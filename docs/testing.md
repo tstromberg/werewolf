@@ -72,9 +72,9 @@ uses the `bitten` form, which has no updater to reach the network once
 committed.
 
 ```
-ok     sshd               lockdown
+ok     sshd               posture
 ok     sshd               symlinks
-ok     sshd               root-readonly
+ok     sshd               root-unlinked
 pass   sshd               all checks
 pass   sshd-again         all checks
 ```
@@ -93,12 +93,20 @@ Logs are in `build/<arch>/check/`: `<form>-build.log` for each build, and
 
 ## Writing a check
 
-A check is one line of `test/checks`: a kind, a name and one line of sh,
-run as root in a subshell, exiting 0 when the property holds.
+A machine's settings are [posture](posture.md)'s to judge, so a setting is
+checked once, in the same place a machine's owner checks it. One line of
+`test/checks` runs `posture --json` and fails on any result but the known
+failures it lists, and on any of those that starts passing: a new
+protection belongs in posture/posture.zig, not in test/checks.
+
+What stays in `test/checks` is what posture cannot do: attacks whose proof
+is the kernel's own log line, attacks as an ordinary user, and the boot's
+own behaviour. A check is one line: a kind, a name and one line of sh, run
+as root in a subshell, exiting 0 when the property holds.
 
 ```
-ok  ptrace-off       grep -qx 3 /proc/sys/kernel/yama/ptrace_scope && ! sysctl -w kernel.yama.ptrace_scope=0
-ok  root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
+ok  proc-mem         ! cat /proc/1/mem >/dev/null && dmesg | grep -q 'ptrace attach of "runit"\[1\]'
+ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
 ```
 
 - **ok** must hold on every machine. A check that applies to some machines
@@ -111,7 +119,8 @@ ok  root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
   have.
 
 Test the attack, not the setting: `ptrace_scope` reading 3 proves less than
-`cat /proc/1/mem` being refused. And make a check fail before trusting it
+`cat /proc/1/mem` being refused, which is why posture asks the kernel to
+undo a setting and expects a refusal. And make a check fail before trusting it
 to pass: point it at a machine without the protection, or invert it.
 
 ## CI

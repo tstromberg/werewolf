@@ -7,7 +7,7 @@ Quite possibly the world's most secure Linux distribution, with no way to execut
 Werewolf Linux is a minimal, secure, fast Linux for virtual machines, combining [Wolfi](https://wolfi.dev/)'s userland with 
 [Alpine](https://www.alpinelinux.org/)'s kernel. It enforces a strict secure-by-default philosophy, inspired by [Chainguard VMs](https://www.chainguard.dev/vms) and [OpenBSD](https://openbsd.org/).
 
-- **Secure**: tiny attack surface, with extreme security defaults and declarable exceptions. 
+- **Secure**: tiny attack surface, with heavy use of Landlock and privilege separation.
 - **Fast**: glibc and its malloc, for heavy compute.
 - **Low maintenance**: few moving parts, few CVEs to chase - updates and reboots itself.
 - **Auditable**: every update is logged, along with which CVE it addresses.

@@ -430,7 +430,7 @@ const Posture = struct {
         try p.fence();
         try p.absentNamed("network-no-login", "network", "No remote login", "There is no ssh or telnet server to log in through.", &.{ "sshd", "dropbear", "telnetd", "in.telnetd" });
         try p.sysctls("network-no-forwarding", "network", "No routing", "The machine forwards no traffic for others.", &.{ .{ "net/ipv4/ip_forward", "0" }, .{ "net/ipv6/conf/all/forwarding", "0" } });
-        try p.sysctls("network-redirects", "network", "ICMP redirects ignored", "Nobody on the network can reroute the machine's traffic.", &.{ .{ "net/ipv4/conf/all/accept_redirects", "0" }, .{ "net/ipv6/conf/all/accept_redirects", "0" } });
+        try p.sysctls("network-redirects", "network", "ICMP redirects ignored", "Nobody on the network can reroute the machine's traffic, and it reroutes nobody's.", &.{ .{ "net/ipv4/conf/all/accept_redirects", "0" }, .{ "net/ipv6/conf/all/accept_redirects", "0" }, .{ "net/ipv4/conf/all/send_redirects", "0" } });
         try p.sysctls("network-source-route", "network", "Source routing refused", "Packets cannot choose their own way through the machine.", &.{.{ "net/ipv4/conf/all/accept_source_route", "0" }});
         try p.sysctls("network-syncookies", "network", "SYN flood protection", "A flood of half-open connections cannot exhaust it.", &.{.{ "net/ipv4/tcp_syncookies", "1" }});
     }
@@ -484,7 +484,7 @@ const Posture = struct {
         });
 
         var rules: RuleSummary = .{};
-        if (ruleDump(p.gpa)) |dump| rules = summarizeRules(dump) else |_| {}
+        if (ruleDump(p.gpa, linux.AF.INET)) |dump| rules = summarizeRules(dump) else |_| {}
         try p.add(.{
             .id = "network-inbound",
             .area = "network",
@@ -499,14 +499,22 @@ const Posture = struct {
         });
 
         const v6 = std.mem.trim(u8, p.read("/proc/sys/net/ipv6/conf/all/disable_ipv6"), " \n");
+        const v6_off = v6.len == 0 or std.mem.eql(u8, v6, "1");
+        var rules6: RuleSummary = .{};
+        if (!v6_off) if (ruleDump(p.gpa, linux.AF.INET6)) |dump| {
+            rules6 = summarizeRules(dump);
+        } else |_| {};
         try p.add(.{
-            .id = "network-ipv6-off",
+            .id = "network-ipv6",
             .area = "network",
-            .name = "IPv6 off",
-            .why = "An interface's IPv6 link-local address is reachable from the network with none of the IPv4 rules.",
-            .how = "/proc/sys/net/ipv6/conf/all/disable_ipv6 reads 1, or the kernel has no IPv6",
-            .result = if (v6.len == 0 or std.mem.eql(u8, v6, "1")) .pass else .fail,
-            .detail = if (v6.len == 0) "no IPv6 in this kernel" else try std.fmt.allocPrint(p.gpa, "disable_ipv6 = {s}", .{v6}),
+            .name = "IPv6 under the same policy",
+            .why = "Every interface has an IPv6 address reachable from the network; IPv6 must not be a way around the IPv4 rules.",
+            .how = "IPv6 is off (disable_ipv6 reads 1, or the kernel has none), or its policy-routing rules (RTM_GETRULE, AF_INET6) drop arriving traffic before delivering it and refuse locally sent traffic no rule allows",
+            .result = if (v6_off or (rules6.inbound_dropped and rules6.outbound_refused)) .pass else .fail,
+            .detail = if (v6_off) "IPv6 off" else try std.fmt.allocPrint(p.gpa, "arriving: {s}; sent: {s}", .{
+                if (rules6.inbound_dropped) "dropped unless declared" else "delivered",
+                if (rules6.outbound_refused) "refused unless declared" else "routed",
+            }),
         });
     }
 
@@ -916,9 +924,9 @@ fn errnoText(e: linux.E) []const u8 {
     return if (e == .SUCCESS) "allowed" else std.enums.tagName(linux.E, e) orelse "unknown";
 }
 
-/// The IPv4 policy-routing rules, as the kernel lists them: RTM_GETRULE
+/// A family's policy-routing rules, as the kernel lists them: RTM_GETRULE
 /// messages, one after another. Listing them needs no privilege.
-fn ruleDump(gpa: Allocator) ![]const u8 {
+fn ruleDump(gpa: Allocator, family: u8) ![]const u8 {
     const rc = linux.socket(linux.AF.NETLINK, linux.SOCK.RAW | linux.SOCK.CLOEXEC, linux.NETLINK.ROUTE);
     if (linux.errno(rc) != .SUCCESS) return error.NoNetlink;
     const fd: i32 = @intCast(rc);
@@ -928,7 +936,7 @@ fn ruleDump(gpa: Allocator) ![]const u8 {
     std.mem.writeInt(u16, req[4..6], 34, .little); // RTM_GETRULE
     std.mem.writeInt(u16, req[6..8], 0x301, .little); // NLM_F_REQUEST | NLM_F_DUMP
     std.mem.writeInt(u32, req[8..12], 1, .little);
-    req[16] = linux.AF.INET;
+    req[16] = family;
     if (linux.errno(linux.sendto(fd, &req, req.len, 0, null, 0)) != .SUCCESS) return error.NoNetlink;
     var out: std.ArrayList(u8) = .empty;
     var buf: [32 << 10]u8 align(4) = undefined;

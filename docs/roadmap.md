@@ -8,8 +8,8 @@
    `.tar.gz` (design/native-boot.md). DHCP and the config from a cloud's
    metadata server, which they need, are done: `dhcp/dhcp.zig`,
    `cloud/cloud.zig`.
-3. No sshd in production. Default-deny inbound is done: only the TCP ports
-   a form declares can be bound ([design/fence.md](../design/fence.md));
-   UDP waits for Landlock's UDP rules or the seal.
+3. No sshd in production. Default-deny in both directions is done: a
+   machine sends and receives only what its form declares
+   ([design/fence.md](../design/fence.md)).
 4. Shipping the update log off the machine.
 5. bite on x86, and drivers beyond virtio (NVMe, ENA, Hyper-V).

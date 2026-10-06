@@ -7,20 +7,21 @@
 //! files, and sets a default-deny policy in both directions:
 //!
 //!   1. Policy-routing rules, which the kernel consults on every route
-//!      lookup, for IPv4. A packet the machine sends passes only if its
+//!      lookup, the same for IPv4 and IPv6. A packet the machine sends passes only if its
 //!      user declared it (`connect`): its protocol and port, or as a reply
 //!      from a port it serves (`listen`); the metadata server's port 80 only
 //!      for the users named (`metadata`). Anything else is refused with
 //!      EACCES. A packet arriving passes only to a port it serves, from a
 //!      port it connects to (a reply), or as ICMP; anything else is dropped
-//!      without an answer. Local and loopback traffic always pass. DHCP's
-//!      packet socket and ARP are below IP routing and do not see this.
-//!   2. IPv6 off on every interface: werewolf configures none.
-//!   3. Landlock: a TCP socket may be bound only to a port the policy names,
+//!      without an answer. Local and loopback traffic always pass, and so
+//!      does ICMPv6, which IPv6 cannot work without (neighbour discovery,
+//!      router advertisements). DHCP's packet socket and ARP are below IP
+//!      routing and do not see this.
+//!   2. Landlock: a TCP socket may be bound only to a port the policy names,
 //!      or to port 0, as some clients do before connecting (busybox's nc).
 //!      A socket that then listens on the port the kernel picked hears only
 //!      what step 1 lets arrive: replies from ports the machine connects to.
-//!   4. It execs PROGRAM, which every process on the machine descends from.
+//!   3. It execs PROGRAM, which every process on the machine descends from.
 //!
 //! Landlock's restriction is inherited and cannot be lifted, by root or
 //! anyone, until the machine reboots. The routing rules can be changed by
@@ -48,8 +49,11 @@ const policy_path = "/usr/share/werewolf/net";
 const max_args = 16;
 const max_entries = 64;
 
-/// The metadata server's address, the one every cloud uses.
+/// The metadata server's addresses: the one every cloud uses, and AWS's
+/// IPv6 one.
 const metadata_ip = [4]u8{ 169, 254, 169, 254 };
+const metadata_ip6 = [16]u8{ 0xfd, 0x00, 0x0e, 0xc2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x54 };
+const IPPROTO_ICMPV6 = 58;
 const metadata_port: u16 = 80;
 
 /// The rules' priorities, in the order the kernel tries them. The kernel's
@@ -113,8 +117,6 @@ fn apply() !Policy {
     const p = try parsePolicy(try readFile(policy_path, &buf));
     step = "routes";
     try routeRules(p);
-    step = "ipv6";
-    try disableIpv6();
     step = "landlock";
     try restrictBind(p);
     return p;
@@ -200,27 +202,33 @@ fn user(word: []const u8) !u32 {
 
 const FR_ACT_TO_TBL = 1;
 const FR_ACT_BLACKHOLE = 6;
+const FR_ACT_UNREACHABLE = 7;
 const FR_ACT_PROHIBIT = 8;
 const RT_TABLE_MAIN = 254;
 const RT_TABLE_LOCAL = 255;
 
 /// One policy-routing rule, as `ip rule` would show it.
 const Rule = struct {
+    family: u8 = linux.AF.INET,
     priority: u32,
     action: u8,
     /// For FR_ACT_TO_TBL.
     table: u8 = 0,
     /// Locally sent traffic only: its lookups come from lo.
     from_here: bool = false,
-    src: ?[4]u8 = null,
-    dst: ?[4]u8 = null,
+    /// An address of the rule's family: 4 bytes, or 16.
+    src: ?[]const u8 = null,
+    dst: ?[]const u8 = null,
     proto: ?Proto = null,
     sport: ?u16 = null,
     dport: ?u16 = null,
     uid: ?u32 = null,
 };
 
-const max_rules = 8 + 3 * max_entries;
+/// Eight per entry at most: metadata, connect and listen each make a
+/// sending rule and its twin, and connect and listen an arriving rule; and
+/// the fixed ones.
+const max_rules = 16 + 8 * max_entries;
 
 /// The policy as rules, in the order the kernel will try them:
 ///
@@ -232,36 +240,56 @@ const max_rules = 8 + 3 * max_entries;
 ///   300   arriving to a served port, from a connected port, or ICMP: local
 ///   399   anything else arriving: dropped
 ///   400   the kernel's own local rule, moved here from 0
-fn plan(p: Policy, out: *[max_rules]Rule) []const Rule {
+///
+/// The same for IPv4 and IPv6, with the family's metadata address, and for
+/// IPv6, ICMPv6 sent by anyone: neighbour discovery and router
+/// solicitations are how IPv6 finds its way at all.
+///
+/// Each rule that lets traffic out is followed by a twin with the same
+/// match, unreachable. Allowed traffic with no route (IPv6 on a network
+/// without it, say) then fails as it would without fence, "network
+/// unreachable", and a client goes on to the next address, rather than
+/// falling through to the refusal, whose EACCES many clients take as final.
+fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     var n: usize = 0;
+    const md: []const u8 = if (family == linux.AF.INET6) &metadata_ip6 else &metadata_ip;
     const add = struct {
-        fn f(o: *[max_rules]Rule, i: *usize, r: Rule) void {
-            o[i.*] = r;
+        fn f(o: *[max_rules]Rule, i: *usize, fam: u8, r: Rule) void {
+            var x = r;
+            x.family = fam;
+            o[i.*] = x;
             i.* += 1;
+            if (x.from_here and x.action == FR_ACT_TO_TBL and x.table == RT_TABLE_MAIN) {
+                x.action = FR_ACT_UNREACHABLE;
+                x.table = 0;
+                o[i.*] = x;
+                i.* += 1;
+            }
         }
     }.f;
-    add(out, &n, .{ .priority = pref.local_out, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .from_here = true });
-    for (p.metadata[0..p.nmetadata]) |uid| add(out, &n, .{ .priority = pref.metadata_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .dst = metadata_ip, .proto = .tcp, .dport = metadata_port, .uid = uid });
-    add(out, &n, .{ .priority = pref.metadata_refuse, .action = FR_ACT_PROHIBIT, .from_here = true, .dst = metadata_ip, .proto = .tcp, .dport = metadata_port });
-    for (p.connect[0..p.nconnect]) |c| add(out, &n, .{ .priority = pref.out_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .proto = c.proto, .dport = if (c.proto == .icmp) null else c.port, .uid = c.uid });
-    for (p.listen[0..p.nlisten]) |l| add(out, &n, .{ .priority = pref.out_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .proto = .tcp, .sport = l });
-    add(out, &n, .{ .priority = pref.out_refuse, .action = FR_ACT_PROHIBIT, .from_here = true });
+    add(out, &n, family, .{ .priority = pref.local_out, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .from_here = true });
+    for (p.metadata[0..p.nmetadata]) |uid| add(out, &n, family, .{ .priority = pref.metadata_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .dst = md, .proto = .tcp, .dport = metadata_port, .uid = uid });
+    add(out, &n, family, .{ .priority = pref.metadata_refuse, .action = FR_ACT_PROHIBIT, .from_here = true, .dst = md, .proto = .tcp, .dport = metadata_port });
+    for (p.connect[0..p.nconnect]) |c| add(out, &n, family, .{ .priority = pref.out_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .proto = c.proto, .dport = if (c.proto == .icmp) null else c.port, .uid = c.uid });
+    for (p.listen[0..p.nlisten]) |l| add(out, &n, family, .{ .priority = pref.out_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .proto = .tcp, .sport = l });
+    if (family == linux.AF.INET6) add(out, &n, family, .{ .priority = pref.out_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .proto = .icmp });
+    add(out, &n, family, .{ .priority = pref.out_refuse, .action = FR_ACT_PROHIBIT, .from_here = true });
 
-    for (p.listen[0..p.nlisten]) |l| add(out, &n, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = .tcp, .dport = l });
+    for (p.listen[0..p.nlisten]) |l| add(out, &n, family, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = .tcp, .dport = l });
     // Replies: from each protocol and port some user connects to, once.
     for (p.connect[0..p.nconnect], 0..) |c, i| {
         if (c.proto == .icmp) continue;
         const seen = for (p.connect[0..i]) |d| {
             if (d.proto == c.proto and d.port == c.port) break true;
         } else false;
-        if (!seen) add(out, &n, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = c.proto, .sport = c.port });
+        if (!seen) add(out, &n, family, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = c.proto, .sport = c.port });
     }
-    if (p.nmetadata > 0) add(out, &n, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .src = metadata_ip, .proto = .tcp, .sport = metadata_port });
+    if (p.nmetadata > 0) add(out, &n, family, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .src = md, .proto = .tcp, .sport = metadata_port });
     // ICMP in: errors a connection needs (path MTU, unreachable). An echo
     // request gets no reply unless root declared `connect root icmp`.
-    add(out, &n, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = .icmp });
-    add(out, &n, .{ .priority = pref.in_drop, .action = FR_ACT_BLACKHOLE });
-    add(out, &n, .{ .priority = pref.local, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL });
+    add(out, &n, family, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = .icmp });
+    add(out, &n, family, .{ .priority = pref.in_drop, .action = FR_ACT_BLACKHOLE });
+    add(out, &n, family, .{ .priority = pref.local, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL });
     return out[0..n];
 }
 
@@ -270,15 +298,18 @@ fn plan(p: Policy, out: *[max_rules]Rule) []const Rule {
 fn routeRules(p: Policy) !void {
     const nl: i32 = @intCast(try sys(linux.socket(linux.AF.NETLINK, linux.SOCK.RAW | linux.SOCK.CLOEXEC, linux.NETLINK.ROUTE), "netlink socket"));
     defer _ = linux.close(nl);
-    var rules: [max_rules]Rule = undefined;
     var seq: u32 = 1;
-    for (plan(p, &rules)) |r| {
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        var rules: [max_rules]Rule = undefined;
+        for (plan(p, family, &rules)) |r| {
+            var msg: [256]u8 = undefined;
+            try send(nl, ruleMessage(&msg, seq, RTM_NEWRULE, r), seq, "add rule");
+            seq += 1;
+        }
         var msg: [256]u8 = undefined;
-        try send(nl, ruleMessage(&msg, seq, RTM_NEWRULE, r), seq, "add rule");
+        try send(nl, ruleMessage(&msg, seq, RTM_DELRULE, .{ .family = family, .priority = 0, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL }), seq, "delete the local rule");
         seq += 1;
     }
-    var msg: [256]u8 = undefined;
-    try send(nl, ruleMessage(&msg, seq, RTM_DELRULE, .{ .priority = 0, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL }), seq, "delete the local rule");
 }
 
 const NLMSG_ERROR = 2;
@@ -304,16 +335,18 @@ fn ruleMessage(buf: *[256]u8, seq: u32, kind: u16, r: Rule) []const u8 {
     var b: Builder = .{ .buf = buf, .len = 16 };
     // struct fib_rule_hdr: family, dst_len, src_len, tos, table, res1,
     // res2, action, flags.
-    b.bytes(&.{ linux.AF.INET, if (r.dst != null) 32 else 0, if (r.src != null) 32 else 0, 0, r.table, 0, 0, r.action, 0, 0, 0, 0 });
+    const dst_len: u8 = if (r.dst) |a| @intCast(a.len * 8) else 0;
+    const src_len: u8 = if (r.src) |a| @intCast(a.len * 8) else 0;
+    b.bytes(&.{ r.family, dst_len, src_len, 0, r.table, 0, 0, r.action, 0, 0, 0, 0 });
     b.attr(FRA_PRIORITY, std.mem.asBytes(&r.priority));
     if (r.table != 0) {
         const table: u32 = r.table;
         b.attr(FRA_TABLE, std.mem.asBytes(&table));
     }
     if (r.from_here) b.attr(FRA_IIFNAME, "lo\x00");
-    if (r.src) |a| b.attr(FRA_SRC, &a);
-    if (r.dst) |a| b.attr(FRA_DST, &a);
-    if (r.proto) |pr| b.attr(FRA_IP_PROTO, &.{@backingInt(pr)});
+    if (r.src) |a| b.attr(FRA_SRC, a);
+    if (r.dst) |a| b.attr(FRA_DST, a);
+    if (r.proto) |pr| b.attr(FRA_IP_PROTO, &.{if (pr == .icmp and r.family == linux.AF.INET6) IPPROTO_ICMPV6 else @backingInt(pr)});
     if (r.sport) |s| b.attr(FRA_SPORT_RANGE, std.mem.sliceAsBytes(&[2]u16{ s, s }));
     if (r.dport) |d| b.attr(FRA_DPORT_RANGE, std.mem.sliceAsBytes(&[2]u16{ d, d }));
     if (r.uid) |u| b.attr(FRA_UID_RANGE, std.mem.sliceAsBytes(&[2]u32{ u, u }));
@@ -364,22 +397,6 @@ fn ackError(reply: []const u8, seq: u32) ?i32 {
     if (std.mem.readInt(u16, reply[4..6], .little) != NLMSG_ERROR) return null;
     if (std.mem.readInt(u32, reply[8..12], .little) != seq) return null;
     return std.mem.readInt(i32, reply[16..20], .little);
-}
-
-// --- IPv6 --------------------------------------------------------------------
-
-/// IPv6 off, on every interface there is and every one to come: werewolf
-/// configures no IPv6, and an interface's link-local address would be
-/// reachable from the network with none of the rules above.
-fn disableIpv6() !void {
-    for ([_][*:0]const u8{ "/proc/sys/net/ipv6/conf/all/disable_ipv6", "/proc/sys/net/ipv6/conf/default/disable_ipv6" }) |path| {
-        const rc = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
-        // A kernel without IPv6 has nothing to turn off.
-        if (linux.errno(rc) == .NOENT) return;
-        const fd: i32 = @intCast(try sys(rc, "open disable_ipv6"));
-        defer _ = linux.close(fd);
-        _ = try sys(linux.write(fd, "1\n", 2), "write disable_ipv6");
-    }
 }
 
 // --- the ports: Landlock -----------------------------------------------------
@@ -495,7 +512,7 @@ test "policies" {
 
 test "the plan, in the order the kernel tries it" {
     var rules: [max_rules]Rule = undefined;
-    const r = plan(try parsePolicy(example), &rules);
+    const r = plan(try parsePolicy(example), linux.AF.INET, &rules);
     var last: u32 = 0;
     for (r) |x| {
         try std.testing.expect(x.priority >= last); // ascending
@@ -517,11 +534,22 @@ test "the plan, in the order the kernel tries it" {
     }
     try std.testing.expect(refused_out);
     try std.testing.expectEqual(1, dns_replies); // two users connect to udp 53: one reply rule
+
+    // Every rule that routes traffic out is followed by its unreachable twin.
+    for (r, 0..) |x, i| {
+        if (!(x.from_here and x.action == FR_ACT_TO_TBL and x.table == RT_TABLE_MAIN)) continue;
+        const t = r[i + 1];
+        try std.testing.expectEqual(FR_ACT_UNREACHABLE, t.action);
+        try std.testing.expectEqual(x.priority, t.priority);
+        try std.testing.expectEqual(x.uid, t.uid);
+        try std.testing.expectEqual(x.dport, t.dport);
+        try std.testing.expectEqual(x.proto, t.proto);
+    }
 }
 
 test "an empty policy refuses everything but local traffic" {
     var rules: [max_rules]Rule = undefined;
-    const r = plan(.{}, &rules);
+    const r = plan(.{}, linux.AF.INET, &rules);
     for (r) |x| {
         if (x.action != FR_ACT_TO_TBL) continue;
         // What passes: local traffic, ICMP in, and the moved local rule.
@@ -530,9 +558,42 @@ test "an empty policy refuses everything but local traffic" {
     }
 }
 
+test "IPv6: the same rules, its metadata address, and ICMPv6 sent by anyone" {
+    var rules: [max_rules]Rule = undefined;
+    const r = plan(try parsePolicy(example), linux.AF.INET6, &rules);
+    var icmp_out = false;
+    var md_refused = false;
+    for (r) |x| {
+        try std.testing.expectEqual(linux.AF.INET6, x.family);
+        if (x.priority == pref.out_allow and x.proto == .icmp and x.uid == null) icmp_out = true;
+        if (x.priority == pref.metadata_refuse) md_refused = std.mem.eql(u8, x.dst.?, &metadata_ip6);
+    }
+    try std.testing.expect(icmp_out and md_refused);
+    var buf: [256]u8 = undefined;
+    const m = ruleMessage(&buf, 3, RTM_NEWRULE, .{ .family = linux.AF.INET6, .priority = pref.metadata_refuse, .action = FR_ACT_PROHIBIT, .from_here = true, .dst = &metadata_ip6, .proto = .tcp, .dport = 80 });
+    try std.testing.expectEqualSlices(u8, &.{ linux.AF.INET6, 128 }, m[16..18]);
+    try std.testing.expect(hasAttr(m, FRA_DST, &metadata_ip6));
+    const icmp = ruleMessage(&buf, 4, RTM_NEWRULE, .{ .family = linux.AF.INET6, .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = .icmp });
+    try std.testing.expect(hasAttr(icmp, FRA_IP_PROTO, &.{IPPROTO_ICMPV6}));
+}
+
+test "a full policy fits its rules" {
+    var p: Policy = .{};
+    for (0..max_entries) |i| {
+        p.listen[i] = @intCast(1000 + i);
+        p.connect[i] = .{ .uid = @intCast(i), .proto = .udp, .port = @intCast(2000 + i) };
+        p.metadata[i] = @intCast(i);
+    }
+    p.nlisten = max_entries;
+    p.nconnect = max_entries;
+    p.nmetadata = max_entries;
+    var rules: [max_rules]Rule = undefined;
+    _ = plan(p, linux.AF.INET6, &rules);
+}
+
 test "rule messages" {
     var buf: [256]u8 = undefined;
-    const m = ruleMessage(&buf, 7, RTM_NEWRULE, .{ .priority = pref.metadata_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .dst = metadata_ip, .proto = .tcp, .dport = 80, .uid = 68 });
+    const m = ruleMessage(&buf, 7, RTM_NEWRULE, .{ .priority = pref.metadata_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_MAIN, .from_here = true, .dst = &metadata_ip, .proto = .tcp, .dport = 80, .uid = 68 });
     try std.testing.expectEqual(m.len, std.mem.readInt(u32, m[0..4], .little));
     try std.testing.expectEqual(RTM_NEWRULE, std.mem.readInt(u16, m[4..6], .little));
     try std.testing.expectEqual(7, std.mem.readInt(u32, m[8..12], .little));

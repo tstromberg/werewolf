@@ -59,6 +59,9 @@ CLOUD := $(PROGRAMS)/cloud/usr/lib/werewolf/cloud
 CLOUD_BIN := $(if $(filter cloud,$(CHAIN)),$(CLOUD))
 MOUNT_BIN := $(PROGRAMS)/mount/usr/lib/werewolf/mount
 LOADER_BIN := $(PROGRAMS)/modules/usr/lib/werewolf/modules
+# stage0's own /init (stage0/stage0.zig): the kernel's first process on every
+# machine. In stage0's initramfs, not the root's.
+STAGE0_BIN := $(PROGRAMS)/stage0/init
 NET_BIN := $(PROGRAMS)/net/usr/lib/werewolf/net
 FENCE_BIN := $(PROGRAMS)/fence/usr/lib/werewolf/fence
 POSTURE_BIN := $(PROGRAMS)/posture/usr/lib/werewolf/posture
@@ -308,7 +311,7 @@ endef
 $(foreach p,$(SHELLFREE),$(eval $(call shellfree_rule,$(p))))
 
 test:
-	zig fmt --check dhcp cloud modules net fence mount posture updater status disk $(SHELLFREE)
+	zig fmt --check dhcp cloud modules net fence mount posture updater status disk stage0 $(SHELLFREE)
 	zig test dhcp/dhcp.zig
 	zig test cloud/cloud.zig
 	zig test mount/mount.zig
@@ -319,6 +322,7 @@ test:
 	zig test status/status.zig
 	zig test posture/posture.zig
 	zig test disk/gpt.zig
+	zig test stage0/stage0.zig
 	for p in $(SHELLFREE); do zig test $$p/$$p.zig || exit 1; done
 
 # posture (docs/posture.md) assumes nothing of werewolf: run here, as root,
@@ -336,7 +340,7 @@ endif
 # update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar stage0/init $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -347,7 +351,7 @@ $(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar 
 	for c in $(OVERLAY_DIRS); do (cd $$c && find . \( -type f -o -type l \) ! -name .DS_Store | sed 's|^\./||'); done | LC_ALL=C sort -u > $$d/overlay && \
 	$(TAR) -xOf $(BUILD)/stage0/rootfs.tar etc/apk/world | grep -v = > $$d/stage0.world && \
 	$(TAR) -xOf $(OUT)/rootfs.tar etc/apk/world | grep -v = > $(OUT)/meta/etc/apk/world && \
-	cp stage0/init $$d/stage0.init && \
+	cp $(STAGE0_BIN) $$d/stage0.init && \
 	echo "$(FORM) $$kernel built-by-make" > $$d/release && \
 	$(TAR) -xOf $(OUT)/rootfs.tar etc/passwd > $(OUT)/passwd && \
 	awk -v pw=$(OUT)/passwd ' \
@@ -404,7 +408,7 @@ $(DISK): $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs \
 
 # --- slot ---------------------------------------------------------------------
 # The same rootfs, booted from disk: a small stage0 initramfs that loads the
-# modules and mounts root.erofs read-only under a RAM overlay (stage0/init).
+# modules and mounts root.erofs read-only at / (stage0/stage0.zig).
 # This is what bite installs, and what autoupdate rebuilds on the machine.
 # root.erofs is made straight from the tar, as the cpio is; the modules stay
 # in stage0, since they are loaded before the root exists.
@@ -414,9 +418,12 @@ slot: $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs
 $(BUILD)/stage0/rootfs.tar: $(LOCK)/stage0.lock.json
 	$(call apko_build,stage0/stage0.yaml,$<)
 
-$(BUILD)/stage0/init.tar: stage0/init $(LOADER_BIN)
+$(STAGE0_BIN): stage0/stage0.zig
+	$(zig_build)
+
+$(BUILD)/stage0/init.tar: $(STAGE0_BIN) $(LOADER_BIN)
 	rm -rf $(BUILD)/stage0/files && mkdir -p $(BUILD)/stage0/files/usr/lib/werewolf && \
-		cp stage0/init $(BUILD)/stage0/files/ && cp $(LOADER_BIN) $(BUILD)/stage0/files/usr/lib/werewolf/
+		cp $(STAGE0_BIN) $(BUILD)/stage0/files/init && cp $(LOADER_BIN) $(BUILD)/stage0/files/usr/lib/werewolf/
 	$(call layer,$(BUILD)/stage0/files)
 
 $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(OUT)/modules.tar
@@ -535,7 +542,7 @@ CHECK_QEMU = $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci \
 CHECK_BOOT = console=$(CONSOLE) panic=1 werewolf.debug=1
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
-CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(DHCP) $(CLOUD) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(PROGRAMS)/updater/usr/lib/werewolf/update
+CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(PROGRAMS)/updater/usr/lib/werewolf/update
 # bitten has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = bitten
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec

@@ -1,6 +1,7 @@
-# stage0: the small initramfs that boots a slot. It carries what it takes
-# to load the modules, find the victim's filesystem and mount root.erofs
-# from it, and nothing else; see stage0/init.
+# stage0: the small initramfs every werewolf machine boots through. Its
+# /init is stage0/stage0.zig, which needs nothing installed: this image is
+# Wolfi's base layout, for /dev/console and the directories, and nothing
+# else. The build adds the module loader and the form's modules.
 contents:
   repositories:
     - https://packages.wolfi.dev/os
@@ -8,14 +9,6 @@ contents:
     - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
   packages:
     - wolfi-baselayout
-    - busybox-full          # sh, chroot, sysctl
-    - blkid                 # the victim's filesystem by UUID
-    - mount                 # util-linux: loop, overlay, --move
-
-paths:
-  - path: /usr/bin/mount
-    type: permissions
-    permissions: 0o755
 
 archs:
   - aarch64

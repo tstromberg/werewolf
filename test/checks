@@ -15,6 +15,12 @@
 # /etc/werewolf/listen; ssh's 22 is declared by sshd being installed. The
 # listeners check fails on anything else listening.
 #
+# The machine's settings are posture's to judge (posture/posture.zig): the
+# posture check runs it and fails on any result but the known failures it
+# lists, and on any of those that starts passing, as a gap does. Checks
+# here are what posture cannot do: attacks whose proof is the kernel's own
+# log line, attacks as an ordinary user, and the boot's own behaviour.
+#
 # Checks run in order on one machine: the quiet log is checked before the
 # attacks that fill it. The console answers as runit starts, so the first
 # check waits for the services to settle (a service still starting, or one
@@ -24,38 +30,20 @@
 ok  network          grep -q '10\.0\.2\.15' /proc/net/fib_trie && awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
 ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
 ok  boot-quiet       ! dmesg | grep -E 'Lockdown:|ptrace attach'
-ok  lockdown         grep -q '\[integrity\]' /sys/kernel/security/lockdown
-ok  lockdown-stays   ! echo none >/sys/kernel/security/lockdown && grep -q '\[integrity\]' /sys/kernel/security/lockdown
-ok  modules-closed   grep -qx 1 /proc/sys/kernel/modules_disabled && ! sysctl -w kernel.modules_disabled=0
-ok  ptrace-off       grep -qx 3 /proc/sys/kernel/yama/ptrace_scope && ! sysctl -w kernel.yama.ptrace_scope=0
+ok  posture          known="network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell programs-services-no-shell"; got=$(/usr/lib/werewolf/posture --json | awk -F'"' '$2 == "id" { id = $4; n++ } $2 == "result" && $4 == "fail" { print id } END { if (n < 20) print "posture-did-not-run" }' | sort | tr '\n' ' '); [ "$got" = "$known " ] || { echo "posture fails: $got"; echo "known:         $known"; exit 1; }
 ok  proc-mem         ! cat /proc/1/mem >/dev/null && dmesg | grep -q 'ptrace attach of "runit"\[1\]'
 ok  dev-mem          ! head -c1 /dev/mem >/dev/null && dmesg | grep -q 'Lockdown: head: /dev/mem'
-ok  memfd-noexec     grep -qx 2 /proc/sys/vm/memfd_noexec
-ok  modules-signed   [ $(( $(cat /proc/sys/kernel/tainted) & 8192 )) -eq 0 ]
-ok  bpf-root-only    grep -qx 1 /proc/sys/kernel/unprivileged_bpf_disabled && ! sysctl -w kernel.unprivileged_bpf_disabled=0
-ok  no-setid         [ -z "$(find / -xdev \( -perm -4000 -o -perm -2000 \) -type f)" ]
 ok  listeners        bad=$(netstat -ltun | awk 'NR > 2 { n = split($4, a, ":"); print a[n] }' | sort -u | grep -vx -e none $(command -v sshd >/dev/null && echo -e 22) $(sed 's/^/-e /' /etc/werewolf/listen 2>/dev/null)); [ -z "$bad" ] || { echo "listening, undeclared: $bad"; exit 1; }
 ok  sshd-config      ! command -v sshd || [ "$(sshd -T | grep -iE '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|usepam) ' | tr A-Z a-z | sort | tr '\n' ' ')" = 'kbdinteractiveauthentication no passwordauthentication no permitrootlogin prohibit-password usepam no ' ]
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
-ok  data-noexec      awk '$2 == "/data" && $4 !~ /nosuid,nodev,noexec/ { bad = 1 } END { exit bad }' /proc/mounts
-ok  mount-flags      awk '$2 ~ /^\/(tmp|var\/tmp|run|dev\/shm|proc|sys|sys\/kernel\/security)$/ && $4 !~ /nosuid,nodev,noexec/ { bad = 1 } $2 ~ /^\/dev(\/pts)?$/ && $4 !~ /nosuid,noexec/ { bad = 1 } END { exit bad }' /proc/mounts
-ok  tmp-noexec       for d in /tmp /var/tmp /run /dev/shm; do t=$(mktemp -d -p $d) && cp "$(command -v busybox)" $t/ && ! $t/busybox true || exit 1; rm -rf $t; done
 ok  run-root-only    ! chpst -u nobody touch /run/.x; r=$?; rm -f /run/.x; exit $r
-ok  no-userns        grep -qx 0 /proc/sys/user/max_user_namespaces
 ok  hidepid          ! chpst -u nobody test -e /proc/1
 ok  symlinks         chpst -u nobody ln -s /run/.st /tmp/.st && ! echo x >/tmp/.st; r=$?; rm -f /tmp/.st /run/.st; exit $r
 ok  hardlinks        echo s >/tmp/.root && chmod 600 /tmp/.root && ! chpst -u nobody ln /tmp/.root /tmp/.hl; r=$?; rm -f /tmp/.root /tmp/.hl; exit $r
 ok  regular-files    chpst -u nobody touch /tmp/.pr && ! echo x >>/tmp/.pr; r=$?; rm -f /tmp/.pr; exit $r
-ok  io-uring-off     grep -qx 2 /proc/sys/kernel/io_uring_disabled
-ok  sysrq-off        grep -qx 0 /proc/sys/kernel/sysrq
-ok  no-redirects     for f in /proc/sys/net/ipv4/conf/all/accept_redirects /proc/sys/net/ipv4/conf/all/send_redirects /proc/sys/net/ipv6/conf/all/accept_redirects; do grep -qx 0 $f || exit 1; done
-ok  fifos            grep -qx 2 /proc/sys/fs/protected_fifos
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
-ok  victim-readonly  awk '$2 == "/victim" && $4 !~ /(^|,)ro(,|$)/ { bad = 1 } END { exit bad }' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
-ok  root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
-ok  posture-root     /usr/lib/werewolf/posture --json | tr -d '\n' | tr '{' '\n' | grep '"id": *"files-root-readonly"' | grep -q '"result": *"pass"'
 # Last, for the second boot (test/checks-again): a mark on a /data that is
 # kept on a disk.
 ok  data-mark        grep -q ' /data tmpfs ' /proc/mounts || echo kept >/data/.werewolf-check

@@ -53,7 +53,7 @@ lines in the kernel log on every boot.
 | processes | hidden from other users, no setuid or setgid files, web server workers unprivileged |
 | programs | no shell, downloaders, interpreters, compilers, debuggers, module tools or network configuration tools; every runit service starts from a program, not a script |
 | files | read-only root, `nosuid`/`noexec`/`nodev` on every mount, no program runs from a writable place or a memfd, link and FIFO protections, `/victim` read-only |
-| network | only declared ports listen (`/etc/werewolf/listen`), no remote login, no forwarding, ICMP redirects ignored, source routing refused, SYN cookies |
+| network | only declared ports listen (`/etc/werewolf/listen`), no remote login, no forwarding, ICMP redirects neither taken nor sent, source routing refused, SYN cookies |
 
 The demo's page runs it once per boot and shows every check
 ([demo.md](demo.md)). For comparison, Ubuntu 24.04's cloud image passes 5 of
