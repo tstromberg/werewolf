@@ -1,0 +1,88 @@
+#!/bin/sh
+# lima-demo: the demo form's boot disk (make disk) in a Lima VM, booted as
+# Lima boots a distro: UEFI, then the disk's own systemd-boot. It updates
+# itself, keeps /data on its disk and scans with grype. Used by `make demo`
+# and `make demo-stop`; see docs/demo.md.
+#
+#   lima-demo DISK   create and start the VM, and print the page's URL
+#   lima-demo stop   delete the VM
+#
+# Lima forwards ports through ssh or its guest agent, and the demo runs
+# neither, so the VM gets a second network, vzNAT, whose address this Mac
+# reaches directly. Its MAC is fixed here, and the disk's command line names
+# it (werewolf.mac), so DHCP runs on that one; macOS's DHCP server records
+# the address it gave, by MAC. vzNAT needs vz: macOS on Apple silicon.
+set -eu
+vm=werewolf-demo
+# No octet below 0x10: macOS's lease file writes them without the zero.
+mac=52:55:55:57:e1:f0
+leases=/var/db/dhcpd_leases
+
+say() { echo "lima-demo: $*"; }
+die() {
+	say "$*" >&2
+	exit 1
+}
+exists() { limactl list --format '{{.Name}}' | grep -qx "$vm"; }
+
+# The address macOS's DHCP server last gave the MAC.
+address() {
+	awk -v hw="hw_address=1,$mac" '
+		/^\{/ { ip = "" }
+		/ip_address=/ { sub(/.*ip_address=/, ""); ip = $0 }
+		$0 ~ hw { found = ip }
+		END { print found }' "$leases" 2>/dev/null
+}
+
+if [ "${1:-}" = stop ]; then
+	exists && limactl delete -f "$vm"
+	exit 0
+fi
+[ $# -eq 1 ] || die "usage: lima-demo DISK | stop"
+[ "$(uname -s)" = Darwin ] || die "vzNAT needs Lima's vz, on macOS"
+disk=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+[ -f "$disk" ] || die "no $disk; make demo builds it"
+arch=$(uname -m | sed 's/arm64/aarch64/')
+
+if exists; then
+	say "$vm exists; make demo-stop to start over from a fresh disk"
+else
+	cfg=$(dirname "$disk")/lima-demo.yaml
+	cat >"$cfg" <<EOF
+# Written by test/lima-demo. A disk that boots itself; no cloud-init, no ssh.
+vmType: vz
+arch: $arch
+plain: true
+cpus: 2
+memory: 2GiB
+images:
+  - location: $disk
+    arch: $arch
+networks:
+  - vzNAT: true
+    macAddress: "$mac"
+mounts: []
+EOF
+	limactl create --name "$vm" --tty=false "$cfg"
+fi
+
+# limactl start waits for ssh, which a shell-free machine never answers, so
+# it runs aside while the page is awaited; the VM outlives it.
+log=$(dirname "$disk")/lima-demo.log
+if [ "$(limactl list --format '{{.Status}}' "$vm")" != Running ]; then
+	limactl start --tty=false "$vm" >"$log" 2>&1 &
+	starter=$!
+	trap 'kill $starter 2>/dev/null || true' EXIT
+fi
+
+say "waiting for werewolf to boot and serve the page"
+i=0
+while :; do
+	addr=$(address)
+	[ -n "$addr" ] && curl -fsS -m 3 -o /dev/null "http://$addr/" 2>/dev/null && break
+	i=$((i + 1))
+	[ $i -le 120 ] || die "no page after 10 minutes; the console is in ~/.lima/$vm/serialv.log, Lima's log in $log"
+	sleep 5
+done
+say "up. The first scan follows grype's database download, about a minute"
+say "the demo: http://$addr/"

@@ -30,6 +30,7 @@ const Allocator = std.mem.Allocator;
 const meta_dir = "/usr/share/werewolf";
 const state_dir = "/data/svc/autoupdate";
 const work_dir = state_dir ++ "/work";
+const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
 const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vulns-master.tar.gz";
 const max_read = 256 << 20;
@@ -69,9 +70,13 @@ const Update = struct {
 
     fn setup(u: *Update) !void {
         try Dir.cwd().createDirPath(u.io, state_dir ++ "/reports");
-        u.host = std.mem.trim(u8, try u.read("/etc/hostname"), " \n");
+        // The kernel's, which init sets whether or not a config named one.
+        const uts = std.posix.uname();
+        u.host = try u.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0));
         u.cmd = parseCmdline(try u.read("/proc/cmdline"));
-        if (u.cmd.slot.len == 0 or u.cmd.victim.len == 0 or u.cmd.grubenv.len == 0)
+        // A slot boots from a distro's GRUB (bite: werewolf.grubenv) or from
+        // werewolf's own disk under systemd-boot (werewolf.esp).
+        if (u.cmd.slot.len == 0 or u.cmd.victim.len == 0 or (u.cmd.grubenv.len == 0 and u.cmd.esp.len == 0))
             return error.NotBootedFromASlot;
         u.other = if (std.mem.eql(u8, u.cmd.slot, "b")) "a" else "b";
     }
@@ -284,17 +289,24 @@ const Update = struct {
         try u.busyboxLinks(s);
         try u.stripSetid(s);
         try Dir.cwd().copyFile(meta_dir ++ "/stage0.init", Dir.cwd(), s ++ "/init", io, .{ .permissions = .fromMode(0o755) });
+        // werewolf's module loader, as the build lays it in stage0.
+        try Dir.cwd().copyFile("/usr/lib/werewolf/modules", Dir.cwd(), s ++ "/usr/lib/werewolf/modules", io, .{ .make_path = true, .permissions = .fromMode(0o755) });
         const kvers = try u.listDir(work_dir ++ "/kernel/lib/modules");
         if (kvers.len != 1) return error.NotOneKernel;
         const src = try std.fmt.allocPrint(u.gpa, "{s}/kernel/lib/modules/{s}", .{ work_dir, kvers[0] });
         const dst = try std.fmt.allocPrint(u.gpa, "{s}/usr/lib/modules/{s}", .{ s, kvers[0] });
         const dep = try u.read(try std.fmt.allocPrint(u.gpa, "{s}/modules.dep", .{src}));
         const order = try moduleOrder(u.gpa, dep, try u.lines(try u.read(meta_dir ++ "/modules")));
+        // Decompressed, as the build does: Alpine's kernel cannot, and the
+        // loader hands it each file as it is.
         for (order) |p| {
-            try Dir.cwd().copyFile(try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ src, p }), Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ dst, p }), io, .{ .make_path = true });
+            const ko = try gunzip(u.gpa, try u.read(try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ src, p })));
+            const out = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ dst, withoutGz(p) });
+            try Dir.cwd().createDirPath(io, parentDir(out));
+            try u.write(out, ko);
         }
         var list: Io.Writer.Allocating = .init(u.gpa);
-        for (order) |p| try list.writer.print("{s}\n", .{p});
+        for (order) |p| try list.writer.print("{s}\n", .{withoutGz(p)});
         try u.write(try std.fmt.allocPrint(u.gpa, "{s}/werewolf.modules", .{dst}), list.written());
         try u.writeCpio(s, work_dir ++ "/stage0.cpio");
         try u.run(&.{ "zstd", "-19", "-q", "-f", "-o", work_dir ++ "/slot/initramfs.zst", work_dir ++ "/stage0.cpio" });
@@ -305,15 +317,16 @@ const Update = struct {
     // stage0 in /boot/werewolf, beside GRUB's directory. Both mounted apart
     // and writable, since /victim is read-only.
     fn install(u: *Update, build: []const u8) !void {
+        if (u.cmd.grubenv.len == 0) return u.installEsp(build);
         const io = u.io;
         u.step = "install";
         const v = work_dir ++ "/mnt/v";
         const g = work_dir ++ "/mnt/g";
         try Dir.cwd().createDirPath(io, v);
         try Dir.cwd().createDirPath(io, g);
-        try u.mountUuid(uuidOf(u.cmd.victim), v);
+        try u.mountUuid(uuidOf(u.cmd.victim), v, null);
         defer u.run(&.{ "umount", v }) catch {};
-        try u.mountUuid(uuidOf(u.cmd.grubenv), g);
+        try u.mountUuid(uuidOf(u.cmd.grubenv), g, null);
         defer u.run(&.{ "umount", g }) catch {};
 
         const gpath = pathOf(u.cmd.grubenv);
@@ -333,13 +346,81 @@ const Update = struct {
         try u.run(&.{ "/usr/lib/werewolf/grubenv", try std.fmt.allocPrint(u.gpa, "{s}{s}", .{ g, gpath }), "next_entry", entry });
     }
 
+    /// The other slot onto werewolf's own disk (design/native-boot.md): its
+    /// root.erofs to the ext4 partition, as install does; its kernel and
+    /// stage0 to the EFI partition; and a loader entry with one try, which
+    /// systemd-boot boots next because it is the newest. commit removes the
+    /// count once the slot is healthy; if it is not, systemd-boot has spent
+    /// the try and boots the slot this one replaced.
+    fn installEsp(u: *Update, build: []const u8) !void {
+        const io = u.io;
+        u.step = "install";
+        const v = work_dir ++ "/mnt/v";
+        const e = work_dir ++ "/mnt/e";
+        try Dir.cwd().createDirPath(io, v);
+        try Dir.cwd().createDirPath(io, e);
+        try u.mountUuid(uuidOf(u.cmd.victim), v, null);
+        defer u.run(&.{ "umount", v }) catch {};
+        try u.mountUuid(u.cmd.esp, e, "vfat");
+        defer u.run(&.{ "umount", e }) catch {};
+
+        const rdir = try std.fmt.allocPrint(u.gpa, "{s}{s}/{s}", .{ v, pathOf(u.cmd.victim), u.other });
+        const kdir = try std.fmt.allocPrint(u.gpa, "{s}/werewolf/{s}", .{ e, u.other });
+        const entries = e ++ "/loader/entries";
+        try Dir.cwd().createDirPath(io, rdir);
+        try Dir.cwd().createDirPath(io, kdir);
+        try Dir.cwd().createDirPath(io, entries);
+
+        // The other slot's entry goes first: from here until the new one is
+        // written, nothing boots the other slot while its files change.
+        for (try u.listDir(entries)) |name| {
+            if (isEntryOf(name, u.other)) try Dir.cwd().deleteFile(io, try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ entries, name }));
+        }
+        try u.replace(work_dir ++ "/slot/root.erofs", try std.fmt.allocPrint(u.gpa, "{s}/root.erofs", .{rdir}));
+        for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
+            try u.replace(try std.fmt.allocPrint(u.gpa, "{s}/slot/{s}", .{ work_dir, f }), try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ kdir, f }));
+        }
+        try u.run(&.{"sync"});
+
+        const version = try compactTime(u.gpa, @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s)));
+        const options = try withSlot(u.gpa, try u.read("/proc/cmdline"), u.other);
+        const entry = try loaderEntry(u.gpa, u.other, version, options);
+        const tmp = try std.fmt.allocPrint(u.gpa, "{s}/werewolf-{s}.tmp", .{ entries, u.other });
+        try u.write(tmp, entry);
+        try Dir.cwd().rename(tmp, Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/werewolf-{s}+1.conf", .{ entries, u.other }), io);
+        try u.run(&.{"sync"});
+        try u.write(state_dir ++ "/attempt", try std.fmt.allocPrint(u.gpa, "{s} {s}\n", .{ u.other, build }));
+    }
+
+    /// src to dst, through a temporary name, so dst is whole or absent.
+    fn replace(u: *Update, src: []const u8, dst: []const u8) !void {
+        const tmp = try std.fmt.allocPrint(u.gpa, "{s}.new", .{dst});
+        try Dir.cwd().copyFile(src, Dir.cwd(), tmp, u.io, .{});
+        try Dir.cwd().rename(tmp, Dir.cwd(), dst, u.io);
+    }
+
     // --- helpers -----------------------------------------------------------
+    /// Install packages into a new root, through a cache on /data named for
+    /// the root (root, kernel, stage0), so a check that finds nothing new
+    /// downloads indexes and nothing else. --update-cache fetches the
+    /// indexes every time; apk would otherwise trust a cached one for
+    /// hours. Each root has a cache of its own, so cleaning one keeps
+    /// nothing another needs. --purge makes clean drop every package the
+    /// new root did not take; without it apk keeps any version Wolfi's
+    /// index still lists, which is all of them. The cache holds one copy
+    /// of the image, no more.
     fn apkAdd(u: *Update, root: []const u8, arch: []const u8, source: []const []const u8, packages: []const []const u8) !void {
+        const cache = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ cache_dir, std.fs.path.basename(root) });
+        try Dir.cwd().createDirPath(u.io, cache);
         var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(u.gpa, &.{ "apk", "--root", root, "--arch", arch });
+        try argv.appendSlice(u.gpa, &.{ "apk", "--root", root, "--arch", arch, "--cache-dir", cache });
         try argv.appendSlice(u.gpa, source);
-        try argv.appendSlice(u.gpa, &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" });
+        const common = argv.items.len;
+        try argv.appendSlice(u.gpa, &.{ "--no-scripts", "--quiet", "--no-progress", "--update-cache", "add", "--initdb" });
         try argv.appendSlice(u.gpa, packages);
+        try u.run(argv.items);
+        argv.shrinkRetainingCapacity(common);
+        try argv.appendSlice(u.gpa, &.{ "--quiet", "--purge", "cache", "clean" });
         try u.run(argv.items);
     }
 
@@ -349,9 +430,15 @@ const Update = struct {
         return std.mem.eql(u8, std.mem.trim(u8, out, " \n"), ">");
     }
 
-    fn mountUuid(u: *Update, uuid: []const u8, dir: []const u8) !void {
+    /// The filesystem with uuid on dir. The mount helper probes only Linux
+    /// filesystems, so FAT is named.
+    fn mountUuid(u: *Update, uuid: []const u8, dir: []const u8, kind: ?[]const u8) !void {
         const dev = std.mem.trim(u8, try u.output(&.{ "blkid", "-c", "/dev/null", "-l", "-o", "device", "-t", try std.fmt.allocPrint(u.gpa, "UUID={s}", .{uuid}) }), "\n");
-        try u.run(&.{ "mount", "-o", "nosuid,nodev,noexec", dev, dir });
+        if (kind) |k| {
+            try u.run(&.{ "/usr/lib/werewolf/mount", "-t", k, "-o", "nosuid,nodev,noexec", dev, dir });
+        } else {
+            try u.run(&.{ "/usr/lib/werewolf/mount", "-o", "nosuid,nodev,noexec", dev, dir });
+        }
     }
 
     fn busyboxLinks(u: *Update, root: []const u8) !void {
@@ -381,9 +468,22 @@ const Update = struct {
     }
 
     /// Copy /path to root/path, with its permissions.
+    /// path, from this root into root. A symlink stays a symlink: a form's
+    /// `run` that links to a binary must not become a copy of the old one.
     fn copyInto(u: *Update, root: []const u8, path: []const u8) !void {
+        const src = try std.fmt.allocPrint(u.gpa, "/{s}", .{path});
         const dst = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ root, path });
-        try Dir.cwd().copyFile(try std.fmt.allocPrint(u.gpa, "/{s}", .{path}), Dir.cwd(), dst, u.io, .{ .make_path = true });
+        var buf: [Dir.max_path_bytes]u8 = undefined;
+        const n = Dir.cwd().readLink(u.io, src, &buf) catch |err| switch (err) {
+            error.NotLink => return Dir.cwd().copyFile(src, Dir.cwd(), dst, u.io, .{ .make_path = true }),
+            else => return err,
+        };
+        try Dir.cwd().createDirPath(u.io, parentDir(dst));
+        Dir.cwd().deleteFile(u.io, dst) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
+        try Dir.cwd().symLink(u.io, buf[0..n], dst, .{});
     }
 
     /// A newc cpio of everything under root, as the kernel unpacks an
@@ -520,7 +620,7 @@ const Source = struct { url: []const u8, fetched: []const u8, sha256: ?[]const u
 
 // --- pure functions, tested below ----------------------------------------------
 
-const Cmdline = struct { victim: []const u8 = "", slot: []const u8 = "", grubenv: []const u8 = "" };
+const Cmdline = struct { victim: []const u8 = "", slot: []const u8 = "", grubenv: []const u8 = "", esp: []const u8 = "" };
 
 fn parseCmdline(text: []const u8) Cmdline {
     var c: Cmdline = .{};
@@ -529,8 +629,61 @@ fn parseCmdline(text: []const u8) Cmdline {
         if (std.mem.startsWith(u8, arg, "werewolf.victim=")) c.victim = arg["werewolf.victim=".len..];
         if (std.mem.startsWith(u8, arg, "werewolf.slot=")) c.slot = arg["werewolf.slot=".len..];
         if (std.mem.startsWith(u8, arg, "werewolf.grubenv=")) c.grubenv = arg["werewolf.grubenv=".len..];
+        if (std.mem.startsWith(u8, arg, "werewolf.esp=")) c.esp = arg["werewolf.esp=".len..];
     }
     return c;
+}
+
+/// This boot's command line, for the other slot: werewolf.slot changed and
+/// everything else kept, so what the machine was booted with (its console,
+/// werewolf.mac) carries over. initrd= and BOOT_IMAGE= belong to the loader
+/// that wrote them, and are dropped.
+fn withSlot(gpa: Allocator, cmdline: []const u8, slot: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
+    while (it.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "werewolf.slot=") or std.mem.startsWith(u8, arg, "initrd=") or
+            std.mem.startsWith(u8, arg, "BOOT_IMAGE=")) continue;
+        try out.appendSlice(gpa, arg);
+        try out.append(gpa, ' ');
+    }
+    try out.print(gpa, "werewolf.slot={s}", .{slot});
+    return out.items;
+}
+
+/// A systemd-boot entry (the Boot Loader Specification's type 1) for slot.
+/// version orders the slots, newest first; sort-key keeps them together.
+fn loaderEntry(gpa: Allocator, slot: []const u8, version: []const u8, options: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(gpa,
+        \\title werewolf {s}
+        \\sort-key werewolf
+        \\version {s}
+        \\linux /werewolf/{s}/vmlinuz
+        \\initrd /werewolf/{s}/initramfs.zst
+        \\options {s}
+        \\
+    , .{ slot, version, slot, slot, options });
+}
+
+/// Whether name is one of slot's entries: werewolf-b.conf, werewolf-b+1.conf
+/// with tries left, werewolf-b+0-1.conf with none.
+fn isEntryOf(name: []const u8, slot: []const u8) bool {
+    const prefix = "werewolf-";
+    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, ".conf")) return false;
+    const rest = name[prefix.len .. name.len - ".conf".len];
+    if (!std.mem.startsWith(u8, rest, slot)) return false;
+    return rest.len == slot.len or rest[slot.len] == '+';
+}
+
+/// secs as a version systemd-boot orders by time: 20261006T120000Z.
+fn compactTime(gpa: Allocator, secs: u64) ![]const u8 {
+    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return std.fmt.allocPrint(gpa, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
+        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    });
 }
 
 fn uuidOf(spec: []const u8) []const u8 {
@@ -775,6 +928,21 @@ fn moduleOrder(gpa: Allocator, dep: []const u8, leaves: []const []const u8) ![]c
 /// Alpine's arm64 vmlinuz is an EFI zboot image: "MZ", "zimg", then the
 /// gzipped Image's offset and size as little-endian u32. Anything else is
 /// returned as it is.
+/// A gzip stream, inflated.
+fn gunzip(gpa: Allocator, data: []const u8) ![]const u8 {
+    var in: Io.Reader = .fixed(data);
+    var window: [std.compress.flate.max_window_len]u8 = undefined;
+    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
+    var out: Io.Writer.Allocating = .init(gpa);
+    _ = try gz.reader.streamRemaining(&out.writer);
+    return out.written();
+}
+
+/// kernel/fs/ext4/ext4.ko.gz -> kernel/fs/ext4/ext4.ko
+fn withoutGz(path: []const u8) []const u8 {
+    return if (std.mem.endsWith(u8, path, ".gz")) path[0 .. path.len - 3] else path;
+}
+
 fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
     if (image.len < 16 or !std.mem.eql(u8, image[4..8], "zimg")) return image;
     const off = std.mem.readInt(u32, image[8..12], .little);
@@ -837,6 +1005,31 @@ test parseCmdline {
     try testing.expectEqualStrings("/var/lib/werewolf", pathOf(c.victim));
     try testing.expectEqualStrings("/boot", parentDir(parentDir(pathOf(c.grubenv))));
     try testing.expectEqualStrings("", parentDir(parentDir("/grub/grubenv")));
+}
+
+test "systemd-boot entries" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const c = parseCmdline("console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000\n");
+    try testing.expectEqualStrings("57E1-F000", c.esp);
+    try testing.expectEqualStrings("", c.grubenv);
+    try testing.expectEqualStrings(
+        "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 werewolf.slot=b",
+        try withSlot(a, "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n", "b"),
+    );
+    try testing.expectEqualStrings(
+        \\title werewolf b
+        \\sort-key werewolf
+        \\version 20261006T120000Z
+        \\linux /werewolf/b/vmlinuz
+        \\initrd /werewolf/b/initramfs.zst
+        \\options x werewolf.slot=b
+        \\
+    , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b"));
+    try testing.expectEqualStrings("20261006T120000Z", try compactTime(a, 1791288000));
+    for ([_][]const u8{ "werewolf-b.conf", "werewolf-b+1.conf", "werewolf-b+0-1.conf" }) |n| try testing.expect(isEntryOf(n, "b"));
+    for ([_][]const u8{ "werewolf-a.conf", "werewolf-b.tmp", "werewolf-bb.conf", "other-b.conf" }) |n| try testing.expect(!isEntryOf(n, "b"));
 }
 
 test "installed database, diffs and origins" {
@@ -913,6 +1106,11 @@ test "secdb parses with versions as keys" {
     try testing.expectEqual(null, db.packages[1].pkg.secfixes);
 }
 
+test withoutGz {
+    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko.gz"));
+    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko"));
+}
+
 test moduleOrder {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -953,7 +1151,7 @@ test unwrapZboot {
     defer arena.deinit();
     const plain = "not a zboot image, at all";
     try testing.expectEqualStrings(plain, try unwrapZboot(arena.allocator(), plain));
-    var bad = [_]u8{0} ** 16;
+    var bad: [16]u8 = @splat(0);
     @memcpy(bad[4..8], "zimg");
     std.mem.writeInt(u32, bad[8..12], 8, .little);
     std.mem.writeInt(u32, bad[12..16], 100, .little);

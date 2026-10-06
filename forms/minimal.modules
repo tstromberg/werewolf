@@ -1,2 +1,4 @@
-# Hypervisor devices, the NoCloud ISO, and the ACPI power button.
-virtio_net virtio_blk virtio_scsi sr_mod isofs evdev button
+# Hypervisor devices: virtio's NIC and disks; the NoCloud ISO, as a SCSI
+# CD-ROM, for Lima; and the ACPI power button. Clouds' own devices are in
+# cloud.modules.
+virtio_net virtio_blk sr_mod isofs evdev button

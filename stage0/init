@@ -34,13 +34,15 @@ for arg in $(cat /proc/cmdline); do
 done
 [ -n "$victim" ] && [ -n "$slot" ] || fail "no werewolf.victim or werewolf.slot"
 
+# Lockdown at integrity before any module: the kernel then loads only those
+# signed by its key, and refuses the rest. It only rises; the root's init
+# finds it raised.
+mount -t securityfs securityfs /sys/kernel/security
+echo integrity >/sys/kernel/security/lockdown || fail "cannot raise lockdown"
+
 # Every module the form needs, then the loader closes for good: the root
-# that follows finds it closed and loads nothing.
-moddir=/usr/lib/modules/$(uname -r)
-for p in $(cat "$moddir/werewolf.modules"); do
-	insmod "$moddir/$p" || say "insmod $p failed"
-done
-sysctl -q -w kernel.modules_disabled=1
+# that follows finds it closed and loads nothing (modules/modules.zig).
+/usr/lib/werewolf/modules || say "not every module loaded; see above"
 
 dev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}") || fail "no filesystem ${victim%%:*}"
 mkdir -p /victim /lower /upper /root

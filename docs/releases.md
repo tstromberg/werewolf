@@ -1,12 +1,13 @@
 # Releases
 
-CI publishes two forms, `minimal` and `prod-ssh`, for aarch64 and x86_64,
+CI publishes three forms, `minimal`, `prod` and `prod-ssh`, for aarch64 and x86_64,
 as GitHub releases. It makes a release only when an image would change,
 usually within the hour of a fix reaching Wolfi or Alpine, and anyone
 can rebuild a release byte for byte from what it carries.
 
-`prod-ssh` is `autoupdate` with sshd: a machine that keeps itself current
-and that an operator reaches by key.
+`prod` is the production base: a machine that takes its address by DHCP,
+keeps itself current, and listens on nothing. `prod-ssh` is `prod` with
+sshd, for an operator to reach by key.
 
 ## What a release holds
 
@@ -14,9 +15,9 @@ and that an operator reaches by key.
 | --- | --- |
 | `FORM-ARCH-vmlinuz` | the kernel |
 | `minimal-ARCH-initramfs.zst` | the whole image, for direct boot |
-| `prod-ssh-ARCH-stage0.zst`, `prod-ssh-ARCH-root.erofs` | the slot bite installs |
+| `prod-ARCH-stage0.zst`, `prod-ARCH-root.erofs`, and the same for `prod-ssh` | the slot bite installs |
 | `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest, signed |
-| `minimal.lock.json`, `prod-ssh.lock.json`, `stage0.lock.json`, `kernel.lock.json` | every package, pinned: apko's locks |
+| `minimal.lock.json`, `prod.lock.json`, `prod-ssh.lock.json`, `stage0.lock.json`, `kernel.lock.json` | every package, pinned: apko's locks |
 | `inputs` | what the release was built from |
 
 The tag is the manifests' serial, the time CI signed them. A release is
@@ -99,8 +100,10 @@ What makes the bytes repeat:
 The toolchain must match too: a different zstd or mkfs.erofs can write
 other bytes from the same input. CI uses Ubuntu 24.04's zstd, bsdtar and
 erofs-utils, and the apko and Zig that [test/ci-setup](../test/ci-setup)
-pins. `inputs` leaves the toolchain out, so a new runner image alone does
-not make a release.
+pins. In practice the first release rebuilt on a Mac with Homebrew's
+tools came out the same, but for the updater: Homebrew's Zig names its own
+linker in the binary, so use Zig's release tarball. `inputs` leaves the
+toolchain out, so a new runner image alone does not make a release.
 
 ## Checking a release
 

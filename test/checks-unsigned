@@ -1,0 +1,9 @@
+# A machine offered an unsigned module at boot (make check-unsigned; see
+# test/checks for the format): evdev with its signature cut off. Lockdown is
+# raised before any module loads, so the kernel must refuse it and say so,
+# stay untainted, and still load every signed module.
+
+ok  refused          ! grep -q '^evdev ' /proc/modules
+ok  said             dmesg | grep -q 'unsigned module loading is restricted'
+ok  untainted        [ $(( $(cat /proc/sys/kernel/tainted) & 8192 )) -eq 0 ]
+ok  signed-loaded    grep -q '^virtio_net ' /proc/modules

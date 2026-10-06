@@ -82,7 +82,7 @@ jobs:
         run: make dist
       - name: Boot and check
         if: matrix.copy == 1
-        run: make -k check-minimal check-prod-ssh check-slot
+        run: make -k check-minimal check-prod check-prod-ssh check-slot check-lease
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: dist-${{ runner.arch }}-${{ matrix.copy }}

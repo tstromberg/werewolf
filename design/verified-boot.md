@@ -100,8 +100,10 @@ wherever that kernel runs.
 `root.erofs` carries a dm-verity hash tree after its data (veritysetup's
 `--hash-offset`). stage0 opens it with the release's root hash and mounts it
 read-only, directly at `/`. There is no overlay, because whatever is written
-into an overlay can be run. A block that does not match its hash fails to
-read.
+into an overlay can be run, and because IPE judges a file by its own
+filesystem's block device: through an overlay, a file from the verified root
+has none, and nothing would run at all. A block that does not match its hash
+fails to read.
 
 Direct boot has no disk for the root image, so the initramfs carries it:
 stage0's cpio, then a second, uncompressed cpio holding `root.erofs`, which
@@ -111,8 +113,9 @@ path serves every form, and the RAM root, the overlay and their differences
 go away.
 
 The writable places are `/data`, as now, and tmpfs on `/run`, `/tmp` and
-`/dev/shm`, which stage0 mounts `nosuid,nodev,noexec` and moves into the
-root. busybox `mount` cannot set `noexec`; stage0's util-linux `mount` can.
+`/dev/shm`, which init already mounts `nosuid,nodev,noexec` with the
+one-way `mount` every form now carries (mount/mount.zig); busybox's cannot
+set those.
 
 What init and the services write in the root today moves to `/run`:
 
@@ -159,7 +162,10 @@ signed both.
   back to the previous slot.
 - **Nothing can switch it off.** init starts runit with `CAP_MAC_ADMIN`
   dropped from the bounding set, so no process can load a policy or put IPE
-  in permissive mode.
+  in permissive mode. IPE checks the capability of whoever opened the
+  securityfs file, so nothing may hold one open across the drop. The other
+  switch, `ipe.enforce=0` on the command line, is as safe as the command
+  line: fixed on direct boot and in a UKI, open to root on a bitten machine.
 - **stage0's files are dead once it is active.** They are still reachable
   (stage0 moves the root over the initramfs rather than deleting it), but
   the policy does not allow them. The deadman already runs only shell
@@ -278,11 +284,15 @@ Each phase ships on its own.
    rather than on the command line reaches every boot path, and machines
    bite took over earlier with their next image, since nothing rewrites
    their GRUB entries. Stops `kexec`, `/dev/mem`, unsigned modules, ptrace
-   and executable memfds.
+   and executable memfds. Also done, ahead of phase 2: `/tmp`, `/run` and
+   `/dev/shm` `nosuid,nodev,noexec`, `/run` writable by root alone, no user
+   namespaces, the kernel's link and sticky-directory protections, and
+   `hidepid=invisible` (docs/security.md). Stops users running what they
+   write.
 2. **A read-only root**, on Alpine's kernel. stage0 boots every form; direct
-   boot carries the root image in the initramfs; no overlay; `noexec` tmpfs;
-   the root's writes moved to `/run`. Stops users running what they write,
-   and anyone changing the running root. root can still remount.
+   boot carries the root image in the initramfs; no overlay; the root's
+   writes moved to `/run`. Stops anyone changing the running root. root can
+   still remount.
 3. **Signed releases**: CI builds reproducibly, boot-tests and signs (done,
    [docs/releases.md](../docs/releases.md)); it adds the hash tree, and the
    updater installs releases (under way). Until
@@ -294,8 +304,9 @@ Each phase ships on its own.
 5. **Secure Boot**, for providers that take our keys: AWS (`register-image
    --uefi-data`) and GCP (an image's signature database). A signed UKI per
    slot on the ESP, with the firmware's `BootNext` and `BootOrder` in place
-   of GRUB's `next_entry` and default. Needs DHCP (docs/roadmap.md, item 2),
-   since a signed command line cannot carry a machine's address. Stops
+   of GRUB's `next_entry` and default. Relies on DHCP, which init uses
+   when the command line names no address, since a signed command line
+   cannot carry a machine's address. Stops
    persistence on those machines.
 
 ## Alternatives considered
@@ -317,11 +328,7 @@ Each phase ships on its own.
 
 ## Open questions
 
-- **IPE on 6.18.** Confirm before relying on them: that its permissive
-  switch (`ipe.enforce`, securityfs `enforce`) needs `CAP_MAC_ADMIN`; that
-  with no policy it allows everything; that `dmverity_roothash` matches
-  dm-verity over a loop device, over a file on the victim's filesystem or in
-  the initramfs.
+- **IPE on 6.18.** Answered; see *IPE, tested*.
 - **Key custody.** The image key is a GitHub environment secret, which
   openssl signs with directly, PKCS#7 included. Moving it to a KMS would
   need a PKCS#11 provider, or the PKCS#7 built around a KMS signature.
@@ -333,3 +340,40 @@ Each phase ships on its own.
 - **Hosting.** GitHub Releases, for now. How long old releases stay.
 - **Reproducible kernels.** The generated module key makes each build's
   modules differ.
+
+## IPE, tested
+
+On 2026-10-06, Alpine's `linux-virt` 6.18.55 config built with the options
+under *The kernel* (kernel image only, 2 min 14 s on 8 cores), with a
+throwaway certificate, booted the `crypt` image under QEMU. `test/boot` ran
+these as root on the console, in order; each came out as below.
+
+| | |
+| --- | --- |
+| No policy loaded | a copy of busybox in `/tmp` runs |
+| A signed policy, loaded and activated through securityfs | accepted |
+| busybox on the dm-verity image the policy names | runs |
+| busybox on another dm-verity image, verified but not named | refused |
+| A copy in `/tmp` | refused |
+| `ld.so` loading the unnamed image's busybox | refused, at mmap |
+| A copy written into the initramfs, with `boot_verified=TRUE` allowed | runs |
+| root writing 0 to `/sys/kernel/security/ipe/enforce` | accepted; the `/tmp` copy then runs, until 1 is written back |
+
+Each refusal reached the console as an audit record naming the hook, the
+path, its device and the rule:
+
+```
+audit: type=1420 ... ipe_op=EXECUTE ipe_hook=BPRM_CHECK enforcing=1 pid=539 comm="ash" path="/tmp/tmp.eBs3zE/busybox" dev="tmpfs" ino=7 rule="DEFAULT op=EXECUTE action=DENY"
+```
+
+IPE's source (`security/ipe/`) agrees: every securityfs write, `enforce`
+included, needs `CAP_MAC_ADMIN` in the initial user namespace, checked
+against the opener's credentials (`file_ns_capable`); with no active policy
+it allows everything; activation refuses only a lower version than the
+active policy's; and `ipe.enforce` is a boot parameter. The Kconfig names
+above are the kernel's.
+
+So the design holds as written, with two rules made firm: no policy may
+trust `boot_verified` once the root is mounted, since the initramfs stays
+writable and its files count as verified; and `CAP_MAC_ADMIN` must go from
+the bounding set, since root holding it can turn enforcement off.

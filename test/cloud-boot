@@ -1,0 +1,74 @@
+#!/bin/sh
+# cloud-boot NAME PROVIDER PAYLOAD CHECKS LOG FIRMWARE QEMU...
+#
+# Boot the cloud form as a machine on PROVIDER (gcp, aws, hetzner, or none
+# for a machine on no cloud), with no address and no config disk, against
+# test/metadata serving PAYLOAD (good or hostile) at 169.254.169.254. Run
+# CHECKS on its console (test/boot), then judge what the console and the
+# metadata server saw:
+#
+#   good, on a cloud   the config is taken: a "config" event for PROVIDER;
+#                      on AWS, a token was fetched first and then used
+#   hostile            it is refused whole: a "refused" event
+#   none               no request reached the server at all
+#
+# FIRMWARE is UEFI for arm64, where only firmware gives the guest SMBIOS
+# tables; empty on x86_64, whose default firmware does.
+set -eu
+name=$1 provider=$2 payload=$3 checks=$4 log=$5 firmware=$6
+shift 6
+
+dir=$(dirname "$log")
+port_file=$dir/$name.port
+server_log=$dir/$name.server.log
+rm -f "$port_file" "$server_log"
+: >"$server_log"
+python3 -I test/metadata "$payload" "$port_file" "$server_log" &
+server=$!
+trap 'kill $server 2>/dev/null || true' EXIT
+i=0
+until [ -s "$port_file" ]; do
+	i=$((i + 1))
+	[ $i -le 100 ] || { echo "FAIL   $name            the metadata server did not start"; exit 1; }
+	sleep 0.1
+done
+port=$(cat "$port_file")
+
+case $provider in
+gcp) smbios='type=1,manufacturer=Google,product=Google Compute Engine' ;;
+aws) smbios='type=1,manufacturer=Amazon EC2,product=m7g.large' ;;
+hetzner) smbios='type=1,manufacturer=Hetzner,product=vServer' ;;
+none) smbios= ;;
+*) echo "cloud-boot: no provider $provider" >&2; exit 2 ;;
+esac
+
+# QEMU's user network as a cloud's: the guest gets 169.254.0.15 by DHCP,
+# and 169.254.169.254:80 reaches the server through nc, one per connection.
+net="user,id=n0,net=169.254.0.0/16,host=169.254.0.2,dhcpstart=169.254.0.15,dns=169.254.0.3,guestfwd=tcp:169.254.169.254:80-cmd:nc 127.0.0.1 $port"
+test/boot "$name" "$checks" "$log" "$@" \
+	${firmware:+-bios "$firmware"} ${smbios:+-smbios "$smbios"} \
+	-netdev "$net" -device virtio-net-pci,netdev=n0,romfile=
+
+judge() {
+	echo "FAIL   $name            $1"
+	sed 's/^/         | /' "$server_log"
+	exit 1
+}
+event() { grep -a -q "cloud: {.*\"event\":\"$1\"" "$log"; }
+case $provider/$payload in
+none/*)
+	[ ! -s "$server_log" ] || judge "a machine on no cloud asked the metadata server"
+	;;
+*/hostile)
+	event refused || judge "no \"refused\" event for a hostile config"
+	;;
+aws/good)
+	{ event config && grep -a -q "\"provider\":\"aws\"" "$log"; } || judge "no \"config\" event from aws"
+	head -n 1 "$server_log" | grep -q '^PUT /latest/api/token ' || judge "AWS's user data was asked for without a session token first"
+	grep -q "^GET /latest/user-data .*werewolf-check-token" "$server_log" || judge "AWS's user data was asked for without the token"
+	;;
+*/good)
+	{ event config && grep -a -q "\"provider\":\"$provider\"" "$log"; } || judge "no \"config\" event from $provider"
+	;;
+esac
+echo "pass   $name            the metadata server saw what it should"

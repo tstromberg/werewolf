@@ -1,0 +1,121 @@
+#!/bin/sh
+# build: werewolf's own boot disk, from a slot (design/native-boot.md).
+#
+#   disk/build ARCH BOOT_ROOTFS GPT SLOT_DIR OUT SIZE_MIB [ARG...]
+#
+# BOOT_ROOTFS is disk/boot.yaml's rootfs, holding systemd-boot; GPT is
+# disk/gpt.zig, built for this host; SLOT_DIR holds vmlinuz, initramfs.zst
+# (stage0) and root.erofs. OUT becomes a sparse disk of SIZE_MIB MiB:
+#
+#   GPT    fixed disk and partition GUIDs (disk/gpt.zig)
+#   1      EFI system partition, FAT32, 256 MiB: systemd-boot at the
+#          removable-media path, its loader.conf, slot a's entry, and
+#          /werewolf/a/vmlinuz and initramfs.zst
+#   2      ext4, the rest: /werewolf/a/root.erofs; init adds /werewolf/data,
+#          which is /data
+#
+# Each ARG is added to the kernel command line, as werewolf.mac= for `make
+# demo`; updates carry them over. No address is on the command line, so the
+# machine asks DHCP. Every GUID, UUID, serial number and time is fixed, so
+# the same slot gives the same disk.
+#
+# Runs on macOS and Linux. Needs mtools (mformat, mmd, mcopy) and
+# e2fsprogs' mke2fs and debugfs: Homebrew's on macOS, which keeps them out
+# of PATH, so its prefix is searched too.
+set -eu
+
+[ $# -ge 6 ] || {
+	echo "usage: disk/build ARCH BOOT_ROOTFS GPT SLOT_DIR OUT SIZE_MIB [ARG...]" >&2
+	exit 2
+}
+arch=$1 boot_rootfs=$2 gpt=$3 slot=$4 out=$5 size_mib=$6
+shift 6
+case $arch in
+aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=tty0 console=ttyAMA0 console=hvc0' ;;
+x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=ttyS0,115200 console=hvc0' ;;
+*)
+	echo "disk/build: $arch is not supported" >&2
+	exit 2
+	;;
+esac
+for p in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
+	[ -d "$p" ] && PATH=$p:$PATH
+done
+for t in mformat mmd mcopy mke2fs debugfs; do
+	command -v "$t" >/dev/null || {
+		echo "disk/build: no $t; on macOS, brew install mtools e2fsprogs" >&2
+		exit 1
+	}
+done
+
+# Fixed identities. The EFI partition's serial number is its UUID to blkid,
+# as 57E1-F000.
+esp_mib=256
+esp_serial=57E1F000
+esp_uuid=57E1-F000
+root_uuid=57e1f000-77e2-4b0f-8a3c-0000000000a0
+# FAT's first day, and mtools' and mke2fs's clocks stopped there.
+export SOURCE_DATE_EPOCH=315532800 E2FSPROGS_FAKE_TIME=315532800 MTOOLS_SKIP_CHECK=1 TZ=UTC
+
+# Sectors, as disk/gpt.zig lays them out: the EFI partition from 1 MiB; the
+# root after it, to 1 MiB short of the end.
+esp_first=2048
+root_first=$((esp_first + esp_mib * 2048))
+root_sectors=$((size_mib * 2048 - root_first - 2048))
+
+w=$out.d
+rm -rf "$w" "$out"
+mkdir -p "$w/esp/EFI/BOOT" "$w/esp/loader/entries" "$w/esp/werewolf/a" "$w/root/werewolf/a"
+"$gpt" "$out" "$size_mib" "$esp_mib"
+
+# --- the EFI partition --------------------------------------------------------
+tar -xOf "$boot_rootfs" "usr/lib/systemd/boot/efi/$efi" >"$w/esp/EFI/BOOT/$boot"
+# No menu, and no editing the command line from the console.
+cat >"$w/esp/loader/loader.conf" <<EOF
+timeout 0
+editor no
+auto-entries no
+auto-firmware no
+EOF
+# Slot a, good from the start: no try count. The version is older than any
+# update's, so the first update's slot sorts ahead of it.
+cat >"$w/esp/loader/entries/werewolf-a.conf" <<EOF
+title werewolf a
+sort-key werewolf
+version 19800101T000000Z
+linux /werewolf/a/vmlinuz
+initrd /werewolf/a/initramfs.zst
+options $console init=/init panic=10 softlockup_panic=1 werewolf.victim=$root_uuid:/werewolf werewolf.esp=$esp_uuid${*:+ $*} werewolf.slot=a
+EOF
+cp "$slot/vmlinuz" "$slot/initramfs.zst" "$w/esp/werewolf/a/"
+find "$w/esp" -exec touch -t 198001010000 {} +
+
+esp="$out@@$((esp_first * 512))"
+mformat -i "$esp" -F -T $((esp_mib * 2048)) -h 64 -s 32 -N "$esp_serial" -v ESP ::
+(cd "$w/esp" && find . -mindepth 1 -type d | sed 's|^\./||' | sort) | while read -r d; do
+	mmd -i "$esp" "::/$d"
+done
+(cd "$w/esp" && find . -type f | sed 's|^\./||' | sort) | while read -r f; do
+	mcopy -m -i "$esp" "$w/esp/$f" "::/$f"
+done
+
+# --- the root partition -------------------------------------------------------
+cp "$slot/root.erofs" "$w/root/werewolf/a/"
+chmod -R u=rwX,go=rX "$w/root"
+chmod 0700 "$w/root/werewolf"
+mke2fs -q -F -t ext4 -b 4096 -L werewolf -U "$root_uuid" \
+	-E "offset=$((root_first * 512)),hash_seed=$root_uuid,root_owner=0:0" \
+	-d "$w/root" "$out" $((root_sectors / 8))
+# mke2fs -d keeps the builder's owners and times: make them root's, and
+# 1980. A file left with the builder's uid would belong to whichever user
+# has that uid on the machine.
+(cd "$w/root" && find . -mindepth 1 | sed 's|^\.||') | while read -r p; do
+	for f in uid gid; do echo "sif $p $f 0"; done
+	for f in atime ctime mtime crtime; do echo "sif $p $f $E2FSPROGS_FAKE_TIME"; done
+done >"$w/debugfs.cmds"
+debugfs -w -f "$w/debugfs.cmds" "$out?offset=$((root_first * 512))" >/dev/null 2>"$w/debugfs.err" || {
+	cat "$w/debugfs.err" >&2
+	exit 1
+}
+rm -rf "$w"
+echo "disk/build: $out ($arch, $size_mib MiB, EFI $esp_uuid, root $root_uuid)"

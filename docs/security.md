@@ -8,17 +8,21 @@ not yet, and how to check it on a running machine. Where it is going is in
 
 ## Approach
 
-- **Carry less.** Each form holds only what it needs. `minimal` is 20
+- **Carry less.** Each form holds only what it needs. `minimal` is 10
   packages and listens on nothing; there is no systemd, no PAM in use, no
   compiler, no package manager outside `autoupdate`.
 - **Close things for good.** What can be locked until reboot is locked at
   boot, before any service runs: the module loader, kernel lockdown,
   ptrace. Root cannot reopen them.
-- **Nothing to keep.** The root is never written; `/data` is cache. A
-  reboot returns the machine to its image, and losing `/data` costs a cold
-  start.
+- **Keep only data.** The root is never written, so a reboot returns the
+  machine to its image. What persists is data on `/data`, which nothing
+  executes, and which init formats only while it is blank.
 - **Fail back, not forward.** A new image boots once and stays only if it
   proves itself; every failure ends on the slot that last worked.
+- **Separate and confine our own code.** werewolf's programs follow
+  OpenBSD's practice: what reads untrusted input runs apart from what
+  changes the machine, as its own user, chrooted, with no capabilities, and
+  under a seccomp allowlist ([programs.md](programs.md)).
 - **Trust no one new.** Updates come from Wolfi and Alpine directly, checked
   against keys in the image. There is no build server and no signing key of
   ours.
@@ -29,10 +33,10 @@ not yet, and how to check it on a running machine. Where it is going is in
 
 | | |
 | --- | --- |
-| No setuid or setgid files | apko's `paths:` clear them from util-linux `mount` and PAM's `unix_chkpwd`; the updater clears any a new package brings |
-| Few listeners | `minimal`, `disk`, `crypt`, `bitten`, `autoupdate`: none. `sshd`, `lima`: 22. `sshd-cloudflared`: 22 and an outbound tunnel |
+| No setuid or setgid files | apko's `paths:` clear them from PAM's `unix_chkpwd`, and from util-linux `mount` in stage0; the updater clears any a new package brings |
+| Few listeners | `minimal`, `dhcp`, `disk`, `crypt`, `bitten`, `autoupdate`, `prod`: none. `sshd`, `prod-ssh`, `lima`: 22. `demo`: 80. Each form declares its ports in `/etc/werewolf/listen`, and `make check` fails on any other |
 | ssh | keys only (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `UsePAM no`); root by key only; no X11 or agent forwarding; `LogLevel VERBOSE`. Host keys are made at each boot and never outlive the machine |
-| Secrets | the config tar's contents go to `/run/config`, tmpfs, 0700. cloudflared's token travels in its environment, not argv. `data.key` is deleted once the volume is open |
+| Secrets | the config tar's contents go to `/run/config`, tmpfs, 0700. `data.key` is deleted once the volume is open |
 
 ### Boot
 
@@ -51,10 +55,21 @@ Before runit starts, init closes, for the life of the machine:
 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1` | leaking kernel addresses | yes |
 | `kernel.unprivileged_bpf_disabled=1` | BPF for non-root users | no |
 | `net.ipv4.ip_forward=0` | routing through the machine | yes |
+| `kernel.io_uring_disabled=2` | io_uring, a large kernel interface nothing here uses | yes |
+| `kernel.sysrq=0` | the magic SysRq keys from a console; `/proc/sysrq-trigger`, which stage0's deadman uses, is not affected | yes |
+| ICMP redirects, IPv4 and IPv6 | a neighbour rewriting the machine's routes; none are sent either | yes |
+| `user.max_user_namespaces=0` | an ordinary user mounting its own filesystems (without `noexec`) in a private namespace, and the kernel code namespaces open to it | yes |
+| `fs.protected_symlinks=1`, `protected_hardlinks=1`, `protected_fifos=2`, `protected_regular=2` | planting a link, FIFO or file in `/tmp` for a root process to follow or write | yes |
 
-Lockdown is raised by init through securityfs, not on the kernel command
-line, so it holds however the machine was booted. Each refusal is in the
-kernel log: `ptrace attach of "runit"[1] was attempted by …`, `Lockdown:
+What root can undo, no one else can: each guards against ordinary users,
+and against root only once services stop running as root.
+
+Lockdown is raised through securityfs, not on the kernel command line, so
+it holds however the machine was booted, and it is raised before any
+module loads: by stage0 on a slot, by init on a RAM root. So the kernel
+loads only modules signed by the key it was built with, Alpine's, and
+refuses the rest rather than loading them and noting a taint. Each refusal
+is in the kernel log: `ptrace attach of "runit"[1] was attempted by …`, `Lockdown:
 head: /dev/mem,kmem,port is restricted`.
 
 ### Storage
@@ -62,8 +77,38 @@ head: /dev/mem,kmem,port is restricted`.
 | | |
 | --- | --- |
 | The root | a RAM root, or on a bitten machine `root.erofs`, read-only, under a tmpfs overlay. Writes vanish at reboot |
-| `/data` | cache only. On a disk or a bitten machine, `nosuid,nodev,noexec`; `crypt` puts it in LUKS2, keyed from the config, never from beside the disk. In RAM (forms without storage tools) it is plain tmpfs, like `/tmp` |
+| Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
+| `/data` | the machine's data. On a disk or a bitten machine, `nosuid,nodev,noexec`; `crypt` puts it in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
 | The victim's filesystem | read-only at `/victim`; the few writers mount it separately |
+
+### Mounts
+
+Everything werewolf mounts goes through its own tool,
+[mount/mount.zig](../mount/mount.zig), installed as `/usr/lib/werewolf/mount`
+in every form. util-linux's `mount` is in none of them: in Wolfi it brings
+SELinux's libraries, and busybox's cannot set `nosuid`, `nodev` or `noexec`.
+
+- **One-way, and the kernel holds it to that.** A new mount is built
+  detached and gets `nosuid`, `noexec` and, but for device filesystems,
+  `nodev` before it is attached; a bind is cloned and restricted the same
+  way. A remount is `mount_setattr(2)` with nothing to clear, so it cannot
+  lift `ro`, `nosuid`, `nodev`, `noexec` or `nosymfollow` whatever it is
+  given. `suid`, `dev`, `exec`, and `rw` on a remount, are refused.
+- **Allowlists.** Only werewolf's filesystems (proc, sysfs, securityfs,
+  devtmpfs, devpts, tmpfs, ext4, xfs, btrfs, iso9660, vfat), only the options each
+  is given, with their values checked, and only under `/proc`, `/sys`,
+  `/dev`, `/run`, `/tmp`, `/data`, `/victim` and `/mnt`: nothing is mounted
+  over `/etc`, `/usr` or the root.
+- **No symlinks.** Paths are absolute and clean, and resolved with symlinks
+  refused, so a link planted in `/tmp` cannot steer a mount.
+- **Pledged.** Before it asks the kernel for anything it sets
+  `no_new_privs`, drops every capability but `CAP_SYS_ADMIN`, and installs a
+  seccomp filter of the dozen system calls it makes. Anything else kills it.
+- **Quiet.** No environment, no files read, nothing printed on success; on
+  failure, one line with the kernel's own reason.
+
+It is a tool that cannot loosen a mount, not a lock: root can run a program
+of its own that calls `mount(2)` (*Not yet*).
 
 ### Updates and slots
 
@@ -86,10 +131,12 @@ cloud-init's user-data, once werewolf has committed.
 
 ## Not yet
 
-- **Any user can run what it writes** to `/tmp`, `/run`, `/dev/shm`, or a
-  `/data` in RAM: Wolfi's busybox `mount` cannot set `noexec`.
 - **root can write the running root** (the RAM root, or the overlay) and
-  run what it writes, and can remount `/data` and `/victim`.
+  run what it writes, including a program of its own that remounts
+  anything `exec`, `/data` and `/victim` included; werewolf's own `mount`
+  will not. It can also undo the sysctls marked "yes" above. Mount
+  options and sysctls bind everyone else; IPE (phase 4 of the design) and
+  services that do not run as root are what will bind root.
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
   them, or GRUB's config, and keep them across reboots. Secure Boot is off,
   since Alpine's kernel is not signed for it.
@@ -118,7 +165,12 @@ as root, on the console (`make run` gives a root shell there) or over ssh:
 | memfds | `cat /proc/sys/vm/memfd_noexec` | `2` |
 | setuid and setgid files | `find / -xdev \( -perm -4000 -o -perm -2000 \) -type f` | nothing |
 | Listeners | `netstat -ltn` | 22, or nothing |
-| `/data` | `grep ' /data ' /proc/mounts` | on a disk, `nosuid,nodev,noexec` among the options |
+| `/data` | `grep ' /data ' /proc/mounts` | `nosuid,nodev,noexec` among the options |
+| Memory filesystems | `grep -E ' /(var/)?(tmp\|run\|dev/shm) ' /proc/mounts` | `nosuid,nodev,noexec` on each |
+| `/run` is root's | `chpst -u nobody touch /run/x` | `Permission denied` |
+| User namespaces | `cat /proc/sys/user/max_user_namespaces` | `0` |
+| Planted symlinks | `chpst -u nobody ln -s /run/x /tmp/x; echo hi >/tmp/x` | `Permission denied` |
+| Other users' processes | `chpst -u nobody ls /proc` | no numbered entries but its own |
 | ssh | `sshd -T \| grep -iE '^(passwordauth\|kbdinteractive\|permitrootlogin\|usepam)'` | `no`, `no`, `prohibit-password`, `no` |
 
 init also says it on the console: `werewolf: lockdown: integrity`.
@@ -126,9 +178,13 @@ init also says it on the console: `werewolf: lockdown: integrity`.
 ## Tested
 
 `make check` runs these as [test/checks](../test/checks) on every form and
-on a slot, on every push, on x86_64 and arm64 ([testing.md](testing.md)). It
-also holds each item under "Not yet" to being still open, so this page
-cannot fall behind the machines.
+on a slot, on every push, on x86_64 and arm64 ([testing.md](testing.md)),
+trying each attack as `nobody` where an ordinary user is the attacker. It
+boots every form a second time on the disks the first boot left, to show
+`/data` comes back as it was left; boots `crypt` without a key, to show it
+refuses; and offers init and stage0 a module with its signature cut off,
+to show the kernel refuses that too. It also holds each item under "Not yet" to being still open, so
+this page cannot fall behind the machines.
 
 By hand, on 2026-10-06, a bitten Debian 13 VM in Lima took the lockdown
 image as an update would: installed in its other slot, booted once,

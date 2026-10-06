@@ -1,0 +1,34 @@
+#!/bin/sh
+# unsign MODULES_TAR NAME OUT
+#
+# Make OUT, a zstd-compressed cpio holding one module from MODULES_TAR with
+# its signature cut off. Appended to an initramfs, the kernel unpacks it
+# last, so it replaces the signed module of the same name, and a machine
+# that loads only signed modules must refuse it (make check-unsigned).
+#
+# A signed module ends in its signature, a 12-byte struct module_signature
+# whose last four bytes are the signature's length (big-endian), and the
+# marker "~Module signature appended~\n".
+set -eu
+tar=$1 name=$2 out=$3
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+path=$(bsdtar -tf "$tar" | grep "/$name\.ko\$")
+[ -n "$path" ] || { echo "unsign: no $name in $tar" >&2; exit 1; }
+bsdtar -xf "$tar" -C "$tmp" "$path"
+cp "$tmp/$path" "$tmp/signed"
+
+marker='~Module signature appended~'
+[ "$(tail -c 28 "$tmp/signed" | head -c 27)" = "$marker" ] || { echo "unsign: $name is not signed" >&2; exit 1; }
+size=$(wc -c <"$tmp/signed")
+siglen=$(tail -c 32 "$tmp/signed" | head -c 4 | od -An -tu1 | awk 'NF == 4 { print $1 * 16777216 + $2 * 65536 + $3 * 256 + $4 }')
+keep=$((size - 28 - 12 - siglen))
+head -c "$keep" "$tmp/signed" >"$tmp/unsigned"
+# Fail rather than test nothing: the copy must be shorter, and unmarked.
+[ "$(wc -c <"$tmp/unsigned")" -eq "$keep" ] && [ "$keep" -gt 0 ] && [ "$keep" -lt "$size" ] &&
+	[ "$(tail -c 28 "$tmp/unsigned" | head -c 27)" != "$marker" ] || { echo "unsign: could not cut $name's signature" >&2; exit 1; }
+cp "$tmp/unsigned" "$tmp/$path"
+
+(cd "$tmp" && bsdtar -cf "$tmp/unsigned.cpio" --format newc --uid 0 --gid 0 --numeric-owner "$path")
+zstd -q -19 -f -o "$out" "$tmp/unsigned.cpio"

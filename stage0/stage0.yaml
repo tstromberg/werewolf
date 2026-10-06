@@ -9,7 +9,6 @@ contents:
   packages:
     - wolfi-baselayout
     - busybox-full          # sh, chroot, sysctl
-    - kmod                  # insmod
     - blkid                 # the victim's filesystem by UUID
     - mount                 # util-linux: loop, overlay, --move
 

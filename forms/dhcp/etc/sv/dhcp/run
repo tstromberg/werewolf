@@ -1,0 +1,4 @@
+#!/bin/sh
+# dhcp: keep the lease init got from DHCP, renewing it or getting another
+# (dhcp/dhcp.zig). Where init used a static address, it sleeps.
+exec /usr/lib/werewolf/dhcp keep 2>&1

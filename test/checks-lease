@@ -1,0 +1,14 @@
+# The dhcp form booted with no werewolf.ip, so init asks QEMU's DHCP server
+# for an address (make check; see test/checks for the format). The lease must be
+# applied, and the client must be split as dhcp/dhcp.zig says: an engine
+# that reads the network as _dhcp, chrooted, with no capabilities, under
+# seccomp; a parent that keeps CAP_NET_ADMIN alone. The Makefile also wants
+# its "bound" event on the console.
+
+ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
+ok  lease            grep -q '10\.0\.2\.15' /run/werewolf/dhcp/lease.json
+ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
+ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
+ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf
+ok  engine-jailed    p=$(ps -o pid,user,args | awk '$2 == "_dhcp" && /dhcp/ { print $1; exit }'); [ -n "$p" ] && [ "$(readlink /proc/$p/root)" = /var/empty ] && awk '/^CapEff:/ { c = $2 } /^Seccomp:/ { s = $2 } /^NoNewPrivs:/ { n = $2 } END { exit !(c == "0000000000000000" && s == 2 && n == 1) }' /proc/$p/status
+ok  parent-narrowed  p=$(ps -o pid,user,args | awk '$2 == "root" && /dhcp keep/ { print $1; exit }'); [ -n "$p" ] && awk '/^CapEff:/ { c = $2 } /^Seccomp:/ { s = $2 } END { exit !(c == "0000000000001000" && s == 2) }' /proc/$p/status

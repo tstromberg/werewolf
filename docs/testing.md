@@ -20,10 +20,48 @@ boots, every check comes out as expected, and it shuts down cleanly.
 
 The checks try what an attacker would and expect to be refused: lower
 lockdown, read `/dev/mem` or another process's memory, undo a one-way
-sysctl, find a setuid file, listen on a port. Where a refusal and an
-ordinary error look alike, a check also asks for the kernel's own line
-saying it refused. One check runs first, before any attack: that nothing
-was refused during boot, which catches a protection breaking a service.
+sysctl, find a setuid file, listen on a port the form has not declared in
+`/etc/werewolf/listen` (ssh's 22 is declared by sshd being installed), run
+a program from `/tmp`.
+Where the attacker would be an ordinary user, the check acts as one, with
+runit's `chpst -u nobody`: write to `/run`, see another user's processes,
+plant a symlink or hardlink in `/tmp` for root to follow. Where a refusal
+and an ordinary error look alike, a check also asks for the kernel's own
+line saying it refused. A check confirms the address and default route the command line gave. One check runs first, before any attack: that
+nothing was refused during boot, which catches a protection breaking a
+service.
+
+Every form then boots a second time, on the disks its first boot left
+([test/checks-again](../test/checks-again)). `/data` may hold real data, so
+a disk init formatted once must come back as it was: opened, checked,
+mounted, still holding the mark the first boot wrote, and with no line on
+the console saying it formatted anything. And `crypt` boots once with a
+blank disk and no key ([test/checks-nodata](../test/checks-nodata)): it must
+refuse, leaving `/data` an empty read-only tmpfs and the reason in
+`/run/werewolf/nodata`, rather than make a key up. And two boots offer an
+unsigned module, `minimal`'s init on a RAM root and stage0 on a slot
+([test/checks-unsigned](../test/checks-unsigned)): [test/unsign](../test/unsign)
+cuts the signature off `evdev` and appends it to the initramfs, where it
+replaces the signed one. The kernel must refuse it, say so, stay
+untainted, and still load every signed module.
+
+Five boots put the `cloud` form behind a stand-in metadata server
+([test/metadata](../test/metadata), driven by
+[test/cloud-boot](../test/cloud-boot)), with the firmware's strings set as
+each cloud's: on GCP, AWS and Hetzner Cloud a good config must be taken
+(the hostname and root's key applied, the tar rewritten root's and 0600),
+and on AWS only through a session token; a tar with a symlink and a `../`
+entry must be refused whole; and a machine on no cloud must not ask the
+metadata server at all, which the server's own log shows. arm64 guests
+get SMBIOS only under UEFI firmware, which the boots load.
+
+Every boot so far gives its address on the kernel command line. One more
+boots the `dhcp` form without one ([test/checks-lease](../test/checks-lease)),
+so init asks QEMU's DHCP server: the address, gateway and DNS server must
+be applied, the console must show the client's `bound` event, and the
+client must be split as it says it is, an engine running as `_dhcp`,
+chrooted, with no capabilities, under seccomp, and a parent keeping
+`CAP_NET_ADMIN` alone.
 
 The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
 by filesystem UUID, the overlay, `/victim` read-only, and the `commit`
@@ -35,13 +73,16 @@ committed.
 
 ```
 ok     sshd               lockdown
-ok     sshd               proc-mem
-gap    sshd               tmp-noexec
+ok     sshd               symlinks
+gap    sshd               root-readonly
 pass   sshd               all checks
+pass   sshd-again         all checks
 ```
 
-Each machine gets a blank disk and no config, and forwards no ports, so
-machines never share state and `make -j` runs them together. Nothing waits a
+Each machine gets a blank disk and a config disk of its own, holding only a
+fixed test `data.key` so `crypt` puts `/data` in LUKS2, and forwards no
+ports, so machines never share state and `make -j` runs them together.
+Nothing waits a
 fixed time: [test/boot](../test/boot) waits for each thing it needs to see,
 up to a limit, so a fast machine finishes fast and a slow one, emulated in
 CI, still passes. On an M4, `make -j8 check` takes about 25 s for the forms
@@ -57,7 +98,7 @@ run as root in a subshell, exiting 0 when the property holds.
 
 ```
 ok  ptrace-off       grep -qx 3 /proc/sys/kernel/yama/ptrace_scope && ! sysctl -w kernel.yama.ptrace_scope=0
-gap tmp-noexec       d=$(mktemp -d) && cp "$(command -v busybox)" $d/ && ! $d/busybox true; r=$?; rm -rf $d; exit $r
+gap root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
 ```
 
 - **ok** must hold on every machine. A check that applies to some machines
@@ -80,7 +121,8 @@ test`, `make lint` and `make check` on GitHub's x86_64 and arm64 Ubuntu
 runners. [test/ci-setup](../test/ci-setup) installs the tools: Ubuntu's
 packages, and apko and Zig pinned by version and sha256; `ci-setup apko`
 installs apko alone, for jobs that only resolve packages. Each job keeps its
-logs when it fails.
+logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
+QEMU emulates there, and the job still takes under five minutes.
 
 `make lima-ci` runs the same job here, in an Ubuntu 24.04 VM, `werewolf-ci`,
 with nested virtualization for KVM. The tree is copied in fresh each run,

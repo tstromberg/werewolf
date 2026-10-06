@@ -17,19 +17,19 @@ all | apko) only=${1:-all} ;;
 esac
 
 apko_version=1.3.1
-zig_version=0.16.0
+zig_version=0.17.0
 
 arch=$(uname -m)
 case $arch in
 x86_64)
-	go=amd64 qemu=qemu-system-x86
+	go=amd64 qemu=qemu-system-x86 efi=
 	apko_sha256=b8c39ff7e63864efa1296d36a95d3c56f750ef2ab41cdc6d7fad0ae6a483b604
-	zig_sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+	zig_sha256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 	;;
 aarch64)
-	go=arm64 qemu=qemu-system-arm
+	go=arm64 qemu=qemu-system-arm efi=qemu-efi-aarch64 # UEFI: arm64 guests' SMBIOS
 	apko_sha256=47ec5e9e66372629919598f5176b37e9e47a3be456b2c8c9541a891065123fbb
-	zig_sha256=ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+	zig_sha256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
 	;;
 *)
 	echo "ci-setup: $arch is not supported" >&2
@@ -41,7 +41,7 @@ if [ "$only" = all ]; then
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -q
 	apt-get install -y -q --no-install-recommends ca-certificates curl make xz-utils \
-		zstd libarchive-tools erofs-utils e2fsprogs expect "$qemu" python3-pip
+		zstd libarchive-tools erofs-utils e2fsprogs expect netcat-openbsd "$qemu" ${efi:+"$efi"} python3-pip
 fi
 
 tmp=$(mktemp -d)

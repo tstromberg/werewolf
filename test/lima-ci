@@ -27,6 +27,8 @@ limactl shell --workdir / "$vm" sh -euc "
 		sudo test/ci-setup
 		sudo install -D -m 0644 test/ci-setup /var/lib/werewolf-ci/ci-setup
 	fi
+	# /dev/kvm's mode does not outlive a restart of the VM; ci-setup's does.
+	[ ! -e /dev/kvm ] || sudo chmod 0666 /dev/kvm
 	make test
 	make lint
 	make -k -j\$(nproc) check

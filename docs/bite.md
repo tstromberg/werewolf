@@ -27,8 +27,9 @@ that slot GRUB's default; until then, a reset returns to the distro.
 Boot on (shim will not load Alpine's unsigned kernel), a NIC or disk that is
 not virtio, LVM or LUKS, or a filesystem other than ext4, xfs or btrfs.
 
-**It carries over the live network**, since werewolf has no DHCP client:
-cloud addresses come from DHCP but do not change. The config tar gets the
+**It carries over the live network** as a static address: cloud
+addresses come from DHCP but do not change, and a provider without DHCP
+works the same. The config tar gets the
 hostname and the ssh keys of root and of the sudo user.
 
 **The victim stays visible, not writable.** werewolf mounts the distro's
@@ -72,7 +73,7 @@ A bitten machine boots a *slot*: the rootfs kept on disk, read-only.
 | File | Installed in | Contents |
 | --- | --- | --- |
 | `vmlinuz` | `/boot/werewolf/<slot>/` | Alpine's kernel |
-| `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: busybox, kmod, blkid, mount, the form's modules |
+| `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: busybox, blkid, mount, werewolf's module loader, the form's modules |
 | `root.erofs` | `/var/lib/werewolf/<slot>/` | the rootfs |
 
 stage0 mounts `root.erofs` read-only under a tmpfs overlay. Writes go to RAM

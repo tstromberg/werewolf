@@ -46,7 +46,8 @@ serial=$(date -u +%Y%m%dT%H%M%SZ)
 		n=${m##*/}
 		echo "| ${n%.json} | $(build "$m") | $(sed -n 's/^  "kernel": "\(.*\)",$/\1/p' "$m") |"
 	done
-	for n in $changed; do
+	# Package changes, against a previous release; the first has none.
+	[ "$prev" = none ] || for n in $changed; do
 		echo
 		echo "**$n**"
 		echo

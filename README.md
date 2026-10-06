@@ -12,6 +12,44 @@ Alpine's kernel. Inspired by [Chainguard VMs](https://www.chainguard.dev/vms), b
 - **Reliable**: A/B slots; a failed update rolls itself back.
 - **Injectable**: Able to take over an existing Linux VM using `bite`, for providers without custom image support.
 
+## Security
+
+The philosophy: carry as little as possible, lock what can be locked at
+boot so that not even root can unlock it, keep the system itself off any
+writable disk, and prove every claim with a test.
+
+- **Tiny**: `minimal` is 10 packages, 3 MB, and listens on nothing. No
+  systemd, no package manager outside `autoupdate`, no setuid or setgid
+  binaries. Modules load, and the network comes up, through werewolf's own
+  small static programs.
+- **Locked at boot, for good**: the module loader closes, kernel lockdown
+  refuses `kexec`, `/dev/mem` and unsigned modules, and ptrace is off, for
+  root too.
+- **Nothing written runs**: `/data`, `/tmp`, `/run` and `/dev/shm` are
+  `noexec`, user namespaces are off so no one can mount around that, the
+  kernel refuses the symlink and hardlink tricks of shared directories, and
+  each user sees only its own processes.
+- **One-way mounts**: werewolf mounts with its own tool,
+  [mount/mount.zig](mount/mount.zig), which can add `ro`, `nosuid`, `nodev`
+  and `noexec` but never lift them, mounts only werewolf's filesystems in
+  werewolf's places, refuses symlinks in a path, and sandboxes itself
+  before it acts.
+- **Declared listeners**: each form lists the ports it listens on, and the
+  tests fail on anything else listening.
+- **The system is never written to disk**: changes to the root live in
+  RAM, so a reboot restores the image. `/data` is the one writable disk; in
+  `crypt` it is encrypted, with a key kept apart from the disk.
+- **ssh**: keys only, no PAM, no forwarding.
+- **Updates**: verified against keys in the image, logged with the CVEs
+  they fix, and rolled back automatically if the new image is unhealthy.
+- **Tested**: `make check` boots every form on every push, tries the
+  attacks, and fails if one gets through.
+
+Next: machines that install only our signed releases, and Linux's IPE, so
+the kernel runs only code we signed
+([design/verified-boot.md](design/verified-boot.md)). What is not yet
+covered, and how to check a machine: [docs/security.md](docs/security.md).
+
 ## Quick start
 
 First install our dependencies, for example, on macOS:
@@ -75,15 +113,18 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 
 | Form | Includes | Adds | /data | Listens | RAM image | root.erofs | Packages |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `minimal` | | busybox, kmod, net-tools, runit; init, shutdown, services; virtio, power button | RAM | nothing | 5.7 MB | | 20 |
-| `disk` | minimal | e2fsprogs, util-linux mount, blkid; ext4 | ext4 | nothing | 7.8 MB | | 31 |
-| `crypt` | disk | cryptsetup; dm-crypt, hardware AES | ext4 in LUKS2 | nothing | 9.0 MB | | 36 |
-| `bitten` | minimal | util-linux mount, blkid; ext4, xfs, btrfs, erofs, overlay, loop | a directory on the victim | nothing | 9.6 MB | 12.8 MB | 27 |
-| `autoupdate` | bitten | apk-tools, erofs-utils, zstd; Alpine's keys; the updater | a directory on the victim | nothing | 11.4 MB | 16.0 MB | 33 |
-| `sshd` | minimal | openssh-server, sftp-server | RAM | :22 | 7.9 MB | | 28 |
-| `sshd-cloudflared` | sshd | cloudflared, CA certificates | RAM | :22, tunnel | 15.0 MB | | 29 |
-| `prod-ssh` | autoupdate | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.9 MB | 19.8 MB | 38 |
-| `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 14.3 MB | 22.8 MB | 44 |
+| `minimal` | | busybox, runit; init, shutdown, services, werewolf's module loader, network setup and one-way mount; virtio, power button | RAM | nothing | 3.0 MB | | 10 |
+| `dhcp` | minimal | werewolf's DHCP client, split into a jailed engine and a parent with one capability; packet sockets | RAM | nothing | 3.1 MB | | 10 |
+| `disk` | minimal | e2fsprogs, blkid; ext4 | ext4 | nothing | 4.0 MB | | 16 |
+| `crypt` | disk | cryptsetup; dm-crypt, hardware AES | ext4 in LUKS2 | nothing | 8.3 MB | | 30 |
+| `cloud` | dhcp | werewolf's metadata fetcher: the config from GCP's, AWS's or Hetzner's user data ([docs/cloud.md](docs/cloud.md)); GCP's SCSI, NVMe and gVNIC | RAM | nothing | 3.3 MB | | 10 |
+| `bitten` | cloud | blkid; ext4, xfs, btrfs, erofs, overlay, loop | a directory on the victim | nothing | 5.9 MB | 12.8 MB | 12 |
+| `autoupdate` | bitten | apk-tools, erofs-utils, zstd; Alpine's keys; the updater | a directory on the victim | nothing | 10.3 MB | 16.0 MB | 25 |
+| `prod` | autoupdate | nothing: the production base, published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | nothing | 10.3 MB | 15.3 MB | 25 |
+| `sshd` | minimal | openssh-server, sftp-server | RAM | :22 | 7.4 MB | | 24 |
+| `prod-ssh` | prod | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.6 MB | 19.8 MB | 33 |
+| `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 14.1 MB | 22.8 MB | 39 |
+| `demo` | prod | nginx, grype, a status page: no shell in its services; updates hourly ([docs/demo.md](docs/demo.md)) | a directory on the victim | :80 | 33.1 MB | 59.6 MB | 36 |
 
 1. **Forms build on each other with apko's `include:`.** The Makefile
    follows the chain, laying on each form's files and modules, base first.
@@ -91,8 +132,9 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
    Modules load at boot and the loader then closes, so a module not listed
    cannot be loaded later.
 2. **Every form includes `minimal`, which carries `/init`.** A service that
-   lacks what it needs stays down: sshd without `sshd`, cloudflared without
-   a token.
+   lacks what it needs stays down: sshd without `sshd`. init takes the
+   address the kernel command line gives, or, in forms built on `dhcp`,
+   asks the network's DHCP server.
 3. **Storage forms carry only packages and modules.** init builds `/data`
    from whichever tools are present ([docs/data.md](docs/data.md)).
 
@@ -108,9 +150,9 @@ make slot            # vmlinuz, stage0 and root.erofs, for bite
 ```
 
 Images need `apko`, `zstd` and `bsdtar`; slots also need `mkfs.erofs`.
-Forms with autoupdate need Zig 0.16 for the updater, and the Makefile
+Every form needs Zig 0.17 for werewolf's own programs, and the Makefile
 checks the version: Zig is pre-1.0 and changes between releases.
-`make test` runs the updater's unit tests; `make check` boots every form
+`make test` runs their unit tests; `make check` boots every form
 and checks its protections ([docs/testing.md](docs/testing.md)).
 
 Builds are reproducible. The first build pins every package, Wolfi's and
@@ -125,7 +167,8 @@ On an M-series Mac, init hands over to runit 0.17 s after the kernel starts
 ## Configuration
 
 **The kernel command line** sets the network (`werewolf.ip=CIDR`,
-`werewolf.gw=`, `werewolf.dns=`, `werewolf.mac=`), the disk `/data` may
+`werewolf.gw=`, `werewolf.dns=`, `werewolf.mac=`; without `werewolf.ip`,
+werewolf's own DHCP client asks the network), the disk `/data` may
 format (`werewolf.data=DEV`), and `werewolf.debug=1`, a root shell on the
 console, which `make run` sets.
 
@@ -139,21 +182,25 @@ config/
   authorized_keys      root's ssh keys
   hostname
   data.key             crypt's /data key: `head -c 64 /dev/urandom`, one per host
-  cloudflared/token    sshd-cloudflared's tunnel; it stays down without one
 ```
 
 init applies the first two and leaves the rest in `/run/config` (tmpfs,
 0700) for services.
+
+**On GCP, AWS and Hetzner Cloud** the config tar can instead be the
+instance's user data, in base64; forms from `cloud` up fetch it when no
+config disk is found ([docs/cloud.md](docs/cloud.md)).
 
 **NoCloud** is read for Lima only: init creates the first user in
 `user-data` with its ssh keys. This is not cloud-init.
 
 ## Data
 
-The root is never written. `/data` is the one writable place, and
-everything on it is cache. The form decides what it is: tmpfs, an ext4 disk,
-the same encrypted with LUKS2, or a directory on a bitten machine's old
-disk. See [docs/data.md](docs/data.md).
+The root is never written. `/data` is the one writable place, and it can
+hold real data: init formats a disk only while it is blank, and never one
+it has used. The form decides what it is: tmpfs, an ext4 disk, the same
+encrypted with LUKS2, or a directory on a bitten machine's old disk. See
+[docs/data.md](docs/data.md).
 
 ## Autoupdate
 
@@ -174,9 +221,7 @@ See [docs/updater.md](docs/updater.md).
 
 ## Limits
 
-- **No DHCP.** Wolfi has no client outside systemd-networkd, and the
-  kernel's `ip=dhcp` runs before virtio-net loads. Addresses come from the
-  command line.
+- **IPv4 only.** DHCP or a static address; no IPv6.
 - **No NTP.** The clock comes from the hypervisor at boot.
 - **No service sandboxing.** runit has none of systemd's; services must
   sandbox themselves, with Landlock and seccomp.
@@ -195,8 +240,13 @@ See [docs/updater.md](docs/updater.md).
 - [docs/updater.md](docs/updater.md): updates, the log and CVE reports
 - [docs/testing.md](docs/testing.md): `make check`, and CI
 - [docs/releases.md](docs/releases.md): signed, reproducible releases
+- [docs/cloud.md](docs/cloud.md): the config from a cloud's metadata server
+- [docs/programs.md](docs/programs.md): how werewolf's own programs separate
+  privileges and confine themselves
 - [docs/security.md](docs/security.md): what is locked down, what is not
   yet, and how to check
+- [docs/demo.md](docs/demo.md): the demo, a self-patching page about itself
+- [docs/posture.md](docs/posture.md): `posture`, which measures a machine's security
 - [docs/roadmap.md](docs/roadmap.md): what comes next
 - [design/verified-boot.md](design/verified-boot.md): running only code we
   signed (proposed)

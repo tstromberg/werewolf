@@ -14,6 +14,7 @@
 #
 # Everything it reads comes from two places, in this order:
 #   kernel command line   werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
+#                           (without werewolf.ip, the address is DHCP's)
 #                         werewolf.mac=ADDR (which NIC, when there are several)
 #                         werewolf.data=DEV (the disk /data may format, once)
 #                         werewolf.debug=1 (root shell on the console)
@@ -37,19 +38,29 @@ exec </dev/null
 
 say() { echo "werewolf: $*"; }
 
-# Wolfi's busybox mount has no flag parsing: `nosuid` and friends go to the
-# kernel as data strings and the mount fails. So no flags here; the
-# filesystems get the kernel's defaults. Booted from a slot, stage0 has
-# mounted the first three already, and moved them here.
+# Every mount here is werewolf's own (mount/mount.zig): nosuid and noexec
+# unless told otherwise, nodev but on device filesystems, and unable to lift
+# a restriction a mount already has. busybox's mount cannot set those
+# options, and util-linux's brings SELinux's libraries with it.
+mount() { /usr/lib/werewolf/mount "$@"; }
+
+# Booted from a slot, stage0 has mounted the first three already and moved
+# them here, so they are remounted with the same options either way.
+# Nothing written to memory may run or be setuid: the RAM filesystems are
+# noexec, and only /tmp and /dev/shm are writable by everyone. /proc shows
+# each user only their own processes.
 mountpoint -q /proc || mount -t proc proc /proc
 mountpoint -q /sys || mount -t sysfs sys /sys
 mountpoint -q /dev || mount -t devtmpfs dev /dev
+mount -o remount,nosuid,nodev,noexec,hidepid=invisible /proc
+mount -o remount,nosuid,nodev,noexec /sys
+mount -o remount,nosuid,noexec /dev
 mkdir -p /dev/pts /dev/shm /mnt /var/empty
-mount -t devpts devpts /dev/pts
-mount -t tmpfs tmpfs /dev/shm
-mount -t tmpfs tmpfs /run
-mount -t tmpfs tmpfs /tmp
-chmod 1777 /dev/shm /tmp
+mount -t devpts -o nosuid,noexec devpts /dev/pts
+mount -t tmpfs -o nosuid,nodev,noexec,mode=1777 tmpfs /dev/shm
+mount -t tmpfs -o nosuid,nodev,noexec,mode=0755 tmpfs /run
+mount -t tmpfs -o nosuid,nodev,noexec,mode=1777 tmpfs /tmp
+mount -t tmpfs -o nosuid,nodev,noexec,mode=1777,size=25% tmpfs /var/tmp
 mkdir -p -m 0700 /run/config
 
 # --- kernel command line ------------------------------------------------------
@@ -68,40 +79,57 @@ for arg in $(cat /proc/cmdline); do
 done
 
 # --- modules ------------------------------------------------------------------
-# The Makefile wrote the list it packed, already in load order. Load them,
-# then close the loader for the life of the machine: nothing after this
-# point may add kernel code. Booted from a slot, stage0 has done both, and
-# the root it hands over carries no modules.
-if [ "$(cat /proc/sys/kernel/modules_disabled)" != 1 ]; then
-	moddir=/usr/lib/modules/$(uname -r)
-	for p in $(cat "$moddir/werewolf.modules"); do
-		insmod "$moddir/$p" || say "insmod $p failed"
-	done
-	sysctl -q -w kernel.modules_disabled=1
-fi
-
-# Then close what root could use to change the running kernel or another
-# process. Lockdown at integrity refuses kexec, /dev/mem and unsigned
-# modules; it only ever rises, so init raises it here rather than trusting
-# whatever command line the machine booted with. Yama's ptrace scope 3 stops
-# any process writing into another, root's included, and cannot be lowered;
-# memfds can no longer be executed, though root may lower that one. The
-# rest hide kernel pointers and the log, keep BPF to root, and stop
-# forwarding. See design/verified-boot.md.
+# Lockdown first. At integrity the kernel loads only modules signed by the
+# key it was built with (Alpine's), so a module that is not is refused, not
+# merely logged; it only ever rises, so init raises it here rather than
+# trusting whatever command line the machine booted with. Booted from a
+# slot, stage0 has raised it already.
 mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security
+# stage0's, on a slot, came without them.
+mount -o remount,nosuid,nodev,noexec /sys/kernel/security
 lockdown=/sys/kernel/security/lockdown
 grep -q '\[none\]' "$lockdown" 2>/dev/null && echo integrity >"$lockdown"
 say "lockdown: $(sed -n 's/.*\[\(.*\)\].*/\1/p' "$lockdown" 2>/dev/null || echo unavailable)"
+
+# Then the modules the Makefile listed, in load order, and the loader
+# closes for the life of the machine: nothing after this point may add
+# kernel code. werewolf's loader (modules/modules.zig) loads nothing unless
+# the kernel is checking signatures, and closes the loader whatever happens.
+# Booted from a slot, stage0 has done both, and it says so.
+/usr/lib/werewolf/modules || say "not every module loaded; see above"
+
+# Then close what root could use to change the running kernel or another
+# process. Lockdown, raised above, refuses kexec and /dev/mem. Yama's ptrace
+# scope 3 stops
+# any process writing into another, root's included, and cannot be lowered;
+# memfds can no longer be executed, though root may lower that one. The
+# rest hide kernel pointers and the log, keep BPF to root, stop forwarding,
+# and close what an ordinary user could use against root: user namespaces
+# (a private mount namespace would let it mount its own tmpfs without
+# noexec) and the symlink, hardlink, FIFO and file tricks the kernel only
+# refuses in sticky directories such as /tmp when asked. Root could undo
+# these; no one else can. And io_uring, a large kernel interface nothing
+# here uses, is off; the magic SysRq keys are off (stage0's deadman writes
+# /proc/sysrq-trigger, which they do not govern); and ICMP redirects are
+# neither taken nor sent. See docs/security.md.
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 \
 	kernel.unprivileged_bpf_disabled=1 net.ipv4.ip_forward=0 \
-	kernel.yama.ptrace_scope=3 vm.memfd_noexec=2 || say "some sysctls were not applied"
+	kernel.yama.ptrace_scope=3 vm.memfd_noexec=2 user.max_user_namespaces=0 \
+	fs.protected_symlinks=1 fs.protected_hardlinks=1 fs.protected_fifos=2 fs.protected_regular=2 \
+	kernel.io_uring_disabled=2 kernel.sysrq=0 \
+	net.ipv4.conf.all.accept_redirects=0 net.ipv4.conf.default.accept_redirects=0 \
+	net.ipv4.conf.all.send_redirects=0 net.ipv4.conf.default.send_redirects=0 \
+	net.ipv6.conf.all.accept_redirects=0 net.ipv6.conf.default.accept_redirects=0 ||
+	say "some sysctls were not applied"
 
 # --- network ------------------------------------------------------------------
-# One static address from the command line. There is no DHCP client in Wolfi
-# short of systemd-networkd, and the hypervisors this runs under hand out
-# fixed addresses anyway; see README. net-tools, not iproute2: ifconfig and
-# route need only libc.
-ifconfig lo up
+# One address: the command line's, or else, in forms built on dhcp, the
+# network's DHCP server's. A static address is for machines whose provider
+# gives none by DHCP, or which bite took over and so keep the victim's, and
+# werewolf's net (net/net.zig) applies it. DHCP is werewolf's own client (dhcp/dhcp.zig), which applies the lease itself,
+# logs it, and keeps the resolvers in its own directory; the dhcp service
+# renews it.
+/usr/lib/werewolf/net lo
 nic=$(ls /sys/class/net | grep -v '^lo$' | head -n 1)
 if [ -n "$mac" ]; then
 	nic=
@@ -109,13 +137,17 @@ if [ -n "$mac" ]; then
 		[ "$(cat "$n/address")" = "$mac" ] && nic=${n##*/}
 	done
 fi
-if [ -n "$nic" ] && [ -n "$ip" ]; then
-	ifconfig "$nic" "$ip" up
-	[ -n "$gw" ] && route add default gw "$gw"
+if [ -z "$nic" ]; then
+	say "no network: no NIC${mac:+ with address $mac}"
+elif [ -n "$ip" ]; then
+	/usr/lib/werewolf/net "$nic" "$ip" ${gw:+"$gw"} || say "network: $nic $ip${gw:+ via $gw} refused"
 	[ -n "$dns" ] && echo "nameserver $dns" >/etc/resolv.conf
 	say "$nic $ip via ${gw:-none} dns ${dns:-none}"
+elif [ -x /usr/lib/werewolf/dhcp ]; then
+	ln -sf /run/werewolf/dhcp/resolv.conf /etc/resolv.conf
+	/usr/lib/werewolf/dhcp up "$nic" || say "no network: no DHCP lease for $nic; the dhcp service keeps asking"
 else
-	say "no network: nic=${nic:-none} ip=${ip:-unset}"
+	say "no network: no werewolf.ip, and this form has no DHCP client"
 fi
 
 # --- victim -------------------------------------------------------------------
@@ -139,7 +171,10 @@ fi
 
 # --- config -------------------------------------------------------------------
 # Probe every block device once. A ustar magic at byte 257 is our config tar;
-# an ISO 9660 volume with user-data is NoCloud.
+# an ISO 9660 volume with user-data is NoCloud. Where none of those is found
+# and the form has werewolf's cloud program, the config comes from the
+# cloud's metadata server instead, checked and rewritten by the program
+# before it is extracted here (docs/cloud.md).
 keys() { # keys USER HOME < authorized_keys
 	mkdir -p -m 0700 "$2/.ssh"
 	cat >"$2/.ssh/authorized_keys"
@@ -149,6 +184,7 @@ keys() { # keys USER HOME < authorized_keys
 if [ -n "$victimdir" ] && [ -f "$victimdir/config.tar" ]; then
 	say "config tar in $victimdir"
 	tar -xf "$victimdir/config.tar" -C /run/config
+	found=1
 fi
 for sys in /sys/class/block/*; do
 	dev=/dev/${sys##*/}
@@ -156,10 +192,11 @@ for sys in /sys/class/block/*; do
 	if [ "$(dd if="$dev" bs=1 skip=257 count=5 2>/dev/null)" = ustar ]; then
 		say "config tar on $dev"
 		tar -xf "$dev" -C /run/config
-		confdev=$dev
+		confdev=$dev found=1
 	elif mount -t iso9660 -o ro "$dev" /mnt 2>/dev/null; then
 		if [ -f /mnt/user-data ]; then
 			say "NoCloud user-data on $dev"
+			found=1
 			# First user in the cloud-config (values may be quoted), and every
 			# ssh key in the file.
 			user=$(awk '/^ *- *name:/ {print $NF; exit}' /mnt/user-data | tr -d '"')
@@ -180,31 +217,47 @@ for sys in /sys/class/block/*; do
 		umount /mnt
 	fi
 done
+if [ -z "${found:-}" ] && [ -x /usr/lib/werewolf/cloud ] &&
+	/usr/lib/werewolf/cloud && [ -f /run/werewolf/cloud/config.tar ]; then
+	say "config tar from the cloud's metadata server"
+	tar -xf /run/werewolf/cloud/config.tar -C /run/config
+fi
 
 [ -f /run/config/hostname ] && cat /run/config/hostname >/etc/hostname
 hostname -F /etc/hostname 2>/dev/null || hostname werewolf
 [ -f /run/config/authorized_keys ] && keys root /root </run/config/authorized_keys
 
 # --- data ---------------------------------------------------------------------
-# /data is the machine's one writable home, and everything on it is cache:
-# losing it costs a cold start, never a broken machine. That is what lets
-# every failure below end in "format it again".
+# /data is the machine's one writable home, and what is on it may be the
+# only copy: a database, someone's files. So init formats a disk once, when
+# werewolf.data names it and blkid finds nothing on it at all, and never
+# again. A disk that carries our label but is not what the form wants (plain
+# where it wants LUKS, no key or a key that does not open it, damage that
+# e2fsck -p will not repair) is left as it is, for a person to look at.
+#
+# /data is then unavailable: an empty, read-only tmpfs, so a service that
+# needs it fails where it can be seen, rather than writing to RAM what it
+# believes is kept. /run/werewolf/nodata says why, and stops a slot on
+# probation from committing, so an update that broke /data falls back.
 #
 # The form's packages decide what /data is, so init never asks which form
 # it is in:
-#   no mke2fs        tmpfs, capped at a quarter of RAM
+#   no mke2fs        tmpfs, capped at a quarter of RAM: the form keeps nothing
 #   mke2fs           ext4 on the device labelled werewolf-data
 #   + cryptsetup     the same inside LUKS2, keyed by data.key from the config
 #
 # The disk is found by its label, so its device name may differ from boot to
-# boot. A device is formatted for the first time only when werewolf.data
-# names it and blkid finds nothing on it at all. One that carries our label
-# but is not what the form wants (plain where it wants LUKS, a key that does
-# not open it, a filesystem e2fsck cannot repair) is ours, and is formatted
-# again.
+# boot.
 label=werewolf-data
-mkdir -p /data
+mkdir -p /data /run/werewolf
 
+nodata() { # nodata WHY
+	say "$*; /data is unavailable"
+	echo "$*" >/run/werewolf/nodata
+	mount -t tmpfs -o ro,nosuid,nodev,noexec,mode=0755 tmpfs /data
+}
+
+# data_home: mount the form's disk on /data, or set why and fail.
 data_home() {
 	want=ext4
 	command -v cryptsetup >/dev/null && want=crypto_LUKS
@@ -214,16 +267,16 @@ data_home() {
 	if [ -n "$src" ]; then
 		have=$(blkid -c /dev/null -p -o value -s TYPE "$src")
 		if [ "$have" != "$want" ]; then
-			say "$src is $have, this form wants $want; formatting"
-			fresh=1
+			why="$src is $have, this form wants $want"
+			return 1
 		fi
 	else
-		[ -n "$data" ] || { say "no $label disk, and werewolf.data names none"; return 1; }
+		[ -n "$data" ] || { why="no $label disk, and werewolf.data names none"; return 1; }
 		src=/dev/${data#/dev/}
-		[ -b "$src" ] || { say "werewolf.data: no device $src"; return 1; }
-		[ "$src" != "$confdev" ] || { say "refusing $src: it holds the config"; return 1; }
+		[ -b "$src" ] || { why="werewolf.data: no device $src"; return 1; }
+		[ "$src" != "$confdev" ] || { why="werewolf.data: $src holds the config"; return 1; }
 		if blkid -c /dev/null -p "$src" >/dev/null 2>&1; then
-			say "refusing to format $src: it is not blank"
+			why="werewolf.data: $src is not blank"
 			return 1
 		fi
 		fresh=1
@@ -231,48 +284,45 @@ data_home() {
 
 	fs=$src
 	if [ "$want" = crypto_LUKS ]; then
+		key=/run/config/data.key
+		[ -s "$key" ] || { why="no data.key in the config"; return 1; }
 		# No udev here: libdevmapper must make /dev/mapper nodes itself.
 		export DM_DISABLE_UDEV=1
 		mkdir -p /run/cryptsetup
-		key=/run/config/data.key
-		if [ ! -s "$key" ]; then
-			key=/run/data.key
-			head -c 64 /dev/urandom >"$key"
-			say "no data.key: /data is encrypted with a throwaway key and will not survive a reboot"
-		fi
 		# The key is random, so a slow KDF adds nothing; argon2id's default
 		# would spend up to 1 GiB and two seconds on every boot.
 		open="cryptsetup open --key-file $key --perf-no_read_workqueue --perf-no_write_workqueue $src data"
-		if [ -z "$fresh" ] && ! $open 2>/dev/null; then
-			say "the key does not open $src; formatting"
-			fresh=1
-		fi
 		if [ -n "$fresh" ]; then
-			cryptsetup luksFormat -q --type luks2 --label "$label" \
-				--pbkdf pbkdf2 --pbkdf-force-iterations 1000 --key-file "$key" "$src" &&
-				$open || return 1
+			say "making LUKS2 on $src"
+			if ! cryptsetup luksFormat -q --type luks2 --label "$label" \
+				--pbkdf pbkdf2 --pbkdf-force-iterations 1000 --key-file "$key" "$src" || ! $open; then
+				why="cannot make LUKS2 on $src"
+				return 1
+			fi
+		elif ! $open 2>/dev/null; then
+			why="data.key does not open $src"
+			return 1
 		fi
 		fs=/dev/mapper/data
 	fi
 
 	# Inside LUKS the filesystem goes unlabelled: the label belongs to the
 	# disk, and two devices answering to it would make the search ambiguous.
-	# -F: by now the device is blank or ours, so an old signature on it is
-	# no reason to stop.
-	mkfs="mke2fs -q -F -t ext4 -m 0"
-	[ "$want" = ext4 ] && mkfs="$mkfs -L $label"
+	# -F: the device is blank as far as blkid can tell, or a LUKS volume made
+	# a moment ago, so a stale signature deeper in is no reason to stop.
 	if [ -n "$fresh" ]; then
+		mkfs="mke2fs -q -F -t ext4 -m 0"
+		[ "$want" = ext4 ] && mkfs="$mkfs -L $label"
 		say "formatting $fs"
-		$mkfs "$fs" || return 1
+		$mkfs "$fs" || { why="mke2fs failed on $fs"; return 1; }
 	else
+		# -p repairs only what is safe without a person. Anything more is
+		# theirs to decide, with the disk attached where there are tools.
 		e2fsck -p "$fs" >/dev/null 2>&1
 		rc=$?
-		if [ $rc -ge 4 ]; then
-			say "e2fsck cannot repair $fs (exit $rc); formatting"
-			$mkfs "$fs" || return 1
-		fi
+		[ $rc -lt 4 ] || { why="e2fsck -p will not repair $fs (exit $rc)"; return 1; }
 	fi
-	mount -t ext4 -o noatime,nosuid,nodev,noexec "$fs" /data
+	mount -t ext4 -o noatime,nosuid,nodev,noexec "$fs" /data || { why="cannot mount $fs"; return 1; }
 }
 
 # On a bitten machine /data is a directory on the victim's filesystem, which the
@@ -284,38 +334,42 @@ if [ -n "$victimdir" ]; then
 		mount -o remount,bind,noatime,nosuid,nodev,noexec /data; then
 		say "/data is $victimdir/data"
 	else
-		say "cannot bind $victimdir/data; /data stays in RAM"
-		mount -t tmpfs -o size=25%,mode=0755 tmpfs /data
+		nodata "cannot bind $victimdir/data"
 	fi
 	# From here /victim is for looking at. Read-only is a property of the
 	# mount, not the filesystem, so /data, bound from it, stays writable.
 	# What must write there (commit; bite --cleanup) mounts it again, apart.
 	mount -o remount,bind,ro,nosuid,nodev,noexec /victim && say "/victim is read-only"
-elif command -v mke2fs >/dev/null && data_home; then
+elif ! command -v mke2fs >/dev/null; then
+	mount -t tmpfs -o size=25%,nosuid,nodev,noexec,mode=0755 tmpfs /data
+	say "/data is RAM, capped at 25%"
+elif data_home; then
 	chmod 0755 /data
 	say "/data is $want on $src"
 else
-	mount -t tmpfs -o size=25%,mode=0755 tmpfs /data
-	say "/data is RAM, capped at 25%"
+	nodata "$why"
 fi
 # /data holds two trees: /data/svc/<service>, which each service's run
 # script makes for itself, and /data/home/<user> for people. The only person
 # init creates is the NoCloud user (Lima's).
-if [ -n "${user:-}" ]; then
+if [ -n "${user:-}" ] && [ ! -e /run/werewolf/nodata ]; then
 	mkdir -p "/data/home/$user"
 	chown "$user:$user" "/data/home/$user"
 	chmod 0700 "/data/home/$user"
 fi
 # The key now lives in the kernel's dm table. No service needs it, and the
 # config directory is the one place a service would look.
-rm -f /run/config/data.key /run/data.key
+rm -f /run/config/data.key
 
 # --- services -----------------------------------------------------------------
 # init knows only minimal's own services. Each form's services prepare
 # themselves in their run scripts, so init never has to learn about them.
 [ "$debug" = 1 ] || touch /etc/sv/console/down
-mkdir -p /run/werewolf
 [ -n "$grubenv" ] && echo "$grubenv" >/run/werewolf/grubenv
 
+# fence sets the network policy the build compiled from the forms, binding
+# only declared TCP ports and the metadata server only for those named,
+# then becomes runit, so every process inherits it. If it cannot, PID 1
+# ends, and the machine falls back to the slot that last worked.
 say "up in $(cut -d' ' -f1 /proc/uptime)s, handing over to runit"
-exec runit
+exec /usr/lib/werewolf/fence /usr/bin/runit

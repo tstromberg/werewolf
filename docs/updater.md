@@ -82,10 +82,13 @@ it was written. Alpine's own patches on top of upstream are not counted.
     reports/TIME-BUILD.json
     attempt             "SLOT BUILD" of the update awaiting its outcome
     bad                 builds that rolled back, one per line
+    cache/              apk's downloads, one directory per root built
+                        (root, kernel, stage0), holding what the last
+                        check installed and nothing older
     work/               the build, deleted when done
 ```
 
-The updater reads `/proc/cmdline`, `/etc/hostname`, `/etc/apk/` and the
+The updater reads `/proc/cmdline`, `/etc/apk/` and the
 build record in `/usr/share/werewolf/`: `form`, `release`, `kernel`,
 `alpine`, `overlay`, `modules`, `stage0.world`, `stage0.init`.
 
@@ -155,7 +158,7 @@ make FORM=autoupdate slot        # builds the updater for ARCH, and the slot
 
 The Makefile builds it with `zig build-exe -O ReleaseSafe -fstrip -target
 ARCH-linux-musl`: 1.1 MB on arm64, 1.3 MB on x86_64, static. It refuses any
-Zig but 0.16.0, since Zig changes between releases.
+Zig but 0.17.0, since Zig changes between releases.
 
 The unit tests cover the pure parts: the kernel command line, package
 databases and their diffs, stream base names, kernel versions, the kernel

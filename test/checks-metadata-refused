@@ -1,0 +1,9 @@
+# The cloud form where its config must not be taken (make check; see
+# test/checks for the format): a hostile tar on a known cloud, with a
+# symlink and a ../ entry beside a hostname, or a good one on no cloud at
+# all. Nothing of it may reach the machine; test/cloud-boot judges the
+# rest from the console and the metadata server's log.
+
+ok  hostname-kept    [ "$(hostname)" = werewolf ]
+ok  nothing-taken    [ ! -e /run/werewolf/cloud/config.tar ] && [ ! -e /run/config/hostname ] && [ ! -e /root/.ssh/authorized_keys ]
+ok  nothing-escaped  [ ! -e /run/werewolf/escaped ] && [ ! -e /run/escaped ] && [ ! -L /run/config/authorized_keys ]

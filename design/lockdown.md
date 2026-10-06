@@ -350,7 +350,12 @@ Each phase ships on its own.
 1. **Runtime settings**, in init's shell: lockdown to `confidentiality`
    unless `/etc/werewolf/allow/ebpf` exists, the sysctls by allowance,
    `ulimit -c 0`, `hidepid`, and the command-line arguments in bite, the
-   Makefile and Lima. No new code.
+   Makefile and Lima. No new code. Done so far, with checks in
+   test/checks: `user.max_user_namespaces=0`, the `fs.protected_*` sysctls,
+   `hidepid=invisible`, and `nosuid,nodev,noexec` on `/tmp`, `/run` and
+   `/dev/shm`, with `/run` root's alone, all through werewolf's one-way
+   `mount` (mount/mount.zig), which also keeps a mount from being loosened
+   by werewolf's own scripts. The seal is what will stop root.
 2. **The seal**: `jail -seal` in front of runit, with the PID 1 filter and
    bounding set, less the allowances. Closes eBPF, perf, io_uring and the
    rest for good on every form that did not ask for them.
@@ -396,9 +401,14 @@ Each phase ships on its own.
   init or out of the machine (verified-boot.md phase 3), root keeps
   `CAP_SYS_ADMIN`, and with it can remount `/proc/sys` and undo the
   reversible sysctls. Forms without either could drop it now.
-- **DHCP** (roadmap item 2) needs `CAP_NET_RAW`, which `packet` gives
-  back, and `CAP_NET_ADMIN` to apply each renewal, which only `ebpf` does.
-  Either `packet` keeps both, or DHCP gets its own allowance.
+- **DHCP** (`dhcp/dhcp.zig`, used when the command line names no
+  address) separates its own privileges, as OpenBSD's dhclient does. It
+  opens and filters its packet socket as root, then forks. The engine,
+  which alone reads the network, runs as `_dhcp`, chrooted to `/var/empty`,
+  with no capabilities and a seccomp allowlist. The parent keeps only
+  `CAP_NET_ADMIN`, to apply leases, under seccomp and Landlock. So the
+  dhcp service needs `CAP_NET_RAW` and `CAP_NET_ADMIN` only when it starts,
+  and the seal can leave it those two at start; `packet` need not widen.
 - **fentry and fexit.** Alpine's kernel lacks `CONFIG_FUNCTION_TRACER`, so
   BPF programs that attach through trampolines fail; kprobes, tracepoints,
   uprobes, XDP, tc and cgroup programs work. Confirm which agents fall back

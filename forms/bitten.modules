@@ -5,3 +5,7 @@
 # xxhash_generic and blake2b_generic. erofs, overlay and loop are for
 # stage0, which mounts the slot's root.erofs from that filesystem.
 ext4 xfs btrfs crc32c-cryptoapi erofs overlay loop
+# FAT, for werewolf's own disk (design/native-boot.md): the updater and
+# commit write the EFI partition. 437 and utf8 are FAT's default codepage
+# and iocharset in Alpine's kernel.
+vfat nls_cp437 nls_utf8

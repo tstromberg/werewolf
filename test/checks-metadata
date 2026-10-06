@@ -1,0 +1,9 @@
+# The cloud form on a known cloud, whose metadata server holds a good config
+# tar (make check; see test/checks for the format). init must have taken it:
+# the hostname, root's key, and the tar as cloud/cloud.zig rewrote it,
+# every entry root's and 0600.
+
+ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
+ok  hostname         [ "$(hostname)" = cloud-check ]
+ok  root-key         grep -q 'werewolf-check-key' /root/.ssh/authorized_keys
+ok  rewritten        [ -z "$(tar -tvf /run/werewolf/cloud/config.tar | awk '$1 !~ /^-rw-------$/ || $2 !~ /^root\/root$|^0\/0$/')" ]

@@ -1,0 +1,4 @@
+# prod: the production base. It takes its address by DHCP and keeps itself
+# current (autoupdate, on bitten, on dhcp), and listens on nothing: forms
+# with a purpose build on it. CI publishes it; see docs/releases.md.
+include: autoupdate.yaml

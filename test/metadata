@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""metadata PAYLOAD PORT_FILE LOG_FILE
+
+A stand-in for GCP's, AWS's and Hetzner Cloud's metadata servers, for
+make check's cloud boots (test/cloud-boot). It serves user data only as
+each cloud does: GCP's with Metadata-Flavor: Google, AWS's only through an
+IMDSv2 session token, Hetzner's plainly. Anything else is refused.
+
+PAYLOAD is good (a config tar with a hostname and root's key) or hostile
+(a symlink and a ../ entry beside them), base64-encoded as a cloud holds
+it. It listens on 127.0.0.1, writes its port to PORT_FILE, and logs each
+request, method, path and the headers that matter, to LOG_FILE.
+"""
+
+import base64
+import http.server
+import io
+import sys
+import tarfile
+
+TOKEN = "werewolf-check-token"
+
+
+def config_tar(hostile):
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w", format=tarfile.USTAR_FORMAT) as tar:
+        def add(name, data):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            info.mode = 0o644
+            tar.addfile(info, io.BytesIO(data))
+        add("hostname", b"cloud-check\n")
+        if hostile:
+            link = tarfile.TarInfo("authorized_keys")
+            link.type = tarfile.SYMTYPE
+            link.linkname = "/etc/shadow"
+            tar.addfile(link)
+            add("../escaped", b"out\n")
+        else:
+            add("authorized_keys", b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl werewolf-check-key\n")
+    return base64.b64encode(out.getvalue())
+
+
+def main():
+    payload, port_file, log_file = sys.argv[1:4]
+    body = config_tar(payload == "hostile")
+    log = open(log_file, "a", buffering=1)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def record(self):
+            seen = {h: self.headers.get(h) for h in ("Metadata-Flavor", "X-aws-ec2-metadata-token", "X-aws-ec2-metadata-token-ttl-seconds") if self.headers.get(h)}
+            log.write(f"{self.command} {self.path} {seen}\n")
+
+        def answer(self, code, data=b""):
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            self.record()
+            if self.path == "/computeMetadata/v1/instance/attributes/user-data":
+                return self.answer(200, body) if self.headers.get("Metadata-Flavor") == "Google" else self.answer(403)
+            if self.path == "/latest/user-data":
+                return self.answer(200, body) if self.headers.get("X-aws-ec2-metadata-token") == TOKEN else self.answer(401)
+            if self.path == "/hetzner/v1/userdata":
+                return self.answer(200, body)
+            self.answer(404)
+
+        def do_PUT(self):
+            self.record()
+            if self.path == "/latest/api/token" and self.headers.get("X-aws-ec2-metadata-token-ttl-seconds"):
+                return self.answer(200, TOKEN.encode())
+            self.answer(400)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    with open(port_file, "w") as f:
+        f.write(f"{server.server_address[1]}\n")
+    server.serve_forever()
+
+
+main()

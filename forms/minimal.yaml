@@ -1,5 +1,6 @@
-# minimal: boots, takes an address, reads config, supervises. Listens on
-# nothing. Every other form includes this one, and its folder carries /init.
+# minimal: boots, takes the address the kernel command line gives, reads
+# config, supervises. Listens on nothing. Every other form includes this
+# one, and its folder carries /init.
 contents:
   repositories:
     - https://packages.wolfi.dev/os
@@ -7,9 +8,7 @@ contents:
     - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
   packages:
     - wolfi-baselayout
-    - busybox-full          # sh, mount, tar, dd, od, adduser, getty, sysctl
-    - kmod                  # insmod, for the few virtio/iso modules
-    - net-tools             # ifconfig, route: libc only, where iproute2 pulls ~30 packages
+    - busybox-full          # sh, tar, dd, od, adduser, getty, sysctl
     - runit                 # PID 1 after init: runs services, shuts down cleanly
 
 archs:

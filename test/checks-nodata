@@ -1,0 +1,8 @@
+# crypt booted with a blank disk and no data.key (make check; see
+# test/checks for the format). It must refuse rather than make a key up:
+# /data unavailable, the reason in /run/werewolf/nodata, and /data an empty
+# read-only tmpfs, so nothing written there is lost at the next reboot.
+
+ok  nodata-marked    [ -s /run/werewolf/nodata ]
+ok  data-empty-ro    [ -z "$(ls -A /data)" ] && ! touch /data/.x
+ok  disk-untouched   ! grep -q '^/dev/mapper/data ' /proc/mounts

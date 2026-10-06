@@ -1,0 +1,3 @@
+# Packet sockets, for the DHCP client, which has no address to send from
+# until its lease arrives.
+af_packet

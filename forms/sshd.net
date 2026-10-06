@@ -1,0 +1,2 @@
+# sshd, for operators by key.
+listen tcp/22

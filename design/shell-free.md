@@ -186,8 +186,8 @@ The format is small enough that jail's parser is a page, and fuzzed.
 Every service gets, without asking:
 
 - `/run/svc/NAME` and `/data/svc/NAME`, made, owned by its user and
-  writable: runtime files that end with the boot, and cache that may
-  outlive it.
+  writable: runtime files that end with the boot, and the service's data,
+  which outlives it.
 - `/run/config/NAME`, if the config carried it, owned by its user and
   readable.
 - **The floor**: read the image's `/usr`; read `/etc/passwd`, `/etc/group`,
