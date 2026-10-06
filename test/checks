@@ -53,7 +53,9 @@ ok  fifos            grep -qx 2 /proc/sys/fs/protected_fifos
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
 ok  victim-readonly  awk '$2 == "/victim" && $4 !~ /(^|,)ro(,|$)/ { bad = 1 } END { exit bad }' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
-gap root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
+ok  root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
+ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
+ok  posture-root     /usr/lib/werewolf/posture --json | tr -d '\n' | tr '{' '\n' | grep '"id": *"files-root-readonly"' | grep -q '"result": *"pass"'
 # Last, for the second boot (test/checks-again): a mark on a /data that is
 # kept on a disk.
 ok  data-mark        grep -q ' /data tmpfs ' /proc/mounts || echo kept >/data/.werewolf-check

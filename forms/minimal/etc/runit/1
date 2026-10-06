@@ -1,3 +1,1 @@
-#!/bin/sh
-# Stage 1 is /init, which has already run by the time runit is PID 1.
-exit 0
+/usr/lib/werewolf/stage

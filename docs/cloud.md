@@ -71,10 +71,11 @@ reaches init.
 
 ## Limits
 
-- **Anyone on the machine can read the user data**, root or not, from
-  169.254.169.254. Until nftables refuses that to everyone but root
-  ([roadmap.md](roadmap.md)), a secret in the config (`data.key`, a tunnel
-  token) is open to every process on the machine.
+- **Only `_cloud` can reach the metadata server's port 80.** fence's
+  routing rules refuse everyone else, root included
+  ([design/fence.md](../design/fence.md)), so the user data, and any secret
+  in it, stays out of other processes' reach. Root could delete the rules
+  until the seal takes `CAP_NET_ADMIN` away.
 - **Whoever sets the user data is root on the machine**: it carries root's
   ssh keys. That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are

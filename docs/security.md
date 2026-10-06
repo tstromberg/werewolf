@@ -76,7 +76,7 @@ head: /dev/mem,kmem,port is restricted`.
 
 | | |
 | --- | --- |
-| The root | a RAM root, or on a bitten machine `root.erofs`, read-only, under a tmpfs overlay. Writes vanish at reboot |
+| The root | `root.erofs`, mounted read-only at `/` by stage0 on every form: from the initramfs, or on a bitten machine from its slot. No overlay: what the system writes (accounts, keys, hostname, `resolv.conf`, runit's state) lives in `/run`, through links |
 | Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
 | `/data` | the machine's data. On a disk or a bitten machine, `nosuid,nodev,noexec`; `crypt` puts it in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
 | The victim's filesystem | read-only at `/victim`; the few writers mount it separately |
@@ -131,10 +131,10 @@ cloud-init's user-data, once werewolf has committed.
 
 ## Not yet
 
-- **root can write the running root** (the RAM root, or the overlay) and
-  run what it writes, including a program of its own that remounts
-  anything `exec`, `/data` and `/victim` included; werewolf's own `mount`
-  will not. It can also undo the sysctls marked "yes" above. Mount
+- **root can remount.** The root is read-only, and everywhere writable
+  is `noexec`, but root can write a script to `/run`, run it with the
+  shell, and with busybox's `mount` (not werewolf's own) remount anything
+  writable or `exec`, `/` included. It can also undo the sysctls marked "yes" above. Mount
   options and sysctls bind everyone else; IPE (phase 4 of the design) and
   services that do not run as root are what will bind root.
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace

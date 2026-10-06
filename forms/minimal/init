@@ -1,9 +1,10 @@
 #!/bin/sh
 # werewolf init: PID 1 from the kernel handing over until runit takes it.
 #
-# The whole root filesystem is the initramfs, unpacked by the kernel into RAM,
-# so there is no root device to find and nothing to switch to. This script
-# only has to make the machine reachable: filesystems, the few modules the
+# stage0 has mounted the form's root.erofs read-only at / and handed over:
+# nothing here or after can write the root, so what changes lives in /run,
+# /tmp, /var/tmp and /data. This script only has to make the machine
+# reachable: filesystems, the few modules the
 # hypervisor needs, one address, the operator's keys. Then it locks the
 # module loader and execs runit, which is runit's stage 1 already done:
 # /etc/runit/2 runs the services and /etc/runit/3 shuts down.
@@ -62,6 +63,16 @@ mount -t tmpfs -o nosuid,nodev,noexec,mode=0755 tmpfs /run
 mount -t tmpfs -o nosuid,nodev,noexec,mode=1777 tmpfs /tmp
 mount -t tmpfs -o nosuid,nodev,noexec,mode=1777,size=25% tmpfs /var/tmp
 mkdir -p -m 0700 /run/config
+
+# The root is read-only (stage0 mounted it so). What init and the services
+# change of it lives in /run, where the image's /etc links: the accounts,
+# seeded from the image's own copies, the hostname, the resolvers, root's
+# and users' ssh keys, runit's controls and each service's supervise
+# directory.
+mkdir -p /run/werewolf/keys /run/runit
+cp -p /usr/share/werewolf/etc/passwd /usr/share/werewolf/etc/group /usr/share/werewolf/etc/shadow /run/werewolf/
+chmod 0600 /run/werewolf/shadow
+for s in /etc/sv/*; do mkdir -p "/run/runit/supervise.${s##*/}"; done
 
 # --- kernel command line ------------------------------------------------------
 ip= gw= dns= mac= data= debug= victim= grubenv=
@@ -141,10 +152,10 @@ if [ -z "$nic" ]; then
 	say "no network: no NIC${mac:+ with address $mac}"
 elif [ -n "$ip" ]; then
 	/usr/lib/werewolf/net "$nic" "$ip" ${gw:+"$gw"} || say "network: $nic $ip${gw:+ via $gw} refused"
-	[ -n "$dns" ] && echo "nameserver $dns" >/etc/resolv.conf
+	[ -n "$dns" ] && echo "nameserver $dns" >/run/resolv.conf
 	say "$nic $ip via ${gw:-none} dns ${dns:-none}"
 elif [ -x /usr/lib/werewolf/dhcp ]; then
-	ln -sf /run/werewolf/dhcp/resolv.conf /etc/resolv.conf
+	ln -sf werewolf/dhcp/resolv.conf /run/resolv.conf
 	/usr/lib/werewolf/dhcp up "$nic" || say "no network: no DHCP lease for $nic; the dhcp service keeps asking"
 else
 	say "no network: no werewolf.ip, and this form has no DHCP client"
@@ -175,11 +186,10 @@ fi
 # and the form has werewolf's cloud program, the config comes from the
 # cloud's metadata server instead, checked and rewritten by the program
 # before it is extracted here (docs/cloud.md).
-keys() { # keys USER HOME < authorized_keys
-	mkdir -p -m 0700 "$2/.ssh"
-	cat >"$2/.ssh/authorized_keys"
-	chmod 0600 "$2/.ssh/authorized_keys"
-	chown -R "$1:$1" "$2/.ssh"
+keys() { # keys USER < authorized_keys, where sshd looks (AuthorizedKeysFile)
+	cat >"/run/werewolf/keys/$1"
+	chmod 0600 "/run/werewolf/keys/$1"
+	chown "$1:$1" "/run/werewolf/keys/$1"
 }
 if [ -n "$victimdir" ] && [ -f "$victimdir/config.tar" ]; then
 	say "config tar in $victimdir"
@@ -201,14 +211,21 @@ for sys in /sys/class/block/*; do
 			# ssh key in the file.
 			user=$(awk '/^ *- *name:/ {print $NF; exit}' /mnt/user-data | tr -d '"')
 			uid=$(awk '/^ *uid:/ {print $NF; exit}' /mnt/user-data | tr -d '"')
-			if [ -n "$user" ]; then
-				adduser -D -s /bin/ash ${uid:+-u "$uid"} -h "/home/$user" "$user"
-				# adduser -D leaves "!" in the shadow field, which sshd reads
-				# as a locked account and refuses even a key. "*" is no
-				# password without the lock.
-				sed -i "s|^$user:[^:]*:|$user:*:|" /etc/shadow
+			uid=${uid:-1000}
+			# The name and uid come from outside the machine: plain ones only.
+			if echo "$user" | grep -qx '[a-z_][a-z0-9_-]\{0,31\}' && echo "$uid" | grep -qx '[1-9][0-9]\{3,8\}' &&
+				! grep -q "^$user:" /run/werewolf/passwd; then
+				# Written directly: adduser rewrites /etc, which is
+				# read-only. "*" is no password, without the lock "!" that
+				# sshd reads as refusing even a key. Home is on /data.
+				echo "$user:x:$uid:$uid::/data/home/$user:/bin/ash" >>/run/werewolf/passwd
+				echo "$user:x:$uid:" >>/run/werewolf/group
+				echo "$user:*:0:0:99999:7:::" >>/run/werewolf/shadow
 				grep -o -E '(ssh-(ed25519|rsa)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9-]+@openssh\.com) [A-Za-z0-9+/=]+( [^"]*)?' /mnt/user-data |
-					keys "$user" "/home/$user"
+					keys "$user"
+			elif [ -n "$user" ]; then
+				say "NoCloud user '$user' (uid $uid) refused: not a plain name and uid"
+				user=
 			fi
 			# Lima's readiness probe reads the instance-id back from here; it
 			# is what cloud-init's boot scripts would have written.
@@ -223,9 +240,9 @@ if [ -z "${found:-}" ] && [ -x /usr/lib/werewolf/cloud ] &&
 	tar -xf /run/werewolf/cloud/config.tar -C /run/config
 fi
 
-[ -f /run/config/hostname ] && cat /run/config/hostname >/etc/hostname
-hostname -F /etc/hostname 2>/dev/null || hostname werewolf
-[ -f /run/config/authorized_keys ] && keys root /root </run/config/authorized_keys
+if [ -f /run/config/hostname ]; then cat /run/config/hostname; else echo werewolf; fi >/run/werewolf/hostname
+hostname -F /etc/hostname
+[ -f /run/config/authorized_keys ] && keys root </run/config/authorized_keys
 
 # --- data ---------------------------------------------------------------------
 # /data is the machine's one writable home, and what is on it may be the
@@ -364,7 +381,6 @@ rm -f /run/config/data.key
 # --- services -----------------------------------------------------------------
 # init knows only minimal's own services. Each form's services prepare
 # themselves in their run scripts, so init never has to learn about them.
-[ "$debug" = 1 ] || touch /etc/sv/console/down
 [ -n "$grubenv" ] && echo "$grubenv" >/run/werewolf/grubenv
 
 # fence sets the network policy the build compiled from the forms, binding

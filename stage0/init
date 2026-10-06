@@ -1,12 +1,18 @@
 #!/bin/sh
-# stage0: PID 1 on a machine that boots a slot. It loads the modules, finds
-# the victim's filesystem, mounts this slot's root.erofs read-only under a
-# RAM overlay, and hands over to that root's /init. The image is never
-# written; what the running system writes lives in RAM and is gone at the
-# next boot, as with a RAM root.
+# stage0: PID 1 on every werewolf machine. It loads the modules, mounts the
+# form's root.erofs read-only, directly at /, and hands over to its /init.
+# Nothing can write the root: what the running system writes goes to /run,
+# /tmp, /var/tmp or /data, and the root is the image, byte for byte, on every
+# boot.
+#
+# The image is a slot's on a machine bite took over, found on the victim's
+# filesystem:
 #
 #   werewolf.victim=UUID:DIR   the filesystem, and the directory holding a/ and b/
 #   werewolf.slot=a|b          which slot this boot is
+#
+# or, booted directly (QEMU, Lima), /root.erofs in this initramfs, which the
+# build appends.
 #
 # Getting back to a slot that works is the kernel's and GRUB's job. GRUB
 # boots a new slot once; if anything here fails, stage0 exits, the kernel
@@ -32,7 +38,9 @@ for arg in $(cat /proc/cmdline); do
 	werewolf.slot=*) slot=${arg#*=} ;;
 	esac
 done
-[ -n "$victim" ] && [ -n "$slot" ] || fail "no werewolf.victim or werewolf.slot"
+case "${victim:+victim}${slot:+slot}" in
+victim | slot) fail "werewolf.victim and werewolf.slot come together" ;;
+esac
 
 # Lockdown at integrity before any module: the kernel then loads only those
 # signed by its key, and refuses the rest. It only rises; the root's init
@@ -44,16 +52,18 @@ echo integrity >/sys/kernel/security/lockdown || fail "cannot raise lockdown"
 # that follows finds it closed and loads nothing (modules/modules.zig).
 /usr/lib/werewolf/modules || say "not every module loaded; see above"
 
-dev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}") || fail "no filesystem ${victim%%:*}"
-mkdir -p /victim /lower /upper /root
-mount -o nosuid,nodev,noexec "$dev" /victim || fail "cannot mount $dev"
-img=/victim${victim#*:}/$slot/root.erofs
-mount -t erofs -o ro,loop "$img" /lower || fail "cannot mount $img"
-mount -t tmpfs -o mode=0755 tmpfs /upper
-mkdir -p /upper/root /upper/work
-mount -t overlay overlay -o lowerdir=/lower,upperdir=/upper/root,workdir=/upper/work /root ||
-	fail "cannot mount the overlay"
-say "slot $slot: $img under a RAM overlay"
+mkdir -p /root
+if [ -n "$slot" ]; then
+	dev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}") || fail "no filesystem ${victim%%:*}"
+	mkdir -p /victim
+	mount -o nosuid,nodev,noexec "$dev" /victim || fail "cannot mount $dev"
+	img=/victim${victim#*:}/$slot/root.erofs
+else
+	img=/root.erofs
+fi
+# Read-only, and nothing over it: no overlay to write into.
+mount -t erofs -o ro,nodev,loop "$img" /root || fail "cannot mount $img"
+say "${slot:+slot $slot: }$img, read-only, is the root"
 
 # The deadman outlives this initramfs: sleep starts now, and what follows it
 # is shell builtins, so nothing needs a file from here once it wakes. It
@@ -62,7 +72,7 @@ say "slot $slot: $img under a RAM overlay"
 # back on the slot that last committed. Its own /proc keeps it a way in.
 mkdir -p /deadman
 mount -t proc proc /deadman
-(
+[ -z "$slot" ] || (
 	sleep 600
 	if [ ! -e /deadman/1/root/run/werewolf/committed ]; then
 		echo "stage0: slot $slot did not commit in 10 minutes; rebooting into the last good slot" >/dev/console
@@ -70,9 +80,9 @@ mount -t proc proc /deadman
 	fi
 ) &
 
-for m in dev proc sys victim; do
-	mkdir -p "/root/$m"
-	mount --move "/$m" "/root/$m"
+# The root is read-only, so its mount points are in the image already.
+for m in dev proc sys ${slot:+victim}; do
+	mount --move "/$m" "/root/$m" || fail "cannot move /$m into the root"
 done
 # What switch_root does, with what is here: put the new root over / and
 # start its init inside it.

@@ -1,7 +1,7 @@
 # werewolf's programs
 
 werewolf writes its own programs only where the image needs one and no
-package will do: `dhcp`, `cloud`, `mount`, `update`, `status`. Each is a single
+package will do: `dhcp`, `cloud`, `fence`, `mount`, `update`, `status`, and others. Each is a single
 static Zig binary, built ReleaseSafe from one source file. They are written
 the way OpenBSD writes its daemons: assume the input is hostile and the
 code has a bug, and arrange that the bug can do nothing.
@@ -56,6 +56,7 @@ not catch.
 | `cloud` | once at boot, on a known cloud with no local config | Two processes. The fetcher runs as `_cloud`, chrooted, with no capabilities, under seccomp: an IPv4 TCP socket to the metadata server, and little else. The parent has no capabilities, never touches the network, and writes only beneath `/run/werewolf/cloud` (Landlock); it checks the fetched tar and writes a new one of what passed, so init extracts only what werewolf wrote. |
 | `modules` | once at boot: stage0 on a slot, init on a RAM root | One process: nothing it reads comes from outside the image, and the kernel judges each module's signature. It loads nothing unless lockdown or `module.sig_enforce` is on; opens the list and every module beneath the module directory with symlinks refused; pledges to `CAP_SYS_MODULE` under seccomp (`finit_module`, read, write, close, exit); and closes the loader whatever happens, reading `kernel.modules_disabled` back to say so. |
 | `net` | once at boot, for a static address | One process: its arguments come from the kernel command line and are parsed strictly. It opens its socket, then pledges to `CAP_NET_ADMIN` under seccomp allowing `ioctl` only for its five requests. A gateway outside the subnet gets a host route first. |
+| `fence` | once, init's last step, before runit | One process, by design: it reads only the image's own policy, sets two kinds of routing rules and a Landlock ruleset as root, then execs runit, so every process inherits the Landlock restriction, which nothing can lift. It fails closed: PID 1 ends and the machine rolls back. |
 | `mount` | once per mount: init at boot, `commit`, the updater, `bite --cleanup` | One process: it reads only its arguments, then sets `no_new_privs` and keeps `CAP_SYS_ADMIN` alone under seccomp before asking anything of the kernel. One-way: mounts are built and restricted detached, and remounts are `mount_setattr(2)` with nothing to clear. Allowlisted types, options and targets; paths resolved without symlinks. |
 | `update` | at boot and every 20 hours | Not yet: one process, as root, running apk and mkfs.erofs. It goes away when the updater installs signed releases instead of building ([design/verified-boot.md](../design/verified-boot.md), phase 3); the part that remains should fetch and verify unprivileged. |
 | `status` | the demo form, every minute | Partly: grype runs as the grype user; the page writer runs as root. |

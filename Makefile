@@ -9,6 +9,7 @@
 #   make config     pack config/ into the raw config tar `run` attaches
 #   make forms      list the forms and what each includes
 #   make test       the Zig programs' unit tests
+#   make posture    build posture and run it here, as root: any Linux's protections
 #   make check      boot every form, and a slot, and check its protections
 #   make lima-ci    the CI job, in an Ubuntu VM under Lima
 #   make lock       resolve the form's packages and kernel afresh
@@ -61,9 +62,14 @@ LOADER_BIN := $(PROGRAMS)/modules/usr/lib/werewolf/modules
 NET_BIN := $(PROGRAMS)/net/usr/lib/werewolf/net
 FENCE_BIN := $(PROGRAMS)/fence/usr/lib/werewolf/fence
 POSTURE_BIN := $(PROGRAMS)/posture/usr/lib/werewolf/posture
+# What a shell script used to do, one small program each (design/shell-free.md):
+# runit's stages, reboot and poweroff, GRUB's environment block, and the
+# commit and power-button services. The forms link to them.
+SHELLFREE := stage reboot grubenv commit powerbtn
+SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter autoupdate,$(CHAIN)),$(PROGRAMS)/updater/usr/lib/werewolf/update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status/usr/lib/werewolf/status)
-OVERLAY_DIRS := $(CHAIN_DIRS) $(PROGRAMS)/modules $(PROGRAMS)/net $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/posture $(if $(DHCP_BIN),$(PROGRAMS)/dhcp) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud) $(if $(UPDATER_BIN),$(PROGRAMS)/updater) \
+OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)/ro $(PROGRAMS)/modules $(PROGRAMS)/net $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud) $(if $(UPDATER_BIN),$(PROGRAMS)/updater) \
 	$(if $(STATUS_BIN),$(PROGRAMS)/status)
 
 # A form that includes bitten boots from a slot, which bite installs; the
@@ -126,8 +132,10 @@ MODULES := $(shell for f in $(CHAIN); do [ -f forms/$$f.modules ] && cat forms/$
 MODULE_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .modules,$(CHAIN))))
 
 # The network policy, from forms/<name>.net along the chain: `listen tcp/PORT`
-# for what a form serves, `metadata USER` for who may reach the cloud's
-# metadata server. meta compiles it to numbers, users to uids from the
+# for what a form serves, `connect USER|all tcp/PORT udp/PORT icmp` for what
+# its programs may send, by the user they run as, and `metadata USER` for
+# who may reach the cloud's metadata server. Nothing undeclared is sent or
+# received. meta compiles it to numbers, users to uids from the
 # image's own /etc/passwd, in /usr/share/werewolf/net, which fence enforces
 # (design/fence.md). A line it cannot compile fails the build.
 NET_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .net,$(CHAIN))))
@@ -157,7 +165,7 @@ VMTYPE = qemu
 endif
 LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
-.PHONY: all image slot disk run lima lima-stop demo demo-stop ssh config forms test check check-form check-slot check-slot-boot check-nodata check-nodata-boot check-lease check-lease-boot check-unsigned check-unsigned-boot check-unsigned-slot check-metadata check-metadata-boots lima-ci lock inputs dist dist-form clean help
+.PHONY: all image slot disk run lima lima-stop demo demo-stop ssh config forms test check check-form check-slot check-slot-boot check-nodata check-nodata-boot check-lease check-lease-boot check-unsigned check-unsigned-boot check-unsigned-slot check-metadata check-metadata-boots lima-ci lock inputs dist dist-form posture clean help
 
 all: image
 
@@ -225,21 +233,38 @@ $(OUT)/rootfs.tar: $(LOCK)/$(FORM).lock.json
 	$(call apko_build,forms/$(FORM).yaml,$<)
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(UPDATER_BIN) $(STATUS_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
-# One cpio: the apko rootfs as apko wrote it (ownership intact, never
-# extracted on the host), then werewolf's files, then the modules. Later
-# entries win. Made from tars alone, its inode numbers are all zero.
-$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(OUT)/modules.tar
+# Booted directly, the machine boots as a slot does, through stage0, onto
+# the same root.erofs, read-only: the slot's stage0, then a second cpio
+# holding root.erofs, which the kernel unpacks after it and stage0 mounts.
+$(OUT)/initramfs.zst: $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs
 	@[ "$(firstword $(CHAIN))" = minimal ] || \
 		{ echo "form $(FORM) does not include minimal, which carries /init" >&2; exit 1; }
-	$(TAR) -cf $(OUT)/initramfs.cpio --format newc --uid 0 --gid 0 --numeric-owner \
-		@$(OUT)/rootfs.tar @$(OUT)/overlay.tar @$(OUT)/modules.tar
-	zstd -19 -T0 -q -f -o $@ $(OUT)/initramfs.cpio
-	rm $(OUT)/initramfs.cpio
+	rm -rf $(OUT)/direct && mkdir -p $(OUT)/direct && cp $(OUT)/slot/root.erofs $(OUT)/direct/ && \
+		TZ=UTC touch -t 197001010000 $(OUT)/direct/root.erofs && \
+		(cd $(OUT)/direct && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs) | \
+		zstd -1 -q -c > $(OUT)/direct.cpio.zst && \
+		cat $(OUT)/slot/initramfs.zst $(OUT)/direct.cpio.zst > $@
+	rm -rf $(OUT)/direct $(OUT)/direct.cpio.zst
 	@echo "form $(FORM): $(CHAIN)"
 	@ls -la $(BUILD)/vmlinuz $@
+
+# What a read-only root needs that a form cannot spell out by hand: each
+# service's supervise directory, along the chain, as a link into
+# /run/runit, and apko's accounts, from which init seeds /run/werewolf
+# (the image's /etc/passwd, group and shadow link there). A layer of the
+# overlay, so the updater carries it forward too.
+$(OUT)/ro.stamp: $(OUT)/rootfs.tar $(shell find $(CHAIN_DIRS) -type d -path '*/etc/sv/*') Makefile
+	rm -rf $(OUT)/ro && mkdir -p $(OUT)/ro/usr/share/werewolf/etc && \
+	for f in passwd group shadow; do \
+		$(TAR) -xOf $(OUT)/rootfs.tar etc/$$f > $(OUT)/ro/usr/share/werewolf/etc/$$f || exit 1; \
+	done && \
+	for s in $$(for c in $(CHAIN_DIRS); do [ -d $$c/etc/sv ] && ls $$c/etc/sv; done | LC_ALL=C sort -u); do \
+		mkdir -p $(OUT)/ro/etc/sv/$$s && ln -s /run/runit/supervise.$$s $(OUT)/ro/etc/sv/$$s/supervise || exit 1; \
+	done
+	touch $@
 
 # --- zig ----------------------------------------------------------------------
 define zig_build
@@ -276,8 +301,14 @@ $(PROGRAMS)/status/usr/lib/werewolf/status: status/status.zig
 $(POSTURE_BIN): posture/posture.zig
 	$(zig_build)
 
+define shellfree_rule
+$(PROGRAMS)/$(1)/usr/lib/werewolf/$(1): $(1)/$(1).zig
+	$$(zig_build)
+endef
+$(foreach p,$(SHELLFREE),$(eval $(call shellfree_rule,$(p))))
+
 test:
-	zig fmt --check dhcp cloud modules net fence mount posture updater status disk
+	zig fmt --check dhcp cloud modules net fence mount posture updater status disk $(SHELLFREE)
 	zig test dhcp/dhcp.zig
 	zig test cloud/cloud.zig
 	zig test mount/mount.zig
@@ -288,13 +319,24 @@ test:
 	zig test status/status.zig
 	zig test posture/posture.zig
 	zig test disk/gpt.zig
+	for p in $(SHELLFREE); do zig test $$p/$$p.zig || exit 1; done
+
+# posture (docs/posture.md) assumes nothing of werewolf: run here, as root,
+# it says how this Linux, whatever its distribution, protects itself. Built
+# elsewhere, or for another ARCH, it is a static binary to copy over.
+posture: $(POSTURE_BIN)
+ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-$(ARCH))
+	$(if $(filter 0,$(shell id -u)),,sudo) $(POSTURE_BIN)
+else
+	@echo "$(POSTURE_BIN): copy it to a Linux $(ARCH) machine and run it there, as root"
+endif
 
 # --- meta ---------------------------------------------------------------------
 # What the build knows that the image will need to rebuild itself: the
 # update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar stage0/init $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(UPDATER_BIN) $(STATUS_BIN) Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar stage0/init $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -316,6 +358,11 @@ $(OUT)/meta.stamp: $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/
 			if ($$i !~ /^tcp\/[0-9]+$$/ || substr($$i, 5) + 0 < 1 || substr($$i, 5) + 0 > 65535) bad(); \
 			print "listen tcp " substr($$i, 5) + 0 } next } \
 		$$1 == "metadata" && NF > 1 { for (i = 2; i <= NF; i++) { if (!($$i in uid)) bad(); print "metadata " uid[$$i] } next } \
+		$$1 == "connect" && NF > 2 { who = $$2 == "all" ? "all" : ($$2 in uid ? uid[$$2] : bad()); \
+			for (i = 3; i <= NF; i++) { \
+				if ($$i == "icmp") { print "connect " who " icmp"; continue } \
+				if ($$i !~ /^(tcp|udp)\/[0-9]+$$/ || substr($$i, 5) + 0 < 1 || substr($$i, 5) + 0 > 65535) bad(); \
+				print "connect " who " " substr($$i, 1, 3) " " substr($$i, 5) + 0 } next } \
 		{ bad() } \
 		function bad() { printf "%s:%d: cannot compile: %s\n", FILENAME, FNR, $$0 > "/dev/stderr"; exit 1 }' \
 		$(OUT)/passwd $(NET_LISTS) > $(OUT)/net && \
@@ -379,16 +426,21 @@ $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $
 	zstd -19 -T0 -q -f -o $@ $(OUT)/stage0.cpio
 	rm $(OUT)/stage0.cpio
 
-# lz4hc: the root is read on demand, so decompression speed matters more
-# than the last few percent of size. -b 4096 because mkfs.erofs otherwise
-# takes the builder's page size, 16 KiB on Apple silicon, which a 4 KiB-page
-# kernel will not mount. -T0 dates every file and the image 1970, and the
-# UUID is fixed (stage0 finds the image by path), so a rebuild matches.
+# LZMA in 1 MiB clusters, with small files packed together and duplicates
+# kept once: the densest erofs makes, as small as the root as a zstd -19
+# tar, since direct boot holds it in RAM. Reads cost more than lz4hc's, as
+# one page may mean decompressing a cluster; werewolf reads its root mostly
+# at startup, and then from the page cache. -b 4096 because mkfs.erofs
+# otherwise takes the builder's page size, 16 KiB on Apple silicon, which a
+# 4 KiB-page kernel will not mount. -T0 dates every file and the image
+# 1970, and the UUID is fixed (stage0 finds the image by path), so a rebuild
+# matches.
+EROFS_OPTS = -b 4096 -zlzma,level=109 -C1048576 -Eall-fragments,dedupe
 $(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar
 	mkdir -p $(dir $@)
 	$(TAR) -cf $(OUT)/root.tar --uid 0 --gid 0 --numeric-owner @$(OUT)/rootfs.tar @$(OUT)/overlay.tar
 	rm -f $@
-	mkfs.erofs -b 4096 -zlz4hc -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f $@ $(OUT)/root.tar >/dev/null
+	mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f $@ $(OUT)/root.tar >/dev/null
 	rm $(OUT)/root.tar
 
 $(OUT)/slot/vmlinuz: $(BUILD)/vmlinuz
@@ -650,7 +702,7 @@ clean:
 	rm -rf build
 
 help:
-	@sed -n '2,19p' Makefile | cut -c3-
+	@sed -n '2,20p' Makefile | cut -c3-
 
 # BEGIN: lint-install .
 # http://github.com/codeGROOVE-dev/lint-install

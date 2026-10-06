@@ -76,9 +76,9 @@ A bitten machine boots a *slot*: the rootfs kept on disk, read-only.
 | `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: busybox, blkid, mount, werewolf's module loader, the form's modules |
 | `root.erofs` | `/var/lib/werewolf/<slot>/` | the rootfs |
 
-stage0 mounts `root.erofs` read-only under a tmpfs overlay. Writes go to RAM
-and vanish at reboot. Unlike a RAM root, pages load on demand and can be
-reclaimed: 79 MB in use on a 4 GB VM.
+stage0 mounts `root.erofs` read-only, directly at `/`, as on every form; a
+direct boot carries the same image in its initramfs. Pages load on demand
+and can be reclaimed.
 
 **Two slots, one try each.** The committed slot is GRUB's default. A new
 slot gets one boot (`next_entry`) and stays only if `commit` finds it

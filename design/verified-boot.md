@@ -16,9 +16,9 @@ its dm-verity cannot check a signed root hash. So:
 
 - Any user can write a binary to `/tmp`, `/run`, `/dev/shm` or a memfd and
   run it.
-- root can write anywhere in the root (a RAM root, or the tmpfs overlay over
-  `root.erofs`) and run it, write into running processes, and `kexec` a
-  kernel of its choosing.
+- root can remount the root writable, or anything `exec`, and run what it
+  writes, write into running processes, and `kexec` a kernel of its
+  choosing.
 - On a bitten machine, root can rewrite the kernel, stage0, the root image
   or GRUB's config, and keep them across reboots.
 - The updater builds slots on the machine. A key the machine can use, root
@@ -292,7 +292,8 @@ Each phase ships on its own.
 2. **A read-only root**, on Alpine's kernel. stage0 boots every form; direct
    boot carries the root image in the initramfs; no overlay; the root's
    writes moved to `/run`. Stops anyone changing the running root. root can
-   still remount.
+   still remount. Done: `make check` proves the root refuses writes and
+   unlinks, and that `posture` reports it.
 3. **Signed releases**: CI builds reproducibly, boot-tests and signs (done,
    [docs/releases.md](../docs/releases.md)); it adds the hash tree, and the
    updater installs releases (under way). Until

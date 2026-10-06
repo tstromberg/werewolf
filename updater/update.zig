@@ -38,7 +38,11 @@ const max_read = 256 << 20;
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
-    const mode = if (args.len == 2) args[1] else "";
+    // runsv starts /etc/sv/autoupdate/run, a link to this program, with no
+    // arguments: that is the daemon.
+    const as_service = args.len == 1 and std.mem.eql(u8, std.fs.path.basename(args[0]), "run");
+    const mode = if (args.len == 2) args[1] else if (as_service) "daemon" else "";
+    if (std.mem.eql(u8, mode, "daemon")) daemon(init.io);
 
     var u: Update = .{ .io = init.io, .gpa = gpa };
     u.setup() catch |err| fatal(&u, err);
@@ -47,14 +51,88 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, mode, "outcome")) {
         u.outcome() catch |err| fatal(&u, err);
     } else {
-        std.debug.print("usage: update check|outcome\n", .{});
+        std.debug.print("usage: update check|outcome|daemon\n", .{});
         std.process.exit(2);
     }
 }
 
 fn fatal(u: *Update, err: anyerror) noreturn {
+    failed(u, err);
+    std.process.exit(1);
+}
+
+/// An error, logged, and the work directory cleared.
+fn failed(u: *Update, err: anyerror) void {
     u.record(.{ .event = "error", .step = u.step, .@"error" = @errorName(err), .detail = u.detail }) catch {};
     Dir.cwd().deleteTree(u.io, work_dir) catch {};
+}
+
+/// The autoupdate service. Once this slot has committed: outcome, then a
+/// check at once and every 20 hours after, or as often as the form's
+/// /etc/werewolf/update-every says, in seconds (demo's says 3600). A check
+/// that fails is logged and tried again next time. Each pass has an arena
+/// of its own, freed when it ends, so months of checks use what one does.
+/// Only a machine booted from a slot can do any of this; elsewhere the
+/// service parks itself.
+fn daemon(io: Io) noreturn {
+    switch (pass(io, .setup)) {
+        .ok => {},
+        .not_a_slot => park(io, "not booted from a slot, staying down"),
+        .failed => {},
+    }
+    while (true) {
+        Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch {
+            io.sleep(.fromSeconds(10), .awake) catch {};
+            continue;
+        };
+        break;
+    }
+    const every = updateEvery(io);
+    _ = pass(io, .outcome);
+    while (true) {
+        _ = pass(io, .check);
+        io.sleep(.fromSeconds(every), .awake) catch {};
+    }
+}
+
+const Step = enum { setup, outcome, check };
+const PassResult = enum { ok, not_a_slot, failed };
+
+fn pass(io: Io, step: Step) PassResult {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    var u: Update = .{ .io = io, .gpa = arena.allocator() };
+    u.setup() catch |err| {
+        if (err == error.NotBootedFromASlot) return .not_a_slot;
+        failed(&u, err);
+        return .failed;
+    };
+    (switch (step) {
+        .setup => {},
+        .outcome => u.outcome(),
+        .check => u.check(),
+    }) catch |err| {
+        failed(&u, err);
+        return .failed;
+    };
+    return .ok;
+}
+
+/// Seconds between checks: the form's /etc/werewolf/update-every, or 20
+/// hours.
+fn updateEvery(io: Io) i64 {
+    var buf: [32]u8 = undefined;
+    const n = Dir.cwd().readFile(io, "/etc/werewolf/update-every", &buf) catch return 72000;
+    return std.fmt.parseInt(i64, std.mem.trim(u8, n, " \n"), 10) catch 72000;
+}
+
+/// Down, as a service with nothing to do: runsv will not restart it.
+fn park(io: Io, why: []const u8) noreturn {
+    Io.File.stdout().writeStreamingAll(io, "autoupdate: ") catch {};
+    Io.File.stdout().writeStreamingAll(io, why) catch {};
+    Io.File.stdout().writeStreamingAll(io, "\n") catch {};
+    const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
+    std.debug.print("autoupdate: sv down: {s}\n", .{@errorName(err)});
     std.process.exit(1);
 }
 
@@ -270,12 +348,13 @@ const Update = struct {
         for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try u.copyInto(root, p);
         for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try u.copyInto(root, p);
         for (try u.listDir("/etc/apk/keys")) |name| try u.copyInto(root, try std.fmt.allocPrint(u.gpa, "etc/apk/keys/{s}", .{name}));
-        for (try u.listDir(meta_dir)) |name| try u.copyInto(root, try std.fmt.allocPrint(u.gpa, "usr/share/werewolf/{s}", .{name}));
+        try u.copyTree(root, "usr/share/werewolf");
         const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
         try u.write(root ++ meta_dir ++ "/kernel", try std.fmt.allocPrint(u.gpa, "{s}\n", .{new_kernel}));
         try u.write(root ++ meta_dir ++ "/release", try std.fmt.allocPrint(u.gpa, "{s} {s} {s} updated-on-{s}\n", .{ form, try u.now(), new_kernel, u.host }));
         try u.stripSetid(root);
-        try u.run(&.{ "mkfs.erofs", "-b", "4096", "-zlz4hc", work_dir ++ "/slot/root.erofs", root });
+        // As the build makes it (Makefile, EROFS_OPTS).
+        try u.run(&.{ "mkfs.erofs", "-b", "4096", "-zlzma,level=109", "-C1048576", "-Eall-fragments,dedupe", work_dir ++ "/slot/root.erofs", root });
 
         // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
         // Image inside it, as the build does (see Makefile).
@@ -468,6 +547,19 @@ const Update = struct {
     }
 
     /// Copy /path to root/path, with its permissions.
+    /// path, a directory, and everything under it, from this root into
+    /// root: the build record, whose etc/ holds the image's accounts.
+    fn copyTree(u: *Update, root: []const u8, path: []const u8) !void {
+        var d = try Dir.cwd().openDir(u.io, try std.fmt.allocPrint(u.gpa, "/{s}", .{path}), .{ .iterate = true });
+        defer d.close(u.io);
+        var w = try d.walk(u.gpa);
+        defer w.deinit();
+        while (try w.next(u.io)) |e| {
+            if (e.kind == .directory) continue;
+            try u.copyInto(root, try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ path, e.path }));
+        }
+    }
+
     /// path, from this root into root. A symlink stays a symlink: a form's
     /// `run` that links to a binary must not become a copy of the old one.
     fn copyInto(u: *Update, root: []const u8, path: []const u8) !void {

@@ -1,3 +1,1 @@
-#!/bin/sh
-# runit's stage 3 shuts down cleanly; this asks runit (PID 1) for it.
-exec runit-init 0
+/usr/lib/werewolf/reboot

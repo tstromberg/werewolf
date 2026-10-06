@@ -64,7 +64,7 @@ chrooted, with no capabilities, under seccomp, and a parent keeping
 `CAP_NET_ADMIN` alone.
 
 The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
-by filesystem UUID, the overlay, `/victim` read-only, and the `commit`
+by filesystem UUID, `/victim` read-only, and the `commit`
 service making the slot GRUB's default once it has stayed healthy for a
 minute. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
 leaves: the root image in slot a and GRUB's environment block. The slot
@@ -74,7 +74,7 @@ committed.
 ```
 ok     sshd               lockdown
 ok     sshd               symlinks
-gap    sshd               root-readonly
+ok     sshd               root-readonly
 pass   sshd               all checks
 pass   sshd-again         all checks
 ```
@@ -98,7 +98,7 @@ run as root in a subshell, exiting 0 when the property holds.
 
 ```
 ok  ptrace-off       grep -qx 3 /proc/sys/kernel/yama/ptrace_scope && ! sysctl -w kernel.yama.ptrace_scope=0
-gap root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
+ok  root-readonly    ! touch /usr/bin/.x; r=$?; rm -f /usr/bin/.x; exit $r
 ```
 
 - **ok** must hold on every machine. A check that applies to some machines

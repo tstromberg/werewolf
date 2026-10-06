@@ -3,8 +3,8 @@
 //!     dhcp up NIC   get a lease for NIC and apply it; exit 0 once bound, or
 //!                   1 if no server has given one within 30 seconds
 //!     dhcp keep     keep that lease for as long as the machine runs: renew
-//!                   it, or get another; the dhcp service runs this. Where
-//!                   init did not use DHCP, it sleeps
+//!                   it, or get another; the dhcp service runs this, as its
+//!                   run, a link here. Where init did not use DHCP, it sleeps
 //!
 //! init runs `dhcp up` when the kernel command line names no werewolf.ip.
 //!
@@ -64,9 +64,12 @@ const zero: Ip4 = .{ 0, 0, 0, 0 };
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
+    // runsv starts a service's ./run with no arguments: run under that
+    // name, as the dhcp service's run links here, it keeps the lease.
+    const as_run = args.len == 1 and std.mem.eql(u8, std.fs.path.basename(args[0]), "run");
     const mode: Mode = if (args.len == 3 and std.mem.eql(u8, args[1], "up"))
         .up
-    else if (args.len == 2 and std.mem.eql(u8, args[1], "keep"))
+    else if (as_run or (args.len == 2 and std.mem.eql(u8, args[1], "keep")))
         .keep
     else {
         std.debug.print("usage: dhcp up NIC | dhcp keep\n", .{});

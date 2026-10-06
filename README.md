@@ -2,10 +2,12 @@
 
 <img src="media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-A minimal, secure, fast Linux for virtual machines: Wolfi's userland on
-Alpine's kernel. Inspired by [Chainguard VMs](https://www.chainguard.dev/vms), but even more paranoid:
+Quite possibly the world's most secure Linux distribution, with no way to execute malware out of the box.
 
-- **Secure**: an OpenBSD-like security philosophy: tiny attack surface, extreme security defaults.
+Werewolf Linux is a minimal, secure, fast Linux for virtual machines, combining [Wolfi](https://wolfi.dev/)'s userland with 
+[Alpine](https://www.alpinelinux.org/)'s kernel. It enforces a strict secure-by-default philosophy, inspired by [Chainguard VMs](https://www.chainguard.dev/vms) and [OpenBSD](https://openbsd.org/).
+
+- **Secure**: tiny attack surface, with extreme security defaults and declarable exceptions. 
 - **Fast**: glibc and its malloc, for heavy compute.
 - **Low maintenance**: few moving parts, few CVEs to chase - updates and reboots itself.
 - **Auditable**: every update is logged, along with which CVE it addresses.
@@ -36,9 +38,10 @@ writable disk, and prove every claim with a test.
   before it acts.
 - **Declared listeners**: each form lists the ports it listens on, and the
   tests fail on anything else listening.
-- **The system is never written to disk**: changes to the root live in
-  RAM, so a reboot restores the image. `/data` is the one writable disk; in
-  `crypt` it is encrypted, with a key kept apart from the disk.
+- **A read-only root**: the system is an erofs image mounted read-only,
+  so nothing can change its programs, and a reboot restores it. `/data` is
+  the one writable disk; in `crypt` it is encrypted, with a key kept apart
+  from the disk.
 - **ssh**: keys only, no PAM, no forwarding.
 - **Updates**: verified against keys in the image, logged with the CVEs
   they fix, and rolled back automatically if the new image is unhealthy.
@@ -113,12 +116,12 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 
 | Form | Includes | Adds | /data | Listens | RAM image | root.erofs | Packages |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `minimal` | | busybox, runit; init, shutdown, services, werewolf's module loader, network setup and one-way mount; virtio, power button | RAM | nothing | 3.0 MB | | 10 |
+| `minimal` | | busybox, runit; init, shutdown, services, werewolf's module loader, network setup and one-way mount; virtio, power button, erofs | RAM | nothing | 3.0 MB | | 10 |
 | `dhcp` | minimal | werewolf's DHCP client, split into a jailed engine and a parent with one capability; packet sockets | RAM | nothing | 3.1 MB | | 10 |
 | `disk` | minimal | e2fsprogs, blkid; ext4 | ext4 | nothing | 4.0 MB | | 16 |
 | `crypt` | disk | cryptsetup; dm-crypt, hardware AES | ext4 in LUKS2 | nothing | 8.3 MB | | 30 |
 | `cloud` | dhcp | werewolf's metadata fetcher: the config from GCP's, AWS's or Hetzner's user data ([docs/cloud.md](docs/cloud.md)); GCP's SCSI, NVMe and gVNIC | RAM | nothing | 3.3 MB | | 10 |
-| `bitten` | cloud | blkid; ext4, xfs, btrfs, erofs, overlay, loop | a directory on the victim | nothing | 5.9 MB | 12.8 MB | 12 |
+| `bitten` | cloud | blkid; ext4, xfs, btrfs | a directory on the victim | nothing | 5.9 MB | 12.8 MB | 12 |
 | `autoupdate` | bitten | apk-tools, erofs-utils, zstd; Alpine's keys; the updater | a directory on the victim | nothing | 10.3 MB | 16.0 MB | 25 |
 | `prod` | autoupdate | nothing: the production base, published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | nothing | 10.3 MB | 15.3 MB | 25 |
 | `sshd` | minimal | openssh-server, sftp-server | RAM | :22 | 7.4 MB | | 24 |
@@ -225,10 +228,6 @@ See [docs/updater.md](docs/updater.md).
 - **No NTP.** The clock comes from the hypervisor at boot.
 - **No service sandboxing.** runit has none of systemd's; services must
   sandbox themselves, with Landlock and seccomp.
-- **No external clean stop** on arm64 device-tree hypervisors (QEMU
-  `virt`, Apple's VZ booting a kernel directly): Alpine's arm64 kernel
-  lacks `gpio_keys`, so an external stop is a power cut. `poweroff` from
-  inside works.
 - **No log shipping.** Services log to the console.
 - **No debuggers.** ptrace is off for everyone, root included, until the
   machine reboots.
@@ -248,5 +247,7 @@ See [docs/updater.md](docs/updater.md).
 - [docs/demo.md](docs/demo.md): the demo, a self-patching page about itself
 - [docs/posture.md](docs/posture.md): `posture`, which measures a machine's security
 - [docs/roadmap.md](docs/roadmap.md): what comes next
+- [design/fence.md](design/fence.md): only declared ports served, and the
+  metadata server only for whom it is meant
 - [design/verified-boot.md](design/verified-boot.md): running only code we
   signed (proposed)

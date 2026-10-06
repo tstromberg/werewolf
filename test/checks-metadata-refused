@@ -5,5 +5,5 @@
 # rest from the console and the metadata server's log.
 
 ok  hostname-kept    [ "$(hostname)" = werewolf ]
-ok  nothing-taken    [ ! -e /run/werewolf/cloud/config.tar ] && [ ! -e /run/config/hostname ] && [ ! -e /root/.ssh/authorized_keys ]
+ok  nothing-taken    [ ! -e /run/werewolf/cloud/config.tar ] && [ ! -e /run/config/hostname ] && [ ! -s /run/werewolf/keys/root ]
 ok  nothing-escaped  [ ! -e /run/werewolf/escaped ] && [ ! -e /run/escaped ] && [ ! -L /run/config/authorized_keys ]

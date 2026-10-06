@@ -1,2 +1,4 @@
 # nginx serves the status page.
 listen tcp/80
+# grype fetches its vulnerability database over HTTPS.
+connect grype tcp/443 udp/53 tcp/53

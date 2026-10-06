@@ -320,7 +320,7 @@ fn writeSecurity(w: *Io.Writer, f: Facts) !void {
     try w.print("<p class=\"note\">How this machine protects itself, tested at boot, ", .{});
     try writeTime(w, parseRfc3339(p.time) orelse 0, f.now_secs);
     try w.print(": {d} of {d} pass. The checks are <code>/usr/lib/werewolf/posture</code>, " ++
-        "which prints JSON and runs on any Linux.</p>\n", .{ p.summary.pass, p.summary.pass + p.summary.fail });
+        "which runs on any Linux.</p>\n", .{ p.summary.pass, p.summary.pass + p.summary.fail });
     try w.writeAll("<div class=\"scroll\"><table class=\"sec\">\n<colgroup><col style=\"width:44%\"><col style=\"width:38%\"><col></colgroup>\n" ++
         "<thead><tr><th>Protection</th><th>Checked by</th><th>Result</th></tr></thead>\n<tbody>\n");
     const areas = [_][2][]const u8{ .{ "kernel", "Kernel" }, .{ "processes", "Processes" }, .{ "programs", "Programs" }, .{ "files", "Files" }, .{ "network", "Network" } };
@@ -884,8 +884,9 @@ fn findString(v: std.json.Value, key: []const u8) ?[]const u8 {
 // --- security posture ---------------------------------------------------------
 //
 // /usr/lib/werewolf/posture (posture/posture.zig) checks how the machine
-// protects itself and prints JSON. It runs once per boot, a minute in, when
-// the services have started; /run keeps its answer until the next boot.
+// protects itself, and with --json prints it as JSON. It runs once per boot,
+// a minute in, when the services have started; /run keeps its answer until
+// the next boot.
 
 const posture_bin = "/usr/lib/werewolf/posture";
 const posture_path = "/run/werewolf/posture.json";
@@ -916,7 +917,7 @@ fn posture(io: Io, gpa: Allocator, uptime: u64) ?Posture {
     } else |_| {}
     if (uptime < posture_after or !exists(io, posture_bin)) return null;
     // posture exits 1 when a check fails; its JSON is the answer either way.
-    const res = std.process.run(gpa, io, .{ .argv = &.{posture_bin} }) catch return null;
+    const res = std.process.run(gpa, io, .{ .argv = &.{ posture_bin, "--json" } }) catch return null;
     const p = std.json.parseFromSliceLeaky(Posture, gpa, res.stdout, .{ .ignore_unknown_fields = true }) catch return null;
     writeAtomic(io, gpa, posture_path, res.stdout) catch {};
     record(io, .{ .event = "posture", .pass = p.summary.pass, .fail = p.summary.fail });

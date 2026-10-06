@@ -1,11 +1,12 @@
 #!/bin/sh
 # sshd, in forms that install it (sshd, lima); elsewhere it parks itself,
-# so a form adds ssh with a package and no files. Host keys are generated
-# on every boot: the root's writable layer is RAM, so they never outlive
-# the machine.
+# so a form adds ssh with a package and no files. Its host key is made at
+# every boot, in /run, since the root is read-only: it never outlives the
+# machine.
 exec 2>&1
 if [ ! -x /usr/bin/sshd ]; then
 	exec sv down .
 fi
-ssh-keygen -A >/dev/null
+mkdir -p -m 0700 /run/sshd
+[ -f /run/sshd/ssh_host_ed25519_key ] || ssh-keygen -q -t ed25519 -N '' -f /run/sshd/ssh_host_ed25519_key
 exec /usr/bin/sshd -D -e

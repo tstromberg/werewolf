@@ -1,3 +1,1 @@
-#!/bin/sh
-# runit's stage 3 shuts down cleanly, then the machine restarts.
-exec runit-init 6
+/usr/lib/werewolf/reboot

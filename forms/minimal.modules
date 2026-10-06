@@ -1,4 +1,5 @@
 # Hypervisor devices: virtio's NIC and disks; the NoCloud ISO, as a SCSI
 # CD-ROM, for Lima; and the ACPI power button. Clouds' own devices are in
-# cloud.modules.
-virtio_net virtio_blk sr_mod isofs evdev button
+# cloud.modules. And the root itself: erofs, on a loop device, which stage0
+# mounts read-only in every form.
+virtio_net virtio_blk sr_mod isofs evdev button erofs loop

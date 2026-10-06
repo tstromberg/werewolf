@@ -45,7 +45,12 @@ spawn -noecho {*}$qemu
 
 expect {
 	"handing over to runit" {}
-	-re {Kernel panic[^\r\n]*|stage0: [^\r\n]*panicking} { give_up "boot: $expect_out(0,string)" }
+	-re {Kernel panic[^\r\n]*|stage0: [^\r\n]*panicking} {
+		# The rest of the panic, for the log, then say why.
+		set why $expect_out(0,string)
+		expect -timeout 2 eof {} timeout {}
+		give_up "boot: $why"
+	}
 	timeout { give_up "boot: no handover to runit in $timeout s" }
 	eof { give_up "boot: QEMU exited" }
 }

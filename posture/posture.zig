@@ -1,7 +1,8 @@
-//! posture: measure a Linux machine's security posture, and print it as
-//! JSON.
+//! posture: measure a Linux machine's security posture, and print it as a
+//! list of what passed and failed, or as JSON.
 //!
 //!     posture           check, print, and exit 1 if any check fails
+//!     posture --json    the same, as JSON, with why and how each was checked
 //!     posture --noop    exit 0 at once: what the run-a-program checks run
 //!
 //! Each check says what it protects against in plain words, how it was
@@ -29,8 +30,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
-    if (args.len != 1) {
-        std.debug.print("usage: posture [--noop]\n", .{});
+    const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
+    if (args.len != 1 and !json) {
+        std.debug.print("usage: posture [--json]\n", .{});
         std.process.exit(2);
     }
 
@@ -38,8 +40,10 @@ pub fn main(init: std.process.Init) !void {
     try p.run();
     const report = try p.report();
     var out: Io.Writer.Allocating = .init(gpa);
-    try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
-    try out.writer.writeByte('\n');
+    if (json) {
+        try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
+        try out.writer.writeByte('\n');
+    } else try printText(&out.writer, report, columns());
     try Io.File.stdout().writeStreamingAll(io, out.written());
     if (report.summary.fail > 0) std.process.exit(1);
 }
@@ -49,6 +53,8 @@ pub const Report = struct {
     tool: []const u8 = "posture",
     version: u32 = 1,
     time: []const u8,
+    /// The distribution, as /etc/os-release names it.
+    os: []const u8,
     host: []const u8,
     kernel: []const u8,
     root: bool,
@@ -70,7 +76,19 @@ pub const Check = struct {
     detail: []const u8 = "",
 };
 
-pub const Result = enum { pass, fail, skip };
+pub const Result = enum {
+    pass,
+    fail,
+    skip,
+
+    fn mark(r: Result) []const u8 {
+        return switch (r) {
+            .pass => "✅",
+            .fail => "❌",
+            .skip => "⚠️",
+        };
+    }
+};
 
 const Posture = struct {
     io: Io,
@@ -84,8 +102,10 @@ const Posture = struct {
 
     fn report(p: *Posture) !Report {
         const uts = std.posix.uname();
+        const os_release = p.read("/etc/os-release");
         var r: Report = .{
             .time = try rfc3339(p.gpa, nowSecs(p.io)),
+            .os = prettyName(if (os_release.len > 0) os_release else p.read("/usr/lib/os-release")),
             .host = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0)),
             .kernel = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.release, 0)),
             .root = p.root,
@@ -386,7 +406,11 @@ const Posture = struct {
         for ([_][]const u8{ "/proc/net/tcp", "/proc/net/tcp6" }) |f| try listenPorts(p.gpa, p.read(f), &ports);
         var list: std.ArrayList(u8) = .empty;
         for (ports.items, 0..) |port, i| try list.print(p.gpa, "{s}{d}", .{ if (i > 0) ", " else "", port });
-        const declared = Dir.cwd().readFileAlloc(p.io, "/etc/werewolf/listen", p.gpa, .limited(64 << 10)) catch null;
+        // The machine's network policy (fence), or the older list of ports.
+        const declared: ?[]const u8 = if (Dir.cwd().readFileAlloc(p.io, "/usr/share/werewolf/net", p.gpa, .limited(64 << 10))) |net|
+            try policyPorts(p.gpa, net)
+        else |_|
+            Dir.cwd().readFileAlloc(p.io, "/etc/werewolf/listen", p.gpa, .limited(64 << 10)) catch null;
         var undeclared: std.ArrayList(u8) = .empty;
         if (declared) |text| for (ports.items) |port| {
             if (!isDeclared(text, port)) try undeclared.print(p.gpa, "{s}{d}", .{ if (undeclared.items.len > 0) ", " else "", port });
@@ -396,18 +420,94 @@ const Posture = struct {
             .area = "network",
             .name = "Only declared ports open",
             .why = "Nothing listens on the network that the machine is not meant to offer.",
-            .how = "listening TCP ports (/proc/net/tcp, tcp6) are those /etc/werewolf/listen declares",
+            .how = "listening TCP ports (/proc/net/tcp, tcp6) are those the machine's policy declares (/usr/share/werewolf/net)",
             .result = if (declared == null) .skip else if (undeclared.items.len == 0) .pass else .fail,
             .detail = if (undeclared.items.len > 0)
                 try std.fmt.allocPrint(p.gpa, "undeclared: {s}", .{undeclared.items})
             else
                 try std.fmt.allocPrint(p.gpa, "listening: {s}", .{if (list.items.len > 0) list.items else "none"}),
         });
+        try p.fence();
         try p.absentNamed("network-no-login", "network", "No remote login", "There is no ssh or telnet server to log in through.", &.{ "sshd", "dropbear", "telnetd", "in.telnetd" });
         try p.sysctls("network-no-forwarding", "network", "No routing", "The machine forwards no traffic for others.", &.{ .{ "net/ipv4/ip_forward", "0" }, .{ "net/ipv6/conf/all/forwarding", "0" } });
         try p.sysctls("network-redirects", "network", "ICMP redirects ignored", "Nobody on the network can reroute the machine's traffic.", &.{ .{ "net/ipv4/conf/all/accept_redirects", "0" }, .{ "net/ipv6/conf/all/accept_redirects", "0" } });
         try p.sysctls("network-source-route", "network", "Source routing refused", "Packets cannot choose their own way through the machine.", &.{.{ "net/ipv4/conf/all/accept_source_route", "0" }});
         try p.sysctls("network-syncookies", "network", "SYN flood protection", "A flood of half-open connections cannot exhaust it.", &.{.{ "net/ipv4/tcp_syncookies", "1" }});
+    }
+
+    // werewolf's network policy (design/fence.md): only declared ports can be
+    // bound, only declared traffic sent, nothing unsolicited received, the
+    // metadata server only for those named, IPv6 off. Each protection is
+    // tested where a test is safe and quiet (a bind, a UDP connect, which
+    // sends nothing, a connect the policy refuses at once), and fails where
+    // it is missing, on any Linux.
+    fn fence(p: *Posture) !void {
+        const policy: []const u8 = Dir.cwd().readFileAlloc(p.io, "/usr/share/werewolf/net", p.gpa, .limited(64 << 10)) catch "";
+
+        const port = unusedPort(policy);
+        const bound = probeBind(port);
+        try p.add(.{
+            .id = "network-bind",
+            .area = "network",
+            .name = "Undeclared ports cannot be opened",
+            .why = "Not even root can start a listener on a port the machine is not meant to offer.",
+            .how = try std.fmt.allocPrint(p.gpa, "bind() of a TCP socket to port {d}, which the policy does not declare, is refused with EACCES (Landlock, inherited from PID 1)", .{port}),
+            .result = if (bound == .ACCES) .pass else .fail,
+            .detail = try std.fmt.allocPrint(p.gpa, "bind: {s}", .{errnoText(bound)}),
+        });
+
+        const sent = probeSend();
+        try p.add(.{
+            .id = "network-outbound",
+            .area = "network",
+            .name = "Only declared traffic leaves",
+            .why = "A program can send nothing its form did not declare: no beacon, no exfiltration, no download.",
+            .how = "connect() of a UDP socket to 192.0.2.1 port 9 (an address for documentation, never routed), which looks the route up without sending, is refused with EACCES (policy routing)",
+            .result = if (sent == .ACCES) .pass else .fail,
+            .detail = try std.fmt.allocPrint(p.gpa, "connect: {s}", .{errnoText(sent)}),
+        });
+
+        const md = probeMetadata();
+        try p.add(.{
+            .id = "network-metadata",
+            .area = "network",
+            .name = "Cloud metadata server closed",
+            .why = "Only the programs named can read the instance's metadata, where its config and any secrets in it are.",
+            .how = "a TCP connect() to 169.254.169.254 port 80, for a second at most, is refused with EACCES",
+            .result = switch (md) {
+                .refused => .pass,
+                .reached => .fail,
+                // Nothing there and no policy to refuse it: not a cloud.
+                .absent => if (policy.len == 0) .skip else .fail,
+            },
+            .detail = @tagName(md),
+        });
+
+        var rules: RuleSummary = .{};
+        if (ruleDump(p.gpa)) |dump| rules = summarizeRules(dump) else |_| {}
+        try p.add(.{
+            .id = "network-inbound",
+            .area = "network",
+            .name = "Unsolicited traffic dropped",
+            .why = "Packets the machine did not ask for and does not serve are dropped unanswered, whatever is listening.",
+            .how = "the IPv4 policy-routing rules (RTM_GETRULE) drop arriving traffic with a blackhole rule before any rule delivers it to the local table, and refuse locally sent traffic that no rule allows",
+            .result = if (rules.inbound_dropped and rules.outbound_refused) .pass else .fail,
+            .detail = try std.fmt.allocPrint(p.gpa, "arriving: {s}; sent: {s}", .{
+                if (rules.inbound_dropped) "dropped unless declared" else "delivered",
+                if (rules.outbound_refused) "refused unless declared" else "routed",
+            }),
+        });
+
+        const v6 = std.mem.trim(u8, p.read("/proc/sys/net/ipv6/conf/all/disable_ipv6"), " \n");
+        try p.add(.{
+            .id = "network-ipv6-off",
+            .area = "network",
+            .name = "IPv6 off",
+            .why = "An interface's IPv6 link-local address is reachable from the network with none of the IPv4 rules.",
+            .how = "/proc/sys/net/ipv6/conf/all/disable_ipv6 reads 1, or the kernel has no IPv6",
+            .result = if (v6.len == 0 or std.mem.eql(u8, v6, "1")) .pass else .fail,
+            .detail = if (v6.len == 0) "no IPv6 in this kernel" else try std.fmt.allocPrint(p.gpa, "disable_ipv6 = {s}", .{v6}),
+        });
     }
 
     fn absentNamed(p: *Posture, id: []const u8, area: []const u8, name: []const u8, why: []const u8, names: []const []const u8) !void {
@@ -527,7 +627,75 @@ const Posture = struct {
     }
 };
 
+// --- text ----------------------------------------------------------------------
+
+/// The report as people read it: a mark for each check, by area, and what
+/// was found where a check did not pass. Details are cut to fit cols, the
+/// terminal's width, when there is one.
+fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
+    try w.print("{s}, Linux {s}, on {s} ({s})\n", .{ r.os, r.kernel, r.host, if (r.root) "root" else "not root: some checks are limited" });
+    var width: usize = 0;
+    for (r.checks) |c| width = @max(width, c.name.len);
+    // Two spaces, a mark two columns wide, a space, the name padded to
+    // width, two spaces, then the detail.
+    const room = if (cols) |n| n -| (width + 7) else std.math.maxInt(usize);
+    var area: []const u8 = "";
+    for (r.checks) |c| {
+        if (!std.mem.eql(u8, c.area, area)) {
+            area = c.area;
+            try w.print("\n{c}{s}\n", .{ std.ascii.toUpper(area[0]), area[1..] });
+        }
+        try w.print("  {s} {s}", .{ c.result.mark(), c.name });
+        if (c.result != .pass and c.detail.len > 0) {
+            const f = fit(c.detail, room);
+            try w.splatByteAll(' ', width - c.name.len + 2);
+            try w.writeAll(c.detail[0..f.len]);
+            if (f.more > 0) try w.print(", +{d} more", .{f.more});
+        }
+        try w.writeByte('\n');
+    }
+    try w.print("\n{s} {d} passed   {s} {d} failed   {s} {d} skipped\n", .{
+        Result.pass.mark(), r.summary.pass, Result.fail.mark(), r.summary.fail, Result.skip.mark(), r.summary.skip,
+    });
+}
+
+/// How much of detail, items between ", ", fits in max bytes: whole items,
+/// with room left to say how many more there are. The first item is kept
+/// even when it alone is too long.
+fn fit(detail: []const u8, max: usize) struct { len: usize, more: usize } {
+    if (detail.len <= max) return .{ .len = detail.len, .more = 0 };
+    const items = std.mem.count(u8, detail, ", ") + 1;
+    var len: usize = 0;
+    var shown: usize = 0;
+    var it = std.mem.splitSequence(u8, detail, ", ");
+    while (it.next()) |item| : (shown += 1) {
+        const end = if (shown == 0) item.len else len + 2 + item.len;
+        if (shown > 0 and end + std.fmt.count(", +{d} more", .{items - shown - 1}) > max) break;
+        len = end;
+    }
+    return .{ .len = len, .more = items - shown };
+}
+
+/// stdout's width in columns, or null when it is not a terminal.
+fn columns() ?usize {
+    var ws: std.posix.winsize = undefined;
+    const rc = linux.ioctl(Io.File.stdout().handle, linux.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (linux.errno(rc) != .SUCCESS or ws.col == 0) return null;
+    return ws.col;
+}
+
 // --- pure functions, tested below ----------------------------------------------
+
+/// PRETTY_NAME in an os-release file, unquoted, or "Linux", its default.
+fn prettyName(text: []const u8) []const u8 {
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "PRETTY_NAME=")) continue;
+        const name = std.mem.trim(u8, line["PRETTY_NAME=".len..], "\"' \r");
+        if (name.len > 0) return name;
+    }
+    return "Linux";
+}
 
 /// The level in /sys/kernel/security/lockdown: "none [integrity] confidentiality".
 fn lockdownLevel(text: []const u8) []const u8 {
@@ -611,6 +779,16 @@ fn listenPorts(gpa: Allocator, text: []const u8, out: *std.ArrayList(u16)) !void
     std.mem.sort(u16, out.items, {}, std.sort.asc(u16));
 }
 
+/// The ports in a network policy's `listen tcp PORT` lines, one a line.
+fn policyPorts(gpa: Allocator, policy: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, policy, '\n');
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "listen tcp ")) try out.print(gpa, "{s}\n", .{std.mem.trim(u8, line["listen tcp ".len..], " ")});
+    }
+    return out.items;
+}
+
 /// Whether /etc/werewolf/listen declares port: one a line, or 22 for sshd,
 /// which the image declares by carrying it.
 fn isDeclared(text: []const u8, port: u16) bool {
@@ -676,6 +854,167 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
 
 const testing = std.testing;
 
+// --- fence probes ------------------------------------------------------------
+
+/// A TCP port the policy does not declare, to try binding.
+fn unusedPort(policy: []const u8) u16 {
+    var port: u16 = 47321;
+    while (isDeclared(policy, port)) port += 1;
+    return port;
+}
+
+fn inet(addr: [4]u8, port: u16) linux.sockaddr.in {
+    return .{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast(addr) };
+}
+
+/// bind() of a fresh TCP socket to `port` on every address: its errno. The
+/// socket never listens, and is closed.
+fn probeBind(port: u16) linux.E {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    const a = inet(.{ 0, 0, 0, 0 }, port);
+    return linux.errno(linux.bind(fd, @ptrCast(&a), @sizeOf(linux.sockaddr.in)));
+}
+
+/// connect() of a UDP socket to 192.0.2.1:9: a route lookup, and no packet.
+fn probeSend() linux.E {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    const a = inet(.{ 192, 0, 2, 1 }, 9);
+    return linux.errno(linux.connect(fd, @ptrCast(&a), @sizeOf(linux.sockaddr.in)));
+}
+
+const Metadata = enum { refused, reached, absent };
+
+/// A TCP connect() to 169.254.169.254:80, given a second: refused by
+/// policy, reached (connected, or something answered), or absent.
+fn probeMetadata() Metadata {
+    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0);
+    if (linux.errno(rc) != .SUCCESS) return .absent;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    const a = inet(.{ 169, 254, 169, 254 }, 80);
+    switch (linux.errno(linux.connect(fd, @ptrCast(&a), @sizeOf(linux.sockaddr.in)))) {
+        .ACCES, .PERM => return .refused,
+        .SUCCESS => return .reached,
+        .INPROGRESS => {},
+        else => return .absent,
+    }
+    var fds = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.OUT, .revents = 0 }};
+    if (linux.poll(&fds, 1, 1000) != 1) return .absent;
+    var err: i32 = 0;
+    var len: linux.socklen_t = @sizeOf(i32);
+    _ = linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&err), &len);
+    return if (err == 0 or err == @backingInt(linux.E.CONNREFUSED)) .reached else .absent;
+}
+
+fn errnoText(e: linux.E) []const u8 {
+    return if (e == .SUCCESS) "allowed" else std.enums.tagName(linux.E, e) orelse "unknown";
+}
+
+/// The IPv4 policy-routing rules, as the kernel lists them: RTM_GETRULE
+/// messages, one after another. Listing them needs no privilege.
+fn ruleDump(gpa: Allocator) ![]const u8 {
+    const rc = linux.socket(linux.AF.NETLINK, linux.SOCK.RAW | linux.SOCK.CLOEXEC, linux.NETLINK.ROUTE);
+    if (linux.errno(rc) != .SUCCESS) return error.NoNetlink;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var req: [28]u8 = @splat(0);
+    std.mem.writeInt(u32, req[0..4], req.len, .little);
+    std.mem.writeInt(u16, req[4..6], 34, .little); // RTM_GETRULE
+    std.mem.writeInt(u16, req[6..8], 0x301, .little); // NLM_F_REQUEST | NLM_F_DUMP
+    std.mem.writeInt(u32, req[8..12], 1, .little);
+    req[16] = linux.AF.INET;
+    if (linux.errno(linux.sendto(fd, &req, req.len, 0, null, 0)) != .SUCCESS) return error.NoNetlink;
+    var out: std.ArrayList(u8) = .empty;
+    var buf: [32 << 10]u8 align(4) = undefined;
+    while (out.items.len < 1 << 20) {
+        var fds = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
+        if (linux.poll(&fds, 1, 1000) != 1) return error.NoReply;
+        const n = linux.recvfrom(fd, &buf, buf.len, 0, null, null);
+        if (linux.errno(n) != .SUCCESS) return error.NoReply;
+        try out.appendSlice(gpa, buf[0..n]);
+        if (dumpDone(buf[0..n])) return out.items;
+    }
+    return error.TooLong;
+}
+
+/// Whether a batch of netlink messages ends the dump.
+fn dumpDone(batch: []const u8) bool {
+    var off: usize = 0;
+    while (off + 16 <= batch.len) {
+        const len = std.mem.readInt(u32, batch[off..][0..4], .little);
+        const kind = std.mem.readInt(u16, batch[off + 4 ..][0..2], .little);
+        if (kind == 3 or kind == 2) return true; // NLMSG_DONE, NLMSG_ERROR
+        if (len < 16) return true;
+        off += std.mem.alignForward(usize, len, 4);
+    }
+    return false;
+}
+
+const RuleSummary = struct {
+    /// A rule refuses whatever is sent here (from lo) that no earlier rule
+    /// allowed: no selector but the interface, action prohibit.
+    outbound_refused: bool = false,
+    /// A rule drops whatever arrives that no earlier rule allowed, and no
+    /// rule without selectors delivers to the local table before it.
+    inbound_dropped: bool = false,
+};
+
+/// What a dump of policy-routing rules says about traffic in and out.
+fn summarizeRules(dump: []const u8) RuleSummary {
+    var drop_at: ?u32 = null;
+    var local_at: ?u32 = null;
+    var out_refused = false;
+    var off: usize = 0;
+    while (off + 28 <= dump.len) {
+        const len = std.mem.readInt(u32, dump[off..][0..4], .little);
+        if (len < 16 or off + len > dump.len) break;
+        const msg = dump[off .. off + len];
+        off += std.mem.alignForward(usize, len, 4);
+        if (std.mem.readInt(u16, msg[4..6], .little) != 32 or msg.len < 28) continue; // RTM_NEWRULE
+        var table: u32 = msg[16 + 4];
+        const action = msg[16 + 7];
+        var priority: u32 = 0;
+        var from_lo = false;
+        var iif = false;
+        var selective = false;
+        var a: usize = 28;
+        while (a + 4 <= msg.len) {
+            const alen = std.mem.readInt(u16, msg[a..][0..2], .little);
+            if (alen < 4 or a + alen > msg.len) break;
+            const kind = std.mem.readInt(u16, msg[a + 2 ..][0..2], .little) & 0x3fff;
+            const v = msg[a + 4 .. a + alen];
+            switch (kind) {
+                6 => if (v.len == 4) {
+                    priority = std.mem.readInt(u32, v[0..4], .little);
+                },
+                15 => if (v.len == 4) {
+                    table = std.mem.readInt(u32, v[0..4], .little);
+                },
+                3 => {
+                    iif = true;
+                    from_lo = std.mem.eql(u8, std.mem.sliceTo(v, 0), "lo");
+                },
+                1, 2, 10, 17, 20, 22, 23, 24 => selective = true, // dst, src, fwmark, oif, uid, proto, ports
+                else => {},
+            }
+            a += std.mem.alignForward(usize, alen, 4);
+        }
+        if (selective) continue;
+        if (action == 8 and from_lo) out_refused = true; // FR_ACT_PROHIBIT
+        if (iif) continue;
+        if (action == 6) drop_at = @min(drop_at orelse priority, priority); // FR_ACT_BLACKHOLE
+        if (action == 1 and table == 255) local_at = @min(local_at orelse priority, priority); // to local
+    }
+    const dropped = if (drop_at) |d| (local_at == null or d < local_at.?) else false;
+    return .{ .outbound_refused = out_refused, .inbound_dropped = dropped };
+}
+
 test lockdownLevel {
     try testing.expectEqualStrings("integrity", lockdownLevel("none [integrity] confidentiality\n"));
     try testing.expectEqualStrings("unavailable", lockdownLevel(""));
@@ -726,6 +1065,9 @@ test listenPorts {
     try listenPorts(arena.allocator(), tcp, &ports);
     try testing.expectEqualSlices(u16, &.{ 22, 80 }, ports.items);
     try testing.expect(isDeclared("80\n", 80));
+    const policy = try policyPorts(arena.allocator(), "listen tcp 22\nlisten tcp 80\nmetadata 68\n");
+    try testing.expectEqualStrings("22\n80\n", policy);
+    try testing.expect(isDeclared(policy, 80) and !isDeclared(policy, 68));
     try testing.expect(!isDeclared("80\n", 22));
 }
 
@@ -738,4 +1080,121 @@ test dotted {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     try testing.expectEqualStrings("kernel.yama.ptrace_scope", dotted(arena.allocator(), "kernel/yama/ptrace_scope"));
+}
+
+/// A netlink rule message for the tests: priority, action, table, and the
+/// iif name and selectors given.
+fn testRule(buf: []u8, priority: u32, action: u8, table: u8, iif: ?[]const u8, proto: ?u8) []const u8 {
+    @memset(buf, 0);
+    var n: usize = 28;
+    buf[16] = linux.AF.INET;
+    buf[16 + 4] = table;
+    buf[16 + 7] = action;
+    const put = struct {
+        fn f(b: []u8, at: *usize, kind: u16, v: []const u8) void {
+            std.mem.writeInt(u16, b[at.*..][0..2], @intCast(4 + v.len), .little);
+            std.mem.writeInt(u16, b[at.* + 2 ..][0..2], kind, .little);
+            @memcpy(b[at.* + 4 ..][0..v.len], v);
+            at.* += std.mem.alignForward(usize, 4 + v.len, 4);
+        }
+    }.f;
+    put(buf, &n, 6, std.mem.asBytes(&priority));
+    if (iif) |name| put(buf, &n, 3, name);
+    if (proto) |pr| put(buf, &n, 22, &.{pr});
+    std.mem.writeInt(u32, buf[0..4], @intCast(n), .little);
+    std.mem.writeInt(u16, buf[4..6], 32, .little);
+    return buf[0..n];
+}
+
+test summarizeRules {
+    var dump: std.ArrayList(u8) = .empty;
+    defer dump.deinit(std.testing.allocator);
+    var b: [64]u8 = undefined;
+    // The kernel's own rules: local at 0, main, default. Nothing dropped.
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 32766, 1, 254, null, null));
+    try std.testing.expectEqual(RuleSummary{}, summarizeRules(dump.items));
+
+    // fence's: local first only for lo, allowances with selectors, the
+    // refusal from lo, the drop, then the local rule moved after it.
+    dump.clearRetainingCapacity();
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 10, 1, 255, "lo\x00", null));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 200, 1, 254, "lo\x00", 6));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 299, 8, 0, "lo\x00", null));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 300, 1, 255, null, 6));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null));
+    try dump.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null));
+    try std.testing.expectEqual(RuleSummary{ .outbound_refused = true, .inbound_dropped = true }, summarizeRules(dump.items));
+
+    // A drop that comes after delivery to the local table drops nothing.
+    var late: std.ArrayList(u8) = .empty;
+    defer late.deinit(std.testing.allocator);
+    try late.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null));
+    try late.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null));
+    try std.testing.expect(!summarizeRules(late.items).inbound_dropped);
+
+    // Truncated input is not trusted past its end.
+    try std.testing.expectEqual(RuleSummary{}, summarizeRules(dump.items[0..20]));
+}
+
+test unusedPort {
+    try std.testing.expectEqual(47321, unusedPort(""));
+    try std.testing.expectEqual(47322, unusedPort("listen tcp 47321\n"));
+}
+
+test printText {
+    const checks = [_]Check{
+        .{ .id = "a", .area = "kernel", .name = "Kernel lockdown", .why = "", .how = "", .result = .pass, .detail = "integrity" },
+        .{ .id = "b", .area = "kernel", .name = "No SysRq", .why = "", .how = "", .result = .fail, .detail = "kernel.sysrq is 176" },
+        .{ .id = "c", .area = "processes", .name = "No setuid or setgid programs", .why = "", .how = "", .result = .fail, .detail = "/usr/bin/su, /usr/bin/sudo, /usr/bin/passwd, /usr/bin/mount" },
+        .{ .id = "d", .area = "network", .name = "Only declared ports open", .why = "", .how = "", .result = .skip, .detail = "listening: 22" },
+    };
+    const r: Report = .{ .time = "", .os = "Wolfi", .host = "h", .kernel = "6.12.1", .root = true, .summary = .{ .pass = 1, .fail = 2, .skip = 1 }, .checks = &checks };
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try printText(&out.writer, r, 60);
+    try testing.expectEqualStrings(
+        \\Wolfi, Linux 6.12.1, on h (root)
+        \\
+        \\Kernel
+        \\  ✅ Kernel lockdown
+        \\  ❌ No SysRq                      kernel.sysrq is 176
+        \\
+        \\Processes
+        \\  ❌ No setuid or setgid programs  /usr/bin/su, +3 more
+        \\
+        \\Network
+        \\  ⚠️ Only declared ports open      listening: 22
+        \\
+        \\✅ 1 passed   ❌ 2 failed   ⚠️ 1 skipped
+        \\
+    , out.written());
+
+    // Not a terminal: nothing is cut.
+    out.clearRetainingCapacity();
+    try printText(&out.writer, r, null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "/usr/bin/passwd, /usr/bin/mount\n") != null);
+}
+
+test fit {
+    const list = "/usr/bin/su, /usr/bin/sudo, /usr/bin/passwd";
+    try testing.expectEqual(list.len, fit(list, list.len).len);
+    try testing.expectEqual(0, fit(list, list.len).more);
+    // "/usr/bin/su, /usr/bin/sudo, +1 more" is 35 bytes.
+    try testing.expectEqualStrings("/usr/bin/su, /usr/bin/sudo", list[0..fit(list, 35).len]);
+    try testing.expectEqual(1, fit(list, 35).more);
+    try testing.expectEqualStrings("/usr/bin/su", list[0..fit(list, 34).len]);
+    try testing.expectEqual(2, fit(list, 34).more);
+    // The first item stays, however little room.
+    try testing.expectEqual(11, fit(list, 0).len);
+    try testing.expectEqual(2, fit(list, 0).more);
+    try testing.expectEqual(13, fit("ran from /tmp", 3).len);
+    try testing.expectEqual(0, fit("ran from /tmp", 3).more);
+}
+
+test prettyName {
+    try testing.expectEqualStrings("Ubuntu 24.04.1 LTS", prettyName("NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n"));
+    try testing.expectEqualStrings("Wolfi", prettyName("ID=wolfi\nPRETTY_NAME=Wolfi\n"));
+    try testing.expectEqualStrings("Linux", prettyName("PRETTY_NAME=\"\"\n"));
+    try testing.expectEqualStrings("Linux", prettyName(""));
 }

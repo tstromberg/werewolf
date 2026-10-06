@@ -1,3 +1,1 @@
-#!/bin/sh
-# Stage 2: run the services until runit is told to stop.
-exec runsvdir -P /etc/sv
+/usr/lib/werewolf/stage
