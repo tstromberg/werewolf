@@ -7,6 +7,12 @@
 //!                       posture: fail=ID,ID pass=N skip=N {JSON}
 //!     posture --noop    exit 0 at once: what the run-a-program checks run
 //!
+//! --extended adds the checks werewolf fails by choice, because meeting
+//! them would slow what machines run, or is not yet shown safe with fence
+//! (docs/security.md, "Not done, by choice"): wiping freed memory,
+//! forced CPU mitigations, strict reverse-path filtering, and ignoring
+//! IPv6 router advertisements. Any Linux can be measured against them.
+//!
 //! Each check says what it protects against in plain words, how it was
 //! checked, and whether it passed. Where it is safe, a check tests rather
 //! than reads: it asks the kernel to undo a one-way setting and expects a
@@ -41,18 +47,22 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "run")) return serve(io, gpa);
-    const format: Format = if (args.len == 1)
-        .text
-    else if (args.len == 2 and std.mem.eql(u8, args[1], "--json"))
-        .json
-    else if (args.len == 2 and std.mem.eql(u8, args[1], "--line"))
-        .line
-    else {
-        std.debug.print("usage: posture [--json | --line]\n", .{});
-        std.process.exit(2);
-    };
+    var format: Format = .text;
+    var extended = false;
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--extended") and !extended) {
+            extended = true;
+        } else if (std.mem.eql(u8, a, "--json") and format == .text) {
+            format = .json;
+        } else if (std.mem.eql(u8, a, "--line") and format == .text) {
+            format = .line;
+        } else {
+            std.debug.print("usage: posture [--extended] [--json | --line]\n", .{});
+            std.process.exit(2);
+        }
+    }
 
-    var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0 };
+    var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0, .extended = extended };
     try p.run();
     const report = try p.report();
     var out: Io.Writer.Allocating = .init(gpa);
@@ -307,6 +317,8 @@ const Posture = struct {
     io: Io,
     gpa: Allocator,
     root: bool,
+    /// Also the checks werewolf fails by choice (--extended).
+    extended: bool = false,
     checks: std.ArrayList(Check) = .empty,
 
     fn add(p: *Posture, c: Check) !void {
@@ -422,6 +434,26 @@ const Posture = struct {
             .result = if (kvm) .fail else .pass,
             .detail = if (kvm) "KVM is running" else "",
         });
+        // Where KVM runs, its guests must not run hypervisors of their own:
+        // nested virtualization is the code a guest's root reaches the host
+        // through (CVE-2026-53359). x86_64's vendor modules say so in a
+        // parameter; aarch64's KVM nests only when the command line asks.
+        var nested: std.ArrayList(u8) = .empty;
+        for ([_][]const u8{ "kvm_intel", "kvm_amd" }) |m| {
+            const on = trim(p.read(try std.fmt.allocPrint(p.gpa, "/sys/module/{s}/parameters/nested", .{m})));
+            if (std.mem.eql(u8, on, "Y") or std.mem.eql(u8, on, "1")) try nested.print(p.gpa, "{s}{s}.nested is {s}", .{ if (nested.items.len > 0) ", " else "", m, on });
+        }
+        var args = std.mem.tokenizeAny(u8, p.read("/proc/cmdline"), " \n");
+        while (args.next()) |a| if (std.mem.eql(u8, a, "kvm-arm.mode=nested")) try nested.print(p.gpa, "{s}kvm-arm.mode=nested", .{if (nested.items.len > 0) ", " else ""});
+        try p.add(.{
+            .id = "kernel-no-nested",
+            .area = "kernel",
+            .name = "Guests cannot nest",
+            .why = "Virtual machines run here cannot run their own, so a guest's root cannot reach this host through nested virtualization.",
+            .how = "KVM is not running, or kvm_intel's and kvm_amd's nested parameter is off, and the command line has no kvm-arm.mode=nested",
+            .result = if (kvm and nested.items.len > 0) .fail else .pass,
+            .detail = if (!kvm) "no KVM" else nested.items,
+        });
         const debugfs = hasFilesystem(p.read("/proc/filesystems"), "debugfs");
         try p.add(.{
             .id = "kernel-debugfs",
@@ -443,6 +475,20 @@ const Posture = struct {
             .detail = if (forced) "the write went through" else "",
         });
         try p.legacy();
+        // A seccomp filter on PID 1 binds every process after it, root's
+        // too, and nothing can remove it before a reboot: werewolf's seal
+        // (init/init.zig) refuses there what no program here calls.
+        const status = p.read("/proc/1/status");
+        const filtered = std.mem.eql(u8, statusField(status, "Seccomp") orelse "", "2");
+        try p.add(.{
+            .id = "kernel-seal",
+            .area = "kernel",
+            .name = "Every process under a seccomp filter",
+            .why = "System calls nothing here makes are refused for every process, root's included, by a filter on PID 1 that no one can remove.",
+            .how = "/proc/1/status reads Seccomp: 2, a filter, which every process inherits",
+            .result = if (status.len == 0) .skip else if (filtered) .pass else .fail,
+            .detail = if (status.len == 0) "cannot read /proc/1/status" else if (!filtered) try std.fmt.allocPrint(p.gpa, "Seccomp: {s}", .{statusField(status, "Seccomp") orelse "absent"}) else "",
+        });
         try p.aslr();
         const min_addr = p.sysctl("vm/mmap_min_addr");
         try p.add(.{
@@ -521,6 +567,7 @@ const Posture = struct {
             .result = if (core) |c| (if (std.mem.eql(u8, c, "0")) .pass else .fail) else .skip,
             .detail = if (core) |c| try std.fmt.allocPrint(p.gpa, "hard limit is {s}", .{c}) else "cannot read /proc/1/limits",
         });
+        try p.memory();
         // --extended only: what werewolf leaves undone by choice, since it
         // slows what machines run (docs/security.md, "Not done, by choice").
         if (p.extended) try p.costly();
@@ -1044,20 +1091,31 @@ const Posture = struct {
         // IPv4 takes a source route only if all and the interface both allow it.
         const source_route = [_][2][]const u8{ .{ "net/ipv4/conf/all/accept_source_route", "0" }, .{ "net/ipv6/conf/*/accept_source_route", "0" } };
         try p.sysctls("network-source-route", "network", "Source routing refused", "Packets cannot choose their own way through the machine.", if (v6_on) &source_route else source_route[0..1]);
-        // The kernel takes the stricter of all and the interface for both.
-        try p.sysctls("network-rp-filter", "network", "Spoofed sources dropped", "A packet claiming an address the machine would not reply to by that way is dropped.", &.{.{ "net/ipv4/conf/all/rp_filter", "1" }});
-        try p.sysctls("network-martians", "network", "Impossible packets logged", "Packets from addresses that cannot be, a sign of spoofing, are logged.", &.{.{ "net/ipv4/conf/all/log_martians", "1" }});
-        if (v6_on) {
-            try p.sysctls("network-ipv6-ra", "network", "Router advertisements ignored", "Nobody on the network can give the machine an IPv6 address or route by advertising one.", &.{ .{ "net/ipv6/conf/*/accept_ra", "0" }, .{ "net/ipv6/conf/*/autoconf", "0" } });
-        } else try p.add(.{
-            .id = "network-ipv6-ra",
-            .area = "network",
-            .name = "Router advertisements ignored",
-            .why = "Nobody on the network can give the machine an IPv6 address or route by advertising one.",
-            .how = "IPv6 is off, or net.ipv6.conf.*.accept_ra and autoconf are 0",
-            .result = .pass,
-            .detail = "IPv6 off",
+        // Router advertisements stay on (IPv6 takes its route from them), but
+        // limited to what they must give.
+        if (v6_on) try p.sysctls("network-ipv6-ra-limits", "network", "Router advertisements limited", "A rogue router on the same network cannot rank itself above the real one, add a route to steal one destination's traffic, or flood the machine with addresses.", &.{
+            .{ "net/ipv6/conf/*/accept_ra_rtr_pref", "0" }, .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" }, .{ "net/ipv6/conf/*/max_addresses", "4" },
         });
+        try p.sysctls("network-martians", "network", "Impossible packets logged", "Packets from addresses that cannot be, a sign of spoofing, are logged.", &.{.{ "net/ipv4/conf/all/log_martians", "1" }});
+        // --extended only, as werewolf fails them by choice (docs/security.md,
+        // "Not done, by choice"): strict reverse-path filtering waits until it
+        // is shown to work with fence, and IPv6 takes its route from router
+        // advertisements.
+        if (p.extended) {
+            // The kernel takes the stricter of all and the interface for both.
+            try p.sysctls("network-rp-filter", "network", "Spoofed sources dropped", "A packet claiming an address the machine would not reply to by that way is dropped.", &.{.{ "net/ipv4/conf/all/rp_filter", "1" }});
+            if (v6_on) {
+                try p.sysctls("network-ipv6-ra", "network", "Router advertisements ignored", "Nobody on the network can give the machine an IPv6 address or route by advertising one.", &.{ .{ "net/ipv6/conf/*/accept_ra", "0" }, .{ "net/ipv6/conf/*/autoconf", "0" } });
+            } else try p.add(.{
+                .id = "network-ipv6-ra",
+                .area = "network",
+                .name = "Router advertisements ignored",
+                .why = "Nobody on the network can give the machine an IPv6 address or route by advertising one.",
+                .how = "IPv6 is off, or net.ipv6.conf.*.accept_ra and autoconf are 0",
+                .result = .pass,
+                .detail = "IPv6 off",
+            });
+        }
         try p.sysctls("network-syncookies", "network", "SYN flood protection", "A flood of half-open connections cannot exhaust it.", &.{.{ "net/ipv4/tcp_syncookies", "1" }});
         try p.sysctls("network-stray-packets", "network", "Stray packets ignored", "Pings to a broadcast address and bogus ICMP errors get no answer, and a forged reset cannot cut short a closing connection.", &.{
             .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" }, .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" }, .{ "net/ipv4/tcp_rfc1337", "1" },
@@ -1073,6 +1131,90 @@ const Posture = struct {
     /// sshd's settings as it runs them, from sshd -T, which reads its
     /// configuration, Match blocks and defaults included, as sshd does.
     /// Nothing is checked where there is no sshd; sshd -T needs root.
+    /// The kernel's memory hardening that costs a program nothing, judged by
+    /// what is in effect rather than by the command line alone, since a
+    /// kernel may have it on by default (Alpine's clears memory as it is
+    /// handed out unless told not to).
+    fn memory(p: *Posture) !void {
+        const cmdline = p.read("/proc/cmdline");
+        var missing: std.ArrayList(u8) = .empty;
+        // Merged caches show in sysfs as links to the cache they share.
+        const merged = if (p.slabAliases()) |n| n > 0 else (try unsetArgs(p.gpa, cmdline, &.{"slab_nomerge"})).len > 0;
+        if (merged) try missing.print(p.gpa, "kernel caches merged", .{});
+        const shuffle = std.mem.trim(u8, p.read("/sys/module/page_alloc/parameters/shuffle"), " \n");
+        const shuffled = if (shuffle.len > 0) std.mem.eql(u8, shuffle, "Y") else (try unsetArgs(p.gpa, cmdline, &.{"page_alloc.shuffle"})).len == 0;
+        if (!shuffled) try missing.print(p.gpa, "{s}pages not shuffled", .{if (missing.items.len > 0) ", " else ""});
+        const alloc = heapInit(p.memAutoInit(), "heap alloc") orelse if ((try unsetArgs(p.gpa, cmdline, &.{"init_on_alloc"})).len == 0) true else null;
+        if (alloc == false) try missing.print(p.gpa, "{s}memory not cleared as it is handed out", .{if (missing.items.len > 0) ", " else ""});
+        try p.add(.{
+            .id = "kernel-memory-hardening",
+            .area = "kernel",
+            .name = "Kernel memory hardened",
+            .why = "Memory is cleared as it is handed out, kernel objects of one kind never share a cache with another's, and pages are handed out in no predictable order, so leaked data and memory corruption are harder to use.",
+            .how = "no merged caches in /sys/kernel/slab (slab_nomerge), page_alloc's shuffle parameter is Y, and the kernel's boot line says heap alloc:on (or init_on_alloc is on the command line)",
+            .result = if (missing.items.len > 0) .fail else if (alloc == null) .skip else .pass,
+            .detail = if (missing.items.len > 0) missing.items else if (alloc == null) "the kernel's log no longer holds its mem auto-init line" else "",
+        });
+    }
+
+    /// How many caches in /sys/kernel/slab are another's, merged; null if
+    /// it cannot be read.
+    fn slabAliases(p: *Posture) ?usize {
+        var d = Dir.cwd().openDir(p.io, "/sys/kernel/slab", .{ .iterate = true }) catch return null;
+        defer d.close(p.io);
+        var n: usize = 0;
+        var it = d.iterate();
+        while (it.next(p.io) catch return null) |e| {
+            if (e.kind == .sym_link) n += 1;
+        }
+        return n;
+    }
+
+    /// The kernel's "mem auto-init:" line, from the start of its log, or "".
+    fn memAutoInit(p: *Posture) []const u8 {
+        const rc = linux.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        if (linux.errno(rc) != .SUCCESS) return "";
+        const fd: i32 = @intCast(rc);
+        defer _ = linux.close(fd);
+        var record: [8192]u8 = undefined;
+        while (true) {
+            const n = linux.read(fd, &record, record.len);
+            switch (linux.errno(n)) {
+                .SUCCESS => if (std.mem.indexOf(u8, record[0..n], "mem auto-init:")) |i| {
+                    const line = record[i..n];
+                    return p.gpa.dupe(u8, line[0 .. std.mem.indexOfScalar(u8, line, '\n') orelse line.len]) catch "";
+                },
+                .PIPE => {}, // records lost to newer ones: read on
+                else => return "",
+            }
+        }
+    }
+
+    /// Kernel checks werewolf fails by choice, for --extended: clearing
+    /// freed memory and forced CPU mitigations cost every workload.
+    fn costly(p: *Posture) !void {
+        const free_on = heapInit(p.memAutoInit(), "heap free") orelse ((try unsetArgs(p.gpa, p.read("/proc/cmdline"), &.{"init_on_free"})).len == 0);
+        try p.add(.{
+            .id = "kernel-memory-wipe",
+            .area = "kernel",
+            .name = "Freed memory wiped",
+            .why = "Memory is cleared as it is freed, so what a program or the kernel held does not linger for a later bug to read.",
+            .how = "the kernel's boot line says heap free:on, or the command line turns on init_on_free",
+            .result = if (free_on) .pass else .fail,
+            .detail = if (free_on) "" else "init_on_free is off",
+        });
+        const vulnerable = try p.cpuVulnerable();
+        try p.add(.{
+            .id = "kernel-cpu-mitigations",
+            .area = "kernel",
+            .name = "CPU flaws mitigated",
+            .why = "No known processor flaw lets one program read another's memory, or the kernel's.",
+            .how = "no file in /sys/devices/system/cpu/vulnerabilities reads Vulnerable",
+            .result = if (vulnerable) |v| (if (v.len == 0) .pass else .fail) else .skip,
+            .detail = vulnerable orelse "the kernel reports no CPU flaws",
+        });
+    }
+
     fn ssh(p: *Posture) !void {
         const sshd = for ([_][]const u8{ "/usr/sbin/sshd", "/usr/bin/sshd" }) |path| {
             if (exists(p.io, path)) break path;
@@ -1581,8 +1723,15 @@ fn firstWordIs(text: []const u8, name: []const u8) bool {
     return false;
 }
 
-/// The kernel command-line switches that harden its memory.
-const boot_hardening = [_][]const u8{ "init_on_alloc", "init_on_free", "slab_nomerge", "page_alloc.shuffle", "randomize_kstack_offset" };
+/// Whether the kernel's mem auto-init line says what (heap alloc, heap
+/// free) is on; null if it does not say.
+fn heapInit(line: []const u8, what: []const u8) ?bool {
+    const i = std.mem.indexOf(u8, line, what) orelse return null;
+    const rest = line[i + what.len ..];
+    if (std.mem.startsWith(u8, rest, ":on")) return true;
+    if (std.mem.startsWith(u8, rest, ":off")) return false;
+    return null;
+}
 
 /// The switches in names the command line does not turn on, as a list. A
 /// switch is on bare, or set to what the kernel reads as true (1, y, on);
@@ -1778,6 +1927,15 @@ fn isDeclared(text: []const u8, port: u16) bool {
 }
 
 /// The real uid on a /proc/PID/status Uid: line.
+/// A field's value on a /proc/PID/status line, "Name:\tvalue".
+fn statusField(status: []const u8, name: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeScalar(u8, status, '\n');
+    while (it.next()) |line| {
+        if (line.len > name.len and std.mem.startsWith(u8, line, name) and line[name.len] == ':') return std.mem.trim(u8, line[name.len + 1 ..], " \t");
+    }
+    return null;
+}
+
 fn uidOf(status: []const u8) ?u32 {
     var it = std.mem.tokenizeScalar(u8, status, '\n');
     while (it.next()) |line| {
@@ -2102,14 +2260,23 @@ test rareFeatures {
     try testing.expect(!firstWordIs("candle 1 0\n", "can"));
 }
 
+test heapInit {
+    const line = "mem auto-init: stack:all(zero), heap alloc:on, heap free:off";
+    try testing.expectEqual(true, heapInit(line, "heap alloc"));
+    try testing.expectEqual(false, heapInit(line, "heap free"));
+    try testing.expectEqual(null, heapInit("", "heap alloc"));
+    try testing.expectEqual(null, heapInit("heap alloc:maybe", "heap alloc"));
+}
+
 test unsetArgs {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("", try unsetArgs(a, "init=/init init_on_alloc=1 init_on_free=on slab_nomerge page_alloc.shuffle=y randomize_kstack_offset=1\n", &boot_hardening));
+    const names = [_][]const u8{ "init_on_alloc", "init_on_free", "slab_nomerge", "page_alloc.shuffle", "randomize_kstack_offset" };
+    try testing.expectEqualStrings("", try unsetArgs(a, "init=/init init_on_alloc=1 init_on_free=on slab_nomerge page_alloc.shuffle=y randomize_kstack_offset=1\n", &names));
     try testing.expectEqualStrings(
         "init_on_alloc, init_on_free, slab_nomerge, page_alloc.shuffle, randomize_kstack_offset",
-        try unsetArgs(a, "console=ttyS0 panic=10\n", &boot_hardening),
+        try unsetArgs(a, "console=ttyS0 panic=10\n", &names),
     );
     // The last setting wins; a longer name is not the switch.
     try testing.expectEqualStrings("init_on_alloc", try unsetArgs(a, "init_on_alloc=1 init_on_alloc=0", &.{"init_on_alloc"}));
@@ -2170,6 +2337,13 @@ test isFound {
     try testing.expect(!isFound(.open, S.IFLNK | 0o777));
     try testing.expect(!isFound(.open_dirs, S.IFREG | 0o666));
     try testing.expect(isFound(.open_dirs, S.IFDIR | 0o773));
+}
+
+test statusField {
+    const status = "Name:\trunit\nSeccomp:\t2\nSeccomp_filters:\t1\n";
+    try testing.expectEqualStrings("2", statusField(status, "Seccomp").?);
+    try testing.expectEqualStrings("1", statusField(status, "Seccomp_filters").?);
+    try testing.expectEqual(null, statusField(status, "NoNewPrivs"));
 }
 
 test uidOf {

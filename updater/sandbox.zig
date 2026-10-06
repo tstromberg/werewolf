@@ -2,8 +2,10 @@
 //! programs do (docs/programs.md): every descriptor closed but those they
 //! were handed, an account of their own, a chroot, no capabilities, limits,
 //! Landlock, and a seccomp allowlist. The pieces are cloud/cloud.zig's.
+//! And how root hears them: what each says, within a limit and a deadline.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
 /// The system call that failed, and how.
@@ -178,6 +180,89 @@ pub const Filter = struct {
         return if (@hasField(linux.SYS, name)) @intCast(@backingInt(@field(linux.SYS, name))) else null;
     }
 };
+
+// --- children ------------------------------------------------------------------
+
+/// What a child said, and how it ended.
+pub const Exit = struct { code: u8, out: []const u8 };
+
+/// A child's error, as its status line: the error, or for a system call,
+/// which and the kernel's reason.
+pub fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
+    if (err != error.SystemCall) return @errorName(err);
+    return std.fmt.allocPrint(gpa, "{s}: {s}", .{ failed, errnoName(failed_errno) }) catch "SystemCall";
+}
+
+/// A child's last words, and its end.
+pub fn say(out: i32, code: u8, status: []const u8, rest: []const u8) noreturn {
+    for ([_][]const u8{ status, "\n", rest }) |data| {
+        var off: usize = 0;
+        while (off < data.len) {
+            const n = linux.write(out, data[off..].ptr, data.len - off);
+            if (linux.errno(n) != .SUCCESS) linux.exit_group(1);
+            off += n;
+        }
+    }
+    // Straight out: the runtime's cleanup would make calls the filter kills.
+    linux.exit_group(code);
+}
+
+/// What child pid writes to in, and its exit code: at most max bytes,
+/// within seconds. It is killed if it says more, or takes longer.
+pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i64) !Exit {
+    var reaped = false;
+    defer if (!reaped) {
+        _ = linux.kill(pid, .KILL);
+        var status: i32 = 0;
+        while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
+    };
+    const buf = try gpa.alloc(u8, max);
+    const deadline = nowMs() + seconds * std.time.ms_per_s;
+    var got: usize = 0;
+    while (true) {
+        const left = deadline - nowMs();
+        if (left <= 0) return error.Timeout;
+        var pfd = [1]linux.pollfd{.{ .fd = in, .events = linux.POLL.IN, .revents = 0 }};
+        const ready = linux.poll(&pfd, 1, @intCast(@min(left, std.time.ms_per_s)));
+        if (linux.errno(ready) == .INTR or ready == 0) continue;
+        if (got == max) return error.ChildSaidTooMuch;
+        const n = linux.read(in, buf[got..].ptr, max - got);
+        switch (linux.errno(n)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+        if (n == 0) break;
+        got += n;
+    }
+    // Its end of the pipe is closed: it has until the deadline to exit.
+    while (nowMs() < deadline) {
+        var status: i32 = 0;
+        const rc = linux.wait4(pid, &status, linux.W.NOHANG, null);
+        if (linux.errno(rc) == .INTR) continue;
+        if (linux.errno(rc) != .SUCCESS) return error.WaitFailed;
+        if (rc == 0) {
+            const tick: linux.timespec = .{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+            _ = linux.nanosleep(&tick, null);
+            continue;
+        }
+        reaped = true;
+        const s: u32 = @bitCast(status);
+        if (!linux.W.IFEXITED(s)) return error.ChildKilled;
+        return .{ .code = linux.W.EXITSTATUS(s), .out = buf[0..got] };
+    }
+    return error.Timeout;
+}
+
+fn nowMs() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.BOOTTIME, &ts);
+    return ts.sec * std.time.ms_per_s + @divFloor(ts.nsec, std.time.ns_per_ms);
+}
+
+pub fn errnoName(e: linux.E) []const u8 {
+    return std.enums.tagName(linux.E, e) orelse "unknown";
+}
 
 test Filter {
     var f: Filter = .{};

@@ -5,7 +5,8 @@ asks Wolfi and Alpine for anything newer than the running image, builds the
 other slot from it, boots that slot once, and records what changed and which
 CVEs that fixes.
 
-It is one Zig program, `updater/update.zig` with `updater/sandbox.zig`, in
+It is one Zig program, `updater/update.zig` with `updater/cve.zig` (the CVE
+children and the checks of what they say) and `updater/sandbox.zig`, in
 the `autoupdate` form.
 
 ## Running
@@ -113,6 +114,11 @@ does not, but only inside the windows root would accept anyway; it cannot
 reach the network, the disk, or root.
 
 Root hashes the file for the report's `sources`, and never parses it.
+
+All of it has run end to end, a whole update from fetch to reboot, on
+aarch64 (HVF) and on x86_64 (QEMU's emulator, which enforces the same
+seccomp filters); x86_64 alone needed `arch_prctl`, which glibc calls to
+set up thread-local storage.
 
 The source's `error` says what happened to a child: its own word
 (`not_found`, `TlsInitializationFailed`, ...), or root's: `Timeout`,

@@ -1,16 +1,27 @@
-//! status: the demo form's one web page, about the machine it runs on.
+//! status: the demo form's one web page, about the machine it runs on, and
+//! the grype scan the page reports. Two services run it, each as a user of
+//! its own, which it tells apart by the service directory runsv starts it
+//! in, since runsv runs both as ./run:
 //!
-//! Every minute it writes /data/svc/status/www/index.html, which nginx
-//! serves: the kernel and uptime, the last update check, the last 25 patches
-//! autoupdate applied with the CVEs each fixed, what grype finds in the
-//! image, and the packages the image holds. Once an hour, and at start, a
-//! second thread runs grype over the root as the grype user, with its
-//! database in /data/svc/grype, and keeps a summary beside the page, so the
-//! page survives a reboot with its last scan.
+//!     /etc/sv/status   as the status user: every minute it writes
+//!                      /data/svc/status/www/index.html, which nginx
+//!                      serves: the kernel and uptime, the last update
+//!                      check, the last 25 patches autoupdate applied with
+//!                      the CVEs each fixed, what grype finds in the image,
+//!                      and the packages the image holds. It may reach
+//!                      nothing on the network.
+//!     /etc/sv/scan     as the grype user: once an hour, and at start, it
+//!                      runs grype over the root, with its database in
+//!                      /data/svc/grype, and keeps a summary there for the
+//!                      page, so the page survives a reboot with its last
+//!                      scan. grype is the one that fetches, so only this
+//!                      user may (forms/demo.net).
 //!
-//! runsv starts it, as root, with no arguments and no shell. It listens on
-//! nothing. Everything written into the page is HTML-escaped: package
-//! metadata and grype's findings are other people's text.
+//! runsv starts both as root, with no arguments and no shell. Each makes
+//! its directories its user's, then becomes that user for good, with no
+//! capabilities and no way back, before it reads anything: grype's database
+//! comes from the network, and package metadata and grype's findings are
+//! other people's text. Everything written into the page is HTML-escaped.
 //!
 //! Each pass allocates from its own arena, freed when the pass ends, so a
 //! process that runs for months uses what one pass needs.
@@ -23,9 +34,9 @@ const Allocator = std.mem.Allocator;
 const state_dir = "/data/svc/status";
 const www_dir = state_dir ++ "/www";
 const page_path = www_dir ++ "/index.html";
-const summary_path = state_dir ++ "/scan.json";
-const scan_error_path = state_dir ++ "/scan-error";
 const grype_dir = "/data/svc/grype";
+const summary_path = grype_dir ++ "/scan.json";
+const scan_error_path = grype_dir ++ "/scan-error";
 const grype_out = grype_dir ++ "/grype.json";
 const grype_bin = "/usr/bin/grype";
 const autoupdate_dir = "/data/svc/autoupdate";
@@ -51,17 +62,28 @@ const grype_args = [_][]const u8{
     "./victim/**",
 };
 
+/// What the console's lines start with: the service's name.
+var role: []const u8 = "status";
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    // grype starts from here as its own user, and must not keep root's
-    // supplementary groups.
-    const linux = std.os.linux;
-    if (linux.errno(linux.setgroups(0, &[_]linux.gid_t{})) != .SUCCESS) return error.SetGroupsFailed;
-    try Dir.cwd().createDirPath(io, www_dir);
-    record(io, .{ .event = "start" });
+    var cwd: [Dir.max_path_bytes]u8 = undefined;
+    const n = std.process.currentPath(io, &cwd) catch 0;
+    if (std.mem.eql(u8, std.fs.path.basename(cwd[0..n]), "scan")) {
+        role = "scan";
+        return scanLoop(io);
+    }
 
-    const scanner = try std.Thread.spawn(.{}, scanLoop, .{io});
-    scanner.detach();
+    // Root's last acts: the page's directory, and whatever an older status,
+    // which ran as root, left in it, made the status user's.
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const user = lookupUser(readOr(io, arena.allocator(), "/etc/passwd", ""), "status") orelse return error.NoStatusUser;
+    arena.deinit();
+    Dir.cwd().createDirPath(io, www_dir) catch |err| record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
+    for ([_][]const u8{ state_dir ++ "/scan.json", state_dir ++ "/scan-error", page_path ++ ".tmp" }) |old| Dir.cwd().deleteFile(io, old) catch {};
+    for ([_][:0]const u8{ state_dir, www_dir, page_path }) |path| _ = std.os.linux.fchownat(std.os.linux.AT.FDCWD, path, user.uid, user.gid, std.os.linux.AT.SYMLINK_NOFOLLOW);
+    try dropTo(user);
+    record(io, .{ .event = "start" });
 
     var failing = false;
     while (true) {
@@ -613,7 +635,22 @@ fn describeEvent(e: Event) []const u8 {
 
 // --- the scan ----------------------------------------------------------------
 
-fn scanLoop(io: Io) void {
+/// The scan service: grype's directories made its user's, then that user
+/// for good, then a scan an hour.
+fn scanLoop(io: Io) !void {
+    var setup: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const user = lookupUser(readOr(io, setup.allocator(), "/etc/passwd", ""), "grype") orelse return error.NoGrypeUser;
+    setup.deinit();
+    for ([_][:0]const u8{ grype_dir, grype_dir ++ "/db" }) |path| {
+        Dir.cwd().createDirPath(io, path) catch |err| {
+            record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
+            break;
+        };
+        _ = std.os.linux.fchownat(std.os.linux.AT.FDCWD, path, user.uid, user.gid, std.os.linux.AT.SYMLINK_NOFOLLOW);
+    }
+    try dropTo(user);
+    record(io, .{ .event = "start" });
+
     while (true) {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         var step: []const u8 = "start";
@@ -637,19 +674,9 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
     if (std.mem.eql(u8, kind, "tmpfs")) return error.DataInRam;
     if (!exists(io, grype_bin)) return error.NoGrype;
 
-    // std's getUserInfo did not compile in Zig 0.16, and /etc/passwd is
-    // in the image: read it.
     step.* = "preparing grype's directories";
-    const user = lookupUser(readOr(io, gpa, "/etc/passwd", ""), "grype") orelse return error.NoGrypeUser;
     Dir.cwd().deleteTree(io, grype_dir ++ "/tmp") catch {};
-    for ([_][]const u8{ grype_dir, grype_dir ++ "/db", grype_dir ++ "/tmp" }) |path| {
-        try Dir.cwd().createDirPath(io, path);
-        // .iterate opens it for reading; otherwise Zig opens a directory
-        // O_PATH, and fchown on that fails.
-        var d = try Dir.cwd().openDir(io, path, .{ .iterate = true });
-        defer d.close(io);
-        try d.setOwner(io, user.uid, user.gid);
-    }
+    for ([_][]const u8{ grype_dir ++ "/db", grype_dir ++ "/tmp" }) |path| try Dir.cwd().createDirPath(io, path);
     Dir.cwd().deleteFile(io, grype_out) catch {};
 
     var env: std.process.Environ.Map = .init(gpa);
@@ -666,8 +693,6 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
     var child = try std.process.spawn(io, .{
         .argv = &grype_args,
         .environ_map = &env,
-        .uid = user.uid,
-        .gid = user.gid,
         .stdin = .ignore,
         .stdout = .ignore,
         .stderr = .inherit,
@@ -1233,6 +1258,19 @@ fn writeAtomic(io: Io, gpa: Allocator, path: []const u8, data: []const u8) !void
     try Dir.rename(Dir.cwd(), tmp, Dir.cwd(), path, io);
 }
 
+/// Become user for good: no capabilities, now or from anything it runs,
+/// no groups but the user's own, and no way back to root.
+fn dropTo(user: User) !void {
+    const linux = std.os.linux;
+    var cap: usize = 0;
+    while (cap < 64) : (cap += 1) _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+    if (linux.errno(linux.setgroups(0, &[_]linux.gid_t{})) != .SUCCESS) return error.SetGroupsFailed;
+    if (linux.errno(linux.setresgid(user.gid, user.gid, user.gid)) != .SUCCESS) return error.SetGidFailed;
+    if (linux.errno(linux.setresuid(user.uid, user.uid, user.uid)) != .SUCCESS) return error.SetUidFailed;
+    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return error.NoNewPrivsFailed;
+    if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
+}
+
 /// One JSON line on the console, as the updater logs.
 fn record(io: Io, fields: anytype) void {
     var buf: [4096]u8 = undefined;
@@ -1241,7 +1279,7 @@ fn record(io: Io, fields: anytype) void {
     var rest: Io.Writer.Allocating = .init(gpa);
     std.json.Stringify.value(fields, .{}, &rest.writer) catch return;
     const time = rfc3339(gpa, nowSecs(io)) catch return;
-    const line = std.fmt.allocPrint(gpa, "status: {{\"time\":\"{s}\",{s}\n", .{ time, rest.written()[1..] }) catch return;
+    const line = std.fmt.allocPrint(gpa, "{s}: {{\"time\":\"{s}\",{s}\n", .{ role, time, rest.written()[1..] }) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 

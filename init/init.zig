@@ -85,6 +85,7 @@ pub fn main(init: std.process.Init) !void {
     // process can raise its own.
     const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
     if (linux.errno(linux.setrlimit(.CORE, &no_core)) != .SUCCESS) say("core dumps not limited", .{});
+    seal();
     say("up in {s}s, handing over to runit", .{firstWord(m.read("/proc/uptime"))});
     const err = std.process.replace(m.io, .{ .argv = &.{ "/usr/lib/werewolf/fence", "/usr/bin/runit" }, .environ_map = &m.env });
     say("cannot start fence: {s}", .{@errorName(err)});
@@ -193,6 +194,7 @@ const Machine = struct {
     fn network(m: *Machine) void {
         _ = m.run(&.{ "/usr/lib/werewolf/net", "lo" });
         const nic = m.pickNic();
+        m.routerAdvertisements(nic);
         const c = m.cmd;
         if (nic.len == 0) {
             if (c.mac.len > 0) say("no network: no NIC with address {s}", .{c.mac}) else say("no network: no NIC", .{});
@@ -213,6 +215,25 @@ const Machine = struct {
     }
 
     /// The NIC: the one werewolf.mac names, or else the first but lo.
+    /// IPv6 is on, and router advertisements are how most networks give it a
+    /// route, so they are taken, but on the machine's NIC alone, before it
+    /// is up, and only for what they must give: a rogue router on the same
+    /// network cannot rank itself above the real one, add a more specific
+    /// route to steal one destination's traffic, or flood the NIC with
+    /// addresses. Interfaces made later (default) take none.
+    fn routerAdvertisements(m: *Machine, nic: []const u8) void {
+        var all = true;
+        for (m.list("/proc/sys/net/ipv6/conf")) |c| {
+            const d = m.fmt("/proc/sys/net/ipv6/conf/{s}", .{c});
+            for ([_][2][]const u8{ .{ "accept_ra_rtr_pref", "0" }, .{ "accept_ra_rt_info_max_plen", "0" }, .{ "max_addresses", "4" } }) |kv| {
+                if (!writeFile(m.fmtZ("{s}/{s}", .{ d, kv[0] }), kv[1])) all = false;
+            }
+            // all's accept_ra governs no interface; each has its own.
+            if (!std.mem.eql(u8, c, nic) and !std.mem.eql(u8, c, "all") and !writeFile(m.fmtZ("{s}/accept_ra", .{d}), "0")) all = false;
+        }
+        if (!all) say("some IPv6 router advertisement limits were not applied", .{});
+    }
+
     fn pickNic(m: *Machine) []const u8 {
         for (m.list("/sys/class/net")) |n| {
             if (std.mem.eql(u8, n, "lo")) continue;
@@ -726,6 +747,70 @@ const sysctls = [_][2][]const u8{
     .{ "net/ipv4/tcp_rfc1337", "1" },
 };
 
+// --- the seal --------------------------------------------------------------------
+
+/// System calls no program here makes, refused for every process the machine
+/// will run: modify_ldt, which only 16-bit code needs and which has carried
+/// kernel exploits. design/lockdown.md's seal adds to this table.
+const denied: []const linux.SYS = switch (builtin.cpu.arch) {
+    .x86_64 => &.{.modify_ldt},
+    .aarch64 => &.{},
+    else => @compileError("init runs on aarch64 and x86_64"),
+};
+
+/// The architecture every system call must come in as. Any other, which on
+/// aarch64 is a 32-bit (AArch32) program's, kills the process: werewolf ships
+/// no 32-bit code, and the kernel has no switch to turn those calls off.
+const native_arch: u32 = switch (builtin.cpu.arch) {
+    .aarch64 => 0xc00000b7, // AUDIT_ARCH_AARCH64
+    .x86_64 => 0xc000003e, // AUDIT_ARCH_X86_64
+    else => unreachable,
+};
+
+const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
+const LD_W_ABS = 0x20;
+const JEQ_K = 0x15;
+const RET_K = 0x06;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
+const SECCOMP_RET_ERRNO: u32 = 0x00050000;
+const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
+
+/// Load the architecture; kill another; load the number; each denied number
+/// jumps to the ENOSYS at the end, as if the kernel had no such call; the
+/// rest are allowed. It reads numbers, never arguments, so the kernel
+/// caches every allowed call as allowed and runs no filter for it, and a
+/// longer table costs nothing more. What any filter costs is the kernel's
+/// slower way into every system call, about 15 ns a call (design/lockdown.md,
+/// *What the seal costs*): werewolf pays that, by choice.
+const seal_filter = blk: {
+    const n = denied.len;
+    var f: [6 + n]Filter = undefined;
+    f[0] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 4 }; // seccomp_data.arch
+    f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = native_arch };
+    f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
+    f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
+    for (denied, 0..) |sys, i| f[4 + i] = .{ .code = JEQ_K, .jt = @intCast(n - i), .jf = 0, .k = @intCast(@backingInt(sys)) };
+    f[4 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
+    f[5 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS) };
+    break :blk f;
+};
+
+/// Install the seal on PID 1, which every process inherits and none, root
+/// included, can remove until the machine reboots. PID 1 holds
+/// CAP_SYS_ADMIN, so it needs no no_new_privs, which would bind every
+/// program after it. A kernel that refuses it leaves the machine unsealed,
+/// and posture says so.
+fn seal() void {
+    const SECCOMP_SET_MODE_FILTER = 1;
+    const prog = extern struct { len: u16, filter: [*]const Filter }{ .len = seal_filter.len, .filter = &seal_filter };
+    const rc = linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog);
+    if (linux.errno(rc) != .SUCCESS) return say("not sealed: seccomp: {t}", .{linux.errno(rc)});
+    switch (builtin.cpu.arch) {
+        .x86_64 => say("sealed: modify_ldt refused for every process", .{}),
+        else => say("sealed: 32-bit system calls end the process that makes them", .{}),
+    }
+}
+
 // --- pure functions, tested below ----------------------------------------------
 
 const Cmdline = struct {
@@ -1002,6 +1087,31 @@ fn say(comptime f: []const u8, args: anytype) void {
 // --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
+
+/// What seal_filter returns for a call: the filter run as the kernel runs
+/// it, for the few instructions it uses.
+fn sealAction(arch: u32, nr: u32) u32 {
+    var a: u32 = 0;
+    var pc: usize = 0;
+    while (true) {
+        const i = seal_filter[pc];
+        switch (i.code) {
+            LD_W_ABS => a = if (i.k == 4) arch else nr,
+            JEQ_K => pc += if (a == i.k) i.jt else i.jf,
+            RET_K => return i.k,
+            else => unreachable,
+        }
+        pc += 1;
+    }
+}
+
+test seal_filter {
+    const enosys = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS);
+    for (denied) |sys| try testing.expectEqual(enosys, sealAction(native_arch, @intCast(@backingInt(sys))));
+    for ([_]linux.SYS{ .read, .write, .openat, .mmap, .futex, .getpid }) |sys| try testing.expectEqual(SECCOMP_RET_ALLOW, sealAction(native_arch, @intCast(@backingInt(sys))));
+    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000028, 0)); // AUDIT_ARCH_ARM
+    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000003, 0)); // AUDIT_ARCH_I386
+}
 
 test parseCmdline {
     const c = parseCmdline("console=hvc0 werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.data=vda werewolf.victim=ab:/w werewolf.debug=1\n");

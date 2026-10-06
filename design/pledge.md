@@ -11,7 +11,7 @@ what it does, not where its libraries look.
 
 werewolf can do the same with Landlock, in two layers: one for the whole
 machine, set by `fence` before runit starts, which nothing can lift, and
-one per service, set by `jail` (shell-free.md) as it starts each one.
+one per service, set by `leash` (shell-free.md) as it starts each one.
 
 ## The machine
 
@@ -84,7 +84,7 @@ The .net files could use the same words: `connect _update dns tcp/443`.
 
 1. The mount broker, which the machine-wide rules depend on.
 2. The machine-wide rules, in `fence`.
-3. Promises in service files, with `jail`.
+3. Promises in service files, with `leash`.
 
 ## Not covered
 

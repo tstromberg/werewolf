@@ -60,6 +60,37 @@ Before runit starts, init closes, for the life of the machine:
 | ICMP redirects, IPv4 and IPv6 | a neighbour rewriting the machine's routes; none are sent either | yes |
 | `user.max_user_namespaces=0` | an ordinary user mounting its own filesystems (without `noexec`) in a private namespace, and the kernel code namespaces open to it | yes |
 | `fs.protected_symlinks=1`, `protected_hardlinks=1`, `protected_fifos=2`, `protected_regular=2` | planting a link, FIFO or file in `/tmp` for a root process to follow or write | yes |
+| `vm.mmap_rnd_bits` 33 (aarch64), 32 (x86_64) | guessing where a program's code and heap are: Alpine's defaults are 18 and 28 | yes |
+| `vm.mmap_min_addr=65536` | mapping the page a kernel null-pointer bug would read | yes |
+| `net.core.bpf_jit_harden=1` | users' socket and seccomp filters planting chosen machine code in the kernel (JIT spraying) | yes |
+| `kernel.panic_on_oops=1`, and `kernel.panic=10` if the command line gave none | a kernel left wrong by a failed exploit running on for another try | yes |
+
+None of these costs a program anything: a database or `../scan` runs as
+fast with them as without.
+
+Some hardening has no runtime switch, so it is on the kernel command line,
+which the build writes from the form ([design/lockdown.md](../design/lockdown.md),
+*Command line*): `debugfs=off`; `proc_mem.force_override=never`, so a
+process cannot rewrite its own code through `/proc/self/mem`, as a shell
+and `dd` do to run a program where nothing written may run; on x86_64
+`ia32_emulation=0`, no 32-bit system calls; on aarch64 `kvm-arm.mode=none`,
+since Alpine builds KVM into the kernel and starts it whenever a host lends
+the guest EL2, which would let root reach the host's nested
+virtualization. A form that runs virtual machines says so with an
+allowance, `kvm`, and its guests still cannot nest (`qemu-host`).
+
+Last, init seals PID 1 with a seccomp filter, which every process inherits
+and no one, root included, can remove before a reboot. It refuses
+`modify_ldt` on x86_64, which only 16-bit code needs, and on aarch64 kills
+any 32-bit system call; no setting can close either. This one costs
+something, by choice: a process under any filter enters each system call
+by the kernel's slower path, about 15 ns a call, measured at 114 against
+131 ns for `getpid`. That is 1–3% of a small `read` or `write`, a fraction
+of a percent of a CPU for a busy database, and nothing for work that
+seldom calls the kernel; it is what every program in a Docker container
+pays already. The filter's length costs nothing, so what the seal adds
+later is free ([design/lockdown.md](../design/lockdown.md), *What the seal
+costs*).
 
 What root can undo, no one else can: each guards against ordinary users,
 and against root only once services stop running as root.
@@ -147,18 +178,10 @@ cloud-init's user-data, once werewolf has committed.
   lima, prod-ssh) carry busybox, whose `sh` runs any script. The others,
   minimal and prod among them, have no shell or interpreter at all, and
   `posture` checks that they do not.
-- **Kernel settings that cost nothing, not yet set.** posture checks
-  each, and `test/posture-known` holds them open: debugfs can be mounted;
-  a process can write its own read-only code through `/proc/self/mem`
-  (`proc_mem.force_override` is Linux's default, `always`), which is how a
-  shell and `dd` run a program where nothing written may run; address
-  randomization is below the kernel's most (`vm.mmap_rnd_bits` 18 of 33 on
-  aarch64, 28 of 32 on x86_64); users' socket and seccomp filters are
-  JIT-compiled without constant blinding; an oops does not panic; on
-  x86_64, `int 0x80` and `modify_ldt(2)` work; on aarch64,
-  `vm.mmap_min_addr` is 4096. KVM is built into the aarch64 kernel, and
-  would start on a host that gives guests EL2; posture checks that
-  `/dev/kvm` is absent, which today depends on the host.
+- **Bitten machines keep bite's command line.** The updater rewrites a
+  native disk's entries with the image's kernel arguments, but not GRUB's;
+  a machine bitten before an argument was added lacks it until bitten
+  again, and posture's `kernel-cmdline` names what is missing.
 - **The host is trusted.** A hypervisor can change any guest.
 
 Phases 2 to 5 of [the design](../design/verified-boot.md) close all but the
@@ -167,20 +190,33 @@ last two.
 ## Not done, by choice
 
 Nothing here may slow what the machines run: a database, or `../scan`.
-`posture` reports these, and `make check` expects them
-([test/posture-known](../test/posture-known)).
+The one exception is the seal, whose 15 ns a system call buys what nothing
+else can (*Boot*, above).
+`posture` checks these only when asked, with `--extended`. What costs
+nothing is done in their place.
 
-- **Memory zeroed on allocation and free** (`init_on_alloc`,
-  `init_on_free`, with `slab_nomerge`, `page_alloc.shuffle` and
-  `randomize_kstack_offset`): every page and object is cleared, which
-  allocation-heavy work pays for.
-- **Forced CPU mitigations** (store bypass): every process pays, and
-  whether the flaw is there at all is the host CPU's.
-- **Strict reverse-path filtering** (`rp_filter=1`): free, but fence's
-  policy routing makes the reverse lookup look locally sent, so it waits
-  until it is shown to work with fence.
-- **Router advertisements**: IPv6 is on, and they are how most networks
-  give it a route.
+- **Freed memory wiped** (`init_on_free`): allocation-heavy work pays for
+  it. Done instead, at no cost: memory cleared as it is handed out
+  (`init_on_alloc`, the kernel's default), kernel caches kept apart
+  (`slab_nomerge`), pages handed out shuffled, and the kernel stack's
+  offset randomized (the kernel's default).
+- **Forced CPU mitigations** (Speculative Store Bypass): every process
+  would pay, and whether the flaw is there is the host CPU's; a guest under
+  a hypervisor that hides the control cannot have it at all. Done instead:
+  werewolf's own long-lived programs (dhcp, cloud, the updater, sshd and its
+  sessions) ask for it for themselves, where the CPU allows.
+- **Reverse-path filtering** (`rp_filter`), strict or loose: the kernel
+  checks a packet's source by looking up the reply as root sending it, so
+  under fence's per-user rules it would drop the replies to every
+  connection a service makes as itself (updates, cloud config, grype's
+  database). fence already takes arriving traffic only to served ports, or
+  from the ports and protocols the machine connects to, and logs impossible
+  sources.
+- **IPv6 router advertisements ignored**: IPv6 is on, and they are how most
+  networks give it a route. Done instead: taken on the machine's NIC alone,
+  and only for a route and up to four addresses, so a rogue router cannot
+  rank itself above the real one, add a route to steal one destination, or
+  flood the NIC with addresses (`network-ipv6-ra-limits`).
 
 ## Checking a machine
 
@@ -193,6 +229,7 @@ as root, on the console (`make run` gives a root shell there) or over ssh:
 | It stays up | `echo none >/sys/kernel/security/lockdown` | `Operation not permitted` |
 | Module loader | `cat /proc/sys/kernel/modules_disabled` | `1` |
 | ptrace | `cat /proc/sys/kernel/yama/ptrace_scope` | `3` |
+| The seal | `grep Seccomp: /proc/1/status` | `Seccomp: 2` |
 | It stays off | `sysctl -w kernel.yama.ptrace_scope=0` | `Invalid argument` |
 | Another process's memory | `cat /proc/1/mem` | `Permission denied` |
 | Kernel memory | `head -c1 /dev/mem` | `Operation not permitted` |

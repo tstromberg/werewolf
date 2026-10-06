@@ -16,6 +16,7 @@ sshd, for an operator to reach by key.
 | `FORM-ARCH-vmlinuz` | the kernel |
 | `minimal-ARCH-initramfs.zst` | the whole image, for direct boot |
 | `prod-ARCH-stage0.zst`, `prod-ARCH-root.erofs`, and the same for `prod-ssh` | the slot bite installs |
+| `FORM-ARCH-cmdline` | the kernel arguments the image asks for, which bite puts in GRUB's entries |
 | `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest, signed |
 | `minimal.lock.json`, `prod.lock.json`, `prod-ssh.lock.json`, `stage0.lock.json`, `kernel.lock.json` | every package, pinned: apko's locks |
 | `inputs` | what the release was built from |

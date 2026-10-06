@@ -32,14 +32,20 @@ Times read as "2 hours ago", with the moment itself on hover. The logo is
 
 | Piece | Runs as | Does |
 | --- | --- | --- |
-| `status` (`status/status.zig`) | root | writes the page every minute; once an hour, and at start, runs grype and keeps a summary |
-| grype | `grype` | scans the root (`dir:/`, without `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`, `/victim`) |
-| nginx | root master, `nginx` workers | serves `index.html` from `/data/svc/status/www`, `GET` only, and nothing else |
+| `status` (`status/status.zig`) | `status` | writes the page every minute, and may reach nothing on the network |
+| `scan` (the same program) | `grype` | once an hour, and at start, runs grype over the root (`dir:/`, without `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`, `/victim`) and keeps a summary for the page; the only user allowed to fetch |
+| nginx | `nginx`, master and workers | serves `index.html` from `/data/svc/status/www`, `GET` only, and nothing else; able to bind :80 and nothing else |
 | autoupdate | root | checks Wolfi and Alpine every hour (`/etc/werewolf/update-every`), and on anything newer builds the other slot and reboots into it |
 
-`/etc/sv/status/run` and `/etc/sv/nginx/run` are links to the programs
-themselves, so runsv starts them with no script between, as it starts
-every service. init, runit's stages and the updater are programs too
+nginx, status and scan are leashed ([programs.md](programs.md)): each
+`/etc/sv/NAME/run` is a link to `leash`, which reads the `service` file
+beside it and starts the service as its own user, never root, under a
+Landlock ruleset of what that file names. nginx may bind :80, read its
+configuration and the page, and nothing else. The page writer reads
+`/data/svc` and `/run/werewolf`, writes its own directory, and may reach
+nothing on the network. The scan reads the whole image, writes only its
+own directory, and runs nothing but grype. No script stands between runsv
+and any of them. init, runit's stages and the updater are programs too
 ([design/shell-free.md](../design/shell-free.md)), so the image carries no
 shell, interpreter or download tool at all, which `posture` checks at
 every boot.
@@ -57,12 +63,12 @@ they consist of the characters IDs use.
 ## What it keeps
 
 ```
-/data/svc/status/
+/data/svc/status/      the page's, owned by the status user
     www/index.html     the page
+/data/svc/scan/        the scan's, owned by the grype user
     scan.json          the last grype run's findings, which the page shows
     scan-error         why the last run did not finish, while it did not
-/data/svc/grype/       grype's own, owned by the grype user
-    db/                its vulnerability database
+    db/                grype's vulnerability database
     tmp/               its downloads, emptied before each run
 /data/svc/autoupdate/  the updater's log and reports (the patch history),
                        and its package cache

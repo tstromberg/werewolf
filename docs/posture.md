@@ -36,6 +36,13 @@ and then the whole report as JSON:
 posture: fail=programs-no-shell,programs-services-no-shell pass=37 skip=0 {"tool":"posture",…}
 ```
 
+`--extended` adds the checks werewolf fails by choice, because meeting
+them would slow what the machine runs, or is not yet shown to work with
+fence: wiping freed memory, forced CPU mitigations, strict
+reverse-path filtering, and ignoring IPv6 router advertisements
+([security.md](security.md), "Not done, by choice"). It combines with
+`--json` or `--line`.
+
 Where it is safe, a check tests rather than reads:
 
 - **One-way settings** (lockdown, the module loader, ptrace, BPF) must read
@@ -61,9 +68,14 @@ Where it is safe, a check tests rather than reads:
 It reads no other process's memory and opens no `/dev/mem`: both would put
 lines in the kernel log on every boot.
 
+A werewolf machine whose form took back a default when it was built, as
+`qemu-host` takes `kvm`, says so under its first line (`Its form allows:
+kvm`) and in the JSON's `allow`. The checks still measure it: such a
+machine fails `kernel-no-hypervisor`, because it has one.
+
 | Area | Checks |
 | --- | --- |
-| kernel | lockdown, module loading closed, signed modules only, kexec, ptrace, BPF, kernel pointers and log, perf events, user namespaces, io_uring, SysRq, core dumps, no hypervisor (`/dev/kvm`), no debugfs, `/proc/self/mem` cannot write read-only memory, 32-bit and 16-bit system calls (x86_64), full address randomization, low memory unmappable, users' BPF JIT hardened, an oops panics, no userfaultfd for users, no vsyscall page, no core dumps at all (PID 1's hard limit), memory hardening on the kernel command line (`init_on_alloc`, `init_on_free`, `slab_nomerge`, `page_alloc.shuffle`, `randomize_kstack_offset`), no CPU flaw the kernel reports `Vulnerable`, no rarely used protocols, filesystems or buses (SCTP, DCCP, TIPC, squashfs, usb-storage, Thunderbolt and the like) |
+| kernel | lockdown, module loading closed, signed modules only, kexec, ptrace, BPF, kernel pointers and log, perf events, user namespaces, io_uring, SysRq, core dumps, no hypervisor (`/dev/kvm`), and where one runs its guests cannot nest, booted with every kernel argument the image asks for (`/usr/share/werewolf/cmdline`), no debugfs, `/proc/self/mem` cannot write read-only memory, 32-bit and 16-bit system calls (x86_64), every process under PID 1's seccomp filter, full address randomization, low memory unmappable, users' BPF JIT hardened, an oops panics, no userfaultfd for users, no vsyscall page, no core dumps at all (PID 1's hard limit), memory hardening on the kernel command line (`init_on_alloc`, `init_on_free`, `slab_nomerge`, `page_alloc.shuffle`, `randomize_kstack_offset`), no CPU flaw the kernel reports `Vulnerable`, no rarely used protocols, filesystems or buses (SCTP, DCCP, TIPC, squashfs, usb-storage, Thunderbolt and the like) |
 | processes | hidden from other users, no setuid or setgid files, web server workers unprivileged |
 | programs | no shell, downloaders, interpreters, compilers, debuggers, module tools or network configuration tools; every runit service starts from a program, not a script |
 | files | read-only root, `nosuid`/`noexec`/`nodev` on every mount, no program runs from a writable place or a memfd, link and FIFO protections, every directory anyone may write is sticky and no file outside the temporary directories is writable by everyone, the account files (`passwd`, `group`, `shadow`, `gshadow`, wherever their links lead) root's alone, only root has uid 0 and no account has an empty password, `/victim` read-only |

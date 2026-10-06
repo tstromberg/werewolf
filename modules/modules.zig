@@ -72,14 +72,17 @@ pub fn main() void {
     const closed = linux.errno(got) == .SUCCESS and got > 0 and state[0] == '1';
     const door = if (closed) "closed" else "STILL OPEN";
     if (result) |r| {
-        say("modules: {d} of {d} loaded; the loader is {s}\n", .{ r.count - r.refused, r.count, door });
+        if (r.absent > 0)
+            say("modules: {d} of {d} loaded, {d} with no hardware here; the loader is {s}\n", .{ r.count - r.refused - r.absent, r.count, r.absent, door })
+        else
+            say("modules: {d} of {d} loaded; the loader is {s}\n", .{ r.count - r.refused, r.count, door });
         linux.exit_group(if (r.refused == 0 and closed) 0 else 1);
     }
     say("modules: the loader is {s}\n", .{door});
     linux.exit_group(1);
 }
 
-const Result = struct { count: usize, refused: usize };
+const Result = struct { count: usize, refused: usize, absent: usize };
 
 /// Check, read, open, pledge, load: everything but closing the loader.
 fn load() !Result {
@@ -111,11 +114,18 @@ fn load() !Result {
     try pledge();
 
     var refused: usize = 0;
+    var absent: usize = 0;
     for (fds[0..count], mods[0..count]) |fd, m| {
         const rc = linux.syscall3(.finit_module, @bitCast(@as(isize, fd)), @intFromPtr(m.params.ptr), 0);
         switch (linux.errno(rc)) {
             .SUCCESS => if (m.params.len > 0) say("modules: {s}: loaded with {s}\n", .{ m.path, m.params }),
             .EXIST => {}, // built in, or loaded already
+            // The module's hardware is not here, as for one CPU vendor's
+            // KVM on the other's: nothing is wrong, and nothing loaded.
+            .NODEV, .OPNOTSUPP => |e| {
+                say("modules: {s}: no hardware for it ({t})\n", .{ m.path, e });
+                absent += 1;
+            },
             else => |e| {
                 say("modules: {s}: refused by the kernel: {t}\n", .{ m.path, e });
                 refused += 1;
@@ -123,7 +133,7 @@ fn load() !Result {
         }
         close(fd);
     }
-    return .{ .count = count, .refused = refused };
+    return .{ .count = count, .refused = refused, .absent = absent };
 }
 
 fn describe(err: anyerror) []const u8 {

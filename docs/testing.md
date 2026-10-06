@@ -110,10 +110,15 @@ on the console once its services settle; with `werewolf.check=1`, which
 only `make check` sets, posture also makes the attacks that write to the
 kernel log, and proves each refusal by the kernel's own line.
 [test/boot](../test/boot) waits for that line before anything else and
-fails the machine unless the checks that fail are exactly the form's line
-in [test/posture-known](../test/posture-known): a new failure fails, and so
+fails the machine unless the checks that fail are exactly those
+[test/posture-known](../test/posture-known) gives the form and the
+architecture: a new failure fails, and so
 does a known one that starts passing, until it leaves the list and the
 docs say so. A new protection belongs in posture/posture.zig.
+
+A form that serves ssh is also logged into from the host, as an operator
+would, through a forwarded port: root's key from the config gets in, a
+session cannot forward a port past fence, and only keys are offered.
 
 `test/checks` holds the rest, the boot's own behaviour: the network, the
 services, `/data`, the slot's commit. A check is one line: a kind, a name

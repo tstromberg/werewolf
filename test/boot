@@ -75,7 +75,7 @@ expect {
 }
 set known [lsort -unique [regexp -all -inline {[^\s,]+} [expr {[info exists env(POSTURE_KNOWN)] ? $env(POSTURE_KNOWN) : ""}]]]
 set got [lsort -unique [split $got ,]]
-# ?ID: may fail or not, as the host decides (a CPU flaw the host's CPU has).
+# ?ID: may fail or not, as the host decides (test/posture-known).
 set maybe {}
 set sure {}
 foreach id $known {
@@ -96,6 +96,58 @@ if {$passed < 20} {
 	incr failed
 } else {
 	say ok posture
+}
+
+# Run a command on the host while the console is read, so QEMU, whose
+# console would otherwise fill and stall it, keeps the machine answering.
+# Returns its exit status and output.
+proc host {cmd} {
+	global spawn_id
+	set console $spawn_id
+	spawn -noecho {*}$cmd
+	set cmd_id $spawn_id
+	set out ""
+	expect {
+		-timeout 60
+		-i $cmd_id -re ".+" { append out $expect_out(0,string); exp_continue }
+		-i $cmd_id eof {}
+		-i $console -re ".+" { exp_continue }
+		-i $console eof { give_up "QEMU exited" }
+		timeout { catch {close -i $cmd_id} }
+	}
+	lassign [wait -i $cmd_id] pid sid os_error status
+	set spawn_id $console
+	return [list $status $out]
+}
+
+# A machine that serves ssh, from the host, as an operator would: root's key
+# from the config logs in; a session cannot forward a port, which would
+# carry traffic past fence; and passwords are not offered at all. In that
+# order, since sshd holds a failed login against its source for a while.
+if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
+	set ssh [list ssh -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes]
+	set key [list -i $env(SSH_KEY)]
+	set in 0
+	for {set i 0} {$i < 30 && !$in} {incr i} {
+		lassign [host [list {*}$ssh {*}$key root@127.0.0.1 id -u]] status out
+		if {$status == 0 && [string trim $out] eq "0"} { set in 1 } else { after 1000 }
+	}
+	if {$in} { say ok ssh-login } else { say FAIL ssh-login "root's key did not log in:\n$out"; incr failed }
+	lassign [host [list {*}$ssh {*}$key -o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 root@127.0.0.1 true]] status out
+	if {$status != 0 && [string match "*forwarding failed*" $out]} {
+		say ok ssh-no-forwarding
+	} else {
+		say FAIL ssh-no-forwarding "a session could forward a port:\n$out"
+		incr failed
+	}
+	lassign [host [list {*}$ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive root@127.0.0.1 true]] status out
+	if {$status != 0 && [string match "*Permission denied (publickey)*" $out]} {
+		say ok ssh-keys-only
+	} else {
+		say FAIL ssh-keys-only "something but a key was offered:\n$out"
+		incr failed
+	}
 }
 
 if {$checks eq "-"} {

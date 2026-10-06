@@ -70,6 +70,11 @@ const providers = [_]Provider{
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
+    // Speculative Store Bypass mitigated for this process and all it starts,
+    // which werewolf leaves to each program, so workloads do not pay
+    // (docs/security.md). Where the CPU has no control, the kernel refuses
+    // and nothing changes.
+    _ = linux.prctl(@backingInt(linux.PR.SET_SPECULATION_CTRL), linux.PR.SPEC_STORE_BYPASS, linux.PR.SPEC_FORCE_DISABLE, 0, 0);
     var log: Log = .{};
     run(&log) catch |err| {
         log.event("error", .{ .step = step, .@"error" = @errorName(err), .detail = detail, .errno = errnoName(detail_errno) });

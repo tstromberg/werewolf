@@ -63,6 +63,11 @@ const zero: Ip4 = .{ 0, 0, 0, 0 };
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
+    // Speculative Store Bypass mitigated for this process and all it starts,
+    // which werewolf leaves to each program, so workloads do not pay
+    // (docs/security.md). Where the CPU has no control, the kernel refuses
+    // and nothing changes.
+    _ = linux.prctl(@backingInt(linux.PR.SET_SPECULATION_CTRL), linux.PR.SPEC_STORE_BYPASS, linux.PR.SPEC_FORCE_DISABLE, 0, 0);
     const args = try init.minimal.args.toSlice(gpa);
     // runsv starts a service's ./run with no arguments: run under that
     // name, as the dhcp service's run links here, it keeps the lease.

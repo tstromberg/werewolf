@@ -69,8 +69,14 @@ endif
 # forced writes through /proc/PID/mem, how a program rewrites its own code;
 # on x86_64 no 32-bit system calls; on aarch64 no KVM, which the kernel
 # builds in and starts whenever a host lends the guest EL2, unless the form
-# allows it, and nested only if it allows that too.
-KERNEL_ARGS = debugfs=off proc_mem.force_override=never
+# allows it, and nested only if it allows that too. Each kernel cache kept
+# apart (slab_nomerge), so an object freed in one cannot be taken over by
+# an attacker's of another type that shares it, and pages handed out in a
+# shuffled order: neither costs a program anything. init_on_alloc and the
+# kernel stack's random offset are Alpine's kernel's defaults already;
+# init_on_free, which costs allocation-heavy work, is left off by choice
+# (docs/security.md).
+KERNEL_ARGS = debugfs=off proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1
 ifeq ($(ARCH),aarch64)
 KERNEL_ARGS += $(if $(filter nested-kvm,$(ALLOW)),kvm-arm.mode=nested,$(if $(filter kvm,$(ALLOW)),,kvm-arm.mode=none))
 else
@@ -367,7 +373,7 @@ $(FENCE_BIN): fence/fence.zig
 $(NET_BIN): net/net.zig
 	$(zig_build)
 
-$(PROGRAMS)/updater/usr/lib/werewolf/update: updater/update.zig updater/sandbox.zig
+$(PROGRAMS)/updater/usr/lib/werewolf/update: updater/update.zig updater/sandbox.zig updater/cve.zig
 	$(zig_build)
 
 $(PROGRAMS)/status/usr/lib/werewolf/status: status/status.zig
@@ -671,9 +677,12 @@ check-form:
 	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 status=none
 	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
 		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
+		$(if $(CHECK_SSH),rm -f $(CHECK)/$(FORM)-key $(CHECK)/$(FORM)-key.pub && \
+			ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f $(CHECK)/$(FORM)-key && \
+			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/authorized_keys &&) \
 		COPYFILE_DISABLE=1 $(TAR) --uid 0 --gid 0 --numeric-owner -cf $(CHECK)/$(FORM)-config.tar -C $(CHECK)/$(FORM)-config .
-	@test/boot $(FORM) test/checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
-	@test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
+	@SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) test/checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
+	@SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
 	@! grep -a -E 'werewolf: (formatting|making LUKS2) ' $(CHECK)/$(FORM)-again.log || \
 		{ echo "FAIL   $(FORM)-again        formatted the disk its first boot left"; exit 1; }
 
@@ -694,7 +703,13 @@ check-shellfree-boot:
 		-drive file=$(CHECK)/$(FORM)-shellfree.img,format=raw,if=virtio
 
 # The same disks both times: the second boot must find what the first left.
-CHECK_FORM_QEMU = $(CHECK_QEMU) \
+# A form that serves ssh, as its policy declares, is logged into from here
+# on both its boots (test/boot): with a key made for the run, in its config,
+# through port 22 forwarded from a port of its own, so forms boot side by
+# side.
+comma := ,
+CHECK_SSH = $(if $(shell cat $(wildcard $(addprefix forms/,$(addsuffix .net,$(CHAIN)))) /dev/null | grep -x 'listen tcp/22'),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 22200 + $$1 }'))
+CHECK_FORM_QEMU = $(if $(CHECK_SSH),$(subst user$(comma)id=n0,user$(comma)id=n0$(comma)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22,$(CHECK_QEMU)),$(CHECK_QEMU)) \
 	-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
 	-drive file=$(CHECK)/$(FORM).img,format=raw,if=virtio \
 	-drive file=$(CHECK)/$(FORM)-config.tar,format=raw,if=virtio,readonly=on

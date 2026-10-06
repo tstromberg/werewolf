@@ -116,7 +116,9 @@ read-only `/proc/sys` with `CAP_SYS_ADMIN` dropped stops remounting it (see
 
 A seccomp filter is inherited by every child and every exec, and can never
 be removed, by root or anyone. Installed by init just before runit, it
-covers every process the machine will run. It denies, with `EPERM`:
+covers every process the machine will run. It denies, with `ENOSYS`, as
+a kernel built without them would answer, so a program that probes for one
+falls back:
 
 | Syscalls | Why |
 | --- | --- |
@@ -130,18 +132,55 @@ covers every process the machine will run. It denies, with `EPERM`:
 | `add_key`, `keyctl`, `request_key` | the kernel keyring; cryptsetup's use of it is over before init hands over |
 | `process_vm_readv`, `process_vm_writev` | read or write another process; Yama already refuses, denied again for the trail |
 | `acct`, `swapon`, `swapoff`, `quotactl`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `syslog`, `vhangup` | unused here; old, rarely audited code |
+| `modify_ldt` (x86_64) | the LDT, which only 16-bit code needs, and a past exploit primitive; `ia32_emulation=0` already closes `int 0x80`. Done |
+
+Done so far: init installs the filter itself (`seal()`, init/init.zig),
+with `modify_ldt` on x86_64 and the architecture check below; the rest of
+the table waits for the allowances that would give each back. posture's
+`kernel-seal` checks PID 1 carries a filter, and `kernel-legacy` that
+`modify_ldt` is refused.
 
 The filter looks at syscall numbers only, never arguments. The kernel
 (5.11 and later) then caches, per syscall, that the filter always allows it,
-and skips the filter entirely on those calls: every syscall a workload
-makes costs what it does today.
+and skips the filter on those calls, so the table's length costs nothing.
+
+#### What the seal costs
+
+Not nothing, and the only thing in this design that is not. A process
+under any seccomp filter enters every system call through the kernel's
+slower path, which checks the cache; without one it does not. Measured on
+2026-10-06, 20 million `getpid` calls in an Ubuntu 26.04 VM (Linux 7.0,
+arm64, Apple M4 Max), twice each:
+
+| Filter | ns a call |
+| --- | --- |
+| none | 114–115 |
+| one instruction, allow everything | 131–133 |
+| the seal | 131–132 |
+| 200 comparisons | 129–133 |
+
+So about 15 ns a system call, whatever the filter holds: the cache works,
+and the cost is having a filter at all. `getpid` is the cheapest call
+there is; against a `read` or `write` of a few kilobytes, which take 0.5 to
+1 µs, it is 1–3%, and a busy database making a few hundred thousand calls a
+second spends a fraction of a percent of a CPU on it. Work that seldom
+calls the kernel, as `../scan` matching rules, pays nothing. Every program
+in a Docker container pays the same already, under Docker's default
+filter. Not yet measured on werewolf's own kernel (Alpine's 6.18), whose
+slower path is the same code.
+
+werewolf pays it, by choice: it is the one way to close for good, root
+included, what no setting can (`modify_ldt` on x86_64, 32-bit system calls
+on aarch64), and every entry added to the table later costs nothing more.
+Our kernel (*Our kernel*, below) builds `modify_ldt` and the 32-bit
+interfaces out; the seal stays for the rest of the table.
 
 It is a deny list, not an allow list. An allow list for every program on
 the machine would break with each glibc or Wolfi update; per-service allow
 lists belong in the services' sandboxes, below.
 
 On a 64-bit kernel with compat syscalls built in, the filter checks the
-architecture and kills any 32-bit syscall: werewolf ships no 32-bit code,
+architecture and kills any 32-bit syscall (done): werewolf ships no 32-bit code,
 and the compat entry points are a second, separately numbered surface.
 
 ### The capability bounding set
@@ -180,6 +219,16 @@ file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
 | `ebpf` | `bpf` and `perf_event_open` in the filter; `CAP_BPF`, `CAP_PERFMON`, and `CAP_NET_ADMIN` for XDP and tc; lockdown stays at `integrity`; `kptr_restrict=1` and `CAP_SYSLOG`, so root can read kernel addresses, from which libbpf and bpftrace resolve symbols |
 | `packet` | `CAP_NET_RAW`: packet sockets, and the classic BPF filters on them, for tcpdump and a DHCP client |
 | `io_uring` | the io_uring syscalls in the filter, and `io_uring_disabled=0`, for workloads built on it |
+| `kvm` | KVM, to run virtual machines: on aarch64 the build leaves out `kvm-arm.mode=none`; on x86_64 the form lists `kvm-intel` and `kvm-amd` in its `.modules`, and the build loads them with `nested=0`. Done: `qemu-host` |
+| `nested-kvm` | needs `kvm`: the guests may run virtual machines too, `kvm-arm.mode=nested` or `nested=1`. Done |
+
+`kvm` and `nested-kvm` are built; the rest wait for the seal. The
+Makefile holds the one list of names (`ALLOWANCES`), and a name not in it
+fails the build, as does `nested-kvm` without `kvm`. Allowances that
+change what the kernel is told at boot become data the build writes,
+`/usr/share/werewolf/cmdline` and the parameters in `werewolf.modules`, and
+everything that boots or loads the image reads that data rather than
+deciding again (*Command line*, below).
 
 Even with `ebpf`, root cannot write user memory from BPF
 (`bpf_probe_write_user`, refused at `integrity`), let other users load BPF,
@@ -213,14 +262,17 @@ form takes them from its chain or carries the files itself.
 
 ### The helper
 
-busybox cannot install a seccomp filter or change the bounding set. One
-static Zig program, `/usr/lib/werewolf/jail`, does both, and the per-service
-sandboxing below. It has no dependencies beyond Zig's standard library. The
+busybox cannot install a seccomp filter or change the bounding set. init,
+now a Zig program, installs PID 1's filter itself, and will drop the
+bounding set the same way, so the seal needs no helper. One static Zig
+program, `/usr/lib/werewolf/leash`, is still the plan for the per-service
+sandboxing below; what follows describes it as first designed, sealing
+too. It has no dependencies beyond Zig's standard library. The
 filter and the dropped capabilities are fixed tables compiled into it, less
 what `/etc/werewolf/allow` names. init ends with:
 
 ```sh
-exec /usr/lib/werewolf/jail -seal -- runit
+exec /usr/lib/werewolf/leash -seal -- runit
 ```
 
 `-seal` sets `no_new_privs`, drops the bounding set, installs the filter,
@@ -242,7 +294,7 @@ for every form.
 ### Services
 
 The README says services must sandbox themselves; in practice none do.
-Each service is started by `jail`, which works like OpenBSD's `unveil` and
+Each service is started by `leash`, which works like OpenBSD's `unveil` and
 `pledge`, from a `service` file in its directory that replaces the `run`
 script. [shell-free.md](shell-free.md) defines the format; cloudflared's is:
 
@@ -259,17 +311,19 @@ connect tcp/443 tcp/7844
 | `read`, `write`, `run` | Landlock filesystem rules: everything else is invisible to reads and writes, and cannot be run |
 | `listen`, `connect` | Landlock TCP rules (ABI 4, Linux 6.7): the ports it may bind and reach |
 | (always) | Landlock scoping (ABI 6, Linux 6.12): no abstract UNIX sockets or signals outside its own domain |
-| (always) | `no_new_privs`, then a second seccomp filter: the PID 1 list, plus `mount`, `umount2`, `pivot_root`, `chroot`, `unshare`, `setns` and `reboot` |
+| (always) | `no_new_privs`, an empty bounding set and no capabilities, but `CAP_NET_BIND_SERVICE` for a port below 1024: `mount`, `umount2`, `pivot_root`, `chroot`, `unshare`, `setns` and `reboot` are refused by the kernel already, with user namespaces off, so a second seccomp filter would add nothing; the seal's covers the rest |
 
-Landlock checks run on path lookup and connect; seccomp runs from the
-cache. Neither shows in a benchmark.
+Landlock checks run on path lookup and connect; nothing of leash runs once
+the service has started. leash starts no service as root: one that needs
+root (sshd, the updater) sandboxes itself or is not yet sandboxed, below.
 
 | Service | Runs as | Notes |
 | --- | --- | --- |
+| nginx, the demo's status page and scan | their own users | leashed (docs/demo.md) |
 | cloudflared | `cloudflared` | its QUIC to Cloudflare is UDP, which Landlock cannot restrict yet |
-| sshd | root | its privilege separation needs root; it is for test forms, and leaves production (roadmap) |
-| autoupdate | root | needs `mount` and `reboot`; Landlock keeps it to the root image, `/data/svc/autoupdate` and the slots; TCP to 443 only |
-| commit, powerbtn, console | root | each a few lines of shell; Landlock to what each touches |
+| sshd | root | not leashed: its privilege separation needs root; it is for test forms, and leaves production (roadmap) |
+| autoupdate | root | not leashed: needs `mount` and `reboot`; its fetching and parsing run in children as `_update`, under Landlock and seccomp (docs/updater.md) |
+| commit, powerbtn, console | root | not leashed: small programs of werewolf's own |
 
 ### Posture
 
@@ -289,19 +343,27 @@ or, on `prod-ebpf`, that a BPF program loads and
 
 ### Command line
 
-Some hardening has no runtime switch. These go on the command line that
-`bite`, the Makefile and `lima.yaml.in` write, and become build defaults in
-our kernel:
+Some hardening has no runtime switch. The build writes what the image asks
+for, from its architecture and allowances (Makefile, `KERNEL_ARGS`), into
+the image as `/usr/share/werewolf/cmdline` and beside it as the slot's
+`cmdline`. bite and `disk/build` write it into the entries they make; the
+Makefile's `run` and `check` and `lima.yaml` pass it; the updater's next
+entry takes it from the image and replaces any argument of the same name,
+so an edited entry does not outlive an update. posture's `kernel-cmdline`
+fails a machine booted without it.
 
 | Argument | Cost | Our kernel instead |
 | --- | --- | --- |
+| `debugfs=off` | none | `# CONFIG_DEBUG_FS is not set` |
+| `proc_mem.force_override=never` | none: only debuggers write read-only memory through `/proc/PID/mem`, and ptrace is off | `CONFIG_PROC_MEM_NO_FORCE=y` |
+| `ia32_emulation=0` (x86_64) | none | `# CONFIG_IA32_EMULATION is not set` |
+| `kvm-arm.mode=none` (aarch64, unless `kvm`) | none | none: one kernel serves `qemu-host` too |
 | `slab_nomerge` | a little memory: caches of the same size stay apart, so one overflow cannot reach another type | `# CONFIG_SLAB_MERGE_DEFAULT is not set` |
 | `page_alloc.shuffle=1` | none measurable | `CONFIG_SHUFFLE_PAGE_ALLOCATOR=y` |
-| `debugfs=off` | none | `# CONFIG_DEBUG_FS is not set` |
-| `ia32_emulation=0` (x86_64) | none | `# CONFIG_IA32_EMULATION is not set` |
 
-Machines bitten before this keep their old GRUB entries until bite writes
-new ones; the runtime layers above reach them regardless.
+All are done. Machines bitten before this keep bite's GRUB entries, which the
+updater does not rewrite; they get the arguments when bitten again, and
+posture's `kernel-cmdline` says which are missing.
 
 ### Our kernel
 
@@ -356,11 +418,12 @@ Each phase ships on its own.
    `/dev/shm`, with `/run` root's alone, all through werewolf's one-way
    `mount` (mount/mount.zig), which also keeps a mount from being loosened
    by werewolf's own scripts. The seal is what will stop root.
-2. **The seal**: `jail -seal` in front of runit, with the PID 1 filter and
-   bounding set, less the allowances. Closes eBPF, perf, io_uring and the
-   rest for good on every form that did not ask for them.
+2. **The seal**: init's PID 1 filter and bounding set, less the
+   allowances. Closes eBPF, perf, io_uring and the rest for good on every
+   form that did not ask for them. Begun: the filter, with `modify_ldt`
+   and the 32-bit check.
 3. **`prod-ebpf`**, and CI booting it with a BPF program.
-4. **Services**: their own users, and each `run` script through `jail`.
+4. **Services**: their own users, and each `run` script through `leash`.
 5. **Posture**: the boot line, the check in `commit`, and CI's boot test.
 6. **Our kernel's config**, with verified-boot.md phase 4.
 

@@ -128,6 +128,7 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 | `prod-ssh` | prod | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.4 MB | 9.5 MB | 33 |
 | `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 13.8 MB | 10.9 MB | 39 |
 | `demo` | prod | nginx, grype, a status page; updates hourly ([docs/demo.md](docs/demo.md)) | a directory on the victim | :80 | 30.5 MB | 27.5 MB | 32 |
+| `qemu-host` | sshd | QEMU, KVM: runs virtual machines of its own, whose guests cannot nest; allows `kvm` | RAM | :22 | 48 MB | | 77 |
 
 1. **Forms build on each other with apko's `include:`.** The Makefile
    follows the chain, laying on each form's files and modules, base first.
@@ -140,6 +141,13 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
    asks the network's DHCP server.
 3. **Storage forms carry only packages and modules.** init builds `/data`
    from whichever tools are present ([docs/data.md](docs/data.md)).
+4. **A form takes back a default only by an allowance**, an empty file
+   `etc/werewolf/allow/NAME` in its folder: `kvm`, to run virtual machines,
+   and `nested-kvm`, to let their guests run them too. The build turns
+   them into the image's kernel arguments and module parameters; nothing
+   on the machine reads one from its command line or config. A name the
+   Makefile does not know fails the build
+   ([design/lockdown.md](design/lockdown.md), *Allowances*).
 
 No form ships a setuid or setgid file.
 
@@ -149,7 +157,7 @@ To build without booting:
 
 ```sh
 make                 # build/<arch>/vmlinuz, build/<arch>/<form>/initramfs.zst
-make slot            # vmlinuz, stage0 and root.erofs, for bite
+make slot            # vmlinuz, stage0, root.erofs and cmdline, for bite
 ```
 
 Images need `apko`, `zstd` and `bsdtar`; slots also need `mkfs.erofs`.

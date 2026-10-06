@@ -87,12 +87,12 @@ requires /run/config/nginx/cert.pem /run/config/nginx/key.pem
 nofile   65536
 ```
 
-The build links `/etc/sv/nginx/run` to the launcher, `jail`. Every service
+The build links `/etc/sv/nginx/run` to the launcher, `leash`. Every service
 in the image starts at boot, because runsvdir starts every directory in
 `/etc/sv`. There is no enabling or disabling on the machine: a service is
 on because the form has it, and a machine without it is another form.
 
-At start, jail checks that the certificate and key arrived in the config
+At start, leash checks that the certificate and key arrived in the config
 and runs `nginx -t`. It then starts nginx as `nginx`, able to bind 80 and
 443 and nothing else, to read its configuration, its site and its own
 config directory, and to write its two directories. It can start no other
@@ -101,7 +101,7 @@ service with one line on the console, as `sv down .` does today.
 
 ### nginx's configuration
 
-What jail provides shapes four lines of it:
+What leash provides shapes four lines of it:
 
 ```nginx
 daemon off;                        # runsv supervises; nginx stays in the foreground
@@ -142,7 +142,7 @@ config/
     site.conf          server_name www.example.com;
 ```
 
-`/run/config/nginx` belongs to the `nginx` service: jail gives it to the
+`/run/config/nginx` belongs to the `nginx` service: leash gives it to the
 service's user before starting it. The image's configuration includes the
 per-machine part by name. There is no templating at boot, because there is
 nothing to run a template; a program that cannot include a file takes its
@@ -165,13 +165,13 @@ One directive per line: a key, then words separated by spaces. Double
 quotes group words; there are no escapes, variables or expansions. `#`
 starts a comment. Unknown keys, a repeated key that may appear once, or a
 relative path keep the service down, with the line number on the console.
-The format is small enough that jail's parser is a page, and fuzzed.
+The format is small enough that leash's parser is a page, and fuzzed.
 
 | Key | Meaning |
 | --- | --- |
 | `exec PROGRAM ARG...` | what runs; required; an absolute path |
 | `before PROGRAM ARG...` | run first, in order, in the same sandbox; each must exit 0 |
-| `user NAME` | required; `user root` is allowed, and stands out in review |
+| `user NAME` | required; never `root`: a service that needs root is not one leash starts |
 | `listen tcp/PORT...` | the ports it may bind; one below 1024 brings `CAP_NET_BIND_SERVICE`, and nothing else, as an ambient capability |
 | `connect tcp/PORT...` | the ports it may reach; without it, none |
 | `read PATH...` | read-only beyond the floor (below) |
@@ -191,14 +191,23 @@ Every service gets, without asking:
 - `/run/config/NAME`, if the config carried it, owned by its user and
   readable.
 - **The floor**: read the image's `/usr`; read `/etc/passwd`, `/etc/group`,
-  `/etc/hosts`, `/etc/resolv.conf` and `/etc/ssl`; read `/proc` and
-  `/sys/devices/system/cpu`; write `/dev/null`, `/dev/stdout` and
-  `/dev/stderr`; read `/dev/urandom`. Libraries need only read: Landlock's
-  execute right covers `execve`, not mapping a library.
+  `/etc/hosts`, `/etc/resolv.conf`, `/etc/nsswitch.conf`,
+  `/etc/ld.so.cache`, `/etc/localtime` and `/etc/ssl`; read `/proc` and
+  `/sys/devices/system/cpu`; write `/dev/null` and the console;
+  read `/dev/zero` and `/dev/urandom`. Libraries need only read: Landlock's
+  execute right covers `execve`, not mapping a library; the program's ELF
+  loader, which the kernel opens for execution, gets it too.
 
-### What jail does
+Built (`leash/leash.zig`): every key above but `memory`, `nice`, `oom` and
+`cgroup`, and everything here but `/run/config/NAME`, which wait for a
+service that needs them. A path in `read`, `write` or `run` that another
+service has yet to make is a retry, not a park: leash exits, and runsv
+starts it again a second later. leash installs no seccomp filter: the
+seal (lockdown.md) does that once, for every process.
 
-`runsv` starts `./run` in the service's directory, which is jail. jail reads
+### What leash does
+
+`runsv` starts `./run` in the service's directory, which is leash. leash reads
 `./service`, and then:
 
 1. **As root**: checks `requires` and `secret`; makes the service's
@@ -267,10 +276,10 @@ memory  80%
 It asks werewolf for two things systemd gives it today:
 
 - **A delegated cgroup.** scan freezes and kills idle workers through a
-  cgroup v2 subtree under its own (`Delegate=yes` under systemd). jail makes
+  cgroup v2 subtree under its own (`Delegate=yes` under systemd). leash makes
   `/sys/fs/cgroup/postdoc`, hands it to `postdoc`, and allows writing it.
 - **Limits.** `nice -20` and the memory backstop (`MemoryMax=80%`) are set
-  as root before jail gives root up. The unit's `OOMScoreAdjust` is `oom`.
+  as root before leash gives root up. The unit's `OOMScoreAdjust` is `oom`.
 
 postdoc's CA roots are compiled in (rustls with webpki-roots), so the image
 needs no certificate bundle for it. Its unpackers inherit its sandbox; a
@@ -311,7 +320,7 @@ that holds no files once it sleeps.
 
 ## Debugging
 
-- **The console** carries every service's output, jail's line per start,
+- **The console** carries every service's output, leash's line per start,
   and the posture line (lockdown.md). Landlock (Linux 6.15 and later) logs
   its refusals through audit, which with no audit daemon reaches the
   console.
@@ -338,7 +347,7 @@ from `/bin/sh`.
 
 ## Phases
 
-1. **Service files.** jail reads `service` files, and the Makefile links
+1. **Service files.** leash reads `service` files, and the Makefile links
    `run` to it. cloudflared, and autoupdate with `update daemon`, convert.
    This is lockdown.md phase 4.
 2. **init and stage0 in Zig.** commit, the power button, `reboot`,
@@ -359,14 +368,14 @@ from `/bin/sh`.
 
 - **Keep the shell, and rely on Landlock.** Each service's Landlock
   ruleset already keeps it from running `/bin/sh`, which buys most of this
-  for services. It leaves root, PID 1, and anything not run through jail,
+  for services. It leaves root, PID 1, and anything not run through leash,
   and the claim is no longer one line.
 - **systemd.** Its units are the same idea, declared sandboxes included,
   and the inspiration for several keys here. It is also most of the size
   and attack surface werewolf exists to avoid.
 - **dinit, or s6 with execline.** dinit's service files are declarative;
   execline is a scripting language without a shell's parsing. Either
-  replaces runit, and neither sandboxes; jail would still be ours.
+  replaces runit, and neither sandboxes; leash would still be ours.
 - **Keep `runit-init`, with Zig stage programs.** runit runs `/etc/runit/2`
   with no arguments, so it would need a program that knows it is stage 2
   by its name. It splits the machine's life between runit's PID 1 and ours,
