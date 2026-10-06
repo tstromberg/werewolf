@@ -259,7 +259,7 @@ fn writeGlance(w: *Io.Writer, f: Facts) !void {
         const run = p.summary.pass + p.summary.fail;
         try w.print("<strong class=\"{s}\">{d} of {d} pass</strong>", .{ if (p.summary.fail == 0) "ok" else "bad", p.summary.pass, run });
         if (p.summary.fail > 0) try w.print("<span>{d} failing</span>", .{p.summary.fail});
-    } else try w.writeAll("<strong>Checking</strong><span>a minute after boot</span>");
+    } else try w.writeAll("<strong>Checking</strong><span>once the services start</span>");
     try w.writeAll("</dd></div>\n<div class=\"tile\"><dt>Last patched</dt><dd>");
     if (f.patches.len > 0) {
         const newest = f.patches[0];
@@ -309,7 +309,7 @@ fn writeSystem(w: *Io.Writer, f: Facts) !void {
     if (f.slot.len > 0) {
         try row(w, "Boot slot", &.{ f.slot, " · the other slot holds the previous release, for rollback" });
     } else try row(w, "Boot slot", &.{"none: booted directly, so it cannot update itself"});
-    try row(w, "Shell", &.{if (f.shell) "/bin/sh: package scripts and the console and sshd services still use it; nginx and this page do not" else "none"});
+    try row(w, "Shell", &.{if (f.shell) "/bin/sh: built in for debugging; no service uses it" else "none"});
     try row(w, "/data", &.{f.data});
     try w.writeAll("</tbody></table></div>\n");
 }

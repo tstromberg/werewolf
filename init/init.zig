@@ -41,6 +41,7 @@
 //! sends the machine back to its last good slot.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -79,6 +80,11 @@ pub fn main(init: std.process.Init) !void {
     // binding only declared TCP ports and the metadata server only for those
     // named, then becomes runit, so every process inherits it. If it cannot,
     // PID 1 ends, and the machine falls back to the slot that last worked.
+    // No core dumps, by anyone it starts: a crash leaves no copy of a
+    // program's memory, and its secrets, behind. A hard limit, so no
+    // process can raise its own.
+    const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
+    if (linux.errno(linux.setrlimit(.CORE, &no_core)) != .SUCCESS) say("core dumps not limited", .{});
     say("up in {s}s, handing over to runit", .{firstWord(m.read("/proc/uptime"))});
     const err = std.process.replace(m.io, .{ .argv = &.{ "/usr/lib/werewolf/fence", "/usr/bin/runit" }, .environ_map = &m.env });
     say("cannot start fence: {s}", .{@errorName(err)});
@@ -159,7 +165,21 @@ const Machine = struct {
         for (sysctls) |kv| {
             if (!writeFile(m.fmtZ("/proc/sys/{s}", .{kv[0]}), kv[1])) all = false;
         }
+        // Redirects, per interface: a host takes or sends them on one if all
+        // or the interface says so, and all and default do not reach the
+        // interfaces stage0's drivers made before now. IPv6 has only the
+        // interface's own setting.
+        for (m.list("/proc/sys/net/ipv4/conf")) |c| for ([_][]const u8{ "accept_redirects", "secure_redirects", "send_redirects" }) |k| {
+            if (!writeFile(m.fmtZ("/proc/sys/net/ipv4/conf/{s}/{s}", .{ c, k }), "0")) all = false;
+        };
+        for (m.list("/proc/sys/net/ipv6/conf")) |c| {
+            if (!writeFile(m.fmtZ("/proc/sys/net/ipv6/conf/{s}/accept_redirects", .{c}), "0")) all = false;
+        }
         if (!all) say("some sysctls were not applied", .{});
+        // A panic reboots in the seconds the command line gave (bite's and
+        // disk/build's say 10), or, given none, in 10: the kernel's own
+        // default is to hang, and an oops now panics.
+        if (std.mem.eql(u8, trim(m.read("/proc/sys/kernel/panic")), "0") and !writeFile("/proc/sys/kernel/panic", "10")) say("kernel.panic not set; a panic will hang", .{});
     }
 
     // --- the network ---------------------------------------------------------
@@ -198,7 +218,7 @@ const Machine = struct {
             if (std.mem.eql(u8, n, "lo")) continue;
             if (m.cmd.mac.len == 0) return n;
             const addr = trim(m.read(m.fmt("/sys/class/net/{s}/address", .{n})));
-            if (std.mem.eql(u8, addr, m.cmd.mac)) return n;
+            if (std.ascii.eqlIgnoreCase(addr, m.cmd.mac)) return n;
         }
         return "";
     }
@@ -281,14 +301,17 @@ const Machine = struct {
     fn nocloud(m: *Machine) void {
         const nc = parseNoCloud(m.gpa, m.read("/mnt/user-data")) catch return;
         if (nc.user.len > 0) {
-            if (isPlainUser(nc.user) and isPlainUid(nc.uid) and !hasEntry(m.read("/run/werewolf/passwd"), nc.user)) {
+            const passwd = m.read("/run/werewolf/passwd");
+            if (isPlainUser(nc.user) and isPlainUid(nc.uid) and !hasEntry(passwd, nc.user) and
+                !idInUse(passwd, nc.uid) and !idInUse(m.read("/run/werewolf/group"), nc.uid))
+            {
                 m.append("/run/werewolf/passwd", m.fmt("{s}:x:{s}:{s}::/data/home/{s}:/bin/ash\n", .{ nc.user, nc.uid, nc.uid, nc.user }));
                 m.append("/run/werewolf/group", m.fmt("{s}:x:{s}:\n", .{ nc.user, nc.uid }));
                 m.append("/run/werewolf/shadow", m.fmt("{s}:*:0:0:99999:7:::\n", .{nc.user}));
                 m.keys(nc.user, nc.keys);
                 m.nocloud_user = nc.user;
             } else {
-                say("NoCloud user '{s}' (uid {s}) refused: not a plain name and uid", .{ nc.user, nc.uid });
+                say("NoCloud user '{s}' (uid {s}) refused: not a plain name, or a uid from 500 to 60000 no account has", .{ nc.user, nc.uid });
             }
         }
         // Lima's readiness probe reads the instance-id back from here; it is
@@ -664,8 +687,25 @@ const Machine = struct {
 /// /tmp only when asked. Root could undo these; no one else can. io_uring,
 /// a large kernel interface nothing here uses, is off; the magic SysRq keys
 /// are off (stage0's deadman writes /proc/sysrq-trigger, which they do not
-/// govern); ICMP redirects are neither taken nor sent. See docs/security.md.
+/// govern); ICMP redirects are neither taken nor sent (and, per interface,
+/// in kernel(), above); packets from impossible addresses are logged; pings
+/// to a broadcast address and bogus ICMP errors are ignored, and a forged
+/// reset cannot cut short a closing connection (RFC 1337). Programs' addresses
+/// are randomized as far as the kernel allows (4K pages, 48-bit addresses),
+/// the first 64 KiB cannot be mapped, the filters any user may install are
+/// compiled with their constants blinded, and an oops panics, so a kernel
+/// a failed exploit left wrong reboots rather than runs on; kernel.panic,
+/// below, makes the panic a reboot. None of it costs a program anything.
+/// See docs/security.md.
 const sysctls = [_][2][]const u8{
+    .{ "vm/mmap_rnd_bits", switch (builtin.cpu.arch) {
+        .aarch64 => "33",
+        .x86_64 => "32",
+        else => @compileError("init runs on aarch64 and x86_64"),
+    } },
+    .{ "vm/mmap_min_addr", "65536" },
+    .{ "net/core/bpf_jit_harden", "1" },
+    .{ "kernel/panic_on_oops", "1" },
     .{ "kernel/kptr_restrict", "2" },
     .{ "kernel/dmesg_restrict", "1" },
     .{ "kernel/unprivileged_bpf_disabled", "1" },
@@ -679,12 +719,11 @@ const sysctls = [_][2][]const u8{
     .{ "fs/protected_regular", "2" },
     .{ "kernel/io_uring_disabled", "2" },
     .{ "kernel/sysrq", "0" },
-    .{ "net/ipv4/conf/all/accept_redirects", "0" },
-    .{ "net/ipv4/conf/default/accept_redirects", "0" },
-    .{ "net/ipv4/conf/all/send_redirects", "0" },
-    .{ "net/ipv4/conf/default/send_redirects", "0" },
-    .{ "net/ipv6/conf/all/accept_redirects", "0" },
-    .{ "net/ipv6/conf/default/accept_redirects", "0" },
+    .{ "net/ipv4/conf/all/log_martians", "1" },
+    .{ "net/ipv4/conf/default/log_martians", "1" },
+    .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" },
+    .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" },
+    .{ "net/ipv4/tcp_rfc1337", "1" },
 };
 
 // --- pure functions, tested below ----------------------------------------------
@@ -799,12 +838,27 @@ fn isPlainUser(s: []const u8) bool {
     return true;
 }
 
-/// A NoCloud uid: [1-9][0-9]{3,8}, so 1000 and up, never root's or a
-/// system account's.
+/// A NoCloud uid: 500 to 60000, written plainly, so macOS's users (501
+/// and up, which Lima passes on) fit and root's never does. Taking a system
+/// account's is stopped by idInUse, not by the range.
 fn isPlainUid(s: []const u8) bool {
-    if (s.len < 4 or s.len > 9 or s[0] == '0') return false;
+    if (s.len == 0 or s.len > 5 or s[0] == '0') return false;
     for (s) |c| if (!std.ascii.isDigit(c)) return false;
-    return true;
+    const n = std.fmt.parseInt(u32, s, 10) catch return false;
+    return n >= 500 and n <= 60000;
+}
+
+/// Whether an /etc/passwd- or /etc/group-like file already has id as an
+/// entry's third field: its uid, or its gid.
+fn idInUse(text: []const u8, id: []const u8) bool {
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ':');
+        _ = f.next();
+        _ = f.next();
+        if (std.mem.eql(u8, f.next() orelse continue, id)) return true;
+    }
+    return false;
 }
 
 fn isHostname(s: []const u8) bool {
@@ -976,7 +1030,7 @@ test parseNoCloud {
     try testing.expectEqualStrings("t", nc.user);
     try testing.expectEqualStrings("501", nc.uid);
     try testing.expectEqualStrings("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc t@mac\necdsa-sha2-nistp256 AAAAE2VjZHNh= other\n", nc.keys);
-    try testing.expect(!isPlainUid(nc.uid)); // 501: below 1000, refused
+    try testing.expect(isPlainUid(nc.uid)); // 501: macOS's first user, through Lima
     const none = try parseNoCloud(arena.allocator(), "#cloud-config\n");
     try testing.expectEqualStrings("1000", none.uid);
     try testing.expectEqualStrings("", none.user);
@@ -999,9 +1053,17 @@ test "validation" {
     try testing.expect(!isPlainUser("a:b"));
     try testing.expect(!isPlainUser("../x"));
     try testing.expect(isPlainUid("1000"));
+    try testing.expect(isPlainUid("500"));
+    try testing.expect(isPlainUid("60000"));
+    try testing.expect(!isPlainUid("499"));
+    try testing.expect(!isPlainUid("60001"));
     try testing.expect(!isPlainUid("0"));
     try testing.expect(!isPlainUid("0100"));
+    try testing.expect(!isPlainUid("+501"));
     try testing.expect(!isPlainUid("1234567890"));
+    try testing.expect(idInUse("root:x:0:0::/root:/bin/sh\n_dhcp:x:501:501::/:/x\n", "501"));
+    try testing.expect(idInUse("_update:x:69:\n", "69"));
+    try testing.expect(!idInUse("root:x:0:0::/root:/bin/sh\nt:x:5010:5010::/:/x\n", "501"));
     try testing.expect(isHostname("lima-werewolf-demo"));
     try testing.expect(!isHostname("a b"));
     try testing.expect(!isHostname("-x"));

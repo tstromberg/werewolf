@@ -2,14 +2,15 @@
 
 `bite`, a POSIX shell script, takes over a Debian, Ubuntu, Fedora or Rocky
 VM using the distro's own GRUB tools. It is for providers that will not
-boot a custom image.
+boot a custom image. Once werewolf has committed, `bite-cleanup`, a Zig
+program in werewolf, deletes the distro.
 
 ```sh
 make FORM=autoupdate slot               # build/<arch>/autoupdate/slot/
 sudo ./bite -n DIR                      # check, and show the plan
 sudo ./bite --reboot [--config X] DIR   # take over, and reboot into werewolf
 sudo ./bite --undo                      # from the distro: remove werewolf
-bite [-n] --cleanup                     # in werewolf, after commit: delete the distro
+bite-cleanup [-n]                       # in werewolf, after commit: delete the distro
 ```
 
 DIR holds a slot (*Slots*, below) of a form built on `bitten`.
@@ -36,11 +37,14 @@ hostname and the ssh keys of root and of the sudo user.
 filesystem read-only at `/victim`; `/data`, bound from it, stays writable.
 Root can still remount it; this guards against mistakes and non-root code.
 
-**`--cleanup` ends the fallback.** Once werewolf commits, the distro is
+**`bite-cleanup` ends the fallback.** Once werewolf commits, the distro is
 stale and still holds its secrets, cloud-init's user-data among them. Run in
-werewolf, `bite --cleanup` deletes everything but `/boot` and
+werewolf, `bite-cleanup` deletes everything but `/boot` and
 `/var/lib/werewolf`, remounting with `discard` first. It refuses before
-commit. Freed blocks are not erased, and earlier snapshots still hold the
+commit. The deleting is done by a child process that can do nothing else:
+`no_new_privs`, only the capabilities that pass files' owners and modes,
+and Landlock allowing nothing but removing files beneath the victim's
+filesystem, and running no program. Freed blocks are not erased, and earlier snapshots still hold the
 distro.
 
 ## Tested
@@ -56,7 +60,7 @@ Debian 13 only:
 | Rocky 10 | xfs | xfs partition | yes |
 
 A reset before commit returned to the distro. `bite --undo` left nothing
-behind. `--cleanup` took Debian from 1.6 GB to 105 MB and Fedora from 1.1 GB
+behind. Cleanup took Debian from 1.6 GB to 105 MB and Fedora from 1.1 GB
 to 117 MB, and both rebooted into werewolf with `/data` intact.
 
 To test in Lima: until the instance restarts, Lima's ssh runs over vsock,
@@ -73,7 +77,7 @@ A bitten machine boots a *slot*: the rootfs kept on disk, read-only.
 | File | Installed in | Contents |
 | --- | --- | --- |
 | `vmlinuz` | `/boot/werewolf/<slot>/` | Alpine's kernel |
-| `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: busybox, blkid, mount, werewolf's module loader, the form's modules |
+| `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: werewolf's stage0 and module loader, the form's modules |
 | `root.erofs` | `/var/lib/werewolf/<slot>/` | the rootfs |
 
 stage0 mounts `root.erofs` read-only, directly at `/`, as on every form; a

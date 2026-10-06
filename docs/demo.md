@@ -1,8 +1,7 @@
 # The demo
 
 `demo` is werewolf shown off: a machine that serves one web page about
-itself and keeps itself patched. Its own services, nginx and the program
-that writes the page, run without a shell.
+itself and keeps itself patched, with no shell anywhere in the image.
 
 The page, rewritten every minute, is plain and quick: no script, no web
 fonts, light or dark as the browser prefers, and readable on a phone.
@@ -11,7 +10,7 @@ fonts, light or dark as the browser prefers, and readable on a phone.
   what that fixed, how many known vulnerabilities it has by severity, and
   when it last checked for updates.
 - **System**: `uname -a`, the release, the boot slot, whether the image
-  still has a shell, and what `/data` is.
+  has a shell (it has none), and what `/data` is.
 - **Security**: every protection the machine has, each tested once per
   boot by `posture` ([posture.md](posture.md)), with what it stops, how it
   was checked, and whether it passed. What werewolf does not do yet fails,
@@ -39,10 +38,11 @@ Times read as "2 hours ago", with the moment itself on hover. The logo is
 | autoupdate | root | checks Wolfi and Alpine every hour (`/etc/werewolf/update-every`), and on anything newer builds the other slot and reboots into it |
 
 `/etc/sv/status/run` and `/etc/sv/nginx/run` are links to the programs
-themselves, so runsv starts them with no script between. `init`, runit's
-stage scripts and `autoupdate`'s loop are still shell. They go with the
-shell-free design's phases 1 and 2 ([design/shell-free.md](../design/shell-free.md)),
-and then the image carries no shell at all. The page says which is true.
+themselves, so runsv starts them with no script between, as it starts
+every service. init, runit's stages and the updater are programs too
+([design/shell-free.md](../design/shell-free.md)), so the image carries no
+shell, interpreter or download tool at all, which `posture` checks at
+every boot.
 
 The patch history is the updater's own record: its reports and log in
 `/data/svc/autoupdate` ([updater.md](updater.md)). A CVE is listed against

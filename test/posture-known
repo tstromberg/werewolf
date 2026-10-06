@@ -1,13 +1,42 @@
 # The posture checks known to fail on each form (make check; test/boot):
 #
 #   FORM ID...
+#   ARCH ID...
 #
-# A form without a line takes the * line. Each is a weakness still open
-# (docs/security.md, "Not yet"): test/boot fails a machine on any other
-# failure, and on any of these that starts passing, so this list cannot
-# claim less, or more, than the machines hold.
+# A form takes the * line, or, built with DEV=1 as make check builds every
+# form, the dev line; a FORM line, and an ARCH line (x86_64, aarch64), add
+# their ids to it, for that form and on that architecture. Each is a weakness still
+# open (docs/security.md, "Not yet"): test/boot fails a machine on any
+# other failure, and on any of these that starts passing, so this list
+# cannot claim less, or more, than the machines hold.
 #
-# Every form still carries busybox (design/shell-free.md): its shell, awk,
-# wget, nc and telnetd, and run scripts.
+# No form carries a shell but those that log people in (sshd, lima,
+# prod-ssh, none of which make check boots as it ships) and DEV=1 builds,
+# which add busybox-full: its shell, awk, wget, nc and telnetd.
+#
+# On x86_64, modify_ldt(2) answers until the seal's seccomp filter denies it
+# (design/lockdown.md); ia32_emulation=0 has closed int 0x80.
+#
+# Every form, by choice (docs/security.md, "Not done, by choice"): nothing
+# here may slow what the machines run, a database or ../scan.
+#   kernel-memory-hardening   init_on_alloc and init_on_free zero every
+#                             page and object, which costs allocation-heavy
+#                             work; the rest come with them or not at all
+#   kernel-cpu-mitigations    forcing the store-bypass mitigation slows
+#                             every process; ? because it is the host's CPU
+#                             that has the flaw or not
+#   network-rp-filter         strict mode must first be shown to work with
+#                             fence's policy routing, whose rules make the
+#                             reverse lookup look locally sent
+#   network-ipv6-ra           IPv6 is on, and router advertisements are how
+#                             most networks give it a route
+#
+# ?ID: may fail or not, as the host decides.
 
-* network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell programs-services-no-shell
+dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell kernel-memory-hardening ?kernel-cpu-mitigations network-rp-filter network-ipv6-ra
+* kernel-memory-hardening ?kernel-cpu-mitigations network-rp-filter network-ipv6-ra
+x86_64 kernel-legacy
+# qemu-host has KVM, as its form allows, wherever its host lends it the
+# hardware: EL2 on aarch64 (Apple M3 and later, QEMU 11), VMX or SVM on
+# x86_64.
+qemu-host ?kernel-no-hypervisor

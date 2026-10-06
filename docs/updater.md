@@ -5,7 +5,8 @@ asks Wolfi and Alpine for anything newer than the running image, builds the
 other slot from it, boots that slot once, and records what changed and which
 CVEs that fixes.
 
-It is one Zig program, `updater/update.zig`, in the `autoupdate` form.
+It is one Zig program, `updater/update.zig` with `updater/sandbox.zig`, in
+the `autoupdate` form.
 
 ## Running
 
@@ -26,10 +27,10 @@ service stays down.
 
 | Step | |
 | --- | --- |
-| `userland` | `apk add --initdb` the image's `/etc/apk/world` into a new root, from its own repositories and keys. |
-| `kernel` | `apk add --initdb linux-virt` from Alpine, verified with `/etc/werewolf/alpine-keys`. |
+| `userland` | Fetch, as `_update`, the indexes and packages for the image's `/etc/apk/world`, from its own repositories; then, as root and offline, `apk add --initdb` them into a new root, verified with its own keys ([Separation](#separation)). |
+| `kernel` | The same for `linux-virt` from Alpine, verified with `/etc/werewolf/alpine-keys`. |
 | `compare` | Diff the new root's installed packages and kernel against the running image's. No difference: log `check` and stop. A build that rolled back before: log `skip` and stop. |
-| `cves` | Fetch the CVE sources and find what the update fixes (below). |
+| `cves` | Fetch the CVE sources and find what the update fixes (below), in children of their own ([Separation](#separation)). |
 | `root` | Add busybox's links, copy werewolf's own files forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `vmlinuz` | Unwrap Alpine's arm64 EFI zboot image to the raw `Image`. |
 | `stage0` | Build stage0 from its packages, `init` and the form's modules, as a newc cpio compressed with `zstd`. |
@@ -58,12 +59,76 @@ The CVE sources are not signed. They are fetched over TLS, checked against
 the system's CA bundle, and inform the report and nothing else. A source
 that fails is recorded with its error, and the update goes ahead.
 
+## Separation
+
+Root, which builds and installs the slot, has no network at all: the
+form's policy (`forms/autoupdate.net`) lets only `_update` (uid 69) send,
+and only HTTPS and DNS. Everything the updater takes from the network is
+fetched by children running as `_update`, as werewolf's programs are
+written ([programs.md](programs.md)).
+
+**Packages.** For each root it builds (the userland, the kernel,
+stage0), a child runs apk's network half: `apk update`, then `apk cache
+download`, into that root's cache, against a scratch root of its own
+that holds only the package names and an empty database. It is
+`_update`, with no capabilities and no_new_privs, every descriptor of
+root's closed, and apk's output on a pipe to root. Landlock lets it read
+`/usr`, `/etc` and the resolver's file, execute only apk and its loader,
+write only the cache and its scratch root, and connect over TCP only to
+443 and 53. A seccomp filter allows the calls apk makes to fetch, as
+traced; `ioctl` only for FIONREAD and isatty; sockets only for IP; no
+fork or clone at all; and fails `mount`, which apk tries in its root,
+with EPERM. Then root takes the cache back: the directory and every file
+become root's, and anything that is not a regular file with a name apk
+gives its cache (`APKINDEX.*.tar.gz`, `*.apk`, `installed`) is removed
+unread. Root's apk installs from it with `--no-network`, checking every
+index signature and package hash against root's keys, as it always
+does: the child decides nothing about trust, and a compromised one can
+only withhold packages. Last, root prunes the cache to the packages the
+new root took.
+
+**CVE sources.** These are the one input the updater parses itself, 40
+MB of JSON from outside, so root does not touch them. Each goes through
+two children:
+
+| | Runs as | Can | Cannot |
+| --- | --- | --- | --- |
+| fetcher | `_update` (uid 69), chrooted to `work/net`, which holds copies of `resolv.conf` and `hosts` and nothing else | resolve names; connect over TCP to ports 443 and 53 (Landlock), as `fence` allows `_update`; write the body to the one file root opened for it, at most 256 MB | read any other file, bind a TCP port, write anywhere else, make any system call TLS and DNS do not need (seccomp, traced) |
+| reader | `_update`, chrooted to the empty `/var/empty` | read the fetched file, through the descriptor it was handed; write lines to root; map at most 1 GB | open any file, make a socket, make any call but `pread64`, `write` to its pipe, and memory's (seccomp) |
+
+Both have no capabilities and an empty bounding set, no_new_privs, every
+descriptor of root's closed but theirs, and stdin, stdout and stderr on
+`/dev/null`; both die with root. The fetcher has 10 minutes and the
+reader 5, after which root kills them.
+
+The reader sends back a status line and then one line per CVE: `INDEX
+FIXED CVE` for a package (`INDEX` into the origins root asked about), `CVE
+FIXED TITLE` for the kernel. Root checks every field again: the CVE id's
+form, the origin, the version inside that origin's window in apk's order,
+the kernel version on the branch and in its range, a title of printable
+UTF-8 under 512 bytes. A single line that fails means the reader is not
+believed at all, and the source is recorded with the error `BadLine`. A
+compromised reader can therefore leave out CVEs, or name ones the source
+does not, but only inside the windows root would accept anyway; it cannot
+reach the network, the disk, or root.
+
+Root hashes the file for the report's `sources`, and never parses it.
+
+The source's `error` says what happened to a child: its own word
+(`not_found`, `TlsInitializationFailed`, ...), or root's: `Timeout`,
+`ChildKilled` (by seccomp, or a limit), `ChildFailed`,
+`ChildSaidTooMuch`, `ChildSaidNonsense`, `BadLine`.
+
+Root still runs apk, offline, to install, and `mkfs.erofs` and `zstd` to
+build; those read only what root has checked or made.
+
 ## CVEs
 
 **Packages.** Wolfi's `security.json` lists, per source package, the
 version that fixed each CVE. A CVE counts when that version is newer than
-the old one and no newer than the new one, as `apk version -t` compares
-them. Version `0` means never affected, and is skipped. A versioned stream
+the old one and no newer than the new one, in apk's order. That order is
+apk-tools 2.14's, ported to Zig so the reader need run nothing, and checked
+against `apk version -t` on 3,000 pairs of the file's own versions. Version `0` means never affected, and is skipped. A versioned stream
 (`openssl-4.0`) is also looked up under its base name (`openssl`); the
 version window keeps the other streams' fixes out.
 
@@ -84,8 +149,12 @@ it was written. Alpine's own patches on top of upstream are not counted.
     bad                 builds that rolled back, one per line
     cache/              apk's downloads, one directory per root built
                         (root, kernel, stage0), holding what the last
-                        check installed and nothing older
+                        check installed and nothing older; root's, lent
+                        to _update while it fetches
     work/               the build, deleted when done
+        apk-NAME/       apk's scratch root while _update fetches
+        net/etc/        the CVE fetcher's root: resolv.conf and hosts
+        cves/           the CVE sources as fetched, root's, mode 0600
 ```
 
 The updater reads `/proc/cmdline`, `/etc/apk/` and the
@@ -139,7 +208,7 @@ The program is small and does one pass. It favours what cannot go wrong:
 
 - **Memory.** Everything comes from the process arena and is freed at exit,
   so nothing is used after it is freed. The kernel's 17,000 records are each
-  parsed in a scratch arena reset between them; only matches are copied out.
+  parsed, by the reader, in a scratch arena reset between them.
 - **Safety checks.** Built ReleaseSafe: an out-of-bounds index or an
   overflow stops the program instead of corrupting it.
 - **Other programs** do what they do best: `apk`, `mkfs.erofs`, `zstd`,
@@ -161,9 +230,11 @@ ARCH-linux-musl`: 1.1 MB on arm64, 1.3 MB on x86_64, static. It refuses any
 Zig but 0.17.0, since Zig changes between releases.
 
 The unit tests cover the pure parts: the kernel command line, package
-databases and their diffs, stream base names, kernel versions, the kernel
-CVE window, `security.json` parsing, module order, cpio entries (device
-nodes included), zboot unwrapping and timestamps.
+databases and their diffs, stream base names, apk's version order (each
+case as apk answered it), kernel versions, the kernel CVE window,
+`security.json` parsing, the readers' lines and root's checks of them,
+lying readers included, the seccomp filter's jumps, module order, cpio
+entries (device nodes included), zboot unwrapping and timestamps.
 
 To exercise a whole update, build a slot whose build record claims an older
 kernel, bite a VM with it, and power-cycle it:

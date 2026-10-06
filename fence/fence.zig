@@ -124,7 +124,9 @@ fn apply() !Policy {
 
 // --- the policy --------------------------------------------------------------
 
-const Proto = enum(u8) { icmp = 1, tcp = 6, udp = 17 };
+/// The IP protocols fence names: those a policy may declare, ICMP, TCP and
+/// UDP, and the other transports with ports, dropped when they arrive.
+const Proto = enum(u8) { icmp = 1, tcp = 6, udp = 17, dccp = 33, sctp = 132, udplite = 136 };
 
 const Connect = struct {
     /// null: every user.
@@ -175,6 +177,7 @@ fn parsePolicy(text: []const u8) !Policy {
             const who = words.next() orelse return error.BadPolicy;
             const uid: ?u32 = if (std.mem.eql(u8, who, "all")) null else try user(who);
             const proto = std.meta.stringToEnum(Proto, words.next() orelse "") orelse return error.BadPolicy;
+            if (proto != .icmp and proto != .tcp and proto != .udp) return error.BadPolicy;
             if (p.nconnect == max_entries) return error.BadPolicy;
             p.connect[p.nconnect] = .{ .uid = uid, .proto = proto, .port = if (proto == .icmp) 0 else try port(words.next()) };
             p.nconnect += 1;
@@ -238,8 +241,13 @@ const max_rules = 16 + 8 * max_entries;
 ///   200   sent as declared (user, protocol, port), or from a served port: main
 ///   299   anything else sent: refused (EACCES)
 ///   300   arriving to a served port, from a connected port, or ICMP: local
-///   399   anything else arriving: dropped
+///   399   anything else arriving by TCP, UDP, UDP-Lite, SCTP or DCCP: dropped
 ///   400   the kernel's own local rule, moved here from 0
+///
+/// The drops name their protocols because a rule that dropped everything
+/// would drop ARP too: answering a request, the kernel asks the rules
+/// whether the address is local with a lookup that has no protocol, and a
+/// machine that does not answer is soon reachable by no one.
 ///
 /// The same for IPv4 and IPv6, with the family's metadata address, and for
 /// IPv6, ICMPv6 sent by anyone: neighbour discovery and router
@@ -288,7 +296,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     // ICMP in: errors a connection needs (path MTU, unreachable). An echo
     // request gets no reply unless root declared `connect root icmp`.
     add(out, &n, family, .{ .priority = pref.in_allow, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL, .proto = .icmp });
-    add(out, &n, family, .{ .priority = pref.in_drop, .action = FR_ACT_BLACKHOLE });
+    for ([_]Proto{ .tcp, .udp, .udplite, .sctp, .dccp }) |pr| add(out, &n, family, .{ .priority = pref.in_drop, .action = FR_ACT_BLACKHOLE, .proto = pr });
     add(out, &n, family, .{ .priority = pref.local, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL });
     return out[0..n];
 }
@@ -518,11 +526,25 @@ test "the plan, in the order the kernel tries it" {
         try std.testing.expect(x.priority >= last); // ascending
         last = x.priority;
     }
-    // First, local traffic; last before the moved local rule, the drop.
+    // First, local traffic; last before the moved local rule, the drops.
     try std.testing.expectEqual(pref.local_out, r[0].priority);
     try std.testing.expect(r[0].from_here);
     try std.testing.expectEqual(FR_ACT_BLACKHOLE, r[r.len - 2].action);
     try std.testing.expectEqual(pref.local, r[r.len - 1].priority);
+
+    // TCP and UDP arriving are dropped. A lookup from outside with no
+    // protocol or port, ARP's, is first matched by the local rule, so the
+    // machine still answers for its address.
+    var drops: usize = 0;
+    for (r) |x| {
+        if (x.action == FR_ACT_BLACKHOLE and (x.proto == .tcp or x.proto == .udp)) drops += 1;
+    }
+    try std.testing.expectEqual(2, drops);
+    const first = for (r) |x| {
+        if (!x.from_here and x.proto == null and x.sport == null and x.dport == null and x.src == null and x.dst == null and x.uid == null) break x;
+    } else unreachable;
+    try std.testing.expectEqual(pref.local, first.priority);
+    try std.testing.expectEqual(RT_TABLE_LOCAL, first.table);
 
     // Every rule for traffic sent here is from lo; none for arriving traffic is.
     var refused_out = false;
@@ -605,9 +627,10 @@ test "rule messages" {
     try std.testing.expect(hasAttr(m, FRA_DPORT_RANGE, std.mem.sliceAsBytes(&[2]u16{ 80, 80 })));
     try std.testing.expect(hasAttr(m, FRA_UID_RANGE, std.mem.sliceAsBytes(&[2]u32{ 68, 68 })));
 
-    const drop = ruleMessage(&buf, 8, RTM_NEWRULE, .{ .priority = pref.in_drop, .action = FR_ACT_BLACKHOLE });
+    const drop = ruleMessage(&buf, 8, RTM_NEWRULE, .{ .priority = pref.in_drop, .action = FR_ACT_BLACKHOLE, .proto = .sctp });
     try std.testing.expectEqualSlices(u8, &.{ linux.AF.INET, 0, 0, 0, 0, 0, 0, FR_ACT_BLACKHOLE }, drop[16..24]);
     try std.testing.expect(!hasAttr(drop, FRA_IIFNAME, "lo\x00"));
+    try std.testing.expect(hasAttr(drop, FRA_IP_PROTO, &.{132}));
 
     const del = ruleMessage(&buf, 9, RTM_DELRULE, .{ .priority = 0, .action = FR_ACT_TO_TBL, .table = RT_TABLE_LOCAL });
     try std.testing.expectEqual(RTM_DELRULE, std.mem.readInt(u16, del[4..6], .little));

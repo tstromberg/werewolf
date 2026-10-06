@@ -18,6 +18,14 @@ bite leaves one. On each machine it runs [test/checks](../test/checks) as
 root on the serial console, then powers it off. A machine passes when it
 boots, every check comes out as expected, and it shuts down cleanly.
 
+Those checks need a shell, which most forms do not have, so each form is
+built for them with `DEV=1`: busybox-full on top of its packages, in
+`build/<arch>/<form>-dev`, and nothing else changed. The forms released
+without a shell, `minimal`, `prod` and `demo`, are also built as they ship
+and booted once more (`check-shellfree-<form>`), where test/boot runs
+nothing on the machine and judges it by its posture line alone: no shell,
+and no failure at all.
+
 The checks try what an attacker would and expect to be refused: lower
 lockdown, read `/dev/mem` or another process's memory, undo a one-way
 sysctl, find a setuid file, listen on a port the form has not declared in
@@ -64,16 +72,17 @@ chrooted, with no capabilities, under seccomp, and a parent keeping
 `CAP_NET_ADMIN` alone.
 
 The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
-by filesystem UUID, `/victim` read-only, and the `commit`
+by filesystem UUID, `/victim` read-only, the `commit`
 service making the slot GRUB's default once it has stayed healthy for a
-minute. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
+minute, and then `bite-cleanup` deleting a stand-in distro around it,
+traps included, while keeping werewolf's directory and `/boot`. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
 leaves: the root image in slot a and GRUB's environment block. The slot
 uses the `bitten` form, which has no updater to reach the network once
 committed.
 
 ```
 ok     sshd               posture
-ok     sshd               symlinks
+ok     sshd               services-up
 ok     sshd               root-unlinked
 pass   sshd               all checks
 pass   sshd-again         all checks
@@ -89,23 +98,31 @@ CI, still passes. On an M4, `make -j8 check` takes about 25 s for the forms
 and a further minute for the slot to commit.
 
 Logs are in `build/<arch>/check/`: `<form>-build.log` for each build, and
-`<form>.log` for each console, kernel messages and all.
+`<form>.log` for each console, kernel messages and all; a shell-free boot's
+are `<form>-shellfree-build.log` and `<form>-shellfree.log`.
 
 ## Writing a check
 
-A machine's settings are [posture](posture.md)'s to judge, so a setting is
-checked once, in the same place a machine's owner checks it. One line of
-`test/checks` runs `posture --json` and fails on any result but the known
-failures it lists, and on any of those that starts passing: a new
-protection belongs in posture/posture.zig, not in test/checks.
+A machine's settings, and the attacks on them, are
+[posture](posture.md)'s to judge, so each is checked once, the way a
+machine's owner checks it. Every machine's posture service prints one line
+on the console once its services settle; with `werewolf.check=1`, which
+only `make check` sets, posture also makes the attacks that write to the
+kernel log, and proves each refusal by the kernel's own line.
+[test/boot](../test/boot) waits for that line before anything else and
+fails the machine unless the checks that fail are exactly the form's line
+in [test/posture-known](../test/posture-known): a new failure fails, and so
+does a known one that starts passing, until it leaves the list and the
+docs say so. A new protection belongs in posture/posture.zig.
 
-What stays in `test/checks` is what posture cannot do: attacks whose proof
-is the kernel's own log line, attacks as an ordinary user, and the boot's
-own behaviour. A check is one line: a kind, a name and one line of sh, run
-as root in a subshell, exiting 0 when the property holds.
+`test/checks` holds the rest, the boot's own behaviour: the network, the
+services, `/data`, the slot's commit. A check is one line: a kind, a name
+and one line of sh, run as root in a subshell, exiting 0 when the property
+holds. A machine with no shell is judged by its posture line alone
+(`test/boot NAME - LOG QEMU...`).
 
 ```
-ok  proc-mem         ! cat /proc/1/mem >/dev/null && dmesg | grep -q 'ptrace attach of "runit"\[1\]'
+ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
 ```
 

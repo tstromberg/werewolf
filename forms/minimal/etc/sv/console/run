@@ -1,7 +1,1 @@
-#!/bin/sh
-# Root shell on the serial console, only when werewolf.debug=1 is on the
-# kernel command line; otherwise it parks itself.
-exec 2>&1
-grep -qw werewolf.debug=1 /proc/cmdline || exec sv down .
-tty=$(sed -n 's/.*console=\([a-zA-Z0-9]*\).*/\1/p' /proc/cmdline)
-exec /usr/bin/getty -n -l /bin/ash -L 115200 "${tty:-console}" vt100
+/usr/lib/werewolf/console

@@ -5,7 +5,8 @@
 #
 # BOOT_ROOTFS is disk/boot.yaml's rootfs, holding systemd-boot; GPT is
 # disk/gpt.zig, built for this host; SLOT_DIR holds vmlinuz, initramfs.zst
-# (stage0) and root.erofs. OUT becomes a sparse disk of SIZE_MIB MiB:
+# (stage0), root.erofs, and cmdline, the kernel arguments the image asks
+# for (Makefile, KERNEL_ARGS). OUT becomes a sparse disk of SIZE_MIB MiB:
 #
 #   GPT    fixed disk and partition GUIDs (disk/gpt.zig)
 #   1      EFI system partition, FAT32, 256 MiB: systemd-boot at the
@@ -38,6 +39,10 @@ x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=t
 	exit 2
 	;;
 esac
+[ -f "$slot/cmdline" ] || {
+	echo "disk/build: $slot has no cmdline, the image's kernel arguments (make slot)" >&2
+	exit 1
+}
 for p in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
 	[ -d "$p" ] && PATH=$p:$PATH
 done
@@ -85,7 +90,7 @@ sort-key werewolf
 version 19800101T000000Z
 linux /werewolf/a/vmlinuz
 initrd /werewolf/a/initramfs.zst
-options $console init=/init panic=10 softlockup_panic=1 werewolf.victim=$root_uuid:/werewolf werewolf.esp=$esp_uuid${*:+ $*} werewolf.slot=a
+options $console init=/init panic=10 softlockup_panic=1 $(cat "$slot/cmdline") werewolf.victim=$root_uuid:/werewolf werewolf.esp=$esp_uuid${*:+ $*} werewolf.slot=a
 EOF
 cp "$slot/vmlinuz" "$slot/initramfs.zst" "$w/esp/werewolf/a/"
 find "$w/esp" -exec touch -t 198001010000 {} +

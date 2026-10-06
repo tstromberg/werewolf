@@ -24,8 +24,10 @@
 //! And as paranoid as the rest of werewolf's programs (docs/programs.md):
 //!
 //! - The list is werewolf's own, checked strictly: paths under kernel/,
-//!   ending in .ko, of plain characters, no . or .. parts, at most 256. One
-//!   bad line and nothing is loaded.
+//!   ending in .ko, of plain characters, no . or .. parts, at most 256,
+//!   each with the parameters the build gave it, as KEY=VALUE words
+//!   (`kernel/arch/x86/kvm/kvm-intel.ko nested=0`). One bad line and
+//!   nothing is loaded.
 //! - Every file is opened beneath the module directory with symlinks
 //!   refused (openat2), all of them before it pledges.
 //! - Then it pledges: no_new_privs, every capability dropped but
@@ -94,14 +96,14 @@ fn load() !Result {
 
     var list: [max_list]u8 = undefined;
     const text = try readBeneath(dir, "werewolf.modules", &list);
-    var paths: [max_modules][:0]const u8 = undefined;
-    var names: [max_modules][256:0]u8 = undefined;
-    const count = try parse(text, &names, &paths);
+    var lines: [max_modules][256:0]u8 = undefined;
+    var mods: [max_modules]Module = undefined;
+    const count = try parse(text, &lines, &mods);
 
     var fds: [max_modules]i32 = undefined;
-    for (paths[0..count], 0..) |p, i| {
-        fds[i] = openBeneath(dir, p, O_RDONLY) catch |err| {
-            say("modules: {s}: cannot open\n", .{p});
+    for (mods[0..count], 0..) |m, i| {
+        fds[i] = openBeneath(dir, m.path, O_RDONLY) catch |err| {
+            say("modules: {s}: cannot open\n", .{m.path});
             return err;
         };
     }
@@ -109,12 +111,13 @@ fn load() !Result {
     try pledge();
 
     var refused: usize = 0;
-    for (fds[0..count], paths[0..count]) |fd, p| {
-        const rc = linux.syscall3(.finit_module, @bitCast(@as(isize, fd)), @intFromPtr(""), 0);
+    for (fds[0..count], mods[0..count]) |fd, m| {
+        const rc = linux.syscall3(.finit_module, @bitCast(@as(isize, fd)), @intFromPtr(m.params.ptr), 0);
         switch (linux.errno(rc)) {
-            .SUCCESS, .EXIST => {}, // built in, or loaded already
+            .SUCCESS => if (m.params.len > 0) say("modules: {s}: loaded with {s}\n", .{ m.path, m.params }),
+            .EXIST => {}, // built in, or loaded already
             else => |e| {
-                say("modules: {s}: refused by the kernel: {t}\n", .{ p, e });
+                say("modules: {s}: refused by the kernel: {t}\n", .{ m.path, e });
                 refused += 1;
             },
         }
@@ -154,20 +157,42 @@ fn enforced() bool {
 
 // --- the list --------------------------------------------------------------------
 
-/// The lines of werewolf.modules, each a clean path to a .ko under kernel/.
-/// Any other line, or too many, and the whole list is refused.
-fn parse(text: []const u8, names: *[max_modules][256:0]u8, paths: *[max_modules][:0]const u8) !usize {
+const Module = struct { path: [:0]const u8, params: [:0]const u8 };
+
+/// The lines of werewolf.modules, each a clean path to a .ko under kernel/
+/// and, after a space, its parameters. Each is copied into lines, its path
+/// and its parameters ended by a NUL, as the kernel takes them. Any other
+/// line, or too many, and the whole list is refused.
+fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]Module) !usize {
     var n: usize = 0;
-    var lines = std.mem.tokenizeScalar(u8, text, '\n');
-    while (lines.next()) |line| {
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |line| {
         if (n == max_modules) return error.TooMany;
-        try checkPath(line);
-        @memcpy(names[n][0..line.len], line);
-        names[n][line.len] = 0;
-        paths[n] = names[n][0..line.len :0];
+        if (line.len > 255) return error.BadPath;
+        const space = std.mem.indexOfScalar(u8, line, ' ') orelse line.len;
+        try checkPath(line[0..space]);
+        const params = if (space < line.len) line[space + 1 ..] else "";
+        if (space < line.len) try checkParams(params);
+        const l = &lines[n];
+        @memcpy(l[0..line.len], line);
+        l[space] = 0;
+        l[line.len] = 0;
+        mods[n] = .{ .path = l[0..space :0], .params = if (space < line.len) l[space + 1 .. line.len :0] else "" };
         n += 1;
     }
     return n;
+}
+
+/// KEY=VALUE words, one space apart: a key of lower-case letters, digits
+/// and underscores, a value of letters, digits and _ , . -.
+fn checkParams(p: []const u8) !void {
+    var words = std.mem.splitScalar(u8, p, ' ');
+    while (words.next()) |w| {
+        const eq = std.mem.indexOfScalar(u8, w, '=') orelse return error.BadPath;
+        if (eq == 0 or eq + 1 == w.len) return error.BadPath;
+        for (w[0..eq]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_') return error.BadPath;
+        for (w[eq + 1 ..]) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ',' and c != '.' and c != '-') return error.BadPath;
+    }
 }
 
 fn checkPath(p: []const u8) !void {
@@ -320,18 +345,22 @@ fn fail(what: []const u8, err: anyerror) noreturn {
 
 const testing = std.testing;
 
-test "a clean list parses, in order" {
-    var names: [max_modules][256:0]u8 = undefined;
-    var paths: [max_modules][:0]const u8 = undefined;
-    const n = try parse("kernel/drivers/block/virtio_blk.ko\nkernel/net/packet/af_packet.ko\n", &names, &paths);
-    try testing.expectEqual(2, n);
-    try testing.expectEqualStrings("kernel/drivers/block/virtio_blk.ko", paths[0]);
-    try testing.expectEqualStrings("kernel/net/packet/af_packet.ko", paths[1]);
+test "a clean list parses, in order, with parameters" {
+    var lines: [max_modules][256:0]u8 = undefined;
+    var mods: [max_modules]Module = undefined;
+    const n = try parse("kernel/drivers/block/virtio_blk.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\nkernel/net/packet/af_packet.ko\n", &lines, &mods);
+    try testing.expectEqual(3, n);
+    try testing.expectEqualStrings("kernel/drivers/block/virtio_blk.ko", mods[0].path);
+    try testing.expectEqualStrings("", mods[0].params);
+    try testing.expectEqualStrings("kernel/arch/x86/kvm/kvm-intel.ko", mods[1].path);
+    try testing.expectEqualStrings("nested=0 ept=1", mods[1].params);
+    try testing.expectEqual(0, mods[1].params.ptr[mods[1].params.len]);
+    try testing.expectEqualStrings("kernel/net/packet/af_packet.ko", mods[2].path);
 }
 
 test "one bad line refuses the list" {
-    var names: [max_modules][256:0]u8 = undefined;
-    var paths: [max_modules][:0]const u8 = undefined;
+    var lines: [max_modules][256:0]u8 = undefined;
+    var mods: [max_modules]Module = undefined;
     for ([_][]const u8{
         "kernel/drivers/x.ko\n/etc/x.ko\n",
         "kernel/../x.ko\n",
@@ -341,16 +370,24 @@ test "one bad line refuses the list" {
         "drivers/x.ko\n",
         "kernel/x y.ko\n",
         "kernel/x.ko\x00\n",
-    }) |text| try testing.expectError(error.BadPath, parse(text, &names, &paths));
+        "kernel/x.ko \n",
+        "kernel/x.ko nested\n",
+        "kernel/x.ko =1\n",
+        "kernel/x.ko nested=\n",
+        "kernel/x.ko nested=0  ept=1\n",
+        "kernel/x.ko Nested=0\n",
+        "kernel/x.ko nested=$(x)\n",
+        "kernel/x.ko nested=0\tept=1\n",
+    }) |text| try testing.expectError(error.BadPath, parse(text, &lines, &mods));
 }
 
 test "too many modules refuses the list" {
-    var names: [max_modules][256:0]u8 = undefined;
-    var paths: [max_modules][:0]const u8 = undefined;
+    var lines: [max_modules][256:0]u8 = undefined;
+    var mods: [max_modules]Module = undefined;
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(testing.allocator);
     for (0..max_modules + 1) |_| try text.appendSlice(testing.allocator, "kernel/x.ko\n");
-    try testing.expectError(error.TooMany, parse(text.items, &names, &paths));
+    try testing.expectError(error.TooMany, parse(text.items, &lines, &mods));
 }
 
 test "the pledge's pieces are the kernel's" {

@@ -346,11 +346,12 @@ from `/bin/sh`.
    stops carrying busybox; `sshd`, `lima` and `DEV=1` add it.
 
    Done, as a first step: init (`init/init.zig`), stage0, commit,
-   `powerbtn`, `reboot` and `poweroff`, `grubenv`, and runit's three stages
-   (`stage`, one program that knows its stage by its name) are programs.
+   `powerbtn`, `reboot` and `poweroff`, `grubenv`, runit's three stages
+   (`stage`, one program that knows its stage by its name), and the console
+   and sshd services (`console`, `sshd-start`) are programs, and `minimal`
+   carries no busybox: `sshd`, `lima`, `prod-ssh` and `DEV=1` add it.
    `runit-init` is still PID 1 after init, running the stage programs,
-   which is the alternative below; init owning PID 1, and busybox leaving
-   `minimal`, are what remains.
+   which is the alternative below; init owning PID 1 is what remains.
 3. **The checks, and `DEV=1`.**
 4. **`prod-nginx`**, as the worked example, booted by CI.
 
@@ -382,8 +383,9 @@ from `/bin/sh`.
   which the build's check does.
 - **`accounts` across includes.** Whether apko merges each form's
   `accounts` along the chain, or the Makefile must.
-- **bite's `--cleanup` and `--undo`** run on the machine after it is
-  werewolf, and are shell. They move into Zig, or into the updater.
+- **bite** stays shell: it runs on the distro, as does `--undo`, where a
+  shell and GRUB's tools are. Its cleanup, which runs in werewolf, is
+  `bite-cleanup`, in Zig.
 - **Forms outside this repository.** postdoc's form belongs in postdoc's
   repository. The Makefile looks only in `forms/`; it could take a
   directory, and resolve includes against ours.

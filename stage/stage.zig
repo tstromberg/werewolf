@@ -22,6 +22,17 @@ pub fn main(init: std.process.Init) !void {
     switch (stageOf(std.fs.path.basename(args[0]))) {
         1 => return,
         2 => {
+            // runit opens the console without blocking (djb's open_write),
+            // so that PID 1 never waits on it, and all it starts shares
+            // that open file: a service writing more than the serial port
+            // holds gets EAGAIN and loses the rest. The services get a
+            // console of their own that waits; runit keeps its.
+            const fd = linux.open("/dev/console", .{ .ACCMODE = .WRONLY, .NOCTTY = true }, 0);
+            if (linux.errno(fd) == .SUCCESS) {
+                _ = linux.dup2(@intCast(fd), 1);
+                _ = linux.dup2(@intCast(fd), 2);
+                if (fd > 2) _ = linux.close(@intCast(fd));
+            }
             const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/runsvdir", "-P", "/etc/sv" } });
             say(io, "runsvdir: {s}", .{@errorName(err)});
             std.process.exit(1);

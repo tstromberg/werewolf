@@ -126,27 +126,61 @@ reboots a slot that has not committed in ten minutes ([bite.md](bite.md)).
 
 bite removes nothing and repartitions nothing, and refuses rather than
 strand a machine: Secure Boot on, a disk or NIC it cannot drive, a layout
-it does not understand. `bite --cleanup` removes the distro, and with it
+it does not understand. `bite-cleanup` removes the distro, and with it
 cloud-init's user-data, once werewolf has committed.
 
 ## Not yet
 
 - **root can remount.** The root is read-only, and everywhere writable
-  is `noexec`, but root can write a script to `/run`, run it with the
-  shell, and with busybox's `mount` (not werewolf's own) remount anything
-  writable or `exec`, `/` included. It can also undo the sysctls marked "yes" above. Mount
-  options and sysctls bind everyone else; IPE (phase 4 of the design) and
-  services that do not run as root are what will bind root.
+  is `noexec`, but a process running as root can call mount(2) itself and
+  make anything writable or `exec`, `/` included, and can undo the sysctls
+  marked "yes" above. Where the form has a shell (sshd, lima, prod-ssh, and
+  `DEV=1` builds) that takes no more than a script and busybox's `mount`.
+  Mount options and sysctls bind everyone else; IPE (phase 4 of the design)
+  and services that do not run as root are what will bind root.
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
   them, or GRUB's config, and keep them across reboots. Secure Boot is off,
   since Alpine's kernel is not signed for it.
 - **Images are built on the machine** that runs them, so no signature on
   one could mean anything.
-- **Scripts.** busybox `sh` is in every image and runs any script.
+- **Scripts, where there is a shell.** The forms that log people in (sshd,
+  lima, prod-ssh) carry busybox, whose `sh` runs any script. The others,
+  minimal and prod among them, have no shell or interpreter at all, and
+  `posture` checks that they do not.
+- **Kernel settings that cost nothing, not yet set.** posture checks
+  each, and `test/posture-known` holds them open: debugfs can be mounted;
+  a process can write its own read-only code through `/proc/self/mem`
+  (`proc_mem.force_override` is Linux's default, `always`), which is how a
+  shell and `dd` run a program where nothing written may run; address
+  randomization is below the kernel's most (`vm.mmap_rnd_bits` 18 of 33 on
+  aarch64, 28 of 32 on x86_64); users' socket and seccomp filters are
+  JIT-compiled without constant blinding; an oops does not panic; on
+  x86_64, `int 0x80` and `modify_ldt(2)` work; on aarch64,
+  `vm.mmap_min_addr` is 4096. KVM is built into the aarch64 kernel, and
+  would start on a host that gives guests EL2; posture checks that
+  `/dev/kvm` is absent, which today depends on the host.
 - **The host is trusted.** A hypervisor can change any guest.
 
 Phases 2 to 5 of [the design](../design/verified-boot.md) close all but the
 last two.
+
+## Not done, by choice
+
+Nothing here may slow what the machines run: a database, or `../scan`.
+`posture` reports these, and `make check` expects them
+([test/posture-known](../test/posture-known)).
+
+- **Memory zeroed on allocation and free** (`init_on_alloc`,
+  `init_on_free`, with `slab_nomerge`, `page_alloc.shuffle` and
+  `randomize_kstack_offset`): every page and object is cleared, which
+  allocation-heavy work pays for.
+- **Forced CPU mitigations** (store bypass): every process pays, and
+  whether the flaw is there at all is the host CPU's.
+- **Strict reverse-path filtering** (`rp_filter=1`): free, but fence's
+  policy routing makes the reverse lookup look locally sent, so it waits
+  until it is shown to work with fence.
+- **Router advertisements**: IPv6 is on, and they are how most networks
+  give it a route.
 
 ## Checking a machine
 

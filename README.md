@@ -96,7 +96,7 @@ sudo ./bite --reboot DIR                # take over, and reboot into werewolf
 
 werewolf boots once and makes itself the default only after its services
 have stayed up for a minute; until then, a reset returns to the distro. See
-[docs/bite.md](docs/bite.md) for what it refuses, `--undo`, `--cleanup`,
+[docs/bite.md](docs/bite.md) for what it refuses, `--undo`, `bite-cleanup`,
 and how slots recover from a bad boot.
 
 ### Other Options
@@ -116,18 +116,18 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 
 | Form | Includes | Adds | /data | Listens | RAM image | root.erofs | Packages |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `minimal` | | busybox, runit; init, shutdown, services, werewolf's module loader, network setup and one-way mount; virtio, power button, erofs | RAM | nothing | 3.0 MB | | 10 |
-| `dhcp` | minimal | werewolf's DHCP client, split into a jailed engine and a parent with one capability; packet sockets | RAM | nothing | 3.1 MB | | 10 |
-| `disk` | minimal | e2fsprogs, blkid; ext4 | ext4 | nothing | 4.0 MB | | 16 |
-| `crypt` | disk | cryptsetup; dm-crypt, hardware AES | ext4 in LUKS2 | nothing | 8.3 MB | | 30 |
-| `cloud` | dhcp | werewolf's metadata fetcher: the config from GCP's, AWS's or Hetzner's user data ([docs/cloud.md](docs/cloud.md)); GCP's SCSI, NVMe and gVNIC | RAM | nothing | 3.3 MB | | 10 |
-| `bitten` | cloud | blkid; ext4, xfs, btrfs | a directory on the victim | nothing | 5.9 MB | 12.8 MB | 12 |
-| `autoupdate` | bitten | apk-tools, erofs-utils, zstd; Alpine's keys; the updater | a directory on the victim | nothing | 10.3 MB | 16.0 MB | 25 |
-| `prod` | autoupdate | nothing: the production base, published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | nothing | 10.3 MB | 15.3 MB | 25 |
-| `sshd` | minimal | openssh-server, sftp-server | RAM | :22 | 7.4 MB | | 24 |
-| `prod-ssh` | prod | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.6 MB | 19.8 MB | 33 |
-| `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 14.1 MB | 22.8 MB | 39 |
-| `demo` | prod | nginx, grype, a status page: no shell in its services; updates hourly ([docs/demo.md](docs/demo.md)) | a directory on the victim | :80 | 33.1 MB | 59.6 MB | 36 |
+| `minimal` | | runit; init, shutdown, services, werewolf's module loader, network setup and one-way mount; virtio, power button, erofs | RAM | nothing | 3.0 MB | | 7 |
+| `dhcp` | minimal | werewolf's DHCP client, split into a jailed engine and a parent with one capability; packet sockets | RAM | nothing | 3.1 MB | | 7 |
+| `disk` | minimal | e2fsprogs, blkid; ext4 | ext4 | nothing | 4.2 MB | | 13 |
+| `crypt` | disk | cryptsetup; dm-crypt, hardware AES | ext4 in LUKS2 | nothing | 8.0 MB | | 27 |
+| `cloud` | dhcp | werewolf's metadata fetcher: the config from GCP's, AWS's or Hetzner's user data ([docs/cloud.md](docs/cloud.md)); GCP's SCSI, NVMe and gVNIC | RAM | nothing | 3.3 MB | | 7 |
+| `bitten` | cloud | blkid; ext4, xfs, btrfs | a directory on the victim | nothing | 5.9 MB | 2.9 MB | 9 |
+| `autoupdate` | bitten | apk-tools, erofs-utils, zstd; Alpine's keys; the updater | a directory on the victim | nothing | 9.8 MB | 6.8 MB | 22 |
+| `prod` | autoupdate | nothing: the production base, published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | nothing | 9.8 MB | 6.8 MB | 22 |
+| `sshd` | minimal | openssh-server, sftp-server, busybox (a shell to log in to) | RAM | :22 | 7.8 MB | | 24 |
+| `prod-ssh` | prod | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.4 MB | 9.5 MB | 33 |
+| `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 13.8 MB | 10.9 MB | 39 |
+| `demo` | prod | nginx, grype, a status page; updates hourly ([docs/demo.md](docs/demo.md)) | a directory on the victim | :80 | 30.5 MB | 27.5 MB | 32 |
 
 1. **Forms build on each other with apko's `include:`.** The Makefile
    follows the chain, laying on each form's files and modules, base first.

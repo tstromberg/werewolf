@@ -8,9 +8,9 @@
 # those in POSTURE_KNOWN (the form's line of test/posture-known), no more and
 # no fewer. Then, unless CHECKS is -, run each check in CHECKS (see
 # test/checks) as root on the console, which needs werewolf.debug=1 and a
-# shell, and power the machine off; with CHECKS -, press its power button
-# from QEMU's monitor. Exit 0 only if it booted, its posture and every check
-# came out as expected, and it shut down cleanly.
+# shell, and power the machine off; with CHECKS -, end QEMU from its
+# monitor. Exit 0 only if it booted, its posture and every check came out
+# as expected, and, with a shell, it shut down cleanly.
 #
 # Nothing waits a fixed time: each step waits for what it needs to see, up
 # to a limit. Each check's output is fenced by a marker its own echo cannot
@@ -75,10 +75,16 @@ expect {
 }
 set known [lsort -unique [regexp -all -inline {[^\s,]+} [expr {[info exists env(POSTURE_KNOWN)] ? $env(POSTURE_KNOWN) : ""}]]]
 set got [lsort -unique [split $got ,]]
+# ?ID: may fail or not, as the host decides (a CPU flaw the host's CPU has).
+set maybe {}
+set sure {}
+foreach id $known {
+	if {[string index $id 0] eq "?"} { lappend maybe [string range $id 1 end] } else { lappend sure $id }
+}
 set new {}
-foreach id $got { if {$id ni $known} { lappend new $id } }
+foreach id $got { if {$id ni $sure && $id ni $maybe} { lappend new $id } }
 set closed {}
-foreach id $known { if {$id ni $got} { lappend closed $id } }
+foreach id $sure { if {$id ni $got} { lappend closed $id } }
 if {$passed < 20} {
 	say FAIL posture "only $passed checks passed; did posture run?"
 	incr failed
@@ -93,16 +99,14 @@ if {$passed < 20} {
 }
 
 if {$checks eq "-"} {
-	# No shell: the power button, through QEMU's monitor (Ctrl-A c).
-	send "\x01c"
-	send "system_powerdown\r"
-	expect {
-		-timeout 120
-		eof {}
-		timeout { give_up "shutdown: still running 120 s after the power button" }
-	}
-	lassign [wait] pid spawn_id os_error status
-	if {$status != 0} { give_up "shutdown: QEMU exited $status" }
+	# No shell to power off from, and on arm64 no power button either (its
+	# device tree's gpio-keys, which linux-virt lacks): QEMU's monitor
+	# (Ctrl-A c) ends the run. Forms with a shell test the shutdown.
+	send "\001c"
+	expect -timeout 10 "(qemu)" {} timeout { give_up "shutdown: no QEMU monitor" }
+	send "quit\r"
+	expect -timeout 30 eof {} timeout { give_up "shutdown: QEMU did not quit" }
+	wait
 	if {$failed} { exit 1 }
 	say pass "all checks"
 	exit 0

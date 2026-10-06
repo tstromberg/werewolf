@@ -26,6 +26,8 @@ const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
+const linux = std.os.linux;
+const sandbox = @import("sandbox.zig");
 
 const meta_dir = "/usr/share/werewolf";
 const state_dir = "/data/svc/autoupdate";
@@ -34,6 +36,20 @@ const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
 const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vulns-master.tar.gz";
 const max_read = 256 << 20;
+
+/// _update, the account the CVE children run as (forms/autoupdate.yaml).
+const update_id: u32 = 69;
+/// The fetcher's root, and where the CVE sources are fetched to.
+const net_root = work_dir ++ "/net";
+const cves_dir = work_dir ++ "/cves";
+/// How long a fetcher and a reader may take, in seconds; what a reader may
+/// send back; the memory it may map, all told; a kernel CVE's title.
+const fetch_seconds = 600;
+const apk_seconds = 1800;
+const read_seconds = 300;
+const max_lines = 4 << 20;
+const reader_memory = 1 << 30;
+const max_title = 512;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -214,12 +230,11 @@ const Update = struct {
         }
 
         u.step = "cves";
-        var client: std.http.Client = .{ .allocator = u.gpa, .io = io };
-        defer client.deinit();
+        try u.netRoot();
         var sources: std.ArrayList(Source) = .empty;
         const repo = (try u.words(try u.read("/etc/apk/repositories")))[0];
-        const package_cves = try u.packageCves(&client, &sources, repo, old_pkgs, new_pkgs);
-        const kernel_cves = if (kernel_changed) try u.kernelCves(&client, &sources, old_kernel, new_kernel) else KernelFixes{};
+        const package_cves = try u.packageCves(&sources, repo, old_pkgs, new_pkgs);
+        const kernel_cves = if (kernel_changed) try u.kernelCves(&sources, old_kernel, new_kernel) else KernelFixes{};
 
         try u.buildSlot(arch, new_kernel);
         try u.install(build);
@@ -261,41 +276,29 @@ const Update = struct {
     }
 
     // --- CVEs --------------------------------------------------------------
+    // Root neither fetches a CVE source nor parses one. For each, a fetcher
+    // (below) makes the request as _update and writes the body to a file
+    // root opened for it; root hashes the file for the report; a reader, as
+    // _update with no network and no files, parses it and sends back a line
+    // per CVE, which root checks field by field, the version window again
+    // included, before any goes in the report.
+
     // Wolfi's security.json: for each source package, the version that fixed
-    // each CVE. A CVE counts when that version is newer than the old one and no
-    // newer than the new one, as apk compares them. "0" lists CVEs that never
+    // each CVE. A CVE counts when that version is newer than the old one and
+    // no newer than the new one, in apk's order. "0" lists CVEs that never
     // applied. A versioned stream (openssl-4.0) is also looked up under its
-    // base name (openssl); the window keeps other streams' fixes out. The file
-    // is not signed, so it informs the report and nothing else.
-    fn packageCves(u: *Update, client: *std.http.Client, sources: *std.ArrayList(Source), repo: []const u8, old: []const Package, new: []const Package) ![]const PackageFix {
+    // base name (openssl); the window keeps other streams' fixes out. The
+    // file is not signed, so it informs the report and nothing else.
+    fn packageCves(u: *Update, sources: *std.ArrayList(Source), repo: []const u8, old: []const Package, new: []const Package) ![]const PackageFix {
+        const origins = try diffOrigins(u.gpa, old, new);
         const url = try std.fmt.allocPrint(u.gpa, "{s}/security.json", .{repo});
-        const body = u.fetch(client, sources, url) catch return &.{};
-        const db = std.json.parseFromSliceLeaky(SecDb, u.gpa, body, .{ .ignore_unknown_fields = true }) catch |err| {
+        const body = try u.fetch(sources, url, "security.json") orelse return &.{};
+        defer _ = linux.close(body.fd);
+        const found = u.examine(sources, .{ .secdb = origins }, body) orelse return &.{};
+        return packageFixes(u.gpa, found, origins) catch |err| {
             sources.items[sources.items.len - 1].@"error" = @errorName(err);
             return &.{};
         };
-        var fixes: std.ArrayList(PackageFix) = .empty;
-        for (try diffOrigins(u.gpa, old, new)) |o| {
-            var cves: std.ArrayList([]const u8) = .empty;
-            const base = streamBase(o.origin);
-            for (db.packages) |p| {
-                if (!std.mem.eql(u8, p.pkg.name, o.origin) and !std.mem.eql(u8, p.pkg.name, base)) continue;
-                const secfixes = p.pkg.secfixes orelse continue;
-                var it = secfixes.map.iterator();
-                while (it.next()) |e| {
-                    const fixed = e.key_ptr.*;
-                    if (std.mem.eql(u8, fixed, "0")) continue;
-                    if (!try u.apkNewer(fixed, o.from) or try u.apkNewer(fixed, o.to)) continue;
-                    for (e.value_ptr.*) |id| {
-                        if (std.mem.startsWith(u8, id, "CVE-")) try appendUnique(u.gpa, &cves, id);
-                    }
-                }
-            }
-            if (cves.items.len == 0) continue;
-            std.mem.sort([]const u8, cves.items, {}, lessString);
-            try fixes.append(u.gpa, .{ .origin = o.origin, .from = o.from, .to = o.to, .cves = cves.items });
-        }
-        return fixes.items;
     }
 
     // The Linux kernel CNA's records, from git.kernel.org as one tarball: for
@@ -303,35 +306,117 @@ const Update = struct {
     // for this kernel's branch (6.18.*) is in (old, new]. Records are often
     // published weeks after a fix ships, so this is what was known at update
     // time.
-    fn kernelCves(u: *Update, client: *std.http.Client, sources: *std.ArrayList(Source), old_kernel: []const u8, new_kernel: []const u8) !KernelFixes {
+    fn kernelCves(u: *Update, sources: *std.ArrayList(Source), old_kernel: []const u8, new_kernel: []const u8) !KernelFixes {
         const old = kernelVersion(old_kernel) orelse return error.BadKernelVersion;
         const new = kernelVersion(new_kernel) orelse return error.BadKernelVersion;
         const branch = try std.fmt.allocPrint(u.gpa, "{d}.{d}", .{ new[0], new[1] });
         var fixes: KernelFixes = .{ .branch = branch, .from = old_kernel, .to = new_kernel };
-        const body = u.fetch(client, sources, kernel_cves_url) catch return fixes;
-        fixes.cves = scanKernelCves(u.gpa, body, branch, old, new) catch |err| {
+        const body = try u.fetch(sources, kernel_cves_url, "vulns.tar.gz") orelse return fixes;
+        defer _ = linux.close(body.fd);
+        const found = u.examine(sources, .{ .kernel = .{ .branch = branch, .old = old, .new = new } }, body) orelse return fixes;
+        fixes.cves = kernelFixes(u.gpa, found, old, new) catch |err| {
             sources.items[sources.items.len - 1].@"error" = @errorName(err);
             return fixes;
         };
         return fixes;
     }
 
-    /// GET url over TLS checked against the system's CA bundle, recording it
-    /// as a source: its sha256 and when it was fetched, or why it was not.
-    fn fetch(u: *Update, client: *std.http.Client, sources: *std.ArrayList(Source), url: []const u8) ![]const u8 {
+    /// GET url, by a fetcher, into cves/name. The file, recorded as a source
+    /// with its sha256; or null, the source recorded with why not.
+    fn fetch(u: *Update, sources: *std.ArrayList(Source), url: []const u8, comptime name: []const u8) !?Body {
         try sources.append(u.gpa, .{ .url = url, .fetched = try u.now() });
         const source = &sources.items[sources.items.len - 1];
-        var body: Io.Writer.Allocating = .init(u.gpa);
-        const res = client.fetch(.{ .location = .{ .url = url }, .response_writer = &body.writer }) catch |err| {
+        const fd: i32 = @intCast(try u.sys(linux.openat(linux.AT.FDCWD, cves_dir ++ "/" ++ name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o600), "open " ++ name));
+        errdefer _ = linux.close(fd);
+        const said = u.ask(fetcher, .{ url, fd }, 256, fetch_seconds) catch |err| {
             source.@"error" = @errorName(err);
+            _ = linux.close(fd);
+            return null;
+        };
+        if (!std.mem.eql(u8, said.status, "ok")) {
+            source.@"error" = said.status;
+            _ = linux.close(fd);
+            return null;
+        }
+        var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+        var buf: [64 << 10]u8 = undefined;
+        var size: usize = 0;
+        while (true) {
+            const n = try u.sys(linux.pread(fd, &buf, buf.len, @intCast(size)), "read " ++ name);
+            if (n == 0) break;
+            h.update(buf[0..n]);
+            size += n;
+        }
+        const hex = std.fmt.bytesToHex(h.finalResult(), .lower);
+        source.sha256 = try u.gpa.dupe(u8, &hex);
+        return .{ .fd = fd, .size = size };
+    }
+
+    /// What a reader found in body, for job: the lines after its "ok", or
+    /// null, with why not recorded on the last source.
+    fn examine(u: *Update, sources: *std.ArrayList(Source), job: Job, body: Body) ?[]const u8 {
+        const source = &sources.items[sources.items.len - 1];
+        const said = u.ask(reader, .{ job, body }, max_lines, read_seconds) catch |err| {
+            source.@"error" = @errorName(err);
+            return null;
+        };
+        if (!std.mem.eql(u8, said.status, "ok")) {
+            source.@"error" = said.status;
+            return null;
+        }
+        return said.rest;
+    }
+
+    /// Run f(args..., out, parent) in a process of its own, and take what it
+    /// writes to out until it exits: at most max bytes, within seconds. A
+    /// child that says more or takes longer is killed, and is an error, as
+    /// is one a signal ended.
+    fn child(u: *Update, comptime f: anytype, args: anytype, max: usize, seconds: i64) !Exit {
+        var pipe: [2]i32 = undefined;
+        _ = try u.sys(linux.pipe2(&pipe, .{ .CLOEXEC = true }), "pipe");
+        defer _ = linux.close(pipe[0]);
+        const parent = linux.getpid();
+        const rc = linux.fork();
+        if (linux.errno(rc) != .SUCCESS) _ = linux.close(pipe[1]);
+        if (try u.sys(rc, "fork") == 0) {
+            _ = linux.close(pipe[0]);
+            @call(.auto, f, args ++ .{ pipe[1], parent });
+        }
+        _ = linux.close(pipe[1]);
+        return collect(u.gpa, @intCast(rc), pipe[0], max, seconds);
+    }
+
+    /// A CVE child's answer: it exits 0, and the first line it writes is its
+    /// status, "ok" or why not, in printable ASCII; the rest is what it
+    /// found. Anything else is an error.
+    fn ask(u: *Update, comptime f: anytype, args: anytype, max: usize, seconds: i64) !Said {
+        const e = try u.child(f, args, max, seconds);
+        if (e.code != 0) return error.ChildFailed;
+        const eol = std.mem.indexOfScalar(u8, e.out, '\n') orelse return error.ChildSaidNothing;
+        const status = e.out[0..eol];
+        if (status.len == 0 or status.len > 128) return error.ChildSaidNonsense;
+        for (status) |c| if (c < 0x20 or c > 0x7e) return error.ChildSaidNonsense;
+        return .{ .status = status, .rest = e.out[eol + 1 ..] };
+    }
+
+    /// The fetcher's root: copies of the resolver's files, and nothing else.
+    fn netRoot(u: *Update) !void {
+        try Dir.cwd().createDirPath(u.io, net_root ++ "/etc");
+        try Dir.cwd().createDirPath(u.io, cves_dir);
+        inline for (.{ "resolv.conf", "hosts" }) |name| {
+            Dir.cwd().copyFile("/etc/" ++ name, Dir.cwd(), net_root ++ "/etc/" ++ name, u.io, .{}) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+        }
+    }
+
+    /// A system call's result, or an error with what failed in detail.
+    fn sys(u: *Update, rc: usize, comptime what: []const u8) !usize {
+        return sandbox.sys(rc, what) catch |err| {
+            u.detail = try std.fmt.allocPrint(u.gpa, "{s}: {s}", .{ what, errnoName(sandbox.failed_errno) });
             return err;
         };
-        if (res.status != .ok) {
-            source.@"error" = @tagName(res.status);
-            return error.HttpStatus;
-        }
-        source.sha256 = try sha256Hex(u.gpa, body.written());
-        return body.written();
     }
 
     // --- build -------------------------------------------------------------
@@ -353,8 +438,15 @@ const Update = struct {
         try u.write(root ++ meta_dir ++ "/kernel", try std.fmt.allocPrint(u.gpa, "{s}\n", .{new_kernel}));
         try u.write(root ++ meta_dir ++ "/release", try std.fmt.allocPrint(u.gpa, "{s} {s} {s} updated-on-{s}\n", .{ form, try u.now(), new_kernel, u.host }));
         try u.stripSetid(root);
-        // As the build makes it (Makefile, EROFS_OPTS).
-        try u.run(&.{ "mkfs.erofs", "-b", "4096", "-zlzma,level=109", "-C1048576", "-Eall-fragments,dedupe", work_dir ++ "/slot/root.erofs", root });
+        // The slot's / is this directory's owner and mode: root's, 0755,
+        // whoever made it, or sshd's StrictModes refuses every key.
+        _ = try u.sys(linux.fchownat(linux.AT.FDCWD, root, 0, 0, linux.AT.SYMLINK_NOFOLLOW), "chown the new root");
+        _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root, 0o755), "chmod the new root");
+        // As the build makes it (Makefile, EROFS_OPTS), but zstd for lzma:
+        // Wolfi's mkfs.erofs has no lzma, and the kernel reads both. A slot
+        // is on disk, not in RAM, so its few more megabytes cost nothing,
+        // and zstd reads faster.
+        try u.run(&.{ "mkfs.erofs", "-b", "4096", "-zzstd,level=19", "-C1048576", "-Eall-fragments,dedupe", work_dir ++ "/slot/root.erofs", root });
 
         // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
         // Image inside it, as the build does (see Makefile).
@@ -384,9 +476,8 @@ const Update = struct {
             try Dir.cwd().createDirPath(io, parentDir(out));
             try u.write(out, ko);
         }
-        var list: Io.Writer.Allocating = .init(u.gpa);
-        for (order) |p| try list.writer.print("{s}\n", .{withoutGz(p)});
-        try u.write(try std.fmt.allocPrint(u.gpa, "{s}/werewolf.modules", .{dst}), list.written());
+        const list = try moduleList(u.gpa, order, try u.read(meta_dir ++ "/module-params"));
+        try u.write(try std.fmt.allocPrint(u.gpa, "{s}/werewolf.modules", .{dst}), list);
         try u.writeCpio(s, work_dir ++ "/stage0.cpio");
         try u.run(&.{ "zstd", "-19", "-q", "-f", "-o", work_dir ++ "/slot/initramfs.zst", work_dir ++ "/stage0.cpio" });
     }
@@ -404,9 +495,9 @@ const Update = struct {
         try Dir.cwd().createDirPath(io, v);
         try Dir.cwd().createDirPath(io, g);
         try u.mountUuid(uuidOf(u.cmd.victim), v, null);
-        defer u.run(&.{ "umount", v }) catch {};
+        defer _ = linux.umount2(v, 0);
         try u.mountUuid(uuidOf(u.cmd.grubenv), g, null);
-        defer u.run(&.{ "umount", g }) catch {};
+        defer _ = linux.umount2(g, 0);
 
         const gpath = pathOf(u.cmd.grubenv);
         const kdir = try std.fmt.allocPrint(u.gpa, "{s}{s}/werewolf/{s}", .{ g, parentDir(parentDir(gpath)), u.other });
@@ -419,7 +510,7 @@ const Update = struct {
         for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
             try Dir.cwd().copyFile(try std.fmt.allocPrint(u.gpa, "{s}/slot/{s}", .{ work_dir, f }), Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ kdir, f }), io, .{});
         }
-        try u.run(&.{"sync"});
+        linux.sync();
         try u.write(state_dir ++ "/attempt", try std.fmt.allocPrint(u.gpa, "{s} {s}\n", .{ u.other, build }));
         const entry = try std.fmt.allocPrint(u.gpa, "werewolf-{s}", .{u.other});
         try u.run(&.{ "/usr/lib/werewolf/grubenv", try std.fmt.allocPrint(u.gpa, "{s}{s}", .{ g, gpath }), "next_entry", entry });
@@ -439,9 +530,9 @@ const Update = struct {
         try Dir.cwd().createDirPath(io, v);
         try Dir.cwd().createDirPath(io, e);
         try u.mountUuid(uuidOf(u.cmd.victim), v, null);
-        defer u.run(&.{ "umount", v }) catch {};
+        defer _ = linux.umount2(v, 0);
         try u.mountUuid(u.cmd.esp, e, "vfat");
-        defer u.run(&.{ "umount", e }) catch {};
+        defer _ = linux.umount2(e, 0);
 
         const rdir = try std.fmt.allocPrint(u.gpa, "{s}{s}/{s}", .{ v, pathOf(u.cmd.victim), u.other });
         const kdir = try std.fmt.allocPrint(u.gpa, "{s}/werewolf/{s}", .{ e, u.other });
@@ -459,15 +550,15 @@ const Update = struct {
         for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
             try u.replace(try std.fmt.allocPrint(u.gpa, "{s}/slot/{s}", .{ work_dir, f }), try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ kdir, f }));
         }
-        try u.run(&.{"sync"});
+        linux.sync();
 
         const version = try compactTime(u.gpa, @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s)));
-        const options = try withSlot(u.gpa, try u.read("/proc/cmdline"), u.other);
+        const options = try withSlot(u.gpa, try u.read("/proc/cmdline"), try u.read(meta_dir ++ "/cmdline"), u.other);
         const entry = try loaderEntry(u.gpa, u.other, version, options);
         const tmp = try std.fmt.allocPrint(u.gpa, "{s}/werewolf-{s}.tmp", .{ entries, u.other });
         try u.write(tmp, entry);
         try Dir.cwd().rename(tmp, Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/werewolf-{s}+1.conf", .{ entries, u.other }), io);
-        try u.run(&.{"sync"});
+        linux.sync();
         try u.write(state_dir ++ "/attempt", try std.fmt.allocPrint(u.gpa, "{s} {s}\n", .{ u.other, build }));
     }
 
@@ -481,32 +572,92 @@ const Update = struct {
     // --- helpers -----------------------------------------------------------
     /// Install packages into a new root, through a cache on /data named for
     /// the root (root, kernel, stage0), so a check that finds nothing new
-    /// downloads indexes and nothing else. --update-cache fetches the
-    /// indexes every time; apk would otherwise trust a cached one for
-    /// hours. Each root has a cache of its own, so cleaning one keeps
-    /// nothing another needs. --purge makes clean drop every package the
-    /// new root did not take; without it apk keeps any version Wolfi's
-    /// index still lists, which is all of them. The cache holds one copy
-    /// of the image, no more.
+    /// downloads indexes and nothing else. Each root has a cache of its own,
+    /// so cleaning one keeps nothing another needs.
+    ///
+    /// Root does not touch the network. apk's network half runs first, as
+    /// _update (apkFetcher): the indexes, fresh every time, since apk would
+    /// otherwise trust a cached one for hours, and every package the new
+    /// root takes, into the cache. Root takes the cache back and installs
+    /// from it with --no-network, checking every signature and hash against
+    /// its own keys, as apk always does. Then it prunes the cache to the
+    /// packages the new root took, so it holds one copy of the image, no
+    /// more.
     fn apkAdd(u: *Update, root: []const u8, arch: []const u8, source: []const []const u8, packages: []const []const u8) !void {
-        const cache = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ cache_dir, std.fs.path.basename(root) });
+        const name = std.fs.path.basename(root);
+        const cache = try std.fmt.allocPrintSentinel(u.gpa, "{s}/{s}", .{ cache_dir, name }, 0);
+        const scratch = try std.fmt.allocPrintSentinel(u.gpa, "{s}/apk-{s}", .{ work_dir, name }, 0);
         try Dir.cwd().createDirPath(u.io, cache);
+        Dir.cwd().deleteTree(u.io, scratch) catch {};
+        try Dir.cwd().createDirPath(u.io, scratch);
+        _ = try u.sys(linux.fchownat(linux.AT.FDCWD, scratch, update_id, update_id, linux.AT.SYMLINK_NOFOLLOW), "chown scratch");
+
+        // The indexes, then the packages: `cache download` fetches no index.
+        const world = try std.mem.join(u.gpa, "\n", packages);
+        for ([_][]const []const u8{ &.{"update"}, &.{ "cache", "download" } }) |applet| {
+            var fetch_argv: std.ArrayList(?[*:0]const u8) = .empty;
+            for ([_][]const u8{ "/usr/bin/apk", "--root", scratch, "--arch", arch, "--cache-dir", cache }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
+            for (source) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
+            for ([_][]const u8{ "--quiet", "--no-progress" }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
+            for (applet) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
+            const argv_z = try fetch_argv.toOwnedSliceSentinel(u.gpa, null);
+            _ = try u.sys(linux.fchownat(linux.AT.FDCWD, cache, update_id, update_id, linux.AT.SYMLINK_NOFOLLOW), "chown cache");
+            const fetched = u.child(apkFetcher, .{ argv_z, world, cache, scratch }, 64 << 10, apk_seconds);
+            try u.reclaim(cache);
+            const e = fetched catch |err| {
+                u.detail = "apk, as _update";
+                return err;
+            };
+            if (e.code != 0) {
+                u.detail = try std.fmt.allocPrint(u.gpa, "apk, as _update: {s}", .{std.mem.trim(u8, e.out[0..@min(e.out.len, 400)], " \n")});
+                return error.CommandFailed;
+            }
+        }
+        try Dir.cwd().deleteTree(u.io, scratch);
+
         var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(u.gpa, &.{ "apk", "--root", root, "--arch", arch, "--cache-dir", cache });
+        try argv.appendSlice(u.gpa, &.{ "apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" });
         try argv.appendSlice(u.gpa, source);
-        const common = argv.items.len;
-        try argv.appendSlice(u.gpa, &.{ "--no-scripts", "--quiet", "--no-progress", "--update-cache", "add", "--initdb" });
+        try argv.appendSlice(u.gpa, &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" });
         try argv.appendSlice(u.gpa, packages);
         try u.run(argv.items);
-        argv.shrinkRetainingCapacity(common);
-        try argv.appendSlice(u.gpa, &.{ "--quiet", "--purge", "cache", "clean" });
-        try u.run(argv.items);
+        try u.prune(cache, root);
     }
 
-    /// Whether apk version a is newer than b.
-    fn apkNewer(u: *Update, a: []const u8, b: []const u8) !bool {
-        const out = try u.output(&.{ "apk", "version", "-t", a, b });
-        return std.mem.eql(u8, std.mem.trim(u8, out, " \n"), ">");
+    /// The cache, down to the packages root has installed, and the indexes.
+    /// Not apk's `cache clean`: without --purge it keeps any version an
+    /// index still lists, which for Wolfi is all of them, and with it,
+    /// where the root is on a disk, it deletes every package.
+    fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
+        const installed = try parseInstalled(u.gpa, try u.read(try std.fmt.allocPrint(u.gpa, "{s}/lib/apk/db/installed", .{root})));
+        var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
+        defer d.close(u.io);
+        var old: std.ArrayList([]const u8) = .empty;
+        var it = d.iterate();
+        while (try it.next(u.io)) |e| {
+            if (std.mem.endsWith(u8, e.name, ".apk") and !isCachedOf(e.name, installed)) try old.append(u.gpa, try u.gpa.dupe(u8, e.name));
+        }
+        for (old.items) |name| try d.deleteFile(u.io, name);
+    }
+
+    /// The cache, root's again once the fetcher is gone: each entry a regular
+    /// file of a name apk gives one, owned by root. Anything else it left is
+    /// removed unread.
+    fn reclaim(u: *Update, cache: [:0]const u8) !void {
+        _ = try u.sys(linux.fchownat(linux.AT.FDCWD, cache, 0, 0, linux.AT.SYMLINK_NOFOLLOW), "chown cache");
+        var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
+        defer d.close(u.io);
+        var strays: std.ArrayList([]const u8) = .empty;
+        var it = d.iterate();
+        while (try it.next(u.io)) |e| {
+            if (e.kind != .file or !cacheName(e.name)) {
+                try strays.append(u.gpa, try u.gpa.dupe(u8, e.name));
+                continue;
+            }
+            const file = try u.gpa.dupeSentinel(u8, e.name, 0);
+            _ = try u.sys(linux.fchownat(d.handle, file, 0, 0, linux.AT.SYMLINK_NOFOLLOW), "chown cached file");
+        }
+        for (strays.items) |stray| try d.deleteTree(u.io, stray);
     }
 
     /// The filesystem with uuid on dir. The mount helper probes only Linux
@@ -550,7 +701,10 @@ const Update = struct {
     /// path, a directory, and everything under it, from this root into
     /// root: the build record, whose etc/ holds the image's accounts.
     fn copyTree(u: *Update, root: []const u8, path: []const u8) !void {
-        var d = try Dir.cwd().openDir(u.io, try std.fmt.allocPrint(u.gpa, "/{s}", .{path}), .{ .iterate = true });
+        var d = Dir.cwd().openDir(u.io, try std.fmt.allocPrint(u.gpa, "/{s}", .{path}), .{ .iterate = true }) catch |err| {
+            u.detail = path;
+            return err;
+        };
         defer d.close(u.io);
         var w = try d.walk(u.gpa);
         defer w.deinit();
@@ -562,9 +716,16 @@ const Update = struct {
 
     /// path, from this root into root. A symlink stays a symlink: a form's
     /// `run` that links to a binary must not become a copy of the old one.
+    /// A .mountpoint is the empty file that keeps a mount point's directory
+    /// in the image; here what is mounted there hides it, so it is made.
     fn copyInto(u: *Update, root: []const u8, path: []const u8) !void {
+        errdefer u.detail = path;
         const src = try std.fmt.allocPrint(u.gpa, "/{s}", .{path});
         const dst = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ root, path });
+        if (std.mem.eql(u8, std.fs.path.basename(path), ".mountpoint")) {
+            try Dir.cwd().createDirPath(u.io, parentDir(dst));
+            return Dir.cwd().writeFile(u.io, .{ .sub_path = dst, .data = "" });
+        }
         var buf: [Dir.max_path_bytes]u8 = undefined;
         const n = Dir.cwd().readLink(u.io, src, &buf) catch |err| switch (err) {
             error.NotLink => return Dir.cwd().copyFile(src, Dir.cwd(), dst, u.io, .{ .make_path = true }),
@@ -584,7 +745,6 @@ const Update = struct {
     /// nodes (/dev/console, which the kernel opens before anything mounts
     /// /dev) as well as files, directories and links.
     fn writeCpio(u: *Update, root: []const u8, out_path: []const u8) !void {
-        const linux = std.os.linux;
         var out: Io.Writer.Allocating = .init(u.gpa);
         var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
         defer d.close(u.io);
@@ -690,6 +850,311 @@ const Update = struct {
     }
 };
 
+// --- the CVE children ----------------------------------------------------------
+
+const Body = struct { fd: i32, size: usize };
+const Exit = struct { code: u8, out: []const u8 };
+const Said = struct { status: []const u8, rest: []const u8 };
+const Job = union(enum) {
+    secdb: []const OriginChange,
+    kernel: struct { branch: []const u8, old: [3]u32, new: [3]u32 },
+};
+
+/// As _update, rooted in net_root with only the resolver's files to read,
+/// TCP only to ports 443 and 53, and no file bigger than max_read: GET url
+/// into body, then say "ok", or why not.
+fn fetcher(url: []const u8, body: i32, out: i32, parent: linux.pid_t) noreturn {
+    sandbox.tieTo(parent);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const status = fetchInto(arena.allocator(), url, body, out) catch |err| whyNot(arena.allocator(), err);
+    say(out, 0, status, "");
+}
+
+fn fetchInto(gpa: Allocator, url: []const u8, body: i32, out: i32) ![]const u8 {
+    try sandbox.closeAllBut(&.{ body, out });
+    var threaded: Io.Threaded = .init_single_threaded;
+    const io = threaded.io();
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    // The CA bundle, read before the chroot hides it.
+    const now = Io.Clock.real.now(io);
+    try client.ca_bundle.rescan(gpa, io, now);
+    client.now = now;
+    try sandbox.limit(.FSIZE, max_read);
+    try sandbox.dropTo(update_id, net_root);
+    const etc: i32 = @intCast(try sandbox.sys(linux.openat(linux.AT.FDCWD, "/etc", .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true }, 0), "open /etc"));
+    try sandbox.landlock(&.{.{ .fd = etc, .access = sandbox.read_file }}, &.{ 443, 53 });
+    _ = linux.close(etc);
+    // What the request takes, as traced: the resolver's files, DNS over
+    // UDP (bound to port 0) or TCP, TLS over TCP, and the body to the file;
+    // nothing else is written anywhere but the status pipe and /dev/null.
+    var f: sandbox.Filter = .{};
+    f.allowArg("socket", 0, linux.AF.INET);
+    f.allowArg("socket", 0, linux.AF.INET6);
+    f.allow("bind");
+    f.allow("connect");
+    f.allow("getsockname");
+    f.allow("sendmsg");
+    f.allow("sendmmsg");
+    f.allow("recvmsg");
+    f.allow("openat");
+    f.allow("preadv");
+    f.allowArg("writev", 0, @intCast(body));
+    f.allowArg("write", 0, @intCast(out));
+    f.allowArg("write", 0, 2);
+    f.allow("close");
+    f.allow("poll");
+    f.allow("ppoll");
+    f.allow("mmap");
+    f.allow("munmap");
+    f.allow("mremap");
+    f.allow("getrandom");
+    f.allow("clock_gettime");
+    f.allow("exit_group");
+    try f.install();
+
+    var buf: [64 << 10]u8 = undefined;
+    const file: Io.File = .{ .handle = body, .flags = .{ .nonblocking = false } };
+    var w = file.writerStreaming(io, &buf);
+    const res = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &w.interface });
+    try w.interface.flush();
+    if (res.status != .ok) return std.enums.tagName(std.http.Status, res.status) orelse "HttpStatus";
+    return "ok";
+}
+
+/// As _update in the empty /var/empty, with no network, no files, and at
+/// most reader_memory of memory: parse body for job, and say "ok" and a
+/// line per CVE, or why not.
+fn reader(job: Job, body: Body, out: i32, parent: linux.pid_t) noreturn {
+    sandbox.tieTo(parent);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    const gpa = arena.allocator();
+    var lines: Io.Writer.Allocating = .init(gpa);
+    readInto(gpa, job, body, out, &lines.writer) catch |err| say(out, 0, whyNot(gpa, err), "");
+    say(out, 0, "ok", lines.written());
+}
+
+fn readInto(gpa: Allocator, job: Job, body: Body, out: i32, w: *Io.Writer) !void {
+    try sandbox.closeAllBut(&.{ body.fd, out });
+    try sandbox.limit(.AS, reader_memory);
+    try sandbox.dropTo(update_id, "/var/empty");
+    try sandbox.landlock(&.{}, &.{});
+    var f: sandbox.Filter = .{};
+    f.allowArg("pread64", 0, @intCast(body.fd));
+    f.allowArg("write", 0, @intCast(out));
+    f.allow("mmap");
+    f.allow("munmap");
+    f.allow("mremap");
+    f.allow("exit_group");
+    try f.install();
+
+    const data = try gpa.alloc(u8, body.size);
+    var got: usize = 0;
+    while (got < data.len) {
+        const n = try sandbox.sys(linux.pread(body.fd, data[got..].ptr, data.len - got, @intCast(got)), "pread");
+        if (n == 0) return error.ShortRead;
+        got += n;
+    }
+    switch (job) {
+        .secdb => |origins| try secdbLines(gpa, data, origins, w),
+        .kernel => |k| try kernelLines(gpa, data, k.branch, k.old, k.new, w),
+    }
+}
+
+/// As _update, apk's network half: argv, run with no environment, in
+/// scratch, a root of its own holding only world and an empty database. It
+/// reads the image (/usr, /etc and the resolver's file), runs nothing but
+/// apk, writes only beneath cache and scratch, connects over TCP only to
+/// ports 443 and 53, and starts no process. What it says goes to out.
+fn apkFetcher(argv: [:null]const ?[*:0]const u8, world: []const u8, cache: [:0]const u8, scratch: [:0]const u8, out: i32, parent: linux.pid_t) noreturn {
+    sandbox.tieTo(parent);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    apkExec(argv, world, cache, scratch, out) catch |err| say(out, 1, whyNot(arena.allocator(), err), "");
+}
+
+fn apkExec(argv: [:null]const ?[*:0]const u8, world: []const u8, cache: [:0]const u8, scratch: [:0]const u8, out: i32) !noreturn {
+    try sandbox.closeAllBut(&.{out});
+    for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
+    // What it may reach, opened while root can. resolv.conf leads, on a
+    // machine with DHCP, to the client's in /run.
+    const dir: linux.O = .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true };
+    const file: linux.O = .{ .PATH = true, .CLOEXEC = true };
+    var rules: [9]sandbox.Rule = undefined;
+    var n: usize = 0;
+    for ([_]struct { [:0]const u8, linux.O, u64 }{
+        .{ "/usr", dir, sandbox.read_file | sandbox.read_dir },
+        .{ "/etc", dir, sandbox.read_file | sandbox.read_dir },
+        .{ "/usr/bin/apk", file, sandbox.execute },
+        .{ interpreter, file, sandbox.execute },
+        .{ "/dev/null", file, sandbox.read_file | sandbox.write_file },
+        .{ cache, dir, sandbox.own_dir },
+        .{ "/etc/resolv.conf", file, sandbox.read_file },
+    }) |r| {
+        const fd = linux.openat(linux.AT.FDCWD, r[0], r[1], 0);
+        if (linux.errno(fd) == .NOENT and std.mem.eql(u8, r[0], "/etc/resolv.conf")) continue;
+        rules[n] = .{ .fd = @intCast(try sandbox.sys(fd, "open what apk may reach")), .access = r[2] };
+        n += 1;
+    }
+    const root: i32 = @intCast(try sandbox.sys(linux.openat(linux.AT.FDCWD, scratch, dir, 0), "open scratch"));
+    rules[n] = .{ .fd = root, .access = sandbox.own_dir };
+    n += 1;
+    try sandbox.dropTo(update_id, null);
+    for ([_][:0]const u8{ "etc", "etc/apk", "lib", "lib/apk", "lib/apk/db" }) |d| {
+        const rc = linux.mkdirat(root, d, 0o755);
+        if (linux.errno(rc) != .EXIST) _ = try sandbox.sys(rc, "mkdir in scratch");
+    }
+    try writeAt(root, "etc/apk/world", world);
+    try writeAt(root, "lib/apk/db/installed", "");
+    try sandbox.landlock(rules[0..n], &.{ 443, 53 });
+
+    // What apk 2.14 calls to fetch, as traced, under glibc on either
+    // architecture; the names one lacks are skipped. It tries to mount /proc
+    // in its root, which is refused as for any unprivileged process, and
+    // carries on.
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "read",            "readv",           "pread64",      "write",        "writev",          "pwrite64",
+        "openat",          "open",            "close",        "fstat",        "newfstatat",      "stat",
+        "lstat",           "statx",           "fstatfs",      "statfs",       "lseek",           "getdents64",
+        "faccessat",       "faccessat2",      "access",       "readlinkat",   "readlink",        "mkdirat",
+        "mkdir",           "renameat",        "renameat2",    "rename",       "unlinkat",        "unlink",
+        "utimensat",       "ftruncate",       "fsync",        "fdatasync",    "fcntl",           "flock",
+        "dup",             "dup2",            "dup3",         "umask",        "mmap",            "munmap",
+        "mprotect",        "mremap",          "madvise",      "brk",          "futex",           "getpid",
+        "gettid",          "getuid",          "geteuid",      "getgid",       "getegid",         "connect",
+        "getsockopt",      "setsockopt",      "getsockname",  "getpeername",  "sendto",          "recvfrom",
+        "sendmsg",         "recvmsg",         "sendmmsg",     "recvmmsg",     "shutdown",        "poll",
+        "ppoll",           "pselect6",        "select",       "rt_sigaction", "rt_sigprocmask",  "rt_sigreturn",
+        "getrandom",       "clock_gettime",   "gettimeofday", "nanosleep",    "clock_nanosleep", "set_tid_address",
+        "set_robust_list", "rseq",            "prlimit64",    "uname",        "execve",          "exit_group",
+        "exit",            "restart_syscall",
+    }) |name| f.allow(name);
+    // IP, and nothing else: glibc's lookups also try nscd's Unix socket,
+    // and netlink for the addresses configured, and do without.
+    f.allowArg("socket", 0, linux.AF.INET);
+    f.allowArg("socket", 0, linux.AF.INET6);
+    f.refuse("socket");
+    // FIONREAD, and isatty's TCGETS and TCGETS2.
+    for ([_]u32{ 0x541b, 0x5401, 0x802c542a }) |req| f.allowArg("ioctl", 1, req);
+    f.refuse("mount");
+    f.refuse("umount2");
+    try f.install();
+
+    const envp = [_:null]?[*:0]const u8{};
+    _ = try sandbox.sys(linux.execve(argv[0].?, argv.ptr, &envp), "execve apk");
+    unreachable;
+}
+
+/// glibc's dynamic loader, which the kernel runs apk with; what it runs in
+/// turn would be as confined as apk is.
+const interpreter = switch (@import("builtin").cpu.arch) {
+    .x86_64 => "/lib64/ld-linux-x86-64.so.2",
+    .aarch64 => "/lib/ld-linux-aarch64.so.1",
+    else => @compileError("werewolf builds for x86_64 and aarch64"),
+};
+
+/// A file beneath dir, written whole.
+fn writeAt(dir: i32, name: [*:0]const u8, data: []const u8) !void {
+    const fd: i32 = @intCast(try sandbox.sys(linux.openat(dir, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o644), "create in scratch"));
+    defer _ = linux.close(fd);
+    var off: usize = 0;
+    while (off < data.len) off += try sandbox.sys(linux.write(fd, data[off..].ptr, data.len - off), "write in scratch");
+}
+
+/// Whether file, a package in apk's cache (NAME-VERSION.HASH.apk), is one
+/// of pkgs.
+fn isCachedOf(file: []const u8, pkgs: []const Package) bool {
+    const stem = file[0 .. std.mem.lastIndexOfScalar(u8, file[0 .. file.len - ".apk".len], '.') orelse return false];
+    for (pkgs) |p| {
+        if (stem.len == p.name.len + 1 + p.version.len and std.mem.startsWith(u8, stem, p.name) and
+            stem[p.name.len] == '-' and std.mem.endsWith(u8, stem, p.version)) return true;
+    }
+    return false;
+}
+
+/// A name apk gives a file in its cache.
+fn cacheName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "installed") or std.mem.endsWith(u8, name, ".apk") or
+        (std.mem.startsWith(u8, name, "APKINDEX.") and std.mem.endsWith(u8, name, ".tar.gz"));
+}
+
+/// A child's error, as its status line: the error, or for a system call,
+/// which and the kernel's reason.
+fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
+    if (err != error.SystemCall) return @errorName(err);
+    return std.fmt.allocPrint(gpa, "{s}: {s}", .{ sandbox.failed, errnoName(sandbox.failed_errno) }) catch "SystemCall";
+}
+
+/// A child's last words, and its end.
+fn say(out: i32, code: u8, status: []const u8, rest: []const u8) noreturn {
+    for ([_][]const u8{ status, "\n", rest }) |data| {
+        var off: usize = 0;
+        while (off < data.len) {
+            const n = linux.write(out, data[off..].ptr, data.len - off);
+            if (linux.errno(n) != .SUCCESS) linux.exit_group(1);
+            off += n;
+        }
+    }
+    // Straight out: the runtime's cleanup would make calls the filter kills.
+    linux.exit_group(code);
+}
+
+/// What child pid writes to in, and its exit code: at most max bytes,
+/// within seconds. It is killed if it says more, or takes longer.
+fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i64) !Exit {
+    var reaped = false;
+    defer if (!reaped) {
+        _ = linux.kill(pid, .KILL);
+        var status: i32 = 0;
+        while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
+    };
+    const buf = try gpa.alloc(u8, max);
+    const deadline = nowMs() + seconds * std.time.ms_per_s;
+    var got: usize = 0;
+    while (true) {
+        const left = deadline - nowMs();
+        if (left <= 0) return error.Timeout;
+        var pfd = [1]linux.pollfd{.{ .fd = in, .events = linux.POLL.IN, .revents = 0 }};
+        const ready = linux.poll(&pfd, 1, @intCast(@min(left, std.time.ms_per_s)));
+        if (linux.errno(ready) == .INTR or ready == 0) continue;
+        if (got == max) return error.ChildSaidTooMuch;
+        const n = linux.read(in, buf[got..].ptr, max - got);
+        switch (linux.errno(n)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            else => return error.ReadFailed,
+        }
+        if (n == 0) break;
+        got += n;
+    }
+    // Its end of the pipe is closed: it has until the deadline to exit.
+    while (nowMs() < deadline) {
+        var status: i32 = 0;
+        const rc = linux.wait4(pid, &status, linux.W.NOHANG, null);
+        if (linux.errno(rc) == .INTR) continue;
+        if (linux.errno(rc) != .SUCCESS) return error.WaitFailed;
+        if (rc == 0) {
+            const tick: linux.timespec = .{ .sec = 0, .nsec = 50 * std.time.ns_per_ms };
+            _ = linux.nanosleep(&tick, null);
+            continue;
+        }
+        reaped = true;
+        const s: u32 = @bitCast(status);
+        if (!linux.W.IFEXITED(s)) return error.ChildKilled;
+        return .{ .code = linux.W.EXITSTATUS(s), .out = buf[0..got] };
+    }
+    return error.Timeout;
+}
+
+fn nowMs() i64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(.BOOTTIME, &ts);
+    return ts.sec * std.time.ms_per_s + @divFloor(ts.nsec, std.time.ns_per_ms);
+}
+
+fn errnoName(e: linux.E) []const u8 {
+    return std.enums.tagName(linux.E, e) orelse "unknown";
+}
+
 // --- report ------------------------------------------------------------------
 
 const Report = struct {
@@ -726,21 +1191,33 @@ fn parseCmdline(text: []const u8) Cmdline {
     return c;
 }
 
-/// This boot's command line, for the other slot: werewolf.slot changed and
-/// everything else kept, so what the machine was booted with (its console,
-/// werewolf.mac) carries over. initrd= and BOOT_IMAGE= belong to the loader
-/// that wrote them, and are dropped.
-fn withSlot(gpa: Allocator, cmdline: []const u8, slot: []const u8) ![]const u8 {
+/// This boot's command line, for the other slot: what the machine was
+/// booted with (its console, werewolf.mac) carries over, but the image's
+/// own arguments (/usr/share/werewolf/cmdline, which the build writes from
+/// the form's allowances) replace any of the same name, so an entry edited
+/// to loosen one does not outlive the next update, and one an update adds
+/// reaches machines installed before it. werewolf.slot is the other slot's;
+/// initrd= and BOOT_IMAGE= belong to the loader that wrote them, and are
+/// dropped.
+fn withSlot(gpa: Allocator, cmdline: []const u8, image: []const u8, slot: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeAny(u8, cmdline, " \n");
-    while (it.next()) |arg| {
+    next: while (it.next()) |arg| {
         if (std.mem.startsWith(u8, arg, "werewolf.slot=") or std.mem.startsWith(u8, arg, "initrd=") or
             std.mem.startsWith(u8, arg, "BOOT_IMAGE=")) continue;
-        try out.appendSlice(gpa, arg);
-        try out.append(gpa, ' ');
+        var own = std.mem.tokenizeAny(u8, image, " \n");
+        while (own.next()) |o| if (std.mem.eql(u8, argName(arg), argName(o))) continue :next;
+        try out.print(gpa, "{s} ", .{arg});
     }
+    var own = std.mem.tokenizeAny(u8, image, " \n");
+    while (own.next()) |o| try out.print(gpa, "{s} ", .{o});
     try out.print(gpa, "werewolf.slot={s}", .{slot});
     return out.items;
+}
+
+/// A kernel argument's name: what comes before its =, or all of it.
+fn argName(arg: []const u8) []const u8 {
+    return arg[0 .. std.mem.indexOfScalar(u8, arg, '=') orelse arg.len];
 }
 
 /// A systemd-boot entry (the Boot Loader Specification's type 1) for slot.
@@ -868,6 +1345,133 @@ fn streamBase(origin: []const u8) []const u8 {
     return origin[0..i];
 }
 
+// apk's version order, as apk-tools 2.14's src/version.c defines it, so no
+// apk need run to compare two: {digit}{.digit}...{letter}{_suffix{#}}...{-r#}.
+// A version is read as tokens, each kind known from the character that ends
+// the last, in an order that only rises but for a few steps back.
+const Tok = enum(i8) { invalid = -1, digit_or_zero, digit, letter, suffix, suffix_no, revision_no, end };
+
+const VersionReader = struct {
+    s: []const u8,
+    t: Tok = .digit,
+
+    const pre_suffixes = [_][]const u8{ "alpha", "beta", "pre", "rc" };
+    const post_suffixes = [_][]const u8{ "cvs", "svn", "git", "hg", "p" };
+
+    /// The kind of the next token, from what separates it from the last.
+    fn next(r: *VersionReader) void {
+        const s = r.s;
+        var n: Tok = .invalid;
+        if (s.len == 0 or s[0] == 0) {
+            n = .end;
+        } else if ((r.t == .digit or r.t == .digit_or_zero) and std.ascii.isLower(s[0])) {
+            n = .letter;
+        } else if (r.t == .letter and std.ascii.isDigit(s[0])) {
+            n = .digit;
+        } else if (r.t == .suffix and std.ascii.isDigit(s[0])) {
+            n = .suffix_no;
+        } else {
+            switch (s[0]) {
+                '.' => n = .digit_or_zero,
+                '_' => n = .suffix,
+                '-' => if (s.len > 1 and s[1] == 'r') {
+                    n = .revision_no;
+                    r.s = r.s[1..];
+                },
+                else => {},
+            }
+            r.s = r.s[1..];
+        }
+        if (@backingInt(n) < @backingInt(r.t) and !((n == .digit_or_zero and r.t == .digit) or
+            (n == .suffix and r.t == .suffix_no) or (n == .digit and r.t == .letter))) n = .invalid;
+        r.t = n;
+    }
+
+    /// The value of the token of kind r.t, and past it.
+    fn token(r: *VersionReader) i64 {
+        const s = r.s;
+        if (s.len == 0) {
+            r.t = .end;
+            return 0;
+        }
+        var i: usize = 0;
+        var v: i64 = 0;
+        var nt: Tok = .invalid;
+        switch (r.t) {
+            .digit_or_zero, .digit, .suffix_no, .revision_no => if (r.t == .digit_or_zero and s[0] == '0') {
+                // Leading zeros: 1.01 is older than 1.1.
+                while (i + 1 < s.len and s[i + 1] == '0') i += 1;
+                nt = .digit;
+                v = -@as(i64, @intCast(i));
+            } else {
+                while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) v = v * 10 + (s[i] - '0');
+                if (i >= 18) return r.fail();
+            },
+            .letter => {
+                v = s[0];
+                i = 1;
+            },
+            .suffix => suffix: {
+                // Before the release (alpha, -4, to rc, -1), or after it.
+                for (pre_suffixes, 0..) |p, k| if (std.mem.startsWith(u8, s, p)) {
+                    i = p.len;
+                    v = @as(i64, @intCast(k)) - pre_suffixes.len;
+                    break :suffix;
+                };
+                for (post_suffixes, 0..) |p, k| if (std.mem.startsWith(u8, s, p)) {
+                    i = p.len;
+                    v = @intCast(k);
+                    break :suffix;
+                };
+                return r.fail();
+            },
+            else => return r.fail(),
+        }
+        r.s = s[i..];
+        if (r.s.len == 0) {
+            r.t = .end;
+        } else if (nt != .invalid) {
+            r.t = nt;
+        } else {
+            r.next();
+        }
+        return v;
+    }
+
+    fn fail(r: *VersionReader) i64 {
+        r.t = .invalid;
+        return -1;
+    }
+};
+
+/// a against b, as `apk version -t a b` orders them.
+fn apkOrder(a: []const u8, b: []const u8) std.math.Order {
+    var x: VersionReader = .{ .s = a };
+    var y: VersionReader = .{ .s = b };
+    var xv: i64 = 0;
+    var yv: i64 = 0;
+    while (x.t == y.t and x.t != .end and x.t != .invalid and xv == yv) {
+        xv = x.token();
+        yv = y.token();
+    }
+    if (xv != yv) return std.math.order(xv, yv);
+    if (x.t == y.t) return .eq;
+    // Equal as far as one goes: the longer is newer, unless what it goes
+    // on with is a pre-release suffix.
+    var xs = x;
+    var ys = y;
+    if (x.t == .suffix and xs.token() < 0) return .lt;
+    if (y.t == .suffix and ys.token() < 0) return .gt;
+    return std.math.order(@backingInt(y.t), @backingInt(x.t));
+}
+
+/// Whether apk would take s as a version.
+fn validVersion(s: []const u8) bool {
+    var r: VersionReader = .{ .s = s };
+    while (r.t != .end and r.t != .invalid) _ = r.token();
+    return r.t == .end;
+}
+
 /// The first 16 hex digits of the sha256 of what goes into a build.
 fn buildHash(gpa: Allocator, pkgs: []const Package, kernel: []const u8) ![]const u8 {
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
@@ -944,8 +1548,69 @@ fn kernelFixedIn(rec: KernelRecord, branch: []const u8, old: [3]u32, new: [3]u32
     return null;
 }
 
-/// Every CVE in the kernel CNA's tarball fixed on branch in (old, new].
-fn scanKernelCves(gpa: Allocator, tarball_gz: []const u8, branch: []const u8, old: [3]u32, new: [3]u32) ![]const KernelFix {
+/// Wolfi's security.json, as the reader's lines, "INDEX FIXED CVE": a CVE
+/// fixed at version FIXED, in the window of origins[INDEX].
+fn secdbLines(gpa: Allocator, json: []const u8, origins: []const OriginChange, w: *Io.Writer) !void {
+    const db = try std.json.parseFromSliceLeaky(SecDb, gpa, json, .{ .ignore_unknown_fields = true });
+    for (origins, 0..) |o, i| {
+        const base = streamBase(o.origin);
+        for (db.packages) |p| {
+            if (!std.mem.eql(u8, p.pkg.name, o.origin) and !std.mem.eql(u8, p.pkg.name, base)) continue;
+            const secfixes = p.pkg.secfixes orelse continue;
+            var it = secfixes.map.iterator();
+            while (it.next()) |e| {
+                if (!inWindow(e.key_ptr.*, o.from, o.to)) continue;
+                for (e.value_ptr.*) |id| {
+                    if (validCve(id)) try w.print("{d} {s} {s}\n", .{ i, e.key_ptr.*, id });
+                }
+            }
+        }
+    }
+}
+
+/// The reader's lines from secdbLines, checked: each names an origin asked
+/// about, a version in its window, and a CVE id. A reader that sends any
+/// other line is not believed at all.
+fn packageFixes(gpa: Allocator, text: []const u8, origins: []const OriginChange) ![]const PackageFix {
+    const cves = try gpa.alloc(std.ArrayList([]const u8), origins.len);
+    @memset(cves, .empty);
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ' ');
+        const i = std.fmt.parseUnsigned(usize, f.next().?, 10) catch return error.BadLine;
+        const fixed = f.next() orelse return error.BadLine;
+        const id = f.next() orelse return error.BadLine;
+        if (f.next() != null or i >= origins.len or !validCve(id)) return error.BadLine;
+        if (!inWindow(fixed, origins[i].from, origins[i].to)) return error.BadLine;
+        try appendUnique(gpa, &cves[i], id);
+    }
+    var fixes: std.ArrayList(PackageFix) = .empty;
+    for (origins, cves) |o, c| {
+        if (c.items.len == 0) continue;
+        std.mem.sort([]const u8, c.items, {}, lessString);
+        try fixes.append(gpa, .{ .origin = o.origin, .from = o.from, .to = o.to, .cves = c.items });
+    }
+    return fixes.items;
+}
+
+/// Whether fixed is a version newer than from and no newer than to. "0",
+/// never affected, is in no window.
+fn inWindow(fixed: []const u8, from: []const u8, to: []const u8) bool {
+    return validVersion(fixed) and !std.mem.eql(u8, fixed, "0") and
+        apkOrder(fixed, from) == .gt and apkOrder(fixed, to) != .gt;
+}
+
+/// CVE-2026-52988: the year, and four digits or more.
+fn validCve(id: []const u8) bool {
+    if (id.len < 13 or id.len > 32 or !std.mem.startsWith(u8, id, "CVE-") or id[8] != '-') return false;
+    for (id[4..8]) |c| if (!std.ascii.isDigit(c)) return false;
+    for (id[9..]) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
+/// The kernel CNA's tarball, as the reader's lines, "CVE FIXED TITLE": each
+/// CVE fixed on branch in (old, new], with its title made one line.
+fn kernelLines(gpa: Allocator, tarball_gz: []const u8, branch: []const u8, old: [3]u32, new: [3]u32, w: *Io.Writer) !void {
     var in: Io.Reader = .fixed(tarball_gz);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
@@ -954,7 +1619,6 @@ fn scanKernelCves(gpa: Allocator, tarball_gz: []const u8, branch: []const u8, ol
     var it: std.tar.Iterator = .init(&gz.reader, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf });
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
-    var out: std.ArrayList(KernelFix) = .empty;
     while (try it.next()) |file| {
         if (file.kind != .file or !isKernelRecord(file.name)) continue;
         _ = scratch.reset(.retain_capacity);
@@ -963,11 +1627,39 @@ fn scanKernelCves(gpa: Allocator, tarball_gz: []const u8, branch: []const u8, ol
         try it.streamRemaining(file, &body.writer);
         const rec = std.json.parseFromSliceLeaky(KernelRecord, s, body.written(), .{ .ignore_unknown_fields = true }) catch continue;
         const fixed = kernelFixedIn(rec, branch, old, new) orelse continue;
-        try out.append(gpa, .{
-            .id = try gpa.dupe(u8, rec.cveMetadata.cveId),
-            .fixed_in = try gpa.dupe(u8, fixed),
-            .title = try gpa.dupe(u8, rec.containers.cna.title),
-        });
+        if (!validCve(rec.cveMetadata.cveId)) continue;
+        try w.print("{s} {s} {s}\n", .{ rec.cveMetadata.cveId, fixed, try oneLine(s, rec.containers.cna.title) });
+    }
+}
+
+/// s with control characters as spaces, and cut, on a character's
+/// boundary, to max_title bytes.
+fn oneLine(gpa: Allocator, s: []const u8) ![]const u8 {
+    var end = @min(s.len, max_title);
+    if (end < s.len) while (end > 0 and s[end] & 0xc0 == 0x80) : (end -= 1) {};
+    const out = try gpa.dupe(u8, s[0..end]);
+    for (out) |*c| if (c.* < 0x20 or c.* == 0x7f) {
+        c.* = ' ';
+    };
+    return out;
+}
+
+/// The reader's lines from kernelLines, checked: a CVE id, a version on
+/// new's branch in (old, new], and a title of printable UTF-8. A reader
+/// that sends any other line is not believed at all.
+fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) ![]const KernelFix {
+    var out: std.ArrayList(KernelFix) = .empty;
+    var it = std.mem.tokenizeScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ' ');
+        const id = f.next().?;
+        const fixed = f.next() orelse return error.BadLine;
+        const title = f.rest();
+        const v = kernelVersion(fixed) orelse return error.BadLine;
+        if (!validCve(id) or v[0] != new[0] or v[1] != new[1] or !kernelLess(old, v) or kernelLess(new, v)) return error.BadLine;
+        if (title.len > max_title or !std.unicode.utf8ValidateSlice(title)) return error.BadLine;
+        for (title) |c| if (c < 0x20 or c == 0x7f) return error.BadLine;
+        try out.append(gpa, .{ .id = id, .fixed_in = fixed, .title = title });
     }
     std.mem.sort(KernelFix, out.items, {}, struct {
         fn lt(_: void, a: KernelFix, b: KernelFix) bool {
@@ -1015,6 +1707,36 @@ fn moduleOrder(gpa: Allocator, dep: []const u8, leaves: []const []const u8) ![]c
         }
     }
     return out.items;
+}
+
+/// werewolf.modules for a load order: each path without .gz, and after it
+/// the parameters /usr/share/werewolf/module-params gives its module, a
+/// line `MODULE KEY=VALUE`, as the build writes them (Makefile,
+/// MODULE_PARAMS). Parameters for a module not in the order are an error,
+/// not a module loaded without them.
+fn moduleList(gpa: Allocator, order: []const []const u8, params: []const u8) ![]const u8 {
+    var out: Io.Writer.Allocating = .init(gpa);
+    for (order) |p| {
+        const path = withoutGz(p);
+        try out.writer.writeAll(path);
+        const stem = std.fs.path.basename(path);
+        var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
+        while (lines_it.next()) |line| {
+            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.BadModuleParams;
+            if (std.mem.eql(u8, line[0..space], stem[0 .. stem.len - ".ko".len])) try out.writer.print(" {s}", .{line[space + 1 ..]});
+        }
+        try out.writer.writeByte('\n');
+    }
+    var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
+    next: while (lines_it.next()) |line| {
+        const name = line[0 .. std.mem.indexOfScalar(u8, line, ' ') orelse line.len];
+        for (order) |p| {
+            const stem = std.fs.path.basename(withoutGz(p));
+            if (std.mem.eql(u8, name, stem[0 .. stem.len - ".ko".len])) continue :next;
+        }
+        return error.ParamsForMissingModule;
+    }
+    return out.written();
 }
 
 /// Alpine's arm64 vmlinuz is an EFI zboot image: "MZ", "zimg", then the
@@ -1108,7 +1830,13 @@ test "systemd-boot entries" {
     try testing.expectEqualStrings("", c.grubenv);
     try testing.expectEqualStrings(
         "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 werewolf.slot=b",
-        try withSlot(a, "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n", "b"),
+        try withSlot(a, "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n", "", "b"),
+    );
+    // The image's arguments replace any of the same name, and are added
+    // where missing.
+    try testing.expectEqualStrings(
+        "console=hvc0 werewolf.victim=ab:/werewolf debugfs=off proc_mem.force_override=never werewolf.slot=b",
+        try withSlot(a, "console=hvc0 proc_mem.force_override=always werewolf.slot=a werewolf.victim=ab:/werewolf\n", "debugfs=off proc_mem.force_override=never\n", "b"),
     );
     try testing.expectEqualStrings(
         \\title werewolf b
@@ -1159,6 +1887,56 @@ test streamBase {
     try testing.expectEqualStrings("py3-", streamBase("py3-"));
 }
 
+test apkOrder {
+    // Each as apk-tools 2.14.10's `apk version -t` answered.
+    const cases = [_]struct { []const u8, []const u8, std.math.Order }{
+        .{ "1.0", "1.0.1", .lt },
+        .{ "1.0_alpha", "1.0", .lt },
+        .{ "1.0_alpha1", "1.0_alpha2", .lt },
+        .{ "1.0_beta", "1.0_alpha", .gt },
+        .{ "1.0_rc1", "1.0", .lt },
+        .{ "1.0_p1", "1.0", .gt },
+        .{ "1.0-r1", "1.0-r0", .gt },
+        .{ "1.0-r10", "1.0-r9", .gt },
+        .{ "1.0a", "1.0", .gt },
+        .{ "1.0a", "1.0b", .lt },
+        .{ "1.01", "1.1", .lt },
+        .{ "1.010", "1.9", .lt },
+        .{ "1.001", "1.01", .lt },
+        .{ "2.0", "1.99", .gt },
+        .{ "1.3.2.1_rc20260601-r0", "1.3.2.1-r0", .lt },
+        .{ "1.3.2.1_rc20260601-r0", "1.3.2-r5", .gt },
+        .{ "4.0.3-r3", "4.0.2-r0", .gt },
+        .{ "1.38.0-r2", "1.37.0-r30", .gt },
+        .{ "1.0", "1.0", .eq },
+        .{ "1.0-r0", "1.0", .gt },
+        .{ "0", "1.0", .lt },
+        .{ "1.0_git20260101", "1.0", .gt },
+        .{ "1.0_cvs", "1.0_svn", .lt },
+        .{ "6.18.55-r0", "6.18.9-r0", .gt },
+        .{ "1.2.3_p4-r1", "1.2.3_p4-r0", .gt },
+        .{ "1.2.3_pre1", "1.2.3_p1", .lt },
+        .{ "2.39.4", "2.39.4_p0", .lt },
+        .{ "1.0_bad", "1.0", .lt },
+        .{ "abc", "1.0", .lt },
+        .{ "1.0.", "1.0", .gt },
+        .{ "1.0", "1.0-r", .lt },
+        .{ "1.2.3a1", "1.2.3a", .gt },
+        .{ "5.2.37_p20250701-r0", "5.2.37-r40", .gt },
+        .{ "2026.04.13-r1", "2026.4.13-r1", .lt },
+        .{ "1.0.0.0.0.0", "1.0", .gt },
+        .{ "1.0_alpha_p1", "1.0_alpha", .gt },
+    };
+    for (cases) |c| {
+        errdefer std.debug.print("{s} {s}\n", .{ c[0], c[1] });
+        try testing.expectEqual(c[2], apkOrder(c[0], c[1]));
+        try testing.expectEqual(c[2].invert(), apkOrder(c[1], c[0]));
+    }
+    // And as `apk version -c` judged them.
+    for ([_][]const u8{ "1.0", "1.0.", "1.0-r", "0", "", "1.0_alpha_p1", "1.3.2.1_rc20260601-r0" }) |v| try testing.expect(validVersion(v));
+    for ([_][]const u8{ "1.0_bad", "abc", "1.0-x", "1.0 ", "1.0-r1a", "1234567890123456789" }) |v| try testing.expect(!validVersion(v));
+}
+
 test kernelVersion {
     try testing.expectEqual([3]u32{ 6, 18, 55 }, kernelVersion("linux-virt-6.18.55-r0").?);
     try testing.expectEqual([3]u32{ 6, 18, 42 }, kernelVersion("6.18.42").?);
@@ -1198,6 +1976,109 @@ test "secdb parses with versions as keys" {
     try testing.expectEqual(null, db.packages[1].pkg.secfixes);
 }
 
+test "package CVEs, from a reader and checked" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const origins: []const OriginChange = &.{
+        .{ .origin = "zlib", .from = "1.3.1-r0", .to = "1.3.2.1-r0" },
+        .{ .origin = "openssl-4.0", .from = "4.0.2-r0", .to = "4.0.3-r3" },
+    };
+    var out: Io.Writer.Allocating = .init(a);
+    try secdbLines(a,
+        \\{"packages":[
+        \\ {"pkg":{"name":"zlib","secfixes":{"0":["CVE-2026-22184"],"1.3.2.1_rc20260601-r0":["CVE-2026-85091","GHSA-x"],"1.3.2-r0":["CVE-2026-1111"],"1.4-r0":["CVE-2026-2222"]}}},
+        \\ {"pkg":{"name":"openssl","secfixes":{"4.0.3-r0":["CVE-2026-3333"],"3.5.9-r0":["CVE-2026-4444"],"4.0.3 -r1":["CVE-2026-5555"]}}},
+        \\ {"pkg":{"name":"other","secfixes":{"4.0.3-r0":["CVE-2026-6666"]}}}]}
+    , origins, &out.writer);
+    try testing.expectEqualStrings(
+        \\0 1.3.2.1_rc20260601-r0 CVE-2026-85091
+        \\0 1.3.2-r0 CVE-2026-1111
+        \\1 4.0.3-r0 CVE-2026-3333
+        \\
+    , out.written());
+
+    const fixes = try packageFixes(a, out.written(), origins);
+    try testing.expectEqual(2, fixes.len);
+    try testing.expectEqualStrings("zlib", fixes[0].origin);
+    try testing.expectEqualStrings("CVE-2026-1111", fixes[0].cves[0]);
+    try testing.expectEqualStrings("CVE-2026-85091", fixes[0].cves[1]);
+    try testing.expectEqualStrings("4.0.2-r0", fixes[1].from);
+    try testing.expectEqual(0, (try packageFixes(a, "", origins)).len);
+
+    // A reader that lies in any one line is believed in none.
+    for ([_][]const u8{
+        "2 4.0.3-r0 CVE-2026-3333", // no such origin
+        "1 4.0.4-r0 CVE-2026-3333", // after the window
+        "1 4.0.2-r0 CVE-2026-3333", // the old version itself
+        "1 0 CVE-2026-3333",
+        "1 4.0.3-r0 GHSA-xxxx-xxxx-xxxx",
+        "1 4.0.3-r0 CVE-2026-3333 more",
+        "1 4.0.3-r0",
+        "1 4.0.3-r0 CVE-26-3333",
+        "-1 4.0.3-r0 CVE-2026-3333",
+        "1 4.0.3-r0 CVE-2026-3333\x00",
+    }) |bad| {
+        const text = try std.fmt.allocPrint(a, "0 1.3.2-r0 CVE-2026-1111\n{s}\n", .{bad});
+        try testing.expectError(error.BadLine, packageFixes(a, text, origins));
+    }
+}
+
+test "kernel CVEs, from a reader and checked" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const old: [3]u32 = .{ 6, 18, 50 };
+    const new: [3]u32 = .{ 6, 18, 55 };
+    const fixes = try kernelFixes(a, "CVE-2026-9000 6.18.55 b: \xc3\xa9t\xc3\xa9\nCVE-2026-10001 6.18.51 a: x\n", old, new);
+    try testing.expectEqual(2, fixes.len);
+    try testing.expectEqualStrings("CVE-2026-10001", fixes[0].id);
+    try testing.expectEqualStrings("a: x", fixes[0].title);
+    try testing.expectEqualStrings("6.18.55", fixes[1].fixed_in);
+    for ([_][]const u8{
+        "CVE-2026-9999 6.18.50 x", // the old version itself
+        "CVE-2026-9999 6.18.56 x",
+        "CVE-2026-9999 6.12.52 x",
+        "CVE-2026-9999 6.18 x",
+        "CVE-2026-9999 6.18.52 \x1b[2Jx",
+        "CVE-2026-9999 6.18.52 \xff",
+        "CVE-2026-99x9 6.18.52 x",
+    }) |bad| try testing.expectError(error.BadLine, kernelFixes(a, bad, old, new));
+
+    try testing.expectEqualStrings("a b  c", try oneLine(a, "a\nb\t\x7fc"));
+    var long: [max_title + 1]u8 = @splat('x');
+    long[max_title - 1] = 0xc3;
+    long[max_title] = 0xa9;
+    try testing.expectEqual(max_title - 1, (try oneLine(a, &long)).len);
+}
+
+test cacheName {
+    for ([_][]const u8{ "installed", "APKINDEX.f8759e6a.tar.gz", "zstd-1.5.7-r10.cc2743ad.apk" }) |n| try testing.expect(cacheName(n));
+    for ([_][]const u8{ "APKINDEX.f8759e6a.tar", ".apk.27182ee91faf", "installed.new", "lib", "zstd-1.5.7-r10.apk.tmp" }) |n| try testing.expect(!cacheName(n));
+}
+
+test isCachedOf {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const pkgs = try parseInstalled(arena.allocator(), "P:zstd\nV:1.5.7-r10\n\nP:glibc-2.44\nV:2.44-r8\n");
+    try testing.expect(isCachedOf("zstd-1.5.7-r10.cc2743ad.apk", pkgs));
+    try testing.expect(isCachedOf("glibc-2.44-2.44-r8.b91ee306.apk", pkgs));
+    try testing.expect(!isCachedOf("glibc-2.44-2.44-r7.53c9e93b.apk", pkgs));
+    try testing.expect(!isCachedOf("zstd-1.5.7-r1.cc2743ad.apk", pkgs));
+    try testing.expect(!isCachedOf("libzstd1-1.5.7-r10.933e1e74.apk", pkgs));
+    try testing.expect(!isCachedOf("zstd-1.5.7-r10.apk", pkgs));
+    try testing.expect(!isCachedOf(".apk", pkgs));
+}
+
+test validCve {
+    for ([_][]const u8{ "CVE-2026-0001", "CVE-1999-1234567" }) |id| try testing.expect(validCve(id));
+    for ([_][]const u8{ "CVE-2026-001", "cve-2026-0001", "CVE-2026-0001 ", "CVE-20260-0001", "GHSA-2026-0001", "CVE-2026-0001a" }) |id| try testing.expect(!validCve(id));
+}
+
+test {
+    _ = sandbox;
+}
+
 test withoutGz {
     try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko.gz"));
     try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko"));
@@ -1217,6 +2098,20 @@ test moduleOrder {
     try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko.gz", order[3]);
     try testing.expectEqualStrings("kernel/fs/xfs/xfs.ko.gz", order[4]);
     try testing.expectError(error.ModuleNotFound, moduleOrder(arena.allocator(), dep, &.{"btrfs"}));
+}
+
+test moduleList {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const order = [_][]const u8{ "kernel/arch/x86/kvm/kvm.ko.gz", "kernel/arch/x86/kvm/kvm-intel.ko.gz" };
+    try testing.expectEqualStrings("kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko\n", try moduleList(a, &order, ""));
+    try testing.expectEqualStrings(
+        "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\n",
+        try moduleList(a, &order, "kvm-intel nested=0\nkvm-intel ept=1\n"),
+    );
+    try testing.expectError(error.ParamsForMissingModule, moduleList(a, &order, "kvm-amd nested=0\n"));
+    try testing.expectError(error.BadModuleParams, moduleList(a, &order, "kvm-intel\n"));
 }
 
 test cpioEntry {

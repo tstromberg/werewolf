@@ -1,1 +1,315 @@
-forms/bitten/usr/bin/bite
+#!/bin/sh
+# bite: turn this Debian, Ubuntu, Fedora or Rocky machine into werewolf.
+#
+#   bite [-n] [--reboot] [--config DIR] IMAGE_DIR    take it over
+#   bite --undo                                      remove werewolf
+#
+# Run on the distro, as root. Once werewolf has committed, bite-cleanup, run
+# in werewolf, deletes the distro.
+#
+# IMAGE_DIR holds a slot built for this machine's architecture (`make slot`):
+# vmlinuz, initramfs.zst (stage0) and root.erofs, of a form that can live on
+# a bitten machine (bitten, or one with its packages and modules; see
+# docs/bite.md).
+#
+# Nothing of the distro is removed. bite adds a GRUB entry and boots it once;
+# werewolf makes itself the default only after its services have stayed up
+# for a minute, so until then any reset comes back here. The disk is not
+# repartitioned: werewolf's files go in /boot/werewolf (the kernel, where
+# GRUB reads the distro's) and /var/lib/werewolf (config.tar, and data/,
+# which becomes /data).
+#
+#   -n            check and show the plan; change nothing
+#   --reboot      reboot into werewolf now; otherwise at the next reboot
+#   --config DIR  more files for the config tar (data.key, ...)
+#   --undo        remove werewolf; the distro boots as it did before
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+say() { echo "bite: $*"; }
+die() { echo "bite: $*" >&2; exit 1; }
+
+dry='' reboot='' extra='' undo='' image=''
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-n) dry=1 ;;
+	--reboot) reboot=1 ;;
+	--config) extra=$2; shift ;;
+	--undo) undo=1 ;;
+	-*) die "unknown flag $1" ;;
+	*) image=$1 ;;
+	esac
+	shift
+done
+[ "$(id -u)" -eq 0 ] || die "run as root"
+
+boot=/boot/werewolf
+home=/var/lib/werewolf
+entry=werewolf
+
+# --- the distro's GRUB ----------------------------------------------------------
+# Debian and Ubuntu name the tools grub-*, generate grub.cfg from
+# /etc/grub.d, and read GRUB_DEFAULT from /etc/default/grub.d. Fedora and
+# Rocky name them grub2-* and take menu entries as Boot Loader Spec files.
+. /etc/os-release
+case "$ID" in
+debian | ubuntu) g=grub style=grub.d ;;
+fedora | rocky) g=grub2 style=bls ;;
+*) die "$ID is not Debian, Ubuntu, Fedora or Rocky" ;;
+esac
+for t in "$g-probe" "$g-mkrelpath" "$g-editenv" "$g-reboot" "$g-mkconfig"; do
+	command -v "$t" >/dev/null || die "no $t: is GRUB this machine's bootloader?"
+done
+grubenv=$(readlink -f "/boot/$g/grubenv")
+
+# GRUB reads ext4 and xfs without replaying their journals, so a change still
+# in the journal is invisible to it until it is written in place: a reset
+# moments after bite would boot what was there before. A clean shutdown
+# writes it in place; so does freezing the filesystem, which settle does to
+# each one GRUB reads, so that bite holds even if the next boot is a reset.
+settle() {
+	sync
+	for p in "$boot" "$grubenv" /boot/loader/entries; do
+		[ -e "$p" ] && findmnt -no TARGET -T "$p"
+	done | sort -u | while read -r mnt; do
+		fsfreeze -f "$mnt" && fsfreeze -u "$mnt"
+	done
+}
+
+undo() {
+	rm -f /etc/grub.d/42_werewolf /etc/default/grub.d/99-werewolf.cfg /boot/loader/entries/werewolf-[ab].conf
+	rm -rf "$boot" "$home"
+	if [ -f "$grubenv" ]; then
+		"$g-editenv" "$grubenv" unset next_entry
+		if "$g-editenv" "$grubenv" list | grep -q "^saved_entry=$entry-[ab]\$"; then
+			"$g-editenv" "$grubenv" unset saved_entry
+		fi
+	fi
+	"$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
+	settle
+	say "werewolf removed; the distro boots as before"
+}
+if [ -n "$undo" ]; then
+	undo
+	exit 0
+fi
+
+# --- preflight ------------------------------------------------------------------
+# Everything werewolf cannot find out for itself is found out here, and
+# anything it could not cope with stops bite before it changes a thing.
+[ -n "$image" ] || die "usage: bite [-n] [--reboot] [--config DIR] IMAGE_DIR"
+[ -f "$image/vmlinuz" ] && [ -f "$image/initramfs.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
+	die "$image is not a slot: it needs vmlinuz, initramfs.zst, root.erofs and cmdline (make slot)"
+# The image's kernel arguments, which go into GRUB's entries and the script
+# that writes them: words of plain characters, nothing a shell would read.
+args=$(cat "$image/cmdline")
+case $args in *[!A-Za-z0-9_.,=\ -]*) die "$image/cmdline holds more than kernel arguments" ;; esac
+[ -z "$extra" ] || [ -d "$extra" ] || die "--config $extra is not a directory"
+
+no=''
+nope() { echo "bite: refusing: $*" >&2; no=1; }
+
+# The kernel must be this machine's: an x86 bzImage says HdrS at 0x202, an
+# arm64 Image ARMd at 0x38.
+arch=$(uname -m)
+case "$arch" in
+x86_64) magic=$(dd if="$image/vmlinuz" bs=1 skip=514 count=4 2>/dev/null) want=HdrS ;;
+aarch64) magic=$(dd if="$image/vmlinuz" bs=1 skip=56 count=4 2>/dev/null) want=ARMd ;;
+*) magic='' want=x ;;
+esac
+[ "$magic" = "$want" ] || nope "$image/vmlinuz is not a kernel for $arch"
+
+# Alpine's kernel is not signed for shim, so Secure Boot would refuse it.
+sb=$(ls /sys/firmware/efi/efivars/SecureBoot-* 2>/dev/null | head -n 1)
+if [ -n "$sb" ] && [ "$(od -An -t u1 -j 4 -N 1 "$sb" | tr -d ' ')" = 1 ]; then
+	nope "Secure Boot is on, and would not boot werewolf's unsigned kernel"
+fi
+
+# werewolf carries virtio drivers and nothing else, and cannot open LVM or
+# LUKS: the NIC and the disk under /var/lib must be plain virtio.
+nic=$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
+[ -n "$nic" ] || nope "no IPv4 default route"
+case "$(readlink -f "/sys/class/net/$nic/device" 2>/dev/null)" in
+*/virtio*) ;;
+*) nope "$nic is not a virtio NIC" ;;
+esac
+# Checked through the parent directories, so that -n creates nothing.
+lib=$(dirname "$home")
+src=$(findmnt -no SOURCE -T "$lib")
+case "$src" in
+/dev/mapper/* | /dev/dm-*) nope "$home is on $src: werewolf cannot open LVM or LUKS" ;;
+esac
+disk=$(lsblk -no PKNAME "${src%%[*}" 2>/dev/null | head -n 1)
+case "$(readlink -f "/sys/block/${disk:-?}/device" 2>/dev/null)" in
+*/virtio*) ;;
+*) nope "$home is on ${disk:-an unknown disk}, which is not virtio" ;;
+esac
+fstype=$(findmnt -no FSTYPE -T "$lib")
+case "$fstype" in
+ext4 | xfs | btrfs) ;;
+*) nope "$home is on $fstype; werewolf reads ext4, xfs and btrfs" ;;
+esac
+genvdir=$(dirname "$grubenv")
+case "$(findmnt -no FSTYPE -T "$genvdir")" in
+ext4 | xfs | btrfs) ;;
+*) nope "$grubenv is on $(findmnt -no FSTYPE -T "$genvdir"), which werewolf cannot write" ;;
+esac
+[ -n "$no" ] && die "nothing changed"
+
+# Where a path will be when werewolf mounts its filesystem plainly, by UUID:
+# its path under the mount point, below the subvolume the distro mounted
+# (btrfs). Proved by mounting it that way here and finding the path.
+where() { # where PATH -> UUID:PATH-IN-FILESYSTEM
+	uuid=$(findmnt -no UUID -T "$1")
+	rel=${1#"$(findmnt -no TARGET -T "$1")"}
+	rel=/${rel#/}
+	root=$(findmnt -no FSROOT -T "$1")
+	p=${root%/}$rel
+	t=$(mktemp -d)
+	# Read-write, as it is already mounted: the kernel will not mount a
+	# filesystem in use read-write a second time read-only. Nothing is
+	# written; the path is only looked at.
+	mount "UUID=$uuid" "$t"
+	ok=
+	[ -e "$t$p" ] && [ "$(stat -c %i "$t$p")" = "$(stat -c %i "$1")" ] && ok=1
+	umount "$t"
+	rmdir "$t"
+	[ -n "$ok" ] || die "$1 is not at $p when its filesystem is mounted plainly"
+	echo "$uuid:$p"
+}
+victim=$(where "$lib")/${home##*/}
+genv=$(where "$genvdir")/${grubenv##*/}
+
+# The network as it is now. Cloud addresses come from DHCP but do not
+# change, so they are written down; werewolf has no DHCP client.
+cidr=$(ip -4 -o addr show dev "$nic" scope global | awk '{ print $4; exit }')
+gw=$(ip -4 route show default | awk '{ print $3; exit }')
+mac=$(cat "/sys/class/net/$nic/address")
+# systemd-resolved points /etc/resolv.conf at its own stub on 127.0.0.53
+# and keeps the real servers in a file of its own. werewolf brings up $nic
+# alone, so a server reached through another interface (a second network's
+# resolver, listed first by chance) would answer nobody: take the first
+# that routes through $nic, and failing that the gateway.
+dns=
+for s in $(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ && $2 !~ /^127\./ { print $2 }' \
+	/etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null); do
+	if ip -4 route get "$s" 2>/dev/null | grep -q " dev $nic "; then
+		dns=$s
+		break
+	fi
+done
+[ -n "$dns" ] || dns=$gw
+# Where the log goes. Cloud images name consoles for every hypervisor they
+# might meet, so keep only those that exist here; then the hypervisor's own
+# console, hvc0, if there is one, last, so it becomes /dev/console. Failing
+# both, the screen and the first serial port.
+console=''
+for c in $(tr ' ' '\n' </proc/cmdline | sed -n 's/^console=//p'); do
+	[ -e "/sys/class/tty/${c%%,*}" ] && [ "${c%%,*}" != hvc0 ] && console="${console}console=$c "
+done
+[ -e /sys/class/tty/hvc0 ] && console="${console}console=hvc0 "
+if [ -z "$console" ]; then
+	for c in ttyS0 ttyAMA0; do
+		if [ -e "/sys/class/tty/$c" ]; then
+			console="console=tty0 console=$c "
+			break
+		fi
+	done
+fi
+# A panic, or a lockup made one, reboots in ten seconds; GRUB then boots the
+# slot that last committed. See stage0/init. init= because a kernel whose
+# /init will not run otherwise tries /sbin/init and then /bin/sh, which is a
+# root shell on the console; named, a failed init is a panic instead. Then
+# the kernel arguments the image asks for (its cmdline, from the form's
+# allowances), which GRUB's entries keep from here on.
+cmdline="${console}init=/init panic=10 softlockup_panic=1 $args werewolf.ip=$cidr werewolf.gw=$gw werewolf.dns=$dns werewolf.mac=$mac werewolf.victim=$victim werewolf.grubenv=$genv"
+
+krel=$("$g-mkrelpath" "$(dirname "$boot")")/werewolf
+krel=/${krel#/}
+
+say "$PRETTY_NAME on $arch, $fstype; GRUB via $style"
+say "network $nic $cidr via $gw, dns $dns"
+say "werewolf in $home ($victim), kernel in $boot"
+say "command line: $cmdline"
+if [ -n "$dry" ]; then
+	say "-n: nothing changed"
+	exit 0
+fi
+
+# --- install --------------------------------------------------------------------
+# Slot a holds this image; b stays empty until autoupdate builds into it.
+# GRUB reads the kernel and stage0 from /boot; stage0 reads root.erofs from
+# the victim's filesystem, where there is room.
+mkdir -p "$boot/a" "$home"
+cp "$image/vmlinuz" "$image/initramfs.zst" "$boot/a/"
+chmod 0700 "$home"
+mkdir -p "$home/a" "$home/data"
+cp "$image/root.erofs" "$home/a/"
+[ -f "$grubenv" ] || "$g-editenv" "$grubenv" create
+t=$(mktemp -d)
+# Root's keys, and those of whoever ran bite through sudo: werewolf lets
+# them all in as root.
+keys=/root/.ssh/authorized_keys
+if [ -n "${SUDO_USER:-}" ]; then
+	keys="$keys $(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys"
+fi
+# shellcheck disable=SC2086 # $keys is two paths, neither with spaces
+cat $keys 2>/dev/null | sort -u >"$t/authorized_keys" || true
+hostname >"$t/hostname"
+[ -n "$extra" ] && cp -R "$extra/." "$t/"
+tar -cf "$home/config.tar" --owner=0 --group=0 -C "$t" .
+chmod 0600 "$home/config.tar"
+rm -rf "$t"
+
+# Every distro gets /etc/grub.d/42_werewolf, run by its own grub-mkconfig.
+# It sets GRUB's fallback to the saved default, so that a slot GRUB cannot
+# load (a power cut before its files were written in place) falls back to
+# the slot that last committed instead of stopping at an error. Debian and
+# Ubuntu also get the two entries from it, written by the distro's own
+# helpers so GRUB loads whatever it needs to read /boot; Fedora and Rocky
+# take them as Boot Loader Spec files.
+{
+	cat <<EOF
+#!/bin/sh
+# Written by werewolf's bite; \`bite --undo\` removes it.
+echo 'set fallback="\${saved_entry}"'
+EOF
+	if [ "$style" = grub.d ]; then
+		cat <<EOF
+. /usr/share/grub/grub-mkconfig_lib
+for s in a b; do
+	echo "menuentry 'werewolf \$s' --id $entry-\$s {"
+	prepare_grub_to_access_device "\$($g-probe --target=device $boot)" | sed 's/^/	/'
+	echo "	linux $krel/\$s/vmlinuz $cmdline werewolf.slot=\$s"
+	echo "	initrd $krel/\$s/initramfs.zst"
+	echo "}"
+done
+EOF
+	fi
+} >/etc/grub.d/42_werewolf
+chmod 0755 /etc/grub.d/42_werewolf
+if [ "$style" = bls ]; then
+	for s in a b; do
+		cat >"/boot/loader/entries/$entry-$s.conf" <<EOF
+title werewolf $s
+version 0-werewolf-$s
+linux $krel/$s/vmlinuz
+initrd $krel/$s/initramfs.zst
+options $cmdline werewolf.slot=$s
+EOF
+	done
+fi
+# saved_entry, which commit writes, counts only with GRUB_DEFAULT=saved
+# (Fedora and Rocky set it already). Until it is written GRUB falls back to
+# entry 0, the distro, as now.
+mkdir -p /etc/default/grub.d
+echo 'GRUB_DEFAULT=saved' >/etc/default/grub.d/99-werewolf.cfg
+"$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
+
+"$g-reboot" "$entry-a"
+settle
+say "werewolf boots once at the next reboot; it becomes the default after a healthy minute"
+if [ -n "$reboot" ]; then
+	say "rebooting"
+	reboot
+fi

@@ -14,9 +14,9 @@ Each form may have a `forms/<name>.net`, read along the include chain as
 modules are:
 
 ```
-# The updater, as root: Wolfi, Alpine and git.kernel.org over HTTPS, and
-# the names to find them.
-connect root tcp/443 udp/53 tcp/53
+# The updater's network half, as _update: Wolfi, Alpine and git.kernel.org
+# over HTTPS, and the names to find them. Root has none.
+connect _update tcp/443 udp/53 tcp/53
 ```
 
 | Line | Means |
@@ -61,7 +61,7 @@ fence reads the policy and then:
    | 200 | sent as declared (user, protocol, port), or from a served port: route; if there is no route, unreachable |
    | 299 | anything else sent: refuse (EACCES) |
    | 300 | arriving to a served port, from a port the machine connects to, from the metadata server's 80, or ICMP: deliver |
-   | 399 | anything else arriving: drop, unanswered |
+   | 399 | anything else arriving by TCP, UDP, UDP-Lite, SCTP or DCCP: drop, unanswered |
    | 400 | the kernel's own local rule, moved here from 0 |
 
    Locally sent traffic is told apart by its lookups coming from `lo`.
@@ -69,6 +69,15 @@ fence reads the policy and then:
    loopback. For IPv6, ICMPv6 passes both ways for everyone (neighbour
    discovery, router advertisements), and the metadata rules name AWS's
    fd00:ec2::254.
+
+   The drops name their protocols. A single rule dropping everything
+   arriving also dropped ARP: to answer a request, the kernel asks the
+   rules whether the address is local, with a lookup that has no protocol
+   or port, and the blackhole answered first. The machine stopped
+   answering for its address, and once its neighbours forgot it, nothing
+   reached it, the served ports included. Other IP protocols reach the
+   local table and, with no handler (modules are closed), get the
+   kernel's "protocol unreachable".
 
    Each rule that routes traffic out has a twin with the same match whose
    action is unreachable. Without it, allowed traffic with no route (IPv6
@@ -129,10 +138,15 @@ Tested under QEMU, on aarch64:
 
 - On the cloud form: every `posture` check above passes, and the config
   still arrives through `_cloud`.
-- On the autoupdate form, as root: `apk` installs from Wolfi by name, TCP
-  443 connects and DNS resolves, all declared; TCP 80 is refused. As `nobody`: TCP 443 is refused. `nc -l -p
+- On the autoupdate form, when root still had `connect root`: `apk`
+  installs from Wolfi by name, TCP 443 connects and DNS resolves, all
+  declared; TCP 80 is refused. As `nobody`: TCP 443 is refused. `nc -l -p
   4444` as root: `bind: Permission denied`.
-- On the sshd form: sshd serves port 22 from the host.
+- On the autoupdate form now, where only `_update` may send: a whole
+  update, apk's fetches and the CVE sources as `_update`, root offline.
+- On the sshd form, with a static address and nothing sent first: sshd
+  serves port 22 from the host. (The single drop-everything rule failed
+  this: ARP went unanswered.)
 
 ## Not covered
 

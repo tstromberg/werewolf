@@ -9,3 +9,15 @@ contents:
     - apk-tools             # fetch and verify packages, against the keys in the image
     - erofs-utils           # mkfs.erofs, for the new slot's root
     - zstd                  # stage0's compression, as the build's
+
+# _update: the updater's halves that fetch the CVE sources and read them.
+accounts:
+  groups:
+    - groupname: _update
+      gid: 69
+  users:
+    - username: _update
+      uid: 69
+      gid: 69
+      homedir: /var/empty
+      shell: /sbin/nologin

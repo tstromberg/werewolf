@@ -32,6 +32,7 @@ ok  sshd-config      ! command -v sshd || [ "$(sshd -T | grep -iE '^(passwordaut
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
+ok  cleanup          ! command -v bite-cleanup || ! grep -q werewolf.slot= /proc/cmdline || { bite-cleanup -n | grep -q 'would delete 7 entries' && [ -e /victim/etc/os-release ] && bite-cleanup && [ "$(ls -A /victim | tr '\n' ' ')" = "boot var " ] && [ "$(ls -A /victim/var /victim/var/lib | tr '\n' ' ')" = "/victim/var: lib  /victim/var/lib: werewolf " ] && [ -s /victim/var/lib/werewolf/a/root.erofs ] && [ -s /victim/boot/grub/grubenv ] && [ -d /run/werewolf ]; }
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
 # Last, for the second boot (test/checks-again): a mark on a /data that is
 # kept on a disk.

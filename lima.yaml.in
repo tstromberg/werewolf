@@ -16,7 +16,7 @@ images:
       # Lima's user-mode network: guest .15, gateway .2. The gateway also
       # answers DNS (192.168.5.3 is slirp's resolver and is absent under vz).
       # The instance disk is vda; the cidata volume comes after it.
-      cmdline: "console=@CONSOLE@ werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.2 werewolf.data=vda"
+      cmdline: "console=@CONSOLE@ @KERNEL_ARGS@ werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.2 werewolf.data=vda"
     initrd:
       location: @OUT@/initramfs.zst
 mounts: []

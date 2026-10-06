@@ -1,6 +1,7 @@
 # minimal: boots, takes the address the kernel command line gives, reads
-# config, supervises. Listens on nothing. Every other form includes this
-# one, and its folder carries /init.
+# config, supervises. Listens on nothing, and has no shell: forms that log
+# people in add busybox-full, as does any form built with DEV=1. Every
+# other form includes this one.
 contents:
   repositories:
     - https://packages.wolfi.dev/os
@@ -8,7 +9,6 @@ contents:
     - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
   packages:
     - wolfi-baselayout
-    - busybox-full          # sh, tar, dd, od, adduser, getty, sysctl
     - runit                 # PID 1 after init: runs services, shuts down cleanly
 
 archs:
