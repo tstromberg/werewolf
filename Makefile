@@ -6,6 +6,7 @@
 #   make lima       boot the lima form under Lima (vz on Apple silicon)
 #   make config     pack config/ into the raw config tar `run` attaches
 #   make forms      list the forms and what each includes
+#   make test       the updater's unit tests (zig)
 #
 # FORM picks the form (default sshd; `make lima` implies FORM=lima). ARCH
 # defaults to the host. ARCH=x86_64 on an arm64 host builds fine and boots
@@ -28,6 +29,14 @@ endif
 CHAIN := $(shell f=$(FORM); c=; while [ -n "$$f" ]; do c="$$f $$c"; \
 	f=$$(sed -n 's/^include: *\(.*\)\.yaml$$/\1/p' forms/$$f.yaml); done; echo $$c)
 CHAIN_DIRS := $(wildcard $(addprefix forms/,$(CHAIN)))
+
+# The autoupdate form's updater is built, not checked in: updater/update.zig,
+# laid in like a form folder for any form whose chain includes autoupdate.
+# Zig is pre-1.0 and changes between releases, so the build insists on the
+# version the code is written for.
+ZIG_VERSION = 0.16.0
+UPDATER_BIN := $(if $(filter autoupdate,$(CHAIN)),build/$(ARCH)/updater/usr/lib/werewolf/update)
+OVERLAY_DIRS := $(CHAIN_DIRS) $(if $(UPDATER_BIN),build/$(ARCH)/updater)
 
 # --- kernel -------------------------------------------------------------------
 # Alpine's linux-virt: the KVM guest kernel, pinned by package and digest. The
@@ -76,7 +85,7 @@ VMTYPE = qemu
 endif
 LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
-.PHONY: all image slot run lima lima-stop ssh config forms clean help
+.PHONY: all image slot run lima lima-stop ssh config forms test clean help
 
 all: image
 
@@ -131,29 +140,40 @@ $(OUT)/rootfs.tar: $(addprefix forms/,$(addsuffix .yaml,$(CHAIN)))
 # One cpio: the apko rootfs as apko wrote it (ownership intact, never
 # extracted on the host), then each form's folder along the chain, then the
 # modules. Later entries win.
-$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(OUT)/modules/.stamp $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f)
+$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(OUT)/modules/.stamp $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f) $(UPDATER_BIN)
 	@[ "$(firstword $(CHAIN))" = minimal ] || \
 		{ echo "form $(FORM) does not include minimal, which carries /init" >&2; exit 1; }
 	COPYFILE_DISABLE=1 $(TAR) --format newc --uid 0 --gid 0 --numeric-owner --exclude .DS_Store \
 		-cf $(OUT)/initramfs.cpio @$(OUT)/rootfs.tar \
-		$(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/meta . -C $(CURDIR)/$(OUT)/modules .
+		$(foreach d,$(OVERLAY_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/meta . -C $(CURDIR)/$(OUT)/modules .
 	zstd -19 -T0 -q -f -o $@ $(OUT)/initramfs.cpio
 	rm $(OUT)/initramfs.cpio
 	@echo "form $(FORM): $(CHAIN)"
 	@ls -la $(BUILD)/vmlinuz $@
 
+# --- updater ------------------------------------------------------------------
+build/$(ARCH)/updater/usr/lib/werewolf/update: updater/update.zig
+	@[ "$$(zig version)" = "$(ZIG_VERSION)" ] || \
+		{ echo "updater/update.zig is written for zig $(ZIG_VERSION), not $$(zig version)" >&2; exit 1; }
+	mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe -fstrip -target $(ARCH)-linux-musl -femit-bin=$@ updater/update.zig
+
+test:
+	zig fmt --check updater
+	zig test updater/update.zig
+
 # --- meta ---------------------------------------------------------------------
 # What the build knows that the image will need to rebuild itself: the
 # update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf.
-$(OUT)/meta.stamp: $(BUILD)/stage0/rootfs.tar stage0/init $(MODULE_LISTS) $(shell find $(CHAIN_DIRS) -type f) Makefile
+$(OUT)/meta.stamp: $(BUILD)/stage0/rootfs.tar stage0/init $(MODULE_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(UPDATER_BIN) Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d && \
 	echo $(FORM) > $$d/form && \
 	echo $(MODULES) | tr ' ' '\n' > $$d/modules && \
 	echo $(KERNEL_PKG:.apk=) > $$d/kernel && \
 	echo https://dl-cdn.alpinelinux.org/alpine/$(ALPINE_BRANCH)/main > $$d/alpine && \
-	for c in $(CHAIN_DIRS); do (cd $$c && find . -type f ! -name .DS_Store | sed 's|^\./||'); done | sort -u > $$d/overlay && \
+	for c in $(OVERLAY_DIRS); do (cd $$c && find . -type f ! -name .DS_Store | sed 's|^\./||'); done | sort -u > $$d/overlay && \
 	tar -xOf $(BUILD)/stage0/rootfs.tar etc/apk/world > $$d/stage0.world && \
 	cp stage0/init $$d/stage0.init && \
 	echo "$(FORM) $$(date -u +%Y%m%dT%H%M%SZ) $(KERNEL_PKG:.apk=) built-by-make" > $$d/release
@@ -184,10 +204,10 @@ $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar stage0/init $(OUT)/modules
 # than the last few percent of size. -b 4096 because mkfs.erofs otherwise
 # takes the builder's page size, 16 KiB on Apple silicon, which a 4 KiB-page
 # kernel will not mount.
-$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f)
+$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f) $(UPDATER_BIN)
 	mkdir -p $(dir $@)
 	COPYFILE_DISABLE=1 $(TAR) --uid 0 --gid 0 --numeric-owner --exclude .DS_Store \
-		-cf $(OUT)/root.tar @$(OUT)/rootfs.tar $(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/meta .
+		-cf $(OUT)/root.tar @$(OUT)/rootfs.tar $(foreach d,$(OVERLAY_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/meta .
 	rm -f $@
 	mkfs.erofs -b 4096 -zlz4hc --tar=f $@ $(OUT)/root.tar >/dev/null
 	rm $(OUT)/root.tar

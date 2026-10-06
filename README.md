@@ -19,57 +19,34 @@ Ubuntu, Fedora or Rocky VM.
 
 ## Quick start
 
-On a Mac, with [Homebrew](https://brew.sh):
+First install our dependencies, for example, on macOS:
 
 ```sh
 brew install apko lima qemu zstd erofs-utils
-git clone https://github.com/tstromberg/werewolf.git
-cd werewolf
 ```
 
-On Linux, install the same plus `bsdtar` (`libarchive-tools` on Debian and
-Ubuntu).
-
-### In Lima
+Then build and connect to a local VM:
 
 ```sh
-make lima                  # build the lima form and boot it
-limactl shell werewolf     # log in as yourself, with your ssh key
-make lima-stop             # stop and delete the VM
+make lima
 ```
 
-The first build downloads Alpine's kernel and Wolfi's packages. Lima runs
-the VM under Apple's Virtualization framework on a Mac and QEMU elsewhere,
-with a 100 GiB `/data` disk that lasts until `make lima-stop`. Inside there
-is no sudo, and not much else:
+Now you can login and poke around:
 
 ```sh
-cat /usr/share/werewolf/release   # form, build time, kernel
-ls /etc/sv                        # every service there is
-free -m                           # about 60 MB in use
+limactl shell werewolf
 ```
 
-Lima copies the kernel and initramfs only at creation, so boot a change with
-`make lima-stop lima`.
+### QEMU-based execution
 
-### In QEMU
+Don't care for Lima? You can rawdog it with QEMU:
 
 ```sh
 make run                   # the sshd form: a root shell on the console
 make ssh                   # from another terminal
 ```
 
-`poweroff`, or Ctrl-A X, ends it. ssh logs in as root with the keys in
-`config/authorized_keys` (*Configuration*):
-
-```sh
-mkdir -p config && cp ~/.ssh/id_ed25519.pub config/authorized_keys
-```
-
-`make run` needs port 2222 free; `pkill -f 'qemu-system.*initramfs'` frees
-it.
-
-### Other forms and architectures
+### Other Options
 
 ```sh
 make forms                 # each form and its include chain
