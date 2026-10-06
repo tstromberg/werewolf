@@ -1,6 +1,6 @@
 # Build every form, boot each under QEMU, and check its protections as
 # root on its console (docs/testing.md), on both architectures. `make
-# lima-ci` runs this same job locally, in an Ubuntu VM under Lima.
+# ci` runs this same job locally, in an Ubuntu VM under Lima.
 name: check
 
 on:

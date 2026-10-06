@@ -28,7 +28,7 @@ There is no address to give: the machine asks DHCP.
 
 init looks for a config tar on a disk and beside the victim, and for
 NoCloud, as always. Only where it finds none does it run
-`/usr/lib/werewolf/cloud`, after the network is up:
+`/usr/lib/werewolf/cloud-metadata`, after the network is up:
 
 1. It reads the firmware's DMI strings. `Google Compute Engine`, `Amazon
    EC2` or `Hetzner` is a cloud it knows; anything else, and it asks no
@@ -48,7 +48,7 @@ User data that is not base64, such as a `#cloud-config`, is logged as
 `none` and ignored. A tar with anything else in it is `refused` whole.
 
 ```
-cloud: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws","files":["authorized_keys","hostname"]}
+cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws","files":["authorized_keys","hostname"]}
 ```
 
 ## Separation
@@ -73,14 +73,14 @@ reaches init.
 
 - **Only `_cloud` can reach the metadata server's port 80.** fence's
   routing rules refuse everyone else, root included
-  ([design/fence.md](../design/fence.md)), so the user data, and any secret
+  ([docs/design/fence.md](design/fence.md)), so the user data, and any secret
   in it, stays out of other processes' reach. Root could delete the rules
   until the seal takes `CAP_NET_ADMIN` away.
 - **Whoever sets the user data is root on the machine**: it carries root's
   ssh keys. That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are
   not applied.
-- **Three clouds.** Another is a row in the table in `cloud/cloud.zig`:
+- **Three clouds.** Another is a row in the table in `cmd/cloud-metadata/cloud-metadata.zig`:
   its DMI vendor, its path, and its header.
 - GCP and AWS are tested against stand-ins under QEMU, with the firmware's
   strings and the metadata server faked, on every `make check`

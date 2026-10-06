@@ -1,13 +1,16 @@
 # The updater
 
-`/usr/lib/werewolf/update` keeps a machine booted from a slot current. It
-asks Wolfi and Alpine for anything newer than the running image, builds the
-other slot from it, boots that slot once, and records what changed and which
-CVEs that fixes.
+`/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current. On a
+form CI publishes (`prod`, `prod-ssh`), it installs the latest signed
+release of that form ([Releases](#releases)). On any other, it asks Wolfi
+and Alpine for anything newer than the running image and builds the other
+slot from it. Either way it boots that slot once, and records what changed
+and which CVEs that fixes.
 
-It is one Zig program, `updater/update.zig` with `updater/cve.zig` (the CVE
-children and the checks of what they say) and `updater/sandbox.zig`, in
-the `autoupdate` form.
+It is one Zig program, `cmd/slot-update/slot-update.zig` with `cmd/slot-update/release.zig` (a
+release's manifest and signature), `cmd/slot-update/cve.zig` (the CVE children and
+the checks of what they say) and `updater/sandbox.zig`, in the
+`autoupdate` form.
 
 ## Running
 
@@ -39,13 +42,38 @@ service stays down.
 | `report` | Write the report; log `update`. |
 | `reboot` | Reboot cleanly. |
 
-The slot keeps itself or not: `commit` makes it GRUB's default once it is
+The slot keeps itself or not: `slot-keep` makes it GRUB's default once it is
 healthy, and anything else ends on the previous slot ([bite.md](bite.md#slots)).
 After the reboot, `outcome` compares the running slot with `attempt` and
 logs `commit` or `rollback`. A rolled-back build's hash goes in `bad`.
 
 The build hash is the first 16 hex digits of the sha256 of the new package
 list and kernel. The same inputs give the same hash.
+
+## Releases
+
+A form built as it ships for release (`RELEASE_FORMS` in the Makefile, not
+a `DEV=1` build) carries two more files in its build record:
+`/usr/share/werewolf/releases`, where its releases are (the latest GitHub
+release's downloads), and `/usr/share/werewolf/image.pub`, the public half
+of the image key CI signs manifests with ([releases.md](releases.md)). With
+them, a check, instead of `userland`, `kernel` and `root`:
+
+| Step | |
+| --- | --- |
+| `release` | Fetch `FORM-ARCH.json` and its `.sig`, as `_update`. Believe nothing in them until the signature checks against `image.pub`: RSA PKCS#1 v1.5 over SHA-256, checked by Zig's standard library. Then refuse a manifest of another format, form or architecture; one past its `expires` (logged `skip`, "expired"), since CI re-signs daily and a frozen mirror must not hold a machine back in silence; and one signed more than a day in the future. No release of the form yet (404): `skip`. |
+| `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A `build` that rolled back before: `skip`. |
+| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst`, `root.erofs`. |
+
+The CVEs, the install, the report and the reboot are as for a built slot;
+the package changes are the manifest's `packages` against the running
+image's. When the slot commits, `outcome` keeps the release's `serial` in
+`serial`.
+
+A machine that follows releases runs exactly what CI built, tested and
+signed: werewolf's own programs update with it, which a built slot cannot
+do. Until our kernel and IPE (docs/design/verified-boot.md, phase 4), the
+signature guards against a bad mirror, not against root on the machine.
 
 ## Trust
 
@@ -151,6 +179,8 @@ it was written. Alpine's own patches on top of upstream are not counted.
 /data/svc/autoupdate/
     log                 one JSON line per event
     reports/TIME-BUILD.json
+    serial              the last release that committed, when following
+                        releases
     attempt             "SLOT BUILD" of the update awaiting its outcome
     bad                 builds that rolled back, one per line
     cache/              apk's downloads, one directory per root built
@@ -218,8 +248,8 @@ The program is small and does one pass. It favours what cannot go wrong:
 - **Safety checks.** Built ReleaseSafe: an out-of-bounds index or an
   overflow stops the program instead of corrupting it.
 - **Other programs** do what they do best: `apk`, `mkfs.erofs`, `zstd`,
-  `blkid`, `mount`, `umount`, `sync`, `/usr/lib/werewolf/grubenv` (which
-  `commit` shares), `/usr/bin/reboot`. Everything else is Zig's standard
+  `blkid`, `mount`, `umount`, `sync`, `/usr/lib/werewolf/grub-setenv` (which
+  `slot-keep` shares), `/usr/bin/reboot`. Everything else is Zig's standard
   library.
 - **Errors** end the run. The `error` event names the step and what the
   failed command said; the work directory is removed, and mounts are undone.

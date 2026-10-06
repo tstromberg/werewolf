@@ -1,2 +1,2 @@
-# The fetcher of cloud/cloud.zig, which takes the config from the user data.
+# The fetcher of cmd/cloud-metadata/cloud-metadata.zig, which takes the config from the user data.
 metadata _cloud

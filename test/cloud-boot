@@ -54,7 +54,7 @@ judge() {
 	sed 's/^/         | /' "$server_log"
 	exit 1
 }
-event() { grep -a -q "cloud: {.*\"event\":\"$1\"" "$log"; }
+event() { grep -a -q "cloud-metadata: {.*\"event\":\"$1\"" "$log"; }
 case $provider/$payload in
 none/*)
 	[ ! -s "$server_log" ] || judge "a machine on no cloud asked the metadata server"

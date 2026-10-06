@@ -14,7 +14,7 @@
 # listeners check fails on anything else listening.
 #
 # The machine's settings, and the attacks on them, are posture's to judge
-# (posture/posture.zig): test/boot judges every machine's posture line
+# (cmd/posture/posture.zig): test/boot judges every machine's posture line
 # against test/posture-known before these run. Checks here are the boot's
 # own behaviour, which posture cannot see.
 #

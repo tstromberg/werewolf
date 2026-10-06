@@ -1,4 +1,4 @@
--- The demo's page and scan keep what they find here (status/status.zig).
+-- The demo's page and scan keep what they find here (cmd/status-page/status-page.zig).
 -- The status role owns it; grype may add scans and nothing more. pg-init
 -- applies this before every start of the server, so each statement is one
 -- that changes nothing the second time. In single-user mode, a statement

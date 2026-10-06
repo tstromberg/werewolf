@@ -219,7 +219,7 @@ if [ -z "$console" ]; then
 	done
 fi
 # A panic, or a lockup made one, reboots in ten seconds; GRUB then boots the
-# slot that last committed. See stage0/init. init= because a kernel whose
+# slot that last committed. See cmd/stage0/stage0.zig. init= because a kernel whose
 # /init will not run otherwise tries /sbin/init and then /bin/sh, which is a
 # root shell on the console; named, a failed init is a panic instead.
 # Between head and tail, the kernel arguments each slot's image asks for

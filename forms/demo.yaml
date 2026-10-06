@@ -2,7 +2,7 @@
 # one page about the machine it runs on: its kernel and uptime, the last 25
 # patches it applied to itself with the CVEs they fixed, what grype finds in
 # it, and its packages. The page and the scan come from
-# /usr/lib/werewolf/status (status/status.zig), run as the status and grype
+# /usr/lib/werewolf/status-page (cmd/status-page/status-page.zig), run as the status and grype
 # users; the image has no shell. It checks
 # Wolfi and Alpine hourly, not every 20 hours (etc/werewolf/update-every).
 # Boot it from a slot (bite), so that /data, which holds grype's database

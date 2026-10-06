@@ -4,7 +4,7 @@
 # Fedora's) is loaded here; xxhash64 and blake2b checksums would need
 # xxhash_generic and blake2b_generic.
 ext4 xfs btrfs crc32c-cryptoapi
-# FAT, for werewolf's own disk (design/native-boot.md): the updater and
+# FAT, for werewolf's own disk (docs/design/native-boot.md): the updater and
 # commit write the EFI partition. 437 and utf8 are FAT's default codepage
 # and iocharset in Alpine's kernel.
 vfat nls_cp437 nls_utf8

@@ -26,13 +26,13 @@ fonts, light or dark as the browser prefers, and readable on a phone.
 - **Packages**: everything installed, with each package's findings linked.
 
 Times read as "2 hours ago", with the moment itself on hover. The logo is
-`media/logo-small.png`, served from the image.
+`docs/media/logo-small.png`, served from the image.
 
 ## How it works
 
 | Piece | Runs as | Does |
 | --- | --- | --- |
-| `status` (`status/status.zig`) | `status` | writes the page every minute, and may reach nothing on the network |
+| `status` (`cmd/status-page/status-page.zig`) | `status` | writes the page every minute, and may reach nothing on the network |
 | `scan` (the same program) | `grype` | once an hour, and at start, runs grype over the root (`dir:/`, without `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`, `/victim`) and keeps a summary for the page; the only user allowed to fetch |
 | PostgreSQL | `postgres` | keeps every boot's posture report and every scan's summary, which the page reads back, newest first; on a UNIX socket only ([postgresql.md](postgresql.md)) |
 | nginx | `nginx`, master and workers | serves `index.html` from `/data/svc/status/www`, `GET` only, and nothing else; able to bind :80 and nothing else |
@@ -47,7 +47,7 @@ configuration and the page, and nothing else. The page writer reads
 nothing on the network. The scan reads the whole image, writes only its
 own directory, and runs nothing but grype. No script stands between runsv
 and any of them. init, runit's stages and the updater are programs too
-([design/shell-free.md](../design/shell-free.md)), so the image carries no
+([docs/design/shell-free.md](design/shell-free.md)), so the image carries no
 shell, interpreter or download tool at all, which `posture` checks at
 every boot.
 
@@ -88,7 +88,7 @@ The demo is for a VM, booted from a slot so that `/data` is on the VM's
 disk and survives every reboot and update. It has two ways in.
 
 **Its own disk**, wherever a VM can boot a disk image with UEFI
-([design/native-boot.md](../design/native-boot.md)):
+([docs/design/native-boot.md](design/native-boot.md)):
 
 ```sh
 make FORM=demo disk                     # build/<arch>/demo/disk.img, 8 GiB, sparse
@@ -117,7 +117,7 @@ Lima, as Lima boots a distro, and prints the page's URL:
 
 ```sh
 make demo                               # http://192.168.64.N/, when it is up
-make demo-stop                          # delete the VM
+make demo-delete                        # delete the VM, and the /data it kept
 ```
 
 Lima forwards ports through ssh or its guest agent, and the demo runs

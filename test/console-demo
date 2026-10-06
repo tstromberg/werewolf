@@ -17,6 +17,6 @@ seen    scan-leashed      leash: \{"event":"start","service":"scan"
 seen    postgres-leashed  leash: \{"event":"start","service":"postgres"
 seen    cluster-made      pg-init: making the cluster in /data/svc/postgres/data
 seen    schema-applied    pg-init: applied [0-9]+ SQL files? from /usr/share/werewolf-postgres
-seen    posture-stored    status: \{"time":"[^"]*","event":"database","kept":"posture"\}
+seen    posture-stored    status-page: \{"time":"[^"]*","event":"database","kept":"posture"\}
 unseen  service-down      leash: \{"event":"down"
-unseen  status-error      status: \{"time":"[^"]*","event":"error"
+unseen  status-error      status-page: \{"time":"[^"]*","event":"error"

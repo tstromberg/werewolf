@@ -23,8 +23,8 @@ with a redirection or two:
 "/usr/libexec/postgresql17/postgres" --check -c max_connections=100 < "/dev/null" > "/dev/null" 2>&1
 ```
 
-So `pg-init` (`pg-init/pg-init.zig`), which leash runs before the server,
-preloads `popen-shim.so` (`popen-shim/popen-shim.zig`) into `initdb`. Its
+So `pg-init` (`cmd/pg-init/pg-init.zig`), which leash runs before the server,
+preloads `popen-shim.so` (`cmd/popen-shim/popen-shim.zig`) into `initdb`. Its
 `popen`, `pclose` and `system` take that shape and nothing else: an
 absolute program and plain or double-quoted words, then `<FILE`, `>FILE`
 and `2>&1`. They run the program directly. Anything more (a pipe, `;`, `$`,

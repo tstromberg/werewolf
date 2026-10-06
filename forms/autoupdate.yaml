@@ -1,7 +1,7 @@
 # autoupdate: bitten, keeping itself current. At boot and every 20 hours it
 # asks Wolfi and Alpine whether anything in this image has a newer version;
 # if so it builds the other slot on the machine, boots it once, and keeps it
-# only if it commits. The updater itself is updater/update.zig, built by the
+# only if it commits. The updater itself is cmd/slot-update/slot-update.zig, built by the
 # Makefile. See docs/updater.md.
 include: bitten.yaml
 contents:

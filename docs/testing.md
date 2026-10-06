@@ -4,8 +4,8 @@
 make test           # the updater's unit tests
 make check          # boot every form, and a slot, and check each one
 make -j check       # the same, side by side
-make lima-ci        # the CI job, in an Ubuntu VM under Lima
-make check-update   # a whole update, over the network
+make ci             # the CI job, in an Ubuntu VM under Lima
+make check-updater  # a whole update, over the network
 ```
 
 `make check` needs, beyond the build's tools, QEMU, `expect` and `mke2fs`
@@ -79,7 +79,7 @@ chrooted, with no capabilities, under seccomp, and a parent keeping
 `CAP_NET_ADMIN` alone.
 
 The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
-by filesystem UUID, `/victim` read-only, the `commit`
+by filesystem UUID, `/victim` read-only, the `slot-keep`
 service making the slot GRUB's default once it has stayed healthy for a
 minute, and then `bite-cleanup` deleting a stand-in distro around it,
 traps included, while keeping werewolf's directory and `/boot`. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
@@ -108,7 +108,7 @@ Logs are in `build/<arch>/check/`: `<form>-build.log` for each build, and
 `<form>.log` for each console, kernel messages and all; a shell-free boot's
 are `<form>-shellfree-build.log` and `<form>-shellfree.log`.
 
-## What `make check-update` does
+## What `make check-updater` does
 
 A whole update, as a machine does one: the `autoupdate` form as it ships
 boots from slot a of a disk, with its build record claiming the kernel
@@ -141,7 +141,7 @@ fails the machine unless the checks that fail are exactly those
 [test/posture-known](../test/posture-known) gives the form and the
 architecture: a new failure fails, and so
 does a known one that starts passing, until it leaves the list and the
-docs say so. A new protection belongs in posture/posture.zig.
+docs say so. A new protection belongs in cmd/posture/posture.zig.
 
 A form that serves ssh is also logged into from the host, as an operator
 would, through a forwarded port: root's key from the config gets in, a
@@ -188,7 +188,11 @@ updates itself over the network, and the slot it builds must boot and
 commit. A workflow of its own, so a network flake fails it and nothing
 else; no push, pull request or release waits on it.
 
-`make lima-ci` runs the same job here, in an Ubuntu 26.04 VM, `werewolf-ci`,
+`make ci` runs the same job here, in an Ubuntu VM, `werewolf-ci-24.04`,
 with nested virtualization for KVM. The tree is copied in fresh each run,
 without `config/` or `.git`; the VM, its tools and its build cache stay
-between runs. `limactl delete -f werewolf-ci` starts over.
+between runs. `limactl delete -f werewolf-ci-24.04` starts over.
+`LIMA_TEMPLATE=ubuntu-26.04 make ci` runs it on 26.04, as GitHub's runners
+are, in a VM of its own; there, nested guests lose a CPU's timer early in
+boot and stall, so 24.04 is the default. Its old erofs-utils is replaced
+by [test/ci-setup](../test/ci-setup), which builds 1.9.4.

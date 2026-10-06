@@ -21,7 +21,7 @@ DIR holds a slot (*Slots*, below) of a form built on `bitten`.
 
 **werewolf boots once, then must prove itself.** bite adds GRUB entries
 `werewolf-a` and `werewolf-b` and boots `werewolf-a` once (`grub-reboot`).
-When every service has stayed up for a minute, the `commit` service makes
+When every service has stayed up for a minute, the `slot-keep` service makes
 that slot GRUB's default; until then, a reset returns to the distro.
 
 **It refuses rather than strand a machine**: the wrong architecture, Secure
@@ -94,7 +94,7 @@ direct boot carries the same image in its initramfs. Pages load on demand
 and can be reclaimed.
 
 **Two slots, one try each.** The committed slot is GRUB's default. A new
-slot gets one boot (`next_entry`) and stays only if `commit` finds it
+slot gets one boot (`next_entry`) and stays only if `slot-keep` finds it
 healthy. Every failure ends on the previous slot:
 
 | Failure | Recovery | Tested |

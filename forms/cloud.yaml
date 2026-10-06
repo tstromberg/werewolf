@@ -1,6 +1,6 @@
 # cloud: dhcp, and its config from a cloud's metadata server. On GCP, AWS
 # or Hetzner Cloud, with no config tar on a disk or beside the victim,
-# init runs werewolf's cloud/cloud.zig once, which fetches the instance's
+# init runs werewolf's cmd/cloud-metadata/cloud-metadata.zig once, which fetches the instance's
 # user data, the config tar in base64, and checks it before init extracts
 # it. bitten builds on it; on a machine bite took over it never runs, since
 # bite leaves a config tar. See docs/cloud.md.

@@ -53,7 +53,7 @@ images. `packages` is the root image's, for CVE reports.
 [.github/workflows/release.yml](../.github/workflows/release.yml) runs
 every 15 minutes:
 
-1. **Inputs.** `make inputs` resolves fresh locks for both forms, stage0
+1. **Inputs.** `make release-inputs` resolves fresh locks for both forms, stage0
    and the kernel: the newest packages in Wolfi, and in Alpine's v3.24 for
    the kernel. It writes `inputs`: a digest of the files that build the
    images, and every package's URL. CI keeps a cache entry per digest; if
@@ -109,7 +109,7 @@ toolchain out, so a new runner image alone does not make a release.
 ## Checking a release
 
 ```sh
-openssl dgst -sha256 -verify keys/image.pub \
+openssl dgst -sha256 -verify release/image.pub \
     -signature prod-ssh-x86_64.json.sig prod-ssh-x86_64.json
 shasum -a 256 prod-ssh-x86_64-root.erofs        # against the manifest
 gh attestation verify prod-ssh-x86_64-root.erofs --repo werewolf-linux/werewolf
@@ -121,27 +121,27 @@ attestation ties each file to the workflow run and commit that built it.
 ## The key
 
 The image key is RSA-4096 because it will also sign IPE policies, which
-the kernel checks ([design/verified-boot.md](../design/verified-boot.md)).
+the kernel checks ([docs/design/verified-boot.md](design/verified-boot.md)).
 Its private half is the secret `WEREWOLF_IMAGE_KEY` in the GitHub
 environment `release`, which only the release workflow on `main` uses; its
-public half is `keys/image.pub`. To set it up:
+public half is `release/image.pub`. To set it up:
 
 ```sh
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 -out image.key
-openssl pkey -in image.key -pubout -out keys/image.pub
+openssl pkey -in image.key -pubout -out release/image.pub
 gh api -X PUT repos/werewolf-linux/werewolf/environments/release
 gh secret set WEREWOLF_IMAGE_KEY --env release <image.key
 ```
 
 Then limit the environment to `main` (Settings, Environments), commit
-`keys/image.pub`, and keep `image.key` offline. Until both exist, the
+`release/image.pub`, and keep `image.key` offline. Until both exist, the
 workflow builds and checks, then fails at signing and publishes nothing.
 
 ## Limits
 
 - Machines do not install releases yet: autoupdate builds each slot on the
   machine ([updater.md](updater.md)). Installing signed releases is phase 3
-  of [design/verified-boot.md](../design/verified-boot.md).
+  of [docs/design/verified-boot.md](design/verified-boot.md).
 - A release's `build` hashes its files; the updater's own build hash, in
   its log and reports, hashes the package list and kernel.
 - Releases are kept; nothing prunes old ones.

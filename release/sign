@@ -1,19 +1,19 @@
 #!/bin/sh
 # sign: stamp each manifest with SERIAL and an expiry seven days out, sign
 # it with the image key as MANIFEST.sig, and check that signature against
-# keys/image.pub. Signing a release again with its own serial moves only
+# release/image.pub. Signing a release again with its own serial moves only
 # its expiry.
 #
 #   WEREWOLF_IMAGE_KEY=<PEM> release/sign SERIAL MANIFEST...
 #
 # The signature is RSA PKCS#1 v1.5 over the sha256 of the file, as
-#   openssl dgst -sha256 -verify keys/image.pub -signature M.sig M
+#   openssl dgst -sha256 -verify release/image.pub -signature M.sig M
 # checks it. See docs/releases.md.
 set -eu
 
 [ $# -ge 2 ] || { echo "usage: release/sign SERIAL MANIFEST..." >&2; exit 2; }
 [ -n "${WEREWOLF_IMAGE_KEY:-}" ] || { echo "release/sign: WEREWOLF_IMAGE_KEY is not set" >&2; exit 1; }
-pub=$(dirname "$0")/../keys/image.pub
+pub=$(dirname "$0")/image.pub
 [ -f "$pub" ] || { echo "release/sign: no $pub" >&2; exit 1; }
 serial=$1
 shift

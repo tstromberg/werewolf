@@ -59,7 +59,7 @@ serial=$(date -u +%Y%m%dT%H%M%SZ)
 			}' | LC_ALL=C sort
 	done
 	echo
-	echo "Check a manifest: \`openssl dgst -sha256 -verify keys/image.pub -signature M.json.sig M.json\`."
+	echo "Check a manifest: \`openssl dgst -sha256 -verify release/image.pub -signature M.json.sig M.json\`."
 	echo "Rebuild and compare: docs/releases.md."
 } >"$last/notes.md"
 

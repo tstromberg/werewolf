@@ -1,5 +1,5 @@
 # dhcp: minimal, taking its address from the network's DHCP server when
-# the kernel command line names none: werewolf's own client, dhcp/dhcp.zig,
+# the kernel command line names none: werewolf's own client, cmd/dhcp-client/dhcp-client.zig,
 # and the dhcp service that renews the lease. bitten builds on it, and so
 # autoupdate and prod do.
 include: minimal.yaml

@@ -1,60 +1,64 @@
 # werewolf
 
-<img src="media/logo-small.png" alt="werewolf logo" width="160" align="right">
+<img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-A Linux for virtual machines with nothing to run malware with: no shell,
-no interpreter, a read-only root, and a kernel locked at boot so that not
-even root can unlock it. [Wolfi](https://wolfi.dev/)'s userland on
-[Alpine](https://www.alpinelinux.org/)'s kernel, built the way OpenBSD
-would build it.
+werewolf is a Linux for virtual machines that gives malware nothing to run
+with. Production images have no shell and no interpreter. The root
+filesystem is read-only. The kernel is locked at boot, and not even root
+can unlock it.
 
-## What is different
+It is [Wolfi](https://wolfi.dev/)'s userland on
+[Alpine](https://www.alpinelinux.org/)'s kernel, built the way OpenBSD would
+build it.
 
-- **No shell.** Production forms carry no `sh`, `busybox`, `awk` or any
-  interpreter; `posture` checks that they do not. Services are declared in a
-  ten-line file, not scripted, and started by [`leash`](leash/leash.zig) as
-  their own user under Landlock: the paths, programs and ports it names, and
-  nothing else ([design/shell-free.md](design/shell-free.md)).
-- **Nothing written runs.** The root is an erofs image mounted read-only;
-  `/data`, `/tmp`, `/run` and `/dev/shm` are `noexec`; memfds are `noexec`;
-  user namespaces are off. werewolf's own [`mount`](mount/mount.zig) can add
-  `ro`, `nosuid`, `nodev` and `noexec` but never lift them.
-- **Locked at boot, for good.** Before the first service starts, init closes
-  the module loader, raises kernel lockdown, turns ptrace off, and seals
-  PID 1 with a seccomp filter and a reduced capability bounding set that
-  every process inherits: no eBPF, perf, kexec, io_uring, `/dev/mem` or
-  raw I/O, for root too ([design/lockdown.md](design/lockdown.md)).
-- **Network policy fixed at build.** [`fence`](fence/fence.zig) reads the
-  form's `.net` file and allows only the ports it serves and the
-  destinations each user may reach; the cloud metadata server only for whom
-  it is meant. No firewall to configure, no BPF, no netfilter
-  ([design/fence.md](design/fence.md)).
-- **Privilege-separated programs.** init, DHCP, metadata fetch, mount, the
-  updater and the rest are small static Zig programs in the OpenBSD style:
-  the half that reads untrusted input runs as its own user, chrooted, with
-  no capabilities, under a seccomp allowlist; the privileged half keeps one
-  capability and checks every message again ([docs/programs.md](docs/programs.md)).
-- **Updates you can audit.** Packages and kernel come from Wolfi and Alpine
-  directly, verified against keys in the image; there is no build server
-  and no signing key of ours. Every update logs the CVEs it fixes and writes
-  a report an auditor can reproduce. A new image boots once into the other
-  slot and is kept only if it stays healthy ([docs/updater.md](docs/updater.md)).
-- **Small.** `minimal` is 10 packages, 3 MB, listens on nothing, and boots
-  to runit in 0.17 s. No systemd, no PAM, no setuid or setgid files.
-- **Tested.** `make check` boots every form on every push, on x86_64 and
-  arm64, tries the attacks, and fails if one gets through
-  ([docs/testing.md](docs/testing.md)).
+## How it stays locked
 
-What is not yet closed, and how to check a machine by hand:
+- **[No shell.](docs/design/shell-free.md)** Services do not need one, so
+  production forms carry no `sh`, `busybox`, `awk` or any interpreter, and
+  `posture` checks that they do not. A shell is a build option, for the
+  `sshd` form and for `DEV=1`, never a dependency. A service is a ten-line
+  declaration, not a script. `leash` starts it as its own user under
+  Landlock, confined to the paths, programs and ports it names.
+- **Nothing written runs.** The root is an erofs image mounted read-only.
+  `/data`, `/tmp`, `/run`, `/dev/shm` and memfds are `noexec`. User
+  namespaces are off. werewolf's own `mount` can add `ro`, `nosuid`, `nodev`
+  and `noexec` but can never remove them.
+- **[Locked at boot.](docs/design/lockdown.md)** Before the first service
+  starts, init closes the module loader, raises kernel lockdown, turns off
+  ptrace, and seals PID 1 with a seccomp filter and a reduced capability set.
+  Every process inherits both. Root has no eBPF, perf, kexec, io_uring,
+  `/dev/mem` or raw I/O.
+- **[Network policy fixed at build.](docs/design/fence.md)** `fence` reads
+  the form's `.net` file and allows only the ports it serves and the
+  destinations each user may reach. The cloud metadata server is reachable
+  only by the user it is meant for. There is no firewall to configure, no
+  BPF and no netfilter.
+- **[Privilege separation.](docs/programs.md)** init, DHCP, metadata fetch,
+  mount, the updater and the rest are small static Zig programs in the
+  OpenBSD style. The half that reads untrusted input runs as its own user,
+  chrooted, with no capabilities, under a seccomp allowlist. The privileged
+  half keeps one capability and checks every message again.
+- **[Auditable updates.](docs/updater.md)** Packages and kernel come straight
+  from Wolfi and Alpine, verified against keys in the image. There is no
+  build server and no signing key of ours. Each update logs the CVEs it fixes
+  and writes a report an auditor can reproduce. A new image boots once into
+  the other slot and is kept only if it stays healthy.
+- **Small.** `minimal` is 10 packages and 3 MB. It listens on nothing and
+  boots to runit in 0.17 s. There is no systemd, no PAM, and no setuid or
+  setgid file.
+- **[Tested.](docs/testing.md)** Every push boots every form on x86_64 and
+  arm64, tries the attacks, and fails if one gets through.
+
+What is not yet closed, and how to check a machine by hand, is in
 [docs/security.md](docs/security.md). Where it is going, Linux IPE and
-machines that run only code we signed:
-[design/verified-boot.md](design/verified-boot.md).
+machines that run only code we signed, is in
+[docs/design/verified-boot.md](docs/design/verified-boot.md).
 
-## Quick start
+## Try it
 
 ```sh
 brew install apko lima qemu zstd erofs-utils zig    # macOS; Zig 0.17
-make lima                  # build, boot and ssh into a VM under Lima
+make lima                                           # build, boot and ssh in
 ```
 
 Or with QEMU alone:
@@ -63,38 +67,50 @@ Or with QEMU alone:
 make run                   # the sshd form, with a root shell on the console
 make run FORM=prod         # the production base: no shell, nothing listening
 make run FORM=prod DEV=1   # the same, with a shell added for debugging
-make ssh                   # from another terminal
+make run-ssh               # from another terminal
 ```
 
-Then measure it: `posture` runs on every boot and prints what passed and
-what did not. It is a static binary that assumes nothing of werewolf, so
-copy it to any Linux machine to compare ([docs/posture.md](docs/posture.md)).
+`posture` runs at every boot and prints what passed and what did not. It is
+a static binary that assumes nothing about werewolf, so copy it to any Linux
+machine and compare. See [docs/posture.md](docs/posture.md).
 
-Secrets travel in a config tar: put `authorized_keys`, `hostname` and
-crypt's `data.key` in `config/` (gitignored) and `make config` packs it.
-init finds it raw on any block device, or in a cloud's user data
-([docs/cloud.md](docs/cloud.md)), and leaves it in `/run/config`, root's alone.
+## Configure it
+
+Secrets travel in a config tar. Put `authorized_keys`, `hostname` and
+crypt's `data.key` in `config/`, which is gitignored, and run
+`make config-tar`. init finds the tar raw on any block device or in the
+cloud's user data, and leaves it in `/run/config`, readable by root alone.
+See [docs/cloud.md](docs/cloud.md).
 
 ## Forms
 
-A form is `forms/<name>.yaml`, an apko config, with optional files, kernel
-modules and network policy beside it. Forms build on each other; every one
-includes `minimal`. `make forms` lists them with their include chains.
-The ones to know: `minimal`, `prod` (DHCP, autoupdate, no shell, nothing
-listening: build yours on this), `prod-ssh`, `crypt` (`/data` in LUKS2),
-`postgresql` and `demo`. CI publishes `minimal` and `prod-ssh` as signed,
-reproducible releases ([docs/releases.md](docs/releases.md)).
+A form is an apko config in `forms/<name>.yaml`, with optional files, kernel
+modules and network policy beside it. Forms build on each other, and every
+one includes `minimal`. `make list-forms` shows the include chains.
 
-## Taking over an existing VM
+| Form | What it is |
+|---|---|
+| `minimal` | the base: 10 packages, nothing listening |
+| `prod` | DHCP and autoupdate, no shell, nothing listening. Build yours on this. |
+| `prod-ssh` | `prod` plus sshd |
+| `crypt` | `/data` in LUKS2 |
+| `postgresql`, `demo` | leashed services |
 
-Where a provider will not boot a custom image, `bite` turns a running
-Debian, Ubuntu, Fedora or Rocky VM into werewolf without repartitioning:
-`make FORM=prod slot`, copy the slot and `bite` over, then
-`sudo ./bite --reboot DIR`. It boots once and becomes the default only after
-its services have stayed up for a minute ([docs/bite.md](docs/bite.md)).
+CI publishes `minimal` and `prod-ssh` as signed, reproducible releases. See
+[docs/releases.md](docs/releases.md).
 
-## More
+## Take over an existing VM
 
+When a provider will not boot a custom image, `bite` turns a running Debian,
+Ubuntu, Fedora or Rocky VM into werewolf without repartitioning. Build a
+slot with `make FORM=prod slot`, copy the slot and `bite` over, and run
+`sudo ./bite --reboot DIR`. The new system boots once and becomes the
+default only after its services have stayed up for a minute. See
+[docs/bite.md](docs/bite.md).
+
+## Documentation
+
+- [docs/programs.md](docs/programs.md): the programs in `cmd/` and what confines them in `lib/`
 - [docs/data.md](docs/data.md): `/data`, disks and encryption
-- [docs/postgresql.md](docs/postgresql.md), [docs/demo.md](docs/demo.md): leashed services
+- [docs/postgresql.md](docs/postgresql.md) and [docs/demo.md](docs/demo.md): running a leashed service
 - [docs/roadmap.md](docs/roadmap.md): what comes next

@@ -41,7 +41,7 @@ jobs:
       - name: Resolve the locks
         id: inputs
         run: |
-          make inputs
+          make release-inputs
           echo "key=inputs-$(sha256sum build/lock/inputs | cut -c1-64)" >>"$GITHUB_OUTPUT"
       # A cache entry per inputs digest records that they were built,
       # whether or not that made a release.

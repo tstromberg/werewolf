@@ -4,7 +4,7 @@ werewolf assumes it will be attacked, and is built to have little to
 attack, to make what is closed stay closed, and to come back from any
 failure on an image that worked. This page says what is in place, what is
 not yet, and how to check it on a running machine. Where it is going is in
-[design/verified-boot.md](../design/verified-boot.md).
+[docs/design/verified-boot.md](design/verified-boot.md).
 
 ## Approach
 
@@ -69,7 +69,7 @@ None of these costs a program anything: a database or `../scan` runs as
 fast with them as without.
 
 Some hardening has no runtime switch, so it is on the kernel command line,
-which the build writes from the form ([design/lockdown.md](../design/lockdown.md),
+which the build writes from the form ([docs/design/lockdown.md](design/lockdown.md),
 *Command line*): `debugfs=off`; `proc_mem.force_override=never`, so a
 process cannot rewrite its own code through `/proc/self/mem`, as a shell
 and `dd` do to run a program where nothing written may run; on x86_64
@@ -80,7 +80,7 @@ virtualization. A form that runs virtual machines says so with an
 allowance, `kvm`, and its guests still cannot nest (`qemu-host`).
 
 Last, init seals PID 1, and nothing after it, root included, can undo
-the seal before a reboot ([design/lockdown.md](../design/lockdown.md)):
+the seal before a reboot ([docs/design/lockdown.md](design/lockdown.md)):
 
 | | Stops |
 | --- | --- |
@@ -121,7 +121,7 @@ head: /dev/mem,kmem,port is restricted`.
 ### Mounts
 
 Everything werewolf mounts goes through its own tool,
-[mount/mount.zig](../mount/mount.zig), installed as `/usr/lib/werewolf/mount`
+[cmd/mount/mount.zig](../cmd/mount/mount.zig), installed as `/usr/lib/werewolf/mount`
 in every form. util-linux's `mount` is in none of them: in Wolfi it brings
 SELinux's libraries, and busybox's cannot set `nosuid`, `nodev` or `noexec`.
 
@@ -198,7 +198,7 @@ cloud-init's user-data, once werewolf has committed.
   posture's `kernel-cmdline` names what such a machine lacks.
 - **The host is trusted.** A hypervisor can change any guest.
 
-Phases 2 to 5 of [the design](../design/verified-boot.md) close all but the
+Phases 2 to 5 of [the design](design/verified-boot.md) close all but the
 last two.
 
 ## Not done, by choice
