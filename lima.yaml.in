@@ -1,0 +1,22 @@
+# Lima template, instantiated by `make lima`. @VARS@ are filled by the Makefile.
+#
+# Plain mode: Lima boots the VM and forwards ssh, nothing else. There is no
+# cloud-init in the guest; init reads the ssh key Lima puts in its cidata
+# volume and creates that user itself.
+vmType: @VMTYPE@
+plain: true
+arch: @LIMA_ARCH@
+cpus: 4
+memory: 2GiB
+images:
+  - location: @BUILD@/disk.img
+    arch: @LIMA_ARCH@
+    kernel:
+      location: @BUILD@/vmlinuz
+      # Lima's user-mode network: guest .15, gateway .2. The gateway also
+      # answers DNS (192.168.5.3 is slirp's resolver and is absent under vz).
+      # The instance disk is vda; the cidata volume comes after it.
+      cmdline: "console=@CONSOLE@ werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.2 werewolf.data=vda"
+    initrd:
+      location: @OUT@/initramfs.zst
+mounts: []

@@ -1,0 +1,17 @@
+# minimal: boots, takes an address, reads config, supervises. Listens on
+# nothing. Every other form includes this one, and its folder carries /init.
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  packages:
+    - wolfi-baselayout
+    - busybox-full          # sh, mount, tar, dd, od, adduser, getty, sysctl
+    - kmod                  # insmod, for the few virtio/iso modules
+    - net-tools             # ifconfig, route: libc only, where iproute2 pulls ~30 packages
+    - runit                 # PID 1 after init: runs services, shuts down cleanly
+
+archs:
+  - aarch64
+  - x86_64

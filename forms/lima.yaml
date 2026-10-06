@@ -1,0 +1,16 @@
+# lima: sshd plus bash, which Lima's readiness probes are written in, and a
+# persistent /data on Lima's own disk. A form has one parent, so disk's
+# packages are repeated here rather than included; disk carries no files,
+# so its packages are all there is to it.
+include: sshd.yaml
+contents:
+  packages:
+    - bash
+    - e2fsprogs
+    - mount
+    - blkid
+
+paths:
+  - path: /usr/bin/mount
+    type: permissions
+    permissions: 0o755

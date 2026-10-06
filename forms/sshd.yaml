@@ -1,0 +1,13 @@
+# sshd: minimal plus operator access by key.
+include: minimal.yaml
+contents:
+  packages:
+    - openssh-server
+    - openssh-sftp-server   # scp and `limactl copy`
+
+paths:
+  # PAM's password helper, setgid shadow, arrives through openssh-server.
+  # Nothing here authenticates with a password.
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755

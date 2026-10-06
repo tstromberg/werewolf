@@ -1,0 +1,5 @@
+#!/bin/sh
+# Root shell on the serial console. Only when werewolf.debug=1 is on the
+# kernel command line; init marks this service down otherwise.
+tty=$(sed -n 's/.*console=\([a-zA-Z0-9]*\).*/\1/p' /proc/cmdline)
+exec /usr/bin/getty -n -l /bin/ash -L 115200 "${tty:-console}" vt100

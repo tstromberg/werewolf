@@ -1,0 +1,247 @@
+#!/bin/sh
+# werewolf init: PID 1 from the kernel handing over until runit takes it.
+#
+# The whole root filesystem is the initramfs, unpacked by the kernel into RAM,
+# so there is no root device to find and nothing to switch to. This script
+# only has to make the machine reachable: filesystems, the few modules the
+# hypervisor needs, one address, the operator's keys. Then it locks the
+# module loader and execs runit, which is runit's stage 1 already done:
+# /etc/runit/2 runs the services and /etc/runit/3 shuts down.
+#
+# Every form includes minimal, so this script is in every image. It must not
+# know which form it is in: it prepares the machine and starts runit, and the
+# services a form adds take care of themselves.
+#
+# Everything it reads comes from two places, in this order:
+#   kernel command line   werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
+#                         werewolf.data=DEV (the disk /data may format, once)
+#                         werewolf.debug=1 (root shell on the console)
+#   config                a tar written raw to any block device, extracted to
+#                         /run/config for the services to read (hostname and
+#                         authorized_keys are applied here); or a NoCloud
+#                         `cidata` volume, from which only the first user and
+#                         its ssh keys are taken, which is what Lima provides.
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+# Nothing here may wait on a person. A tool that prompts (mke2fs does, over
+# an old signature) reads end of file instead of stalling the boot.
+exec </dev/null
+
+say() { echo "werewolf: $*"; }
+
+# Wolfi's busybox mount has no flag parsing: `nosuid` and friends go to the
+# kernel as data strings and the mount fails. So no flags here; the
+# filesystems get the kernel's defaults.
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mountpoint -q /dev || mount -t devtmpfs dev /dev
+mkdir -p /dev/pts /dev/shm /mnt /var/empty
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmpfs /dev/shm
+mount -t tmpfs tmpfs /run
+mount -t tmpfs tmpfs /tmp
+chmod 1777 /dev/shm /tmp
+mkdir -p -m 0700 /run/config
+
+# --- kernel command line ------------------------------------------------------
+ip= gw= dns= data= debug=
+for arg in $(cat /proc/cmdline); do
+	case "$arg" in
+	werewolf.ip=*) ip=${arg#*=} ;;
+	werewolf.gw=*) gw=${arg#*=} ;;
+	werewolf.dns=*) dns=${arg#*=} ;;
+	werewolf.data=*) data=${arg#*=} ;;
+	werewolf.debug=*) debug=${arg#*=} ;;
+	esac
+done
+
+# --- modules ------------------------------------------------------------------
+# The Makefile wrote the list it packed, already in load order. Load them,
+# then close the loader for the life of the machine: nothing after this
+# point may add kernel code.
+moddir=/usr/lib/modules/$(uname -r)
+for p in $(cat "$moddir/werewolf.modules"); do
+	insmod "$moddir/$p" || say "insmod $p failed"
+done
+sysctl -q -w kernel.modules_disabled=1
+
+sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 \
+	kernel.unprivileged_bpf_disabled=1 net.ipv4.ip_forward=0
+
+# --- network ------------------------------------------------------------------
+# One static address from the command line. There is no DHCP client in Wolfi
+# short of systemd-networkd, and the hypervisors this runs under hand out
+# fixed addresses anyway; see README. net-tools, not iproute2: ifconfig and
+# route need only libc.
+ifconfig lo up
+nic=$(ls /sys/class/net | grep -v '^lo$' | head -n 1)
+if [ -n "$nic" ] && [ -n "$ip" ]; then
+	ifconfig "$nic" "$ip" up
+	[ -n "$gw" ] && route add default gw "$gw"
+	[ -n "$dns" ] && echo "nameserver $dns" >/etc/resolv.conf
+	say "$nic $ip via ${gw:-none} dns ${dns:-none}"
+else
+	say "no network: nic=${nic:-none} ip=${ip:-unset}"
+fi
+
+# --- config -------------------------------------------------------------------
+# Probe every block device once. A ustar magic at byte 257 is our config tar;
+# an ISO 9660 volume with user-data is NoCloud.
+keys() { # keys USER HOME < authorized_keys
+	mkdir -p -m 0700 "$2/.ssh"
+	cat >"$2/.ssh/authorized_keys"
+	chmod 0600 "$2/.ssh/authorized_keys"
+	chown -R "$1:$1" "$2/.ssh"
+}
+for sys in /sys/class/block/*; do
+	dev=/dev/${sys##*/}
+	[ -b "$dev" ] || continue
+	if [ "$(dd if="$dev" bs=1 skip=257 count=5 2>/dev/null)" = ustar ]; then
+		say "config tar on $dev"
+		tar -xf "$dev" -C /run/config
+		confdev=$dev
+	elif mount -t iso9660 -o ro "$dev" /mnt 2>/dev/null; then
+		if [ -f /mnt/user-data ]; then
+			say "NoCloud user-data on $dev"
+			# First user in the cloud-config (values may be quoted), and every
+			# ssh key in the file.
+			user=$(awk '/^ *- *name:/ {print $NF; exit}' /mnt/user-data | tr -d '"')
+			uid=$(awk '/^ *uid:/ {print $NF; exit}' /mnt/user-data | tr -d '"')
+			if [ -n "$user" ]; then
+				adduser -D -s /bin/ash ${uid:+-u "$uid"} -h "/home/$user" "$user"
+				# adduser -D leaves "!" in the shadow field, which sshd reads
+				# as a locked account and refuses even a key. "*" is no
+				# password without the lock.
+				sed -i "s|^$user:[^:]*:|$user:*:|" /etc/shadow
+				grep -o -E '(ssh-(ed25519|rsa)|ecdsa-sha2-nistp[0-9]+|sk-[a-z0-9-]+@openssh\.com) [A-Za-z0-9+/=]+( [^"]*)?' /mnt/user-data |
+					keys "$user" "/home/$user"
+			fi
+			# Lima's readiness probe reads the instance-id back from here; it
+			# is what cloud-init's boot scripts would have written.
+			awk '/^instance-id:/ {print $2}' /mnt/meta-data >/run/lima-boot-done 2>/dev/null
+		fi
+		umount /mnt
+	fi
+done
+
+[ -f /run/config/hostname ] && cat /run/config/hostname >/etc/hostname
+hostname -F /etc/hostname 2>/dev/null || hostname werewolf
+[ -f /run/config/authorized_keys ] && keys root /root </run/config/authorized_keys
+
+# --- data ---------------------------------------------------------------------
+# /data is the machine's one writable home, and everything on it is cache:
+# losing it costs a cold start, never a broken machine. That is what lets
+# every failure below end in "format it again".
+#
+# The form's packages decide what /data is, so init never asks which form
+# it is in:
+#   no mke2fs        tmpfs, capped at a quarter of RAM
+#   mke2fs           ext4 on the device labelled werewolf-data
+#   + cryptsetup     the same inside LUKS2, keyed by data.key from the config
+#
+# The disk is found by its label, so its device name may differ from boot to
+# boot. A device is formatted for the first time only when werewolf.data
+# names it and blkid finds nothing on it at all. One that carries our label
+# but is not what the form wants (plain where it wants LUKS, a key that does
+# not open it, a filesystem e2fsck cannot repair) is ours, and is formatted
+# again.
+label=werewolf-data
+mkdir -p /data
+
+data_home() {
+	want=ext4
+	command -v cryptsetup >/dev/null && want=crypto_LUKS
+	fresh=
+
+	src=$(blkid -c /dev/null -l -o device -t LABEL=$label)
+	if [ -n "$src" ]; then
+		have=$(blkid -c /dev/null -p -o value -s TYPE "$src")
+		if [ "$have" != "$want" ]; then
+			say "$src is $have, this form wants $want; formatting"
+			fresh=1
+		fi
+	else
+		[ -n "$data" ] || { say "no $label disk, and werewolf.data names none"; return 1; }
+		src=/dev/${data#/dev/}
+		[ -b "$src" ] || { say "werewolf.data: no device $src"; return 1; }
+		[ "$src" != "$confdev" ] || { say "refusing $src: it holds the config"; return 1; }
+		if blkid -c /dev/null -p "$src" >/dev/null 2>&1; then
+			say "refusing to format $src: it is not blank"
+			return 1
+		fi
+		fresh=1
+	fi
+
+	fs=$src
+	if [ "$want" = crypto_LUKS ]; then
+		# No udev here: libdevmapper must make /dev/mapper nodes itself.
+		export DM_DISABLE_UDEV=1
+		mkdir -p /run/cryptsetup
+		key=/run/config/data.key
+		if [ ! -s "$key" ]; then
+			key=/run/data.key
+			head -c 64 /dev/urandom >"$key"
+			say "no data.key: /data is encrypted with a throwaway key and will not survive a reboot"
+		fi
+		# The key is random, so a slow KDF adds nothing; argon2id's default
+		# would spend up to 1 GiB and two seconds on every boot.
+		open="cryptsetup open --key-file $key --perf-no_read_workqueue --perf-no_write_workqueue $src data"
+		if [ -z "$fresh" ] && ! $open 2>/dev/null; then
+			say "the key does not open $src; formatting"
+			fresh=1
+		fi
+		if [ -n "$fresh" ]; then
+			cryptsetup luksFormat -q --type luks2 --label "$label" \
+				--pbkdf pbkdf2 --pbkdf-force-iterations 1000 --key-file "$key" "$src" &&
+				$open || return 1
+		fi
+		fs=/dev/mapper/data
+	fi
+
+	# Inside LUKS the filesystem goes unlabelled: the label belongs to the
+	# disk, and two devices answering to it would make the search ambiguous.
+	# -F: by now the device is blank or ours, so an old signature on it is
+	# no reason to stop.
+	mkfs="mke2fs -q -F -t ext4 -m 0"
+	[ "$want" = ext4 ] && mkfs="$mkfs -L $label"
+	if [ -n "$fresh" ]; then
+		say "formatting $fs"
+		$mkfs "$fs" || return 1
+	else
+		e2fsck -p "$fs" >/dev/null 2>&1
+		rc=$?
+		if [ $rc -ge 4 ]; then
+			say "e2fsck cannot repair $fs (exit $rc); formatting"
+			$mkfs "$fs" || return 1
+		fi
+	fi
+	mount -t ext4 -o noatime,nosuid,nodev,noexec "$fs" /data
+}
+
+if command -v mke2fs >/dev/null && data_home; then
+	chmod 0755 /data
+	say "/data is $want on $src"
+else
+	mount -t tmpfs -o size=25%,mode=0755 tmpfs /data
+	say "/data is RAM, capped at 25%"
+fi
+# /data holds two trees: /data/svc/<service>, which each service's run
+# script makes for itself, and /data/home/<user> for people. The only person
+# init creates is the NoCloud user (Lima's).
+if [ -n "${user:-}" ]; then
+	mkdir -p "/data/home/$user"
+	chown "$user:$user" "/data/home/$user"
+	chmod 0700 "/data/home/$user"
+fi
+# The key now lives in the kernel's dm table. No service needs it, and the
+# config directory is the one place a service would look.
+rm -f /run/config/data.key /run/data.key
+
+# --- services -----------------------------------------------------------------
+# init knows only minimal's own services. Each form's services prepare
+# themselves in their run scripts, so init never has to learn about them.
+[ "$debug" = 1 ] || touch /etc/sv/console/down
+
+say "up in $(cut -d' ' -f1 /proc/uptime)s, handing over to runit"
+exec runit

@@ -1,0 +1,5 @@
+#!/bin/sh
+# runsv runs this instead of sending TERM. The console is an interactive
+# ash, which ignores TERM, so stage 3 would wait out its whole timeout; a
+# shell honours HUP. Exiting 0 tells runsv the signal has been handled.
+kill -HUP "$(cat supervise/pid)"

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Stage 3: stop the services, then put /data down before the power goes.
+# Without this a stop is a power cut, and ext4 loses its last few seconds of
+# writes. runit kills whatever is left, syncs, and powers off (or reboots,
+# if `reboot` asked) once this exits.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+exec 2>&1 </dev/null
+
+say() { echo "werewolf: $*"; }
+
+say "stopping services"
+sv -w 30 force-stop /etc/sv/*
+sv exit /etc/sv/*
+
+sync
+if umount /data 2>/dev/null; then
+	say "/data unmounted"
+else
+	mount -o remount,ro /data 2>/dev/null && say "/data busy; remounted read-only"
+fi
+if [ -e /dev/mapper/data ]; then
+	cryptsetup close data && say "/data closed"
+fi

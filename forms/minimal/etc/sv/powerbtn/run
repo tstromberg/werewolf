@@ -1,0 +1,35 @@
+#!/bin/sh
+# Turn the hypervisor's power-button press into a clean poweroff. It reaches
+# us as an input event: struct input_event, 24 bytes on a 64-bit kernel,
+# ending in type, code and value. EV_KEY (1), KEY_POWER (116), pressed (1)
+# is 01 00 74 00 01 00 00 00. Each device is read through one open
+# descriptor, so the kernel's queue holds events between reads.
+#
+# The ACPI button (x86, and arm64 servers that boot with ACPI) arrives this
+# way. arm64 machines described by a device tree (QEMU's virt, Apple's VZ)
+# wire it to gpio-keys, which Alpine's linux-virt does not build, so there
+# nothing ever arrives and the service parks itself.
+exec 2>&1
+
+devs=$(ls /dev/input/event* 2>/dev/null)
+if [ -z "$devs" ]; then
+	echo "powerbtn: no input devices, staying down"
+	exec sv down .
+fi
+
+watch() {
+	exec 3<"$1"
+	while ev=$(dd bs=24 count=1 <&3 2>/dev/null | od -An -tx1 | tr -d ' \n') && [ -n "$ev" ]; do
+		case "$ev" in
+		*0100740001000000)
+			echo "powerbtn: power button on $1, powering off"
+			exec runit-init 0
+			;;
+		esac
+	done
+}
+
+for d in $devs; do
+	watch "$d" &
+done
+wait

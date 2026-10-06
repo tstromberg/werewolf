@@ -1,0 +1,7 @@
+# sshd-cloudflared: sshd plus a Cloudflare tunnel, the fleet's way in.
+# The tunnel stays down until the config tar carries cloudflared/token.
+include: sshd.yaml
+contents:
+  packages:
+    - ca-certificates-bundle
+    - cloudflared

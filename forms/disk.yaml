@@ -1,0 +1,14 @@
+# disk: minimal plus a persistent /data. The form carries no files; init
+# builds the data home when these tools are present. See README, Data.
+include: minimal.yaml
+contents:
+  packages:
+    - e2fsprogs             # mke2fs, e2fsck
+    - mount                 # util-linux: busybox's cannot pass noexec/nosuid
+    - blkid                 # find /data by label, refuse a disk that is not blank
+
+paths:
+  # Wolfi ships util-linux mount setuid root. Nothing here mounts as a user.
+  - path: /usr/bin/mount
+    type: permissions
+    permissions: 0o755
