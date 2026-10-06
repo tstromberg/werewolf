@@ -8,7 +8,7 @@
 # IMAGE_DIR holds a slot built for this machine's architecture (`make slot`):
 # vmlinuz, initramfs.zst (stage0) and root.erofs, of a form that can live on
 # a bitten machine (bitten, or one with its packages and modules; see
-# README, Bite).
+# docs/bite.md).
 #
 # Nothing of the distro is removed. bite adds a GRUB entry and boots it once;
 # werewolf makes itself the default only after its services have stayed up

@@ -138,7 +138,7 @@ const Update = struct {
         const package_cves = try u.packageCves(&client, &sources, repo, old_pkgs, new_pkgs);
         const kernel_cves = if (kernel_changed) try u.kernelCves(&client, &sources, old_kernel, new_kernel) else KernelFixes{};
 
-        try u.buildSlot(arch, new_kernel, release);
+        try u.buildSlot(arch, new_kernel);
         try u.install(build);
 
         u.step = "report";
@@ -252,7 +252,7 @@ const Update = struct {
     }
 
     // --- build -------------------------------------------------------------
-    fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8, release: []const u8) !void {
+    fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
         const io = u.io;
         const root = work_dir ++ "/root";
         try Dir.cwd().createDirPath(io, work_dir ++ "/slot");
@@ -268,7 +268,7 @@ const Update = struct {
         for (try u.listDir(meta_dir)) |name| try u.copyInto(root, try std.fmt.allocPrint(u.gpa, "usr/share/werewolf/{s}", .{name}));
         const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
         try u.write(root ++ meta_dir ++ "/kernel", try std.fmt.allocPrint(u.gpa, "{s}\n", .{new_kernel}));
-        try u.write(root ++ meta_dir ++ "/release", try std.fmt.allocPrint(u.gpa, "{s} {s} {s} updated-on-{s} from {s}\n", .{ form, try u.now(), new_kernel, u.host, release }));
+        try u.write(root ++ meta_dir ++ "/release", try std.fmt.allocPrint(u.gpa, "{s} {s} {s} updated-on-{s}\n", .{ form, try u.now(), new_kernel, u.host }));
         try u.stripSetid(root);
         try u.run(&.{ "mkfs.erofs", "-b", "4096", "-zlz4hc", work_dir ++ "/slot/root.erofs", root });
 
@@ -387,8 +387,12 @@ const Update = struct {
     }
 
     /// A newc cpio of everything under root, as the kernel unpacks an
-    /// initramfs: owned by root, children after their directory.
+    /// initramfs: owned by root, children after their directory. The type
+    /// and device numbers come from statx, since the stage0 root has device
+    /// nodes (/dev/console, which the kernel opens before anything mounts
+    /// /dev) as well as files, directories and links.
     fn writeCpio(u: *Update, root: []const u8, out_path: []const u8) !void {
+        const linux = std.os.linux;
         var out: Io.Writer.Allocating = .init(u.gpa);
         var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
         defer d.close(u.io);
@@ -396,19 +400,20 @@ const Update = struct {
         var ino: u32 = 1;
         var link_buf: [Dir.max_path_bytes]u8 = undefined;
         while (try w.next(u.io)) |e| : (ino += 1) {
-            const st = try e.dir.statFile(u.io, e.basename, .{ .follow_symlinks = false });
-            const perm: u32 = @intCast(st.permissions.toMode() & 0o7777);
-            switch (e.kind) {
-                .directory => try cpioEntry(&out.writer, e.path, 0o040000 | perm, ino, ""),
-                .sym_link => {
-                    const n = try e.dir.readLink(u.io, e.basename, &link_buf);
-                    try cpioEntry(&out.writer, e.path, 0o120000 | 0o777, ino, link_buf[0..n]);
-                },
-                .file => try cpioEntry(&out.writer, e.path, 0o100000 | perm, ino, try e.dir.readFileAlloc(u.io, e.basename, u.gpa, .limited(max_read))),
+            const path = try std.fmt.allocPrintSentinel(u.gpa, "{s}/{s}", .{ root, e.path }, 0);
+            var st: linux.Statx = undefined;
+            const rc = linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true }, &st);
+            if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
+            const node: Node = .{ .name = e.path, .mode = st.mode, .ino = ino, .rdev_major = st.rdev_major, .rdev_minor = st.rdev_minor };
+            const data: []const u8 = switch (st.mode & linux.S.IFMT) {
+                linux.S.IFREG => try e.dir.readFileAlloc(u.io, e.basename, u.gpa, .limited(max_read)),
+                linux.S.IFLNK => link_buf[0..try e.dir.readLink(u.io, e.basename, &link_buf)],
+                linux.S.IFDIR, linux.S.IFCHR, linux.S.IFBLK => "",
                 else => return error.UnexpectedFileKind,
-            }
+            };
+            try cpioEntry(&out.writer, node, data);
         }
-        try cpioEntry(&out.writer, "TRAILER!!!", 0, 0, "");
+        try cpioEntry(&out.writer, .{ .name = "TRAILER!!!", .mode = 0, .ino = 0 }, "");
         try u.write(out_path, out.written());
     }
 
@@ -783,14 +788,16 @@ fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
     return out.written();
 }
 
+const Node = struct { name: []const u8, mode: u32, ino: u32, rdev_major: u32 = 0, rdev_minor: u32 = 0 };
+
 /// One newc cpio entry: header, name and data, each padded to 4 bytes.
-fn cpioEntry(w: *Io.Writer, name: []const u8, mode: u32, ino: u32, data: []const u8) !void {
-    const fields = [_]u32{ ino, mode, 0, 0, 1, 0, @intCast(data.len), 0, 0, 0, 0, @intCast(name.len + 1), 0 };
+fn cpioEntry(w: *Io.Writer, n: Node, data: []const u8) !void {
+    const fields = [_]u32{ n.ino, n.mode, 0, 0, 1, 0, @intCast(data.len), 0, 0, n.rdev_major, n.rdev_minor, @intCast(n.name.len + 1), 0 };
     try w.writeAll("070701");
     for (fields) |f| try w.print("{x:0>8}", .{f});
-    try w.writeAll(name);
+    try w.writeAll(n.name);
     try w.writeByte(0);
-    try w.splatByteAll(0, pad4(110 + name.len + 1));
+    try w.splatByteAll(0, pad4(110 + n.name.len + 1));
     try w.writeAll(data);
     try w.splatByteAll(0, pad4(data.len));
 }
@@ -925,13 +932,20 @@ test moduleOrder {
 test cpioEntry {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try cpioEntry(&out.writer, "init", 0o100755, 1, "ab");
+    try cpioEntry(&out.writer, .{ .name = "init", .mode = 0o100755, .ino = 1 }, "ab");
     const b = out.written();
     try testing.expectEqualStrings("070701", b[0..6]);
     try testing.expectEqualStrings("000081ed", b[14..22]);
     try testing.expectEqualStrings("init\x00", b[110..115]);
     try testing.expectEqual(0, (110 + 5 + pad4(115)) % 4);
     try testing.expectEqual(b.len, 110 + 5 + pad4(115) + 2 + pad4(2));
+
+    out.clearRetainingCapacity();
+    try cpioEntry(&out.writer, .{ .name = "dev/console", .mode = 0o020620, .ino = 2, .rdev_major = 5, .rdev_minor = 1 }, "");
+    const c = out.written();
+    try testing.expectEqualStrings("00002190", c[14..22]);
+    try testing.expectEqualStrings("00000005", c[78..86]);
+    try testing.expectEqualStrings("00000001", c[86..94]);
 }
 
 test unwrapZboot {

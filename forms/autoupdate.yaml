@@ -2,7 +2,7 @@
 # asks Wolfi and Alpine whether anything in this image has a newer version;
 # if so it builds the other slot on the machine, boots it once, and keeps it
 # only if it commits. The updater itself is updater/update.zig, built by the
-# Makefile. See README, Autoupdate.
+# Makefile. See docs/updater.md.
 include: bitten.yaml
 contents:
   packages:

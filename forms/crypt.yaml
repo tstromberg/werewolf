@@ -1,6 +1,6 @@
 # crypt: disk, with /data encrypted (LUKS2). The key is data.key in the
 # config tar; without one, a throwaway key is used and /data does not
-# survive a reboot. See README, Data.
+# survive a reboot. See docs/data.md.
 include: disk.yaml
 contents:
   packages:

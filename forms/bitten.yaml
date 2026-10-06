@@ -1,6 +1,6 @@
 # bitten: minimal, on a machine `bite` took over. The old root filesystem
 # stays, and /data is a directory on it; the config sits beside it. See
-# README, Bite.
+# docs/bite.md.
 include: minimal.yaml
 contents:
   packages:

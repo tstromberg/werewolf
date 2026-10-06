@@ -1,5 +1,5 @@
 # disk: minimal plus a persistent /data. The form carries no files; init
-# builds the data home when these tools are present. See README, Data.
+# builds the data home when these tools are present. See docs/data.md.
 include: minimal.yaml
 contents:
   packages:
