@@ -7,16 +7,76 @@ Alpine's kernel.
 
 We wanted Chainguard's VMs without paying for them:
 
-- **Secure**: little to attack, and it updates itself.
+- **Secure**: little to attack.
 - **Fast**: glibc and its malloc, for heavy compute.
-- **Low maintenance**: few CVEs to chase; updates reboot on their own.
+- **Low maintenance**: few CVEs to chase; it updates and reboots itself.
 - **Auditable**: every update is logged.
 - **Reliable**: A/B slots; a failed update rolls itself back.
 
-Alpine supplies the kernel; Wolfi supplies a glibc userland. Images are
-built from *forms*, so each holds only what it needs. Where a provider will
-not boot a custom image, `bite` takes over an existing Debian, Ubuntu,
-Fedora or Rocky VM.
+Images are built from *forms*, so each holds only what it needs. Where a
+provider will not boot a custom image, `bite` takes over an existing Debian,
+Ubuntu, Fedora or Rocky VM.
+
+## Quick start
+
+On a Mac, with [Homebrew](https://brew.sh):
+
+```sh
+brew install apko lima qemu zstd erofs-utils
+git clone https://github.com/tstromberg/werewolf.git
+cd werewolf
+```
+
+On Linux, install the same plus `bsdtar` (`libarchive-tools` on Debian and
+Ubuntu).
+
+### In Lima
+
+```sh
+make lima                  # build the lima form and boot it
+limactl shell werewolf     # log in as yourself, with your ssh key
+make lima-stop             # stop and delete the VM
+```
+
+The first build downloads Alpine's kernel and Wolfi's packages. Lima runs
+the VM under Apple's Virtualization framework on a Mac and QEMU elsewhere,
+with a 100 GiB `/data` disk that lasts until `make lima-stop`. Inside there
+is no sudo, and not much else:
+
+```sh
+cat /usr/share/werewolf/release   # form, build time, kernel
+ls /etc/sv                        # every service there is
+free -m                           # about 60 MB in use
+```
+
+Lima copies the kernel and initramfs only at creation, so boot a change with
+`make lima-stop lima`.
+
+### In QEMU
+
+```sh
+make run                   # the sshd form: a root shell on the console
+make ssh                   # from another terminal
+```
+
+`poweroff`, or Ctrl-A X, ends it. ssh logs in as root with the keys in
+`config/authorized_keys` (*Configuration*):
+
+```sh
+mkdir -p config && cp ~/.ssh/id_ed25519.pub config/authorized_keys
+```
+
+`make run` needs port 2222 free; `pkill -f 'qemu-system.*initramfs'` frees
+it.
+
+### Other forms and architectures
+
+```sh
+make forms                 # each form and its include chain
+make run FORM=minimal      # 5.7 MB, nothing listening
+make run FORM=crypt        # /data encrypted with LUKS2
+make run ARCH=x86_64       # from arm64: cross-built, emulated, slow
+```
 
 ## Forms
 
@@ -35,47 +95,37 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 | `sshd-cloudflared` | sshd | cloudflared, CA certificates | RAM | :22, tunnel | 15.0 MB | | 29 |
 | `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 14.4 MB | 23.2 MB | 47 |
 
-```sh
-make forms              # each form and its include chain
-make run FORM=minimal   # FORM defaults to sshd
-```
-
 1. **Forms build on each other with apko's `include:`.** The Makefile
    follows the chain, laying on each form's files and modules, base first.
    A `.modules` line may start with an arch: `aarch64: aes-ce-blk`.
 2. **Every form includes `minimal`, which carries `/init`.** init does not
    know which form it is in. Each service prepares itself in its run script
    and parks itself (`sv down .`) when it lacks what it needs: sshd without
-   `sshd`, cloudflared without a token. So `sshd` is just two packages.
+   `sshd`, cloudflared without a token.
 3. **Storage forms carry only packages and modules.** init builds `/data`
    from whichever tools are present (*Data*).
 
 No form ships a setuid or setgid file; apko `paths:` entries clear them
 from util-linux `mount` and PAM's `unix_chkpwd`. openssl appears only where
 it is needed: sshd, cryptsetup and apk-tools use it, and kmod links
-`libcrypto` to check module signatures. Networking uses net-tools, which needs only libc;
-Wolfi's iproute2 would pull in about thirty packages, PAM and iptables among
-them. runit, not systemd: the heaviest form is 87 MB, and the same packages
-with systemd measured 189 MB.
+`libcrypto` to check module signatures. Networking uses net-tools, which
+needs only libc; Wolfi's iproute2 would pull in about thirty packages, PAM
+and iptables among them. runit, not systemd: the heaviest form is 87 MB, and
+the same packages with systemd measured 189 MB.
 
-## Build and run
+## Build
 
-Needs `apko`, `zstd`, `bsdtar`, `mkfs.erofs` (for slots), and
-`qemu-system-*` or `limactl`.
+To build without booting:
 
 ```sh
-make                 # kernel, rootfs, initramfs
+make                 # build/<arch>/vmlinuz, build/<arch>/<form>/initramfs.zst
 make slot            # vmlinuz, stage0 and root.erofs, for bite
-make run             # QEMU: root shell on the console, ssh on :2222
-make lima            # Lima (VZ on Apple silicon); then `limactl shell werewolf`
-make ARCH=x86_64     # cross-build; boots under TCG on arm64
 ```
 
-`make run` needs port 2222 free; `pkill -f 'qemu-system.*initramfs'` frees
-it.
+Images need `apko`, `zstd` and `bsdtar`; slots also need `mkfs.erofs`.
 
 bsdtar writes the cpio straight from apko's tar, so ownership arrives as apko
-set it. The kernel is pinned by digest. On aarch64 Alpine ships an EFI zboot
+set it. The kernel is pinned by digest. On aarch64, Alpine ships an EFI zboot
 image; the Makefile unwraps the raw `Image`, which Apple's Virtualization
 framework requires.
 
@@ -83,8 +133,6 @@ On an M-series Mac, init hands over to runit 0.17 s after the kernel starts
 (1.3 s under VZ). The booted machine runs seven processes in 51 MB.
 
 ## Configuration
-
-init reads two sources.
 
 **The kernel command line** sets the network (`werewolf.ip=CIDR`,
 `werewolf.gw=`, `werewolf.dns=`, `werewolf.mac=`), the disk `/data` may
@@ -144,7 +192,7 @@ survive a reboot.
 LUKS2 tells a wrong key from a corrupt disk. pbkdf2 runs at 1000 iterations
 because the key is random; argon2id would cost up to 1 GiB and two seconds
 per boot. The hardware AES modules are loaded explicitly, since once the
-loader closes, dm-crypt would fall back to generic AES without a word.
+loader closes, dm-crypt would silently fall back to generic AES.
 Under QEMU a 1 GiB synced write took 0.48 s encrypted and 0.50 s plain. XTS
 does not detect tampering; dm-integrity would, at a cost in write speed.
 
