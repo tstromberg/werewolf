@@ -183,6 +183,38 @@ fn opensForWrite(path: [:0]const u8, append: bool) bool {
     return true;
 }
 
+/// How opening path for writing, and nothing more, ends.
+fn writeOpen(path: [:0]const u8) linux.E {
+    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .NOFOLLOW = true }, 0);
+    if (linux.errno(rc) == .SUCCESS) _ = linux.close(@intCast(rc));
+    return linux.errno(rc);
+}
+
+/// The first whole disk, /dev/vda say: not a loop, RAM or mapped device.
+fn firstDisk(buf: *[64]u8) [:0]const u8 {
+    const dir = linux.open(
+        "/sys/block",
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(dir) != .SUCCESS) return "";
+    defer _ = linux.close(@intCast(dir));
+    var ents: [2048]u8 align(8) = undefined;
+    const n = linux.getdents64(@intCast(dir), &ents, ents.len);
+    if (linux.errno(n) != .SUCCESS) return "";
+    var off: usize = 0;
+    while (off < n) {
+        const ent: *align(1) const linux.dirent64 = @ptrCast(&ents[off]);
+        off += ent.reclen;
+        const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
+        const virtual = [_][]const u8{ ".", "loop", "ram", "dm-", "zram" };
+        for (virtual) |v| {
+            if (std.mem.startsWith(u8, name, v)) break;
+        } else return std.mem.printSentinel(buf, "/dev/{s}", .{name}, 0) catch "";
+    }
+    return "";
+}
+
 /// What writesOwnReadOnly writes over: a string, so in read-only memory.
 const read_only: []const u8 = "posture: read-only";
 
@@ -1352,6 +1384,41 @@ const Posture = struct {
             .how = "/victim is mounted ro",
             .result = if (hasOption(mounts, "/victim", "ro")) .pass else .fail,
         });
+        if (p.root) {
+            var disk_buf: [64]u8 = undefined;
+            const disk = firstDisk(&disk_buf);
+            var writable: std.ArrayList(u8) = .empty;
+            const places = [_][:0]const u8{
+                "/proc/sys/kernel/printk",
+                "/sys/kernel/mm/transparent_hugepage/enabled",
+                disk,
+            };
+            for (places) |path| {
+                if (path.len == 0) continue;
+                switch (writeOpen(path)) {
+                    .ACCES, .NOENT => {},
+                    else => try writable.print(
+                        p.gpa,
+                        "{s}{s}",
+                        .{ if (writable.items.len > 0) ", " else "", path },
+                    ),
+                }
+            }
+            try p.add(.{
+                .id = "files-system-writes",
+                .area = "files",
+                .name = "Kernel settings and disks not writable",
+                .why = "Not even root can change a sysctl, a sysfs setting or a disk underneath " ++
+                    "its filesystem, until the machine reboots.",
+                .how = "opening a sysctl, a sysfs setting and the first disk for writing, " ++
+                    "without writing, is refused with EACCES (Landlock, from fence)",
+                .result = if (writable.items.len == 0) .pass else .fail,
+                .detail = if (writable.items.len == 0)
+                    ""
+                else
+                    try p.gpa.print("opened for writing: {s}", .{writable.items}),
+            });
+        }
     }
 
     /// Whether a copy of this program, put in dir, starts. A place it

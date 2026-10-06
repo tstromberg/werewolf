@@ -1,14 +1,16 @@
 #!/bin/sh
 # update DIR CMDLINE QEMU...
 #
-# A whole update, as a machine does one, from Wolfi and Alpine over the
-# network. DIR/victim.img holds slot a, whose build record claims a kernel
+# A whole update, as a machine does one, over the network: a slot built
+# from Wolfi and Alpine, or, for a form CI publishes, its latest signed
+# release. DIR/victim.img holds slot a, whose build record claims a kernel
 # one release older than its own, and GRUB's environment; DIR/vmlinuz and
 # DIR/initramfs.zst boot it. QEMU... is the machine, with the network and
 # -no-reboot; CMDLINE is the kernel command line, but for werewolf.slot.
 #
 # First boot, slot a: it commits, the updater finds Alpine's kernel newer,
-# fetches and builds slot b, installs it, and reboots, which ends QEMU.
+# fetches and builds slot b (or fetches the release's), installs it, and
+# reboots, which ends QEMU.
 # Then, from the disk: the report names both CVE sources with a sha256 and
 # no error; each apk cache kept its packages; slot b's root is root's, mode
 # 0755; GRUB will boot b once. Second boot, slot b: it must commit, and the
@@ -84,13 +86,20 @@ check "no seccomp kill in slot a" absent 'type=1326' "$dir/update-1.log"
 
 state=/var/lib/werewolf/data/svc/autoupdate
 victim_cat "$state/reports/$(victim_ls $state/reports | tail -1)" >"$dir/report.json"
+# One source or two: the kernel's only when the kernel changed.
+listed=$(grep -c '"url": ' "$dir/report.json")
 hashed=$(grep -c '"sha256": "[0-9a-f]\{64\}"' "$dir/report.json")
 clean=$(grep -c '"error": null' "$dir/report.json")
-check "the report's CVE sources fetched, with their sha256" [ "$hashed" -eq 2 -a "$clean" -eq 2 ]
-for cache in root kernel stage0; do
-	n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
-	check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
-done
+check "the report's $listed CVE sources fetched, with their sha256" [ "$listed" -gt 0 -a "$hashed" -eq "$listed" -a "$clean" -eq "$listed" ]
+# A slot built from Wolfi and Alpine leaves apk's caches; a release, none.
+if victim_ls $state | grep -qx cache; then
+	for cache in root kernel stage0; do
+		n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
+		check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
+	done
+else
+	check "a release: its serial kept once slot b commits, not before" [ -z "$(victim_cat $state/serial)" ]
+fi
 victim_dump /var/lib/werewolf/b/root.erofs "$dir/b.erofs"
 root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]

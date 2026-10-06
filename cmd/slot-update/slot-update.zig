@@ -28,6 +28,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
+const broker = @import("broker");
 const cve = @import("cve.zig");
 const releases = @import("release.zig");
 
@@ -36,6 +37,8 @@ const state_dir = "/data/svc/autoupdate";
 const work_dir = state_dir ++ "/work";
 const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
+/// Where the daemon says it can update (daemon).
+const ready_path = "/run/werewolf/updater-ready";
 const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vulns-" ++
     "master.tar.gz";
 const max_read = 256 << 20;
@@ -97,6 +100,11 @@ fn failed(u: *Update, err: anyerror) void {
 /// of its own, freed when it ends, so months of checks use what one does.
 /// Only a machine booted from a slot can do any of this; elsewhere the
 /// service parks itself.
+///
+/// Once setup succeeds, so that it could update if asked, it says so in
+/// /run/werewolf/updater-ready, and slot-keep commits no slot until it
+/// has: a slot whose updater cannot start could never be updated again,
+/// so it must not be kept. /run starts empty each boot.
 fn daemon(io: Io) noreturn {
     // Speculative Store Bypass off for the daemon and every child, apk and
     // mkfs.erofs included: they read what came from the network. Where the
@@ -109,7 +117,12 @@ fn daemon(io: Io) noreturn {
         0,
     );
     switch (pass(io, .setup)) {
-        .ok => {},
+        .ok => Dir.cwd().writeFile(io, .{ .sub_path = ready_path, .data = "" }) catch |err| {
+            std.debug.print(
+                "autoupdate: cannot write {s}: {s}\n",
+                .{ ready_path, @errorName(err) },
+            );
+        },
         .not_a_slot => park(io, "not booted from a slot, staying down"),
         .failed => {},
     }
@@ -842,14 +855,12 @@ const Update = struct {
         if (u.cmd.grubenv.len == 0) return u.installEsp(build);
         const io = u.io;
         u.step = "install";
-        const v = work_dir ++ "/mnt/v";
-        const g = work_dir ++ "/mnt/g";
-        try Dir.cwd().createDirPath(io, v);
-        try Dir.cwd().createDirPath(io, g);
-        try u.mountUuid(uuidOf(u.cmd.victim), v, null);
-        defer _ = linux.umount2(v, 0);
-        try u.mountUuid(uuidOf(u.cmd.grubenv), g, null);
-        defer _ = linux.umount2(g, 0);
+        const victim = try u.held(.victim);
+        defer victim.release();
+        const grub = try u.held(.grub);
+        defer grub.release();
+        const v = victim.path();
+        const g = grub.path();
 
         const gpath = pathOf(u.cmd.grubenv);
         const kdir = try u.gpa.print(
@@ -908,21 +919,19 @@ const Update = struct {
     fn installEsp(u: *Update, build: []const u8) !void {
         const io = u.io;
         u.step = "install";
-        const v = work_dir ++ "/mnt/v";
-        const e = work_dir ++ "/mnt/e";
-        try Dir.cwd().createDirPath(io, v);
-        try Dir.cwd().createDirPath(io, e);
-        try u.mountUuid(uuidOf(u.cmd.victim), v, null);
-        defer _ = linux.umount2(v, 0);
-        try u.mountUuid(u.cmd.esp, e, "vfat");
-        defer _ = linux.umount2(e, 0);
+        const victim = try u.held(.victim);
+        defer victim.release();
+        const esp = try u.held(.esp);
+        defer esp.release();
+        const v = victim.path();
+        const e = esp.path();
 
         const rdir = try u.gpa.print(
             "{s}{s}/{s}",
             .{ v, pathOf(u.cmd.victim), u.other },
         );
         const kdir = try u.gpa.print("{s}/werewolf/{s}", .{ e, u.other });
-        const entries = e ++ "/loader/entries";
+        const entries = try u.gpa.print("{s}/loader/entries", .{e});
         try Dir.cwd().createDirPath(io, rdir);
         try Dir.cwd().createDirPath(io, kdir);
         try Dir.cwd().createDirPath(io, entries);
@@ -1134,36 +1143,15 @@ const Update = struct {
         for (strays.items) |stray| try d.deleteTree(u.io, stray);
     }
 
-    /// The filesystem with uuid on dir. The mount helper probes only Linux
-    /// filesystems, so FAT is named.
-    fn mountUuid(u: *Update, uuid: []const u8, dir: []const u8, kind: ?[]const u8) !void {
-        const dev = std.mem.trim(
-            u8,
-            try u.output(&.{
-                "blkid",
-                "-c",
-                "/dev/null",
-                "-l",
-                "-o",
-                "device",
-                "-t",
-                try u.gpa.print("UUID={s}", .{uuid}),
-            }),
-            "\n",
-        );
-        if (kind) |k| {
-            try u.run(&.{
-                "/usr/lib/werewolf/mount",
-                "-t",
-                k,
-                "-o",
-                "nosuid,nodev,noexec",
-                dev,
-                dir,
-            });
-        } else {
-            try u.run(&.{ "/usr/lib/werewolf/mount", "-o", "nosuid,nodev,noexec", dev, dir });
-        }
+    /// A filesystem the mount broker mounts read-write for as long as it
+    /// is held: fence's Landlock domain refuses this process mount(2)
+    /// itself (cmd/mount-broker).
+    fn held(u: *Update, word: broker.Word) !broker.Held {
+        return broker.ask(word) catch |err| {
+            const why = if (err == error.Refused) broker.refusal else @errorName(err);
+            u.detail = try u.gpa.print("mount-broker, {s}: {s}", .{ @tagName(word), why });
+            return err;
+        };
     }
 
     fn busyboxLinks(u: *Update, root: []const u8) !void {

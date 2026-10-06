@@ -2,10 +2,14 @@
 //!
 //! A new slot boots on probation, chosen for this boot only; the next reset
 //! goes back to the slot (or, after bite, the distro) that was good. Once
-//! every other service has stayed up for a minute, and /data is there,
-//! slot-keep makes this slot good, and leaves /run/werewolf/committed for
-//! stage0's deadman, which otherwise reboots the machine after ten minutes.
-//! Then it parks, as a service that has done its job.
+//! every other service has stayed up for a minute, /data is there, and,
+//! where the form has an updater, the updater has said it can update
+//! (/run/werewolf/updater-ready, which slot-update writes once its setup
+//! succeeds), slot-keep makes this slot good, and leaves
+//! /run/werewolf/committed for stage0's deadman, which otherwise reboots the
+//! machine after ten minutes. A slot whose updater cannot run is the one
+//! failure no later update could undo, so it is never kept. Then it parks,
+//! as a service that has done its job.
 //!
 //! Two loaders choose slots:
 //!
@@ -25,9 +29,10 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
+const broker = @import("broker");
 
-const mount_bin = "/usr/lib/werewolf/mount";
 const committed = "/run/werewolf/committed";
+const updater_ready = "/run/werewolf/updater-ready";
 const nodata = "/run/werewolf/nodata";
 const wait = 15;
 
@@ -42,29 +47,34 @@ pub fn main(init: std.process.Init) !void {
         .{if (cmd.slot.len > 0) cmd.slot else "a"},
     );
 
-    while (!healthy(io, gpa)) try io.sleep(.fromSeconds(wait), .awake);
+    var said = false;
+    while (true) : (try io.sleep(.fromSeconds(wait), .awake)) {
+        if (!healthy(io, gpa)) continue;
+        if (!exists(io, "/etc/sv/autoupdate") or exists(io, updater_ready)) break;
+        // Said once, and only when the updater is all that is missing.
+        if (!said) say(io, "the updater has not said it can update; not committing", .{});
+        said = true;
+    }
 
     if (grubenv.len > 0)
         try commitGrub(io, gpa, grubenv, entry)
     else
-        try commitEsp(io, gpa, cmd.esp, entry);
+        try commitEsp(io, gpa, entry);
     park(io);
 }
 
-/// systemd-boot: the EFI partition, mounted apart for as long as the rename
-/// takes. FAT is never probed, so it is named.
-fn commitEsp(io: Io, gpa: Allocator, esp: []const u8, entry: []const u8) !void {
-    const e = "/run/werewolf/esp";
-    if (!mountUuid(
-        io,
-        gpa,
-        esp,
-        e,
-        "vfat",
-    )) return say(io, "no EFI partition {s}; not committing", .{esp});
-    defer _ = linux.umount2(e, 0);
+/// systemd-boot: the EFI partition, which the mount broker mounts apart for
+/// as long as the rename takes.
+fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
+    const esp = broker.ask(.esp) catch |err|
+        return say(
+            io,
+            "no EFI partition: {s} {s}; not committing",
+            .{ @errorName(err), broker.refusal },
+        );
+    defer esp.release();
 
-    const d = e ++ "/loader/entries";
+    const d = try gpa.print("{s}/loader/entries", .{esp.path()});
     const good = try gpa.print("{s}/{s}.conf", .{ d, entry });
     if (exists(io, good)) {
         say(io, "{s} is already good", .{entry});
@@ -91,27 +101,23 @@ fn commitEsp(io: Io, gpa: Allocator, esp: []const u8, entry: []const u8) !void {
 }
 
 /// GRUB: the block is on the victim's root filesystem (Debian), its /boot
-/// partition (Ubuntu, Rocky) or its /boot subvolume (Fedora). Either way it
-/// is mounted here, apart and writable, for as long as the write takes:
-/// /victim, if it is the same filesystem, is read-only.
+/// partition (Ubuntu, Rocky) or its /boot subvolume (Fedora). Either way the
+/// mount broker mounts it apart and writable, for as long as the write
+/// takes: /victim, if it is the same filesystem, is read-only.
 fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void {
     const colon = std.mem.findScalar(
         u8,
         spec,
         ':',
     ) orelse return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
-    const uuid = spec[0..colon];
-    const b = "/run/werewolf/boot";
-    if (!mountUuid(
+    const boot = broker.ask(.grub) catch |err| return say(
         io,
-        gpa,
-        uuid,
-        b,
-        null,
-    )) return say(io, "no GRUB environment block at {s}; not committing", .{spec});
-    defer _ = linux.umount2(b, 0);
+        "no GRUB environment block at {s}: {s} {s}; not committing",
+        .{ spec, @errorName(err), broker.refusal },
+    );
+    defer boot.release();
 
-    const f = try gpa.print("{s}{s}", .{ b, spec[colon + 1 ..] });
+    const f = try gpa.print("{s}{s}", .{ boot.path(), spec[colon + 1 ..] });
     const block = readAll(io, gpa, f);
     if (block.len == 0) return say(io, "no GRUB environment block at {s}; not committing", .{spec});
     if (isSaved(block, entry)) {
@@ -208,20 +214,6 @@ fn parseCmdline(text: []const u8) Cmdline {
 }
 
 /// The filesystem with uuid on dir, through the mount helper.
-fn mountUuid(io: Io, gpa: Allocator, uuid: []const u8, dir: []const u8, kind: ?[]const u8) bool {
-    const tag = gpa.print("UUID={s}", .{uuid}) catch return false;
-    const res = std.process.run(
-        gpa,
-        io,
-        .{ .argv = &.{ "/usr/bin/blkid", "-c", "/dev/null", "-l", "-o", "device", "-t", tag } },
-    ) catch return false;
-    const dev = trim(res.stdout);
-    if (dev.len == 0) return false;
-    Dir.cwd().createDirPath(io, dir) catch return false;
-    if (kind) |k| return run(io, &.{ mount_bin, "-t", k, "-o", "nosuid,nodev,noexec", dev, dir });
-    return run(io, &.{ mount_bin, "-o", "nosuid,nodev,noexec", dev, dir });
-}
-
 fn markCommitted(io: Io) void {
     Dir.cwd().writeFile(
         io,
@@ -276,7 +268,8 @@ const testing = std.testing;
 test statusHealthy {
     try testing.expect(statusHealthy("run: /etc/sv/nginx: (pid 123) 75s\n"));
     try testing.expect(!statusHealthy("run: /etc/sv/nginx: (pid 123) 12s\n"));
-    try testing.expect(statusHealthy("down: /etc/sv/autoupdate: 30s, normally up\n"));
+    // Parked by design; the updater is held to more (updater_ready).
+    try testing.expect(statusHealthy("down: /etc/sv/power-button: 30s, normally up\n"));
     try testing.expect(!statusHealthy("down: /etc/sv/nginx: 1s, normally up, want up\n"));
     try testing.expect(!statusHealthy("run: /etc/sv/x: garbage\n"));
 }

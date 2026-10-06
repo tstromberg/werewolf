@@ -1,7 +1,7 @@
 #!/bin/sh
 # bite: turn this Debian, Ubuntu, Fedora or Rocky machine into werewolf.
 #
-#   bite [-n] [--reboot] [--config DIR] IMAGE_DIR    take it over
+#   bite [-n] [-i | --reboot] [--config DIR] IMAGE_DIR    take it over
 #   bite --undo                                      remove werewolf
 #
 # Run on the distro, as root. Once werewolf has committed, bite-cleanup, run
@@ -20,6 +20,7 @@
 # which becomes /data).
 #
 #   -n            check and show the plan; change nothing
+#   -i            then open a shell in the new root, and ask whether to reboot
 #   --reboot      reboot into werewolf now; otherwise at the next reboot
 #   --config DIR  more files for the config tar (data.key, ...)
 #   --undo        remove werewolf; the distro boots as it did before
@@ -29,10 +30,11 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 say() { echo "bite: $*"; }
 die() { echo "bite: $*" >&2; exit 1; }
 
-dry='' reboot='' extra='' undo='' image=''
+dry='' ask='' reboot='' extra='' undo='' image=''
 while [ $# -gt 0 ]; do
 	case "$1" in
 	-n) dry=1 ;;
+	-i) ask=1 ;;
 	--reboot) reboot=1 ;;
 	--config) extra=$2; shift ;;
 	--undo) undo=1 ;;
@@ -99,7 +101,7 @@ fi
 # --- preflight ------------------------------------------------------------------
 # Everything werewolf cannot find out for itself is found out here, and
 # anything it could not cope with stops bite before it changes a thing.
-[ -n "$image" ] || die "usage: bite [-n] [--reboot] [--config DIR] IMAGE_DIR"
+[ -n "$image" ] || die "usage: bite [-n] [-i | --reboot] [--config DIR] IMAGE_DIR"
 [ -f "$image/vmlinuz" ] && [ -f "$image/initramfs.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
 	die "$image is not a slot: it needs vmlinuz, initramfs.zst, root.erofs and cmdline (make slot)"
 # The image's kernel arguments, which go into GRUB's entries and the script
@@ -316,6 +318,44 @@ echo 'GRUB_DEFAULT=saved' >/etc/default/grub.d/99-werewolf.cfg
 "$g-reboot" "$entry-a"
 settle
 say "werewolf boots once at the next reboot; it becomes the default after a healthy minute"
+
+# -i: a look before the leap. The new root, read-only, under its own shell
+# if the form has one; then the choice to reboot into it. This is werewolf's
+# files on the distro's kernel, without werewolf's init or lockdown. A
+# kernel that cannot mount the image (erofs, LZMA) skips the look, not the
+# question.
+enter() {
+	r=$(mktemp -d)
+	if ! mount -t erofs -o ro,loop "$home/a/root.erofs" "$r" 2>/dev/null; then
+		say "this kernel cannot mount the new root; not entering it"
+		rmdir "$r"
+		return 0
+	fi
+	trap 'umount -R -l "$r"; rmdir "$r"' EXIT
+	mount -t proc proc "$r/proc"
+	mount --bind /dev "$r/dev"
+	mount -t tmpfs -o mode=0755 tmpfs "$r/run"
+	mount -t tmpfs -o mode=1777 tmpfs "$r/tmp"
+	if chroot "$r" /bin/sh -c : 2>/dev/null; then
+		say "entering the new root, read-only; exit to leave"
+		env -i TERM="${TERM:-vt100}" HOME=/ PATH=/usr/sbin:/usr/bin:/sbin:/bin PS1='werewolf# ' \
+			chroot "$r" /bin/sh -i || true
+	else
+		say "the new root has no shell to enter"
+	fi
+	umount -R -l "$r"
+	rmdir "$r"
+	trap - EXIT
+}
+if [ -n "$ask" ] && [ -z "$reboot" ] && [ -t 0 ]; then
+	enter
+	printf 'bite: reboot into werewolf now? [y/N] '
+	read -r yes || yes=
+	case "$yes" in
+	[yY]*) reboot=1 ;;
+	*) say "reboot when ready; bite --undo puts the distro back" ;;
+	esac
+fi
 if [ -n "$reboot" ]; then
 	say "rebooting"
 	reboot

@@ -98,6 +98,17 @@ pub fn main(init: std.process.Init) !void {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
+    // The mount broker (cmd/mount-broker), which mounts for the few that
+    // must once fence's Landlock domain forbids mounting to everyone in
+    // it: started here, so it is outside that domain, and after the seal,
+    // so it is under it like every other process. It never exits; without
+    // it nothing can keep this slot, so a machine whose broker would not
+    // start falls back to the slot that last worked.
+    if (std.process.spawn(m.io, .{
+        .argv = &.{"/usr/lib/werewolf/mount-broker"},
+        .environ_map = &m.env,
+        .stdin = .ignore,
+    })) |_| {} else |broker_err| say("no mount broker: {s}", .{@errorName(broker_err)});
     say("up in {s}s, handing over to runit", .{firstWord(m.read("/proc/uptime"))});
     const err = std.process.replace(
         m.io,

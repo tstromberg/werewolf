@@ -12,25 +12,22 @@
 //! kernel). It refuses until werewolf is GRUB's default: before that, a reset
 //! still boots the distro.
 //!
-//! The victim's filesystem is mounted apart and writable, since /victim is
-//! read-only, and with discard, so a thin cloud volume gets the freed blocks
-//! back. The deleting is done by a child that can do nothing else: no new
-//! privileges, only the capabilities that override file permissions, and
-//! Landlock allowing nothing on any filesystem but removing files and
-//! directories beneath the victim's mount, and running nothing at all. The
-//! parent, which mounted it, unmounts it after.
+//! GRUB's filesystem, then the victim's, are mounted apart and writable by
+//! the mount broker (lib/broker.zig), since /victim is read-only and nothing
+//! under runit may mount. The deleting is done by a child that can do
+//! nothing else: no new privileges, only the capabilities that override
+//! file permissions, and Landlock allowing nothing on any filesystem but
+//! removing files and directories beneath the victim's mount, and running
+//! nothing at all. Then the parent hands the freed blocks back to the disk
+//! (FITRIM), so a thin cloud volume no longer holds them, and releases the
+//! mount.
 
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
-
-const mount_bin = "/usr/lib/werewolf/mount";
-const blkid_bin = "/usr/bin/blkid";
-const base = "/run/werewolf/cleanup";
-const env_dir = base ++ "/env";
-const victim_dir = base ++ "/victim";
+const broker = @import("broker");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -47,47 +44,30 @@ pub fn main(init: std.process.Init) !void {
     )) orelse fail("this machine was not bitten", .{});
 
     // Only a committed machine may lose its fallback.
-    if (!mountUuid(
-        io,
-        gpa,
-        cmd.grubenv.uuid,
-        env_dir,
-    )) fail("cannot mount {s}", .{cmd.grubenv.uuid});
-    const block = readAll(
-        io,
-        gpa,
-        try gpa.print("{s}{s}", .{ env_dir, cmd.grubenv.path }),
-    );
-    _ = linux.umount2(env_dir, 0);
+    const grub = ask(.grub);
+    const block = readAll(io, gpa, try gpa.print("{s}{s}", .{ grub.path(), cmd.grubenv.path }));
+    grub.release();
     if (!isCommitted(block)) fail(
         "werewolf is not yet GRUB's default; the distro is still its fallback",
         .{},
     );
 
     const keep = try keeps(gpa, cmd);
-    if (!mountUuid(
-        io,
-        gpa,
-        cmd.victim.uuid,
-        victim_dir,
-    )) fail("cannot mount {s}", .{cmd.victim.uuid});
-    // Not every filesystem will turn discard on in a remount; it is a help,
-    // not a promise.
-    if (!dry and
-        !run(
-            io,
-            &.{ mount_bin, "-o", "remount,discard", victim_dir },
-        )) say("discard not available here", .{});
-
+    const victim = ask(.victim);
+    defer victim.release();
     const pid = linux.fork();
-    if (pid == 0) prune(io, gpa, keep, dry);
+    if (pid == 0) prune(io, gpa, victim.path(), keep, dry);
     var status: i32 = 0;
     _ = linux.waitpid(@intCast(pid), &status, 0);
     linux.sync();
-    _ = linux.umount2(victim_dir, 0);
     const s: u32 = @bitCast(status);
     if (!linux.W.IFEXITED(s) or
         linux.W.EXITSTATUS(s) != 0) fail("deleting stopped; see above", .{});
+    if (!dry and
+        !trim(victim.path())) say(
+        "trim not available here; the blocks are freed, not handed back",
+        .{},
+    );
     if (!dry) {
         say(
             "bite --undo is no longer possible; GRUB's menu still lists the distro, which no " ++
@@ -103,13 +83,13 @@ pub fn main(init: std.process.Init) !void {
 }
 
 /// The child: confined, then deleting everything not kept.
-fn prune(io: Io, gpa: Allocator, keep: []const []const u8, dry: bool) noreturn {
+fn prune(io: Io, gpa: Allocator, dir: []const u8, keep: []const []const u8, dry: bool) noreturn {
     const root = Dir.cwd().openDir(
         io,
-        victim_dir,
+        dir,
         .{ .iterate = true, .follow_symlinks = false },
     ) catch |err|
-        fail("{s}: {s}", .{ victim_dir, @errorName(err) });
+        fail("{s}: {s}", .{ dir, @errorName(err) });
     confine(root.handle) catch |err| fail("cannot confine the deleting: {s}", .{@errorName(err)});
     var n: usize = 0;
     walk(io, gpa, root, "", keep, dry, &n) catch |err| fail("{s}", .{@errorName(err)});
@@ -308,28 +288,41 @@ fn sys(rc: usize) !void {
 
 // --- the rest ----------------------------------------------------------------
 
-/// The filesystem with uuid on dir, through the mount helper, apart from
-/// /victim and writable.
-fn mountUuid(io: Io, gpa: Allocator, uuid: []const u8, dir: []const u8) bool {
-    const tag = gpa.print("UUID={s}", .{uuid}) catch return false;
-    const res = std.process.run(
-        gpa,
-        io,
-        .{ .argv = &.{ blkid_bin, "-c", "/dev/null", "-l", "-o", "device", "-t", tag } },
-    ) catch return false;
-    const dev = std.mem.trim(u8, res.stdout, " \r\n");
-    if (dev.len == 0) return false;
-    Dir.cwd().createDirPath(io, dir) catch return false;
-    return run(io, &.{ mount_bin, "-o", "nosuid,nodev,noexec", dev, dir });
+/// word's filesystem, from the mount broker. It refuses a filesystem
+/// another holds (slot-keep holds GRUB's a moment, at commit): once more,
+/// a second later.
+fn ask(word: broker.Word) broker.Held {
+    for (0..2) |i| {
+        if (broker.ask(word)) |h| return h else |err| {
+            if (i == 0 and err == error.Refused and
+                std.mem.startsWith(u8, broker.refusal, "no busy"))
+            {
+                _ = linux.nanosleep(&.{ .sec = 1, .nsec = 0 }, null);
+                continue;
+            }
+            fail("cannot mount {s}: {s} {s}", .{ @tagName(word), @errorName(err), broker.refusal });
+        }
+    }
+    unreachable;
 }
 
-fn run(io: Io, argv: []const []const u8) bool {
-    var child = std.process.spawn(io, .{ .argv = argv, .stdin = .ignore }) catch return false;
-    const term = child.wait(io) catch return false;
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
+/// The filesystem at dir hands its free blocks back to the disk (FITRIM):
+/// false where the filesystem or the disk cannot.
+fn trim(dir: []const u8) bool {
+    var buf: [128]u8 = undefined;
+    const z = std.mem.print(&buf, "{s}\x00", .{dir}) catch return false;
+    const rc = linux.open(
+        @ptrCast(z.ptr),
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    // struct fstrim_range: start, len, minlen; the whole filesystem.
+    var range = [3]u64{ 0, std.math.maxInt(u64), 0 };
+    const FITRIM = 0xc0185879; // _IOWR('X', 121, struct fstrim_range)
+    return linux.errno(linux.ioctl(fd, FITRIM, @intFromPtr(&range))) == .SUCCESS;
 }
 
 /// path, read to its end: procfs reports a size of 0, so not readFileAlloc.

@@ -6,6 +6,7 @@ make check          # boot every form, and a slot, and check each one
 make -j check       # the same, side by side
 make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
+make check-updater-release  # the same, to CI's latest signed release
 ```
 
 `make check` needs, beyond the build's tools, QEMU, `expect` and `mke2fs`
@@ -123,7 +124,14 @@ report names both CVE sources with a sha256 and no error; each apk cache
 kept its packages; slot b's root is root's, mode 0755; GRUB boots b next.
 It boots slot b, which must commit and the updater record that the update
 held; no seccomp filter may have killed anything in either boot. The
-consoles are in `build/<arch>/check/update/`.
+consoles are in `build/<arch>/check/update-autoupdate/`.
+
+`make check-updater-release` does the same with `prod-ssh`, a form CI
+publishes: its updater installs the latest signed release instead of
+building (docs/updater.md, Releases), and there are no apk caches to
+check. It tests the release as much as the updater: slot b is what CI
+published, so it passes only once CI has published from a tree whose
+slot boots and updates as this one does.
 
 It needs the network, so it is not part of `make check`. About 4 minutes
 with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.
@@ -172,6 +180,26 @@ Test the attack, not the setting: `ptrace_scope` reading 3 proves less than
 undo a setting and expects a refusal. And make a check fail before trusting it
 to pass: point it at a machine without the protection, or invert it.
 
+## Debugging a failure
+
+A FAIL says what the machine last reported doing (its last progress line),
+the first thing its kernel said was wrong (an RCU stall, a blocked task, a
+lockup, a panic), and the host: its kernel, QEMU, accelerator, CPUs and
+load. The same host line heads every console log. Check boots panic on a
+CPU stalled 20 s or a task blocked two minutes, so a hang fails in
+seconds, with the kernel's reason, rather than at a timeout. A machine that
+stops answering has every virtual CPU's state (`info cpus`, `info registers
+-a`) dumped into its log first: a CPU parked and never woken is the
+hypervisor's, not the guest's.
+
+```sh
+make check-one FORM=lima REPEAT=20          # how often does it fail?
+make check-one FORM=lima REPEAT=20 ACCEL=tcg   # without the hypervisor
+BOOT_TIMEOUT=20 make check-minimal          # see a hang sooner
+```
+
+`check-one` keeps each failing boot's console as `FORM-one-N.log`.
+
 ## CI
 
 [.github/workflows/check.yml](../.github/workflows/check.yml) runs `make
@@ -183,7 +211,7 @@ logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
 QEMU emulates there, and the job still takes under five minutes.
 
 [.github/workflows/update.yml](../.github/workflows/update.yml) runs `make
-check-update` nightly, and on demand, on x86_64 alone: the autoupdate form
+check-updater` nightly, and on demand, on x86_64 alone: the autoupdate form
 updates itself over the network, and the slot it builds must boot and
 commit. A workflow of its own, so a network flake fails it and nothing
 else; no push, pull request or release waits on it.

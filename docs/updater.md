@@ -44,6 +44,10 @@ service stays down.
 
 The slot keeps itself or not: `slot-keep` makes it GRUB's default once it is
 healthy, and anything else ends on the previous slot ([bite.md](bite.md#slots)).
+Healthy includes the updater: once its setup succeeds it writes
+`/run/werewolf/updater-ready`, and `slot-keep` keeps no slot without it, so
+a slot whose updater cannot run, the one failure no later update could
+undo, rolls back.
 After the reboot, `outcome` compares the running slot with `attempt` and
 logs `commit` or `rollback`. A rolled-back build's hash goes in `bad`.
 

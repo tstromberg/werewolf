@@ -173,24 +173,40 @@ if {$passed < 20} {
 
 # Run a command on the host while the console is read, so QEMU, whose
 # console would otherwise fill and stall it, keeps the machine answering.
-# Returns its exit status and output.
+# The command runs in the background, its output and exit status to files,
+# and only the console is watched: one process to expect from, so the end
+# of the command is never taken for the end of QEMU. Returns its exit
+# status and output.
 proc host {cmd} {
-	global spawn_id
-	set console $spawn_id
-	spawn -noecho {*}$cmd
-	set cmd_id $spawn_id
-	set out ""
-	expect {
-		-timeout 60
-		-i $cmd_id -re ".+" { append out $expect_out(0,string); exp_continue }
-		-i $cmd_id eof {}
-		-i $console -re ".+" { exp_continue }
-		-i $console eof { give_up "QEMU exited" }
-		timeout { catch {close -i $cmd_id} }
+	global log
+	set out $log.host
+	file delete -force $out $out.rc
+	set quoted ""
+	foreach a $cmd { append quoted " '" [string map {' '\''} $a] "'" }
+	exec sh -c "$quoted </dev/null >'$out' 2>&1; echo \$? >'$out.rc'" &
+	set deadline [expr {[clock seconds] + 60}]
+	while {![file exists $out.rc] && [clock seconds] < $deadline} {
+		expect {
+			-timeout 1
+			-re ".+" {}
+			timeout {}
+			eof { give_up "QEMU exited" }
+		}
 	}
-	lassign [wait -i $cmd_id] pid sid os_error status
-	set spawn_id $console
-	return [list $status $out]
+	set status 124
+	if {[file exists $out.rc]} {
+		set f [open $out.rc]
+		set status [string trim [read $f]]
+		close $f
+	}
+	set text ""
+	if {[file exists $out]} {
+		set f [open $out]
+		set text [read $f]
+		close $f
+	}
+	file delete -force $out $out.rc
+	return [list $status $text]
 }
 
 # A machine that serves ssh, from the host, as an operator would: root's key

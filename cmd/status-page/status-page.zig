@@ -60,16 +60,11 @@ const grype_args = [_][]const u8{
     "./victim/**",
 };
 
-/// What the console's lines start with: the program, as every werewolf
-/// program's do, and for the scan, its mode.
-var role: []const u8 = "status-page";
-
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     if (std.os.linux.getuid() == 0) return error.RunMeUnderLeash;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len == 2 and std.mem.eql(u8, args[1], "scan")) {
-        role = "status-page scan";
         return scanLoop(io);
     }
     if (args.len != 1) return error.Usage;
@@ -1696,8 +1691,8 @@ fn record(io: Io, fields: anytype) void {
     std.json.Stringify.value(fields, .{}, &rest.writer) catch return;
     const time = rfc3339(gpa, nowSecs(io)) catch return;
     const line = gpa.print(
-        "{s}: {{\"time\":\"{s}\",{s}\n",
-        .{ role, time, rest.written()[1..] },
+        "status-page: {{\"time\":\"{s}\",{s}\n",
+        .{ time, rest.written()[1..] },
     ) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }

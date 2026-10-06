@@ -7,7 +7,7 @@ form from `bitten` up includes.
 
 ## Setting it up
 
-Make the config tar as for a config disk ([README](../README.md#configuration)),
+Make the config tar as for a config disk ([README](../README.md#configure-it)),
 then hand it to the cloud in base64:
 
 ```sh

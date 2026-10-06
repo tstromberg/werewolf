@@ -21,6 +21,15 @@
 //!      or to port 0, as some clients do before connecting (busybox's nc).
 //!      A socket that then listens on the port the kernel picked hears only
 //!      what step 1 lets arrive: replies from ports the machine connects to.
+//!      And the files, for every process, root included: read anywhere;
+//!      run only what is beneath /usr, the image's; write only in /run,
+//!      /tmp, /var/tmp, /dev/shm and /data, and to terminals and the likes
+//!      of /dev/null, so never /proc, /sys or a disk itself; sockets and
+//!      FIFOs only in /run; device ioctls only on terminals. A domain that
+//!      handles files also refuses mount, umount and pivot_root to every
+//!      process in it: the few mounts werewolf makes after boot are made by
+//!      the mount broker, which init starts before it becomes fence, outside
+//!      the domain (docs/design/pledge.md).
 //!   3. CAP_NET_ADMIN, which could change the rules, and CAP_NET_RAW, whose
 //!      packet sockets are below them, leave the bounding set, so no process
 //!      after it, root included, holds either until the machine reboots;
@@ -177,7 +186,7 @@ fn apply() !Policy {
     step = "routes";
     try routeRules(p);
     step = "landlock";
-    try restrictBind(p);
+    try restrict(p);
     return p;
 }
 
@@ -649,7 +658,7 @@ const LANDLOCK_RULE_NET_PORT = 2;
 /// to the policy's ports and to port 0. Only BIND_TCP is handled: files,
 /// connections and everything else are left to the rules above and each
 /// service's jail.
-fn restrictBind(p: Policy) !void {
+fn restrict(p: Policy) !void {
     const abi = linux.syscall3(
         .landlock_create_ruleset,
         0,
@@ -661,7 +670,13 @@ fn restrictBind(p: Policy) !void {
         detail = "Landlock without network rules (ABI 4)";
         return error.LandlockTooOld;
     }
-    const attr = [2]u64{ 0, LANDLOCK_ACCESS_NET_BIND_TCP }; // handled_access_fs, handled_access_net
+    // Every filesystem right this kernel knows: TRUNCATE from ABI 3,
+    // IOCTL_DEV from 5.
+    const fs_all: u64 = if (abi >= 5) 0xffff else 0x7fff;
+    const attr = [2]u64{
+        fs_all,
+        LANDLOCK_ACCESS_NET_BIND_TCP,
+    }; // handled_access_fs, handled_access_net
     const ruleset: i32 = @intCast(try sys(
         linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), @sizeOf(@TypeOf(attr)), 0),
         "landlock ruleset",
@@ -683,10 +698,95 @@ fn restrictBind(p: Policy) !void {
             "landlock rule",
         );
     }
+    for (files) |f| {
+        const fd = linux.openat(linux.AT.FDCWD, f.path, .{ .PATH = true, .CLOEXEC = true }, 0);
+        // A place a form does not have (/data on a machine without one,
+        // /dev/ptmx without sshd) is simply not allowed.
+        if (linux.errno(fd) == .NOENT) continue;
+        const rule = PathBeneath{
+            .allowed_access = f.access & fs_all,
+            .parent_fd = @intCast(try sys(fd, "open a place for Landlock")),
+        };
+        defer _ = linux.close(rule.parent_fd);
+        _ = try sys(
+            linux.syscall4(
+                .landlock_add_rule,
+                @intCast(ruleset),
+                LANDLOCK_RULE_PATH_BENEATH,
+                @intFromPtr(&rule),
+                0,
+            ),
+            "landlock path rule",
+        );
+    }
     // As root, with CAP_SYS_ADMIN, no_new_privs is not needed, and is not
     // set: it would follow into every process on the machine.
     _ = try sys(linux.syscall2(.landlock_restrict_self, @intCast(ruleset), 0), "landlock restrict");
 }
+
+/// struct landlock_path_beneath_attr, packed as the kernel declares it.
+const PathBeneath = extern struct {
+    allowed_access: u64 align(4),
+    parent_fd: i32,
+
+    comptime {
+        std.debug.assert(@sizeOf(PathBeneath) == 12);
+    }
+};
+
+const LANDLOCK_RULE_PATH_BENEATH = 1;
+
+// Landlock's filesystem rights (linux/landlock.h).
+const fs_execute: u64 = 0x1;
+const fs_write_file: u64 = 0x2;
+const fs_read_file: u64 = 0x4;
+const fs_read_dir: u64 = 0x8;
+const fs_remove_dir: u64 = 0x10;
+const fs_remove_file: u64 = 0x20;
+const fs_make_char: u64 = 0x40;
+const fs_make_dir: u64 = 0x80;
+const fs_make_reg: u64 = 0x100;
+const fs_make_sock: u64 = 0x200;
+const fs_make_fifo: u64 = 0x400;
+const fs_make_block: u64 = 0x800;
+const fs_make_sym: u64 = 0x1000;
+const fs_refer: u64 = 0x2000;
+const fs_truncate: u64 = 0x4000;
+const fs_ioctl_dev: u64 = 0x8000;
+
+/// What a writable place allows: everything a directory's owner does with
+/// files and directories, and links between them.
+const fs_writable: u64 = fs_read_file | fs_write_file | fs_read_dir | fs_remove_dir |
+    fs_remove_file |
+    fs_make_dir | fs_make_reg | fs_make_sym | fs_refer | fs_truncate;
+const fs_device: u64 = fs_read_file | fs_write_file;
+const fs_terminal: u64 = fs_device | fs_ioctl_dev;
+
+/// The machine's files, as every process sees them. Rights are added up
+/// along the path, so / reading everything and /run writing everything
+/// beneath it make /run read-write.
+const files = [_]struct { path: [*:0]const u8, access: u64 }{
+    .{ .path = "/", .access = fs_read_file | fs_read_dir },
+    .{ .path = "/usr", .access = fs_execute },
+    // runit's FIFOs and the services' sockets.
+    .{ .path = "/run", .access = fs_writable | fs_make_sock | fs_make_fifo },
+    .{ .path = "/tmp", .access = fs_writable },
+    .{ .path = "/var/tmp", .access = fs_writable },
+    .{ .path = "/dev/shm", .access = fs_writable },
+    // nodev, so a device node made here, as apk may unpack one for a slot
+    // being built, opens nothing.
+    .{ .path = "/data", .access = fs_writable | fs_make_char | fs_make_block },
+    .{ .path = "/dev/null", .access = fs_device },
+    .{ .path = "/dev/zero", .access = fs_device },
+    .{ .path = "/dev/full", .access = fs_device },
+    .{ .path = "/dev/random", .access = fs_device },
+    .{ .path = "/dev/urandom", .access = fs_device },
+    .{ .path = "/dev/kmsg", .access = fs_device },
+    .{ .path = "/dev/console", .access = fs_terminal },
+    .{ .path = "/dev/tty", .access = fs_terminal },
+    .{ .path = "/dev/ptmx", .access = fs_terminal },
+    .{ .path = "/dev/pts", .access = fs_terminal },
+};
 
 // --- files, errors, logging ----------------------------------------------------
 

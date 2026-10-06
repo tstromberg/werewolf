@@ -6,8 +6,10 @@ boot a custom image. Once werewolf has committed, `bite-cleanup`, a Zig
 program in werewolf, deletes the distro.
 
 ```sh
+make bite-me                            # on the VM: build, take over, look, reboot
 make FORM=autoupdate slot               # build/<arch>/autoupdate/slot/
 sudo ./bite -n DIR                      # check, and show the plan
+sudo ./bite -i [--config X] DIR         # take over, look inside, ask to reboot
 sudo ./bite --reboot [--config X] DIR   # take over, and reboot into werewolf
 sudo ./bite --undo                      # from the distro: remove werewolf
 bite-cleanup [-n]                       # in werewolf, after commit: delete the distro
@@ -15,14 +17,28 @@ bite-cleanup [-n]                       # in werewolf, after commit: delete the 
 
 DIR holds a slot (*Slots*, below) of a form built on `bitten`.
 
+**`make bite-me` does it all on the VM.** Run in a clone of this
+repository, it builds `prod-ssh`'s slot, the form that can still be
+reached by ssh afterwards, and runs `bite -i` on it. `FORM=` picks another,
+and `config/`, if present, joins the config tar. The build needs apko, Zig
+and erofs-utils 1.9 or later; on Ubuntu, `sudo test/ci-setup` installs
+them.
+
+**`-i` looks before it leaps.** After installing, bite mounts the new
+root read-only, with the distro's kernel, and opens the image's own shell
+in it. Leaving the shell asks whether to reboot into werewolf now. A form
+without a shell skips the look, and so does a kernel that cannot mount
+the image. Either way the question is still asked.
+
 **Nothing is removed or repartitioned.** The slot's kernel and stage0 go in
 `/boot/werewolf/<slot>`; `root.erofs`, `config.tar` and `data/` go in
 `/var/lib/werewolf`.
 
 **werewolf boots once, then must prove itself.** bite adds GRUB entries
 `werewolf-a` and `werewolf-b` and boots `werewolf-a` once (`grub-reboot`).
-When every service has stayed up for a minute, the `slot-keep` service makes
-that slot GRUB's default; until then, a reset returns to the distro.
+When every service has stayed up for a minute, and the updater, where the
+form has one, has said it can update, the `slot-keep` service makes that
+slot GRUB's default; until then, a reset returns to the distro.
 
 **It refuses rather than strand a machine**: the wrong architecture, Secure
 Boot on (shim will not load Alpine's unsigned kernel), a NIC or disk that is

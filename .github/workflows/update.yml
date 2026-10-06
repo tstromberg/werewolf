@@ -37,5 +37,5 @@ jobs:
         with:
           name: update
           path: |
-            build/*/check/update/*.log
-            build/*/check/update/report.json
+            build/*/check/update-*/*.log
+            build/*/check/update-*/report.json

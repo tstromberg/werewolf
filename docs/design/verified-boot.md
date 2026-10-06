@@ -296,7 +296,9 @@ Each phase ships on its own.
    unlinks, and that `posture` reports it.
 3. **Signed releases**: CI builds reproducibly, boot-tests and signs (done,
    [docs/releases.md](../releases.md)); it adds the hash tree, and the
-   updater installs releases (under way). Until
+   updater installs releases: a form CI publishes follows them, its
+   manifest checked against the image key, its files against the
+   manifest (docs/updater.md); `make check-updater-release` tests it. Until
    phase 4, dm-verity catches corruption, not attackers. Removes building
    from the machine, and brings werewolf's own files into updates.
 4. **Our kernel and IPE**: the kernel above, the per-release policy, and
