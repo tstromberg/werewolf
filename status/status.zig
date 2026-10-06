@@ -119,7 +119,7 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     const events = try parseLog(gpa, log);
     f.last_check = lastCheck(events);
     f.patches = try patchHistory(gpa, try readReports(io, gpa), events, installed, max_patches);
-    f.posture = posture(io, gpa, uptime);
+    f.posture = posture(io, gpa);
 
     if (readAll(io, gpa, summary_path)) |text| {
         f.scan = std.json.parseFromSliceLeaky(Summary, gpa, text, .{ .ignore_unknown_fields = true }) catch null;
@@ -309,14 +309,14 @@ fn writeSystem(w: *Io.Writer, f: Facts) !void {
     if (f.slot.len > 0) {
         try row(w, "Boot slot", &.{ f.slot, " · the other slot holds the previous release, for rollback" });
     } else try row(w, "Boot slot", &.{"none: booted directly, so it cannot update itself"});
-    try row(w, "Shell", &.{if (f.shell) "/bin/sh: init and the updater still use it; nginx and this page do not" else "none"});
+    try row(w, "Shell", &.{if (f.shell) "/bin/sh: package scripts and the console and sshd services still use it; nginx and this page do not" else "none"});
     try row(w, "/data", &.{f.data});
     try w.writeAll("</tbody></table></div>\n");
 }
 
 fn writeSecurity(w: *Io.Writer, f: Facts) !void {
     try w.writeAll("<h2 id=\"security\">Security</h2>\n");
-    const p = f.posture orelse return w.writeAll("<p class=\"note\">Checked a minute after boot.</p>\n");
+    const p = f.posture orelse return w.writeAll("<p class=\"note\">Checked once the services have started.</p>\n");
     try w.print("<p class=\"note\">How this machine protects itself, tested at boot, ", .{});
     try writeTime(w, parseRfc3339(p.time) orelse 0, f.now_secs);
     try w.print(": {d} of {d} pass. The checks are <code>/usr/lib/werewolf/posture</code>, " ++
@@ -884,13 +884,10 @@ fn findString(v: std.json.Value, key: []const u8) ?[]const u8 {
 // --- security posture ---------------------------------------------------------
 //
 // /usr/lib/werewolf/posture (posture/posture.zig) checks how the machine
-// protects itself, and with --json prints it as JSON. It runs once per boot,
-// a minute in, when the services have started; /run keeps its answer until
-// the next boot.
+// protects itself. Its service runs it once per boot, when the other
+// services have settled, and keeps the JSON in /run until the next boot.
 
-const posture_bin = "/usr/lib/werewolf/posture";
 const posture_path = "/run/werewolf/posture.json";
-const posture_after = 60;
 
 /// What posture prints; see posture.zig.
 const Posture = struct {
@@ -909,19 +906,10 @@ const Check = struct {
     detail: []const u8 = "",
 };
 
-/// This boot's posture: from /run once it has run, else run now if the
-/// machine has been up long enough, else nothing yet.
-fn posture(io: Io, gpa: Allocator, uptime: u64) ?Posture {
-    if (readAll(io, gpa, posture_path)) |text| {
-        return std.json.parseFromSliceLeaky(Posture, gpa, text, .{ .ignore_unknown_fields = true }) catch null;
-    } else |_| {}
-    if (uptime < posture_after or !exists(io, posture_bin)) return null;
-    // posture exits 1 when a check fails; its JSON is the answer either way.
-    const res = std.process.run(gpa, io, .{ .argv = &.{ posture_bin, "--json" } }) catch return null;
-    const p = std.json.parseFromSliceLeaky(Posture, gpa, res.stdout, .{ .ignore_unknown_fields = true }) catch return null;
-    writeAtomic(io, gpa, posture_path, res.stdout) catch {};
-    record(io, .{ .event = "posture", .pass = p.summary.pass, .fail = p.summary.fail });
-    return p;
+/// This boot's posture, once the posture service has checked.
+fn posture(io: Io, gpa: Allocator) ?Posture {
+    const text = readAll(io, gpa, posture_path) catch return null;
+    return std.json.parseFromSliceLeaky(Posture, gpa, text, .{ .ignore_unknown_fields = true }) catch null;
 }
 
 // --- patches -----------------------------------------------------------------

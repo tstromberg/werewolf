@@ -3,9 +3,7 @@
 #
 #   KIND NAME COMMAND
 #
-# COMMAND is one line of sh, run in a subshell; exit 0 means it holds. Where
-# a refusal and an ordinary error look alike (reading /dev/mem fails either
-# way), it also asks for the kernel's own line saying it refused.
+# COMMAND is one line of sh, run in a subshell; exit 0 means it holds.
 #
 #   ok    must hold.
 #   gap   a known weakness (docs/security.md, "Not yet"), so must not hold
@@ -15,32 +13,23 @@
 # /etc/werewolf/listen; ssh's 22 is declared by sshd being installed. The
 # listeners check fails on anything else listening.
 #
-# The machine's settings are posture's to judge (posture/posture.zig): the
-# posture check runs it and fails on any result but the known failures it
-# lists, and on any of those that starts passing, as a gap does. Checks
-# here are what posture cannot do: attacks whose proof is the kernel's own
-# log line, attacks as an ordinary user, and the boot's own behaviour.
+# The machine's settings, and the attacks on them, are posture's to judge
+# (posture/posture.zig): test/boot judges every machine's posture line
+# against test/posture-known before these run. Checks here are the boot's
+# own behaviour, which posture cannot see.
 #
-# Checks run in order on one machine: the quiet log is checked before the
-# attacks that fill it. The console answers as runit starts, so the first
-# check waits for the services to settle (a service still starting, or one
-# that keeps crashing, reads "want up") before judging them. No tabs: the
-# console's shell would complete them.
+# Checks run in order on one machine. The first waits for the services to
+# settle (a service still starting, or one that keeps crashing, reads "want
+# up") before judging them. boot-quiet allows the two kernel lines that
+# posture's own attacks leave. No tabs: the console's shell would complete
+# them.
 
 ok  network          grep -q '10\.0\.2\.15' /proc/net/fib_trie && awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
 ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
-ok  boot-quiet       ! dmesg | grep -E 'Lockdown:|ptrace attach'
-ok  posture          known="network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell programs-services-no-shell"; got=$(/usr/lib/werewolf/posture --json | awk -F'"' '$2 == "id" { id = $4; n++ } $2 == "result" && $4 == "fail" { print id } END { if (n < 20) print "posture-did-not-run" }' | sort | tr '\n' ' '); [ "$got" = "$known " ] || { echo "posture fails: $got"; echo "known:         $known"; exit 1; }
-ok  proc-mem         ! cat /proc/1/mem >/dev/null && dmesg | grep -q 'ptrace attach of "runit"\[1\]'
-ok  dev-mem          ! head -c1 /dev/mem >/dev/null && dmesg | grep -q 'Lockdown: head: /dev/mem'
+ok  boot-quiet       ! dmesg | grep -E 'Lockdown:|ptrace attach' | grep -v -e 'Lockdown: run: /dev/mem' -e 'ptrace attach of "runit"\[1\] was attempted by "\./run"'
 ok  listeners        bad=$(netstat -ltun | awk 'NR > 2 { n = split($4, a, ":"); print a[n] }' | sort -u | grep -vx -e none $(command -v sshd >/dev/null && echo -e 22) $(sed 's/^/-e /' /etc/werewolf/listen 2>/dev/null)); [ -z "$bad" ] || { echo "listening, undeclared: $bad"; exit 1; }
 ok  sshd-config      ! command -v sshd || [ "$(sshd -T | grep -iE '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|usepam) ' | tr A-Z a-z | sort | tr '\n' ' ')" = 'kbdinteractiveauthentication no passwordauthentication no permitrootlogin prohibit-password usepam no ' ]
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
-ok  run-root-only    ! chpst -u nobody touch /run/.x; r=$?; rm -f /run/.x; exit $r
-ok  hidepid          ! chpst -u nobody test -e /proc/1
-ok  symlinks         chpst -u nobody ln -s /run/.st /tmp/.st && ! echo x >/tmp/.st; r=$?; rm -f /tmp/.st /run/.st; exit $r
-ok  hardlinks        echo s >/tmp/.root && chmod 600 /tmp/.root && ! chpst -u nobody ln /tmp/.root /tmp/.hl; r=$?; rm -f /tmp/.root /tmp/.hl; exit $r
-ok  regular-files    chpst -u nobody touch /tmp/.pr && ! echo x >>/tmp/.pr; r=$?; rm -f /tmp/.pr; exit $r
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts

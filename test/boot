@@ -2,10 +2,15 @@
 # boot NAME CHECKS LOG QEMU...
 #
 # Boot a werewolf image with the QEMU command given, which must set
-# werewolf.debug=1 (a root shell on the serial console) and -no-reboot (so a
-# panic ends the run). Run each check in CHECKS (see test/checks) as root on
-# that console, power the machine off, and exit 0 only if it booted, every
-# check came out as expected, and it shut down cleanly.
+# -no-reboot (so a panic ends the run) and -nographic (QEMU's monitor on the
+# console). Judge the machine's posture line, which its posture service
+# prints once the services settle: the checks that fail must be exactly
+# those in POSTURE_KNOWN (the form's line of test/posture-known), no more and
+# no fewer. Then, unless CHECKS is -, run each check in CHECKS (see
+# test/checks) as root on the console, which needs werewolf.debug=1 and a
+# shell, and power the machine off; with CHECKS -, press its power button
+# from QEMU's monitor. Exit 0 only if it booted, its posture and every check
+# came out as expected, and it shut down cleanly.
 #
 # Nothing waits a fixed time: each step waits for what it needs to see, up
 # to a limit. Each check's output is fenced by a marker its own echo cannot
@@ -43,16 +48,64 @@ proc give_up {what} {
 set timeout 300
 spawn -noecho {*}$qemu
 
+proc panicked {} {
+	global expect_out
+	# The rest of the panic, for the log, then say why.
+	set why $expect_out(0,string)
+	expect -timeout 2 eof {} timeout {}
+	give_up "boot: $why"
+}
+
 expect {
 	"handing over to runit" {}
-	-re {Kernel panic[^\r\n]*|stage0: [^\r\n]*panicking} {
-		# The rest of the panic, for the log, then say why.
-		set why $expect_out(0,string)
-		expect -timeout 2 eof {} timeout {}
-		give_up "boot: $why"
-	}
+	-re {Kernel panic[^\r\n]*|stage0: [^\r\n]*panicking} panicked
 	timeout { give_up "boot: no handover to runit in $timeout s" }
 	eof { give_up "boot: QEMU exited" }
+}
+
+# Before the shell, so no check's output can swallow the line.
+expect {
+	-re {posture: fail=([^ ]*) pass=([0-9]+) skip=([0-9]+) } {
+		set got $expect_out(1,string)
+		set passed $expect_out(2,string)
+	}
+	-re {Kernel panic[^\r\n]*} panicked
+	timeout { give_up "posture: no posture line in $timeout s" }
+	eof { give_up "posture: QEMU exited" }
+}
+set known [lsort -unique [regexp -all -inline {[^\s,]+} [expr {[info exists env(POSTURE_KNOWN)] ? $env(POSTURE_KNOWN) : ""}]]]
+set got [lsort -unique [split $got ,]]
+set new {}
+foreach id $got { if {$id ni $known} { lappend new $id } }
+set closed {}
+foreach id $known { if {$id ni $got} { lappend closed $id } }
+if {$passed < 20} {
+	say FAIL posture "only $passed checks passed; did posture run?"
+	incr failed
+} elseif {[llength $new] || [llength $closed]} {
+	set detail ""
+	if {[llength $new]} { append detail "failing, not known: [join $new]\n" }
+	if {[llength $closed]} { append detail "known, now passing: [join $closed]; take it out of test/posture-known, and update the docs\n" }
+	say FAIL posture $detail
+	incr failed
+} else {
+	say ok posture
+}
+
+if {$checks eq "-"} {
+	# No shell: the power button, through QEMU's monitor (Ctrl-A c).
+	send "\x01c"
+	send "system_powerdown\r"
+	expect {
+		-timeout 120
+		eof {}
+		timeout { give_up "shutdown: still running 120 s after the power button" }
+	}
+	lassign [wait] pid spawn_id os_error status
+	if {$status != 0} { give_up "shutdown: QEMU exited $status" }
+	if {$failed} { exit 1 }
+	say pass "all checks"
+	exit 0
 }
 
 # The console's getty starts a moment after runit; type until a shell answers.

@@ -1,6 +1,6 @@
 #!/bin/sh
 # ci-setup [apko]: install what `make test lint check` needs on Ubuntu
-# 24.04, as GitHub's runners have it, and open /dev/kvm to the user who runs
+# 26.04, as GitHub's runners have it, and open /dev/kvm to the user who runs
 # the checks. With `apko`, install apko alone, for jobs that only resolve
 # packages: no apt, no QEMU, no Zig. Run as root. Used by
 # .github/workflows/check.yml, release.yml and test/lima-ci.

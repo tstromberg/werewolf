@@ -62,6 +62,9 @@ LOADER_BIN := $(PROGRAMS)/modules/usr/lib/werewolf/modules
 # stage0's own /init (stage0/stage0.zig): the kernel's first process on every
 # machine. In stage0's initramfs, not the root's.
 STAGE0_BIN := $(PROGRAMS)/stage0/init
+# The root's /init (init/init.zig), which stage0 hands over to: PID 1 until
+# runit, in every form.
+INIT_BIN := $(PROGRAMS)/init/init
 NET_BIN := $(PROGRAMS)/net/usr/lib/werewolf/net
 FENCE_BIN := $(PROGRAMS)/fence/usr/lib/werewolf/fence
 POSTURE_BIN := $(PROGRAMS)/posture/usr/lib/werewolf/posture
@@ -72,7 +75,7 @@ SHELLFREE := stage reboot grubenv commit powerbtn
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter autoupdate,$(CHAIN)),$(PROGRAMS)/updater/usr/lib/werewolf/update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status/usr/lib/werewolf/status)
-OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)/ro $(PROGRAMS)/modules $(PROGRAMS)/net $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud) $(if $(UPDATER_BIN),$(PROGRAMS)/updater) \
+OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)/ro $(PROGRAMS)/init $(PROGRAMS)/modules $(PROGRAMS)/net $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud) $(if $(UPDATER_BIN),$(PROGRAMS)/updater) \
 	$(if $(STATUS_BIN),$(PROGRAMS)/status)
 
 # A form that includes bitten boots from a slot, which bite installs; the
@@ -236,7 +239,7 @@ $(OUT)/rootfs.tar: $(LOCK)/$(FORM).lock.json
 	$(call apko_build,forms/$(FORM).yaml,$<)
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -304,6 +307,9 @@ $(PROGRAMS)/status/usr/lib/werewolf/status: status/status.zig
 $(POSTURE_BIN): posture/posture.zig
 	$(zig_build)
 
+$(INIT_BIN): init/init.zig
+	$(zig_build)
+
 define shellfree_rule
 $(PROGRAMS)/$(1)/usr/lib/werewolf/$(1): $(1)/$(1).zig
 	$$(zig_build)
@@ -311,7 +317,7 @@ endef
 $(foreach p,$(SHELLFREE),$(eval $(call shellfree_rule,$(p))))
 
 test:
-	zig fmt --check dhcp cloud modules net fence mount posture updater status disk stage0 $(SHELLFREE)
+	zig fmt --check dhcp cloud modules net fence mount posture updater status disk stage0 init $(SHELLFREE)
 	zig test dhcp/dhcp.zig
 	zig test cloud/cloud.zig
 	zig test mount/mount.zig
@@ -323,6 +329,7 @@ test:
 	zig test posture/posture.zig
 	zig test disk/gpt.zig
 	zig test stage0/stage0.zig
+	zig test init/init.zig
 	for p in $(SHELLFREE); do zig test $$p/$$p.zig || exit 1; done
 
 # posture (docs/posture.md) assumes nothing of werewolf: run here, as root,
@@ -340,7 +347,7 @@ endif
 # update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -441,12 +448,16 @@ $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $
 # otherwise takes the builder's page size, 16 KiB on Apple silicon, which a
 # 4 KiB-page kernel will not mount. -T0 dates every file and the image
 # 1970, and the UUID is fixed (stage0 finds the image by path), so a rebuild
-# matches.
+# matches. erofs-utils before 1.9 (Ubuntu 24.04 has 1.7.1) take
+# -Eall-fragments from a tar and write every file empty, without an error,
+# so older ones are refused.
 EROFS_OPTS = -b 4096 -zlzma,level=109 -C1048576 -Eall-fragments,dedupe
 $(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar
 	mkdir -p $(dir $@)
 	$(TAR) -cf $(OUT)/root.tar --uid 0 --gid 0 --numeric-owner @$(OUT)/rootfs.tar @$(OUT)/overlay.tar
 	rm -f $@
+	@v=$$(mkfs.erofs --version 2>/dev/null | sed -n 's/.*erofs-utils) *//p'); case $$v in '' | 1.[0-8] | 1.[0-8].*) \
+		echo "mkfs.erofs $${v:-before 1.9}: 1.9 or later is needed; older ones write an image of empty files" >&2; exit 1 ;; esac
 	mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f $@ $(OUT)/root.tar >/dev/null
 	rm $(OUT)/root.tar
 
@@ -539,10 +550,13 @@ CHECK = $(BUILD)/check
 CHECK_QEMU = $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci \
 	-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
 # panic=1 with -no-reboot: a panic ends QEMU at once rather than hanging.
-CHECK_BOOT = console=$(CONSOLE) panic=1 werewolf.debug=1
+# werewolf.check=1 adds posture's attacks, which write to the kernel log.
+CHECK_BOOT = console=$(CONSOLE) panic=1 werewolf.debug=1 werewolf.check=1
+# The posture checks known to fail on the form, for test/boot to expect.
+export POSTURE_KNOWN = $(shell awk -v f=$(FORM) '$$1 == f { k = $$0 } $$1 == "*" { d = $$0 } END { $$0 = k != "" ? k : d; $$1 = ""; print }' test/posture-known)
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
-CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(PROGRAMS)/updater/usr/lib/werewolf/update
+CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(PROGRAMS)/updater/usr/lib/werewolf/update
 # bitten has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = bitten
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec

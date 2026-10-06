@@ -28,6 +28,14 @@ posture --json | jq '.summary'          # { "pass": 24, "fail": 9, "skip": 0 }
 posture --json | jq -r '.checks[] | select(.result == "fail") | .name'
 ```
 
+`--line` prints one line, for a console or a log: the ids that failed,
+sorted, between commas (`fail=` and nothing when none did), the counts,
+and then the whole report as JSON:
+
+```
+posture: fail=programs-no-shell,programs-services-no-shell pass=37 skip=0 {"tool":"posture",…}
+```
+
 Where it is safe, a check tests rather than reads:
 
 - **One-way settings** (lockdown, the module loader, ptrace, BPF) must read
@@ -55,6 +63,10 @@ lines in the kernel log on every boot.
 | files | read-only root, `nosuid`/`noexec`/`nodev` on every mount, no program runs from a writable place or a memfd, link and FIFO protections, `/victim` read-only |
 | network | only declared ports listen (`/etc/werewolf/listen`), no remote login, no forwarding, ICMP redirects neither taken nor sent, source routing refused, SYN cookies |
 
-The demo's page runs it once per boot and shows every check
+In werewolf it is also a service, in every form: once per boot, when every
+other service has run for 5 seconds or parked itself (or after 60 seconds,
+whichever is first), it checks, keeps the JSON in
+`/run/werewolf/posture.json`, prints its `--line` on the console, and parks
+itself. The demo's page shows every check from that file
 ([demo.md](demo.md)). For comparison, Ubuntu 24.04's cloud image passes 5 of
 40.

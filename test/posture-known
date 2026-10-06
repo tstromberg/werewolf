@@ -1,0 +1,13 @@
+# The posture checks known to fail on each form (make check; test/boot):
+#
+#   FORM ID...
+#
+# A form without a line takes the * line. Each is a weakness still open
+# (docs/security.md, "Not yet"): test/boot fails a machine on any other
+# failure, and on any of these that starts passing, so this list cannot
+# claim less, or more, than the machines hold.
+#
+# Every form still carries busybox (design/shell-free.md): its shell, awk,
+# wget, nc and telnetd, and run scripts.
+
+* network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell programs-services-no-shell

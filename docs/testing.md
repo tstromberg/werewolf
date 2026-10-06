@@ -133,7 +133,7 @@ installs apko alone, for jobs that only resolve packages. Each job keeps its
 logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
 QEMU emulates there, and the job still takes under five minutes.
 
-`make lima-ci` runs the same job here, in an Ubuntu 24.04 VM, `werewolf-ci`,
+`make lima-ci` runs the same job here, in an Ubuntu 26.04 VM, `werewolf-ci`,
 with nested virtualization for KVM. The tree is copied in fresh each run,
 without `config/` or `.git`; the VM, its tools and its build cache stay
 between runs. `limactl delete -f werewolf-ci` starts over.

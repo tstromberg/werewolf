@@ -51,14 +51,14 @@ init's last step is `exec /usr/lib/werewolf/fence /usr/bin/runit`. As root,
 fence reads the policy and then:
 
 1. **Sets policy-routing rules**, which the kernel consults on every route
-   lookup, in this order:
+   lookup, the same for IPv4 and IPv6, in this order:
 
    | Priority | Rule |
    | --- | --- |
    | 10 | sent here, to this machine or over loopback: deliver |
    | 100 | sent to 169.254.169.254 TCP 80 by a user named: route |
    | 101 | sent there by anyone else: refuse |
-   | 200 | sent as declared (user, protocol, port), or from a served port: route |
+   | 200 | sent as declared (user, protocol, port), or from a served port: route; if there is no route, unreachable |
    | 299 | anything else sent: refuse (EACCES) |
    | 300 | arriving to a served port, from a port the machine connects to, from the metadata server's 80, or ICMP: deliver |
    | 399 | anything else arriving: drop, unanswered |
@@ -66,14 +66,19 @@ fence reads the policy and then:
 
    Locally sent traffic is told apart by its lookups coming from `lo`.
    DHCP's packet socket and ARP are below IP routing and unaffected; so is
-   loopback.
-2. **Turns IPv6 off** on every interface. werewolf configures none, and an
-   interface's link-local address would be reachable with none of the
-   IPv4 rules.
-3. **Binds only declared ports.** It restricts itself with Landlock: a
+   loopback. For IPv6, ICMPv6 passes both ways for everyone (neighbour
+   discovery, router advertisements), and the metadata rules name AWS's
+   fd00:ec2::254.
+
+   Each rule that routes traffic out has a twin with the same match whose
+   action is unreachable. Without it, allowed traffic with no route (IPv6
+   on a network without IPv6) fell through to the refusal and got EACCES,
+   which clients take as final, where they would have tried the next
+   address after ENETUNREACH. That broke the updater on dual-stack names.
+2. **Binds only declared ports.** It restricts itself with Landlock: a
    ruleset handling only `BIND_TCP`, allowing the policy's ports and port
    0, which some clients bind before connecting (busybox's `nc`).
-4. **Becomes runit.** Landlock's restriction is inherited by every process
+3. **Becomes runit.** Landlock's restriction is inherited by every process
    that follows and cannot be lifted, by root or anyone, until reboot.
 
 It logs one line, and fails closed: a step that fails exits 1, init is
@@ -100,7 +105,7 @@ bound to port 0 by a process the seal has not stopped.
 
 ## Order with the seal
 
-The routing rules and the IPv6 setting can be changed by anyone holding
+The routing rules can be changed by anyone holding
 `CAP_NET_ADMIN`. The seal (lockdown.md) drops it from every process but the
 DHCP client's parent, whose seccomp filter allows no netlink. So the seal
 goes after fence's netlink step and before runit starts anything. Landlock
@@ -118,14 +123,14 @@ it is missing, on any Linux:
 | `network-outbound` | UDP connect() to 192.0.2.1:9, a route lookup that sends nothing: EACCES |
 | `network-metadata` | TCP connect() to 169.254.169.254:80, one second at most: EACCES |
 | `network-inbound` | the rules (RTM_GETRULE) drop arriving traffic before delivering it, and refuse undeclared sent traffic |
-| `network-ipv6-off` | disable_ipv6 reads 1 |
+| `network-ipv6` | IPv6 is off, or its rules (AF_INET6) drop and refuse as IPv4's do |
 
 Tested under QEMU, on aarch64:
 
 - On the cloud form: every `posture` check above passes, and the config
   still arrives through `_cloud`.
-- On the autoupdate form, as root: TCP 443 connects and DNS resolves, both
-  declared; TCP 80 is refused. As `nobody`: TCP 443 is refused. `nc -l -p
+- On the autoupdate form, as root: `apk` installs from Wolfi by name, TCP
+  443 connects and DNS resolves, all declared; TCP 80 is refused. As `nobody`: TCP 443 is refused. `nc -l -p
   4444` as root: `bind: Permission denied`.
 - On the sshd form: sshd serves port 22 from the host.
 

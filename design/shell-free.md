@@ -344,6 +344,13 @@ from `/bin/sh`.
 2. **init and stage0 in Zig.** commit, the power button, `reboot`,
    `poweroff` and `grubenv` with them. `runit-init` goes, and `minimal`
    stops carrying busybox; `sshd`, `lima` and `DEV=1` add it.
+
+   Done, as a first step: init (`init/init.zig`), stage0, commit,
+   `powerbtn`, `reboot` and `poweroff`, `grubenv`, and runit's three stages
+   (`stage`, one program that knows its stage by its name) are programs.
+   `runit-init` is still PID 1 after init, running the stage programs,
+   which is the alternative below; init owning PID 1, and busybox leaving
+   `minimal`, are what remains.
 3. **The checks, and `DEV=1`.**
 4. **`prod-nginx`**, as the worked example, booted by CI.
 

@@ -3,6 +3,8 @@
 //!
 //!     posture           check, print, and exit 1 if any check fails
 //!     posture --json    the same, as JSON, with why and how each was checked
+//!     posture --line    the same, as one line for a console or a log:
+//!                       posture: fail=ID,ID pass=N skip=N {JSON}
 //!     posture --noop    exit 0 at once: what the run-a-program checks run
 //!
 //! Each check says what it protects against in plain words, how it was
@@ -12,12 +14,19 @@
 //! and expects the copy not to start. It asks the kernel only when the
 //! setting already reads as locked, when the refusal is certain, so a check
 //! that fails never weakens the machine. Nothing touches another process or
-//! /dev/mem, which would write to the kernel log.
+//! /dev/mem, which would write to the kernel log, unless the kernel command
+//! line has werewolf.check=1: werewolf's tests set it, and posture then also
+//! attacks the machine and expects each attack refused (attacks, below).
 //!
 //! Run as root for the whole picture; as another user some checks read what
 //! they can and some are skipped. It assumes nothing of werewolf: run it on
 //! any Linux to compare. werewolf's own checks (its services, its declared
 //! ports, /victim) are skipped where those do not exist.
+//!
+//! In werewolf it is also a service, run once a boot as /etc/sv/posture/run:
+//! it waits for the other services to settle, so it sees the machine as it
+//! runs, checks, keeps the JSON in /run/werewolf/posture.json, says the
+//! --line on the console, and parks itself.
 
 const std = @import("std");
 const Io = std.Io;
@@ -30,22 +39,176 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
-    const json = args.len == 2 and std.mem.eql(u8, args[1], "--json");
-    if (args.len != 1 and !json) {
-        std.debug.print("usage: posture [--json]\n", .{});
+    if (std.mem.eql(u8, std.fs.path.basename(args[0]), "run")) return serve(io, gpa);
+    const format: Format = if (args.len == 1)
+        .text
+    else if (args.len == 2 and std.mem.eql(u8, args[1], "--json"))
+        .json
+    else if (args.len == 2 and std.mem.eql(u8, args[1], "--line"))
+        .line
+    else {
+        std.debug.print("usage: posture [--json | --line]\n", .{});
         std.process.exit(2);
-    }
+    };
 
     var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0 };
     try p.run();
     const report = try p.report();
     var out: Io.Writer.Allocating = .init(gpa);
-    if (json) {
-        try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
-        try out.writer.writeByte('\n');
-    } else try printText(&out.writer, report, columns());
+    switch (format) {
+        .text => try printText(&out.writer, report, columns()),
+        .json => {
+            try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
+            try out.writer.writeByte('\n');
+        },
+        .line => try printLine(gpa, &out.writer, report),
+    }
     try Io.File.stdout().writeStreamingAll(io, out.written());
     if (report.summary.fail > 0) std.process.exit(1);
+}
+
+const Format = enum { text, json, line };
+
+// --- attacking as nobody ---------------------------------------------------------
+
+const attack_run = "/run/.posture-attack";
+const attack_link = "/tmp/.posture-attack-link";
+const attack_secret = "/tmp/.posture-attack-secret";
+const attack_hard = "/tmp/.posture-attack-hard";
+const attack_file = "/tmp/.posture-attack-file";
+
+fn cleanAttacks() void {
+    for ([_][:0]const u8{ attack_run, attack_link, attack_secret, attack_hard, attack_file }) |path| _ = linux.unlink(path);
+}
+
+/// attack, run in a child as nobody: uid and gid 65534, no other groups, no
+/// new privileges. Whether it worked, or null if the child could not become
+/// nobody. The child makes only system calls: the parent may have threads.
+fn asNobody(attack: *const fn () bool) ?bool {
+    const rc = linux.fork();
+    if (linux.errno(rc) != .SUCCESS) return null;
+    if (rc == 0) {
+        const nobody = 65534;
+        const none = [0]linux.gid_t{};
+        if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS or
+            linux.errno(linux.setgroups(0, &none)) != .SUCCESS or
+            linux.errno(linux.setresgid(nobody, nobody, nobody)) != .SUCCESS or
+            linux.errno(linux.setresuid(nobody, nobody, nobody)) != .SUCCESS)
+            linux.exit_group(2);
+        linux.exit_group(if (attack()) 1 else 0);
+    }
+    var status: i32 = 0;
+    if (linux.errno(linux.wait4(@intCast(rc), &status, 0, null)) != .SUCCESS) return null;
+    const s: u32 = @bitCast(status);
+    if (!linux.W.IFEXITED(s)) return null;
+    return switch (linux.W.EXITSTATUS(s)) {
+        0 => false,
+        1 => true,
+        else => null,
+    };
+}
+
+fn seesInit() bool {
+    return linux.errno(linux.access("/proc/1", linux.F_OK)) == .SUCCESS;
+}
+
+fn writesRun() bool {
+    return created(attack_run, 0o600);
+}
+
+fn plantsLink() bool {
+    return linux.errno(linux.symlink(attack_run, attack_link)) == .SUCCESS;
+}
+
+fn linksSecret() bool {
+    return linux.errno(linux.link(attack_secret, attack_hard)) == .SUCCESS;
+}
+
+fn plantsFile() bool {
+    return created(attack_file, 0o644);
+}
+
+fn created(path: [:0]const u8, mode: linux.mode_t) bool {
+    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, mode);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    _ = linux.close(@intCast(rc));
+    return true;
+}
+
+/// Whether root can open path to write, creating it if it is not there.
+fn opensForWrite(path: [:0]const u8, append: bool) bool {
+    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = append, .CLOEXEC = true }, 0o600);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    _ = linux.close(@intCast(rc));
+    return true;
+}
+
+fn hasAll(haystack: []const u8, needles: []const []const u8) bool {
+    for (needles) |n| if (std.mem.indexOf(u8, haystack, n) == null) return false;
+    return true;
+}
+
+// --- as a service ----------------------------------------------------------------
+
+const service_json = "/run/werewolf/posture.json";
+/// How long every other service must have run, or been down by choice.
+const settle_s = 5;
+/// How long to wait for that before checking anyway.
+const settle_max_s = 60;
+
+fn serve(io: Io, gpa: Allocator) !void {
+    var waited: u32 = 0;
+    while (waited < settle_max_s and !settled(io, gpa)) : (waited += 1) io.sleep(.fromSeconds(1), .awake) catch {};
+
+    var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0 };
+    try p.run();
+    const report = try p.report();
+    var json: Io.Writer.Allocating = .init(gpa);
+    try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &json.writer);
+    try json.writer.writeByte('\n');
+    const tmp = service_json ++ ".tmp";
+    Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = json.written() }) catch |err| std.debug.print("posture: {s}: {s}\n", .{ tmp, @errorName(err) });
+    Dir.rename(Dir.cwd(), tmp, Dir.cwd(), service_json, io) catch |err| std.debug.print("posture: {s}: {s}\n", .{ service_json, @errorName(err) });
+
+    var line: Io.Writer.Allocating = .init(gpa);
+    try printLine(gpa, &line.writer, report);
+    try Io.File.stdout().writeStreamingAll(io, line.written());
+
+    // Down, so runsv does not run it again until the next boot.
+    const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
+    std.debug.print("posture: sv down: {s}\n", .{@errorName(err)});
+    std.process.exit(1);
+}
+
+/// Whether every service but this one has settled, by runsv's own account.
+fn settled(io: Io, gpa: Allocator) bool {
+    var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return true;
+    defer d.close(io);
+    const now = nowSecs(io);
+    var it = d.iterate();
+    while (it.next(io) catch return false) |e| {
+        if (std.mem.eql(u8, e.name, "posture")) continue;
+        var f = d.openFile(io, std.fmt.allocPrint(gpa, "{s}/supervise/status", .{e.name}) catch return false, .{}) catch return false;
+        defer f.close(io);
+        var status: [20]u8 = undefined;
+        const n = f.readPositionalAll(io, &status, 0) catch return false;
+        if (n != status.len or !serviceSettled(status, now)) return false;
+    }
+    return true;
+}
+
+/// Whether runsv's supervise/status says the service is down because it
+/// was asked to be, or has run for settle_s. The 20 bytes are the time of
+/// the last change, as TAI64N (seconds since 1970 plus 2^62 + 10), the pid,
+/// paused, want ('u' or 'd'), a term flag, and the state (0 down, 1 run, 2
+/// finish).
+fn serviceSettled(status: [20]u8, now: u64) bool {
+    const since = std.mem.readInt(u64, status[0..8], .big) -| ((1 << 62) + 10);
+    return switch (status[19]) {
+        0 => status[17] == 'd',
+        1 => now -| since >= settle_s,
+        else => false,
+    };
 }
 
 /// What posture prints.
@@ -126,6 +289,10 @@ const Posture = struct {
         try p.programs();
         try p.files();
         try p.network();
+        var args = std.mem.tokenizeAny(u8, p.read("/proc/cmdline"), " \n");
+        while (args.next()) |arg| {
+            if (p.root and std.mem.eql(u8, arg, "werewolf.check=1")) return p.attacks();
+        }
     }
 
     // --- kernel ------------------------------------------------------------
@@ -399,6 +566,140 @@ const Posture = struct {
         };
     }
 
+    // --- attacks, for werewolf's tests ---------------------------------------
+    //
+    // With werewolf.check=1 on the kernel command line, which only werewolf's
+    // tests set, posture also attacks the machine as an intruder would, and
+    // expects each attack refused. Two are meant to leave a line in the
+    // kernel's log: the check is that the kernel both refused and said so.
+    // The rest act as nobody, in a child, against files posture makes and
+    // removes in /tmp and /run.
+
+    fn attacks(p: *Posture) !void {
+        const pid = linux.getpid();
+        const comm = trim(p.read("/proc/self/comm"));
+
+        // Yama names both sides by their command lines.
+        const mem = p.refusedAndLogged("/proc/1/mem", &.{ "\"[1] was attempted by \"", try std.fmt.allocPrint(p.gpa, "\"[{d}]", .{pid}) });
+        try p.add(.{
+            .id = "processes-mem-attack",
+            .area = "processes",
+            .name = "Another process's memory refused",
+            .why = "Not even root can read or change a running program's memory, and the kernel logs every attempt.",
+            .how = "opening /proc/1/mem fails, and the kernel logs Yama's refusal",
+            .result = if (mem == .logged) .pass else .fail,
+            .detail = mem.detail(),
+        });
+        const dev = p.refusedAndLogged("/dev/mem", &.{try std.fmt.allocPrint(p.gpa, "Lockdown: {s}: /dev/mem,kmem,port is restricted", .{comm})});
+        try p.add(.{
+            .id = "kernel-mem-attack",
+            .area = "kernel",
+            .name = "Physical memory refused",
+            .why = "Not even root can read or write the machine's memory directly, and the kernel logs every attempt.",
+            .how = "opening /dev/mem fails, and the kernel logs lockdown's refusal",
+            .result = if (dev == .logged) .pass else .fail,
+            .detail = dev.detail(),
+        });
+
+        defer cleanAttacks();
+        cleanAttacks();
+        const sees = asNobody(seesInit);
+        try p.add(.{
+            .id = "processes-hidden-attack",
+            .area = "processes",
+            .name = "Processes hidden from another user",
+            .why = "A user, or an intruder running as one, cannot see what else runs.",
+            .how = "as nobody, /proc/1 does not exist",
+            .result = if (sees) |s| (if (s) .fail else .pass) else .skip,
+            .detail = if (sees) |s| (if (s) "nobody sees /proc/1" else "") else "could not become nobody",
+        });
+        const writes = asNobody(writesRun);
+        try p.add(.{
+            .id = "files-run-attack",
+            .area = "files",
+            .name = "/run closed to other users",
+            .why = "Another user cannot plant files where the services keep their state.",
+            .how = "as nobody, creating a file in /run fails",
+            .result = if (writes) |w| (if (w) .fail else .pass) else .skip,
+            .detail = if (writes) |w| (if (w) "nobody wrote to /run" else "") else "could not become nobody",
+        });
+
+        // Each trick needs one side planted by nobody and the other tried
+        // by root, or the other way around.
+        var got: std.ArrayList(u8) = .empty;
+        var missed = false;
+        if (asNobody(plantsLink)) |planted| {
+            if (planted and opensForWrite(attack_link, false)) try got.appendSlice(p.gpa, "root wrote through nobody's symlink");
+            missed = missed or !planted;
+        } else missed = true;
+        const secret = linux.open(attack_secret, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, 0o600);
+        if (linux.errno(secret) == .SUCCESS) {
+            _ = linux.close(@intCast(secret));
+            if (asNobody(linksSecret)) |linked| {
+                if (linked) try got.print(p.gpa, "{s}nobody hard-linked root's file", .{if (got.items.len > 0) ", " else ""});
+            } else missed = true;
+        } else missed = true;
+        if (asNobody(plantsFile)) |planted| {
+            if (planted and opensForWrite(attack_file, true)) try got.print(p.gpa, "{s}root opened nobody's file with O_CREAT", .{if (got.items.len > 0) ", " else ""});
+            missed = missed or !planted;
+        } else missed = true;
+        try p.add(.{
+            .id = "files-links-attack",
+            .area = "files",
+            .name = "Link and file tricks refused",
+            .why = "A file planted in a shared directory cannot make root write where it did not mean to, or reach root's files.",
+            .how = "in /tmp, root writing through nobody's symlink, nobody hard-linking root's 0600 file, and root opening nobody's file with O_CREAT each fail",
+            .result = if (got.items.len > 0) .fail else if (missed) .skip else .pass,
+            .detail = if (got.items.len > 0) got.items else if (missed) "could not set every trick up" else "",
+        });
+    }
+
+    const Refusal = enum {
+        logged,
+        silent,
+        allowed,
+
+        fn detail(r: Refusal) []const u8 {
+            return switch (r) {
+                .logged => "",
+                .silent => "refused, but the kernel logged nothing",
+                .allowed => "opened",
+            };
+        }
+    };
+
+    /// Whether opening path read-only is refused, with a line in the
+    /// kernel's log, written after this open, that has every one of needles.
+    fn refusedAndLogged(p: *Posture, path: [:0]const u8, needles: []const []const u8) Refusal {
+        const kmsg_rc = linux.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        const kmsg: ?i32 = if (linux.errno(kmsg_rc) == .SUCCESS) @intCast(kmsg_rc) else null;
+        defer if (kmsg) |fd| {
+            _ = linux.close(fd);
+        };
+        if (kmsg) |fd| _ = linux.lseek(fd, 0, linux.SEEK.END);
+
+        const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        if (linux.errno(rc) == .SUCCESS) {
+            _ = linux.close(@intCast(rc));
+            return .allowed;
+        }
+        const fd = kmsg orelse return .silent;
+        // One record a read. Yama logs as the open returns; allow a moment.
+        var record: [8192]u8 = undefined;
+        for (0..20) |_| {
+            while (true) {
+                const n = linux.read(fd, &record, record.len);
+                switch (linux.errno(n)) {
+                    .SUCCESS => if (hasAll(record[0..n], needles)) return .logged,
+                    .PIPE => {}, // records lost to newer ones: read on
+                    else => break,
+                }
+            }
+            p.io.sleep(.fromMilliseconds(100), .awake) catch {};
+        }
+        return .silent;
+    }
+
     // --- network -----------------------------------------------------------
 
     fn network(p: *Posture) !void {
@@ -665,6 +966,23 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     try w.print("\n{s} {d} passed   {s} {d} failed   {s} {d} skipped\n", .{
         Result.pass.mark(), r.summary.pass, Result.fail.mark(), r.summary.fail, Result.skip.mark(), r.summary.skip,
     });
+}
+
+/// One line: the ids that failed, sorted and between commas (none: fail=
+/// and a space), the counts, then the whole report as JSON. A harness can
+/// match the start and parse the rest.
+fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
+    var failed: std.ArrayList([]const u8) = .empty;
+    for (r.checks) |c| if (c.result == .fail) try failed.append(gpa, c.id);
+    std.mem.sort([]const u8, failed.items, {}, lessString);
+    try w.writeAll("posture: fail=");
+    for (failed.items, 0..) |id, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll(id);
+    }
+    try w.print(" pass={d} skip={d} ", .{ r.summary.pass, r.summary.skip });
+    try std.json.Stringify.value(r, .{}, w);
+    try w.writeByte('\n');
 }
 
 /// How much of detail, items between ", ", fits in max bytes: whole items,
@@ -1182,6 +1500,44 @@ test printText {
     out.clearRetainingCapacity();
     try printText(&out.writer, r, null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "/usr/bin/passwd, /usr/bin/mount\n") != null);
+}
+
+test printLine {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const checks = [_]Check{
+        .{ .id = "programs-shell", .area = "programs", .name = "No shell", .why = "", .how = "", .result = .fail },
+        .{ .id = "kernel-lockdown", .area = "kernel", .name = "Kernel lockdown", .why = "", .how = "", .result = .pass },
+        .{ .id = "kernel-io-uring", .area = "kernel", .name = "No io_uring", .why = "", .how = "", .result = .fail },
+    };
+    const r: Report = .{ .time = "t", .os = "o", .host = "h", .kernel = "k", .root = true, .summary = .{ .pass = 1, .fail = 2 }, .checks = &checks };
+    var out: Io.Writer.Allocating = .init(arena.allocator());
+    try printLine(arena.allocator(), &out.writer, r);
+    const line = out.written();
+    try testing.expect(std.mem.startsWith(u8, line, "posture: fail=kernel-io-uring,programs-shell pass=1 skip=0 {\"tool\":\"posture\","));
+    try testing.expectEqual(1, std.mem.count(u8, line, "\n"));
+    try testing.expect(std.mem.endsWith(u8, line, "}\n"));
+
+    const clean: Report = .{ .time = "t", .os = "o", .host = "h", .kernel = "k", .root = true, .summary = .{ .pass = 1 }, .checks = checks[1..2] };
+    out.clearRetainingCapacity();
+    try printLine(arena.allocator(), &out.writer, clean);
+    try testing.expect(std.mem.startsWith(u8, out.written(), "posture: fail= pass=1 skip=0 {"));
+}
+
+test serviceSettled {
+    const now = 1_760_000_000;
+    var st: [20]u8 = @splat(0);
+    std.mem.writeInt(u64, st[0..8], (1 << 62) + 10 + now - 30, .big);
+    st[17] = 'u';
+    st[19] = 1;
+    try testing.expect(serviceSettled(st, now)); // running 30 s
+    try testing.expect(!serviceSettled(st, now - 28)); // running 2 s
+    st[19] = 0;
+    try testing.expect(!serviceSettled(st, now)); // down, wanted up: restarting
+    st[17] = 'd';
+    try testing.expect(serviceSettled(st, now)); // parked
+    st[19] = 2;
+    try testing.expect(!serviceSettled(st, now)); // finishing
 }
 
 test fit {

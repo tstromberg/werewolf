@@ -1,6 +1,6 @@
 #!/bin/sh
 # lima-ci: run the CI job here, before pushing: test/ci-setup, then make
-# test, lint and check, in an Ubuntu 24.04 VM under Lima, as GitHub runs
+# test, lint and check, in an Ubuntu 26.04 VM under Lima, as GitHub runs
 # them. Nested virtualization (Apple M3 or later, macOS 15 or later) gives
 # the VM KVM; without it QEMU emulates, and the checks take minutes.
 #
@@ -13,7 +13,7 @@ vm=werewolf-ci
 repo=$(cd "$(dirname "$0")/.." && pwd)
 
 if ! limactl list --format '{{.Name}}' | grep -qx "$vm"; then
-	limactl create --name "$vm" --tty=false --cpus 8 --memory 8 --nested-virt template://ubuntu-24.04
+	limactl create --name "$vm" --tty=false --cpus 8 --memory 8 --nested-virt template://ubuntu-26.04
 fi
 [ "$(limactl list --format '{{.Status}}' "$vm")" = Running ] || limactl start "$vm"
 

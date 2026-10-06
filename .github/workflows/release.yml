@@ -27,7 +27,7 @@ concurrency:
 jobs:
   inputs:
     if: github.event.schedule != '41 4 * * *'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
       key: ${{ steps.inputs.outputs.key }}
@@ -62,7 +62,7 @@ jobs:
     if: needs.inputs.outputs.build == 'true'
     strategy:
       matrix:
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
         copy: [1, 2]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -96,7 +96,7 @@ jobs:
 
   publish:
     needs: [inputs, build]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     environment: release
     permissions:
@@ -144,7 +144,7 @@ jobs:
 
   resign:
     if: github.event.schedule == '41 4 * * *'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     environment: release
     permissions:

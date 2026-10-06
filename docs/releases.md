@@ -98,7 +98,7 @@ What makes the bytes repeat:
 - **Nothing records the build.** No time, host or path reaches an image.
 
 The toolchain must match too: a different zstd or mkfs.erofs can write
-other bytes from the same input. CI uses Ubuntu 24.04's zstd, bsdtar and
+other bytes from the same input. CI uses Ubuntu 26.04's zstd, bsdtar and
 erofs-utils, and the apko and Zig that [test/ci-setup](../test/ci-setup)
 pins. In practice the first release rebuilt on a Mac with Homebrew's
 tools came out the same, but for the updater: Homebrew's Zig names its own
