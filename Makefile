@@ -243,7 +243,7 @@ VMTYPE = qemu
 endif
 LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
-.PHONY: all image slot disk run lima lima-stop demo demo-stop ssh config forms test check check-form check-slot check-slot-boot check-nodata check-nodata-boot check-lease check-lease-boot check-unsigned check-unsigned-boot check-unsigned-slot check-metadata check-metadata-boots lima-ci lock inputs dist dist-form posture clean help
+.PHONY: all image slot disk run lima lima-stop demo demo-stop ssh config forms test check check-form check-slot check-update check-update-boot check-slot-boot check-nodata check-nodata-boot check-lease check-lease-boot check-unsigned check-unsigned-boot check-unsigned-slot check-metadata check-metadata-boots lima-ci lock inputs dist dist-form posture clean help
 
 all: image
 
@@ -843,6 +843,41 @@ check-slot-boot:
 	@grep -a -o 'saved_entry=werewolf-[ab]' $(CHECK)/victim.img | sort -u | grep -qx saved_entry=werewolf-a || \
 		{ echo "FAIL   slot               GRUB's default is not werewolf-a after commit"; exit 1; }
 	@echo "pass   slot               GRUB's default is werewolf-a"
+
+# A whole update, over the network from Wolfi and Alpine, so not part of
+# `check`, which needs none: the autoupdate form as it ships, on slot a of a
+# disk, its build record claiming the kernel release before its own,
+# updates itself to slot b, which must then boot and commit. The claim is
+# one more file laid over the slot's root, as a later tar entry replaces an
+# earlier one; the build itself is untouched. See test/update.
+CHECK_UPDATE = $(CHECK)/update
+check-update: | $(CHECK_SHARED)
+	@mkdir -p $(CHECK_UPDATE)
+	@$(MAKE) --no-print-directory FORM=autoupdate slot >$(CHECK_UPDATE)/build.log 2>&1 || \
+		{ tail -n 20 $(CHECK_UPDATE)/build.log; echo "FAIL   update build: see $(CHECK_UPDATE)/build.log"; exit 1; }
+	@$(MAKE) --no-print-directory FORM=autoupdate check-update-boot
+
+check-update-boot:
+	@rm -rf $(CHECK_UPDATE)/claim $(CHECK_UPDATE)/victim $(CHECK_UPDATE)/victim.img
+	@mkdir -p $(CHECK_UPDATE)/claim/usr/share/werewolf $(CHECK_UPDATE)/victim/var/lib/werewolf/a $(CHECK_UPDATE)/victim/boot/grub
+	@# linux-virt-6.18.55-r0 claims linux-virt-6.18.54-r0.
+	@awk -F. '{ split($$3, z, "-"); if (z[1] < 1) exit 1; printf "%s.%s.%d-%s\n", $$1, $$2, z[1] - 1, z[2] }' \
+		$(OUT)/meta/usr/share/werewolf/kernel >$(CHECK_UPDATE)/claim/usr/share/werewolf/kernel
+	@printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >$(CHECK_UPDATE)/root.mtree
+	@$(TAR) -C $(CHECK_UPDATE)/claim -cf $(CHECK_UPDATE)/claim.tar --uid 0 --gid 0 --numeric-owner usr/share/werewolf/kernel
+	@$(TAR) -cf $(CHECK_UPDATE)/root.tar --uid 0 --gid 0 --numeric-owner \
+		@$(CHECK_UPDATE)/root.mtree @$(OUT)/rootfs.tar @$(OUT)/overlay.tar @$(CHECK_UPDATE)/claim.tar
+	@mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
+		$(CHECK_UPDATE)/victim/var/lib/werewolf/a/root.erofs $(CHECK_UPDATE)/root.tar >/dev/null
+	@rm $(CHECK_UPDATE)/root.tar
+	@env=$(CHECK_UPDATE)/victim/boot/grub/grubenv; \
+		printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >$$env; \
+		head -c $$((1024 - $$(wc -c <$$env))) /dev/zero | tr '\0' '#' >>$$env
+	@mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK_UPDATE)/victim $(CHECK_UPDATE)/victim.img 3G
+	@cp $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(CHECK_UPDATE)/
+	@test/update $(CHECK_UPDATE) \
+		"console=$(CONSOLE) panic=1 $$(cat $(OUT)/slot/cmdline) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 init=/init werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
+		$(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
 
 # The CI job, here: in an Ubuntu VM like GitHub's runners, with nested
 # virtualization for KVM. See test/lima-ci.

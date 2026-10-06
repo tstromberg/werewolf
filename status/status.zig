@@ -1066,33 +1066,50 @@ var posture_kept = false;
 
 const Kept = struct { posture: ?Posture = null, scan: ?Summary = null, said: []const u8 };
 
+/// Whether the last pass could not use the database: a failure is said
+/// on the console once, as it begins, not once a minute.
+var db_failing = false;
+
 fn fromDatabase(io: Io, gpa: Allocator) Kept {
     if (!exists(io, pg_socket)) return .{ .said = "none; the page reads its files" };
-    var db = Pg.connect(gpa, "status") catch |err| return .{ .said = whyNot(gpa, err) };
+    const kept = readDatabase(io, gpa) catch |err| {
+        if (!db_failing) record(
+            io,
+            .{ .event = "error", .step = "database", .@"error" = @errorName(err) },
+        );
+        db_failing = true;
+        return .{ .said = whyNot(gpa, err) };
+    };
+    db_failing = false;
+    return kept;
+}
+
+fn readDatabase(io: Io, gpa: Allocator) !Kept {
+    var db = try Pg.connect(gpa, "status");
     defer db.close();
     if (!posture_kept) if (readAll(io, gpa, posture_path)) |text| {
         const boot = trimLine(readOr(io, gpa, "/proc/sys/kernel/random/boot_id", ""));
-        _ = db.query(
+        _ = try db.query(
             gpa,
-            "INSERT INTO status.posture (boot, report) VALUES ($1, $2::jsonb) ON CONFLICT " ++
-                "(boot) DO NOTHING",
+            "INSERT INTO status.posture (boot, report) VALUES ($1, $2::jsonb) " ++
+                "ON CONFLICT (boot) DO NOTHING",
             &.{ boot, text },
-        ) catch |err| return .{ .said = whyNot(gpa, err) };
+        );
         posture_kept = true;
+        record(io, .{ .event = "database", .kept = "posture" });
     } else |_| {};
-    const rows = db.query(gpa,
+    const rows = try db.query(gpa,
         \\SELECT current_setting('server_version'),
         \\       (SELECT report::text FROM status.posture ORDER BY at DESC LIMIT 1),
         \\       (SELECT summary::text FROM status.scans ORDER BY at DESC LIMIT 1),
         \\       (SELECT count(*) FROM status.posture)::text,
         \\       (SELECT count(*) FROM status.scans)::text
-    , &.{}) catch |err| return .{ .said = whyNot(gpa, err) };
-    if (rows.len != 1 or
-        rows[0].len != 5) return .{
-        .said = "unreachable: an answer of the wrong shape; the page reads its files",
-    };
+    , &.{});
+    if (rows.len != 1 or rows[0].len != 5) return error.UnexpectedAnswer;
     const r = rows[0];
     const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    const boots = r[3] orelse "0";
+    const scans = r[4] orelse "0";
     return .{
         .posture = if (r[1]) |t|
             std.json.parseFromSliceLeaky(Posture, gpa, t, opts) catch null
@@ -1102,16 +1119,14 @@ fn fromDatabase(io: Io, gpa: Allocator) Kept {
             std.json.parseFromSliceLeaky(Summary, gpa, t, opts) catch null
         else
             null,
-        .said = gpa.print("PostgreSQL {s}: the checks of {s} boot{s} and {s} " ++
-            "scan{s} kept, the newest shown here", .{
-            r[0] orelse "?", r[3] orelse "0",
-            plural(std.fmt.parseInt(
-                usize,
-                r[3] orelse "0",
-                10,
-            ) catch 0),
-            r[4] orelse "0", plural(std.fmt.parseInt(usize, r[4] orelse "0", 10) catch 0),
-        }) catch "PostgreSQL",
+        .said = try gpa.print("PostgreSQL {s}: the checks of {s} boot{s} and {s} scan{s} kept, " ++
+            "the newest shown here", .{
+            r[0] orelse "?",
+            boots,
+            plural(std.fmt.parseInt(usize, boots, 10) catch 0),
+            scans,
+            plural(std.fmt.parseInt(usize, scans, 10) catch 0),
+        }),
     };
 }
 
@@ -1139,7 +1154,8 @@ fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
         "INSERT INTO status.scans (summary) VALUES ($1::jsonb)",
         &.{summary},
     ) catch |err|
-        record(io, .{ .event = "error", .step = "database", .@"error" = @errorName(err) });
+        return record(io, .{ .event = "error", .step = "database", .@"error" = @errorName(err) });
+    record(io, .{ .event = "database", .kept = "scan" });
 }
 
 /// One connection to the server, as one role, to the postgres database.

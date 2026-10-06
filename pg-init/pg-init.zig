@@ -10,7 +10,7 @@
 //!      runs the server through popen(3) and system(3), which want a
 //!      shell; popen-shim.so (popen-shim/popen-shim.zig), preloaded into initdb alone,
 //!      runs its commands without one.
-//!   2. The image's SQL: each /etc/werewolf/postgres/*.sql, in name order,
+//!   2. The image's SQL: each /usr/share/werewolf-postgres/*.sql, in name order,
 //!      in the postgres database, as the superuser, through the server in
 //!      single-user mode, which runs while the real server is not yet up.
 //!      A form brings its roles, schemas and grants this way, written so
@@ -24,7 +24,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
 const data_dir = "/data/svc/postgres/data";
-const sql_dir = "/etc/werewolf/postgres";
+const sql_dir = "/usr/share/werewolf-postgres";
 const initdb = "/usr/bin/initdb";
 const postgres = "/usr/bin/postgres";
 const preload = "/usr/lib/werewolf/popen-shim.so";

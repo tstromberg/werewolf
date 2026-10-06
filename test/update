@@ -1,0 +1,104 @@
+#!/bin/sh
+# update DIR CMDLINE QEMU...
+#
+# A whole update, as a machine does one, from Wolfi and Alpine over the
+# network. DIR/victim.img holds slot a, whose build record claims a kernel
+# one release older than its own, and GRUB's environment; DIR/vmlinuz and
+# DIR/initramfs.zst boot it. QEMU... is the machine, with the network and
+# -no-reboot; CMDLINE is the kernel command line, but for werewolf.slot.
+#
+# First boot, slot a: it commits, the updater finds Alpine's kernel newer,
+# fetches and builds slot b, installs it, and reboots, which ends QEMU.
+# Then, from the disk: the report names both CVE sources with a sha256 and
+# no error; each apk cache kept its packages; slot b's root is root's, mode
+# 0755; GRUB will boot b once. Second boot, slot b: it must commit, and the
+# updater record that the update held. In neither boot may a seccomp
+# filter have killed anything. The consoles are DIR/update-1.log and
+# DIR/update-2.log.
+set -u
+[ $# -ge 3 ] || { echo "usage: update DIR CMDLINE QEMU..." >&2; exit 2; }
+dir=$1
+cmdline=$2
+shift 2
+failed=0
+say() { printf '%-6s %-18s %s\n' "$1" update "$2"; }
+check() { # check WHAT CONDITION...
+	what=$1
+	shift
+	if "$@"; then say pass "$what"; else say FAIL "$what"; failed=1; fi
+}
+
+# debugfs, from e2fsprogs, which Homebrew keeps off the PATH.
+debugfs=$(command -v debugfs)
+for d in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
+	[ -n "$debugfs" ] || [ ! -x "$d/debugfs" ] || debugfs=$d/debugfs
+done
+[ -n "$debugfs" ] || { say FAIL "no debugfs (e2fsprogs)"; exit 1; }
+victim_cat() { "$debugfs" -R "cat $1" "$dir/victim.img" 2>/dev/null; }
+victim_dump() { "$debugfs" -R "dump $1 $2" "$dir/victim.img" >/dev/null 2>&1; }
+victim_ls() { "$debugfs" -R "ls -p $1" "$dir/victim.img" 2>/dev/null | awk -F/ '$6 != "" && $6 != "." && $6 != ".." { print $6 }'; }
+
+# boot N SLOT KERNEL INITRD UNTIL LIMIT QEMU...: boot slot SLOT, its console
+# in update-N.log. Ends QEMU when a line matches UNTIL, an extended regex,
+# and fails after LIMIT seconds; QEMU ending by itself ends it too.
+boot() {
+	n=$1 slot=$2 kernel=$3 initrd=$4 until=$5 limit=$6
+	shift 6
+	log=$dir/update-$n.log
+	"$@" -kernel "$kernel" -initrd "$initrd" -append "$cmdline werewolf.slot=$slot" \
+		-drive "file=$dir/victim.img,format=raw,if=virtio" >"$log" 2>&1 </dev/null &
+	pid=$!
+	waited=0
+	while kill -0 $pid 2>/dev/null; do
+		if grep -a -q -E "$until" "$log"; then
+			kill $pid 2>/dev/null
+			wait $pid
+			return 0
+		fi
+		if [ $waited -ge "$limit" ]; then
+			kill $pid 2>/dev/null
+			wait $pid
+			say FAIL "boot $n: nothing after $limit seconds, see $log"
+			return 1
+		fi
+		sleep 2
+		waited=$((waited + 2))
+	done
+	wait $pid
+}
+
+# shellcheck disable=SC2329 # called through check
+absent() { ! grep -a -q "$1" "$2"; }
+event() { grep -a -o "autoupdate: .*\"event\":\"$2\".*" "$dir/update-$1.log" | head -1; }
+
+# First boot. An update reboots, ending QEMU; a check or an error leaves
+# the machine up, so it is ended then.
+boot 1 a "$dir/vmlinuz" "$dir/initramfs.zst" '"event":"(check|error)"' 3600 "$@" || exit 1
+if [ -z "$(event 1 update)" ]; then
+	say FAIL "no update: $(grep -a -o 'autoupdate: .*"event":"\(check\|error\)".*' "$dir/update-1.log" | head -1)"
+	exit 1
+fi
+say pass "slot a updated: $(event 1 update | sed 's/.*"kernel":"\([^"]*\)".*"cves":\([0-9]*\).*/\1, \2 CVEs/')"
+check "no seccomp kill in slot a" absent 'type=1326' "$dir/update-1.log"
+
+state=/var/lib/werewolf/data/svc/autoupdate
+victim_cat "$state/reports/$(victim_ls $state/reports | tail -1)" >"$dir/report.json"
+hashed=$(grep -c '"sha256": "[0-9a-f]\{64\}"' "$dir/report.json")
+clean=$(grep -c '"error": null' "$dir/report.json")
+check "the report's CVE sources fetched, with their sha256" [ "$hashed" -eq 2 -a "$clean" -eq 2 ]
+for cache in root kernel stage0; do
+	n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
+	check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
+done
+victim_dump /var/lib/werewolf/b/root.erofs "$dir/b.erofs"
+root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
+check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]
+check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.img"
+
+# Second boot: what the update built.
+victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
+victim_dump /boot/werewolf/b/initramfs.zst "$dir/b-initramfs.zst"
+boot 2 b "$dir/b-vmlinuz" "$dir/b-initramfs.zst" '"event":"(commit|rollback|error)"' 900 "$@" || exit 1
+check "slot b committed, and the update held" grep -a -q '"event":"commit","slot":"b"' "$dir/update-2.log"
+check "no seccomp kill in slot b" absent 'type=1326' "$dir/update-2.log"
+exit $failed
