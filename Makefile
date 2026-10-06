@@ -39,21 +39,17 @@ KERNEL_SHA256_x86_64 = a941c15fc5db26b6692fd0140fa0970da76cb12aadf3dc8306c419f21
 KERNEL_URL = https://dl-cdn.alpinelinux.org/alpine/$(ALPINE_BRANCH)/main/$(ARCH)/$(KERNEL_PKG)
 KERNEL_SHA256 = $(KERNEL_SHA256_$(ARCH))
 
-# Leaf modules the initramfs carries. modules.dep lists each one's
-# transitive dependencies; read back to front that is a load order, which
-# is what werewolf.modules holds and init insmods. No kmod index files
-# travel, so there is nothing describing the 880 modules that stay behind.
-# virtio-pci and virtio-console are built in. init closes the loader once
-# these are in.
-#
-# ext4 and dm-crypt are for /data. XTS and generic AES are built in, but the
-# hardware AES drivers are modules, and with the loader closed nothing pulls
-# them in on demand: without them dm-crypt still works, much slower, and
-# says nothing. evdev and button carry the ACPI power button to the powerbtn
-# service. Every form carries the same list.
-MODULES = virtio_net virtio_blk virtio_scsi sr_mod isofs ext4 dm-crypt evdev button $(MODULES_$(ARCH))
-MODULES_aarch64 = aes-ce-blk
-MODULES_x86_64 = aesni-intel
+# Leaf modules a form carries, from forms/<name>.modules along its include
+# chain, as its folders are. A line may start with an arch and a colon to
+# apply to that arch alone. modules.dep lists each leaf's transitive
+# dependencies; read back to front that is a load order, which is what
+# werewolf.modules holds and init insmods. No kmod index files travel, so
+# there is nothing describing the 880 modules that stay behind. init closes
+# the loader once these are in.
+MODULES := $(shell for f in $(CHAIN); do [ -f forms/$$f.modules ] && cat forms/$$f.modules; done | \
+	awk -v a=$(ARCH) '{ c = index($$0, sprintf("%c", 35)); if (c) $$0 = substr($$0, 1, c - 1) } \
+		$$1 ~ /:$$/ { if ($$1 != a ":") next; $$1 = "" } { print }')
+MODULE_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .modules,$(CHAIN))))
 
 BUILD = build/$(ARCH)
 OUT = $(BUILD)/$(FORM)
@@ -93,8 +89,8 @@ $(BUILD)/kernel/$(KERNEL_PKG):
 
 # The apk is three concatenated gzip streams (signature, control, data);
 # bsdtar reads straight through them.
-$(BUILD)/vmlinuz $(BUILD)/modules/.stamp: $(BUILD)/kernel/$(KERNEL_PKG) Makefile
-	rm -rf $(BUILD)/kernel/x $(BUILD)/modules
+$(BUILD)/vmlinuz: $(BUILD)/kernel/$(KERNEL_PKG)
+	rm -rf $(BUILD)/kernel/x
 	mkdir -p $(BUILD)/kernel/x
 	$(TAR) -xzf $< -C $(BUILD)/kernel/x
 	cp $(BUILD)/kernel/x/boot/vmlinuz-virt $(BUILD)/vmlinuz
@@ -109,9 +105,12 @@ $(BUILD)/vmlinuz $(BUILD)/modules/.stamp: $(BUILD)/kernel/$(KERNEL_PKG) Makefile
 		tail -c +$$((off + 1)) $(BUILD)/vmlinuz | head -c $$size | gunzip > $(BUILD)/vmlinuz.tmp && \
 		mv $(BUILD)/vmlinuz.tmp $(BUILD)/vmlinuz; \
 	fi
+
+$(OUT)/modules/.stamp: $(BUILD)/vmlinuz $(MODULE_LISTS) Makefile
+	rm -rf $(OUT)/modules
 	kver=$$(ls $(BUILD)/kernel/x/lib/modules); \
 	src=$(BUILD)/kernel/x/lib/modules/$$kver; \
-	dst=$(BUILD)/modules/usr/lib/modules/$$kver; \
+	dst=$(OUT)/modules/usr/lib/modules/$$kver; \
 	mkdir -p $$dst && : > $$dst/all && \
 	for m in $(MODULES); do \
 		paths=$$(awk -v m="$$m" '$$1 ~ ("/" m "\\.ko\\.gz:$$") { sub(":", "", $$1); for (i = NF; i >= 1; i--) print $$i }' $$src/modules.dep); \
@@ -120,7 +119,7 @@ $(BUILD)/vmlinuz $(BUILD)/modules/.stamp: $(BUILD)/kernel/$(KERNEL_PKG) Makefile
 	done && \
 	awk '!seen[$$0]++' $$dst/all > $$dst/werewolf.modules && rm $$dst/all && \
 	for p in $$(cat $$dst/werewolf.modules); do mkdir -p $$dst/$$(dirname $$p) && cp $$src/$$p $$dst/$$p; done
-	touch $(BUILD)/modules/.stamp
+	touch $@
 
 # apko resolves `include:` against its working directory, and
 # build-minirootfs has no flag to change that, so it runs inside forms/.
@@ -131,12 +130,12 @@ $(OUT)/rootfs.tar: $(addprefix forms/,$(addsuffix .yaml,$(CHAIN)))
 # One cpio: the apko rootfs as apko wrote it (ownership intact, never
 # extracted on the host), then each form's folder along the chain, then the
 # modules. Later entries win.
-$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(BUILD)/modules/.stamp $(shell find $(CHAIN_DIRS) -type f)
+$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(OUT)/modules/.stamp $(shell find $(CHAIN_DIRS) -type f)
 	@[ "$(firstword $(CHAIN))" = minimal ] || \
 		{ echo "form $(FORM) does not include minimal, which carries /init" >&2; exit 1; }
 	COPYFILE_DISABLE=1 $(TAR) --format newc --uid 0 --gid 0 --numeric-owner --exclude .DS_Store \
 		-cf $(OUT)/initramfs.cpio @$(OUT)/rootfs.tar \
-		$(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(BUILD)/modules .
+		$(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/modules .
 	zstd -19 -T0 -q -f -o $@ $(OUT)/initramfs.cpio
 	rm $(OUT)/initramfs.cpio
 	@echo "form $(FORM): $(CHAIN)"
@@ -212,3 +211,55 @@ clean:
 
 help:
 	@sed -n '2,12p' Makefile | cut -c3-
+
+# BEGIN: lint-install .
+# http://github.com/codeGROOVE-dev/lint-install
+
+.PHONY: lint
+lint: _lint
+
+LINT_ARCH := $(shell uname -m)
+LINT_OS := $(shell uname)
+LINT_OS_LOWER := $(shell echo $(LINT_OS) | tr '[:upper:]' '[:lower:]')
+LINT_ROOT := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
+
+# shellcheck and hadolint lack arm64 native binaries: rely on x86-64 emulation
+ifeq ($(LINT_OS),Darwin)
+	ifeq ($(LINT_ARCH),arm64)
+		LINT_ARCH=x86_64
+	endif
+endif
+
+LINTERS :=
+FIXERS :=
+
+YAMLLINT_VERSION ?= 1.37.1
+YAMLLINT_ROOT := $(LINT_ROOT)/out/linters/yamllint-$(YAMLLINT_VERSION)
+YAMLLINT_BIN := $(YAMLLINT_ROOT)/dist/bin/yamllint
+$(YAMLLINT_BIN):
+	mkdir -p $(LINT_ROOT)/out/linters
+	rm -rf $(LINT_ROOT)/out/linters/yamllint-*
+	curl -sSfL https://github.com/adrienverge/yamllint/archive/refs/tags/v$(YAMLLINT_VERSION).tar.gz | tar -C $(LINT_ROOT)/out/linters -zxf -
+	cd $(YAMLLINT_ROOT) && pip3 install --target dist . || pip install --target dist .
+
+LINTERS += yamllint-lint
+yamllint-lint: $(YAMLLINT_BIN)
+	PYTHONPATH=$(YAMLLINT_ROOT)/dist $(YAMLLINT_ROOT)/dist/bin/yamllint .
+
+.PHONY: _lint $(LINTERS)
+_lint:
+	@exit_code=0; \
+	for target in $(LINTERS); do \
+		$(MAKE) $$target || exit_code=1; \
+	done; \
+	exit $$exit_code
+
+.PHONY: fix $(FIXERS)
+fix:
+	@exit_code=0; \
+	for target in $(FIXERS); do \
+		$(MAKE) $$target || exit_code=1; \
+	done; \
+	exit $$exit_code
+
+# END: lint-install .

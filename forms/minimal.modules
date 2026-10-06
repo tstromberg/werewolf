@@ -1,0 +1,2 @@
+# Hypervisor devices, the NoCloud ISO, and the ACPI power button.
+virtio_net virtio_blk virtio_scsi sr_mod isofs evdev button

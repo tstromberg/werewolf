@@ -21,3 +21,11 @@ fi
 if [ -e /dev/mapper/data ]; then
 	cryptsetup close data && say "/data closed"
 fi
+# The victim's root filesystem, which /data was bound from.
+if mountpoint -q /victim; then
+	if umount /victim 2>/dev/null; then
+		say "/victim unmounted"
+	else
+		mount -o remount,ro /victim 2>/dev/null && say "/victim busy; remounted read-only"
+	fi
+fi

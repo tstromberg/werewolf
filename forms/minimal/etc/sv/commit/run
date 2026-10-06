@@ -1,0 +1,73 @@
+#!/bin/sh
+# A machine bite took over boots werewolf on probation: GRUB chose it for
+# this boot only, and the next reset goes back to the distro. Once every
+# running service has stayed up for a minute, make werewolf GRUB's default.
+# A machine that never gets healthy never commits, and a reset undoes it.
+#
+# werewolf.grubenv=UUID:PATH names GRUB's environment block: exactly 1024
+# bytes, a header line, name=value lines, then '#' to the end. GRUB itself
+# rewrites it in place, sector by sector, so this does too.
+exec 2>&1
+[ -s /run/werewolf/grubenv ] || exec sv down .
+env=$(cat /run/werewolf/grubenv)
+uuid=${env%%:*}
+path=${env#*:}
+entry=werewolf
+
+say() { echo "commit: $*"; }
+
+healthy() {
+	for s in /etc/sv/*; do
+		[ "$s" = /etc/sv/commit ] && continue
+		st=$(sv status "$s")
+		case "$st" in
+		run:*)
+			up=$(echo "$st" | sed -n 's/^run: [^ ]* (pid [0-9]*) \([0-9]*\)s.*/\1/p')
+			[ "${up:-0}" -ge 60 ] || return 1
+			;;
+		esac
+	done
+}
+until healthy; do
+	sleep 15
+done
+
+# The block is on the victim's root filesystem (Debian), its /boot partition
+# (Ubuntu, Rocky) or its /boot subvolume (Fedora). Either way it is mounted
+# here, apart and writable, for as long as the write takes: /victim, if it is
+# the same filesystem, is read-only.
+dev=$(blkid -c /dev/null -l -o device -t UUID="$uuid")
+dir=
+if [ -n "$dev" ]; then
+	mkdir -p /run/werewolf/boot
+	mount -o nosuid,nodev,noexec "$dev" /run/werewolf/boot && dir=/run/werewolf/boot
+fi
+f=$dir$path
+if [ -z "$dir" ] || [ ! -f "$f" ]; then
+	say "no GRUB environment block at $uuid:$path; not committing"
+	exec sv down .
+fi
+
+if grep -a -q "^saved_entry=$entry\$" "$f"; then
+	say "already GRUB's default"
+elif [ "$(wc -c <"$f")" -ne 1024 ] || ! head -n 1 "$f" | grep -q '^# GRUB Environment Block'; then
+	say "$f is not a GRUB environment block; not committing"
+else
+	new=/run/werewolf/grubenv.new
+	{
+		echo '# GRUB Environment Block'
+		grep -a -v -E '^(#|saved_entry=)' "$f"
+		echo "saved_entry=$entry"
+	} >"$new"
+	n=$(wc -c <"$new")
+	if [ "$n" -le 1024 ]; then
+		head -c $((1024 - n)) /dev/zero | tr '\0' '#' >>"$new"
+		dd if="$new" of="$f" conv=notrunc 2>/dev/null && sync &&
+			say "healthy for a minute; werewolf is now GRUB's default"
+	else
+		say "environment block would overflow; not committing"
+	fi
+	rm -f "$new"
+fi
+[ "$dir" = /run/werewolf/boot ] && umount /run/werewolf/boot
+exec sv down .

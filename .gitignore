@@ -1,2 +1,5 @@
 build/
 config/
+
+# added by lint-install
+out/

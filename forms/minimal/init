@@ -14,13 +14,20 @@
 #
 # Everything it reads comes from two places, in this order:
 #   kernel command line   werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
+#                         werewolf.mac=ADDR (which NIC, when there are several)
 #                         werewolf.data=DEV (the disk /data may format, once)
 #                         werewolf.debug=1 (root shell on the console)
-#   config                a tar written raw to any block device, extracted to
-#                         /run/config for the services to read (hostname and
-#                         authorized_keys are applied here); or a NoCloud
-#                         `cidata` volume, from which only the first user and
-#                         its ssh keys are taken, which is what Lima provides.
+#                         and, on a machine `bite` took over:
+#                         werewolf.victim=UUID:DIR (the victim's root filesystem,
+#                           and the directory in it holding config.tar, data/)
+#                         werewolf.grubenv=UUID:PATH (GRUB's environment block,
+#                           which the commit service writes)
+#   config                a tar written raw to any block device, or config.tar
+#                         in the victim's directory, extracted to /run/config for
+#                         the services to read (hostname and authorized_keys
+#                         are applied here); or a NoCloud `cidata` volume, from
+#                         which only the first user and its ssh keys are taken,
+#                         which is what Lima provides.
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -45,14 +52,17 @@ chmod 1777 /dev/shm /tmp
 mkdir -p -m 0700 /run/config
 
 # --- kernel command line ------------------------------------------------------
-ip= gw= dns= data= debug=
+ip= gw= dns= mac= data= debug= victim= grubenv=
 for arg in $(cat /proc/cmdline); do
 	case "$arg" in
 	werewolf.ip=*) ip=${arg#*=} ;;
 	werewolf.gw=*) gw=${arg#*=} ;;
 	werewolf.dns=*) dns=${arg#*=} ;;
+	werewolf.mac=*) mac=${arg#*=} ;;
 	werewolf.data=*) data=${arg#*=} ;;
 	werewolf.debug=*) debug=${arg#*=} ;;
+	werewolf.victim=*) victim=${arg#*=} ;;
+	werewolf.grubenv=*) grubenv=${arg#*=} ;;
 	esac
 done
 
@@ -76,6 +86,12 @@ sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 \
 # route need only libc.
 ifconfig lo up
 nic=$(ls /sys/class/net | grep -v '^lo$' | head -n 1)
+if [ -n "$mac" ]; then
+	nic=
+	for n in /sys/class/net/*; do
+		[ "$(cat "$n/address")" = "$mac" ] && nic=${n##*/}
+	done
+fi
 if [ -n "$nic" ] && [ -n "$ip" ]; then
 	ifconfig "$nic" "$ip" up
 	[ -n "$gw" ] && route add default gw "$gw"
@@ -83,6 +99,23 @@ if [ -n "$nic" ] && [ -n "$ip" ]; then
 	say "$nic $ip via ${gw:-none} dns ${dns:-none}"
 else
 	say "no network: nic=${nic:-none} ip=${ip:-unset}"
+fi
+
+# --- victim -------------------------------------------------------------------
+# On a machine bite took over, the victim's root filesystem is still there,
+# and holds what bite left for us in one directory: config.tar, and data/ for
+# /data. Finding it by UUID and mounting it nosuid,nodev,noexec take
+# util-linux blkid and mount, which the bitten form carries.
+victimdir=
+if [ -n "$victim" ]; then
+	victimdev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}" 2>/dev/null)
+	mkdir -p /victim
+	if [ -n "$victimdev" ] && mount -o nosuid,nodev,noexec "$victimdev" /victim; then
+		victimdir=/victim${victim#*:}
+		say "victim's filesystem $victimdev on /victim, werewolf in $victimdir"
+	else
+		say "victim's filesystem ${victim%%:*} not found"
+	fi
 fi
 
 # --- config -------------------------------------------------------------------
@@ -94,6 +127,10 @@ keys() { # keys USER HOME < authorized_keys
 	chmod 0600 "$2/.ssh/authorized_keys"
 	chown -R "$1:$1" "$2/.ssh"
 }
+if [ -n "$victimdir" ] && [ -f "$victimdir/config.tar" ]; then
+	say "config tar in $victimdir"
+	tar -xf "$victimdir/config.tar" -C /run/config
+fi
 for sys in /sys/class/block/*; do
 	dev=/dev/${sys##*/}
 	[ -b "$dev" ] || continue
@@ -219,7 +256,23 @@ data_home() {
 	mount -t ext4 -o noatime,nosuid,nodev,noexec "$fs" /data
 }
 
-if command -v mke2fs >/dev/null && data_home; then
+# On a bitten machine /data is a directory on the victim's filesystem, which the
+# distro made and the kernel repairs as it mounts it: nothing to format,
+# check or label. It takes precedence over any disk of our own.
+if [ -n "$victimdir" ]; then
+	mkdir -p "$victimdir/data"
+	if mount --bind "$victimdir/data" /data &&
+		mount -o remount,bind,noatime,nosuid,nodev,noexec /data; then
+		say "/data is $victimdir/data"
+	else
+		say "cannot bind $victimdir/data; /data stays in RAM"
+		mount -t tmpfs -o size=25%,mode=0755 tmpfs /data
+	fi
+	# From here /victim is for looking at. Read-only is a property of the
+	# mount, not the filesystem, so /data, bound from it, stays writable.
+	# What must write there (commit; bite --cleanup) mounts it again, apart.
+	mount -o remount,bind,ro,nosuid,nodev,noexec /victim && say "/victim is read-only"
+elif command -v mke2fs >/dev/null && data_home; then
 	chmod 0755 /data
 	say "/data is $want on $src"
 else
@@ -242,6 +295,8 @@ rm -f /run/config/data.key /run/data.key
 # init knows only minimal's own services. Each form's services prepare
 # themselves in their run scripts, so init never has to learn about them.
 [ "$debug" = 1 ] || touch /etc/sv/console/down
+mkdir -p /run/werewolf
+[ -n "$grubenv" ] && echo "$grubenv" >/run/werewolf/grubenv
 
 say "up in $(cut -d' ' -f1 /proc/uptime)s, handing over to runit"
 exec runit

@@ -1,0 +1,3 @@
+# disk's and bitten's, since lima includes neither: Lima's VM is where bite
+# is tested.
+ext4 xfs btrfs crc32c-cryptoapi
