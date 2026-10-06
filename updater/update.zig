@@ -35,7 +35,8 @@ const state_dir = "/data/svc/autoupdate";
 const work_dir = state_dir ++ "/work";
 const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
-const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vulns-master.tar.gz";
+const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vulns-" ++
+    "master.tar.gz";
 const max_read = 256 << 20;
 
 /// _update, the account the children that fetch run as
@@ -79,7 +80,12 @@ fn fatal(u: *Update, err: anyerror) noreturn {
 
 /// An error, logged, and the work directory cleared.
 fn failed(u: *Update, err: anyerror) void {
-    u.record(.{ .event = "error", .step = u.step, .@"error" = @errorName(err), .detail = u.detail }) catch {};
+    u.record(.{
+        .event = "error",
+        .step = u.step,
+        .@"error" = @errorName(err),
+        .detail = u.detail,
+    }) catch {};
     Dir.cwd().deleteTree(u.io, work_dir) catch {};
 }
 
@@ -94,7 +100,13 @@ fn daemon(io: Io) noreturn {
     // Speculative Store Bypass off for the daemon and every child, apk and
     // mkfs.erofs included: they read what came from the network. Where the
     // CPU offers no control (EINVAL, ENXIO, EPERM), it runs as it would.
-    _ = linux.prctl(@backingInt(linux.PR.SET_SPECULATION_CTRL), linux.PR.SPEC_STORE_BYPASS, linux.PR.SPEC_FORCE_DISABLE, 0, 0);
+    _ = linux.prctl(
+        @backingInt(linux.PR.SET_SPECULATION_CTRL),
+        linux.PR.SPEC_STORE_BYPASS,
+        linux.PR.SPEC_FORCE_DISABLE,
+        0,
+        0,
+    );
     switch (pass(io, .setup)) {
         .ok => {},
         .not_a_slot => park(io, "not booted from a slot, staying down"),
@@ -174,7 +186,8 @@ const Update = struct {
         u.cmd = parseCmdline(try u.read("/proc/cmdline"));
         // A slot boots from a distro's GRUB (bite: werewolf.grubenv) or from
         // werewolf's own disk under systemd-boot (werewolf.esp).
-        if (u.cmd.slot.len == 0 or u.cmd.victim.len == 0 or (u.cmd.grubenv.len == 0 and u.cmd.esp.len == 0))
+        if (u.cmd.slot.len == 0 or u.cmd.victim.len == 0 or (u.cmd.grubenv.len == 0 and
+            u.cmd.esp.len == 0))
             return error.NotBootedFromASlot;
         u.other = if (std.mem.eql(u8, u.cmd.slot, "b")) "a" else "b";
     }
@@ -193,10 +206,21 @@ const Update = struct {
         const build = it.next() orelse return error.BadAttemptFile;
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
         if (std.mem.eql(u8, tried, u.cmd.slot)) {
-            try u.record(.{ .event = "commit", .slot = u.cmd.slot, .build = build, .release = release });
+            try u.record(.{
+                .event = "commit",
+                .slot = u.cmd.slot,
+                .build = build,
+                .release = release,
+            });
         } else {
-            try u.append(state_dir ++ "/bad", try std.fmt.allocPrint(u.gpa, "{s}\n", .{build}));
-            try u.record(.{ .event = "rollback", .failed = tried, .running = u.cmd.slot, .build = build, .release = release });
+            try u.append(state_dir ++ "/bad", try u.gpa.print("{s}\n", .{build}));
+            try u.record(.{
+                .event = "rollback",
+                .failed = tried,
+                .running = u.cmd.slot,
+                .build = build,
+                .release = release,
+            });
         }
         try Dir.cwd().deleteFile(u.io, state_dir ++ "/attempt");
     }
@@ -211,26 +235,54 @@ const Update = struct {
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
 
         u.step = "userland";
-        try u.apkAdd(work_dir ++ "/root", arch, &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" }, try u.words(try u.read("/etc/apk/world")));
+        try u.apkAdd(
+            work_dir ++ "/root",
+            arch,
+            &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" },
+            try u.words(try u.read("/etc/apk/world")),
+        );
         u.step = "kernel";
         const alpine = std.mem.trim(u8, try u.read(meta_dir ++ "/alpine"), "\n");
-        try u.apkAdd(work_dir ++ "/kernel", arch, &.{ "--keys-dir", "/etc/werewolf/alpine-keys", "--repository", alpine }, &.{"linux-virt"});
+        try u.apkAdd(
+            work_dir ++ "/kernel",
+            arch,
+            &.{ "--keys-dir", "/etc/werewolf/alpine-keys", "--repository", alpine },
+            &.{"linux-virt"},
+        );
 
         u.step = "compare";
         const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));
-        const new_pkgs = try parseInstalled(u.gpa, try u.read(work_dir ++ "/root/lib/apk/db/installed"));
-        const kernel_pkgs = try parseInstalled(u.gpa, try u.read(work_dir ++ "/kernel/lib/apk/db/installed"));
+        const new_pkgs = try parseInstalled(
+            u.gpa,
+            try u.read(work_dir ++ "/root/lib/apk/db/installed"),
+        );
+        const kernel_pkgs = try parseInstalled(
+            u.gpa,
+            try u.read(work_dir ++ "/kernel/lib/apk/db/installed"),
+        );
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
-        const new_kernel = try std.fmt.allocPrint(u.gpa, "linux-virt-{s}", .{versionOf(kernel_pkgs, "linux-virt") orelse return error.NoKernel});
+        const new_kernel = try u.gpa.print(
+            "linux-virt-{s}",
+            .{versionOf(kernel_pkgs, "linux-virt") orelse return error.NoKernel},
+        );
         const changes = try diffPackages(u.gpa, old_pkgs, new_pkgs);
         const kernel_changed = !std.mem.eql(u8, old_kernel, new_kernel);
         if (changes.len == 0 and !kernel_changed) {
-            return u.record(.{ .event = "check", .slot = u.cmd.slot, .release = release, .result = "current" });
+            return u.record(.{
+                .event = "check",
+                .slot = u.cmd.slot,
+                .release = release,
+                .result = "current",
+            });
         }
 
         const build = try buildHash(u.gpa, new_pkgs, new_kernel);
         if (u.isBad(build)) {
-            return u.record(.{ .event = "skip", .build = build, .reason = "this build rolled back before" });
+            return u.record(.{
+                .event = "skip",
+                .build = build,
+                .reason = "this build rolled back before",
+            });
         }
 
         u.step = "cves";
@@ -238,7 +290,10 @@ const Update = struct {
         var sources: std.ArrayList(Source) = .empty;
         const repo = (try u.words(try u.read("/etc/apk/repositories")))[0];
         const package_cves = try u.packageCves(&sources, repo, old_pkgs, new_pkgs);
-        const kernel_cves = if (kernel_changed) try u.kernelCves(&sources, old_kernel, new_kernel) else cve.KernelFixes{};
+        const kernel_cves = if (kernel_changed)
+            try u.kernelCves(&sources, old_kernel, new_kernel)
+        else
+            cve.KernelFixes{};
 
         try u.buildSlot(arch, new_kernel);
         try u.install(build);
@@ -256,7 +311,10 @@ const Update = struct {
             .kernel_cves = kernel_cves,
             .sources = sources.items,
         };
-        const report_path = try std.fmt.allocPrint(u.gpa, "{s}/reports/{s}-{s}.json", .{ state_dir, stamp, build });
+        const report_path = try u.gpa.print(
+            "{s}/reports/{s}-{s}.json",
+            .{ state_dir, stamp, build },
+        );
         var out: Io.Writer.Allocating = .init(u.gpa);
         try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
         try out.writer.writeByte('\n');
@@ -269,7 +327,7 @@ const Update = struct {
             .from = u.cmd.slot,
             .to = u.other,
             .build = build,
-            .kernel = try std.fmt.allocPrint(u.gpa, "{s} -> {s}", .{ old_kernel, new_kernel }),
+            .kernel = try u.gpa.print("{s} -> {s}", .{ old_kernel, new_kernel }),
             .packages = changes.len,
             .cves = cve_count,
             .report = report_path,
@@ -293,9 +351,15 @@ const Update = struct {
     // applied. A versioned stream (openssl-4.0) is also looked up under its
     // base name (openssl); the window keeps other streams' fixes out. The
     // file is not signed, so it informs the report and nothing else.
-    fn packageCves(u: *Update, sources: *std.ArrayList(Source), repo: []const u8, old: []const Package, new: []const Package) ![]const cve.PackageFix {
+    fn packageCves(
+        u: *Update,
+        sources: *std.ArrayList(Source),
+        repo: []const u8,
+        old: []const Package,
+        new: []const Package,
+    ) ![]const cve.PackageFix {
         const origins = try diffOrigins(u.gpa, old, new);
-        const url = try std.fmt.allocPrint(u.gpa, "{s}/security.json", .{repo});
+        const url = try u.gpa.print("{s}/security.json", .{repo});
         const body = try u.fetch(sources, url, "security.json") orelse return &.{};
         defer _ = linux.close(body.fd);
         const found = u.examine(sources, .{ .secdb = origins }, body) orelse return &.{};
@@ -310,14 +374,23 @@ const Update = struct {
     // for this kernel's branch (6.18.*) is in (old, new]. Records are often
     // published weeks after a fix ships, so this is what was known at update
     // time.
-    fn kernelCves(u: *Update, sources: *std.ArrayList(Source), old_kernel: []const u8, new_kernel: []const u8) !cve.KernelFixes {
+    fn kernelCves(
+        u: *Update,
+        sources: *std.ArrayList(Source),
+        old_kernel: []const u8,
+        new_kernel: []const u8,
+    ) !cve.KernelFixes {
         const old = cve.kernelVersion(old_kernel) orelse return error.BadKernelVersion;
         const new = cve.kernelVersion(new_kernel) orelse return error.BadKernelVersion;
-        const branch = try std.fmt.allocPrint(u.gpa, "{d}.{d}", .{ new[0], new[1] });
+        const branch = try u.gpa.print("{d}.{d}", .{ new[0], new[1] });
         var fixes: cve.KernelFixes = .{ .branch = branch, .from = old_kernel, .to = new_kernel };
         const body = try u.fetch(sources, kernel_cves_url, "vulns.tar.gz") orelse return fixes;
         defer _ = linux.close(body.fd);
-        const found = u.examine(sources, .{ .kernel = .{ .branch = branch, .old = old, .new = new } }, body) orelse return fixes;
+        const found = u.examine(
+            sources,
+            .{ .kernel = .{ .branch = branch, .old = old, .new = new } },
+            body,
+        ) orelse return fixes;
         fixes.cves = cve.kernelFixes(u.gpa, found, old, new) catch |err| {
             sources.items[sources.items.len - 1].@"error" = @errorName(err);
             return fixes;
@@ -327,12 +400,36 @@ const Update = struct {
 
     /// GET url, by a fetcher, into cves/name. The file, recorded as a source
     /// with its sha256; or null, the source recorded with why not.
-    fn fetch(u: *Update, sources: *std.ArrayList(Source), url: []const u8, comptime name: []const u8) !?cve.Body {
+    fn fetch(
+        u: *Update,
+        sources: *std.ArrayList(Source),
+        url: []const u8,
+        comptime name: []const u8,
+    ) !?cve.Body {
         try sources.append(u.gpa, .{ .url = url, .fetched = try u.now() });
         const source = &sources.items[sources.items.len - 1];
-        const fd: i32 = @intCast(try u.sys(linux.openat(linux.AT.FDCWD, cves_dir ++ "/" ++ name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o600), "open " ++ name));
+        const fd: i32 = @intCast(try u.sys(
+            linux.openat(
+                linux.AT.FDCWD,
+                cves_dir ++ "/" ++ name,
+                .{
+                    .ACCMODE = .RDWR,
+                    .CREAT = true,
+                    .TRUNC = true,
+                    .CLOEXEC = true,
+                    .NOFOLLOW = true,
+                },
+                0o600,
+            ),
+            "open " ++ name,
+        ));
         errdefer _ = linux.close(fd);
-        const said = u.ask(cve.fetcher, .{ update_id, net_root, url, fd }, 256, fetch_seconds) catch |err| {
+        const said = u.ask(
+            cve.fetcher,
+            .{ update_id, net_root, url, fd },
+            256,
+            fetch_seconds,
+        ) catch |err| {
             source.@"error" = @errorName(err);
             _ = linux.close(fd);
             return null;
@@ -358,9 +455,19 @@ const Update = struct {
 
     /// What a reader found in body, for job: the lines after its "ok", or
     /// null, with why not recorded on the last source.
-    fn examine(u: *Update, sources: *std.ArrayList(Source), job: cve.Job, body: cve.Body) ?[]const u8 {
+    fn examine(
+        u: *Update,
+        sources: *std.ArrayList(Source),
+        job: cve.Job,
+        body: cve.Body,
+    ) ?[]const u8 {
         const source = &sources.items[sources.items.len - 1];
-        const said = u.ask(cve.reader, .{ update_id, job, body }, max_lines, read_seconds) catch |err| {
+        const said = u.ask(
+            cve.reader,
+            .{ update_id, job, body },
+            max_lines,
+            read_seconds,
+        ) catch |err| {
             source.@"error" = @errorName(err);
             return null;
         };
@@ -375,7 +482,13 @@ const Update = struct {
     /// writes to out until it exits: at most max bytes, within seconds. A
     /// child that says more or takes longer is killed, and is an error, as
     /// is one a signal ended.
-    fn child(u: *Update, comptime f: anytype, args: anytype, max: usize, seconds: i64) !sandbox.Exit {
+    fn child(
+        u: *Update,
+        comptime f: anytype,
+        args: anytype,
+        max: usize,
+        seconds: i64,
+    ) !sandbox.Exit {
         var pipe: [2]i32 = undefined;
         _ = try u.sys(linux.pipe2(&pipe, .{ .CLOEXEC = true }), "pipe");
         defer _ = linux.close(pipe[0]);
@@ -396,7 +509,7 @@ const Update = struct {
     fn ask(u: *Update, comptime f: anytype, args: anytype, max: usize, seconds: i64) !Said {
         const e = try u.child(f, args, max, seconds);
         if (e.code != 0) return error.ChildFailed;
-        const eol = std.mem.indexOfScalar(u8, e.out, '\n') orelse return error.ChildSaidNothing;
+        const eol = std.mem.findScalar(u8, e.out, '\n') orelse return error.ChildSaidNothing;
         const status = e.out[0..eol];
         if (status.len == 0 or status.len > 128) return error.ChildSaidNonsense;
         for (status) |c| if (c < 0x20 or c > 0x7e) return error.ChildSaidNonsense;
@@ -408,7 +521,13 @@ const Update = struct {
         try Dir.cwd().createDirPath(u.io, net_root ++ "/etc");
         try Dir.cwd().createDirPath(u.io, cves_dir);
         inline for (.{ "resolv.conf", "hosts" }) |name| {
-            Dir.cwd().copyFile("/etc/" ++ name, Dir.cwd(), net_root ++ "/etc/" ++ name, u.io, .{}) catch |err| switch (err) {
+            Dir.cwd().copyFile(
+                "/etc/" ++ name,
+                Dir.cwd(),
+                net_root ++ "/etc/" ++ name,
+                u.io,
+                .{},
+            ) catch |err| switch (err) {
                 error.FileNotFound => {},
                 else => return err,
             };
@@ -418,7 +537,10 @@ const Update = struct {
     /// A system call's result, or an error with what failed in detail.
     fn sys(u: *Update, rc: usize, comptime what: []const u8) !usize {
         return sandbox.sys(rc, what) catch |err| {
-            u.detail = try std.fmt.allocPrint(u.gpa, "{s}: {s}", .{ what, sandbox.errnoName(sandbox.failed_errno) });
+            u.detail = try u.gpa.print(
+                "{s}: {s}",
+                .{ what, sandbox.errnoName(sandbox.failed_errno) },
+            );
             return err;
         };
     }
@@ -436,21 +558,45 @@ const Update = struct {
         // build record the next update will need.
         for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try u.copyInto(root, p);
         for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try u.copyInto(root, p);
-        for (try u.listDir("/etc/apk/keys")) |name| try u.copyInto(root, try std.fmt.allocPrint(u.gpa, "etc/apk/keys/{s}", .{name}));
+        for (try u.listDir("/etc/apk/keys")) |name| try u.copyInto(
+            root,
+            try u.gpa.print("etc/apk/keys/{s}", .{name}),
+        );
         try u.copyTree(root, "usr/share/werewolf");
         const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-        try u.write(root ++ meta_dir ++ "/kernel", try std.fmt.allocPrint(u.gpa, "{s}\n", .{new_kernel}));
-        try u.write(root ++ meta_dir ++ "/release", try std.fmt.allocPrint(u.gpa, "{s} {s} {s} updated-on-{s}\n", .{ form, try u.now(), new_kernel, u.host }));
+        try u.write(
+            root ++ meta_dir ++ "/kernel",
+            try u.gpa.print("{s}\n", .{new_kernel}),
+        );
+        try u.write(
+            root ++ meta_dir ++ "/release",
+            try u.gpa.print(
+                "{s} {s} {s} updated-on-{s}\n",
+                .{ form, try u.now(), new_kernel, u.host },
+            ),
+        );
         try u.stripSetid(root);
         // The slot's / is this directory's owner and mode: root's, 0755,
         // whoever made it, or sshd's StrictModes refuses every key.
-        _ = try u.sys(linux.fchownat(linux.AT.FDCWD, root, 0, 0, linux.AT.SYMLINK_NOFOLLOW), "chown the new root");
+        _ = try u.sys(
+            linux.fchownat(linux.AT.FDCWD, root, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
+            "chown the new root",
+        );
         _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root, 0o755), "chmod the new root");
         // As the build makes it (Makefile, EROFS_OPTS), but zstd for lzma:
         // Wolfi's mkfs.erofs has no lzma, and the kernel reads both. A slot
         // is on disk, not in RAM, so its few more megabytes cost nothing,
         // and zstd reads faster.
-        try u.run(&.{ "mkfs.erofs", "-b", "4096", "-zzstd,level=19", "-C1048576", "-Eall-fragments,dedupe", work_dir ++ "/slot/root.erofs", root });
+        try u.run(&.{
+            "mkfs.erofs",
+            "-b",
+            "4096",
+            "-zzstd,level=19",
+            "-C1048576",
+            "-Eall-fragments,dedupe",
+            work_dir ++ "/slot/root.erofs",
+            root,
+        });
 
         // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
         // Image inside it, as the build does (see Makefile).
@@ -460,30 +606,61 @@ const Update = struct {
 
         u.step = "stage0";
         const s = work_dir ++ "/stage0";
-        try u.apkAdd(s, arch, &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" }, try u.words(try u.read(meta_dir ++ "/stage0.world")));
+        try u.apkAdd(
+            s,
+            arch,
+            &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" },
+            try u.words(try u.read(meta_dir ++ "/stage0.world")),
+        );
         try u.busyboxLinks(s);
         try u.stripSetid(s);
-        try Dir.cwd().copyFile(meta_dir ++ "/stage0.init", Dir.cwd(), s ++ "/init", io, .{ .permissions = .fromMode(0o755) });
+        try Dir.cwd().copyFile(
+            meta_dir ++ "/stage0.init",
+            Dir.cwd(),
+            s ++ "/init",
+            io,
+            .{ .permissions = .fromMode(0o755) },
+        );
         // werewolf's module loader, as the build lays it in stage0.
-        try Dir.cwd().copyFile("/usr/lib/werewolf/modules", Dir.cwd(), s ++ "/usr/lib/werewolf/modules", io, .{ .make_path = true, .permissions = .fromMode(0o755) });
+        try Dir.cwd().copyFile(
+            "/usr/lib/werewolf/modules",
+            Dir.cwd(),
+            s ++ "/usr/lib/werewolf/modules",
+            io,
+            .{ .make_path = true, .permissions = .fromMode(0o755) },
+        );
         const kvers = try u.listDir(work_dir ++ "/kernel/lib/modules");
         if (kvers.len != 1) return error.NotOneKernel;
-        const src = try std.fmt.allocPrint(u.gpa, "{s}/kernel/lib/modules/{s}", .{ work_dir, kvers[0] });
-        const dst = try std.fmt.allocPrint(u.gpa, "{s}/usr/lib/modules/{s}", .{ s, kvers[0] });
-        const dep = try u.read(try std.fmt.allocPrint(u.gpa, "{s}/modules.dep", .{src}));
+        const src = try u.gpa.print(
+            "{s}/kernel/lib/modules/{s}",
+            .{ work_dir, kvers[0] },
+        );
+        const dst = try u.gpa.print("{s}/usr/lib/modules/{s}", .{ s, kvers[0] });
+        const dep = try u.read(try u.gpa.print("{s}/modules.dep", .{src}));
         const order = try moduleOrder(u.gpa, dep, try u.lines(try u.read(meta_dir ++ "/modules")));
         // Decompressed, as the build does: Alpine's kernel cannot, and the
         // loader hands it each file as it is.
         for (order) |p| {
-            const ko = try gunzip(u.gpa, try u.read(try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ src, p })));
-            const out = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ dst, withoutGz(p) });
+            const ko = try gunzip(
+                u.gpa,
+                try u.read(try u.gpa.print("{s}/{s}", .{ src, p })),
+            );
+            const out = try u.gpa.print("{s}/{s}", .{ dst, withoutGz(p) });
             try Dir.cwd().createDirPath(io, parentDir(out));
             try u.write(out, ko);
         }
         const list = try moduleList(u.gpa, order, try u.read(meta_dir ++ "/module-params"));
-        try u.write(try std.fmt.allocPrint(u.gpa, "{s}/werewolf.modules", .{dst}), list);
+        try u.write(try u.gpa.print("{s}/werewolf.modules", .{dst}), list);
         try u.writeCpio(s, work_dir ++ "/stage0.cpio");
-        try u.run(&.{ "zstd", "-19", "-q", "-f", "-o", work_dir ++ "/slot/initramfs.zst", work_dir ++ "/stage0.cpio" });
+        try u.run(&.{
+            "zstd",
+            "-19",
+            "-q",
+            "-f",
+            "-o",
+            work_dir ++ "/slot/initramfs.zst",
+            work_dir ++ "/stage0.cpio",
+        });
     }
 
     // --- install -----------------------------------------------------------
@@ -504,20 +681,51 @@ const Update = struct {
         defer _ = linux.umount2(g, 0);
 
         const gpath = pathOf(u.cmd.grubenv);
-        const kdir = try std.fmt.allocPrint(u.gpa, "{s}{s}/werewolf/{s}", .{ g, parentDir(parentDir(gpath)), u.other });
-        const rdir = try std.fmt.allocPrint(u.gpa, "{s}{s}/{s}", .{ v, pathOf(u.cmd.victim), u.other });
+        const kdir = try u.gpa.print(
+            "{s}{s}/werewolf/{s}",
+            .{ g, parentDir(parentDir(gpath)), u.other },
+        );
+        const rdir = try u.gpa.print(
+            "{s}{s}/{s}",
+            .{ v, pathOf(u.cmd.victim), u.other },
+        );
         try Dir.cwd().createDirPath(io, kdir);
         try Dir.cwd().createDirPath(io, rdir);
-        const erofs_new = try std.fmt.allocPrint(u.gpa, "{s}/root.erofs.new", .{rdir});
+        const erofs_new = try u.gpa.print("{s}/root.erofs.new", .{rdir});
         try Dir.cwd().copyFile(work_dir ++ "/slot/root.erofs", Dir.cwd(), erofs_new, io, .{});
-        try Dir.cwd().rename(erofs_new, Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/root.erofs", .{rdir}), io);
+        try Dir.cwd().rename(
+            erofs_new,
+            Dir.cwd(),
+            try u.gpa.print("{s}/root.erofs", .{rdir}),
+            io,
+        );
         for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
-            try Dir.cwd().copyFile(try std.fmt.allocPrint(u.gpa, "{s}/slot/{s}", .{ work_dir, f }), Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ kdir, f }), io, .{});
+            try Dir.cwd().copyFile(
+                try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
+                Dir.cwd(),
+                try u.gpa.print("{s}/{s}", .{ kdir, f }),
+                io,
+                .{},
+            );
         }
         linux.sync();
-        try u.write(state_dir ++ "/attempt", try std.fmt.allocPrint(u.gpa, "{s} {s}\n", .{ u.other, build }));
-        const entry = try std.fmt.allocPrint(u.gpa, "werewolf-{s}", .{u.other});
-        try u.run(&.{ "/usr/lib/werewolf/grubenv", try std.fmt.allocPrint(u.gpa, "{s}{s}", .{ g, gpath }), "next_entry", entry });
+        try u.write(
+            state_dir ++ "/attempt",
+            try u.gpa.print("{s} {s}\n", .{ u.other, build }),
+        );
+        // The image's kernel arguments, which bite's entries read from
+        // GRUB's environment for each slot, so an update's new arguments
+        // reach a machine bitten before them; then the one try.
+        const env = try u.gpa.print("{s}{s}", .{ g, gpath });
+        const args = try std.mem.join(u.gpa, " ", try u.words(try u.read(meta_dir ++ "/cmdline")));
+        try u.run(&.{
+            "/usr/lib/werewolf/grubenv",
+            env,
+            try u.gpa.print("werewolf_args_{s}", .{u.other}),
+            args,
+        });
+        const entry = try u.gpa.print("werewolf-{s}", .{u.other});
+        try u.run(&.{ "/usr/lib/werewolf/grubenv", env, "next_entry", entry });
     }
 
     /// The other slot onto werewolf's own disk (design/native-boot.md): its
@@ -538,8 +746,11 @@ const Update = struct {
         try u.mountUuid(u.cmd.esp, e, "vfat");
         defer _ = linux.umount2(e, 0);
 
-        const rdir = try std.fmt.allocPrint(u.gpa, "{s}{s}/{s}", .{ v, pathOf(u.cmd.victim), u.other });
-        const kdir = try std.fmt.allocPrint(u.gpa, "{s}/werewolf/{s}", .{ e, u.other });
+        const rdir = try u.gpa.print(
+            "{s}{s}/{s}",
+            .{ v, pathOf(u.cmd.victim), u.other },
+        );
+        const kdir = try u.gpa.print("{s}/werewolf/{s}", .{ e, u.other });
         const entries = e ++ "/loader/entries";
         try Dir.cwd().createDirPath(io, rdir);
         try Dir.cwd().createDirPath(io, kdir);
@@ -548,27 +759,52 @@ const Update = struct {
         // The other slot's entry goes first: from here until the new one is
         // written, nothing boots the other slot while its files change.
         for (try u.listDir(entries)) |name| {
-            if (isEntryOf(name, u.other)) try Dir.cwd().deleteFile(io, try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ entries, name }));
+            if (isEntryOf(
+                name,
+                u.other,
+            )) try Dir.cwd().deleteFile(io, try u.gpa.print("{s}/{s}", .{ entries, name }));
         }
-        try u.replace(work_dir ++ "/slot/root.erofs", try std.fmt.allocPrint(u.gpa, "{s}/root.erofs", .{rdir}));
+        try u.replace(
+            work_dir ++ "/slot/root.erofs",
+            try u.gpa.print("{s}/root.erofs", .{rdir}),
+        );
         for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
-            try u.replace(try std.fmt.allocPrint(u.gpa, "{s}/slot/{s}", .{ work_dir, f }), try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ kdir, f }));
+            try u.replace(
+                try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
+                try u.gpa.print("{s}/{s}", .{ kdir, f }),
+            );
         }
         linux.sync();
 
-        const version = try compactTime(u.gpa, @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s)));
-        const options = try withSlot(u.gpa, try u.read("/proc/cmdline"), try u.read(meta_dir ++ "/cmdline"), u.other);
+        const version = try compactTime(
+            u.gpa,
+            @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s)),
+        );
+        const options = try withSlot(
+            u.gpa,
+            try u.read("/proc/cmdline"),
+            try u.read(meta_dir ++ "/cmdline"),
+            u.other,
+        );
         const entry = try loaderEntry(u.gpa, u.other, version, options);
-        const tmp = try std.fmt.allocPrint(u.gpa, "{s}/werewolf-{s}.tmp", .{ entries, u.other });
+        const tmp = try u.gpa.print("{s}/werewolf-{s}.tmp", .{ entries, u.other });
         try u.write(tmp, entry);
-        try Dir.cwd().rename(tmp, Dir.cwd(), try std.fmt.allocPrint(u.gpa, "{s}/werewolf-{s}+1.conf", .{ entries, u.other }), io);
+        try Dir.cwd().rename(
+            tmp,
+            Dir.cwd(),
+            try u.gpa.print("{s}/werewolf-{s}+1.conf", .{ entries, u.other }),
+            io,
+        );
         linux.sync();
-        try u.write(state_dir ++ "/attempt", try std.fmt.allocPrint(u.gpa, "{s} {s}\n", .{ u.other, build }));
+        try u.write(
+            state_dir ++ "/attempt",
+            try u.gpa.print("{s} {s}\n", .{ u.other, build }),
+        );
     }
 
     /// src to dst, through a temporary name, so dst is whole or absent.
     fn replace(u: *Update, src: []const u8, dst: []const u8) !void {
-        const tmp = try std.fmt.allocPrint(u.gpa, "{s}.new", .{dst});
+        const tmp = try u.gpa.print("{s}.new", .{dst});
         try Dir.cwd().copyFile(src, Dir.cwd(), tmp, u.io, .{});
         try Dir.cwd().rename(tmp, Dir.cwd(), dst, u.io);
     }
@@ -587,42 +823,95 @@ const Update = struct {
     /// its own keys, as apk always does. Then it prunes the cache to the
     /// packages the new root took, so it holds one copy of the image, no
     /// more.
-    fn apkAdd(u: *Update, root: []const u8, arch: []const u8, source: []const []const u8, packages: []const []const u8) !void {
+    fn apkAdd(
+        u: *Update,
+        root: []const u8,
+        arch: []const u8,
+        source: []const []const u8,
+        packages: []const []const u8,
+    ) !void {
         const name = std.fs.path.basename(root);
-        const cache = try std.fmt.allocPrintSentinel(u.gpa, "{s}/{s}", .{ cache_dir, name }, 0);
-        const scratch = try std.fmt.allocPrintSentinel(u.gpa, "{s}/apk-{s}", .{ work_dir, name }, 0);
+        const cache = try u.gpa.printSentinel("{s}/{s}", .{ cache_dir, name }, 0);
+        const scratch = try u.gpa.printSentinel(
+            "{s}/apk-{s}",
+            .{ work_dir, name },
+            0,
+        );
         try Dir.cwd().createDirPath(u.io, cache);
         Dir.cwd().deleteTree(u.io, scratch) catch {};
         try Dir.cwd().createDirPath(u.io, scratch);
-        _ = try u.sys(linux.fchownat(linux.AT.FDCWD, scratch, update_id, update_id, linux.AT.SYMLINK_NOFOLLOW), "chown scratch");
+        _ = try u.sys(
+            linux.fchownat(
+                linux.AT.FDCWD,
+                scratch,
+                update_id,
+                update_id,
+                linux.AT.SYMLINK_NOFOLLOW,
+            ),
+            "chown scratch",
+        );
 
         // The indexes, then the packages: `cache download` fetches no index.
         const world = try std.mem.join(u.gpa, "\n", packages);
         for ([_][]const []const u8{ &.{"update"}, &.{ "cache", "download" } }) |applet| {
             var fetch_argv: std.ArrayList(?[*:0]const u8) = .empty;
-            for ([_][]const u8{ "/usr/bin/apk", "--root", scratch, "--arch", arch, "--cache-dir", cache }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
+            for ([_][]const u8{
+                "/usr/bin/apk",
+                "--root",
+                scratch,
+                "--arch",
+                arch,
+                "--cache-dir",
+                cache,
+            }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
             for (source) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-            for ([_][]const u8{ "--quiet", "--no-progress" }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
+            for ([_][]const u8{
+                "--quiet",
+                "--no-progress",
+            }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
             for (applet) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
             const argv_z = try fetch_argv.toOwnedSliceSentinel(u.gpa, null);
-            _ = try u.sys(linux.fchownat(linux.AT.FDCWD, cache, update_id, update_id, linux.AT.SYMLINK_NOFOLLOW), "chown cache");
-            const fetched = u.child(apkFetcher, .{ argv_z, world, cache, scratch }, 64 << 10, apk_seconds);
+            _ = try u.sys(
+                linux.fchownat(
+                    linux.AT.FDCWD,
+                    cache,
+                    update_id,
+                    update_id,
+                    linux.AT.SYMLINK_NOFOLLOW,
+                ),
+                "chown cache",
+            );
+            const fetched = u.child(
+                apkFetcher,
+                .{ argv_z, world, cache, scratch },
+                64 << 10,
+                apk_seconds,
+            );
             try u.reclaim(cache);
             const e = fetched catch |err| {
                 u.detail = "apk, as _update";
                 return err;
             };
             if (e.code != 0) {
-                u.detail = try std.fmt.allocPrint(u.gpa, "apk, as _update: {s}", .{std.mem.trim(u8, e.out[0..@min(e.out.len, 400)], " \n")});
+                u.detail = try u.gpa.print(
+                    "apk, as _update: {s}",
+                    .{std.mem.trim(u8, e.out[0..@min(e.out.len, 400)], " \n")},
+                );
                 return error.CommandFailed;
             }
         }
         try Dir.cwd().deleteTree(u.io, scratch);
 
         var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(u.gpa, &.{ "apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" });
+        try argv.appendSlice(
+            u.gpa,
+            &.{ "apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
+        );
         try argv.appendSlice(u.gpa, source);
-        try argv.appendSlice(u.gpa, &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" });
+        try argv.appendSlice(
+            u.gpa,
+            &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
+        );
         try argv.appendSlice(u.gpa, packages);
         try u.run(argv.items);
         try u.prune(cache, root);
@@ -633,13 +922,17 @@ const Update = struct {
     /// index still lists, which for Wolfi is all of them, and with it,
     /// where the root is on a disk, it deletes every package.
     fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
-        const installed = try parseInstalled(u.gpa, try u.read(try std.fmt.allocPrint(u.gpa, "{s}/lib/apk/db/installed", .{root})));
+        const installed = try parseInstalled(
+            u.gpa,
+            try u.read(try u.gpa.print("{s}/lib/apk/db/installed", .{root})),
+        );
         var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
         defer d.close(u.io);
         var old: std.ArrayList([]const u8) = .empty;
         var it = d.iterate();
         while (try it.next(u.io)) |e| {
-            if (std.mem.endsWith(u8, e.name, ".apk") and !isCachedOf(e.name, installed)) try old.append(u.gpa, try u.gpa.dupe(u8, e.name));
+            if (std.mem.endsWith(u8, e.name, ".apk") and
+                !isCachedOf(e.name, installed)) try old.append(u.gpa, try u.gpa.dupe(u8, e.name));
         }
         for (old.items) |name| try d.deleteFile(u.io, name);
     }
@@ -648,7 +941,10 @@ const Update = struct {
     /// file of a name apk gives one, owned by root. Anything else it left is
     /// removed unread.
     fn reclaim(u: *Update, cache: [:0]const u8) !void {
-        _ = try u.sys(linux.fchownat(linux.AT.FDCWD, cache, 0, 0, linux.AT.SYMLINK_NOFOLLOW), "chown cache");
+        _ = try u.sys(
+            linux.fchownat(linux.AT.FDCWD, cache, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
+            "chown cache",
+        );
         var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
         defer d.close(u.io);
         var strays: std.ArrayList([]const u8) = .empty;
@@ -659,7 +955,10 @@ const Update = struct {
                 continue;
             }
             const file = try u.gpa.dupeSentinel(u8, e.name, 0);
-            _ = try u.sys(linux.fchownat(d.handle, file, 0, 0, linux.AT.SYMLINK_NOFOLLOW), "chown cached file");
+            _ = try u.sys(
+                linux.fchownat(d.handle, file, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
+                "chown cached file",
+            );
         }
         for (strays.items) |stray| try d.deleteTree(u.io, stray);
     }
@@ -667,19 +966,46 @@ const Update = struct {
     /// The filesystem with uuid on dir. The mount helper probes only Linux
     /// filesystems, so FAT is named.
     fn mountUuid(u: *Update, uuid: []const u8, dir: []const u8, kind: ?[]const u8) !void {
-        const dev = std.mem.trim(u8, try u.output(&.{ "blkid", "-c", "/dev/null", "-l", "-o", "device", "-t", try std.fmt.allocPrint(u.gpa, "UUID={s}", .{uuid}) }), "\n");
+        const dev = std.mem.trim(
+            u8,
+            try u.output(&.{
+                "blkid",
+                "-c",
+                "/dev/null",
+                "-l",
+                "-o",
+                "device",
+                "-t",
+                try u.gpa.print("UUID={s}", .{uuid}),
+            }),
+            "\n",
+        );
         if (kind) |k| {
-            try u.run(&.{ "/usr/lib/werewolf/mount", "-t", k, "-o", "nosuid,nodev,noexec", dev, dir });
+            try u.run(&.{
+                "/usr/lib/werewolf/mount",
+                "-t",
+                k,
+                "-o",
+                "nosuid,nodev,noexec",
+                dev,
+                dir,
+            });
         } else {
             try u.run(&.{ "/usr/lib/werewolf/mount", "-o", "nosuid,nodev,noexec", dev, dir });
         }
     }
 
     fn busyboxLinks(u: *Update, root: []const u8) !void {
-        const d = try std.fmt.allocPrint(u.gpa, "{s}/etc/busybox-paths.d", .{root});
+        const d = try u.gpa.print("{s}/etc/busybox-paths.d", .{root});
         for (u.listDir(d) catch return) |name| {
-            for (try u.lines(try u.read(try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ d, name })))) |p| {
-                const link = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ root, std.mem.trimStart(u8, p, "/") });
+            for (try u.lines(try u.read(try u.gpa.print(
+                "{s}/{s}",
+                .{ d, name },
+            )))) |p| {
+                const link = try u.gpa.print(
+                    "{s}/{s}",
+                    .{ root, std.mem.trimStart(u8, p, "/") },
+                );
                 _ = Dir.cwd().statFile(u.io, link, .{ .follow_symlinks = false }) catch {
                     try Dir.cwd().symLink(u.io, "/usr/bin/busybox", link, .{});
                 };
@@ -696,7 +1022,12 @@ const Update = struct {
             const st = try e.dir.statFile(u.io, e.basename, .{ .follow_symlinks = false });
             const mode = st.permissions.toMode();
             if (mode & 0o6000 != 0) {
-                try e.dir.setFilePermissions(u.io, e.basename, .fromMode(mode & ~@as(std.posix.mode_t, 0o6000)), .{ .follow_symlinks = false });
+                try e.dir.setFilePermissions(
+                    u.io,
+                    e.basename,
+                    .fromMode(mode & ~@as(std.posix.mode_t, 0o6000)),
+                    .{ .follow_symlinks = false },
+                );
             }
         }
     }
@@ -705,7 +1036,11 @@ const Update = struct {
     /// path, a directory, and everything under it, from this root into
     /// root: the build record, whose etc/ holds the image's accounts.
     fn copyTree(u: *Update, root: []const u8, path: []const u8) !void {
-        var d = Dir.cwd().openDir(u.io, try std.fmt.allocPrint(u.gpa, "/{s}", .{path}), .{ .iterate = true }) catch |err| {
+        var d = Dir.cwd().openDir(
+            u.io,
+            try u.gpa.print("/{s}", .{path}),
+            .{ .iterate = true },
+        ) catch |err| {
             u.detail = path;
             return err;
         };
@@ -714,7 +1049,7 @@ const Update = struct {
         defer w.deinit();
         while (try w.next(u.io)) |e| {
             if (e.kind == .directory) continue;
-            try u.copyInto(root, try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ path, e.path }));
+            try u.copyInto(root, try u.gpa.print("{s}/{s}", .{ path, e.path }));
         }
     }
 
@@ -724,15 +1059,21 @@ const Update = struct {
     /// in the image; here what is mounted there hides it, so it is made.
     fn copyInto(u: *Update, root: []const u8, path: []const u8) !void {
         errdefer u.detail = path;
-        const src = try std.fmt.allocPrint(u.gpa, "/{s}", .{path});
-        const dst = try std.fmt.allocPrint(u.gpa, "{s}/{s}", .{ root, path });
+        const src = try u.gpa.print("/{s}", .{path});
+        const dst = try u.gpa.print("{s}/{s}", .{ root, path });
         if (std.mem.eql(u8, std.fs.path.basename(path), ".mountpoint")) {
             try Dir.cwd().createDirPath(u.io, parentDir(dst));
             return Dir.cwd().writeFile(u.io, .{ .sub_path = dst, .data = "" });
         }
         var buf: [Dir.max_path_bytes]u8 = undefined;
         const n = Dir.cwd().readLink(u.io, src, &buf) catch |err| switch (err) {
-            error.NotLink => return Dir.cwd().copyFile(src, Dir.cwd(), dst, u.io, .{ .make_path = true }),
+            error.NotLink => return Dir.cwd().copyFile(
+                src,
+                Dir.cwd(),
+                dst,
+                u.io,
+                .{ .make_path = true },
+            ),
             else => return err,
         };
         try Dir.cwd().createDirPath(u.io, parentDir(dst));
@@ -756,13 +1097,30 @@ const Update = struct {
         var ino: u32 = 1;
         var link_buf: [Dir.max_path_bytes]u8 = undefined;
         while (try w.next(u.io)) |e| : (ino += 1) {
-            const path = try std.fmt.allocPrintSentinel(u.gpa, "{s}/{s}", .{ root, e.path }, 0);
+            const path = try u.gpa.printSentinel("{s}/{s}", .{ root, e.path }, 0);
             var st: linux.Statx = undefined;
-            const rc = linux.statx(linux.AT.FDCWD, path, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true }, &st);
+            const rc = linux.statx(
+                linux.AT.FDCWD,
+                path,
+                linux.AT.SYMLINK_NOFOLLOW,
+                .{ .TYPE = true, .MODE = true },
+                &st,
+            );
             if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-            const node: Node = .{ .name = e.path, .mode = st.mode, .ino = ino, .rdev_major = st.rdev_major, .rdev_minor = st.rdev_minor };
+            const node: Node = .{
+                .name = e.path,
+                .mode = st.mode,
+                .ino = ino,
+                .rdev_major = st.rdev_major,
+                .rdev_minor = st.rdev_minor,
+            };
             const data: []const u8 = switch (st.mode & linux.S.IFMT) {
-                linux.S.IFREG => try e.dir.readFileAlloc(u.io, e.basename, u.gpa, .limited(max_read)),
+                linux.S.IFREG => try e.dir.readFileAlloc(
+                    u.io,
+                    e.basename,
+                    u.gpa,
+                    .limited(max_read),
+                ),
                 linux.S.IFLNK => link_buf[0..try e.dir.readLink(u.io, e.basename, &link_buf)],
                 linux.S.IFDIR, linux.S.IFCHR, linux.S.IFBLK => "",
                 else => return error.UnexpectedFileKind,
@@ -788,7 +1146,10 @@ const Update = struct {
         try std.json.Stringify.value(fields, .{}, &rest.writer);
         try line.writer.print(",{s}\n", .{rest.written()[1..]});
         try u.append(log_path, line.written());
-        try Io.File.stdout().writeStreamingAll(u.io, try std.fmt.allocPrint(u.gpa, "autoupdate: {s}", .{line.written()}));
+        try Io.File.stdout().writeStreamingAll(
+            u.io,
+            try u.gpa.print("autoupdate: {s}", .{line.written()}),
+        );
     }
 
     fn run(u: *Update, argv: []const []const u8) !void {
@@ -801,7 +1162,10 @@ const Update = struct {
             .exited => |code| if (code == 0) return res.stdout,
             else => {},
         }
-        u.detail = try std.fmt.allocPrint(u.gpa, "{s}: {s}", .{ argv[0], std.mem.trim(u8, res.stderr[0..@min(res.stderr.len, 400)], " \n") });
+        u.detail = try u.gpa.print(
+            "{s}: {s}",
+            .{ argv[0], std.mem.trim(u8, res.stderr[0..@min(res.stderr.len, 400)], " \n") },
+        );
         return error.CommandFailed;
     }
 
@@ -862,13 +1226,32 @@ const Said = struct { status: []const u8, rest: []const u8 };
 /// reads the image (/usr, /etc and the resolver's file), runs nothing but
 /// apk, writes only beneath cache and scratch, connects over TCP only to
 /// ports 443 and 53, and starts no process. What it says goes to out.
-fn apkFetcher(argv: [:null]const ?[*:0]const u8, world: []const u8, cache: [:0]const u8, scratch: [:0]const u8, out: i32, parent: linux.pid_t) noreturn {
+fn apkFetcher(
+    argv: [:null]const ?[*:0]const u8,
+    world: []const u8,
+    cache: [:0]const u8,
+    scratch: [:0]const u8,
+    out: i32,
+    parent: linux.pid_t,
+) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    apkExec(argv, world, cache, scratch, out) catch |err| sandbox.say(out, 1, sandbox.whyNot(arena.allocator(), err), "");
+    apkExec(
+        argv,
+        world,
+        cache,
+        scratch,
+        out,
+    ) catch |err| sandbox.say(out, 1, sandbox.whyNot(arena.allocator(), err), "");
 }
 
-fn apkExec(argv: [:null]const ?[*:0]const u8, world: []const u8, cache: [:0]const u8, scratch: [:0]const u8, out: i32) !noreturn {
+fn apkExec(
+    argv: [:null]const ?[*:0]const u8,
+    world: []const u8,
+    cache: [:0]const u8,
+    scratch: [:0]const u8,
+    out: i32,
+) !noreturn {
     try sandbox.closeAllBut(&.{out});
     for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
     // What it may reach, opened while root can. resolv.conf leads, on a
@@ -888,10 +1271,16 @@ fn apkExec(argv: [:null]const ?[*:0]const u8, world: []const u8, cache: [:0]cons
     }) |r| {
         const fd = linux.openat(linux.AT.FDCWD, r[0], r[1], 0);
         if (linux.errno(fd) == .NOENT and std.mem.eql(u8, r[0], "/etc/resolv.conf")) continue;
-        rules[n] = .{ .fd = @intCast(try sandbox.sys(fd, "open what apk may reach")), .access = r[2] };
+        rules[n] = .{
+            .fd = @intCast(try sandbox.sys(fd, "open what apk may reach")),
+            .access = r[2],
+        };
         n += 1;
     }
-    const root: i32 = @intCast(try sandbox.sys(linux.openat(linux.AT.FDCWD, scratch, dir, 0), "open scratch"));
+    const root: i32 = @intCast(try sandbox.sys(
+        linux.openat(linux.AT.FDCWD, scratch, dir, 0),
+        "open scratch",
+    ));
     rules[n] = .{ .fd = root, .access = sandbox.own_dir };
     n += 1;
     try sandbox.dropTo(update_id, null);
@@ -910,20 +1299,27 @@ fn apkExec(argv: [:null]const ?[*:0]const u8, world: []const u8, cache: [:0]cons
     // carries on.
     var f: sandbox.Filter = .{};
     inline for (.{
-        "read",            "readv",           "pread64",      "write",        "writev",          "pwrite64",
-        "openat",          "open",            "close",        "fstat",        "newfstatat",      "stat",
-        "lstat",           "statx",           "fstatfs",      "statfs",       "lseek",           "getdents64",
-        "faccessat",       "faccessat2",      "access",       "readlinkat",   "readlink",        "mkdirat",
-        "mkdir",           "renameat",        "renameat2",    "rename",       "unlinkat",        "unlink",
-        "utimensat",       "ftruncate",       "fsync",        "fdatasync",    "fcntl",           "flock",
-        "dup",             "dup2",            "dup3",         "umask",        "mmap",            "munmap",
-        "mprotect",        "mremap",          "madvise",      "brk",          "futex",           "getpid",
-        "gettid",          "getuid",          "geteuid",      "getgid",       "getegid",         "connect",
-        "getsockopt",      "setsockopt",      "getsockname",  "getpeername",  "sendto",          "recvfrom",
-        "sendmsg",         "recvmsg",         "sendmmsg",     "recvmmsg",     "shutdown",        "poll",
-        "ppoll",           "pselect6",        "select",       "rt_sigaction", "rt_sigprocmask",  "rt_sigreturn",
-        "getrandom",       "clock_gettime",   "gettimeofday", "nanosleep",    "clock_nanosleep", "set_tid_address",
-        "set_robust_list", "rseq",            "prlimit64",    "uname",        "execve",          "exit_group",
+        "read",            "readv",           "pread64",         "write",
+        "writev",          "pwrite64",        "openat",          "open",
+        "close",           "fstat",           "newfstatat",      "stat",
+        "lstat",           "statx",           "fstatfs",         "statfs",
+        "lseek",           "getdents64",      "faccessat",       "faccessat2",
+        "access",          "readlinkat",      "readlink",        "mkdirat",
+        "mkdir",           "renameat",        "renameat2",       "rename",
+        "unlinkat",        "unlink",          "utimensat",       "ftruncate",
+        "fsync",           "fdatasync",       "fcntl",           "flock",
+        "dup",             "dup2",            "dup3",            "umask",
+        "mmap",            "munmap",          "mprotect",        "mremap",
+        "madvise",         "brk",             "futex",           "getpid",
+        "gettid",          "getuid",          "geteuid",         "getgid",
+        "getegid",         "connect",         "getsockopt",      "setsockopt",
+        "getsockname",     "getpeername",     "sendto",          "recvfrom",
+        "sendmsg",         "recvmsg",         "sendmmsg",        "recvmmsg",
+        "shutdown",        "poll",            "ppoll",           "pselect6",
+        "select",          "rt_sigaction",    "rt_sigprocmask",  "rt_sigreturn",
+        "getrandom",       "clock_gettime",   "gettimeofday",    "nanosleep",
+        "clock_nanosleep", "set_tid_address", "set_robust_list", "rseq",
+        "prlimit64",       "uname",           "execve",          "exit_group",
         "exit",            "restart_syscall", "arch_prctl",
     }) |name| f.allow(name);
     // IP, and nothing else: glibc's lookups also try nscd's Unix socket,
@@ -952,16 +1348,37 @@ const interpreter = switch (@import("builtin").cpu.arch) {
 
 /// A file beneath dir, written whole.
 fn writeAt(dir: i32, name: [*:0]const u8, data: []const u8) !void {
-    const fd: i32 = @intCast(try sandbox.sys(linux.openat(dir, name, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o644), "create in scratch"));
+    const fd: i32 = @intCast(try sandbox.sys(
+        linux.openat(
+            dir,
+            name,
+            .{
+                .ACCMODE = .WRONLY,
+                .CREAT = true,
+                .TRUNC = true,
+                .CLOEXEC = true,
+                .NOFOLLOW = true,
+            },
+            0o644,
+        ),
+        "create in scratch",
+    ));
     defer _ = linux.close(fd);
     var off: usize = 0;
-    while (off < data.len) off += try sandbox.sys(linux.write(fd, data[off..].ptr, data.len - off), "write in scratch");
+    while (off < data.len) off += try sandbox.sys(
+        linux.write(fd, data[off..].ptr, data.len - off),
+        "write in scratch",
+    );
 }
 
 /// Whether file, a package in apk's cache (NAME-VERSION.HASH.apk), is one
 /// of pkgs.
 fn isCachedOf(file: []const u8, pkgs: []const Package) bool {
-    const stem = file[0 .. std.mem.lastIndexOfScalar(u8, file[0 .. file.len - ".apk".len], '.') orelse return false];
+    const stem = file[0 .. std.mem.findScalarLast(
+        u8,
+        file[0 .. file.len - ".apk".len],
+        '.',
+    ) orelse return false];
     for (pkgs) |p| {
         if (stem.len == p.name.len + 1 + p.version.len and std.mem.startsWith(u8, stem, p.name) and
             stem[p.name.len] == '-' and std.mem.endsWith(u8, stem, p.version)) return true;
@@ -990,19 +1407,37 @@ const Report = struct {
 };
 
 const Change = struct { name: []const u8, from: ?[]const u8, to: ?[]const u8 };
-const Source = struct { url: []const u8, fetched: []const u8, sha256: ?[]const u8 = null, @"error": ?[]const u8 = null };
+const Source = struct {
+    url: []const u8,
+    fetched: []const u8,
+    sha256: ?[]const u8 = null,
+    @"error": ?[]const u8 = null,
+};
 
 // --- pure functions, tested below ----------------------------------------------
 
-const Cmdline = struct { victim: []const u8 = "", slot: []const u8 = "", grubenv: []const u8 = "", esp: []const u8 = "" };
+const Cmdline = struct {
+    victim: []const u8 = "",
+    slot: []const u8 = "",
+    grubenv: []const u8 = "",
+    esp: []const u8 = "",
+};
 
 fn parseCmdline(text: []const u8) Cmdline {
     var c: Cmdline = .{};
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.victim=")) c.victim = arg["werewolf.victim=".len..];
+        if (std.mem.startsWith(
+            u8,
+            arg,
+            "werewolf.victim=",
+        )) c.victim = arg["werewolf.victim=".len..];
         if (std.mem.startsWith(u8, arg, "werewolf.slot=")) c.slot = arg["werewolf.slot=".len..];
-        if (std.mem.startsWith(u8, arg, "werewolf.grubenv=")) c.grubenv = arg["werewolf.grubenv=".len..];
+        if (std.mem.startsWith(
+            u8,
+            arg,
+            "werewolf.grubenv=",
+        )) c.grubenv = arg["werewolf.grubenv=".len..];
         if (std.mem.startsWith(u8, arg, "werewolf.esp=")) c.esp = arg["werewolf.esp=".len..];
     }
     return c;
@@ -1020,7 +1455,8 @@ fn withSlot(gpa: Allocator, cmdline: []const u8, image: []const u8, slot: []cons
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeAny(u8, cmdline, " \n");
     next: while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=") or std.mem.startsWith(u8, arg, "initrd=") or
+        if (std.mem.startsWith(u8, arg, "werewolf.slot=") or
+            std.mem.startsWith(u8, arg, "initrd=") or
             std.mem.startsWith(u8, arg, "BOOT_IMAGE=")) continue;
         var own = std.mem.tokenizeAny(u8, image, " \n");
         while (own.next()) |o| if (std.mem.eql(u8, argName(arg), argName(o))) continue :next;
@@ -1034,13 +1470,18 @@ fn withSlot(gpa: Allocator, cmdline: []const u8, image: []const u8, slot: []cons
 
 /// A kernel argument's name: what comes before its =, or all of it.
 fn argName(arg: []const u8) []const u8 {
-    return arg[0 .. std.mem.indexOfScalar(u8, arg, '=') orelse arg.len];
+    return arg[0 .. std.mem.findScalar(u8, arg, '=') orelse arg.len];
 }
 
 /// A systemd-boot entry (the Boot Loader Specification's type 1) for slot.
 /// version orders the slots, newest first; sort-key keeps them together.
-fn loaderEntry(gpa: Allocator, slot: []const u8, version: []const u8, options: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(gpa,
+fn loaderEntry(
+    gpa: Allocator,
+    slot: []const u8,
+    version: []const u8,
+    options: []const u8,
+) ![]const u8 {
+    return gpa.print(
         \\title werewolf {s}
         \\sort-key werewolf
         \\version {s}
@@ -1067,22 +1508,23 @@ fn compactTime(gpa: Allocator, secs: u64) ![]const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(gpa, "{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return gpa.print("{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
 }
 
 fn uuidOf(spec: []const u8) []const u8 {
-    return spec[0 .. std.mem.indexOfScalar(u8, spec, ':') orelse spec.len];
+    return spec[0 .. std.mem.findScalar(u8, spec, ':') orelse spec.len];
 }
 
 fn pathOf(spec: []const u8) []const u8 {
-    const i = std.mem.indexOfScalar(u8, spec, ':') orelse return "";
+    const i = std.mem.findScalar(u8, spec, ':') orelse return "";
     return spec[i + 1 ..];
 }
 
 fn parentDir(path: []const u8) []const u8 {
-    return path[0 .. std.mem.lastIndexOfScalar(u8, path, '/') orelse 0];
+    return path[0 .. std.mem.findScalarLast(u8, path, '/') orelse 0];
 }
 
 const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
@@ -1115,7 +1557,11 @@ fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
 }
 
 fn finish(p: Package) Package {
-    return .{ .name = p.name, .version = p.version, .origin = if (p.origin.len > 0) p.origin else p.name };
+    return .{
+        .name = p.name,
+        .version = p.version,
+        .origin = if (p.origin.len > 0) p.origin else p.name,
+    };
 }
 
 fn versionOf(pkgs: []const Package, name: []const u8) ?[]const u8 {
@@ -1128,16 +1574,28 @@ fn diffPackages(gpa: Allocator, old: []const Package, new: []const Package) ![]c
     var out: std.ArrayList(Change) = .empty;
     for (new) |n| {
         const o = versionOf(old, n.name);
-        if (o == null or !std.mem.eql(u8, o.?, n.version)) try out.append(gpa, .{ .name = n.name, .from = o, .to = n.version });
+        if (o == null or
+            !std.mem.eql(
+                u8,
+                o.?,
+                n.version,
+            )) try out.append(gpa, .{ .name = n.name, .from = o, .to = n.version });
     }
     for (old) |o| {
-        if (versionOf(new, o.name) == null) try out.append(gpa, .{ .name = o.name, .from = o.version, .to = null });
+        if (versionOf(
+            new,
+            o.name,
+        ) == null) try out.append(gpa, .{ .name = o.name, .from = o.version, .to = null });
     }
     return out.items;
 }
 
 /// Source packages present before and after, at different versions.
-fn diffOrigins(gpa: Allocator, old: []const Package, new: []const Package) ![]const cve.OriginChange {
+fn diffOrigins(
+    gpa: Allocator,
+    old: []const Package,
+    new: []const Package,
+) ![]const cve.OriginChange {
     var out: std.ArrayList(cve.OriginChange) = .empty;
     for (new) |n| {
         const o = for (old) |p| {
@@ -1172,10 +1630,10 @@ fn buildHash(gpa: Allocator, pkgs: []const Package, kernel: []const u8) ![]const
 fn moduleOrder(gpa: Allocator, dep: []const u8, leaves: []const []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (leaves) |leaf| {
-        const suffix = try std.fmt.allocPrint(gpa, "/{s}.ko.gz", .{leaf});
+        const suffix = try gpa.print("/{s}.ko.gz", .{leaf});
         var lines_it = std.mem.splitScalar(u8, dep, '\n');
         const line = while (lines_it.next()) |l| {
-            const colon = std.mem.indexOfScalar(u8, l, ':') orelse continue;
+            const colon = std.mem.findScalar(u8, l, ':') orelse continue;
             if (std.mem.endsWith(u8, l[0..colon], suffix)) break l;
         } else return error.ModuleNotFound;
         var fields: std.ArrayList([]const u8) = .empty;
@@ -1203,14 +1661,18 @@ fn moduleList(gpa: Allocator, order: []const []const u8, params: []const u8) ![]
         const stem = std.fs.path.basename(path);
         var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
         while (lines_it.next()) |line| {
-            const space = std.mem.indexOfScalar(u8, line, ' ') orelse return error.BadModuleParams;
-            if (std.mem.eql(u8, line[0..space], stem[0 .. stem.len - ".ko".len])) try out.writer.print(" {s}", .{line[space + 1 ..]});
+            const space = std.mem.findScalar(u8, line, ' ') orelse return error.BadModuleParams;
+            if (std.mem.eql(
+                u8,
+                line[0..space],
+                stem[0 .. stem.len - ".ko".len],
+            )) try out.writer.print(" {s}", .{line[space + 1 ..]});
         }
         try out.writer.writeByte('\n');
     }
     var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
     next: while (lines_it.next()) |line| {
-        const name = line[0 .. std.mem.indexOfScalar(u8, line, ' ') orelse line.len];
+        const name = line[0 .. std.mem.findScalar(u8, line, ' ') orelse line.len];
         for (order) |p| {
             const stem = std.fs.path.basename(withoutGz(p));
             if (std.mem.eql(u8, name, stem[0 .. stem.len - ".ko".len])) continue :next;
@@ -1251,11 +1713,31 @@ fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
     return out.written();
 }
 
-const Node = struct { name: []const u8, mode: u32, ino: u32, rdev_major: u32 = 0, rdev_minor: u32 = 0 };
+const Node = struct {
+    name: []const u8,
+    mode: u32,
+    ino: u32,
+    rdev_major: u32 = 0,
+    rdev_minor: u32 = 0,
+};
 
 /// One newc cpio entry: header, name and data, each padded to 4 bytes.
 fn cpioEntry(w: *Io.Writer, n: Node, data: []const u8) !void {
-    const fields = [_]u32{ n.ino, n.mode, 0, 0, 1, 0, @intCast(data.len), 0, 0, n.rdev_major, n.rdev_minor, @intCast(n.name.len + 1), 0 };
+    const fields = [_]u32{
+        n.ino,
+        n.mode,
+        0,
+        0,
+        1,
+        0,
+        @intCast(data.len),
+        0,
+        0,
+        n.rdev_major,
+        n.rdev_minor,
+        @intCast(n.name.len + 1),
+        0,
+    };
     try w.writeAll("070701");
     for (fields) |f| try w.print("{x:0>8}", .{f});
     try w.writeAll(n.name);
@@ -1274,8 +1756,9 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(gpa, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return gpa.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
 }
 
@@ -1293,7 +1776,10 @@ fn lessString(_: void, a: []const u8, b: []const u8) bool {
 const testing = std.testing;
 
 test parseCmdline {
-    const c = parseCmdline("console=hvc0 werewolf.victim=abcd:/var/lib/werewolf werewolf.slot=b werewolf.grubenv=ef01:/boot/grub/grubenv\n");
+    const c = parseCmdline(
+        "console=hvc0 werewolf.victim=abcd:/var/lib/werewolf werewolf.slot=b " ++
+            "werewolf.grubenv=ef01:/boot/grub/grubenv\n",
+    );
     try testing.expectEqualStrings("abcd:/var/lib/werewolf", c.victim);
     try testing.expectEqualStrings("b", c.slot);
     try testing.expectEqualStrings("abcd", uuidOf(c.victim));
@@ -1306,18 +1792,34 @@ test "systemd-boot entries" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const c = parseCmdline("console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000\n");
+    const c = parseCmdline(
+        "console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000\n",
+    );
     try testing.expectEqualStrings("57E1-F000", c.esp);
     try testing.expectEqualStrings("", c.grubenv);
     try testing.expectEqualStrings(
-        "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 werewolf.slot=b",
-        try withSlot(a, "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n", "", "b"),
+        "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 " ++
+            "werewolf.slot=b",
+        try withSlot(
+            a,
+            "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a " ++
+                "werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n",
+            "",
+            "b",
+        ),
     );
     // The image's arguments replace any of the same name, and are added
     // where missing.
     try testing.expectEqualStrings(
-        "console=hvc0 werewolf.victim=ab:/werewolf debugfs=off proc_mem.force_override=never werewolf.slot=b",
-        try withSlot(a, "console=hvc0 proc_mem.force_override=always werewolf.slot=a werewolf.victim=ab:/werewolf\n", "debugfs=off proc_mem.force_override=never\n", "b"),
+        "console=hvc0 werewolf.victim=ab:/werewolf debugfs=off proc_mem.force_override=never " ++
+            "werewolf.slot=b",
+        try withSlot(
+            a,
+            "console=hvc0 proc_mem.force_override=always werewolf.slot=a " ++
+                "werewolf.victim=ab:/werewolf\n",
+            "debugfs=off proc_mem.force_override=never\n",
+            "b",
+        ),
     );
     try testing.expectEqualStrings(
         \\title werewolf b
@@ -1329,16 +1831,33 @@ test "systemd-boot entries" {
         \\
     , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b"));
     try testing.expectEqualStrings("20261006T120000Z", try compactTime(a, 1791288000));
-    for ([_][]const u8{ "werewolf-b.conf", "werewolf-b+1.conf", "werewolf-b+0-1.conf" }) |n| try testing.expect(isEntryOf(n, "b"));
-    for ([_][]const u8{ "werewolf-a.conf", "werewolf-b.tmp", "werewolf-bb.conf", "other-b.conf" }) |n| try testing.expect(!isEntryOf(n, "b"));
+    for ([_][]const u8{
+        "werewolf-b.conf",
+        "werewolf-b+1.conf",
+        "werewolf-b+0-1.conf",
+    }) |n| try testing.expect(isEntryOf(n, "b"));
+    for ([_][]const u8{
+        "werewolf-a.conf",
+        "werewolf-b.tmp",
+        "werewolf-bb.conf",
+        "other-b.conf",
+    }) |n| try testing.expect(!isEntryOf(n, "b"));
 }
 
 test "installed database, diffs and origins" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const old = try parseInstalled(a, "P:busybox-full\nV:1.37.0-r30\no:busybox\n\nP:openssl-4.0-libcrypto\nV:4.0.2-r0\no:openssl-4.0\n\nP:gone\nV:1-r0\n");
-    const new = try parseInstalled(a, "P:openssl-4.0-libcrypto\nV:4.0.3-r3\no:openssl-4.0\n\nP:busybox-full\nV:1.38.0-r2\no:busybox\n\nP:fresh\nV:2-r0\n\n");
+    const old = try parseInstalled(
+        a,
+        "P:busybox-full\nV:1.37.0-r30\no:busybox\n\nP:openssl-4.0-libcrypto\nV:4.0.2-r0\no:opens" ++
+            "sl-4.0\n\nP:gone\nV:1-r0\n",
+    );
+    const new = try parseInstalled(
+        a,
+        "P:openssl-4.0-libcrypto\nV:4.0.3-r3\no:openssl-4.0\n\nP:busybox-full\nV:1.38.0-r2\no:bu" ++
+            "sybox\n\nP:fresh\nV:2-r0\n\n",
+    );
     try testing.expectEqual(3, old.len);
     try testing.expectEqualStrings("gone", old[1].origin);
 
@@ -1361,14 +1880,27 @@ test "installed database, diffs and origins" {
 }
 
 test cacheName {
-    for ([_][]const u8{ "installed", "APKINDEX.f8759e6a.tar.gz", "zstd-1.5.7-r10.cc2743ad.apk" }) |n| try testing.expect(cacheName(n));
-    for ([_][]const u8{ "APKINDEX.f8759e6a.tar", ".apk.27182ee91faf", "installed.new", "lib", "zstd-1.5.7-r10.apk.tmp" }) |n| try testing.expect(!cacheName(n));
+    for ([_][]const u8{
+        "installed",
+        "APKINDEX.f8759e6a.tar.gz",
+        "zstd-1.5.7-r10.cc2743ad.apk",
+    }) |n| try testing.expect(cacheName(n));
+    for ([_][]const u8{
+        "APKINDEX.f8759e6a.tar",
+        ".apk.27182ee91faf",
+        "installed.new",
+        "lib",
+        "zstd-1.5.7-r10.apk.tmp",
+    }) |n| try testing.expect(!cacheName(n));
 }
 
 test isCachedOf {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const pkgs = try parseInstalled(arena.allocator(), "P:zstd\nV:1.5.7-r10\n\nP:glibc-2.44\nV:2.44-r8\n");
+    const pkgs = try parseInstalled(
+        arena.allocator(),
+        "P:zstd\nV:1.5.7-r10\n\nP:glibc-2.44\nV:2.44-r8\n",
+    );
     try testing.expect(isCachedOf("zstd-1.5.7-r10.cc2743ad.apk", pkgs));
     try testing.expect(isCachedOf("glibc-2.44-2.44-r8.b91ee306.apk", pkgs));
     try testing.expect(!isCachedOf("glibc-2.44-2.44-r7.53c9e93b.apk", pkgs));
@@ -1384,7 +1916,10 @@ test {
 }
 
 test withoutGz {
-    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko.gz"));
+    try testing.expectEqualStrings(
+        "kernel/fs/ext4/ext4.ko",
+        withoutGz("kernel/fs/ext4/ext4.ko.gz"),
+    );
     try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko"));
 }
 
@@ -1408,13 +1943,22 @@ test moduleList {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const order = [_][]const u8{ "kernel/arch/x86/kvm/kvm.ko.gz", "kernel/arch/x86/kvm/kvm-intel.ko.gz" };
-    try testing.expectEqualStrings("kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko\n", try moduleList(a, &order, ""));
+    const order = [_][]const u8{
+        "kernel/arch/x86/kvm/kvm.ko.gz",
+        "kernel/arch/x86/kvm/kvm-intel.ko.gz",
+    };
+    try testing.expectEqualStrings(
+        "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko\n",
+        try moduleList(a, &order, ""),
+    );
     try testing.expectEqualStrings(
         "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\n",
         try moduleList(a, &order, "kvm-intel nested=0\nkvm-intel ept=1\n"),
     );
-    try testing.expectError(error.ParamsForMissingModule, moduleList(a, &order, "kvm-amd nested=0\n"));
+    try testing.expectError(
+        error.ParamsForMissingModule,
+        moduleList(a, &order, "kvm-amd nested=0\n"),
+    );
     try testing.expectError(error.BadModuleParams, moduleList(a, &order, "kvm-intel\n"));
 }
 
@@ -1430,7 +1974,11 @@ test cpioEntry {
     try testing.expectEqual(b.len, 110 + 5 + pad4(115) + 2 + pad4(2));
 
     out.clearRetainingCapacity();
-    try cpioEntry(&out.writer, .{ .name = "dev/console", .mode = 0o020620, .ino = 2, .rdev_major = 5, .rdev_minor = 1 }, "");
+    try cpioEntry(
+        &out.writer,
+        .{ .name = "dev/console", .mode = 0o020620, .ino = 2, .rdev_major = 5, .rdev_minor = 1 },
+        "",
+    );
     const c = out.written();
     try testing.expectEqualStrings("00002190", c[14..22]);
     try testing.expectEqualStrings("00000005", c[78..86]);
@@ -1452,5 +2000,8 @@ test unwrapZboot {
 test rfc3339 {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("2026-10-06T12:42:29Z", try rfc3339(arena.allocator(), 1791290549));
+    try testing.expectEqualStrings(
+        "2026-10-06T12:42:29Z",
+        try rfc3339(arena.allocator(), 1791290549),
+    );
 }

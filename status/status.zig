@@ -1,27 +1,25 @@
 //! status: the demo form's one web page, about the machine it runs on, and
-//! the grype scan the page reports. Two services run it, each as a user of
-//! its own, which it tells apart by the service directory runsv starts it
-//! in, since runsv runs both as ./run:
+//! the grype scan the page reports. Two services run it, each leashed
+//! (leash/leash.zig) as a user of its own:
 //!
-//!     /etc/sv/status   as the status user: every minute it writes
-//!                      /data/svc/status/www/index.html, which nginx
-//!                      serves: the kernel and uptime, the last update
-//!                      check, the last 25 patches autoupdate applied with
-//!                      the CVEs each fixed, what grype finds in the image,
-//!                      and the packages the image holds. It may reach
-//!                      nothing on the network.
-//!     /etc/sv/scan     as the grype user: once an hour, and at start, it
-//!                      runs grype over the root, with its database in
-//!                      /data/svc/grype, and keeps a summary there for the
-//!                      page, so the page survives a reboot with its last
-//!                      scan. grype is the one that fetches, so only this
-//!                      user may (forms/demo.net).
+//!     status        as the status user: every minute it writes
+//!                   /data/svc/status/www/index.html, which nginx serves:
+//!                   the kernel and uptime, the last update check, the
+//!                   last 25 patches autoupdate applied with the CVEs each
+//!                   fixed, what grype finds in the image, and the
+//!                   packages the image holds. It may reach nothing on
+//!                   the network.
+//!     status scan   as the grype user: once an hour, and at start, it runs
+//!                   grype over the root, with its database in
+//!                   /data/svc/scan, and keeps a summary there for the
+//!                   page, so the page survives a reboot with its last
+//!                   scan. grype is the one that fetches, so only this
+//!                   user may (forms/demo.net).
 //!
-//! runsv starts both as root, with no arguments and no shell. Each makes
-//! its directories its user's, then becomes that user for good, with no
-//! capabilities and no way back, before it reads anything: grype's database
-//! comes from the network, and package metadata and grype's findings are
-//! other people's text. Everything written into the page is HTML-escaped.
+//! It never runs as root: leash has made its directories its user's and
+//! given root up before it starts. grype's database comes from the
+//! network, and package metadata and grype's findings are other people's
+//! text; everything written into the page is HTML-escaped.
 //!
 //! Each pass allocates from its own arena, freed when the pass ends, so a
 //! process that runs for months uses what one pass needs.
@@ -34,7 +32,7 @@ const Allocator = std.mem.Allocator;
 const state_dir = "/data/svc/status";
 const www_dir = state_dir ++ "/www";
 const page_path = www_dir ++ "/index.html";
-const grype_dir = "/data/svc/grype";
+const grype_dir = "/data/svc/scan";
 const summary_path = grype_dir ++ "/scan.json";
 const scan_error_path = grype_dir ++ "/scan-error";
 const grype_out = grype_dir ++ "/grype.json";
@@ -67,22 +65,17 @@ var role: []const u8 = "status";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
-    var cwd: [Dir.max_path_bytes]u8 = undefined;
-    const n = std.process.currentPath(io, &cwd) catch 0;
-    if (std.mem.eql(u8, std.fs.path.basename(cwd[0..n]), "scan")) {
+    if (std.os.linux.getuid() == 0) return error.RunMeUnderLeash;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len == 2 and std.mem.eql(u8, args[1], "scan")) {
         role = "scan";
         return scanLoop(io);
     }
-
-    // Root's last acts: the page's directory, and whatever an older status,
-    // which ran as root, left in it, made the status user's.
-    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    const user = lookupUser(readOr(io, arena.allocator(), "/etc/passwd", ""), "status") orelse return error.NoStatusUser;
-    arena.deinit();
-    Dir.cwd().createDirPath(io, www_dir) catch |err| record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
-    for ([_][]const u8{ state_dir ++ "/scan.json", state_dir ++ "/scan-error", page_path ++ ".tmp" }) |old| Dir.cwd().deleteFile(io, old) catch {};
-    for ([_][:0]const u8{ state_dir, www_dir, page_path }) |path| _ = std.os.linux.fchownat(std.os.linux.AT.FDCWD, path, user.uid, user.gid, std.os.linux.AT.SYMLINK_NOFOLLOW);
-    try dropTo(user);
+    if (args.len != 1) return error.Usage;
+    Dir.cwd().createDirPath(
+        io,
+        www_dir,
+    ) catch |err| record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
     record(io, .{ .event = "start" });
 
     var failing = false;
@@ -92,7 +85,10 @@ pub fn main(init: std.process.Init) !void {
             failing = false;
         } else |err| {
             // Once per failure, not once a minute.
-            if (!failing) record(io, .{ .event = "error", .step = "page", .@"error" = @errorName(err) });
+            if (!failing) record(
+                io,
+                .{ .event = "error", .step = "page", .@"error" = @errorName(err) },
+            );
             failing = true;
         }
         try io.sleep(.fromSeconds(render_every), .awake);
@@ -122,7 +118,7 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     var f: Facts = .{
         .now_secs = now_secs,
         .host = try gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0)),
-        .uname = try std.fmt.allocPrint(gpa, "{s} {s} {s} {s} {s}", .{
+        .uname = try gpa.print("{s} {s} {s} {s} {s}", .{
             std.mem.sliceTo(&uts.sysname, 0), std.mem.sliceTo(&uts.nodename, 0),
             std.mem.sliceTo(&uts.release, 0), std.mem.sliceTo(&uts.version, 0),
             std.mem.sliceTo(&uts.machine, 0),
@@ -141,11 +137,19 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     const events = try parseLog(gpa, log);
     f.last_check = lastCheck(events);
     f.patches = try patchHistory(gpa, try readReports(io, gpa), events, installed, max_patches);
-    f.posture = posture(io, gpa);
-
-    if (readAll(io, gpa, summary_path)) |text| {
-        f.scan = std.json.parseFromSliceLeaky(Summary, gpa, text, .{ .ignore_unknown_fields = true }) catch null;
-    } else |_| {}
+    // From PostgreSQL where the form runs it; from the files otherwise.
+    const kept = fromDatabase(io, gpa);
+    f.database = kept.said;
+    f.posture = kept.posture orelse posture(io, gpa);
+    f.scan = kept.scan;
+    if (f.scan == null) if (readAll(io, gpa, summary_path)) |text| {
+        f.scan = std.json.parseFromSliceLeaky(
+            Summary,
+            gpa,
+            text,
+            .{ .ignore_unknown_fields = true },
+        ) catch null;
+    } else |_| {};
     if (readAll(io, gpa, scan_error_path)) |text| {
         f.scan_error = trimLine(text);
     } else |_| {}
@@ -155,7 +159,11 @@ fn gather(io: Io, gpa: Allocator) !Facts {
 /// The newest reports first, read only as far as the page needs: each
 /// changes at least one package, so max_patches reports are enough.
 fn readReports(io: Io, gpa: Allocator) ![]const Report {
-    var d = Dir.cwd().openDir(io, autoupdate_dir ++ "/reports", .{ .iterate = true }) catch return &.{};
+    var d = Dir.cwd().openDir(
+        io,
+        autoupdate_dir ++ "/reports",
+        .{ .iterate = true },
+    ) catch return &.{};
     defer d.close(io);
     var names: std.ArrayList([]const u8) = .empty;
     var it = d.iterate();
@@ -166,8 +174,17 @@ fn readReports(io: Io, gpa: Allocator) ![]const Report {
     std.mem.sort([]const u8, names.items, {}, moreString);
     var reports: std.ArrayList(Report) = .empty;
     for (names.items[0..@min(names.items.len, max_patches)]) |name| {
-        const text = readAll(io, gpa, try std.fmt.allocPrint(gpa, "{s}/reports/{s}", .{ autoupdate_dir, name })) catch continue;
-        const r = std.json.parseFromSliceLeaky(Report, gpa, text, .{ .ignore_unknown_fields = true }) catch continue;
+        const text = readAll(
+            io,
+            gpa,
+            try gpa.print("{s}/reports/{s}", .{ autoupdate_dir, name }),
+        ) catch continue;
+        const r = std.json.parseFromSliceLeaky(
+            Report,
+            gpa,
+            text,
+            .{ .ignore_unknown_fields = true },
+        ) catch continue;
         try reports.append(gpa, r);
     }
     return reports.items;
@@ -175,9 +192,12 @@ fn readReports(io: Io, gpa: Allocator) ![]const Report {
 
 fn describeData(io: Io, gpa: Allocator) []const u8 {
     if (exists(io, "/run/werewolf/nodata")) return "unavailable (see the console)";
-    const kind = mountType(readOr(io, gpa, "/proc/self/mounts", ""), "/data") orelse return "not mounted";
+    const kind = mountType(
+        readOr(io, gpa, "/proc/self/mounts", ""),
+        "/data",
+    ) orelse return "not mounted";
     if (std.mem.eql(u8, kind, "tmpfs")) return "RAM: nothing here outlives a reboot";
-    return std.fmt.allocPrint(gpa, "{s}, kept across reboots and updates", .{kind}) catch kind;
+    return gpa.print("{s}, kept across reboots and updates", .{kind}) catch kind;
 }
 
 const Facts = struct {
@@ -191,6 +211,8 @@ const Facts = struct {
     slot: []const u8,
     shell: bool,
     data: []const u8,
+    /// What PostgreSQL keeps, or why the page reads files instead.
+    database: []const u8 = "",
     packages: []const Package,
     last_check: ?Event = null,
     patches: []const Patch = &.{},
@@ -250,12 +272,16 @@ fn writePage(w: *Io.Writer, f: Facts) !void {
         "<link rel=\"icon\" href=\"/logo.png\">\n<title>");
     try esc(w, f.host);
     try w.writeAll(" · werewolf</title>\n<style>\n" ++ style ++ "</style>\n</head>\n<body>\n" ++
-        "<header><img class=\"logo\" src=\"/logo.png\" alt=\"\" width=\"64\" height=\"64\">\n<div><h1>");
+        "<header><img class=\"logo\" src=\"/logo.png\" alt=\"\" width=\"64\" " ++
+        "height=\"64\">\n<div><h1>");
     try esc(w, f.host);
-    try w.writeAll("</h1><p class=\"sub\">A self-patching Linux machine: updated hourly from Wolfi and Alpine, " ++
+    try w.writeAll("</h1><p class=\"sub\">A self-patching Linux machine: updated hourly from " ++
+        "Wolfi and Alpine, " ++
         "scanned for known vulnerabilities by grype.</p></div></header>\n" ++
-        "<nav><a href=\"#system\">System</a><a href=\"#security\">Security</a><a href=\"#patches\">Patches</a>" ++
-        "<a href=\"#vulnerabilities\">Vulnerabilities</a><a href=\"#packages\">Packages</a></nav>\n");
+        "<nav><a href=\"#system\">System</a><a href=\"#security\">Security</a><a " ++
+        "href=\"#patches\">Patches</a>" ++
+        "<a href=\"#vulnerabilities\">Vulnerabilities</a><a href=\"#packages\">Packages</a></nav" ++
+        ">\n");
     try writeGlance(w, f);
     try writeSystem(w, f);
     try writeSecurity(w, f);
@@ -272,14 +298,21 @@ fn writePage(w: *Io.Writer, f: Facts) !void {
 fn writeGlance(w: *Io.Writer, f: Facts) !void {
     var buf: [32]u8 = undefined;
     const booted = rfc3339Buf(&buf, f.booted);
-    try w.print("<dl class=\"glance\">\n<div class=\"tile\"><dt>Up</dt><dd><strong><time datetime=\"{s}\" title=\"booted {s} {s} UTC\">", .{ booted, booted[0..10], booted[11..16] });
+    try w.print(
+        "<dl class=\"glance\">\n<div class=\"tile\"><dt>Up</dt><dd><strong><time " ++
+            "datetime=\"{s}\" title=\"booted {s} {s} UTC\">",
+        .{ booted, booted[0..10], booted[11..16] },
+    );
     try esc(w, f.uptime);
     try w.writeAll("</time></strong><span>load ");
     try esc(w, f.load);
     try w.writeAll("</span></dd></div>\n<div class=\"tile\"><dt>Security checks</dt><dd>");
     if (f.posture) |p| {
         const run = p.summary.pass + p.summary.fail;
-        try w.print("<strong class=\"{s}\">{d} of {d} pass</strong>", .{ if (p.summary.fail == 0) "ok" else "bad", p.summary.pass, run });
+        try w.print(
+            "<strong class=\"{s}\">{d} of {d} pass</strong>",
+            .{ if (p.summary.fail == 0) "ok" else "bad", p.summary.pass, run },
+        );
         if (p.summary.fail > 0) try w.print("<span>{d} failing</span>", .{p.summary.fail});
     } else try w.writeAll("<strong>Checking</strong><span>once the services start</span>");
     try w.writeAll("</dd></div>\n<div class=\"tile\"><dt>Last patched</dt><dd>");
@@ -294,7 +327,10 @@ fn writeGlance(w: *Io.Writer, f: Facts) !void {
         }
         try w.writeAll("<strong>");
         try writeTime(w, parseRfc3339(newest.time) orelse 0, f.now_secs);
-        try w.print("</strong><span>{d} package{s}, {d} CVE{s} fixed</span>", .{ packages, plural(packages), cves, plural(cves) });
+        try w.print(
+            "</strong><span>{d} package{s}, {d} CVE{s} fixed</span>",
+            .{ packages, plural(packages), cves, plural(cves) },
+        );
     } else {
         try w.writeAll("<strong>Not yet</strong>");
     }
@@ -305,7 +341,10 @@ fn writeGlance(w: *Io.Writer, f: Facts) !void {
         try w.print("<strong>{d}</strong>", .{s.findings.len});
         try chips(w, s.counts);
         if (s.findings.len > 0) {
-            if (fixable == 0) try w.writeAll("<span>none has a fix yet</span>") else try w.print("<span>{d} with a fix available</span>", .{fixable});
+            if (fixable == 0)
+                try w.writeAll("<span>none has a fix yet</span>")
+            else
+                try w.print("<span>{d} with a fix available</span>", .{fixable});
         }
     } else {
         try w.writeAll("<strong>Not scanned yet</strong>");
@@ -329,23 +368,41 @@ fn writeSystem(w: *Io.Writer, f: Facts) !void {
     try w.writeAll("</pre>\n<div class=\"scroll\"><table><tbody>\n");
     try row(w, "Release", &.{f.release});
     if (f.slot.len > 0) {
-        try row(w, "Boot slot", &.{ f.slot, " · the other slot holds the previous release, for rollback" });
+        try row(
+            w,
+            "Boot slot",
+            &.{ f.slot, " · the other slot holds the previous release, for rollback" },
+        );
     } else try row(w, "Boot slot", &.{"none: booted directly, so it cannot update itself"});
-    try row(w, "Shell", &.{if (f.shell) "/bin/sh: built in for debugging; no service uses it" else "none"});
+    try row(
+        w,
+        "Shell",
+        &.{if (f.shell) "/bin/sh: built in for debugging; no service uses it" else "none"},
+    );
     try row(w, "/data", &.{f.data});
+    try row(w, "Database", &.{f.database});
     try w.writeAll("</tbody></table></div>\n");
 }
 
 fn writeSecurity(w: *Io.Writer, f: Facts) !void {
     try w.writeAll("<h2 id=\"security\">Security</h2>\n");
-    const p = f.posture orelse return w.writeAll("<p class=\"note\">Checked once the services have started.</p>\n");
+    const p = f.posture orelse return w.writeAll(
+        "<p class=\"note\">Checked once the services have started.</p>\n",
+    );
     try w.print("<p class=\"note\">How this machine protects itself, tested at boot, ", .{});
     try writeTime(w, parseRfc3339(p.time) orelse 0, f.now_secs);
     try w.print(": {d} of {d} pass. The checks are <code>/usr/lib/werewolf/posture</code>, " ++
         "which runs on any Linux.</p>\n", .{ p.summary.pass, p.summary.pass + p.summary.fail });
-    try w.writeAll("<div class=\"scroll\"><table class=\"sec\">\n<colgroup><col style=\"width:44%\"><col style=\"width:38%\"><col></colgroup>\n" ++
+    try w.writeAll("<div class=\"scroll\"><table class=\"sec\">\n<colgroup><col " ++
+        "style=\"width:44%\"><col style=\"width:38%\"><col></colgroup>\n" ++
         "<thead><tr><th>Protection</th><th>Checked by</th><th>Result</th></tr></thead>\n<tbody>\n");
-    const areas = [_][2][]const u8{ .{ "kernel", "Kernel" }, .{ "processes", "Processes" }, .{ "programs", "Programs" }, .{ "files", "Files" }, .{ "network", "Network" } };
+    const areas = [_][2][]const u8{
+        .{ "kernel", "Kernel" },
+        .{ "processes", "Processes" },
+        .{ "programs", "Programs" },
+        .{ "files", "Files" },
+        .{ "network", "Network" },
+    };
     for (areas) |area| {
         var any = false;
         for (p.checks) |c| any = any or std.mem.eql(u8, c.area, area[0]);
@@ -383,7 +440,8 @@ fn writePatches(w: *Io.Writer, f: Facts) !void {
         return w.writeAll("<p class=\"note\">None yet.</p>\n");
     }
     try w.writeAll("<p class=\"note\">Updates it applied to itself, newest first.</p>\n");
-    try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>When</th><th>Package</th><th>Change</th>" ++
+    try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>When</th><th>Package</th><th>C" ++
+        "hange</th>" ++
         "<th>CVEs fixed</th><th>Outcome</th></tr></thead>\n<tbody>\n");
     for (f.patches) |p| {
         try w.writeAll("<tr><td>");
@@ -407,7 +465,12 @@ fn writePatches(w: *Io.Writer, f: Facts) !void {
             if (i > 0) try w.writeAll(", ");
             try advisory(w, id);
         }
-        const class = if (std.mem.eql(u8, p.outcome, "applied")) "ok" else if (std.mem.eql(u8, p.outcome, "rolled back")) "bad" else "muted";
+        const class = if (std.mem.eql(u8, p.outcome, "applied"))
+            "ok"
+        else if (std.mem.eql(u8, p.outcome, "rolled back"))
+            "bad"
+        else
+            "muted";
         try w.print("</td><td class=\"{s}\">", .{class});
         try esc(w, p.outcome);
         try w.writeAll("</td></tr>\n");
@@ -432,7 +495,8 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
     if (s.findings.len == 0) {
         return w.writeAll("<p class=\"ok\">No known vulnerabilities in this image.</p>\n");
     }
-    try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>Severity</th><th>Advisory</th><th>Component</th>" ++
+    try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>Severity</th><th>Advisory</th>" ++
+        "<th>Component</th>" ++
         "<th>Fixed in</th></tr></thead>\n<tbody>\n");
     // Findings are worst first, so a package's group starts at its worst
     // finding: the first with that owner.
@@ -453,7 +517,10 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
             try esc(w, first.in_version);
             try w.writeAll("</span>");
         }
-        try w.print(" <span class=\"muted\">· {d} finding{s}</span></th></tr>\n", .{ n, plural(n) });
+        try w.print(
+            " <span class=\"muted\">· {d} finding{s}</span></th></tr>\n",
+            .{ n, plural(n) },
+        );
         for (s.findings) |x| {
             if (!std.mem.eql(u8, x.in_package, owner)) continue;
             try w.writeAll("<tr><td>");
@@ -463,7 +530,9 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
             // The component, where it is not the package itself: a Go
             // module inside a program, say.
             try w.writeAll("</td><td>");
-            if (std.mem.eql(u8, x.package, x.in_package) and std.mem.eql(u8, x.version, x.in_version)) {
+            if (std.mem.eql(u8, x.package, x.in_package) and
+                std.mem.eql(u8, x.version, x.in_version))
+            {
                 try w.writeAll("<span class=\"muted\">—</span>");
             } else {
                 try esc(w, x.package);
@@ -495,7 +564,9 @@ fn scanError(w: *Io.Writer, e: ?[]const u8) !void {
 fn writePackages(w: *Io.Writer, f: Facts) !void {
     try w.print("<h2 id=\"packages\">Packages</h2>\n" ++
         "<details><summary>{d} packages from Wolfi</summary>\n<div class=\"scroll\"><table>\n" ++
-        "<thead><tr><th>Package</th><th>Version</th><th>Findings</th></tr></thead>\n<tbody>\n", .{f.packages.len});
+        "<thead><tr><th>Package</th><th>Version</th><th>Findings</th></tr></thead>\n<tbody>\n", .{
+        f.packages.len,
+    });
     for (f.packages) |p| {
         try w.writeAll("<tr><th scope=\"row\">");
         try esc(w, p.name);
@@ -523,7 +594,10 @@ fn chips(w: *Io.Writer, c: Counts) !void {
     for (counts, 0..) |n, i| {
         if (n == 0 and i > 1) continue; // critical and high always show, as zero is news
         any = true;
-        try w.print("<span class=\"sev {s}\">{d} {s}</span>", .{ if (n == 0) "zero" else severityClass(i), n, severityClass(i) });
+        try w.print(
+            "<span class=\"sev {s}\">{d} {s}</span>",
+            .{ if (n == 0) "zero" else severityClass(i), n, severityClass(i) },
+        );
     }
     if (!any) try w.writeAll("none");
     try w.writeAll("</span>");
@@ -569,7 +643,10 @@ fn row(w: *Io.Writer, name: []const u8, parts: []const []const u8) !void {
 fn writeTime(w: *Io.Writer, secs: u64, now: u64) !void {
     var buf: [32]u8 = undefined;
     const stamp = rfc3339Buf(&buf, secs);
-    try w.print("<time datetime=\"{s}\" title=\"{s} {s} UTC\">", .{ stamp, stamp[0..10], stamp[11..16] });
+    try w.print(
+        "<time datetime=\"{s}\" title=\"{s} {s} UTC\">",
+        .{ stamp, stamp[0..10], stamp[11..16] },
+    );
     try writeAgo(w, secs, now);
     try w.writeAll("</time>");
 }
@@ -589,7 +666,9 @@ fn plural(n: usize) []const u8 {
 
 /// An id for package, from characters ids can hold.
 fn anchor(w: *Io.Writer, name: []const u8) !void {
-    for (name) |c| try w.writeByte(if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') c else '-');
+    for (name) |c| try w.writeByte(
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') c else '-',
+    );
 }
 
 /// An advisory ID, linked to OSV, which knows CVE, GHSA, GO and the rest.
@@ -620,13 +699,18 @@ fn esc(w: *Io.Writer, s: []const u8) !void {
 fn isAdvisoryId(id: []const u8) bool {
     if (id.len == 0 or id.len > 64) return false;
     for (id) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.' and c != ':') return false;
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '.' and
+            c != ':') return false;
     }
     return true;
 }
 
 fn describeEvent(e: Event) []const u8 {
-    if (std.mem.eql(u8, e.event, "check")) return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
+    if (std.mem.eql(
+        u8,
+        e.event,
+        "check",
+    )) return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
     if (std.mem.eql(u8, e.event, "update")) return "updated, and rebooted into it";
     if (std.mem.eql(u8, e.event, "skip")) return e.reason;
     if (std.mem.eql(u8, e.event, "error")) return e.@"error";
@@ -635,28 +719,22 @@ fn describeEvent(e: Event) []const u8 {
 
 // --- the scan ----------------------------------------------------------------
 
-/// The scan service: grype's directories made its user's, then that user
-/// for good, then a scan an hour.
+/// The scan service: a scan an hour.
 fn scanLoop(io: Io) !void {
-    var setup: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    const user = lookupUser(readOr(io, setup.allocator(), "/etc/passwd", ""), "grype") orelse return error.NoGrypeUser;
-    setup.deinit();
-    for ([_][:0]const u8{ grype_dir, grype_dir ++ "/db" }) |path| {
-        Dir.cwd().createDirPath(io, path) catch |err| {
-            record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
-            break;
-        };
-        _ = std.os.linux.fchownat(std.os.linux.AT.FDCWD, path, user.uid, user.gid, std.os.linux.AT.SYMLINK_NOFOLLOW);
-    }
-    try dropTo(user);
     record(io, .{ .event = "start" });
 
     while (true) {
         var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
         var step: []const u8 = "start";
         scan(io, arena.allocator(), &step) catch |err| {
-            record(io, .{ .event = "error", .step = "scan", .at = step, .@"error" = @errorName(err) });
-            const msg = std.fmt.allocPrint(arena.allocator(), "{s}, while {s}, at {s}\n", .{ @errorName(err), step, rfc3339(arena.allocator(), nowSecs(io)) catch "" }) catch "";
+            record(
+                io,
+                .{ .event = "error", .step = "scan", .at = step, .@"error" = @errorName(err) },
+            );
+            const msg = arena.allocator().print(
+                "{s}, while {s}, at {s}\n",
+                .{ @errorName(err), step, rfc3339(arena.allocator(), nowSecs(io)) catch "" },
+            ) catch "";
             writeAtomic(io, arena.allocator(), scan_error_path, msg) catch {};
         };
         arena.deinit();
@@ -668,7 +746,10 @@ fn scanLoop(io: Io) !void {
 fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
     step.* = "checking /data";
     if (exists(io, "/run/werewolf/nodata")) return error.DataUnavailable;
-    const kind = mountType(readOr(io, gpa, "/proc/self/mounts", ""), "/data") orelse return error.DataNotMounted;
+    const kind = mountType(
+        readOr(io, gpa, "/proc/self/mounts", ""),
+        "/data",
+    ) orelse return error.DataNotMounted;
     // grype's database is a 190 MB download that unpacks to several times
     // that; it does not belong in RAM.
     if (std.mem.eql(u8, kind, "tmpfs")) return error.DataInRam;
@@ -676,7 +757,10 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
 
     step.* = "preparing grype's directories";
     Dir.cwd().deleteTree(io, grype_dir ++ "/tmp") catch {};
-    for ([_][]const u8{ grype_dir ++ "/db", grype_dir ++ "/tmp" }) |path| try Dir.cwd().createDirPath(io, path);
+    for ([_][]const u8{
+        grype_dir ++ "/db",
+        grype_dir ++ "/tmp",
+    }) |path| try Dir.cwd().createDirPath(io, path);
     Dir.cwd().deleteFile(io, grype_out) catch {};
 
     var env: std.process.Environ.Map = .init(gpa);
@@ -704,12 +788,17 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
 
     step.* = "reading grype's findings";
     const text = try readAll(io, gpa, grype_out);
-    const owners = try parseOwners(gpa, readOr(io, gpa, "/lib/apk/db/installed", ""), readOr(io, gpa, meta_dir ++ "/overlay", ""));
+    const owners = try parseOwners(
+        gpa,
+        readOr(io, gpa, "/lib/apk/db/installed", ""),
+        readOr(io, gpa, meta_dir ++ "/overlay", ""),
+    );
     const summary = try summarize(gpa, text, try rfc3339(gpa, nowSecs(io)), owners);
     var out: Io.Writer.Allocating = .init(gpa);
     try std.json.Stringify.value(summary, .{ .whitespace = .indent_2 }, &out.writer);
     try out.writer.writeByte('\n');
     try writeAtomic(io, gpa, summary_path, out.written());
+    keepScan(io, gpa, out.written());
     Dir.cwd().deleteFile(io, scan_error_path) catch {};
     Dir.cwd().deleteFile(io, grype_out) catch {};
     record(io, .{
@@ -770,9 +859,14 @@ const Owners = struct {
         const rel = std.mem.trimStart(u8, path, "/");
         if (o.files.get(rel)) |p| return p;
         var buf: [1024]u8 = undefined;
-        const usr = std.fmt.bufPrint(&buf, "usr/{s}", .{rel}) catch return null;
+        const usr = std.mem.print(&buf, "usr/{s}", .{rel}) catch return null;
         if (o.files.get(usr)) |p| return p;
-        if (o.werewolf.contains(rel) or o.werewolf.contains(usr)) return .{ .name = werewolf_owner, .version = "", .origin = "" };
+        if (o.werewolf.contains(rel) or
+            o.werewolf.contains(usr)) return .{
+            .name = werewolf_owner,
+            .version = "",
+            .origin = "",
+        };
         return null;
     }
 };
@@ -795,7 +889,7 @@ fn parseOwners(gpa: Allocator, installed: []const u8, overlay: []const u8) !Owne
         } else if (std.mem.startsWith(u8, line, "F:")) {
             dir = line[2..];
         } else if (std.mem.startsWith(u8, line, "R:") and pkg.name.len > 0) {
-            try o.files.put(gpa, try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, line[2..] }), pkg);
+            try o.files.put(gpa, try gpa.print("{s}/{s}", .{ dir, line[2..] }), pkg);
         }
     }
     var lines = std.mem.tokenizeScalar(u8, overlay, '\n');
@@ -826,7 +920,12 @@ const GrypeOutput = struct {
 /// grype's findings, one per vulnerability and component, worst first, each
 /// with the package that put it in the image.
 fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners) !Summary {
-    const g = try std.json.parseFromSliceLeaky(GrypeOutput, gpa, text, .{ .ignore_unknown_fields = true });
+    const g = try std.json.parseFromSliceLeaky(
+        GrypeOutput,
+        gpa,
+        text,
+        .{ .ignore_unknown_fields = true },
+    );
     var findings: std.ArrayList(Finding) = .empty;
     var counts: Counts = .{};
     outer: for (g.matches) |m| {
@@ -853,7 +952,8 @@ fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners)
         // name, in two locations); the page lists it once.
         for (findings.items) |x| {
             if (std.mem.eql(u8, x.id, f.id) and std.mem.eql(u8, x.package, f.package) and
-                std.mem.eql(u8, x.version, f.version) and std.mem.eql(u8, x.in_package, f.in_package)) continue :outer;
+                std.mem.eql(u8, x.version, f.version) and
+                std.mem.eql(u8, x.in_package, f.in_package)) continue :outer;
         }
         try findings.append(gpa, f);
         switch (rank(f.severity)) {
@@ -867,7 +967,13 @@ fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners)
     }
     std.mem.sort(Finding, findings.items, {}, worseFirst);
     const db_built = if (g.descriptor.db) |db| findString(db, "built") orelse "" else "";
-    return .{ .time = time, .grype = g.descriptor.version, .db_built = db_built, .counts = counts, .findings = findings.items };
+    return .{
+        .time = time,
+        .grype = g.descriptor.version,
+        .db_built = db_built,
+        .counts = counts,
+        .findings = findings.items,
+    };
 }
 
 const severities = [_][]const u8{ "Critical", "High", "Medium", "Low", "Negligible", "Unknown" };
@@ -934,7 +1040,294 @@ const Check = struct {
 /// This boot's posture, once the posture service has checked.
 fn posture(io: Io, gpa: Allocator) ?Posture {
     const text = readAll(io, gpa, posture_path) catch return null;
-    return std.json.parseFromSliceLeaky(Posture, gpa, text, .{ .ignore_unknown_fields = true }) catch null;
+    return std.json.parseFromSliceLeaky(
+        Posture,
+        gpa,
+        text,
+        .{ .ignore_unknown_fields = true },
+    ) catch null;
+}
+
+// --- PostgreSQL ------------------------------------------------------------------
+//
+// Where the form runs PostgreSQL (forms/postgresql), the scan keeps each
+// summary there, and the page this boot's posture, and the page shows the
+// newest of each from there. A small client of the server's own protocol
+// (version 3), over its UNIX socket, as the service's own role, which peer
+// authentication takes from its user: no password, no TCP, no libpq.
+// Values go as parameters, never into the SQL. When the server is not
+// there, or says no, the page reads the files in /data/svc as before.
+
+const pg_socket = "/run/svc/postgres/.s.PGSQL.5432";
+const pg_max_message = 16 << 20;
+
+/// This boot's posture, once in the database, is not sent again.
+var posture_kept = false;
+
+const Kept = struct { posture: ?Posture = null, scan: ?Summary = null, said: []const u8 };
+
+fn fromDatabase(io: Io, gpa: Allocator) Kept {
+    if (!exists(io, pg_socket)) return .{ .said = "none; the page reads its files" };
+    var db = Pg.connect(gpa, "status") catch |err| return .{ .said = whyNot(gpa, err) };
+    defer db.close();
+    if (!posture_kept) if (readAll(io, gpa, posture_path)) |text| {
+        const boot = trimLine(readOr(io, gpa, "/proc/sys/kernel/random/boot_id", ""));
+        _ = db.query(
+            gpa,
+            "INSERT INTO status.posture (boot, report) VALUES ($1, $2::jsonb) ON CONFLICT " ++
+                "(boot) DO NOTHING",
+            &.{ boot, text },
+        ) catch |err| return .{ .said = whyNot(gpa, err) };
+        posture_kept = true;
+    } else |_| {};
+    const rows = db.query(gpa,
+        \\SELECT current_setting('server_version'),
+        \\       (SELECT report::text FROM status.posture ORDER BY at DESC LIMIT 1),
+        \\       (SELECT summary::text FROM status.scans ORDER BY at DESC LIMIT 1),
+        \\       (SELECT count(*) FROM status.posture)::text,
+        \\       (SELECT count(*) FROM status.scans)::text
+    , &.{}) catch |err| return .{ .said = whyNot(gpa, err) };
+    if (rows.len != 1 or
+        rows[0].len != 5) return .{
+        .said = "unreachable: an answer of the wrong shape; the page reads its files",
+    };
+    const r = rows[0];
+    const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
+    return .{
+        .posture = if (r[1]) |t|
+            std.json.parseFromSliceLeaky(Posture, gpa, t, opts) catch null
+        else
+            null,
+        .scan = if (r[2]) |t|
+            std.json.parseFromSliceLeaky(Summary, gpa, t, opts) catch null
+        else
+            null,
+        .said = gpa.print("PostgreSQL {s}: the checks of {s} boot{s} and {s} " ++
+            "scan{s} kept, the newest shown here", .{
+            r[0] orelse "?", r[3] orelse "0",
+            plural(std.fmt.parseInt(
+                usize,
+                r[3] orelse "0",
+                10,
+            ) catch 0),
+            r[4] orelse "0", plural(std.fmt.parseInt(usize, r[4] orelse "0", 10) catch 0),
+        }) catch "PostgreSQL",
+    };
+}
+
+fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
+    return gpa.print(
+        "unreachable ({s}); the page reads its files",
+        .{@errorName(err)},
+    ) catch "unreachable";
+}
+
+/// The scan's summary into the database, where there is one. The file is
+/// written either way, so a failure here is said and nothing more.
+fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
+    if (!exists(io, pg_socket)) return;
+    var db = Pg.connect(
+        gpa,
+        "grype",
+    ) catch |err| return record(
+        io,
+        .{ .event = "error", .step = "database", .@"error" = @errorName(err) },
+    );
+    defer db.close();
+    _ = db.query(
+        gpa,
+        "INSERT INTO status.scans (summary) VALUES ($1::jsonb)",
+        &.{summary},
+    ) catch |err|
+        record(io, .{ .event = "error", .step = "database", .@"error" = @errorName(err) });
+}
+
+/// One connection to the server, as one role, to the postgres database.
+const Pg = struct {
+    fd: i32,
+
+    fn connect(gpa: Allocator, as: []const u8) !Pg {
+        const linux = std.os.linux;
+        const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+        if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
+        var p: Pg = .{ .fd = @intCast(rc) };
+        errdefer _ = linux.close(p.fd);
+        // A server that stops answering costs the page five seconds, not
+        // the page.
+        const tv: linux.timeval = .{ .sec = 5, .usec = 0 };
+        for ([_]u32{
+            linux.SO.RCVTIMEO,
+            linux.SO.SNDTIMEO,
+        }) |opt| _ = linux.setsockopt(
+            p.fd,
+            linux.SOL.SOCKET,
+            opt,
+            std.mem.asBytes(&tv),
+            @sizeOf(linux.timeval),
+        );
+        var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+        @memcpy(addr.path[0..pg_socket.len], pg_socket);
+        if (linux.errno(linux.connect(
+            p.fd,
+            @ptrCast(&addr),
+            @sizeOf(linux.sockaddr.un),
+        )) != .SUCCESS) return error.NoServer;
+
+        var m: std.ArrayList(u8) = .empty;
+        try m.appendNTimes(gpa, 0, 4);
+        try m.appendSlice(gpa, &.{ 0, 3, 0, 0 }); // protocol 3.0
+        for ([_][]const u8{
+            "user",
+            as,
+            "database",
+            "postgres",
+            "application_name",
+            "werewolf-status",
+        }) |field| {
+            if (std.mem.findScalar(u8, field, 0) != null) return error.BadValue;
+            try m.appendSlice(gpa, field);
+            try m.append(gpa, 0);
+        }
+        try m.append(gpa, 0);
+        std.mem.writeInt(u32, m.items[0..4], @intCast(m.items.len), .big);
+        try p.send(m.items);
+        while (true) {
+            const msg = try p.receive(gpa);
+            switch (msg.kind) {
+                'R' => if (msg.body.len < 4 or
+                    std.mem.readInt(
+                        u32,
+                        msg.body[0..4],
+                        .big,
+                    ) != 0) return error.AuthenticationRefused,
+                'E' => return error.Refused,
+                'Z' => return p,
+                else => {},
+            }
+        }
+    }
+
+    /// One statement, its parameters as text; its rows, each column text,
+    /// or null for NULL.
+    fn query(
+        p: *Pg,
+        gpa: Allocator,
+        sql: []const u8,
+        params: []const []const u8,
+    ) ![]const []const ?[]const u8 {
+        if (std.mem.findScalar(u8, sql, 0) != null) return error.BadValue;
+        var m: std.ArrayList(u8) = .empty;
+        // Parse: the unnamed statement, its parameters' types inferred.
+        var start = try messageStart(gpa, &m, 'P');
+        try m.appendSlice(gpa, "\x00");
+        try m.appendSlice(gpa, sql);
+        try m.appendSlice(gpa, &.{ 0, 0, 0 });
+        messageEnd(&m, start);
+        // Bind: the unnamed portal, every value as text.
+        start = try messageStart(gpa, &m, 'B');
+        try m.appendSlice(gpa, &.{ 0, 0, 0, 0 });
+        try appendInt(gpa, &m, u16, @intCast(params.len));
+        for (params) |v| {
+            try appendInt(gpa, &m, u32, @intCast(v.len));
+            try m.appendSlice(gpa, v);
+        }
+        try m.appendSlice(gpa, &.{ 0, 0 });
+        messageEnd(&m, start);
+        start = try messageStart(gpa, &m, 'E'); // Execute, every row
+        try m.appendSlice(gpa, &.{ 0, 0, 0, 0, 0 });
+        messageEnd(&m, start);
+        start = try messageStart(gpa, &m, 'S'); // Sync
+        messageEnd(&m, start);
+        try p.send(m.items);
+
+        var rows: std.ArrayList([]const ?[]const u8) = .empty;
+        var failed = false;
+        while (true) {
+            const msg = try p.receive(gpa);
+            switch (msg.kind) {
+                'D' => try rows.append(gpa, try dataRow(gpa, msg.body)),
+                'E' => failed = true,
+                'Z' => return if (failed) error.Refused else rows.items,
+                else => {}, // completions, notices, parameter changes
+            }
+        }
+    }
+
+    fn close(p: *Pg) void {
+        _ = std.os.linux.write(p.fd, "X\x00\x00\x00\x04", 5);
+        _ = std.os.linux.close(p.fd);
+    }
+
+    fn send(p: *Pg, bytes: []const u8) !void {
+        var off: usize = 0;
+        while (off < bytes.len) {
+            const n = std.os.linux.write(p.fd, bytes[off..].ptr, bytes.len - off);
+            if (std.os.linux.errno(n) != .SUCCESS or n == 0) return error.Lost;
+            off += n;
+        }
+    }
+
+    const Message = struct { kind: u8, body: []const u8 };
+
+    fn receive(p: *Pg, gpa: Allocator) !Message {
+        var head: [5]u8 = undefined;
+        try p.fill(&head);
+        const len = std.mem.readInt(u32, head[1..5], .big);
+        if (len < 4 or len > pg_max_message) return error.Lost;
+        const body = try gpa.alloc(u8, len - 4);
+        try p.fill(body);
+        return .{ .kind = head[0], .body = body };
+    }
+
+    fn fill(p: *Pg, buf: []u8) !void {
+        var off: usize = 0;
+        while (off < buf.len) {
+            const n = std.os.linux.read(p.fd, buf[off..].ptr, buf.len - off);
+            if (std.os.linux.errno(n) != .SUCCESS or n == 0) return error.Lost;
+            off += n;
+        }
+    }
+};
+
+fn messageStart(gpa: Allocator, m: *std.ArrayList(u8), kind: u8) !usize {
+    try m.append(gpa, kind);
+    const at = m.items.len;
+    try m.appendNTimes(gpa, 0, 4);
+    return at;
+}
+
+/// The length of the message whose length field is at start: itself and
+/// what follows.
+fn messageEnd(m: *std.ArrayList(u8), start: usize) void {
+    std.mem.writeInt(u32, m.items[start..][0..4], @intCast(m.items.len - start), .big);
+}
+
+fn appendInt(gpa: Allocator, m: *std.ArrayList(u8), comptime T: type, v: T) !void {
+    var b: [@sizeOf(T)]u8 = undefined;
+    std.mem.writeInt(T, &b, v, .big);
+    try m.appendSlice(gpa, &b);
+}
+
+/// A DataRow's columns: a count, then each a length (-1 for NULL) and
+/// its bytes.
+fn dataRow(gpa: Allocator, body: []const u8) ![]const ?[]const u8 {
+    if (body.len < 2) return error.Lost;
+    const n = std.mem.readInt(u16, body[0..2], .big);
+    const cols = try gpa.alloc(?[]const u8, n);
+    var at: usize = 2;
+    for (cols) |*c| {
+        if (at + 4 > body.len) return error.Lost;
+        const len = std.mem.readInt(i32, body[at..][0..4], .big);
+        at += 4;
+        if (len < 0) {
+            c.* = null;
+            continue;
+        }
+        if (at + @as(usize, @intCast(len)) > body.len) return error.Lost;
+        c.* = body[at .. at + @as(usize, @intCast(len))];
+        at += @intCast(len);
+    }
+    return cols;
 }
 
 // --- patches -----------------------------------------------------------------
@@ -965,7 +1358,13 @@ const Patch = struct {
 
 /// The newest `limit` patches in reports, newest first. Within an update,
 /// the kernel comes first, then packages that fixed CVEs, then the rest.
-fn patchHistory(gpa: Allocator, reports: []const Report, events: []const Event, installed: []const Package, limit: usize) ![]const Patch {
+fn patchHistory(
+    gpa: Allocator,
+    reports: []const Report,
+    events: []const Event,
+    installed: []const Package,
+    limit: usize,
+) ![]const Patch {
     var out: std.ArrayList(Patch) = .empty;
     for (reports, 0..) |r, i| {
         if (out.items.len >= limit) break;
@@ -987,9 +1386,20 @@ fn patchHistory(gpa: Allocator, reports: []const Report, events: []const Event, 
             const origin = originOf(installed, c.name);
             var cves: []const []const u8 = &.{};
             for (r.package_cves) |fix| {
-                if (std.mem.eql(u8, fix.origin, origin) or isSubpackage(c.name, fix.origin)) cves = fix.cves;
+                if (std.mem.eql(u8, fix.origin, origin) or
+                    isSubpackage(c.name, fix.origin)) cves = fix.cves;
             }
-            try batch.append(gpa, .{ .time = r.time, .name = c.name, .from = c.from, .to = c.to, .cves = cves, .outcome = outcome });
+            try batch.append(
+                gpa,
+                .{
+                    .time = r.time,
+                    .name = c.name,
+                    .from = c.from,
+                    .to = c.to,
+                    .cves = cves,
+                    .outcome = outcome,
+                },
+            );
         }
         std.mem.sort(Patch, batch.items, {}, cvesFirst);
         try out.appendSlice(gpa, batch.items);
@@ -1050,7 +1460,12 @@ fn parseLog(gpa: Allocator, text: []const u8) ![]const Event {
     var out: std.ArrayList(Event) = .empty;
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
-        const e = std.json.parseFromSliceLeaky(Event, gpa, line, .{ .ignore_unknown_fields = true }) catch continue;
+        const e = std.json.parseFromSliceLeaky(
+            Event,
+            gpa,
+            line,
+            .{ .ignore_unknown_fields = true },
+        ) catch continue;
         try out.append(gpa, e);
     }
     return out.items;
@@ -1097,7 +1512,11 @@ fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
 }
 
 fn withOrigin(p: Package) Package {
-    return .{ .name = p.name, .version = p.version, .origin = if (p.origin.len > 0) p.origin else p.name };
+    return .{
+        .name = p.name,
+        .version = p.version,
+        .origin = if (p.origin.len > 0) p.origin else p.name,
+    };
 }
 
 fn byName(_: void, a: Package, b: Package) bool {
@@ -1119,22 +1538,6 @@ fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     return found;
 }
 
-const User = struct { uid: std.posix.uid_t, gid: std.posix.gid_t };
-
-/// name's uid and gid in an /etc/passwd: name:password:uid:gid:...
-fn lookupUser(passwd: []const u8, name: []const u8) ?User {
-    var lines = std.mem.tokenizeScalar(u8, passwd, '\n');
-    while (lines.next()) |line| {
-        var f = std.mem.splitScalar(u8, line, ':');
-        if (!std.mem.eql(u8, f.next() orelse continue, name)) continue;
-        _ = f.next() orelse return null;
-        const uid = std.fmt.parseInt(std.posix.uid_t, f.next() orelse return null, 10) catch return null;
-        const gid = std.fmt.parseInt(std.posix.gid_t, f.next() orelse return null, 10) catch return null;
-        return .{ .uid = uid, .gid = gid };
-    }
-    return null;
-}
-
 fn parseSlot(cmdline: []const u8) []const u8 {
     var it = std.mem.tokenizeAny(u8, cmdline, " \n");
     while (it.next()) |arg| {
@@ -1154,9 +1557,15 @@ fn formatUptime(gpa: Allocator, secs: u64) ![]const u8 {
     const days = secs / 86400;
     const hours = secs % 86400 / 3600;
     const mins = secs % 3600 / 60;
-    if (days > 0) return std.fmt.allocPrint(gpa, "{d} day{s}, {d} hour{s}", .{ days, plural(days), hours, plural(hours) });
-    if (hours > 0) return std.fmt.allocPrint(gpa, "{d} hour{s}, {d} min", .{ hours, plural(hours), mins });
-    return std.fmt.allocPrint(gpa, "{d} min", .{mins});
+    if (days > 0) return gpa.print(
+        "{d} day{s}, {d} hour{s}",
+        .{ days, plural(days), hours, plural(hours) },
+    );
+    if (hours > 0) return gpa.print(
+        "{d} hour{s}, {d} min",
+        .{ hours, plural(hours), mins },
+    );
+    return gpa.print("{d} min", .{mins});
 }
 
 fn firstWords(text: []const u8, n: usize) []const u8 {
@@ -1177,7 +1586,8 @@ fn trimLine(text: []const u8) []const u8 {
 /// An RFC 3339 time in UTC, as the updater writes them, as seconds; null
 /// for anything else.
 fn parseRfc3339(s: []const u8) ?u64 {
-    if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':' or s[19] != 'Z') return null;
+    if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':' or
+        s[19] != 'Z') return null;
     const n = struct {
         fn f(t: []const u8) ?u32 {
             return std.fmt.parseInt(u32, t, 10) catch null;
@@ -1205,8 +1615,9 @@ fn rfc3339Buf(buf: *[32]u8, secs: u64) []const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return std.mem.print(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch unreachable;
 }
 
@@ -1215,8 +1626,9 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(gpa, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return gpa.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
 }
 
@@ -1253,22 +1665,9 @@ fn exists(io: Io, path: []const u8) bool {
 
 /// Write path whole or not at all: nginx may be reading the old one.
 fn writeAtomic(io: Io, gpa: Allocator, path: []const u8, data: []const u8) !void {
-    const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
+    const tmp = try gpa.print("{s}.tmp", .{path});
     try Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
     try Dir.rename(Dir.cwd(), tmp, Dir.cwd(), path, io);
-}
-
-/// Become user for good: no capabilities, now or from anything it runs,
-/// no groups but the user's own, and no way back to root.
-fn dropTo(user: User) !void {
-    const linux = std.os.linux;
-    var cap: usize = 0;
-    while (cap < 64) : (cap += 1) _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
-    if (linux.errno(linux.setgroups(0, &[_]linux.gid_t{})) != .SUCCESS) return error.SetGroupsFailed;
-    if (linux.errno(linux.setresgid(user.gid, user.gid, user.gid)) != .SUCCESS) return error.SetGidFailed;
-    if (linux.errno(linux.setresuid(user.uid, user.uid, user.uid)) != .SUCCESS) return error.SetUidFailed;
-    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS) return error.NoNewPrivsFailed;
-    if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
 }
 
 /// One JSON line on the console, as the updater logs.
@@ -1279,7 +1678,10 @@ fn record(io: Io, fields: anytype) void {
     var rest: Io.Writer.Allocating = .init(gpa);
     std.json.Stringify.value(fields, .{}, &rest.writer) catch return;
     const time = rfc3339(gpa, nowSecs(io)) catch return;
-    const line = std.fmt.allocPrint(gpa, "{s}: {{\"time\":\"{s}\",{s}\n", .{ role, time, rest.written()[1..] }) catch return;
+    const line = gpa.print(
+        "{s}: {{\"time\":\"{s}\",{s}\n",
+        .{ role, time, rest.written()[1..] },
+    ) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 
@@ -1299,7 +1701,11 @@ test advisory {
     defer out.deinit();
     try advisory(&out.writer, "CVE-2026-1234");
     try advisory(&out.writer, " GHSA\"><x");
-    try testing.expectEqualStrings("<a class=\"adv\" href=\"https://osv.dev/vulnerability/CVE-2026-1234\">CVE-2026-1234</a> GHSA&quot;&gt;&lt;x", out.written());
+    try testing.expectEqualStrings(
+        "<a class=\"adv\" href=\"https://osv.dev/vulnerability/CVE-2026-1234\">CVE-2026-1234</a>" ++
+            " GHSA&quot;&gt;&lt;x",
+        out.written(),
+    );
 }
 
 test formatUptime {
@@ -1311,14 +1717,20 @@ test formatUptime {
     try testing.expectEqualStrings("4 hours, 5 min", try formatUptime(a, 4 * 3600 + 5 * 60));
     try testing.expectEqualStrings("1 hour, 0 min", try formatUptime(a, 3600));
     try testing.expectEqualStrings("1 day, 0 hours", try formatUptime(a, 86400));
-    try testing.expectEqualStrings("3 days, 4 hours", try formatUptime(a, 3 * 86400 + 4 * 3600 + 5 * 60 + 9));
+    try testing.expectEqualStrings(
+        "3 days, 4 hours",
+        try formatUptime(a, 3 * 86400 + 4 * 3600 + 5 * 60 + 9),
+    );
     try testing.expectEqual(1234, parseUptime("1234.56 4567.89\n"));
     try testing.expectEqual(0, parseUptime(""));
 }
 
 test "small parsers" {
     try testing.expectEqualStrings("0.00 0.01 0.05", firstWords("0.00 0.01 0.05 1/80 1234\n", 3));
-    try testing.expectEqualStrings("b", parseSlot("console=hvc0 werewolf.slot=b werewolf.victim=x:/y\n"));
+    try testing.expectEqualStrings(
+        "b",
+        parseSlot("console=hvc0 werewolf.slot=b werewolf.victim=x:/y\n"),
+    );
     try testing.expectEqualStrings("", parseSlot("console=ttyS0\n"));
     const mounts =
         \\proc /proc proc rw 0 0
@@ -1332,16 +1744,30 @@ test "small parsers" {
     try testing.expect(isSubpackage("openssl-4.0-libcrypto", "openssl-4.0"));
     try testing.expect(isSubpackage("openssl-4.0", "openssl-4.0"));
     try testing.expect(!isSubpackage("openssl-4.01", "openssl-4.0"));
-    const passwd = "root:x:0:0:root:/root:/bin/sh\ngrype:x:201:202::/var/empty:/sbin/nologin\nbad:x:nope:1::/:/x\n";
-    try testing.expectEqual(User{ .uid = 201, .gid = 202 }, lookupUser(passwd, "grype").?);
-    try testing.expectEqual(null, lookupUser(passwd, "gry"));
-    try testing.expectEqual(null, lookupUser(passwd, "bad"));
+}
+
+test dataRow {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const cols = try dataRow(
+        arena.allocator(),
+        &.{ 0, 3, 0, 0, 0, 2, 'h', 'i', 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0 },
+    );
+    try testing.expectEqual(3, cols.len);
+    try testing.expectEqualStrings("hi", cols[0].?);
+    try testing.expectEqual(null, cols[1]);
+    try testing.expectEqualStrings("", cols[2].?);
+    try testing.expectError(error.Lost, dataRow(arena.allocator(), &.{ 0, 1, 0, 0, 0, 9, 'x' }));
+    try testing.expectError(error.Lost, dataRow(arena.allocator(), &.{0}));
 }
 
 test parseInstalled {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const pkgs = try parseInstalled(arena.allocator(), "P:zlib\nV:1.3-r0\n\nP:openssl-4.0-libcrypto\nV:4.0.2-r0\no:openssl-4.0\n");
+    const pkgs = try parseInstalled(
+        arena.allocator(),
+        "P:zlib\nV:1.3-r0\n\nP:openssl-4.0-libcrypto\nV:4.0.2-r0\no:openssl-4.0\n",
+    );
     try testing.expectEqual(2, pkgs.len);
     try testing.expectEqualStrings("openssl-4.0-libcrypto", pkgs[0].name);
     try testing.expectEqualStrings("openssl-4.0", pkgs[0].origin);
@@ -1365,7 +1791,11 @@ test summarize {
         \\],
         \\"descriptor":{"name":"grype","version":"0.120.0","db":{"status":{"built":"2026-10-06T06:32:14Z","schemaVersion":"v6.1.10"}}}}
     ;
-    const owners = try parseOwners(a, "P:grype\nV:0.120.0-r0\nF:usr/bin\nR:grype\n\nP:zlib\nV:1.1\nF:usr/lib\nR:libz.so.1\n", "usr/lib/werewolf/status\n");
+    const owners = try parseOwners(
+        a,
+        "P:grype\nV:0.120.0-r0\nF:usr/bin\nR:grype\n\nP:zlib\nV:1.1\nF:usr/lib\nR:libz.so.1\n",
+        "usr/lib/werewolf/status\n",
+    );
     const s = try summarize(a, json, "2026-10-06T12:00:00Z", owners);
     try testing.expectEqual(4, s.findings.len);
     try testing.expectEqualStrings("GHSA-x", s.findings[0].id);
@@ -1419,7 +1849,10 @@ test patchHistory {
         \\{"time":"2026-10-06T13:00:00Z","host":"h","event":"update","build":"bbbb"}
         \\{"time":"2026-10-06T14:00:00Z","host":"h","event":"check","result":"current"}
     );
-    const installed = try parseInstalled(a, "P:openssl-4.0-libcrypto\nV:4.0.2\no:openssl-4.0\n\nP:zlib\nV:1.2\n");
+    const installed = try parseInstalled(
+        a,
+        "P:openssl-4.0-libcrypto\nV:4.0.2\no:openssl-4.0\n\nP:zlib\nV:1.2\n",
+    );
 
     const p = try patchHistory(a, &.{ newer, older }, events, installed, 25);
     try testing.expectEqual(5, p.len);
@@ -1454,7 +1887,10 @@ test writePage {
         .slot = "a",
         .shell = false,
         .data = "ext4",
-        .packages = &.{ .{ .name = "glibc", .version = "2.44-r7", .origin = "glibc" }, .{ .name = "grype", .version = "0.120.0-r0", .origin = "grype" } },
+        .packages = &.{
+            .{ .name = "glibc", .version = "2.44-r7", .origin = "glibc" },
+            .{ .name = "grype", .version = "0.120.0-r0", .origin = "grype" },
+        },
     };
     var out: Io.Writer.Allocating = .init(arena.allocator());
     try writePage(&out.writer, facts);
@@ -1476,9 +1912,36 @@ test writePage {
         .db_built = "2026-10-06T06:32:14Z",
         .counts = .{ .high = 1, .medium = 2 },
         .findings = &.{
-            .{ .severity = "High", .id = "GO-2026-4887", .package = "github.com/docker/docker", .version = "v28.5.2", .kind = "go-module", .fixed_in = "", .in_package = "grype", .in_version = "0.120.0-r0" },
-            .{ .severity = "Medium", .id = "CVE-2026-8674", .package = "glibc", .version = "2.44-r7", .kind = "apk", .fixed_in = "2.44-r8", .in_package = "glibc", .in_version = "2.44-r7" },
-            .{ .severity = "Medium", .id = "GHSA-pxq6", .package = "github.com/docker/docker", .version = "v28.5.2", .kind = "go-module", .fixed_in = "", .in_package = "grype", .in_version = "0.120.0-r0" },
+            .{
+                .severity = "High",
+                .id = "GO-2026-4887",
+                .package = "github.com/docker/docker",
+                .version = "v28.5.2",
+                .kind = "go-module",
+                .fixed_in = "",
+                .in_package = "grype",
+                .in_version = "0.120.0-r0",
+            },
+            .{
+                .severity = "Medium",
+                .id = "CVE-2026-8674",
+                .package = "glibc",
+                .version = "2.44-r7",
+                .kind = "apk",
+                .fixed_in = "2.44-r8",
+                .in_package = "glibc",
+                .in_version = "2.44-r7",
+            },
+            .{
+                .severity = "Medium",
+                .id = "GHSA-pxq6",
+                .package = "github.com/docker/docker",
+                .version = "v28.5.2",
+                .kind = "go-module",
+                .fixed_in = "",
+                .in_package = "grype",
+                .in_version = "0.120.0-r0",
+            },
         },
     };
     out = .init(arena.allocator());

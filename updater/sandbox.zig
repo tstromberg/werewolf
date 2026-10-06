@@ -29,7 +29,10 @@ pub fn tieTo(parent: linux.pid_t) void {
 /// Close every descriptor but those in keep, with 0, 1 and 2 on /dev/null:
 /// nothing of root's open files, its console included, goes with a child.
 pub fn closeAllBut(keep: []const i32) !void {
-    const null_fd: i32 = @intCast(try sys(linux.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0), "open /dev/null"));
+    const null_fd: i32 = @intCast(try sys(
+        linux.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0),
+        "open /dev/null",
+    ));
     for (0..3) |fd| _ = try sys(linux.dup3(null_fd, @intCast(fd), 0), "dup3");
     var sorted: [8]i32 = undefined;
     const k = sorted[0..keep.len];
@@ -37,10 +40,16 @@ pub fn closeAllBut(keep: []const i32) !void {
     std.mem.sort(i32, k, {}, std.sort.asc(i32));
     var from: i32 = 3;
     for (k) |fd| {
-        if (fd > from) _ = try sys(linux.close_range(from, fd - 1, .{ .UNSHARE = false, .CLOEXEC = false }), "close_range");
+        if (fd > from) _ = try sys(
+            linux.close_range(from, fd - 1, .{ .UNSHARE = false, .CLOEXEC = false }),
+            "close_range",
+        );
         from = @max(from, fd + 1);
     }
-    _ = try sys(linux.close_range(from, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false }), "close_range");
+    _ = try sys(
+        linux.close_range(from, std.math.maxInt(i32), .{ .UNSHARE = false, .CLOEXEC = false }),
+        "close_range",
+    );
 }
 
 /// At most n of resource, hard and soft.
@@ -81,22 +90,38 @@ pub const Rule = struct { fd: i32, access: u64 };
 pub fn landlock(rules: []const Rule, ports: []const u16) !void {
     const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1);
     _ = try sys(abi, "landlock version");
-    const fs_all: u64 = if (abi >= 5) 0xffff else if (abi >= 3) 0x7fff else if (abi >= 2) 0x3fff else 0x1fff;
+    const fs_all: u64 = if (abi >= 5)
+        0xffff
+    else if (abi >= 3)
+        0x7fff
+    else if (abi >= 2)
+        0x3fff
+    else
+        0x1fff;
     // BIND_TCP and CONNECT_TCP; the scopes, abstract sockets and signals.
     const attr: [3]u64 = .{ fs_all, if (abi >= 4) 0x3 else 0, if (abi >= 6) 0x3 else 0 };
     const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
-    const ruleset = try sys(linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0), "landlock ruleset");
+    const ruleset = try sys(
+        linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
+        "landlock ruleset",
+    );
     for (rules) |r| {
         // LANDLOCK_RULE_PATH_BENEATH, of the rights this kernel knows.
         var beneath: [12]u8 = undefined;
         std.mem.writeInt(u64, beneath[0..8], r.access & fs_all, .little);
         std.mem.writeInt(i32, beneath[8..12], r.fd, .little);
-        _ = try sys(linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0), "landlock rule");
+        _ = try sys(
+            linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0),
+            "landlock rule",
+        );
     }
     if (abi >= 4) for (ports) |port| {
         // LANDLOCK_RULE_NET_PORT: CONNECT_TCP.
         const rule: [2]u64 = .{ 0x2, port };
-        _ = try sys(linux.syscall4(.landlock_add_rule, ruleset, 2, @intFromPtr(&rule), 0), "landlock port");
+        _ = try sys(
+            linux.syscall4(.landlock_add_rule, ruleset, 2, @intFromPtr(&rule), 0),
+            "landlock port",
+        );
     };
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
     _ = try sys(linux.syscall2(.landlock_restrict_self, ruleset, 0), "landlock restrict");
@@ -160,7 +185,10 @@ pub const Filter = struct {
         const refuse_at = f.n + 2;
         f.prog[kill] = .{ .code = BPF_RET_K, .k = linux.SECCOMP.RET.KILL_PROCESS };
         f.prog[allow_at] = .{ .code = BPF_RET_K, .k = linux.SECCOMP.RET.ALLOW };
-        f.prog[refuse_at] = .{ .code = BPF_RET_K, .k = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(linux.E.PERM)) };
+        f.prog[refuse_at] = .{
+            .code = BPF_RET_K,
+            .k = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(linux.E.PERM)),
+        };
         for (f.prog[3..kill], 3..) |*insn, i| {
             if (insn.code != BPF_JEQ_K) continue;
             if (insn.jt == to_allow) insn.jt = @intCast(allow_at - i - 1);
@@ -172,12 +200,18 @@ pub const Filter = struct {
     pub fn install(f: *Filter) !void {
         const insns = f.finish();
         const prog: SockFprog = .{ .len = @intCast(insns.len), .filter = insns.ptr };
-        _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
+        _ = try sys(
+            linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
+            "no_new_privs",
+        );
         _ = try sys(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &prog), "seccomp");
     }
 
     fn nr(comptime name: []const u8) ?u32 {
-        return if (@hasField(linux.SYS, name)) @intCast(@backingInt(@field(linux.SYS, name))) else null;
+        return if (@hasField(linux.SYS, name))
+            @intCast(@backingInt(@field(linux.SYS, name)))
+        else
+            null;
     }
 };
 
@@ -190,7 +224,10 @@ pub const Exit = struct { code: u8, out: []const u8 };
 /// which and the kernel's reason.
 pub fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
     if (err != error.SystemCall) return @errorName(err);
-    return std.fmt.allocPrint(gpa, "{s}: {s}", .{ failed, errnoName(failed_errno) }) catch "SystemCall";
+    return gpa.print(
+        "{s}: {s}",
+        .{ failed, errnoName(failed_errno) },
+    ) catch "SystemCall";
 }
 
 /// A child's last words, and its end.

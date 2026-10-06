@@ -18,6 +18,12 @@ bite leaves one. On each machine it runs [test/checks](../test/checks) as
 root on the serial console, then powers it off. A machine passes when it
 boots, every check comes out as expected, and it shuts down cleanly.
 
+On aarch64 each machine is given EL2 wherever the host can lend it (TCG
+always, HVF on Apple M3 and later, KVM where the host nests), as a cloud
+that offers nested virtualization would: the kernel's built-in KVM would
+start there, so posture's `kernel-no-hypervisor` proves that
+`kvm-arm.mode=none` stops it, and `qemu-host` that its allowance does not.
+
 Those checks need a shell, which most forms do not have, so each form is
 built for them with `DEV=1`: busybox-full on top of its packages, in
 `build/<arch>/<form>-dev`, and nothing else changed. The forms released

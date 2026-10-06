@@ -131,14 +131,16 @@ falls back:
 | `open_by_handle_at`, `name_to_handle_at` | walk past mount and chroot boundaries by inode handle |
 | `add_key`, `keyctl`, `request_key` | the kernel keyring; cryptsetup's use of it is over before init hands over |
 | `process_vm_readv`, `process_vm_writev` | read or write another process; Yama already refuses, denied again for the trail |
-| `acct`, `swapon`, `swapoff`, `quotactl`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `syslog`, `vhangup` | unused here; old, rarely audited code |
+| `acct`, `swapon`, `swapoff`, `quotactl`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `vhangup` | unused here; old, rarely audited code |
 | `modify_ldt` (x86_64) | the LDT, which only 16-bit code needs, and a past exploit primitive; `ia32_emulation=0` already closes `int 0x80`. Done |
 
-Done so far: init installs the filter itself (`seal()`, init/init.zig),
-with `modify_ldt` on x86_64 and the architecture check below; the rest of
-the table waits for the allowances that would give each back. posture's
-`kernel-seal` checks PID 1 carries a filter, and `kernel-legacy` that
-`modify_ldt` is refused.
+Done: init installs the filter itself (`seal()`, init/init.zig), with
+every row above that the architecture has, and the architecture check
+below. `syslog` is not denied, though first listed: busybox's `dmesg`
+reads the kernel's log through it, and test/checks reads it so. No form
+yet asks for `ebpf` or `io_uring`, so those allowances are not built; a
+form that needs one adds it then. posture's `kernel-seal` checks PID 1
+carries a filter, and `kernel-legacy` that `modify_ldt` is refused.
 
 The filter looks at syscall numbers only, never arguments. The kernel
 (5.11 and later) then caches, per syscall, that the filter always allows it,
@@ -149,25 +151,26 @@ and skips the filter on those calls, so the table's length costs nothing.
 Not nothing, and the only thing in this design that is not. A process
 under any seccomp filter enters every system call through the kernel's
 slower path, which checks the cache; without one it does not. Measured on
-2026-10-06, 20 million `getpid` calls in an Ubuntu 26.04 VM (Linux 7.0,
-arm64, Apple M4 Max), twice each:
+2026-10-06, 20 million `getpid` calls, on an Apple M4 Max:
 
-| Filter | ns a call |
-| --- | --- |
-| none | 114–115 |
-| one instruction, allow everything | 131–133 |
-| the seal | 131–132 |
-| 200 comparisons | 129–133 |
+| Filter | werewolf's kernel (Alpine's 6.18), ns a call | Ubuntu 26.04's (Linux 7.0), ns a call |
+| --- | --- | --- |
+| none | 124–125 | 114–115 |
+| one instruction, allow everything | | 131–133 |
+| the seal | 150–151 | 131–132 |
+| 200 comparisons | 150 | 129–133 |
 
-So about 15 ns a system call, whatever the filter holds: the cache works,
-and the cost is having a filter at all. `getpid` is the cheapest call
+werewolf's kernel was booted under QEMU with HVF, its `/init` a program
+that timed the calls, installed the filter, and timed them again; Ubuntu's
+in a Lima VM. So about 25 ns a system call on werewolf's kernel, 15 on
+Ubuntu's, whatever the filter holds: the cache works, and the cost is
+having a filter at all. `getpid` is the cheapest call
 there is; against a `read` or `write` of a few kilobytes, which take 0.5 to
-1 µs, it is 1–3%, and a busy database making a few hundred thousand calls a
+1 µs, it is 2–5%, and a busy database making a few hundred thousand calls a
 second spends a fraction of a percent of a CPU on it. Work that seldom
 calls the kernel, as `../scan` matching rules, pays nothing. Every program
 in a Docker container pays the same already, under Docker's default
-filter. Not yet measured on werewolf's own kernel (Alpine's 6.18), whose
-slower path is the same code.
+filter.
 
 werewolf pays it, by choice: it is the one way to close for good, root
 included, what no setting can (`modify_ldt` on x86_64, 32-bit system calls
@@ -187,7 +190,10 @@ and the compat entry points are a second, separately numbered surface.
 
 A capability dropped from PID 1's bounding set before it execs runit is
 gone for every process after it, uid 0 included, and cannot come back
-short of a reboot. init drops:
+short of a reboot. Done: init drops these as it seals, but for the
+network's two, which fence drops once it has set the network policy it
+needs `CAP_NET_ADMIN` for, unless the form allows them (*Allowances*).
+posture's `kernel-bounding-set` checks PID 1's bounding set:
 
 | Capability | Takes away |
 | --- | --- |
@@ -197,7 +203,13 @@ short of a reboot. init drops:
 | `CAP_NET_RAW` | packet sockets, and with them classic BPF socket filters: how BPFDoor listens without `bpf()` or an open port |
 | `CAP_NET_ADMIN` | changes to addresses, routes, tc, XDP and, once it exists, nftables: the firewall init loads is the firewall |
 | `CAP_MAC_ADMIN`, `CAP_MAC_OVERRIDE` | LSM policy; IPE's, once verified-boot.md lands |
-| `CAP_SYSLOG`, `CAP_SYS_TIME`, `CAP_SYS_PACCT`, `CAP_LINUX_IMMUTABLE`, `CAP_AUDIT_CONTROL`, `CAP_CHECKPOINT_RESTORE`, `CAP_WAKE_ALARM`, `CAP_BLOCK_SUSPEND`, `CAP_MKNOD` | unused here |
+| `CAP_SYS_TIME`, `CAP_SYS_PACCT`, `CAP_LINUX_IMMUTABLE`, `CAP_AUDIT_CONTROL`, `CAP_CHECKPOINT_RESTORE`, `CAP_WAKE_ALARM`, `CAP_BLOCK_SUSPEND`, `CAP_MKNOD` | unused here |
+
+`CAP_SYSLOG` stays, though first listed: with `dmesg_restrict=1` it is
+what reads the kernel's log, which `dmesg`, posture's proofs of a refusal
+and test/checks all read. Without `CAP_SYS_RAWIO` the kernel refuses
+`/dev/mem` before lockdown is asked, so that refusal is no longer logged;
+posture accepts it.
 
 It keeps what sshd, runit and the updater use: `CAP_SETUID`, `CAP_SETGID`,
 `CAP_SYS_CHROOT`, `CAP_KILL`, `CAP_DAC_*`, `CAP_CHOWN`, `CAP_FOWNER`,
@@ -217,12 +229,15 @@ file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
 | Allowance | Gives back |
 | --- | --- |
 | `ebpf` | `bpf` and `perf_event_open` in the filter; `CAP_BPF`, `CAP_PERFMON`, and `CAP_NET_ADMIN` for XDP and tc; lockdown stays at `integrity`; `kptr_restrict=1` and `CAP_SYSLOG`, so root can read kernel addresses, from which libbpf and bpftrace resolve symbols |
-| `packet` | `CAP_NET_RAW`: packet sockets, and the classic BPF filters on them, for tcpdump and a DHCP client |
+| `packet` | `CAP_NET_RAW`: packet sockets, and the classic BPF filters on them, for tcpdump and a DHCP client. Done: `dhcp` |
+| `netadmin` | `CAP_NET_ADMIN`: addresses and routes, as a DHCP client renewing changes them, and fence's rules. Done: `dhcp` |
 | `io_uring` | the io_uring syscalls in the filter, and `io_uring_disabled=0`, for workloads built on it |
 | `kvm` | KVM, to run virtual machines: on aarch64 the build leaves out `kvm-arm.mode=none`; on x86_64 the form lists `kvm-intel` and `kvm-amd` in its `.modules`, and the build loads them with `nested=0`. Done: `qemu-host` |
 | `nested-kvm` | needs `kvm`: the guests may run virtual machines too, `kvm-arm.mode=nested` or `nested=1`. Done |
 
-`kvm` and `nested-kvm` are built; the rest wait for the seal. The
+`kvm`, `nested-kvm`, `packet` and `netadmin` are built; `ebpf` and
+`io_uring` wait for a form that needs them. Every form built on `dhcp`
+keeps both network capabilities, as its client must. The
 Makefile holds the one list of names (`ALLOWANCES`), and a name not in it
 fails the build, as does `nested-kvm` without `kvm`. Allowances that
 change what the kernel is told at boot become data the build writes,
@@ -361,9 +376,13 @@ fails a machine booted without it.
 | `slab_nomerge` | a little memory: caches of the same size stay apart, so one overflow cannot reach another type | `# CONFIG_SLAB_MERGE_DEFAULT is not set` |
 | `page_alloc.shuffle=1` | none measurable | `CONFIG_SHUFFLE_PAGE_ALLOCATOR=y` |
 
-All are done. Machines bitten before this keep bite's GRUB entries, which the
-updater does not rewrite; they get the arguments when bitten again, and
-posture's `kernel-cmdline` says which are missing.
+All are done. bite's GRUB entries do not hold the image's arguments but
+read them from GRUB's environment, `werewolf_args_a` and `werewolf_args_b`,
+which bite sets for the slot it installs and the updater for each slot it
+builds, so a bitten machine boots each slot with that slot's image's
+arguments, as a native disk's entries do. Machines bitten before
+2026-10-06 keep the entries bite wrote then until bitten again;
+posture's `kernel-cmdline` says which arguments they lack.
 
 ### Our kernel
 
@@ -420,8 +439,8 @@ Each phase ships on its own.
    by werewolf's own scripts. The seal is what will stop root.
 2. **The seal**: init's PID 1 filter and bounding set, less the
    allowances. Closes eBPF, perf, io_uring and the rest for good on every
-   form that did not ask for them. Begun: the filter, with `modify_ldt`
-   and the 32-bit check.
+   form that did not ask for them. Done, but for the `ebpf` and
+   `io_uring` allowances, which no form asks for yet.
 3. **`prod-ebpf`**, and CI booting it with a BPF program.
 4. **Services**: their own users, and each `run` script through `leash`.
 5. **Posture**: the boot line, the check in `commit`, and CI's boot test.

@@ -61,7 +61,7 @@ fn parse(args: []const [:0]const u8) !Plan {
     if (args.len == 1) return p;
 
     const cidr = args[1];
-    const slash = std.mem.indexOfScalar(u8, cidr, '/') orelse return error.Address;
+    const slash = std.mem.findScalar(u8, cidr, '/') orelse return error.Address;
     const addr = try ip4(cidr[0..slash]);
     const prefix = try number(cidr[slash + 1 ..], 1, 32);
     p.addr = addr;
@@ -84,8 +84,10 @@ fn parse(args: []const [:0]const u8) !Plan {
 /// An interface name: 1 to 15 plain characters, as the kernel allows, but
 /// none of its odder ones.
 fn nic(s: [:0]const u8) ![:0]const u8 {
-    if (s.len == 0 or s.len > 15 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, "..")) return error.Interface;
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and c != '.') return error.Interface;
+    if (s.len == 0 or s.len > 15 or std.mem.eql(u8, s, ".") or
+        std.mem.eql(u8, s, "..")) return error.Interface;
+    for (s) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and
+        c != '.') return error.Interface;
     return s;
 }
 
@@ -146,7 +148,12 @@ const RTF_UP = 0x1;
 const RTF_GATEWAY = 0x2;
 const RTF_HOST = 0x4;
 
-const SockaddrIn = extern struct { family: u16 = linux.AF.INET, port: u16 = 0, addr: Ip4 = .{ 0, 0, 0, 0 }, zero: [8]u8 = @splat(0) };
+const SockaddrIn = extern struct {
+    family: u16 = linux.AF.INET,
+    port: u16 = 0,
+    addr: Ip4 = .{ 0, 0, 0, 0 },
+    zero: [8]u8 = @splat(0),
+};
 
 /// struct ifreq: the name, then a 24-byte union, of which net uses an
 /// address and the flags.
@@ -175,7 +182,11 @@ const Rtentry = extern struct {
 fn apply(sock: i32, p: Plan) !void {
     if (p.addr) |addr| {
         try ioctl(sock, SIOCSIFADDR, &ifreq(p.nic, .{ .addr = .{ .addr = addr } }));
-        try ioctl(sock, SIOCSIFNETMASK, &ifreq(p.nic, .{ .addr = .{ .addr = fromInt(maskInt(p.prefix)) } }));
+        try ioctl(
+            sock,
+            SIOCSIFNETMASK,
+            &ifreq(p.nic, .{ .addr = .{ .addr = fromInt(maskInt(p.prefix)) } }),
+        );
     }
     var flags = ifreq(p.nic, .{ .pad = @splat(0) });
     try ioctl(sock, SIOCGIFFLAGS, &flags);
@@ -185,9 +196,20 @@ fn apply(sock: i32, p: Plan) !void {
     const gw = p.gateway orelse return;
     if (!inSubnet(gw, p.addr.?, p.prefix)) {
         // Reach the gateway itself through the NIC first.
-        try route(sock, .{ .dst = .{ .addr = gw }, .genmask = .{ .addr = .{ 255, 255, 255, 255 } }, .flags = RTF_UP | RTF_HOST, .dev = p.nic.ptr });
+        try route(
+            sock,
+            .{
+                .dst = .{ .addr = gw },
+                .genmask = .{ .addr = .{ 255, 255, 255, 255 } },
+                .flags = RTF_UP | RTF_HOST,
+                .dev = p.nic.ptr,
+            },
+        );
     }
-    try route(sock, .{ .gateway = .{ .addr = gw }, .flags = RTF_UP | RTF_GATEWAY, .dev = p.nic.ptr });
+    try route(
+        sock,
+        .{ .gateway = .{ .addr = gw }, .flags = RTF_UP | RTF_GATEWAY, .dev = p.nic.ptr },
+    );
 }
 
 fn ifreq(name: []const u8, data: @FieldType(Ifreq, "data")) Ifreq {
@@ -220,7 +242,7 @@ const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
 /// The kernel's __user_cap_header_struct, whose pid is an int; Zig 0.17's
 /// cap_user_header_t has it as a usize (see mount/mount.zig).
 const CapHeader = extern struct { version: u32, pid: i32 };
-const CapData = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
 
 const simple_syscalls = [_]linux.SYS{ .write, .close, .exit, .exit_group };
 
@@ -249,14 +271,24 @@ const filter = blk: {
     f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
     f[4] = .{ .code = JGE_K, .jt = kill - 5, .jf = 0, .k = 0x40000000 }; // x32
-    for (simple_syscalls, 0..) |sc, j| f[5 + j] = .{ .code = JEQ_K, .jt = allow - (5 + j) - 1, .jf = 0, .k = @intCast(@backingInt(sc)) };
+    for (simple_syscalls, 0..) |sc, j| f[5 + j] = .{
+        .code = JEQ_K,
+        .jt = allow - (5 + j) - 1,
+        .jf = 0,
+        .k = @intCast(@backingInt(sc)),
+    };
     f[5 + s] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = @intCast(@backingInt(linux.SYS.ioctl)) };
     f[kill] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[7 + s] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 28 }; // args[1], high word
     f[8 + s] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = 0 };
     f[9 + s] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[10 + s] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 24 }; // args[1], low word
-    for (requests, 0..) |req, j| f[11 + s + j] = .{ .code = JEQ_K, .jt = allow - (11 + s + j) - 1, .jf = 0, .k = req };
+    for (requests, 0..) |req, j| f[11 + s + j] = .{
+        .code = JEQ_K,
+        .jt = allow - (11 + s + j) - 1,
+        .jf = 0,
+        .k = req,
+    };
     f[11 + s + r] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[allow] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
     break :blk f;
@@ -266,12 +298,15 @@ fn pledge() !void {
     try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
     const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
     const keep: u32 = 1 << CAP_NET_ADMIN;
-    const data = [2]CapData{
+    const data = [2]CapSets{
         .{ .effective = keep, .permitted = keep, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
     };
     try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
-    const prog = extern struct { len: u16, filter: [*]const Filter }{ .len = filter.len, .filter = &filter };
+    const prog = extern struct {
+        len: u16,
+        filter: [*]const Filter,
+    }{ .len = filter.len, .filter = &filter };
     try sys(linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog));
 }
 
@@ -294,9 +329,10 @@ fn fail(err: anyerror) noreturn {
     const line = switch (err) {
         error.Usage => "usage: net NIC [ADDR/PREFIX [GATEWAY]]\n",
         error.Interface => "net: refused: not an interface name\n",
-        error.Address => "net: refused: an address is a dotted quad, prefix 1 to 32, and a usable host\n",
+        error.Address => "net: refused: an address is a dotted quad, prefix 1 to 32, and a " ++
+            "usable host\n",
         error.Gateway => "net: refused: the gateway is the address itself\n",
-        else => std.fmt.bufPrint(&buf, "net: {s}\n", .{@errorName(err)}) catch "net: failed\n",
+        else => std.mem.print(&buf, "net: {s}\n", .{@errorName(err)}) catch "net: failed\n",
     };
     _ = linux.write(2, line.ptr, line.len);
     linux.exit_group(if (err == error.Usage) 2 else 1);

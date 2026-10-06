@@ -26,7 +26,7 @@
 
 const std = @import("std");
 const linux = std.os.linux;
-const MS = linux.MS;
+const MS = linux.MS; // ziglint-ignore: Z032
 
 const deadman_after = 600;
 const find_for = 10; // seconds to wait for the victim's disk to appear
@@ -52,7 +52,8 @@ pub fn main(init: std.process.Init) !void {
     // finds it raised.
     mountFs("securityfs", "/sys/kernel/security", "securityfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     const lockdown = "/sys/kernel/security/lockdown";
-    if (!isLocked(readAll(gpa, lockdown)) and !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
+    if (!isLocked(readAll(gpa, lockdown)) and
+        !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
 
     // Every module the form needs, then the loader closes for good: the
     // root that follows finds it closed and loads nothing.
@@ -62,9 +63,22 @@ pub fn main(init: std.process.Init) !void {
     if (boot.slot.len > 0) {
         const found = findFilesystem(gpa, boot.uuid) orelse fail("no filesystem {s}", .{boot.uuid});
         mkdir("/victim");
-        const rc = linux.mount(found.dev, "/victim", @tagName(found.kind), MS.NOSUID | MS.NODEV | MS.NOEXEC, 0);
-        if (linux.errno(rc) != .SUCCESS) fail("cannot mount {s}: {s}", .{ found.dev, @tagName(linux.errno(rc)) });
-        img = try std.fmt.allocPrintSentinel(gpa, "/victim{s}/{s}/root.erofs", .{ boot.dir, boot.slot }, 0);
+        const rc = linux.mount(
+            found.dev,
+            "/victim",
+            @tagName(found.kind),
+            MS.NOSUID | MS.NODEV | MS.NOEXEC,
+            0,
+        );
+        if (linux.errno(rc) != .SUCCESS) fail(
+            "cannot mount {s}: {s}",
+            .{ found.dev, @tagName(linux.errno(rc)) },
+        );
+        img = try gpa.printSentinel(
+            "/victim{s}/{s}/root.erofs",
+            .{ boot.dir, boot.slot },
+            0,
+        );
     }
     // Read-only, and nothing over it: no overlay to write into. erofs
     // mounts the image file itself where the file's filesystem lets it (a
@@ -75,28 +89,49 @@ pub fn main(init: std.process.Init) !void {
     const flags = MS.RDONLY | MS.NOSUID | MS.NODEV;
     var rc = linux.mount(img, "/root", "erofs", flags, 0);
     if (linux.errno(rc) == .NOTBLK) {
-        const loop = loopDevice(gpa, img) catch |err| fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
+        const loop = loopDevice(
+            gpa,
+            img,
+        ) catch |err| fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
         rc = linux.mount(loop.path, "/root", "erofs", flags, 0);
         // Only now: autoclear detaches the image when the last holder of
         // the device lets go, and until the mount holds it, that is us.
         _ = linux.close(loop.fd);
     }
-    if (linux.errno(rc) != .SUCCESS) fail("cannot mount {s}: {s}", .{ img, @tagName(linux.errno(rc)) });
-    if (boot.slot.len > 0) say("slot {s}: {s}, read-only, is the root", .{ boot.slot, img }) else say("{s}, read-only, is the root", .{img});
+    if (linux.errno(rc) != .SUCCESS) fail(
+        "cannot mount {s}: {s}",
+        .{ img, @tagName(linux.errno(rc)) },
+    );
+    if (boot.slot.len > 0)
+        say("slot {s}: {s}, read-only, is the root", .{ boot.slot, img })
+    else
+        say("{s}, read-only, is the root", .{img});
 
     if (boot.slot.len > 0) deadman(boot.slot);
 
     // The root is read-only, so its mount points are in the image already.
     for ([_][:0]const u8{ "dev", "proc", "sys", "victim" }) |m| {
         if (std.mem.eql(u8, m, "victim") and boot.slot.len == 0) continue;
-        const from = try std.fmt.allocPrintSentinel(gpa, "/{s}", .{m}, 0);
-        const to = try std.fmt.allocPrintSentinel(gpa, "/root/{s}", .{m}, 0);
-        if (linux.errno(linux.mount(from, to, null, MS.MOVE, 0)) != .SUCCESS) fail("cannot move /{s} into the root", .{m});
+        const from = try gpa.printSentinel("/{s}", .{m}, 0);
+        const to = try gpa.printSentinel("/root/{s}", .{m}, 0);
+        if (linux.errno(linux.mount(
+            from,
+            to,
+            null,
+            MS.MOVE,
+            0,
+        )) != .SUCCESS) fail("cannot move /{s} into the root", .{m});
     }
     // What switch_root does: put the new root over / and start its init
     // inside it.
     if (linux.errno(linux.chdir("/root")) != .SUCCESS) fail("cannot enter /root", .{});
-    if (linux.errno(linux.mount(".", "/", null, MS.MOVE, 0)) != .SUCCESS) fail("cannot move the root over /", .{});
+    if (linux.errno(linux.mount(
+        ".",
+        "/",
+        null,
+        MS.MOVE,
+        0,
+    )) != .SUCCESS) fail("cannot move the root over /", .{});
     if (linux.errno(linux.chroot(".")) != .SUCCESS) fail("cannot enter the root", .{});
     _ = linux.chdir("/");
     const err = std.process.replace(io, .{ .argv = &.{"/init"} });
@@ -117,9 +152,16 @@ fn deadman(slot: []const u8) void {
 
     var ts: linux.timespec = .{ .sec = deadman_after, .nsec = 0 };
     while (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) {}
-    if (linux.errno(linux.access("/deadman/1/root/run/werewolf/committed", linux.F_OK)) != .SUCCESS) {
+    if (linux.errno(linux.access(
+        "/deadman/1/root/run/werewolf/committed",
+        linux.F_OK,
+    )) != .SUCCESS) {
         var buf: [128]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n", .{slot}) catch "";
+        const msg = std.mem.print(
+            &buf,
+            "stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
+            .{slot},
+        ) catch "";
         _ = writeFile("/dev/console", msg);
         _ = writeFile("/deadman/sysrq-trigger", "b");
     }
@@ -166,7 +208,7 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     defer _ = linux.close(@intCast(ctl));
     const n = linux.ioctl(@intCast(ctl), LOOP_CTL_GET_FREE, 0);
     if (linux.errno(n) != .SUCCESS) return error.NoFreeLoop;
-    const dev = try std.fmt.allocPrintSentinel(gpa, "/dev/loop{d}", .{n}, 0);
+    const dev = try gpa.printSentinel("/dev/loop{d}", .{n}, 0);
 
     // devtmpfs makes the node a moment after the device exists.
     var fd: usize = 0;
@@ -182,8 +224,15 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     if (linux.errno(backing) != .SUCCESS) return error.NoImage;
     defer _ = linux.close(@intCast(backing));
 
-    var cfg: LoopConfig = .{ .fd = @intCast(backing), .info = .{ .flags = LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR } };
-    if (linux.errno(linux.ioctl(@intCast(fd), LOOP_CONFIGURE, @intFromPtr(&cfg))) != .SUCCESS) return error.LoopConfigure;
+    var cfg: LoopConfig = .{
+        .fd = @intCast(backing),
+        .info = .{ .flags = LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR },
+    };
+    if (linux.errno(linux.ioctl(
+        @intCast(fd),
+        LOOP_CONFIGURE,
+        @intFromPtr(&cfg),
+    )) != .SUCCESS) return error.LoopConfigure;
     return .{ .path = dev, .fd = @intCast(fd) };
 }
 
@@ -207,7 +256,11 @@ fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
 
 /// Each block device, its superblock read for want.
 fn scan(gpa: std.mem.Allocator, want: [16]u8) ?Found {
-    const dir = linux.open("/sys/class/block", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    const dir = linux.open(
+        "/sys/class/block",
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+        0,
+    );
     if (linux.errno(dir) != .SUCCESS) return null;
     defer _ = linux.close(@intCast(dir));
     var buf: [4096]u8 align(8) = undefined;
@@ -220,7 +273,7 @@ fn scan(gpa: std.mem.Allocator, want: [16]u8) ?Found {
             off += ent.reclen;
             const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
             if (name[0] == '.') continue;
-            const dev = std.fmt.allocPrintSentinel(gpa, "/dev/{s}", .{name}, 0) catch continue;
+            const dev = gpa.printSentinel("/dev/{s}", .{name}, 0) catch continue;
             const kind = superblock(dev, want) orelse continue;
             return .{ .dev = dev, .kind = kind };
         }
@@ -290,12 +343,13 @@ fn parseCmdline(text: []const u8) !Boot {
         } else if (std.mem.startsWith(u8, arg, "werewolf.slot=")) {
             if (b.slot.len > 0) return error.Twice;
             b.slot = arg["werewolf.slot=".len..];
-            if (!std.mem.eql(u8, b.slot, "a") and !std.mem.eql(u8, b.slot, "b")) return error.BadSlot;
+            if (!std.mem.eql(u8, b.slot, "a") and
+                !std.mem.eql(u8, b.slot, "b")) return error.BadSlot;
         }
     }
     if ((victim == null) != (b.slot.len == 0)) return error.Unpaired;
     const v = victim orelse return b;
-    const colon = std.mem.indexOfScalar(u8, v, ':') orelse return error.BadVictim;
+    const colon = std.mem.findScalar(u8, v, ':') orelse return error.BadVictim;
     b.uuid = v[0..colon];
     b.dir = v[colon + 1 ..];
     if (parseUuid(b.uuid) == null or !isSafeDir(b.dir)) return error.BadVictim;
@@ -309,13 +363,15 @@ fn isSafeDir(dir: []const u8) bool {
     var parts = std.mem.splitScalar(u8, dir[1..], '/');
     while (parts.next()) |p| {
         if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return false;
-        for (p) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and c != '-') return false;
+        for (p) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and
+            c != '-') return false;
     }
     return true;
 }
 
 fn isLocked(text: []const u8) bool {
-    return std.mem.indexOf(u8, text, "[integrity]") != null or std.mem.indexOf(u8, text, "[confidentiality]") != null;
+    return std.mem.indexOf(u8, text, "[integrity]") != null or
+        std.mem.indexOf(u8, text, "[confidentiality]") != null;
 }
 
 // --- the kernel, directly ------------------------------------------------------
@@ -323,7 +379,8 @@ fn isLocked(text: []const u8) bool {
 fn mountFs(source: [:0]const u8, target: [:0]const u8, kind: [:0]const u8, flags: u32) void {
     mkdir(target);
     const rc = linux.mount(source, target, kind, flags, 0);
-    if (linux.errno(rc) != .SUCCESS and linux.errno(rc) != .BUSY) fail("cannot mount {s} on {s}", .{ kind, target });
+    if (linux.errno(rc) != .SUCCESS and
+        linux.errno(rc) != .BUSY) fail("cannot mount {s} on {s}", .{ kind, target });
 }
 
 fn mkdir(path: [:0]const u8) void {
@@ -365,7 +422,7 @@ fn run(io: std.Io, argv: []const []const u8) bool {
 
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
@@ -381,7 +438,10 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 const testing = std.testing;
 
 test parseCmdline {
-    const b = try parseCmdline("console=hvc0 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/var/lib/werewolf werewolf.slot=b\n");
+    const b = try parseCmdline(
+        "console=hvc0 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/var/lib/werewolf " ++
+            "werewolf.slot=b\n",
+    );
     try testing.expectEqualStrings("57e1f000-77e2-4b0f-8a3c-0000000000a0", b.uuid);
     try testing.expectEqualStrings("/var/lib/werewolf", b.dir);
     try testing.expectEqualStrings("b", b.slot);
@@ -391,16 +451,35 @@ test parseCmdline {
     const uuid = "57e1f000-77e2-4b0f-8a3c-0000000000a0";
     try testing.expectError(error.Unpaired, parseCmdline("werewolf.slot=a"));
     try testing.expectError(error.Unpaired, parseCmdline("werewolf.victim=" ++ uuid ++ ":/w"));
-    try testing.expectError(error.BadSlot, parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=c"));
-    try testing.expectError(error.Twice, parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a werewolf.slot=b"));
-    try testing.expectError(error.BadVictim, parseCmdline("werewolf.victim=" ++ uuid ++ ":/w/../etc werewolf.slot=a"));
-    try testing.expectError(error.BadVictim, parseCmdline("werewolf.victim=" ++ uuid ++ ":w werewolf.slot=a"));
-    try testing.expectError(error.BadVictim, parseCmdline("werewolf.victim=nope:/w werewolf.slot=a"));
+    try testing.expectError(
+        error.BadSlot,
+        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=c"),
+    );
+    try testing.expectError(
+        error.Twice,
+        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a werewolf.slot=b"),
+    );
+    try testing.expectError(
+        error.BadVictim,
+        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w/../etc werewolf.slot=a"),
+    );
+    try testing.expectError(
+        error.BadVictim,
+        parseCmdline("werewolf.victim=" ++ uuid ++ ":w werewolf.slot=a"),
+    );
+    try testing.expectError(
+        error.BadVictim,
+        parseCmdline("werewolf.victim=nope:/w werewolf.slot=a"),
+    );
 }
 
 test parseUuid {
     const u = parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a0").?;
-    try testing.expectEqualSlices(u8, &.{ 0x57, 0xe1, 0xf0, 0x00, 0x77, 0xe2, 0x4b, 0x0f, 0x8a, 0x3c, 0, 0, 0, 0, 0, 0xa0 }, &u);
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 0x57, 0xe1, 0xf0, 0x00, 0x77, 0xe2, 0x4b, 0x0f, 0x8a, 0x3c, 0, 0, 0, 0, 0, 0xa0 },
+        &u,
+    );
     try testing.expectEqual(null, parseUuid("57e1f000x77e2-4b0f-8a3c-0000000000a0"));
     try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a"));
 }

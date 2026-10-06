@@ -79,18 +79,21 @@ the guest EL2, which would let root reach the host's nested
 virtualization. A form that runs virtual machines says so with an
 allowance, `kvm`, and its guests still cannot nest (`qemu-host`).
 
-Last, init seals PID 1 with a seccomp filter, which every process inherits
-and no one, root included, can remove before a reboot. It refuses
-`modify_ldt` on x86_64, which only 16-bit code needs, and on aarch64 kills
-any 32-bit system call; no setting can close either. This one costs
-something, by choice: a process under any filter enters each system call
-by the kernel's slower path, about 15 ns a call, measured at 114 against
-131 ns for `getpid`. That is 1–3% of a small `read` or `write`, a fraction
-of a percent of a CPU for a busy database, and nothing for work that
-seldom calls the kernel; it is what every program in a Docker container
-pays already. The filter's length costs nothing, so what the seal adds
-later is free ([design/lockdown.md](../design/lockdown.md), *What the seal
-costs*).
+Last, init seals PID 1, and nothing after it, root included, can undo
+the seal before a reboot ([design/lockdown.md](../design/lockdown.md)):
+
+| | Stops |
+| --- | --- |
+| A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process |
+| The capability bounding set | loading kernel code (`CAP_SYS_MODULE`, `CAP_BPF`, `CAP_PERFMON`), hardware and `/dev/mem` (`CAP_SYS_RAWIO`), tracing (`CAP_SYS_PTRACE`), device files (`CAP_MKNOD`) and what nothing here uses; once fence has set the network policy, `CAP_NET_ADMIN` and `CAP_NET_RAW` too, but on forms that allow them, as `dhcp` and those built on it do for their DHCP client |
+
+The filter costs something, by choice: a process under any filter enters
+each system call by the kernel's slower path. On werewolf's kernel that is
+about 25 ns a call, measured at 125 against 150 ns for `getpid`: 2–5% of a
+small `read` or `write`, a fraction of a percent of a CPU for a busy
+database, and nothing for work that seldom calls the kernel. Every program
+in a Docker container pays the same already. The filter's length costs
+nothing, so what the seal adds later is free (*What the seal costs*).
 
 What root can undo, no one else can: each guards against ordinary users,
 and against root only once services stop running as root.
@@ -178,10 +181,11 @@ cloud-init's user-data, once werewolf has committed.
   lima, prod-ssh) carry busybox, whose `sh` runs any script. The others,
   minimal and prod among them, have no shell or interpreter at all, and
   `posture` checks that they do not.
-- **Bitten machines keep bite's command line.** The updater rewrites a
-  native disk's entries with the image's kernel arguments, but not GRUB's;
-  a machine bitten before an argument was added lacks it until bitten
-  again, and posture's `kernel-cmdline` names what is missing.
+- **Machines bitten before 2026-10-06 keep bite's old command line.**
+  bite's GRUB entries now read each slot's kernel arguments from GRUB's
+  environment, which the updater sets for each slot it installs; entries
+  written before then hold the arguments of that day, until bitten again.
+  posture's `kernel-cmdline` names what such a machine lacks.
 - **The host is trusted.** A hypervisor can change any guest.
 
 Phases 2 to 5 of [the design](../design/verified-boot.md) close all but the
@@ -190,7 +194,7 @@ last two.
 ## Not done, by choice
 
 Nothing here may slow what the machines run: a database, or `../scan`.
-The one exception is the seal, whose 15 ns a system call buys what nothing
+The one exception is the seal, whose 25 ns a system call buys what nothing
 else can (*Boot*, above).
 `posture` checks these only when asked, with `--extended`. What costs
 nothing is done in their place.

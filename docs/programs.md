@@ -61,6 +61,8 @@ not catch.
 | `update` | at boot and every 20 hours | Root builds and installs the slot and has no network at all. Every fetch is a child as `_update`: apk's network half, under Landlock (read the image, run only apk, write only its cache, TCP to 443 and 53) and a traced seccomp allowlist, after which root takes the cache back and installs from it offline, checking every signature itself; and the CVE sources, fetched by a child chrooted to the resolver's files and parsed by another with no network, no files and `pread64`, `write` and memory calls alone, whose lines root checks field by field. The updater goes away when it installs signed releases instead ([design/verified-boot.md](../design/verified-boot.md), phase 3). |
 | `status` | the demo form: the page every minute, the scan hourly | Two services, each leashed as its own user: the page as `status`, which may reach nothing on the network and read only `/data/svc` and `/run/werewolf` beyond the floor, and the scan as `grype`, the only user that may fetch, and which writes only its own directory. It refuses to run as root. |
 | `leash` | once per start of a service someone else wrote (nginx, the demo's page and scan) | Starts the service its `service` file describes, as its own user, never root. As root it only checks the file, requirements and secrets, makes the service's directories and builds the rules; then it empties the bounding set (keeping `CAP_NET_BIND_SERVICE` only for a port below 1024), sets `no_new_privs`, checks that root cannot be had back, and applies a Landlock ruleset of the paths, programs and TCP ports the file names, with scoping. Nothing of it runs once the service has started. No seccomp filter: the seal's is for every process. |
+| `pg-init` | before each start of PostgreSQL, leashed as `postgres` | Makes the cluster once with `initdb`, then applies the image's SQL in single-user mode; reads nothing from outside the image ([postgresql.md](postgresql.md)). |
+| `popen-shim.so` | inside `initdb` and the servers it starts to set the cluster up, preloaded by pg-init | `popen`, `pclose` and `system` without a shell, for commands of `initdb`'s one shape: an absolute program, plain or double-quoted words, `<FILE`, `>FILE`, `2>&1`. Anything else is not run; `locale -a`, which the setup servers run, reads as empty. |
 | `stage0` | the kernel's first process, on every machine | Not separated: as root, it reads the kernel command line (strictly: each key once, plain paths, well-formed UUIDs) and filesystem superblocks it finds itself, mounts the slot's root, and forks the deadman, which holds no files while it sleeps. |
 | `init` | PID 1, from stage0 until fence | Not yet: one process, as root, since it mounts, sets the kernel's settings and extracts the config. What comes from outside is parsed strictly: config tar entries must be plain relative names, and only directories and regular files up to 1 MiB, never links; NoCloud's user and uid must be plain; the hostname must be a plain name. It runs werewolf's programs and the filesystem tools (`blkid`, `mke2fs`, `e2fsck`, `cryptsetup`) by full path, never a shell. Unlike the others it does not fail closed: a step that fails is said on the console, and the boot goes on as far as it can. |
 | `stage` | runit's three stages | As root, with nothing from outside: stage 2 gives the services a blocking console and becomes `runsvdir`; stage 3 stops the services and puts `/data` and `/victim` down. |
@@ -76,3 +78,15 @@ what can be tested without a kernel (parsers, the filters' jumps, message
 layouts), give the parser a fuzz target, and check the sandbox on a
 running machine: `/proc/PID/status` should show the uid, `CapEff`,
 `CapBnd`, `NoNewPrivs: 1` and `Seccomp: 2` you meant.
+
+Write it as the Zig language reference's
+[Style Guide](https://ziglang.org/documentation/0.17.0/#Style-Guide) says,
+and let the tools hold you to it. `make fix` runs `tools/zigfix`: it
+lays the code out as zig fmt does, breaks lines longer than the guide's
+100 where zig fmt keeps a break, and rewrites calls the standard library
+has deprecated to what it names instead. `make lint` fails on anything
+`make fix` would still change, on a long line it could not break (a
+multiline string's data and a URL in a comment excepted, as common
+sense), on what `zig ast-check` finds, and on the guide's naming rules as
+ziglint checks them; `.ziglint.zon` lists which rules are on, and why the
+others are off.

@@ -1,0 +1,8 @@
+# PostgreSQL, as its own user, for local clients over its UNIX socket
+# alone. pg-init makes the cluster on the first start, and applies the
+# image's SQL before each; initdb, which it runs, needs popen-shim.so and
+# starts the server itself.
+exec    /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres
+before  /usr/lib/werewolf/pg-init
+user    postgres
+run     /usr/bin/initdb

@@ -100,13 +100,27 @@ pub fn encode(l: Layout, primary: []u8, backup: []u8) void {
 
     const table = primary[2 * sector ..][0 .. entry_sectors * sector];
     writeEntry(table[0..entry_size], esp_type, esp_guid, l.esp_first, l.esp_last, "EFI");
-    writeEntry(table[entry_size..][0..entry_size], linux_type, root_guid, l.root_first, l.root_last, "werewolf");
+    writeEntry(
+        table[entry_size..][0..entry_size],
+        linux_type,
+        root_guid,
+        l.root_first,
+        l.root_last,
+        "werewolf",
+    );
     @memcpy(backup[0 .. entry_sectors * sector], table);
     const table_crc = std.hash.Crc32.hash(table);
 
     const last = l.sectors - 1;
     writeHeader(primary[sector..][0..sector], 1, last, 2, l, table_crc);
-    writeHeader(backup[entry_sectors * sector ..][0..sector], last, 1, last - entry_sectors, l, table_crc);
+    writeHeader(
+        backup[entry_sectors * sector ..][0..sector],
+        last,
+        1,
+        last - entry_sectors,
+        l,
+        table_crc,
+    );
 }
 
 fn writeHeader(h: []u8, mine: u64, alternate: u64, table_lba: u64, l: Layout, table_crc: u32) void {
@@ -126,7 +140,14 @@ fn writeHeader(h: []u8, mine: u64, alternate: u64, table_lba: u64, l: Layout, ta
     std.mem.writeInt(u32, h[16..20], std.hash.Crc32.hash(h[0..92]), .little);
 }
 
-fn writeEntry(e: []u8, kind: []const u8, id: []const u8, first: u64, last: u64, name: []const u8) void {
+fn writeEntry(
+    e: []u8,
+    kind: []const u8,
+    id: []const u8,
+    first: u64,
+    last: u64,
+    name: []const u8,
+) void {
     guid(e[0..16], kind);
     guid(e[16..32], id);
     std.mem.writeInt(u64, e[32..40], first, .little);
@@ -175,7 +196,28 @@ test layout {
 test guid {
     var g: [16]u8 = undefined;
     guid(&g, esp_type);
-    try testing.expectEqualSlices(u8, &.{ 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b }, &g);
+    try testing.expectEqualSlices(
+        u8,
+        &.{
+            0x28,
+            0x73,
+            0x2a,
+            0xc1,
+            0x1f,
+            0xf8,
+            0xd2,
+            0x11,
+            0xba,
+            0x4b,
+            0x00,
+            0xa0,
+            0xc9,
+            0x3e,
+            0xc9,
+            0x3b,
+        },
+        &g,
+    );
 }
 
 test encode {
@@ -196,12 +238,25 @@ test encode {
     for ([_]*[sector]u8{ h, b }) |x| {
         var copy = x[0..92].*;
         @memset(copy[16..20], 0);
-        try testing.expectEqual(std.mem.readInt(u32, x[16..20], .little), std.hash.Crc32.hash(&copy));
-        try testing.expectEqual(std.hash.Crc32.hash(primary[2 * sector ..][0 .. entry_sectors * sector]), std.mem.readInt(u32, x[88..92], .little));
+        try testing.expectEqual(
+            std.mem.readInt(u32, x[16..20], .little),
+            std.hash.Crc32.hash(&copy),
+        );
+        try testing.expectEqual(
+            std.hash.Crc32.hash(primary[2 * sector ..][0 .. entry_sectors * sector]),
+            std.mem.readInt(u32, x[88..92], .little),
+        );
     }
     try testing.expectEqual(l.sectors - 1, std.mem.readInt(u64, b[24..32], .little));
-    try testing.expectEqual(l.sectors - 1 - entry_sectors, std.mem.readInt(u64, b[72..80], .little));
-    try testing.expectEqualSlices(u8, primary[2 * sector ..][0 .. entry_sectors * sector], backup[0 .. entry_sectors * sector]);
+    try testing.expectEqual(
+        l.sectors - 1 - entry_sectors,
+        std.mem.readInt(u64, b[72..80], .little),
+    );
+    try testing.expectEqualSlices(
+        u8,
+        primary[2 * sector ..][0 .. entry_sectors * sector],
+        backup[0 .. entry_sectors * sector],
+    );
 
     // The second entry is the root, named in UTF-16LE.
     const e = primary[2 * sector + entry_size ..][0..entry_size];

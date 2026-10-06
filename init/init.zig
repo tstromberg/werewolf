@@ -74,7 +74,11 @@ pub fn main(init: std.process.Init) !void {
     m.config();
     m.data();
 
-    if (m.cmd.grubenv.len > 0) m.write("/run/werewolf/grubenv", m.fmt("{s}\n", .{m.cmd.grubenv}), 0o644);
+    if (m.cmd.grubenv.len > 0) m.write(
+        "/run/werewolf/grubenv",
+        m.fmt("{s}\n", .{m.cmd.grubenv}),
+        0o644,
+    );
 
     // fence sets the network policy the build compiled from the forms,
     // binding only declared TCP ports and the metadata server only for those
@@ -84,10 +88,16 @@ pub fn main(init: std.process.Init) !void {
     // program's memory, and its secrets, behind. A hard limit, so no
     // process can raise its own.
     const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
-    if (linux.errno(linux.setrlimit(.CORE, &no_core)) != .SUCCESS) say("core dumps not limited", .{});
+    if (linux.errno(linux.setrlimit(
+        .CORE,
+        &no_core,
+    )) != .SUCCESS) say("core dumps not limited", .{});
     seal();
     say("up in {s}s, handing over to runit", .{firstWord(m.read("/proc/uptime"))});
-    const err = std.process.replace(m.io, .{ .argv = &.{ "/usr/lib/werewolf/fence", "/usr/bin/runit" }, .environ_map = &m.env });
+    const err = std.process.replace(
+        m.io,
+        .{ .argv = &.{ "/usr/lib/werewolf/fence", "/usr/bin/runit" }, .environ_map = &m.env },
+    );
     say("cannot start fence: {s}", .{@errorName(err)});
     std.process.exit(1);
 }
@@ -122,7 +132,14 @@ const Machine = struct {
         m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=1777", "tmpfs", "/dev/shm" });
         m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=0755", "tmpfs", "/run" });
         m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=1777", "tmpfs", "/tmp" });
-        m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=1777,size=25%", "tmpfs", "/var/tmp" });
+        m.mount(&.{
+            "-t",
+            "tmpfs",
+            "-o",
+            "nosuid,nodev,noexec,mode=1777,size=25%",
+            "tmpfs",
+            "/var/tmp",
+        });
         mkdir("/run/config", 0o700);
     }
 
@@ -131,7 +148,11 @@ const Machine = struct {
     /// image's own copies, the hostname, the resolvers, root's and users' ssh
     /// keys, runit's controls and each service's supervise directory.
     fn seed(m: *Machine) void {
-        for ([_][:0]const u8{ "/run/werewolf", "/run/werewolf/keys", "/run/runit" }) |d| mkdir(d, 0o755);
+        for ([_][:0]const u8{
+            "/run/werewolf",
+            "/run/werewolf/keys",
+            "/run/runit",
+        }) |d| mkdir(d, 0o755);
         for ([_][]const u8{ "passwd", "group", "shadow" }) |f| {
             const src = m.fmt("/usr/share/werewolf/etc/{s}", .{f});
             const text = m.read(src);
@@ -139,7 +160,11 @@ const Machine = struct {
                 say("cannot read {s}", .{src});
                 continue;
             }
-            m.write(m.fmt("/run/werewolf/{s}", .{f}), text, if (std.mem.eql(u8, f, "shadow")) 0o600 else 0o644);
+            m.write(
+                m.fmt("/run/werewolf/{s}", .{f}),
+                text,
+                if (std.mem.eql(u8, f, "shadow")) 0o600 else 0o644,
+            );
         }
         for (m.list("/etc/sv")) |s| mkdir(m.fmtZ("/run/runit/supervise.{s}", .{s}), 0o755);
     }
@@ -154,10 +179,19 @@ const Machine = struct {
     /// closes for the life of the machine (modules/modules.zig); stage0 has
     /// done both, and the loader says so. Then the settings.
     fn kernel(m: *Machine) void {
-        if (!m.isMounted("/sys/kernel/security")) m.mount(&.{ "-t", "securityfs", "securityfs", "/sys/kernel/security" });
+        if (!m.isMounted("/sys/kernel/security")) m.mount(&.{
+            "-t",
+            "securityfs",
+            "securityfs",
+            "/sys/kernel/security",
+        });
         m.mount(&.{ "-o", "remount,nosuid,nodev,noexec", "/sys/kernel/security" });
         const lockdown = "/sys/kernel/security/lockdown";
-        if (std.mem.indexOf(u8, m.read(lockdown), "[none]") != null) _ = writeFile(lockdown, "integrity");
+        if (std.mem.indexOf(
+            u8,
+            m.read(lockdown),
+            "[none]",
+        ) != null) _ = writeFile(lockdown, "integrity");
         say("lockdown: {s}", .{lockdownLevel(m.read(lockdown))});
 
         if (!m.run(&.{"/usr/lib/werewolf/modules"})) say("not every module loaded; see above", .{});
@@ -170,17 +204,28 @@ const Machine = struct {
         // or the interface says so, and all and default do not reach the
         // interfaces stage0's drivers made before now. IPv6 has only the
         // interface's own setting.
-        for (m.list("/proc/sys/net/ipv4/conf")) |c| for ([_][]const u8{ "accept_redirects", "secure_redirects", "send_redirects" }) |k| {
+        for (m.list("/proc/sys/net/ipv4/conf")) |c| for ([_][]const u8{
+            "accept_redirects",
+            "secure_redirects",
+            "send_redirects",
+        }) |k| {
             if (!writeFile(m.fmtZ("/proc/sys/net/ipv4/conf/{s}/{s}", .{ c, k }), "0")) all = false;
         };
         for (m.list("/proc/sys/net/ipv6/conf")) |c| {
-            if (!writeFile(m.fmtZ("/proc/sys/net/ipv6/conf/{s}/accept_redirects", .{c}), "0")) all = false;
+            if (!writeFile(
+                m.fmtZ("/proc/sys/net/ipv6/conf/{s}/accept_redirects", .{c}),
+                "0",
+            )) all = false;
         }
         if (!all) say("some sysctls were not applied", .{});
         // A panic reboots in the seconds the command line gave (bite's and
         // disk/build's say 10), or, given none, in 10: the kernel's own
         // default is to hang, and an oops now panics.
-        if (std.mem.eql(u8, trim(m.read("/proc/sys/kernel/panic")), "0") and !writeFile("/proc/sys/kernel/panic", "10")) say("kernel.panic not set; a panic will hang", .{});
+        if (std.mem.eql(u8, trim(m.read("/proc/sys/kernel/panic")), "0") and
+            !writeFile(
+                "/proc/sys/kernel/panic",
+                "10",
+            )) say("kernel.panic not set; a panic will hang", .{});
     }
 
     // --- the network ---------------------------------------------------------
@@ -197,18 +242,35 @@ const Machine = struct {
         m.routerAdvertisements(nic);
         const c = m.cmd;
         if (nic.len == 0) {
-            if (c.mac.len > 0) say("no network: no NIC with address {s}", .{c.mac}) else say("no network: no NIC", .{});
+            if (c.mac.len > 0)
+                say("no network: no NIC with address {s}", .{c.mac})
+            else
+                say("no network: no NIC", .{});
         } else if (c.ip.len > 0) {
-            const ok = if (c.gw.len > 0) m.run(&.{ "/usr/lib/werewolf/net", nic, c.ip, c.gw }) else m.run(&.{ "/usr/lib/werewolf/net", nic, c.ip });
+            const ok = if (c.gw.len > 0)
+                m.run(&.{ "/usr/lib/werewolf/net", nic, c.ip, c.gw })
+            else
+                m.run(&.{ "/usr/lib/werewolf/net", nic, c.ip });
             if (!ok) {
-                if (c.gw.len > 0) say("network: {s} {s} via {s} refused", .{ nic, c.ip, c.gw }) else say("network: {s} {s} refused", .{ nic, c.ip });
+                if (c.gw.len > 0)
+                    say("network: {s} {s} via {s} refused", .{ nic, c.ip, c.gw })
+                else
+                    say("network: {s} {s} refused", .{ nic, c.ip });
             }
-            if (c.dns.len > 0) m.write("/run/resolv.conf", m.fmt("nameserver {s}\n", .{c.dns}), 0o644);
+            if (c.dns.len > 0) m.write(
+                "/run/resolv.conf",
+                m.fmt("nameserver {s}\n", .{c.dns}),
+                0o644,
+            );
             say("{s} {s} via {s} dns {s}", .{ nic, c.ip, orNone(c.gw), orNone(c.dns) });
         } else if (executable("/usr/lib/werewolf/dhcp")) {
             _ = linux.unlink("/run/resolv.conf");
             _ = linux.symlink("werewolf/dhcp/resolv.conf", "/run/resolv.conf");
-            if (!m.run(&.{ "/usr/lib/werewolf/dhcp", "up", nic })) say("no network: no DHCP lease for {s}; the dhcp service keeps asking", .{nic});
+            if (!m.run(&.{
+                "/usr/lib/werewolf/dhcp",
+                "up",
+                nic,
+            })) say("no network: no DHCP lease for {s}; the dhcp service keeps asking", .{nic});
         } else {
             say("no network: no werewolf.ip, and this form has no DHCP client", .{});
         }
@@ -225,11 +287,16 @@ const Machine = struct {
         var all = true;
         for (m.list("/proc/sys/net/ipv6/conf")) |c| {
             const d = m.fmt("/proc/sys/net/ipv6/conf/{s}", .{c});
-            for ([_][2][]const u8{ .{ "accept_ra_rtr_pref", "0" }, .{ "accept_ra_rt_info_max_plen", "0" }, .{ "max_addresses", "4" } }) |kv| {
+            for ([_][2][]const u8{
+                .{ "accept_ra_rtr_pref", "0" },
+                .{ "accept_ra_rt_info_max_plen", "0" },
+                .{ "max_addresses", "4" },
+            }) |kv| {
                 if (!writeFile(m.fmtZ("{s}/{s}", .{ d, kv[0] }), kv[1])) all = false;
             }
             // all's accept_ra governs no interface; each has its own.
-            if (!std.mem.eql(u8, c, nic) and !std.mem.eql(u8, c, "all") and !writeFile(m.fmtZ("{s}/accept_ra", .{d}), "0")) all = false;
+            if (!std.mem.eql(u8, c, nic) and !std.mem.eql(u8, c, "all") and
+                !writeFile(m.fmtZ("{s}/accept_ra", .{d}), "0")) all = false;
         }
         if (!all) say("some IPv6 router advertisement limits were not applied", .{});
     }
@@ -252,7 +319,11 @@ const Machine = struct {
     fn victim(m: *Machine) void {
         const v = m.cmd.victim;
         if (v.len == 0) return;
-        const colon = std.mem.indexOfScalar(u8, v, ':') orelse return say("victim's filesystem {s} not found", .{v});
+        const colon = std.mem.findScalar(
+            u8,
+            v,
+            ':',
+        ) orelse return say("victim's filesystem {s} not found", .{v});
         const uuid = v[0..colon];
         mkdir("/victim", 0o755);
         const dev = m.blkid(&.{ "-l", "-o", "device", "-t", m.fmt("UUID={s}", .{uuid}) });
@@ -297,21 +368,28 @@ const Machine = struct {
                 _ = linux.umount2("/mnt", 0);
             }
         }
-        if (!found and executable("/usr/lib/werewolf/cloud") and m.run(&.{"/usr/lib/werewolf/cloud"}) and
+        if (!found and executable("/usr/lib/werewolf/cloud") and
+            m.run(&.{"/usr/lib/werewolf/cloud"}) and
             exists("/run/werewolf/cloud/config.tar"))
         {
             say("config tar from the cloud's metadata server", .{});
             m.extract("/run/werewolf/cloud/config.tar");
         }
 
-        const name = if (exists("/run/config/hostname")) trim(firstLine(m.read("/run/config/hostname"))) else "werewolf";
+        const name = if (exists("/run/config/hostname"))
+            trim(firstLine(m.read("/run/config/hostname")))
+        else
+            "werewolf";
         const host = if (isHostname(name)) name else blk: {
             say("hostname '{s}' refused: not a plain name", .{name});
             break :blk "werewolf";
         };
         m.write("/run/werewolf/hostname", m.fmt("{s}\n", .{host}), 0o644);
         _ = linux.syscall2(.sethostname, @intFromPtr(host.ptr), host.len);
-        if (exists("/run/config/authorized_keys")) m.keys("root", m.read("/run/config/authorized_keys"));
+        if (exists("/run/config/authorized_keys")) m.keys(
+            "root",
+            m.read("/run/config/authorized_keys"),
+        );
     }
 
     /// The first user in a NoCloud cloud-config and every ssh key in it,
@@ -326,13 +404,23 @@ const Machine = struct {
             if (isPlainUser(nc.user) and isPlainUid(nc.uid) and !hasEntry(passwd, nc.user) and
                 !idInUse(passwd, nc.uid) and !idInUse(m.read("/run/werewolf/group"), nc.uid))
             {
-                m.append("/run/werewolf/passwd", m.fmt("{s}:x:{s}:{s}::/data/home/{s}:/bin/ash\n", .{ nc.user, nc.uid, nc.uid, nc.user }));
+                m.append(
+                    "/run/werewolf/passwd",
+                    m.fmt(
+                        "{s}:x:{s}:{s}::/data/home/{s}:/bin/ash\n",
+                        .{ nc.user, nc.uid, nc.uid, nc.user },
+                    ),
+                );
                 m.append("/run/werewolf/group", m.fmt("{s}:x:{s}:\n", .{ nc.user, nc.uid }));
                 m.append("/run/werewolf/shadow", m.fmt("{s}:*:0:0:99999:7:::\n", .{nc.user}));
                 m.keys(nc.user, nc.keys);
                 m.nocloud_user = nc.user;
             } else {
-                say("NoCloud user '{s}' (uid {s}) refused: not a plain name, or a uid from 500 to 60000 no account has", .{ nc.user, nc.uid });
+                say(
+                    "NoCloud user '{s}' (uid {s}) refused: not a plain name, or a uid from 500 " ++
+                        "to 60000 no account has",
+                    .{ nc.user, nc.uid },
+                );
             }
         }
         // Lima's readiness probe reads the instance-id back from here; it is
@@ -354,14 +442,24 @@ const Machine = struct {
     /// Files are 0600 and directories 0700, root's: the services that read
     /// the config run as root, and nothing else needs it.
     fn extract(m: *Machine, path: []const u8) void {
-        var f = Dir.cwd().openFile(m.io, path, .{}) catch |err| return say("config: {s}: {s}", .{ path, @errorName(err) });
+        var f = Dir.cwd().openFile(
+            m.io,
+            path,
+            .{},
+        ) catch |err| return say("config: {s}: {s}", .{ path, @errorName(err) });
         defer f.close(m.io);
         var rbuf: [8192]u8 = undefined;
         var r = f.readerStreaming(m.io, &rbuf);
         var name_buf: [Dir.max_path_bytes]u8 = undefined;
         var link_buf: [Dir.max_path_bytes]u8 = undefined;
-        var it: std.tar.Iterator = .init(&r.interface, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf });
-        while (it.next() catch |err| return say("config: {s}: {s}", .{ path, @errorName(err) })) |e| {
+        var it: std.tar.Iterator = .init(
+            &r.interface,
+            .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
+        );
+        while (it.next() catch |err| return say(
+            "config: {s}: {s}",
+            .{ path, @errorName(err) },
+        )) |e| {
             const name = safeName(e.name) orelse {
                 say("config: {s} refused: not a plain relative name", .{e.name});
                 continue;
@@ -377,14 +475,21 @@ const Machine = struct {
                         continue;
                     }
                     if (std.fs.path.dirname(dest)) |parent| m.mkdirAll(m.z(parent));
-                    var out = Dir.cwd().createFile(m.io, dest, .{ .permissions = .fromMode(0o600) }) catch |err| {
+                    var out = Dir.cwd().createFile(
+                        m.io,
+                        dest,
+                        .{ .permissions = .fromMode(0o600) },
+                    ) catch |err| {
                         say("config: {s}: {s}", .{ name, @errorName(err) });
                         continue;
                     };
                     defer out.close(m.io);
                     var wbuf: [8192]u8 = undefined;
                     var w = out.writer(m.io, &wbuf);
-                    it.streamRemaining(e, &w.interface) catch |err| return say("config: {s}: {s}", .{ name, @errorName(err) });
+                    it.streamRemaining(
+                        e,
+                        &w.interface,
+                    ) catch |err| return say("config: {s}: {s}", .{ name, @errorName(err) });
                     w.interface.flush() catch {};
                 },
             }
@@ -435,9 +540,21 @@ const Machine = struct {
             // the mount, not the filesystem, so /data, bound from it, stays
             // writable. What must write there (commit; the updater) mounts
             // it again, apart.
-            if (m.run(&.{ mount_bin, "-o", "remount,bind,ro,nosuid,nodev,noexec", "/victim" })) say("/victim is read-only", .{});
+            if (m.run(&.{
+                mount_bin,
+                "-o",
+                "remount,bind,ro,nosuid,nodev,noexec",
+                "/victim",
+            })) say("/victim is read-only", .{});
         } else if (m.which("mke2fs") == null) {
-            m.mount(&.{ "-t", "tmpfs", "-o", "size=25%,nosuid,nodev,noexec,mode=0755", "tmpfs", "/data" });
+            m.mount(&.{
+                "-t",
+                "tmpfs",
+                "-o",
+                "size=25%,nosuid,nodev,noexec,mode=0755",
+                "tmpfs",
+                "/data",
+            });
             say("/data is RAM, capped at 25%", .{});
         } else {
             var why: []const u8 = "";
@@ -452,7 +569,10 @@ const Machine = struct {
         if (m.nocloud_user.len > 0 and !exists("/run/werewolf/nodata")) {
             const home = m.fmtZ("/data/home/{s}", .{m.nocloud_user});
             m.mkdirAll(home);
-            if (lookupIds(m.read("/run/werewolf/passwd"), m.nocloud_user)) |ids| _ = linux.fchownat(linux.AT.FDCWD, home, ids.uid, ids.gid, 0);
+            if (lookupIds(
+                m.read("/run/werewolf/passwd"),
+                m.nocloud_user,
+            )) |ids| _ = linux.fchownat(linux.AT.FDCWD, home, ids.uid, ids.gid, 0);
             _ = linux.fchmodat(linux.AT.FDCWD, home, 0o700);
         }
         // The key now lives in the kernel's dm table. No service needs it,
@@ -484,7 +604,10 @@ const Machine = struct {
                 why.* = "no " ++ label ++ " disk, and werewolf.data names none";
                 return null;
             }
-            src = m.fmt("/dev/{s}", .{if (std.mem.startsWith(u8, d, "/dev/")) d["/dev/".len..] else d});
+            src = m.fmt(
+                "/dev/{s}",
+                .{if (std.mem.startsWith(u8, d, "/dev/")) d["/dev/".len..] else d},
+            );
             if (!isBlockDevice(m.z(src))) {
                 why.* = m.fmt("werewolf.data: no device {s}", .{src});
                 return null;
@@ -514,10 +637,34 @@ const Machine = struct {
             mkdir("/run/cryptsetup", 0o700);
             // The key is random, so a slow KDF adds nothing; argon2id's
             // default would spend up to 1 GiB and two seconds every boot.
-            const open = [_][]const u8{ cryptsetup, "open", "--key-file", key, "--perf-no_read_workqueue", "--perf-no_write_workqueue", src, "data" };
+            const open = [_][]const u8{
+                cryptsetup,
+                "open",
+                "--key-file",
+                key,
+                "--perf-no_read_workqueue",
+                "--perf-no_write_workqueue",
+                src,
+                "data",
+            };
             if (fresh) {
                 say("making LUKS2 on {s}", .{src});
-                if (!m.run(&.{ cryptsetup, "luksFormat", "-q", "--type", "luks2", "--label", label, "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000", "--key-file", key, src }) or
+                if (!m.run(&.{
+                    cryptsetup,
+                    "luksFormat",
+                    "-q",
+                    "--type",
+                    "luks2",
+                    "--label",
+                    label,
+                    "--pbkdf",
+                    "pbkdf2",
+                    "--pbkdf-force-iterations",
+                    "1000",
+                    "--key-file",
+                    key,
+                    src,
+                }) or
                     !m.run(&open))
                 {
                     why.* = m.fmt("cannot make LUKS2 on {s}", .{src});
@@ -556,7 +703,15 @@ const Machine = struct {
                 return null;
             }
         }
-        if (!m.run(&.{ mount_bin, "-t", "ext4", "-o", "noatime,nosuid,nodev,noexec", fs, "/data" })) {
+        if (!m.run(&.{
+            mount_bin,
+            "-t",
+            "ext4",
+            "-o",
+            "noatime,nosuid,nodev,noexec",
+            fs,
+            "/data",
+        })) {
             why.* = m.fmt("cannot mount {s}", .{fs});
             return null;
         }
@@ -621,8 +776,16 @@ const Machine = struct {
 
     /// blkid's answer, trimmed, or "": the device, or the value asked for.
     fn blkid(m: *Machine, args: []const []const u8) []const u8 {
-        const argv = std.mem.concat(m.gpa, []const u8, &.{ &.{ m.which("blkid") orelse return "", "-c", "/dev/null" }, args }) catch return "";
-        const res = std.process.run(m.gpa, m.io, .{ .argv = argv, .environ_map = &m.env }) catch return "";
+        const argv = std.mem.concat(
+            m.gpa,
+            []const u8,
+            &.{ &.{ m.which("blkid") orelse return "", "-c", "/dev/null" }, args },
+        ) catch return "";
+        const res = std.process.run(
+            m.gpa,
+            m.io,
+            .{ .argv = argv, .environ_map = &m.env },
+        ) catch return "";
         return switch (res.term) {
             .exited => |code| if (code == 0) trim(firstLine(res.stdout)) else "",
             else => "",
@@ -652,16 +815,27 @@ const Machine = struct {
 
     /// text to path, with mode; a failure is said.
     fn write(m: *Machine, path: []const u8, text: []const u8, mode: u32) void {
-        Dir.cwd().writeFile(m.io, .{ .sub_path = path, .data = text, .flags = .{ .permissions = .fromMode(mode) } }) catch |err|
+        Dir.cwd().writeFile(
+            m.io,
+            .{ .sub_path = path, .data = text, .flags = .{ .permissions = .fromMode(mode) } },
+        ) catch |err|
             return say("{s}: {s}", .{ path, @errorName(err) });
         _ = linux.fchmodat(linux.AT.FDCWD, m.z(path), mode);
     }
 
     fn append(m: *Machine, path: []const u8, text: []const u8) void {
-        var f = Dir.cwd().openFile(m.io, path, .{ .mode = .write_only }) catch |err| return say("{s}: {s}", .{ path, @errorName(err) });
+        var f = Dir.cwd().openFile(
+            m.io,
+            path,
+            .{ .mode = .write_only },
+        ) catch |err| return say("{s}: {s}", .{ path, @errorName(err) });
         defer f.close(m.io);
         const end = f.length(m.io) catch return;
-        f.writePositionalAll(m.io, text, end) catch |err| say("{s}: {s}", .{ path, @errorName(err) });
+        f.writePositionalAll(
+            m.io,
+            text,
+            end,
+        ) catch |err| say("{s}: {s}", .{ path, @errorName(err) });
     }
 
     /// The names in dir, sorted, as the shell's glob gives them.
@@ -684,11 +858,11 @@ const Machine = struct {
     }
 
     fn fmt(m: *Machine, comptime f: []const u8, args: anytype) []const u8 {
-        return std.fmt.allocPrint(m.gpa, f, args) catch "";
+        return m.gpa.print(f, args) catch "";
     }
 
     fn fmtZ(m: *Machine, comptime f: []const u8, args: anytype) [:0]const u8 {
-        return std.fmt.allocPrintSentinel(m.gpa, f, args, 0) catch "";
+        return m.gpa.printSentinel(f, args, 0) catch "";
     }
 
     fn z(m: *Machine, s: []const u8) [:0]const u8 {
@@ -749,13 +923,64 @@ const sysctls = [_][2][]const u8{
 
 // --- the seal --------------------------------------------------------------------
 
-/// System calls no program here makes, refused for every process the machine
-/// will run: modify_ldt, which only 16-bit code needs and which has carried
-/// kernel exploits. design/lockdown.md's seal adds to this table.
-const denied: []const linux.SYS = switch (builtin.cpu.arch) {
-    .x86_64 => &.{.modify_ldt},
-    .aarch64 => &.{},
-    else => @compileError("init runs on aarch64 and x86_64"),
+/// System calls no program here makes once init hands over, refused for
+/// every process the machine will run (design/lockdown.md, the seal), each
+/// where the architecture has it:
+///
+///   bpf, perf_event_open           eBPF and kernel tracing, which rootkits
+///                                  are made of
+///   init_module .. delete_module   modules: the loader closed already
+///   kexec_load, kexec_file_load    another kernel: lockdown refuses already
+///   io_uring_*                     makes kernel.io_uring_disabled permanent
+///   userfaultfd                    the usual way to win a kernel race
+///   open_by_handle_at, name_..     walking past mounts by inode handle
+///   add_key, keyctl, request_key   the kernel keyring; cryptsetup is done
+///                                  with it before init hands over
+///   process_vm_readv, _writev      another process's memory: Yama refuses
+///   modify_ldt, iopl, ioperm       16-bit code and I/O ports
+///   acct .. vhangup                unused here; old, rarely audited code
+///
+/// syslog stays: busybox's dmesg reads the kernel's log with it.
+const denied_names = [_][]const u8{
+    "bpf",               "perf_event_open",   "init_module",     "finit_module",
+    "delete_module",     "kexec_load",        "kexec_file_load", "io_uring_setup",
+    "io_uring_enter",    "io_uring_register", "userfaultfd",     "open_by_handle_at",
+    "name_to_handle_at", "add_key",           "keyctl",          "request_key",
+    "process_vm_readv",  "process_vm_writev", "modify_ldt",      "iopl",
+    "ioperm",            "acct",              "swapon",          "swapoff",
+    "quotactl",          "lookup_dcookie",    "uselib",          "vhangup",
+};
+
+const denied: []const linux.SYS = blk: {
+    var list: []const linux.SYS = &.{};
+    for (denied_names) |name| {
+        if (@hasField(linux.SYS, name)) list = list ++ [_]linux.SYS{@field(linux.SYS, name)};
+    }
+    break :blk list;
+};
+
+/// Capabilities no process needs once init hands over, dropped from the
+/// bounding set, so not even root gets them back before a reboot: code in
+/// the kernel (SYS_MODULE, BPF, PERFMON), hardware and ports (SYS_RAWIO),
+/// other processes (SYS_PTRACE), device files (MKNOD), and what nothing here
+/// uses. fence drops NET_ADMIN and NET_RAW after it sets the network
+/// policy, unless the form allows them. SYSLOG stays, for dmesg.
+const dropped_caps = [_]struct { name: []const u8, n: u6 }{
+    .{ .name = "linux_immutable", .n = 9 },
+    .{ .name = "sys_module", .n = 16 },
+    .{ .name = "sys_rawio", .n = 17 },
+    .{ .name = "sys_ptrace", .n = 19 },
+    .{ .name = "sys_pacct", .n = 20 },
+    .{ .name = "sys_time", .n = 25 },
+    .{ .name = "mknod", .n = 27 },
+    .{ .name = "audit_control", .n = 30 },
+    .{ .name = "mac_override", .n = 32 },
+    .{ .name = "mac_admin", .n = 33 },
+    .{ .name = "wake_alarm", .n = 35 },
+    .{ .name = "block_suspend", .n = 36 },
+    .{ .name = "perfmon", .n = 38 },
+    .{ .name = "bpf", .n = 39 },
+    .{ .name = "checkpoint_restore", .n = 40 },
 };
 
 /// The architecture every system call must come in as. Any other, which on
@@ -780,7 +1005,7 @@ const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
 /// rest are allowed. It reads numbers, never arguments, so the kernel
 /// caches every allowed call as allowed and runs no filter for it, and a
 /// longer table costs nothing more. What any filter costs is the kernel's
-/// slower way into every system call, about 15 ns a call (design/lockdown.md,
+/// slower way into every system call, about 25 ns a call (design/lockdown.md,
 /// *What the seal costs*): werewolf pays that, by choice.
 const seal_filter = blk: {
     const n = denied.len;
@@ -789,9 +1014,19 @@ const seal_filter = blk: {
     f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = native_arch };
     f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
-    for (denied, 0..) |sys, i| f[4 + i] = .{ .code = JEQ_K, .jt = @intCast(n - i), .jf = 0, .k = @intCast(@backingInt(sys)) };
+    for (denied, 0..) |sys, i| f[4 + i] = .{
+        .code = JEQ_K,
+        .jt = @intCast(n - i),
+        .jf = 0,
+        .k = @intCast(@backingInt(sys)),
+    };
     f[4 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
-    f[5 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS) };
+    f[5 + n] = .{
+        .code = RET_K,
+        .jt = 0,
+        .jf = 0,
+        .k = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS),
+    };
     break :blk f;
 };
 
@@ -801,14 +1036,30 @@ const seal_filter = blk: {
 /// program after it. A kernel that refuses it leaves the machine unsealed,
 /// and posture says so.
 fn seal() void {
-    const SECCOMP_SET_MODE_FILTER = 1;
-    const prog = extern struct { len: u16, filter: [*]const Filter }{ .len = seal_filter.len, .filter = &seal_filter };
-    const rc = linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog);
-    if (linux.errno(rc) != .SUCCESS) return say("not sealed: seccomp: {t}", .{linux.errno(rc)});
-    switch (builtin.cpu.arch) {
-        .x86_64 => say("sealed: modify_ldt refused for every process", .{}),
-        else => say("sealed: 32-bit system calls end the process that makes them", .{}),
+    const PR_CAPBSET_DROP = 24;
+    var caps: usize = 0;
+    for (dropped_caps) |c| {
+        const rc = linux.prctl(PR_CAPBSET_DROP, c.n, 0, 0, 0);
+        if (linux.errno(rc) == .SUCCESS)
+            caps += 1
+        else
+            say("cap_{s} not dropped: {t}", .{ c.name, linux.errno(rc) });
     }
+    const SECCOMP_SET_MODE_FILTER = 1;
+    const prog = extern struct {
+        len: u16,
+        filter: [*]const Filter,
+    }{ .len = seal_filter.len, .filter = &seal_filter };
+    const rc = linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog);
+    if (linux.errno(rc) != .SUCCESS) return say(
+        "not sealed: seccomp: {t}; {d} capabilities dropped",
+        .{ linux.errno(rc), caps },
+    );
+    say(
+        "sealed: {d} system calls refused, {d} capabilities dropped, other architectures' calls " ++
+            "fatal",
+        .{ denied.len, caps },
+    );
 }
 
 // --- pure functions, tested below ----------------------------------------------
@@ -884,7 +1135,7 @@ fn sshKeys(gpa: Allocator, line: []const u8, out: *std.ArrayList(u8)) !void {
             continue;
         }
         if (j < line.len and line[j] == ' ') {
-            const q = std.mem.indexOfScalarPos(u8, line, j, '"') orelse line.len;
+            const q = std.mem.findScalarPos(u8, line, j, '"') orelse line.len;
             j = q;
         }
         try out.print(gpa, "{s}\n", .{std.mem.trimEnd(u8, line[start..j], " \r")});
@@ -905,7 +1156,8 @@ fn keyTypeEnd(s: []const u8) ?usize {
     }
     if (std.mem.startsWith(u8, s, "sk-")) {
         const at = std.mem.indexOf(u8, s, "@openssh.com ") orelse return null;
-        for (s[3..at]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') return null;
+        for (s[3..at]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and
+            c != '-') return null;
         return at + "@openssh.com ".len;
     }
     return null;
@@ -919,7 +1171,8 @@ fn isBase64(c: u8) bool {
 fn isPlainUser(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
     if (!std.ascii.isLower(s[0]) and s[0] != '_') return false;
-    for (s[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_' and c != '-') return false;
+    for (s[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_' and
+        c != '-') return false;
     return true;
 }
 
@@ -956,7 +1209,8 @@ fn isHostname(s: []const u8) bool {
 fn hasEntry(text: []const u8, name: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
-        if (std.mem.startsWith(u8, line, name) and line.len > name.len and line[name.len] == ':') return true;
+        if (std.mem.startsWith(u8, line, name) and line.len > name.len and
+            line[name.len] == ':') return true;
     }
     return false;
 }
@@ -1008,8 +1262,8 @@ fn instanceId(text: []const u8) []const u8 {
 
 /// The level in /sys/kernel/security/lockdown: "none [integrity] confidentiality".
 fn lockdownLevel(text: []const u8) []const u8 {
-    const a = std.mem.indexOfScalar(u8, text, '[') orelse return "unavailable";
-    const b = std.mem.indexOfScalarPos(u8, text, a, ']') orelse return "unavailable";
+    const a = std.mem.findScalar(u8, text, '[') orelse return "unavailable";
+    const b = std.mem.findScalarPos(u8, text, a, ']') orelse return "unavailable";
     return text[a + 1 .. b];
 }
 
@@ -1020,7 +1274,7 @@ fn lastField(s: []const u8) []const u8 {
 }
 
 fn firstLine(s: []const u8) []const u8 {
-    return s[0 .. std.mem.indexOfScalar(u8, s, '\n') orelse s.len];
+    return s[0 .. std.mem.findScalar(u8, s, '\n') orelse s.len];
 }
 
 fn firstWord(s: []const u8) []const u8 {
@@ -1056,7 +1310,13 @@ fn executable(path: [:0]const u8) bool {
 
 fn isBlockDevice(path: [:0]const u8) bool {
     var st: linux.Statx = undefined;
-    if (linux.errno(linux.statx(linux.AT.FDCWD, path, 0, .{ .TYPE = true }, &st)) != .SUCCESS) return false;
+    if (linux.errno(linux.statx(
+        linux.AT.FDCWD,
+        path,
+        0,
+        .{ .TYPE = true },
+        &st,
+    )) != .SUCCESS) return false;
     return st.mode & linux.S.IFMT == linux.S.IFBLK;
 }
 
@@ -1080,7 +1340,7 @@ fn writeFile(path: [:0]const u8, data: []const u8) bool {
 
 fn say(comptime f: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "werewolf: " ++ f ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "werewolf: " ++ f ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
@@ -1107,14 +1367,30 @@ fn sealAction(arch: u32, nr: u32) u32 {
 
 test seal_filter {
     const enosys = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS);
-    for (denied) |sys| try testing.expectEqual(enosys, sealAction(native_arch, @intCast(@backingInt(sys))));
-    for ([_]linux.SYS{ .read, .write, .openat, .mmap, .futex, .getpid }) |sys| try testing.expectEqual(SECCOMP_RET_ALLOW, sealAction(native_arch, @intCast(@backingInt(sys))));
+    for (denied) |sys| try testing.expectEqual(
+        enosys,
+        sealAction(native_arch, @intCast(@backingInt(sys))),
+    );
+    for ([_]linux.SYS{
+        .read,
+        .write,
+        .openat,
+        .mmap,
+        .futex,
+        .getpid,
+    }) |sys| try testing.expectEqual(
+        SECCOMP_RET_ALLOW,
+        sealAction(native_arch, @intCast(@backingInt(sys))),
+    );
     try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000028, 0)); // AUDIT_ARCH_ARM
     try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000003, 0)); // AUDIT_ARCH_I386
 }
 
 test parseCmdline {
-    const c = parseCmdline("console=hvc0 werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.data=vda werewolf.victim=ab:/w werewolf.debug=1\n");
+    const c = parseCmdline(
+        "console=hvc0 werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.data=vda " ++
+            "werewolf.victim=ab:/w werewolf.debug=1\n",
+    );
     try testing.expectEqualStrings("10.0.2.15/24", c.ip);
     try testing.expectEqualStrings("10.0.2.2", c.gw);
     try testing.expectEqualStrings("vda", c.data);
@@ -1139,7 +1415,10 @@ test parseNoCloud {
     const nc = try parseNoCloud(arena.allocator(), ud);
     try testing.expectEqualStrings("t", nc.user);
     try testing.expectEqualStrings("501", nc.uid);
-    try testing.expectEqualStrings("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc t@mac\necdsa-sha2-nistp256 AAAAE2VjZHNh= other\n", nc.keys);
+    try testing.expectEqualStrings(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc t@mac\necdsa-sha2-nistp256 AAAAE2VjZHNh= other\n",
+        nc.keys,
+    );
     try testing.expect(isPlainUid(nc.uid)); // 501: macOS's first user, through Lima
     const none = try parseNoCloud(arena.allocator(), "#cloud-config\n");
     try testing.expectEqualStrings("1000", none.uid);
@@ -1153,7 +1432,10 @@ test sshKeys {
     try sshKeys(arena.allocator(), "  - sk-ssh-ed25519@openssh.com AAAAGnNr comment here", &out);
     try sshKeys(arena.allocator(), "ssh-rsa AAAAB3Nza", &out);
     try sshKeys(arena.allocator(), "ssh-dss AAAA not ours; ssh-rsa  no-body", &out);
-    try testing.expectEqualStrings("sk-ssh-ed25519@openssh.com AAAAGnNr comment here\nssh-rsa AAAAB3Nza\n", out.items);
+    try testing.expectEqualStrings(
+        "sk-ssh-ed25519@openssh.com AAAAGnNr comment here\nssh-rsa AAAAB3Nza\n",
+        out.items,
+    );
 }
 
 test "validation" {
@@ -1179,7 +1461,10 @@ test "validation" {
     try testing.expect(!isHostname("-x"));
     try testing.expect(hasEntry("root:x:0:0::/root:/bin/sh\nt:x:501:501::/:/x\n", "t"));
     try testing.expect(!hasEntry("tt:x:1:1::/:/x\n", "t"));
-    try testing.expectEqual(Ids{ .uid = 200, .gid = 201 }, lookupIds("nginx:x:200:201::/:/x\n", "nginx").?);
+    try testing.expectEqual(
+        Ids{ .uid = 200, .gid = 201 },
+        lookupIds("nginx:x:200:201::/:/x\n", "nginx").?,
+    );
 }
 
 test safeName {
@@ -1196,7 +1481,13 @@ test safeName {
 }
 
 test "small parsers" {
-    try testing.expectEqualStrings("i-0123", instanceId("local-hostname: x\ninstance-id: i-0123\n"));
-    try testing.expectEqualStrings("integrity", lockdownLevel("none [integrity] confidentiality\n"));
+    try testing.expectEqualStrings(
+        "i-0123",
+        instanceId("local-hostname: x\ninstance-id: i-0123\n"),
+    );
+    try testing.expectEqualStrings(
+        "integrity",
+        lockdownLevel("none [integrity] confidentiality\n"),
+    );
     try testing.expectEqualStrings("12.34", firstWord("12.34 56.78\n"));
 }

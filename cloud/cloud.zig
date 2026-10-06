@@ -63,7 +63,13 @@ const Provider = struct {
 };
 
 const providers = [_]Provider{
-    .{ .name = "gcp", .vendor = "Google", .product = "Google Compute Engine", .path = "/computeMetadata/v1/instance/attributes/user-data", .header = "Metadata-Flavor: Google" },
+    .{
+        .name = "gcp",
+        .vendor = "Google",
+        .product = "Google Compute Engine",
+        .path = "/computeMetadata/v1/instance/attributes/user-data",
+        .header = "Metadata-Flavor: Google",
+    },
     .{ .name = "aws", .vendor = "Amazon EC2", .path = "/latest/user-data", .token = true },
     .{ .name = "hetzner", .vendor = "Hetzner", .path = "/hetzner/v1/userdata" },
 };
@@ -74,10 +80,24 @@ pub fn main(init: std.process.Init) !void {
     // which werewolf leaves to each program, so workloads do not pay
     // (docs/security.md). Where the CPU has no control, the kernel refuses
     // and nothing changes.
-    _ = linux.prctl(@backingInt(linux.PR.SET_SPECULATION_CTRL), linux.PR.SPEC_STORE_BYPASS, linux.PR.SPEC_FORCE_DISABLE, 0, 0);
+    _ = linux.prctl(
+        @backingInt(linux.PR.SET_SPECULATION_CTRL),
+        linux.PR.SPEC_STORE_BYPASS,
+        linux.PR.SPEC_FORCE_DISABLE,
+        0,
+        0,
+    );
     var log: Log = .{};
     run(&log) catch |err| {
-        log.event("error", .{ .step = step, .@"error" = @errorName(err), .detail = detail, .errno = errnoName(detail_errno) });
+        log.event(
+            "error",
+            .{
+                .step = step,
+                .@"error" = @errorName(err),
+                .detail = detail,
+                .errno = errnoName(detail_errno),
+            },
+        );
         linux.exit_group(1);
     };
     // Straight out: the runtime's cleanup would make system calls the
@@ -101,15 +121,33 @@ fn run(log: *Log) !void {
     const vendor = dmi("/sys/class/dmi/id/sys_vendor", &vendor_buf);
     const product = dmi("/sys/class/dmi/id/product_name", &product_buf);
     const p = identify(vendor, product) orelse {
-        log.event("skip", .{ .reason = "not a cloud werewolf knows", .vendor = printable(vendor), .product = printable(product) });
+        log.event(
+            "skip",
+            .{
+                .reason = "not a cloud werewolf knows",
+                .vendor = printable(vendor),
+                .product = printable(product),
+            },
+        );
         return;
     };
 
     step = "setup";
     _ = linux.mkdirat(linux.AT.FDCWD, "/run/werewolf", 0o755);
     const made = linux.mkdirat(linux.AT.FDCWD, out_dir, 0o700);
-    if (linux.errno(made) != .SUCCESS and linux.errno(made) != .EXIST) _ = try sys(made, "mkdir " ++ out_dir);
-    const dir: i32 = @intCast(try sys(linux.openat(linux.AT.FDCWD, out_dir, .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true }, 0), "open " ++ out_dir));
+    if (linux.errno(made) != .SUCCESS and linux.errno(made) != .EXIST) _ = try sys(
+        made,
+        "mkdir " ++ out_dir,
+    );
+    const dir: i32 = @intCast(try sys(
+        linux.openat(
+            linux.AT.FDCWD,
+            out_dir,
+            .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true },
+            0,
+        ),
+        "open " ++ out_dir,
+    ));
     var pipe: [2]i32 = undefined;
     _ = try sys(linux.pipe2(&pipe, .{ .CLOEXEC = true }), "pipe");
     const parent_pid = linux.getpid();
@@ -137,7 +175,13 @@ fn run(log: *Log) !void {
     step = "check";
     var raw: [max_config]u8 = undefined;
     const tar = decodeBase64(msg[1..], &raw) orelse
-        return log.event("none", .{ .provider = p.name, .reason = "the user data is not a werewolf config (base64 of a tar)" });
+        return log.event(
+            "none",
+            .{
+                .provider = p.name,
+                .reason = "the user data is not a werewolf config (base64 of a tar)",
+            },
+        );
     var files: [max_entries]Entry = undefined;
     const n = checkTar(tar, &files) catch |err|
         return log.event("refused", .{ .provider = p.name, .reason = @errorName(err) });
@@ -173,7 +217,8 @@ fn dmi(path: [*:0]const u8, buf: *[128]u8) []const u8 {
 /// For logging DMI strings, which are the firmware's: letters, digits and
 /// a little punctuation, or nothing.
 fn printable(s: []const u8) []const u8 {
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.indexOfScalar(u8, " .-_()", c) == null) return "?";
+    for (s) |c| if (!std.ascii.isAlphanumeric(c) and
+        std.mem.findScalar(u8, " .-_()", c) == null) return "?";
     return s;
 }
 
@@ -240,12 +285,27 @@ fn fetchOnce(p: Provider, buf: *[max_response]u8) ?Fetched {
     var extra: []const u8 = p.header;
     var token_header: [256]u8 = undefined;
     if (p.token) {
-        const resp = exchange(request(&req, "PUT", "/latest/api/token", "X-aws-ec2-metadata-token-ttl-seconds: 60") orelse return .failed, buf) orelse return null;
+        const resp = exchange(
+            request(
+                &req,
+                "PUT",
+                "/latest/api/token",
+                "X-aws-ec2-metadata-token-ttl-seconds: 60",
+            ) orelse return .failed,
+            buf,
+        ) orelse return null;
         const r = parseResponse(resp) orelse return null;
         if (r.status != 200 or !validToken(r.body)) return null;
-        extra = std.fmt.bufPrint(&token_header, "X-aws-ec2-metadata-token: {s}", .{r.body}) catch return .failed;
+        extra = std.mem.print(
+            &token_header,
+            "X-aws-ec2-metadata-token: {s}",
+            .{r.body},
+        ) catch return .failed;
     }
-    const resp = exchange(request(&req, "GET", p.path, extra) orelse return .failed, buf) orelse return null;
+    const resp = exchange(
+        request(&req, "GET", p.path, extra) orelse return .failed,
+        buf,
+    ) orelse return null;
     const r = parseResponse(resp) orelse return null;
     return switch (r.status) {
         200 => if (r.body.len == 0) .none else .{ .body = r.body },
@@ -261,7 +321,8 @@ fn request(buf: []u8, method: []const u8, path: []const u8, header: []const u8) 
     for ([_][]const u8{ path, header }) |s| {
         for (s) |c| if (c < 0x20 or c > 0x7e) return null;
     }
-    return std.fmt.bufPrint(buf, "{s} {s} HTTP/1.1\r\nHost: 169.254.169.254\r\nConnection: close\r\nContent-Length: 0\r\n{s}{s}\r\n", .{
+    return std.mem.print(buf, "{s} {s} HTTP/1.1\r\nHost: 169.254.169.254\r\nConnection: " ++
+        "close\r\nContent-Length: 0\r\n{s}{s}\r\n", .{
         method, path, header, if (header.len > 0) "\r\n" else "",
     }) catch null;
 }
@@ -269,7 +330,8 @@ fn request(buf: []u8, method: []const u8, path: []const u8, header: []const u8) 
 /// IMDSv2's tokens are base64-ish: anything else is not put in a header.
 fn validToken(t: []const u8) bool {
     if (t.len == 0 or t.len > 200) return false;
-    for (t) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '=' and c != '+' and c != '/') return false;
+    for (t) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '=' and
+        c != '+' and c != '/') return false;
     return true;
 }
 
@@ -278,17 +340,30 @@ fn validToken(t: []const u8) bool {
 /// or with its last chunk, or when the server closes.
 fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
     const deadline = nowMs() + 5_000;
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0);
+    const rc = linux.socket(
+        linux.AF.INET,
+        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+    );
     if (linux.errno(rc) != .SUCCESS) return null;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
-    const addr: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, 80), .addr = @bitCast(metadata_ip) };
+    const addr: linux.sockaddr.in = .{
+        .port = std.mem.nativeToBig(u16, 80),
+        .addr = @bitCast(metadata_ip),
+    };
     const c = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
     if (linux.errno(c) != .SUCCESS and linux.errno(c) != .INPROGRESS) return null;
     if (!waitFor(fd, linux.POLL.OUT, deadline)) return null;
     var err: i32 = 0;
     var len: linux.socklen_t = @sizeOf(i32);
-    if (linux.errno(linux.getsockopt(fd, linux.SOL.SOCKET, linux.SO.ERROR, @ptrCast(&err), &len)) != .SUCCESS or err != 0) return null;
+    if (linux.errno(linux.getsockopt(
+        fd,
+        linux.SOL.SOCKET,
+        linux.SO.ERROR,
+        @ptrCast(&err),
+        &len,
+    )) != .SUCCESS or err != 0) return null;
 
     var off: usize = 0;
     while (off < req.len) {
@@ -318,14 +393,17 @@ fn complete(resp: []const u8) bool {
     var lines = std.mem.splitSequence(u8, resp[0..end], "\r\n");
     _ = lines.next();
     while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return false;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return false;
         const name = std.mem.trim(u8, line[0..colon], " ");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
             const l = std.fmt.parseInt(usize, value, 10) catch return false;
             return resp.len - end - 4 >= l;
         }
-        if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) return std.mem.endsWith(u8, resp, "\r\n0\r\n\r\n");
+        if (std.ascii.eqlIgnoreCase(
+            name,
+            "transfer-encoding",
+        )) return std.mem.endsWith(u8, resp, "\r\n0\r\n\r\n");
     }
     return false;
 }
@@ -353,12 +431,13 @@ fn parseResponse(resp: []u8) ?Response {
     var body = resp[end + 4 ..];
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const status_line = lines.next() orelse return null;
-    if (!std.mem.startsWith(u8, status_line, "HTTP/1.") or status_line.len < 12 or status_line[8] != ' ') return null;
+    if (!std.mem.startsWith(u8, status_line, "HTTP/1.") or status_line.len < 12 or
+        status_line[8] != ' ') return null;
     const status = std.fmt.parseInt(u16, status_line[9..12], 10) catch return null;
     var length: ?usize = null;
     var chunked = false;
     while (lines.next()) |line| {
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return null;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return null;
         const name = std.mem.trim(u8, line[0..colon], " ");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
@@ -386,12 +465,12 @@ fn dechunk(body: []u8) ?[]const u8 {
     while (true) {
         const eol = std.mem.indexOfPos(u8, body, in, "\r\n") orelse return null;
         const size_text = std.mem.trim(u8, body[in..eol], " ");
-        const semi = std.mem.indexOfScalar(u8, size_text, ';') orelse size_text.len;
+        const semi = std.mem.findScalar(u8, size_text, ';') orelse size_text.len;
         const size = std.fmt.parseInt(usize, size_text[0..semi], 16) catch return null;
         in = eol + 2;
         if (size == 0) return out[0..n];
         if (size > body.len - in or body.len - in - size < 2) return null;
-        std.mem.copyForwards(u8, out[n .. n + size], body[in .. in + size]);
+        @memmove(out[n .. n + size], body[in .. in + size]);
         n += size;
         in += size;
         if (!std.mem.eql(u8, body[in .. in + 2], "\r\n")) return null;
@@ -448,7 +527,8 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         const h = tar[off..][0..512];
         if (std.mem.allEqual(u8, h, 0)) return n; // the end
         if (!checksumOk(h)) return error.BadChecksum;
-        const posix = std.mem.eql(u8, h[257..263], "ustar\x00") and std.mem.eql(u8, h[263..265], "00");
+        const posix = std.mem.eql(u8, h[257..263], "ustar\x00") and
+            std.mem.eql(u8, h[263..265], "00");
         const gnu = std.mem.eql(u8, h[257..265], "ustar  \x00");
         if (!posix and !gnu) return error.NotUstar;
         const dir = switch (h[156]) {
@@ -478,7 +558,12 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         if (name.len > 100) return error.BadName;
         if (name.len > 0) {
             if (n == max_entries) return error.TooManyEntries;
-            out[n] = .{ .name_buf = undefined, .name_len = @intCast(name.len), .dir = dir, .data = tar[off..][0..size] };
+            out[n] = .{
+                .name_buf = undefined,
+                .name_len = @intCast(name.len),
+                .dir = dir,
+                .data = tar[off..][0..size],
+            };
             @memcpy(out[n].name_buf[0..name.len], name);
             n += 1;
         }
@@ -491,7 +576,7 @@ fn fullName(h: *const [512]u8, posix: bool, buf: *[256]u8) ?[]const u8 {
     const name = std.mem.sliceTo(h[0..100], 0);
     const prefix = if (posix) std.mem.sliceTo(h[345..500], 0) else "";
     if (prefix.len == 0) return name;
-    return std.fmt.bufPrint(buf, "{s}/{s}", .{ prefix, name }) catch null;
+    return std.mem.print(buf, "{s}/{s}", .{ prefix, name }) catch null;
 }
 
 /// A name werewolf will extract, without a leading ./ or a trailing /: ""
@@ -502,7 +587,8 @@ fn cleanName(raw: []const u8) ?[]const u8 {
     while (name.len > 0 and name[name.len - 1] == '/') name = name[0 .. name.len - 1];
     if (name.len == 0 or std.mem.eql(u8, name, ".")) return "";
     if (name[0] == '/') return null;
-    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and c != '-' and c != '/') return null;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and c != '-' and
+        c != '/') return null;
     var parts = std.mem.splitScalar(u8, name, '/');
     while (parts.next()) |part| {
         if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return null;
@@ -531,17 +617,25 @@ fn writeTar(out: []u8, entries: []const Entry) []const u8 {
         const h = out[off..][0..512];
         @memset(h, 0);
         @memcpy(h[0..e.name_len], e.name());
-        _ = std.fmt.bufPrint(h[100..108], "{o:0>7}\x00", .{@as(u32, if (e.dir) 0o700 else 0o600)}) catch unreachable;
-        _ = std.fmt.bufPrint(h[108..116], "0000000\x00", .{}) catch unreachable;
-        _ = std.fmt.bufPrint(h[116..124], "0000000\x00", .{}) catch unreachable;
-        _ = std.fmt.bufPrint(h[124..136], "{o:0>11}\x00", .{if (e.dir) 0 else e.data.len}) catch unreachable;
-        _ = std.fmt.bufPrint(h[136..148], "00000000000\x00", .{}) catch unreachable;
+        _ = std.mem.print(
+            h[100..108],
+            "{o:0>7}\x00",
+            .{@as(u32, if (e.dir) 0o700 else 0o600)},
+        ) catch unreachable;
+        _ = std.mem.print(h[108..116], "0000000\x00", .{}) catch unreachable;
+        _ = std.mem.print(h[116..124], "0000000\x00", .{}) catch unreachable;
+        _ = std.mem.print(
+            h[124..136],
+            "{o:0>11}\x00",
+            .{if (e.dir) 0 else e.data.len},
+        ) catch unreachable;
+        _ = std.mem.print(h[136..148], "00000000000\x00", .{}) catch unreachable;
         h[156] = if (e.dir) '5' else '0';
         @memcpy(h[257..265], "ustar\x0000");
         var sum: usize = 0;
         @memset(h[148..156], ' ');
         for (h) |b| sum += b;
-        _ = std.fmt.bufPrint(h[148..156], "{o:0>6}\x00 ", .{sum}) catch unreachable;
+        _ = std.mem.print(h[148..156], "{o:0>6}\x00 ", .{sum}) catch unreachable;
         off += 512;
         if (!e.dir) {
             @memcpy(out[off..][0..e.data.len], e.data);
@@ -563,7 +657,7 @@ fn sandboxParent(dir: i32, in: i32) !void {
     while (cap < 64) : (cap += 1) _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_SECUREBITS), 0xef, 0, 0, 0), "securebits");
     var hdr: CapHeader = .{};
-    const none = [2]CapData{ .{}, .{} };
+    const none = [2]CapSets{ .{}, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&none)), "capset");
     try landlock(dir);
     var f: Filter = .{};
@@ -598,16 +692,29 @@ fn dropTo(id: u32) !void {
 fn landlock(dir: i32) !void {
     const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1);
     _ = try sys(abi, "landlock version");
-    const fs_all: u64 = if (abi >= 5) 0xffff else if (abi >= 3) 0x7fff else if (abi >= 2) 0x3fff else 0x1fff;
+    const fs_all: u64 = if (abi >= 5)
+        0xffff
+    else if (abi >= 3)
+        0x7fff
+    else if (abi >= 2)
+        0x3fff
+    else
+        0x1fff;
     const attr: [3]u64 = .{ fs_all, if (abi >= 4) 0x3 else 0, if (abi >= 6) 0x3 else 0 };
     const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
-    const ruleset = try sys(linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0), "landlock ruleset");
+    const ruleset = try sys(
+        linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
+        "landlock ruleset",
+    );
     // READ_FILE, WRITE_FILE, REMOVE_FILE, MAKE_REG, and TRUNCATE where known.
     const allowed: u64 = 0x4 | 0x2 | 0x20 | 0x100 | (if (abi >= 3) @as(u64, 0x4000) else 0);
     var beneath: [12]u8 = undefined;
     std.mem.writeInt(u64, beneath[0..8], allowed, .little);
     std.mem.writeInt(i32, beneath[8..12], dir, .little);
-    _ = try sys(linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0), "landlock rule");
+    _ = try sys(
+        linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0),
+        "landlock rule",
+    );
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
     _ = try sys(linux.syscall2(.landlock_restrict_self, ruleset, 0), "landlock restrict");
     _ = linux.close(@intCast(ruleset));
@@ -622,7 +729,7 @@ const CapHeader = extern struct {
         std.debug.assert(@sizeOf(CapHeader) == 8);
     }
 };
-const CapData = extern struct { effective: u32 = 0, permitted: u32 = 0, inheritable: u32 = 0 };
+const CapSets = extern struct { effective: u32 = 0, permitted: u32 = 0, inheritable: u32 = 0 };
 
 const SockFilter = extern struct { code: u16, jt: u8 = 0, jf: u8 = 0, k: u32 = 0 };
 const SockFprog = extern struct { len: u16, filter: [*]const SockFilter };
@@ -677,7 +784,10 @@ const Filter = struct {
     fn install(f: *Filter) !void {
         const insns = f.finish();
         const prog: SockFprog = .{ .len = @intCast(insns.len), .filter = insns.ptr };
-        _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
+        _ = try sys(
+            linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
+            "no_new_privs",
+        );
         _ = try sys(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &prog), "seccomp");
     }
 };
@@ -699,10 +809,27 @@ fn sys(rc: usize, comptime what: []const u8) !usize {
 /// Write a file whole beneath `dir`: to a new name, then renamed over the old.
 fn writeFile(dir: i32, comptime name: [:0]const u8, data: []const u8) !void {
     const tmp = std.fmt.comptimePrint("{s}.new", .{name});
-    const fd = try sys(linux.openat(dir, tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o600), "open " ++ name);
+    const fd = try sys(
+        linux.openat(
+            dir,
+            tmp,
+            .{
+                .ACCMODE = .WRONLY,
+                .CREAT = true,
+                .TRUNC = true,
+                .CLOEXEC = true,
+                .NOFOLLOW = true,
+            },
+            0o600,
+        ),
+        "open " ++ name,
+    );
     defer _ = linux.close(@intCast(fd));
     var off: usize = 0;
-    while (off < data.len) off += try sys(linux.write(@intCast(fd), data[off..].ptr, data.len - off), "write " ++ name);
+    while (off < data.len) off += try sys(
+        linux.write(@intCast(fd), data[off..].ptr, data.len - off),
+        "write " ++ name,
+    );
     _ = try sys(linux.renameat(dir, tmp, dir, name), "rename " ++ name);
 }
 
@@ -749,7 +876,10 @@ const Log = struct {
         var ts: linux.timespec = undefined;
         _ = linux.clock_gettime(.REALTIME, &ts);
         var time: [20]u8 = undefined;
-        w.print("cloud: {{\"time\":\"{s}\",\"event\":\"{s}\",", .{ rfc3339(&time, @intCast(ts.sec)), name }) catch return;
+        w.print(
+            "cloud: {{\"time\":\"{s}\",\"event\":\"{s}\",",
+            .{ rfc3339(&time, @intCast(ts.sec)), name },
+        ) catch return;
         const mark = w.end;
         std.json.Stringify.value(fields, .{}, &w) catch return;
         @memmove(l.buf[mark .. w.end - 1], l.buf[mark + 1 .. w.end]);
@@ -764,8 +894,9 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return std.mem.print(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch unreachable;
 }
 
@@ -778,17 +909,21 @@ fn testTar(buf: []u8, entries: []const struct { []const u8, u8, []const u8 }) []
         const h = buf[off..][0..512];
         @memset(h, 0);
         @memcpy(h[0..e[0].len], e[0]);
-        _ = std.fmt.bufPrint(h[100..108], "0000644\x00", .{}) catch unreachable;
-        _ = std.fmt.bufPrint(h[108..116], "0000765\x00", .{}) catch unreachable; // the builder's uid
-        _ = std.fmt.bufPrint(h[116..124], "0000024\x00", .{}) catch unreachable;
-        _ = std.fmt.bufPrint(h[124..136], "{o:0>11}\x00", .{e[2].len}) catch unreachable;
-        _ = std.fmt.bufPrint(h[136..148], "15052301457\x00", .{}) catch unreachable;
+        _ = std.mem.print(h[100..108], "0000644\x00", .{}) catch unreachable;
+        _ = std.mem.print(
+            h[108..116],
+            "0000765\x00",
+            .{},
+        ) catch unreachable; // the builder's uid
+        _ = std.mem.print(h[116..124], "0000024\x00", .{}) catch unreachable;
+        _ = std.mem.print(h[124..136], "{o:0>11}\x00", .{e[2].len}) catch unreachable;
+        _ = std.mem.print(h[136..148], "15052301457\x00", .{}) catch unreachable;
         h[156] = e[1];
         @memcpy(h[257..265], "ustar\x0000");
         @memset(h[148..156], ' ');
         var sum: usize = 0;
         for (h) |b| sum += b;
-        _ = std.fmt.bufPrint(h[148..156], "{o:0>6}\x00 ", .{sum}) catch unreachable;
+        _ = std.mem.print(h[148..156], "{o:0>6}\x00 ", .{sum}) catch unreachable;
         off += 512;
         @memcpy(buf[off..][0..e[2].len], e[2]);
         const padded = (e[2].len + 511) / 512 * 512;
@@ -799,11 +934,21 @@ fn testTar(buf: []u8, entries: []const struct { []const u8, u8, []const u8 }) []
     return buf[0 .. off + 1024];
 }
 
-const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK0wmN/Cr3JXqmLW7u+g9pTh+wyqqkgOEH7fJiXfj0lJ root@laptop\n";
+const key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK0wmN/Cr3JXqmLW7u+g9pTh+wyqqkgOEH7fJiXfj0lJ " ++
+    "root@laptop\n";
 
 test "a config as tar -C config . writes it" {
     var buf: [8192]u8 = undefined;
-    const tar = testTar(&buf, &.{ .{ "./", '5', "" }, .{ "./authorized_keys", '0', key }, .{ "./hostname", '0', "web-1\n" }, .{ "./cloudflared/", '5', "" }, .{ "./cloudflared/token", '0', "eyJh" } });
+    const tar = testTar(
+        &buf,
+        &.{
+            .{ "./", '5', "" },
+            .{ "./authorized_keys", '0', key },
+            .{ "./hostname", '0', "web-1\n" },
+            .{ "./cloudflared/", '5', "" },
+            .{ "./cloudflared/token", '0', "eyJh" },
+        },
+    );
     var files: [max_entries]Entry = undefined;
     const n = try checkTar(tar, &files);
     try std.testing.expectEqual(4, n);
@@ -824,7 +969,13 @@ test "a config as tar -C config . writes it" {
 
 test "pax headers, as macOS's tar writes, are skipped" {
     var buf: [8192]u8 = undefined;
-    const tar = testTar(&buf, &.{ .{ "./PaxHeader/hostname", 'x', "30 path=../../etc/shadow\n" }, .{ "./hostname", '0', "web-1\n" } });
+    const tar = testTar(
+        &buf,
+        &.{
+            .{ "./PaxHeader/hostname", 'x', "30 path=../../etc/shadow\n" },
+            .{ "./hostname", '0', "web-1\n" },
+        },
+    );
     var files: [max_entries]Entry = undefined;
     try std.testing.expectEqual(1, try checkTar(tar, &files));
     try std.testing.expectEqualStrings("hostname", files[0].name());
@@ -844,7 +995,10 @@ test "entries that are refused" {
         .{ "././@LongLink", 'L', error.NotAFileOrDirectory },
     };
     inline for (cases) |c| {
-        try std.testing.expectError(c[2], checkTar(testTar(&buf, &.{.{ c[0], c[1], "x" }}), &files));
+        try std.testing.expectError(
+            c[2],
+            checkTar(testTar(&buf, &.{.{ c[0], c[1], "x" }}), &files),
+        );
     }
     // A bad checksum, a truncated archive, and a file larger than allowed.
     var tar = testTar(&buf, &.{.{ "hostname", '0', "web-1\n" }});
@@ -875,38 +1029,63 @@ fn parseText(comptime text: []const u8) ?Response {
 }
 
 test "HTTP responses" {
-    var r = parseText("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhelloEXTRA").?;
+    var r = parseText(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhelloEXTRA",
+    ).?;
     try std.testing.expectEqual(200, r.status);
     try std.testing.expectEqualStrings("hello", r.body);
     r = parseText("HTTP/1.0 404 Not Found\r\n\r\n").?;
     try std.testing.expectEqual(404, r.status);
     // Without a length, the body runs to the close.
-    try std.testing.expectEqualStrings("token", parseText("HTTP/1.1 200 OK\r\nServer: EC2ws\r\n\r\ntoken").?.body);
+    try std.testing.expectEqualStrings(
+        "token",
+        parseText("HTTP/1.1 200 OK\r\nServer: EC2ws\r\n\r\ntoken").?.body,
+    );
 
-    var chunked = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n4;x=y\r\nwolf\r\n0\r\n\r\n".*;
+    var chunked = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n4;x=y\r\nw" ++
+        "olf\r\n0\r\n\r\n").*;
     try std.testing.expectEqualStrings("werewolf", parseResponse(&chunked).?.body);
 
-    try std.testing.expectEqual(null, parseText("HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort"));
+    try std.testing.expectEqual(
+        null,
+        parseText("HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\nshort"),
+    );
     try std.testing.expectEqual(null, parseText("HTTP/1.1 200 OK\r\nno colon here\r\n\r\n"));
     try std.testing.expectEqual(null, parseText("SSH-2.0-OpenSSH\r\n\r\n"));
-    try std.testing.expectEqual(null, parseText("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nx"));
-    var bad_chunk = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffff\r\nshort\r\n0\r\n\r\n".*;
+    try std.testing.expectEqual(
+        null,
+        parseText("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nx"),
+    );
+    var bad_chunk = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffff\r\nshort\r\n0\r" ++
+        "\n\r\n").*;
     try std.testing.expectEqual(null, parseResponse(&bad_chunk));
 }
 
 test "a response is whole when its length or last chunk says so" {
     try std.testing.expect(!complete("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhel"));
     try std.testing.expect(complete("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello"));
-    try std.testing.expect(!complete("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n"));
-    try std.testing.expect(complete("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n0\r\n\r\n"));
+    try std.testing.expect(
+        !complete("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n"),
+    );
+    try std.testing.expect(
+        complete("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n0\r\n\r\n"),
+    );
     try std.testing.expect(!complete("HTTP/1.1 200 OK\r\n\r\nuntil the close"));
 }
 
 test "requests carry no smuggled lines" {
     var buf: [512]u8 = undefined;
-    const r = request(&buf, "GET", "/computeMetadata/v1/instance/attributes/user-data", "Metadata-Flavor: Google").?;
+    const r = request(
+        &buf,
+        "GET",
+        "/computeMetadata/v1/instance/attributes/user-data",
+        "Metadata-Flavor: Google",
+    ).?;
     try std.testing.expect(std.mem.endsWith(u8, r, "Metadata-Flavor: Google\r\n\r\n"));
-    try std.testing.expectEqual(null, request(&buf, "GET", "/x", "X-aws-ec2-metadata-token: a\r\nEvil: 1"));
+    try std.testing.expectEqual(
+        null,
+        request(&buf, "GET", "/x", "X-aws-ec2-metadata-token: a\r\nEvil: 1"),
+    );
     try std.testing.expect(validToken("AQAEAOfVfS3tA0Ys4Q_XprM-HDQ=="));
     try std.testing.expect(!validToken("abc\r\nEvil: 1"));
     try std.testing.expect(!validToken(""));

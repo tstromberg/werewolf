@@ -57,7 +57,17 @@ pub fn main(init: std.process.Init) !void {
 // --- what may be mounted -------------------------------------------------------
 
 /// The places mounts may go, and binds may come from.
-const places = [_][]const u8{ "/proc", "/sys", "/dev", "/run", "/tmp", "/var/tmp", "/data", "/victim", "/mnt" };
+const places = [_][]const u8{
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/tmp",
+    "/var/tmp",
+    "/data",
+    "/victim",
+    "/mnt",
+};
 
 const Fs = struct {
     name: [:0]const u8,
@@ -92,7 +102,7 @@ const filesystems = [_]Fs{
 const remount_options = [_][]const u8{ "hidepid", "discard" };
 
 // mount_setattr(2) and fsmount(2) attributes (linux/mount.h).
-const ATTR = struct {
+const ATTR = struct { // ziglint-ignore: Z032
     const RDONLY: u64 = 0x1;
     const NOSUID: u64 = 0x2;
     const NODEV: u64 = 0x4;
@@ -181,7 +191,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
             p.attrs |= a[1];
             continue :next;
         };
-        const eq = std.mem.indexOfScalar(u8, o, '=');
+        const eq = std.mem.findScalar(u8, o, '=');
         try options.append(gpa, .{
             .key = try gpa.dupeSentinel(u8, o[0 .. eq orelse o.len], 0),
             .value = if (eq) |e| try gpa.dupeSentinel(u8, o[e + 1 ..], 0) else null,
@@ -277,7 +287,10 @@ fn validValue(o: Option) bool {
     if (std.mem.eql(u8, o.key, "size")) {
         if (v.len == 0 or v.len > 12) return false;
         const last = v[v.len - 1];
-        const digits = if (std.mem.indexOfScalar(u8, "kmg%", last) != null) v[0 .. v.len - 1] else v;
+        const digits = if (std.mem.findScalar(u8, "kmg%", last) != null)
+            v[0 .. v.len - 1]
+        else
+            v;
         if (digits.len == 0) return false;
         for (digits) |c| if (!std.ascii.isDigit(c)) return false;
         return true;
@@ -311,7 +324,7 @@ const audit_arch: u32 = switch (builtin.cpu.arch) {
 /// cap_user_header_t makes it a usize, so the kernel would read its pid from
 /// padding, which is whatever was on the stack.)
 const CapHeader = extern struct { version: u32, pid: i32 };
-const CapData = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
 
 const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
 
@@ -339,7 +352,12 @@ const filter = blk: {
     f[2] = stmt(RET_K, SECCOMP_RET_KILL_PROCESS);
     f[3] = stmt(LD_W_ABS, 0); // seccomp_data.nr
     f[4] = jump(JGE_K, 0x40000000, @intCast(n), 0); // x32's numbers
-    for (allowed_syscalls, 0..) |s, j| f[5 + j] = jump(JEQ_K, @intCast(@backingInt(s)), @intCast(n - j), 0);
+    for (allowed_syscalls, 0..) |s, j| f[5 + j] = jump(
+        JEQ_K,
+        @intCast(@backingInt(s)),
+        @intCast(n - j),
+        0,
+    );
     f[5 + n] = stmt(RET_K, SECCOMP_RET_KILL_PROCESS);
     // Every match jumps here.
     break :blk f ++ [_]Filter{stmt(RET_K, SECCOMP_RET_ALLOW)};
@@ -349,12 +367,15 @@ fn pledge() !void {
     try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
     const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
     const keep: u32 = 1 << CAP_SYS_ADMIN;
-    const data = [2]CapData{
+    const data = [2]CapSets{
         .{ .effective = keep, .permitted = keep, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
     };
     try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
-    const prog = extern struct { len: u16, filter: [*]const Filter }{ .len = filter.len, .filter = &filter };
+    const prog = extern struct {
+        len: u16,
+        filter: [*]const Filter,
+    }{ .len = filter.len, .filter = &filter };
     try sys(linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog));
 }
 
@@ -388,7 +409,12 @@ fn apply(p: Plan, log: []u8) !void {
             const clr: u64 = if (p.attrs & ATTR.NOATIME != 0) ATTR.ATIME else 0;
             try setattr(target, p.attrs, clr);
             if (p.options.len > 0) {
-                const fc = try fd(linux.syscall3(.fspick, @bitCast(@as(isize, target)), @intFromPtr(""), FSPICK_EMPTY_PATH | CLOEXEC));
+                const fc = try fd(linux.syscall3(
+                    .fspick,
+                    @bitCast(@as(isize, target)),
+                    @intFromPtr(""),
+                    FSPICK_EMPTY_PATH | CLOEXEC,
+                ));
                 defer _ = linux.close(fc);
                 try configure(fc, p.options, log);
                 try fsconfigCmd(fc, FSCONFIG_CMD_RECONFIGURE, log);
@@ -397,7 +423,12 @@ fn apply(p: Plan, log: []u8) !void {
         .bind => {
             const source = try resolve(p.source);
             defer _ = linux.close(source);
-            const tree = try fd(linux.syscall3(.open_tree, @bitCast(@as(isize, source)), @intFromPtr(""), OPEN_TREE_CLONE | O_CLOEXEC | AT_EMPTY_PATH));
+            const tree = try fd(linux.syscall3(
+                .open_tree,
+                @bitCast(@as(isize, source)),
+                @intFromPtr(""),
+                OPEN_TREE_CLONE | O_CLOEXEC | AT_EMPTY_PATH,
+            ));
             defer _ = linux.close(tree);
             try setattr(tree, p.attrs, if (p.attrs & ATTR.NOATIME != 0) ATTR.ATIME else 0);
             try attach(tree, target);
@@ -420,8 +451,18 @@ fn apply(p: Plan, log: []u8) !void {
 
 /// Open a place for mounting on, refusing symlinks anywhere in its path.
 fn resolve(path: [:0]const u8) !i32 {
-    var how: OpenHow = .{ .flags = O_PATH | O_CLOEXEC, .mode = 0, .resolve = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS };
-    return fd(linux.syscall4(.openat2, @bitCast(@as(isize, linux.AT.FDCWD)), @intFromPtr(path.ptr), @intFromPtr(&how), @sizeOf(OpenHow)));
+    var how: OpenHow = .{
+        .flags = O_PATH | O_CLOEXEC,
+        .mode = 0,
+        .resolve = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+    };
+    return fd(linux.syscall4(
+        .openat2,
+        @bitCast(@as(isize, linux.AT.FDCWD)),
+        @intFromPtr(path.ptr),
+        @intFromPtr(&how),
+        @sizeOf(OpenHow),
+    ));
 }
 
 fn create(fs: *const Fs, p: Plan, target: i32, log: []u8) !void {
@@ -438,13 +479,23 @@ fn create(fs: *const Fs, p: Plan, target: i32, log: []u8) !void {
 
 fn configure(fc: i32, options: []const Option, log: []u8) !void {
     for (options) |o| {
-        if (o.value) |v| try fsconfig(fc, FSCONFIG_SET_STRING, o.key, v, log) else try fsconfig(fc, FSCONFIG_SET_FLAG, o.key, null, log);
+        if (o.value) |v|
+            try fsconfig(fc, FSCONFIG_SET_STRING, o.key, v, log)
+        else
+            try fsconfig(fc, FSCONFIG_SET_FLAG, o.key, null, log);
     }
 }
 
 fn fsconfig(fc: i32, cmd: u32, key: [:0]const u8, value: ?[:0]const u8, log: []u8) !void {
     const v: usize = if (value) |x| @intFromPtr(x.ptr) else 0;
-    sys(linux.syscall5(.fsconfig, @bitCast(@as(isize, fc)), cmd, @intFromPtr(key.ptr), v, 0)) catch |err| {
+    sys(linux.syscall5(
+        .fsconfig,
+        @bitCast(@as(isize, fc)),
+        cmd,
+        @intFromPtr(key.ptr),
+        v,
+        0,
+    )) catch |err| {
         drain(fc, log);
         return err;
     };
@@ -470,11 +521,25 @@ fn kernelSaid(log: []u8) []const u8 {
 
 fn setattr(dirfd: i32, set: u64, clr: u64) !void {
     var attr: MountAttr = .{ .set = set, .clr = clr, .propagation = 0, .userns_fd = 0 };
-    try sys(linux.syscall5(.mount_setattr, @bitCast(@as(isize, dirfd)), @intFromPtr(""), AT_EMPTY_PATH, @intFromPtr(&attr), @sizeOf(MountAttr)));
+    try sys(linux.syscall5(
+        .mount_setattr,
+        @bitCast(@as(isize, dirfd)),
+        @intFromPtr(""),
+        AT_EMPTY_PATH,
+        @intFromPtr(&attr),
+        @sizeOf(MountAttr),
+    ));
 }
 
 fn attach(mnt: i32, target: i32) !void {
-    try sys(linux.syscall5(.move_mount, @bitCast(@as(isize, mnt)), @intFromPtr(""), @bitCast(@as(isize, target)), @intFromPtr(""), MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH));
+    try sys(linux.syscall5(
+        .move_mount,
+        @bitCast(@as(isize, mnt)),
+        @intFromPtr(""),
+        @bitCast(@as(isize, target)),
+        @intFromPtr(""),
+        MOVE_MOUNT_F_EMPTY_PATH | MOVE_MOUNT_T_EMPTY_PATH,
+    ));
 }
 
 fn fd(rc: usize) !i32 {
@@ -511,7 +576,7 @@ fn fail(target: []const u8, err: anyerror, kernel: []const u8) noreturn {
         \\       mount -o remount[,OPTIONS] TARGET
         \\
         ,
-        else => std.fmt.bufPrint(&buf, "mount: {s}{s}{s}{s}{s}\n", .{
+        else => std.mem.print(&buf, "mount: {s}{s}{s}{s}{s}\n", .{
             target,
             if (target.len > 0) ": " else "",
             describe(err),
@@ -525,11 +590,14 @@ fn fail(target: []const u8, err: anyerror, kernel: []const u8) noreturn {
 
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
-        error.Loosens => "refused: that option would lift a restriction, and this mount only adds them",
-        error.Option => "refused: an option this filesystem is not given, or not in the form werewolf uses",
+        error.Loosens => "refused: that option would lift a restriction, and this mount only " ++
+            "adds them",
+        error.Option => "refused: an option this filesystem is not given, or not in the form " ++
+            "werewolf uses",
         error.Filesystem => "refused: not a filesystem werewolf mounts",
         error.Path => "refused: paths are absolute, without empty, . or .. parts",
-        error.Place => "refused: not under /proc, /sys, /dev, /run, /tmp, /var/tmp, /data, /victim or /mnt",
+        error.Place => "refused: not under /proc, /sys, /dev, /run, /tmp, /var/tmp, /data, " ++
+            "/victim or /mnt",
         error.Device => "refused: a block device is a path under /dev",
         error.Source => "refused: the source of this filesystem is a plain name",
         error.SymlinkInPath => "refused: a symlink in the path",
@@ -562,7 +630,10 @@ test "a new mount is nosuid, noexec and nodev, but for device filesystems" {
 
 test "nothing that would lift a restriction is taken" {
     for ([_][:0]const u8{ "exec", "suid", "dev", "nosuid,exec", "symfollow" }) |o| {
-        try testing.expectError(error.Loosens, tryParse(&.{ "-t", "tmpfs", "-o", o, "tmpfs", "/tmp" }));
+        try testing.expectError(
+            error.Loosens,
+            tryParse(&.{ "-t", "tmpfs", "-o", o, "tmpfs", "/tmp" }),
+        );
         try testing.expectError(error.Loosens, tryParse(&.{ "-o", o, "/tmp" }));
     }
     try testing.expectError(error.Loosens, tryParse(&.{ "-o", "remount,rw", "/victim" }));
@@ -580,18 +651,51 @@ test "a remount narrows, and takes only options that narrow" {
 
 test "only werewolf's filesystems, options and values" {
     try testing.expectError(error.Filesystem, tryParse(&.{ "-t", "ntfs", "/dev/vdb", "/mnt" }));
-    _ = try tryParse(&.{ "-t", "vfat", "-o", "nosuid,nodev,noexec", "/dev/vda1", "/run/werewolf/esp" });
-    try testing.expectError(error.Option, tryParse(&.{ "-t", "vfat", "-o", "umask=0", "/dev/vda1", "/run/werewolf/esp" }));
+    _ = try tryParse(&.{
+        "-t",
+        "vfat",
+        "-o",
+        "nosuid,nodev,noexec",
+        "/dev/vda1",
+        "/run/werewolf/esp",
+    });
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-t", "vfat", "-o", "umask=0", "/dev/vda1", "/run/werewolf/esp" }),
+    );
     try testing.expectError(error.Filesystem, tryParse(&.{ "-t", "overlay", "overlay", "/mnt" }));
-    try testing.expectError(error.Option, tryParse(&.{ "-t", "tmpfs", "-o", "uid=0", "tmpfs", "/tmp" }));
-    try testing.expectError(error.Option, tryParse(&.{ "-t", "tmpfs", "-o", "mode=8777", "tmpfs", "/tmp" }));
-    try testing.expectError(error.Option, tryParse(&.{ "-t", "tmpfs", "-o", "size=lots", "tmpfs", "/tmp" }));
-    try testing.expectError(error.Option, tryParse(&.{ "-t", "proc", "-o", "hidepid=0", "proc", "/proc" }));
-    try testing.expectError(error.Option, tryParse(&.{ "-o", "errors=continue", "/dev/vda", "/data" }));
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-t", "tmpfs", "-o", "uid=0", "tmpfs", "/tmp" }),
+    );
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-t", "tmpfs", "-o", "mode=8777", "tmpfs", "/tmp" }),
+    );
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-t", "tmpfs", "-o", "size=lots", "tmpfs", "/tmp" }),
+    );
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-t", "proc", "-o", "hidepid=0", "proc", "/proc" }),
+    );
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-o", "errors=continue", "/dev/vda", "/data" }),
+    );
 }
 
 test "only werewolf's places, as clean absolute paths" {
-    for ([_][:0]const u8{ "/etc", "/usr/bin", "/root", "/var", "/var/lib", "/datax", "/tmpfoo" }) |t| {
+    for ([_][:0]const u8{
+        "/etc",
+        "/usr/bin",
+        "/root",
+        "/var",
+        "/var/lib",
+        "/datax",
+        "/tmpfoo",
+    }) |t| {
         try testing.expectError(error.Place, tryParse(&.{ "-t", "tmpfs", "tmpfs", t }));
     }
     for ([_][:0]const u8{ "/", "tmp", "/tmp/../etc", "/tmp/./x", "//tmp", "/tmp/" }) |t| {
@@ -612,7 +716,10 @@ test "binds, probes, and what is not an invocation" {
     try testing.expectError(error.Usage, tryParse(&.{ "-t", "tmpfs" }));
     try testing.expectError(error.Usage, tryParse(&.{ "-o", "remount", "/tmp", "/run" }));
     try testing.expectError(error.Usage, tryParse(&.{ "-f", "tmpfs", "/tmp" }));
-    try testing.expectError(error.Usage, tryParse(&.{ "-o", "ro,rw", "-t", "tmpfs", "tmpfs", "/tmp" }));
+    try testing.expectError(
+        error.Usage,
+        tryParse(&.{ "-o", "ro,rw", "-t", "tmpfs", "tmpfs", "/tmp" }),
+    );
     try testing.expectError(error.Usage, tryParse(&.{ "-t", "tmpfs", "-o", "remount", "/tmp" }));
 }
 

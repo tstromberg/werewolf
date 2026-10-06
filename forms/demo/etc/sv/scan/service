@@ -1,0 +1,8 @@
+# grype over the image, hourly, as its own user, the only one that may
+# fetch (forms/demo.net): it reads everything, writes only its own
+# directory, and runs nothing but grype.
+exec    /usr/lib/werewolf/status scan
+run     /usr/bin/grype
+user    grype
+connect tcp/443 tcp/53
+read    /

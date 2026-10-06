@@ -7,7 +7,7 @@
 # Wolfi and Alpine hourly, not every 20 hours (etc/werewolf/update-every).
 # Boot it from a slot (bite), so that /data, which holds grype's database
 # and the page's history, is on a disk. See docs/demo.md.
-include: prod.yaml
+include: postgresql.yaml
 contents:
   packages:
     - nginx-mainline        # shares openssl 4 with the rest of the image

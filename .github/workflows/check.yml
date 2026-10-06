@@ -34,7 +34,9 @@ jobs:
       - name: Lint
         run: make lint
       - name: Boot and check every form, and a slot
-        run: make -k -j"$(nproc)" check
+        # A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no
+        # guest starves.
+        run: make -k -j"$(( ($(nproc) + 1) / 2 ))" check
       - name: Keep the build and console logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

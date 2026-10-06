@@ -80,18 +80,33 @@ pub fn main(init: std.process.Init) !void {
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
     // runsv's control pipe, opened while root, so a service can be parked
     // from any step, before or after root is given up.
-    const ctl_rc = linux.open("supervise/control", .{ .ACCMODE = .WRONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+    const ctl_rc = linux.open(
+        "supervise/control",
+        .{ .ACCMODE = .WRONLY, .NONBLOCK = true, .CLOEXEC = true },
+        0,
+    );
     const ctl: ?linux.fd_t = if (linux.errno(ctl_rc) == .SUCCESS) @intCast(ctl_rc) else null;
 
     var cwd_buf: [Dir.max_path_bytes]u8 = undefined;
     const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
     const name = std.fs.path.basename(cwd_buf[0..cwd_len]);
-    if (!isName(name)) fail(io, ctl, .park, "?", "run from /etc/sv/NAME, not {s}", .{cwd_buf[0..cwd_len]});
+    if (!isName(name)) fail(
+        io,
+        ctl,
+        .park,
+        "?",
+        "run from /etc/sv/NAME, not {s}",
+        .{cwd_buf[0..cwd_len]},
+    );
 
     const text = Dir.cwd().readFileAlloc(io, "service", gpa, .limited(max_file)) catch |err|
         fail(io, ctl, .park, name, "./service: {s}", .{@errorName(err)});
     var bad: Bad = .{};
-    const s = parse(gpa, text, &bad) catch fail(io, ctl, .park, name, "./service, line {d}: {s}", .{ bad.line, bad.why });
+    const s = parse(
+        gpa,
+        text,
+        &bad,
+    ) catch fail(io, ctl, .park, name, "./service, line {d}: {s}", .{ bad.line, bad.why });
 
     const user = lookupUser(readOr(io, gpa, "/etc/passwd"), s.user) orelse
         fail(io, ctl, .park, name, "no user {s} in /etc/passwd", .{s.user});
@@ -101,18 +116,33 @@ pub fn main(init: std.process.Init) !void {
 
     const nodata = exists("/run/werewolf/nodata");
     for (s.requires) |p| {
-        if (!exists(try gpa.dupeSentinel(u8, p, 0))) fail(io, ctl, .park, name, "requires {s}, which is not there", .{p});
+        if (!exists(try gpa.dupeSentinel(
+            u8,
+            p,
+            0,
+        ))) fail(io, ctl, .park, name, "requires {s}, which is not there", .{p});
     }
     var env: std.process.Environ.Map = .init(gpa);
     try env.put("PATH", path_env);
     for (s.env) |e| try env.put(e[0], e[1]);
     for (s.secrets) |sec| {
-        const value = readSecret(io, gpa, sec[1]) catch |err| fail(io, ctl, .park, name, "secret {s}: {s}: {s}", .{ sec[0], sec[1], @errorName(err) });
+        const value = readSecret(
+            io,
+            gpa,
+            sec[1],
+        ) catch |err| fail(
+            io,
+            ctl,
+            .park,
+            name,
+            "secret {s}: {s}: {s}",
+            .{ sec[0], sec[1], @errorName(err) },
+        );
         try env.put(sec[0], value);
     }
 
-    const run_dir = try std.fmt.allocPrintSentinel(gpa, "/run/svc/{s}", .{name}, 0);
-    const data_dir = try std.fmt.allocPrintSentinel(gpa, "/data/svc/{s}", .{name}, 0);
+    const run_dir = try gpa.printSentinel("/run/svc/{s}", .{name}, 0);
+    const data_dir = try gpa.printSentinel("/data/svc/{s}", .{name}, 0);
     _ = linux.mkdir("/run/svc", 0o755);
     own(io, ctl, name, run_dir, user);
     if (!nodata) {
@@ -120,39 +150,99 @@ pub fn main(init: std.process.Init) !void {
         own(io, ctl, name, data_dir, user);
     }
     if (s.nofile) |n| {
-        if (linux.errno(linux.setrlimit(.NOFILE, &.{ .cur = n, .max = n })) != .SUCCESS) fail(io, ctl, .park, name, "nofile {d}: refused", .{n});
+        if (linux.errno(linux.setrlimit(
+            .NOFILE,
+            &.{ .cur = n, .max = n },
+        )) != .SUCCESS) fail(io, ctl, .park, name, "nofile {d}: refused", .{n});
     }
 
-    var rules = Ruleset.init() catch |err| fail(io, ctl, .park, name, "Landlock: {s}; this kernel cannot leash a service", .{@errorName(err)});
-    if ((s.listen.len > 0 or s.connect.len > 0) and rules.abi < 4) fail(io, ctl, .park, name, "Landlock ABI {d} has no TCP rules", .{rules.abi});
+    var rules = Ruleset.init() catch |err| fail(
+        io,
+        ctl,
+        .park,
+        name,
+        "Landlock: {s}; this kernel cannot leash a service",
+        .{@errorName(err)},
+    );
+    if ((s.listen.len > 0 or s.connect.len > 0) and
+        rules.abi < 4) fail(
+        io,
+        ctl,
+        .park,
+        name,
+        "Landlock ABI {d} has no TCP rules",
+        .{rules.abi},
+    );
     for (floor) |f| rules.allow(f.path, f.access, .optional) catch {};
-    for ([_][:0]const u8{ "/proc/self/fd/1", "/proc/self/fd/2" }) |fd| rules.allow(fd, write_file, .optional) catch {};
-    rules.allow(run_dir, write_dir, .own) catch |err| fail(io, ctl, .park, name, "{s}: {s}", .{ run_dir, @errorName(err) });
-    if (!nodata) rules.allow(data_dir, write_dir, .own) catch |err| fail(io, ctl, .park, name, "{s}: {s}", .{ data_dir, @errorName(err) });
+    for ([_][:0]const u8{
+        "/proc/self/fd/1",
+        "/proc/self/fd/2",
+    }) |fd| rules.allow(fd, write_file, .optional) catch {};
+    rules.allow(
+        run_dir,
+        write_dir,
+        .own,
+    ) catch |err| fail(io, ctl, .park, name, "{s}: {s}", .{ run_dir, @errorName(err) });
+    if (!nodata) rules.allow(
+        data_dir,
+        write_dir,
+        .own,
+    ) catch |err| fail(io, ctl, .park, name, "{s}: {s}", .{ data_dir, @errorName(err) });
     for (s.read) |p| allowPath(io, ctl, name, &rules, gpa, p, read_dir, nodata);
     for (s.write) |p| allowPath(io, ctl, name, &rules, gpa, p, write_dir, nodata);
     for (s.run) |p| allowProgram(io, ctl, name, &rules, gpa, p);
     allowProgram(io, ctl, name, &rules, gpa, s.exec[0]);
     for (s.before) |b| allowProgram(io, ctl, name, &rules, gpa, b[0]);
-    for (s.listen) |port| rules.port(port, bind_tcp) catch |err| fail(io, ctl, .park, name, "listen tcp/{d}: {s}", .{ port, @errorName(err) });
-    for (s.connect) |port| rules.port(port, connect_tcp) catch |err| fail(io, ctl, .park, name, "connect tcp/{d}: {s}", .{ port, @errorName(err) });
+    for (s.listen) |port| rules.port(
+        port,
+        bind_tcp,
+    ) catch |err| fail(io, ctl, .park, name, "listen tcp/{d}: {s}", .{ port, @errorName(err) });
+    for (s.connect) |port| rules.port(
+        port,
+        connect_tcp,
+    ) catch |err| fail(io, ctl, .park, name, "connect tcp/{d}: {s}", .{ port, @errorName(err) });
 
     _ = linux.chdir(if (nodata) run_dir else data_dir);
     const low_port = for (s.listen) |p| {
         if (p < 1024) break true;
     } else false;
-    dropTo(user, low_port) catch |err| fail(io, ctl, .park, name, "giving root up: {s}", .{@errorName(err)});
+    dropTo(
+        user,
+        low_port,
+    ) catch |err| fail(io, ctl, .park, name, "giving root up: {s}", .{@errorName(err)});
 
     // --- leashed --------------------------------------------------------------
 
     rules.restrict() catch |err| fail(io, ctl, .park, name, "Landlock: {s}", .{@errorName(err)});
-    record(io, .{ .event = "start", .service = name, .user = s.user, .exec = s.exec[0], .listen = s.listen, .connect = s.connect, .landlock = rules.abi });
+    record(
+        io,
+        .{
+            .event = "start",
+            .service = name,
+            .user = s.user,
+            .exec = s.exec[0],
+            .listen = s.listen,
+            .connect = s.connect,
+            .landlock = rules.abi,
+        },
+    );
 
     for (s.before) |argv| {
-        var child = std.process.spawn(io, .{ .argv = argv, .environ_map = &env, .stdin = .ignore }) catch |err|
+        var child = std.process.spawn(
+            io,
+            .{ .argv = argv, .environ_map = &env, .stdin = .ignore },
+        ) catch |err|
             fail(io, ctl, .park, name, "before {s}: {s}", .{ argv[0], @errorName(err) });
-        const term = child.wait(io) catch |err| fail(io, ctl, .park, name, "before {s}: {s}", .{ argv[0], @errorName(err) });
-        if (term != .exited or term.exited != 0) fail(io, ctl, .park, name, "before {s} failed", .{argv[0]});
+        const term = child.wait(io) catch |err| fail(
+            io,
+            ctl,
+            .park,
+            name,
+            "before {s}: {s}",
+            .{ argv[0], @errorName(err) },
+        );
+        if (term != .exited or
+            term.exited != 0) fail(io, ctl, .park, name, "before {s} failed", .{argv[0]});
     }
     const err = std.process.replace(io, .{ .argv = s.exec, .environ_map = &env });
     fail(io, ctl, .park, name, "exec {s}: {s}", .{ s.exec[0], @errorName(err) });
@@ -211,11 +301,18 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         } else if (std.mem.eql(u8, key, "user")) {
             if (user != null) return invalid(bad, "user twice");
             if (args.len != 1 or !isName(args[0])) return invalid(bad, "user takes one plain name");
-            if (std.mem.eql(u8, args[0], "root")) return invalid(bad, "user root: a service runs as a user of its own");
+            if (std.mem.eql(
+                u8,
+                args[0],
+                "root",
+            )) return invalid(bad, "user root: a service runs as a user of its own");
             user = args[0];
         } else if (std.mem.eql(u8, key, "listen") or std.mem.eql(u8, key, "connect")) {
             if (args.len == 0) return invalid(bad, "no ports");
-            for (args) |a| try (if (key[0] == 'l') &listen else &connect).append(gpa, try tcpPort(a, bad));
+            for (args) |a| try (if (key[0] == 'l') &listen else &connect).append(
+                gpa,
+                try tcpPort(a, bad),
+            );
         } else if (std.mem.eql(u8, key, "read") or std.mem.eql(u8, key, "write") or
             std.mem.eql(u8, key, "run") or std.mem.eql(u8, key, "requires"))
         {
@@ -226,22 +323,37 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 else => unreachable,
             };
             for (args) |a| {
-                if (!isCleanPath(a)) return invalid(bad, "a path must be absolute, without . or .. or //");
+                if (!isCleanPath(a)) return invalid(
+                    bad,
+                    "a path must be absolute, without . or .. or //",
+                );
                 try list.append(gpa, a);
             }
         } else if (std.mem.eql(u8, key, "env")) {
             if (args.len != 1) return invalid(bad, "env takes one NAME=VALUE");
-            const eq = std.mem.indexOfScalar(u8, args[0], '=') orelse return invalid(bad, "env takes NAME=VALUE");
+            const eq = std.mem.findScalar(
+                u8,
+                args[0],
+                '=',
+            ) orelse return invalid(bad, "env takes NAME=VALUE");
             if (!isVariable(args[0][0..eq])) return invalid(bad, "not a variable name");
             try env.append(gpa, .{ args[0][0..eq], args[0][eq + 1 ..] });
         } else if (std.mem.eql(u8, key, "secret")) {
-            if (args.len != 2 or !isVariable(args[0])) return invalid(bad, "secret takes NAME and PATH");
-            if (!isCleanPath(args[1])) return invalid(bad, "a path must be absolute, without . or .. or //");
+            if (args.len != 2 or
+                !isVariable(args[0])) return invalid(bad, "secret takes NAME and PATH");
+            if (!isCleanPath(args[1])) return invalid(
+                bad,
+                "a path must be absolute, without . or .. or //",
+            );
             try secrets.append(gpa, .{ args[0], args[1] });
         } else if (std.mem.eql(u8, key, "nofile")) {
             if (nofile != null) return invalid(bad, "nofile twice");
             if (args.len != 1) return invalid(bad, "nofile takes one number");
-            nofile = std.fmt.parseInt(u32, args[0], 10) catch return invalid(bad, "nofile takes a number");
+            nofile = std.fmt.parseInt(
+                u32,
+                args[0],
+                10,
+            ) catch return invalid(bad, "nofile takes a number");
             if (nofile.? == 0 or nofile.? > 1 << 20) return invalid(bad, "nofile is 1 to 1048576");
         } else return invalid(bad, "unknown key");
     }
@@ -279,32 +391,52 @@ fn split(gpa: Allocator, line: []const u8, bad: *Bad) ![]const []const u8 {
         } else if (c == '#') {
             break;
         } else if (c == '"') {
-            const end = std.mem.indexOfScalarPos(u8, line, i + 1, '"') orelse return invalid(bad, "a quote is not closed");
-            if (end + 1 < line.len and line[end + 1] != ' ' and line[end + 1] != '\t') return invalid(bad, "a quote ends inside a word");
+            const end = std.mem.findScalarPos(
+                u8,
+                line,
+                i + 1,
+                '"',
+            ) orelse return invalid(bad, "a quote is not closed");
+            if (end + 1 < line.len and line[end + 1] != ' ' and
+                line[end + 1] != '\t') return invalid(bad, "a quote ends inside a word");
             try words.append(gpa, line[i + 1 .. end]);
             i = end + 1;
         } else {
             var end = i;
-            while (end < line.len and line[end] != ' ' and line[end] != '\t' and line[end] != '\r') : (end += 1) {
+            while (end < line.len and line[end] != ' ' and line[end] != '\t' and
+                line[end] != '\r') : (end += 1)
+            {
                 if (line[end] == '"') return invalid(bad, "a quote inside a word");
             }
             try words.append(gpa, line[i..end]);
             i = end;
         }
     }
-    for (words.items) |w| for (w) |c| if (c < 0x20 or c == 0x7f) return invalid(bad, "a control character");
+    for (words.items) |w| for (w) |c| if (c < 0x20 or
+        c == 0x7f) return invalid(bad, "a control character");
     return words.items;
 }
 
 fn program(args: []const []const u8, bad: *Bad) ![]const []const u8 {
     if (args.len == 0) return invalid(bad, "no program");
-    if (!isCleanPath(args[0])) return invalid(bad, "a program is an absolute path, without . or .. or //");
+    if (!isCleanPath(args[0])) return invalid(
+        bad,
+        "a program is an absolute path, without . or .. or //",
+    );
     return args;
 }
 
 fn tcpPort(word: []const u8, bad: *Bad) !u16 {
-    if (!std.mem.startsWith(u8, word, "tcp/")) return invalid(bad, "a port is tcp/PORT: Landlock cannot restrict UDP");
-    const p = std.fmt.parseInt(u16, word[4..], 10) catch return invalid(bad, "a port is 1 to 65535");
+    if (!std.mem.startsWith(
+        u8,
+        word,
+        "tcp/",
+    )) return invalid(bad, "a port is tcp/PORT: Landlock cannot restrict UDP");
+    const p = std.fmt.parseInt(
+        u16,
+        word[4..],
+        10,
+    ) catch return invalid(bad, "a port is 1 to 65535");
     if (p == 0) return invalid(bad, "a port is 1 to 65535");
     return p;
 }
@@ -315,7 +447,8 @@ fn isCleanPath(p: []const u8) bool {
     if (p.len == 1) return true;
     var parts = std.mem.splitScalar(u8, p[1..], '/');
     while (parts.next()) |part| {
-        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or
+            std.mem.eql(u8, part, "..")) return false;
     }
     return true;
 }
@@ -324,7 +457,8 @@ fn isCleanPath(p: []const u8) bool {
 fn isName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
     if (!std.ascii.isLower(s[0]) and s[0] != '_') return false;
-    for (s[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_' and c != '-') return false;
+    for (s[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_' and
+        c != '-') return false;
     return true;
 }
 
@@ -344,11 +478,23 @@ fn isVariable(s: []const u8) bool {
 fn own(io: Io, ctl: ?linux.fd_t, name: []const u8, dir: [:0]const u8, user: User) void {
     _ = linux.mkdir(dir, 0o755);
     var st: linux.Statx = undefined;
-    if (linux.errno(linux.statx(linux.AT.FDCWD, dir, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .UID = true, .GID = true }, &st)) != .SUCCESS or
+    if (linux.errno(linux.statx(
+        linux.AT.FDCWD,
+        dir,
+        linux.AT.SYMLINK_NOFOLLOW,
+        .{ .TYPE = true, .UID = true, .GID = true },
+        &st,
+    )) != .SUCCESS or
         st.mode & linux.S.IFMT != linux.S.IFDIR)
         fail(io, ctl, .park, name, "{s} is not a directory", .{dir});
     if (st.uid != user.uid or st.gid != user.gid) {
-        if (linux.errno(linux.fchownat(linux.AT.FDCWD, dir, user.uid, user.gid, linux.AT.SYMLINK_NOFOLLOW)) != .SUCCESS)
+        if (linux.errno(linux.fchownat(
+            linux.AT.FDCWD,
+            dir,
+            user.uid,
+            user.gid,
+            linux.AT.SYMLINK_NOFOLLOW,
+        )) != .SUCCESS)
             fail(io, ctl, .park, name, "cannot give {s} to its user", .{dir});
     }
 }
@@ -362,44 +508,98 @@ fn readSecret(io: Io, gpa: Allocator, path: []const u8) ![]const u8 {
     return value;
 }
 
-fn allowPath(io: Io, ctl: ?linux.fd_t, name: []const u8, rules: *Ruleset, gpa: Allocator, path: []const u8, access: u64, nodata: bool) void {
+fn allowPath(
+    io: Io,
+    ctl: ?linux.fd_t,
+    name: []const u8,
+    rules: *Ruleset,
+    gpa: Allocator,
+    path: []const u8,
+    access: u64,
+    nodata: bool,
+) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch fail(io, ctl, .park, name, "out of memory", .{});
     rules.allow(z, access, .follow) catch |err| switch (err) {
         // Another service makes it; runsv starts this one again in a
         // second. Not while /data is unavailable: it would not appear.
-        error.FileNotFound => fail(io, ctl, if (nodata and std.mem.startsWith(u8, path, "/data/")) .park else .retry, name, "{s} is not there yet", .{path}),
+        error.FileNotFound => fail(
+            io,
+            ctl,
+            if (nodata and std.mem.startsWith(u8, path, "/data/")) .park else .retry,
+            name,
+            "{s} is not there yet",
+            .{path},
+        ),
         else => fail(io, ctl, .park, name, "{s}: {s}", .{ path, @errorName(err) }),
     };
 }
 
 /// A program it may start, and the ELF interpreter that loads it, which
 /// the kernel opens for execution too.
-fn allowProgram(io: Io, ctl: ?linux.fd_t, name: []const u8, rules: *Ruleset, gpa: Allocator, path: []const u8) void {
+fn allowProgram(
+    io: Io,
+    ctl: ?linux.fd_t,
+    name: []const u8,
+    rules: *Ruleset,
+    gpa: Allocator,
+    path: []const u8,
+) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch fail(io, ctl, .park, name, "out of memory", .{});
-    rules.allow(z, run_file, .follow) catch |err| fail(io, ctl, .park, name, "{s}: {s}", .{ path, @errorName(err) });
+    rules.allow(
+        z,
+        run_file,
+        .follow,
+    ) catch |err| fail(io, ctl, .park, name, "{s}: {s}", .{ path, @errorName(err) });
     var head: [4096]u8 = undefined;
     const fd = linux.open(z, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) fail(io, ctl, .park, name, "{s}: cannot read it", .{path});
     defer _ = linux.close(@intCast(fd));
     const n = linux.pread(@intCast(fd), &head, head.len, 0);
     if (linux.errno(n) != .SUCCESS) fail(io, ctl, .park, name, "{s}: cannot read it", .{path});
-    const interp = interpreter(head[0..n]) catch fail(io, ctl, .park, name, "{s}: not an ELF program leash can read", .{path});
+    const interp = interpreter(head[0..n]) catch fail(
+        io,
+        ctl,
+        .park,
+        name,
+        "{s}: not an ELF program leash can read",
+        .{path},
+    );
     if (interp) |i| {
-        const iz = gpa.dupeSentinel(u8, i, 0) catch fail(io, ctl, .park, name, "out of memory", .{});
-        rules.allow(iz, run_file, .follow) catch |err| fail(io, ctl, .park, name, "{s}'s loader {s}: {s}", .{ path, i, @errorName(err) });
+        const iz = gpa.dupeSentinel(
+            u8,
+            i,
+            0,
+        ) catch fail(io, ctl, .park, name, "out of memory", .{});
+        rules.allow(
+            iz,
+            run_file,
+            .follow,
+        ) catch |err| fail(
+            io,
+            ctl,
+            .park,
+            name,
+            "{s}'s loader {s}: {s}",
+            .{ path, i, @errorName(err) },
+        );
     }
 }
 
 /// The ELF interpreter a 64-bit little-endian program names (PT_INTERP),
 /// or null for a static one, from the program's first bytes.
 fn interpreter(head: []const u8) !?[]const u8 {
-    if (head.len < 64 or !std.mem.eql(u8, head[0..4], "\x7fELF") or head[4] != 2 or head[5] != 1) return error.NotElf;
+    if (head.len < 64 or !std.mem.eql(u8, head[0..4], "\x7fELF") or head[4] != 2 or
+        head[5] != 1) return error.NotElf;
     const phoff = std.mem.readInt(u64, head[0x20..0x28], .little);
     const phentsize = std.mem.readInt(u16, head[0x36..0x38], .little);
     const phnum = std.mem.readInt(u16, head[0x38..0x3a], .little);
     if (phentsize < 56) return error.NotElf;
     for (0..phnum) |i| {
-        const at = std.math.add(u64, phoff, std.math.mul(u64, i, phentsize) catch return error.NotElf) catch return error.NotElf;
+        const at = std.math.add(
+            u64,
+            phoff,
+            std.math.mul(u64, i, phentsize) catch return error.NotElf,
+        ) catch return error.NotElf;
         if (at + 56 > head.len) return error.NotElf;
         const ph = head[@intCast(at)..][0..56];
         if (std.mem.readInt(u32, ph[0..4], .little) != 3) continue; // PT_INTERP
@@ -407,7 +607,7 @@ fn interpreter(head: []const u8) !?[]const u8 {
         const size = std.mem.readInt(u64, ph[32..40], .little);
         if (size < 2 or size > 256 or off + size > head.len) return error.NotElf;
         const path = head[@intCast(off)..][0..@intCast(size)];
-        const end = std.mem.indexOfScalar(u8, path, 0) orelse return error.NotElf;
+        const end = std.mem.findScalar(u8, path, 0) orelse return error.NotElf;
         if (!isCleanPath(path[0..end])) return error.NotElf;
         return path[0..end];
     }
@@ -420,7 +620,14 @@ fn interpreter(head: []const u8) !?[]const u8 {
 fn dropTo(user: User, bind_low: bool) !void {
     var cap: usize = 0;
     while (cap < 64) : (cap += 1) {
-        if (!(bind_low and cap == linux.CAP.NET_BIND_SERVICE)) _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+        if (!(bind_low and
+            cap == linux.CAP.NET_BIND_SERVICE)) _ = linux.prctl(
+            @backingInt(linux.PR.CAPBSET_DROP),
+            cap,
+            0,
+            0,
+            0,
+        );
     }
     if (bind_low) try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
     try check(linux.setgroups(0, &[_]linux.gid_t{}));
@@ -428,10 +635,16 @@ fn dropTo(user: User, bind_low: bool) !void {
     try check(linux.setresuid(user.uid, user.uid, user.uid));
     const keep: u32 = if (bind_low) 1 << linux.CAP.NET_BIND_SERVICE else 0;
     var hdr: CapHeader = .{};
-    const caps = [2]CapData{ .{ .effective = keep, .permitted = keep, .inheritable = keep }, .{} };
+    const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep, .inheritable = keep }, .{} };
     try check(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)));
     // Ambient, so it survives exec into a program with no file capabilities.
-    if (bind_low) try check(linux.prctl(@backingInt(linux.PR.CAP_AMBIENT), linux.PR.CAP_AMBIENT_RAISE, linux.CAP.NET_BIND_SERVICE, 0, 0));
+    if (bind_low) try check(linux.prctl(
+        @backingInt(linux.PR.CAP_AMBIENT),
+        linux.PR.CAP_AMBIENT_RAISE,
+        linux.CAP.NET_BIND_SERVICE,
+        0,
+        0,
+    ));
     try check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0));
     if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
 }
@@ -445,7 +658,7 @@ const CapHeader = extern struct {
     version: u32 = 0x20080522, // _LINUX_CAPABILITY_VERSION_3
     pid: i32 = 0,
 };
-const CapData = extern struct {
+const CapSets = extern struct {
     effective: u32 = 0,
     permitted: u32 = 0,
     inheritable: u32 = 0,
@@ -458,7 +671,8 @@ const execute: u64 = 1 << 0;
 const write_file: u64 = 1 << 1;
 const read_file: u64 = 1 << 2;
 const read_dir: u64 = read_file | 1 << 3;
-const write_dir: u64 = read_dir | write_file | 1 << 4 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 | 1 << 10 | 1 << 12 | 1 << 13 | 1 << 14; // not MAKE_CHAR or MAKE_BLOCK
+const write_dir: u64 = read_dir | write_file | 1 << 4 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 |
+    1 << 10 | 1 << 12 | 1 << 13 | 1 << 14; // not MAKE_CHAR or MAKE_BLOCK
 const run_file: u64 = execute | read_file;
 /// The rights a rule on a file, not a directory, may hold.
 const file_rights: u64 = execute | write_file | read_file | 1 << 14 | 1 << 15;
@@ -491,10 +705,26 @@ const Ruleset = struct {
     /// A ruleset handling every access this kernel's Landlock knows, so
     /// what no rule grants is refused.
     fn init() !Ruleset {
-        const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1); // LANDLOCK_CREATE_RULESET_VERSION
+        const abi = linux.syscall3(
+            .landlock_create_ruleset,
+            0,
+            0,
+            1,
+        ); // LANDLOCK_CREATE_RULESET_VERSION
         if (linux.errno(abi) != .SUCCESS) return error.Unsupported;
-        const fs: u64 = if (abi >= 5) 0xffff else if (abi >= 3) 0x7fff else if (abi >= 2) 0x3fff else 0x1fff;
-        const attr: [3]u64 = .{ fs, if (abi >= 4) bind_tcp | connect_tcp else 0, if (abi >= 6) 0x3 else 0 }; // scoped: abstract UNIX sockets, signals
+        const fs: u64 = if (abi >= 5)
+            0xffff
+        else if (abi >= 3)
+            0x7fff
+        else if (abi >= 2)
+            0x3fff
+        else
+            0x1fff;
+        const attr: [3]u64 = .{
+            fs,
+            if (abi >= 4) bind_tcp | connect_tcp else 0,
+            if (abi >= 6) 0x3 else 0,
+        }; // scoped: abstract UNIX sockets, signals
         const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
         const fd = linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0);
         if (linux.errno(fd) != .SUCCESS) return error.Unsupported;
@@ -514,21 +744,48 @@ const Ruleset = struct {
         }
         defer _ = linux.close(@intCast(fd));
         var st: linux.Statx = undefined;
-        if (linux.errno(linux.statx(@intCast(fd), "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS) return error.CannotOpen;
+        if (linux.errno(linux.statx(
+            @intCast(fd),
+            "",
+            linux.AT.EMPTY_PATH,
+            .{ .TYPE = true },
+            &st,
+        )) != .SUCCESS) return error.CannotOpen;
         const is_dir = st.mode & linux.S.IFMT == linux.S.IFDIR;
         var beneath: [12]u8 = undefined; // struct landlock_path_beneath_attr, packed
-        std.mem.writeInt(u64, beneath[0..8], access & r.fs & (if (is_dir) ~@as(u64, 0) else file_rights), .little);
+        std.mem.writeInt(
+            u64,
+            beneath[0..8],
+            access & r.fs & (if (is_dir) ~@as(u64, 0) else file_rights),
+            .little,
+        );
         std.mem.writeInt(i32, beneath[8..12], @intCast(fd), .little);
-        if (linux.errno(linux.syscall4(.landlock_add_rule, @intCast(r.fd), 1, @intFromPtr(&beneath), 0)) != .SUCCESS) return error.RuleRefused;
+        if (linux.errno(linux.syscall4(
+            .landlock_add_rule,
+            @intCast(r.fd),
+            1,
+            @intFromPtr(&beneath),
+            0,
+        )) != .SUCCESS) return error.RuleRefused;
     }
 
     fn port(r: *Ruleset, p: u16, access: u64) !void {
         const attr: [2]u64 = .{ access, p }; // struct landlock_net_port_attr
-        if (linux.errno(linux.syscall4(.landlock_add_rule, @intCast(r.fd), 2, @intFromPtr(&attr), 0)) != .SUCCESS) return error.RuleRefused;
+        if (linux.errno(linux.syscall4(
+            .landlock_add_rule,
+            @intCast(r.fd),
+            2,
+            @intFromPtr(&attr),
+            0,
+        )) != .SUCCESS) return error.RuleRefused;
     }
 
     fn restrict(r: *Ruleset) !void {
-        if (linux.errno(linux.syscall2(.landlock_restrict_self, @intCast(r.fd), 0)) != .SUCCESS) return error.Refused;
+        if (linux.errno(linux.syscall2(
+            .landlock_restrict_self,
+            @intCast(r.fd),
+            0,
+        )) != .SUCCESS) return error.Refused;
         _ = linux.close(r.fd);
     }
 };
@@ -544,8 +801,16 @@ fn lookupUser(passwd: []const u8, name: []const u8) ?User {
         var f = std.mem.splitScalar(u8, line, ':');
         if (!std.mem.eql(u8, f.next() orelse continue, name)) continue;
         _ = f.next() orelse return null;
-        const uid = std.fmt.parseInt(linux.uid_t, f.next() orelse return null, 10) catch return null;
-        const gid = std.fmt.parseInt(linux.gid_t, f.next() orelse return null, 10) catch return null;
+        const uid = std.fmt.parseInt(
+            linux.uid_t,
+            f.next() orelse return null,
+            10,
+        ) catch return null;
+        const gid = std.fmt.parseInt(
+            linux.gid_t,
+            f.next() orelse return null,
+            10,
+        ) catch return null;
         return .{ .uid = uid, .gid = gid };
     }
     return null;
@@ -562,8 +827,15 @@ fn exists(path: [:0]const u8) bool {
 const Outcome = enum { park, retry };
 
 /// Say why on the console, then stop: parked, or for runsv to try again.
-fn fail(io: Io, ctl: ?linux.fd_t, how: Outcome, name: []const u8, comptime fmt: []const u8, args: anytype) noreturn {
-    const why = std.fmt.bufPrint(&why_buf, fmt, args) catch fmt;
+fn fail(
+    io: Io,
+    ctl: ?linux.fd_t,
+    how: Outcome,
+    name: []const u8,
+    comptime fmt: []const u8,
+    args: anytype,
+) noreturn {
+    const why = std.mem.print(&why_buf, fmt, args) catch fmt;
     record(io, .{ .event = if (how == .park) "down" else "retry", .service = name, .why = why });
     if (how == .park) if (ctl) |fd| {
         _ = linux.write(fd, "d", 1);
@@ -674,6 +946,9 @@ test interpreter {
 }
 
 test lookupUser {
-    try testing.expectEqual(User{ .uid = 200, .gid = 200 }, lookupUser("root:x:0:0::/:/x\nnginx:x:200:200::/var/empty:/sbin/nologin\n", "nginx").?);
+    try testing.expectEqual(
+        User{ .uid = 200, .gid = 200 },
+        lookupUser("root:x:0:0::/:/x\nnginx:x:200:200::/var/empty:/sbin/nologin\n", "nginx").?,
+    );
     try testing.expectEqual(null, lookupUser("nginx2:x:1:1::/:/x\n", "nginx"));
 }

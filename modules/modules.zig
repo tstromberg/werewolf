@@ -56,8 +56,14 @@ pub fn main() void {
     // opened now, before the pledge. A sysctl write lands only at offset 0,
     // so the write has its own; and the answer is the kernel's, read back,
     // not the write's return.
-    const disabled = openPath(modules_disabled, O_WRONLY) catch |err| fail("cannot open kernel.modules_disabled", err);
-    const verify = openPath(modules_disabled, O_RDONLY) catch |err| fail("cannot open kernel.modules_disabled", err);
+    const disabled = openPath(
+        modules_disabled,
+        O_WRONLY,
+    ) catch |err| fail("cannot open kernel.modules_disabled", err);
+    const verify = openPath(
+        modules_disabled,
+        O_RDONLY,
+    ) catch |err| fail("cannot open kernel.modules_disabled", err);
 
     // Whatever load does, the loader closes after it.
     const result = load() catch |err| blk: {
@@ -73,9 +79,15 @@ pub fn main() void {
     const door = if (closed) "closed" else "STILL OPEN";
     if (result) |r| {
         if (r.absent > 0)
-            say("modules: {d} of {d} loaded, {d} with no hardware here; the loader is {s}\n", .{ r.count - r.refused - r.absent, r.count, r.absent, door })
+            say(
+                "modules: {d} of {d} loaded, {d} with no hardware here; the loader is {s}\n",
+                .{ r.count - r.refused - r.absent, r.count, r.absent, door },
+            )
         else
-            say("modules: {d} of {d} loaded; the loader is {s}\n", .{ r.count - r.refused, r.count, door });
+            say(
+                "modules: {d} of {d} loaded; the loader is {s}\n",
+                .{ r.count - r.refused, r.count, door },
+            );
         linux.exit_group(if (r.refused == 0 and closed) 0 else 1);
     }
     say("modules: the loader is {s}\n", .{door});
@@ -92,7 +104,11 @@ fn load() !Result {
     _ = linux.uname(&uts);
     const release = std.mem.sliceTo(&uts.release, 0);
     var dir_buf: [128]u8 = undefined;
-    const dir_len = (std.fmt.bufPrint(dir_buf[0 .. dir_buf.len - 1], "/usr/lib/modules/{s}", .{release}) catch return error.Release).len;
+    const dir_len = (std.mem.print(
+        dir_buf[0 .. dir_buf.len - 1],
+        "/usr/lib/modules/{s}",
+        .{release},
+    ) catch return error.Release).len;
     dir_buf[dir_len] = 0;
     const dir = try openPath(dir_buf[0..dir_len :0], O_PATH);
     defer close(dir);
@@ -116,9 +132,17 @@ fn load() !Result {
     var refused: usize = 0;
     var absent: usize = 0;
     for (fds[0..count], mods[0..count]) |fd, m| {
-        const rc = linux.syscall3(.finit_module, @bitCast(@as(isize, fd)), @intFromPtr(m.params.ptr), 0);
+        const rc = linux.syscall3(
+            .finit_module,
+            @bitCast(@as(isize, fd)),
+            @intFromPtr(m.params.ptr),
+            0,
+        );
         switch (linux.errno(rc)) {
-            .SUCCESS => if (m.params.len > 0) say("modules: {s}: loaded with {s}\n", .{ m.path, m.params }),
+            .SUCCESS => if (m.params.len > 0) say(
+                "modules: {s}: loaded with {s}\n",
+                .{ m.path, m.params },
+            ),
             .EXIST => {}, // built in, or loaded already
             // The module's hardware is not here, as for one CPU vendor's
             // KVM on the other's: nothing is wrong, and nothing loaded.
@@ -138,7 +162,8 @@ fn load() !Result {
 
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
-        error.Unenforced => "refused: the kernel would load unsigned modules (no lockdown, no module.sig_enforce)",
+        error.Unenforced => "refused: the kernel would load unsigned modules (no lockdown, no " ++
+            "module.sig_enforce)",
         error.BadPath, error.TooMany => "refused: werewolf.modules is not a clean list",
         else => @errorName(err),
     };
@@ -157,7 +182,8 @@ fn loaderClosed() bool {
 fn enforced() bool {
     var buf: [128]u8 = undefined;
     if (readSmall("/sys/kernel/security/lockdown", &buf)) |s| {
-        if (std.mem.indexOf(u8, s, "[integrity]") != null or std.mem.indexOf(u8, s, "[confidentiality]") != null) return true;
+        if (std.mem.indexOf(u8, s, "[integrity]") != null or
+            std.mem.indexOf(u8, s, "[confidentiality]") != null) return true;
     }
     if (readSmall("/sys/module/module/parameters/sig_enforce", &buf)) |s| {
         if (s.len > 0 and s[0] == 'Y') return true;
@@ -179,7 +205,7 @@ fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]M
     while (it.next()) |line| {
         if (n == max_modules) return error.TooMany;
         if (line.len > 255) return error.BadPath;
-        const space = std.mem.indexOfScalar(u8, line, ' ') orelse line.len;
+        const space = std.mem.findScalar(u8, line, ' ') orelse line.len;
         try checkPath(line[0..space]);
         const params = if (space < line.len) line[space + 1 ..] else "";
         if (space < line.len) try checkParams(params);
@@ -187,7 +213,10 @@ fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]M
         @memcpy(l[0..line.len], line);
         l[space] = 0;
         l[line.len] = 0;
-        mods[n] = .{ .path = l[0..space :0], .params = if (space < line.len) l[space + 1 .. line.len :0] else "" };
+        mods[n] = .{
+            .path = l[0..space :0],
+            .params = if (space < line.len) l[space + 1 .. line.len :0] else "",
+        };
         n += 1;
     }
     return n;
@@ -198,18 +227,22 @@ fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]M
 fn checkParams(p: []const u8) !void {
     var words = std.mem.splitScalar(u8, p, ' ');
     while (words.next()) |w| {
-        const eq = std.mem.indexOfScalar(u8, w, '=') orelse return error.BadPath;
+        const eq = std.mem.findScalar(u8, w, '=') orelse return error.BadPath;
         if (eq == 0 or eq + 1 == w.len) return error.BadPath;
-        for (w[0..eq]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_') return error.BadPath;
-        for (w[eq + 1 ..]) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ',' and c != '.' and c != '-') return error.BadPath;
+        for (w[0..eq]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and
+            c != '_') return error.BadPath;
+        for (w[eq + 1 ..]) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != ',' and
+            c != '.' and c != '-') return error.BadPath;
     }
 }
 
 fn checkPath(p: []const u8) !void {
     if (p.len == 0 or p.len > 255) return error.BadPath;
-    if (!std.mem.startsWith(u8, p, "kernel/") or !std.mem.endsWith(u8, p, ".ko")) return error.BadPath;
+    if (!std.mem.startsWith(u8, p, "kernel/") or
+        !std.mem.endsWith(u8, p, ".ko")) return error.BadPath;
     for (p) |c| {
-        if (!std.ascii.isAlphanumeric(c) and c != '/' and c != '_' and c != '-' and c != '.') return error.BadPath;
+        if (!std.ascii.isAlphanumeric(c) and c != '/' and c != '_' and c != '-' and
+            c != '.') return error.BadPath;
     }
     var parts = std.mem.splitScalar(u8, p, '/');
     while (parts.next()) |c| {
@@ -238,7 +271,13 @@ fn openBeneath(dir: i32, path: [:0]const u8, flags: u64) !i32 {
 
 fn openat2(dir: i32, path: [:0]const u8, flags: u64, resolve: u64) !i32 {
     var how: OpenHow = .{ .flags = flags | O_CLOEXEC, .mode = 0, .resolve = resolve };
-    const rc = linux.syscall4(.openat2, @bitCast(@as(isize, dir)), @intFromPtr(path.ptr), @intFromPtr(&how), @sizeOf(OpenHow));
+    const rc = linux.syscall4(
+        .openat2,
+        @bitCast(@as(isize, dir)),
+        @intFromPtr(path.ptr),
+        @intFromPtr(&how),
+        @sizeOf(OpenHow),
+    );
     try sys(rc);
     return @intCast(rc);
 }
@@ -283,7 +322,7 @@ const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
 /// The kernel's __user_cap_header_struct, whose pid is an int; Zig 0.17's
 /// cap_user_header_t has it as a usize (see mount/mount.zig).
 const CapHeader = extern struct { version: u32, pid: i32 };
-const CapData = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
 
 const allowed_syscalls = [_]linux.SYS{ .finit_module, .read, .write, .close, .exit, .exit_group };
 
@@ -307,7 +346,12 @@ const filter = blk: {
     f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // nr
     f[4] = .{ .code = JGE_K, .jt = @intCast(n), .jf = 0, .k = 0x40000000 }; // x32
-    for (allowed_syscalls, 0..) |s, j| f[5 + j] = .{ .code = JEQ_K, .jt = @intCast(n - j), .jf = 0, .k = @intCast(@backingInt(s)) };
+    for (allowed_syscalls, 0..) |s, j| f[5 + j] = .{
+        .code = JEQ_K,
+        .jt = @intCast(n - j),
+        .jf = 0,
+        .k = @intCast(@backingInt(s)),
+    };
     f[5 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     break :blk f ++ [_]Filter{.{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW }};
 };
@@ -316,12 +360,15 @@ fn pledge() !void {
     try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
     const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
     const keep: u32 = 1 << CAP_SYS_MODULE;
-    const data = [2]CapData{
+    const data = [2]CapSets{
         .{ .effective = keep, .permitted = keep, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
     };
     try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
-    const prog = extern struct { len: u16, filter: [*]const Filter }{ .len = filter.len, .filter = &filter };
+    const prog = extern struct {
+        len: u16,
+        filter: [*]const Filter,
+    }{ .len = filter.len, .filter = &filter };
     try sys(linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog));
 }
 
@@ -342,7 +389,7 @@ fn sys(rc: usize) !void {
 
 fn say(comptime format: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, format, args) catch "modules: (message too long)\n";
+    const line = std.mem.print(&buf, format, args) catch "modules: (message too long)\n";
     _ = linux.write(2, line.ptr, line.len);
 }
 
@@ -358,7 +405,12 @@ const testing = std.testing;
 test "a clean list parses, in order, with parameters" {
     var lines: [max_modules][256:0]u8 = undefined;
     var mods: [max_modules]Module = undefined;
-    const n = try parse("kernel/drivers/block/virtio_blk.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\nkernel/net/packet/af_packet.ko\n", &lines, &mods);
+    const n = try parse(
+        "kernel/drivers/block/virtio_blk.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 " ++
+            "ept=1\nkernel/net/packet/af_packet.ko\n",
+        &lines,
+        &mods,
+    );
     try testing.expectEqual(3, n);
     try testing.expectEqualStrings("kernel/drivers/block/virtio_blk.ko", mods[0].path);
     try testing.expectEqualStrings("", mods[0].params);

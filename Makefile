@@ -50,7 +50,11 @@ CHAIN_DIRS := $(wildcard $(addprefix forms/,$(CHAIN)))
 #   kvm         run virtual machines: KVM starts, built in (aarch64) or from
 #               the form's modules (x86_64), with nested virtualization off
 #   nested-kvm  and let their guests run virtual machines too; needs kvm
-ALLOWANCES = kvm nested-kvm
+#   netadmin    CAP_NET_ADMIN after boot, which fence otherwise drops: to
+#               change addresses and routes, as a DHCP client renewing does
+#   packet      CAP_NET_RAW after boot: packet sockets, which a DHCP client
+#               listens on, and which pass below fence's rules
+ALLOWANCES = kvm nested-kvm netadmin packet
 ALLOW_FILES := $(wildcard $(addsuffix /etc/werewolf/allow/*,$(CHAIN_DIRS)))
 ALLOW := $(sort $(notdir $(ALLOW_FILES)))
 ifneq ($(filter-out $(ALLOWANCES),$(ALLOW)),)
@@ -109,6 +113,13 @@ CLOUD := $(PROGRAMS)/cloud/usr/lib/werewolf/cloud
 CLOUD_BIN := $(if $(filter cloud,$(CHAIN)),$(CLOUD))
 BITE_CLEANUP := $(PROGRAMS)/bite-cleanup/usr/bin/bite-cleanup
 BITE_CLEANUP_BIN := $(if $(filter bitten,$(CHAIN)),$(BITE_CLEANUP))
+# PostgreSQL's helpers, in any form whose chain includes postgresql:
+# pg-init, which makes the cluster and applies the image's SQL, and
+# popen-shim.so, which pg-init preloads into initdb in place of a shell. The
+# library is built against glibc, as initdb is.
+PG_INIT := $(PROGRAMS)/postgresql/usr/lib/werewolf/pg-init
+PG_SHIM := $(PROGRAMS)/postgresql/usr/lib/werewolf/popen-shim.so
+PG_BINS := $(if $(filter postgresql,$(CHAIN)),$(PG_INIT) $(PG_SHIM))
 MOUNT_BIN := $(PROGRAMS)/mount/usr/lib/werewolf/mount
 LOADER_BIN := $(PROGRAMS)/modules/usr/lib/werewolf/modules
 # stage0's own /init (stage0/stage0.zig): the kernel's first process on every
@@ -122,12 +133,13 @@ FENCE_BIN := $(PROGRAMS)/fence/usr/lib/werewolf/fence
 POSTURE_BIN := $(PROGRAMS)/posture/usr/lib/werewolf/posture
 # What a shell script used to do, one small program each (design/shell-free.md):
 # runit's stages, reboot and poweroff, GRUB's environment block, and the
-# commit, power-button, console and sshd services. The forms link to them.
-SHELLFREE := stage reboot grubenv commit powerbtn console sshd-start
+# commit, power-button, console and sshd services; and leash, which starts
+# a service someone else wrote. The forms link to them.
+SHELLFREE := stage reboot grubenv commit powerbtn console sshd-start leash
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter autoupdate,$(CHAIN)),$(PROGRAMS)/updater/usr/lib/werewolf/update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status/usr/lib/werewolf/status)
-OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modules $(PROGRAMS)/net $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud) $(if $(BITE_CLEANUP_BIN),$(PROGRAMS)/bite-cleanup) $(if $(UPDATER_BIN),$(PROGRAMS)/updater) \
+OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modules $(PROGRAMS)/net $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud) $(if $(BITE_CLEANUP_BIN),$(PROGRAMS)/bite-cleanup) $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/updater) \
 	$(if $(STATUS_BIN),$(PROGRAMS)/status)
 
 # A form that includes bitten boots from a slot, which bite installs; the
@@ -311,7 +323,7 @@ $(OUT)/rootfs.tar: $(FORM_LOCK)
 	$(call apko_build,forms/$(FORM).yaml,$<)
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP_BIN) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -358,6 +370,15 @@ $(DHCP): dhcp/dhcp.zig
 $(BITE_CLEANUP): bite-cleanup/bite-cleanup.zig
 	$(zig_build)
 
+$(PG_INIT): pg-init/pg-init.zig
+	$(zig_build)
+
+$(PG_SHIM): popen-shim/popen-shim.zig
+	@[ "$$(zig version)" = "$(ZIG_VERSION)" ] || \
+		{ echo "$< is written for zig $(ZIG_VERSION), not $$(zig version)" >&2; exit 1; }
+	mkdir -p $(dir $@)
+	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
+
 $(CLOUD): cloud/cloud.zig
 	$(zig_build)
 
@@ -392,7 +413,7 @@ endef
 $(foreach p,$(SHELLFREE),$(eval $(call shellfree_rule,$(p))))
 
 test:
-	zig fmt --check dhcp cloud bite-cleanup modules net fence mount posture updater status disk stage0 init $(SHELLFREE)
+	zig fmt --check dhcp cloud bite-cleanup pg-init popen-shim modules net fence mount posture updater status disk stage0 init $(SHELLFREE)
 	zig test dhcp/dhcp.zig
 	zig test cloud/cloud.zig
 	zig test mount/mount.zig
@@ -406,6 +427,8 @@ test:
 	zig test stage0/stage0.zig
 	zig test init/init.zig
 	zig test bite-cleanup/bite-cleanup.zig
+	zig test pg-init/pg-init.zig
+	zig test popen-shim/popen-shim.zig -lc
 	for p in $(SHELLFREE); do zig test $$p/$$p.zig || exit 1; done
 
 # posture (docs/posture.md) assumes nothing of werewolf: run here, as root,
@@ -423,7 +446,7 @@ endif
 # update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP_BIN) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -621,7 +644,14 @@ $(BUILD)/data.img:
 	mkdir -p $(BUILD)
 	dd if=/dev/zero of=$@ bs=1048576 count=0 seek=8192 status=none
 
-QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic
+# Given EL2, an aarch64 guest's kernel starts its built-in KVM unless told
+# not to (kvm-arm.mode=none), so werewolf boots with EL2 wherever the host
+# can lend it: TCG always, HVF on Apple M3 and later, KVM where the host
+# nests. Then posture's kernel-no-hypervisor proves the argument works,
+# rather than passing because no EL2 was there. QEMU, started paused and
+# told to quit, says in milliseconds whether it can.
+EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M virt,virtualization=on -accel $(ACCEL) -cpu $(CPU) -nodefaults -display none -monitor stdio -S >/dev/null 2>&1 && echo ,virtualization=on))
+QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
 run: image $(BUILD)/data.img $(if $(wildcard config),config)
 	$(QEMU) -smp 4 -m 2048 \
@@ -659,7 +689,7 @@ CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf
 export POSTURE_KNOWN = $(shell awk -v b=$(if $(DEV),dev,*) -v f=$(FORM) -v a=$(ARCH) '$$1 == b || $$1 == f || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
-CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(PROGRAMS)/updater/usr/lib/werewolf/update
+CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(PROGRAMS)/updater/usr/lib/werewolf/update
 # bitten has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = bitten
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
@@ -909,3 +939,45 @@ fix:
 	exit $$exit_code
 
 # END: lint-install .
+
+# --- zig lint and fix -----------------------------------------------------------
+# Kept out of lint-install's block above, which it rewrites. `make lint`
+# checks werewolf's Zig three ways: zig ast-check, Zig's own check of every
+# function, called or not; tools/zigfix --check, zig fmt's layout with lines
+# held to the Style Guide's 100 and nothing the standard library deprecates;
+# and ziglint, with the Style Guide's naming rules (.ziglint.zon says which
+# and why). `make fix` runs tools/zigfix, which makes most of that so.
+ZIG_SOURCES = $(shell find . -name '*.zig' -not -path './build/*' -not -path './out/*' -not -path './.zig-cache/*')
+
+ZIGFIX := $(LINT_ROOT)/out/tools/zigfix
+$(ZIGFIX): tools/zigfix.zig
+	mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe -femit-bin=$@ tools/zigfix.zig
+
+# ziglint's release for this machine, checked against the sha256 each
+# release's checksums.txt gave when it was pinned.
+ZIGLINT_VERSION ?= 0.5.3
+ZIGLINT_PLATFORM := $(subst arm64,aarch64,$(shell uname -m))-$(if $(filter Darwin,$(LINT_OS)),macos,linux)
+ZIGLINT_SHA256_aarch64-macos := 5fae98d6052b42ac07a8cb211036a633ebcd90db0ad40ebbadfbec96195bff13
+ZIGLINT_SHA256_aarch64-linux := 110203d2e2332bfd5e2972f00cf731a215cf953e3eb4e14a17d8f7f80eeab26d
+ZIGLINT_SHA256_x86_64-linux := 7560bf5ad36170ae1560505a5e273c83376534feccad23a9f7be716f94853539
+ZIGLINT_ROOT := $(LINT_ROOT)/out/linters/ziglint-$(ZIGLINT_VERSION)
+ZIGLINT_BIN := $(ZIGLINT_ROOT)/ziglint
+$(ZIGLINT_BIN):
+	@[ -n "$(ZIGLINT_SHA256_$(ZIGLINT_PLATFORM))" ] || { echo "no ziglint $(ZIGLINT_VERSION) for $(ZIGLINT_PLATFORM)" >&2; exit 1; }
+	mkdir -p $(ZIGLINT_ROOT)
+	curl -sSfL -o $(ZIGLINT_ROOT)/ziglint.tar.gz https://github.com/rockorager/ziglint/releases/download/v$(ZIGLINT_VERSION)/ziglint-$(ZIGLINT_PLATFORM).tar.gz
+	echo "$(ZIGLINT_SHA256_$(ZIGLINT_PLATFORM))  $(ZIGLINT_ROOT)/ziglint.tar.gz" | shasum -a 256 -c -
+	tar -C $(ZIGLINT_ROOT) -xzf $(ZIGLINT_ROOT)/ziglint.tar.gz ziglint
+	rm $(ZIGLINT_ROOT)/ziglint.tar.gz
+
+.PHONY: zig-lint zig-fix
+LINTERS += zig-lint
+zig-lint: $(ZIGFIX) $(ZIGLINT_BIN)
+	@status=0; for f in $(ZIG_SOURCES); do zig ast-check $$f >/dev/null || status=1; done; exit $$status
+	$(ZIGFIX) --check $(ZIG_SOURCES)
+	$(ZIGLINT_BIN) $(ZIG_SOURCES)
+
+FIXERS += zig-fix
+zig-fix: $(ZIGFIX)
+	$(ZIGFIX) $(ZIG_SOURCES)

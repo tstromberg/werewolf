@@ -60,7 +60,10 @@ Debian 13 only:
 | Rocky 10 | xfs | xfs partition | yes |
 
 A reset before commit returned to the distro. `bite --undo` left nothing
-behind. Cleanup took Debian from 1.6 GB to 105 MB and Fedora from 1.1 GB
+behind. On 2026-10-06, on Debian 13, a slot booted with the kernel
+arguments GRUB's environment held for it, `werewolf_args_a`, changed after
+bite to add one: the entries read them at each boot (*Slots*). The BLS
+entries Fedora and Rocky take are not yet tested so. Cleanup took Debian from 1.6 GB to 105 MB and Fedora from 1.1 GB
 to 117 MB, and both rebooted into werewolf with `/data` intact.
 
 To test in Lima: until the instance restarts, Lima's ssh runs over vsock,
@@ -79,6 +82,12 @@ A bitten machine boots a *slot*: the rootfs kept on disk, read-only.
 | `vmlinuz` | `/boot/werewolf/<slot>/` | Alpine's kernel |
 | `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: werewolf's stage0 and module loader, the form's modules |
 | `root.erofs` | `/var/lib/werewolf/<slot>/` | the rootfs |
+| `cmdline` | GRUB's environment, as `werewolf_args_<slot>` | the kernel arguments the image asks for |
+
+bite's GRUB entries name each slot's kernel arguments by that variable,
+not by value, so the arguments an image asks for reach the machine with
+the image: bite sets `werewolf_args_a`, and the updater the other slot's
+before it gives that slot its one try. `bite --undo` removes both.
 
 stage0 mounts `root.erofs` read-only, directly at `/`, as on every form; a
 direct boot carries the same image in its initramfs. Pages load on demand

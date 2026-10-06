@@ -37,11 +37,17 @@ pub fn main(init: std.process.Init) !void {
     const cmd = parseCmdline(readAll(io, gpa, "/proc/cmdline"));
     const grubenv = trim(readAll(io, gpa, "/run/werewolf/grubenv"));
     if (grubenv.len == 0 and (cmd.esp.len == 0 or cmd.slot.len == 0)) park(io);
-    const entry = try std.fmt.allocPrint(gpa, "werewolf-{s}", .{if (cmd.slot.len > 0) cmd.slot else "a"});
+    const entry = try gpa.print(
+        "werewolf-{s}",
+        .{if (cmd.slot.len > 0) cmd.slot else "a"},
+    );
 
     while (!healthy(io, gpa)) try io.sleep(.fromSeconds(wait), .awake);
 
-    if (grubenv.len > 0) try commitGrub(io, gpa, grubenv, entry) else try commitEsp(io, gpa, cmd.esp, entry);
+    if (grubenv.len > 0)
+        try commitGrub(io, gpa, grubenv, entry)
+    else
+        try commitEsp(io, gpa, cmd.esp, entry);
     park(io);
 }
 
@@ -49,17 +55,35 @@ pub fn main(init: std.process.Init) !void {
 /// takes. FAT is never probed, so it is named.
 fn commitEsp(io: Io, gpa: Allocator, esp: []const u8, entry: []const u8) !void {
     const e = "/run/werewolf/esp";
-    if (!mountUuid(io, gpa, esp, e, "vfat")) return say(io, "no EFI partition {s}; not committing", .{esp});
+    if (!mountUuid(
+        io,
+        gpa,
+        esp,
+        e,
+        "vfat",
+    )) return say(io, "no EFI partition {s}; not committing", .{esp});
     defer _ = linux.umount2(e, 0);
 
     const d = e ++ "/loader/entries";
-    const good = try std.fmt.allocPrint(gpa, "{s}/{s}.conf", .{ d, entry });
+    const good = try gpa.print("{s}/{s}.conf", .{ d, entry });
     if (exists(io, good)) {
         say(io, "{s} is already good", .{entry});
         return markCommitted(io);
     }
-    if (exists(io, nodata)) return say(io, "/data is unavailable ({s}); not committing", .{trim(readAll(io, gpa, nodata))});
-    const tried = (try triedEntry(io, gpa, d, entry)) orelse return say(io, "no entry for {s} in {s}; not committing", .{ entry, d });
+    if (exists(
+        io,
+        nodata,
+    )) return say(
+        io,
+        "/data is unavailable ({s}); not committing",
+        .{trim(readAll(io, gpa, nodata))},
+    );
+    const tried = (try triedEntry(
+        io,
+        gpa,
+        d,
+        entry,
+    )) orelse return say(io, "no entry for {s} in {s}; not committing", .{ entry, d });
     try Dir.rename(Dir.cwd(), tried, Dir.cwd(), good, io);
     linux.sync();
     markCommitted(io);
@@ -71,13 +95,23 @@ fn commitEsp(io: Io, gpa: Allocator, esp: []const u8, entry: []const u8) !void {
 /// is mounted here, apart and writable, for as long as the write takes:
 /// /victim, if it is the same filesystem, is read-only.
 fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void {
-    const colon = std.mem.indexOfScalar(u8, spec, ':') orelse return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
+    const colon = std.mem.findScalar(
+        u8,
+        spec,
+        ':',
+    ) orelse return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
     const uuid = spec[0..colon];
     const b = "/run/werewolf/boot";
-    if (!mountUuid(io, gpa, uuid, b, null)) return say(io, "no GRUB environment block at {s}; not committing", .{spec});
+    if (!mountUuid(
+        io,
+        gpa,
+        uuid,
+        b,
+        null,
+    )) return say(io, "no GRUB environment block at {s}; not committing", .{spec});
     defer _ = linux.umount2(b, 0);
 
-    const f = try std.fmt.allocPrint(gpa, "{s}{s}", .{ b, spec[colon + 1 ..] });
+    const f = try gpa.print("{s}{s}", .{ b, spec[colon + 1 ..] });
     const block = readAll(io, gpa, f);
     if (block.len == 0) return say(io, "no GRUB environment block at {s}; not committing", .{spec});
     if (isSaved(block, entry)) {
@@ -87,8 +121,18 @@ fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void
     // A slot that cannot reach the machine's data is not healthy, whatever
     // its services say. Leaving it uncommitted lets the deadman take the
     // machine back to the slot that last could.
-    if (exists(io, nodata)) return say(io, "/data is unavailable ({s}); not committing", .{trim(readAll(io, gpa, nodata))});
-    if (!run(io, &.{ "/usr/lib/werewolf/grubenv", f, "saved_entry", entry })) return say(io, "not committing", .{});
+    if (exists(
+        io,
+        nodata,
+    )) return say(
+        io,
+        "/data is unavailable ({s}); not committing",
+        .{trim(readAll(io, gpa, nodata))},
+    );
+    if (!run(
+        io,
+        &.{ "/usr/lib/werewolf/grubenv", f, "saved_entry", entry },
+    )) return say(io, "not committing", .{});
     markCommitted(io);
     say(io, "healthy for a minute; {s} is now GRUB's default", .{entry});
 }
@@ -102,8 +146,12 @@ fn healthy(io: Io, gpa: Allocator) bool {
     var it = d.iterate();
     while (it.next(io) catch return false) |e| {
         if (std.mem.eql(u8, e.name, "commit")) continue;
-        const dir = std.fmt.allocPrint(gpa, "/etc/sv/{s}", .{e.name}) catch return false;
-        const res = std.process.run(gpa, io, .{ .argv = &.{ "/usr/bin/sv", "status", dir } }) catch return false;
+        const dir = gpa.print("/etc/sv/{s}", .{e.name}) catch return false;
+        const res = std.process.run(
+            gpa,
+            io,
+            .{ .argv = &.{ "/usr/bin/sv", "status", dir } },
+        ) catch return false;
         if (!statusHealthy(res.stdout)) return false;
     }
     return true;
@@ -115,7 +163,7 @@ fn statusHealthy(line: []const u8) bool {
     if (!std.mem.startsWith(u8, line, "run:")) return true;
     const close = std.mem.indexOf(u8, line, ") ") orelse return false;
     const rest = line[close + 2 ..];
-    const end = std.mem.indexOfScalar(u8, rest, 's') orelse return false;
+    const end = std.mem.findScalar(u8, rest, 's') orelse return false;
     const up = std.fmt.parseInt(u32, rest[0..end], 10) catch return false;
     return up >= 60;
 }
@@ -127,7 +175,7 @@ fn triedEntry(io: Io, gpa: Allocator, dir: []const u8, entry: []const u8) !?[]co
     defer d.close(io);
     var it = d.iterate();
     while (try it.next(io)) |e| {
-        if (isTried(e.name, entry)) return try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir, e.name });
+        if (isTried(e.name, entry)) return try gpa.print("{s}/{s}", .{ dir, e.name });
     }
     return null;
 }
@@ -161,8 +209,12 @@ fn parseCmdline(text: []const u8) Cmdline {
 
 /// The filesystem with uuid on dir, through the mount helper.
 fn mountUuid(io: Io, gpa: Allocator, uuid: []const u8, dir: []const u8, kind: ?[]const u8) bool {
-    const tag = std.fmt.allocPrint(gpa, "UUID={s}", .{uuid}) catch return false;
-    const res = std.process.run(gpa, io, .{ .argv = &.{ "/usr/bin/blkid", "-c", "/dev/null", "-l", "-o", "device", "-t", tag } }) catch return false;
+    const tag = gpa.print("UUID={s}", .{uuid}) catch return false;
+    const res = std.process.run(
+        gpa,
+        io,
+        .{ .argv = &.{ "/usr/bin/blkid", "-c", "/dev/null", "-l", "-o", "device", "-t", tag } },
+    ) catch return false;
     const dev = trim(res.stdout);
     if (dev.len == 0) return false;
     Dir.cwd().createDirPath(io, dir) catch return false;
@@ -171,7 +223,10 @@ fn mountUuid(io: Io, gpa: Allocator, uuid: []const u8, dir: []const u8, kind: ?[
 }
 
 fn markCommitted(io: Io) void {
-    Dir.cwd().writeFile(io, .{ .sub_path = committed, .data = "" }) catch |err| say(io, "{s}: {s}", .{ committed, @errorName(err) });
+    Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = committed, .data = "" },
+    ) catch |err| say(io, "{s}: {s}", .{ committed, @errorName(err) });
 }
 
 /// Down, as a service that has done its job: runsv will not restart it.
@@ -210,7 +265,7 @@ fn trim(s: []const u8) []const u8 {
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "commit: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "commit: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 

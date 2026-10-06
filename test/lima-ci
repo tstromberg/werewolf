@@ -31,5 +31,7 @@ limactl shell --workdir / "$vm" sh -euc "
 	[ ! -e /dev/kvm ] || sudo chmod 0666 /dev/kvm
 	make test
 	make lint
-	make -k -j\$(nproc) check
+	# A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no guest
+	# starves, which nested virtualization makes fatal (RCU stalls).
+	make -k -j\$(( (\$(nproc) + 1) / 2 )) check
 "

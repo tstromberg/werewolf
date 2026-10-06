@@ -35,14 +35,35 @@ pub const Job = union(enum) {
 /// As id, rooted in root with only the resolver's files to read, TCP only
 /// to ports 443 and 53, and no file bigger than max_fetch: GET url into
 /// body, then say "ok", or why not.
-pub fn fetcher(id: u32, root: [*:0]const u8, url: []const u8, body: i32, out: i32, parent: linux.pid_t) noreturn {
+pub fn fetcher(
+    id: u32,
+    root: [*:0]const u8,
+    url: []const u8,
+    body: i32,
+    out: i32,
+    parent: linux.pid_t,
+) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    const status = fetchInto(arena.allocator(), id, root, url, body, out) catch |err| sandbox.whyNot(arena.allocator(), err);
+    const status = fetchInto(
+        arena.allocator(),
+        id,
+        root,
+        url,
+        body,
+        out,
+    ) catch |err| sandbox.whyNot(arena.allocator(), err);
     sandbox.say(out, 0, status, "");
 }
 
-fn fetchInto(gpa: Allocator, id: u32, root: [*:0]const u8, url: []const u8, body: i32, out: i32) ![]const u8 {
+fn fetchInto(
+    gpa: Allocator,
+    id: u32,
+    root: [*:0]const u8,
+    url: []const u8,
+    body: i32,
+    out: i32,
+) ![]const u8 {
     try sandbox.closeAllBut(&.{ body, out });
     var threaded: Io.Threaded = .init_single_threaded;
     const io = threaded.io();
@@ -53,7 +74,15 @@ fn fetchInto(gpa: Allocator, id: u32, root: [*:0]const u8, url: []const u8, body
     client.now = now;
     try sandbox.limit(.FSIZE, max_fetch);
     try sandbox.dropTo(id, root);
-    const etc: i32 = @intCast(try sandbox.sys(linux.openat(linux.AT.FDCWD, "/etc", .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true }, 0), "open /etc"));
+    const etc: i32 = @intCast(try sandbox.sys(
+        linux.openat(
+            linux.AT.FDCWD,
+            "/etc",
+            .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true },
+            0,
+        ),
+        "open /etc",
+    ));
     try sandbox.landlock(&.{.{ .fd = etc, .access = sandbox.read_file }}, &.{ 443, 53 });
     _ = linux.close(etc);
     // What the request takes, as traced: the resolver's files, DNS over
@@ -89,7 +118,10 @@ fn fetchInto(gpa: Allocator, id: u32, root: [*:0]const u8, url: []const u8, body
     var w = file.writerStreaming(io, &buf);
     const res = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &w.interface });
     try w.interface.flush();
-    if (res.status != .ok) return std.enums.tagName(std.http.Status, res.status) orelse "HttpStatus";
+    if (res.status != .ok) return std.enums.tagName(
+        std.http.Status,
+        res.status,
+    ) orelse "HttpStatus";
     return "ok";
 }
 
@@ -101,7 +133,14 @@ pub fn reader(id: u32, job: Job, body: Body, out: i32, parent: linux.pid_t) nore
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const gpa = arena.allocator();
     var lines: Io.Writer.Allocating = .init(gpa);
-    readInto(gpa, id, job, body, out, &lines.writer) catch |err| sandbox.say(out, 0, sandbox.whyNot(gpa, err), "");
+    readInto(
+        gpa,
+        id,
+        job,
+        body,
+        out,
+        &lines.writer,
+    ) catch |err| sandbox.say(out, 0, sandbox.whyNot(gpa, err), "");
     sandbox.say(out, 0, "ok", lines.written());
 }
 
@@ -122,7 +161,10 @@ fn readInto(gpa: Allocator, id: u32, job: Job, body: Body, out: i32, w: *Io.Writ
     const data = try gpa.alloc(u8, body.size);
     var got: usize = 0;
     while (got < data.len) {
-        const n = try sandbox.sys(linux.pread(body.fd, data[got..].ptr, data.len - got, @intCast(got)), "pread");
+        const n = try sandbox.sys(
+            linux.pread(body.fd, data[got..].ptr, data.len - got, @intCast(got)),
+            "pread",
+        );
         if (n == 0) return error.ShortRead;
         got += n;
     }
@@ -132,14 +174,24 @@ fn readInto(gpa: Allocator, id: u32, job: Job, body: Body, out: i32, w: *Io.Writ
     }
 }
 
-pub const PackageFix = struct { origin: []const u8, from: []const u8, to: []const u8, cves: []const []const u8 };
+pub const PackageFix = struct {
+    origin: []const u8,
+    from: []const u8,
+    to: []const u8,
+    cves: []const []const u8,
+};
 pub const KernelFix = struct { id: []const u8, fixed_in: []const u8, title: []const u8 };
-pub const KernelFixes = struct { branch: []const u8 = "", from: []const u8 = "", to: []const u8 = "", cves: []const KernelFix = &.{} };
+pub const KernelFixes = struct {
+    branch: []const u8 = "",
+    from: []const u8 = "",
+    to: []const u8 = "",
+    cves: []const KernelFix = &.{},
+};
 pub const OriginChange = struct { origin: []const u8, from: []const u8, to: []const u8 };
 
 /// openssl-4.0 -> openssl; a name without a version suffix is its own base.
 fn streamBase(origin: []const u8) []const u8 {
-    const i = std.mem.lastIndexOfScalar(u8, origin, '-') orelse return origin;
+    const i = std.mem.findScalarLast(u8, origin, '-') orelse return origin;
     const tail = origin[i + 1 ..];
     if (tail.len == 0) return origin;
     for (tail) |c| if (!std.ascii.isDigit(c) and c != '.') return origin;
@@ -150,7 +202,16 @@ fn streamBase(origin: []const u8) []const u8 {
 // apk need run to compare two: {digit}{.digit}...{letter}{_suffix{#}}...{-r#}.
 // A version is read as tokens, each kind known from the character that ends
 // the last, in an order that only rises but for a few steps back.
-const Tok = enum(i8) { invalid = -1, digit_or_zero, digit, letter, suffix, suffix_no, revision_no, end };
+const Tok = enum(i8) {
+    invalid = -1,
+    digit_or_zero,
+    digit,
+    letter,
+    suffix,
+    suffix_no,
+    revision_no,
+    end,
+};
 
 const VersionReader = struct {
     s: []const u8,
@@ -199,7 +260,11 @@ const VersionReader = struct {
         var v: i64 = 0;
         var nt: Tok = .invalid;
         switch (r.t) {
-            .digit_or_zero, .digit, .suffix_no, .revision_no => if (r.t == .digit_or_zero and s[0] == '0') {
+            .digit_or_zero,
+            .digit,
+            .suffix_no,
+            .revision_no,
+            => if (r.t == .digit_or_zero and s[0] == '0') {
                 // Leading zeros: 1.01 is older than 1.1.
                 while (i + 1 < s.len and s[i + 1] == '0') i += 1;
                 nt = .digit;
@@ -277,7 +342,7 @@ fn validVersion(s: []const u8) bool {
 pub fn kernelVersion(s: []const u8) ?[3]u32 {
     var v = s;
     if (std.mem.startsWith(u8, v, "linux-virt-")) v = v["linux-virt-".len..];
-    if (std.mem.indexOfScalar(u8, v, '-')) |i| v = v[0..i];
+    if (std.mem.findScalar(u8, v, '-')) |i| v = v[0..i];
     var out: [3]u32 = .{ 0, 0, 0 };
     var it = std.mem.splitScalar(u8, v, '.');
     for (&out) |*part| {
@@ -318,7 +383,8 @@ fn kernelFixedIn(rec: KernelRecord, branch: []const u8, old: [3]u32, new: [3]u32
             if (!std.mem.eql(u8, v.status, "unaffected")) continue;
             if (!std.mem.eql(u8, v.versionType orelse "", "semver")) continue;
             const le = v.lessThanOrEqual orelse continue;
-            if (!std.mem.endsWith(u8, le, ".*") or !std.mem.eql(u8, le[0 .. le.len - 2], branch)) continue;
+            if (!std.mem.endsWith(u8, le, ".*") or
+                !std.mem.eql(u8, le[0 .. le.len - 2], branch)) continue;
             const fixed = kernelVersion(v.version) orelse continue;
             if (kernelLess(old, fixed) and !kernelLess(new, fixed)) return v.version;
         }
@@ -328,12 +394,23 @@ fn kernelFixedIn(rec: KernelRecord, branch: []const u8, old: [3]u32, new: [3]u32
 
 /// Wolfi's security.json, as the reader's lines, "INDEX FIXED CVE": a CVE
 /// fixed at version FIXED, in the window of origins[INDEX].
-fn secdbLines(gpa: Allocator, json: []const u8, origins: []const OriginChange, w: *Io.Writer) !void {
-    const db = try std.json.parseFromSliceLeaky(SecDb, gpa, json, .{ .ignore_unknown_fields = true });
+fn secdbLines(
+    gpa: Allocator,
+    json: []const u8,
+    origins: []const OriginChange,
+    w: *Io.Writer,
+) !void {
+    const db = try std.json.parseFromSliceLeaky(
+        SecDb,
+        gpa,
+        json,
+        .{ .ignore_unknown_fields = true },
+    );
     for (origins, 0..) |o, i| {
         const base = streamBase(o.origin);
         for (db.packages) |p| {
-            if (!std.mem.eql(u8, p.pkg.name, o.origin) and !std.mem.eql(u8, p.pkg.name, base)) continue;
+            if (!std.mem.eql(u8, p.pkg.name, o.origin) and
+                !std.mem.eql(u8, p.pkg.name, base)) continue;
             const secfixes = p.pkg.secfixes orelse continue;
             var it = secfixes.map.iterator();
             while (it.next()) |e| {
@@ -349,7 +426,11 @@ fn secdbLines(gpa: Allocator, json: []const u8, origins: []const OriginChange, w
 /// The reader's lines from secdbLines, checked: each names an origin asked
 /// about, a version in its window, and a CVE id. A reader that sends any
 /// other line is not believed at all.
-pub fn packageFixes(gpa: Allocator, text: []const u8, origins: []const OriginChange) ![]const PackageFix {
+pub fn packageFixes(
+    gpa: Allocator,
+    text: []const u8,
+    origins: []const OriginChange,
+) ![]const PackageFix {
     const cves = try gpa.alloc(std.ArrayList([]const u8), origins.len);
     @memset(cves, .empty);
     var it = std.mem.tokenizeScalar(u8, text, '\n');
@@ -372,7 +453,10 @@ pub fn packageFixes(gpa: Allocator, text: []const u8, origins: []const OriginCha
             c.items[n] = id;
             n += 1;
         }
-        try fixes.append(gpa, .{ .origin = o.origin, .from = o.from, .to = o.to, .cves = c.items[0..n] });
+        try fixes.append(
+            gpa,
+            .{ .origin = o.origin, .from = o.from, .to = o.to, .cves = c.items[0..n] },
+        );
     }
     return fixes.items;
 }
@@ -386,7 +470,8 @@ fn inWindow(fixed: []const u8, from: []const u8, to: []const u8) bool {
 
 /// CVE-2026-52988: the year, and four digits or more.
 fn validCve(id: []const u8) bool {
-    if (id.len < 13 or id.len > 32 or !std.mem.startsWith(u8, id, "CVE-") or id[8] != '-') return false;
+    if (id.len < 13 or id.len > 32 or !std.mem.startsWith(u8, id, "CVE-") or
+        id[8] != '-') return false;
     for (id[4..8]) |c| if (!std.ascii.isDigit(c)) return false;
     for (id[9..]) |c| if (!std.ascii.isDigit(c)) return false;
     return true;
@@ -394,13 +479,23 @@ fn validCve(id: []const u8) bool {
 
 /// The kernel CNA's tarball, as the reader's lines, "CVE FIXED TITLE": each
 /// CVE fixed on branch in (old, new], with its title made one line.
-fn kernelLines(gpa: Allocator, tarball_gz: []const u8, branch: []const u8, old: [3]u32, new: [3]u32, w: *Io.Writer) !void {
+fn kernelLines(
+    gpa: Allocator,
+    tarball_gz: []const u8,
+    branch: []const u8,
+    old: [3]u32,
+    new: [3]u32,
+    w: *Io.Writer,
+) !void {
     var in: Io.Reader = .fixed(tarball_gz);
     var window: [std.compress.flate.max_window_len]u8 = undefined;
     var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
     var name_buf: [Dir.max_path_bytes]u8 = undefined;
     var link_buf: [Dir.max_path_bytes]u8 = undefined;
-    var it: std.tar.Iterator = .init(&gz.reader, .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf });
+    var it: std.tar.Iterator = .init(
+        &gz.reader,
+        .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
+    );
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     while (try it.next()) |file| {
@@ -409,10 +504,18 @@ fn kernelLines(gpa: Allocator, tarball_gz: []const u8, branch: []const u8, old: 
         const s = scratch.allocator();
         var body: Io.Writer.Allocating = .init(s);
         try it.streamRemaining(file, &body.writer);
-        const rec = std.json.parseFromSliceLeaky(KernelRecord, s, body.written(), .{ .ignore_unknown_fields = true }) catch continue;
+        const rec = std.json.parseFromSliceLeaky(
+            KernelRecord,
+            s,
+            body.written(),
+            .{ .ignore_unknown_fields = true },
+        ) catch continue;
         const fixed = kernelFixedIn(rec, branch, old, new) orelse continue;
         if (!validCve(rec.cveMetadata.cveId)) continue;
-        try w.print("{s} {s} {s}\n", .{ rec.cveMetadata.cveId, fixed, try oneLine(s, rec.containers.cna.title) });
+        try w.print(
+            "{s} {s} {s}\n",
+            .{ rec.cveMetadata.cveId, fixed, try oneLine(s, rec.containers.cna.title) },
+        );
     }
 }
 
@@ -440,7 +543,8 @@ pub fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) !
         const fixed = f.next() orelse return error.BadLine;
         const title = f.rest();
         const v = kernelVersion(fixed) orelse return error.BadLine;
-        if (!validCve(id) or v[0] != new[0] or v[1] != new[1] or !kernelLess(old, v) or kernelLess(new, v)) return error.BadLine;
+        if (!validCve(id) or v[0] != new[0] or v[1] != new[1] or !kernelLess(old, v) or
+            kernelLess(new, v)) return error.BadLine;
         if (title.len > max_title or !std.unicode.utf8ValidateSlice(title)) return error.BadLine;
         for (title) |c| if (c < 0x20 or c == 0x7f) return error.BadLine;
         try out.append(gpa, .{ .id = id, .fixed_in = fixed, .title = title });
@@ -455,7 +559,7 @@ pub fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) !
 
 /// vulns-master/cve/published/2026/CVE-2026-52988.json
 fn isKernelRecord(name: []const u8) bool {
-    const base = name[(std.mem.lastIndexOfScalar(u8, name, '/') orelse return false) + 1 ..];
+    const base = name[(std.mem.findScalarLast(u8, name, '/') orelse return false) + 1 ..];
     return std.mem.indexOf(u8, name, "/cve/published/") != null and
         std.mem.startsWith(u8, base, "CVE-") and std.mem.endsWith(u8, base, ".json");
 }
@@ -532,8 +636,23 @@ test apkOrder {
         try testing.expectEqual(c[2].invert(), apkOrder(c[1], c[0]));
     }
     // And as `apk version -c` judged them.
-    for ([_][]const u8{ "1.0", "1.0.", "1.0-r", "0", "", "1.0_alpha_p1", "1.3.2.1_rc20260601-r0" }) |v| try testing.expect(validVersion(v));
-    for ([_][]const u8{ "1.0_bad", "abc", "1.0-x", "1.0 ", "1.0-r1a", "1234567890123456789" }) |v| try testing.expect(!validVersion(v));
+    for ([_][]const u8{
+        "1.0",
+        "1.0.",
+        "1.0-r",
+        "0",
+        "",
+        "1.0_alpha_p1",
+        "1.3.2.1_rc20260601-r0",
+    }) |v| try testing.expect(validVersion(v));
+    for ([_][]const u8{
+        "1.0_bad",
+        "abc",
+        "1.0-x",
+        "1.0 ",
+        "1.0-r1a",
+        "1234567890123456789",
+    }) |v| try testing.expect(!validVersion(v));
 }
 
 test kernelVersion {
@@ -553,9 +672,20 @@ test "kernel CVE window" {
         \\   {"version":"6.18.55","lessThanOrEqual":"6.18.*","status":"unaffected","versionType":"semver"},
         \\   {"version":"abc","lessThan":"def","status":"affected","versionType":"git"}]}]}}}
     ;
-    const rec = try std.json.parseFromSliceLeaky(KernelRecord, arena.allocator(), json, .{ .ignore_unknown_fields = true });
-    try testing.expectEqualStrings("6.18.55", kernelFixedIn(rec, "6.18", .{ 6, 18, 54 }, .{ 6, 18, 55 }).?);
-    try testing.expectEqualStrings("6.18.55", kernelFixedIn(rec, "6.18", .{ 6, 18, 1 }, .{ 6, 18, 60 }).?);
+    const rec = try std.json.parseFromSliceLeaky(
+        KernelRecord,
+        arena.allocator(),
+        json,
+        .{ .ignore_unknown_fields = true },
+    );
+    try testing.expectEqualStrings(
+        "6.18.55",
+        kernelFixedIn(rec, "6.18", .{ 6, 18, 54 }, .{ 6, 18, 55 }).?,
+    );
+    try testing.expectEqualStrings(
+        "6.18.55",
+        kernelFixedIn(rec, "6.18", .{ 6, 18, 1 }, .{ 6, 18, 60 }).?,
+    );
     try testing.expectEqual(null, kernelFixedIn(rec, "6.18", .{ 6, 18, 55 }, .{ 6, 18, 60 }));
     try testing.expectEqual(null, kernelFixedIn(rec, "6.18", .{ 6, 18, 50 }, .{ 6, 18, 54 }));
     try testing.expectEqual(null, kernelFixedIn(rec, "6.1", .{ 6, 1, 1 }, .{ 6, 1, 999 }));
@@ -618,7 +748,7 @@ test "package CVEs, from a reader and checked" {
         "-1 4.0.3-r0 CVE-2026-3333",
         "1 4.0.3-r0 CVE-2026-3333\x00",
     }) |bad| {
-        const text = try std.fmt.allocPrint(a, "0 1.3.2-r0 CVE-2026-1111\n{s}\n", .{bad});
+        const text = try a.print("0 1.3.2-r0 CVE-2026-1111\n{s}\n", .{bad});
         try testing.expectError(error.BadLine, packageFixes(a, text, origins));
     }
 }
@@ -629,7 +759,12 @@ test "kernel CVEs, from a reader and checked" {
     const a = arena.allocator();
     const old: [3]u32 = .{ 6, 18, 50 };
     const new: [3]u32 = .{ 6, 18, 55 };
-    const fixes = try kernelFixes(a, "CVE-2026-9000 6.18.55 b: \xc3\xa9t\xc3\xa9\nCVE-2026-10001 6.18.51 a: x\n", old, new);
+    const fixes = try kernelFixes(
+        a,
+        "CVE-2026-9000 6.18.55 b: \xc3\xa9t\xc3\xa9\nCVE-2026-10001 6.18.51 a: x\n",
+        old,
+        new,
+    );
     try testing.expectEqual(2, fixes.len);
     try testing.expectEqualStrings("CVE-2026-10001", fixes[0].id);
     try testing.expectEqualStrings("a: x", fixes[0].title);
@@ -652,6 +787,16 @@ test "kernel CVEs, from a reader and checked" {
 }
 
 test validCve {
-    for ([_][]const u8{ "CVE-2026-0001", "CVE-1999-1234567" }) |id| try testing.expect(validCve(id));
-    for ([_][]const u8{ "CVE-2026-001", "cve-2026-0001", "CVE-2026-0001 ", "CVE-20260-0001", "GHSA-2026-0001", "CVE-2026-0001a" }) |id| try testing.expect(!validCve(id));
+    for ([_][]const u8{
+        "CVE-2026-0001",
+        "CVE-1999-1234567",
+    }) |id| try testing.expect(validCve(id));
+    for ([_][]const u8{
+        "CVE-2026-001",
+        "cve-2026-0001",
+        "CVE-2026-0001 ",
+        "CVE-20260-0001",
+        "GHSA-2026-0001",
+        "CVE-2026-0001a",
+    }) |id| try testing.expect(!validCve(id));
 }

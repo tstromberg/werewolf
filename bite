@@ -81,6 +81,8 @@ undo() {
 	rm -rf "$boot" "$home"
 	if [ -f "$grubenv" ]; then
 		"$g-editenv" "$grubenv" unset next_entry
+		"$g-editenv" "$grubenv" unset werewolf_args_a
+		"$g-editenv" "$grubenv" unset werewolf_args_b
 		if "$g-editenv" "$grubenv" list | grep -q "^saved_entry=$entry-[ab]\$"; then
 			"$g-editenv" "$grubenv" unset saved_entry
 		fi
@@ -219,10 +221,14 @@ fi
 # A panic, or a lockup made one, reboots in ten seconds; GRUB then boots the
 # slot that last committed. See stage0/init. init= because a kernel whose
 # /init will not run otherwise tries /sbin/init and then /bin/sh, which is a
-# root shell on the console; named, a failed init is a panic instead. Then
-# the kernel arguments the image asks for (its cmdline, from the form's
-# allowances), which GRUB's entries keep from here on.
-cmdline="${console}init=/init panic=10 softlockup_panic=1 $args werewolf.ip=$cidr werewolf.gw=$gw werewolf.dns=$dns werewolf.mac=$mac werewolf.victim=$victim werewolf.grubenv=$genv"
+# root shell on the console; named, a failed init is a panic instead.
+# Between head and tail, the kernel arguments each slot's image asks for
+# (its cmdline, from the form's allowances): not written in the entries,
+# but read from GRUB's environment, werewolf_args_a and werewolf_args_b,
+# which bite sets for slot a and the updater for each slot it installs, so
+# an image's new arguments reach a machine bitten before them.
+head="${console}init=/init panic=10 softlockup_panic=1"
+tail="werewolf.ip=$cidr werewolf.gw=$gw werewolf.dns=$dns werewolf.mac=$mac werewolf.victim=$victim werewolf.grubenv=$genv"
 
 krel=$("$g-mkrelpath" "$(dirname "$boot")")/werewolf
 krel=/${krel#/}
@@ -230,7 +236,7 @@ krel=/${krel#/}
 say "$PRETTY_NAME on $arch, $fstype; GRUB via $style"
 say "network $nic $cidr via $gw, dns $dns"
 say "werewolf in $home ($victim), kernel in $boot"
-say "command line: $cmdline"
+say "command line: $head $args $tail"
 if [ -n "$dry" ]; then
 	say "-n: nothing changed"
 	exit 0
@@ -246,6 +252,7 @@ chmod 0700 "$home"
 mkdir -p "$home/a" "$home/data"
 cp "$image/root.erofs" "$home/a/"
 [ -f "$grubenv" ] || "$g-editenv" "$grubenv" create
+"$g-editenv" "$grubenv" set "werewolf_args_a=$args"
 t=$(mktemp -d)
 # Root's keys, and those of whoever ran bite through sudo: werewolf lets
 # them all in as root.
@@ -280,7 +287,7 @@ EOF
 for s in a b; do
 	echo "menuentry 'werewolf \$s' --id $entry-\$s {"
 	prepare_grub_to_access_device "\$($g-probe --target=device $boot)" | sed 's/^/	/'
-	echo "	linux $krel/\$s/vmlinuz $cmdline werewolf.slot=\$s"
+	echo "	linux $krel/\$s/vmlinuz $head \\\$werewolf_args_\$s $tail werewolf.slot=\$s"
 	echo "	initrd $krel/\$s/initramfs.zst"
 	echo "}"
 done
@@ -295,7 +302,7 @@ title werewolf $s
 version 0-werewolf-$s
 linux $krel/$s/vmlinuz
 initrd $krel/$s/initramfs.zst
-options $cmdline werewolf.slot=$s
+options $head \$werewolf_args_$s $tail werewolf.slot=$s
 EOF
 	done
 fi

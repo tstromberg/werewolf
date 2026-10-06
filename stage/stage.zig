@@ -33,7 +33,10 @@ pub fn main(init: std.process.Init) !void {
                 _ = linux.dup2(@intCast(fd), 2);
                 if (fd > 2) _ = linux.close(@intCast(fd));
             }
-            const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/runsvdir", "-P", "/etc/sv" } });
+            const err = std.process.replace(
+                io,
+                .{ .argv = &.{ "/usr/bin/runsvdir", "-P", "/etc/sv" } },
+            );
             say(io, "runsvdir: {s}", .{@errorName(err)});
             std.process.exit(1);
         },
@@ -68,7 +71,9 @@ fn stop(io: Io, gpa: Allocator) !void {
             say(io, "/data busy; remounted read-only", .{});
         }
     }
-    if (exists(io, "/dev/mapper/data") and run(io, gpa, &.{ "/usr/bin/cryptsetup", "close", "data" }, &.{})) {
+    if (exists(io, "/dev/mapper/data") and
+        run(io, gpa, &.{ "/usr/bin/cryptsetup", "close", "data" }, &.{}))
+    {
         say(io, "/data closed", .{});
     }
     // The victim's root filesystem, which /data was bound from, and which
@@ -79,7 +84,11 @@ fn stop(io: Io, gpa: Allocator) !void {
     // boot's GRUB sees what this one wrote. Allowed with the loop open,
     // since it is open read-only.
     if (isMounted(mounts, "/victim")) {
-        if (remountReadOnly("/victim")) say(io, "/victim's filesystem is read-only, its journal written in place", .{});
+        if (remountReadOnly("/victim")) say(
+            io,
+            "/victim's filesystem is read-only, its journal written in place",
+            .{},
+        );
         if (umount("/victim")) {
             say(io, "/victim unmounted", .{});
         } else if (remountReadOnly("/victim")) {
@@ -95,7 +104,8 @@ fn serviceDirs(io: Io, gpa: Allocator) ![]const []const u8 {
     defer d.close(io);
     var it = d.iterate();
     while (it.next(io) catch null) |e| {
-        if (e.kind == .directory or e.kind == .sym_link) try out.append(gpa, try std.fmt.allocPrint(gpa, "/etc/sv/{s}", .{e.name}));
+        if (e.kind == .directory or
+            e.kind == .sym_link) try out.append(gpa, try gpa.print("/etc/sv/{s}", .{e.name}));
     }
     std.mem.sort([]const u8, out.items, {}, lessString);
     return out.items;
@@ -110,7 +120,7 @@ fn umount(path: [*:0]const u8) bool {
 /// mount_setattr(2), which the mount helper uses, changes only the one
 /// mount. The restrictions the mount has are given again, so it keeps them.
 fn remountReadOnly(dir: [*:0]const u8) bool {
-    const MS = linux.MS;
+    const MS = linux.MS; // ziglint-ignore: Z032
     const flags = MS.REMOUNT | MS.RDONLY | MS.NOSUID | MS.NODEV | MS.NOEXEC;
     return linux.errno(linux.mount(null, dir, null, flags, 0)) == .SUCCESS;
 }
@@ -154,7 +164,7 @@ fn exists(io: Io, path: []const u8) bool {
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "werewolf: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "werewolf: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 

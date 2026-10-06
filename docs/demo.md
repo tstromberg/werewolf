@@ -34,6 +34,7 @@ Times read as "2 hours ago", with the moment itself on hover. The logo is
 | --- | --- | --- |
 | `status` (`status/status.zig`) | `status` | writes the page every minute, and may reach nothing on the network |
 | `scan` (the same program) | `grype` | once an hour, and at start, runs grype over the root (`dir:/`, without `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`, `/victim`) and keeps a summary for the page; the only user allowed to fetch |
+| PostgreSQL | `postgres` | keeps every boot's posture report and every scan's summary, which the page reads back, newest first; on a UNIX socket only ([postgresql.md](postgresql.md)) |
 | nginx | `nginx`, master and workers | serves `index.html` from `/data/svc/status/www`, `GET` only, and nothing else; able to bind :80 and nothing else |
 | autoupdate | root | checks Wolfi and Alpine every hour (`/etc/werewolf/update-every`), and on anything newer builds the other slot and reboots into it |
 
@@ -65,6 +66,8 @@ they consist of the characters IDs use.
 ```
 /data/svc/status/      the page's, owned by the status user
     www/index.html     the page
+/data/svc/postgres/    PostgreSQL's cluster: every boot's posture and every
+                       scan, of which the page shows the newest
 /data/svc/scan/        the scan's, owned by the grype user
     scan.json          the last grype run's findings, which the page shows
     scan-error         why the last run did not finish, while it did not

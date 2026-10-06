@@ -1,0 +1,52 @@
+// ziglint's rules for werewolf (`make lint`), as the Zig language
+// reference's Style Guide states them, and the standard library's own
+// deprecation markers: https://ziglang.org/documentation/0.17.0/#Style-Guide
+//
+// On, from the Style Guide: function names camelCase (Z001), functions that
+// return a type TitleCase (Z005), a file with top-level fields TitleCase
+// (Z009), error sets TitleCase (Z014), no underscore prefixes (Z031),
+// acronyms cased as words (Z032), and none of Value, Data, Context, Manager,
+// State, utils or misc in type names (Z033). From the standard library:
+// calls to what it marks deprecated (Z011). Kept from ziglint's defaults
+// because werewolf removes dead code: duplicate and unused imports (Z007,
+// Z013). And a parse error (Z003).
+//
+// Off, each for a reason:
+//   Z006   snake_case for every other name. Right, but the guide excepts
+//          "an established convention such as ENOENT", and ziglint cannot:
+//          werewolf's C constants keep the kernel headers' names
+//          (PR_SET_NO_NEW_PRIVS, FRA_IP_PROTO), as the standard library's
+//          own do.
+//   Z024   line length. The guide says "aim for 100; use common sense":
+//          tools/zigfix --check holds lines to 100 and lets a multiline
+//          string's data and a comment's URL run long, which ziglint
+//          cannot tell apart.
+//   The rest are ziglint's own taste, not the guide's, and Zig's standard
+//   library departs from each: Z002, Z004, Z010, Z012, Z015, Z016, Z017,
+//   Z018, Z019, Z020, Z021, Z022, Z023, Z025, Z026, Z027, Z028, Z029, Z030.
+.{
+    .rules = .{
+        .Z002 = .{ .enabled = false },
+        .Z004 = .{ .enabled = false },
+        .Z006 = .{ .enabled = false },
+        .Z010 = .{ .enabled = false },
+        .Z012 = .{ .enabled = false },
+        .Z015 = .{ .enabled = false },
+        .Z016 = .{ .enabled = false },
+        .Z017 = .{ .enabled = false },
+        .Z018 = .{ .enabled = false },
+        .Z019 = .{ .enabled = false },
+        .Z020 = .{ .enabled = false },
+        .Z021 = .{ .enabled = false },
+        .Z022 = .{ .enabled = false },
+        .Z023 = .{ .enabled = false },
+        .Z024 = .{ .enabled = false },
+        .Z025 = .{ .enabled = false },
+        .Z026 = .{ .enabled = false },
+        .Z027 = .{ .enabled = false },
+        .Z028 = .{ .enabled = false },
+        .Z029 = .{ .enabled = false },
+        .Z030 = .{ .enabled = false },
+        .Z033 = .{ .enabled = true },
+    },
+}

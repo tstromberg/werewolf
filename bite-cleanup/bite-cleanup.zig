@@ -40,19 +40,44 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 1 and !dry) fail("usage: bite-cleanup [-n]", .{});
     if (linux.geteuid() != 0) fail("run as root", .{});
 
-    const cmd = parseCmdline(readAll(io, gpa, "/proc/cmdline")) orelse fail("this machine was not bitten", .{});
+    const cmd = parseCmdline(readAll(
+        io,
+        gpa,
+        "/proc/cmdline",
+    )) orelse fail("this machine was not bitten", .{});
 
     // Only a committed machine may lose its fallback.
-    if (!mountUuid(io, gpa, cmd.grubenv.uuid, env_dir)) fail("cannot mount {s}", .{cmd.grubenv.uuid});
-    const block = readAll(io, gpa, try std.fmt.allocPrint(gpa, "{s}{s}", .{ env_dir, cmd.grubenv.path }));
+    if (!mountUuid(
+        io,
+        gpa,
+        cmd.grubenv.uuid,
+        env_dir,
+    )) fail("cannot mount {s}", .{cmd.grubenv.uuid});
+    const block = readAll(
+        io,
+        gpa,
+        try gpa.print("{s}{s}", .{ env_dir, cmd.grubenv.path }),
+    );
     _ = linux.umount2(env_dir, 0);
-    if (!isCommitted(block)) fail("werewolf is not yet GRUB's default; the distro is still its fallback", .{});
+    if (!isCommitted(block)) fail(
+        "werewolf is not yet GRUB's default; the distro is still its fallback",
+        .{},
+    );
 
     const keep = try keeps(gpa, cmd);
-    if (!mountUuid(io, gpa, cmd.victim.uuid, victim_dir)) fail("cannot mount {s}", .{cmd.victim.uuid});
+    if (!mountUuid(
+        io,
+        gpa,
+        cmd.victim.uuid,
+        victim_dir,
+    )) fail("cannot mount {s}", .{cmd.victim.uuid});
     // Not every filesystem will turn discard on in a remount; it is a help,
     // not a promise.
-    if (!dry and !run(io, &.{ mount_bin, "-o", "remount,discard", victim_dir })) say("discard not available here", .{});
+    if (!dry and
+        !run(
+            io,
+            &.{ mount_bin, "-o", "remount,discard", victim_dir },
+        )) say("discard not available here", .{});
 
     const pid = linux.fork();
     if (pid == 0) prune(io, gpa, keep, dry);
@@ -61,36 +86,64 @@ pub fn main(init: std.process.Init) !void {
     linux.sync();
     _ = linux.umount2(victim_dir, 0);
     const s: u32 = @bitCast(status);
-    if (!linux.W.IFEXITED(s) or linux.W.EXITSTATUS(s) != 0) fail("deleting stopped; see above", .{});
+    if (!linux.W.IFEXITED(s) or
+        linux.W.EXITSTATUS(s) != 0) fail("deleting stopped; see above", .{});
     if (!dry) {
-        say("bite --undo is no longer possible; GRUB's menu still lists the distro, which no longer boots", .{});
-        say("rm frees blocks, it does not erase them: snapshots taken before now still hold the distro", .{});
+        say(
+            "bite --undo is no longer possible; GRUB's menu still lists the distro, which no " ++
+                "longer boots",
+            .{},
+        );
+        say(
+            "rm frees blocks, it does not erase them: snapshots taken before now still hold the " ++
+                "distro",
+            .{},
+        );
     }
 }
 
 /// The child: confined, then deleting everything not kept.
 fn prune(io: Io, gpa: Allocator, keep: []const []const u8, dry: bool) noreturn {
-    const root = Dir.cwd().openDir(io, victim_dir, .{ .iterate = true, .follow_symlinks = false }) catch |err|
+    const root = Dir.cwd().openDir(
+        io,
+        victim_dir,
+        .{ .iterate = true, .follow_symlinks = false },
+    ) catch |err|
         fail("{s}: {s}", .{ victim_dir, @errorName(err) });
     confine(root.handle) catch |err| fail("cannot confine the deleting: {s}", .{@errorName(err)});
     var n: usize = 0;
     walk(io, gpa, root, "", keep, dry, &n) catch |err| fail("{s}", .{@errorName(err)});
     var list: std.ArrayList(u8) = .empty;
     for (keep, 0..) |k, i| list.print(gpa, "{s}{s}", .{ if (i > 0) " " else "", k }) catch {};
-    if (dry) say("-n: would delete {d} entries, keeping {s}; nothing changed", .{ n, list.items }) else say("deleted {d} entries of the distro, keeping {s}", .{ n, list.items });
+    if (dry)
+        say("-n: would delete {d} entries, keeping {s}; nothing changed", .{ n, list.items })
+    else
+        say("deleted {d} entries of the distro, keeping {s}", .{ n, list.items });
     std.process.exit(0);
 }
 
 /// Everything in dir (at path, from the filesystem's root) that is neither
 /// kept nor above something kept goes. Symlinks are entries, never followed.
-fn walk(io: Io, gpa: Allocator, dir: Dir, path: []const u8, keep: []const []const u8, dry: bool, n: *usize) !void {
+fn walk(
+    io: Io,
+    gpa: Allocator,
+    dir: Dir,
+    path: []const u8,
+    keep: []const []const u8,
+    dry: bool,
+    n: *usize,
+) !void {
     var it = dir.iterate();
     while (try it.next(io)) |e| {
-        const p = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ path, e.name });
+        const p = try gpa.print("{s}/{s}", .{ path, e.name });
         switch (fate(p, keep)) {
             .keep => {},
             .descend => {
-                var sub = try dir.openDir(io, e.name, .{ .iterate = true, .follow_symlinks = false });
+                var sub = try dir.openDir(
+                    io,
+                    e.name,
+                    .{ .iterate = true, .follow_symlinks = false },
+                );
                 defer sub.close(io);
                 try walk(io, gpa, sub, p, keep, dry, n);
             },
@@ -107,7 +160,8 @@ const Fate = enum { keep, descend, delete };
 fn fate(path: []const u8, keep: []const []const u8) Fate {
     for (keep) |k| {
         if (std.mem.eql(u8, k, path)) return .keep;
-        if (k.len > path.len and std.mem.startsWith(u8, k, path) and k[path.len] == '/') return .descend;
+        if (k.len > path.len and std.mem.startsWith(u8, k, path) and
+            k[path.len] == '/') return .descend;
     }
     return .delete;
 }
@@ -120,7 +174,7 @@ fn keeps(gpa: Allocator, cmd: Cmdline) ![]const []const u8 {
     if (std.mem.eql(u8, cmd.victim.uuid, cmd.grubenv.uuid)) {
         var it = std.mem.tokenizeScalar(u8, cmd.grubenv.path, '/');
         const top = it.next() orelse return k.items;
-        try k.append(gpa, try std.fmt.allocPrint(gpa, "/{s}", .{top}));
+        try k.append(gpa, try gpa.print("/{s}", .{top}));
     }
     return k.items;
 }
@@ -129,7 +183,8 @@ fn keeps(gpa: Allocator, cmd: Cmdline) ![]const []const u8 {
 fn isCommitted(block: []const u8) bool {
     var it = std.mem.splitScalar(u8, block, '\n');
     while (it.next()) |line| {
-        if (std.mem.eql(u8, line, "saved_entry=werewolf-a") or std.mem.eql(u8, line, "saved_entry=werewolf-b")) return true;
+        if (std.mem.eql(u8, line, "saved_entry=werewolf-a") or
+            std.mem.eql(u8, line, "saved_entry=werewolf-b")) return true;
     }
     return false;
 }
@@ -144,14 +199,22 @@ fn parseCmdline(text: []const u8) ?Cmdline {
     var grubenv: ?Place = null;
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.victim=")) victim = parsePlace(arg["werewolf.victim=".len..]);
-        if (std.mem.startsWith(u8, arg, "werewolf.grubenv=")) grubenv = parsePlace(arg["werewolf.grubenv=".len..]);
+        if (std.mem.startsWith(
+            u8,
+            arg,
+            "werewolf.victim=",
+        )) victim = parsePlace(arg["werewolf.victim=".len..]);
+        if (std.mem.startsWith(
+            u8,
+            arg,
+            "werewolf.grubenv=",
+        )) grubenv = parsePlace(arg["werewolf.grubenv=".len..]);
     }
     return .{ .victim = victim orelse return null, .grubenv = grubenv orelse return null };
 }
 
 fn parsePlace(s: []const u8) ?Place {
-    const colon = std.mem.indexOfScalar(u8, s, ':') orelse return null;
+    const colon = std.mem.findScalar(u8, s, ':') orelse return null;
     const uuid = s[0..colon];
     const path = s[colon + 1 ..];
     if (uuid.len == 0 or path.len < 2 or path[0] != '/') return null;
@@ -174,7 +237,7 @@ const CAP_FOWNER = 3;
 /// The kernel's __user_cap_header_struct, whose pid is an int; Zig 0.17's
 /// cap_user_header_t has it as a usize (see mount/mount.zig).
 const CapHeader = extern struct { version: u32, pid: i32 };
-const CapData = extern struct { effective: u32, permitted: u32, inheritable: u32 };
+const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
 
 // Landlock's filesystem rights (ABI 1), and REFER (2) and TRUNCATE (3).
 const LL_EXECUTE = 1 << 0;
@@ -194,24 +257,40 @@ fn confine(root: linux.fd_t) !void {
     try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
     const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
     const caps: u32 = 1 << CAP_DAC_OVERRIDE | 1 << CAP_DAC_READ_SEARCH | 1 << CAP_FOWNER;
-    const data = [2]CapData{
+    const data = [2]CapSets{
         .{ .effective = caps, .permitted = caps, .inheritable = 0 },
         .{ .effective = 0, .permitted = 0, .inheritable = 0 },
     };
     try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
 
-    const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1); // LANDLOCK_CREATE_RULESET_VERSION
+    const abi = linux.syscall3(
+        .landlock_create_ruleset,
+        0,
+        0,
+        1,
+    ); // LANDLOCK_CREATE_RULESET_VERSION
     try sys(abi);
     var handled: u64 = LL_EXECUTE | LL_WRITE_FILE | LL_REMOVE_DIR | LL_REMOVE_FILE | LL_MAKE_ALL;
     if (abi >= 2) handled |= LL_REFER;
     if (abi >= 3) handled |= LL_TRUNCATE;
-    const ruleset = linux.syscall3(.landlock_create_ruleset, @intFromPtr(&handled), @sizeOf(u64), 0);
+    const ruleset = linux.syscall3(
+        .landlock_create_ruleset,
+        @intFromPtr(&handled),
+        @sizeOf(u64),
+        0,
+    );
     try sys(ruleset);
     // struct landlock_path_beneath_attr: a u64 and an s32, packed.
     var rule: [12]u8 = undefined;
     std.mem.writeInt(u64, rule[0..8], LL_REMOVE_DIR | LL_REMOVE_FILE, .little);
     std.mem.writeInt(i32, rule[8..12], root, .little);
-    try sys(linux.syscall4(.landlock_add_rule, ruleset, LANDLOCK_RULE_PATH_BENEATH, @intFromPtr(&rule), 0));
+    try sys(linux.syscall4(
+        .landlock_add_rule,
+        ruleset,
+        LANDLOCK_RULE_PATH_BENEATH,
+        @intFromPtr(&rule),
+        0,
+    ));
     try sys(linux.syscall2(.landlock_restrict_self, ruleset, 0));
 }
 
@@ -232,8 +311,12 @@ fn sys(rc: usize) !void {
 /// The filesystem with uuid on dir, through the mount helper, apart from
 /// /victim and writable.
 fn mountUuid(io: Io, gpa: Allocator, uuid: []const u8, dir: []const u8) bool {
-    const tag = std.fmt.allocPrint(gpa, "UUID={s}", .{uuid}) catch return false;
-    const res = std.process.run(gpa, io, .{ .argv = &.{ blkid_bin, "-c", "/dev/null", "-l", "-o", "device", "-t", tag } }) catch return false;
+    const tag = gpa.print("UUID={s}", .{uuid}) catch return false;
+    const res = std.process.run(
+        gpa,
+        io,
+        .{ .argv = &.{ blkid_bin, "-c", "/dev/null", "-l", "-o", "device", "-t", tag } },
+    ) catch return false;
     const dev = std.mem.trim(u8, res.stdout, " \r\n");
     if (dev.len == 0) return false;
     Dir.cwd().createDirPath(io, dir) catch return false;
@@ -260,13 +343,17 @@ fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
 
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "bite-cleanup: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "bite-cleanup: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     var buf: [1024]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "bite-cleanup: " ++ fmt ++ "\n", args) catch "bite-cleanup: failed\n";
+    const line = std.mem.print(
+        &buf,
+        "bite-cleanup: " ++ fmt ++ "\n",
+        args,
+    ) catch "bite-cleanup: failed\n";
     _ = linux.write(2, line.ptr, line.len);
     std.process.exit(1);
 }
@@ -276,7 +363,10 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 const testing = std.testing;
 
 test parseCmdline {
-    const c = parseCmdline("console=hvc0 werewolf.victim=0e7e1f00-c4ec:/var/lib/werewolf werewolf.grubenv=0e7e1f00-c4ec:/boot/grub/grubenv werewolf.slot=a\n").?;
+    const c = parseCmdline(
+        "console=hvc0 werewolf.victim=0e7e1f00-c4ec:/var/lib/werewolf werewolf.grubenv=0e7e1f00-" ++
+            "c4ec:/boot/grub/grubenv werewolf.slot=a\n",
+    ).?;
     try testing.expectEqualStrings("0e7e1f00-c4ec", c.victim.uuid);
     try testing.expectEqualStrings("/var/lib/werewolf", c.victim.path);
     try testing.expectEqualStrings("/boot/grub/grubenv", c.grubenv.path);
@@ -290,7 +380,9 @@ test parseCmdline {
 
 test isCommitted {
     try testing.expect(isCommitted("# GRUB Environment Block\nsaved_entry=werewolf-b\n####"));
-    try testing.expect(!isCommitted("# GRUB Environment Block\nnext_entry=werewolf-a\nsaved_entry=0\n####"));
+    try testing.expect(
+        !isCommitted("# GRUB Environment Block\nnext_entry=werewolf-a\nsaved_entry=0\n####"),
+    );
     try testing.expect(!isCommitted("saved_entry=werewolf-ab\n"));
     try testing.expect(!isCommitted(""));
 }
@@ -298,12 +390,16 @@ test isCommitted {
 test keeps {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const same = parseCmdline("werewolf.victim=ab:/var/lib/werewolf werewolf.grubenv=ab:/boot/grub/grubenv").?;
+    const same = parseCmdline(
+        "werewolf.victim=ab:/var/lib/werewolf werewolf.grubenv=ab:/boot/grub/grubenv",
+    ).?;
     const k = try keeps(arena.allocator(), same);
     try testing.expectEqual(2, k.len);
     try testing.expectEqualStrings("/boot", k[1]);
     // Fedora: the root subvolume, and /boot a filesystem of its own.
-    const apart = parseCmdline("werewolf.victim=ab:/root/var/lib/werewolf werewolf.grubenv=cd:/grub2/grubenv").?;
+    const apart = parseCmdline(
+        "werewolf.victim=ab:/root/var/lib/werewolf werewolf.grubenv=cd:/grub2/grubenv",
+    ).?;
     try testing.expectEqual(1, (try keeps(arena.allocator(), apart)).len);
 }
 

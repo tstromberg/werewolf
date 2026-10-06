@@ -24,14 +24,24 @@ pub fn main(init: std.process.Init) !void {
         fail("grubenv: {s}: {s}", .{ path, @errorName(err) });
     defer f.close(io);
     var old: [size + 1]u8 = undefined;
-    const n = f.readPositionalAll(io, &old, 0) catch |err| fail("grubenv: {s}: {s}", .{ path, @errorName(err) });
+    const n = f.readPositionalAll(
+        io,
+        &old,
+        0,
+    ) catch |err| fail("grubenv: {s}: {s}", .{ path, @errorName(err) });
     var new: [size]u8 = undefined;
     edit(old[0..n], args[2], args[3], &new) catch |err| switch (err) {
         error.NotABlock => fail("grubenv: {s} is not a GRUB environment block", .{path}),
-        error.BadName, error.BadValue => fail("grubenv: {s}={s} cannot be stored", .{ args[2], args[3] }),
+        error.BadName,
+        error.BadValue,
+        => fail("grubenv: {s}={s} cannot be stored", .{ args[2], args[3] }),
         error.Overflow => fail("grubenv: {s} would overflow", .{path}),
     };
-    f.writePositionalAll(io, &new, 0) catch |err| fail("grubenv: {s}: {s}", .{ path, @errorName(err) });
+    f.writePositionalAll(
+        io,
+        &new,
+        0,
+    ) catch |err| fail("grubenv: {s}: {s}", .{ path, @errorName(err) });
     f.sync(io) catch |err| fail("grubenv: {s}: {s}", .{ path, @errorName(err) });
 }
 
@@ -44,8 +54,9 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 /// order, name=value last, and '#' to the end.
 fn edit(old: []const u8, name: []const u8, value: []const u8, out: *[size]u8) !void {
     if (old.len != size or !std.mem.startsWith(u8, old, header)) return error.NotABlock;
-    if (name.len == 0 or std.mem.indexOfAny(u8, name, "=\n#") != null or name[0] == '#') return error.BadName;
-    if (std.mem.indexOfScalar(u8, value, '\n') != null) return error.BadValue;
+    if (name.len == 0 or std.mem.indexOfAny(u8, name, "=\n#") != null or
+        name[0] == '#') return error.BadName;
+    if (std.mem.findScalar(u8, value, '\n') != null) return error.BadValue;
 
     var w: Io.Writer = .fixed(out);
     w.writeAll(header) catch return error.Overflow;
@@ -54,7 +65,8 @@ fn edit(old: []const u8, name: []const u8, value: []const u8, out: *[size]u8) !v
         // Padding, comments and the variable being set are dropped; the
         // padding has no newline, so it is the last "line".
         if (line.len == 0 or line[0] == '#') continue;
-        if (std.mem.startsWith(u8, line, name) and line.len > name.len and line[name.len] == '=') continue;
+        if (std.mem.startsWith(u8, line, name) and line.len > name.len and
+            line[name.len] == '=') continue;
         w.print("{s}\n", .{line}) catch return error.Overflow;
     }
     w.print("{s}={s}\n", .{ name, value }) catch return error.Overflow;
@@ -77,11 +89,19 @@ test edit {
     const old = block("saved_entry=werewolf-a\nnext_entry=werewolf-b\n");
 
     try edit(&old, "saved_entry", "werewolf-b", &out);
-    try testing.expectEqualSlices(u8, &block("next_entry=werewolf-b\nsaved_entry=werewolf-b\n"), &out);
+    try testing.expectEqualSlices(
+        u8,
+        &block("next_entry=werewolf-b\nsaved_entry=werewolf-b\n"),
+        &out,
+    );
 
     // A new variable goes last; a name that is a prefix of another leaves it.
     try edit(&old, "saved", "x", &out);
-    try testing.expectEqualSlices(u8, &block("saved_entry=werewolf-a\nnext_entry=werewolf-b\nsaved=x\n"), &out);
+    try testing.expectEqualSlices(
+        u8,
+        &block("saved_entry=werewolf-a\nnext_entry=werewolf-b\nsaved=x\n"),
+        &out,
+    );
 
     // An empty value clears it, as GRUB's own save_env does.
     try edit(&old, "next_entry", "", &out);

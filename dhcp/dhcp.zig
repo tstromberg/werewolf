@@ -67,7 +67,13 @@ pub fn main(init: std.process.Init) !void {
     // which werewolf leaves to each program, so workloads do not pay
     // (docs/security.md). Where the CPU has no control, the kernel refuses
     // and nothing changes.
-    _ = linux.prctl(@backingInt(linux.PR.SET_SPECULATION_CTRL), linux.PR.SPEC_STORE_BYPASS, linux.PR.SPEC_FORCE_DISABLE, 0, 0);
+    _ = linux.prctl(
+        @backingInt(linux.PR.SET_SPECULATION_CTRL),
+        linux.PR.SPEC_STORE_BYPASS,
+        linux.PR.SPEC_FORCE_DISABLE,
+        0,
+        0,
+    );
     const args = try init.minimal.args.toSlice(gpa);
     // runsv starts a service's ./run with no arguments: run under that
     // name, as the dhcp service's run links here, it keeps the lease.
@@ -82,7 +88,15 @@ pub fn main(init: std.process.Init) !void {
     };
     start(init.io, gpa, mode, if (mode == .up) args[2] else "") catch |err| {
         var log: Log = .{};
-        log.event("error", .{ .step = "start", .@"error" = @errorName(err), .detail = detail, .errno = errnoName(detail_errno) });
+        log.event(
+            "error",
+            .{
+                .step = "start",
+                .@"error" = @errorName(err),
+                .detail = detail,
+                .errno = errnoName(detail_errno),
+            },
+        );
         std.process.exit(1);
     };
 }
@@ -106,7 +120,12 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     try Dir.cwd().createDirPath(io, state_dir);
     const nic = switch (mode) {
         .up => arg_nic,
-        .keep => std.mem.trim(u8, Dir.cwd().readFileAlloc(io, nic_path, gpa, .limited(64)) catch |err| switch (err) {
+        .keep => std.mem.trim(u8, Dir.cwd().readFileAlloc(
+            io,
+            nic_path,
+            gpa,
+            .limited(64),
+        ) catch |err| switch (err) {
             error.FileNotFound => park(),
             else => return err,
         }, " \n"),
@@ -124,9 +143,20 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     }
 
     const link = try Link.open(nic);
-    const dir = try sys(linux.openat(linux.AT.FDCWD, state_dir, .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true }, 0), "open " ++ state_dir);
+    const dir = try sys(
+        linux.openat(
+            linux.AT.FDCWD,
+            state_dir,
+            .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true },
+            0,
+        ),
+        "open " ++ state_dir,
+    );
     var sp: [2]i32 = undefined;
-    _ = try sys(linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0, &sp), "socketpair");
+    _ = try sys(
+        linux.socketpair(linux.AF.UNIX, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0, &sp),
+        "socketpair",
+    );
     const parent_pid = linux.getpid();
 
     const pid = try sys(linux.fork(), "fork");
@@ -175,7 +205,13 @@ const Engine = struct {
     /// capability, live as _dhcp in an empty root, and make any system call
     /// beyond these few fatal.
     fn sandbox(e: *Engine, parent_pid: linux.pid_t) !void {
-        _ = try e.sys(linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0));
+        _ = try e.sys(linux.prctl(
+            @backingInt(linux.PR.SET_PDEATHSIG),
+            @backingInt(linux.SIG.KILL),
+            0,
+            0,
+            0,
+        ));
         if (linux.getppid() != parent_pid) return error.ParentGone;
         dropTo(engine_id) catch |err| {
             e.errno = @backingInt(linux.E.PERM);
@@ -245,13 +281,26 @@ const Engine = struct {
             const xid = newXid();
             var buf: [576]u8 = undefined;
             e.step = .discover;
-            const offer = try e.exchange(message(&buf, 1, xid, e.mac, zero, null, null), zero, xid, deadline) orelse return null;
-            if (offer.kind != .offer or !usable(offer.lease.addr) or !usable(offer.lease.server)) continue;
+            const offer = try e.exchange(
+                message(&buf, 1, xid, e.mac, zero, null, null),
+                zero,
+                xid,
+                deadline,
+            ) orelse return null;
+            if (offer.kind != .offer or !usable(offer.lease.addr) or
+                !usable(offer.lease.server)) continue;
             e.step = .request;
-            const ack = try e.exchange(message(&buf, 3, xid, e.mac, zero, offer.lease.addr, offer.lease.server), zero, xid, deadline) orelse return null;
+            const ack = try e.exchange(
+                message(&buf, 3, xid, e.mac, zero, offer.lease.addr, offer.lease.server),
+                zero,
+                xid,
+                deadline,
+            ) orelse return null;
             if (!std.mem.eql(u8, &ack.lease.server, &offer.lease.server)) continue;
             switch (ack.kind) {
-                .ack => if (std.mem.eql(u8, &ack.lease.addr, &offer.lease.addr) and valid(ack.lease)) {
+                .ack => if (std.mem.eql(u8, &ack.lease.addr, &offer.lease.addr) and
+                    valid(ack.lease))
+                {
                     var w = ack.lease;
                     w.bound = boottime();
                     return w;
@@ -269,7 +318,12 @@ const Engine = struct {
         const xid = newXid();
         var buf: [576]u8 = undefined;
         e.step = .renew;
-        var r = try e.exchange(message(&buf, 3, xid, e.mac, h.addr, null, null), h.addr, xid, nowMs() + @as(i64, seconds) * 1000) orelse return null;
+        var r = try e.exchange(
+            message(&buf, 3, xid, e.mac, h.addr, null, null),
+            h.addr,
+            xid,
+            nowMs() + @as(i64, seconds) * 1000,
+        ) orelse return null;
         if (!std.mem.eql(u8, &r.lease.server, &h.server)) return null;
         switch (r.kind) {
             .ack => {
@@ -289,7 +343,14 @@ const Engine = struct {
     fn exchange(e: *Engine, msg: []const u8, src: Ip4, xid: u32, deadline: i64) !?Reply {
         var out: [28 + 576]u8 = undefined;
         const pkt = frame(&out, src, msg);
-        const to: linux.sockaddr.ll = .{ .protocol = std.mem.nativeToBig(u16, linux.ETH.P.IP), .ifindex = e.index, .hatype = 0, .pkttype = 0, .halen = 6, .addr = .{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0 } };
+        const to: linux.sockaddr.ll = .{
+            .protocol = std.mem.nativeToBig(u16, linux.ETH.P.IP),
+            .ifindex = e.index,
+            .hatype = 0,
+            .pkttype = 0,
+            .halen = 6,
+            .addr = .{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0 },
+        };
         var wait: i64 = 1000;
         while (nowMs() < deadline) {
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
@@ -302,7 +363,14 @@ const Engine = struct {
                 if (linux.errno(n) == .INTR) continue;
                 if (try e.sys(n) == 0) break;
                 var in: [1536]u8 = undefined;
-                const got = try e.sys(linux.recvfrom(e.pkt, &in, in.len, linux.MSG.DONTWAIT, null, null));
+                const got = try e.sys(linux.recvfrom(
+                    e.pkt,
+                    &in,
+                    in.len,
+                    linux.MSG.DONTWAIT,
+                    null,
+                    null,
+                ));
                 const payload = unframe(in[0..got]) orelse continue;
                 if (parseReply(payload, xid, e.mac)) |r| return r;
             }
@@ -313,7 +381,12 @@ const Engine = struct {
 
     fn send(e: *Engine, event: Event, w: Wire) !void {
         e.step = .send;
-        const m: Msg = .{ .event = @backingInt(event), .step = @backingInt(e.step), .errno = e.errno, .lease = w };
+        const m: Msg = .{
+            .event = @backingInt(event),
+            .step = @backingInt(e.step),
+            .errno = e.errno,
+            .lease = w,
+        };
         const n = try e.sys(linux.write(e.sp, std.mem.asBytes(&m), @sizeOf(Msg)));
         if (n != @sizeOf(Msg)) return error.ShortWrite;
     }
@@ -321,7 +394,12 @@ const Engine = struct {
     /// Tell the parent what failed, and end.
     fn fail(e: *Engine) noreturn {
         if (e.errno == 0) e.errno = 1;
-        const m: Msg = .{ .event = @backingInt(Event.@"error"), .step = @backingInt(e.step), .errno = e.errno, .lease = std.mem.zeroes(Wire) };
+        const m: Msg = .{
+            .event = @backingInt(Event.@"error"),
+            .step = @backingInt(e.step),
+            .errno = e.errno,
+            .lease = std.mem.zeroes(Wire),
+        };
         _ = linux.write(e.sp, std.mem.asBytes(&m), @sizeOf(Msg));
         linux.exit_group(1);
     }
@@ -363,13 +441,22 @@ const Parent = struct {
     fn sandbox(p: *Parent) !void {
         var cap: usize = 0;
         while (cap < 64) : (cap += 1) {
-            if (cap != linux.CAP.NET_ADMIN) _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+            if (cap != linux.CAP.NET_ADMIN) _ = linux.prctl(
+                @backingInt(linux.PR.CAPBSET_DROP),
+                cap,
+                0,
+                0,
+                0,
+            );
         }
         // NOROOT, NO_SETUID_FIXUP, KEEP_CAPS and NO_CAP_AMBIENT_RAISE, each
         // locked: root's uid no longer brings capabilities.
         _ = try sys(linux.prctl(@backingInt(linux.PR.SET_SECUREBITS), 0xef, 0, 0, 0), "securebits");
         var hdr: CapHeader = .{};
-        const caps = [2]CapData{ .{ .effective = 1 << linux.CAP.NET_ADMIN, .permitted = 1 << linux.CAP.NET_ADMIN }, .{} };
+        const caps = [2]CapSets{
+            .{ .effective = 1 << linux.CAP.NET_ADMIN, .permitted = 1 << linux.CAP.NET_ADMIN },
+            .{},
+        };
         _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
         try landlock(p.dir);
 
@@ -398,11 +485,27 @@ const Parent = struct {
             const n = linux.read(p.sp, std.mem.asBytes(&m), @sizeOf(Msg));
             if (linux.errno(n) == .INTR) continue;
             if (linux.errno(n) != .SUCCESS or n != @sizeOf(Msg)) {
-                p.log.event("error", .{ .nic = p.nic, .step = "engine", .@"error" = if (n == 0) "EngineExited" else "BadMessage" });
+                p.log.event(
+                    "error",
+                    .{
+                        .nic = p.nic,
+                        .step = "engine",
+                        .@"error" = if (n == 0) "EngineExited" else "BadMessage",
+                    },
+                );
                 linux.exit_group(1);
             }
             p.handle(m) catch |err| {
-                p.log.event("error", .{ .nic = p.nic, .step = "apply", .@"error" = @errorName(err), .detail = detail, .errno = errnoName(detail_errno) });
+                p.log.event(
+                    "error",
+                    .{
+                        .nic = p.nic,
+                        .step = "apply",
+                        .@"error" = @errorName(err),
+                        .detail = detail,
+                        .errno = errnoName(detail_errno),
+                    },
+                );
                 linux.exit_group(1);
             };
         }
@@ -438,7 +541,10 @@ const Parent = struct {
             .@"error" => {
                 const step = std.enums.fromInt(Engine.Step, m.step) orelse return error.BadMessage;
                 const err: linux.E = @fromBackingInt(@intCast(m.errno));
-                p.log.event("error", .{ .nic = p.nic, .step = @tagName(step), .errno = errnoName(err) });
+                p.log.event(
+                    "error",
+                    .{ .nic = p.nic, .step = @tagName(step), .errno = errnoName(err) },
+                );
                 linux.exit_group(1);
             },
         }
@@ -448,23 +554,41 @@ const Parent = struct {
 /// Landlock: the parent may write files only beneath `dir`, make no TCP
 /// connection, and reach no abstract socket or process outside itself.
 fn landlock(dir: i32) !void {
-    const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1); // LANDLOCK_CREATE_RULESET_VERSION
+    const abi = linux.syscall3(
+        .landlock_create_ruleset,
+        0,
+        0,
+        1,
+    ); // LANDLOCK_CREATE_RULESET_VERSION
     _ = try sys(abi, "landlock version");
-    const fs_all: u64 = if (abi >= 5) 0xffff else if (abi >= 3) 0x7fff else if (abi >= 2) 0x3fff else 0x1fff;
+    const fs_all: u64 = if (abi >= 5)
+        0xffff
+    else if (abi >= 3)
+        0x7fff
+    else if (abi >= 2)
+        0x3fff
+    else
+        0x1fff;
     const attr: [3]u64 = .{
         fs_all,
         if (abi >= 4) 0x3 else 0, // bind and connect TCP
         if (abi >= 6) 0x3 else 0, // abstract UNIX sockets, signals
     };
     const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
-    const ruleset = try sys(linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0), "landlock ruleset");
+    const ruleset = try sys(
+        linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
+        "landlock ruleset",
+    );
     // READ_FILE, WRITE_FILE, REMOVE_FILE, MAKE_REG, and TRUNCATE where
     // the kernel knows it: replacing a file by renaming another over it.
     const allowed: u64 = 0x4 | 0x2 | 0x20 | 0x100 | (if (abi >= 3) @as(u64, 0x4000) else 0);
     var beneath: [12]u8 = undefined; // struct landlock_path_beneath_attr, packed
     std.mem.writeInt(u64, beneath[0..8], allowed, .little);
     std.mem.writeInt(i32, beneath[8..12], dir, .little);
-    _ = try sys(linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0), "landlock rule");
+    _ = try sys(
+        linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0),
+        "landlock rule",
+    );
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
     _ = try sys(linux.syscall2(.landlock_restrict_self, ruleset, 0), "landlock restrict");
     _ = linux.close(@intCast(ruleset));
@@ -480,7 +604,7 @@ const CapHeader = extern struct {
         std.debug.assert(@sizeOf(CapHeader) == 8);
     }
 };
-const CapData = extern struct {
+const CapSets = extern struct {
     effective: u32 = 0,
     permitted: u32 = 0,
     inheritable: u32 = 0,
@@ -489,10 +613,27 @@ const CapData = extern struct {
 /// Write a file whole beneath `dir`: to a new name, then renamed over the old.
 fn writeFile(dir: i32, comptime name: [:0]const u8, data: []const u8) !void {
     const tmp = std.fmt.comptimePrint("{s}.new", .{name});
-    const fd = try sys(linux.openat(dir, tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true }, 0o644), "open " ++ name);
+    const fd = try sys(
+        linux.openat(
+            dir,
+            tmp,
+            .{
+                .ACCMODE = .WRONLY,
+                .CREAT = true,
+                .TRUNC = true,
+                .CLOEXEC = true,
+                .NOFOLLOW = true,
+            },
+            0o644,
+        ),
+        "open " ++ name,
+    );
     defer _ = linux.close(@intCast(fd));
     var off: usize = 0;
-    while (off < data.len) off += try sys(linux.write(@intCast(fd), data[off..].ptr, data.len - off), "write " ++ name);
+    while (off < data.len) off += try sys(
+        linux.write(@intCast(fd), data[off..].ptr, data.len - off),
+        "write " ++ name,
+    );
     _ = try sys(linux.renameat(dir, tmp, dir, name), "rename " ++ name);
 }
 
@@ -555,13 +696,21 @@ fn valid(w: Wire) bool {
         const host = std.mem.readInt(u32, &w.addr, .big) & ~std.mem.readInt(u32, &w.mask, .big);
         if (host == 0 or host == ~std.mem.readInt(u32, &w.mask, .big)) return false;
     }
-    if (!std.mem.eql(u8, &w.router, &zero) and (!usable(w.router) or std.mem.eql(u8, &w.router, &w.addr))) return false;
+    if (!std.mem.eql(
+        u8,
+        &w.router,
+        &zero,
+    ) and (!usable(w.router) or std.mem.eql(u8, &w.router, &w.addr))) return false;
     if (w.ndns > max_dns or w.nroutes > max_routes) return false;
     for (w.dns[0..w.ndns]) |d| if (!usable(d)) return false;
     for (w.routes[0..w.nroutes]) |r| {
         if (r.prefix > 32 or !std.mem.eql(u8, &masked(r.dst, r.prefix), &r.dst)) return false;
         if (r.prefix > 0 and !usable(r.dst)) return false;
-        if (!std.mem.eql(u8, &r.gw, &zero) and (!usable(r.gw) or std.mem.eql(u8, &r.gw, &w.addr))) return false;
+        if (!std.mem.eql(
+            u8,
+            &r.gw,
+            &zero,
+        ) and (!usable(r.gw) or std.mem.eql(u8, &r.gw, &w.addr))) return false;
     }
     if (w.mtu != 0 and (w.mtu < 576 or w.mtu > 9000)) return false;
     return w.lease > 0;
@@ -590,14 +739,26 @@ fn describe(gpa: Allocator, nic: []const u8, w: Wire) !Lease {
     var routes: std.ArrayList([]const u8) = .empty;
     var plan_buf: [max_routes + 2]Route = undefined;
     for (plan(w, &plan_buf)) |rt| {
-        const dst = try std.fmt.allocPrint(gpa, "{s}/{d}", .{ try ipString(gpa, rt.dst), rt.prefix });
-        try routes.append(gpa, if (std.mem.eql(u8, &rt.gw, &zero)) dst else try std.fmt.allocPrint(gpa, "{s} via {s}", .{ dst, try ipString(gpa, rt.gw) }));
+        const dst = try gpa.print(
+            "{s}/{d}",
+            .{ try ipString(gpa, rt.dst), rt.prefix },
+        );
+        try routes.append(
+            gpa,
+            if (std.mem.eql(u8, &rt.gw, &zero))
+                dst
+            else
+                try gpa.print("{s} via {s}", .{ dst, try ipString(gpa, rt.gw) }),
+        );
     }
     var dns: std.ArrayList([]const u8) = .empty;
     for (w.dns[0..w.ndns]) |d| try dns.append(gpa, try ipString(gpa, d));
     return .{
         .nic = nic,
-        .addr = try std.fmt.allocPrint(gpa, "{s}/{d}", .{ try ipString(gpa, w.addr), prefixOf(w.mask) }),
+        .addr = try gpa.print(
+            "{s}/{d}",
+            .{ try ipString(gpa, w.addr), prefixOf(w.mask) },
+        ),
         .server = try ipString(gpa, w.server),
         .router = if (std.mem.eql(u8, &w.router, &zero)) null else try ipString(gpa, w.router),
         .routes = routes.items,
@@ -613,8 +774,13 @@ fn describe(gpa: Allocator, nic: []const u8, w: Wire) !Lease {
 /// What the engine needs from lease.json to renew: the address, the server
 /// and the times. Null for anything it cannot use.
 fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
-    const l = std.json.parseFromSliceLeaky(Lease, gpa, data, .{ .ignore_unknown_fields = true }) catch return null;
-    const slash = std.mem.indexOfScalar(u8, l.addr, '/') orelse return null;
+    const l = std.json.parseFromSliceLeaky(
+        Lease,
+        gpa,
+        data,
+        .{ .ignore_unknown_fields = true },
+    ) catch return null;
+    const slash = std.mem.findScalar(u8, l.addr, '/') orelse return null;
     const prefix = std.fmt.parseInt(u8, l.addr[slash + 1 ..], 10) catch return null;
     if (prefix > 32) return null;
     const w: Wire = .{
@@ -639,7 +805,10 @@ const Log = struct {
         var ts: linux.timespec = undefined;
         _ = linux.clock_gettime(.REALTIME, &ts);
         var time: [20]u8 = undefined;
-        w.print("dhcp: {{\"time\":\"{s}\",\"event\":\"{s}\",", .{ rfc3339(&time, @intCast(ts.sec)), name }) catch return;
+        w.print(
+            "dhcp: {{\"time\":\"{s}\",\"event\":\"{s}\",",
+            .{ rfc3339(&time, @intCast(ts.sec)), name },
+        ) catch return;
         const mark = w.end;
         std.json.Stringify.value(fields, .{}, &w) catch return;
         // Drop the fields' own opening brace: they continue the line's object.
@@ -670,7 +839,10 @@ const Link = struct {
         var l: Link = undefined;
         l.name = @splat(0);
         @memcpy(l.name[0..nic.len], nic);
-        l.inet = @intCast(try sys(linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0), "socket inet"));
+        l.inet = @intCast(try sys(
+            linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0),
+            "socket inet",
+        ));
 
         var ifr = l.ifreq();
         _ = try sys(linux.ioctl(l.inet, linux.SIOCGIFINDEX, @intFromPtr(&ifr)), "SIOCGIFINDEX");
@@ -686,14 +858,45 @@ const Link = struct {
         // The packet socket hears nothing until it is bound: the filter goes
         // on, and is locked, first. Without the filter the kernel would copy
         // every IPv4 packet the machine receives into it.
-        l.packet = @intCast(try sys(linux.socket(linux.AF.PACKET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0), "socket packet"));
+        l.packet = @intCast(try sys(
+            linux.socket(linux.AF.PACKET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0),
+            "socket packet",
+        ));
         const prog: SockFprog = .{ .len = reply_filter.len, .filter = &reply_filter };
-        _ = try sys(linux.setsockopt(l.packet, linux.SOL.SOCKET, SO_ATTACH_FILTER, @ptrCast(&prog), @sizeOf(SockFprog)), "SO_ATTACH_FILTER");
+        _ = try sys(
+            linux.setsockopt(
+                l.packet,
+                linux.SOL.SOCKET,
+                SO_ATTACH_FILTER,
+                @ptrCast(&prog),
+                @sizeOf(SockFprog),
+            ),
+            "SO_ATTACH_FILTER",
+        );
         const one: i32 = 1;
-        _ = try sys(linux.setsockopt(l.packet, linux.SOL.SOCKET, SO_LOCK_FILTER, @ptrCast(&one), @sizeOf(i32)), "SO_LOCK_FILTER");
+        _ = try sys(
+            linux.setsockopt(
+                l.packet,
+                linux.SOL.SOCKET,
+                SO_LOCK_FILTER,
+                @ptrCast(&one),
+                @sizeOf(i32),
+            ),
+            "SO_LOCK_FILTER",
+        );
         const proto = std.mem.nativeToBig(u16, linux.ETH.P.IP);
-        const sll: linux.sockaddr.ll = .{ .protocol = proto, .ifindex = l.index, .hatype = 0, .pkttype = 0, .halen = 0, .addr = @splat(0) };
-        _ = try sys(linux.bind(l.packet, @ptrCast(&sll), @sizeOf(linux.sockaddr.ll)), "bind packet");
+        const sll: linux.sockaddr.ll = .{
+            .protocol = proto,
+            .ifindex = l.index,
+            .hatype = 0,
+            .pkttype = 0,
+            .halen = 0,
+            .addr = @splat(0),
+        };
+        _ = try sys(
+            linux.bind(l.packet, @ptrCast(&sll), @sizeOf(linux.sockaddr.ll)),
+            "bind packet",
+        );
         return l;
     }
 
@@ -720,7 +923,10 @@ const Link = struct {
         if (w.ndns > 0) {
             var text: [max_dns * 28]u8 = undefined;
             var tw: Io.Writer = .fixed(&text);
-            for (w.dns[0..w.ndns]) |d| try tw.print("nameserver {d}.{d}.{d}.{d}\n", .{ d[0], d[1], d[2], d[3] });
+            for (w.dns[0..w.ndns]) |d| try tw.print(
+                "nameserver {d}.{d}.{d}.{d}\n",
+                .{ d[0], d[1], d[2], d[3] },
+            );
             try writeFile(dir, "resolv.conf", tw.buffered());
         }
     }
@@ -737,7 +943,8 @@ const Link = struct {
             .dst = inetAddr(rt.dst),
             .gateway = inetAddr(rt.gw),
             .genmask = inetAddr(maskOf(rt.prefix)),
-            .flags = RTF_UP | (if (on_link) 0 else RTF_GATEWAY) | (if (rt.prefix == 32) RTF_HOST else 0),
+            .flags = RTF_UP | (if (on_link) 0 else RTF_GATEWAY) |
+                (if (rt.prefix == 32) RTF_HOST else 0),
             .dev = @ptrCast(&l.name),
         };
         const rc = linux.ioctl(l.inet, linux.SIOCADDRT, @intFromPtr(&e));
@@ -858,7 +1065,10 @@ const Filter = struct {
     fn install(f: *Filter) !void {
         const insns = f.finish();
         const prog: SockFprog = .{ .len = @intCast(insns.len), .filter = insns.ptr };
-        _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
+        _ = try sys(
+            linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
+            "no_new_privs",
+        );
         _ = try sys(linux.seccomp(linux.SECCOMP.SET_MODE_FILTER, 0, &prog), "seccomp");
     }
 };
@@ -872,7 +1082,15 @@ fn sysnr(comptime name: []const u8) ?u32 {
 /// A DHCP message of `kind` (1 DISCOVER, 3 REQUEST) from `mac`. A REQUEST
 /// that answers an OFFER names the address and the server; one that renews
 /// has the address held in ciaddr instead.
-fn message(buf: *[576]u8, kind: u8, xid: u32, mac: [6]u8, ciaddr: Ip4, requested: ?Ip4, server: ?Ip4) []const u8 {
+fn message(
+    buf: *[576]u8,
+    kind: u8,
+    xid: u32,
+    mac: [6]u8,
+    ciaddr: Ip4,
+    requested: ?Ip4,
+    server: ?Ip4,
+) []const u8 {
     @memset(buf, 0);
     buf[0] = 1; // BOOTREQUEST
     buf[1] = 1; // Ethernet
@@ -990,7 +1208,11 @@ fn parseRoutes(v: []const u8, out: *[max_routes]Route) ?u8 {
         var dst = zero;
         @memcpy(dst[0..sig], v[i + 1 ..][0..sig]);
         if (n < max_routes) {
-            out[n] = .{ .dst = masked(dst, width), .prefix = width, .gw = v[i + 1 + sig ..][0..4].* };
+            out[n] = .{
+                .dst = masked(dst, width),
+                .prefix = width,
+                .gw = v[i + 1 + sig ..][0..4].*,
+            };
             n += 1;
         }
         i += 1 + sig + 4;
@@ -1117,11 +1339,11 @@ fn sameSubnet(a: Ip4, b: Ip4, m: Ip4) bool {
 }
 
 fn ipString(gpa: Allocator, a: Ip4) ![]const u8 {
-    return std.fmt.allocPrint(gpa, "{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] });
+    return gpa.print("{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] });
 }
 
 fn ipText(buf: *[16]u8, a: Ip4) []const u8 {
-    return std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch unreachable;
+    return std.mem.print(buf, "{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch unreachable;
 }
 
 fn parseIp4(s: []const u8) ?Ip4 {
@@ -1161,8 +1383,9 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return std.mem.print(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch unreachable;
 }
 
@@ -1232,8 +1455,20 @@ test "messages" {
     try std.testing.expectEqualSlices(u8, &cookie, d[236..240]);
     try std.testing.expectEqualSlices(u8, &.{ 53, 1, 1, 55, wanted.len }, d[240..245]);
 
-    const r = message(&buf, 3, test_xid, test_mac, zero, .{ 10, 128, 0, 5 }, .{ 169, 254, 169, 254 });
-    try std.testing.expectEqualSlices(u8, &.{ 53, 1, 3, 50, 4, 10, 128, 0, 5, 54, 4, 169, 254, 169, 254 }, r[240..255]);
+    const r = message(
+        &buf,
+        3,
+        test_xid,
+        test_mac,
+        zero,
+        .{ 10, 128, 0, 5 },
+        .{ 169, 254, 169, 254 },
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 53, 1, 3, 50, 4, 10, 128, 0, 5, 54, 4, 169, 254, 169, 254 },
+        r[240..255],
+    );
 
     const renewal = message(&buf, 3, test_xid, test_mac, .{ 10, 128, 0, 5 }, null, null);
     try std.testing.expectEqualSlices(u8, &.{ 10, 128, 0, 5 }, renewal[12..16]);
@@ -1312,11 +1547,21 @@ test "lease.json round trip" {
     try std.testing.expectEqual(1234, h.bound);
     try std.testing.expectEqual(3600, h.lease);
     try std.testing.expectEqual(null, heldFrom(a.allocator(), "{\"addr\":"));
-    try std.testing.expectEqual(null, heldFrom(a.allocator(), "{\"nic\":\"eth0\",\"addr\":\"10.0.0.5\",\"server\":\"10.0.0.1\",\"lease\":60,\"t1\":0,\"t2\":0,\"bound\":0}"));
+    try std.testing.expectEqual(
+        null,
+        heldFrom(
+            a.allocator(),
+            "{\"nic\":\"eth0\",\"addr\":\"10.0.0.5\",\"server\":\"10.0.0.1\",\"lease\":60,\"t1\"" ++
+                ":0,\"t2\":0,\"bound\":0}",
+        ),
+    );
 }
 
 test "a /32 with only a router reaches the router on the link first" {
-    const w = testLease(&.{ 54, 4, 10, 128, 0, 1, 51, 4, 0, 0, 0x0e, 0x10, 3, 4, 10, 128, 0, 1 }, .{ 10, 128, 0, 5 });
+    const w = testLease(
+        &.{ 54, 4, 10, 128, 0, 1, 51, 4, 0, 0, 0x0e, 0x10, 3, 4, 10, 128, 0, 1 },
+        .{ 10, 128, 0, 5 },
+    );
     var p: [max_routes + 2]Route = undefined;
     const routes = plan(w, &p);
     try std.testing.expectEqual(2, routes.len);
@@ -1347,8 +1592,22 @@ test "replies that are not ours, or are malformed" {
     // An option running past the end.
     try std.testing.expectEqual(null, parseReply(ok[0 .. ok.len - 3], test_xid, test_mac));
     // A server address of the wrong size, a mask with holes, no type.
-    try std.testing.expectEqual(null, parseReply(testReply(&buf, 5, .{ 10, 0, 2, 15 }, &.{ 54, 3, 10, 0, 2 }), test_xid, test_mac));
-    try std.testing.expectEqual(null, parseReply(testReply(&buf, 5, .{ 10, 0, 2, 15 }, &.{ 1, 4, 255, 0, 255, 0 }), test_xid, test_mac));
+    try std.testing.expectEqual(
+        null,
+        parseReply(
+            testReply(&buf, 5, .{ 10, 0, 2, 15 }, &.{ 54, 3, 10, 0, 2 }),
+            test_xid,
+            test_mac,
+        ),
+    );
+    try std.testing.expectEqual(
+        null,
+        parseReply(
+            testReply(&buf, 5, .{ 10, 0, 2, 15 }, &.{ 1, 4, 255, 0, 255, 0 }),
+            test_xid,
+            test_mac,
+        ),
+    );
     var none = okbuf;
     none[240] = 0; // the type option becomes padding
     none[241] = 0;
@@ -1357,7 +1616,40 @@ test "replies that are not ours, or are malformed" {
 }
 
 test "routes and MTU that are malformed are ignored" {
-    const w = testLease(&.{ 54, 4, 10, 0, 2, 2, 51, 4, 0, 0, 1, 0, 121, 5, 33, 10, 0, 0, 1, 26, 2, 0, 100, 3, 4, 10, 0, 2, 2 }, .{ 10, 0, 2, 15 });
+    const w = testLease(
+        &.{
+            54,
+            4,
+            10,
+            0,
+            2,
+            2,
+            51,
+            4,
+            0,
+            0,
+            1,
+            0,
+            121,
+            5,
+            33,
+            10,
+            0,
+            0,
+            1,
+            26,
+            2,
+            0,
+            100,
+            3,
+            4,
+            10,
+            0,
+            2,
+            2,
+        },
+        .{ 10, 0, 2, 15 },
+    );
     try std.testing.expectEqual(0, w.nroutes);
     try std.testing.expectEqual(0, w.mtu);
     var p: [max_routes + 2]Route = undefined;
@@ -1429,7 +1721,11 @@ test "masks and addresses" {
     try std.testing.expectEqual(33, prefixOf(.{ 255, 0, 255, 0 }));
     try std.testing.expectEqualSlices(u8, &.{ 255, 255, 240, 0 }, &maskOf(20));
     try std.testing.expect(sameSubnet(.{ 10, 0, 2, 2 }, .{ 10, 0, 2, 15 }, .{ 255, 255, 255, 0 }));
-    try std.testing.expect(!sameSubnet(.{ 10, 128, 0, 1 }, .{ 10, 128, 0, 5 }, .{ 255, 255, 255, 255 }));
+    try std.testing.expect(!sameSubnet(
+        .{ 10, 128, 0, 1 },
+        .{ 10, 128, 0, 5 },
+        .{ 255, 255, 255, 255 },
+    ));
     try std.testing.expect(!usable(zero));
     try std.testing.expect(!usable(.{ 255, 255, 255, 255 }));
     try std.testing.expect(!usable(.{ 127, 0, 0, 1 }));
@@ -1460,7 +1756,10 @@ test "seccomp filter" {
     for (p, 0..) |insn, i| {
         if (insn.code != BPF_JEQ_K) continue;
         try std.testing.expect(i + 1 + insn.jt < p.len and i + 1 + insn.jf < p.len);
-        if (insn.jt != 0) try std.testing.expectEqual(linux.SECCOMP.RET.ALLOW, p[i + 1 + insn.jt].k);
+        if (insn.jt != 0) try std.testing.expectEqual(
+            linux.SECCOMP.RET.ALLOW,
+            p[i + 1 + insn.jt].k,
+        );
     }
     // A wrong architecture lands on KILL.
     try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, p[2 + p[1].jf].k);
@@ -1469,7 +1768,9 @@ test "seccomp filter" {
 test "socket filter jumps" {
     for (reply_filter, 0..) |insn, i| {
         if (insn.code != BPF_JEQ_K and insn.code != BPF_JSET_K) continue;
-        try std.testing.expect(i + 1 + insn.jt < reply_filter.len and i + 1 + insn.jf < reply_filter.len);
+        try std.testing.expect(
+            i + 1 + insn.jt < reply_filter.len and i + 1 + insn.jf < reply_filter.len,
+        );
     }
     // Every rejection is the final `ret 0`.
     try std.testing.expectEqual(reply_filter.len - 1, 1 + 1 + reply_filter[1].jf);

@@ -1,0 +1,6 @@
+# The demo's page, as its own user: it reads what the other services keep
+# and the machine's state, writes only its own directory, and reaches
+# nothing on the network.
+exec    /usr/lib/werewolf/status
+user    status
+read    /data/svc /run/werewolf

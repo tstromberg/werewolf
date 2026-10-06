@@ -25,10 +25,22 @@ pub fn main(init: std.process.Init) !void {
     // session, which werewolf leaves to each program, so workloads do not
     // pay (docs/security.md). Where the CPU has no control, the kernel
     // refuses and nothing changes.
-    _ = linux.prctl(@backingInt(linux.PR.SET_SPECULATION_CTRL), linux.PR.SPEC_STORE_BYPASS, linux.PR.SPEC_FORCE_DISABLE, 0, 0);
+    _ = linux.prctl(
+        @backingInt(linux.PR.SET_SPECULATION_CTRL),
+        linux.PR.SPEC_STORE_BYPASS,
+        linux.PR.SPEC_FORCE_DISABLE,
+        0,
+        0,
+    );
     _ = linux.mkdir("/run/sshd", 0o700);
     if (linux.errno(linux.access(key, linux.F_OK)) != .SUCCESS) {
-        var child = try std.process.spawn(io, .{ .argv = &.{ "/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key }, .stdin = .ignore });
+        var child = try std.process.spawn(
+            io,
+            .{
+                .argv = &.{ "/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key },
+                .stdin = .ignore,
+            },
+        );
         const term = try child.wait(io);
         if (term != .exited or term.exited != 0) {
             say(io, "ssh-keygen failed; trying again", .{});
@@ -42,6 +54,6 @@ pub fn main(init: std.process.Init) !void {
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "sshd-start: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "sshd-start: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }

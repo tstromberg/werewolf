@@ -89,7 +89,13 @@ const attack_hard = "/tmp/.posture-attack-hard";
 const attack_file = "/tmp/.posture-attack-file";
 
 fn cleanAttacks() void {
-    for ([_][:0]const u8{ attack_run, attack_link, attack_secret, attack_hard, attack_file }) |path| _ = linux.unlink(path);
+    for ([_][:0]const u8{
+        attack_run,
+        attack_link,
+        attack_secret,
+        attack_hard,
+        attack_file,
+    }) |path| _ = linux.unlink(path);
 }
 
 /// attack, run in a child as nobody: uid and gid 65534, no other groups, no
@@ -108,10 +114,17 @@ fn inChild(attack: *const fn () bool, as_nobody: bool) ?bool {
     if (rc == 0) {
         const nobody = 65534;
         const none = [0]linux.gid_t{};
-        if (as_nobody and (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) != .SUCCESS or
-            linux.errno(linux.setgroups(0, &none)) != .SUCCESS or
-            linux.errno(linux.setresgid(nobody, nobody, nobody)) != .SUCCESS or
-            linux.errno(linux.setresuid(nobody, nobody, nobody)) != .SUCCESS))
+        if (as_nobody and
+            (linux.errno(linux.prctl(
+                @backingInt(linux.PR.SET_NO_NEW_PRIVS),
+                1,
+                0,
+                0,
+                0,
+            )) != .SUCCESS or
+                linux.errno(linux.setgroups(0, &none)) != .SUCCESS or
+                linux.errno(linux.setresgid(nobody, nobody, nobody)) != .SUCCESS or
+                linux.errno(linux.setresuid(nobody, nobody, nobody)) != .SUCCESS))
             linux.exit_group(2);
         linux.exit_group(if (attack()) 1 else 0);
     }
@@ -147,7 +160,11 @@ fn plantsFile() bool {
 }
 
 fn created(path: [:0]const u8, mode: linux.mode_t) bool {
-    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, mode);
+    const rc = linux.open(
+        path,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
+        mode,
+    );
     if (linux.errno(rc) != .SUCCESS) return false;
     _ = linux.close(@intCast(rc));
     return true;
@@ -155,7 +172,11 @@ fn created(path: [:0]const u8, mode: linux.mode_t) bool {
 
 /// Whether root can open path to write, creating it if it is not there.
 fn opensForWrite(path: [:0]const u8, append: bool) bool {
-    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = append, .CLOEXEC = true }, 0o600);
+    const rc = linux.open(
+        path,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = append, .CLOEXEC = true },
+        0o600,
+    );
     if (linux.errno(rc) != .SUCCESS) return false;
     _ = linux.close(@intCast(rc));
     return true;
@@ -181,7 +202,11 @@ fn writesOwnReadOnly() bool {
 /// kernel without 32-bit system calls answers with SIGSEGV, handled here so
 /// it is not logged. x86_64 only.
 fn makes32BitSyscall() bool {
-    const act: linux.Sigaction = .{ .handler = .{ .handler = &refused }, .mask = linux.sigemptyset(), .flags = 0 };
+    const act: linux.Sigaction = .{
+        .handler = .{ .handler = &refused },
+        .mask = linux.sigemptyset(),
+        .flags = 0,
+    };
     _ = linux.sigaction(.SEGV, &act, null);
     const pid = asm volatile ("int $0x80"
         : [ret] "={eax}" (-> u32),
@@ -215,7 +240,8 @@ const settle_max_s = 60;
 
 fn serve(io: Io, gpa: Allocator) !void {
     var waited: u32 = 0;
-    while (waited < settle_max_s and !settled(io, gpa)) : (waited += 1) io.sleep(.fromSeconds(1), .awake) catch {};
+    while (waited < settle_max_s and
+        !settled(io, gpa)) : (waited += 1) io.sleep(.fromSeconds(1), .awake) catch {};
 
     var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0 };
     try p.run();
@@ -224,8 +250,17 @@ fn serve(io: Io, gpa: Allocator) !void {
     try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &json.writer);
     try json.writer.writeByte('\n');
     const tmp = service_json ++ ".tmp";
-    Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = json.written() }) catch |err| std.debug.print("posture: {s}: {s}\n", .{ tmp, @errorName(err) });
-    Dir.rename(Dir.cwd(), tmp, Dir.cwd(), service_json, io) catch |err| std.debug.print("posture: {s}: {s}\n", .{ service_json, @errorName(err) });
+    Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = tmp, .data = json.written() },
+    ) catch |err| std.debug.print("posture: {s}: {s}\n", .{ tmp, @errorName(err) });
+    Dir.rename(
+        Dir.cwd(),
+        tmp,
+        Dir.cwd(),
+        service_json,
+        io,
+    ) catch |err| std.debug.print("posture: {s}: {s}\n", .{ service_json, @errorName(err) });
 
     var line: Io.Writer.Allocating = .init(gpa);
     try printLine(gpa, &line.writer, report);
@@ -245,7 +280,11 @@ fn settled(io: Io, gpa: Allocator) bool {
     var it = d.iterate();
     while (it.next(io) catch return false) |e| {
         if (std.mem.eql(u8, e.name, "posture")) continue;
-        var f = d.openFile(io, std.fmt.allocPrint(gpa, "{s}/supervise/status", .{e.name}) catch return false, .{}) catch return false;
+        var f = d.openFile(
+            io,
+            gpa.print("{s}/supervise/status", .{e.name}) catch return false,
+            .{},
+        ) catch return false;
         defer f.close(io);
         var status: [20]u8 = undefined;
         const n = f.readPositionalAll(io, &status, 0) catch return false;
@@ -328,7 +367,11 @@ const Posture = struct {
     /// The names in /etc/werewolf/allow, sorted.
     fn allowances(p: *Posture) ![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
-        var d = Dir.cwd().openDir(p.io, "/etc/werewolf/allow", .{ .iterate = true }) catch return names.items;
+        var d = Dir.cwd().openDir(
+            p.io,
+            "/etc/werewolf/allow",
+            .{ .iterate = true },
+        ) catch return names.items;
         defer d.close(p.io);
         var it = d.iterate();
         while (it.next(p.io) catch null) |e| try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
@@ -379,13 +422,28 @@ const Posture = struct {
             .id = "kernel-lockdown",
             .area = "kernel",
             .name = "Kernel lockdown",
-            .why = "Root cannot change the running kernel: no /dev/mem, no unsigned code, no hibernation images.",
-            .how = if (p.root) "lockdown is integrity or higher, and writing none is refused" else "lockdown is integrity or higher",
+            .why = "Root cannot change the running kernel: no /dev/mem, no unsigned code, no " ++
+                "hibernation images.",
+            .how = if (p.root)
+                "lockdown is integrity or higher, and writing none is refused"
+            else
+                "lockdown is integrity or higher",
             .result = if (locked and !lowered) .pass else .fail,
             .detail = level,
         });
-        try p.oneWay("kernel-modules-closed", "Kernel module loading closed", "No new kernel code can be loaded after boot, by anyone.", "kernel/modules_disabled", "1", "0");
-        const tainted = std.fmt.parseInt(u64, trim(p.read("/proc/sys/kernel/tainted")), 10) catch std.math.maxInt(u64);
+        try p.oneWay(
+            "kernel-modules-closed",
+            "Kernel module loading closed",
+            "No new kernel code can be loaded after boot, by anyone.",
+            "kernel/modules_disabled",
+            "1",
+            "0",
+        );
+        const tainted = std.fmt.parseInt(
+            u64,
+            trim(p.read("/proc/sys/kernel/tainted")),
+            10,
+        ) catch std.math.maxInt(u64);
         try p.add(.{
             .id = "kernel-modules-signed",
             .area = "kernel",
@@ -400,13 +458,38 @@ const Posture = struct {
             .area = "kernel",
             .name = "No booting another kernel",
             .why = "Root cannot replace the running kernel with kexec.",
-            .how = "kernel.kexec_load_disabled is 1, or lockdown (integrity) refuses unsigned kexec",
+            .how = "kernel.kexec_load_disabled is 1, or lockdown (integrity) refuses unsigned " ++
+                "kexec",
             .result = if (kexec_off or locked) .pass else .fail,
         });
-        try p.oneWay("kernel-ptrace", "No process debugging", "No process can read or change another's memory, root's included.", "kernel/yama/ptrace_scope", "3", "0");
-        try p.oneWay("kernel-bpf", "BPF only for root", "Ordinary users cannot load BPF programs into the kernel.", "kernel/unprivileged_bpf_disabled", "1", "0");
-        try p.sysctls("kernel-hidden", "kernel", "Kernel addresses and log hidden", "An exploit cannot read kernel addresses or the kernel's log.", &.{ .{ "kernel/kptr_restrict", "2" }, .{ "kernel/dmesg_restrict", "1" } });
-        const perf = std.fmt.parseInt(i32, trim(p.sysctl("kernel/perf_event_paranoid")), 10) catch -9;
+        try p.oneWay(
+            "kernel-ptrace",
+            "No process debugging",
+            "No process can read or change another's memory, root's included.",
+            "kernel/yama/ptrace_scope",
+            "3",
+            "0",
+        );
+        try p.oneWay(
+            "kernel-bpf",
+            "BPF only for root",
+            "Ordinary users cannot load BPF programs into the kernel.",
+            "kernel/unprivileged_bpf_disabled",
+            "1",
+            "0",
+        );
+        try p.sysctls(
+            "kernel-hidden",
+            "kernel",
+            "Kernel addresses and log hidden",
+            "An exploit cannot read kernel addresses or the kernel's log.",
+            &.{ .{ "kernel/kptr_restrict", "2" }, .{ "kernel/dmesg_restrict", "1" } },
+        );
+        const perf = std.fmt.parseInt(
+            i32,
+            trim(p.sysctl("kernel/perf_event_paranoid")),
+            10,
+        ) catch -9;
         try p.add(.{
             .id = "kernel-perf",
             .area = "kernel",
@@ -416,10 +499,34 @@ const Posture = struct {
             .result = if (perf >= 2) .pass else .fail,
             .detail = trim(p.sysctl("kernel/perf_event_paranoid")),
         });
-        try p.sysctls("kernel-userns", "kernel", "No user namespaces", "Removes kernel code that privilege-escalation exploits often start from.", &.{.{ "user/max_user_namespaces", "0" }});
-        try p.sysctls("kernel-io-uring", "kernel", "No io_uring", "Removes a large interface that has carried many kernel exploits.", &.{.{ "kernel/io_uring_disabled", "2" }});
-        try p.sysctls("kernel-sysrq", "kernel", "No SysRq", "The console's magic keys cannot dump memory or reboot.", &.{.{ "kernel/sysrq", "0" }});
-        try p.sysctls("kernel-core-dumps", "kernel", "No core dumps of privileged programs", "A program that changed its privileges leaves no memory dump behind.", &.{.{ "fs/suid_dumpable", "0" }});
+        try p.sysctls(
+            "kernel-userns",
+            "kernel",
+            "No user namespaces",
+            "Removes kernel code that privilege-escalation exploits often start from.",
+            &.{.{ "user/max_user_namespaces", "0" }},
+        );
+        try p.sysctls(
+            "kernel-io-uring",
+            "kernel",
+            "No io_uring",
+            "Removes a large interface that has carried many kernel exploits.",
+            &.{.{ "kernel/io_uring_disabled", "2" }},
+        );
+        try p.sysctls(
+            "kernel-sysrq",
+            "kernel",
+            "No SysRq",
+            "The console's magic keys cannot dump memory or reboot.",
+            &.{.{ "kernel/sysrq", "0" }},
+        );
+        try p.sysctls(
+            "kernel-core-dumps",
+            "kernel",
+            "No core dumps of privileged programs",
+            "A program that changed its privileges leaves no memory dump behind.",
+            &.{.{ "fs/suid_dumpable", "0" }},
+        );
 
         // A hypervisor in the guest is the way to the host's nested
         // virtualization. arm64 kernels build KVM in, and start it whenever
@@ -429,7 +536,8 @@ const Posture = struct {
             .id = "kernel-no-hypervisor",
             .area = "kernel",
             .name = "No hypervisor inside",
-            .why = "The machine cannot run virtual machines of its own, so root cannot reach the host's nested-virtualization code, where guest-to-host escapes are found.",
+            .why = "The machine cannot run virtual machines of its own, so root cannot reach " ++
+                "the host's nested-virtualization code, where guest-to-host escapes are found.",
             .how = "neither /dev/kvm nor /sys/class/misc/kvm exists",
             .result = if (kvm) .fail else .pass,
             .detail = if (kvm) "KVM is running" else "",
@@ -440,17 +548,39 @@ const Posture = struct {
         // parameter; aarch64's KVM nests only when the command line asks.
         var nested: std.ArrayList(u8) = .empty;
         for ([_][]const u8{ "kvm_intel", "kvm_amd" }) |m| {
-            const on = trim(p.read(try std.fmt.allocPrint(p.gpa, "/sys/module/{s}/parameters/nested", .{m})));
-            if (std.mem.eql(u8, on, "Y") or std.mem.eql(u8, on, "1")) try nested.print(p.gpa, "{s}{s}.nested is {s}", .{ if (nested.items.len > 0) ", " else "", m, on });
+            const on = trim(p.read(try p.gpa.print(
+                "/sys/module/{s}/parameters/nested",
+                .{m},
+            )));
+            if (std.mem.eql(u8, on, "Y") or
+                std.mem.eql(
+                    u8,
+                    on,
+                    "1",
+                )) try nested.print(
+                p.gpa,
+                "{s}{s}.nested is {s}",
+                .{ if (nested.items.len > 0) ", " else "", m, on },
+            );
         }
         var args = std.mem.tokenizeAny(u8, p.read("/proc/cmdline"), " \n");
-        while (args.next()) |a| if (std.mem.eql(u8, a, "kvm-arm.mode=nested")) try nested.print(p.gpa, "{s}kvm-arm.mode=nested", .{if (nested.items.len > 0) ", " else ""});
+        while (args.next()) |a| if (std.mem.eql(
+            u8,
+            a,
+            "kvm-arm.mode=nested",
+        )) try nested.print(
+            p.gpa,
+            "{s}kvm-arm.mode=nested",
+            .{if (nested.items.len > 0) ", " else ""},
+        );
         try p.add(.{
             .id = "kernel-no-nested",
             .area = "kernel",
             .name = "Guests cannot nest",
-            .why = "Virtual machines run here cannot run their own, so a guest's root cannot reach this host through nested virtualization.",
-            .how = "KVM is not running, or kvm_intel's and kvm_amd's nested parameter is off, and the command line has no kvm-arm.mode=nested",
+            .why = "Virtual machines run here cannot run their own, so a guest's root cannot " ++
+                "reach this host through nested virtualization.",
+            .how = "KVM is not running, or kvm_intel's and kvm_amd's nested parameter is off, " ++
+                "and the command line has no kvm-arm.mode=nested",
             .result = if (kvm and nested.items.len > 0) .fail else .pass,
             .detail = if (!kvm) "no KVM" else nested.items,
         });
@@ -459,7 +589,8 @@ const Posture = struct {
             .id = "kernel-debugfs",
             .area = "kernel",
             .name = "No kernel debug filesystem",
-            .why = "debugfs, a large window onto the kernel's internals that lockdown only partly closes, cannot be mounted, even by root.",
+            .why = "debugfs, a large window onto the kernel's internals that lockdown only " ++
+                "partly closes, cannot be mounted, even by root.",
             .how = "debugfs is not in /proc/filesystems",
             .result = if (debugfs) .fail else .pass,
             .detail = if (debugfs) "debugfs is available" else "",
@@ -469,25 +600,68 @@ const Posture = struct {
             .id = "kernel-proc-mem",
             .area = "kernel",
             .name = "Read-only memory stays read-only",
-            .why = "A program cannot rewrite its own code through /proc/self/mem, as a shell and dd do to run a program where nothing written may run (DDexec).",
-            .how = "writing to a read-only page of this program through /proc/self/mem is refused (it writes the bytes already there)",
+            .why = "A program cannot rewrite its own code through /proc/self/mem, as a shell " ++
+                "and dd do to run a program where nothing written may run (DDexec).",
+            .how = "writing to a read-only page of this program through /proc/self/mem is " ++
+                "refused (it writes the bytes already there)",
             .result = if (forced) .fail else .pass,
             .detail = if (forced) "the write went through" else "",
         });
         try p.legacy();
+        // The bounding set: what no process, root included, can hold again
+        // before a reboot. The network's two only where the form allows them.
+        const status1 = p.read("/proc/1/status");
+        const bnd = statusField(status1, "CapBnd");
+        const allow = try p.allowances();
+        var held: std.ArrayList(u8) = .empty;
+        next: for (bounded_caps) |c| {
+            for (allow) |a| if (c.allow.len > 0 and std.mem.eql(u8, a, c.allow)) continue :next;
+            if (capBit(
+                status1,
+                "CapBnd",
+                c.n,
+            ) orelse false) try held.print(
+                p.gpa,
+                "{s}{s}",
+                .{ if (held.items.len > 0) ", " else "", c.name },
+            );
+        }
+        try p.add(.{
+            .id = "kernel-bounding-set",
+            .area = "kernel",
+            .name = "Root's capabilities bounded",
+            .why = "Not even root can load kernel code, reach hardware or ports, trace " ++
+                "processes, make device files, or, unless the machine's form allows it, change " ++
+                "the network or open packet sockets.",
+            .how = "PID 1's CapBnd in /proc/1/status lacks each of them; every process descends " ++
+                "from PID 1",
+            .result = if (bnd == null) .skip else if (held.items.len == 0) .pass else .fail,
+            .detail = if (bnd == null)
+                "cannot read /proc/1/status"
+            else if (held.items.len > 0)
+                try p.gpa.print("held: {s}", .{held.items})
+            else
+                "",
+        });
         // A seccomp filter on PID 1 binds every process after it, root's
         // too, and nothing can remove it before a reboot: werewolf's seal
         // (init/init.zig) refuses there what no program here calls.
-        const status = p.read("/proc/1/status");
+        const status = status1;
         const filtered = std.mem.eql(u8, statusField(status, "Seccomp") orelse "", "2");
         try p.add(.{
             .id = "kernel-seal",
             .area = "kernel",
             .name = "Every process under a seccomp filter",
-            .why = "System calls nothing here makes are refused for every process, root's included, by a filter on PID 1 that no one can remove.",
+            .why = "System calls nothing here makes are refused for every process, root's " ++
+                "included, by a filter on PID 1 that no one can remove.",
             .how = "/proc/1/status reads Seccomp: 2, a filter, which every process inherits",
             .result = if (status.len == 0) .skip else if (filtered) .pass else .fail,
-            .detail = if (status.len == 0) "cannot read /proc/1/status" else if (!filtered) try std.fmt.allocPrint(p.gpa, "Seccomp: {s}", .{statusField(status, "Seccomp") orelse "absent"}) else "",
+            .detail = if (status.len == 0)
+                "cannot read /proc/1/status"
+            else if (!filtered)
+                try p.gpa.print("Seccomp: {s}", .{statusField(status, "Seccomp") orelse "absent"})
+            else
+                "",
         });
         try p.aslr();
         const min_addr = p.sysctl("vm/mmap_min_addr");
@@ -495,10 +669,14 @@ const Posture = struct {
             .id = "kernel-null-page",
             .area = "kernel",
             .name = "Low memory unmappable",
-            .why = "No program can map the first 64 KiB of memory, where a kernel bug that follows a null pointer would find it.",
+            .why = "No program can map the first 64 KiB of memory, where a kernel bug that " ++
+                "follows a null pointer would find it.",
             .how = "vm.mmap_min_addr is 65536 or more",
             .result = if ((std.fmt.parseInt(u64, min_addr, 10) catch 0) >= 65536) .pass else .fail,
-            .detail = try std.fmt.allocPrint(p.gpa, "vm.mmap_min_addr is {s}", .{if (min_addr.len > 0) min_addr else "absent"}),
+            .detail = try p.gpa.print(
+                "vm.mmap_min_addr is {s}",
+                .{if (min_addr.len > 0) min_addr else "absent"},
+            ),
         });
         // Readable by root alone. Absent, the kernel has no BPF JIT.
         const harden = p.sysctl("net/core/bpf_jit_harden");
@@ -506,10 +684,23 @@ const Posture = struct {
             .id = "kernel-bpf-jit",
             .area = "kernel",
             .name = "Users' BPF compiled hardened",
-            .why = "The socket and seccomp filters any user may install are compiled with their constants blinded, so they cannot plant chosen machine code in the kernel (JIT spraying).",
+            .why = "The socket and seccomp filters any user may install are compiled with their " ++
+                "constants blinded, so they cannot plant chosen machine code in the kernel (JIT " ++
+                "spraying).",
             .how = "net.core.bpf_jit_harden is 1 or 2, or the kernel has no BPF JIT",
-            .result = if (!p.root) .skip else if (harden.len == 0 or std.mem.eql(u8, harden, "1") or std.mem.eql(u8, harden, "2")) .pass else .fail,
-            .detail = if (!p.root) "readable by root alone" else if (harden.len == 0) "no BPF JIT" else try std.fmt.allocPrint(p.gpa, "net.core.bpf_jit_harden is {s}", .{harden}),
+            .result = if (!p.root)
+                .skip
+            else if (harden.len == 0 or std.mem.eql(u8, harden, "1") or
+                std.mem.eql(u8, harden, "2"))
+                .pass
+            else
+                .fail,
+            .detail = if (!p.root)
+                "readable by root alone"
+            else if (harden.len == 0)
+                "no BPF JIT"
+            else
+                try p.gpa.print("net.core.bpf_jit_harden is {s}", .{harden}),
         });
         const oops = p.sysctl("kernel/panic_on_oops");
         const panic_s = p.sysctl("kernel/panic");
@@ -517,10 +708,19 @@ const Posture = struct {
             .id = "kernel-oops",
             .area = "kernel",
             .name = "A kernel bug stops the kernel",
-            .why = "A kernel that hits a bug, as a failed exploit often makes it, reboots rather than running on for the exploit to try again.",
-            .how = "kernel.panic_on_oops is 1, and kernel.panic is above 0, so the panic reboots rather than hangs",
-            .result = if (std.mem.eql(u8, oops, "1") and (std.fmt.parseInt(i64, panic_s, 10) catch 0) > 0) .pass else .fail,
-            .detail = try std.fmt.allocPrint(p.gpa, "kernel.panic_on_oops is {s}, kernel.panic is {s}", .{ oops, panic_s }),
+            .why = "A kernel that hits a bug, as a failed exploit often makes it, reboots " ++
+                "rather than running on for the exploit to try again.",
+            .how = "kernel.panic_on_oops is 1, and kernel.panic is above 0, so the panic " ++
+                "reboots rather than hangs",
+            .result = if (std.mem.eql(u8, oops, "1") and
+                (std.fmt.parseInt(i64, panic_s, 10) catch 0) > 0)
+                .pass
+            else
+                .fail,
+            .detail = try p.gpa.print(
+                "kernel.panic_on_oops is {s}, kernel.panic is {s}",
+                .{ oops, panic_s },
+            ),
         });
         // What the kernel can only be told at boot: werewolf's image names
         // it (the build writes it from the form's allowances), and a
@@ -532,10 +732,16 @@ const Posture = struct {
             .id = "kernel-cmdline",
             .area = "kernel",
             .name = "Booted as the image asks",
-            .why = "The kernel was started with every hardening argument the image asks for, which it cannot be given later.",
+            .why = "The kernel was started with every hardening argument the image asks for, " ++
+                "which it cannot be given later.",
             .how = "every argument in /usr/share/werewolf/cmdline is in /proc/cmdline",
             .result = if (own.len == 0) .skip else if (missing.len == 0) .pass else .fail,
-            .detail = if (own.len == 0) "not werewolf: no /usr/share/werewolf/cmdline" else if (missing.len > 0) try std.fmt.allocPrint(p.gpa, "missing: {s}", .{missing}) else "",
+            .detail = if (own.len == 0)
+                "not werewolf: no /usr/share/werewolf/cmdline"
+            else if (missing.len > 0)
+                try p.gpa.print("missing: {s}", .{missing})
+            else
+                "",
         });
         // Absent, the kernel has no userfaultfd.
         const uffd = p.sysctl("vm/unprivileged_userfaultfd");
@@ -543,18 +749,26 @@ const Posture = struct {
             .id = "kernel-userfaultfd",
             .area = "kernel",
             .name = "No userfaultfd for users",
-            .why = "Ordinary users cannot stall the kernel at a page fault, the usual way to win the race in a kernel exploit.",
+            .why = "Ordinary users cannot stall the kernel at a page fault, the usual way to " ++
+                "win the race in a kernel exploit.",
             .how = "vm.unprivileged_userfaultfd is 0, or the kernel has no userfaultfd",
             .result = if (uffd.len == 0 or std.mem.eql(u8, uffd, "0")) .pass else .fail,
-            .detail = if (uffd.len == 0) "no userfaultfd" else try std.fmt.allocPrint(p.gpa, "vm.unprivileged_userfaultfd is {s}", .{uffd}),
+            .detail = if (uffd.len == 0)
+                "no userfaultfd"
+            else
+                try p.gpa.print("vm.unprivileged_userfaultfd is {s}", .{uffd}),
         });
         try p.add(.{
             .id = "kernel-vsyscall",
             .area = "kernel",
             .name = "No vsyscall page",
-            .why = "No code sits at the one fixed address every process shares, for an exploit to jump to.",
+            .why = "No code sits at the one fixed address every process shares, for an exploit " ++
+                "to jump to.",
             .how = "/proc/self/maps has no [vsyscall] mapping (vsyscall=none)",
-            .result = if (std.mem.indexOf(u8, p.read("/proc/self/maps"), "[vsyscall]") == null) .pass else .fail,
+            .result = if (std.mem.indexOf(u8, p.read("/proc/self/maps"), "[vsyscall]") == null)
+                .pass
+            else
+                .fail,
         });
         // Children inherit PID 1's limits, and only root can raise a hard one.
         const core = hardCoreLimit(p.read("/proc/1/limits"));
@@ -562,22 +776,34 @@ const Posture = struct {
             .id = "kernel-core-limit",
             .area = "kernel",
             .name = "No core dumps at all",
-            .why = "A program that crashes leaves no copy of its memory, and the secrets in it, on disk.",
-            .how = "PID 1's hard limit on core file size (/proc/1/limits) is 0, so no process it starts can raise its own",
+            .why = "A program that crashes leaves no copy of its memory, and the secrets in it, " ++
+                "on disk.",
+            .how = "PID 1's hard limit on core file size (/proc/1/limits) is 0, so no process " ++
+                "it starts can raise its own",
             .result = if (core) |c| (if (std.mem.eql(u8, c, "0")) .pass else .fail) else .skip,
-            .detail = if (core) |c| try std.fmt.allocPrint(p.gpa, "hard limit is {s}", .{c}) else "cannot read /proc/1/limits",
+            .detail = if (core) |c|
+                try p.gpa.print("hard limit is {s}", .{c})
+            else
+                "cannot read /proc/1/limits",
         });
         try p.memory();
         // --extended only: what werewolf leaves undone by choice, since it
         // slows what machines run (docs/security.md, "Not done, by choice").
         if (p.extended) try p.costly();
-        const rare = try rareFeatures(p.gpa, p.read("/proc/modules"), p.read("/proc/net/protocols"), p.read("/proc/filesystems"));
+        const rare = try rareFeatures(
+            p.gpa,
+            p.read("/proc/modules"),
+            p.read("/proc/net/protocols"),
+            p.read("/proc/filesystems"),
+        );
         try p.add(.{
             .id = "kernel-rare-features",
             .area = "kernel",
             .name = "No rarely used protocols or filesystems",
-            .why = "Kernel code for old protocols, filesystems and buses, where exploits keep being found, is not in the running kernel.",
-            .how = "none of " ++ comptime joined(&rare_features) ++ " in /proc/modules, /proc/net/protocols or /proc/filesystems",
+            .why = "Kernel code for old protocols, filesystems and buses, where exploits keep " ++
+                "being found, is not in the running kernel.",
+            .how = "none of " ++ comptime joined(&rare_features) ++
+                " in /proc/modules, /proc/net/protocols or /proc/filesystems",
             .result = if (rare.len == 0) .pass else .fail,
             .detail = rare,
         });
@@ -595,8 +821,12 @@ const Posture = struct {
         std.mem.sort([]const u8, names.items, {}, lessString);
         var found: std.ArrayList(u8) = .empty;
         for (names.items) |name| {
-            const text = trim(p.read(try std.fmt.allocPrint(p.gpa, "{s}/{s}", .{ dir, name })));
-            if (std.mem.startsWith(u8, text, "Vulnerable")) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", name });
+            const text = trim(p.read(try p.gpa.print("{s}/{s}", .{ dir, name })));
+            if (std.mem.startsWith(
+                u8,
+                text,
+                "Vulnerable",
+            )) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", name });
         }
         return found.items;
     }
@@ -608,7 +838,8 @@ const Posture = struct {
     fn legacy(p: *Posture) !void {
         const id = "kernel-legacy";
         const name = "No 32-bit or 16-bit system calls";
-        const why = "The separate system-call paths kept for old programs, a frequent source of kernel bugs, cannot be reached.";
+        const why = "The separate system-call paths kept for old programs, a frequent source of " ++
+            "kernel bugs, cannot be reached.";
         if (builtin.cpu.arch != .x86_64) return p.add(.{
             .id = id,
             .area = "kernel",
@@ -622,15 +853,25 @@ const Posture = struct {
         const ldt = readsLdt();
         var open: std.ArrayList(u8) = .empty;
         if (int80 orelse false) try open.appendSlice(p.gpa, "int 0x80 works");
-        if (ldt) try open.print(p.gpa, "{s}modify_ldt works", .{if (open.items.len > 0) ", " else ""});
+        if (ldt) try open.print(
+            p.gpa,
+            "{s}modify_ldt works",
+            .{if (open.items.len > 0) ", " else ""},
+        );
         try p.add(.{
             .id = id,
             .area = "kernel",
             .name = name,
             .why = why,
-            .how = "a 32-bit getpid through int 0x80 is refused, and so is modify_ldt(2) reading the LDT",
+            .how = "a 32-bit getpid through int 0x80 is refused, and so is modify_ldt(2) " ++
+                "reading the LDT",
             .result = if (open.items.len > 0) .fail else if (int80 == null) .skip else .pass,
-            .detail = if (open.items.len > 0) open.items else if (int80 == null) "could not fork to try int 0x80" else "",
+            .detail = if (open.items.len > 0)
+                open.items
+            else if (int80 == null)
+                "could not fork to try int 0x80"
+            else
+                "",
         });
     }
 
@@ -645,20 +886,25 @@ const Posture = struct {
         };
         const va = p.sysctl("kernel/randomize_va_space");
         const bits = p.sysctl("vm/mmap_rnd_bits");
-        const ok = std.mem.eql(u8, va, "2") and (std.fmt.parseInt(u8, bits, 10) catch 0) >= (full orelse 0);
+        const ok = std.mem.eql(u8, va, "2") and
+            (std.fmt.parseInt(u8, bits, 10) catch 0) >= (full orelse 0);
         try p.add(.{
             .id = "kernel-aslr",
             .area = "kernel",
             .name = "Full address randomization",
             .why = "An exploit cannot guess where a program's code, libraries and heap are.",
-            .how = "kernel.randomize_va_space is 2, and vm.mmap_rnd_bits is the kernel's most: 32 on x86_64, 33 on aarch64",
+            .how = "kernel.randomize_va_space is 2, and vm.mmap_rnd_bits is the kernel's most: " ++
+                "32 on x86_64, 33 on aarch64",
             .result = if (full == null or !p.root) .skip else if (ok) .pass else .fail,
             .detail = if (full == null)
                 "no known maximum on this architecture"
             else if (!p.root)
                 "vm.mmap_rnd_bits is readable by root alone"
             else
-                try std.fmt.allocPrint(p.gpa, "kernel.randomize_va_space is {s}, vm.mmap_rnd_bits is {s} of {d}", .{ va, bits, full.? }),
+                try p.gpa.print(
+                    "kernel.randomize_va_space is {s}, vm.mmap_rnd_bits is {s} of {d}",
+                    .{ va, bits, full.? },
+                ),
         });
     }
 
@@ -672,7 +918,11 @@ const Posture = struct {
             .name = "Processes hidden",
             .why = "A user sees only their own processes, not what else runs.",
             .how = "/proc is mounted hidepid=invisible",
-            .result = if (hasOption(mounts, "/proc", "hidepid=invisible") or hasOption(mounts, "/proc", "hidepid=2")) .pass else .fail,
+            .result = if (hasOption(mounts, "/proc", "hidepid=invisible") or
+                hasOption(mounts, "/proc", "hidepid=2"))
+                .pass
+            else
+                .fail,
         });
         const setid = try p.findSetid();
         try p.add(.{
@@ -702,13 +952,77 @@ const Posture = struct {
     // --- programs ----------------------------------------------------------
 
     fn programs(p: *Posture) !void {
-        try p.absent("programs-no-shell", "No shell", "An intruder finds no shell to run commands with.", &.{ "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "fish" });
-        try p.absent("programs-no-downloaders", "No download or network tools", "An intruder cannot fetch more tools or open a connection out.", &.{ "wget", "curl", "nc", "ncat", "netcat", "socat", "telnet", "tftp", "ftp", "ftpget", "ftpput", "scp", "sftp", "rsync" });
-        try p.absent("programs-no-interpreters", "No script interpreters", "There is nothing to run a script with.", &.{ "awk", "gawk", "mawk", "perl", "python", "python3", "ruby", "node", "lua", "luajit", "php", "tclsh", "expect" });
-        try p.absent("programs-no-compilers", "No compilers", "Code cannot be built on the machine.", &.{ "cc", "gcc", "clang", "tcc", "as", "ld", "go", "rustc", "zig" });
-        try p.absent("programs-no-module-tools", "No kernel module tools", "Nothing on the system can load, unload or list kernel modules.", &.{ "insmod", "modprobe", "rmmod", "lsmod", "kmod", "depmod" });
-        try p.absent("programs-no-network-tools", "No network configuration tools", "An intruder cannot readdress the machine or change its routes with the usual tools.", &.{ "ifconfig", "ip", "route", "iptables", "nft", "tc", "ethtool" });
-        try p.absent("programs-no-debuggers", "No debuggers", "Nothing to attach to a process or trace its calls.", &.{ "gdb", "lldb", "strace", "ltrace" });
+        try p.absent(
+            "programs-no-shell",
+            "No shell",
+            "An intruder finds no shell to run commands with.",
+            &.{ "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "fish" },
+        );
+        try p.absent(
+            "programs-no-downloaders",
+            "No download or network tools",
+            "An intruder cannot fetch more tools or open a connection out.",
+            &.{
+                "wget",
+                "curl",
+                "nc",
+                "ncat",
+                "netcat",
+                "socat",
+                "telnet",
+                "tftp",
+                "ftp",
+                "ftpget",
+                "ftpput",
+                "scp",
+                "sftp",
+                "rsync",
+            },
+        );
+        try p.absent(
+            "programs-no-interpreters",
+            "No script interpreters",
+            "There is nothing to run a script with.",
+            &.{
+                "awk",
+                "gawk",
+                "mawk",
+                "perl",
+                "python",
+                "python3",
+                "ruby",
+                "node",
+                "lua",
+                "luajit",
+                "php",
+                "tclsh",
+                "expect",
+            },
+        );
+        try p.absent(
+            "programs-no-compilers",
+            "No compilers",
+            "Code cannot be built on the machine.",
+            &.{ "cc", "gcc", "clang", "tcc", "as", "ld", "go", "rustc", "zig" },
+        );
+        try p.absent(
+            "programs-no-module-tools",
+            "No kernel module tools",
+            "Nothing on the system can load, unload or list kernel modules.",
+            &.{ "insmod", "modprobe", "rmmod", "lsmod", "kmod", "depmod" },
+        );
+        try p.absent(
+            "programs-no-network-tools",
+            "No network configuration tools",
+            "An intruder cannot readdress the machine or change its routes with the usual tools.",
+            &.{ "ifconfig", "ip", "route", "iptables", "nft", "tc", "ethtool" },
+        );
+        try p.absent(
+            "programs-no-debuggers",
+            "No debuggers",
+            "Nothing to attach to a process or trace its calls.",
+            &.{ "gdb", "lldb", "strace", "ltrace" },
+        );
 
         // werewolf's services: each started straight from its program.
         var d = Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true }) catch return;
@@ -720,11 +1034,15 @@ const Posture = struct {
         while (it.next(p.io) catch null) |e| try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
         std.mem.sort([]const u8, names.items, {}, lessString);
         for (names.items) |name| {
-            const path = try std.fmt.allocPrint(p.gpa, "/etc/sv/{s}/run", .{name});
+            const path = try p.gpa.print("/etc/sv/{s}/run", .{name});
             if (!exists(p.io, path)) continue;
             if (p.isElf(path)) {
                 programs_ += 1;
-            } else try scripts.print(p.gpa, "{s}{s}", .{ if (scripts.items.len > 0) ", " else "", name });
+            } else try scripts.print(
+                p.gpa,
+                "{s}{s}",
+                .{ if (scripts.items.len > 0) ", " else "", name },
+            );
         }
         try p.add(.{
             .id = "programs-services-no-shell",
@@ -733,27 +1051,51 @@ const Posture = struct {
             .why = "Every service starts straight from its program, with no script between.",
             .how = "each /etc/sv/*/run leads to an ELF program, not a script",
             .result = if (scripts.items.len == 0) .pass else .fail,
-            .detail = if (scripts.items.len > 0) try std.fmt.allocPrint(p.gpa, "{d} without; scripts: {s}", .{ programs_, scripts.items }) else "",
+            .detail = if (scripts.items.len > 0)
+                try p.gpa.print("{d} without; scripts: {s}", .{ programs_, scripts.items })
+            else
+                "",
         });
     }
 
     /// None of names is on the system's PATH directories.
-    fn absent(p: *Posture, id: []const u8, name: []const u8, why: []const u8, names: []const []const u8) !void {
+    fn absent(
+        p: *Posture,
+        id: []const u8,
+        name: []const u8,
+        why: []const u8,
+        names: []const []const u8,
+    ) !void {
         var found: std.ArrayList(u8) = .empty;
         var how: std.ArrayList(u8) = .empty;
         try how.appendSlice(p.gpa, "none of ");
         for (names, 0..) |n, i| {
             if (i > 0) try how.appendSlice(p.gpa, ", ");
             try how.appendSlice(p.gpa, n);
-            for ([_][]const u8{ "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin" }) |dir| {
-                const path = try std.fmt.allocPrint(p.gpa, "{s}/{s}", .{ dir, n });
+            for ([_][]const u8{
+                "/bin",
+                "/sbin",
+                "/usr/bin",
+                "/usr/sbin",
+                "/usr/local/bin",
+                "/usr/local/sbin",
+            }) |dir| {
+                const path = try p.gpa.print("{s}/{s}", .{ dir, n });
                 if (!exists(p.io, path)) continue;
                 try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", path });
                 break;
             }
         }
         try how.appendSlice(p.gpa, " in /bin, /sbin, /usr/bin, /usr/sbin or /usr/local");
-        try p.add(.{ .id = id, .area = "programs", .name = name, .why = why, .how = how.items, .result = if (found.items.len == 0) .pass else .fail, .detail = found.items });
+        try p.add(.{
+            .id = id,
+            .area = "programs",
+            .name = name,
+            .why = why,
+            .how = how.items,
+            .result = if (found.items.len == 0) .pass else .fail,
+            .detail = found.items,
+        });
     }
 
     // --- files -------------------------------------------------------------
@@ -803,19 +1145,37 @@ const Posture = struct {
         // The proof: a program put in each place does not start.
         var ran: std.ArrayList(u8) = .empty;
         var tried: std.ArrayList(u8) = .empty;
-        for ([_][]const u8{ "/tmp", "/var/tmp", "/run", "/dev/shm", "/dev/mqueue", "/data" }) |dir| {
+        for ([_][]const u8{
+            "/tmp",
+            "/var/tmp",
+            "/run",
+            "/dev/shm",
+            "/dev/mqueue",
+            "/data",
+        }) |dir| {
             if (!exists(p.io, dir)) continue;
             try tried.print(p.gpa, "{s}{s}", .{ if (tried.items.len > 0) ", " else "", dir });
-            if (p.runsFrom(dir)) try ran.print(p.gpa, "{s}{s}", .{ if (ran.items.len > 0) ", " else "", dir });
+            if (p.runsFrom(dir)) try ran.print(
+                p.gpa,
+                "{s}{s}",
+                .{ if (ran.items.len > 0) ", " else "", dir },
+            );
         }
         try p.add(.{
             .id = "files-exec-refused",
             .area = "files",
             .name = "A program written there does not run",
             .why = "Malware dropped into a temporary or data directory cannot be started.",
-            .how = try std.fmt.allocPrint(p.gpa, "a copy of this program, put in each of {s}, fails to start (or cannot be put there)", .{tried.items}),
+            .how = try p.gpa.print(
+                "a copy of this program, put in each of {s}, fails to start (or cannot be put " ++
+                    "there)",
+                .{tried.items},
+            ),
             .result = if (ran.items.len == 0) .pass else .fail,
-            .detail = if (ran.items.len > 0) try std.fmt.allocPrint(p.gpa, "ran from {s}", .{ran.items}) else "",
+            .detail = if (ran.items.len > 0)
+                try p.gpa.print("ran from {s}", .{ran.items})
+            else
+                "",
         });
 
         const sealed = std.mem.eql(u8, p.sysctl("vm/memfd_noexec"), "2");
@@ -824,21 +1184,41 @@ const Posture = struct {
             .id = "files-memfd-exec",
             .area = "files",
             .name = "No programs from memory",
-            .why = "Code cannot run from an anonymous memory file, the usual way to run malware without writing it to disk.",
+            .why = "Code cannot run from an anonymous memory file, the usual way to run malware " ++
+                "without writing it to disk.",
             .how = "vm.memfd_noexec is 2, and a copy of this program in a memfd fails to start",
             .result = if (sealed and !memfd_ran) .pass else .fail,
-            .detail = if (memfd_ran) "a memfd program ran" else if (!sealed) try std.fmt.allocPrint(p.gpa, "vm.memfd_noexec is {s}", .{p.sysctl("vm/memfd_noexec")}) else "",
+            .detail = if (memfd_ran)
+                "a memfd program ran"
+            else if (!sealed)
+                try p.gpa.print("vm.memfd_noexec is {s}", .{p.sysctl("vm/memfd_noexec")})
+            else
+                "",
         });
-        try p.sysctls("files-links", "files", "Link and FIFO tricks blocked", "Symlinks, hard links and FIFOs in shared directories cannot be turned against another user.", &.{
-            .{ "fs/protected_symlinks", "1" }, .{ "fs/protected_hardlinks", "1" }, .{ "fs/protected_fifos", "2" }, .{ "fs/protected_regular", "2" },
+        try p.sysctls("files-link" ++
+            "s", "files", "Link and FIFO tricks " ++
+            "blocked", "Symlinks, hard links and FIFOs in shared directories cannot be turned " ++
+            "against another user.", &.{
+            .{
+                "fs/protected_symlinks",
+                "1",
+            },
+            .{ "fs/protected_hardlinks", "1" },
+            .{ "fs/protected_fifos", "2" },
+            .{ "fs/protected_regular", "2" },
         });
         const open = try p.worldWritable();
         try p.add(.{
             .id = "files-world-writable",
             .area = "files",
             .name = "Shared places are sticky",
-            .why = "Where everyone may write, no one can remove or replace another's files, and outside the temporary directories there is no file anyone may change.",
-            .how = try std.fmt.allocPrint(p.gpa, "in {s}, every directory anyone may write is sticky, and outside /tmp, /var/tmp and /dev/shm no file is writable by anyone", .{open.tried}),
+            .why = "Where everyone may write, no one can remove or replace another's files, and " ++
+                "outside the temporary directories there is no file anyone may change.",
+            .how = try p.gpa.print(
+                "in {s}, every directory anyone may write is sticky, and outside /tmp, /var/tmp " ++
+                    "and /dev/shm no file is writable by anyone",
+                .{open.tried},
+            ),
             .result = if (open.found.len == 0) .pass else .fail,
             .detail = open.found,
         });
@@ -848,7 +1228,9 @@ const Posture = struct {
             .area = "files",
             .name = "Account files root's alone",
             .why = "No one but root can add an account, change a password or read a password hash.",
-            .how = "/etc/passwd, group, shadow and gshadow, and the directories their links lead to, are root's and writable by no one else, and shadow and gshadow are not readable by everyone",
+            .how = "/etc/passwd, group, shadow and gshadow, and the directories their links " ++
+                "lead to, are root's and writable by no one else, and shadow and gshadow are " ++
+                "not readable by everyone",
             .result = if (loose.len == 0) .pass else .fail,
             .detail = loose,
         });
@@ -859,10 +1241,17 @@ const Posture = struct {
             .id = "files-accounts",
             .area = "files",
             .name = "One root, and no empty passwords",
-            .why = "No account but root has root's powers, and none can be logged into without a password or key.",
-            .how = "only root has uid 0 in /etc/passwd, and no account in /etc/shadow has an empty password",
+            .why = "No account but root has root's powers, and none can be logged into without " ++
+                "a password or key.",
+            .how = "only root has uid 0 in /etc/passwd, and no account in /etc/shadow has an " ++
+                "empty password",
             .result = if (accounts.len > 0) .fail else if (unread) .skip else .pass,
-            .detail = if (accounts.len > 0) accounts else if (unread) "cannot read /etc/shadow" else "",
+            .detail = if (accounts.len > 0)
+                accounts
+            else if (unread)
+                "cannot read /etc/shadow"
+            else
+                "",
         });
         if (mountType(mounts, "/victim") != null) try p.add(.{
             .id = "files-victim-readonly",
@@ -877,9 +1266,15 @@ const Posture = struct {
     /// Whether a copy of this program, put in dir, starts. A place it
     /// cannot be put is one it cannot start from.
     fn runsFrom(p: *Posture, dir: []const u8) bool {
-        const path = std.fmt.allocPrint(p.gpa, "{s}/.posture-exec-check", .{dir}) catch return true;
+        const path = p.gpa.print("{s}/.posture-exec-check", .{dir}) catch return true;
         defer Dir.cwd().deleteFile(p.io, path) catch {};
-        Dir.cwd().copyFile("/proc/self/exe", Dir.cwd(), path, p.io, .{ .permissions = .fromMode(0o755) }) catch return false;
+        Dir.cwd().copyFile(
+            "/proc/self/exe",
+            Dir.cwd(),
+            path,
+            p.io,
+            .{ .permissions = .fromMode(0o755) },
+        ) catch return false;
         return p.starts(path);
     }
 
@@ -890,7 +1285,12 @@ const Posture = struct {
         if (linux.errno(rc) != .SUCCESS) return false;
         const fd: i32 = @intCast(rc);
         defer _ = linux.close(fd);
-        const self = Dir.cwd().readFileAlloc(p.io, "/proc/self/exe", p.gpa, .limited(64 << 20)) catch return false;
+        const self = Dir.cwd().readFileAlloc(
+            p.io,
+            "/proc/self/exe",
+            p.gpa,
+            .limited(64 << 20),
+        ) catch return false;
         var off: usize = 0;
         while (off < self.len) {
             const n = linux.write(fd, self[off..].ptr, self.len - off);
@@ -898,13 +1298,24 @@ const Posture = struct {
             off += n;
         }
         // The child reaches the memfd through this process's fd table.
-        const path = std.fmt.allocPrint(p.gpa, "/proc/{d}/fd/{d}", .{ linux.getpid(), fd }) catch return false;
+        const path = p.gpa.print(
+            "/proc/{d}/fd/{d}",
+            .{ linux.getpid(), fd },
+        ) catch return false;
         return p.starts(path);
     }
 
     /// Whether path starts, run with --noop, and exits 0.
     fn starts(p: *Posture, path: []const u8) bool {
-        var child = std.process.spawn(p.io, .{ .argv = &.{ path, "--noop" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore }) catch return false;
+        var child = std.process.spawn(
+            p.io,
+            .{
+                .argv = &.{ path, "--noop" },
+                .stdin = .ignore,
+                .stdout = .ignore,
+                .stderr = .ignore,
+            },
+        ) catch return false;
         const term = child.wait(p.io) catch return false;
         return switch (term) {
             .exited => |code| code == 0,
@@ -926,25 +1337,38 @@ const Posture = struct {
         const comm = trim(p.read("/proc/self/comm"));
 
         // Yama names both sides by their command lines.
-        const mem = p.refusedAndLogged("/proc/1/mem", &.{ "\"[1] was attempted by \"", try std.fmt.allocPrint(p.gpa, "\"[{d}]", .{pid}) });
+        const mem = p.refusedAndLogged(
+            "/proc/1/mem",
+            &.{ "\"[1] was attempted by \"", try p.gpa.print("\"[{d}]", .{pid}) },
+        );
         try p.add(.{
             .id = "processes-mem-attack",
             .area = "processes",
             .name = "Another process's memory refused",
-            .why = "Not even root can read or change a running program's memory, and the kernel logs every attempt.",
+            .why = "Not even root can read or change a running program's memory, and the kernel " ++
+                "logs every attempt.",
             .how = "opening /proc/1/mem fails, and the kernel logs Yama's refusal",
             .result = if (mem == .logged) .pass else .fail,
             .detail = mem.detail(),
         });
-        const dev = p.refusedAndLogged("/dev/mem", &.{try std.fmt.allocPrint(p.gpa, "Lockdown: {s}: /dev/mem,kmem,port is restricted", .{comm})});
+        // Without CAP_SYS_RAWIO, which werewolf's seal takes from every
+        // process, the kernel refuses /dev/mem before lockdown is asked, and
+        // so before it would log anything.
+        const dev = p.refusedAndLogged(
+            "/dev/mem",
+            &.{try p.gpa.print("Lockdown: {s}: /dev/mem,kmem,port is restricted", .{comm})},
+        );
+        const rawio = capBit(p.read("/proc/self/status"), "CapEff", cap_sys_rawio) orelse true;
         try p.add(.{
             .id = "kernel-mem-attack",
             .area = "kernel",
             .name = "Physical memory refused",
-            .why = "Not even root can read or write the machine's memory directly, and the kernel logs every attempt.",
-            .how = "opening /dev/mem fails, and the kernel logs lockdown's refusal",
-            .result = if (dev == .logged) .pass else .fail,
-            .detail = dev.detail(),
+            .why = "Not even root can read or write the machine's memory directly, and the " ++
+                "kernel logs every attempt or refuses the capability it takes.",
+            .how = "opening /dev/mem fails, and the kernel logs lockdown's refusal, or this " ++
+                "process lacks CAP_SYS_RAWIO",
+            .result = if (dev == .logged or (dev == .silent and !rawio)) .pass else .fail,
+            .detail = if (dev == .silent and !rawio) "refused: no CAP_SYS_RAWIO" else dev.detail(),
         });
 
         defer cleanAttacks();
@@ -957,7 +1381,10 @@ const Posture = struct {
             .why = "A user, or an intruder running as one, cannot see what else runs.",
             .how = "as nobody, /proc/1 does not exist",
             .result = if (sees) |s| (if (s) .fail else .pass) else .skip,
-            .detail = if (sees) |s| (if (s) "nobody sees /proc/1" else "") else "could not become nobody",
+            .detail = if (sees) |s| (if (s)
+                "nobody sees /proc/1"
+            else
+                "") else "could not become nobody",
         });
         const writes = asNobody(writesRun);
         try p.add(.{
@@ -967,7 +1394,10 @@ const Posture = struct {
             .why = "Another user cannot plant files where the services keep their state.",
             .how = "as nobody, creating a file in /run fails",
             .result = if (writes) |w| (if (w) .fail else .pass) else .skip,
-            .detail = if (writes) |w| (if (w) "nobody wrote to /run" else "") else "could not become nobody",
+            .detail = if (writes) |w| (if (w)
+                "nobody wrote to /run"
+            else
+                "") else "could not become nobody",
         });
 
         // Each trick needs one side planted by nobody and the other tried
@@ -975,28 +1405,55 @@ const Posture = struct {
         var got: std.ArrayList(u8) = .empty;
         var missed = false;
         if (asNobody(plantsLink)) |planted| {
-            if (planted and opensForWrite(attack_link, false)) try got.appendSlice(p.gpa, "root wrote through nobody's symlink");
+            if (planted and
+                opensForWrite(
+                    attack_link,
+                    false,
+                )) try got.appendSlice(p.gpa, "root wrote through nobody's symlink");
             missed = missed or !planted;
         } else missed = true;
-        const secret = linux.open(attack_secret, .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true }, 0o600);
+        const secret = linux.open(
+            attack_secret,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
+            0o600,
+        );
         if (linux.errno(secret) == .SUCCESS) {
             _ = linux.close(@intCast(secret));
             if (asNobody(linksSecret)) |linked| {
-                if (linked) try got.print(p.gpa, "{s}nobody hard-linked root's file", .{if (got.items.len > 0) ", " else ""});
+                if (linked) try got.print(
+                    p.gpa,
+                    "{s}nobody hard-linked root's file",
+                    .{if (got.items.len > 0) ", " else ""},
+                );
             } else missed = true;
         } else missed = true;
         if (asNobody(plantsFile)) |planted| {
-            if (planted and opensForWrite(attack_file, true)) try got.print(p.gpa, "{s}root opened nobody's file with O_CREAT", .{if (got.items.len > 0) ", " else ""});
+            if (planted and
+                opensForWrite(
+                    attack_file,
+                    true,
+                )) try got.print(
+                p.gpa,
+                "{s}root opened nobody's file with O_CREAT",
+                .{if (got.items.len > 0) ", " else ""},
+            );
             missed = missed or !planted;
         } else missed = true;
         try p.add(.{
             .id = "files-links-attack",
             .area = "files",
             .name = "Link and file tricks refused",
-            .why = "A file planted in a shared directory cannot make root write where it did not mean to, or reach root's files.",
-            .how = "in /tmp, root writing through nobody's symlink, nobody hard-linking root's 0600 file, and root opening nobody's file with O_CREAT each fail",
+            .why = "A file planted in a shared directory cannot make root write where it did " ++
+                "not mean to, or reach root's files.",
+            .how = "in /tmp, root writing through nobody's symlink, nobody hard-linking root's " ++
+                "0600 file, and root opening nobody's file with O_CREAT each fail",
             .result = if (got.items.len > 0) .fail else if (missed) .skip else .pass,
-            .detail = if (got.items.len > 0) got.items else if (missed) "could not set every trick up" else "",
+            .detail = if (got.items.len > 0)
+                got.items
+            else if (missed)
+                "could not set every trick up"
+            else
+                "",
         });
     }
 
@@ -1017,7 +1474,11 @@ const Posture = struct {
     /// Whether opening path read-only is refused, with a line in the
     /// kernel's log, written after this open, that has every one of needles.
     fn refusedAndLogged(p: *Posture, path: [:0]const u8, needles: []const []const u8) Refusal {
-        const kmsg_rc = linux.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        const kmsg_rc = linux.open(
+            "/dev/kmsg",
+            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true },
+            0,
+        );
         const kmsg: ?i32 = if (linux.errno(kmsg_rc) == .SUCCESS) @intCast(kmsg_rc) else null;
         defer if (kmsg) |fd| {
             _ = linux.close(fd);
@@ -1050,34 +1511,79 @@ const Posture = struct {
 
     fn network(p: *Posture) !void {
         var ports: std.ArrayList(u16) = .empty;
-        for ([_][]const u8{ "/proc/net/tcp", "/proc/net/tcp6" }) |f| try listenPorts(p.gpa, p.read(f), &ports);
+        for ([_][]const u8{
+            "/proc/net/tcp",
+            "/proc/net/tcp6",
+        }) |f| try listenPorts(p.gpa, p.read(f), &ports);
         var list: std.ArrayList(u8) = .empty;
-        for (ports.items, 0..) |port, i| try list.print(p.gpa, "{s}{d}", .{ if (i > 0) ", " else "", port });
+        for (ports.items, 0..) |port, i| try list.print(
+            p.gpa,
+            "{s}{d}",
+            .{ if (i > 0) ", " else "", port },
+        );
         // The machine's network policy (fence), or the older list of ports.
-        const declared: ?[]const u8 = if (Dir.cwd().readFileAlloc(p.io, "/usr/share/werewolf/net", p.gpa, .limited(64 << 10))) |net|
+        const declared: ?[]const u8 = if (Dir.cwd().readFileAlloc(
+            p.io,
+            "/usr/share/werewolf/net",
+            p.gpa,
+            .limited(64 << 10),
+        )) |net|
             try policyPorts(p.gpa, net)
         else |_|
-            Dir.cwd().readFileAlloc(p.io, "/etc/werewolf/listen", p.gpa, .limited(64 << 10)) catch null;
+            Dir.cwd().readFileAlloc(
+                p.io,
+                "/etc/werewolf/listen",
+                p.gpa,
+                .limited(64 << 10),
+            ) catch null;
         var undeclared: std.ArrayList(u8) = .empty;
         if (declared) |text| for (ports.items) |port| {
-            if (!isDeclared(text, port)) try undeclared.print(p.gpa, "{s}{d}", .{ if (undeclared.items.len > 0) ", " else "", port });
+            if (!isDeclared(
+                text,
+                port,
+            )) try undeclared.print(
+                p.gpa,
+                "{s}{d}",
+                .{ if (undeclared.items.len > 0) ", " else "", port },
+            );
         };
         try p.add(.{
             .id = "network-ports",
             .area = "network",
             .name = "Only declared ports open",
             .why = "Nothing listens on the network that the machine is not meant to offer.",
-            .how = "listening TCP ports (/proc/net/tcp, tcp6) are those the machine's policy declares (/usr/share/werewolf/net)",
-            .result = if (declared == null) .skip else if (undeclared.items.len == 0) .pass else .fail,
-            .detail = if (undeclared.items.len > 0)
-                try std.fmt.allocPrint(p.gpa, "undeclared: {s}", .{undeclared.items})
+            .how = "listening TCP ports (/proc/net/tcp, tcp6) are those the machine's policy " ++
+                "declares (/usr/share/werewolf/net)",
+            .result = if (declared == null)
+                .skip
+            else if (undeclared.items.len == 0)
+                .pass
             else
-                try std.fmt.allocPrint(p.gpa, "listening: {s}", .{if (list.items.len > 0) list.items else "none"}),
+                .fail,
+            .detail = if (undeclared.items.len > 0)
+                try p.gpa.print("undeclared: {s}", .{undeclared.items})
+            else
+                try p.gpa.print(
+                    "listening: {s}",
+                    .{if (list.items.len > 0) list.items else "none"},
+                ),
         });
         try p.fence();
-        try p.absentNamed("network-no-login", "network", "No remote login", "There is no ssh or telnet server to log in through.", &.{ "sshd", "dropbear", "telnetd", "in.telnetd" });
+        try p.absentNamed(
+            "network-no-login",
+            "network",
+            "No remote login",
+            "There is no ssh or telnet server to log in through.",
+            &.{ "sshd", "dropbear", "telnetd", "in.telnetd" },
+        );
         try p.ssh();
-        try p.sysctls("network-no-forwarding", "network", "No routing", "The machine forwards no traffic for others.", &.{ .{ "net/ipv4/ip_forward", "0" }, .{ "net/ipv6/conf/all/forwarding", "0" } });
+        try p.sysctls(
+            "network-no-forwarding",
+            "network",
+            "No routing",
+            "The machine forwards no traffic for others.",
+            &.{ .{ "net/ipv4/ip_forward", "0" }, .{ "net/ipv6/conf/all/forwarding", "0" } },
+        );
         // A host takes and sends redirects on an interface if all or the
         // interface says so, so each interface must say no: all and default
         // do not reach an interface that was there before they were set.
@@ -1085,40 +1591,108 @@ const Posture = struct {
         // settings govern nothing.
         const v6_on = !p.ipv6Off();
         const redirects = [_][2][]const u8{
-            .{ "net/ipv4/conf/*/accept_redirects", "0" }, .{ "net/ipv4/conf/*/secure_redirects", "0" }, .{ "net/ipv4/conf/*/send_redirects", "0" }, .{ "net/ipv6/conf/*/accept_redirects", "0" },
+            .{
+                "net/ipv4/conf/*/accept_redirects",
+                "0",
+            },
+            .{ "net/ipv4/conf/*/secure_redirects", "0" },
+            .{ "net/ipv4/conf/*/send_redirects", "0" },
+            .{ "net/ipv6/conf/*/accept_redirects", "0" },
         };
-        try p.sysctls("network-redirects", "network", "ICMP redirects ignored", "Nobody on the network can reroute the machine's traffic, and it reroutes nobody's.", if (v6_on) &redirects else redirects[0..3]);
+        try p.sysctls(
+            "network-redirects",
+            "network",
+            "ICMP redirects ignored",
+            "Nobody on the network can reroute the machine's traffic, and it reroutes nobody's.",
+            if (v6_on) &redirects else redirects[0..3],
+        );
         // IPv4 takes a source route only if all and the interface both allow it.
-        const source_route = [_][2][]const u8{ .{ "net/ipv4/conf/all/accept_source_route", "0" }, .{ "net/ipv6/conf/*/accept_source_route", "0" } };
-        try p.sysctls("network-source-route", "network", "Source routing refused", "Packets cannot choose their own way through the machine.", if (v6_on) &source_route else source_route[0..1]);
+        const source_route = [_][2][]const u8{
+            .{ "net/ipv4/conf/all/accept_source_route", "0" },
+            .{ "net/ipv6/conf/*/accept_source_route", "0" },
+        };
+        try p.sysctls(
+            "network-source-route",
+            "network",
+            "Source routing refused",
+            "Packets cannot choose their own way through the machine.",
+            if (v6_on) &source_route else source_route[0..1],
+        );
         // Router advertisements stay on (IPv6 takes its route from them), but
         // limited to what they must give.
-        if (v6_on) try p.sysctls("network-ipv6-ra-limits", "network", "Router advertisements limited", "A rogue router on the same network cannot rank itself above the real one, add a route to steal one destination's traffic, or flood the machine with addresses.", &.{
-            .{ "net/ipv6/conf/*/accept_ra_rtr_pref", "0" }, .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" }, .{ "net/ipv6/conf/*/max_addresses", "4" },
+        if (v6_on) try p.sysctls("network-ipv6-ra-limit" ++
+            "s", "network", "Router advertisements " ++
+            "limited", "A rogue router on the same network cannot rank itself above the real " ++
+            "one, add a route to steal one destination's traffic, or flood the machine with " ++
+            "addresses.", &.{
+            .{
+                "net/ipv6/conf/*/accept_ra_rtr_pref",
+                "0",
+            },
+            .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" },
+            .{ "net/ipv6/conf/*/max_addresses", "4" },
         });
-        try p.sysctls("network-martians", "network", "Impossible packets logged", "Packets from addresses that cannot be, a sign of spoofing, are logged.", &.{.{ "net/ipv4/conf/all/log_martians", "1" }});
+        try p.sysctls(
+            "network-martians",
+            "network",
+            "Impossible packets logged",
+            "Packets from addresses that cannot be, a sign of spoofing, are logged.",
+            &.{.{ "net/ipv4/conf/all/log_martians", "1" }},
+        );
         // --extended only, as werewolf fails them by choice (docs/security.md,
         // "Not done, by choice"): strict reverse-path filtering waits until it
         // is shown to work with fence, and IPv6 takes its route from router
         // advertisements.
         if (p.extended) {
             // The kernel takes the stricter of all and the interface for both.
-            try p.sysctls("network-rp-filter", "network", "Spoofed sources dropped", "A packet claiming an address the machine would not reply to by that way is dropped.", &.{.{ "net/ipv4/conf/all/rp_filter", "1" }});
+            try p.sysctls(
+                "network-rp-filter",
+                "network",
+                "Spoofed sources dropped",
+                "A packet claiming an address the machine would not reply to by that way is " ++
+                    "dropped.",
+                &.{.{ "net/ipv4/conf/all/rp_filter", "1" }},
+            );
             if (v6_on) {
-                try p.sysctls("network-ipv6-ra", "network", "Router advertisements ignored", "Nobody on the network can give the machine an IPv6 address or route by advertising one.", &.{ .{ "net/ipv6/conf/*/accept_ra", "0" }, .{ "net/ipv6/conf/*/autoconf", "0" } });
+                try p.sysctls(
+                    "network-ipv6-ra",
+                    "network",
+                    "Router advertisements ignored",
+                    "Nobody on the network can give the machine an IPv6 address or route by " ++
+                        "advertising one.",
+                    &.{
+                        .{ "net/ipv6/conf/*/accept_ra", "0" },
+                        .{ "net/ipv6/conf/*/autoconf", "0" },
+                    },
+                );
             } else try p.add(.{
                 .id = "network-ipv6-ra",
                 .area = "network",
                 .name = "Router advertisements ignored",
-                .why = "Nobody on the network can give the machine an IPv6 address or route by advertising one.",
+                .why = "Nobody on the network can give the machine an IPv6 address or route by " ++
+                    "advertising one.",
                 .how = "IPv6 is off, or net.ipv6.conf.*.accept_ra and autoconf are 0",
                 .result = .pass,
                 .detail = "IPv6 off",
             });
         }
-        try p.sysctls("network-syncookies", "network", "SYN flood protection", "A flood of half-open connections cannot exhaust it.", &.{.{ "net/ipv4/tcp_syncookies", "1" }});
-        try p.sysctls("network-stray-packets", "network", "Stray packets ignored", "Pings to a broadcast address and bogus ICMP errors get no answer, and a forged reset cannot cut short a closing connection.", &.{
-            .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" }, .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" }, .{ "net/ipv4/tcp_rfc1337", "1" },
+        try p.sysctls(
+            "network-syncookies",
+            "network",
+            "SYN flood protection",
+            "A flood of half-open connections cannot exhaust it.",
+            &.{.{ "net/ipv4/tcp_syncookies", "1" }},
+        );
+        try p.sysctls("network-stray-packet" ++
+            "s", "network", "Stray packets " ++
+            "ignored", "Pings to a broadcast address and bogus ICMP errors get no answer, and a " ++
+            "forged reset cannot cut short a closing connection.", &.{
+            .{
+                "net/ipv4/icmp_echo_ignore_broadcasts",
+                "1",
+            },
+            .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" },
+            .{ "net/ipv4/tcp_rfc1337", "1" },
         });
     }
 
@@ -1139,21 +1713,51 @@ const Posture = struct {
         const cmdline = p.read("/proc/cmdline");
         var missing: std.ArrayList(u8) = .empty;
         // Merged caches show in sysfs as links to the cache they share.
-        const merged = if (p.slabAliases()) |n| n > 0 else (try unsetArgs(p.gpa, cmdline, &.{"slab_nomerge"})).len > 0;
+        const merged = if (p.slabAliases()) |n|
+            n > 0
+        else
+            (try unsetArgs(p.gpa, cmdline, &.{"slab_nomerge"})).len > 0;
         if (merged) try missing.print(p.gpa, "kernel caches merged", .{});
-        const shuffle = std.mem.trim(u8, p.read("/sys/module/page_alloc/parameters/shuffle"), " \n");
-        const shuffled = if (shuffle.len > 0) std.mem.eql(u8, shuffle, "Y") else (try unsetArgs(p.gpa, cmdline, &.{"page_alloc.shuffle"})).len == 0;
-        if (!shuffled) try missing.print(p.gpa, "{s}pages not shuffled", .{if (missing.items.len > 0) ", " else ""});
-        const alloc = heapInit(p.memAutoInit(), "heap alloc") orelse if ((try unsetArgs(p.gpa, cmdline, &.{"init_on_alloc"})).len == 0) true else null;
-        if (alloc == false) try missing.print(p.gpa, "{s}memory not cleared as it is handed out", .{if (missing.items.len > 0) ", " else ""});
+        const shuffle = std.mem.trim(
+            u8,
+            p.read("/sys/module/page_alloc/parameters/shuffle"),
+            " \n",
+        );
+        const shuffled = if (shuffle.len > 0)
+            std.mem.eql(u8, shuffle, "Y")
+        else
+            (try unsetArgs(p.gpa, cmdline, &.{"page_alloc.shuffle"})).len == 0;
+        if (!shuffled) try missing.print(
+            p.gpa,
+            "{s}pages not shuffled",
+            .{if (missing.items.len > 0) ", " else ""},
+        );
+        const alloc = heapInit(
+            p.memAutoInit(),
+            "heap alloc",
+        ) orelse if ((try unsetArgs(p.gpa, cmdline, &.{"init_on_alloc"})).len == 0) true else null;
+        if (alloc == false) try missing.print(
+            p.gpa,
+            "{s}memory not cleared as it is handed out",
+            .{if (missing.items.len > 0) ", " else ""},
+        );
         try p.add(.{
             .id = "kernel-memory-hardening",
             .area = "kernel",
             .name = "Kernel memory hardened",
-            .why = "Memory is cleared as it is handed out, kernel objects of one kind never share a cache with another's, and pages are handed out in no predictable order, so leaked data and memory corruption are harder to use.",
-            .how = "no merged caches in /sys/kernel/slab (slab_nomerge), page_alloc's shuffle parameter is Y, and the kernel's boot line says heap alloc:on (or init_on_alloc is on the command line)",
+            .why = "Memory is cleared as it is handed out, kernel objects of one kind never " ++
+                "share a cache with another's, and pages are handed out in no predictable " ++
+                "order, so leaked data and memory corruption are harder to use.",
+            .how = "no merged caches in /sys/kernel/slab (slab_nomerge), page_alloc's shuffle " ++
+                "parameter is Y, and the kernel's boot line says heap alloc:on (or " ++
+                "init_on_alloc is on the command line)",
             .result = if (missing.items.len > 0) .fail else if (alloc == null) .skip else .pass,
-            .detail = if (missing.items.len > 0) missing.items else if (alloc == null) "the kernel's log no longer holds its mem auto-init line" else "",
+            .detail = if (missing.items.len > 0)
+                missing.items
+            else if (alloc == null)
+                "the kernel's log no longer holds its mem auto-init line"
+            else
+                "",
         });
     }
 
@@ -1172,7 +1776,11 @@ const Posture = struct {
 
     /// The kernel's "mem auto-init:" line, from the start of its log, or "".
     fn memAutoInit(p: *Posture) []const u8 {
-        const rc = linux.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
+        const rc = linux.open(
+            "/dev/kmsg",
+            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true },
+            0,
+        );
         if (linux.errno(rc) != .SUCCESS) return "";
         const fd: i32 = @intCast(rc);
         defer _ = linux.close(fd);
@@ -1182,7 +1790,10 @@ const Posture = struct {
             switch (linux.errno(n)) {
                 .SUCCESS => if (std.mem.indexOf(u8, record[0..n], "mem auto-init:")) |i| {
                     const line = record[i..n];
-                    return p.gpa.dupe(u8, line[0 .. std.mem.indexOfScalar(u8, line, '\n') orelse line.len]) catch "";
+                    return p.gpa.dupe(
+                        u8,
+                        line[0 .. std.mem.findScalar(u8, line, '\n') orelse line.len],
+                    ) catch "";
                 },
                 .PIPE => {}, // records lost to newer ones: read on
                 else => return "",
@@ -1193,13 +1804,18 @@ const Posture = struct {
     /// Kernel checks werewolf fails by choice, for --extended: clearing
     /// freed memory and forced CPU mitigations cost every workload.
     fn costly(p: *Posture) !void {
-        const free_on = heapInit(p.memAutoInit(), "heap free") orelse ((try unsetArgs(p.gpa, p.read("/proc/cmdline"), &.{"init_on_free"})).len == 0);
+        const free_on = heapInit(
+            p.memAutoInit(),
+            "heap free",
+        ) orelse ((try unsetArgs(p.gpa, p.read("/proc/cmdline"), &.{"init_on_free"})).len == 0);
         try p.add(.{
             .id = "kernel-memory-wipe",
             .area = "kernel",
             .name = "Freed memory wiped",
-            .why = "Memory is cleared as it is freed, so what a program or the kernel held does not linger for a later bug to read.",
-            .how = "the kernel's boot line says heap free:on, or the command line turns on init_on_free",
+            .why = "Memory is cleared as it is freed, so what a program or the kernel held does " ++
+                "not linger for a later bug to read.",
+            .how = "the kernel's boot line says heap free:on, or the command line turns on " ++
+                "init_on_free",
             .result = if (free_on) .pass else .fail,
             .detail = if (free_on) "" else "init_on_free is off",
         });
@@ -1208,7 +1824,8 @@ const Posture = struct {
             .id = "kernel-cpu-mitigations",
             .area = "kernel",
             .name = "CPU flaws mitigated",
-            .why = "No known processor flaw lets one program read another's memory, or the kernel's.",
+            .why = "No known processor flaw lets one program read another's memory, or the " ++
+                "kernel's.",
             .how = "no file in /sys/devices/system/cpu/vulnerabilities reads Vulnerable",
             .result = if (vulnerable) |v| (if (v.len == 0) .pass else .fail) else .skip,
             .detail = vulnerable orelse "the kernel reports no CPU flaws",
@@ -1235,14 +1852,21 @@ const Posture = struct {
             try loose.appendSlice(p.gpa, try sshMismatches(p.gpa, s, &ssh_settings));
             const config = "/etc/ssh/sshd_config";
             if (statx(p.gpa, config)) |st| if (st.uid != 0 or st.mode & 0o022 != 0)
-                try loose.print(p.gpa, "{s}{s} is not root's alone", .{ if (loose.items.len > 0) ", " else "", config });
+                try loose.print(
+                    p.gpa,
+                    "{s}{s} is not root's alone",
+                    .{ if (loose.items.len > 0) ", " else "", config },
+                );
         }
         try p.add(.{
             .id = "network-ssh-config",
             .area = "network",
             .name = "ssh offers keys and nothing more",
-            .why = "Logging in takes a key; no one gets in without a password, through another host's trust, or with their own environment, and a session cannot forward ports or tunnel past the machine's network policy.",
-            .how = "sshd -T reports " ++ comptime sshSettingsText() ++ ", and /etc/ssh/sshd_config is root's and writable by no one else",
+            .why = "Logging in takes a key; no one gets in without a password, through another " ++
+                "host's trust, or with their own environment, and a session cannot forward " ++
+                "ports or tunnel past the machine's network policy.",
+            .how = "sshd -T reports " ++ comptime sshSettingsText() ++
+                ", and /etc/ssh/sshd_config is root's and writable by no one else",
             .result = if (settings == null) .skip else if (loose.items.len == 0) .pass else .fail,
             .detail = if (settings == null) skipped else loose.items,
         });
@@ -1251,8 +1875,11 @@ const Posture = struct {
             .id = "network-ssh-crypto",
             .area = "network",
             .name = "ssh uses strong cryptography",
-            .why = "No ssh connection can be made with a cipher, MAC, key exchange or signature that is broken or weakening.",
-            .how = "sshd -T lists no CBC, arcfour or 3DES cipher, no MD5, SHA-1, 64-bit or truncated MAC, no SHA-1 or 1024-bit key exchange, and no ssh-rsa or ssh-dss signature",
+            .why = "No ssh connection can be made with a cipher, MAC, key exchange or signature " ++
+                "that is broken or weakening.",
+            .how = "sshd -T lists no CBC, arcfour or 3DES cipher, no MD5, SHA-1, 64-bit or " ++
+                "truncated MAC, no SHA-1 or 1024-bit key exchange, and no ssh-rsa or ssh-dss " ++
+                "signature",
             .result = if (settings == null) .skip else if (weak.len == 0) .pass else .fail,
             .detail = if (settings == null) skipped else weak,
         });
@@ -1265,7 +1892,12 @@ const Posture = struct {
     // sends nothing, a connect the policy refuses at once), and fails where
     // it is missing, on any Linux.
     fn fence(p: *Posture) !void {
-        const policy: []const u8 = Dir.cwd().readFileAlloc(p.io, "/usr/share/werewolf/net", p.gpa, .limited(64 << 10)) catch "";
+        const policy: []const u8 = Dir.cwd().readFileAlloc(
+            p.io,
+            "/usr/share/werewolf/net",
+            p.gpa,
+            .limited(64 << 10),
+        ) catch "";
 
         const port = unusedPort(policy);
         const bound = probeBind(port);
@@ -1273,10 +1905,15 @@ const Posture = struct {
             .id = "network-bind",
             .area = "network",
             .name = "Undeclared ports cannot be opened",
-            .why = "Not even root can start a listener on a port the machine is not meant to offer.",
-            .how = try std.fmt.allocPrint(p.gpa, "bind() of a TCP socket to port {d}, which the policy does not declare, is refused with EACCES (Landlock, inherited from PID 1)", .{port}),
+            .why = "Not even root can start a listener on a port the machine is not meant to " ++
+                "offer.",
+            .how = try p.gpa.print(
+                "bind() of a TCP socket to port {d}, which the policy does not declare, is " ++
+                    "refused with EACCES (Landlock, inherited from PID 1)",
+                .{port},
+            ),
             .result = if (bound == .ACCES) .pass else .fail,
-            .detail = try std.fmt.allocPrint(p.gpa, "bind: {s}", .{errnoText(bound)}),
+            .detail = try p.gpa.print("bind: {s}", .{errnoText(bound)}),
         });
 
         const sent = probeSend();
@@ -1284,10 +1921,13 @@ const Posture = struct {
             .id = "network-outbound",
             .area = "network",
             .name = "Only declared traffic leaves",
-            .why = "A program can send nothing its form did not declare: no beacon, no exfiltration, no download.",
-            .how = "connect() of a UDP socket to 192.0.2.1 port 9 (an address for documentation, never routed), which looks the route up without sending, is refused with EACCES (policy routing)",
+            .why = "A program can send nothing its form did not declare: no beacon, no " ++
+                "exfiltration, no download.",
+            .how = "connect() of a UDP socket to 192.0.2.1 port 9 (an address for " ++
+                "documentation, never routed), which looks the route up without sending, is " ++
+                "refused with EACCES (policy routing)",
             .result = if (sent == .ACCES) .pass else .fail,
-            .detail = try std.fmt.allocPrint(p.gpa, "connect: {s}", .{errnoText(sent)}),
+            .detail = try p.gpa.print("connect: {s}", .{errnoText(sent)}),
         });
 
         const md = probeMetadata();
@@ -1295,8 +1935,10 @@ const Posture = struct {
             .id = "network-metadata",
             .area = "network",
             .name = "Cloud metadata server closed",
-            .why = "Only the programs named can read the instance's metadata, where its config and any secrets in it are.",
-            .how = "a TCP connect() to 169.254.169.254 port 80, for a second at most, is refused with EACCES",
+            .why = "Only the programs named can read the instance's metadata, where its config " ++
+                "and any secrets in it are.",
+            .how = "a TCP connect() to 169.254.169.254 port 80, for a second at most, is " ++
+                "refused with EACCES",
             .result = switch (md) {
                 .refused => .pass,
                 .reached => .fail,
@@ -1312,10 +1954,13 @@ const Posture = struct {
             .id = "network-inbound",
             .area = "network",
             .name = "Unsolicited traffic dropped",
-            .why = "Packets the machine did not ask for and does not serve are dropped unanswered, whatever is listening.",
-            .how = "the IPv4 policy-routing rules (RTM_GETRULE) blackhole arriving TCP and UDP (or everything) before any rule delivers it to the local table, and refuse locally sent traffic that no rule allows",
+            .why = "Packets the machine did not ask for and does not serve are dropped " ++
+                "unanswered, whatever is listening.",
+            .how = "the IPv4 policy-routing rules (RTM_GETRULE) blackhole arriving TCP and UDP " ++
+                "(or everything) before any rule delivers it to the local table, and refuse " ++
+                "locally sent traffic that no rule allows",
             .result = if (rules.inbound_dropped and rules.outbound_refused) .pass else .fail,
-            .detail = try std.fmt.allocPrint(p.gpa, "arriving: {s}; sent: {s}", .{
+            .detail = try p.gpa.print("arriving: {s}; sent: {s}", .{
                 if (rules.inbound_dropped) "dropped unless declared" else "delivered",
                 if (rules.outbound_refused) "refused unless declared" else "routed",
             }),
@@ -1330,17 +1975,33 @@ const Posture = struct {
             .id = "network-ipv6",
             .area = "network",
             .name = "IPv6 under the same policy",
-            .why = "Every interface has an IPv6 address reachable from the network; IPv6 must not be a way around the IPv4 rules.",
-            .how = "IPv6 is off (disable_ipv6 reads 1, or the kernel has none), or its policy-routing rules (RTM_GETRULE, AF_INET6) drop arriving traffic before delivering it and refuse locally sent traffic no rule allows",
-            .result = if (v6_off or (rules6.inbound_dropped and rules6.outbound_refused)) .pass else .fail,
-            .detail = if (v6_off) "IPv6 off" else try std.fmt.allocPrint(p.gpa, "arriving: {s}; sent: {s}", .{
-                if (rules6.inbound_dropped) "dropped unless declared" else "delivered",
-                if (rules6.outbound_refused) "refused unless declared" else "routed",
-            }),
+            .why = "Every interface has an IPv6 address reachable from the network; IPv6 must " ++
+                "not be a way around the IPv4 rules.",
+            .how = "IPv6 is off (disable_ipv6 reads 1, or the kernel has none), or its " ++
+                "policy-routing rules (RTM_GETRULE, AF_INET6) drop arriving traffic before " ++
+                "delivering it and refuse locally sent traffic no rule allows",
+            .result = if (v6_off or (rules6.inbound_dropped and rules6.outbound_refused))
+                .pass
+            else
+                .fail,
+            .detail = if (v6_off)
+                "IPv6 off"
+            else
+                try p.gpa.print("arriving: {s}; sent: {s}", .{
+                    if (rules6.inbound_dropped) "dropped unless declared" else "delivered",
+                    if (rules6.outbound_refused) "refused unless declared" else "routed",
+                }),
         });
     }
 
-    fn absentNamed(p: *Posture, id: []const u8, area: []const u8, name: []const u8, why: []const u8, names: []const []const u8) !void {
+    fn absentNamed(
+        p: *Posture,
+        id: []const u8,
+        area: []const u8,
+        name: []const u8,
+        why: []const u8,
+        names: []const []const u8,
+    ) !void {
         try p.absent(id, name, why, names);
         p.checks.items[p.checks.items.len - 1].area = area;
     }
@@ -1349,8 +2010,16 @@ const Posture = struct {
 
     /// A setting the kernel lets rise but never fall: it must read locked,
     /// and as root, writing the unlocked value must be refused.
-    fn oneWay(p: *Posture, id: []const u8, name: []const u8, why: []const u8, key: []const u8, locked: []const u8, unlocked: []const u8) !void {
-        const path = try std.fmt.allocPrint(p.gpa, "/proc/sys/{s}", .{key});
+    fn oneWay(
+        p: *Posture,
+        id: []const u8,
+        name: []const u8,
+        why: []const u8,
+        key: []const u8,
+        locked: []const u8,
+        unlocked: []const u8,
+    ) !void {
+        const path = try p.gpa.print("/proc/sys/{s}", .{key});
         const value = trim(p.read(path));
         const is_locked = std.mem.eql(u8, value, locked);
         const lowered = is_locked and p.root and !p.refused(path, unlocked);
@@ -1360,18 +2029,31 @@ const Posture = struct {
             .name = name,
             .why = why,
             .how = if (p.root)
-                try std.fmt.allocPrint(p.gpa, "{s} is {s}, and writing {s} is refused", .{ dotted(p.gpa, key), locked, unlocked })
+                try p.gpa.print(
+                    "{s} is {s}, and writing {s} is refused",
+                    .{ dotted(p.gpa, key), locked, unlocked },
+                )
             else
-                try std.fmt.allocPrint(p.gpa, "{s} is {s}", .{ dotted(p.gpa, key), locked }),
+                try p.gpa.print("{s} is {s}", .{ dotted(p.gpa, key), locked }),
             .result = if (is_locked and !lowered) .pass else .fail,
-            .detail = if (is_locked) "" else try std.fmt.allocPrint(p.gpa, "{s} is {s}", .{ dotted(p.gpa, key), if (value.len > 0) value else "absent" }),
+            .detail = if (is_locked) "" else try p.gpa.print(
+                "{s} is {s}",
+                .{ dotted(p.gpa, key), if (value.len > 0) value else "absent" },
+            ),
         });
     }
 
     /// Settings that must hold these values. A * in a key stands for every
     /// entry in its directory, such as every interface, all and default
     /// among them; a directory that is not there has none to fail.
-    fn sysctls(p: *Posture, id: []const u8, area: []const u8, name: []const u8, why: []const u8, want: []const [2][]const u8) !void {
+    fn sysctls(
+        p: *Posture,
+        id: []const u8,
+        area: []const u8,
+        name: []const u8,
+        why: []const u8,
+        want: []const [2][]const u8,
+    ) !void {
         var how: std.ArrayList(u8) = .empty;
         var bad: std.ArrayList(u8) = .empty;
         for (want, 0..) |kv, i| {
@@ -1379,28 +2061,55 @@ const Posture = struct {
             try how.print(p.gpa, "{s} = {s}", .{ dotted(p.gpa, kv[0]), kv[1] });
             for (try p.expand(kv[0])) |key| {
                 const value = p.sysctl(key);
-                if (!std.mem.eql(u8, value, kv[1])) try bad.print(p.gpa, "{s}{s} is {s}", .{ if (bad.items.len > 0) ", " else "", dotted(p.gpa, key), if (value.len > 0) value else "absent" });
+                if (!std.mem.eql(
+                    u8,
+                    value,
+                    kv[1],
+                )) try bad.print(
+                    p.gpa,
+                    "{s}{s} is {s}",
+                    .{
+                        if (bad.items.len > 0) ", " else "",
+                        dotted(p.gpa, key),
+                        if (value.len > 0) value else "absent",
+                    },
+                );
             }
         }
-        try p.add(.{ .id = id, .area = area, .name = name, .why = why, .how = how.items, .result = if (bad.items.len == 0) .pass else .fail, .detail = bad.items });
+        try p.add(.{
+            .id = id,
+            .area = area,
+            .name = name,
+            .why = why,
+            .how = how.items,
+            .result = if (bad.items.len == 0) .pass else .fail,
+            .detail = bad.items,
+        });
     }
 
     /// key, or where it has a /*/, the key for each entry in that directory
     /// of /proc/sys, in order.
     fn expand(p: *Posture, key: []const u8) ![]const []const u8 {
         const star = std.mem.indexOf(u8, key, "/*/") orelse return p.gpa.dupe([]const u8, &.{key});
-        var d = Dir.cwd().openDir(p.io, try std.fmt.allocPrint(p.gpa, "/proc/sys/{s}", .{key[0..star]}), .{ .iterate = true }) catch return &.{};
+        var d = Dir.cwd().openDir(
+            p.io,
+            try p.gpa.print("/proc/sys/{s}", .{key[0..star]}),
+            .{ .iterate = true },
+        ) catch return &.{};
         defer d.close(p.io);
         var keys: std.ArrayList([]const u8) = .empty;
         var it = d.iterate();
-        while (it.next(p.io) catch null) |e| try keys.append(p.gpa, try std.fmt.allocPrint(p.gpa, "{s}/{s}{s}", .{ key[0..star], e.name, key[star + 2 ..] }));
+        while (it.next(p.io) catch null) |e| try keys.append(
+            p.gpa,
+            try p.gpa.print("{s}/{s}{s}", .{ key[0..star], e.name, key[star + 2 ..] }),
+        );
         std.mem.sort([]const u8, keys.items, {}, lessString);
         return keys.items;
     }
 
     /// A setting's value, without its newline.
     fn sysctl(p: *Posture, key: []const u8) []const u8 {
-        return trim(p.read(std.fmt.allocPrint(p.gpa, "/proc/sys/{s}", .{key}) catch return ""));
+        return trim(p.read(p.gpa.print("/proc/sys/{s}", .{key}) catch return ""));
     }
 
     /// path, read to its end, or "". Not Dir.readFileAlloc, which reads
@@ -1432,15 +2141,19 @@ const Posture = struct {
     fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usize } {
         var found: usize = 0;
         var root: usize = 0;
-        var d = Dir.cwd().openDir(p.io, "/proc", .{ .iterate = true }) catch return .{ .found = 0, .root = 0 };
+        var d = Dir.cwd().openDir(
+            p.io,
+            "/proc",
+            .{ .iterate = true },
+        ) catch return .{ .found = 0, .root = 0 };
         defer d.close(p.io);
         var it = d.iterate();
         while (it.next(p.io) catch null) |e| {
             _ = std.fmt.parseInt(u32, e.name, 10) catch continue;
-            const cmd = p.read(try std.fmt.allocPrint(p.gpa, "/proc/{s}/cmdline", .{e.name}));
+            const cmd = p.read(try p.gpa.print("/proc/{s}/cmdline", .{e.name}));
             if (!std.mem.startsWith(u8, cmd, prefix)) continue;
             found += 1;
-            const status = p.read(try std.fmt.allocPrint(p.gpa, "/proc/{s}/status", .{e.name}));
+            const status = p.read(try p.gpa.print("/proc/{s}/status", .{e.name}));
             if (uidOf(status) == 0) root += 1;
         }
         return .{ .found = found, .root = root };
@@ -1457,17 +2170,36 @@ const Posture = struct {
 
     /// The files under dir, on top's filesystem, that find looks for,
     /// added to found.
-    fn walk(p: *Posture, dir: []const u8, top: linux.Statx, find: Find, found: *std.ArrayList(u8), depth: usize) !void {
+    fn walk(
+        p: *Posture,
+        dir: []const u8,
+        top: linux.Statx,
+        find: Find,
+        found: *std.ArrayList(u8),
+        depth: usize,
+    ) !void {
         if (depth > 40) return;
         var d = Dir.cwd().openDir(p.io, dir, .{ .iterate = true }) catch return;
         defer d.close(p.io);
         var it = d.iterate();
         while (it.next(p.io) catch null) |e| {
-            const path = try std.fmt.allocPrint(p.gpa, "{s}{s}{s}", .{ dir, if (dir.len > 1) "/" else "", e.name });
+            const path = try p.gpa.print(
+                "{s}{s}{s}",
+                .{ dir, if (dir.len > 1) "/" else "", e.name },
+            );
             const st = statx(p.gpa, path) orelse continue;
             if (st.dev_major != top.dev_major or st.dev_minor != top.dev_minor) continue;
-            if (isFound(find, st.mode)) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", path });
-            if (st.mode & linux.S.IFMT == linux.S.IFDIR) try p.walk(path, top, find, found, depth + 1);
+            if (isFound(
+                find,
+                st.mode,
+            )) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", path });
+            if (st.mode & linux.S.IFMT == linux.S.IFDIR) try p.walk(
+                path,
+                top,
+                find,
+                found,
+                depth + 1,
+            );
         }
     }
 
@@ -1476,13 +2208,24 @@ const Posture = struct {
     fn worldWritable(p: *Posture) !struct { found: []const u8, tried: []const u8 } {
         var found: std.ArrayList(u8) = .empty;
         var tried: std.ArrayList(u8) = .empty;
-        for ([_][]const u8{ "/run", "/tmp", "/var/tmp", "/dev/shm", "/dev/mqueue", "/data" }) |dir| {
+        for ([_][]const u8{
+            "/run",
+            "/tmp",
+            "/var/tmp",
+            "/dev/shm",
+            "/dev/mqueue",
+            "/data",
+        }) |dir| {
             const top = statx(p.gpa, dir) orelse continue;
             if (top.mode & linux.S.IFMT != linux.S.IFDIR) continue;
             try tried.print(p.gpa, "{s}{s}", .{ if (tried.items.len > 0) ", " else "", dir });
-            const temporary = std.mem.eql(u8, dir, "/tmp") or std.mem.eql(u8, dir, "/var/tmp") or std.mem.eql(u8, dir, "/dev/shm");
+            const temporary = std.mem.eql(u8, dir, "/tmp") or std.mem.eql(u8, dir, "/var/tmp") or
+                std.mem.eql(u8, dir, "/dev/shm");
             const find: Find = if (temporary) .open_dirs else .open;
-            if (isFound(.open_dirs, top.mode)) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", dir });
+            if (isFound(
+                .open_dirs,
+                top.mode,
+            )) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", dir });
             try p.walk(dir, top, find, &found, 0);
         }
         return .{ .found = found.items, .tried = tried.items };
@@ -1504,7 +2247,11 @@ const Posture = struct {
             } else if (std.mem.endsWith(u8, path, "shadow") and st.mode & 0o004 != 0) {
                 try loose.print(p.gpa, "{s}{s} is readable by everyone", .{ sep, real });
             } else if (statx(p.gpa, dir)) |d| if (d.uid != 0 or d.mode & 0o022 != 0) {
-                try loose.print(p.gpa, "{s}{s}, which holds {s}, is not root's alone", .{ sep, dir, std.fs.path.basename(real) });
+                try loose.print(
+                    p.gpa,
+                    "{s}{s}, which holds {s}, is not root's alone",
+                    .{ sep, dir, std.fs.path.basename(real) },
+                );
             };
         }
         return loose.items;
@@ -1512,12 +2259,16 @@ const Posture = struct {
 
     /// The real path of path, every link followed, or null if it is not there.
     fn realPath(p: *Posture, path: []const u8) ?[]const u8 {
-        const z = std.fmt.allocPrintSentinel(p.gpa, "{s}", .{path}, 0) catch return null;
+        const z = p.gpa.printSentinel("{s}", .{path}, 0) catch return null;
         const rc = linux.open(z, .{ .PATH = true, .CLOEXEC = true }, 0);
         if (linux.errno(rc) != .SUCCESS) return null;
         const fd: i32 = @intCast(rc);
         defer _ = linux.close(fd);
-        const link = std.fmt.allocPrintSentinel(p.gpa, "/proc/self/fd/{d}", .{fd}, 0) catch return null;
+        const link = p.gpa.printSentinel(
+            "/proc/self/fd/{d}",
+            .{fd},
+            0,
+        ) catch return null;
         var buf: [4096]u8 = undefined;
         const n = linux.readlink(link, &buf, buf.len);
         if (linux.errno(n) != .SUCCESS) return null;
@@ -1532,7 +2283,8 @@ const Find = enum { setid, open, open_dirs };
 
 fn isFound(find: Find, mode: u16) bool {
     const kind = mode & linux.S.IFMT;
-    const open_dir = kind == linux.S.IFDIR and mode & linux.S.IWOTH != 0 and mode & linux.S.ISVTX == 0;
+    const open_dir = kind == linux.S.IFDIR and mode & linux.S.IWOTH != 0 and
+        mode & linux.S.ISVTX == 0;
     return switch (find) {
         .setid => kind == linux.S.IFREG and mode & (linux.S.ISUID | linux.S.ISGID) != 0,
         .open => open_dir or (kind == linux.S.IFREG and mode & linux.S.IWOTH != 0),
@@ -1546,7 +2298,10 @@ fn isFound(find: Find, mode: u16) bool {
 /// was found where a check did not pass. Details are cut to fit cols, the
 /// terminal's width, when there is one.
 fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
-    try w.print("{s}, Linux {s}, on {s} ({s})\n", .{ r.os, r.kernel, r.host, if (r.root) "root" else "not root: some checks are limited" });
+    try w.print(
+        "{s}, Linux {s}, on {s} ({s})\n",
+        .{ r.os, r.kernel, r.host, if (r.root) "root" else "not root: some checks are limited" },
+    );
     if (r.allow.len > 0) {
         try w.writeAll("Its form allows:");
         for (r.allow) |a| try w.print(" {s}", .{a});
@@ -1573,7 +2328,8 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
         try w.writeByte('\n');
     }
     try w.print("\n{s} {d} passed   {s} {d} failed   {s} {d} skipped\n", .{
-        Result.pass.mark(), r.summary.pass, Result.fail.mark(), r.summary.fail, Result.skip.mark(), r.summary.skip,
+        Result.pass.mark(), r.summary.pass, Result.fail.mark(), r.summary.fail,
+        Result.skip.mark(), r.summary.skip,
     });
 }
 
@@ -1634,8 +2390,8 @@ fn prettyName(text: []const u8) []const u8 {
 
 /// The level in /sys/kernel/security/lockdown: "none [integrity] confidentiality".
 fn lockdownLevel(text: []const u8) []const u8 {
-    const a = std.mem.indexOfScalar(u8, text, '[') orelse return "unavailable";
-    const b = std.mem.indexOfScalarPos(u8, text, a, ']') orelse return "unavailable";
+    const a = std.mem.findScalar(u8, text, '[') orelse return "unavailable";
+    const b = std.mem.findScalarPos(u8, text, a, ']') orelse return "unavailable";
     return text[a + 1 .. b];
 }
 
@@ -1684,7 +2440,7 @@ fn missingArgs(gpa: Allocator, want: []const u8, have: []const u8) ![]const u8 {
 fn hasFilesystem(text: []const u8, name: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
-        const tab = std.mem.lastIndexOfScalar(u8, line, '\t') orelse continue;
+        const tab = std.mem.findScalarLast(u8, line, '\t') orelse continue;
         if (std.mem.eql(u8, line[tab + 1 ..], name)) return true;
     }
     return false;
@@ -1694,18 +2450,26 @@ fn hasFilesystem(text: []const u8, name: []const u8) bool {
 /// names /proc/modules, /proc/net/protocols (without "v6") and
 /// /proc/filesystems give it.
 const rare_features = [_][]const u8{
-    "dccp",     "sctp",   "rds",    "tipc",      "n_hdlc",        "ax25",        "netrom",      "x25",
-    "rose",     "decnet", "econet", "af_802154", "ipx",           "appletalk",   "psnap",       "p8022",
-    "p8023",    "can",    "atm",    "bluetooth", "firewire_core", "thunderbolt", "usb_storage", "cramfs",
-    "freevxfs", "jffs2",  "hfs",    "hfsplus",   "squashfs",      "udf",         "cifs",        "ksmbd",
-    "gfs2",
+    "dccp",          "sctp",        "rds",         "tipc",      "n_hdlc",
+    "ax25",          "netrom",      "x25",         "rose",      "decnet",
+    "econet",        "af_802154",   "ipx",         "appletalk", "psnap",
+    "p8022",         "p8023",       "can",         "atm",       "bluetooth",
+    "firewire_core", "thunderbolt", "usb_storage", "cramfs",    "freevxfs",
+    "jffs2",         "hfs",         "hfsplus",     "squashfs",  "udf",
+    "cifs",          "ksmbd",       "gfs2",
 };
 
 /// The rare_features the running kernel has, as a list.
-fn rareFeatures(gpa: Allocator, modules: []const u8, protocols: []const u8, filesystems: []const u8) ![]const u8 {
+fn rareFeatures(
+    gpa: Allocator,
+    modules: []const u8,
+    protocols: []const u8,
+    filesystems: []const u8,
+) ![]const u8 {
     var found: std.ArrayList(u8) = .empty;
     for (rare_features) |name| {
-        if (hasFilesystem(filesystems, name) or firstWordIs(modules, name) or firstWordIs(protocols, name))
+        if (hasFilesystem(filesystems, name) or firstWordIs(modules, name) or
+            firstWordIs(protocols, name))
             try found.print(gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", name });
     }
     return found.items;
@@ -1744,9 +2508,12 @@ fn unsetArgs(gpa: Allocator, cmdline: []const u8, names: []const []const u8) ![]
         while (it.next()) |arg| {
             if (std.mem.eql(u8, arg, name)) {
                 on = true;
-            } else if (std.mem.startsWith(u8, arg, name) and arg.len > name.len and arg[name.len] == '=') {
+            } else if (std.mem.startsWith(u8, arg, name) and arg.len > name.len and
+                arg[name.len] == '=')
+            {
                 const v = arg[name.len + 1 ..];
-                on = std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "y") or std.ascii.eqlIgnoreCase(v, "on");
+                on = std.mem.eql(u8, v, "1") or std.ascii.eqlIgnoreCase(v, "y") or
+                    std.ascii.eqlIgnoreCase(v, "on");
             }
         }
         if (!on) try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", name });
@@ -1770,16 +2537,37 @@ fn hardCoreLimit(limits: []const u8) ?[]const u8 {
 /// What sshd -T must report, by its names: keys only, no host-based trust,
 /// and no forwarding, tunnels or user environment.
 const ssh_settings = [_][2][]const u8{
-    .{ "passwordauthentication", "no" },  .{ "kbdinteractiveauthentication", "no" }, .{ "permitemptypasswords", "no" },
-    .{ "hostbasedauthentication", "no" }, .{ "ignorerhosts", "yes" },                .{ "strictmodes", "yes" },
-    .{ "permituserenvironment", "no" },   .{ "x11forwarding", "no" },                .{ "allowagentforwarding", "no" },
-    .{ "allowtcpforwarding", "no" },      .{ "allowstreamlocalforwarding", "no" },   .{ "gatewayports", "no" },
+    .{
+        "passwordauthentication",
+        "no",
+    },
+    .{ "kbdinteractiveauthentication", "no" },
+    .{ "permitemptypasswords", "no" },
+    .{
+        "hostbasedauthentication",
+        "no",
+    },
+    .{ "ignorerhosts", "yes" },
+    .{ "strictmodes", "yes" },
+    .{
+        "permituserenvironment",
+        "no",
+    },
+    .{ "x11forwarding", "no" },
+    .{ "allowagentforwarding", "no" },
+    .{
+        "allowtcpforwarding",
+        "no",
+    },
+    .{ "allowstreamlocalforwarding", "no" },
+    .{ "gatewayports", "no" },
     .{ "permittunnel", "no" },
 };
 
 fn sshSettingsText() []const u8 {
     comptime var s: []const u8 = "";
-    inline for (ssh_settings, 0..) |kv, i| s = s ++ (if (i > 0) ", " else "") ++ kv[0] ++ " " ++ kv[1];
+    inline for (ssh_settings, 0..) |kv, i| s = s ++ (if (i > 0) ", " else "") ++ kv[0] ++ " " ++
+        kv[1];
     return s;
 }
 
@@ -1789,7 +2577,8 @@ fn sshSettingsText() []const u8 {
 fn sshValue(settings: []const u8, key: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, settings, '\n');
     while (it.next()) |line| {
-        if (line.len > key.len and std.ascii.startsWithIgnoreCase(line, key) and line[key.len] == ' ') return trim(line[key.len + 1 ..]);
+        if (line.len > key.len and std.ascii.startsWithIgnoreCase(line, key) and
+            line[key.len] == ' ') return trim(line[key.len + 1 ..]);
     }
     return null;
 }
@@ -1802,7 +2591,11 @@ fn sshMismatches(gpa: Allocator, settings: []const u8, want: []const [2][]const 
         // cannot forward X11 at all.
         if (std.mem.eql(u8, kv[0], "x11forwarding") and sshValue(settings, kv[0]) == null) continue;
         const v = sshValue(settings, kv[0]) orelse "absent";
-        if (!std.mem.eql(u8, v, kv[1])) try out.print(gpa, "{s}{s} is {s}", .{ if (out.items.len > 0) ", " else "", kv[0], v });
+        if (!std.mem.eql(
+            u8,
+            v,
+            kv[1],
+        )) try out.print(gpa, "{s}{s} is {s}", .{ if (out.items.len > 0) ", " else "", kv[0], v });
     }
     return out.items;
 }
@@ -1843,14 +2636,27 @@ fn accountProblems(gpa: Allocator, passwd: []const u8, shadow: []const u8) ![]co
         const name = f.next() orelse continue;
         _ = f.next() orelse continue;
         const uid = f.next() orelse continue;
-        if (std.mem.eql(u8, uid, "0") and !std.mem.eql(u8, name, "root")) try out.print(gpa, "{s}{s} has uid 0", .{ if (out.items.len > 0) ", " else "", name });
+        if (std.mem.eql(u8, uid, "0") and
+            !std.mem.eql(
+                u8,
+                name,
+                "root",
+            )) try out.print(
+            gpa,
+            "{s}{s} has uid 0",
+            .{ if (out.items.len > 0) ", " else "", name },
+        );
     }
     lines = std.mem.tokenizeScalar(u8, shadow, '\n');
     while (lines.next()) |line| {
         var f = std.mem.splitScalar(u8, line, ':');
         const name = f.next() orelse continue;
         const hash = f.next() orelse continue;
-        if (hash.len == 0) try out.print(gpa, "{s}{s} has no password", .{ if (out.items.len > 0) ", " else "", name });
+        if (hash.len == 0) try out.print(
+            gpa,
+            "{s}{s} has no password",
+            .{ if (out.items.len > 0) ", " else "", name },
+        );
     }
     return out.items;
 }
@@ -1875,7 +2681,12 @@ fn parseMount(line: []const u8) ?Mount {
 
 /// The mount points, but those in except, whose options lack option, each
 /// once.
-fn missingOption(gpa: Allocator, mounts: []const u8, option: []const u8, except: []const []const u8) ![]const u8 {
+fn missingOption(
+    gpa: Allocator,
+    mounts: []const u8,
+    option: []const u8,
+    except: []const []const u8,
+) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, mounts, '\n');
     next: while (it.next()) |line| {
@@ -1901,9 +2712,9 @@ fn listenPorts(gpa: Allocator, text: []const u8, out: *std.ArrayList(u16)) !void
         _ = f.next() orelse continue; // remote
         const state = f.next() orelse continue;
         if (!std.mem.eql(u8, state, "0A")) continue; // TCP_LISTEN
-        const colon = std.mem.lastIndexOfScalar(u8, local, ':') orelse continue;
+        const colon = std.mem.findScalarLast(u8, local, ':') orelse continue;
         const port = std.fmt.parseInt(u16, local[colon + 1 ..], 16) catch continue;
-        if (std.mem.indexOfScalar(u16, out.items, port) == null) try out.append(gpa, port);
+        if (std.mem.findScalar(u16, out.items, port) == null) try out.append(gpa, port);
     }
     std.mem.sort(u16, out.items, {}, std.sort.asc(u16));
 }
@@ -1913,7 +2724,11 @@ fn policyPorts(gpa: Allocator, policy: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, policy, '\n');
     while (it.next()) |line| {
-        if (std.mem.startsWith(u8, line, "listen tcp ")) try out.print(gpa, "{s}\n", .{std.mem.trim(u8, line["listen tcp ".len..], " ")});
+        if (std.mem.startsWith(
+            u8,
+            line,
+            "listen tcp ",
+        )) try out.print(gpa, "{s}\n", .{std.mem.trim(u8, line["listen tcp ".len..], " ")});
     }
     return out.items;
 }
@@ -1927,11 +2742,35 @@ fn isDeclared(text: []const u8, port: u16) bool {
 }
 
 /// The real uid on a /proc/PID/status Uid: line.
+const cap_sys_rawio = 17;
+
+/// The capabilities kernel-bounding-set wants gone from PID 1's bounding
+/// set, and the allowance that keeps each, if any.
+const bounded_caps = [_]struct { name: []const u8, n: u6, allow: []const u8 = "" }{
+    .{ .name = "CAP_SYS_MODULE", .n = 16 },
+    .{ .name = "CAP_SYS_RAWIO", .n = cap_sys_rawio },
+    .{ .name = "CAP_SYS_PTRACE", .n = 19 },
+    .{ .name = "CAP_MKNOD", .n = 27 },
+    .{ .name = "CAP_PERFMON", .n = 38 },
+    .{ .name = "CAP_BPF", .n = 39 },
+    .{ .name = "CAP_NET_ADMIN", .n = 12, .allow = "netadmin" },
+    .{ .name = "CAP_NET_RAW", .n = 13, .allow = "packet" },
+};
+
+/// Whether capability n is in a /proc/PID/status set, given in hex, or null
+/// if the field is missing.
+fn capBit(status: []const u8, field: []const u8, n: u6) ?bool {
+    const hex = statusField(status, field) orelse return null;
+    const set = std.fmt.parseInt(u64, hex, 16) catch return null;
+    return set & (@as(u64, 1) << n) != 0;
+}
+
 /// A field's value on a /proc/PID/status line, "Name:\tvalue".
 fn statusField(status: []const u8, name: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, status, '\n');
     while (it.next()) |line| {
-        if (line.len > name.len and std.mem.startsWith(u8, line, name) and line[name.len] == ':') return std.mem.trim(u8, line[name.len + 1 ..], " \t");
+        if (line.len > name.len and std.mem.startsWith(u8, line, name) and
+            line[name.len] == ':') return std.mem.trim(u8, line[name.len + 1 ..], " \t");
     }
     return null;
 }
@@ -1963,9 +2802,15 @@ fn exists(io: Io, path: []const u8) bool {
 }
 
 fn statx(gpa: Allocator, path: []const u8) ?linux.Statx {
-    const z = std.fmt.allocPrintSentinel(gpa, "{s}", .{path}, 0) catch return null;
+    const z = gpa.printSentinel("{s}", .{path}, 0) catch return null;
     var st: linux.Statx = undefined;
-    const rc = linux.statx(linux.AT.FDCWD, z, linux.AT.SYMLINK_NOFOLLOW, .{ .TYPE = true, .MODE = true, .UID = true }, &st);
+    const rc = linux.statx(
+        linux.AT.FDCWD,
+        z,
+        linux.AT.SYMLINK_NOFOLLOW,
+        .{ .TYPE = true, .MODE = true, .UID = true },
+        &st,
+    );
     if (linux.errno(rc) != .SUCCESS) return null;
     return st;
 }
@@ -1983,8 +2828,9 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
     const ds = es.getDaySeconds();
-    return std.fmt.allocPrint(gpa, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year, md.month.numeric(), md.day_index + 1, ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    return gpa.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
 }
 
@@ -2031,7 +2877,11 @@ const Metadata = enum { refused, reached, absent };
 /// A TCP connect() to 169.254.169.254:80, given a second: refused by
 /// policy, reached (connected, or something answered), or absent.
 fn probeMetadata() Metadata {
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0);
+    const rc = linux.socket(
+        linux.AF.INET,
+        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
+        0,
+    );
     if (linux.errno(rc) != .SUCCESS) return .absent;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
@@ -2057,7 +2907,11 @@ fn errnoText(e: linux.E) []const u8 {
 /// A family's policy-routing rules, as the kernel lists them: RTM_GETRULE
 /// messages, one after another. Listing them needs no privilege.
 fn ruleDump(gpa: Allocator, family: u8) ![]const u8 {
-    const rc = linux.socket(linux.AF.NETLINK, linux.SOCK.RAW | linux.SOCK.CLOEXEC, linux.NETLINK.ROUTE);
+    const rc = linux.socket(
+        linux.AF.NETLINK,
+        linux.SOCK.RAW | linux.SOCK.CLOEXEC,
+        linux.NETLINK.ROUTE,
+    );
     if (linux.errno(rc) != .SUCCESS) return error.NoNetlink;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
@@ -2067,7 +2921,14 @@ fn ruleDump(gpa: Allocator, family: u8) ![]const u8 {
     std.mem.writeInt(u16, req[6..8], 0x301, .little); // NLM_F_REQUEST | NLM_F_DUMP
     std.mem.writeInt(u32, req[8..12], 1, .little);
     req[16] = family;
-    if (linux.errno(linux.sendto(fd, &req, req.len, 0, null, 0)) != .SUCCESS) return error.NoNetlink;
+    if (linux.errno(linux.sendto(
+        fd,
+        &req,
+        req.len,
+        0,
+        null,
+        0,
+    )) != .SUCCESS) return error.NoNetlink;
     var out: std.ArrayList(u8) = .empty;
     var buf: [32 << 10]u8 align(4) = undefined;
     while (out.items.len < 1 << 20) {
@@ -2156,10 +3017,18 @@ fn summarizeRules(dump: []const u8) RuleSummary {
         if (action == 8 and from_lo) out_refused = true; // FR_ACT_PROHIBIT
         if (iif) continue;
         if (action == 6) { // FR_ACT_BLACKHOLE
-            const at: *?u32 = if (proto == null) &drop_at else if (proto == 6) &tcp_drop_at else if (proto == 17) &udp_drop_at else continue;
+            const at: *?u32 = if (proto == null)
+                &drop_at
+            else if (proto == 6)
+                &tcp_drop_at
+            else if (proto == 17)
+                &udp_drop_at
+            else
+                continue;
             at.* = @min(at.* orelse priority, priority);
         }
-        if (action == 1 and table == 255 and proto == null) local_at = @min(local_at orelse priority, priority); // to local
+        if (action == 1 and table == 255 and
+            proto == null) local_at = @min(local_at orelse priority, priority); // to local
     }
     const before = struct {
         fn f(drop: ?u32, local: ?u32) bool {
@@ -2167,12 +3036,18 @@ fn summarizeRules(dump: []const u8) RuleSummary {
             return local == null or d < local.?;
         }
     }.f;
-    const dropped = before(drop_at, local_at) or (before(tcp_drop_at, local_at) and before(udp_drop_at, local_at));
+    const dropped = before(
+        drop_at,
+        local_at,
+    ) or (before(tcp_drop_at, local_at) and before(udp_drop_at, local_at));
     return .{ .outbound_refused = out_refused, .inbound_dropped = dropped };
 }
 
 test lockdownLevel {
-    try testing.expectEqualStrings("integrity", lockdownLevel("none [integrity] confidentiality\n"));
+    try testing.expectEqualStrings(
+        "integrity",
+        lockdownLevel("none [integrity] confidentiality\n"),
+    );
     try testing.expectEqualStrings("unavailable", lockdownLevel(""));
     try testing.expect(isLocked("confidentiality"));
     try testing.expect(!isLocked("none"));
@@ -2204,7 +3079,10 @@ test missingOption {
     const a = arena.allocator();
     try testing.expectEqualStrings("/", try missingOption(a, test_mounts, "nosuid", &.{}));
     try testing.expectEqualStrings("/run", try missingOption(a, test_mounts, "noexec", &.{"/"}));
-    try testing.expectEqualStrings("", try missingOption(a, test_mounts, "nodev", &.{ "/", "/dev" }));
+    try testing.expectEqualStrings(
+        "",
+        try missingOption(a, test_mounts, "nodev", &.{ "/", "/dev" }),
+    );
 }
 
 test listenPorts {
@@ -2221,7 +3099,10 @@ test listenPorts {
     try listenPorts(arena.allocator(), tcp, &ports);
     try testing.expectEqualSlices(u16, &.{ 22, 80 }, ports.items);
     try testing.expect(isDeclared("80\n", 80));
-    const policy = try policyPorts(arena.allocator(), "listen tcp 22\nlisten tcp 80\nmetadata 68\n");
+    const policy = try policyPorts(
+        arena.allocator(),
+        "listen tcp 22\nlisten tcp 80\nmetadata 68\n",
+    );
     try testing.expectEqualStrings("22\n80\n", policy);
     try testing.expect(isDeclared(policy, 80) and !isDeclared(policy, 68));
     try testing.expect(!isDeclared("80\n", 22));
@@ -2232,9 +3113,22 @@ test missingArgs {
     defer arena.deinit();
     const a = arena.allocator();
     const want = "debugfs=off proc_mem.force_override=never\n";
-    try testing.expectEqualStrings("", try missingArgs(a, want, "console=hvc0 debugfs=off proc_mem.force_override=never init=/init\n"));
-    try testing.expectEqualStrings("proc_mem.force_override=never", try missingArgs(a, want, "debugfs=off proc_mem.force_override=always\n"));
-    try testing.expectEqualStrings("debugfs=off, proc_mem.force_override=never", try missingArgs(a, want, ""));
+    try testing.expectEqualStrings(
+        "",
+        try missingArgs(
+            a,
+            want,
+            "console=hvc0 debugfs=off proc_mem.force_override=never init=/init\n",
+        ),
+    );
+    try testing.expectEqualStrings(
+        "proc_mem.force_override=never",
+        try missingArgs(a, want, "debugfs=off proc_mem.force_override=always\n"),
+    );
+    try testing.expectEqualStrings(
+        "debugfs=off, proc_mem.force_override=never",
+        try missingArgs(a, want, ""),
+    );
     try testing.expectEqualStrings("", try missingArgs(a, "", "x"));
 }
 
@@ -2250,11 +3144,26 @@ test rareFeatures {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const modules = "virtio_net 61440 0 - Live 0x0\nsctp 475136 2 - Live 0x0\nusb_storage 86016 0 - Live 0x0\n";
-    const protocols = "protocol  size sockets  memory press maxhdr  slab module     cl co di ac io in de sh ss gs se re sp bi br ha uh gp em\nDCCPv6    1272      0      -1   NI       0   yes  dccp_ipv6   y  y\nTCP       2432      3       3   no     320   yes  kernel      y  y\n";
+    const modules = "virtio_net 61440 0 - Live 0x0\nsctp 475136 2 - Live 0x0\nusb_storage 86016 " ++
+        "0 - Live 0x0\n";
+    const protocols = "protocol  size sockets  memory press maxhdr  slab module     cl co di ac " ++
+        "io in de sh ss gs se re sp bi br ha uh gp em\nDCCPv6    1272      0      -1   NI       " ++
+        "0   yes  dccp_ipv6   y  y\nTCP       2432      3       3   no     320   yes  kernel    " ++
+        "  y  y\n";
     const filesystems = "nodev\tsysfs\n\text4\n\tsquashfs\n\terofs\n";
-    try testing.expectEqualStrings("dccp, sctp, usb_storage, squashfs", try rareFeatures(a, modules, protocols, filesystems));
-    try testing.expectEqualStrings("", try rareFeatures(a, "virtio_net 61440 0 - Live 0x0\n", "TCP 2432\nUDPv6 1472\n", "\text4\n"));
+    try testing.expectEqualStrings(
+        "dccp, sctp, usb_storage, squashfs",
+        try rareFeatures(a, modules, protocols, filesystems),
+    );
+    try testing.expectEqualStrings(
+        "",
+        try rareFeatures(
+            a,
+            "virtio_net 61440 0 - Live 0x0\n",
+            "TCP 2432\nUDPv6 1472\n",
+            "\text4\n",
+        ),
+    );
     // A name is a whole word: hfsplus is not hfs, can is not candle.
     try testing.expect(!firstWordIs("hfsplus 1 0\ncandle 1 0\n", "hfs"));
     try testing.expect(!firstWordIs("candle 1 0\n", "can"));
@@ -2272,15 +3181,35 @@ test unsetArgs {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const names = [_][]const u8{ "init_on_alloc", "init_on_free", "slab_nomerge", "page_alloc.shuffle", "randomize_kstack_offset" };
-    try testing.expectEqualStrings("", try unsetArgs(a, "init=/init init_on_alloc=1 init_on_free=on slab_nomerge page_alloc.shuffle=y randomize_kstack_offset=1\n", &names));
+    const names = [_][]const u8{
+        "init_on_alloc",
+        "init_on_free",
+        "slab_nomerge",
+        "page_alloc.shuffle",
+        "randomize_kstack_offset",
+    };
+    try testing.expectEqualStrings(
+        "",
+        try unsetArgs(
+            a,
+            "init=/init init_on_alloc=1 init_on_free=on slab_nomerge page_alloc.shuffle=y " ++
+                "randomize_kstack_offset=1\n",
+            &names,
+        ),
+    );
     try testing.expectEqualStrings(
         "init_on_alloc, init_on_free, slab_nomerge, page_alloc.shuffle, randomize_kstack_offset",
         try unsetArgs(a, "console=ttyS0 panic=10\n", &names),
     );
     // The last setting wins; a longer name is not the switch.
-    try testing.expectEqualStrings("init_on_alloc", try unsetArgs(a, "init_on_alloc=1 init_on_alloc=0", &.{"init_on_alloc"}));
-    try testing.expectEqualStrings("slab_nomerge", try unsetArgs(a, "slab_nomerge_x", &.{"slab_nomerge"}));
+    try testing.expectEqualStrings(
+        "init_on_alloc",
+        try unsetArgs(a, "init_on_alloc=1 init_on_alloc=0", &.{"init_on_alloc"}),
+    );
+    try testing.expectEqualStrings(
+        "slab_nomerge",
+        try unsetArgs(a, "slab_nomerge_x", &.{"slab_nomerge"}),
+    );
 }
 
 test hardCoreLimit {
@@ -2291,7 +3220,12 @@ test hardCoreLimit {
         \\Max open files            1024                 4096                 files
     ;
     try testing.expectEqualStrings("unlimited", hardCoreLimit(limits).?);
-    try testing.expectEqualStrings("0", hardCoreLimit("Max core file size        0                    0                    bytes\n").?);
+    try testing.expectEqualStrings(
+        "0",
+        hardCoreLimit(
+            "Max core file size        0                    0                    bytes\n",
+        ).?,
+    );
     try testing.expectEqual(null, hardCoreLimit(""));
 }
 
@@ -2299,32 +3233,69 @@ test sshMismatches {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const settings = "port 22\npasswordauthentication no\nallowtcpforwarding yes\npermittunnel no\nciphers chacha20-poly1305@openssh.com,aes256-cbc\nmacs hmac-sha2-256-etm@openssh.com,umac-64-etm@openssh.com,hmac-sha1\nkexalgorithms curve25519-sha256,diffie-hellman-group14-sha1\nhostkeyalgorithms ssh-ed25519,ssh-rsa\npubkeyacceptedalgorithms ssh-ed25519,ssh-rsa,rsa-sha2-512\n";
+    const settings = "port 22\npasswordauthentication no\nallowtcpforwarding yes\npermittunnel " ++
+        "no\nciphers chacha20-poly1305@openssh.com,aes256-cbc\nmacs hmac-sha2-256-etm@openssh.co" ++
+        "m,umac-64-etm@openssh.com,hmac-sha1\nkexalgorithms curve25519-sha256,diffie-hellman-gro" ++
+        "up14-sha1\nhostkeyalgorithms ssh-ed25519,ssh-rsa\npubkeyacceptedalgorithms " ++
+        "ssh-ed25519,ssh-rsa,rsa-sha2-512\n";
     try testing.expectEqualStrings("no", sshValue(settings, "passwordauthentication").?);
     try testing.expectEqualStrings("yes", sshValue("Port 22\nStrictModes yes\n", "strictmodes").?);
     try testing.expectEqual(null, sshValue("StrictModesX yes\n", "strictmodes"));
-    try testing.expectEqualStrings("", try sshMismatches(a, "PermitTunnel no\n", &.{ .{ "x11forwarding", "no" }, .{ "permittunnel", "no" } }));
-    try testing.expectEqualStrings("x11forwarding is yes", try sshMismatches(a, "X11Forwarding yes\n", &.{.{ "x11forwarding", "no" }}));
+    try testing.expectEqualStrings(
+        "",
+        try sshMismatches(
+            a,
+            "PermitTunnel no\n",
+            &.{ .{ "x11forwarding", "no" }, .{ "permittunnel", "no" } },
+        ),
+    );
+    try testing.expectEqualStrings(
+        "x11forwarding is yes",
+        try sshMismatches(a, "X11Forwarding yes\n", &.{.{ "x11forwarding", "no" }}),
+    );
     try testing.expectEqual(null, sshValue(settings, "password"));
     try testing.expectEqualStrings(
         "allowtcpforwarding is yes, gatewayports is absent",
-        try sshMismatches(a, settings, &.{ .{ "passwordauthentication", "no" }, .{ "allowtcpforwarding", "no" }, .{ "permittunnel", "no" }, .{ "gatewayports", "no" } }),
+        try sshMismatches(
+            a,
+            settings,
+            &.{
+                .{ "passwordauthentication", "no" },
+                .{ "allowtcpforwarding", "no" },
+                .{ "permittunnel", "no" },
+                .{ "gatewayports", "no" },
+            },
+        ),
     );
     try testing.expectEqualStrings(
         "aes256-cbc, umac-64-etm@openssh.com, hmac-sha1, diffie-hellman-group14-sha1, ssh-rsa",
         try weakSshCrypto(a, settings),
     );
-    try testing.expectEqualStrings("", try weakSshCrypto(a, "ciphers aes256-gcm@openssh.com\nmacs hmac-sha2-512-etm@openssh.com\nkexalgorithms mlkem768x25519-sha256\nhostkeyalgorithms ssh-ed25519,rsa-sha2-256\n"));
+    try testing.expectEqualStrings(
+        "",
+        try weakSshCrypto(
+            a,
+            "ciphers aes256-gcm@openssh.com\nmacs hmac-sha2-512-etm@openssh.com\nkexalgorithms " ++
+                "mlkem768x25519-sha256\nhostkeyalgorithms ssh-ed25519,rsa-sha2-256\n",
+        ),
+    );
 }
 
 test accountProblems {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const passwd = "root:x:0:0:root:/root:/sbin/nologin\ntoor:x:0:0::/:/bin/sh\nnobody:x:65534:65534::/:/sbin/nologin\n";
+    const passwd = "root:x:0:0:root:/root:/sbin/nologin\ntoor:x:0:0::/:/bin/sh\nnobody:x:65534:6" ++
+        "5534::/:/sbin/nologin\n";
     const shadow = "root:*:19000::::::\ntoor::19000::::::\nnobody:!:19000::::::\n";
-    try testing.expectEqualStrings("toor has uid 0, toor has no password", try accountProblems(a, passwd, shadow));
-    try testing.expectEqualStrings("", try accountProblems(a, "root:x:0:0::/:/x\n", "root:!::::::::\n"));
+    try testing.expectEqualStrings(
+        "toor has uid 0, toor has no password",
+        try accountProblems(a, passwd, shadow),
+    );
+    try testing.expectEqualStrings(
+        "",
+        try accountProblems(a, "root:x:0:0::/:/x\n", "root:!::::::::\n"),
+    );
 }
 
 test isFound {
@@ -2337,6 +3308,14 @@ test isFound {
     try testing.expect(!isFound(.open, S.IFLNK | 0o777));
     try testing.expect(!isFound(.open_dirs, S.IFREG | 0o666));
     try testing.expect(isFound(.open_dirs, S.IFDIR | 0o773));
+}
+
+test capBit {
+    const status = "CapEff:\t000001ffffffffff\nCapBnd:\t000001fffe7cfdff\n";
+    try testing.expect(capBit(status, "CapEff", 17).?);
+    try testing.expect(!capBit(status, "CapBnd", 16).?);
+    try testing.expect(capBit(status, "CapBnd", 12).?);
+    try testing.expectEqual(null, capBit(status, "CapPrm", 0));
 }
 
 test statusField {
@@ -2354,12 +3333,22 @@ test uidOf {
 test dotted {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("kernel.yama.ptrace_scope", dotted(arena.allocator(), "kernel/yama/ptrace_scope"));
+    try testing.expectEqualStrings(
+        "kernel.yama.ptrace_scope",
+        dotted(arena.allocator(), "kernel/yama/ptrace_scope"),
+    );
 }
 
 /// A netlink rule message for the tests: priority, action, table, and the
 /// iif name and selectors given.
-fn testRule(buf: []u8, priority: u32, action: u8, table: u8, iif: ?[]const u8, proto: ?u8) []const u8 {
+fn testRule(
+    buf: []u8,
+    priority: u32,
+    action: u8,
+    table: u8,
+    iif: ?[]const u8,
+    proto: ?u8,
+) []const u8 {
     @memset(buf, 0);
     var n: usize = 28;
     buf[16] = linux.AF.INET;
@@ -2402,7 +3391,10 @@ test summarizeRules {
     const tcp_only = dump.items.len;
     try dump.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, 17));
     try dump.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null));
-    try std.testing.expectEqual(RuleSummary{ .outbound_refused = true, .inbound_dropped = true }, summarizeRules(dump.items));
+    try std.testing.expectEqual(
+        RuleSummary{ .outbound_refused = true, .inbound_dropped = true },
+        summarizeRules(dump.items),
+    );
 
     // TCP dropped and UDP not is not dropped.
     var half: std.ArrayList(u8) = .empty;
@@ -2436,12 +3428,52 @@ test unusedPort {
 
 test printText {
     const checks = [_]Check{
-        .{ .id = "a", .area = "kernel", .name = "Kernel lockdown", .why = "", .how = "", .result = .pass, .detail = "integrity" },
-        .{ .id = "b", .area = "kernel", .name = "No SysRq", .why = "", .how = "", .result = .fail, .detail = "kernel.sysrq is 176" },
-        .{ .id = "c", .area = "processes", .name = "No setuid or setgid programs", .why = "", .how = "", .result = .fail, .detail = "/usr/bin/su, /usr/bin/sudo, /usr/bin/passwd, /usr/bin/mount" },
-        .{ .id = "d", .area = "network", .name = "Only declared ports open", .why = "", .how = "", .result = .skip, .detail = "listening: 22" },
+        .{
+            .id = "a",
+            .area = "kernel",
+            .name = "Kernel lockdown",
+            .why = "",
+            .how = "",
+            .result = .pass,
+            .detail = "integrity",
+        },
+        .{
+            .id = "b",
+            .area = "kernel",
+            .name = "No SysRq",
+            .why = "",
+            .how = "",
+            .result = .fail,
+            .detail = "kernel.sysrq is 176",
+        },
+        .{
+            .id = "c",
+            .area = "processes",
+            .name = "No setuid or setgid programs",
+            .why = "",
+            .how = "",
+            .result = .fail,
+            .detail = "/usr/bin/su, /usr/bin/sudo, /usr/bin/passwd, /usr/bin/mount",
+        },
+        .{
+            .id = "d",
+            .area = "network",
+            .name = "Only declared ports open",
+            .why = "",
+            .how = "",
+            .result = .skip,
+            .detail = "listening: 22",
+        },
     };
-    const r: Report = .{ .time = "", .os = "Wolfi", .host = "h", .kernel = "6.12.1", .root = true, .summary = .{ .pass = 1, .fail = 2, .skip = 1 }, .checks = &checks };
+    const r: Report = .{
+        .time = "",
+        .os = "Wolfi",
+        .host = "h",
+        .kernel = "6.12.1",
+        .root = true,
+        .summary = .{ .pass = 1, .fail = 2, .skip = 1 },
+        .checks = &checks,
+    };
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try printText(&out.writer, r, 60);
@@ -2465,26 +3497,71 @@ test printText {
     // Not a terminal: nothing is cut.
     out.clearRetainingCapacity();
     try printText(&out.writer, r, null);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "/usr/bin/passwd, /usr/bin/mount\n") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out.written(),
+        "/usr/bin/passwd, /usr/bin/mount\n",
+    ) != null);
 }
 
 test printLine {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const checks = [_]Check{
-        .{ .id = "programs-shell", .area = "programs", .name = "No shell", .why = "", .how = "", .result = .fail },
-        .{ .id = "kernel-lockdown", .area = "kernel", .name = "Kernel lockdown", .why = "", .how = "", .result = .pass },
-        .{ .id = "kernel-io-uring", .area = "kernel", .name = "No io_uring", .why = "", .how = "", .result = .fail },
+        .{
+            .id = "programs-shell",
+            .area = "programs",
+            .name = "No shell",
+            .why = "",
+            .how = "",
+            .result = .fail,
+        },
+        .{
+            .id = "kernel-lockdown",
+            .area = "kernel",
+            .name = "Kernel lockdown",
+            .why = "",
+            .how = "",
+            .result = .pass,
+        },
+        .{
+            .id = "kernel-io-uring",
+            .area = "kernel",
+            .name = "No io_uring",
+            .why = "",
+            .how = "",
+            .result = .fail,
+        },
     };
-    const r: Report = .{ .time = "t", .os = "o", .host = "h", .kernel = "k", .root = true, .summary = .{ .pass = 1, .fail = 2 }, .checks = &checks };
+    const r: Report = .{
+        .time = "t",
+        .os = "o",
+        .host = "h",
+        .kernel = "k",
+        .root = true,
+        .summary = .{ .pass = 1, .fail = 2 },
+        .checks = &checks,
+    };
     var out: Io.Writer.Allocating = .init(arena.allocator());
     try printLine(arena.allocator(), &out.writer, r);
     const line = out.written();
-    try testing.expect(std.mem.startsWith(u8, line, "posture: fail=kernel-io-uring,programs-shell pass=1 skip=0 {\"tool\":\"posture\","));
+    try testing.expect(std.mem.startsWith(
+        u8,
+        line,
+        "posture: fail=kernel-io-uring,programs-shell pass=1 skip=0 {\"tool\":\"posture\",",
+    ));
     try testing.expectEqual(1, std.mem.count(u8, line, "\n"));
     try testing.expect(std.mem.endsWith(u8, line, "}\n"));
 
-    const clean: Report = .{ .time = "t", .os = "o", .host = "h", .kernel = "k", .root = true, .summary = .{ .pass = 1 }, .checks = checks[1..2] };
+    const clean: Report = .{
+        .time = "t",
+        .os = "o",
+        .host = "h",
+        .kernel = "k",
+        .root = true,
+        .summary = .{ .pass = 1 },
+        .checks = checks[1..2],
+    };
     out.clearRetainingCapacity();
     try printLine(arena.allocator(), &out.writer, clean);
     try testing.expect(std.mem.startsWith(u8, out.written(), "posture: fail= pass=1 skip=0 {"));
@@ -2523,7 +3600,10 @@ test fit {
 }
 
 test prettyName {
-    try testing.expectEqualStrings("Ubuntu 24.04.1 LTS", prettyName("NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n"));
+    try testing.expectEqualStrings(
+        "Ubuntu 24.04.1 LTS",
+        prettyName("NAME=\"Ubuntu\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n"),
+    );
     try testing.expectEqualStrings("Wolfi", prettyName("ID=wolfi\nPRETTY_NAME=Wolfi\n"));
     try testing.expectEqualStrings("Linux", prettyName("PRETTY_NAME=\"\"\n"));
     try testing.expectEqualStrings("Linux", prettyName(""));

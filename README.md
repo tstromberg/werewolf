@@ -127,7 +127,8 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 | `sshd` | minimal | openssh-server, sftp-server, busybox (a shell to log in to) | RAM | :22 | 7.8 MB | | 24 |
 | `prod-ssh` | prod | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.4 MB | 9.5 MB | 33 |
 | `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 13.8 MB | 10.9 MB | 39 |
-| `demo` | prod | nginx, grype, a status page; updates hourly ([docs/demo.md](docs/demo.md)) | a directory on the victim | :80 | 30.5 MB | 27.5 MB | 32 |
+| `postgresql` | prod | PostgreSQL 17 on a UNIX socket for the machine's own services, leashed; no TCP ([docs/postgresql.md](docs/postgresql.md)) | a directory on the victim | nothing | 78.7 MB | 76.0 MB | 54 |
+| `demo` | postgresql | nginx, grype, a status page that keeps its history in PostgreSQL; updates hourly ([docs/demo.md](docs/demo.md)) | a directory on the victim | :80 | 99.0 MB | 96.4 MB | 61 |
 | `qemu-host` | sshd | QEMU, KVM: runs virtual machines of its own, whose guests cannot nest; allows `kvm` | RAM | :22 | 48 MB | | 77 |
 
 1. **Forms build on each other with apko's `include:`.** The Makefile

@@ -27,12 +27,20 @@ pub fn main(init: std.process.Init) !void {
     var names: [max_devices][]const u8 = undefined;
     var n: usize = 0;
 
-    var d = Io.Dir.cwd().openDir(io, "/dev/input", .{ .iterate = true }) catch park(io, "no input devices, staying down");
+    var d = Io.Dir.cwd().openDir(
+        io,
+        "/dev/input",
+        .{ .iterate = true },
+    ) catch park(io, "no input devices, staying down");
     defer d.close(io);
     var it = d.iterate();
     while (try it.next(io)) |e| {
         if (!std.mem.startsWith(u8, e.name, "event") or n == max_devices) continue;
-        const path = try std.fmt.allocPrintSentinel(init.arena.allocator(), "/dev/input/{s}", .{e.name}, 0);
+        const path = try init.arena.allocator().printSentinel(
+            "/dev/input/{s}",
+            .{e.name},
+            0,
+        );
         const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
         if (linux.errno(rc) != .SUCCESS) continue;
         fds[n] = .{ .fd = @intCast(rc), .events = linux.POLL.IN, .revents = 0 };
@@ -79,7 +87,7 @@ fn park(io: Io, why: []const u8) noreturn {
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [256]u8 = undefined;
-    const line = std.fmt.bufPrint(&buf, "powerbtn: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "powerbtn: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 
