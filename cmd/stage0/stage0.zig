@@ -34,6 +34,9 @@ const find_for = 10; // seconds to wait for the victim's disk to appear
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
+    // How long the kernel took: the boot clock as the first program starts.
+    // init shows it with its own, and the demo's page with the services'.
+    const kernel_ms = bootMs();
 
     mountFs("proc", "/proc", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     mountFs("sys", "/sys", "sysfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
@@ -134,7 +137,10 @@ pub fn main(init: std.process.Init) !void {
     )) != .SUCCESS) fail("cannot move the root over /", .{});
     if (linux.errno(linux.chroot(".")) != .SUCCESS) fail("cannot enter the root", .{});
     _ = linux.chdir("/");
-    const err = std.process.replace(io, .{ .argv = &.{"/init"} });
+    say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
+    var env = try init.environ_map.clone(gpa);
+    try env.put("WEREWOLF_KERNEL_MS", try gpa.print("{d}", .{kernel_ms}));
+    const err = std.process.replace(io, .{ .argv = &.{"/init"}, .environ_map = &env });
     fail("cannot start /init: {s}", .{@errorName(err)});
 }
 
@@ -519,4 +525,11 @@ test LoopConfig {
 test isLocked {
     try testing.expect(isLocked("none [integrity] confidentiality\n"));
     try testing.expect(!isLocked("[none] integrity confidentiality\n"));
+}
+
+/// Milliseconds since the kernel started its clock.
+fn bootMs() u64 {
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }

@@ -120,6 +120,28 @@ DHCP client's parent, whose seccomp filter allows no netlink. So the seal
 goes after fence's netlink step and before runit starts anything. Landlock
 needs nothing from the seal.
 
+## Files
+
+The same Landlock ruleset holds every process's files, root's included,
+from runit on:
+
+| | Allowed | Refused to everyone |
+| --- | --- | --- |
+| Read | everywhere | |
+| Write | `/run`, `/tmp`, `/var/tmp`, `/dev/shm`, `/data`; `/dev/null`, `zero`, `full`, `random`, `urandom`, `kmsg`; terminals | `/proc`, `/sys`, a disk itself, the image |
+| Execute | beneath `/usr`, where every program and service link leads | anything written since boot, wherever |
+| Make sockets, FIFOs | `/run` | elsewhere |
+| Make device nodes | `/data`, which is `nodev`, for apk building a slot | elsewhere |
+| Device ioctls | terminals: `/dev/console`, `/dev/ptmx`, `/dev/pts`, and every `tty*` and `hvc*` in `/dev` at boot | every other device |
+
+Not even root can change a sysctl or a sysfs setting init left, or write
+under a filesystem to its disk, until the machine reboots. A domain that
+handles files also refuses `mount`, `umount` and `pivot_root` to every
+process in it; the mounts werewolf makes after boot (an update's slot,
+GRUB's environment, the ESP, shutdown) are made by `mount-broker`, which
+init starts before it becomes fence, outside the domain, and which takes
+a word, never a path ([pledge.md](pledge.md)).
+
 ## Checked
 
 `posture` tests each protection on a running machine, and fails it where
@@ -133,6 +155,7 @@ it is missing, on any Linux:
 | `network-metadata` | TCP connect() to 169.254.169.254:80, one second at most: EACCES |
 | `network-inbound` | the rules (RTM_GETRULE) drop arriving traffic before delivering it, and refuse undeclared sent traffic |
 | `network-ipv6` | IPv6 is off, or its rules (AF_INET6) drop and refuse as IPv4's do |
+| `files-system-writes` | opening a sysctl, a sysfs setting and the first disk for writing, without writing: EACCES |
 
 Tested under QEMU, on aarch64:
 

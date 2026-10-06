@@ -1,12 +1,14 @@
 -- The demo's page and scan keep what they find here (cmd/status-page/status-page.zig).
 -- The status role owns it; grype may add scans and nothing more. pg-init
 -- applies this before every start of the server, so each statement is one
--- that changes nothing the second time. In single-user mode, a statement
--- ends at a semicolon before an empty line.
+-- that changes nothing the second time, and raises no error doing so:
+-- pg-init stops at the first error, which then no EXCEPTION clause can
+-- catch, so a role is made only where pg_roles has none. In single-user
+-- mode, a statement ends at a semicolon before an empty line.
 
-DO $$ BEGIN CREATE ROLE status LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'status') THEN CREATE ROLE status LOGIN; END IF; END $$;
 
-DO $$ BEGIN CREATE ROLE grype LOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'grype') THEN CREATE ROLE grype LOGIN; END IF; END $$;
 
 CREATE SCHEMA IF NOT EXISTS status AUTHORIZATION status;
 

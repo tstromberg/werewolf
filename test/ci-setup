@@ -26,12 +26,12 @@ erofs_sha256=7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
 arch=$(uname -m)
 case $arch in
 x86_64)
-	go=amd64 qemu=qemu-system-x86 efi=
+	go=amd64 qemu=qemu-system-x86 efi=ovmf # UEFI: the demo's disk (check-persist)
 	apko_sha256=b8c39ff7e63864efa1296d36a95d3c56f750ef2ab41cdc6d7fad0ae6a483b604
 	zig_sha256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 	;;
 aarch64)
-	go=arm64 qemu=qemu-system-arm efi=qemu-efi-aarch64 # UEFI: arm64 guests' SMBIOS
+	go=arm64 qemu=qemu-system-arm efi=qemu-efi-aarch64 # UEFI: arm64 guests' SMBIOS, the demo's disk
 	apko_sha256=47ec5e9e66372629919598f5176b37e9e47a3be456b2c8c9541a891065123fbb
 	zig_sha256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
 	;;

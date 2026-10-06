@@ -718,7 +718,7 @@ CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.
 CHECK_SLOT_FORM = bitten
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 
-check: $(addprefix check-,$(FORMS)) $(SHELLFREE_CHECKS) check-slot check-nodata check-lease check-unsigned check-metadata
+check: $(addprefix check-,$(FORMS)) $(SHELLFREE_CHECKS) check-slot check-persist check-nodata check-lease check-unsigned check-metadata
 	@echo "check: every form, and a slot, passed"
 
 # One form's two boots, REPEAT times (10 unless given), for a failure that
@@ -884,6 +884,37 @@ _check-slot-boot:
 	@grep -a -o 'saved_entry=werewolf-[ab]' $(CHECK)/victim.img | sort -u | grep -qx saved_entry=werewolf-a || \
 		{ echo "FAIL   slot               GRUB's default is not werewolf-a after commit"; exit 1; }
 	@echo "pass   slot               GRUB's default is werewolf-a"
+
+# PostgreSQL's data must outlive a reboot: the demo as it ships, a werewolf
+# disk (make disk: GPT, systemd-boot, werewolf's ext4 with its slots and
+# data/), booted twice under UEFI from the same image (test/checks-persist,
+# test/checks-persist-again). The first makes the cluster and stores its
+# posture; the second must keep both, and find the first's. Its network
+# reaches nothing beyond QEMU (restrict=on), so the updater, finding no
+# newer packages, builds no slot b mid-test, and the scan fetches no
+# database. After the demo's own check, which builds the same form in the
+# same place.
+UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
+	/opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd \
+	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd, \
+	/opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/local/share/qemu/edk2-x86_64-code.fd \
+	/usr/share/qemu/edk2-x86_64-code.fd /usr/share/ovmf/OVMF.fd)))
+PERSIST_QEMU = $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -bios $(UEFI_FIRMWARE) \
+	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
+	-drive file=$(CHECK)/persist.img,format=raw,if=virtio
+.PHONY: check-persist _check-persist-boot
+check-persist: | $(CHECK_SHARED) check-demo
+	@mkdir -p $(CHECK)
+	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
+	@rm -f $(CHECK)/persist.img
+	@$(CHECK_MAKE) FORM=demo disk DISK=$(CHECK)/persist.img DISK_MIB=2048 \
+		DISK_ARGS="werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS)" >$(CHECK)/persist-build.log 2>&1 || \
+		{ tail -n 20 $(CHECK)/persist-build.log; echo "FAIL   persist build: see $(CHECK)/persist-build.log"; exit 1; }
+	@$(CHECK_MAKE) FORM=demo _check-persist-boot
+
+_check-persist-boot:
+	@test/boot persist test/checks-persist $(CHECK)/persist.log $(PERSIST_QEMU)
+	@test/boot persist-again test/checks-persist-again $(CHECK)/persist-again.log $(PERSIST_QEMU)
 
 # A whole update, over the network, so not part of `check`, which needs
 # none: a form as it ships, on slot a of a disk, its build record claiming

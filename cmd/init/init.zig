@@ -109,7 +109,21 @@ pub fn main(init: std.process.Init) !void {
         .environ_map = &m.env,
         .stdin = .ignore,
     })) |_| {} else |broker_err| say("no mount broker: {s}", .{@errorName(broker_err)});
-    say("up in {s}s, handing over to runit", .{firstWord(m.read("/proc/uptime"))});
+    // How long the boot took, for the console and the demo's page: the
+    // kernel's part, which stage0 measured, and userland's, stage0 and init.
+    const kernel_ms = std.fmt.parseInt(u64, m.env.get("WEREWOLF_KERNEL_MS") orelse "0", 10) catch 0;
+    _ = m.env.swapRemove("WEREWOLF_KERNEL_MS");
+    const up_ms = bootMs();
+    m.write(
+        "/run/werewolf/boot",
+        m.fmt("{{\"kernel_ms\":{d},\"userland_ms\":{d}}}\n", .{ kernel_ms, up_ms -| kernel_ms }),
+        0o644,
+    );
+    say("up in {s}s (the kernel {s}s, userland {s}s), handing over to runit", .{
+        m.fmt("{d}.{d:0>3}", .{ up_ms / 1000, up_ms % 1000 }),
+        m.fmt("{d}.{d:0>3}", .{ kernel_ms / 1000, kernel_ms % 1000 }),
+        m.fmt("{d}.{d:0>3}", .{ (up_ms -| kernel_ms) / 1000, (up_ms -| kernel_ms) % 1000 }),
+    });
     const err = std.process.replace(
         m.io,
         .{ .argv = &.{ "/usr/lib/werewolf/fence", "/usr/bin/runit" }, .environ_map = &m.env },
@@ -1564,4 +1578,11 @@ test "small parsers" {
         lockdownLevel("none [integrity] confidentiality\n"),
     );
     try testing.expectEqualStrings("12.34", firstWord("12.34 56.78\n"));
+}
+
+/// Milliseconds since the kernel started its clock.
+fn bootMs() u64 {
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }

@@ -73,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
         www_dir,
     ) catch |err| record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
     record(io, .{ .event = "start" });
+    timeBoot(io);
 
     var failing = false;
     while (true) {
@@ -136,6 +137,8 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     // From PostgreSQL where the form runs it; from the files otherwise.
     const kept = fromDatabase(io, gpa);
     f.database = kept.said;
+    f.database_warn = kept.warn;
+    f.boot = boot_said;
     f.posture = kept.posture orelse posture(io, gpa);
     f.scan = kept.scan;
     if (f.scan == null) if (readAll(io, gpa, summary_path)) |text| {
@@ -209,6 +212,10 @@ const Facts = struct {
     data: []const u8,
     /// What PostgreSQL keeps, or why the page reads files instead.
     database: []const u8 = "",
+    /// Whether the database row needs a warning: no answer, or lost data.
+    database_warn: bool = false,
+    /// How long the boot took, when the page started.
+    boot: []const u8 = "",
     packages: []const Package,
     last_check: ?Event = null,
     patches: []const Patch = &.{},
@@ -376,7 +383,8 @@ fn writeSystem(w: *Io.Writer, f: Facts) !void {
         &.{if (f.shell) "/bin/sh: built in for debugging; no service uses it" else "none"},
     );
     try row(w, "/data", &.{f.data});
-    try row(w, "Database", &.{f.database});
+    try row(w, "Database", &.{ if (f.database_warn) "⚠️ " else "", f.database });
+    if (f.boot.len > 0) try row(w, "Boot", &.{f.boot});
     try w.writeAll("</tbody></table></div>\n");
 }
 
@@ -1055,26 +1063,156 @@ fn posture(io: Io, gpa: Allocator) ?Posture {
 // there, or says no, the page reads the files in /data/svc as before.
 
 const pg_socket = "/run/svc/postgres/.s.PGSQL.5432";
+
+// --- how long the boot took ------------------------------------------------
+//
+// The kernel's part and userland's (stage0 and init), which init leaves in
+// /run/werewolf/boot, and when nginx and PostgreSQL first answered: nginx
+// listening on :80, and PostgreSQL's socket taking a connection, as the page
+// sees them, looking every 25 ms from its own start for up to 30 seconds.
+// Each is time since the kernel started its clock.
+
+/// The Boot row, worked out once, as the page starts.
+var boot_said: []const u8 = "";
+var boot_buf: [256]u8 = undefined;
+
+fn timeBoot(io: Io) void {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const Times = struct { kernel_ms: u64 = 0, userland_ms: u64 = 0 };
+    const t = std.json.parseFromSliceLeaky(
+        Times,
+        gpa,
+        readOr(io, gpa, "/run/werewolf/boot", "{}"),
+        .{ .ignore_unknown_fields = true },
+    ) catch Times{};
+    const want_nginx = exists(io, "/etc/sv/nginx");
+    const want_pg = exists(io, "/etc/sv/postgres");
+    var nginx_ms: ?u64 = null;
+    var pg_ms: ?u64 = null;
+    var tries: u32 = 0;
+    while (tries < 30_000 / 25) : (tries += 1) {
+        _ = arena.reset(.retain_capacity);
+        if (want_nginx and nginx_ms == null and
+            listening(io, arena.allocator(), 80)) nginx_ms = bootMs();
+        if (want_pg and pg_ms == null and socketAnswers(pg_socket)) pg_ms = bootMs();
+        if ((!want_nginx or nginx_ms != null) and (!want_pg or pg_ms != null)) break;
+        io.sleep(.fromMilliseconds(25), .awake) catch break;
+    }
+    record(
+        io,
+        .{
+            .event = "boot",
+            .kernel_ms = t.kernel_ms,
+            .userland_ms = t.userland_ms,
+            .nginx_ms = nginx_ms,
+            .postgresql_ms = pg_ms,
+        },
+    );
+    var w: Io.Writer = .fixed(&boot_buf);
+    w.print(
+        "the kernel {d}.{d:0>2} s, userland {d}.{d:0>2} s",
+        .{
+            t.kernel_ms / 1000,
+            t.kernel_ms % 1000 / 10,
+            t.userland_ms / 1000,
+            t.userland_ms % 1000 / 10,
+        },
+    ) catch return;
+    if (want_nginx) if (nginx_ms) |ms|
+        w.print("; nginx answering at {d}.{d:0>2} s", .{ ms / 1000, ms % 1000 / 10 }) catch return
+    else
+        w.writeAll("; nginx not answering after 30 s") catch return;
+    if (want_pg) if (pg_ms) |ms|
+        w.print("; PostgreSQL at {d}.{d:0>2} s", .{ ms / 1000, ms % 1000 / 10 }) catch return
+    else
+        w.writeAll("; PostgreSQL not answering after 30 s") catch return;
+    boot_said = w.buffered();
+}
+
+/// Whether something listens on TCP port, by /proc/net/tcp and tcp6.
+fn listening(io: Io, gpa: Allocator, port: u16) bool {
+    return listensOn(readOr(io, gpa, "/proc/net/tcp", ""), port) or
+        listensOn(readOr(io, gpa, "/proc/net/tcp6", ""), port);
+}
+
+/// Whether a /proc/net/tcp table has a socket listening (state 0A) on port.
+fn listensOn(table: []const u8, port: u16) bool {
+    var hex: [5]u8 = undefined;
+    const want = std.mem.print(&hex, ":{X:0>4}", .{port}) catch return false;
+    var lines = std.mem.tokenizeScalar(u8, table, '\n');
+    _ = lines.next(); // the header
+    while (lines.next()) |line| {
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = f.next() orelse continue;
+        const local = f.next() orelse continue;
+        _ = f.next() orelse continue;
+        const state = f.next() orelse continue;
+        if (std.mem.endsWith(u8, local, want) and std.mem.eql(u8, state, "0A")) return true;
+    }
+    return false;
+}
+
+/// Whether a UNIX socket takes a connection.
+fn socketAnswers(path: []const u8) bool {
+    const linux = std.os.linux;
+    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(rc));
+    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    @memcpy(addr.path[0..path.len], path);
+    return linux.errno(linux.connect(
+        @intCast(rc),
+        @ptrCast(&addr),
+        @sizeOf(linux.sockaddr.un),
+    )) == .SUCCESS;
+}
+
+/// Milliseconds since the kernel started its clock.
+fn bootMs() u64 {
+    const linux = std.os.linux;
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
+    return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
 const pg_max_message = 16 << 20;
 
 /// This boot's posture, once in the database, is not sent again.
 var posture_kept = false;
+/// Said on the console, with what the database holds, once it is kept.
+var posture_just_kept = false;
+/// Lost data is said on the console once, not once a minute.
+var data_lost = false;
 
-const Kept = struct { posture: ?Posture = null, scan: ?Summary = null, said: []const u8 };
+const Kept = struct {
+    posture: ?Posture = null,
+    scan: ?Summary = null,
+    said: []const u8,
+    warn: bool = false,
+};
+
+/// The most the database has held, as the page last saw it: a database
+/// that holds less has lost what it was given.
+const kept_path = state_dir ++ "/kept";
 
 /// Whether the last pass could not use the database: a failure is said
 /// on the console once, as it begins, not once a minute.
 var db_failing = false;
 
 fn fromDatabase(io: Io, gpa: Allocator) Kept {
-    if (!exists(io, pg_socket)) return .{ .said = "none; the page reads its files" };
+    if (!exists(io, "/etc/sv/postgres")) return .{ .said = "none; the page reads its files" };
+    if (!exists(
+        io,
+        pg_socket,
+    )) return .{ .said = "PostgreSQL is not answering; the page reads its files", .warn = true };
     const kept = readDatabase(io, gpa) catch |err| {
         if (!db_failing) record(
             io,
             .{ .event = "error", .step = "database", .@"error" = @errorName(err) },
         );
         db_failing = true;
-        return .{ .said = whyNot(gpa, err) };
+        return .{ .said = whyNot(gpa, err), .warn = true };
     };
     db_failing = false;
     return kept;
@@ -1092,7 +1230,7 @@ fn readDatabase(io: Io, gpa: Allocator) !Kept {
             &.{ boot, text },
         );
         posture_kept = true;
-        record(io, .{ .event = "database", .kept = "posture" });
+        posture_just_kept = true;
     } else |_| {};
     const rows = try db.query(gpa,
         \\SELECT current_setting('server_version'),
@@ -1106,6 +1244,41 @@ fn readDatabase(io: Io, gpa: Allocator) !Kept {
     const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
     const boots = r[3] orelse "0";
     const scans = r[4] orelse "0";
+    const nb = std.fmt.parseInt(u64, boots, 10) catch 0;
+    const ns = std.fmt.parseInt(u64, scans, 10) catch 0;
+    if (posture_just_kept) {
+        posture_just_kept = false;
+        record(io, .{ .event = "database", .kept = "posture", .boots = nb, .scans = ns });
+    }
+    // What the page saw before, against what is there now.
+    var before = std.mem.tokenizeAny(u8, readOr(io, gpa, kept_path, ""), " \n");
+    const had_boots = std.fmt.parseInt(u64, before.next() orelse "0", 10) catch 0;
+    const had_scans = std.fmt.parseInt(u64, before.next() orelse "0", 10) catch 0;
+    if (nb < had_boots or ns < had_scans) {
+        if (!data_lost) record(
+            io,
+            .{
+                .event = "error",
+                .step = "database",
+                .@"error" = "DataLost",
+                .boots = nb,
+                .scans = ns,
+                .had_boots = had_boots,
+                .had_scans = had_scans,
+            },
+        );
+        data_lost = true;
+        return .{ .said = try gpa.print("PostgreSQL has lost data: it held the checks of {d} " ++
+            "boots and {d} scans, " ++
+            "and now holds {d} and {d}", .{ had_boots, had_scans, nb, ns }), .warn = true };
+    }
+    if (nb != had_boots or
+        ns != had_scans) writeAtomic(
+        io,
+        gpa,
+        kept_path,
+        try gpa.print("{d} {d}\n", .{ nb, ns }),
+    ) catch {};
     return .{
         .posture = if (r[1]) |t|
             std.json.parseFromSliceLeaky(Posture, gpa, t, opts) catch null
@@ -1771,6 +1944,18 @@ test dataRow {
     try testing.expectEqualStrings("", cols[2].?);
     try testing.expectError(error.Lost, dataRow(arena.allocator(), &.{ 0, 1, 0, 0, 0, 9, 'x' }));
     try testing.expectError(error.Lost, dataRow(arena.allocator(), &.{0}));
+}
+
+test listensOn {
+    const table =
+        \\  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+        \\   0: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000   200        0 1234
+        \\   1: 0100007F:1F90 0100007F:0050 01 00000000:00000000 00:00000000 00000000     0        0 0
+    ;
+    try testing.expect(listensOn(table, 80));
+    try testing.expect(!listensOn(table, 8080)); // connected, not listening
+    try testing.expect(!listensOn(table, 443));
+    try testing.expect(!listensOn("", 80));
 }
 
 test parseInstalled {

@@ -1,6 +1,8 @@
 # pledge
 
-Proposed, 2026-10-06.
+Proposed, 2026-10-06. The mount broker and the machine-wide rules are
+built (cmd/mount-broker, fence.md's Files); promises are leash's floor,
+less the words.
 
 OpenBSD's `pledge` restricts a program to classes of work, and `unveil` to
 the parts of the filesystem it names. What makes them usable is that a
@@ -82,8 +84,12 @@ The .net files could use the same words: `connect _update dns tcp/443`.
 
 ## Order
 
-1. The mount broker, which the machine-wide rules depend on.
-2. The machine-wide rules, in `fence`.
+1. The mount broker, which the machine-wide rules depend on. Done:
+   `grub`, `esp`, `victim` and `shutdown`, the mounts held as long as the
+   asker's connection; `slot-keep`, `slot-update`, `bite-cleanup` and stage
+   3 ask it, through lib/broker.zig.
+2. The machine-wide rules, in `fence`. Done (fence.md, Files);
+   `posture`'s `files-system-writes` checks them.
 3. Promises in service files, with `leash`.
 
 ## Not covered
