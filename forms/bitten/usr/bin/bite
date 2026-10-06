@@ -5,9 +5,10 @@
 #   bite --undo                                      on the distro
 #   bite [-n] --cleanup                              in werewolf, after commit
 #
-# IMAGE_DIR holds a werewolf build for this machine's architecture, vmlinuz
-# and initramfs.zst, of a form that can live on a bitten machine (bitten, or
-# one with blkid and util-linux mount; see README, Bite).
+# IMAGE_DIR holds a slot built for this machine's architecture (`make slot`):
+# vmlinuz, initramfs.zst (stage0) and root.erofs, of a form that can live on
+# a bitten machine (bitten, or one with its packages and modules; see
+# README, Bite).
 #
 # Nothing of the distro is removed. bite adds a GRUB entry and boots it once;
 # werewolf makes itself the default only after its services have stayed up
@@ -72,7 +73,7 @@ cleanup() {
 	# is werewolf, a reset still boots the distro.
 	mount -o nosuid,nodev,noexec "$(dev "${genv%%:*}")" "$m/env" || die "cannot mount ${genv%%:*}"
 	committed=''
-	grep -a -q "^saved_entry=$entry\$" "$m/env${genv#*:}" && committed=1
+	grep -a -q "^saved_entry=$entry-[ab]\$" "$m/env${genv#*:}" && committed=1
 	umount "$m/env"
 	[ -n "$committed" ] || die "werewolf is not yet GRUB's default; the distro is still its fallback"
 
@@ -155,15 +156,15 @@ settle() {
 }
 
 undo() {
-	rm -f /etc/grub.d/42_werewolf /etc/default/grub.d/99-werewolf.cfg /boot/loader/entries/werewolf.conf
+	rm -f /etc/grub.d/42_werewolf /etc/default/grub.d/99-werewolf.cfg /boot/loader/entries/werewolf-[ab].conf
 	rm -rf "$boot" "$home"
 	if [ -f "$grubenv" ]; then
 		"$g-editenv" "$grubenv" unset next_entry
-		if "$g-editenv" "$grubenv" list | grep -q "^saved_entry=$entry\$"; then
+		if "$g-editenv" "$grubenv" list | grep -q "^saved_entry=$entry-[ab]\$"; then
 			"$g-editenv" "$grubenv" unset saved_entry
 		fi
 	fi
-	[ "$style" = grub.d ] && "$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
+	"$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
 	settle
 	say "werewolf removed; the distro boots as before"
 }
@@ -176,7 +177,8 @@ fi
 # Everything werewolf cannot find out for itself is found out here, and
 # anything it could not cope with stops bite before it changes a thing.
 [ -n "$image" ] || die "usage: bite [-n] [--reboot] [--config DIR] IMAGE_DIR"
-[ -f "$image/vmlinuz" ] && [ -f "$image/initramfs.zst" ] || die "$image has no vmlinuz and initramfs.zst"
+[ -f "$image/vmlinuz" ] && [ -f "$image/initramfs.zst" ] && [ -f "$image/root.erofs" ] ||
+	die "$image is not a slot: it needs vmlinuz, initramfs.zst and root.erofs (make slot)"
 [ -z "$extra" ] || [ -d "$extra" ] || die "--config $extra is not a directory"
 
 no=''
@@ -280,7 +282,11 @@ if [ -z "$console" ]; then
 		fi
 	done
 fi
-cmdline="${console}werewolf.ip=$cidr werewolf.gw=$gw werewolf.dns=$dns werewolf.mac=$mac werewolf.victim=$victim werewolf.grubenv=$genv"
+# A panic, or a lockup made one, reboots in ten seconds; GRUB then boots the
+# slot that last committed. See stage0/init. init= because a kernel whose
+# /init will not run otherwise tries /sbin/init and then /bin/sh, which is a
+# root shell on the console; named, a failed init is a panic instead.
+cmdline="${console}init=/init panic=10 softlockup_panic=1 werewolf.ip=$cidr werewolf.gw=$gw werewolf.dns=$dns werewolf.mac=$mac werewolf.victim=$victim werewolf.grubenv=$genv"
 
 krel=$("$g-mkrelpath" "$(dirname "$boot")")/werewolf
 krel=/${krel#/}
@@ -295,12 +301,14 @@ if [ -n "$dry" ]; then
 fi
 
 # --- install --------------------------------------------------------------------
-mkdir -p "$boot"
-cp "$image/vmlinuz" "$image/initramfs.zst" "$boot/"
-
-mkdir -p "$home"
+# Slot a holds this image; b stays empty until autoupdate builds into it.
+# GRUB reads the kernel and stage0 from /boot; stage0 reads root.erofs from
+# the victim's filesystem, where there is room.
+mkdir -p "$boot/a" "$home"
+cp "$image/vmlinuz" "$image/initramfs.zst" "$boot/a/"
 chmod 0700 "$home"
-mkdir -p "$home/data"
+mkdir -p "$home/a" "$home/data"
+cp "$image/root.erofs" "$home/a/"
 [ -f "$grubenv" ] || "$g-editenv" "$grubenv" create
 t=$(mktemp -d)
 # Root's keys, and those of whoever ran bite through sudo: werewolf lets
@@ -317,39 +325,52 @@ tar -cf "$home/config.tar" --owner=0 --group=0 -C "$t" .
 chmod 0600 "$home/config.tar"
 rm -rf "$t"
 
-case "$style" in
-grub.d)
-	# An entry after the distro's, written by the distro's own helpers so
-	# GRUB loads whatever it needs to read /boot.
-	cat >/etc/grub.d/42_werewolf <<EOF
+# Every distro gets /etc/grub.d/42_werewolf, run by its own grub-mkconfig.
+# It sets GRUB's fallback to the saved default, so that a slot GRUB cannot
+# load (a power cut before its files were written in place) falls back to
+# the slot that last committed instead of stopping at an error. Debian and
+# Ubuntu also get the two entries from it, written by the distro's own
+# helpers so GRUB loads whatever it needs to read /boot; Fedora and Rocky
+# take them as Boot Loader Spec files.
+{
+	cat <<EOF
 #!/bin/sh
 # Written by werewolf's bite; \`bite --undo\` removes it.
+echo 'set fallback="\${saved_entry}"'
+EOF
+	if [ "$style" = grub.d ]; then
+		cat <<EOF
 . /usr/share/grub/grub-mkconfig_lib
-echo "menuentry 'werewolf' --id $entry {"
-prepare_grub_to_access_device "\$($g-probe --target=device $boot)" | sed 's/^/	/'
-echo "	linux $krel/vmlinuz $cmdline"
-echo "	initrd $krel/initramfs.zst"
-echo "}"
+for s in a b; do
+	echo "menuentry 'werewolf \$s' --id $entry-\$s {"
+	prepare_grub_to_access_device "\$($g-probe --target=device $boot)" | sed 's/^/	/'
+	echo "	linux $krel/\$s/vmlinuz $cmdline werewolf.slot=\$s"
+	echo "	initrd $krel/\$s/initramfs.zst"
+	echo "}"
+done
 EOF
-	chmod 0755 /etc/grub.d/42_werewolf
-	# saved_entry, which commit writes, counts only with GRUB_DEFAULT=saved.
-	# Until it is written GRUB falls back to entry 0, the distro, as now.
-	mkdir -p /etc/default/grub.d
-	echo 'GRUB_DEFAULT=saved' >/etc/default/grub.d/99-werewolf.cfg
-	"$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
-	;;
-bls)
-	cat >/boot/loader/entries/werewolf.conf <<EOF
-title werewolf
-version 0-werewolf
-linux $krel/vmlinuz
-initrd $krel/initramfs.zst
-options $cmdline
+	fi
+} >/etc/grub.d/42_werewolf
+chmod 0755 /etc/grub.d/42_werewolf
+if [ "$style" = bls ]; then
+	for s in a b; do
+		cat >"/boot/loader/entries/$entry-$s.conf" <<EOF
+title werewolf $s
+version 0-werewolf-$s
+linux $krel/$s/vmlinuz
+initrd $krel/$s/initramfs.zst
+options $cmdline werewolf.slot=$s
 EOF
-	;;
-esac
+	done
+fi
+# saved_entry, which commit writes, counts only with GRUB_DEFAULT=saved
+# (Fedora and Rocky set it already). Until it is written GRUB falls back to
+# entry 0, the distro, as now.
+mkdir -p /etc/default/grub.d
+echo 'GRUB_DEFAULT=saved' >/etc/default/grub.d/99-werewolf.cfg
+"$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
 
-"$g-reboot" "$entry"
+"$g-reboot" "$entry-a"
 settle
 say "werewolf boots once at the next reboot; it becomes the default after a healthy minute"
 if [ -n "$reboot" ]; then

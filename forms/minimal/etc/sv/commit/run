@@ -1,18 +1,19 @@
 #!/bin/sh
-# A machine bite took over boots werewolf on probation: GRUB chose it for
-# this boot only, and the next reset goes back to the distro. Once every
-# running service has stayed up for a minute, make werewolf GRUB's default.
-# A machine that never gets healthy never commits, and a reset undoes it.
+# A new slot boots on probation: GRUB chose it for this boot only, and the
+# next reset goes back to the slot (or, after bite, the distro) that was
+# GRUB's default. Once every running service has stayed up for a minute,
+# make this slot the default, and leave /run/werewolf/committed for stage0's
+# deadman, which otherwise reboots the machine after ten minutes.
 #
-# werewolf.grubenv=UUID:PATH names GRUB's environment block: exactly 1024
-# bytes, a header line, name=value lines, then '#' to the end. GRUB itself
-# rewrites it in place, sector by sector, so this does too.
+# werewolf.grubenv=UUID:PATH names GRUB's environment block, which
+# /usr/lib/werewolf/grubenv rewrites in place.
 exec 2>&1
 [ -s /run/werewolf/grubenv ] || exec sv down .
 env=$(cat /run/werewolf/grubenv)
 uuid=${env%%:*}
 path=${env#*:}
-entry=werewolf
+slot=$(tr ' ' '\n' </proc/cmdline | sed -n 's/^werewolf\.slot=//p')
+entry=werewolf-${slot:-a}
 
 say() { echo "commit: $*"; }
 
@@ -20,11 +21,14 @@ healthy() {
 	for s in /etc/sv/*; do
 		[ "$s" = /etc/sv/commit ] && continue
 		st=$(sv status "$s")
+		# Running for a minute, or down because it asked to be (a service
+		# that parks itself); not down while wanted up, between crashes.
 		case "$st" in
 		run:*)
 			up=$(echo "$st" | sed -n 's/^run: [^ ]* (pid [0-9]*) \([0-9]*\)s.*/\1/p')
 			[ "${up:-0}" -ge 60 ] || return 1
 			;;
+		*"want up"*) return 1 ;;
 		esac
 	done
 }
@@ -49,25 +53,13 @@ if [ -z "$dir" ] || [ ! -f "$f" ]; then
 fi
 
 if grep -a -q "^saved_entry=$entry\$" "$f"; then
-	say "already GRUB's default"
-elif [ "$(wc -c <"$f")" -ne 1024 ] || ! head -n 1 "$f" | grep -q '^# GRUB Environment Block'; then
-	say "$f is not a GRUB environment block; not committing"
+	say "$entry is already GRUB's default"
+	touch /run/werewolf/committed
+elif /usr/lib/werewolf/grubenv "$f" saved_entry "$entry"; then
+	touch /run/werewolf/committed
+	say "healthy for a minute; $entry is now GRUB's default"
 else
-	new=/run/werewolf/grubenv.new
-	{
-		echo '# GRUB Environment Block'
-		grep -a -v -E '^(#|saved_entry=)' "$f"
-		echo "saved_entry=$entry"
-	} >"$new"
-	n=$(wc -c <"$new")
-	if [ "$n" -le 1024 ]; then
-		head -c $((1024 - n)) /dev/zero | tr '\0' '#' >>"$new"
-		dd if="$new" of="$f" conv=notrunc 2>/dev/null && sync &&
-			say "healthy for a minute; werewolf is now GRUB's default"
-	else
-		say "environment block would overflow; not committing"
-	fi
-	rm -f "$new"
+	say "not committing"
 fi
 [ "$dir" = /run/werewolf/boot ] && umount /run/werewolf/boot
 exec sv down .

@@ -1,0 +1,29 @@
+#!/bin/sh
+# grubenv FILE NAME VALUE: set NAME in GRUB's environment block, in place.
+#
+# The block is exactly 1024 bytes: a header line, name=value lines, then '#'
+# to the end. GRUB rewrites it in place, sector by sector, and reads it
+# without the filesystem's journal, so this writes the same bytes in the same
+# place rather than a new file: a data write the journal never holds.
+set -eu
+f=$1 name=$2 value=$3
+if [ "$(wc -c <"$f")" -ne 1024 ] || ! head -n 1 "$f" | grep -q '^# GRUB Environment Block'; then
+	echo "grubenv: $f is not a GRUB environment block" >&2
+	exit 1
+fi
+new=$(mktemp)
+{
+	echo '# GRUB Environment Block'
+	grep -a -v -E "^(#|$name=)" "$f" || true
+	echo "$name=$value"
+} >"$new"
+n=$(wc -c <"$new")
+if [ "$n" -gt 1024 ]; then
+	rm -f "$new"
+	echo "grubenv: $f would overflow" >&2
+	exit 1
+fi
+head -c $((1024 - n)) /dev/zero | tr '\0' '#' >>"$new"
+dd if="$new" of="$f" conv=notrunc 2>/dev/null
+rm -f "$new"
+sync

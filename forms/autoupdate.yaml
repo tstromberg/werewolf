@@ -1,0 +1,12 @@
+# autoupdate: bitten, keeping itself current. At boot and every 20 hours it
+# asks Wolfi and Alpine whether anything in this image has a newer version;
+# if so it builds the other slot on the machine, boots it once, and keeps it
+# only if it commits. See README, Autoupdate.
+include: bitten.yaml
+contents:
+  packages:
+    - apk-tools             # fetch and verify packages, against the keys in the image
+    - erofs-utils           # mkfs.erofs, for the new slot's root
+    - zstd                  # stage0's compression, as the build's
+    - jq                    # read Wolfi's security.json, for the CVEs an update fixes
+    - wget                  # fetch it over TLS that is verified, which busybox's wget is not

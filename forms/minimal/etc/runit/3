@@ -21,8 +21,15 @@ fi
 if [ -e /dev/mapper/data ]; then
 	cryptsetup close data && say "/data closed"
 fi
-# The victim's root filesystem, which /data was bound from.
+# The victim's root filesystem, which /data was bound from, and which may
+# hold the root itself (a slot's root.erofs, held open by a loop device, so
+# it is never wholly unmounted). GRUB reads it without the journal: a
+# read-only remount of the filesystem itself, not this one mount, writes
+# everything the journal holds into place, so the next boot's GRUB sees what
+# this one wrote. Allowed with the loop open, since it is open read-only.
 if mountpoint -q /victim; then
+	mount -o remount,ro /victim 2>/dev/null &&
+		say "/victim's filesystem is read-only, its journal written in place"
 	if umount /victim 2>/dev/null; then
 		say "/victim unmounted"
 	else

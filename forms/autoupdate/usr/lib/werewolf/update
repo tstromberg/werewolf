@@ -1,0 +1,206 @@
+#!/bin/sh
+# update check: if Wolfi or Alpine has anything newer than this image, build
+#               the other slot from them, boot it once, and reboot.
+# update outcome: log how the last update ended: committed, or rolled back.
+#
+# The other slot is built as `make slot` builds one, with apk where the
+# build has apko: the userland from this image's own /etc/apk (world,
+# repositories, Wolfi's key), the kernel from Alpine's linux-virt checked
+# against the two Alpine keys in /etc/werewolf/alpine-keys, and the rest
+# (werewolf's own files, the module list, stage0) from what the build
+# recorded in /usr/share/werewolf. Nothing is trusted that apk has not
+# verified against a key the image carries.
+#
+# Every event is one JSON line in /data/svc/autoupdate/log, and on the
+# console: check (nothing newer), update (what changed, the CVEs that fixes,
+# from which slot to which), commit, rollback, skip (a build that failed
+# before), error.
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+meta=/usr/share/werewolf
+state=/data/svc/autoupdate
+log=$state/log
+work=$state/work
+arch=$(cat /etc/apk/arch)
+mkdir -p "$state"
+
+record() { # record EVENT [NAME=VALUE...]
+	line="{\"time\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"host\":\"$(hostname)\",\"event\":\"$1\""
+	shift
+	for kv in "$@"; do
+		v=$(printf '%s' "${kv#*=}" | tr -d '\042\134' | tr '\n' ' ') # no quotes or backslashes
+		line="$line,\"${kv%%=*}\":\"$v\""
+	done
+	line="$line}"
+	echo "$line" >>"$log"
+	echo "autoupdate: $line"
+}
+
+victim='' slot='' grubenv=''
+for arg in $(cat /proc/cmdline); do
+	case "$arg" in
+	werewolf.victim=*) victim=${arg#*=} ;;
+	werewolf.slot=*) slot=${arg#*=} ;;
+	werewolf.grubenv=*) grubenv=${arg#*=} ;;
+	esac
+done
+other=b
+[ "$slot" = b ] && other=a
+
+# --- outcome ------------------------------------------------------------------
+# The last update left $state/attempt: the slot it built and a hash of what
+# went into it. Booted into that slot, and committed, it held; booted into
+# the other, it did not, and the same build is not tried again.
+if [ "${1:-}" = outcome ]; then
+	[ -f "$state/attempt" ] || exit 0
+	read -r tried hash <"$state/attempt"
+	if [ "$tried" = "$slot" ]; then
+		record commit slot="$slot" release="$(cat $meta/release)"
+	else
+		echo "$hash" >>"$state/bad"
+		record rollback failed="$tried" running="$slot" release="$(cat $meta/release)"
+	fi
+	rm -f "$state/attempt"
+	exit 0
+fi
+
+# --- check --------------------------------------------------------------------
+step=start
+finish() {
+	rc=$?
+	[ "$rc" -eq 0 ] || record error step="$step" status="$rc"
+	rm -rf "$work"
+}
+trap finish EXIT
+rm -rf "$work"
+mkdir -p "$work"
+
+step=userland
+apk --root "$work/root" --arch "$arch" --keys-dir /etc/apk/keys \
+	--repositories-file /etc/apk/repositories --no-scripts --quiet --no-progress \
+	add --initdb $(cat /etc/apk/world)
+
+step=kernel
+apk --root "$work/kernel" --arch "$arch" --keys-dir /etc/werewolf/alpine-keys \
+	--repository "$(cat $meta/alpine)" --no-scripts --quiet --no-progress \
+	add --initdb linux-virt
+
+step=compare
+apk info -v 2>/dev/null | sort >"$work/old"
+apk --root "$work/root" info -v 2>/dev/null | sort >"$work/new"
+oldk=$(cat $meta/kernel)
+# `apk info -v NAME` describes the package; the list names its version.
+newk=$(apk --root "$work/kernel" info -v 2>/dev/null | grep '^linux-virt-[0-9]')
+if cmp -s "$work/old" "$work/new" && [ "$oldk" = "$newk" ]; then
+	record check slot="$slot" release="$(cat $meta/release)" result=current
+	exit 0
+fi
+hash=$({ cat "$work/new"; echo "$newk"; } | sha256sum | cut -c1-16)
+if grep -qx "$hash" "$state/bad" 2>/dev/null; then
+	record skip build="$hash" reason="this build rolled back before"
+	exit 0
+fi
+# What changed, as "old -> new", "+added", "-removed".
+changes=$(awk '
+	function name(s) { sub(/-[^-]+-r[0-9]+$/, "", s); return s }
+	NR == FNR { old[name($0)] = $0; next }
+	{ n = name($0); seen[n] = 1
+	  if (!(n in old)) out = out sep "+" $0
+	  else if (old[n] != $0) out = out sep old[n] " -> " $0
+	  if (out != "") sep = "; " }
+	END { for (n in old) if (!(n in seen)) { out = out sep "-" old[n]; sep = "; " }
+	      print out }' "$work/old" "$work/new")
+
+# The CVEs those changes fix, from Wolfi's security.json beside its packages
+# (lib/werewolf/cves). For the log only: the file is not signed, so a fetch
+# that fails leaves "unavailable" and the update goes ahead. Alpine's secdb
+# does not track the kernel, so its CVEs are not here.
+step=cves
+cves=unavailable
+repo=$(head -n 1 /etc/apk/repositories)
+if wget -q -O "$work/secdb.json" "$repo/security.json"; then
+	cves=$(/usr/lib/werewolf/cves /lib/apk/db/installed "$work/root/lib/apk/db/installed" "$work/secdb.json") ||
+		cves=unavailable
+fi
+
+# --- build --------------------------------------------------------------------
+step=root
+r=$work/root
+# What apko does that apk does not: busybox's applet links, and no setuid
+# or setgid file in any form.
+for p in $(cat "$r"/etc/busybox-paths.d/* 2>/dev/null); do
+	[ -e "$r/${p#/}" ] || ln -s /usr/bin/busybox "$r/${p#/}"
+done
+# werewolf's own files, as the build laid them, and the apk setup and build
+# record the next update will need.
+(cd / && tar -cf - $(cat $meta/overlay) etc/apk/keys etc/apk/repositories etc/apk/arch) | tar -xf - -C "$r"
+mkdir -p "$r$meta"
+cp -a "$meta/." "$r$meta/"
+echo "$newk" >"$r$meta/kernel"
+echo "$(cat $meta/form) $(date -u +%Y%m%dT%H%M%SZ) $newk updated-on-$(hostname)" >"$r$meta/release"
+find "$r" -type f \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} +
+mkdir -p "$work/slot"
+mkfs.erofs -b 4096 -zlz4hc "$work/slot/root.erofs" "$r" >/dev/null
+
+step=vmlinuz
+k=$work/kernel
+cp "$k/boot/vmlinuz-virt" "$work/slot/vmlinuz"
+# Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
+# Image inside it, as the build does (see Makefile).
+v=$work/slot/vmlinuz
+if [ "$(dd if="$v" bs=1 skip=4 count=4 2>/dev/null)" = zimg ]; then
+	off=$(od -An -t u4 -j 8 -N 4 "$v" | tr -d ' ')
+	size=$(od -An -t u4 -j 12 -N 4 "$v" | tr -d ' ')
+	tail -c +$((off + 1)) "$v" | head -c "$size" | gunzip >"$v.raw"
+	mv "$v.raw" "$v"
+fi
+
+step=stage0
+s=$work/stage0
+apk --root "$s" --arch "$arch" --keys-dir /etc/apk/keys \
+	--repositories-file /etc/apk/repositories --no-scripts --quiet --no-progress \
+	add --initdb $(cat $meta/stage0.world)
+for p in $(cat "$s"/etc/busybox-paths.d/* 2>/dev/null); do
+	[ -e "$s/${p#/}" ] || ln -s /usr/bin/busybox "$s/${p#/}"
+done
+find "$s" -type f \( -perm -4000 -o -perm -2000 \) -exec chmod ug-s {} +
+cp $meta/stage0.init "$s/init"
+chmod 0755 "$s/init"
+kver=$(ls "$k/lib/modules")
+src=$k/lib/modules/$kver
+dst=$s/usr/lib/modules/$kver
+mkdir -p "$dst"
+for m in $(cat $meta/modules); do
+	awk -v m="$m" '$1 ~ ("/" m "\\.ko\\.gz:$") { sub(":", "", $1); for (i = NF; i >= 1; i--) print $i }' \
+		"$src/modules.dep"
+done | awk '!seen[$0]++' >"$dst/werewolf.modules"
+for p in $(cat "$dst/werewolf.modules"); do
+	mkdir -p "$dst/$(dirname "$p")"
+	cp "$src/$p" "$dst/$p"
+done
+(cd "$s" && find . | cpio -o -H newc 2>/dev/null) | zstd -19 -q >"$work/slot/initramfs.zst"
+
+# --- install ------------------------------------------------------------------
+# root.erofs beside this slot's on the victim's filesystem; the kernel and
+# stage0 beside this slot's in /boot/werewolf, next to GRUB's directory. Both
+# mounted apart and writable, as /victim is read-only.
+step=install
+mnt=$work/mnt
+mkdir -p "$mnt/v" "$mnt/g"
+mount -o nosuid,nodev,noexec "$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}")" "$mnt/v"
+mount -o nosuid,nodev,noexec "$(blkid -c /dev/null -l -o device -t UUID="${grubenv%%:*}")" "$mnt/g"
+gpath=${grubenv#*:}
+kdir=$mnt/g$(dirname "$(dirname "$gpath")")/werewolf/$other
+rdir=$mnt/v${victim#*:}/$other
+mkdir -p "$kdir" "$rdir"
+cp "$work/slot/root.erofs" "$rdir/root.erofs.new" && mv "$rdir/root.erofs.new" "$rdir/root.erofs"
+cp "$work/slot/vmlinuz" "$work/slot/initramfs.zst" "$kdir/"
+sync
+echo "$other $hash" >"$state/attempt"
+/usr/lib/werewolf/grubenv "$mnt/g$gpath" next_entry "werewolf-$other"
+umount "$mnt/v" "$mnt/g"
+
+step=reboot
+record update from="$slot" to="$other" build="$hash" kernel="$oldk -> $newk" packages="$changes" cves="$cves"
+reboot

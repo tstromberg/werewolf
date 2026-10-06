@@ -1,0 +1,11 @@
+#!/bin/sh
+# sshd, in forms that install it (sshd, lima); elsewhere it parks itself,
+# so a form adds ssh with a package and no files. Host keys are generated
+# on every boot: the root's writable layer is RAM, so they never outlive
+# the machine.
+exec 2>&1
+if [ ! -x /usr/bin/sshd ]; then
+	exec sv down .
+fi
+ssh-keygen -A >/dev/null
+exec /usr/bin/sshd -D -e

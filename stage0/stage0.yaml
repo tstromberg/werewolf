@@ -1,0 +1,23 @@
+# stage0: the small initramfs that boots a slot. It carries what it takes
+# to load the modules, find the victim's filesystem and mount root.erofs
+# from it, and nothing else; see stage0/init.
+contents:
+  repositories:
+    - https://packages.wolfi.dev/os
+  keyring:
+    - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+  packages:
+    - wolfi-baselayout
+    - busybox-full          # sh, chroot, sysctl
+    - kmod                  # insmod
+    - blkid                 # the victim's filesystem by UUID
+    - mount                 # util-linux: loop, overlay, --move
+
+paths:
+  - path: /usr/bin/mount
+    type: permissions
+    permissions: 0o755
+
+archs:
+  - aarch64
+  - x86_64

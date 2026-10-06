@@ -1,0 +1,18 @@
+#!/bin/sh
+# At boot, once this slot has committed, and every 20 hours after: ask
+# Wolfi and Alpine for anything newer, and if there is, build and boot the
+# other slot (/usr/lib/werewolf/update). Only a machine booted from a slot
+# can do that; elsewhere this parks itself.
+exec 2>&1
+if [ ! -s /run/werewolf/grubenv ] || ! grep -q 'werewolf\.slot=' /proc/cmdline; then
+	echo "autoupdate: not booted from a slot, staying down"
+	exec sv down .
+fi
+until [ -e /run/werewolf/committed ]; do
+	sleep 10
+done
+/usr/lib/werewolf/update outcome
+while :; do
+	/usr/lib/werewolf/update check || true
+	sleep 72000
+done

@@ -1,4 +1,5 @@
-# sshd: minimal plus operator access by key.
+# sshd: minimal plus operator access by key. The service and its policy are
+# in minimal, and park themselves where sshd is not installed.
 include: minimal.yaml
 contents:
   packages:

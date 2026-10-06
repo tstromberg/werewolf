@@ -39,9 +39,10 @@ say() { echo "werewolf: $*"; }
 
 # Wolfi's busybox mount has no flag parsing: `nosuid` and friends go to the
 # kernel as data strings and the mount fails. So no flags here; the
-# filesystems get the kernel's defaults.
-mount -t proc proc /proc
-mount -t sysfs sys /sys
+# filesystems get the kernel's defaults. Booted from a slot, stage0 has
+# mounted the first three already, and moved them here.
+mountpoint -q /proc || mount -t proc proc /proc
+mountpoint -q /sys || mount -t sysfs sys /sys
 mountpoint -q /dev || mount -t devtmpfs dev /dev
 mkdir -p /dev/pts /dev/shm /mnt /var/empty
 mount -t devpts devpts /dev/pts
@@ -69,12 +70,15 @@ done
 # --- modules ------------------------------------------------------------------
 # The Makefile wrote the list it packed, already in load order. Load them,
 # then close the loader for the life of the machine: nothing after this
-# point may add kernel code.
-moddir=/usr/lib/modules/$(uname -r)
-for p in $(cat "$moddir/werewolf.modules"); do
-	insmod "$moddir/$p" || say "insmod $p failed"
-done
-sysctl -q -w kernel.modules_disabled=1
+# point may add kernel code. Booted from a slot, stage0 has done both, and
+# the root it hands over carries no modules.
+if [ "$(cat /proc/sys/kernel/modules_disabled)" != 1 ]; then
+	moddir=/usr/lib/modules/$(uname -r)
+	for p in $(cat "$moddir/werewolf.modules"); do
+		insmod "$moddir/$p" || say "insmod $p failed"
+	done
+	sysctl -q -w kernel.modules_disabled=1
+fi
 
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 \
 	kernel.unprivileged_bpf_disabled=1 net.ipv4.ip_forward=0
@@ -106,11 +110,13 @@ fi
 # and holds what bite left for us in one directory: config.tar, and data/ for
 # /data. Finding it by UUID and mounting it nosuid,nodev,noexec take
 # util-linux blkid and mount, which the bitten form carries.
+# Booted from a slot, stage0 has mounted it already, to read root.erofs.
 victimdir=
 if [ -n "$victim" ]; then
-	victimdev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}" 2>/dev/null)
 	mkdir -p /victim
-	if [ -n "$victimdev" ] && mount -o nosuid,nodev,noexec "$victimdev" /victim; then
+	victimdev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}" 2>/dev/null)
+	if mountpoint -q /victim ||
+		{ [ -n "$victimdev" ] && mount -o nosuid,nodev,noexec "$victimdev" /victim; }; then
 		victimdir=/victim${victim#*:}
 		say "victim's filesystem $victimdev on /victim, werewolf in $victimdir"
 	else

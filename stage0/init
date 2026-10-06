@@ -1,0 +1,79 @@
+#!/bin/sh
+# stage0: PID 1 on a machine that boots a slot. It loads the modules, finds
+# the victim's filesystem, mounts this slot's root.erofs read-only under a
+# RAM overlay, and hands over to that root's /init. The image is never
+# written; what the running system writes lives in RAM and is gone at the
+# next boot, as with a RAM root.
+#
+#   werewolf.victim=UUID:DIR   the filesystem, and the directory holding a/ and b/
+#   werewolf.slot=a|b          which slot this boot is
+#
+# Getting back to a slot that works is the kernel's and GRUB's job. GRUB
+# boots a new slot once; if anything here fails, stage0 exits, the kernel
+# panics, panic=10 reboots it, and GRUB boots the slot that last committed.
+# A slot that boots but never commits is caught by the deadman below.
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+exec </dev/null
+
+say() { echo "stage0: $*"; }
+fail() {
+	say "$*; panicking, so the machine reboots into the last good slot"
+	exit 1
+}
+
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+
+victim='' slot=''
+for arg in $(cat /proc/cmdline); do
+	case "$arg" in
+	werewolf.victim=*) victim=${arg#*=} ;;
+	werewolf.slot=*) slot=${arg#*=} ;;
+	esac
+done
+[ -n "$victim" ] && [ -n "$slot" ] || fail "no werewolf.victim or werewolf.slot"
+
+# Every module the form needs, then the loader closes for good: the root
+# that follows finds it closed and loads nothing.
+moddir=/usr/lib/modules/$(uname -r)
+for p in $(cat "$moddir/werewolf.modules"); do
+	insmod "$moddir/$p" || say "insmod $p failed"
+done
+sysctl -q -w kernel.modules_disabled=1
+
+dev=$(blkid -c /dev/null -l -o device -t UUID="${victim%%:*}") || fail "no filesystem ${victim%%:*}"
+mkdir -p /victim /lower /upper /root
+mount -o nosuid,nodev,noexec "$dev" /victim || fail "cannot mount $dev"
+img=/victim${victim#*:}/$slot/root.erofs
+mount -t erofs -o ro,loop "$img" /lower || fail "cannot mount $img"
+mount -t tmpfs -o mode=0755 tmpfs /upper
+mkdir -p /upper/root /upper/work
+mount -t overlay overlay -o lowerdir=/lower,upperdir=/upper/root,workdir=/upper/work /root ||
+	fail "cannot mount the overlay"
+say "slot $slot: $img under a RAM overlay"
+
+# The deadman outlives this initramfs: sleep starts now, and what follows it
+# is shell builtins, so nothing needs a file from here once it wakes. It
+# looks through PID 1's root for the mark commit leaves, and without it
+# reboots at once; GRUB has spent this slot's one boot, so the machine comes
+# back on the slot that last committed. Its own /proc keeps it a way in.
+mkdir -p /deadman
+mount -t proc proc /deadman
+(
+	sleep 600
+	if [ ! -e /deadman/1/root/run/werewolf/committed ]; then
+		echo "stage0: slot $slot did not commit in 10 minutes; rebooting into the last good slot" >/dev/console
+		echo b >/deadman/sysrq-trigger
+	fi
+) &
+
+for m in dev proc sys victim; do
+	mkdir -p "/root/$m"
+	mount --move "/$m" "/root/$m"
+done
+# What switch_root does, with what is here: put the new root over / and
+# start its init inside it.
+cd /root || fail "cannot enter /root"
+mount --move . /
+exec chroot . /init

@@ -1,6 +1,7 @@
 # werewolf: a Wolfi userland on an Alpine kernel, booted from RAM.
 #
 #   make            build/<arch>/vmlinuz + build/<arch>/<form>/initramfs.zst
+#   make slot       build/<arch>/<form>/slot/: vmlinuz, stage0, root.erofs (for bite)
 #   make run        boot it under QEMU, root shell on the console, ssh on :2222
 #   make lima       boot the lima form under Lima (vz on Apple silicon)
 #   make config     pack config/ into the raw config tar `run` attaches
@@ -75,7 +76,7 @@ VMTYPE = qemu
 endif
 LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
-.PHONY: all image run lima lima-stop ssh config forms clean help
+.PHONY: all image slot run lima lima-stop ssh config forms clean help
 
 all: image
 
@@ -130,16 +131,70 @@ $(OUT)/rootfs.tar: $(addprefix forms/,$(addsuffix .yaml,$(CHAIN)))
 # One cpio: the apko rootfs as apko wrote it (ownership intact, never
 # extracted on the host), then each form's folder along the chain, then the
 # modules. Later entries win.
-$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(OUT)/modules/.stamp $(shell find $(CHAIN_DIRS) -type f)
+$(OUT)/initramfs.zst: $(OUT)/rootfs.tar $(OUT)/modules/.stamp $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f)
 	@[ "$(firstword $(CHAIN))" = minimal ] || \
 		{ echo "form $(FORM) does not include minimal, which carries /init" >&2; exit 1; }
 	COPYFILE_DISABLE=1 $(TAR) --format newc --uid 0 --gid 0 --numeric-owner --exclude .DS_Store \
 		-cf $(OUT)/initramfs.cpio @$(OUT)/rootfs.tar \
-		$(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/modules .
+		$(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/meta . -C $(CURDIR)/$(OUT)/modules .
 	zstd -19 -T0 -q -f -o $@ $(OUT)/initramfs.cpio
 	rm $(OUT)/initramfs.cpio
 	@echo "form $(FORM): $(CHAIN)"
 	@ls -la $(BUILD)/vmlinuz $@
+
+# --- meta ---------------------------------------------------------------------
+# What the build knows that the image will need to rebuild itself: the
+# update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
+# In every image, in /usr/share/werewolf.
+$(OUT)/meta.stamp: $(BUILD)/stage0/rootfs.tar stage0/init $(MODULE_LISTS) $(shell find $(CHAIN_DIRS) -type f) Makefile
+	rm -rf $(OUT)/meta
+	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d && \
+	echo $(FORM) > $$d/form && \
+	echo $(MODULES) | tr ' ' '\n' > $$d/modules && \
+	echo $(KERNEL_PKG:.apk=) > $$d/kernel && \
+	echo https://dl-cdn.alpinelinux.org/alpine/$(ALPINE_BRANCH)/main > $$d/alpine && \
+	for c in $(CHAIN_DIRS); do (cd $$c && find . -type f ! -name .DS_Store | sed 's|^\./||'); done | sort -u > $$d/overlay && \
+	tar -xOf $(BUILD)/stage0/rootfs.tar etc/apk/world > $$d/stage0.world && \
+	cp stage0/init $$d/stage0.init && \
+	echo "$(FORM) $$(date -u +%Y%m%dT%H%M%SZ) $(KERNEL_PKG:.apk=) built-by-make" > $$d/release
+	touch $@
+
+# --- slot ---------------------------------------------------------------------
+# The same rootfs, booted from disk: a small stage0 initramfs that loads the
+# modules and mounts root.erofs read-only under a RAM overlay (stage0/init).
+# This is what bite installs, and what autoupdate rebuilds on the machine.
+# root.erofs is made straight from the tar, as the cpio is; the modules stay
+# in stage0, since they are loaded before the root exists.
+slot: $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs
+	@ls -la $(OUT)/slot
+
+$(BUILD)/stage0/rootfs.tar: stage0/stage0.yaml
+	mkdir -p $(dir $@)
+	cd stage0 && apko build-minirootfs --build-arch $(ARCH) stage0.yaml $(CURDIR)/$@
+
+$(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar stage0/init $(OUT)/modules/.stamp
+	mkdir -p $(dir $@)
+	COPYFILE_DISABLE=1 $(TAR) --format newc --uid 0 --gid 0 --numeric-owner --exclude .DS_Store \
+		-cf $(OUT)/stage0.cpio @$(BUILD)/stage0/rootfs.tar \
+		-C $(CURDIR)/stage0 init -C $(CURDIR)/$(OUT)/modules .
+	zstd -19 -T0 -q -f -o $@ $(OUT)/stage0.cpio
+	rm $(OUT)/stage0.cpio
+
+# lz4hc: the root is read on demand, so decompression speed matters more
+# than the last few percent of size. -b 4096 because mkfs.erofs otherwise
+# takes the builder's page size, 16 KiB on Apple silicon, which a 4 KiB-page
+# kernel will not mount.
+$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/meta.stamp $(shell find $(CHAIN_DIRS) -type f)
+	mkdir -p $(dir $@)
+	COPYFILE_DISABLE=1 $(TAR) --uid 0 --gid 0 --numeric-owner --exclude .DS_Store \
+		-cf $(OUT)/root.tar @$(OUT)/rootfs.tar $(foreach d,$(CHAIN_DIRS),-C $(CURDIR)/$(d) .) -C $(CURDIR)/$(OUT)/meta .
+	rm -f $@
+	mkfs.erofs -b 4096 -zlz4hc --tar=f $@ $(OUT)/root.tar >/dev/null
+	rm $(OUT)/root.tar
+
+$(OUT)/slot/vmlinuz: $(BUILD)/vmlinuz
+	mkdir -p $(dir $@)
+	cp $< $@
 
 forms:
 	@for y in forms/*.yaml; do \

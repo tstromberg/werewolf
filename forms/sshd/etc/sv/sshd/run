@@ -1,6 +1,0 @@
-#!/bin/sh
-# Host keys are generated on every boot: the root is RAM, so they never
-# outlive the machine.
-exec 2>&1
-ssh-keygen -A >/dev/null
-exec /usr/bin/sshd -D -e
