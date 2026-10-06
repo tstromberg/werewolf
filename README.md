@@ -82,6 +82,7 @@ A form is `forms/<name>.yaml`, an apko config, with an optional
 | `autoupdate` | bitten | apk-tools, erofs-utils, zstd; Alpine's keys; the updater | a directory on the victim | nothing | 11.4 MB | 16.0 MB | 33 |
 | `sshd` | minimal | openssh-server, sftp-server | RAM | :22 | 7.9 MB | | 28 |
 | `sshd-cloudflared` | sshd | cloudflared, CA certificates | RAM | :22, tunnel | 15.0 MB | | 29 |
+| `prod-ssh` | autoupdate | sshd: published by CI ([docs/releases.md](docs/releases.md)) | a directory on the victim | :22 | 12.9 MB | 19.8 MB | 38 |
 | `lima` | autoupdate | sshd, bash, e2fsprogs: a test vehicle for Lima | ext4, or a directory on the victim | :22 | 14.3 MB | 22.8 MB | 44 |
 
 1. **Forms build on each other with apko's `include:`.** The Makefile
@@ -109,7 +110,14 @@ make slot            # vmlinuz, stage0 and root.erofs, for bite
 Images need `apko`, `zstd` and `bsdtar`; slots also need `mkfs.erofs`.
 Forms with autoupdate need Zig 0.16 for the updater, and the Makefile
 checks the version: Zig is pre-1.0 and changes between releases.
-`make test` runs the updater's unit tests.
+`make test` runs the updater's unit tests; `make check` boots every form
+and checks its protections ([docs/testing.md](docs/testing.md)).
+
+Builds are reproducible. The first build pins every package, Wolfi's and
+the kernel's, in `build/lock/`; later builds install exactly those and
+write the same bytes. `make lock` takes the newest again. CI publishes
+`minimal` and `prod-ssh` as signed releases whenever an image would change
+([docs/releases.md](docs/releases.md)).
 
 On an M-series Mac, init hands over to runit 0.17 s after the kernel starts
 (1.3 s under VZ). The booted machine runs seven processes in 51 MB.
@@ -177,10 +185,18 @@ See [docs/updater.md](docs/updater.md).
   lacks `gpio_keys`, so an external stop is a power cut. `poweroff` from
   inside works.
 - **No log shipping.** Services log to the console.
+- **No debuggers.** ptrace is off for everyone, root included, until the
+  machine reboots.
 
 ## Documentation
 
 - [docs/bite.md](docs/bite.md): taking over a VM, and slots
 - [docs/data.md](docs/data.md): `/data`, disks and encryption
 - [docs/updater.md](docs/updater.md): updates, the log and CVE reports
+- [docs/testing.md](docs/testing.md): `make check`, and CI
+- [docs/releases.md](docs/releases.md): signed, reproducible releases
+- [docs/security.md](docs/security.md): what is locked down, what is not
+  yet, and how to check
 - [docs/roadmap.md](docs/roadmap.md): what comes next
+- [design/verified-boot.md](design/verified-boot.md): running only code we
+  signed (proposed)

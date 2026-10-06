@@ -1,0 +1,100 @@
+#!/usr/bin/env expect
+# boot NAME CHECKS LOG QEMU...
+#
+# Boot a werewolf image with the QEMU command given, which must set
+# werewolf.debug=1 (a root shell on the serial console) and -no-reboot (so a
+# panic ends the run). Run each check in CHECKS (see test/checks) as root on
+# that console, power the machine off, and exit 0 only if it booted, every
+# check came out as expected, and it shut down cleanly.
+#
+# Nothing waits a fixed time: each step waits for what it needs to see, up
+# to a limit. Each check's output is fenced by a marker its own echo cannot
+# match, so the shell typing the command back is never mistaken for its
+# result. The whole console goes to LOG.
+
+if {[llength $argv] < 4} {
+	puts stderr "usage: boot NAME CHECKS LOG QEMU..."
+	exit 2
+}
+lassign $argv name checks log
+set qemu [lrange $argv 3 end]
+
+log_user 0
+log_file -a -noappend $log
+set failed 0
+
+proc say {status what {detail ""}} {
+	global name
+	send_user [format "%-6s %-18s %s\n" $status $name $what]
+	if {$detail ne ""} {
+		foreach line [split [string trim $detail] "\n"] {
+			send_user "         | [string trimright $line]\n"
+		}
+	}
+}
+
+proc give_up {what} {
+	global log
+	say FAIL $what "see $log"
+	exit 1
+}
+
+# TCG, without KVM or HVF, boots in tens of seconds, not one.
+set timeout 300
+spawn -noecho {*}$qemu
+
+expect {
+	"handing over to runit" {}
+	-re {Kernel panic[^\r\n]*|stage0: [^\r\n]*panicking} { give_up "boot: $expect_out(0,string)" }
+	timeout { give_up "boot: no handover to runit in $timeout s" }
+	eof { give_up "boot: QEMU exited" }
+}
+
+# The console's getty starts a moment after runit; type until a shell answers.
+set ready 0
+for {set i 0} {$i < 60 && !$ready} {incr i} {
+	send "echo RE''ADY\r"
+	expect {
+		-timeout 2
+		"READY" { set ready 1 }
+		timeout {}
+		eof { give_up "console: QEMU exited" }
+	}
+}
+if {!$ready} { give_up "console: no root shell; is werewolf.debug=1 set?" }
+
+set f [open $checks]
+while {[gets $f line] >= 0} {
+	if {![regexp {^(ok|gap)\s+(\S+)\s+(.+)$} $line -> kind check cmd]} { continue }
+	send "( $cmd ) 2>&1; printf '\\n@@%s=%d\\n' $check \$?\r"
+	expect {
+		-timeout 180
+		-re "@@$check=(\[0-9]+)" { set rc $expect_out(1,string); set out $expect_out(buffer) }
+		timeout { set rc timeout; set out "no answer in 180 s" }
+		eof { give_up "$check: QEMU exited" }
+	}
+	if {$kind eq "ok" && $rc eq "0"} {
+		say ok $check
+	} elseif {$kind eq "gap" && $rc ne "0" && $rc ne "timeout"} {
+		say gap $check
+	} elseif {$kind eq "gap" && $rc eq "0"} {
+		say FAIL $check "this gap has closed: make it ok in test/checks, and update docs/security.md"
+		incr failed
+	} else {
+		say FAIL $check "exit $rc; console:\n$out"
+		incr failed
+	}
+}
+close $f
+
+send "poweroff\r"
+expect {
+	-timeout 120
+	eof {}
+	timeout { give_up "shutdown: still running after 120 s" }
+}
+lassign [wait] pid spawn_id os_error status
+if {$status != 0} { give_up "shutdown: QEMU exited $status" }
+
+if {$failed} { exit 1 }
+say pass "all checks"

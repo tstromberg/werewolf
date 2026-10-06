@@ -80,8 +80,21 @@ if [ "$(cat /proc/sys/kernel/modules_disabled)" != 1 ]; then
 	sysctl -q -w kernel.modules_disabled=1
 fi
 
+# Then close what root could use to change the running kernel or another
+# process. Lockdown at integrity refuses kexec, /dev/mem and unsigned
+# modules; it only ever rises, so init raises it here rather than trusting
+# whatever command line the machine booted with. Yama's ptrace scope 3 stops
+# any process writing into another, root's included, and cannot be lowered;
+# memfds can no longer be executed, though root may lower that one. The
+# rest hide kernel pointers and the log, keep BPF to root, and stop
+# forwarding. See design/verified-boot.md.
+mountpoint -q /sys/kernel/security || mount -t securityfs securityfs /sys/kernel/security
+lockdown=/sys/kernel/security/lockdown
+grep -q '\[none\]' "$lockdown" 2>/dev/null && echo integrity >"$lockdown"
+say "lockdown: $(sed -n 's/.*\[\(.*\)\].*/\1/p' "$lockdown" 2>/dev/null || echo unavailable)"
 sysctl -q -w kernel.kptr_restrict=2 kernel.dmesg_restrict=1 \
-	kernel.unprivileged_bpf_disabled=1 net.ipv4.ip_forward=0
+	kernel.unprivileged_bpf_disabled=1 net.ipv4.ip_forward=0 \
+	kernel.yama.ptrace_scope=3 vm.memfd_noexec=2 || say "some sysctls were not applied"
 
 # --- network ------------------------------------------------------------------
 # One static address from the command line. There is no DHCP client in Wolfi

@@ -1,0 +1,35 @@
+#!/bin/sh
+# sign: stamp each manifest with SERIAL and an expiry seven days out, sign
+# it with the image key as MANIFEST.sig, and check that signature against
+# keys/image.pub. Signing a release again with its own serial moves only
+# its expiry.
+#
+#   WEREWOLF_IMAGE_KEY=<PEM> release/sign SERIAL MANIFEST...
+#
+# The signature is RSA PKCS#1 v1.5 over the sha256 of the file, as
+#   openssl dgst -sha256 -verify keys/image.pub -signature M.sig M
+# checks it. See docs/releases.md.
+set -eu
+
+[ $# -ge 2 ] || { echo "usage: release/sign SERIAL MANIFEST..." >&2; exit 2; }
+[ -n "${WEREWOLF_IMAGE_KEY:-}" ] || { echo "release/sign: WEREWOLF_IMAGE_KEY is not set" >&2; exit 1; }
+pub=$(dirname "$0")/../keys/image.pub
+[ -f "$pub" ] || { echo "release/sign: no $pub" >&2; exit 1; }
+serial=$1
+shift
+expires=$(date -u -d '+7 days' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+7d +%Y-%m-%dT%H:%M:%SZ)
+
+key=$(mktemp) # mode 0600
+trap 'rm -f "$key"' EXIT
+printf '%s\n' "$WEREWOLF_IMAGE_KEY" >"$key"
+
+for m; do
+	awk -v s="$serial" -v e="$expires" '
+		/^  "(serial|expires)": / { next }
+		{ print }
+		/^  "arch": / { printf "  \"serial\": \"%s\",\n  \"expires\": \"%s\",\n", s, e }' "$m" >"$m.new"
+	mv "$m.new" "$m"
+	openssl dgst -sha256 -sign "$key" -out "$m.sig" "$m"
+	openssl dgst -sha256 -verify "$pub" -signature "$m.sig" "$m" >/dev/null
+	echo "signed ${m##*/}: serial $serial, expires $expires"
+done

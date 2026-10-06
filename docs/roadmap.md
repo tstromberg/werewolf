@@ -1,11 +1,12 @@
 # Roadmap
 
-1. werewolf's own files as apks, so autoupdate can update werewolf itself.
+1. Verified boot: a read-only root, signed releases built in CI, and our
+   own kernel with IPE, so only code we signed runs. Lockdown and the
+   ptrace and memfd settings are done; see
+   [design/verified-boot.md](../design/verified-boot.md).
 2. DHCP: busybox with udhcpc, or a systemd form.
-3. dm-verity under `root.erofs`, with the root hash on the command line.
-4. Lockdown: `lockdown=integrity`, no sshd in production, nftables
-   default-deny inbound.
-5. A static `finit_module(2)` helper in place of kmod, removing libcrypto
+3. No sshd in production, and nftables default-deny inbound.
+4. A static `finit_module(2)` helper in place of kmod, removing libcrypto
    from forms that do no cryptography.
-6. Shipping the update log off the machine.
-7. bite on x86, and drivers beyond virtio (NVMe, ENA, Hyper-V).
+5. Shipping the update log off the machine.
+6. bite on x86, and drivers beyond virtio (NVMe, ENA, Hyper-V).

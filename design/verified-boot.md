@@ -176,7 +176,7 @@ writing code into a running process through ptrace or `/proc/<pid>/mem`.
 
 | Key | Signs | Checked by | Kept |
 | --- | --- | --- | --- |
-| image, RSA-4096 | IPE policies, release manifests | our kernel, which has its certificate built in; the updater | a KMS, used only by the release workflow |
+| image, RSA-4096 | IPE policies, release manifests | our kernel, which has its certificate built in; the updater | a GitHub environment secret, used only by the release workflow |
 | boot, RSA-2048 | UKIs | firmware, from `db` | a KMS, used only by the release workflow |
 | PK, KEK | `db` updates | firmware | offline |
 
@@ -187,10 +187,14 @@ the KEK.
 
 ### Releases
 
-CI builds every form for both architectures daily and on every push to main,
-boot-tests each, and publishes a release when what goes in has changed: the
-packages, the kernel, or werewolf's own files. werewolf's files therefore
-update like everything else (docs/roadmap.md, item 1).
+Every 15 minutes CI resolves what the published forms would be built from:
+the packages, the kernel, and werewolf's own files. When that has changed,
+it builds them twice on each architecture, requires the builds to match
+byte for byte, boot-tests each, and publishes a release unless every image
+is the same as the latest release's. werewolf's files therefore update like
+everything else, without being packaged as apks. This much is done, for
+`minimal` and `prod-ssh` without the hash tree or policy
+([docs/releases.md](../docs/releases.md)).
 
 | File | Contents |
 | --- | --- |
@@ -266,17 +270,22 @@ inactive and everything runs, as now. To see enforcement, boot a CI release.
 
 Each phase ships on its own.
 
-1. **Lockdown and sysctls**, on Alpine's kernel. `lockdown=integrity` on
-   every command line werewolf writes (`make run`, `lima.yaml.in`, bite's
-   GRUB entries); `vm.memfd_noexec=2` and `kernel.yama.ptrace_scope=3` from
-   init. Stops `kexec`, `/dev/mem`, unsigned modules, ptrace and executable
-   memfds.
+1. **Lockdown and sysctls**, on Alpine's kernel. Done. init raises lockdown
+   to integrity through securityfs and sets `kernel.yama.ptrace_scope=3`
+   and `vm.memfd_noexec=2`. root cannot lower the first two; it can lower
+   the third, which binds non-root code until IPE refuses memfds outright
+   in phase 4. Doing it in init
+   rather than on the command line reaches every boot path, and machines
+   bite took over earlier with their next image, since nothing rewrites
+   their GRUB entries. Stops `kexec`, `/dev/mem`, unsigned modules, ptrace
+   and executable memfds.
 2. **A read-only root**, on Alpine's kernel. stage0 boots every form; direct
    boot carries the root image in the initramfs; no overlay; `noexec` tmpfs;
    the root's writes moved to `/run`. Stops users running what they write,
    and anyone changing the running root. root can still remount.
-3. **Signed releases**: the updater rewrite under way. CI builds, adds the
-   hash tree, boot-tests and signs; the updater installs releases. Until
+3. **Signed releases**: CI builds reproducibly, boot-tests and signs (done,
+   [docs/releases.md](../docs/releases.md)); it adds the hash tree, and the
+   updater installs releases (under way). Until
    phase 4, dm-verity catches corruption, not attackers. Removes building
    from the machine, and brings werewolf's own files into updates.
 4. **Our kernel and IPE**: the kernel above, the per-release policy, and
@@ -313,14 +322,14 @@ Each phase ships on its own.
   with no policy it allows everything; that `dmverity_roothash` matches
   dm-verity over a loop device, over a file on the victim's filesystem or in
   the initramfs.
-- **Key custody.** openssl's PKCS#7 signing has to reach the KMS, through a
-  PKCS#11 provider, or the PKCS#7 has to be built around a KMS signature.
+- **Key custody.** The image key is a GitHub environment secret, which
+  openssl signs with directly, PKCS#7 included. Moving it to a KMS would
+  need a PKCS#11 provider, or the PKCS#7 built around a KMS signature.
 - **Rollback.** An older signed release still boots if root installs it on a
   bitten machine, or writes an older UKI to the ESP. TPM counters, as
   ChromeOS uses, would stop that; our kernel can carry the TPM driver.
 - **stage0's size.** veritysetup brings libcryptsetup and its libraries;
   `dmsetup` with a table may be smaller.
-- **Hosting.** GitHub Releases or object storage, and how long old releases
-  stay.
+- **Hosting.** GitHub Releases, for now. How long old releases stay.
 - **Reproducible kernels.** The generated module key makes each build's
   modules differ.

@@ -1,0 +1,43 @@
+# Build every form, boot each under QEMU, and check its protections as
+# root on its console (docs/testing.md), on both architectures. `make
+# lima-ci` runs this same job locally, in an Ubuntu VM under Lima.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: sudo test/ci-setup
+      - name: Unit tests
+        run: make test
+      - name: Lint
+        run: make lint
+      - name: Boot and check every form, and a slot
+        run: make -k -j"$(nproc)" check
+      - name: Keep the build and console logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: check-${{ runner.arch }}
+          path: build/*/check/*.log

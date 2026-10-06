@@ -1,0 +1,59 @@
+#!/bin/sh
+# manifest: put a form's release files in DIST as the release names them,
+# FORM-ARCH-NAME, and write its manifest, FORM-ARCH.json. The manifest has
+# no serial or expiry and no signature; release/sign adds those. Everything
+# here follows from the files, so a rebuild writes the same manifest.
+#
+#   release/manifest FORM ARCH ROOTFS KERNEL DIST NAME=PATH...
+#
+# ROOTFS is the form's apko rootfs, whose packages the manifest lists.
+# KERNEL is a file naming the kernel package. `build` is the first 16 hex
+# digits of the sha256 of the files' sha256sum lines, in the order given.
+# See docs/releases.md.
+set -eu
+
+[ $# -ge 6 ] || { echo "usage: release/manifest FORM ARCH ROOTFS KERNEL DIST NAME=PATH..." >&2; exit 2; }
+form=$1 arch=$2 rootfs=$3 kernel=$(cat "$4") dist=$5
+shift 5
+
+sha256() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -c1-64; }
+
+mkdir -p "$dist"
+files='' sums=''
+for f; do
+	name=${f%%=*} path=${f#*=}
+	cp "$path" "$dist/$form-$arch-$name"
+	sum=$(sha256 <"$path")
+	size=$(wc -c <"$path" | tr -d ' ')
+	files="$files${files:+,
+}    \"$name\": {\"sha256\": \"$sum\", \"size\": $size}"
+	sums="$sums$sum  $name
+"
+done
+build=$(printf %s "$sums" | sha256 | cut -c1-16)
+
+# The installed database: one stanza per package, P: name, V: version,
+# o: origin, separated by blank lines.
+packages=$(bsdtar -xOf "$rootfs" usr/lib/apk/db/installed | awk '
+	function emit() { if (p != "") print p, v, (o != "" ? o : p); p = v = o = "" }
+	/^P:/ { p = substr($0, 3) } /^V:/ { v = substr($0, 3) } /^o:/ { o = substr($0, 3) }
+	/^$/ { emit() } END { emit() }' | LC_ALL=C sort |
+	awk '{ printf "%s    {\"name\": \"%s\", \"version\": \"%s\", \"origin\": \"%s\"}", (NR > 1 ? ",\n" : ""), $1, $2, $3 }')
+[ -n "$packages" ] || { echo "release/manifest: no packages in $rootfs" >&2; exit 1; }
+
+cat >"$dist/$form-$arch.json" <<EOF
+{
+  "format": "werewolf-release/1",
+  "form": "$form",
+  "arch": "$arch",
+  "build": "$build",
+  "kernel": "$kernel",
+  "files": {
+$files
+  },
+  "packages": [
+$packages
+  ]
+}
+EOF
+echo "$form $arch: build $build"

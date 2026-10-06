@@ -1,0 +1,68 @@
+#!/bin/sh
+# publish: make DIST a draft GitHub release, unless the latest release has
+# the same builds. DIST holds each form and architecture's files and
+# manifest (release/manifest); LOCKS holds the locks and inputs they were
+# built from, which the release carries so anyone can rebuild it. The
+# manifests are signed (release/sign) with a serial, which tags the release.
+# The workflow attests the files, then publishes the draft.
+#
+#   WEREWOLF_IMAGE_KEY=<PEM> release/publish DIST LOCKS
+#
+# Run by .github/workflows/release.yml, with gh logged in. Writes
+# tag=SERIAL to $GITHUB_OUTPUT when it made a draft.
+set -eu
+
+[ $# -eq 2 ] || { echo "usage: release/publish DIST LOCKS" >&2; exit 2; }
+dist=$1 locks=$2
+last=$(mktemp -d)
+trap 'rm -rf "$last"' EXIT
+
+build() { sed -n 's/^  "build": "\(.*\)",$/\1/p' "$1" 2>/dev/null || true; }
+packages() { sed -n 's/^    {"name": "\([^"]*\)", "version": "\([^"]*\)".*/\1 \2/p' "$1" 2>/dev/null || true; }
+
+# The latest release's manifests; none before the first release.
+prev=$(gh release view --json tagName --jq .tagName 2>/dev/null || echo none)
+[ "$prev" = none ] || gh release download "$prev" --dir "$last" --pattern '*-aarch64.json' --pattern '*-x86_64.json'
+
+changed=''
+for m in "$dist"/*.json; do
+	n=${m##*/}
+	[ "$(build "$m")" = "$(build "$last/$n")" ] || changed="$changed ${n%.json}"
+done
+if [ -z "$changed" ]; then
+	echo "publish: every build is the same as in $prev; nothing to publish"
+	exit 0
+fi
+
+serial=$(date -u +%Y%m%dT%H%M%SZ)
+"$(dirname "$0")/sign" "$serial" "$dist"/*.json
+
+{
+	echo "Built from $GITHUB_SHA. Changed since $prev:$changed."
+	echo
+	echo "| Image | Build | Kernel |"
+	echo "| --- | --- | --- |"
+	for m in "$dist"/*.json; do
+		n=${m##*/}
+		echo "| ${n%.json} | $(build "$m") | $(sed -n 's/^  "kernel": "\(.*\)",$/\1/p' "$m") |"
+	done
+	for n in $changed; do
+		echo
+		echo "**$n**"
+		echo
+		{ packages "$last/$n.json" | sed 's/^/- /'; packages "$dist/$n.json" | sed 's/^/+ /'; } | awk '
+			$1 == "-" { old[$2] = $3; next } { new[$2] = $3 }
+			END {
+				for (p in new) if (!(p in old)) print "- " p " " new[p] " (new)"; else if (old[p] != new[p]) print "- " p " " old[p] " -> " new[p]
+				for (p in old) if (!(p in new)) print "- " p " " old[p] " (removed)"
+			}' | LC_ALL=C sort
+	done
+	echo
+	echo "Check a manifest: \`openssl dgst -sha256 -verify keys/image.pub -signature M.json.sig M.json\`."
+	echo "Rebuild and compare: docs/releases.md."
+} >"$last/notes.md"
+
+cp "$locks"/*.lock.json "$locks/inputs" "$dist/"
+gh release create "$serial" --draft --target "$GITHUB_SHA" --title "$serial" --notes-file "$last/notes.md" "$dist"/*
+echo "publish: draft $serial:$changed"
+[ -z "${GITHUB_OUTPUT:-}" ] || echo "tag=$serial" >>"$GITHUB_OUTPUT"

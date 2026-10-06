@@ -1,0 +1,15 @@
+# prod-ssh: a production machine an operator reaches by key. autoupdate
+# keeps it current; sshd is as the sshd form has it. CI publishes it; see
+# docs/releases.md.
+include: autoupdate.yaml
+contents:
+  packages:
+    - openssh-server
+    - openssh-sftp-server   # scp
+
+paths:
+  # PAM's password helper, setgid shadow, arrives through openssh-server.
+  # Nothing here authenticates with a password.
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755

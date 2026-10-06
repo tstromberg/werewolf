@@ -1,0 +1,15 @@
+# kernel: Alpine's linux-virt, the KVM guest kernel. The build keeps
+# boot/vmlinuz-virt and the modules; the rest of what the package pulls in
+# stays behind. Alpine's keys are the ones the autoupdate form carries.
+contents:
+  repositories:
+    - https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+  keyring:
+    - ../forms/autoupdate/etc/werewolf/alpine-keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub
+    - ../forms/autoupdate/etc/werewolf/alpine-keys/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub
+  packages:
+    - linux-virt
+
+archs:
+  - aarch64
+  - x86_64

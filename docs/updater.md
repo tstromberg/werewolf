@@ -168,7 +168,7 @@ kernel, bite a VM with it, and power-cycle it:
 ```sh
 make FORM=lima slot
 echo linux-virt-6.18.54-r0 > build/aarch64/lima/meta/usr/share/werewolf/kernel
-rm build/aarch64/lima/slot/root.erofs && make FORM=lima slot
+rm build/aarch64/lima/overlay.tar build/aarch64/lima/slot/root.erofs && make FORM=lima slot
 ```
 
 The machine will find Alpine's current kernel newer, build and boot slot
