@@ -1,0 +1,12 @@
+# The demo's first boot on a disk of its own (make check-persist; see
+# test/checks and test/console-demo for the kinds): PostgreSQL makes its
+# cluster on /data, and the page stores this boot's posture in it. Then a
+# clean power-off, so the second boot (test/checks-persist-again) finds
+# what this one left.
+
+seen    cluster-made      pg-init: making the cluster in /data/svc/postgres/data
+seen    posture-stored    status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":[1-9]
+unseen  cluster-gone      pg-init: the cluster in /data/svc/postgres/data is gone
+unseen  data-lost         "error":"DataLost"
+unseen  postgres-down     leash: \{"event":"down","service":"postgres"
+ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'

@@ -11,7 +11,9 @@
 # off. A machine with no shell is judged from its console instead: CHECKS
 # is - (its posture line alone), or a file of console lines (seen NAME
 # REGEX, which must appear; unseen NAME REGEX, which must not; see
-# test/console-demo), and QEMU ends from its monitor. Exit 0 only if it
+# test/console-demo), and QEMU ends from its monitor. A file may hold both,
+# for a machine with a shell whose services speak on the console
+# (test/checks-persist-again). Exit 0 only if it
 # booted, its posture and every check came out as expected, and, with a
 # shell, it shut down cleanly.
 #
@@ -46,16 +48,18 @@ if {![info exists load]} { set load ? }
 set host "$uname; [lindex [split $qemu_version \n] 0]; accel $accel; $cpus CPUs; load $load"
 puts $log_chan "werewolf-check: host $host"
 
-# CHECKS as console lines, or {} if it is a file of shell checks.
+# CHECKS' console lines (seen, unseen), judged first, and whether it has
+# shell checks (ok, gap) too, which need the console's shell.
 set console {}
+set shell 0
 if {$checks ne "-"} {
 	set f [open $checks]
 	while {[gets $f line] >= 0} {
 		if {[regexp {^(seen|unseen)\s+(\S+)\s+(.+)$} $line -> kind check re]} { lappend console [list $kind $check $re] }
+		if {[regexp {^(ok|gap)\s} $line]} { set shell 1 }
 	}
 	close $f
 }
-set shell [expr {$checks ne "-" && ![llength $console]}]
 
 proc say {status what {detail ""}} {
 	global name
@@ -239,7 +243,7 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	}
 }
 
-# A machine with no shell, by what its console says: each seen line, waited
+# By what the machine's console says: each seen line, waited
 # for up to five minutes while the console is read, and no unseen line.
 if {[llength $console]} {
 	set deadline [expr {[clock seconds] + 300}]

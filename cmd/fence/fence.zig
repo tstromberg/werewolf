@@ -698,30 +698,55 @@ fn restrict(p: Policy) !void {
             "landlock rule",
         );
     }
-    for (files) |f| {
-        const fd = linux.openat(linux.AT.FDCWD, f.path, .{ .PATH = true, .CLOEXEC = true }, 0);
-        // A place a form does not have (/data on a machine without one,
-        // /dev/ptmx without sshd) is simply not allowed.
-        if (linux.errno(fd) == .NOENT) continue;
-        const rule = PathBeneath{
-            .allowed_access = f.access & fs_all,
-            .parent_fd = @intCast(try sys(fd, "open a place for Landlock")),
-        };
-        defer _ = linux.close(rule.parent_fd);
-        _ = try sys(
-            linux.syscall4(
-                .landlock_add_rule,
-                @intCast(ruleset),
-                LANDLOCK_RULE_PATH_BENEATH,
-                @intFromPtr(&rule),
-                0,
-            ),
-            "landlock path rule",
-        );
+    for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access & fs_all);
+    // Every terminal: the console the kernel was given (ttyS0, ttyAMA0,
+    // hvc0, whichever the machine has), the virtual consoles, and the rest.
+    const dev: i32 = @intCast(try sys(
+        linux.openat(linux.AT.FDCWD, "/dev", .{ .DIRECTORY = true, .CLOEXEC = true }, 0),
+        "open /dev",
+    ));
+    defer _ = linux.close(dev);
+    var buf: [8192]u8 align(8) = undefined;
+    while (true) {
+        const n = try sys(linux.getdents64(dev, &buf, buf.len), "read /dev");
+        if (n == 0) break;
+        var off: usize = 0;
+        while (off < n) {
+            const ent: *align(1) const linux.dirent64 = @ptrCast(&buf[off]);
+            off += ent.reclen;
+            const name: [*:0]const u8 = @ptrCast(&ent.name);
+            const s_name = std.mem.sliceTo(name, 0);
+            if (ent.type != linux.DT.CHR) continue;
+            if (!std.mem.startsWith(u8, s_name, "tty") and
+                !std.mem.startsWith(u8, s_name, "hvc")) continue;
+            try allowPath(ruleset, dev, name, fs_terminal & fs_all);
+        }
     }
     // As root, with CAP_SYS_ADMIN, no_new_privs is not needed, and is not
     // set: it would follow into every process on the machine.
     _ = try sys(linux.syscall2(.landlock_restrict_self, @intCast(ruleset), 0), "landlock restrict");
+}
+
+/// access to path, beneath dir, in ruleset; nothing if there is no such
+/// place, as a form may lack /data or /dev/ptmx.
+fn allowPath(ruleset: i32, dir: i32, path: [*:0]const u8, access: u64) !void {
+    const fd = linux.openat(dir, path, .{ .PATH = true, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) == .NOENT) return;
+    const rule = PathBeneath{
+        .allowed_access = access,
+        .parent_fd = @intCast(try sys(fd, "open a place for Landlock")),
+    };
+    defer _ = linux.close(rule.parent_fd);
+    _ = try sys(
+        linux.syscall4(
+            .landlock_add_rule,
+            @intCast(ruleset),
+            LANDLOCK_RULE_PATH_BENEATH,
+            @intFromPtr(&rule),
+            0,
+        ),
+        "landlock path rule",
+    );
 }
 
 /// struct landlock_path_beneath_attr, packed as the kernel declares it.
@@ -783,7 +808,6 @@ const files = [_]struct { path: [*:0]const u8, access: u64 }{
     .{ .path = "/dev/urandom", .access = fs_device },
     .{ .path = "/dev/kmsg", .access = fs_device },
     .{ .path = "/dev/console", .access = fs_terminal },
-    .{ .path = "/dev/tty", .access = fs_terminal },
     .{ .path = "/dev/ptmx", .access = fs_terminal },
     .{ .path = "/dev/pts", .access = fs_terminal },
 };

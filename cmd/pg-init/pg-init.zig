@@ -4,7 +4,9 @@
 //! (forms/postgresql/etc/sv/postgres/service). It does two things, and the
 //! server starts only if both succeed:
 //!
-//!   1. The cluster, if /data/svc/postgres/data has none: initdb, with
+//!   1. The cluster, if /data/svc/postgres/data has none and never had
+//!      one (cluster-made, beside it, says it had: then the data is lost,
+//!      and the server stays down rather than start again empty): initdb, with
 //!      local connections by peer (a role is its system user's name) and
 //!      none by TCP, which the server does not listen on anyway. initdb
 //!      runs the server through popen(3) and system(3), which want a
@@ -28,12 +30,26 @@ const sql_dir = "/usr/share/werewolf-postgres";
 const initdb = "/usr/bin/initdb";
 const postgres = "/usr/bin/postgres";
 const preload = "/usr/lib/werewolf/popen-shim.so";
+/// Left once the cluster is made, beside it: a cluster that is gone while
+/// this is not was lost, and is not quietly made again, empty.
+const made = "/data/svc/postgres/cluster-made";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
 
-    if (Dir.cwd().access(io, data_dir ++ "/PG_VERSION", .{})) |_| {} else |_| {
+    if (Dir.cwd().access(io, data_dir ++ "/PG_VERSION", .{})) |_| {
+        say(io, "keeping the cluster in {s}", .{data_dir});
+    } else |_| {
+        if (Dir.cwd().access(io, made, .{})) |_| {
+            say(
+                io,
+                "the cluster in {s} is gone, though one was made here; not making an empty one " ++
+                    "over its loss",
+                .{data_dir},
+            );
+            return error.ClusterLost;
+        } else |_| {}
         say(io, "making the cluster in {s}", .{data_dir});
         var env: std.process.Environ.Map = .init(gpa);
         try env.put("PATH", "/usr/bin");
@@ -59,6 +75,7 @@ pub fn main(init: std.process.Init) !void {
                 .stdout = .ignore,
             },
         );
+        try Dir.cwd().writeFile(io, .{ .sub_path = made, .data = "" });
     }
 
     var names: std.ArrayList([]const u8) = .empty;
