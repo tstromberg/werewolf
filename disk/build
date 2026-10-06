@@ -43,6 +43,14 @@ esac
 	echo "disk/build: $slot has no cmdline, the image's kernel arguments (make slot)" >&2
 	exit 1
 }
+# The image's kernel arguments go on the loader entry's options line: words
+# of plain characters, no newline to start another line, as bite takes them.
+args=$(cat "$slot/cmdline")
+case $args in *[!A-Za-z0-9_.,=\ -]*)
+	echo "disk/build: $slot/cmdline holds more than kernel arguments" >&2
+	exit 1
+	;;
+esac
 for p in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
 	[ -d "$p" ] && PATH=$p:$PATH
 done
@@ -90,7 +98,7 @@ sort-key werewolf
 version 19800101T000000Z
 linux /werewolf/a/vmlinuz
 initrd /werewolf/a/initramfs.zst
-options $console init=/init panic=10 softlockup_panic=1 $(cat "$slot/cmdline") werewolf.victim=$root_uuid:/werewolf werewolf.esp=$esp_uuid${*:+ $*} werewolf.slot=a
+options $console init=/init panic=10 softlockup_panic=1 $args werewolf.victim=$root_uuid:/werewolf werewolf.esp=$esp_uuid${*:+ $*} werewolf.slot=a
 EOF
 cp "$slot/vmlinuz" "$slot/initramfs.zst" "$w/esp/werewolf/a/"
 find "$w/esp" -exec touch -t 198001010000 {} +

@@ -1,0 +1,41 @@
+# A whole update, nightly: the autoupdate form updates itself from Wolfi
+# and Alpine over the network, and the slot it builds must boot and commit
+# (make check-update, test/update, docs/testing.md). A workflow of its own,
+# apart from check.yml, so a network flake fails this and nothing else: no
+# push, pull request or release waits on it.
+name: update
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    # x86_64 alone: its runners have KVM; an arm64 runner's TCG would take
+    # far longer than an update should.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: sudo test/ci-setup
+      - name: Update a machine, and boot what it built
+        run: make check-update
+      - name: Keep the consoles and the report
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: update
+          path: |
+            build/*/check/update/*.log
+            build/*/check/update/report.json

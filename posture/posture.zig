@@ -46,6 +46,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
+    if (args.len == 2 and std.mem.eql(u8, args[1], "--probe")) std.process.exit(probe());
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "run")) return serve(io, gpa);
     var format: Format = .text;
     var extended = false;
@@ -643,6 +644,51 @@ const Posture = struct {
             else
                 "",
         });
+        // The programs the kernel starts itself (core dump pipes, modprobe,
+        // the uevent helper) descend from kthreadd, not PID 1: only these
+        // sysctls bound them. Readable by root alone.
+        const umh = trim(p.read("/proc/sys/kernel/usermodehelper/bset"));
+        const hotplug = trim(p.read("/proc/sys/kernel/hotplug"));
+        var helper_held: std.ArrayList(u8) = .empty;
+        if (helperCaps(umh)) |set| for (helper_denied) |c| {
+            if (set & (@as(
+                u64,
+                1,
+            ) << c.n) != 0) try helper_held.print(
+                p.gpa,
+                "{s}{s}",
+                .{ if (helper_held.items.len > 0) ", " else "", c.name },
+            );
+        };
+        try p.add(.{
+            .id = "kernel-helpers",
+            .area = "kernel",
+            .name = "Kernel-started programs bounded",
+            .why = "A program the kernel starts itself, which neither PID 1's seccomp filter " ++
+                "nor its bounding set reaches, cannot load kernel code, reach hardware, trace " ++
+                "processes, mount or change the network, and no program is started on every " ++
+                "device event.",
+            .how = "kernel.usermodehelper.bset lacks each of those capabilities, and " ++
+                "kernel.hotplug is empty",
+            .result = if (!p.root)
+                .skip
+            else if (helperCaps(umh) == null)
+                .fail
+            else if (helper_held.items.len == 0 and hotplug.len == 0)
+                .pass
+            else
+                .fail,
+            .detail = if (!p.root)
+                "readable by root alone"
+            else if (helperCaps(umh) == null)
+                "cannot read kernel.usermodehelper.bset"
+            else if (helper_held.items.len > 0)
+                try p.gpa.print("held: {s}", .{helper_held.items})
+            else if (hotplug.len > 0)
+                try p.gpa.print("kernel.hotplug is {s}", .{hotplug})
+            else
+                "",
+        });
         // A seccomp filter on PID 1 binds every process after it, root's
         // too, and nothing can remove it before a reboot: werewolf's seal
         // (init/init.zig) refuses there what no program here calls.
@@ -946,7 +992,52 @@ const Posture = struct {
                 .result = if (nginx.found == 0) .skip else if (nginx.root == 0) .pass else .fail,
                 .detail = if (nginx.found == 0) "no nginx running" else "",
             });
+            try p.servicesLeashed();
         }
+    }
+
+    /// Each service leash starts, one with an /etc/sv/NAME/service file,
+    /// runs as leash left it.
+    fn servicesLeashed(p: *Posture) !void {
+        var names: std.ArrayList([]const u8) = .empty;
+        if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |d| {
+            var dir = d;
+            defer dir.close(p.io);
+            var it = dir.iterate();
+            while (try it.next(p.io)) |e| {
+                if (exists(p.io, try p.gpa.print("/etc/sv/{s}/service", .{e.name})))
+                    try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+            }
+        } else |_| {}
+        std.mem.sort([]const u8, names.items, {}, lessString);
+        var bad: std.ArrayList(u8) = .empty;
+        var running: usize = 0;
+        for (names.items) |name| {
+            const pid = trim(p.read(try p.gpa.print("/etc/sv/{s}/supervise/pid", .{name})));
+            if (pid.len == 0) continue; // down, or parked
+            const status = p.read(try p.gpa.print("/proc/{s}/status", .{pid}));
+            if (status.len == 0) continue;
+            running += 1;
+            if (whyNotLeashed(status)) |why|
+                try bad.print(
+                    p.gpa,
+                    "{s}{s} {s}",
+                    .{ if (bad.items.len > 0) ", " else "", name, why },
+                );
+        }
+        try p.add(.{
+            .id = "processes-services-leashed",
+            .area = "processes",
+            .name = "Services others wrote run leashed",
+            .why = "Programs werewolf did not write, nginx and PostgreSQL among them, run as " ++
+                "users " ++
+                "of their own, with no capability but binding a low port, and can gain none.",
+            .how = "for each service with an /etc/sv/NAME/service file, its /proc/PID/status: " ++
+                "no " ++
+                "uid 0, no capability in any set but CAP_NET_BIND_SERVICE, and NoNewPrivs 1",
+            .result = if (running == 0) .skip else if (bad.items.len == 0) .pass else .fail,
+            .detail = if (running == 0) "no leashed service running" else bad.items,
+        });
     }
 
     // --- programs ----------------------------------------------------------
@@ -1454,6 +1545,62 @@ const Posture = struct {
                 "could not set every trick up"
             else
                 "",
+        });
+        try p.leashAttack();
+    }
+
+    /// A service leash starts as an unprivileged user does what its file
+    /// grants and nothing more: posture leashes a copy of itself, which
+    /// tries (probe, below) and says by its exit code what went as it
+    /// should not.
+    fn leashAttack(p: *Posture) !void {
+        if (!exists(p.io, leash_bin)) return;
+        var exe: [Dir.max_path_bytes]u8 = undefined;
+        const self = exe[0 .. Dir.cwd().readLink(p.io, "/proc/self/exe", &exe) catch return];
+        Dir.cwd().createDirPath(p.io, probe_dir) catch return;
+        defer {
+            Dir.cwd().deleteTree(p.io, probe_dir) catch {};
+            Dir.cwd().deleteTree(p.io, "/run/svc/" ++ probe_name) catch {};
+            Dir.cwd().deleteTree(p.io, "/data/svc/" ++ probe_name) catch {};
+        }
+        const file = try p.gpa.print(
+            "# posture's probe (werewolf.check=1), granted TCP port 1 and nothing else\n" ++
+                "exec {s} --probe\nuser nobody\nconnect tcp/1\n",
+            .{self},
+        );
+        Dir.cwd().writeFile(
+            p.io,
+            .{ .sub_path = probe_dir ++ "/service", .data = file },
+        ) catch return;
+        var child = std.process.spawn(p.io, .{
+            .argv = &.{leash_bin},
+            .cwd = .{ .path = probe_dir },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch return;
+        const term = child.wait(p.io) catch return;
+        const code: u8 = if (term == .exited) @truncate(term.exited) else 0;
+        var got: std.ArrayList(u8) = .empty;
+        if (code & 0x80 != 0) {
+            for (probe_tries, 0..) |what, i| {
+                if (code & (@as(u8, 1) << @intCast(i)) != 0)
+                    try got.print(p.gpa, "{s}{s}", .{ if (got.items.len > 0) ", " else "", what });
+            }
+        }
+        try p.add(.{
+            .id = "processes-leash-attack",
+            .area = "processes",
+            .name = "A leashed service stays on its leash",
+            .why = "A service that is taken over can reach only the files, programs and ports " ++
+                "its " ++
+                "service file names.",
+            .how = "this program, leashed as nobody and granted TCP port 1, cannot read " ++
+                "/run/werewolf/hostname, write /tmp, run /usr/bin/sv or connect to port 2 on " ++
+                "127.0.0.1, and can read /etc/passwd, write its own directory and connect to " ++
+                "port 1",
+            .result = if (code & 0x80 == 0) .fail else if (got.items.len == 0) .pass else .fail,
+            .detail = if (code & 0x80 == 0) "the probe did not run" else got.items,
         });
     }
 
@@ -2757,6 +2904,27 @@ const bounded_caps = [_]struct { name: []const u8, n: u6, allow: []const u8 = ""
     .{ .name = "CAP_NET_RAW", .n = 13, .allow = "packet" },
 };
 
+/// What kernel-helpers wants gone from the helpers' bounding set.
+const helper_denied = [_]struct { name: []const u8, n: u6 }{
+    .{ .name = "CAP_NET_ADMIN", .n = 12 },
+    .{ .name = "CAP_NET_RAW", .n = 13 },
+    .{ .name = "CAP_SYS_MODULE", .n = 16 },
+    .{ .name = "CAP_SYS_RAWIO", .n = 17 },
+    .{ .name = "CAP_SYS_PTRACE", .n = 19 },
+    .{ .name = "CAP_SYS_ADMIN", .n = 21 },
+    .{ .name = "CAP_PERFMON", .n = 38 },
+    .{ .name = "CAP_BPF", .n = 39 },
+};
+
+/// kernel.usermodehelper.bset, "LOW\tHIGH", as one set, or null.
+fn helperCaps(text: []const u8) ?u64 {
+    var it = std.mem.tokenizeAny(u8, text, " \t\n");
+    const low = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
+    const high = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
+    if (it.next() != null) return null;
+    return @as(u64, high) << 32 | low;
+}
+
 /// Whether capability n is in a /proc/PID/status set, given in hex, or null
 /// if the field is missing.
 fn capBit(status: []const u8, field: []const u8, n: u6) ?bool {
@@ -2790,6 +2958,116 @@ fn dotted(gpa: Allocator, key: []const u8) []const u8 {
     const out = gpa.dupe(u8, key) catch return key;
     std.mem.replaceScalar(u8, out, '/', '.');
     return out;
+}
+
+// --- the leash probe --------------------------------------------------------------
+
+const leash_bin = "/usr/lib/werewolf/leash";
+const probe_name = "posture-probe";
+const probe_dir = "/run/werewolf/" ++ probe_name;
+
+/// What the probe tries, in its exit code's bits, each a thing that went
+/// as it should not.
+const probe_tries = [_][]const u8{
+    "read a file it was not granted",
+    "could not read /etc/passwd",
+    "connected to a port it was not granted",
+    "could not connect to the port it was granted",
+    "could not write its own directory",
+    "wrote to /tmp",
+    "ran a program it was not granted",
+};
+
+/// posture --probe, as leashed by leashAttack: 128, and a bit for each of
+/// probe_tries that went wrong. It makes only system calls.
+fn probe() u8 {
+    var bits: u8 = 0;
+    if (opens("/run/werewolf/hostname")) bits |= 1 << 0;
+    if (!opens("/etc/passwd")) bits |= 1 << 1;
+    if (connectError(2) != .ACCES) bits |= 1 << 2;
+    if (connectError(1) == .ACCES) bits |= 1 << 3;
+    if (!creates("/run/svc/" ++ probe_name ++ "/x")) bits |= 1 << 4;
+    if (creates("/tmp/." ++ probe_name)) bits |= 1 << 5;
+    if (runs("/usr/bin/sv")) bits |= 1 << 6;
+    return 0x80 | bits;
+}
+
+fn opens(path: [:0]const u8) bool {
+    const fd = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    _ = linux.close(@intCast(fd));
+    return true;
+}
+
+fn creates(path: [:0]const u8) bool {
+    const fd = linux.open(
+        path,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
+        0o600,
+    );
+    if (linux.errno(fd) != .SUCCESS) return false;
+    _ = linux.close(@intCast(fd));
+    _ = linux.unlink(path);
+    return true;
+}
+
+/// The error a TCP connect to port on 127.0.0.1 gets: fence lets loopback
+/// pass, so a refusal there is the leash's.
+fn connectError(port: u16) linux.E {
+    const fd = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(fd) != .SUCCESS) return linux.errno(fd);
+    defer _ = linux.close(@intCast(fd));
+    var addr: linux.sockaddr.in = .{
+        .port = std.mem.nativeToBig(u16, port),
+        .addr = std.mem.nativeToBig(u32, 0x7f000001),
+    };
+    return linux.errno(linux.connect(@intCast(fd), @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+}
+
+/// Whether path starts: a child tries it, and says by its exit code.
+fn runs(path: [:0]const u8) bool {
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) return false;
+    if (pid == 0) {
+        const argv = [_:null]?[*:0]const u8{ path, null };
+        const envp = [_:null]?[*:0]const u8{null};
+        _ = linux.execve(path, &argv, &envp);
+        linux.exit_group(42); // refused
+    }
+    var status: u32 = 0;
+    if (linux.errno(linux.wait4(
+        @intCast(pid),
+        @ptrCast(&status),
+        0,
+        null,
+    )) != .SUCCESS) return false;
+    return !(linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 42);
+}
+
+/// Why a /proc/PID/status is not that of a process leash started, or null.
+fn whyNotLeashed(status: []const u8) ?[]const u8 {
+    var ids = std.mem.tokenizeAny(
+        u8,
+        statusField(status, "Uid") orelse return "shows no uid",
+        " \t",
+    );
+    while (ids.next()) |id| if (std.mem.eql(u8, id, "0")) return "runs as root";
+    const bind: u64 = 1 << linux.CAP.NET_BIND_SERVICE;
+    for ([_][]const u8{ "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb" }) |key| {
+        const v = std.fmt.parseInt(
+            u64,
+            statusField(status, key) orelse return "shows no capabilities",
+            16,
+        ) catch
+            return "shows no capabilities";
+        if (v & ~bind != 0) return "has capabilities";
+    }
+    if (!std.mem.eql(
+        u8,
+        statusField(status, "NoNewPrivs") orelse "",
+        "1",
+    )) return "may gain privileges";
+    return null;
 }
 
 fn trim(s: []const u8) []const u8 {
@@ -3310,6 +3588,15 @@ test isFound {
     try testing.expect(isFound(.open_dirs, S.IFDIR | 0o773));
 }
 
+test helperCaps {
+    try testing.expectEqual(1 << 22, helperCaps("4194304\t0\n").?);
+    try testing.expectEqual((1 << 41) - 1, helperCaps("4294967295\t511").?);
+    try testing.expectEqual(null, helperCaps(""));
+    try testing.expectEqual(null, helperCaps("1"));
+    try testing.expectEqual(null, helperCaps("1 2 3"));
+    try testing.expectEqual(null, helperCaps("x 0"));
+}
+
 test capBit {
     const status = "CapEff:\t000001ffffffffff\nCapBnd:\t000001fffe7cfdff\n";
     try testing.expect(capBit(status, "CapEff", 17).?);
@@ -3502,6 +3789,21 @@ test printText {
         out.written(),
         "/usr/bin/passwd, /usr/bin/mount\n",
     ) != null);
+}
+
+test whyNotLeashed {
+    const ok = "Name:\tnginx\nUid:\t200\t200\t200\t200\nCapInh:\t0000000000000000\nCapPrm:\t0000" ++
+        "000000000400\n" ++
+        "CapEff:\t0000000000000400\nCapBnd:\t0000000000000400\nCapAmb:\t0000000000000400\nNoNewP" ++
+        "rivs:\t1\n";
+    try testing.expectEqual(null, whyNotLeashed(ok));
+    try testing.expectEqualStrings("runs as root", whyNotLeashed("Uid:\t200\t0\t200\t200\n").?);
+    const caps = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t000001fffff" ++
+        "fffff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
+    try testing.expectEqualStrings("has capabilities", whyNotLeashed(caps).?);
+    const nnp = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t0\nCapAmb:\t" ++
+        "0\nNoNewPrivs:\t0\n";
+    try testing.expectEqualStrings("may gain privileges", whyNotLeashed(nnp).?);
 }
 
 test printLine {

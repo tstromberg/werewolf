@@ -200,14 +200,21 @@ fn fail(e: linux.E) ?linux.pid_t {
     return null;
 }
 
+/// Say on stderr that command was not run, its first max_command bytes
+/// with every control character as ?, so a command cannot write to the
+/// terminal or log it is shown on; and set errno.
 fn refuse(command: [*:0]const u8) void {
-    var buf: [max_command + 64]u8 = undefined;
-    const line = std.mem.print(
-        &buf,
-        "popen-shim: not run, not a command of initdb's shape: {s}\n",
-        .{std.mem.span(command)},
-    ) catch "popen-shim: not run\n";
-    _ = linux.write(2, line.ptr, line.len);
+    const prefix = "popen-shim: not run, not a command of initdb's shape: ";
+    var buf: [prefix.len + max_command + 1]u8 = undefined;
+    const cmd = std.mem.span(command);
+    const shown = cmd[0..@min(cmd.len, max_command)];
+    @memcpy(buf[0..prefix.len], prefix);
+    for (shown, buf[prefix.len..][0..shown.len]) |ch, *o| o.* = if (ch < 0x20 or ch == 0x7f)
+        '?'
+    else
+        ch;
+    buf[prefix.len + shown.len] = '\n';
+    _ = linux.write(2, &buf, prefix.len + shown.len + 1);
     std.c._errno().* = @backingInt(linux.E.NOEXEC);
 }
 
@@ -724,6 +731,8 @@ test "refused: nothing runs, ENOEXEC, and a line on stderr" {
     const e1 = errno();
     const s = popen(bad, "r");
     const e2 = errno();
+    // A command that would set the terminal's title and colour.
+    _ = system("/bin/x \x1b]0;owned\x07 \x1b[31m");
     _ = linux.dup3(saved, 2, 0);
     _ = linux.close(saved);
     _ = linux.close(p[1]);
@@ -740,7 +749,9 @@ test "refused: nothing runs, ENOEXEC, and a line on stderr" {
         b[0..n],
         "popen-shim: not run, not a command of initdb's shape: /usr/bin/touch",
     ));
-    try testing.expectEqual(2, std.mem.count(u8, b[0..n], "\n"));
+    try testing.expectEqual(3, std.mem.count(u8, b[0..n], "\n"));
+    try testing.expect(std.mem.indexOfAny(u8, b[0..n], "\x1b\x07") == null);
+    try testing.expect(std.mem.indexOf(u8, b[0..n], "/bin/x ?]0;owned? ?[31m\n") != null);
 }
 
 test "popen: locale -a reads as empty and closes as a success" {

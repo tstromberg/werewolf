@@ -1,0 +1,22 @@
+# What the demo, booted as it ships, without a shell, must say on its
+# console (make check-shellfree-demo; test/boot). One line a check:
+#
+#   KIND NAME REGEX
+#
+#   seen    must appear, within five minutes of the posture line
+#   unseen  must not appear at all
+#
+# Each leashed service starts; PostgreSQL's cluster is made on the blank
+# disk and its schema applied; and the page stores this boot's posture in
+# it. The scan's own line needs a day's vulnerability database from the
+# network, so it is not waited for here.
+
+seen    nginx-leashed     leash: \{"event":"start","service":"nginx"
+seen    status-leashed    leash: \{"event":"start","service":"status"
+seen    scan-leashed      leash: \{"event":"start","service":"scan"
+seen    postgres-leashed  leash: \{"event":"start","service":"postgres"
+seen    cluster-made      pg-init: making the cluster in /data/svc/postgres/data
+seen    schema-applied    pg-init: applied [0-9]+ SQL files? from /usr/share/werewolf-postgres
+seen    posture-stored    status: \{"time":"[^"]*","event":"database","kept":"posture"\}
+unseen  service-down      leash: \{"event":"down"
+unseen  status-error      status: \{"time":"[^"]*","event":"error"

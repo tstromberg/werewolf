@@ -6,11 +6,14 @@
 # console). Judge the machine's posture line, which its posture service
 # prints once the services settle: the checks that fail must be exactly
 # those in POSTURE_KNOWN (the form's line of test/posture-known), no more and
-# no fewer. Then, unless CHECKS is -, run each check in CHECKS (see
-# test/checks) as root on the console, which needs werewolf.debug=1 and a
-# shell, and power the machine off; with CHECKS -, end QEMU from its
-# monitor. Exit 0 only if it booted, its posture and every check came out
-# as expected, and, with a shell, it shut down cleanly.
+# no fewer. Then run each check in CHECKS (see test/checks) as root on the
+# console, which needs werewolf.debug=1 and a shell, and power the machine
+# off. A machine with no shell is judged from its console instead: CHECKS
+# is - (its posture line alone), or a file of console lines (seen NAME
+# REGEX, which must appear; unseen NAME REGEX, which must not; see
+# test/console-demo), and QEMU ends from its monitor. Exit 0 only if it
+# booted, its posture and every check came out as expected, and, with a
+# shell, it shut down cleanly.
 #
 # Nothing waits a fixed time: each step waits for what it needs to see, up
 # to a limit. Each check's output is fenced by a marker its own echo cannot
@@ -25,8 +28,22 @@ lassign $argv name checks log
 set qemu [lrange $argv 3 end]
 
 log_user 0
-log_file -a -noappend $log
+# Opened here, unbuffered, so the console seen so far can be read back.
+set log_chan [open $log w]
+fconfigure $log_chan -buffering none
+log_file -a -open $log_chan
 set failed 0
+
+# CHECKS as console lines, or {} if it is a file of shell checks.
+set console {}
+if {$checks ne "-"} {
+	set f [open $checks]
+	while {[gets $f line] >= 0} {
+		if {[regexp {^(seen|unseen)\s+(\S+)\s+(.+)$} $line -> kind check re]} { lappend console [list $kind $check $re] }
+	}
+	close $f
+}
+set shell [expr {$checks ne "-" && ![llength $console]}]
 
 proc say {status what {detail ""}} {
 	global name
@@ -150,7 +167,46 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	}
 }
 
-if {$checks eq "-"} {
+# A machine with no shell, by what its console says: each seen line, waited
+# for up to five minutes while the console is read, and no unseen line.
+if {[llength $console]} {
+	set deadline [expr {[clock seconds] + 300}]
+	while 1 {
+		set f [open $log]
+		set text [string map [list "\r" ""] [read $f]]
+		close $f
+		set missing 0
+		foreach c $console {
+			lassign $c kind check re
+			if {$kind eq "seen" && ![regexp -- $re $text]} { incr missing }
+		}
+		if {!$missing || [clock seconds] > $deadline} { break }
+		expect {
+			-timeout 2
+			-re ".+" {}
+			timeout {}
+			eof { give_up "console: QEMU exited" }
+		}
+	}
+	foreach c $console {
+		lassign $c kind check re
+		set found [regexp -- $re $text]
+		if {$kind eq "seen" && $found} {
+			say ok $check
+		} elseif {$kind eq "unseen" && !$found} {
+			say ok $check
+		} elseif {$kind eq "seen"} {
+			say FAIL $check "not on the console in 300 s: $re"
+			incr failed
+		} else {
+			regexp -- "\[^\n\]*(?:$re)\[^\n\]*" $text line
+			say FAIL $check "on the console: $line"
+			incr failed
+		}
+	}
+}
+
+if {!$shell} {
 	# No shell to power off from, and on arm64 no power button either (its
 	# device tree's gpio-keys, which linux-virt lacks): QEMU's monitor
 	# (Ctrl-A c) ends the run. Forms with a shell test the shutdown.

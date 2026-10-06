@@ -92,7 +92,12 @@ pub fn main(init: std.process.Init) !void {
         .CORE,
         &no_core,
     )) != .SUCCESS) say("core dumps not limited", .{});
-    seal();
+    // The seal fails closed, as fence does: PID 1 ends, the kernel panics,
+    // and the machine comes back on the slot that last worked.
+    seal() catch |err| {
+        say("not sealed: {s}; not handing over", .{@errorName(err)});
+        std.process.exit(1);
+    };
     say("up in {s}s, handing over to runit", .{firstWord(m.read("/proc/uptime"))});
     const err = std.process.replace(
         m.io,
@@ -914,6 +919,9 @@ const sysctls = [_][2][]const u8{
     .{ "fs/protected_regular", "2" },
     .{ "kernel/io_uring_disabled", "2" },
     .{ "kernel/sysrq", "0" },
+    // No program for the kernel to start on every device event: it would
+    // run outside the seal (see seal()). An empty line empties it.
+    .{ "kernel/hotplug", "\n" },
     .{ "net/ipv4/conf/all/log_martians", "1" },
     .{ "net/ipv4/conf/default/log_martians", "1" },
     .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" },
@@ -995,6 +1003,7 @@ const native_arch: u32 = switch (builtin.cpu.arch) {
 const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
 const LD_W_ABS = 0x20;
 const JEQ_K = 0x15;
+const JGE_K = 0x35;
 const RET_K = 0x06;
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
 const SECCOMP_RET_ERRNO: u32 = 0x00050000;
@@ -1007,21 +1016,32 @@ const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
 /// longer table costs nothing more. What any filter costs is the kernel's
 /// slower way into every system call, about 25 ns a call (design/lockdown.md,
 /// *What the seal costs*): werewolf pays that, by choice.
+///
+/// On x86_64 a number with bit 30 set is an x32 call, under x86_64's own
+/// architecture: it would pass every comparison below as another number,
+/// so it kills the process too. Alpine's kernel has no x32 ABI; the check
+/// keeps one that does from opening the table.
 const seal_filter = blk: {
     const n = denied.len;
-    var f: [6 + n]Filter = undefined;
+    const x32 = builtin.cpu.arch == .x86_64;
+    const at = if (x32) 6 else 4; // the first comparison
+    var f: [at + 2 + n]Filter = undefined;
     f[0] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 4 }; // seccomp_data.arch
     f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = native_arch };
     f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
     f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
-    for (denied, 0..) |sys, i| f[4 + i] = .{
+    if (x32) {
+        f[4] = .{ .code = JGE_K, .jt = 0, .jf = 1, .k = 0x40000000 }; // __X32_SYSCALL_BIT
+        f[5] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
+    }
+    for (denied, 0..) |sys, i| f[at + i] = .{
         .code = JEQ_K,
         .jt = @intCast(n - i),
         .jf = 0,
         .k = @intCast(@backingInt(sys)),
     };
-    f[4 + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
-    f[5 + n] = .{
+    f[at + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
+    f[at + 1 + n] = .{
         .code = RET_K,
         .jt = 0,
         .jf = 0,
@@ -1030,20 +1050,50 @@ const seal_filter = blk: {
     break :blk f;
 };
 
+/// The capabilities a program the kernel starts itself may have: a
+/// usermode helper, which kthreadd starts, not PID 1, so neither the seal's
+/// filter nor its bounding set reach it. Root could name one (a core
+/// pattern of `|PROGRAM`, kernel.modprobe, kernel.hotplug) and have it run
+/// with every capability, outside the seal. Only CAP_SYS_BOOT is left, for
+/// the kernel's own orderly poweroff. The kernel lets these only fall, and
+/// only for a holder of CAP_SYS_MODULE, which the seal then takes.
+const helper_caps: u64 = 1 << 22; // CAP_SYS_BOOT
+
+/// "LOW HIGH": a capability set as kernel.usermodehelper.bset reads it.
+fn capWords(buf: []u8, set: u64) []const u8 {
+    return std.mem.print(
+        buf,
+        "{d} {d}",
+        .{ @as(u32, @truncate(set)), @as(u32, @truncate(set >> 32)) },
+    ) catch unreachable;
+}
+
 /// Install the seal on PID 1, which every process inherits and none, root
-/// included, can remove until the machine reboots. PID 1 holds
-/// CAP_SYS_ADMIN, so it needs no no_new_privs, which would bind every
-/// program after it. A kernel that refuses it leaves the machine unsealed,
-/// and posture says so.
-fn seal() void {
+/// included, can remove until the machine reboots: the helpers' bounding
+/// set, PID 1's, then the filter. PID 1 holds CAP_SYS_ADMIN, so it needs no
+/// no_new_privs, which would bind every program after it. Any step that
+/// fails is an error; a capability the kernel does not know (EINVAL) is
+/// one it cannot grant.
+fn seal() !void {
+    var buf: [32]u8 = undefined;
+    for ([_][:0]const u8{
+        "/proc/sys/kernel/usermodehelper/bset",
+        "/proc/sys/kernel/usermodehelper/inheritable",
+    }, [_]u64{ helper_caps, 0 }) |path, set| {
+        if (!writeFile(path, capWords(&buf, set))) return error.UsermodeHelperCaps;
+    }
     const PR_CAPBSET_DROP = 24;
     var caps: usize = 0;
     for (dropped_caps) |c| {
         const rc = linux.prctl(PR_CAPBSET_DROP, c.n, 0, 0, 0);
-        if (linux.errno(rc) == .SUCCESS)
-            caps += 1
-        else
-            say("cap_{s} not dropped: {t}", .{ c.name, linux.errno(rc) });
+        switch (linux.errno(rc)) {
+            .SUCCESS => caps += 1,
+            .INVAL => {},
+            else => |e| {
+                say("cap_{s} not dropped: {t}", .{ c.name, e });
+                return error.BoundingSet;
+            },
+        }
     }
     const SECCOMP_SET_MODE_FILTER = 1;
     const prog = extern struct {
@@ -1051,10 +1101,10 @@ fn seal() void {
         filter: [*]const Filter,
     }{ .len = seal_filter.len, .filter = &seal_filter };
     const rc = linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog);
-    if (linux.errno(rc) != .SUCCESS) return say(
-        "not sealed: seccomp: {t}; {d} capabilities dropped",
-        .{ linux.errno(rc), caps },
-    );
+    if (linux.errno(rc) != .SUCCESS) {
+        say("seccomp: {t}", .{linux.errno(rc)});
+        return error.Seccomp;
+    }
     say(
         "sealed: {d} system calls refused, {d} capabilities dropped, other architectures' calls " ++
             "fatal",
@@ -1358,6 +1408,7 @@ fn sealAction(arch: u32, nr: u32) u32 {
         switch (i.code) {
             LD_W_ABS => a = if (i.k == 4) arch else nr,
             JEQ_K => pc += if (a == i.k) i.jt else i.jf,
+            JGE_K => pc += if (a >= i.k) i.jt else i.jf,
             RET_K => return i.k,
             else => unreachable,
         }
@@ -1384,6 +1435,18 @@ test seal_filter {
     );
     try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000028, 0)); // AUDIT_ARCH_ARM
     try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000003, 0)); // AUDIT_ARCH_I386
+    // x32: a denied number, or any, with bit 30 set.
+    if (builtin.cpu.arch == .x86_64) for ([_]u32{ 0x40000000, 0x40000000 | 154, 0xffffffff }) |nr| {
+        try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(native_arch, nr));
+    };
+    try testing.expectEqual(SECCOMP_RET_ALLOW, sealAction(native_arch, 0x3fffffff));
+}
+
+test capWords {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("4194304 0", capWords(&buf, helper_caps));
+    try testing.expectEqualStrings("0 0", capWords(&buf, 0));
+    try testing.expectEqualStrings("4294967295 511", capWords(&buf, (1 << 41) - 1));
 }
 
 test parseCmdline {

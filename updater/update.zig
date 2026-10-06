@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const sandbox = @import("sandbox.zig");
 const cve = @import("cve.zig");
+const releases = @import("release.zig");
 
 const meta_dir = "/usr/share/werewolf";
 const state_dir = "/data/svc/autoupdate";
@@ -206,6 +207,8 @@ const Update = struct {
         const build = it.next() orelse return error.BadAttemptFile;
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
         if (std.mem.eql(u8, tried, u.cmd.slot)) {
+            Dir.cwd().rename(state_dir ++ "/attempt-serial", Dir.cwd(), state_dir ++ "/serial", u.io) catch |err|
+                if (err != error.FileNotFound) return err;
             try u.record(.{
                 .event = "commit",
                 .slot = u.cmd.slot,
@@ -222,10 +225,15 @@ const Update = struct {
                 .release = release,
             });
         }
+        Dir.cwd().deleteFile(u.io, state_dir ++ "/attempt-serial") catch {};
         try Dir.cwd().deleteFile(u.io, state_dir ++ "/attempt");
     }
 
     // --- check -------------------------------------------------------------
+    // What the other slot would be: the latest signed release of this form,
+    // if CI publishes the form (the build record names where), or else what
+    // Wolfi and Alpine have now. Then the same for both: the CVEs it fixes,
+    // the slot, the report, and a reboot into it once.
     fn check(u: *Update) !void {
         const io = u.io;
         Dir.cwd().deleteTree(io, work_dir) catch {};
@@ -233,7 +241,84 @@ const Update = struct {
         defer Dir.cwd().deleteTree(io, work_dir) catch {};
         const arch = std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n");
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
+        const published = if (Dir.cwd().access(io, meta_dir ++ "/releases", .{})) true else |_| false;
+        const plan = (if (published)
+            try u.releasePlan(arch, release)
+        else
+            try u.packagesPlan(arch, release)) orelse return;
 
+        if (u.isBad(plan.build)) {
+            return u.record(.{
+                .event = "skip",
+                .build = plan.build,
+                .reason = "this build rolled back before",
+            });
+        }
+
+        u.step = "cves";
+        try u.netRoot();
+        var sources: std.ArrayList(Source) = .empty;
+        const repo = (try u.words(try u.read("/etc/apk/repositories")))[0];
+        const package_cves = try u.packageCves(&sources, repo, plan.old_pkgs, plan.new_pkgs);
+        const kernel_changed = !std.mem.eql(u8, plan.old_kernel, plan.new_kernel);
+        const kernel_cves = if (kernel_changed)
+            try u.kernelCves(&sources, plan.old_kernel, plan.new_kernel)
+        else
+            cve.KernelFixes{};
+
+        switch (plan.from) {
+            .packages => try u.buildSlot(arch, plan.new_kernel),
+            .release => |r| try u.fetchRelease(r.base, r.name, r.manifest),
+        }
+        try u.install(plan.build);
+        // outcome keeps a release's serial once its slot commits, so no
+        // older one is taken after it.
+        if (plan.from == .release) try u.write(state_dir ++ "/attempt-serial", plan.from.release.manifest.serial);
+
+        u.step = "report";
+        const changes = try diffPackages(u.gpa, plan.old_pkgs, plan.new_pkgs);
+        const stamp = try u.now();
+        const report: Report = .{
+            .time = stamp,
+            .host = u.host,
+            .build = plan.build,
+            .from = .{ .slot = u.cmd.slot, .release = release, .kernel = plan.old_kernel },
+            .to = .{ .slot = u.other, .kernel = plan.new_kernel },
+            .packages = changes,
+            .package_cves = package_cves,
+            .kernel_cves = kernel_cves,
+            .sources = sources.items,
+        };
+        const report_path = try u.gpa.print(
+            "{s}/reports/{s}-{s}.json",
+            .{ state_dir, stamp, plan.build },
+        );
+        var out: Io.Writer.Allocating = .init(u.gpa);
+        try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
+        try out.writer.writeByte('\n');
+        try Dir.cwd().writeFile(io, .{ .sub_path = report_path, .data = out.written() });
+
+        var cve_count: usize = kernel_cves.cves.len;
+        for (package_cves) |p| cve_count += p.cves.len;
+        try u.record(.{
+            .event = "update",
+            .from = u.cmd.slot,
+            .to = u.other,
+            .build = plan.build,
+            .kernel = try u.gpa.print("{s} -> {s}", .{ plan.old_kernel, plan.new_kernel }),
+            .packages = changes.len,
+            .cves = cve_count,
+            .report = report_path,
+        });
+        u.step = "reboot";
+        Dir.cwd().deleteTree(io, work_dir) catch {};
+        try u.run(&.{"/usr/bin/reboot"});
+    }
+
+    /// The other slot as Wolfi and Alpine would have it now, installed into
+    /// work_dir/root and work_dir/kernel; or null, logged, if it would be
+    /// this one.
+    fn packagesPlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
         u.step = "userland";
         try u.apkAdd(
             work_dir ++ "/root",
@@ -265,76 +350,94 @@ const Update = struct {
             "linux-virt-{s}",
             .{versionOf(kernel_pkgs, "linux-virt") orelse return error.NoKernel},
         );
-        const changes = try diffPackages(u.gpa, old_pkgs, new_pkgs);
-        const kernel_changed = !std.mem.eql(u8, old_kernel, new_kernel);
-        if (changes.len == 0 and !kernel_changed) {
-            return u.record(.{
-                .event = "check",
-                .slot = u.cmd.slot,
-                .release = release,
-                .result = "current",
-            });
+        if ((try diffPackages(u.gpa, old_pkgs, new_pkgs)).len == 0 and std.mem.eql(u8, old_kernel, new_kernel)) {
+            try u.record(.{ .event = "check", .slot = u.cmd.slot, .release = release, .result = "current" });
+            return null;
         }
-
-        const build = try buildHash(u.gpa, new_pkgs, new_kernel);
-        if (u.isBad(build)) {
-            return u.record(.{
-                .event = "skip",
-                .build = build,
-                .reason = "this build rolled back before",
-            });
-        }
-
-        u.step = "cves";
-        try u.netRoot();
-        var sources: std.ArrayList(Source) = .empty;
-        const repo = (try u.words(try u.read("/etc/apk/repositories")))[0];
-        const package_cves = try u.packageCves(&sources, repo, old_pkgs, new_pkgs);
-        const kernel_cves = if (kernel_changed)
-            try u.kernelCves(&sources, old_kernel, new_kernel)
-        else
-            cve.KernelFixes{};
-
-        try u.buildSlot(arch, new_kernel);
-        try u.install(build);
-
-        u.step = "report";
-        const stamp = try u.now();
-        const report: Report = .{
-            .time = stamp,
-            .host = u.host,
-            .build = build,
-            .from = .{ .slot = u.cmd.slot, .release = release, .kernel = old_kernel },
-            .to = .{ .slot = u.other, .kernel = new_kernel },
-            .packages = changes,
-            .package_cves = package_cves,
-            .kernel_cves = kernel_cves,
-            .sources = sources.items,
+        return .{
+            .build = try buildHash(u.gpa, new_pkgs, new_kernel),
+            .old_pkgs = old_pkgs,
+            .new_pkgs = new_pkgs,
+            .old_kernel = old_kernel,
+            .new_kernel = new_kernel,
+            .from = .packages,
         };
-        const report_path = try u.gpa.print(
-            "{s}/reports/{s}-{s}.json",
-            .{ state_dir, stamp, build },
-        );
-        var out: Io.Writer.Allocating = .init(u.gpa);
-        try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
-        try out.writer.writeByte('\n');
-        try Dir.cwd().writeFile(io, .{ .sub_path = report_path, .data = out.written() });
+    }
 
-        var cve_count: usize = kernel_cves.cves.len;
-        for (package_cves) |p| cve_count += p.cves.len;
-        try u.record(.{
-            .event = "update",
-            .from = u.cmd.slot,
-            .to = u.other,
-            .build = build,
-            .kernel = try u.gpa.print("{s} -> {s}", .{ old_kernel, new_kernel }),
-            .packages = changes.len,
-            .cves = cve_count,
-            .report = report_path,
-        });
-        u.step = "reboot";
-        Dir.cwd().deleteTree(io, work_dir) catch {};
-        try u.run(&.{"/usr/bin/reboot"});
+    /// The other slot as the latest release of this form has it, its
+    /// manifest signed with the image key; or null, logged, if this slot
+    /// is that release, or it is not one to take: expired, older than one
+    /// already taken, or not published for this form yet.
+    fn releasePlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
+        u.step = "release";
+        try u.netRoot();
+        const base = std.mem.trim(u8, try u.read(meta_dir ++ "/releases"), " \n");
+        const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
+        const name = try u.gpa.print("{s}-{s}", .{ form, arch });
+        const data = u.downloadSmall(try u.gpa.print("{s}{s}.json", .{ base, name }), cves_dir ++ "/manifest.json") catch |err| {
+            if (err == error.FetchFailed and std.mem.eql(u8, u.detail, "not_found")) {
+                try u.record(.{ .event = "skip", .release = release, .reason = "no release of this form yet" });
+                return null;
+            }
+            return err;
+        };
+        const sig = try u.downloadSmall(try u.gpa.print("{s}{s}.json.sig", .{ base, name }), cves_dir ++ "/manifest.sig");
+        const key = try releases.parseKey(u.gpa, try u.read(meta_dir ++ "/image.pub"));
+        const secs: i64 = @intCast(@divFloor(Io.Timestamp.now(u.io, .real).nanoseconds, std.time.ns_per_s));
+        const m = releases.open(u.gpa, key, data, sig, form, arch, secs) catch |err| switch (err) {
+            error.Stale => {
+                try u.record(.{ .event = "skip", .release = release, .reason = "the latest release has expired" });
+                return null;
+            },
+            else => return err,
+        };
+
+        u.step = "compare";
+        const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
+        const running = try u.gpa.print("/victim{s}/{s}/root.erofs", .{ pathOf(u.cmd.victim), u.cmd.slot });
+        const root = m.files.map.get("root.erofs").?;
+        if (std.mem.eql(u8, &try u.sha256Of(running), root.sha256) and std.mem.eql(u8, m.kernel, old_kernel)) {
+            try u.record(.{ .event = "check", .slot = u.cmd.slot, .release = release, .result = "current" });
+            return null;
+        }
+        if (u.read(state_dir ++ "/serial")) |taken| {
+            if (std.mem.order(u8, m.serial, std.mem.trim(u8, taken, "\n")) != .gt) {
+                try u.record(.{ .event = "skip", .build = m.build, .reason = "not newer than the release last taken" });
+                return null;
+            }
+        } else |err| if (err != error.FileNotFound) return err;
+
+        const new_pkgs = try u.gpa.alloc(Package, m.packages.len);
+        for (m.packages, new_pkgs) |p, *n| n.* = .{ .name = p.name, .version = p.version, .origin = p.origin };
+        return .{
+            .build = m.build,
+            .old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed")),
+            .new_pkgs = new_pkgs,
+            .old_kernel = old_kernel,
+            .new_kernel = m.kernel,
+            .from = .{ .release = .{ .base = base, .name = name, .manifest = m } },
+        };
+    }
+
+    /// A release's slot files into work_dir/slot as a built slot has them,
+    /// each checked against the manifest's size and sha256.
+    fn fetchRelease(u: *Update, base: []const u8, name: []const u8, m: releases.Manifest) !void {
+        u.step = "fetch";
+        try Dir.cwd().createDirPath(u.io, work_dir ++ "/slot");
+        const targets = [_][:0]const u8{
+            work_dir ++ "/slot/vmlinuz",
+            work_dir ++ "/slot/initramfs.zst",
+            work_dir ++ "/slot/root.erofs",
+        };
+        for (releases.Manifest.slot_files, targets) |file, target| {
+            const want = m.files.map.get(file).?;
+            const got = try u.download(try u.gpa.print("{s}{s}-{s}", .{ base, name, file }), target);
+            _ = linux.close(got.fd);
+            if (got.size != want.size or !std.mem.eql(u8, &got.sha256, want.sha256)) {
+                u.detail = try u.gpa.print("{s}: not the file the manifest names", .{file});
+                return error.ReleaseFileMismatch;
+            }
+        }
     }
 
     // --- CVEs --------------------------------------------------------------
@@ -408,49 +511,52 @@ const Update = struct {
     ) !?cve.Body {
         try sources.append(u.gpa, .{ .url = url, .fetched = try u.now() });
         const source = &sources.items[sources.items.len - 1];
-        const fd: i32 = @intCast(try u.sys(
-            linux.openat(
-                linux.AT.FDCWD,
-                cves_dir ++ "/" ++ name,
-                .{
-                    .ACCMODE = .RDWR,
-                    .CREAT = true,
-                    .TRUNC = true,
-                    .CLOEXEC = true,
-                    .NOFOLLOW = true,
-                },
-                0o600,
-            ),
-            "open " ++ name,
-        ));
-        errdefer _ = linux.close(fd);
-        const said = u.ask(
-            cve.fetcher,
-            .{ update_id, net_root, url, fd },
-            256,
-            fetch_seconds,
-        ) catch |err| {
-            source.@"error" = @errorName(err);
-            _ = linux.close(fd);
+        const got = u.download(url, cves_dir ++ "/" ++ name) catch |err| {
+            source.@"error" = if (err == error.FetchFailed) u.detail else @errorName(err);
             return null;
         };
+        source.sha256 = try u.gpa.dupe(u8, &got.sha256);
+        return .{ .fd = got.fd, .size = got.size };
+    }
+
+    /// GET url, by a fetcher as _update (cve.fetcher), into path, a file
+    /// root makes for it: the file, open, with its size and sha256. A
+    /// fetcher that says why not fails with error.FetchFailed, its word in
+    /// detail.
+    fn download(u: *Update, url: []const u8, path: [:0]const u8) !Download {
+        const flags: linux.O = .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true };
+        const fd: i32 = @intCast(try u.sys(linux.openat(linux.AT.FDCWD, path, flags, 0o600), "open a download"));
+        errdefer _ = linux.close(fd);
+        const said = try u.ask(cve.fetcher, .{ update_id, net_root, url, fd }, 256, fetch_seconds);
         if (!std.mem.eql(u8, said.status, "ok")) {
-            source.@"error" = said.status;
-            _ = linux.close(fd);
-            return null;
+            u.detail = said.status;
+            return error.FetchFailed;
         }
         var h: std.crypto.hash.sha2.Sha256 = .init(.{});
         var buf: [64 << 10]u8 = undefined;
         var size: usize = 0;
         while (true) {
-            const n = try u.sys(linux.pread(fd, &buf, buf.len, @intCast(size)), "read " ++ name);
+            const n = try u.sys(linux.pread(fd, &buf, buf.len, @intCast(size)), "read a download");
             if (n == 0) break;
             h.update(buf[0..n]);
             size += n;
         }
-        const hex = std.fmt.bytesToHex(h.finalResult(), .lower);
-        source.sha256 = try u.gpa.dupe(u8, &hex);
-        return .{ .fd = fd, .size = size };
+        return .{ .fd = fd, .size = size, .sha256 = std.fmt.bytesToHex(h.finalResult(), .lower) };
+    }
+
+    /// A small file, a manifest or its signature, by download, as bytes.
+    fn downloadSmall(u: *Update, url: []const u8, path: [:0]const u8) ![]const u8 {
+        const got = try u.download(url, path);
+        _ = linux.close(got.fd);
+        if (got.size > 1 << 20) return error.TooBig;
+        return u.read(path);
+    }
+
+    /// The sha256 of a file, as hex.
+    fn sha256Of(u: *Update, path: []const u8) ![64]u8 {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(try u.read(path), &digest, .{});
+        return std.fmt.bytesToHex(digest, .lower);
     }
 
     /// What a reader found in body, for job: the lines after its "ok", or
@@ -1406,6 +1512,21 @@ const Report = struct {
     sources: []const Source,
 };
 
+/// What the other slot would be, and where it comes from.
+const Plan = struct {
+    build: []const u8,
+    old_pkgs: []const Package,
+    new_pkgs: []const Package,
+    old_kernel: []const u8,
+    new_kernel: []const u8,
+    from: union(enum) {
+        packages,
+        release: struct { base: []const u8, name: []const u8, manifest: releases.Manifest },
+    },
+};
+
+const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
+
 const Change = struct { name: []const u8, from: ?[]const u8, to: ?[]const u8 };
 const Source = struct {
     url: []const u8,
@@ -1913,6 +2034,7 @@ test isCachedOf {
 test {
     _ = sandbox;
     _ = cve;
+    _ = releases;
 }
 
 test withoutGz {

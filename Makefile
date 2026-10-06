@@ -717,8 +717,8 @@ check-form:
 		{ echo "FAIL   $(FORM)-again        formatted the disk its first boot left"; exit 1; }
 
 # The forms released without a shell, booted as they ship, without DEV:
-# test/boot runs no checks there (CHECKS -) and judges the machine by its
-# posture line alone, which must find no shell. A static pattern, so that
+# test/boot judges the machine by its posture line, which must find no
+# shell, and by the console lines in test/console-FORM, where there is one. A static pattern, so that
 # it, not check-%, makes these.
 $(SHELLFREE_CHECKS): check-shellfree-%: | $(CHECK_SHARED)
 	@mkdir -p $(CHECK)
@@ -728,7 +728,7 @@ $(SHELLFREE_CHECKS): check-shellfree-%: | $(CHECK_SHARED)
 
 check-shellfree-boot:
 	@rm -f $(CHECK)/$(FORM)-shellfree.img && dd if=/dev/zero of=$(CHECK)/$(FORM)-shellfree.img bs=1048576 count=0 seek=1024 status=none
-	@test/boot $(FORM)-shellfree - $(CHECK)/$(FORM)-shellfree.log $(CHECK_QEMU) \
+	@test/boot $(FORM)-shellfree $(or $(wildcard test/console-$(FORM)),-) $(CHECK)/$(FORM)-shellfree.log $(CHECK_QEMU) \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
 		-drive file=$(CHECK)/$(FORM)-shellfree.img,format=raw,if=virtio
 

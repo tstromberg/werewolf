@@ -86,6 +86,9 @@ the seal before a reboot ([design/lockdown.md](../design/lockdown.md)):
 | --- | --- |
 | A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process |
 | The capability bounding set | loading kernel code (`CAP_SYS_MODULE`, `CAP_BPF`, `CAP_PERFMON`), hardware and `/dev/mem` (`CAP_SYS_RAWIO`), tracing (`CAP_SYS_PTRACE`), device files (`CAP_MKNOD`) and what nothing here uses; once fence has set the network policy, `CAP_NET_ADMIN` and `CAP_NET_RAW` too, but on forms that allow them, as `dhcp` and those built on it do for their DHCP client |
+| The helpers' bounding set (`kernel.usermodehelper.bset`, `inheritable`) | a program the kernel starts itself (a core dump piped to a program, `kernel.modprobe`, the uevent helper) holding more than `CAP_SYS_BOOT`: it descends from the kernel, not PID 1, so neither line above reaches it. `kernel.hotplug` is emptied too |
+
+The seal fails closed: if any part of it cannot be set, PID 1 ends, the kernel panics, and the machine comes back on the slot that last worked. On x86_64 the filter also kills x32 system calls, which Alpine's kernel does not have, so that one that does could not number its way past the table.
 
 The filter costs something, by choice: a process under any filter enters
 each system call by the kernel's slower path. On werewolf's kernel that is
@@ -181,6 +184,13 @@ cloud-init's user-data, once werewolf has committed.
   lima, prod-ssh) carry busybox, whose `sh` runs any script. The others,
   minimal and prod among them, have no shell or interpreter at all, and
   `posture` checks that they do not.
+- **The kernel's own helpers escape the filter.** A program the kernel
+  starts (a core pattern of `|PROGRAM`, `kernel.modprobe`,
+  `kernel.hotplug`) holds no capability but `CAP_SYS_BOOT`, whatever root
+  does, but it is not under PID 1's seccomp filter. Root, which can still
+  write those sysctls, can so make the calls the filter refuses but needs
+  no capability for. Our kernel's `CONFIG_STATIC_USERMODEHELPER`, or a
+  read-only `/proc/sys` once `CAP_SYS_ADMIN` goes, closes it.
 - **Machines bitten before 2026-10-06 keep bite's old command line.**
   bite's GRUB entries now read each slot's kernel arguments from GRUB's
   environment, which the updater sets for each slot it installs; entries

@@ -184,7 +184,34 @@ lists belong in the services' sandboxes, below.
 
 On a 64-bit kernel with compat syscalls built in, the filter checks the
 architecture and kills any 32-bit syscall (done): werewolf ships no 32-bit code,
-and the compat entry points are a second, separately numbered surface.
+and the compat entry points are a second, separately numbered surface. On
+x86_64 it also kills any number with bit 30 set: an x32 call, made under
+x86_64's own architecture, which would otherwise pass every comparison as
+another number. Alpine's kernel has no x32 ABI; a kernel that had one
+would not open the table.
+
+The seal fails closed, as fence does: a filter, a capability or a helper
+setting (below) that cannot be set ends PID 1, and the machine falls back
+to the slot that last worked.
+
+#### The kernel's own helpers
+
+The kernel starts some programs itself, from kthreadd, not PID 1: a core
+dump piped to a program (`kernel.core_pattern = |PROGRAM`), `modprobe` for a
+module request (`kernel.modprobe`), and the uevent helper (`kernel.hotplug`,
+which Alpine's kernel builds in as `/sbin/hotplug`). Neither the filter
+nor PID 1's bounding set reaches them, and root, which can write those
+sysctls, could have one run with every capability. So the seal also sets
+`kernel.usermodehelper.bset` and `inheritable` to `CAP_SYS_BOOT` alone, for
+the kernel's orderly poweroff: they only fall, and only for a holder of
+`CAP_SYS_MODULE`, which the seal then takes. init also empties
+`kernel.hotplug`. posture's `kernel-helpers` checks both.
+
+Not closed: such a helper is still not under the filter, so root can have
+one make the refused calls that need no capability. Our kernel's
+`CONFIG_STATIC_USERMODEHELPER` lets the kernel start no program but one,
+which can be none; a read-only `/proc/sys`, once `CAP_SYS_ADMIN` goes, stops
+root naming one.
 
 ### The capability bounding set
 

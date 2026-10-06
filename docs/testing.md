@@ -5,6 +5,7 @@ make test           # the updater's unit tests
 make check          # boot every form, and a slot, and check each one
 make -j check       # the same, side by side
 make lima-ci        # the CI job, in an Ubuntu VM under Lima
+make check-update   # a whole update, over the network
 ```
 
 `make check` needs, beyond the build's tools, QEMU, `expect` and `mke2fs`
@@ -107,6 +108,26 @@ Logs are in `build/<arch>/check/`: `<form>-build.log` for each build, and
 `<form>.log` for each console, kernel messages and all; a shell-free boot's
 are `<form>-shellfree-build.log` and `<form>-shellfree.log`.
 
+## What `make check-update` does
+
+A whole update, as a machine does one: the `autoupdate` form as it ships
+boots from slot a of a disk, with its build record claiming the kernel
+release before its own (`linux-virt-6.18.55-r0` claims `6.18.54-r0`). The
+claim is one file laid over the slot's root as a later tar entry; nothing
+in `build/` is changed. The machine commits, finds Alpine's kernel newer,
+fetches Wolfi's and Alpine's packages and the CVE sources as `_update`,
+builds slot b, installs it and reboots.
+
+[test/update](../test/update) then reads the disk, with `debugfs`: the
+report names both CVE sources with a sha256 and no error; each apk cache
+kept its packages; slot b's root is root's, mode 0755; GRUB boots b next.
+It boots slot b, which must commit and the updater record that the update
+held; no seccomp filter may have killed anything in either boot. The
+consoles are in `build/<arch>/check/update/`.
+
+It needs the network, so it is not part of `make check`. About 4 minutes
+with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.
+
 ## Writing a check
 
 A machine's settings, and the attacks on them, are
@@ -160,6 +181,12 @@ packages, and apko and Zig pinned by version and sha256; `ci-setup apko`
 installs apko alone, for jobs that only resolve packages. Each job keeps its
 logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
 QEMU emulates there, and the job still takes under five minutes.
+
+[.github/workflows/update.yml](../.github/workflows/update.yml) runs `make
+check-update` nightly, and on demand, on x86_64 alone: the autoupdate form
+updates itself over the network, and the slot it builds must boot and
+commit. A workflow of its own, so a network flake fails it and nothing
+else; no push, pull request or release waits on it.
 
 `make lima-ci` runs the same job here, in an Ubuntu 26.04 VM, `werewolf-ci`,
 with nested virtualization for KVM. The tree is copied in fresh each run,

@@ -45,6 +45,7 @@ boot() {
 	n=$1 slot=$2 kernel=$3 initrd=$4 until=$5 limit=$6
 	shift 6
 	log=$dir/update-$n.log
+	: >"$log"
 	"$@" -kernel "$kernel" -initrd "$initrd" -append "$cmdline werewolf.slot=$slot" \
 		-drive "file=$dir/victim.img,format=raw,if=virtio" >"$log" 2>&1 </dev/null &
 	pid=$!

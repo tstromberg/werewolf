@@ -157,6 +157,15 @@ Tested under QEMU, on aarch64:
 - **Raw and packet sockets** bypass routing and Landlock: they need
   `CAP_NET_RAW`, which the seal drops for all but the DHCP client's
   allowance.
+- **Fragmented UDP.** Arriving packets are routed before they are
+  reassembled, and only a datagram's first fragment carries its ports, so
+  the rest of a fragmented reply matches no allowance, meets the UDP drop,
+  and the datagram is lost. No rule can tell a later fragment apart. It
+  costs nothing today: the one UDP werewolf declares is DNS, and neither
+  Zig's resolver nor glibc's asks for EDNS0 (no `options edns0` in
+  resolv.conf), so answers stay within 512 bytes, and a truncated one is
+  asked again over TCP 53, which is declared. A UDP service with large
+  datagrams would need its fragments let through some other way.
 - **Destinations.** Outbound rules name protocols and ports, not hosts:
   `connect root tcp/443` reaches any HTTPS server.
 
