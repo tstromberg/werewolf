@@ -7,7 +7,7 @@ there ([demo.md](demo.md)).
 | | |
 | --- | --- |
 | Listens | a UNIX socket in `/run/svc/postgres`, and nothing else: `listen_addresses` is empty and the form declares no port, so fence would refuse one anyway |
-| Data | `/data/svc/postgres/data`, made by `initdb` on the first start |
+| Data | `/data/svc/postgres/data`, made by `initdb` on the first start, in `data.new` until whole |
 | Runs as | `postgres` (uid 70), leashed ([programs.md](programs.md)): it reads the image and writes only its own directories |
 | Logs in | by peer authentication: a local role is its system user's name, and TCP logins are refused |
 | Updates | within PostgreSQL 17, with the rest of the image; the major version is the package's name, since a new one needs `pg_upgrade` |
@@ -26,9 +26,10 @@ with a redirection or two:
 So `pg-init` (`cmd/pg-init/pg-init.zig`), which leash runs before the server,
 preloads `popen-shim.so` (`cmd/popen-shim/popen-shim.zig`) into `initdb`. Its
 `popen`, `pclose` and `system` take that shape and nothing else: an
-absolute program and plain or double-quoted words, then `<FILE`, `>FILE`
-and `2>&1`. They run the program directly. Anything more (a pipe, `;`, `$`,
-a glob, a single quote) is not run, and the command is printed on stderr,
+absolute program and plain or double-quoted words, then `</dev/null`,
+`>/dev/null` and `2>&1`. They run the program directly. Anything more (a
+pipe, `;`, `$`, a glob, a single quote, a file other than `/dev/null`) is
+not run, and the command is printed on stderr,
 so `initdb` fails where it can be seen. The servers `initdb` starts to
 set the cluster up keep the library, since one of them runs `locale -a` to
 import the system's locales; there are none to import, so that command

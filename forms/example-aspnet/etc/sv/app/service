@@ -1,0 +1,12 @@
+exec    /usr/bin/dotnet /usr/lib/app/App.dll
+user    app
+pledge  stdio rpath wpath proc inet listen
+memory  512
+listen  tcp/8080
+env     ASPNETCORE_ENVIRONMENT=Production
+# Configuration is baked into the read-only image, not watched for edits.
+env     DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
+env     DOTNET_EnableDiagnostics=0
+env     TMPDIR=/run/svc/app
+# Use writable/executable anonymous JIT memory; executable memfds stay blocked.
+env     DOTNET_EnableWriteXorExecute=0

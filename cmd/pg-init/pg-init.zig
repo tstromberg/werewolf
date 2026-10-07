@@ -9,9 +9,11 @@
 //!      and the server stays down rather than start again empty): initdb, with
 //!      local connections by peer (a role is its system user's name) and
 //!      none by TCP, which the server does not listen on anyway. initdb
-//!      runs the server through popen(3) and system(3), which want a
-//!      shell; popen-shim.so (cmd/popen-shim/popen-shim.zig), preloaded into initdb alone,
-//!      runs its commands without one.
+//!      makes it in data.new, which becomes data only once whole, so a
+//!      start stopped partway leaves no cluster rather than half of one.
+//!      initdb runs the server through popen(3) and system(3), which want a
+//!      shell; popen-shim.so (cmd/popen-shim/popen-shim.zig), preloaded into
+//!      initdb alone, runs its commands without one.
 //!   2. The image's SQL: each /usr/share/werewolf-postgres/*.sql, in name order,
 //!      in the postgres database, as the superuser, through the server in
 //!      single-user mode, which runs while the real server is not yet up.
@@ -21,46 +23,59 @@
 //! Nothing here comes from outside the image.
 
 const std = @import("std");
+const linux = std.os.linux;
 const Io = std.Io;
 const Dir = Io.Dir;
-const Allocator = std.mem.Allocator;
 
-const data_dir = "/data/svc/postgres/data";
+const svc_dir = "/data/svc/postgres";
+const data_dir = svc_dir ++ "/data";
 const sql_dir = "/usr/share/werewolf-postgres";
 const initdb = "/usr/bin/initdb";
 const postgres = "/usr/bin/postgres";
 const preload = "/usr/lib/werewolf/popen-shim.so";
 /// Left once the cluster is made, beside it: a cluster that is gone while
 /// this is not was lost, and is not quietly made again, empty.
-const made = "/data/svc/postgres/cluster-made";
+const made = "cluster-made";
+/// Left on the first start of each boot, in /run, which each boot begins
+/// empty: a lock found before it is there is an earlier boot's.
+const started = "/run/svc/postgres/pg-init-started";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
+    var svc = try Dir.cwd().openDir(io, svc_dir, .{});
+    defer svc.close(io);
 
-    if (Dir.cwd().access(io, data_dir ++ "/PG_VERSION", .{})) |_| {
+    const first_start = blk: {
+        if (Dir.cwd().access(io, started, .{})) |_| break :blk false else |_| {}
+        Dir.cwd().writeFile(io, .{ .sub_path = started, .data = "" }) catch |err| {
+            say(io, "{s}: {s}", .{ started, @errorName(err) });
+            break :blk false;
+        };
+        break :blk true;
+    };
+
+    if (svc.access(io, "data/PG_VERSION", .{})) |_| {
         say(io, "keeping the cluster in {s}", .{data_dir});
+        // Whole, since data.new becomes data only so: one whose start was
+        // cut before cluster-made was kept is marked now.
+        if (svc.access(io, made, .{})) |_| {} else |_| try mark(io, svc, made);
         // A power cut leaves the last boot's lock behind, naming a pid this
         // boot may well have given to something else, which the server
-        // would take for itself still running. A lock from before this boot
-        // can be no one's: it goes.
-        const lock = data_dir ++ "/postmaster.pid";
-        if (lockStarted(Dir.cwd().readFileAlloc(
-            io,
-            lock,
-            gpa,
-            .limited(4096),
-        ) catch "")) |started| {
-            if (started < bootedAt(io)) {
-                Dir.cwd().deleteFile(
-                    io,
-                    lock,
-                ) catch |err| say(io, "{s}: {s}", .{ lock, @errorName(err) });
+        // would take for itself still running. On the first start of a
+        // boot, the lock can be no one's: it goes. A later start's lock may
+        // be a server of this boot's still stopping, and the server judges
+        // that itself.
+        if (first_start) {
+            if (svc.deleteFile(io, "data/postmaster.pid")) |_| {
                 say(io, "removed the lock the last boot left", .{});
+            } else |err| switch (err) {
+                error.FileNotFound => {},
+                else => say(io, "{s}/postmaster.pid: {s}", .{ data_dir, @errorName(err) }),
             }
         }
     } else |_| {
-        if (Dir.cwd().access(io, made, .{})) |_| {
+        if (svc.access(io, made, .{})) |_| {
             say(
                 io,
                 "the cluster in {s} is gone, though one was made here; not making an empty one " ++
@@ -69,32 +84,46 @@ pub fn main(init: std.process.Init) !void {
             );
             return error.ClusterLost;
         } else |_| {}
+        // initdb writes PG_VERSION first and the rest after, so a cluster
+        // it was stopped in the middle of would read as made: it makes the
+        // cluster beside its place, which takes it only whole.
+        if (svc.access(io, "data.new", .{})) |_| {
+            say(io, "removing the cluster a stopped start left half made", .{});
+            try svc.deleteTree(io, "data.new");
+        } else |_| {}
         say(io, "making the cluster in {s}", .{data_dir});
         var env: std.process.Environ.Map = .init(gpa);
         try env.put("PATH", "/usr/bin");
         try env.put("LD_PRELOAD", preload);
-        try run(
-            io,
-            .{
-                .argv = &.{
-                    initdb,
-                    "-D",
-                    data_dir,
-                    "-U",
-                    "postgres",
-                    "-E",
-                    "UTF8",
-                    "--no-locale",
-                    "--auth-local=peer",
-                    "--auth-host=reject",
-                    "--no-instructions",
-                },
-                .environ_map = &env,
-                .stdin = .ignore,
-                .stdout = .ignore,
+        var child = try std.process.spawn(io, .{
+            .argv = &.{
+                initdb,
+                "-D",
+                svc_dir ++ "/data.new",
+                "-U",
+                "postgres",
+                "-E",
+                "UTF8",
+                "--no-locale",
+                "--auth-local=peer",
+                "--auth-host=reject",
+                "--no-instructions",
             },
-        );
-        try Dir.cwd().writeFile(io, .{ .sub_path = made, .data = "" });
+            .environ_map = &env,
+            .stdin = .ignore,
+            .stdout = .ignore,
+        });
+        const term = try child.wait(io);
+        if (term != .exited or term.exited != 0) {
+            say(io, "{s} failed; see above", .{initdb});
+            return error.InitdbFailed;
+        }
+        svc.rename("data.new", svc, "data", io) catch |err| {
+            say(io, "{s} holds something, but no cluster: {s}", .{ data_dir, @errorName(err) });
+            return err;
+        };
+        try syncSvc(io);
+        try mark(io, svc, made);
     }
 
     var names: std.ArrayList([]const u8) = .empty;
@@ -158,13 +187,26 @@ pub fn main(init: std.process.Init) !void {
     );
 }
 
-fn run(io: Io, options: std.process.SpawnOptions) !void {
-    var child = try std.process.spawn(io, options);
-    const term = try child.wait(io);
-    if (term != .exited or term.exited != 0) {
-        say(io, "{s} failed; see above", .{options.argv[0]});
-        return error.CommandFailed;
-    }
+/// name, made empty in dir, and on the disk with its entry before this
+/// returns.
+fn mark(io: Io, dir: Dir, name: []const u8) !void {
+    const f = try dir.createFile(io, name, .{});
+    defer f.close(io);
+    try f.sync(io);
+    try syncSvc(io);
+}
+
+/// svc_dir's entries on the disk: a rename or a new file in it kept. Its
+/// own descriptor, as Dir's may be O_PATH, which cannot be synced.
+fn syncSvc(io: Io) !void {
+    const rc = linux.open(svc_dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    const e = if (linux.errno(rc) != .SUCCESS) linux.errno(rc) else blk: {
+        defer _ = linux.close(@intCast(rc));
+        break :blk linux.errno(linux.fsync(@intCast(rc)));
+    };
+    if (e == .SUCCESS) return;
+    say(io, "syncing {s}: {s}", .{ svc_dir, @tagName(e) });
+    return error.SyncFailed;
 }
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
@@ -175,34 +217,4 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "pg-init: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
-}
-
-/// When the server that wrote a postmaster.pid started: its third line,
-/// seconds since 1970.
-fn lockStarted(text: []const u8) ?i64 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    _ = lines.next() orelse return null; // the pid
-    _ = lines.next() orelse return null; // the data directory
-    return std.fmt.parseInt(
-        i64,
-        std.mem.trim(u8, lines.next() orelse return null, " \r"),
-        10,
-    ) catch null;
-}
-
-/// When this boot began, in seconds since 1970: now, less the boot clock.
-fn bootedAt(io: Io) i64 {
-    const linux = std.os.linux;
-    var ts: linux.timespec = undefined;
-    if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
-    const now = @divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s);
-    return @as(i64, @intCast(now)) - @as(i64, @intCast(ts.sec));
-}
-
-test lockStarted {
-    const lock = "537\n/data/svc/postgres/data\n1791328288\n5432\n/run/svc/postgres\n\n  " ++
-        "1234567    123456\nready   \n";
-    try std.testing.expectEqual(1791328288, lockStarted(lock).?);
-    try std.testing.expectEqual(null, lockStarted("537\n"));
-    try std.testing.expectEqual(null, lockStarted(""));
 }

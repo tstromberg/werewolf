@@ -1,0 +1,5 @@
+exec    /usr/lib/app/server
+user    app
+pledge  stdio rpath proc inet listen
+memory  256
+listen  tcp/8080

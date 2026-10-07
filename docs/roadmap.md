@@ -12,4 +12,8 @@
    machine sends and receives only what its form declares
    ([docs/design/fence.md](design/fence.md)).
 4. Shipping the update log off the machine.
-5. bite on x86, and drivers beyond virtio (NVMe, ENA, Hyper-V).
+5. Hourly checks, rebooting by how urgent the fix is: minutes for an
+   exploited CVE, hours for a high one, and a week or four in the
+   maintenance window for the rest
+   ([docs/design/update-policy.md](design/update-policy.md)).
+6. bite on x86, and drivers beyond virtio (NVMe, ENA, Hyper-V).

@@ -21,8 +21,7 @@ DIR holds a slot (*Slots*, below) of any form.
 repository, it builds `prod-ssh`'s slot, the form that can still be
 reached by ssh afterwards, and runs `bite -i` on it. `FORM=` picks another,
 and `config/`, if present, joins the config tar. The build needs apko, Zig
-and erofs-utils 1.9 or later; on Ubuntu, `sudo test/ci-setup` installs
-them.
+and erofs-utils 1.9 or later; `make install-deps` installs them.
 
 **`-i` looks before it leaps.** After installing, bite mounts the new
 root read-only, with the distro's kernel, and opens the image's own shell
@@ -55,13 +54,18 @@ Root can still remount it; this guards against mistakes and non-root code.
 
 **`bite-cleanup` ends the fallback.** Once werewolf commits, the distro is
 stale and still holds its secrets, cloud-init's user-data among them. Run in
-werewolf, `bite-cleanup` deletes everything but `/boot` and
-`/var/lib/werewolf`, remounting with `discard` first. It refuses before
-commit. The deleting is done by a child process that can do nothing else:
-`no_new_privs`, only the capabilities that pass files' owners and modes,
-and Landlock allowing nothing but removing files beneath the victim's
-filesystem, and running no program. Freed blocks are not erased, and earlier snapshots still hold the
-distro.
+werewolf, `bite-cleanup` deletes everything but `/var/lib/werewolf` and, on
+the same filesystem, the directory GRUB's is in (`/boot`, or `/@/boot` in a
+btrfs subvolume), then trims the freed blocks. It refuses before commit,
+and deletes nothing unless it finds the running slot's `root.erofs` and
+kernel in what it keeps, reached through no link. The deleting is done by a
+child process that can do nothing else: `no_new_privs`, only the
+capabilities that pass files' owners and modes, Landlock allowing nothing
+but reading directories and removing beneath the victim's filesystem, and a
+seccomp filter of the few calls that takes. A file it may not delete, such
+as one a cloud agent made immutable (`chattr +i`), it names and leaves,
+deletes everything around it, and exits 1. Freed blocks are not erased,
+and earlier snapshots still hold the distro.
 
 ## Tested
 

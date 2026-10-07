@@ -115,10 +115,14 @@ bound to port 0 by a process the seal has not stopped.
 ## Order with the seal
 
 The routing rules can be changed by anyone holding
-`CAP_NET_ADMIN`. The seal (lockdown.md) drops it from every process but the
-DHCP client's parent, whose seccomp filter allows no netlink. So the seal
-goes after fence's netlink step and before runit starts anything. Landlock
-needs nothing from the seal.
+`CAP_NET_ADMIN`. fence drops it, and `CAP_NET_RAW`, from the bounding set
+once its rules are set, so no process after it holds either. It drops
+`CAP_SYS_ADMIN` too, which its Landlock restriction is the last to need:
+the few mounts after boot are the mount broker's, started before fence. The one that
+needs them, DHCP's renewal (`dhcp-client keep`), init starts before fence,
+as it starts the mount broker: it keeps them, its parent's seccomp filter
+allows no netlink, and its engine holds a packet socket it cannot remake.
+The seal goes before both, and Landlock needs nothing from it.
 
 ## Files
 
@@ -178,8 +182,8 @@ Tested under QEMU, on aarch64:
   declared ports); the seal can refuse UDP sockets to processes not
   allowed them.
 - **Raw and packet sockets** bypass routing and Landlock: they need
-  `CAP_NET_RAW`, which the seal drops for all but the DHCP client's
-  allowance.
+  `CAP_NET_RAW`, which fence drops from every process after it. DHCP's
+  renewal opened its packet socket before.
 - **Fragmented UDP.** Arriving packets are routed before they are
   reassembled, and only a datagram's first fragment carries its ports, so
   the rest of a fragmented reply matches no allowance, meets the UDP drop,

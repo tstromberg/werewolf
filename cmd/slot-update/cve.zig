@@ -190,7 +190,7 @@ pub const KernelFixes = struct {
 pub const OriginChange = struct { origin: []const u8, from: []const u8, to: []const u8 };
 
 /// openssl-4.0 -> openssl; a name without a version suffix is its own base.
-fn streamBase(origin: []const u8) []const u8 {
+pub fn streamBase(origin: []const u8) []const u8 {
     const i = std.mem.findScalarLast(u8, origin, '-') orelse return origin;
     const tail = origin[i + 1 ..];
     if (tail.len == 0) return origin;
@@ -270,8 +270,12 @@ const VersionReader = struct {
                 nt = .digit;
                 v = -@as(i64, @intCast(i));
             } else {
-                while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) v = v * 10 + (s[i] - '0');
-                if (i >= 18) return r.fail();
+                // At most 17 digits, refused before they could overflow:
+                // a version is input from below root's trust line.
+                while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
+                    if (i == 17) return r.fail();
+                    v = v * 10 + (s[i] - '0');
+                }
             },
             .letter => {
                 v = s[0];
@@ -311,7 +315,7 @@ const VersionReader = struct {
 };
 
 /// a against b, as `apk version -t a b` orders them.
-fn apkOrder(a: []const u8, b: []const u8) std.math.Order {
+pub fn apkOrder(a: []const u8, b: []const u8) std.math.Order {
     var x: VersionReader = .{ .s = a };
     var y: VersionReader = .{ .s = b };
     var xv: i64 = 0;
@@ -347,6 +351,9 @@ pub fn kernelVersion(s: []const u8) ?[3]u32 {
     var it = std.mem.splitScalar(u8, v, '.');
     for (&out) |*part| {
         const field = it.next() orelse return null;
+        // Digits alone: parseInt would also take "+" and "_".
+        if (field.len == 0 or field.len > 9) return null;
+        for (field) |c| if (!std.ascii.isDigit(c)) return null;
         part.* = std.fmt.parseInt(u32, field, 10) catch return null;
     }
     if (it.next() != null) return null;
@@ -531,6 +538,34 @@ fn oneLine(gpa: Allocator, s: []const u8) ![]const u8 {
     return out;
 }
 
+/// UTF-8 a log or a page may show as it is: no C0 or C1 control, and none
+/// of the marks that reorder text (U+200E, U+200F, U+202A-U+202E,
+/// U+2066-U+2069), which could make a title read as something else.
+pub fn printable(s: []const u8) bool {
+    var it = (std.unicode.Utf8View.init(s) catch return false).iterator();
+    while (it.nextCodepoint()) |c| switch (c) {
+        0...0x1f, 0x7f...0x9f, 0x200e, 0x200f, 0x202a...0x202e, 0x2066...0x2069 => return false,
+        else => {},
+    };
+    return true;
+}
+
+test printable {
+    try std.testing.expect(printable("net: fix a use-after-free in Jürgen's driver"));
+    try std.testing.expect(!printable("tab\there"));
+    try std.testing.expect(!printable("c1 \u{85} control"));
+    try std.testing.expect(!printable("reads \u{202e}backwards"));
+    try std.testing.expect(!printable("\xff not utf-8"));
+}
+
+test "versions too long to hold are refused, not overflowed" {
+    try std.testing.expect(!validVersion("99999999999999999999"));
+    try std.testing.expect(!validVersion("1.99999999999999999999-r0"));
+    try std.testing.expect(validVersion("12345678901234567-r0"));
+    try std.testing.expectEqual(@as(?[3]u32, null), kernelVersion("+6.1_8.5_5"));
+    try std.testing.expectEqual(@as(?[3]u32, null), kernelVersion("6.18."));
+}
+
 /// The reader's lines from kernelLines, checked: a CVE id, a version on
 /// new's branch in (old, new], and a title of printable UTF-8. A reader
 /// that sends any other line is not believed at all.
@@ -545,8 +580,7 @@ pub fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) !
         const v = kernelVersion(fixed) orelse return error.BadLine;
         if (!validCve(id) or v[0] != new[0] or v[1] != new[1] or !kernelLess(old, v) or
             kernelLess(new, v)) return error.BadLine;
-        if (title.len > max_title or !std.unicode.utf8ValidateSlice(title)) return error.BadLine;
-        for (title) |c| if (c < 0x20 or c == 0x7f) return error.BadLine;
+        if (title.len > max_title or !printable(title)) return error.BadLine;
         try out.append(gpa, .{ .id = id, .fixed_in = fixed, .title = title });
     }
     std.mem.sort(KernelFix, out.items, {}, struct {

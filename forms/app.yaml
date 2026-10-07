@@ -1,0 +1,13 @@
+# app: prod with an unprivileged account for an application. No runtime,
+# service or listening port: descendants declare those for their workload.
+include: prod.yaml
+accounts:
+  groups:
+    - groupname: app
+      gid: 204
+  users:
+    - username: app
+      uid: 204
+      gid: 204
+      homedir: /var/empty
+      shell: /sbin/nologin

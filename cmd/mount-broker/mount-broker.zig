@@ -28,8 +28,10 @@
 //! fsmount) with nosuid, nodev and noexec, then attached.
 //!
 //! One process, with CAP_SYS_ADMIN alone and locked, under a seccomp filter
-//! of the calls above and its socket's; it runs nothing. Every event is one
-//! JSON line on the console.
+//! of the calls above and its socket's, the classic mount(2) only to remount
+//! read-only and umount2 only plainly or lazily; it runs nothing. Two
+//! devices answering to the same UUID or serial are refused, not guessed
+//! between. Every event is one JSON line on the console.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -108,13 +110,17 @@ fn setUp() !i32 {
     try sandbox.keepOnly(1 << cap_sys_admin);
     var f: sandbox.Filter = .{};
     inline for (.{
-        "accept4",         "getsockopt", "sendto",  "read",          "close",     "poll",
-        "ppoll",           "openat",     "pread64", "getdents64",    "fsopen",    "fsconfig",
-        "fsmount",         "move_mount", "umount2", "mount",         "sync",      "write",
-        "mmap",            "munmap",     "mremap",  "clock_gettime", "nanosleep", "exit_group",
-        "restart_syscall",
+        "accept4", "getsockopt",    "sendto",    "read",       "close",           "poll",
+        "ppoll",   "openat",        "pread64",   "getdents64", "fsopen",          "fsconfig",
+        "fsmount", "move_mount",    "sync",      "write",      "mmap",            "munmap",
+        "mremap",  "clock_gettime", "nanosleep", "exit_group", "restart_syscall",
     }) |name| f.allow(name);
     f.allowArg("ioctl", 1, dm.dev_remove);
+    // The classic mount(2) only to remount read-only, at shutdown; umount2
+    // only plainly or lazily: nothing it could mount or move with them.
+    f.allowArg("mount", 3, linux.MS.REMOUNT | linux.MS.RDONLY);
+    f.allowArg("umount2", 1, 0);
+    f.allowArg("umount2", 1, linux.MNT.DETACH);
     try f.install();
     return fd;
 }
@@ -126,7 +132,17 @@ fn serve(log: *Log, listener: i32) noreturn {
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         for (conns, 1..) |c, i| fds[i] = .{ .fd = c.fd, .events = linux.POLL.IN, .revents = 0 };
         const n = linux.poll(&fds, fds.len, -1);
-        if (linux.errno(n) != .SUCCESS) continue;
+        switch (linux.errno(n)) {
+            .SUCCESS => {},
+            .INTR => continue,
+            // Not an asker's doing, and not a reason to stop: the machine
+            // needs the broker to keep its slots. A moment, then again,
+            // rather than a loop that spins.
+            else => {
+                _ = linux.nanosleep(&.{ .sec = 0, .nsec = 100 * std.time.ns_per_ms }, null);
+                continue;
+            },
+        }
         for (&conns, fds[1..]) |*c, p| {
             if (c.fd >= 0 and p.revents != 0) heard(log, c, &conns);
         }
@@ -242,7 +258,7 @@ fn mountWord(log: *Log, word: Word) !void {
         .shutdown => unreachable,
     };
     var dev_buf: [64]u8 = undefined;
-    const found = find(want, &dev_buf) orelse return error.NoSuchFilesystem;
+    const found = try find(want, &dev_buf);
     try attach(found.kind, found.dev, word.place());
     log.event(
         "mounted",
@@ -256,32 +272,44 @@ fn mountWord(log: *Log, word: Word) !void {
 }
 
 const Kind = enum { ext4, xfs, btrfs, vfat };
+/// A device, and the kind of filesystem on it.
+const Found = struct { dev: [:0]const u8, kind: Kind };
 const Want = union(enum) { uuid: [16]u8, serial: u32 };
 
-/// The block device whose filesystem is want.
-fn find(want: Want, dev_buf: *[64]u8) ?struct { dev: [:0]const u8, kind: Kind } {
+/// The one block device whose filesystem is want. Two that answer to it, as
+/// a clone or snapshot of a disk attached beside it would, or two FAT
+/// volumes sharing a 32-bit serial, are refused: which one GRUB reads is not
+/// the broker's to guess, and an attached disk must not be mounted, and
+/// written, in the real one's place.
+fn find(want: Want, dev_buf: *[64]u8) !Found {
     const dir = linux.openat(
         linux.AT.FDCWD,
         "/sys/class/block",
         .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
         0,
     );
-    if (linux.errno(dir) != .SUCCESS) return null;
+    if (linux.errno(dir) != .SUCCESS) return error.NoSuchFilesystem;
     defer _ = linux.close(@intCast(dir));
+    var found: ?Found = null;
+    var other_buf: [64]u8 = undefined;
     var buf: [4096]u8 align(8) = undefined;
     while (true) {
         const n = linux.getdents64(@intCast(dir), &buf, buf.len);
-        if (linux.errno(n) != .SUCCESS or n == 0) return null;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
         var off: usize = 0;
         while (off < n) {
             const ent: *align(1) const linux.dirent64 = @ptrCast(&buf[off]);
             off += ent.reclen;
             const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
             if (name[0] == '.' or name.len > 32) continue;
-            const dev = std.mem.printSentinel(dev_buf, "/dev/{s}", .{name}, 0) catch continue;
-            if (identifyDevice(dev, want)) |kind| return .{ .dev = dev, .kind = kind };
+            const into = if (found == null) dev_buf else &other_buf;
+            const dev = std.mem.printSentinel(into, "/dev/{s}", .{name}, 0) catch continue;
+            const kind = identifyDevice(dev, want) orelse continue;
+            if (found != null) return error.TwoFilesystemsMatch;
+            found = .{ .dev = dev, .kind = kind };
         }
     }
+    return found orelse error.NoSuchFilesystem;
 }
 
 const btrfs_at = 0x10000;

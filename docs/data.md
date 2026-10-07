@@ -23,16 +23,23 @@ for as long as the machine keeps its data there.
 
 **The disk** is found by its label, so its device name may change. It is
 formatted only when there is none with the label yet, `werewolf.data=DEV`
-names it, it is not the config disk, and `blkid` finds
-nothing on it. A disk with our label is never formatted again. One the form
-cannot use is left as it is:
+names it, it holds no config tar, and `blkid` finds nothing on it. A disk
+with our label is never formatted again. One the form cannot use is left
+as it is:
 
 - the wrong type: plain when the config has a `data.key`, LUKS when it
   has none, or another filesystem;
 - a `data.key` that does not open it;
+- a second disk with the label: which one is `/data` is not init's to
+  guess, and an attached disk must not take the real one's place;
 - damage `e2fsck -p` will not repair. `-p` fixes only what is safe without
   a person; the rest is a person's, with the disk attached to a machine
   that has e2fsprogs and cryptsetup.
+
+**`data.key` must be 32 random bytes or more** (`head -c 32 /dev/urandom`).
+LUKS2 is made with a quick key derivation, which a random key needs no
+slower one for. So init refuses to make LUKS2 with a shorter key, and warns
+when one opens a disk made before.
 
 **When /data is unavailable**, because of any of those, because
 `werewolf.data` names nothing usable, or because a slot's

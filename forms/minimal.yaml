@@ -20,3 +20,16 @@ contents:
 archs:
   - aarch64
   - x86_64
+
+# _seal is seal-watch's, once it gives up root: an account no service
+# shares, so none may signal it (cmd/seal-watch).
+accounts:
+  groups:
+    - groupname: _seal
+      gid: 66
+  users:
+    - username: _seal
+      uid: 66
+      gid: 66
+      homedir: /var/empty
+      shell: /sbin/nologin

@@ -3,10 +3,15 @@
 //!     dhcp up NIC   get a lease for NIC and apply it; exit 0 once bound, or
 //!                   1 if no server has given one within 30 seconds
 //!     dhcp keep     keep that lease for as long as the machine runs: renew
-//!                   it, or get another; the dhcp service runs this, as its
-//!                   run, a link here. Where init did not use DHCP, it sleeps
+//!                   it, or get another
 //!
-//! init runs `dhcp up` when the kernel command line names no werewolf.ip.
+//! init runs `dhcp up` when the kernel command line names no werewolf.ip,
+//! and then starts `dhcp keep` itself, before it becomes fence, as it
+//! starts the mount broker: so keep has CAP_NET_ADMIN, to apply a lease,
+//! and its packet socket, which fence then takes from every process after
+//! it, root's included. runit does not restart it, so it treats a failed
+//! receive, as when the link drops for a moment, as a round with no answer;
+//! should it end anyway, the address it applied stays.
 //!
 //! The program is two processes, as OpenBSD's dhclient is, so the one that
 //! reads the network can do nothing else:
@@ -35,6 +40,15 @@
 //! message type, server, subnet mask, router, classless static routes (RFC
 //! 3442, which GCP sends with a /32 address), DNS servers, MTU, and the lease
 //! times. Every event is one JSON line on stdout, from the parent.
+//!
+//! A lease that puts a different address, mask or routes on the NIC than
+//! the one before is applied clean: the old address is taken off first, and
+//! with it, the kernel flushes every route through the NIC, so no route of
+//! the old lease is left beside the new one's. A server's NAK
+//! takes the address off. A lease that runs out with no server answering
+//! is kept until another comes, as a cloud's address does not change and a
+//! DHCP server that is down for a moment should not take the machine off
+//! the network (RFC 2131 would drop it).
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -48,7 +62,7 @@ const state_dir = "/run/werewolf/dhcp";
 const nic_path = state_dir ++ "/nic";
 const lease_path = state_dir ++ "/lease.json";
 const empty_dir = "/var/empty";
-/// _dhcp, in minimal.yaml's accounts.
+/// _dhcp, in prod.yaml's accounts.
 const engine_id: u32 = 67;
 
 const client_port = 68;
@@ -77,12 +91,9 @@ pub fn main(init: std.process.Init) !void {
         0,
     );
     const args = try init.minimal.args.toSlice(gpa);
-    // runsv starts a service's ./run with no arguments: run under that
-    // name, as the dhcp service's run links here, it keeps the lease.
-    const as_run = args.len == 1 and std.mem.eql(u8, std.fs.path.basename(args[0]), "run");
     const mode: Mode = if (args.len == 3 and std.mem.eql(u8, args[1], "up"))
         .up
-    else if (as_run or (args.len == 2 and std.mem.eql(u8, args[1], "keep")))
+    else if (args.len == 2 and std.mem.eql(u8, args[1], "keep"))
         .keep
     else {
         std.debug.print("usage: dhcp up NIC | dhcp keep\n", .{});
@@ -162,13 +173,20 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     }
     _ = linux.close(sp[1]);
     _ = linux.close(link.packet);
-    var p: Parent = .{ .mode = mode, .sp = sp[0], .dir = @intCast(dir), .link = link, .nic = nic };
+    var p: Parent = .{
+        .mode = mode,
+        .sp = sp[0],
+        .dir = @intCast(dir),
+        .link = link,
+        .nic = nic,
+        .applied = held,
+    };
     try p.confine();
     p.run();
 }
 
-/// Where init did not use DHCP: nothing to do, for as long as the service
-/// runs, as _dhcp in an empty root with nothing but sleep allowed.
+/// No NIC that `up` named: nothing to keep, for as long as the machine runs,
+/// as _dhcp in an empty root with nothing but sleep allowed.
 fn park() noreturn {
     sandbox.dropTo(engine_id, empty_dir) catch linux.exit_group(1);
     var f: sandbox.Filter = .{};
@@ -329,8 +347,8 @@ const Engine = struct {
 
     /// Broadcast `msg` from `src`, again at 1, 2, 4 and then every 8
     /// seconds, until a reply to `xid` arrives or `deadline` passes. A send
-    /// that fails, as when the link drops for a moment, counts as a round
-    /// with no answer.
+    /// or a receive that fails, as when the link drops for a moment, counts
+    /// as a round with no answer: nothing restarts `keep`.
     fn exchange(e: *Engine, msg: []const u8, src: Ip4, xid: u32, deadline: i64) !?Reply {
         var out: [28 + 576]u8 = undefined;
         const pkt = frame(&out, src, msg);
@@ -354,14 +372,21 @@ const Engine = struct {
                 if (linux.errno(n) == .INTR) continue;
                 if (try e.sys(n) == 0) break;
                 var in: [1536]u8 = undefined;
-                const got = try e.sys(linux.recvfrom(
-                    e.pkt,
-                    &in,
-                    in.len,
-                    linux.MSG.DONTWAIT,
-                    null,
-                    null,
-                ));
+                const got = linux.recvfrom(e.pkt, &in, in.len, linux.MSG.DONTWAIT, null, null);
+                switch (linux.errno(got)) {
+                    .SUCCESS => {},
+                    .INTR, .AGAIN => continue,
+                    else => {
+                        // The rest of the round waited out, not spun away on
+                        // an error poll reports at once.
+                        const ts: linux.timespec = .{
+                            .sec = @divFloor(left, 1000),
+                            .nsec = @mod(left, 1000) * std.time.ns_per_ms,
+                        };
+                        _ = linux.nanosleep(&ts, null);
+                        break;
+                    },
+                }
                 const payload = unframe(in[0..got]) orelse continue;
                 if (parseReply(payload, xid, e.mac)) |r| return r;
             }
@@ -411,6 +436,8 @@ const Parent = struct {
     dir: i32,
     link: Link,
     nic: []const u8,
+    /// The lease on the NIC: `keep` starts from the one `up` applied.
+    applied: ?Wire = null,
     log: Log = .{},
 
     /// Keep CAP_NET_ADMIN and nothing else, never gain more, write only in
@@ -477,7 +504,17 @@ const Parent = struct {
                 // The engine checked this already; a lease that fails here
                 // means the engine is not what it was.
                 if (!valid(m.lease)) return error.InvalidLease;
+                if (p.applied) |a| if (!samePlan(a, m.lease)) {
+                    try p.link.withdraw();
+                    var ip: [16]u8 = undefined;
+                    p.log.event("withdrawn", .{
+                        .nic = p.nic,
+                        .addr = ipText(&ip, a.addr),
+                        .reason = "the new lease differs",
+                    });
+                };
                 try p.link.apply(p.dir, m.lease);
+                p.applied = m.lease;
                 var fba: [16 << 10]u8 = undefined;
                 var a: std.heap.FixedBufferAllocator = .init(&fba);
                 const text = try describe(a.allocator(), p.nic, m.lease);
@@ -488,9 +525,29 @@ const Parent = struct {
                 p.log.event(@tagName(event), text);
                 if (p.mode == .up) linux.exit_group(0);
             },
-            .refused, .expired => {
+            .refused => {
+                // The server says the address is not ours: off the NIC, if it
+                // is the one there.
+                const ours = if (p.applied) |a| std.mem.eql(u8, &a.addr, &m.lease.addr) else false;
+                if (ours) {
+                    try p.link.withdraw();
+                    p.applied = null;
+                }
                 var ip: [16]u8 = undefined;
-                p.log.event(@tagName(event), .{ .nic = p.nic, .addr = ipText(&ip, m.lease.addr) });
+                p.log.event("refused", .{
+                    .nic = p.nic,
+                    .addr = ipText(&ip, m.lease.addr),
+                    .withdrawn = ours,
+                });
+            },
+            .expired => {
+                // No server answered: kept until another lease comes.
+                var ip: [16]u8 = undefined;
+                p.log.event("expired", .{
+                    .nic = p.nic,
+                    .addr = ipText(&ip, m.lease.addr),
+                    .kept = p.applied != null,
+                });
             },
             .waiting => p.log.event("waiting", .{ .nic = p.nic }),
             .failed => {
@@ -663,8 +720,10 @@ fn describe(gpa: Allocator, nic: []const u8, w: Wire) !Lease {
     };
 }
 
-/// What the engine needs from lease.json to renew: the address, the server
-/// and the times. Null for anything it cannot use.
+/// What lease.json says is on the NIC: for the engine to renew, the
+/// address, the server and the times; for the parent to know what it is
+/// replacing, the mask and the routes, kept as plan made them. Null for
+/// anything it cannot use.
 fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
     const l = std.json.parseFromSliceLeaky(
         Lease,
@@ -675,7 +734,7 @@ fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
     const slash = std.mem.findScalar(u8, l.addr, '/') orelse return null;
     const prefix = std.fmt.parseInt(u8, l.addr[slash + 1 ..], 10) catch return null;
     if (prefix > 32) return null;
-    const w: Wire = .{
+    var w: Wire = .{
         .addr = parseIp4(l.addr[0..slash]) orelse return null,
         .mask = maskOf(prefix),
         .server = parseIp4(l.server) orelse return null,
@@ -684,7 +743,25 @@ fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
         .t2 = l.t2,
         .bound = l.bound,
     };
+    if (l.routes.len > max_routes) return null;
+    for (l.routes, 0..) |text, i| w.routes[i] = parseRoute(text) orelse return null;
+    w.nroutes = @intCast(l.routes.len);
     return if (valid(w)) w else null;
+}
+
+/// A route as describe writes it: "D.D.D.D/N" on the link, or
+/// "D.D.D.D/N via G.G.G.G".
+fn parseRoute(s: []const u8) ?Route {
+    var dst_text = s;
+    var gw = zero;
+    if (std.mem.find(u8, s, " via ")) |i| {
+        dst_text = s[0..i];
+        gw = parseIp4(s[i + " via ".len ..]) orelse return null;
+    }
+    const slash = std.mem.findScalar(u8, dst_text, '/') orelse return null;
+    const prefix = std.fmt.parseInt(u8, dst_text[slash + 1 ..], 10) catch return null;
+    if (prefix > 32) return null;
+    return .{ .dst = parseIp4(dst_text[0..slash]) orelse return null, .gw = gw, .prefix = prefix };
 }
 
 /// JSON lines on stdout: `dhcp-client: {"time":...,"event":...,...}`. Built in a
@@ -821,6 +898,13 @@ const Link = struct {
             );
             try writeFile(dir, "resolv.conf", tw.buffered());
         }
+    }
+
+    /// Take the lease off the NIC: its address set to 0.0.0.0, which removes
+    /// it, and with the NIC's last address the kernel flushes every route
+    /// through it.
+    fn withdraw(l: *Link) !void {
+        try l.setAddr(linux.SIOCSIFADDR, zero, "SIOCSIFADDR");
     }
 
     fn setAddr(l: *Link, req: u32, a: Ip4, comptime what: []const u8) !void {
@@ -1051,12 +1135,19 @@ fn parseRoutes(v: []const u8, out: *[max_routes]Route) ?u8 {
 }
 
 /// The routes a lease asks for. Classless routes, when sent, replace the
-/// router (RFC 3442). A router outside the subnet, such as GCP's for a /32
-/// address, is first made reachable on the link.
+/// router (RFC 3442), those on the link first, in the server's order, so a
+/// gateway is reachable before a route through it is added, whatever order
+/// the server sent them in. A router outside the subnet, such as GCP's for
+/// a /32 address, is first made reachable on the link.
 fn plan(w: Wire, out: *[max_routes + 2]Route) []const Route {
     if (w.nroutes > 0) {
-        @memcpy(out[0..w.nroutes], w.routes[0..w.nroutes]);
-        return out[0..w.nroutes];
+        var n: usize = 0;
+        for ([_]bool{ true, false }) |on_link| for (w.routes[0..w.nroutes]) |r| {
+            if (std.mem.eql(u8, &r.gw, &zero) != on_link) continue;
+            out[n] = r;
+            n += 1;
+        };
+        return out[0..n];
     }
     if (std.mem.eql(u8, &w.router, &zero)) return out[0..0];
     var n: usize = 0;
@@ -1066,6 +1157,18 @@ fn plan(w: Wire, out: *[max_routes + 2]Route) []const Route {
     }
     out[n] = .{ .dst = zero, .prefix = 0, .gw = w.router };
     return out[0 .. n + 1];
+}
+
+/// Whether two leases put the same address, mask and routes on the NIC.
+fn samePlan(a: Wire, b: Wire) bool {
+    if (!std.mem.eql(u8, &a.addr, &b.addr) or !std.mem.eql(u8, &a.mask, &b.mask)) return false;
+    var pa: [max_routes + 2]Route = undefined;
+    var pb: [max_routes + 2]Route = undefined;
+    const ra = plan(a, &pa);
+    const rb = plan(b, &pb);
+    if (ra.len != rb.len) return false;
+    for (ra, rb) |x, y| if (!std.meta.eql(x, y)) return false;
+    return true;
 }
 
 /// When to renew and when the lease ends, in seconds from when it was given:
@@ -1385,6 +1488,63 @@ test "lease.json round trip" {
                 ":0,\"t2\":0,\"bound\":0}",
         ),
     );
+}
+
+test "a lease that changes the NIC is told apart" {
+    const qemu = testLease(&qemu_options, .{ 10, 0, 2, 15 });
+    try std.testing.expect(samePlan(qemu, qemu));
+    // Renewed with new times: the same on the NIC.
+    var later = qemu;
+    later.bound += 3600;
+    later.lease = 7200;
+    try std.testing.expect(samePlan(qemu, later));
+    // Another router, mask or address is not.
+    var moved = qemu;
+    moved.router = .{ 10, 0, 2, 1 };
+    try std.testing.expect(!samePlan(qemu, moved));
+    var wider = qemu;
+    wider.mask = .{ 255, 255, 0, 0 };
+    try std.testing.expect(!samePlan(qemu, wider));
+    var other = qemu;
+    other.addr = .{ 10, 0, 2, 16 };
+    try std.testing.expect(!samePlan(qemu, other));
+
+    // What lease.json keeps is the same, for the parent to compare a
+    // renewal against after `keep` starts.
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    for ([_]Wire{ qemu, testLease(&gcp_options, .{ 10, 128, 0, 5 }) }) |w| {
+        var out: Io.Writer.Allocating = .init(a.allocator());
+        try std.json.Stringify.value(try describe(a.allocator(), "eth0", w), .{}, &out.writer);
+        try std.testing.expect(samePlan(heldFrom(a.allocator(), out.written()).?, w));
+    }
+}
+
+test "routes on the link come first, whatever the server's order" {
+    // Azure-like: the default route sent before the route to its gateway.
+    const w = testLease(
+        &([_]u8{ 54, 4, 10, 0, 0, 1, 51, 4, 0, 0, 0x0e, 0x10, 1, 4, 255, 255, 255, 255 } ++
+            [_]u8{ 121, 14, 0, 10, 0, 0, 1, 32, 10, 0, 0, 1, 0, 0, 0, 0 }),
+        .{ 10, 0, 0, 5 },
+    );
+    var p: [max_routes + 2]Route = undefined;
+    const routes = plan(w, &p);
+    try std.testing.expectEqual(2, routes.len);
+    try std.testing.expectEqual(32, routes[0].prefix);
+    try std.testing.expectEqualSlices(u8, &zero, &routes[0].gw);
+    try std.testing.expectEqual(0, routes[1].prefix);
+}
+
+test parseRoute {
+    const on_link = parseRoute("10.128.0.1/32").?;
+    try std.testing.expectEqual(32, on_link.prefix);
+    try std.testing.expectEqualSlices(u8, &zero, &on_link.gw);
+    const via = parseRoute("0.0.0.0/0 via 10.0.2.2").?;
+    try std.testing.expectEqual(0, via.prefix);
+    try std.testing.expectEqualSlices(u8, &.{ 10, 0, 2, 2 }, &via.gw);
+    try std.testing.expectEqual(null, parseRoute("10.0.0.0/33"));
+    try std.testing.expectEqual(null, parseRoute("10.0.0.0"));
+    try std.testing.expectEqual(null, parseRoute("0.0.0.0/0 via 10.0.2"));
 }
 
 test "a /32 with only a router reaches the router on the link first" {

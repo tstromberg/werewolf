@@ -28,9 +28,11 @@ their containers.
 
 ```
 minimal ──→ prod ──┬──→ nginx ──→ php
-                   ├──→ node
-                   ├──→ python
-                   ├──→ jre
+                   ├──→ app ──┬──→ node
+                   │          ├──→ python
+                   │          ├──→ jre
+                   │          ├──→ example-go
+                   │          └──→ example-rust
                    └──→ postgresql ──→ demo
 qemu-host (on prod, allows kvm)
 lima      (on prod, the Lima test vehicle)
@@ -40,7 +42,8 @@ lima      (on prod, the Lima test vehicle)
 | --- | --- | --- |
 | `minimal` | boots anywhere: directly, from a native disk, or from slots bite installed; a static address; listens on nothing | `bitten`: slots, `blkid`, `bite-cleanup`, and the ext4, xfs, btrfs and FAT modules |
 | `prod` | the production base: DHCP, the cloud's metadata, updates itself, `/data` on a disk, in LUKS when the config brings `data.key` | `dhcp`, `cloud`, `autoupdate`, `disk`, `crypt` |
-| `nginx`, `node`, `python`, `jre`, `php` | `prod` and one runtime, with a leashed service for the application | |
+| `app` | `prod` plus the unprivileged application account; no packages, service or listener | duplicated accounts in node, python and jre |
+| `nginx`, `node`, `python`, `jre`, `php` | `prod` and one runtime, with a leashed service for the application; node, python and jre inherit through `app` | |
 | `postgresql` | `prod` and PostgreSQL 17 on a UNIX socket ([postgresql.md](../postgresql.md)) | |
 | `demo` | `postgresql`, nginx and the status page ([demo.md](../demo.md)) | |
 
@@ -182,8 +185,8 @@ to `prod-ssh`).
   the one run it gets. Choosing means opening the loader twice, which gives
   up the run-once design; until a way keeps it, every boot loads all four.
 
-- **`/run/config/NAME`.** leash's design gives each service its part of the
-  config; it is not built yet, and the runtime forms need it.
+- **Service configuration.** Built as explicit `config NAME PATH` copies,
+  not access to `/run/config/NAME`; see [forms.md](../forms.md#private-configuration-files).
 - **Which forms are published.** Today `minimal`, `prod` and `prod-ssh`.
   With the runtime forms, perhaps all of them, each with `SSH=1`.
 

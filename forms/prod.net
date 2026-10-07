@@ -3,5 +3,6 @@
 # git.kernel.org, all over HTTPS, and the names to find them. Root, which
 # builds and installs the slot, has no network at all.
 connect _update tcp/443 udp/53 tcp/53
-# The fetcher of cmd/cloud-metadata/cloud-metadata.zig, which takes the config from the user data.
-metadata _cloud
+# No one reaches the metadata server, where the user data and its secrets
+# are: cmd/cloud-metadata's fetcher, the one that asks, runs at boot before
+# this policy is set, held to TCP port 80 by its own Landlock instead.

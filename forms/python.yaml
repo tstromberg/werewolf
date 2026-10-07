@@ -6,18 +6,7 @@
 # its packages (py3.13-*) in its contents, and its own etc/sv/app/service
 # if it starts differently. Until then, a server of one line. See
 # docs/forms.md.
-include: prod.yaml
+include: app.yaml
 contents:
   packages:
     - python-3.13
-
-accounts:
-  groups:
-    - groupname: app
-      gid: 204
-  users:
-    - username: app
-      uid: 204
-      gid: 204
-      homedir: /var/empty
-      shell: /sbin/nologin

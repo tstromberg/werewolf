@@ -180,6 +180,7 @@ The format is small enough that leash's parser is a page, and fuzzed.
 | `requires PATH...` | stay down unless each exists |
 | `env NAME=VALUE` | its environment, which is otherwise empty but `PATH` |
 | `secret NAME PATH` | an environment variable read from a file, as cloudflared's token is today; stays down without it; never logged |
+| `config NAME PATH` | copy one file beneath `/run/config` to `/run/svc/SERVICE/NAME`, service-owned, mode `0600`; refreshed before `before` commands; contents never logged |
 | `nofile N`, `memory SIZE`, `nice N`, `oom N` | limits, priority and OOM score, set as root before it gives root up |
 | `cgroup delegate` | a cgroup v2 subtree it may manage itself |
 
@@ -188,8 +189,6 @@ Every service gets, without asking:
 - `/run/svc/NAME` and `/data/svc/NAME`, made, owned by its user and
   writable: runtime files that end with the boot, and the service's data,
   which outlives it.
-- `/run/config/NAME`, if the config carried it, owned by its user and
-  readable.
 - **The floor**: read the image's `/usr`; read `/etc/passwd`, `/etc/group`,
   `/etc/hosts`, `/etc/resolv.conf`, `/etc/nsswitch.conf`,
   `/etc/ld.so.cache`, `/etc/localtime` and `/etc/ssl`; read `/proc` and
@@ -198,28 +197,30 @@ Every service gets, without asking:
   execute right covers `execve`, not mapping a library; the program's ELF
   loader, which the kernel opens for execution, gets it too.
 
-Built (`cmd/leash/leash.zig`): every key above but `memory`, `nice`, `oom` and
-`cgroup`, and everything here but `/run/config/NAME`, which wait for a
-service that needs them. A path in `read`, `write` or `run` that another
+Config access is explicit: `config` accepts up to 32 named files, each at
+most 64 KiB, without granting access to the source directory. See
+[the configuration reference](../forms.md#private-configuration-files).
+
+Built (`cmd/leash/leash.zig`): every key above but `nice`, `oom` and
+`cgroup`. A path in `read`, `write` or `run` that another
 service has yet to make is a retry, not a park: leash exits, and runsv
-starts it again a second later. leash installs no seccomp filter: the
-seal (lockdown.md) does that once, for every process.
+starts it again a second later. Leash installs the service's `pledge`
+seccomp filter on top of the machine seal.
 
 ### What leash does
 
 `runsv` starts `./run` in the service's directory, which is leash. leash reads
 `./service`, and then:
 
-1. **As root**: checks `requires` and `secret`; makes the service's
-   directories and hands them to its user; sets limits, priority, OOM score
-   and its cgroup.
+1. **As root**: checks `requires`, reads `secret` and `config`; makes the service's
+   directories and hands them to its user; sets limits and its cgroup.
 2. **Gives up root**: supplementary groups, gid and uid, keeping only
    `CAP_NET_BIND_SERVICE` if a port needs it.
 3. **Seals itself**: `no_new_privs`; a Landlock ruleset of the floor, the
-   paths, the ports and the programs; Landlock scoping; and the service's
-   seccomp filter, as in lockdown.md.
-4. **Runs each `before`**, and waits for it.
-5. **Execs `exec`**, with only the environment the file names.
+   paths, the ports and the programs; and Landlock scoping.
+4. **Copies the named config files**, then runs each `before` and waits for it.
+5. **Installs the service's seccomp filter and execs `exec`**, with only the
+   environment the file names. The machine seal also covers `before` commands.
 
 It logs one line saying what it applied. When a requirement is missing or a
 `before` fails, it logs why, writes `d` to `supervise/control` and exits:
@@ -326,7 +327,8 @@ that holds no files once it sleeps.
   console.
 - **`DEV=1`** builds the same chain with a development layer on top:
   `busybox-full`, `strace`, and a root shell on the console. The posture
-  line says `"dev":true`, and CI refuses to publish one. As with
+  line says `"dev":true`, and `make dist`, which CI publishes from,
+  refuses one. As with
   Chainguard's `-dev` images, it is a different image from the one in
   production, so a fix is confirmed on the production image after.
 - **`werewolf.debug=1`** on a shell-free image has no shell to start, and

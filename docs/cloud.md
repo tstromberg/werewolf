@@ -4,7 +4,21 @@ On GCP, AWS, Hetzner Cloud and Azure, a werewolf machine can take its config fro
 the cloud's metadata server: the same config tar a config disk carries,
 set as the instance's user data. `prod`, and every form on it, asks.
 
+The [bastion](../examples/bastion/README.md) and
+[Tailscale router](../examples/tailscale/README.md) tutorials use restricted
+JSON boot settings for destinations/routes, plus separate credential files.
+For local Lima, init imports `provision: mode: data` files targeting
+`/run/config/...` from the NoCloud volume: at most 32 regular files of
+32 KiB, root-owned, mode `0600`. It runs no cloud-init or Lima provisioning
+scripts. The `lima.env` index is also limited to 32 KiB. GCP uses the same
+files in the base64 config tar described below.
+See [service VM deployment](service-vms.md).
+
 ## Setting it up
+
+For an end-to-end image build and GCP deployment, start with the
+[language tutorials](../examples/README.md). Each includes a form, a Makefile
+for QEMU and GCP, verification commands and cloud resource cleanup.
 
 Make the config tar as for a config disk ([README](../README.md#configure-it)),
 then hand it to the cloud in base64:
@@ -23,7 +37,11 @@ hcloud server create --name web-1 --user-data-from-file config.b64 ...
 az vm create --name web-1 --user-data config.tar ...
 ```
 
-There is no address to give: the machine asks DHCP.
+There is no address to give: the machine asks DHCP. A `network` file in
+the user data is not read, the network being up to fetch it; one on a
+config disk is, before the network comes up ([design/cli.md](design/cli.md#config-the-config-tar-from-flags)).
+A NoCloud seed's `network-config` (cloud-init's v1 and v2) is never read:
+the address comes from the command line, the config tar or DHCP.
 
 ## What happens at boot
 
@@ -58,9 +76,11 @@ cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws"
 The program is two processes ([programs.md](programs.md)):
 
 - **The fetcher** speaks HTTP. It runs as `_cloud` (uid 68), chrooted to
-  the empty `/var/empty`, with no capabilities, under a seccomp filter
-  that allows an IPv4 TCP socket and little else, and reads at most 128
-  KiB.
+  the empty `/var/empty`, with no capabilities, under Landlock, which lets
+  it reach no file and connect over TCP to port 80 alone, and a seccomp
+  filter that allows a TCP socket and little else. It runs before fence
+  sets the network policy, so those are what hold it. It reads at most
+  128 KiB.
 - **The parent** decodes, checks and writes. It never touches the network.
   It has no capabilities at all, Landlock lets it write only beneath
   `/run/werewolf/cloud`, and seccomp allows only reading the fetcher's
@@ -73,11 +93,12 @@ reaches init.
 
 ## Limits
 
-- **Only `_cloud` can reach the metadata server's port 80.** fence's
-  routing rules refuse everyone else, root included
-  ([docs/design/fence.md](design/fence.md)), so the user data, and any secret
-  in it, stays out of other processes' reach. Root could delete the rules
-  until the seal takes `CAP_NET_ADMIN` away.
+- **No one reaches the metadata server's port 80 once the machine is up.**
+  fence's routing rules refuse everyone, root included
+  ([docs/design/fence.md](design/fence.md)), so the user data, and any
+  secret in it, stays out of every process's reach. The fetcher asks at
+  boot, before those rules exist. Root could delete the rules until the
+  seal takes `CAP_NET_ADMIN` away.
 - **Whoever sets the user data is root on the machine**: it carries root's
   ssh keys. That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are

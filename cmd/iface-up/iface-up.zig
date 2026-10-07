@@ -17,27 +17,30 @@
 //!   strictly and refused if odd: an interface name of plain characters, a
 //!   dotted quad with no leading zeros, a prefix of 1 to 32, an address
 //!   that is not the subnet's network or broadcast, loopback, multicast or
-//!   zero, and a gateway that is none of those either.
-//! - It opens its one socket, then pledges: no_new_privs, every capability
-//!   dropped but CAP_NET_ADMIN, and a seccomp filter allowing ioctl only
-//!   for the five requests it makes, and write, close and exit. Anything
-//!   else kills it.
+//!   zero, and a gateway that is none of those either, nor the address.
+//! - It opens its one socket, then pledges (lib/sandbox.zig): every
+//!   capability but CAP_NET_ADMIN gone, from the bounding set too, never to
+//!   come back, and a seccomp filter allowing ioctl only for the five
+//!   requests it makes, and write, close and exit. Anything else, or
+//!   another architecture's call, kills it.
 //! - No environment, no files; nothing printed on success, one line on
-//!   failure.
+//!   failure, naming the request that failed and the kernel's reason.
 //!
 //! There is no privilege separation: it reads nothing from the network,
 //! and what it is told comes from whoever booted the machine.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const linux = std.os.linux;
+const sandbox = @import("sandbox");
 
 pub fn main(init: std.process.Init) void {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch fail(error.OutOfMemory);
     const p = parse(args[1..]) catch |err| fail(err);
 
-    const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
-    sys(rc) catch |err| fail(err);
+    const rc = sandbox.sys(
+        linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0),
+        "socket",
+    ) catch |err| fail(err);
     const sock: i32 = @intCast(rc);
     pledge() catch |err| fail(err);
     apply(sock, p) catch |err| fail(err);
@@ -76,6 +79,11 @@ fn parse(args: []const [:0]const u8) !Plan {
         const gw = try ip4(args[2]);
         try usable(gw);
         if (std.mem.eql(u8, &gw, &addr)) return error.Gateway;
+        // Within the subnet, not its own address nor its broadcast.
+        if (prefix <= 30 and inSubnet(gw, addr, p.prefix)) {
+            const host = toInt(gw) & ~maskInt(p.prefix);
+            if (host == 0 or host == ~maskInt(p.prefix)) return error.Gateway;
+        }
         p.gateway = gw;
     }
     return p;
@@ -181,17 +189,18 @@ const Rtentry = extern struct {
 
 fn apply(sock: i32, p: Plan) !void {
     if (p.addr) |addr| {
-        try ioctl(sock, SIOCSIFADDR, &ifreq(p.nic, .{ .addr = .{ .addr = addr } }));
+        try ioctl(sock, SIOCSIFADDR, &ifreq(p.nic, .{ .addr = .{ .addr = addr } }), "SIOCSIFADDR");
         try ioctl(
             sock,
             SIOCSIFNETMASK,
             &ifreq(p.nic, .{ .addr = .{ .addr = fromInt(maskInt(p.prefix)) } }),
+            "SIOCSIFNETMASK",
         );
     }
     var flags = ifreq(p.nic, .{ .pad = @splat(0) });
-    try ioctl(sock, SIOCGIFFLAGS, &flags);
+    try ioctl(sock, SIOCGIFFLAGS, &flags, "SIOCGIFFLAGS");
     flags.data.flags |= IFF_UP;
-    try ioctl(sock, SIOCSIFFLAGS, &flags);
+    try ioctl(sock, SIOCSIFFLAGS, &flags, "SIOCSIFFLAGS");
 
     const gw = p.gateway orelse return;
     if (!inSubnet(gw, p.addr.?, p.prefix)) {
@@ -220,109 +229,31 @@ fn ifreq(name: []const u8, data: @FieldType(Ifreq, "data")) Ifreq {
 
 fn route(sock: i32, rt: Rtentry) !void {
     var r = rt;
-    ioctl(sock, SIOCADDRT, &r) catch |err| switch (err) {
-        error.Exists => {}, // already there: the machine is as asked
-        else => return err,
-    };
+    const rc = linux.ioctl(sock, SIOCADDRT, @intFromPtr(&r));
+    // The very route already there, gateway and all: as asked.
+    if (linux.errno(rc) == .EXIST) return;
+    _ = try sandbox.sys(rc, "SIOCADDRT");
 }
 
-fn ioctl(sock: i32, request: u32, arg: anytype) !void {
-    return sys(linux.ioctl(sock, request, @intFromPtr(arg)));
+fn ioctl(sock: i32, request: u32, arg: anytype, comptime what: []const u8) !void {
+    _ = try sandbox.sys(linux.ioctl(sock, request, @intFromPtr(arg)), what);
 }
 
 // --- pledge --------------------------------------------------------------------------
 
-const PR_SET_NO_NEW_PRIVS = 38;
 const CAP_NET_ADMIN = 12;
-const LINUX_CAPABILITY_VERSION_3 = 0x20080522;
-const SECCOMP_SET_MODE_FILTER = 1;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
 
-/// The kernel's __user_cap_header_struct, whose pid is an int; Zig 0.17's
-/// cap_user_header_t has it as a usize (see cmd/mount/mount.zig).
-const CapHeader = extern struct { version: u32, pid: i32 };
-const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
-
-const simple_syscalls = [_]linux.SYS{ .write, .close, .exit, .exit_group };
-
-const audit_arch: u32 = switch (builtin.cpu.arch) {
-    .aarch64 => 0xc00000b7,
-    .x86_64 => 0xc000003e,
-    else => @compileError("net runs on aarch64 and x86_64"),
-};
-
-const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-const LD_W_ABS = 0x20;
-const JEQ_K = 0x15;
-const JGE_K = 0x35;
-const RET_K = 0x06;
-
-/// The architecture; then write, close and exit; then ioctl, but only with
-/// a request (args[1], whose high word must be zero) from requests.
-const filter = blk: {
-    const s = simple_syscalls.len;
-    const r = requests.len;
-    const kill = 6 + s;
-    const allow = 12 + s + r;
-    var f: [allow + 1]Filter = undefined;
-    f[0] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 4 }; // seccomp_data.arch
-    f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = audit_arch };
-    f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
-    f[4] = .{ .code = JGE_K, .jt = kill - 5, .jf = 0, .k = 0x40000000 }; // x32
-    for (simple_syscalls, 0..) |sc, j| f[5 + j] = .{
-        .code = JEQ_K,
-        .jt = allow - (5 + j) - 1,
-        .jf = 0,
-        .k = @intCast(@backingInt(sc)),
-    };
-    f[5 + s] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = @intCast(@backingInt(linux.SYS.ioctl)) };
-    f[kill] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[7 + s] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 28 }; // args[1], high word
-    f[8 + s] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = 0 };
-    f[9 + s] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[10 + s] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 24 }; // args[1], low word
-    for (requests, 0..) |req, j| f[11 + s + j] = .{
-        .code = JEQ_K,
-        .jt = allow - (11 + s + j) - 1,
-        .jf = 0,
-        .k = req,
-    };
-    f[11 + s + r] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[allow] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
-    break :blk f;
-};
-
+/// CAP_NET_ADMIN alone, never to gain more, and a filter of what apply
+/// calls: ioctl for its five requests, write, close and exit.
 fn pledge() !void {
-    try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
-    const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
-    const keep: u32 = 1 << CAP_NET_ADMIN;
-    const data = [2]CapSets{
-        .{ .effective = keep, .permitted = keep, .inheritable = 0 },
-        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
-    };
-    try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
-    const prog = extern struct {
-        len: u16,
-        filter: [*]const Filter,
-    }{ .len = filter.len, .filter = &filter };
-    try sys(linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog));
+    try sandbox.keepOnly(1 << CAP_NET_ADMIN);
+    var f: sandbox.Filter = .{};
+    inline for (.{ "write", "close", "exit", "exit_group" }) |name| f.allow(name);
+    for (requests) |req| f.allowArg("ioctl", 1, req);
+    try f.install();
 }
 
 // --- saying so -----------------------------------------------------------------------
-
-fn sys(rc: usize) !void {
-    return switch (linux.errno(rc)) {
-        .SUCCESS => {},
-        .PERM => error.PermissionDenied,
-        .NODEV => error.NoSuchInterface,
-        .EXIST => error.Exists,
-        .NETUNREACH => error.GatewayUnreachable,
-        .INVAL => error.InvalidArgument,
-        else => error.Failed,
-    };
-}
 
 fn fail(err: anyerror) noreturn {
     var buf: [256]u8 = undefined;
@@ -331,7 +262,13 @@ fn fail(err: anyerror) noreturn {
         error.Interface => "iface-up: refused: not an interface name\n",
         error.Address => "iface-up: refused: an address is a dotted quad, prefix 1 to 32, and a " ++
             "usable host\n",
-        error.Gateway => "iface-up: refused: the gateway is the address itself\n",
+        error.Gateway => "iface-up: refused: the gateway is the address, or the subnet's own or " ++
+            "broadcast address\n",
+        error.SystemCall => std.mem.print(
+            &buf,
+            "iface-up: {s}: {s}\n",
+            .{ sandbox.failed, sandbox.errnoName(sandbox.failed_errno) },
+        ) catch "iface-up: failed\n",
         else => std.mem.print(&buf, "iface-up: {t}\n", .{err}) catch "iface-up: failed\n",
     };
     _ = linux.write(2, line.ptr, line.len);
@@ -376,6 +313,11 @@ test "odd input is refused" {
         &.{ "eth0", "10.0.2.15/24", "-1" },
     }) |args| try testing.expectError(error.Address, parse(args));
     try testing.expectError(error.Gateway, parse(&.{ "eth0", "10.0.2.15/24", "10.0.2.15" }));
+    // Not the subnet's own address nor its broadcast.
+    try testing.expectError(error.Gateway, parse(&.{ "eth0", "10.0.2.15/24", "10.0.2.0" }));
+    try testing.expectError(error.Gateway, parse(&.{ "eth0", "10.0.2.15/24", "10.0.2.255" }));
+    // Outside the subnet, as GCP's for a /32, any host is a gateway.
+    _ = try parse(&.{ "ens4", "10.128.0.5/32", "10.128.0.0" });
     try testing.expectError(error.Interface, parse(&.{ "eth0;reboot", "10.0.2.15/24" }));
     try testing.expectError(error.Interface, parse(&.{ "a-name-far-too-long", "10.0.2.15/24" }));
     try testing.expectError(error.Interface, parse(&.{ "..", "10.0.2.15/24" }));
@@ -389,17 +331,4 @@ test "the kernel's structures, as it lays them out" {
     try testing.expectEqual(120, @sizeOf(Rtentry));
     try testing.expectEqual(56, @offsetOf(Rtentry, "flags"));
     try testing.expectEqual(88, @offsetOf(Rtentry, "dev"));
-    try testing.expectEqual(8, @sizeOf(CapHeader));
-}
-
-test "the seccomp program ends where its jumps say" {
-    try testing.expectEqual(SECCOMP_RET_ALLOW, filter[filter.len - 1].k);
-    for (filter, 0..) |f, i| if (f.code == JEQ_K or f.code == JGE_K) {
-        try testing.expect(i + 1 + f.jt < filter.len);
-    };
-    // Every request jumps to allow.
-    for (requests, 0..) |_, j| {
-        const at = 11 + simple_syscalls.len + j;
-        try testing.expectEqual(filter.len - 1, at + 1 + filter[at].jt);
-    }
 }

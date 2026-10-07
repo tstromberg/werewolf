@@ -1,0 +1,12 @@
+# minimal, which has no DHCP client, booted with no werewolf.ip and a config
+# tar from werewolf pack --ip --gw --dns (make check; see test/checks for the
+# format): init must take the address from the tar's network file
+# (lib/network.zig), before it brings the network up, and say so.
+
+seen  from-tar         werewolf: \S+ 10\.0\.2\.15/24 via 10\.0\.2\.2 dns 10\.0\.2\.3, from the config tar
+unseen refused          werewolf: network: .*refused
+unseen no-network       werewolf: no network
+ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
+ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
+ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf
+ok  no-dhcp          [ ! -e /usr/lib/werewolf/dhcp-client ] && [ ! -e /run/werewolf/dhcp ]

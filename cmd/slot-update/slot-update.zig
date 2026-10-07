@@ -1,7 +1,8 @@
 //! slot-update: keep a machine booted from a slot current, from Wolfi and Alpine.
 //!
 //!     slot-update check     if Wolfi or Alpine has anything newer than this image,
-//!                           build the other slot, boot it once, and reboot
+//!                           build the other slot and stage it: armed to boot
+//!                           once, and booted by the daemon when it is due
 //!     slot-update outcome   after a reboot, log whether the last update held
 //!
 //! The other slot is built as `make slot` builds one, with apk where the build
@@ -23,39 +24,75 @@
 //! with only what matches copied out.
 
 const std = @import("std");
-const Io = std.Io;
-const Dir = Io.Dir;
-const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
-const sandbox = @import("sandbox");
+pub const Io = std.Io;
+pub const Dir = Io.Dir;
+pub const Allocator = std.mem.Allocator;
+pub const linux = std.os.linux;
+pub const sandbox = @import("sandbox");
 const broker = @import("broker");
-const verity = @import("verity");
-const cve = @import("cve.zig");
-const releases = @import("release.zig");
+pub const verity = @import("verity");
+pub const policy = @import("update-policy");
+pub const cve = @import("cve.zig");
+pub const releases = @import("release.zig");
+pub const tiers = @import("tiers.zig");
+const stage = @import("stage.zig");
+const slot = @import("slot.zig");
+const Pending = stage.Pending;
 
-const meta_dir = "/usr/share/werewolf";
+pub const meta_dir = "/usr/share/werewolf";
 const state_dir = "/data/svc/autoupdate";
-const work_dir = state_dir ++ "/work";
-const cache_dir = state_dir ++ "/cache";
+pub const work_dir = state_dir ++ "/work";
+pub const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
+/// The staged slot, and when this machine first saw each tier of its fixes.
+pub const pending_path = state_dir ++ "/pending";
+/// "SLOT BUILD BOOT" of the slot armed to boot once, and the boot that armed
+/// it (attemptOf).
+pub const attempt_path = state_dir ++ "/attempt";
+/// Held while a pass changes anything here, so a check run by hand and the
+/// daemon's never interleave.
+pub const lock_path = state_dir ++ "/lock";
+/// When the last reboot for an update went, in seconds since the epoch.
+pub const rebooted_path = state_dir ++ "/rebooted";
+/// The last tiers feed this machine took, and its signature.
+pub const feed_path = state_dir ++ "/cve-tiers.json";
+pub const feed_sig_path = feed_path ++ ".sig";
+/// The newest serial of a feed this machine took.
+pub const feed_serial_path = feed_path ++ ".serial";
+/// The most a feed or its signature may be.
+pub const max_feed = 16 << 20;
+/// Reports kept, newest first: years of updates at a few a week.
+const max_reports = 500;
+/// The form's update settings, then the operator's (lib/update-policy.zig).
+pub const form_policy = "/etc/werewolf/update-policy.json";
+pub const operator_policy = "/run/config/update-policy.json";
 /// Where the daemon says it can update (daemon).
 const ready_path = "/run/werewolf/updater-ready";
-const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vulns-" ++
+const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vu" ++
+    "lns-" ++
     "master.tar.gz";
-const max_read = 256 << 20;
+pub const max_read = 256 << 20;
 
 /// _update, the account the children that fetch run as
 /// (forms/prod.yaml).
-const update_id: u32 = 69;
+pub const update_id: u32 = 69;
 /// The CVE fetcher's root, and where the CVE sources are fetched to.
 const net_root = work_dir ++ "/net";
-const cves_dir = work_dir ++ "/cves";
+pub const cves_dir = work_dir ++ "/cves";
 /// How long a CVE fetcher, apk's fetcher and a CVE reader may take, in
 /// seconds; what a reader may send back.
 const fetch_seconds = 600;
-const apk_seconds = 1800;
+pub const apk_seconds = 1800;
 const read_seconds = 300;
 const max_lines = 4 << 20;
+/// How long a tool root runs may take (mkfs.erofs, zstd, apk offline,
+/// grub-setenv), in seconds, and the most it may say on each of stdout and
+/// stderr: one that hangs is killed, and the pass fails, to try again.
+const tool_seconds = 1800;
+const max_tool_output = 1 << 20;
+/// The most any one file apk's fetcher writes may be: an index or a
+/// package, the largest of which (a JDK) is a few hundred megabytes.
+pub const max_apk_file = 1 << 30;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -69,7 +106,9 @@ pub fn main(init: std.process.Init) !void {
     var u: Update = .{ .io = init.io, .gpa = gpa };
     u.setup() catch |err| fatal(&u, err);
     if (std.mem.eql(u8, mode, "check")) {
-        u.check() catch |err| fatal(&u, err);
+        var settings: policy.Settings = .{};
+        u.loadPolicy(&settings) catch |err| fatal(&u, err);
+        u.check(&settings, false) catch |err| fatal(&u, err);
     } else if (std.mem.eql(u8, mode, "outcome")) {
         u.outcome() catch |err| fatal(&u, err);
     } else {
@@ -94,13 +133,14 @@ fn failed(u: *Update, err: anyerror) void {
     Dir.cwd().deleteTree(u.io, work_dir) catch {};
 }
 
-/// The autoupdate service. Once this slot has committed: outcome, then a
-/// check at once and every 20 hours after, or as often as the form's
-/// /etc/werewolf/update-every says, in seconds (demo's says 3600). A check
-/// that fails is logged and tried again next time. Each pass has an arena
-/// of its own, freed when it ends, so months of checks use what one does.
-/// Only a machine booted from a slot can do any of this; elsewhere the
-/// service parks itself.
+/// The autoupdate service. Once this slot has committed: the settings
+/// (loadPolicy), outcome, then a check at once and every hour after, or as
+/// often as the form's /etc/werewolf/update-every says, in seconds. A check
+/// stages what it finds; between checks the daemon sleeps until the staged
+/// slot is due, and boots it then (bootIfDue). A check that fails is logged
+/// and tried again next time. Each pass has an arena of its own, freed when
+/// it ends, so months of checks use what one does. Only a machine booted
+/// from a slot can do any of this; elsewhere the service parks itself.
 ///
 /// Once setup succeeds, so that it could update if asked, it says so in
 /// /run/werewolf/updater-ready, and slot-keep commits no slot until it
@@ -117,7 +157,10 @@ fn daemon(io: Io) noreturn {
         0,
         0,
     );
-    switch (pass(io, .setup)) {
+    // Before anything is logged: a machine that has never logged has never
+    // checked, and boots whatever its first check stages at once.
+    var ctx: Ctx = .{ .first_boot = neverLogged(io) };
+    switch (pass(io, .setup, &ctx)) {
         .ok => Dir.cwd().writeFile(io, .{ .sub_path = ready_path, .data = "" }) catch |err| {
             std.debug.print(
                 "autoupdate: cannot write {s}: {s}\n",
@@ -135,17 +178,34 @@ fn daemon(io: Io) noreturn {
         break;
     }
     const every = updateEvery(io);
-    _ = pass(io, .outcome);
+    _ = pass(io, .policy, &ctx);
+    _ = pass(io, .outcome, &ctx);
+    var next_check = nowSecs(io);
     while (true) {
-        _ = pass(io, .check);
-        io.sleep(.fromSeconds(every), .awake) catch {};
+        if (nowSecs(io) >= next_check) {
+            if (pass(io, .check, &ctx) == .ok) ctx.first_boot = false;
+            next_check = nowSecs(io) + every;
+        }
+        if (!ctx.rebooting) _ = pass(io, .boot, &ctx);
+        const wait = @min(next_check - nowSecs(io), ctx.due_in orelse every);
+        io.sleep(.fromSeconds(@max(wait, 1)), .awake) catch {};
     }
 }
 
-const Step = enum { setup, outcome, check };
+/// What the daemon keeps between passes: the settings, read once; whether
+/// this machine has yet to finish a check; how long until the staged slot
+/// is due, if one is; and whether it has asked to reboot.
+pub const Ctx = struct {
+    settings: policy.Settings = .{},
+    first_boot: bool = false,
+    due_in: ?i64 = null,
+    rebooting: bool = false,
+};
+
+const Step = enum { setup, policy, outcome, check, boot };
 const PassResult = enum { ok, not_a_slot, failed };
 
-fn pass(io: Io, step: Step) PassResult {
+fn pass(io: Io, step: Step, ctx: *Ctx) PassResult {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
     var u: Update = .{ .io = io, .gpa = arena.allocator() };
@@ -156,8 +216,10 @@ fn pass(io: Io, step: Step) PassResult {
     };
     (switch (step) {
         .setup => {},
+        .policy => u.loadPolicy(&ctx.settings),
         .outcome => u.outcome(),
-        .check => u.check(),
+        .check => u.check(&ctx.settings, ctx.first_boot),
+        .boot => u.bootIfDue(ctx),
     }) catch |err| {
         failed(&u, err);
         return .failed;
@@ -165,12 +227,31 @@ fn pass(io: Io, step: Step) PassResult {
     return .ok;
 }
 
-/// Seconds between checks: the form's /etc/werewolf/update-every, or 20
-/// hours.
+/// Whether this machine's log is missing or empty: it has never checked.
+fn neverLogged(io: Io) bool {
+    const f = Dir.cwd().openFile(io, log_path, .{}) catch return true;
+    defer f.close(io);
+    return (f.length(io) catch return false) == 0;
+}
+
+pub fn nowSecs(io: Io) i64 {
+    return @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
+}
+
+/// Seconds since the kernel started its clock.
+pub fn bootSecs() i64 {
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
+    return ts.sec;
+}
+
+/// Seconds between checks: the form's /etc/werewolf/update-every, or an
+/// hour; never less than five minutes, nor more than a week.
 fn updateEvery(io: Io) i64 {
     var buf: [32]u8 = undefined;
-    const n = Dir.cwd().readFile(io, "/etc/werewolf/update-every", &buf) catch return 72000;
-    return std.fmt.parseInt(i64, std.mem.trim(u8, n, " \n"), 10) catch 72000;
+    const n = Dir.cwd().readFile(io, "/etc/werewolf/update-every", &buf) catch return 3600;
+    const every = std.fmt.parseInt(i64, std.mem.trim(u8, n, " \n"), 10) catch return 3600;
+    return std.math.clamp(every, 5 * 60, 7 * 24 * 3600);
 }
 
 /// Down, as a service with nothing to do: runsv will not restart it.
@@ -183,7 +264,7 @@ fn park(io: Io, why: []const u8) noreturn {
     std.process.exit(1);
 }
 
-const Update = struct {
+pub const Update = struct {
     io: Io,
     gpa: Allocator,
     host: []const u8 = "",
@@ -193,7 +274,7 @@ const Update = struct {
     /// What the last command that failed said, for the error event.
     detail: []const u8 = "",
 
-    fn setup(u: *Update) !void {
+    pub fn setup(u: *Update) !void {
         try Dir.cwd().createDirPath(u.io, state_dir ++ "/reports");
         // The kernel's, which init sets whether or not a config named one.
         const uts = std.posix.uname();
@@ -211,15 +292,17 @@ const Update = struct {
     // The last update left `attempt`: the slot it built and the build's hash.
     // Booted into that slot, and committed, it held; booted into the other,
     // it did not, and the same build is not tried again.
-    fn outcome(u: *Update) !void {
-        const attempt = u.read(state_dir ++ "/attempt") catch |err| switch (err) {
-            error.FileNotFound => return,
-            else => return err,
-        };
-        var it = std.mem.tokenizeAny(u8, attempt, " \n");
-        const tried = it.next() orelse return error.BadAttemptFile;
-        const build = it.next() orelse return error.BadAttemptFile;
+    pub fn outcome(u: *Update) !void {
+        const held_lock = try u.lock();
+        defer _ = linux.close(held_lock);
+        const attempt = try u.attemptOf() orelse return;
+        // Armed in this boot, so not tried yet: the daemon started again,
+        // and there is nothing to judge until the machine reboots.
+        if (std.mem.eql(u8, attempt.boot, try u.bootId())) return;
+        const tried = attempt.slot;
+        const build = attempt.build;
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
+        const down = u.downtime();
         if (std.mem.eql(u8, tried, u.cmd.slot)) {
             Dir.cwd().rename(
                 state_dir ++ "/attempt-serial",
@@ -233,6 +316,8 @@ const Update = struct {
                 .slot = u.cmd.slot,
                 .build = build,
                 .release = release,
+                .waited = try u.waited(),
+                .down = down,
             });
         } else {
             try u.append(state_dir ++ "/bad", try u.gpa.print("{s}\n", .{build}));
@@ -242,19 +327,47 @@ const Update = struct {
                 .running = u.cmd.slot,
                 .build = build,
                 .release = release,
+                .down = down,
             });
         }
         Dir.cwd().deleteFile(u.io, state_dir ++ "/attempt-serial") catch {};
-        try Dir.cwd().deleteFile(u.io, state_dir ++ "/attempt");
+        Dir.cwd().deleteFile(u.io, pending_path) catch {};
+        Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
+        try Dir.cwd().deleteFile(u.io, attempt_path);
     }
+
+    pub const Attempt = stage.Attempt;
+    pub const attemptOf = stage.attemptOf;
+    pub const bootId = stage.bootId;
+    pub const armed = stage.armed;
+    pub const lock = stage.lock;
+    pub const downtime = stage.downtime;
+    pub const waited = stage.waited;
+    pub const loadPolicy = stage.loadPolicy;
+    pub const readPending = stage.readPending;
+    pub const dueOf = stage.dueOf;
+    pub const whyOf = stage.whyOf;
+    pub const seed = stage.seed;
+    pub const tiersFeed = stage.tiersFeed;
+    pub const fetchFeed = stage.fetchFeed;
+    pub const ownAdvisories = stage.ownAdvisories;
+    pub const noFeed = stage.noFeed;
+    pub const retier = stage.retier;
+    pub const bootIfDue = stage.bootIfDue;
 
     // --- check -------------------------------------------------------------
     // What the other slot would be: the latest signed release of this form,
     // if CI publishes the form (the build record names where), or else what
     // Wolfi and Alpine have now. Then the same for both: the CVEs it fixes,
-    // the slot, the report, and a reboot into it once.
-    fn check(u: *Update) !void {
+    // the slot, the report, and the slot staged, to boot once when it is due
+    // (bootIfDue).
+    pub fn check(u: *Update, s: *const policy.Settings, first_boot: bool) !void {
         const io = u.io;
+        // Until this slot has committed, the other is the one to fall back
+        // to, and must not be written.
+        Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
+        const held_lock = try u.lock();
+        defer _ = linux.close(held_lock);
         Dir.cwd().deleteTree(io, work_dir) catch {};
         try Dir.cwd().createDirPath(io, work_dir);
         defer Dir.cwd().deleteTree(io, work_dir) catch {};
@@ -276,6 +389,22 @@ const Update = struct {
                 .reason = "this build rolled back before",
             });
         }
+        const staged = try u.readPending();
+        if (staged) |p| if (std.mem.eql(u8, p.build, plan.build) and try u.armed(p)) {
+            // Staged already: tier its fixes again, and say when it boots.
+            const now_p = try u.retier(s, p, plan);
+            const d = try u.dueOf(s, now_p);
+            return u.record(.{
+                .event = "check",
+                .slot = u.cmd.slot,
+                .release = release,
+                .result = "staged",
+                .build = now_p.build,
+                .tier = @tagName(d.tier),
+                .due = try u.time(d.at),
+                .due_in = d.at - nowSecs(io),
+            });
+        };
 
         u.step = "cves";
         try u.netRoot();
@@ -288,22 +417,61 @@ const Update = struct {
         else
             cve.KernelFixes{};
 
+        // Tiered before anything is installed, so nothing after the install
+        // can fail for want of the feed.
+        u.step = "stage";
+        const feed = try u.tiersFeed();
+        const fixes = try tiers.tiersOf(u.gpa, feed, .{
+            .changes = try diffOrigins(u.gpa, plan.old_pkgs, plan.new_pkgs),
+            .package_cves = package_cves,
+            .kernel_cves = kernel_cves,
+            .old_kernel = plan.old_kernel,
+            .new_kernel = plan.new_kernel,
+            .advisories = stage.advisoriesOf(plan),
+            .have = try u.ownAdvisories(),
+        });
+        const now = nowSecs(io);
+        const stamp = try u.time(now);
+        const report_path = try u.gpa.print(
+            "{s}/reports/{s}-{s}.json",
+            .{ state_dir, stamp, plan.build },
+        );
+        var next: Pending = staged orelse .{ .build = plan.build };
+        next.build = plan.build;
+        next.report = report_path;
+        next.first_boot = next.first_boot or first_boot;
+        for (std.enums.values(policy.Tier)) |t| if (fixes.first[@backingInt(t)]) |f| {
+            const seen = next.tier(t);
+            if (seen.* == null) seen.* = .{
+                .seen = try u.time(now),
+                .subject = f.subject,
+                .evidence = f.evidence,
+            };
+        };
+
         switch (plan.from) {
             .packages => try u.buildSlot(arch, plan.new_kernel),
             .release => |r| try u.fetchRelease(r.base, r.name, r.manifest),
         }
+        // pending stays as it was, with its first-seen times, until the new
+        // build is armed: install takes `attempt` away first, so the old
+        // build is no longer armed, and bootIfDue boots nothing meanwhile.
         try u.install(plan.build);
+        try u.writeReplacing(pending_path, try std.json.Stringify.valueAlloc(u.gpa, next, .{}));
         // outcome keeps a release's serial once its slot commits, so no
         // older one is taken after it.
         if (plan.from == .release) try u.write(
             state_dir ++ "/attempt-serial",
             plan.from.release.manifest.serial,
         );
+        const d = try u.dueOf(s, next);
+        const why = try u.whyOf(s, next, d, now);
 
         u.step = "report";
         const changes = try diffPackages(u.gpa, plan.old_pkgs, plan.new_pkgs);
-        const stamp = try u.now();
         const report: Report = .{
+            .tier = @tagName(d.tier),
+            .why = why,
             .time = stamp,
             .host = u.host,
             .build = plan.build,
@@ -314,30 +482,34 @@ const Update = struct {
             .kernel_cves = kernel_cves,
             .sources = sources.items,
         };
-        const report_path = try u.gpa.print(
-            "{s}/reports/{s}-{s}.json",
-            .{ state_dir, stamp, plan.build },
-        );
         var out: Io.Writer.Allocating = .init(u.gpa);
         try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
         try out.writer.writeByte('\n');
-        try Dir.cwd().writeFile(io, .{ .sub_path = report_path, .data = out.written() });
-
+        try u.writeReplacing(report_path, out.written());
+        u.pruneReports() catch {};
         var cve_count: usize = kernel_cves.cves.len;
         for (package_cves) |p| cve_count += p.cves.len;
         try u.record(.{
-            .event = "update",
+            .event = "stage",
+            .slot = u.other,
             .from = u.cmd.slot,
-            .to = u.other,
             .build = plan.build,
             .kernel = try u.gpa.print("{s} -> {s}", .{ plan.old_kernel, plan.new_kernel }),
             .packages = changes.len,
             .cves = cve_count,
+            .tier = @tagName(d.tier),
+            .seen = next.seenTimes(),
+            .fixes = .{
+                .urgent = fixes.count[@backingInt(policy.Tier.urgent)],
+                .high = fixes.count[@backingInt(policy.Tier.high)],
+                .medium = fixes.count[@backingInt(policy.Tier.medium)],
+                .low = fixes.count[@backingInt(policy.Tier.low)],
+            },
+            .due = try u.time(d.at),
+            .due_in = d.at - now,
+            .why = why,
             .report = report_path,
         });
-        u.step = "reboot";
-        Dir.cwd().deleteTree(io, work_dir) catch {};
-        try u.run(&.{"/usr/bin/reboot"});
     }
 
     /// The other slot as Wolfi and Alpine would have it now, installed into
@@ -348,7 +520,8 @@ const Update = struct {
         try u.apkAdd(
             work_dir ++ "/root",
             arch,
-            &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" },
+            "/etc/apk/keys",
+            &.{ "--repositories-file", "/etc/apk/repositories" },
             try u.words(try u.read("/etc/apk/world")),
         );
         u.step = "kernel";
@@ -356,7 +529,8 @@ const Update = struct {
         try u.apkAdd(
             work_dir ++ "/kernel",
             arch,
-            &.{ "--keys-dir", "/etc/werewolf/alpine-keys", "--repository", alpine },
+            "/etc/werewolf/alpine-keys",
+            &.{ "--repository", alpine },
             &.{"linux-virt"},
         );
 
@@ -364,20 +538,30 @@ const Update = struct {
         const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));
         const new_pkgs = try parseInstalled(
             u.gpa,
-            try u.read(work_dir ++ "/root/lib/apk/db/installed"),
+            try slot.readIn(u, work_dir ++ "/root", "lib/apk/db/installed"),
         );
         const kernel_pkgs = try parseInstalled(
             u.gpa,
-            try u.read(work_dir ++ "/kernel/lib/apk/db/installed"),
+            try slot.readIn(u, work_dir ++ "/kernel", "lib/apk/db/installed"),
         );
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
         const new_kernel = try u.gpa.print(
             "linux-virt-{s}",
             .{versionOf(kernel_pkgs, "linux-virt") orelse return error.NoKernel},
         );
-        if ((try diffPackages(u.gpa, old_pkgs, new_pkgs)).len == 0 and
-            std.mem.eql(u8, old_kernel, new_kernel))
-        {
+        // apk installs what the index names, and an index carries no date:
+        // a signed index older than this image's would be installed as
+        // happily as a newer one. Nothing goes backwards.
+        const changes = try diffPackages(u.gpa, old_pkgs, new_pkgs);
+        if (backwards(changes, old_kernel, new_kernel)) |what| {
+            try u.record(.{
+                .event = "skip",
+                .release = release,
+                .reason = try u.gpa.print("{s} would go backwards", .{what}),
+            });
+            return null;
+        }
+        if (changes.len == 0 and std.mem.eql(u8, old_kernel, new_kernel)) {
             try u.record(.{
                 .event = "check",
                 .slot = u.cmd.slot,
@@ -488,7 +672,12 @@ const Update = struct {
 
     /// A release's slot files into work_dir/slot as a built slot has them,
     /// each checked against the manifest's size and sha256.
-    fn fetchRelease(u: *Update, base: []const u8, name: []const u8, m: releases.Manifest) !void {
+    fn fetchRelease(
+        u: *Update,
+        base: []const u8,
+        name: []const u8,
+        m: releases.Manifest,
+    ) !void {
         u.step = "fetch";
         try Dir.cwd().createDirPath(u.io, work_dir ++ "/slot");
         const targets = [_][:0]const u8{
@@ -497,17 +686,45 @@ const Update = struct {
             work_dir ++ "/slot/root.erofs",
         };
         for (releases.Manifest.slot_files, targets) |file, target| {
-            const want = m.files.map.get(file).?;
-            const got = try u.download(
-                try u.gpa.print("{s}{s}-{s}", .{ base, name, file }),
-                target,
-            );
-            _ = linux.close(got.fd);
-            if (got.size != want.size or !std.mem.eql(u8, &got.sha256, want.sha256)) {
-                u.detail = try u.gpa.print("{s}: not the file the manifest names", .{file});
-                return error.ReleaseFileMismatch;
-            }
+            try u.fetchReleaseFile(base, name, file, m.files.map.get(file).?, target);
         }
+        // The release's own kernel arguments, where its manifest names them:
+        // a slot boots with what its image asks for, not this one's.
+        if (m.files.map.get("cmdline")) |want| {
+            if (want.size > 4096) return error.BadManifest;
+            try u.fetchReleaseFile(base, name, "cmdline", want, work_dir ++ "/slot/cmdline");
+        }
+    }
+
+    fn fetchReleaseFile(
+        u: *Update,
+        base: []const u8,
+        name: []const u8,
+        file: []const u8,
+        want: releases.Manifest.File,
+        target: [:0]const u8,
+    ) !void {
+        const got = try u.download(try u.gpa.print("{s}{s}-{s}", .{ base, name, file }), target);
+        _ = linux.close(got.fd);
+        if (got.size != want.size or !std.mem.eql(u8, &got.sha256, want.sha256)) {
+            u.detail = try u.gpa.print("{s}: not the file the manifest names", .{file});
+            return error.ReleaseFileMismatch;
+        }
+    }
+
+    /// The kernel arguments the new slot boots with: its release's, when
+    /// the release carried them (fetchRelease), or else this image's, which
+    /// a slot built from packages carries forward with the rest of
+    /// werewolf's files. One line of printable ASCII, as a loader entry and
+    /// GRUB's environment can hold.
+    pub fn slotCmdline(u: *Update) ![]const u8 {
+        const text = u.read(work_dir ++ "/slot/cmdline") catch |err| switch (err) {
+            error.FileNotFound => try u.read(meta_dir ++ "/cmdline"),
+            else => return err,
+        };
+        const line = std.mem.trimEnd(u8, text, "\n");
+        for (line) |c| if (c < ' ' or c > '~' or c == '\\') return error.BadCmdline;
+        return line;
     }
 
     // --- CVEs --------------------------------------------------------------
@@ -573,13 +790,13 @@ const Update = struct {
 
     /// GET url, by a fetcher, into cves/name. The file, recorded as a source
     /// with its sha256; or null, the source recorded with why not.
-    fn fetch(
+    pub fn fetch(
         u: *Update,
         sources: *std.ArrayList(Source),
         url: []const u8,
         comptime name: []const u8,
     ) !?cve.Body {
-        try sources.append(u.gpa, .{ .url = url, .fetched = try u.now() });
+        try sources.append(u.gpa, .{ .url = url, .fetched = try u.nowText() });
         const source = &sources.items[sources.items.len - 1];
         const got = u.download(url, cves_dir ++ "/" ++ name) catch |err| {
             source.@"error" = if (err == error.FetchFailed) u.detail else @errorName(err);
@@ -593,7 +810,7 @@ const Update = struct {
     /// root makes for it: the file, open, with its size and sha256. A
     /// fetcher that says why not fails with error.FetchFailed, its word in
     /// detail.
-    fn download(u: *Update, url: []const u8, path: [:0]const u8) !Download {
+    pub fn download(u: *Update, url: []const u8, path: [:0]const u8) !Download {
         const flags: linux.O = .{
             .ACCMODE = .RDWR,
             .CREAT = true,
@@ -625,17 +842,32 @@ const Update = struct {
 
     /// A small file, a manifest or its signature, by download, as bytes.
     fn downloadSmall(u: *Update, url: []const u8, path: [:0]const u8) ![]const u8 {
+        return u.downloadMax(url, path, 1 << 20);
+    }
+
+    /// A file of at most max bytes, by download, as bytes.
+    pub fn downloadMax(u: *Update, url: []const u8, path: [:0]const u8, max: usize) ![]const u8 {
         const got = try u.download(url, path);
         _ = linux.close(got.fd);
-        if (got.size > 1 << 20) return error.TooBig;
+        if (got.size > max) return error.TooBig;
         return u.read(path);
     }
 
     /// The sha256 of a file, as hex.
     fn sha256Of(u: *Update, path: []const u8) ![64]u8 {
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(try u.read(path), &digest, .{});
-        return std.fmt.bytesToHex(digest, .lower);
+        // Read through, not into memory: it is a root image, every hour.
+        var f = try Dir.cwd().openFile(u.io, path, .{});
+        defer f.close(u.io);
+        var h: std.crypto.hash.sha2.Sha256 = .init(.{});
+        var buf: [64 << 10]u8 = undefined;
+        var at: u64 = 0;
+        while (true) {
+            const n = try f.readPositionalAll(u.io, &buf, at);
+            if (n == 0) break;
+            h.update(buf[0..n]);
+            at += n;
+        }
+        return std.fmt.bytesToHex(h.finalResult(), .lower);
     }
 
     /// What a reader found in body, for job: the lines after its "ok", or
@@ -667,7 +899,7 @@ const Update = struct {
     /// writes to out until it exits: at most max bytes, within seconds. A
     /// child that says more or takes longer is killed, and is an error, as
     /// is one a signal ended.
-    fn child(
+    pub fn child(
         u: *Update,
         comptime f: anytype,
         args: anytype,
@@ -702,7 +934,7 @@ const Update = struct {
     }
 
     /// The fetcher's root: copies of the resolver's files, and nothing else.
-    fn netRoot(u: *Update) !void {
+    pub fn netRoot(u: *Update) !void {
         try Dir.cwd().createDirPath(u.io, net_root ++ "/etc");
         try Dir.cwd().createDirPath(u.io, cves_dir);
         inline for (.{ "resolv.conf", "hosts" }) |name| {
@@ -720,7 +952,7 @@ const Update = struct {
     }
 
     /// A system call's result, or an error with what failed in detail.
-    fn sys(u: *Update, rc: usize, comptime what: []const u8) !usize {
+    pub fn sys(u: *Update, rc: usize, comptime what: []const u8) !usize {
         return sandbox.sys(rc, what) catch |err| {
             u.detail = try u.gpa.print(
                 "{s}: {s}",
@@ -730,573 +962,20 @@ const Update = struct {
         };
     }
 
-    // --- build -------------------------------------------------------------
-    fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
-        const io = u.io;
-        const root = work_dir ++ "/root";
-        try Dir.cwd().createDirPath(io, work_dir ++ "/slot");
+    pub const buildSlot = slot.buildSlot;
+    pub const install = slot.install;
 
-        // What apko does that apk does not: busybox's links, no setuid or setgid.
-        u.step = "root";
-        try u.busyboxLinks(root);
-        // werewolf's own files as the build laid them, and the apk setup and
-        // build record the next update will need.
-        for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try u.copyInto(root, p);
-        for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try u.copyInto(root, p);
-        for (try u.listDir("/etc/apk/keys")) |name| try u.copyInto(
-            root,
-            try u.gpa.print("etc/apk/keys/{s}", .{name}),
-        );
-        try u.copyTree(root, "usr/share/werewolf");
-        const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-        try u.write(
-            root ++ meta_dir ++ "/kernel",
-            try u.gpa.print("{s}\n", .{new_kernel}),
-        );
-        try u.write(
-            root ++ meta_dir ++ "/release",
-            try u.gpa.print(
-                "{s} {s} {s} updated-on-{s}\n",
-                .{ form, try u.now(), new_kernel, u.host },
-            ),
-        );
-        try u.stripSetid(root);
-        // The slot's / is this directory's owner and mode: root's, 0755,
-        // whoever made it, or sshd's StrictModes refuses every key.
-        _ = try u.sys(
-            linux.fchownat(linux.AT.FDCWD, root, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
-            "chown the new root",
-        );
-        _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root, 0o755), "chmod the new root");
-        // As the build makes it (Makefile, EROFS_OPTS), but zstd for lzma:
-        // Wolfi's mkfs.erofs has no lzma, and the kernel reads both. A slot
-        // is on disk, not in RAM, so its few more megabytes cost nothing,
-        // and zstd reads faster.
-        try u.run(&.{
-            "mkfs.erofs",
-            "-b",
-            "4096",
-            "-zzstd,level=19",
-            "-C1048576",
-            "-Eall-fragments,dedupe",
-            work_dir ++ "/slot/root.erofs",
-            root,
-        });
-        // Its dm-verity hash tree after it, and the line stage0 opens it with,
-        // for stage0's /verity below: as the build makes them (tools/verity.zig).
-        u.step = "verity";
-        const tree = try verity.build(u.gpa, try u.read(work_dir ++ "/slot/root.erofs"));
-        try u.append(work_dir ++ "/slot/root.erofs", tree.tree);
-
-        // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
-        // Image inside it, as the build does (see Makefile).
-        u.step = "vmlinuz";
-        const vmlinuz = try u.read(work_dir ++ "/kernel/boot/vmlinuz-virt");
-        try u.write(work_dir ++ "/slot/vmlinuz", try unwrapZboot(u.gpa, vmlinuz));
-
-        u.step = "stage0";
-        const s = work_dir ++ "/stage0";
-        try u.apkAdd(
-            s,
-            arch,
-            &.{ "--keys-dir", "/etc/apk/keys", "--repositories-file", "/etc/apk/repositories" },
-            try u.words(try u.read(meta_dir ++ "/stage0.world")),
-        );
-        try u.busyboxLinks(s);
-        try u.stripSetid(s);
-        try Dir.cwd().copyFile(
-            meta_dir ++ "/stage0.init",
-            Dir.cwd(),
-            s ++ "/init",
-            io,
-            .{ .permissions = .fromMode(0o755) },
-        );
-        // werewolf's module loader, as the build lays it in stage0.
-        try Dir.cwd().copyFile(
-            "/usr/lib/werewolf/modload",
-            Dir.cwd(),
-            s ++ "/usr/lib/werewolf/modload",
-            io,
-            .{ .make_path = true, .permissions = .fromMode(0o755) },
-        );
-        const kvers = try u.listDir(work_dir ++ "/kernel/lib/modules");
-        if (kvers.len != 1) return error.NotOneKernel;
-        const src = try u.gpa.print(
-            "{s}/kernel/lib/modules/{s}",
-            .{ work_dir, kvers[0] },
-        );
-        const dst = try u.gpa.print("{s}/usr/lib/modules/{s}", .{ s, kvers[0] });
-        const dep = try u.read(try u.gpa.print("{s}/modules.dep", .{src}));
-        const order = try moduleOrder(u.gpa, dep, try u.lines(try u.read(meta_dir ++ "/modules")));
-        // Decompressed, as the build does: Alpine's kernel cannot, and the
-        // loader hands it each file as it is.
-        for (order) |p| {
-            const ko = try gunzip(
-                u.gpa,
-                try u.read(try u.gpa.print("{s}/{s}", .{ src, p })),
-            );
-            const out = try u.gpa.print("{s}/{s}", .{ dst, withoutGz(p) });
-            try Dir.cwd().createDirPath(io, parentDir(out));
-            try u.write(out, ko);
-        }
-        const list = try moduleList(u.gpa, order, try u.read(meta_dir ++ "/module-params"));
-        try u.write(try u.gpa.print("{s}/werewolf.modules", .{dst}), list);
-        var line: Io.Writer.Allocating = .init(u.gpa);
-        try tree.params.format(&line.writer);
-        try u.write(s ++ "/verity", line.written());
-        try u.writeCpio(s, work_dir ++ "/stage0.cpio");
-        try u.run(&.{
-            "zstd",
-            "-19",
-            "-q",
-            "-f",
-            "-o",
-            work_dir ++ "/slot/initramfs.zst",
-            work_dir ++ "/stage0.cpio",
-        });
-    }
-
-    // --- install -----------------------------------------------------------
-    // root.erofs beside this slot's on the victim's filesystem; the kernel and
-    // stage0 in /boot/werewolf, beside GRUB's directory. Both mounted apart
-    // and writable, since /victim is read-only.
-    fn install(u: *Update, build: []const u8) !void {
-        if (u.cmd.grubenv.len == 0) return u.installEsp(build);
-        const io = u.io;
-        u.step = "install";
-        const victim = try u.held(.victim);
-        defer victim.release();
-        const grub = try u.held(.grub);
-        defer grub.release();
-        const v = victim.path();
-        const g = grub.path();
-
-        const gpath = pathOf(u.cmd.grubenv);
-        const kdir = try u.gpa.print(
-            "{s}{s}/werewolf/{s}",
-            .{ g, parentDir(parentDir(gpath)), u.other },
-        );
-        const rdir = try u.gpa.print(
-            "{s}{s}/{s}",
-            .{ v, pathOf(u.cmd.victim), u.other },
-        );
-        try Dir.cwd().createDirPath(io, kdir);
-        try Dir.cwd().createDirPath(io, rdir);
-        const erofs_new = try u.gpa.print("{s}/root.erofs.new", .{rdir});
-        try Dir.cwd().copyFile(work_dir ++ "/slot/root.erofs", Dir.cwd(), erofs_new, io, .{});
-        try Dir.cwd().rename(
-            erofs_new,
-            Dir.cwd(),
-            try u.gpa.print("{s}/root.erofs", .{rdir}),
-            io,
-        );
-        for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
-            try Dir.cwd().copyFile(
-                try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
-                Dir.cwd(),
-                try u.gpa.print("{s}/{s}", .{ kdir, f }),
-                io,
-                .{},
-            );
-        }
-        linux.sync();
-        try u.write(
-            state_dir ++ "/attempt",
-            try u.gpa.print("{s} {s}\n", .{ u.other, build }),
-        );
-        // The image's kernel arguments, which bite's entries read from
-        // GRUB's environment for each slot, so an update's new arguments
-        // reach a machine bitten before them; then the one try.
-        const env = try u.gpa.print("{s}{s}", .{ g, gpath });
-        const args = try std.mem.join(u.gpa, " ", try u.words(try u.read(meta_dir ++ "/cmdline")));
-        try u.run(&.{
-            "/usr/lib/werewolf/grub-setenv",
-            env,
-            try u.gpa.print("werewolf_args_{s}", .{u.other}),
-            args,
-        });
-        const entry = try u.gpa.print("werewolf-{s}", .{u.other});
-        try u.run(&.{ "/usr/lib/werewolf/grub-setenv", env, "next_entry", entry });
-    }
-
-    /// The other slot onto werewolf's own disk (docs/design/native-boot.md): its
-    /// root.erofs to the ext4 partition, as install does; its kernel and
-    /// stage0 to the EFI partition; and a loader entry with one try, which
-    /// systemd-boot boots next because it is the newest. slot-keep removes the
-    /// count once the slot is healthy; if it is not, systemd-boot has spent
-    /// the try and boots the slot this one replaced.
-    fn installEsp(u: *Update, build: []const u8) !void {
-        const io = u.io;
-        u.step = "install";
-        const victim = try u.held(.victim);
-        defer victim.release();
-        const esp = try u.held(.esp);
-        defer esp.release();
-        const v = victim.path();
-        const e = esp.path();
-
-        const rdir = try u.gpa.print(
-            "{s}{s}/{s}",
-            .{ v, pathOf(u.cmd.victim), u.other },
-        );
-        const kdir = try u.gpa.print("{s}/werewolf/{s}", .{ e, u.other });
-        const entries = try u.gpa.print("{s}/loader/entries", .{e});
-        try Dir.cwd().createDirPath(io, rdir);
-        try Dir.cwd().createDirPath(io, kdir);
-        try Dir.cwd().createDirPath(io, entries);
-
-        // The other slot's entry goes first: from here until the new one is
-        // written, nothing boots the other slot while its files change.
-        for (try u.listDir(entries)) |name| {
-            if (isEntryOf(
-                name,
-                u.other,
-            )) try Dir.cwd().deleteFile(io, try u.gpa.print("{s}/{s}", .{ entries, name }));
-        }
-        try u.replace(
-            work_dir ++ "/slot/root.erofs",
-            try u.gpa.print("{s}/root.erofs", .{rdir}),
-        );
-        for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
-            try u.replace(
-                try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
-                try u.gpa.print("{s}/{s}", .{ kdir, f }),
-            );
-        }
-        linux.sync();
-
-        const version = try compactTime(
-            u.gpa,
-            @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s)),
-        );
-        const options = try withSlot(
-            u.gpa,
-            try u.read("/proc/cmdline"),
-            try u.read(meta_dir ++ "/cmdline"),
-            u.other,
-        );
-        const entry = try loaderEntry(u.gpa, u.other, version, options);
-        const tmp = try u.gpa.print("{s}/werewolf-{s}.tmp", .{ entries, u.other });
-        try u.write(tmp, entry);
-        try Dir.cwd().rename(
-            tmp,
-            Dir.cwd(),
-            try u.gpa.print("{s}/werewolf-{s}+1.conf", .{ entries, u.other }),
-            io,
-        );
-        linux.sync();
-        try u.write(
-            state_dir ++ "/attempt",
-            try u.gpa.print("{s} {s}\n", .{ u.other, build }),
-        );
-    }
-
-    /// src to dst, through a temporary name, so dst is whole or absent.
-    fn replace(u: *Update, src: []const u8, dst: []const u8) !void {
-        const tmp = try u.gpa.print("{s}.new", .{dst});
-        try Dir.cwd().copyFile(src, Dir.cwd(), tmp, u.io, .{});
-        try Dir.cwd().rename(tmp, Dir.cwd(), dst, u.io);
-    }
-
-    // --- helpers -----------------------------------------------------------
-    /// Install packages into a new root, through a cache on /data named for
-    /// the root (root, kernel, stage0), so a check that finds nothing new
-    /// downloads indexes and nothing else. Each root has a cache of its own,
-    /// so cleaning one keeps nothing another needs.
-    ///
-    /// Root does not touch the network. apk's network half runs first, as
-    /// _update (apkFetcher): the indexes, fresh every time, since apk would
-    /// otherwise trust a cached one for hours, and every package the new
-    /// root takes, into the cache. Root takes the cache back and installs
-    /// from it with --no-network, checking every signature and hash against
-    /// its own keys, as apk always does. Then it prunes the cache to the
-    /// packages the new root took, so it holds one copy of the image, no
-    /// more.
-    fn apkAdd(
-        u: *Update,
-        root: []const u8,
-        arch: []const u8,
-        source: []const []const u8,
-        packages: []const []const u8,
-    ) !void {
-        const name = std.fs.path.basename(root);
-        const cache = try u.gpa.printSentinel("{s}/{s}", .{ cache_dir, name }, 0);
-        const scratch = try u.gpa.printSentinel(
-            "{s}/apk-{s}",
-            .{ work_dir, name },
-            0,
-        );
-        try Dir.cwd().createDirPath(u.io, cache);
-        Dir.cwd().deleteTree(u.io, scratch) catch {};
-        try Dir.cwd().createDirPath(u.io, scratch);
-        _ = try u.sys(
-            linux.fchownat(
-                linux.AT.FDCWD,
-                scratch,
-                update_id,
-                update_id,
-                linux.AT.SYMLINK_NOFOLLOW,
-            ),
-            "chown scratch",
-        );
-
-        // The indexes, then the packages: `cache download` fetches no index.
-        const world = try std.mem.join(u.gpa, "\n", packages);
-        for ([_][]const []const u8{ &.{"update"}, &.{ "cache", "download" } }) |applet| {
-            var fetch_argv: std.ArrayList(?[*:0]const u8) = .empty;
-            for ([_][]const u8{
-                "/usr/bin/apk",
-                "--root",
-                scratch,
-                "--arch",
-                arch,
-                "--cache-dir",
-                cache,
-            }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-            for (source) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-            for ([_][]const u8{
-                "--quiet",
-                "--no-progress",
-            }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-            for (applet) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-            const argv_z = try fetch_argv.toOwnedSliceSentinel(u.gpa, null);
-            _ = try u.sys(
-                linux.fchownat(
-                    linux.AT.FDCWD,
-                    cache,
-                    update_id,
-                    update_id,
-                    linux.AT.SYMLINK_NOFOLLOW,
-                ),
-                "chown cache",
-            );
-            const fetched = u.child(
-                apkFetcher,
-                .{ argv_z, world, cache, scratch },
-                64 << 10,
-                apk_seconds,
-            );
-            try u.reclaim(cache);
-            const e = fetched catch |err| {
-                u.detail = "apk, as _update";
-                return err;
-            };
-            if (e.code != 0) {
-                u.detail = try u.gpa.print(
-                    "apk, as _update: {s}",
-                    .{std.mem.trim(u8, e.out[0..@min(e.out.len, 400)], " \n")},
-                );
-                return error.CommandFailed;
-            }
-        }
-        try Dir.cwd().deleteTree(u.io, scratch);
-
-        var argv: std.ArrayList([]const u8) = .empty;
-        try argv.appendSlice(
-            u.gpa,
-            &.{ "apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
-        );
-        try argv.appendSlice(u.gpa, source);
-        try argv.appendSlice(
-            u.gpa,
-            &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
-        );
-        try argv.appendSlice(u.gpa, packages);
-        try u.run(argv.items);
-        try u.prune(cache, root);
-    }
-
-    /// The cache, down to the packages root has installed, and the indexes.
-    /// Not apk's `cache clean`: without --purge it keeps any version an
-    /// index still lists, which for Wolfi is all of them, and with it,
-    /// where the root is on a disk, it deletes every package.
-    fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
-        const installed = try parseInstalled(
-            u.gpa,
-            try u.read(try u.gpa.print("{s}/lib/apk/db/installed", .{root})),
-        );
-        var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
-        defer d.close(u.io);
-        var old: std.ArrayList([]const u8) = .empty;
-        var it = d.iterate();
-        while (try it.next(u.io)) |e| {
-            if (std.mem.endsWith(u8, e.name, ".apk") and
-                !isCachedOf(e.name, installed)) try old.append(u.gpa, try u.gpa.dupe(u8, e.name));
-        }
-        for (old.items) |name| try d.deleteFile(u.io, name);
-    }
-
-    /// The cache, root's again once the fetcher is gone: each entry a regular
-    /// file of a name apk gives one, owned by root. Anything else it left is
-    /// removed unread.
-    fn reclaim(u: *Update, cache: [:0]const u8) !void {
-        _ = try u.sys(
-            linux.fchownat(linux.AT.FDCWD, cache, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
-            "chown cache",
-        );
-        var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
-        defer d.close(u.io);
-        var strays: std.ArrayList([]const u8) = .empty;
-        var it = d.iterate();
-        while (try it.next(u.io)) |e| {
-            if (e.kind != .file or !cacheName(e.name)) {
-                try strays.append(u.gpa, try u.gpa.dupe(u8, e.name));
-                continue;
-            }
-            const file = try u.gpa.dupeSentinel(u8, e.name, 0);
-            _ = try u.sys(
-                linux.fchownat(d.handle, file, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
-                "chown cached file",
-            );
-        }
-        for (strays.items) |stray| try d.deleteTree(u.io, stray);
-    }
+    pub const apkAdd = slot.apkAdd;
 
     /// A filesystem the mount broker mounts read-write for as long as it
     /// is held: fence's Landlock domain refuses this process mount(2)
     /// itself (cmd/mount-broker).
-    fn held(u: *Update, word: broker.Word) !broker.Held {
+    pub fn held(u: *Update, word: broker.Word) !broker.Held {
         return broker.ask(word) catch |err| {
             const why = if (err == error.Refused) broker.refusal else @errorName(err);
             u.detail = try u.gpa.print("mount-broker, {s}: {s}", .{ @tagName(word), why });
             return err;
         };
-    }
-
-    fn busyboxLinks(u: *Update, root: []const u8) !void {
-        const d = try u.gpa.print("{s}/etc/busybox-paths.d", .{root});
-        for (u.listDir(d) catch return) |name| {
-            for (try u.lines(try u.read(try u.gpa.print(
-                "{s}/{s}",
-                .{ d, name },
-            )))) |p| {
-                const link = try u.gpa.print(
-                    "{s}/{s}",
-                    .{ root, std.mem.trimStart(u8, p, "/") },
-                );
-                _ = Dir.cwd().statFile(u.io, link, .{ .follow_symlinks = false }) catch {
-                    try Dir.cwd().symLink(u.io, "/usr/bin/busybox", link, .{});
-                };
-            }
-        }
-    }
-
-    fn stripSetid(u: *Update, root: []const u8) !void {
-        var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
-        defer d.close(u.io);
-        var w = try d.walk(u.gpa);
-        while (try w.next(u.io)) |e| {
-            if (e.kind != .file) continue;
-            const st = try e.dir.statFile(u.io, e.basename, .{ .follow_symlinks = false });
-            const mode = st.permissions.toMode();
-            if (mode & 0o6000 != 0) {
-                try e.dir.setFilePermissions(
-                    u.io,
-                    e.basename,
-                    .fromMode(mode & ~@as(std.posix.mode_t, 0o6000)),
-                    .{ .follow_symlinks = false },
-                );
-            }
-        }
-    }
-
-    /// Copy /path to root/path, with its permissions.
-    /// path, a directory, and everything under it, from this root into
-    /// root: the build record, whose etc/ holds the image's accounts.
-    fn copyTree(u: *Update, root: []const u8, path: []const u8) !void {
-        var d = Dir.cwd().openDir(
-            u.io,
-            try u.gpa.print("/{s}", .{path}),
-            .{ .iterate = true },
-        ) catch |err| {
-            u.detail = path;
-            return err;
-        };
-        defer d.close(u.io);
-        var w = try d.walk(u.gpa);
-        defer w.deinit();
-        while (try w.next(u.io)) |e| {
-            if (e.kind == .directory) continue;
-            try u.copyInto(root, try u.gpa.print("{s}/{s}", .{ path, e.path }));
-        }
-    }
-
-    /// path, from this root into root. A symlink stays a symlink: a form's
-    /// `run` that links to a binary must not become a copy of the old one.
-    /// A .mountpoint is the empty file that keeps a mount point's directory
-    /// in the image; here what is mounted there hides it, so it is made.
-    fn copyInto(u: *Update, root: []const u8, path: []const u8) !void {
-        errdefer u.detail = path;
-        const src = try u.gpa.print("/{s}", .{path});
-        const dst = try u.gpa.print("{s}/{s}", .{ root, path });
-        if (std.mem.eql(u8, std.fs.path.basename(path), ".mountpoint")) {
-            try Dir.cwd().createDirPath(u.io, parentDir(dst));
-            return Dir.cwd().writeFile(u.io, .{ .sub_path = dst, .data = "" });
-        }
-        var buf: [Dir.max_path_bytes]u8 = undefined;
-        const n = Dir.cwd().readLink(u.io, src, &buf) catch |err| switch (err) {
-            error.NotLink => return Dir.cwd().copyFile(
-                src,
-                Dir.cwd(),
-                dst,
-                u.io,
-                .{ .make_path = true },
-            ),
-            else => return err,
-        };
-        try Dir.cwd().createDirPath(u.io, parentDir(dst));
-        Dir.cwd().deleteFile(u.io, dst) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
-        };
-        try Dir.cwd().symLink(u.io, buf[0..n], dst, .{});
-    }
-
-    /// A newc cpio of everything under root, as the kernel unpacks an
-    /// initramfs: owned by root, children after their directory. The type
-    /// and device numbers come from statx, since the stage0 root has device
-    /// nodes (/dev/console, which the kernel opens before anything mounts
-    /// /dev) as well as files, directories and links.
-    fn writeCpio(u: *Update, root: []const u8, out_path: []const u8) !void {
-        var out: Io.Writer.Allocating = .init(u.gpa);
-        var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
-        defer d.close(u.io);
-        var w = try d.walk(u.gpa);
-        var ino: u32 = 1;
-        var link_buf: [Dir.max_path_bytes]u8 = undefined;
-        while (try w.next(u.io)) |e| : (ino += 1) {
-            const path = try u.gpa.printSentinel("{s}/{s}", .{ root, e.path }, 0);
-            var st: linux.Statx = undefined;
-            const rc = linux.statx(
-                linux.AT.FDCWD,
-                path,
-                linux.AT.SYMLINK_NOFOLLOW,
-                .{ .TYPE = true, .MODE = true },
-                &st,
-            );
-            if (linux.errno(rc) != .SUCCESS) return error.StatFailed;
-            const node: Node = .{
-                .name = e.path,
-                .mode = st.mode,
-                .ino = ino,
-                .rdev_major = st.rdev_major,
-                .rdev_minor = st.rdev_minor,
-            };
-            const data: []const u8 = switch (st.mode & linux.S.IFMT) {
-                linux.S.IFREG => try e.dir.readFileAlloc(
-                    u.io,
-                    e.basename,
-                    u.gpa,
-                    .limited(max_read),
-                ),
-                linux.S.IFLNK => link_buf[0..try e.dir.readLink(u.io, e.basename, &link_buf)],
-                linux.S.IFDIR, linux.S.IFCHR, linux.S.IFBLK => "",
-                else => return error.UnexpectedFileKind,
-            };
-            try cpioEntry(&out.writer, node, data);
-        }
-        try cpioEntry(&out.writer, .{ .name = "TRAILER!!!", .mode = 0, .ino = 0 }, "");
-        try u.write(out_path, out.written());
     }
 
     fn isBad(u: *Update, build: []const u8) bool {
@@ -1305,27 +984,60 @@ const Update = struct {
         return false;
     }
 
-    /// One JSON line, in the log and on the console.
-    fn record(u: *Update, fields: anytype) !void {
+    /// One JSON line, in the log and on the console. Each counts on from
+    /// the last, seq, and names it, prev: the first 16 hex digits of its
+    /// SHA-256 (docs/design/update-policy.md, The audit log).
+    pub fn record(u: *Update, fields: anytype) !void {
+        const tail = try u.logTail();
+        const Seq = struct { seq: u64 = 0 };
+        var seq = (std.json.parseFromSliceLeaky(Seq, u.gpa, tail.last, .{
+            .ignore_unknown_fields = true,
+        }) catch Seq{}).seq;
+        // A line a crash cut short is ended, counted, and chained over as it
+        // is, so the chain goes on through it and shows where it broke.
+        var last = tail.last;
+        if (tail.torn.len > 0) {
+            try u.append(log_path, "\n");
+            last = try std.mem.concat(u.gpa, u8, &.{ tail.torn, "\n" });
+            seq += 1;
+        }
+        const prev = policy.chain(last);
         var line: Io.Writer.Allocating = .init(u.gpa);
-        try line.writer.print("{{\"time\":\"{s}\",\"host\":", .{try u.now()});
+        try line.writer.print("{{\"time\":\"{s}\",\"host\":", .{try u.nowText()});
         try std.json.Stringify.value(u.host, .{}, &line.writer);
+        try line.writer.print(",\"seq\":{d},\"prev\":\"{s}\"", .{
+            seq + 1, if (last.len == 0) "" else &prev,
+        });
         var rest: Io.Writer.Allocating = .init(u.gpa);
         try std.json.Stringify.value(fields, .{}, &rest.writer);
         try line.writer.print(",{s}\n", .{rest.written()[1..]});
         try u.append(log_path, line.written());
+        // On the disk before anything follows: a log a power cut can take
+        // lines from is no record of what the machine did.
+        try u.syncPath(log_path);
         try Io.File.stdout().writeStreamingAll(
             u.io,
             try u.gpa.print("autoupdate: {s}", .{line.written()}),
         );
     }
 
-    fn run(u: *Update, argv: []const []const u8) !void {
+    pub fn run(u: *Update, argv: []const []const u8) !void {
         _ = try u.output(argv);
     }
 
     fn output(u: *Update, argv: []const []const u8) ![]const u8 {
-        const res = try std.process.run(u.gpa, u.io, .{ .argv = argv });
+        const res = std.process.run(u.gpa, u.io, .{
+            .argv = argv,
+            .stdout_limit = .limited(max_tool_output),
+            .stderr_limit = .limited(max_tool_output),
+            .timeout = .{ .deadline = .fromNow(u.io, .{
+                .raw = .fromSeconds(tool_seconds),
+                .clock = .boot,
+            }) },
+        }) catch |err| {
+            u.detail = try u.gpa.print("{s}: {s}", .{ argv[0], @errorName(err) });
+            return err;
+        };
         switch (res.term) {
             .exited => |code| if (code == 0) return res.stdout,
             else => {},
@@ -1337,21 +1049,40 @@ const Update = struct {
         return error.CommandFailed;
     }
 
-    fn read(u: *Update, path: []const u8) ![]const u8 {
+    /// The log's last whole line, with its newline, or "" if there is none;
+    /// and what follows it without a newline, a line a crash cut short.
+    fn logTail(u: *Update) !struct { last: []const u8, torn: []const u8 } {
+        var f = Dir.cwd().openFile(u.io, log_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return .{ .last = "", .torn = "" },
+            else => return err,
+        };
+        defer f.close(u.io);
+        const size = try f.length(u.io);
+        const buf = try u.gpa.alloc(u8, @intCast(@min(size, 64 << 10)));
+        const tail = buf[0..try f.readPositionalAll(u.io, buf, size - buf.len)];
+        const end = if (std.mem.findScalarLast(u8, tail, '\n')) |i| i + 1 else 0;
+        const start = if (end > 0) if (std.mem.findScalarLast(u8, tail[0 .. end - 1], '\n')) |i|
+            i + 1
+        else
+            0 else 0;
+        return .{ .last = tail[start..end], .torn = tail[end..] };
+    }
+
+    pub fn read(u: *Update, path: []const u8) ![]const u8 {
         return Dir.cwd().readFileAlloc(u.io, path, u.gpa, .limited(max_read));
     }
 
-    fn write(u: *Update, path: []const u8, data: []const u8) !void {
+    pub fn write(u: *Update, path: []const u8, data: []const u8) !void {
         try Dir.cwd().writeFile(u.io, .{ .sub_path = path, .data = data });
     }
 
-    fn append(u: *Update, path: []const u8, data: []const u8) !void {
+    pub fn append(u: *Update, path: []const u8, data: []const u8) !void {
         var f = try Dir.cwd().createFile(u.io, path, .{ .truncate = false });
         defer f.close(u.io);
         try f.writePositionalAll(u.io, data, try f.length(u.io));
     }
 
-    fn listDir(u: *Update, path: []const u8) ![]const []const u8 {
+    pub fn listDir(u: *Update, path: []const u8) ![]const []const u8 {
         var d = try Dir.cwd().openDir(u.io, path, .{ .iterate = true });
         defer d.close(u.io);
         var names: std.ArrayList([]const u8) = .empty;
@@ -1361,7 +1092,7 @@ const Update = struct {
         return names.items;
     }
 
-    fn lines(u: *Update, text: []const u8) ![]const []const u8 {
+    pub fn lines(u: *Update, text: []const u8) ![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         var it = std.mem.tokenizeScalar(u8, text, '\n');
         while (it.next()) |l| {
@@ -1371,7 +1102,7 @@ const Update = struct {
         return out.items;
     }
 
-    fn words(u: *Update, text: []const u8) ![]const []const u8 {
+    pub fn words(u: *Update, text: []const u8) ![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         var it = std.mem.tokenizeAny(u8, text, " \n");
         while (it.next()) |w| try out.append(u.gpa, w);
@@ -1380,192 +1111,64 @@ const Update = struct {
     }
 
     /// Now, as RFC 3339 in UTC.
-    fn now(u: *Update) ![]const u8 {
-        const ns = Io.Timestamp.now(u.io, .real).nanoseconds;
-        return rfc3339(u.gpa, @intCast(@divFloor(ns, std.time.ns_per_s)));
+    pub fn nowText(u: *Update) ![]const u8 {
+        return u.time(nowSecs(u.io));
+    }
+
+    pub fn time(u: *Update, secs: i64) ![]const u8 {
+        return rfc3339(u.gpa, @intCast(secs));
+    }
+
+    /// data to path through a temporary name, so path is whole or absent,
+    /// and on the disk, the rename too, before it returns.
+    pub fn writeReplacing(u: *Update, path: []const u8, data: []const u8) !void {
+        const tmp = try u.gpa.print("{s}.new", .{path});
+        try u.write(tmp, data);
+        try u.syncPath(tmp);
+        try Dir.cwd().rename(tmp, Dir.cwd(), path, u.io);
+        try u.syncPath(std.fs.path.dirname(path) orelse ".");
+    }
+
+    fn syncPath(u: *Update, path: []const u8) !void {
+        const fd: i32 = @intCast(try u.sys(linux.openat(
+            linux.AT.FDCWD,
+            try u.gpa.dupeSentinel(u8, path, 0),
+            .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true },
+            0,
+        ), "open to sync"));
+        defer _ = linux.close(fd);
+        _ = try u.sys(linux.fsync(fd), "fsync");
+    }
+
+    /// The newest max_reports reports kept, the rest removed: a staged
+    /// build that a newer one replaced leaves one each hour it lasted.
+    fn pruneReports(u: *Update) !void {
+        const names = try u.listDir(state_dir ++ "/reports");
+        if (names.len <= max_reports) return;
+        // Named TIME-BUILD.json, so sorted by name is sorted by time.
+        for (names[0 .. names.len - max_reports]) |name| {
+            try Dir.cwd().deleteFile(
+                u.io,
+                try u.gpa.print("{s}/reports/{s}", .{ state_dir, name }),
+            );
+        }
     }
 };
 
-// --- the CVE children ----------------------------------------------------------
+// --- the CVE children -------------------------------------------------------
 
 const Said = struct { status: []const u8, rest: []const u8 };
-/// As _update, apk's network half: argv, run with no environment, in
-/// scratch, a root of its own holding only world and an empty database. It
-/// reads the image (/usr, /etc and the resolver's file), runs nothing but
-/// apk, writes only beneath cache and scratch, connects over TCP only to
-/// ports 443 and 53, and starts no process. What it says goes to out.
-fn apkFetcher(
-    argv: [:null]const ?[*:0]const u8,
-    world: []const u8,
-    cache: [:0]const u8,
-    scratch: [:0]const u8,
-    out: i32,
-    parent: linux.pid_t,
-) noreturn {
-    sandbox.tieTo(parent);
-    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
-    apkExec(
-        argv,
-        world,
-        cache,
-        scratch,
-        out,
-    ) catch |err| sandbox.say(out, 1, sandbox.whyNot(arena.allocator(), err), "");
-}
 
-fn apkExec(
-    argv: [:null]const ?[*:0]const u8,
-    world: []const u8,
-    cache: [:0]const u8,
-    scratch: [:0]const u8,
-    out: i32,
-) !noreturn {
-    try sandbox.closeAllBut(&.{out});
-    for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
-    // What it may reach, opened while root can. resolv.conf leads, on a
-    // machine with DHCP, to the client's in /run.
-    const dir: linux.O = .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true };
-    const file: linux.O = .{ .PATH = true, .CLOEXEC = true };
-    var rules: [9]sandbox.Rule = undefined;
-    var n: usize = 0;
-    for ([_]struct { [:0]const u8, linux.O, u64 }{
-        .{ "/usr", dir, sandbox.read_file | sandbox.read_dir },
-        .{ "/etc", dir, sandbox.read_file | sandbox.read_dir },
-        .{ "/usr/bin/apk", file, sandbox.execute },
-        .{ interpreter, file, sandbox.execute },
-        .{ "/dev/null", file, sandbox.read_file | sandbox.write_file },
-        .{ cache, dir, sandbox.own_dir },
-        .{ "/etc/resolv.conf", file, sandbox.read_file },
-    }) |r| {
-        const fd = linux.openat(linux.AT.FDCWD, r[0], r[1], 0);
-        if (linux.errno(fd) == .NOENT and std.mem.eql(u8, r[0], "/etc/resolv.conf")) continue;
-        rules[n] = .{
-            .fd = @intCast(try sandbox.sys(fd, "open what apk may reach")),
-            .access = r[2],
-        };
-        n += 1;
-    }
-    const root: i32 = @intCast(try sandbox.sys(
-        linux.openat(linux.AT.FDCWD, scratch, dir, 0),
-        "open scratch",
-    ));
-    rules[n] = .{ .fd = root, .access = sandbox.own_dir };
-    n += 1;
-    try sandbox.dropTo(update_id, null);
-    for ([_][:0]const u8{ "etc", "etc/apk", "lib", "lib/apk", "lib/apk/db" }) |d| {
-        const rc = linux.mkdirat(root, d, 0o755);
-        if (linux.errno(rc) != .EXIST) _ = try sandbox.sys(rc, "mkdir in scratch");
-    }
-    try writeAt(root, "etc/apk/world", world);
-    try writeAt(root, "lib/apk/db/installed", "");
-    try sandbox.landlock(rules[0..n], &.{ 443, 53 });
-
-    // What apk 2.14 calls to fetch, as traced, under glibc on either
-    // architecture (x86_64's arch_prctl sets up thread-local storage); the
-    // names one lacks are skipped. It tries to mount /proc
-    // in its root, which is refused as for any unprivileged process, and
-    // carries on.
-    var f: sandbox.Filter = .{};
-    inline for (.{
-        "read",            "readv",           "pread64",         "write",
-        "writev",          "pwrite64",        "openat",          "open",
-        "close",           "fstat",           "newfstatat",      "stat",
-        "lstat",           "statx",           "fstatfs",         "statfs",
-        "lseek",           "getdents64",      "faccessat",       "faccessat2",
-        "access",          "readlinkat",      "readlink",        "mkdirat",
-        "mkdir",           "renameat",        "renameat2",       "rename",
-        "unlinkat",        "unlink",          "utimensat",       "ftruncate",
-        "fsync",           "fdatasync",       "fcntl",           "flock",
-        "dup",             "dup2",            "dup3",            "umask",
-        "mmap",            "munmap",          "mprotect",        "mremap",
-        "madvise",         "brk",             "futex",           "getpid",
-        "gettid",          "getuid",          "geteuid",         "getgid",
-        "getegid",         "connect",         "getsockopt",      "setsockopt",
-        "getsockname",     "getpeername",     "sendto",          "recvfrom",
-        "sendmsg",         "recvmsg",         "sendmmsg",        "recvmmsg",
-        "shutdown",        "poll",            "ppoll",           "pselect6",
-        "select",          "rt_sigaction",    "rt_sigprocmask",  "rt_sigreturn",
-        "getrandom",       "clock_gettime",   "gettimeofday",    "nanosleep",
-        "clock_nanosleep", "set_tid_address", "set_robust_list", "rseq",
-        "prlimit64",       "uname",           "execve",          "exit_group",
-        "exit",            "restart_syscall", "arch_prctl",
-    }) |name| f.allow(name);
-    // IP, and nothing else: glibc's lookups also try nscd's Unix socket,
-    // and netlink for the addresses configured, and do without.
-    f.allowArg("socket", 0, linux.AF.INET);
-    f.allowArg("socket", 0, linux.AF.INET6);
-    f.refuse("socket");
-    // FIONREAD, and isatty's TCGETS and TCGETS2.
-    for ([_]u32{ 0x541b, 0x5401, 0x802c542a }) |req| f.allowArg("ioctl", 1, req);
-    f.refuse("mount");
-    f.refuse("umount2");
-    try f.install();
-
-    const envp = [_:null]?[*:0]const u8{};
-    _ = try sandbox.sys(linux.execve(argv[0].?, argv.ptr, &envp), "execve apk");
-    unreachable;
-}
-
-/// glibc's dynamic loader, which the kernel runs apk with; what it runs in
-/// turn would be as confined as apk is.
-const interpreter = switch (@import("builtin").cpu.arch) {
-    .x86_64 => "/lib64/ld-linux-x86-64.so.2",
-    .aarch64 => "/lib/ld-linux-aarch64.so.1",
-    else => @compileError("werewolf builds for x86_64 and aarch64"),
-};
-
-/// A file beneath dir, written whole.
-fn writeAt(dir: i32, name: [*:0]const u8, data: []const u8) !void {
-    const fd: i32 = @intCast(try sandbox.sys(
-        linux.openat(
-            dir,
-            name,
-            .{
-                .ACCMODE = .WRONLY,
-                .CREAT = true,
-                .TRUNC = true,
-                .CLOEXEC = true,
-                .NOFOLLOW = true,
-            },
-            0o644,
-        ),
-        "create in scratch",
-    ));
-    defer _ = linux.close(fd);
-    var off: usize = 0;
-    while (off < data.len) off += try sandbox.sys(
-        linux.write(fd, data[off..].ptr, data.len - off),
-        "write in scratch",
-    );
-}
-
-/// Whether file, a package in apk's cache (NAME-VERSION.HASH.apk), is one
-/// of pkgs.
-fn isCachedOf(file: []const u8, pkgs: []const Package) bool {
-    const stem = file[0 .. std.mem.findScalarLast(
-        u8,
-        file[0 .. file.len - ".apk".len],
-        '.',
-    ) orelse return false];
-    for (pkgs) |p| {
-        if (stem.len == p.name.len + 1 + p.version.len and std.mem.startsWith(u8, stem, p.name) and
-            stem[p.name.len] == '-' and std.mem.endsWith(u8, stem, p.version)) return true;
-    }
-    return false;
-}
-
-/// A name apk gives a file in its cache.
-fn cacheName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "installed") or std.mem.endsWith(u8, name, ".apk") or
-        (std.mem.startsWith(u8, name, "APKINDEX.") and std.mem.endsWith(u8, name, ".tar.gz"));
-}
-
-// --- report ------------------------------------------------------------------
+// --- report -----------------------------------------------------------------
 
 const Report = struct {
     time: []const u8,
     host: []const u8,
     build: []const u8,
+    /// The update's tier, and why it boots when it does
+    /// (docs/design/update-policy.md).
+    tier: []const u8,
+    why: []const u8,
     from: struct { slot: []const u8, release: []const u8, kernel: []const u8 },
     to: struct { slot: []const u8, kernel: []const u8 },
     packages: []const Change,
@@ -1575,7 +1178,7 @@ const Report = struct {
 };
 
 /// What the other slot would be, and where it comes from.
-const Plan = struct {
+pub const Plan = struct {
     build: []const u8,
     old_pkgs: []const Package,
     new_pkgs: []const Package,
@@ -1587,7 +1190,7 @@ const Plan = struct {
     },
 };
 
-const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
+pub const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
 
 const Change = struct { name: []const u8, from: ?[]const u8, to: ?[]const u8 };
 const Source = struct {
@@ -1597,16 +1200,16 @@ const Source = struct {
     @"error": ?[]const u8 = null,
 };
 
-// --- pure functions, tested below ----------------------------------------------
+// --- pure functions, tested below -------------------------------------------
 
-const Cmdline = struct {
+pub const Cmdline = struct {
     victim: []const u8 = "",
     slot: []const u8 = "",
     grubenv: []const u8 = "",
     esp: []const u8 = "",
 };
 
-fn parseCmdline(text: []const u8) Cmdline {
+pub fn parseCmdline(text: []const u8) Cmdline {
     var c: Cmdline = .{};
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |arg| {
@@ -1626,95 +1229,24 @@ fn parseCmdline(text: []const u8) Cmdline {
     return c;
 }
 
-/// This boot's command line, for the other slot: what the machine was
-/// booted with (its console, werewolf.mac) carries over, but the image's
-/// own arguments (/usr/share/werewolf/cmdline, which the build writes from
-/// the form's allowances) replace any of the same name, so an entry edited
-/// to loosen one does not outlive the next update, and one an update adds
-/// reaches machines installed before it. werewolf.slot is the other slot's;
-/// initrd= and BOOT_IMAGE= belong to the loader that wrote them, and are
-/// dropped.
-fn withSlot(gpa: Allocator, cmdline: []const u8, image: []const u8, slot: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
-    next: while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=") or
-            std.mem.startsWith(u8, arg, "initrd=") or
-            std.mem.startsWith(u8, arg, "BOOT_IMAGE=")) continue;
-        var own = std.mem.tokenizeAny(u8, image, " \n");
-        while (own.next()) |o| if (std.mem.eql(u8, argName(arg), argName(o))) continue :next;
-        try out.print(gpa, "{s} ", .{arg});
-    }
-    var own = std.mem.tokenizeAny(u8, image, " \n");
-    while (own.next()) |o| try out.print(gpa, "{s} ", .{o});
-    try out.print(gpa, "werewolf.slot={s}", .{slot});
-    return out.items;
-}
-
-/// A kernel argument's name: what comes before its =, or all of it.
-fn argName(arg: []const u8) []const u8 {
-    return arg[0 .. std.mem.findScalar(u8, arg, '=') orelse arg.len];
-}
-
-/// A systemd-boot entry (the Boot Loader Specification's type 1) for slot.
-/// version orders the slots, newest first; sort-key keeps them together.
-fn loaderEntry(
-    gpa: Allocator,
-    slot: []const u8,
-    version: []const u8,
-    options: []const u8,
-) ![]const u8 {
-    return gpa.print(
-        \\title werewolf {s}
-        \\sort-key werewolf
-        \\version {s}
-        \\linux /werewolf/{s}/vmlinuz
-        \\initrd /werewolf/{s}/initramfs.zst
-        \\options {s}
-        \\
-    , .{ slot, version, slot, slot, options });
-}
-
-/// Whether name is one of slot's entries: werewolf-b.conf, werewolf-b+1.conf
-/// with tries left, werewolf-b+0-1.conf with none.
-fn isEntryOf(name: []const u8, slot: []const u8) bool {
-    const prefix = "werewolf-";
-    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, ".conf")) return false;
-    const rest = name[prefix.len .. name.len - ".conf".len];
-    if (!std.mem.startsWith(u8, rest, slot)) return false;
-    return rest.len == slot.len or rest[slot.len] == '+';
-}
-
-/// secs as a version systemd-boot orders by time: 20261006T120000Z.
-fn compactTime(gpa: Allocator, secs: u64) ![]const u8 {
-    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
-    const yd = es.getEpochDay().calculateYearDay();
-    const md = yd.calculateMonthDay();
-    const ds = es.getDaySeconds();
-    return gpa.print("{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
-        yd.year,              md.month.numeric(),      md.day_index + 1,
-        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
-    });
-}
-
 fn uuidOf(spec: []const u8) []const u8 {
     return spec[0 .. std.mem.findScalar(u8, spec, ':') orelse spec.len];
 }
 
-fn pathOf(spec: []const u8) []const u8 {
+pub fn pathOf(spec: []const u8) []const u8 {
     const i = std.mem.findScalar(u8, spec, ':') orelse return "";
     return spec[i + 1 ..];
 }
 
-fn parentDir(path: []const u8) []const u8 {
+pub fn parentDir(path: []const u8) []const u8 {
     return path[0 .. std.mem.findScalarLast(u8, path, '/') orelse 0];
 }
 
-const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
+pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
 
 /// The packages in an apk installed database: P (name), V (version) and o
 /// (origin, the source package) of each record; records end at a blank line.
-fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
+pub fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
     var out: std.ArrayList(Package) = .empty;
     var p: Package = .{ .name = "", .version = "", .origin = "" };
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -1773,8 +1305,50 @@ fn diffPackages(gpa: Allocator, old: []const Package, new: []const Package) ![]c
     return out.items;
 }
 
+/// The first package, or the kernel, that changes would take to an older
+/// version, in apk's order; or null.
+fn backwards(
+    changes: []const Change,
+    old_kernel: []const u8,
+    new_kernel: []const u8,
+) ?[]const u8 {
+    for (changes) |c| {
+        const from = c.from orelse continue;
+        const to = c.to orelse continue;
+        if (cve.apkOrder(to, from) == .lt) return c.name;
+    }
+    const prefix = "linux-virt-";
+    if (std.mem.startsWith(u8, old_kernel, prefix) and
+        std.mem.startsWith(u8, new_kernel, prefix) and
+        cve.apkOrder(
+            new_kernel[prefix.len..],
+            old_kernel[prefix.len..],
+        ) == .lt) return "linux-virt";
+    return null;
+}
+
+test backwards {
+    const up = [_]Change{.{ .name = "curl", .from = "8.17.0-r0", .to = "8.17.0-r1" }};
+    try std.testing.expectEqual(
+        @as(?[]const u8, null),
+        backwards(&up, "linux-virt-6.18.55-r0", "linux-virt-6.18.56-r0"),
+    );
+    const down = [_]Change{
+        .{ .name = "zlib", .from = null, .to = "1.3.2-r0" },
+        .{ .name = "openssl", .from = "3.5.4-r0", .to = "3.5.3-r0" },
+    };
+    try std.testing.expectEqualStrings(
+        "openssl",
+        backwards(&down, "linux-virt-6.18.55-r0", "linux-virt-6.18.55-r0").?,
+    );
+    try std.testing.expectEqualStrings(
+        "linux-virt",
+        backwards(&up, "linux-virt-6.18.55-r0", "linux-virt-6.18.9-r0").?,
+    );
+}
+
 /// Source packages present before and after, at different versions.
-fn diffOrigins(
+pub fn diffOrigins(
     gpa: Allocator,
     old: []const Package,
     new: []const Package,
@@ -1808,132 +1382,6 @@ fn buildHash(gpa: Allocator, pkgs: []const Package, kernel: []const u8) ![]const
     return gpa.dupe(u8, hex[0..16]);
 }
 
-/// The order to load modules in: each leaf's dependencies from modules.dep,
-/// read back to front, then the leaf; each module once.
-fn moduleOrder(gpa: Allocator, dep: []const u8, leaves: []const []const u8) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    for (leaves) |leaf| {
-        const suffix = try gpa.print("/{s}.ko.gz", .{leaf});
-        var lines_it = std.mem.splitScalar(u8, dep, '\n');
-        const line = while (lines_it.next()) |l| {
-            const colon = std.mem.findScalar(u8, l, ':') orelse continue;
-            if (std.mem.endsWith(u8, l[0..colon], suffix)) break l;
-        } else return error.ModuleNotFound;
-        var fields: std.ArrayList([]const u8) = .empty;
-        var f = std.mem.tokenizeAny(u8, line, ": ");
-        while (f.next()) |x| try fields.append(gpa, x);
-        var i = fields.items.len;
-        while (i > 0) {
-            i -= 1;
-            try appendUnique(gpa, &out, fields.items[i]);
-        }
-    }
-    return out.items;
-}
-
-/// werewolf.modules for a load order: each path without .gz, and after it
-/// the parameters /usr/share/werewolf/module-params gives its module, a
-/// line `MODULE KEY=VALUE`, as the build writes them (Makefile,
-/// MODULE_PARAMS). Parameters for a module not in the order are an error,
-/// not a module loaded without them.
-fn moduleList(gpa: Allocator, order: []const []const u8, params: []const u8) ![]const u8 {
-    var out: Io.Writer.Allocating = .init(gpa);
-    for (order) |p| {
-        const path = withoutGz(p);
-        try out.writer.writeAll(path);
-        const stem = std.fs.path.basename(path);
-        var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
-        while (lines_it.next()) |line| {
-            const space = std.mem.findScalar(u8, line, ' ') orelse return error.BadModuleParams;
-            if (std.mem.eql(
-                u8,
-                line[0..space],
-                stem[0 .. stem.len - ".ko".len],
-            )) try out.writer.print(" {s}", .{line[space + 1 ..]});
-        }
-        try out.writer.writeByte('\n');
-    }
-    var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
-    next: while (lines_it.next()) |line| {
-        const name = line[0 .. std.mem.findScalar(u8, line, ' ') orelse line.len];
-        for (order) |p| {
-            const stem = std.fs.path.basename(withoutGz(p));
-            if (std.mem.eql(u8, name, stem[0 .. stem.len - ".ko".len])) continue :next;
-        }
-        return error.ParamsForMissingModule;
-    }
-    return out.written();
-}
-
-/// Alpine's arm64 vmlinuz is an EFI zboot image: "MZ", "zimg", then the
-/// gzipped Image's offset and size as little-endian u32. Anything else is
-/// returned as it is.
-/// A gzip stream, inflated.
-fn gunzip(gpa: Allocator, data: []const u8) ![]const u8 {
-    var in: Io.Reader = .fixed(data);
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
-    var out: Io.Writer.Allocating = .init(gpa);
-    _ = try gz.reader.streamRemaining(&out.writer);
-    return out.written();
-}
-
-/// kernel/fs/ext4/ext4.ko.gz -> kernel/fs/ext4/ext4.ko
-fn withoutGz(path: []const u8) []const u8 {
-    return if (std.mem.endsWith(u8, path, ".gz")) path[0 .. path.len - 3] else path;
-}
-
-fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
-    if (image.len < 16 or !std.mem.eql(u8, image[4..8], "zimg")) return image;
-    const off = std.mem.readInt(u32, image[8..12], .little);
-    const size = std.mem.readInt(u32, image[12..16], .little);
-    if (@as(u64, off) + size > image.len) return error.BadZboot;
-    var in: Io.Reader = .fixed(image[off .. off + size]);
-    var window: [std.compress.flate.max_window_len]u8 = undefined;
-    var gz: std.compress.flate.Decompress = .init(&in, .gzip, &window);
-    var out: Io.Writer.Allocating = .init(gpa);
-    _ = try gz.reader.streamRemaining(&out.writer);
-    return out.written();
-}
-
-const Node = struct {
-    name: []const u8,
-    mode: u32,
-    ino: u32,
-    rdev_major: u32 = 0,
-    rdev_minor: u32 = 0,
-};
-
-/// One newc cpio entry: header, name and data, each padded to 4 bytes.
-fn cpioEntry(w: *Io.Writer, n: Node, data: []const u8) !void {
-    const fields = [_]u32{
-        n.ino,
-        n.mode,
-        0,
-        0,
-        1,
-        0,
-        @intCast(data.len),
-        0,
-        0,
-        n.rdev_major,
-        n.rdev_minor,
-        @intCast(n.name.len + 1),
-        0,
-    };
-    try w.writeAll("070701");
-    for (fields) |f| try w.print("{x:0>8}", .{f});
-    try w.writeAll(n.name);
-    try w.writeByte(0);
-    try w.splatByteAll(0, pad4(110 + n.name.len + 1));
-    try w.writeAll(data);
-    try w.splatByteAll(0, pad4(data.len));
-}
-
-fn pad4(n: usize) usize {
-    return (4 - n % 4) % 4;
-}
-
 fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
     const yd = es.getEpochDay().calculateYearDay();
@@ -1945,7 +1393,7 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
     });
 }
 
-fn appendUnique(gpa: Allocator, list: *std.ArrayList([]const u8), s: []const u8) !void {
+pub fn appendUnique(gpa: Allocator, list: *std.ArrayList([]const u8), s: []const u8) !void {
     for (list.items) |x| if (std.mem.eql(u8, x, s)) return;
     try list.append(gpa, s);
 }
@@ -1954,7 +1402,7 @@ fn lessString(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-// --- tests -------------------------------------------------------------------
+// --- tests ------------------------------------------------------------------
 
 const testing = std.testing;
 
@@ -1969,62 +1417,6 @@ test parseCmdline {
     try testing.expectEqualStrings("/var/lib/werewolf", pathOf(c.victim));
     try testing.expectEqualStrings("/boot", parentDir(parentDir(pathOf(c.grubenv))));
     try testing.expectEqualStrings("", parentDir(parentDir("/grub/grubenv")));
-}
-
-test "systemd-boot entries" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const c = parseCmdline(
-        "console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000\n",
-    );
-    try testing.expectEqualStrings("57E1-F000", c.esp);
-    try testing.expectEqualStrings("", c.grubenv);
-    try testing.expectEqualStrings(
-        "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 " ++
-            "werewolf.slot=b",
-        try withSlot(
-            a,
-            "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a " ++
-                "werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n",
-            "",
-            "b",
-        ),
-    );
-    // The image's arguments replace any of the same name, and are added
-    // where missing.
-    try testing.expectEqualStrings(
-        "console=hvc0 werewolf.victim=ab:/werewolf debugfs=off proc_mem.force_override=never " ++
-            "werewolf.slot=b",
-        try withSlot(
-            a,
-            "console=hvc0 proc_mem.force_override=always werewolf.slot=a " ++
-                "werewolf.victim=ab:/werewolf\n",
-            "debugfs=off proc_mem.force_override=never\n",
-            "b",
-        ),
-    );
-    try testing.expectEqualStrings(
-        \\title werewolf b
-        \\sort-key werewolf
-        \\version 20261006T120000Z
-        \\linux /werewolf/b/vmlinuz
-        \\initrd /werewolf/b/initramfs.zst
-        \\options x werewolf.slot=b
-        \\
-    , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b"));
-    try testing.expectEqualStrings("20261006T120000Z", try compactTime(a, 1791288000));
-    for ([_][]const u8{
-        "werewolf-b.conf",
-        "werewolf-b+1.conf",
-        "werewolf-b+0-1.conf",
-    }) |n| try testing.expect(isEntryOf(n, "b"));
-    for ([_][]const u8{
-        "werewolf-a.conf",
-        "werewolf-b.tmp",
-        "werewolf-bb.conf",
-        "other-b.conf",
-    }) |n| try testing.expect(!isEntryOf(n, "b"));
 }
 
 test "installed database, diffs and origins" {
@@ -2062,123 +1454,14 @@ test "installed database, diffs and origins" {
     try testing.expect(!std.mem.eql(u8, try buildHash(a, new, "k"), try buildHash(a, old, "k")));
 }
 
-test cacheName {
-    for ([_][]const u8{
-        "installed",
-        "APKINDEX.f8759e6a.tar.gz",
-        "zstd-1.5.7-r10.cc2743ad.apk",
-    }) |n| try testing.expect(cacheName(n));
-    for ([_][]const u8{
-        "APKINDEX.f8759e6a.tar",
-        ".apk.27182ee91faf",
-        "installed.new",
-        "lib",
-        "zstd-1.5.7-r10.apk.tmp",
-    }) |n| try testing.expect(!cacheName(n));
-}
-
-test isCachedOf {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const pkgs = try parseInstalled(
-        arena.allocator(),
-        "P:zstd\nV:1.5.7-r10\n\nP:glibc-2.44\nV:2.44-r8\n",
-    );
-    try testing.expect(isCachedOf("zstd-1.5.7-r10.cc2743ad.apk", pkgs));
-    try testing.expect(isCachedOf("glibc-2.44-2.44-r8.b91ee306.apk", pkgs));
-    try testing.expect(!isCachedOf("glibc-2.44-2.44-r7.53c9e93b.apk", pkgs));
-    try testing.expect(!isCachedOf("zstd-1.5.7-r1.cc2743ad.apk", pkgs));
-    try testing.expect(!isCachedOf("libzstd1-1.5.7-r10.933e1e74.apk", pkgs));
-    try testing.expect(!isCachedOf("zstd-1.5.7-r10.apk", pkgs));
-    try testing.expect(!isCachedOf(".apk", pkgs));
-}
-
 test {
     _ = sandbox;
     _ = cve;
     _ = releases;
-}
-
-test withoutGz {
-    try testing.expectEqualStrings(
-        "kernel/fs/ext4/ext4.ko",
-        withoutGz("kernel/fs/ext4/ext4.ko.gz"),
-    );
-    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko", withoutGz("kernel/fs/ext4/ext4.ko"));
-}
-
-test moduleOrder {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const dep =
-        \\kernel/fs/ext4/ext4.ko.gz: kernel/lib/crc/crc16.ko.gz kernel/fs/mbcache.ko.gz kernel/fs/jbd2/jbd2.ko.gz
-        \\kernel/fs/xfs/xfs.ko.gz:
-        \\kernel/fs/jbd2/jbd2.ko.gz:
-    ;
-    const order = try moduleOrder(arena.allocator(), dep, &.{ "ext4", "xfs", "jbd2" });
-    try testing.expectEqual(5, order.len);
-    try testing.expectEqualStrings("kernel/fs/jbd2/jbd2.ko.gz", order[0]);
-    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko.gz", order[3]);
-    try testing.expectEqualStrings("kernel/fs/xfs/xfs.ko.gz", order[4]);
-    try testing.expectError(error.ModuleNotFound, moduleOrder(arena.allocator(), dep, &.{"btrfs"}));
-}
-
-test moduleList {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const order = [_][]const u8{
-        "kernel/arch/x86/kvm/kvm.ko.gz",
-        "kernel/arch/x86/kvm/kvm-intel.ko.gz",
-    };
-    try testing.expectEqualStrings(
-        "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko\n",
-        try moduleList(a, &order, ""),
-    );
-    try testing.expectEqualStrings(
-        "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\n",
-        try moduleList(a, &order, "kvm-intel nested=0\nkvm-intel ept=1\n"),
-    );
-    try testing.expectError(
-        error.ParamsForMissingModule,
-        moduleList(a, &order, "kvm-amd nested=0\n"),
-    );
-    try testing.expectError(error.BadModuleParams, moduleList(a, &order, "kvm-intel\n"));
-}
-
-test cpioEntry {
-    var out: Io.Writer.Allocating = .init(testing.allocator);
-    defer out.deinit();
-    try cpioEntry(&out.writer, .{ .name = "init", .mode = 0o100755, .ino = 1 }, "ab");
-    const b = out.written();
-    try testing.expectEqualStrings("070701", b[0..6]);
-    try testing.expectEqualStrings("000081ed", b[14..22]);
-    try testing.expectEqualStrings("init\x00", b[110..115]);
-    try testing.expectEqual(0, (110 + 5 + pad4(115)) % 4);
-    try testing.expectEqual(b.len, 110 + 5 + pad4(115) + 2 + pad4(2));
-
-    out.clearRetainingCapacity();
-    try cpioEntry(
-        &out.writer,
-        .{ .name = "dev/console", .mode = 0o020620, .ino = 2, .rdev_major = 5, .rdev_minor = 1 },
-        "",
-    );
-    const c = out.written();
-    try testing.expectEqualStrings("00002190", c[14..22]);
-    try testing.expectEqualStrings("00000005", c[78..86]);
-    try testing.expectEqualStrings("00000001", c[86..94]);
-}
-
-test unwrapZboot {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const plain = "not a zboot image, at all";
-    try testing.expectEqualStrings(plain, try unwrapZboot(arena.allocator(), plain));
-    var bad: [16]u8 = @splat(0);
-    @memcpy(bad[4..8], "zimg");
-    std.mem.writeInt(u32, bad[8..12], 8, .little);
-    std.mem.writeInt(u32, bad[12..16], 100, .little);
-    try testing.expectError(error.BadZboot, unwrapZboot(arena.allocator(), &bad));
+    _ = tiers;
+    _ = stage;
+    _ = slot;
+    _ = @import("apk.zig");
 }
 
 test rfc3339 {

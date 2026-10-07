@@ -20,21 +20,49 @@ pub fn sys(rc: usize, comptime what: []const u8) !usize {
     return error.SystemCall;
 }
 
-/// Die with the parent, and not outlive it if it is already gone.
+/// Die with the parent, and not outlive it if it is already gone. dropTo
+/// and keepOnly keep the tie, which the kernel would otherwise forget as
+/// they change who the process is.
 pub fn tieTo(parent: linux.pid_t) void {
     _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0);
     if (linux.getppid() != parent) linux.exit_group(1);
 }
 
-/// Close every descriptor but those in keep, with 0, 1 and 2 on /dev/null:
-/// nothing of root's open files, its console included, goes with a child.
+/// The parent-death signal, and the parent it is for. The kernel clears the
+/// signal when a process's uid, gid or capabilities change, so a change of
+/// them notes it before and sets it again after, and ends the process if
+/// the parent died in between.
+const Tie = struct {
+    sig: u32,
+    parent: linux.pid_t,
+
+    fn note() Tie {
+        var sig: i32 = 0;
+        _ = linux.prctl(@backingInt(linux.PR.GET_PDEATHSIG), @intFromPtr(&sig), 0, 0, 0);
+        return .{ .sig = @bitCast(sig), .parent = linux.getppid() };
+    }
+
+    fn keep(t: Tie) void {
+        if (t.sig == 0) return;
+        _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), t.sig, 0, 0, 0);
+        if (linux.getppid() != t.parent) linux.exit_group(1);
+    }
+};
+
+/// Close every descriptor but those in keep, at most 8, with 0, 1 and 2 on
+/// /dev/null: nothing of root's open files, its console included, goes
+/// with a child.
 pub fn closeAllBut(keep: []const i32) !void {
+    var sorted: [8]i32 = undefined;
+    if (keep.len > sorted.len) return error.TooManyKept;
     const null_fd: i32 = @intCast(try sys(
         linux.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0),
         "open /dev/null",
     ));
-    for (0..3) |fd| _ = try sys(linux.dup3(null_fd, @intCast(fd), 0), "dup3");
-    var sorted: [8]i32 = undefined;
+    // Where 0, 1 or 2 was closed, /dev/null opened as it already.
+    for ([_]i32{ 0, 1, 2 }) |fd| if (fd != null_fd) {
+        _ = try sys(linux.dup3(null_fd, fd, 0), "dup3");
+    };
     const k = sorted[0..keep.len];
     @memcpy(k, keep);
     std.mem.sort(i32, k, {}, std.sort.asc(i32));
@@ -59,32 +87,48 @@ pub fn limit(resource: linux.rlimit_resource, n: u64) !void {
 }
 
 /// Become `id`, user and group, rooted at `root` if one is given, with no
-/// capabilities left to anything that follows, and check root cannot be had
+/// capabilities left to anything that follows: the bounding set emptied,
+/// and every set cleared after the change of uid, which alone would keep
+/// them under a keepOnly's NO_SETUID_FIXUP. Then check root cannot be had
 /// back.
 pub fn dropTo(id: u32, root: ?[*:0]const u8) !void {
-    var cap: usize = 0;
-    while (cap < 64) : (cap += 1) _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+    const tie: Tie = .note();
+    try bound(0);
     if (root) |r| _ = try sys(linux.chroot(r), "chroot");
     _ = try sys(linux.chdir("/"), "chdir /");
     _ = try sys(linux.setgroups(0, &[_]linux.gid_t{}), "setgroups");
     _ = try sys(linux.setresgid(id, id, id), "setresgid");
     _ = try sys(linux.setresuid(id, id, id), "setresuid");
+    var hdr: CapHeader = .{};
+    const none = [2]CapSets{ .{}, .{} };
+    _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&none)), "capset");
     if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
+    tie.keep();
 }
 
 /// Keep only the capabilities in `keep`, a mask of CAP_ numbers below 32,
-/// never to gain more: the bounding set emptied of the rest, and NOROOT,
-/// NO_SETUID_FIXUP, KEEP_CAPS and NO_CAP_AMBIENT_RAISE set and locked, so
-/// root's uid brings no others.
+/// never to gain more: the bounding set emptied of the rest; NOROOT,
+/// NO_SETUID_FIXUP and NO_CAP_AMBIENT_RAISE set and locked, and KEEP_CAPS
+/// locked off (moot under NO_SETUID_FIXUP), so root's uid brings no others.
 pub fn keepOnly(keep: u32) !void {
-    for (0..64) |cap| {
-        if (cap < 32 and keep & (@as(u32, 1) << @intCast(cap)) != 0) continue;
-        _ = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
-    }
+    const tie: Tie = .note();
+    try bound(keep);
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_SECUREBITS), 0xef, 0, 0, 0), "securebits");
     var hdr: CapHeader = .{};
     const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
+    tie.keep();
+}
+
+/// The bounding set emptied of every capability not in keep, a mask of
+/// those below 32. One the kernel does not know (EINVAL) is one it cannot
+/// grant; any other failure is an error, not a set left whole.
+fn bound(keep: u32) !void {
+    for (0..64) |cap| {
+        if (cap < 32 and keep & (@as(u32, 1) << @intCast(cap)) != 0) continue;
+        const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+        if (linux.errno(rc) != .INVAL) _ = try sys(rc, "capbset drop");
+    }
 }
 
 /// The kernel's struct __user_cap_header_struct: pid is an int, not the
@@ -122,7 +166,9 @@ pub const Rule = struct { fd: i32, access: u64 };
 
 /// Landlock: of the filesystem, only what `rules` allow; connect over TCP
 /// only to `ports`, and bind none; reach no abstract socket and signal no
-/// process outside.
+/// process outside. What the kernel's Landlock does not know yet goes
+/// unrestricted: ports before ABI 4 (6.7), sockets and signals before ABI 6
+/// (6.12). werewolf's own kernel knows all of it.
 pub fn landlock(rules: []const Rule, ports: []const u16) !void {
     const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1);
     _ = try sys(abi, "landlock version");
@@ -202,6 +248,10 @@ pub const Filter = struct {
         f.n += 1;
     }
 
+    /// Allow the call when argument arg equals value, comparing its low 32
+    /// bits alone: only for an argument the kernel reads as 32 bits (a
+    /// descriptor, an ioctl's request, a socket's family), or a value with
+    /// other high bits would pass.
     pub fn allowArg(f: *Filter, comptime name: []const u8, comptime arg: u3, value: u32) void {
         const n = nr(name) orelse return;
         f.prog[f.n] = .{ .code = BPF_JEQ_K, .jf = 3, .k = n };
@@ -288,7 +338,8 @@ pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i
         var status: i32 = 0;
         while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
     };
-    const buf = try gpa.alloc(u8, max);
+    // A byte past max, to tell a child that said max from one that said more.
+    const buf = try gpa.alloc(u8, max + 1);
     const deadline = nowMs() + seconds * std.time.ms_per_s;
     var got: usize = 0;
     while (true) {
@@ -297,8 +348,7 @@ pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i
         var pfd = [1]linux.pollfd{.{ .fd = in, .events = linux.POLL.IN, .revents = 0 }};
         const ready = linux.poll(&pfd, 1, @intCast(@min(left, std.time.ms_per_s)));
         if (linux.errno(ready) == .INTR or ready == 0) continue;
-        if (got == max) return error.ChildSaidTooMuch;
-        const n = linux.read(in, buf[got..].ptr, max - got);
+        const n = linux.read(in, buf[got..].ptr, buf.len - got);
         switch (linux.errno(n)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -306,6 +356,7 @@ pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i
         }
         if (n == 0) break;
         got += n;
+        if (got > max) return error.ChildSaidTooMuch;
     }
     // Its end of the pipe is closed: it has until the deadline to exit.
     while (nowMs() < deadline) {

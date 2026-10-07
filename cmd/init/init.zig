@@ -26,13 +26,17 @@
 //!                             slots, config.tar and data/)
 //!                           werewolf.grubenv=UUID:PATH (GRUB's environment block,
 //!                             which the slot-keep service writes)
-//!     config                a tar written raw to any block device, or config.tar
-//!                           in the victim's directory, extracted to /run/config
-//!                           for the services to read (hostname and
-//!                           authorized_keys are applied here); or a NoCloud
-//!                           `cidata` volume, from which only the first user and
-//!                           its ssh keys are taken, which is what Lima provides;
-//!                           or, failing both, the cloud's metadata server.
+//!     config                one tar: config.tar in the victim's directory, or
+//!                           else the first block device written with one;
+//!                           never two, merged. It is extracted to /run/config,
+//!                           by a confined child, for the services to read
+//!                           (hostname and authorized_keys are applied here).
+//!                           Beside it, a NoCloud volume labelled `cidata`, from
+//!                           which the first user, its ssh keys and Lima's data
+//!                           files beneath /run/config are taken, never in
+//!                           place of the tar's, and without running
+//!                           provisioning scripts. Failing both, the cloud's
+//!                           metadata server.
 //!
 //! It runs no shell. What it cannot do itself it asks of werewolf's programs
 //! (mount, modules, net, dhcp, cloud, fence) and of the filesystem tools the
@@ -43,6 +47,9 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const seal_lib = @import("seal");
+const sandbox = @import("sandbox");
+const network_file = @import("network");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -52,6 +59,12 @@ const mount_bin = "/usr/lib/werewolf/mount";
 const path_env = "/usr/sbin:/usr/bin:/sbin:/bin";
 const label = "werewolf-data";
 const max_config_file = 1 << 20;
+/// What a config tar may hold in all, so one from a disk cannot fill /run.
+const max_config_total = 16 << 20;
+const max_config_entries = 256;
+/// The least data.key LUKS is made with: the key derivation is quick, as a
+/// random key needs no slow one, so the key itself must be strong.
+const min_data_key = 32;
 
 pub fn main(init: std.process.Init) !void {
     var m: Machine = .{
@@ -60,6 +73,11 @@ pub fn main(init: std.process.Init) !void {
         .env = try init.environ_map.clone(init.arena.allocator()),
     };
     try m.env.put("PATH", path_env);
+    // Where the boot's time goes: stage0's phases, then init's, each marked
+    // as it ends. Taken out of the environment before anything is started;
+    // the names point into a copy, since removing the variable frees it.
+    var phases = Phases.parse(try m.gpa.dupe(u8, m.env.get("WEREWOLF_BOOT") orelse ""));
+    _ = m.env.swapRemove("WEREWOLF_BOOT");
 
     // Nothing here may wait on a person. A tool that prompts (mke2fs does,
     // over an old signature) reads end of file instead of stalling the boot.
@@ -69,11 +87,24 @@ pub fn main(init: std.process.Init) !void {
     m.filesystems();
     m.seed();
     m.cmd = parseCmdline(m.read("/proc/cmdline"));
-    m.kernel();
-    m.network();
+    phases.add("mounts", bootMs());
+    m.kernel() catch {
+        say("the kernel's protections are not all set; not handing over", .{});
+        std.process.exit(1);
+    };
+    phases.add("sysctls", bootMs());
+    // The config on the machine's disks first, since it may hold the
+    // network; the cloud's, which comes over the network, after it.
     m.victim();
+    phases.add("victim", bootMs());
     m.config();
+    phases.add("config", bootMs());
+    m.network();
+    phases.add("network", bootMs());
+    m.metadata();
+    phases.add("metadata", bootMs());
     m.data();
+    phases.add("data", bootMs());
 
     if (m.cmd.grubenv.len > 0) m.write(
         "/run/werewolf/grubenv",
@@ -95,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
     )) != .SUCCESS) say("core dumps not limited", .{});
     // The seal fails closed, as fence does: PID 1 ends, the kernel panics,
     // and the machine comes back on the slot that last worked.
-    seal() catch |err| {
+    seal(&m) catch |err| {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -110,16 +141,38 @@ pub fn main(init: std.process.Init) !void {
         .environ_map = &m.env,
         .stdin = .ignore,
     })) |_| {} else |broker_err| say("no mount broker: {s}", .{@errorName(broker_err)});
+    // The DHCP lease's renewal (cmd/dhcp-client), started here too, so it
+    // keeps CAP_NET_ADMIN to apply a lease, and its packet socket, which
+    // fence then takes from every process after it, root's included: no
+    // form need keep either for DHCP. runit does not restart it; should it
+    // end, the address it applied stays.
+    if (m.dhcp) if (std.process.spawn(m.io, .{
+        .argv = &.{ "/usr/lib/werewolf/dhcp-client", "keep" },
+        .environ_map = &m.env,
+        .stdin = .ignore,
+    })) |_| {} else |dhcp_err| say("no DHCP renewal: {s}", .{@errorName(dhcp_err)});
+    // The seal, and starting the broker and the renewal.
+    phases.add("seal", bootMs());
     // How long the boot took, for the console and the demo's page: the
-    // kernel's part, which stage0 measured, and userland's, stage0 and init.
-    const kernel_ms = std.fmt.parseInt(u64, m.env.get("WEREWOLF_KERNEL_MS") orelse "0", 10) catch 0;
-    _ = m.env.swapRemove("WEREWOLF_KERNEL_MS");
+    // kernel's part, which stage0 measured, and userland's, stage0 and init,
+    // phase by phase.
+    const kernel_ms = phases.endOf("kernel");
     const up_ms = bootMs();
+    const took = phases.durations(m.gpa);
     m.write(
         "/run/werewolf/boot",
-        m.fmt("{{\"kernel_ms\":{d},\"userland_ms\":{d}}}\n", .{ kernel_ms, up_ms -| kernel_ms }),
+        m.fmt("{s}\n", .{std.json.Stringify.valueAlloc(m.gpa, .{
+            .kernel_ms = kernel_ms,
+            .userland_ms = up_ms -| kernel_ms,
+            .phases = took,
+        }, .{}) catch ""}),
         0o644,
     );
+    var line: Io.Writer.Allocating = .init(m.gpa);
+    for (took, 0..) |p, i| line.writer.print("{s}{s} {d}.{d:0>3}s", .{
+        if (i == 0) "" else ", ", p.name, p.ms / 1000, p.ms % 1000,
+    }) catch {};
+    say("phases: {s}", .{line.written()});
     say("up in {s}s (the kernel {s}s, userland {s}s), handing over to runit", .{
         m.fmt("{d}.{d:0>3}", .{ up_ms / 1000, up_ms % 1000 }),
         m.fmt("{d}.{d:0>3}", .{ kernel_ms / 1000, kernel_ms % 1000 }),
@@ -139,8 +192,12 @@ const Machine = struct {
     env: std.process.Environ.Map,
     cmd: Cmdline = .{},
     victim_dir: []const u8 = "",
-    conf_dev: []const u8 = "",
     nocloud_user: []const u8 = "",
+    /// Whether a config tar or a NoCloud seed was found on a disk, so the
+    /// cloud's metadata server is not asked.
+    configured: bool = false,
+    /// Whether the address is DHCP's, for its renewal to be started.
+    dhcp: bool = false,
 
     // --- filesystems ---------------------------------------------------------
 
@@ -159,7 +216,15 @@ const Machine = struct {
         m.mount(&.{ "-o", "remount,nosuid,nodev,noexec", "/sys" });
         m.mount(&.{ "-o", "remount,nosuid,noexec", "/dev" });
         for ([_][:0]const u8{ "/dev/pts", "/dev/shm" }) |d| mkdir(d, 0o755);
-        m.mount(&.{ "-t", "devpts", "-o", "nosuid,noexec", "devpts", "/dev/pts" });
+        // Pseudo-terminals only where the form allows them (pty): ssh
+        // logins. Without devpts mounted, /dev/ptmx opens nothing (ENODEV),
+        // so the TTY layer's pseudo-terminal code (CVE-2014-0196) is out of
+        // reach of every process, root included, and nothing after boot
+        // can mount it.
+        if (exists("/etc/werewolf/allow/pty"))
+            m.mount(&.{ "-t", "devpts", "-o", "nosuid,noexec", "devpts", "/dev/pts" })
+        else
+            say("no pseudo-terminals: the form does not allow pty", .{});
         m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=1777", "tmpfs", "/dev/shm" });
         m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=0755", "tmpfs", "/run" });
         m.mount(&.{ "-t", "tmpfs", "-o", "nosuid,nodev,noexec,mode=1777", "tmpfs", "/tmp" });
@@ -172,6 +237,33 @@ const Machine = struct {
             "/var/tmp",
         });
         mkdir("/run/config", 0o700);
+        m.cgroups();
+    }
+
+    /// A cgroup2 hierarchy for the leashed services (cmd/leash), under /run
+    /// rather than /sys so fence's domain -- which keeps /sys read-only --
+    /// still lets leash and the finish reaper manage it through the /run it
+    /// may write. memory and pids are delegated to the svc subtree, so a
+    /// service gets a memory ceiling and its whole process tree, detached
+    /// children included, is killed when it stops (its finish writes
+    /// cgroup.kill). Without cgroup2 or its controllers, services still run,
+    /// uncapped and without that reaper.
+    fn cgroups(m: *Machine) void {
+        mkdir("/run/cgroup", 0o755);
+        if (!m.run(&.{
+            mount_bin,
+            "-t",
+            "cgroup2",
+            "-o",
+            "nosuid,nodev,noexec",
+            "cgroup2",
+            "/run/cgroup",
+        })) return say("no cgroup2; services run uncapped and unreaped", .{});
+        if (!writeFile("/run/cgroup/cgroup.subtree_control", "+memory +pids"))
+            return say("cgroup2 without memory/pids; services run uncapped", .{});
+        mkdir("/run/cgroup/svc", 0o755);
+        _ = writeFile("/run/cgroup/svc/cgroup.subtree_control", "+memory +pids");
+        say("cgroups: a memory cap and a reaper per service", .{});
     }
 
     /// What init and the services change of the read-only root lives in
@@ -209,7 +301,7 @@ const Machine = struct {
     /// with. stage0 has raised it already. Then the modules, and the loader
     /// closes for the life of the machine (cmd/modload/modload.zig); stage0 has
     /// done both, and the loader says so. Then the settings.
-    fn kernel(m: *Machine) void {
+    fn kernel(m: *Machine) !void {
         if (!m.isMounted("/sys/kernel/security")) m.mount(&.{
             "-t",
             "securityfs",
@@ -228,9 +320,19 @@ const Machine = struct {
         if (!m.run(&.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
 
         var all = true;
-        for (sysctls) |kv| {
-            if (!writeFile(m.fmtZ("/proc/sys/{s}", .{kv[0]}), kv[1])) all = false;
-        }
+        // Each is a protection, so one the kernel refuses ends the boot, and
+        // the machine returns on the slot that last worked, as the seal and
+        // fence do. werewolf's kernel has every one. A container's /proc/sys
+        // is read-only (EROFS), and these are the host's to set: that case,
+        // and that one alone, is said and passed.
+        for (sysctls) |kv| switch (writeErrno(m.fmtZ("/proc/sys/{s}", .{kv[0]}), kv[1])) {
+            .SUCCESS => {},
+            .ROFS => all = false,
+            else => |e| {
+                say("sysctl {s} not set: {t}", .{ kv[0], e });
+                return error.Sysctl;
+            },
+        };
         // Redirects, per interface: a host takes or sends them on one if all
         // or the interface says so, and all and default do not reach the
         // interfaces stage0's drivers made before now. IPv6 has only the
@@ -261,20 +363,22 @@ const Machine = struct {
 
     // --- the network ---------------------------------------------------------
 
-    /// One address: the command line's, or else, in forms built on dhcp, the
-    /// network's DHCP server's. A static address is for machines whose
-    /// provider gives none by DHCP, or which bite took over and so keep the
-    /// victim's; werewolf's net (cmd/iface-up/iface-up.zig) applies it. DHCP is werewolf's
+    /// One address: the command line's, or else the config tar's network
+    /// file's, or else, in forms built on dhcp, the network's DHCP server's.
+    /// A static address is for machines whose provider gives none by DHCP,
+    /// or which bite took over and so keep the victim's; werewolf's net
+    /// (cmd/iface-up/iface-up.zig) applies it. DHCP is werewolf's
     /// own client (cmd/dhcp-client/dhcp-client.zig), which applies the lease, logs it, and
-    /// keeps the resolvers in its own directory; the dhcp service renews it.
+    /// keeps the resolvers in its own directory; its renewal starts before fence.
     fn network(m: *Machine) void {
         _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
         const nic = m.pickNic();
         m.routerAdvertisements(nic);
-        const c = m.cmd;
+        var from: []const u8 = "";
+        const c = m.staticNetwork(&from);
         if (nic.len == 0) {
-            if (c.mac.len > 0)
-                say("no network: no NIC with address {s}", .{c.mac})
+            if (m.cmd.mac.len > 0)
+                say("no network: no NIC with address {s}", .{m.cmd.mac})
             else
                 say("no network: no NIC", .{});
         } else if (c.ip.len > 0) {
@@ -293,18 +397,51 @@ const Machine = struct {
                 m.fmt("nameserver {s}\n", .{c.dns}),
                 0o644,
             );
-            say("{s} {s} via {s} dns {s}", .{ nic, c.ip, orNone(c.gw), orNone(c.dns) });
+            say(
+                "{s} {s} via {s} dns {s}, from {s}",
+                .{ nic, c.ip, orNone(c.gw), orNone(c.dns), from },
+            );
         } else if (executable("/usr/lib/werewolf/dhcp-client")) {
+            m.dhcp = true;
             _ = linux.unlink("/run/resolv.conf");
             _ = linux.symlink("werewolf/dhcp/resolv.conf", "/run/resolv.conf");
             if (!m.run(&.{
                 "/usr/lib/werewolf/dhcp-client",
                 "up",
                 nic,
-            })) say("no network: no DHCP lease for {s}; the dhcp service keeps asking", .{nic});
+            })) say("no network: no DHCP lease for {s}; its renewal keeps asking", .{nic});
         } else {
-            say("no network: no werewolf.ip, and this form has no DHCP client", .{});
+            say(
+                "no network: no werewolf.ip, no network file in the config tar, and this form " ++
+                    "has no DHCP client",
+                .{},
+            );
         }
+    }
+
+    /// The static address, and where it came from: the command line's
+    /// werewolf.ip, or else the config tar's network file, checked as
+    /// werewolf pack checks it (lib/network.zig). The command line wins,
+    /// since whoever set it holds the boot; a file refused is said and
+    /// left, as if absent.
+    fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
+        const has_file = exists("/run/config/network");
+        if (m.cmd.ip.len > 0) {
+            if (has_file) say(
+                "network: the command line's, not the config tar's network file",
+                .{},
+            );
+            from.* = "the command line";
+            return .{ .ip = m.cmd.ip, .gw = m.cmd.gw, .dns = m.cmd.dns };
+        }
+        if (!has_file) return .{};
+        var why: []const u8 = "";
+        const n = network_file.parse(m.read("/run/config/network"), &why) orelse {
+            say("network: the config tar's network file refused: {s}", .{why});
+            return .{};
+        };
+        from.* = "the config tar";
+        return n;
     }
 
     /// The NIC: the one werewolf.mac names, or else the first but lo.
@@ -355,56 +492,88 @@ const Machine = struct {
             v,
             ':',
         ) orelse return say("victim's filesystem {s} not found", .{v});
-        const uuid = v[0..colon];
-        mkdir("/victim", 0o755);
-        const dev = m.blkid(&.{ "-l", "-o", "device", "-t", m.fmt("UUID={s}", .{uuid}) });
-        const mounted = m.isMounted("/victim") or
-            (dev.len > 0 and m.run(&.{ mount_bin, "-o", "nosuid,nodev,noexec", dev, "/victim" }));
-        if (!mounted) return say("victim's filesystem {s} not found", .{uuid});
+        // stage0 mounts it before it hands over, or the machine never gets
+        // here (werewolf.victim comes only with werewolf.slot). Its device
+        // is the kernel's word, from the mount table, not a second search
+        // of every disk that could name a different one.
+        const dev = m.mountSource("/victim") orelse
+            return say("victim's filesystem {s} is not on /victim", .{v[0..colon]});
         m.victim_dir = m.fmt("/victim{s}", .{v[colon + 1 ..]});
         say("victim's filesystem {s} on /victim, werewolf in {s}", .{ dev, m.victim_dir });
     }
 
     // --- the config ----------------------------------------------------------
 
-    /// Probe every block device once. A ustar magic at byte 257 is our config
-    /// tar; an ISO 9660 volume with user-data is NoCloud. Where none is found
-    /// and the form has werewolf's cloud program, the config comes from the
-    /// cloud's metadata server, checked and rewritten by that program before
-    /// it is extracted here (docs/cloud.md).
+    /// One config tar: the victim's config.tar, or else the first block
+    /// device holding one ("ustar" at byte 257). Never a merge: any other is
+    /// said and ignored, so a disk someone attached cannot quietly replace
+    /// root's keys. Then a NoCloud seed, but only an ISO9660 volume labelled
+    /// cidata, found in the same pass by its volume descriptor alone, so no
+    /// other disk is ever mounted to look, and no blkid probes every
+    /// superblock of every disk (85 ms on GCP's network disks, where there
+    /// is never a seed); the first, and any other said and ignored, as a
+    /// second tar is. Before the network, as the tar may hold its address.
     fn config(m: *Machine) void {
-        var found = false;
+        var tar: ?[]const u8 = null;
         if (m.victim_dir.len > 0) {
-            const tar = m.fmt("{s}/config.tar", .{m.victim_dir});
-            if (exists(m.z(tar))) {
+            const t = m.fmt("{s}/config.tar", .{m.victim_dir});
+            if (exists(m.z(t))) {
                 say("config tar in {s}", .{m.victim_dir});
-                m.extract(tar);
-                found = true;
+                tar = t;
             }
         }
+        var seed_dev: ?[:0]const u8 = null;
         for (m.list("/sys/class/block")) |name| {
             const dev = m.fmtZ("/dev/{s}", .{name});
             if (!isBlockDevice(dev)) continue;
-            if (hasUstar(dev)) {
-                say("config tar on {s}", .{dev});
-                m.extract(dev);
-                m.conf_dev = dev;
-                found = true;
-            } else if (m.runQuiet(&.{ mount_bin, "-t", "iso9660", "-o", "ro", dev, "/mnt" })) {
+            if (isNoCloud(dev)) {
+                if (seed_dev) |s|
+                    say("NoCloud seed on {s} ignored: the seed is {s}", .{ dev, s })
+                else
+                    seed_dev = dev;
+                continue;
+            }
+            if (!hasUstar(dev)) continue;
+            if (tar) |t| {
+                say("config tar on {s} ignored: the config is {s}", .{ dev, t });
+                continue;
+            }
+            say("config tar on {s}", .{dev});
+            tar = dev;
+        }
+        if (tar) |t| m.extract(t);
+
+        var seeded = false;
+        if (seed_dev) |cidata| {
+            if (m.runQuiet(&.{ mount_bin, "-t", "iso9660", "-o", "ro", cidata, "/mnt" })) {
                 if (exists("/mnt/user-data")) {
-                    say("NoCloud user-data on {s}", .{dev});
-                    found = true;
+                    say("NoCloud user-data on {s}", .{cidata});
+                    seeded = true;
                     m.nocloud();
                 }
                 _ = linux.umount2("/mnt", 0);
             }
         }
-        if (!found and executable("/usr/lib/werewolf/cloud-metadata") and
+        m.configured = tar != null or seeded;
+    }
+
+    /// Where no disk held a config and the form has werewolf's cloud
+    /// program, the config from the cloud's metadata server, checked and
+    /// rewritten by that program first (docs/cloud.md); a network file in
+    /// it comes too late, the network being up to fetch it. Then the
+    /// hostname and root's keys, from whichever config there is.
+    fn metadata(m: *Machine) void {
+        if (!m.configured and executable("/usr/lib/werewolf/cloud-metadata") and
             m.run(&.{"/usr/lib/werewolf/cloud-metadata"}) and
             exists("/run/werewolf/cloud/config.tar"))
         {
             say("config tar from the cloud's metadata server", .{});
             m.extract("/run/werewolf/cloud/config.tar");
+            if (exists("/run/config/network"))
+                say(
+                    "network: the cloud's network file is not read: the network was up to fetch it",
+                    .{},
+                );
         }
 
         const name = if (exists("/run/config/hostname"))
@@ -436,6 +605,7 @@ const Machine = struct {
     /// "*" is no password, without the lock "!" that sshd reads as refusing
     /// even a key. Home is on /data.
     fn nocloud(m: *Machine) void {
+        m.limaConfig();
         const nc = parseNoCloud(m.gpa, m.read("/mnt/user-data")) catch return;
         if (nc.user.len > 0) {
             const passwd = m.read("/run/werewolf/passwd");
@@ -467,6 +637,36 @@ const Machine = struct {
         m.write("/run/lima-boot-done", if (id.len > 0) m.fmt("{s}\n", .{id}) else "", 0o644);
     }
 
+    /// Import only Lima's data provisioning into root-private /run/config.
+    /// Treat lima.env as data, never source it or run any cidata script.
+    fn limaConfig(m: *Machine) void {
+        var cidata = Dir.cwd().openDir(m.io, "/mnt", .{ .follow_symlinks = false }) catch return;
+        defer cidata.close(m.io);
+        const env = readLimaFile(m.gpa, m.io, cidata, "lima.env") catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return say("Lima config refused: {s}", .{@errorName(err)}),
+        };
+        const files = limaDataFiles(m.gpa, env) catch |err|
+            return say("Lima config refused: {s}", .{@errorName(err)});
+        if (files.len == 0) return;
+        // Read and check every source before writing any destination.
+        const values = readLimaData(m.gpa, m.io, cidata, files) catch |err|
+            return say("Lima config refused: {s}", .{@errorName(err)});
+        var n: usize = 0;
+        for (files, values) |file, value| {
+            const dest = m.fmt("/run/config/{s}", .{file.name});
+            // The config tar's word stands: Lima's adds, never replaces.
+            if (exists(m.z(dest))) {
+                say("Lima config: {s} kept, as the config tar gave it", .{file.name});
+                continue;
+            }
+            if (std.fs.path.dirname(dest)) |parent| m.mkdirAll(m.z(parent));
+            m.write(dest, value, 0o600);
+            n += 1;
+        }
+        say("Lima config: imported {d} data files", .{n});
+    }
+
     /// user's ssh keys, where sshd looks (AuthorizedKeysFile).
     fn keys(m: *Machine, user: []const u8, text: []const u8) void {
         const path = m.fmtZ("/run/werewolf/keys/{s}", .{user});
@@ -475,17 +675,61 @@ const Machine = struct {
         _ = linux.fchownat(linux.AT.FDCWD, path, ids.uid, ids.gid, 0);
     }
 
-    /// A config tar into /run/config, strictly: regular files and
-    /// directories only, each name relative and plain, no file over 1 MiB.
-    /// Files are 0600 and directories 0700, root's: the services that read
-    /// the config run as root, and nothing else needs it.
+    /// A config tar into /run/config, by a child that can do nothing else:
+    /// root's uid with no capabilities, Landlock letting it write beneath
+    /// /run/config alone and read nothing else, and a filter of file calls
+    /// alone. It reads the whole tar once to check its size, then extracts
+    /// it, or nothing: at most 256 entries and 16 MiB. Regular files and
+    /// directories only, each name relative and plain, no file over 1 MiB;
+    /// files 0600 and directories 0700, root's.
     fn extract(m: *Machine, path: []const u8) void {
-        var f = Dir.cwd().openFile(
-            m.io,
-            path,
-            .{},
-        ) catch |err| return say("config: {s}: {s}", .{ path, @errorName(err) });
-        defer f.close(m.io);
+        const src = linux.open(m.z(path), .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        if (linux.errno(src) != .SUCCESS)
+            return say("config: {s}: {t}", .{ path, linux.errno(src) });
+        defer _ = linux.close(@intCast(src));
+        const dir = linux.open(
+            "/run/config",
+            .{ .PATH = true, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(dir) != .SUCCESS)
+            return say("config: /run/config: {t}", .{linux.errno(dir)});
+        defer _ = linux.close(@intCast(dir));
+        const pid = linux.fork();
+        if (linux.errno(pid) != .SUCCESS) return say("config: fork: {t}", .{linux.errno(pid)});
+        if (pid == 0) m.extractChild(@intCast(src), @intCast(dir), path);
+        var status: i32 = 0;
+        while (linux.errno(linux.wait4(@intCast(pid), &status, 0, null)) == .INTR) {}
+        const st: u32 = @bitCast(status);
+        if (!linux.W.IFEXITED(st) or linux.W.EXITSTATUS(st) != 0)
+            say("config: {s} not extracted", .{path});
+    }
+
+    /// The child of extract: confined, then the tar checked whole, then
+    /// written.
+    fn extractChild(m: *Machine, src: i32, dir: i32, path: []const u8) noreturn {
+        confineExtract(dir) catch {
+            say("config: cannot confine the extraction: {s} {s}", .{
+                sandbox.failed, sandbox.errnoName(sandbox.failed_errno),
+            });
+            linux.exit_group(1);
+        };
+        const f: Io.File = .{ .handle = src, .flags = .{ .nonblocking = false } };
+        const out: Dir = .{ .handle = dir };
+        sizeUp(m, f) catch |err| {
+            say("config: {s} refused: {s}", .{ path, @errorName(err) });
+            linux.exit_group(1);
+        };
+        if (linux.errno(linux.lseek(src, 0, linux.SEEK.SET)) != .SUCCESS) linux.exit_group(1);
+        writeOut(m, f, out) catch |err| {
+            say("config: {s}: {s}", .{ path, @errorName(err) });
+            linux.exit_group(1);
+        };
+        linux.exit_group(0);
+    }
+
+    /// The tar's entries and file bytes counted, before anything is written.
+    fn sizeUp(m: *Machine, f: Io.File) !void {
         var rbuf: [8192]u8 = undefined;
         var r = f.readerStreaming(m.io, &rbuf);
         var name_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -494,41 +738,58 @@ const Machine = struct {
             &r.interface,
             .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
         );
-        while (it.next() catch |err| return say(
-            "config: {s}: {s}",
-            .{ path, @errorName(err) },
-        )) |e| {
+        var entries: usize = 0;
+        var total: u64 = 0;
+        while (try it.next()) |e| {
+            entries += 1;
+            if (e.kind == .file) total += e.size;
+            if (entries > max_config_entries) return error.TooManyEntries;
+            if (total > max_config_total) return error.TooLarge;
+        }
+    }
+
+    /// Each entry written beneath out: what is not plain is said and left.
+    fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
+        var rbuf: [8192]u8 = undefined;
+        var r = f.readerStreaming(m.io, &rbuf);
+        var name_buf: [Dir.max_path_bytes]u8 = undefined;
+        var link_buf: [Dir.max_path_bytes]u8 = undefined;
+        var it: std.tar.Iterator = .init(
+            &r.interface,
+            .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
+        );
+        while (try it.next()) |e| {
             const name = safeName(e.name) orelse {
                 say("config: {s} refused: not a plain relative name", .{e.name});
                 continue;
             };
             if (name.len == 0) continue;
-            const dest = m.fmtZ("/run/config/{s}", .{name});
             switch (e.kind) {
-                .directory => m.mkdirAll(dest),
+                .directory => out.createDirPath(m.io, name) catch |err|
+                    say("config: {s}: {s}", .{ name, @errorName(err) }),
                 .sym_link => say("config: {s} refused: a link", .{name}),
                 .file => {
                     if (e.size > max_config_file) {
                         say("config: {s} refused: over 1 MiB", .{name});
                         continue;
                     }
-                    if (std.fs.path.dirname(dest)) |parent| m.mkdirAll(m.z(parent));
-                    var out = Dir.cwd().createFile(
+                    if (std.fs.path.dirname(name)) |parent| out.createDirPath(
                         m.io,
-                        dest,
+                        parent,
+                    ) catch {};
+                    var file = out.createFile(
+                        m.io,
+                        name,
                         .{ .permissions = .fromMode(0o600) },
                     ) catch |err| {
                         say("config: {s}: {s}", .{ name, @errorName(err) });
                         continue;
                     };
-                    defer out.close(m.io);
+                    defer file.close(m.io);
                     var wbuf: [8192]u8 = undefined;
-                    var w = out.writer(m.io, &wbuf);
-                    it.streamRemaining(
-                        e,
-                        &w.interface,
-                    ) catch |err| return say("config: {s}: {s}", .{ name, @errorName(err) });
-                    w.interface.flush() catch {};
+                    var w = file.writer(m.io, &wbuf);
+                    try it.streamRemaining(e, &w.interface);
+                    try w.interface.flush();
                 },
             }
         }
@@ -629,14 +890,25 @@ const Machine = struct {
             return null;
         };
         const key = "/run/config/data.key";
-        const crypt = if (m.read(key).len == 0) null else m.which("cryptsetup") orelse {
+        const key_len = m.read(key).len;
+        const crypt = if (key_len == 0) null else m.which("cryptsetup") orelse {
             why.* = "data.key is in the config, and there is no cryptsetup to use it";
             return null;
         };
         const want: []const u8 = if (crypt != null) "crypto_LUKS" else "ext4";
         var fresh = false;
 
-        var src = m.blkid(&.{ "-l", "-o", "device", "-t", "LABEL=" ++ label });
+        // Two disks with the label leave no telling which is /data: an
+        // attached one could take its place.
+        const labelled = m.blkidAll(&.{ "-o", "device", "-t", "LABEL=" ++ label });
+        if (std.mem.findScalar(u8, labelled, '\n') != null) {
+            why.* = m.fmt(
+                "more than one disk is labelled {s}: {s}",
+                .{ label, std.mem.replaceOwned(u8, m.gpa, labelled, "\n", " ") catch labelled },
+            );
+            return null;
+        }
+        var src = labelled;
         if (src.len > 0) {
             const have = m.blkid(&.{ "-p", "-o", "value", "-s", "TYPE", src });
             if (!std.mem.eql(u8, have, want)) {
@@ -656,8 +928,8 @@ const Machine = struct {
                 why.* = m.fmt("werewolf.data: no device {s}", .{src});
                 return null;
             }
-            if (std.mem.eql(u8, src, m.conf_dev)) {
-                why.* = m.fmt("werewolf.data: {s} holds the config", .{src});
+            if (hasUstar(m.z(src))) {
+                why.* = m.fmt("werewolf.data: {s} holds a config tar", .{src});
                 return null;
             }
             if (m.runQuiet(&.{ blkid_bin, "-c", "/dev/null", "-p", src })) {
@@ -686,6 +958,18 @@ const Machine = struct {
                 src,
                 "data",
             };
+            if (fresh and key_len < min_data_key) {
+                why.* = m.fmt(
+                    "data.key is {d} bytes; LUKS2 is made only with {d} or more random bytes",
+                    .{ key_len, min_data_key },
+                );
+                return null;
+            }
+            if (!fresh and key_len < min_data_key) say(
+                "data.key is only {d} bytes: a disk copied from this one could be opened by " ++
+                    "guessing it; make a new disk with {d} random bytes or more",
+                .{ key_len, min_data_key },
+            );
             if (fresh) {
                 say("making LUKS2 on {s}", .{src});
                 if (!m.run(&.{
@@ -815,6 +1099,11 @@ const Machine = struct {
 
     /// blkid's answer, trimmed, or "": the device, or the value asked for.
     fn blkid(m: *Machine, args: []const []const u8) []const u8 {
+        return firstLine(m.blkidAll(args));
+    }
+
+    /// blkid's whole answer, one device or value a line, trimmed, or "".
+    fn blkidAll(m: *Machine, args: []const []const u8) []const u8 {
         const argv = std.mem.concat(
             m.gpa,
             []const u8,
@@ -826,7 +1115,7 @@ const Machine = struct {
             .{ .argv = argv, .environ_map = &m.env },
         ) catch return "";
         return switch (res.term) {
-            .exited => |code| if (code == 0) trim(firstLine(res.stdout)) else "",
+            .exited => |code| if (code == 0) trim(res.stdout) else "",
             else => "",
         };
     }
@@ -834,13 +1123,19 @@ const Machine = struct {
     // --- files ---------------------------------------------------------------
 
     fn isMounted(m: *Machine, point: []const u8) bool {
+        return m.mountSource(point) != null;
+    }
+
+    /// What is mounted on point, as the kernel's mount table names it, or
+    /// null if nothing is.
+    fn mountSource(m: *Machine, point: []const u8) ?[]const u8 {
         var it = std.mem.tokenizeScalar(u8, m.read("/proc/self/mounts"), '\n');
         while (it.next()) |line| {
             var f = std.mem.tokenizeScalar(u8, line, ' ');
-            _ = f.next() orelse continue;
-            if (std.mem.eql(u8, f.next() orelse continue, point)) return true;
+            const source = f.next() orelse continue;
+            if (std.mem.eql(u8, f.next() orelse continue, point)) return source;
         }
-        return false;
+        return null;
     }
 
     /// path, read to its end, or "" (procfs and sysfs report a size of 0).
@@ -965,41 +1260,30 @@ const sysctls = [_][2][]const u8{
 
 // --- the seal --------------------------------------------------------------------
 
-/// System calls no program here makes once init hands over, refused for
-/// every process the machine will run (docs/design/lockdown.md, the seal), each
-/// where the architecture has it:
-///
-///   bpf, perf_event_open           eBPF and kernel tracing, which rootkits
-///                                  are made of
-///   init_module .. delete_module   modules: the loader closed already
-///   kexec_load, kexec_file_load    another kernel: lockdown refuses already
-///   io_uring_*                     makes kernel.io_uring_disabled permanent
-///   userfaultfd                    the usual way to win a kernel race
-///   open_by_handle_at, name_..     walking past mounts by inode handle
-///   add_key, keyctl, request_key   the kernel keyring; cryptsetup is done
-///                                  with it before init hands over
-///   process_vm_readv, _writev      another process's memory: Yama refuses
-///   modify_ldt, iopl, ioperm       16-bit code and I/O ports
-///   acct .. vhangup                unused here; old, rarely audited code
-///
-/// syslog stays: busybox's dmesg reads the kernel's log with it.
-const denied_names = [_][]const u8{
-    "bpf",               "perf_event_open",   "init_module",     "finit_module",
-    "delete_module",     "kexec_load",        "kexec_file_load", "io_uring_setup",
-    "io_uring_enter",    "io_uring_register", "userfaultfd",     "open_by_handle_at",
-    "name_to_handle_at", "add_key",           "keyctl",          "request_key",
-    "process_vm_readv",  "process_vm_writev", "modify_ldt",      "iopl",
-    "ioperm",            "acct",              "swapon",          "swapoff",
-    "quotactl",          "lookup_dcookie",    "uselib",          "vhangup",
-};
+/// The seal (docs/design/lockdown.md) denies by default, in promises
+/// (docs/design/pledge.md, System calls: promises): every process the
+/// machine will run may make the calls of the promises werewolf's own
+/// programs make (seal_lib.base) and of every promise the image's services
+/// make, which the build gathers from their service files' `pledge` lines
+/// into /usr/share/werewolf/pledge. leash then holds each service to its
+/// own. The rest go to seal-watch (cmd/seal-watch), which refuses them as
+/// if the kernel had no such call and says so once each, with the promise
+/// that would allow it; or, on a DEV=1 build booted with
+/// werewolf.seal=learn, allows and records them. What no promise brings
+/// goes to seal-watch too, so an attempt by a program the machine's
+/// promises alone bind is seen; a leashed service's own filter refuses it
+/// first, and the kernel takes that ENOSYS over the listener, unseen.
+const never = seal_lib.never;
 
-const denied: []const linux.SYS = blk: {
-    var list: []const linux.SYS = &.{};
-    for (denied_names) |name| {
-        if (@hasField(linux.SYS, name)) list = list ++ [_]linux.SYS{@field(linux.SYS, name)};
-    }
-    break :blk list;
-};
+/// What policy_path says: the mode, and the promises the seal allows.
+fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.print(gpa, "mode {s}\npromises", .{if (learn) "learn" else "enforce"});
+    var it = promises.iterator();
+    while (it.next()) |p| try out.print(gpa, " {s}", .{@tagName(p)});
+    try out.append(gpa, '\n');
+    return out.items;
+}
 
 /// Capabilities no process needs once init hands over, dropped from the
 /// bounding set, so not even root gets them back before a reboot: code in
@@ -1025,65 +1309,6 @@ const dropped_caps = [_]struct { name: []const u8, n: u6 }{
     .{ .name = "checkpoint_restore", .n = 40 },
 };
 
-/// The architecture every system call must come in as. Any other, which on
-/// aarch64 is a 32-bit (AArch32) program's, kills the process: werewolf ships
-/// no 32-bit code, and the kernel has no switch to turn those calls off.
-const native_arch: u32 = switch (builtin.cpu.arch) {
-    .aarch64 => 0xc00000b7, // AUDIT_ARCH_AARCH64
-    .x86_64 => 0xc000003e, // AUDIT_ARCH_X86_64
-    else => unreachable,
-};
-
-const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-const LD_W_ABS = 0x20;
-const JEQ_K = 0x15;
-const JGE_K = 0x35;
-const RET_K = 0x06;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
-const SECCOMP_RET_ERRNO: u32 = 0x00050000;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
-
-/// Load the architecture; kill another; load the number; each denied number
-/// jumps to the ENOSYS at the end, as if the kernel had no such call; the
-/// rest are allowed. It reads numbers, never arguments, so the kernel
-/// caches every allowed call as allowed and runs no filter for it, and a
-/// longer table costs nothing more. What any filter costs is the kernel's
-/// slower way into every system call, about 25 ns a call (docs/design/lockdown.md,
-/// *What the seal costs*): werewolf pays that, by choice.
-///
-/// On x86_64 a number with bit 30 set is an x32 call, under x86_64's own
-/// architecture: it would pass every comparison below as another number,
-/// so it kills the process too. Alpine's kernel has no x32 ABI; the check
-/// keeps one that does from opening the table.
-const seal_filter = blk: {
-    const n = denied.len;
-    const x32 = builtin.cpu.arch == .x86_64;
-    const at = if (x32) 6 else 4; // the first comparison
-    var f: [at + 2 + n]Filter = undefined;
-    f[0] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 4 }; // seccomp_data.arch
-    f[1] = .{ .code = JEQ_K, .jt = 1, .jf = 0, .k = native_arch };
-    f[2] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    f[3] = .{ .code = LD_W_ABS, .jt = 0, .jf = 0, .k = 0 }; // seccomp_data.nr
-    if (x32) {
-        f[4] = .{ .code = JGE_K, .jt = 0, .jf = 1, .k = 0x40000000 }; // __X32_SYSCALL_BIT
-        f[5] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_KILL_PROCESS };
-    }
-    for (denied, 0..) |sys, i| f[at + i] = .{
-        .code = JEQ_K,
-        .jt = @intCast(n - i),
-        .jf = 0,
-        .k = @intCast(@backingInt(sys)),
-    };
-    f[at + n] = .{ .code = RET_K, .jt = 0, .jf = 0, .k = SECCOMP_RET_ALLOW };
-    f[at + 1 + n] = .{
-        .code = RET_K,
-        .jt = 0,
-        .jf = 0,
-        .k = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS),
-    };
-    break :blk f;
-};
-
 /// The capabilities a program the kernel starts itself may have: a
 /// usermode helper, which kthreadd starts, not PID 1, so neither the seal's
 /// filter nor its bounding set reach it. Root could name one (a core
@@ -1102,20 +1327,83 @@ fn capWords(buf: []u8, set: u64) []const u8 {
     ) catch unreachable;
 }
 
+/// seal-watch, started before the seal so it is not under it, with one end
+/// of a socket as its stdin, over which it is sent the seal's listener; the
+/// other end, or null if it cannot be started. Raw calls only between fork
+/// and exec: this process may have threads.
+fn startWatch() ?i32 {
+    const path = "/usr/lib/werewolf/seal-watch";
+    if (!executable(path)) return null;
+    var sv: [2]i32 = undefined;
+    if (linux.errno(linux.socketpair(
+        linux.AF.UNIX,
+        linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC,
+        0,
+        &sv,
+    )) != .SUCCESS) return null;
+    const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{path};
+    const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) return null;
+    if (pid == 0) {
+        _ = linux.dup2(sv[1], 0);
+        _ = linux.execve(path, argv, envp);
+        linux.exit_group(127);
+    }
+    _ = linux.close(sv[1]);
+    return sv[0];
+}
+
 /// Install the seal on PID 1, which every process inherits and none, root
 /// included, can remove until the machine reboots: the helpers' bounding
 /// set, PID 1's, then the filter. PID 1 holds CAP_SYS_ADMIN, so it needs no
 /// no_new_privs, which would bind every program after it. Any step that
 /// fails is an error; a capability the kernel does not know (EINVAL) is
 /// one it cannot grant.
-fn seal() !void {
+fn seal(m: *Machine) !void {
+    // Learning: what the promises do not allow, seal-watch allows and
+    // records, with the promise that would, so a service's author learns
+    // what its pledge lacks. Only on a DEV=1 build, never released;
+    // anywhere else the word is ignored.
+    const learn = std.mem.eql(u8, m.cmd.seal, "learn") and exists("/usr/share/werewolf/dev");
+    if (m.cmd.seal.len > 0 and
+        !learn) say("werewolf.seal={s} ignored: only a DEV=1 build learns", .{m.cmd.seal});
+    var bad: []const u8 = "";
+    const pledged = seal_lib.parse(m.read("/usr/share/werewolf/pledge"), &bad) catch |err| {
+        say("/usr/share/werewolf/pledge: {s}: {s}", .{ bad, @errorName(err) });
+        return err;
+    };
+    const promises = seal_lib.base.unionWith(pledged);
     var buf: [32]u8 = undefined;
+    // The bounding set for the programs the kernel starts itself, which the
+    // seccomp filter does not reach. On real hardware /proc/sys is writable --
+    // init has just mounted /proc -- so a failure here is real and fatal. In a
+    // container /proc/sys is read-only (EROFS) and these are the host's to set,
+    // not ours, and the kernel's helpers never run in the container's
+    // namespaces anyway; tolerate that one case, and that one alone, so the
+    // read-only mount cannot be forged into skipping the limit on a real boot.
     for ([_][:0]const u8{
         "/proc/sys/kernel/usermodehelper/bset",
         "/proc/sys/kernel/usermodehelper/inheritable",
     }, [_]u64{ helper_caps, 0 }) |path, set| {
-        if (!writeFile(path, capWords(&buf, set))) return error.UsermodeHelperCaps;
+        switch (writeErrno(path, capWords(&buf, set))) {
+            .SUCCESS => {},
+            .ROFS => {
+                say(
+                    "usermodehelper caps left to the host: /proc/sys is read-only (a container)",
+                    .{},
+                );
+                break;
+            },
+            else => |e| {
+                say("usermodehelper caps: {t}", .{e});
+                return error.UsermodeHelperCaps;
+            },
+        }
     }
+    mkdir("/run/werewolf/seal", 0o755);
+    const watch = startWatch();
+    if (watch == null) say("no seal-watch: unlisted calls are refused unsaid", .{});
     const PR_CAPBSET_DROP = 24;
     var caps: usize = 0;
     for (dropped_caps) |c| {
@@ -1129,21 +1417,41 @@ fn seal() !void {
             },
         }
     }
-    const SECCOMP_SET_MODE_FILTER = 1;
-    const prog = extern struct {
-        len: u16,
-        filter: [*]const Filter,
-    }{ .len = seal_filter.len, .filter = &seal_filter };
-    const rc = linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog);
-    if (linux.errno(rc) != .SUCCESS) {
-        say("seccomp: {t}", .{linux.errno(rc)});
-        return error.Seccomp;
+    var filter_buf: [seal_lib.max_filter]seal_lib.Filter = undefined;
+    const filter = seal_lib.buildFilter(&filter_buf, promises, false);
+    const listener = seal_lib.install(filter, true) catch |err| {
+        say("seccomp: {s}", .{@errorName(err)});
+        return err;
+    };
+    // The listener goes to seal-watch alone. Once no one holds it, the
+    // kernel refuses every call the promises do not allow, itself.
+    if (watch) |sock| {
+        if (!seal_lib.sendListener(sock, listener, if (learn) "l" else "e"))
+            say("seal-watch did not take the listener: unlisted calls are refused unsaid", .{});
+        _ = linux.close(sock);
     }
+    _ = linux.close(listener);
+    m.write(seal_lib.policy_path, policyText(m.gpa, learn, promises) catch "", 0o644);
     say(
-        "sealed: {d} system calls refused, {d} capabilities dropped, other architectures' calls " ++
-            "fatal",
-        .{ denied.len, caps },
+        "sealed: {d} promises; every other call {s}; {d} capabilities dropped; " ++
+            "other architectures' calls fatal",
+        .{ promises.count(), if (learn) "allowed and recorded" else "refused", caps },
     );
+}
+
+/// What a config tar's extraction may do: write beneath /run/config, which
+/// dir names, and nothing else; root's uid with no capabilities, so no
+/// other file it could not reach as an owner; no socket, process or mount
+/// call, refused as if the kernel had none.
+fn confineExtract(dir: i32) !void {
+    try sandbox.keepOnly(0);
+    try sandbox.landlock(&.{.{ .fd = dir, .access = sandbox.own_dir }}, &.{});
+    var buf: [seal_lib.max_filter]seal_lib.Filter = undefined;
+    const filter = seal_lib.buildFilter(&buf, .initMany(&.{ .stdio, .rpath, .wpath }), true);
+    _ = seal_lib.install(filter, false) catch {
+        sandbox.failed = "seccomp";
+        return error.SystemCall;
+    };
 }
 
 // --- pure functions, tested below ----------------------------------------------
@@ -1156,6 +1464,7 @@ const Cmdline = struct {
     data: []const u8 = "",
     victim: []const u8 = "",
     grubenv: []const u8 = "",
+    seal: []const u8 = "",
 };
 
 fn parseCmdline(text: []const u8) Cmdline {
@@ -1171,6 +1480,140 @@ fn parseCmdline(text: []const u8) Cmdline {
 }
 
 const NoCloud = struct { user: []const u8 = "", uid: []const u8 = "1000", keys: []const u8 = "" };
+
+const LimaFile = struct { id: []const u8, name: []const u8 };
+
+fn readLimaData(gpa: Allocator, io: Io, cidata: Dir, files: []const LimaFile) ![]const []const u8 {
+    var payloads = try cidata.openDir(io, "provision.data", .{ .follow_symlinks = false });
+    defer payloads.close(io);
+    const values = try gpa.alloc([]const u8, files.len);
+    for (files, values) |file, *value|
+        value.* = try readLimaFile(gpa, io, payloads, file.id);
+    return values;
+}
+
+fn readLimaFile(gpa: Allocator, io: Io, dir: Dir, name: []const u8) ![]const u8 {
+    // cidata is read-only. Refuse special files before opening: a FIFO
+    // could otherwise wait forever for a writer before f.stat sees it.
+    const entry = try dir.statFile(io, name, .{ .follow_symlinks = false });
+    if (entry.kind != .file or entry.size > 32 * 1024) return error.InvalidLimaDataFile;
+    var f = try dir.openFile(io, name, .{ .follow_symlinks = false });
+    defer f.close(io);
+    const st = try f.stat(io);
+    if (st.kind != .file or st.size > 32 * 1024) return error.InvalidLimaDataFile;
+    var buf: [4096]u8 = undefined;
+    var reader = f.readerStreaming(io, &buf);
+    return reader.interface.allocRemaining(gpa, .limited(32 * 1024));
+}
+
+test "Lima data is bounded and never follows links" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    const files = [_]LimaFile{.{ .id = "00000000", .name = "service/key" }};
+    try tmp.dir.createDir(io, "provision.data", .default_dir);
+    try tmp.dir.writeFile(io, .{ .sub_path = "provision.data/00000000", .data = "private\n" });
+    const values = try readLimaData(arena.allocator(), io, tmp.dir, &files);
+    try std.testing.expectEqualStrings("private\n", values[0]);
+    const large = try arena.allocator().alloc(u8, 32 * 1024 + 1);
+    @memset(large, 'x');
+    try tmp.dir.writeFile(io, .{ .sub_path = "provision.data/00000000", .data = large });
+    try std.testing.expectError(
+        error.InvalidLimaDataFile,
+        readLimaData(arena.allocator(), io, tmp.dir, &files),
+    );
+    try tmp.dir.deleteFile(io, "provision.data/00000000");
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "must not be imported" });
+    try tmp.dir.symLink(io, "../victim", "provision.data/00000000", .{});
+    if (readLimaData(arena.allocator(), io, tmp.dir, &files)) |_|
+        return error.FollowedSymlink
+    else |_| {}
+    try tmp.dir.deleteFile(io, "provision.data/00000000");
+    try tmp.dir.deleteDir(io, "provision.data");
+    try tmp.dir.createDir(io, "other", .default_dir);
+    try std.testing.expectError(
+        error.InvalidLimaDataFile,
+        readLimaFile(arena.allocator(), io, tmp.dir, "other"),
+    );
+    try tmp.dir.writeFile(io, .{ .sub_path = "other/00000000", .data = "outside" });
+    try tmp.dir.symLink(io, "other", "provision.data", .{});
+    if (readLimaData(arena.allocator(), io, tmp.dir, &files)) |_|
+        return error.FollowedSymlink
+    else |_| {}
+}
+
+fn limaDataFiles(gpa: Allocator, env: []const u8) ![]const LimaFile {
+    var files: std.ArrayList(LimaFile) = .empty;
+    var lines = std.mem.splitScalar(u8, env, '\n');
+    while (lines.next()) |line| {
+        const prefix = "LIMA_CIDATA_DATAFILE_";
+        if (!std.mem.startsWith(u8, line, prefix)) continue;
+        const rest = line[prefix.len..];
+        if (rest.len < 14 or !std.mem.startsWith(u8, rest[8..], "_PATH=")) continue;
+        const id = rest[0..8];
+        for (id) |c| if (!std.ascii.isDigit(c)) return error.InvalidLimaDataId;
+        const path = std.mem.trimEnd(u8, rest[14..], "\r");
+        if (!std.mem.startsWith(u8, path, "/run/config/")) continue;
+        const relative = path["/run/config/".len..];
+        for (relative) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and
+            c != '.' and c != '/')
+            return error.InvalidLimaConfigPath;
+        const name = safeName(relative) orelse return error.InvalidLimaConfigPath;
+        if (name.len == 0 or !std.mem.eql(u8, name, relative)) return error.InvalidLimaConfigPath;
+        if (files.items.len == 32) return error.TooManyLimaConfigFiles;
+        for (files.items) |f| {
+            if (std.mem.eql(u8, f.id, id) or
+                std.mem.eql(u8, f.name, name)) return error.DuplicateLimaConfigFile;
+            // Prevent file/directory conflicts between destinations.
+            if ((std.mem.startsWith(u8, name, f.name) and name.len > f.name.len and
+                name[f.name.len] == '/') or
+                (std.mem.startsWith(u8, f.name, name) and f.name.len > name.len and
+                    f.name[name.len] == '/'))
+                return error.ConflictingLimaConfigPaths;
+        }
+        try files.append(gpa, .{ .id = id, .name = name });
+    }
+    return files.items;
+}
+
+test "Lima data imports only plain config paths" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const files = try limaDataFiles(gpa,
+        \\LIMA_CIDATA_DATAFILE_00000000_PATH=/run/config/bastion/settings.json
+        \\LIMA_CIDATA_DATAFILE_00000001_PATH=/etc/ssh/sshd_config
+        \\LIMA_CIDATA_DATAFILE_00000002_PATH=/run/config/tailscale/auth_key
+        \\LIMA_CIDATA_YQ_PROVISION_00000003_PATH=/run/config/ignored
+        \\LIMA_CIDATA_DATAFILE_00000004_OWNER=root:root
+    );
+    try std.testing.expectEqual(@as(usize, 2), files.len);
+    try std.testing.expectEqualStrings("00000000", files[0].id);
+    try std.testing.expectEqualStrings("bastion/settings.json", files[0].name);
+    for ([_][]const u8{
+        "/run/config/../etc/shadow",
+        "/run/config/a//b",
+        "/run/config/",
+        "/run/config/a;echo",
+    }) |path| {
+        const line = try gpa.print("LIMA_CIDATA_DATAFILE_00000000_PATH={s}", .{path});
+        try std.testing.expectError(error.InvalidLimaConfigPath, limaDataFiles(gpa, line));
+    }
+    try std.testing.expectError(
+        error.InvalidLimaDataId,
+        limaDataFiles(gpa, "LIMA_CIDATA_DATAFILE_../../.._PATH=/run/config/key"),
+    );
+    try std.testing.expectError(error.DuplicateLimaConfigFile, limaDataFiles(gpa,
+        \\LIMA_CIDATA_DATAFILE_00000000_PATH=/run/config/key
+        \\LIMA_CIDATA_DATAFILE_00000001_PATH=/run/config/key
+    ));
+    try std.testing.expectError(error.ConflictingLimaConfigPaths, limaDataFiles(gpa,
+        \\LIMA_CIDATA_DATAFILE_00000000_PATH=/run/config/key
+        \\LIMA_CIDATA_DATAFILE_00000001_PATH=/run/config/key/child
+    ));
+}
 
 /// The first user's name and uid in a cloud-config, quotes dropped, and
 /// every ssh public key in it, one a line.
@@ -1414,12 +1857,38 @@ fn hasUstar(dev: [:0]const u8) bool {
     return linux.errno(n) == .SUCCESS and n == 5 and std.mem.eql(u8, &magic, "ustar");
 }
 
-fn writeFile(path: [:0]const u8, data: []const u8) bool {
-    const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+/// Whether dev is an ISO9660 volume labelled cidata (or CIDATA), as a
+/// NoCloud seed is: its primary volume descriptor, at 32 KiB, says CD001,
+/// and its volume identifier, from byte 40, is the label: padded with
+/// spaces, as the standard says, or with NULs, as Lima's and macOS's are.
+fn isNoCloud(dev: [:0]const u8) bool {
+    const fd = linux.open(dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
     defer _ = linux.close(@intCast(fd));
+    var pvd: [72]u8 = undefined;
+    const n = linux.pread(@intCast(fd), &pvd, pvd.len, 0x8000);
+    return linux.errno(n) == .SUCCESS and n == pvd.len and isCidata(&pvd);
+}
+
+fn isCidata(pvd: *const [72]u8) bool {
+    if (pvd[0] != 1 or !std.mem.eql(u8, pvd[1..6], "CD001")) return false;
+    const volume = std.mem.trimEnd(u8, pvd[40..72], " \x00");
+    return std.mem.eql(u8, volume, "cidata") or std.mem.eql(u8, volume, "CIDATA");
+}
+
+fn writeFile(path: [:0]const u8, data: []const u8) bool {
+    return writeErrno(path, data) == .SUCCESS;
+}
+
+/// writeFile, but returning why it failed, so a caller can tell a read-only
+/// /proc/sys (a container) from a refusal that matters on real hardware.
+fn writeErrno(path: [:0]const u8, data: []const u8) linux.E {
+    const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return linux.errno(fd);
+    defer _ = linux.close(@intCast(fd));
     const n = linux.write(@intCast(fd), data.ptr, data.len);
-    return linux.errno(n) == .SUCCESS and n == data.len;
+    if (linux.errno(n) != .SUCCESS) return linux.errno(n);
+    return if (n == data.len) .SUCCESS else .IO;
 }
 
 fn say(comptime f: []const u8, args: anytype) void {
@@ -1428,52 +1897,70 @@ fn say(comptime f: []const u8, args: anytype) void {
     _ = linux.write(1, line.ptr, line.len);
 }
 
+/// Where the boot's time went: each phase's name and when it ended, in
+/// milliseconds of the boot clock. stage0 hands its own over as
+/// WEREWOLF_BOOT, `kernel=225 modules=611 slot=838 root=851`; init adds
+/// its own after them.
+const Phases = struct {
+    names: [max][]const u8 = undefined,
+    ends: [max]u64 = undefined,
+    len: usize = 0,
+
+    const max = 16;
+    const Took = struct { name: []const u8, ms: u64 };
+
+    /// stage0's phases: each a name of lowercase letters and when it ended,
+    /// none before the last. The first that is not stops the list.
+    fn parse(text: []const u8) Phases {
+        var p: Phases = .{};
+        var it = std.mem.tokenizeScalar(u8, text, ' ');
+        while (it.next()) |word| {
+            const eq = std.mem.findScalar(u8, word, '=') orelse break;
+            const name = word[0..eq];
+            const end = std.fmt.parseInt(u64, word[eq + 1 ..], 10) catch break;
+            if (name.len == 0 or name.len > 16) break;
+            for (name) |c| if (c < 'a' or c > 'z') return p;
+            if (p.len > 0 and end < p.ends[p.len - 1]) break;
+            p.add(name, end);
+        }
+        return p;
+    }
+
+    /// A phase that ended at end; past max, nothing.
+    fn add(p: *Phases, name: []const u8, end: u64) void {
+        if (p.len == max) return;
+        p.names[p.len] = name;
+        p.ends[p.len] = end;
+        p.len += 1;
+    }
+
+    /// When the phase name ended, or 0 if there was none.
+    fn endOf(p: *const Phases, name: []const u8) u64 {
+        for (p.names[0..p.len], p.ends[0..p.len]) |n, e| if (std.mem.eql(u8, n, name)) return e;
+        return 0;
+    }
+
+    /// How long each phase took: from the end of the one before, or, for the
+    /// first, from the boot clock's start.
+    fn durations(p: *const Phases, gpa: Allocator) []const Took {
+        const out = gpa.alloc(Took, p.len) catch return &.{};
+        for (out, 0..) |*t, i| t.* = .{
+            .name = p.names[i],
+            .ms = p.ends[i] -| if (i == 0) 0 else p.ends[i - 1],
+        };
+        return out;
+    }
+};
+
 // --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
 
-/// What seal_filter returns for a call: the filter run as the kernel runs
-/// it, for the few instructions it uses.
-fn sealAction(arch: u32, nr: u32) u32 {
-    var a: u32 = 0;
-    var pc: usize = 0;
-    while (true) {
-        const i = seal_filter[pc];
-        switch (i.code) {
-            LD_W_ABS => a = if (i.k == 4) arch else nr,
-            JEQ_K => pc += if (a == i.k) i.jt else i.jf,
-            JGE_K => pc += if (a >= i.k) i.jt else i.jf,
-            RET_K => return i.k,
-            else => unreachable,
-        }
-        pc += 1;
-    }
-}
-
-test seal_filter {
-    const enosys = SECCOMP_RET_ERRNO | @backingInt(linux.E.NOSYS);
-    for (denied) |sys| try testing.expectEqual(
-        enosys,
-        sealAction(native_arch, @intCast(@backingInt(sys))),
-    );
-    for ([_]linux.SYS{
-        .read,
-        .write,
-        .openat,
-        .mmap,
-        .futex,
-        .getpid,
-    }) |sys| try testing.expectEqual(
-        SECCOMP_RET_ALLOW,
-        sealAction(native_arch, @intCast(@backingInt(sys))),
-    );
-    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000028, 0)); // AUDIT_ARCH_ARM
-    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(0x40000003, 0)); // AUDIT_ARCH_I386
-    // x32: a denied number, or any, with bit 30 set.
-    if (builtin.cpu.arch == .x86_64) for ([_]u32{ 0x40000000, 0x40000000 | 154, 0xffffffff }) |nr| {
-        try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, sealAction(native_arch, nr));
-    };
-    try testing.expectEqual(SECCOMP_RET_ALLOW, sealAction(native_arch, 0x3fffffff));
+test policyText {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const text = try policyText(arena.allocator(), false, .initMany(&.{ .stdio, .inet }));
+    try testing.expectEqualStrings("mode enforce\npromises stdio inet\n", text);
 }
 
 test capWords {
@@ -1577,6 +2064,34 @@ test safeName {
     try testing.expectEqual(null, safeName("/"));
 }
 
+test Phases {
+    var p = Phases.parse("kernel=225 modules=611 slot=838 root=851");
+    p.add("mounts", 900);
+    try testing.expectEqual(225, p.endOf("kernel"));
+    try testing.expectEqual(0, p.endOf("absent"));
+    const took = p.durations(testing.allocator);
+    defer testing.allocator.free(took);
+    try testing.expectEqual(5, took.len);
+    try testing.expectEqualStrings("kernel", took[0].name);
+    try testing.expectEqual(225, took[0].ms);
+    try testing.expectEqual(386, took[1].ms);
+    try testing.expectEqualStrings("mounts", took[4].name);
+    try testing.expectEqual(49, took[4].ms);
+
+    // A bad word ends the list; what came before it stays.
+    try testing.expectEqual(1, Phases.parse("kernel=225 modules=100").len);
+    try testing.expectEqual(1, Phases.parse("kernel=225 Bad=900 root=950").len);
+    try testing.expectEqual(1, Phases.parse("kernel=225 root=x").len);
+    try testing.expectEqual(1, Phases.parse("kernel=225 \"x\"=900").len);
+    try testing.expectEqual(0, Phases.parse("").len);
+    try testing.expectEqual(0, Phases.parse("=5").len);
+
+    // Past max, nothing more is kept.
+    var full: Phases = .{};
+    for (0..Phases.max + 3) |i| full.add("x", i);
+    try testing.expectEqual(Phases.max, full.len);
+}
+
 test "small parsers" {
     try testing.expectEqualStrings(
         "i-0123",
@@ -1594,4 +2109,29 @@ fn bootMs() u64 {
     var ts: linux.timespec = undefined;
     if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
+}
+
+test isCidata {
+    var pvd: [72]u8 = @splat(' ');
+    pvd[0] = 1;
+    @memcpy(pvd[1..6], "CD001");
+    @memcpy(pvd[40..46], "cidata");
+    try testing.expect(isCidata(&pvd));
+    @memcpy(pvd[40..46], "CIDATA");
+    try testing.expect(isCidata(&pvd));
+    // Lima's seed, and macOS's hdiutil's, pad with NULs.
+    @memset(pvd[46..72], 0);
+    try testing.expect(isCidata(&pvd));
+    @memset(pvd[46..72], ' ');
+    // Another label, a label that only starts so, or no ISO9660 at all.
+    @memcpy(pvd[40..46], "config");
+    try testing.expect(!isCidata(&pvd));
+    @memcpy(pvd[40..47], "cidata2");
+    try testing.expect(!isCidata(&pvd));
+    @memcpy(pvd[40..47], "cidata ");
+    pvd[0] = 2; // a supplementary descriptor, not the primary
+    try testing.expect(!isCidata(&pvd));
+    pvd[0] = 1;
+    @memcpy(pvd[1..6], "BEA01");
+    try testing.expect(!isCidata(&pvd));
 }

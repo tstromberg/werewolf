@@ -6,18 +6,7 @@
 # its own etc/sv/app/service (exec /usr/bin/java -jar /usr/lib/app/app.jar).
 # Until then, the JDK's own simple web server, serving one page. See
 # docs/forms.md.
-include: prod.yaml
+include: app.yaml
 contents:
   packages:
     - openjdk-21-jre
-
-accounts:
-  groups:
-    - groupname: app
-      gid: 204
-  users:
-    - username: app
-      uid: 204
-      gid: 204
-      homedir: /var/empty
-      shell: /sbin/nologin

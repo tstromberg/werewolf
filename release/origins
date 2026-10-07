@@ -1,0 +1,47 @@
+#!/bin/sh
+# origins OUT: the source packages, Wolfi's "origins", of everything werewolf
+# installs: every form in forms/, stage0 and the boot disk, as their locks
+# resolve them now, for both architectures. The CVE tiers feed
+# (tools/cve-tiers.zig) covers these and the kernel, and nothing else: a
+# CVE in a package werewolf never installs tells no machine anything. A
+# package of a form built elsewhere, which this list does not name, a
+# machine counts as Medium (docs/design/update-policy.md).
+#
+#   release/origins OUT
+#
+# Run from the tree's top, with apko and curl. Writes OUT, one origin a
+# line, sorted, or nothing and fails.
+set -eu
+
+[ $# -eq 1 ] || { echo "usage: release/origins OUT" >&2; exit 2; }
+out=$1
+top=$(pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# Every package name each config installs, as apko resolves it now. apko
+# resolves include: against the config's own directory, as make does.
+for config in forms/*.yaml cmd/stage0/stage0.yaml boot/boot.yaml; do
+	name=$(basename "$config" .yaml)
+	(cd "$(dirname "$config")" && apko lock --arch aarch64,x86_64 --include-paths "$top/forms" \
+		--output "$work/$name.lock.json" "$(basename "$config")" >/dev/null 2>"$work/$name.err") ||
+		{ cat "$work/$name.err" >&2; echo "origins: cannot lock $config" >&2; exit 1; }
+done
+sed -n 's|^ *"name": "\([^"]*\)",$|\1|p' "$work"/*.lock.json | LC_ALL=C sort -u >"$work/names"
+
+# Each package's origin, from Wolfi's index for each architecture: records
+# of KEY:VALUE lines, P the package, o its origin, a blank line between.
+for arch in x86_64 aarch64; do
+	curl -fsS --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
+		"https://packages.wolfi.dev/os/$arch/APKINDEX.tar.gz" | tar -xzOf - APKINDEX |
+		awk -F: '/^P:/ { p = $2 } /^o:/ { o = $2 } /^$/ { if (p != "" && o != "") print p, o; p = o = "" }'
+done | LC_ALL=C sort -u >"$work/index"
+
+awk 'NR == FNR { want[$1] = 1; next } ($1 in want) { print $2 }' "$work/names" "$work/index" |
+	LC_ALL=C sort -u >"$work/origins"
+# A list this short means a lock or the index was cut short, not that
+# werewolf installs so little.
+n=$(($(wc -l <"$work/origins")))
+[ "$n" -ge 50 ] || { echo "origins: only $n origins: refusing" >&2; exit 1; }
+mv "$work/origins" "$out"
+echo "origins: $n, from $(($(wc -l <"$work/names"))) packages"

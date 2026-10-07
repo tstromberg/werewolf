@@ -9,22 +9,27 @@ const std = @import("std");
 
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 1) {
+    const level = (if (args.len == 1) levelFor(std.fs.path.basename(args[0])) else null) orelse {
         std.debug.print("usage: reboot | poweroff\n", .{});
         std.process.exit(2);
-    }
-    const level = levelFor(std.fs.path.basename(args[0]));
+    };
     const err = std.process.replace(init.io, .{ .argv = &.{ "/usr/bin/runit-init", level } });
     std.debug.print("{s}: runit-init: {s}\n", .{ args[0], @errorName(err) });
     std.process.exit(1);
 }
 
-/// runit-init's level for the name this was run as.
-fn levelFor(name: []const u8) []const u8 {
-    return if (std.mem.eql(u8, name, "poweroff")) "0" else "6";
+/// runit-init's level for the name this was run as: 6 to restart, 0 to
+/// turn off, and none for any other name, so a stray link (halt, say)
+/// does nothing.
+fn levelFor(name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "reboot")) return "6";
+    if (std.mem.eql(u8, name, "poweroff")) return "0";
+    return null;
 }
 
 test levelFor {
-    try std.testing.expectEqualStrings("0", levelFor("poweroff"));
-    try std.testing.expectEqualStrings("6", levelFor("reboot"));
+    try std.testing.expectEqualStrings("0", levelFor("poweroff").?);
+    try std.testing.expectEqualStrings("6", levelFor("reboot").?);
+    try std.testing.expectEqual(null, levelFor("halt"));
+    try std.testing.expectEqual(null, levelFor("reboot2"));
 }

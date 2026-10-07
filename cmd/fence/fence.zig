@@ -12,20 +12,39 @@
 //!      from a port it serves (`listen`); the metadata server's port 80 only
 //!      for the users named (`metadata`). Anything else is refused with
 //!      EACCES. A packet arriving passes only to a port it serves, from a
-//!      port it connects to (a reply), or as ICMP; anything else is dropped
-//!      without an answer. Local and loopback traffic always pass, and so
-//!      does ICMPv6, which IPv6 cannot work without (neighbour discovery,
-//!      router advertisements). DHCP's packet socket and ARP are below IP
-//!      routing and do not see this.
+//!      port it connects to (a reply), or as ICMP; TCP, UDP and the other
+//!      transports, and tunnels and IPsec (IPIP, IPv6-in-IP, GRE, ESP, AH),
+//!      are dropped without an answer. Other protocols, which the kernel
+//!      has no handler for once modules are closed, it answers as
+//!      unreachable: a rule that dropped everything would drop ARP too.
+//!      Local and loopback traffic always pass, and so does ICMPv6, which
+//!      IPv6 cannot work without (neighbour discovery, router
+//!      advertisements). DHCP's packet socket and ARP are below IP routing
+//!      and do not see this. A kernel without IPv6 (ipv6.disable=1, as
+//!      werewolf boots unless the form allows IPv6) gets IPv4's rules alone.
+//!
+//!      The rules hold no state: a reply is known by its source port alone.
+//!      So a packet from TCP port 443, or UDP 53, reaches any socket on the
+//!      machine, whichever user connected there. That includes a socket
+//!      listening on a port the kernel picked, as listen() without bind()
+//!      gets one, which step 2 cannot see. Such a listener needs code
+//!      already running on the machine; leash refuses listen to services
+//!      that did not promise it.
 //!   2. Landlock: a TCP socket may be bound only to a port the policy names,
 //!      or to port 0, as some clients do before connecting (busybox's nc).
 //!      A socket that then listens on the port the kernel picked hears only
 //!      what step 1 lets arrive: replies from ports the machine connects to.
-//!      And the files, for every process, root included: read anywhere;
-//!      run only what is beneath /usr, the image's; write only in /run,
-//!      /tmp, /var/tmp, /dev/shm and /data, and to terminals and the likes
-//!      of /dev/null, so never /proc, /sys or a disk itself; sockets and
-//!      FIFOs only in /run; device ioctls only on terminals. A domain that
+//!      And the files, for every process, root included: read anywhere
+//!      but /dev; run only what is beneath /usr, the image's; write only
+//!      in /run, /tmp, /var/tmp, /dev/shm and /data, so never /proc or
+//!      /sys; sockets and FIFOs only in /run. /dev is closed, even for
+//!      reading, but for the devices werewolf uses: null, zero, full,
+//!      random, urandom and kmsg; the console and the terminals; the power
+//!      button's input devices, and a virtual machine's PL061 GPIO chip
+//!      (cmd/power-button), the one device given ioctls beside terminals;
+//!      and pseudo-terminals where the form allows pty. So a disk, the
+//!      decrypted data volume, or any device a form does not name opens for
+//!      no one. A domain that
 //!      handles files also refuses mount, umount and pivot_root to every
 //!      process in it: the few mounts werewolf makes after boot are made by
 //!      the mount broker, which init starts before it becomes fence, outside
@@ -34,12 +53,19 @@
 //!      packet sockets are below them, leave the bounding set, so no process
 //!      after it, root included, holds either until the machine reboots;
 //!      but for a form that allows them (etc/werewolf/allow/netadmin,
-//!      packet), as dhcp does, whose client renews its lease with both.
+//!      packet). DHCP's renewal needs neither from here: init starts it
+//!      before fence, as it starts the mount broker, and it keeps the
+//!      CAP_NET_ADMIN and packet socket it opened then. CAP_SYS_ADMIN
+//!      leaves too, on every form, once step 2 has used it: what needs it
+//!      after boot, mounting, the broker does, from outside. So root has no
+//!      way to mount, to configure a filesystem (fsconfig, where CVE-2022-0185
+//!      was), or to reach the rest of what that capability guards.
 //!   4. It execs PROGRAM, which every process on the machine descends from.
 //!
 //! Landlock's restriction is inherited and cannot be lifted, by root or
 //! anyone, until the machine reboots. The routing rules can be changed by
-//! whoever holds CAP_NET_ADMIN, which the seal takes away (docs/design/fence.md).
+//! whoever holds CAP_NET_ADMIN, which step 3 takes away, but on a form
+//! that allows it (docs/design/fence.md).
 //! Nothing here reads anything but the image's own file, so fence runs as
 //! one process, without a sandbox of its own: whatever it set up, it hands
 //! to runit.
@@ -105,8 +131,8 @@ pub fn main(init: std.process.Init) !void {
         linux.exit_group(1);
     };
     step = "capabilities";
-    var kept_buf: [net_caps.len][]const u8 = undefined;
-    const kept = dropNetCaps(&kept_buf) catch |err| {
+    var kept_buf: [caps.len][]const u8 = undefined;
+    const kept = dropCaps(&kept_buf) catch |err| {
         log.event(
             "error",
             .{
@@ -126,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
             .listen = p.listen[0..p.nlisten],
             .connect = p.connectText(&out, &text),
             .metadata = p.metadata[0..p.nmetadata],
+            .ipv6 = hasIpv6(),
             .kept = kept,
         },
     );
@@ -159,19 +186,23 @@ fn errnoName(e: linux.E) []const u8 {
     return std.enums.tagName(linux.E, e) orelse "unknown";
 }
 
-/// The capabilities the policy rests on, and the allowance that keeps each.
-const net_caps = [_]struct { name: []const u8, n: u6, allow: [:0]const u8 }{
+/// The capabilities fence takes from every process after it, and the
+/// allowance that keeps each, if any: the two the policy rests on, and
+/// CAP_SYS_ADMIN, the largest of root's, which only Landlock's
+/// restriction, above, needed.
+const caps = [_]struct { name: []const u8, n: u6, allow: [:0]const u8 }{
     .{ .name = "net_admin", .n = 12, .allow = "/etc/werewolf/allow/netadmin" },
     .{ .name = "net_raw", .n = 13, .allow = "/etc/werewolf/allow/packet" },
+    .{ .name = "sys_admin", .n = 21, .allow = "" },
 };
 
-/// Drop each of net_caps from the bounding set but those the form allows;
-/// the names of those kept.
-fn dropNetCaps(kept: *[net_caps.len][]const u8) ![]const []const u8 {
+/// Drop each of caps from the bounding set but those the form allows; the
+/// names of those kept.
+fn dropCaps(kept: *[caps.len][]const u8) ![]const []const u8 {
     const PR_CAPBSET_DROP = 24;
     var n: usize = 0;
-    for (net_caps) |c| {
-        if (linux.errno(linux.access(c.allow, linux.F_OK)) == .SUCCESS) {
+    for (caps) |c| {
+        if (c.allow.len > 0 and linux.errno(linux.access(c.allow, linux.F_OK)) == .SUCCESS) {
             kept[n] = c.name;
             n += 1;
         } else _ = try sys(linux.prctl(PR_CAPBSET_DROP, c.n, 0, 0, 0), "prctl");
@@ -193,8 +224,25 @@ fn apply() !Policy {
 // --- the policy --------------------------------------------------------------
 
 /// The IP protocols fence names: those a policy may declare, ICMP, TCP and
-/// UDP, and the other transports with ports, dropped when they arrive.
-const Proto = enum(u8) { icmp = 1, tcp = 6, udp = 17, dccp = 33, sctp = 132, udplite = 136 };
+/// UDP; and, dropped when they arrive, the other transports with ports, and
+/// the tunnels and IPsec, which would carry traffic past the rules should a
+/// handler for them ever be loaded.
+const Proto = enum(u8) {
+    icmp = 1,
+    ipip = 4,
+    tcp = 6,
+    udp = 17,
+    dccp = 33,
+    ipv6 = 41,
+    gre = 47,
+    esp = 50,
+    ah = 51,
+    sctp = 132,
+    udplite = 136,
+};
+
+/// What arrives that is dropped, unanswered.
+const dropped = [_]Proto{ .tcp, .udp, .udplite, .sctp, .dccp, .ipip, .ipv6, .gre, .esp, .ah };
 
 const Connect = struct {
     /// null: every user.
@@ -308,8 +356,8 @@ const Rule = struct {
 
 /// Eight per entry at most: metadata, connect and listen each make a
 /// sending rule and its twin, and connect and listen an arriving rule; and
-/// the fixed ones.
-const max_rules = 16 + 8 * max_entries;
+/// the fixed ones, the drops among them.
+const max_rules = 16 + dropped.len + 8 * max_entries;
 
 /// The policy as rules, in the order the kernel will try them:
 ///
@@ -319,7 +367,8 @@ const max_rules = 16 + 8 * max_entries;
 ///   200   sent as declared (user, protocol, port), or from a served port: main
 ///   299   anything else sent: refused (EACCES)
 ///   300   arriving to a served port, from a connected port, or ICMP: local
-///   399   anything else arriving by TCP, UDP, UDP-Lite, SCTP or DCCP: dropped
+///   399   anything else arriving by TCP, UDP, UDP-Lite, SCTP, DCCP, or a
+///         tunnel or IPsec: dropped
 ///   400   the kernel's own local rule, moved here from 0
 ///
 /// The drops name their protocols because a rule that dropped everything
@@ -495,13 +544,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .proto = .icmp,
         },
     );
-    for ([_]Proto{
-        .tcp,
-        .udp,
-        .udplite,
-        .sctp,
-        .dccp,
-    }) |pr| add(
+    for (dropped) |pr| add(
         out,
         &n,
         family,
@@ -526,6 +569,7 @@ fn routeRules(p: Policy) !void {
     defer _ = linux.close(nl);
     var seq: u32 = 1;
     for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        if (family == linux.AF.INET6 and !hasIpv6()) continue;
         var rules: [max_rules]Rule = undefined;
         for (plan(p, family, &rules)) |r| {
             var msg: [256]u8 = undefined;
@@ -551,6 +595,12 @@ fn routeRules(p: Policy) !void {
         );
         seq += 1;
     }
+}
+
+/// Whether the kernel has IPv6. Booted with ipv6.disable=1 it has no
+/// address family, rules or traffic for it, and no /proc/net/if_inet6.
+fn hasIpv6() bool {
+    return linux.errno(linux.access("/proc/net/if_inet6", linux.F_OK)) == .SUCCESS;
 }
 
 const NLMSG_ERROR = 2;
@@ -699,6 +749,40 @@ fn restrict(p: Policy) !void {
         );
     }
     for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access & fs_all);
+    // Reading: everything at the root but /dev, each entry by itself, so
+    // /dev gets only what is named here and below.
+    const root: i32 = @intCast(try sys(
+        linux.openat(linux.AT.FDCWD, "/", .{ .DIRECTORY = true, .CLOEXEC = true }, 0),
+        "open /",
+    ));
+    defer _ = linux.close(root);
+    var buf: [8192]u8 align(8) = undefined;
+    while (true) {
+        const n = try sys(linux.getdents64(root, &buf, buf.len), "read /");
+        if (n == 0) break;
+        var off: usize = 0;
+        while (off < n) {
+            const ent: *align(1) const linux.dirent64 = @ptrCast(&buf[off]);
+            off += ent.reclen;
+            const name: [*:0]const u8 = @ptrCast(&ent.name);
+            const s_name = std.mem.sliceTo(name, 0);
+            if (std.mem.eql(u8, s_name, ".") or std.mem.eql(u8, s_name, "..") or
+                std.mem.eql(u8, s_name, "dev")) continue;
+            // Landlock takes a directory's rights on a directory alone;
+            // a link (bin, to usr/bin) resolves to one that has its own.
+            const access: u64 = if (ent.type == linux.DT.DIR)
+                fs_read_file | fs_read_dir
+            else
+                fs_read_file;
+            try allowPath(ruleset, root, name, access);
+        }
+    }
+    // Pseudo-terminals, where the form allows them (cmd/init mounts devpts
+    // then, and only then).
+    if (linux.errno(linux.access("/etc/werewolf/allow/pty", linux.F_OK)) == .SUCCESS) {
+        try allowPath(ruleset, linux.AT.FDCWD, "/dev/ptmx", fs_terminal & fs_all);
+        try allowPath(ruleset, linux.AT.FDCWD, "/dev/pts", fs_terminal & fs_all);
+    }
     // Every terminal: the console the kernel was given (ttyS0, ttyAMA0,
     // hvc0, whichever the machine has), the virtual consoles, and the rest.
     const dev: i32 = @intCast(try sys(
@@ -706,7 +790,6 @@ fn restrict(p: Policy) !void {
         "open /dev",
     ));
     defer _ = linux.close(dev);
-    var buf: [8192]u8 align(8) = undefined;
     while (true) {
         const n = try sys(linux.getdents64(dev, &buf, buf.len), "read /dev");
         if (n == 0) break;
@@ -717,6 +800,16 @@ fn restrict(p: Policy) !void {
             const name: [*:0]const u8 = @ptrCast(&ent.name);
             const s_name = std.mem.sliceTo(name, 0);
             if (ent.type != linux.DT.CHR) continue;
+            if (std.mem.startsWith(u8, s_name, "gpiochip")) {
+                // Read, and request a line of: power-button's power key.
+                if (isPl061(s_name)) try allowPath(
+                    ruleset,
+                    dev,
+                    name,
+                    (fs_read_file | fs_ioctl_dev) & fs_all,
+                );
+                continue;
+            }
             if (!std.mem.startsWith(u8, s_name, "tty") and
                 !std.mem.startsWith(u8, s_name, "hvc")) continue;
             try allowPath(ruleset, dev, name, fs_terminal & fs_all);
@@ -725,6 +818,35 @@ fn restrict(p: Policy) !void {
     // As root, with CAP_SYS_ADMIN, no_new_privs is not needed, and is not
     // set: it would follow into every process on the machine.
     _ = try sys(linux.syscall2(.landlock_restrict_self, @intCast(ruleset), 0), "landlock restrict");
+}
+
+/// Whether gpiochip, a /dev name, is a PL061, the GPIO controller QEMU's
+/// virt and Apple's VZ wire the power button to: its device-tree node's
+/// compatible list names arm,pl061. On real hardware a chip may drive
+/// resets and regulators, so no other is given ioctls.
+fn isPl061(gpiochip: []const u8) bool {
+    var path_buf: [96]u8 = undefined;
+    const path = std.mem.print(
+        &path_buf,
+        "/sys/bus/gpio/devices/{s}/of_node/compatible\x00",
+        .{gpiochip},
+    ) catch
+        return false;
+    const fd = linux.openat(linux.AT.FDCWD, @ptrCast(path.ptr), .{ .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(fd));
+    var buf: [256]u8 = undefined;
+    const n = linux.read(@intCast(fd), &buf, buf.len);
+    if (linux.errno(n) != .SUCCESS) return false;
+    return compatibleWith(buf[0..n], "arm,pl061");
+}
+
+/// Whether a device-tree compatible property, NUL-separated strings,
+/// names want.
+fn compatibleWith(list: []const u8, want: []const u8) bool {
+    var it = std.mem.splitScalar(u8, list, 0);
+    while (it.next()) |c| if (std.mem.eql(u8, c, want)) return true;
+    return false;
 }
 
 /// access to path, beneath dir, in ruleset; nothing if there is no such
@@ -788,10 +910,11 @@ const fs_device: u64 = fs_read_file | fs_write_file;
 const fs_terminal: u64 = fs_device | fs_ioctl_dev;
 
 /// The machine's files, as every process sees them. Rights are added up
-/// along the path, so / reading everything and /run writing everything
-/// beneath it make /run read-write.
+/// along the path, so /usr reading everything and /run writing everything
+/// beneath it make /run read-write. / itself may only be listed: reading
+/// is given to each of its entries but /dev (restrict).
 const files = [_]struct { path: [*:0]const u8, access: u64 }{
-    .{ .path = "/", .access = fs_read_file | fs_read_dir },
+    .{ .path = "/", .access = fs_read_dir },
     .{ .path = "/usr", .access = fs_execute },
     // runit's FIFOs and the services' sockets.
     .{ .path = "/run", .access = fs_writable | fs_make_sock | fs_make_fifo },
@@ -808,8 +931,9 @@ const files = [_]struct { path: [*:0]const u8, access: u64 }{
     .{ .path = "/dev/urandom", .access = fs_device },
     .{ .path = "/dev/kmsg", .access = fs_device },
     .{ .path = "/dev/console", .access = fs_terminal },
-    .{ .path = "/dev/ptmx", .access = fs_terminal },
-    .{ .path = "/dev/pts", .access = fs_terminal },
+    // The power button, as an input event (cmd/power-button): found by
+    // listing, read, never given an ioctl.
+    .{ .path = "/dev/input", .access = fs_read_file | fs_read_dir },
 };
 
 // --- files, errors, logging ----------------------------------------------------
@@ -874,6 +998,13 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 
 const example = "connect 0 tcp 443\nconnect 0 udp 53\nconnect all udp 53\nconnect 0 " ++
     "icmp\nlisten tcp 22\nmetadata 68\n";
+
+test compatibleWith {
+    try std.testing.expect(compatibleWith("arm,pl061\x00arm,primecell\x00", "arm,pl061"));
+    try std.testing.expect(compatibleWith("arm,primecell\x00arm,pl061\x00", "arm,pl061"));
+    try std.testing.expect(!compatibleWith("arm,pl0610\x00", "arm,pl061"));
+    try std.testing.expect(!compatibleWith("rockchip,gpio-bank\x00", "arm,pl061"));
+}
 
 test "a program runs under its own name" {
     try std.testing.expectEqualStrings("runit", std.mem.span(baseName("/usr/bin/runit")));
@@ -966,6 +1097,23 @@ test "the plan, in the order the kernel tries it" {
         try std.testing.expectEqual(x.dport, t.dport);
         try std.testing.expectEqual(x.proto, t.proto);
     }
+}
+
+test "tunnels and IPsec arriving are dropped, like the transports" {
+    var rules: [max_rules]Rule = undefined;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        const r = plan(try parsePolicy(example), family, &rules);
+        for (dropped) |pr| {
+            const found = for (r) |x| {
+                if (x.priority == pref.in_drop and x.action == FR_ACT_BLACKHOLE and
+                    x.proto == pr) break true;
+            } else false;
+            try std.testing.expect(found);
+        }
+    }
+    // A policy cannot declare them.
+    try std.testing.expectError(error.BadPolicy, parsePolicy("connect 0 gre 1\n"));
+    try std.testing.expectError(error.BadPolicy, parsePolicy("connect all esp\n"));
 }
 
 test "an empty policy refuses everything but local traffic" {

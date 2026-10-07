@@ -6,4 +6,7 @@
 
 ok  nodata-marked    grep -q 'without data.key' /run/werewolf/nodata
 ok  data-empty-ro    [ -z "$(ls -A /data)" ] && ! touch /data/.x
-ok  disk-untouched   ! grep -q '^/dev/mapper/data ' /proc/mounts && [ "$(head -c 4 /dev/vda)" = LUKS ]
+# The disk itself cannot be read from here: /dev is closed under fence.
+# init, which read it before fence, said what it found.
+ok  disk-untouched   ! grep -q '^/dev/mapper/data ' /proc/mounts && [ "$(head -c 4 /dev/vda 2>&1)" != LUKS ]
+seen  disk-is-luks     werewolf: .*LUKS.*without data.key

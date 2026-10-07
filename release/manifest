@@ -41,6 +41,22 @@ packages=$(bsdtar -xOf "$rootfs" usr/lib/apk/db/installed | awk '
 	awk '{ printf "%s    {\"name\": \"%s\", \"version\": \"%s\", \"origin\": \"%s\"}", (NR > 1 ? ",\n" : ""), $1, $2, $3 }')
 [ -n "$packages" ] || { echo "release/manifest: no packages in $rootfs" >&2; exit 1; }
 
+# werewolf's own advisories (release/advisories), checked line by line: a
+# line this cannot read fails the release rather than ship unread.
+advisories=$(awk '
+	/^[ \t]*(#|$)/ { next }
+	{
+		id = $1; date = $2; tier = $3
+		title = $0; sub(/^[ \t]*[^ \t]+[ \t]+[^ \t]+[ \t]+[^ \t]+[ \t]+/, "", title)
+		if (NF < 4 || id !~ /^WW-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9]+$/ || date !~ /^[0-9][0-9][0-9][0-9]-[0-1][0-9]-[0-3][0-9]$/ ||
+			tier !~ /^(urgent|high|medium|low)$/ || title == "" || length(title) > 200 || title ~ /["\\]/ ||
+			title ~ /[^ -~]/ || seen[id]++) {
+			printf "release/manifest: release/advisories:%d: cannot read: %s\n", NR, $0 > "/dev/stderr"; bad = 1; exit 1
+		}
+		printf "%s    {\"id\": \"%s\", \"date\": \"%s\", \"tier\": \"%s\", \"title\": \"%s\"}", (n++ ? ",\n" : ""), id, date, tier, title
+	}
+	END { if (bad) exit 1 }' "$(dirname "$0")/advisories")
+
 cat >"$dist/$form-$arch.json" <<EOF
 {
   "format": "werewolf-release/1",
@@ -53,6 +69,9 @@ $files
   },
   "packages": [
 $packages
+  ],
+  "advisories": [
+$advisories
   ]
 }
 EOF

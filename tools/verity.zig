@@ -16,12 +16,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     }
     const dir = Io.Dir.cwd();
-    const image = try dir.readFileAlloc(io, args[1], gpa, .limited(4 << 30));
-    const built = try verity.build(gpa, image);
-
-    const file = try dir.openFile(io, args[1], .{ .mode = .write_only });
+    const file = try dir.openFile(io, args[1], .{ .mode = .read_write });
     defer file.close(io);
-    try file.writePositionalAll(io, built.tree, image.len);
+    const built = try verity.build(gpa, io, file);
+    try file.writePositionalAll(io, built.tree, try file.length(io));
 
     var line: Io.Writer.Allocating = .init(gpa);
     try built.params.format(&line.writer);

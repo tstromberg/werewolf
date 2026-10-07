@@ -1,6 +1,8 @@
-# Build every form, boot each under QEMU, and check its protections as
-# root on its console (docs/testing.md), on both architectures. `make
-# ci` runs this same job locally, in an Ubuntu VM under Lima.
+# Build every form, boot each under QEMU, and check its protections as root
+# on its console (docs/testing.md), on both architectures. The suite is split
+# into jobs so a failure names its area at a glance and the groups run in
+# parallel; `make ci` still runs the whole of it locally, in an Ubuntu VM
+# under Lima, and `make check-<group>` runs one group.
 name: check
 
 on:
@@ -16,13 +18,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  test:
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -31,15 +33,66 @@ jobs:
         run: sudo test/ci-setup
       - name: Unit tests
         run: make test
+
+  lint:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: sudo test/ci-setup
       - name: Lint
         run: make lint
-      - name: Boot and check every form, and a slot
+
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+        # The groups of make check (Makefile): forms is every form booted;
+        # shellfree the shell-free rebuilds; integrity the slot, its unsigned
+        # refusal and verity; cloud the metadata, no-data and lease boots;
+        # persist the UEFI-firmware power-cut run (skipped on emulated arm).
+        # x86_64 runs them all under KVM. arm64 has no KVM, so rather than
+        # emulate every form it runs them natively under systemd-nspawn
+        # (native, test/cage); integrity and cloud still emulate minimal and
+        # prod there, asserting the kernel, boot-chain and attack checks a
+        # container cannot carry.
+        group: [forms, shellfree, integrity, cloud, persist, native]
+        exclude:
+          - { runner: ubuntu-26.04, group: native }        # x86_64 emulates fast under KVM
+          - { runner: ubuntu-26.04-arm, group: forms }      # arm runs these natively instead
+          - { runner: ubuntu-26.04-arm, group: shellfree }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: sudo test/ci-setup
+      - name: Install example compilers
+        # Only the forms group builds the compiled tutorial applications, which
+        # compile on the host (examples/build.mk) for an image with no toolchain.
+        if: matrix.group == 'forms'
+        run: |
+          command -v go || sudo apt-get install -y golang-go
+          command -v rustup || sudo apt-get install -y rustup
+          rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
+          dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
+      - name: Boot and check (${{ matrix.group }})
         # A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no
         # guest starves.
-        run: make -k -j"$(( ($(nproc) + 1) / 2 ))" check
+        run: make -k -j"$(( ($(nproc) + 1) / 2 ))" check-${{ matrix.group }}
       - name: Keep the build and console logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: check-${{ runner.arch }}
+          name: check-${{ runner.arch }}-${{ matrix.group }}
           path: build/*/check/*.log

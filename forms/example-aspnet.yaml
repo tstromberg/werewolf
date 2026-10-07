@@ -1,0 +1,4 @@
+include: app.yaml
+contents:
+  packages:
+    - aspnet-10-runtime

@@ -1,0 +1,12 @@
+{
+  "version": "alpha0",
+  "locked": true,
+  "authKey": "file:/run/svc/tailscale/auth-key",
+  "acceptDNS": false,
+  "acceptRoutes": false,
+  "advertiseRoutes": [],
+  "runSSHServer": false,
+  "runWebClient": false,
+  "netfilterMode": "off",
+  "autoUpdate": { "check": false, "apply": false }
+}

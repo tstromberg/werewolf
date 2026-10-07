@@ -3,4 +3,5 @@
 # nothing on the network.
 exec    /usr/lib/werewolf/status-page
 user    status
+pledge  stdio rpath wpath unix connect
 read    /data/svc /run/werewolf

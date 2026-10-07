@@ -42,6 +42,12 @@ pub fn main(init: std.process.Init) !void {
     const cmd = parseCmdline(readAll(io, gpa, "/proc/cmdline"));
     const grubenv = trim(readAll(io, gpa, "/run/werewolf/grubenv"));
     if (grubenv.len == 0 and (cmd.esp.len == 0 or cmd.slot.len == 0)) park(io);
+    // stage0 insists on a or b; the entry name goes into a path here, so
+    // this does too.
+    if (cmd.slot.len > 0 and !std.mem.eql(u8, cmd.slot, "a") and !std.mem.eql(u8, cmd.slot, "b")) {
+        say(io, "werewolf.slot={s} is not a or b; not committing", .{cmd.slot});
+        park(io);
+    }
     const entry = try gpa.print(
         "werewolf-{s}",
         .{if (cmd.slot.len > 0) cmd.slot else "a"},
@@ -49,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
 
     var said = false;
     while (true) : (try io.sleep(.fromSeconds(wait), .awake)) {
-        if (!healthy(io, gpa)) continue;
+        if (!healthy(io)) continue;
         if (!exists(io, "/etc/sv/autoupdate") or exists(io, updater_ready)) break;
         // Said once, and only when the updater is all that is missing.
         if (!said) say(io, "the updater has not said it can update; not committing", .{});
@@ -110,6 +116,9 @@ fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void
         spec,
         ':',
     ) orelse return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
+    // Joined to the broker's mount and written as root: within it only.
+    if (!isCleanPath(spec[colon + 1 ..]))
+        return say(io, "werewolf.grubenv={s}: not a plain absolute path; not committing", .{spec});
     const boot = broker.ask(.grub) catch |err| return say(
         io,
         "no GRUB environment block at {s}: {s} {s}; not committing",
@@ -144,34 +153,41 @@ fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void
 }
 
 /// Whether every other service has been running for a minute, or is down
-/// because it asked to be (a service that parks itself); not down while
-/// wanted up, between crashes.
-fn healthy(io: Io, gpa: Allocator) bool {
+/// because it asked to be (a service that parks itself), by runsv's own
+/// account in each supervise/status; not down while wanted up, between
+/// crashes, nor finishing, as a crashed service does while leash-reap
+/// clears it, and not one whose runsv has yet to say.
+fn healthy(io: Io) bool {
     var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return false;
     defer d.close(io);
+    const now: u64 = @intCast(@max(
+        0,
+        @divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s),
+    ));
     var it = d.iterate();
     while (it.next(io) catch return false) |e| {
         if (std.mem.eql(u8, e.name, "slot-keep")) continue;
-        const dir = gpa.print("/etc/sv/{s}", .{e.name}) catch return false;
-        const res = std.process.run(
-            gpa,
-            io,
-            .{ .argv = &.{ "/usr/bin/sv", "status", dir } },
-        ) catch return false;
-        if (!statusHealthy(res.stdout)) return false;
+        var path_buf: [Dir.max_name_bytes + 32]u8 = undefined;
+        const path = std.mem.print(&path_buf, "{s}/supervise/status", .{e.name}) catch return false;
+        var f = d.openFile(io, path, .{}) catch return false;
+        defer f.close(io);
+        var status: [20]u8 = undefined;
+        const n = f.readPositionalAll(io, &status, 0) catch return false;
+        if (n != status.len or !serviceHealthy(status, now)) return false;
     }
     return true;
 }
 
-/// One line of `sv status`: "run: /etc/sv/x: (pid 12) 75s", or "down: ...".
-fn statusHealthy(line: []const u8) bool {
-    if (std.mem.indexOf(u8, line, "want up") != null) return false;
-    if (!std.mem.startsWith(u8, line, "run:")) return true;
-    const close = std.mem.indexOf(u8, line, ") ") orelse return false;
-    const rest = line[close + 2 ..];
-    const end = std.mem.findScalar(u8, rest, 's') orelse return false;
-    const up = std.fmt.parseInt(u32, rest[0..end], 10) catch return false;
-    return up >= 60;
+/// runsv's supervise/status: the time of the last change as TAI64N
+/// (seconds since 1970 plus 2^62 + 10), the pid, paused, want ('u' or
+/// 'd'), a term flag, and the state (0 down, 1 run, 2 finish).
+fn serviceHealthy(status: [20]u8, now: u64) bool {
+    const since = std.mem.readInt(u64, status[0..8], .big) -| ((1 << 62) + 10);
+    return switch (status[19]) {
+        0 => status[17] == 'd',
+        1 => now -| since >= 60,
+        else => false,
+    };
 }
 
 /// The entry for this slot that still counts its tries:
@@ -213,7 +229,7 @@ fn parseCmdline(text: []const u8) Cmdline {
     return c;
 }
 
-/// The filesystem with uuid on dir, through the mount helper.
+/// Left for stage0's deadman, which then lets the machine be.
 fn markCommitted(io: Io) void {
     Dir.cwd().writeFile(
         io,
@@ -246,6 +262,17 @@ fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     return r.interface.allocRemaining(gpa, .limited(1 << 20)) catch "";
 }
 
+/// Absolute, with no empty, . or .. part.
+fn isCleanPath(p: []const u8) bool {
+    if (p.len < 2 or p[0] != '/') return false;
+    var parts = std.mem.splitScalar(u8, p[1..], '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, ".."))
+            return false;
+    }
+    return true;
+}
+
 fn exists(io: Io, path: []const u8) bool {
     Dir.cwd().access(io, path, .{}) catch return false;
     return true;
@@ -265,13 +292,39 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
 
 const testing = std.testing;
 
-test statusHealthy {
-    try testing.expect(statusHealthy("run: /etc/sv/nginx: (pid 123) 75s\n"));
-    try testing.expect(!statusHealthy("run: /etc/sv/nginx: (pid 123) 12s\n"));
+/// A supervise/status for state, want, and the last change secs ago.
+fn statusOf(state: u8, want: u8, ago: u64) [20]u8 {
+    var st: [20]u8 = @splat(0);
+    std.mem.writeInt(u64, st[0..8], (1 << 62) + 10 + 1000 - ago, .big);
+    st[17] = want;
+    st[19] = state;
+    return st;
+}
+
+test serviceHealthy {
+    try testing.expect(serviceHealthy(statusOf(1, 'u', 75), 1000));
+    try testing.expect(!serviceHealthy(statusOf(1, 'u', 12), 1000));
     // Parked by design; the updater is held to more (updater_ready).
-    try testing.expect(statusHealthy("down: /etc/sv/power-button: 30s, normally up\n"));
-    try testing.expect(!statusHealthy("down: /etc/sv/nginx: 1s, normally up, want up\n"));
-    try testing.expect(!statusHealthy("run: /etc/sv/x: garbage\n"));
+    try testing.expect(serviceHealthy(statusOf(0, 'd', 30), 1000));
+    // Down between crashes, and finishing after one.
+    try testing.expect(!serviceHealthy(statusOf(0, 'u', 1), 1000));
+    try testing.expect(!serviceHealthy(statusOf(2, 'u', 600), 1000));
+    try testing.expect(!serviceHealthy(statusOf(7, 'u', 600), 1000));
+}
+
+test isCleanPath {
+    try testing.expect(isCleanPath("/boot/grub/grubenv"));
+    try testing.expect(isCleanPath("/grub2/grubenv"));
+    for ([_][]const u8{
+        "",
+        "/",
+        "grub/grubenv",
+        "/boot/../etc/shadow",
+        "/./x",
+        "/a//b",
+        "/a/",
+    }) |p|
+        try testing.expect(!isCleanPath(p));
 }
 
 test isTried {

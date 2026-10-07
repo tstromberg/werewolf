@@ -1,0 +1,41 @@
+#!/bin/sh
+# sign-tiers: stamp the CVE tiers feed (tools/cve-tiers.zig) with SERIAL and
+# an expiry three days out, sign it with the tiers key as FEED.sig, and
+# check the signature against release/tiers.pub. CI signs the feed at
+# least daily, so a current one never expires, and a machine whose feed has
+# stopped coming counts every fix as High within three days
+# (docs/design/update-policy.md).
+#
+#   WEREWOLF_TIERS_KEY=<PEM> release/sign-tiers SERIAL FEED
+#
+# The signature is RSA PKCS#1 v1.5 over the sha256 of FEED, as
+#   openssl dgst -sha256 -verify release/tiers.pub -signature F.sig F
+# checks it. See docs/releases.md.
+set -eu
+
+[ $# -eq 2 ] || { echo "usage: release/sign-tiers SERIAL FEED" >&2; exit 2; }
+[ -n "${WEREWOLF_TIERS_KEY:-}" ] || { echo "release/sign-tiers: WEREWOLF_TIERS_KEY is not set" >&2; exit 1; }
+pub=$(dirname "$0")/tiers.pub
+[ -f "$pub" ] || { echo "release/sign-tiers: no $pub" >&2; exit 1; }
+serial=$1
+feed=$2
+case $serial in
+[0-9][0-9][0-9][0-9][0-1][0-9][0-3][0-9]T[0-2][0-9][0-5][0-9][0-5][0-9]Z) ;;
+*) echo "release/sign-tiers: $serial is not a serial, such as 20261007T140000Z" >&2; exit 1 ;;
+esac
+grep -q '^  "format": "werewolf-cve-tiers/1",$' "$feed" ||
+	{ echo "release/sign-tiers: $feed is not a tiers feed" >&2; exit 1; }
+expires=$(date -u -d '+3 days' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+3d +%Y-%m-%dT%H:%M:%SZ)
+
+key=$(mktemp) # mode 0600
+trap 'rm -f "$key"' EXIT
+printf '%s\n' "$WEREWOLF_TIERS_KEY" >"$key"
+
+awk -v s="$serial" -v e="$expires" '
+	/^  "(serial|expires)": / { next }
+	{ print }
+	/^  "format": / { printf "  \"serial\": \"%s\",\n  \"expires\": \"%s\",\n", s, e }' "$feed" >"$feed.new"
+mv "$feed.new" "$feed"
+openssl dgst -sha256 -sign "$key" -out "$feed.sig" "$feed"
+openssl dgst -sha256 -verify "$pub" -signature "$feed.sig" "$feed" >/dev/null
+echo "sign-tiers: signed ${feed##*/}: serial $serial, expires $expires"

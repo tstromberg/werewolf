@@ -6,7 +6,8 @@
 # the same as the latest release's. Daily, sign the latest release's
 # manifests again so they do not expire. GitHub runs schedules this often
 # late or not at all, so a change to werewolf itself does not wait on one:
-# its push releases once its boots have passed. See docs/releases.md.
+# its push releases once its boots have passed. The CVE tiers feed is
+# tiers.yml's. See docs/releases.md.
 name: release
 
 on:

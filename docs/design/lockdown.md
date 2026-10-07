@@ -116,35 +116,56 @@ read-only `/proc/sys` with `CAP_SYS_ADMIN` dropped stops remounting it (see
 
 A seccomp filter is inherited by every child and every exec, and can never
 be removed, by root or anyone. Installed by init just before runit, it
-covers every process the machine will run. It denies, with `ENOSYS`, as
-a kernel built without them would answer, so a program that probes for one
-falls back:
+covers every process the machine will run. It **denies by default**: a
+system call is refused unless a promise the machine made allows it
+(pledge.md, System calls: promises), so what no promise names is refused
+even as the kernel gains new calls. A refused call fails with `ENOSYS`, as
+a kernel built without it would answer, so a program that probes for one
+falls back.
+
+The machine's promises are werewolf's own (`seal.base` in lib/seal.zig)
+and every promise its services pledge, which the build gathers from the
+service files. A handful of calls are in **no** promise, refused however a
+form is built:
 
 | Syscalls | Why |
 | --- | --- |
 | `bpf` | all eBPF: no programs, maps, links or BPF LSM programs |
 | `perf_event_open` | perf, and the tracepoint and kprobe attachment BPF uses |
-| `init_module`, `finit_module`, `delete_module` | already closed by `modules_disabled`; denied again for the audit trail |
+| `init_module`, `finit_module`, `delete_module` | already closed by `modules_disabled` |
 | `kexec_load`, `kexec_file_load` | already closed by lockdown and the sysctl |
 | `io_uring_setup`, `io_uring_enter`, `io_uring_register` | makes `io_uring_disabled` permanent |
-| `userfaultfd` | not built in Alpine's kernel; denied in case ours builds it |
+| `userfaultfd` | not built in Alpine's kernel; refused in case ours builds it |
 | `open_by_handle_at`, `name_to_handle_at` | walk past mount and chroot boundaries by inode handle |
 | `add_key`, `keyctl`, `request_key` | the kernel keyring; cryptsetup's use of it is over before init hands over |
-| `process_vm_readv`, `process_vm_writev` | read or write another process; Yama already refuses, denied again for the trail |
-| `acct`, `swapon`, `swapoff`, `quotactl`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `vhangup` | unused here; old, rarely audited code |
-| `modify_ldt` (x86_64) | the LDT, which only 16-bit code needs, and a past exploit primitive; `ia32_emulation=0` already closes `int 0x80`. Done |
+| `process_vm_readv`, `process_vm_writev` | read or write another process; Yama already refuses |
+| `acct`, `swapon`, `swapoff`, `quotactl`, `quotactl_fd`, `lookup_dcookie`, `uselib`, `iopl`, `ioperm`, `vhangup` | unused here; old, rarely audited code |
+| `modify_ldt` (x86_64) | the LDT, which only 16-bit code needs, and a past exploit primitive; `ia32_emulation=0` already closes `int 0x80` |
 
-Done: init installs the filter itself (`seal()`, cmd/init/init.zig), with
-every row above that the architecture has, and the architecture check
-below. `syslog` is not denied, though first listed: busybox's `dmesg`
-reads the kernel's log through it, and test/checks reads it so. No form
-yet asks for `ebpf` or `io_uring`, so those allowances are not built; a
-form that needs one adds it then. posture's `kernel-seal` checks PID 1
-carries a filter, and `kernel-legacy` that `modify_ldt` is refused.
+Done: init installs the filter itself (`seal()`, cmd/init/init.zig), from
+the machine's promises and with the architecture check below. What the
+promises do not allow goes to `seal-watch`, which refuses it (ENOSYS),
+says so once with the promise that would allow it, and counts it for the
+`seal` command; a leashed service holds itself to its own pledge with a
+second filter (leash). `ptrace` is in no promise; `syslog` is its own
+promise (`syslog`), which the base makes, since busybox's `dmesg` reads
+the kernel's log through it and test/checks reads it so. posture's `kernel-seal` checks PID 1 carries a
+filter, `processes-leash-attack` that a service's pledge refuses what it
+did not promise, and `kernel-legacy` that `modify_ldt` is refused.
+`make seal-learn` writes what each form needs by booting it with every
+call allowed and recorded (pledge.md).
 
-The filter looks at syscall numbers only, never arguments. The kernel
-(5.11 and later) then caches, per syscall, that the filter always allows it,
-and skips the filter on those calls, so the table's length costs nothing.
+The machine seal looks at syscall numbers, and at the arguments of five
+calls alone. The kernel (5.11 and later) caches, per syscall, that the
+filter always allows it, and skips the filter on those calls, so the
+table's length costs nothing. The five are refused, to everyone, for what
+they ask: `socket` for a family no promise names (AF_ALG among them),
+`setsockopt` for `TCP_ULP` (kernel TLS), `pipe2` for
+`O_NOTIFICATION_PIPE` (watch queues), and `timer_create` and
+`clock_nanosleep` for a CPU-time clock: each the way into a kernel bug
+exploited in the wild (pledge.md, Two filters; docs/cve-mitigation-survey.md).
+None is on a hot path. A service's own filter (leash) checks a new
+socket's family against its own promises.
 
 #### What the seal costs
 
@@ -172,15 +193,19 @@ calls the kernel, as `../scan` matching rules, pays nothing. Every program
 in a Docker container pays the same already, under Docker's default
 filter.
 
-werewolf pays it, by choice: it is the one way to close for good, root
-included, what no setting can (`modify_ldt` on x86_64, 32-bit system calls
-on aarch64), and every entry added to the table later costs nothing more.
-Our kernel (*Our kernel*, below) builds `modify_ldt` and the 32-bit
-interfaces out; the seal stays for the rest of the table.
+werewolf pays it, by choice: it is the one way to deny by default for
+good, root included, and to close what no setting can (`modify_ldt` on
+x86_64, 32-bit system calls on aarch64); a longer promise list costs
+nothing more. Our kernel (*Our kernel*, below) builds `modify_ldt` and the
+32-bit interfaces out; the seal denies by default regardless.
 
-It is a deny list, not an allow list. An allow list for every program on
-the machine would break with each glibc or Wolfi update; per-service allow
-lists belong in the services' sandboxes, below.
+It is a deny list, not an allow list: an allow list kept for every
+program on the machine would break with each glibc or Wolfi update. It is
+becoming an allow list of a different kind, of promises rather than system
+calls (pledge.md, System calls: promises): forms say what their services
+do, in a few words, and werewolf alone keeps which calls each word
+brings, so an update that makes a new call for the same work is learned
+once, for every form.
 
 On a 64-bit kernel with compat syscalls built in, the filter checks the
 architecture and kills any 32-bit syscall (done): werewolf ships no 32-bit code,
@@ -229,6 +254,7 @@ posture's `kernel-bounding-set` checks PID 1's bounding set:
 | `CAP_SYS_PTRACE` | ptrace and `/proc/<pid>/mem`, a second time |
 | `CAP_NET_RAW` | packet sockets, and with them classic BPF socket filters: how BPFDoor listens without `bpf()` or an open port |
 | `CAP_NET_ADMIN` | changes to addresses, routes, tc, XDP and, once it exists, nftables: the firewall init loads is the firewall |
+| `CAP_SYS_ADMIN` | mounting, the new mount API's `fsconfig` (CVE-2022-0185), and the rest of the kernel's largest privileged surface. fence drops it, on every form, once its Landlock restriction, which needs it, is set; the mount broker, started before fence, makes the few mounts after boot |
 | `CAP_MAC_ADMIN`, `CAP_MAC_OVERRIDE` | LSM policy; IPE's, once verified-boot.md lands |
 | `CAP_SYS_TIME`, `CAP_SYS_PACCT`, `CAP_LINUX_IMMUTABLE`, `CAP_AUDIT_CONTROL`, `CAP_CHECKPOINT_RESTORE`, `CAP_WAKE_ALARM`, `CAP_BLOCK_SUSPEND`, `CAP_MKNOD` | unused here |
 
@@ -240,8 +266,7 @@ posture accepts it.
 
 It keeps what sshd, runit and the updater use: `CAP_SETUID`, `CAP_SETGID`,
 `CAP_SYS_CHROOT`, `CAP_KILL`, `CAP_DAC_*`, `CAP_CHOWN`, `CAP_FOWNER`,
-`CAP_SYS_BOOT`, `CAP_AUDIT_WRITE`, `CAP_NET_BIND_SERVICE`, and, for now,
-`CAP_SYS_ADMIN` (see *Open questions*).
+`CAP_SYS_BOOT`, `CAP_AUDIT_WRITE` and `CAP_NET_BIND_SERVICE`.
 
 `bpf()` also accepts `CAP_SYS_ADMIN`, which is why the seccomp filter, not
 the bounding set, is the layer that settles eBPF.
@@ -256,15 +281,18 @@ file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
 | Allowance | Gives back |
 | --- | --- |
 | `ebpf` | `bpf` and `perf_event_open` in the filter; `CAP_BPF`, `CAP_PERFMON`, and `CAP_NET_ADMIN` for XDP and tc; lockdown stays at `integrity`; `kptr_restrict=1` and `CAP_SYSLOG`, so root can read kernel addresses, from which libbpf and bpftrace resolve symbols |
-| `packet` | `CAP_NET_RAW`: packet sockets, and the classic BPF filters on them, for tcpdump and a DHCP client. Done: `dhcp-client` |
-| `netadmin` | `CAP_NET_ADMIN`: addresses and routes, as a DHCP client renewing changes them, and fence's rules. Done: `dhcp-client` |
+| `packet` | `CAP_NET_RAW`: packet sockets, and the classic BPF filters on them, for tcpdump. DHCP needs none: its renewal opens its socket before fence |
+| `netadmin` | `CAP_NET_ADMIN`: addresses, routes and fence's rules. DHCP needs none: its renewal starts before fence and keeps its own |
 | `io_uring` | the io_uring syscalls in the filter, and `io_uring_disabled=0`, for workloads built on it |
+| `ipv6` | IPv6. Without it the kernel is booted with `ipv6.disable=1`, which leaves out the address family and every path through it (CVE-2026-53362); fence then sets IPv4's rules alone. Done |
+| `pty` | pseudo-terminals, for ssh logins: init mounts devpts. Without it `/dev/ptmx` opens nothing, for root too, so the TTY layer's pseudo-terminal code (CVE-2014-0196) is out of every process's reach, and nothing after boot can mount it. Done: the forms with logins (`sshd`, `prod-ssh`, `lima`; `qemu-host` through `sshd`); `bastion` forbids terminals (`PermitTTY no`) and has none |
 | `kvm` | KVM, to run virtual machines: on aarch64 the build leaves out `kvm-arm.mode=none`; on x86_64 the form lists `kvm-intel` and `kvm-amd` in its `.modules`, and the build loads them with `nested=0`. Done: `qemu-host` |
 | `nested-kvm` | needs `kvm`: the guests may run virtual machines too, `kvm-arm.mode=nested` or `nested=1`. Done |
 
-`kvm`, `nested-kvm`, `packet` and `netadmin` are built; `ebpf` and
-`io_uring` wait for a form that needs them. Every form built on `prod`
-keeps both network capabilities, as its client must. The
+`kvm`, `nested-kvm`, `packet`, `netadmin`, `ipv6` and `pty` are built;
+`ebpf` and `io_uring` wait for a form that needs them. No form keeps either network
+capability: DHCP's renewal, started by init before fence, holds them
+alone. The
 Makefile holds the one list of names (`ALLOWANCES`), and a name not in it
 fails the build, as does `nested-kvm` without `kvm`. Allowances that
 change what the kernel is told at boot become data the build writes,
@@ -350,7 +378,7 @@ connect tcp/443 tcp/7844
 | Key | Mechanism |
 | --- | --- |
 | `user` | its own uid and gid, from the image's `/etc/passwd`; `chpst -u` does the same today, without the rest |
-| `read`, `write`, `run` | Landlock filesystem rules: everything else is invisible to reads and writes, and cannot be run |
+| `read`, `write`, `run` | Landlock filesystem rules: everything else is invisible to reads and writes, and cannot be run. `/dev` is closed to every process by fence's domain but for the devices werewolf names; a service that needs another has no way to ask yet (*Open questions*) |
 | `listen`, `connect` | Landlock TCP rules (ABI 4, Linux 6.7): the ports it may bind and reach |
 | (always) | Landlock scoping (ABI 6, Linux 6.12): no abstract UNIX sockets or signals outside its own domain |
 | (always) | `no_new_privs`, an empty bounding set and no capabilities, but `CAP_NET_BIND_SERVICE` for a port below 1024: `mount`, `umount2`, `pivot_root`, `chroot`, `unshare`, `setns` and `reboot` are refused by the kernel already, with user namespaces off, so a second seccomp filter would add nothing; the seal's covers the rest |
@@ -432,6 +460,15 @@ kprobes and tracing for `prod-ebpf`; the seal removes them elsewhere.
 | `# CONFIG_HIBERNATION`, `# CONFIG_KEXEC` | on | nothing hibernates or kexecs |
 | `# CONFIG_KALLSYMS_ALL` | on | fewer symbols for an exploit to find |
 | `# CONFIG_BINFMT_MISC` | module | no registering interpreters for new binary formats |
+| `# CONFIG_CRYPTO_USER_API`, `# CONFIG_TLS`, `# CONFIG_WATCH_QUEUE`, `# CONFIG_BRIDGE_NF_EBTABLES`, `# CONFIG_OVERLAY_FS`, no USB sound, video or HID | module, or off | code exploited in the wild that no form uses (docs/cve-mitigation-survey.md); the `crypt` form opens LUKS2 without AF_ALG |
+| `CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y` | on | closes CVE-2025-38352's race |
+
+Until then, the build checks Alpine's config for those it relies on
+already (tools/kernel-config-check.zig): it fails if Alpine builds AF_ALG,
+kernel TLS, ebtables, nf_tables, x_tables, overlayfs, USB or HID into the
+kernel, where the closed module loader would not keep them out, or turns
+on watch queues, USB sound or video, or turns off
+`POSIX_CPU_TIMERS_TASK_WORK`.
 
 The runtime layers stay: they are what this design rests on while we use
 Alpine's kernel, and cost nothing once the code they guard is gone.
@@ -505,19 +542,15 @@ Each phase ships on its own.
 
 ## Open questions
 
-- **`CAP_SYS_ADMIN`.** `slot-keep` mounts the boot partition and the updater
-  mounts the victim's filesystem, both at runtime. Until those move into
-  init or out of the machine (verified-boot.md phase 3), root keeps
-  `CAP_SYS_ADMIN`, and with it can remount `/proc/sys` and undo the
-  reversible sysctls. Forms without either could drop it now.
 - **DHCP** (`cmd/dhcp-client/dhcp-client.zig`, used when the command line names no
   address) separates its own privileges, as OpenBSD's dhclient does. It
   opens and filters its packet socket as root, then forks. The engine,
   which alone reads the network, runs as `_dhcp`, chrooted to `/var/empty`,
   with no capabilities and a seccomp allowlist. The parent keeps only
-  `CAP_NET_ADMIN`, to apply leases, under seccomp and Landlock. So the
-  dhcp service needs `CAP_NET_RAW` and `CAP_NET_ADMIN` only when it starts,
-  and the seal can leave it those two at start; `packet` need not widen.
+  `CAP_NET_ADMIN`, to apply leases, under seccomp and Landlock. So it
+  needs `CAP_NET_RAW` and `CAP_NET_ADMIN` only when it starts. Done: init
+  starts its renewal before fence, so it keeps them, and fence drops both
+  for every process after it; no form allows `packet` or `netadmin`.
 - **fentry and fexit.** Alpine's kernel lacks `CONFIG_FUNCTION_TRACER`, so
   BPF programs that attach through trampolines fail; kprobes, tracepoints,
   uprobes, XDP, tc and cgroup programs work. Confirm which agents fall back
@@ -533,3 +566,8 @@ Each phase ships on its own.
   nothing in boot, commit, the updater or sshd, under CI's boot test.
 - **`hidepid` under busybox.** Its `mount` passes options as filesystem
   data, which `hidepid` is; confirm it works on a remount of `/proc`.
+- **Devices for a form.** fence closes `/dev` but for what werewolf's own
+  programs use. A form whose service needs a device (a GPU, a TPM, a
+  serial line) would need to name it, as it names ports: a `device` line
+  in the service file that the build gathers into fence's list, as it
+  gathers promises. No form needs one yet.

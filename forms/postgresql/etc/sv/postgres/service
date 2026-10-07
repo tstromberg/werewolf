@@ -5,4 +5,5 @@
 exec    /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres
 before  /usr/lib/werewolf/pg-init
 user    postgres
+pledge  stdio rpath wpath proc ipc unix listen
 run     /usr/bin/initdb

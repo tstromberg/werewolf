@@ -77,15 +77,17 @@ and `dd` do to run a program where nothing written may run; on x86_64
 since Alpine builds KVM into the kernel and starts it whenever a host lends
 the guest EL2, which would let root reach the host's nested
 virtualization. A form that runs virtual machines says so with an
-allowance, `kvm`, and its guests still cannot nest (`qemu-host`).
+allowance, `kvm`, and its guests still cannot nest (`qemu-host`). And
+`ipv6.disable=1`: the kernel has no IPv6 at all, and none of the code
+behind it, such as CVE-2026-53362's, unless the form allows it (`ipv6`).
 
 Last, init seals PID 1, and nothing after it, root included, can undo
 the seal before a reboot ([docs/design/lockdown.md](design/lockdown.md)):
 
 | | Stops |
 | --- | --- |
-| A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process |
-| The capability bounding set | loading kernel code (`CAP_SYS_MODULE`, `CAP_BPF`, `CAP_PERFMON`), hardware and `/dev/mem` (`CAP_SYS_RAWIO`), tracing (`CAP_SYS_PTRACE`), device files (`CAP_MKNOD`) and what nothing here uses; once fence has set the network policy, `CAP_NET_ADMIN` and `CAP_NET_RAW` too, but on forms that allow them, as `dhcp` and those built on it do for their DHCP client |
+| A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process. And, by their arguments, the way into kernel bugs exploited in the wild: a socket family no promise names (AF_ALG), kernel TLS (`TCP_ULP`), watch queues (`O_NOTIFICATION_PIPE`) and CPU-time timers, each answered as a kernel without it would answer ([docs/cve-mitigation-survey.md](cve-mitigation-survey.md)) |
+| The capability bounding set | loading kernel code (`CAP_SYS_MODULE`, `CAP_BPF`, `CAP_PERFMON`), hardware and `/dev/mem` (`CAP_SYS_RAWIO`), tracing (`CAP_SYS_PTRACE`), device files (`CAP_MKNOD`) and what nothing here uses; once fence has set the network policy, `CAP_NET_ADMIN` and `CAP_NET_RAW` too, on every form: DHCP's renewal, started before fence, holds them alone; and `CAP_SYS_ADMIN`, so no process after fence can mount, configure a filesystem or reach what else it guards: the mount broker, started before fence, makes the few mounts after boot |
 | The helpers' bounding set (`kernel.usermodehelper.bset`, `inheritable`) | a program the kernel starts itself (a core dump piped to a program, `kernel.modprobe`, the uevent helper) holding more than `CAP_SYS_BOOT`: it descends from the kernel, not PID 1, so neither line above reaches it. `kernel.hotplug` is emptied too |
 
 The seal fails closed: if any part of it cannot be set, PID 1 ends, the kernel panics, and the machine comes back on the slot that last worked. On x86_64 the filter also kills x32 system calls, which Alpine's kernel does not have, so that one that does could not number its way past the table.
@@ -99,7 +101,11 @@ in a Docker container pays the same already. The filter's length costs
 nothing, so what the seal adds later is free (*What the seal costs*).
 
 What root can undo, no one else can: each guards against ordinary users,
-and against root only once services stop running as root.
+and against root only once services stop running as root. Once fence has
+run, root cannot undo them either: its Landlock domain lets no process
+write `/proc/sys` (posture's `files-system-writes`). Only the programs
+init starts before fence, the mount broker and DHCP's renewal, are outside
+it.
 
 Lockdown is raised through securityfs, not on the kernel command line, so
 it holds however the machine was booted, and it is raised before any
@@ -114,7 +120,7 @@ head: /dev/mem,kmem,port is restricted`.
 | | |
 | --- | --- |
 | The root | `root.erofs`, mounted read-only at `/` by stage0 on every form: from the initramfs, or from a slot. Through dm-verity: the image carries its hash tree, stage0 the root hash, both from the same build, so a block changed since fails to read, and a changed superblock stops the boot. No overlay: what the system writes (accounts, keys, hostname, `resolv.conf`, runit's state) lives in `/run`, through links |
-| Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
+| Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. `/dev/pts` is mounted only on a form that allows `pty` (those with ssh logins): elsewhere no process, root included, can open a pseudo-terminal, the way into CVE-2014-0196. And `/dev` is closed, even for reading, but for the devices werewolf names (`null`, `zero`, `full`, `random`, `urandom`, `kmsg`, the console and terminals, the power button's), so a disk, the decrypted data volume or any other device opens for no one (fence; posture's `files-device-reads`) Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
 | `/data` | the machine's data. On a disk or beside the slots, `nosuid,nodev,noexec`; with a `data.key` in the config, in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
 | The victim's filesystem | read-only at `/victim`; the few writers mount it separately |
 
@@ -226,11 +232,12 @@ nothing is done in their place.
   database). fence already takes arriving traffic only to served ports, or
   from the ports and protocols the machine connects to, and logs impossible
   sources.
-- **IPv6 router advertisements ignored**: IPv6 is on, and they are how most
-  networks give it a route. Done instead: taken on the machine's NIC alone,
-  and only for a route and up to four addresses, so a rogue router cannot
-  rank itself above the real one, add a route to steal one destination, or
-  flood the NIC with addresses (`network-ipv6-ra-limits`).
+- **IPv6 router advertisements ignored**, on a form that allows IPv6
+  (`ipv6`; it is off otherwise): they are how most networks give it a
+  route. Done instead: taken on the machine's NIC alone, and only for a
+  route and up to four addresses, so a rogue router cannot rank itself
+  above the real one, add a route to steal one destination, or flood the
+  NIC with addresses (`network-ipv6-ra-limits`).
 
 ## Checking a machine
 

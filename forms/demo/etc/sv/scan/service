@@ -4,5 +4,6 @@
 exec    /usr/lib/werewolf/status-page scan
 run     /usr/bin/grype
 user    grype
+pledge  stdio rpath wpath proc exec inet unix connect
 connect tcp/443 tcp/53
 read    /

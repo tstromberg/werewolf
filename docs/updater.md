@@ -15,16 +15,22 @@ form on it.
 ## Running
 
 ```
-update check      build and boot the other slot if anything is newer
+update check      build and stage the other slot if anything is newer
 update outcome    after a reboot, log whether the last update held
 ```
 
-The `autoupdate` service waits for the running slot to commit, runs
-`outcome` once, then `check` at once and every 20 hours. A failed check is
-logged and tried again 20 hours later.
+The `autoupdate` service waits for the running slot to commit, reads its
+settings and logs them (`policy`), runs `outcome` once, then `check` at
+once and every hour (`/etc/werewolf/update-every` sets another interval,
+in seconds). A check stages what it finds; the service boots a staged slot
+when it is due, by how urgent its fixes are, and in between sleeps until
+the next check or that time, whichever comes first
+([design/update-policy.md](design/update-policy.md)). A failed check is
+logged and tried again at the next.
 
 The machine must be booted from a slot: the kernel command line names
-`werewolf.slot`, `werewolf.victim` and `werewolf.grubenv`. Elsewhere the
+`werewolf.slot`, `werewolf.victim`, and `werewolf.grubenv` (bite's GRUB)
+or `werewolf.esp` (werewolf's own disk). Elsewhere the
 service stays down.
 
 ## What a check does
@@ -33,15 +39,20 @@ service stays down.
 | --- | --- |
 | `userland` | Fetch, as `_update`, the indexes and packages for the image's `/etc/apk/world`, from its own repositories; then, as root and offline, `apk add --initdb` them into a new root, verified with its own keys ([Separation](#separation)). |
 | `kernel` | The same for `linux-virt` from Alpine, verified with `/etc/werewolf/alpine-keys`. |
-| `compare` | Diff the new root's installed packages and kernel against the running image's. No difference: log `check` and stop. A build that rolled back before: log `skip` and stop. |
+| `compare` | Diff the new root's installed packages and kernel against the running image's. No difference: log `check` and stop. A package or the kernel at an older version, in apk's order: log `skip` and stop, since an index carries no date, and an older one, signed, would install as readily as a newer. A build that rolled back before: log `skip` and stop. |
 | `cves` | Fetch the CVE sources and find what the update fixes (below), in children of their own ([Separation](#separation)). |
 | `root` | Add busybox's links, copy werewolf's own files forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Unwrap Alpine's arm64 EFI zboot image to the raw `Image`. |
 | `stage0` | Build stage0 from its packages, `init`, the form's modules and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
-| `install` | Mount the victim's filesystem and GRUB's apart, copy the slot in, `sync`, write `attempt`, set GRUB's `next_entry`. |
-| `report` | Write the report; log `update`. |
-| `reboot` | Reboot cleanly. |
+| `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, `sync`, write `attempt`, set GRUB's `next_entry`. |
+| `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
+| `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
+
+When the staged slot is due, the service logs `reboot` and reboots cleanly.
+On the machine's first check, ever, that is within two minutes; otherwise
+at the soonest of each tier's time, and never within an hour of boot.
+Any reboot before then boots the staged slot too: its one try is set.
 
 The slot keeps itself or not: `slot-keep` makes it GRUB's default once it is
 healthy, and anything else ends on the previous slot ([bite.md](bite.md#slots)).
@@ -51,6 +62,15 @@ a slot whose updater cannot run, the one failure no later update could
 undo, rolls back.
 After the reboot, `outcome` compares the running slot with `attempt` and
 logs `commit` or `rollback`. A rolled-back build's hash goes in `bad`.
+`attempt` names the boot that armed the slot, too (the kernel's
+`boot_id`): until the machine has rebooted, `outcome` judges nothing, so
+the service starting again over a staged slot is no rollback. A staged
+slot counts only while it is armed, its `attempt` this boot's; the service
+reboots for nothing else.
+
+A check runs only once this slot has committed, since until then the other
+slot is the one to fall back to; and `check`, `outcome` and the reboot
+each hold `lock`, so a check run by hand and the service's never meet.
 
 The build hash is the first 16 hex digits of the sha256 of the new package
 list and kernel. The same inputs give the same hash.
@@ -68,7 +88,7 @@ them, a check, instead of `userland`, `kernel` and `root`:
 | --- | --- |
 | `release` | Fetch `FORM-ARCH.json` and its `.sig`, as `_update`. Believe nothing in them until the signature checks against `image.pub`: RSA PKCS#1 v1.5 over SHA-256, checked by Zig's standard library. Then refuse a manifest of another format, form or architecture; one past its `expires` (logged `skip`, "expired"), since CI re-signs daily and a frozen mirror must not hold a machine back in silence; and one signed more than a day in the future. No release of the form yet (404): `skip`. |
 | `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A `build` that rolled back before: `skip`. |
-| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst`, `root.erofs`. |
+| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst`, `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
 
 The CVEs, the install, the report and the reboot are as for a built slot;
 the package changes are the manifest's `packages` against the running
@@ -82,8 +102,9 @@ signature guards against a bad mirror, not against root on the machine.
 
 ## Trust
 
-apk fetches every package, checks every signature and compares every
-version. The updater decides nothing about trust.
+apk fetches every package; root checks every signature and hash before
+apk reads one, and apk checks them again and compares every version. The
+updater decides nothing about trust: the keys do.
 
 The trust anchors are the Wolfi key apko installed in `/etc/apk/keys` and
 the two Alpine keys in `/etc/werewolf/alpine-keys`, which matched byte for
@@ -115,11 +136,20 @@ fork or clone at all; and fails `mount`, which apk tries in its root,
 with EPERM. Then root takes the cache back: the directory and every file
 become root's, and anything that is not a regular file with a name apk
 gives its cache (`APKINDEX.*.tar.gz`, `*.apk`, `installed`) is removed
-unread. Root's apk installs from it with `--no-network`, checking every
-index signature and package hash against root's keys, as it always
-does: the child decides nothing about trust, and a compromised one can
-only withhold packages. Last, root prunes the cache to the packages the
-new root took.
+unread. Before its apk reads a byte, root checks the cache itself
+(`cmd/slot-update/apk.zig`): each index's signature against the root's
+keys (`.SIGN.RSA256` is SHA-256, Alpine's `.SIGN.RSA` SHA-1), each
+package's control segment against the SHA-1 its index lists (`C:`), and
+the rest against the SHA-256 that control names (`datahash`). A package
+no index lists is removed; one that does not match fails the pass, and is
+removed for the next to fetch again. Root writes each index's signature
+segment anew and drops Alpine's package signatures, which the index
+vouches for, so apk installs them as it does Wolfi's, which carry none.
+Root's apk then installs with `--no-network`, checking the same again:
+the child decides nothing about trust, and a compromised one can
+withhold packages, or offer an older index, which `compare` refuses. Its
+files are capped at 1 GiB each. Last, root prunes the cache to the
+packages the new root took.
 
 **CVE sources.** These are the one input the updater parses itself, 40
 MB of JSON from outside, so root does not touch them. Each goes through
@@ -159,7 +189,10 @@ The source's `error` says what happened to a child: its own word
 `ChildSaidTooMuch`, `ChildSaidNonsense`, `BadLine`.
 
 Root still runs apk, offline, to install, and `mkfs.erofs` and `zstd` to
-build; those read only what root has checked or made.
+build, each by its full path, each killed if it runs 30 minutes. They read
+only what root made or checked. Root writes into the roots it builds
+through `openat2` with `RESOLVE_IN_ROOT`: a link a package laid resolves
+as it would on the slot, within the root, never into the running system.
 
 ## CVEs
 
@@ -184,14 +217,25 @@ it was written. Alpine's own patches on top of upstream are not counted.
 /data/svc/autoupdate/
     log                 one JSON line per event
     reports/TIME-BUILD.json
+                        one per update staged, the newest 500 kept
     serial              the last release that committed, when following
                         releases
-    attempt             "SLOT BUILD" of the update awaiting its outcome
+    attempt             "SLOT BUILD BOOT" of the slot armed to boot once,
+                        and the boot that armed it
+    lock                held while a check, outcome or reboot runs
+    pending             the staged slot: its build, and for each tier of
+                        its fixes when this machine first saw one
+    rebooted            when the updater last rebooted, for `down`
+    cve-tiers.json      the last CVE tiers feed this machine took, and
+    cve-tiers.json.sig  its signature, checked again whenever it is read
+    cve-tiers.json.serial
+                        the newest feed serial taken: none older is, even
+                        once the kept feed has expired
     bad                 builds that rolled back, one per line
     cache/              apk's downloads, one directory per root built
                         (root, kernel, stage0), holding what the last
-                        check installed and nothing older; root's, lent
-                        to _update while it fetches
+                        good check installed; root's, lent to _update
+                        while it fetches
     work/               the build, deleted when done
         apk-NAME/       apk's scratch root while _update fetches
         net/etc/        the CVE fetcher's root: resolv.conf and hosts
@@ -200,18 +244,26 @@ it was written. Alpine's own patches on top of upstream are not counted.
 
 The updater reads `/proc/cmdline`, `/etc/apk/` and the
 build record in `/usr/share/werewolf/`: `form`, `release`, `kernel`,
-`alpine`, `overlay`, `modules`, `stage0.world`, `stage0.init`.
+`alpine`, `overlay`, `modules`, `stage0.world`, `stage0.init`, `tiers`,
+`tiers.pub` and `advisories`.
 
 ## Events
 
-Every line has `time` (RFC 3339, UTC), `host` and `event`.
+Every line has `time` (RFC 3339, UTC), `host`, `seq`, `prev` and `event`.
+`seq` counts on from the line before; `prev` is the first 16 hex digits of
+that line's SHA-256, so a line edited or removed breaks the chain from
+there ([design/update-policy.md](design/update-policy.md#the-audit-log)).
 
 | Event | Fields |
 | --- | --- |
-| `check` | `slot`, `release`, `result` |
-| `update` | `from`, `to`, `build`, `kernel`, `packages` (count), `cves` (count), `report` |
-| `commit` | `slot`, `build`, `release` |
-| `rollback` | `failed`, `running`, `build`, `release` |
+| `policy` | `settings` (each one's `value`, `source` and `limit`), `refused` (each file refused, with `key` and `why`) |
+| `check` | `slot`, `release`, `result`; when `staged`: `build`, `tier`, `due`, `due_in` |
+| `stage` | `slot`, `from`, `build`, `kernel`, `packages` (count), `cves` (count), `tier`, `seen` (per tier), `fixes` (count per tier), `due`, `due_in` (seconds), `why`, `report` |
+| `reboot` | `build`, `tier`, `cause` (`due` or `first-boot`), `due`, `late` (seconds), `why` |
+| `feed` | `serial`, `expires`, `result` (`ok`, `unchanged`, `kept`: the feed kept from before, as a new one could not be had or did not check; `none`), `reason`, and with `none`, `consequence` |
+| `tier` | `build`, `fix`, `cause` (the evidence), `feed` (its serial), `from`, `to`, `was_due`, `due`, `due_in`, `why`: a staged fix's tier rose |
+| `commit` | `slot`, `build`, `release`, `waited` (per tier: `seen`, and the seconds from then to the commit), `down` (seconds from the update's reboot to this boot's kernel start, or null) |
+| `rollback` | `failed`, `running`, `build`, `release`, `down` |
 | `skip` | `build`, `reason` |
 | `error` | `step`, `error`, `detail` (what the failed command said) |
 

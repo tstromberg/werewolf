@@ -1,7 +1,11 @@
-//! debug-shell: a root shell on the serial console, for debugging, when the
-//! kernel command line has werewolf.debug=1 and the form has a shell to
-//! give (busybox's getty and ash: the sshd, lima and prod-ssh forms, or any
-//! form built with DEV=1). Otherwise it parks itself.
+//! debug-shell: a root shell on the serial console, without a password, for
+//! debugging: on a DEV=1 build alone (/usr/share/werewolf/dev, on its
+//! verified read-only root), booted with werewolf.debug=1. Otherwise it
+//! parks itself. A released form that carries a shell (prod-ssh, sshd)
+//! gives none: the kernel command line is a switch that root, or anyone at
+//! a bitten machine's console who can edit GRUB's menu, can flip, so it
+//! loosens nothing (docs/design/lockdown.md). It says so on the console
+//! when it opens one.
 //!
 //! runsv runs it as /etc/sv/debug-shell/run, and as /etc/sv/debug-shell/control/t
 //! in place of sending TERM. The shell is an interactive ash, which ignores
@@ -45,8 +49,13 @@ pub fn main(init: std.process.Init) !void {
     var debug = false;
     while (words.next()) |w| debug = debug or std.mem.eql(u8, w, "werewolf.debug=1");
     if (!debug) park(io, null);
+    if (!exists("/usr/share/werewolf/dev"))
+        park(io, "werewolf.debug=1 ignored: only a DEV=1 build gives a console shell");
     if (!executable("/usr/bin/getty") or
         !executable("/bin/ash")) park(io, "werewolf.debug=1, but this form has no shell to give");
+
+    const tty = consoleName(line);
+    say(io, "werewolf.debug=1: a root shell, without a password, on {s}", .{tty});
 
     const err = std.process.replace(
         io,
@@ -57,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
             "/bin/ash",
             "-L",
             "115200",
-            consoleName(line),
+            tty,
             "vt100",
         } },
     );
@@ -82,6 +91,10 @@ fn consoleName(cmdline: []const u8) []const u8 {
 
 fn executable(path: [:0]const u8) bool {
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
+}
+
+fn exists(path: [:0]const u8) bool {
+    return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
 /// Down, as a service with nothing to do: runsv will not restart it.

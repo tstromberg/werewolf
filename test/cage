@@ -1,0 +1,85 @@
+#!/bin/sh
+# cage NAME EROFS LOG: boot a werewolf form's root under systemd-nspawn on
+# this kernel -- no virtual machine -- and judge its posture. werewolf's
+# runtime protections (the seal, Landlock, fence's policy routing, the leash,
+# hidepid, W^X) are the host kernel's own features: they hold in a container,
+# and the in-container posture service exercises and attacks them faithfully
+# (WEREWOLF_CHECK=1, below). What a container cannot own -- the kernel's
+# sysctls and boot line (every kernel-* check but kernel-seal, werewolf's own
+# filter), the mount options of nspawn's own mounts, a host sysctl behind a
+# files-* check -- is asserted in emulation instead; POSTURE_KNOWN_NATIVE
+# names the few non-kernel ones, as POSTURE_KNOWN does for a booted machine.
+#
+# This is the native half of the arm64 checks, where a full-machine boot would
+# otherwise emulate slowly (docs/testing.md). Run where sudo works.
+set -u
+
+name=${1:?usage: cage NAME EROFS LOG}
+erofs=${2:?}
+log=${3:?}
+: >"$log"
+
+say() { printf '%-6s %-18s %s\n' "$1" "$name" "$2"; }
+mnt=$(mktemp -d)
+work=$(mktemp -d)
+cleanup() {
+	sudo machinectl terminate "cage-$name" 2>/dev/null
+	[ -n "${pid:-}" ] && { kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; }
+	sudo umount "$mnt" 2>/dev/null
+	sudo rm -rf "$mnt" "$work"
+}
+trap cleanup EXIT
+fail() { say FAIL "$1"; exit 1; }
+
+# A writable copy of the read-only erofs tree: nspawn and runit write a few
+# files (machine-id, resolv.conf, the supervise directories).
+sudo mount -t erofs -o loop,ro "$erofs" "$mnt" || fail "cannot mount $erofs"
+sudo cp -a "$mnt/." "$work/" || fail "cannot copy the root"
+sudo umount "$mnt"
+
+# Boot it. --console=pipe keeps init non-interactive, its console to the log.
+# --capability=all lets init raise the seal (the listener needs CAP_SYS_ADMIN)
+# and fence set the policy; the seal then drops what the services may not keep.
+# --private-network gives a net namespace of its own, so fence's policy routing
+# applies cleanly, every run alike, and never touches the host's.
+# WEREWOLF_CHECK=1 reaches the posture service through init and runit, so it
+# attacks the machine (posture --attack) as a PID 1 descendant, under the seal,
+# the leash and fence's Landlock, as a real machine with werewolf.check=1 does.
+sudo systemd-nspawn --quiet --directory="$work" --machine="cage-$name" \
+	--console=pipe --capability=all --private-network \
+	--setenv=WEREWOLF_CHECK=1 /init >>"$log" 2>&1 </dev/null &
+pid=$!
+
+# Wait for the posture line the posture service prints once services settle.
+line=""
+i=0
+while [ $i -lt 120 ]; do
+	line=$(grep -aE 'posture: fail=[^ ]* pass=[0-9]+ skip=[0-9]+ ' "$log" | head -1) && [ -n "$line" ] && break
+	kill -0 "$pid" 2>/dev/null || fail "the container exited before posture; see $log"
+	sleep 1
+	i=$((i + 1))
+done
+[ -n "$line" ] || fail "no posture line in 120 s; see $log"
+
+# The posture line ends in the full JSON, which says each check's area. A
+# failing check is expected here if it is a kernel-* check other than
+# kernel-seal (the container shares the host's kernel), or POSTURE_KNOWN_NATIVE
+# names it. Anything else failing is a regression in a protection that should
+# hold natively.
+got=$(printf '%s\n' "$line" | sed -E 's/.*fail=([^ ]*) .*/\1/' | tr ',' ' ')
+passed=$(printf '%s\n' "$line" | sed -E 's/.*pass=([0-9]+).*/\1/')
+json=$(printf '%s\n' "$line" | sed -E 's/^[^{]*(\{.*\})[^}]*$/\1/')
+known=" ${POSTURE_KNOWN_NATIVE:-} "
+new=""
+for id in $got; do
+	case $known in *" $id "*) continue ;; esac
+	[ "$id" != kernel-seal ] &&
+		printf '%s' "$json" | grep -q "\"id\":\"$id\",\"area\":\"kernel\"" && continue
+	new="$new $id"
+done
+
+echo "--- cage $name: pass=$passed fail=[$got]" >>"$log"
+[ "$passed" -ge 20 ] || fail "only $passed checks passed; did posture run? see $log"
+[ -z "$new" ] || fail "failing, not expected natively:$new; see $log"
+say ok posture
+say pass "all checks"

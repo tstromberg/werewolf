@@ -1,6 +1,9 @@
 # The application, as its own user: it may bind :8080 and no other port,
 # read the image, and run only java. Without its performance-data file,
-# which it would write in /tmp.
-exec    /usr/bin/java -XX:-UsePerfData -m jdk.httpserver -b 0.0.0.0 -p 8080 -d /usr/lib/app/www
+# which it would write in /tmp; and with its temporary directory in its own
+# /run, since /tmp is not the service's to write.
+exec    /usr/bin/java -XX:-UsePerfData -Djava.io.tmpdir=/run/svc/app -m jdk.httpserver -b 0.0.0.0 -p 8080 -d /usr/lib/app/www
 user    app
+pledge  stdio rpath wpath proc inet listen unix
+memory  1024
 listen  tcp/8080

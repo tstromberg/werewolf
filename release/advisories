@@ -1,0 +1,14 @@
+# werewolf's own security advisories: fixes to werewolf's code, which no
+# CVE names (docs/design/update-policy.md, werewolf's own fixes). Add a
+# line in the commit that makes the fix:
+#
+#   ID           DATE        TIER    TITLE
+#   WW-2026-001  2026-10-07  high    fence: what was wrong, in a line
+#
+# ID is WW-YEAR-NUMBER, never reused; DATE when the fix landed, UTC; TIER
+# urgent, high, medium or low, as a CVE of the same weight would be; TITLE
+# printable ASCII, no quotes or backslashes, at most 200 characters. Every
+# image carries this file, so it knows which fixes it has; a release's
+# manifest carries it too, signed, and a machine applies each advisory its
+# own image lacks at its tier (cmd/slot-update). release/manifest refuses
+# a release whose file has a line it cannot read.

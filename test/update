@@ -9,15 +9,24 @@
 # -no-reboot; CMDLINE is the kernel command line, but for werewolf.slot.
 #
 # First boot, slot a: it commits, the updater finds Alpine's kernel newer,
-# fetches and builds slot b (or fetches the release's), installs it, and
-# reboots, which ends QEMU.
+# fetches and builds slot b (or fetches the release's), and stages it; it
+# is the machine's first check, so slot b is due within two minutes, and
+# the updater reboots into it, which ends QEMU
+# (docs/design/update-policy.md).
 # Then, from the disk: the report names both CVE sources with a sha256 and
 # no error; each apk cache kept its packages; slot b's root is root's, mode
-# 0755; GRUB will boot b once. Second boot, slot b: it must commit, and the
+# 0755; GRUB will boot b once; slot b's stage0 has the build's device nodes. Second boot, slot b: it must commit, and the
 # updater record that the update held. In neither boot may a seccomp
 # filter have killed anything. The consoles are DIR/update-1.log and
 # DIR/update-2.log.
+#
+# With STAGED=1, the machine has checked before (its log is seeded), so the
+# updater stages slot b and waits for it to be due, hours off; QEMU is cut
+# off the moment it is staged, as a crash or an operator's reboot would end
+# it, and slot b must boot all the same: a staged slot is armed
+# (docs/design/update-policy.md).
 set -u
+staged=${STAGED:-}
 [ $# -ge 3 ] || { echo "usage: update DIR CMDLINE QEMU..." >&2; exit 2; }
 dir=$1
 cmdline=$2
@@ -36,6 +45,7 @@ for d in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
 	[ -n "$debugfs" ] || [ ! -x "$d/debugfs" ] || debugfs=$d/debugfs
 done
 [ -n "$debugfs" ] || { say FAIL "no debugfs (e2fsprogs)"; exit 1; }
+e2fsck=${debugfs%/*}/e2fsck
 victim_cat() { "$debugfs" -R "cat $1" "$dir/victim.img" 2>/dev/null; }
 victim_dump() { "$debugfs" -R "dump $1 $2" "$dir/victim.img" >/dev/null 2>&1; }
 victim_ls() { "$debugfs" -R "ls -p $1" "$dir/victim.img" 2>/dev/null | awk -F/ '$6 != "" && $6 != "." && $6 != ".." { print $6 }'; }
@@ -74,17 +84,48 @@ boot() {
 absent() { ! grep -a -q "$1" "$2"; }
 event() { grep -a -o "autoupdate: .*\"event\":\"$2\".*" "$dir/update-$1.log" | head -1; }
 
-# First boot. An update reboots, ending QEMU; a check or an error leaves
-# the machine up, so it is ended then.
-boot 1 a "$dir/vmlinuz" "$dir/initramfs.zst" '"event":"(check|error)"' 3600 "$@" || exit 1
-if [ -z "$(event 1 update)" ]; then
+state=/var/lib/werewolf/data/svc/autoupdate
+if [ -n "$staged" ]; then
+	# A log from an earlier check, owned and moded as the updater's own.
+	printf '{"time":"2026-01-01T00:00:00Z","host":"werewolf","event":"check","result":"current"}\n' >"$dir/seed.log"
+	for d in /var/lib/werewolf/data /var/lib/werewolf/data/svc $state; do
+		"$debugfs" -w -R "mkdir $d" "$dir/victim.img" >/dev/null 2>&1
+		for field in "uid 0" "gid 0" "mode 040755"; do
+			"$debugfs" -w -R "sif $d $field" "$dir/victim.img" >/dev/null 2>&1
+		done
+	done
+	"$debugfs" -w -R "write $dir/seed.log $state/log" "$dir/victim.img" >/dev/null 2>&1
+	for field in "uid 0" "gid 0" "mode 0100600"; do
+		"$debugfs" -w -R "sif $state/log $field" "$dir/victim.img" >/dev/null 2>&1
+	done
+	[ -n "$(victim_cat $state/log)" ] || { say FAIL "could not seed the victim's log"; exit 1; }
+	until='"event":"(stage|check|error)"'
+else
+	until='"event":"(check|error)"'
+fi
+
+# First boot. A staged update reboots when due, ending QEMU; a check or an
+# error leaves the machine up, so it is ended then. With STAGED=1, the
+# stage ends it: the power cut.
+boot 1 a "$dir/vmlinuz" "$dir/initramfs.zst" "$until" 3600 "$@" || exit 1
+if [ -z "$(event 1 stage)" ]; then
 	say FAIL "no update: $(grep -a -o 'autoupdate: .*"event":"\(check\|error\)".*' "$dir/update-1.log" | head -1)"
 	exit 1
 fi
-say pass "slot a updated: $(event 1 update | sed 's/.*"kernel":"\([^"]*\)".*"cves":\([0-9]*\).*/\1, \2 CVEs/')"
+say pass "slot a staged an update: $(event 1 stage | sed 's/.*"kernel":"\([^"]*\)".*"cves":\([0-9]*\).*/\1, \2 CVEs/')"
+if [ -n "$staged" ]; then
+	check "staged, and not yet due: the updater did not reboot" absent '"event":"reboot"' "$dir/update-1.log"
+	# Cut off, the filesystem's last changes are in its journal, which the
+	# next mount replays; debugfs does not, so replay it first, as that
+	# mount would.
+	"$e2fsck" -y -E journal_only "$dir/victim.img" >/dev/null 2>&1
+	check "what was staged is on the disk: the log's stage line" sh -c \
+		"'$debugfs' -R 'cat $state/log' '$dir/victim.img' 2>/dev/null | grep -q '\"event\":\"stage\"'"
+else
+	check "the first check's update booted at once" grep -a -q '"event":"reboot",.*"cause":"first-boot"' "$dir/update-1.log"
+fi
 check "no seccomp kill in slot a" absent 'type=1326' "$dir/update-1.log"
 
-state=/var/lib/werewolf/data/svc/autoupdate
 victim_cat "$state/reports/$(victim_ls $state/reports | tail -1)" >"$dir/report.json"
 # One source or two: the kernel's only when the kernel changed.
 listed=$(grep -c '"url": ' "$dir/report.json")
@@ -108,7 +149,14 @@ check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.i
 # Second boot: what the update built.
 victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
 victim_dump /boot/werewolf/b/initramfs.zst "$dir/b-initramfs.zst"
+# The device nodes in a stage0, by type, mode and name: apko makes the
+# build's, and slot-update must write the same, /dev/console above all,
+# which the kernel gives stage0 as its stdin, stdout and stderr.
+devices() { zstd -dc "$1" | bsdtar -tvf - 2>/dev/null | awk '$1 ~ /^c/ { print $1, $NF }' | sort; }
+built=$(devices "$dir/initramfs.zst")
+check "slot b's stage0 has the build's device nodes" [ -n "$built" -a "$built" = "$(devices "$dir/b-initramfs.zst")" ]
 boot 2 b "$dir/b-vmlinuz" "$dir/b-initramfs.zst" '"event":"(commit|rollback|error)"' 900 "$@" || exit 1
 check "slot b committed, and the update held" grep -a -q '"event":"commit","slot":"b"' "$dir/update-2.log"
+check "the commit says how long each tier waited" grep -a -q '"event":"commit",.*"waited":{' "$dir/update-2.log"
 check "no seccomp kill in slot b" absent 'type=1326' "$dir/update-2.log"
 exit $failed

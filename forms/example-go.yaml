@@ -1,0 +1,2 @@
+# A compiled application needs prod, with no Go toolchain in the VM.
+include: app.yaml

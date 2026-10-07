@@ -68,29 +68,54 @@ pub fn main(init: std.process.Init) !void {
         !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
 
     // Every module the form needs, then the loader closes for good: the
-    // root that follows finds it closed and loads nothing.
-    if (!run(io, &.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
+    // root that follows finds it closed and loads nothing. The slot's disk
+    // is looked for while the drivers load, its superblock needing none,
+    // and modload then told its filesystem, for the modules that alone
+    // needs (xfs's, btrfs's): none for werewolf's own ext4, or with no slot.
+    var loader: ?std.process.Child = std.process.spawn(io, .{
+        .argv = &.{"/usr/lib/werewolf/modload"},
+        .stdin = .pipe,
+    }) catch |err| blk: {
+        say("cannot run modload: {s}", .{@errorName(err)});
+        break :blk null;
+    };
+    const found = if (boot.slot.len > 0) findFilesystem(gpa, boot.uuid) else null;
+    if (loader) |*l| {
+        const name = if (found) |f| @tagName(f.kind) else "none";
+        l.stdin.?.writeStreamingAll(io, name) catch {};
+        l.stdin.?.writeStreamingAll(io, "\n") catch {};
+        l.stdin.?.close(io);
+        l.stdin = null;
+        const ok = if (l.wait(io)) |term| switch (term) {
+            .exited => |code| code == 0,
+            else => false,
+        } else |_| false;
+        if (!ok) say("not every module loaded; see above", .{});
+    }
+    const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
+    var slot_ms: u64 = 0;
     if (boot.slot.len > 0) {
-        const found = findFilesystem(gpa, boot.uuid) orelse fail("no filesystem {s}", .{boot.uuid});
+        const f = found orelse fail("no filesystem {s}", .{boot.uuid});
         mkdir("/victim");
         const rc = linux.mount(
-            found.dev,
+            f.dev,
             "/victim",
-            @tagName(found.kind),
+            @tagName(f.kind),
             MS.NOSUID | MS.NODEV | MS.NOEXEC,
             0,
         );
         if (linux.errno(rc) != .SUCCESS) fail(
             "cannot mount {s}: {s}",
-            .{ found.dev, @tagName(linux.errno(rc)) },
+            .{ f.dev, @tagName(linux.errno(rc)) },
         );
         img = try gpa.printSentinel(
             "/victim{s}/{s}/root.erofs",
             .{ boot.dir, boot.slot },
             0,
         );
+        slot_ms = bootMs();
     }
     // Read-only, and nothing over it: no overlay to write into. The image,
     // a file in a slot's filesystem or in this initramfs, goes through a
@@ -118,6 +143,7 @@ pub fn main(init: std.process.Init) !void {
         "cannot mount {s}: {s}",
         .{ img, @tagName(linux.errno(rc)) },
     );
+    const root_ms = bootMs();
     if (boot.slot.len > 0)
         say(
             "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",
@@ -158,7 +184,16 @@ pub fn main(init: std.process.Init) !void {
     _ = linux.chdir("/");
     say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
     var env = try init.environ_map.clone(gpa);
-    try env.put("WEREWOLF_KERNEL_MS", try gpa.print("{d}", .{kernel_ms}));
+    // Where the time went, each phase and when it ended, for init to add
+    // its own to: the kernel, the modules, the slot's filesystem found and
+    // mounted, and the root opened through dm-verity.
+    try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
+        try gpa.print(
+            "kernel={d} modules={d} slot={d} root={d}",
+            .{ kernel_ms, modules_ms, slot_ms, root_ms },
+        )
+    else
+        try gpa.print("kernel={d} modules={d} root={d}", .{ kernel_ms, modules_ms, root_ms }));
     const err = std.process.replace(io, .{ .argv = &.{"/init"}, .environ_map = &env });
     fail("cannot start /init: {s}", .{@errorName(err)});
 }
@@ -184,10 +219,10 @@ fn deadman(slot: []const u8) void {
         var buf: [128]u8 = undefined;
         const msg = std.mem.print(
             &buf,
-            "stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
+            "<2>stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
             .{slot},
         ) catch "";
-        _ = writeFile("/dev/console", msg);
+        _ = writeFile("/dev/kmsg", msg); // reaches the console before the sysrq reboot; see fail()
         _ = writeFile("/deadman/sysrq-trigger", "b");
     }
     linux.exit(0);
@@ -248,6 +283,10 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     const backing = linux.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(backing) != .SUCCESS) return error.NoImage;
     defer _ = linux.close(@intCast(backing));
+    // The whole image, data and hash tree, read into the page cache in the
+    // background from now: the boot reads most of it, and a cloud's network
+    // disk answers a few large reads far sooner than hundreds of small ones.
+    _ = linux.fadvise(@intCast(backing), 0, 0, linux.POSIX_FADV.WILLNEED);
 
     var cfg: LoopConfig = .{
         .fd = @intCast(backing),
@@ -267,13 +306,14 @@ const Kind = enum { ext4, xfs, btrfs };
 const Found = struct { dev: [:0]const u8, kind: Kind };
 
 /// The block device whose filesystem has uuid, waiting for it to appear:
-/// a disk's driver may still be probing when the modules are loaded.
+/// its driver is still loading, or probing, as the search begins. Looked
+/// for every 10 ms, so the boot goes on the moment it is there.
 fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
     const want = parseUuid(uuid) orelse return null;
     var waited: usize = 0;
-    while (waited < find_for * 5) : (waited += 1) {
+    while (waited < find_for * 100) : (waited += 1) {
         if (scan(gpa, want)) |f| return f;
-        var ts: linux.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
+        var ts: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = linux.nanosleep(&ts, null);
     }
     return null;
@@ -436,25 +476,28 @@ fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
 }
 
 /// Whether argv runs and exits 0, its output on the console with ours.
-fn run(io: std.Io, argv: []const []const u8) bool {
-    var child = std.process.spawn(io, .{ .argv = argv, .stdin = .ignore }) catch return false;
-    const term = child.wait(io) catch return false;
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
-}
-
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
-/// Exiting PID 1 panics the kernel; panic=10 reboots it, and the loader
-/// boots the slot that last committed.
+/// Exiting PID 1 panics the kernel; panic=1 reboots it, and the loader
+/// boots the slot that last committed. The reason goes through /dev/kmsg,
+/// which a serial console writes synchronously ("<2>", KERN_CRIT, so it
+/// prints whatever the console log level): a plain write to the console tty
+/// can still be draining the UART when the panic reboots the machine, and
+/// on a fast KVM host it is lost -- exactly when the reason matters most --
+/// whereas the kernel flushes its log on panic. The console itself is the
+/// fallback for a machine with no /dev/kmsg.
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
-    say(fmt ++ "; panicking, so the machine reboots into the last good slot", args);
+    var buf: [512]u8 = undefined;
+    const line = std.mem.print(
+        &buf,
+        "<2>stage0: " ++ fmt ++ "; panicking, so the machine reboots into the last good slot\n",
+        args,
+    ) catch linux.exit(1);
+    if (!writeFile("/dev/kmsg", line)) _ = linux.write(1, line.ptr + 3, line.len - 3);
     linux.exit(1);
 }
 

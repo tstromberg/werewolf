@@ -5,18 +5,7 @@
 # the root: a form of your own includes this one and lays its files there,
 # and its own etc/sv/app/service if it starts differently. Until then, a
 # server of one line. See docs/forms.md.
-include: prod.yaml
+include: app.yaml
 contents:
   packages:
     - nodejs-22
-
-accounts:
-  groups:
-    - groupname: app
-      gid: 204
-  users:
-    - username: app
-      uid: 204
-      gid: 204
-      homedir: /var/empty
-      shell: /sbin/nologin

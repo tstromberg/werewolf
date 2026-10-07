@@ -12,8 +12,14 @@ having. The command runs as the leashed `app` user (cmd/leash), on a root
 that is read-only and dm-verity-checked, with:
 
   * no shell in the image, so a shell command finds no interpreter;
-  * Landlock allowing exec of only the service's own program (python3),
-    so fork/exec of any other binary is refused;
+  * Landlock allowing exec of only the service's own python3 and the
+    programs the `run` line names; Landlock grants exec per file, and
+    Wolfi's coreutils is one multi-call binary, so naming id or cat allows
+    every coreutils applet (dd, chroot, base64 ...) -- they run and gain
+    nothing, held by the read/write floor, the dropped capabilities and the
+    empty network -- while net-tools' separate binaries, ifconfig and route,
+    are refused at the exec; an allowed reader sees only the floor's files,
+    so `cat /etc/passwd` prints and `cat /etc/shadow` is refused;
   * reads confined to the image and the service's own directories, so
     /etc/shadow and other services' data are unreadable;
   * writes confined to /run/svc/app and /data/svc/app, so the root and
@@ -133,9 +139,12 @@ PAGE = """<!doctype html>
 </style>
 <h1>werewolf webshell &mdash; a contained vulnerability</h1>
 <p class="warn">This runs whatever you type, as a real web application with
-remote code execution would. On werewolf it is caged: no shell, exec only
-of python3, no secrets, no writes outside its own data, no network out. Try
-to escape.</p>
+remote code execution would. On werewolf it is caged: no shell; exec of
+only its own python3 and the programs its leash allows (coreutils and
+<code>hostname</code>); no writes outside its own data; no network out;
+and even an allowed tool reads only what the cage permits. Try to escape
+&mdash; or run <code>cat /etc/passwd</code> (works) and
+<code>cat /etc/shadow</code> (refused) and see the difference.</p>
 <form method="post">
   <input type="text" name="cmd" placeholder="e.g. cat /etc/shadow" autofocus>
   <label><input type="checkbox" name="shell" value="1"> Run within a shell</label>
@@ -155,6 +164,15 @@ to escape.</p>
  </tr>
  {% endfor %}
 </table>
+<footer>
+ <p><small>Everything running here is open: the application
+ (<a href="https://github.com/werewolf-linux/werewolf/blob/main/forms/webshell-example/usr/lib/app/webshell.py">webshell.py</a>),
+ its leash policy
+ (<a href="https://github.com/werewolf-linux/werewolf/blob/main/forms/webshell-example/etc/sv/app/service">etc/sv/app/service</a>),
+ and the form that builds it
+ (<a href="https://github.com/werewolf-linux/werewolf/tree/main/forms/webshell-example">forms/webshell-example</a>).
+ How it runs and is contained: <a href="https://github.com/werewolf-linux/werewolf/blob/main/docs/forms.md">docs/forms.md</a>.</small></p>
+</footer>
 """
 
 
@@ -214,6 +232,21 @@ ATTACKS = [
         "CONNECTED",
     ),
     ("spawn a shell to read a secret", "sh -c 'cat /etc/shadow && echo LEAK'", True, "LEAK"),
+    ("read a secret with an allowed tool", "cat /etc/shadow", False, "root:"),
+]
+
+# The commands the service's `run` line allows (etc/sv/app/service): real
+# programs in the image that the leash lets this RCE exec, to show that
+# execution does happen and is bounded by the allowlist, not by the tools
+# being absent. Each should run and print something; none reveals a secret.
+ALLOWED = [
+    ("the account it runs as", "id", "uid=204"),
+    ("the kernel it runs on", "uname -a", "Linux"),
+    ("the host it runs on", "hostname", ""),
+    ("the public account list", "cat /etc/passwd", "root:x:0:0"),
+    ("a directory it may read", "ls /usr", "bin"),
+    ("the first line of the account list", "head -n1 /etc/passwd", "root:x:0:0"),
+    ("a line it prints itself", "echo contained-rce-works", "contained-rce-works"),
 ]
 
 
@@ -237,6 +270,27 @@ def self_test():
     if escaped:
         # The cage leaked: say so loudly. The console test fails on this.
         print(f"webshell: ESCAPED on {escaped} attack(s)", file=sys.stderr, flush=True)
+
+    # The allowlisted commands: each must run (exit 0, something on stdout),
+    # proving the RCE executes and the `run` list permits exactly these.
+    ran = 0
+    for name, cmd, expect in ALLOWED:
+        rec = run(cmd, False, "self-test", name)
+        out = rec.get("stdout", "")
+        # It ran if it exited cleanly with output, and gave the expected
+        # content: `cat /etc/passwd` must show the public account list,
+        # `echo` its argument, and so on -- proving the exec did real work,
+        # not merely that it was permitted.
+        ok = rec["exit"] == 0 and out.strip() != "" and expect in out
+        if ok:
+            ran += 1
+        _log("allowed", command=cmd, exit=rec["exit"], ran=ok)
+    _log("exec-allowed", commands=len(ALLOWED), ran=ran)
+    if ran != len(ALLOWED):
+        # The allowlist should let every one of these run and produce its
+        # expected output; if not, the demo is not showing contained
+        # execution. The console test fails on this.
+        print(f"webshell: only {ran} of {len(ALLOWED)} allowed commands ran", file=sys.stderr, flush=True)
 
 
 # Attack ourselves once the worker is up, off the request path.

@@ -52,16 +52,19 @@ def main():
             seen = {h: self.headers.get(h) for h in ("Metadata-Flavor", "Metadata", "X-aws-ec2-metadata-token", "X-aws-ec2-metadata-token-ttl-seconds") if self.headers.get(h)}
             log.write(f"{self.command} {self.path} {seen}\n")
 
-        def answer(self, code, data=b""):
+        def answer(self, code, data=b"", google=False):
             self.send_response(code)
             self.send_header("Content-Length", str(len(data)))
+            # GCP's server marks every answer; cloud-metadata refuses one without.
+            if google:
+                self.send_header("Metadata-Flavor", "Google")
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self):
             self.record()
             if self.path == "/computeMetadata/v1/instance/attributes/user-data":
-                return self.answer(200, body) if self.headers.get("Metadata-Flavor") == "Google" else self.answer(403)
+                return self.answer(200, body, True) if self.headers.get("Metadata-Flavor") == "Google" else self.answer(403, google=True)
             if self.path == "/latest/user-data":
                 return self.answer(200, body) if self.headers.get("X-aws-ec2-metadata-token") == TOKEN else self.answer(401)
             if self.path == "/hetzner/v1/userdata":

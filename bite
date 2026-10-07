@@ -272,15 +272,21 @@ rm -rf "$t"
 # Every distro gets /etc/grub.d/42_werewolf, run by its own grub-mkconfig.
 # It sets GRUB's fallback to the saved default, so that a slot GRUB cannot
 # load (a power cut before its files were written in place) falls back to
-# the slot that last committed instead of stopping at an error. Debian and
-# Ubuntu also get the two entries from it, written by the distro's own
-# helpers so GRUB loads whatever it needs to read /boot; Fedora and Rocky
-# take them as Boot Loader Spec files.
+# the slot that last committed instead of stopping at an error. And it sets
+# no wait at the menu: the distro's 00_header, which ran before it, may set
+# 5 seconds (Debian, Rocky) or, after a boot Ubuntu thinks failed, 30, and
+# every reboot for an update would pay it. That is speed, not a lock: Esc
+# or Shift at the console still opens the menu, and only a GRUB password
+# keeps an entry from being edited. Debian and Ubuntu also get the two
+# entries from it, written by the distro's own helpers so GRUB loads
+# whatever it needs to read /boot; Fedora and Rocky take them as Boot
+# Loader Spec files.
 {
 	cat <<EOF
 #!/bin/sh
 # Written by werewolf's bite; \`bite --undo\` removes it.
 echo 'set fallback="\${saved_entry}"'
+echo 'set timeout=0'
 EOF
 	if [ "$style" = grub.d ]; then
 		cat <<EOF
@@ -321,7 +327,7 @@ say "werewolf boots once at the next reboot; it becomes the default after a heal
 # -i: a look before the leap. The new root, read-only, under its own shell
 # if the form has one; then the choice to reboot into it. This is werewolf's
 # files on the distro's kernel, without werewolf's init or lockdown. A
-# kernel that cannot mount the image (erofs, LZMA) skips the look, not the
+# kernel that cannot mount the image (erofs, zstd) skips the look, not the
 # question.
 enter() {
 	r=$(mktemp -d)

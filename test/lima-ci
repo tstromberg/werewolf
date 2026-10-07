@@ -24,19 +24,20 @@ fi
 [ "$(limactl list --format '{{.Status}}' "$vm")" = Running ] || limactl start "$vm"
 
 # Lima mounts the home directory read-only at the same path, so the tree is
-# copied from there. ci-setup runs again only when it has changed.
+# copied from there. ci-setup runs every time: it installs only what is
+# missing or changed, and opens /dev/kvm, whose mode a restart resets.
 limactl shell --workdir / "$vm" sh -euc "
 	command -v rsync >/dev/null || sudo apt-get install -y -q rsync
 	rsync -a --delete --exclude /build --exclude /out --exclude /config --exclude /.git '$repo/' ~/werewolf/
 	cd ~/werewolf
-	if ! cmp -s test/ci-setup /var/lib/werewolf-ci/ci-setup; then
-		sudo test/ci-setup
-		sudo install -D -m 0644 test/ci-setup /var/lib/werewolf-ci/ci-setup
-	fi
-	# /dev/kvm's mode does not outlive a restart of the VM; ci-setup's does.
-	[ ! -e /dev/kvm ] || sudo chmod 0666 /dev/kvm
+	sudo test/ci-setup
 	make test
 	make lint
+	# The compiled tutorial forms build on the host, never in the guest.
+	command -v go >/dev/null || sudo apt-get install -y golang-go
+	command -v rustup >/dev/null || sudo apt-get install -y rustup
+	rustup toolchain install stable --profile minimal --target \"\$(uname -m)-unknown-linux-musl\"
+	dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
 	# A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no guest
 	# starves, which nested virtualization makes fatal (RCU stalls).
 	make -k -j\$(( (\$(nproc) + 1) / 2 )) check

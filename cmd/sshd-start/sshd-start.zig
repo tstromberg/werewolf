@@ -1,19 +1,32 @@
 //! sshd-start: the sshd service. In forms that install OpenSSH (sshd, lima,
-//! prod-ssh) it makes this boot's host key and becomes sshd; elsewhere it
-//! parks itself, so a form adds ssh with a package and no files. The host
-//! key lives in /run, since the root is read-only: it never outlives the
-//! machine.
+//! prod-ssh) it makes sure of the host key and becomes sshd; elsewhere it
+//! parks itself, so a form adds ssh with a package and no files.
+//!
+//! The host key is made on the machine's first boot and kept in /data,
+//! root's alone, as a distribution's first boot makes /etc/ssh's; the root
+//! is read-only, so sshd reads a copy in /run. Without /data the key is
+//! made for this boot alone, and a client sees a new one at the next: an
+//! operator who logs in here must still be able to. Every start logs the
+//! key's fingerprint and public half, for an operator to pin (werewolf
+//! console NAME), never the private half.
 //!
 //! runsv runs it as /etc/sv/sshd/run, with no arguments and no shell.
 
 const std = @import("std");
 const Io = std.Io;
+const Dir = Io.Dir;
+const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
+/// Where sshd reads it (minimal's sshd_config.d/werewolf.conf).
 const key = "/run/sshd/ssh_host_ed25519_key";
+/// Where the machine keeps it, while /data is usable.
+const kept = "/data/sshd/ssh_host_ed25519_key";
+const keygen = "/usr/bin/ssh-keygen";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
+    const gpa = init.arena.allocator();
     if (linux.errno(linux.access("/usr/bin/sshd", linux.X_OK)) != .SUCCESS) {
         // Down, as a service with nothing to do: runsv will not restart it.
         const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
@@ -33,23 +46,97 @@ pub fn main(init: std.process.Init) !void {
         0,
     );
     _ = linux.mkdir("/run/sshd", 0o700);
-    if (linux.errno(linux.access(key, linux.F_OK)) != .SUCCESS) {
-        var child = try std.process.spawn(
-            io,
-            .{
-                .argv = &.{ "/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", key },
-                .stdin = .ignore,
-            },
-        );
-        const term = try child.wait(io);
-        if (term != .exited or term.exited != 0) {
-            say(io, "ssh-keygen failed; trying again", .{});
-            std.process.exit(1);
-        }
-    }
+    const from = hostKey(io, gpa) catch |err| {
+        say(io, "host key: {s}; trying again", .{@errorName(err)});
+        std.process.exit(1);
+    };
+    logKey(io, gpa, from);
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sshd", "-D", "-e" } });
     say(io, "sshd: {s}", .{@errorName(err)});
     std.process.exit(1);
+}
+
+/// Make sure of key: the kept one, copied, or a new one, kept if it can be.
+fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
+    const unkept: ?[]const u8 = if (exists("/run/werewolf/nodata"))
+        "no /data to keep it in"
+    else if (onRam("/data"))
+        "/data is RAM"
+    else
+        null;
+    if (unkept) |why| {
+        if (!exists(key)) try make(io, gpa, key);
+        return gpa.print("for this boot alone: {s}", .{why});
+    }
+    _ = linux.mkdir("/data/sshd", 0o700);
+    var from: []const u8 = "kept in /data";
+    if (!exists(kept)) {
+        try make(io, gpa, kept);
+        from = "new, kept in /data";
+    }
+    for ([_][]const u8{ "", ".pub" }) |ext| {
+        const src = try gpa.print("{s}{s}", .{ kept, ext });
+        const dst = try gpa.print("{s}{s}", .{ key, ext });
+        const data = try Dir.cwd().readFileAlloc(io, src, gpa, .limited(16 << 10));
+        Dir.cwd().deleteFile(io, dst) catch |e| switch (e) {
+            error.FileNotFound => {},
+            else => return e,
+        };
+        var f = try Dir.cwd().createFile(
+            io,
+            dst,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
+        defer f.close(io);
+        try f.writeStreamingAll(io, data);
+    }
+    return from;
+}
+
+fn make(io: Io, gpa: Allocator, path: []const u8) !void {
+    const r = try std.process.run(gpa, io, .{
+        .argv = &.{ keygen, "-q", "-t", "ed25519", "-N", "", "-C", "werewolf", "-f", path },
+    });
+    if (r.term != .exited or r.term.exited != 0) return error.KeygenFailed;
+}
+
+/// The key's fingerprint and public half, as one line on the console.
+fn logKey(io: Io, gpa: Allocator, from: []const u8) void {
+    const public = Dir.cwd().readFileAlloc(io, key ++ ".pub", gpa, .limited(16 << 10)) catch return;
+    const r = std.process.run(
+        gpa,
+        io,
+        .{ .argv = &.{ keygen, "-l", "-f", key ++ ".pub" } },
+    ) catch return;
+    var words = std.mem.tokenizeAny(u8, r.stdout, " \n");
+    _ = words.next();
+    const fingerprint = words.next() orelse return;
+    var buf: [1024]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    w.writeAll("sshd-start: ") catch return;
+    std.json.Stringify.value(.{
+        .event = "host-key",
+        .key = key,
+        .from = from,
+        .fingerprint = fingerprint,
+        .public = std.mem.trim(u8, public, " \n"),
+    }, .{}, &w) catch return;
+    w.writeByte('\n') catch return;
+    Io.File.stdout().writeStreamingAll(io, w.buffered()) catch {};
+}
+
+/// Whether path is on RAM (tmpfs), so nothing kept there outlives the boot:
+/// /data, where a machine has no disk for it.
+fn onRam(path: [*:0]const u8) bool {
+    // struct statfs, whose first word is the filesystem's type.
+    var buf: [128]u8 align(8) = undefined;
+    const rc = linux.syscall2(.statfs, @intFromPtr(path), @intFromPtr(&buf));
+    if (linux.errno(rc) != .SUCCESS) return false;
+    return std.mem.readInt(u64, buf[0..8], .little) == 0x01021994; // TMPFS_MAGIC
+}
+
+fn exists(path: [*:0]const u8) bool {
+    return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {

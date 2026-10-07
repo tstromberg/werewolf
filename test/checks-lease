@@ -6,7 +6,10 @@
 # its "bound" event on the console. Root cannot read the engine's root link,
 # which takes CAP_SYS_PTRACE, gone with the seal (cmd/init/init.zig); its chroot
 # shows instead in its mountinfo, which lists only the mounts reachable
-# from its root: none, from the empty /var/empty.
+# from its root: none, from the empty /var/empty. Both run outside fence's
+# Landlock domain, as init starts the renewal before fence, so a process in
+# it cannot read their exe link either: the parent is found by its name
+# and its real uid, 0.
 
 ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
 ok  lease            grep -q '10\.0\.2\.15' /run/werewolf/dhcp/lease.json
@@ -14,4 +17,4 @@ ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
 ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
 ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf
 ok  engine-jailed    p=$(ps -o pid,user | awk '$2 == "_dhcp" { print $1; exit }'); [ -n "$p" ] && ! readlink /proc/$p/root >/dev/null 2>&1 && m=$(cat /proc/$p/mountinfo) && [ -z "$m" ] && awk '/^CapEff:/ { c = $2 } /^Seccomp:/ { s = $2 } /^NoNewPrivs:/ { n = $2 } END { exit !(c == "0000000000000000" && s == 2 && n == 1) }' /proc/$p/status
-ok  parent-narrowed  p=$(for d in /proc/[0-9]*; do [ "$(readlink $d/exe)" = /usr/lib/werewolf/dhcp-client ] && [ "$(stat -c %u $d)" = 0 ] && echo ${d#/proc/} && break; done); [ -n "$p" ] && awk '/^CapEff:/ { c = $2 } /^Seccomp:/ { s = $2 } END { exit !(c == "0000000000001000" && s == 2) }' /proc/$p/status
+ok  parent-narrowed  p=$(for d in /proc/[0-9]*; do [ "$(cat $d/comm)" = dhcp-client ] && awk '/^Uid:/ { exit $2 != 0 }' $d/status && echo ${d#/proc/} && break; done); [ -n "$p" ] && awk '/^CapEff:/ { c = $2 } /^Seccomp:/ { s = $2 } END { exit !(c == "0000000000001000" && s == 2) }' /proc/$p/status

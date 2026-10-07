@@ -17,7 +17,7 @@
 # declared port but ssh's.
 #
 # The machine's settings, and the attacks on them, are posture's to judge
-# (cmd/posture/posture.zig): test/boot judges every machine's posture line
+# (cmd/posture): test/boot judges every machine's posture line
 # against test/posture-known before these run. Checks here are the boot's
 # own behaviour, which posture cannot see.
 #
@@ -35,9 +35,23 @@ ok  answering        for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 {
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
-ok  cleanup          ! command -v bite-cleanup || ! grep -q werewolf.slot= /proc/cmdline || { bite-cleanup -n | grep -q 'would delete 7 entries' && [ -e /victim/etc/os-release ] && bite-cleanup && [ "$(ls -A /victim | tr '\n' ' ')" = "boot var " ] && [ "$(ls -A /victim/var /victim/var/lib | tr '\n' ' ')" = "/victim/var: lib  /victim/var/lib: werewolf " ] && [ -s /victim/var/lib/werewolf/a/root.erofs ] && [ -s /victim/boot/grub/grubenv ] && [ -d /run/werewolf ]; }
+ok  cleanup          ! command -v bite-cleanup || ! grep -q werewolf.slot= /proc/cmdline || { bite-cleanup -n | grep -q 'would delete 7 entries' && [ -e /victim/etc/os-release ] && { out=$(bite-cleanup 2>&1); [ $? -eq 1 ]; } && printf '%s\n' "$out" | grep -q '^bite-cleanup: /etc/resolv.conf stays' && [ "$(ls -A /victim | tr '\n' ' ')" = "boot etc var " ] && [ "$(ls -A /victim/etc)" = resolv.conf ] && [ "$(ls -A /victim/var /victim/var/lib | tr '\n' ' ')" = "/victim/var: lib  /victim/var/lib: werewolf " ] && [ -s /victim/var/lib/werewolf/a/root.erofs ] && [ -s /victim/boot/grub/grubenv ] && [ -s /victim/boot/werewolf/a/vmlinuz ] && [ -d /run/werewolf ]; }
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
 ok  root-verified    grep -q '^/dev/mapper/root / erofs ro' /proc/mounts && [ "$(cat /sys/block/dm-0/dm/name)" = root ] && ls /sys/block/dm-0/slaves | grep -q '^loop' && [ "$(cat /sys/module/dm_verity/refcnt)" = 1 ]
+# Each leashed service (one with a service file) is in its own cgroup under
+# /run/cgroup/svc, so its whole tree -- a detached backdoor included -- is
+# killed when it stops (its finish writes cgroup.kill), and held to 4096
+# tasks (pids.max), so none can fork the machine out of processes. Skipped
+# where the kernel has no cgroup2.
+ok  cgrouped         [ -d /run/cgroup/svc ] || exit 0; for d in /etc/sv/*/; do [ -f "$d/service" ] || continue; n=$(basename "$d"); [ -n "$(cat /run/cgroup/svc/$n/cgroup.procs 2>/dev/null)" ] || { echo "$n not in its cgroup"; exit 1; }; [ "$(cat /run/cgroup/svc/$n/pids.max)" = 4096 ] || { echo "$n has no task limit"; exit 1; }; done
+# What outlives a leashed service is killed when runsv stops it: a process
+# put in the first such service's cgroup, as a detached backdoor would be,
+# dies (137, SIGKILL) at `sv restart`, by leash-reap, its ./finish, and the
+# service comes back up. Skipped on a form with no leashed service.
+ok  reaped           d=$(for d in /etc/sv/*/; do [ -f "$d/service" ] && echo "$d" && break; done); [ -n "$d" ] && [ -d /run/cgroup/svc ] || exit 0; n=$(basename "$d"); sleep 30 & s=$!; echo $s >/run/cgroup/svc/$n/cgroup.procs && sv restart "/etc/sv/$n" >/dev/null; wait $s; [ $? -eq 137 ] || { echo "the process in $n's cgroup outlived it"; exit 1; }; i=0; until sv status "/etc/sv/$n" | grep -q '^run:'; do i=$((i + 1)); [ $i -le 50 ] || { echo "$n did not come back"; exit 1; }; sleep 0.2; done
+# The seal holds, enforcing, and seal-watch, which answers for it, has
+# given root up: _seal (66), no capabilities. Skipped when learning.
+ok  sealed           grep -q werewolf.seal=learn /proc/cmdline || { /usr/lib/werewolf/seal | grep -q '^seal: enforcing;' && p=$(pidof seal-watch) && grep -Eq '^Uid:[[:space:]]+66[[:space:]]+66[[:space:]]+66[[:space:]]+66$' /proc/$p/status && grep -Eq '^CapEff:[[:space:]]+0+$' /proc/$p/status && grep -Eq '^CapBnd:[[:space:]]+0+$' /proc/$p/status; }
 # Last, for the second boot (test/checks-again): a mark on a /data that is
 # kept on a disk.
 ok  data-mark        grep -q ' /data tmpfs ' /proc/mounts || echo kept >/data/.werewolf-check

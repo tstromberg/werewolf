@@ -23,10 +23,16 @@ dev network-no-login programs-no-downloaders programs-no-interpreters programs-n
 # x86_64.
 qemu-host ?kernel-no-hypervisor
 prod-ssh network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell
+# The bastion deliberately permits local forwarding, but no login sessions.
+bastion network-no-login network-ssh-config
 # The runtime forms carry an interpreter by design: that is what they are
 # for (docs/design/forms.md). nginx carries none.
 php programs-no-interpreters
 node programs-no-interpreters
 python programs-no-interpreters
-webshell-example programs-no-interpreters
+example-php programs-no-interpreters
+example-node programs-no-interpreters
+example-python programs-no-interpreters
+example-aspnet programs-no-interpreters
+webshell-example programs-no-interpreters programs-no-network-tools
 jre programs-no-interpreters

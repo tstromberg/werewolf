@@ -73,15 +73,21 @@ fn element(bytes: []const u8, index: u32, tag: der.Tag) !der.Element {
     return e;
 }
 
-/// Whether sig is key's signature of data.
+/// Whether sig is key's signature of data's SHA-256.
 pub fn verify(key: Key, data: []const u8, sig: []const u8) !void {
+    return verifyHash(Sha256, key, data, sig);
+}
+
+/// Whether sig is key's signature of data's Hash: SHA-256, or for apk's
+/// older indexes, SHA-1.
+pub fn verifyHash(comptime Hash: type, key: Key, data: []const u8, sig: []const u8) !void {
     if (sig.len != key.modulus.len) return error.BadSignature;
     const public_key = rsa.PublicKey.fromBytes(key.exponent, key.modulus) catch return error.BadKey;
     switch (key.modulus.len) {
         inline 256,
         384,
         512,
-        => |len| rsa.PKCS1v1_5Signature.verify(len, sig[0..len], data, public_key, Sha256) catch
+        => |len| rsa.PKCS1v1_5Signature.verify(len, sig[0..len], data, public_key, Hash) catch
             return error.BadSignature,
         else => return error.BadKey,
     }
@@ -98,8 +104,17 @@ pub const Manifest = struct {
     kernel: []const u8,
     files: std.json.ArrayHashMap(File),
     packages: []const struct { name: []const u8, version: []const u8, origin: []const u8 },
+    /// werewolf's own security advisories (release/advisories), signed with
+    /// the rest: fixes to werewolf's code, which no CVE names.
+    advisories: []const Advisory = &.{},
 
     pub const File = struct { sha256: []const u8, size: u64 };
+    pub const Advisory = struct {
+        id: []const u8,
+        date: []const u8,
+        tier: []const u8,
+        title: []const u8,
+    };
 
     /// What a slot needs from a release.
     pub const slot_files = [_][]const u8{ "vmlinuz", "stage0.zst", "root.erofs" };
@@ -131,6 +146,7 @@ pub fn open(
     if (now >= try parseTime(m.expires)) return error.Stale;
     const signed = serialTime(m.serial) catch return error.BadManifest;
     if (signed > now + 24 * 3600) return error.BadManifest;
+    for (m.advisories) |a| if (!validAdvisory(a)) return error.BadManifest;
     for (Manifest.slot_files) |name| {
         const f = m.files.map.get(name) orelse return error.BadManifest;
         if (f.sha256.len != 64 or f.size == 0 or f.size > 256 << 20) return error.BadManifest;
@@ -140,8 +156,49 @@ pub fn open(
     return m;
 }
 
+/// An advisory as release/manifest checks one: WW-YEAR-NUMBER, a date, a
+/// tier, and a title of printable ASCII without quotes or backslashes.
+pub fn validAdvisory(a: Manifest.Advisory) bool {
+    const id = a.id;
+    if (id.len < 11 or id.len > 32 or !std.mem.startsWith(u8, id, "WW-") or
+        id[7] != '-') return false;
+    for (id[3..7]) |c| if (!std.ascii.isDigit(c)) return false;
+    for (id[8..]) |c| if (!std.ascii.isDigit(c)) return false;
+    if (a.date.len != 10 or a.date[4] != '-' or a.date[7] != '-') return false;
+    for (a.date, 0..) |c, i| if (i != 4 and i != 7 and !std.ascii.isDigit(c)) return false;
+    const tiers = [_][]const u8{ "urgent", "high", "medium", "low" };
+    for (tiers) |t| {
+        if (std.mem.eql(u8, a.tier, t)) break;
+    } else return false;
+    if (a.title.len == 0 or a.title.len > 200) return false;
+    for (a.title) |c| if (c < ' ' or c > '~' or c == '"' or c == '\\') return false;
+    return true;
+}
+
+test validAdvisory {
+    const good: Manifest.Advisory = .{
+        .id = "WW-2026-001",
+        .date = "2026-10-07",
+        .tier = "high",
+        .title = "fence: x",
+    };
+    try std.testing.expect(validAdvisory(good));
+    var a = good;
+    a.id = "WW-26-1";
+    try std.testing.expect(!validAdvisory(a));
+    a = good;
+    a.tier = "severe";
+    try std.testing.expect(!validAdvisory(a));
+    a = good;
+    a.title = "a \"quote\"";
+    try std.testing.expect(!validAdvisory(a));
+    a = good;
+    a.date = "2026-1-07";
+    try std.testing.expect(!validAdvisory(a));
+}
+
 /// A serial, 20261006T151016Z, as seconds since the epoch.
-fn serialTime(serial: []const u8) !i64 {
+pub fn serialTime(serial: []const u8) !i64 {
     if (serial.len != 16 or serial[8] != 'T' or serial[15] != 'Z') return error.BadTime;
     var buf: [20]u8 = undefined;
     const s = std.mem.print(&buf, "{s}-{s}-{s}T{s}:{s}:{s}Z", .{

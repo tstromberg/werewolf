@@ -715,7 +715,9 @@ fn describeEvent(e: Event) []const u8 {
         e.event,
         "check",
     )) return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
+    // "update" is the event before staging (docs/design/update-policy.md).
     if (std.mem.eql(u8, e.event, "update")) return "updated, and rebooted into it";
+    if (std.mem.eql(u8, e.event, "stage")) return "staged, to boot when due";
     if (std.mem.eql(u8, e.event, "skip")) return e.reason;
     if (std.mem.eql(u8, e.event, "error")) return e.@"error";
     return e.event;
@@ -1664,7 +1666,7 @@ fn lastCheck(events: []const Event) ?Event {
     while (i > 0) {
         i -= 1;
         const e = events[i].event;
-        for ([_][]const u8{ "check", "update", "skip", "error" }) |name| {
+        for ([_][]const u8{ "check", "stage", "update", "skip", "error" }) |name| {
             if (std.mem.eql(u8, e, name)) return events[i];
         }
     }

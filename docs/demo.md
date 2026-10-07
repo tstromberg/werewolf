@@ -112,8 +112,9 @@ machine is; the first scan follows the database download.
 | Disk | 8 GiB, its disk's size; with bite, 10 GB free in `/var/lib/werewolf` |
 | Network | Wolfi, Alpine, git.kernel.org (updates); grype.anchore.io (the database) |
 
-On a Mac with Apple silicon, `make demo` builds the disk and boots it in
-Lima, as Lima boots a distro, and prints the page's URL:
+On a Mac with Apple silicon, `make demo` runs `werewolf create demo
+werewolf-demo`, which builds the disk and boots it in Lima, as Lima boots
+a distro, and prints the page's URL:
 
 ```sh
 make demo                               # http://192.168.64.N/, when it is up
@@ -122,11 +123,13 @@ make demo-delete                        # delete the VM, and the /data it kept
 
 Lima forwards ports through ssh or its guest agent, and the demo runs
 neither, so the VM gets a second network, vzNAT, whose address the Mac
-reaches directly. The disk names that network's MAC (`werewolf.mac=`), so
-DHCP runs there, and macOS's DHCP server records the address it gave.
-`limactl start` waits for ssh that never answers, so `make demo` waits for
-the page instead. A second `make demo` finds the VM and prints the URL
-again. Building the disk on a Mac needs `brew install mtools e2fsprogs`.
+reaches directly. The disk names that network's MAC (`werewolf.mac=`),
+derived from the VM's name, so DHCP runs there, and macOS's DHCP server
+records the address it gave. `limactl start` waits for ssh that never
+answers, so `werewolf create` waits for that address, and `make demo` for
+the page. A second `make demo` restarts the VM, keeping its `/data`, and
+prints the URL again. A `werewolf-demo` VM made before `werewolf create`
+was is refused: `make demo-delete` first. Building the disk on a Mac needs `brew install mtools e2fsprogs`.
 
 On Google Compute Engine, `make demo-gcp` builds the same disk, makes it a
 GCP image, boots it on a VM (an `e2-medium`, or a `t2a-standard-1` for

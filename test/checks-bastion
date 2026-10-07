@@ -1,0 +1,5 @@
+# The shipping form denies every forwarding destination until configured.
+ok  bastion-private  [ "$(stat -c '%u:%a' /data/svc/sshd/host-key)" = 205:600 ] && [ "$(stat -c '%u:%a' /run/svc/sshd/authorized-keys)" = 205:600 ]
+ok  bastion-user     p=$(cat /run/svc/sshd/sshd.pid); grep -q '^Uid:[[:space:]]*205[[:space:]]' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  config-restart   sv down /etc/sv/sshd; echo unchanged >/run/config-copy-victim; rm /run/svc/sshd/authorized-keys; ln -s /run/config-copy-victim /run/svc/sshd/authorized-keys; sv up /etc/sv/sshd; i=0; while [ -L /run/svc/sshd/authorized-keys ] && [ $i -lt 10 ]; do sleep 1; i=$((i + 1)); done; [ ! -L /run/svc/sshd/authorized-keys ] && grep -qx unchanged /run/config-copy-victim && cmp /run/config/bastion/authorized_keys /run/svc/sshd/authorized-keys
+ok  no-destinations  [ ! -s /run/svc/sshd/destinations ] && [ "$(stat -c '%u:%a' /run/svc/sshd/destinations)" = 205:600 ]

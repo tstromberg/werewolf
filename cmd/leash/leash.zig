@@ -27,11 +27,37 @@
 //!     connect tcp/PORT...     ports it may reach; without it, none
 //!     read PATH...            read beyond the floor (below)
 //!     write PATH...           read and write beyond its own directories
-//!     run PROGRAM...          other programs it may start
+//!     run PROGRAM...          other programs it may start. Landlock grants
+//!                             exec per file, so a multi-call binary (busybox,
+//!                             Wolfi's coreutils, whose applets are symlinks
+//!                             to one file) is all-or-nothing: naming one
+//!                             applet allows them all. What bounds them then
+//!                             is the floor, the capabilities and the network,
+//!                             not the names.
 //!     requires PATH...        stay down unless each exists
+//!     pledge PROMISE...       the system calls it may make, in promises
+//!                             (lib/seal.zig); required, once
 //!     env NAME=VALUE          its environment, otherwise only PATH
 //!     secret NAME PATH        a variable read from a file; never logged
+//!     config NAME PATH        copy a /run/config file to this service's
+//!                             /run/svc/SERVICE/NAME, mode 0600; never logged
+//!     setting NAME TYPE[...] [required] [as KEY]
+//!                             a value it takes from the machine: from
+//!                             the file a `config settings PATH` names,
+//!                             which may be missing
+//!     render FORMAT FILE [from PATH]
+//!                             where its settings go: env, json or conf, in
+//!                             /run/svc/SERVICE/FILE (lib/settings.zig)
 //!     nofile N                its limit on open files
+//!     memory N                its resident memory ceiling, in MiB: the
+//!                             service's cgroup memory.max, so one service
+//!                             cannot exhaust the machine's memory. A
+//!                             ceiling on memory held, not address space
+//!                             reserved, so the JVM and V8 fit under it.
+//!
+//! Every service is also held to 4096 tasks, processes and threads together
+//! (its cgroup's pids.max), so one that forks or spawns without end stops
+//! there, not when the machine has no process left for anyone else.
 //!
 //! Every service also gets /run/svc/NAME and, while /data is usable,
 //! /data/svc/NAME, owned by its user and its working directory; and the
@@ -49,17 +75,34 @@
 //! capability but the one a low port needs, no_new_privs, and a check that
 //! root cannot be had back. Then the ruleset applies, with Landlock's
 //! scoping (no signals or abstract UNIX sockets outside the service), and
-//! leash runs each `before` and becomes the service. Nothing of leash runs
-//! after that, so the service pays nothing for it.
+//! leash renders the service's settings with service-config, as the
+//! service, and runs each `before`; then a seccomp filter of the service's
+//! promises, stacked on the seal, whose refusals seal-watch answers and
+//! says, and leash becomes the service. Nothing of leash runs after that,
+//! so the service pays nothing for it.
+//!
+//! A promise is a class of work (docs/design/pledge.md, System calls:
+//! promises): `stdio rpath inet listen` for a server that reads files and
+//! takes connections. leash becomes the service by executing an open
+//! descriptor of its program, which a pledge without exec still allows,
+//! and Landlock lets it execute nothing but that program and, for one
+//! dynamically linked, its ELF loader; `pledge exec` lets it run the
+//! programs its `run` lines name too. The loader, run itself, would load
+//! any program the service can read where the mount allows running one:
+//! the image's /usr, never /data, /run or /tmp, which are noexec. What it
+//! loads stays this service, under its user, Landlock and pledge
+//! (docs/design/pledge.md, Not covered).
 //!
 //! What cannot change by waiting, a bad line, a missing requirement or a
 //! `before` that fails, parks the service: one line on the console says
 //! why, and runsv is told to keep it down. A path another service has not
 //! made yet is not that: leash exits, and runsv tries again in a second.
-//! The system calls a service may make are the seal's business, for every
-//! process at once (docs/design/lockdown.md), not leash's.
+//! The `before` programs run before the pledge, under the seal and the
+//! rest of the leash.
 
 const std = @import("std");
+const seal = @import("seal");
+const settings = @import("settings");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -68,6 +111,9 @@ const linux = std.os.linux;
 const path_env = "/usr/sbin:/usr/bin:/sbin:/bin";
 const max_file = 64 << 10;
 const max_secret = 4 << 10;
+/// Every service's tasks, processes and threads together: pids.max.
+const max_tasks = 4096;
+const service_config = "/usr/lib/werewolf/service-config";
 
 /// What failed, for the line that says so.
 var why_buf: [512]u8 = undefined;
@@ -78,6 +124,15 @@ pub fn main(init: std.process.Init) !void {
 
     // Whatever runsv left open goes at exec; leash's own files close too.
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
+    // runsv hands fd 0 the console, write-only: a service that kept it could
+    // forge log lines there (WEBSHELL_VULNS #1). It reads nothing from a
+    // person, so fd 0 becomes /dev/null; it logs on fd 1 and 2, which runsv
+    // routes.
+    const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(null_fd) == .SUCCESS) {
+        _ = linux.dup2(@intCast(null_fd), 0);
+        _ = linux.close(@intCast(null_fd));
+    }
     // runsv's control pipe, opened while root, so a service can be parked
     // from any step, before or after root is given up.
     const ctl_rc = linux.open(
@@ -140,6 +195,27 @@ pub fn main(init: std.process.Init) !void {
         );
         try env.put(sec[0], value);
     }
+    // Read only the files the image names, while root. Write their copies
+    // only AFTER dropping root and entering Landlock: a service cannot use
+    // a link or a restart race to make a privileged writer act for it.
+    // A service with settings may be given none: its settings file, missing,
+    // is an empty object, and the image's defaults hold.
+    const configs = try gpa.alloc([]const u8, s.configs.len);
+    for (s.configs, configs) |cfg, *value| {
+        value.* = Dir.cwd().readFileAlloc(io, cfg[1], gpa, .limited(max_file)) catch |err|
+            switch (err) {
+                error.FileNotFound => if (s.render != null and
+                    std.mem.eql(u8, cfg[0], settings.input_file)) "{}" else fail(
+                    io,
+                    ctl,
+                    .park,
+                    name,
+                    "config {s}: {s}",
+                    .{ cfg[0], @errorName(err) },
+                ),
+                else => fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg[0], @errorName(err) }),
+            };
+    }
 
     const run_dir = try gpa.printSentinel("/run/svc/{s}", .{name}, 0);
     const data_dir = try gpa.printSentinel("/data/svc/{s}", .{name}, 0);
@@ -154,6 +230,32 @@ pub fn main(init: std.process.Init) !void {
             .NOFILE,
             &.{ .cur = n, .max = n },
         )) != .SUCCESS) fail(io, ctl, .park, name, "nofile {d}: refused", .{n});
+    }
+    // The service's cgroup (cmd/init made /run/cgroup/svc with memory and
+    // pids delegated): its whole process tree lives here, so `memory` caps
+    // its resident memory -- not its address space, which the JVM and V8
+    // over-reserve -- and its finish reaper kills the tree, detached
+    // children included, when it stops. Joined as root, before the drop, so
+    // the service cannot leave it or raise its own cap. Where cgroup2 is not
+    // available (init said so), the service runs uncapped and unreaped, as
+    // before.
+    if (exists("/run/cgroup/svc")) {
+        const dir = gpa.printSentinel("/run/cgroup/svc/{s}", .{name}, 0) catch unreachable;
+        _ = linux.mkdir(dir, 0o755);
+        if (s.memory) |mib| {
+            var buf: [24]u8 = undefined;
+            const max = std.mem.print(&buf, "{d}\n", .{@as(u64, mib) << 20}) catch unreachable;
+            if (!writeIn(gpa, dir, "memory.max", max))
+                fail(io, ctl, .park, name, "memory {d}: cannot set memory.max", .{mib});
+        }
+        if (!writeIn(gpa, dir, "pids.max", std.fmt.comptimePrint("{d}\n", .{max_tasks})))
+            fail(io, ctl, .park, name, "cannot set pids.max", .{});
+        var pid_buf: [24]u8 = undefined;
+        const pid = std.mem.print(&pid_buf, "{d}\n", .{linux.getpid()}) catch unreachable;
+        if (!writeIn(gpa, dir, "cgroup.procs", pid))
+            fail(io, ctl, .park, name, "cannot join its cgroup", .{});
+    } else if (s.memory != null) {
+        record(io, .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
     }
 
     var rules = Ruleset.init() catch |err| fail(
@@ -193,6 +295,10 @@ pub fn main(init: std.process.Init) !void {
     for (s.run) |p| allowProgram(io, ctl, name, &rules, gpa, p);
     allowProgram(io, ctl, name, &rules, gpa, s.exec[0]);
     for (s.before) |b| allowProgram(io, ctl, name, &rules, gpa, b[0]);
+    if (s.render) |r| {
+        allowProgram(io, ctl, name, &rules, gpa, service_config);
+        if (r.from) |from| allowPath(io, ctl, name, &rules, gpa, from, read_file, nodata);
+    }
     for (s.listen) |port| rules.port(
         port,
         bind_tcp,
@@ -214,6 +320,10 @@ pub fn main(init: std.process.Init) !void {
     // --- leashed --------------------------------------------------------------
 
     rules.restrict() catch |err| fail(io, ctl, .park, name, "Landlock: {s}", .{@errorName(err)});
+    for (s.configs, configs) |cfg, value| {
+        copyConfig(run_dir, try gpa.dupeSentinel(u8, cfg[0], 0), value) catch |err|
+            fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg[0], @errorName(err) });
+    }
     record(
         io,
         .{
@@ -224,9 +334,11 @@ pub fn main(init: std.process.Init) !void {
             .listen = s.listen,
             .connect = s.connect,
             .landlock = rules.abi,
+            .pledge = try promiseWords(gpa, s.pledge),
         },
     );
 
+    if (s.render) |r| renderSettings(io, ctl, gpa, name, run_dir, s, r, &env);
     for (s.before) |argv| {
         var child = std.process.spawn(
             io,
@@ -244,8 +356,77 @@ pub fn main(init: std.process.Init) !void {
         if (term != .exited or
             term.exited != 0) fail(io, ctl, .park, name, "before {s} failed", .{argv[0]});
     }
-    const err = std.process.replace(io, .{ .argv = s.exec, .environ_map = &env });
-    fail(io, ctl, .park, name, "exec {s}: {s}", .{ s.exec[0], @errorName(err) });
+    // The program, open before the pledge: becoming it is executing this
+    // descriptor. A pledge without exec still allows that one execveat, and
+    // Landlock lets it run only this program.
+    const prog_rc = linux.open(
+        try gpa.dupeSentinel(u8, s.exec[0], 0),
+        .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(prog_rc) != .SUCCESS)
+        fail(
+            io,
+            ctl,
+            .retry,
+            name,
+            "exec {s}: {s}",
+            .{ s.exec[0], @tagName(linux.errno(prog_rc)) },
+        );
+    const argv = try gpa.allocSentinel(?[*:0]const u8, s.exec.len, null);
+    for (s.exec, argv) |a, *p| p.* = try gpa.dupeSentinel(u8, a, 0);
+    const envp = try gpa.allocSentinel(?[*:0]const u8, env.count(), null);
+    var env_it = env.iterator();
+    var i: usize = 0;
+    while (env_it.next()) |e| : (i += 1)
+        envp[i] = try gpa.printSentinel("{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }, 0);
+
+    // The service's own filter, refusing with ENOSYS what its pledge does
+    // not promise: no listener, so no_new_privs (set in dropTo) is enough.
+    // A machine learning (werewolf.seal=learn, a DEV=1 build) installs none,
+    // so every call reaches the machine seal, which records it.
+    if (!learning()) {
+        var filter_buf: [seal.max_filter]seal.Filter = undefined;
+        const filter = seal.buildFilter(&filter_buf, s.pledge, true);
+        _ = seal.install(filter, false) catch |e|
+            fail(io, ctl, .park, name, "pledge: {s}", .{@errorName(e)});
+    }
+    const rc = linux.syscall5(
+        .execveat,
+        prog_rc,
+        @intFromPtr(""),
+        @intFromPtr(argv.ptr),
+        @intFromPtr(envp.ptr),
+        0x1000, // AT_EMPTY_PATH
+    );
+    fail(io, ctl, .park, name, "exec {s}: {s}", .{ s.exec[0], @tagName(linux.errno(rc)) });
+}
+
+/// Whether the machine is learning its pledges (werewolf.seal=learn, a
+/// DEV=1 build), when a service installs no filter of its own, so every
+/// call reaches the machine seal to be recorded.
+fn learning() bool {
+    var buf: [4096]u8 = undefined;
+    const fd = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(fd));
+    const n = linux.read(@intCast(fd), &buf, buf.len);
+    if (linux.errno(n) != .SUCCESS) return false;
+    var it = std.mem.tokenizeAny(u8, buf[0..n], " \n");
+    while (it.next()) |a| if (std.mem.eql(
+        u8,
+        a,
+        "werewolf.seal=learn",
+    )) return exists("/usr/share/werewolf/dev");
+    return false;
+}
+
+/// A pledge, as the words a service file says it in.
+fn promiseWords(gpa: Allocator, set: seal.Set) ![]const []const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    var it = set.iterator();
+    while (it.next()) |p| try words.append(gpa, @tagName(p));
+    return words.items;
 }
 
 // --- the service file ----------------------------------------------------------
@@ -262,7 +443,12 @@ const Service = struct {
     requires: []const []const u8 = &.{},
     env: []const [2][]const u8 = &.{},
     secrets: []const [2][]const u8 = &.{},
+    configs: []const [2][]const u8 = &.{},
+    settings: []const settings.Setting = &.{},
+    render: ?settings.Render = null,
     nofile: ?u32 = null,
+    memory: ?u32 = null,
+    pledge: seal.Set = .empty,
 };
 
 /// Where the file is wrong, and how.
@@ -274,6 +460,8 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var exec: ?[]const []const u8 = null;
     var user: ?[]const u8 = null;
     var nofile: ?u32 = null;
+    var memory: ?u32 = null;
+    var pledge: ?seal.Set = null;
     var before: std.ArrayList([]const []const u8) = .empty;
     var listen: std.ArrayList(u16) = .empty;
     var connect: std.ArrayList(u16) = .empty;
@@ -283,6 +471,9 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var requires: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([2][]const u8) = .empty;
     var secrets: std.ArrayList([2][]const u8) = .empty;
+    var configs: std.ArrayList([2][]const u8) = .empty;
+    var declared: std.ArrayList(settings.Setting) = .empty;
+    var render: ?settings.Render = null;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     var n: usize = 0;
@@ -346,6 +537,34 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 "a path must be absolute, without . or .. or //",
             );
             try secrets.append(gpa, .{ args[0], args[1] });
+        } else if (std.mem.eql(u8, key, "config")) {
+            if (args.len != 2 or
+                !isName(args[0])) return invalid(bad, "config takes a plain NAME and PATH");
+            if (!isCleanPath(args[1]) or !std.mem.startsWith(u8, args[1], "/run/config/"))
+                return invalid(bad, "config source must be beneath /run/config");
+            if (configs.items.len == 32) return invalid(bad, "at most 32 config files");
+            for (configs.items) |cfg| if (std.mem.eql(u8, cfg[0], args[0]))
+                return invalid(bad, "config name repeated");
+            try configs.append(gpa, .{ args[0], args[1] });
+        } else if (std.mem.eql(u8, key, "setting")) {
+            try declared.append(
+                gpa,
+                settings.parseSetting(args, &bad.why) catch return error.Invalid,
+            );
+        } else if (std.mem.eql(u8, key, "render")) {
+            if (render != null) return invalid(bad, "render twice");
+            render = settings.parseRender(args, &bad.why) catch return error.Invalid;
+        } else if (std.mem.eql(u8, key, "pledge")) {
+            if (pledge != null) return invalid(bad, "pledge twice");
+            if (args.len == 0) return invalid(bad, "pledge takes promises");
+            var set: seal.Set = .empty;
+            for (args) |a| set.insert(
+                std.meta.stringToEnum(
+                    seal.Promise,
+                    a,
+                ) orelse return invalid(bad, "no such promise"),
+            );
+            pledge = set;
         } else if (std.mem.eql(u8, key, "nofile")) {
             if (nofile != null) return invalid(bad, "nofile twice");
             if (args.len != 1) return invalid(bad, "nofile takes one number");
@@ -355,12 +574,42 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 10,
             ) catch return invalid(bad, "nofile takes a number");
             if (nofile.? == 0 or nofile.? > 1 << 20) return invalid(bad, "nofile is 1 to 1048576");
+        } else if (std.mem.eql(u8, key, "memory")) {
+            if (memory != null) return invalid(bad, "memory twice");
+            if (args.len != 1) return invalid(bad, "memory takes one number of MiB");
+            memory = std.fmt.parseInt(
+                u32,
+                args[0],
+                10,
+            ) catch return invalid(bad, "memory takes a number of MiB");
+            if (memory.? == 0 or
+                memory.? > 1 << 20) return invalid(bad, "memory is 1 to 1048576 MiB");
         } else return invalid(bad, "unknown key");
     }
     bad.line = 0;
+    const promises = pledge orelse return invalid(bad, "no pledge: say what it does");
+    if (render) |r| {
+        settings.declare(gpa, declared.items, r, &bad.why) catch |err| switch (err) {
+            error.Invalid => return error.Invalid,
+            else => return err,
+        };
+        const sourced = for (configs.items) |cfg| {
+            if (std.mem.eql(u8, cfg[0], settings.input_file)) break true;
+        } else false;
+        if (!sourced) return invalid(bad, "settings come from a `config settings PATH` line");
+        for (configs.items) |cfg| if (std.mem.eql(u8, cfg[0], r.file))
+            return invalid(bad, "a config has render's file name");
+        if (r.format == .env) for (declared.items) |d| {
+            for (env.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
+                return invalid(bad, "a setting's key is an env line's too");
+            for (secrets.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
+                return invalid(bad, "a setting's key is a secret's too");
+        };
+    } else if (declared.items.len > 0) return invalid(bad, "setting without render");
     return .{
         .exec = exec orelse return invalid(bad, "no exec"),
         .user = user orelse return invalid(bad, "no user"),
+        .pledge = promises,
         .before = before.items,
         .listen = listen.items,
         .connect = connect.items,
@@ -370,7 +619,11 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .requires = requires.items,
         .env = env.items,
         .secrets = secrets.items,
+        .configs = configs.items,
+        .settings = declared.items,
+        .render = render,
         .nofile = nofile,
+        .memory = memory,
     };
 }
 
@@ -508,6 +761,98 @@ fn readSecret(io: Io, gpa: Allocator, path: []const u8) ![]const u8 {
     return value;
 }
 
+/// Called as the service, inside Landlock, once its `config settings` copy
+/// is made: have service-config render them, given the service file's
+/// declarations on its standard input, so that the tar's JSON is
+/// parsed by neither root nor leash. An env file it rendered joins the
+/// service's environment, and nothing but the keys declared may.
+fn renderSettings(
+    io: Io,
+    ctl: ?linux.fd_t,
+    gpa: Allocator,
+    name: []const u8,
+    run_dir: [:0]const u8,
+    s: Service,
+    r: settings.Render,
+    env: *std.process.Environ.Map,
+) void {
+    var decl: std.ArrayList(u8) = .empty;
+    for (s.settings) |d| decl.print(gpa, "setting {s} {t}{s}{s} as {s}\n", .{
+        d.name,
+        d.type,
+        if (d.list) "..." else "",
+        if (d.required) " required" else "",
+        d.key.?,
+    }) catch fail(io, ctl, .park, name, "out of memory", .{});
+    decl.print(gpa, "render {t} {s}{s}{s}\n", .{
+        r.format,
+        r.file,
+        if (r.from != null) " from " else "",
+        r.from orelse "",
+    }) catch fail(io, ctl, .park, name, "out of memory", .{});
+
+    var child_env: std.process.Environ.Map = .init(gpa);
+    child_env.put("PATH", path_env) catch fail(io, ctl, .park, name, "out of memory", .{});
+    var child = std.process.spawn(io, .{
+        .argv = &.{ service_config, run_dir },
+        .environ_map = &child_env,
+        .stdin = .pipe,
+    }) catch |err| fail(io, ctl, .park, name, "service-config: {s}", .{@errorName(err)});
+    child.stdin.?.writeStreamingAll(io, decl.items) catch {};
+    child.stdin.?.close(io);
+    child.stdin = null;
+    const term = child.wait(io) catch |err|
+        fail(io, ctl, .park, name, "service-config: {s}", .{@errorName(err)});
+    if (term != .exited or term.exited != 0)
+        fail(io, ctl, .park, name, "settings refused; service-config said why", .{});
+    if (r.format != .env) return;
+
+    const path = gpa.print("{s}/{s}", .{ run_dir, r.file }) catch
+        fail(io, ctl, .park, name, "out of memory", .{});
+    const text = Dir.cwd().readFileAlloc(
+        io,
+        path,
+        gpa,
+        .limited(settings.max_input * 2),
+    ) catch |err|
+        fail(io, ctl, .park, name, "settings {s}: {s}", .{ r.file, @errorName(err) });
+    const vars = settings.parseEnv(gpa, s.settings, text) catch
+        fail(io, ctl, .park, name, "settings {s}: not what was declared", .{r.file});
+    for (vars) |v| env.put(v[0], v[1]) catch fail(io, ctl, .park, name, "out of memory", .{});
+}
+
+/// Called as the service, inside Landlock. Never truncate an existing
+/// inode (which could be a hard link); replace the name with a new 0600
+/// file. Pin the directory, refuse symlinks and fail closed on a race.
+fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: []const u8) !void {
+    const d = linux.open(
+        dir,
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(d) != .SUCCESS) return error.OpenDirectory;
+    const dfd: linux.fd_t = @intCast(d);
+    defer _ = linux.close(dfd);
+    const un = linux.unlinkat(dfd, name, 0);
+    if (linux.errno(un) != .SUCCESS and linux.errno(un) != .NOENT) return error.Unlink;
+    const f = linux.openat(
+        dfd,
+        name,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0o600,
+    );
+    if (linux.errno(f) != .SUCCESS) return error.CreateFile;
+    const fd: linux.fd_t = @intCast(f);
+    defer _ = linux.close(fd);
+    var off: usize = 0;
+    while (off < value.len) {
+        const n = linux.write(fd, value[off..].ptr, value.len - off);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return error.WriteFile;
+        off += n;
+    }
+}
+
 fn allowPath(
     io: Io,
     ctl: ?linux.fd_t,
@@ -618,16 +963,13 @@ fn interpreter(head: []const u8) !?[]const u8 {
 /// CAP_NET_BIND_SERVICE where a low port needs it, now or in anything it
 /// runs, and no way back to root.
 fn dropTo(user: User, bind_low: bool) !void {
+    // A capability the kernel does not know (EINVAL) is one it cannot
+    // grant; any other failure leaves the set whole, and is an error.
     var cap: usize = 0;
     while (cap < 64) : (cap += 1) {
-        if (!(bind_low and
-            cap == linux.CAP.NET_BIND_SERVICE)) _ = linux.prctl(
-            @backingInt(linux.PR.CAPBSET_DROP),
-            cap,
-            0,
-            0,
-            0,
-        );
+        if (bind_low and cap == linux.CAP.NET_BIND_SERVICE) continue;
+        const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+        if (linux.errno(rc) != .INVAL) try check(rc);
     }
     if (bind_low) try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
     try check(linux.setgroups(0, &[_]linux.gid_t{}));
@@ -820,6 +1162,17 @@ fn readOr(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     return Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch "";
 }
 
+/// Write text to dir/file, which must already exist (a cgroup control
+/// file): opened write-only, no create, no truncate.
+fn writeIn(gpa: Allocator, dir: [:0]const u8, file: []const u8, text: []const u8) bool {
+    const path = gpa.printSentinel("{s}/{s}", .{ dir, file }, 0) catch return false;
+    const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    defer _ = linux.close(@intCast(fd));
+    const n = linux.write(@intCast(fd), text.ptr, text.len);
+    return linux.errno(n) == .SUCCESS and n == text.len;
+}
+
 fn exists(path: [:0]const u8) bool {
     return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
@@ -874,7 +1227,10 @@ test parse {
         \\requires /run/config/nginx/cert.pem
         \\env     "GREETING=hello world"
         \\secret  TOKEN /run/config/x/token
+        \\config  host-key /run/config/ssh/host_key
         \\nofile  65536
+        \\memory  512
+        \\pledge  stdio rpath inet listen connect exec
     , &bad);
     try testing.expectEqualStrings("/etc/nginx/nginx.conf", s.exec[2]);
     try testing.expectEqual(3, s.before[0].len);
@@ -886,7 +1242,11 @@ test parse {
     try testing.expectEqualStrings("/run/config/nginx/cert.pem", s.requires[0]);
     try testing.expectEqualStrings("hello world", s.env[0][1]);
     try testing.expectEqualStrings("TOKEN", s.secrets[0][0]);
+    try testing.expectEqualStrings("host-key", s.configs[0][0]);
+    try testing.expectEqualStrings("/run/config/ssh/host_key", s.configs[0][1]);
     try testing.expectEqual(65536, s.nofile.?);
+    try testing.expectEqual(512, s.memory.?);
+    try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
 }
 
 test "parse refuses" {
@@ -902,16 +1262,67 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
         .{ .text = "exec /a\nuser x\nread /etc//x", .line = 3 },
         .{ .text = "exec /a\nuser x\nenv 1X=y", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig ../key /run/config/key", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig key /etc/shadow", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig key /run/config/../shadow", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconfig key /run/config", .line = 3 },
+        .{
+            .text = "exec /a\nuser x\nconfig key /run/config/a\nconfig key /run/config/b",
+            .line = 4,
+        },
         .{ .text = "exec /a \"b\nuser x", .line = 1 },
         .{ .text = "exec /a b\"c\"\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser x\nnofile 0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nmemory 0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nmemory huge", .line = 3 },
         .{ .text = "user x", .line = 0 },
         .{ .text = "exec /a", .line = 0 },
         .{ .text = "exec /a\x07\nuser x", .line = 1 },
+        .{ .text = "exec /a\nuser x", .line = 0 }, // no pledge
+        .{ .text = "exec /a\nuser x\npledge stdio ptrace", .line = 3 },
+        .{ .text = "exec /a\nuser x\npledge", .line = 3 },
+        .{ .text = "exec /a\nuser x\npledge stdio\npledge rpath", .line = 4 },
     };
     for (cases) |c| {
         var bad: Bad = .{};
         try testing.expectError(error.Invalid, parse(arena.allocator(), c.text, &bad));
+        try testing.expectEqual(c.line, bad.line);
+    }
+}
+
+test "settings are declared, never invented" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const head = "exec /a\nuser x\npledge stdio\nconfig settings /run/config/x/settings.json\n";
+    var bad: Bad = .{};
+    const s = try parse(gpa, head ++
+        \\setting routes cidr... as advertiseRoutes
+        \\render  json config.json from /etc/tailscale/config.json
+    , &bad);
+    try testing.expectEqualStrings("advertiseRoutes", s.settings[0].key.?);
+    try testing.expectEqualStrings("/etc/tailscale/config.json", s.render.?.from.?);
+    const e = try parse(
+        gpa,
+        head ++ "setting database-url url required\nrender env app.env\n",
+        &bad,
+    );
+    try testing.expectEqualStrings("DATABASE_URL", e.settings[0].key.?);
+
+    const cases = [_]struct { text: []const u8, line: usize }{
+        .{ .text = head ++ "setting a ip\n", .line = 0 }, // no render
+        .{ .text = head ++ "render conf x\n", .line = 0 }, // nothing to render
+        .{ .text = head ++ "setting a ip\nrender conf x\nrender conf y\n", .line = 7 },
+        .{ .text = head ++ "setting a string\nrender conf x\n", .line = 0 },
+        .{ .text = head ++ "setting a nonsense\nrender conf x\n", .line = 5 },
+        .{ .text = head ++ "env HOME=/x\nsetting home hostname\nrender env e\n", .line = 0 },
+        .{ .text = head ++ "secret A /run/config/a\nsetting a ip\nrender env e\n", .line = 0 },
+        .{ .text = head ++ "config x /run/config/x\nsetting a ip\nrender conf x\n", .line = 0 },
+        // No `config settings`: nowhere for the values to come from.
+        .{ .text = "exec /a\nuser x\npledge stdio\nsetting a ip\nrender conf x\n", .line = 0 },
+    };
+    for (cases) |c| {
+        try testing.expectError(error.Invalid, parse(gpa, c.text, &bad));
         try testing.expectEqual(c.line, bad.line);
     }
 }
@@ -951,4 +1362,54 @@ test lookupUser {
         lookupUser("root:x:0:0::/:/x\nnginx:x:200:200::/var/empty:/sbin/nologin\n", "nginx").?,
     );
     try testing.expectEqual(null, lookupUser("nginx2:x:1:1::/:/x\n", "nginx"));
+}
+
+test "config file count is bounded" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var text: std.ArrayList(u8) = .empty;
+    try text.appendSlice(gpa, "exec /a\nuser x\npledge stdio\n");
+    for (0..32) |i| try text.appendSlice(
+        gpa,
+        try gpa.print("config key{d} /run/config/key{d}\n", .{ i, i }),
+    );
+    var bad: Bad = .{};
+    try testing.expectEqual(@as(usize, 32), (try parse(gpa, text.items, &bad)).configs.len);
+    try text.appendSlice(gpa, "config extra /run/config/extra\n");
+    try testing.expectError(error.Invalid, parse(gpa, text.items, &bad));
+}
+
+test "config copies replace links, not their targets" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = testing.io;
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    const n = try tmp.dir.realPath(io, &buf);
+    const path = try testing.allocator.dupeSentinel(u8, buf[0..n], 0);
+    defer testing.allocator.free(path);
+    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "unchanged" });
+    try tmp.dir.symLink(io, "victim", "key", .{});
+    try copyConfig(path, "key", "first\n");
+    try testing.expectEqualStrings("unchanged", try tmp.dir.readFile(io, "victim", &buf));
+    try testing.expectEqualStrings("first\n", try tmp.dir.readFile(io, "key", &buf));
+    const st = try tmp.dir.statFile(io, "key", .{});
+    try testing.expectEqual(@as(u32, 0o600), st.permissions.toMode() & 0o777);
+    try copyConfig(path, "key", "second\n");
+    try testing.expectEqualStrings("second\n", try tmp.dir.readFile(io, "key", &buf));
+    // Replacing a hard link must not truncate the inode it shares.
+    const victim = try testing.allocator.printSentinel("{s}/victim", .{path}, 0);
+    defer testing.allocator.free(victim);
+    const hard = try testing.allocator.printSentinel("{s}/hard", .{path}, 0);
+    defer testing.allocator.free(hard);
+    try testing.expectEqual(
+        linux.E.SUCCESS,
+        linux.errno(linux.linkat(linux.AT.FDCWD, victim, linux.AT.FDCWD, hard, 0)),
+    );
+    try copyConfig(path, "hard", "replacement");
+    try testing.expectEqualStrings("unchanged", try tmp.dir.readFile(io, "victim", &buf));
+    try testing.expectEqualStrings("replacement", try tmp.dir.readFile(io, "hard", &buf));
+    try tmp.dir.createDir(io, "directory", .default_dir);
+    try testing.expectError(error.Unlink, copyConfig(path, "directory", "no"));
 }

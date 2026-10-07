@@ -12,7 +12,8 @@
 //! "/dev/null" 2>&1
 //!
 //! that is, an absolute program and plain words, either of which may be in
-//! double quotes, and then the redirections <FILE, >FILE and 2>&1. It runs
+//! double quotes, and then the redirections </dev/null, >/dev/null and 2>&1,
+//! the one file initdb ever names, so the library never creates a file. It runs
 //! the program itself, with no shell between, with the words a shell would
 //! have given it. A command with anything else (a pipe, a ;, a $ or ` or \
 //! even in double quotes, a glob outside them, a quote of the other kind)
@@ -37,13 +38,13 @@ extern "c" var environ: [*:null]?[*:0]u8;
 const max_words = 64;
 const max_command = 4096;
 
-/// A command, parsed: argv, and where stdin and stdout come from, and
+/// A command, parsed: argv, whether stdin and stdout are /dev/null, and
 /// whether stderr follows stdout.
 const Command = struct {
     buf: [max_command + 1]u8 = undefined,
     argv: [max_words + 1]?[*:0]const u8 = @splat(null),
-    in: ?[*:0]const u8 = null,
-    out: ?[*:0]const u8 = null,
+    in: bool = false,
+    out: bool = false,
     err_to_out: bool = false,
 };
 
@@ -60,7 +61,7 @@ fn parse(command: []const u8, c: *Command) bool {
         if (i == command.len) break;
         if (next == .arg) {
             if (std.mem.startsWith(u8, command[i..], "2>&1")) {
-                if (c.out == null) return false; // only after >FILE, as initdb writes it
+                if (!c.out) return false; // only after >/dev/null, as initdb writes it
                 c.err_to_out = true;
                 i += 4;
                 continue;
@@ -70,7 +71,7 @@ fn parse(command: []const u8, c: *Command) bool {
                 i += 1;
                 continue;
             }
-            if (c.in != null or c.out != null) return false; // words after a redirection
+            if (c.in or c.out) return false; // words after a redirection
         }
         // A word: in double quotes, or plain.
         var word: []const u8 = undefined;
@@ -91,19 +92,21 @@ fn parse(command: []const u8, c: *Command) bool {
             0...0x1f, 0x7f, '"', '$', '`', '\\' => return false,
             else => {},
         };
-        if (used + word.len + 1 > c.buf.len) return false;
-        @memcpy(c.buf[used..][0..word.len], word);
-        c.buf[used + word.len] = 0;
-        const z: [*:0]const u8 = @ptrCast(&c.buf[used]);
-        used += word.len + 1;
         switch (next) {
             .arg => {
-                if (n == max_words) return false;
-                c.argv[n] = z;
+                if (n == max_words or used + word.len + 1 > c.buf.len) return false;
+                @memcpy(c.buf[used..][0..word.len], word);
+                c.buf[used + word.len] = 0;
+                c.argv[n] = @ptrCast(&c.buf[used]);
+                used += word.len + 1;
                 n += 1;
             },
-            .in => c.in = if (c.in == null) z else return false,
-            .out => c.out = if (c.out == null) z else return false,
+            // Only the file initdb names, once each.
+            .in, .out => {
+                const seen = if (next == .in) &c.in else &c.out;
+                if (seen.* or !std.mem.eql(u8, word, "/dev/null")) return false;
+                seen.* = true;
+            },
         }
         next = .arg;
     }
@@ -160,8 +163,8 @@ fn start(c: *const Command, pipe_end: ?struct { fd: i32, which: i32 }) ?linux.pi
             else
                 _ = linux.dup3(p.fd, p.which, 0);
         }
-        if (c.in) |path| redirect(path, .{ .ACCMODE = .RDONLY }, 0);
-        if (c.out) |path| redirect(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 1);
+        if (c.in) toNull(.RDONLY, 0);
+        if (c.out) toNull(.WRONLY, 1);
         if (c.err_to_out) _ = linux.dup3(1, 2, 0);
         _ = linux.execve(c.argv[0].?, @ptrCast(&c.argv), @ptrCast(environ));
         linux.exit_group(127);
@@ -169,10 +172,10 @@ fn start(c: *const Command, pipe_end: ?struct { fd: i32, which: i32 }) ?linux.pi
     return @intCast(pid);
 }
 
-/// path opened onto descriptor to, or the child ends as a shell's would.
-/// Opened as the lowest free descriptor, it may be to already.
-fn redirect(path: [*:0]const u8, flags: linux.O, to: i32) void {
-    const rc = linux.open(path, flags, 0o600);
+/// /dev/null opened onto descriptor to, or the child ends as a shell's
+/// would. Opened as the lowest free descriptor, it may be to already.
+fn toNull(mode: @FieldType(linux.O, "ACCMODE"), to: i32) void {
+    const rc = linux.open("/dev/null", .{ .ACCMODE = mode }, 0);
     if (linux.errno(rc) != .SUCCESS) linux.exit_group(127);
     const fd: i32 = @intCast(rc);
     if (fd == to) return;
@@ -325,7 +328,7 @@ test "initdb's commands" {
 
     c = .{};
     try testing.expect(parse("\"/usr/bin/postgres\" --single -F -O -j template1 >/dev/null", &c));
-    try testing.expectEqualStrings("/dev/null", std.mem.span(c.out.?));
+    try testing.expect(c.out and !c.in);
     try testing.expect(!c.err_to_out);
 
     c = .{};
@@ -334,7 +337,7 @@ test "initdb's commands" {
             "x < \"/dev/null\" > \"/dev/null\" 2>&1",
         &c,
     ));
-    try testing.expectEqualStrings("/dev/null", std.mem.span(c.in.?));
+    try testing.expect(c.in and c.out);
     try testing.expect(c.err_to_out);
 
     c = .{};
@@ -379,6 +382,16 @@ test "anything else is not run" {
         "/usr/bin/postgres <",
         "/usr/bin/postgres < >/tmp/x",
         "/usr/bin/postgres >/tmp/x <",
+        // Any file but /dev/null: none to create, truncate or read.
+        "/usr/bin/postgres >/tmp/x",
+        "/usr/bin/postgres </etc/shadow",
+        "/usr/bin/postgres >\"/tmp/x\"",
+        "/usr/bin/postgres >/dev/null/",
+        "/usr/bin/postgres >/dev/null2",
+        "/usr/bin/postgres >dev/null",
+        "/usr/bin/postgres >/dev/./null",
+        "/usr/bin/postgres </dev/null </dev/null",
+        "/usr/bin/postgres >/dev/null >/dev/null",
         // Quotes that a shell would join or read otherwise.
         "/usr/bin/postgres a\"b\"",
         "/usr/bin/postgres \"a\"b",
@@ -412,20 +425,20 @@ test "accepted commands, word for word" {
     const Case = struct {
         cmd: []const u8,
         argv: []const []const u8,
-        in: ?[]const u8 = null,
-        out: ?[]const u8 = null,
+        in: bool = false,
+        out: bool = false,
         err: bool = false,
     };
     const cases = [_]Case{
         .{ .cmd = "/bin/x a\tb  c", .argv = &.{ "/bin/x", "a", "b", "c" } },
         .{ .cmd = "\"/bin/x\" \"a b\" \"\"", .argv = &.{ "/bin/x", "a b", "" } },
-        .{ .cmd = "/bin/x >out", .argv = &.{"/bin/x"}, .out = "out" },
-        .{ .cmd = "/bin/x <in", .argv = &.{"/bin/x"}, .in = "in" },
+        .{ .cmd = "/bin/x >/dev/null", .argv = &.{"/bin/x"}, .out = true },
+        .{ .cmd = "/bin/x </dev/null", .argv = &.{"/bin/x"}, .in = true },
         .{
-            .cmd = "/bin/x > \"/dev/null\" < \"/dev/zero\" 2>&1",
+            .cmd = "/bin/x > \"/dev/null\" < \"/dev/null\" 2>&1",
             .argv = &.{"/bin/x"},
-            .in = "/dev/zero",
-            .out = "/dev/null",
+            .in = true,
+            .out = true,
             .err = true,
         },
         .{ .cmd = "/bin/x -c=1,2:3@4%5+6^7.8_9/", .argv = &.{ "/bin/x", "-c=1,2:3@4%5+6^7.8_9/" } },
@@ -445,14 +458,8 @@ test "accepted commands, word for word" {
         const a = argvOf(&c);
         try testing.expectEqual(k.argv.len, a.len);
         for (k.argv, a) |want, got| try testing.expectEqualStrings(want, std.mem.span(got));
-        if (k.in) |in|
-            try testing.expectEqualStrings(in, std.mem.span(c.in.?))
-        else
-            try testing.expectEqual(null, c.in);
-        if (k.out) |out|
-            try testing.expectEqualStrings(out, std.mem.span(c.out.?))
-        else
-            try testing.expectEqual(null, c.out);
+        try testing.expectEqual(k.in, c.in);
+        try testing.expectEqual(k.out, c.out);
         try testing.expectEqual(k.err, c.err_to_out);
     }
 }
@@ -622,8 +629,7 @@ test "random commands: the words /bin/sh gives" {
     while (compared < 3000) {
         const program_end = try randomCommand(prng.random(), &buf);
         var c: Command = .{};
-        if (program_end == 0 or !parse(buf.items, &c) or c.in != null or c.out != null or
-            c.err_to_out) continue;
+        if (program_end == 0 or !parse(buf.items, &c) or c.in or c.out or c.err_to_out) continue;
         // A piece run on into the program makes another program: /bin/x-c.
         if (!std.mem.eql(u8, std.mem.span(c.argv[0].?), "/bin/x")) continue;
         try text.print(testing.allocator, "p{s}\n", .{buf.items[program_end..]});
@@ -667,7 +673,7 @@ test "popen: a program's input" {
     const out = scratch(&pb, "input");
     defer _ = linux.unlink(out);
     var cmd: [300]u8 = undefined;
-    const c = try std.mem.printSentinel(&cmd, "/bin/cat >{s}", .{out}, 0);
+    const c = try std.mem.printSentinel(&cmd, "/usr/bin/tee {s} >/dev/null", .{out}, 0);
     const s = popen(c, "w") orelse return error.NotRun;
     try testing.expectEqual(5, fwrite("data\n", 1, 5, s));
     try testing.expectEqual(0, pclose(s));
@@ -682,31 +688,55 @@ test "system: statuses, redirections, and a program not there" {
     try testing.expectEqual(1 << 8, system("/bin/false"));
     try testing.expectEqual(127 << 8, system("/nonexistent/popen-shim-test"));
 
-    var ib: [256]u8 = undefined;
     var ob: [256]u8 = undefined;
-    const in = scratch(&ib, "in");
+    var eb: [256]u8 = undefined;
     const out = scratch(&ob, "out");
-    defer _ = linux.unlink(in);
+    const err = scratch(&eb, "err");
     defer _ = linux.unlink(out);
-    try writeAll(in, "abc\n");
-    var cmd: [600]u8 = undefined;
-    try testing.expectEqual(
-        0,
-        system(try std.mem.printSentinel(&cmd, "/bin/cat <{s} >{s}", .{ in, out }, 0)),
-    );
+    defer _ = linux.unlink(err);
     var b: [256]u8 = undefined;
+    // Without a redirection, cat copies its stdin to its stdout; with
+    // one, /dev/null takes the place of either.
+    try testing.expect(try systemWith("/bin/cat", out, err));
     try testing.expectEqualStrings("abc\n", try readAll(out, &b));
+    try testing.expect(try systemWith("/bin/cat </dev/null", out, err));
+    try testing.expectEqualStrings("", try readAll(out, &b));
+    try testing.expect(try systemWith("/bin/cat >/dev/null", out, err));
+    try testing.expectEqualStrings("", try readAll(out, &b));
 
-    // 2>&1: what the program says on stderr lands in the file.
-    try testing.expect(system(try std.mem.printSentinel(
-        &cmd,
-        "/bin/ls /nonexistent/popen-shim-test >{s} 2>&1",
-        .{out},
-        0,
-    )) != 0);
-    try testing.expect((try readAll(out, &b)).len > 0);
-    // A file it cannot open ends the command as a shell's would: 127.
-    try testing.expectEqual(127 << 8, system("/bin/cat </nonexistent/popen-shim-test"));
+    // 2>&1: what the program says on stderr follows stdout to /dev/null.
+    try testing.expect(!try systemWith("/bin/ls /nonexistent/popen-shim-test", out, err));
+    try testing.expect((try readAll(err, &b)).len > 0);
+    try testing.expect(!try systemWith(
+        "/bin/ls /nonexistent/popen-shim-test >/dev/null 2>&1",
+        out,
+        err,
+    ));
+    try testing.expectEqualStrings("", try readAll(err, &b));
+    try testing.expectEqualStrings("", try readAll(out, &b));
+    // A file other than /dev/null is not opened: the command is not run.
+    try testing.expectEqual(-1, system("/bin/cat </nonexistent/popen-shim-test"));
+}
+
+/// Whether system(cmd) succeeded, run in a child whose stdin holds "abc\n"
+/// and whose stdout and stderr are the files out and err.
+fn systemWith(cmd: [*:0]const u8, out: [:0]const u8, err: [:0]const u8) !bool {
+    var p: [2]i32 = undefined;
+    if (linux.errno(linux.pipe2(&p, .{})) != .SUCCESS) return error.Pipe;
+    _ = linux.write(p[1], "abc\n", 4);
+    _ = linux.close(p[1]);
+    const pid = linux.fork();
+    if (pid == 0) {
+        _ = linux.dup3(p[0], 0, 0);
+        const flags: linux.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true };
+        _ = linux.dup3(@intCast(linux.open(out, flags, 0o600)), 1, 0);
+        _ = linux.dup3(@intCast(linux.open(err, flags, 0o600)), 2, 0);
+        linux.exit_group(if (system(cmd) == 0) 0 else 1);
+    }
+    _ = linux.close(p[0]);
+    var status: i32 = 0;
+    _ = linux.wait4(@intCast(pid), &status, 0, null);
+    return status == 0;
 }
 
 test "refused: nothing runs, ENOEXEC, and a line on stderr" {
@@ -800,20 +830,22 @@ test "children keep the environment" {
 
 test "a caller with stdin closed" {
     try onLinux();
-    var ib: [256]u8 = undefined;
     var ob: [256]u8 = undefined;
-    const in = scratch(&ib, "closed-in");
     const out = scratch(&ob, "closed-out");
-    defer _ = linux.unlink(in);
     defer _ = linux.unlink(out);
-    try writeAll(in, "through\n");
-    var cmd: [600]u8 = undefined;
-    const redirected = try std.mem.printSentinel(&cmd, "/bin/cat <{s} >{s}", .{ in, out }, 0);
+    var cmd: [300]u8 = undefined;
+    const redirected = try std.mem.printSentinel(
+        &cmd,
+        "/usr/bin/tee {s} </dev/null >/dev/null",
+        .{out},
+        0,
+    );
     var cmd2: [300]u8 = undefined;
-    const written = try std.mem.printSentinel(&cmd2, "/bin/cat >{s}", .{out}, 0);
+    const written = try std.mem.printSentinel(&cmd2, "/usr/bin/tee {s} >/dev/null", .{out}, 0);
 
-    // In a child, so the test's own stdin is left alone: the file <FILE
-    // opens, and the pipe popen makes, each take descriptor 0 itself.
+    // In a child, so the test's own stdin is left alone: the /dev/null
+    // </dev/null opens, and the pipe popen makes, each take descriptor 0
+    // itself. tee fails on a stdin it cannot read.
     for ([_]bool{ false, true }) |use_popen| {
         _ = linux.unlink(out);
         const pid = linux.fork();
@@ -830,6 +862,6 @@ test "a caller with stdin closed" {
         _ = linux.wait4(@intCast(pid), &status, 0, null);
         try testing.expectEqual(0, status);
         var b: [64]u8 = undefined;
-        try testing.expectEqualStrings("through\n", try readAll(out, &b));
+        try testing.expectEqualStrings(if (use_popen) "through\n" else "", try readAll(out, &b));
     }
 }

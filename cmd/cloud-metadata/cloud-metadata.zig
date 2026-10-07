@@ -18,10 +18,12 @@
 //! Two processes, as werewolf's programs are written (docs/programs.md):
 //!
 //!   fetcher   runs as _cloud (uid 68), chrooted to the empty /var/empty,
-//!             with no capabilities, under a seccomp filter that allows an
-//!             IPv4 TCP connection and little else. It makes the HTTP
-//!             requests, reads at most 128 KiB, and sends the parent the
-//!             response's body.
+//!             with no capabilities, under Landlock, which lets it reach
+//!             no file and connect over TCP to port 80 alone, and a seccomp
+//!             filter that allows a TCP socket and little else: no UDP. It
+//!             runs before fence sets the network policy, so these are what
+//!             hold it. It makes the HTTP requests, reads at most 128 KiB,
+//!             and sends the parent the response's body.
 //!   parent    stays root's uid with no capabilities at all, under Landlock,
 //!             which confines its writes to /run/werewolf/cloud, and seccomp.
 //!             It never touches the network. It decodes the body, checks the
@@ -40,7 +42,7 @@ const sys = sandbox.sys;
 
 const out_dir = "/run/werewolf/cloud";
 const empty_dir = "/var/empty";
-/// _cloud, in cloud.yaml's accounts.
+/// _cloud, in prod.yaml's accounts.
 const fetcher_id: u32 = 68;
 const metadata_ip = [4]u8{ 169, 254, 169, 254 };
 
@@ -64,6 +66,9 @@ const Provider = struct {
     header: []const u8 = "",
     /// AWS's IMDSv2: a session token from a PUT before the GET.
     token: bool = false,
+    /// GCP's server says `Metadata-Flavor: Google` on every answer; one that
+    /// does not is not it.
+    flavor: bool = false,
 };
 
 const providers = [_]Provider{
@@ -73,6 +78,7 @@ const providers = [_]Provider{
         .product = "Google Compute Engine",
         .path = "/computeMetadata/v1/instance/attributes/user-data",
         .header = "Metadata-Flavor: Google",
+        .flavor = true,
     },
     .{ .name = "aws", .vendor = "Amazon EC2", .path = "/latest/user-data", .token = true },
     .{ .name = "hetzner", .vendor = "Hetzner", .path = "/hetzner/v1/userdata" },
@@ -245,8 +251,12 @@ const result_failed: u8 = 2;
 fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
     sandbox.tieTo(parent_pid);
     sandbox.dropTo(fetcher_id, empty_dir) catch linux.exit_group(1);
+    // No file, and TCP to port 80 alone: fence's policy is not set yet.
+    sandbox.landlock(&.{}, &.{80}) catch linux.exit_group(1);
     var f: sandbox.Filter = .{};
-    f.allowArg("socket", 0, linux.AF.INET);
+    // A stream socket, exactly as exchange makes one: TCP, never UDP, which
+    // Landlock does not hold to a port.
+    f.allowArg("socket", 1, socket_type);
     f.allow("connect");
     f.allow("getsockopt");
     f.allow("write");
@@ -276,17 +286,19 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
 
 const Fetched = union(enum) { body: []const u8, none, failed };
 
-/// The provider's user data, in four tries over at most half a minute, as
-/// the metadata server may not answer the moment the network is up.
+/// The provider's user data, in four tries 1, 2 and 4 seconds apart, as the
+/// metadata server may not answer the moment the network is up: at most 27
+/// seconds, or 47 where a token is asked for first (5 an exchange).
 fn fetch(p: Provider, buf: *[max_response]u8) Fetched {
     var wait: u32 = 1;
     var tries: u32 = 0;
-    while (tries < 4) : (tries += 1) {
+    while (true) {
         if (fetchOnce(p, buf)) |r| return r;
+        tries += 1;
+        if (tries == 4) return .failed;
         sleep(wait);
         wait *= 2;
     }
-    return .failed;
 }
 
 /// One attempt: null to try again.
@@ -317,6 +329,7 @@ fn fetchOnce(p: Provider, buf: *[max_response]u8) ?Fetched {
         buf,
     ) orelse return null;
     const r = parseResponse(resp) orelse return null;
+    if (p.flavor and !r.google) return .failed;
     return switch (r.status) {
         200 => if (r.body.len == 0) .none else .{ .body = r.body },
         404 => .none,
@@ -345,16 +358,15 @@ fn validToken(t: []const u8) bool {
     return true;
 }
 
+/// The only socket the fetcher makes, and so the only one its filter allows.
+const socket_type: u32 = linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK;
+
 /// Send `req` to the metadata server and read its whole response, within
 /// 5 seconds; null on any failure. The response ends where its length says,
 /// or with its last chunk, or when the server closes.
 fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
     const deadline = nowMs() + 5_000;
-    const rc = linux.socket(
-        linux.AF.INET,
-        linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK,
-        0,
-    );
+    const rc = linux.socket(linux.AF.INET, socket_type, 0);
     if (linux.errno(rc) != .SUCCESS) return null;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
@@ -397,25 +409,14 @@ fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
 }
 
 /// Whether `resp` holds a whole response: its headers, and all of a body
-/// whose length is given or whose last chunk has come.
+/// whose last chunk has come or whose length is given, read as
+/// parseResponse reads them, chunks first.
 fn complete(resp: []const u8) bool {
-    const end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return false;
-    var lines = std.mem.splitSequence(u8, resp[0..end], "\r\n");
-    _ = lines.next();
-    while (lines.next()) |line| {
-        const colon = std.mem.findScalar(u8, line, ':') orelse return false;
-        const name = std.mem.trim(u8, line[0..colon], " ");
-        const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-        if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            const l = std.fmt.parseInt(usize, value, 10) catch return false;
-            return resp.len - end - 4 >= l;
-        }
-        if (std.ascii.eqlIgnoreCase(
-            name,
-            "transfer-encoding",
-        )) return std.mem.endsWith(u8, resp, "\r\n0\r\n\r\n");
-    }
-    return false;
+    const end = std.mem.find(u8, resp, "\r\n\r\n") orelse return false;
+    const h = parseHead(resp[0..end]) orelse return false;
+    if (h.chunked) return std.mem.endsWith(u8, resp, "\r\n0\r\n\r\n");
+    const l = h.length orelse return false;
+    return resp.len - end - 4 >= l;
 }
 
 fn waitFor(fd: i32, events: i16, deadline: i64) bool {
@@ -430,39 +431,72 @@ fn waitFor(fd: i32, events: i16, deadline: i64) bool {
     }
 }
 
-const Response = struct { status: u16, body: []const u8 };
+const Response = struct { status: u16, body: []const u8, google: bool };
 
-/// An HTTP/1.x response: its status and body, the body decoded from
-/// chunks, in place, or cut to Content-Length where the server says so.
-/// Null for anything malformed.
-fn parseResponse(resp: []u8) ?Response {
-    const end = std.mem.indexOf(u8, resp, "\r\n\r\n") orelse return null;
-    const head = resp[0..end];
-    var body = resp[end + 4 ..];
+/// What werewolf reads of a response's head: its status, how its body
+/// ends, and GCP's mark.
+const Head = struct {
+    status: u16,
+    length: ?usize = null,
+    chunked: bool = false,
+    /// Metadata-Flavor: Google, as GCP's server says on every answer.
+    google: bool = false,
+};
+
+/// An HTTP/1.x response's head, the status line and headers before the
+/// blank line. Null for anything malformed, or a body encoded other than
+/// in chunks.
+fn parseHead(head: []const u8) ?Head {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const status_line = lines.next() orelse return null;
     if (!std.mem.startsWith(u8, status_line, "HTTP/1.") or status_line.len < 12 or
-        status_line[8] != ' ') return null;
-    const status = std.fmt.parseInt(u16, status_line[9..12], 10) catch return null;
-    var length: ?usize = null;
-    var chunked = false;
+        status_line[8] != ' ' or (status_line.len > 12 and status_line[12] != ' ')) return null;
+    var h: Head = .{ .status = std.math.cast(u16, digits(status_line[9..12], 10) orelse
+        return null) orelse return null };
     while (lines.next()) |line| {
         const colon = std.mem.findScalar(u8, line, ':') orelse return null;
         const name = std.mem.trim(u8, line[0..colon], " ");
         const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
         if (std.ascii.eqlIgnoreCase(name, "content-length")) {
-            length = std.fmt.parseInt(usize, value, 10) catch return null;
+            h.length = digits(value, 10) orelse return null;
         } else if (std.ascii.eqlIgnoreCase(name, "transfer-encoding")) {
             if (!std.ascii.eqlIgnoreCase(value, "chunked")) return null;
-            chunked = true;
+            h.chunked = true;
+        } else if (std.ascii.eqlIgnoreCase(name, "metadata-flavor")) {
+            h.google = std.mem.eql(u8, value, "Google");
         }
     }
-    if (chunked) return .{ .status = status, .body = dechunk(body) orelse return null };
-    if (length) |l| {
-        if (l > body.len) return null;
-        body = body[0..l];
+    return h;
+}
+
+/// An HTTP/1.x response: its status and body, the body decoded from
+/// chunks, in place, or cut to Content-Length where the server says so.
+/// Null for anything malformed.
+fn parseResponse(resp: []u8) ?Response {
+    const end = std.mem.find(u8, resp, "\r\n\r\n") orelse return null;
+    const h = parseHead(resp[0..end]) orelse return null;
+    const raw = resp[end + 4 ..];
+    if (h.chunked) return .{
+        .status = h.status,
+        .body = dechunk(raw) orelse return null,
+        .google = h.google,
+    };
+    const l = h.length orelse raw.len;
+    if (l > raw.len) return null;
+    return .{ .status = h.status, .body = raw[0..l], .google = h.google };
+}
+
+/// text as digits in base and nothing else: no sign and no _ between them,
+/// which std.fmt.parseInt would take. Null for anything else, or too large.
+fn digits(text: []const u8, base: u8) ?usize {
+    if (text.len == 0) return null;
+    var v: usize = 0;
+    for (text) |c| {
+        const d = std.fmt.charToDigit(c, base) catch return null;
+        v = std.math.mul(usize, v, base) catch return null;
+        v = std.math.add(usize, v, d) catch return null;
     }
-    return .{ .status = status, .body = body };
+    return v;
 }
 
 /// A chunked body, its chunks moved together in place: the decoded body is
@@ -473,10 +507,10 @@ fn dechunk(body: []u8) ?[]const u8 {
     var in: usize = 0;
     var n: usize = 0;
     while (true) {
-        const eol = std.mem.indexOfPos(u8, body, in, "\r\n") orelse return null;
+        const eol = std.mem.findPos(u8, body, in, "\r\n") orelse return null;
         const size_text = std.mem.trim(u8, body[in..eol], " ");
         const semi = std.mem.findScalar(u8, size_text, ';') orelse size_text.len;
-        const size = std.fmt.parseInt(usize, size_text[0..semi], 16) catch return null;
+        const size = digits(size_text[0..semi], 16) orelse return null;
         in = eol + 2;
         if (size == 0) return out[0..n];
         if (size > body.len - in or body.len - in - size < 2) return null;
@@ -523,7 +557,8 @@ const Entry = struct {
 
 /// Check a tar entry by entry. Only regular files and directories pass,
 /// under names of letters, digits and . _ - /, relative, without . or ..
-/// components, each at most 32 KiB, at most 32 of them. A POSIX ustar or a
+/// components, each at most 32 KiB, at most 32 of them, and no name twice
+/// or beneath a file. A POSIX ustar or a
 /// GNU tar, as tar and bsdtar write them. pax headers, which macOS's tar
 /// adds for extended attributes, are skipped and never applied: what they
 /// say about the next entry is ignored, since the tar init extracts is
@@ -568,6 +603,7 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         if (name.len > 100) return error.BadName;
         if (name.len > 0) {
             if (n == max_entries) return error.TooManyEntries;
+            for (out[0..n]) |*e| if (clash(e, name, dir)) return error.NameClash;
             out[n] = .{
                 .name_buf = undefined,
                 .name_len = @intCast(name.len),
@@ -579,6 +615,20 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         }
         off += blocks * 512;
     }
+}
+
+/// Whether name, a directory's or not, clashes with entry e: the same name
+/// twice, a name beneath a file, or a file above a name. A config that
+/// says two things is refused, not settled by whichever init meets last.
+fn clash(e: *const Entry, name: []const u8, dir: bool) bool {
+    if (std.mem.eql(u8, e.name(), name)) return true;
+    return (!e.dir and beneath(name, e.name())) or (!dir and beneath(e.name(), name));
+}
+
+/// Whether path lies beneath the directory parent.
+fn beneath(path: []const u8, parent: []const u8) bool {
+    return path.len > parent.len and std.mem.startsWith(u8, path, parent) and
+        path[parent.len] == '/';
 }
 
 /// The entry's name, with ustar's prefix where there is one.
@@ -609,7 +659,7 @@ fn cleanName(raw: []const u8) ?[]const u8 {
 fn octal(field: []const u8) ?usize {
     const t = std.mem.trim(u8, std.mem.sliceTo(field, 0), " ");
     if (t.len == 0) return 0;
-    return std.fmt.parseInt(usize, t, 8) catch null;
+    return digits(t, 8);
 }
 
 fn checksumOk(h: *const [512]u8) bool {
@@ -875,6 +925,24 @@ test "entries that are refused" {
             checkTar(testTar(&buf, &.{.{ c[0], c[1], "x" }}), &files),
         );
     }
+    // The same name twice, a name beneath a file, a file above a name.
+    const clashes = .{
+        .{ .{ "hostname", '0', "a" }, .{ "hostname", '0', "b" } },
+        .{ .{ "keys", '0', "a" }, .{ "keys/x", '0', "b" } },
+        .{ .{ "keys/x", '0', "a" }, .{ "keys", '0', "b" } },
+        .{ .{ "d/", '5', "" }, .{ "d", '5', "" } },
+    };
+    inline for (clashes) |c| {
+        try std.testing.expectError(
+            error.NameClash,
+            checkTar(testTar(&buf, &.{ c[0], c[1] }), &files),
+        );
+    }
+    // A directory, then what is in it, passes.
+    try std.testing.expectEqual(2, try checkTar(
+        testTar(&buf, &.{ .{ "d/", '5', "" }, .{ "d/x", '0', "a" } }),
+        &files,
+    ));
     // A bad checksum, a truncated archive, and a file larger than allowed.
     var tar = testTar(&buf, &.{.{ "hostname", '0', "web-1\n" }});
     var bad: [8192]u8 = undefined;
@@ -931,6 +999,26 @@ test "HTTP responses" {
         null,
         parseText("HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\n\r\nx"),
     );
+    // Numbers are digits alone: no sign, no _ between them.
+    try std.testing.expectEqual(
+        null,
+        parseText("HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello"),
+    );
+    try std.testing.expectEqual(
+        null,
+        parseText("HTTP/1.1 200 OK\r\nContent-Length: 0_5\r\n\r\nhello"),
+    );
+    try std.testing.expectEqual(null, parseText("HTTP/1.1 +20 OK\r\n\r\n"));
+    try std.testing.expectEqual(
+        null,
+        parseText("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+4\r\nwere\r\n0\r\n\r\n"),
+    );
+    // GCP's mark, and its absence.
+    try std.testing.expect(
+        parseText("HTTP/1.1 200 OK\r\nMetadata-Flavor: Google\r\n\r\nx").?.google,
+    );
+    try std.testing.expect(!parseText("HTTP/1.1 200 OK\r\n\r\nx").?.google);
+
     var bad_chunk = ("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffff\r\nshort\r\n0\r" ++
         "\n\r\n").*;
     try std.testing.expectEqual(null, parseResponse(&bad_chunk));
@@ -946,6 +1034,10 @@ test "a response is whole when its length or last chunk says so" {
         complete("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n0\r\n\r\n"),
     );
     try std.testing.expect(!complete("HTTP/1.1 200 OK\r\n\r\nuntil the close"));
+    // Both: the chunks rule, whichever header comes first.
+    try std.testing.expect(!complete(
+        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n",
+    ));
 }
 
 test "requests carry no smuggled lines" {

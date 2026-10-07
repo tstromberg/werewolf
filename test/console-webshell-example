@@ -8,12 +8,19 @@
 #   unseen  must not appear at all
 #
 # The app starts leashed, then attacks itself with a battery of command
-# injections and reports that none escaped (usr/lib/app/webshell.py). The
-# point of the form is that a vulnerable web application gains nothing, so
-# the test is exactly that: every attack ran, and the cage held.
+# injections and reports that none escaped (usr/lib/app/webshell.py). It
+# then runs the read-only programs the leash's `run` line allows and
+# reports that each ran and gave its expected output (cat /etc/passwd shows
+# the public account list; /etc/shadow stays unreadable). The point of the
+# form is that a vulnerable web application executes real code and still
+# gains nothing: every attack ran and the cage held, and the allowed
+# commands ran and revealed no secret.
 
 seen    app-leashed       leash: \{"event":"start","service":"app","user":"app"
 seen    self-test-done    webshell: \{.*"event": "self-test", "attacks": [1-9][0-9]*, "escaped": 0\}
+seen    exec-allowed      webshell: \{.*"event": "exec-allowed", "commands": 7, "ran": 7\}
+seen    cat-passwd        webshell: \{.*"event": "allowed", "command": "cat /etc/passwd", "exit": 0, "ran": true\}
 unseen  escaped           "escaped": true
 unseen  cage-leaked       webshell: ESCAPED
+unseen  exec-blocked      webshell: \{.*"event": "exec-allowed", "commands": 7, "ran": [0-6]\}
 unseen  service-down      leash: \{"event":"down"

@@ -1,7 +1,6 @@
 //! mount: mount a filesystem werewolf uses, and only ever tighten a mount.
 //!
 //!     mount -t TYPE [-o OPTIONS] SOURCE TARGET   mount SOURCE on TARGET
-//!     mount [-o OPTIONS] DEVICE TARGET           the same, as ext4, xfs or btrfs
 //!     mount --bind SOURCE TARGET                 bind SOURCE onto TARGET
 //!     mount -o remount[,OPTIONS] TARGET          tighten the mount on TARGET
 //!
@@ -14,8 +13,8 @@
 //!   then attached.
 //! - A remount is mount_setattr(2) with nothing to clear: the call cannot
 //!   lift ro, nosuid, nodev, noexec or nosymfollow, whatever it is given.
-//!   Filesystem options on a remount are limited to those that only narrow:
-//!   hidepid=invisible, discard.
+//!   The one filesystem option a remount takes is hidepid=invisible, which
+//!   only narrows what /proc shows.
 //! - suid, dev, exec, and rw on a remount, are refused outright.
 //!
 //! And as paranoid as OpenBSD would have it:
@@ -28,9 +27,10 @@
 //!   symlinks refused: a link planted in a writable directory cannot steer
 //!   a mount elsewhere.
 //! - After the arguments are read and before anything is asked of the
-//!   kernel, it pledges: no_new_privs, every capability dropped but
-//!   CAP_SYS_ADMIN, and a seccomp filter allowing only the system calls
-//!   below; any other kills it.
+//!   kernel, it pledges (lib/sandbox.zig): every capability but
+//!   CAP_SYS_ADMIN gone, from the bounding set too, never to come back, and
+//!   a seccomp filter allowing only the system calls below; any other, or
+//!   another architecture's call, kills it.
 //! - It reads no environment and no file, prints nothing on success, and on
 //!   failure one line with the kernel's own reason.
 //!
@@ -39,8 +39,8 @@
 //! (docs/design/lockdown.md) and IPE (docs/design/verified-boot.md).
 
 const std = @import("std");
-const builtin = @import("builtin");
 const linux = std.os.linux;
+const sandbox = @import("sandbox");
 const Allocator = std.mem.Allocator;
 
 pub fn main(init: std.process.Init) !void {
@@ -75,8 +75,6 @@ const Fs = struct {
     block: bool = false,
     /// It holds device nodes, so it is mounted without nodev.
     devices: bool = false,
-    /// Tried, in order, when no type is given.
-    probe: bool = false,
     /// The filesystem options it may be given.
     options: []const []const u8 = &.{},
 };
@@ -85,21 +83,21 @@ const filesystems = [_]Fs{
     .{ .name = "proc", .options = &.{"hidepid"} },
     .{ .name = "sysfs" },
     .{ .name = "securityfs" },
+    // The leashed services' cgroup2 hierarchy, under /run (cmd/init); no
+    // options, since init mounts it once and the kernel names its files.
+    .{ .name = "cgroup2" },
     .{ .name = "devtmpfs", .devices = true },
     .{ .name = "devpts", .devices = true },
     .{ .name = "tmpfs", .options = &.{ "mode", "size" } },
-    .{ .name = "ext4", .block = true, .probe = true, .options = &.{"discard"} },
-    .{ .name = "xfs", .block = true, .probe = true, .options = &.{"discard"} },
-    .{ .name = "btrfs", .block = true, .probe = true, .options = &.{"discard"} },
+    // /data on a disk, plain or inside LUKS2 (cmd/init).
+    .{ .name = "ext4", .block = true },
+    // A NoCloud seed, read-only.
     .{ .name = "iso9660", .block = true },
-    // The EFI system partition, for native boot's loader entries; only by
-    // name, and with no options, so its owner and mask are FAT's own.
-    .{ .name = "vfat", .block = true },
 };
 
 /// Filesystem options a remount may pass, whatever the filesystem: each only
-/// narrows what it shows or how it writes.
-const remount_options = [_][]const u8{ "hidepid", "discard" };
+/// narrows what it shows.
+const remount_options = [_][]const u8{"hidepid"};
 
 // mount_setattr(2) and fsmount(2) attributes (linux/mount.h).
 const ATTR = struct { // ziglint-ignore: Z032
@@ -136,7 +134,7 @@ const Option = struct { key: [:0]const u8, value: ?[:0]const u8 = null };
 /// Everything an invocation asks, checked before the kernel hears of it.
 const Plan = struct {
     action: Action = .mount,
-    /// null: try each .probe filesystem.
+    /// For a mount; a bind or remount has none.
     fs: ?*const Fs = null,
     source: [:0]const u8 = "",
     target: [:0]const u8 = "",
@@ -218,9 +216,10 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
         .mount => {
             if (n != 2) return error.Usage;
             if (rw and p.attrs & ATTR.RDONLY != 0) return error.Usage;
-            if (fstype) |t| p.fs = try filesystem(t);
-            // Probed filesystems share their kind and options.
-            const fs = p.fs orelse comptime (filesystem("ext4") catch unreachable);
+            // A mount names its filesystem: the kernel is never asked to
+            // read a device as one kind after another.
+            const fs = try filesystem(fstype orelse return error.Usage);
+            p.fs = fs;
             p.source = if (fs.block) try device(pos[0]) else try name(pos[0]);
             p.target = try place(pos[1]);
             for (p.options) |o| if (!allowedOn(fs, o)) return error.Option;
@@ -277,7 +276,7 @@ fn allowedOnRemount(o: Option) bool {
 
 /// Each option's value, in the one form werewolf uses it.
 fn validValue(o: Option) bool {
-    const v = o.value orelse return std.mem.eql(u8, o.key, "discard");
+    const v = o.value orelse return false;
     if (std.mem.eql(u8, o.key, "hidepid")) return std.mem.eql(u8, v, "invisible");
     if (std.mem.eql(u8, o.key, "mode")) {
         if (v.len < 3 or v.len > 4) return false;
@@ -300,83 +299,19 @@ fn validValue(o: Option) bool {
 
 // --- pledge --------------------------------------------------------------------
 
-const PR_SET_NO_NEW_PRIVS = 38;
 const CAP_SYS_ADMIN = 21;
-const LINUX_CAPABILITY_VERSION_3 = 0x20080522;
-const SECCOMP_SET_MODE_FILTER = 1;
-const SECCOMP_RET_ALLOW: u32 = 0x7fff0000;
-const SECCOMP_RET_KILL_PROCESS: u32 = 0x80000000;
 
-/// The system calls apply makes, and the few exiting and writing need.
-const allowed_syscalls = [_]linux.SYS{
-    .openat2,    .open_tree,     .fsopen, .fsconfig, .fsmount, .move_mount,
-    .fspick,     .mount_setattr, .read,   .write,    .close,   .exit,
-    .exit_group,
-};
-
-const audit_arch: u32 = switch (builtin.cpu.arch) {
-    .aarch64 => 0xc00000b7, // AUDIT_ARCH_AARCH64
-    .x86_64 => 0xc000003e, // AUDIT_ARCH_X86_64
-    else => @compileError("mount runs on aarch64 and x86_64"),
-};
-
-/// The kernel's __user_cap_header_struct: pid is an int. (Zig 0.17's
-/// cap_user_header_t makes it a usize, so the kernel would read its pid from
-/// padding, which is whatever was on the stack.)
-const CapHeader = extern struct { version: u32, pid: i32 };
-const CapSets = extern struct { effective: u32, permitted: u32, inheritable: u32 };
-
-const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
-
-fn stmt(code: u16, k: u32) Filter {
-    return .{ .code = code, .jt = 0, .jf = 0, .k = k };
-}
-
-fn jump(code: u16, k: u32, jt: u8, jf: u8) Filter {
-    return .{ .code = code, .jt = jt, .jf = jf, .k = k };
-}
-
-// classic BPF, as seccomp reads it: load a word of seccomp_data, compare, return.
-const LD_W_ABS = 0x20;
-const JEQ_K = 0x15;
-const JGE_K = 0x35;
-const RET_K = 0x06;
-
-/// The program: right architecture (and, on x86_64, no x32 calls), then
-/// one of allowed_syscalls, or the process dies.
-const filter = blk: {
-    const n = allowed_syscalls.len;
-    var f: [5 + n + 1]Filter = undefined;
-    f[0] = stmt(LD_W_ABS, 4); // seccomp_data.arch
-    f[1] = jump(JEQ_K, audit_arch, 1, 0);
-    f[2] = stmt(RET_K, SECCOMP_RET_KILL_PROCESS);
-    f[3] = stmt(LD_W_ABS, 0); // seccomp_data.nr
-    f[4] = jump(JGE_K, 0x40000000, @intCast(n), 0); // x32's numbers
-    for (allowed_syscalls, 0..) |s, j| f[5 + j] = jump(
-        JEQ_K,
-        @intCast(@backingInt(s)),
-        @intCast(n - j),
-        0,
-    );
-    f[5 + n] = stmt(RET_K, SECCOMP_RET_KILL_PROCESS);
-    // Every match jumps here.
-    break :blk f ++ [_]Filter{stmt(RET_K, SECCOMP_RET_ALLOW)};
-};
-
+/// CAP_SYS_ADMIN alone, never to gain more, and a filter of the calls apply
+/// makes, and the few exiting and writing need.
 fn pledge() !void {
-    try sys(linux.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0));
-    const header: CapHeader = .{ .version = LINUX_CAPABILITY_VERSION_3, .pid = 0 };
-    const keep: u32 = 1 << CAP_SYS_ADMIN;
-    const data = [2]CapSets{
-        .{ .effective = keep, .permitted = keep, .inheritable = 0 },
-        .{ .effective = 0, .permitted = 0, .inheritable = 0 },
-    };
-    try sys(linux.syscall2(.capset, @intFromPtr(&header), @intFromPtr(&data)));
-    const prog = extern struct {
-        len: u16,
-        filter: [*]const Filter,
-    }{ .len = filter.len, .filter = &filter };
-    try sys(linux.seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog));
+    try sandbox.keepOnly(1 << CAP_SYS_ADMIN);
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "openat2",    "open_tree",     "fsopen", "fsconfig", "fsmount", "move_mount",
+        "fspick",     "mount_setattr", "read",   "write",    "close",   "exit",
+        "exit_group",
+    }) |call| f.allow(call);
+    try f.install();
 }
 
 // --- asking the kernel ---------------------------------------------------------
@@ -433,19 +368,7 @@ fn apply(p: Plan, log: []u8) !void {
             try setattr(tree, p.attrs, if (p.attrs & ATTR.NOATIME != 0) ATTR.ATIME else 0);
             try attach(tree, target);
         },
-        .mount => {
-            if (p.fs) |fs| return create(fs, p, target, log);
-            for (&filesystems) |*fs| {
-                if (!fs.probe) continue;
-                create(fs, p, target, log) catch |err| switch (err) {
-                    // Not this filesystem, or not one this kernel has.
-                    error.InvalidArgument, error.NoSuchFilesystem => continue,
-                    else => return err,
-                };
-                return;
-            }
-            return error.NoFilesystem;
-        },
+        .mount => try create(p.fs.?, p, target, log),
     }
 }
 
@@ -601,7 +524,6 @@ fn describe(err: anyerror) []const u8 {
         error.Device => "refused: a block device is a path under /dev",
         error.Source => "refused: the source of this filesystem is a plain name",
         error.SymlinkInPath => "refused: a symlink in the path",
-        error.NoFilesystem => "not ext4, xfs or btrfs",
         else => @errorName(err),
     };
 }
@@ -644,25 +566,17 @@ test "a remount narrows, and takes only options that narrow" {
     try testing.expectEqual(Action.tighten, v.action);
     try testing.expectEqual(ATTR.RDONLY | ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, v.attrs);
     _ = try tryParse(&.{ "-o", "remount,nosuid,nodev,noexec,hidepid=invisible", "/proc" });
-    _ = try tryParse(&.{ "-o", "remount,discard", "/run/werewolf/cleanup/victim" });
+    try testing.expectError(error.Option, tryParse(&.{ "-o", "remount,discard", "/data" }));
     try testing.expectError(error.Option, tryParse(&.{ "-o", "remount,hidepid=off", "/proc" }));
     try testing.expectError(error.Option, tryParse(&.{ "-o", "remount,size=90%", "/tmp" }));
 }
 
 test "only werewolf's filesystems, options and values" {
     try testing.expectError(error.Filesystem, tryParse(&.{ "-t", "ntfs", "/dev/vdb", "/mnt" }));
-    _ = try tryParse(&.{
-        "-t",
-        "vfat",
-        "-o",
-        "nosuid,nodev,noexec",
-        "/dev/vda1",
-        "/run/werewolf/esp",
-    });
-    try testing.expectError(
-        error.Option,
-        tryParse(&.{ "-t", "vfat", "-o", "umask=0", "/dev/vda1", "/run/werewolf/esp" }),
-    );
+    // Filesystems no caller of mount uses: the broker mounts the ESP and the
+    // victim's itself.
+    for ([_][:0]const u8{ "vfat", "xfs", "btrfs" }) |t|
+        try testing.expectError(error.Filesystem, tryParse(&.{ "-t", t, "/dev/vda1", "/mnt" }));
     try testing.expectError(error.Filesystem, tryParse(&.{ "-t", "overlay", "overlay", "/mnt" }));
     try testing.expectError(
         error.Option,
@@ -682,7 +596,11 @@ test "only werewolf's filesystems, options and values" {
     );
     try testing.expectError(
         error.Option,
-        tryParse(&.{ "-o", "errors=continue", "/dev/vda", "/data" }),
+        tryParse(&.{ "-t", "ext4", "-o", "errors=continue", "/dev/vda", "/data" }),
+    );
+    try testing.expectError(
+        error.Option,
+        tryParse(&.{ "-t", "ext4", "-o", "discard", "/dev/vda", "/data" }),
     );
 }
 
@@ -706,12 +624,15 @@ test "only werewolf's places, as clean absolute paths" {
     try testing.expectError(error.Place, tryParse(&.{ "--bind", "/etc", "/data" }));
 }
 
-test "binds, probes, and what is not an invocation" {
+test "binds, and what is not an invocation" {
     const b = try tryParse(&.{ "--bind", "/victim/var/lib/werewolf/data", "/data" });
     try testing.expectEqual(Action.bind, b.action);
     try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, b.attrs);
-    const d = try tryParse(&.{ "-o", "nosuid,nodev,noexec", "/dev/vda1", "/victim" });
-    try testing.expectEqual(null, d.fs);
+    // A mount names its filesystem: nothing is probed.
+    try testing.expectError(
+        error.Usage,
+        tryParse(&.{ "-o", "nosuid,nodev,noexec", "/dev/vda1", "/victim" }),
+    );
     try testing.expectError(error.Usage, tryParse(&.{"/tmp"}));
     try testing.expectError(error.Usage, tryParse(&.{ "-t", "tmpfs" }));
     try testing.expectError(error.Usage, tryParse(&.{ "-o", "remount", "/tmp", "/run" }));
@@ -721,22 +642,4 @@ test "binds, probes, and what is not an invocation" {
         tryParse(&.{ "-o", "ro,rw", "-t", "tmpfs", "tmpfs", "/tmp" }),
     );
     try testing.expectError(error.Usage, tryParse(&.{ "-t", "tmpfs", "-o", "remount", "/tmp" }));
-}
-
-test "the capability header is the kernel's" {
-    try testing.expectEqual(8, @sizeOf(CapHeader));
-    try testing.expectEqual(4, @offsetOf(CapHeader, "pid"));
-}
-
-test "the seccomp program allows exactly its system calls" {
-    try testing.expectEqual(5 + allowed_syscalls.len + 2, filter.len);
-    try testing.expectEqual(SECCOMP_RET_ALLOW, filter[filter.len - 1].k);
-    try testing.expectEqual(SECCOMP_RET_KILL_PROCESS, filter[filter.len - 2].k);
-    // Each match lands on the last instruction.
-    for (allowed_syscalls, 0..) |_, j| {
-        const at = 5 + j;
-        try testing.expectEqual(filter.len - 1, at + 1 + filter[at].jt);
-    }
-    // The x32 check skips past every match to the kill.
-    try testing.expectEqual(filter.len - 2, 4 + 1 + filter[4].jt);
 }

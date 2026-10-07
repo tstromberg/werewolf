@@ -218,9 +218,33 @@ proc host {cmd} {
 # carry traffic past fence; and passwords are not offered at all. In that
 # order, since sshd holds a failed login against its source for a while.
 if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
-	set ssh [list ssh -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes]
+	set level ERROR
+	if {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} { set level DEBUG1 }
+	set ssh [list ssh -F /dev/null -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=$level -o IdentitiesOnly=yes]
 	set key [list -i $env(SSH_KEY)]
+	if {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} {
+		set deny_destination 127.0.0.1:22
+		if {$env(SSH_MODE) eq "bastion-config"} {
+			lassign [host [list {*}$ssh {*}$key -W 127.0.0.1:22 bastion@127.0.0.1]] status out
+			if {$status == 0 && [string match "*SSH-2.0-OpenSSH*" $out]} {
+				say ok bastion-permitted-destination
+			} else { say FAIL bastion-permitted-destination $out; incr failed }
+			set deny_destination 127.0.0.2:22
+		}
+		foreach {check args pattern} {
+			bastion-no-session {bastion@127.0.0.1 true} {*open failed*}
+			bastion-no-destination {-W 127.0.0.1:22 bastion@127.0.0.1} {*administratively prohibited*}
+			bastion-no-remote {-o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 bastion@127.0.0.1 true} {*forwarding failed*}
+			bastion-pq-required {-o KexAlgorithms=curve25519-sha256 bastion@127.0.0.1 true} {*no matching key exchange method*}
+		} {
+			if {$check eq "bastion-no-destination"} { set args [list -W $deny_destination bastion@127.0.0.1] }
+			lassign [host [list {*}$ssh {*}$key {*}$args]] status out
+			if {$status != 0 && [string match $pattern $out]} {
+				say ok $check
+			} else { say FAIL $check $out; incr failed }
+		}
+	} else {
 	set in 0
 	for {set i 0} {$i < 30 && !$in} {incr i} {
 		lassign [host [list {*}$ssh {*}$key root@127.0.0.1 id -u]] status out
@@ -241,6 +265,7 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 		say FAIL ssh-keys-only "something but a key was offered:\n$out"
 		incr failed
 	}
+}
 }
 
 # By what the machine's console says: each seen line, waited
@@ -283,13 +308,23 @@ if {[llength $console]} {
 }
 
 if {!$shell} {
-	# No shell to power off from, and on arm64 no power button either (its
-	# device tree's gpio-keys, which linux-virt lacks): QEMU's monitor
-	# (Ctrl-A c) ends the run. Forms with a shell test the shutdown.
+	# No shell to power off from: the power button, as a hypervisor presses
+	# it (ACPI on x86_64; on arm64 the device tree's GPIO line, which
+	# power-button reads itself). QEMU's monitor (Ctrl-A c) presses it, and
+	# the machine must stop its services and power off, which ends QEMU.
 	send "\001c"
 	expect -timeout 10 "(qemu)" {} timeout { give_up "shutdown: no QEMU monitor" }
-	send "quit\r"
-	expect -timeout 30 eof {} timeout { give_up "shutdown: QEMU did not quit" }
+	send "system_powerdown\r"
+	expect -timeout 10 "(qemu)" {} timeout {}
+	send "\001c"
+	expect {
+		-timeout 60
+		"power button on" { exp_continue }
+		"reboot: Power down" { say ok shutdown }
+		timeout { say FAIL shutdown "no power-off 60 s after the power button"; incr failed }
+		eof { say FAIL shutdown "QEMU ended without the kernel powering off"; incr failed }
+	}
+	expect -timeout 30 eof {} timeout { give_up "shutdown: QEMU did not exit after powering off" }
 	wait
 	if {$failed} { exit 1 }
 	say pass "all checks"

@@ -81,8 +81,9 @@ slot as now, then:
    temporary name and renamed into place, and `root.erofs` to the ext4
    partition as now.
 3. Removes any entry for the other slot, and writes
-   `werewolf-<other>+1.conf`: version now, options this boot's command line
-   with `werewolf.slot` changed. Anything the machine was booted with
+   `werewolf-<other>+1.conf`: version now, or a second past the running
+   entry's if the clock is behind it, so it is always the newest; options
+   this boot's command line with `werewolf.slot` changed. Anything the machine was booted with
    (`werewolf.mac`, `console`) carries over.
 4. Reboots.
 

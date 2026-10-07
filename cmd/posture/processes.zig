@@ -1,0 +1,277 @@
+//! posture's process and program checks: hidden processes, leashed
+//! services, and the tools an intruder would want, absent.
+
+const std = @import("std");
+const Io = std.Io;
+const Dir = Io.Dir;
+const Allocator = std.mem.Allocator;
+const linux = std.os.linux;
+const testing = std.testing;
+
+const posture = @import("posture.zig");
+const files = @import("files.zig");
+const Posture = posture.Posture;
+const exists = posture.exists;
+const hasOption = posture.hasOption;
+const lessString = posture.lessString;
+const statusField = posture.statusField;
+const trim = posture.trim;
+const uidOf = posture.uidOf;
+
+pub fn check(p: *Posture) !void {
+    const mounts = p.read("/proc/self/mounts");
+    try p.add(.{
+        .id = "processes-hidden",
+        .area = "processes",
+        .name = "Processes hidden",
+        .why = "A user sees only their own processes, not what else runs.",
+        .how = "/proc is mounted hidepid=invisible",
+        .result = if (hasOption(mounts, "/proc", "hidepid=invisible") or
+            hasOption(mounts, "/proc", "hidepid=2"))
+            .pass
+        else
+            .fail,
+    });
+    const setid = try files.findSetid(p);
+    try p.add(.{
+        .id = "processes-no-setid",
+        .area = "processes",
+        .name = "No setuid or setgid programs",
+        .why = "No program gains privileges by being run.",
+        .how = "no file on the root filesystem has either bit",
+        .result = if (setid.len == 0) .pass else .fail,
+        .detail = setid,
+    });
+    // A web server's workers, which face the network, are not root.
+    if (p.root) {
+        const nginx = try workerUids(p, "nginx: worker");
+        try p.add(.{
+            .id = "processes-workers",
+            .area = "processes",
+            .name = "Web server workers unprivileged",
+            .why = "The processes that answer requests cannot act as root.",
+            .how = "every nginx worker runs as a uid other than 0",
+            .result = if (nginx.found == 0) .skip else if (nginx.root == 0) .pass else .fail,
+            .detail = if (nginx.found == 0) "no nginx running" else "",
+        });
+        try servicesLeashed(p);
+    }
+}
+
+/// Each service leash starts, one with an /etc/sv/NAME/service file,
+/// runs as leash left it.
+fn servicesLeashed(p: *Posture) !void {
+    var names: std.ArrayList([]const u8) = .empty;
+    if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |d| {
+        var dir = d;
+        defer dir.close(p.io);
+        var it = dir.iterate();
+        while (try it.next(p.io)) |e| {
+            if (exists(p.io, try p.gpa.print("/etc/sv/{s}/service", .{e.name})))
+                try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+        }
+    } else |_| {}
+    std.mem.sort([]const u8, names.items, {}, lessString);
+    var bad: std.ArrayList(u8) = .empty;
+    var running: usize = 0;
+    for (names.items) |name| {
+        const pid = trim(p.read(try p.gpa.print("/etc/sv/{s}/supervise/pid", .{name})));
+        if (pid.len == 0) continue; // down, or parked
+        const status = p.read(try p.gpa.print("/proc/{s}/status", .{pid}));
+        if (status.len == 0) continue;
+        running += 1;
+        if (whyNotLeashed(status)) |why|
+            try bad.print(
+                p.gpa,
+                "{s}{s} {s}",
+                .{ if (bad.items.len > 0) ", " else "", name, why },
+            );
+    }
+    try p.add(.{
+        .id = "processes-services-leashed",
+        .area = "processes",
+        .name = "Services others wrote run leashed",
+        .why = "Programs werewolf did not write, nginx and PostgreSQL among them, run as " ++
+            "users " ++
+            "of their own, with no capability but binding a low port, and can gain none.",
+        .how = "for each service with an /etc/sv/NAME/service file, its /proc/PID/status: " ++
+            "no " ++
+            "uid 0, no capability in any set but CAP_NET_BIND_SERVICE, and NoNewPrivs 1",
+        .result = if (running == 0) .skip else if (bad.items.len == 0) .pass else .fail,
+        .detail = if (running == 0) "no leashed service running" else bad.items,
+    });
+}
+
+pub fn programs(p: *Posture) !void {
+    try p.absent(
+        "programs-no-shell",
+        "No shell",
+        "An intruder finds no shell to run commands with.",
+        &.{ "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "fish" },
+    );
+    try p.absent(
+        "programs-no-downloaders",
+        "No download or network tools",
+        "An intruder cannot fetch more tools or open a connection out.",
+        &.{
+            "wget",
+            "curl",
+            "nc",
+            "ncat",
+            "netcat",
+            "socat",
+            "telnet",
+            "tftp",
+            "ftp",
+            "ftpget",
+            "ftpput",
+            "scp",
+            "sftp",
+            "rsync",
+        },
+    );
+    try p.absent(
+        "programs-no-interpreters",
+        "No script interpreters",
+        "There is nothing to run a script with.",
+        &.{
+            "awk",
+            "gawk",
+            "mawk",
+            "perl",
+            "python",
+            "python3",
+            "ruby",
+            "node",
+            "lua",
+            "luajit",
+            "php",
+            "php-fpm",
+            "java",
+            "dotnet",
+            "tclsh",
+            "expect",
+        },
+    );
+    try p.absent(
+        "programs-no-compilers",
+        "No compilers",
+        "Code cannot be built on the machine.",
+        &.{ "cc", "gcc", "clang", "tcc", "as", "ld", "go", "rustc", "zig" },
+    );
+    try p.absent(
+        "programs-no-module-tools",
+        "No kernel module tools",
+        "Nothing on the system can load, unload or list kernel modules.",
+        &.{ "insmod", "modprobe", "rmmod", "lsmod", "kmod", "depmod" },
+    );
+    try p.absent(
+        "programs-no-network-tools",
+        "No network configuration tools",
+        "An intruder cannot readdress the machine or change its routes with the usual tools.",
+        &.{ "ifconfig", "ip", "route", "iptables", "nft", "tc", "ethtool" },
+    );
+    try p.absent(
+        "programs-no-debuggers",
+        "No debuggers",
+        "Nothing to attach to a process or trace its calls.",
+        &.{ "gdb", "lldb", "strace", "ltrace" },
+    );
+
+    // werewolf's services: each started straight from its program.
+    var d = Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true }) catch return;
+    defer d.close(p.io);
+    var scripts: std.ArrayList(u8) = .empty;
+    var programs_: usize = 0;
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = d.iterate();
+    while (it.next(p.io) catch null) |e| try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+    std.mem.sort([]const u8, names.items, {}, lessString);
+    for (names.items) |name| {
+        const path = try p.gpa.print("/etc/sv/{s}/run", .{name});
+        if (!exists(p.io, path)) continue;
+        if (p.isElf(path)) {
+            programs_ += 1;
+        } else try scripts.print(
+            p.gpa,
+            "{s}{s}",
+            .{ if (scripts.items.len > 0) ", " else "", name },
+        );
+    }
+    try p.add(.{
+        .id = "programs-services-no-shell",
+        .area = "programs",
+        .name = "Services start without a shell",
+        .why = "Every service starts straight from its program, with no script between.",
+        .how = "each /etc/sv/*/run leads to an ELF program, not a script",
+        .result = if (scripts.items.len == 0) .pass else .fail,
+        .detail = if (scripts.items.len > 0)
+            try p.gpa.print("{d} without; scripts: {s}", .{ programs_, scripts.items })
+        else
+            "",
+    });
+}
+
+/// How many processes have a command line starting with prefix, and how
+/// many of those run as root.
+fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usize } {
+    var found: usize = 0;
+    var root: usize = 0;
+    var d = Dir.cwd().openDir(
+        p.io,
+        "/proc",
+        .{ .iterate = true },
+    ) catch return .{ .found = 0, .root = 0 };
+    defer d.close(p.io);
+    var it = d.iterate();
+    while (it.next(p.io) catch null) |e| {
+        _ = std.fmt.parseInt(u32, e.name, 10) catch continue;
+        const cmd = p.read(try p.gpa.print("/proc/{s}/cmdline", .{e.name}));
+        if (!std.mem.startsWith(u8, cmd, prefix)) continue;
+        found += 1;
+        const status = p.read(try p.gpa.print("/proc/{s}/status", .{e.name}));
+        if (uidOf(status) == 0) root += 1;
+    }
+    return .{ .found = found, .root = root };
+}
+
+/// Why a /proc/PID/status is not that of a process leash started, or null.
+fn whyNotLeashed(status: []const u8) ?[]const u8 {
+    var ids = std.mem.tokenizeAny(
+        u8,
+        statusField(status, "Uid") orelse return "shows no uid",
+        " \t",
+    );
+    while (ids.next()) |id| if (std.mem.eql(u8, id, "0")) return "runs as root";
+    const bind: u64 = 1 << linux.CAP.NET_BIND_SERVICE;
+    for ([_][]const u8{ "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb" }) |key| {
+        const v = std.fmt.parseInt(
+            u64,
+            statusField(status, key) orelse return "shows no capabilities",
+            16,
+        ) catch
+            return "shows no capabilities";
+        if (v & ~bind != 0) return "has capabilities";
+    }
+    if (!std.mem.eql(
+        u8,
+        statusField(status, "NoNewPrivs") orelse "",
+        "1",
+    )) return "may gain privileges";
+    return null;
+}
+
+test whyNotLeashed {
+    const ok = "Name:\tnginx\nUid:\t200\t200\t200\t200\nCapInh:\t0000000000000000\nCapPrm:\t0000" ++
+        "000000000400\n" ++
+        "CapEff:\t0000000000000400\nCapBnd:\t0000000000000400\nCapAmb:\t0000000000000400\nNoNewP" ++
+        "rivs:\t1\n";
+    try testing.expectEqual(null, whyNotLeashed(ok));
+    try testing.expectEqualStrings("runs as root", whyNotLeashed("Uid:\t200\t0\t200\t200\n").?);
+    const caps = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t000001fffff" ++
+        "fffff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
+    try testing.expectEqualStrings("has capabilities", whyNotLeashed(caps).?);
+    const nnp = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t0\nCapAmb:\t" ++
+        "0\nNoNewPrivs:\t0\n";
+    try testing.expectEqualStrings("may gain privileges", whyNotLeashed(nnp).?);
+}

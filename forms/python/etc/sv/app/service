@@ -3,6 +3,8 @@
 # writes no bytecode beside it.
 exec    /usr/bin/python3 /usr/lib/app/main.py
 user    app
+pledge  stdio rpath proc inet listen
+memory  512
 listen  tcp/8080
 env     PYTHONDONTWRITEBYTECODE=1
 env     PYTHONUNBUFFERED=1

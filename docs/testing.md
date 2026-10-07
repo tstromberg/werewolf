@@ -14,6 +14,12 @@ make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
 (e2fsprogs). On a Mac: `brew install qemu e2fsprogs`; `expect` ships with
 macOS.
 
+The tutorial forms also need Go, rustup and the .NET 10 SDK on the build host. Install Rust's
+Linux musl target for the architecture being tested, for example
+`rustup toolchain install stable --profile minimal --target aarch64-unknown-linux-musl`.
+Use `x86_64-unknown-linux-musl` for `ARCH=x86_64`. CI and `make ci` install
+these compilers before checking the forms. None ships in a VM.
+
 ## What `make check` does
 
 It builds every form and boots each under QEMU, then boots a slot the way
@@ -94,14 +100,19 @@ so init asks QEMU's DHCP server: the address, gateway and DNS server must
 be applied, the console must show the client's `bound` event, and the
 client must be split as it says it is, an engine running as `_dhcp`,
 chrooted, with no capabilities, under seccomp, and a parent keeping
-`CAP_NET_ADMIN` alone.
+`CAP_NET_ADMIN` alone. Another, `check-static`, boots `minimal`, which has no DHCP client,
+without one too, and with a config tar from `werewolf pack --ip --gw --dns`
+([test/checks-static](../test/checks-static)): init must take the address,
+route and DNS server from the tar's `network` file, and say so.
 
 The slot boot covers what direct boot cannot: stage0 finding `root.erofs`
 by filesystem UUID, `/victim` read-only, the `slot-keep`
 service making the slot GRUB's default once it has stayed healthy for a
 minute, and then `bite-cleanup` deleting a stand-in distro around it,
-traps included, while keeping werewolf's directory and `/boot`. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
-leaves: the root image in slot a and GRUB's environment block. The slot
+traps included, while keeping werewolf's directory and `/boot`. Among the
+traps, `debugfs` makes `/etc/resolv.conf` immutable: bite-cleanup must
+delete the rest of `/etc`, name the file, and exit 1. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
+leaves: the root image in slot a, its kernel, and GRUB's environment block. The slot
 uses `minimal`, which has no updater to reach the network once
 committed.
 
@@ -194,7 +205,7 @@ fails the machine unless the checks that fail are exactly those
 [test/posture-known](../test/posture-known) gives the form and the
 architecture: a new failure fails, and so
 does a known one that starts passing, until it leaves the list and the
-docs say so. A new protection belongs in cmd/posture/posture.zig.
+docs say so. A new protection belongs in cmd/posture, in the file for its area.
 
 A form that serves ssh is also logged into from the host, as an operator
 would, through a forwarded port: root's key from the config gets in, a
@@ -245,15 +256,61 @@ BOOT_TIMEOUT=20 make check-minimal          # see a hang sooner
 
 `check-one` keeps each failing boot's console as `FORM-one-N.log`.
 
+## Where a boot's time goes
+
+Every boot says it on the console, and every machine keeps it in
+`/run/werewolf/boot` as `kernel_ms`, `userland_ms` and `phases`, each a
+`name` and its `ms`:
+
+```
+werewolf: phases: kernel 0.225s, modules 0.386s, slot 0.227s, root 0.013s, mounts 0.012s, ...
+werewolf: up in 1.470s (the kernel 0.225s, userland 1.245s), handing over to runit
+```
+
+| Phase | Until |
+|---|---|
+| `kernel` | stage0 starts |
+| `modules` | stage0's modload closes the loader, after the scan for the slot's disk it runs alongside |
+| `slot` | the slot's filesystem is mounted (a slot's boot only) |
+| `root` | `root.erofs` is mounted through dm-verity |
+| `mounts`, `sysctls`, `network`, `victim`, `config`, `data` | init's steps of those names end |
+| `seal` | init has sealed itself and started the mount broker and the DHCP renewal |
+
+A reboot's other half is on the console too: stage 3 ends with `werewolf:
+down in Xs (services Ys, filesystems Zs)`, after `werewolf: SERVICE not
+down in 30s; killed` for any it had to kill. On a machine with slots, the update's
+`commit` or `rollback` event carries `down`: the seconds from its `reboot`
+event to the new kernel's start, which are the stop, the firmware and the
+loader. The console shows only the kernel's warnings and worse
+(`loglevel=5`); `dmesg` keeps every line with its time, so a gap between two
+of them is where to look next.
+
 ## CI
 
 [.github/workflows/check.yml](../.github/workflows/check.yml) runs `make
-test`, `make lint` and `make check` on GitHub's x86_64 and arm64 Ubuntu
-runners. [test/ci-setup](../test/ci-setup) installs the tools: Ubuntu's
-packages, and apko and Zig pinned by version and sha256; `ci-setup apko`
-installs apko alone, for jobs that only resolve packages. Each job keeps its
-logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
-QEMU emulates there, and the job still takes under five minutes.
+test` and `make lint` on GitHub's x86_64 and arm64 Ubuntu runners, and `make
+check` split into jobs that run in parallel, so a failure names the area it
+is in: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on arm64,
+`native`. [test/ci-setup](../test/ci-setup) installs the tools with
+[tools/install-deps](../tools/install-deps), as `make install-deps` does
+anywhere: Ubuntu's packages, and apko and Zig pinned by version and
+sha256; `ci-setup apko` installs apko alone, for jobs that only resolve
+packages. Each job keeps its logs when it fails.
+
+The x86_64 runner has KVM, so it emulates fast and runs every group. The
+arm64 runner has none: a full boot there emulates under TCG, slowly. So arm64
+runs the `native` group instead of `forms` and `shellfree`:
+[test/cage](../test/cage) boots each form's root under `systemd-nspawn` on
+the runner's own kernel -- no virtual machine -- and judges its posture.
+werewolf's runtime protections (the seal, Landlock, fence's policy routing,
+the leash, hidepid, W^X) are the host kernel's own features and hold in a
+container, so cage asserts them directly, and `WEREWOLF_CHECK=1` has the
+in-container posture service attack them too, as `werewolf.check=1` does on a
+booted machine. What a container cannot own -- the kernel's sysctls and boot
+line, dm-verity, a few mount options -- `POSTURE_KNOWN_NATIVE` allows to
+fail; arm64 still emulates `minimal` and `prod` (the `integrity` and `cloud`
+groups) to assert those, and the attacks a container cannot carry. `persist`
+is skipped on emulated arm64 (Makefile).
 
 [.github/workflows/update.yml](../.github/workflows/update.yml) runs `make
 check-updater` nightly, and on demand, on x86_64 alone: `prod`
@@ -268,4 +325,4 @@ between runs. `limactl delete -f werewolf-ci-24.04` starts over.
 `LIMA_TEMPLATE=ubuntu-26.04 make ci` runs it on 26.04, as GitHub's runners
 are, in a VM of its own; there, nested guests lose a CPU's timer early in
 boot and stall, so 24.04 is the default. Its old erofs-utils is replaced
-by [test/ci-setup](../test/ci-setup), which builds 1.9.4.
+by [tools/install-deps](../tools/install-deps), which builds 1.9.4.

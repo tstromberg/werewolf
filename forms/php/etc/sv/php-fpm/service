@@ -4,4 +4,6 @@
 exec    /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf
 before  /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf
 user    php
+pledge  stdio rpath wpath proc unix listen
+memory  512
 read    /etc/php

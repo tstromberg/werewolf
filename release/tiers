@@ -1,0 +1,68 @@
+#!/bin/sh
+# tiers: build the CVE tiers feed (tools/cve-tiers.zig) for what werewolf
+# installs (release/origins) and the kernel Alpine ships now, sign it
+# (release/sign-tiers), and commit it to FEED, a checkout of the feed's own
+# repository (werewolf-linux/cve-feed), as cve-tiers.json and
+# cve-tiers.json.sig, then push; machines fetch it from there
+# (docs/design/update-policy.md). CACHE keeps NVD's scores between runs, so
+# a run asks NVD only for what changed since the last.
+#
+#   release/tiers CACHE FEED
+#
+# with NVD_API_KEY and WEREWOLF_TIERS_KEY (PEM), run from the top of
+# werewolf's tree with Zig, apko and git. Hourly, the feed repository's own
+# workflow runs it, and pushes with that repository's token, which can
+# write nowhere else; the workflow is in that repository.
+#
+# It commits only when a tier changed, or when the published feed is a day
+# old, to renew its three-day expiry; so the repository's history is the
+# feed's, and an auditor reads each change as a diff. Whoever can push to
+# the feed repository can change or remove what is published, never sign
+# it: the worst it does is no feed, and then a machine counts every fix as
+# High.
+set -eu
+
+[ $# -eq 2 ] || { echo "usage: release/tiers CACHE FEED" >&2; exit 2; }
+cache=$1
+feed=$2
+for v in NVD_API_KEY WEREWOLF_TIERS_KEY; do
+	eval "[ -n \"\${$v:-}\" ]" || { echo "tiers: $v is not set" >&2; exit 1; }
+done
+[ -d "$feed/.git" ] || { echo "tiers: $feed is not a checkout of the feed's repository" >&2; exit 1; }
+release=$(cd "$(dirname "$0")" && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# What to cover: what werewolf installs, and the kernel Alpine ships now.
+"$release/origins" "$work/origins"
+# Locked into this run's own directory: the tree's locks are its builds'.
+(cd boot && apko lock --arch x86_64 --output "$work/kernel.lock.json" kernel.yaml >/dev/null)
+make --no-print-directory build/host/cve-tiers
+kernel=$(sed -n 's|.*"url": "[^"]*/x86_64/\(linux-virt-[^/]*\)\.apk".*|\1|p' "$work/kernel.lock.json")
+[ -n "$kernel" ] || { echo "tiers: the kernel lock names no linux-virt" >&2; exit 1; }
+build/host/cve-tiers "$kernel" "$work/origins" "$cache" "$work/in" "$work/cve-tiers.json"
+
+# Unchanged but for its stamp, and less than a day old: nothing to publish.
+unstamped() { grep -v -E '^  "(serial|expires)": ' "$1" 2>/dev/null || true; }
+digits() { echo "$1" | tr -d 'TZ'; } # a serial, as a number
+if [ -f "$feed/cve-tiers.json" ] &&
+	[ "$(unstamped "$feed/cve-tiers.json" | cksum)" = "$(unstamped "$work/cve-tiers.json" | cksum)" ]; then
+	last=$(sed -n 's/^  "serial": "\(.*\)",$/\1/p' "$feed/cve-tiers.json")
+	day_ago=$(date -u -d '-1 day' +%Y%m%dT%H%M%SZ 2>/dev/null || date -u -v-1d +%Y%m%dT%H%M%SZ)
+	if [ -n "$last" ] && [ "$(digits "$day_ago")" -lt "$(digits "$last")" ]; then
+		echo "tiers: unchanged since $last"
+		exit 0
+	fi
+fi
+
+serial=$(date -u +%Y%m%dT%H%M%SZ)
+"$release/sign-tiers" "$serial" "$work/cve-tiers.json"
+cp "$work/cve-tiers.json" "$work/cve-tiers.json.sig" "$feed/"
+cd "$feed"
+git add cve-tiers.json cve-tiers.json.sig
+git -c user.name="werewolf tiers" -c user.email="tiers@users.noreply.github.com" \
+	commit -q -m "tiers $serial, for $kernel" -m "$(grep -c '"cve":' cve-tiers.json) entries"
+git push -q origin HEAD
+[ "$(git ls-remote origin HEAD | cut -f1)" = "$(git rev-parse HEAD)" ] ||
+	{ echo "tiers: the push did not take" >&2; exit 1; }
+echo "tiers: published $serial for $kernel"

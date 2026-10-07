@@ -128,7 +128,11 @@ done
 cp "$slot/root.erofs" "$w/root/werewolf/a/"
 chmod -R u=rwX,go=rX "$w/root"
 chmod 0700 "$w/root/werewolf"
-mke2fs -q -F -t ext4 -b 4096 -L werewolf -U "$root_uuid" \
+# No orphan_file (e2fsprogs 1.47's default): ext4 reads all of it, 512
+# blocks one at a time, at every mount, and stage0 mounts this on every
+# boot. On a cloud's network disk that was 543 reads and 0.21 s, against
+# 48 without it; the orphan list in the superblock serves instead.
+mke2fs -q -F -t ext4 -b 4096 -L werewolf -U "$root_uuid" -O ^orphan_file \
 	-E "offset=$((root_first * 512)),hash_seed=$root_uuid,root_owner=0:0" \
 	-d "$w/root" "$out" $((root_sectors / 8))
 # mke2fs -d keeps the builder's owners and times: make them root's, and
