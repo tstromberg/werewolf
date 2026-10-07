@@ -30,13 +30,14 @@ group (gid 210) to reach the socket; `valkey-cli -s
   its service file and `.net`, and then a password is required: an ACL
   file from the config. TLS when the config brings a certificate.
 
-## A shell in the image
+## No shell, after all
 
 Wolfi's `valkey-9.1` depends on `posix-libc-utils`, whose `ldd` is a bash
-script, so this image carries bash and posture's `programs-no-shell` fails
-on it by that dependency alone ([test/posture-known](../test/posture-known)).
-Nothing runs it: Valkey is leashed to its own program, and there is no
-login. It goes when Wolfi drops the dependency, and the check will say so.
+script, so bash would come with it. Nothing on the machine runs either:
+Valkey is leashed to its own program, and there is no login. The form
+leaves `usr/bin/bash` out of the image ([forms/valkey.prune](../forms/valkey.prune),
+[forms.md](forms.md#files-a-form-leaves-out)), and posture's
+`programs-no-shell` passes as on every other form.
 
 ## Checked
 

@@ -322,17 +322,28 @@ const Machine = struct {
         var all = true;
         // Each is a protection, so one the kernel refuses ends the boot, and
         // the machine returns on the slot that last worked, as the seal and
-        // fence do. werewolf's kernel has every one. A container's /proc/sys
-        // is read-only (EROFS), and these are the host's to set: that case,
-        // and that one alone, is said and passed.
+        // fence do. werewolf's kernel has every one. In a container these
+        // are the host's to set: its /proc/sys is read-only, and a network
+        // namespace of its own lacks what only the host's has (EROFS or
+        // ENOENT), so there any refusal is said and passed. And a kernel
+        // without a BPF JIT has no bpf_jit_harden: nothing to harden.
+        const contained = linux.errno(linux.access("/proc/sys/kernel/panic", linux.W_OK)) == .ROFS;
         for (sysctls) |kv| switch (writeErrno(m.fmtZ("/proc/sys/{s}", .{kv[0]}), kv[1])) {
             .SUCCESS => {},
-            .ROFS => all = false,
-            else => |e| {
+            .NOENT => if (contained or std.mem.eql(u8, kv[0], "net/core/bpf_jit_harden")) {
+                all = false;
+            } else {
+                say("sysctl {s} not set: the kernel has none", .{kv[0]});
+                return error.Sysctl;
+            },
+            else => |e| if (contained) {
+                all = false;
+            } else {
                 say("sysctl {s} not set: {t}", .{ kv[0], e });
                 return error.Sysctl;
             },
         };
+        if (contained) say("in a container: the kernel's settings are the host's", .{});
         // Redirects, per interface: a host takes or sends them on one if all
         // or the interface says so, and all and default do not reach the
         // interfaces stage0's drivers made before now. IPv6 has only the

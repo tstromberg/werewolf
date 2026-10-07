@@ -9,12 +9,12 @@ pledge  stdio rpath wpath inet unix connect listen proc
 listen  tcp/8200 tcp/8201
 read    /etc/openbao
 # The unseal key (32 random bytes), the API's certificate and key, and
-# the admin's bcrypt password hash, from the machine's config: missing,
-# the service parks with a line naming the file.
+# the admin's first password, from the machine's config: missing, the
+# service parks with a line naming the file.
 config  unseal-key /run/config/openbao/unseal.key
 config  tls-cert /run/config/openbao/tls.crt
 config  tls-key /run/config/openbao/tls.key
-config  admin-password-hash /run/config/openbao/admin_password_hash
+config  admin-password /run/config/openbao/admin_password
 # The address clients reach it at, into the image's configuration.
 config  settings /run/config/openbao/settings.json
 setting api-addr url required as api_addr

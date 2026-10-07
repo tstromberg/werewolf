@@ -8,7 +8,11 @@
 //! made for this boot alone, and a client sees a new one at the next: an
 //! operator who logs in here must still be able to. Every start logs the
 //! key's fingerprint and public half, for an operator to pin (werewolf
-//! console NAME), never the private half.
+//! console NAME), never the private half. lib/hostkey.zig keeps the key
+//! whole: a boot cut short leaves a whole key or none.
+//!
+//! A start that fails waits ten seconds before it ends, and runsv tries
+//! again: a passing fault clears, and a lasting one is not a line a second.
 //!
 //! runsv runs it as /etc/sv/sshd/run, with no arguments and no shell.
 
@@ -23,7 +27,6 @@ const linux = std.os.linux;
 const key = "/run/sshd/ssh_host_ed25519_key";
 /// Where the machine keeps it, while /data is usable.
 const kept = "/data/sshd/ssh_host_ed25519_key";
-const keygen = "/usr/bin/ssh-keygen";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -48,7 +51,8 @@ pub fn main(init: std.process.Init) !void {
     );
     _ = linux.mkdir("/run/sshd", 0o700);
     const from = hostKey(io, gpa) catch |err| {
-        say(io, "host key: {s}; trying again", .{@errorName(err)});
+        say(io, "host key: {s}; trying again in 10s", .{@errorName(err)});
+        io.sleep(.fromSeconds(10), .awake) catch {};
         std.process.exit(1);
     };
     logKey(io, gpa, from);
@@ -61,20 +65,19 @@ pub fn main(init: std.process.Init) !void {
 fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
     const unkept: ?[]const u8 = if (exists("/run/werewolf/nodata"))
         "no /data to keep it in"
-    else if (onRam("/data"))
+    else if (hostkey.onRam("/data"))
         "/data is RAM"
     else
         null;
     if (unkept) |why| {
-        if (!exists(key)) try make(io, gpa, key);
+        _ = try hostkey.keep(io, gpa, key);
         return gpa.print("for this boot alone: {s}", .{why});
     }
     _ = linux.mkdir("/data/sshd", 0o700);
-    var from: []const u8 = "kept in /data";
-    if (!exists(kept)) {
-        try make(io, gpa, kept);
-        from = "new, kept in /data";
-    }
+    const from: []const u8 = switch (try hostkey.keep(io, gpa, kept)) {
+        .new => "new, kept in /data",
+        .kept => "kept in /data",
+    };
     for ([_][]const u8{ "", ".pub" }) |ext| {
         const src = try gpa.print("{s}{s}", .{ kept, ext });
         const dst = try gpa.print("{s}{s}", .{ key, ext });
@@ -94,24 +97,14 @@ fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
     return from;
 }
 
-fn make(io: Io, gpa: Allocator, path: []const u8) !void {
-    const r = try std.process.run(gpa, io, .{
-        .argv = &.{ keygen, "-q", "-t", "ed25519", "-N", "", "-C", "werewolf", "-f", path },
-    });
-    if (r.term != .exited or r.term.exited != 0) return error.KeygenFailed;
-}
-
 /// The key's fingerprint and public half, as one line on the console.
 fn logKey(io: Io, gpa: Allocator, from: []const u8) void {
-    const public = Dir.cwd().readFileAlloc(io, key ++ ".pub", gpa, .limited(16 << 10)) catch return;
-    const r = std.process.run(
-        gpa,
-        io,
-        .{ .argv = &.{ keygen, "-l", "-f", key ++ ".pub" } },
-    ) catch return;
-    var words = std.mem.tokenizeAny(u8, r.stdout, " \n");
-    _ = words.next();
-    const fingerprint = words.next() orelse return;
+    const public = std.mem.trim(
+        u8,
+        Dir.cwd().readFileAlloc(io, key ++ ".pub", gpa, .limited(16 << 10)) catch return,
+        " \n",
+    );
+    var fp: [hostkey.fingerprint_len]u8 = undefined;
     var buf: [1024]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
     w.writeAll("sshd-start: ") catch return;
@@ -119,21 +112,11 @@ fn logKey(io: Io, gpa: Allocator, from: []const u8) void {
         .event = "host-key",
         .key = key,
         .from = from,
-        .fingerprint = fingerprint,
-        .public = std.mem.trim(u8, public, " \n"),
+        .fingerprint = hostkey.fingerprint(public, &fp) orelse "unreadable",
+        .public = public,
     }, .{}, &w) catch return;
     w.writeByte('\n') catch return;
     Io.File.stdout().writeStreamingAll(io, w.buffered()) catch {};
-}
-
-/// Whether path is on RAM (tmpfs), so nothing kept there outlives the boot:
-/// /data, where a machine has no disk for it.
-fn onRam(path: [*:0]const u8) bool {
-    // struct statfs, whose first word is the filesystem's type.
-    var buf: [128]u8 align(8) = undefined;
-    const rc = linux.syscall2(.statfs, @intFromPtr(path), @intFromPtr(&buf));
-    if (linux.errno(rc) != .SUCCESS) return false;
-    return std.mem.readInt(u64, buf[0..8], .little) == 0x01021994; // TMPFS_MAGIC
 }
 
 fn exists(path: [*:0]const u8) bool {

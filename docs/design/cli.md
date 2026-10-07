@@ -9,13 +9,17 @@ While reviewing this proposal, focus on answering for yourself:
 * Are there other alternatives to consider?
 
 Proposed, 2026-10-07. Built (cmd/werewolf, `make werewolf`): `build`,
-`pack`, `run`; `create`, `delete` and `console` on Lima and GCP; and
-`upload` to GCP. `build` makes a form as `make dist` makes a release,
+`pack`, `run`; `create`, `delete` and `console` on Lima, GCP and AWS; and
+`upload` to GCP and AWS. On AWS (2026-10-07), prod on a t3.small runs end
+to end: imported, booted, its config from IMDSv2, `up in` 1.2 s, posture
+clean, restarted with a new config, deleted. On a t4g.small it boots and
+answers, but Graviton's console shows only the firmware's banner, so
+`create` cannot see `up in` there yet. `build` makes a form as `make dist` makes a release,
 through make's `_dist-form`; `--app DIR` works with `build`, `run` and
 `create`. `pack` reads FORM's
 declarations from `./forms`; `--image` is not built. `pack` makes no
 host keys: the bastion makes its own on first boot and keeps it in
-`/data`. Firecracker, AWS and Azure are not built.
+`/data`. Firecracker and Azure are not built.
 `make check-gcp`, `make demo` and the GCP demos run through `werewolf
 create`; `test/gcp` keeps only its judging, and `test/lima-demo` its wait
 for the page.
@@ -182,7 +186,7 @@ comes up, and only when the command line has no `werewolf.ip`, which
 wins; `pack` checks it with init's own parser (`lib/network.zig`). On
 Lima, `create` gives a form with no DHCP client Lima's own network,
 `192.168.5.15/24` by `192.168.5.2`, which the Mac does not reach: its
-console does.
+console does. On bhyve it gives slirp's, `10.0.2.15/24` by `10.0.2.2`.
 
 The names are part of the form's interface, as the tar paths already
 are. A chain that declares the same name twice (a form on `prod-ssh`
@@ -277,9 +281,10 @@ Azure's boot diagnostics): on a shell-free machine it is the only way to
 learn why it did not come up.
 
 Without `--on`, a machine goes where this host keeps machines itself:
-Lima, where it is installed on macOS, else QEMU here, in the foreground,
-as `run` boots it, and not kept (Firecracker, on Linux with KVM, is where
-that fallback goes next). `delete` and `console` take the same default.
+Lima, where it is installed on macOS, or bhyve on FreeBSD with vmm
+loaded, else QEMU here, in the foreground, as `run` boots it, and not
+kept (Firecracker, on Linux with KVM, is where that fallback goes next).
+`delete` and `console` take the same default.
 
 On Lima, built: the machine's disk is built for it, since its command
 line names the MAC of its vzNAT network (`werewolf.mac`), which is the
@@ -317,6 +322,30 @@ forms, and since they run sshd with a shell, `ssh root@ADDR poweroff`
 stops one cleanly. If Lima wraps its probes in `/bin/sh` one day, they
 are managed with no change here.
 
+On bhyve, built, and experimental: FreeBSD on x86_64, with no CI run
+yet (`cmd/werewolf/bhyve.zig`). The machine's disk is built as for Lima,
+and bhyve's UEFI firmware (the `bhyve-firmware` package) boots it; the
+tar is a second virtio disk, read-only. bhyve is a process that needs
+root and exits when the guest halts, or with 0 when it asks to reboot,
+so `create` starts it through `doas` or `sudo` under `daemon(8)`,
+detached, running werewolf's own supervisor (`werewolf _bhyve`), which
+runs bhyve again after a reboot and destroys the VM when it stops; the
+console is bhyve's standard output, which `daemon` appends to
+`console.log` in `build/ARCH/machines/NAME`, where `console` reads it
+and `create` waits for the `up in` line. The network is slirp's (the
+`libslirp` package), as `run`'s is under QEMU: a form with no DHCP
+client gets `10.0.2.15/24` by `10.0.2.2` in its tar, and this host
+reaches the machine only through the ports slirp forwards, one host port
+on `127.0.0.1` per `listen tcp/PORT` in the form's `.net` files, from a
+base the name's sha256 picks between 20000 and 59900; `create` says
+which, and prints the first as the address. bhyve is the state:
+`/dev/vmm/NAME` exists while the VM does, and the machine's directory
+holds its form. A second `create` of the name replaces the tar after a
+hard stop, `bhyvectl --destroy`, since nothing asks a werewolf machine
+to shut down; `delete` destroys the VM the same way, which ends its
+bhyve and supervisor, and removes the directory. bhyve on arm64, new in
+FreeBSD 15 with other firmware, is not built.
+
 On GCP, built: `create` builds the release's `disk.qcow2` and makes it an
 image named `werewolf-FORM-ARCH-DIGEST`, the first 16 hex digits of the
 disk's sha256, uploading it only if no such image exists. The VM gets
@@ -330,6 +359,23 @@ and GCP keeps the console of the current run alone. Project and zone are
 gcloud's (`gcloud config`, or `CLOUDSDK_COMPUTE_ZONE`), the zone
 `us-central1-a` if gcloud has none; where a zone has no Arm machines
 free, GCP says so and another zone serves.
+
+On AWS, built, and run once: `create` builds the same
+`disk.qcow2`, converts it to a dynamic VHD, which holds only the blocks
+written, has VM Import make it an EBS snapshot through
+`werewolf-images-ACCOUNT-REGION`, and registers the AMI under the same
+digest name, for UEFI, the ENA and IMDSv2 alone. The bucket and VM
+Import's `vmimport` role are named when missing, not made
+([service-vms.md](../service-vms.md#once-per-account-and-region)). The
+instance gets the tar in base64 as user data, no instance profile, IMDSv2
+with one hop, `Name` and `werewolf-form` tags, and a security group of
+its own, `werewolf-NAME`, with no rule in; `delete` waits for the
+instance to go, then deletes the group. Nitro keeps 64 KiB of console,
+perhaps across a stop, so after a restart `create` looks for `up in` only
+after the earlier console's last lines. A second `create` stops the
+instance, replaces its user data (in base64 once more, which
+`modify-instance-attribute` wants and `run-instances` does itself) and
+starts it.
 
 ### upload
 

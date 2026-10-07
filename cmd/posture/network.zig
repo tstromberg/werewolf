@@ -57,7 +57,8 @@ pub fn check(p: *Posture) !void {
         .area = "network",
         .name = "Only declared ports open",
         .why = "Nothing listens on the network that the machine is not meant to offer.",
-        .how = "listening TCP ports (/proc/net/tcp, tcp6) are those the machine's policy " ++
+        .how = "listening TCP ports (/proc/net/tcp, tcp6), but those bound to loopback alone, " ++
+            "which the network never reaches, are those the machine's policy " ++
             "declares (/usr/share/werewolf/net)",
         .result = if (declared == null)
             .skip
@@ -466,8 +467,11 @@ fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// The local ports of listening sockets in /proc/net/tcp or tcp6, each
-/// once, in order.
+/// The local ports of sockets listening on the network in /proc/net/tcp
+/// or tcp6, each once, in order. A socket bound to a loopback address
+/// alone serves the machine's own processes (a service's cluster port on
+/// 127.0.0.1), and fence lets nothing from the network reach it, so it is
+/// not a port the machine offers.
 fn listenPorts(gpa: Allocator, text: []const u8, out: *std.ArrayList(u16)) !void {
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
     _ = lines.next(); // the header
@@ -479,10 +483,21 @@ fn listenPorts(gpa: Allocator, text: []const u8, out: *std.ArrayList(u16)) !void
         const state = f.next() orelse continue;
         if (!std.mem.eql(u8, state, "0A")) continue; // TCP_LISTEN
         const colon = std.mem.findScalarLast(u8, local, ':') orelse continue;
+        if (isLoopback(local[0..colon])) continue;
         const port = std.fmt.parseInt(u16, local[colon + 1 ..], 16) catch continue;
         if (std.mem.findScalar(u16, out.items, port) == null) try out.append(gpa, port);
     }
     std.mem.sort(u16, out.items, {}, std.sort.asc(u16));
+}
+
+/// Whether a /proc/net/tcp local address, little-endian hex words, is
+/// 127.0.0.0/8 or ::1 (or ::ffff:127.0.0.0/8).
+fn isLoopback(hex: []const u8) bool {
+    if (hex.len == 8) return std.mem.endsWith(u8, hex, "7F");
+    if (hex.len != 32) return false;
+    if (std.mem.eql(u8, hex, "00000000000000000000000001000000")) return true;
+    return std.mem.eql(u8, hex[0..24], "0000000000000000FFFF0000") and
+        std.mem.endsWith(u8, hex, "7F");
 }
 
 /// The ports in a network policy's `listen tcp PORT` lines, one a line.
@@ -720,9 +735,16 @@ test listenPorts {
         \\   1: 0F05A8C0:0050 0105A8C0:C350 01 00000000:00000000 00:00000000 00000000   200        0 2 1
         \\   2: 0100007F:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 3 1
         \\   3: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4 1
+        \\   4: 0F05A8C0:2009 00000000:0000 0A 00000000:00000000 00:00000000 00000000   208        0 5 1
     ;
     try listenPorts(arena.allocator(), tcp, &ports);
-    try testing.expectEqualSlices(u16, &.{ 22, 80 }, ports.items);
+    // 22 is bound to 127.0.0.1 alone: the machine's own, not offered.
+    try testing.expectEqualSlices(u16, &.{ 80, 8201 }, ports.items);
+    try testing.expect(isLoopback("0100007F") and isLoopback("0A00007F"));
+    try testing.expect(isLoopback("00000000000000000000000001000000"));
+    try testing.expect(isLoopback("0000000000000000FFFF00000100007F"));
+    try testing.expect(!isLoopback("00000000") and !isLoopback("0F05A8C0"));
+    try testing.expect(!isLoopback("00000000000000000000000000000000"));
     try testing.expect(isDeclared("80\n", 80));
     const policy = try policyPorts(
         arena.allocator(),

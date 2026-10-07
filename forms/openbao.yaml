@@ -3,7 +3,7 @@
 # /data/svc/openbao; the API on :8200, TLS, with a certificate from the
 # config; unsealed by a static key from the config, and initialized by
 # itself on its first start: the stdout audit device, an admin policy and
-# a userpass admin whose password hash the config brings, then the root
+# a userpass admin whose first password the config brings, then the root
 # token revoked (etc/openbao/openbao.hcl). leash starts it (etc/sv/openbao/service) as the openbao
 # user. A cloud KMS in place of the static seal is a form of your own.
 # See docs/openbao.md.

@@ -239,7 +239,8 @@ The two files are all any hypervisor needs:
   it a vzNAT network with that MAC ([service-vms.md](service-vms.md)).
 - **A cloud**: an image of the disk, and `base64 config.tar` as the
   instance's user data ([service-vms.md](service-vms.md#gcp-vm) does GCP by
-  hand).
+  hand; on AWS, VM Import makes the image from a VHD,
+  [service-vms.md](service-vms.md#aws-vm)).
 
 ### Updates
 
@@ -258,4 +259,4 @@ were.
 Checks before anything boots (`pack` runs the machine's own setting checks
 on your machine, and refuses a missing key by name), the application's
 digest, and each provider's steps (Lima's template and MAC, GCP's image and
-user data). The mechanism is the one above.
+user data, AWS's import, AMI and security group). The mechanism is the one above.

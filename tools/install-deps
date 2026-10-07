@@ -1,7 +1,8 @@
 #!/bin/sh
 # install-deps [-y] [apko | zig]: install what building, booting and
-# checking werewolf needs, on macOS, Debian, Ubuntu, Fedora, Arch or
-# FreeBSD, after showing what it will run and asking; -y does not ask.
+# checking werewolf needs, on macOS, Debian, Ubuntu, Fedora, Arch,
+# FreeBSD or NetBSD (the BSDs experimental: no CI runs them), after
+# showing what it will run and asking; -y does not ask.
 # With `apko` or `zig`, install that alone, for what needs nothing else:
 # resolving packages, or building a tool. Packages come from
 # the system's package manager, as root through doas or sudo (Homebrew's,
@@ -10,15 +11,15 @@
 # release's bytes depend on (docs/releases.md), and erofs-utils, built
 # from source where the system's is older than 1.9 or has no zstd
 # (Homebrew's has none, so on macOS it is always built).
-# FreeBSD has no apko release, so it is built with Go, pinned by Go's
+# The BSDs have no apko release, so it is built with Go, pinned by Go's
 # checksum database.
 #
 # It installs only what is missing or not the pinned version, so a second
 # run installs nothing and takes a second. test/ci-setup runs it for CI.
 #
 # A shell script, not a Zig program: it is what installs Zig.
-# `make install-deps` runs it; on FreeBSD, whose make is not GNU make,
-# run it directly, and use gmake after.
+# `make install-deps` runs it; on FreeBSD and NetBSD, whose make is not
+# GNU make, run it directly, and use gmake after.
 #
 # Commands and package lists are words split on purpose, with globbing off.
 # shellcheck disable=SC2086
@@ -169,14 +170,39 @@ FreeBSD)
 	# ASSUME_ALWAYS_YES also bootstraps pkg itself without asking.
 	install="env ASSUME_ALWAYS_YES=yes pkg install"
 	# Its base has bsdtar, nc, xz and zstd; ports have no erofs-utils.
-	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect"
+	# bhyve-firmware and libslirp are for werewolf create, which keeps
+	# machines on bhyve: its UEFI firmware, and its user-mode network.
+	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect bhyve-firmware libslirp"
 	apko_pkgs=''
 	zig_pkgs=curl
 	erofs_deps="autoconf automake libtool pkgconf liblz4 zstd"
 	mk=gmake
 	erofs_env="CPPFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib"
 	;;
-*) die "$(uname -s) is not supported: macOS, Debian, Ubuntu, Fedora, Arch or FreeBSD" ;;
+NetBSD)
+	# Experimental, and amd64 alone: NVMM, which accelerates QEMU, has no
+	# arm64, and uname -m says evbarm there.
+	system="NetBSD $(uname -r)"
+	zos=netbsd
+	case $arch in
+	x86_64) zig_sha256=10f71cc89efbafc6e22447f23c44047d53c5d2061c82b1c32efd1ef55ea2d9b6 ;;
+	*) die "$arch is not supported on NetBSD: amd64" ;;
+	esac
+	command -v pkgin >/dev/null || die "needs pkgin: pkg_add pkgin, as sysinst offers"
+	pm=pkgin
+	install="pkgin -y install"
+	# Its base has nc and xz; its tar is not bsdtar, which libarchive
+	# brings; pkgsrc has no erofs-utils.
+	pkgs="gmake curl qemu mtools e2fsprogs tcl-expect libarchive zstd"
+	apko_pkgs=''
+	zig_pkgs=curl
+	erofs_deps="autoconf automake libtool pkgconf lz4 zstd"
+	mk=gmake
+	# One word each, since they are split: the linker takes -L and -R
+	# itself, so the libraries are found at run time too.
+	erofs_env="CPPFLAGS=-I/usr/pkg/include LDFLAGS=-Wl,-L/usr/pkg/lib,-R/usr/pkg/lib"
+	;;
+*) die "$(uname -s) is not supported: macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD or NetBSD" ;;
 esac
 
 # What is to do: the packages not installed, and upstream's that are
@@ -191,12 +217,15 @@ case $only in
 apko) pkgs=$apko_pkgs ;;
 zig) pkgs=$zig_pkgs ;;
 esac
-[ "$pm$need_apko" != pkgyes ] || pkgs="$pkgs go" # go builds apko
+case $pm$need_apko in
+pkgyes | pkginyes) pkgs="$pkgs go" ;; # go builds apko
+esac
 case $pm in
 apt) have=$(dpkg-query -W -f '${db:Status-Status} ${Package}\n' | sed -n 's/^installed //p') ;;
 dnf) have=$(rpm -qa --qf '%{NAME}\n') ;;
 pacman) have=$(pacman -Qq) ;;
 pkg) have=$(! pkg -N >/dev/null 2>&1 || pkg query %n) ;;
+pkgin) have=$(pkg_info | sed 's/-[0-9][^ ]* .*//') ;; # name-version  comment
 brew) have=$(brew list --formula -1) ;;
 esac
 missing=''
@@ -230,7 +259,7 @@ if [ -n "$missing$need_apko$need_zig$need_erofs" ]; then
 	fi
 	case $need_apko$zos in
 	yeslinux) echo "  install apko $apko_version from github.com/chainguard-dev/apko as /usr/local/bin/apko" ;;
-	yesfreebsd) echo "  build apko $apko_version with go install, as /usr/local/bin/apko" ;;
+	yesfreebsd | yesnetbsd) echo "  build apko $apko_version with go install, as /usr/local/bin/apko" ;;
 	esac
 	[ -z "$need_zig" ] ||
 		echo "  install zig $zig_version from ziglang.org in /usr/local/zig-$zig_version, linked as /usr/local/bin/zig"
@@ -285,7 +314,7 @@ fetch() { # fetch URL SHA256 FILE
 	if command -v sha256sum >/dev/null; then
 		got=$(sha256sum "$tmp/$3")
 	else
-		got=$(sha256 -r "$tmp/$3")
+		got=$(sha256 -q "$tmp/$3") # FreeBSD's and NetBSD's: the sum alone
 	fi
 	[ "${got%% *}" = "$2" ] || die "$1: sha256 ${got%% *}, not $2"
 }
@@ -298,7 +327,7 @@ if [ -n "$need_apko" ]; then
 			"$apko_sha256" apko.tar.gz
 		tar -xzf "$tmp/apko.tar.gz" -C "$tmp" --strip-components=1 "apko_${apko_version}_linux_$go/apko"
 		;;
-	freebsd)
+	freebsd | netbsd)
 		echo "install-deps: building apko $apko_version"
 		retry 3 env GOBIN="$tmp" go install "chainguard.dev/apko@v$apko_version" || die "could not build apko"
 		;;
@@ -331,7 +360,7 @@ if [ -n "$need_erofs" ] && ! erofs_ok; then
 	(cd "$tmp/erofs-utils-$erofs_version" && ./autogen.sh &&
 		env $erofs_env ./configure -q --prefix="$erofs_prefix" --disable-lzma --enable-lz4 --with-libzstd \
 			--without-libcurl --without-openssl --without-libxml2 --disable-fuse &&
-		$mk -s -j"$(getconf _NPROCESSORS_ONLN)") >"$tmp/erofs.log" 2>&1 ||
+		$mk -s -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || getconf NPROCESSORS_ONLN)") >"$tmp/erofs.log" 2>&1 ||
 		{ cat "$tmp/erofs.log" >&2; die "could not build erofs-utils $erofs_version"; }
 	$root $mk -s -C "$tmp/erofs-utils-$erofs_version" install >/dev/null
 	hash -r
@@ -363,3 +392,16 @@ echo "install-deps: apko $(apko_version), zig $(zig version), $(mkfs.erofs --ver
 if [ -e /dev/kvm ] && [ ! -w /dev/kvm ]; then
 	echo "install-deps: /dev/kvm is not yours, so QEMU will emulate, slowly: join its group, then log in again"
 fi
+case $pm in
+pkg)
+	[ -e /dev/vmmctl ] ||
+		echo "install-deps: vmm is not loaded, so werewolf create boots under QEMU, emulated, and keeps nothing: kldload vmm; sysrc kld_list+=vmm keeps it loaded"
+	;;
+pkgin)
+	if [ ! -e /dev/nvmm ]; then
+		echo "install-deps: NVMM is not loaded, so QEMU will emulate, slowly: modload nvmm; nvmm in /etc/modules.conf loads it at boot"
+	elif [ ! -w /dev/nvmm ]; then
+		echo "install-deps: /dev/nvmm is not yours, so QEMU will emulate, slowly: join group nvmm, then log in again"
+	fi
+	;;
+esac

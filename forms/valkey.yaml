@@ -6,11 +6,8 @@
 # (etc/valkey/valkey.conf). The application's form includes this one and
 # puts its user in the valkey group, which the socket is shared with. The
 # major version is in the package's name: a new one is a new form. See
-# docs/valkey.md.
-#
-# Wolfi's valkey depends on posix-libc-utils, whose ldd is a bash script,
-# so this image carries bash and posture's programs-no-shell fails on it
-# (test/posture-known), until Wolfi drops that dependency.
+# docs/valkey.md. Wolfi's valkey depends on posix-libc-utils, whose ldd is
+# a bash script: the image is made without the shell (valkey.prune).
 include: prod.yaml
 contents:
   packages:

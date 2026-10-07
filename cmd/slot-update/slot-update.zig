@@ -660,9 +660,21 @@ pub const Update = struct {
             .version = p.version,
             .origin = p.origin,
         };
+        // Nothing goes backwards, as for a slot built here: a machine that
+        // has taken no release (an image built from a tree) has no serial,
+        // and must not take a release older than what it runs.
+        const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));
+        if (backwards(try diffPackages(u.gpa, old_pkgs, new_pkgs), old_kernel, m.kernel)) |what| {
+            try u.record(.{
+                .event = "skip",
+                .build = m.build,
+                .reason = try u.gpa.print("{s} would go backwards", .{what}),
+            });
+            return null;
+        }
         return .{
             .build = m.build,
-            .old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed")),
+            .old_pkgs = old_pkgs,
             .new_pkgs = new_pkgs,
             .old_kernel = old_kernel,
             .new_kernel = m.kernel,

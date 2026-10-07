@@ -1,6 +1,17 @@
 # Service forms
 
-Proposed, 2026-10-07.
+Proposed, 2026-10-07. Built the same day: `caddy`, `valkey`, `openbao`,
+`step-ca` and `wordpress` (order 1), each with its config, checks and a
+page in docs/; `bastion` and `tailscale` were built before. Of order 0:
+`/run/config/NAME` as leash's `config` and `setting` lines
+([settings.md](settings.md)), with `config ... optional` for a file a
+service runs without and a `json` key with dots reaching a nested key;
+`answering` as "a socket listens", with `http-answering` where the port
+speaks HTTP and each daemon's own check in test/checks-FORM; and a socket
+bound to loopback alone counted as the machine's own by posture and the
+listeners check (OpenBao's cluster port). `listen udp` waits with the
+forms that need it. What differs from the plan below is noted in each
+form's section.
 
 Forms for the services people most want on a machine that is hard to take
 over: wordpress and wordpress-mariadb, caddy, haproxy, bastion, wireguard,
@@ -47,9 +58,17 @@ Four things the forms share, built once, before the forms that need them:
    it is not the plan. These three forms wait for Wolfi; the PRs go in
    first, since they take the longest.
 
-The rest (wordpress, caddy, bastion, tailscale, openbao, step-ca, valkey)
-have closures with no shell or interpreter beyond what their base already
-carries.
+The rest (wordpress, caddy, bastion, tailscale, openbao, step-ca) have
+closures with no shell or interpreter beyond what their base already
+carries. **valkey did not**, it turned out: Wolfi's `valkey-9.1` depends
+on `posix-libc-utils`, whose `ldd` is a bash script, so bash came with it.
+Rather than ship a shell nothing runs, or wait, forms gained `.prune`
+([forms.md](../forms.md#files-a-form-leaves-out)): the build leaves the
+named files out of the root, and the updater out of every slot it builds,
+so the image stays what its lock names but for what the form says. That
+is the answer for haproxy, unbound and mariadb too, once their scripts are
+read: a shell a dependency drags in goes; a shell the package's own
+scripts need, and the scripts with it, is more than a line.
 
 ## The forms
 
@@ -109,7 +128,12 @@ For every form:
 
 ### caddy
 
-A web server that gets its own certificates.
+A web server that gets its own certificates. Built as planned
+([caddy.md](../caddy.md)), with one site name as a setting (`domain`,
+which the Caddyfile reads as `{$DOMAIN::80}`); more names, or upstreams,
+are a form of your own with its Caddyfile in the image. Caddy logs JSON
+to the console whatever stderr is. The RAM `/data` console line is not
+built: Caddy's own log says when it asks the CA.
 
 - `admin off`: the admin API on :2019 lets any local process rewrite the
   configuration.
@@ -254,7 +278,18 @@ it), and nothing is forwarded by the kernel.
 ### openbao
 
 Secrets, on a machine where root cannot read another process's memory.
-Integrated storage (raft) in `/data/svc/openbao`.
+Integrated storage (raft) in `/data/svc/openbao`. Built as planned
+([openbao.md](../openbao.md)); "the auth method the config names" is
+`userpass`, with an `admin` user whose first password the `initialize`
+stanza reads from the config's file through its `file` source, so no
+secret is in the image or in settings.json; a bcrypt `password_hash`
+there instead waits on an OpenBao after 2.5.4, which Wolfi ships (the
+field arrived upstream in July 2026). The audit
+device is OpenBao's `audit` configuration stanza, not an `initialize`
+request: `sys/audit` refused the request from self-initialization, and a
+device declared in the image cannot be disabled over the API, which is
+better. raft's cluster listener is on 127.0.0.1:8201, which the policy
+does not declare and fence lets no one reach.
 
 - **Unsealed by a static key, and initialized by itself.** The key is
   `/run/config/openbao/unseal.key` (`seal "static"`), and the config's
@@ -275,14 +310,18 @@ Integrated storage (raft) in `/data/svc/openbao`.
 - `raw_storage_endpoint`, `introspection_endpoint` and
   `unauthenticated_metrics_access` off, as they ship, and said so in the
   file.
-- `disable_mlock = true`, since werewolf has no swap.
+- No `disable_mlock`: OpenBao 2.5 knows no such field, and locks no
+  memory (werewolf has no swap anyway).
 - No `plugin_directory`, and no `exec` promise.
 - Lease lifetimes as OpenBao ships them. Clustering adds tcp/8201.
 
 ### step-ca
 
 An internal CA. Named for what runs, as `postgresql` is: "ca" says too
-little.
+little. Built ([step-ca.md](../step-ca.md)) with ACME alone: a JWK
+provisioner is a key, an object a setting cannot hold, so a form of your
+own lays its `ca.json` over the image's to add one. The ACME names reach
+`authority.policy.x509.allow.dns` through a dotted `json` key.
 
 - The intermediate's key and certificate, the root's certificate and the
   intermediate's password (`--password-file`) from
@@ -302,7 +341,10 @@ little.
 
 A cache or queue for the application on the same machine, on a UNIX
 socket in `/run/svc/valkey`, as `postgresql` answers on one. The socket is
-shared with the application's group, which the form on it names.
+shared with the application's group, which the form on it names. Built
+([valkey.md](../valkey.md)) with `valkey-9.1-cli` beside it, the
+operator's client and the check's, and without the bash its package
+drags in (above).
 
 - The default user may do all but `-@admin`: no `CONFIG`, `DEBUG`,
   `MODULE`, `REPLICAOF`, `SHUTDOWN`, `MONITOR` or ACL changes. Lua stays
@@ -387,7 +429,13 @@ planned here.
 
 The worked example forms.md promised, on `php`. Wolfi installs WordPress
 in `/usr/src/wordpress`, which becomes nginx's root; the form brings
-`wp-config.php`.
+`wp-config.php`. Built as planned ([wordpress.md](../wordpress.md)); the
+installer is PHP, `usr/share/werewolf-wordpress/install.php`, run as a
+`before` step, and the admin's password is a bcrypt hash in the config.
+Wolfi's package resolves `php` to `php-8.4` once the form names it, and
+carries the site's `.git` (58 MB), which nginx refuses as a dotfile.
+SQLite wants a temporary directory the leash grants (`SQLITE_TMPDIR`),
+and opcache its lock file there too, on php-fpm's command line.
 
 - **Installed before it serves.** A `before` step, `php` calling
   `wp_install()`, sets up the site from `/run/config/wordpress`: its
@@ -457,8 +505,8 @@ It waits with `mariadb` on Wolfi's split, and on `mariadb-init`.
 | | Forms | Waits on |
 | --- | --- | --- |
 | 0 | | `/run/config/NAME`, `answering` as a TCP check, `listen udp`; the Wolfi PRs filed |
-| 1 | `valkey`, `caddy`, `openbao`, `step-ca`, `wordpress` | 0 |
-| 2 | `bastion`, `tailscale` | 0 |
+| 1 | `valkey`, `caddy`, `openbao`, `step-ca`, `wordpress` | 0; built |
+| 2 | `bastion`, `tailscale` | 0; built |
 | 3 | `haproxy`, `mariadb` (with `mariadb-init`), `wordpress-mariadb`, `unbound` | Wolfi's splits |
 | 4 | `wireguard` (with `wireguard-up`) | the `forward` allowance, fence's forwarding rules |
 

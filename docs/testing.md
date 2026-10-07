@@ -167,7 +167,8 @@ publishes: its updater installs the latest signed release instead of
 building (docs/updater.md, Releases), and there are no apk caches to
 check. It tests the release as much as the updater: slot b is what CI
 published, so it passes only once CI has published from a tree whose
-slot boots and updates as this one does.
+slot boots and updates as this one does, and whose packages are no older
+than this tree's: the updater takes nothing backwards.
 
 It needs the network, so it is not part of `make check`. About 4 minutes
 with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.

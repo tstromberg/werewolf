@@ -45,7 +45,7 @@ service stays down.
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
 | `stage0` | Build stage0 from its packages, `init`, the form's modules and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
-| `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, `sync`, write `attempt`, set GRUB's `next_entry`. |
+| `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, the kernel unwrapped to its `Image` for GRUB, which cannot run zboot, `sync`, write `attempt`, set GRUB's `next_entry`. On werewolf's own disk, the kernel goes to the EFI partition as it is. |
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
 
@@ -87,7 +87,7 @@ them, a check, instead of `userland`, `kernel` and `root`:
 | Step | |
 | --- | --- |
 | `release` | Fetch `FORM-ARCH.json` and its `.sig`, as `_update`. Believe nothing in them until the signature checks against `image.pub`: RSA PKCS#1 v1.5 over SHA-256, checked by Zig's standard library. Then refuse a manifest of another format, form or architecture; one past its `expires` (logged `skip`, "expired"), since CI re-signs daily and a frozen mirror must not hold a machine back in silence; and one signed more than a day in the future. No release of the form yet (404): `skip`. |
-| `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A `build` that rolled back before: `skip`. |
+| `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A release that would take a package or the kernel to an older version than this image's, in apk's order, as a slot built here may not either: `skip`, for an image built from a tree, which has no `serial`. A `build` that rolled back before: `skip`. |
 | `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst`, `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
 
 The CVEs, the install, the report and the reboot are as for a built slot;

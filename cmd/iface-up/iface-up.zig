@@ -18,6 +18,8 @@
 //!   dotted quad with no leading zeros, a prefix of 1 to 32, an address
 //!   that is not the subnet's network or broadcast, loopback, multicast or
 //!   zero, and a gateway that is none of those either, nor the address.
+//!   The rules are lib/network.zig's, which the config tar's network file
+//!   and werewolf pack are held to as well, so all three agree.
 //! - It opens its one socket, then pledges (lib/sandbox.zig): every
 //!   capability but CAP_NET_ADMIN gone, from the bounding set too, never to
 //!   come back, and a seccomp filter allowing ioctl only for the five
@@ -32,6 +34,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
+const network = @import("network");
 
 pub fn main(init: std.process.Init) void {
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch fail(error.OutOfMemory);
@@ -63,29 +66,10 @@ fn parse(args: []const [:0]const u8) !Plan {
     var p: Plan = .{ .nic = try nic(args[0]) };
     if (args.len == 1) return p;
 
-    const cidr = args[1];
-    const slash = std.mem.findScalar(u8, cidr, '/') orelse return error.Address;
-    const addr = try ip4(cidr[0..slash]);
-    const prefix = try number(cidr[slash + 1 ..], 1, 32);
-    p.addr = addr;
-    p.prefix = @intCast(prefix);
-    try usable(addr);
-    if (prefix <= 30) {
-        const host = toInt(addr) & ~maskInt(p.prefix);
-        if (host == 0 or host == ~maskInt(p.prefix)) return error.Address;
-    }
-
-    if (args.len == 3) {
-        const gw = try ip4(args[2]);
-        try usable(gw);
-        if (std.mem.eql(u8, &gw, &addr)) return error.Gateway;
-        // Within the subnet, not its own address nor its broadcast.
-        if (prefix <= 30 and inSubnet(gw, addr, p.prefix)) {
-            const host = toInt(gw) & ~maskInt(p.prefix);
-            if (host == 0 or host == ~maskInt(p.prefix)) return error.Gateway;
-        }
-        p.gateway = gw;
-    }
+    const a = try network.address(args[1]);
+    p.addr = a.addr;
+    p.prefix = a.prefix;
+    if (args.len == 3) p.gateway = try network.gateway(a, args[2]);
     return p;
 }
 

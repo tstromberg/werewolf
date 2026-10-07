@@ -9,15 +9,16 @@ audit "file" "stdout" {
   description = "every request, on the console"
   options {
     file_path = "stdout"
-    log_raw = "true"
   }
 }
 
 # The first start: what `bao operator init` and the first logins would
 # do, done by OpenBao itself under its static seal, once, then the root
 # token revoked. An admin, who may do everything, logging in by userpass
-# with the password whose bcrypt hash the config brought
-# (/run/config/openbao/admin_password_hash; leash's copy is read here).
+# with the password the config brought (/run/config/openbao/admin_password;
+# leash's copy is read here). A bcrypt hash in its place (password_hash)
+# waits on an OpenBao after 2.5, which Wolfi ships; the admin changes the
+# password at the first login.
 initialize "admin" {
   request "policy" {
     operation = "update"
@@ -37,10 +38,10 @@ initialize "admin" {
     operation = "update"
     path      = "auth/userpass/users/admin"
     data = {
-      password_hash = {
+      password = {
         eval_type   = "string"
         eval_source = "file"
-        path        = "/run/svc/openbao/admin-password-hash"
+        path        = "/run/svc/openbao/admin-password"
       }
       token_policies = ["admin"]
     }

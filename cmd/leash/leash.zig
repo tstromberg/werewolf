@@ -39,8 +39,11 @@
 //!                             (lib/seal.zig); required, once
 //!     env NAME=VALUE          its environment, otherwise only PATH
 //!     secret NAME PATH        a variable read from a file; never logged
-//!     config NAME PATH        copy a /run/config file to this service's
-//!                             /run/svc/SERVICE/NAME, mode 0600; never logged
+//!     config NAME PATH [optional]
+//!                             copy a /run/config file to this service's
+//!                             /run/svc/SERVICE/NAME, mode 0600; never logged.
+//!                             Missing, it keeps the service down, unless
+//!                             optional: then there is no copy
 //!     setting NAME TYPE[...] [required] [as KEY]
 //!                             a value it takes from the machine: from
 //!                             the file a `config settings PATH` names,
@@ -200,20 +203,31 @@ pub fn main(init: std.process.Init) !void {
     // a link or a restart race to make a privileged writer act for it.
     // A service with settings may be given none: its settings file, missing,
     // is an empty object, and the image's defaults hold.
-    const configs = try gpa.alloc([]const u8, s.configs.len);
+    const configs = try gpa.alloc(?[]const u8, s.configs.len);
     for (s.configs, configs) |cfg, *value| {
-        value.* = Dir.cwd().readFileAlloc(io, cfg[1], gpa, .limited(max_file)) catch |err|
+        value.* = Dir.cwd().readFileAlloc(io, cfg.path, gpa, .limited(max_file)) catch |err|
             switch (err) {
                 error.FileNotFound => if (s.render != null and
-                    std.mem.eql(u8, cfg[0], settings.input_file)) "{}" else fail(
+                    std.mem.eql(
+                        u8,
+                        cfg.name,
+                        settings.input_file,
+                    )) "{}" else if (cfg.optional) null else fail(
                     io,
                     ctl,
                     .park,
                     name,
                     "config {s}: {s}",
-                    .{ cfg[0], @errorName(err) },
+                    .{ cfg.name, @errorName(err) },
                 ),
-                else => fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg[0], @errorName(err) }),
+                else => fail(
+                    io,
+                    ctl,
+                    .park,
+                    name,
+                    "config {s}: {s}",
+                    .{ cfg.name, @errorName(err) },
+                ),
             };
     }
 
@@ -321,8 +335,8 @@ pub fn main(init: std.process.Init) !void {
 
     rules.restrict() catch |err| fail(io, ctl, .park, name, "Landlock: {s}", .{@errorName(err)});
     for (s.configs, configs) |cfg, value| {
-        copyConfig(run_dir, try gpa.dupeSentinel(u8, cfg[0], 0), value) catch |err|
-            fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg[0], @errorName(err) });
+        copyConfig(run_dir, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
+            fail(io, ctl, .park, name, "config {s}: {s}", .{ cfg.name, @errorName(err) });
     }
     record(
         io,
@@ -443,7 +457,7 @@ const Service = struct {
     requires: []const []const u8 = &.{},
     env: []const [2][]const u8 = &.{},
     secrets: []const [2][]const u8 = &.{},
-    configs: []const [2][]const u8 = &.{},
+    configs: []const Config = &.{},
     settings: []const settings.Setting = &.{},
     render: ?settings.Render = null,
     nofile: ?u32 = null,
@@ -475,7 +489,7 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var requires: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([2][]const u8) = .empty;
     var secrets: std.ArrayList([2][]const u8) = .empty;
-    var configs: std.ArrayList([2][]const u8) = .empty;
+    var configs: std.ArrayList(Config) = .empty;
     var declared: std.ArrayList(settings.Setting) = .empty;
     var render: ?settings.Render = null;
 
@@ -542,14 +556,20 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             );
             try secrets.append(gpa, .{ args[0], args[1] });
         } else if (std.mem.eql(u8, key, "config")) {
-            if (args.len != 2 or
-                !isName(args[0])) return invalid(bad, "config takes a plain NAME and PATH");
+            const optional = args.len == 3 and std.mem.eql(u8, args[2], "optional");
+            if ((args.len != 2 and !optional) or
+                !isName(args[0])) return invalid(
+                bad,
+                "config takes a plain NAME and PATH [optional]",
+            );
             if (!isCleanPath(args[1]) or !std.mem.startsWith(u8, args[1], "/run/config/"))
                 return invalid(bad, "config source must be beneath /run/config");
             if (configs.items.len == 32) return invalid(bad, "at most 32 config files");
-            for (configs.items) |cfg| if (std.mem.eql(u8, cfg[0], args[0]))
+            for (configs.items) |cfg| if (std.mem.eql(u8, cfg.name, args[0]))
                 return invalid(bad, "config name repeated");
-            try configs.append(gpa, .{ args[0], args[1] });
+            if (optional and std.mem.eql(u8, args[0], settings.input_file))
+                return invalid(bad, "settings are optional already");
+            try configs.append(gpa, .{ .name = args[0], .path = args[1], .optional = optional });
         } else if (std.mem.eql(u8, key, "setting")) {
             try declared.append(
                 gpa,
@@ -598,10 +618,10 @@ fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             else => return err,
         };
         const sourced = for (configs.items) |cfg| {
-            if (std.mem.eql(u8, cfg[0], settings.input_file)) break true;
+            if (std.mem.eql(u8, cfg.name, settings.input_file)) break true;
         } else false;
         if (!sourced) return invalid(bad, "settings come from a `config settings PATH` line");
-        for (configs.items) |cfg| if (std.mem.eql(u8, cfg[0], r.file))
+        for (configs.items) |cfg| if (std.mem.eql(u8, cfg.name, r.file))
             return invalid(bad, "a config has render's file name");
         if (r.format == .env) for (declared.items) |d| {
             for (env.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
@@ -828,7 +848,9 @@ fn renderSettings(
 /// Called as the service, inside Landlock. Never truncate an existing
 /// inode (which could be a hard link); replace the name with a new 0600
 /// file. Pin the directory, refuse symlinks and fail closed on a race.
-fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: []const u8) !void {
+/// value into dir/name, 0600, replacing whatever was there; null, an
+/// optional config the machine does not have, leaves nothing there.
+fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: ?[]const u8) !void {
     const d = linux.open(
         dir,
         .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
@@ -839,6 +861,7 @@ fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: []const u8) !void {
     defer _ = linux.close(dfd);
     const un = linux.unlinkat(dfd, name, 0);
     if (linux.errno(un) != .SUCCESS and linux.errno(un) != .NOENT) return error.Unlink;
+    const data = value orelse return;
     const f = linux.openat(
         dfd,
         name,
@@ -849,8 +872,8 @@ fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: []const u8) !void {
     const fd: linux.fd_t = @intCast(f);
     defer _ = linux.close(fd);
     var off: usize = 0;
-    while (off < value.len) {
-        const n = linux.write(fd, value[off..].ptr, value.len - off);
+    while (off < data.len) {
+        const n = linux.write(fd, data[off..].ptr, data.len - off);
         if (linux.errno(n) == .INTR) continue;
         if (linux.errno(n) != .SUCCESS or n == 0) return error.WriteFile;
         off += n;
@@ -1246,8 +1269,9 @@ test parse {
     try testing.expectEqualStrings("/run/config/nginx/cert.pem", s.requires[0]);
     try testing.expectEqualStrings("hello world", s.env[0][1]);
     try testing.expectEqualStrings("TOKEN", s.secrets[0][0]);
-    try testing.expectEqualStrings("host-key", s.configs[0][0]);
-    try testing.expectEqualStrings("/run/config/ssh/host_key", s.configs[0][1]);
+    try testing.expectEqualStrings("host-key", s.configs[0].name);
+    try testing.expectEqualStrings("/run/config/ssh/host_key", s.configs[0].path);
+    try testing.expect(!s.configs[0].optional);
     try testing.expectEqual(65536, s.nofile.?);
     try testing.expectEqual(512, s.memory.?);
     try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
@@ -1368,6 +1392,23 @@ test lookupUser {
     try testing.expectEqual(null, lookupUser("nginx2:x:1:1::/:/x\n", "nginx"));
 }
 
+test "an optional config may be missing; settings are optional already" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var bad: Bad = .{};
+    const s = try parse(
+        gpa,
+        "exec /a\nuser x\npledge stdio\nconfig relay /run/config/x/relay optional\n",
+        &bad,
+    );
+    try testing.expect(s.configs[0].optional);
+    for ([_][]const u8{
+        "exec /a\nuser x\npledge stdio\nconfig relay /run/config/x/relay maybe\n",
+        "exec /a\nuser x\npledge stdio\nconfig settings /run/config/x/settings.json optional\n",
+    }) |text| try testing.expectError(error.Invalid, parse(gpa, text, &bad));
+}
+
 test "config file count is bounded" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -1402,6 +1443,10 @@ test "config copies replace links, not their targets" {
     try testing.expectEqual(@as(u32, 0o600), st.permissions.toMode() & 0o777);
     try copyConfig(path, "key", "second\n");
     try testing.expectEqualStrings("second\n", try tmp.dir.readFile(io, "key", &buf));
+    // An optional config the machine lacks leaves no stale copy behind.
+    try copyConfig(path, "key", null);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "key", .{}));
+    try testing.expectEqualStrings("unchanged", try tmp.dir.readFile(io, "victim", &buf));
     // Replacing a hard link must not truncate the inode it shares.
     const victim = try testing.allocator.printSentinel("{s}/victim", .{path}, 0);
     defer testing.allocator.free(victim);

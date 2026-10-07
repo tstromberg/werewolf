@@ -209,21 +209,6 @@ pub fn awaitAddress(io: Io, gpa: Allocator, m: []const u8, before: u64) !?[]cons
     return null;
 }
 
-/// Wait for init's "werewolf: up in" on the console, past the first seen bytes of
-/// its log: for a machine with no DHCP lease to say it is up.
-pub fn awaitUp(io: Io, gpa: Allocator, log: []const u8, seen: u64) !bool {
-    var waited: u32 = 0;
-    while (waited < wait_seconds) : (waited += 2) {
-        if (Dir.cwd().readFileAlloc(io, log, gpa, .limited(64 << 20))) |text| {
-            // A log shorter than before was started again.
-            const from = if (seen <= text.len) seen else 0;
-            if (std.mem.find(u8, text[from..], "werewolf: up in ") != null) return true;
-        } else |_| {}
-        try io.sleep(.fromSeconds(2), .awake);
-    }
-    return false;
-}
-
 const testing = std.testing;
 
 test mac {

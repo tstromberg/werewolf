@@ -54,7 +54,7 @@ pub const Format = enum {
     /// service's environment.
     env,
     /// One JSON object; with `from`, the image's object, its declared keys
-    /// replaced.
+    /// replaced. A key with dots, a.b.c, is a path into nested objects.
     json,
     /// KEY VALUE... lines, a list joined by spaces, a bool yes or no.
     conf,
@@ -264,7 +264,21 @@ pub fn render(
                 obj = doc.object;
             }
             for (settings, values) |s, value| {
-                if (value) |v| try obj.put(gpa, s.key.?, v);
+                const v = value orelse continue;
+                // A key with dots is a path into the object, a.b.c: each
+                // part but the last an object, made where the base has
+                // none, so a setting can fill a key the daemon nests.
+                var target = &obj;
+                var parts = std.mem.splitScalar(u8, s.key.?, '.');
+                var last = parts.first();
+                while (parts.next()) |part| {
+                    const slot = try target.getOrPut(gpa, last);
+                    if (!slot.found_existing) slot.value_ptr.* = .{ .object = .empty };
+                    if (slot.value_ptr.* != .object) return error.Invalid;
+                    target = &slot.value_ptr.object;
+                    last = part;
+                }
+                try target.put(gpa, last, v);
             }
             const doc: json.Value = .{ .object = obj };
             try out.appendSlice(gpa, try json.Stringify.valueAlloc(gpa, doc, .{}));
@@ -846,6 +860,67 @@ test "env and conf render every type, and env reads back" {
             null,
         ),
     );
+}
+
+test "a dotted json key fills a nested object" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: []const u8 = "";
+    var diag: Diagnostic = .{};
+    var s = [_]Setting{
+        .{
+            .name = "domains",
+            .type = .hostname,
+            .list = true,
+            .key = "authority.policy.x509.allow.dns",
+        },
+        .{ .name = "names", .type = .hostname, .list = true, .key = "dnsNames" },
+    };
+    const r: Render = .{ .format = .json, .file = "ca.json", .from = "/etc/step-ca/ca.json" };
+    try declare(gpa, &s, r, &why);
+    const image = "{\"address\":\":443\",\"authority\":{\"enableAdmin\":false,\"policy\":{\"x509" ++
+        "\":" ++
+        "{\"allow\":{\"dns\":[]},\"allowWildcardNames\":false}}}}";
+    const out = try render(
+        gpa,
+        &s,
+        r,
+        try parseValues(
+            gpa,
+            &s,
+            "{\"domains\":[\"a.example\"],\"names\":[\"ca.example\"]}",
+            &diag,
+        ),
+        image,
+    );
+    const got = try json.parseFromSliceLeaky(json.Value, gpa, out, .{});
+    const authority = got.object.get("authority").?.object;
+    try testing.expect(!authority.get("enableAdmin").?.bool);
+    const x509 = authority.get("policy").?.object.get("x509").?.object;
+    try testing.expect(!x509.get("allowWildcardNames").?.bool);
+    try testing.expectEqualStrings(
+        "a.example",
+        x509.get("allow").?.object.get("dns").?.array.items[0].string,
+    );
+    try testing.expectEqualStrings(
+        "ca.example",
+        got.object.get("dnsNames").?.array.items[0].string,
+    );
+    // A path through a value that is not an object is refused.
+    try testing.expectError(
+        error.Invalid,
+        render(gpa, &s, r, &.{ .{ .array = .init(gpa) }, null }, "{\"authority\":1}"),
+    );
+    // Without a base, the path is made whole.
+    const alone = try render(
+        gpa,
+        &s,
+        .{ .format = .json, .file = "x" },
+        &.{ null, .{ .array = .init(gpa) } },
+        null,
+    );
+    try testing.expectEqualStrings("{\"dnsNames\":[]}\n", alone);
 }
 
 test "json without from is the settings alone" {

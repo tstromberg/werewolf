@@ -6,10 +6,14 @@
 //! For machines whose network gives no address by DHCP: a hypervisor of
 //! your own, bare metal, a form with no DHCP client. init reads it when
 //! the command line has no werewolf.ip, before it brings the network up,
-//! and the host's werewolf pack checks it with this same parser, so what
-//! the host packs the machine takes. IPv4: an address within its subnet,
-//! neither the subnet's network nor its broadcast address; a gateway
-//! inside that subnet; a unicast resolver.
+//! and the host's werewolf pack checks it with this same parser; iface-up,
+//! which gives the NIC the address, checks it with the same rules (address
+//! and gateway, below), so what the host packs the machine takes. IPv4: a
+//! dotted quad with no leading zeros, a prefix of 1 to 32 in plain digits,
+//! a usable host that is not its subnet's network or broadcast address; a
+//! gateway, usable, not the address, and inside the subnet not its network
+//! or broadcast either, or outside it, on the link, as GCP gives a /32's;
+//! a usable resolver.
 
 const std = @import("std");
 
@@ -47,39 +51,17 @@ pub fn parse(text: []const u8, why: *[]const u8) ?Network {
         if (slot.len == 0) return refuse(why, "a key with no value");
     }
     if (n.ip.len == 0) return refuse(why, "no werewolf.ip");
-    const slash = std.mem.findScalar(
-        u8,
-        n.ip,
-        '/',
-    ) orelse return refuse(why, "werewolf.ip is not ADDRESS/PREFIX");
-    const addr = ip4(n.ip[0..slash]) orelse return refuse(
+    const a = address(n.ip) catch return refuse(
         why,
-        "werewolf.ip is not an IPv4 address",
+        "werewolf.ip is not ADDRESS/PREFIX: a dotted quad, a prefix of 1 to 32, a usable host",
     );
-    const bits = std.fmt.parseInt(
-        u6,
-        n.ip[slash + 1 ..],
-        10,
-    ) catch return refuse(why, "werewolf.ip's prefix is not 1 to 32");
-    if (bits < 1 or bits > 32) return refuse(why, "werewolf.ip's prefix is not 1 to 32");
-    const mask: u32 = if (bits == 32) 0xffff_ffff else ~(@as(u32, 0xffff_ffff) >> @intCast(bits));
-    // /31 and /32 have no network or broadcast address to avoid (RFC 3021).
-    if (bits <= 30 and (addr & ~mask == 0 or addr & ~mask == ~mask))
-        return refuse(why, "werewolf.ip is its subnet's network or broadcast address");
-    if (!unicast(addr)) return refuse(why, "werewolf.ip is not a unicast address");
-    if (n.gw.len > 0) {
-        const gw = ip4(n.gw) orelse return refuse(why, "werewolf.gw is not an IPv4 address");
-        if (gw & mask != addr & mask) return refuse(
-            why,
-            "werewolf.gw is outside werewolf.ip's subnet",
-        );
-        if (gw == addr) return refuse(why, "werewolf.gw is the machine's own address");
-        if (bits <= 30 and (gw & ~mask == 0 or gw & ~mask == ~mask))
-            return refuse(why, "werewolf.gw is its subnet's network or broadcast address");
-    }
+    if (n.gw.len > 0) _ = gateway(a, n.gw) catch |err| return refuse(why, switch (err) {
+        error.Address => "werewolf.gw is not a usable address",
+        error.Gateway => "werewolf.gw is the address, or its subnet's network or broadcast",
+    });
     if (n.dns.len > 0) {
-        const dns = ip4(n.dns) orelse return refuse(why, "werewolf.dns is not an IPv4 address");
-        if (!unicast(dns)) return refuse(why, "werewolf.dns is not a unicast address");
+        const dns = ip4(n.dns) catch return refuse(why, "werewolf.dns is not an IPv4 address");
+        if (!usable(dns)) return refuse(why, "werewolf.dns is not a usable address");
     }
     return n;
 }
@@ -94,15 +76,75 @@ pub fn format(buf: []u8, n: Network) ![]const u8 {
     return w.buffered();
 }
 
-fn ip4(text: []const u8) ?u32 {
-    const a = std.Io.net.Ip4Address.parse(text, 0) catch return null;
-    return std.mem.readInt(u32, &a.bytes, .big);
+pub const Ip4 = [4]u8;
+pub const Address = struct { addr: Ip4, prefix: u6 };
+
+/// ADDR/PREFIX: a usable host, a prefix of 1 to 32 in plain digits, and,
+/// below /31 (RFC 3021), neither its subnet's network nor its broadcast.
+pub fn address(cidr: []const u8) error{Address}!Address {
+    const slash = std.mem.findScalar(u8, cidr, '/') orelse return error.Address;
+    const a: Address = .{
+        .addr = try ip4(cidr[0..slash]),
+        .prefix = @intCast(try number(cidr[slash + 1 ..], 1, 32)),
+    };
+    if (!usable(a.addr)) return error.Address;
+    if (a.prefix <= 30) {
+        const host = toInt(a.addr) & ~mask(a.prefix);
+        if (host == 0 or host == ~mask(a.prefix)) return error.Address;
+    }
+    return a;
 }
 
-/// Not 0.0.0.0/8, loopback, multicast or reserved (240.0.0.0/4, broadcast).
-fn unicast(a: u32) bool {
-    const first = a >> 24;
-    return first != 0 and first != 127 and first < 224;
+/// A gateway for a: a usable host, not a's own address, and inside its
+/// subnet not the network or broadcast either. One outside the subnet is
+/// on the link, as GCP gives a /32's, reached by a host route first.
+pub fn gateway(a: Address, s: []const u8) error{ Address, Gateway }!Ip4 {
+    const gw = try ip4(s);
+    if (!usable(gw)) return error.Address;
+    if (std.mem.eql(u8, &gw, &a.addr)) return error.Gateway;
+    if (a.prefix <= 30 and inSubnet(gw, a.addr, a.prefix)) {
+        const host = toInt(gw) & ~mask(a.prefix);
+        if (host == 0 or host == ~mask(a.prefix)) return error.Gateway;
+    }
+    return gw;
+}
+
+/// A dotted quad: four numbers 0 to 255, no leading zeros, nothing else.
+pub fn ip4(s: []const u8) error{Address}!Ip4 {
+    var out: Ip4 = undefined;
+    var parts = std.mem.splitScalar(u8, s, '.');
+    for (&out) |*o| o.* = @intCast(try number(parts.next() orelse return error.Address, 0, 255));
+    if (parts.next() != null) return error.Address;
+    return out;
+}
+
+/// Plain digits, no sign and no leading zero, from min to max.
+fn number(s: []const u8, min: u32, max: u32) error{Address}!u32 {
+    if (s.len == 0 or s.len > 3 or (s.len > 1 and s[0] == '0')) return error.Address;
+    var v: u32 = 0;
+    for (s) |c| {
+        if (!std.ascii.isDigit(c)) return error.Address;
+        v = v * 10 + (c - '0');
+    }
+    if (v < min or v > max) return error.Address;
+    return v;
+}
+
+/// Not zero, broadcast, loopback or multicast.
+pub fn usable(a: Ip4) bool {
+    return toInt(a) != 0 and toInt(a) != 0xffffffff and a[0] != 127 and a[0] < 224;
+}
+
+pub fn inSubnet(a: Ip4, b: Ip4, prefix: u6) bool {
+    return toInt(a) & mask(prefix) == toInt(b) & mask(prefix);
+}
+
+pub fn toInt(a: Ip4) u32 {
+    return std.mem.readInt(u32, &a, .big);
+}
+
+pub fn mask(prefix: u6) u32 {
+    return if (prefix == 0) 0 else ~@as(u32, 0) << @intCast(32 - prefix);
 }
 
 fn refuse(why: *[]const u8, text: []const u8) ?Network {
@@ -127,6 +169,10 @@ test parse {
     );
     _ = parse("werewolf.ip=10.0.0.0/31 werewolf.gw=10.0.0.1", &why).?;
     _ = parse("werewolf.ip=10.0.0.9/32", &why).?;
+    // A gateway outside the subnet is on the link, as iface-up and the
+    // command line take it: GCP's /32, or a provider's gateway elsewhere.
+    _ = parse("werewolf.ip=10.128.0.5/32 werewolf.gw=10.128.0.1", &why).?;
+    _ = parse("werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.1.1", &why).?;
     for ([_][]const u8{
         "",
         "werewolf.gw=10.0.0.1",
@@ -141,7 +187,9 @@ test parse {
         "werewolf.ip=fd00::5/64",
         "werewolf.ip=127.0.0.5/8",
         "werewolf.ip=224.0.0.5/24",
-        "werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.1.1",
+        "werewolf.ip=10.0.0.5/+24",
+        "werewolf.ip=10.0.0.5/024",
+        "werewolf.ip=10.0.0.05/24",
         "werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.0.5",
         "werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.0.255",
         "werewolf.ip=10.0.0.5/24 werewolf.dns=255.255.255.255",

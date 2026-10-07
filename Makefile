@@ -2,7 +2,8 @@
 #
 # Build
 #   make install-deps    install apko, Zig, QEMU, erofs-utils and the rest, after
-#                        asking: macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD
+#                        asking: macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD and
+#                        NetBSD, experimental, with gmake (tools/install-deps)
 #   make                 the image: build/<arch>/vmlinuz, build/<arch>/<form>/initramfs.zst
 #   make slot            build/<arch>/<form>/slot/: vmlinuz, stage0, root.erofs, for bite
 #   make disk            build/<arch>/<form>/disk.img: a UEFI boot disk of the slot;
@@ -275,6 +276,21 @@ MODULES := $(shell for f in $(CHAIN); do [ -f forms/$$f.modules ] && cat forms/$
 		$$1 ~ /:$$/ { if ($$1 != a ":") next; $$1 = "" } { print }')
 MODULE_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .modules,$(CHAIN))))
 
+# Files a form leaves out of its packages, from forms/<name>.prune along
+# the chain: a path a line, as it is in the image (usr/bin/bash), and #
+# comments. For what a package declares it needs and nothing on the
+# machine runs: Wolfi's valkey brings bash, for posix-libc-utils' ldd. The
+# root is made without them, the image records them
+# (/usr/share/werewolf/prune) and the updater removes them from every slot
+# it builds, so a slot built on the machine holds what the build's did.
+# The packages stay installed as far as apk's database and the release's
+# manifest know. A path must be relative and clean.
+PRUNE_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .prune,$(CHAIN))))
+PRUNE := $(shell cat $(PRUNE_LISTS) /dev/null | sed 's/\#.*//' | awk 'NF')
+ifneq ($(filter /% ./% ../% %/ %/.. %/.,$(PRUNE)),)
+$(error form $(FORM) prunes $(filter /% ./% ../% %/ %/.. %/.,$(PRUNE)): a path is relative and clean, usr/bin/bash)
+endif
+
 # The network policy, from forms/<name>.net along the chain: `listen tcp/PORT`
 # for what a form serves, `connect USER|all tcp/PORT udp/PORT icmp` for what
 # its programs may send, by the user they run as, and `metadata USER` for
@@ -478,10 +494,10 @@ endef
 # boots, as "update-policy", and lib/network.zig, a config tar's static
 # network, as "network", compiled with them, as ReleaseSafe as it is.
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
-	--dep update-policy --dep network -Mroot=$(1) \
+	--dep update-policy --dep network --dep hostkey -Mroot=$(1) \
 	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig \
 	-Mseal=lib/seal.zig -Msettings=lib/settings.zig -Mupdate-policy=lib/update-policy.zig \
-	-Mnetwork=lib/network.zig
+	-Mnetwork=lib/network.zig -Mhostkey=lib/hostkey.zig
 
 define zig_build
 $(zig_check)
@@ -514,6 +530,7 @@ test:
 	zig test lib/settings.zig
 	zig test lib/update-policy.zig
 	zig test lib/network.zig
+	zig test lib/hostkey.zig
 	zig test boot/gpt.zig
 	zig test tools/cve-tiers.zig
 	zig test tools/kernel-config-check.zig
@@ -535,12 +552,13 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub release/tiers.pub release/advisories Makefile $(SERVICE_CONFIG_BIN)
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(PRUNE_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub release/tiers.pub release/advisories Makefile $(SERVICE_CONFIG_BIN)
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
 	echo $(FORM) > $$d/form && \
 	echo $(MODULES) | tr ' ' '\n' | sed 's/^@[a-z0-9]*://' > $$d/modules && \
+	{ for p in $(PRUNE); do echo $$p; done; } > $$d/prune && \
 	for f in $$(for c in $(CHAIN_DIRS); do (cd $$c && ls etc/sv/*/service 2>/dev/null); done | LC_ALL=C sort -u); do \
 		w=; for c in $(CHAIN_DIRS); do [ -f $$c/$$f ] && w=$$c/$$f; done; sed -n 's/#.*//; s/^pledge[[:space:]]//p' $$w; \
 	done | tr -s ' \t' '\n\n' | grep . | LC_ALL=C sort -u | tr '\n' ' ' > $$d/pledge && \
@@ -636,7 +654,11 @@ werewolf: $(WEREWOLF)
 $(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig \
 	lib/network.zig
 	$(zig_check)
-	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@
+	@# Beside it, then renamed over it: a build while werewolf runs (a
+	@# check rebuilds it) never leaves an empty file, which a shell would run
+	@# as an empty script, exiting 0 having done nothing.
+	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@.tmp
+	mv -f $@.tmp $@
 
 disk: $(DISK)
 
@@ -711,13 +733,13 @@ $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $
 # with the root hash and salt tools/verity writes to $(OUT)/verity/verity
 # for stage0's /verity (lib/verity.zig, the same tree veritysetup makes).
 EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments,dedupe
-$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(VERITY_BIN)
+$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(VERITY_BIN) $(PRUNE_LISTS)
 	mkdir -p $(dir $@)
 	@# The root directory itself, first: without an entry for it, mkfs.erofs
 	@# gives / the builder's uid and mode 0777, which sshd's StrictModes
 	@# rightly refuses keys under.
 	printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >$(OUT)/root.mtree
-	$(TAR) -cf $(OUT)/root.tar --uid 0 --gid 0 --numeric-owner @$(OUT)/root.mtree @$(OUT)/rootfs.tar @$(OUT)/overlay.tar
+	$(TAR) -cf $(OUT)/root.tar --uid 0 --gid 0 --numeric-owner $(foreach p,$(PRUNE),--exclude $(p)) @$(OUT)/root.mtree @$(OUT)/rootfs.tar @$(OUT)/overlay.tar
 	rm -f $@
 	@v=$$(mkfs.erofs --version 2>/dev/null | sed -n 's/.*erofs-utils) *//p'); case $$v in '' | 1.[0-8] | 1.[0-8].*) \
 		echo "mkfs.erofs $${v:-before 1.9}: 1.9 or later is needed; older ones write an image of empty files" >&2; exit 1 ;; esac
@@ -985,7 +1007,7 @@ check-%: | $(CHECK_SHARED)
 	@$(CHECK_MAKE) FORM=$* _check-form
 
 _check-form: $(WEREWOLF)
-	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 status=none
+	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 2>/dev/null
 	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
 		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
 		$(if $(CHECK_SSH),rm -f $(CHECK)/$(FORM)-key $(CHECK)/$(FORM)-key.pub && \
@@ -995,6 +1017,7 @@ _check-form: $(WEREWOLF)
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/bastion/authorized_keys &&) \
 		$(if $(filter tailscale,$(FORM)),mkdir -p $(CHECK)/$(FORM)-config/tailscale && \
 			printf '%s\n' tskey-auth-offline-test >$(CHECK)/$(FORM)-config/tailscale/auth_key &&) \
+		$(if $(wildcard test/config-$(FORM)),test/config-$(FORM) $(CHECK)/$(FORM)-config &&) \
 		$(WEREWOLF) pack $(FORM) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
 	@awk '$(if $(filter tailscale,$(FORM)),$$2 != "listeners",1)' test/checks $(wildcard test/checks-$(FORM)) >$(CHECK)/$(FORM)-checks
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
@@ -1344,7 +1367,7 @@ _check-updater-boot:
 		$(OUT)/meta/usr/share/werewolf/kernel >$(CHECK_UPDATE)/claim/usr/share/werewolf/kernel
 	@printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >$(CHECK_UPDATE)/root.mtree
 	@$(TAR) -C $(CHECK_UPDATE)/claim -cf $(CHECK_UPDATE)/claim.tar --uid 0 --gid 0 --numeric-owner usr/share/werewolf/kernel
-	@$(TAR) -cf $(CHECK_UPDATE)/root.tar --uid 0 --gid 0 --numeric-owner \
+	@$(TAR) -cf $(CHECK_UPDATE)/root.tar --uid 0 --gid 0 --numeric-owner $(foreach p,$(PRUNE),--exclude $(p)) \
 		@$(CHECK_UPDATE)/root.mtree @$(OUT)/rootfs.tar @$(OUT)/overlay.tar @$(CHECK_UPDATE)/claim.tar
 	@mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
 		$(CHECK_UPDATE)/victim/var/lib/werewolf/a/root.erofs $(CHECK_UPDATE)/root.tar >/dev/null

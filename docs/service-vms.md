@@ -1,4 +1,4 @@
-# Service VMs in Lima and GCP
+# Service VMs in Lima, GCP and AWS
 
 Use this with the [bastion](bastion.md) or [Tailscale](tailscale.md) tutorial.
 Those tutorials set `FORM`, `VM` and `CONFIG_DIR`, and explain
@@ -152,6 +152,78 @@ export VM_IP=$(gcloud --project="$GCP_PROJECT" compute instances describe \
   --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
 ```
 
+## AWS VM
+
+`werewolf create` makes the machine in the aws CLI's region (`aws
+configure`, or `AWS_REGION` and `AWS_PROFILE`), in the default VPC:
+
+```sh
+build/host/werewolf create "$FORM" "$VM" --on aws --config "$CONFIG_DIR"
+build/host/werewolf console "$VM" --on aws
+build/host/werewolf delete "$VM" --on aws     # the instance, its volume and security group; the AMI stays
+```
+
+The first `create` of a build converts its disk to a dynamic VHD, which
+holds only the blocks written, puts it in S3, has VM Import make an EBS
+snapshot of it, registers that as an AMI named
+`werewolf-FORM-ARCH-DIGEST` (UEFI, ENA, IMDSv2 alone) and deletes the
+upload; later ones find the AMI. The instance is a `t4g.small` (Graviton)
+or a `t3.small` (`--size` picks another), with no instance profile, the
+config tar in base64 as its user data, and the metadata service reachable
+only from the machine itself (IMDSv2, one hop). Its security group,
+`werewolf-NAME`, lets nothing in; allow what the form listens on:
+
+```sh
+aws ec2 authorize-security-group-ingress --group-name "werewolf-$VM" \
+  --protocol tcp --port 22 --cidr "$(curl -fsS https://checkip.amazonaws.com)/32"
+```
+
+AWS user data holds 16 KiB, so the tar's base64 must fit; `werewolf
+pack --on aws` says whether it does. A second `create` of the same name
+and form stops the instance, replaces its user data and starts it again,
+with its volume and `/data` kept; its public address changes unless it
+is an Elastic IP.
+
+### Once per account and region
+
+VM Import reads the disk from a bucket and makes the snapshot with a
+service role, `vmimport`. werewolf makes neither: it names the one that
+is missing, since a tool that makes IAM roles on a retry is not one to
+run with an administrator's credentials. Make them once, with an
+administrator's:
+
+```sh
+REGION=$(aws ec2 describe-availability-zones --query 'AvailabilityZones[0].RegionName' --output text)
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=werewolf-images-$ACCOUNT-$REGION
+if [ "$REGION" = us-east-1 ]; then
+  aws s3api create-bucket --bucket "$BUCKET" --region "$REGION"
+else
+  aws s3api create-bucket --bucket "$BUCKET" --region "$REGION" \
+    --create-bucket-configuration LocationConstraint="$REGION"
+fi
+cat >vmimport-trust.json <<'EOF'
+{"Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+  "Principal": {"Service": "vmie.amazonaws.com"}, "Action": "sts:AssumeRole",
+  "Condition": {"StringEquals": {"sts:Externalid": "vmimport"}}}]}
+EOF
+cat >vmimport-policy.json <<EOF
+{"Version": "2012-10-17", "Statement": [
+  {"Effect": "Allow", "Action": ["s3:GetBucketLocation", "s3:GetObject", "s3:ListBucket"],
+   "Resource": ["arn:aws:s3:::$BUCKET", "arn:aws:s3:::$BUCKET/*"]},
+  {"Effect": "Allow", "Action": ["ec2:ModifySnapshotAttribute", "ec2:CopySnapshot",
+   "ec2:RegisterImage", "ec2:Describe*"], "Resource": "*"}]}
+EOF
+aws iam create-role --role-name vmimport --assume-role-policy-document file://vmimport-trust.json
+aws iam put-role-policy --role-name vmimport --policy-name vmimport \
+  --policy-document file://vmimport-policy.json
+rm vmimport-trust.json vmimport-policy.json
+```
+
+The role can read only that bucket. Whoever runs `create` then needs EC2
+(images, import tasks, instances, security groups), `s3:PutObject` and
+`s3:DeleteObject` on the bucket, and `iam:PassRole` for `vmimport`.
+
 ## Change boot configuration
 
 In Lima, run the same `werewolf create` with the changed files or flags.
@@ -159,7 +231,8 @@ It checks the new config, stops the VM, replaces its config disk and
 starts it again; the boot disk and `/data` stay, and with them a Tailscale
 node's identity. The stop is a hard one, a power cut: Lima sends its
 request to shut down only to a guest that answers ssh on Lima's network,
-and a werewolf machine does not. For GCP, update the source files, regenerate the tar/base64 using the packing
+and a werewolf machine does not. On AWS, run the same `werewolf create`
+too. For GCP, update the source files, regenerate the tar/base64 using the packing
 commands above, then replace the metadata and reboot:
 
 ```sh

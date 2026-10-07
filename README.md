@@ -36,13 +36,14 @@ privilege-separated binaries for basic functions such as auto-updates. Images ar
 ## Try it
 
 ```sh
-make install-deps          # macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD: tools/install-deps
+make install-deps          # macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD and NetBSD
+                           # (experimental): tools/install-deps, then gmake
 make werewolf              # the werewolf command, for this machine: build/host/werewolf
 alias werewolf=build/host/werewolf
 
 werewolf run prod --dev    # the production base under QEMU, here, a shell on the console
 werewolf create bastion edge --authorized-keys ~/.ssh/id_ed25519.pub \
-    --destinations 10.20.0.10:22          # a VM that stays: Lima on a Mac, else QEMU here
+    --destinations 10.20.0.10:22          # a VM that stays: Lima on a Mac, bhyve on FreeBSD, else QEMU here
 werewolf create python web --app ./myapp  # your application on the python form, on :8080
 werewolf create prod-ssh box --on gcp --root-keys ~/.ssh/id_ed25519.pub
 werewolf console edge      # a VM's serial console, where a machine with no shell speaks
@@ -94,6 +95,7 @@ one includes `minimal`. `make list-forms` shows the include chains.
 | `prod-ssh` | `prod` plus sshd |
 | `bastion` | forwarding-only SSH with explicit destinations and hybrid post-quantum key exchange ([security and tutorial](examples/bastion/README.md)) |
 | `tailscale` | unprivileged, userspace subnet router ([security and tutorial](examples/tailscale/README.md)) |
+| `caddy`, `valkey`, `openbao`, `step-ca`, `wordpress` | a web server with its own certificates, a cache, a secrets store, an internal CA and a site, each leashed and set up from the config before it serves ([docs/forms.md](docs/forms.md)) |
 | `nginx`, `php`, `node`, `python`, `jre` | `prod` and one runtime, leashed: bake your site or application into a form on one ([docs/forms.md](docs/forms.md)) |
 | `postgresql`, `demo` | leashed services |
 | `webshell-example` | a deliberately vulnerable web app, to show the sandbox holds (`make webshell-demo`) |

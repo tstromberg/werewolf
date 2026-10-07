@@ -94,6 +94,10 @@ pub fn main(init: std.process.Init) !void {
         } else |_| false;
         if (!ok) say("not every module loaded; see above", .{});
     }
+    // The initramfs stays in RAM after the switch, as nothing frees it:
+    // its modules, loaded or refused now, would hold 14 MB for good.
+    std.Io.Dir.cwd().deleteTree(io, "/usr/lib/modules") catch |err|
+        say("modules not freed: {s}", .{@errorName(err)});
     const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
@@ -126,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
     // waited for from devtmpfs.
     const params = verity.Params.parse(readAll(gpa, "/verity")) catch
         fail("no root hash in /verity", .{});
-    const loop = loopDevice(gpa, img) catch |err|
+    const loop = loopDevice(gpa, img, params.hash_start * verity.block_size) catch |err|
         fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
     var table_buf: [512]u8 = undefined;
     const table = verity.table(&table_buf, loop.path, params) catch unreachable;
@@ -230,7 +234,8 @@ fn deadman(slot: []const u8) void {
             "<2>stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
             .{slot},
         ) catch "";
-        _ = writeFile("/dev/kmsg", msg); // reaches the console before the sysrq reboot; see fail()
+        // Reaches the console before the sysrq reboot; see fail().
+        if (linux.errno(kmsg) == .SUCCESS) _ = linux.write(@intCast(kmsg), msg.ptr, msg.len);
         _ = writeFile("/deadman/sysrq-trigger", "b");
     }
     linux.exit(0);
@@ -270,7 +275,12 @@ const LoopConfig = extern struct {
 /// A free loop device, read-only, holding file, and gone once its last
 /// holder is (autoclear). The caller closes fd once something else holds
 /// the device: closed before, autoclear would detach the image at once.
-fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]const u8, fd: i32 } {
+/// tree_at is where file's dm-verity hash tree begins, after its data.
+fn loopDevice(
+    gpa: std.mem.Allocator,
+    file: [:0]const u8,
+    tree_at: u64,
+) !struct { path: [:0]const u8, fd: i32 } {
     const ctl = linux.open("/dev/loop-control", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
     if (linux.errno(ctl) != .SUCCESS) return error.NoLoopControl;
     defer _ = linux.close(@intCast(ctl));
@@ -291,10 +301,14 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     const backing = linux.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(backing) != .SUCCESS) return error.NoImage;
     defer _ = linux.close(@intCast(backing));
-    // The whole image, data and hash tree, read into the page cache in the
-    // background from now: the boot reads most of it, and a cloud's network
-    // disk answers a few large reads far sooner than hundreds of small ones.
-    _ = linux.fadvise(@intCast(backing), 0, 0, linux.POSIX_FADV.WILLNEED);
+    // The whole image read into the page cache in the background from now:
+    // the boot reads most of it, and a cloud's network disk answers a few
+    // large reads far sooner than hundreds of small ones. The hash tree
+    // first, which every read checks against, the mount's first among
+    // them; then the data. Read in the other order, mounting the root
+    // waited 50 ms on GCP for the data to be read ahead of the tree.
+    _ = linux.fadvise(@intCast(backing), @intCast(tree_at), 0, linux.POSIX_FADV.WILLNEED);
+    _ = linux.fadvise(@intCast(backing), 0, @intCast(tree_at), linux.POSIX_FADV.WILLNEED);
 
     var cfg: LoopConfig = .{
         .fd = @intCast(backing),
@@ -315,12 +329,23 @@ const Found = struct { dev: [:0]const u8, kind: Kind };
 
 /// The block device whose filesystem has uuid, waiting for it to appear:
 /// its driver is still loading, or probing, as the search begins. Looked
-/// for every 10 ms, so the boot goes on the moment it is there.
+/// for every 10 ms, so the boot goes on the moment it is there. Two that
+/// answer to it, and stage0 fails rather than guess, as the mount broker
+/// does: the loader falls back, and so will the other slot, until the
+/// second is gone.
 fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
     const want = parseUuid(uuid) orelse return null;
     var waited: usize = 0;
     while (waited < find_for * 100) : (waited += 1) {
-        if (scan(gpa, want)) |f| return f;
+        switch (scan(gpa, want)) {
+            .none => {},
+            .one => |f| return f,
+            .two => |d| fail(
+                "{s} and {s} both hold filesystem {s}, as a clone or snapshot attached " ++
+                    "beside the disk would; refusing to guess",
+                .{ d[0], d[1], uuid },
+            ),
+        }
         var ts: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
         _ = linux.nanosleep(&ts, null);
     }
@@ -492,14 +517,14 @@ fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
     return out.items;
 }
 
-/// Whether argv runs and exits 0, its output on the console with ours.
+/// One line on the console.
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
-/// Exiting PID 1 panics the kernel; panic=1 reboots it, and the loader
+/// Exiting PID 1 panics the kernel; panic= reboots it, and the loader
 /// boots the slot that last committed. The reason goes through /dev/kmsg,
 /// which a serial console writes synchronously ("<2>", KERN_CRIT, so it
 /// prints whatever the console log level): a plain write to the console tty

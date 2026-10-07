@@ -48,8 +48,8 @@ Invariants to keep when changing this code:
   `attempt` (fsync); arm last. `errdefer` removes `attempt` if arming fails.
   `pending` survives the install so first-seen times are never lost.
 - **Nothing goes backwards.** Packages and the kernel never older (apk's
-  order); releases never older than `serial`; the feed never older than
-  `cve-tiers.json.serial`. Signed inputs are verified before parsing.
+  order), built or released; releases never older than `serial`; the feed
+  never older than `cve-tiers.json.serial`. Signed inputs verified first.
 - **apk reads only what a key vouched for.** Indexes' signatures, packages'
   control (index SHA-1) and data (datahash) are checked first; the rest of
   the cache is removed. New roots resolve within themselves (`Root`).
@@ -85,8 +85,8 @@ Known gaps, for the next reviewer:
 - apk itself, installing as root, follows links that signed packages lay.
 - Alpine's index signatures and every package hash are SHA-1 (a second
   preimage, not a collision, to forge).
-- A machine that has taken no release takes the latest, even one older
-  than its image (a tree build of a release form; use DEV=1).
+- A tree-built image of a release form takes a release with its packages
+  but older code: only packages and the kernel are compared (use DEV=1).
 - A tool that closes its output and then hangs outlives its deadline.
 
 ## Reliability Considerations

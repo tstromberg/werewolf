@@ -1,9 +1,9 @@
 #!/bin/sh
 # config-openbao DIR: the openbao form's config for make check, in DIR,
 # as an operator would make one (docs/openbao.md): a 32-byte unseal key, a
-# certificate for localhost, the admin's bcrypt hash and the API's
-# address. The hash is of "werewolf-check", which test/checks-openbao logs
-# in with; a wrong password must be refused.
+# certificate for localhost, the admin's first password and the API's
+# address. The password is "werewolf-check", which test/checks-openbao
+# logs in with; a wrong one must be refused.
 set -eu
 d=$1/openbao
 mkdir -p "$d"
@@ -12,5 +12,5 @@ openssl rand -out "$d/unseal.key" 32
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
 	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
 	-keyout "$d/tls.key" -out "$d/tls.crt" 2>/dev/null
-printf '%s' '$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq' >"$d/admin_password_hash"
+printf '%s' werewolf-check >"$d/admin_password"
 echo '{"api-addr":"https://127.0.0.1:8200"}' >"$d/settings.json"

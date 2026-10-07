@@ -1,0 +1,5 @@
+# Wolfi's valkey-9.1 depends on posix-libc-utils, whose ldd is a bash
+# script, so bash comes with it. Nothing on this machine runs either: the
+# leash holds Valkey to its own program, and there is no login. The image
+# is made without the shell, and posture finds none.
+usr/bin/bash

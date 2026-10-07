@@ -292,9 +292,11 @@ second form with the same need, or stay single-node.
   an A/B update that is caught: the new slot is unhealthy, and slot-keep
   boots the old one ([updater.md](../updater.md)). It is caught, not
   avoided; a form adds settings and does not rename them.
-- **Structure is out of reach.** Clustered OpenBao and unbound's zones
-  wait, and a user who needs them builds a form with the configuration in
-  the image.
+- **Structure is out of reach.** A `json` key with dots reaches into the
+  image's nested objects (step-ca's `authority.policy.x509.allow.dns`),
+  but a list of objects (OpenBao's peers, unbound's zones) does not fit a
+  setting, and a user who needs one builds a form with the configuration
+  in the image.
 - **leash grows.** It parses two more lines, copies one more file, runs
   one more program and reads an environment file. leash is the code
   every service passes through.
