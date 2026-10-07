@@ -416,6 +416,13 @@ const Machine = struct {
             break :blk "werewolf";
         };
         m.write("/run/werewolf/hostname", m.fmt("{s}\n", .{host}), 0o644);
+        // The machine's own name resolves, to itself, with no DNS: programs
+        // that look it up (Java's getLocalHost) need it, and a lookup that
+        // left the machine would say its name to the network.
+        m.write("/run/werewolf/hosts", m.fmt(
+            "127.0.0.1\tlocalhost {s}\n::1\t\tlocalhost {s}\n",
+            .{ host, host },
+        ), 0o644);
         _ = linux.syscall2(.sethostname, @intFromPtr(host.ptr), host.len);
         if (exists("/run/config/authorized_keys")) m.keys(
             "root",

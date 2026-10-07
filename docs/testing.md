@@ -29,17 +29,19 @@ start there, so posture's `kernel-no-hypervisor` proves that
 
 Those checks need a shell, which most forms do not have, so each form is
 built for them with `DEV=1`: busybox-full on top of its packages, in
-`build/<arch>/<form>-dev`, and nothing else changed. The forms released
-without a shell, `minimal`, `prod` and `demo`, are also built as they ship
-and booted once more (`check-shellfree-<form>`), where test/boot runs
-nothing on the machine and judges it by its posture line alone: no shell,
-and no failure at all.
+`build/<arch>/<form>-dev`, and nothing else changed. The forms that ship
+without a shell, `minimal`, `prod`, the runtime forms and `demo`, are also
+built as they ship and booted once more (`check-shellfree-<form>`), where
+test/boot runs nothing on the machine and judges it by its posture line,
+no shell and no failure but those the form is for, and by what
+`test/console-<form>` says its console must and must not show.
 
 The checks try what an attacker would and expect to be refused: lower
 lockdown, read `/dev/mem` or another process's memory, undo a one-way
 sysctl, find a setuid file, listen on a port the form has not declared in
-`/etc/werewolf/listen` (ssh's 22 is declared by sshd being installed), run
-a program from `/tmp`.
+its network policy (ssh's 22 is declared by sshd being installed), run a
+program from `/tmp`. And something must answer HTTP on every port it has
+declared, so a runtime form's application runs, leashed, and serves.
 Where the attacker would be an ordinary user, the check acts as one, with
 runit's `chpst -u nobody`: write to `/run`, see another user's processes,
 plant a symlink or hardlink in `/tmp` for root to follow. Where a refusal

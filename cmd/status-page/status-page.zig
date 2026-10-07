@@ -1328,9 +1328,10 @@ const Pg = struct {
         if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
         var p: Pg = .{ .fd = @intCast(rc) };
         errdefer _ = linux.close(p.fd);
-        // A server that stops answering costs the page five seconds, not
-        // the page.
-        const tv: linux.timeval = .{ .sec = 5, .usec = 0 };
+        // A server that stops answering costs the page half its minute,
+        // not the page; one that is merely slow, on a loaded machine, is
+        // waited for.
+        const tv: linux.timeval = .{ .sec = 30, .usec = 0 };
         for ([_]u32{
             linux.SO.RCVTIMEO,
             linux.SO.SNDTIMEO,
@@ -1438,7 +1439,7 @@ const Pg = struct {
         var off: usize = 0;
         while (off < bytes.len) {
             const n = std.os.linux.write(p.fd, bytes[off..].ptr, bytes.len - off);
-            if (std.os.linux.errno(n) != .SUCCESS or n == 0) return error.Lost;
+            try ioError(n);
             off += n;
         }
     }
@@ -1459,8 +1460,18 @@ const Pg = struct {
         var off: usize = 0;
         while (off < buf.len) {
             const n = std.os.linux.read(p.fd, buf[off..].ptr, buf.len - off);
-            if (std.os.linux.errno(n) != .SUCCESS or n == 0) return error.Lost;
+            try ioError(n);
             off += n;
+        }
+    }
+
+    /// What a read or write on the socket that moved nothing means: the
+    /// timeout passing, or the server gone.
+    fn ioError(n: usize) !void {
+        switch (std.os.linux.errno(n)) {
+            .SUCCESS => if (n == 0) return error.Lost,
+            .AGAIN => return error.Timeout,
+            else => return error.Lost,
         }
     }
 };

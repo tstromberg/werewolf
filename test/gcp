@@ -2,12 +2,15 @@
 # gcp: a werewolf disk (make disk's qcow2) on Google Compute Engine, as a
 # user would run it: made a GCP image, booted under UEFI on a VM, its
 # config in the instance's user-data. Used by `make check-gcp`, `make
-# demo-gcp` and `make demo-gcp-delete`; see docs/testing.md and
-# docs/demo.md.
+# demo-gcp`, `make demo-gcp-delete`, `make webshell-gcp` and
+# `make webshell-gcp-delete`; see docs/testing.md, docs/demo.md and
+# docs/forms.md.
 #
-#   gcp check DISK ARCH   boot DISK on a fresh VM, judge it, delete it all
-#   gcp demo DISK ARCH    boot the demo's DISK on a VM that stays; print its URL
-#   gcp demo-delete       delete the demo's VM and its firewall rule
+#   gcp check DISK ARCH     boot DISK on a fresh VM, judge it, delete it all
+#   gcp demo DISK ARCH      boot the demo's DISK on a VM that stays; print its URL
+#   gcp demo-delete         delete the demo's VM and its firewall rule
+#   gcp webshell DISK ARCH  the webshell-example form, likewise, on :8080
+#   gcp webshell-delete     delete the webshell VM and its firewall rule
 #
 # check judges the machine by GCP's record of its serial port: the root
 # verified through dm-verity, the config taken from the metadata server,
@@ -36,15 +39,20 @@ region=${zone%-*}
 bucket=${GCP_BUCKET:-$project-werewolf-images}
 g() { gcloud --quiet --project "$project" "$@"; }
 demo=werewolf-demo
+webshell=werewolf-webshell
+g projects describe "$project" --format 'value(projectId)' >/dev/null 2>&1 ||
+	die "$(gcloud config get-value account 2>/dev/null) cannot reach the project $project; set GCP_PROJECT"
 
 mode=${1:-}
-if [ "$mode" = demo-delete ]; then
-	g compute instances delete "$demo" --zone "$zone" 2>/dev/null || true
-	g compute firewall-rules delete "$demo-http" 2>/dev/null || true
+if [ "$mode" = demo-delete ] || [ "$mode" = webshell-delete ]; then
+	svc=$demo
+	[ "$mode" = webshell-delete ] && svc=$webshell
+	g compute instances delete "$svc" --zone "$zone" 2>/dev/null || true
+	g compute firewall-rules delete "$svc-http" 2>/dev/null || true
 	exit 0
 fi
-[ $# -eq 3 ] && { [ "$mode" = check ] || [ "$mode" = demo ]; } ||
-	die "usage: gcp check DISK ARCH | demo DISK ARCH | demo-delete"
+[ $# -eq 3 ] && { [ "$mode" = check ] || [ "$mode" = demo ] || [ "$mode" = webshell ]; } ||
+	die "usage: gcp check DISK ARCH | demo DISK ARCH | webshell DISK ARCH | demo-delete | webshell-delete"
 disk=$2 arch=$3
 [ -f "$disk" ] || die "no $disk"
 case $arch in
@@ -57,7 +65,8 @@ aarch64) gcp_arch=ARM64 nic=GVNIC machine=t2a-standard-1 ;;
 esac
 
 name=werewolf-$mode-$(date -u +%Y%m%d%H%M%S)
-[ "$mode" = check ] || name=$demo
+[ "$mode" = demo ] && name=$demo
+[ "$mode" = webshell ] && name=$webshell
 work=$(mktemp -d)
 image=$name-$(date -u +%H%M%S)
 
@@ -85,8 +94,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-if [ "$mode" = demo ] && g compute instances describe "$demo" --zone "$zone" >/dev/null 2>&1; then
-	say "$demo exists; make demo-gcp-delete to start over from a fresh disk"
+if { [ "$mode" = demo ] || [ "$mode" = webshell ]; } &&
+	g compute instances describe "$name" --zone "$zone" >/dev/null 2>&1; then
+	say "$name exists; make $mode-gcp-delete to start over from a fresh disk"
 else
 	# GCP takes a raw disk named disk.raw, in a gzipped GNU tar. GNU tar
 	# keeps the disk's holes; bsdtar writes them out, and gzip makes them
@@ -126,19 +136,27 @@ fi
 addr=$(g compute instances describe "$name" --zone "$zone" \
 	--format 'get(networkInterfaces[0].accessConfigs[0].natIP)')
 
-if [ "$mode" = demo ]; then
-	g compute firewall-rules describe "$demo-http" >/dev/null 2>&1 ||
-		g compute firewall-rules create "$demo-http" --allow tcp:80 --target-tags "$demo" \
-			--description "werewolf's demo page (test/gcp)"
-	say "waiting for werewolf to boot and serve the page"
+if [ "$mode" = demo ] || [ "$mode" = webshell ]; then
+	if [ "$mode" = webshell ]; then port=8080; else port=80; fi
+	url=http://$addr
+	[ "$port" = 80 ] || url=$url:$port
+	g compute firewall-rules describe "$name-http" >/dev/null 2>&1 ||
+		g compute firewall-rules create "$name-http" --allow "tcp:$port" --target-tags "$name" \
+			--description "werewolf's $mode on :$port (test/gcp)"
+	say "waiting for werewolf to boot and serve on :$port"
 	i=0
-	until curl -fsS -m 3 -o /dev/null "http://$addr/" 2>/dev/null; do
+	until curl -fsS -m 3 -o /dev/null "$url/" 2>/dev/null; do
 		i=$((i + 1))
-		[ $i -le 120 ] || die "no page after 10 minutes; the console: gcloud compute instances get-serial-port-output $demo --zone $zone"
+		[ $i -le 120 ] || die "no answer after 10 minutes; the console: gcloud compute instances get-serial-port-output $name --zone $zone"
 		sleep 5
 	done
-	say "up. The first scan follows grype's database download, about a minute"
-	say "the demo: http://$addr/"
+	if [ "$mode" = webshell ]; then
+		say "up. A deliberately vulnerable web app, on the Internet. Try to escape it:"
+		say "the webshell: $url/"
+	else
+		say "up. The first scan follows grype's database download, about a minute"
+		say "the demo: $url/"
+	fi
 	exit 0
 fi
 

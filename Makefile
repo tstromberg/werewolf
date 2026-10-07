@@ -16,6 +16,7 @@
 #   make demo            build and boot the demo's disk under Lima (macOS on Apple silicon)
 #   make demo-delete     delete the demo's VM and its /data
 #   make demo-gcp        the demo on a Google Compute Engine VM; demo-gcp-delete deletes it
+#   make webshell-gcp    the webshell-example form on a GCP VM; webshell-gcp-delete deletes it
 #
 # Take over
 #   make bite-me         on a Debian, Ubuntu, Fedora or Rocky VM: build a slot,
@@ -269,7 +270,7 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
@@ -699,11 +700,16 @@ $(BUILD)/data.img:
 EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M virt,virtualization=on -accel $(ACCEL) -cpu $(CPU) -nodefaults -display none -monitor stdio -S >/dev/null 2>&1 && echo ,virtualization=on))
 QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
+# The machine's port that this host's 127.0.0.1:8080 reaches: the last one,
+# but ssh's, its form's .net files listen on (python's 8080, nginx's 80),
+# or 80.
+RUN_PORT ?= $(or $(lastword $(filter-out 22,$(patsubst tcp/%,%,$(filter tcp/%,$(shell sed -n 's/^listen //p' $(NET_LISTS) /dev/null))))),80)
+
 run: image $(BUILD)/data.img $(if $(wildcard config),config-tar)
 	$(QEMU) -smp 4 -m 2048 \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst \
 		-append "console=$(CONSOLE) $(KERNEL_ARGS) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 werewolf.data=vda werewolf.debug=1" \
-		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80 -device virtio-net-pci,netdev=n0 \
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:$(RUN_PORT) -device virtio-net-pci,netdev=n0 \
 		-device virtio-rng-pci -drive file=$(BUILD)/data.img,format=raw,if=virtio $(QEMU_CONFIG)
 
 # No host key to check: the machine makes a new one each boot, and this
@@ -725,7 +731,7 @@ CHECK = $(BUILD)/check
 # shell on the console; the forms that ship without one are also booted as
 # they ship (check-shellfree-%).
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
-SHELLFREE_FORMS = minimal prod demo
+SHELLFREE_FORMS = minimal prod nginx php node python jre demo webshell-example
 SHELLFREE_CHECKS = $(addprefix check-shellfree-,$(SHELLFREE_FORMS))
 # romfile= because direct boot needs no network boot ROM, and CI has none.
 # 1 GB keeps a form's memory honest; demo's grype holds its ~700 MB
@@ -1097,6 +1103,20 @@ demo:
 		DISK_ARGS="werewolf.mac=$(DEMO_MAC) console=$(LIMA_CONSOLE)"
 	test/lima-demo build/$(ARCH)/demo/lima.img
 
+# webshell-demo: boot the webshell-example form (docs/forms.md) under QEMU,
+# as it ships -- no shell -- with its port on this host's 127.0.0.1:8080,
+# to attack from the outside with curl or a browser. Ctrl-a x quits.
+webshell-demo:
+	@$(MAKE) --no-print-directory FORM=webshell-example DEV= _webshell-demo
+
+_webshell-demo: image $(BUILD)/data.img $(if $(wildcard config),config-tar)
+	@echo "webshell-example is up: attack it at http://127.0.0.1:8080  (Ctrl-a x quits)"
+	$(QEMU) -smp 2 -m 1024 \
+		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst \
+		-append "console=$(CONSOLE) $(KERNEL_ARGS) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 werewolf.data=vda" \
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8080-:8080 -device virtio-net-pci,netdev=n0 \
+		-device virtio-rng-pci -drive file=$(BUILD)/data.img,format=raw,if=virtio $(QEMU_CONFIG)
+
 demo-delete:
 	test/lima-demo delete
 
@@ -1110,6 +1130,17 @@ demo-gcp:
 
 demo-gcp-delete:
 	test/gcp demo-delete
+
+# The webshell-example form on Google Compute Engine (test/gcp), the same
+# way: a vulnerable web app on a real VM on the Internet, reached at
+# http://ADDR:8080, to attack from anywhere and watch it hold. The VM costs
+# what an e2-small or t2a-standard-1 costs until webshell-gcp-delete.
+webshell-gcp:
+	@$(MAKE) --no-print-directory FORM=webshell-example build/$(ARCH)/webshell-example/disk.qcow2
+	test/gcp webshell build/$(ARCH)/webshell-example/disk.qcow2 $(ARCH)
+
+webshell-gcp-delete:
+	test/gcp webshell-delete
 
 # The locks stay: they are what makes the next build the same as the last.
 # `make relock` resolves them again; `rm -rf build` removes them too.

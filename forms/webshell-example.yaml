@@ -1,0 +1,9 @@
+# webshell-example: a deliberately vulnerable web application, leashed, to
+# show werewolf contains remote code execution (docs/forms.md, and
+# usr/lib/app/webshell.py). It is prod and Python, as the python form is;
+# the app runs arbitrary commands from HTTP and proves it gains nothing.
+include: python.yaml
+contents:
+  packages:
+    - py3.13-flask
+    - py3.13-gunicorn

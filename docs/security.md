@@ -34,7 +34,7 @@ not yet, and how to check it on a running machine. Where it is going is in
 | | |
 | --- | --- |
 | No setuid or setgid files | apko's `paths:` clear them from PAM's `unix_chkpwd`, and from util-linux `mount` in stage0; the updater clears any a new package brings |
-| Few listeners | `minimal`, `prod`, `postgresql`: none. `sshd`, `prod-ssh`, `lima`: 22. `demo`: 80. Each form declares its ports in `/etc/werewolf/listen`, and `make check` fails on any other |
+| Few listeners | `minimal`, `prod`, `postgresql`: none. `sshd`, `prod-ssh`, `lima`: 22. `nginx`, `php`, `demo`: 80. `node`, `python`, `jre`: 8080. Each form declares its ports in its network policy (`forms/FORM.net`), and `make check` fails on any other |
 | ssh | keys only (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `UsePAM no`); root by key only; no X11 or agent forwarding; `LogLevel VERBOSE`. Host keys are made at each boot and never outlive the machine |
 | Secrets | the config tar's contents go to `/run/config`, tmpfs, 0700. `data.key` is deleted once the volume is open |
 

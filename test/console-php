@@ -1,0 +1,9 @@
+# What the php form, booted as it ships, without a shell, must say on its
+# console (make check-shellfree-php; test/boot; test/console-demo has the
+# format). That it answers is test/checks' answering, on the DEV=1 build.
+# nginx and php-fpm start, leashed, and php-fpm takes connections.
+
+seen    nginx-leashed     leash: \{"event":"start","service":"nginx"
+seen    fpm-leashed       leash: \{"event":"start","service":"php-fpm"
+seen    fpm-ready         NOTICE: ready to handle connections
+unseen  service-down      leash: \{"event":"(down|retry)"

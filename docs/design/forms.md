@@ -2,8 +2,8 @@
 
 Proposed, 2026-10-06. The graph's first step is done: `minimal` and `prod`
 have absorbed what they should, and `dhcp`, `cloud`, `bitten`,
-`autoupdate`, `disk` and `crypt` are gone. `sshd` and `prod-ssh` wait for
-`SSH=1`; the runtime forms are next.
+`autoupdate`, `disk` and `crypt` are gone. The runtime forms are built
+([forms.md](../forms.md)). `sshd` and `prod-ssh` wait for `SSH=1`.
 
 As few forms as will do what most people want, the way Chainguard offers a
 handful of images (nginx, node, python, php, the JRE) and a `-dev` variant
@@ -93,16 +93,22 @@ following the same manifests.
 
 ## The runtime forms
 
-Each is `prod`, one Wolfi runtime package, and a leash service (`app`)
-that runs the application as a user of its own:
+Each is `prod`, one Wolfi runtime package, and a leash service that runs
+it as a user of its own, with a site or application of its own that
+answers until a form on it brings the real one:
 
 | Form | Package | The service runs |
 | --- | --- | --- |
-| `nginx` | `nginx-mainline` | nginx, serving `/data/svc/nginx/www`, configured from the config |
-| `php` | nginx's, and `php-8.4-fpm` | nginx, and php-fpm on a UNIX socket |
-| `node` | `nodejs-22` | `node` on the application |
-| `python` | `python-3.13` | `python3` on the application |
-| `jre` | `openjdk-21-jre` | `java -jar` on the application |
+| `nginx` | `nginx-mainline` | nginx (`nginx`, :80), serving `/usr/share/nginx/html` from the image |
+| `php` | nginx's, and `php-8.4-fpm` | nginx, and php-fpm (`php`) on a UNIX socket only nginx's group may use |
+| `node` | `nodejs-22` | `node /usr/lib/app/server.js` (`app`, :8080) |
+| `python` | `python-3.13` | `python3 /usr/lib/app/main.py` (`app`, :8080) |
+| `jre` | `openjdk-21-jre` | the JDK's web server, until a form brings `java -jar` (`app`, :8080) |
+
+The site is in the image, not on `/data` or in the config: it is code (or
+might as well be), so it is verified and rolls back with the rest. leash
+clears every supplementary group, so php-fpm's socket is shared through
+php's primary group, nginx's, rather than by adding nginx to php's.
 
 Where they are still more secure than a container running the same
 runtime: the root is read-only and verified; there is no shell or package
@@ -112,8 +118,10 @@ machine; and posture says so at every boot.
 
 **An interpreter is the point of these forms.** posture's
 `programs-no-interpreters` fails on them by design, as `kernel-no-hypervisor`
-fails on `qemu-host`. They are listed in test/posture-known for those forms,
-and the page says the form allows it, as it does for `kvm`.
+fails on `qemu-host`. They are listed in test/posture-known for those
+forms. Wolfi's JRE keeps `java` beside the JDK, so the form links it into
+`/usr/bin`, and posture looks for `java` and `php-fpm` too: what the form
+carries, posture says.
 
 ## Applications
 

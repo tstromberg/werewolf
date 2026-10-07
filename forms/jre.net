@@ -1,0 +1,2 @@
+# The application serves on 8080.
+listen tcp/8080

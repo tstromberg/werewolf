@@ -1,0 +1,19 @@
+# What the webshell-example form, booted as it ships without a shell, must
+# say on its console (make check-shellfree-webshell-example; test/boot).
+# One line a check:
+#
+#   KIND NAME REGEX
+#
+#   seen    must appear, within five minutes of the posture line
+#   unseen  must not appear at all
+#
+# The app starts leashed, then attacks itself with a battery of command
+# injections and reports that none escaped (usr/lib/app/webshell.py). The
+# point of the form is that a vulnerable web application gains nothing, so
+# the test is exactly that: every attack ran, and the cage held.
+
+seen    app-leashed       leash: \{"event":"start","service":"app","user":"app"
+seen    self-test-done    webshell: \{.*"event": "self-test", "attacks": [1-9][0-9]*, "escaped": 0\}
+unseen  escaped           "escaped": true
+unseen  cage-leaked       webshell: ESCAPED
+unseen  service-down      leash: \{"event":"down"
