@@ -1,0 +1,53 @@
+# Caddy for the caddy form: the site in /usr/share/caddy, from the image,
+# on the name the machine's settings give (DOMAIN; werewolf pack --domain),
+# with a certificate Caddy gets itself. leash starts Caddy
+# (etc/sv/caddy/service) as the caddy user. A form on this one lays its
+# own file here.
+{
+	# The admin API lets any local process rewrite the configuration;
+	# werewolf's configuration is in the image, so there is nothing to
+	# reload: off, and no :2019.
+	admin off
+	# One JSON line an event on the console, as every service logs, rather
+	# than Caddy's coloured console format when stderr is a terminal.
+	log {
+		output stderr
+		format json
+	}
+	# Certificates, keys and the ACME account, kept across boots. On a
+	# machine whose /data is RAM, every boot asks the CA again, whose rate
+	# limits will notice: give it a disk.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris: a client has 10 s to finish its headers and
+		# 2 min idle between requests. No body or write timeout, which
+		# would cut off uploads and streams.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+	# On-demand TLS, if a form on this one wants it, only with an ask
+	# endpoint, so a stranger cannot make Caddy ask for certificates
+	# without limit:
+	#   on_demand_tls { ask http://127.0.0.1:9123/ask }
+}
+
+# The site's name, or :80 (plain HTTP, no certificate) where the machine
+# has none. With a public name, Caddy's automatic HTTPS does the rest:
+# Let's Encrypt (ZeroSSL behind it), and :80 redirected to HTTPS. Names
+# under .localhost, .local, .internal and .home.arpa, and localhost, get
+# a certificate from Caddy's own CA instead.
+{$DOMAIN::80} {
+	root * /usr/share/caddy
+	file_server
+	header {
+		# No Server header, and no sniffing a response into another type.
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		# HSTS is the site's to choose: it locks a name to HTTPS for months.
+	}
+}

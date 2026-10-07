@@ -46,8 +46,16 @@ The checks try what an attacker would and expect to be refused: lower
 lockdown, read `/dev/mem` or another process's memory, undo a one-way
 sysctl, find a setuid file, listen on a port the form has not declared in
 its network policy (ssh's 22 is declared by sshd being installed), run a
-program from `/tmp`. And something must answer HTTP on every port it has
-declared, so a runtime form's application runs, leashed, and serves.
+program from `/tmp`. And a socket must listen on every port it has
+declared, and answer HTTP where the port speaks it, so a runtime form's
+application runs, leashed, and serves; a daemon that speaks another
+protocol (Valkey, OpenBao, step-ca, Caddy's HTTPS) is asked in its own,
+by its form's `test/checks-FORM`, which `make check` appends. A socket
+bound to loopback alone (OpenBao's cluster port) is the machine's own,
+not a listener the network can reach, to this check and to posture
+alike. What a form's services need from the config, `test/config-FORM`
+writes into the check's config tar: a bastion's key, OpenBao's unseal key
+and certificate, a CA for step-ca, WordPress's admin.
 Where the attacker would be an ordinary user, the check acts as one, with
 runit's `chpst -u nobody`: write to `/run`, see another user's processes,
 plant a symlink or hardlink in `/tmp` for root to follow. Where a refusal

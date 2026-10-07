@@ -1004,14 +1004,20 @@ const Machine = struct {
         // the disk, and two devices answering to it would make the search
         // ambiguous. -F: the device is blank as far as blkid can tell, or a
         // LUKS volume made a moment ago, so a stale signature deeper in is no
-        // reason to stop.
+        // reason to stop. ^orphan_file: e2fsprogs 1.47 turns it on, and ext4
+        // then reads all of it, a block at a time, at every mount (0.2s a
+        // boot on GCP's disks); without it, orphans go on the list ext4
+        // always kept.
         if (fresh) {
             say("formatting {s}", .{fs});
             const mke2fs = m.which("mke2fs").?;
             const ok = if (crypt != null)
-                m.run(&.{ mke2fs, "-q", "-F", "-t", "ext4", "-m", "0", fs })
+                m.run(&.{ mke2fs, "-q", "-F", "-t", "ext4", "-m", "0", "-O", "^orphan_file", fs })
             else
-                m.run(&.{ mke2fs, "-q", "-F", "-t", "ext4", "-m", "0", "-L", label, fs });
+                m.run(&.{
+                    mke2fs, "-q",           "-F", "-t",  "ext4", "-m", "0",
+                    "-O",   "^orphan_file", "-L", label, fs,
+                });
             if (!ok) {
                 why.* = m.fmt("mke2fs failed on {s}", .{fs});
                 return null;

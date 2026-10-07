@@ -451,6 +451,10 @@ const Service = struct {
     pledge: seal.Set = .empty,
 };
 
+/// A `config` line: the copy's name in the service's directory, its source
+/// beneath /run/config, and whether the service runs without it.
+const Config = struct { name: []const u8, path: []const u8, optional: bool = false };
+
 /// Where the file is wrong, and how.
 const Bad = struct { line: usize = 0, why: []const u8 = "" };
 

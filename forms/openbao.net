@@ -1,0 +1,5 @@
+# OpenBao serves its API and UI on :8200, and sends nothing: its seal is
+# a key on the machine. A form that unseals with a cloud KMS adds
+# `connect openbao tcp/443 udp/53 tcp/53` and `metadata openbao`; one that
+# clusters adds `listen tcp/8201`, whose listener is on loopback here.
+listen tcp/8200

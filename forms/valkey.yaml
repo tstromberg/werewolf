@@ -1,0 +1,29 @@
+# valkey: prod, with Valkey 9.1 as a cache or queue for the application on
+# the same machine. It answers on a UNIX socket in /run/svc/valkey and
+# nothing else: no TCP port, and the form declares none. Its snapshots
+# are in /data/svc/valkey. leash starts it as the valkey user
+# (etc/sv/valkey/service); the default user may do all but administer it
+# (etc/valkey/valkey.conf). The application's form includes this one and
+# puts its user in the valkey group, which the socket is shared with. The
+# major version is in the package's name: a new one is a new form. See
+# docs/valkey.md.
+#
+# Wolfi's valkey depends on posix-libc-utils, whose ldd is a bash script,
+# so this image carries bash and posture's programs-no-shell fails on it
+# (test/posture-known), until Wolfi drops that dependency.
+include: prod.yaml
+contents:
+  packages:
+    - valkey-9.1
+    - valkey-9.1-cli        # the operator's client, and make check's
+
+accounts:
+  groups:
+    - groupname: valkey
+      gid: 210
+  users:
+    - username: valkey
+      uid: 210
+      gid: 210
+      homedir: /var/empty
+      shell: /sbin/nologin

@@ -1,0 +1,23 @@
+# caddy: prod, with Caddy serving a site from the image and getting its
+# own certificates. leash starts it (etc/sv/caddy/service) as the caddy
+# user, able to bind :80 and :443 and nothing else, to reach the ACME CA
+# and a resolver, and to write only its own directories: the certificates
+# and ACME account live in /data/svc/caddy. Its admin API is off. The
+# site's name is a setting (--domain); without one it serves plain HTTP on
+# :80. A form of your own includes this one and lays its Caddyfile over
+# etc/caddy/Caddyfile. See docs/caddy.md.
+include: prod.yaml
+contents:
+  packages:
+    - caddy
+
+accounts:
+  groups:
+    - groupname: caddy
+      gid: 207
+  users:
+    - username: caddy
+      uid: 207
+      gid: 207
+      homedir: /var/empty
+      shell: /sbin/nologin

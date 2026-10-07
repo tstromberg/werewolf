@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) void {
 
 // --- what it is asked --------------------------------------------------------------
 
-const Ip4 = [4]u8;
+const Ip4 = network.Ip4;
 
 const Plan = struct {
     nic: [:0]const u8,
@@ -99,47 +99,13 @@ fn nic(s: [:0]const u8) ![:0]const u8 {
     return s;
 }
 
-/// A dotted quad: four numbers 0 to 255, no leading zeros, nothing else.
-fn ip4(s: []const u8) !Ip4 {
-    var out: Ip4 = undefined;
-    var parts = std.mem.splitScalar(u8, s, '.');
-    for (&out) |*o| o.* = @intCast(try number(parts.next() orelse return error.Address, 0, 255));
-    if (parts.next() != null) return error.Address;
-    return out;
-}
-
-fn number(s: []const u8, min: u32, max: u32) !u32 {
-    if (s.len == 0 or s.len > 3 or (s.len > 1 and s[0] == '0')) return error.Address;
-    var v: u32 = 0;
-    for (s) |c| {
-        if (!std.ascii.isDigit(c)) return error.Address;
-        v = v * 10 + (c - '0');
-    }
-    if (v < min or v > max) return error.Address;
-    return v;
-}
-
-/// Not zero, broadcast, loopback or multicast.
-fn usable(a: Ip4) !void {
-    if (toInt(a) == 0 or toInt(a) == 0xffffffff or a[0] == 127 or a[0] >= 224) return error.Address;
-}
-
-fn toInt(a: Ip4) u32 {
-    return std.mem.readInt(u32, &a, .big);
-}
-
-fn maskInt(prefix: u6) u32 {
-    return if (prefix == 0) 0 else ~@as(u32, 0) << @intCast(32 - prefix);
-}
+const maskInt = network.mask;
+const inSubnet = network.inSubnet;
 
 fn fromInt(v: u32) Ip4 {
     var a: Ip4 = undefined;
     std.mem.writeInt(u32, &a, v, .big);
     return a;
-}
-
-fn inSubnet(a: Ip4, b: Ip4, prefix: u6) bool {
-    return toInt(a) & maskInt(prefix) == toInt(b) & maskInt(prefix);
 }
 
 // --- asking the kernel ---------------------------------------------------------------

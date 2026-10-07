@@ -1,0 +1,30 @@
+{
+  "ui": true,
+  "api_addr": "https://127.0.0.1:8200",
+  "cluster_addr": "https://127.0.0.1:8201",
+  "raw_storage_endpoint": false,
+  "introspection_endpoint": false,
+  "log_level": "info",
+  "log_format": "json",
+  "listener": {
+    "tcp": {
+      "address": "0.0.0.0:8200",
+      "cluster_address": "127.0.0.1:8201",
+      "tls_cert_file": "/run/svc/openbao/tls-cert",
+      "tls_key_file": "/run/svc/openbao/tls-key",
+      "tls_min_version": "tls12"
+    }
+  },
+  "storage": {
+    "raft": {
+      "path": "/data/svc/openbao",
+      "node_id": "openbao"
+    }
+  },
+  "seal": {
+    "static": {
+      "current_key_id": "1",
+      "current_key": "file:///run/svc/openbao/unseal-key"
+    }
+  }
+}

@@ -113,11 +113,17 @@ no=''
 nope() { echo "bite: refusing: $*" >&2; no=1; }
 
 # The kernel must be this machine's: an x86 bzImage says HdrS at 0x202, an
-# arm64 Image ARMd at 0x38.
+# arm64 Image ARMd at 0x38. An arm64 slot carries Alpine's EFI zboot image
+# instead ("zimg" at 4), which systemd-boot runs but GRUB cannot; install
+# gives GRUB the Image inside it.
 arch=$(uname -m)
+zboot=''
 case "$arch" in
 x86_64) magic=$(dd if="$image/vmlinuz" bs=1 skip=514 count=4 2>/dev/null) want=HdrS ;;
-aarch64) magic=$(dd if="$image/vmlinuz" bs=1 skip=56 count=4 2>/dev/null) want=ARMd ;;
+aarch64)
+	magic=$(dd if="$image/vmlinuz" bs=1 skip=56 count=4 2>/dev/null) want=ARMd
+	[ "$(dd if="$image/vmlinuz" bs=1 skip=4 count=4 2>/dev/null)" != zimg ] || magic=ARMd zboot=1
+	;;
 *) magic='' want=x ;;
 esac
 [ "$magic" = "$want" ] || nope "$image/vmlinuz is not a kernel for $arch"
@@ -248,7 +254,20 @@ fi
 # GRUB reads the kernel and stage0 from /boot; stage0 reads root.erofs from
 # the victim's filesystem, where there is room.
 mkdir -p "$boot/a" "$home"
-cp "$image/vmlinuz" "$image/initramfs.zst" "$boot/a/"
+if [ -n "$zboot" ]; then
+	# The gzipped Image, at the offset and of the size the zboot header
+	# gives as little-endian u32s after "zimg"; checked as preflight checks
+	# a plain one.
+	off=$(od -An -t u4 -j 8 -N 4 "$image/vmlinuz" | tr -d ' ')
+	size=$(od -An -t u4 -j 12 -N 4 "$image/vmlinuz" | tr -d ' ')
+	tail -c +$((off + 1)) "$image/vmlinuz" | head -c "$size" | gunzip >"$boot/a/vmlinuz" ||
+		die "cannot unpack $image/vmlinuz"
+	[ "$(dd if="$boot/a/vmlinuz" bs=1 skip=56 count=4 2>/dev/null)" = ARMd ] ||
+		die "$image/vmlinuz holds no arm64 Image"
+else
+	cp "$image/vmlinuz" "$boot/a/"
+fi
+cp "$image/initramfs.zst" "$boot/a/"
 chmod 0700 "$home"
 mkdir -p "$home/a" "$home/data"
 cp "$image/root.erofs" "$home/a/"

@@ -99,7 +99,7 @@ A bitten machine boots a *slot*: the rootfs kept on disk, read-only.
 
 | File | Installed in | Contents |
 | --- | --- | --- |
-| `vmlinuz` | `/boot/werewolf/<slot>/` | Alpine's kernel |
+| `vmlinuz` | `/boot/werewolf/<slot>/` | Alpine's kernel; on arm64 the raw Image, unpacked from the slot's EFI zboot image, which GRUB cannot load |
 | `initramfs.zst` | `/boot/werewolf/<slot>/` | stage0: werewolf's stage0 and module loader, the form's modules |
 | `root.erofs` | `/var/lib/werewolf/<slot>/` | the rootfs |
 | `cmdline` | GRUB's environment, as `werewolf_args_<slot>` | the kernel arguments the image asks for |

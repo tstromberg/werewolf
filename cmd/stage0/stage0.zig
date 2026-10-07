@@ -29,7 +29,9 @@
 //!
 //! It is the kernel's first process, so it uses the kernel directly: no
 //! shell, no blkid, no mount program. It finds the filesystem by reading
-//! each block device's superblock for the UUID.
+//! each block device's superblock for the UUID, and refuses two: the root
+//! image is verified, but /data and the config tar come from that
+//! filesystem too, and a clone attached beside it must not stand in.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -202,13 +204,19 @@ pub fn main(init: std.process.Init) !void {
 /// through PID 1's root for the mark slot-keep leaves; without it, it reboots
 /// at once. The loader has spent this slot's one boot, so the machine comes
 /// back on the slot that last committed. It touches no file of the
-/// initramfs once it sleeps, and reaches PID 1 through a /proc of its own.
+/// initramfs once it sleeps, and reaches PID 1 through a /proc of its own,
+/// and the kernel's log through a descriptor opened now: /dev moves into
+/// the new root, leaving this one's empty.
 fn deadman(slot: []const u8) void {
     mkdir("/deadman");
     mountFs("proc", "/deadman", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
+    const kmsg = linux.open("/dev/kmsg", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) fail("cannot start the deadman", .{});
-    if (pid != 0) return;
+    if (pid != 0) {
+        if (linux.errno(kmsg) == .SUCCESS) _ = linux.close(@intCast(kmsg));
+        return;
+    }
 
     var ts: linux.timespec = .{ .sec = deadman_after, .nsec = 0 };
     while (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) {}
@@ -319,19 +327,23 @@ fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
     return null;
 }
 
-/// Each block device, its superblock read for want.
-fn scan(gpa: std.mem.Allocator, want: [16]u8) ?Found {
+const Scan = union(enum) { none, one: Found, two: [2][:0]const u8 };
+
+/// Each block device, its superblock read for want: every one, so that a
+/// second with the same UUID is seen.
+fn scan(gpa: std.mem.Allocator, want: [16]u8) Scan {
     const dir = linux.open(
         "/sys/class/block",
         .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
         0,
     );
-    if (linux.errno(dir) != .SUCCESS) return null;
+    if (linux.errno(dir) != .SUCCESS) return .none;
     defer _ = linux.close(@intCast(dir));
+    var found: ?Found = null;
     var buf: [4096]u8 align(8) = undefined;
     while (true) {
         const n = linux.getdents64(@intCast(dir), &buf, buf.len);
-        if (linux.errno(n) != .SUCCESS or n == 0) return null;
+        if (linux.errno(n) != .SUCCESS or n == 0) break;
         var off: usize = 0;
         while (off < n) {
             const ent: *align(1) const linux.dirent64 = @ptrCast(&buf[off]);
@@ -340,9 +352,11 @@ fn scan(gpa: std.mem.Allocator, want: [16]u8) ?Found {
             if (name[0] == '.') continue;
             const dev = gpa.printSentinel("/dev/{s}", .{name}, 0) catch continue;
             const kind = superblock(dev, want) orelse continue;
-            return .{ .dev = dev, .kind = kind };
+            if (found) |f| return .{ .two = .{ f.dev, dev } };
+            found = .{ .dev = dev, .kind = kind };
         }
     }
+    return if (found) |f| .{ .one = f } else .none;
 }
 
 /// The filesystem on dev, if its UUID is want.
@@ -384,7 +398,10 @@ fn parseUuid(s: []const u8) ?[16]u8 {
             i += 1;
             continue;
         }
-        out[j] = std.fmt.parseInt(u8, s[i .. i + 2], 16) catch return null;
+        // Two hex digits, and nothing parseInt would also take, such as +.
+        const hi = std.fmt.charToDigit(s[i], 16) catch return null;
+        const lo = std.fmt.charToDigit(s[i + 1], 16) catch return null;
+        out[j] = hi << 4 | lo;
         j += 1;
         i += 2;
     }
@@ -550,6 +567,8 @@ test parseUuid {
     );
     try testing.expectEqual(null, parseUuid("57e1f000x77e2-4b0f-8a3c-0000000000a0"));
     try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a"));
+    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000+a"));
+    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-00000000000g"));
 }
 
 test identify {

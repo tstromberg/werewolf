@@ -1,0 +1,39 @@
+# php-fpm running WordPress, as the php user: it reads its configuration
+# and the image, writes only its own directories (the database and
+# uploads in /data/svc/php-fpm), and reaches the mail relay's submission
+# port and nothing else. Before it serves, install.php sets the site up
+# from the settings, so no first visitor claims it; a missing admin
+# password hash parks the service.
+# The opcode cache is set up as php-fpm starts, before any pool's values
+# apply, so its settings go on the line: its lock file in php's own
+# directory (not /tmp, which the leash does not grant), and no looking
+# for changed files, since the image cannot change.
+exec    /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d opcache.validate_timestamps=0 -d opcache.memory_consumption=128 -d opcache.interned_strings_buffer=16
+before  /usr/bin/php /usr/share/werewolf-wordpress/install.php
+before  /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
+user    php
+pledge  stdio rpath wpath proc unix inet connect listen
+connect tcp/587 tcp/53
+memory  512
+read    /etc/php
+# SQLite's temporary files, for the installer; php-fpm.conf gives the
+# workers the same.
+env     SQLITE_TMPDIR=/run/svc/php-fpm
+env     TMPDIR=/run/svc/php-fpm
+# The admin's bcrypt password hash: required, since a WordPress without
+# an admin belongs to whoever finds it first. Salts and the relay's
+# password only if the machine brings them: salts are otherwise made once
+# on /data, and mail is otherwise off.
+config  admin-password-hash /run/config/wordpress/admin_password_hash
+config  salts /run/config/wordpress/salts.php optional
+config  smtp-password /run/config/wordpress/smtp_password optional
+# The site: its address, name and admin; its mail relay.
+config  settings /run/config/wordpress/settings.json
+setting url url required
+setting title string
+setting admin-user string
+setting admin-email string required
+setting smtp hostport
+setting smtp-user string
+setting mail-from string
+render  json site.json

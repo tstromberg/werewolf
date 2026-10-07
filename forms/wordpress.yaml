@@ -1,0 +1,39 @@
+# wordpress: php, with WordPress in the image, on SQLite: one machine, no
+# second server. Wolfi installs WordPress in /usr/src/wordpress, which is
+# nginx's root; the form brings wp-config.php, the SQLite drop-in
+# (wp-content/db.php) and WordPress's own SQLite plugin
+# (wp-content/plugins/sqlite-database-integration, from
+# wordpress.org/plugins/sqlite-database-integration, GPL-2.0), a must-use
+# plugin for its mail and hardening, and the installer that sets the site
+# up from the machine's settings before php-fpm serves it
+# (usr/share/werewolf-wordpress/install.php). Plugins, themes and updates
+# come with the image (DISALLOW_FILE_MODS); uploads and the database are
+# on /data. TLS is in front of it: a caddy machine or the cloud's load
+# balancer. See docs/wordpress.md.
+#
+# Wolfi's wordpress package carries its .git checkout (58 MB) beside the
+# site; nginx refuses every dotfile, and the image is larger for it.
+include: php.yaml
+contents:
+  packages:
+    - wordpress
+    - php-8.4               # the php command, for the installer
+    - php-8.4-pdo
+    - php-8.4-pdo_sqlite    # the database
+    - php-8.4-mbstring
+    - php-8.4-gd            # thumbnails
+    - php-8.4-exif
+    - php-8.4-fileinfo      # uploads' types
+    - php-8.4-dom
+    - php-8.4-xml
+    - php-8.4-simplexml
+    - php-8.4-xmlreader
+    - php-8.4-xmlwriter
+    - php-8.4-iconv
+    - php-8.4-ctype
+    - php-8.4-openssl
+    - php-8.4-sodium
+    - php-8.4-zip
+    - php-8.4-intl
+    - php-8.4-curl
+    - php-8.4-opcache

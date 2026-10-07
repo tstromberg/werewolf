@@ -43,7 +43,7 @@ service stays down.
 | `cves` | Fetch the CVE sources and find what the update fixes (below), in children of their own ([Separation](#separation)). |
 | `root` | Add busybox's links, copy werewolf's own files forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
-| `vmlinuz` | Unwrap Alpine's arm64 EFI zboot image to the raw `Image`. |
+| `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
 | `stage0` | Build stage0 from its packages, `init`, the form's modules and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
 | `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, `sync`, write `attempt`, set GRUB's `next_entry`. |
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |

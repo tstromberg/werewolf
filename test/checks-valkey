@@ -1,0 +1,12 @@
+# Valkey answers on its socket, for its group alone, and the default user
+# may do everything but administer it: the old attack, CONFIG SET dir to
+# a key directory and then SAVE, fails at its first word, as do the rest
+# of @admin (DEBUG is refused by enable-debug-command no, before the ACL
+# is asked). valkey-cli is the form's own.
+ok  valkey-user      p=$(pidof valkey-server); grep -q '^Uid:[[:space:]]*210[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  valkey-ping      i=0; until [ "$(valkey-cli -s /run/svc/valkey/valkey.sock ping 2>/dev/null)" = PONG ]; do i=$((i + 1)); [ $i -le 60 ] || { echo "no PONG on the socket"; exit 1; }; sleep 1; done
+ok  valkey-socket    [ "$(stat -c '%U:%G:%a' /run/svc/valkey/valkey.sock)" = valkey:valkey:660 ] && ! chpst -u nobody valkey-cli -s /run/svc/valkey/valkey.sock ping 2>/dev/null | grep -q PONG
+ok  valkey-works     [ "$(valkey-cli -s /run/svc/valkey/valkey.sock set werewolf check)" = OK ] && [ "$(valkey-cli -s /run/svc/valkey/valkey.sock get werewolf)" = check ] && [ "$(valkey-cli -s /run/svc/valkey/valkey.sock eval 'return 1' 0)" = 1 ]
+ok  valkey-no-admin  for c in 'config set dir /run/svc/valkey' 'config get dir' 'save' 'debug sleep 0' 'module list' 'replicaof 10.0.2.2 6379' 'acl list' 'acl setuser x on nopass' 'shutdown nosave'; do valkey-cli -s /run/svc/valkey/valkey.sock $c 2>&1 | grep -q 'NOPERM\|not allowed' || { echo "allowed: $c"; exit 1; }; done; [ "$(valkey-cli -s /run/svc/valkey/valkey.sock ping)" = PONG ]
+ok  valkey-no-tcp    ! netstat -ltn | grep -q ':6379 '
+ok  valkey-snapshots [ "$(valkey-cli -s /run/svc/valkey/valkey.sock bgsave)" = 'Background saving started' ]; i=0; until [ -f /data/svc/valkey/dump.rdb ]; do i=$((i + 1)); [ $i -le 30 ] || exit 1; sleep 1; done

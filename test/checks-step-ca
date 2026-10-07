@@ -1,0 +1,12 @@
+# step-ca serves its health, roots and ACME directory over TLS on :443
+# with the config's intermediate (test/config-step-ca); ACME may issue
+# only for the names the settings allow, rendered into ca.json; remote
+# administration is off; the root's key is nowhere on the machine; and
+# the intermediate's key and password are the service's, 0600.
+ok  step-user        p=$(pidof step-ca); grep -q '^Uid:[[:space:]]*209[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  step-health      i=0; until wget -q -T 5 --no-check-certificate -O /tmp/step.json https://localhost/health 2>/dev/null; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing answers HTTPS on :443"; exit 1; }; sleep 1; done; grep -q '"status":"ok"' /tmp/step.json
+ok  step-roots       wget -q -T 5 --no-check-certificate -O - https://localhost/roots | grep -q 'BEGIN CERTIFICATE'
+ok  step-acme        wget -q -T 5 --no-check-certificate -O - https://localhost/acme/acme/directory | grep -q '"newAccount":"https://localhost/acme/acme/new-account"'
+ok  step-policy      grep -q '"dns":\["example.test"\]' /run/svc/step-ca/ca.json && grep -q '"dnsNames":\["localhost"\]' /run/svc/step-ca/ca.json && grep -q '"enableAdmin":false' /run/svc/step-ca/ca.json && [ "$(stat -c '%u:%a' /run/svc/step-ca/ca.json)" = 209:600 ]
+ok  step-no-admin    wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/admin/provisioners 2>&1 | grep -q 'HTTP/1.1 4'
+ok  step-private     [ "$(stat -c '%u:%a' /run/svc/step-ca/intermediate-key)" = 209:600 ] && [ "$(stat -c '%u:%a' /run/svc/step-ca/password)" = 209:600 ] && [ ! -e /run/config/step-ca/root.key ] && [ -d /data/svc/step-ca/db ]

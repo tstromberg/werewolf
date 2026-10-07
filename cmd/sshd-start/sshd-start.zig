@@ -13,6 +13,7 @@
 //! runsv runs it as /etc/sv/sshd/run, with no arguments and no shell.
 
 const std = @import("std");
+const hostkey = @import("hostkey");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;

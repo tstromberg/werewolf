@@ -25,40 +25,57 @@
 //! process that runs for months uses what one pass needs.
 
 const std = @import("std");
+
 const Io = std.Io;
+
 const Dir = Io.Dir;
+
 const Allocator = std.mem.Allocator;
+const page = @import("page.zig");
+const scan = @import("scan.zig");
+const pg = @import("pg.zig");
+const describeEvent = page.describeEvent;
+const isAdvisoryId = page.isAdvisoryId;
+const plural = page.plural;
+const writePage = page.writePage;
+const Pg = pg.Pg;
+const dbWhy = pg.dbWhy;
+const Summary = scan.Summary;
+const scanLoop = scan.scanLoop;
 
 const state_dir = "/data/svc/status";
+
 const www_dir = state_dir ++ "/www";
+
 const page_path = www_dir ++ "/index.html";
-const grype_dir = "/data/svc/scan";
-const summary_path = grype_dir ++ "/scan.json";
-const scan_error_path = grype_dir ++ "/scan-error";
-const grype_out = grype_dir ++ "/grype.json";
-const grype_bin = "/usr/bin/grype";
+
+pub const grype_dir = "/data/svc/scan";
+
+pub const summary_path = grype_dir ++ "/scan.json";
+
+pub const scan_error_path = grype_dir ++ "/scan-error";
+
+pub const grype_out = grype_dir ++ "/grype.json";
+
+pub const grype_bin = "/usr/bin/grype";
+
 const autoupdate_dir = "/data/svc/autoupdate";
-const meta_dir = "/usr/share/werewolf";
+
+pub const meta_dir = "/usr/share/werewolf";
+
 const render_every = 60;
-const scan_every = 3600;
+
+pub const scan_every = 3600;
+
 const max_patches = 25;
+
 const max_read = 256 << 20;
 
-/// What grype must not walk: the kernel's own trees, RAM, and /data, which
-/// holds grype's database and is not part of the image.
-const grype_args = [_][]const u8{
-    grype_bin,     "dir:/",
-    "--output",    "json",
-    "--file",      grype_out,
-    "--quiet",     "--exclude",
-    "./proc/**",   "--exclude",
-    "./sys/**",    "--exclude",
-    "./dev/**",    "--exclude",
-    "./run/**",    "--exclude",
-    "./tmp/**",    "--exclude",
-    "./data/**",   "--exclude",
-    "./victim/**",
-};
+/// The most read of what the scan, as grype's user, leaves for the page:
+/// a scan taken over cannot make the page hold more.
+const max_summary = 4 << 20;
+
+const max_scan_error = 4 << 10;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -91,8 +108,6 @@ pub fn main(init: std.process.Init) !void {
         try io.sleep(.fromSeconds(render_every), .awake);
     }
 }
-
-// --- the page ----------------------------------------------------------------
 
 fn render(io: Io) !void {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -141,7 +156,7 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     f.boot = boot_said;
     f.posture = kept.posture orelse posture(io, gpa);
     f.scan = kept.scan;
-    if (f.scan == null) if (readAll(io, gpa, summary_path)) |text| {
+    if (f.scan == null) if (readUpTo(io, gpa, summary_path, max_summary)) |text| {
         f.scan = std.json.parseFromSliceLeaky(
             Summary,
             gpa,
@@ -149,7 +164,7 @@ fn gather(io: Io, gpa: Allocator) !Facts {
             .{ .ignore_unknown_fields = true },
         ) catch null;
     } else |_| {};
-    if (readAll(io, gpa, scan_error_path)) |text| {
+    if (readUpTo(io, gpa, scan_error_path, max_scan_error)) |text| {
         f.scan_error = trimLine(text);
     } else |_| {}
     return f;
@@ -199,7 +214,7 @@ fn describeData(io: Io, gpa: Allocator) []const u8 {
     return gpa.print("{s}, kept across reboots and updates", .{kind}) catch kind;
 }
 
-const Facts = struct {
+pub const Facts = struct {
     now_secs: u64,
     host: []const u8,
     uname: []const u8,
@@ -1054,8 +1069,6 @@ fn posture(io: Io, gpa: Allocator) ?Posture {
     ) catch null;
 }
 
-// --- PostgreSQL ------------------------------------------------------------------
-//
 // Where the form runs PostgreSQL (forms/postgresql), the scan keeps each
 // summary there, and the page this boot's posture, and the page shows the
 // newest of each from there. A small client of the server's own protocol
@@ -1064,10 +1077,8 @@ fn posture(io: Io, gpa: Allocator) ?Posture {
 // Values go as parameters, never into the SQL. When the server is not
 // there, or says no, the page reads the files in /data/svc as before.
 
-const pg_socket = "/run/svc/postgres/.s.PGSQL.5432";
+pub const pg_socket = "/run/svc/postgres/.s.PGSQL.5432";
 
-// --- how long the boot took ------------------------------------------------
-//
 // The kernel's part and userland's (stage0 and init), which init leaves in
 // /run/werewolf/boot, and when nginx and PostgreSQL first answered: nginx
 // listening on :80, and PostgreSQL's socket taking a connection, as the page
@@ -1076,6 +1087,7 @@ const pg_socket = "/run/svc/postgres/.s.PGSQL.5432";
 
 /// The Boot row, worked out once, as the page starts.
 var boot_said: []const u8 = "";
+
 var boot_buf: [256]u8 = undefined;
 
 fn timeBoot(io: Io) void {
@@ -1169,12 +1181,13 @@ fn bootMs() u64 {
     if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }
-const pg_max_message = 16 << 20;
 
 /// This boot's posture, once in the database, is not sent again.
 var posture_kept = false;
+
 /// Said on the console, with what the database holds, once it is kept.
 var posture_just_kept = false;
+
 /// Lost data is said on the console once, not once a minute.
 var data_lost = false;
 
@@ -1202,7 +1215,12 @@ fn fromDatabase(io: Io, gpa: Allocator) Kept {
     const kept = readDatabase(io, gpa) catch |err| {
         if (!db_failing) record(
             io,
-            .{ .event = "error", .step = "database", .@"error" = @errorName(err) },
+            .{
+                .event = "error",
+                .step = "database",
+                .@"error" = @errorName(err),
+                .why = dbWhy(err),
+            },
         );
         db_failing = true;
         return .{ .said = whyNot(gpa, err), .warn = true };
@@ -1301,7 +1319,7 @@ fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
 
 /// The scan's summary into the database, where there is one. The file is
 /// written either way, so a failure here is said and nothing more.
-fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
+pub fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
     if (!exists(io, pg_socket)) return;
     var db = Pg.connect(
         gpa,
@@ -1315,211 +1333,12 @@ fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
         gpa,
         "INSERT INTO status.scans (summary) VALUES ($1::jsonb)",
         &.{summary},
-    ) catch |err|
-        return record(io, .{ .event = "error", .step = "database", .@"error" = @errorName(err) });
+    ) catch |err| return record(
+        io,
+        .{ .event = "error", .step = "database", .@"error" = @errorName(err), .why = dbWhy(err) },
+    );
     record(io, .{ .event = "database", .kept = "scan" });
 }
-
-/// One connection to the server, as one role, to the postgres database.
-const Pg = struct {
-    fd: i32,
-
-    fn connect(gpa: Allocator, as: []const u8) !Pg {
-        const linux = std.os.linux;
-        const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-        if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
-        var p: Pg = .{ .fd = @intCast(rc) };
-        errdefer _ = linux.close(p.fd);
-        // A server that stops answering costs the page half its minute,
-        // not the page; one that is merely slow, on a loaded machine, is
-        // waited for.
-        const tv: linux.timeval = .{ .sec = 30, .usec = 0 };
-        for ([_]u32{
-            linux.SO.RCVTIMEO,
-            linux.SO.SNDTIMEO,
-        }) |opt| _ = linux.setsockopt(
-            p.fd,
-            linux.SOL.SOCKET,
-            opt,
-            std.mem.asBytes(&tv),
-            @sizeOf(linux.timeval),
-        );
-        var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
-        @memcpy(addr.path[0..pg_socket.len], pg_socket);
-        if (linux.errno(linux.connect(
-            p.fd,
-            @ptrCast(&addr),
-            @sizeOf(linux.sockaddr.un),
-        )) != .SUCCESS) return error.NoServer;
-
-        var m: std.ArrayList(u8) = .empty;
-        try m.appendNTimes(gpa, 0, 4);
-        try m.appendSlice(gpa, &.{ 0, 3, 0, 0 }); // protocol 3.0
-        for ([_][]const u8{
-            "user",
-            as,
-            "database",
-            "postgres",
-            "application_name",
-            "werewolf-status",
-        }) |field| {
-            if (std.mem.findScalar(u8, field, 0) != null) return error.BadValue;
-            try m.appendSlice(gpa, field);
-            try m.append(gpa, 0);
-        }
-        try m.append(gpa, 0);
-        std.mem.writeInt(u32, m.items[0..4], @intCast(m.items.len), .big);
-        try p.send(m.items);
-        while (true) {
-            const msg = try p.receive(gpa);
-            switch (msg.kind) {
-                'R' => if (msg.body.len < 4 or
-                    std.mem.readInt(
-                        u32,
-                        msg.body[0..4],
-                        .big,
-                    ) != 0) return error.AuthenticationRefused,
-                'E' => return error.Refused,
-                'Z' => return p,
-                else => {},
-            }
-        }
-    }
-
-    /// One statement, its parameters as text; its rows, each column text,
-    /// or null for NULL.
-    fn query(
-        p: *Pg,
-        gpa: Allocator,
-        sql: []const u8,
-        params: []const []const u8,
-    ) ![]const []const ?[]const u8 {
-        if (std.mem.findScalar(u8, sql, 0) != null) return error.BadValue;
-        var m: std.ArrayList(u8) = .empty;
-        // Parse: the unnamed statement, its parameters' types inferred.
-        var start = try messageStart(gpa, &m, 'P');
-        try m.appendSlice(gpa, "\x00");
-        try m.appendSlice(gpa, sql);
-        try m.appendSlice(gpa, &.{ 0, 0, 0 });
-        messageEnd(&m, start);
-        // Bind: the unnamed portal, every value as text.
-        start = try messageStart(gpa, &m, 'B');
-        try m.appendSlice(gpa, &.{ 0, 0, 0, 0 });
-        try appendInt(gpa, &m, u16, @intCast(params.len));
-        for (params) |v| {
-            try appendInt(gpa, &m, u32, @intCast(v.len));
-            try m.appendSlice(gpa, v);
-        }
-        try m.appendSlice(gpa, &.{ 0, 0 });
-        messageEnd(&m, start);
-        start = try messageStart(gpa, &m, 'E'); // Execute, every row
-        try m.appendSlice(gpa, &.{ 0, 0, 0, 0, 0 });
-        messageEnd(&m, start);
-        start = try messageStart(gpa, &m, 'S'); // Sync
-        messageEnd(&m, start);
-        try p.send(m.items);
-
-        var rows: std.ArrayList([]const ?[]const u8) = .empty;
-        var failed = false;
-        while (true) {
-            const msg = try p.receive(gpa);
-            switch (msg.kind) {
-                'D' => try rows.append(gpa, try dataRow(gpa, msg.body)),
-                'E' => failed = true,
-                'Z' => return if (failed) error.Refused else rows.items,
-                else => {}, // completions, notices, parameter changes
-            }
-        }
-    }
-
-    fn close(p: *Pg) void {
-        _ = std.os.linux.write(p.fd, "X\x00\x00\x00\x04", 5);
-        _ = std.os.linux.close(p.fd);
-    }
-
-    fn send(p: *Pg, bytes: []const u8) !void {
-        var off: usize = 0;
-        while (off < bytes.len) {
-            const n = std.os.linux.write(p.fd, bytes[off..].ptr, bytes.len - off);
-            try ioError(n);
-            off += n;
-        }
-    }
-
-    const Message = struct { kind: u8, body: []const u8 };
-
-    fn receive(p: *Pg, gpa: Allocator) !Message {
-        var head: [5]u8 = undefined;
-        try p.fill(&head);
-        const len = std.mem.readInt(u32, head[1..5], .big);
-        if (len < 4 or len > pg_max_message) return error.Lost;
-        const body = try gpa.alloc(u8, len - 4);
-        try p.fill(body);
-        return .{ .kind = head[0], .body = body };
-    }
-
-    fn fill(p: *Pg, buf: []u8) !void {
-        var off: usize = 0;
-        while (off < buf.len) {
-            const n = std.os.linux.read(p.fd, buf[off..].ptr, buf.len - off);
-            try ioError(n);
-            off += n;
-        }
-    }
-
-    /// What a read or write on the socket that moved nothing means: the
-    /// timeout passing, or the server gone.
-    fn ioError(n: usize) !void {
-        switch (std.os.linux.errno(n)) {
-            .SUCCESS => if (n == 0) return error.Lost,
-            .AGAIN => return error.Timeout,
-            else => return error.Lost,
-        }
-    }
-};
-
-fn messageStart(gpa: Allocator, m: *std.ArrayList(u8), kind: u8) !usize {
-    try m.append(gpa, kind);
-    const at = m.items.len;
-    try m.appendNTimes(gpa, 0, 4);
-    return at;
-}
-
-/// The length of the message whose length field is at start: itself and
-/// what follows.
-fn messageEnd(m: *std.ArrayList(u8), start: usize) void {
-    std.mem.writeInt(u32, m.items[start..][0..4], @intCast(m.items.len - start), .big);
-}
-
-fn appendInt(gpa: Allocator, m: *std.ArrayList(u8), comptime T: type, v: T) !void {
-    var b: [@sizeOf(T)]u8 = undefined;
-    std.mem.writeInt(T, &b, v, .big);
-    try m.appendSlice(gpa, &b);
-}
-
-/// A DataRow's columns: a count, then each a length (-1 for NULL) and
-/// its bytes.
-fn dataRow(gpa: Allocator, body: []const u8) ![]const ?[]const u8 {
-    if (body.len < 2) return error.Lost;
-    const n = std.mem.readInt(u16, body[0..2], .big);
-    const cols = try gpa.alloc(?[]const u8, n);
-    var at: usize = 2;
-    for (cols) |*c| {
-        if (at + 4 > body.len) return error.Lost;
-        const len = std.mem.readInt(i32, body[at..][0..4], .big);
-        at += 4;
-        if (len < 0) {
-            c.* = null;
-            continue;
-        }
-        if (at + @as(usize, @intCast(len)) > body.len) return error.Lost;
-        c.* = body[at .. at + @as(usize, @intCast(len))];
-        at += @intCast(len);
-    }
-    return cols;
-}
-
-// --- patches -----------------------------------------------------------------
 
 /// The parts of an update report (docs/updater.md) the page uses.
 const Report = struct {
@@ -1533,6 +1352,7 @@ const Report = struct {
 };
 
 const Change = struct { name: []const u8, from: ?[]const u8 = null, to: ?[]const u8 = null };
+
 const OriginFix = struct { origin: []const u8, cves: []const []const u8 = &.{} };
 
 /// One package changing version in an update.
@@ -1636,7 +1456,7 @@ fn outcomeOf(events: []const Event, build: []const u8, newest: bool) []const u8 
 }
 
 /// One line of the updater's log (docs/updater.md, "Events").
-const Event = struct {
+pub const Event = struct {
     time: []const u8 = "",
     event: []const u8 = "",
     build: []const u8 = "",
@@ -1673,9 +1493,7 @@ fn lastCheck(events: []const Event) ?Event {
     return null;
 }
 
-// --- small parsers -----------------------------------------------------------
-
-const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
+pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
 
 /// The packages in an apk installed database, by name: P (name), V (version)
 /// and o (origin) of each record; records end at a blank line.
@@ -1714,7 +1532,7 @@ fn byName(_: void, a: Package, b: Package) bool {
 
 /// The filesystem type mounted at point, from /proc/self/mounts; the last
 /// mount there is the one that shows.
-fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
+pub fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     var found: ?[]const u8 = null;
     var it = std.mem.tokenizeScalar(u8, mounts, '\n');
     while (it.next()) |line| {
@@ -1774,7 +1592,7 @@ fn trimLine(text: []const u8) []const u8 {
 
 /// An RFC 3339 time in UTC, as the updater writes them, as seconds; null
 /// for anything else.
-fn parseRfc3339(s: []const u8) ?u64 {
+pub fn parseRfc3339(s: []const u8) ?u64 {
     if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':' or
         s[19] != 'Z') return null;
     const n = struct {
@@ -1799,7 +1617,7 @@ fn parseRfc3339(s: []const u8) ?u64 {
     return @intCast(secs);
 }
 
-fn rfc3339Buf(buf: *[32]u8, secs: u64) []const u8 {
+pub fn rfc3339Buf(buf: *[32]u8, secs: u64) []const u8 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
@@ -1810,7 +1628,7 @@ fn rfc3339Buf(buf: *[32]u8, secs: u64) []const u8 {
     }) catch unreachable;
 }
 
-fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
+pub fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
@@ -1825,77 +1643,64 @@ fn moreString(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, b, a);
 }
 
-// --- I/O helpers ---------------------------------------------------------------
-
-fn nowSecs(io: Io) u64 {
+pub fn nowSecs(io: Io) u64 {
     const ns = Io.Timestamp.now(io, .real).nanoseconds;
     return @intCast(@max(0, @divFloor(ns, std.time.ns_per_s)));
 }
 
-fn readOr(io: Io, gpa: Allocator, path: []const u8, fallback: []const u8) []const u8 {
+pub fn readOr(io: Io, gpa: Allocator, path: []const u8, fallback: []const u8) []const u8 {
     return readAll(io, gpa, path) catch fallback;
 }
 
 /// path, read to its end. Not Dir.readFileAlloc, which reads only as much
 /// as stat reports, and procfs reports 0 for /proc/uptime, /proc/loadavg
 /// and /proc/self/mounts.
-fn readAll(io: Io, gpa: Allocator, path: []const u8) ![]u8 {
+pub fn readAll(io: Io, gpa: Allocator, path: []const u8) ![]u8 {
+    return readUpTo(io, gpa, path, max_read);
+}
+
+fn readUpTo(io: Io, gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     var f = try Dir.cwd().openFile(io, path, .{});
     defer f.close(io);
     var buf: [4096]u8 = undefined;
     var r = f.readerStreaming(io, &buf);
-    return r.interface.allocRemaining(gpa, .limited(max_read));
+    return r.interface.allocRemaining(gpa, .limited(limit));
 }
 
-fn exists(io: Io, path: []const u8) bool {
+pub fn exists(io: Io, path: []const u8) bool {
     Dir.cwd().access(io, path, .{}) catch return false;
     return true;
 }
 
 /// Write path whole or not at all: nginx may be reading the old one.
-fn writeAtomic(io: Io, gpa: Allocator, path: []const u8, data: []const u8) !void {
+pub fn writeAtomic(io: Io, gpa: Allocator, path: []const u8, data: []const u8) !void {
     const tmp = try gpa.print("{s}.tmp", .{path});
     try Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
     try Dir.rename(Dir.cwd(), tmp, Dir.cwd(), path, io);
 }
 
 /// One JSON line on the console, as the updater logs.
-fn record(io: Io, fields: anytype) void {
+pub fn record(io: Io, fields: anytype) void {
     var buf: [4096]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     const gpa = fba.allocator();
     var rest: Io.Writer.Allocating = .init(gpa);
-    std.json.Stringify.value(fields, .{}, &rest.writer) catch return;
-    const time = rfc3339(gpa, nowSecs(io)) catch return;
-    const line = gpa.print(
-        "status-page: {{\"time\":\"{s}\",{s}\n",
-        .{ time, rest.written()[1..] },
-    ) catch return;
-    Io.File.stdout().writeStreamingAll(io, line) catch {};
+    const line = if (std.json.Stringify.value(fields, .{}, &rest.writer)) |_|
+        if (rfc3339(gpa, nowSecs(io))) |time|
+            gpa.print("status-page: {{\"time\":\"{s}\",{s}\n", .{ time, rest.written()[1..] }) catch
+                null
+        else |_|
+            null
+    else |_|
+        null;
+    // Never nothing: a line too long to say is said to be.
+    Io.File.stdout().writeStreamingAll(
+        io,
+        line orelse "status-page: {\"event\":\"error\",\"error\":\"a log line too long to say\"}\n",
+    ) catch {};
 }
-
-// --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
-
-test esc {
-    var out: Io.Writer.Allocating = .init(testing.allocator);
-    defer out.deinit();
-    try esc(&out.writer, "a<b>&\"c'd");
-    try testing.expectEqualStrings("a&lt;b&gt;&amp;&quot;c&#39;d", out.written());
-}
-
-test advisory {
-    var out: Io.Writer.Allocating = .init(testing.allocator);
-    defer out.deinit();
-    try advisory(&out.writer, "CVE-2026-1234");
-    try advisory(&out.writer, " GHSA\"><x");
-    try testing.expectEqualStrings(
-        "<a class=\"adv\" href=\"https://osv.dev/vulnerability/CVE-2026-1234\">CVE-2026-1234</a>" ++
-            " GHSA&quot;&gt;&lt;x",
-        out.written(),
-    );
-}
 
 test formatUptime {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -1935,21 +1740,6 @@ test "small parsers" {
     try testing.expect(!isSubpackage("openssl-4.01", "openssl-4.0"));
 }
 
-test dataRow {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const cols = try dataRow(
-        arena.allocator(),
-        &.{ 0, 3, 0, 0, 0, 2, 'h', 'i', 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0 },
-    );
-    try testing.expectEqual(3, cols.len);
-    try testing.expectEqualStrings("hi", cols[0].?);
-    try testing.expectEqual(null, cols[1]);
-    try testing.expectEqualStrings("", cols[2].?);
-    try testing.expectError(error.Lost, dataRow(arena.allocator(), &.{ 0, 1, 0, 0, 0, 9, 'x' }));
-    try testing.expectError(error.Lost, dataRow(arena.allocator(), &.{0}));
-}
-
 test listensOn {
     const table =
         \\  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
@@ -1973,49 +1763,6 @@ test parseInstalled {
     try testing.expectEqualStrings("openssl-4.0-libcrypto", pkgs[0].name);
     try testing.expectEqualStrings("openssl-4.0", pkgs[0].origin);
     try testing.expectEqualStrings("zlib", pkgs[1].origin);
-}
-
-test summarize {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const json =
-        \\{"matches":[
-        \\ {"vulnerability":{"id":"CVE-2026-2","severity":"Medium","fix":{"versions":["1.2"],"state":"fixed"}},
-        \\  "artifact":{"name":"zlib","version":"1.1","type":"apk","locations":[{"path":"/usr/lib/apk/db/installed"}]},"matchDetails":[]},
-        \\ {"vulnerability":{"id":"GHSA-x","severity":"Critical","fix":{"versions":[],"state":"not-fixed"}},
-        \\  "artifact":{"name":"stdlib","version":"go1.25","type":"go-module","locations":[{"path":"/usr/bin/grype","layerID":"x"}]}},
-        \\ {"vulnerability":{"id":"CVE-2026-2","severity":"Medium","fix":{"versions":["1.2"]}},
-        \\  "artifact":{"name":"zlib","version":"1.1","type":"apk"}},
-        \\ {"vulnerability":{"id":"CVE-2026-4","severity":"Low"},"artifact":{"name":"zig","version":"0.17","type":"binary","locations":[{"path":"/usr/lib/werewolf/status-page"}]}},
-        \\ {"vulnerability":{"id":"CVE-2026-3","severity":"weird"},"artifact":{"name":"a","version":"1","locations":[{"path":"/opt/x"}]}}
-        \\],
-        \\"descriptor":{"name":"grype","version":"0.120.0","db":{"status":{"built":"2026-10-06T06:32:14Z","schemaVersion":"v6.1.10"}}}}
-    ;
-    const owners = try parseOwners(
-        a,
-        "P:grype\nV:0.120.0-r0\nF:usr/bin\nR:grype\n\nP:zlib\nV:1.1\nF:usr/lib\nR:libz.so.1\n",
-        "usr/lib/werewolf/status-page\n",
-    );
-    const s = try summarize(a, json, "2026-10-06T12:00:00Z", owners);
-    try testing.expectEqual(4, s.findings.len);
-    try testing.expectEqualStrings("GHSA-x", s.findings[0].id);
-    try testing.expectEqualStrings("grype", s.findings[0].in_package);
-    try testing.expectEqualStrings("0.120.0-r0", s.findings[0].in_version);
-    try testing.expectEqualStrings("CVE-2026-2", s.findings[1].id);
-    try testing.expectEqualStrings("zlib", s.findings[1].in_package);
-    try testing.expectEqualStrings("1.2", s.findings[1].fixed_in);
-    try testing.expectEqualStrings(werewolf_owner, s.findings[2].in_package);
-    try testing.expectEqualStrings("Unknown", s.findings[3].severity);
-    try testing.expectEqualStrings("", s.findings[3].in_package);
-    try testing.expectEqual(1, s.counts.critical);
-    try testing.expectEqual(1, s.counts.medium);
-    try testing.expectEqual(1, s.counts.unknown);
-    try testing.expectEqualStrings("0.120.0", s.grype);
-    try testing.expectEqualStrings("2026-10-06T06:32:14Z", s.db_built);
-    // /bin is a link into /usr.
-    try testing.expectEqualStrings("grype", owners.of("/bin/grype").?.name);
-    try testing.expectEqual(null, owners.of("/etc/passwd"));
 }
 
 test parseRfc3339 {
@@ -2073,87 +1820,9 @@ test patchHistory {
     try testing.expectEqualStrings("up to date", describeEvent(lastCheck(events).?));
 }
 
-test writePage {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const now = 1791288000; // 2026-10-06T12:00:00Z
-    const facts: Facts = .{
-        .now_secs = now,
-        .host = "<demo>",
-        .uname = "Linux demo 6.18.55-0-virt #1 SMP aarch64",
-        .uptime = "4:05",
-        .booted = now - (4 * 3600 + 5 * 60),
-        .load = "0.00 0.01 0.05",
-        .release = "demo",
-        .slot = "a",
-        .shell = false,
-        .data = "ext4",
-        .packages = &.{
-            .{ .name = "glibc", .version = "2.44-r7", .origin = "glibc" },
-            .{ .name = "grype", .version = "0.120.0-r0", .origin = "grype" },
-        },
-    };
-    var out: Io.Writer.Allocating = .init(arena.allocator());
-    try writePage(&out.writer, facts);
-    var page = out.written();
-    try testing.expect(std.mem.indexOf(u8, page, "<h1>&lt;demo&gt;</h1>") != null);
-    try testing.expect(std.mem.indexOf(u8, page, "<demo>") == null);
-    try testing.expect(std.mem.indexOf(u8, page, "src=\"/logo.png\"") != null);
-    try testing.expect(std.mem.indexOf(u8, page, "None yet") != null);
-    try testing.expect(std.mem.indexOf(u8, page, "No scan yet.") != null);
-    try testing.expect(std.mem.indexOf(u8, page, "<script") == null);
-    try testing.expect(std.mem.endsWith(u8, page, "</html>\n"));
-
-    // With findings: grouped under the package that brought them, worst
-    // group first, each package's count linked from the package list.
-    var with = facts;
-    with.scan = .{
-        .time = "2026-10-06T11:58:00Z",
-        .grype = "0.120.0",
-        .db_built = "2026-10-06T06:32:14Z",
-        .counts = .{ .high = 1, .medium = 2 },
-        .findings = &.{
-            .{
-                .severity = "High",
-                .id = "GO-2026-4887",
-                .package = "github.com/docker/docker",
-                .version = "v28.5.2",
-                .kind = "go-module",
-                .fixed_in = "",
-                .in_package = "grype",
-                .in_version = "0.120.0-r0",
-            },
-            .{
-                .severity = "Medium",
-                .id = "CVE-2026-8674",
-                .package = "glibc",
-                .version = "2.44-r7",
-                .kind = "apk",
-                .fixed_in = "2.44-r8",
-                .in_package = "glibc",
-                .in_version = "2.44-r7",
-            },
-            .{
-                .severity = "Medium",
-                .id = "GHSA-pxq6",
-                .package = "github.com/docker/docker",
-                .version = "v28.5.2",
-                .kind = "go-module",
-                .fixed_in = "",
-                .in_package = "grype",
-                .in_version = "0.120.0-r0",
-            },
-        },
-    };
-    out = .init(arena.allocator());
-    try writePage(&out.writer, with);
-    page = out.written();
-    const grype_group = std.mem.indexOf(u8, page, "id=\"in-grype\"").?;
-    const glibc_group = std.mem.indexOf(u8, page, "id=\"in-glibc\"").?;
-    try testing.expect(grype_group < glibc_group);
-    try testing.expect(std.mem.indexOf(u8, page, "· 2 findings") != null);
-    try testing.expect(std.mem.count(u8, page, "id=\"in-grype\"") == 1);
-    try testing.expect(std.mem.indexOf(u8, page, "Go module") != null);
-    try testing.expect(std.mem.indexOf(u8, page, "<a href=\"#in-grype\">2</a>") != null);
-    try testing.expect(std.mem.indexOf(u8, page, "2 min ago") != null);
+// Each part's tests, with these.
+test {
+    _ = page;
+    _ = scan;
+    _ = pg;
 }

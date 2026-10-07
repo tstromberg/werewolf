@@ -1,0 +1,5 @@
+# Caddy serves the site, and asks the ACME CA (HTTPS) for its
+# certificates, and a resolver for the CA's address. HTTP/3 waits on fence
+# serving UDP: the Caddyfile keeps to h1 and h2.
+listen tcp/80 tcp/443
+connect caddy tcp/443 tcp/53 udp/53

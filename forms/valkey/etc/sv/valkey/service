@@ -1,0 +1,11 @@
+# Valkey, as its own user, for local clients over its UNIX socket alone:
+# it reads its configuration and the image, writes only its own
+# directories, and reaches nothing on the network. Its own ceiling
+# (maxmemory, in valkey.conf) sits below the leash's, so it refuses writes
+# rather than being killed for them.
+exec    /usr/bin/valkey-server /etc/valkey/valkey.conf
+user    valkey
+pledge  stdio rpath wpath unix listen proc
+read    /etc/valkey
+memory  256
+nofile  10240
