@@ -1096,7 +1096,13 @@ fn timeBoot(io: Io) void {
         _ = arena.reset(.retain_capacity);
         if (want_nginx and nginx_ms == null and
             listening(io, arena.allocator(), 80)) nginx_ms = bootMs();
-        if (want_pg and pg_ms == null and socketAnswers(pg_socket)) pg_ms = bootMs();
+        // Answering is a login that completes: the socket takes connections
+        // while the server is still starting, and refuses them all.
+        if (want_pg and pg_ms == null) if (Pg.connect(arena.allocator(), "status")) |db| {
+            var d = db;
+            d.close();
+            pg_ms = bootMs();
+        } else |_| {};
         if ((!want_nginx or nginx_ms != null) and (!want_pg or pg_ms != null)) break;
         io.sleep(.fromMilliseconds(25), .awake) catch break;
     }
@@ -1152,21 +1158,6 @@ fn listensOn(table: []const u8, port: u16) bool {
         if (std.mem.endsWith(u8, local, want) and std.mem.eql(u8, state, "0A")) return true;
     }
     return false;
-}
-
-/// Whether a UNIX socket takes a connection.
-fn socketAnswers(path: []const u8) bool {
-    const linux = std.os.linux;
-    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(rc) != .SUCCESS) return false;
-    defer _ = linux.close(@intCast(rc));
-    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
-    @memcpy(addr.path[0..path.len], path);
-    return linux.errno(linux.connect(
-        @intCast(rc),
-        @ptrCast(&addr),
-        @sizeOf(linux.sockaddr.un),
-    )) == .SUCCESS;
 }
 
 /// Milliseconds since the kernel started its clock.

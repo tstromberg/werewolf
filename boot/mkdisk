@@ -20,6 +20,11 @@
 # machine asks DHCP. Every GUID, UUID, serial number and time is fixed, so
 # the same slot gives the same disk.
 #
+# The kernel speaks on every console named; userland on the last, which is
+# /dev/console. That is the serial port, which every cloud records and
+# QEMU's -nographic shows. An ARG of console=hvc0 makes it the virtio
+# console instead, for Lima's vz.
+#
 # Runs on macOS and Linux. Needs mtools (mformat, mmd, mcopy) and
 # e2fsprogs' mke2fs and debugfs: Homebrew's on macOS, which keeps them out
 # of PATH, so its prefix is searched too.
@@ -32,8 +37,8 @@ set -eu
 arch=$1 boot_rootfs=$2 gpt=$3 slot=$4 out=$5 size_mib=$6
 shift 6
 case $arch in
-aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=tty0 console=ttyAMA0 console=hvc0' ;;
-x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=ttyS0,115200 console=hvc0' ;;
+aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=tty0 console=hvc0 console=ttyAMA0' ;;
+x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=hvc0 console=ttyS0,115200' ;;
 *)
 	echo "boot/mkdisk: $arch is not supported" >&2
 	exit 2

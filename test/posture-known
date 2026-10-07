@@ -12,8 +12,9 @@
 # cannot claim less, or more, than the machines hold.
 #
 # No form carries a shell but those that log people in (sshd, lima,
-# prod-ssh, none of which make check boots as it ships) and DEV=1 builds,
-# which add busybox-full: its shell, awk, wget, nc and telnetd.
+# prod-ssh) and DEV=1 builds, which add busybox-full: its shell, awk,
+# wget, nc and telnetd. make check-dist boots prod-ssh's release disk as it
+# ships: busybox for the logins sshd serves, and sshd listening.
 
 dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell
 *
@@ -21,3 +22,4 @@ dev network-no-login programs-no-downloaders programs-no-interpreters programs-n
 # hardware: EL2 on aarch64 (Apple M3 and later, QEMU 11), VMX or SVM on
 # x86_64.
 qemu-host ?kernel-no-hypervisor
+prod-ssh network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell

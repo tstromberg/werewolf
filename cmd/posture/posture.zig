@@ -1118,6 +1118,8 @@ const Posture = struct {
                 "lua",
                 "luajit",
                 "php",
+                "php-fpm",
+                "java",
                 "tclsh",
                 "expect",
             },

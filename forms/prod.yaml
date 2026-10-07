@@ -4,8 +4,8 @@
 # - an address from the network's DHCP server when the kernel command line
 #   names none: werewolf's own client (cmd/dhcp-client), and the dhcp-client
 #   service that renews the lease;
-# - its config from a cloud's metadata server (GCP, AWS, Hetzner Cloud)
-#   when no config tar is on a disk or beside the victim
+# - its config from a cloud's metadata server (GCP, AWS, Hetzner Cloud,
+#   Azure) when no config tar is on a disk or beside the victim
 #   (cmd/cloud-metadata; docs/cloud.md);
 # - keeping itself current (cmd/slot-update; docs/updater.md): at boot and
 #   every 20 hours it asks Wolfi and Alpine whether anything in this image

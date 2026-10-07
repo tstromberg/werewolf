@@ -15,6 +15,7 @@
 #   make lima-delete     delete that VM and its /data: needed before a rebuild boots
 #   make demo            build and boot the demo's disk under Lima (macOS on Apple silicon)
 #   make demo-delete     delete the demo's VM and its /data
+#   make demo-gcp        the demo on a Google Compute Engine VM; demo-gcp-delete deletes it
 #
 # Take over
 #   make bite-me         on a Debian, Ubuntu, Fedora or Rocky VM: build a slot,
@@ -28,6 +29,7 @@
 #   make check-FORM      one form's boot, built with a shell for the checks;
 #                        check-shellfree-FORM boots it as it ships, without one
 #   make check-updater   a whole update, fetched from Wolfi and Alpine
+#   make check-gcp       prod-ssh's disk on a Google Compute Engine VM, then deleted
 #   make ci              CI's check job, in an Ubuntu VM under Lima
 #   make posture         build posture; on Linux, run it here with sudo
 #
@@ -36,6 +38,7 @@
 #   make release-inputs  relock the released forms and digest what they build from;
 #                        CI releases when the digest changes
 #   make dist            the released forms' files and unsigned manifests, in dist/
+#   make check-dist      boot dist/'s disks as published, under UEFI
 #   make clean           remove build/, but for the package pins in build/lock
 #
 # FORM picks the form (default sshd; make lima implies lima, make bite-me
@@ -266,8 +269,8 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata ci relock release-inputs dist posture clean help \
-	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form
+.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete ci relock release-inputs dist posture clean help \
+	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
 
@@ -625,7 +628,8 @@ RELEASE_FORMS = minimal prod prod-ssh
 # minimal is published whole, for direct boot, with the kernel arguments its
 # host passes; the rest as the slot the updater follows, and as a disk to
 # boot a VM from.
-DIST_DIRECT = $(filter minimal,$(FORM))
+DIST_DIRECT_FORMS = minimal
+DIST_DIRECT = $(filter $(DIST_DIRECT_FORMS),$(FORM))
 # Where a published form's updater finds its releases (docs/updater.md): the
 # latest release's FORM-ARCH.json and files, which only a form built as it
 # ships follows, not a DEV=1 build.
@@ -724,7 +728,11 @@ CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
 SHELLFREE_FORMS = minimal prod demo
 SHELLFREE_CHECKS = $(addprefix check-shellfree-,$(SHELLFREE_FORMS))
 # romfile= because direct boot needs no network boot ROM, and CI has none.
-CHECK_QEMU = $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci \
+# 1 GB keeps a form's memory honest; demo's grype holds its ~700 MB
+# vulnerability database in memory while it scans, so demo gets what
+# test/lima-demo gives it.
+CHECK_MEM_demo = 2048
+CHECK_QEMU = $(QEMU) -smp 2 -m $(or $(CHECK_MEM_$(FORM)),1024) -no-reboot -device virtio-rng-pci \
 	-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
 # panic=1 with -no-reboot: a panic ends QEMU at once rather than hanging.
 # werewolf.check=1 adds posture's attacks, which write to the kernel log.
@@ -866,17 +874,18 @@ _check-unsigned-slot:
 		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
 		-drive file=$(CHECK)/unsigned-victim.img,format=raw,if=virtio
 
-# prod against a stand-in metadata server (test/metadata), five
-# ways: a good config on GCP, AWS and Hetzner must be taken; a hostile one
-# refused whole; and a machine on no cloud must not ask at all
-# (test/cloud-boot). arm64 guests have SMBIOS only under UEFI firmware.
+# prod against a stand-in metadata server (test/metadata), seven
+# ways: a good config on GCP, AWS, Hetzner and Azure must be taken; a
+# hostile one refused whole; and a machine on no cloud, or on Hyper-V that
+# is not Azure, must not ask at all (test/cloud-boot). arm64 guests have
+# SMBIOS only under UEFI firmware.
 CLOUD_FIRMWARE = $(if $(filter aarch64,$(ARCH)),$(firstword $(wildcard \
 	/opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd \
 	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd)))
 METADATA_QEMU = $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci \
 	-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)"
-METADATA_BOOTS = "gcp good metadata" "aws good metadata" "hetzner good metadata" \
-	"gcp hostile metadata-refused" "none good metadata-refused"
+METADATA_BOOTS = "gcp good metadata" "aws good metadata" "hetzner good metadata" "azure good metadata" \
+	"gcp hostile metadata-refused" "none good metadata-refused" "hyperv good metadata-refused"
 
 check-metadata: | $(CHECK_SHARED) check-prod
 	@$(CHECK_MAKE) FORM=prod _check-metadata-boots
@@ -887,6 +896,39 @@ _check-metadata-boots:
 	@failed=0; for b in $(METADATA_BOOTS); do set -- $$b; \
 		test/cloud-boot meta-$$1-$$2 $$1 $$2 test/checks-$$3 $(CHECK)/meta-$$1-$$2.log "$(CLOUD_FIRMWARE)" $(METADATA_QEMU) || failed=1; \
 	done; exit $$failed
+
+# The release's disks, booted as published, after `make dist`: UEFI
+# firmware, systemd-boot, slot a, and the posture line on the serial port,
+# as a cloud records it, judged against the form as it ships
+# (test/posture-known). -snapshot leaves the published bytes as they are,
+# and a network with no way out keeps the updater from installing the
+# latest release over them.
+DIST_DISK_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
+	-smp 2 -m 2048 -snapshot -no-reboot -bios $(UEFI_FIRMWARE) -device virtio-rng-pci \
+	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
+check-dist:
+	@failed=0; for f in $(filter-out $(DIST_DIRECT_FORMS),$(RELEASE_FORMS)); do \
+		$(MAKE) --no-print-directory FORM=$$f _check-dist-disk || failed=1; \
+	done; exit $$failed
+
+_check-dist-disk:
+	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   dist-$(FORM)     no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
+	@[ -f $(DIST)/$(FORM)-$(ARCH)-disk.qcow2 ] || \
+		{ echo "FAIL   dist-$(FORM)     no $(DIST)/$(FORM)-$(ARCH)-disk.qcow2: make dist first"; exit 1; }
+	@mkdir -p $(CHECK)
+	@test/boot dist-$(FORM) - $(CHECK)/dist.log $(DIST_DISK_QEMU) \
+		-drive file=$(DIST)/$(FORM)-$(ARCH)-disk.qcow2,format=qcow2,if=virtio
+
+# prod-ssh's disk on Google Compute Engine, for real (test/gcp): imported
+# as an image, booted with a config in the instance's user-data, judged
+# from GCP's record of its serial port and an ssh login, then deleted.
+# Needs gcloud, logged in, with a project, and costs a few cents; not part
+# of check.
+check-gcp:
+	@$(MAKE) --no-print-directory FORM=prod-ssh _check-gcp
+
+_check-gcp: $(OUT)/disk.qcow2
+	@test/gcp check $(OUT)/disk.qcow2 $(ARCH)
 
 # prod's LUKS2 disk, as its own check left it, booted with no data.key:
 # it must refuse the disk, not format it again. After prod's own check,
@@ -1051,11 +1093,23 @@ lima-delete:
 # there. Its URL is printed at the end. See docs/demo.md.
 DEMO_MAC = 52:55:55:57:e1:f0
 demo:
-	@$(MAKE) --no-print-directory FORM=demo disk DISK=build/$(ARCH)/demo/lima.img DISK_ARGS=werewolf.mac=$(DEMO_MAC)
+	@$(MAKE) --no-print-directory FORM=demo disk DISK=build/$(ARCH)/demo/lima.img \
+		DISK_ARGS="werewolf.mac=$(DEMO_MAC) console=$(LIMA_CONSOLE)"
 	test/lima-demo build/$(ARCH)/demo/lima.img
 
 demo-delete:
 	test/lima-demo delete
+
+# The demo on Google Compute Engine (test/gcp): its disk as a release
+# makes one, imported as an image and booted on a VM that stays, reached
+# over HTTP. Needs gcloud, logged in, with a project; the VM costs what an
+# e2-medium or t2a-standard-1 costs until demo-gcp-delete.
+demo-gcp:
+	@$(MAKE) --no-print-directory FORM=demo build/$(ARCH)/demo/disk.qcow2
+	test/gcp demo build/$(ARCH)/demo/disk.qcow2 $(ARCH)
+
+demo-gcp-delete:
+	test/gcp demo-delete
 
 # The locks stay: they are what makes the next build the same as the last.
 # `make relock` resolves them again; `rm -rf build` removes them too.

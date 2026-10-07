@@ -1,6 +1,6 @@
 # Clouds
 
-On GCP, AWS and Hetzner Cloud, a werewolf machine can take its config from
+On GCP, AWS, Hetzner Cloud and Azure, a werewolf machine can take its config from
 the cloud's metadata server: the same config tar a config disk carries,
 set as the instance's user data. `prod`, and every form on it, asks.
 
@@ -19,6 +19,8 @@ gcloud compute instances create web-1 --metadata-from-file user-data=config.b64 
 aws ec2 run-instances --user-data file://config.b64 ...
 # Hetzner Cloud
 hcloud server create --name web-1 --user-data-from-file config.b64 ...
+# Azure: the tar itself, which az encodes in base64
+az vm create --name web-1 --user-data config.tar ...
 ```
 
 There is no address to give: the machine asks DHCP.
@@ -30,12 +32,13 @@ NoCloud, as always. Only where it finds none does it run
 `/usr/lib/werewolf/cloud-metadata`, after the network is up:
 
 1. It reads the firmware's DMI strings. `Google Compute Engine`, `Amazon
-   EC2` or `Hetzner` is a cloud it knows; anything else, and it asks no
-   one. A neighbour on a flat network could answer for 169.254.169.254; a
+   EC2` or `Hetzner` is a cloud it knows, as is Hyper-V's `Virtual
+   Machine` with the chassis asset tag only Azure sets; anything else, a
+   desktop's Hyper-V included, and it asks no one. A neighbour on a flat network could answer for 169.254.169.254; a
    cloud's own hypervisor answers it there.
 2. It asks the metadata server for the user data: GCP with
    `Metadata-Flavor: Google`, AWS through IMDSv2's session token, Hetzner
-   plainly. Four tries over at most half a minute.
+   plainly, Azure with `Metadata: true`. Four tries over at most half a minute.
 3. It decodes the base64 and checks the tar entry by entry: regular files
    and directories only, names of letters, digits and `. _ - /`, no
    absolute paths and no `..`, at most 32 entries of 32 KiB each.
@@ -79,8 +82,12 @@ reaches init.
   ssh keys. That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are
   not applied.
-- **Three clouds.** Another is a row in the table in `cmd/cloud-metadata/cloud-metadata.zig`:
-  its DMI vendor, its path, and its header.
-- GCP and AWS are tested against stand-ins under QEMU, with the firmware's
+- **Four clouds.** Another is a row in the table in `cmd/cloud-metadata/cloud-metadata.zig`:
+  its DMI strings, its path, and its header.
+- **Azure only as a specialized VM.** Azure reboots a VM made from a
+  generalized image unless an agent reports it ready, and werewolf has
+  none; a VM whose OS disk is attached as it is needs no agent
+  ([releases.md](releases.md#deploying)).
+- Every cloud is tested against stand-ins under QEMU, with the firmware's
   strings and the metadata server faked, on every `make check`
-  ([testing.md](testing.md)); Hetzner's path too.
+  ([testing.md](testing.md)); GCP also for real, by `make check-gcp`.

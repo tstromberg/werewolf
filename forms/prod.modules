@@ -2,6 +2,15 @@
 # older machine types), and NVMe and Google's gVNIC (on newer ones, Arm's
 # included). Kept out of minimal, which runs where virtio is enough.
 virtio_scsi sd_mod nvme gve
+# AWS's NIC, the ENA; its disks are NVMe, as above.
+ena
+# Azure's disks and synthetic NIC, on Hyper-V's VMBus, which is built in,
+# as is the NIC on x86_64. Elsewhere these find no VMBus, and modload says
+# there is no hardware for them. Accelerated networking's VF, a fast path
+# beside the synthetic NIC, is left out: the NIC carries everything
+# without it.
+hv_storvsc
+aarch64: hv_netvsc
 # Packet sockets, for the DHCP client, which has no address to send from
 # until its lease arrives.
 af_packet

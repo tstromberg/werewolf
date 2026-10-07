@@ -7,6 +7,7 @@ make -j check       # the same, side by side
 make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
 make check-updater-release  # the same, to CI's latest signed release
+make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
 ```
 
 `make check` needs, beyond the build's tools, QEMU, `expect` and `mke2fs`
@@ -66,15 +67,24 @@ dm-verity must name the block, and stage0 must stop before the root is
 mounted. Every other boot checks that its root is mounted through dm-verity
 (`root-verified` in [test/checks](../test/checks)).
 
-Five boots put `prod` behind a stand-in metadata server
+Seven boots put `prod` behind a stand-in metadata server
 ([test/metadata](../test/metadata), driven by
 [test/cloud-boot](../test/cloud-boot)), with the firmware's strings set as
-each cloud's: on GCP, AWS and Hetzner Cloud a good config must be taken
-(the hostname and root's key applied, the tar rewritten root's and 0600),
-and on AWS only through a session token; a tar with a symlink and a `../`
-entry must be refused whole; and a machine on no cloud must not ask the
-metadata server at all, which the server's own log shows. arm64 guests
-get SMBIOS only under UEFI firmware, which the boots load.
+each cloud's: on GCP, AWS, Hetzner Cloud and Azure a good config must be
+taken (the hostname and root's key applied, the tar rewritten root's and
+0600), and on AWS only through a session token; a tar with a symlink and a
+`../` entry must be refused whole; and a machine on no cloud, or on a
+desktop's Hyper-V, which names itself as Azure does but for Azure's asset
+tag, must not ask the metadata server at all, which the server's own log
+shows. arm64 guests get SMBIOS only under UEFI firmware, which the boots
+load.
+
+`make check-dist`, after `make dist`, boots each release disk in `dist/`
+as published: UEFI firmware, systemd-boot, slot a, with `-snapshot` so the
+file is not changed and a network with no way out, so the updater cannot
+install the latest release over it. Its posture line must show exactly
+what the form fails as it ships ([test/posture-known](../test/posture-known)).
+The release workflow runs it on every release.
 
 Every boot so far gives its address on the kernel command line. One more
 boots `prod` without one ([test/checks-lease](../test/checks-lease)),
@@ -140,6 +150,34 @@ slot boots and updates as this one does.
 
 It needs the network, so it is not part of `make check`. About 4 minutes
 with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.
+
+## What `make check-gcp` does
+
+[test/gcp](../test/gcp) runs `prod-ssh`'s disk, as a release makes it, on
+Google Compute Engine, as a user would: converted to the raw disk GCP
+imports, made an image (UEFI, gVNIC), and booted on a fresh VM (an
+`e2-small`, or a `t2a-standard-1` for `ARCH=aarch64`) with a config in its
+user-data: a hostname, and an ssh key made for this run. It is judged from
+GCP's record of the VM's serial port:
+
+| Check | Passes when |
+| --- | --- |
+| `root-verified` | stage0 opened slot a's root through dm-verity |
+| `metadata-config` | `cloud-metadata` took the config from GCP's metadata server |
+| `hostname` | posture names the host as the config did |
+| `posture` | what fails is exactly what `test/posture-known` says `prod-ssh` fails |
+| `ssh-login` | root logs in, over the Internet, with the run's key |
+
+For the login, a firewall rule opens port 22 to this VM alone, while the
+check runs. The VM, the rule, the image and the upload are deleted however
+the check ends; `GCP_KEEP=1` keeps the VM and the rule, to look around.
+The serial port is kept in `build/<arch>/prod-ssh/check/gcp-serial.log`.
+
+It needs gcloud, logged in, with a project (`GCP_PROJECT`, or gcloud's
+own), and costs a few cents. The zone is `us-central1-a` (`GCP_ZONE`), and
+the image goes up through a bucket it makes, `PROJECT-werewolf-images`
+(`GCP_BUCKET`). About 5 minutes, most of it GCP making the image. Not part
+of `make check`, nor of CI, which holds no GCP credentials.
 
 ## Writing a check
 

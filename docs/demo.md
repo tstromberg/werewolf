@@ -128,6 +128,23 @@ DHCP runs there, and macOS's DHCP server records the address it gave.
 the page instead. A second `make demo` finds the VM and prints the URL
 again. Building the disk on a Mac needs `brew install mtools e2fsprogs`.
 
+On Google Compute Engine, `make demo-gcp` builds the same disk, makes it a
+GCP image, boots it on a VM (an `e2-medium`, or a `t2a-standard-1` for
+`ARCH=aarch64`), opens port 80 to it, and prints the page's URL
+([test/gcp](../test/gcp)):
+
+```sh
+make demo-gcp                           # http://IP/, when it is up
+make demo-gcp-delete                    # delete the VM, its disk and the firewall rule
+```
+
+It uses gcloud's project and the zone `us-central1-a` (`GCP_PROJECT`,
+`GCP_ZONE`), and uploads the image through a bucket it makes,
+`PROJECT-werewolf-images` (`GCP_BUCKET`); the upload and the image are
+deleted once the VM's disk is made. The VM costs what its machine type
+costs until it is deleted. Its serial port shows the boot:
+`gcloud compute instances get-serial-port-output werewolf-demo`.
+
 To boot the image directly instead, without slots, updates or a scan:
 
 ```sh

@@ -64,7 +64,9 @@ load; a push does not wait on one.
 2. **Build, twice.** Each architecture is built on two runners from those
    locks, and the two must match byte for byte.
 3. **Boot.** Each form boots under QEMU and passes `make check`
-   ([testing.md](testing.md)), and so does the slot path.
+   ([testing.md](testing.md)), and so does the slot path. `make check-dist`
+   boots each published disk, the very file, under UEFI firmware, and
+   judges its posture as the form ships.
 4. **Compare.** If every image's `build` matches the latest release's, as
    after a change to a comment, nothing is published.
 5. **Publish.** The manifests are signed, the release is made as a draft,
@@ -128,13 +130,21 @@ attestation ties each file to the workflow run and commit that built it.
 A VM boots the disk under UEFI firmware, on slot a, and from then on keeps
 itself current from these releases ([updater.md](updater.md#releases)).
 Its config comes from a config disk, NoCloud, or the cloud's metadata
-server ([cloud.md](cloud.md)).
+server ([cloud.md](cloud.md)). Secure Boot must be off: systemd-boot is
+not signed yet ([verified-boot.md](design/verified-boot.md)).
 
 ```sh
 gh release download --repo werewolf-linux/werewolf --pattern 'prod-ssh-x86_64*'
-# check it, as above; then QEMU, Lima, Proxmox and OpenStack take the qcow2 as it is.
+```
 
-# GCP wants a raw disk named disk.raw, in a gzipped tar:
+Check it, as above. QEMU, Lima, Proxmox and OpenStack take the qcow2 as
+it is. The clouds each want their own format; on aarch64, tell each the
+architecture too (`--architecture ARM64` on GCP, `arm64` on AWS, `Arm64`
+on Azure).
+
+**GCP**: a raw disk named `disk.raw`, in a gzipped tar.
+
+```sh
 qemu-img convert -O raw prod-ssh-x86_64-disk.qcow2 disk.raw
 tar --format=oldgnu -Sczf werewolf.tar.gz disk.raw
 gcloud storage cp werewolf.tar.gz gs://BUCKET/
@@ -142,10 +152,45 @@ gcloud compute images create werewolf --source-uri gs://BUCKET/werewolf.tar.gz \
     --guest-os-features UEFI_COMPATIBLE,GVNIC
 ```
 
+`make check-gcp` does this with a disk built from the tree, boots it and
+checks it there, then deletes it ([testing.md](testing.md)).
+
+**AWS**: a raw snapshot, imported through S3 (which needs the `vmimport`
+role), registered as a UEFI image with ENA.
+
+```sh
+qemu-img convert -O raw prod-ssh-x86_64-disk.qcow2 disk.raw
+aws s3 cp disk.raw s3://BUCKET/werewolf.raw
+aws ec2 import-snapshot --disk-container 'Format=RAW,UserBucket={S3Bucket=BUCKET,S3Key=werewolf.raw}'
+# once aws ec2 describe-import-snapshot-tasks names the snapshot:
+aws ec2 register-image --name werewolf --architecture x86_64 --boot-mode uefi \
+    --ena-support --virtualization-type hvm --root-device-name /dev/xvda \
+    --block-device-mappings 'DeviceName=/dev/xvda,Ebs={SnapshotId=SNAPSHOT}'
+```
+
+**Azure**: a fixed-size VHD, made a Gen2 managed disk and attached as a
+VM's OS disk. That makes the VM *specialized*: Azure provisions nothing
+and waits for no agent to report ready, which a generalized image needs
+and werewolf has not. One disk serves one VM.
+
+```sh
+qemu-img convert -O vpc -o subformat=fixed,force_size prod-ssh-x86_64-disk.qcow2 disk.vhd
+az storage blob upload --account-name ACCOUNT -c disks -n werewolf.vhd -f disk.vhd --type page
+az disk create -g RG -n web-1 --os-type Linux --hyper-v-generation V2 --security-type Standard \
+    --source https://ACCOUNT.blob.core.windows.net/disks/werewolf.vhd
+az vm create -g RG -n web-1 --attach-os-disk web-1 --os-type Linux --security-type Standard \
+    --user-data config.tar
+```
+
+`prod` carries each cloud's devices (`forms/prod.modules`): virtio, GCP's
+virtio-scsi, NVMe and gVNIC, AWS's ENA and NVMe, and Azure's Hyper-V disks
+and synthetic NIC. Each is tested where it is absent, and the metadata
+fetch against stand-ins for each cloud ([cloud.md](cloud.md)). GCP's
+steps run for real in `make check-gcp`; AWS's and Azure's have not been
+run against the clouds themselves.
+
 The disk is 8 GiB, and stays so: a provider's larger disk leaves the rest
-unused ([native-boot.md](design/native-boot.md#open-questions)). Beyond
-virtio, `prod` carries GCP's devices (`forms/prod.modules`); AWS's ENA
-and Azure's Hyper-V devices are not among them yet.
+unused ([native-boot.md](design/native-boot.md#open-questions)).
 
 ## The key
 
@@ -168,9 +213,8 @@ workflow builds and checks, then fails at signing and publishes nothing.
 
 ## Limits
 
-- No release is booted from its published disk: CI boots each form directly
-  and the slot path, and `make check` boots the demo's disk, which
-  `boot/mkdisk` makes the same way.
+- The published disks boot in CI under QEMU alone: not on a cloud, and
+  not with a cloud's devices.
 - A release's `build` hashes its files; the updater's own build hash, in
   its log and reports, hashes the package list and kernel.
 - Releases are kept; nothing prunes old ones.

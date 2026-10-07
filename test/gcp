@@ -1,0 +1,221 @@
+#!/bin/sh
+# gcp: a werewolf disk (make disk's qcow2) on Google Compute Engine, as a
+# user would run it: made a GCP image, booted under UEFI on a VM, its
+# config in the instance's user-data. Used by `make check-gcp`, `make
+# demo-gcp` and `make demo-gcp-delete`; see docs/testing.md and
+# docs/demo.md.
+#
+#   gcp check DISK ARCH   boot DISK on a fresh VM, judge it, delete it all
+#   gcp demo DISK ARCH    boot the demo's DISK on a VM that stays; print its URL
+#   gcp demo-delete       delete the demo's VM and its firewall rule
+#
+# check judges the machine by GCP's record of its serial port: the root
+# verified through dm-verity, the config taken from the metadata server,
+# and posture failing exactly what POSTURE_KNOWN says the form fails
+# (test/posture-known). If sshd listens, root must also log in, over the
+# Internet, with the key the config carried. Everything check made is
+# deleted however it ends, unless GCP_KEEP=1.
+#
+# The project is gcloud's own, or GCP_PROJECT; the zone GCP_ZONE
+# (us-central1-a, which has Arm machines); the image's upload goes through
+# GCP_BUCKET (PROJECT-werewolf-images, made if missing) and is deleted once
+# the image is made. ARCH picks the machine: e2-small (the demo, which
+# runs PostgreSQL and grype, e2-medium) or t2a-standard-1.
+set -eu
+
+say() { echo "gcp: $*"; }
+die() {
+	say "$*" >&2
+	exit 1
+}
+command -v gcloud >/dev/null || die "no gcloud; install the Google Cloud SDK and gcloud auth login"
+project=${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
+[ -n "$project" ] || die "no project: gcloud config set project PROJECT, or GCP_PROJECT"
+zone=${GCP_ZONE:-us-central1-a}
+region=${zone%-*}
+bucket=${GCP_BUCKET:-$project-werewolf-images}
+g() { gcloud --quiet --project "$project" "$@"; }
+demo=werewolf-demo
+
+mode=${1:-}
+if [ "$mode" = demo-delete ]; then
+	g compute instances delete "$demo" --zone "$zone" 2>/dev/null || true
+	g compute firewall-rules delete "$demo-http" 2>/dev/null || true
+	exit 0
+fi
+[ $# -eq 3 ] && { [ "$mode" = check ] || [ "$mode" = demo ]; } ||
+	die "usage: gcp check DISK ARCH | demo DISK ARCH | demo-delete"
+disk=$2 arch=$3
+[ -f "$disk" ] || die "no $disk"
+case $arch in
+x86_64)
+	gcp_arch=X86_64 nic=VIRTIO_NET
+	if [ "$mode" = demo ]; then machine=e2-medium; else machine=e2-small; fi
+	;;
+aarch64) gcp_arch=ARM64 nic=GVNIC machine=t2a-standard-1 ;;
+*) die "no GCP machine for $arch" ;;
+esac
+
+name=werewolf-$mode-$(date -u +%Y%m%d%H%M%S)
+[ "$mode" = check ] || name=$demo
+work=$(mktemp -d)
+image=$name-$(date -u +%H%M%S)
+
+# What this run made, deleted however it ends: the upload and the image
+# always, once the VM's disk is made from it; for check, the VM and its
+# firewall rule too.
+cleanup() {
+	rc=$?
+	trap - EXIT INT TERM
+	g storage rm "gs://$bucket/$image.tar.gz" >/dev/null 2>&1 || true
+	g compute images delete "$image" >/dev/null 2>&1 || true
+	if [ "$mode" = check ]; then
+		if [ "${GCP_KEEP:-}" = 1 ]; then
+			say "kept $name in $zone; delete it with: gcloud compute instances delete $name --zone $zone" \
+				"&& gcloud compute firewall-rules delete $name-ssh"
+		else
+			say "deleting $name"
+			g compute instances delete "$name" --zone "$zone" >/dev/null 2>&1 || true
+			g compute firewall-rules delete "$name-ssh" >/dev/null 2>&1 || true
+		fi
+	fi
+	rm -rf "$work"
+	exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+if [ "$mode" = demo ] && g compute instances describe "$demo" --zone "$zone" >/dev/null 2>&1; then
+	say "$demo exists; make demo-gcp-delete to start over from a fresh disk"
+else
+	# GCP takes a raw disk named disk.raw, in a gzipped GNU tar. GNU tar
+	# keeps the disk's holes; bsdtar writes them out, and gzip makes them
+	# small again.
+	say "making the image $image from $disk"
+	qemu-img convert -f qcow2 -O raw "$disk" "$work/disk.raw"
+	if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+		tar -C "$work" --format=oldgnu -Sczf "$work/image.tar.gz" disk.raw
+	else
+		tar -C "$work" --format gnutar -czf "$work/image.tar.gz" disk.raw
+	fi
+	rm -f "$work/disk.raw"
+	g storage buckets describe "gs://$bucket" >/dev/null 2>&1 ||
+		g storage buckets create "gs://$bucket" --location "$region" --uniform-bucket-level-access
+	g storage cp "$work/image.tar.gz" "gs://$bucket/$image.tar.gz"
+	g compute images create "$image" --source-uri "gs://$bucket/$image.tar.gz" \
+		--architecture "$gcp_arch" --guest-os-features UEFI_COMPATIBLE,GVNIC
+
+	# The config, as docs/cloud.md has it: a tar, in base64, as user-data.
+	# check's carries a key made for this run alone.
+	mkdir "$work/config"
+	echo "$name" >"$work/config/hostname"
+	if [ "$mode" = check ]; then
+		ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
+		cp "$work/key.pub" "$work/config/authorized_keys"
+	fi
+	(cd "$work/config" && COPYFILE_DISABLE=1 tar -cf ../config.tar --format ustar -- *)
+	base64 <"$work/config.tar" >"$work/config.b64"
+
+	tag=$name
+	say "starting $name, a $machine in $zone"
+	g compute instances create "$name" --zone "$zone" --machine-type "$machine" \
+		--image "$image" --network-interface "nic-type=$nic" --tags "$tag" \
+		--metadata-from-file "user-data=$work/config.b64"
+fi
+
+addr=$(g compute instances describe "$name" --zone "$zone" \
+	--format 'get(networkInterfaces[0].accessConfigs[0].natIP)')
+
+if [ "$mode" = demo ]; then
+	g compute firewall-rules describe "$demo-http" >/dev/null 2>&1 ||
+		g compute firewall-rules create "$demo-http" --allow tcp:80 --target-tags "$demo" \
+			--description "werewolf's demo page (test/gcp)"
+	say "waiting for werewolf to boot and serve the page"
+	i=0
+	until curl -fsS -m 3 -o /dev/null "http://$addr/" 2>/dev/null; do
+		i=$((i + 1))
+		[ $i -le 120 ] || die "no page after 10 minutes; the console: gcloud compute instances get-serial-port-output $demo --zone $zone"
+		sleep 5
+	done
+	say "up. The first scan follows grype's database download, about a minute"
+	say "the demo: http://$addr/"
+	exit 0
+fi
+
+# --- check ---------------------------------------------------------------------
+log=$work/serial.log
+serial() {
+	g compute instances get-serial-port-output "$name" --zone "$zone" >"$log" 2>/dev/null || true
+	tr -d '\r' <"$log" >"$log.txt"
+}
+seen() { grep -a -q -E "$1" "$log.txt"; }
+failed=0
+ok() { say "ok     $1"; }
+fail() {
+	say "FAIL   $1"
+	failed=1
+}
+
+# Until posture speaks, which is after every service has started; a panic,
+# or a machine that rolled back, ends the wait early.
+say "waiting for the posture line on the serial port"
+i=0
+while serial; ! seen 'posture: fail='; do
+	seen 'Kernel panic' && break
+	i=$((i + 1))
+	[ $i -le 60 ] || break
+	sleep 5
+done
+mkdir -p "$(dirname "$disk")/check"
+keep=$(dirname "$disk")/check/gcp-serial.log
+cp "$log.txt" "$keep"
+
+seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: stage0 did not verify slot a's root"
+seen 'cloud-metadata: \{.*"event":"config","provider":"gcp"' && ok metadata-config ||
+	fail "metadata-config: no config taken from GCP's metadata server"
+seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
+
+# posture: what fails must be exactly what POSTURE_KNOWN says; ?ID may
+# fail or not (test/posture-known).
+line=$(grep -a -o -E 'posture: fail=[^ ]* pass=[0-9]+' "$log.txt" | tail -n 1 || true)
+if [ -z "$line" ]; then
+	fail "posture: no posture line"
+else
+	got=$(echo "$line" | sed 's/^posture: fail=\([^ ]*\) .*/\1/' | tr ',' '\n' | sed '/^$/d' | LC_ALL=C sort -u)
+	sure=$(echo "${POSTURE_KNOWN:-}" | tr ' ' '\n' | sed '/^$/d;/^?/d' | LC_ALL=C sort -u)
+	maybe=$(echo "${POSTURE_KNOWN:-}" | tr ' ' '\n' | sed -n 's/^?//p' | LC_ALL=C sort -u)
+	new=$(echo "$got" | while read -r id; do
+		[ -z "$id" ] || echo "$sure $maybe" | tr ' ' '\n' | grep -qx "$id" || echo "$id"
+	done)
+	closed=$(echo "$sure" | while read -r id; do
+		[ -z "$id" ] || echo "$got" | grep -qx "$id" || echo "$id"
+	done)
+	if [ -z "$new" ] && [ -z "$closed" ]; then
+		ok posture
+	else
+		fail "posture: failing, not known: $(echo "$new" | tr '\n' ' ')known, now passing: $(echo "$closed" | tr '\n' ' ')"
+	fi
+fi
+
+# Over the Internet, as an operator would: only while this check runs, and
+# only to this VM, which takes keys alone.
+if seen 'Server listening on 0.0.0.0 port 22'; then
+	g compute firewall-rules create "$name-ssh" --allow tcp:22 --target-tags "$name" \
+		--description "test/gcp's ssh check, deleted when it ends" >/dev/null
+	i=0
+	until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
+		"root@$addr" id -u 2>/dev/null)" = 0 ]; do
+		i=$((i + 1))
+		[ $i -le 12 ] || break
+		sleep 10
+	done
+	[ $i -le 12 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
+fi
+
+if [ $failed = 0 ]; then
+	say "pass   all checks; the serial port is in $keep"
+else
+	say "FAIL   see $keep"
+fi
+exit $failed
