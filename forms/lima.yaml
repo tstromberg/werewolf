@@ -1,15 +1,13 @@
 # lima: the test vehicle. Everything a form can be, so one Lima VM can try
-# bite, slots and autoupdate: autoupdate's chain, sshd (its service is in
-# minimal), bash for Lima's readiness probes, and a disk for /data when
-# Lima boots it directly.
-include: autoupdate.yaml
+# bite, slots and the updater: prod, sshd (its service is in minimal), and
+# bash for Lima's readiness probes.
+include: prod.yaml
 contents:
   packages:
     - openssh-server
     - openssh-sftp-server
     - busybox-full          # a shell for those who log in, and its tools
     - bash
-    - e2fsprogs
 
 paths:
   - path: /usr/bin/unix_chkpwd

@@ -45,7 +45,7 @@ if [ "$only" = all ]; then
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -q
 	apt-get install -y -q --no-install-recommends ca-certificates curl make xz-utils \
-		zstd libarchive-tools erofs-utils e2fsprogs expect netcat-openbsd "$qemu" ${efi:+"$efi"} python3-pip
+		zstd libarchive-tools erofs-utils e2fsprogs mtools qemu-utils expect netcat-openbsd "$qemu" ${efi:+"$efi"} python3-pip
 fi
 
 tmp=$(mktemp -d)

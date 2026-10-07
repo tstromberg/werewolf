@@ -5,6 +5,13 @@
 //! /tmp, /var/tmp or /data, and the root is the image, byte for byte, on
 //! every boot.
 //!
+//! The image carries a dm-verity hash tree after its data, and this
+//! initramfs the parameters to open it with, /verity, both from the same
+//! build (lib/verity.zig). The root is mounted through dm-verity, so every
+//! block read from it is checked against the tree, and the tree against its
+//! root hash: a block that does not match fails to read
+//! (docs/design/verified-boot.md).
+//!
 //! The image is a slot's on a machine with slots, found on a filesystem the
 //! kernel command line names:
 //!
@@ -26,6 +33,8 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+const dm = @import("dm");
+const verity = @import("verity");
 const MS = linux.MS; // ziglint-ignore: Z032
 
 const deadman_after = 600;
@@ -83,32 +92,42 @@ pub fn main(init: std.process.Init) !void {
             0,
         );
     }
-    // Read-only, and nothing over it: no overlay to write into. erofs
-    // mounts the image file itself where the file's filesystem lets it (a
-    // slot's ext4, xfs or btrfs); the initramfs, in tmpfs, does not, and
-    // says so with ENOTBLK, so a direct boot's image goes through a
-    // read-only loop device.
+    // Read-only, and nothing over it: no overlay to write into. The image,
+    // a file in a slot's filesystem or in this initramfs, goes through a
+    // read-only loop device, which dm-verity then maps, checking each block
+    // as it is read. The device node is made from the number dm gives, not
+    // waited for from devtmpfs.
+    const params = verity.Params.parse(readAll(gpa, "/verity")) catch
+        fail("no root hash in /verity", .{});
+    const loop = loopDevice(gpa, img) catch |err|
+        fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
+    var table_buf: [512]u8 = undefined;
+    const table = verity.table(&table_buf, loop.path, params) catch unreachable;
+    const sectors = params.data_blocks * (verity.block_size / 512);
+    const dev = dm.create("root", "verity", sectors, table) catch |err|
+        fail("cannot open {s} through dm-verity: {s}", .{ img, @errorName(err) });
+    // dm-verity holds the loop device now: autoclear detaches the image
+    // when it lets go.
+    _ = linux.close(loop.fd);
+    const root_dev = "/dev/mapper/root";
+    if (linux.errno(linux.mknodat(linux.AT.FDCWD, root_dev, linux.S.IFBLK | 0o600, dev)) !=
+        .SUCCESS) fail("cannot make {s}", .{root_dev});
     mkdir("/root");
-    const flags = MS.RDONLY | MS.NOSUID | MS.NODEV;
-    var rc = linux.mount(img, "/root", "erofs", flags, 0);
-    if (linux.errno(rc) == .NOTBLK) {
-        const loop = loopDevice(
-            gpa,
-            img,
-        ) catch |err| fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
-        rc = linux.mount(loop.path, "/root", "erofs", flags, 0);
-        // Only now: autoclear detaches the image when the last holder of
-        // the device lets go, and until the mount holds it, that is us.
-        _ = linux.close(loop.fd);
-    }
+    const rc = linux.mount(root_dev, "/root", "erofs", MS.RDONLY | MS.NOSUID | MS.NODEV, 0);
     if (linux.errno(rc) != .SUCCESS) fail(
         "cannot mount {s}: {s}",
         .{ img, @tagName(linux.errno(rc)) },
     );
     if (boot.slot.len > 0)
-        say("slot {s}: {s}, read-only, is the root", .{ boot.slot, img })
+        say(
+            "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",
+            .{ boot.slot, img, params.root[0..8] },
+        )
     else
-        say("{s}, read-only, is the root", .{img});
+        say(
+            "{s}, read-only, verified (root hash {x}…), is the root",
+            .{ img, params.root[0..8] },
+        );
 
     if (boot.slot.len > 0) deadman(boot.slot);
 
@@ -205,9 +224,9 @@ const LoopConfig = extern struct {
     reserved: [8]u64 = @splat(0),
 };
 
-/// A free loop device, read-only, holding file, and gone once its mount
-/// is (autoclear). The caller closes fd once the device is mounted: closed
-/// before, autoclear would detach the image at once.
+/// A free loop device, read-only, holding file, and gone once its last
+/// holder is (autoclear). The caller closes fd once something else holds
+/// the device: closed before, autoclear would detach the image at once.
 fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]const u8, fd: i32 } {
     const ctl = linux.open("/dev/loop-control", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
     if (linux.errno(ctl) != .SUCCESS) return error.NoLoopControl;

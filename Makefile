@@ -119,24 +119,22 @@ MODULE_PARAMS = $(if $(and $(filter x86_64,$(ARCH)),$(filter kvm,$(ALLOW))),$(fo
 # werewolf's own programs, cmd/NAME/NAME.zig, are built, not checked in, and
 # laid in like form folders (docs/programs.md). init, stage0, the module
 # loader (modload), the network setup (iface-up) and policy (fence), the
-# one-way mount and the mount broker, posture and the SHELLFREE programs
-# are in every form; the rest only in forms whose chain includes the form
-# that needs them: dhcp (dhcp-client), cloud (cloud-metadata), bitten
-# (bite-cleanup), autoupdate (slot-update), postgresql (pg-init,
-# popen-shim) and demo (status-page). What they share to confine
-# themselves is lib/sandbox.zig, and to mount, lib/broker.zig. Zig is pre-1.0
-# and changes between releases, so the build insists on the version the
-# code is written for.
+# one-way mount and the mount broker, posture, the SHELLFREE programs
+# and bite-cleanup are in every form; the rest only in forms whose chain
+# includes the form that needs them: prod (dhcp-client, cloud-metadata,
+# slot-update), postgresql (pg-init, popen-shim) and demo (status-page).
+# What they share to confine themselves is lib/sandbox.zig, and to mount,
+# lib/broker.zig. Zig is pre-1.0 and changes between releases, so the build
+# insists on the version the code is written for.
 ZIG_VERSION = 0.17.0
 # Each is built into its own folder under PROGRAMS, apart from the forms',
 # so a form may share a program's name.
 PROGRAMS = build/$(ARCH)/programs
 DHCP := $(PROGRAMS)/dhcp-client/usr/lib/werewolf/dhcp-client
-DHCP_BIN := $(if $(filter dhcp,$(CHAIN)),$(DHCP))
+DHCP_BIN := $(if $(filter prod,$(CHAIN)),$(DHCP))
 CLOUD := $(PROGRAMS)/cloud-metadata/usr/lib/werewolf/cloud-metadata
-CLOUD_BIN := $(if $(filter cloud,$(CHAIN)),$(CLOUD))
+CLOUD_BIN := $(if $(filter prod,$(CHAIN)),$(CLOUD))
 BITE_CLEANUP := $(PROGRAMS)/bite-cleanup/usr/bin/bite-cleanup
-BITE_CLEANUP_BIN := $(if $(filter bitten,$(CHAIN)),$(BITE_CLEANUP))
 # PostgreSQL's helpers, in any form whose chain includes postgresql:
 # pg-init, which makes the cluster and applies the image's SQL, and
 # popen-shim.so, which pg-init preloads into initdb in place of a shell. The
@@ -164,14 +162,10 @@ POSTURE_BIN := $(PROGRAMS)/posture/usr/lib/werewolf/posture
 # a service someone else wrote. The forms link to them.
 SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell sshd-start leash
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
-UPDATER_BIN := $(if $(filter autoupdate,$(CHAIN)),$(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update)
+UPDATER_BIN := $(if $(filter prod,$(CHAIN)),$(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status-page/usr/lib/werewolf/status-page)
-OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(if $(BITE_CLEANUP_BIN),$(PROGRAMS)/bite-cleanup) $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
+OVERLAY_DIRS := $(CHAIN_DIRS) build/$(ARCH)/$(FORM)$(if $(DEV),-dev)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
 	$(if $(STATUS_BIN),$(PROGRAMS)/status-page)
-
-# A form that includes bitten boots from a slot, which bite installs; the
-# others boot directly, from the initramfs.
-SLOT := $(filter bitten,$(CHAIN))
 
 # --- locks --------------------------------------------------------------------
 # Every package in an image is pinned by a lock, apko's own, covering both
@@ -183,7 +177,7 @@ SLOT := $(filter bitten,$(CHAIN))
 # missing or older than its config; `make relock` resolves the form's again.
 # CI does that every 15 minutes, and releases when the result changes.
 LOCK = build/lock
-LOCKS = $(FORM_LOCK) $(LOCK)/stage0.lock.json $(LOCK)/kernel.lock.json
+LOCKS = $(FORM_LOCK) $(LOCK)/stage0.lock.json $(LOCK)/kernel.lock.json $(LOCK)/boot.lock.json
 
 # DEV=1 builds a form with a shell, for debugging and for test/checks, which
 # run as root on the console: busybox-full on top of the form's packages,
@@ -272,7 +266,7 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-metadata ci relock release-inputs dist posture clean help \
+.PHONY: all image slot bite-me disk run run-ssh lima lima-delete demo demo-delete config-tar list-forms test check check-slot check-updater check-updater-release _check-updater check-nodata check-lease check-unsigned check-verity check-metadata ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form
 
 all: image
@@ -299,7 +293,7 @@ relock:
 
 # --- kernel -------------------------------------------------------------------
 # Alpine's linux-virt, installed by apko with the rest of what it depends on,
-# checked against the Alpine keys in forms/autoupdate. Only the kernel and
+# checked against the Alpine keys in forms/prod. Only the kernel and
 # its modules are kept.
 $(BUILD)/kernel/rootfs.tar: $(LOCK)/kernel.lock.json
 	$(call apko_build,boot/kernel.yaml,$<)
@@ -353,19 +347,23 @@ $(OUT)/rootfs.tar: $(FORM_LOCK)
 	$(call apko_build,forms/$(FORM).yaml,$<)
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP_BIN) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
 # the same root.erofs, read-only: the slot's stage0, then a second cpio
 # holding root.erofs, which the kernel unpacks after it and stage0 mounts.
+# The cpio is made from a tar, as every image is: a cpio made from the file
+# would carry its inode and device numbers on this host, and two builds of
+# the same release would differ.
 $(OUT)/initramfs.zst: $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs
 	@[ "$(firstword $(CHAIN))" = minimal ] || \
 		{ echo "form $(FORM) does not include minimal, which carries /init" >&2; exit 1; }
 	rm -rf $(OUT)/direct && mkdir -p $(OUT)/direct && cp $(OUT)/slot/root.erofs $(OUT)/direct/ && \
 		TZ=UTC touch -t 197001010000 $(OUT)/direct/root.erofs && \
-		(cd $(OUT)/direct && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs) | \
-		zstd -1 -q -c > $(OUT)/direct.cpio.zst && \
+		(cd $(OUT)/direct && COPYFILE_DISABLE=1 $(TAR) -cf - --format ustar --uid 0 --gid 0 --numeric-owner \
+			--no-xattrs --no-acls --no-fflags root.erofs) | \
+		$(TAR) -cf - --format newc @- | zstd -1 -q -c > $(OUT)/direct.cpio.zst && \
 		cat $(OUT)/slot/initramfs.zst $(OUT)/direct.cpio.zst > $@
 	rm -rf $(OUT)/direct $(OUT)/direct.cpio.zst
 	@echo "form $(FORM): $(CHAIN)"
@@ -394,9 +392,12 @@ mkdir -p $(dir $@)
 endef
 
 # A program is cmd/NAME/NAME.zig and the files beside it, and may import
-# lib/sandbox.zig as "sandbox" and lib/broker.zig, the mount broker's
-# client, as "broker", compiled with them, as ReleaseSafe as it is.
-ZIG_MODULES = --dep sandbox --dep broker -Mroot=$(1) -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig
+# lib/sandbox.zig as "sandbox", lib/broker.zig, the mount broker's client,
+# as "broker", lib/dm.zig, the device mapper, as "dm", and lib/verity.zig,
+# dm-verity's hash tree, as "verity", compiled with them, as ReleaseSafe as
+# it is.
+ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity -Mroot=$(1) \
+	-Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig -Mverity=lib/verity.zig
 
 define zig_build
 $(zig_check)
@@ -423,6 +424,8 @@ $(PG_SHIM): cmd/popen-shim/popen-shim.zig
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/*),$(d)/$(notdir $(d)).zig)
 test:
 	zig test lib/sandbox.zig
+	zig test lib/dm.zig
+	zig test lib/verity.zig
 	zig test boot/gpt.zig
 	zig test cmd/popen-shim/popen-shim.zig -lc
 	for f in $(filter-out cmd/popen-shim/%,$(PROGRAM_SOURCES)); do zig test $(call ZIG_MODULES,$$f) || exit 1; done
@@ -439,10 +442,10 @@ endif
 
 # --- meta ---------------------------------------------------------------------
 # What the build knows that the image will need to rebuild itself: the
-# update in forms/autoupdate rebuilds a slot as `make slot` does, from these.
+# update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP_BIN) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -483,8 +486,8 @@ $(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar 
 # werewolf's own boot disk (docs/design/native-boot.md): GPT, an EFI partition
 # holding systemd-boot and slot a's kernel and stage0, and an ext4 partition
 # holding slot a's root.erofs, laid out as bite leaves a distro's. UEFI
-# firmware boots it anywhere, and it updates itself as a bitten machine does.
-# Only forms that boot from a slot have one. systemd-boot comes from Wolfi,
+# firmware boots it anywhere, and a form that includes prod updates itself
+# there as on a machine bite installed. systemd-boot comes from Wolfi,
 # pinned by a lock like the kernel's; the partition table is written by
 # boot/gpt.zig, built for this host. DISK_MIB is the disk's size;
 # DISK_ARGS go on the kernel command line, and updates carry them over.
@@ -503,17 +506,31 @@ $(GPT_BIN): boot/gpt.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -femit-bin=$@ $<
 
+VERITY_BIN = build/host/verity
+$(VERITY_BIN): tools/verity.zig lib/verity.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe --dep verity -Mroot=$< -Mverity=lib/verity.zig -femit-bin=$@
+
 disk: $(DISK)
 
-$(DISK): $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs $(OUT)/slot/cmdline \
-		$(BUILD)/boot/rootfs.tar $(GPT_BIN) boot/mkdisk
-	@[ -n "$(SLOT)" ] || { echo "form $(FORM) does not boot from a slot; build on bitten" >&2; exit 1; }
+DISK_INPUTS = $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs $(OUT)/slot/cmdline \
+	$(BUILD)/boot/rootfs.tar $(GPT_BIN) boot/mkdisk
+
+$(DISK): $(DISK_INPUTS)
 	boot/mkdisk $(ARCH) $(BUILD)/boot/rootfs.tar $(GPT_BIN) $(OUT)/slot $@ $(DISK_MIB) $(DISK_ARGS)
+
+# The disk a release publishes (docs/releases.md): made afresh, never with
+# DISK_ARGS, as compressed qcow2. zlib is named rather than left to
+# qemu-img's default, which a later qemu-img may change.
+$(OUT)/disk.qcow2: $(DISK_INPUTS)
+	boot/mkdisk $(ARCH) $(BUILD)/boot/rootfs.tar $(GPT_BIN) $(OUT)/slot $(OUT)/disk.raw $(DISK_MIB)
+	qemu-img convert -f raw -O qcow2 -c -o compression_type=zlib $(OUT)/disk.raw $@
+	rm -f $(OUT)/disk.raw
 
 # --- slot ---------------------------------------------------------------------
 # The same rootfs, booted from disk: a small stage0 initramfs that loads the
 # modules and mounts root.erofs read-only at / (cmd/stage0/stage0.zig).
-# This is what bite installs, and what autoupdate rebuilds on the machine.
+# This is what bite installs, and what the updater rebuilds on the machine.
 # root.erofs is made straight from the tar, as the cpio is; the modules stay
 # in stage0, since they are loaded before the root exists.
 slot: $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs $(OUT)/slot/cmdline
@@ -533,10 +550,14 @@ $(BUILD)/stage0/init.tar: $(STAGE0_BIN) $(LOADER_BIN)
 		cp $(STAGE0_BIN) $(BUILD)/stage0/files/init && cp $(LOADER_BIN) $(BUILD)/stage0/files/usr/lib/werewolf/
 	$(call layer,$(BUILD)/stage0/files)
 
-$(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(OUT)/modules.tar
+# stage0's /verity: what it opens this form's root.erofs with, made with it.
+$(OUT)/verity.tar: $(OUT)/slot/root.erofs
+	$(call layer,$(OUT)/verity)
+
+$(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(OUT)/modules.tar $(OUT)/verity.tar
 	mkdir -p $(dir $@)
 	$(TAR) -cf $(OUT)/stage0.cpio --format newc --uid 0 --gid 0 --numeric-owner \
-		@$(BUILD)/stage0/rootfs.tar @$(BUILD)/stage0/init.tar @$(OUT)/modules.tar
+		@$(BUILD)/stage0/rootfs.tar @$(BUILD)/stage0/init.tar @$(OUT)/modules.tar @$(OUT)/verity.tar
 	zstd -19 -T0 -q -f -o $@ $(OUT)/stage0.cpio
 	rm $(OUT)/stage0.cpio
 
@@ -556,8 +577,12 @@ $(OUT)/slot/initramfs.zst: $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $
 # matches. erofs-utils before 1.9 (Ubuntu 24.04 has 1.7.1) take
 # -Eall-fragments from a tar and write every file empty, without an error,
 # so older ones are refused, as are ones built without LZMA.
+#
+# After the image, its dm-verity hash tree, which stage0 opens it through,
+# with the root hash and salt tools/verity writes to $(OUT)/verity/verity
+# for stage0's /verity (lib/verity.zig, the same tree veritysetup makes).
 EROFS_OPTS = -b 4096 -zlzma,level=109 -C1048576 -Eall-fragments,dedupe
-$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar
+$(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar $(VERITY_BIN)
 	mkdir -p $(dir $@)
 	@# The root directory itself, first: without an entry for it, mkfs.erofs
 	@# gives / the builder's uid and mode 0777, which sshd's StrictModes
@@ -571,6 +596,7 @@ $(OUT)/slot/root.erofs: $(OUT)/rootfs.tar $(OUT)/overlay.tar
 		{ echo "mkfs.erofs has no LZMA: an erofs-utils built with liblzma is needed" >&2; exit 1; }
 	mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f $@ $(OUT)/root.tar >/dev/null
 	rm $(OUT)/root.tar $(OUT)/root.mtree
+	mkdir -p $(OUT)/verity && $(VERITY_BIN) $@ $(OUT)/verity/verity
 
 $(OUT)/slot/vmlinuz: $(BUILD)/vmlinuz
 	mkdir -p $(dir $@)
@@ -585,9 +611,6 @@ ifneq ($(filter bite-me,$(MAKECMDGOALS)),)
 ifneq ($(HOST_OS)-$(HOST_ARCH),Linux-$(ARCH))
 $(error bite-me runs on the Linux $(ARCH) machine it takes over)
 endif
-ifeq ($(SLOT),)
-$(error form $(FORM) does not boot from a slot; build on bitten)
-endif
 endif
 bite-me: slot
 	$(if $(filter 0,$(shell id -u)),,sudo) ./bite -i $(if $(wildcard config/*),--config config) $(OUT)/slot
@@ -599,6 +622,10 @@ bite-me: slot
 # CI builds only when that changes. `make dist` puts each form's files in
 # dist/ as a release names them, with its manifest, unsigned.
 RELEASE_FORMS = minimal prod prod-ssh
+# minimal is published whole, for direct boot, with the kernel arguments its
+# host passes; the rest as the slot the updater follows, and as a disk to
+# boot a VM from.
+DIST_DIRECT = $(filter minimal,$(FORM))
 # Where a published form's updater finds its releases (docs/updater.md): the
 # latest release's FORM-ARCH.json and files, which only a form built as it
 # ships follows, not a DEV=1 build.
@@ -621,10 +648,9 @@ release-inputs:
 dist:
 	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FORM=$$f _dist-form || exit 1; done
 
-_dist-form: $(if $(SLOT),slot,image) $(OUT)/meta.stamp $(OUT)/slot/cmdline
+_dist-form: $(if $(DIST_DIRECT),image $(OUT)/slot/cmdline,slot $(OUT)/disk.qcow2) $(OUT)/meta.stamp
 	release/manifest $(FORM) $(ARCH) $(OUT)/rootfs.tar $(OUT)/meta/usr/share/werewolf/kernel $(DIST) \
-		$(if $(SLOT),vmlinuz=$(OUT)/slot/vmlinuz stage0.zst=$(OUT)/slot/initramfs.zst root.erofs=$(OUT)/slot/root.erofs,vmlinuz=$(BUILD)/vmlinuz initramfs.zst=$(OUT)/initramfs.zst) \
-		cmdline=$(OUT)/slot/cmdline
+		$(if $(DIST_DIRECT),vmlinuz=$(BUILD)/vmlinuz initramfs.zst=$(OUT)/initramfs.zst cmdline=$(OUT)/slot/cmdline,vmlinuz=$(OUT)/slot/vmlinuz stage0.zst=$(OUT)/slot/initramfs.zst root.erofs=$(OUT)/slot/root.erofs disk.qcow2=$(OUT)/disk.qcow2)
 
 list-forms:
 	@for y in forms/*.yaml; do \
@@ -686,7 +712,8 @@ run-ssh:
 # and runs test/checks on each as root on its console (test/boot). Each
 # machine gets a blank disk and a config disk of its own, and nothing listens
 # on the host, so `make -j check` runs them side by side. The config holds
-# only data.key, a fixed test key, so crypt puts /data in LUKS2. Builds and
+# only data.key, a fixed test key, so prod and the forms on it put /data in
+# LUKS2. Builds and
 # consoles are logged in build/<arch>/check/. See docs/testing.md.
 FORMS := $(patsubst forms/%.yaml,%,$(wildcard forms/*.yaml))
 CHECK = $(BUILD)/check
@@ -714,17 +741,17 @@ export POSTURE_KNOWN = $(shell awk -v b=$(if $(DEV),dev,*) -v f=$(FORM) -v a=$(A
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
 CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update
-# bitten has no updater, which would fetch from the network once committed.
-CHECK_SLOT_FORM = bitten
+# minimal has no updater, which would fetch from the network once committed.
+CHECK_SLOT_FORM = minimal
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 
-check: $(addprefix check-,$(FORMS)) $(SHELLFREE_CHECKS) check-slot check-persist check-nodata check-lease check-unsigned check-metadata
+check: $(addprefix check-,$(FORMS)) $(SHELLFREE_CHECKS) check-slot check-persist check-nodata check-lease check-unsigned check-verity check-metadata
 	@echo "check: every form, and a slot, passed"
 
 # One form's two boots, REPEAT times (10 unless given), for a failure that
 # comes and goes: each failing first boot's console is kept as
 # FORM-one-N.log.
-# make check-one FORM=cloud REPEAT=20; add ACCEL=tcg to rule the
+# make check-one FORM=prod REPEAT=20; add ACCEL=tcg to rule the
 # hypervisor out.
 REPEAT ?= 10
 .PHONY: check-one
@@ -785,17 +812,36 @@ CHECK_FORM_QEMU = $(if $(CHECK_SSH),$(subst user$(comma)id=n0,user$(comma)id=n0$
 	-drive file=$(CHECK)/$(FORM).img,format=raw,if=virtio \
 	-drive file=$(CHECK)/$(FORM)-config.tar,format=raw,if=virtio,readonly=on
 
-# The dhcp form with no werewolf.ip: an address from QEMU's DHCP server, and
-# the client split as it says it is. After dhcp's own check, which builds
-# the same form in the same place.
-check-lease: | $(CHECK_SHARED) check-dhcp
-	@$(CHECK_MAKE) FORM=dhcp _check-lease-boot
+# prod with no werewolf.ip: an address from QEMU's DHCP server, and the
+# client split as it says it is. After prod's own check, which builds the
+# same form in the same place.
+check-lease: | $(CHECK_SHARED) check-prod
+	@$(CHECK_MAKE) FORM=prod _check-lease-boot
 
 _check-lease-boot:
 	@test/boot lease test/checks-lease $(CHECK)/lease.log $(CHECK_QEMU) \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)"
 	@grep -a -q 'dhcp-client: {.*"event":"bound"' $(CHECK)/lease.log || \
 		{ echo "FAIL   lease              no \"bound\" event on the console"; exit 1; }
+
+# A root image changed after its build must not boot: minimal's stage0,
+# then its root.erofs with one byte of the superblock changed, must stop
+# in stage0, dm-verity naming the block, before erofs ever reads it. After
+# minimal's own check, which builds the same form in the same place.
+check-verity: | $(CHECK_SHARED) check-minimal
+	@$(CHECK_MAKE) FORM=minimal _check-verity-boot
+
+_check-verity-boot:
+	@rm -rf $(CHECK)/verity && mkdir -p $(CHECK)/verity && cp $(OUT)/slot/root.erofs $(CHECK)/verity/ && \
+		printf x | dd of=$(CHECK)/verity/root.erofs bs=1 seek=1024 conv=notrunc 2>/dev/null && \
+		(cd $(CHECK)/verity && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs) | \
+		zstd -1 -q -c | cat $(OUT)/slot/initramfs.zst - >$(CHECK)/verity.zst && rm -r $(CHECK)/verity
+	@! test/boot verity - $(CHECK)/verity.log $(CHECK_QEMU) \
+		-kernel $(BUILD)/vmlinuz -initrd $(CHECK)/verity.zst -append "$(CHECK_CMDLINE)" >/dev/null
+	@grep -a -q 'device-mapper: verity: [0-9:]*: data block 0 is corrupted' $(CHECK)/verity.log && \
+		grep -a -q 'stage0: cannot mount /root.erofs' $(CHECK)/verity.log || \
+		{ echo "FAIL   verity             a changed root image was not refused; see $(CHECK)/verity.log"; exit 1; }
+	@echo "pass   verity             a changed root image does not boot"
 
 # An unsigned module offered at boot must be refused: by init on a RAM root,
 # and by stage0 on a slot. test/unsign cuts the signature off evdev, in a
@@ -820,7 +866,7 @@ _check-unsigned-slot:
 		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
 		-drive file=$(CHECK)/unsigned-victim.img,format=raw,if=virtio
 
-# The cloud form against a stand-in metadata server (test/metadata), five
+# prod against a stand-in metadata server (test/metadata), five
 # ways: a good config on GCP, AWS and Hetzner must be taken; a hostile one
 # refused whole; and a machine on no cloud must not ask at all
 # (test/cloud-boot). arm64 guests have SMBIOS only under UEFI firmware.
@@ -832,8 +878,8 @@ METADATA_QEMU = $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci \
 METADATA_BOOTS = "gcp good metadata" "aws good metadata" "hetzner good metadata" \
 	"gcp hostile metadata-refused" "none good metadata-refused"
 
-check-metadata: | $(CHECK_SHARED) check-cloud
-	@$(CHECK_MAKE) FORM=cloud _check-metadata-boots
+check-metadata: | $(CHECK_SHARED) check-prod
+	@$(CHECK_MAKE) FORM=prod _check-metadata-boots
 
 _check-metadata-boots:
 	@[ "$(ARCH)" != aarch64 ] || [ -n "$(CLOUD_FIRMWARE)" ] || \
@@ -842,13 +888,14 @@ _check-metadata-boots:
 		test/cloud-boot meta-$$1-$$2 $$1 $$2 test/checks-$$3 $(CHECK)/meta-$$1-$$2.log "$(CLOUD_FIRMWARE)" $(METADATA_QEMU) || failed=1; \
 	done; exit $$failed
 
-# crypt with a blank disk and no data.key must refuse, not make a key up.
-# After crypt's own check, which builds the same form in the same place.
-check-nodata: | $(CHECK_SHARED) check-crypt
-	@$(CHECK_MAKE) FORM=crypt _check-nodata-boot
+# prod's LUKS2 disk, as its own check left it, booted with no data.key:
+# it must refuse the disk, not format it again. After prod's own check,
+# which builds the same form in the same place and makes the disk.
+check-nodata: | $(CHECK_SHARED) check-prod
+	@$(CHECK_MAKE) FORM=prod _check-nodata-boot
 
 _check-nodata-boot:
-	@rm -f $(CHECK)/nodata.img && dd if=/dev/zero of=$(CHECK)/nodata.img bs=1048576 count=0 seek=1024 status=none
+	@cp $(CHECK)/prod.img $(CHECK)/nodata.img
 	@test/boot nodata test/checks-nodata $(CHECK)/nodata.log $(CHECK_QEMU) \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
 		-drive file=$(CHECK)/nodata.img,format=raw,if=virtio
@@ -857,7 +904,7 @@ _check-nodata-boot:
 # /victim read-only, and commit making the slot GRUB's default, which takes
 # the minute commit waits. The victim is a small ext4 holding what bite
 # leaves: the root image in slot a, and GRUB's environment block.
-# After bitten's own check, which builds the same form in the same place.
+# After minimal's own check, which builds the same form in the same place.
 check-slot: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM)
 	@mkdir -p $(CHECK)
 	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) slot >$(CHECK)/slot-build.log 2>&1 || \
@@ -885,11 +932,15 @@ _check-slot-boot:
 		{ echo "FAIL   slot               GRUB's default is not werewolf-a after commit"; exit 1; }
 	@echo "pass   slot               GRUB's default is werewolf-a"
 
-# PostgreSQL's data must outlive a reboot: the demo as it ships, a werewolf
-# disk (make disk: GPT, systemd-boot, werewolf's ext4 with its slots and
-# data/), booted twice under UEFI from the same image (test/checks-persist,
-# test/checks-persist-again). The first makes the cluster and stores its
-# posture; the second must keep both, and find the first's. Its network
+# PostgreSQL's data must outlive a reboot, and a power cut: the demo as it
+# ships, a werewolf disk (make disk: GPT, systemd-boot, werewolf's ext4
+# with its slots and data/), booted three times under UEFI from the same
+# image. The first makes the cluster and stores its posture, and powers off
+# (test/checks-persist); the second keeps both, finds the first's, and then
+# loses its power (test/checks-persist-again); the third, after the cut,
+# must keep all of it (test/checks-persist-cut). Without EL2: edk2, started
+# there under HVF, never reaches the boot manager, and the direct boots
+# already prove the guest's hypervisor stays off. Its network
 # reaches nothing beyond QEMU (restrict=on), so the updater, finding no
 # newer packages, builds no slot b mid-test, and the scan fetches no
 # database. After the demo's own check, which builds the same form in the
@@ -899,7 +950,8 @@ UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
 	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd, \
 	/opt/homebrew/share/qemu/edk2-x86_64-code.fd /usr/local/share/qemu/edk2-x86_64-code.fd \
 	/usr/share/qemu/edk2-x86_64-code.fd /usr/share/ovmf/OVMF.fd)))
-PERSIST_QEMU = $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -bios $(UEFI_FIRMWARE) \
+PERSIST_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
+	-smp 2 -m 2048 -no-reboot -device virtio-rng-pci -bios $(UEFI_FIRMWARE) \
 	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
 	-drive file=$(CHECK)/persist.img,format=raw,if=virtio
 .PHONY: check-persist _check-persist-boot
@@ -908,26 +960,28 @@ check-persist: | $(CHECK_SHARED) check-demo
 	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
 	@rm -f $(CHECK)/persist.img
 	@$(CHECK_MAKE) FORM=demo disk DISK=$(CHECK)/persist.img DISK_MIB=2048 \
-		DISK_ARGS="werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS)" >$(CHECK)/persist-build.log 2>&1 || \
+		DISK_ARGS="console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS)" >$(CHECK)/persist-build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/persist-build.log; echo "FAIL   persist build: see $(CHECK)/persist-build.log"; exit 1; }
 	@$(CHECK_MAKE) FORM=demo _check-persist-boot
 
 _check-persist-boot:
 	@test/boot persist test/checks-persist $(CHECK)/persist.log $(PERSIST_QEMU)
-	@test/boot persist-again test/checks-persist-again $(CHECK)/persist-again.log $(PERSIST_QEMU)
+	@POWER_CUT=1 test/boot persist-again test/checks-persist-again $(CHECK)/persist-again.log $(PERSIST_QEMU)
+	@test/boot persist-cut test/checks-persist-cut $(CHECK)/persist-cut.log $(PERSIST_QEMU)
+	@echo "pass   persist            $$(grep -a -c 'pg-init: removed the lock the last boot left' $(CHECK)/persist-cut.log) stale lock(s) removed after the cut"
 
 # A whole update, over the network, so not part of `check`, which needs
 # none: a form as it ships, on slot a of a disk, its build record claiming
 # the kernel release before its own, updates itself to slot b, which must
 # then boot and commit. The claim is one more file laid over the slot's
 # root, as a later tar entry replaces an earlier one; the build itself is
-# untouched. check-updater: autoupdate, which builds its slot from Wolfi
-# and Alpine. check-updater-release: prod-ssh, a form CI publishes, which
+# untouched. check-updater: prod built with DEV=1, which follows no
+# releases, so builds its slot from Wolfi and Alpine. check-updater-release: prod-ssh, a form CI publishes, which
 # installs CI's latest signed release; the claim also makes its root unlike
 # any release's. See test/update.
 CHECK_UPDATE = $(CHECK)/update-$(FORM)
 check-updater: | $(CHECK_SHARED)
-	@$(MAKE) --no-print-directory FORM=autoupdate _check-updater
+	@$(MAKE) --no-print-directory FORM=prod DEV=1 _check-updater
 
 check-updater-release: | $(CHECK_SHARED)
 	@$(MAKE) --no-print-directory FORM=prod-ssh _check-updater
@@ -950,12 +1004,17 @@ _check-updater-boot:
 		@$(CHECK_UPDATE)/root.mtree @$(OUT)/rootfs.tar @$(OUT)/overlay.tar @$(CHECK_UPDATE)/claim.tar
 	@mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
 		$(CHECK_UPDATE)/victim/var/lib/werewolf/a/root.erofs $(CHECK_UPDATE)/root.tar >/dev/null
-	@rm $(CHECK_UPDATE)/root.tar
+	@rm -rf $(CHECK_UPDATE)/root.tar $(CHECK_UPDATE)/verity && mkdir -p $(CHECK_UPDATE)/verity
+	@$(VERITY_BIN) $(CHECK_UPDATE)/victim/var/lib/werewolf/a/root.erofs $(CHECK_UPDATE)/verity/verity
 	@env=$(CHECK_UPDATE)/victim/boot/grub/grubenv; \
 		printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >$$env; \
 		head -c $$((1024 - $$(wc -c <$$env))) /dev/zero | tr '\0' '#' >>$$env
 	@mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK_UPDATE)/victim $(CHECK_UPDATE)/victim.img 3G
-	@cp $(OUT)/slot/vmlinuz $(OUT)/slot/initramfs.zst $(CHECK_UPDATE)/
+	@# The build's stage0, then this root's /verity in a cpio of its own,
+	@# which the kernel unpacks over the build's.
+	@cp $(OUT)/slot/vmlinuz $(CHECK_UPDATE)/
+	@(cd $(CHECK_UPDATE)/verity && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) | \
+		zstd -q -c | cat $(OUT)/slot/initramfs.zst - >$(CHECK_UPDATE)/initramfs.zst
 	@test/update $(CHECK_UPDATE) \
 		"console=$(CONSOLE) panic=1 $$(cat $(OUT)/slot/cmdline) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 init=/init werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
 		$(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=

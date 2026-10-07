@@ -70,7 +70,7 @@ accounts:
       gid: 200
 ```
 
-It includes `autoupdate`, as production forms do. The user is in the
+It includes `prod`, as production forms do. The user is in the
 image's `/etc/passwd`, which is read-only: nothing on the machine creates
 accounts.
 

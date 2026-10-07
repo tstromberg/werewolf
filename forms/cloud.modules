@@ -1,4 +1,0 @@
-# GCP's disks and NIC: SCSI disks behind virtio-scsi (the boot disk on
-# older machine types), and NVMe and Google's gVNIC (on newer ones, Arm's
-# included). Kept out of minimal, which runs where virtio is enough.
-virtio_scsi sd_mod nvme gve

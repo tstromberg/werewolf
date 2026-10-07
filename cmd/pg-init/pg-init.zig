@@ -40,6 +40,25 @@ pub fn main(init: std.process.Init) !void {
 
     if (Dir.cwd().access(io, data_dir ++ "/PG_VERSION", .{})) |_| {
         say(io, "keeping the cluster in {s}", .{data_dir});
+        // A power cut leaves the last boot's lock behind, naming a pid this
+        // boot may well have given to something else, which the server
+        // would take for itself still running. A lock from before this boot
+        // can be no one's: it goes.
+        const lock = data_dir ++ "/postmaster.pid";
+        if (lockStarted(Dir.cwd().readFileAlloc(
+            io,
+            lock,
+            gpa,
+            .limited(4096),
+        ) catch "")) |started| {
+            if (started < bootedAt(io)) {
+                Dir.cwd().deleteFile(
+                    io,
+                    lock,
+                ) catch |err| say(io, "{s}: {s}", .{ lock, @errorName(err) });
+                say(io, "removed the lock the last boot left", .{});
+            }
+        }
     } else |_| {
         if (Dir.cwd().access(io, made, .{})) |_| {
             say(
@@ -156,4 +175,34 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "pg-init: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
+}
+
+/// When the server that wrote a postmaster.pid started: its third line,
+/// seconds since 1970.
+fn lockStarted(text: []const u8) ?i64 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    _ = lines.next() orelse return null; // the pid
+    _ = lines.next() orelse return null; // the data directory
+    return std.fmt.parseInt(
+        i64,
+        std.mem.trim(u8, lines.next() orelse return null, " \r"),
+        10,
+    ) catch null;
+}
+
+/// When this boot began, in seconds since 1970: now, less the boot clock.
+fn bootedAt(io: Io) i64 {
+    const linux = std.os.linux;
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
+    const now = @divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s);
+    return @as(i64, @intCast(now)) - @as(i64, @intCast(ts.sec));
+}
+
+test lockStarted {
+    const lock = "537\n/data/svc/postgres/data\n1791328288\n5432\n/run/svc/postgres\n\n  " ++
+        "1234567    123456\nready   \n";
+    try std.testing.expectEqual(1791328288, lockStarted(lock).?);
+    try std.testing.expectEqual(null, lockStarted("537\n"));
+    try std.testing.expectEqual(null, lockStarted(""));
 }

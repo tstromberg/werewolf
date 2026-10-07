@@ -10,7 +10,7 @@ not yet, and how to check it on a running machine. Where it is going is in
 
 - **Carry less.** Each form holds only what it needs. `minimal` is 10
   packages and listens on nothing; there is no systemd, no PAM in use, no
-  compiler, no package manager outside `autoupdate`.
+  compiler, no package manager outside `prod`'s updater.
 - **Close things for good.** What can be locked until reboot is locked at
   boot, before any service runs: the module loader, kernel lockdown,
   ptrace. Root cannot reopen them.
@@ -34,7 +34,7 @@ not yet, and how to check it on a running machine. Where it is going is in
 | | |
 | --- | --- |
 | No setuid or setgid files | apko's `paths:` clear them from PAM's `unix_chkpwd`, and from util-linux `mount` in stage0; the updater clears any a new package brings |
-| Few listeners | `minimal`, `dhcp`, `disk`, `crypt`, `bitten`, `autoupdate`, `prod`: none. `sshd`, `prod-ssh`, `lima`: 22. `demo`: 80. Each form declares its ports in `/etc/werewolf/listen`, and `make check` fails on any other |
+| Few listeners | `minimal`, `prod`, `postgresql`: none. `sshd`, `prod-ssh`, `lima`: 22. `demo`: 80. Each form declares its ports in `/etc/werewolf/listen`, and `make check` fails on any other |
 | ssh | keys only (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `UsePAM no`); root by key only; no X11 or agent forwarding; `LogLevel VERBOSE`. Host keys are made at each boot and never outlive the machine |
 | Secrets | the config tar's contents go to `/run/config`, tmpfs, 0700. `data.key` is deleted once the volume is open |
 
@@ -113,9 +113,9 @@ head: /dev/mem,kmem,port is restricted`.
 
 | | |
 | --- | --- |
-| The root | `root.erofs`, mounted read-only at `/` by stage0 on every form: from the initramfs, or on a bitten machine from its slot. No overlay: what the system writes (accounts, keys, hostname, `resolv.conf`, runit's state) lives in `/run`, through links |
+| The root | `root.erofs`, mounted read-only at `/` by stage0 on every form: from the initramfs, or from a slot. Through dm-verity: the image carries its hash tree, stage0 the root hash, both from the same build, so a block changed since fails to read, and a changed superblock stops the boot. No overlay: what the system writes (accounts, keys, hostname, `resolv.conf`, runit's state) lives in `/run`, through links |
 | Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
-| `/data` | the machine's data. On a disk or a bitten machine, `nosuid,nodev,noexec`; `crypt` puts it in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
+| `/data` | the machine's data. On a disk or beside the slots, `nosuid,nodev,noexec`; with a `data.key` in the config, in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
 | The victim's filesystem | read-only at `/victim`; the few writers mount it separately |
 
 ### Mounts
@@ -266,8 +266,8 @@ init also says it on the console: `werewolf: lockdown: integrity`.
 on a slot, on every push, on x86_64 and arm64 ([testing.md](testing.md)),
 trying each attack as `nobody` where an ordinary user is the attacker. It
 boots every form a second time on the disks the first boot left, to show
-`/data` comes back as it was left; boots `crypt` without a key, to show it
-refuses; and offers init and stage0 a module with its signature cut off,
+`/data` comes back as it was left; boots `prod`'s LUKS2 disk without its
+key, to show it refuses; and offers init and stage0 a module with its signature cut off,
 to show the kernel refuses that too. It also holds each item under "Not yet" to being still open, so
 this page cannot fall behind the machines.
 

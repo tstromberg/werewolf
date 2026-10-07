@@ -10,14 +10,15 @@
 //! Every form includes minimal, so this program is in every image. It must
 //! not know which form it is in: it prepares the machine and starts runit,
 //! and the services a form adds take care of themselves. It decides from
-//! what the image carries (a DHCP client, mke2fs, cryptsetup) instead.
+//! what the image carries (a DHCP client, mke2fs, cryptsetup) and what it
+//! is told, instead.
 //!
 //! Everything it reads comes from two places, in this order:
 //!
 //!     kernel command line   werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
 //!                             (without werewolf.ip, the address is DHCP's)
 //!                           werewolf.mac=ADDR (which NIC, when there are several)
-//!                           werewolf.data=DEV (the disk /data may format, once)
+//!                           werewolf.data=DEV (/data on a disk: DEV, formatted once)
 //!                           (werewolf.debug=1, a root shell on the console where
 //!                             the form has one, is the debug-shell service's)
 //!                           and, on a machine with slots:
@@ -542,15 +543,18 @@ const Machine = struct {
     /// slot on probation from committing, so an update that broke /data
     /// falls back.
     ///
-    /// The form's packages decide what /data is, so init never asks which
-    /// form it is in:
+    /// The command line and the config decide what /data is, never which
+    /// form this is; the form only has the tools or not:
     ///
-    ///     no mke2fs        tmpfs, capped at a quarter of RAM: the form keeps nothing
-    ///     mke2fs           ext4 on the device labelled werewolf-data
-    ///     + cryptsetup     the same inside LUKS2, keyed by data.key from the config
+    ///     no werewolf.data, or no mke2fs   tmpfs, capped at a quarter of RAM: nothing is kept
+    ///     werewolf.data                    ext4 on the disk labelled werewolf-data
+    ///     + data.key in the config         the same inside LUKS2, keyed by it
     ///
-    /// The disk is found by its label, so its device name may differ from
-    /// boot to boot.
+    /// So a disk is used only where the command line says one is wanted,
+    /// and a disk that is slow to appear, or gone, is not quietly replaced
+    /// by RAM. The disk is found by its label, so its device name may
+    /// differ from boot to boot; werewolf.data names the device to format
+    /// when there is none yet.
     fn data(m: *Machine) void {
         mkdir("/data", 0o755);
         if (m.victim_dir.len > 0) {
@@ -576,7 +580,7 @@ const Machine = struct {
                 "remount,bind,ro,nosuid,nodev,noexec",
                 "/victim",
             })) say("/victim is read-only", .{});
-        } else if (m.which("mke2fs") == null) {
+        } else if (m.cmd.data.len == 0 or m.which("mke2fs") == null) {
             m.mount(&.{
                 "-t",
                 "tmpfs",
@@ -617,7 +621,11 @@ const Machine = struct {
             why.* = "no blkid, so no telling a blank disk from one in use";
             return null;
         };
-        const crypt = m.which("cryptsetup");
+        const key = "/run/config/data.key";
+        const crypt = if (m.read(key).len == 0) null else m.which("cryptsetup") orelse {
+            why.* = "data.key is in the config, and there is no cryptsetup to use it";
+            return null;
+        };
         const want: []const u8 = if (crypt != null) "crypto_LUKS" else "ext4";
         var fresh = false;
 
@@ -625,15 +633,14 @@ const Machine = struct {
         if (src.len > 0) {
             const have = m.blkid(&.{ "-p", "-o", "value", "-s", "TYPE", src });
             if (!std.mem.eql(u8, have, want)) {
-                why.* = m.fmt("{s} is {s}, this form wants {s}", .{ src, have, want });
+                why.* = m.fmt(
+                    "{s} is {s}; {s} data.key in the config, this machine wants {s}",
+                    .{ src, have, if (crypt != null) "with" else "without", want },
+                );
                 return null;
             }
         } else {
             const d = m.cmd.data;
-            if (d.len == 0) {
-                why.* = "no " ++ label ++ " disk, and werewolf.data names none";
-                return null;
-            }
             src = m.fmt(
                 "/dev/{s}",
                 .{if (std.mem.startsWith(u8, d, "/dev/")) d["/dev/".len..] else d},
@@ -655,11 +662,6 @@ const Machine = struct {
 
         var fs = src;
         if (crypt) |cryptsetup| {
-            const key = "/run/config/data.key";
-            if (m.read(key).len == 0) {
-                why.* = "no data.key in the config";
-                return null;
-            }
             // No udev here: libdevmapper must make /dev/mapper nodes itself,
             // here and in /etc/runit/3, which closes the volume and inherits
             // this environment through fence and runit.

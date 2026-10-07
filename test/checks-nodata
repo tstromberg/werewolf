@@ -1,8 +1,9 @@
-# crypt booted with a blank disk and no data.key (make check; see
-# test/checks for the format). It must refuse rather than make a key up:
-# /data unavailable, the reason in /run/werewolf/nodata, and /data an empty
-# read-only tmpfs, so nothing written there is lost at the next reboot.
+# prod's LUKS2 disk, as prod's own check left it, booted with no data.key
+# (make check; see test/checks for the format). It must refuse the disk,
+# not format it again: /data unavailable, the reason in
+# /run/werewolf/nodata, /data an empty read-only tmpfs, so nothing written
+# there is lost at the next reboot, and the disk still LUKS2.
 
-ok  nodata-marked    [ -s /run/werewolf/nodata ]
+ok  nodata-marked    grep -q 'without data.key' /run/werewolf/nodata
 ok  data-empty-ro    [ -z "$(ls -A /data)" ] && ! touch /data/.x
-ok  disk-untouched   ! grep -q '^/dev/mapper/data ' /proc/mounts
+ok  disk-untouched   ! grep -q '^/dev/mapper/data ' /proc/mounts && [ "$(head -c 4 /dev/vda)" = LUKS ]

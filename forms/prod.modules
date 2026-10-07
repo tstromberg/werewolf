@@ -1,0 +1,13 @@
+# GCP's disks and NIC: SCSI disks behind virtio-scsi (the boot disk on
+# older machine types), and NVMe and Google's gVNIC (on newer ones, Arm's
+# included). Kept out of minimal, which runs where virtio is enough.
+virtio_scsi sd_mod nvme gve
+# Packet sockets, for the DHCP client, which has no address to send from
+# until its lease arrives.
+af_packet
+# /data's LUKS. XTS and generic AES are built in, but the hardware AES
+# drivers are modules, and with the loader closed nothing pulls them in on
+# demand: without them dm-crypt still works, much slower, and says nothing.
+dm-crypt
+aarch64: aes-ce-blk
+x86_64: aesni-intel

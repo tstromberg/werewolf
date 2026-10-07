@@ -9,8 +9,8 @@ and which CVEs that fixes.
 
 It is one Zig program, `cmd/slot-update/slot-update.zig` with `cmd/slot-update/release.zig` (a
 release's manifest and signature), `cmd/slot-update/cve.zig` (the CVE children and
-the checks of what they say) and `updater/sandbox.zig`, in the
-`autoupdate` form.
+the checks of what they say) and `lib/sandbox.zig`, in `prod` and every
+form on it.
 
 ## Running
 
@@ -36,8 +36,9 @@ service stays down.
 | `compare` | Diff the new root's installed packages and kernel against the running image's. No difference: log `check` and stop. A build that rolled back before: log `skip` and stop. |
 | `cves` | Fetch the CVE sources and find what the update fixes (below), in children of their own ([Separation](#separation)). |
 | `root` | Add busybox's links, copy werewolf's own files forward, clear setuid and setgid bits, run `mkfs.erofs`. |
+| `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Unwrap Alpine's arm64 EFI zboot image to the raw `Image`. |
-| `stage0` | Build stage0 from its packages, `init` and the form's modules, as a newc cpio compressed with `zstd`. |
+| `stage0` | Build stage0 from its packages, `init`, the form's modules and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
 | `install` | Mount the victim's filesystem and GRUB's apart, copy the slot in, `sync`, write `attempt`, set GRUB's `next_entry`. |
 | `report` | Write the report; log `update`. |
 | `reboot` | Reboot cleanly. |
@@ -95,7 +96,7 @@ that fails is recorded with its error, and the update goes ahead.
 ## Separation
 
 Root, which builds and installs the slot, has no network at all: the
-form's policy (`forms/autoupdate.net`) lets only `_update` (uid 69) send,
+form's policy (`forms/prod.net`) lets only `_update` (uid 69) send,
 and only HTTPS and DNS. Everything the updater takes from the network is
 fetched by children running as `_update`, as werewolf's programs are
 written ([programs.md](programs.md)).
@@ -262,7 +263,7 @@ The program is small and does one pass. It favours what cannot go wrong:
 
 ```sh
 make test                        # zig fmt --check, and the unit tests
-make FORM=autoupdate slot        # builds the updater for ARCH, and the slot
+make FORM=prod slot              # builds the updater for ARCH, and the slot
 ```
 
 The Makefile builds it with `zig build-exe -O ReleaseSafe -fstrip -target

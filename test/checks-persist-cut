@@ -1,9 +1,10 @@
-# The demo's second boot on the disk its first boot left, before its
-# power is cut (test/checks-persist-cut): PostgreSQL keeps its cluster, and
-# the page finds the first boot's posture, so it has stored two or more.
+# The demo's third boot, after its second lost its power
+# (test/checks-persist-again): PostgreSQL recovers, keeps its cluster, and
+# starts though the last boot's lock is left behind; the page finds both
+# earlier boots' postures, so it has stored three or more.
 
 seen    cluster-kept      pg-init: keeping the cluster in /data/svc/postgres/data
-seen    two-boots-kept    status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":([2-9]|[1-9][0-9]+)[,}]
+seen    three-boots-kept  status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":([3-9]|[1-9][0-9]+)[,}]
 unseen  cluster-made      pg-init: making the cluster
 unseen  cluster-gone      pg-init: the cluster in /data/svc/postgres/data is gone
 unseen  data-lost         "error":"DataLost"

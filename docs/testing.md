@@ -51,17 +51,22 @@ Every form then boots a second time, on the disks its first boot left
 ([test/checks-again](../test/checks-again)). `/data` may hold real data, so
 a disk init formatted once must come back as it was: opened, checked,
 mounted, still holding the mark the first boot wrote, and with no line on
-the console saying it formatted anything. And `crypt` boots once with a
-blank disk and no key ([test/checks-nodata](../test/checks-nodata)): it must
-refuse, leaving `/data` an empty read-only tmpfs and the reason in
-`/run/werewolf/nodata`, rather than make a key up. And two boots offer an
+the console saying it formatted anything. And `prod` boots once more on
+the LUKS2 disk its own boots left, with no key
+([test/checks-nodata](../test/checks-nodata)): it must refuse the disk,
+leaving `/data` an empty read-only tmpfs, the reason in
+`/run/werewolf/nodata`, and the disk as it was, rather than format it again. And two boots offer an
 unsigned module, `minimal`'s init on a RAM root and stage0 on a slot
 ([test/checks-unsigned](../test/checks-unsigned)): [test/unsign](../test/unsign)
 cuts the signature off `evdev` and appends it to the initramfs, where it
 replaces the signed one. The kernel must refuse it, say so, stay
-untainted, and still load every signed module.
+untainted, and still load every signed module. And `minimal` boots once
+with one byte of its root image's superblock changed (`make check-verity`):
+dm-verity must name the block, and stage0 must stop before the root is
+mounted. Every other boot checks that its root is mounted through dm-verity
+(`root-verified` in [test/checks](../test/checks)).
 
-Five boots put the `cloud` form behind a stand-in metadata server
+Five boots put `prod` behind a stand-in metadata server
 ([test/metadata](../test/metadata), driven by
 [test/cloud-boot](../test/cloud-boot)), with the firmware's strings set as
 each cloud's: on GCP, AWS and Hetzner Cloud a good config must be taken
@@ -72,7 +77,7 @@ metadata server at all, which the server's own log shows. arm64 guests
 get SMBIOS only under UEFI firmware, which the boots load.
 
 Every boot so far gives its address on the kernel command line. One more
-boots the `dhcp` form without one ([test/checks-lease](../test/checks-lease)),
+boots `prod` without one ([test/checks-lease](../test/checks-lease)),
 so init asks QEMU's DHCP server: the address, gateway and DNS server must
 be applied, the console must show the client's `bound` event, and the
 client must be split as it says it is, an engine running as `_dhcp`,
@@ -85,7 +90,7 @@ service making the slot GRUB's default once it has stayed healthy for a
 minute, and then `bite-cleanup` deleting a stand-in distro around it,
 traps included, while keeping werewolf's directory and `/boot`. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
 leaves: the root image in slot a and GRUB's environment block. The slot
-uses the `bitten` form, which has no updater to reach the network once
+uses `minimal`, which has no updater to reach the network once
 committed.
 
 ```
@@ -97,7 +102,7 @@ pass   sshd-again         all checks
 ```
 
 Each machine gets a blank disk and a config disk of its own, holding only a
-fixed test `data.key` so `crypt` puts `/data` in LUKS2, and forwards no
+fixed test `data.key` so `prod` and the forms on it put `/data` in LUKS2, and forwards no
 ports, so machines never share state and `make -j` runs them together.
 Nothing waits a
 fixed time: [test/boot](../test/boot) waits for each thing it needs to see,
@@ -111,8 +116,8 @@ are `<form>-shellfree-build.log` and `<form>-shellfree.log`.
 
 ## What `make check-updater` does
 
-A whole update, as a machine does one: the `autoupdate` form as it ships
-boots from slot a of a disk, with its build record claiming the kernel
+A whole update, as a machine does one: `prod`, built with `DEV=1` so it
+follows no releases and builds its own slot, boots from slot a of a disk, with its build record claiming the kernel
 release before its own (`linux-virt-6.18.55-r0` claims `6.18.54-r0`). The
 claim is one file laid over the slot's root as a later tar entry; nothing
 in `build/` is changed. The machine commits, finds Alpine's kernel newer,
@@ -211,7 +216,7 @@ logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
 QEMU emulates there, and the job still takes under five minutes.
 
 [.github/workflows/update.yml](../.github/workflows/update.yml) runs `make
-check-updater` nightly, and on demand, on x86_64 alone: the autoupdate form
+check-updater` nightly, and on demand, on x86_64 alone: `prod`
 updates itself over the network, and the slot it builds must boot and
 commit. A workflow of its own, so a network flake fails it and nothing
 else; no push, pull request or release waits on it.

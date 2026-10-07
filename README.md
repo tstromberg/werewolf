@@ -33,7 +33,7 @@ build it.
 - **[Auditable updates.](docs/updater.md)** Packages and kernel come straight
   from Wolfi and Alpine, with no build server between. Each update logs the
   CVEs it fixes. A new image boots once and stays only if it stays healthy.
-- **Small.** `minimal` is 7 packages and 3 MB, listens on nothing, and boots
+- **Small.** `minimal` is 9 packages and 3 MB, listens on nothing, and boots
   in 0.17 s. There is no systemd, no PAM, and no setuid file.
 - **[Tested.](docs/testing.md)** Every push boots every form on two
   architectures, tries the attacks, and fails if one gets through.
@@ -63,7 +63,7 @@ machine and compare. See [docs/posture.md](docs/posture.md).
 ## Configure it
 
 Secrets travel in a config tar. Put `authorized_keys`, `hostname` and
-crypt's `data.key` in `config/`, which is gitignored, and run
+`data.key`, which puts `/data` in LUKS2, in `config/`, which is gitignored, and run
 `make config-tar`. init finds the tar raw on any block device or in the
 cloud's user data, and leaves it in `/run/config`, readable by root alone.
 See [docs/cloud.md](docs/cloud.md).
@@ -76,10 +76,9 @@ one includes `minimal`. `make list-forms` shows the include chains.
 
 | Form | What it is |
 |---|---|
-| `minimal` | the base: 7 packages, nothing listening |
-| `prod` | DHCP and autoupdate, no shell, nothing listening. Build yours on this. |
+| `minimal` | the base: 9 packages, nothing listening |
+| `prod` | DHCP, the cloud's metadata, updates itself, `/data` on a disk (in LUKS2 with `data.key`); no shell, nothing listening. Build yours on this. |
 | `prod-ssh` | `prod` plus sshd |
-| `crypt` | `/data` in LUKS2 |
 | `postgresql`, `demo` | leashed services |
 
 CI publishes `minimal`, `prod` and `prod-ssh` as signed, reproducible releases. See

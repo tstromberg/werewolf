@@ -2,8 +2,7 @@
 
 On GCP, AWS and Hetzner Cloud, a werewolf machine can take its config from
 the cloud's metadata server: the same config tar a config disk carries,
-set as the instance's user data. It needs the `cloud` form, which every
-form from `bitten` up includes.
+set as the instance's user data. `prod`, and every form on it, asks.
 
 ## Setting it up
 

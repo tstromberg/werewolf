@@ -1,7 +1,7 @@
 #!/bin/sh
 # cloud-boot NAME PROVIDER PAYLOAD CHECKS LOG FIRMWARE QEMU...
 #
-# Boot the cloud form as a machine on PROVIDER (gcp, aws, hetzner, or none
+# Boot prod as a machine on PROVIDER (gcp, aws, hetzner, or none
 # for a machine on no cloud), with no address and no config disk, against
 # test/metadata serving PAYLOAD (good or hostile) at 169.254.169.254. Run
 # CHECKS on its console (test/boot), then judge what the console and the

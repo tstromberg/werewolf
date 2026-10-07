@@ -263,7 +263,7 @@ file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
 | `nested-kvm` | needs `kvm`: the guests may run virtual machines too, `kvm-arm.mode=nested` or `nested=1`. Done |
 
 `kvm`, `nested-kvm`, `packet` and `netadmin` are built; `ebpf` and
-`io_uring` wait for a form that needs them. Every form built on `dhcp`
+`io_uring` wait for a form that needs them. Every form built on `prod`
 keeps both network capabilities, as its client must. The
 Makefile holds the one list of names (`ALLOWANCES`), and a name not in it
 fails the build, as does `nested-kvm` without `kvm`. Allowances that
@@ -296,7 +296,7 @@ A form allowed `ebpf` gives root back what eBPF rootkits are made of. That
 is the price of running an eBPF agent, and why it is a form of its own
 rather than a switch on every form.
 
-That form is `prod-ebpf`. It includes `autoupdate`, as production forms do,
+That form is `prod-ebpf`. It includes `prod`, as production forms do,
 and adds nothing but the `ebpf` and `packet` files: it is the base for an
 eBPF agent's form, which adds the agent and no tools an attacker could use
 to explore. Include chains are linear, so allowances are not mixins; a

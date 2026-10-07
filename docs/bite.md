@@ -7,7 +7,7 @@ program in werewolf, deletes the distro.
 
 ```sh
 make bite-me                            # on the VM: build, take over, look, reboot
-make FORM=autoupdate slot               # build/<arch>/autoupdate/slot/
+make FORM=prod slot                     # build/<arch>/prod/slot/
 sudo ./bite -n DIR                      # check, and show the plan
 sudo ./bite -i [--config X] DIR         # take over, look inside, ask to reboot
 sudo ./bite --reboot [--config X] DIR   # take over, and reboot into werewolf
@@ -15,7 +15,7 @@ sudo ./bite --undo                      # from the distro: remove werewolf
 bite-cleanup [-n]                       # in werewolf, after commit: delete the distro
 ```
 
-DIR holds a slot (*Slots*, below) of a form built on `bitten`.
+DIR holds a slot (*Slots*, below) of any form.
 
 **`make bite-me` does it all on the VM.** Run in a clone of this
 repository, it builds `prod-ssh`'s slot, the form that can still be
@@ -121,5 +121,5 @@ healthy. Every failure ends on the previous slot:
 | the kernel locks up | `softlockup_panic=1` makes it a panic | |
 | it boots but never gets healthy | stage0's deadman reboots it at ten minutes | yes |
 
-The `autoupdate` form builds new slots on the machine itself; see the
-README's *Autoupdate* and [updater.md](updater.md).
+`prod`, and every form on it, builds new slots on the machine itself; see
+[updater.md](updater.md).
