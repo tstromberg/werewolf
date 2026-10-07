@@ -1,6 +1,0 @@
-# /data's LUKS. XTS and generic AES are built in, but the hardware AES
-# drivers are modules, and with the loader closed nothing pulls them in on
-# demand: without them dm-crypt still works, much slower, and says nothing.
-dm-crypt
-aarch64: aes-ce-blk
-x86_64: aesni-intel

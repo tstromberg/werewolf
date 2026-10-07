@@ -1,0 +1,7 @@
+# nginx, as its own user: it may bind :80 and no other port, read its
+# configuration and the image, and run only itself.
+exec    /usr/bin/nginx -e stderr
+before  /usr/bin/nginx -e stderr -t -q
+user    nginx
+listen  tcp/80
+read    /etc/nginx

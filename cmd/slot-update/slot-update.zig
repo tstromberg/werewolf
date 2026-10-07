@@ -29,6 +29,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
 const broker = @import("broker");
+const verity = @import("verity");
 const cve = @import("cve.zig");
 const releases = @import("release.zig");
 
@@ -44,7 +45,7 @@ const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git
 const max_read = 256 << 20;
 
 /// _update, the account the children that fetch run as
-/// (forms/autoupdate.yaml).
+/// (forms/prod.yaml).
 const update_id: u32 = 69;
 /// The CVE fetcher's root, and where the CVE sources are fetched to.
 const net_root = work_dir ++ "/net";
@@ -781,6 +782,11 @@ const Update = struct {
             work_dir ++ "/slot/root.erofs",
             root,
         });
+        // Its dm-verity hash tree after it, and the line stage0 opens it with,
+        // for stage0's /verity below: as the build makes them (tools/verity.zig).
+        u.step = "verity";
+        const tree = try verity.build(u.gpa, try u.read(work_dir ++ "/slot/root.erofs"));
+        try u.append(work_dir ++ "/slot/root.erofs", tree.tree);
 
         // Alpine's arm64 kernel is an EFI zboot image; the slot carries the raw
         // Image inside it, as the build does (see Makefile).
@@ -835,6 +841,9 @@ const Update = struct {
         }
         const list = try moduleList(u.gpa, order, try u.read(meta_dir ++ "/module-params"));
         try u.write(try u.gpa.print("{s}/werewolf.modules", .{dst}), list);
+        var line: Io.Writer.Allocating = .init(u.gpa);
+        try tree.params.format(&line.writer);
+        try u.write(s ++ "/verity", line.written());
         try u.writeCpio(s, work_dir ++ "/stage0.cpio");
         try u.run(&.{
             "zstd",

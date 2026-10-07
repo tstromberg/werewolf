@@ -1,0 +1,7 @@
+# php-fpm, as its own user, its socket in its own directory: it reads its
+# configuration and the image, reaches nothing on the network, and runs
+# only itself.
+exec    /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf
+before  /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf
+user    php
+read    /etc/php

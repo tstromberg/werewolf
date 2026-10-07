@@ -28,7 +28,7 @@ any program to write:
 | Execute | the image: `/usr`, `/etc/sv`, `/etc/runit` | anything written since boot, even after a remount |
 | Make device nodes | | anywhere |
 | Make sockets, FIFOs, symlinks | `/run` | `/tmp`, `/data`: no rendezvous points or symlink traps there |
-| Device ioctls | terminals; what a form declares (`crypt`: `/dev/mapper/control`) | everything else: loop, device-mapper, and the rest of the kernel's ioctl surface |
+| Device ioctls | terminals; what a form declares (`prod`, for LUKS: `/dev/mapper/control`) | everything else: loop, device-mapper, and the rest of the kernel's ioctl surface |
 
 Reading stays open. The image is the same on every machine and holds no
 secrets; those are in `/run/config`, root's alone, and other users'
@@ -100,3 +100,13 @@ The .net files could use the same words: `connect _update dns tcp/443`.
   out of view.
 - **Connecting to a Unix socket by path.** Linux 6.18's Landlock does not
   judge it. Sockets live only in `/run`, under the directories' owners.
+- **Root and the broker.** Any root process can ask the broker for the
+  victim's filesystem, read-write, and while the updater holds it any
+  root process can write under it, since the mount is in the one
+  namespace. Telling askers apart by program does not close this: a
+  process can connect and then exec one that is allowed, and an attacker
+  with root can as well wait for the updater's own mount. What the rules
+  take from root is writing the machine's settings and disks underneath
+  their filesystems, and mounting anything else; what keeps root from
+  replacing a slot is verified boot (verified-boot.md): a root image not
+  its release's fails its hash tree, and the slot falls back.

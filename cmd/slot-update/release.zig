@@ -183,21 +183,6 @@ pub fn parseTime(s: []const u8) !i64 {
     return days * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
 }
 
-/// The build a slot's files make, as a release's manifest computes it: the
-/// first 16 hex digits of the sha256 of their sha256sum lines, in the
-/// manifest's order.
-pub fn buildOf(hashes: [Manifest.slot_files.len][64]u8) [16]u8 {
-    var h: Sha256 = .init(.{});
-    for (Manifest.slot_files, hashes) |name, hex| {
-        h.update(&hex);
-        h.update("  ");
-        h.update(name);
-        h.update("\n");
-    }
-    const hex = std.fmt.bytesToHex(h.finalResult(), .lower);
-    return hex[0..16].*;
-}
-
 const testing = std.testing;
 const test_key = @embedFile("testdata/image.pub");
 const test_manifest = @embedFile("testdata/prod-ssh-aarch64.json");
@@ -285,13 +270,4 @@ test parseTime {
         "+026-10-13T15:10:16Z",
     }) |bad|
         try testing.expectError(error.BadTime, parseTime(bad));
-}
-
-test buildOf {
-    // The test release's files, by their manifest hashes.
-    var hashes: [3][64]u8 = undefined;
-    @memcpy(&hashes[0], "27e0c04b7b7cfa4d34af20c23a3ff4d321aad83e7ab72674ebb747ba7b8a2868");
-    @memcpy(&hashes[1], "47bb120124e8f7e91f2f46611407640a39d8ca63408335e11a97c5325f19ccc8");
-    @memcpy(&hashes[2], "47f40485501c7f1d8f152348fc1859a3f3d839d4c0c3d2c7d9f6639cc26bc937");
-    try testing.expectEqualStrings("cd9d31b81c66fe3a", &buildOf(hashes));
 }

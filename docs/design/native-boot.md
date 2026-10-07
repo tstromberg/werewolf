@@ -104,7 +104,7 @@ fallback, and the next update's target.
 | Makefile | `make disk`: the slot, systemd-boot from a pinned Wolfi package (`boot/boot.yaml`), and `boot/mkdisk`, which writes the GPT with a small Zig program (`boot/gpt.zig`, so no `sfdisk`), the EFI partition with mtools, and the ext4 partition with `mke2fs -d`, then makes every file root's with `debugfs`. On a Mac: `brew install mtools e2fsprogs` |
 | updater | a second install path for `werewolf.esp=`; GRUB's stays |
 | `slot-keep` | for `werewolf.esp=`, rename the entry instead of setting `saved_entry` |
-| `bitten.modules` | `fat vfat nls_cp437 nls_utf8`, for the EFI partition |
+| `minimal.modules` | `fat vfat nls_cp437 nls_utf8`, for the EFI partition |
 | stage0, init | nothing: the ext4 partition is a victim filesystem |
 | `make demo` | boots the demo's disk in Lima like a distro's, with no Debian and no bite |
 

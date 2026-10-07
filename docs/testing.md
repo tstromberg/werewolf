@@ -7,6 +7,7 @@ make -j check       # the same, side by side
 make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
 make check-updater-release  # the same, to CI's latest signed release
+make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
 ```
 
 `make check` needs, beyond the build's tools, QEMU, `expect` and `mke2fs`
@@ -28,17 +29,19 @@ start there, so posture's `kernel-no-hypervisor` proves that
 
 Those checks need a shell, which most forms do not have, so each form is
 built for them with `DEV=1`: busybox-full on top of its packages, in
-`build/<arch>/<form>-dev`, and nothing else changed. The forms released
-without a shell, `minimal`, `prod` and `demo`, are also built as they ship
-and booted once more (`check-shellfree-<form>`), where test/boot runs
-nothing on the machine and judges it by its posture line alone: no shell,
-and no failure at all.
+`build/<arch>/<form>-dev`, and nothing else changed. The forms that ship
+without a shell, `minimal`, `prod`, the runtime forms and `demo`, are also
+built as they ship and booted once more (`check-shellfree-<form>`), where
+test/boot runs nothing on the machine and judges it by its posture line,
+no shell and no failure but those the form is for, and by what
+`test/console-<form>` says its console must and must not show.
 
 The checks try what an attacker would and expect to be refused: lower
 lockdown, read `/dev/mem` or another process's memory, undo a one-way
 sysctl, find a setuid file, listen on a port the form has not declared in
-`/etc/werewolf/listen` (ssh's 22 is declared by sshd being installed), run
-a program from `/tmp`.
+its network policy (ssh's 22 is declared by sshd being installed), run a
+program from `/tmp`. And something must answer HTTP on every port it has
+declared, so a runtime form's application runs, leashed, and serves.
 Where the attacker would be an ordinary user, the check acts as one, with
 runit's `chpst -u nobody`: write to `/run`, see another user's processes,
 plant a symlink or hardlink in `/tmp` for root to follow. Where a refusal
@@ -51,28 +54,42 @@ Every form then boots a second time, on the disks its first boot left
 ([test/checks-again](../test/checks-again)). `/data` may hold real data, so
 a disk init formatted once must come back as it was: opened, checked,
 mounted, still holding the mark the first boot wrote, and with no line on
-the console saying it formatted anything. And `crypt` boots once with a
-blank disk and no key ([test/checks-nodata](../test/checks-nodata)): it must
-refuse, leaving `/data` an empty read-only tmpfs and the reason in
-`/run/werewolf/nodata`, rather than make a key up. And two boots offer an
+the console saying it formatted anything. And `prod` boots once more on
+the LUKS2 disk its own boots left, with no key
+([test/checks-nodata](../test/checks-nodata)): it must refuse the disk,
+leaving `/data` an empty read-only tmpfs, the reason in
+`/run/werewolf/nodata`, and the disk as it was, rather than format it again. And two boots offer an
 unsigned module, `minimal`'s init on a RAM root and stage0 on a slot
 ([test/checks-unsigned](../test/checks-unsigned)): [test/unsign](../test/unsign)
 cuts the signature off `evdev` and appends it to the initramfs, where it
 replaces the signed one. The kernel must refuse it, say so, stay
-untainted, and still load every signed module.
+untainted, and still load every signed module. And `minimal` boots once
+with one byte of its root image's superblock changed (`make check-verity`):
+dm-verity must name the block, and stage0 must stop before the root is
+mounted. Every other boot checks that its root is mounted through dm-verity
+(`root-verified` in [test/checks](../test/checks)).
 
-Five boots put the `cloud` form behind a stand-in metadata server
+Seven boots put `prod` behind a stand-in metadata server
 ([test/metadata](../test/metadata), driven by
 [test/cloud-boot](../test/cloud-boot)), with the firmware's strings set as
-each cloud's: on GCP, AWS and Hetzner Cloud a good config must be taken
-(the hostname and root's key applied, the tar rewritten root's and 0600),
-and on AWS only through a session token; a tar with a symlink and a `../`
-entry must be refused whole; and a machine on no cloud must not ask the
-metadata server at all, which the server's own log shows. arm64 guests
-get SMBIOS only under UEFI firmware, which the boots load.
+each cloud's: on GCP, AWS, Hetzner Cloud and Azure a good config must be
+taken (the hostname and root's key applied, the tar rewritten root's and
+0600), and on AWS only through a session token; a tar with a symlink and a
+`../` entry must be refused whole; and a machine on no cloud, or on a
+desktop's Hyper-V, which names itself as Azure does but for Azure's asset
+tag, must not ask the metadata server at all, which the server's own log
+shows. arm64 guests get SMBIOS only under UEFI firmware, which the boots
+load.
+
+`make check-dist`, after `make dist`, boots each release disk in `dist/`
+as published: UEFI firmware, systemd-boot, slot a, with `-snapshot` so the
+file is not changed and a network with no way out, so the updater cannot
+install the latest release over it. Its posture line must show exactly
+what the form fails as it ships ([test/posture-known](../test/posture-known)).
+The release workflow runs it on every release.
 
 Every boot so far gives its address on the kernel command line. One more
-boots the `dhcp` form without one ([test/checks-lease](../test/checks-lease)),
+boots `prod` without one ([test/checks-lease](../test/checks-lease)),
 so init asks QEMU's DHCP server: the address, gateway and DNS server must
 be applied, the console must show the client's `bound` event, and the
 client must be split as it says it is, an engine running as `_dhcp`,
@@ -85,7 +102,7 @@ service making the slot GRUB's default once it has stayed healthy for a
 minute, and then `bite-cleanup` deleting a stand-in distro around it,
 traps included, while keeping werewolf's directory and `/boot`. The victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite
 leaves: the root image in slot a and GRUB's environment block. The slot
-uses the `bitten` form, which has no updater to reach the network once
+uses `minimal`, which has no updater to reach the network once
 committed.
 
 ```
@@ -97,7 +114,7 @@ pass   sshd-again         all checks
 ```
 
 Each machine gets a blank disk and a config disk of its own, holding only a
-fixed test `data.key` so `crypt` puts `/data` in LUKS2, and forwards no
+fixed test `data.key` so `prod` and the forms on it put `/data` in LUKS2, and forwards no
 ports, so machines never share state and `make -j` runs them together.
 Nothing waits a
 fixed time: [test/boot](../test/boot) waits for each thing it needs to see,
@@ -111,8 +128,8 @@ are `<form>-shellfree-build.log` and `<form>-shellfree.log`.
 
 ## What `make check-updater` does
 
-A whole update, as a machine does one: the `autoupdate` form as it ships
-boots from slot a of a disk, with its build record claiming the kernel
+A whole update, as a machine does one: `prod`, built with `DEV=1` so it
+follows no releases and builds its own slot, boots from slot a of a disk, with its build record claiming the kernel
 release before its own (`linux-virt-6.18.55-r0` claims `6.18.54-r0`). The
 claim is one file laid over the slot's root as a later tar entry; nothing
 in `build/` is changed. The machine commits, finds Alpine's kernel newer,
@@ -135,6 +152,34 @@ slot boots and updates as this one does.
 
 It needs the network, so it is not part of `make check`. About 4 minutes
 with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.
+
+## What `make check-gcp` does
+
+[test/gcp](../test/gcp) runs `prod-ssh`'s disk, as a release makes it, on
+Google Compute Engine, as a user would: converted to the raw disk GCP
+imports, made an image (UEFI, gVNIC), and booted on a fresh VM (an
+`e2-small`, or a `t2a-standard-1` for `ARCH=aarch64`) with a config in its
+user-data: a hostname, and an ssh key made for this run. It is judged from
+GCP's record of the VM's serial port:
+
+| Check | Passes when |
+| --- | --- |
+| `root-verified` | stage0 opened slot a's root through dm-verity |
+| `metadata-config` | `cloud-metadata` took the config from GCP's metadata server |
+| `hostname` | posture names the host as the config did |
+| `posture` | what fails is exactly what `test/posture-known` says `prod-ssh` fails |
+| `ssh-login` | root logs in, over the Internet, with the run's key |
+
+For the login, a firewall rule opens port 22 to this VM alone, while the
+check runs. The VM, the rule, the image and the upload are deleted however
+the check ends; `GCP_KEEP=1` keeps the VM and the rule, to look around.
+The serial port is kept in `build/<arch>/prod-ssh/check/gcp-serial.log`.
+
+It needs gcloud, logged in, with a project (`GCP_PROJECT`, or gcloud's
+own), and costs a few cents. The zone is `us-central1-a` (`GCP_ZONE`), and
+the image goes up through a bucket it makes, `PROJECT-werewolf-images`
+(`GCP_BUCKET`). About 5 minutes, most of it GCP making the image. Not part
+of `make check`, nor of CI, which holds no GCP credentials.
 
 ## Writing a check
 
@@ -211,7 +256,7 @@ logs when it fails. The x86_64 runner has KVM; the arm64 runner has none, so
 QEMU emulates there, and the job still takes under five minutes.
 
 [.github/workflows/update.yml](../.github/workflows/update.yml) runs `make
-check-updater` nightly, and on demand, on x86_64 alone: the autoupdate form
+check-updater` nightly, and on demand, on x86_64 alone: `prod`
 updates itself over the network, and the slot it builds must boot and
 commit. A workflow of its own, so a network flake fails it and nothing
 else; no push, pull request or release waits on it.

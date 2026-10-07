@@ -20,6 +20,18 @@
 # machine asks DHCP. Every GUID, UUID, serial number and time is fixed, so
 # the same slot gives the same disk.
 #
+# The kernel speaks on every console named; userland on the last that
+# exists, which is /dev/console, or, if none does, on the first console the
+# kernel registered. That must be the serial port, which every cloud
+# records and QEMU's -nographic shows. On x86_64 it is ttyS0 everywhere. On
+# aarch64 it is not: ttyAMA0 on GCP, Azure, Hetzner and QEMU, ttyS0 on AWS
+# Graviton. So aarch64 names no serial port, and no tty0, which, registered
+# first, would take /dev/console wherever the port named is missing; it
+# names only hvc0, and where there is no hvc0 the kernel takes the serial
+# port the firmware describes in its ACPI SPCR table, whichever it is.
+# Lima's vz, which has no serial port, has hvc0. An ARG of console=hvc0
+# makes /dev/console the virtio console on x86_64 too.
+#
 # Runs on macOS and Linux. Needs mtools (mformat, mmd, mcopy) and
 # e2fsprogs' mke2fs and debugfs: Homebrew's on macOS, which keeps them out
 # of PATH, so its prefix is searched too.
@@ -32,8 +44,8 @@ set -eu
 arch=$1 boot_rootfs=$2 gpt=$3 slot=$4 out=$5 size_mib=$6
 shift 6
 case $arch in
-aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=tty0 console=ttyAMA0 console=hvc0' ;;
-x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=ttyS0,115200 console=hvc0' ;;
+aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=hvc0' ;;
+x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=hvc0 console=ttyS0,115200' ;;
 *)
 	echo "boot/mkdisk: $arch is not supported" >&2
 	exit 2

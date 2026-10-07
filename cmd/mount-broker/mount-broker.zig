@@ -34,6 +34,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
+const dm = @import("dm");
 
 const socket_path = "/run/werewolf/mount-broker.sock";
 const mnt_dir = "/run/werewolf/mnt";
@@ -113,7 +114,7 @@ fn setUp() !i32 {
         "mmap",            "munmap",     "mremap",  "clock_gettime", "nanosleep", "exit_group",
         "restart_syscall",
     }) |name| f.allow(name);
-    f.allowArg("ioctl", 1, dm_dev_remove);
+    f.allowArg("ioctl", 1, dm.dev_remove);
     try f.install();
     return fd;
 }
@@ -412,7 +413,7 @@ fn shutdown(log: *Log) void {
             log.event("shutdown", .{ .data = "busy; read-only" });
         }
     }
-    if (closeLuks("data")) log.event("shutdown", .{ .luks = "closed" });
+    if (dm.remove("data")) log.event("shutdown", .{ .luks = "closed" });
     if (isMounted(mounts, "/victim")) {
         const journal = remountReadOnly("/victim");
         const unmounted = linux.errno(linux.umount2("/victim", 0)) == .SUCCESS;
@@ -440,45 +441,6 @@ fn isMounted(mounts: []const u8, dir: []const u8) bool {
         if (std.mem.eql(u8, fields.next() orelse continue, dir)) return true;
     }
     return false;
-}
-
-/// The kernel's struct dm_ioctl (linux/dm-ioctl.h), version 4.
-const DmIoctl = extern struct {
-    version: [3]u32 = .{ 4, 0, 0 },
-    data_size: u32 = @sizeOf(DmIoctl),
-    data_start: u32 = @sizeOf(DmIoctl),
-    target_count: u32 = 0,
-    open_count: i32 = 0,
-    flags: u32 = 0,
-    event_nr: u32 = 0,
-    padding: u32 = 0,
-    dev: u64 = 0,
-    name: [128]u8 = @splat(0),
-    uuid: [129]u8 = @splat(0),
-    data: [7]u8 = @splat(0),
-
-    comptime {
-        std.debug.assert(@sizeOf(DmIoctl) == 312);
-    }
-};
-
-/// DM_DEV_REMOVE: _IOWR(0xfd, 4, struct dm_ioctl).
-const dm_dev_remove: u32 = 0xc0000000 | (@as(u32, @sizeOf(DmIoctl)) << 16) | (0xfd << 8) | 4;
-
-/// The device-mapper device name removed, as `cryptsetup close` does: the
-/// mapping goes, and with it the key it held. Whether there was one.
-fn closeLuks(comptime name: []const u8) bool {
-    const ctl = linux.openat(
-        linux.AT.FDCWD,
-        "/dev/mapper/control",
-        .{ .ACCMODE = .RDWR, .CLOEXEC = true },
-        0,
-    );
-    if (linux.errno(ctl) != .SUCCESS) return false;
-    defer _ = linux.close(@intCast(ctl));
-    var io: DmIoctl = .{};
-    @memcpy(io.name[0..name.len], name);
-    return linux.errno(linux.ioctl(@intCast(ctl), dm_dev_remove, @intFromPtr(&io))) == .SUCCESS;
 }
 
 // --- the machine's own record --------------------------------------------------
@@ -619,8 +581,4 @@ test "the machine's own record" {
         "/victim",
     ));
     try testing.expect(!isMounted("/dev/vda /victim2 ext4 ro 0 0\n", "/victim"));
-}
-
-test DmIoctl {
-    try testing.expectEqual(0xc138fd04, dm_dev_remove);
 }

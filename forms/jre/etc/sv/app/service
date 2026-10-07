@@ -1,0 +1,6 @@
+# The application, as its own user: it may bind :8080 and no other port,
+# read the image, and run only java. Without its performance-data file,
+# which it would write in /tmp.
+exec    /usr/bin/java -XX:-UsePerfData -m jdk.httpserver -b 0.0.0.0 -p 8080 -d /usr/lib/app/www
+user    app
+listen  tcp/8080

@@ -1,7 +1,0 @@
-# bitten: cloud, on a machine `bite` took over. The old root filesystem
-# stays, and /data is a directory on it; the config sits beside it. See
-# docs/bite.md.
-include: cloud.yaml
-contents:
-  packages:
-    - blkid                 # find the victim's filesystem by UUID (busybox cannot read xfs or btrfs)

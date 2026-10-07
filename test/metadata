@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """metadata PAYLOAD PORT_FILE LOG_FILE
 
-A stand-in for GCP's, AWS's and Hetzner Cloud's metadata servers, for
-make check's cloud boots (test/cloud-boot). It serves user data only as
-each cloud does: GCP's with Metadata-Flavor: Google, AWS's only through an
-IMDSv2 session token, Hetzner's plainly. Anything else is refused.
+A stand-in for GCP's, AWS's, Hetzner Cloud's and Azure's metadata
+servers, for make check's cloud boots (test/cloud-boot). It serves user
+data only as each cloud does: GCP's with Metadata-Flavor: Google, AWS's
+only through an IMDSv2 session token, Hetzner's plainly, Azure's with
+Metadata: true. Anything else is refused.
 
 PAYLOAD is good (a config tar with a hostname and root's key) or hostile
 (a symlink and a ../ entry beside them), base64-encoded as a cloud holds
@@ -48,7 +49,7 @@ def main():
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def record(self):
-            seen = {h: self.headers.get(h) for h in ("Metadata-Flavor", "X-aws-ec2-metadata-token", "X-aws-ec2-metadata-token-ttl-seconds") if self.headers.get(h)}
+            seen = {h: self.headers.get(h) for h in ("Metadata-Flavor", "Metadata", "X-aws-ec2-metadata-token", "X-aws-ec2-metadata-token-ttl-seconds") if self.headers.get(h)}
             log.write(f"{self.command} {self.path} {seen}\n")
 
         def answer(self, code, data=b""):
@@ -65,6 +66,8 @@ def main():
                 return self.answer(200, body) if self.headers.get("X-aws-ec2-metadata-token") == TOKEN else self.answer(401)
             if self.path == "/hetzner/v1/userdata":
                 return self.answer(200, body)
+            if self.path == "/metadata/instance/compute/userData?api-version=2021-01-01&format=text":
+                return self.answer(200, body) if self.headers.get("Metadata") == "true" else self.answer(400)
             self.answer(404)
 
         def do_PUT(self):

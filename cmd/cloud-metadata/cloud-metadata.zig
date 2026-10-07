@@ -11,7 +11,7 @@
 //!
 //! The user data is the config tar, base64-encoded: on GCP the instance's
 //! `user-data` attribute, on AWS its user data, on Hetzner Cloud its
-//! user_data. The cloud is known from the firmware's DMI strings before any
+//! user_data, on Azure its userData. The cloud is known from the firmware's DMI strings before any
 //! packet is sent, so nothing is asked of 169.254.169.254 on a network
 //! where a neighbour might answer for it.
 //!
@@ -57,6 +57,8 @@ const Provider = struct {
     vendor: []const u8,
     /// DMI product_name, exactly, where the vendor alone is not enough.
     product: ?[]const u8 = null,
+    /// DMI chassis_asset_tag, exactly, where the product is not enough.
+    asset: ?[]const u8 = null,
     path: []const u8,
     /// One extra request header, if the server insists on it.
     header: []const u8 = "",
@@ -74,6 +76,16 @@ const providers = [_]Provider{
     },
     .{ .name = "aws", .vendor = "Amazon EC2", .path = "/latest/user-data", .token = true },
     .{ .name = "hetzner", .vendor = "Hetzner", .path = "/hetzner/v1/userdata" },
+    // Hyper-V on a desktop names itself as Azure does; only Azure sets
+    // this asset tag.
+    .{
+        .name = "azure",
+        .vendor = "Microsoft Corporation",
+        .product = "Virtual Machine",
+        .asset = "7783-7084-3265-9085-8269-3286-77",
+        .path = "/metadata/instance/compute/userData?api-version=2021-01-01&format=text",
+        .header = "Metadata: true",
+    },
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -114,9 +126,11 @@ var step: []const u8 = "start";
 fn run(log: *Log) !void {
     var vendor_buf: [128]u8 = undefined;
     var product_buf: [128]u8 = undefined;
+    var asset_buf: [128]u8 = undefined;
     const vendor = dmi("/sys/class/dmi/id/sys_vendor", &vendor_buf);
     const product = dmi("/sys/class/dmi/id/product_name", &product_buf);
-    const p = identify(vendor, product) orelse {
+    const asset = dmi("/sys/class/dmi/id/chassis_asset_tag", &asset_buf);
+    const p = identify(vendor, product, asset) orelse {
         log.event(
             "skip",
             .{
@@ -190,10 +204,11 @@ fn run(log: *Log) !void {
     log.event("config", .{ .provider = p.name, .files = names[0..n] });
 }
 
-fn identify(vendor: []const u8, product: []const u8) ?Provider {
+fn identify(vendor: []const u8, product: []const u8, asset: []const u8) ?Provider {
     for (providers) |p| {
         if (!std.mem.eql(u8, vendor, p.vendor)) continue;
         if (p.product) |want| if (!std.mem.eql(u8, product, want)) continue;
+        if (p.asset) |want| if (!std.mem.eql(u8, asset, want)) continue;
         return p;
     }
     return null;
@@ -952,11 +967,21 @@ test "requests carry no smuggled lines" {
 }
 
 test "clouds by their firmware's names" {
-    try std.testing.expectEqualStrings("gcp", identify("Google", "Google Compute Engine").?.name);
-    try std.testing.expectEqualStrings("aws", identify("Amazon EC2", "m7g.large").?.name);
-    try std.testing.expectEqualStrings("hetzner", identify("Hetzner", "vServer").?.name);
-    try std.testing.expectEqual(null, identify("QEMU", "Standard PC (Q35 + ICH9, 2009)"));
-    try std.testing.expectEqual(null, identify("Google", "Pixel"));
+    const azure_tag = "7783-7084-3265-9085-8269-3286-77";
+    try std.testing.expectEqualStrings(
+        "gcp",
+        identify("Google", "Google Compute Engine", "").?.name,
+    );
+    try std.testing.expectEqualStrings("aws", identify("Amazon EC2", "m7g.large", "").?.name);
+    try std.testing.expectEqualStrings("hetzner", identify("Hetzner", "vServer", "").?.name);
+    try std.testing.expectEqualStrings(
+        "azure",
+        identify("Microsoft Corporation", "Virtual Machine", azure_tag).?.name,
+    );
+    try std.testing.expectEqual(null, identify("QEMU", "Standard PC (Q35 + ICH9, 2009)", ""));
+    try std.testing.expectEqual(null, identify("Google", "Pixel", ""));
+    // Hyper-V on a desktop: Azure's names, without Azure's asset tag.
+    try std.testing.expectEqual(null, identify("Microsoft Corporation", "Virtual Machine", "None"));
     try std.testing.expectEqualStrings("?", printable("Evil\"vendor"));
 }
 

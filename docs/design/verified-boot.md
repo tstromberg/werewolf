@@ -205,7 +205,7 @@ everything else, without being packaged as apks. This much is done, for
 | File | Contents |
 | --- | --- |
 | `vmlinuz` | our kernel |
-| `stage0.zst` | stage0: the form's modules, veritysetup, the signed policy and the root hash |
+| `stage0.zst` | stage0: the form's modules, the signed policy and the root hash |
 | `root.erofs` | the root image and its hash tree |
 | `initramfs.zst` | for direct boot: stage0 and the root image |
 | `werewolf.efi` | for Secure Boot: a UKI of the kernel, `initramfs.zst` and the command line |
@@ -267,10 +267,11 @@ clock, which comes from the hypervisor.
 
 ### Development builds
 
-`make` builds what CI builds, without the signatures: no hash tree
-(veritysetup does not run on macOS) and no policy. stage0 mounts the root
-image directly and says on the console that the build is unsigned; IPE stays
-inactive and everything runs, as now. To see enforcement, boot a CI release.
+`make` builds what CI builds, without the signatures: the hash tree and
+root hash, which werewolf makes itself (tools/verity.zig, on macOS as on
+Linux), but no policy. stage0 opens the root through dm-verity on every
+build; IPE stays inactive and everything runs, as now. To see enforcement,
+boot a CI release.
 
 ## Phases
 
@@ -295,8 +296,10 @@ Each phase ships on its own.
    still remount. Done: `make check` proves the root refuses writes and
    unlinks, and that `posture` reports it.
 3. **Signed releases**: CI builds reproducibly, boot-tests and signs (done,
-   [docs/releases.md](../releases.md)); it adds the hash tree, and the
-   updater installs releases: a form CI publishes follows them, its
+   [docs/releases.md](../releases.md)); the hash tree (done: every build
+   appends it to `root.erofs`, and stage0 opens the root through dm-verity
+   with the root hash in its initramfs; `make check-verity` proves a
+   changed image does not boot), and the updater installs releases: a form CI publishes follows them, its
    manifest checked against the image key, its files against the
    manifest (docs/updater.md); `make check-updater-release` tests it. Until
    phase 4, dm-verity catches corruption, not attackers. Removes building
@@ -338,8 +341,11 @@ Each phase ships on its own.
 - **Rollback.** An older signed release still boots if root installs it on a
   bitten machine, or writes an older UKI to the ESP. TPM counters, as
   ChromeOS uses, would stop that; our kernel can carry the TPM driver.
-- **stage0's size.** veritysetup brings libcryptsetup and its libraries;
-  `dmsetup` with a table may be smaller.
+- **stage0's size.** Answered: neither veritysetup nor `dmsetup`. The tree
+  is werewolf's own (lib/verity.zig, byte for byte what `veritysetup format
+  --no-superblock` writes, salted with the image's own SHA-256 so builds
+  stay reproducible), and stage0 loads the table through the device
+  mapper's ioctls (lib/dm.zig).
 - **Hosting.** GitHub Releases, for now. How long old releases stay.
 - **Reproducible kernels.** The generated module key makes each build's
   modules differ.

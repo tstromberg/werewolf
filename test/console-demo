@@ -9,8 +9,8 @@
 # Each leashed service starts; PostgreSQL's cluster is made on the blank
 # disk and its schema applied; and the page stores this boot's posture in
 # it. The scan's own line needs a day's vulnerability database from the
-# network, so it is not waited for here; nor are its errors, since it
-# refuses, as it should, to fill a /data in RAM with that database.
+# network, so it is not waited for here; nor are its errors, since that
+# download is not a check's to wait for either.
 
 seen    nginx-leashed     leash: \{"event":"start","service":"nginx"
 seen    status-leashed    leash: \{"event":"start","service":"status"
@@ -18,6 +18,6 @@ seen    scan-leashed      leash: \{"event":"start","service":"scan"
 seen    postgres-leashed  leash: \{"event":"start","service":"postgres"
 seen    cluster-made      pg-init: making the cluster in /data/svc/postgres/data
 seen    schema-applied    pg-init: applied [0-9]+ SQL files? from /usr/share/werewolf-postgres
-seen    posture-stored    status-page: \{"time":"[^"]*","event":"database","kept":"posture"\}
+seen    posture-stored    status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":[1-9][0-9]*,"scans":[0-9]+\}
 unseen  service-down      leash: \{"event":"down"
 unseen  status-error      status-page: \{"time":"[^"]*","event":"error","step":"(?!scan")

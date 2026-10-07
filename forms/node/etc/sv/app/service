@@ -1,0 +1,6 @@
+# The application, as its own user: it may bind :8080 and no other port,
+# read the image, and run only node.
+exec    /usr/bin/node /usr/lib/app/server.js
+user    app
+listen  tcp/8080
+env     NODE_ENV=production

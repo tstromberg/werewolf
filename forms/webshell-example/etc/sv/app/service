@@ -1,0 +1,9 @@
+# The webshell, as the app user: it may bind :8080, and nothing more. No
+# `run` program, so Landlock lets it exec only python3 (this line's own);
+# no `connect`, so it reaches nothing on the network. The command an
+# attacker sends runs inside exactly this.
+exec    /usr/bin/python3 -m gunicorn --bind 0.0.0.0:8080 --workers 1 --worker-tmp-dir /run/svc/app --no-control-socket --pythonpath /usr/lib/app webshell:app
+user    app
+listen  tcp/8080
+env     PYTHONDONTWRITEBYTECODE=1
+env     PYTHONUNBUFFERED=1

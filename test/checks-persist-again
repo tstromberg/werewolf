@@ -1,6 +1,6 @@
-# The demo's second boot on the disk its first boot left
-# (test/checks-persist): PostgreSQL keeps its cluster, and the page finds
-# the first boot's posture there, so it has stored two or more.
+# The demo's second boot on the disk its first boot left, before its
+# power is cut (test/checks-persist-cut): PostgreSQL keeps its cluster, and
+# the page finds the first boot's posture, so it has stored two or more.
 
 seen    cluster-kept      pg-init: keeping the cluster in /data/svc/postgres/data
 seen    two-boots-kept    status-page: \{"time":"[^"]*","event":"database","kept":"posture","boots":([2-9]|[1-9][0-9]+)[,}]

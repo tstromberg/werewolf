@@ -1,7 +1,0 @@
-# disk: minimal plus a persistent /data. The form carries no files; init
-# builds the data home when these tools are present. See docs/data.md.
-include: minimal.yaml
-contents:
-  packages:
-    - e2fsprogs             # mke2fs, e2fsck
-    - blkid                 # find /data by label, refuse a disk that is not blank

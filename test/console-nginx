@@ -1,0 +1,8 @@
+# What the nginx form, booted as it ships, without a shell, must say on its
+# console (make check-shellfree-nginx; test/boot; test/console-demo has the
+# format). That it answers is test/checks' answering, on the DEV=1 build.
+# nginx starts, leashed, and stays up.
+
+seen    nginx-leashed     leash: \{"event":"start","service":"nginx"
+unseen  service-down      leash: \{"event":"(down|retry)"
+unseen  nginx-failed      \[(emerg|alert|crit)\]

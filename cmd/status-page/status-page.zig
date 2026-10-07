@@ -1096,7 +1096,13 @@ fn timeBoot(io: Io) void {
         _ = arena.reset(.retain_capacity);
         if (want_nginx and nginx_ms == null and
             listening(io, arena.allocator(), 80)) nginx_ms = bootMs();
-        if (want_pg and pg_ms == null and socketAnswers(pg_socket)) pg_ms = bootMs();
+        // Answering is a login that completes: the socket takes connections
+        // while the server is still starting, and refuses them all.
+        if (want_pg and pg_ms == null) if (Pg.connect(arena.allocator(), "status")) |db| {
+            var d = db;
+            d.close();
+            pg_ms = bootMs();
+        } else |_| {};
         if ((!want_nginx or nginx_ms != null) and (!want_pg or pg_ms != null)) break;
         io.sleep(.fromMilliseconds(25), .awake) catch break;
     }
@@ -1152,21 +1158,6 @@ fn listensOn(table: []const u8, port: u16) bool {
         if (std.mem.endsWith(u8, local, want) and std.mem.eql(u8, state, "0A")) return true;
     }
     return false;
-}
-
-/// Whether a UNIX socket takes a connection.
-fn socketAnswers(path: []const u8) bool {
-    const linux = std.os.linux;
-    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(rc) != .SUCCESS) return false;
-    defer _ = linux.close(@intCast(rc));
-    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
-    @memcpy(addr.path[0..path.len], path);
-    return linux.errno(linux.connect(
-        @intCast(rc),
-        @ptrCast(&addr),
-        @sizeOf(linux.sockaddr.un),
-    )) == .SUCCESS;
 }
 
 /// Milliseconds since the kernel started its clock.
@@ -1337,9 +1328,10 @@ const Pg = struct {
         if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
         var p: Pg = .{ .fd = @intCast(rc) };
         errdefer _ = linux.close(p.fd);
-        // A server that stops answering costs the page five seconds, not
-        // the page.
-        const tv: linux.timeval = .{ .sec = 5, .usec = 0 };
+        // A server that stops answering costs the page half its minute,
+        // not the page; one that is merely slow, on a loaded machine, is
+        // waited for.
+        const tv: linux.timeval = .{ .sec = 30, .usec = 0 };
         for ([_]u32{
             linux.SO.RCVTIMEO,
             linux.SO.SNDTIMEO,
@@ -1447,7 +1439,7 @@ const Pg = struct {
         var off: usize = 0;
         while (off < bytes.len) {
             const n = std.os.linux.write(p.fd, bytes[off..].ptr, bytes.len - off);
-            if (std.os.linux.errno(n) != .SUCCESS or n == 0) return error.Lost;
+            try ioError(n);
             off += n;
         }
     }
@@ -1468,8 +1460,18 @@ const Pg = struct {
         var off: usize = 0;
         while (off < buf.len) {
             const n = std.os.linux.read(p.fd, buf[off..].ptr, buf.len - off);
-            if (std.os.linux.errno(n) != .SUCCESS or n == 0) return error.Lost;
+            try ioError(n);
             off += n;
+        }
+    }
+
+    /// What a read or write on the socket that moved nothing means: the
+    /// timeout passing, or the server gone.
+    fn ioError(n: usize) !void {
+        switch (std.os.linux.errno(n)) {
+            .SUCCESS => if (n == 0) return error.Lost,
+            .AGAIN => return error.Timeout,
+            else => return error.Lost,
         }
     }
 };

@@ -1,5 +1,0 @@
-# The updater's network half, as _update: Wolfi and Alpine for apk, and the
-# CVE sources, Wolfi's security.json and the kernel CNA's records on
-# git.kernel.org, all over HTTPS, and the names to find them. Root, which
-# builds and installs the slot, has no network at all.
-connect _update tcp/443 udp/53 tcp/53
