@@ -23,10 +23,10 @@ const writeFile = init.writeFile;
 /// keeps the resolvers in its own directory; its renewal starts before fence.
 pub fn network(m: *Machine) void {
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
-    const nic = m.pickNic();
-    m.routerAdvertisements(nic);
+    const nic = pickNic(m);
+    routerAdvertisements(m, nic);
     var from: []const u8 = "";
-    const c = m.staticNetwork(&from);
+    const c = staticNetwork(m, &from);
     if (nic.len == 0) {
         if (m.cmd.mac.len > 0)
             say("no network: no NIC with address {s}", .{m.cmd.mac})
@@ -45,8 +45,13 @@ pub fn network(m: *Machine) void {
         }
         // Where /etc/resolv.conf leads, and DHCP's client writes when there
         // is no static address: a file, since no link under /run is
-        // followed (nosymfollow).
-        if (c.dns.len > 0) {
+        // followed (nosymfollow). The resolver is checked here, where it
+        // is written, whichever way it came: the config tar's was parsed
+        // by lib/network.zig, the command line's by no one.
+        const dns_ok = if (network_file.ip4(c.dns)) |d| network_file.usable(d) else |_| false;
+        if (c.dns.len > 0 and !dns_ok) {
+            say("network: dns {s} refused: not a usable IPv4 address", .{c.dns});
+        } else if (c.dns.len > 0) {
             mkdir("/run/werewolf/network", 0o755);
             m.write(
                 "/run/werewolf/network/resolv.conf",
@@ -60,11 +65,8 @@ pub fn network(m: *Machine) void {
         );
     } else if (executable("/usr/lib/werewolf/dhcp-client")) {
         m.dhcp = true;
-        if (!m.run(&.{
-            "/usr/lib/werewolf/dhcp-client",
-            "up",
-            nic,
-        })) say("no network: no DHCP lease for {s}; its renewal keeps asking", .{nic});
+        if (!m.run(&.{ "/usr/lib/werewolf/dhcp-client", "up", nic }))
+            say("no network: no DHCP lease for {s}; its renewal keeps asking", .{nic});
     } else {
         say(
             "no network: no werewolf.ip, no network file in the config tar, and this form " ++
@@ -79,7 +81,7 @@ pub fn network(m: *Machine) void {
 /// howl pack checks it (lib/network.zig). The command line wins,
 /// since whoever set it holds the boot; a file refused is said and
 /// left, as if absent.
-pub fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
+fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
     const has_file = exists("/run/config/network");
     if (m.cmd.ip.len > 0) {
         if (has_file) say(
@@ -106,7 +108,7 @@ pub fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
 /// network cannot rank itself above the real one, add a more specific
 /// route to steal one destination's traffic, or flood the NIC with
 /// addresses. Interfaces made later (default) take none.
-pub fn routerAdvertisements(m: *Machine, nic: []const u8) void {
+fn routerAdvertisements(m: *Machine, nic: []const u8) void {
     var all = true;
     for (m.list("/proc/sys/net/ipv6/conf")) |c| {
         const d = m.fmt("/proc/sys/net/ipv6/conf/{s}", .{c});
@@ -124,7 +126,7 @@ pub fn routerAdvertisements(m: *Machine, nic: []const u8) void {
     if (!all) say("some IPv6 router advertisement limits were not applied", .{});
 }
 
-pub fn pickNic(m: *Machine) []const u8 {
+fn pickNic(m: *Machine) []const u8 {
     for (m.list("/sys/class/net")) |n| {
         if (std.mem.eql(u8, n, "lo")) continue;
         if (m.cmd.mac.len == 0) return n;

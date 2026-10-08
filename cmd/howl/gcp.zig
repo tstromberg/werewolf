@@ -160,12 +160,21 @@ pub fn ensureImage(
     return name;
 }
 
-/// The form an instance was made from, as its label says; null if there is
-/// no such instance.
-pub fn formOf(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
-    return ask(io, gpa, p, &.{
+/// The form an instance was made from, as its label says: "" for one
+/// without it; null if there is no such instance. gcloud failing for
+/// another reason, as an expired login, is refused: taken for "none", it
+/// would have delete forget a machine that runs on.
+pub fn formOf(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !?[]const u8 {
+    const r = std.process.run(gpa, io, .{ .argv = try gcloud(gpa, p, &.{
         "compute",  "instances",                     "describe", name, "--zone", p.zone,
         "--format", "value(labels." ++ label ++ ")",
+    }) }) catch |err| return why.refuse("gcloud: {s}", .{@errorName(err)});
+    if (r.term == .exited and r.term.exited == 0) return std.mem.trim(u8, r.stdout, " \n");
+    if (std.mem.find(u8, r.stderr, "was not found") != null) return null;
+    const e = std.mem.trimEnd(u8, r.stderr, " \r\n");
+    return why.refuse("gcloud compute instances describe {s}: {s}", .{
+        name,
+        e[if (std.mem.findScalarLast(u8, e, '\n')) |nl| nl + 1 else 0..],
     });
 }
 

@@ -4,7 +4,6 @@
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
-const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const testing = std.testing;
 
@@ -14,6 +13,7 @@ const Posture = posture.Posture;
 const exists = posture.exists;
 const hasOption = posture.hasOption;
 const lessString = posture.lessString;
+const listAdd = posture.listAdd;
 const statusField = posture.statusField;
 const trim = posture.trim;
 const uidOf = posture.uidOf;
@@ -80,12 +80,7 @@ fn servicesLeashed(p: *Posture) !void {
         const status = p.read(try p.gpa.print("/proc/{s}/status", .{pid}));
         if (status.len == 0) continue;
         running += 1;
-        if (whyNotLeashed(status)) |why|
-            try bad.print(
-                p.gpa,
-                "{s}{s} {s}",
-                .{ if (bad.items.len > 0) ", " else "", name, why },
-            );
+        if (whyNotLeashed(status)) |why| try listAdd(p.gpa, &bad, "{s} {s}", .{ name, why });
     }
     try p.add(.{
         .id = "processes-services-leashed",
@@ -105,12 +100,14 @@ fn servicesLeashed(p: *Posture) !void {
 pub fn programs(p: *Posture) !void {
     try p.absent(
         "programs-no-shell",
+        "programs",
         "No shell",
         "An intruder finds no shell to run commands with.",
         &.{ "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "fish" },
     );
     try p.absent(
         "programs-no-downloaders",
+        "programs",
         "No download or network tools",
         "An intruder cannot fetch more tools or open a connection out.",
         &.{
@@ -132,6 +129,7 @@ pub fn programs(p: *Posture) !void {
     );
     try p.absent(
         "programs-no-interpreters",
+        "programs",
         "No script interpreters",
         "There is nothing to run a script with.",
         &.{
@@ -155,24 +153,28 @@ pub fn programs(p: *Posture) !void {
     );
     try p.absent(
         "programs-no-compilers",
+        "programs",
         "No compilers",
         "Code cannot be built on the machine.",
         &.{ "cc", "gcc", "clang", "tcc", "as", "ld", "go", "rustc", "zig" },
     );
     try p.absent(
         "programs-no-module-tools",
+        "programs",
         "No kernel module tools",
         "Nothing on the system can load, unload or list kernel modules.",
         &.{ "insmod", "modprobe", "rmmod", "lsmod", "kmod", "depmod" },
     );
     try p.absent(
         "programs-no-network-tools",
+        "programs",
         "No network configuration tools",
         "An intruder cannot readdress the machine or change its routes with the usual tools.",
         &.{ "ifconfig", "ip", "route", "iptables", "nft", "tc", "ethtool" },
     );
     try p.absent(
         "programs-no-debuggers",
+        "programs",
         "No debuggers",
         "Nothing to attach to a process or trace its calls.",
         &.{ "gdb", "lldb", "strace", "ltrace" },
@@ -192,11 +194,7 @@ pub fn programs(p: *Posture) !void {
         if (!exists(p.io, path)) continue;
         if (p.isElf(path)) {
             programs_ += 1;
-        } else try scripts.print(
-            p.gpa,
-            "{s}{s}",
-            .{ if (scripts.items.len > 0) ", " else "", name },
-        );
+        } else try listAdd(p.gpa, &scripts, "{s}", .{name});
     }
     try p.add(.{
         .id = "programs-services-no-shell",
@@ -237,27 +235,17 @@ fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usi
 
 /// Why a /proc/PID/status is not that of a process leash started, or null.
 fn whyNotLeashed(status: []const u8) ?[]const u8 {
-    var ids = std.mem.tokenizeAny(
-        u8,
-        statusField(status, "Uid") orelse return "shows no uid",
-        " \t",
-    );
+    const uids = statusField(status, "Uid") orelse return "shows no uid";
+    var ids = std.mem.tokenizeAny(u8, uids, " \t");
     while (ids.next()) |id| if (std.mem.eql(u8, id, "0")) return "runs as root";
     const bind: u64 = 1 << linux.CAP.NET_BIND_SERVICE;
     for ([_][]const u8{ "CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb" }) |key| {
-        const v = std.fmt.parseInt(
-            u64,
-            statusField(status, key) orelse return "shows no capabilities",
-            16,
-        ) catch
+        const v = std.fmt.parseInt(u64, statusField(status, key) orelse "", 16) catch
             return "shows no capabilities";
         if (v & ~bind != 0) return "has capabilities";
     }
-    if (!std.mem.eql(
-        u8,
-        statusField(status, "NoNewPrivs") orelse "",
-        "1",
-    )) return "may gain privileges";
+    if (!std.mem.eql(u8, statusField(status, "NoNewPrivs") orelse "", "1"))
+        return "may gain privileges";
     // A kernel before 4.7 shows no umask: nothing to judge.
     if (statusField(status, "Umask")) |mask| {
         const m = std.fmt.parseInt(u32, mask, 8) catch return "shows no umask";

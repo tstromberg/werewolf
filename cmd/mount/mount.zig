@@ -53,7 +53,8 @@ pub fn main(init: std.process.Init) !void {
     const p = parse(gpa, args[1..]) catch |err| fail("", err, "");
     pledge() catch |err| fail(p.target, err, "");
     var log: [512]u8 = @splat(0);
-    apply(p, &log) catch |err| fail(p.target, err, kernelSaid(&log));
+    apply(p, &log) catch |err|
+        fail(p.target, err, std.mem.trim(u8, std.mem.sliceTo(&log, 0), " \n"));
     // Straight out: returning would free memory, which the pledge forbids.
     linux.exit_group(0);
 }
@@ -217,7 +218,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
         .tighten => {
             if (n != 1 or fstype != null) return error.Usage;
             if (rw or follow) return error.Loosens;
-            for (p.options) |o| if (!allowedOnRemount(o)) return error.Option;
+            for (p.options) |o| if (!allowed(&remount_options, o)) return error.Option;
             p.target = try place(pos[0]);
         },
         .bind => {
@@ -233,22 +234,20 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
             if (rw and p.attrs & ATTR.RDONLY != 0) return error.Usage;
             // A mount names its filesystem: the kernel is never asked to
             // read a device as one kind after another.
-            const fs = try filesystem(fstype orelse return error.Usage);
+            const t = fstype orelse return error.Usage;
+            const fs = for (&filesystems) |*f| {
+                if (std.mem.eql(u8, f.name, t)) break f;
+            } else return error.Filesystem;
             p.fs = fs;
             p.source = if (fs.block) try device(pos[0]) else try name(pos[0]);
             p.target = try place(pos[1]);
-            for (p.options) |o| if (!allowedOn(fs, o)) return error.Option;
+            for (p.options) |o| if (!allowed(fs.options, o)) return error.Option;
             p.attrs |= ATTR.NOSUID | ATTR.NOEXEC;
             if (!fs.devices) p.attrs |= ATTR.NODEV;
             if (!fs.links and !follow) p.attrs |= ATTR.NOSYMFOLLOW;
         },
     }
     return p;
-}
-
-fn filesystem(t: []const u8) !*const Fs {
-    for (&filesystems) |*fs| if (std.mem.eql(u8, fs.name, t)) return fs;
-    return error.Filesystem;
 }
 
 /// A path is absolute, has no empty, . or .. component, and lies in one of
@@ -280,13 +279,9 @@ fn name(s: [:0]const u8) ![:0]const u8 {
     return s;
 }
 
-fn allowedOn(fs: *const Fs, o: Option) bool {
-    for (fs.options) |k| if (std.mem.eql(u8, o.key, k)) return validValue(o);
-    return false;
-}
-
-fn allowedOnRemount(o: Option) bool {
-    for (remount_options) |k| if (std.mem.eql(u8, o.key, k)) return validValue(o);
+/// Whether o is one of keys, with a valid value.
+fn allowed(keys: []const []const u8, o: Option) bool {
+    for (keys) |k| if (std.mem.eql(u8, o.key, k)) return validValue(o);
     return false;
 }
 
@@ -355,10 +350,8 @@ fn apply(p: Plan, log: []u8) !void {
     defer _ = linux.close(target);
     switch (p.action) {
         .tighten => {
-            // Only a set: what the mount has, it keeps. noatime moves the
-            // atime field, which is not a restriction.
-            const clr: u64 = if (p.attrs & ATTR.NOATIME != 0) ATTR.ATIME else 0;
-            try setattr(target, p.attrs, clr);
+            // Only a set: what the mount has, it keeps.
+            try setattr(target, p.attrs);
             if (p.options.len > 0) {
                 const fc = try fd(linux.syscall3(
                     .fspick,
@@ -381,7 +374,7 @@ fn apply(p: Plan, log: []u8) !void {
                 OPEN_TREE_CLONE | O_CLOEXEC | AT_EMPTY_PATH,
             ));
             defer _ = linux.close(tree);
-            try setattr(tree, p.attrs, if (p.attrs & ATTR.NOATIME != 0) ATTR.ATIME else 0);
+            try setattr(tree, p.attrs);
             try attach(tree, target);
         },
         .mount => try create(p.fs.?, p, target, log),
@@ -453,12 +446,10 @@ fn drain(fc: i32, log: []u8) void {
     log[if (linux.errno(n) == .SUCCESS) n else 0] = 0;
 }
 
-fn kernelSaid(log: []u8) []const u8 {
-    const s = std.mem.sliceTo(log, 0);
-    return std.mem.trim(u8, s, " \n");
-}
-
-fn setattr(dirfd: i32, set: u64, clr: u64) !void {
+/// set added to the mount at dirfd, and nothing cleared but the atime field
+/// that noatime moves, which is not a restriction.
+fn setattr(dirfd: i32, set: u64) !void {
+    const clr: u64 = if (set & ATTR.NOATIME != 0) ATTR.ATIME else 0;
     var attr: MountAttr = .{ .set = set, .clr = clr, .propagation = 0, .userns_fd = 0 };
     try sys(linux.syscall5(
         .mount_setattr,

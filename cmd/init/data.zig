@@ -68,7 +68,7 @@ pub fn data(m: *Machine) void {
         {
             say("/data is {s}", .{dir});
         } else {
-            m.nodata(m.fmt("cannot bind {s}", .{dir}));
+            nodata(m, m.fmt("cannot bind {s}", .{dir}));
         }
         // From here /victim is for looking at. Read-only is a property of
         // the mount, not the filesystem, so /data, bound from it, stays
@@ -79,7 +79,10 @@ pub fn data(m: *Machine) void {
             "-o",
             "remount,bind,ro,nosuid,nodev,noexec,nosymfollow",
             "/victim",
-        })) say("/victim is read-only", .{});
+        }))
+            say("/victim is read-only", .{})
+        else
+            say("/victim stays writable: remounting it read-only failed", .{});
     } else if (m.cmd.data.len == 0 or m.which("mke2fs") == null) {
         m.mount(&.{
             "-t",
@@ -92,10 +95,10 @@ pub fn data(m: *Machine) void {
         say("/data is RAM, capped at 25%", .{});
     } else {
         var why: []const u8 = "";
-        if (m.dataHome(&why)) |what| {
+        if (dataHome(m, &why)) |what| {
             _ = linux.fchmodat(linux.AT.FDCWD, "/data", 0o755);
             say("/data is {s}", .{what});
-        } else m.nodata(why);
+        } else nodata(m, why);
     }
     // /data holds /data/svc/<service>, which each service makes for
     // itself, and /data/home/<user> for people. The only person init
@@ -103,10 +106,8 @@ pub fn data(m: *Machine) void {
     if (m.nocloud_user.len > 0 and !exists("/run/werewolf/nodata")) {
         const home = m.fmtZ("/data/home/{s}", .{m.nocloud_user});
         m.mkdirAll(home);
-        if (lookupIds(
-            m.read("/run/werewolf/passwd"),
-            m.nocloud_user,
-        )) |ids| _ = linux.fchownat(linux.AT.FDCWD, home, ids.uid, ids.gid, 0);
+        if (lookupIds(m.read("/run/werewolf/passwd"), m.nocloud_user)) |ids|
+            _ = linux.fchownat(linux.AT.FDCWD, home, ids.uid, ids.gid, 0);
         _ = linux.fchmodat(linux.AT.FDCWD, home, 0o700);
     }
     // The key now lives in the kernel's dm table. No service needs it,
@@ -116,7 +117,7 @@ pub fn data(m: *Machine) void {
 
 /// The form's disk on /data; what it is and where, as said on the
 /// console, or null with why set.
-pub fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
+fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
     const key = "/run/config/data.key";
     const key_len = m.read(key).len;
     const crypt = if (key_len == 0) null else m.which("cryptsetup") orelse {
@@ -174,13 +175,17 @@ pub fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
             return null;
         }
         // Blank as blkid sees it, every signature it knows probed: the
-        // one judgement before a format, so it stays blkid's.
+        // one judgement before a format, so it stays blkid's. Only its
+        // exit 2, nothing found, is blank: 0 found something, 8 found
+        // more than one thing, and 4, or blkid not running at all, said
+        // nothing, and a disk not known blank is never formatted.
         const blkid_bin = m.which("blkid") orelse {
             why.* = "no blkid, so no telling a blank disk from one in use";
             return null;
         };
-        if (m.runQuiet(&.{ blkid_bin, "-c", "/dev/null", "-p", src })) {
-            why.* = m.fmt("werewolf.data: {s} is not blank", .{src});
+        const blank = m.spawn(&.{ blkid_bin, "-c", "/dev/null", "-p", src }, true);
+        if (blank != 2) {
+            why.* = m.fmt("werewolf.data: {s} is not blank (blkid exit {d})", .{ src, blank });
             return null;
         }
         fresh = true;
@@ -205,18 +210,20 @@ pub fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
             src,
             "data",
         };
-        if (fresh and key_len < min_data_key) {
-            why.* = m.fmt(
-                "data.key is {d} bytes; LUKS2 is made only with {d} or more random bytes",
+        if (key_len < min_data_key) {
+            if (fresh) {
+                why.* = m.fmt(
+                    "data.key is {d} bytes; LUKS2 is made only with {d} or more random bytes",
+                    .{ key_len, min_data_key },
+                );
+                return null;
+            }
+            say(
+                "data.key is only {d} bytes: a disk copied from this one could be opened by " ++
+                    "guessing it; make a new disk with {d} random bytes or more",
                 .{ key_len, min_data_key },
             );
-            return null;
         }
-        if (!fresh and key_len < min_data_key) say(
-            "data.key is only {d} bytes: a disk copied from this one could be opened by " ++
-                "guessing it; make a new disk with {d} random bytes or more",
-            .{ key_len, min_data_key },
-        );
         if (fresh) {
             say("making LUKS2 on {s}", .{src});
             if (!m.run(&.{
@@ -284,7 +291,7 @@ pub fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
             "its superblock cannot be read";
         if (reason) |r| {
             say("e2fsck -p {s}: {s}", .{ fs, r });
-            const rc = m.exitCode(&.{ m.which("e2fsck") orelse "e2fsck", "-p", fs });
+            const rc = m.spawn(&.{ m.which("e2fsck") orelse "e2fsck", "-p", fs }, true);
             if (rc >= 4) {
                 why.* = m.fmt("e2fsck -p will not repair {s} (exit {d})", .{ fs, rc });
                 return null;
@@ -352,7 +359,7 @@ fn checkDue(sb: []const u8, now: i64) ?[]const u8 {
     return null;
 }
 
-pub fn nodata(m: *Machine, why: []const u8) void {
+fn nodata(m: *Machine, why: []const u8) void {
     say("{s}; /data is unavailable", .{why});
     m.write("/run/werewolf/nodata", m.fmt("{s}\n", .{why}), 0o644);
     m.mount(&.{ "-t", "tmpfs", "-o", "ro,nosuid,nodev,noexec,mode=0755", "tmpfs", "/data" });

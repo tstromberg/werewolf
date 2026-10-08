@@ -13,6 +13,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const net = Io.net;
 const posix = std.posix;
+const howl = @import("howl.zig");
 
 /// QEMU's pid, while the machine runs.
 pub fn running(io: Io, gpa: Allocator, d: []const u8) ?posix.pid_t {
@@ -24,7 +25,10 @@ pub fn running(io: Io, gpa: Allocator, d: []const u8) ?posix.pid_t {
 }
 
 /// Stop it, as Ctrl-a x does: QEMU's monitor told to quit, or, if that
-/// does not answer, a signal. Whether one was running.
+/// does not answer, a signal. Whether one was running. A monitor that
+/// is not there, or that nothing listens on, means no QEMU of this
+/// machine's: its pid is a stale one, maybe another process's by now,
+/// and is sent nothing.
 pub fn stop(io: Io, gpa: Allocator, d: []const u8) !bool {
     const pid = running(io, gpa, d) orelse return false;
     const ua = try net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{d}));
@@ -32,11 +36,19 @@ pub fn stop(io: Io, gpa: Allocator, d: []const u8) !bool {
         defer s.close(io);
         const f: Io.File = .{ .handle = s.socket.handle, .flags = .{ .nonblocking = false } };
         f.writeStreamingAll(io, "quit\n") catch {};
-    } else |_| {}
+    } else |err| switch (err) {
+        error.ConnectionRefused, error.FileNotFound => {
+            howl.say(io, "{s}: no QEMU at its monitor; pid {d} is stale, left alone", .{ d, pid });
+            Dir.cwd().deleteFile(io, try gpa.print("{s}/qemu.pid", .{d})) catch {};
+            return false;
+        },
+        else => howl.say(io, "{s}: its monitor: {s}", .{ d, @errorName(err) }),
+    }
     for (0..50) |_| {
         posix.kill(pid, @fromBackingInt(@intCast(0))) catch return true;
         try io.sleep(.fromMilliseconds(100), .awake);
     }
+    howl.say(io, "{s}: QEMU did not quit when told; pid {d} sent TERM, then KILL", .{ d, pid });
     posix.kill(pid, .TERM) catch return true;
     try io.sleep(.fromSeconds(1), .awake);
     posix.kill(pid, .KILL) catch {};
@@ -73,7 +85,12 @@ pub fn record(io: Io, gpa: Allocator, d: []const u8, key: []const u8) ?[]const u
 /// path, a sparse disk of size bytes, unless it is there already: a
 /// machine's /data, which outlives its restarts.
 pub fn disk(io: Io, path: []const u8, size: u64) !void {
-    const f = Dir.cwd().createFile(io, path, .{ .exclusive = true }) catch |err| switch (err) {
+    // Root's alone on the host: it is the machine's /data, its secrets
+    // and its database, in the clear unless a data key was given.
+    const f = Dir.cwd().createFile(io, path, .{
+        .exclusive = true,
+        .permissions = .fromMode(0o600),
+    }) catch |err| switch (err) {
         error.PathAlreadyExists => return,
         else => return err,
     };

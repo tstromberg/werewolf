@@ -37,7 +37,7 @@ pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
         } else recipe = a;
     }
     const r = recipe orelse return why.refuse("{s}", .{syntax});
-    arch = ww.archName(arch) orelse return why.refuse(ww.arch_refusal, .{arch});
+    arch = howl.archName(arch) orelse return why.refuse(howl.arch_refusal, .{arch});
     if (!isRecipePath(r)) return why.refuse(
         "{s}: a recipe is a .yaml path of [A-Za-z0-9._/-]",
         .{r},
@@ -61,7 +61,7 @@ fn isRecipePath(p: []const u8) bool {
     if (!std.mem.endsWith(u8, p, ".yaml") or p.len > 255) return false;
     for (p) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._/-", c) == null)
         return false;
-    return std.mem.indexOf(u8, p, "//") == null;
+    return std.mem.find(u8, p, "//") == null;
 }
 
 test isRecipePath {

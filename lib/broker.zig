@@ -13,17 +13,36 @@ const linux = std.os.linux;
 
 pub const socket_path = "/run/werewolf/mount-broker.sock";
 
+/// Where the broker mounts what it is asked for.
+pub const mnt_dir = "/run/werewolf/mnt";
+
 /// What can be asked for: three filesystems, and the shutdown.
-pub const Word = enum { grub, esp, victim, shutdown };
+pub const Word = enum {
+    grub,
+    esp,
+    victim,
+    shutdown,
+
+    /// Where a word's filesystem is mounted: fixed, so an asker takes no
+    /// path from the answer. The socket lives in /run, where root in
+    /// fence's domain could put a listener of its own.
+    pub fn place(w: Word) [:0]const u8 {
+        return switch (w) {
+            .grub => mnt_dir ++ "/grub",
+            .esp => mnt_dir ++ "/esp",
+            .victim => mnt_dir ++ "/victim",
+            .shutdown => unreachable,
+        };
+    }
+};
 
 /// A filesystem the broker has mounted for us, and where.
 pub const Held = struct {
     fd: i32,
-    path_buf: [64]u8,
-    path_len: usize,
+    word: Word,
 
     pub fn path(h: *const Held) []const u8 {
-        return h.path_buf[0..h.path_len];
+        return h.word.place();
     }
 
     /// Unmounted: the broker sees the connection close.
@@ -48,33 +67,28 @@ pub fn ask(word: Word) !Held {
         return error.NoBroker;
     var line: [16]u8 = undefined;
     const request = std.mem.print(&line, "{s}\n", .{@tagName(word)}) catch unreachable;
-    if (linux.errno(linux.sendto(
-        fd,
-        request.ptr,
-        request.len,
-        linux.MSG.NOSIGNAL,
-        null,
-        0,
-    )) != .SUCCESS)
-        return error.NoBroker;
+    const sent = linux.sendto(fd, request.ptr, request.len, linux.MSG.NOSIGNAL, null, 0);
+    if (linux.errno(sent) != .SUCCESS) return error.NoBroker;
 
-    var h: Held = .{ .fd = fd, .path_buf = undefined, .path_len = 0 };
     var buf: [128]u8 = undefined;
     var got: usize = 0;
-    while (std.mem.findScalar(u8, buf[0..got], '\n') == null) {
+    const answer = while (true) {
+        if (std.mem.findScalar(u8, buf[0..got], '\n')) |end| break buf[0..end];
         if (got == buf.len) return error.BadAnswer;
         const n = linux.read(fd, buf[got..].ptr, buf.len - got);
         if (linux.errno(n) == .INTR) continue;
         if (linux.errno(n) != .SUCCESS or n == 0) return error.NoBroker;
         got += n;
-    }
-    const answer = buf[0..std.mem.findScalar(u8, buf[0..got], '\n').?];
-    if (std.mem.eql(u8, answer, "ok") and word == .shutdown) return h;
-    if (std.mem.startsWith(u8, answer, "ok /") and word != .shutdown and
-        answer.len - 3 <= h.path_buf.len)
+    };
+    const h: Held = .{ .fd = fd, .word = word };
+    // The answer must name the word's own place, no other: a listener
+    // put at the socket's name by root in the domain could otherwise
+    // send the asker's writes where it liked.
+    if (word == .shutdown) {
+        if (std.mem.eql(u8, answer, "ok")) return h;
+    } else if (std.mem.startsWith(u8, answer, "ok ") and
+        std.mem.eql(u8, answer[3..], word.place()))
     {
-        h.path_len = answer.len - 3;
-        @memcpy(h.path_buf[0..h.path_len], answer[3..]);
         return h;
     }
     const n = @min(answer.len, refusal_buf.len);

@@ -20,6 +20,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -50,18 +51,11 @@ pub fn exists(io: Io, gpa: Allocator, name: []const u8) !bool {
 /// What runs bhyve, which needs root: nothing as root, else doas, or
 /// sudo, from the ports, where FreeBSD keeps them.
 pub fn asRoot(io: Io) error{NoRoot}![]const []const u8 {
-    if (isRoot()) return &.{};
+    if (howl.isRoot()) return &.{};
     inline for (.{ "doas", "sudo" }) |tool| {
         if (Dir.cwd().access(io, "/usr/local/bin/" ++ tool, .{})) |_| return &.{tool} else |_| {}
     }
     return error.NoRoot;
-}
-
-fn isRoot() bool {
-    return switch (builtin.os.tag) {
-        .linux => std.os.linux.geteuid() == 0,
-        else => std.c.geteuid() == 0,
-    };
 }
 
 /// A port slirp forwards: this host's 127.0.0.1:host to the machine's guest.
@@ -171,7 +165,7 @@ pub fn keep(
         });
         const term = try child.wait(io);
         const code: u32 = if (term == .exited) term.exited else 4;
-        say(io, "{s}: bhyve exited {d}: {s}", .{ name, code, switch (code) {
+        howl.say(io, "{s}: bhyve exited {d}: {s}", .{ name, code, switch (code) {
             0 => "the guest asked to reboot",
             1 => "the guest powered off",
             2 => "the guest halted",
@@ -183,12 +177,6 @@ pub fn keep(
         if (code != 0) return;
         Dir.cwd().access(io, config, .{}) catch return;
     }
-}
-
-fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
-    var buf: [512]u8 = undefined;
-    const line = std.mem.print(&buf, "howl: " ++ fmt ++ "\n", args) catch return;
-    Io.File.stderr().writeStreamingAll(io, line) catch {};
 }
 
 const testing = std.testing;

@@ -24,8 +24,8 @@ pub fn sys(rc: usize, comptime what: []const u8) !usize {
 /// and keepOnly keep the tie, which the kernel would otherwise forget as
 /// they change who the process is.
 pub fn tieTo(parent: linux.pid_t) void {
-    _ = linux.prctl(@backingInt(linux.PR.SET_PDEATHSIG), @backingInt(linux.SIG.KILL), 0, 0, 0);
-    if (linux.getppid() != parent) linux.exit_group(1);
+    const tie: Tie = .{ .sig = @backingInt(linux.SIG.KILL), .parent = parent };
+    tie.keep();
 }
 
 /// The parent-death signal, and the parent it is for. The kernel clears the
@@ -315,10 +315,7 @@ pub const Exit = struct { code: u8, out: []const u8 };
 /// which and the kernel's reason.
 pub fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
     if (err != error.SystemCall) return @errorName(err);
-    return gpa.print(
-        "{s}: {s}",
-        .{ failed, errnoName(failed_errno) },
-    ) catch "SystemCall";
+    return gpa.print("{s}: {s}", .{ failed, errnoName(failed_errno) }) catch "SystemCall";
 }
 
 /// A child's last words, and its end.

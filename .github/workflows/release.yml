@@ -46,8 +46,10 @@ jobs:
           # What check passed, when it was check's passing that started this.
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
-      - name: Install apko
-        run: sudo test/ci-setup apko
+      # apko resolves the locks; Zig builds build/host/form, which every
+      # make reads the forms through.
+      - name: Install apko and Zig
+        run: sudo test/ci-setup apko zig
       - name: Resolve the locks
         id: inputs
         run: |

@@ -8,9 +8,7 @@ const testing = std.testing;
 const main = @import("status-page.zig");
 const Package = main.Package;
 const exists = main.exists;
-const grype_bin = main.grype_bin;
 const grype_dir = main.grype_dir;
-const grype_out = main.grype_out;
 const keepScan = main.keepScan;
 const meta_dir = main.meta_dir;
 const mountType = main.mountType;
@@ -20,12 +18,22 @@ const readOr = main.readOr;
 const record = main.record;
 const rfc3339 = main.rfc3339;
 const scan_error_path = main.scan_error_path;
-const scan_every = main.scan_every;
 const summary_path = main.summary_path;
 const writeAtomic = main.writeAtomic;
 
+const grype_bin = "/usr/bin/grype";
+const grype_out = grype_dir ++ "/grype.json";
+const scan_every = 3600;
+
 /// What grype must not walk: the kernel's own trees, RAM, and /data, which
 /// holds grype's database and is not part of the image.
+/// How long grype may run without a word, which, --quiet, is its whole
+/// run: its database download and the scan, done in minutes.
+const grype_seconds = 30 * 60;
+
+/// The most grype may say, on stdout or stderr, kept to relay.
+const max_grype_said = 1 << 20;
+
 const grype_args = [_][]const u8{
     grype_bin,     "dir:/",
     "--output",    "json",
@@ -52,9 +60,10 @@ pub fn scanLoop(io: Io) !void {
                 io,
                 .{ .event = "error", .step = "scan", .at = step, .@"error" = @errorName(err) },
             );
+            var time: [32]u8 = undefined;
             const msg = arena.allocator().print(
                 "{s}, while {s}, at {s}\n",
-                .{ @errorName(err), step, rfc3339(arena.allocator(), nowSecs(io)) catch "" },
+                .{ @errorName(err), step, rfc3339(&time, nowSecs(io)) },
             ) catch "";
             writeAtomic(io, arena.allocator(), scan_error_path, msg) catch {};
         };
@@ -95,15 +104,18 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
 
     step.* = "running grype";
     record(io, .{ .event = "scan", .result = "started" });
-    var child = try std.process.spawn(io, .{
+    // Bounded: grype fetches its database, and a fetch that never ends
+    // would stop every scan after it. --quiet, it says nothing until it
+    // fails, so the wait for its next word is the wait for all of it.
+    const run = std.process.run(gpa, io, .{
         .argv = &grype_args,
         .environ_map = &env,
-        .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .pipe,
-    });
-    relay(io, child.stderr.?);
-    switch (try child.wait(io)) {
+        .stdout_limit = .limited(max_grype_said),
+        .stderr_limit = .limited(max_grype_said),
+        .timeout = .{ .duration = .{ .raw = .fromSeconds(grype_seconds), .clock = .awake } },
+    }) catch |err| return if (err == error.Timeout) error.GrypeTimedOut else err;
+    relay(io, run.stderr);
+    switch (run.term) {
         .exited => |code| if (code != 0) return error.GrypeFailed,
         else => return error.GrypeKilled,
     }
@@ -115,7 +127,8 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
         readOr(io, gpa, "/lib/apk/db/installed", ""),
         readOr(io, gpa, meta_dir ++ "/overlay", ""),
     );
-    const summary = try summarize(gpa, text, try rfc3339(gpa, nowSecs(io)), owners);
+    var time: [32]u8 = undefined;
+    const summary = try summarize(gpa, text, rfc3339(&time, nowSecs(io)), owners);
     var out: Io.Writer.Allocating = .init(gpa);
     try std.json.Stringify.value(summary, .{ .whitespace = .indent_2 }, &out.writer);
     try out.writer.writeByte('\n');
@@ -136,20 +149,21 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
 /// grype's stderr onto the console, a line at a time, each control
 /// character but tab as ?: grype reads a database from the network, and
 /// what it says must not drive the terminal it is shown on.
-fn relay(io: Io, from: Io.File) void {
-    var buf: [4096]u8 = undefined;
-    var r = from.readerStreaming(io, &buf);
-    while (true) {
+fn relay(io: Io, said: []const u8) void {
+    var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, said, "\n"), '\n');
+    while (lines.next()) |whole| {
+        if (whole.len == 0) continue;
         // A line longer than the buffer is said in pieces.
-        const line = (r.interface.takeDelimiter('\n') catch |err| switch (err) {
-            error.StreamTooLong => r.interface.take(buf.len) catch return,
-            else => return,
-        }) orelse return;
-        var out: [4097]u8 = undefined;
-        for (line, out[0..line.len]) |c, *o|
-            o.* = if ((c < 0x20 and c != '\t') or c == 0x7f) '?' else c;
-        out[line.len] = '\n';
-        Io.File.stderr().writeStreamingAll(io, out[0 .. line.len + 1]) catch {};
+        var rest = whole;
+        while (rest.len > 0) {
+            const line = rest[0..@min(rest.len, 4096)];
+            rest = rest[line.len..];
+            var out: [4097]u8 = undefined;
+            for (line, out[0..line.len]) |c, *o|
+                o.* = if ((c < 0x20 and c != '\t') or c == 0x7f) '?' else c;
+            out[line.len] = '\n';
+            Io.File.stderr().writeStreamingAll(io, out[0 .. line.len + 1]) catch {};
+        }
     }
 }
 
@@ -272,7 +286,7 @@ fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners)
     var counts: Counts = .{};
     outer: for (g.matches) |m| {
         var f: Finding = .{
-            .severity = severityName(m.vulnerability.severity),
+            .severity = severities[rank(m.vulnerability.severity)],
             .id = m.vulnerability.id,
             .package = m.artifact.name,
             .version = m.artifact.version,
@@ -330,10 +344,6 @@ pub const severities = [_][]const u8{
 pub fn rank(severity: []const u8) usize {
     for (severities, 0..) |s, i| if (std.ascii.eqlIgnoreCase(s, severity)) return i;
     return severities.len - 1;
-}
-
-fn severityName(severity: []const u8) []const u8 {
-    return severities[rank(severity)];
 }
 
 fn worseFirst(_: void, a: Finding, b: Finding) bool {

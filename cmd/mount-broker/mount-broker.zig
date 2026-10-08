@@ -31,7 +31,7 @@
 //!
 //! One process, with CAP_SYS_ADMIN alone and locked, under a seccomp filter
 //! of the calls above and its socket's, the classic mount(2) only to remount
-//! read-only and umount2 only plainly or lazily; it runs nothing. Two
+//! read-only and umount2 only plainly; it runs nothing. Two
 //! devices answering to the same UUID or serial are refused, not guessed
 //! between. Every event is one JSON line on the console.
 
@@ -39,35 +39,33 @@ const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
 const dm = @import("dm");
+const broker = @import("broker");
 
-const socket_path = "/run/werewolf/mount-broker.sock";
-const mnt_dir = "/run/werewolf/mnt";
+const socket_path = broker.socket_path;
+const mnt_dir = broker.mnt_dir;
 const cap_sys_admin = 21;
 const max_conns = 8;
 
-const Word = enum {
-    grub,
-    esp,
-    victim,
-    shutdown,
+/// The words and their places are the library's (lib/broker.zig), so an
+/// asker checks the answer against the same places.
+const Word = broker.Word;
 
-    /// Where a word's filesystem is mounted.
-    fn place(w: Word) [:0]const u8 {
-        return switch (w) {
-            .grub => mnt_dir ++ "/grub",
-            .esp => mnt_dir ++ "/esp",
-            .victim => mnt_dir ++ "/victim",
-            .shutdown => unreachable,
-        };
-    }
-};
-
-/// A connection: what it has said so far, and the mount it holds.
+/// A connection: what it has said so far, and the mount it holds. An
+/// asker that is gone while something else still holds its mount open
+/// keeps the slot (fd closed, holds set) until a plain unmount succeeds.
 const Conn = struct {
     fd: i32 = -1,
     buf: [16]u8 = undefined,
     len: usize = 0,
     holds: ?Word = null,
+
+    fn open(c: Conn) bool {
+        return c.fd >= 0;
+    }
+
+    fn orphan(c: Conn) bool {
+        return c.fd < 0 and c.holds != null;
+    }
 };
 
 pub fn main() !void {
@@ -119,10 +117,9 @@ fn setUp() !i32 {
     }) |name| f.allow(name);
     f.allowArg("ioctl", 1, dm.dev_remove);
     // The classic mount(2) only to remount read-only, at shutdown; umount2
-    // only plainly or lazily: nothing it could mount or move with them.
+    // only plainly, never lazily: nothing it could mount or move with them.
     f.allowArg("mount", 3, linux.MS.REMOUNT | linux.MS.RDONLY);
     f.allowArg("umount2", 1, 0);
-    f.allowArg("umount2", 1, linux.MNT.DETACH);
     try f.install();
     return fd;
 }
@@ -133,7 +130,12 @@ fn serve(log: *Log, listener: i32) noreturn {
         var fds: [max_conns + 1]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         for (conns, 1..) |c, i| fds[i] = .{ .fd = c.fd, .events = linux.POLL.IN, .revents = 0 };
-        const n = linux.poll(&fds, fds.len, -1);
+        // A second at a time while an orphaned mount waits to be unmounted.
+        var waiting = false;
+        for (conns) |c| if (c.orphan()) {
+            waiting = true;
+        };
+        const n = linux.poll(&fds, fds.len, if (waiting) 1000 else -1);
         switch (linux.errno(n)) {
             .SUCCESS => {},
             .INTR => continue,
@@ -146,8 +148,9 @@ fn serve(log: *Log, listener: i32) noreturn {
             },
         }
         for (&conns, fds[1..]) |*c, p| {
-            if (c.fd >= 0 and p.revents != 0) heard(log, c, &conns);
+            if (c.open() and p.revents != 0) heard(log, c, &conns);
         }
+        for (&conns) |*c| if (c.orphan()) release(log, c, false);
         if (fds[0].revents & linux.POLL.IN != 0) accept(log, listener, &conns);
     }
 }
@@ -170,7 +173,7 @@ fn accept(log: *Log, listener: i32, conns: *[max_conns]Conn) void {
         _ = linux.close(fd);
         return;
     }
-    for (conns) |*c| if (c.fd < 0) {
+    for (conns) |*c| if (!c.open() and !c.orphan()) {
         c.* = .{ .fd = fd };
         return;
     };
@@ -217,14 +220,37 @@ fn heard(log: *Log, c: *Conn, conns: *[max_conns]Conn) void {
     reply(c.fd, std.mem.print(&buf, "ok {s}\n", .{word.place()}) catch unreachable);
 }
 
-/// An asker gone: what it held unmounted, and its connection closed.
+/// An asker gone: its connection closed, and what it held unmounted.
 fn hangUp(log: *Log, c: *Conn) void {
-    if (c.holds) |w| {
-        const lazy = linux.errno(linux.umount2(w.place(), 0)) != .SUCCESS;
-        if (lazy) _ = linux.umount2(w.place(), linux.MNT.DETACH);
-        log.event("unmounted", .{ .what = @tagName(w), .lazily = lazy });
+    if (c.open()) _ = linux.close(c.fd);
+    c.fd = -1;
+    c.len = 0;
+    if (c.holds != null) release(log, c, true);
+}
+
+/// The mount c holds, unmounted plainly, never detached: a lazy unmount
+/// would hide a mount a process in the domain still has open, and the
+/// broker would say it was gone while that process kept writing through
+/// it, and would mount the same filesystem again for the next asker. If
+/// it is busy, the word stays c's, refused to other askers, and serve
+/// tries again each second until the kernel lets it go; the first refusal
+/// is said, and so is the unmount when it comes.
+fn release(log: *Log, c: *Conn, first: bool) void {
+    const w = c.holds.?;
+    const err = linux.errno(linux.umount2(w.place(), 0));
+    if (err == .BUSY) {
+        if (first) log.event("busy", .{ .what = @tagName(w), .held = "by a process still" });
+        return;
     }
-    _ = linux.close(c.fd);
+    // Unmounted, or no longer a mount at all (EINVAL): either way gone.
+    if (err == .SUCCESS) {
+        log.event("unmounted", .{ .what = @tagName(w), .late = !first });
+    } else {
+        log.event(
+            "unmounted",
+            .{ .what = @tagName(w), .late = !first, .errno = sandbox.errnoName(err) },
+        );
+    }
     c.* = .{};
 }
 
@@ -239,9 +265,11 @@ fn reply(fd: i32, text: []const u8) void {
 
 /// The filesystem a word names, found and mounted at its place.
 fn mountWord(log: *Log, word: Word) !void {
+    // Each from the kernel command line itself, never from init's record
+    // of it under /run, which root in fence's domain can rewrite: the
+    // asker may name a word, not a device.
     var cmdline_buf: [4096]u8 = undefined;
     const cmdline = readFile("/proc/cmdline", &cmdline_buf);
-    var grubenv_buf: [512]u8 = undefined;
     const want: Want = switch (word) {
         .victim => parseUuid(before(
             ':',
@@ -250,9 +278,9 @@ fn mountWord(log: *Log, word: Word) !void {
             return error.BadVictim,
         .grub => parseUuid(before(
             ':',
-            std.mem.trim(u8, readFile("/run/werewolf/grubenv", &grubenv_buf), " \n"),
+            arg(cmdline, "werewolf.grubenv=") orelse return error.NoGrubEnvironment,
         )) orelse
-            return error.NoGrubEnvironment,
+            return error.BadGrubEnvironment,
         .esp => parseSerial(arg(
             cmdline,
             "werewolf.esp=",
@@ -368,8 +396,8 @@ const move_mount_f_empty_path = 0x4;
 const move_mount_t_empty_path = 0x40;
 
 /// dev, a kind of filesystem, read-write at place: built detached with
-/// nosuid, nodev and noexec, then attached, so there is no moment it lacks
-/// them.
+/// nosuid, nodev, noexec and nosymfollow, then attached, so there is no
+/// moment it lacks them.
 fn attach(kind: Kind, dev: [:0]const u8, place: [:0]const u8) !void {
     const name: [:0]const u8 = @tagName(kind);
     const fc = try fdOf(
@@ -442,9 +470,15 @@ fn shutdown(log: *Log) void {
             log.event("shutdown", .{ .data = "unmounted" });
         } else if (remountReadOnly("/data")) {
             log.event("shutdown", .{ .data = "busy; read-only" });
+        } else {
+            log.event("shutdown", .{ .data = "busy; still writable" });
         }
     }
-    if (dm.remove("data")) log.event("shutdown", .{ .luks = "closed" });
+    if (dm.remove("data")) {
+        log.event("shutdown", .{ .luks = "closed" });
+    } else if (exists("/dev/mapper/data")) {
+        log.event("shutdown", .{ .luks = "not closed" });
+    }
     if (isMounted(mounts, "/victim")) {
         const journal = remountReadOnly("/victim");
         const unmounted = linux.errno(linux.umount2("/victim", 0)) == .SUCCESS;
@@ -477,6 +511,13 @@ fn isMounted(mounts: []const u8, dir: []const u8) bool {
 // --- the machine's own record --------------------------------------------------
 
 /// A file's bytes, as many as fit; none if it cannot be read.
+fn exists(path: [*:0]const u8) bool {
+    const fd = linux.open(path, .{ .PATH = true, .CLOEXEC = true }, 0);
+    if (linux.errno(fd) != .SUCCESS) return false;
+    _ = linux.close(@intCast(fd));
+    return true;
+}
+
 fn readFile(path: [*:0]const u8, buf: []u8) []const u8 {
     const fd = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return "";

@@ -1,10 +1,10 @@
 #!/bin/sh
-# install-deps [-y] [apko | zig]: install what building, booting and
+# install-deps [-y] [apko] [zig]: install what building, booting and
 # checking werewolf needs, on macOS, Debian, Ubuntu, Fedora, Arch,
 # FreeBSD or NetBSD (the BSDs experimental: no CI runs them), after
 # showing what it will run and asking; -y does not ask.
-# With `apko` or `zig`, install that alone, for what needs nothing else:
-# resolving packages, or building a tool. Packages come from
+# With `apko`, `zig` or both, install only those, for what needs nothing
+# else: resolving packages, or building a tool. Packages come from
 # the system's package manager, as root through doas or sudo (Homebrew's,
 # as the user). What a system lacks at the version the build needs comes
 # from upstream, pinned by version and sha256: apko and Zig, which a
@@ -40,17 +40,26 @@ die() {
 	exit 1
 }
 
+# only: the tools named, or empty for everything.
 yes='' only=''
 for a; do
 	case $a in
 	-y) yes=1 ;;
-	apko | zig) only=$a ;;
+	apko | zig) only="${only:+$only }$a" ;;
 	*)
-		echo "usage: install-deps [-y] [apko | zig]" >&2
+		echo "usage: install-deps [-y] [apko] [zig]" >&2
 		exit 2
 		;;
 	esac
 done
+
+# wants TOOL: whether TOOL is to be installed: every tool is, unless some were named.
+wants() {
+	case " $only " in
+	"  " | *" $1 "*) return 0 ;;
+	esac
+	return 1
+}
 
 arch=$(uname -m)
 case $arch in
@@ -222,18 +231,19 @@ esac
 # missing or not the pinned version.
 need_apko='' need_melange='' need_zig='' need_erofs='' need_fc=''
 if [ -n "$zos" ]; then
-	[ "$only" = zig ] || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes
-	[ "$only" = apko ] || [ "$(zig version 2>/dev/null)" = "$zig_version" ] || need_zig=yes
+	! wants apko || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes
+	! wants zig || [ "$(zig version 2>/dev/null)" = "$zig_version" ] || need_zig=yes
 fi
 if [ "$zos" = linux ] && [ -z "$only" ]; then
 	[ "$(firecracker --version 2>/dev/null | head -n 1)" = "Firecracker v$fc_version" ] || need_fc=yes
 	[ "$(melange_version)" = "$melange_version" ] || need_melange=yes
 fi
 [ -n "$only" ] || erofs_ok || need_erofs=yes
-case $only in
-apko) pkgs=$apko_pkgs ;;
-zig) pkgs=$zig_pkgs ;;
-esac
+if [ -n "$only" ]; then
+	pkgs=''
+	! wants apko || pkgs=$apko_pkgs
+	! wants zig || pkgs="$pkgs $zig_pkgs"
+fi
 case $pm$need_apko in
 pkgyes | pkginyes) pkgs="$pkgs go" ;; # go builds apko
 esac
@@ -408,20 +418,17 @@ fi
 in_path() { # in_path TOOL [DIR]: why TOOL is not what was installed in DIR
 	echo "$1 is $(command -v "$1" || echo missing): is ${2:-/usr/local}/bin first in PATH?"
 }
-if [ "$only" != zig ]; then
+if wants apko; then
 	if [ -n "$zos" ]; then
 		[ "$(apko_version)" = "v$apko_version" ] || die "$(in_path apko)"
 	else
 		command -v apko >/dev/null || die "no apko"
 	fi
 fi
-if [ "$only" = apko ]; then
-	echo "install-deps: apko $(apko_version)"
-	exit 0
-fi
-[ "$(zig version 2>/dev/null)" = "$zig_version" ] || die "$(in_path zig)"
-if [ "$only" = zig ]; then
-	echo "install-deps: zig $(zig version)"
+! wants zig || [ "$(zig version 2>/dev/null)" = "$zig_version" ] || die "$(in_path zig)"
+if [ -n "$only" ]; then
+	! wants apko || echo "install-deps: apko $(apko_version)"
+	! wants zig || echo "install-deps: zig $(zig version)"
 	exit 0
 fi
 erofs_ok || die "$(in_path mkfs.erofs "$erofs_prefix")"

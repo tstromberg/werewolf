@@ -174,10 +174,8 @@ pub fn apply(
             next.source.window = source;
             continue;
         }
-        const time = timeOf(
-            &next.time,
-            key,
-        ) orelse return .{ .key = key, .why = "unknown setting" };
+        const time = timeOf(&next.time, key) orelse
+            return .{ .key = key, .why = "unknown setting" };
         const value = duration(v) orelse
             return .{ .key = key, .why = "a time is a string such as \"4h\" or \"7d\"" };
         if (value > timeOf(&next.limit, key).?.*) return .{ .key = key, .why = "above its limit" };
@@ -208,9 +206,13 @@ fn duration(v: json.Value) ?u32 {
 fn parseWindow(s: []const u8) ?Window {
     var words = std.mem.tokenizeScalar(u8, s, ' ');
     const days = parseDays(words.next() orelse return null) orelse return null;
-    const range = parseRange(words.next() orelse return null) orelse return null;
-    if (words.next() != null) return null;
-    const w: Window = .{ .days = days, .start = range[0], .end = range[1] };
+    const range = words.next() orelse return null;
+    if (words.next() != null or range.len != 11 or range[5] != '-') return null;
+    const w: Window = .{
+        .days = days,
+        .start = parseClock(range[0..5]) orelse return null,
+        .end = parseClock(range[6..11]) orelse return null,
+    };
     if (w.start == w.end or w.len() < hour) return null;
     return w;
 }
@@ -238,11 +240,6 @@ fn parseDays(s: []const u8) ?u7 {
         days |= @as(u7, 1) << @intCast(i);
     }
     return days;
-}
-
-fn parseRange(s: []const u8) ?[2]u32 {
-    if (s.len != 11 or s[5] != '-') return null;
-    return .{ parseClock(s[0..5]) orelse return null, parseClock(s[6..11]) orelse return null };
 }
 
 fn parseClock(s: []const u8) ?u32 {
@@ -292,6 +289,12 @@ fn inWindow(w: Window, earliest: i64, sd: u64) i64 {
     }
 }
 
+/// When a fix boots by its rule alone: due, or on a machine's first check,
+/// within first_boot_time of when it was seen.
+fn byRule(s: *const Settings, tier: Tier, seen: i64, sd: u64, first_boot: bool) i64 {
+    return if (first_boot) seen + place(sd, first_boot_time) else due(s, tier, seen, sd);
+}
+
 /// When the tiers seen first were seen; null for a tier not seen. A tier,
 /// once seen, stays until the slot boots, so a fix whose tier rises never
 /// boots later than it would have.
@@ -312,10 +315,7 @@ pub fn when(s: *const Settings, seen: Seen, sd: u64, first_boot: bool) ?Due {
     for (seen, 0..) |t, i| {
         const at = t orelse continue;
         const tier: Tier = @fromBackingInt(@intCast(i));
-        const d: Due = .{
-            .at = if (first_boot) at + place(sd, first_boot_time) else due(s, tier, at, sd),
-            .tier = tier,
-        };
+        const d: Due = .{ .at = byRule(s, tier, at, sd, first_boot), .tier = tier };
         if (best == null or d.at < best.?.at or (d.at == best.?.at and
             @backingInt(d.tier) > @backingInt(best.?.tier)))
             best = d;
@@ -381,10 +381,10 @@ pub fn why(
         ", where this machine's place is {f} in.",
         .{Duration{ .secs = place(sd, span) }},
     );
-    const rule = if (first_boot) seen + place(sd, first_boot_time) else due(s, tier, seen, sd);
-    if (at > rule) try out.print(" An update reboot waits until {f} after boot.", .{
-        Duration{ .secs = reboot_gap },
-    });
+    if (at > byRule(s, tier, seen, sd, first_boot)) try out.print(
+        " An update reboot waits until {f} after boot.",
+        .{Duration{ .secs = reboot_gap }},
+    );
     try out.print(" Due {f}, ", .{Time{ .secs = at }});
     if (at <= now)
         try out.writeAll("now.")
@@ -423,10 +423,7 @@ pub const Duration = struct {
 
     pub fn format(d: Duration, out: *Writer) Writer.Error!void {
         const units = [_]struct { n: u64, c: u8 }{
-            .{
-                .n = day,
-                .c = 'd',
-            },
+            .{ .n = day, .c = 'd' },
             .{ .n = hour, .c = 'h' },
             .{ .n = minute, .c = 'm' },
             .{ .n = 1, .c = 's' },

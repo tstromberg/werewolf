@@ -15,15 +15,18 @@ const linux = std.os.linux;
 
 const gitea = "/usr/bin/gitea";
 const config = "/etc/gitea/app.ini";
-const hooks = [_][]const u8{ "pre-receive", "update", "post-receive", "proc-receive" };
+const hooks = [_][:0]const u8{ "pre-receive", "update", "post-receive", "proc-receive" };
 const max_args = 16;
 
 pub fn main(init: std.process.Init.Minimal) void {
     const argv = init.args.vector;
     if (argv.len == 0 or argv.len > max_args) die("usage: HOOK [ARG...], as git runs it");
+    // The table's own name is what Gitea gets: argv[0]'s basename is a
+    // slice of it, with no end of its own (".../pre-receive/" would pass
+    // as "pre-receive" and be handed on with the slash).
     const name = std.fs.path.basename(std.mem.span(argv[0]));
-    for (hooks) |h| {
-        if (std.mem.eql(u8, name, h)) break;
+    const hook = for (hooks) |h| {
+        if (std.mem.eql(u8, name, h)) break h;
     } else die("not a hook Gitea has");
 
     var args: [max_args + 5:null]?[*:0]const u8 = @splat(null);
@@ -31,11 +34,10 @@ pub fn main(init: std.process.Init.Minimal) void {
     args[1] = "--config";
     args[2] = config;
     args[3] = "hook";
-    args[4] = @ptrCast(name.ptr);
+    args[4] = hook.ptr;
     for (argv[1..], 5..) |a, i| args[i] = a;
     const envp: [*:null]const ?[*:0]const u8 = @ptrCast(init.environ.block.slice.ptr);
-    const rc = linux.execve(gitea, &args, envp);
-    _ = rc;
+    _ = linux.execve(gitea, &args, envp);
     die("cannot run " ++ gitea);
 }
 

@@ -2,8 +2,6 @@
 //! UNIX socket, every value a parameter, never part of the SQL.
 
 const std = @import("std");
-const Io = std.Io;
-const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const main = @import("status-page.zig");
@@ -88,12 +86,8 @@ pub const Pg = struct {
         while (true) {
             const msg = try p.receive(gpa);
             switch (msg.kind) {
-                'R' => if (msg.body.len < 4 or
-                    std.mem.readInt(
-                        u32,
-                        msg.body[0..4],
-                        .big,
-                    ) != 0) return error.AuthenticationRefused,
+                'R' => if (msg.body.len < 4 or std.mem.readInt(u32, msg.body[0..4], .big) != 0)
+                    return error.AuthenticationRefused,
                 'E' => {
                     keepRefusal(msg.body);
                     return error.Refused;

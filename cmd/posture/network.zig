@@ -11,46 +11,36 @@ const testing = std.testing;
 const posture = @import("posture.zig");
 const Posture = posture.Posture;
 const exists = posture.exists;
+const listAdd = posture.listAdd;
 const statx = posture.statx;
 const trim = posture.trim;
 
 pub fn check(p: *Posture) !void {
+    // IPv6 is on unless disable_ipv6 reads 1, or the kernel has none.
+    const v6 = p.sysctl("net/ipv6/conf/all/disable_ipv6");
+    const v6_on = v6.len > 0 and !std.mem.eql(u8, v6, "1");
     var ports: std.ArrayList(u16) = .empty;
     for ([_][]const u8{
         "/proc/net/tcp",
         "/proc/net/tcp6",
     }) |f| try listenPorts(p.gpa, p.read(f), &ports);
     var list: std.ArrayList(u8) = .empty;
-    for (ports.items, 0..) |port, i| try list.print(
-        p.gpa,
-        "{s}{d}",
-        .{ if (i > 0) ", " else "", port },
-    );
+    for (ports.items) |port| try listAdd(p.gpa, &list, "{d}", .{port});
     // The machine's network policy (fence), or the older list of ports.
-    const declared: ?[]const u8 = if (Dir.cwd().readFileAlloc(
+    const policy: ?[]const u8 = Dir.cwd().readFileAlloc(
         p.io,
         "/usr/share/werewolf/net",
         p.gpa,
         .limited(64 << 10),
-    )) |net|
+    ) catch null;
+    const declared: ?[]const u8 = if (policy) |net|
         try policyPorts(p.gpa, net)
-    else |_|
-        Dir.cwd().readFileAlloc(
-            p.io,
-            "/etc/werewolf/listen",
-            p.gpa,
-            .limited(64 << 10),
-        ) catch null;
+    else
+        Dir.cwd().readFileAlloc(p.io, "/etc/werewolf/listen", p.gpa, .limited(64 << 10)) catch
+            null;
     var undeclared: std.ArrayList(u8) = .empty;
     if (declared) |text| for (ports.items) |port| {
-        if (!isDeclared(
-            text,
-            port,
-        )) try undeclared.print(
-            p.gpa,
-            "{s}{d}",
-            .{ if (undeclared.items.len > 0) ", " else "", port },
-        );
+        if (!isDeclared(text, port)) try listAdd(p.gpa, &undeclared, "{d}", .{port});
     };
     try p.add(.{
         .id = "network-ports",
@@ -74,8 +64,8 @@ pub fn check(p: *Posture) !void {
                 .{if (list.items.len > 0) list.items else "none"},
             ),
     });
-    try fence(p);
-    try p.absentNamed(
+    try fence(p, policy orelse "", v6_on);
+    try p.absent(
         "network-no-login",
         "network",
         "No remote login",
@@ -84,28 +74,24 @@ pub fn check(p: *Posture) !void {
     );
     try ssh(p);
     // With IPv6 off (ipv6.disable=1), there is no IPv6 forwarding to check.
-    const forwarding: []const [2][]const u8 = if (ipv6Off(p))
-        &.{.{ "net/ipv4/ip_forward", "0" }}
-    else
-        &.{ .{ "net/ipv4/ip_forward", "0" }, .{ "net/ipv6/conf/all/forwarding", "0" } };
+    const forwarding = [_][2][]const u8{
+        .{ "net/ipv4/ip_forward", "0" },
+        .{ "net/ipv6/conf/all/forwarding", "0" },
+    };
     try p.sysctls(
         "network-no-forwarding",
         "network",
         "No routing",
         "The machine forwards no traffic for others.",
-        forwarding,
+        if (v6_on) &forwarding else forwarding[0..1],
     );
     // A host takes and sends redirects on an interface if all or the
     // interface says so, so each interface must say no: all and default
     // do not reach an interface that was there before they were set.
     // IPv6 has only the interface's own setting. With IPv6 off, its
     // settings govern nothing.
-    const v6_on = !ipv6Off(p);
     const redirects = [_][2][]const u8{
-        .{
-            "net/ipv4/conf/*/accept_redirects",
-            "0",
-        },
+        .{ "net/ipv4/conf/*/accept_redirects", "0" },
         .{ "net/ipv4/conf/*/secure_redirects", "0" },
         .{ "net/ipv4/conf/*/send_redirects", "0" },
         .{ "net/ipv6/conf/*/accept_redirects", "0" },
@@ -141,18 +127,18 @@ pub fn check(p: *Posture) !void {
     );
     // Router advertisements stay on (IPv6 takes its route from them), but
     // limited to what they must give.
-    if (v6_on) try p.sysctls("network-ipv6-ra-limit" ++
-        "s", "network", "Router advertisements " ++
-        "limited", "A rogue router on the same network cannot rank itself above the real " ++
-        "one, add a route to steal one destination's traffic, or flood the machine with " ++
-        "addresses.", &.{
-        .{
-            "net/ipv6/conf/*/accept_ra_rtr_pref",
-            "0",
+    if (v6_on) try p.sysctls(
+        "network-ipv6-ra-limits",
+        "network",
+        "Router advertisements limited",
+        "A rogue router on the same network cannot rank itself above the real one, add a " ++
+            "route to steal one destination's traffic, or flood the machine with addresses.",
+        &.{
+            .{ "net/ipv6/conf/*/accept_ra_rtr_pref", "0" },
+            .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" },
+            .{ "net/ipv6/conf/*/max_addresses", "4" },
         },
-        .{ "net/ipv6/conf/*/accept_ra_rt_info_max_plen", "0" },
-        .{ "net/ipv6/conf/*/max_addresses", "4" },
-    });
+    );
     try p.sysctls(
         "network-martians",
         "network",
@@ -204,23 +190,18 @@ pub fn check(p: *Posture) !void {
         "A flood of half-open connections cannot exhaust it.",
         &.{.{ "net/ipv4/tcp_syncookies", "1" }},
     );
-    try p.sysctls("network-stray-packet" ++
-        "s", "network", "Stray packets " ++
-        "ignored", "Pings to a broadcast address and bogus ICMP errors get no answer, and a " ++
-        "forged reset cannot cut short a closing connection.", &.{
-        .{
-            "net/ipv4/icmp_echo_ignore_broadcasts",
-            "1",
+    try p.sysctls(
+        "network-stray-packets",
+        "network",
+        "Stray packets ignored",
+        "Pings to a broadcast address and bogus ICMP errors get no answer, and a forged " ++
+            "reset cannot cut short a closing connection.",
+        &.{
+            .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" },
+            .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" },
+            .{ "net/ipv4/tcp_rfc1337", "1" },
         },
-        .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" },
-        .{ "net/ipv4/tcp_rfc1337", "1" },
-    });
-}
-
-/// Whether IPv6 is off: disable_ipv6 reads 1, or the kernel has none.
-fn ipv6Off(p: *Posture) bool {
-    const v6 = p.sysctl("net/ipv6/conf/all/disable_ipv6");
-    return v6.len == 0 or std.mem.eql(u8, v6, "1");
+    );
 }
 
 fn ssh(p: *Posture) !void {
@@ -244,22 +225,15 @@ fn ssh(p: *Posture) !void {
         try loose.appendSlice(p.gpa, try sshLimits(p.gpa, s, loose.items.len > 0));
         const config = "/etc/ssh/sshd_config";
         if (statx(p.gpa, config)) |st| if (st.uid != 0 or st.mode & 0o022 != 0)
-            try loose.print(
-                p.gpa,
-                "{s}{s} is not root's alone",
-                .{ if (loose.items.len > 0) ", " else "", config },
-            );
+            try listAdd(p.gpa, &loose, "{s} is not root's alone", .{config});
         // Each host key, as sshd -T lists them, one "hostkey PATH" a line.
         var lines = std.mem.tokenizeScalar(u8, s, '\n');
         while (lines.next()) |line| {
             if (!std.ascii.startsWithIgnoreCase(line, "hostkey ")) continue;
             const key = trim(line["hostkey ".len..]);
             const st = statx(p.gpa, key) orelse continue;
-            if (st.mode & 0o077 != 0) try loose.print(
-                p.gpa,
-                "{s}{s} is readable by others",
-                .{ if (loose.items.len > 0) ", " else "", key },
-            );
+            if (st.mode & 0o077 != 0)
+                try listAdd(p.gpa, &loose, "{s} is readable by others", .{key});
         }
     }
     try p.add(.{
@@ -362,20 +336,13 @@ test sshLimits {
     );
 }
 
-// werewolf's network policy (docs/design/fence.md): only declared ports can be
-// bound, only declared traffic sent, nothing unsolicited received, the
-// metadata server only for those named, IPv6 off. Each protection is
-// tested where a test is safe and quiet (a bind, a UDP connect, which
-// sends nothing, a connect the policy refuses at once), and fails where
-// it is missing, on any Linux.
-fn fence(p: *Posture) !void {
-    const policy: []const u8 = Dir.cwd().readFileAlloc(
-        p.io,
-        "/usr/share/werewolf/net",
-        p.gpa,
-        .limited(64 << 10),
-    ) catch "";
-
+/// werewolf's network policy (docs/design/fence.md), "" where there is
+/// none: only declared ports can be bound, only declared traffic sent,
+/// nothing unsolicited received, the metadata server only for those named,
+/// IPv6 off. Each protection is tested where a test is safe and quiet (a
+/// bind, a UDP connect, which sends nothing, a connect the policy refuses
+/// at once), and fails where it is missing, on any Linux.
+fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
     const port = unusedPort(policy);
     const bound = probeBind(port);
     try p.add(.{
@@ -425,8 +392,10 @@ fn fence(p: *Posture) !void {
         .detail = @tagName(md),
     });
 
-    var rules: RuleSummary = .{};
-    if (ruleDump(p.gpa, linux.AF.INET)) |dump| rules = summarizeRules(dump) else |_| {}
+    const rules: RuleSummary = if (ruleDump(p.gpa, linux.AF.INET)) |dump|
+        summarizeRules(dump)
+    else |_|
+        .{};
     try p.add(.{
         .id = "network-inbound",
         .area = "network",
@@ -443,11 +412,12 @@ fn fence(p: *Posture) !void {
         }),
     });
 
-    const v6_off = ipv6Off(p);
-    var rules6: RuleSummary = .{};
-    if (!v6_off) if (ruleDump(p.gpa, linux.AF.INET6)) |dump| {
-        rules6 = summarizeRules(dump);
-    } else |_| {};
+    const rules6: RuleSummary = if (!v6_on)
+        .{}
+    else if (ruleDump(p.gpa, linux.AF.INET6)) |dump|
+        summarizeRules(dump)
+    else |_|
+        .{};
     try p.add(.{
         .id = "network-ipv6",
         .area = "network",
@@ -457,11 +427,11 @@ fn fence(p: *Posture) !void {
         .how = "IPv6 is off (disable_ipv6 reads 1, or the kernel has none), or its " ++
             "policy-routing rules (RTM_GETRULE, AF_INET6) drop arriving traffic before " ++
             "delivering it and refuse locally sent traffic no rule allows",
-        .result = if (v6_off or (rules6.inbound_dropped and rules6.outbound_refused))
+        .result = if (!v6_on or (rules6.inbound_dropped and rules6.outbound_refused))
             .pass
         else
             .fail,
-        .detail = if (v6_off)
+        .detail = if (!v6_on)
             "IPv6 off"
         else
             try p.gpa.print("arriving: {s}; sent: {s}", .{
@@ -474,30 +444,18 @@ fn fence(p: *Posture) !void {
 /// What sshd -T must report, by its names: keys only, no host-based trust,
 /// and no forwarding, tunnels or user environment.
 const ssh_settings = [_][2][]const u8{
-    .{
-        "passwordauthentication",
-        "no",
-    },
+    .{ "passwordauthentication", "no" },
     .{ "kbdinteractiveauthentication", "no" },
     .{ "permitemptypasswords", "no" },
-    .{
-        "hostbasedauthentication",
-        "no",
-    },
+    .{ "hostbasedauthentication", "no" },
     .{ "ignorerhosts", "yes" },
     .{ "strictmodes", "yes" },
-    .{
-        "permituserenvironment",
-        "no",
-    },
+    .{ "permituserenvironment", "no" },
     .{ "x11forwarding", "no" },
     .{ "gssapiauthentication", "no" },
     .{ "loglevel", "VERBOSE" },
     .{ "allowagentforwarding", "no" },
-    .{
-        "allowtcpforwarding",
-        "no",
-    },
+    .{ "allowtcpforwarding", "no" },
     .{ "allowstreamlocalforwarding", "no" },
     .{ "gatewayports", "no" },
     .{ "permittunnel", "no" },
@@ -510,9 +468,9 @@ fn sshSettingsText() []const u8 {
     return s;
 }
 
-/// A setting's value in sshd -T's output, "key value" a line, or null.
-/// key's value in sshd -T's output, whose names are lowercase in some
-/// OpenSSH releases and CamelCase in others (10.x: StrictModes yes).
+/// key's value in sshd -T's output, "key value" a line, or null. Its names
+/// are lowercase in some OpenSSH releases and CamelCase in others (10.x:
+/// StrictModes yes).
 fn sshValue(settings: []const u8, key: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, settings, '\n');
     while (it.next()) |line| {
@@ -526,17 +484,14 @@ fn sshValue(settings: []const u8, key: []const u8) ?[]const u8 {
 fn sshMismatches(gpa: Allocator, settings: []const u8, want: []const [2][]const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (want) |kv| {
-        // An sshd built without X11 or GSSAPI (Wolfi's) lists neither
-        // setting, and can do neither at all.
-        if ((std.mem.eql(u8, kv[0], "x11forwarding") or
-            std.mem.eql(u8, kv[0], "gssapiauthentication")) and
-            sshValue(settings, kv[0]) == null) continue;
-        const v = sshValue(settings, kv[0]) orelse "absent";
-        if (!std.mem.eql(
-            u8,
-            v,
-            kv[1],
-        )) try out.print(gpa, "{s}{s} is {s}", .{ if (out.items.len > 0) ", " else "", kv[0], v });
+        const v = sshValue(settings, kv[0]) orelse v: {
+            // An sshd built without X11 or GSSAPI (Wolfi's) lists neither
+            // setting, and can do neither at all.
+            if (std.mem.eql(u8, kv[0], "x11forwarding") or
+                std.mem.eql(u8, kv[0], "gssapiauthentication")) continue;
+            break :v "absent";
+        };
+        if (!std.mem.eql(u8, v, kv[1])) try listAdd(gpa, &out, "{s} is {s}", .{ kv[0], v });
     }
     return out.items;
 }
@@ -565,7 +520,7 @@ fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
             for (w[1]) |needle| if (std.mem.indexOf(u8, alg, needle) != null) {
                 var seen = std.mem.tokenizeSequence(u8, out.items, ", ");
                 while (seen.next()) |s| if (std.mem.eql(u8, s, alg)) continue :next;
-                try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", alg });
+                try listAdd(gpa, &out, "{s}", .{alg});
                 continue :next;
             };
         }
@@ -574,11 +529,7 @@ fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
     const post_quantum = offered: while (kex.next()) |alg| {
         for (ssh_post_quantum) |pq| if (std.mem.startsWith(u8, alg, pq)) break :offered true;
     } else false;
-    if (!post_quantum) try out.print(
-        gpa,
-        "{s}no post-quantum key exchange",
-        .{if (out.items.len > 0) ", " else ""},
-    );
+    if (!post_quantum) try listAdd(gpa, &out, "no post-quantum key exchange", .{});
     return out.items;
 }
 
@@ -620,11 +571,8 @@ fn policyPorts(gpa: Allocator, policy: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, policy, '\n');
     while (it.next()) |line| {
-        if (std.mem.startsWith(
-            u8,
-            line,
-            "listen tcp ",
-        )) try out.print(gpa, "{s}\n", .{std.mem.trim(u8, line["listen tcp ".len..], " ")});
+        if (std.mem.startsWith(u8, line, "listen tcp "))
+            try out.print(gpa, "{s}\n", .{std.mem.trim(u8, line["listen tcp ".len..], " ")});
     }
     return out.items;
 }
@@ -824,8 +772,9 @@ fn summarizeRules(dump: []const u8) RuleSummary {
                 continue;
             at.* = @min(at.* orelse priority, priority);
         }
-        if (action == 1 and table == 255 and
-            proto == null) local_at = @min(local_at orelse priority, priority); // to local
+        // To the local table.
+        if (action == 1 and table == 255 and proto == null)
+            local_at = @min(local_at orelse priority, priority);
     }
     const before = struct {
         fn f(drop: ?u32, local: ?u32) bool {
@@ -833,10 +782,8 @@ fn summarizeRules(dump: []const u8) RuleSummary {
             return local == null or d < local.?;
         }
     }.f;
-    const dropped = before(
-        drop_at,
-        local_at,
-    ) or (before(tcp_drop_at, local_at) and before(udp_drop_at, local_at));
+    const dropped = before(drop_at, local_at) or
+        (before(tcp_drop_at, local_at) and before(udp_drop_at, local_at));
     return .{ .outbound_refused = out_refused, .inbound_dropped = dropped };
 }
 

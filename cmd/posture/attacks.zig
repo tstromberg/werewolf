@@ -10,25 +10,20 @@
 const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
-const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
-const testing = std.testing;
 
 const posture = @import("posture.zig");
 const cap_sys_rawio = @import("kernel.zig").cap_sys_rawio;
 const Posture = posture.Posture;
 const capBit = posture.capBit;
 const exists = posture.exists;
+const listAdd = posture.listAdd;
 const trim = posture.trim;
 
 const attack_run = "/run/.posture-attack";
-
 const attack_link = "/tmp/.posture-attack-link";
-
 const attack_secret = "/tmp/.posture-attack-secret";
-
 const attack_hard = "/tmp/.posture-attack-hard";
-
 const attack_file = "/tmp/.posture-attack-file";
 
 fn cleanAttacks() void {
@@ -102,6 +97,7 @@ fn plantsFile() bool {
     return created(attack_file, 0o644);
 }
 
+/// Whether path, not there before, can be made with mode.
 fn created(path: [:0]const u8, mode: linux.mode_t) bool {
     const rc = linux.open(
         path,
@@ -122,11 +118,6 @@ fn opensForWrite(path: [:0]const u8, append: bool) bool {
     );
     if (linux.errno(rc) != .SUCCESS) return false;
     _ = linux.close(@intCast(rc));
-    return true;
-}
-
-fn hasAll(haystack: []const u8, needles: []const []const u8) bool {
-    for (needles) |n| if (std.mem.indexOf(u8, haystack, n) == null) return false;
     return true;
 }
 
@@ -181,10 +172,10 @@ pub fn run(p: *Posture) !void {
         .why = "A user, or an intruder running as one, cannot see what else runs.",
         .how = "as nobody, /proc/1 does not exist",
         .result = if (sees) |s| (if (s) .fail else .pass) else .skip,
-        .detail = if (sees) |s| (if (s)
-            "nobody sees /proc/1"
+        .detail = if (sees) |s|
+            (if (s) "nobody sees /proc/1" else "")
         else
-            "") else "could not become nobody",
+            "could not become nobody",
     });
     const writes = asNobody(writesRun);
     try p.add(.{
@@ -194,10 +185,10 @@ pub fn run(p: *Posture) !void {
         .why = "Another user cannot plant files where the services keep their state.",
         .how = "as nobody, creating a file in /run fails",
         .result = if (writes) |w| (if (w) .fail else .pass) else .skip,
-        .detail = if (writes) |w| (if (w)
-            "nobody wrote to /run"
+        .detail = if (writes) |w|
+            (if (w) "nobody wrote to /run" else "")
         else
-            "") else "could not become nobody",
+            "could not become nobody",
     });
 
     // Each trick needs one side planted by nobody and the other tried
@@ -205,38 +196,18 @@ pub fn run(p: *Posture) !void {
     var got: std.ArrayList(u8) = .empty;
     var missed = false;
     if (asNobody(plantsLink)) |planted| {
-        if (planted and
-            opensForWrite(
-                attack_link,
-                false,
-            )) try got.appendSlice(p.gpa, "root wrote through nobody's symlink");
+        if (planted and opensForWrite(attack_link, false))
+            try listAdd(p.gpa, &got, "root wrote through nobody's symlink", .{});
         missed = missed or !planted;
     } else missed = true;
-    const secret = linux.open(
-        attack_secret,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
-        0o600,
-    );
-    if (linux.errno(secret) == .SUCCESS) {
-        _ = linux.close(@intCast(secret));
+    if (created(attack_secret, 0o600)) {
         if (asNobody(linksSecret)) |linked| {
-            if (linked) try got.print(
-                p.gpa,
-                "{s}nobody hard-linked root's file",
-                .{if (got.items.len > 0) ", " else ""},
-            );
+            if (linked) try listAdd(p.gpa, &got, "nobody hard-linked root's file", .{});
         } else missed = true;
     } else missed = true;
     if (asNobody(plantsFile)) |planted| {
-        if (planted and
-            opensForWrite(
-                attack_file,
-                true,
-            )) try got.print(
-            p.gpa,
-            "{s}root opened nobody's file with O_CREAT",
-            .{if (got.items.len > 0) ", " else ""},
-        );
+        if (planted and opensForWrite(attack_file, true))
+            try listAdd(p.gpa, &got, "root opened nobody's file with O_CREAT", .{});
         missed = missed or !planted;
     } else missed = true;
     try p.add(.{
@@ -278,11 +249,21 @@ fn leashAttack(p: *Posture) !void {
         Dir.cwd().deleteTree(p.io, "/run/svc/" ++ probe_name) catch {};
         Dir.cwd().deleteTree(p.io, "/data/svc/" ++ probe_name) catch {};
     }
+    // The port it is granted must be one fence lets anything connect to,
+    // the policy's own (docs/design/fence.md): a port the policy names no
+    // leash can open, however it is granted. Where the policy names none,
+    // as minimal's, the granted half is not tried.
+    const granted = policyPort(p) orelse 0;
     const file = try p.gpa.print(
-        "# posture's probe (werewolf.check=1), granted TCP port 1 and nothing else\n" ++
-            "exec {s} --probe\nuser nobody\nconnect tcp/1\npledge stdio rpath wpath inet " ++
+        "# posture's probe (werewolf.check=1), granted TCP port {d} and nothing else\n" ++
+            "exec {s} --probe {d}\nuser nobody\n{s}pledge stdio rpath wpath inet " ++
             "connect proc exec\n",
-        .{self},
+        .{
+            granted,
+            self,
+            granted,
+            if (granted == 0) "" else try p.gpa.print("connect tcp/{d}\n", .{granted}),
+        },
     );
     Dir.cwd().writeFile(
         p.io,
@@ -312,22 +293,25 @@ fn leashAttack(p: *Posture) !void {
     }
     var got: std.ArrayList(u8) = .empty;
     if (ran) for (probe_tries, 0..) |what, i| {
-        if (mask & (@as(u32, 1) << @intCast(i)) != 0)
-            try got.print(p.gpa, "{s}{s}", .{ if (got.items.len > 0) ", " else "", what });
+        if (mask & (@as(u32, 1) << @intCast(i)) != 0) try listAdd(p.gpa, &got, "{s}", .{what});
     };
     try p.add(.{
         .id = "processes-leash-attack",
         .area = "processes",
         .name = "A leashed service stays on its leash",
         .why = "A service that is taken over can reach only the files, programs and ports " ++
-            "its " ++
-            "service file names.",
-        .how = "this program, leashed as nobody, granted TCP port 1 and pledged " ++
-            "stdio rpath wpath inet connect proc exec, cannot read /run/werewolf/hostname, " ++
-            "write /tmp, run /usr/bin/sv, connect to port 2, or (its pledge not promising " ++
-            "them) make a memfd, an inotify watch or SysV shared memory; and can read " ++
-            "/etc/passwd, write its own directory and connect to port 1",
-        .result = if (!ran) .fail else if (got.items.len == 0) .pass else .fail,
+            "its service file names.",
+        .how = try p.gpa.print(
+            "this program, leashed as nobody, granted TCP port {d} (a port the policy " ++
+                "names, which fence lets anything connect to; 0: none, so not tried) " ++
+                "and pledged stdio rpath wpath inet connect proc exec, cannot read " ++
+                "/run/werewolf/hostname, write /tmp, run /usr/bin/sv, connect to port 2, " ++
+                "or (its pledge not promising them) make a memfd, an inotify watch or " ++
+                "SysV shared memory; and can read /etc/passwd, write its own directory " ++
+                "and connect to port {d}",
+            .{ granted, granted },
+        ),
+        .result = if (ran and got.items.len == 0) .pass else .fail,
         .detail = if (!ran) "the probe did not run" else got.items,
     });
 }
@@ -372,7 +356,7 @@ fn refusedAndLogged(p: *Posture, path: [:0]const u8, needles: []const []const u8
         while (true) {
             const n = linux.read(fd, &record, record.len);
             switch (linux.errno(n)) {
-                .SUCCESS => if (hasAll(record[0..n], needles)) return .logged,
+                .SUCCESS => if (posture.logHas(record[0..n], needles)) return .logged,
                 .PIPE => {}, // records lost to newer ones: read on
                 else => break,
             }
@@ -383,9 +367,7 @@ fn refusedAndLogged(p: *Posture, path: [:0]const u8, needles: []const []const u8
 }
 
 const leash_bin = "/usr/lib/werewolf/leash";
-
 const probe_name = "posture-probe";
-
 const probe_dir = "/run/werewolf/" ++ probe_name;
 
 /// What the probe tries, in its exit code's bits, each a thing that went
@@ -408,12 +390,34 @@ const probe_tries = [_][]const u8{
 /// leashAttack reads; it exits 0x80 to say it ran. It makes only system
 /// calls. Bits 0..6 are the leash's Landlock (files, ports, programs);
 /// 7..9 the pledge's seccomp (calls it did not promise must be ENOSYS).
-pub fn probe() u8 {
+/// The first TCP port the machine's policy names, listen or connect: one
+/// fence lets every process connect to. Null where it names none.
+fn policyPort(p: *Posture) ?u16 {
+    const net = Dir.cwd().readFileAlloc(
+        p.io,
+        "/usr/share/werewolf/net",
+        p.gpa,
+        .limited(64 << 10),
+    ) catch return null;
+    var lines = std.mem.tokenizeScalar(u8, net, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeScalar(u8, line, ' ');
+        const key = words.next() orelse continue;
+        if (std.mem.eql(u8, key, "connect")) _ = words.next(); // the user
+        if (!std.mem.eql(u8, key, "listen") and !std.mem.eql(u8, key, "connect")) continue;
+        if (!std.mem.eql(u8, words.next() orelse continue, "tcp")) continue;
+        return std.fmt.parseInt(u16, words.next() orelse continue, 10) catch continue;
+    }
+    return null;
+}
+
+/// granted: the port its leash grants, 0 for none.
+pub fn probe(granted: u16) u8 {
     var bits: u32 = 0;
     if (opens("/run/werewolf/hostname")) bits |= 1 << 0;
     if (!opens("/etc/passwd")) bits |= 1 << 1;
     if (connectError(2) != .ACCES) bits |= 1 << 2;
-    if (connectError(1) == .ACCES) bits |= 1 << 3;
+    if (granted != 0 and connectError(granted) == .ACCES) bits |= 1 << 3;
     if (!creates("/run/svc/" ++ probe_name ++ "/x")) bits |= 1 << 4;
     if (creates("/tmp/." ++ probe_name)) bits |= 1 << 5;
     if (runs("/usr/bin/sv")) bits |= 1 << 6;
@@ -440,7 +444,7 @@ pub fn probe() u8 {
 /// Whether a call the probe's pledge did not promise still worked: the
 /// per-service seccomp filter should answer ENOSYS, so a success is a hole.
 /// Each returns a descriptor or id when allowed, closed or removed at once.
-fn made(comptime sys: std.os.linux.SYS) bool {
+fn made(comptime sys: linux.SYS) bool {
     const rc = switch (sys) {
         .memfd_create => linux.syscall2(sys, @intFromPtr("probe"), 0),
         .inotify_init1 => linux.syscall1(sys, @as(usize, linux.IN.CLOEXEC)),
@@ -462,20 +466,17 @@ fn opens(path: [:0]const u8) bool {
     return true;
 }
 
+/// Whether path can be made, and if so, removed again.
 fn creates(path: [:0]const u8) bool {
-    const fd = linux.open(
-        path,
-        .{ .ACCMODE = .WRONLY, .CREAT = true, .EXCL = true, .CLOEXEC = true },
-        0o600,
-    );
-    if (linux.errno(fd) != .SUCCESS) return false;
-    _ = linux.close(@intCast(fd));
+    if (!created(path, 0o600)) return false;
     _ = linux.unlink(path);
     return true;
 }
 
-/// The error a TCP connect to port on 127.0.0.1 gets: fence lets loopback
-/// pass, so a refusal there is the leash's.
+/// The error a TCP connect to port on 127.0.0.1 gets. fence lets a connect
+/// to a port the policy names pass, loopback included, so a refusal of
+/// the granted one is the leash's; port 2 fence refuses as well, and the
+/// leash first.
 fn connectError(port: u16) linux.E {
     const fd = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(fd) != .SUCCESS) return linux.errno(fd);

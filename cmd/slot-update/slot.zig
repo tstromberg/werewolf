@@ -24,6 +24,8 @@ const meta_dir = m.meta_dir;
 const update_id = m.update_id;
 const work_dir = m.work_dir;
 
+const argvZ = m.argvZ;
+const nowSecs = m.nowSecs;
 const Package = m.Package;
 const parentDir = m.parentDir;
 const parseCmdline = m.parseCmdline;
@@ -58,17 +60,11 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // build's did. One the packages no longer bring is noted, not an error:
     // an upstream fix must not stop the machine updating.
     for (try u.lines(try u.read(meta_dir ++ "/prune"))) |p| {
-        if (!try r.remove(
-            u,
-            p,
-        )) try u.record(.{ .event = "prune", .path = p, .why = "not in the packages now" });
+        if (try r.remove(u, p)) continue;
+        try u.record(.{ .event = "prune", .path = p, .why = "not in the packages now" });
     }
     const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-    try r.write(
-        u,
-        meta_dir ++ "/kernel",
-        try u.gpa.print("{s}\n", .{new_kernel}),
-    );
+    try r.write(u, meta_dir ++ "/kernel", try u.gpa.print("{s}\n", .{new_kernel}));
     try r.write(
         u,
         meta_dir ++ "/release",
@@ -96,6 +92,11 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         "-zzstd,level=9",
         "-C65536",
         "-Eall-fragments,dedupe",
+        // No extended attributes, as the build's tar strips them: a
+        // package's file capabilities (security.capability) would
+        // otherwise ride into the image, inert only while the root stays
+        // nosuid.
+        "-x-1",
         work_dir ++ "/slot/root.erofs",
         root,
     });
@@ -233,13 +234,17 @@ pub fn install(u: *Update, build: []const u8) !void {
         try u.gpa.print("werewolf_args_{s}", .{u.other}),
         args,
     });
-    // Then `attempt`, kept, and last the one try: a slot is armed only
-    // with its attempt on record, and an attempt never outlives a try
-    // that was not set.
-    try writeAttempt(u, build);
-    errdefer Dir.cwd().deleteFile(io, attempt_path) catch {};
+    // Then the one try, and last `attempt`, kept: an attempt is on
+    // record only for a slot that is armed. The other order would, after
+    // a power cut between the two, record a try that never happened as a
+    // rollback, and so blacklist a build no boot has judged. This way a
+    // cut between them leaves a slot armed with no record: it boots once,
+    // slot-keep commits it if it is healthy, and if it is not, nothing
+    // marks the build bad and the next pass tries it again, one boot's
+    // cost and no loss.
     const entry = try u.gpa.print("werewolf-{s}", .{u.other});
     try u.run(&.{ "/usr/lib/werewolf/grub-setenv", env, "next_entry", entry });
+    try writeAttempt(u, build);
 }
 
 fn writeAttempt(u: *Update, build: []const u8) !void {
@@ -284,10 +289,8 @@ fn installEsp(u: *Update, build: []const u8) !void {
         else => return err,
     };
     for (try u.listDir(entries)) |name| {
-        if (isEntryOf(
-            name,
-            u.other,
-        )) try Dir.cwd().deleteFile(io, try u.gpa.print("{s}/{s}", .{ entries, name }));
+        if (!isEntryOf(name, u.other)) continue;
+        try Dir.cwd().deleteFile(io, try u.gpa.print("{s}/{s}", .{ entries, name }));
     }
     linux.sync();
     // Each through a temporary name (copyFile), so whole or absent.
@@ -319,10 +322,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
         const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
         newest = @max(newest, entrySecs(text) orelse continue);
     }
-    const now: u64 = @intCast(@divFloor(
-        Io.Timestamp.now(io, .real).nanoseconds,
-        std.time.ns_per_s,
-    ));
+    const now: u64 = @intCast(nowSecs(io));
     const version = try compactTime(u.gpa, @max(now, newest + 1));
     const options = try withSlot(
         u.gpa,
@@ -333,9 +333,8 @@ fn installEsp(u: *Update, build: []const u8) !void {
     const entry = try loaderEntry(u.gpa, u.other, version, options);
     const tmp = try u.gpa.print("{s}/werewolf-{s}.tmp", .{ entries, u.other });
     try u.write(tmp, entry);
-    // `attempt` kept first, then the one try, as install does.
-    try writeAttempt(u, build);
-    errdefer Dir.cwd().deleteFile(io, attempt_path) catch {};
+    // The one try first, then `attempt`, as install does and for the
+    // same reason.
     try Dir.cwd().rename(
         tmp,
         Dir.cwd(),
@@ -343,6 +342,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
         io,
     );
     linux.sync();
+    try writeAttempt(u, build);
 }
 
 // --- helpers ----------------------------------------------------------------
@@ -392,77 +392,73 @@ pub fn apkAdd(
     // The indexes, then the packages: `cache download` fetches no index.
     const world = try std.mem.join(u.gpa, "\n", packages);
     for ([_][]const []const u8{ &.{"update"}, &.{ "cache", "download" } }) |applet| {
-        var fetch_argv: std.ArrayList(?[*:0]const u8) = .empty;
-        for ([_][]const u8{
-            "/usr/bin/apk",
-            "--root",
-            scratch,
-            "--arch",
-            arch,
-            "--cache-dir",
-            cache,
-        }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-        for (source) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-        for ([_][]const u8{
-            "--quiet",
-            "--no-progress",
-        }) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-        for (applet) |arg| try fetch_argv.append(u.gpa, try u.gpa.dupeSentinel(u8, arg, 0));
-        const argv_z = try fetch_argv.toOwnedSliceSentinel(u.gpa, null);
-        _ = try u.sys(
-            linux.fchownat(
-                linux.AT.FDCWD,
-                cache,
-                update_id,
-                update_id,
-                linux.AT.SYMLINK_NOFOLLOW,
-            ),
-            "chown cache",
-        );
-        const fetched = u.child(
-            apkFetcher,
-            .{ argv_z, world, cache, scratch },
-            64 << 10,
-            apk_seconds,
-        );
-        try reclaim(u, cache);
-        const e = fetched catch |err| {
-            u.detail = "apk, as _update";
-            return err;
-        };
-        if (e.code != 0) {
-            u.detail = try u.gpa.print(
-                "apk, as _update: {s}",
-                .{std.mem.trim(u8, e.out[0..@min(e.out.len, 400)], " \n")},
-            );
-            return error.CommandFailed;
+        var b: Update.Backoff = .{};
+        while (true) {
+            if (apkFetch(u, applet, arch, source, world, cache, scratch)) break else |err| {
+                // An apk that exited failing is tried again, from where it
+                // stopped: the cache keeps what came, so a retry fetches
+                // only what did not. One killed at apk_seconds is not.
+                if (err != error.CommandFailed or !u.again(&b, "apk")) return err;
+            }
         }
     }
     try Dir.cwd().deleteTree(u.io, scratch);
     try checkCache(u, cache, keys);
 
-    var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(
-        u.gpa,
-        &.{
-            "/usr/bin/apk",
-            "--root",
-            root,
-            "--arch",
-            arch,
-            "--cache-dir",
-            cache,
-            "--no-network",
-        },
-    );
-    try argv.appendSlice(u.gpa, source);
-    try argv.appendSlice(
-        u.gpa,
+    try u.run(try std.mem.concat(u.gpa, []const u8, &.{
+        &.{ "/usr/bin/apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
+        source,
         &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
-    );
-    try argv.appendSlice(u.gpa, packages);
-    try u.run(argv.items);
+        packages,
+    }));
     try prune(u, cache, root);
+}
+
+/// One apk applet, in a child as _update (apkFetcher): the network half
+/// of apkAdd.
+fn apkFetch(
+    u: *Update,
+    applet: []const []const u8,
+    arch: []const u8,
+    source: []const []const u8,
+    world: []const u8,
+    cache: [:0]const u8,
+    scratch: [:0]const u8,
+) !void {
+    const argv_z = try argvZ(u.gpa, try std.mem.concat(u.gpa, []const u8, &.{
+        &.{ "/usr/bin/apk", "--root", scratch, "--arch", arch, "--cache-dir", cache },
+        source,
+        &.{ "--quiet", "--no-progress" },
+        applet,
+    }));
+    _ = try u.sys(
+        linux.fchownat(
+            linux.AT.FDCWD,
+            cache,
+            update_id,
+            update_id,
+            linux.AT.SYMLINK_NOFOLLOW,
+        ),
+        "chown cache",
+    );
+    const fetched = u.child(
+        apkFetcher,
+        .{ argv_z, world, cache, scratch },
+        64 << 10,
+        apk_seconds,
+    );
+    try reclaim(u, cache);
+    const e = fetched catch |err| {
+        u.detail = "apk, as _update";
+        return err;
+    };
+    if (e.code != 0) {
+        u.detail = try u.gpa.print(
+            "apk, as _update: {s}",
+            .{std.mem.trim(u8, e.out[0..@min(e.out.len, 400)], " \n")},
+        );
+        return error.CommandFailed;
+    }
 }
 
 /// The cache as root's apk may read it (apk.zig): each index signed by a
@@ -494,6 +490,9 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !void {
             &idx,
             try d.readFileAlloc(u.io, name, u.gpa, .limited(max_read)),
         ) catch |err| {
+            // Gone before the pass ends, as a bad package is: the fetcher
+            // could otherwise leave one and end every pass after, for good.
+            d.deleteFile(u.io, name) catch {};
             u.detail = try u.gpa.print("{s}/{s}", .{ cache, name });
             return err;
         };

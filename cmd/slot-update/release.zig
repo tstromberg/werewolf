@@ -148,6 +148,11 @@ pub fn open(
     if (!std.mem.eql(u8, m.format, "werewolf-release/1")) return error.BadManifest;
     if (!std.mem.eql(u8, m.form, form) or
         !std.mem.eql(u8, m.arch, arch)) return error.NotThisMachine;
+    // build names report files and lines of the attempt and bad records,
+    // which are read back by their spaces and newlines: 16 lower-case hex
+    // digits, as the updater makes its own, and nothing else.
+    if (m.build.len != 16) return error.BadManifest;
+    for (m.build) |c| if (!std.ascii.isDigit(c) and (c < 'a' or c > 'f')) return error.BadManifest;
     const signed = serialTime(m.serial) catch return error.BadManifest;
     if (signed > now + 24 * 3600) return error.BadManifest;
     for (m.advisories) |a| if (!validAdvisory(a)) return error.BadManifest;
@@ -233,15 +238,12 @@ pub fn parseTime(s: []const u8) !i64 {
     const second = try num(s[17..19]);
     if (year < 1970 or month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or
         second > 59) return error.BadTime;
-    const leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0);
+    const leap = std.time.epoch.isLeapYear(@intCast(year));
     const days_in = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
     if (day > days_in[month - 1]) return error.BadTime;
     var days: i64 = 0;
     var y: u32 = 1970;
-    while (y < year) : (y += 1) days += if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0))
-        366
-    else
-        365;
+    while (y < year) : (y += 1) days += std.time.epoch.getDaysInYear(@intCast(y));
     for (days_in[0 .. month - 1]) |d| days += d;
     days += day - 1;
     return days * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;

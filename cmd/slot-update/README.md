@@ -44,9 +44,13 @@ Invariants to keep when changing this code:
 - **Staged means armed.** `attempt` holds `SLOT BUILD BOOT`, BOOT the
   `boot_id` that armed it. The daemon reboots only for a slot this boot armed;
   `outcome` judges nothing in it. Any reboot boots a staged slot.
-- **Arming order.** Disarm and remove `attempt`; write the slot; sync; write
-  `attempt` (fsync); arm last. `errdefer` removes `attempt` if arming fails.
-  `pending` survives the install so first-seen times are never lost.
+- **Arming order.** Remove `attempt` and disarm; write the slot; sync; arm;
+  write `attempt` (fsync) last. So `attempt` is on record only for a slot
+  that is armed: a power cut between the two leaves a slot armed with no
+  record, which boots once and is committed or forgotten, where the other
+  order would record a try that never happened as a rollback and blacklist
+  a build no boot has judged. `pending` survives the install so first-seen
+  times are never lost.
 - **Nothing goes backwards.** Packages and the kernel never older (apk's
   order), built or released; releases never older than `serial`; the feed
   never older than `cve-tiers.json.serial`. Signed inputs verified first.

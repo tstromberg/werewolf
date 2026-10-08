@@ -64,13 +64,7 @@ fn stageTwo() ?linux.pid_t {
             const name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&ent.name)), 0);
             const pid = std.fmt.parseInt(linux.pid_t, name, 10) catch continue;
             var path: [32]u8 = undefined;
-            const len = (std.mem.print(
-                path[0 .. path.len - 1],
-                "/proc/{d}/stat",
-                .{pid},
-            ) catch continue).len;
-            path[len] = 0;
-            const p = path[0..len :0];
+            const p = std.mem.printSentinel(&path, "/proc/{d}/stat", .{pid}, 0) catch continue;
             var buf: [512]u8 = undefined;
             if (isStageTwo(readSmall(p, &buf) orelse continue)) return pid;
         }

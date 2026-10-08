@@ -152,7 +152,10 @@ fn isPlain(ch: u8) bool {
 /// The child's pid, or null with errno set.
 fn start(c: *const Command, pipe_end: ?struct { fd: i32, which: i32 }) ?linux.pid_t {
     const pid = linux.fork();
-    if (linux.errno(pid) != .SUCCESS) return fail(linux.errno(pid));
+    if (linux.errno(pid) != .SUCCESS) {
+        setErrno(linux.errno(pid));
+        return null;
+    }
     if (pid == 0) {
         // The child: only system calls until it becomes the command. A pipe
         // end that is already the descriptor it should be (the caller had
@@ -191,16 +194,15 @@ fn wait(pid: linux.pid_t) c_int {
             .SUCCESS => return status,
             .INTR => continue,
             else => |e| {
-                _ = fail(e);
+                setErrno(e);
                 return -1;
             },
         }
     }
 }
 
-fn fail(e: linux.E) ?linux.pid_t {
-    std.c._errno().* = @intCast(@backingInt(e));
-    return null;
+fn setErrno(e: linux.E) void {
+    std.c._errno().* = @backingInt(e);
 }
 
 /// Say on stderr that command was not run, its first max_command bytes
@@ -218,7 +220,7 @@ fn refuse(command: [*:0]const u8) void {
         ch;
     buf[prefix.len + shown.len] = '\n';
     _ = linux.write(2, &buf, prefix.len + shown.len + 1);
-    std.c._errno().* = @backingInt(linux.E.NOEXEC);
+    setErrno(.NOEXEC);
 }
 
 /// The streams popen has open, and the children behind them: none, pid 0,
@@ -228,20 +230,20 @@ var open_streams: [8]struct { stream: ?*FILE = null, pid: linux.pid_t = 0 } = @s
 export fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
     const reading = mode[0] == 'r';
     if (!reading and mode[0] != 'w') {
-        std.c._errno().* = @backingInt(linux.E.INVAL);
+        setErrno(.INVAL);
         return null;
     }
     const slot = for (&open_streams) |*s| {
         if (s.stream == null) break s;
     } else {
-        std.c._errno().* = @backingInt(linux.E.MFILE);
+        setErrno(.MFILE);
         return null;
     };
     // The system's locales, of which there are none.
     if (reading and std.mem.eql(u8, std.mem.span(command), "locale -a")) {
         const fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
         if (linux.errno(fd) != .SUCCESS) {
-            _ = fail(linux.errno(fd));
+            setErrno(linux.errno(fd));
             return null;
         }
         const stream = fdopen(@intCast(fd), "r") orelse {
@@ -257,8 +259,9 @@ export fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
         return null;
     }
     var fds: [2]i32 = undefined;
-    if (linux.errno(linux.pipe2(&fds, .{ .CLOEXEC = true })) != .SUCCESS) {
-        std.c._errno().* = @backingInt(linux.E.MFILE);
+    const piped = linux.pipe2(&fds, .{ .CLOEXEC = true });
+    if (linux.errno(piped) != .SUCCESS) {
+        setErrno(linux.errno(piped));
         return null;
     }
     // Reading: the child writes stdout into fds[1]. Writing: it reads
@@ -290,7 +293,7 @@ export fn pclose(stream: *FILE) c_int {
         return if (pid == 0) 0 else wait(pid);
     }
     // Not a stream popen opened: as glibc, ECHILD, and the stream untouched.
-    std.c._errno().* = @backingInt(linux.E.CHILD);
+    setErrno(.CHILD);
     return -1;
 }
 

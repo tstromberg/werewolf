@@ -25,11 +25,8 @@
 //! process that runs for months uses what one pass needs.
 
 const std = @import("std");
-
 const Io = std.Io;
-
 const Dir = Io.Dir;
-
 const Allocator = std.mem.Allocator;
 const page = @import("page.zig");
 const scan = @import("scan.zig");
@@ -44,31 +41,15 @@ const Summary = scan.Summary;
 const scanLoop = scan.scanLoop;
 
 const state_dir = "/data/svc/status";
-
 const www_dir = state_dir ++ "/www";
-
 const page_path = www_dir ++ "/index.html";
-
 pub const grype_dir = "/data/svc/scan";
-
 pub const summary_path = grype_dir ++ "/scan.json";
-
 pub const scan_error_path = grype_dir ++ "/scan-error";
-
-pub const grype_out = grype_dir ++ "/grype.json";
-
-pub const grype_bin = "/usr/bin/grype";
-
 const autoupdate_dir = "/data/svc/autoupdate";
-
 pub const meta_dir = "/usr/share/werewolf";
-
 const render_every = 60;
-
-pub const scan_every = 3600;
-
 const max_patches = 25;
-
 const max_read = 256 << 20;
 
 /// The most read of what the scan, as grype's user, leaves for the page:
@@ -85,10 +66,8 @@ pub fn main(init: std.process.Init) !void {
         return scanLoop(io);
     }
     if (args.len != 1) return error.Usage;
-    Dir.cwd().createDirPath(
-        io,
-        www_dir,
-    ) catch |err| record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
+    Dir.cwd().createDirPath(io, www_dir) catch |err|
+        record(io, .{ .event = "error", .step = "setup", .@"error" = @errorName(err) });
     record(io, .{ .event = "start" });
     timeBoot(io);
 
@@ -155,15 +134,17 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     f.database_warn = kept.warn;
     f.boot = boot_said;
     f.posture = kept.posture orelse posture(io, gpa);
-    f.scan = kept.scan;
-    if (f.scan == null) if (readUpTo(io, gpa, summary_path, max_summary)) |text| {
-        f.scan = std.json.parseFromSliceLeaky(
-            Summary,
-            gpa,
-            text,
-            .{ .ignore_unknown_fields = true },
-        ) catch null;
-    } else |_| {};
+    // The newer of the database's scan and the file's: a scan that ended
+    // while PostgreSQL was down is in the file alone. Both say their time
+    // in RFC 3339, in UTC, which sorts as text.
+    const file_scan: ?Summary = if (readUpTo(io, gpa, summary_path, max_summary)) |text|
+        parsed(Summary, "scan.json", io, gpa, text)
+    else |_|
+        null;
+    f.scan = if (kept.scan) |k| (if (file_scan) |fs|
+        (if (std.mem.order(u8, k.time, fs.time) == .lt) fs else k)
+    else
+        k) else file_scan;
     if (readUpTo(io, gpa, scan_error_path, max_scan_error)) |text| {
         f.scan_error = trimLine(text);
     } else |_| {}
@@ -264,12 +245,37 @@ const Check = struct {
 /// This boot's posture, once the posture service has checked.
 fn posture(io: Io, gpa: Allocator) ?Posture {
     const text = readAll(io, gpa, posture_path) catch return null;
-    return std.json.parseFromSliceLeaky(
-        Posture,
+    return parsed(Posture, "posture.json", io, gpa, text);
+}
+
+/// text as a T, or null: said on the console the first time it fails, as
+/// when a field the page reads was renamed, and not again until it has
+/// parsed once more, so a page that runs every minute does not repeat it.
+fn parsed(
+    comptime T: type,
+    comptime what: []const u8,
+    io: Io,
+    gpa: Allocator,
+    text: []const u8,
+) ?T {
+    const latch = struct {
+        var failing = false;
+    };
+    const v = std.json.parseFromSliceLeaky(
+        T,
         gpa,
         text,
         .{ .ignore_unknown_fields = true },
-    ) catch null;
+    ) catch |err| {
+        if (!latch.failing) record(
+            io,
+            .{ .event = "error", .step = "parse " ++ what, .@"error" = @errorName(err) },
+        );
+        latch.failing = true;
+        return null;
+    };
+    latch.failing = false;
+    return v;
 }
 
 // Where the form runs PostgreSQL (forms/postgresql), the scan keeps each
@@ -411,10 +417,8 @@ var db_failing = false;
 
 fn fromDatabase(io: Io, gpa: Allocator) Kept {
     if (!exists(io, "/etc/sv/postgres")) return .{ .said = "none; the page reads its files" };
-    if (!exists(
-        io,
-        pg_socket,
-    )) return .{ .said = "PostgreSQL is not answering; the page reads its files", .warn = true };
+    if (!exists(io, pg_socket))
+        return .{ .said = "PostgreSQL is not answering; the page reads its files", .warn = true };
     const kept = readDatabase(io, gpa) catch |err| {
         if (!db_failing) record(
             io,
@@ -426,7 +430,8 @@ fn fromDatabase(io: Io, gpa: Allocator) Kept {
             },
         );
         db_failing = true;
-        return .{ .said = whyNot(gpa, err), .warn = true };
+        const said = gpa.print("unreachable ({s}); the page reads its files", .{@errorName(err)});
+        return .{ .said = said catch "unreachable", .warn = true };
     };
     db_failing = false;
     return kept;
@@ -455,7 +460,6 @@ fn readDatabase(io: Io, gpa: Allocator) !Kept {
     , &.{});
     if (rows.len != 1 or rows[0].len != 5) return error.UnexpectedAnswer;
     const r = rows[0];
-    const opts: std.json.ParseOptions = .{ .ignore_unknown_fields = true };
     const boots = r[3] orelse "0";
     const scans = r[4] orelse "0";
     const nb = std.fmt.parseInt(u64, boots, 10) catch 0;
@@ -482,55 +486,40 @@ fn readDatabase(io: Io, gpa: Allocator) !Kept {
             },
         );
         data_lost = true;
-        return .{ .said = try gpa.print("PostgreSQL has lost data: it held the checks of {d} " ++
-            "boots and {d} scans, " ++
-            "and now holds {d} and {d}", .{ had_boots, had_scans, nb, ns }), .warn = true };
+        const said = try gpa.print("PostgreSQL has lost data: it held the checks of {d} boots " ++
+            "and {d} scans, and now holds {d} and {d}", .{ had_boots, had_scans, nb, ns });
+        return .{ .said = said, .warn = true };
     }
-    if (nb != had_boots or
-        ns != had_scans) writeAtomic(
-        io,
-        gpa,
-        kept_path,
-        try gpa.print("{d} {d}\n", .{ nb, ns }),
-    ) catch {};
+    if (nb != had_boots or ns != had_scans)
+        writeAtomic(io, gpa, kept_path, try gpa.print("{d} {d}\n", .{ nb, ns })) catch {};
     return .{
-        .posture = if (r[1]) |t|
-            std.json.parseFromSliceLeaky(Posture, gpa, t, opts) catch null
-        else
-            null,
-        .scan = if (r[2]) |t|
-            std.json.parseFromSliceLeaky(Summary, gpa, t, opts) catch null
-        else
-            null,
+        .posture = if (r[1]) |t| parsed(Posture, "the database's posture", io, gpa, t) else null,
+        .scan = if (r[2]) |t| parsed(Summary, "the database's scan", io, gpa, t) else null,
         .said = try gpa.print("PostgreSQL {s}: the checks of {s} boot{s} and {s} scan{s} kept, " ++
             "the newest shown here", .{
             r[0] orelse "?",
             boots,
-            plural(std.fmt.parseInt(usize, boots, 10) catch 0),
+            plural(nb),
             scans,
-            plural(std.fmt.parseInt(usize, scans, 10) catch 0),
+            plural(ns),
         }),
     };
-}
-
-fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
-    return gpa.print(
-        "unreachable ({s}); the page reads its files",
-        .{@errorName(err)},
-    ) catch "unreachable";
 }
 
 /// The scan's summary into the database, where there is one. The file is
 /// written either way, so a failure here is said and nothing more.
 pub fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
-    if (!exists(io, pg_socket)) return;
-    var db = Pg.connect(
-        gpa,
-        "grype",
-    ) catch |err| return record(
-        io,
-        .{ .event = "error", .step = "database", .@"error" = @errorName(err) },
-    );
+    if (!exists(io, pg_socket)) {
+        // Said only where the form runs PostgreSQL: the scan is in
+        // scan.json alone until the next.
+        if (exists(io, "/etc/sv/postgres")) record(
+            io,
+            .{ .event = "database", .kept = "none", .why = "PostgreSQL is not answering" },
+        );
+        return;
+    }
+    var db = Pg.connect(gpa, "grype") catch |err|
+        return record(io, .{ .event = "error", .step = "database", .@"error" = @errorName(err) });
     defer db.close();
     _ = db.query(
         gpa,
@@ -820,7 +809,8 @@ pub fn parseRfc3339(s: []const u8) ?u64 {
     return @intCast(secs);
 }
 
-pub fn rfc3339Buf(buf: *[32]u8, secs: u64) []const u8 {
+/// secs as an RFC 3339 time in UTC, in buf.
+pub fn rfc3339(buf: *[32]u8, secs: u64) []const u8 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
@@ -829,17 +819,6 @@ pub fn rfc3339Buf(buf: *[32]u8, secs: u64) []const u8 {
         yd.year,              md.month.numeric(),      md.day_index + 1,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     }) catch unreachable;
-}
-
-pub fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
-    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
-    const yd = es.getEpochDay().calculateYearDay();
-    const md = yd.calculateMonthDay();
-    const ds = es.getDaySeconds();
-    return gpa.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year,              md.month.numeric(),      md.day_index + 1,
-        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
-    });
 }
 
 fn moreString(_: void, a: []const u8, b: []const u8) bool {
@@ -888,12 +867,12 @@ pub fn record(io: Io, fields: anytype) void {
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
     const gpa = fba.allocator();
     var rest: Io.Writer.Allocating = .init(gpa);
+    var time: [32]u8 = undefined;
     const line = if (std.json.Stringify.value(fields, .{}, &rest.writer)) |_|
-        if (rfc3339(gpa, nowSecs(io))) |time|
-            gpa.print("status-page: {{\"time\":\"{s}\",{s}\n", .{ time, rest.written()[1..] }) catch
-                null
-        else |_|
-            null
+        gpa.print("status-page: {{\"time\":\"{s}\",{s}\n", .{
+            rfc3339(&time, nowSecs(io)),
+            rest.written()[1..],
+        }) catch null
     else |_|
         null;
     // Never nothing: a line too long to say is said to be.
@@ -975,7 +954,7 @@ test parseRfc3339 {
     try testing.expectEqual(null, parseRfc3339("2026-10-06 12:00:00"));
     try testing.expectEqual(null, parseRfc3339("2026-13-06T12:00:00Z"));
     var buf: [32]u8 = undefined;
-    try testing.expectEqualStrings("2026-10-06T12:00:00Z", rfc3339Buf(&buf, 1791288000));
+    try testing.expectEqualStrings("2026-10-06T12:00:00Z", rfc3339(&buf, 1791288000));
 }
 
 test patchHistory {

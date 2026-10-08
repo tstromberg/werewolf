@@ -190,7 +190,12 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
         );
     };
     try addAdvisories(gpa, &t, u.advisories, u.have);
-    return finish(t);
+    for (t.count) |n| if (n > 0) return t;
+    t.first[@backingInt(policy.Tier.low)] = .{
+        .subject = "this update",
+        .evidence = "it fixes no known CVE",
+    };
+    return t;
 }
 
 /// A CVE the feed names, and in which tier.
@@ -233,16 +238,6 @@ fn addNamed(
         t.add(x.tier, .{ .subject = s, .evidence = try evidence(gpa, x.entry) })
     else
         t.add(.medium, .{ .subject = s, .evidence = "not in the tiers feed yet" });
-}
-
-fn finish(t: Tiers) Tiers {
-    var out = t;
-    for (out.count) |n| if (n > 0) return out;
-    out.first[@backingInt(policy.Tier.low)] = .{
-        .subject = "this update",
-        .evidence = "it fixes no known CVE",
-    };
-    return out;
 }
 
 /// "CVE-2026-1111 in busybox", or "in the kernel".

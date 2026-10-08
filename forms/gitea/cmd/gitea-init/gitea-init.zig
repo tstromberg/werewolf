@@ -3,16 +3,16 @@
 //!
 //!     gitea-init CONFIG
 //!
-//! leash runs it before each start of Gitea, as the gitea user, inside
-//! its leash (forms/gitea/rootfs/etc/sv/gitea/service), with Gitea's environment
-//! (GITEA_WORK_DIR, and the settings' GITEA_ADMIN and GITEA_ADMIN_EMAIL).
-//! It makes its SSH host key once, Ed25519, by ssh-keygen (lib/hostkey.zig),
-//! and says its fingerprint; the directory Gitea keeps its secrets in, and each secret
-//! once (`gitea generate secret`, 0600), brings
-//! the database's schema up to this Gitea's (`gitea migrate`, which does
-//! nothing when it is current), asks Gitea for its administrators, and if
-//! the one the settings name is not among them, makes it with the
-//! password the config brought
+//! leash runs it before each start of Gitea, as the gitea user, inside its
+//! leash (forms/gitea/rootfs/etc/sv/gitea/service), with Gitea's
+//! environment (GITEA_WORK_DIR, and the settings' GITEA_ADMIN and
+//! GITEA_ADMIN_EMAIL). It makes its SSH host key once, Ed25519, by
+//! ssh-keygen (lib/hostkey.zig), and says its fingerprint; the directory
+//! Gitea keeps its secrets in, and each secret once (`gitea generate
+//! secret`, 0600), brings the database's schema up to this Gitea's (`gitea
+//! migrate`, which does nothing when it is current), asks Gitea for its
+//! administrators, and if the one the settings name is not among them,
+//! makes it with the password the config brought
 //! (/run/svc/gitea/admin-password; leash's copy). Nothing is printed of
 //! the password, which goes to Gitea as an argument, visible to root
 //! alone (hidepid). A site with its admin is left as it is.
@@ -112,6 +112,11 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ, config: []const u8)
         "--must-change-password=false",
     });
     say(io, "made administrator {s} ({s}) with the password from the config", .{ admin, email });
+    // The password has done its one job. Its copy here is the service's
+    // own (leash makes it as the service user, and again at every start),
+    // and nothing in Gitea's uid should keep reading the operator's choice.
+    Dir.cwd().deleteFile(io, password_file) catch |err|
+        say(io, "{s} not removed: {s}", .{ password_file, @errorName(err) });
 }
 
 /// secrets_dir/name, made with `gitea generate secret kind` if missing,
@@ -120,7 +125,12 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ, config: []const u8)
 fn makeSecret(io: Io, gpa: Allocator, name: []const u8, kind: []const u8) !void {
     var dir = try Dir.cwd().openDir(io, secrets_dir, .{});
     defer dir.close(io);
-    if (dir.access(io, name, .{})) |_| return else |_| {}
+    // One there already is kept, unless it is short: a power cut could
+    // have left an empty one, and Gitea with it would stay down for good.
+    if (dir.statFile(io, name, .{})) |st| {
+        if (st.size >= 32) return;
+        say(io, "{s} in {s} is too short; made again", .{ name, secrets_dir });
+    } else |_| {}
     const value = std.mem.trim(
         u8,
         try giteaRun(io, gpa, &.{ gitea, "generate", "secret", kind }),
@@ -129,13 +139,20 @@ fn makeSecret(io: Io, gpa: Allocator, name: []const u8, kind: []const u8) !void 
     if (value.len < 32) return error.ShortSecret;
     const tmp = try std.mem.concat(gpa, u8, &.{ name, ".tmp" });
     dir.deleteFile(io, tmp) catch {};
-    var f = try dir.createFile(io, tmp, .{ .exclusive = true, .permissions = .fromMode(0o600) });
-    f.writeStreamingAll(io, value) catch |err| {
-        f.close(io);
-        return err;
-    };
-    f.close(io);
+    {
+        var f = try dir.createFile(
+            io,
+            tmp,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
+        defer f.close(io);
+        try f.writeStreamingAll(io, value);
+        // On disk before it is named, and the name on disk before it is
+        // trusted: whole or absent after a power cut, never empty.
+        try f.sync(io);
+    }
     try Dir.rename(dir, tmp, dir, name, io);
+    if (std.os.linux.errno(std.os.linux.fsync(dir.handle)) != .SUCCESS) return error.SyncFailed;
     say(io, "made {s} in {s}", .{ name, secrets_dir });
 }
 
@@ -156,8 +173,14 @@ fn giteaRun(io: Io, gpa: Allocator, argv: []const []const u8) ![]const u8 {
     return error.GiteaFailed;
 }
 
+/// One line on the console. What Gitea says on failure may hold anything
+/// its database does, so each control byte becomes a "?": nothing from
+/// outside carries an escape sequence or a false line to the console log.
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const line = std.mem.print(&buf, "gitea-init: " ++ fmt ++ "\n", args) catch return;
+    for (line[0 .. line.len - 1]) |*c| if (c.* < 0x20 or c.* == 0x7f) {
+        c.* = '?';
+    };
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }

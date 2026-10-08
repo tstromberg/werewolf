@@ -14,21 +14,6 @@ const mkdir = init.mkdir;
 const say = init.say;
 const writeErrno = init.writeErrno;
 
-/// The seal (docs/design/lockdown.md) denies by default, in promises
-/// (docs/design/pledge.md, System calls: promises): every process the
-/// machine will run may make the calls of the promises werewolf's own
-/// programs make (seal_lib.base) and of every promise the image's services
-/// make, which the build gathers from their service files' `pledge` lines
-/// into /usr/share/werewolf/pledge. leash then holds each service to its
-/// own. The rest go to seal-watch (cmd/seal-watch), which refuses them as
-/// if the kernel had no such call and says so once each, with the promise
-/// that would allow it; or, on a DEV=1 build booted with
-/// werewolf.seal=learn, allows and records them. What no promise brings
-/// goes to seal-watch too, so an attempt by a program the machine's
-/// promises alone bind is seen; a leashed service's own filter refuses it
-/// first, and the kernel takes that ENOSYS over the listener, unseen.
-pub const never = seal_lib.never;
-
 /// What policy_path says: the mode, and the promises the seal allows.
 fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -108,6 +93,20 @@ fn startWatch() ?i32 {
     return sv[0];
 }
 
+/// The seal (docs/design/lockdown.md) denies by default, in promises
+/// (docs/design/pledge.md, System calls: promises): every process the
+/// machine will run may make the calls of the promises werewolf's own
+/// programs make (seal_lib.base) and of every promise the image's services
+/// make, which the build gathers from their service files' `pledge` lines
+/// into /usr/share/werewolf/pledge. leash then holds each service to its
+/// own. The rest go to seal-watch (cmd/seal-watch), which refuses them as
+/// if the kernel had no such call and says so once each, with the promise
+/// that would allow it; or, on a DEV=1 build booted with
+/// werewolf.seal=learn, allows and records them. What no promise brings
+/// goes to seal-watch too, so an attempt by a program the machine's
+/// promises alone bind is seen; a leashed service's own filter refuses it
+/// first, and the kernel takes that ENOSYS over the listener, unseen.
+///
 /// Install the seal on PID 1, which every process inherits and none, root
 /// included, can remove until the machine reboots: the helpers' bounding
 /// set, PID 1's, then the filter. PID 1 holds CAP_SYS_ADMIN, so it needs no
@@ -120,8 +119,8 @@ pub fn seal(m: *Machine) !void {
     // what its pledge lacks. Only on a DEV=1 build, never released;
     // anywhere else the word is ignored.
     const learn = std.mem.eql(u8, m.cmd.seal, "learn") and exists("/usr/share/werewolf/dev");
-    if (m.cmd.seal.len > 0 and
-        !learn) say("werewolf.seal={s} ignored: only a DEV=1 build learns", .{m.cmd.seal});
+    if (m.cmd.seal.len > 0 and !learn)
+        say("werewolf.seal={s} ignored: only a DEV=1 build learns", .{m.cmd.seal});
     var bad: []const u8 = "";
     const pledged = seal_lib.parse(m.read("/usr/share/werewolf/pledge"), &bad) catch |err| {
         say("/usr/share/werewolf/pledge: {s}: {s}", .{ bad, @errorName(err) });

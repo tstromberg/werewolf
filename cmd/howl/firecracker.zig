@@ -46,15 +46,15 @@ pub fn installed(io: Io, gpa: Allocator) bool {
 /// root, or a sudo or doas that asks none, as create and run need to
 /// choose Firecracker without stopping to ask.
 pub fn rootReady(io: Io, gpa: Allocator) bool {
-    if (isRoot()) return true;
-    return asked(io, gpa, (asRoot(io, gpa) catch return false)[0]);
+    const root = asRoot(io, gpa) catch return false;
+    return root.len == 0 or asked(io, gpa, root[0]);
 }
 
 /// What sets the network up, which needs root: nothing as root; else the
 /// first of sudo and doas that asks no password, or, if both would, the
 /// first there is.
 pub fn asRoot(io: Io, gpa: Allocator) error{NoRoot}![]const []const u8 {
-    if (isRoot()) return &.{};
+    if (howl.isRoot()) return &.{};
     const tools = .{ "/usr/bin/sudo", "/usr/bin/doas", "/usr/local/bin/doas" };
     var first: ?[]const []const u8 = null;
     inline for (tools) |path| {
@@ -73,13 +73,6 @@ pub fn asRoot(io: Io, gpa: Allocator) error{NoRoot}![]const []const u8 {
 fn asked(io: Io, gpa: Allocator, tool: []const u8) bool {
     const r = std.process.run(gpa, io, .{ .argv = &.{ tool, "-n", "true" } }) catch return false;
     return r.term == .exited and r.term.exited == 0;
-}
-
-fn isRoot() bool {
-    return switch (builtin.os.tag) {
-        .linux => std.os.linux.geteuid() == 0,
-        else => std.c.geteuid() == 0,
-    };
 }
 
 /// A machine's network: its tap device and MAC, and its /30, all from the
@@ -242,21 +235,55 @@ pub fn networkUp(
         );
     }
     try run(io, gpa, root, &.{ "ip", "link", "set", n.tap, "up" }, why);
-    try run(io, gpa, root, &.{ "sysctl", "-q", "-w", "net.ipv4.ip_forward=1" }, why);
+    // Forwarding is the host's, not the machine's: turned on only if it
+    // was off, and noted so, for the last machine's networkDown to turn
+    // it off again. A host forwarding already for its own reasons keeps
+    // forwarding.
+    const forward = Dir.cwd().readFileAlloc(io, ip_forward, gpa, .limited(8)) catch "";
+    if (std.mem.eql(u8, std.mem.trim(u8, forward, "\n"), "0")) {
+        if (Dir.cwd().createFile(io, forward_marker, .{ .exclusive = true })) |f| {
+            f.close(io);
+        } else |err| if (err != error.PathAlreadyExists) return err;
+        try run(io, gpa, root, &.{ "sysctl", "-q", "-w", "net.ipv4.ip_forward=1" }, why);
+    }
     for (try rules(gpa, n)) |r| {
         if (done(io, gpa, root, try iptables(gpa, "-C", r))) continue;
         try run(io, gpa, root, try iptables(gpa, "-A", r), why);
     }
 }
 
-/// The machine's network, down: its rules and its tap. Nothing is said of
-/// what was gone already.
+/// The machine's network, down: its rules and its tap, and, when it was
+/// the last machine's and networkUp turned the host's forwarding on, that
+/// too. Nothing is said of what was gone already.
 pub fn networkDown(io: Io, gpa: Allocator, root: []const []const u8, n: Net) void {
     for (rules(
         gpa,
         n,
     ) catch return) |r| _ = done(io, gpa, root, iptables(gpa, "-D", r) catch return);
     _ = done(io, gpa, root, &.{ "ip", "link", "del", n.tap });
+    Dir.cwd().access(io, forward_marker, .{}) catch return;
+    if (tapsLeft(io)) return;
+    if (done(io, gpa, root, &.{ "sysctl", "-q", "-w", "net.ipv4.ip_forward=0" }))
+        Dir.cwd().deleteFile(io, forward_marker) catch {};
+}
+
+const ip_forward = "/proc/sys/net/ipv4/ip_forward";
+/// Beside howl's own build: networkUp turned the host's forwarding on.
+const forward_marker = "build/host/ip_forward-was-off";
+
+/// Whether any machine's tap remains: one named as net names them.
+fn tapsLeft(io: Io) bool {
+    var d = Dir.cwd().openDir(io, "/sys/class/net", .{ .iterate = true }) catch return true;
+    defer d.close(io);
+    var it = d.iterate();
+    while (it.next(io) catch return true) |e| {
+        if (e.name.len != 10 or !std.mem.startsWith(u8, e.name, "fc")) continue;
+        const hex = for (e.name[2..]) |c| {
+            if (!std.ascii.isHex(c)) break false;
+        } else true;
+        if (hex) return true;
+    }
+    return false;
 }
 
 /// An iptables rule: its table, if not the filter table, its chain and
@@ -298,7 +325,7 @@ pub fn iptables(gpa: Allocator, verb: []const u8, r: Rule) ![]const []const u8 {
     return argv.items;
 }
 
-/// Whether a command on the node, as root, succeeds; quietly.
+/// Whether a command here, as root, succeeds; quietly.
 fn done(io: Io, gpa: Allocator, root: []const []const u8, args: []const []const u8) bool {
     const argv = std.mem.concat(gpa, []const u8, &.{ root, args }) catch return false;
     const r = std.process.run(gpa, io, .{ .argv = argv }) catch return false;
@@ -373,11 +400,13 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
         .flags = .{ .nonblocking = false },
     };
     defer out.close(io);
+    // The end of a boot's console, where a halt says so: read through this
+    // one buffer every boot, never the whole log, which grows without end.
+    const tail = try gpa.alloc(u8, 1 << 20);
     while (true) {
         const seen = if (Dir.cwd().statFile(io, log, .{})) |st| st.size else |_| 0;
         // Firecracker's log must exist before it opens it.
-        (Dir.cwd().createFile(io, fc_log, .{ .truncate = false }) catch |err|
-            return err).close(io);
+        (try Dir.cwd().createFile(io, fc_log, .{ .truncate = false })).close(io);
         var child = try std.process.spawn(io, .{
             .argv = &.{ "firecracker", "--no-api", "--config-file", vm },
             .stdin = .pipe,
@@ -391,8 +420,12 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
         const term = try child.wait(io);
         Dir.cwd().deleteFile(io, pidfile) catch {};
         const code: u32 = if (term == .exited) term.exited else 1;
-        const text = Dir.cwd().readFileAlloc(io, log, gpa, .limited(64 << 20)) catch "";
-        const since = text[@min(seen, text.len)..];
+        const since: []const u8 = if (Dir.cwd().openFile(io, log, .{})) |f| read: {
+            defer f.close(io);
+            const len = f.length(io) catch break :read "";
+            const from = @max(seen, len -| tail.len);
+            break :read tail[0 .. f.readPositionalAll(io, tail, from) catch 0];
+        } else |_| "";
         const halted = std.mem.find(u8, since, "reboot: Power down") != null;
         var buf: [256]u8 = undefined;
         out.writeStreamingAll(io, std.mem.print(

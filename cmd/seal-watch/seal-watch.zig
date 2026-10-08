@@ -59,7 +59,6 @@ pub fn main() void {
         linux.exit_group(1);
     };
     _ = linux.close(0);
-    const fd = got.fd;
     const learn = got.mode.len > 0 and got.mode[0] == 'l';
     // runit's stage 3 asks every process to stop; refusals still come until
     // the machine is down, so this one ignores the signals and waits for the
@@ -70,13 +69,18 @@ pub fn main() void {
         .flags = 0,
     };
     for ([_]linux.SIG{ .TERM, .HUP, .INT, .PIPE }) |sig| _ = linux.sigaction(sig, &ignore, null);
-    const table = linux.open(
+    const rc = linux.open(
         seal.refused_path,
         .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true },
         0o644,
     );
-    if (linux.errno(table) != .SUCCESS)
-        say("cannot write {s}: {s}", .{ seal.refused_path, @tagName(linux.errno(table)) });
+    const table: i32 = switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        else => |e| t: {
+            say("cannot write {s}: {s}", .{ seal.refused_path, @tagName(e) });
+            break :t -1;
+        },
+    };
     if (!learn) confine() catch {
         say("cannot confine itself: {s} {s}; unlisted calls are refused unsaid", .{
             sandbox.failed, sandbox.errnoName(sandbox.failed_errno),
@@ -84,7 +88,7 @@ pub fn main() void {
         linux.exit_group(1);
     };
     say("{{\"event\":\"start\",\"mode\":\"{s}\"}}", .{if (learn) "learn" else "enforce"});
-    serve(fd, learn, if (linux.errno(table) == .SUCCESS) @intCast(table) else -1);
+    serve(got.fd, learn, table);
 }
 
 const Received = struct { fd: i32, mode: []const u8 };
@@ -333,7 +337,9 @@ fn plain(s: []u8) []const u8 {
     return s;
 }
 
-var line_buf: [512]u8 = undefined;
+/// Room for the longest line: a learned call's, with an exe and a service
+/// of up to 256 bytes each.
+var line_buf: [1024]u8 = undefined;
 
 /// One line on the console.
 fn say(comptime fmt: []const u8, args: anytype) void {

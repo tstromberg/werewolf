@@ -46,23 +46,15 @@
 //! sends the machine back to its last good slot.
 
 const std = @import("std");
-
 const Io = std.Io;
-
 const Dir = Io.Dir;
-
 const Allocator = std.mem.Allocator;
-
 const linux = std.os.linux;
 const phase_kernel = @import("kernel.zig");
 const phase_network = @import("network.zig");
 const phase_config = @import("config.zig");
 const phase_data = @import("data.zig");
 const phase_seal = @import("seal.zig");
-const instanceId = phase_config.instanceId;
-const lockdownLevel = phase_kernel.lockdownLevel;
-const sysctls = phase_kernel.sysctls;
-const seal = phase_seal.seal;
 
 pub const mount_bin = "/usr/lib/werewolf/mount";
 
@@ -72,14 +64,20 @@ pub fn main(init: std.process.Init) !void {
     var m: Machine = .{
         .io = init.io,
         .gpa = init.arena.allocator(),
-        .env = try init.environ_map.clone(init.arena.allocator()),
+        .env = .init(init.arena.allocator()),
     };
+    // The environment every program on the machine inherits, through
+    // fence and runit, made here from nothing: the kernel's own two
+    // words, and the PATH werewolf's tools are found on. Nothing init was
+    // given passes through: on a RAM root that is every NAME=value on the
+    // command line the kernel did not take, which blkid, e2fsprogs and
+    // the loader read settings from.
     try m.env.put("PATH", path_env);
+    try m.env.put("HOME", "/");
+    try m.env.put("TERM", "linux");
     // Where the boot's time goes: stage0's phases, then init's, each marked
-    // as it ends. Taken out of the environment before anything is started;
-    // the names point into a copy, since removing the variable frees it.
-    var phases = Phases.parse(try m.gpa.dupe(u8, m.env.get("WEREWOLF_BOOT") orelse ""));
-    _ = m.env.swapRemove("WEREWOLF_BOOT");
+    // as it ends.
+    var phases = Phases.parse(init.environ_map.get("WEREWOLF_BOOT") orelse "");
 
     // Nothing here may wait on a person. A tool that prompts (mke2fs does,
     // over an old signature) reads end of file instead of stalling the boot.
@@ -122,13 +120,11 @@ pub fn main(init: std.process.Init) !void {
     // program's memory, and its secrets, behind. A hard limit, so no
     // process can raise its own.
     const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
-    if (linux.errno(linux.setrlimit(
-        .CORE,
-        &no_core,
-    )) != .SUCCESS) say("core dumps not limited", .{});
+    if (linux.errno(linux.setrlimit(.CORE, &no_core)) != .SUCCESS)
+        say("core dumps not limited", .{});
     // The seal fails closed, as fence does: PID 1 ends, the kernel panics,
     // and the machine comes back on the slot that last worked.
-    seal(&m) catch |err| {
+    phase_seal.seal(&m) catch |err| {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -180,10 +176,8 @@ pub fn main(init: std.process.Init) !void {
     // it says at that level, which loglevel=5 kept off the console while
     // the boot's own notices would have cost a millisecond a line on a
     // cloud's serial port (Makefile, KERNEL_ARGS). dmesg has every one.
-    if (!writeFile(
-        "/proc/sys/kernel/printk",
-        "6",
-    )) say("console loglevel not raised: the kernel's refusals stay in dmesg", .{});
+    if (!writeFile("/proc/sys/kernel/printk", "6"))
+        say("console loglevel not raised: the kernel's refusals stay in dmesg", .{});
     say("up in {s}s (the kernel {s}s, userland {s}s), handing over to runit", .{
         m.fmt("{d}.{d:0>3}", .{ up_ms / 1000, up_ms % 1000 }),
         m.fmt("{d}.{d:0>3}", .{ kernel_ms / 1000, kernel_ms % 1000 }),
@@ -212,26 +206,13 @@ pub const Machine = struct {
 
     // Each phase is in a file of its own, and still m.phase() here.
     pub const filesystems = phase_kernel.filesystems;
-    pub const cgroups = phase_kernel.cgroups;
     pub const seed = phase_kernel.seed;
     pub const kernel = phase_kernel.kernel;
     pub const network = phase_network.network;
-    pub const staticNetwork = phase_network.staticNetwork;
-    pub const routerAdvertisements = phase_network.routerAdvertisements;
-    pub const pickNic = phase_network.pickNic;
     pub const victim = phase_config.victim;
     pub const config = phase_config.config;
     pub const metadata = phase_config.metadata;
-    pub const nocloud = phase_config.nocloud;
-    pub const limaConfig = phase_config.limaConfig;
-    pub const keys = phase_config.keys;
-    pub const extract = phase_config.extract;
-    pub const extractChild = phase_config.extractChild;
-    pub const sizeUp = phase_config.sizeUp;
-    pub const writeOut = phase_config.writeOut;
     pub const data = phase_data.data;
-    pub const dataHome = phase_data.dataHome;
-    pub const nodata = phase_data.nodata;
 
     /// werewolf's mount, which says what went wrong itself; the boot goes on.
     pub fn mount(m: *Machine, args: []const []const u8) void {
@@ -247,10 +228,6 @@ pub const Machine = struct {
     /// failure is an answer.
     pub fn runQuiet(m: *Machine, argv: []const []const u8) bool {
         return m.spawn(argv, true) == 0;
-    }
-
-    pub fn exitCode(m: *Machine, argv: []const []const u8) u32 {
-        return m.spawn(argv, true);
     }
 
     /// name's path in PATH, as the shell's command -v finds it. Programs
@@ -300,6 +277,17 @@ pub const Machine = struct {
     /// path, read to its end, or "" (procfs and sysfs report a size of 0).
     pub fn read(m: *Machine, path: []const u8) []const u8 {
         var f = Dir.cwd().openFile(m.io, path, .{}) catch return "";
+        defer f.close(m.io);
+        var buf: [4096]u8 = undefined;
+        var r = f.readerStreaming(m.io, &buf);
+        return r.interface.allocRemaining(m.gpa, .limited(1 << 20)) catch "";
+    }
+
+    /// read, for a file from outside the image: a regular file alone, no
+    /// link followed (openRegular), at most 1 MiB; "" otherwise.
+    pub fn readRegular(m: *Machine, path: []const u8) []const u8 {
+        const fd = openRegular(m.z(path)) orelse return "";
+        var f: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
         defer f.close(m.io);
         var buf: [4096]u8 = undefined;
         var r = f.readerStreaming(m.io, &buf);
@@ -396,11 +384,6 @@ pub fn firstLine(s: []const u8) []const u8 {
     return s[0 .. std.mem.findScalar(u8, s, '\n') orelse s.len];
 }
 
-fn firstWord(s: []const u8) []const u8 {
-    var it = std.mem.tokenizeAny(u8, s, " \n");
-    return it.next() orelse "";
-}
-
 pub fn trim(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \t\r\n");
 }
@@ -435,6 +418,36 @@ pub fn isBlockDevice(path: [:0]const u8) bool {
         &st,
     )) != .SUCCESS) return false;
     return st.mode & linux.S.IFMT == linux.S.IFBLK;
+}
+
+/// The kind of file fd is open on (S.IFREG, S.IFBLK, ...), or 0.
+pub fn fileType(fd: i32) u32 {
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(fd, "", AT_EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS)
+        return 0;
+    return st.mode & linux.S.IFMT;
+}
+
+const AT_EMPTY_PATH = 0x1000;
+
+/// A file from outside the image (a cidata ISO's, a victim's) opened for
+/// reading as a regular file alone, with links refused: a FIFO or a
+/// device at the name would otherwise hold PID 1 in open or read for good,
+/// and a link would lead it elsewhere. Null if it is not one.
+pub fn openRegular(path: [:0]const u8) ?i32 {
+    const fd = linux.open(path, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .NOCTTY = true,
+    }, 0);
+    if (linux.errno(fd) != .SUCCESS) return null;
+    if (fileType(@intCast(fd)) != linux.S.IFREG) {
+        _ = linux.close(@intCast(fd));
+        return null;
+    }
+    return @intCast(fd);
 }
 
 pub fn writeFile(path: [:0]const u8, data: []const u8) bool {
@@ -553,18 +566,6 @@ test Phases {
     var full: Phases = .{};
     for (0..Phases.max + 3) |i| full.add("x", i);
     try testing.expectEqual(Phases.max, full.len);
-}
-
-test "small parsers" {
-    try testing.expectEqualStrings(
-        "i-0123",
-        instanceId("local-hostname: x\ninstance-id: i-0123\n"),
-    );
-    try testing.expectEqualStrings(
-        "integrity",
-        lockdownLevel("none [integrity] confidentiality\n"),
-    );
-    try testing.expectEqualStrings("12.34", firstWord("12.34 56.78\n"));
 }
 
 /// Milliseconds since the kernel started its clock.

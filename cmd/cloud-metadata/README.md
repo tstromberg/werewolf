@@ -72,4 +72,7 @@ means a pax header, a link or an owner never reaches init.
 
 - **Bounded:** at most 27 seconds, or 47 on AWS, when the server is down.
 - **Fails safe:** no config means no keys, not a broken config; init boots on.
+- **Says why:** a failure is logged with its cause (refused, timed out, an
+  HTTP status, a token refused, an answer not GCP's), which the fetcher
+  passes as a byte and a number, never text, and the parent puts in words.
 - **Tested:** `make check-cloud`: all four clouds, a hostile one, and none.

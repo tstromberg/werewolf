@@ -41,11 +41,8 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 1 and !dry) fail("usage: bite-cleanup [-n]", .{});
     if (linux.geteuid() != 0) fail("run as root", .{});
 
-    const cmd = parseCmdline(readAll(
-        io,
-        gpa,
-        "/proc/cmdline",
-    )) orelse fail("this machine was not bitten", .{});
+    const cmd = parseCmdline(readAll(io, gpa, "/proc/cmdline")) orelse
+        fail("this machine was not bitten", .{});
     const p = plan(gpa, cmd) catch |err|
         fail("cannot tell what to keep: {s}; deleting nothing", .{@errorName(err)});
 
@@ -62,19 +59,17 @@ pub fn main(init: std.process.Init) !void {
     const victim = ask(.victim);
     defer victim.release();
     const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) fail("cannot fork: {t}", .{linux.errno(pid)});
     if (pid == 0) prune(io, gpa, victim.path(), p, dry);
     var status: i32 = 0;
-    _ = linux.waitpid(@intCast(pid), &status, 0);
+    while (linux.errno(linux.waitpid(@intCast(pid), &status, 0)) == .INTR) {}
     linux.sync();
     const s: u32 = @bitCast(status);
     const code = if (linux.W.IFEXITED(s)) linux.W.EXITSTATUS(s) else 255;
     if (code != 0 and code != partial) fail("deleting stopped; see above", .{});
-    if (!dry and
-        !trim(victim.path())) say(
-        "trim not available here; the blocks are freed, not handed back",
-        .{},
-    );
     if (!dry) {
+        if (!trim(victim.path()))
+            say("trim not available here; the blocks are freed, not handed back", .{});
         say(
             "bite --undo is no longer possible; GRUB's menu still lists the distro, which no " ++
                 "longer boots",
@@ -113,15 +108,11 @@ fn prune(io: Io, gpa: Allocator, dir: []const u8, p: Plan, dry: bool) noreturn {
     );
     var t: Tally = .{};
     walk(io, gpa, root, "", p.keep, dry, &t) catch |err| fail("{s}", .{@errorName(err)});
-    var list: std.ArrayList(u8) = .empty;
-    for (p.keep, 0..) |k, i| list.print(gpa, "{s}{s}", .{ if (i > 0) " " else "", k }) catch {};
+    const kept = std.mem.join(gpa, " ", p.keep) catch "";
     if (dry)
-        say(
-            "-n: would delete {d} entries, keeping {s}; nothing changed",
-            .{ t.deleted, list.items },
-        )
+        say("-n: would delete {d} entries, keeping {s}; nothing changed", .{ t.deleted, kept })
     else
-        say("deleted {d} entries of the distro, keeping {s}", .{ t.deleted, list.items });
+        say("deleted {d} entries of the distro, keeping {s}", .{ t.deleted, kept });
     if (t.left > 0) {
         say("{d} entries may not be deleted and stay, named above", .{t.left});
         std.process.exit(partial);
@@ -290,20 +281,10 @@ fn parseCmdline(text: []const u8) ?Cmdline {
     var slot: ?u8 = null;
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |arg| {
-        if (std.mem.startsWith(
-            u8,
-            arg,
-            "werewolf.victim=",
-        )) victim = parsePlace(arg["werewolf.victim=".len..]);
-        if (std.mem.startsWith(
-            u8,
-            arg,
-            "werewolf.grubenv=",
-        )) grubenv = parsePlace(arg["werewolf.grubenv=".len..]);
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=")) {
-            const v = arg["werewolf.slot=".len..];
+        if (std.mem.cutPrefix(u8, arg, "werewolf.victim=")) |v| victim = parsePlace(v);
+        if (std.mem.cutPrefix(u8, arg, "werewolf.grubenv=")) |v| grubenv = parsePlace(v);
+        if (std.mem.cutPrefix(u8, arg, "werewolf.slot=")) |v|
             slot = if (std.mem.eql(u8, v, "a") or std.mem.eql(u8, v, "b")) v[0] else null;
-        }
     }
     return .{
         .victim = victim orelse return null,
@@ -452,9 +433,15 @@ fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     return r.interface.allocRemaining(gpa, .limited(1 << 20)) catch "";
 }
 
+/// One line on stdout, the console log. The names in it are the distro's,
+/// which whoever wrote that disk chose: each control byte becomes a "?",
+/// so none can carry an escape sequence or a false line to the console.
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const line = std.mem.print(&buf, "bite-cleanup: " ++ fmt ++ "\n", args) catch return;
+    for (line[0 .. line.len - 1]) |*c| if (c.* < 0x20 or c.* == 0x7f) {
+        c.* = '?';
+    };
     _ = linux.write(1, line.ptr, line.len);
 }
 

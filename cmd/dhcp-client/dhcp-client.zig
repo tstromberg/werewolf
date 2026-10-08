@@ -194,10 +194,8 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
 fn park() noreturn {
     sandbox.dropTo(engine_id, empty_dir) catch linux.exit_group(1);
     var f: sandbox.Filter = .{};
-    f.allow("nanosleep");
-    f.allow("clock_nanosleep");
-    f.allow("restart_syscall");
-    f.allow("exit_group");
+    inline for (.{ "nanosleep", "clock_nanosleep", "restart_syscall", "exit_group" }) |call|
+        f.allow(call);
     f.install() catch linux.exit_group(1);
     while (true) sleep(1 << 30);
 }
@@ -242,15 +240,10 @@ const Engine = struct {
         f.allowArg("sendto", 0, @intCast(e.pkt));
         f.allowArg("recvfrom", 0, @intCast(e.pkt));
         f.allowArg("write", 0, @intCast(e.sp));
-        f.allow("poll");
-        f.allow("ppoll");
-        f.allow("clock_gettime");
-        f.allow("nanosleep");
-        f.allow("clock_nanosleep");
-        f.allow("getrandom");
-        f.allow("restart_syscall");
-        f.allow("exit_group");
-        f.allow("exit");
+        inline for (.{
+            "poll",      "ppoll",           "clock_gettime", "nanosleep", "clock_nanosleep",
+            "getrandom", "restart_syscall", "exit_group",    "exit",
+        }) |call| f.allow(call);
         try f.install();
     }
 
@@ -297,12 +290,25 @@ const Engine = struct {
     /// finished one within `seconds`. The ACK must come from the server
     /// that offered, for the address offered.
     fn acquire(e: *Engine, seconds: u32) !?Wire {
-        e.sent = 0;
-        e.offered_after = 0;
-        e.offer_ms = 0;
-        e.started = nowMs();
+        e.begin();
         const deadline = e.started + @as(i64, seconds) * 1000;
+        // A round that ended without a lease (an OFFER not usable, an
+        // answer from another server, a NAK) waits before the next, 0.25 s
+        // doubling to 8: a peer that answers at once with what is refused
+        // must not set the pace of our broadcasts.
+        var pause: i64 = 0;
         while (nowMs() < deadline) {
+            if (pause > 0) {
+                const ms = @min(pause, deadline - nowMs());
+                if (ms > 0) {
+                    const ts: linux.timespec = .{
+                        .sec = @divFloor(ms, 1000),
+                        .nsec = @mod(ms, 1000) * std.time.ns_per_ms,
+                    };
+                    _ = linux.nanosleep(&ts, null);
+                }
+            }
+            pause = if (pause == 0) 250 else @min(pause * 2, 8000);
             const xid = newXid();
             var buf: [576]u8 = undefined;
             e.step = .discover;
@@ -311,8 +317,9 @@ const Engine = struct {
                 zero,
                 xid,
                 deadline,
+                true,
             ) orelse return null;
-            if (offer.kind != .offer or !usable(offer.lease.addr) or
+            if (!usable(offer.lease.addr) or
                 !usable(offer.lease.server)) continue;
             e.offered_after = e.sent;
             e.offer_ms = e.since();
@@ -322,6 +329,7 @@ const Engine = struct {
                 zero,
                 xid,
                 deadline,
+                false,
             ) orelse return null;
             if (!std.mem.eql(u8, &ack.lease.server, &offer.lease.server)) continue;
             switch (ack.kind) {
@@ -342,10 +350,7 @@ const Engine = struct {
     /// A renewing REQUEST for the lease held: the server's ACK, for the same
     /// address, or its NAK; null for no answer, or one from anyone else.
     fn renew(e: *Engine, h: Wire, seconds: u32) !?Reply {
-        e.sent = 0;
-        e.offered_after = 0;
-        e.offer_ms = 0;
-        e.started = nowMs();
+        e.begin();
         const xid = newXid();
         var buf: [576]u8 = undefined;
         e.step = .renew;
@@ -354,6 +359,7 @@ const Engine = struct {
             h.addr,
             xid,
             nowMs() + @as(i64, seconds) * 1000,
+            false,
         ) orelse return null;
         if (!std.mem.eql(u8, &r.lease.server, &h.server)) return null;
         switch (r.kind) {
@@ -367,17 +373,29 @@ const Engine = struct {
         }
     }
 
-    /// Broadcast `msg` from `src`, again after 0.25, 0.5, 1, 2 and 4 and then
-    /// every 8 seconds, until a reply to `xid` arrives or `deadline` passes.
-    /// The first tries come quickly because a boot waits on them: the first
-    /// broadcast of a boot can go unanswered (under Lima's vzNAT, one boot in
-    /// three), and a 1 s first wait was then a second of every such boot. A
-    /// server slower than that sees the same `xid` twice and answers once.
+    /// Broadcast `msg` from `src`, again every 0.25 seconds for the first
+    /// `quick_ms` of the lease, then after 0.5, 1, 2 and 4 and then every 8
+    /// seconds, until a reply to `xid` arrives or `deadline` passes. The
+    /// first tries come quickly because a boot waits on them: the first
+    /// broadcasts of a boot can go unheard, under Lima's vzNAT one boot in
+    /// three, and on Azure most boots, for 0.6 to 4.4 s, the server
+    /// answering 15 to 50 ms after the first it hears; each wait doubled
+    /// then left up to 2 s of every such boot waiting on the next try. A
+    /// server slower than that sees the same `xid` twice and may answer each
+    /// (ISC dhcpd, dnsmasq): an OFFER is taken only when `offer` asks for
+    /// one, and a late second OFFER is passed over while the ACK is awaited.
     /// Each wait is drawn from half to one and a half of its value (RFC 2131
     /// 4.1), so machines booting together do not retransmit in step. A send
     /// or a receive that fails, as when the link drops for a moment, counts
     /// as a round with no answer: nothing restarts `keep`.
-    fn exchange(e: *Engine, msg: []const u8, src: Ip4, xid: u32, deadline: i64) !?Reply {
+    fn exchange(
+        e: *Engine,
+        msg: []const u8,
+        src: Ip4,
+        xid: u32,
+        deadline: i64,
+        offer: bool,
+    ) !?Reply {
         var out: [28 + 576]u8 = undefined;
         const pkt = frame(&out, src, msg);
         const to: linux.sockaddr.ll = .{
@@ -390,6 +408,11 @@ const Engine = struct {
         };
         var wait: i64 = 250;
         while (nowMs() < deadline) {
+            // secs: the seconds since the lease's first broadcast, as RFC
+            // 2131 has every client say, and some servers act on; 0 in
+            // every message before.
+            const secs: u16 = @intCast(@min(e.since() / 1000, 0xffff));
+            std.mem.writeInt(u16, out[28 + 8 ..][0..2], secs, .big);
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
             e.sent +|= 1;
             const spread: i64 = newXid() % @as(u32, @intCast(wait));
@@ -418,9 +441,9 @@ const Engine = struct {
                     },
                 }
                 const payload = unframe(in[0..got]) orelse continue;
-                if (parseReply(payload, xid, e.mac)) |r| return r;
+                if (parseReply(payload, xid, e.mac)) |r| if ((r.kind == .offer) == offer) return r;
             }
-            wait = @min(wait * 2, 8000);
+            wait = if (e.since() < quick_ms) 250 else @min(wait * 2, 8000);
         }
         return null;
     }
@@ -452,6 +475,14 @@ const Engine = struct {
         };
         _ = linux.write(e.sp, std.mem.asBytes(&m), @sizeOf(Msg));
         linux.exit_group(1);
+    }
+
+    /// A lease sought anew: no broadcasts yet, and the clock starts now.
+    fn begin(e: *Engine) void {
+        e.sent = 0;
+        e.offered_after = 0;
+        e.offer_ms = 0;
+        e.started = nowMs();
     }
 
     /// ms since the lease's first broadcast.
@@ -491,15 +522,10 @@ const Parent = struct {
         f.allowArg("ioctl", 1, linux.SIOCSIFNETMASK);
         f.allowArg("ioctl", 1, linux.SIOCSIFMTU);
         f.allowArg("ioctl", 1, linux.SIOCADDRT);
-        f.allow("write");
-        f.allow("openat");
-        f.allow("close");
-        f.allow("renameat");
-        f.allow("renameat2");
-        f.allow("clock_gettime");
-        f.allow("restart_syscall");
-        f.allow("exit_group");
-        f.allow("exit");
+        inline for (.{
+            "write",         "openat",          "close",      "renameat", "renameat2",
+            "clock_gettime", "restart_syscall", "exit_group", "exit",
+        }) |call| f.allow(call);
         try f.install();
     }
 
@@ -542,7 +568,7 @@ const Parent = struct {
             .bound, .renewed => {
                 // The engine checked this already; a lease that fails here
                 // means the engine is not what it was.
-                if (!valid(m.lease)) return error.InvalidLease;
+                if (!valid(m.lease) or m.lease.bound > boottime()) return error.InvalidLease;
                 if (p.applied) |a| if (!samePlan(a, m.lease)) {
                     try p.link.withdraw();
                     var ip: [16]u8 = undefined;
@@ -552,7 +578,7 @@ const Parent = struct {
                         .reason = "the new lease differs",
                     });
                 };
-                try p.link.apply(p.dir, m.lease);
+                try p.link.apply(p.dir, m.lease, &p.log, p.nic);
                 p.applied = m.lease;
                 var fba: [16 << 10]u8 = undefined;
                 var a: std.heap.FixedBufferAllocator = .init(&fba);
@@ -678,6 +704,14 @@ const Wire = extern struct {
     bound: i64 = 0,
 };
 
+/// How long the lease's broadcasts go out every 0.25 s before backing off
+/// (Engine.exchange): longer than Azure's server took to first hear one.
+const quick_ms = 5000;
+
+/// The largest MTU taken from a server: EC2 offers 9001, and ENA allows
+/// up to 9216.
+const max_mtu = 9216;
+
 const Route = extern struct {
     dst: Ip4,
     /// zero: on the link, no gateway.
@@ -697,24 +731,26 @@ fn valid(w: Wire) bool {
         const host = std.mem.readInt(u32, &w.addr, .big) & ~std.mem.readInt(u32, &w.mask, .big);
         if (host == 0 or host == ~std.mem.readInt(u32, &w.mask, .big)) return false;
     }
-    if (!std.mem.eql(
-        u8,
-        &w.router,
-        &zero,
-    ) and (!usable(w.router) or std.mem.eql(u8, &w.router, &w.addr))) return false;
+    if (!usableGateway(w.router, w.addr)) return false;
     if (w.ndns > max_dns or w.nroutes > max_routes) return false;
     for (w.dns[0..w.ndns]) |d| if (!usable(d)) return false;
     for (w.routes[0..w.nroutes]) |r| {
         if (r.prefix > 32 or !std.mem.eql(u8, &masked(r.dst, r.prefix), &r.dst)) return false;
         if (r.prefix > 0 and !usable(r.dst)) return false;
-        if (!std.mem.eql(
-            u8,
-            &r.gw,
-            &zero,
-        ) and (!usable(r.gw) or std.mem.eql(u8, &r.gw, &w.addr))) return false;
+        if (!usableGateway(r.gw, w.addr)) return false;
     }
-    if (w.mtu != 0 and (w.mtu < 576 or w.mtu > 9000)) return false;
+    if (w.mtu != 0 and (w.mtu < 576 or w.mtu > max_mtu)) return false;
+    // A boot's seconds, so bound plus any of the lease's u32 times cannot
+    // overflow; the parent holds it to the clock as well (Parent.handle).
+    if (w.bound < 0 or w.bound > 1 << 40) return false;
     return w.lease > 0;
+}
+
+/// Whether gw, a router or a route's gateway, is none (zero), or a usable
+/// address other than the lease's own.
+fn usableGateway(gw: Ip4, addr: Ip4) bool {
+    if (std.mem.eql(u8, &gw, &zero)) return true;
+    return usable(gw) and !std.mem.eql(u8, &gw, &addr);
 }
 
 // --- the parent's view: text, logged and kept --------------------------------
@@ -783,12 +819,10 @@ fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
         data,
         .{ .ignore_unknown_fields = true },
     ) catch return null;
-    const slash = std.mem.findScalar(u8, l.addr, '/') orelse return null;
-    const prefix = std.fmt.parseInt(u8, l.addr[slash + 1 ..], 10) catch return null;
-    if (prefix > 32) return null;
+    const a = parseCidr(l.addr) orelse return null;
     var w: Wire = .{
-        .addr = parseIp4(l.addr[0..slash]) orelse return null,
-        .mask = maskOf(prefix),
+        .addr = a.addr,
+        .mask = maskOf(a.prefix),
         .server = parseIp4(l.server) orelse return null,
         .lease = l.lease,
         .t1 = l.t1,
@@ -810,10 +844,16 @@ fn parseRoute(s: []const u8) ?Route {
         dst_text = s[0..i];
         gw = parseIp4(s[i + " via ".len ..]) orelse return null;
     }
-    const slash = std.mem.findScalar(u8, dst_text, '/') orelse return null;
-    const prefix = std.fmt.parseInt(u8, dst_text[slash + 1 ..], 10) catch return null;
+    const dst = parseCidr(dst_text) orelse return null;
+    return .{ .dst = dst.addr, .gw = gw, .prefix = dst.prefix };
+}
+
+/// "D.D.D.D/N", N at most 32.
+fn parseCidr(s: []const u8) ?struct { addr: Ip4, prefix: u8 } {
+    const slash = std.mem.findScalar(u8, s, '/') orelse return null;
+    const prefix = std.fmt.parseInt(u8, s[slash + 1 ..], 10) catch return null;
     if (prefix > 32) return null;
-    return .{ .dst = parseIp4(dst_text[0..slash]) orelse return null, .gw = gw, .prefix = prefix };
+    return .{ .addr = parseIp4(s[0..slash]) orelse return null, .prefix = prefix };
 }
 
 /// JSON lines on stdout: `dhcp-client: {"time":...,"event":...,...}`. Built in a
@@ -949,17 +989,34 @@ const Link = struct {
     /// Put a lease on the NIC: address and netmask, MTU, routes, resolvers.
     /// Applying one that is already there changes nothing: the kernel keeps
     /// an address or mask set to what it is, and a route that exists is
-    /// left as it is.
-    fn apply(l: *Link, dir: i32, w: Wire) !void {
+    /// left as it is. An MTU the NIC cannot take, or a route the kernel
+    /// refuses, is logged and passed over: the address is on by then, and
+    /// ending here would end `keep`, and with it every renewal of the boot.
+    fn apply(l: *Link, dir: i32, w: Wire, log: *Log, nic: []const u8) !void {
         try l.setAddr(linux.SIOCSIFADDR, w.addr, "SIOCSIFADDR");
         try l.setAddr(linux.SIOCSIFNETMASK, w.mask, "SIOCSIFNETMASK");
         if (w.mtu != 0) {
             var ifr = l.ifreq();
             ifr.ifru.mtu = w.mtu;
-            _ = try sys(linux.ioctl(l.inet, linux.SIOCSIFMTU, @intFromPtr(&ifr)), "SIOCSIFMTU");
+            _ = sys(linux.ioctl(l.inet, linux.SIOCSIFMTU, @intFromPtr(&ifr)), "SIOCSIFMTU") catch
+                log.event("mtu_refused", .{
+                    .nic = nic,
+                    .mtu = w.mtu,
+                    .errno = sandbox.errnoName(sandbox.failed_errno),
+                });
         }
         var plan_buf: [max_routes + 2]Route = undefined;
-        for (plan(w, &plan_buf)) |rt| try l.addRoute(rt);
+        for (plan(w, &plan_buf)) |rt| l.addRoute(rt) catch {
+            var dst: [16]u8 = undefined;
+            var gw: [16]u8 = undefined;
+            log.event("route_refused", .{
+                .nic = nic,
+                .dst = ipText(&dst, rt.dst),
+                .prefix = rt.prefix,
+                .gw = ipText(&gw, rt.gw),
+                .errno = sandbox.errnoName(sandbox.failed_errno),
+            });
+        };
         if (w.ndns > 0) {
             var text: [max_dns * 28]u8 = undefined;
             var tw: Io.Writer = .fixed(&text);
@@ -1098,6 +1155,9 @@ fn message(
     if (server) |a| opts.put(buf, &i, 54, &a);
     opts.put(buf, &i, 55, &wanted);
     opts.put(buf, &i, 57, &.{ 0x05, 0xdc }); // replies up to 1500 bytes
+    // The client identifier, Ethernet and the MAC, as dhclient and
+    // systemd-networkd send it: a server may key its leases by it.
+    opts.put(buf, &i, 61, &([1]u8{1} ++ mac));
     buf[i] = 255;
     // BOOTP's minimum: some servers drop anything shorter.
     return buf[0..@max(i + 1, 300)];
@@ -1167,7 +1227,7 @@ fn parseReply(msg: []const u8, xid: u32, mac: [6]u8) ?Reply {
             26 => {
                 if (len != 2) return null;
                 const mtu = std.mem.readInt(u16, v[0..2], .big);
-                w.mtu = if (mtu >= 576 and mtu <= 9000) mtu else 0;
+                w.mtu = if (mtu >= 576 and mtu <= max_mtu) mtu else 0;
             },
             51 => w.lease = u32Of(v) orelse return null,
             58 => w.t1 = u32Of(v) orelse return null,
@@ -1473,6 +1533,9 @@ test "messages" {
         &.{ 53, 1, 3, 50, 4, 10, 128, 0, 5, 54, 4, 169, 254, 169, 254 },
         r[240..255],
     );
+
+    const id = std.mem.find(u8, r[240..], &([2]u8{ 61, 7 } ++ [1]u8{1} ++ test_mac));
+    try std.testing.expect(id != null);
 
     const renewal = message(&buf, 3, test_xid, test_mac, .{ 10, 128, 0, 5 }, null, null);
     try std.testing.expectEqualSlices(u8, &.{ 10, 128, 0, 5 }, renewal[12..16]);

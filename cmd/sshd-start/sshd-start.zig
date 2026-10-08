@@ -7,7 +7,7 @@
 //! is read-only, so sshd reads a copy in /run. Without /data the key is
 //! made for this boot alone, and a client sees a new one at the next: an
 //! operator who logs in here must still be able to. Every start logs the
-//! key's fingerprint and public half, for an operator to pin (werewolf
+//! key's fingerprint and public half, for an operator to pin (howl
 //! console NAME), never the private half. lib/hostkey.zig keeps the key
 //! whole: a boot cut short leaves a whole key or none.
 //!
@@ -63,7 +63,8 @@ pub fn main(init: std.process.Init) !void {
 
 /// Make sure of key: the kept one, copied, or a new one, kept if it can be.
 fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
-    const unkept: ?[]const u8 = if (exists("/run/werewolf/nodata"))
+    const nodata = linux.errno(linux.access("/run/werewolf/nodata", linux.F_OK)) == .SUCCESS;
+    const unkept: ?[]const u8 = if (nodata)
         "no /data to keep it in"
     else if (hostkey.onRam("/data"))
         "/data is RAM"
@@ -117,10 +118,6 @@ fn logKey(io: Io, gpa: Allocator, from: []const u8) void {
     }, .{}, &w) catch return;
     w.writeByte('\n') catch return;
     Io.File.stdout().writeStreamingAll(io, w.buffered()) catch {};
-}
-
-fn exists(path: [*:0]const u8) bool {
-    return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {

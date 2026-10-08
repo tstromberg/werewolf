@@ -16,8 +16,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const block_size = 4096;
 const digest_len = Sha256.digest_length;
-const per_block_bits = 7; // 4096 / 32 digests a block
-const per_block = 1 << per_block_bits;
+const per_block = block_size / digest_len; // 128 digests a block
 
 /// What stage0 needs to open an image: as dm-verity's table takes them.
 pub const Params = struct {

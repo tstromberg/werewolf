@@ -83,15 +83,6 @@ fn nic(s: [:0]const u8) ![:0]const u8 {
     return s;
 }
 
-const maskInt = network.mask;
-const inSubnet = network.inSubnet;
-
-fn fromInt(v: u32) Ip4 {
-    var a: Ip4 = undefined;
-    std.mem.writeInt(u32, &a, v, .big);
-    return a;
-}
-
 // --- asking the kernel ---------------------------------------------------------------
 
 const SIOCADDRT = 0x890B;
@@ -139,11 +130,12 @@ const Rtentry = extern struct {
 
 fn apply(sock: i32, p: Plan) !void {
     if (p.addr) |addr| {
+        const mask: Ip4 = std.mem.toBytes(std.mem.nativeToBig(u32, network.mask(p.prefix)));
         try ioctl(sock, SIOCSIFADDR, &ifreq(p.nic, .{ .addr = .{ .addr = addr } }), "SIOCSIFADDR");
         try ioctl(
             sock,
             SIOCSIFNETMASK,
-            &ifreq(p.nic, .{ .addr = .{ .addr = fromInt(maskInt(p.prefix)) } }),
+            &ifreq(p.nic, .{ .addr = .{ .addr = mask } }),
             "SIOCSIFNETMASK",
         );
     }
@@ -153,7 +145,7 @@ fn apply(sock: i32, p: Plan) !void {
     try ioctl(sock, SIOCSIFFLAGS, &flags, "SIOCSIFFLAGS");
 
     const gw = p.gateway orelse return;
-    if (!inSubnet(gw, p.addr.?, p.prefix)) {
+    if (!network.inSubnet(gw, p.addr.?, p.prefix)) {
         // Reach the gateway itself through the NIC first.
         try route(
             sock,
@@ -235,14 +227,14 @@ test "what the kernel command line gives, parsed" {
     try testing.expectEqual(Ip4{ 10, 0, 2, 15 }, p.addr.?);
     try testing.expectEqual(24, p.prefix);
     try testing.expectEqual(Ip4{ 10, 0, 2, 2 }, p.gateway.?);
-    try testing.expect(inSubnet(p.gateway.?, p.addr.?, p.prefix));
+    try testing.expect(network.inSubnet(p.gateway.?, p.addr.?, p.prefix));
     const lo = try parse(&.{"lo"});
     try testing.expectEqual(null, lo.addr);
 }
 
 test "a /32 with a gateway outside it, as GCP gives" {
     const p = try parse(&.{ "ens4", "10.128.0.5/32", "10.128.0.1" });
-    try testing.expect(!inSubnet(p.gateway.?, p.addr.?, p.prefix));
+    try testing.expect(!network.inSubnet(p.gateway.?, p.addr.?, p.prefix));
 }
 
 test "odd input is refused" {

@@ -52,16 +52,11 @@ const files = @import("files.zig");
 const kernel = @import("kernel.zig");
 const network = @import("network.zig");
 const processes = @import("processes.zig");
-const probe = @import("attacks.zig").probe;
 
 const std = @import("std");
-
 const Io = std.Io;
-
 const Dir = Io.Dir;
-
 const Allocator = std.mem.Allocator;
-
 const linux = std.os.linux;
 
 pub fn main(init: std.process.Init) !void {
@@ -69,7 +64,9 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
-    if (args.len == 2 and std.mem.eql(u8, args[1], "--probe")) std.process.exit(probe());
+    if (args.len == 3 and std.mem.eql(u8, args[1], "--probe")) std.process.exit(attacks.probe(
+        std.fmt.parseInt(u16, args[2], 10) catch 0,
+    ));
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "run")) return serve(io, gpa);
     var format: Format = .text;
     var extended = false;
@@ -128,8 +125,16 @@ const settle_max_s = 60;
 
 fn serve(io: Io, gpa: Allocator) !void {
     var waited: u32 = 0;
-    while (waited < settle_max_s and
-        !settled(io, gpa)) : (waited += 1) io.sleep(.fromSeconds(1), .awake) catch {};
+    while (unsettled(io, gpa)) |name| : (waited += 1) {
+        if (waited >= settle_max_s) {
+            std.debug.print(
+                "posture: checking anyway; {s} has not settled after {d} s\n",
+                .{ name, settle_max_s },
+            );
+            break;
+        }
+        io.sleep(.fromSeconds(1), .awake) catch {};
+    }
 
     var p: Posture = .{ .io = io, .gpa = gpa, .root = linux.geteuid() == 0 };
     try p.run();
@@ -161,25 +166,27 @@ fn serve(io: Io, gpa: Allocator) !void {
     std.process.exit(1);
 }
 
-/// Whether every service but this one has settled, by runsv's own account.
-fn settled(io: Io, gpa: Allocator) bool {
-    var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return true;
+/// The first service but this one that has not settled, by runsv's own
+/// account; null once all have.
+fn unsettled(io: Io, gpa: Allocator) ?[]const u8 {
+    var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return null;
     defer d.close(io);
     const now = nowSecs(io);
     var it = d.iterate();
-    while (it.next(io) catch return false) |e| {
+    while (it.next(io) catch return "/etc/sv") |e| {
         if (std.mem.eql(u8, e.name, "posture")) continue;
+        const name = gpa.dupe(u8, e.name) catch return "/etc/sv";
         var f = d.openFile(
             io,
-            gpa.print("{s}/supervise/status", .{e.name}) catch return false,
+            gpa.print("{s}/supervise/status", .{name}) catch return name,
             .{},
-        ) catch return false;
+        ) catch return name;
         defer f.close(io);
         var status: [20]u8 = undefined;
-        const n = f.readPositionalAll(io, &status, 0) catch return false;
-        if (n != status.len or !serviceSettled(status, now)) return false;
+        const n = f.readPositionalAll(io, &status, 0) catch return name;
+        if (n != status.len or !serviceSettled(status, now)) return name;
     }
-    return true;
+    return null;
 }
 
 /// Whether runsv's supervise/status says the service is down because it
@@ -363,6 +370,7 @@ pub const Posture = struct {
     pub fn absent(
         p: *Posture,
         id: []const u8,
+        area: []const u8,
         name: []const u8,
         why: []const u8,
         names: []const []const u8,
@@ -383,32 +391,20 @@ pub const Posture = struct {
             }) |dir| {
                 const path = try p.gpa.print("{s}/{s}", .{ dir, n });
                 if (!exists(p.io, path)) continue;
-                try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", path });
+                try listAdd(p.gpa, &found, "{s}", .{path});
                 break;
             }
         }
         try how.appendSlice(p.gpa, " in /bin, /sbin, /usr/bin, /usr/sbin or /usr/local");
         try p.add(.{
             .id = id,
-            .area = "programs",
+            .area = area,
             .name = name,
             .why = why,
             .how = how.items,
             .result = if (found.items.len == 0) .pass else .fail,
             .detail = found.items,
         });
-    }
-
-    pub fn absentNamed(
-        p: *Posture,
-        id: []const u8,
-        area: []const u8,
-        name: []const u8,
-        why: []const u8,
-        names: []const []const u8,
-    ) !void {
-        try p.absent(id, name, why, names);
-        p.checks.items[p.checks.items.len - 1].area = area;
     }
 
     /// A setting the kernel lets rise but never fall: it must read locked,
@@ -459,23 +455,15 @@ pub const Posture = struct {
     ) !void {
         var how: std.ArrayList(u8) = .empty;
         var bad: std.ArrayList(u8) = .empty;
-        for (want, 0..) |kv, i| {
-            if (i > 0) try how.appendSlice(p.gpa, ", ");
-            try how.print(p.gpa, "{s} = {s}", .{ dotted(p.gpa, kv[0]), kv[1] });
+        for (want) |kv| {
+            try listAdd(p.gpa, &how, "{s} = {s}", .{ dotted(p.gpa, kv[0]), kv[1] });
             for (try p.expand(kv[0])) |key| {
                 const value = p.sysctl(key);
-                if (!std.mem.eql(
-                    u8,
-                    value,
-                    kv[1],
-                )) try bad.print(
+                if (!std.mem.eql(u8, value, kv[1])) try listAdd(
                     p.gpa,
-                    "{s}{s} is {s}",
-                    .{
-                        if (bad.items.len > 0) ", " else "",
-                        dotted(p.gpa, key),
-                        if (value.len > 0) value else "absent",
-                    },
+                    &bad,
+                    "{s} is {s}",
+                    .{ dotted(p.gpa, key), if (value.len > 0) value else "absent" },
                 );
             }
         }
@@ -548,19 +536,23 @@ fn compare(gpa: Allocator, checks: []Check, text: []const u8) !Known {
     var now_passing: std.ArrayList([]const u8) = .empty;
     for (checks) |*c| {
         if (c.result != .fail) continue;
-        c.excuse = excuseOf(text, c.id) orelse {
-            try unexpected.append(gpa, c.id);
-            continue;
-        };
+        c.excuse = excuseOf(text, c.id);
+        if (c.excuse == null) try unexpected.append(gpa, c.id);
     }
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         var words = std.mem.tokenizeAny(u8, line, " \t");
         const id = words.next() orelse continue;
         if (id[0] == '?' or id[0] == '#') continue;
-        for (checks) |c| {
-            if (std.mem.eql(u8, c.id, id) and c.result == .fail) break;
-        } else for (now_passing.items) |have| {
+        // Passing now only if it ran and passed: one skipped, as a check
+        // that cannot run here is, says nothing about the excuse.
+        var passed = false;
+        for (checks) |c| if (std.mem.eql(u8, c.id, id)) {
+            passed = c.result == .pass;
+            if (!passed) break;
+        };
+        if (!passed) continue;
+        for (now_passing.items) |have| {
             if (std.mem.eql(u8, have, id)) break;
         } else try now_passing.append(gpa, id);
     }
@@ -767,6 +759,18 @@ pub fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     return found;
 }
 
+/// Adds an item, what fmt makes of args, to a list: items between ", ",
+/// as checks give what they found.
+pub fn listAdd(
+    gpa: Allocator,
+    list: *std.ArrayList(u8),
+    comptime fmt: []const u8,
+    args: anytype,
+) !void {
+    if (list.items.len > 0) try list.appendSlice(gpa, ", ");
+    try list.print(gpa, fmt, args);
+}
+
 /// names, between commas.
 pub fn joined(comptime names: []const []const u8) []const u8 {
     comptime var s: []const u8 = "";
@@ -801,7 +805,7 @@ pub fn missingOption(
         if (hasOption(line, m.dir, option)) continue;
         var seen = std.mem.tokenizeAny(u8, out.items, ", ");
         while (seen.next()) |d| if (std.mem.eql(u8, d, m.dir)) continue :next;
-        try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", m.dir });
+        try listAdd(gpa, &out, "{s}", .{m.dir});
     }
     return out.items;
 }
@@ -824,6 +828,7 @@ pub fn statusField(status: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
+/// The real uid on a /proc/PID/status Uid: line.
 pub fn uidOf(status: []const u8) ?u32 {
     var it = std.mem.tokenizeScalar(u8, status, '\n');
     while (it.next()) |line| {

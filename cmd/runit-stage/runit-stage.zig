@@ -103,8 +103,8 @@ fn serviceDirs(io: Io, gpa: Allocator) ![]const []const u8 {
     defer d.close(io);
     var it = d.iterate();
     while (it.next(io) catch null) |e| {
-        if (e.kind == .directory or
-            e.kind == .sym_link) try out.append(gpa, try gpa.print("/etc/sv/{s}", .{e.name}));
+        if (e.kind == .directory or e.kind == .sym_link)
+            try out.append(gpa, try gpa.print("/etc/sv/{s}", .{e.name}));
     }
     std.mem.sort([]const u8, out.items, {}, lessString);
     return out.items;

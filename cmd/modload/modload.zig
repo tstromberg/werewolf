@@ -66,7 +66,8 @@ const max_modules = 256;
 const max_list = 64 << 10;
 
 pub fn main() void {
-    if (loaderClosed()) {
+    var before: [4]u8 = undefined;
+    if (std.mem.startsWith(u8, readSmall(modules_disabled, &before) orelse "", "1")) {
         say("modload: the loader is closed already\n", .{});
         linux.exit_group(0);
     }
@@ -131,13 +132,9 @@ fn load() !Result {
     _ = linux.uname(&uts);
     const release = std.mem.sliceTo(&uts.release, 0);
     var dir_buf: [128]u8 = undefined;
-    const dir_len = (std.mem.print(
-        dir_buf[0 .. dir_buf.len - 1],
-        "/usr/lib/modules/{s}",
-        .{release},
-    ) catch return error.Release).len;
-    dir_buf[dir_len] = 0;
-    const dir = try openPath(dir_buf[0..dir_len :0], O_PATH);
+    const dir_path = std.mem.printSentinel(&dir_buf, "/usr/lib/modules/{s}", .{release}, 0) catch
+        return error.Release;
+    const dir = try openPath(dir_path, O_PATH);
     defer close(dir);
 
     var list: [max_list]u8 = undefined;
@@ -273,12 +270,6 @@ fn describe(err: anyerror) []const u8 {
 
 const modules_disabled = "/proc/sys/kernel/modules_disabled";
 
-fn loaderClosed() bool {
-    var buf: [4]u8 = undefined;
-    const s = readSmall(modules_disabled, &buf) orelse return false;
-    return s.len > 0 and s[0] == '1';
-}
-
 /// Whether the kernel will refuse an unsigned module: lockdown at integrity
 /// or confidentiality, or module.sig_enforce.
 fn enforced() bool {
@@ -318,8 +309,7 @@ fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]M
         if (line.len > 255) return error.BadPath;
         const space = std.mem.findScalar(u8, line, ' ') orelse line.len;
         try checkPath(line[0..space]);
-        const params = if (space < line.len) line[space + 1 ..] else "";
-        if (space < line.len) try checkParams(params);
+        if (space < line.len) try checkParams(line[space + 1 ..]);
         const l = &lines[n];
         @memcpy(l[0..line.len], line);
         l[space] = 0;
