@@ -12,8 +12,8 @@
 #   make list-forms      each form and the forms it includes
 #   make howl            the howl command, for this machine: build/host/howl;
 #                        howl pack FORM packs a config tar from flags (docs/design/cli.md)
-#   make install         that command on your PATH, to run in a werewolf checkout;
-#                        make uninstall removes it
+#   make install         install-deps, then that command on your PATH, to run
+#                        in a werewolf checkout; make uninstall removes it
 #
 # Boot
 #   make run             build and boot it under QEMU, the console here
@@ -81,25 +81,43 @@ HOST_OS := $(shell uname -s)
 # after it, built on forms in forms/.
 FORM ?= $(if $(filter lima,$(MAKECMDGOALS)),lima,$(if $(filter bite-me,$(MAKECMDGOALS)),prod-ssh,sshd))
 FORM_TOOL = build/host/form
+HOWL = build/host/howl
+FORM_REF := $(FORM)
+override FORM := $(notdir $(patsubst %/,%,$(FORM)))
+# Goals that ask nothing of a form: install-deps, which installs the Zig
+# that builds the tool below, so it must run without one; install and
+# howl, which build the howl command, which reads forms itself; and
+# uninstall, clean and help. A make of those alone leaves the tool be,
+# and the questions below go to `:`, which answers nothing.
+FORMLESS = install-deps install uninstall howl $(HOWL) clean help
+ifeq ($(filter-out $(FORMLESS),$(or $(MAKECMDGOALS),all)),)
+FORM_ASK = :
+else
+FORM_ASK = $(FORM_TOOL)
 # Built before anything else is read, since everything about a form is
 # read through it; each make asks it a few questions, in milliseconds.
 FORM_TOOL_BUILT := $(shell [ -x $(FORM_TOOL) ] && [ -z "$$(find tools/form.zig lib/form.zig -newer $(FORM_TOOL))" ] || \
 	{ mkdir -p build/host && zig build-exe -O ReleaseSafe --dep form -Mroot=tools/form.zig -Mform=lib/form.zig \
 		-femit-bin=$(FORM_TOOL).$$$$ >&2 && mv $(FORM_TOOL).$$$$ $(FORM_TOOL); })
-FORM_REF := $(FORM)
-override FORM := $(notdir $(patsubst %/,%,$(FORM)))
+ifeq ($(wildcard $(FORM_TOOL)),)
+$(error no $(FORM_TOOL), as zig says above; `make install-deps` installs zig)
+endif
 CHAIN := $(shell $(FORM_TOOL) names $(FORM_REF))
 ifeq ($(CHAIN),)
 $(error no form $(FORM_REF), as build/host/form says above; `make list-forms` lists them)
 endif
-FORM_DIRS := $(shell $(FORM_TOOL) dirs $(FORM_REF))
+endif
+FORM_DIRS := $(shell $(FORM_ASK) dirs $(FORM_REF))
 FORM_DIR := $(lastword $(FORM_DIRS))
 ROOTFS_DIRS := $(wildcard $(addsuffix /rootfs,$(FORM_DIRS)))
+# rootfs_find ARGS: find ARGS over the chain's rootfs/ directories; with
+# none, in a make that asked no form, nothing, rather than find's usage.
+rootfs_find = $(if $(ROOTFS_DIRS),$(shell find $(ROOTFS_DIRS) $(1)))
 FORM_FILES := $(wildcard $(addsuffix /apko.yaml,$(FORM_DIRS)) $(addsuffix /form.yaml,$(FORM_DIRS)))
 # form_list KEY: form.yaml's KEY along the chain; form_check KEY: the
 # form's own check KEY.
-form_list = $(shell $(FORM_TOOL) list $(FORM_REF) $(1))
-form_check = $(shell $(FORM_TOOL) check $(FORM_REF) $(1))
+form_list = $(shell $(FORM_ASK) list $(FORM_REF) $(1))
+form_check = $(shell $(FORM_ASK) check $(FORM_REF) $(1))
 
 # --- allowances ---------------------------------------------------------------
 # What a form may take back of werewolf's defaults, and only when it is
@@ -204,7 +222,7 @@ endif
 FORM_OWN_PROGRAMS := $(foreach d,$(FORM_DIRS),$(patsubst %/,%,$(wildcard $(d)/cmd/*/)))
 PROGRAM_BINS := $(foreach p,$(FORM_PROGRAMS),$(call program_bin,$(p))) $(foreach c,$(FORM_OWN_PROGRAMS),$(call form_bin,$(c)))
 # Every form's, for the checks to build before forms build side by side.
-ALL_PROGRAM_BINS := $(foreach p,$(shell $(FORM_TOOL) every programs),$(call program_bin,$(p))) \
+ALL_PROGRAM_BINS := $(foreach p,$(shell $(FORM_ASK) every programs),$(call program_bin,$(p))) \
 	$(foreach c,$(patsubst %/,%,$(wildcard forms/*/cmd/*/)),$(call form_bin,$(c)))
 BITE_CLEANUP := $(PROGRAMS)/bite-cleanup/usr/bin/bite-cleanup
 MOUNT_BIN := $(PROGRAMS)/mount/usr/lib/werewolf/mount
@@ -318,7 +336,7 @@ endef
 # which modload loads only when stage0 finds the slot on xfs. No kmod index
 # files travel, so there is nothing describing the 880 modules that stay
 # behind. modload closes the loader once these are in.
-MODULES := $(shell $(FORM_TOOL) list $(FORM_REF) modules | \
+MODULES := $(shell $(FORM_ASK) list $(FORM_REF) modules | \
 	awk -v a=$(ARCH) '{ c = index($$0, sprintf("%c", 35)); if (c) $$0 = substr($$0, 1, c - 1) } \
 		$$1 ~ /:$$/ && $$1 !~ /^@/ { if ($$1 != a ":") next; $$1 = ""; $$0 = $$0 } \
 		$$1 ~ /^@[a-z0-9]+:$$/ { for (i = 2; i <= NF; i++) printf "%s%s ", $$1, $$i; print ""; next } { print }')
@@ -514,7 +532,7 @@ $(OUT)/rootfs.tar: $(FORM_LOCK) $(FORM_APKO)
 	$(call apko_build,$(FORM_APKO),$<)
 
 # werewolf's own files: each form's rootfs along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(call rootfs_find,-type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -546,7 +564,7 @@ $(OUT)/initramfs.zst: $(OUT)/slot/initramfs.zst $(OUT)/slot/root.erofs
 # forward too.
 # The etc/sv directories are prerequisites too: a service removed or renamed
 # changes nothing else Make can see, and its supervise link would stay.
-$(OUT)/ro.stamp: $(OUT)/rootfs.tar $(shell find $(ROOTFS_DIRS) -type d \( -path '*/etc/sv' -o -path '*/etc/sv/*' \)) Makefile
+$(OUT)/ro.stamp: $(OUT)/rootfs.tar $(call rootfs_find,-type d \( -path '*/etc/sv' -o -path '*/etc/sv/*' \)) Makefile
 	rm -rf $(OUT)/ro && mkdir -p $(OUT)/ro/usr/share/werewolf/etc && \
 	for f in passwd group shadow; do \
 		$(TAR) -xOf $(OUT)/rootfs.tar etc/$$f > $(OUT)/ro/usr/share/werewolf/etc/$$f || exit 1; \
@@ -646,7 +664,7 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories test/posture-known Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(call rootfs_find,-type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories test/posture-known Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -747,7 +765,6 @@ cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
 	$(CVE_TIERS_BIN) "$$kernel" build/tiers/origins build/tiers/nvd build/tiers/in build/tiers/cve-tiers.json
 
 # The howl command (cmd/howl), built for this machine, not the image.
-HOWL = build/host/howl
 .PHONY: howl
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig \
@@ -767,7 +784,10 @@ $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/updat
 # so it runs in a werewolf checkout, as build/host/howl does. The command
 # was called werewolf once: one of those that make install put there goes.
 INSTALL_DIRS = $(HOME)/bin $(HOME)/.local/bin /usr/local/bin
-install: $(HOWL)
+# install-deps first, for the Zig that builds howl, and in a make of its
+# own after it, so that -j does not start the build before Zig is there.
+install: install-deps
+	@$(MAKE) --no-print-directory $(HOWL)
 	@set -e; bindir=; \
 	for d in $(INSTALL_DIRS); do \
 		if echo "$$PATH" | tr ':' '\n' | grep -qx "$$d" && [ -d "$$d" ] && [ -w "$$d" ]; then bindir=$$d; break; fi; \
@@ -1080,7 +1100,7 @@ CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf
 POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 # The posture checks known to fail on the form and architecture, for
 # test/boot to expect: those, and the form's own weaknesses.
-export POSTURE_KNOWN := $(POSTURE_KNOWN_KIND) $(shell $(FORM_TOOL) weaknesses $(FORM_REF))
+export POSTURE_KNOWN := $(POSTURE_KNOWN_KIND) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
 # The posture checks test/cage expects to fail in a container, beyond the
 # kernel-* checks it allows by their area (the container shares the host's
 # kernel; only kernel-seal and kernel-write-xor-execute, werewolf's own,
@@ -1133,7 +1153,7 @@ check: check-forms check-shellfree check-integrity check-cloud check-persist
 # runs nothing on the machine, only reads its posture line, so each form is
 # built as it ships, without DEV. Every form is checked so, but one whose
 # form.yaml says `check: native: false`, with why it cannot be.
-NATIVE_FORMS := $(filter-out $(shell $(FORM_TOOL) having native false),$(FORMS))
+NATIVE_FORMS := $(filter-out $(shell $(FORM_ASK) having native false),$(FORMS))
 NATIVE_CHECKS = $(addprefix check-native-,$(NATIVE_FORMS))
 .PHONY: check-native $(NATIVE_CHECKS) _check-native
 check-native: $(addprefix check-native-,$(call shard,$(NATIVE_FORMS)))
@@ -1234,7 +1254,7 @@ _check-shellfree-boot:
 # through port 22 forwarded from a port of its own, so forms boot side by
 # side.
 comma := ,
-CHECK_SSH := $(if $(shell $(FORM_TOOL) list $(FORM_REF) net | grep -x 'listen tcp/22'),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 22200 + $$1 }'))
+CHECK_SSH := $(if $(shell $(FORM_ASK) list $(FORM_REF) net | grep -x 'listen tcp/22'),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 22200 + $$1 }'))
 # A form test/boot drives through its web API from the host too (gitea),
 # its check's web port: forwarded beside ssh's, from a range of its own.
 CHECK_WEB_PORT := $(call form_check,web)
