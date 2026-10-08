@@ -7,7 +7,8 @@ can rebuild a release byte for byte from what it carries.
 
 `prod` is the production base: a machine that takes its address by DHCP,
 keeps itself current, and listens on nothing. `prod-ssh` is `prod` with
-sshd, for an operator to reach by key.
+sshd, for an operator to reach by security key (`ed25519-sk` or
+`ecdsa-sk`, touched); a key file is refused.
 
 ## What a release holds
 
@@ -59,13 +60,15 @@ image lacks as soon as that advisory's tier says
 every 15 minutes, for what Wolfi and Alpine change, and whenever the `check`
 workflow passes on `main`, for what werewolf changes, building the commit
 that passed. GitHub runs a schedule this frequent late, or skips it, under
-load; a push does not wait on one.
+load, most often on the hour and its quarters, so release.yml's minutes are
+7, 22, 37 and 52; a push does not wait on one.
 
 1. **Inputs.** `make release-inputs` resolves fresh locks for the forms, stage0,
    the kernel and systemd-boot: the newest packages in Wolfi, and in Alpine's
    v3.24 for the kernel. It writes `inputs`: a digest of the files that build the
-   images, and every package's URL. CI keeps a cache entry per digest; if
-   these inputs were built before, the run stops.
+   images, and every package's URL. The locks resolve all at once, and CI
+   keeps the form tool built, so this takes seconds. CI keeps a cache entry
+   per digest; if these inputs were built before, the run stops.
 2. **Build, twice.** Each architecture is built on two runners from those
    locks, and the two must match byte for byte.
 3. **Boot.** Each form boots under QEMU and passes `make check`
@@ -248,7 +251,7 @@ of the kernel Alpine ships, a tier, with the evidence for it:
   "kernel": "6.18",
   "urgent": [
     {"cve": "CVE-2026-1234", "origin": "openssl", "fixed": "3.5.4-r0", "score": 9.8, "vector": "CVSS:3.1/AV:N/...", "source": "nvd", "kev": "2026-10-01"},
-    {"cve": "CVE-2026-5678", "kernel": "6.18", "fixed": "6.18.55", "score": 9.1, "vector": "CVSS:3.1/AV:N/...", "source": "cna"}
+    {"cve": "CVE-2026-5678", "fixed": "6.18.55", "score": 9.1, "vector": "CVSS:3.1/AV:N/...", "source": "cna"}
   ],
   "high": [...],
   "medium": [
@@ -259,9 +262,10 @@ of the kernel Alpine ships, a tier, with the evidence for it:
 }
 ```
 
-Urgent and high CVEs are listed with each package version, or kernel
-release, that fixed them, so a machine finds them from the signed feed
-alone; medium and low once each. Every entry carries what its tier rests
+Urgent and high CVEs are listed with each package version that fixed
+them, its package's `origin` with it, or kernel release, on the `kernel`
+branch, without one, so a machine finds them from the signed feed alone;
+medium and low once each. Every entry carries what its tier rests
 on, for the machine's log: `score`, `vector` and `source` when the CVE has
 a score, and `kev`, the date CISA listed it, when it is in KEV; each is
 left out otherwise. A score is NVD's own, or, until NVD has one, that of
@@ -337,6 +341,4 @@ git log -p cve-tiers.json   # every change, as a diff
 
 - The published disks boot in CI under QEMU alone: not on a cloud, and
   not with a cloud's devices.
-- A release's `build` hashes its files; the updater's own build hash, in
-  its log and reports, hashes the package list and kernel.
 - Releases are kept; nothing prunes old ones.

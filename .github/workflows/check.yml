@@ -32,14 +32,11 @@ jobs:
       - name: Install tools
         run: sudo test/ci-setup
       - name: Unit tests
-        run: make test
+        run: make -j"$(nproc)" test
 
   lint:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-26.04, ubuntu-26.04-arm]
-    runs-on: ${{ matrix.runner }}
+    # Once: lint reads the sources, and the sources are the same on arm.
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -58,22 +55,24 @@ jobs:
         # The groups of make check (Makefile): forms is every form booted;
         # shellfree every form rebuilt and booted as it ships; integrity the
         # slot, its unsigned refusal and verity; cloud the metadata, no-data
-        # and lease boots; persist the UEFI-firmware power-cut run (skipped
+        # and lease boots, and on x86_64 the ad-hoc form, whose OCI image is
+        # pulled; persist the UEFI-firmware power-cut run (skipped
         # on emulated arm). x86_64 runs them all under KVM. arm64 has no
         # KVM, so rather than emulate every form it runs them natively under
         # systemd-nspawn (native, test/cage); integrity and cloud still
         # emulate minimal and prod there, asserting the kernel, boot-chain
         # and attack checks a container cannot carry. forms, shellfree and
-        # native each split over three runners (SHARD=K/N) to finish in the
-        # time allowed.
+        # native each split over runners (SHARD=K/N): 19 jobs in all, under
+        # the account's 20 at once, so none waits for another to end.
         group: [integrity, cloud, persist]
         include:
           - { runner: ubuntu-26.04-arm, group: native, shard: 1, shards: 3 }
           - { runner: ubuntu-26.04-arm, group: native, shard: 2, shards: 3 }
           - { runner: ubuntu-26.04-arm, group: native, shard: 3, shards: 3 }
-          - { runner: ubuntu-26.04, group: forms, shard: 1, shards: 3 }
-          - { runner: ubuntu-26.04, group: forms, shard: 2, shards: 3 }
-          - { runner: ubuntu-26.04, group: forms, shard: 3, shards: 3 }
+          - { runner: ubuntu-26.04, group: forms, shard: 1, shards: 4 }
+          - { runner: ubuntu-26.04, group: forms, shard: 2, shards: 4 }
+          - { runner: ubuntu-26.04, group: forms, shard: 3, shards: 4 }
+          - { runner: ubuntu-26.04, group: forms, shard: 4, shards: 4 }
           - { runner: ubuntu-26.04, group: shellfree, shard: 1, shards: 3 }
           - { runner: ubuntu-26.04, group: shellfree, shard: 2, shards: 3 }
           - { runner: ubuntu-26.04, group: shellfree, shard: 3, shards: 3 }
@@ -85,6 +84,34 @@ jobs:
           persist-credentials: false
       - name: Install tools
         run: sudo test/ci-setup
+      - name: Tool versions
+        id: versions
+        run: |
+          { echo "zig=$(sed -n 's/^ZIG_VERSION = //p' Makefile)"
+            echo "week=$(date -u +%G-%V)"
+            echo "melange=$(sed -n 's/^melange_version=//p' tools/install-deps)"; } >>"$GITHUB_OUTPUT"
+      # Zig's global cache, keyed by the week, so a program whose inputs are
+      # unchanged since the last run that week is not compiled again. Zig
+      # checks it by content, so a stale entry only costs a compile.
+      - name: Restore the Zig cache
+        id: zig
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/zig
+          key: zig-${{ runner.arch }}-${{ steps.versions.outputs.zig }}-${{ steps.versions.outputs.week }}-${{ hashFiles('**/*.zig') }}
+          restore-keys: zig-${{ runner.arch }}-${{ steps.versions.outputs.zig }}-${{ steps.versions.outputs.week }}-
+      # apko's package cache, so a job's forms take their packages from its
+      # last run that week, not from Wolfi's server; apko checks them by
+      # hash. Each job keeps its own, as each builds its own forms.
+      - name: Restore the apko cache
+        id: apko
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/dev.chainguard.go-apk
+          key: >-
+            apko-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard }}-${{ steps.versions.outputs.week
+            }}-${{ hashFiles('forms/*/apko.yaml', 'boot/*.yaml') }}
+          restore-keys: apko-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard }}-${{ steps.versions.outputs.week }}-
       - name: Install example compilers
         # The groups that build every form build the compiled tutorial
         # applications, which compile on the host (examples/build.mk) for an
@@ -96,8 +123,9 @@ jobs:
           rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
           dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
       # The packages melange builds from forms' recipes (melange.mk), kept
-      # between runs by the recipes' contents: vaultwarden's is a Rust
-      # build. Saved even when a check fails, as the packages are sound.
+      # between runs by the recipes' contents and melange's version:
+      # vaultwarden's is a Rust build of twenty minutes. Saved even when a
+      # check fails, as the packages are sound.
       # Checkout leaves the recipes newer than any stamp restored, so the
       # stamps are touched to say the packages are current.
       - name: Restore melange packages
@@ -108,18 +136,35 @@ jobs:
           path: |
             build/vendor/packages
             build/vendor/stamps
-          key: melange-${{ runner.arch }}-${{ hashFiles('forms/*/melange/*.yaml', 'tools/install-deps') }}
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/*.yaml') }}
       - name: Mark restored melange packages current
         if: steps.melange.outputs.cache-hit == 'true'
         run: find build/vendor/stamps -type f -exec touch {} +
       - name: Boot and check (${{ matrix.group }}${{ matrix.shard && format(' {0}/{1}', matrix.shard, matrix.shards) || '' }})
-        # A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no
-        # guest starves. The runner is thrown away after, so test/cage may
-        # raise its link and memfd sysctls to werewolf's own, and the native
-        # attacks on them run for real.
+        # A boot a CPU: a guest has two (CHECK_QEMU's -smp 2) but spends
+        # most of its seconds waiting on its services, so four at once on
+        # four CPUs keep them busy. The forms jobs check demo, so persist
+        # need not first (PERSIST_AFTER). The runner is thrown away after,
+        # so test/cage may raise its link and memfd sysctls to werewolf's
+        # own, and the native attacks on them run for real.
         env:
           CAGE_HARDEN_HOST: 1
-        run: make -k -j"$(( ($(nproc) + 1) / 2 ))" ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+        run: make -k -j"$(nproc)" PERSIST_AFTER= ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+      # One job an architecture saves the Zig cache, when this week's has
+      # no entry for these sources yet: every check job compiles the same
+      # programs, and integrity is off the critical path.
+      - name: Save the Zig cache
+        if: always() && matrix.group == 'integrity' && steps.zig.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/zig
+          key: ${{ steps.zig.outputs.cache-primary-key }}
+      - name: Save the apko cache
+        if: always() && steps.apko.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/dev.chainguard.go-apk
+          key: ${{ steps.apko.outputs.cache-primary-key }}
       - name: Save melange packages
         if: >-
           always() && steps.melange.outcome == 'success' && steps.melange.outputs.cache-hit != 'true'

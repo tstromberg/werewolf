@@ -55,7 +55,72 @@ pub fn check(p: *Posture) !void {
             .detail = if (nginx.found == 0) "no nginx running" else "",
         });
         try servicesLeashed(p);
+        try imageRoots(p);
     }
+}
+
+/// Each service with a `root` (an OCI image baked in, docs/design/adhoc.md)
+/// runs inside it, and what it may write there is a bind that runs nothing.
+fn imageRoots(p: *Posture) !void {
+    const mounts = p.read("/proc/self/mounts");
+    var names: std.ArrayList([]const u8) = .empty;
+    if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |d| {
+        var dir = d;
+        defer dir.close(p.io);
+        var it = dir.iterate();
+        while (try it.next(p.io)) |e| try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+    } else |_| {}
+    std.mem.sort([]const u8, names.items, {}, lessString);
+    var bad: std.ArrayList(u8) = .empty;
+    var rooted: usize = 0;
+    var running: usize = 0;
+    for (names.items) |name| {
+        const text = p.read(try p.gpa.print("/etc/sv/{s}/service", .{name}));
+        var root: []const u8 = "";
+        var lines = std.mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |line| {
+            var words = std.mem.tokenizeAny(u8, line, " \t");
+            if (std.mem.eql(
+                u8,
+                words.next() orelse continue,
+                "root",
+            )) root = words.next() orelse "";
+        }
+        if (root.len == 0) continue;
+        rooted += 1;
+        for ([_][]const u8{ "tmp", "run", "data" }) |sub| {
+            const at = try p.gpa.print("{s}/{s}", .{ root, sub });
+            if (!hasOption(mounts, at, "noexec") or !hasOption(mounts, at, "nodev"))
+                try listAdd(p.gpa, &bad, "{s}: {s} not a noexec, nodev bind", .{ name, at });
+        }
+        const pid = trim(p.read(try p.gpa.print("/etc/sv/{s}/supervise/pid", .{name})));
+        if (pid.len == 0) continue; // down, or parked
+        var buf: [4096]u8 = undefined;
+        const n = Dir.cwd().readLink(
+            p.io,
+            try p.gpa.print("/proc/{s}/root", .{pid}),
+            &buf,
+        ) catch continue;
+        running += 1;
+        if (!std.mem.eql(u8, buf[0..n], root))
+            try listAdd(p.gpa, &bad, "{s}: runs in {s}, not {s}", .{ name, buf[0..n], root });
+    }
+    try p.add(.{
+        .id = "processes-image-roots",
+        .area = "processes",
+        .name = "Images run inside their roots",
+        .why = "A baked-in image's program sees its image alone, and may write only beneath " ++
+            "binds that run nothing.",
+        .how = "for each /etc/sv/NAME/service with a root line, /proc/PID/root is that root, " ++
+            "and its tmp, run and data are mounts with noexec and nodev",
+        .result = if (rooted == 0) .skip else if (bad.items.len == 0) .pass else .fail,
+        .detail = if (rooted == 0)
+            "no service with a root"
+        else if (bad.items.len > 0)
+            bad.items
+        else
+            try p.gpa.print("{d} rooted, {d} running", .{ rooted, running }),
+    });
 }
 
 /// Each service leash starts, one with an /etc/sv/NAME/service file,

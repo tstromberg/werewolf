@@ -98,27 +98,20 @@ pub fn lock(u: *Update) !i32 {
 /// the kernel read at boot, about a second.
 pub fn downtime(u: *Update) ?i64 {
     const text = u.read(rebooted_path) catch return null;
-    const at = std.fmt.parseInt(i64, std.mem.trim(u8, text, " \n"), 10) catch return null;
+    const at = policy.parseTime(std.mem.trim(u8, text, " \n")) catch return null;
     return nowSecs(u.io) - bootSecs() - at;
 }
 
 /// For each tier the committed slot carried, when this machine first
 /// saw it and the seconds from then to now.
 pub fn waited(u: *Update) !Waits {
-    const p = try u.readPending() orelse return .{};
+    var w: Waits = .{};
+    const p = try u.readPending() orelse return w;
     const now = nowSecs(u.io);
-    const of = struct {
-        fn f(x: ?Pending.Seen, t: i64) !?Waited {
-            const y = x orelse return null;
-            return .{ .seen = y.seen, .seconds = t - try releases.parseTime(y.seen) };
-        }
-    }.f;
-    return .{
-        .urgent = try of(p.urgent, now),
-        .high = try of(p.high, now),
-        .medium = try of(p.medium, now),
-        .low = try of(p.low, now),
+    inline for (comptime std.enums.values(policy.Tier)) |t| if (p.get(t)) |x| {
+        @field(w, @tagName(t)) = .{ .seen = x.seen, .seconds = now - try policy.parseTime(x.seen) };
     };
+    return w;
 }
 
 // --- policy -----------------------------------------------------------------
@@ -218,9 +211,9 @@ pub fn readPending(u: *Update) !?Pending {
 /// policy's time, held until an hour after boot unless a first check
 /// staged it.
 pub fn dueOf(u: *Update, s: *const policy.Settings, p: Pending) !policy.Due {
-    var seen: policy.Seen = @splat(null);
+    var seen: policy.Seen = .initFill(null);
     for (std.enums.values(policy.Tier)) |t| if (p.get(t)) |x| {
-        seen[@backingInt(t)] = try releases.parseTime(x.seen);
+        seen.set(t, try policy.parseTime(x.seen));
     };
     var d = policy.when(s, seen, u.seed(p.build), p.first_boot) orelse
         return error.NothingStaged;
@@ -243,7 +236,7 @@ pub fn whyOf(
         s,
         d.tier,
         .{ .subject = x.subject, .evidence = x.evidence },
-        try releases.parseTime(x.seen),
+        try policy.parseTime(x.seen),
         u.seed(p.build),
         p.first_boot,
         d.at,
@@ -255,7 +248,7 @@ pub fn whyOf(
 /// This machine's seed for build: by its disk, which outlives every
 /// slot, so its place is the same from boot to boot.
 pub fn seed(u: *Update, build: []const u8) u64 {
-    return policy.seed(m.uuidOf(u.cmd.victim), build);
+    return policy.seed(u.cmd.victim.?.uuid, build);
 }
 
 // --- the tiers feed ---------------------------------------------------------
@@ -418,7 +411,7 @@ pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pe
     const now = nowSecs(u.io);
     var next = p;
     var rose: ?policy.Tier = null;
-    for (std.enums.values(policy.Tier)) |t| if (fixes.first[@backingInt(t)]) |f| {
+    for (std.enums.values(policy.Tier)) |t| if (fixes.first.get(t)) |f| {
         const seen = next.tier(t);
         if (seen.* != null) continue;
         seen.* = .{ .seen = try u.time(now), .subject = f.subject, .evidence = f.evidence };
@@ -473,7 +466,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
     });
     // For the next boot's outcome to say how long the machine was down;
     // without it, the reboot still goes.
-    u.writeReplacing(rebooted_path, try u.gpa.print("{d}\n", .{now})) catch {};
+    u.writeReplacing(rebooted_path, try u.gpa.print("{s}\n", .{try u.time(now)})) catch {};
     u.run(&.{"/usr/bin/reboot"}) catch |err| {
         Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
         return err;
@@ -500,49 +493,32 @@ pub const Pending = struct {
 
     pub fn tier(p: *Pending, t: policy.Tier) *?Seen {
         return switch (t) {
-            .urgent => &p.urgent,
-            .high => &p.high,
-            .medium => &p.medium,
-            .low => &p.low,
+            inline else => |x| &@field(p, @tagName(x)),
         };
     }
 
     pub fn get(p: Pending, t: policy.Tier) ?Seen {
         return switch (t) {
-            .urgent => p.urgent,
-            .high => p.high,
-            .medium => p.medium,
-            .low => p.low,
+            inline else => |x| @field(p, @tagName(x)),
         };
     }
 
-    pub fn seenTimes(p: Pending) struct {
-        urgent: ?[]const u8,
-        high: ?[]const u8,
-        medium: ?[]const u8,
-        low: ?[]const u8,
-    } {
-        const at = struct {
-            fn f(x: ?Seen) ?[]const u8 {
-                return if (x) |y| y.seen else null;
-            }
-        }.f;
-        return .{
-            .urgent = at(p.urgent),
-            .high = at(p.high),
-            .medium = at(p.medium),
-            .low = at(p.low),
-        };
+    /// When each tier was first seen, for the log.
+    pub fn seenTimes(p: Pending) std.enums.EnumFieldStruct(
+        policy.Tier,
+        ?[]const u8,
+        @as(?[]const u8, null),
+    ) {
+        var out: std.enums.EnumFieldStruct(policy.Tier, ?[]const u8, @as(?[]const u8, null)) = .{};
+        inline for (comptime std.enums.values(policy.Tier)) |t| {
+            if (p.get(t)) |x| @field(out, @tagName(t)) = x.seen;
+        }
+        return out;
     }
 };
 
 const Waited = struct { seen: []const u8, seconds: i64 };
-pub const Waits = struct {
-    urgent: ?Waited = null,
-    high: ?Waited = null,
-    medium: ?Waited = null,
-    low: ?Waited = null,
-};
+pub const Waits = std.enums.EnumFieldStruct(policy.Tier, ?Waited, @as(?Waited, null));
 const Valued = struct { value: []const u8, source: []const u8, limit: []const u8 };
 const Refused = struct { file: []const u8, key: []const u8, why: []const u8 };
 

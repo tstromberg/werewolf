@@ -13,7 +13,7 @@ const Dir = Io.Dir;
 const linux = std.os.linux;
 
 const posture = @import("posture.zig");
-const cap_sys_rawio = @import("kernel.zig").cap_sys_rawio;
+const allow = @import("allow");
 const Posture = posture.Posture;
 const capBit = posture.capBit;
 const exists = posture.exists;
@@ -149,7 +149,11 @@ pub fn run(p: *Posture) !void {
         "/dev/mem",
         &.{try p.gpa.print("Lockdown: {s}: /dev/mem,kmem,port is restricted", .{comm})},
     );
-    const rawio = capBit(p.read("/proc/self/status"), "CapEff", cap_sys_rawio) orelse true;
+    const rawio = capBit(
+        p.read("/proc/self/status"),
+        "CapEff",
+        @backingInt(allow.Cap.sys_rawio),
+    ) orelse true;
     try p.add(.{
         .id = "kernel-mem-attack",
         .area = "kernel",

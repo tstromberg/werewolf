@@ -15,7 +15,7 @@ audit "file" "stdout" {
 # The first start: what `bao operator init` and the first logins would
 # do, done by OpenBao itself under its static seal, once, then the root
 # token revoked. An admin, who may do everything, logging in by userpass
-# with the password the config brought (/run/config/openbao/admin_password;
+# with the password the config brought (/run/config/openbao/admin-password;
 # leash's copy is read here). A bcrypt hash in its place (password_hash)
 # waits on an OpenBao after 2.5, which Wolfi ships; the admin changes the
 # password at the first login.

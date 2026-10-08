@@ -4,14 +4,14 @@
 #   boot/mkdisk ARCH BOOT_ROOTFS GPT SLOT_DIR OUT SIZE_MIB [ARG...]
 #
 # BOOT_ROOTFS is boot/boot.yaml's rootfs, holding systemd-boot; GPT is
-# boot/gpt.zig, built for this host; SLOT_DIR holds vmlinuz, initramfs.zst
-# (stage0), root.erofs, and cmdline, the kernel arguments the image asks
+# boot/gpt.zig, built for this host; SLOT_DIR holds vmlinuz, stage0.zst,
+# root.erofs, and cmdline, the kernel arguments the image asks
 # for (Makefile, KERNEL_ARGS). OUT becomes a sparse disk of SIZE_MIB MiB:
 #
 #   GPT    fixed disk and partition GUIDs (boot/gpt.zig)
 #   1      EFI system partition, FAT32, 256 MiB: systemd-boot at the
 #          removable-media path, its loader.conf, slot a's entry, and
-#          /werewolf/a/vmlinuz and initramfs.zst
+#          /werewolf/a/vmlinuz and stage0.zst
 #   2      ext4, the rest: /werewolf/a/root.erofs; init adds /werewolf/data,
 #          which is /data
 #
@@ -111,10 +111,10 @@ title werewolf a
 sort-key werewolf
 version 19800101T000000Z
 linux /werewolf/a/vmlinuz
-initrd /werewolf/a/initramfs.zst
+initrd /werewolf/a/stage0.zst
 options $console init=/init panic=10 softlockup_panic=1 $args werewolf.victim=$root_uuid:/werewolf werewolf.esp=$esp_uuid${*:+ $*} werewolf.slot=a
 EOF
-cp "$slot/vmlinuz" "$slot/initramfs.zst" "$w/esp/werewolf/a/"
+cp "$slot/vmlinuz" "$slot/stage0.zst" "$w/esp/werewolf/a/"
 find "$w/esp" -exec touch -t 198001010000 {} +
 
 esp="$out@@$((esp_first * 512))"

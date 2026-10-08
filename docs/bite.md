@@ -96,15 +96,15 @@ forces the VM off.
 
 A bitten machine boots a *slot*: the rootfs kept on disk, read-only.
 `make slot` builds one in `build/<arch>/<form>/slot/`, with two stage0s:
-`initramfs.zst`, for werewolf's own disk and a direct boot, and
-`initramfs-bitten.zst`, which bite installs, with the modules of every
+`stage0.zst`, for werewolf's own disk and a direct boot, and
+`stage0-bitten.zst`, which bite installs, with the modules of every
 filesystem a distro's disk may be (xfs, btrfs). werewolf's own leaves
 them out: no weight, and no code to load, where no machine needs them.
 
 | File | Installed in | Contents |
 | --- | --- | --- |
 | `vmlinuz` | `/boot/werewolf/<slot>/` | Alpine's kernel; on arm64 the raw Image, unpacked from the slot's EFI zboot image, which GRUB cannot load |
-| `initramfs-bitten.zst` | `/boot/werewolf/<slot>/`, as `initramfs.zst` | stage0: werewolf's stage0 and module loader, the form's modules, and those only a distro's filesystem needs (Rocky's xfs, Fedora's btrfs) |
+| `stage0-bitten.zst` | `/boot/werewolf/<slot>/`, as `stage0.zst` | stage0: werewolf's stage0 and module loader, the form's modules, and those only a distro's filesystem needs (Rocky's xfs, Fedora's btrfs) |
 | `root.erofs` | `/var/lib/werewolf/<slot>/` | the rootfs |
 | `cmdline` | GRUB's environment, as `werewolf_args_<slot>` | the kernel arguments the image asks for |
 

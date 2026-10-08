@@ -12,6 +12,7 @@ const Dir = m.Dir;
 const Allocator = m.Allocator;
 const linux = m.linux;
 const sandbox = m.sandbox;
+const policy = m.policy;
 const releases = m.releases;
 const verity = m.verity;
 
@@ -28,9 +29,7 @@ const argvZ = m.argvZ;
 const nowSecs = m.nowSecs;
 const Package = m.Package;
 const parentDir = m.parentDir;
-const parseCmdline = m.parseCmdline;
 const parseInstalled = m.parseInstalled;
-const pathOf = m.pathOf;
 const testing = std.testing;
 const Update = m.Update;
 
@@ -142,7 +141,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // build's two stage0s do (Makefile, BITTEN_TAGS).
     var leaves: std.ArrayList([]const u8) = .empty;
     try leaves.appendSlice(u.gpa, try u.lines(try u.read(meta_dir ++ "/modules")));
-    if (u.cmd.grubenv.len > 0)
+    if (u.cmd.grubenv != null)
         try leaves.appendSlice(u.gpa, try u.lines(try u.read(meta_dir ++ "/modules-bitten")));
     const order = try moduleOrder(u.gpa, dep, leaves.items);
     // Decompressed, as the build does: Alpine's kernel cannot, and the
@@ -163,7 +162,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         "-q",
         "-f",
         "-o",
-        work_dir ++ "/slot/initramfs.zst",
+        work_dir ++ "/slot/stage0.zst",
         work_dir ++ "/stage0.cpio",
     });
 }
@@ -173,7 +172,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
 // stage0 in /boot/werewolf, beside GRUB's directory. Both mounted apart
 // and writable, since /victim is read-only.
 pub fn install(u: *Update, build: []const u8) !void {
-    if (u.cmd.grubenv.len == 0) return installEsp(u, build);
+    if (u.cmd.grubenv == null) return installEsp(u, build);
     const io = u.io;
     u.step = "install";
     const victim = try u.held(.victim);
@@ -183,14 +182,14 @@ pub fn install(u: *Update, build: []const u8) !void {
     const v = victim.path();
     const g = grub.path();
 
-    const gpath = pathOf(u.cmd.grubenv);
+    const gpath = u.cmd.grubenv.?.path;
     const kdir = try u.gpa.print(
         "{s}{s}/werewolf/{s}",
         .{ g, parentDir(parentDir(gpath)), u.other },
     );
     const rdir = try u.gpa.print(
         "{s}{s}/{s}",
-        .{ v, pathOf(u.cmd.victim), u.other },
+        .{ v, u.cmd.victim.?.path, u.other },
     );
     try Dir.cwd().createDirPath(io, kdir);
     try Dir.cwd().createDirPath(io, rdir);
@@ -217,9 +216,9 @@ pub fn install(u: *Update, build: []const u8) !void {
         try unwrapZboot(u.gpa, try u.read(work_dir ++ "/slot/vmlinuz")),
     );
     try Dir.cwd().copyFile(
-        work_dir ++ "/slot/initramfs.zst",
+        work_dir ++ "/slot/stage0.zst",
         Dir.cwd(),
-        try u.gpa.print("{s}/initramfs.zst", .{kdir}),
+        try u.gpa.print("{s}/stage0.zst", .{kdir}),
         io,
         .{},
     );
@@ -272,7 +271,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
 
     const rdir = try u.gpa.print(
         "{s}{s}/{s}",
-        .{ v, pathOf(u.cmd.victim), u.other },
+        .{ v, u.cmd.victim.?.path, u.other },
     );
     const kdir = try u.gpa.print("{s}/werewolf/{s}", .{ e, u.other });
     const entries = try u.gpa.print("{s}/loader/entries", .{e});
@@ -301,7 +300,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
         io,
         .{},
     );
-    for (&[_][]const u8{ "vmlinuz", "initramfs.zst" }) |f| {
+    for (&[_][]const u8{ "vmlinuz", "stage0.zst" }) |f| {
         try Dir.cwd().copyFile(
             try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
             Dir.cwd(),
@@ -315,15 +314,18 @@ fn installEsp(u: *Update, build: []const u8) !void {
     // Now, or a second past the newest werewolf entry left, the running
     // slot's, if the clock is behind the one that wrote it: systemd-boot
     // boots the newest version, so an older one would never be tried.
-    var newest: u64 = 0;
+    var newest: i64 = 0;
     for (try u.listDir(entries)) |name| {
         if (!std.mem.startsWith(u8, name, "werewolf-") or
             !std.mem.endsWith(u8, name, ".conf")) continue;
         const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
         newest = @max(newest, entrySecs(text) orelse continue);
     }
-    const now: u64 = @intCast(nowSecs(io));
-    const version = try compactTime(u.gpa, @max(now, newest + 1));
+    // A serial, which systemd-boot orders by time.
+    const version = try u.gpa.print(
+        "{f}",
+        .{policy.Serial{ .secs = @max(nowSecs(io), newest + 1) }},
+    );
     const options = try withSlot(
         u.gpa,
         try u.read("/proc/cmdline"),
@@ -1070,7 +1072,7 @@ fn loaderEntry(
         \\sort-key werewolf
         \\version {s}
         \\linux /werewolf/{s}/vmlinuz
-        \\initrd /werewolf/{s}/initramfs.zst
+        \\initrd /werewolf/{s}/stage0.zst
         \\options {s}
         \\
     , .{ slot, version, slot, slot, options });
@@ -1086,41 +1088,15 @@ fn isEntryOf(name: []const u8, slot: []const u8) bool {
     return rest.len == slot.len or rest[slot.len] == '+';
 }
 
-/// secs as a version systemd-boot orders by time: 20261006T120000Z.
-fn compactTime(gpa: Allocator, secs: u64) ![]const u8 {
-    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
-    const yd = es.getEpochDay().calculateYearDay();
-    const md = yd.calculateMonthDay();
-    const ds = es.getDaySeconds();
-    return gpa.print("{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{
-        yd.year,              md.month.numeric(),      md.day_index + 1,
-        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
-    });
-}
-
-/// An entry's version as compactTime writes it, in seconds since the
-/// epoch; null if it has none, or one of another form.
-fn entrySecs(entry: []const u8) ?u64 {
+/// An entry's version, a serial as a new one is written (policy.Serial),
+/// in seconds since the epoch; null if it has none, or one of another form.
+fn entrySecs(entry: []const u8) ?i64 {
     var it = std.mem.tokenizeScalar(u8, entry, '\n');
-    const v = while (it.next()) |line| {
-        if (std.mem.startsWith(u8, line, "version ")) break line["version ".len..];
-    } else return null;
-    if (v.len != 16 or v[8] != 'T' or v[15] != 'Z') return null;
-    var f: [6]u64 = undefined;
-    for (&f, [_][]const u8{ v[0..4], v[4..6], v[6..8], v[9..11], v[11..13], v[13..15] }) |*n, s| {
-        for (s) |c| if (!std.ascii.isDigit(c)) return null;
-        n.* = std.fmt.parseUnsigned(u64, s, 10) catch return null;
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "version "))
+            return policy.parseSerial(line["version ".len..]) catch null;
     }
-    const y, const mo, const d, const h, const mi, const s = f;
-    if (y < 1970 or mo < 1 or mo > 12 or d < 1 or d > 31 or h > 23 or mi > 59 or
-        s > 59) return null;
-    // Days from 1970-01-01, by the proleptic Gregorian calendar (Hinnant's
-    // days_from_civil), the years counted from March so leap days come last.
-    const ym = if (mo <= 2) y - 1 else y;
-    const yoe = ym % 400;
-    const doy = (153 * ((mo + 9) % 12) + 2) / 5 + d - 1;
-    const days = ym / 400 * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    return days * std.time.s_per_day + h * 3600 + mi * 60 + s;
+    return null;
 }
 
 /// A module in load order: its path in modules.dep, and the tag a machine
@@ -1363,17 +1339,12 @@ test "systemd-boot entries" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const c = parseCmdline(
-        "console=hvc0 werewolf.slot=a werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000\n",
-    );
-    try testing.expectEqualStrings("57E1-F000", c.esp);
-    try testing.expectEqualStrings("", c.grubenv);
     try testing.expectEqualStrings(
         "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 " ++
             "werewolf.slot=b",
         try withSlot(
             a,
-            "initrd=\\werewolf\\a\\initramfs.zst console=hvc0 werewolf.slot=a " ++
+            "initrd=\\werewolf\\a\\stage0.zst console=hvc0 werewolf.slot=a " ++
                 "werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n",
             "",
             "b",
@@ -1397,18 +1368,19 @@ test "systemd-boot entries" {
         \\sort-key werewolf
         \\version 20261006T120000Z
         \\linux /werewolf/b/vmlinuz
-        \\initrd /werewolf/b/initramfs.zst
+        \\initrd /werewolf/b/stage0.zst
         \\options x werewolf.slot=b
         \\
     , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b"));
-    try testing.expectEqualStrings("20261006T120000Z", try compactTime(a, 1791288000));
-    // And back, for the entries a new one must be newer than: mkdisk's
-    // first, a leap day, and versions of other forms, which count as none.
-    for ([_]u64{ 0, 315532800, 1835481599, 1835481600, 1791288000 }) |secs| {
-        const entry = try a.print("title werewolf a\nversion {s}\n", .{try compactTime(a, secs)});
+    // The versions a new entry must be newer than: mkdisk's first, a leap
+    // day, and versions of other forms, which count as none.
+    for ([_]i64{ 0, 315532800, 1835481599, 1835481600, 1791288000 }) |secs| {
+        const entry = try a.print(
+            "title werewolf a\nversion {f}\n",
+            .{policy.Serial{ .secs = secs }},
+        );
         try testing.expectEqual(secs, entrySecs(entry).?);
     }
-    try testing.expectEqualStrings("20280229T235959Z", try compactTime(a, 1835481599));
     for ([_][]const u8{
         "title werewolf a\n",
         "version 0-werewolf-a\n",
@@ -1416,6 +1388,7 @@ test "systemd-boot entries" {
         "version 2026100GT120000Z\n",
         "version +0261006T120000Z\n",
         "version 19691231T235959Z\n",
+        "version 20260231T120000Z\n",
     }) |entry| try testing.expectEqual(null, entrySecs(entry));
     for ([_][]const u8{
         "werewolf-b.conf",

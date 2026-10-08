@@ -2,6 +2,7 @@
 //! key, checked and mounted; or RAM, said as such.
 
 const std = @import("std");
+const settings = @import("settings");
 const linux = std.os.linux;
 const init = @import("init.zig");
 const Machine = init.Machine;
@@ -16,9 +17,8 @@ const lookupIds = phase_config.lookupIds;
 
 const label = "werewolf-data";
 
-/// The least data.key LUKS is made with: the key derivation is quick, as a
-/// random key needs no slow one, so the key itself must be strong.
-const min_data_key = 32;
+/// The least data.key LUKS is made with, which howl pack holds a key to too.
+const min_data_key = settings.min_data_key;
 
 /// /data is the machine's one writable home, and what is on it may be
 /// the only copy: a database, someone's files. So init formats a disk
@@ -161,11 +161,7 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
             return null;
         }
     } else {
-        const d = m.cmd.data;
-        src = m.fmt(
-            "/dev/{s}",
-            .{if (std.mem.startsWith(u8, d, "/dev/")) d["/dev/".len..] else d},
-        );
+        src = m.fmt("/dev/{s}", .{m.cmd.data});
         if (!isBlockDevice(m.z(src))) {
             why.* = m.fmt("werewolf.data: no device {s}", .{src});
             return null;

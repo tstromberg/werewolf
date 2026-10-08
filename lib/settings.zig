@@ -10,7 +10,7 @@
 //! of the declared type, and do nothing else: it cannot name a key, and no
 //! type's alphabet holds the delimiters of a format it may be rendered in,
 //! so nothing is ever quoted. leash parses the declarations, service-config
-//! renders them, and the host's werewolf checks with the same functions.
+//! renders them, and the host's howl checks with the same functions.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -487,8 +487,9 @@ fn envName(gpa: Allocator, name: []const u8) ![]const u8 {
     return key;
 }
 
-/// [a-z][a-z0-9-]*, at most 32: a key in settings.json and a flag.
-fn isName(s: []const u8) bool {
+/// [a-z][a-z0-9-]*, at most 32: a key in settings.json, a service's config
+/// file's name, and so a flag of howl pack's.
+pub fn isName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32 or !std.ascii.isLower(s[0])) return false;
     for (s) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') return false;
     return true;
@@ -528,6 +529,42 @@ fn isCleanPath(p: []const u8) bool {
             return false;
     }
     return true;
+}
+
+// --- the config tar's own rules -------------------------------------------------
+// What init, cloud-metadata and howl pack all hold a config tar to, so a
+// tar the host packs is one the machine takes.
+
+/// The most a machine's hostname may be: the kernel's (__NEW_UTS_LEN).
+pub const max_hostname = 64;
+
+/// The least a data.key may be: LUKS2 is made with a quick key derivation,
+/// as a random key needs no slow one, so the key itself must be strong.
+pub const min_data_key = 32;
+
+/// Whether s may be a machine's hostname: a hostname setting's rules, and
+/// no longer than the kernel takes.
+pub fn isHostname(s: []const u8) bool {
+    return s.len <= max_hostname and hostname(s);
+}
+
+/// A config tar entry's name, made relative and plain: no leading /, no
+/// . or .. or empty parts, and only letters, digits and . _ - /; "" for
+/// the archive's root, ./ itself. Null if it cannot be.
+pub fn entryName(raw: []const u8) ?[]const u8 {
+    var n = raw;
+    while (std.mem.startsWith(u8, n, "./")) n = n[2..];
+    if (std.mem.eql(u8, n, ".")) return "";
+    if (n.len > 0 and n[0] == '/') return null;
+    n = std.mem.trimEnd(u8, n, "/");
+    if (n.len == 0) return "";
+    for (n) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._-/", c) == null)
+        return null;
+    var parts = std.mem.splitScalar(u8, n, '/');
+    while (parts.next()) |p| {
+        if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return null;
+    }
+    return n;
 }
 
 // --- tests ---------------------------------------------------------------------
@@ -605,6 +642,30 @@ test "the other types" {
     try testing.expectEqual(null, reason(.string, str("Engineering, Ünïcode")));
     try testing.expect(reason(.string, str("a\nb")) != null);
     try testing.expect(reason(.string, str("\xff")) != null);
+}
+
+test isHostname {
+    try testing.expect(isHostname("lima-werewolf-demo"));
+    try testing.expect(isHostname("db.example.com"));
+    for ([_][]const u8{ "", "a b", "-x", "x-", "a..b", "a_b", "x." }) |h|
+        try testing.expect(!isHostname(h));
+    // 64 bytes is the kernel's most; a label, 63.
+    const a31: [31]u8 = @splat('a');
+    const a32: [32]u8 = @splat('a');
+    const b32: [32]u8 = @splat('b');
+    try testing.expect(isHostname(&a31 ++ "." ++ &b32));
+    try testing.expect(!isHostname(&a32 ++ "." ++ &b32));
+    try testing.expect(!isHostname(&a32 ++ &b32));
+}
+
+test entryName {
+    try testing.expectEqualStrings("authorized_keys", entryName("./authorized_keys").?);
+    try testing.expectEqualStrings("cloudflared/token", entryName("cloudflared/token").?);
+    try testing.expectEqualStrings("nginx", entryName("nginx/").?);
+    try testing.expectEqualStrings("", entryName("./").?);
+    try testing.expectEqualStrings("", entryName(".").?);
+    for ([_][]const u8{ "/etc/passwd", "../x", "a/../../x", "a//b", "/", "a b", "a\x1b", "é" }) |n|
+        try testing.expectEqual(null, entryName(n));
 }
 
 test "fromText makes the value a flag means" {

@@ -28,7 +28,7 @@ outside that domain; `lib/broker.zig` is how a program asks.
 
 - Serving anyone but root: other askers are turned away.
 - Choosing a filesystem by path: by UUID or FAT serial, from the kernel's
-  command line and what init wrote.
+  command line alone, read as stage0 reads it (`lib/cmdline.zig`).
 
 ## Detailed design
 

@@ -11,3 +11,6 @@ ok  nats-permissions export HOME=/tmp; c='--server tls://localhost:4222 --tlsca 
 ok  nats-jetstream   export HOME=/tmp; c='--server tls://localhost:4222 --tlsca /run/config/nats/tls.crt --user check --password werewolf-check'; nats $c stream add check --subjects 'check.s.>' --storage file --defaults >/dev/null && nats $c pub check.s.a kept >/dev/null && nats $c stream info check 2>/dev/null | grep -q 'Messages: 1' && ls /data/svc/nats/jetstream >/dev/null
 ok  nats-monitor-local wget -q -T 5 -O - http://127.0.0.1:8222/varz | grep -q '"server_name": "werewolf"' && ! wget -q -T 5 -O /dev/null http://10.0.2.15:8222/varz 2>/dev/null
 ok  nats-private     [ "$(stat -c '%u:%a' /run/svc/nats/tls-key)" = 216:600 ] && [ "$(stat -c '%u:%a' /run/svc/nats/users)" = 216:600 ]
+# leash copies a config file anew at each start, never through a link
+# planted where the copy goes. Last: nats restarts.
+ok  config-restart   sv down /etc/sv/nats; echo unchanged >/run/config-copy-victim; rm /run/svc/nats/users; ln -s /run/config-copy-victim /run/svc/nats/users; sv up /etc/sv/nats; i=0; while [ -L /run/svc/nats/users ] && [ $i -lt 10 ]; do sleep 1; i=$((i + 1)); done; [ ! -L /run/svc/nats/users ] && grep -qx unchanged /run/config-copy-victim && cmp /run/config/nats/users.conf /run/svc/nats/users

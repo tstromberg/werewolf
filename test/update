@@ -5,7 +5,7 @@
 # from Wolfi and Alpine, or, for a form CI publishes, its latest signed
 # release. DIR/victim.img holds slot a, whose build record claims a kernel
 # one release older than its own, and GRUB's environment; DIR/vmlinuz and
-# DIR/initramfs.zst boot it. QEMU... is the machine, with the network and
+# DIR/stage0.zst boot it. QEMU... is the machine, with the network and
 # -no-reboot; CMDLINE is the kernel command line, but for werewolf.slot.
 #
 # First boot, slot a: it commits, the updater finds Alpine's kernel newer,
@@ -107,7 +107,7 @@ fi
 # First boot. A staged update reboots when due, ending QEMU; a check or an
 # error leaves the machine up, so it is ended then. With STAGED=1, the
 # stage ends it: the power cut.
-boot 1 a "$dir/vmlinuz" "$dir/initramfs.zst" "$until" 3600 "$@" || exit 1
+boot 1 a "$dir/vmlinuz" "$dir/stage0.zst" "$until" 3600 "$@" || exit 1
 if [ -z "$(event 1 stage)" ]; then
 	say FAIL "no update: $(grep -a -o 'autoupdate: .*"event":"\(check\|error\)".*' "$dir/update-1.log" | head -1)"
 	exit 1
@@ -148,14 +148,14 @@ check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.i
 
 # Second boot: what the update built.
 victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
-victim_dump /boot/werewolf/b/initramfs.zst "$dir/b-initramfs.zst"
+victim_dump /boot/werewolf/b/stage0.zst "$dir/b-stage0.zst"
 # The device nodes in a stage0, by type, mode and name: the build's
 # (cmd/stage0/stage0.mtree), and slot-update must write the same, /dev/console above all,
 # which the kernel gives stage0 as its stdin, stdout and stderr.
 devices() { zstd -dc "$1" | bsdtar -tvf - 2>/dev/null | awk '$1 ~ /^c/ { print $1, $NF }' | sort; }
-built=$(devices "$dir/initramfs.zst")
-check "slot b's stage0 has the build's device nodes" [ -n "$built" -a "$built" = "$(devices "$dir/b-initramfs.zst")" ]
-boot 2 b "$dir/b-vmlinuz" "$dir/b-initramfs.zst" '"event":"(commit|rollback|error)"' 900 "$@" || exit 1
+built=$(devices "$dir/stage0.zst")
+check "slot b's stage0 has the build's device nodes" [ -n "$built" -a "$built" = "$(devices "$dir/b-stage0.zst")" ]
+boot 2 b "$dir/b-vmlinuz" "$dir/b-stage0.zst" '"event":"(commit|rollback|error)"' 900 "$@" || exit 1
 check "slot b committed, and the update held" grep -a -q '"event":"commit","slot":"b"' "$dir/update-2.log"
 check "the commit says how long each tier waited" grep -a -q '"event":"commit",.*"waited":{' "$dir/update-2.log"
 check "no seccomp kill in slot b" absent 'type=1326' "$dir/update-2.log"

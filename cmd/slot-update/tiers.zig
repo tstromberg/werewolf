@@ -9,18 +9,18 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const policy = @import("update-policy");
+const sources = @import("cve");
 const cve = @import("cve.zig");
 const releases = @import("release.zig");
 
 pub const format = "werewolf-cve-tiers/1";
 
-/// One CVE in one tier. Urgent and High entries name the package (origin)
-/// or kernel branch, and the version that fixed it; every entry carries
-/// what its tier rests on.
+/// One CVE in one tier. Urgent and High entries name the package (origin),
+/// or none for the kernel's, on the feed's branch, and the version that
+/// fixed it; every entry carries what its tier rests on.
 pub const Entry = struct {
     cve: []const u8,
     origin: ?[]const u8 = null,
-    kernel: ?[]const u8 = null,
     fixed: ?[]const u8 = null,
     score: ?f64 = null,
     vector: ?[]const u8 = null,
@@ -62,37 +62,33 @@ pub fn open(
 /// Its serial must be a serial, no more than a day ahead of now, and it may
 /// expire no more than a week after it: a feed signed to last forever, or
 /// to outrank every later one, is refused, so not even a leaked key pins a
-/// machine to one feed. Every Urgent and High entry must name one package
-/// or the kernel's branch, and a version that fixed it, or the promise that
-/// they are found from signed data alone would not hold.
+/// machine to one feed. Every Urgent and High entry must name a version
+/// that fixed it, and a package, or none for a kernel release on the
+/// feed's branch, or the promise that they are found from signed data
+/// alone would not hold.
 pub fn check(f: Feed, now: i64, last: ?[]const u8) !void {
     if (!std.mem.eql(u8, f.format, format)) return error.BadFormat;
-    const signed = releases.serialTime(f.serial) catch return error.BadSerial;
-    const expires = releases.parseTime(f.expires) catch return error.BadExpiry;
+    const signed = policy.parseSerial(f.serial) catch return error.BadSerial;
+    const expires = policy.parseTime(f.expires) catch return error.BadExpiry;
     if (signed > now + policy.day) return error.BadSerial;
     if (expires > signed + 7 * policy.day) return error.BadExpiry;
     if (expires <= now) return error.Expired;
     if (last) |l| if (std.mem.order(u8, f.serial, l) == .lt) return error.Older;
     for ([_][]const Entry{ f.urgent, f.high }) |entries| for (entries) |e| {
         const fixed = e.fixed orelse return error.BadEntry;
-        if ((e.origin == null) == (e.kernel == null)) return error.BadEntry;
-        if (e.kernel) |k| {
-            if (!std.mem.eql(u8, k, f.kernel)) return error.BadEntry;
-            _ = cve.kernelVersion(fixed) orelse return error.BadEntry;
-        }
+        if (e.origin == null and !sources.onBranch(fixed, f.kernel)) return error.BadEntry;
     };
 }
 
 /// Each tier's first fix, and how many fixes each tier has, among those an
 /// update carries.
 pub const Tiers = struct {
-    first: [4]?policy.Fix = @splat(null),
-    count: [4]u32 = @splat(0),
+    first: std.enums.EnumArray(policy.Tier, ?policy.Fix) = .initFill(null),
+    count: std.enums.EnumArray(policy.Tier, u32) = .initFill(0),
 
     pub fn add(t: *Tiers, tier: policy.Tier, fix: policy.Fix) void {
-        const i = @backingInt(tier);
-        if (t.first[i] == null) t.first[i] = fix;
-        t.count[i] += 1;
+        if (t.first.get(tier) == null) t.first.set(tier, fix);
+        t.count.getPtr(tier).* += 1;
     }
 };
 
@@ -135,8 +131,7 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
             );
         }
         try addAdvisories(gpa, &t, u.advisories, u.have);
-        if (t.count[@backingInt(policy.Tier.high)] == 0 and
-            t.count[@backingInt(policy.Tier.urgent)] == 0)
+        if (t.count.get(.high) == 0 and t.count.get(.urgent) == 0)
             t.add(
                 .high,
                 .{
@@ -147,14 +142,11 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
         return t;
     };
 
+    // Each CVE by the most urgent tier that names it.
     var named: std.StringHashMapUnmanaged(Named) = .empty;
-    const lists = [_]struct { tier: policy.Tier, entries: []const Entry }{
-        .{ .tier = .urgent, .entries = f.urgent }, .{ .tier = .high, .entries = f.high },
-        .{ .tier = .medium, .entries = f.medium }, .{ .tier = .low, .entries = f.low },
-    };
-    for (lists) |l| for (l.entries) |e| {
+    inline for (.{ .urgent, .high, .medium, .low }) |tier| for (@field(f, @tagName(tier))) |e| {
         const slot = try named.getOrPut(gpa, e.cve);
-        if (!slot.found_existing) slot.value_ptr.* = .{ .tier = l.tier, .entry = e };
+        if (!slot.found_existing) slot.value_ptr.* = .{ .tier = tier, .entry = e };
     };
 
     // What the sources found, each by the feed's tier.
@@ -168,33 +160,29 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
     }
 
     // What the feed alone says this update fixes, Urgent and High.
-    const old_kernel = cve.kernelVersion(u.old_kernel);
-    const new_kernel = cve.kernelVersion(u.new_kernel);
-    for (lists[0..2]) |l| for (l.entries) |e| {
+    const old_kernel = sources.kernelVersion(u.old_kernel);
+    const new_kernel = sources.kernelVersion(u.new_kernel);
+    inline for (.{ .urgent, .high }) |tier| for (@field(f, @tagName(tier))) |e| {
         const fixed = e.fixed orelse continue;
         const carried = if (e.origin) |origin| for (u.changes) |c| {
             if (!std.mem.eql(u8, origin, c.origin) and
                 !std.mem.eql(u8, origin, cve.streamBase(c.origin))) continue;
             if (cve.apkOrder(fixed, c.from) == .gt and cve.apkOrder(fixed, c.to) != .gt) break true;
-        } else false else if (e.kernel != null and old_kernel != null and new_kernel != null) b: {
+        } else false else if (old_kernel != null and new_kernel != null) b: {
             // The running kernel's branch only: 6.18.56 is no fix to 6.12.
-            const v = cve.kernelVersion(fixed) orelse break :b false;
+            const v = sources.kernelVersion(fixed) orelse break :b false;
             if (v[0] != new_kernel.?[0] or v[1] != new_kernel.?[1]) break :b false;
-            break :b std.mem.order(u32, &v, &old_kernel.?) == .gt and
-                std.mem.order(u32, &v, &new_kernel.?) != .gt;
+            break :b sources.kernelLess(old_kernel.?, v) and !sources.kernelLess(new_kernel.?, v);
         } else false;
         if (!carried or (try counted.getOrPut(gpa, e.cve)).found_existing) continue;
         t.add(
-            l.tier,
+            tier,
             .{ .subject = try subject(gpa, e.cve, e.origin), .evidence = try evidence(gpa, e) },
         );
     };
     try addAdvisories(gpa, &t, u.advisories, u.have);
-    for (t.count) |n| if (n > 0) return t;
-    t.first[@backingInt(policy.Tier.low)] = .{
-        .subject = "this update",
-        .evidence = "it fixes no known CVE",
-    };
+    for (t.count.values) |n| if (n > 0) return t;
+    t.first.set(.low, .{ .subject = "this update", .evidence = "it fixes no known CVE" });
     return t;
 }
 
@@ -221,8 +209,10 @@ fn addAdvisories(
     }
     for (advisories) |a| {
         if (held.contains(a.id)) continue;
-        const tier = std.meta.stringToEnum(policy.Tier, a.tier) orelse continue;
-        t.add(tier, .{ .subject = try gpa.print("{s} in werewolf", .{a.id}), .evidence = a.title });
+        t.add(
+            a.tier,
+            .{ .subject = try gpa.print("{s} in werewolf", .{a.id}), .evidence = a.title },
+        );
     }
 }
 
@@ -248,13 +238,14 @@ fn subject(gpa: Allocator, id: []const u8, origin: ?[]const u8) ![]const u8 {
         gpa.print("{s} in the kernel", .{id});
 }
 
-/// What a tier rests on, for the log's why: "CVSS 8.1 from NVD, in KEV
-/// since 2026-10-06", or "no score yet".
+/// What a tier rests on, for the log's why: "CVSS 8.1 from NVD
+/// (CVSS:3.1/AV:N/...), in KEV since 2026-10-06", or "no score yet".
 pub fn evidence(gpa: Allocator, e: Entry) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     if (e.score) |s| {
         const by = if (e.source) |src| sourceName(src) else "an unnamed source";
         try out.writer.print("CVSS {d:.1} from {s}", .{ s, by });
+        if (e.vector) |v| try out.writer.print(" ({s})", .{v});
     } else try out.writer.writeAll("no score yet");
     if (e.kev) |since| try out.writer.print(", in KEV since {s}", .{since});
     return out.written();
@@ -309,10 +300,13 @@ test "check: serial and expiry bounded, signed entries whole" {
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
     f = feedOf(&.{.{ .cve = "CVE-2026-1", .fixed = "1-r0" }}, &.{}, &.{});
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
-    f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .kernel = "6.12", .fixed = "6.12.1" }}, &.{});
+    // The kernel's, on another branch than the feed's, or not a release.
+    f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .fixed = "6.12.1" }}, &.{});
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
-    f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .kernel = "6.18", .fixed = "6.18.x" }}, &.{});
+    f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .fixed = "6.18.x" }}, &.{});
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
+    f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .fixed = "6.18.56" }}, &.{});
+    try check(f, t0, null);
 }
 
 test "tiers: the feed's tier, Medium when unnamed, Low with no CVE" {
@@ -343,13 +337,13 @@ test "tiers: the feed's tier, Medium when unnamed, Low with no CVE" {
         .old_kernel = "linux-virt-6.18.55-r0",
         .new_kernel = "linux-virt-6.18.55-r0",
     });
-    try std.testing.expectEqual([4]u32{ 0, 2, 0, 1 }, t.count);
-    try std.testing.expectEqualStrings("CVE-2026-1 in openssl", t.first[3].?.subject);
+    try std.testing.expectEqual([4]u32{ 0, 2, 0, 1 }, t.count.values);
+    try std.testing.expectEqualStrings("CVE-2026-1 in openssl", t.first.get(.urgent).?.subject);
     try std.testing.expectEqualStrings(
         "CVSS 9.8 from NVD, in KEV since 2026-10-06",
-        t.first[3].?.evidence,
+        t.first.get(.urgent).?.evidence,
     );
-    try std.testing.expectEqualStrings("no score yet", t.first[1].?.evidence);
+    try std.testing.expectEqualStrings("no score yet", t.first.get(.medium).?.evidence);
 
     const none = try tiersOf(gpa, f, .{
         .changes = &.{.{ .origin = "zlib", .from = "1.3.1-r0", .to = "1.3.1-r1" }},
@@ -358,8 +352,8 @@ test "tiers: the feed's tier, Medium when unnamed, Low with no CVE" {
         .old_kernel = "linux-virt-6.18.55-r0",
         .new_kernel = "linux-virt-6.18.55-r0",
     });
-    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, none.count);
-    try std.testing.expectEqualStrings("it fixes no known CVE", none.first[0].?.evidence);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 0 }, none.count.values);
+    try std.testing.expectEqualStrings("it fixes no known CVE", none.first.get(.low).?.evidence);
 }
 
 test "tiers: Urgent and High from the feed alone, in this update's versions" {
@@ -370,14 +364,12 @@ test "tiers: Urgent and High from the feed alone, in this update's versions" {
         &.{
             .{
                 .cve = "CVE-2026-10",
-                .kernel = "6.18",
                 .fixed = "6.18.56",
                 .score = 9.8,
                 .source = "cna",
             },
             .{
                 .cve = "CVE-2026-11",
-                .kernel = "6.18",
                 .fixed = "6.18.40",
                 .score = 9.8,
                 .source = "cna",
@@ -422,9 +414,9 @@ test "tiers: Urgent and High from the feed alone, in this update's versions" {
     // CVE-2026-10 (6.18.56, in the window) and CVE-2026-20 (8.17.0-r1); not
     // CVE-2026-11 (fixed long before), CVE-2026-21 (not yet), or
     // CVE-2026-22 (openssl, a stream this update leaves alone).
-    try std.testing.expectEqual([4]u32{ 0, 0, 1, 1 }, t.count);
-    try std.testing.expectEqualStrings("CVE-2026-10 in the kernel", t.first[3].?.subject);
-    try std.testing.expectEqualStrings("CVE-2026-20 in curl", t.first[2].?.subject);
+    try std.testing.expectEqual([4]u32{ 0, 0, 1, 1 }, t.count.values);
+    try std.testing.expectEqualStrings("CVE-2026-10 in the kernel", t.first.get(.urgent).?.subject);
+    try std.testing.expectEqualStrings("CVE-2026-20 in curl", t.first.get(.high).?.subject);
 }
 
 test "tiers: without a feed, every CVE is High" {
@@ -446,8 +438,8 @@ test "tiers: without a feed, every CVE is High" {
         .old_kernel = "linux-virt-6.18.55-r0",
         .new_kernel = "linux-virt-6.18.56-r0",
     });
-    try std.testing.expectEqual([4]u32{ 0, 0, 2, 0 }, t.count);
-    try std.testing.expectEqualStrings("no valid tiers feed", t.first[2].?.evidence);
+    try std.testing.expectEqual([4]u32{ 0, 0, 2, 0 }, t.count.values);
+    try std.testing.expectEqualStrings("no valid tiers feed", t.first.get(.high).?.evidence);
     // Nothing named, and nothing signed to say so: High, not Low.
     const quiet = try tiersOf(arena.allocator(), null, .{
         .changes = &.{},
@@ -456,7 +448,7 @@ test "tiers: without a feed, every CVE is High" {
         .old_kernel = "linux-virt-6.18.55-r0",
         .new_kernel = "linux-virt-6.18.56-r0",
     });
-    try std.testing.expectEqual([4]u32{ 0, 0, 1, 0 }, quiet.count);
+    try std.testing.expectEqual([4]u32{ 0, 0, 1, 0 }, quiet.count.values);
 }
 
 test "advisories: only those this image lacks" {
@@ -465,12 +457,12 @@ test "advisories: only those this image lacks" {
     const gpa = arena.allocator();
     var t: Tiers = .{};
     try addAdvisories(gpa, &t, &.{
-        .{ .id = "WW-2026-001", .date = "2026-10-01", .tier = "high", .title = "fence: old" },
-        .{ .id = "WW-2026-002", .date = "2026-10-07", .tier = "urgent", .title = "init: new" },
+        .{ .id = "WW-2026-001", .tier = .high, .title = "fence: old" },
+        .{ .id = "WW-2026-002", .tier = .urgent, .title = "init: new" },
     }, "# comment\nWW-2026-001  2026-10-01  high  fence: old\n");
-    try std.testing.expectEqual([4]u32{ 0, 0, 0, 1 }, t.count);
-    try std.testing.expectEqualStrings("WW-2026-002 in werewolf", t.first[3].?.subject);
-    try std.testing.expectEqualStrings("init: new", t.first[3].?.evidence);
+    try std.testing.expectEqual([4]u32{ 0, 0, 0, 1 }, t.count.values);
+    try std.testing.expectEqualStrings("WW-2026-002 in werewolf", t.first.get(.urgent).?.subject);
+    try std.testing.expectEqualStrings("init: new", t.first.get(.urgent).?.evidence);
 }
 
 test "evidence" {
@@ -484,6 +476,16 @@ test "evidence" {
     try std.testing.expectEqualStrings(
         "CVSS 5.5 from CISA",
         try evidence(gpa, .{ .cve = "x", .score = 5.5, .source = "cisa-adp" }),
+    );
+    try std.testing.expectEqualStrings(
+        "CVSS 8.1 from NVD (CVSS:3.1/AV:N), in KEV since 2026-10-01",
+        try evidence(gpa, .{
+            .cve = "x",
+            .score = 8.1,
+            .source = "nvd",
+            .vector = "CVSS:3.1/AV:N",
+            .kev = "2026-10-01",
+        }),
     );
     try std.testing.expectEqualStrings(
         "no score yet, in KEV since 2026-10-01",

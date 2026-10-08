@@ -1,5 +1,9 @@
 base: prod
 
+# Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
+# costly queries to machine code with LLVM (jit = on, its default).
+allow: [jit]
+
 # werewolf's programs from cmd/ this form's machines run, beside the
 # ones every form has (docs/programs.md)
 programs: [popen-shim.so]

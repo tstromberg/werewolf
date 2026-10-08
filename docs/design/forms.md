@@ -17,7 +17,7 @@ their containers.
   `crypt`, `bitten`), and one, `bitten`, that came to mean two things:
   "boots from slots", which every self-updating machine needs, and
   "installed by bite", which only some are.
-- **A chain is linear.** A form includes one other, so capabilities cannot
+- **A chain is linear.** A form is built on one other, its `base`, so capabilities cannot
   be mixed in. Every capability added as a link forces every form above it
   to carry it, and every combination wants its own form (`prod-ssh`,
   `sshd`, `lima`).
@@ -34,7 +34,7 @@ minimal ──→ prod ──┬──→ nginx ──→ php
                    │          ├──→ example-go
                    │          └──→ example-rust
                    └──→ postgresql ──→ demo
-qemu-host (on prod, allows kvm)
+qemu-host (on sshd, on minimal; allows kvm)
 lima      (on prod, the Lima test vehicle)
 ```
 
@@ -129,7 +129,7 @@ carries, posture says.
 ## Applications
 
 An application is baked into the image, as Chainguard's are built with
-apko: a form of the user's own includes a runtime form, lists the Wolfi
+apko: a form of the user's own is built on a runtime form (`base`), lists the Wolfi
 packages it needs, and carries the application's files and its leash
 `service` file in its rootfs.
 

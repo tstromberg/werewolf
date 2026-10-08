@@ -5,10 +5,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+const allow = @import("allow");
 const audit = @import("audit");
 const init = @import("init.zig");
 const Machine = init.Machine;
-const exists = init.exists;
 const mkdir = init.mkdir;
 const mount_bin = init.mount_bin;
 const say = init.say;
@@ -40,7 +40,7 @@ pub fn filesystems(m: *Machine) void {
     // so the TTY layer's pseudo-terminal code (CVE-2014-0196) is out of
     // reach of every process, root included, and nothing after boot
     // can mount it.
-    if (exists("/etc/werewolf/allow/pty"))
+    if (allow.has(.pty))
         m.mount(&.{ "-t", "devpts", "-o", "nosuid,noexec", "devpts", "/dev/pts" })
     else
         say("no pseudo-terminals: the form does not allow pty", .{});
@@ -203,7 +203,7 @@ pub fn kernel(m: *Machine) !void {
 /// nothing: nothing else here ever writes code. A protection, so a kernel
 /// that refuses it ends the boot; in a container, it is said and passed.
 fn writeXorExecute(contained: bool) !void {
-    if (exists("/etc/werewolf/allow/jit"))
+    if (allow.has(.jit))
         return say("memory may be written and then run: the form allows jit", .{});
     const PR_SET_MDWE = 65;
     const PR_MDWE_REFUSE_EXEC_GAIN = 1;

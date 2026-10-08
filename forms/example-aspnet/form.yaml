@@ -1,5 +1,9 @@
 base: app
 
+# Taken back of werewolf's defaults (lib/allow.zig): .NET compiles the
+# example to machine code as it runs.
+allow: [jit]
+
 net:
   - listen tcp/8080
 

@@ -276,8 +276,9 @@ the bounding set, is the layer that settles eBPF.
 
 Some workloads need what the seal takes away. eBPF agents and tools
 (Falco, Tetragon, Cilium, bpftrace) need `bpf()` and kernel tracing; packet
-capture and DHCP need packet sockets. A form asks for each with an empty
-file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
+capture and DHCP need packet sockets. A form asks for each by name in its
+form.yaml, `allow: [<name>]`, and gets back only that; the build writes
+each into the image as an empty file, `/etc/werewolf/allow/<name>`:
 
 | Allowance | Gives back |
 | --- | --- |
@@ -287,16 +288,17 @@ file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
 | `io_uring` | the io_uring syscalls in the filter, and `io_uring_disabled=0`, for workloads built on it |
 | `ipv6` | IPv6. Without it the kernel is booted with `ipv6.disable=1`, which leaves out the address family and every path through it (CVE-2026-53362); fence then sets IPv4's rules alone. Done |
 | `pty` | pseudo-terminals, for ssh logins: init mounts devpts. Without it `/dev/ptmx` opens nothing, for root too, so the TTY layer's pseudo-terminal code (CVE-2014-0196) is out of every process's reach, and nothing after boot can mount it. Done: the forms with logins (`sshd`, `prod-ssh`, `lima`; `qemu-host` through `sshd`); `bastion` forbids terminals (`PermitTTY no`) and has none |
-| `kvm` | KVM, to run virtual machines: on aarch64 the build leaves out `kvm-arm.mode=none`; on x86_64 the form lists `kvm-intel` and `kvm-amd` in its `.modules`, and the build loads them with `nested=0`. Done: `qemu-host` |
+| `kvm` | KVM, to run virtual machines: on aarch64 the build leaves out `kvm-arm.mode=none`; on x86_64 the form lists `kvm-intel` and `kvm-amd` in form.yaml's `modules`, and the build loads them with `nested=0`. Done: `qemu-host` |
 | `nested-kvm` | needs `kvm`: the guests may run virtual machines too, `kvm-arm.mode=nested` or `nested=1`. Done |
 | `jit` | memory written and then run. Without it init sets Memory-Deny-Write-Execute on PID 1 (`PR_SET_MDWE`, `PR_MDWE_REFUSE_EXEC_GAIN`), which every process inherits and none can lift: no mapping is writable and executable at once, or made executable once written. Done: `node`, `jre`, `example-aspnet` (V8, HotSpot, .NET), `php` (PCRE2's JIT, `pcre.jit=1` by default) and `postgresql` (LLVM, `jit = on` by default), and the forms built on them. `qemu-host` has none, so QEMU runs guests under KVM alone: TCG, its emulator, would need it |
 
 `kvm`, `nested-kvm`, `packet`, `netadmin`, `ipv6`, `pty` and `jit` are built;
 `ebpf` and `io_uring` wait for a form that needs them. No form keeps either network
 capability: DHCP's renewal, started by init before fence, holds them
-alone. The
-Makefile holds the one list of names (`ALLOWANCES`), and a name not in it
-fails the build, as does `nested-kvm` without `kvm`. Allowances that
+alone. One list holds the names, lib/allow.zig's `Allowance`, with the
+capabilities each keeps (`Cap`), for the build, init, fence and posture
+alike; a name not in it fails the build, as does `nested-kvm` without
+`kvm`. Allowances that
 change what the kernel is told at boot become data the build writes,
 `/usr/share/werewolf/cmdline` and the parameters in `werewolf.modules`, and
 everything that boots or loads the image reads that data rather than
@@ -311,10 +313,10 @@ load modules, kexec or ptrace. uprobes do not need ptrace.
   never read from the command line, the config tar or NoCloud, and
   `werewolf.debug=1` does not loosen anything: on a bitten machine root can
   rewrite all of those, and a switch there is one an attacker can flip.
-- **They only accumulate.** Form folders are laid base first, so a form
-  inherits every allowance in its include chain and cannot drop one. The
-  Makefile records them with the form's other files, so the updater carries
-  them into the next slot.
+- **They only accumulate.** form.yaml's `allow` is added to along the
+  chain, so a form inherits every allowance of the forms it is built on
+  and cannot drop one. The build lays them in the image's overlay, so the
+  updater carries them into the next slot.
 - **init knows allowances, not forms.** It reads `/etc/werewolf/allow`;
   which form put a file there is the build's business.
 - **The posture line names them**, so an auditor sees at once that a
@@ -326,11 +328,11 @@ A form allowed `ebpf` gives root back what eBPF rootkits are made of. That
 is the price of running an eBPF agent, and why it is a form of its own
 rather than a switch on every form.
 
-That form is `prod-ebpf`. It includes `prod`, as production forms do,
-and adds nothing but the `ebpf` and `packet` files: it is the base for an
+That form is `prod-ebpf`. It is built on `prod`, as production forms
+are, and adds nothing but `allow: [ebpf, packet]`: it is the base for an
 eBPF agent's form, which adds the agent and no tools an attacker could use
-to explore. Include chains are linear, so allowances are not mixins; a
-form takes them from its chain or carries the files itself.
+to explore. A form takes its allowances from its chain or names them
+itself.
 
 ### The helper
 
@@ -400,18 +402,14 @@ root (sshd, the updater) sandboxes itself or is not yet sandboxed, below.
 ### Posture
 
 An auditor should be able to check the running state rather than trust
-this document. init logs one structured line before it hands over:
-
-```
-{"event":"posture","allow":[],"lockdown":"confidentiality","modules_disabled":1,"seccomp":"filter","no_new_privs":1,"cap_bnd":"…","setuid_files":0,"listening":[],"sysctls":{"kernel.io_uring_disabled":2,"user.max_user_namespaces":0}}
-```
-
-`seccomp` and `cap_bnd` come from `/proc/1/status` after the seal, so a
-later check in `slot-keep` reads them from PID 1 rather than from init's
-intentions. CI's boot test (verified-boot.md, *Releases*) checks the same,
-and that `bpf()`, `perf_event_open()` and `io_uring_setup()` fail as root,
-or, on `prod-ebpf`, that a BPF program loads and
-`bpf_probe_write_user` does not.
+this document. posture ([posture.md](../posture.md)) does: a service in
+every form, it checks the running machine once a boot, keeps its JSON in
+`/run/werewolf/posture.json` and prints its `--line` on the console, with
+the form's allowances (`allow`) and each failed check. The bounding set
+it reads from `/proc/1/status`, PID 1's, not from init's intentions.
+CI's boot test (verified-boot.md, *Releases*) checks the same, and that
+`bpf()`, `perf_event_open()` and `io_uring_setup()` fail as root, or, on
+`prod-ebpf`, that a BPF program loads and `bpf_probe_write_user` does not.
 
 ### Command line
 

@@ -8,8 +8,8 @@
 # in werewolf, deletes the distro.
 #
 # IMAGE_DIR holds a slot built for this machine's architecture (`make slot`):
-# vmlinuz, initramfs-bitten.zst (stage0, with the modules a distro's
-# filesystem needs, xfs's and btrfs's, which werewolf's own initramfs.zst
+# vmlinuz, stage0-bitten.zst (stage0, with the modules a distro's
+# filesystem needs, xfs's and btrfs's, which werewolf's own stage0.zst
 # leaves out) and root.erofs, of any form (see docs/bite.md).
 #
 # Nothing of the distro is removed. bite adds a GRUB entry and boots it once;
@@ -102,8 +102,8 @@ fi
 # Everything werewolf cannot find out for itself is found out here, and
 # anything it could not cope with stops bite before it changes a thing.
 [ -n "$image" ] || die "usage: bite [-n] [-i | --reboot] [--config DIR] IMAGE_DIR"
-[ -f "$image/vmlinuz" ] && [ -f "$image/initramfs-bitten.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
-	die "$image is not a slot: it needs vmlinuz, initramfs-bitten.zst, root.erofs and cmdline (make slot)"
+[ -f "$image/vmlinuz" ] && [ -f "$image/stage0-bitten.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
+	die "$image is not a slot: it needs vmlinuz, stage0-bitten.zst, root.erofs and cmdline (make slot)"
 # The image's kernel arguments, which go into GRUB's entries and the script
 # that writes them: words of plain characters, nothing a shell would read.
 args=$(cat "$image/cmdline")
@@ -197,6 +197,9 @@ genv=$(where "$genvdir")/${grubenv##*/}
 cidr=$(ip -4 -o addr show dev "$nic" scope global | awk '{ print $4; exit }')
 gw=$(ip -4 route show default | awk '{ print $3; exit }')
 mac=$(cat "/sys/class/net/$nic/address")
+# stage0 refuses a command line with an empty werewolf.ip or werewolf.gw,
+# and a machine that cannot boot its slot is worse than one not bitten.
+[ -n "$cidr" ] && [ -n "$gw" ] || die "$nic has no IPv4 address and default route to write down"
 # systemd-resolved points /etc/resolv.conf at its own stub on 127.0.0.53
 # and keeps the real servers in a file of its own. werewolf brings up $nic
 # alone, so a server reached through another interface (a second network's
@@ -270,7 +273,7 @@ if [ -n "$zboot" ]; then
 else
 	cp "$image/vmlinuz" "$boot/a/"
 fi
-cp "$image/initramfs-bitten.zst" "$boot/a/initramfs.zst"
+cp "$image/stage0-bitten.zst" "$boot/a/stage0.zst"
 chmod 0700 "$home"
 mkdir -p "$home/a" "$home/data"
 cp "$image/root.erofs" "$home/a/"
@@ -317,7 +320,7 @@ for s in a b; do
 	echo "menuentry 'werewolf \$s' --id $entry-\$s {"
 	prepare_grub_to_access_device "\$($g-probe --target=device $boot)" | sed 's/^/	/'
 	echo "	linux $krel/\$s/vmlinuz $head \\\$werewolf_args_\$s $tail werewolf.slot=\$s"
-	echo "	initrd $krel/\$s/initramfs.zst"
+	echo "	initrd $krel/\$s/stage0.zst"
 	echo "}"
 done
 EOF
@@ -330,7 +333,7 @@ if [ "$style" = bls ]; then
 title werewolf $s
 version 0-werewolf-$s
 linux $krel/$s/vmlinuz
-initrd $krel/$s/initramfs.zst
+initrd $krel/$s/stage0.zst
 options $head \$werewolf_args_$s $tail werewolf.slot=$s
 EOF
 	done

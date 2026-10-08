@@ -24,7 +24,7 @@ if [ "${1:-}" = delete ]; then
 fi
 [ $# -eq 0 ] || die "usage: lima-demo | delete"
 
-made=$("$howl" create demo "$vm" --on lima) || die "howl create failed; its output is above"
+made=$("$howl" create "$vm" --with demo --on lima) || die "howl create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
 
 say "waiting for the page at http://$addr/"

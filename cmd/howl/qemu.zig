@@ -1,6 +1,6 @@
 //! QEMU: a werewolf machine kept here, in the background (make run with
 //! RUN_DIR), where no likelier engine is (Lima, bhyve, Firecracker), or
-//! as --on qemu asks. Its directory, build/ARCH/machines/NAME, holds its
+//! as --on qemu asks. Its directory, build/machines/NAME, holds its
 //! data disk, its config tar, its console on console.sock and in
 //! console.log, QEMU's monitor on monitor.sock, its pid in qemu.pid, and
 //! the ports this host reaches it by in machine. It has user-mode

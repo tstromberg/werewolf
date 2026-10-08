@@ -13,13 +13,14 @@
 const std = @import("std");
 const howl = @import("howl.zig");
 const images = @import("image.zig");
+const booting = @import("boot.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
 /// How long create waits for a machine to say it is up.
 const wait_seconds = 300;
-const label = "werewolf-form";
+const label = howl.form_tag;
 
 pub const Place = struct { project: []const u8, zone: []const u8 };
 
@@ -70,13 +71,13 @@ fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
 
 /// The machine a form runs on, for an arch: GCP's name for the arch, the
 /// machine type, and the NIC werewolf has a driver for.
-pub const Machine = struct { arch: []const u8, kind: []const u8, nic: []const u8 };
+pub const Machine = struct { arch: []const u8, size: []const u8, nic: []const u8 };
 
-pub fn machine(arch: []const u8) Machine {
-    return if (std.mem.eql(u8, arch, "aarch64"))
-        .{ .arch = "ARM64", .kind = "t2a-standard-1", .nic = "GVNIC" }
-    else
-        .{ .arch = "X86_64", .kind = "e2-small", .nic = "VIRTIO_NET" };
+pub fn machine(arch: howl.Arch) Machine {
+    return switch (arch) {
+        .aarch64 => .{ .arch = "ARM64", .size = "t2a-standard-1", .nic = "GVNIC" },
+        .x86_64 => .{ .arch = "X86_64", .size = "e2-small", .nic = "VIRTIO_NET" },
+    };
 }
 
 /// The image of disk, a release's disk.qcow2: there already, or made from
@@ -86,7 +87,7 @@ pub fn ensureImage(
     gpa: Allocator,
     p: Place,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     disk: []const u8,
     work: []const u8,
     why: *howl.Why,
@@ -187,7 +188,7 @@ pub fn create(
     p: Place,
     name: []const u8,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     size: ?[]const u8,
     image: []const u8,
     b64: []const u8,
@@ -202,7 +203,7 @@ pub fn create(
         "--zone",
         p.zone,
         "--machine-type",
-        size orelse m.kind,
+        size orelse m.size,
         "--image",
         image,
         // SSD-backed, not GCP's HDD default (pd-standard): an 8 GB
@@ -278,20 +279,12 @@ pub fn console(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
     );
 }
 
-/// Whether the console shows a boot finished: init's "up in" line.
-pub fn booted(text: []const u8) bool {
-    return std.mem.find(u8, text, "werewolf: up in ") != null;
-}
-
 /// Wait for the boot to finish, or a panic. GCP keeps the console of the
 /// machine's current run only, so a stop and start begins it afresh.
-pub fn awaitUp(io: Io, gpa: Allocator, p: Place, name: []const u8) !enum { up, panic, late } {
+pub fn awaitUp(io: Io, gpa: Allocator, p: Place, name: []const u8) !booting.Outcome {
     const start = Io.Clock.awake.now(io);
     while (start.untilNow(io, .awake).toSeconds() < wait_seconds) {
-        if (console(io, gpa, p, name)) |text| {
-            if (booted(text)) return .up;
-            if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
-        }
+        if (console(io, gpa, p, name)) |text| if (booting.outcome(text)) |o| return o;
         try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
@@ -357,12 +350,7 @@ test openArgs {
     try testing.expectEqualStrings("tcp:22,tcp:8080", c[0][12]);
 }
 
-test booted {
-    try testing.expect(!booted("stage0: ...\n"));
-    try testing.expect(booted("...\nwerewolf: up in 0.6s (the kernel 0.2s)\n"));
-}
-
 test machine {
-    try testing.expectEqualStrings("t2a-standard-1", machine("aarch64").kind);
-    try testing.expectEqualStrings("VIRTIO_NET", machine("x86_64").nic);
+    try testing.expectEqualStrings("t2a-standard-1", machine(.aarch64).size);
+    try testing.expectEqualStrings("VIRTIO_NET", machine(.x86_64).nic);
 }

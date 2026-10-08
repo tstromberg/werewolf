@@ -55,7 +55,7 @@ by its form's `forms/FORM/test/checks`, which `make check` appends. A socket
 bound to loopback alone (OpenBao's cluster port) is the machine's own,
 not a listener the network can reach, to this check and to posture
 alike. What a form's services need from the config, `forms/FORM/test/config`
-writes into the check's config tar: a bastion's key, OpenBao's unseal key
+writes into the check's config tar: OpenBao's unseal key
 and certificate, a CA for step-ca, WordPress's admin.
 Where the attacker would be an ordinary user, the check acts as one, with
 runit's `chpst -u nobody`: write to `/run`, see another user's processes,
@@ -140,6 +140,9 @@ pass   sshd-again         all checks
 Each machine gets a blank disk and a config disk of its own, holding only a
 fixed test `data.key` so `prod` and the forms on it put `/data` in LUKS2, and forwards no
 ports, so machines never share state and `make -j` runs them together.
+A few forms boot a second time from the disk the first left, to show what
+it kept (`AGAIN_FORMS`, Makefile): the code is every form's, so those stand
+for all, chosen for what they keep; `AGAIN_FORMS=all` boots every form twice.
 Nothing waits a
 fixed time: [test/boot](../test/boot) waits for each thing it needs to see,
 up to a limit, so a fast machine finishes fast and a slow one, emulated in
@@ -314,10 +317,15 @@ of them is where to look next.
 ## CI
 
 [.github/workflows/check.yml](../.github/workflows/check.yml) runs `make
-test` and `make lint` on GitHub's x86_64 and arm64 Ubuntu runners, and `make
-check` split into jobs that run in parallel, so a failure names the area it
-is in: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on arm64,
-`native`. [test/ci-setup](../test/ci-setup) installs the tools with
+test` on GitHub's x86_64 and arm64 Ubuntu runners, `make lint` on one, and
+`make check` split into jobs that run in parallel, so a failure names the
+area it is in: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on
+arm64, `native`; `forms`, `shellfree` and `native` are split again over
+runners (`SHARD=K/N`), 19 jobs in all, under the 20 the account runs at
+once. Each job boots four machines at a time on its four CPUs, and keeps
+Zig's and apko's caches from one run to the next, a week at a time, so a
+program or a package unchanged since is not built or fetched again.
+[test/ci-setup](../test/ci-setup) installs the tools with
 [tools/install-deps](../tools/install-deps), as `make install-deps` does
 anywhere: Ubuntu's packages, and apko and Zig pinned by version and
 sha256; `ci-setup apko zig` installs those two alone, for the release job

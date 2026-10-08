@@ -24,8 +24,8 @@
 //!                           and, on a machine with slots:
 //!                           werewolf.victim=UUID:DIR (the filesystem holding the
 //!                             slots, config.tar and data/)
-//!                           werewolf.grubenv=UUID:PATH (GRUB's environment block,
-//!                             which the slot-keep service writes)
+//!                           every werewolf.* word read by lib/cmdline.zig, as
+//!                             stage0 read it
 //!     config                one tar: config.tar in the victim's directory, or
 //!                           else the first block device written with one;
 //!                           never two, merged. It is extracted to /run/config,
@@ -54,7 +54,9 @@ const phase_kernel = @import("kernel.zig");
 const phase_network = @import("network.zig");
 const phase_config = @import("config.zig");
 const phase_data = @import("data.zig");
+const phase_oci = @import("oci.zig");
 const phase_seal = @import("seal.zig");
+const cmdline = @import("cmdline");
 
 pub const mount_bin = "/usr/lib/werewolf/mount";
 
@@ -86,7 +88,13 @@ pub fn main(init: std.process.Init) !void {
 
     m.filesystems();
     m.seed();
-    m.cmd = parseCmdline(m.read("/proc/cmdline"));
+    // stage0 checked the line by the same rules, so one refused here is
+    // one that changed under it.
+    var refused: cmdline.Failure = .{};
+    m.cmd = cmdline.parse(m.read("/proc/cmdline"), &refused) orelse {
+        say("the command line's {s}: {s}; not handing over", .{ refused.word, refused.why });
+        std.process.exit(1);
+    };
     phases.add("mounts", bootMs());
     m.kernel() catch {
         say("the kernel's protections are not all set; not handing over", .{});
@@ -105,12 +113,8 @@ pub fn main(init: std.process.Init) !void {
     phases.add("metadata", bootMs());
     m.data();
     phases.add("data", bootMs());
-
-    if (m.cmd.grubenv.len > 0) m.write(
-        "/run/werewolf/grubenv",
-        m.fmt("{s}\n", .{m.cmd.grubenv}),
-        0o644,
-    );
+    // The image roots' binds (oci.zig), where the form has any.
+    if (m.oci()) phases.add("oci", bootMs());
 
     // fence sets the network policy the build compiled from the forms,
     // binding only declared TCP ports and the metadata server only for those
@@ -195,7 +199,7 @@ pub const Machine = struct {
     io: Io,
     gpa: Allocator,
     env: std.process.Environ.Map,
-    cmd: Cmdline = .{},
+    cmd: cmdline.Cmdline = .{},
     victim_dir: []const u8 = "",
     nocloud_user: []const u8 = "",
     /// Whether a config tar or a NoCloud seed was found on a disk, so the
@@ -213,6 +217,7 @@ pub const Machine = struct {
     pub const config = phase_config.config;
     pub const metadata = phase_config.metadata;
     pub const data = phase_data.data;
+    pub const oci = phase_oci.oci;
 
     /// werewolf's mount, which says what went wrong itself; the boot goes on.
     pub fn mount(m: *Machine, args: []const []const u8) void {
@@ -350,29 +355,6 @@ pub const Machine = struct {
         return m.gpa.dupeSentinel(u8, s, 0) catch "";
     }
 };
-
-const Cmdline = struct {
-    ip: []const u8 = "",
-    gw: []const u8 = "",
-    dns: []const u8 = "",
-    mac: []const u8 = "",
-    data: []const u8 = "",
-    victim: []const u8 = "",
-    grubenv: []const u8 = "",
-    seal: []const u8 = "",
-};
-
-fn parseCmdline(text: []const u8) Cmdline {
-    var c: Cmdline = .{};
-    var it = std.mem.tokenizeAny(u8, text, " \t\n");
-    while (it.next()) |arg| {
-        inline for (@typeInfo(Cmdline).@"struct".field_names) |name| {
-            const prefix = "werewolf." ++ name ++ "=";
-            if (std.mem.startsWith(u8, arg, prefix)) @field(c, name) = arg[prefix.len..];
-        }
-    }
-    return c;
-}
 
 pub fn lastField(s: []const u8) []const u8 {
     const t = std.mem.trimEnd(u8, s, " \t\r");
@@ -528,18 +510,6 @@ const Phases = struct {
 
 const testing = std.testing;
 
-test parseCmdline {
-    const c = parseCmdline(
-        "console=hvc0 werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.data=vda " ++
-            "werewolf.victim=ab:/w werewolf.debug=1\n",
-    );
-    try testing.expectEqualStrings("10.0.2.15/24", c.ip);
-    try testing.expectEqualStrings("10.0.2.2", c.gw);
-    try testing.expectEqualStrings("vda", c.data);
-    try testing.expectEqualStrings("ab:/w", c.victim);
-    try testing.expectEqualStrings("", c.mac);
-}
-
 test Phases {
     var p = Phases.parse("kernel=225 modules=611 slot=838 root=851");
     p.add("mounts", 900);
@@ -581,5 +551,6 @@ test {
     _ = phase_network;
     _ = phase_config;
     _ = phase_data;
+    _ = phase_oci;
     _ = phase_seal;
 }

@@ -22,6 +22,7 @@
 
 const std = @import("std");
 const seal = @import("seal");
+const service = @import("service");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -83,37 +84,26 @@ const Service = struct {
     }
 };
 
-/// What binds a leashed service, from its service file: its pledge, or
-/// that leash refuses the file and the service does not run.
+/// What binds a leashed service, from its service file read as leash reads
+/// it (lib/service.zig): its pledge, or why leash refuses the file, and so
+/// the service does not run.
 fn boundBy(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
-    const words = pledgeOf(text) orelse return "(no pledge: leash refuses it)";
-    if (words.len == 0) return "(an empty pledge: leash refuses it)";
-    var bad: []const u8 = "";
-    _ = seal.parse(words, &bad) catch
-        return try gpa.print("(no promise {s}: leash refuses it)", .{bad});
-    return words;
-}
-
-/// The words of a service file's pledge line, as leash reads them: split by
-/// spaces and tabs, and ended by a word that starts with #. null if there is
-/// no pledge line.
-fn pledgeOf(text: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        var words = std.mem.tokenizeAny(u8, line, " \t\r");
-        const key = words.next() orelse continue;
-        if (!std.mem.eql(u8, key, "pledge")) continue;
-        var first: ?usize = null;
-        var end: usize = 0;
-        while (words.next()) |w| {
-            if (w[0] == '#') break;
-            const at = @intFromPtr(w.ptr) - @intFromPtr(line.ptr);
-            if (first == null) first = at;
-            end = at + w.len;
-        }
-        return if (first) |f| line[f..end] else "";
-    }
-    return null;
+    var bad: service.Bad = .{};
+    const s = service.parse(gpa, text, &bad) catch |err| switch (err) {
+        error.Invalid => return if (bad.line > 0)
+            try gpa.print("(leash refuses it: line {d}: {s})", .{ bad.line, bad.why })
+        else
+            try gpa.print("(leash refuses it: {s})", .{bad.why}),
+        else => |e| return e,
+    };
+    var words: std.ArrayList(u8) = .empty;
+    var it = s.pledge.iterator();
+    while (it.next()) |p| try words.print(
+        gpa,
+        "{s}{t}",
+        .{ if (words.items.len > 0) " " else "", p },
+    );
+    return words.items;
 }
 
 /// The rest of the line in text that starts with key and a space.
@@ -193,30 +183,32 @@ fn utc(w: *std.Io.Writer, secs: i64) !void {
 
 const testing = std.testing;
 
-test pledgeOf {
-    try testing.expectEqualStrings(
-        "stdio rpath",
-        pledgeOf("exec /a\npledge  stdio rpath # ok\nuser x\n").?,
-    );
-    try testing.expectEqual(null, pledgeOf("exec /a\n# pledge stdio\n"));
-    // As leash reads it: # ends the line only where it starts a word.
-    try testing.expectEqualStrings("stdio#x", pledgeOf("pledge stdio#x\n").?);
-    try testing.expectEqualStrings("", pledgeOf("pledge # none\n").?);
-}
-
 test boundBy {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("stdio inet", try boundBy(a, "pledge stdio inet\n"));
-    try testing.expectEqualStrings("(no pledge: leash refuses it)", try boundBy(a, "exec /a\n"));
+    const head = "exec /a\nuser x\n";
     try testing.expectEqualStrings(
-        "(an empty pledge: leash refuses it)",
-        try boundBy(a, "pledge\n"),
+        "stdio inet listen",
+        try boundBy(a, head ++ "pledge  listen stdio inet # ok\n"),
     );
     try testing.expectEqualStrings(
-        "(no promise stdio#x: leash refuses it)",
-        try boundBy(a, "pledge stdio#x\n"),
+        "(leash refuses it: no pledge: say what it does)",
+        try boundBy(a, head),
+    );
+    try testing.expectEqualStrings(
+        "(leash refuses it: line 3: pledge takes promises)",
+        try boundBy(a, head ++ "pledge # none\n"),
+    );
+    // As leash reads it: # ends the line only where it starts a word.
+    try testing.expectEqualStrings(
+        "(leash refuses it: line 3: no such promise)",
+        try boundBy(a, head ++ "pledge stdio#x\n"),
+    );
+    // Refused for more than its pledge: the service does not run either.
+    try testing.expectEqualStrings(
+        "(leash refuses it: line 4: unknown key)",
+        try boundBy(a, head ++ "pledge stdio\nfrobnicate\n"),
     );
 }
 

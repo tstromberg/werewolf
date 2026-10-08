@@ -6,24 +6,24 @@ modules:
   - virtio_net virtio_blk sr_mod isofs evdev button erofs loop dm-verity
   # virtio over MMIO, the bus Firecracker puts its devices on, having no
   # PCI: a module in Alpine's arm64 kernel, built into its x86_64 one.
-  - "aarch64: virtio_mmio"
+  - aarch64 virtio_mmio
   # arm64's power button, where a device tree wires it to a PL061 GPIO line
   # (QEMU's virt, Apple's VZ): the controller, whose line power-button reads,
   # since linux-virt has no gpio-keys driver to make it a key.
-  - "aarch64: gpio-pl061"
+  - aarch64 gpio-pl061
   # The victim's filesystem bite leaves behind: ext4 (Debian, Ubuntu, and
   # werewolf's own disk, and /data's everywhere), xfs (Rocky), btrfs
-  # (Fedora). xfs and btrfs load only on a slot that is on them (`@FS:`;
+  # (Fedora). xfs and btrfs load only on a slot that is on them (`@FS`;
   # stage0 tells modload): btrfs's raid6 times itself for 0.17 s at load.
   # btrfs asks the crypto API for its checksum at mount time, after the
   # loader is closed, so crc32c (its default, and Fedora's) is loaded with
   # it; xxhash64 and blake2b checksums would need xxhash_generic and
   # blake2b_generic.
   - ext4
-  - "@xfs: xfs"
-  - "@btrfs: btrfs crc32c-cryptoapi"
+  - "@xfs xfs"
+  - "@btrfs btrfs crc32c-cryptoapi"
   # FAT, for werewolf's own disk (docs/design/native-boot.md): the updater and
   # commit write the EFI partition. 437 and utf8 are FAT's default codepage
-  # and iocharset in Alpine's kernel. Loaded only there (`@esp:`; stage0
+  # and iocharset in Alpine's kernel. Loaded only there (`@esp`; stage0
   # tells modload when the command line names the partition, werewolf.esp).
-  - "@esp: vfat nls_cp437 nls_utf8"
+  - "@esp vfat nls_cp437 nls_utf8"

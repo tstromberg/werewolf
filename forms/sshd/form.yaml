@@ -1,6 +1,14 @@
 base: minimal
 
-# sshd, for operators by key.
+# sshd-start, the service: the host key, then sshd. The forms that log
+# people in take this form (prod-ssh, lima), so minimal carries no sshd.
+programs: [sshd-start]
+
+# Taken back of werewolf's defaults (lib/allow.zig): pseudo-terminals,
+# for ssh logins; prod-ssh and lima take them with this form.
+allow: [pty]
+
+# sshd, for operators by security key.
 net:
   - listen tcp/22
 

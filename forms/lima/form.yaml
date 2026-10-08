@@ -1,13 +1,16 @@
 base: prod
 
-# sshd, for operators by key.
-net:
-  - listen tcp/22
+# sshd, its service and its policy, taking Lima's own key too: a key file
+# it makes, not a security key (OpenSSH's defaults, less RSA over SHA-1).
+with: [sshd]
+sshd:
+  pubkey-accepted-algorithms: "-ssh-rsa*"
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
+  network-ssh-security-keys: Lima logs in with a key file it makes itself, as does anyone it hands ~/.ssh's keys to
   programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
   programs-no-interpreters: busybox-full, the tools of those who log in, has awk
   programs-no-shell: bash, for Lima's readiness probes, and busybox-full's shell, for those who log in

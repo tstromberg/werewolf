@@ -1,7 +1,7 @@
 # A catalog of forms: the top 25 uses of a locked-down VM
 
 Proposed, 2026-10-07. Follows [service-forms.md](service-forms.md), whose
-order 1 and 2 are built, and whose `.prune` and `answering` work this
+order 1 and 2 are built, and whose `prune` and `answering` work this
 plan builds on.
 
 ## Summary
@@ -31,7 +31,7 @@ interpreter is a form in an afternoon. Checked on 2026-10-07: cloudflared,
 sftpgo, oauth2-proxy, chrony, nats-server, mosquitto, minio, zot, gitea,
 prometheus, loki, gatus, ollama, nsd, coredns, meilisearch, clickhouse and
 memcached are clean; haproxy, unbound, grafana, mattermost and teleport
-bring bash for a script nobody runs (`.prune`); mariadb and postfix bring
+bring bash for a script nobody runs (`prune`); mariadb and postfix bring
 perl; Mastodon, Vaultwarden, Immich, Miniflux, Matrix and Syncthing are not
 in Wolfi at all, and come as vendored applications on a runtime form, as
 WordPress's SQLite plugin does.
@@ -67,7 +67,7 @@ WordPress's SQLite plugin does.
 | 1 | website, blog | `nginx`, `wordpress` | `prod`, `php` | built |
 | 2 | fediverse server | `mastodon` | `ruby` + bundle | needs bundles, `ruby` |
 | 3 | game server | `minecraft` | `jre` | needs `cpu`, large `memory` |
-| 4 | team chat | `mattermost` | `prod` + bundle | needs bundles, `.prune` |
+| 4 | team chat | `mattermost` | `prod` + bundle | needs bundles, `prune` |
 | 5 | password manager | `vaultwarden` | `prod` | vendored (Rust) |
 | 6 | media server | `jellyfin` | `prod` | .NET by design; first-run wizard |
 | 7 | files: SFTP, sync | `sftpgo` | `prod` | clean |
@@ -81,9 +81,9 @@ WordPress's SQLite plugin does.
 | 15 | VPN | `tailscale`; `wireguard` | `prod` | built; `forward`, UDP |
 | 16 | ingress with no open port | `cloudflared` | `prod` | clean |
 | 17 | login in front of anything | `oauth2-proxy` | `prod` | clean |
-| 18 | DNS resolver | `unbound` | `prod` | `.prune`, UDP |
+| 18 | DNS resolver | `unbound` | `prod` | `prune`, UDP |
 | 19 | time | `chrony` | `prod` | `settime` |
-| 20 | SQL | `postgresql`; `mariadb` | `prod` | built; `.prune`, `mariadb-init` |
+| 20 | SQL | `postgresql`; `mariadb` | `prod` | built; `prune`, `mariadb-init` |
 | 21 | cache, queue | `valkey` | `prod` | built |
 | 22 | object storage, backups | `minio` | `prod` | clean |
 | 23 | secrets, PKI | `openbao`, `step-ca` | `prod` | built |
@@ -119,9 +119,9 @@ year's forms:
 Each form below names what it needs; gathered here, in the order they
 unblock the most:
 
-1. **Bundles.** An include chain is linear; Mastodon is a runtime plus
+1. **Bundles.** A chain of bases is linear; Mastodon is a runtime plus
    PostgreSQL plus Valkey plus nginx. A form gains `with:` beside
-   `include:`, naming forms whose folders, services, policies and modules
+   `base:`, naming forms whose folders, services, policies and modules
    merge after the chain, in order, each once; apko gets their packages.
    The Makefile's `CHAIN` becomes a list the yaml walks, and a bundle's
    users and ports must not collide, which the build checks. Unblocks 2,
@@ -144,7 +144,7 @@ unblock the most:
 6. **`cpu` beside `memory`** in service files: `cpu.max` or `cpu.weight`
    in the service's cgroup, so a Minecraft server on the same machine as
    its map site cannot starve it. Unblocks 3.
-7. **`.prune` of a tree** (`usr/src/wordpress/.git`, 58 MB), with the
+7. **`prune` of a tree** (`usr/src/wordpress/.git`, 58 MB), with the
    updater's `Root.remove` deleting a directory. Shrinks 1 and 4.
 8. **`exec` with a `run` list, the discipline**: gitea runs `git`, git
    runs hooks through `sh`. The form names `git` and nothing else, hooks
@@ -173,7 +173,7 @@ state lives; the defaults; the attack its check tries; what it teaches.
 
 #### mastodon (2)
 
-Ruby 3.4 on the `ruby` form, `with: postgresql valkey nginx`. Four
+Ruby 3.4 on the `ruby` form, `with: [postgresql, valkey, nginx]`. Four
 services: `web` (Puma, :3000 on loopback), `streaming` (Node 22, :4000
 on loopback), `sidekiq`, and nginx on :80 in front, with `caddy` or the
 balancer for TLS. Assets precompiled at image build on the host; media on
@@ -223,7 +223,7 @@ EULA.
 
 #### mattermost (4)
 
-Go, `with: postgresql`. Listens :8065 behind `caddy`.
+Go, `with: [postgresql]`. Listens :8065 behind `caddy`.
 
 - Sends tcp/443 (push notifications, link previews) and tcp/587; DNS.
 - `EnableOpenServer=false`, `EnableUserCreation` on invitation only, the
@@ -232,7 +232,7 @@ Go, `with: postgresql`. Listens :8065 behind `caddy`.
   uploads off: a plugin is code); `EnableDeveloper=false`; files on
   `/data/svc/mattermost`, 50 MB each; `SqlSettings.MaxOpenConns` under
   the database's.
-- `.prune` of the bash its package brings.
+- `prune` of the bash its package brings.
 - Attack: sign up on the open form; upload a plugin; the API without a
   session.
 - Teaches: `first-run` through the API (Mattermost's CLI needs the
@@ -277,12 +277,12 @@ admin and REST API are off, users come from the config as a JSON import
 `/data/svc/sftpgo/USER`.
 
 - Attack: a password login; a path above the home; the web admin port.
-- Teaches: nothing new; the first form after `.prune` and the loopback
+- Teaches: nothing new; the first form after `prune` and the loopback
   rule with no base work at all. Three hours.
 
 #### miniflux (9)
 
-Go, vendored, `with: postgresql`. Listens :8080 behind `caddy`.
+Go, vendored, `with: [postgresql]`. Listens :8080 behind `caddy`.
 
 - `CREATE_ADMIN` from the config before it serves; `DISABLE_LOCAL_AUTH`
   off; polling frequency 60 min; sends tcp/443 and DNS to fetch feeds,
@@ -329,7 +329,7 @@ server, Go; no sshd); `exec` with `run /usr/bin/git`.
   admin from the config before it serves (`gitea admin user create`),
   `DISABLE_GIT_HOOKS=true` (a hook is a shell script: RCE for a repo
   admin), `DISABLE_WEBHOOKS` off but `ALLOWED_HOST_LIST` empty, LFS on
-  `/data`, SQLite by default (`with: postgresql` for more), migrations
+  `/data`, SQLite by default (`with: [postgresql]` for more), migrations
   from tcp/443 only if the form adds it.
 - Attack: the installer; registration; a hook pushed and expected to run
   (refused: off, and `sh` is not there); a webhook to loopback.

@@ -1,2 +1,0 @@
-ok  bastion-destination grep -qx 'PermitOpen 127.0.0.1:22' /run/svc/sshd/destinations
-ok  generated-private   [ "$(stat -c '%u:%a' /run/svc/sshd/destinations)" = 205:600 ]

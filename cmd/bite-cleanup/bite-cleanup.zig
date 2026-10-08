@@ -32,6 +32,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const broker = @import("broker");
 const sandbox = @import("sandbox");
+const cmdline = @import("cmdline");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -41,8 +42,14 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 1 and !dry) fail("usage: bite-cleanup [-n]", .{});
     if (linux.geteuid() != 0) fail("run as root", .{});
 
-    const cmd = parseCmdline(readAll(io, gpa, "/proc/cmdline")) orelse
-        fail("this machine was not bitten", .{});
+    var refused: cmdline.Failure = .{};
+    const line = cmdline.parse(readAll(io, gpa, "/proc/cmdline"), &refused) orelse
+        fail("the command line's {s}: {s}; deleting nothing", .{ refused.word, refused.why });
+    const cmd: Bitten = .{
+        .victim = line.victim orelse fail("this machine was not bitten", .{}),
+        .grubenv = line.grubenv orelse fail("this machine was not bitten", .{}),
+        .slot = line.slot orelse fail("this machine was not bitten", .{}),
+    };
     const p = plan(gpa, cmd) catch |err|
         fail("cannot tell what to keep: {s}; deleting nothing", .{@errorName(err)});
 
@@ -244,17 +251,19 @@ const Plan = struct { keep: []const []const u8, need: []const []const u8 };
 /// own is in, holding the slot's kernel in werewolf/ as bite and slot-update
 /// lay it. On btrfs that directory may be in a subvolume (/@/boot), so it
 /// is found from the block, not from the top of the filesystem.
-fn plan(gpa: Allocator, cmd: Cmdline) !Plan {
+fn plan(gpa: Allocator, cmd: Bitten) !Plan {
     var keep: std.ArrayList([]const u8) = .empty;
     var need: std.ArrayList([]const u8) = .empty;
+    const slot = @tagName(cmd.slot);
     try keep.append(gpa, cmd.victim.path);
-    try need.append(gpa, try gpa.print("{s}/{c}/root.erofs", .{ cmd.victim.path, cmd.slot }));
-    if (std.mem.eql(u8, cmd.victim.uuid, cmd.grubenv.uuid)) {
+    try need.append(gpa, try gpa.print("{s}/{s}/root.erofs", .{ cmd.victim.path, slot }));
+    // The same filesystem by its UUID's bytes, however each was written.
+    if (std.mem.eql(u8, &cmdline.uuid(cmd.victim.uuid).?, &cmdline.uuid(cmd.grubenv.uuid).?)) {
         const grub = std.fs.path.dirnamePosix(cmd.grubenv.path) orelse "/";
         const boot = std.fs.path.dirnamePosix(grub) orelse "/";
         if (std.mem.eql(u8, boot, "/")) return error.GrubNotBeneathBoot;
         try keep.append(gpa, boot);
-        try need.append(gpa, try gpa.print("{s}/werewolf/{c}/vmlinuz", .{ boot, cmd.slot }));
+        try need.append(gpa, try gpa.print("{s}/werewolf/{s}/vmlinuz", .{ boot, slot }));
     }
     return .{ .keep = keep.items, .need = need.items };
 }
@@ -269,42 +278,9 @@ fn isCommitted(block: []const u8) bool {
     return false;
 }
 
-const Place = struct { uuid: []const u8, path: []const u8 };
-const Cmdline = struct { victim: Place, grubenv: Place, slot: u8 };
-
-/// werewolf.victim=UUID:PATH, werewolf.grubenv=UUID:PATH and
-/// werewolf.slot=a|b, as bite wrote them. PATH is absolute, without . or ..
-/// or empty parts.
-fn parseCmdline(text: []const u8) ?Cmdline {
-    var victim: ?Place = null;
-    var grubenv: ?Place = null;
-    var slot: ?u8 = null;
-    var it = std.mem.tokenizeAny(u8, text, " \n");
-    while (it.next()) |arg| {
-        if (std.mem.cutPrefix(u8, arg, "werewolf.victim=")) |v| victim = parsePlace(v);
-        if (std.mem.cutPrefix(u8, arg, "werewolf.grubenv=")) |v| grubenv = parsePlace(v);
-        if (std.mem.cutPrefix(u8, arg, "werewolf.slot=")) |v|
-            slot = if (std.mem.eql(u8, v, "a") or std.mem.eql(u8, v, "b")) v[0] else null;
-    }
-    return .{
-        .victim = victim orelse return null,
-        .grubenv = grubenv orelse return null,
-        .slot = slot orelse return null,
-    };
-}
-
-fn parsePlace(s: []const u8) ?Place {
-    const colon = std.mem.findScalar(u8, s, ':') orelse return null;
-    const uuid = s[0..colon];
-    const path = s[colon + 1 ..];
-    if (uuid.len == 0 or path.len < 2 or path[0] != '/') return null;
-    for (uuid) |c| if (!std.ascii.isHex(c) and c != '-') return null;
-    var it = std.mem.splitScalar(u8, path[1..], '/');
-    while (it.next()) |part| {
-        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return null;
-    }
-    return .{ .uuid = uuid, .path = path };
-}
+/// What bite left on the command line, read as stage0 read it
+/// (lib/cmdline.zig): werewolf.victim, werewolf.grubenv and werewolf.slot.
+const Bitten = struct { victim: cmdline.Place, grubenv: cmdline.Place, slot: cmdline.Slot };
 
 // --- confinement -------------------------------------------------------------
 
@@ -460,37 +436,6 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 
 const testing = std.testing;
 
-test parseCmdline {
-    const c = parseCmdline(
-        "console=hvc0 werewolf.victim=0e7e1f00-c4ec:/var/lib/werewolf werewolf.grubenv=0e7e1f00-" ++
-            "c4ec:/boot/grub/grubenv werewolf.slot=a\n",
-    ).?;
-    try testing.expectEqualStrings("0e7e1f00-c4ec", c.victim.uuid);
-    try testing.expectEqualStrings("/var/lib/werewolf", c.victim.path);
-    try testing.expectEqualStrings("/boot/grub/grubenv", c.grubenv.path);
-    try testing.expectEqual('a', c.slot);
-    const ok = " werewolf.slot=b";
-    try testing.expect(parseCmdline("werewolf.victim=ab:/var/lib/werewolf" ++ ok) == null);
-    try testing.expect(
-        parseCmdline("werewolf.victim=ab:/x werewolf.grubenv=ab:/../etc/x" ++ ok) == null,
-    );
-    try testing.expect(parseCmdline("werewolf.victim=ab:/ werewolf.grubenv=ab:/b/g" ++ ok) == null);
-    try testing.expect(parseCmdline("werewolf.victim=ab:x werewolf.grubenv=ab:/b/g" ++ ok) == null);
-    try testing.expect(
-        parseCmdline("werewolf.victim=a/b:/x werewolf.grubenv=ab:/b/g" ++ ok) == null,
-    );
-    try testing.expect(
-        parseCmdline("werewolf.victim=ab:/x//y werewolf.grubenv=ab:/b/g" ++ ok) == null,
-    );
-    try testing.expect(parseCmdline("werewolf.victim=ab:/x werewolf.grubenv=ab:/b/g") == null);
-    try testing.expect(
-        parseCmdline("werewolf.victim=ab:/x werewolf.grubenv=ab:/b/g werewolf.slot=c") == null,
-    );
-    try testing.expect(
-        parseCmdline("werewolf.victim=ab:/x werewolf.grubenv=ab:/b/g werewolf.slot=ab") == null,
-    );
-}
-
 test isCommitted {
     try testing.expect(isCommitted("# GRUB Environment Block\nsaved_entry=werewolf-b\n####"));
     try testing.expect(
@@ -500,33 +445,49 @@ test isCommitted {
     try testing.expect(!isCommitted(""));
 }
 
+/// The command line bite leaves, as main reads it.
+fn bitten(text: []const u8) !Bitten {
+    var refused: cmdline.Failure = .{};
+    const c = cmdline.parse(text, &refused) orelse return error.Refused;
+    return .{ .victim = c.victim.?, .grubenv = c.grubenv.?, .slot = c.slot.? };
+}
+
+const ab = "57e1f000-77e2-4b0f-8a3c-0000000000ab";
+const cd = "57E1F000-77E2-4B0F-8A3C-0000000000CD";
+
 test plan {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     // Debian: GRUB and werewolf's kernels in /boot, on the root filesystem.
-    const debian = try plan(a, parseCmdline(
-        "werewolf.victim=ab:/var/lib/werewolf werewolf.grubenv=ab:/boot/grub/grubenv " ++
-            "werewolf.slot=a",
-    ).?);
+    const debian = try plan(a, try bitten(
+        "werewolf.victim=" ++ ab ++ ":/var/lib/werewolf werewolf.grubenv=" ++ ab ++
+            ":/boot/grub/grubenv werewolf.slot=a",
+    ));
     try testing.expectEqual(2, debian.keep.len);
     try testing.expectEqualStrings("/boot", debian.keep[1]);
     try testing.expectEqualStrings("/var/lib/werewolf/a/root.erofs", debian.need[0]);
     try testing.expectEqualStrings("/boot/werewolf/a/vmlinuz", debian.need[1]);
+    // The same filesystem, its UUID written in capitals.
+    const upper = try plan(a, try bitten(
+        "werewolf.victim=" ++ ab ++ ":/var/lib/werewolf werewolf.grubenv=" ++
+            "57E1F000-77E2-4B0F-8A3C-0000000000AB:/boot/grub/grubenv werewolf.slot=a",
+    ));
+    try testing.expectEqual(2, upper.keep.len);
     // Fedora: the root subvolume, and /boot a filesystem of its own.
-    const apart = try plan(a, parseCmdline(
-        "werewolf.victim=ab:/root/var/lib/werewolf werewolf.grubenv=cd:/grub2/grubenv " ++
-            "werewolf.slot=b",
-    ).?);
+    const apart = try plan(a, try bitten(
+        "werewolf.victim=" ++ ab ++ ":/root/var/lib/werewolf werewolf.grubenv=" ++ cd ++
+            ":/grub2/grubenv werewolf.slot=b",
+    ));
     try testing.expectEqual(1, apart.keep.len);
     try testing.expectEqual(1, apart.need.len);
     try testing.expectEqualStrings("/root/var/lib/werewolf/b/root.erofs", apart.need[0]);
     // Ubuntu on btrfs: /boot in the root subvolume, @, beside everything
     // else of the distro. Keeping @ whole would delete none of it.
-    const btrfs = try plan(a, parseCmdline(
-        "werewolf.victim=ab:/@/var/lib/werewolf werewolf.grubenv=ab:/@/boot/grub/grubenv " ++
-            "werewolf.slot=a",
-    ).?);
+    const btrfs = try plan(a, try bitten(
+        "werewolf.victim=" ++ ab ++ ":/@/var/lib/werewolf werewolf.grubenv=" ++ ab ++
+            ":/@/boot/grub/grubenv werewolf.slot=a",
+    ));
     try testing.expectEqualStrings("/@/boot", btrfs.keep[1]);
     try testing.expectEqualStrings("/@/boot/werewolf/a/vmlinuz", btrfs.need[1]);
     try testing.expectEqual(Fate.descend, fate("/@", btrfs.keep));
@@ -534,12 +495,14 @@ test plan {
     try testing.expectEqual(Fate.keep, fate("/@/boot", btrfs.keep));
     // GRUB's directory at the top of the filesystem it shares: no /boot to
     // keep, and keeping / would delete nothing.
-    try testing.expectError(error.GrubNotBeneathBoot, plan(a, parseCmdline(
-        "werewolf.victim=ab:/var/lib/werewolf werewolf.grubenv=ab:/grub/grubenv werewolf.slot=a",
-    ).?));
-    try testing.expectError(error.GrubNotBeneathBoot, plan(a, parseCmdline(
-        "werewolf.victim=ab:/var/lib/werewolf werewolf.grubenv=ab:/grubenv werewolf.slot=a",
-    ).?));
+    try testing.expectError(error.GrubNotBeneathBoot, plan(a, try bitten(
+        "werewolf.victim=" ++ ab ++ ":/var/lib/werewolf werewolf.grubenv=" ++ ab ++
+            ":/grub/grubenv werewolf.slot=a",
+    )));
+    try testing.expectError(error.GrubNotBeneathBoot, plan(a, try bitten(
+        "werewolf.victim=" ++ ab ++ ":/var/lib/werewolf werewolf.grubenv=" ++ ab ++
+            ":/grubenv werewolf.slot=a",
+    )));
 }
 
 test fate {

@@ -34,11 +34,12 @@ whose name counts its tries, `werewolf-a+1.conf`, kept as `werewolf-a.conf`).
 
 ## Detailed design
 
-1. **Which loader**: `/run/werewolf/grubenv` (init writes it from
-   `werewolf.grubenv=UUID:PATH`) means GRUB; else `werewolf.esp` and
-   `werewolf.slot` mean systemd-boot; else nothing to keep, and it parks.
-   The slot must be `a` or `b`, and GRUB's PATH absolute with no `.` or `..`
-   parts, as both go into paths written as root.
+1. **Which loader**, from the kernel command line, read as stage0 reads
+   it (`lib/cmdline.zig`): `werewolf.grubenv=UUID:PATH` means GRUB; else
+   `werewolf.esp` and `werewolf.slot` mean systemd-boot; else nothing to
+   keep, and it parks. The slot is `a` or `b`, and GRUB's PATH absolute
+   and plain, as both go into paths written as root; a line the parser
+   refuses is said, and it parks.
 2. **Wait**, every 15 s, until healthy: each `/etc/sv/*/supervise/status`
    (20 bytes: state, want, time of the last change) says running for 60 s,
    or down because it asked to be. Down while wanted up (between crashes),

@@ -1,6 +1,6 @@
 # Service VMs in Lima, GCP and AWS
 
-Use this with the [bastion](../forms/bastion/README.md) or [Tailscale](../forms/tailscale/README.md) tutorial.
+Use this with the [Tailscale](../forms/tailscale/README.md) tutorial; the [bastion](../forms/bastion/README.md) needs no boot configuration.
 Those tutorials set `FORM`, `VM` and `CONFIG_DIR`, and explain
 which files to create. Run commands from the repository root.
 
@@ -19,14 +19,14 @@ mkdir -p "$SERVICE_BUILD"
 umask 077
 printf '%s\n' "$VM" >"$CONFIG_DIR/hostname"
 make howl
-build/host/howl pack "$FORM" -o "$SERVICE_BUILD/config.tar" --config "$CONFIG_DIR"
+build/host/howl pack --with "$FORM" -o "$SERVICE_BUILD/config.tar" --config "$CONFIG_DIR"
 ```
 
 `howl pack` checks the directory against what the form declares
 before it writes anything: a missing key, or a destination or route the
 VM would refuse, fails here and names the file. It lists the targets the
 tar fits; cloud metadata limits the config to 32 files of at most 32 KiB,
-and AWS's user data to 16 KiB. `howl pack "$FORM" -h` lists the
+and AWS's user data to 16 KiB. `howl pack --with "$FORM" -h` lists the
 form's files and settings, which can also be given as flags. The tar
 contains secrets. Keep it private and out of Git. Base64 is an encoding,
 not encryption.
@@ -34,7 +34,7 @@ not encryption.
 ## Local Lima VM
 
 ```sh
-export VM_IP=$(build/host/howl create "$FORM" "$VM" --config "$CONFIG_DIR" | cut -f2)
+export VM_IP=$(build/host/howl create "$VM" --with "$FORM" --config "$CONFIG_DIR" | cut -f2)
 printf '%s\n' "$VM_IP"
 ```
 
@@ -78,7 +78,7 @@ build/host/howl delete "$VM"
 On the default network, `howl create` does what this section does:
 
 ```sh
-build/host/howl create "$FORM" "$VM" --on gcp --config "$CONFIG_DIR"
+build/host/howl create "$VM" --with "$FORM" --on gcp --config "$CONFIG_DIR"
 build/host/howl console "$VM" --on gcp
 build/host/howl delete "$VM" --on gcp     # the VM; its image stays, for others of the build
 ```
@@ -178,7 +178,7 @@ export VM_IP=$(gcloud --project="$GCP_PROJECT" compute instances describe \
 configure`, or `AWS_REGION` and `AWS_PROFILE`), in the default VPC:
 
 ```sh
-build/host/howl create "$FORM" "$VM" --on aws --config "$CONFIG_DIR"
+build/host/howl create "$VM" --with "$FORM" --on aws --config "$CONFIG_DIR"
 build/host/howl console "$VM" --on aws
 build/host/howl delete "$VM" --on aws     # the instance, its volume and security group; the AMI stays
 ```
@@ -237,5 +237,5 @@ gcloud --project="$GCP_PROJECT" compute images delete "$GCP_IMAGE"
 gcloud --project="$GCP_PROJECT" storage rm "gs://$GCP_BUCKET/$GCP_IMAGE.tar.gz"
 ```
 
-The bucket and local credential files remain. The bastion tutorial also
-removes its firewall rule; remove a retired Tailscale node from your tailnet.
+The bucket and local credential files remain; remove a retired Tailscale
+node from your tailnet.

@@ -2,9 +2,9 @@
 
 ## Summary
 
-The sshd service for forms that install OpenSSH (sshd, lima, prod-ssh): it
-makes sure of the host key and becomes sshd. In forms without OpenSSH it
-parks itself, so a form adds ssh with a package and no files of its own.
+The sshd form's service, in every form that takes it (prod-ssh, lima): it
+makes sure of the host key and becomes sshd. A form adds ssh with
+`with: [sshd]`; minimal carries none of it.
 
 ## Background
 
@@ -23,27 +23,27 @@ leashed instead, through ssh-host-key.
 
 ## Non-Goals
 
-- Configuring sshd: the form's `sshd_config` does.
+- Configuring sshd: the form's `sshd_config.d/werewolf.conf` does: keys
+  only, and those of a security key, touched.
 - Keys other than Ed25519.
 
 ## Detailed design
 
-1. **No sshd** (`/usr/bin/sshd` not executable): `sv down`, and nothing
-   more.
-2. **Speculative Store Bypass** disabled for itself, `ssh-keygen`, sshd
+1. **Speculative Store Bypass** disabled for itself, `ssh-keygen`, sshd
    and every session (`PR_SET_SPECULATION_CTRL`), which werewolf leaves to
    each program rather than paying for it everywhere.
-3. **The key**, through `lib/hostkey.zig`: with `/data` usable, kept at
-   `/data/sshd/ssh_host_ed25519_key` (0700 directory, root's), made once by
+2. **The key**, through `lib/hostkey.zig`: with `/data` usable, kept at
+   `/data/svc/sshd/host-key` (0700 directory, root's; where a leashed
+   sshd keeps its own, through `ssh-host-key`), made once by
    `ssh-keygen` beside its place and renamed in, so a boot cut short leaves
    a whole key or none; a lost public half is made again from the key.
    Both halves are copied to `/run/sshd`, each a new 0600 file. Without
    `/data` (`/run/werewolf/nodata`), or with it on RAM, the key is made in
    `/run/sshd` for this boot alone.
-4. **Says** `sshd-start: {"event":"host-key","from":"kept in /data",
+3. **Says** `sshd-start: {"event":"host-key","from":"kept in /data",
    "fingerprint":"SHA256:…","public":"…"}`; `from` says when it is new or
    for this boot alone.
-5. **Becomes** `sshd -D -e`. If anything fails, it says why, waits ten
+4. **Becomes** `sshd -D -e`. If anything fails, it says why, waits ten
    seconds, and exits; runsv starts it again.
 
 ## Drawbacks

@@ -10,12 +10,12 @@ baked into a form ([forms.md](../../docs/forms.md#applications)).
 | Sends | mail, by SMTP submission to the relay the settings name (`connect php tcp/587`), and DNS to find it; nothing else (`WP_HTTP_BLOCK_EXTERNAL`) |
 | Runs as | nginx as `nginx`; php-fpm as `php`, leashed to the site, `/run/svc/php-fpm` and `/data/svc/php-fpm` |
 | Keeps | the database (`/data/svc/php-fpm/database/wordpress.sqlite`), uploads (`/data/svc/php-fpm/uploads`, which `wp-content/uploads` links to) and the salts, made once |
-| Config | `wordpress/admin_password_hash` (bcrypt, required); `wordpress/salts.php` and `wordpress/smtp_password`, optional; settings `url` and `admin-email` (required), `title`, `admin-user`, `smtp` (host:port), `smtp-user`, `mail-from` |
+| Config | `wordpress/admin-password-hash` (bcrypt, required); `wordpress/salts.php` and `wordpress/smtp-password`, optional; settings `url` and `admin-email` (required), `title`, `admin-user`, `smtp` (host:port), `smtp-user`, `mail-from` |
 
 ```sh
 umask 077; mkdir -p config/wordpress
-htpasswd -nbB x 'the admin password' | cut -d: -f2 >config/wordpress/admin_password_hash
-build/host/howl pack wordpress -o config.tar --config config \
+htpasswd -nbB x 'the admin password' | cut -d: -f2 >config/wordpress/admin-password-hash
+build/host/howl pack --with wordpress -o config.tar --config config \
 	--url https://blog.example.com --title 'A blog' --admin-email me@example.com \
 	--smtp smtp.example.com:587 --smtp-user me@example.com --mail-from blog@example.com
 ```

@@ -1,1 +1,5 @@
 base: prod
+
+# Where it keeps its application: howl's --app DIR is laid here
+# (cmd/howl/app.zig).
+app: /usr/lib/app

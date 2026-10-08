@@ -308,8 +308,8 @@ pub fn phaseOf(target: []const u8) ?Phase {
     if (ends(t, "/overlay.tar") or has(t, "/apps/") or
         ends(t, "application.stamp")) return P("Adding the form's files", "files");
     if (ends(t, "/root.erofs")) return P("Sealing the root (erofs, dm-verity)", "seal");
-    if (ends(t, "initramfs.zst") or
-        ends(t, "initramfs-bitten.zst")) return P("Packing the boot image", "boot image");
+    if (ends(t, "initramfs.zst") or ends(t, "/stage0.zst") or
+        ends(t, "/stage0-bitten.zst")) return P("Packing the boot image", "boot image");
     if (ends(t, "/disk.img") or ends(t, "/disk.qcow2")) return P("Making the boot disk", "disk");
     if (ends(t, "/data.img")) return P("Making a disk for /data", "data disk");
     if (ends(t, "config.tar")) return P("Packing the config", "config");
@@ -530,6 +530,10 @@ test phaseOf {
     try testing.expectEqualStrings(
         "Sealing the root (erofs, dm-verity)",
         phaseOf("build/aarch64/caddy/slot/root.erofs").?.name,
+    );
+    try testing.expectEqualStrings(
+        "Packing the boot image",
+        phaseOf("build/aarch64/caddy/slot/stage0-bitten.zst").?.name,
     );
     try testing.expectEqualStrings(
         "Making the boot disk",

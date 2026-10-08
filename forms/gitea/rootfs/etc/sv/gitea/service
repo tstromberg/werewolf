@@ -17,7 +17,7 @@ read    /etc/gitea
 # gitea-hook (forms/gitea/cmd/gitea-hook) becoming `gitea hook NAME`, so Gitea's
 # bash hook scripts are never needed.
 run     /usr/bin/git /usr/lib/werewolf/gitea-hook /usr/bin/gitea /usr/bin/ssh-keygen
-config  admin-password /run/config/gitea/admin_password
+config  admin-password /run/config/gitea/admin-password
 config  settings /run/config/gitea/settings.json
 setting url url required as GITEA__server__ROOT_URL
 setting domain hostname required as GITEA__server__DOMAIN

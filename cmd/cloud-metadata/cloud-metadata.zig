@@ -38,6 +38,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const Io = std.Io;
 const sandbox = @import("sandbox");
+const settings = @import("settings");
 const sys = sandbox.sys;
 
 const out_dir = "/run/werewolf/cloud";
@@ -661,7 +662,7 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         const blocks = (size + 511) / 512;
         if (blocks * 512 > tar.len - off - 512) return error.Truncated;
         off += 512;
-        const name = cleanName(full) orelse return error.BadName;
+        const name = settings.entryName(full) orelse return error.BadName;
         if (name.len > 100) return error.BadName;
         if (name.len > 0) {
             if (n == max_entries) return error.TooManyEntries;
@@ -689,23 +690,6 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
 fn beneath(path: []const u8, parent: []const u8) bool {
     return path.len > parent.len and std.mem.startsWith(u8, path, parent) and
         path[parent.len] == '/';
-}
-
-/// A name werewolf will extract, without a leading ./ or a trailing /: ""
-/// for the archive's own root, null for anything else.
-fn cleanName(raw: []const u8) ?[]const u8 {
-    var name = raw;
-    while (std.mem.startsWith(u8, name, "./")) name = name[2..];
-    while (name.len > 0 and name[name.len - 1] == '/') name = name[0 .. name.len - 1];
-    if (name.len == 0 or std.mem.eql(u8, name, ".")) return "";
-    if (name[0] == '/') return null;
-    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and c != '-' and
-        c != '/') return null;
-    var parts = std.mem.splitScalar(u8, name, '/');
-    while (parts.next()) |part| {
-        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return null;
-    }
-    return name;
 }
 
 fn octal(field: []const u8) ?usize {

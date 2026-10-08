@@ -1,7 +1,9 @@
 #!/bin/sh
 # forms/tailscale/test/config DIR: the tailscale form's config for make
 # check, in DIR: an auth key no coordination server takes, so the daemon
-# starts, keeps trying, and is checked offline (forms/tailscale/test/checks).
+# starts, keeps trying, and is checked offline (forms/tailscale/test/checks);
+# and a route, which service-config renders into its configuration.
 set -eu
 mkdir -p "$1/tailscale"
-printf '%s\n' tskey-auth-offline-test >"$1/tailscale/auth_key"
+printf '%s\n' tskey-auth-offline-test >"$1/tailscale/auth-key"
+printf '%s\n' '{"routes": ["10.20.0.0/24"]}' >"$1/tailscale/settings.json"

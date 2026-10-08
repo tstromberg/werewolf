@@ -26,6 +26,10 @@
 //!     werewolf.root=DEV          the disk holding the image, by its name in
 //!                                /dev (Firecracker's vdc), with no slot
 //!
+//! Every werewolf.* word on the line is checked first, by lib/cmdline.zig,
+//! which every later program reads it with: a line it refuses ends the
+//! boot here, so none of them meets one.
+//!
 //! A disk is read as the root is used, where the kernel unpacks an
 //! appended image into RAM before stage0 starts, and nothing frees it: on
 //! Firecracker 20 MB for the machine's life, and 26 ms of every boot,
@@ -47,6 +51,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const dm = @import("dm");
 const verity = @import("verity");
+const cmdline = @import("cmdline");
 const MS = linux.MS; // ziglint-ignore: Z032
 
 /// How long a slot has to commit before the deadman reboots it.
@@ -64,15 +69,11 @@ pub fn main(init: std.process.Init) !void {
     mountFs("sys", "/sys", "sysfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     mountFs("dev", "/dev", "devtmpfs", MS.NOSUID | MS.NOEXEC);
 
-    const boot = parseCmdline(readAll(gpa, "/proc/cmdline")) catch |err| switch (err) {
-        error.Unpaired => fail("werewolf.victim and werewolf.slot come together", .{}),
-        error.Twice => fail("werewolf.victim, werewolf.slot or werewolf.root given twice", .{}),
-        error.BadVictim => fail("werewolf.victim must be UUID:/DIR", .{}),
-        error.BadSlot => fail("werewolf.slot must be a or b", .{}),
-        error.BadDeadman => fail("werewolf.deadman must be 1 to 600 seconds", .{}),
-        error.BadRoot => fail("werewolf.root must name a disk in /dev, as vdc", .{}),
-        error.RootAndSlot => fail("werewolf.root is for a direct boot, not a slot's", .{}),
-    };
+    // The whole line, checked here for every program after: one that
+    // reads two ways, or not at all, ends the boot before anything does.
+    var refused: cmdline.Failure = .{};
+    const boot = cmdline.parse(readAll(gpa, "/proc/cmdline"), &refused) orelse
+        fail("the command line's {s}: {s}", .{ refused.word, refused.why });
 
     // Lockdown at integrity before any module: the kernel then loads only
     // those signed by its key, and refuses the rest. It only rises (writing
@@ -103,9 +104,9 @@ pub fn main(init: std.process.Init) !void {
     if (loader) |l| {
         if (linux.errno(linux.access("/sys/bus/vmbus", linux.F_OK)) == .SUCCESS)
             l.stdin.?.writeStreamingAll(io, "hyperv\n") catch {};
-        if (boot.esp) l.stdin.?.writeStreamingAll(io, "esp\n") catch {};
+        if (boot.esp != null) l.stdin.?.writeStreamingAll(io, "esp\n") catch {};
     }
-    const found = if (boot.slot.len > 0) findFilesystem(gpa, boot.uuid) else null;
+    const found = if (boot.victim) |v| findFilesystem(gpa, v.uuid) else null;
     if (loader) |*l| {
         const name = if (found) |f| @tagName(f.kind) else "none";
         l.stdin.?.writeStreamingAll(io, name) catch {};
@@ -136,8 +137,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     var slot_ms: u64 = 0;
-    if (boot.slot.len > 0) {
-        const f = found orelse fail("no filesystem {s}", .{boot.uuid});
+    if (boot.victim) |v| {
+        const f = found orelse fail("no filesystem {s}", .{v.uuid});
         mkdir("/victim");
         const rc = linux.mount(
             f.dev,
@@ -152,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
         );
         img = try gpa.printSentinel(
             "/victim{s}/{s}/root.erofs",
-            .{ boot.dir, boot.slot },
+            .{ v.path, @tagName(boot.slot.?) },
             0,
         );
         slot_ms = bootMs();
@@ -185,10 +186,10 @@ pub fn main(init: std.process.Init) !void {
         .{ img, @tagName(linux.errno(rc)) },
     );
     const root_ms = bootMs();
-    if (boot.slot.len > 0)
+    if (boot.slot) |slot|
         say(
             "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",
-            .{ boot.slot, img, params.root[0..8] },
+            .{ @tagName(slot), img, params.root[0..8] },
         )
     else
         say(
@@ -196,7 +197,7 @@ pub fn main(init: std.process.Init) !void {
             .{ img, params.root[0..8] },
         );
 
-    if (boot.slot.len > 0) {
+    if (boot.slot) |slot| {
         // A shorter wait is for testing the deadman (make check-deadman),
         // so only a DEV build's root, verified now, may ask for one: a
         // released machine waits its ten minutes whatever its command line.
@@ -207,12 +208,12 @@ pub fn main(init: std.process.Init) !void {
                 say("the deadman waits {d}s (werewolf.deadman, a DEV build)", .{after});
             } else say("werewolf.deadman ignored: not a DEV build", .{});
         }
-        deadman(boot.slot, after);
+        deadman(@tagName(slot), after);
     }
 
     // The root is read-only, so its mount points are in the image already.
     for ([_][:0]const u8{ "dev", "proc", "sys", "victim" }) |m| {
-        if (std.mem.eql(u8, m, "victim") and boot.slot.len == 0) continue;
+        if (std.mem.eql(u8, m, "victim") and boot.slot == null) continue;
         const from = try gpa.printSentinel("/{s}", .{m}, 0);
         const to = try gpa.printSentinel("/root/{s}", .{m}, 0);
         if (linux.errno(linux.mount(from, to, null, MS.MOVE, 0)) != .SUCCESS)
@@ -390,7 +391,7 @@ const Found = struct { dev: [:0]const u8, kind: Kind };
 /// does: the loader falls back, and so will the other slot, until the
 /// second is gone.
 fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
-    const want = parseUuid(uuid) orelse return null;
+    const want = cmdline.uuid(uuid) orelse return null;
     var waited: usize = 0;
     while (waited < find_for * 100) : (waited += 1) {
         switch (scan(gpa, want)) {
@@ -467,106 +468,6 @@ fn identify(b: []const u8) ?struct { kind: Kind, uuid: [16]u8 } {
     return null;
 }
 
-/// 57e1f000-77e2-4b0f-8a3c-0000000000a0 as its 16 bytes, in order.
-fn parseUuid(s: []const u8) ?[16]u8 {
-    if (s.len != 36) return null;
-    var out: [16]u8 = undefined;
-    var j: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        if (i == 8 or i == 13 or i == 18 or i == 23) {
-            if (s[i] != '-') return null;
-            i += 1;
-            continue;
-        }
-        // Two hex digits, and nothing parseInt would also take, such as +.
-        const hi = std.fmt.charToDigit(s[i], 16) catch return null;
-        const lo = std.fmt.charToDigit(s[i + 1], 16) catch return null;
-        out[j] = hi << 4 | lo;
-        j += 1;
-        i += 2;
-    }
-    return out;
-}
-
-// --- the command line ----------------------------------------------------------
-
-const Boot = struct {
-    uuid: []const u8 = "",
-    dir: []const u8 = "",
-    slot: []const u8 = "",
-    /// werewolf.root: booted directly, the disk holding the image, by its
-    /// name in /dev, or "" for /root.erofs in this initramfs.
-    root: []const u8 = "",
-    /// Whether werewolf.esp names an EFI partition: werewolf's own disk,
-    /// whose updater writes it, so FAT's modules load.
-    esp: bool = false,
-    /// werewolf.deadman, in seconds, or 0 for none given.
-    deadman: u32 = 0,
-};
-
-/// werewolf.victim=UUID:/DIR and werewolf.slot=a|b, both or neither, or
-/// werewolf.root=DEV without them, each once, and well formed.
-fn parseCmdline(text: []const u8) !Boot {
-    var b: Boot = .{};
-    var victim: ?[]const u8 = null;
-    var it = std.mem.tokenizeAny(u8, text, " \t\n");
-    while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.victim=")) {
-            if (victim != null) return error.Twice;
-            victim = arg["werewolf.victim=".len..];
-        } else if (std.mem.startsWith(u8, arg, "werewolf.slot=")) {
-            if (b.slot.len > 0) return error.Twice;
-            b.slot = arg["werewolf.slot=".len..];
-            if (!std.mem.eql(u8, b.slot, "a") and
-                !std.mem.eql(u8, b.slot, "b")) return error.BadSlot;
-        } else if (std.mem.startsWith(u8, arg, "werewolf.esp=")) {
-            b.esp = true;
-        } else if (std.mem.startsWith(u8, arg, "werewolf.root=")) {
-            if (b.root.len > 0) return error.Twice;
-            b.root = arg["werewolf.root=".len..];
-            if (!isDeviceName(b.root)) return error.BadRoot;
-        } else if (std.mem.startsWith(u8, arg, "werewolf.deadman=")) {
-            if (b.deadman > 0) return error.Twice;
-            const secs = arg["werewolf.deadman=".len..];
-            // Plain digits: no sign, no leading zero.
-            if (secs.len == 0 or secs.len > 3 or secs[0] == '0') return error.BadDeadman;
-            for (secs) |c| if (!std.ascii.isDigit(c)) return error.BadDeadman;
-            b.deadman = std.fmt.parseInt(u32, secs, 10) catch return error.BadDeadman;
-            if (b.deadman > deadman_after) return error.BadDeadman;
-        }
-    }
-    if ((victim == null) != (b.slot.len == 0)) return error.Unpaired;
-    if (b.root.len > 0 and b.slot.len > 0) return error.RootAndSlot;
-    const v = victim orelse return b;
-    const colon = std.mem.findScalar(u8, v, ':') orelse return error.BadVictim;
-    b.uuid = v[0..colon];
-    b.dir = v[colon + 1 ..];
-    if (parseUuid(b.uuid) == null or !isSafeDir(b.dir)) return error.BadVictim;
-    return b;
-}
-
-/// A block device's name in /dev, as the kernel gives it: vdc, nvme0n1.
-/// A letter, then up to 15 lower-case letters and digits; no path.
-fn isDeviceName(name: []const u8) bool {
-    if (name.len == 0 or name.len > 16 or !std.ascii.isLower(name[0])) return false;
-    for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
-    return true;
-}
-
-/// An absolute path of plain names: no ., no .., no empty parts, and only
-/// the characters paths here use.
-fn isSafeDir(dir: []const u8) bool {
-    if (dir.len < 2 or dir[0] != '/' or dir[dir.len - 1] == '/') return false;
-    var parts = std.mem.splitScalar(u8, dir[1..], '/');
-    while (parts.next()) |p| {
-        if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return false;
-        for (p) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and
-            c != '-') return false;
-    }
-    return true;
-}
-
 fn isLocked(text: []const u8) bool {
     return std.mem.indexOf(u8, text, "[integrity]") != null or
         std.mem.indexOf(u8, text, "[confidentiality]") != null;
@@ -637,84 +538,6 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 // --- tests -------------------------------------------------------------------
 
 const testing = std.testing;
-
-test parseCmdline {
-    const b = try parseCmdline(
-        "console=hvc0 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/var/lib/werewolf " ++
-            "werewolf.slot=b\n",
-    );
-    try testing.expectEqualStrings("57e1f000-77e2-4b0f-8a3c-0000000000a0", b.uuid);
-    try testing.expectEqualStrings("/var/lib/werewolf", b.dir);
-    try testing.expectEqualStrings("b", b.slot);
-    const direct = try parseCmdline("console=ttyAMA0 werewolf.ip=10.0.2.15/24\n");
-    try testing.expectEqualStrings("", direct.slot);
-    try testing.expectEqualStrings("", direct.root);
-    try testing.expect(!direct.esp);
-    try testing.expect((try parseCmdline("werewolf.esp=57E1-F000")).esp);
-    try testing.expectEqualStrings("vdc", (try parseCmdline("werewolf.root=vdc")).root);
-    try testing.expectEqualStrings("nvme0n1", (try parseCmdline("werewolf.root=nvme0n1")).root);
-    for ([_][]const u8{ "", "/dev/vdc", "../vdc", "vdC", "0vd", "vd-c", "abcdefghijklmnopq" }) |v| {
-        var buf: [64]u8 = undefined;
-        const arg = try std.mem.print(&buf, "werewolf.root={s}", .{v});
-        try testing.expectError(error.BadRoot, parseCmdline(arg));
-    }
-    try testing.expectError(error.Twice, parseCmdline("werewolf.root=vdc werewolf.root=vdd"));
-
-    const uuid = "57e1f000-77e2-4b0f-8a3c-0000000000a0";
-    try testing.expectError(error.Unpaired, parseCmdline("werewolf.slot=a"));
-    try testing.expectError(error.Unpaired, parseCmdline("werewolf.victim=" ++ uuid ++ ":/w"));
-    try testing.expectError(
-        error.RootAndSlot,
-        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a werewolf.root=vdc"),
-    );
-    try testing.expectError(
-        error.BadSlot,
-        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=c"),
-    );
-    try testing.expectError(
-        error.Twice,
-        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a werewolf.slot=b"),
-    );
-    try testing.expectError(
-        error.BadVictim,
-        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w/../etc werewolf.slot=a"),
-    );
-    try testing.expectError(
-        error.BadVictim,
-        parseCmdline("werewolf.victim=" ++ uuid ++ ":w werewolf.slot=a"),
-    );
-    try testing.expectError(
-        error.BadVictim,
-        parseCmdline("werewolf.victim=nope:/w werewolf.slot=a"),
-    );
-
-    // The deadman's wait: plain seconds, 1 to 600, once.
-    const pair = "werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a ";
-    try testing.expectEqual(20, (try parseCmdline(pair ++ "werewolf.deadman=20")).deadman);
-    try testing.expectEqual(0, (try parseCmdline(pair)).deadman);
-    for ([_][]const u8{ "0", "601", "020", "+20", "2O", "" }) |v| {
-        var buf: [96]u8 = undefined;
-        const line = try std.mem.print(&buf, "{s}werewolf.deadman={s}", .{ pair, v });
-        try testing.expectError(error.BadDeadman, parseCmdline(line));
-    }
-    try testing.expectError(
-        error.Twice,
-        parseCmdline(pair ++ "werewolf.deadman=20 werewolf.deadman=30"),
-    );
-}
-
-test parseUuid {
-    const u = parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a0").?;
-    try testing.expectEqualSlices(
-        u8,
-        &.{ 0x57, 0xe1, 0xf0, 0x00, 0x77, 0xe2, 0x4b, 0x0f, 0x8a, 0x3c, 0, 0, 0, 0, 0, 0xa0 },
-        &u,
-    );
-    try testing.expectEqual(null, parseUuid("57e1f000x77e2-4b0f-8a3c-0000000000a0"));
-    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a"));
-    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000+a"));
-    try testing.expectEqual(null, parseUuid("57e1f000-77e2-4b0f-8a3c-00000000000g"));
-}
 
 test identify {
     var b: [btrfs_at + 0x1000]u8 = @splat(0);

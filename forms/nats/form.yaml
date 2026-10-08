@@ -1,9 +1,11 @@
 base: prod
 
 # NATS serves its clients over TLS, and sends nothing: no routes, no
-# leaf nodes, no gateways.
+# leaf nodes, no gateways. Its monitor, on 127.0.0.1:8222, serves the
+# machine alone.
 net:
   - listen tcp/4222
+  - listen tcp/8222 loopback
 
 # The check speaks NATS with its own client.
 dev:

@@ -9,11 +9,11 @@ The `gitea` form is `prod` with Gitea 1.26 hosting git repositories, with
 | Sends | nothing: mirrors, migrations and webhooks leave the machine only when a form of your own adds `connect gitea tcp/443 udp/53 tcp/53` |
 | Runs as | `gitea` (uid 219), leashed; it may run git, git's hooks (`gitea-hook`), itself and `ssh-keygen`, and reach its own API on loopback |
 | Keeps | repositories, LFS, the SQLite database, indexes, queues, the SSH host key and its generated secrets in `/data/svc/gitea` |
-| Config | `gitea/admin_password` (12 characters at least); settings `url` and `domain` (required), `admin` (default `admin`), `admin-email` (required) |
+| Config | `gitea/admin-password` (12 characters at least); settings `url` and `domain` (required), `admin` (default `admin`), `admin-email` (required) |
 
 ```sh
-printf '%s' 'a long administrator password' >config/gitea/admin_password
-build/host/howl pack gitea -o config.tar --config config \
+printf '%s' 'a long administrator password' >config/gitea/admin-password
+build/host/howl pack --with gitea -o config.tar --config config \
 	--url https://git.example.com/ --domain git.example.com --admin-email me@example.com
 ```
 

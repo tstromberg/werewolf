@@ -12,7 +12,7 @@ status page.
 | Settings | `target` (a URL, required): what it watches, 60 s apart, for a 200 within 2 s |
 
 ```sh
-build/host/howl pack gatus -o config.tar --target https://www.example.com/
+build/host/howl pack --with gatus -o config.tar --target https://www.example.com/
 ```
 
 More endpoints, groups and alerting are a form of your own, with its

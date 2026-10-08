@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -101,12 +102,12 @@ pub fn template(
     return gpa.print(
         \\# Written by howl create. A disk that boots itself, and its config
         \\# tar as a second, unformatted disk; no cloud-init, no ssh.
-        \\# werewolf form: {s}
+        \\# {s}: {s}
         \\vmType: vz
         \\arch: {s}
         \\plain: true
-        \\cpus: 2
-        \\memory: 2GiB
+        \\cpus: {d}
+        \\memory: {d}MiB
         \\images:
         \\  - location: "{s}"
         \\    arch: {s}
@@ -115,7 +116,17 @@ pub fn template(
         \\  - name: "{s}"
         \\    format: false
         \\
-    , .{ form, arch, disk, arch, net, config_disk });
+    , .{
+        howl.form_tag,
+        form,
+        arch,
+        howl.local_cpus,
+        howl.local_mib,
+        disk,
+        arch,
+        net,
+        config_disk,
+    });
 }
 
 /// The template for a machine Lima manages: make's, from boot/lima.yaml.in,
@@ -129,14 +140,14 @@ pub fn managedTemplate(
 ) ![]const u8 {
     return gpa.print(
         \\# Written by howl create, from make's template: Lima manages it.
-        \\# werewolf form: {s}
+        \\# {s}: {s}
         \\# werewolf lima: managed
         \\{s}
         \\additionalDisks:
         \\  - name: "{s}"
         \\    format: false
         \\
-    , .{ form, std.mem.trimEnd(u8, base, "\n"), config_disk });
+    , .{ howl.form_tag, form, std.mem.trimEnd(u8, base, "\n"), config_disk });
 }
 
 /// Whether a machine's template is one Lima manages.
@@ -151,8 +162,9 @@ pub fn isManaged(yaml: []const u8) bool {
 /// keeps the template, so Lima is where it is recorded.
 pub fn formOf(yaml: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, yaml, '\n');
-    while (lines.next()) |l| if (std.mem.startsWith(u8, l, "# werewolf form: ")) {
-        const f = std.mem.trim(u8, l["# werewolf form: ".len..], " \r");
+    const prefix = "# " ++ howl.form_tag ++ ": ";
+    while (lines.next()) |l| if (std.mem.startsWith(u8, l, prefix)) {
+        const f = std.mem.trim(u8, l[prefix.len..], " \r");
         return if (f.len > 0) f else null;
     };
     return null;

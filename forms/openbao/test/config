@@ -8,9 +8,9 @@ set -eu
 d=$1/openbao
 mkdir -p "$d"
 umask 077
-openssl rand -out "$d/unseal.key" 32
+openssl rand -out "$d/unseal-key" 32
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
 	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
 	-keyout "$d/tls.key" -out "$d/tls.crt" 2>/dev/null
-printf '%s' werewolf-check >"$d/admin_password"
+printf '%s' werewolf-check >"$d/admin-password"
 echo '{"api-addr":"https://127.0.0.1:8200"}' >"$d/settings.json"

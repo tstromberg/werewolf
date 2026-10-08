@@ -112,8 +112,8 @@ machine is; the first scan follows the database download.
 | Disk | 8 GiB, its disk's size; with bite, 10 GB free in `/var/lib/werewolf` |
 | Network | Wolfi, Alpine, git.kernel.org (updates); grype.anchore.io (the database) |
 
-On a Mac with Apple silicon, `make demo` runs `howl create demo
-werewolf-demo`, which builds the disk and boots it in Lima, as Lima boots
+On a Mac with Apple silicon, `make demo` runs `howl create werewolf-demo
+--with demo --on lima`, which builds the disk and boots it in Lima, as Lima boots
 a distro, and prints the page's URL:
 
 ```sh

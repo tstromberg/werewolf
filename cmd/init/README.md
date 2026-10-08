@@ -12,7 +12,7 @@ stage0 mounts the verified, read-only root and hands over. Nothing after can
 write the root, so what changes lives in `/run`, `/tmp`, `/var/tmp` and
 `/data`. init decides from what the image carries (a DHCP client, mke2fs,
 cryptsetup) and what it is told: the kernel command line (`werewolf.ip`,
-`.gw`, `.dns`, `.mac`, `.data`, `.victim`, `.grubenv`), and one config.
+`.gw`, `.dns`, `.mac`, `.data`, `.victim`; `lib/cmdline.zig`), and one config.
 It runs no shell: werewolf's programs and the form's tools, by full path.
 
 ## Goals
@@ -30,7 +30,12 @@ It runs no shell: werewolf's programs and the form's tools, by full path.
 ## Detailed design
 
 Each phase is a file: `kernel.zig`, `config.zig`, `network.zig`, `data.zig`,
-`seal.zig`; `init.zig` runs them in order, as `m.kernel()` and so on.
+`oci.zig`, `seal.zig`; `init.zig` runs them in order, as `m.kernel()` and
+so on. `oci.zig` runs only where the build listed image roots
+(`/usr/share/werewolf/oci`): beneath each, a procfs of its own, the CPU
+count, five devices, the resolver, the service's `/tmp`, `/run` and
+`/data` from its own places, and each path it writes, all before fence
+closes mounting ([adhoc.md](../../docs/design/adhoc.md)).
 
 1. **Filesystems**: `/proc` (`hidepid=invisible`), `/sys`, `/dev`, and RAM
    filesystems, all `nosuid` and `noexec`, the RAM ones `nosymfollow`; a

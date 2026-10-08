@@ -11,10 +11,10 @@ read    /etc/openbao
 # The unseal key (32 random bytes), the API's certificate and key, and
 # the admin's first password, from the machine's config: missing, the
 # service parks with a line naming the file.
-config  unseal-key /run/config/openbao/unseal.key
+config  unseal-key /run/config/openbao/unseal-key
 config  tls-cert /run/config/openbao/tls.crt
 config  tls-key /run/config/openbao/tls.key
-config  admin-password /run/config/openbao/admin_password
+config  admin-password /run/config/openbao/admin-password
 # The address clients reach it at, into the image's configuration.
 config  settings /run/config/openbao/settings.json
 setting api-addr url required as api_addr

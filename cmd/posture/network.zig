@@ -268,6 +268,67 @@ fn ssh(p: *Posture) !void {
         .result = if (settings == null) .skip else if (weak.len == 0) .pass else .fail,
         .detail = if (settings == null) skipped else weak,
     });
+    const plain = if (settings) |s| try plainSshKeys(p.gpa, s) else "";
+    try p.add(.{
+        .id = "network-ssh-security-keys",
+        .area = "network",
+        .name = "ssh takes security keys alone",
+        .why = "Logging in takes a security key, and a touch of it: a key file copied off " ++
+            "an operator's laptop, or used there by malware while they are away, signs " ++
+            "nothing.",
+        .how = "sshd -T lists only security-key algorithms (sk-...) in " ++
+            "pubkeyacceptedalgorithms, and touch-required in pubkeyauthoptions",
+        .result = if (settings == null) .skip else if (plain.len == 0) .pass else .fail,
+        .detail = if (settings == null) skipped else plain,
+    });
+}
+
+/// What sshd -T takes that is not a security key's, touched: each
+/// algorithm without the sk- of a FIDO authenticator's, and pubkeyauthoptions
+/// without touch-required, which an authorized_keys line's no-touch-required
+/// could otherwise turn off.
+fn plainSshKeys(gpa: Allocator, settings: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const algs = sshValue(settings, "pubkeyacceptedalgorithms") orelse "absent";
+    var it = std.mem.tokenizeScalar(u8, algs, ',');
+    while (it.next()) |alg| {
+        if (!std.mem.startsWith(u8, alg, "sk-")) try listAdd(gpa, &out, "{s}", .{alg});
+    }
+    const options = sshValue(settings, "pubkeyauthoptions") orelse "absent";
+    var opts = std.mem.tokenizeAny(u8, options, ", ");
+    const touch = while (opts.next()) |o| {
+        if (std.mem.eql(u8, o, "touch-required")) break true;
+    } else false;
+    if (!touch) try listAdd(gpa, &out, "pubkeyauthoptions is {s}", .{options});
+    return out.items;
+}
+
+test plainSshKeys {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings("", try plainSshKeys(
+        a,
+        "PubkeyAcceptedAlgorithms sk-ssh-ed25519@openssh.com," ++
+            "sk-ecdsa-sha2-nistp256@openssh.com\nPubkeyAuthOptions touch-required\n",
+    ));
+    try testing.expectEqualStrings("", try plainSshKeys(
+        a,
+        "pubkeyacceptedalgorithms sk-ssh-ed25519@openssh.com\n" ++
+            "pubkeyauthoptions touch-required,verify-required\n",
+    ));
+    try testing.expectEqualStrings(
+        "ssh-ed25519, rsa-sha2-512, pubkeyauthoptions is none",
+        try plainSshKeys(
+            a,
+            "pubkeyacceptedalgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com,rsa-sha2-512\n" ++
+                "pubkeyauthoptions none\n",
+        ),
+    );
+    try testing.expectEqualStrings(
+        "absent, pubkeyauthoptions is absent",
+        try plainSshKeys(a, "port 22\n"),
+    );
 }
 
 /// How far a guesser or a forgotten session gets: what sshd -T reports

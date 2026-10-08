@@ -19,6 +19,7 @@
 const std = @import("std");
 const howl = @import("howl.zig");
 const images = @import("image.zig");
+const booting = @import("boot.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
@@ -87,7 +88,7 @@ pub fn ensureImage(
     gpa: Allocator,
     p: Place,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     disk: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
@@ -177,8 +178,9 @@ pub fn parseRow(line: []const u8) ?struct {
 /// create wrote, or null for a VM that is not ours.
 pub fn formOf(config: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, config, '\n');
-    while (lines.next()) |l| if (std.mem.startsWith(u8, l, "description: werewolf form: ")) {
-        const f = std.mem.trim(u8, l["description: werewolf form: ".len..], " \r");
+    const prefix = "description: " ++ howl.form_tag ++ ": ";
+    while (lines.next()) |l| if (std.mem.startsWith(u8, l, prefix)) {
+        const f = std.mem.trim(u8, l[prefix.len..], " \r");
         return if (f.len > 0) f else null;
     };
     return null;
@@ -227,7 +229,7 @@ pub fn createArgs(
         name,
         // Quoted for the node's shell, which splits what ssh joined.
         "--description",
-        try gpa.print("'werewolf form: {s}'", .{form}),
+        try gpa.print("'{s}: {s}'", .{ howl.form_tag, form }),
         "--tags",
         "werewolf",
         "--machine",
@@ -239,9 +241,9 @@ pub fn createArgs(
         "--cpu",
         "host",
         "--cores",
-        "2",
+        std.fmt.comptimePrint("{d}", .{howl.local_cpus}),
         "--memory",
-        "2048",
+        std.fmt.comptimePrint("{d}", .{howl.local_mib}),
         "--ostype",
         "l26",
         "--scsihw",
@@ -353,13 +355,10 @@ pub fn awaitUp(
     p: Place,
     name: []const u8,
     seen: u64,
-) !enum { up, panic, late } {
+) !booting.Outcome {
     var waited: u32 = 0;
     while (waited < wait_seconds) : (waited += 5) {
-        if (console(io, gpa, p, name, seen)) |text| {
-            if (std.mem.find(u8, text, "werewolf: up in ") != null) return .up;
-            if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
-        }
+        if (console(io, gpa, p, name, seen)) |text| if (booting.outcome(text)) |o| return o;
         try io.sleep(.fromSeconds(5), .awake);
     }
     return .late;
@@ -421,7 +420,7 @@ test parseRow {
 test formOf {
     try testing.expectEqualStrings(
         "bastion",
-        formOf("boot: order=virtio0\ndescription: werewolf form: bastion\nname: edge\n").?,
+        formOf("boot: order=virtio0\ndescription: werewolf-form: bastion\nname: edge\n").?,
     );
     try testing.expectEqual(null, formOf("description: someone else's\n"));
 }
@@ -447,7 +446,7 @@ test createArgs {
         "/var/lib/vz/werewolf/werewolf-bastion-x86-64-0123456789abcdef.qcow2",
     );
     try testing.expectEqualStrings("101", a[2]);
-    try testing.expectEqualStrings("'werewolf form: bastion'", a[6]);
+    try testing.expectEqualStrings("'werewolf-form: bastion'", a[6]);
     try testing.expectEqualStrings(
         "local-lvm:0,import-from=/var/lib/vz/werewolf/edge-config.tar,format=raw,ro=1",
         a[28],

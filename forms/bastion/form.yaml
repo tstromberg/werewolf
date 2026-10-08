@@ -1,12 +1,15 @@
 base: prod
 
+# A forwarding-only sshd, by security key. It has no users: a form built on
+# it names them, each with keys and destinations (bastion: users:,
+# forms/bastion/README.md), and lets the bastion connect to their ports.
 net:
   - listen tcp/22
-  # sshd's PermitOpen further restricts these connections by destination.
+  # sshd's PermitOpen, and each key's permitopen, restrict these by destination.
   - connect bastion tcp/22
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  network-no-login: sshd, by key, which forwards to the destinations the config names and opens no session
+  network-no-login: sshd, by security key, which forwards to the destinations form.yaml names and opens no session
   network-ssh-config: sshd forwards ports, which is what a bastion is for

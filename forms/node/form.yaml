@@ -1,5 +1,9 @@
 base: app
 
+# Taken back of werewolf's defaults (lib/allow.zig): V8 compiles the
+# application to machine code as it runs.
+allow: [jit]
+
 # The application serves on 8080.
 net:
   - listen tcp/8080

@@ -4,6 +4,7 @@
 const std = @import("std");
 const seal_lib = @import("seal");
 const sandbox = @import("sandbox");
+const settings = @import("settings");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -31,17 +32,14 @@ const max_config_entries = 256;
 /// one directory, config.tar and data/ for /data. stage0 has mounted it
 /// already, to read root.erofs.
 pub fn victim(m: *Machine) void {
-    const v = m.cmd.victim;
-    if (v.len == 0) return;
-    const colon = std.mem.findScalar(u8, v, ':') orelse
-        return say("victim's filesystem {s} not found", .{v});
+    const v = m.cmd.victim orelse return;
     // stage0 mounts it before it hands over, or the machine never gets
     // here (werewolf.victim comes only with werewolf.slot). Its device
     // is the kernel's word, from the mount table, not a second search
     // of every disk that could name a different one.
     const dev = m.mountSource("/victim") orelse
-        return say("victim's filesystem {s} is not on /victim", .{v[0..colon]});
-    m.victim_dir = m.fmt("/victim{s}", .{v[colon + 1 ..]});
+        return say("victim's filesystem {s} is not on /victim", .{v.uuid});
+    m.victim_dir = m.fmt("/victim{s}", .{v.path});
     say("victim's filesystem {s} on /victim, werewolf in {s}", .{ dev, m.victim_dir });
 }
 
@@ -121,9 +119,9 @@ pub fn metadata(m: *Machine) void {
         trim(firstLine(m.read("/run/config/hostname")))
     else
         "werewolf";
-    const host = if (isHostname(name)) name else blk: {
+    const host = if (settings.isHostname(name)) name else blk: {
         var buf: [64]u8 = undefined;
-        say("hostname '{s}' refused: not a plain name", .{shown(&buf, name)});
+        say("hostname '{s}' refused: not a hostname of at most 64 bytes", .{shown(&buf, name)});
         break :blk "werewolf";
     };
     m.write("/run/werewolf/hostname", m.fmt("{s}\n", .{host}), 0o644);
@@ -325,9 +323,12 @@ fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
         if (e.kind == .file) total += e.size;
         if (entries > max_config_entries) return error.TooManyEntries;
         if (total > max_config_total) return error.TooLarge;
-        const name = safeName(e.name) orelse {
+        const name = settings.entryName(e.name) orelse {
             var buf: [64]u8 = undefined;
-            say("config: {s} refused: not a plain relative name", .{shown(&buf, e.name)});
+            say(
+                "config: {s} refused: not a plain relative name of letters, digits and . _ - /",
+                .{shown(&buf, e.name)},
+            );
             continue;
         };
         if (name.len == 0) continue;
@@ -452,10 +453,7 @@ fn limaDataFiles(gpa: Allocator, env: []const u8) ![]const LimaFile {
         const path = std.mem.trimEnd(u8, rest[14..], "\r");
         if (!std.mem.startsWith(u8, path, "/run/config/")) continue;
         const relative = path["/run/config/".len..];
-        for (relative) |c| if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '-' and
-            c != '.' and c != '/')
-            return error.InvalidLimaConfigPath;
-        const name = safeName(relative) orelse return error.InvalidLimaConfigPath;
+        const name = settings.entryName(relative) orelse return error.InvalidLimaConfigPath;
         if (name.len == 0 or !std.mem.eql(u8, name, relative)) return error.InvalidLimaConfigPath;
         if (files.items.len == 32) return error.TooManyLimaConfigFiles;
         for (files.items) |f| {
@@ -480,7 +478,7 @@ test "Lima data imports only plain config paths" {
     const files = try limaDataFiles(gpa,
         \\LIMA_CIDATA_DATAFILE_00000000_PATH=/run/config/bastion/settings.json
         \\LIMA_CIDATA_DATAFILE_00000001_PATH=/etc/ssh/sshd_config
-        \\LIMA_CIDATA_DATAFILE_00000002_PATH=/run/config/tailscale/auth_key
+        \\LIMA_CIDATA_DATAFILE_00000002_PATH=/run/config/tailscale/auth-key
         \\LIMA_CIDATA_YQ_PROVISION_00000003_PATH=/run/config/ignored
         \\LIMA_CIDATA_DATAFILE_00000004_OWNER=root:root
     );
@@ -619,12 +617,6 @@ fn idInUse(text: []const u8, id: []const u8) bool {
     return false;
 }
 
-fn isHostname(s: []const u8) bool {
-    if (s.len == 0 or s.len > 64) return false;
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '.') return false;
-    return s[0] != '-' and s[0] != '.';
-}
-
 /// Whether an /etc/passwd-like file has an entry for name.
 fn hasEntry(text: []const u8, name: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
@@ -635,7 +627,7 @@ fn hasEntry(text: []const u8, name: []const u8) bool {
     return false;
 }
 
-const Ids = struct { uid: u32, gid: u32 };
+pub const Ids = struct { uid: u32, gid: u32 };
 
 /// name's uid and gid in an /etc/passwd.
 pub fn lookupIds(passwd: []const u8, name: []const u8) ?Ids {
@@ -651,9 +643,6 @@ pub fn lookupIds(passwd: []const u8, name: []const u8) ?Ids {
     return null;
 }
 
-/// A tar entry's name, made relative and plain: no leading /, no . or ..,
-/// no empty parts; "" for the archive's root, ./ itself. null if it cannot
-/// be.
 /// Text from outside as the console may show it: at most buf.len bytes,
 /// each control byte a "?", so a name refused for holding one cannot put
 /// an escape sequence or a false line on the console log.
@@ -667,21 +656,6 @@ test "shown hides control bytes and bounds the text" {
     var buf: [8]u8 = undefined;
     try testing.expectEqualStrings("a?b?c", shown(&buf, "a\x1bb\x7fc"));
     try testing.expectEqualStrings("12345678", shown(&buf, "123456789"));
-}
-
-fn safeName(name: []const u8) ?[]const u8 {
-    var n = name;
-    while (std.mem.startsWith(u8, n, "./")) n = n[2..];
-    if (std.mem.eql(u8, n, ".")) return "";
-    if (n.len > 0 and n[0] == '/') return null;
-    n = std.mem.trimEnd(u8, n, "/");
-    if (n.len == 0) return "";
-    var parts = std.mem.splitScalar(u8, n, '/');
-    while (parts.next()) |p| {
-        if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return null;
-        for (p) |c| if (c < 0x20 or c == 0x7f) return null;
-    }
-    return n;
 }
 
 /// instance-id's value in a NoCloud meta-data.
@@ -782,28 +756,12 @@ test "validation" {
     try testing.expect(idInUse("root:x:0:0::/root:/bin/sh\n_dhcp:x:501:501::/:/x\n", "501"));
     try testing.expect(idInUse("_update:x:69:\n", "69"));
     try testing.expect(!idInUse("root:x:0:0::/root:/bin/sh\nt:x:5010:5010::/:/x\n", "501"));
-    try testing.expect(isHostname("lima-werewolf-demo"));
-    try testing.expect(!isHostname("a b"));
-    try testing.expect(!isHostname("-x"));
     try testing.expect(hasEntry("root:x:0:0::/root:/bin/sh\nt:x:501:501::/:/x\n", "t"));
     try testing.expect(!hasEntry("tt:x:1:1::/:/x\n", "t"));
     try testing.expectEqual(
         Ids{ .uid = 200, .gid = 201 },
         lookupIds("nginx:x:200:201::/:/x\n", "nginx").?,
     );
-}
-
-test safeName {
-    try testing.expectEqualStrings("authorized_keys", safeName("./authorized_keys").?);
-    try testing.expectEqualStrings("cloudflared/token", safeName("cloudflared/token").?);
-    try testing.expectEqualStrings("nginx", safeName("nginx/").?);
-    try testing.expectEqual(null, safeName("/etc/passwd"));
-    try testing.expectEqual(null, safeName("../x"));
-    try testing.expectEqual(null, safeName("a/../../x"));
-    try testing.expectEqual(null, safeName("a//b"));
-    try testing.expectEqualStrings("", safeName("./").?);
-    try testing.expectEqualStrings("", safeName(".").?);
-    try testing.expectEqual(null, safeName("/"));
 }
 
 test instanceId {

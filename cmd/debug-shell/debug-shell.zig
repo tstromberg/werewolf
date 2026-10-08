@@ -16,6 +16,7 @@
 const std = @import("std");
 const Io = std.Io;
 const linux = std.os.linux;
+const cmdline = @import("cmdline");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -38,17 +39,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var cmdline: [4096]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const fd = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     const n = if (linux.errno(fd) == .SUCCESS)
-        linux.read(@intCast(fd), &cmdline, cmdline.len)
+        linux.read(@intCast(fd), &buf, buf.len)
     else
         0;
-    const line = if (linux.errno(n) == .SUCCESS) cmdline[0..n] else "";
-    var words = std.mem.tokenizeAny(u8, line, " \n");
-    var debug = false;
-    while (words.next()) |w| debug = debug or std.mem.eql(u8, w, "werewolf.debug=1");
-    if (!debug) park(io, null);
+    const line = if (linux.errno(n) == .SUCCESS) buf[0..n] else "";
+    // Read as stage0 read it (lib/cmdline.zig); a line it refuses gives no shell.
+    var refused: cmdline.Failure = .{};
+    const cmd = cmdline.parse(line, &refused) orelse park(io, null);
+    if (!cmd.debug) park(io, null);
     if (linux.errno(linux.access("/usr/share/werewolf/dev", linux.F_OK)) != .SUCCESS)
         park(io, "werewolf.debug=1 ignored: only a DEV=1 build gives a console shell");
     if (!executable("/usr/bin/getty") or
@@ -76,9 +77,9 @@ pub fn main(init: std.process.Init) !void {
 
 /// The kernel's console, as the last console= names it, without its
 /// options ("ttyS0,115200" is ttyS0); "console" if there is none.
-fn consoleName(cmdline: []const u8) []const u8 {
+fn consoleName(line: []const u8) []const u8 {
     var name: []const u8 = "console";
-    var words = std.mem.tokenizeAny(u8, cmdline, " \n");
+    var words = std.mem.tokenizeAny(u8, line, " \n");
     while (words.next()) |w| {
         if (!std.mem.startsWith(u8, w, "console=")) continue;
         const v = w["console=".len..];

@@ -1,5 +1,5 @@
 //! --app DIR: an application's files, laid over a form's image where the
-//! form keeps its application. The form says where, in etc/werewolf/app
+//! form keeps its application. The form says where, in form.yaml's app
 //! (the app forms /usr/lib/app, nginx its html root), and its service file
 //! how to run it and which settings it takes; DIR is what to run. DIR is
 //! built by its own toolchain (go build, dotnet publish, mvn package), and
@@ -16,24 +16,6 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-
-/// Where the chain's last form keeps its application, or null.
-pub fn place(io: Io, gpa: Allocator, chain: []const @import("form").Form) !?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (chain) |form| {
-        const text = Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/rootfs/etc/werewolf/app", .{form.dir}),
-            gpa,
-            .limited(4096),
-        ) catch
-            continue;
-        const p = std.mem.trim(u8, text, " \n");
-        if (p.len < 2 or p[0] != '/' or std.mem.find(u8, p, "..") != null) return error.BadAppPlace;
-        found = p;
-    }
-    return found;
-}
 
 const File = struct { path: []const u8, exec: bool };
 

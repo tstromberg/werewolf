@@ -16,7 +16,7 @@
 //!     werewolf.grubenv=UUID:PATH   a distro's GRUB, after bite: saved_entry
 //!                                  in GRUB's environment block, which
 //!                                  /usr/lib/werewolf/grub-setenv rewrites in place
-//!     werewolf.esp=UUID            systemd-boot, on werewolf's own disk
+//!     werewolf.esp=XXXX-XXXX       systemd-boot, on werewolf's own disk
 //!                                  (docs/design/native-boot.md): the entry is
 //!                                  renamed from werewolf-a+N-M.conf, which
 //!                                  counts tries, to werewolf-a.conf, good for
@@ -30,6 +30,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const broker = @import("broker");
+const cmdline = @import("cmdline");
 
 const committed = "/run/werewolf/committed";
 const updater_ready = "/run/werewolf/updater-ready";
@@ -39,16 +40,15 @@ const wait = 15;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
-    const cmd = parseCmdline(readAll(io, gpa, "/proc/cmdline"));
-    const grubenv = trim(readAll(io, gpa, "/run/werewolf/grubenv"));
-    if (grubenv.len == 0 and (cmd.esp.len == 0 or cmd.slot.len == 0)) park(io);
-    // stage0 insists on a or b; the entry name goes into a path here, so
-    // this does too.
-    if (cmd.slot.len > 0 and !std.mem.eql(u8, cmd.slot, "a") and !std.mem.eql(u8, cmd.slot, "b")) {
-        say(io, "werewolf.slot={s} is not a or b; not committing", .{cmd.slot});
+    // Read as stage0 read it (lib/cmdline.zig): the slot a or b, and
+    // GRUB's path plain, as both go into paths written as root.
+    var refused: cmdline.Failure = .{};
+    const cmd = cmdline.parse(readAll(io, gpa, "/proc/cmdline"), &refused) orelse {
+        say(io, "the command line's {s}: {s}; not committing", .{ refused.word, refused.why });
         park(io);
-    }
-    const entry = try gpa.print("werewolf-{s}", .{if (cmd.slot.len > 0) cmd.slot else "a"});
+    };
+    if (cmd.grubenv == null and (cmd.esp == null or cmd.slot == null)) park(io);
+    const entry = try gpa.print("werewolf-{s}", .{@tagName(cmd.slot orelse .a)});
 
     var said = false;
     // The service that holds the commit back, said when it changes once a
@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
         said = true;
     }
 
-    if (grubenv.len > 0)
+    if (cmd.grubenv) |grubenv|
         try commitGrub(io, gpa, grubenv, entry)
     else
         try commitEsp(io, gpa, entry);
@@ -115,22 +115,22 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
 /// partition (Ubuntu, Rocky) or its /boot subvolume (Fedora). Either way the
 /// mount broker mounts it apart and writable, for as long as the write
 /// takes: /victim, if it is the same filesystem, is read-only.
-fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void {
-    const colon = std.mem.findScalar(u8, spec, ':') orelse
-        return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
-    // Joined to the broker's mount and written as root: within it only.
-    if (!isCleanPath(spec[colon + 1 ..]))
-        return say(io, "werewolf.grubenv={s}: not a plain absolute path; not committing", .{spec});
+fn commitGrub(io: Io, gpa: Allocator, spec: cmdline.Place, entry: []const u8) !void {
     const boot = broker.ask(.grub) catch |err| return say(
         io,
-        "no GRUB environment block at {s}: {s} {s}; not committing",
-        .{ spec, @errorName(err), broker.refusal },
+        "no GRUB environment block at {s}:{s}: {s} {s}; not committing",
+        .{ spec.uuid, spec.path, @errorName(err), broker.refusal },
     );
     defer boot.release();
 
-    const f = try gpa.print("{s}{s}", .{ boot.path(), spec[colon + 1 ..] });
+    // A plain path (lib/cmdline.zig), so within the broker's mount only.
+    const f = try gpa.print("{s}{s}", .{ boot.path(), spec.path });
     const block = readAll(io, gpa, f);
-    if (block.len == 0) return say(io, "no GRUB environment block at {s}; not committing", .{spec});
+    if (block.len == 0) return say(
+        io,
+        "no GRUB environment block at {s}:{s}; not committing",
+        .{ spec.uuid, spec.path },
+    );
     if (isSaved(block, entry)) {
         say(io, "{s} is already GRUB's default", .{entry});
         return markCommitted(io);
@@ -220,18 +220,6 @@ fn isSaved(block: []const u8, entry: []const u8) bool {
     return false;
 }
 
-const Cmdline = struct { slot: []const u8 = "", esp: []const u8 = "" };
-
-fn parseCmdline(text: []const u8) Cmdline {
-    var c: Cmdline = .{};
-    var it = std.mem.tokenizeAny(u8, text, " \n");
-    while (it.next()) |arg| {
-        if (std.mem.cutPrefix(u8, arg, "werewolf.slot=")) |v| c.slot = v;
-        if (std.mem.cutPrefix(u8, arg, "werewolf.esp=")) |v| c.esp = v;
-    }
-    return c;
-}
-
 /// Left for stage0's deadman, which then lets the machine be.
 fn markCommitted(io: Io) void {
     Dir.cwd().writeFile(
@@ -263,17 +251,6 @@ fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     var buf: [4096]u8 = undefined;
     var r = f.readerStreaming(io, &buf);
     return r.interface.allocRemaining(gpa, .limited(1 << 20)) catch "";
-}
-
-/// Absolute, with no empty, . or .. part.
-fn isCleanPath(p: []const u8) bool {
-    if (p.len < 2 or p[0] != '/') return false;
-    var parts = std.mem.splitScalar(u8, p[1..], '/');
-    while (parts.next()) |part| {
-        if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, ".."))
-            return false;
-    }
-    return true;
 }
 
 fn exists(io: Io, path: []const u8) bool {
@@ -315,21 +292,6 @@ test serviceHealthy {
     try testing.expect(!serviceHealthy(statusOf(7, 'u', 600), 1000));
 }
 
-test isCleanPath {
-    try testing.expect(isCleanPath("/boot/grub/grubenv"));
-    try testing.expect(isCleanPath("/grub2/grubenv"));
-    for ([_][]const u8{
-        "",
-        "/",
-        "grub/grubenv",
-        "/boot/../etc/shadow",
-        "/./x",
-        "/a//b",
-        "/a/",
-    }) |p|
-        try testing.expect(!isCleanPath(p));
-}
-
 test isTried {
     try testing.expect(isTried("werewolf-b+1.conf", "werewolf-b"));
     try testing.expect(isTried("werewolf-b+0-1.conf", "werewolf-b"));
@@ -343,10 +305,4 @@ test isSaved {
     try testing.expect(isSaved(block, "werewolf-a"));
     try testing.expect(!isSaved(block, "werewolf-b"));
     try testing.expect(!isSaved("saved_entry=werewolf-ab\n", "werewolf-a"));
-}
-
-test parseCmdline {
-    const c = parseCmdline("console=hvc0 werewolf.slot=b werewolf.esp=57E1-F000\n");
-    try testing.expectEqualStrings("b", c.slot);
-    try testing.expectEqualStrings("57E1-F000", c.esp);
 }

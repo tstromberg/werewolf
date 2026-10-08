@@ -62,7 +62,7 @@ The rest (wordpress, caddy, bastion, tailscale, openbao, step-ca) have
 closures with no shell or interpreter beyond what their base already
 carries. **valkey did not**, it turned out: Wolfi's `valkey-9.1` depends
 on `posix-libc-utils`, whose `ldd` is a bash script, so bash came with it.
-Rather than ship a shell nothing runs, or wait, forms gained `.prune`
+Rather than ship a shell nothing runs, or wait, forms gained `prune`
 ([forms.md](../forms.md#files-a-form-leaves-out)): the build leaves the
 named files out of the root, and the updater out of every slot it builds,
 so the image stays what its lock names but for what the form says. That
@@ -292,7 +292,7 @@ better. raft's cluster listener is on 127.0.0.1:8201, which the policy
 does not declare and fence lets no one reach.
 
 - **Unsealed by a static key, and initialized by itself.** The key is
-  `/run/config/openbao/unseal.key` (`seal "static"`), and the config's
+  `/run/config/openbao/unseal-key` (`seal "static"`), and the config's
   `initialize` stanza (OpenBao 2.4 and later) does what `bao operator
   init` and the first logins would: enables the stdout audit device and
   the auth method the config names, then revokes the root token. Self-
@@ -520,11 +520,9 @@ is written.
 
 ## Open questions
 
-- **Mixins.** An include chain is linear, so tailscale, wireguard and
-  valkey cannot be added to another form, only built on. `sshd`'s service
-  lives in `minimal` and parks itself where sshd is not installed; that
-  pattern, or `SSH=1`-style flags (`TAILSCALE=1`), would let them combine.
-  Not until a form needs it.
+- **Mixins.** A chain of bases is linear, so tailscale, wireguard and
+  valkey cannot be added to another form, only built on. Answered since by
+  form.yaml's `with`: `prod-ssh` and `lima` are `prod` with the `sshd` form.
 - **fence by destination.** fence names users and ports, not addresses.
   bastion, haproxy, tailscale and wordpress's mail would be tighter if it
   named networks too. sshd's `PermitOpen`, haproxy's backends and the

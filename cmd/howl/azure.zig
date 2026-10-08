@@ -23,6 +23,7 @@
 const std = @import("std");
 const howl = @import("howl.zig");
 const images = @import("image.zig");
+const booting = @import("boot.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -34,7 +35,7 @@ const wait_seconds = 300;
 /// in" before restarting the VM to watch it.
 const enable_seconds = 90;
 const first_boot_seconds = 60;
-const tag = "werewolf-form";
+const tag = howl.form_tag;
 
 /// The resource group, and its location.
 pub const Place = struct { group: []const u8, location: []const u8 };
@@ -126,11 +127,11 @@ fn lastLine(text: []const u8) []const u8 {
 /// werewolf kernel drives, where the newest sizes offer NVMe alone.
 pub const Machine = struct { arch: []const u8, size: []const u8 };
 
-pub fn machine(arch: []const u8) Machine {
-    return if (std.mem.eql(u8, arch, "aarch64"))
-        .{ .arch = "Arm64", .size = "Standard_B2pls_v2" }
-    else
-        .{ .arch = "x64", .size = "Standard_D2as_v4" };
+pub fn machine(arch: howl.Arch) Machine {
+    return switch (arch) {
+        .aarch64 => .{ .arch = "Arm64", .size = "Standard_B2pls_v2" },
+        .x86_64 => .{ .arch = "x64", .size = "Standard_D2as_v4" },
+    };
 }
 
 /// The managed disk the form's boot disk is, werewolf-FORM-ARCH-DIGEST,
@@ -146,7 +147,7 @@ pub fn ensureImage(
     gpa: Allocator,
     p: Place,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     disk: []const u8,
     work: []const u8,
     why: *howl.Why,
@@ -277,7 +278,7 @@ pub fn create(
     p: Place,
     name: []const u8,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     size: ?[]const u8,
     image: []const u8,
     tar: []const u8,
@@ -471,9 +472,6 @@ pub fn mark(text: []const u8) []const u8 {
     return text[text.len -| 256..];
 }
 
-/// How a boot ended, as the console says.
-pub const Boot = enum { up, panic, late };
-
 /// Wait for a boot to finish, or panic, in what the console says after
 /// before, its end when the boot began.
 pub fn awaitUp(
@@ -482,7 +480,7 @@ pub fn awaitUp(
     p: Place,
     name: []const u8,
     before: []const u8,
-) !Boot {
+) !booting.Outcome {
     return awaitUpWithin(io, gpa, p, name, before, wait_seconds);
 }
 
@@ -493,14 +491,11 @@ fn awaitUpWithin(
     name: []const u8,
     before: []const u8,
     seconds: i64,
-) !Boot {
+) !booting.Outcome {
     const start = Io.Clock.awake.now(io);
     while (start.untilNow(io, .awake).toSeconds() < seconds) {
-        if (console(io, gpa, p, name)) |text| {
-            const new = since(text, before);
-            if (std.mem.find(u8, new, "werewolf: up in ") != null) return .up;
-            if (std.mem.find(u8, new, "Kernel panic") != null) return .panic;
-        }
+        if (console(io, gpa, p, name)) |text|
+            if (booting.outcome(since(text, before))) |o| return o;
         try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
@@ -588,8 +583,8 @@ test openArgs {
 }
 
 test machine {
-    try testing.expectEqualStrings("Arm64", machine("aarch64").arch);
-    try testing.expectEqualStrings("Standard_D2as_v4", machine("x86_64").size);
+    try testing.expectEqualStrings("Arm64", machine(.aarch64).arch);
+    try testing.expectEqualStrings("Standard_D2as_v4", machine(.x86_64).size);
 }
 
 test lastLine {
@@ -634,7 +629,7 @@ test mark {
     // mark, and it holds the new "up in".
     try testing.expectEqualStrings(two, since(one ++ two, m));
     // While the restart has printed nothing yet, there is nothing after it.
-    try testing.expect(std.mem.find(u8, since(one, m), "werewolf: up in ") == null);
+    try testing.expect(std.mem.find(u8, since(one, m), booting.up_line) == null);
     // With no clock on any line, the last bytes.
     try testing.expectEqualStrings("no clock", mark("no clock"));
 }

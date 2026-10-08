@@ -20,7 +20,7 @@ through make's `_dist-form`; `--app DIR` works with `build`, `run` and
 declarations from `./forms`; `--image` is not built. `pack` makes no
 host keys: the bastion makes its own on first boot and keeps it in
 `/data`. bhyve, Firecracker, Proxmox and Azure are built, experimental.
-`make check-gcp`, `make demo` and the GCP demos run through `werewolf
+`make check-gcp`, `make demo` and the GCP demos run through `howl
 create`; `test/gcp` keeps only its judging, and `test/lima-demo` its wait
 for the page.
 
@@ -42,9 +42,9 @@ policy. The *config tar* ([cloud.md](../cloud.md)) carries what is
 specific to one machine: its hostname, `data.key`, ssh keys. init finds
 the tar raw on any block device or in the cloud's user data, and leaves
 it in `/run/config`, readable by root alone. Leash copies the files a
-service file names (`config host-key /run/config/bastion/host_key`) into
+service file names (`config users /run/config/nats/users.conf`) into
 the service's private directory, and `service-config` renders the
-service's `settings.json` (destinations, routes) into the daemon's format,
+service's `settings.json` (routes) into the daemon's format,
 inside the leash.
 
 Getting those three things onto a machine is where the project is least
@@ -63,8 +63,9 @@ finished:
   clouds, against the rule that werewolf's own programs are Zig
   ([shell-free.md](shell-free.md)).
 - **Settings were in the wrong place.** Until `service-config`, setting a
-  bastion destination meant forking the form. A destination is per
-  machine, not per fleet.
+  router's routes meant forking the form. A route is per machine, not per
+  fleet. (A bastion's users and destinations are the other way, by
+  choice: who reaches what is the image's, reviewed with it.)
 
 ## Goals
 
@@ -105,7 +106,7 @@ finished:
 | --- | --- | --- | --- |
 | **Form** | what runs: packages, services, policy | git, `forms/` | the software or the fleet's policy changes; rebuild |
 | **Settings** | who this machine serves: destinations, routes, hostname | the config tar, `settings.json` | per machine; re-read at every boot, no rebuild |
-| **Secrets** | host key, `authorized_keys`, `auth_key`, `data.key` | the config tar | on rotation |
+| **Secrets** | `authorized_keys`, `auth-key`, `data.key` | the config tar | on rotation |
 
 The form says what; the config says for whom. A changed destination is
 another `create`, not a new image.
@@ -113,20 +114,30 @@ another `create`, not a new image.
 ### The verbs
 
 ```
-howl build   FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-howl pack    FORM|--image IMAGE [-o FILE] [-n] [--on TARGET] CONFIG...
-howl run     FORM [--dev] [CONFIG...]                QEMU, in the foreground
-howl create  FORM|--image IMAGE NAME [--on TARGET] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
+howl build   --with FORM,... [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+howl pack    --with FORM [-o FILE] [-n] [--on TARGET] CONFIG...
+howl run     [--with FORM,...] [--on TARGET] [--dev] [CONFIG...]   create's machine werewolf-run; prod, or lima on Lima, with no --with
+howl ssh     [NAME] [-- COMMAND...]
+howl stop
+howl create  NAME --with FORM,... [--on TARGET] [--dev] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
 howl delete  NAME [--on TARGET]
-howl console NAME [--on TARGET]
+howl console [NAME] [--on TARGET]
 howl upload  FILE --on gcp|aws|azure
 howl build-apk RECIPE [--arch ARCH]                 a form's own melange package
+howl form    --with FORM,... --package PKG,... --oci NAME=REF --NAME.DIRECTIVE 'LINE' --KEY LINE --KEY.SUB VALUE -o DIR
 ```
+
+A form is a reference, `--with`, never a positional: one alone is run as
+it is; more, or anything added, is a form `howl` generates and builds,
+kept with `form -o` ([adhoc.md](adhoc.md)).
 
 `--arch` takes each world's spelling: `aarch64` or `arm64`, and `x86_64`,
 `x86-64` or `amd64`, in any case. werewolf makes it `aarch64` or `x86_64`,
 which make and release names use, and each cloud names it as it does:
-GCP `ARM64`/`X86_64`, AWS `arm64`/`x86_64`, Azure `Arm64`/`x64`.
+GCP `ARM64`/`X86_64`, AWS `arm64`/`x86_64`, Azure `Arm64`/`x64`. An
+image's name writes it `aarch64` or `x86-64`, as GCP's names take no
+underscore. `--arch` and `--size` are for the clouds; an engine here runs
+this machine's arch, and Proxmox takes `x86_64` alone.
 
 Two rules, stated once:
 
@@ -161,12 +172,12 @@ same for `pack`, `run` and `create`; `pack` writes the tar out, the
 others hand it to a machine.
 
 ```
---config DIR               files, as today: DIR/hostname, DIR/bastion/host_key, ...
+--config DIR               files, as today: DIR/hostname, DIR/nats/users.conf, ...
 --hostname NAME            the hostname file
 --ip CIDR --gw ADDR --dns ADDR   the network file: a static address
 --data-key FILE            data.key: /data goes in LUKS2
---NAME FILE                a file a service declared: --host-key, --authorized-keys, --auth-key
---KEY VALUE[,VALUE...]     a setting a service declared: --destinations, --routes
+--NAME FILE                a file a service declared: --users, --auth-key
+--KEY VALUE[,VALUE...]     a setting a service declared: --routes
 ```
 
 The flags are not written into the tool. The form's service files
@@ -174,9 +185,8 @@ declare them, and the CLI reads the form's chain to learn which flags
 this form takes and where each lands:
 
 ```
-config   host-key         /run/config/bastion/host_key       → --host-key FILE
-config   authorized-keys  /run/config/bastion/authorized_keys → --authorized-keys FILE
-setting  destinations     addrport...                        → --destinations ADDR:PORT,...
+config   users   /run/config/nats/users.conf → --users FILE
+setting  routes  cidr...                     → --routes CIDR,...
 ```
 
 `setting` is one new line in a service file: a key in `settings.json`
@@ -205,9 +215,9 @@ Lima, `create` gives a form with no DHCP client Lima's own network,
 console does. On bhyve it gives slirp's, `10.0.2.15/24` by `10.0.2.2`.
 
 The names are part of the form's interface, as the tar paths already
-are. A chain that declares the same name twice (a form on `prod-ssh`
-that adds a bastion: two `authorized-keys`) fails to build, and the form
-author renames one. Qualifying flags only when they collide would rename
+are. A chain that declares the same name twice (a form that takes two
+services, each with a `tls-cert`) fails to build, and the form author
+renames one. Qualifying flags only when they collide would rename
 a flag when a service is added, and break every script that used it.
 
 The declarations are already in the image: they are its service files,
@@ -219,7 +229,7 @@ the bytes that boot, not a source that may have moved on. The manifest
 carries no copy. A copy is a second source of truth, which could
 disagree with the image leash reads, and would make the release format
 promise a shape. `--image` waits for someone deploying without a
-checkout; until then `pack FORM` reads the same files from `./forms`.
+checkout; until then `pack --with FORM` reads the same files from `./forms`.
 
 A `--NAME FILE` flag reads a file. It never takes the value itself, so no
 secret is in `ps` or a shell history; `-` reads standard input, for a
@@ -233,8 +243,8 @@ tar is already a raw disk image; nothing else is needed to attach it.
 `pack` validates everything before it writes anything, with the same Zig
 functions the guest's `service-config` runs in the leash, moved to
 `lib/`: a route or destination that passes here passes there. It reads
-the form's `config` lines, so a bastion with no `authorized_keys` fails
-naming the file. `-n` checks and writes nothing, Venema's `postfix check`.
+the form's `config` lines, so a nats with no `users.conf` fails naming
+the file. `-n` checks and writes nothing, Venema's `postfix check`.
 `--on` sets the size ceiling the target enforces (AWS 16 KB, Azure 64
 KB, a disk none) and `pack` reports the size either way, because a tar
 of five small files is 6 KB of ustar headers and people will be
@@ -292,6 +302,13 @@ machine here with the debug shell. A form that serves ssh is up when its
 sshd answers, not only when init hands over, so `howl ssh` right after
 works.
 
+Whatever it runs on, `create` keeps a machine's files in
+`build/machines/NAME`, with `engine` there naming the platform, so
+`delete`, `console` and `ssh` find a machine without `--on`. On every
+platform the form it was made from is recorded under one name,
+`werewolf-form`: a cloud's label or tag, Proxmox's description, a
+comment in Lima's template.
+
 ### What the verbs say
 
 `build`, `run` and `create` say little: one line that names the phase
@@ -336,7 +353,7 @@ copy of a secret. `limactl start` waits for ssh, which never answers, so
 `create` waits for the MAC's DHCP lease, newer than any a deleted
 machine of the same name left, and prints `NAME ADDRESS FORM` on
 standard output and nothing else there. What it built is in
-`build/ARCH/machines/NAME`, which `delete` removes with the instance and
+`build/machines/NAME`, which `delete` removes with the instance and
 its config disk. Another `create` of a name that exists, with the same
 form, replaces its config: Lima keeps the template, which names the form
 in a comment, and the config disk is the tar's bytes, so werewolf stops
@@ -372,7 +389,7 @@ so `create` starts it through `doas` or `sudo` under `daemon(8)`,
 detached, running werewolf's own supervisor (`howl _bhyve`), which
 runs bhyve again after a reboot and destroys the VM when it stops; the
 console is bhyve's standard output, which `daemon` appends to
-`console.log` in `build/ARCH/machines/NAME`, where `console` reads it
+`console.log` in `build/machines/NAME`, where `console` reads it
 and `create` waits for the `up in` line. The network is slirp's (the
 `libslirp` package), as `run`'s is under QEMU, in its `open` mode, so
 the machine reaches out, as its updater must; `open` also keeps slirp's
@@ -381,7 +398,7 @@ helper process out of capability mode, where, run as root, FreeBSD
 form with no DHCP client gets `10.0.2.15/24` by `10.0.2.2` in its tar,
 and this host
 reaches the machine only through the ports slirp forwards, one host port
-on `127.0.0.1` per `listen tcp/PORT` in the form's `.net` files, from a
+on `127.0.0.1` per `listen tcp/PORT` in its chain's form.yaml `net`, from a
 base the name's sha256 picks between 20000 and 59900; `create` says
 which, and prints the first as the address. bhyve is the state:
 `/dev/vmm/NAME` exists while the VM does, and the machine's directory
@@ -406,11 +423,11 @@ machine is up 10 to 15 ms sooner with 20 MB more to spare. A rebuild
 does not change the root under a running machine: the build writes a
 new `root.erofs` rather than over the old, which Firecracker holds
 open until it next boots. Firecracker has
-no PCI, so `minimal.modules` carries `virtio_mmio`, its bus. Firecracker
+no PCI, so minimal's form.yaml `modules` carries `virtio_mmio`, its bus. Firecracker
 runs as the user and exits when the guest stops, for a reboot as for a
 halt, so `create` starts it detached, under `setsid`, through
 werewolf's own supervisor (`howl _firecracker DIR`), which keeps
-the console on `console.log` in `build/ARCH/machines/NAME`, tells a
+the console on `console.log` in `build/machines/NAME`, tells a
 reboot from a halt by the kernel's last line there, runs Firecracker
 again after a reboot, and leaves its pid in a pidfile, which is the
 state. Only the network needs root, through `sudo` or `doas`:
@@ -579,15 +596,16 @@ which tests the core of every other target.
 
 ### End to end
 
-A bastion, forwarding to one host, with the config directory keeping the
-host key for next time:
+A bastion, forwarding to one host. Its users, their keys and their
+destinations are its image's, from the form built on it
+([bastion](../../forms/bastion/README.md)); it makes its host key on its
+first boot, on /data (`ssh-host-key`), and says the fingerprint on its
+console:
 
 ```sh
-howl create bastion edge --on gcp --config edge \
-    --authorized-keys ~/.ssh/id_ed25519.pub --destinations 10.20.0.10:22
+howl create edge --with edge --on gcp   # forms/edge/form.yaml: base: bastion, bastion: users: ...
 ```
 ```
-edge/bastion/host_key: generated, SHA256:k2w...
 edge  34.1.2.3  bastion  SHA256:k2w...  (verify before connecting)
 ssh -J bastion@34.1.2.3 you@10.20.0.10
 ```
@@ -599,7 +617,7 @@ so another `create` with new routes does not re-enroll:
 
 ```sh
 op read op://infra/tailscale/auth-key |
-    howl create tailscale router --on gcp --auth-key - --routes 10.20.0.0/24
+    howl create router --with tailscale --on gcp --auth-key - --routes 10.20.0.0/24
 ```
 ```
 router  34.1.2.4  tailscale
@@ -609,22 +627,23 @@ approve 10.20.0.0/24 for router at https://login.tailscale.com/admin/machines
 The same two, for a hypervisor this tool does not know:
 
 ```sh
-howl build bastion -o edge.qcow2
-howl pack bastion -o edge.tar --config edge --authorized-keys ~/.ssh/id_ed25519.pub \
-    --destinations 10.20.0.10:22
+howl build --with edge -o edge.qcow2          # the bastion: no config tar, its users are its image's
+howl build --with tailscale -o router.qcow2
+howl pack --with tailscale -o router.tar --auth-key - --routes 10.20.0.0/24
 qm importdisk 100 edge.qcow2 local-lvm
-qm importdisk 100 edge.tar local-lvm --format raw
+qm importdisk 101 router.qcow2 local-lvm
+qm importdisk 101 router.tar local-lvm --format raw
 ```
 
 ### Checked against three services
 
 **OpenBao.** Two files (`tls-cert`, `tls-key`), two settings
 (`api-addr url`, `cluster-addr url`), raft under `/data/svc/openbao`,
-8200 and 8201 in the `.net`. All inputs fit, for a single node; a
+8200 and 8201 in its `net`. All inputs fit, for a single node; a
 cluster's `retry_join` is a list of objects, which no format in
 [settings.md](settings.md) renders. Auto-unseal with a cloud KMS needs the
 service to reach the metadata server, which fence allows no one, and the
-`.net`, being by port, cannot name. Auto-unseal is not optional
+`net`, being by port, cannot name. Auto-unseal is not optional
 here: with Shamir, bao comes up sealed after every reboot, and werewolf
 reboots itself on every update. Its first boot also *produces* secrets,
 the unseal keys and root token. The tool never fetches them; `create`

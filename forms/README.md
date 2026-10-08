@@ -29,12 +29,16 @@ build/host/form (tools/form.zig) reads them for the build.
 | `base` | the form it is built on, a name in forms/ | |
 | `with` | forms it takes beside its base, as a Mastodon takes `[postgresql, valkey, nginx]`: their parts come before its own | added to |
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `popen-shim.so` (a library) | added to |
-| `net` | its network policy: `listen tcp/PORT`, `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER` ([docs/design/fence.md](../docs/design/fence.md)) | added to |
+| `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
+| `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
+| `net` | its network policy: `listen tcp/PORT... [loopback]`, `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER` ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
 | `prune` | files its packages bring that nothing runs, as each is in the image: `usr/bin/bash` | added to |
 | `dev` | packages for DEV=1 builds alone: a daemon's client, for its checks | added to |
-| `modules` | kernel modules it loads: `ARCH: MODULE...` for one arch, `@TAG: MODULE` for a machine stage0 tags (quote a line with a colon) | added to |
+| `modules` | kernel modules it loads, `MODULE...`; `ARCH MODULE...` for one arch (`aarch64 virtio_mmio`); `@TAG MODULE...` for a machine stage0 tags (`"@xfs xfs"`, quoted, as YAML wants a value that starts with @); both, arch first: `aarch64 @hyperv hv_netvsc` | added to |
 | `weaknesses` | the posture checks it fails, each with its excuse: why this image has the weakness, not what the check tests. `?ID` may fail or not, as the host decides. None named, none excused: any posture failure fails `make check` | its own |
-| `check` | how `make check` boots it: `memory` (MiB), `offline: true`, `web` (a port test/boot drives from the host), `skip` (checks of test/checks it skips), `native: false` (not checked under systemd-nspawn, as every other form is; say why) | its own |
+| `sshd` | sshd_config settings, each named in lowercase with dashes, from a closed list ([lib/sshd.zig](../lib/sshd.zig)): `pubkey-accepted-algorithms: ssh-ed25519,sk-ssh-ed25519@openssh.com` lets key files in beside security keys. The image holds them in `/etc/ssh/sshd_config.d/form.conf`, which sshd reads before werewolf's policy. Only where the chain has the `sshd` form or the `bastion`; a setting posture checks wants its weakness named. howl's `--sshd.KEYWORD=VALUE` writes the same | a later form's value in place of its base's |
+| `bastion` | the bastion's users: `users:`, each a name with `keys:` (lines of a `.pub`, security keys' unless `sshd:` takes key files) and `destinations:` (literal `ADDRESS:PORT`s). The image holds them in `/etc/ssh/bastion`, each key held to its user's destinations ([bastion](bastion/README.md)) | added to |
+| `check` | how `make check` boots it: `memory` (MiB, a number), `offline: true`, `web` (a port test/boot drives from the host), `skip` (a list of the checks of test/checks it skips), `native: false` (not checked under systemd-nspawn, as every other form is; say why). `offline` and `native` are `true` or `false`; anything else fails the build | its own |
 
 What a form's chain gives it, it cannot take away, only add to. Its own
 keys are its own because they describe the machine as built: a form on

@@ -17,7 +17,7 @@ openssl as [forms/step-ca/test/config](test/config) does), and give
 the machine the intermediate alone.
 
 ```sh
-build/host/howl pack step-ca -o config.tar --config config \
+build/host/howl pack --with step-ca -o config.tar --config config \
 	--names ca.example.internal --domains example.internal,app.example.internal
 ```
 

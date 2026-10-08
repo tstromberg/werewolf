@@ -10,6 +10,9 @@ While reviewing this proposal, focus on answering for yourself:
 
 Built, 2026-10-07: `lib/settings.zig`, `service-config` and leash's
 `setting` and `render` lines; the bastion and Tailscale forms use them.
+Since 2026-10-08 the bastion takes no settings: its users and their
+destinations are its image's, from form.yaml's `bastion:`
+([forms/bastion/README.md](../../forms/bastion/README.md)).
 The guest's half of [cli.md](cli.md); `howl pack` checks with the
 same library on the host.
 
@@ -27,10 +30,10 @@ renderer.
 
 A form says what runs; the config tar ([cloud.md](../cloud.md)) says
 what is particular to one machine. Secrets in the tar are files, and
-leash already hands them to a service: `config host-key
-/run/config/bastion/host_key` copies that file into
-`/run/svc/sshd/host-key`, mode 0600, owned by the service, at every
-start ([programs.md](../programs.md)).
+leash already hands them to a service: `config authorized-keys
+/run/config/bastion/authorized_keys` copies that file into
+`/run/svc/sshd/authorized-keys`, mode 0600, owned by the service, at
+every start ([programs.md](../programs.md)).
 
 *Settings* are the other half: values that are not secret but differ per
 machine, such as a bastion's destinations, a router's routes, a server's
@@ -69,7 +72,8 @@ setting before boot without its own copy of each case.
 
 - Secrets. They stay files, through `config` and `secret`, and never
   pass through a renderer, so a renderer has nothing to leak.
-- A template language, an expression, or a path into nested structure.
+- A template language, an expression, or a path into a list. A `json`
+  key with dots, `a.b.c`, names a nested object's key, and no more.
 - Every daemon's syntax. A format is added when a form needs it and none
   of the three will do.
 - Changing settings on a running machine. Settings change with the tar;
@@ -91,8 +95,7 @@ names, which leash copies as it copies any `config` file. With `setting`
 lines that line is required, and its file is not: a missing file is no
 values. The path is the service file's to say, not derived from the
 service's name, because a service's name is not always its own to pick:
-the bastion's is `sshd`, so that it replaces the `sshd` service `minimal`
-runs whenever OpenSSH is installed, while its files live in
+the bastion's is `sshd`, as the service sshd is, while its files live in
 `/run/config/bastion`.
 
 `setting` declares one. `NAME` is a plain lowercase name: the key in
@@ -184,7 +187,10 @@ passes on.
 several (openbao's `-config`, given twice). With `from`, it is a daemon
 that reads one, such as Tailscale's or step-ca's: the base's other keys,
 `locked` among them, pass through untouched, and the settings can only
-replace the keys declared. Keys are top-level only.
+replace the keys declared. A key with dots, `a.b.c`, is a path into
+nested objects (step-ca's `authority.policy.x509.allow.dns`, openbao's
+`seal.static.current_key_id`), made where the base has none; a list is
+never entered.
 
 **`conf`** is for line-oriented daemons, such as sshd and valkey. A
 `bool` is `yes` or `no`. Where the rendered file is included decides
@@ -247,7 +253,7 @@ run earlier.
 
 | Form | Settings | Format | |
 | --- | --- | --- | --- |
-| `bastion` | `destinations addrport...` | `conf` | as today |
+| `bastion` | `destinations addrport...` | `conf` | since 2026-10-08, form.yaml's `bastion:` instead |
 | `tailscale` | `routes cidr...` | `json from` | as today |
 | `openbao` | `api-addr url required`, `cluster-addr url required` | `json` | a single node |
 | `step-ca` | `dns-names hostname...`, `address hostport` | `json from` | |
@@ -340,8 +346,8 @@ which may not allow the writes.
 ### A path language for nested JSON
 
 `as storage.raft.retry_join[].leader_api_addr` would serve clustered
-OpenBao. Each such language grows until it is jq. Top-level keys serve
-every form planned but two.
+OpenBao. Each such language grows until it is jq. Dotted keys into nested
+objects, without lists, serve every form planned but two.
 
 ### More formats now: YAML, TOML, Java properties
 
