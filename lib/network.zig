@@ -6,7 +6,7 @@
 //! For machines whose network gives no address by DHCP: a hypervisor of
 //! your own, bare metal, a form with no DHCP client. init reads it when
 //! the command line has no werewolf.ip, before it brings the network up,
-//! and the host's werewolf pack checks it with this same parser; iface-up,
+//! and the host's howl pack checks it with this same parser; iface-up,
 //! which gives the NIC the address, checks it with the same rules (address
 //! and gateway, below), so what the host packs the machine takes. IPv4: a
 //! dotted quad with no leading zeros, a prefix of 1 to 32 in plain digits,

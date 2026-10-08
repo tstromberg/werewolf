@@ -21,7 +21,7 @@
 //! first boot whole, and restarts the VM once where it was not.
 
 const std = @import("std");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const images = @import("image.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -41,7 +41,7 @@ pub const Place = struct { group: []const u8, location: []const u8 };
 
 /// The resource group the az CLI defaults to, and where it is, or a
 /// refusal saying what to set.
-pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
+pub fn place(io: Io, gpa: Allocator, why: *howl.Why) !Place {
     const group = call(
         io,
         gpa,
@@ -99,7 +99,7 @@ fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
 
 /// az's output, or a refusal with its last line, which says what is
 /// wrong.
-fn need(io: Io, gpa: Allocator, p: Place, args: []const []const u8, why: *ww.Why) ![]const u8 {
+fn need(io: Io, gpa: Allocator, p: Place, args: []const []const u8, why: *howl.Why) ![]const u8 {
     const r = call(io, gpa, try az(gpa, p, args));
     if (!r.ok) return why.refuse("az {s}: {s}", .{ args[0], lastLine(r.err) });
     return r.out;
@@ -149,7 +149,7 @@ pub fn ensureImage(
     arch: []const u8,
     disk: []const u8,
     work: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) ![]const u8 {
     const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     if (ask(
@@ -159,10 +159,10 @@ pub fn ensureImage(
         &.{ "disk", "show", "-n", name, "--query", "diskState", "-o", "tsv" },
     )) |state| {
         if (!uploading(state)) {
-            ww.say(io, "image {s}: there already", .{name});
+            howl.say(io, "image {s}: there already", .{name});
             return name;
         }
-        ww.say(io, "image {s}: left mid-upload ({s}); making it again", .{ name, state });
+        howl.say(io, "image {s}: left mid-upload ({s}); making it again", .{ name, state });
         _ = ask(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" });
         _ = try need(io, gpa, p, &.{ "disk", "delete", "-n", name, "--yes", "-o", "none" }, why);
     }
@@ -174,10 +174,10 @@ pub fn ensureImage(
             .{},
         );
     }
-    ww.say(io, "image {s}: making it from {s}", .{ name, disk });
+    howl.say(io, "image {s}: making it from {s}", .{ name, disk });
     const vhd = try gpa.print("{s}/disk.vhd", .{work});
     defer Dir.cwd().deleteFile(io, vhd) catch {};
-    try ww.run(io, why, &.{
+    try howl.run(io, why, &.{
         "qemu-img", "convert",
         "-f",       "qcow2",
         "-O",       "vpc",
@@ -226,8 +226,8 @@ pub fn ensureImage(
         "-o",
         "tsv",
     }, why);
-    ww.say(io, "image {s}: uploading {d} bytes", .{ name, size });
-    try ww.run(
+    howl.say(io, "image {s}: uploading {d} bytes", .{ name, size });
+    try howl.run(
         io,
         why,
         &.{ "azcopy", "copy", vhd, sas, "--blob-type", "PageBlob", "--log-level", "ERROR" },
@@ -281,7 +281,7 @@ pub fn create(
     size: ?[]const u8,
     image: []const u8,
     tar: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     const m = machine(arch);
     const disk = try copyDisk(gpa, name);
@@ -370,14 +370,14 @@ pub fn create(
         // it made (docs/design/cli.md), but says so, and how it goes.
         const said = Dir.cwd().readFileAlloc(io, err_path, gpa, .limited(64 << 10)) catch "";
         return why.refuse(
-            "az vm: {s}; its disk {s} is left, which werewolf delete {s} --on azure removes",
+            "az vm: {s}; its disk {s} is left, which howl delete {s} --on azure removes",
             .{ lastLine(said), disk, name },
         );
     }
     if (!enabled)
         _ = try need(io, gpa, p, &.{ "vm", "boot-diagnostics", "enable", "-n", name }, why);
     if (try awaitUpWithin(io, gpa, p, name, "", first_boot_seconds) != .late) return;
-    ww.say(io, "{s}: its first boot was not watched from the start; restarting it once", .{name});
+    howl.say(io, "{s}: its first boot was not watched from the start; restarting it once", .{name});
     _ = try need(io, gpa, p, &.{ "vm", "restart", "-n", name, "-o", "none" }, why);
 }
 
@@ -394,11 +394,11 @@ pub fn reconfigure(
     name: []const u8,
     tar: []const u8,
     dir: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     const set = try gpa.print("{s}/userdata.set", .{dir});
     const b64 = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(tar.len));
-    try ww.writePrivate(
+    try howl.writePrivate(
         io,
         gpa,
         set,
@@ -536,7 +536,7 @@ pub fn openArgs(
 /// The VM, with its OS disk and NIC; then the network az made for it,
 /// named as az names them, and the disk copy, if a failed create left it;
 /// the image stays. Nothing is said of what was gone already.
-pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) !void {
+pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !void {
     if (find(io, gpa, p, name) != null)
         _ = try need(io, gpa, p, &.{ "vm", "delete", "-n", name, "--yes", "-o", "none" }, why);
     // Azure frees each only once what uses it has gone, which the VM's
@@ -555,7 +555,7 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) 
             try io.sleep(.fromSeconds(3), .awake);
             r = call(io, gpa, try az(gpa, p, args));
         }
-        if (!r.ok) ww.say(
+        if (!r.ok) howl.say(
             io,
             "{s}: its {s} {s} is left ({s}): az network {s} delete -g {s} -n {s}",
             .{ name, kind, what, lastLine(r.err), kind, p.group, what },

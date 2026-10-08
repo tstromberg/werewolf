@@ -15,7 +15,7 @@
 //! made again from the key.
 //!
 //! Every start logs the key's fingerprint and public half, for an operator
-//! to pin (werewolf console NAME), never the private half.
+//! to pin (howl console NAME), never the private half.
 
 const std = @import("std");
 const hostkey = @import("hostkey");

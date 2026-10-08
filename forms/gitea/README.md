@@ -13,7 +13,7 @@ The `gitea` form is `prod` with Gitea 1.26 hosting git repositories, with
 
 ```sh
 printf '%s' 'a long administrator password' >config/gitea/admin_password
-build/host/werewolf pack gitea -o config.tar --config config \
+build/host/howl pack gitea -o config.tar --config config \
 	--url https://git.example.com/ --domain git.example.com --admin-email me@example.com
 ```
 

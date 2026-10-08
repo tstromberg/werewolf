@@ -165,7 +165,7 @@ gcloud compute images create werewolf --source-uri gs://BUCKET/werewolf.tar.gz \
 `make check-gcp` does this with a disk built from the tree, boots it and
 checks it there, then deletes it ([testing.md](testing.md)).
 
-**AWS**: `werewolf upload prod-ssh-x86_64-disk.qcow2 --on aws` writes
+**AWS**: `howl upload prod-ssh-x86_64-disk.qcow2 --on aws` writes
 the disk straight into an EBS snapshot, only its blocks that hold data,
 registers it as a UEFI image with ENA and IMDSv2 alone, and prints the
 AMI's id; nothing needs setting up first. By hand, without werewolf, VM

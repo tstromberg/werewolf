@@ -31,8 +31,8 @@ melange_version=0.61.4
 zig_version=0.17.0 # the Makefile's ZIG_VERSION
 erofs_version=1.9.4
 erofs_sha256=7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
-# Firecracker, on Linux: werewolf create keeps machines on it where there
-# is KVM (cmd/werewolf/firecracker.zig); no distribution packages it.
+# Firecracker, on Linux: howl create keeps machines on it where there
+# is KVM (cmd/howl/firecracker.zig); no distribution packages it.
 fc_version=1.17.0
 
 die() {
@@ -183,7 +183,7 @@ FreeBSD)
 	# ASSUME_ALWAYS_YES also bootstraps pkg itself without asking.
 	install="env ASSUME_ALWAYS_YES=yes pkg install"
 	# Its base has bsdtar, nc, xz and zstd; ports have no erofs-utils.
-	# bhyve-firmware and libslirp are for werewolf create, which keeps
+	# bhyve-firmware and libslirp are for howl create, which keeps
 	# machines on bhyve: its UEFI firmware, and its user-mode network.
 	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect bhyve-firmware libslirp"
 	apko_pkgs=''
@@ -434,7 +434,7 @@ fi
 case $pm in
 pkg)
 	[ -e /dev/vmmctl ] ||
-		echo "install-deps: vmm is not loaded, so werewolf create boots under QEMU, emulated, and keeps nothing: kldload vmm; sysrc kld_list+=vmm keeps it loaded"
+		echo "install-deps: vmm is not loaded, so howl create boots under QEMU, emulated, and keeps nothing: kldload vmm; sysrc kld_list+=vmm keeps it loaded"
 	;;
 pkgin)
 	if [ ! -e /dev/nvmm ]; then

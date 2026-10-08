@@ -19,7 +19,7 @@
 //!   that is not the subnet's network or broadcast, loopback, multicast or
 //!   zero, and a gateway that is none of those either, nor the address.
 //!   The rules are lib/network.zig's, which the config tar's network file
-//!   and werewolf pack are held to as well, so all three agree.
+//!   and howl pack are held to as well, so all three agree.
 //! - It opens its one socket, then pledges (lib/sandbox.zig): every
 //!   capability but CAP_NET_ADMIN gone, from the bounding set too, never to
 //!   come back, and a seccomp filter allowing ioctl only for the five

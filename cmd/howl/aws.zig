@@ -15,7 +15,7 @@
 //! is its name, and its werewolf-form tag the form it was made from.
 
 const std = @import("std");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const images = @import("image.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -39,7 +39,7 @@ pub const Place = struct { region: []const u8 };
 /// The region the aws CLI works in, or a refusal saying why not: the one
 /// it resolves, from the environment or its config, as an EC2 call shows
 /// it, which also says whether it has credentials.
-pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
+pub fn place(io: Io, gpa: Allocator, why: *howl.Why) !Place {
     const region = call(io, gpa, &.{
         "aws",                             "ec2",
         "describe-availability-zones",     "--query",
@@ -83,7 +83,7 @@ fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
 }
 
 /// aws's output, or a refusal with its error.
-fn need(io: Io, gpa: Allocator, p: Place, args: []const []const u8, why: *ww.Why) ![]const u8 {
+fn need(io: Io, gpa: Allocator, p: Place, args: []const []const u8, why: *howl.Why) ![]const u8 {
     const r = call(io, gpa, try aws(gpa, p, args));
     if (!r.ok) return why.refuse("aws {s} {s}: {s}", .{ args[0], args[1], lastLine(r.err) });
     return r.out;
@@ -122,7 +122,7 @@ pub fn ensureImage(
     arch: []const u8,
     disk: []const u8,
     work: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) ![]const u8 {
     const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     if (ask(io, gpa, p, &.{
@@ -135,14 +135,14 @@ pub fn ensureImage(
         "--query",
         "Images[0].ImageId",
     })) |id| {
-        ww.say(io, "image {s}: there already, {s}", .{ name, id });
+        howl.say(io, "image {s}: there already, {s}", .{ name, id });
         return id;
     }
-    ww.say(io, "image {s}: making it from {s}", .{ name, disk });
+    howl.say(io, "image {s}: making it from {s}", .{ name, disk });
     // Raw, so a block is at its offset; sparse where the disk is empty.
     const raw = try gpa.print("{s}/disk.raw", .{work});
     defer Dir.cwd().deleteFile(io, raw) catch {};
-    try ww.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
+    try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
     const snapshot = try writeSnapshot(io, gpa, p, name, form, raw, work, why);
     const m = machine(arch);
     return need(io, gpa, p, &.{
@@ -193,7 +193,7 @@ fn writeSnapshot(
     form: []const u8,
     raw: []const u8,
     work: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) ![]const u8 {
     var f = try Dir.cwd().openFile(io, raw, .{});
     defer f.close(io);
@@ -263,7 +263,7 @@ fn writeSnapshot(
         written += 1;
     }
     for (&slots) |*s| try finish(io, gpa, s, why);
-    ww.say(io, "image {s}: {d} blocks, {d} MiB, in snapshot {s}", .{
+    howl.say(io, "image {s}: {d} blocks, {d} MiB, in snapshot {s}", .{
         name,
         written,
         written * block_size >> 20,
@@ -300,7 +300,7 @@ fn writeSnapshot(
 
 /// The block a slot sent, waited for: a refusal, with what aws said, if it
 /// was not taken.
-fn finish(io: Io, gpa: Allocator, s: *Slot, why: *ww.Why) !void {
+fn finish(io: Io, gpa: Allocator, s: *Slot, why: *howl.Why) !void {
     var child = s.child orelse return;
     s.child = null;
     const term = child.wait(io) catch |err|
@@ -345,7 +345,7 @@ fn instance(text: []const u8) ?Instance {
 
 /// The machine's security group, werewolf-NAME, in the default VPC: no
 /// rule lets anything in, and its owner adds what should.
-fn securityGroup(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) ![]const u8 {
+fn securityGroup(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) ![]const u8 {
     const group = try gpa.print("werewolf-{s}", .{name});
     if (ask(io, gpa, p, &.{
         "ec2",
@@ -372,7 +372,7 @@ fn securityGroup(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Wh
 /// A default subnet in a zone that offers kind: not every zone has every
 /// instance type (us-east-1e has no t4g), and AWS, left to choose, may
 /// choose one that does not.
-fn defaultSubnet(io: Io, gpa: Allocator, p: Place, kind: []const u8, why: *ww.Why) ![]const u8 {
+fn defaultSubnet(io: Io, gpa: Allocator, p: Place, kind: []const u8, why: *howl.Why) ![]const u8 {
     const zones = ask(io, gpa, p, &.{
         "ec2",
         "describe-instance-type-offerings",
@@ -437,7 +437,7 @@ pub fn create(
     size: ?[]const u8,
     ami: []const u8,
     b64: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) ![]const u8 {
     const kind = size orelse machine(arch).kind;
     const subnet = try defaultSubnet(io, gpa, p, kind, why);
@@ -479,7 +479,7 @@ pub fn reconfigure(
     p: Place,
     id: []const u8,
     b64: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     // modify-instance-attribute takes user data already in base64, unlike
     // run-instances: the base64 of the file, so the machine reads the same
@@ -488,16 +488,16 @@ pub fn reconfigure(
         return why.refuse("{s}: {s}", .{ b64, @errorName(err) });
     const again = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(text.len));
     const value = try gpa.print("{s}.b64", .{b64});
-    try ww.writePrivate(io, gpa, value, std.base64.standard.Encoder.encode(again, text), why);
+    try howl.writePrivate(io, gpa, value, std.base64.standard.Encoder.encode(again, text), why);
     defer Dir.cwd().deleteFile(io, value) catch {};
 
-    try ww.run(io, why, try aws(gpa, p, &.{ "ec2", "stop-instances", "--instance-ids", id }));
-    try ww.run(
+    try howl.run(io, why, try aws(gpa, p, &.{ "ec2", "stop-instances", "--instance-ids", id }));
+    try howl.run(
         io,
         why,
         try aws(gpa, p, &.{ "ec2", "wait", "instance-stopped", "--instance-ids", id }),
     );
-    try ww.run(io, why, try aws(gpa, p, &.{
+    try howl.run(io, why, try aws(gpa, p, &.{
         "ec2",
         "modify-instance-attribute",
         "--instance-id",
@@ -507,7 +507,7 @@ pub fn reconfigure(
         "--value",
         try gpa.print("file://{s}", .{value}),
     }));
-    try ww.run(io, why, try aws(gpa, p, &.{ "ec2", "start-instances", "--instance-ids", id }));
+    try howl.run(io, why, try aws(gpa, p, &.{ "ec2", "start-instances", "--instance-ids", id }));
 }
 
 /// The instance's public address.
@@ -613,15 +613,15 @@ pub fn delete(
     p: Place,
     name: []const u8,
     inst: ?Instance,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     if (inst) |i| {
-        try ww.run(
+        try howl.run(
             io,
             why,
             try aws(gpa, p, &.{ "ec2", "terminate-instances", "--instance-ids", i.id }),
         );
-        try ww.run(
+        try howl.run(
             io,
             why,
             try aws(gpa, p, &.{ "ec2", "wait", "instance-terminated", "--instance-ids", i.id }),
@@ -634,7 +634,7 @@ pub fn delete(
         try gpa.print("Name=group-name,Values=werewolf-{s}", .{name}),
         "--query",
         "SecurityGroups[0].GroupId",
-    })) |group| try ww.run(
+    })) |group| try howl.run(
         io,
         why,
         try aws(gpa, p, &.{ "ec2", "delete-security-group", "--group-id", group }),

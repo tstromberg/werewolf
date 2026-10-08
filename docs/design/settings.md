@@ -10,7 +10,7 @@ While reviewing this proposal, focus on answering for yourself:
 
 Built, 2026-10-07: `lib/settings.zig`, `service-config` and leash's
 `setting` and `render` lines; the bastion and Tailscale forms use them.
-The guest's half of [cli.md](cli.md); `werewolf pack` checks with the
+The guest's half of [cli.md](cli.md); `howl pack` checks with the
 same library on the host.
 
 ## Summary
@@ -19,7 +19,7 @@ A service file declares its per-machine settings, each with a type from a
 closed set of ten, and one of three formats to render them in: `env`,
 `json` or `conf`. One program, `service-config`, renders any service's
 settings from the config tar, unprivileged, inside the service's leash;
-the host's `werewolf pack` validates with the same code. A new service
+the host's `howl pack` validates with the same code. A new service
 gets per-machine settings by writing two lines in its service file, not a
 renderer.
 
@@ -59,7 +59,7 @@ setting before boot without its own copy of each case.
   same output and the same refusals: its tests carry over unchanged.
 - A form adds a setting in one line of its service file, with no Zig.
 - The host and the guest validate with one function per type, in `lib/`.
-  A setting `werewolf pack` accepts, the guest accepts.
+  A setting `howl pack` accepts, the guest accepts.
 - A setting cannot add a directive, a key or a variable the service file
   did not declare. The image's review still describes the machine.
 - The forms in service-forms.md and the runtime forms' applications are
@@ -234,7 +234,7 @@ change past a restart.
 
 ### On the host
 
-`lib/settings.zig` is linked into `werewolf` too ([cli.md](cli.md)).
+`lib/settings.zig` is linked into `howl` too ([cli.md](cli.md)).
 `pack` reads each service's `setting` and `render` lines from the form's
 service files, in `./forms` or, later, in the image itself, offers
 `--NAME` for each
@@ -275,7 +275,7 @@ second form with the same need, or stay single-node.
 3. `make check`: the bastion and Tailscale forms boot with settings, and
    the rendered files are compared with what is expected; a fuzz test of
    each type's parser.
-4. `werewolf pack` links the library ([cli.md](cli.md), its first step).
+4. `howl pack` links the library ([cli.md](cli.md), its first step).
 5. The forms in service-forms.md, as they arrive.
 
 ## Drawbacks
@@ -395,7 +395,7 @@ form's reviewer already reads.
   a tmpfs. A machine's settings are what its tar says, every boot.
 - **Fail closed, and say so.** A refused setting keeps its service down
   with one structured line, like a missing key. The host's `pack`
-  refuses the same value first, so on a machine made with `werewolf` it
+  refuses the same value first, so on a machine made with `howl` it
   is reached only by a hand-made tar.
 - **Updates that change settings are caught by the update.** A setting
   renamed or retyped in a new image refuses an old tar; the new slot does

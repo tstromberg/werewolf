@@ -2,7 +2,7 @@
 //! style (melange.mk), built as the form's build builds it, for the
 //! recipe's author to try before a form keeps it in forms/NAME/melange/.
 //!
-//!     werewolf build-apk RECIPE [--arch ARCH]
+//!     howl build-apk RECIPE [--arch ARCH]
 //!
 //! make's _build-apk does the work, as build's _dist-form does: melange in
 //! bubblewrap on Linux, or on macOS in QEMU from werewolf's own Alpine
@@ -11,16 +11,16 @@
 //! letters, digits and . _ - /, since make takes it as a word.
 
 const std = @import("std");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-const syntax = "werewolf build-apk RECIPE [--arch ARCH]";
+const syntax = "howl build-apk RECIPE [--arch ARCH]";
 
-pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *ww.Why) !void {
+pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
     var recipe: ?[]const u8 = null;
-    var arch: []const u8 = ww.hostArch();
+    var arch: []const u8 = howl.hostArch();
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
@@ -37,17 +37,17 @@ pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *ww.Why) !vo
         } else recipe = a;
     }
     const r = recipe orelse return why.refuse("{s}", .{syntax});
-    arch = ww.archName(arch) orelse return why.refuse(ww.arch_refusal, .{arch});
+    arch = howl.archName(arch) orelse return why.refuse(howl.arch_refusal, .{arch});
     if (!isRecipePath(r)) return why.refuse(
         "{s}: a recipe is a .yaml path of [A-Za-z0-9._/-]",
         .{r},
     );
     Dir.cwd().access(io, r, .{}) catch return why.refuse("{s}: no such recipe", .{r});
     var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
+        return why.refuse("no ./forms: run howl in a werewolf checkout", .{});
     forms.close(io);
-    try ww.run(io, why, &.{
-        ww.make_cmd,
+    try howl.run(io, why, &.{
+        howl.make_cmd,
         "--no-print-directory",
         try gpa.print("ARCH={s}", .{arch}),
         try gpa.print("RECIPE={s}", .{r}),

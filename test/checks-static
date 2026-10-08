@@ -1,5 +1,5 @@
 # minimal, which has no DHCP client, booted with no werewolf.ip and a config
-# tar from werewolf pack --ip --gw --dns (make check; see test/checks for the
+# tar from howl pack --ip --gw --dns (make check; see test/checks for the
 # format): init must take the address from the tar's network file
 # (lib/network.zig), before it brings the network up, and say so.
 

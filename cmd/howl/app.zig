@@ -11,7 +11,7 @@
 //! same image.
 
 const std = @import("std");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -47,7 +47,7 @@ pub fn stage(
     src: []const u8,
     root: []const u8,
     at: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !Staged {
     var from = Dir.cwd().openDir(io, src, .{ .iterate = true }) catch |err|
         return why.refuse("--app {s}: {s}", .{ src, @errorName(err) });
@@ -140,7 +140,7 @@ test stage {
     try tmp.dir.writeFile(io, .{ .sub_path = "src/lib/util.py", .data = "x = 1\n" });
     const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     const src = try std.fs.path.join(gpa, &.{ root, "src" });
-    var why: ww.Why = .{};
+    var why: howl.Why = .{};
 
     const a = try stage(
         io,

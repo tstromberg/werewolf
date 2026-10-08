@@ -10,8 +10,8 @@
 #                        DISK_MIB sets its size (8192), DISK_ARGS adds kernel arguments
 #   make config-tar      pack config/ (ssh keys, hostname, data.key) into the tar run attaches
 #   make list-forms      each form and the forms it includes
-#   make werewolf        the werewolf command, for this machine: build/host/werewolf;
-#                        werewolf pack FORM packs a config tar from flags (docs/design/cli.md)
+#   make howl            the howl command, for this machine: build/host/howl;
+#                        howl pack FORM packs a config tar from flags (docs/design/cli.md)
 #   make install         that command on your PATH, to run in a werewolf checkout;
 #                        make uninstall removes it
 #
@@ -358,8 +358,8 @@ endif
 # (docs/design/fence.md). A line it cannot compile fails the build.
 
 BUILD = build/$(ARCH)
-# APP: an application's files, staged by werewolf build, run or create
-# --app (cmd/werewolf/app.zig) and laid over the image where the form keeps
+# APP: an application's files, staged by howl build, run or create
+# --app (cmd/howl/app.zig) and laid over the image where the form keeps
 # its application (etc/werewolf/app). An image with one builds apart.
 APP ?=
 OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)
@@ -375,7 +375,7 @@ MACHINE = q35
 CONSOLE = ttyS0
 endif
 # A Linux host without /dev/kvm (some CI runners) emulates, slowly, and so
-# does FreeBSD, since QEMU has no bhyve (werewolf create --on bhyve has).
+# does FreeBSD, since QEMU has no bhyve (howl create --on bhyve has).
 # NetBSD accelerates with NVMM once loaded (modload nvmm): experimental.
 ifeq ($(ARCH),$(HOST_ARCH))
 ACCEL = $(if $(filter Darwin,$(HOST_OS)),hvf,$(if $(wildcard /dev/kvm),kvm,$(if $(wildcard /dev/nvmm),nvmm,tcg)))
@@ -746,11 +746,11 @@ cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
 	NVD_API_KEY=$${NVD_API_KEY:-$$(cat $(NVD_API_KEY_FILE))} \
 	$(CVE_TIERS_BIN) "$$kernel" build/tiers/origins build/tiers/nvd build/tiers/in build/tiers/cve-tiers.json
 
-# The werewolf command (cmd/werewolf), built for this machine, not the image.
-WEREWOLF = build/host/werewolf
-.PHONY: werewolf
-werewolf: $(WEREWOLF)
-$(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settings.zig lib/update-policy.zig \
+# The howl command (cmd/howl), built for this machine, not the image.
+HOWL = build/host/howl
+.PHONY: howl
+howl: $(HOWL)
+$(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/form.zig
 	$(zig_check)
 	@# Beside it, then renamed over it: a build while werewolf runs (a
@@ -760,13 +760,14 @@ $(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settin
 	@# one file.
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
-# The werewolf command on your PATH: in the first of ~/bin, ~/.local/bin
-# and /usr/local/bin that is on it and yours to write, or else in
+# The howl command on your PATH: in the first of ~/bin, ~/.local/bin and
+# /usr/local/bin that is on it and yours to write, or else in
 # ~/.local/bin, made, with a word that it is not on your PATH. Beside the
 # old one, then renamed over it, as above. It reads ./forms and runs make,
-# so it runs in a werewolf checkout, as build/host/werewolf does.
+# so it runs in a werewolf checkout, as build/host/howl does. The command
+# was called werewolf once: one of those that make install put there goes.
 INSTALL_DIRS = $(HOME)/bin $(HOME)/.local/bin /usr/local/bin
-install: $(WEREWOLF)
+install: $(HOWL)
 	@set -e; bindir=; \
 	for d in $(INSTALL_DIRS); do \
 		if echo "$$PATH" | tr ':' '\n' | grep -qx "$$d" && [ -d "$$d" ] && [ -w "$$d" ]; then bindir=$$d; break; fi; \
@@ -775,17 +776,21 @@ install: $(WEREWOLF)
 		bindir=$(HOME)/.local/bin; mkdir -p "$$bindir"; \
 		echo "install: $$bindir is not on your PATH; add it"; \
 	fi; \
-	install -m 755 $(WEREWOLF) "$$bindir/werewolf.new" && mv -f "$$bindir/werewolf.new" "$$bindir/werewolf"; \
-	echo "installed $$bindir/werewolf"
+	install -m 755 $(HOWL) "$$bindir/howl.new" && mv -f "$$bindir/howl.new" "$$bindir/howl"; \
+	echo "installed $$bindir/howl"; \
+	for d in $(INSTALL_DIRS); do \
+		[ -x "$$d/werewolf" ] && "$$d/werewolf" 2>&1 | grep -q 'usage: werewolf build FORM' && \
+			rm -f "$$d/werewolf" && echo "removed $$d/werewolf, as howl was once called"; \
+	done; true
 
-# Removes what make install put there: a werewolf that answers as this
-# one does, never another program of the name.
+# Removes what make install put there: a howl that answers as this one
+# does, never another program of the name.
 uninstall:
 	@for d in $(INSTALL_DIRS); do \
-		[ -x "$$d/werewolf" ] || continue; \
-		if "$$d/werewolf" 2>&1 | grep -q 'usage: werewolf build FORM'; then \
-			rm -f "$$d/werewolf" && echo "removed $$d/werewolf"; \
-		else echo "uninstall: $$d/werewolf is another program; left it"; fi; \
+		[ -x "$$d/howl" ] || continue; \
+		if "$$d/howl" 2>&1 | grep -q 'usage: howl build FORM'; then \
+			rm -f "$$d/howl" && echo "removed $$d/howl"; \
+		else echo "uninstall: $$d/howl is another program; left it"; fi; \
 	done
 
 disk: $(DISK)
@@ -998,7 +1003,7 @@ QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nogr
 # or 80.
 RUN_PORT ?= $(or $(lastword $(filter-out 22,$(patsubst tcp/%,%,$(filter tcp/%,$(shell $(FORM_TOOL) list $(FORM_REF) net | sed -n 's/^listen //p'))))),80)
 
-# RUN_DIR=DIR, absolute, as werewolf run gives it: the machine in the
+# RUN_DIR=DIR, absolute, as howl run gives it: the machine in the
 # background, its console on DIR/console.sock and in DIR/console.log, QEMU's
 # monitor on DIR/monitor.sock and its pid in DIR/qemu.pid; make returns once
 # QEMU has started. Without it, as ever: the console is this terminal's.
@@ -1176,7 +1181,7 @@ check-%: | $(CHECK_SHARED)
 		{ tail -n 20 $(CHECK)/$*-build.log; echo "FAIL   $* build: see $(CHECK)/$*-build.log"; exit 1; }
 	@$(CHECK_MAKE) FORM=$* _check-form
 
-_check-form: $(WEREWOLF)
+_check-form: $(HOWL)
 	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 2>/dev/null
 	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
 		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
@@ -1184,7 +1189,7 @@ _check-form: $(WEREWOLF)
 			ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f $(CHECK)/$(FORM)-key && \
 			cp $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-config/authorized_keys &&) \
 		$(if $(wildcard $(FORM_DIR)/test/config),$(FORM_DIR)/test/config $(CHECK)/$(FORM)-config &&) \
-		$(WEREWOLF) pack $(FORM_REF) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
+		$(HOWL) pack $(FORM_REF) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
 	@awk '$(foreach c,$(call form_check,skip),$$2 != "$(c)" &&) 1' test/checks $(wildcard $(FORM_DIR)/test/checks) >$(CHECK)/$(FORM)-checks
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key GITEA_PORT=$(CHECK_WEB) test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
 	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key GITEA_PORT=$(CHECK_WEB) test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
@@ -1200,10 +1205,10 @@ _check-form: $(WEREWOLF)
 	@$(if $(filter bastion,$(FORM)),$(CHECK_MAKE) FORM=bastion _check-bastion-config,:)
 
 .PHONY: _check-bastion-config
-# The tar, this time, as a user makes one: werewolf pack, from the same
+# The tar, this time, as a user makes one: howl pack, from the same
 # files and a destination on the line.
-_check-bastion-config: $(WEREWOLF)
-	@$(WEREWOLF) pack bastion -o $(CHECK)/bastion-config.tar --config $(CHECK)/bastion-config \
+_check-bastion-config: $(HOWL)
+	@$(HOWL) pack bastion -o $(CHECK)/bastion-config.tar --config $(CHECK)/bastion-config \
 		--destinations 127.0.0.1:22 >/dev/null
 	@SSH_MODE=bastion-config SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/bastion-key test/boot bastion-config forms/bastion/test/checks-config $(CHECK)/bastion-config.log $(CHECK_FORM_QEMU)
 
@@ -1252,14 +1257,14 @@ _check-lease-boot:
 		{ echo "FAIL   lease              no \"bound\" event on the console"; exit 1; }
 
 # minimal, which has no DHCP client, with no werewolf.ip: its address from
-# the config tar's network file, as werewolf pack --ip writes it, read
+# the config tar's network file, as howl pack --ip writes it, read
 # before the network comes up. After minimal's own check, which builds the
 # same form in the same place.
 check-static: | $(CHECK_SHARED) check-minimal
 	@$(CHECK_MAKE) FORM=minimal _check-static-boot
 
-_check-static-boot: $(WEREWOLF)
-	@$(WEREWOLF) pack minimal -o $(CHECK)/static-config.tar \
+_check-static-boot: $(HOWL)
+	@$(HOWL) pack minimal -o $(CHECK)/static-config.tar \
 		--ip 10.0.2.15/24 --gw 10.0.2.2 --dns 10.0.2.3 >/dev/null
 	@test/boot static test/checks-static $(CHECK)/static.log $(CHECK_QEMU) \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)" \
@@ -1401,7 +1406,7 @@ _check-dist-disk:
 	@test/boot dist-$(FORM) - $(CHECK)/dist.log $(DIST_DISK_QEMU) \
 		-drive file=$(DIST)/$(FORM)-$(ARCH)-disk.qcow2,format=qcow2,if=virtio
 
-# prod-ssh's disk on a real cloud (test/cloud), as `werewolf create` makes
+# prod-ssh's disk on a real cloud (test/cloud), as `howl create` makes
 # it: its image, a machine booted with a config in its user data, judged
 # from the cloud's record of its serial port and an ssh login from this
 # host alone, a second create with a new config, and delete leaving
@@ -1411,7 +1416,7 @@ _check-dist-disk:
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
 
-_check-cloud: $(WEREWOLF)
+_check-cloud: $(HOWL)
 	@test/cloud $(CLOUD) $(FORM) $(ARCH)
 
 # prod's LUKS2 disk, as its own check left it, booted with no data.key:
@@ -1621,11 +1626,11 @@ lima-delete:
 	limactl stop -f werewolf
 	limactl delete werewolf
 
-# The demo form in Lima, made with werewolf create: its own boot disk,
+# The demo form in Lima, made with howl create: its own boot disk,
 # booted by its own systemd-boot and reached over vzNAT, since Lima cannot
 # forward a port to a guest without ssh. Its URL is printed at the end.
 # See forms/demo/README.md.
-demo: $(WEREWOLF)
+demo: $(HOWL)
 	test/lima-demo
 
 # webshell-demo: boot the webshell-example form (docs/forms.md) under QEMU,
@@ -1642,27 +1647,27 @@ _webshell-demo: image $(BUILD)/data.img $(if $(wildcard config),config-tar)
 		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:8080-:8080 -device virtio-net-pci,netdev=n0 \
 		-device virtio-rng-pci -drive file=$(BUILD)/data.img,format=raw,if=virtio $(QEMU_CONFIG)
 
-demo-delete: $(WEREWOLF)
+demo-delete: $(HOWL)
 	test/lima-demo delete
 
 # The demo on Google Compute Engine (test/gcp): its disk as a release
 # makes one, imported as an image and booted on a VM that stays, reached
 # over HTTP. Needs gcloud, logged in, with a project; the VM costs what an
 # e2-medium or t2a-standard-1 costs until demo-gcp-delete.
-demo-gcp: $(WEREWOLF)
+demo-gcp: $(HOWL)
 	test/gcp demo demo $(ARCH)
 
-demo-gcp-delete: $(WEREWOLF)
+demo-gcp-delete: $(HOWL)
 	test/gcp demo-delete
 
 # The webshell-example form on Google Compute Engine (test/gcp), the same
 # way: a vulnerable web app on a real VM on the Internet, reached at
 # http://ADDR:8080, to attack from anywhere and watch it hold. The VM costs
 # what an e2-small or t2a-standard-1 costs until webshell-gcp-delete.
-webshell-gcp: $(WEREWOLF)
+webshell-gcp: $(HOWL)
 	test/gcp webshell webshell-example $(ARCH)
 
-webshell-gcp-delete: $(WEREWOLF)
+webshell-gcp-delete: $(HOWL)
 	test/gcp webshell-delete
 
 # The locks stay: they are what makes the next build the same as the last.

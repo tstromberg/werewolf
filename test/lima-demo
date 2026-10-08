@@ -1,6 +1,6 @@
 #!/bin/sh
 # lima-demo: the demo form in a Lima VM, made as a user makes one, with
-# `werewolf create` (docs/design/cli.md): its own boot disk, booted under
+# `howl create` (docs/design/cli.md): its own boot disk, booted under
 # UEFI, on vzNAT, which this Mac reaches directly, since the demo runs no
 # ssh for Lima to forward through. It updates itself, keeps /data on its
 # disk and scans with grype. Used by `make demo` and `make demo-delete`;
@@ -11,27 +11,27 @@
 #   lima-demo delete   delete the VM, and the /data it kept
 set -eu
 vm=werewolf-demo
-werewolf=build/host/werewolf
+howl=build/host/howl
 
 say() { echo "lima-demo: $*"; }
 die() {
 	say "$*" >&2
 	exit 1
 }
-[ -x "$werewolf" ] || die "no $werewolf; make werewolf"
+[ -x "$howl" ] || die "no $howl; make howl"
 if [ "${1:-}" = delete ]; then
-	exec "$werewolf" delete "$vm" --on lima
+	exec "$howl" delete "$vm" --on lima
 fi
 [ $# -eq 0 ] || die "usage: lima-demo | delete"
 
-made=$("$werewolf" create demo "$vm" --on lima) || die "werewolf create failed; its output is above"
+made=$("$howl" create demo "$vm" --on lima) || die "howl create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
 
 say "waiting for the page at http://$addr/"
 i=0
 until curl -fsS -m 3 -o /dev/null "http://$addr/" 2>/dev/null; do
 	i=$((i + 1))
-	[ $i -le 120 ] || die "no page after 10 minutes; the console: $werewolf console $vm"
+	[ $i -le 120 ] || die "no page after 10 minutes; the console: $howl console $vm"
 	sleep 5
 done
 say "up. The first scan follows grype's database download, about a minute"

@@ -14,7 +14,7 @@ settings allow through to the upstream.
 ```sh
 openssl rand -base64 24 | tr -d '\n' >config/oauth2-proxy/cookie_secret
 printf '%s' 'the client secret' >config/oauth2-proxy/client_secret
-build/host/werewolf pack oauth2-proxy -o config.tar --config config \
+build/host/howl pack oauth2-proxy -o config.tar --config config \
 	--provider-url https://accounts.google.com --client-id 1234.apps.googleusercontent.com \
 	--redirect-url https://app.example.com/oauth2/callback --email-domains example.com
 ```

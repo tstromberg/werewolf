@@ -17,30 +17,30 @@ refusal is a line to paste.
 
 ```sh
 # Wolfi packages: a Python application, with the libraries it imports
-werewolf run python --app ./api --packages py3.13-flask,py3.13-psycopg
+howl run python --app ./api --packages py3.13-flask,py3.13-psycopg
 
 # Forms: a site with its cache and database, each on its own leash
-werewolf run caddy --with valkey,postgresql --domain shop.example.com
+howl run caddy --with valkey,postgresql --domain shop.example.com
 
 # OCI images: your own code, as two containers; the worker reaches the web
-werewolf run --oci web=ghcr.io/acme/web@sha256:9f86d0… \
+howl run --oci web=ghcr.io/acme/web@sha256:9f86d0… \
              --oci worker=ghcr.io/acme/worker@sha256:3a7bd3… \
              --web.listen tcp/8080 --link worker:web
 
 # Mixed: containers for your code, forms for the infrastructure under them
-werewolf create shop --on gcp --oci web=ghcr.io/acme/web:1.4 --with postgresql,valkey \
+howl create shop --on gcp --oci web=ghcr.io/acme/web:1.4 --with postgresql,valkey \
     --link web:postgres,valkey --web.listen tcp/8080 --web.secret 'DB_PASSWORD db.pass'
 
 # Keep what any of those generated; build it from the tree from then on
-werewolf form caddy --with valkey,postgresql -o forms/shop/
-werewolf create shop edge --on gcp --domain shop.example.com
+howl form caddy --with valkey,postgresql -o forms/shop/
+howl create shop edge --on gcp --domain shop.example.com
 ```
 
 ## Background
 
 A machine is a form: `apko.yaml`, `form.yaml`, `rootfs/` with a leash
 `service` a program ([forms.md](forms.md)), built by `make`, deployed by
-`werewolf` ([cli.md](cli.md)). Writing one is the right first step for a
+`howl` ([cli.md](cli.md)). Writing one is the right first step for a
 fleet and the wrong one for trying something: five files before the first
 boot. Bundles (`with:`) already combine forms; [oci.md](oci.md) designs
 running one image from the config at boot, and is not built. People
@@ -83,7 +83,7 @@ image, its tree at `/oci/NAME`, `/etc/hosts`), prints the result, then runs
 `make FORM=build/adhoc/NAME`. Everything that governs behaviour is written
 out, not left to a default (`memory`, `user`, ports, `exec`), so a kept
 form means the same next year. Its first line is its provenance: the
-generating command with paths, never values, the werewolf version, the
+generating command with paths, never values, the howl version, the
 date. `--print` shows the *effective* machine, the chain merged: every
 service, every `net` line, who writes where. `-n` prints and builds nothing.
 
@@ -111,9 +111,9 @@ new build and a `create`, as `--app` is. The host resolves a tag to a
 digest once and prints the `--oci NAME=REF@sha256:…` to use next time;
 `form -o` refuses to write a form that still names a tag.
 
-The pull keeps oci.md's shape on the host: `werewolf _fetch` speaks HTTPS
+The pull keeps oci.md's shape on the host: `howl _fetch` speaks HTTPS
 and holds the registry token and nothing else; the parent checks every
-size and digest before parsing; `werewolf _unpack DIR` inflates and applies
+size and digest before parsing; `howl _unpack DIR` inflates and applies
 layers beneath one directory, with no network, no environment and none of
 the operator's credentials, sealed on Linux (seccomp, Landlock), a plain
 child on macOS, which is said. oci.md's refusals and fixed limits apply
@@ -142,7 +142,7 @@ stays read-only; the printed service shows both.
 ### The service an image gets
 
 ```
-# ghcr.io/acme/web@sha256:9f86d0…, from werewolf form
+# ghcr.io/acme/web@sha256:9f86d0…, from howl form
 root    /oci/web
 exec    /app/server
 user    _oci-web

@@ -101,7 +101,7 @@ pub fn template(
     else
         "";
     return gpa.print(
-        \\# Written by werewolf create. A disk that boots itself, and its config
+        \\# Written by howl create. A disk that boots itself, and its config
         \\# tar as a second, unformatted disk; no cloud-init, no ssh.
         \\# werewolf form: {s}
         \\vmType: vz
@@ -130,7 +130,7 @@ pub fn managedTemplate(
     config_disk: []const u8,
 ) ![]const u8 {
     return gpa.print(
-        \\# Written by werewolf create, from make's template: Lima manages it.
+        \\# Written by howl create, from make's template: Lima manages it.
         \\# werewolf form: {s}
         \\# werewolf lima: managed
         \\{s}

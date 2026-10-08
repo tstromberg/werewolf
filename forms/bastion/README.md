@@ -53,11 +53,11 @@ Boot settings cannot grant a port the image denies.
 ## Local Lima
 
 Follow [the Lima steps](../../docs/service-vms.md#local-lima-vm) with the variables above.
-`werewolf create` builds a boot disk, attaches your files as a config disk
+`howl create` builds a boot disk, attaches your files as a config disk
 and sets `VM_IP`. Pin the host key the VM logged, then forward a port:
 
 ```sh
-build/host/werewolf console "$VM" |
+build/host/howl console "$VM" |
   sed -n 's/^ssh-host-key: .*"public":"\([^"]*\)".*/\1/p' | tail -n 1 |
   awk -v host="$VM" '{ print host " " $0 }' >"$SERVICE_BUILD/known_hosts"
 ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
@@ -91,7 +91,7 @@ gcloud --project="$GCP_PROJECT" compute firewall-rules create "$VM-ssh" \
 ```
 
 Pin the host key and forward as for Lima, reading the console with
-`werewolf console "$VM" --on gcp` and using the GCP `VM_IP`. Review
+`howl console "$VM" --on gcp` and using the GCP `VM_IP`. Review
 existing VPC rules: this narrow rule does not cancel broader access.
 After removing the test VM, remove its rule too:
 

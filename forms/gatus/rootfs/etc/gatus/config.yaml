@@ -1,5 +1,5 @@
 # Gatus for the gatus form: one endpoint, the machine's setting (TARGET;
-# werewolf pack --target), a page on :8080 and history on /data. leash
+# howl pack --target), a page on :8080 and history on /data. leash
 # starts Gatus (etc/sv/gatus/service) as the gatus user. A form on this
 # one lays its own file here, with its endpoints and alerting.
 web:

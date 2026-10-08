@@ -13,8 +13,8 @@ From the repository root, with the [build tools](../examples/README.md#build-hos
 installed:
 
 ```sh
-make werewolf
-build/host/werewolf create example-python web --app ./myapp --greeting "Hello"
+make howl
+build/host/howl create example-python web --app ./myapp --greeting "Hello"
 ```
 
 `./myapp` is the application's directory (step 1 below writes one).
@@ -22,7 +22,7 @@ build/host/werewolf create example-python web --app ./myapp --greeting "Hello"
 image, packs the config tar from `--greeting` (the one setting the
 `example-python` form declares), starts a VM (Lima on a Mac, QEMU here
 otherwise), and prints its name and address; the application answers on
-:8080. `build/host/werewolf delete web` removes it. See [forms.md](forms.md#without-a-form---app).
+:8080. `build/host/howl delete web` removes it. See [forms.md](forms.md#without-a-form---app).
 
 ## Step by step
 
@@ -172,7 +172,7 @@ packages and overlays together, is an erofs image that stage0 mounts
 read-only through dm-verity ([design/verified-boot.md](design/verified-boot.md)):
 a byte of the application changed on the disk stops the machine booting
 it. `make FORM=example-python DEV= APP=... DIST=out _dist-form` writes the
-release files and their manifest, each file's sha256, as `werewolf build`
+release files and their manifest, each file's sha256, as `howl build`
 does ([releases.md](releases.md)).
 
 ### How it runs
@@ -227,7 +227,7 @@ relative names of letters, digits and `. _ - /` up to 100 bytes; from a
 disk, files up to 1 MiB; from cloud user data, at most 32 entries of
 32 KiB each, 48 KiB in all, and AWS's user data is 16 KiB of base64. A
 setting of the wrong type, or one not declared, keeps the service down,
-with a line on the console saying which. `werewolf pack` refuses the same
+with a line on the console saying which. `howl pack` refuses the same
 things on your machine first, with the same code.
 
 ### Elsewhere
@@ -257,7 +257,7 @@ healthy, the application included. The code changes only when you build
 and deploy a new image; `/data/svc/app` and the config tar stay as they
 were.
 
-### What `werewolf` adds
+### What `howl` adds
 
 Checks before anything boots (`pack` runs the machine's own setting checks
 on your machine, and refuses a missing key by name), the application's

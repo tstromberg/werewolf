@@ -413,7 +413,7 @@ Two files, read once at the updater's start, each one strict JSON object:
 - **A refused form's file stops the operator's.** Its lowered limits are
   lost with it, so the operator's file is not read either, rather than
   checked against werewolf's wider limits; both are logged as refused.
-- **One parser,** `lib/update-policy.zig`, so the host's `werewolf pack`
+- **One parser,** `lib/update-policy.zig`, so the host's `howl pack`
   checks an operator's file before it ever reaches a machine.
 
 ### Draining
