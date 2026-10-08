@@ -360,8 +360,8 @@ from `/bin/sh`.
    Done, as a first step: init (`cmd/init/init.zig`), stage0, commit,
    `power-button`, `reboot` and `poweroff`, `grub-setenv`, runit's three stages
    (`runit-stage`, one program that knows its stage by its name), and the console
-   and sshd services (`debug-shell`, `sshd-start`) are programs, and `minimal`
-   carries no busybox: `sshd`, `lima`, `prod-ssh` and `DEV=1` add it.
+   and sshd services (`debug-shell`, the `sshd` form's `sshd-start`) are
+   programs, and `minimal` carries no busybox: `sshd`, `lima`, `prod-ssh` and `DEV=1` add it.
    `runit-init` is still PID 1 after init, running the stage programs,
    which is the alternative below; init owning PID 1 is what remains.
 3. **The checks, and `DEV=1`.**

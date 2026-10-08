@@ -13,5 +13,5 @@ hash=$(openssl kdf -keylen 32 -kdfopt pass:werewolf-check-admin \
 	-kdfopt lanes:4 -binary ARGON2ID | openssl base64 -A | tr -d '=')
 salt=$(openssl base64 -A -in "$d/.salt" | tr -d '=')
 rm "$d/.salt"
-printf '$argon2id$v=19$m=65536,t=3,p=4$%s$%s' "$salt" "$hash" >"$d/admin_token"
+printf '$argon2id$v=19$m=65536,t=3,p=4$%s$%s' "$salt" "$hash" >"$d/admin-token"
 echo '{"domain":"http://127.0.0.1:8080"}' >"$d/settings.json"

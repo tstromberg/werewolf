@@ -5,6 +5,7 @@
 //! a child: what it says, within a limit and a deadline.
 
 const std = @import("std");
+const seal = @import("seal");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
@@ -143,23 +144,118 @@ const CapHeader = extern struct {
 };
 const CapSets = extern struct { effective: u32 = 0, permitted: u32 = 0, inheritable: u32 = 0 };
 
-/// Landlock's filesystem rights, from linux/landlock.h.
+// --- Landlock ------------------------------------------------------------------
+
+/// Landlock's filesystem rights, from linux/landlock.h: one copy, for this
+/// file, leash and fence. A kernel ignores none it is asked to handle, so
+/// what one does not know is masked off (fsAll).
 pub const execute: u64 = 0x1;
 pub const write_file: u64 = 0x2;
 pub const read_file: u64 = 0x4;
 pub const read_dir: u64 = 0x8;
 pub const remove_dir: u64 = 0x10;
 pub const remove_file: u64 = 0x20;
+pub const make_char: u64 = 0x40;
 pub const make_dir: u64 = 0x80;
 pub const make_reg: u64 = 0x100;
-/// Known from ABI 3; landlock drops it where the kernel does not know it.
+pub const make_sock: u64 = 0x200;
+pub const make_fifo: u64 = 0x400;
+pub const make_block: u64 = 0x800;
+pub const make_sym: u64 = 0x1000;
+/// Known from ABI 2.
+pub const refer: u64 = 0x2000;
+/// Known from ABI 3.
 pub const truncate: u64 = 0x4000;
+/// Known from ABI 5.
+pub const ioctl_dev: u64 = 0x8000;
+/// The rights a rule on a file, not a directory, may hold.
+pub const file_rights: u64 = execute | write_file | read_file | truncate | ioctl_dev;
 /// Files only, beneath a directory: read, write, make, remove and truncate
 /// them, and so replace one by renaming another over it.
 pub const own_files: u64 = read_file | write_file | remove_file | make_reg | truncate;
 /// Everything a directory's owner does: read, write, make and remove files
 /// and directories, truncate. No devices, sockets, FIFOs, links or ioctls.
 pub const own_dir: u64 = own_files | read_dir | remove_dir | make_dir;
+
+/// Landlock's network rights, known from ABI 4: binding and connecting a
+/// TCP socket to a port.
+pub const bind_tcp: u64 = 0x1;
+pub const connect_tcp: u64 = 0x2;
+
+/// Every filesystem right a kernel of Landlock ABI abi knows.
+pub fn fsAll(abi: usize) u64 {
+    return if (abi >= 5)
+        0xffff
+    else if (abi >= 3)
+        0x7fff
+    else if (abi >= 2)
+        0x3fff
+    else
+        0x1fff;
+}
+
+/// A Landlock ruleset that handles every right this kernel knows, so what
+/// no rule grants is refused: every filesystem right; from ABI 4, binding
+/// and connecting TCP; from ABI 6, scoped, so no abstract UNIX socket of,
+/// and no signal to, a process outside the domain.
+pub const Ruleset = struct {
+    fd: i32,
+    abi: usize,
+
+    pub fn init() !Ruleset {
+        // LANDLOCK_CREATE_RULESET_VERSION
+        const abi = try sys(linux.syscall3(.landlock_create_ruleset, 0, 0, 1), "landlock version");
+        // struct landlock_ruleset_attr: handled_access_fs, handled_access_net,
+        // scoped (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and _SIGNAL).
+        const attr: [3]u64 = .{
+            fsAll(abi),
+            if (abi >= 4) bind_tcp | connect_tcp else 0,
+            if (abi >= 6) 0x3 else 0,
+        };
+        const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
+        const fd = try sys(
+            linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
+            "landlock ruleset",
+        );
+        return .{ .fd = @intCast(fd), .abi = abi };
+    }
+
+    /// access beneath what fd names, of the rights this kernel knows: on a
+    /// directory, all of it; a file's rule may hold file_rights alone.
+    pub fn add(r: Ruleset, fd: i32, access: u64) !void {
+        // struct landlock_path_beneath_attr, packed.
+        var beneath: [12]u8 = undefined;
+        std.mem.writeInt(u64, beneath[0..8], access & fsAll(r.abi), .little);
+        std.mem.writeInt(i32, beneath[8..12], fd, .little);
+        _ = try sys(
+            linux.syscall4(.landlock_add_rule, @intCast(r.fd), 1, @intFromPtr(&beneath), 0),
+            "landlock rule",
+        );
+    }
+
+    /// access, bind_tcp or connect_tcp, on TCP port p; ABI 4 and later.
+    pub fn port(r: Ruleset, access: u64, p: u16) !void {
+        const attr: [2]u64 = .{ access, p }; // struct landlock_net_port_attr
+        _ = try sys(
+            linux.syscall4(.landlock_add_rule, @intCast(r.fd), 2, @intFromPtr(&attr), 0),
+            "landlock port",
+        );
+    }
+
+    /// Enter the domain, for good, and close the ruleset. Every access it
+    /// refuses is audited, after an exec too
+    /// (LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON, ABI 7): without it the
+    /// kernel says nothing of a domain's refusals once the program that
+    /// made it has become another.
+    pub fn restrict(r: Ruleset) !void {
+        const log_new_exec: usize = if (r.abi >= 7) 1 << 1 else 0;
+        _ = try sys(
+            linux.syscall2(.landlock_restrict_self, @intCast(r.fd), log_new_exec),
+            "landlock restrict",
+        );
+        _ = linux.close(r.fd);
+    }
+};
 
 /// Access to what fd names: beneath it, for a directory.
 pub const Rule = struct { fd: i32, access: u64 };
@@ -170,79 +266,30 @@ pub const Rule = struct { fd: i32, access: u64 };
 /// unrestricted: ports before ABI 4 (6.7), sockets and signals before ABI 6
 /// (6.12). werewolf's own kernel knows all of it.
 pub fn landlock(rules: []const Rule, ports: []const u16) !void {
-    const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, 1);
-    _ = try sys(abi, "landlock version");
-    const fs_all: u64 = if (abi >= 5)
-        0xffff
-    else if (abi >= 3)
-        0x7fff
-    else if (abi >= 2)
-        0x3fff
-    else
-        0x1fff;
-    // BIND_TCP and CONNECT_TCP; the scopes, abstract sockets and signals.
-    const attr: [3]u64 = .{ fs_all, if (abi >= 4) 0x3 else 0, if (abi >= 6) 0x3 else 0 };
-    const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
-    const ruleset = try sys(
-        linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
-        "landlock ruleset",
-    );
-    for (rules) |r| {
-        // LANDLOCK_RULE_PATH_BENEATH, of the rights this kernel knows.
-        var beneath: [12]u8 = undefined;
-        std.mem.writeInt(u64, beneath[0..8], r.access & fs_all, .little);
-        std.mem.writeInt(i32, beneath[8..12], r.fd, .little);
-        _ = try sys(
-            linux.syscall4(.landlock_add_rule, ruleset, 1, @intFromPtr(&beneath), 0),
-            "landlock rule",
-        );
-    }
-    if (abi >= 4) for (ports) |port| {
-        // LANDLOCK_RULE_NET_PORT: CONNECT_TCP.
-        const rule: [2]u64 = .{ 0x2, port };
-        _ = try sys(
-            linux.syscall4(.landlock_add_rule, ruleset, 2, @intFromPtr(&rule), 0),
-            "landlock port",
-        );
-    };
+    const ruleset: Ruleset = try .init();
+    for (rules) |r| try ruleset.add(r.fd, r.access);
+    if (ruleset.abi >= 4) for (ports) |p| try ruleset.port(connect_tcp, p);
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
-    // Refusals audited, after an exec too (LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
-    // ABI 7), for a program that runs another inside its domain.
-    const log_new_exec: usize = if (abi >= 7) 1 << 1 else 0;
-    _ = try sys(
-        linux.syscall2(.landlock_restrict_self, ruleset, log_new_exec),
-        "landlock restrict",
-    );
-    _ = linux.close(@intCast(ruleset));
+    try ruleset.restrict();
 }
 
-const SockFilter = extern struct { code: u16, jt: u8 = 0, jf: u8 = 0, k: u32 = 0 };
-const SockFprog = extern struct { len: u16, filter: [*]const SockFilter };
-const BPF_LD_W_ABS = 0x20;
-const BPF_JEQ_K = 0x15;
-const BPF_RET_K = 0x06;
+const SockFprog = extern struct { len: u16, filter: [*]const seal.Filter };
 
 /// A seccomp filter that allows the calls named, some only with one
 /// argument equal to a value, fails some with EPERM, and kills the process
 /// for anything else, including a call made as another architecture.
 pub const Filter = struct {
-    prog: [max_insns]SockFilter = undefined,
+    prog: [max_insns]seal.Filter = undefined,
     n: usize = 3,
 
     const max_insns = 200;
     /// Jump targets, until finish knows where they are.
     const to_allow = 0xff;
     const to_refuse = 0xfe;
-    /// AUDIT_ARCH_X86_64 and AUDIT_ARCH_AARCH64, from linux/audit.h.
-    const audit_arch: u32 = switch (@import("builtin").cpu.arch) {
-        .x86_64 => 0xc000003e,
-        .aarch64 => 0xc00000b7,
-        else => @compileError("werewolf builds for x86_64 and aarch64"),
-    };
 
     pub fn allow(f: *Filter, comptime name: []const u8) void {
         const n = nr(name) orelse return;
-        f.prog[f.n] = .{ .code = BPF_JEQ_K, .jt = to_allow, .k = n };
+        f.prog[f.n] = .{ .code = seal.JEQ_K, .jt = to_allow, .k = n };
         f.n += 1;
     }
 
@@ -250,7 +297,7 @@ pub const Filter = struct {
     /// a program that tries it and carries on.
     pub fn refuse(f: *Filter, comptime name: []const u8) void {
         const n = nr(name) orelse return;
-        f.prog[f.n] = .{ .code = BPF_JEQ_K, .jt = to_refuse, .k = n };
+        f.prog[f.n] = .{ .code = seal.JEQ_K, .jt = to_refuse, .k = n };
         f.n += 1;
     }
 
@@ -260,28 +307,28 @@ pub const Filter = struct {
     /// other high bits would pass.
     pub fn allowArg(f: *Filter, comptime name: []const u8, comptime arg: u3, value: u32) void {
         const n = nr(name) orelse return;
-        f.prog[f.n] = .{ .code = BPF_JEQ_K, .jf = 3, .k = n };
-        f.prog[f.n + 1] = .{ .code = BPF_LD_W_ABS, .k = 16 + 8 * @as(u32, arg) };
-        f.prog[f.n + 2] = .{ .code = BPF_JEQ_K, .jt = to_allow, .k = value };
-        f.prog[f.n + 3] = .{ .code = BPF_LD_W_ABS, .k = 0 };
+        f.prog[f.n] = .{ .code = seal.JEQ_K, .jf = 3, .k = n };
+        f.prog[f.n + 1] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, arg) };
+        f.prog[f.n + 2] = .{ .code = seal.JEQ_K, .jt = to_allow, .k = value };
+        f.prog[f.n + 3] = .{ .code = seal.LD_W_ABS, .k = 0 };
         f.n += 4;
     }
 
-    fn finish(f: *Filter) []const SockFilter {
-        f.prog[0] = .{ .code = BPF_LD_W_ABS, .k = 4 };
-        f.prog[1] = .{ .code = BPF_JEQ_K, .jf = @intCast(f.n - 2), .k = audit_arch };
-        f.prog[2] = .{ .code = BPF_LD_W_ABS, .k = 0 };
+    fn finish(f: *Filter) []const seal.Filter {
+        f.prog[0] = .{ .code = seal.LD_W_ABS, .k = 4 };
+        f.prog[1] = .{ .code = seal.JEQ_K, .jf = @intCast(f.n - 2), .k = seal.native_arch };
+        f.prog[2] = .{ .code = seal.LD_W_ABS, .k = 0 };
         const kill = f.n;
         const allow_at = f.n + 1;
         const refuse_at = f.n + 2;
-        f.prog[kill] = .{ .code = BPF_RET_K, .k = linux.SECCOMP.RET.KILL_PROCESS };
-        f.prog[allow_at] = .{ .code = BPF_RET_K, .k = linux.SECCOMP.RET.ALLOW };
+        f.prog[kill] = .{ .code = seal.RET_K, .k = linux.SECCOMP.RET.KILL_PROCESS };
+        f.prog[allow_at] = .{ .code = seal.RET_K, .k = linux.SECCOMP.RET.ALLOW };
         f.prog[refuse_at] = .{
-            .code = BPF_RET_K,
+            .code = seal.RET_K,
             .k = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(linux.E.PERM)),
         };
         for (f.prog[3..kill], 3..) |*insn, i| {
-            if (insn.code != BPF_JEQ_K) continue;
+            if (insn.code != seal.JEQ_K) continue;
             if (insn.jt == to_allow) insn.jt = @intCast(allow_at - i - 1);
             if (insn.jt == to_refuse) insn.jt = @intCast(refuse_at - i - 1);
         }

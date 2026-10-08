@@ -72,6 +72,9 @@ const places = [_][]const u8{
     "/data",
     "/victim",
     "/mnt",
+    // The image roots (cmd/init/oci.zig): what a rooted service needs,
+    // bound beneath its image.
+    "/oci",
 };
 
 const Fs = struct {
@@ -226,7 +229,10 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
             if (rw and p.attrs & ATTR.RDONLY != 0) return error.Usage;
             p.source = try place(pos[0]);
             p.target = try place(pos[1]);
-            p.attrs |= ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC;
+            p.attrs |= ATTR.NOSUID | ATTR.NOEXEC;
+            // A bind of a device node (/dev/null into an image root) is
+            // the device: nodev would make it open nothing.
+            if (!std.mem.startsWith(u8, p.source, "/dev/")) p.attrs |= ATTR.NODEV;
             if (!follow) p.attrs |= ATTR.NOSYMFOLLOW;
         },
         .mount => {
@@ -653,6 +659,13 @@ test "binds, and what is not an invocation" {
     const b = try tryParse(&.{ "--bind", "/victim/var/lib/werewolf/data", "/data" });
     try testing.expectEqual(Action.bind, b.action);
     try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, b.attrs);
+    // Into an image root: a device stays one; a directory stays nodev.
+    const d = try tryParse(&.{ "--bind", "/dev/null", "/oci/web/dev/null" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, d.attrs);
+    const t = try tryParse(&.{ "--bind", "/run/svc/web", "/oci/web/tmp" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, t.attrs);
+    const p = try tryParse(&.{ "-t", "proc", "-o", "hidepid=invisible", "proc", "/oci/web/proc" });
+    try testing.expectEqual(Action.mount, p.action);
     // A mount names its filesystem: nothing is probed.
     try testing.expectError(
         error.Usage,

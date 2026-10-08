@@ -2,9 +2,10 @@ base: prod
 
 # The tunnel to Cloudflare's edge, QUIC with HTTP/2 behind it, and the
 # names to find it; and the origins it fronts, HTTP and HTTPS, on this
-# machine or its network. It listens on nothing: its metrics are on
-# loopback alone.
+# machine or its network. It serves nothing: its metrics are on
+# loopback, for the machine alone.
 net:
+  - listen tcp/2000 loopback
   - connect cloudflared udp/7844 tcp/7844 tcp/443 tcp/80 udp/53 tcp/53
 
 # make check's, for this form alone (forms/README.md)

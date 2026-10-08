@@ -1,5 +1,9 @@
 base: sshd
 
+# Taken back of werewolf's defaults (lib/allow.zig): KVM, for its guests,
+# which cannot run virtual machines of their own (no nested-kvm).
+allow: [kvm]
+
 # QEMU's user-mode network, as root: the guests' names and HTTP and HTTPS,
 # through the host's own sockets.
 net:
@@ -9,7 +13,7 @@ net:
 # of which the machine's CPU takes one and refuses the other. The build
 # loads them with nested=0 (Makefile, MODULE_PARAMS).
 modules:
-  - "x86_64: kvm-intel kvm-amd"
+  - x86_64 kvm-intel kvm-amd
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.

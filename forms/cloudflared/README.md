@@ -12,7 +12,7 @@ serves hostnames on the Internet with no port open to it.
 
 ```sh
 printf '%s' 'eyJhIjoi...' >config/cloudflared/token
-build/host/howl pack cloudflared -o config.tar --config config
+build/host/howl pack --with cloudflared -o config.tar --config config
 ```
 
 The token is read into the service's environment (`TUNNEL_TOKEN`) by

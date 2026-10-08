@@ -251,7 +251,7 @@ KEV changes daily: `cve-tiers.json` and its `.sig`.
   "urgent": [
     {"cve": "CVE-2023-4863", "origin": "libwebp", "fixed": "1.3.1-r2", "score": 8.8,
      "vector": "CVSS:3.1/AV:N/...", "source": "nvd", "kev": "2023-09-13"},
-    {"cve": "CVE-2025-68263", "kernel": "6.18", "fixed": "6.18.1", "score": 9.8,
+    {"cve": "CVE-2025-68263", "fixed": "6.18.1", "score": 9.8,
      "vector": "CVSS:3.1/AV:N/...", "source": "cna"}
   ],
   "high": [{"cve": "CVE-2026-2222", "origin": "curl", "fixed": "8.17.0-r1", "score": 7.5, "...": "..."}],
@@ -271,7 +271,8 @@ date CISA listed it, when it is exploited.
   often comes sooner. NVD's API is queried with CI's key and cached between
   runs.
 - **Urgent and High name their fixes.** Each entry carries the package
-  origin, or kernel branch, and the version that fixed it, so the machine
+  origin, or none for the kernel's, on the feed's `kernel` branch, and the
+  version that fixed it, so the machine
   finds every Urgent and High fix an update carries from signed data alone,
   with apk's version order as `cve.zig` already has it.
 - **Medium and Low name only the CVE.** The machine finds those CVEs from

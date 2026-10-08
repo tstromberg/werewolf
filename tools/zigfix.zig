@@ -426,7 +426,12 @@ fn tableBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
         const close = matching(tree, a.ast.lbrace) orelse continue;
         if (starts[a.ast.lbrace] >= l.start or starts[close] < line_end) continue;
         if (best != null and a.ast.lbrace < best.?.open) continue;
-        best = .{ .open = a.ast.lbrace, .close = close, .items = a.ast.elements };
+        // A short list's elements are in two, which the next node reuses.
+        best = .{
+            .open = a.ast.lbrace,
+            .close = close,
+            .items = try gpa.dupe(Ast.Node.Index, a.ast.elements),
+        };
     }
     const b = best orelse return null;
     if (b.items.len < 2) return null;

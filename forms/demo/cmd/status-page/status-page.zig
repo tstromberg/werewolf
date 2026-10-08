@@ -31,6 +31,7 @@ const Allocator = std.mem.Allocator;
 const page = @import("page.zig");
 const scan = @import("scan.zig");
 const pg = @import("pg.zig");
+const cmdline = @import("cmdline");
 const describeEvent = page.describeEvent;
 const isAdvisoryId = page.isAdvisoryId;
 const plural = page.plural;
@@ -106,6 +107,13 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     const uptime = parseUptime(readOr(io, gpa, "/proc/uptime", ""));
     const installed = try parseInstalled(gpa, readOr(io, gpa, "/lib/apk/db/installed", ""));
 
+    // The slot this boot is, read as stage0 read it (lib/cmdline.zig).
+    var refused: cmdline.Failure = .{};
+    const slot = if (cmdline.parse(readOr(io, gpa, "/proc/cmdline", ""), &refused)) |c|
+        c.slot
+    else
+        null;
+
     var f: Facts = .{
         .now_secs = now_secs,
         .host = try gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0)),
@@ -118,7 +126,7 @@ fn gather(io: Io, gpa: Allocator) !Facts {
         .booted = now_secs -| uptime,
         .load = firstWords(readOr(io, gpa, "/proc/loadavg", ""), 3),
         .release = trimLine(readOr(io, gpa, meta_dir ++ "/release", "")),
-        .slot = parseSlot(readOr(io, gpa, "/proc/cmdline", "")),
+        .slot = if (slot) |s| @tagName(s) else "",
         .shell = exists(io, "/bin/sh"),
         .data = describeData(io, gpa),
         .packages = installed,
@@ -737,14 +745,6 @@ pub fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     return found;
 }
 
-fn parseSlot(cmdline: []const u8) []const u8 {
-    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
-    while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=")) return arg["werewolf.slot=".len..];
-    }
-    return "";
-}
-
 /// Whole seconds since boot, from /proc/uptime.
 fn parseUptime(text: []const u8) u64 {
     const end = std.mem.indexOfAny(u8, text, ". \n") orelse text.len;
@@ -903,11 +903,6 @@ test formatUptime {
 
 test "small parsers" {
     try testing.expectEqualStrings("0.00 0.01 0.05", firstWords("0.00 0.01 0.05 1/80 1234\n", 3));
-    try testing.expectEqualStrings(
-        "b",
-        parseSlot("console=hvc0 werewolf.slot=b werewolf.victim=x:/y\n"),
-    );
-    try testing.expectEqualStrings("", parseSlot("console=ttyS0\n"));
     const mounts =
         \\proc /proc proc rw 0 0
         \\tmpfs /data tmpfs rw 0 0

@@ -5,5 +5,5 @@
 set -eu
 mkdir -p "$1/gitea"
 umask 077
-printf '%s' werewolf-check-pass >"$1/gitea/admin_password"
+printf '%s' werewolf-check-pass >"$1/gitea/admin-password"
 echo '{"url":"http://127.0.0.1:3000/","domain":"127.0.0.1","admin":"admin","admin-email":"admin@example.test"}' >"$1/gitea/settings.json"

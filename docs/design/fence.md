@@ -10,7 +10,7 @@ no BPF or netfilter: mechanisms built into the kernel enforce it.
 
 ## The policy
 
-Each form may have a `forms/<name>/form.yaml`, read along the include chain as
+Each form may have a `forms/<name>/form.yaml`, read along its chain of bases as
 modules are:
 
 ```
@@ -22,6 +22,7 @@ connect _update tcp/443 udp/53 tcp/53
 | Line | Means |
 | --- | --- |
 | `listen tcp/PORT...` | a TCP port the machine serves |
+| `listen tcp/PORT... loopback` | a TCP port its own processes may bind and reach, and the network never does |
 | `connect USER\|all tcp/PORT udp/PORT icmp ...` | what processes running as USER, or anyone, may send |
 | `connect USER\|all tcp/PORT udp/PORT ... public` | the same, to public addresses alone |
 | `metadata USER...` | a user who may reach the metadata server's port 80 |
@@ -160,7 +161,8 @@ from runit on:
 | --- | --- | --- |
 | Read | everywhere | |
 | Write | `/run`, `/tmp`, `/var/tmp`, `/dev/shm`, `/data`; `/dev/null`, `zero`, `full`, `random`, `urandom`, `kmsg`; terminals | `/proc`, `/sys`, a disk itself, the image |
-| Execute | beneath `/usr`, where every program and service link leads | anything written since boot, wherever |
+| Execute | beneath `/usr`, where every program and service link leads, and `/oci`, the image roots baked in beside it ([adhoc.md](adhoc.md)) | anything written since boot, wherever |
+| Write, beneath an image root | its `/tmp`, `/run` and `/data`, and each path its service writes: the binds init made from its own places, listed by the build in `/usr/share/werewolf/oci`, each needing a rule of its own since Landlock judges a path by the mounts it crosses | the image |
 | Make sockets, FIFOs | `/run` | elsewhere |
 | Make device nodes | `/data`, which is `nodev`, for apk building a slot | elsewhere |
 | Device ioctls | terminals: `/dev/console`, `/dev/ptmx`, `/dev/pts`, and every `tty*` and `hvc*` in `/dev` at boot | every other device |

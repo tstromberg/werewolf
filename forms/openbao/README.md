@@ -10,16 +10,16 @@ root cannot read another process's memory. Vault is not planned: Wolfi's
 | Sends | nothing: the seal is a key on the machine. A cloud KMS is a form of your own, with `connect openbao tcp/443` and `metadata openbao` |
 | Runs as | `openbao` (uid 208), leashed |
 | Keeps | integrated storage (raft) in `/data/svc/openbao` |
-| Config | `openbao/unseal.key` (32 random bytes), `openbao/tls.crt` and `tls.key`, `openbao/admin_password` (the admin's first); settings `api-addr` (required) and `unseal-key-id` |
+| Config | `openbao/unseal-key` (32 random bytes), `openbao/tls.crt` and `tls.key`, `openbao/admin-password` (the admin's first); settings `api-addr` (required) and `unseal-key-id` |
 
 ```sh
 umask 077; mkdir -p config/openbao
-openssl rand -out config/openbao/unseal.key 32
+openssl rand -out config/openbao/unseal-key 32
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
 	-subj /CN=bao.example.com -addext subjectAltName=DNS:bao.example.com \
 	-keyout config/openbao/tls.key -out config/openbao/tls.crt
-printf '%s' 'the admin password' >config/openbao/admin_password      # no newline: it is the password
-build/host/howl pack openbao -o config.tar --config config --api-addr https://bao.example.com:8200
+printf '%s' 'the admin password' >config/openbao/admin-password      # no newline: it is the password
+build/host/howl pack --with openbao -o config.tar --config config --api-addr https://bao.example.com:8200
 ```
 
 ## Unsealed by a key, set up by itself

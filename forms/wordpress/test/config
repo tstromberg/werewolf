@@ -8,5 +8,5 @@ set -eu
 d=$1/wordpress
 mkdir -p "$d"
 umask 077
-printf '%s' '$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq' >"$d/admin_password_hash"
+printf '%s' '$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq' >"$d/admin-password-hash"
 echo '{"url":"http://localhost","title":"werewolf check site","admin-user":"admin","admin-email":"admin@example.test"}' >"$d/settings.json"

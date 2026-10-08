@@ -20,24 +20,21 @@ const syntax = "howl build-apk RECIPE [--arch ARCH]";
 
 pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
     var recipe: ?[]const u8 = null;
-    var arch: []const u8 = howl.hostArch();
+    var arch = howl.hostArch();
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (std.mem.eql(u8, a, "--arch")) {
-            i += 1;
-            if (i == args.len) return why.refuse("--arch takes aarch64 or x86_64: {s}", .{syntax});
-            arch = args[i];
-        } else if (std.mem.startsWith(u8, a, "--arch=")) {
-            arch = a["--arch=".len..];
-        } else if (a.len > 0 and a[0] == '-') {
-            return why.refuse("build-apk takes no {s}: {s}", .{ a, syntax });
+        if (a.len > 0 and a[0] == '-') {
+            const flag, const v = try howl.flagValue(args, &i, why);
+            if (!std.mem.eql(u8, flag, "--arch"))
+                return why.refuse("build-apk takes no {s}: {s}", .{ flag, syntax });
+            arch = howl.archName(v) orelse return why.refuse(howl.arch_refusal, .{v});
         } else if (recipe != null) {
             return why.refuse("one recipe at a time: {s}", .{syntax});
         } else recipe = a;
     }
     const r = recipe orelse return why.refuse("{s}", .{syntax});
-    arch = howl.archName(arch) orelse return why.refuse(howl.arch_refusal, .{arch});
+    const for_arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
     if (!isRecipePath(r)) return why.refuse(
         "{s}: a recipe is a .yaml path of [A-Za-z0-9._/-]",
         .{r},
@@ -49,7 +46,7 @@ pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
     try howl.run(io, why, &.{
         howl.make_cmd,
         "--no-print-directory",
-        try gpa.print("ARCH={s}", .{arch}),
+        try gpa.print("ARCH={t}", .{for_arch}),
         try gpa.print("RECIPE={s}", .{r}),
         "_build-apk",
     });

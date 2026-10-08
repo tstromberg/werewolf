@@ -45,7 +45,7 @@ its dm-verity cannot check a signed root hash. So:
 | Code running as a service's user | runs any binary it writes to `/tmp`, `/run`, `/dev/shm` or a memfd | cannot: those are `noexec`, and IPE refuses anything not in the root image |
 | root, during a boot | runs anything it writes; writes into running processes; `kexec`s another kernel | runs only the release's binaries, and scripts through them; no `kexec`, `/dev/mem` or ptrace |
 | root, across a reboot | direct boot: keeps only `/data`, which nothing executes. Bitten: replaces anything in the slot or GRUB's config | direct boot and Secure Boot: keeps only `/data`. Bitten: can still replace the kernel or stage0, which nothing checks |
-| The network, or a compromised mirror | stopped by apk's signatures | stopped by the manifest's signature, serial and expiry |
+| The network, or a compromised mirror | stopped by apk's signatures | stopped by the manifest's signature and serial: no older release is taken |
 | Someone editing a disk snapshot | bitten: changes anything in the slot | bitten: a changed root image will not run, but a changed kernel or stage0 will. Secure Boot: nothing changed boots |
 
 ## Design
@@ -209,7 +209,7 @@ everything else, without being packaged as apks. This much is done, for
 | `root.erofs` | the root image and its hash tree |
 | `initramfs.zst` | for direct boot: stage0 and the root image |
 | `werewolf.efi` | for Secure Boot: a UKI of the kernel, `initramfs.zst` and the command line |
-| `manifest.json`, `manifest.json.sig` | what follows, signed with the image key |
+| `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest: what follows, signed with the image key |
 
 ```json
 {
@@ -217,7 +217,7 @@ everything else, without being packaged as apks. This much is done, for
   "form": "autoupdate",
   "arch": "aarch64",
   "serial": "20261006T124216Z",
-  "expires": "2026-10-13T12:42:16Z",
+  "expires": "9999-12-31T23:59:59Z",
   "build": "ad5c83649ab367c6",
   "kernel": "linux-virt-6.18.55-r0",
   "files": {
@@ -245,9 +245,12 @@ The updater stops building. Each check:
 
 1. Fetches the manifest for its form and architecture, and checks its
    signature against the image certificate in the image.
-2. Refuses it if it has expired (logging `stale`) or is older than the
-   running release, by `serial`. Does nothing if `build` is the running
-   build, or one that rolled back before.
+2. Skips it if it is no newer than the release last taken, by `serial`
+   (logging `skip`); a manifest does not expire, so a release stands until
+   the next supersedes it, and its `expires`, the end of 9999, is there
+   only for updaters from before 2026-10-08, which require one. Does
+   nothing if the release is the running one, or its `build` rolled back
+   before.
 3. Reports the package changes and the CVEs they fix, as now, from the
    manifest's packages against the running image's.
 4. Downloads the files, checks each size and sha256, installs them in the

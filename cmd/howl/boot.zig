@@ -13,6 +13,22 @@ const posix = std.posix;
 const lima = @import("lima.zig");
 const progress = @import("progress.zig");
 
+/// init's line that says a boot finished: "werewolf: up in 0.120s (the
+/// kernel 0.051s, userland 0.069s)".
+pub const up_line = "werewolf: up in ";
+
+/// How a boot ended, as its console says: init's up line, a kernel panic,
+/// or, when the time to wait ran out, neither.
+pub const Outcome = enum { up, panic, late };
+
+/// What console text says of a boot so far: up, a panic, or null for
+/// neither yet.
+pub fn outcome(text: []const u8) ?Outcome {
+    if (std.mem.find(u8, text, up_line) != null) return .up;
+    if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
+    return null;
+}
+
 /// How long a machine may take to come up.
 const wait_seconds = 180;
 /// How long its sshd may take to answer, once it is up.
@@ -102,7 +118,7 @@ pub fn watch(
 /// init's times in its "werewolf: up in 0.120s (the kernel 0.051s,
 /// userland 0.069s)" line, if text holds one.
 fn upLine(text: []const u8) ?struct { kernel: []const u8, userland: []const u8 } {
-    const at = std.mem.find(u8, text, "werewolf: up in ") orelse return null;
+    const at = std.mem.find(u8, text, up_line) orelse return null;
     const line = text[at..(std.mem.findScalarPos(u8, text, at, '\n') orelse text.len)];
     const k = "(the kernel ";
     const u = ", userland ";
@@ -158,4 +174,10 @@ test upLine {
     try testing.expectEqualStrings("0.051s", u.kernel);
     try testing.expectEqualStrings("0.069s", u.userland);
     try testing.expectEqual(null, upLine("werewolf: booting\n"));
+}
+
+test outcome {
+    try testing.expectEqual(null, outcome("stage0: ...\n"));
+    try testing.expectEqual(.up, outcome("...\nwerewolf: up in 0.6s (the kernel 0.2s)\n"));
+    try testing.expectEqual(.panic, outcome("Kernel panic - not syncing\n"));
 }

@@ -24,9 +24,9 @@ env     TMPDIR=/run/svc/php-fpm
 # an admin belongs to whoever finds it first. Salts and the relay's
 # password only if the machine brings them: salts are otherwise made once
 # on /data, and mail is otherwise off.
-config  admin-password-hash /run/config/wordpress/admin_password_hash
+config  admin-password-hash /run/config/wordpress/admin-password-hash
 config  salts /run/config/wordpress/salts.php optional
-config  smtp-password /run/config/wordpress/smtp_password optional
+config  smtp-password /run/config/wordpress/smtp-password optional
 # The site: its address, name and admin; its mail relay.
 config  settings /run/config/wordpress/settings.json
 setting url url required

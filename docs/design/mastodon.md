@@ -75,7 +75,7 @@ web and jobs through a shared group, served by nginx with `sendfile`.
    POLICY` in a service file: the child gets its own pledge, write paths,
    no network and its own memory and CPU ceilings, applied by a small
    launcher before exec. ffmpeg and ffprobe run so.
-4. **Public-only egress.** `connect USER tcp/443 public` in a `.net`
+4. **Public-only egress.** `connect USER tcp/443 public` in a form.yaml's `net`
    file: fence adds refusals for that user's traffic to 10/8, 172.16/12,
    192.168/16, 100.64/10, 127/8, 169.254/16 and their IPv6 kin before the
    allowance, by policy routing on destination and uid. Mastodon's own

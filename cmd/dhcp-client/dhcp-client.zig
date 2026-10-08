@@ -57,6 +57,7 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const sandbox = @import("sandbox");
+const network = @import("network");
 const sys = sandbox.sys;
 
 const state_dir = "/run/werewolf/network";
@@ -574,7 +575,7 @@ const Parent = struct {
                     var ip: [16]u8 = undefined;
                     p.log.event("withdrawn", .{
                         .nic = p.nic,
-                        .addr = ipText(&ip, a.addr),
+                        .ip = ipText(&ip, a.addr),
                         .reason = "the new lease differs",
                     });
                 };
@@ -608,7 +609,7 @@ const Parent = struct {
                 var ip: [16]u8 = undefined;
                 p.log.event("refused", .{
                     .nic = p.nic,
-                    .addr = ipText(&ip, m.lease.addr),
+                    .ip = ipText(&ip, m.lease.addr),
                     .withdrawn = ours,
                 });
             },
@@ -617,7 +618,7 @@ const Parent = struct {
                 var ip: [16]u8 = undefined;
                 p.log.event("expired", .{
                     .nic = p.nic,
-                    .addr = ipText(&ip, m.lease.addr),
+                    .ip = ipText(&ip, m.lease.addr),
                     .kept = p.applied != null,
                 });
             },
@@ -755,13 +756,14 @@ fn usableGateway(gw: Ip4, addr: Ip4) bool {
 
 // --- the parent's view: text, logged and kept --------------------------------
 
-/// What is kept in lease.json and logged: the lease, as text.
+/// What is kept in lease.json and logged: the lease, as text, its ip and gw
+/// named as a static network's are (lib/network.zig).
 const Lease = struct {
     nic: []const u8,
     /// The address and prefix: "10.128.0.5/32".
-    addr: []const u8,
+    ip: []const u8,
     server: []const u8,
-    router: ?[]const u8 = null,
+    gw: ?[]const u8 = null,
     /// "10.128.0.1/32" (on the link) or "0.0.0.0/0 via 10.128.0.1".
     routes: []const []const u8 = &.{},
     dns: []const []const u8 = &.{},
@@ -792,12 +794,12 @@ fn describe(gpa: Allocator, nic: []const u8, w: Wire) !Lease {
     for (w.dns[0..w.ndns]) |d| try dns.append(gpa, try ipString(gpa, d));
     return .{
         .nic = nic,
-        .addr = try gpa.print(
+        .ip = try gpa.print(
             "{s}/{d}",
             .{ try ipString(gpa, w.addr), prefixOf(w.mask) },
         ),
         .server = try ipString(gpa, w.server),
-        .router = if (std.mem.eql(u8, &w.router, &zero)) null else try ipString(gpa, w.router),
+        .gw = if (std.mem.eql(u8, &w.router, &zero)) null else try ipString(gpa, w.router),
         .routes = routes.items,
         .dns = dns.items,
         .mtu = w.mtu,
@@ -819,11 +821,11 @@ fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
         data,
         .{ .ignore_unknown_fields = true },
     ) catch return null;
-    const a = parseCidr(l.addr) orelse return null;
+    const a = network.cidr(l.ip) catch return null;
     var w: Wire = .{
         .addr = a.addr,
         .mask = maskOf(a.prefix),
-        .server = parseIp4(l.server) orelse return null,
+        .server = network.ip4(l.server) catch return null,
         .lease = l.lease,
         .t1 = l.t1,
         .t2 = l.t2,
@@ -842,18 +844,10 @@ fn parseRoute(s: []const u8) ?Route {
     var gw = zero;
     if (std.mem.find(u8, s, " via ")) |i| {
         dst_text = s[0..i];
-        gw = parseIp4(s[i + " via ".len ..]) orelse return null;
+        gw = network.ip4(s[i + " via ".len ..]) catch return null;
     }
-    const dst = parseCidr(dst_text) orelse return null;
+    const dst = network.cidr(dst_text) catch return null;
     return .{ .dst = dst.addr, .gw = gw, .prefix = dst.prefix };
-}
-
-/// "D.D.D.D/N", N at most 32.
-fn parseCidr(s: []const u8) ?struct { addr: Ip4, prefix: u8 } {
-    const slash = std.mem.findScalar(u8, s, '/') orelse return null;
-    const prefix = std.fmt.parseInt(u8, s[slash + 1 ..], 10) catch return null;
-    if (prefix > 32) return null;
-    return .{ .addr = parseIp4(s[0..slash]) orelse return null, .prefix = prefix };
 }
 
 /// JSON lines on stdout: `dhcp-client: {"time":...,"event":...,...}`. Built in a
@@ -1371,11 +1365,8 @@ fn u32Of(v: []const u8) ?u32 {
     return if (v.len == 4) std.mem.readInt(u32, v[0..4], .big) else null;
 }
 
-/// Neither zero, loopback, multicast nor broadcast: 1.0.0.0 to 223.255.255.255
-/// outside 127.0.0.0/8.
-fn usable(a: Ip4) bool {
-    return a[0] != 0 and a[0] != 127 and a[0] < 224;
-}
+/// A host's address, as a static network's must be too.
+const usable = network.usable;
 
 fn maskOf(prefix: u8) Ip4 {
     const bits: u32 = if (prefix == 0) 0 else ~@as(u32, 0) << @intCast(32 - @min(prefix, 32));
@@ -1408,13 +1399,6 @@ fn ipString(gpa: Allocator, a: Ip4) ![]const u8 {
 
 fn ipText(buf: *[16]u8, a: Ip4) []const u8 {
     return std.mem.print(buf, "{d}.{d}.{d}.{d}", .{ a[0], a[1], a[2], a[3] }) catch unreachable;
-}
-
-fn parseIp4(s: []const u8) ?Ip4 {
-    var a: Ip4 = undefined;
-    var it = std.mem.splitScalar(u8, s, '.');
-    for (&a) |*o| o.* = std.fmt.parseInt(u8, it.next() orelse return null, 10) catch return null;
-    return if (it.next() == null) a else null;
 }
 
 // --- time and chance ---------------------------------------------------------
@@ -1581,7 +1565,8 @@ test "GCP's lease" {
     var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer a.deinit();
     const l = try describe(a.allocator(), "eth0", w);
-    try std.testing.expectEqualStrings("10.128.0.5/32", l.addr);
+    try std.testing.expectEqualStrings("10.128.0.5/32", l.ip);
+    try std.testing.expectEqualStrings("10.128.0.1", l.gw.?);
     try std.testing.expectEqualStrings("169.254.169.254", l.server);
     try std.testing.expectEqual(2, l.routes.len);
     try std.testing.expectEqualStrings("10.128.0.1/32", l.routes[0]);
@@ -1595,7 +1580,7 @@ test "QEMU's lease" {
     var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer a.deinit();
     const l = try describe(a.allocator(), "eth0", w);
-    try std.testing.expectEqualStrings("10.0.2.15/24", l.addr);
+    try std.testing.expectEqualStrings("10.0.2.15/24", l.ip);
     try std.testing.expectEqual(1, l.routes.len); // the router is on the subnet
     try std.testing.expectEqualStrings("0.0.0.0/0 via 10.0.2.2", l.routes[0]);
     try std.testing.expectEqual(0, l.mtu);
@@ -1613,12 +1598,12 @@ test "lease.json round trip" {
     try std.testing.expectEqualSlices(u8, &w.server, &h.server);
     try std.testing.expectEqual(1234, h.bound);
     try std.testing.expectEqual(3600, h.lease);
-    try std.testing.expectEqual(null, heldFrom(a.allocator(), "{\"addr\":"));
+    try std.testing.expectEqual(null, heldFrom(a.allocator(), "{\"ip\":"));
     try std.testing.expectEqual(
         null,
         heldFrom(
             a.allocator(),
-            "{\"nic\":\"eth0\",\"addr\":\"10.0.0.5\",\"server\":\"10.0.0.1\",\"lease\":60,\"t1\"" ++
+            "{\"nic\":\"eth0\",\"ip\":\"10.0.0.5\",\"server\":\"10.0.0.1\",\"lease\":60,\"t1\"" ++
                 ":0,\"t2\":0,\"bound\":0}",
         ),
     );
@@ -1851,12 +1836,9 @@ test "masks and addresses" {
         .{ 255, 255, 255, 255 },
     ));
     try std.testing.expect(!usable(zero));
+    try std.testing.expect(!usable(.{ 0, 1, 2, 3 }));
     try std.testing.expect(!usable(.{ 255, 255, 255, 255 }));
     try std.testing.expect(!usable(.{ 127, 0, 0, 1 }));
-    try std.testing.expectEqualSlices(u8, &.{ 10, 128, 0, 5 }, &parseIp4("10.128.0.5").?);
-    try std.testing.expectEqual(null, parseIp4("10.128.0"));
-    try std.testing.expectEqual(null, parseIp4("10.128.0.256"));
-    try std.testing.expectEqual(null, parseIp4("10.128.0.5.1"));
 }
 
 test "timers" {

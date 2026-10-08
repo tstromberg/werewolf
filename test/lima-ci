@@ -31,7 +31,7 @@ limactl shell --workdir / "$vm" sh -euc "
 	rsync -a --delete --exclude /build --exclude /out --exclude /config --exclude /.git '$repo/' ~/werewolf/
 	cd ~/werewolf
 	sudo test/ci-setup
-	make test
+	make -j\$(nproc) test
 	make lint
 	# The compiled tutorial forms build on the host, never in the guest.
 	command -v go >/dev/null || sudo apt-get install -y golang-go

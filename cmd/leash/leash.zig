@@ -17,7 +17,8 @@
 //! One directive a line: a key, then words. Double quotes around a whole
 //! word let it hold spaces (env "GREETING=hello world"); there are no
 //! escapes, variables or expansions. A # that starts a word starts a
-//! comment.
+//! comment. lib/service.zig reads it, for leash, howl, seal and the build
+//! alike.
 //!
 //!     exec PROGRAM ARG...     what runs; required, once
 //!     before PROGRAM ARG...   run first, in order, leashed; each must exit 0
@@ -42,6 +43,8 @@
 //!     config NAME PATH [optional]
 //!                             copy a /run/config file to this service's
 //!                             /run/svc/SERVICE/NAME, mode 0600; never logged.
+//!                             NAME is a setting's, [a-z][a-z0-9-]*: howl
+//!                             pack's --NAME.
 //!                             Missing, it keeps the service down, unless
 //!                             optional: then there is no copy
 //!     setting NAME TYPE[...] [required] [as KEY]
@@ -57,6 +60,17 @@
 //!                             cannot exhaust the machine's memory. A
 //!                             ceiling on memory held, not address space
 //!                             reserved, so the JVM and V8 fit under it.
+//!     root /oci/NAME          an image baked into the root (docs/design/adhoc.md):
+//!                             the service runs inside it, and every path
+//!                             above is the image's. leash enters it as
+//!                             root, before it builds a rule or gives root
+//!                             up, so the image's links resolve inside it.
+//!                             Its floor is the image, readable; /tmp, /run
+//!                             and /data, which init bound from
+//!                             /run/svc/NAME, its run/ and /data/svc/NAME;
+//!                             and the devices init bound in. No render:
+//!                             service-config is not there
+//!     dir PATH                where it starts, inside its root; /data otherwise
 //!
 //! Every service is also held to 4096 tasks, processes and threads together
 //! (its cgroup's pids.max), so one that forks or spawns without end stops
@@ -106,6 +120,9 @@
 const std = @import("std");
 const seal = @import("seal");
 const settings = @import("settings");
+const sandbox = @import("sandbox");
+const service = @import("service");
+const cmdline = @import("cmdline");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -159,13 +176,17 @@ pub fn main(init: std.process.Init) !void {
     var cwd_buf: [Dir.max_path_bytes]u8 = undefined;
     const cwd_len = std.process.currentPath(io, &cwd_buf) catch 0;
     const name = std.fs.path.basename(cwd_buf[0..cwd_len]);
-    if (!isName(name)) l.fail(.park, "run from /etc/sv/NAME, not {s}", .{cwd_buf[0..cwd_len]});
+    if (!service.isName(name)) l.fail(
+        .park,
+        "run from /etc/sv/NAME, not {s}",
+        .{cwd_buf[0..cwd_len]},
+    );
     l.name = name;
 
     const text = Dir.cwd().readFileAlloc(io, "service", gpa, .limited(max_file)) catch |err|
         l.fail(.park, "./service: {s}", .{@errorName(err)});
-    var bad: Bad = .{};
-    const s = parse(gpa, text, &bad) catch
+    var bad: service.Bad = .{};
+    const s = service.parse(gpa, text, &bad) catch
         l.fail(.park, "./service, line {d}: {s}", .{ bad.line, bad.why });
 
     const passwd = Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
@@ -243,32 +264,66 @@ pub fn main(init: std.process.Init) !void {
         record(io, .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
     }
 
-    var rules = Ruleset.init() catch |err|
-        l.fail(.park, "Landlock: {s}; this kernel cannot leash a service", .{@errorName(err)});
+    // A service with a root runs inside the image beneath it. leash enters
+    // it here, as root and before any rule: every path from here on, the
+    // floor, its programs, its own places, is the image's and resolves
+    // inside it, links and all, and nothing of the machine is reachable
+    // but what init bound in (cmd/init/oci.zig). Its /tmp and /data are
+    // /run/svc/NAME and /data/svc/NAME, bound there, made and owned above.
+    if (s.root) |r| {
+        const rz = try gpa.dupeSentinel(u8, r, 0);
+        if (linux.errno(linux.chroot(rz)) != .SUCCESS or linux.errno(linux.chdir("/")) != .SUCCESS)
+            l.fail(.park, "root {s}: cannot enter it", .{r});
+    }
+    const own_run: [:0]const u8 = if (s.root != null) "/tmp" else run_dir;
+    const own_data: [:0]const u8 = if (s.root != null) "/data" else data_dir;
+    // An image logs by reopening /dev/stdout and /dev/stderr, which lead
+    // through /proc/self/fd to runsv's pipes, and a pipe reopened by path
+    // is checked like a file: root's, mode 0600. Given to the service's
+    // user, they open; what they carry goes where it always did.
+    if (s.root != null) for ([_]i32{ 1, 2 }) |fd| {
+        _ = linux.fchown(fd, user.uid, user.gid);
+    };
+
+    const rules = sandbox.Ruleset.init() catch |err| l.fail(
+        .park,
+        "Landlock: {s}; this kernel cannot leash a service",
+        .{sandbox.whyNot(gpa, err)},
+    );
     if ((s.listen.len > 0 or s.connect.len > 0) and rules.abi < 4)
         l.fail(.park, "Landlock ABI {d} has no TCP rules", .{rules.abi});
-    for (floor) |f| rules.allow(f.path, f.access, .optional) catch {};
+    const floor_rules: []const Floor = if (s.root != null) &rooted_floor else &floor;
+    for (floor_rules) |f| allow(rules, f.path, f.access, .optional) catch {};
     for ([_][:0]const u8{ "/proc/self/fd/1", "/proc/self/fd/2" }) |fd|
-        rules.allow(fd, write_file, .optional) catch {};
-    rules.allow(run_dir, write_dir, .own) catch |err|
-        l.fail(.park, "{s}: {s}", .{ run_dir, @errorName(err) });
-    if (!nodata) rules.allow(data_dir, write_dir, .own) catch |err|
-        l.fail(.park, "{s}: {s}", .{ data_dir, @errorName(err) });
-    for (s.read) |p| allowPath(l, &rules, gpa, p, read_dir, nodata);
-    for (s.write) |p| allowPath(l, &rules, gpa, p, write_dir, nodata);
-    for (s.run) |p| allowProgram(l, &rules, gpa, p);
-    allowProgram(l, &rules, gpa, s.exec[0]);
-    for (s.before) |b| allowProgram(l, &rules, gpa, b[0]);
+        allow(rules, fd, sandbox.write_file, .optional) catch {};
+    allow(rules, own_run, write_tree, .own) catch |err|
+        l.fail(.park, "{s}: {s}", .{ own_run, sandbox.whyNot(gpa, err) });
+    if (!nodata) allow(rules, own_data, write_tree, .own) catch |err|
+        l.fail(.park, "{s}: {s}", .{ own_data, sandbox.whyNot(gpa, err) });
+    // And an image's /run, where it keeps its pid file and sockets, bound
+    // from its own /run/svc/NAME/run (cmd/init/oci.zig).
+    if (s.root != null) allow(rules, "/run", write_tree, .own) catch |err|
+        l.fail(.park, "/run: {s}", .{sandbox.whyNot(gpa, err)});
+    for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
+    for (s.write) |p| allowPath(l, rules, gpa, p, write_tree, nodata);
+    for (s.run) |p| allowProgram(l, rules, gpa, p);
+    allowProgram(l, rules, gpa, s.exec[0]);
+    for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
     if (s.render) |r| {
-        allowProgram(l, &rules, gpa, service_config);
-        if (r.from) |from| allowPath(l, &rules, gpa, from, read_file, nodata);
+        allowProgram(l, rules, gpa, service_config);
+        if (r.from) |from| allowPath(l, rules, gpa, from, sandbox.read_file, nodata);
     }
-    for (s.listen) |port| rules.port(port, bind_tcp) catch |err|
-        l.fail(.park, "listen tcp/{d}: {s}", .{ port, @errorName(err) });
-    for (s.connect) |port| rules.port(port, connect_tcp) catch |err|
-        l.fail(.park, "connect tcp/{d}: {s}", .{ port, @errorName(err) });
+    for (s.listen) |port| rules.port(sandbox.bind_tcp, port) catch |err|
+        l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+    for (s.connect) |port| rules.port(sandbox.connect_tcp, port) catch |err|
+        l.fail(.park, "connect tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
 
-    const cwd = if (nodata) run_dir else data_dir;
+    const cwd: [:0]const u8 = if (s.dir) |d|
+        try gpa.dupeSentinel(u8, d, 0)
+    else if (nodata)
+        own_run
+    else
+        own_data;
     const cd = linux.chdir(cwd);
     if (linux.errno(cd) != .SUCCESS) record(io, .{
         .event = "warning",
@@ -284,9 +339,9 @@ pub fn main(init: std.process.Init) !void {
 
     // --- leashed --------------------------------------------------------------
 
-    rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{@errorName(err)});
+    rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     for (s.configs, configs) |cfg, value| {
-        copyConfig(run_dir, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
+        copyConfig(own_run, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
             l.fail(.park, "config {s}: {s}", .{ cfg.name, @errorName(err) });
     }
     // The pledge, as the words a service file says it in.
@@ -301,6 +356,7 @@ pub fn main(init: std.process.Init) !void {
             .service = name,
             .user = s.user,
             .exec = s.exec[0],
+            .root = s.root,
             .listen = s.listen,
             .connect = s.connect,
             .landlock = rules.abi,
@@ -360,7 +416,9 @@ pub fn main(init: std.process.Init) !void {
 
 /// Whether the machine is learning its pledges (werewolf.seal=learn, a
 /// DEV=1 build), when a service installs no filter of its own, so every
-/// call reaches the machine seal to be recorded.
+/// call reaches the machine seal to be recorded. Read as init read it, by
+/// lib/cmdline.zig, from the kernel's line, which root cannot rewrite, as
+/// it could init's record in /run; a line it refuses is no learning.
 fn learning() bool {
     var buf: [4096]u8 = undefined;
     const fd = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
@@ -368,281 +426,9 @@ fn learning() bool {
     defer _ = linux.close(@intCast(fd));
     const n = linux.read(@intCast(fd), &buf, buf.len);
     if (linux.errno(n) != .SUCCESS) return false;
-    var it = std.mem.tokenizeAny(u8, buf[0..n], " \n");
-    while (it.next()) |a| if (std.mem.eql(u8, a, "werewolf.seal=learn"))
-        return exists("/usr/share/werewolf/dev");
-    return false;
-}
-
-// --- the service file ----------------------------------------------------------
-
-const Service = struct {
-    exec: []const []const u8 = &.{},
-    before: []const []const []const u8 = &.{},
-    user: []const u8 = "",
-    listen: []const u16 = &.{},
-    connect: []const u16 = &.{},
-    read: []const []const u8 = &.{},
-    write: []const []const u8 = &.{},
-    run: []const []const u8 = &.{},
-    requires: []const []const u8 = &.{},
-    env: []const [2][]const u8 = &.{},
-    secrets: []const [2][]const u8 = &.{},
-    configs: []const Config = &.{},
-    settings: []const settings.Setting = &.{},
-    render: ?settings.Render = null,
-    nofile: ?u32 = null,
-    memory: ?u32 = null,
-    pledge: seal.Set = .empty,
-};
-
-/// A `config` line: the copy's name in the service's directory, its source
-/// beneath /run/config, and whether the service runs without it.
-const Config = struct { name: []const u8, path: []const u8, optional: bool = false };
-
-/// Where the file is wrong, and how.
-const Bad = struct { line: usize = 0, why: []const u8 = "" };
-
-/// A service file, checked whole: an error sets bad and returns
-/// error.Invalid, and nothing has been done.
-fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
-    var exec: ?[]const []const u8 = null;
-    var user: ?[]const u8 = null;
-    var nofile: ?u32 = null;
-    var memory: ?u32 = null;
-    var pledge: ?seal.Set = null;
-    var before: std.ArrayList([]const []const u8) = .empty;
-    var listen: std.ArrayList(u16) = .empty;
-    var connect: std.ArrayList(u16) = .empty;
-    var read: std.ArrayList([]const u8) = .empty;
-    var write: std.ArrayList([]const u8) = .empty;
-    var run: std.ArrayList([]const u8) = .empty;
-    var requires: std.ArrayList([]const u8) = .empty;
-    var env: std.ArrayList([2][]const u8) = .empty;
-    var secrets: std.ArrayList([2][]const u8) = .empty;
-    var configs: std.ArrayList(Config) = .empty;
-    var declared: std.ArrayList(settings.Setting) = .empty;
-    var render: ?settings.Render = null;
-
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    var n: usize = 0;
-    while (lines.next()) |line| {
-        n += 1;
-        bad.line = n;
-        const words = try split(gpa, line, bad);
-        if (words.len == 0) continue;
-        const key = words[0];
-        const args = words[1..];
-        if (std.mem.eql(u8, key, "exec")) {
-            if (exec != null) return invalid(bad, "exec twice");
-            exec = try program(args, bad);
-        } else if (std.mem.eql(u8, key, "before")) {
-            try before.append(gpa, try program(args, bad));
-        } else if (std.mem.eql(u8, key, "user")) {
-            if (user != null) return invalid(bad, "user twice");
-            if (args.len != 1 or !isName(args[0])) return invalid(bad, "user takes one plain name");
-            if (std.mem.eql(u8, args[0], "root"))
-                return invalid(bad, "user root: a service runs as a user of its own");
-            user = args[0];
-        } else if (std.mem.eql(u8, key, "listen") or std.mem.eql(u8, key, "connect")) {
-            if (args.len == 0) return invalid(bad, "no ports");
-            const list = if (std.mem.eql(u8, key, "listen")) &listen else &connect;
-            for (args) |a| try list.append(gpa, try tcpPort(a, bad));
-        } else if (std.mem.eql(u8, key, "read") or std.mem.eql(u8, key, "write") or
-            std.mem.eql(u8, key, "run") or std.mem.eql(u8, key, "requires"))
-        {
-            if (args.len == 0) return invalid(bad, "no paths");
-            const list = if (std.mem.eql(u8, key, "read"))
-                &read
-            else if (std.mem.eql(u8, key, "write"))
-                &write
-            else if (std.mem.eql(u8, key, "run"))
-                &run
-            else
-                &requires;
-            for (args) |a| {
-                if (!isCleanPath(a))
-                    return invalid(bad, "a path must be absolute, without . or .. or //");
-                try list.append(gpa, a);
-            }
-        } else if (std.mem.eql(u8, key, "env")) {
-            if (args.len != 1) return invalid(bad, "env takes one NAME=VALUE");
-            const eq = std.mem.findScalar(u8, args[0], '=') orelse
-                return invalid(bad, "env takes NAME=VALUE");
-            if (!isVariable(args[0][0..eq])) return invalid(bad, "not a variable name");
-            try env.append(gpa, .{ args[0][0..eq], args[0][eq + 1 ..] });
-        } else if (std.mem.eql(u8, key, "secret")) {
-            if (args.len != 2 or !isVariable(args[0]))
-                return invalid(bad, "secret takes NAME and PATH");
-            if (!isCleanPath(args[1]) or !std.mem.startsWith(u8, args[1], "/run/config/"))
-                return invalid(bad, "secret source must be beneath /run/config");
-            try secrets.append(gpa, .{ args[0], args[1] });
-        } else if (std.mem.eql(u8, key, "config")) {
-            const optional = args.len == 3 and std.mem.eql(u8, args[2], "optional");
-            if ((args.len != 2 and !optional) or !isName(args[0]))
-                return invalid(bad, "config takes a plain NAME and PATH [optional]");
-            if (!isCleanPath(args[1]) or !std.mem.startsWith(u8, args[1], "/run/config/"))
-                return invalid(bad, "config source must be beneath /run/config");
-            if (configs.items.len == 32) return invalid(bad, "at most 32 config files");
-            for (configs.items) |cfg| if (std.mem.eql(u8, cfg.name, args[0]))
-                return invalid(bad, "config name repeated");
-            if (optional and std.mem.eql(u8, args[0], settings.input_file))
-                return invalid(bad, "settings are optional already");
-            try configs.append(gpa, .{ .name = args[0], .path = args[1], .optional = optional });
-        } else if (std.mem.eql(u8, key, "setting")) {
-            try declared.append(
-                gpa,
-                settings.parseSetting(args, &bad.why) catch return error.Invalid,
-            );
-        } else if (std.mem.eql(u8, key, "render")) {
-            if (render != null) return invalid(bad, "render twice");
-            render = settings.parseRender(args, &bad.why) catch return error.Invalid;
-        } else if (std.mem.eql(u8, key, "pledge")) {
-            if (pledge != null) return invalid(bad, "pledge twice");
-            if (args.len == 0) return invalid(bad, "pledge takes promises");
-            var set: seal.Set = .empty;
-            for (args) |a| set.insert(
-                std.meta.stringToEnum(seal.Promise, a) orelse
-                    return invalid(bad, "no such promise"),
-            );
-            pledge = set;
-        } else if (std.mem.eql(u8, key, "nofile")) {
-            if (nofile != null) return invalid(bad, "nofile twice");
-            if (args.len != 1) return invalid(bad, "nofile takes one number");
-            nofile = std.fmt.parseInt(u32, args[0], 10) catch
-                return invalid(bad, "nofile takes a number");
-            if (nofile.? == 0 or nofile.? > 1 << 20) return invalid(bad, "nofile is 1 to 1048576");
-        } else if (std.mem.eql(u8, key, "memory")) {
-            if (memory != null) return invalid(bad, "memory twice");
-            if (args.len != 1) return invalid(bad, "memory takes one number of MiB");
-            memory = std.fmt.parseInt(u32, args[0], 10) catch
-                return invalid(bad, "memory takes a number of MiB");
-            if (memory.? == 0 or memory.? > 1 << 20)
-                return invalid(bad, "memory is 1 to 1048576 MiB");
-        } else return invalid(bad, "unknown key");
-    }
-    bad.line = 0;
-    const promises = pledge orelse return invalid(bad, "no pledge: say what it does");
-    if (render) |r| {
-        settings.declare(gpa, declared.items, r, &bad.why) catch |err| switch (err) {
-            error.Invalid => return error.Invalid,
-            else => return err,
-        };
-        const sourced = for (configs.items) |cfg| {
-            if (std.mem.eql(u8, cfg.name, settings.input_file)) break true;
-        } else false;
-        if (!sourced) return invalid(bad, "settings come from a `config settings PATH` line");
-        for (configs.items) |cfg| if (std.mem.eql(u8, cfg.name, r.file))
-            return invalid(bad, "a config has render's file name");
-        if (r.format == .env) for (declared.items) |d| {
-            for (env.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
-                return invalid(bad, "a setting's key is an env line's too");
-            for (secrets.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
-                return invalid(bad, "a setting's key is a secret's too");
-        };
-    } else if (declared.items.len > 0) return invalid(bad, "setting without render");
-    return .{
-        .exec = exec orelse return invalid(bad, "no exec"),
-        .user = user orelse return invalid(bad, "no user"),
-        .pledge = promises,
-        .before = before.items,
-        .listen = listen.items,
-        .connect = connect.items,
-        .read = read.items,
-        .write = write.items,
-        .run = run.items,
-        .requires = requires.items,
-        .env = env.items,
-        .secrets = secrets.items,
-        .configs = configs.items,
-        .settings = declared.items,
-        .render = render,
-        .nofile = nofile,
-        .memory = memory,
-    };
-}
-
-fn invalid(bad: *Bad, why: []const u8) error{Invalid} {
-    bad.why = why;
-    return error.Invalid;
-}
-
-/// A line's words: separated by spaces or tabs, grouped by double quotes,
-/// ended by a # that starts a word.
-fn split(gpa: Allocator, line: []const u8, bad: *Bad) ![]const []const u8 {
-    var words: std.ArrayList([]const u8) = .empty;
-    var i: usize = 0;
-    while (i < line.len) {
-        const c = line[i];
-        if (c == ' ' or c == '\t' or c == '\r') {
-            i += 1;
-        } else if (c == '#') {
-            break;
-        } else if (c == '"') {
-            const end = std.mem.findScalarPos(u8, line, i + 1, '"') orelse
-                return invalid(bad, "a quote is not closed");
-            if (end + 1 < line.len and line[end + 1] != ' ' and
-                line[end + 1] != '\t') return invalid(bad, "a quote ends inside a word");
-            try words.append(gpa, line[i + 1 .. end]);
-            i = end + 1;
-        } else {
-            var end = i;
-            while (end < line.len and line[end] != ' ' and line[end] != '\t' and
-                line[end] != '\r') : (end += 1)
-            {
-                if (line[end] == '"') return invalid(bad, "a quote inside a word");
-            }
-            try words.append(gpa, line[i..end]);
-            i = end;
-        }
-    }
-    for (words.items) |w| for (w) |c| if (c < 0x20 or c == 0x7f)
-        return invalid(bad, "a control character");
-    return words.items;
-}
-
-fn program(args: []const []const u8, bad: *Bad) ![]const []const u8 {
-    if (args.len == 0) return invalid(bad, "no program");
-    if (!isCleanPath(args[0]))
-        return invalid(bad, "a program is an absolute path, without . or .. or //");
-    return args;
-}
-
-fn tcpPort(word: []const u8, bad: *Bad) !u16 {
-    if (!std.mem.startsWith(u8, word, "tcp/"))
-        return invalid(bad, "a port is tcp/PORT: Landlock cannot restrict UDP");
-    const p = std.fmt.parseInt(u16, word[4..], 10) catch
-        return invalid(bad, "a port is 1 to 65535");
-    if (p == 0) return invalid(bad, "a port is 1 to 65535");
-    return p;
-}
-
-/// Absolute, with no empty, . or .. part, and no trailing slash but "/".
-fn isCleanPath(p: []const u8) bool {
-    if (p.len == 0 or p[0] != '/') return false;
-    if (p.len == 1) return true;
-    var parts = std.mem.splitScalar(u8, p[1..], '/');
-    while (parts.next()) |part| {
-        if (part.len == 0 or std.mem.eql(u8, part, ".") or
-            std.mem.eql(u8, part, "..")) return false;
-    }
-    return true;
-}
-
-/// A user's or service's name: [a-z_][a-z0-9_-]*, at most 32.
-fn isName(s: []const u8) bool {
-    if (s.len == 0 or s.len > 32) return false;
-    if (!std.ascii.isLower(s[0]) and s[0] != '_') return false;
-    for (s[1..]) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '_' and
-        c != '-') return false;
-    return true;
-}
-
-/// An environment variable's name: [A-Za-z_][A-Za-z0-9_]*.
-fn isVariable(s: []const u8) bool {
-    if (s.len == 0 or std.ascii.isDigit(s[0])) return false;
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
-    return true;
+    var refused: cmdline.Failure = .{};
+    const c = cmdline.parse(buf[0..n], &refused) orelse return false;
+    return c.seal == .learn and exists("/usr/share/werewolf/dev");
 }
 
 // --- as root ---------------------------------------------------------------------
@@ -693,7 +479,7 @@ fn renderSettings(
     l: Leash,
     gpa: Allocator,
     run_dir: [:0]const u8,
-    s: Service,
+    s: service.Service,
     r: settings.Render,
     env: *std.process.Environ.Map,
 ) void {
@@ -779,14 +565,14 @@ fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: ?[]const u8) !void {
 
 fn allowPath(
     l: Leash,
-    rules: *Ruleset,
+    rules: sandbox.Ruleset,
     gpa: Allocator,
     path: []const u8,
     access: u64,
     nodata: bool,
 ) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch l.fail(.park, "out of memory", .{});
-    rules.allow(z, access, .plain) catch |err| switch (err) {
+    allow(rules, z, access, .plain) catch |err| switch (err) {
         // Another service makes it; runsv starts this one again in a
         // second. Not while /data is unavailable: it would not appear.
         error.FileNotFound => l.fail(
@@ -794,16 +580,16 @@ fn allowPath(
             "{s} is not there yet",
             .{path},
         ),
-        else => l.fail(.park, "{s}: {s}", .{ path, @errorName(err) }),
+        else => l.fail(.park, "{s}: {s}", .{ path, sandbox.whyNot(gpa, err) }),
     };
 }
 
 /// A program it may start, and the ELF interpreter that loads it, which
 /// the kernel opens for execution too.
-fn allowProgram(l: Leash, rules: *Ruleset, gpa: Allocator, path: []const u8) void {
+fn allowProgram(l: Leash, rules: sandbox.Ruleset, gpa: Allocator, path: []const u8) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch l.fail(.park, "out of memory", .{});
-    rules.allow(z, run_file, .follow) catch |err|
-        l.fail(.park, "{s}: {s}", .{ path, @errorName(err) });
+    allow(rules, z, run_file, .follow) catch |err|
+        l.fail(.park, "{s}: {s}", .{ path, sandbox.whyNot(gpa, err) });
     var head: [4096]u8 = undefined;
     const fd = linux.open(z, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) l.fail(.park, "{s}: cannot read it", .{path});
@@ -814,8 +600,8 @@ fn allowProgram(l: Leash, rules: *Ruleset, gpa: Allocator, path: []const u8) voi
         l.fail(.park, "{s}: not an ELF program leash can read", .{path});
     if (interp) |i| {
         const iz = gpa.dupeSentinel(u8, i, 0) catch l.fail(.park, "out of memory", .{});
-        rules.allow(iz, run_file, .follow) catch |err|
-            l.fail(.park, "{s}'s loader {s}: {s}", .{ path, i, @errorName(err) });
+        allow(rules, iz, run_file, .follow) catch |err|
+            l.fail(.park, "{s}'s loader {s}: {s}", .{ path, i, sandbox.whyNot(gpa, err) });
     }
 }
 
@@ -842,7 +628,7 @@ fn interpreter(head: []const u8) !?[]const u8 {
         if (size < 2 or size > 256 or off + size > head.len) return error.NotElf;
         const path = head[@intCast(off)..][0..@intCast(size)];
         const end = std.mem.findScalar(u8, path, 0) orelse return error.NotElf;
-        if (!isCleanPath(path[0..end])) return error.NotElf;
+        if (!service.isCleanPath(path[0..end])) return error.NotElf;
         return path[0..end];
     }
     return null;
@@ -897,18 +683,13 @@ const CapSets = extern struct {
 
 // --- Landlock -------------------------------------------------------------------
 
-// Access rights, from linux/landlock.h.
-const execute: u64 = 1 << 0;
-const write_file: u64 = 1 << 1;
-const read_file: u64 = 1 << 2;
-const read_dir: u64 = read_file | 1 << 3;
-const write_dir: u64 = read_dir | write_file | 1 << 4 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 9 |
-    1 << 10 | 1 << 12 | 1 << 13 | 1 << 14; // not MAKE_CHAR or MAKE_BLOCK
-const run_file: u64 = execute | read_file;
-/// The rights a rule on a file, not a directory, may hold.
-const file_rights: u64 = execute | write_file | read_file | 1 << 14 | 1 << 15;
-const bind_tcp: u64 = 1 << 0;
-const connect_tcp: u64 = 1 << 1;
+// Rights, of lib/sandbox.zig's: a tree read, files and listings; a tree
+// written, everything but devices; and a program run.
+const read_tree: u64 = sandbox.read_file | sandbox.read_dir;
+const write_tree: u64 = read_tree | sandbox.write_file | sandbox.remove_dir |
+    sandbox.remove_file | sandbox.make_dir | sandbox.make_reg | sandbox.make_sock |
+    sandbox.make_fifo | sandbox.make_sym | sandbox.refer | sandbox.truncate;
+const run_file: u64 = sandbox.execute | sandbox.read_file;
 
 // openat2(2), for a path resolved with no link in it.
 const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
@@ -919,139 +700,79 @@ const RESOLVE_NO_SYMLINKS = 0x04;
 
 const Floor = struct { path: [:0]const u8, access: u64 };
 const floor = [_]Floor{
-    .{ .path = "/usr", .access = read_dir },
-    .{ .path = "/proc", .access = read_dir },
-    .{ .path = "/sys/devices/system/cpu", .access = read_dir },
-    .{ .path = "/etc/passwd", .access = read_file },
-    .{ .path = "/etc/group", .access = read_file },
-    .{ .path = "/etc/hosts", .access = read_file },
-    .{ .path = "/etc/resolv.conf", .access = read_file },
-    .{ .path = "/etc/nsswitch.conf", .access = read_file },
-    .{ .path = "/etc/ld.so.cache", .access = read_file },
-    .{ .path = "/etc/localtime", .access = read_file },
-    .{ .path = "/etc/ssl", .access = read_dir },
-    .{ .path = "/dev/null", .access = read_file | write_file },
-    .{ .path = "/dev/zero", .access = read_file },
-    .{ .path = "/dev/urandom", .access = read_file },
+    .{ .path = "/usr", .access = read_tree },
+    .{ .path = "/proc", .access = read_tree },
+    .{ .path = "/sys/devices/system/cpu", .access = read_tree },
+    .{ .path = "/etc/passwd", .access = sandbox.read_file },
+    .{ .path = "/etc/group", .access = sandbox.read_file },
+    .{ .path = "/etc/hosts", .access = sandbox.read_file },
+    .{ .path = "/etc/resolv.conf", .access = sandbox.read_file },
+    .{ .path = "/etc/nsswitch.conf", .access = sandbox.read_file },
+    .{ .path = "/etc/ld.so.cache", .access = sandbox.read_file },
+    .{ .path = "/etc/localtime", .access = sandbox.read_file },
+    .{ .path = "/etc/ssl", .access = read_tree },
+    .{ .path = "/dev/null", .access = sandbox.read_file | sandbox.write_file },
+    .{ .path = "/dev/zero", .access = sandbox.read_file },
+    .{ .path = "/dev/urandom", .access = sandbox.read_file },
 };
 
-const Ruleset = struct {
-    fd: linux.fd_t,
-    abi: usize,
-    fs: u64,
+/// The floor of a service with a root, inside it: the image, readable
+/// whole, /proc and the two writable places beneath it included, and the
+/// devices init bound in (cmd/init/oci.zig). Nothing of the machine's own
+/// /etc or /usr is there to be read.
+const rooted_floor = [_]Floor{
+    .{ .path = "/", .access = read_tree },
+    .{ .path = "/dev/null", .access = sandbox.read_file | sandbox.write_file },
+    .{ .path = "/dev/zero", .access = sandbox.read_file },
+    .{ .path = "/dev/full", .access = sandbox.read_file | sandbox.write_file },
+    .{ .path = "/dev/random", .access = sandbox.read_file },
+    .{ .path = "/dev/urandom", .access = sandbox.read_file },
+};
 
-    /// A ruleset handling every access this kernel's Landlock knows, so
-    /// what no rule grants is refused.
-    fn init() !Ruleset {
-        const abi = linux.syscall3(
-            .landlock_create_ruleset,
-            0,
-            0,
-            1,
-        ); // LANDLOCK_CREATE_RULESET_VERSION
-        if (linux.errno(abi) != .SUCCESS) return error.Unsupported;
-        const fs: u64 = if (abi >= 5)
-            0xffff
-        else if (abi >= 3)
-            0x7fff
-        else if (abi >= 2)
-            0x3fff
-        else
-            0x1fff;
-        const attr: [3]u64 = .{
-            fs,
-            if (abi >= 4) bind_tcp | connect_tcp else 0,
-            if (abi >= 6) 0x3 else 0,
-        }; // scoped: abstract UNIX sockets, signals
-        const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
-        const fd = linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0);
-        if (linux.errno(fd) != .SUCCESS) return error.Unsupported;
-        return .{ .fd = @intCast(fd), .abi = abi, .fs = fs };
-    }
+/// How a path is resolved. follow: the image's programs, through its
+/// links (/lib to usr/lib). plain: a service file's read and write
+/// paths, with no link anywhere in them: one may lie in another
+/// service's directory, under /data, which follows links, and that
+/// service could make the name a link to what it wants this one
+/// granted. own: the service's directories, a link at the end refused.
+/// optional: the floor, which may be absent.
+const How = enum { follow, plain, optional, own };
 
-    /// How a path is resolved. follow: the image's programs, through its
-    /// links (/lib to usr/lib). plain: a service file's read and write
-    /// paths, with no link anywhere in them: one may lie in another
-    /// service's directory, under /data, which follows links, and that
-    /// service could make the name a link to what it wants this one
-    /// granted. own: the service's directories, a link at the end refused.
-    /// optional: the floor, which may be absent.
-    const How = enum { follow, plain, optional, own };
-
-    /// access beneath path: on a directory, all of it; on a file, the
-    /// file's rights alone.
-    fn allow(r: *Ruleset, path: [:0]const u8, access: u64, how: How) !void {
-        const fd = if (how == .plain) blk: {
-            var open_how: OpenHow = .{
-                .flags = O_PATH | O_CLOEXEC,
-                .mode = 0,
-                .resolve = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
-            };
-            break :blk linux.syscall4(
-                .openat2,
-                @bitCast(@as(isize, linux.AT.FDCWD)),
-                @intFromPtr(path.ptr),
-                @intFromPtr(&open_how),
-                @sizeOf(OpenHow),
-            );
-        } else linux.open(path, .{ .PATH = true, .CLOEXEC = true, .NOFOLLOW = how == .own }, 0);
-        switch (linux.errno(fd)) {
-            .SUCCESS => {},
-            .NOENT => return error.FileNotFound,
-            .LOOP => return error.ThroughALink,
-            else => return error.CannotOpen,
-        }
-        defer _ = linux.close(@intCast(fd));
-        var st: linux.Statx = undefined;
-        if (linux.errno(linux.statx(
-            @intCast(fd),
-            "",
-            linux.AT.EMPTY_PATH,
-            .{ .TYPE = true },
-            &st,
-        )) != .SUCCESS) return error.CannotOpen;
-        const is_dir = st.mode & linux.S.IFMT == linux.S.IFDIR;
-        var beneath: [12]u8 = undefined; // struct landlock_path_beneath_attr, packed
-        std.mem.writeInt(
-            u64,
-            beneath[0..8],
-            access & r.fs & (if (is_dir) ~@as(u64, 0) else file_rights),
-            .little,
+/// access beneath path, in rules: on a directory, all of it; on a file,
+/// the file's rights alone.
+fn allow(rules: sandbox.Ruleset, path: [:0]const u8, access: u64, how: How) !void {
+    const fd = if (how == .plain) blk: {
+        var open_how: OpenHow = .{
+            .flags = O_PATH | O_CLOEXEC,
+            .mode = 0,
+            .resolve = RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+        };
+        break :blk linux.syscall4(
+            .openat2,
+            @bitCast(@as(isize, linux.AT.FDCWD)),
+            @intFromPtr(path.ptr),
+            @intFromPtr(&open_how),
+            @sizeOf(OpenHow),
         );
-        std.mem.writeInt(i32, beneath[8..12], @intCast(fd), .little);
-        if (linux.errno(linux.syscall4(
-            .landlock_add_rule,
-            @intCast(r.fd),
-            1,
-            @intFromPtr(&beneath),
-            0,
-        )) != .SUCCESS) return error.RuleRefused;
+    } else linux.open(path, .{ .PATH = true, .CLOEXEC = true, .NOFOLLOW = how == .own }, 0);
+    switch (linux.errno(fd)) {
+        .SUCCESS => {},
+        .NOENT => return error.FileNotFound,
+        .LOOP => return error.ThroughALink,
+        else => return error.CannotOpen,
     }
-
-    fn port(r: *Ruleset, p: u16, access: u64) !void {
-        const attr: [2]u64 = .{ access, p }; // struct landlock_net_port_attr
-        if (linux.errno(linux.syscall4(
-            .landlock_add_rule,
-            @intCast(r.fd),
-            2,
-            @intFromPtr(&attr),
-            0,
-        )) != .SUCCESS) return error.RuleRefused;
-    }
-
-    /// Every access the service is refused, audited: it is the program
-    /// leash becomes, and without LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
-    /// (ABI 7) the kernel says nothing of a domain's refusals after exec.
-    fn restrict(r: *Ruleset) !void {
-        const log_new_exec: usize = if (r.abi >= 7) 1 << 1 else 0;
-        if (linux.errno(linux.syscall2(
-            .landlock_restrict_self,
-            @intCast(r.fd),
-            log_new_exec,
-        )) != .SUCCESS) return error.Refused;
-        _ = linux.close(r.fd);
-    }
-};
+    defer _ = linux.close(@intCast(fd));
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(
+        @intCast(fd),
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true },
+        &st,
+    )) != .SUCCESS) return error.CannotOpen;
+    const is_dir = st.mode & linux.S.IFMT == linux.S.IFDIR;
+    try rules.add(@intCast(fd), if (is_dir) access else access & sandbox.file_rights);
+}
 
 // --- small things ------------------------------------------------------------------
 
@@ -1123,134 +844,6 @@ fn record(io: Io, fields: anytype) void {
 
 const testing = std.testing;
 
-test parse {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    var bad: Bad = .{};
-    const s = try parse(arena.allocator(),
-        \\# nginx
-        \\exec    /usr/bin/nginx -c "/etc/nginx/nginx.conf"
-        \\before  /usr/bin/nginx -t -q   # check first
-        \\user    nginx
-        \\listen  tcp/80 tcp/443
-        \\connect tcp/443
-        \\read    /etc/nginx /data/svc/status/www
-        \\write   /var/lib/nginx
-        \\run     /usr/bin/grype
-        \\requires /run/config/nginx/cert.pem
-        \\env     "GREETING=hello world"
-        \\secret  TOKEN /run/config/x/token
-        \\config  host-key /run/config/ssh/host_key
-        \\nofile  65536
-        \\memory  512
-        \\pledge  stdio rpath inet listen connect exec
-    , &bad);
-    try testing.expectEqualStrings("/etc/nginx/nginx.conf", s.exec[2]);
-    try testing.expectEqual(3, s.before[0].len);
-    try testing.expectEqualSlices(u16, &.{ 80, 443 }, s.listen);
-    try testing.expectEqualSlices(u16, &.{443}, s.connect);
-    try testing.expectEqual(2, s.read.len);
-    try testing.expectEqualStrings("/var/lib/nginx", s.write[0]);
-    try testing.expectEqualStrings("/usr/bin/grype", s.run[0]);
-    try testing.expectEqualStrings("/run/config/nginx/cert.pem", s.requires[0]);
-    try testing.expectEqualStrings("hello world", s.env[0][1]);
-    try testing.expectEqualStrings("TOKEN", s.secrets[0][0]);
-    try testing.expectEqualStrings("host-key", s.configs[0].name);
-    try testing.expectEqualStrings("/run/config/ssh/host_key", s.configs[0].path);
-    try testing.expect(!s.configs[0].optional);
-    try testing.expectEqual(65536, s.nofile.?);
-    try testing.expectEqual(512, s.memory.?);
-    try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
-}
-
-test "parse refuses" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const cases = [_]struct { text: []const u8, line: usize }{
-        .{ .text = "exec /a\nuser x\nfrobnicate 1", .line = 3 },
-        .{ .text = "exec /a\nexec /b\nuser x", .line = 2 },
-        .{ .text = "exec a\nuser x", .line = 1 },
-        .{ .text = "exec /a/../b\nuser x", .line = 1 },
-        .{ .text = "exec /a\nuser root", .line = 2 },
-        .{ .text = "exec /a\nuser x\nlisten udp/53", .line = 3 },
-        .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
-        .{ .text = "exec /a\nuser x\nread /etc//x", .line = 3 },
-        .{ .text = "exec /a\nuser x\nenv 1X=y", .line = 3 },
-        .{ .text = "exec /a\nuser x\nconfig ../key /run/config/key", .line = 3 },
-        .{ .text = "exec /a\nuser x\nconfig key /etc/shadow", .line = 3 },
-        .{ .text = "exec /a\nuser x\nconfig key /run/config/../shadow", .line = 3 },
-        .{ .text = "exec /a\nuser x\nconfig key /run/config", .line = 3 },
-        .{
-            .text = "exec /a\nuser x\nconfig key /run/config/a\nconfig key /run/config/b",
-            .line = 4,
-        },
-        .{ .text = "exec /a \"b\nuser x", .line = 1 },
-        .{ .text = "exec /a b\"c\"\nuser x", .line = 1 },
-        .{ .text = "exec /a\nuser x\nnofile 0", .line = 3 },
-        .{ .text = "exec /a\nuser x\nmemory 0", .line = 3 },
-        .{ .text = "exec /a\nuser x\nmemory huge", .line = 3 },
-        .{ .text = "user x", .line = 0 },
-        .{ .text = "exec /a", .line = 0 },
-        .{ .text = "exec /a\x07\nuser x", .line = 1 },
-        .{ .text = "exec /a\nuser x", .line = 0 }, // no pledge
-        .{ .text = "exec /a\nuser x\npledge stdio ptrace", .line = 3 },
-        .{ .text = "exec /a\nuser x\npledge", .line = 3 },
-        .{ .text = "exec /a\nuser x\npledge stdio\npledge rpath", .line = 4 },
-    };
-    for (cases) |c| {
-        var bad: Bad = .{};
-        try testing.expectError(error.Invalid, parse(arena.allocator(), c.text, &bad));
-        try testing.expectEqual(c.line, bad.line);
-    }
-}
-
-test "settings are declared, never invented" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const head = "exec /a\nuser x\npledge stdio\nconfig settings /run/config/x/settings.json\n";
-    var bad: Bad = .{};
-    const s = try parse(gpa, head ++
-        \\setting routes cidr... as advertiseRoutes
-        \\render  json config.json from /etc/tailscale/config.json
-    , &bad);
-    try testing.expectEqualStrings("advertiseRoutes", s.settings[0].key.?);
-    try testing.expectEqualStrings("/etc/tailscale/config.json", s.render.?.from.?);
-    const e = try parse(
-        gpa,
-        head ++ "setting database-url url required\nrender env app.env\n",
-        &bad,
-    );
-    try testing.expectEqualStrings("DATABASE_URL", e.settings[0].key.?);
-
-    const cases = [_]struct { text: []const u8, line: usize }{
-        .{ .text = head ++ "setting a ip\n", .line = 0 }, // no render
-        .{ .text = head ++ "render conf x\n", .line = 0 }, // nothing to render
-        .{ .text = head ++ "setting a ip\nrender conf x\nrender conf y\n", .line = 7 },
-        .{ .text = head ++ "setting a string\nrender conf x\n", .line = 0 },
-        .{ .text = head ++ "setting a nonsense\nrender conf x\n", .line = 5 },
-        .{ .text = head ++ "env HOME=/x\nsetting home hostname\nrender env e\n", .line = 0 },
-        .{ .text = head ++ "secret A /run/config/a\nsetting a ip\nrender env e\n", .line = 0 },
-        .{ .text = head ++ "config x /run/config/x\nsetting a ip\nrender conf x\n", .line = 0 },
-        // No `config settings`: nowhere for the values to come from.
-        .{ .text = "exec /a\nuser x\npledge stdio\nsetting a ip\nrender conf x\n", .line = 0 },
-    };
-    for (cases) |c| {
-        try testing.expectError(error.Invalid, parse(gpa, c.text, &bad));
-        try testing.expectEqual(c.line, bad.line);
-    }
-}
-
-test isCleanPath {
-    try testing.expect(isCleanPath("/"));
-    try testing.expect(isCleanPath("/data/svc/status"));
-    try testing.expect(!isCleanPath("data"));
-    try testing.expect(!isCleanPath("/data/"));
-    try testing.expect(!isCleanPath("/data/./x"));
-    try testing.expect(!isCleanPath("/data/../etc"));
-    try testing.expect(!isCleanPath(""));
-}
-
 test interpreter {
     var elf: [512]u8 = @splat(0);
     @memcpy(elf[0..6], "\x7fELF\x02\x01");
@@ -1276,39 +869,6 @@ test lookupUser {
         lookupUser("root:x:0:0::/:/x\nnginx:x:200:200::/var/empty:/sbin/nologin\n", "nginx").?,
     );
     try testing.expectEqual(null, lookupUser("nginx2:x:1:1::/:/x\n", "nginx"));
-}
-
-test "an optional config may be missing; settings are optional already" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var bad: Bad = .{};
-    const s = try parse(
-        gpa,
-        "exec /a\nuser x\npledge stdio\nconfig relay /run/config/x/relay optional\n",
-        &bad,
-    );
-    try testing.expect(s.configs[0].optional);
-    for ([_][]const u8{
-        "exec /a\nuser x\npledge stdio\nconfig relay /run/config/x/relay maybe\n",
-        "exec /a\nuser x\npledge stdio\nconfig settings /run/config/x/settings.json optional\n",
-    }) |text| try testing.expectError(error.Invalid, parse(gpa, text, &bad));
-}
-
-test "config file count is bounded" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var text: std.ArrayList(u8) = .empty;
-    try text.appendSlice(gpa, "exec /a\nuser x\npledge stdio\n");
-    for (0..32) |i| try text.appendSlice(
-        gpa,
-        try gpa.print("config key{d} /run/config/key{d}\n", .{ i, i }),
-    );
-    var bad: Bad = .{};
-    try testing.expectEqual(@as(usize, 32), (try parse(gpa, text.items, &bad)).configs.len);
-    try text.appendSlice(gpa, "config extra /run/config/extra\n");
-    try testing.expectError(error.Invalid, parse(gpa, text.items, &bad));
 }
 
 test "config copies replace links, not their targets" {

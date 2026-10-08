@@ -8,8 +8,8 @@
 //! fence's domain. It listens on /run/werewolf/mount-broker.sock, root's
 //! alone, answers only uid 0, and takes one word a connection:
 //!
-//!     grub       the filesystem holding GRUB's environment (what init wrote
-//!                in /run/werewolf/grubenv), read-write at /run/werewolf/mnt/grub
+//!     grub       the filesystem holding GRUB's environment (werewolf.grubenv),
+//!                read-write at /run/werewolf/mnt/grub
 //!     esp        the EFI system partition (werewolf.esp), read-write at
 //!                /run/werewolf/mnt/esp
 //!     victim     the victim's filesystem (werewolf.victim), read-write at
@@ -22,9 +22,9 @@
 //! It answers one line: `ok PATH`, `ok`, or `no WHY`. A mount lasts as long
 //! as the connection that asked for it: when the asker closes it, or dies,
 //! the broker unmounts. Nothing an asker says but the word is used: which
-//! filesystem comes from the kernel command line and what init wrote in
-//! /run, found by the UUID in its superblock, and how it is mounted is
-//! fixed here, as the one-way mount helper mounts: built detached (fsopen,
+//! filesystem comes from the kernel command line, read as stage0 read it
+//! (lib/cmdline.zig), found by the UUID in its superblock, and how it is
+//! mounted is fixed here, as the one-way mount helper mounts: built detached (fsopen,
 //! fsmount) with nosuid, nodev, noexec and nosymfollow, then attached. bite
 //! names GRUB's environment and the victim's directory by where their links
 //! lead (readlink -f), so nothing here needs one followed.
@@ -38,6 +38,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
+const cmdline = @import("cmdline");
 const dm = @import("dm");
 const broker = @import("broker");
 
@@ -269,22 +270,16 @@ fn mountWord(log: *Log, word: Word) !void {
     // of it under /run, which root in fence's domain can rewrite: the
     // asker may name a word, not a device.
     var cmdline_buf: [4096]u8 = undefined;
-    const cmdline = readFile("/proc/cmdline", &cmdline_buf);
+    var refused: cmdline.Failure = .{};
+    const cmd = cmdline.parse(readFile("/proc/cmdline", &cmdline_buf), &refused) orelse
+        return error.BadCommandLine;
+    // parse checked each place's UUID, so .? holds.
     const want: Want = switch (word) {
-        .victim => parseUuid(before(
-            ':',
-            arg(cmdline, "werewolf.victim=") orelse return error.NoVictim,
-        )) orelse
-            return error.BadVictim,
-        .grub => parseUuid(before(
-            ':',
-            arg(cmdline, "werewolf.grubenv=") orelse return error.NoGrubEnvironment,
-        )) orelse
-            return error.BadGrubEnvironment,
-        .esp => parseSerial(arg(
-            cmdline,
-            "werewolf.esp=",
-        ) orelse return error.NoEsp) orelse return error.BadEsp,
+        .victim => .{ .uuid = cmdline.uuid((cmd.victim orelse return error.NoVictim).uuid).? },
+        .grub => .{
+            .uuid = cmdline.uuid((cmd.grubenv orelse return error.NoGrubEnvironment).uuid).?,
+        },
+        .esp => .{ .serial = cmd.esp orelse return error.NoEsp },
         .shutdown => unreachable,
     };
     var dev_buf: [64]u8 = undefined;
@@ -531,44 +526,6 @@ fn readFile(path: [*:0]const u8, buf: []u8) []const u8 {
     return buf[0..got];
 }
 
-/// The value of name=value among the kernel's arguments.
-fn arg(cmdline: []const u8, comptime name: []const u8) ?[]const u8 {
-    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
-    while (it.next()) |a| if (std.mem.startsWith(u8, a, name)) return a[name.len..];
-    return null;
-}
-
-fn before(c: u8, s: []const u8) []const u8 {
-    return s[0 .. std.mem.findScalar(u8, s, c) orelse s.len];
-}
-
-/// 57e1f000-77e2-4b0f-8a3c-0000000000a0 as its 16 bytes, in order.
-fn parseUuid(s: []const u8) ?Want {
-    if (s.len != 36) return null;
-    var out: [16]u8 = undefined;
-    var j: usize = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        if (i == 8 or i == 13 or i == 18 or i == 23) {
-            if (s[i] != '-') return null;
-            i += 1;
-            continue;
-        }
-        out[j] = std.fmt.parseInt(u8, s[i .. i + 2], 16) catch return null;
-        j += 1;
-        i += 2;
-    }
-    return .{ .uuid = out };
-}
-
-/// A FAT volume's serial as blkid writes it, 57E1-F000.
-fn parseSerial(s: []const u8) ?Want {
-    if (s.len != 9 or s[4] != '-') return null;
-    const hi = std.fmt.parseInt(u16, s[0..4], 16) catch return null;
-    const lo = std.fmt.parseInt(u16, s[5..9], 16) catch return null;
-    return .{ .serial = @as(u32, hi) << 16 | lo };
-}
-
 // --- the console ---------------------------------------------------------------
 
 /// JSON lines on stdout: `mount-broker: {"time":...,"event":...,...}`.
@@ -604,13 +561,11 @@ test identify {
     var b: [btrfs_at + 0x1000]u8 = @splat(0);
     // ext4: magic at 1024 + 0x38, UUID at 1024 + 0x68.
     std.mem.writeInt(u16, b[1024 + 0x38 ..][0..2], 0xEF53, .little);
-    @memcpy(b[1024 + 0x68 ..][0..16], &(parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a0").?.uuid));
+    const id = cmdline.uuid("57e1f000-77e2-4b0f-8a3c-0000000000a0").?;
+    @memcpy(b[1024 + 0x68 ..][0..16], &id);
     const ext4 = identify(&b).?;
     try testing.expectEqual(Kind.ext4, ext4.kind);
-    try testing.expect(std.meta.eql(
-        ext4.want,
-        parseUuid("57e1f000-77e2-4b0f-8a3c-0000000000a0").?,
-    ));
+    try testing.expect(std.meta.eql(ext4.want, Want{ .uuid = id }));
 
     // FAT32: the serial 57E1-F000, little-endian at 0x43.
     var fat: [512]u8 = @splat(0);
@@ -620,34 +575,14 @@ test identify {
     std.mem.writeInt(u32, fat[0x43..0x47], 0x57E1F000, .little);
     const esp = identify(&fat).?;
     try testing.expectEqual(Kind.vfat, esp.kind);
-    try testing.expect(std.meta.eql(esp.want, parseSerial("57E1-F000").?));
-    try testing.expect(!std.meta.eql(esp.want, parseSerial("57E1-F001").?));
+    try testing.expect(std.meta.eql(esp.want, Want{ .serial = cmdline.serial("57E1-F000").? }));
+    try testing.expect(!std.meta.eql(esp.want, Want{ .serial = cmdline.serial("57E1-F001").? }));
 
     var nothing: [512]u8 = @splat(0);
     try testing.expectEqual(null, identify(&nothing));
 }
 
-test "the machine's own record" {
-    const cmdline = "console=hvc0 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/var/lib/" ++
-        "werewolf werewolf.esp=57E1-F000\n";
-    try testing.expectEqualStrings(
-        "57e1f000-77e2-4b0f-8a3c-0000000000a0",
-        before(':', arg(cmdline, "werewolf.victim=").?),
-    );
-    try testing.expectEqualStrings("57E1-F000", arg(cmdline, "werewolf.esp=").?);
-    try testing.expectEqual(null, arg(cmdline, "werewolf.grubenv="));
-    for ([_][]const u8{
-        "57E1F000",
-        "57E1-F00",
-        "57E1-G000",
-        "",
-    }) |bad| try testing.expectEqual(null, parseSerial(bad));
-    for ([_][]const u8{
-        "57e1f000-77e2-4b0f-8a3c-0000000000a",
-        "57e1f000_77e2-4b0f-8a3c-0000000000a0",
-        "",
-    }) |bad|
-        try testing.expectEqual(null, parseUuid(bad));
+test isMounted {
     try testing.expect(isMounted(
         "/dev/vda /victim ext4 ro 0 0\ntmpfs /run tmpfs rw 0 0\n",
         "/victim",

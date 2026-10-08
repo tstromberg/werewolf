@@ -123,7 +123,9 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ, config: []const u8)
 /// written beside its place and renamed over it, so it is never half a
 /// secret, 0600.
 fn makeSecret(io: Io, gpa: Allocator, name: []const u8, kind: []const u8) !void {
-    var dir = try Dir.cwd().openDir(io, secrets_dir, .{});
+    // Opened to be read, as iterate does, not O_PATH, Dir's default,
+    // whose descriptor fsync refuses: the rename below is synced on it.
+    var dir = try Dir.cwd().openDir(io, secrets_dir, .{ .iterate = true });
     defer dir.close(io);
     // One there already is kept, unless it is short: a power cut could
     // have left an empty one, and Gitea with it would stay down for good.

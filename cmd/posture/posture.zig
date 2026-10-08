@@ -48,12 +48,14 @@
 //! service says so on the console. On another Linux there is no such file,
 //! and every failure is simply a failure.
 const attacks = @import("attacks.zig");
+const cmdline = @import("cmdline");
 const files = @import("files.zig");
 const kernel = @import("kernel.zig");
 const network = @import("network.zig");
 const processes = @import("processes.zig");
 
 const std = @import("std");
+const allow = @import("allow");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -280,12 +282,12 @@ pub const Posture = struct {
         try p.checks.append(p.gpa, c);
     }
 
-    /// The names in /etc/werewolf/allow, sorted.
+    /// The names in /etc/werewolf/allow (lib/allow.zig), sorted.
     pub fn allowances(p: *Posture) ![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
         var d = Dir.cwd().openDir(
             p.io,
-            "/etc/werewolf/allow",
+            allow.dir,
             .{ .iterate = true },
         ) catch return names.items;
         defer d.close(p.io);
@@ -359,11 +361,9 @@ pub const Posture = struct {
         while (env.next()) |kv| {
             if (std.mem.eql(u8, kv, "WEREWOLF_CHECK=1")) return true;
         }
-        var args = std.mem.tokenizeAny(u8, p.read("/proc/cmdline"), " \n");
-        while (args.next()) |arg| {
-            if (std.mem.eql(u8, arg, "werewolf.check=1")) return true;
-        }
-        return false;
+        var bad: cmdline.Failure = .{};
+        const cmd = cmdline.parse(p.read("/proc/cmdline"), &bad) orelse return false;
+        return cmd.check;
     }
 
     /// None of names is on the system's PATH directories.
@@ -789,19 +789,21 @@ fn parseMount(line: []const u8) ?Mount {
     return .{ .dir = dir, .kind = kind, .opts = opts };
 }
 
-/// The mount points, but those in except, whose options lack option, each
-/// once.
+/// The mount points, but those in except and those of a filesystem kind
+/// in except_kinds, whose options lack option, each once.
 pub fn missingOption(
     gpa: Allocator,
     mounts: []const u8,
     option: []const u8,
     except: []const []const u8,
+    except_kinds: []const []const u8,
 ) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, mounts, '\n');
     next: while (it.next()) |line| {
         const m = parseMount(line) orelse continue;
         for (except) |e| if (std.mem.eql(u8, m.dir, e)) continue :next;
+        for (except_kinds) |k| if (std.mem.eql(u8, m.kind, k)) continue :next;
         if (hasOption(line, m.dir, option)) continue;
         var seen = std.mem.tokenizeAny(u8, out.items, ", ");
         while (seen.next()) |d| if (std.mem.eql(u8, d, m.dir)) continue :next;
@@ -1010,11 +1012,14 @@ test missingOption {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try testing.expectEqualStrings("/", try missingOption(a, test_mounts, "nosuid", &.{}));
-    try testing.expectEqualStrings("/run", try missingOption(a, test_mounts, "noexec", &.{"/"}));
+    try testing.expectEqualStrings("/", try missingOption(a, test_mounts, "nosuid", &.{}, &.{}));
+    try testing.expectEqualStrings(
+        "/run",
+        try missingOption(a, test_mounts, "noexec", &.{"/"}, &.{}),
+    );
     try testing.expectEqualStrings(
         "",
-        try missingOption(a, test_mounts, "nodev", &.{ "/", "/dev" }),
+        try missingOption(a, test_mounts, "nodev", &.{ "/", "/dev" }, &.{}),
     );
 }
 

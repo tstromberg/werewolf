@@ -3,6 +3,8 @@ base: prod
 # OpenBao serves its API and UI on :8200, and sends nothing: its seal is
 # a key on the machine. A form that unseals with a cloud KMS adds
 # `connect openbao tcp/443 udp/53 tcp/53` and `metadata openbao`; one that
-# clusters adds `listen tcp/8201`, whose listener is on loopback here.
+# clusters makes `listen tcp/8201` public; here raft's cluster listener
+# is on loopback, for the machine alone.
 net:
   - listen tcp/8200
+  - listen tcp/8201 loopback

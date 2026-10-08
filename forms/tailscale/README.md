@@ -47,10 +47,10 @@ Use your own identity/subnet and merge carefully with your existing policy.
 Grants are additive; review any existing allow-all rule. Create a tagged,
 preauthorized, non-ephemeral [auth key](https://tailscale.com/docs/features/access-control/auth-keys)
 for `tag:subnet-router`. Use a single-use key for one VM. Paste it into
-`$CONFIG_DIR/tailscale/auth_key` with your editor, then:
+`$CONFIG_DIR/tailscale/auth-key` with your editor, then:
 
 ```sh
-chmod 600 "$CONFIG_DIR/tailscale/auth_key"
+chmod 600 "$CONFIG_DIR/tailscale/auth-key"
 ```
 
 Use a fresh key for a second VM, including when moving from Lima to GCP.

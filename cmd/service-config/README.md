@@ -9,7 +9,7 @@ of the service, and refuses any value that is not what the image declared.
 ## Background
 
 A form's image is the same on every machine; what differs is in the config
-tar: a bastion's allowed destinations, a router's routes. The service file
+tar: a router's routes, an application's database URL. The service file
 declares what may be set (`setting NAME TYPE`) and how it is written out
 (`render FORMAT FILE`). The machine's `settings.json` gives the values
 (docs/design/settings.md, `lib/settings.zig`). Those values come from
@@ -84,5 +84,5 @@ parser runs as the service, under a filter of its own.
 - **Always says why**: a refusal line, or a short one if the full one will
   not fit.
 - **Tested**: `lib/settings.zig`'s tests (types, formats, the bastion's and
-  tailscale's declarations); `check-bastion` renders a bastion's settings
+  tailscale's declarations); `check-tailscale` renders a router's route
   at boot.

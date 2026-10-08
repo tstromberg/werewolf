@@ -12,4 +12,4 @@ net:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs WordPress
-  kernel-write-xor-execute: PCRE2 compiles PHP's patterns to machine code (php's jit allowance)
+  kernel-write-xor-execute: PCRE2 compiles PHP's patterns to machine code (allow jit, from php)

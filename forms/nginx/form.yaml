@@ -1,5 +1,9 @@
 base: prod
 
+# Where it keeps its site: howl's --app DIR is laid here
+# (cmd/howl/app.zig).
+app: /usr/share/nginx/html
+
 # nginx serves the site.
 net:
   - listen tcp/80

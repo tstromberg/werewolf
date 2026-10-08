@@ -8,7 +8,7 @@
 //! printk's own limit, and never makes a process wait for the log.
 
 const std = @import("std");
-const builtin = @import("builtin");
+const seal = @import("seal");
 const linux = std.os.linux;
 
 /// linux/audit.h: the message types sent here.
@@ -33,14 +33,6 @@ const equal = 0x40000000;
 /// arguments, its command line and an end-of-event marker. Left out, so a
 /// refusal is two lines on the console, not six.
 const left_out = [_]u32{ 1307, 1309, 1320, 1327 };
-
-/// The architecture a rule names (AUDIT_ARCH_*), so a 32-bit call, which
-/// the seal ends anyway, never matches one meant for native calls.
-const arch: u32 = switch (builtin.cpu.arch) {
-    .aarch64 => 0xc00000b7,
-    .x86_64 => 0xc000003e,
-    else => @compileError("audit runs on aarch64 and x86_64"),
-};
 
 /// struct audit_status: what AUDIT_SET changes, by its mask.
 const Status = extern struct {
@@ -114,7 +106,9 @@ pub fn enable() Error!void {
     var refused_exec: Rule = .{ .flags = filter_exit };
     refused_exec.syscall(.execve);
     refused_exec.syscall(.execveat);
-    refused_exec.field(field_arch, arch);
+    // Native calls alone: a 32-bit one, which the seal ends anyway, never
+    // matches.
+    refused_exec.field(field_arch, seal.native_arch);
     refused_exec.field(field_success, 0);
     try send(sock, msg_add_rule, std.mem.asBytes(&refused_exec));
     for (left_out) |t| {

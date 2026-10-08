@@ -154,7 +154,7 @@ say "creating $name, $form on $arch, in $where"
 # too, which names the image cleanup deletes: the address on fd 3,
 # create's status in a file, since a pipeline's is tee's (and `|| rc=`,
 # so that set -e lets a failed create reach the line that records it).
-made=$({ { rc=0; "$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" \
+made=$({ { rc=0; "$werewolf" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" \
 	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
 [ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
@@ -193,8 +193,22 @@ else
 fi
 
 # Over the Internet, as an operator would, through the port werewolf
-# opened to this host alone, to a machine that takes keys alone.
-if seen 'Server listening on 0.0.0.0 port 22'; then
+# opened to this host alone, to a machine that takes keys alone; where it
+# takes security keys alone (POSTURE_KNOWN does not excuse
+# network-ssh-security-keys), this run's key, a file, must be refused.
+if seen 'Server listening on 0.0.0.0 port 22' &&
+	! echo " ${POSTURE_KNOWN:-} " | tr ' ' '\n' | grep -qx -e network-ssh-security-keys -e '?network-ssh-security-keys'; then
+	i=0
+	until ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
+		"root@$addr" true 2>&1 | grep -q 'Permission denied (publickey)'; do
+		i=$((i + 1))
+		[ $i -le 40 ] || break
+		sleep 3
+	done
+	[ $i -le 40 ] && ok ssh-security-keys-only ||
+		fail "ssh-security-keys-only: a key file was not refused at $addr, or something but a key was offered"
+elif seen 'Server listening on 0.0.0.0 port 22'; then
 	i=0
 	until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
@@ -210,7 +224,7 @@ fi
 # one; create restarts the machine on it.
 echo "$name-b" >"$work/config/hostname"
 say "replacing its config"
-if "$howl" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then
+if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then
 	await_posture "$name-b"
 	cat "$log" >>"$keep"
 	seen "posture: .*\"host\":\"$name-b\"" && ok reconfigure ||

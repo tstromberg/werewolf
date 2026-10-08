@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const seal_lib = @import("seal");
+const allow = @import("allow");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const testing = std.testing;
@@ -30,22 +31,10 @@ fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
 /// other processes (SYS_PTRACE), device files (MKNOD), and what nothing here
 /// uses. fence drops NET_ADMIN and NET_RAW after it sets the network
 /// policy, unless the form allows them. SYSLOG stays, for dmesg.
-const dropped_caps = [_]struct { name: []const u8, n: u6 }{
-    .{ .name = "linux_immutable", .n = 9 },
-    .{ .name = "sys_module", .n = 16 },
-    .{ .name = "sys_rawio", .n = 17 },
-    .{ .name = "sys_ptrace", .n = 19 },
-    .{ .name = "sys_pacct", .n = 20 },
-    .{ .name = "sys_time", .n = 25 },
-    .{ .name = "mknod", .n = 27 },
-    .{ .name = "audit_control", .n = 30 },
-    .{ .name = "mac_override", .n = 32 },
-    .{ .name = "mac_admin", .n = 33 },
-    .{ .name = "wake_alarm", .n = 35 },
-    .{ .name = "block_suspend", .n = 36 },
-    .{ .name = "perfmon", .n = 38 },
-    .{ .name = "bpf", .n = 39 },
-    .{ .name = "checkpoint_restore", .n = 40 },
+const dropped_caps = [_]allow.Cap{
+    .linux_immutable, .sys_module,    .sys_rawio,     .sys_ptrace,   .sys_pacct,
+    .sys_time,        .mknod,         .audit_control, .mac_override, .mac_admin,
+    .wake_alarm,      .block_suspend, .perfmon,       .bpf,          .checkpoint_restore,
 };
 
 /// The capabilities a program the kernel starts itself may have: a
@@ -55,7 +44,7 @@ const dropped_caps = [_]struct { name: []const u8, n: u6 }{
 /// with every capability, outside the seal. Only CAP_SYS_BOOT is left, for
 /// the kernel's own orderly poweroff. The kernel lets these only fall, and
 /// only for a holder of CAP_SYS_MODULE, which the seal then takes.
-const helper_caps: u64 = 1 << 22; // CAP_SYS_BOOT
+const helper_caps: u64 = 1 << @backingInt(allow.Cap.sys_boot);
 
 /// "LOW HIGH": a capability set as kernel.usermodehelper.bset reads it.
 fn capWords(buf: []u8, set: u64) []const u8 {
@@ -118,9 +107,9 @@ pub fn seal(m: *Machine) !void {
     // records, with the promise that would, so a service's author learns
     // what its pledge lacks. Only on a DEV=1 build, never released;
     // anywhere else the word is ignored.
-    const learn = std.mem.eql(u8, m.cmd.seal, "learn") and exists("/usr/share/werewolf/dev");
-    if (m.cmd.seal.len > 0 and !learn)
-        say("werewolf.seal={s} ignored: only a DEV=1 build learns", .{m.cmd.seal});
+    const learn = m.cmd.seal == .learn and exists("/usr/share/werewolf/dev");
+    if (m.cmd.seal == .learn and !learn)
+        say("werewolf.seal=learn ignored: only a DEV=1 build learns", .{});
     var bad: []const u8 = "";
     const pledged = seal_lib.parse(m.read("/usr/share/werewolf/pledge"), &bad) catch |err| {
         say("/usr/share/werewolf/pledge: {s}: {s}", .{ bad, @errorName(err) });
@@ -160,12 +149,12 @@ pub fn seal(m: *Machine) !void {
     const PR_CAPBSET_DROP = 24;
     var caps: usize = 0;
     for (dropped_caps) |c| {
-        const rc = linux.prctl(PR_CAPBSET_DROP, c.n, 0, 0, 0);
+        const rc = linux.prctl(PR_CAPBSET_DROP, @backingInt(c), 0, 0, 0);
         switch (linux.errno(rc)) {
             .SUCCESS => caps += 1,
             .INVAL => {},
             else => |e| {
-                say("cap_{s} not dropped: {t}", .{ c.name, e });
+                say("cap_{t} not dropped: {t}", .{ c, e });
                 return error.BoundingSet;
             },
         }

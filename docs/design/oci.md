@@ -1,6 +1,12 @@
 # OCI images
 
-Proposed, 2026-10-06.
+Proposed, 2026-10-06. Not built as written: [adhoc.md](adhoc.md) built
+the other half of this design on 2026-10-08, an image baked into the
+verified root at build (`howl --oci NAME=REF`), with the unpacker's
+refusals, the `_oci` user, leash's `root` and init's binds as specified
+here, and no pull at boot. Pulling at boot, for a fleet that changes
+images under a signed base, remains open, and would share the same leash
+and binds.
 
 A werewolf machine should run an OCI image named in its config the way it
 runs any other service: as its own user, on a leash, unable to run anything

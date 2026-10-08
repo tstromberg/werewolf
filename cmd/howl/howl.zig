@@ -1,10 +1,10 @@
 //! howl: make what a werewolf machine needs, on the machine that makes
 //! it, and run it (docs/design/cli.md). Built for this host, not the image.
 //!
-//!     howl build FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-//!     howl pack FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
-//!     howl run FORM [--on TARGET] [--dev] [CONFIG...]
-//!     howl create FORM NAME [--on TARGET] [--dev] [CONFIG...]
+//!     howl build --with FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+//!     howl pack --with FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
+//!     howl run [--with FORM,...] [--on TARGET] [--dev] [CONFIG...]
+//!     howl create NAME --with FORM,... [--on TARGET] [--dev] [CONFIG...]
 //!     howl ssh|console [NAME], howl delete NAME, howl stop
 //!     howl build-apk RECIPE [--arch ARCH]
 //!
@@ -28,8 +28,8 @@
 //! FORM's service files declare them, and pack reads FORM's chain in
 //! ./forms to learn them:
 //!
-//!     config  host-key /run/config/bastion/host_key      --host-key FILE
-//!     setting destinations addrport... as PermitOpen     --destinations ADDR:PORT,...
+//!     config  authorized-keys /run/config/bastion/authorized_keys  --authorized-keys FILE
+//!     setting destinations addrport... as PermitOpen               --destinations ADDR:PORT,...
 //!
 //! Others do not come from a form: --config DIR, a directory of files as
 //! they go in the tar; --hostname NAME; --ip CIDR, --gw ADDR and --dns
@@ -52,6 +52,7 @@
 
 const std = @import("std");
 const settings = @import("settings");
+const service = @import("service");
 const update_policy = @import("update-policy");
 const network = @import("network");
 const lima = @import("lima.zig");
@@ -63,6 +64,8 @@ const aws = @import("aws.zig");
 const azure = @import("azure.zig");
 const app = @import("app.zig");
 const apk = @import("apk.zig");
+const adhoc = @import("adhoc.zig");
+const oci = @import("oci.zig");
 const progress = @import("progress.zig");
 const qemu = @import("qemu.zig");
 const booting = @import("boot.zig");
@@ -73,16 +76,20 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 
 const usage =
-    \\usage: howl build FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-    \\       howl pack FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
-    \\       howl pack FORM -h          the flags FORM takes
-    \\       howl run FORM [--on TARGET] [--dev] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time
+    \\usage: howl build --with FORM,... [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+    \\       howl pack --with FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
+    \\       howl pack --with FORM -h   the flags FORM takes
+    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; prod, or lima on Lima, with no --with
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
-    \\       howl create FORM NAME [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure] [--dev] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
-    \\       howl delete NAME [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure]
-    \\       howl console [NAME] [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure]
-    \\       howl upload DISK --on gcp|aws|azure
+    \\
+++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
+    "] [--dev] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]\n" ++
+    "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
+    "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
+    "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
     \\       howl build-apk RECIPE [--arch ARCH]   a form's own package, from a melange recipe
+    \\       howl form --with FORM,... --package PKG,... --oci NAME=REF --KEY LINE --KEY.SUB VALUE -o DIR   a form from the line, kept;
+    \\            build, run, create and pack take the same flags: one form alone is run as it is, more is generated (-n shows it)
     \\
 ;
 
@@ -117,8 +124,10 @@ pub fn main(init: std.process.Init) void {
             ssh,
             upload,
             @"build-apk",
+            form,
             _bhyve,
             _firecracker,
+            _unpack,
         },
         args[1],
     ) orelse
@@ -135,6 +144,7 @@ pub fn main(init: std.process.Init) void {
         .ssh => sshTo(io, gpa, args[2..], &why),
         .upload => upload(io, gpa, args[2..], &why),
         .@"build-apk" => apk.build(io, gpa, args[2..], &why),
+        .form => adhoc.form(io, gpa, args[2..], &why),
         // create's supervisors on bhyve and Firecracker, not verbs for anyone.
         ._bhyve => if (args.len < 5)
             why.refuse("_bhyve NAME CONFIG BHYVE...", .{})
@@ -144,6 +154,8 @@ pub fn main(init: std.process.Init) void {
             why.refuse("_firecracker DIR", .{})
         else
             firecracker.keep(io, gpa, args[2]),
+        // form's unpacker for an image's tar, a child with nothing (oci.zig).
+        ._unpack => oci.unpackMain(io, gpa, args[2..], &why),
     };
     done catch |err| switch (err) {
         // Said already, in full (progress).
@@ -193,7 +205,7 @@ const File = struct {
 const Settings = struct {
     service: []const u8,
     path: []const u8,
-    decl: []settings.Setting,
+    decl: []const settings.Setting,
 };
 
 /// The flags a form takes, and where each lands.
@@ -235,7 +247,7 @@ const reserved = [_][]const u8{
 
 /// A form's chain, base first, as the build lays it (lib/form.zig): the
 /// form in ./forms, or in the directory form names.
-fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.Form {
+pub fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.Form {
     Dir.cwd().access(io, "forms", .{}) catch
         return why.refuse("no ./forms: run howl in a werewolf checkout", .{});
     var f: forms.Failure = .{};
@@ -245,103 +257,39 @@ fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.For
     };
 }
 
-/// A service's name and its file, as the image will hold it.
-const Service = struct { name: []const u8, text: []const u8 };
-
-/// The service files of a chain, as the image lays them over each other:
-/// a later form's etc/sv/NAME replaces an earlier one's whole, and one with
-/// no service file (runit's own run) leaves none.
-fn services(io: Io, gpa: Allocator, c: []const forms.Form) ![]const Service {
-    var found: std.array_hash_map.String(?[]const u8) = .empty;
-    for (c) |form| {
-        var sv = Dir.cwd().openDir(
-            io,
-            try gpa.print("{s}/rootfs/etc/sv", .{form.dir}),
-            .{ .iterate = true },
-        ) catch
-            continue;
-        defer sv.close(io);
-        var it = sv.iterate();
-        while (try it.next(io)) |e| {
-            if (e.kind != .directory) continue;
-            const text = sv.readFileAlloc(
-                io,
-                try gpa.print("{s}/service", .{e.name}),
-                gpa,
-                .limited(64 << 10),
-            ) catch null;
-            try found.put(gpa, try gpa.dupe(u8, e.name), text);
-        }
-    }
-    var out: std.ArrayList(Service) = .empty;
-    var it = found.iterator();
-    while (it.next()) |e| if (e.value_ptr.*) |text|
-        try out.append(gpa, .{ .name = e.key_ptr.*, .text = text });
-    std.mem.sortUnstable(Service, out.items, {}, struct {
-        fn lt(_: void, a: Service, b: Service) bool {
-            return std.mem.lessThan(u8, a.name, b.name);
-        }
-    }.lt);
-    return out.items;
-}
-
 /// The flags the services declare: their `config` lines, and their
-/// `setting` and `render` lines, checked as leash checks them.
-fn interface(gpa: Allocator, svcs: []const Service, why: *Why) !Interface {
+/// `setting` and `render` lines, each file read whole as leash reads it
+/// (lib/service.zig), so what pack accepts, the guest does.
+fn interface(gpa: Allocator, svcs: []const forms.Service, why: *Why) !Interface {
     var files: std.ArrayList(File) = .empty;
     var sets: std.ArrayList(Settings) = .empty;
     for (svcs) |svc| {
-        var decl: std.ArrayList(settings.Setting) = .empty;
-        var render: ?settings.Render = null;
+        var bad: service.Bad = .{};
+        const s = service.parse(gpa, svc.text, &bad) catch |err| switch (err) {
+            error.Invalid => return if (bad.line > 0)
+                why.refuse("{s}, line {d}: {s}", .{ svc.name, bad.line, bad.why })
+            else
+                why.refuse("{s}: {s}", .{ svc.name, bad.why }),
+            else => |e| return e,
+        };
         var settings_path: ?[]const u8 = null;
-        var lines = std.mem.splitScalar(u8, svc.text, '\n');
-        var n: usize = 0;
-        while (lines.next()) |line| {
-            n += 1;
-            const words = try split(gpa, line);
-            if (words.len == 0) continue;
-            const key = words[0];
-            const rest = words[1..];
-            var bad: []const u8 = "";
-            if (std.mem.eql(u8, key, "config")) {
-                const optional = rest.len == 3 and std.mem.eql(u8, rest[2], "optional");
-                if ((rest.len != 2 and !optional) or
-                    !std.mem.startsWith(u8, rest[1], "/run/config/"))
-                    return why.refuse(
-                        "{s}, line {d}: config NAME /run/config/PATH [optional]",
-                        .{ svc.name, n },
-                    );
-                const path = rest[1]["/run/config/".len..];
-                if (!isTarName(path)) return why.refuse(
-                    "{s}, line {d}: {s} cannot be in a config tar",
-                    .{ svc.name, n, rest[1] },
-                );
-                if (std.mem.eql(u8, rest[0], settings.input_file)) {
-                    settings_path = path;
-                } else try files.append(
-                    gpa,
-                    .{ .flag = rest[0], .path = path, .service = svc.name, .optional = optional },
-                );
-            } else if (std.mem.eql(u8, key, "setting")) {
-                try decl.append(gpa, settings.parseSetting(rest, &bad) catch
-                    return why.refuse("{s}, line {d}: {s}", .{ svc.name, n, bad }));
-            } else if (std.mem.eql(u8, key, "render")) {
-                render = settings.parseRender(rest, &bad) catch
-                    return why.refuse("{s}, line {d}: {s}", .{ svc.name, n, bad });
-            }
+        for (s.configs) |cfg| {
+            const path = cfg.path["/run/config/".len..];
+            if (!isTarName(path))
+                return why.refuse("{s}: {s} cannot be in a config tar", .{ svc.name, cfg.path });
+            if (std.mem.eql(u8, cfg.name, settings.input_file)) {
+                settings_path = path;
+            } else try files.append(
+                gpa,
+                .{ .flag = cfg.name, .path = path, .service = svc.name, .optional = cfg.optional },
+            );
         }
-        const r = render orelse {
-            if (decl.items.len > 0) return why.refuse("{s}: setting without render", .{svc.name});
-            continue;
-        };
-        var bad: []const u8 = "";
-        settings.declare(gpa, decl.items, r, &bad) catch |err| switch (err) {
-            error.Invalid => return why.refuse("{s}: {s}", .{ svc.name, bad }),
-            else => return err,
-        };
-        const path = settings_path orelse
-            return why.refuse("{s}: settings come from a `config settings PATH` line", .{svc.name});
-        try sets.append(gpa, .{ .service = svc.name, .path = path, .decl = decl.items });
+        // leash refuses settings without render, or with no `config settings`.
+        if (s.render != null)
+            try sets.append(
+                gpa,
+                .{ .service = svc.name, .path = settings_path.?, .decl = s.settings },
+            );
     }
 
     // Every flag means one thing, and every path in the tar has one source.
@@ -369,29 +317,53 @@ fn interface(gpa: Allocator, svcs: []const Service, why: *Why) !Interface {
     return .{ .files = files.items, .settings = sets.items };
 }
 
-/// A service file's words, for the lines pack reads: no quotes are needed
-/// in a config, setting or render line, and a # starts a comment.
-fn split(gpa: Allocator, line: []const u8) ![]const []const u8 {
-    var words: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, line, " \t\r");
-    while (it.next()) |w| {
-        if (w[0] == '#') break;
-        try words.append(gpa, w);
-    }
-    return words.items;
-}
-
 // --- the inputs -----------------------------------------------------------------------
 
-const Target = enum { disk, gcp, aws, azure };
+/// What --on names: an engine on this machine, a hypervisor elsewhere, a
+/// cloud, or, for pack, any hypervisor at all. A hypervisor reads the tar
+/// from a disk; a cloud from user data, through cloud-metadata.
+pub const Platform = enum {
+    lima,
+    bhyve,
+    firecracker,
+    qemu,
+    proxmox,
+    gcp,
+    aws,
+    azure,
+    disk,
 
-/// What --on names: a hypervisor reads the tar from a disk; a cloud from
-/// user data, through cloud-metadata.
-fn target(name: []const u8) ?Target {
-    for ([_][]const u8{ "disk", "qemu", "lima", "bhyve", "firecracker", "proxmox" }) |d|
-        if (std.mem.eql(u8, name, d)) return .disk;
-    return std.meta.stringToEnum(Target, name);
-}
+    /// Which platforms a list names: those create makes machines on, every
+    /// one but disk; or the clouds, which take --arch and --size.
+    const Kind = enum { made, cloud };
+
+    fn is(p: Platform, kind: Kind) bool {
+        return switch (kind) {
+            .made => p != .disk,
+            .cloud => p == .gcp or p == .aws or p == .azure,
+        };
+    }
+
+    /// An engine on this machine, which runs this machine's arch.
+    fn here(p: Platform) bool {
+        return p == .lima or p == .bhyve or p == .firecracker or p == .qemu;
+    }
+
+    /// The platforms of a kind, as a usage or a refusal names them.
+    fn list(comptime kind: Kind, comptime between: []const u8) []const u8 {
+        const names = comptime names: {
+            var out: []const u8 = "";
+            for (std.enums.values(Platform)) |p| if (p.is(kind)) {
+                out = out ++ (if (out.len > 0) between else "") ++ @tagName(p);
+            };
+            break :names out;
+        };
+        return names;
+    }
+};
+
+/// What --arch and --size are refused with, where neither means anything.
+const sized_only = "--arch and --size are for --on " ++ Platform.list(.cloud, ", ");
 
 const Options = struct {
     form: []const u8 = "",
@@ -400,9 +372,7 @@ const Options = struct {
     out: ?[]const u8 = null,
     check: bool = false,
     help: bool = false,
-    on: ?Target = null,
-    /// --on as given: what create runs on, where on is what the tar must fit.
-    platform: ?[]const u8 = null,
+    on: ?Platform = null,
     config: ?[]const u8 = null,
     hostname: ?[]const u8 = null,
     /// A static network: init's network file.
@@ -412,8 +382,8 @@ const Options = struct {
     data_key: ?[]const u8 = null,
     update_policy: ?[]const u8 = null,
     root_keys: ?[]const u8 = null,
-    /// create --on gcp's: the machine's architecture, and its type.
-    arch: ?[]const u8 = null,
+    /// create --on a cloud's: the machine's architecture, and its type.
+    arch: ?Arch = null,
     size: ?[]const u8 = null,
     /// build, run and create's: a directory, laid where the form keeps its
     /// application (app.zig).
@@ -452,19 +422,9 @@ fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             );
             continue;
         }
-        var name = a;
-        var value: ?[]const u8 = null;
-        if (std.mem.findScalar(u8, a, '=')) |eq| {
-            name = a[0..eq];
-            value = a[eq + 1 ..];
-        }
+        const name, const v = try flagValue(args, &i, why);
         if (!std.mem.startsWith(u8, name, "--") and !std.mem.eql(u8, name, "-o"))
             return why.refuse("{s}: flags are --NAME, or -o, -n, -h", .{a});
-        const v = value orelse v: {
-            i += 1;
-            if (i == args.len) return why.refuse("{s} wants a value", .{a});
-            break :v args[i];
-        };
         const flag = if (std.mem.eql(u8, name, "-o")) "o" else name[2..];
         const slot: ?*?[]const u8 = if (std.mem.eql(u8, flag, "o"))
             &o.out
@@ -484,8 +444,6 @@ fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             &o.update_policy
         else if (std.mem.eql(u8, flag, "root-keys"))
             &o.root_keys
-        else if (std.mem.eql(u8, flag, "arch"))
-            &o.arch
         else if (std.mem.eql(u8, flag, "size"))
             &o.size
         else if (std.mem.eql(u8, flag, "app"))
@@ -499,18 +457,33 @@ fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             s.* = v;
         } else if (std.mem.eql(u8, flag, "on")) {
             if (o.on != null) return why.refuse("--on given twice", .{});
-            o.on = target(v) orelse
+            o.on = std.meta.stringToEnum(Platform, v) orelse
                 return why.refuse(
-                    "--on {s}: disk qemu lima bhyve firecracker proxmox gcp aws azure",
-                    .{v},
+                    "--on {s}: {s}",
+                    .{ v, comptime Platform.list(.made, " ") ++ " disk" },
                 );
-            o.platform = v;
+        } else if (std.mem.eql(u8, flag, "arch")) {
+            if (o.arch != null) return why.refuse("--arch given twice", .{});
+            o.arch = archName(v) orelse return why.refuse(arch_refusal, .{v});
         } else try flags.append(gpa, .{ flag, v });
     }
     if (o.form.len == 0) return why.refuse("no form\n{s}", .{usage});
-    if (o.arch) |a| o.arch = archName(a) orelse return why.refuse(arch_refusal, .{a});
     o.flags = flags.items;
     return o;
+}
+
+/// A flag and its value, `--NAME VALUE` or `--NAME=VALUE`, as every verb
+/// takes them, from args[i.*], the flag; i is left on the last word read.
+pub fn flagValue(
+    args: []const []const u8,
+    i: *usize,
+    why: *Why,
+) error{Refused}!struct { []const u8, []const u8 } {
+    const a = args[i.*];
+    if (std.mem.findScalar(u8, a, '=')) |eq| return .{ a[0..eq], a[eq + 1 ..] };
+    i.* += 1;
+    if (i.* == args.len) return why.refuse("{s} wants a value", .{a});
+    return .{ a, args[i.*] };
 }
 
 /// A path in the tar and what goes there.
@@ -524,10 +497,6 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
 
     if (o.config) |dir| try readConfigDir(io, gpa, dir, &entries, why);
     if (o.hostname) |h| {
-        if (settings.reason(
-            .hostname,
-            .{ .string = h },
-        )) |r| return why.refuse("--hostname {s}: {s}", .{ h, r });
         try add(
             gpa,
             &entries,
@@ -615,10 +584,26 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
             else => return err,
         };
     }
-    // The network, as init reads it.
+    // The hostname, the network and the data key, as init reads them,
+    // whether from a flag or from --config DIR.
+    for (entries.items) |e| if (std.mem.eql(u8, e.path, "hostname")) {
+        const line = e.data[0 .. std.mem.findScalar(u8, e.data, '\n') orelse e.data.len];
+        const name = std.mem.trim(u8, line, " \t\r");
+        if (!settings.isHostname(name)) return why.refuse(
+            "hostname {s} (from {s}): a hostname of at most {d} bytes, which init takes",
+            .{ name, e.from, settings.max_hostname },
+        );
+    };
     for (entries.items) |e| if (std.mem.eql(u8, e.path, "network")) {
         var reason: []const u8 = "";
         if (network.parse(e.data, &reason) == null) return why.refuse("network: {s}", .{reason});
+    };
+    for (entries.items) |e| if (std.mem.eql(u8, e.path, "data.key")) {
+        if (e.data.len < settings.min_data_key) return why.refuse(
+            "data.key (from {s}) is {d} bytes: init makes LUKS2 only with {d} or more " ++
+                "random bytes (head -c 32 /dev/urandom)",
+            .{ e.from, e.data.len, settings.min_data_key },
+        );
     };
     // The updater's policy, as slot-update applies it: werewolf's limits,
     // then the form's file, then the operator's.
@@ -651,8 +636,9 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
 }
 
 /// One value of a setting given on the line: a list's values may be given
-/// by commas or by repeating the flag; a string list's only by repeating,
-/// since a string may hold a comma.
+/// by commas or by repeating the flag; a string or url list's only by
+/// repeating, since either may hold a comma, as settings.declare holds
+/// them out of env for.
 fn setValue(
     gpa: Allocator,
     obj: *json.ObjectMap,
@@ -661,7 +647,7 @@ fn setValue(
     why: *Why,
 ) !void {
     var items: std.ArrayList([]const u8) = .empty;
-    if (d.list and d.type != .string) {
+    if (d.list and d.type != .string and d.type != .url) {
         var parts = std.mem.splitScalar(u8, text, ',');
         while (parts.next()) |p| try items.append(gpa, p);
     } else try items.append(gpa, text);
@@ -797,8 +783,8 @@ fn writeTar(gpa: Allocator, entries: []const Entry) ![]const u8 {
 /// Why the tar does not fit t, or null if it does. AWS caps user data at
 /// 16 KiB and Azure at 64 KiB, both of base64; GCP's 256 KiB is above
 /// what cloud-metadata takes.
-fn misfit(entries: []const Entry, tar_len: usize, t: Target) ?[]const u8 {
-    if (t == .disk) return null;
+fn misfit(entries: []const Entry, tar_len: usize, t: Platform) ?[]const u8 {
+    if (!t.is(.cloud)) return null;
     if (entries.len > max_cloud_entries) return "more than 32 files";
     var total: usize = 0;
     for (entries) |e| {
@@ -820,30 +806,28 @@ const BuildOptions = struct {
     form: []const u8,
     app: ?[]const u8 = null,
     dir: []const u8 = "dist",
-    arch: []const u8,
+    arch: Arch,
     format: DiskFormat = .qcow2,
 };
 
 /// build's command line: FORM, and -o, --arch, --format, each with a value.
 /// host is this machine's arch, if werewolf builds for it.
-fn buildOptions(args: []const []const u8, host: ?[]const u8, why: *Why) !BuildOptions {
+fn buildOptions(args: []const []const u8, host: ?Arch, why: *Why) !BuildOptions {
     var form: ?[]const u8 = null;
-    var o: BuildOptions = .{ .form = "", .arch = host orelse "" };
+    var arch = host;
+    var o: BuildOptions = .{ .form = "", .arch = undefined };
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        const a = args[i];
-        if (a.len == 0 or a[0] != '-') {
-            if (form != null) return why.refuse("{s}: one form at a time", .{a});
-            form = a;
+        if (args[i].len == 0 or args[i][0] != '-') {
+            if (form != null) return why.refuse("{s}: one form at a time", .{args[i]});
+            form = args[i];
             continue;
         }
-        i += 1;
-        if (i == args.len) return why.refuse("{s} wants a value", .{a});
-        const v = args[i];
+        const a, const v = try flagValue(args, &i, why);
         if (std.mem.eql(u8, a, "-o")) {
             o.dir = v;
         } else if (std.mem.eql(u8, a, "--arch")) {
-            o.arch = archName(v) orelse return why.refuse(arch_refusal, .{v});
+            arch = archName(v) orelse return why.refuse(arch_refusal, .{v});
         } else if (std.mem.eql(u8, a, "--app")) {
             o.app = v;
         } else if (std.mem.eql(u8, a, "--format")) {
@@ -855,28 +839,22 @@ fn buildOptions(args: []const []const u8, host: ?[]const u8, why: *Why) !BuildOp
         );
     }
     o.form = form orelse return why.refuse("no form\n{s}", .{usage});
-    if (o.arch.len == 0) return why.refuse(
-        "this machine is neither aarch64 nor x86_64: --arch",
-        .{},
-    );
+    o.arch = arch orelse return why.refuse("{s}: --arch", .{not_built_here});
     return o;
 }
 
-fn build(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
+fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
+    const all = (try adhoc.take(io, gpa, .build, given, why)) orelse return;
     const verbose, const args = try verboseFlag(gpa, all);
-    const o = try buildOptions(args, switch (@import("builtin").cpu.arch) {
-        .aarch64 => "aarch64",
-        .x86_64 => "x86_64",
-        else => null,
-    }, why);
+    const o = try buildOptions(args, hostArch(), why);
     // The form as make takes it, a name or a directory, and its name.
     const ref = o.form;
     const f = std.fs.path.basename(std.mem.trimEnd(u8, ref, "/"));
-    const a = o.arch;
+    const a = @tagName(o.arch);
     const dir = o.dir;
     const format = o.format;
     _ = try chain(io, gpa, ref, why);
-    const ab = try appBuild(io, gpa, ref, a, o.app, why);
+    const ab = try appBuild(io, gpa, ref, o.arch, o.app, why);
     const command = try gpa.print("howl build {s}", .{std.mem.join(gpa, " ", args) catch ref});
     const log = try gpa.print("build/log/{s}-{s}-build.log", .{ f, a });
 
@@ -895,20 +873,23 @@ fn build(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     const name = try gpa.print("{s}/{s}-{s}.json", .{ dir, f, a });
     const text = Dir.cwd().readFileAlloc(io, name, gpa, .limited(1 << 20)) catch |err|
         return why.refuse("{s}: {s}", .{ name, @errorName(err) });
-    const m = json.parseFromSliceLeaky(json.Value, gpa, text, .{}) catch
-        return why.refuse("{s}: not JSON", .{name});
-    if (m != .object) return why.refuse("{s}: not a manifest", .{name});
-    const files = m.object.get("files") orelse return why.refuse("{s}: no files", .{name});
-    const id = m.object.get("build") orelse return why.refuse("{s}: no build", .{name});
-    if (files != .object or id != .string) return why.refuse("{s}: not a manifest", .{name});
+    // As much of the manifest as is used here: the files it names. The
+    // updater reads the rest (cmd/slot-update/release.zig).
+    const m = json.parseFromSliceLeaky(
+        struct { files: json.ArrayHashMap(struct { sha256: []const u8, size: u64 }) },
+        gpa,
+        text,
+        .{ .ignore_unknown_fields = true },
+    ) catch return why.refuse("{s}: not a manifest", .{name});
+    const files = m.files.map;
 
     // What a machine boots from: the disk, or, for a form released for
     // direct boot, its initramfs, unless a format of its own was asked for.
     var boot = try gpa.print("{s}/{s}-{s}-{s}", .{
-        dir, f, a, if (files.object.get("disk.qcow2") != null) "disk.qcow2" else "initramfs.zst",
+        dir, f, a, if (files.contains("disk.qcow2")) "disk.qcow2" else "initramfs.zst",
     });
     if (format != .qcow2) {
-        if (files.object.get("disk.qcow2") == null)
+        if (!files.contains("disk.qcow2"))
             return why.refuse("{s} is released for direct boot, without a disk to convert", .{f});
         const dst = try gpa.print("{s}/{s}-{s}-disk.{t}", .{ dir, f, a, format });
         // VHD as Azure takes it: fixed, its size exactly the disk's.
@@ -965,24 +946,23 @@ fn build(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
         },
     );
     if (verbose) {
-        var it = files.object.iterator();
-        while (it.next()) |x| try w.print("  {s}/{s}-{s}-{s}\n", .{ dir, f, a, x.key_ptr.* });
+        for (files.keys()) |file| try w.print("  {s}/{s}-{s}-{s}\n", .{ dir, f, a, file });
     }
     err_out.clearRetainingCapacity();
-    if (std.mem.eql(u8, a, hostArch())) {
+    if (o.arch == hostArch()) {
         try e.print(
-            "  Next: howl create {s} NAME   {f}\n",
+            "  Next: howl create NAME --with {s}   {f}\n",
             .{
                 ref,
-                look.dim(try gpa.print("a machine on {s}, kept", .{engine(io, gpa, null).name})),
+                look.dim(try gpa.print("a machine on {t}, kept", .{engine(io, gpa, null).on})),
             },
         );
         try e.print(
-            "        howl run {s}           {f}\n",
+            "        howl run --with {s}           {f}\n",
             .{ ref, look.dim("boot it here, its console in this terminal") },
         );
     } else {
-        try e.print("  Next: howl upload {s} --on gcp|aws|azure\n", .{boot});
+        try e.print("  Next: howl upload {s} --on {s}\n", .{ boot, Platform.list(.cloud, "|") });
     }
     Io.File.stderr().writeStreamingAll(io, err_out.written()) catch {};
 }
@@ -1046,10 +1026,11 @@ pub fn run(io: Io, why: *Why, argv: []const []const u8) !void {
 
 // --- pack -------------------------------------------------------------------------------
 
-fn pack(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
+    const args = (try adhoc.take(io, gpa, .pack, given, why)) orelse return;
     const o = try options(gpa, args, why);
     if (o.name) |n| return why.refuse("{s}: pack takes one form, and no name", .{n});
-    if (o.arch != null or o.size != null) return why.refuse("--arch and --size are create's", .{});
+    if (o.arch != null or o.size != null) return why.refuse("{s}, create's", .{sized_only});
     if (o.allow_from != null) return why.refuse(
         "--allow-from is create's: it opens a machine's ports",
         .{},
@@ -1079,7 +1060,7 @@ fn pack(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         if (declared(iface, e.path)) "" else "\tnothing reads it",
     });
     var fits: std.ArrayList(u8) = .empty;
-    for ([_]Target{ .disk, .gcp, .azure, .aws }) |t| if (misfit(entries, tar.len, t) == null)
+    for ([_]Platform{ .disk, .gcp, .azure, .aws }) |t| if (misfit(entries, tar.len, t) == null)
         try fits.print(gpa, " {t}", .{t});
     try w.print("{d} files, a {d}-byte tar, for:{s}\n", .{ entries.len, tar.len, fits.items });
     if (o.check) return;
@@ -1090,7 +1071,12 @@ fn pack(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
 /// The flags FORM takes, from its chain's files.
 fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface {
     const c = try chain(io, gpa, form, why);
-    var iface = try interface(gpa, try services(io, gpa, c), why);
+    var failure: forms.Failure = .{};
+    const svcs = forms.services(io, gpa, Dir.cwd(), c, &failure) catch |err| switch (err) {
+        error.Form => return why.refuse("{s}", .{failure.text}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    var iface = try interface(gpa, svcs, why);
     // As the image lays the forms over each other: the last one's wins.
     for (c) |f| {
         const path = try gpa.print("{s}/rootfs/etc/werewolf/update-policy.json", .{f.dir});
@@ -1151,13 +1137,14 @@ pub fn writePrivate(io: Io, gpa: Allocator, path: []const u8, data: []const u8, 
 /// engine create would pick, with create's flags, named werewolf-run,
 /// and in place of the last one. howl ssh, console and stop, with no
 /// name, are its.
-fn runForm(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+fn runForm(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
+    const args = (try adhoc.take(io, gpa, .run, given, why)) orelse return;
     for (args) |a| if (std.mem.eql(u8, a, run_name))
-        return why.refuse("{s} is the name run gives its machine: run FORM [flags]", .{a});
+        return why.refuse("{s} is the name run gives its machine: run [--with FORM] [flags]", .{a});
     // The last one, wherever it ran: it has the name, and maybe the ports.
     if (madeOn(io, gpa, run_name)) |was| remove(io, gpa, run_name, was, why) catch |err| say(
         io,
-        "{s}: the last one, on {s}, was not removed: {s}",
+        "{s}: the last one, on {t}, was not removed: {s}",
         .{ run_name, was, if (err == error.Refused) why.text else @errorName(err) },
     );
     var with: std.ArrayList([]const u8) = .empty;
@@ -1200,9 +1187,8 @@ fn createQemu(
     tell: Tell,
     why: *Why,
 ) !void {
-    const arch = hostArch();
-    const dir = try machineDir(gpa, arch, name);
-    try Dir.cwd().createDirPath(io, dir);
+    const arch = try localArch(why);
+    const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
     const replaced = try qemu.stop(io, gpa, dir);
@@ -1217,7 +1203,6 @@ fn createQemu(
         "image",
     }, step);
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
-    try writePrivate(io, gpa, try gpa.print("{s}/engine", .{dir}), "qemu", why);
     try qemu.disk(io, try gpa.print("{s}/data.img", .{dir}), 8 << 30);
     const ssh_port = try qemu.freePort(io, 2222);
     const web_port = try qemu.freePort(io, 8080);
@@ -1325,7 +1310,7 @@ fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         break;
     };
     const name, const on = try machineArgs(io, gpa, rest, why);
-    const dir = try machineDir(gpa, hostArch(), name);
+    const dir = try machineDir(gpa, name);
     // Its host key is its own, kept in /data: learned once, then held to,
     // beside its other files, not by an address another machine may get;
     // delete takes it with the machine.
@@ -1336,7 +1321,7 @@ fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         "-o", "LogLevel=ERROR",
     };
     var argv: std.ArrayList([]const u8) = .empty;
-    if (std.mem.eql(u8, on, "qemu")) {
+    if (on == .qemu) {
         if (qemu.running(
             io,
             gpa,
@@ -1351,11 +1336,11 @@ fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
         try argv.appendSlice(gpa, &pinned);
         try argv.append(gpa, "root@127.0.0.1");
-    } else if (std.mem.eql(u8, on, "firecracker")) {
+    } else if (on == .firecracker) {
         try argv.append(gpa, "ssh");
         try argv.appendSlice(gpa, &pinned);
         try argv.append(gpa, try gpa.print("root@{s}", .{(try firecracker.net(gpa, name)).guest}));
-    } else if (std.mem.eql(u8, on, "lima")) {
+    } else if (on == .lima) {
         if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
         if (lima.addressOf(io, gpa, name)) |addr| {
             try argv.append(gpa, "ssh");
@@ -1363,7 +1348,7 @@ fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             try argv.append(gpa, try gpa.print("root@{s}", .{addr}));
         } else try argv.appendSlice(gpa, &.{ "limactl", "shell", name });
     } else return why.refuse(
-        "ssh reaches machines here (qemu, firecracker, lima); {s}'s address is in create's summary",
+        "ssh reaches machines here (qemu, firecracker, lima); {t}'s address is in create's summary",
         .{on},
     );
     try argv.appendSlice(gpa, command);
@@ -1426,7 +1411,7 @@ fn appBuild(
     io: Io,
     gpa: Allocator,
     form: []const u8,
-    arch: []const u8,
+    arch: Arch,
     src: ?[]const u8,
     why: *Why,
 ) !AppBuild {
@@ -1434,15 +1419,18 @@ fn appBuild(
     // outside the tree, ../myapp, builds into build/ARCH/myapp.
     const name = std.fs.path.basename(std.mem.trimEnd(u8, form, "/"));
     const dir = src orelse return .{ .app = "APP=", .out = name };
-    const at = app.place(io, gpa, try chain(io, gpa, form, why)) catch
-        return why.refuse("{s}: its etc/werewolf/app is not an absolute path", .{form});
+    // The last form's app, which lib/form.zig has checked is an absolute path.
+    var at: ?[]const u8 = null;
+    for (try chain(io, gpa, form, why)) |f| if (f.spec.get("app")) |a| {
+        at = a.scalar.text;
+    };
     const where = at orelse return why.refuse(
-        "{s} keeps no application (no etc/werewolf/app in its forms): build on app, python, " ++
+        "{s} keeps no application (no app in its forms' form.yaml): build on app, python, " ++
             "node, jre, nginx or php",
         .{form},
     );
     const cwd = try std.process.currentPathAlloc(io, gpa);
-    const root = try gpa.print("{s}/build/{s}/apps/{s}", .{ cwd, arch, name });
+    const root = try gpa.print("{s}/build/{t}/apps/{s}", .{ cwd, arch, name });
     const staged = try app.stage(io, gpa, dir, root, where, why);
     say(io, "app {s}: {d} files, {d} bytes, sha256 {s}, at {s}", .{
         dir,
@@ -1454,10 +1442,11 @@ fn appBuild(
     return .{ .app = try gpa.print("APP={s}", .{root}), .out = try gpa.print("{s}-app", .{name}) };
 }
 
-/// Where create keeps what it built for a machine: its disk, which names
-/// its MAC, and its config tar, which holds secrets.
-fn machineDir(gpa: Allocator, arch: []const u8, name: []const u8) ![]const u8 {
-    return gpa.print("build/{s}/machines/{s}", .{ arch, name });
+/// Where create keeps what it made a machine of, on any platform: the
+/// engine it is on, its disk, which names its MAC, and its config tar,
+/// which holds secrets. delete removes it with the machine.
+fn machineDir(gpa: Allocator, name: []const u8) ![]const u8 {
+    return gpa.print("build/machines/{s}", .{name});
 }
 
 /// The GNU make the Makefile is written for: gmake on the BSDs, whose own
@@ -1467,22 +1456,44 @@ pub const make_cmd = switch (@import("builtin").os.tag) {
     else => "make",
 };
 
-pub fn hostArch() []const u8 {
+/// The architectures werewolf builds for, by its own names, which make,
+/// the build's directories and a release's files use. Each cloud names
+/// them as it does: GCP ARM64 and X86_64, AWS arm64 and x86_64, Azure
+/// Arm64 and x64.
+pub const Arch = enum { aarch64, x86_64 };
+
+/// This machine's arch, which an engine here runs, if werewolf builds for it.
+pub fn hostArch() ?Arch {
     return switch (@import("builtin").cpu.arch) {
-        .aarch64 => "aarch64",
-        else => "x86_64",
+        .aarch64 => .aarch64,
+        .x86_64 => .x86_64,
+        else => null,
     };
 }
 
-/// --arch's spellings, as each world writes them, made werewolf's own,
-/// which make and the clouds' code take: aarch64 (arm64) and x86_64
-/// (x86-64, amd64). Each cloud then names it as it does: GCP ARM64 and
-/// X86_64, AWS arm64 and x86_64, Azure Arm64 and x64.
-pub fn archName(given: []const u8) ?[]const u8 {
-    const names = [_][2][]const u8{
-        .{ "aarch64", "aarch64" }, .{ "arm64", "aarch64" },
-        .{ "x86_64", "x86_64" },   .{ "x86-64", "x86_64" },
-        .{ "amd64", "x86_64" },
+pub const not_built_here = "this machine is neither aarch64 nor x86_64";
+
+/// A machine an engine here or on Proxmox runs: two CPUs and 2 GiB, as
+/// the clouds' smallest that werewolf runs well on (gcp.machine).
+pub const local_cpus = 2;
+pub const local_mib = 2048;
+
+/// What marks a machine create made, on any platform, and names its form:
+/// a cloud's label or tag, Proxmox's description, Lima's template.
+pub const form_tag = "werewolf-form";
+
+/// The arch an engine here runs: this machine's.
+fn localArch(why: *Why) error{Refused}!Arch {
+    return hostArch() orelse why.refuse("{s}, which werewolf builds for", .{not_built_here});
+}
+
+/// --arch's spellings, as each world writes them, made werewolf's own:
+/// aarch64 (arm64) and x86_64 (x86-64, amd64).
+pub fn archName(given: []const u8) ?Arch {
+    const names = [_]struct { []const u8, Arch }{
+        .{ "aarch64", .aarch64 }, .{ "arm64", .aarch64 },
+        .{ "x86_64", .x86_64 },   .{ "x86-64", .x86_64 },
+        .{ "amd64", .x86_64 },
     };
     for (names) |n| if (std.ascii.eqlIgnoreCase(given, n[0])) return n[1];
     return null;
@@ -1503,37 +1514,36 @@ pub const arch_refusal = "--arch {s}: aarch64 (arm64), or x86_64 (x86-64, amd64)
 /// FreeBSD, Firecracker on Linux with KVM where its network can be set up
 /// without a password, or QEMU; and, when a likelier one was passed over,
 /// why, for the summary to say. run and create choose alike.
-const Engine = struct { name: []const u8, note: ?[]const u8 = null };
+const Engine = struct { on: Platform, note: ?[]const u8 = null };
 
-fn engine(io: Io, gpa: Allocator, given: ?[]const u8) Engine {
-    if (given) |p| return .{ .name = p };
-    if (lima.installed(io, gpa)) return .{ .name = "lima" };
-    if (bhyve.installed(io)) return .{ .name = "bhyve" };
+pub fn engine(io: Io, gpa: Allocator, given: ?Platform) Engine {
+    if (given) |p| return .{ .on = p };
+    if (lima.installed(io, gpa)) return .{ .on = .lima };
+    if (bhyve.installed(io)) return .{ .on = .bhyve };
     if (firecracker.installed(io, gpa)) {
-        if (firecracker.rootReady(io, gpa)) return .{ .name = "firecracker" };
+        if (firecracker.rootReady(io, gpa)) return .{ .on = .firecracker };
         return .{
-            .name = "qemu",
+            .on = .qemu,
             .note = "not Firecracker: its network needs root, and sudo asks a password (sudo " ++
                 "-v, then again)",
         };
     }
-    return .{ .name = "qemu" };
+    return .{ .on = .qemu };
 }
 
-/// The engine a machine here was made on, as create recorded it.
-fn madeOn(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
-    const path = gpa.print(
-        "{s}/engine",
-        .{machineDir(gpa, hostArch(), name) catch return null},
-    ) catch return null;
+/// The platform a machine was made on, as create recorded it.
+fn madeOn(io: Io, gpa: Allocator, name: []const u8) ?Platform {
+    const path = gpa.print("{s}/engine", .{machineDir(gpa, name) catch return null}) catch
+        return null;
     const text = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64)) catch return null;
-    return std.mem.trim(u8, text, " \n");
+    return std.meta.stringToEnum(Platform, std.mem.trim(u8, text, " \n"));
 }
 
 /// The name run gives the one machine it keeps.
 const run_name = "werewolf-run";
 
-fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
+fn create(io: Io, gpa: Allocator, line: []const []const u8, why: *Why) !void {
+    const all = (try adhoc.take(io, gpa, .create, line, why)) orelse return;
     const began = Io.Clock.awake.now(io);
     const verbose, const some = try verboseFlag(gpa, all);
     const dev, const args = try takeFlag(gpa, some, &.{"--dev"});
@@ -1545,7 +1555,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     const w = &out.interface;
     if (o.help) return help(w, gpa, "create", o.form, iface);
     const name = o.name orelse return why.refuse(
-        "create FORM NAME: name the machine\n{s}",
+        "create NAME --with FORM: name the machine\n{s}",
         .{usage},
     );
     if (!isMachineName(name)) return why.refuse(
@@ -1553,8 +1563,8 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
         .{name},
     );
 
-    const eng = engine(io, gpa, o.platform);
-    const on = eng.name;
+    const eng = engine(io, gpa, o.on);
+    const on = eng.on;
     const tell: Tell = .{
         .verbose = verbose,
         .command = try gpa.print("howl {s} {s}", .{
@@ -1569,31 +1579,25 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
         .note = eng.note,
         .dev = dev,
     };
-    if (dev) for ([_][]const u8{ "gcp", "aws", "azure", "proxmox" }) |c| if (std.mem.eql(u8, on, c))
-        return why.refuse(
-            "--dev is for machines here: a shell on {s} is a release's choice to make",
-            .{on},
-        );
-    // What engine made a machine here, for the verbs that find it again.
-    for ([_][]const u8{
-        "lima",
-        "bhyve",
-        "firecracker",
-        "qemu",
-    }) |local| if (std.mem.eql(u8, on, local)) {
-        const d = try machineDir(gpa, hostArch(), name);
-        try Dir.cwd().createDirPath(io, d);
-        try writePrivate(io, gpa, try gpa.print("{s}/engine", .{d}), on, why);
-    };
+    if (on == .disk) return why.refuse(
+        "--on disk is pack's: howl build and howl pack make a disk and its tar",
+        .{},
+    );
+    if (dev and !on.here()) return why.refuse(
+        "--dev is for machines here: a shell on {t} is a release's choice to make",
+        .{on},
+    );
+    if (on.here() and (o.arch != null or o.size != null))
+        return why.refuse("{s}: {t} runs this machine's arch", .{ sized_only, on });
     // A form with no DHCP client is given the hypervisor's own network in
     // its config tar, Lima's as make lima's template gives it on the
     // command line, or slirp's under bhyve, unless the flags or --config
     // DIR give one.
-    const on_lima = std.mem.eql(u8, on, "lima");
+    const on_lima = on == .lima;
     // A Firecracker machine's address is its tap's, on the kernel command
     // line; --dns alone is taken there, not in the tar.
     var fc_dns: ?[]const u8 = null;
-    if (std.mem.eql(u8, on, "firecracker")) {
+    if (on == .firecracker) {
         if (o.ip != null or o.gw != null) return why.refuse(
             "--ip and --gw: a Firecracker machine's address is its tap's, 172.16.0.0/16",
             .{},
@@ -1601,7 +1605,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
         fc_dns = o.dns;
         o.dns = null;
     }
-    const dhcp = !(on_lima or std.mem.eql(u8, on, "bhyve")) or try hasDhcp(io, gpa, o.form, why);
+    const dhcp = !(on_lima or on == .bhyve) or try hasDhcp(io, gpa, o.form, why);
     if (!dhcp and o.ip == null and o.gw == null and o.dns == null) {
         const given = if (o.config) |d|
             if (Dir.cwd().access(io, try std.fs.path.join(gpa, &.{ d, "network" }), .{}))
@@ -1618,47 +1622,35 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     }
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);
-    if (target(on)) |t| if (misfit(
-        entries,
-        tar.len,
-        t,
-    )) |r| return why.refuse("not for {s}: {s}", .{ on, r });
-
-    if (std.mem.eql(u8, on, "qemu")) return createQemu(io, gpa, o, name, tar, tell, why);
-    const cloud = std.mem.eql(u8, on, "gcp") or std.mem.eql(u8, on, "aws") or
-        std.mem.eql(u8, on, "azure");
+    if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
     if (o.allow_from) |a| {
-        if (!cloud) return why.refuse(
-            "--allow-from is for --on gcp, aws and azure: {s}'s machines are reached as it says",
-            .{on},
+        if (!on.is(.cloud)) return why.refuse(
+            "--allow-from is for --on {s}: {t}'s machines are reached as it says",
+            .{ Platform.list(.cloud, ", "), on },
         );
         // Resolved, and checked, before anything is built or made.
         o.allow_from = try allowSource(io, gpa, a, why);
     }
-    if (std.mem.eql(u8, on, "gcp")) return createGcp(io, gpa, o, name, tar, w, why);
-    if (std.mem.eql(u8, on, "aws")) return createAws(io, gpa, o, name, tar, w, why);
-    if (std.mem.eql(u8, on, "azure")) return createAzure(io, gpa, o, name, entries, tar, w, why);
-    if (std.mem.eql(u8, on, "bhyve")) return createBhyve(io, gpa, o, name, tar, tell.dev, w, why);
-    if (std.mem.eql(u8, on, "proxmox")) return createProxmox(io, gpa, o, name, tar, w, why);
-    if (std.mem.eql(u8, on, "firecracker"))
-        return createFirecracker(io, gpa, o, name, tar, fc_dns, tell, why);
-    if (o.arch != null or o.size != null)
-        return why.refuse(
-            "--arch and --size are for --on gcp and aws: {s} runs this machine's arch",
-            .{on},
-        );
-    if (!std.mem.eql(u8, on, "lima"))
-        return why.refuse(
-            "--on {s} is not built yet: howl build and howl pack make its two files",
-            .{on},
-        );
+    // What the machine is on, for the verbs that find it again.
+    const dir = try machineDir(gpa, name);
+    try Dir.cwd().createDirPath(io, dir);
+    try writePrivate(io, gpa, try gpa.print("{s}/engine", .{dir}), @tagName(on), why);
+    switch (on) {
+        .qemu => return createQemu(io, gpa, o, name, tar, tell, why),
+        .gcp => return createGcp(io, gpa, o, name, tar, w, why),
+        .aws => return createAws(io, gpa, o, name, tar, w, why),
+        .azure => return createAzure(io, gpa, o, name, entries, tar, w, why),
+        .bhyve => return createBhyve(io, gpa, o, name, tar, tell.dev, w, why),
+        .proxmox => return createProxmox(io, gpa, o, name, tar, w, why),
+        .firecracker => return createFirecracker(io, gpa, o, name, tar, fc_dns, tell, why),
+        .lima => {},
+        .disk => unreachable,
+    }
     if (!lima.installed(
         io,
         gpa,
     )) return why.refuse("--on lima: no limactl here, or not macOS (brew install lima)", .{});
-    const arch = hostArch();
-    const dir = try machineDir(gpa, arch, name);
-    try Dir.cwd().createDirPath(io, dir);
+    const arch = try localArch(why);
     const m = lima.mac(name);
     var managed = try limaManages(io, gpa, o.form, why);
     // Each step a line that says which it is in, and its output in a log.
@@ -1680,7 +1672,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
             // As make lima boots one: on Lima's network, with its user,
             // from the image and the template make writes, so Lima manages
             // it, its ssh and its stop included.
-            const made = try gpa.print("build/{s}/{s}/lima.yaml", .{ arch, ab.out });
+            const made = try gpa.print("build/{t}/{s}/lima.yaml", .{ arch, ab.out });
             built = (try progress.run(io, gpa, why, &.{
                 make_cmd,
                 "--no-print-directory",
@@ -1688,7 +1680,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
                 if (tell.dev) "DEV=1" else "DEV=",
                 ab.app,
                 "image",
-                try gpa.print("build/{s}/disk.img", .{arch}),
+                try gpa.print("build/{t}/disk.img", .{arch}),
                 made,
             }, step)).seconds;
             const base = Dir.cwd().readFileAlloc(io, made, gpa, .limited(1 << 20)) catch |err|
@@ -1713,7 +1705,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
             template = try lima.template(
                 gpa,
                 o.form,
-                arch,
+                @tagName(arch),
                 disk,
                 if (dhcp) &m else null,
                 config_disk,
@@ -1948,12 +1940,12 @@ fn reachAt(gpa: Allocator, addr: []const u8, ports: []const u16, name: []const u
 const up_ms = 180_000;
 const up_poll_ms = 50;
 
-/// Wait for init's "werewolf: up in" on the console, past the first seen
+/// Wait for init's up line, or a panic, on the console, past the first seen
 /// bytes of its log: for a machine whose address says nothing, or that
 /// has none this host reaches. Each look reads what follows seen into one
 /// buffer, up to its size, so frequent looks cost no memory; a boot says
 /// it is up well within its first MiB.
-fn awaitUp(io: Io, gpa: Allocator, log: []const u8, seen: u64) !bool {
+fn awaitUp(io: Io, gpa: Allocator, log: []const u8, seen: u64) !booting.Outcome {
     const buf = try gpa.alloc(u8, 1 << 20);
     defer gpa.free(buf);
     var waited: u32 = 0;
@@ -1964,11 +1956,11 @@ fn awaitUp(io: Io, gpa: Allocator, log: []const u8, seen: u64) !bool {
             const len = f.length(io) catch 0;
             const from = if (seen <= len) seen else 0;
             const n = f.readPositionalAll(io, buf, from) catch 0;
-            if (std.mem.find(u8, buf[0..n], "werewolf: up in ") != null) return true;
+            if (booting.outcome(buf[0..n])) |o| return o;
         } else |_| {}
         try io.sleep(.fromMilliseconds(up_poll_ms), .awake);
     }
-    return false;
+    return .late;
 }
 
 /// create --on bhyve (bhyve.zig): the machine's disk, built for it, and
@@ -1988,19 +1980,14 @@ fn createBhyve(
     w: *Io.Writer,
     why: *Why,
 ) !void {
-    if (o.arch != null or o.size != null) return why.refuse(
-        "--arch and --size are for --on gcp and aws: bhyve runs this machine's arch",
-        .{},
-    );
     if (!bhyve.installed(io))
         return why.refuse("--on bhyve: FreeBSD on x86_64, with vmm loaded (kldload vmm)", .{});
     Dir.cwd().access(io, bhyve.firmware, .{}) catch
         return why.refuse("no {s}: pkg install bhyve-firmware", .{bhyve.firmware});
     const root = bhyve.asRoot(io) catch
         return why.refuse("bhyve needs root, and there is no doas or sudo: pkg install doas", .{});
-    const arch = hostArch();
-    const dir = try machineDir(gpa, arch, name);
-    try Dir.cwd().createDirPath(io, dir);
+    const arch = try localArch(why);
+    const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
     const config = try gpa.print("{s}/{s}/config.tar", .{ cwd, dir });
@@ -2011,7 +1998,7 @@ fn createBhyve(
         Dir.cwd().readFileAlloc(io, form_file, gpa, .limited(256)) catch "",
         " \n",
     );
-    if (was.len > 0) try reconfigurable(o, name, was, "bhyve", why);
+    if (was.len > 0) try reconfigurable(o, name, was, .bhyve, why);
     if (try bhyve.exists(io, gpa, name)) {
         say(
             io,
@@ -2056,10 +2043,14 @@ fn createBhyve(
     try argv.appendSlice(gpa, try bhyve.argv(gpa, name, disk, config, fwds));
     try run(io, why, argv.items);
     say(io, "{s}: waiting for it to boot", .{name});
-    if (!try awaitUp(io, gpa, log, seen)) return why.refuse(
-        "{s} is not up after 3 minutes: howl console {s} --on bhyve",
-        .{ name, name },
-    );
+    switch (try awaitUp(io, gpa, log, seen)) {
+        .up => {},
+        .panic => return why.refuse("{s} panicked: howl console {s} --on bhyve", .{ name, name }),
+        .late => return why.refuse(
+            "{s} is not up after 3 minutes: howl console {s} --on bhyve",
+            .{ name, name },
+        ),
+    }
     for (fwds) |fw| say(
         io,
         "{s}: 127.0.0.1:{d} reaches its port {d}",
@@ -2100,17 +2091,12 @@ fn createFirecracker(
         "--on firecracker: Linux with /dev/kvm, and firecracker on the PATH (tools/install-deps)",
         .{},
     );
-    if (o.arch != null or o.size != null) return why.refuse(
-        "--arch and --size are for --on gcp and aws: Firecracker runs this machine's arch",
-        .{},
-    );
     const root = firecracker.asRoot(io, gpa) catch
         return why.refuse("the machine's tap device needs root, and there is no sudo or doas", .{});
     const user = environ.get("USER") orelse
         return why.refuse("no USER in the environment, whose tap device the machine's is", .{});
-    const arch = hostArch();
-    const dir = try machineDir(gpa, arch, name);
-    try Dir.cwd().createDirPath(io, dir);
+    const arch = try localArch(why);
+    const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const form_file = try gpa.print("{s}/form", .{dir});
     const was = std.mem.trim(
@@ -2118,7 +2104,7 @@ fn createFirecracker(
         Dir.cwd().readFileAlloc(io, form_file, gpa, .limited(256)) catch "",
         " \n",
     );
-    if (was.len > 0) try reconfigurable(o, name, was, "firecracker", why);
+    if (was.len > 0) try reconfigurable(o, name, was, .firecracker, why);
     if (firecracker.running(io, gpa, dir)) |pid| {
         say(io, "{s}: replacing its config, with a hard stop", .{name});
         try firecracker.stop(io, gpa, dir, pid, why);
@@ -2142,7 +2128,7 @@ fn createFirecracker(
         );
         const image_args = std.mem.trim(u8, Dir.cwd().readFileAlloc(
             io,
-            try gpa.print("build/{s}/{s}/meta/usr/share/werewolf/cmdline", .{ arch, ab.out }),
+            try gpa.print("build/{t}/{s}/meta/usr/share/werewolf/cmdline", .{ arch, ab.out }),
             gpa,
             .limited(4096),
         ) catch |err| return why.refuse(
@@ -2163,11 +2149,11 @@ fn createFirecracker(
         try writePrivate(io, gpa, try gpa.print("{s}/vm.json", .{dir}), try firecracker.config(
             gpa,
             try gpa.print("{s}/{s}", .{ cwd, try firecracker.kernelPath(gpa, arch) }),
-            try gpa.print("{s}/build/{s}/{s}/slot/initramfs.zst", .{ cwd, arch, ab.out }),
+            try gpa.print("{s}/build/{t}/{s}/slot/stage0.zst", .{ cwd, arch, ab.out }),
             try firecracker.bootArgs(gpa, image_args, n, dns),
             data,
             try gpa.print("{s}/{s}/config.tar", .{ cwd, dir }),
-            try gpa.print("{s}/build/{s}/{s}/slot/root.erofs", .{ cwd, arch, ab.out }),
+            try gpa.print("{s}/build/{t}/{s}/slot/root.erofs", .{ cwd, arch, ab.out }),
             try gpa.print("{s}/{s}/firecracker.log", .{ cwd, dir }),
             n,
         ), why);
@@ -2236,17 +2222,16 @@ fn createProxmox(
     why: *Why,
 ) !void {
     const p = try proxmox.place(environ, why);
-    const arch = o.arch orelse "x86_64";
-    if (!std.mem.eql(u8, arch, "x86_64"))
+    const arch = o.arch orelse .x86_64;
+    if (arch != .x86_64)
         return why.refuse("--on proxmox: x86_64 machines only; its nodes are", .{});
-    if (o.size != null) return why.refuse("--size is for --on gcp and aws", .{});
-    const dir = try machineDir(gpa, arch, name);
-    try Dir.cwd().createDirPath(io, dir);
+    if (o.size != null) return why.refuse("--size is for --on {s}", .{Platform.list(.cloud, ", ")});
+    const dir = try machineDir(gpa, name);
     const tar_path = try gpa.print("{s}/config.tar", .{dir});
     try writePrivate(io, gpa, tar_path, tar, why);
     var vmid: []const u8 = undefined;
     if (try proxmox.find(io, gpa, p, name, why)) |m| {
-        try reconfigurable(o, name, m.form, "proxmox", why);
+        try reconfigurable(o, name, m.form, .proxmox, why);
         say(io, "{s}: replacing the config of VM {s} on {s}, with a hard stop", .{
             name,
             m.vmid,
@@ -2287,25 +2272,15 @@ fn createProxmox(
     try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
 }
 
-/// The TCP ports form listens on, as its chain's net declares them
-/// (listen tcp/80 tcp/443), in order, once each.
+/// The TCP ports form serves, as its chain's net declares them
+/// (lib/form.zig): listen tcp/80 tcp/443, in order, once each.
 fn listens(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const u16 {
-    var ports: std.ArrayList(u16) = .empty;
-    for (try chain(io, gpa, form, why)) |f|
-        for (try f.items(gpa, "net")) |line| try listenPorts(gpa, line, &ports);
-    return ports.items;
-}
-
-/// Add the TCP ports a net line names, when it is a listen line, to
-/// ports, once each.
-fn listenPorts(gpa: Allocator, line: []const u8, ports: *std.ArrayList(u16)) !void {
-    var words = std.mem.tokenizeAny(u8, line, " \t\r");
-    if (!std.mem.eql(u8, words.next() orelse return, "listen")) return;
-    while (words.next()) |word| {
-        if (!std.mem.startsWith(u8, word, "tcp/")) continue;
-        const p = std.fmt.parseInt(u16, word["tcp/".len..], 10) catch continue;
-        if (std.mem.findScalar(u16, ports.items, p) == null) try ports.append(gpa, p);
-    }
+    const c = try chain(io, gpa, form, why);
+    var f: forms.Failure = .{};
+    return forms.listens(gpa, c, &f) catch |err| switch (err) {
+        error.Form => why.refuse("{s}", .{f.text}),
+        error.OutOfMemory => error.OutOfMemory,
+    };
 }
 
 /// Whether form takes an address by DHCP: whether its chain runs
@@ -2317,27 +2292,25 @@ fn hasDhcp(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
 }
 
 /// Whether Lima can manage a machine of form: one that answers Lima's ssh
-/// as Lima's user and runs its readiness probes, which want sshd and bash.
+/// as Lima's user and runs its readiness probes, which want sshd and bash
+/// among the packages its chain's apko configs install (lib/form.zig).
 /// Any other starts on vzNAT, unmanaged, and is stopped hard.
 fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+    const c = try chain(io, gpa, form, why);
+    var f: forms.Failure = .{};
+    const config = forms.apko(io, gpa, Dir.cwd(), c, &.{}, &f) catch |err| switch (err) {
+        error.Form => return why.refuse("{s}", .{f.text}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     var sshd = false;
     var bash = false;
-    for (try chain(io, gpa, form, why)) |f| {
-        const text = try Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/apko.yaml", .{f.dir}),
-            gpa,
-            .limited(256 << 10),
-        );
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        while (lines.next()) |line| {
-            var words = std.mem.tokenizeAny(u8, line, " \t\r");
-            if (!std.mem.eql(u8, words.next() orelse continue, "-")) continue;
-            const pkg = words.next() orelse continue;
-            if (std.mem.eql(u8, pkg, "openssh-server")) sshd = true;
-            if (std.mem.eql(u8, pkg, "bash")) bash = true;
-        }
-    }
+    const packages = (config.get("contents") orelse return false).get("packages") orelse
+        return false;
+    if (packages != .list) return false;
+    for (packages.list) |p| if (p == .scalar) {
+        if (std.mem.eql(u8, p.scalar.text, "openssh-server")) sshd = true;
+        if (std.mem.eql(u8, p.scalar.text, "bash")) bash = true;
+    };
     return sshd and bash;
 }
 
@@ -2504,11 +2477,11 @@ fn isCidr(s: []const u8) bool {
 
 /// A second create of a machine keeps its rules as its owner left them:
 /// --allow-from opens a new machine's ports.
-fn newOnly(o: Options, name: []const u8, on: []const u8, why: *Why) error{Refused}!void {
+fn newOnly(o: Options, name: []const u8, on: Platform, why: *Why) error{Refused}!void {
     if (o.allow_from == null) return;
     return why.refuse(
         "{s} exists, and keeps its rules as they are: --allow-from opens a new machine's ports " ++
-            "(howl delete {s} --on {s}, then create)",
+            "(howl delete {s} --on {t}, then create)",
         .{ name, name, on },
     );
 }
@@ -2516,7 +2489,7 @@ fn newOnly(o: Options, name: []const u8, on: []const u8, why: *Why) error{Refuse
 /// A machine in a cloud: its architecture, --arch or this host's, where
 /// create keeps its files, and its config tar in base64, as the clouds
 /// take user data, kept private there.
-const Cloud = struct { arch: []const u8, dir: []const u8, b64: []const u8 };
+const Cloud = struct { arch: Arch, dir: []const u8, b64: []const u8 };
 
 fn cloudMachine(
     io: Io,
@@ -2526,10 +2499,9 @@ fn cloudMachine(
     tar: []const u8,
     why: *Why,
 ) !Cloud {
-    // options() made --arch aarch64 or x86_64.
-    const arch = o.arch orelse hostArch();
-    const dir = try machineDir(gpa, arch, name);
-    try Dir.cwd().createDirPath(io, dir);
+    const arch = o.arch orelse hostArch() orelse
+        return why.refuse("{s}: --arch", .{not_built_here});
+    const dir = try machineDir(gpa, name);
     const b64 = try gpa.print("{s}/config.b64", .{dir});
     const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(tar.len));
     try writePrivate(io, gpa, b64, std.base64.standard.Encoder.encode(encoded, tar), why);
@@ -2539,21 +2511,18 @@ fn cloudMachine(
 /// Whether a machine that exists, made of the form was ("" if not made by
 /// create), may take a new config: the same form, and no --app, since an
 /// application is in the image.
-fn notMade(name: []const u8, on: []const u8, why: *Why) error{Refused} {
-    return why.refuse("{s} was not made by howl create; it is {s}'s alone", .{ name, on });
+fn notMade(name: []const u8, on: Platform, why: *Why) error{Refused} {
+    return why.refuse("{s} was not made by howl create; it is {t}'s alone", .{ name, on });
 }
 
-fn reconfigurable(o: Options, name: []const u8, was: []const u8, on: []const u8, why: *Why) !void {
+fn reconfigurable(o: Options, name: []const u8, was: []const u8, on: Platform, why: *Why) !void {
     if (o.app != null) return why.refuse(
-        "{s} exists, and an application is in the image: howl delete {s} --on {s}, then create",
+        "{s} exists, and an application is in the image: howl delete {s} --on {t}, then create",
         .{ name, name, on },
     );
-    if (was.len == 0) return why.refuse(
-        "{s} was not made by howl create; it is {s}'s alone",
-        .{ name, on },
-    );
+    if (was.len == 0) return notMade(name, on, why);
     if (!std.mem.eql(u8, was, o.form)) return why.refuse(
-        "{s} runs {s}, not {s}: another form is another image; howl delete {s} --on {s}, " ++
+        "{s} runs {s}, not {s}: another form is another image; howl delete {s} --on {t}, " ++
             "then create",
         .{ name, was, o.form, name, on },
     );
@@ -2561,14 +2530,14 @@ fn reconfigurable(o: Options, name: []const u8, was: []const u8, on: []const u8,
 
 /// The release's disk.qcow2 of the form, with --app's application, built
 /// if stale.
-fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: []const u8, why: *Why) ![]const u8 {
+fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: Arch, why: *Why) ![]const u8 {
     const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
-    const disk = try gpa.print("build/{s}/{s}/disk.qcow2", .{ arch, ab.out });
+    const disk = try gpa.print("build/{t}/{s}/disk.qcow2", .{ arch, ab.out });
     try run(io, why, &.{
         make_cmd,
         "--no-print-directory",
         try gpa.print("FORM={s}", .{o.form}),
-        try gpa.print("ARCH={s}", .{arch}),
+        try gpa.print("ARCH={t}", .{arch}),
         "DEV=",
         ab.app,
         disk,
@@ -2592,8 +2561,8 @@ fn createGcp(
     const c = try cloudMachine(io, gpa, o, name, tar, why);
     var made = false;
     if (try gcp.formOf(io, gpa, p, name, why)) |was| {
-        try reconfigurable(o, name, was, "gcp", why);
-        try newOnly(o, name, "gcp", why);
+        try reconfigurable(o, name, was, .gcp, why);
+        try newOnly(o, name, .gcp, why);
         say(
             io,
             "{s}: replacing its config, and restarting it; its address changes unless it is static",
@@ -2637,8 +2606,8 @@ fn createAws(
     var id: []const u8 = undefined;
     var made = false;
     if (try aws.find(io, gpa, p, name, why)) |i| {
-        try reconfigurable(o, name, i.form, "aws", why);
-        try newOnly(o, name, "aws", why);
+        try reconfigurable(o, name, i.form, .aws, why);
+        try newOnly(o, name, .aws, why);
         say(
             io,
             "{s}: replacing its config, and restarting it; its address changes unless it is " ++
@@ -2693,8 +2662,8 @@ fn createAzure(
     const tar_path = try gpa.print("{s}/config.tar", .{c.dir});
     try writePrivate(io, gpa, tar_path, tar, why);
     if (try azure.find(io, gpa, p, name, why)) |vm| {
-        try reconfigurable(o, name, vm.form, "azure", why);
-        try newOnly(o, name, "azure", why);
+        try reconfigurable(o, name, vm.form, .azure, why);
+        try newOnly(o, name, .azure, why);
         say(io, "{s}: replacing its config, and restarting it", .{name});
         const before = if (azure.console(io, gpa, p, name)) |text| azure.mark(text) else "";
         try azure.reconfigure(io, gpa, p, name, tar, c.dir, why);
@@ -2740,12 +2709,13 @@ fn azureUp(
 /// name, or the AMI's id. An Azure disk serves one VM, so make a copy of
 /// it for each (az disk create --source).
 fn upload(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
-    const clouds = [_][]const u8{ "gcp", "aws", "azure" };
-    const known = for (clouds) |c| {
-        if (args.len == 3 and std.mem.eql(u8, args[2], c)) break true;
-    } else false;
-    if (!known or !std.mem.eql(u8, args[1], "--on"))
-        return why.refuse("upload DISK --on gcp|aws|azure", .{});
+    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|");
+    if (args.len < 2) return why.refuse(syntax, .{});
+    var i: usize = 1;
+    const flag, const value = try flagValue(args, &i, why);
+    const on = std.meta.stringToEnum(Platform, value) orelse .disk;
+    if (i + 1 != args.len or !std.mem.eql(u8, flag, "--on") or !on.is(.cloud))
+        return why.refuse(syntax, .{});
     const disk = args[0];
     const base = std.fs.path.basename(disk);
     const stem = if (std.mem.endsWith(u8, base, "-disk.qcow2"))
@@ -2760,9 +2730,10 @@ fn upload(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         stem,
         '-',
     ) orelse return why.refuse("{s}: no FORM-ARCH", .{disk});
-    const arch = stem[dash + 1 ..];
-    if (!std.mem.eql(u8, arch, "aarch64") and !std.mem.eql(u8, arch, "x86_64"))
-        return why.refuse("{s}: arch {s} is neither aarch64 nor x86_64", .{ disk, arch });
+    const arch = std.meta.stringToEnum(Arch, stem[dash + 1 ..]) orelse return why.refuse(
+        "{s}: arch {s} is neither aarch64 nor x86_64",
+        .{ disk, stem[dash + 1 ..] },
+    );
     const form = stem[0..dash];
     // The upload's own directory beside the disk, for its raw copy and
     // the rest: two uploads at once, of one disk to two clouds, or of
@@ -2775,12 +2746,39 @@ fn upload(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     });
     try Dir.cwd().createDirPath(io, work);
     defer Dir.cwd().deleteTree(io, work) catch {};
-    const image = if (std.mem.eql(u8, args[2], "azure"))
-        try azure.ensureImage(io, gpa, try azure.place(io, gpa, why), form, arch, disk, work, why)
-    else if (std.mem.eql(u8, args[2], "aws"))
-        try aws.ensureImage(io, gpa, try aws.place(io, gpa, why), form, arch, disk, work, why)
-    else
-        try gcp.ensureImage(io, gpa, try gcp.place(io, gpa, why), form, arch, disk, work, why);
+    const image = switch (on) {
+        .azure => try azure.ensureImage(
+            io,
+            gpa,
+            try azure.place(io, gpa, why),
+            form,
+            arch,
+            disk,
+            work,
+            why,
+        ),
+        .aws => try aws.ensureImage(
+            io,
+            gpa,
+            try aws.place(io, gpa, why),
+            form,
+            arch,
+            disk,
+            work,
+            why,
+        ),
+        .gcp => try gcp.ensureImage(
+            io,
+            gpa,
+            try gcp.place(io, gpa, why),
+            form,
+            arch,
+            disk,
+            work,
+            why,
+        ),
+        else => unreachable,
+    };
     var out = Io.File.stdout().writerStreaming(io, &.{});
     try out.interface.print("{s}\n", .{image});
 }
@@ -2791,38 +2789,28 @@ fn machineArgs(
     gpa: Allocator,
     args: []const []const u8,
     why: *Why,
-) !struct { []const u8, []const u8 } {
+) !struct { []const u8, Platform } {
+    const syntax = "[NAME] [--on " ++ comptime Platform.list(.made, "|") ++ "]";
     var name: ?[]const u8 = null;
-    var on: ?[]const u8 = null;
+    var on: ?Platform = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--on") and i + 1 < args.len) {
-            i += 1;
-            on = args[i];
-        } else if (args[i].len > 0 and args[i][0] != '-' and name == null) {
+        if (args[i].len > 0 and args[i][0] == '-') {
+            const flag, const value = try flagValue(args, &i, why);
+            if (!std.mem.eql(u8, flag, "--on") or on != null)
+                return why.refuse("{s}: {s}", .{ flag, syntax });
+            const p = std.meta.stringToEnum(Platform, value) orelse .disk;
+            if (!p.is(.made)) return why.refuse("--on {s}: {s}", .{ value, syntax });
+            on = p;
+        } else if (name == null) {
             name = args[i];
-        } else return why.refuse(
-            "{s}: [NAME] [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure]",
-            .{args[i]},
-        );
+        } else return why.refuse("{s}: {s}", .{ args[i], syntax });
     }
     // No name: the machine howl run keeps.
     const n = name orelse run_name;
     if (!isMachineName(n)) return why.refuse("{s}: not a machine's name", .{n});
-    // A machine made here was made on an engine create recorded.
-    const p = on orelse madeOn(io, gpa, n) orelse engine(io, gpa, null).name;
-    for ([_][]const u8{
-        "lima",
-        "bhyve",
-        "firecracker",
-        "qemu",
-        "proxmox",
-        "gcp",
-        "aws",
-        "azure",
-    }) |keeper|
-        if (std.mem.eql(u8, p, keeper)) return .{ n, p };
-    return why.refuse("--on {s}: lima, bhyve, firecracker, qemu, proxmox, gcp, aws or azure", .{p});
+    // A machine create made, it recorded the platform of.
+    return .{ n, on orelse madeOn(io, gpa, n) orelse engine(io, gpa, null).on };
 }
 
 fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
@@ -2835,103 +2823,110 @@ fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
 /// A machine of that name that howl create did not make, as its missing
 /// form label or tag says, is refused, as create refuses it: it is its
 /// owner's, not howl's to delete.
-fn remove(io: Io, gpa: Allocator, name: []const u8, on: []const u8, why: *Why) !void {
-    if (std.mem.eql(u8, on, "qemu")) {
-        _ = try qemu.stop(io, gpa, try machineDir(gpa, hostArch(), name));
-    } else if (std.mem.eql(u8, on, "gcp")) {
-        // The machine and its disk, not the image, which others may share.
-        const p = try gcp.place(io, gpa, why);
-        if (try gcp.formOf(io, gpa, p, name, why)) |was| {
-            if (was.len == 0) return notMade(name, "gcp", why);
-            try gcp.delete(io, gpa, p, name, why);
-        }
-    } else if (std.mem.eql(u8, on, "aws")) {
-        // The instance, its volume and its security group, not the AMI.
-        const p = try aws.place(io, gpa, why);
-        const i = try aws.find(io, gpa, p, name, why);
-        if (i) |m| if (m.form.len == 0) return notMade(name, "aws", why);
-        try aws.delete(io, gpa, p, name, i, why);
-    } else if (std.mem.eql(u8, on, "azure")) {
-        // The VM, its disk, NIC and network, not the image.
-        const p = try azure.place(io, gpa, why);
-        const vm = try azure.find(io, gpa, p, name, why);
-        if (vm) |v| if (v.form.len == 0) return notMade(name, "azure", why);
-        try azure.delete(io, gpa, p, name, vm, why);
-    } else if (std.mem.eql(u8, on, "proxmox")) {
-        // The VM and its disks, not the image, which others may share.
-        const p = try proxmox.place(environ, why);
-        const vm = try proxmox.find(io, gpa, p, name, why);
-        if (vm) |m| try proxmox.delete(io, gpa, p, m, name, why);
-        Dir.cwd().deleteTree(io, try machineDir(gpa, "x86_64", name)) catch {};
-    } else if (std.mem.eql(u8, on, "firecracker")) {
-        // Its tar first, so the supervisor runs it no more; then its
-        // Firecracker, killed; then its network, as root.
-        const dir = try machineDir(gpa, hostArch(), name);
-        Dir.cwd().deleteFile(io, try gpa.print("{s}/config.tar", .{dir})) catch {};
-        if (firecracker.running(io, gpa, dir)) |pid| try firecracker.stop(io, gpa, dir, pid, why);
-        if (firecracker.asRoot(io, gpa)) |root|
-            firecracker.networkDown(io, gpa, root, try firecracker.net(gpa, name))
-        else |_|
-            say(io, "{s}: no sudo or doas, so its tap device and rules stay", .{name});
-    } else if (std.mem.eql(u8, on, "bhyve")) {
-        // Destroyed under its bhyve, which exits, and its supervisor with it.
-        if (try bhyve.exists(io, gpa, name)) {
-            const root = bhyve.asRoot(io) catch
-                return why.refuse("bhyve needs root, and there is no doas or sudo", .{});
-            try run(
-                io,
-                why,
-                try std.mem.concat(gpa, []const u8, &.{ root, try bhyve.destroy(gpa, name) }),
-            );
-        }
-    } else {
-        if (try lima.exists(io, gpa, name)) {
-            const d = try lima.dir(io, gpa, name) orelse
-                return why.refuse("no machine {s}", .{name});
-            const yaml = Dir.cwd().readFileAlloc(
-                io,
-                try gpa.print("{s}/lima.yaml", .{d}),
-                gpa,
-                .limited(1 << 20),
-            ) catch |err| return why.refuse("{s}/lima.yaml: {s}", .{ d, @errorName(err) });
-            if (lima.formOf(yaml) == null) return notMade(name, "Lima", why);
-            // Quietly, unless it fails: then limactl's last words.
-            const r = std.process.run(gpa, io, .{
-                .argv = &.{ "limactl", "delete", "-f", name },
-            }) catch |err| return why.refuse("limactl: {s}", .{@errorName(err)});
-            if (r.term != .exited or r.term.exited != 0) {
-                const said = std.mem.trim(u8, if (r.stderr.len > 0) r.stderr else r.stdout, " \n");
-                return why.refuse("limactl failed: {s}", .{said[said.len -| 400..]});
+fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why) !void {
+    const dir = try machineDir(gpa, name);
+    switch (on) {
+        .qemu => _ = try qemu.stop(io, gpa, dir),
+        .gcp => {
+            // The machine and its disk, not the image, which others may share.
+            const p = try gcp.place(io, gpa, why);
+            if (try gcp.formOf(io, gpa, p, name, why)) |was| {
+                if (was.len == 0) return notMade(name, .gcp, why);
+                try gcp.delete(io, gpa, p, name, why);
             }
-        }
-        _ = std.process.run(gpa, io, .{
-            .argv = &.{ "limactl", "disk", "delete", try gpa.print("{s}-config", .{name}) },
-        }) catch {};
+        },
+        .aws => {
+            // The instance, its volume and its security group, not the AMI.
+            const p = try aws.place(io, gpa, why);
+            const i = try aws.find(io, gpa, p, name, why);
+            if (i) |m| if (m.form.len == 0) return notMade(name, .aws, why);
+            try aws.delete(io, gpa, p, name, i, why);
+        },
+        .azure => {
+            // The VM, its disk, NIC and network, not the image.
+            const p = try azure.place(io, gpa, why);
+            const vm = try azure.find(io, gpa, p, name, why);
+            if (vm) |v| if (v.form.len == 0) return notMade(name, .azure, why);
+            try azure.delete(io, gpa, p, name, vm, why);
+        },
+        .proxmox => {
+            // The VM and its disks, not the image, which others may share.
+            const p = try proxmox.place(environ, why);
+            const vm = try proxmox.find(io, gpa, p, name, why);
+            if (vm) |m| try proxmox.delete(io, gpa, p, m, name, why);
+        },
+        .firecracker => {
+            // Its tar first, so the supervisor runs it no more; then its
+            // Firecracker, killed; then its network, as root.
+            Dir.cwd().deleteFile(io, try gpa.print("{s}/config.tar", .{dir})) catch {};
+            if (firecracker.running(
+                io,
+                gpa,
+                dir,
+            )) |pid| try firecracker.stop(io, gpa, dir, pid, why);
+            if (firecracker.asRoot(io, gpa)) |root|
+                firecracker.networkDown(io, gpa, root, try firecracker.net(gpa, name))
+            else |_|
+                say(io, "{s}: no sudo or doas, so its tap device and rules stay", .{name});
+        },
+        .bhyve => {
+            // Destroyed under its bhyve, which exits, and its supervisor with it.
+            if (try bhyve.exists(io, gpa, name)) {
+                const root = bhyve.asRoot(io) catch
+                    return why.refuse("bhyve needs root, and there is no doas or sudo", .{});
+                try run(
+                    io,
+                    why,
+                    try std.mem.concat(gpa, []const u8, &.{ root, try bhyve.destroy(gpa, name) }),
+                );
+            }
+        },
+        .lima => {
+            if (try lima.exists(io, gpa, name)) {
+                const d = try lima.dir(io, gpa, name) orelse
+                    return why.refuse("no machine {s}", .{name});
+                const yaml = Dir.cwd().readFileAlloc(
+                    io,
+                    try gpa.print("{s}/lima.yaml", .{d}),
+                    gpa,
+                    .limited(1 << 20),
+                ) catch |err| return why.refuse("{s}/lima.yaml: {s}", .{ d, @errorName(err) });
+                if (lima.formOf(yaml) == null) return notMade(name, .lima, why);
+                // Quietly, unless it fails: then limactl's last words.
+                const r = std.process.run(gpa, io, .{
+                    .argv = &.{ "limactl", "delete", "-f", name },
+                }) catch |err| return why.refuse("limactl: {s}", .{@errorName(err)});
+                if (r.term != .exited or r.term.exited != 0) {
+                    const said = std.mem.trim(
+                        u8,
+                        if (r.stderr.len > 0) r.stderr else r.stdout,
+                        " \n",
+                    );
+                    return why.refuse("limactl failed: {s}", .{said[said.len -| 400..]});
+                }
+            }
+            _ = std.process.run(gpa, io, .{
+                .argv = &.{ "limactl", "disk", "delete", try gpa.print("{s}-config", .{name}) },
+            }) catch {};
+        },
+        .disk => unreachable,
     }
-    // Its disk and its config tar, which holds secrets: here, under this
-    // host's arch; for a cloud's, under either, as --arch chose, where its
-    // config in base64 marks it a cloud's and not another machine's.
-    Dir.cwd().deleteTree(io, try machineDir(gpa, hostArch(), name)) catch {};
-    const cloud = std.mem.eql(u8, on, "gcp") or std.mem.eql(u8, on, "aws") or
-        std.mem.eql(u8, on, "azure");
-    if (cloud) for ([_][]const u8{ "aarch64", "x86_64" }) |arch| {
-        const dir = try machineDir(gpa, arch, name);
-        Dir.cwd().access(io, try gpa.print("{s}/config.b64", .{dir}), .{}) catch continue;
-        Dir.cwd().deleteTree(io, dir) catch {};
-    };
+    // What create kept of it: its disks, and its config tar, which holds
+    // secrets.
+    Dir.cwd().deleteTree(io, dir) catch {};
 }
 
 fn console(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     const name, const on = try machineArgs(io, gpa, args, why);
-    if (std.mem.eql(u8, on, "qemu")) {
-        const d = try machineDir(gpa, hostArch(), name);
+    const d = try machineDir(gpa, name);
+    if (on == .qemu) {
         if (qemu.running(io, gpa, d) == null) return why.refuse(
             "no machine {s} running under QEMU{s}",
-            .{ name, if (std.mem.eql(u8, name, run_name)) ": howl run FORM" else "" },
+            .{ name, if (std.mem.eql(u8, name, run_name)) ": howl run --with FORM" else "" },
         );
         return qemu.attach(io, gpa, d);
     }
-    if (std.mem.eql(u8, on, "gcp")) {
+    if (on == .gcp) {
         const p = try gcp.place(io, gpa, why);
         const text = gcp.console(
             io,
@@ -2941,7 +2936,7 @@ fn console(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         ) orelse return why.refuse("no machine {s} in {s}", .{ name, p.zone });
         return show(io, gpa, text[text.len -| (64 << 10)..]);
     }
-    if (std.mem.eql(u8, on, "aws")) {
+    if (on == .aws) {
         const p = try aws.place(io, gpa, why);
         const i = try aws.find(io, gpa, p, name, why) orelse
             return why.refuse("no machine {s} in {s}", .{ name, p.region });
@@ -2949,20 +2944,20 @@ fn console(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             return why.refuse("{s}: no console yet; AWS keeps it from shortly after boot", .{name});
         return show(io, gpa, text);
     }
-    if (std.mem.eql(u8, on, "azure")) {
+    if (on == .azure) {
         const p = try azure.place(io, gpa, why);
         const text = azure.console(io, gpa, p, name) orelse
             return why.refuse("no machine {s} in {s}, or no boot diagnostics", .{ name, p.group });
         return show(io, gpa, text[text.len -| (64 << 10)..]);
     }
-    if (std.mem.eql(u8, on, "proxmox")) {
+    if (on == .proxmox) {
         const p = try proxmox.place(environ, why);
         const text = proxmox.console(io, gpa, p, name, 0) orelse
             return why.refuse("no console for {s} on {s}", .{ name, p.host });
         return show(io, gpa, text[text.len -| (64 << 10)..]);
     }
-    const path = if (std.mem.eql(u8, on, "bhyve") or std.mem.eql(u8, on, "firecracker"))
-        try gpa.print("{s}/console.log", .{try machineDir(gpa, hostArch(), name)})
+    const path = if (on == .bhyve or on == .firecracker)
+        try gpa.print("{s}/console.log", .{d})
     else
         try gpa.print("{s}/serialv.log", .{
             try lima.dir(io, gpa, name) orelse return why.refuse("no machine {s}", .{name}),
@@ -3031,15 +3026,11 @@ fn declared(iface: Interface, path: []const u8) bool {
 
 /// A name every reader of a config tar takes: [A-Za-z0-9._-/], relative,
 /// at most 100 bytes, with no empty, . or .. part.
+/// A name a config tar may hold, plain as every reader of one takes it
+/// (settings.entryName), and short enough for ustar's name field.
 fn isTarName(s: []const u8) bool {
-    if (s.len == 0 or s.len > max_name) return false;
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._-/", c) == null)
-        return false;
-    var parts = std.mem.splitScalar(u8, s, '/');
-    while (parts.next()) |p| {
-        if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return false;
-    }
-    return true;
+    const n = settings.entryName(s) orelse return false;
+    return n.len > 0 and n.len <= max_name and n.len == s.len;
 }
 
 fn beneath(path: []const u8, parent: []const u8) bool {
@@ -3062,6 +3053,8 @@ test {
     _ = app;
     _ = @import("image.zig");
     _ = @import("apk.zig");
+    _ = adhoc;
+    _ = oci;
     _ = @import("progress.zig");
     _ = @import("qemu.zig");
     _ = @import("boot.zig");
@@ -3071,7 +3064,6 @@ const bastion =
     \\exec    /usr/bin/sshd -D -e -f /etc/ssh/sshd_config
     \\user    bastion
     \\pledge  stdio
-    \\config  host-key /run/config/bastion/host_key
     \\config  authorized-keys /run/config/bastion/authorized_keys
     \\config  settings /run/config/bastion/settings.json   # may be missing
     \\setting destinations addrport... as PermitOpen
@@ -3079,37 +3071,37 @@ const bastion =
 ;
 
 test archName {
-    for ([_][2][]const u8{
-        .{ "aarch64", "aarch64" }, .{ "arm64", "aarch64" }, .{ "ARM64", "aarch64" },
-        .{ "x86_64", "x86_64" },   .{ "x86-64", "x86_64" }, .{ "amd64", "x86_64" },
-        .{ "AMD64", "x86_64" },
-    }) |c| try testing.expectEqualStrings(c[1], archName(c[0]).?);
+    for ([_]struct { []const u8, Arch }{
+        .{ "aarch64", .aarch64 }, .{ "arm64", .aarch64 }, .{ "ARM64", .aarch64 },
+        .{ "x86_64", .x86_64 },   .{ "x86-64", .x86_64 }, .{ "amd64", .x86_64 },
+        .{ "AMD64", .x86_64 },
+    }) |c| try testing.expectEqual(c[1], archName(c[0]).?);
     for ([_][]const u8{ "", "x86", "i386", "arm", "riscv64", "x64", "aarch64 " }) |bad|
         try testing.expectEqual(null, archName(bad));
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var why: Why = .{};
     const o = try options(arena.allocator(), &.{ "prod", "web", "--arch", "amd64" }, &why);
-    try testing.expectEqualStrings("x86_64", o.arch.?);
+    try testing.expectEqual(.x86_64, o.arch.?);
     try testing.expectError(
         error.Refused,
         options(arena.allocator(), &.{ "prod", "--arch", "i386" }, &why),
     );
-    try testing.expectEqualStrings(
-        "aarch64",
-        (try buildOptions(&.{ "--arch", "arm64", "prod" }, null, &why)).arch,
+    try testing.expectEqual(
+        .aarch64,
+        (try buildOptions(&.{ "--arch=arm64", "prod" }, null, &why)).arch,
     );
 }
 
 test buildOptions {
     var why: Why = .{};
-    const o = try buildOptions(&.{ "bastion", "--format", "vhd", "-o", "out" }, "aarch64", &why);
+    const o = try buildOptions(&.{ "bastion", "--format", "vhd", "-o", "out" }, .aarch64, &why);
     try testing.expectEqualStrings("bastion", o.form);
     try testing.expectEqualStrings("out", o.dir);
-    try testing.expectEqualStrings("aarch64", o.arch);
+    try testing.expectEqual(.aarch64, o.arch);
     try testing.expectEqual(DiskFormat.vhd, o.format);
-    try testing.expectEqualStrings(
-        "x86_64",
+    try testing.expectEqual(
+        .x86_64,
         (try buildOptions(&.{ "--arch", "x86_64", "prod" }, null, &why)).arch,
     );
     for ([_][]const []const u8{
@@ -3119,8 +3111,35 @@ test buildOptions {
         &.{ "a", "--format", "zip" },
         &.{ "a", "--on", "gcp" },
         &.{ "a", "-o" },
-    }) |args| try testing.expectError(error.Refused, buildOptions(args, "aarch64", &why));
+    }) |args| try testing.expectError(error.Refused, buildOptions(args, .aarch64, &why));
     try testing.expectError(error.Refused, buildOptions(&.{"a"}, null, &why));
+}
+
+test flagValue {
+    var why: Why = .{};
+    const args = [_][]const u8{ "--on", "gcp", "--arch=arm64", "--size" };
+    var i: usize = 0;
+    const a = try flagValue(&args, &i, &why);
+    try testing.expectEqualStrings("--on", a[0]);
+    try testing.expectEqualStrings("gcp", a[1]);
+    try testing.expectEqual(1, i);
+    i = 2;
+    const b = try flagValue(&args, &i, &why);
+    try testing.expectEqualStrings("--arch", b[0]);
+    try testing.expectEqualStrings("arm64", b[1]);
+    try testing.expectEqual(2, i);
+    i = 3;
+    try testing.expectError(error.Refused, flagValue(&args, &i, &why));
+}
+
+test "Platform: lists and kinds" {
+    try testing.expectEqualStrings(
+        "lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure",
+        Platform.list(.made, "|"),
+    );
+    try testing.expectEqualStrings("gcp, aws, azure", Platform.list(.cloud, ", "));
+    try testing.expect(Platform.qemu.here() and !Platform.proxmox.here());
+    try testing.expect(!Platform.disk.is(.made));
 }
 
 test interface {
@@ -3128,32 +3147,47 @@ test interface {
     defer arena.deinit();
     const gpa = arena.allocator();
     var why: Why = .{};
-    const i = try interface(gpa, &.{.{ .name = "sshd", .text = bastion }}, &why);
-    try testing.expectEqual(@as(usize, 2), i.files.len);
-    try testing.expectEqualStrings("bastion/authorized_keys", i.files[1].path);
+    const i = try interface(gpa, &.{.{ .name = "sshd", .path = "", .text = bastion }}, &why);
+    try testing.expectEqual(@as(usize, 1), i.files.len);
+    try testing.expectEqualStrings("bastion/authorized_keys", i.files[0].path);
     try testing.expectEqualStrings("bastion/settings.json", i.settings[0].path);
     try testing.expectEqualStrings("PermitOpen", i.settings[0].decl[0].key.?);
 
-    const refused = [_][]const Service{
+    // Each a service file leash takes, but for what follows its first lines.
+    const head = "exec /a\nuser x\npledge stdio\n";
+    const refused = [_][]const [2][]const u8{
         // The same flag from two services: a form on prod-ssh with a bastion.
         &.{
-            .{ .name = "a", .text = "config authorized-keys /run/config/a/k" },
-            .{ .name = "b", .text = "config authorized-keys /run/config/b/k" },
+            .{ "a", head ++ "config authorized-keys /run/config/a/k" },
+            .{ "b", head ++ "config authorized-keys /run/config/b/k" },
         },
-        &.{.{ .name = "a", .text = "config hostname /run/config/a/h" }},
-        &.{.{ .name = "a", .text = "config key /run/config/hostname" }},
+        &.{.{ "a", head ++ "config hostname /run/config/a/h" }},
+        &.{.{ "a", head ++ "config key /run/config/hostname" }},
         &.{
-            .{ .name = "a", .text = "config k1 /run/config/x" },
-            .{ .name = "b", .text = "config k2 /run/config/x" },
+            .{ "a", head ++ "config k1 /run/config/x" },
+            .{ "b", head ++ "config k2 /run/config/x" },
         },
-        &.{.{ .name = "a", .text = "config key /etc/shadow" }},
-        &.{.{ .name = "a", .text = "setting a ip\nrender conf x" }},
+        &.{.{ "a", head ++ "config key /etc/shadow" }},
+        &.{.{ "a", head ++ "setting a ip\nrender conf x" }},
         &.{.{
-            .name = "a",
-            .text = "setting a string\nrender conf x\nconfig settings /run/config/a/s.json",
+            "a",
+            head ++ "setting a string\nrender conf x\nconfig settings /run/config/a/s.json",
         }},
+        // What leash refuses, pack does: render twice, an optional settings.
+        &.{.{
+            "a",
+            head ++ "config settings /run/config/a/s.json\nsetting a ip\nrender conf x\n" ++
+                "render conf y",
+        }},
+        &.{.{ "a", head ++ "config settings /run/config/a/s.json optional" }},
+        &.{.{ "a", head ++ "config ../k /run/config/a/k" }},
+        &.{.{ "a", "config k /run/config/a/k" }},
     };
-    for (refused) |svcs| try testing.expectError(error.Refused, interface(gpa, svcs, &why));
+    for (refused) |texts| {
+        var svcs: [2]forms.Service = undefined;
+        for (texts, svcs[0..texts.len]) |t, *s| s.* = .{ .name = t[0], .path = "", .text = t[1] };
+        try testing.expectError(error.Refused, interface(gpa, svcs[0..texts.len], &why));
+    }
 }
 
 test options {
@@ -3163,7 +3197,10 @@ test options {
     var why: Why = .{};
     const o = try options(
         gpa,
-        &.{ "-n", "--on", "aws", "--destinations=10.0.0.1:22", "bastion", "--host-key", "k" },
+        &.{
+            "-n",      "--on",              "aws", "--destinations=10.0.0.1:22",
+            "bastion", "--authorized-keys", "k",
+        },
         &why,
     );
     try testing.expectEqualStrings("bastion", o.form);
@@ -3171,13 +3208,13 @@ test options {
     try testing.expectEqualStrings("destinations", o.flags[0][0]);
     try testing.expectEqualStrings("k", o.flags[1][1]);
     try testing.expectEqual(
-        Target.disk,
+        Platform.proxmox,
         (try options(gpa, &.{ "x", "--on", "proxmox" }, &why)).on.?,
     );
     for ([_][]const []const u8{
         &.{},
         &.{ "a", "b", "c" },
-        &.{ "a", "--host-key" },
+        &.{ "a", "--authorized-keys" },
         &.{ "a", "--on", "mars" },
         &.{ "a", "-x", "1" },
         &.{ "a", "--config", "x", "--config", "y" },
@@ -3209,7 +3246,7 @@ test "settings from flags, checked as the guest checks them" {
     defer arena.deinit();
     const gpa = arena.allocator();
     var why: Why = .{};
-    const i = try interface(gpa, &.{.{ .name = "sshd", .text = bastion }}, &why);
+    const i = try interface(gpa, &.{.{ .name = "sshd", .path = "", .text = bastion }}, &why);
     var obj: json.ObjectMap = .empty;
     const d = i.settings[0].decl[0];
     try setValue(gpa, &obj, d, "10.0.0.1:22,[fd00::1]:22", &why);
@@ -3225,6 +3262,44 @@ test "settings from flags, checked as the guest checks them" {
     const name: settings.Setting = .{ .name = "team", .type = .string };
     try setValue(gpa, &s, name, "red, blue", &why);
     try testing.expectError(error.Refused, setValue(gpa, &s, name, "green", &why));
+
+    // A url may hold a comma, so a list of them is given by repeating.
+    var u: json.ObjectMap = .empty;
+    const hooks: settings.Setting = .{ .name = "hooks", .type = .url, .list = true };
+    try setValue(gpa, &u, hooks, "https://a.example/?x=1,2", &why);
+    try setValue(gpa, &u, hooks, "https://b.example/", &why);
+    try testing.expectEqual(@as(usize, 2), u.get("hooks").?.array.items.len);
+}
+
+test "the hostname and data key, checked as init checks them" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const none: Interface = .{ .files = &.{}, .settings = &.{} };
+    const e = try gather(
+        testing.io,
+        gpa,
+        none,
+        try options(gpa, &.{ "x", "--hostname", "edge" }, &why),
+        &why,
+    );
+    try testing.expectEqualStrings("edge\n", e[0].data);
+    const long: [65]u8 = @splat('a');
+    try testing.expectError(error.Refused, gather(
+        testing.io,
+        gpa,
+        none,
+        try options(gpa, &.{ "x", "--hostname", &long }, &why),
+        &why,
+    ));
+    try testing.expectError(error.Refused, gather(
+        testing.io,
+        gpa,
+        none,
+        try options(gpa, &.{ "x", "--hostname", "a_b" }, &why),
+        &why,
+    ));
 }
 
 test "the tar is ustar, sorted, and what std.tar reads back" {
@@ -3261,7 +3336,7 @@ test "the tar is ustar, sorted, and what std.tar reads back" {
 
 test misfit {
     const small = [_]Entry{.{ .path = "a", .data = "x", .from = "" }};
-    for ([_]Target{
+    for ([_]Platform{
         .disk,
         .gcp,
         .aws,
@@ -3287,9 +3362,9 @@ test awaitUp {
     defer arena.deinit();
     const log = try tmp.dir.realPathFileAlloc(io, "console.log", arena.allocator());
     // Past the first boot's line, the second's.
-    try testing.expect(try awaitUp(io, testing.allocator, log, old.len));
+    try testing.expectEqual(.up, try awaitUp(io, testing.allocator, log, old.len));
     // A log shorter than what was seen was started again: read from its start.
-    try testing.expect(try awaitUp(io, testing.allocator, log, 1 << 30));
+    try testing.expectEqual(.up, try awaitUp(io, testing.allocator, log, 1 << 30));
 }
 
 test isCidr {
@@ -3340,9 +3415,9 @@ test "--allow-from is create's, for the clouds alone" {
         error.Refused,
         options(gpa, &.{ "prod", "--allow-from", "me", "--allow-from", "me" }, &why),
     );
-    try testing.expectError(error.Refused, newOnly(o, "web", "aws", &why));
+    try testing.expectError(error.Refused, newOnly(o, "web", .aws, &why));
     try testing.expect(std.mem.find(u8, why.text, "web exists") != null);
-    try newOnly(.{ .form = "prod" }, "web", "aws", &why);
+    try newOnly(.{ .form = "prod" }, "web", .aws, &why);
     try testing.expectError(error.Refused, allowSource(testing.io, gpa, "0.0.0.0", &why));
     try testing.expectEqualStrings(
         "0.0.0.0/0",
@@ -3350,22 +3425,8 @@ test "--allow-from is create's, for the clouds alone" {
     );
 }
 
-test listenPorts {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    var ports: std.ArrayList(u16) = .empty;
-    for ([_][]const u8{
-        "listen tcp/80 tcp/443",
-        "connect caddy tcp/443",
-        "listen udp/53 tcp/80",
-        "listen",
-    }) |line|
-        try listenPorts(arena.allocator(), line, &ports);
-    try testing.expectEqualSlices(u16, &.{ 80, 443 }, ports.items);
-}
-
 test isTarName {
-    try testing.expect(isTarName("bastion/host_key"));
+    try testing.expect(isTarName("bastion/settings.json"));
     try testing.expect(isTarName("data.key"));
     for ([_][]const u8{ "", "/etc/x", "a/../b", "a//b", "a b", "a/", "./a", "é" }) |s|
         try testing.expect(!isTarName(s));

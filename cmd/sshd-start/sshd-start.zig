@@ -1,8 +1,8 @@
-//! sshd-start: the sshd service. In forms that install OpenSSH (sshd, lima,
-//! prod-ssh) it makes sure of the host key and becomes sshd; elsewhere it
-//! parks itself, so a form adds ssh with a package and no files.
+//! sshd-start: the sshd form's service, in every form that takes it
+//! (prod-ssh, lima): it makes sure of the host key and becomes sshd.
 //!
-//! The host key is made on the machine's first boot and kept in /data,
+//! The host key is made on the machine's first boot and kept in /data, at
+//! /data/svc/sshd/host-key as a leashed sshd keeps its own (ssh-host-key),
 //! root's alone, as a distribution's first boot makes /etc/ssh's; the root
 //! is read-only, so sshd reads a copy in /run. Without /data the key is
 //! made for this boot alone, and a client sees a new one at the next: an
@@ -23,20 +23,15 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
-/// Where sshd reads it (minimal's sshd_config.d/werewolf.conf).
+/// Where sshd reads it (the sshd form's sshd_config.d/werewolf.conf).
 const key = "/run/sshd/ssh_host_ed25519_key";
-/// Where the machine keeps it, while /data is usable.
-const kept = "/data/sshd/ssh_host_ed25519_key";
+/// Where the machine keeps it, while /data is usable: the sshd service's
+/// directory, as every service's is /data/svc/NAME.
+const kept = "/data/svc/sshd/host-key";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
-    if (linux.errno(linux.access("/usr/bin/sshd", linux.X_OK)) != .SUCCESS) {
-        // Down, as a service with nothing to do: runsv will not restart it.
-        const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
-        say(io, "sv down: {s}", .{@errorName(err)});
-        std.process.exit(1);
-    }
 
     // Speculative Store Bypass mitigated for ssh-keygen, sshd and every
     // session, which werewolf leaves to each program, so workloads do not
@@ -74,7 +69,8 @@ fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
         _ = try hostkey.keep(io, gpa, key);
         return gpa.print("for this boot alone: {s}", .{why});
     }
-    _ = linux.mkdir("/data/sshd", 0o700);
+    _ = linux.mkdir("/data/svc", 0o755);
+    _ = linux.mkdir("/data/svc/sshd", 0o700);
     const from: []const u8 = switch (try hostkey.keep(io, gpa, kept)) {
         .new => "new, kept in /data",
         .kept => "kept in /data",

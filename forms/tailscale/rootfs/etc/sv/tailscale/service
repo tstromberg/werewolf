@@ -2,7 +2,7 @@ exec    /usr/bin/tailscaled --tun=userspace-networking --port=41641 --state=/dat
 user    tailscale
 pledge  stdio rpath wpath inet unix netlink connect listen proc
 read    /etc/tailscale
-config  auth-key /run/config/tailscale/auth_key
+config  auth-key /run/config/tailscale/auth-key
 # The subnets it advertises, into the image's own configuration.
 config  settings /run/config/tailscale/settings.json
 setting routes cidr... as advertiseRoutes

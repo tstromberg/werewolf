@@ -17,6 +17,7 @@
 const std = @import("std");
 const howl = @import("howl.zig");
 const images = @import("image.zig");
+const booting = @import("boot.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -30,7 +31,7 @@ const block_size = 512 << 10;
 const parallel = 8;
 /// How long a snapshot may take to complete once its blocks are in.
 const snapshot_seconds = 600;
-const tag = "werewolf-form";
+const tag = howl.form_tag;
 /// The states of an instance that has not gone, nor is going.
 const alive = "Name=instance-state-name,Values=pending,running,stopping,stopped";
 
@@ -103,13 +104,13 @@ fn lastLine(text: []const u8) []const u8 {
 /// The machine a form runs on, for an arch: AWS's name for the arch, and
 /// the smallest Nitro instance with 2 GiB, whose disks are NVMe and whose
 /// NIC is the ENA, which prod's modules carry.
-pub const Machine = struct { arch: []const u8, kind: []const u8 };
+pub const Machine = struct { arch: []const u8, size: []const u8 };
 
-pub fn machine(arch: []const u8) Machine {
-    return if (std.mem.eql(u8, arch, "aarch64"))
-        .{ .arch = "arm64", .kind = "t4g.small" }
-    else
-        .{ .arch = "x86_64", .kind = "t3.small" };
+pub fn machine(arch: howl.Arch) Machine {
+    return switch (arch) {
+        .aarch64 => .{ .arch = "arm64", .size = "t4g.small" },
+        .x86_64 => .{ .arch = "x86_64", .size = "t3.small" },
+    };
 }
 
 /// The AMI of disk, a release's disk.qcow2: there already, or made from a
@@ -119,7 +120,7 @@ pub fn ensureImage(
     gpa: Allocator,
     p: Place,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     disk: []const u8,
     work: []const u8,
     why: *howl.Why,
@@ -379,20 +380,20 @@ fn groupId(io: Io, gpa: Allocator, p: Place, group: []const u8) !?[]const u8 {
     });
 }
 
-/// A default subnet in a zone that offers kind: not every zone has every
+/// A default subnet in a zone that offers size: not every zone has every
 /// instance type (us-east-1e has no t4g), and AWS, left to choose, may
 /// choose one that does not.
-fn defaultSubnet(io: Io, gpa: Allocator, p: Place, kind: []const u8, why: *howl.Why) ![]const u8 {
+fn defaultSubnet(io: Io, gpa: Allocator, p: Place, size: []const u8, why: *howl.Why) ![]const u8 {
     const zones = ask(io, gpa, p, &.{
         "ec2",
         "describe-instance-type-offerings",
         "--location-type",
         "availability-zone",
         "--filters",
-        try gpa.print("Name=instance-type,Values={s}", .{kind}),
+        try gpa.print("Name=instance-type,Values={s}", .{size}),
         "--query",
         "InstanceTypeOfferings[].Location",
-    }) orelse return why.refuse("{s} is not offered in {s}", .{ kind, p.region });
+    }) orelse return why.refuse("{s} is not offered in {s}", .{ size, p.region });
     const subnets = ask(io, gpa, p, &.{
         "ec2",
         "describe-subnets",
@@ -406,7 +407,7 @@ fn defaultSubnet(io: Io, gpa: Allocator, p: Place, kind: []const u8, why: *howl.
     );
     return pickSubnet(zones, subnets) orelse why.refuse(
         "no default subnet in {s} is in a zone offering {s} ({s})",
-        .{ p.region, kind, zones },
+        .{ p.region, size, zones },
     );
 }
 
@@ -443,14 +444,14 @@ pub fn create(
     p: Place,
     name: []const u8,
     form: []const u8,
-    arch: []const u8,
+    arch: howl.Arch,
     size: ?[]const u8,
     ami: []const u8,
     b64: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
-    const kind = size orelse machine(arch).kind;
-    const subnet = try defaultSubnet(io, gpa, p, kind, why);
+    const instance_type = size orelse machine(arch).size;
+    const subnet = try defaultSubnet(io, gpa, p, instance_type, why);
     const group = try securityGroup(io, gpa, p, name, why);
     // The CLI retries a launch whose answer it lost; with the token, AWS
     // takes the retry for the same launch, not a second instance of the
@@ -466,7 +467,7 @@ pub fn create(
         "--image-id",
         ami,
         "--instance-type",
-        kind,
+        instance_type,
         "--subnet-id",
         subnet,
         "--security-group-ids",
@@ -588,13 +589,10 @@ fn ofRun(out: []const u8, launched: []const u8) ?[]const u8 {
 }
 
 /// Wait for this run's boot to finish, or panic.
-pub fn awaitUp(io: Io, gpa: Allocator, p: Place, id: []const u8) !enum { up, panic, late } {
+pub fn awaitUp(io: Io, gpa: Allocator, p: Place, id: []const u8) !booting.Outcome {
     const start = Io.Clock.awake.now(io);
     while (start.untilNow(io, .awake).toSeconds() < wait_seconds) {
-        if (currentConsole(io, gpa, p, id)) |text| {
-            if (std.mem.find(u8, text, "werewolf: up in ") != null) return .up;
-            if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
-        }
+        if (currentConsole(io, gpa, p, id)) |text| if (booting.outcome(text)) |o| return o;
         try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
@@ -671,8 +669,8 @@ test openArgs {
 }
 
 test machine {
-    try testing.expectEqualStrings("t4g.small", machine("aarch64").kind);
-    try testing.expectEqualStrings("x86_64", machine("x86_64").arch);
+    try testing.expectEqualStrings("t4g.small", machine(.aarch64).size);
+    try testing.expectEqualStrings("x86_64", machine(.x86_64).arch);
 }
 
 test gib {

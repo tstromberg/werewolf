@@ -1,7 +1,0 @@
-#!/bin/sh
-# forms/bastion/test/config DIR: the bastion's config for make check, in
-# DIR: the key make check made for root (DIR/authorized_keys), as the one
-# key the bastion forwards for (forms/bastion/test/checks).
-set -eu
-mkdir -p "$1/bastion"
-cp "$1/authorized_keys" "$1/bastion/authorized_keys"

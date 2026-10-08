@@ -47,6 +47,12 @@ pub fn parse(text: []const u8, why: *[]const u8) ?Network {
         slot.* = word[eq + 1 ..];
         if (slot.len == 0) return refuse(why, "a key with no value");
     }
+    return check(n, why);
+}
+
+/// n, checked: the file's rules, and the kernel command line's, which
+/// lib/cmdline.zig holds to them too.
+pub fn check(n: Network, why: *[]const u8) ?Network {
     if (n.ip.len == 0) return refuse(why, "no werewolf.ip");
     const a = address(n.ip) catch return refuse(
         why,
@@ -78,13 +84,9 @@ pub const Address = struct { addr: Ip4, prefix: u6 };
 
 /// ADDR/PREFIX: a usable host, a prefix of 1 to 32 in plain digits, and,
 /// below /31 (RFC 3021), neither its subnet's network nor its broadcast.
-pub fn address(cidr: []const u8) error{Address}!Address {
-    const slash = std.mem.findScalar(u8, cidr, '/') orelse return error.Address;
-    const a: Address = .{
-        .addr = try ip4(cidr[0..slash]),
-        .prefix = @intCast(try number(cidr[slash + 1 ..], 1, 32)),
-    };
-    if (!usable(a.addr)) return error.Address;
+pub fn address(s: []const u8) error{Address}!Address {
+    const a = try cidr(s);
+    if (a.prefix == 0 or !usable(a.addr)) return error.Address;
     if (a.prefix <= 30 and edge(a.addr, a.prefix)) return error.Address;
     return a;
 }
@@ -99,6 +101,16 @@ pub fn gateway(a: Address, s: []const u8) error{ Address, Gateway }!Ip4 {
     if (a.prefix <= 30 and inSubnet(gw, a.addr, a.prefix) and edge(gw, a.prefix))
         return error.Gateway;
     return gw;
+}
+
+/// ADDR/PREFIX as written, any address and a prefix of 0 to 32 in plain
+/// digits: a route's destination, 0.0.0.0/0 included.
+pub fn cidr(s: []const u8) error{Address}!Address {
+    const slash = std.mem.findScalar(u8, s, '/') orelse return error.Address;
+    return .{
+        .addr = try ip4(s[0..slash]),
+        .prefix = @intCast(try number(s[slash + 1 ..], 0, 32)),
+    };
 }
 
 /// Whether a is its subnet's network or broadcast address.
@@ -128,9 +140,10 @@ fn number(s: []const u8, min: u32, max: u32) error{Address}!u32 {
     return v;
 }
 
-/// Not zero, broadcast, loopback or multicast.
+/// A host's: 1.0.0.0 to 223.255.255.255 outside 127.0.0.0/8. Not 0.0.0.0/8,
+/// "this network" (RFC 1122), loopback, multicast, reserved or broadcast.
 pub fn usable(a: Ip4) bool {
-    return toInt(a) != 0 and toInt(a) != 0xffffffff and a[0] != 127 and a[0] < 224;
+    return a[0] != 0 and a[0] != 127 and a[0] < 224;
 }
 
 pub fn inSubnet(a: Ip4, b: Ip4, prefix: u6) bool {
@@ -192,6 +205,8 @@ test parse {
         "werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.0.255",
         "werewolf.ip=10.0.0.5/24 werewolf.dns=255.255.255.255",
         "werewolf.ip=10.0.0.5/24 werewolf.dns=0.0.0.0",
+        "werewolf.ip=10.0.0.5/24 werewolf.dns=0.1.2.3",
+        "werewolf.ip=0.1.2.3/8",
         "werewolf.ip=10.0.0.5/24 werewolf.dns=",
         "werewolf.ip=10.0.0.5/24 stray",
     }) |text| try testing.expectEqual(null, parse(text, &why));
@@ -199,6 +214,15 @@ test parse {
     @memcpy(long[0..24], "werewolf.ip=10.0.0.5/24 ");
     try testing.expectEqual(null, parse(&long, &why));
     try testing.expectEqualStrings("over 512 bytes", why);
+}
+
+test cidr {
+    const any = try cidr("0.0.0.0/0");
+    try testing.expectEqual(0, any.prefix);
+    try testing.expectEqual(32, (try cidr("10.128.0.1/32")).prefix);
+    for ([_][]const u8{ "10.0.0.1", "10.0.0.1/33", "10.0.0.1/+8", "10.0.0.1/08", "1.2.3/8" }) |s|
+        try testing.expectError(error.Address, cidr(s));
+    try testing.expectError(error.Address, address("10.0.0.5/0"));
 }
 
 test format {

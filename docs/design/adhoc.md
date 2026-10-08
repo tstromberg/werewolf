@@ -1,6 +1,15 @@
 # Ad-hoc machines
 
 Proposed, 2026-10-08; revised after review for shape, trust and operation.
+Built the same day, phases 1 to 5 and 6's links between images
+(cmd/howl/adhoc.zig, oci.zig; cmd/leash `root`; cmd/init/oci.zig; fence,
+posture, the mount tool, install-deps), and `make check-adhoc`, which
+`make check`'s cloud group runs: Chainguard's nginx, baked in from `--oci
+web=cgr.dev/chainguard/nginx --web.listen tcp/8080`, boots under QEMU and
+serves. The grammar settled that evening: forms are references, `--with`,
+never a positional; flags write lines, files hold structure. Not yet: a
+link to a form's UNIX socket, and checking `--package` names against the
+APKINDEX before the build.
 
 ## Summary
 
@@ -15,14 +24,14 @@ the same files. The operator alone writes policy; every refusal is a line
 to paste.
 
 ```sh
-howl run python --app ./api --packages py3.13-flask,py3.13-psycopg      # packages
-howl run caddy --with valkey,postgresql --domain shop.example.com        # forms
+howl run --with python --app ./api --package py3.13-flask,py3.13-psycopg # packages
+howl run --with caddy,valkey,postgresql --domain shop.example.com        # forms
 howl run --oci web=ghcr.io/acme/web@sha256:9f86d0… \                     # images
          --oci worker=ghcr.io/acme/worker@sha256:3a7bd3… \
          --web.listen tcp/8080 --link worker:web
 howl create shop --on gcp --oci web=ghcr.io/acme/web:1.4 \               # mixed
     --with postgresql,valkey --link web:postgres,valkey --web.listen tcp/8080
-howl form caddy --with valkey,postgresql -o forms/shop/                  # keep it
+howl form --with caddy,valkey,postgresql -o forms/shop/                  # keep it
 ```
 
 ## Goals and non-goals
@@ -40,8 +49,13 @@ refuses them.
 ## Detailed design
 
 **The generator.** `build`, `run`, `create` and `form` take the flags
-below; `pack` takes the generated directory as any form. FORM is the base,
-`prod` when omitted. A form is named after its directory, as an out-of-tree
+below. Forms are references, `--with`: a name in `forms/`, or a kept
+form's directory; none means `prod`, or `lima` for a run whose machine
+goes on Lima, the form Lima manages. One reference and nothing to add
+runs that form as it is, its own name, release URL and build; one with
+more is the generated form's base; several are taken by a form on the
+default. `create`'s one positional is its machine's name. A form is
+named after its directory, as an out-of-tree
 form is: `create NAME` makes `build/adhoc/NAME`, `-o DIR` the basename,
 `run` the directory `run`. The generator writes `form.yaml`, `apko.yaml`
 (packages; an account an image, uid written down) and `rootfs/` (a service
@@ -51,10 +65,12 @@ runs `make FORM=build/adhoc/NAME`.
 
 | Flag | Generates |
 | --- | --- |
-| `--with FORM,...` | `with:`; refused if two forms serve one port or declare one config name |
-| `--packages PKG,...` | packages, each checked against the APKINDEX first |
+| `--with FORM,...` | the references: one alone is that form; more make `base:` and `with:`, refused if two serve one port or declare one config name. Every list flag repeats or takes commas |
+| `--package PKG,...` | `apko.yaml`'s packages |
 | `--oci NAME=REF` | account `_oci-NAME`, tree at `rootfs/oci/NAME`, a service |
 | `--link A:B,...` | A reaches B: `connect` to B's `loopback` port, or B's UNIX socket bound into A |
+| `--KEY LINE` | one line more in one of form.yaml's lists: `net`, `prune`, `modules`, `programs` (`--net 'connect bastion tcp/5432'`) |
+| `--KEY.SUB VALUE` | one scalar in one of form.yaml's maps (`--sshd.max-auth-tries 3`); which keys exist is the build's to say, and howl knows no form. Anything nested is the file's: `form -o DIR`, then edit |
 | `--NAME.DIRECTIVE 'LINE'` | one line of image NAME's service file, checked by leash's parser in `lib/`: `--web.listen tcp/8080`, `--web.write /var/cache/web`, `--web.env K=V`, `--web.secret 'NAME FILE'`, `--web.exec '/app/server --port 8080'`, `--web.memory 1024` |
 
 The last is the whole grammar for images: the argument is the line as it
@@ -69,9 +85,11 @@ image is a new build and a `create`, as `--app` is. `crane export REF@sha256:…
 -` pulls by digest, verifies every blob and flattens the layers to one tar
 on a pipe; `howl _unpack DIR` reads it with no network, environment or
 credentials, sealed on Linux, with oci.md's refusals and limits (`..`,
-devices, links out, setuid stripped, 500,000 entries). A tag is resolved
-once and printed as the `REF@sha256:…` to use next time; `form -o` refuses
-to write one.
+links out, a whiteout, 500,000 entries; a device node or FIFO, usual in a
+root image, is left out and counted; setuid goes with the rest of the
+mode, since the build keeps only whether a file runs). A tag, or none
+(`nginx` is docker.io's latest), is resolved once and printed as the
+`REF@sha256:…` to use next time, and the kept form carries the digest.
 
 **The image's words are a checklist.** `ExposedPorts` and `Volumes` grant
 nothing. An image declaring either needs the operator's word, any
@@ -82,7 +100,10 @@ loopback'` for a linked container alone, `--web.listen tcp/8080` public,
 
 **The service** is oci.md's mapping (`root /oci/web`, `user _oci-web`,
 `exec`, `env`, `memory`) plus the operator's lines. leash gains `root` and
-`dir` as oci.md specifies; `write PATH` under a root is a `noexec` bind of
+`dir`: it enters the root with `chroot` as root, before any rule, so every
+path resolves inside the image, and gives the service its log pipes, so
+`/dev/stderr` reopens. Its `/tmp`, `/run` and `/data` are binds of its own
+places, as every runtime gives them; `write PATH` is a `noexec` bind of
 `/data/svc/NAME/PATH` at PATH, made by init beside oci.md's binds. A link
 to a form speaking a UNIX socket (`postgres`, `valkey`) binds `/run/svc/SVC`
 into the image where the client library looks, so the listener knows its
@@ -100,7 +121,7 @@ compiler, leash, fence and posture. Loopback is delivered before any rule
 **Order**, each phase alone with its check, changing nothing above it:
 
 1. `loopback`.
-2. `--with`, `--packages`, `form -o -n`, naming, the APKINDEX, collision
+2. `--with`, `--package`, `form -o -n`, naming, the APKINDEX, collision
    and memory-sum checks; ad-hoc and kept forms checked identical.
 3. leash `root`/`dir`, `write` under a root, init's binds, fence's `/oci`
    exec rule, on a hand-laid tree with a static ELF and a `/bin/sh` that
@@ -108,9 +129,11 @@ compiler, leash, fence and posture. Loopback is delivered before any rule
 4. `crane` in `install-deps`; `_unpack` on oci.md's fixtures; a stand-in registry.
 5. One image: the checklist, `#!` refused (*docker-entrypoint.sh is a shell
    script; `--with postgresql` runs PostgreSQL without one*), `--NAME.exec`,
-   posture's `oci-mount` and `oci-user`.
-6. Several: `--link` by port and socket; the mixed check.
-7. Docs. Per-service disk limits on `/data` are data.md's proposal.
+   posture's `processes-image-roots`.
+6. Several: `--link` by port, and by socket (open: the image's user must
+   share the form service's group); the mixed check.
+7. Docs, and `make check-adhoc`. Per-service disk limits on `/data` are
+   data.md's proposal.
 
 ## Drawbacks
 

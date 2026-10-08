@@ -1,5 +1,5 @@
 //! Firecracker: a werewolf machine as a microVM on Linux with KVM,
-//! experimental, booted directly: the kernel and the slot's initramfs,
+//! experimental, booted directly: the kernel and the slot's stage0,
 //! with no bootloader and no slots; a data disk of its own; the config tar
 //! as a second virtio drive, read-only, where init finds it; and the
 //! slot's root.erofs as a third, read-only, which stage0 opens through
@@ -118,9 +118,12 @@ pub fn bootArgs(gpa: Allocator, image_args: []const u8, n: Net, dns: []const u8)
 /// $(BUILD)/vmlinux), which Firecracker loads as it is, where given the
 /// bzImage it waits while the bzImage's stub gunzips 39 MB, 0.1 s of every
 /// boot; on aarch64 the raw Image, $(BUILD)/vmlinuz already.
-pub fn kernelPath(gpa: Allocator, arch: []const u8) ![]const u8 {
-    const file = if (std.mem.eql(u8, arch, "x86_64")) "vmlinux" else "vmlinuz";
-    return gpa.print("build/{s}/{s}", .{ arch, file });
+pub fn kernelPath(gpa: Allocator, arch: howl.Arch) ![]const u8 {
+    const file = switch (arch) {
+        .x86_64 => "vmlinux",
+        .aarch64 => "vmlinuz",
+    };
+    return gpa.print("build/{t}/{s}", .{ arch, file });
 }
 
 const Drive = struct {
@@ -178,7 +181,7 @@ pub fn config(
             guest_mac: []const u8,
             host_dev_name: []const u8,
         }{.{ .iface_id = "eth0", .guest_mac = n.mac, .host_dev_name = n.tap }},
-        .@"machine-config" = .{ .vcpu_count = 2, .mem_size_mib = 2048 },
+        .@"machine-config" = .{ .vcpu_count = howl.local_cpus, .mem_size_mib = howl.local_mib },
     }, .{ .whitespace = .indent_2 });
 }
 
@@ -499,7 +502,7 @@ test config {
     const c = try config(
         gpa,
         "/b/vmlinuz",
-        "/b/slot/initramfs.zst",
+        "/b/slot/stage0.zst",
         args,
         "/m/data.img",
         "/m/config.tar",
@@ -523,10 +526,10 @@ test kernelPath {
     defer arena.deinit();
     try testing.expectEqualStrings(
         "build/x86_64/vmlinux",
-        try kernelPath(arena.allocator(), "x86_64"),
+        try kernelPath(arena.allocator(), .x86_64),
     );
     try testing.expectEqualStrings(
         "build/aarch64/vmlinuz",
-        try kernelPath(arena.allocator(), "aarch64"),
+        try kernelPath(arena.allocator(), .aarch64),
     );
 }

@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const testing = std.testing;
 
+const allow = @import("allow");
 const audit = @import("audit");
 const posture = @import("posture.zig");
 const inChild = @import("attacks.zig").inChild;
@@ -233,11 +234,16 @@ pub fn check(p: *Posture) !void {
     // before a reboot. The network's two only where the form allows them.
     const status = p.read("/proc/1/status");
     const bnd = statusField(status, "CapBnd");
-    const allow = try p.allowances();
+    const allowed = try p.allowances();
     var held: std.ArrayList(u8) = .empty;
     next: for (bounded_caps) |c| {
-        for (allow) |a| if (c.allow.len > 0 and std.mem.eql(u8, a, c.allow)) continue :next;
-        if (capBit(status, "CapBnd", c.n) orelse false) try listAdd(p.gpa, &held, "{s}", .{c.name});
+        if (c.allowance()) |kept| for (allowed) |a| if (std.mem.eql(
+            u8,
+            a,
+            @tagName(kept),
+        )) continue :next;
+        if (capBit(status, "CapBnd", @backingInt(c)) orelse false)
+            try listAdd(p.gpa, &held, "{s}", .{c.name()});
     }
     try p.add(.{
         .id = "kernel-bounding-set",
@@ -264,7 +270,8 @@ pub fn check(p: *Posture) !void {
     const modprobe = p.sysctl("kernel/modprobe");
     var helper_held: std.ArrayList(u8) = .empty;
     if (helpers) |set| for (helper_denied) |c| {
-        if (set & (@as(u64, 1) << c.n) != 0) try listAdd(p.gpa, &helper_held, "{s}", .{c.name});
+        if (set & (@as(u64, 1) << @backingInt(c)) != 0)
+            try listAdd(p.gpa, &helper_held, "{s}", .{c.name()});
     };
     try p.add(.{
         .id = "kernel-helpers",
@@ -578,7 +585,7 @@ fn exploitEntries(p: *Posture) !void {
     const ptmx_e = linux.errno(ptmx);
     if (ptmx_e == .SUCCESS) _ = linux.close(@intCast(ptmx));
     const pty_allowed = for (try p.allowances()) |a| {
-        if (std.mem.eql(u8, a, "pty")) break true;
+        if (std.mem.eql(u8, a, @tagName(allow.Allowance.pty))) break true;
     } else false;
     try p.add(.{
         .id = "kernel-no-pty",
@@ -1086,33 +1093,17 @@ fn hardCoreLimit(limits: []const u8) ?[]const u8 {
     return null;
 }
 
-/// CAP_SYS_RAWIO's bit in a capability set.
-pub const cap_sys_rawio = 17;
-
 /// The capabilities kernel-bounding-set wants gone from PID 1's bounding
 /// set, and the allowance that keeps each, if any.
-const bounded_caps = [_]struct { name: []const u8, n: u6, allow: []const u8 = "" }{
-    .{ .name = "CAP_SYS_MODULE", .n = 16 },
-    .{ .name = "CAP_SYS_RAWIO", .n = cap_sys_rawio },
-    .{ .name = "CAP_SYS_PTRACE", .n = 19 },
-    .{ .name = "CAP_MKNOD", .n = 27 },
-    .{ .name = "CAP_PERFMON", .n = 38 },
-    .{ .name = "CAP_BPF", .n = 39 },
-    .{ .name = "CAP_SYS_ADMIN", .n = 21 },
-    .{ .name = "CAP_NET_ADMIN", .n = 12, .allow = "netadmin" },
-    .{ .name = "CAP_NET_RAW", .n = 13, .allow = "packet" },
+const bounded_caps = [_]allow.Cap{
+    .sys_module, .sys_rawio, .sys_ptrace, .mknod,   .perfmon,
+    .bpf,        .sys_admin, .net_admin,  .net_raw,
 };
 
 /// What kernel-helpers wants gone from the helpers' bounding set.
-const helper_denied = [_]struct { name: []const u8, n: u6 }{
-    .{ .name = "CAP_NET_ADMIN", .n = 12 },
-    .{ .name = "CAP_NET_RAW", .n = 13 },
-    .{ .name = "CAP_SYS_MODULE", .n = 16 },
-    .{ .name = "CAP_SYS_RAWIO", .n = 17 },
-    .{ .name = "CAP_SYS_PTRACE", .n = 19 },
-    .{ .name = "CAP_SYS_ADMIN", .n = 21 },
-    .{ .name = "CAP_PERFMON", .n = 38 },
-    .{ .name = "CAP_BPF", .n = 39 },
+const helper_denied = [_]allow.Cap{
+    .net_admin,  .net_raw,   .sys_module, .sys_rawio,
+    .sys_ptrace, .sys_admin, .perfmon,    .bpf,
 };
 
 /// kernel.usermodehelper.bset, "LOW\tHIGH", as one set, or null.

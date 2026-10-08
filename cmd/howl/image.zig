@@ -7,13 +7,17 @@ const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
+const howl = @import("howl.zig");
 
-/// werewolf-FORM-ARCH-DIGEST: lower case, at most 63, as GCP wants; AWS
-/// takes it as it is.
-pub fn name(gpa: Allocator, form: []const u8, arch: []const u8, digest: []const u8) ![]const u8 {
+/// werewolf-FORM-ARCH-DIGEST: lower case, digits and -, at most 63, as
+/// GCP wants, so x86_64 is x86-64; the others take it as it is.
+pub fn name(gpa: Allocator, form: []const u8, arch: howl.Arch, digest: []const u8) ![]const u8 {
     return gpa.print("werewolf-{s}-{s}-{s}", .{
         form,
-        if (std.mem.eql(u8, arch, "aarch64")) "arm64" else "x86-64",
+        switch (arch) {
+            .aarch64 => "aarch64",
+            .x86_64 => "x86-64",
+        },
         digest[0..16],
     });
 }
@@ -43,12 +47,12 @@ test name {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const n = try name(arena.allocator(), "webshell-example", "aarch64", digest);
-    try testing.expectEqualStrings("werewolf-webshell-example-arm64-0123456789abcdef", n);
+    const n = try name(arena.allocator(), "webshell-example", .aarch64, digest);
+    try testing.expectEqualStrings("werewolf-webshell-example-aarch64-0123456789abcdef", n);
     try testing.expect(n.len <= 63);
     try testing.expectEqualStrings(
         "werewolf-prod-x86-64-0123456789abcdef",
-        try name(arena.allocator(), "prod", "x86_64", digest),
+        try name(arena.allocator(), "prod", .x86_64, digest),
     );
 }
 

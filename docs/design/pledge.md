@@ -61,34 +61,36 @@ It takes no paths and no options from the asker: each request is a word,
 and what it does is in the program. Its own sandbox allows the mount
 calls and nothing else of note.
 
-## Services: promises
+## Services: path bundles (not built)
 
-A service file (shell-free.md) would name promises, each a bundle of what
-a class of work needs, and the service's own paths would come with it:
+A first design, superseded for system calls by *System calls: promises*,
+below, where these words are not promises: a service file (shell-free.md)
+would name bundles, each what a class of work needs, and the service's
+own paths would come with it:
 
-| Promise | Brings |
+| Bundle | Brings |
 | --- | --- |
 | `dns` | read `/etc/hosts`, `/etc/resolv.conf`, `/etc/services`, `/etc/nsswitch.conf`; send UDP and TCP to port 53 |
 | `tls` | read `/etc/ssl` |
 | `users` | read `/etc/passwd`, `/etc/group` |
 | `tty` | read and write its terminal |
 | `tmp` | a private directory in `/tmp` |
-| `inet` | the `connect` and `listen` lines of its .net |
+| `net` | the `connect` and `listen` lines of its form.yaml `net` |
 
 Every service also gets its own `/run/svc/NAME` and `/data/svc/NAME`, the
 image's libraries, `/dev/null` and `/dev/urandom`, without asking. The
 `read` and `write` lines in a service file then name only what is truly
 its own, never a file every program needs.
 
-The .net files could use the same words: `connect _update dns tcp/443`.
+form.yaml's `net` could use the same words: `connect _update dns tcp/443`.
 
 ## System calls: promises
 
 The seal (lockdown.md) was a list of 28 system calls refused to everyone.
 It becomes the other way round: a system call is refused unless a promise
-allows it. And the promises are the same words, so a service file says
-what the program does once, and gets the calls, the paths and the ports
-for it:
+allows it. A service file says in a few words what the program does,
+and gets the calls for it; its `read`, `write`, `listen` and `connect`
+lines give it the paths and the ports:
 
 ```
 exec    /usr/bin/python3 /usr/lib/app/main.py
@@ -111,6 +113,7 @@ stand alone, so a program that needs one asks for that one:
 | --- | --- |
 | `stdio` | what every program does with what it already holds: read and write descriptors, memory, time, signals, waiting, polling, pipes, its own ids, terminal ioctls |
 | `rpath` | opening, reading and looking at files and directories |
+| `watch` | watching files and directories for changes (inotify, fanotify): Landlock does not stand between them and a name, so a service that only reads files cannot watch the machine's activity |
 | `wpath` | changing them: creating, removing, renaming, linking, modes, owners, times, syncing |
 | `inet` | creating IPv4 and IPv6 sockets |
 | `unix` | creating Unix sockets and socket pairs |
@@ -135,9 +138,11 @@ stand alone, so a program that needs one asks for that one:
 | `sendfile` | `sendfile`: copying a file's pages to a socket or file without reading them. werewolf's own programs make it (Zig's standard library copies files with it); a service, only if it pledges it: nginx does |
 | `splice` | `splice` and `tee`: moving pages between pipes, files and sockets. Nothing here needs them |
 | `mlock` | locking memory |
+| `aio` | the kernel's asynchronous I/O (`io_setup`, `io_submit`, `io_getevents`): nginx's, not io_uring, which no word brings |
 | `settime` | setting the clock |
 | `hostname` | setting the host and domain names |
 | `syslog` | reading the kernel's log |
+| `reboot` | rebooting and powering off |
 
 What no promise allows is refused to everyone: tracing (`ptrace`), and
 the never list, which no word can bring back: eBPF, kernel tracing,

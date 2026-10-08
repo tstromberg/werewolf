@@ -4,9 +4,10 @@ On GCP, AWS, Hetzner Cloud and Azure, a werewolf machine can take its config fro
 the cloud's metadata server: the same config tar a config disk carries,
 set as the instance's user data. `prod`, and every form on it, asks.
 
-The [bastion](../examples/bastion/README.md) and
-[Tailscale router](../examples/tailscale/README.md) tutorials use restricted
-JSON boot settings for destinations/routes, plus separate credential files.
+The [Tailscale router](../examples/tailscale/README.md) tutorial uses
+restricted JSON boot settings for its routes, plus a separate credential
+file. The [bastion](../forms/bastion/README.md) takes nothing from the
+config: its users are in its image.
 For local Lima, init imports `provision: mode: data` files targeting
 `/run/config/...` from the NoCloud volume: at most 32 regular files of
 32 KiB, root-owned, mode `0600`. It runs no cloud-init or Lima provisioning

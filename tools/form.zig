@@ -5,8 +5,18 @@
 //!   form dirs FORM           their directories
 //!   form list FORM KEY       form.yaml's KEY along the chain, a line each
 //!   form check FORM KEY      the form's own check KEY, an item a line
+//!   form listens FORM        the TCP ports the chain's net serves, a line each
 //!   form weaknesses FORM     the posture checks the form's own weaknesses name
 //!   form excuses FORM        the same, each with its excuse, a line each
+//!   form oci FORM            the services with a root (an image baked in), a line each:
+//!                            `root NAME DIR USER`, then `write NAME PATH` for each path
+//!   form pledge FORM         the machine's promises: every service's pledge, as one;
+//!                            refused, a service leash refuses or that listens
+//!                            where no net line does
+//!   form sshd FORM           the chain's sshd: as sshd_config lines, or nothing
+//!   form bastion-keys FORM   the bastion's authorized_keys, from bastion: users:
+//!   form bastion-permit FORM the bastion's PermitOpen line, or nothing
+//!   form bastion-service FORM the bastion's service file, connecting where net says
 //!   form having KEY [VALUE]  the forms in forms/ whose check KEY is VALUE (true)
 //!   form every KEY           form.yaml's KEY in every form in forms/, once each
 //!   form apko FORM [PKG...]  the chain's apko configs as one, and PKGs
@@ -19,9 +29,12 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const form = @import("form");
+const seal = @import("seal");
+const service = @import("service");
 
-const usage = "usage: form names|dirs|weaknesses|excuses FORM, list|check FORM KEY, " ++
-    "having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
+const usage = "usage: form names|dirs|listens|weaknesses|excuses|pledge|oci|sshd|bastion-keys|" ++
+    "bastion-permit|bastion-service FORM, " ++
+    "list|check FORM KEY, having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -97,11 +110,80 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
             .list => |l| for (l) |item| try w.print("{s}\n", .{item.scalar.text}),
             .map => unreachable,
         }
+    } else if (is(verb, "listens") and args.len == 2) {
+        for (try form.listens(gpa, forms, f)) |port| try w.print("{d}\n", .{port});
     } else if (is(verb, "weaknesses") and args.len == 2) {
         for (forms[forms.len - 1].weaknesses()) |e| try w.print("{s}\n", .{e.key});
     } else if (is(verb, "excuses") and args.len == 2) {
         for (forms[forms.len - 1].weaknesses()) |e|
             try w.print("{s} {s}\n", .{ e.key, e.value.scalar.text });
+    } else if (is(verb, "oci") and args.len == 2) {
+        // What init binds beneath each image root and fence allows there
+        // (cmd/init/oci.zig, cmd/fence): read as leash reads the file.
+        for (try form.services(io, gpa, root, forms, f)) |s| {
+            var bad: service.Bad = .{};
+            const parsed = service.parse(gpa, s.text, &bad) catch |err| switch (err) {
+                error.Invalid => return f.fail(
+                    gpa,
+                    "{s}, line {d}: {s}",
+                    .{ s.path, bad.line, bad.why },
+                ),
+                else => |e| return e,
+            };
+            const dir = parsed.root orelse continue;
+            try w.print("root {s} {s} {s}\n", .{ s.name, dir, parsed.user });
+            for (parsed.write) |path| try w.print("write {s} {s}\n", .{ s.name, path });
+        }
+    } else if (is(verb, "pledge") and args.len == 2) {
+        // Each service file read whole, as leash reads it: one leash would
+        // refuse fails the build, rather than give the machine the wrong
+        // promises; and so does one that listens where the chain's net
+        // does not, whose bind fence would refuse at boot.
+        var declared: std.ArrayList(u16) = .empty;
+        for (forms) |fm| for (try fm.items(gpa, "net")) |line| {
+            var why: []const u8 = "";
+            const l = (form.listen(gpa, line, &why) catch |err| switch (err) {
+                error.Invalid => return f.fail(
+                    gpa,
+                    "{s}/form.yaml: net: {s}: {s}",
+                    .{ fm.dir, line, why },
+                ),
+                error.OutOfMemory => return error.OutOfMemory,
+            }) orelse continue;
+            try declared.appendSlice(gpa, l.ports);
+        };
+        var promises: seal.Set = .empty;
+        for (try form.services(io, gpa, root, forms, f)) |s| {
+            var bad: service.Bad = .{};
+            const parsed = service.parse(gpa, s.text, &bad) catch |err| switch (err) {
+                error.Invalid => return f.fail(
+                    gpa,
+                    "{s}, line {d}: {s}",
+                    .{ s.path, bad.line, bad.why },
+                ),
+                else => |e| return e,
+            };
+            for (parsed.listen) |port| if (std.mem.findScalar(u16, declared.items, port) == null)
+                return f.fail(
+                    gpa,
+                    "{s}: listen tcp/{d}, which no net line declares: fence refuses the bind " ++
+                        "(`listen tcp/{d} loopback` for the machine alone)",
+                    .{ s.path, port, port },
+                );
+            promises.setUnion(parsed.pledge);
+        }
+        var it = promises.iterator();
+        var sep: []const u8 = "";
+        while (it.next()) |p| : (sep = " ") try w.print("{s}{t}", .{ sep, p });
+        try w.writeAll("\n");
+    } else if (is(verb, "sshd") and args.len == 2) {
+        try w.writeAll(try form.sshdConfig(gpa, forms, f));
+    } else if (is(verb, "bastion-keys") and args.len == 2) {
+        try w.writeAll((try form.bastionFiles(gpa, forms, f)).keys);
+    } else if (is(verb, "bastion-permit") and args.len == 2) {
+        try w.writeAll((try form.bastionFiles(gpa, forms, f)).permit);
+    } else if (is(verb, "bastion-service") and args.len == 2) {
+        try w.writeAll(try form.bastionService(io, gpa, root, forms, f));
     } else if (is(verb, "apko")) {
         try form.write(w, try form.apko(io, gpa, root, forms, args[2..], f));
     } else return error.Usage;

@@ -37,7 +37,7 @@ general-purpose UDP or ICMP routing.
 Start with [routes and enrollment](../../forms/tailscale/README.md#routes-and-enrollment),
 then follow either [local Lima](../../forms/tailscale/README.md#local-lima) or
 [GCP](../../forms/tailscale/README.md#gcp). Both use `tailscale/settings.json` and a
-private `auth_key` file. Lima carries them as NoCloud data files; GCP carries
+private `auth-key` file. Lima carries them as NoCloud data files; GCP carries
 them in a base64 config tar.
 
 The tutorial includes a narrow tailnet grant, route approval, client tests,

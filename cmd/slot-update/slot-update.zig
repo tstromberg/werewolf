@@ -30,9 +30,11 @@ pub const Allocator = std.mem.Allocator;
 pub const linux = std.os.linux;
 pub const sandbox = @import("sandbox");
 const broker = @import("broker");
+const cmdline = @import("cmdline");
 pub const verity = @import("verity");
 pub const policy = @import("update-policy");
 pub const cve = @import("cve.zig");
+const kernelVersion = @import("cve").kernelVersion;
 pub const releases = @import("release.zig");
 pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
@@ -54,7 +56,7 @@ pub const attempt_path = state_dir ++ "/attempt";
 /// Held while a pass changes anything here, so a check run by hand and the
 /// daemon's never interleave.
 pub const lock_path = state_dir ++ "/lock";
-/// When the last reboot for an update went, in seconds since the epoch.
+/// When the last reboot for an update went, as RFC 3339.
 pub const rebooted_path = state_dir ++ "/rebooted";
 /// The last tiers feed this machine took, and its signature.
 pub const feed_path = state_dir ++ "/cve-tiers.json";
@@ -280,7 +282,9 @@ pub const Update = struct {
     io: Io,
     gpa: Allocator,
     host: []const u8 = "",
-    cmd: Cmdline = .{},
+    cmd: cmdline.Cmdline = .{},
+    /// The slot this boot is, and the other, which an update builds.
+    slot: []const u8 = "a",
     other: []const u8 = "b",
     step: []const u8 = "start",
     /// What the last command that failed said, for the error event.
@@ -291,13 +295,17 @@ pub const Update = struct {
         // The kernel's, which init sets whether or not a config named one.
         const uts = std.posix.uname();
         u.host = try u.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0));
-        u.cmd = parseCmdline(try u.read("/proc/cmdline"));
-        // A slot boots from a distro's GRUB (bite: werewolf.grubenv) or from
-        // werewolf's own disk under systemd-boot (werewolf.esp).
-        if (u.cmd.slot.len == 0 or u.cmd.victim.len == 0 or (u.cmd.grubenv.len == 0 and
-            u.cmd.esp.len == 0))
-            return error.NotBootedFromASlot;
-        u.other = if (std.mem.eql(u8, u.cmd.slot, "b")) "a" else "b";
+        // Read as stage0 read it (lib/cmdline.zig): werewolf.slot comes with
+        // werewolf.victim, a slot from a distro's GRUB (bite:
+        // werewolf.grubenv) or from werewolf's own disk under systemd-boot
+        // (werewolf.esp).
+        var refused: cmdline.Failure = .{};
+        u.cmd = cmdline.parse(try u.read("/proc/cmdline"), &refused) orelse
+            return error.BadCommandLine;
+        const s = u.cmd.slot orelse return error.NotBootedFromASlot;
+        if (u.cmd.grubenv == null and u.cmd.esp == null) return error.NotBootedFromASlot;
+        u.slot = @tagName(s);
+        u.other = @tagName(s.other());
     }
 
     // --- outcome -----------------------------------------------------------
@@ -318,7 +326,7 @@ pub const Update = struct {
         const build = attempt.build;
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
         const down = u.downtime();
-        if (std.mem.eql(u8, tried, u.cmd.slot)) {
+        if (std.mem.eql(u8, tried, u.slot)) {
             Dir.cwd().rename(
                 state_dir ++ "/attempt-serial",
                 Dir.cwd(),
@@ -328,7 +336,7 @@ pub const Update = struct {
                 if (err != error.FileNotFound) return err;
             try u.record(.{
                 .event = "commit",
-                .slot = u.cmd.slot,
+                .slot = u.slot,
                 .build = build,
                 .release = release,
                 .waited = try u.waited(),
@@ -339,7 +347,7 @@ pub const Update = struct {
             try u.record(.{
                 .event = "rollback",
                 .failed = tried,
-                .running = u.cmd.slot,
+                .running = u.slot,
                 .build = build,
                 .release = release,
                 .down = down,
@@ -411,7 +419,7 @@ pub const Update = struct {
             const d = try u.dueOf(s, now_p);
             return u.record(.{
                 .event = "check",
-                .slot = u.cmd.slot,
+                .slot = u.slot,
                 .release = release,
                 .result = "staged",
                 .build = now_p.build,
@@ -455,7 +463,7 @@ pub const Update = struct {
         next.build = plan.build;
         next.report = report_path;
         next.first_boot = next.first_boot or first_boot;
-        for (std.enums.values(policy.Tier)) |t| if (fixes.first[@backingInt(t)]) |f| {
+        for (std.enums.values(policy.Tier)) |t| if (fixes.first.get(t)) |f| {
             const seen = next.tier(t);
             if (seen.* == null) seen.* = .{
                 .seen = try u.time(now),
@@ -490,7 +498,7 @@ pub const Update = struct {
             .time = stamp,
             .host = u.host,
             .build = plan.build,
-            .from = .{ .slot = u.cmd.slot, .release = release, .kernel = plan.old_kernel },
+            .from = .{ .slot = u.slot, .release = release, .kernel = plan.old_kernel },
             .to = .{ .slot = u.other, .kernel = plan.new_kernel },
             .packages = changes,
             .package_cves = package_cves,
@@ -507,7 +515,7 @@ pub const Update = struct {
         try u.record(.{
             .event = "stage",
             .slot = u.other,
-            .from = u.cmd.slot,
+            .from = u.slot,
             .build = plan.build,
             .kernel = try u.gpa.print("{s} -> {s}", .{ plan.old_kernel, plan.new_kernel }),
             .packages = changes.len,
@@ -515,10 +523,10 @@ pub const Update = struct {
             .tier = @tagName(d.tier),
             .seen = next.seenTimes(),
             .fixes = .{
-                .urgent = fixes.count[@backingInt(policy.Tier.urgent)],
-                .high = fixes.count[@backingInt(policy.Tier.high)],
-                .medium = fixes.count[@backingInt(policy.Tier.medium)],
-                .low = fixes.count[@backingInt(policy.Tier.low)],
+                .urgent = fixes.count.get(.urgent),
+                .high = fixes.count.get(.high),
+                .medium = fixes.count.get(.medium),
+                .low = fixes.count.get(.low),
             },
             .due = try u.time(d.at),
             .due_in = d.at - now,
@@ -579,7 +587,7 @@ pub const Update = struct {
         if (changes.len == 0 and std.mem.eql(u8, old_kernel, new_kernel)) {
             try u.record(.{
                 .event = "check",
-                .slot = u.cmd.slot,
+                .slot = u.slot,
                 .release = release,
                 .result = "current",
             });
@@ -630,7 +638,7 @@ pub const Update = struct {
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
         const running = try u.gpa.print(
             "/victim{s}/{s}/root.erofs",
-            .{ pathOf(u.cmd.victim), u.cmd.slot },
+            .{ u.cmd.victim.?.path, u.slot },
         );
         const root = m.files.map.get("root.erofs").?;
         if (std.mem.eql(u8, &try u.sha256Of(running), root.sha256) and
@@ -638,7 +646,7 @@ pub const Update = struct {
         {
             try u.record(.{
                 .event = "check",
-                .slot = u.cmd.slot,
+                .slot = u.slot,
                 .release = release,
                 .result = "current",
             });
@@ -695,12 +703,12 @@ pub const Update = struct {
         try Dir.cwd().createDirPath(u.io, work_dir ++ "/slot");
         const targets = [_][:0]const u8{
             work_dir ++ "/slot/vmlinuz",
-            work_dir ++ "/slot/initramfs.zst",
+            work_dir ++ "/slot/stage0.zst",
             work_dir ++ "/slot/root.erofs",
         };
         // A slot on a distro's disk (bite's, under GRUB) needs the stage0
         // with its filesystem's modules, which werewolf's own disk's leaves out.
-        const stage0 = if (u.cmd.grubenv.len > 0) releases.Manifest.bitten_stage0 else "stage0.zst";
+        const stage0 = if (u.cmd.grubenv != null) releases.Manifest.bitten_stage0 else "stage0.zst";
         for ([_][]const u8{ "vmlinuz", stage0, "root.erofs" }, targets) |file, target| {
             const want = m.files.map.get(file) orelse {
                 u.detail = try u.gpa.print("the release has no {s}", .{file});
@@ -790,8 +798,8 @@ pub const Update = struct {
         old_kernel: []const u8,
         new_kernel: []const u8,
     ) !cve.KernelFixes {
-        const old = cve.kernelVersion(old_kernel) orelse return error.BadKernelVersion;
-        const new = cve.kernelVersion(new_kernel) orelse return error.BadKernelVersion;
+        const old = kernelVersion(old_kernel) orelse return error.BadKernelVersion;
+        const new = kernelVersion(new_kernel) orelse return error.BadKernelVersion;
         const branch = try u.gpa.print("{d}.{d}", .{ new[0], new[1] });
         var fixes: cve.KernelFixes = .{ .branch = branch, .from = old_kernel, .to = new_kernel };
         const body = try u.fetch(sources, kernel_cves_url, "vulns.tar.gz") orelse return fixes;
@@ -1174,7 +1182,7 @@ pub const Update = struct {
     }
 
     pub fn time(u: *Update, secs: i64) ![]const u8 {
-        return rfc3339(u.gpa, @intCast(secs));
+        return u.gpa.print("{f}", .{policy.Time{ .secs = secs }});
     }
 
     /// data to path through a temporary name, so path is whole or absent,
@@ -1278,34 +1286,6 @@ const Source = struct {
 };
 
 // --- pure functions, tested below -------------------------------------------
-
-pub const Cmdline = struct {
-    victim: []const u8 = "",
-    slot: []const u8 = "",
-    grubenv: []const u8 = "",
-    esp: []const u8 = "",
-};
-
-pub fn parseCmdline(text: []const u8) Cmdline {
-    var c: Cmdline = .{};
-    var it = std.mem.tokenizeAny(u8, text, " \n");
-    while (it.next()) |arg| {
-        if (std.mem.cutPrefix(u8, arg, "werewolf.victim=")) |v| c.victim = v;
-        if (std.mem.cutPrefix(u8, arg, "werewolf.slot=")) |v| c.slot = v;
-        if (std.mem.cutPrefix(u8, arg, "werewolf.grubenv=")) |v| c.grubenv = v;
-        if (std.mem.cutPrefix(u8, arg, "werewolf.esp=")) |v| c.esp = v;
-    }
-    return c;
-}
-
-pub fn uuidOf(spec: []const u8) []const u8 {
-    return spec[0 .. std.mem.findScalar(u8, spec, ':') orelse spec.len];
-}
-
-pub fn pathOf(spec: []const u8) []const u8 {
-    const i = std.mem.findScalar(u8, spec, ':') orelse return "";
-    return spec[i + 1 ..];
-}
 
 pub fn parentDir(path: []const u8) []const u8 {
     return path[0 .. std.mem.findScalarLast(u8, path, '/') orelse 0];
@@ -1467,17 +1447,6 @@ fn buildHash(gpa: Allocator, pkgs: []const Package, kernel: []const u8) ![]const
     return gpa.dupe(u8, hex[0..16]);
 }
 
-fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
-    const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
-    const yd = es.getEpochDay().calculateYearDay();
-    const md = yd.calculateMonthDay();
-    const ds = es.getDaySeconds();
-    return gpa.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        yd.year,              md.month.numeric(),      md.day_index + 1,
-        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
-    });
-}
-
 fn lessString(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
@@ -1486,16 +1455,8 @@ fn lessString(_: void, a: []const u8, b: []const u8) bool {
 
 const testing = std.testing;
 
-test parseCmdline {
-    const c = parseCmdline(
-        "console=hvc0 werewolf.victim=abcd:/var/lib/werewolf werewolf.slot=b " ++
-            "werewolf.grubenv=ef01:/boot/grub/grubenv\n",
-    );
-    try testing.expectEqualStrings("abcd:/var/lib/werewolf", c.victim);
-    try testing.expectEqualStrings("b", c.slot);
-    try testing.expectEqualStrings("abcd", uuidOf(c.victim));
-    try testing.expectEqualStrings("/var/lib/werewolf", pathOf(c.victim));
-    try testing.expectEqualStrings("/boot", parentDir(parentDir(pathOf(c.grubenv))));
+test parentDir {
+    try testing.expectEqualStrings("/boot", parentDir(parentDir("/boot/grub/grubenv")));
     try testing.expectEqualStrings("", parentDir(parentDir("/grub/grubenv")));
 }
 
@@ -1542,15 +1503,6 @@ test {
     _ = stage;
     _ = slot;
     _ = @import("apk.zig");
-}
-
-test rfc3339 {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    try testing.expectEqualStrings(
-        "2026-10-06T12:42:29Z",
-        try rfc3339(arena.allocator(), 1791290549),
-    );
 }
 
 /// Whether a fetcher's word for a failure may pass if tried again: no

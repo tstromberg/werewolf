@@ -1,6 +1,6 @@
 //! update-policy: when a staged update boots, and why
-//! (docs/design/update-policy.md). slot-update decides with it; the host's
-//! werewolf checks an operator's update-policy.json with the same apply.
+//! (docs/design/update-policy.md). slot-update decides with it; howl
+//! checks an operator's update-policy.json with the same apply.
 //!
 //! Each fix has a tier. Urgent and High boot within a time of when this
 //! machine first saw them; Medium and Low wait at least a time, then boot
@@ -10,7 +10,11 @@
 //! window, never past the limits, and never Urgent's.
 //!
 //! Everything here is pure: times are seconds since the epoch, UTC, passed
-//! in, so all of it is tested without a clock.
+//! in, so all of it is tested without a clock. Times are written in two
+//! forms alone, each read and written here: RFC 3339 (Time), in logs,
+//! reports, state files and expiries, and a serial (Serial), the same
+//! without dashes or colons, which a git tag can carry, for a release's and
+//! a feed's serial and a loader entry's version.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -186,17 +190,20 @@ pub fn apply(
     return null;
 }
 
+/// The tiers whose times a setting names: Times' fields, and Settings'
+/// sources'.
+const Timed = enum { high, medium, low };
+
 fn timeOf(t: *Times, key: []const u8) ?*u32 {
-    if (std.mem.eql(u8, key, "high")) return &t.high;
-    if (std.mem.eql(u8, key, "medium")) return &t.medium;
-    if (std.mem.eql(u8, key, "low")) return &t.low;
-    return null;
+    return switch (std.meta.stringToEnum(Timed, key) orelse return null) {
+        inline else => |k| &@field(t, @tagName(k)),
+    };
 }
 
 fn sourceOf(s: *Settings, key: []const u8) *Source {
-    if (std.mem.eql(u8, key, "high")) return &s.source.high;
-    if (std.mem.eql(u8, key, "medium")) return &s.source.medium;
-    return &s.source.low;
+    return switch (std.meta.stringToEnum(Timed, key).?) {
+        inline else => |k| &@field(s.source, @tagName(k)),
+    };
 }
 
 fn duration(v: json.Value) ?u32 {
@@ -298,10 +305,10 @@ fn byRule(s: *const Settings, tier: Tier, seen: i64, sd: u64, first_boot: bool) 
 /// When the tiers seen first were seen; null for a tier not seen. A tier,
 /// once seen, stays until the slot boots, so a fix whose tier rises never
 /// boots later than it would have.
-pub const Seen = [4]?i64;
+pub const Seen = std.enums.EnumArray(Tier, ?i64);
 
 pub fn see(seen: *Seen, tier: Tier, now: i64) void {
-    const t = &seen[@backingInt(tier)];
+    const t = seen.getPtr(tier);
     if (t.* == null) t.* = now;
 }
 
@@ -312,9 +319,8 @@ pub const Due = struct { at: i64, tier: Tier };
 /// first_boot_time of the first fix seen. Null when nothing is seen.
 pub fn when(s: *const Settings, seen: Seen, sd: u64, first_boot: bool) ?Due {
     var best: ?Due = null;
-    for (seen, 0..) |t, i| {
-        const at = t orelse continue;
-        const tier: Tier = @fromBackingInt(@intCast(i));
+    for (std.enums.values(Tier)) |tier| {
+        const at = seen.get(tier) orelse continue;
         const d: Due = .{ .at = byRule(s, tier, at, sd, first_boot), .tier = tier };
         if (best == null or d.at < best.?.at or (d.at == best.?.at and
             @backingInt(d.tier) > @backingInt(best.?.tier)))
@@ -405,16 +411,71 @@ pub const Time = struct {
     secs: i64,
 
     pub fn format(t: Time, out: *Writer) Writer.Error!void {
-        const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(t.secs) };
-        const yd = es.getEpochDay().calculateYearDay();
-        const md = yd.calculateMonthDay();
-        const ds = es.getDaySeconds();
-        try out.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-            yd.year,              md.month.numeric(),      md.day_index + 1,
-            ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
-        });
+        const y, const mo, const d, const h, const mi, const s = civil(t.secs);
+        try out.print(
+            "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z",
+            .{ y, mo, d, h, mi, s },
+        );
     }
 };
+
+/// A serial: RFC 3339 in UTC without its dashes and colons,
+/// 20261007T140211Z, which a git tag can carry and a string compare orders.
+pub const Serial = struct {
+    secs: i64,
+
+    pub fn format(t: Serial, out: *Writer) Writer.Error!void {
+        const y, const mo, const d, const h, const mi, const s = civil(t.secs);
+        try out.print("{d:0>4}{d:0>2}{d:0>2}T{d:0>2}{d:0>2}{d:0>2}Z", .{ y, mo, d, h, mi, s });
+    }
+};
+
+/// secs as year, month, day, hour, minute and second.
+fn civil(secs: i64) [6]u32 {
+    const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(secs) };
+    const yd = es.getEpochDay().calculateYearDay();
+    const md = yd.calculateMonthDay();
+    const ds = es.getDaySeconds();
+    return .{
+        yd.year,              md.month.numeric(),      md.day_index + 1,
+        ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
+    };
+}
+
+/// RFC 3339 in UTC, as Time writes it, as seconds since the epoch.
+pub fn parseTime(s: []const u8) error{BadTime}!i64 {
+    if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or
+        s[16] != ':' or s[19] != 'Z') return error.BadTime;
+    return secsOf(.{ s[0..4], s[5..7], s[8..10], s[11..13], s[14..16], s[17..19] });
+}
+
+/// A serial, as Serial writes it, as seconds since the epoch.
+pub fn parseSerial(s: []const u8) error{BadTime}!i64 {
+    if (s.len != 16 or s[8] != 'T' or s[15] != 'Z') return error.BadTime;
+    return secsOf(.{ s[0..4], s[4..6], s[6..8], s[9..11], s[11..13], s[13..15] });
+}
+
+/// Year, month, day, hour, minute and second, each in digits alone, as
+/// seconds since the epoch; a date that is not one, Feb 31, is refused.
+fn secsOf(fields: [6][]const u8) error{BadTime}!i64 {
+    var n: [6]u32 = undefined;
+    for (fields, &n) |digits, *v| {
+        for (digits) |c| if (!std.ascii.isDigit(c)) return error.BadTime;
+        v.* = std.fmt.parseUnsigned(u32, digits, 10) catch return error.BadTime;
+    }
+    const year, const month, const d, const h, const mi, const s = n;
+    if (year < 1970 or month < 1 or month > 12 or d < 1 or h > 23 or mi > 59 or s > 59)
+        return error.BadTime;
+    const leap = std.time.epoch.isLeapYear(@intCast(year));
+    const days_in = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (d > days_in[month - 1]) return error.BadTime;
+    var days: i64 = 0;
+    var y: u32 = 1970;
+    while (y < year) : (y += 1) days += std.time.epoch.getDaysInYear(@intCast(y));
+    for (days_in[0 .. month - 1]) |m| days += m;
+    days += d - 1;
+    return days * day + @as(i64, h) * hour + @as(i64, mi) * minute + s;
+}
 
 /// A span for people: at most its three largest units, "14d 13h 38m",
 /// "2h 45m 42s", "15m", "0s".
@@ -637,7 +698,7 @@ test "due: windows on some days, and past midnight" {
 
 test "when: the earliest tier, kept as tiers rise" {
     const s: Settings = .{};
-    var seen: Seen = .{ null, null, null, null };
+    var seen: Seen = .initFill(null);
     try std.testing.expectEqual(@as(?Due, null), when(&s, seen, 0, false));
     see(&seen, .low, t0);
     see(&seen, .medium, t0);
@@ -759,6 +820,44 @@ test "durations and settings as text" {
     try expectText("0h", Setting{ .secs = 0 });
     try expectText("90m", Setting{ .secs = 90 * minute });
     try std.testing.expectEqual(@as(?u32, null), parseDuration("100000d"));
+}
+
+test "times, written and read" {
+    try expectText("2026-10-07T14:02:11Z", Time{ .secs = t0 });
+    try expectText("20261007T140211Z", Serial{ .secs = t0 });
+    try expectText("20280229T235959Z", Serial{ .secs = 1835481599 });
+    try std.testing.expectEqual(t0, try parseTime("2026-10-07T14:02:11Z"));
+    try std.testing.expectEqual(t0, try parseSerial("20261007T140211Z"));
+    try std.testing.expectEqual(0, try parseTime("1970-01-01T00:00:00Z"));
+    try std.testing.expectEqual(951782400, try parseTime("2000-02-29T00:00:00Z"));
+    for ([_]i64{ 0, t0, 1835481599, 4102444799 }) |secs| {
+        var buf: [32]u8 = undefined;
+        try std.testing.expectEqual(secs, try parseSerial(
+            try std.mem.print(&buf, "{f}", .{Serial{ .secs = secs }}),
+        ));
+        try std.testing.expectEqual(secs, try parseTime(
+            try std.mem.print(&buf, "{f}", .{Time{ .secs = secs }}),
+        ));
+    }
+    // release/sign's "expires", which updaters from before 2026-10-08
+    // check: it must read as later than any now.
+    try std.testing.expect(try parseTime("9999-12-31T23:59:59Z") > t0 + 100 * 365 * day);
+    for ([_][]const u8{
+        "2026-02-29T00:00:00Z",
+        "2026-02-31T00:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-10-13 15:10:16Z",
+        "2026-10-13T15:10:16",
+        "+026-10-13T15:10:16Z",
+        "1969-12-31T23:59:59Z",
+    }) |bad| try std.testing.expectError(error.BadTime, parseTime(bad));
+    for ([_][]const u8{
+        "20260231T000000Z",
+        "20261006T120000",
+        "20261006T1200+0Z",
+        "2026-10-06T12:00",
+        "~",
+    }) |bad| try std.testing.expectError(error.BadTime, parseSerial(bad));
 }
 
 test "seed and chain" {

@@ -22,14 +22,14 @@ modules:
   # AWS's NIC, the ENA; its disks are NVMe, as above.
   - ena
   # Azure's disks and synthetic NIC, on Hyper-V's VMBus, which is built in,
-  # as is the NIC on x86_64. Loaded only on Hyper-V (`@hyperv:`; stage0
+  # as is the NIC on x86_64. Loaded only on Hyper-V (`@hyperv`; stage0
   # tells modload where the kernel registered VMBus, before it looks for the
   # slot's disk, which may be behind it): elsewhere they find no VMBus, and
   # hv_storvsc alone cost every boot 18 ms finding none. Accelerated
   # networking's VF, a fast path beside the synthetic NIC, is left out: the
   # NIC carries everything without it.
-  - "@hyperv: hv_storvsc"
-  - "aarch64: @hyperv: hv_netvsc"
+  - "@hyperv hv_storvsc"
+  - aarch64 @hyperv hv_netvsc
   # Packet sockets, for the DHCP client, which has no address to send from
   # until its lease arrives.
   - af_packet
@@ -37,5 +37,5 @@ modules:
   # drivers are modules, and with the loader closed nothing pulls them in on
   # demand: without them dm-crypt still works, much slower, and says nothing.
   - dm-crypt
-  - "aarch64: aes-ce-blk"
-  - "x86_64: aesni-intel"
+  - aarch64 aes-ce-blk
+  - x86_64 aesni-intel

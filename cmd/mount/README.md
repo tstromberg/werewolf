@@ -35,7 +35,9 @@ Landlock domain forbids mounting to every process.
   securityfs, cgroup2, devtmpfs, devpts, tmpfs, ext4 for `/data`, iso9660
   for a NoCloud seed), each named with `-t`, never probed; the options each
   takes, with their values checked; and the places mounts may go: `/proc`,
-  `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, `/data`, `/victim`, `/mnt`.
+  `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, `/data`, `/victim`, `/mnt`,
+  and `/oci`, the image roots init binds into (cmd/init/oci.zig). A bind
+  of a device node from `/dev` keeps `dev`: it is the device.
 - **A new mount** is built detached (`fsopen`, `fsconfig`, `fsmount`) with
   its restrictions, then attached (`move_mount`): no moment without them.
 - **A bind** is cloned detached (`open_tree`), restricted the same, then

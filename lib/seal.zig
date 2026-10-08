@@ -271,28 +271,29 @@ pub const never: []const linux.SYS = blk: {
 
 // --- filters -------------------------------------------------------------------
 
-pub const Filter = extern struct { code: u16, jt: u8, jf: u8, k: u32 };
+/// A classic BPF instruction (struct sock_filter), and the few opcodes
+/// seccomp's filters here and in lib/sandbox.zig are made of.
+pub const Filter = extern struct { code: u16, jt: u8 = 0, jf: u8 = 0, k: u32 = 0 };
+pub const LD_W_ABS = 0x20;
+pub const JEQ_K = 0x15;
+pub const JGE_K = 0x35;
+pub const JSET_K = 0x45;
+pub const RET_K = 0x06;
 
-const LD_W_ABS = 0x20;
-const JEQ_K = 0x15;
-const JGE_K = 0x35;
-const JSET_K = 0x45;
-const RET_K = 0x06;
-pub const RET_KILL_PROCESS: u32 = 0x80000000;
-pub const RET_USER_NOTIF: u32 = 0x7fc00000;
-pub const RET_ERRNO: u32 = 0x00050000;
-pub const RET_ALLOW: u32 = 0x7fff0000;
 /// A refused call fails as if the kernel had no such call, which programs
 /// expect of an older kernel and handle.
-pub const RET_ENOSYS: u32 = RET_ERRNO | @as(u32, @backingInt(linux.E.NOSYS));
+pub const RET_ENOSYS: u32 = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(linux.E.NOSYS));
 
-/// The architecture every system call must come in as. Any other, which on
-/// aarch64 is a 32-bit (AArch32) program's, kills the process: werewolf ships
-/// no 32-bit code, and the kernel has no switch to turn those calls off.
+/// The architecture every system call must come in as (AUDIT_ARCH_*, from
+/// linux/audit.h), here once for seccomp's filters and the audit rules
+/// (lib/sandbox.zig, lib/audit.zig): std's AUDIT.ARCH.current does not
+/// compile in Zig 0.17. Any other, which on aarch64 is a 32-bit (AArch32)
+/// program's, kills the process: werewolf ships no 32-bit code, and the
+/// kernel has no switch to turn those calls off.
 pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
-    .aarch64 => 0xc00000b7, // AUDIT_ARCH_AARCH64
-    .x86_64 => 0xc000003e, // AUDIT_ARCH_X86_64
-    else => unreachable,
+    .aarch64 => 0xc00000b7,
+    .x86_64 => 0xc000003e,
+    else => @compileError("werewolf builds for aarch64 and x86_64"),
 };
 
 const max_calls = 512;
@@ -409,7 +410,7 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
     // A service's own filter refuses with ENOSYS, needing no listener (so
     // leash installs it after dropping CAP_SYS_ADMIN); the machine seal's,
     // on PID 1, hands the rest to seal-watch to say and count.
-    const other = if (per_service) RET_ENOSYS else RET_USER_NOTIF;
+    const other = if (per_service) RET_ENOSYS else linux.SECCOMP.RET.USER_NOTIF;
     var n: usize = 0;
     const put = struct {
         fn f(b: *[max_filter]Filter, i: *usize, code: u16, jt: u8, jf: u8, k: u32) void {
@@ -419,18 +420,18 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
     }.f;
     put(buf, &n, LD_W_ABS, 0, 0, 4); // seccomp_data.arch
     put(buf, &n, JEQ_K, 1, 0, native_arch);
-    put(buf, &n, RET_K, 0, 0, RET_KILL_PROCESS);
+    put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.KILL_PROCESS);
     put(buf, &n, LD_W_ABS, 0, 0, 0); // seccomp_data.nr
     if (@import("builtin").cpu.arch == .x86_64) {
         put(buf, &n, JGE_K, 0, 1, 0x40000000); // __X32_SYSCALL_BIT
-        put(buf, &n, RET_K, 0, 0, RET_KILL_PROCESS);
+        put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.KILL_PROCESS);
     }
     const socket = number(.socket);
     if (per_service and !promises.contains(.exec)) {
         put(buf, &n, JEQ_K, 0, 4, number(.execveat));
         put(buf, &n, LD_W_ABS, 0, 0, 48); // seccomp_data.args[4], low word: flags
         put(buf, &n, JSET_K, 0, 1, AT_EMPTY_PATH);
-        put(buf, &n, RET_K, 0, 0, RET_ALLOW);
+        put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
         put(buf, &n, RET_K, 0, 0, other);
     }
     {
@@ -449,7 +450,7 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
             put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word
             for (afs[0..m]) |af| {
                 put(buf, &n, JEQ_K, 0, 1, af);
-                put(buf, &n, RET_K, 0, 0, RET_ALLOW);
+                put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
             }
             put(buf, &n, RET_K, 0, 0, other);
         }
@@ -493,7 +494,7 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
         seen[n_seen] = nr;
         n_seen += 1;
         put(buf, &n, JEQ_K, 0, 1, nr);
-        put(buf, &n, RET_K, 0, 0, RET_ALLOW);
+        put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
     };
     put(buf, &n, RET_K, 0, 0, other);
     return buf[0..n];
@@ -595,12 +596,24 @@ test buildFilter {
     // Every promise at once fits.
     _ = buildFilter(&buf, .full, true);
     const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), false);
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, number(.read), 0));
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, socket, linux.AF.INET));
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, socket, linux.AF.INET6));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(machine, native_arch, number(.read), 0),
+    );
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(machine, native_arch, socket, linux.AF.INET),
+    );
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(machine, native_arch, socket, linux.AF.INET6),
+    );
     // A family no promise names goes to the listener, even for root.
     const AF_ALG = 38;
-    try testing.expectEqual(RET_USER_NOTIF, action(machine, native_arch, socket, AF_ALG));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.USER_NOTIF,
+        action(machine, native_arch, socket, AF_ALG),
+    );
     // The refusals by argument, and the same calls asking for nothing refused.
     // Each case: the call, its first three arguments, whether it is refused.
     const Case = struct { linux.SYS, u32, u32, u32, bool };
@@ -619,7 +632,7 @@ test buildFilter {
         .{ .clock_nanosleep, CLOCK_PROCESS_CPUTIME_ID, 0, 0, true },
         .{ .clock_nanosleep, 0, 0, 0, false }, // CLOCK_REALTIME
     }) |c| {
-        const want = if (c[4]) RET_USER_NOTIF else RET_ALLOW;
+        const want: u32 = if (c[4]) linux.SECCOMP.RET.USER_NOTIF else linux.SECCOMP.RET.ALLOW;
         const nr = number(c[0]);
         const args: [6]u32 = .{ c[1], c[2], c[3], 0, 0, 0 };
         try testing.expectEqual(want, actionArgs(machine, native_arch, nr, args));
@@ -627,25 +640,43 @@ test buildFilter {
         try testing.expectEqual(c[4], refusal(nr, .{ c[1], c[2], c[3], 0, 0, 0 }) != null);
     }
     // The call after a refusal block is still judged by its number.
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, number(.read), 0));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(machine, native_arch, number(.read), 0),
+    );
     // The machine seal hands the rest to the listener (seal-watch).
-    try testing.expectEqual(RET_USER_NOTIF, action(machine, native_arch, number(.memfd_create), 0));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.USER_NOTIF,
+        action(machine, native_arch, number(.memfd_create), 0),
+    );
     for (never) |sys| try testing.expectEqual(
-        RET_USER_NOTIF,
+        linux.SECCOMP.RET.USER_NOTIF,
         action(machine, native_arch, number(sys), 0),
     );
-    try testing.expectEqual(RET_KILL_PROCESS, action(machine, 0x40000028, 0, 0)); // AUDIT_ARCH_ARM
-    try testing.expectEqual(RET_KILL_PROCESS, action(machine, 0x40000003, 0, 0)); // AUDIT_ARCH_I386
+    try testing.expectEqual(
+        linux.SECCOMP.RET.KILL_PROCESS,
+        action(machine, 0x40000028, 0, 0),
+    ); // AUDIT_ARCH_ARM
+    try testing.expectEqual(
+        linux.SECCOMP.RET.KILL_PROCESS,
+        action(machine, 0x40000003, 0, 0),
+    ); // AUDIT_ARCH_I386
     if (@import("builtin").cpu.arch == .x86_64)
         try testing.expectEqual(
-            RET_KILL_PROCESS,
+            linux.SECCOMP.RET.KILL_PROCESS,
             action(machine, native_arch, 0x40000000 | number(.read), 0),
         );
 
     // A service's own filter refuses with ENOSYS, needing no listener.
     const service = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), true);
-    try testing.expectEqual(RET_ALLOW, action(service, native_arch, socket, linux.AF.INET));
-    try testing.expectEqual(RET_ALLOW, action(service, native_arch, socket, linux.AF.INET6));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(service, native_arch, socket, linux.AF.INET),
+    );
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(service, native_arch, socket, linux.AF.INET6),
+    );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, socket, linux.AF.UNIX));
     try testing.expectEqual(
         RET_ENOSYS,
@@ -656,7 +687,7 @@ test buildFilter {
     var unix_buf: [max_filter]Filter = undefined;
     const unix = buildFilter(&unix_buf, .initMany(&.{ .stdio, .unix }), true);
     try testing.expectEqual(
-        RET_ALLOW,
+        linux.SECCOMP.RET.ALLOW,
         action(unix, native_arch, number(.socketpair), linux.AF.UNIX),
     );
     try testing.expectEqual(
@@ -666,10 +697,13 @@ test buildFilter {
     var all_buf: [max_filter]Filter = undefined;
     const all = buildFilter(&all_buf, .initMany(&.{ .stdio, .unix, .inet }), false);
     try testing.expectEqual(
-        RET_USER_NOTIF,
+        linux.SECCOMP.RET.USER_NOTIF,
         action(all, native_arch, number(.socketpair), linux.AF.TIPC),
     );
-    try testing.expectEqual(RET_ALLOW, action(service, native_arch, number(.write), 0));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(service, native_arch, number(.write), 0),
+    );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.clone), 0));
     // The findings' risky calls, refused to a plain reader-and-server.
     for ([_]linux.SYS{
@@ -685,18 +719,21 @@ test buildFilter {
     // Without exec: execveat of a descriptor, the way leash becomes the
     // service, and nothing else that runs a program.
     try testing.expectEqual(
-        RET_ALLOW,
+        linux.SECCOMP.RET.ALLOW,
         action(service, native_arch, number(.execveat), AT_EMPTY_PATH),
     );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execveat), 0));
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execve), 0));
     const exec = buildFilter(&buf, .initMany(&.{ .stdio, .exec }), true);
-    try testing.expectEqual(RET_ALLOW, action(exec, native_arch, number(.execve), 0));
-    try testing.expectEqual(RET_ALLOW, action(exec, native_arch, number(.execveat), 0));
+    try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(exec, native_arch, number(.execve), 0));
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        action(exec, native_arch, number(.execveat), 0),
+    );
 
     // A service's filter leaves the refusals by argument to the machine's.
     try testing.expectEqual(
-        RET_ALLOW,
+        linux.SECCOMP.RET.ALLOW,
         actionArgs(service, native_arch, number(.setsockopt), .{ 3, SOL_TCP, TCP_ULP, 0, 0, 0 }),
     );
     // splice and tee are no program's here; sendfile is the machine's own.
@@ -707,7 +744,7 @@ test buildFilter {
 
     const none = buildFilter(&buf, .initMany(&.{.stdio}), true);
     try testing.expectEqual(RET_ENOSYS, action(none, native_arch, socket, linux.AF.INET));
-    try testing.expectEqual(RET_ALLOW, action(none, native_arch, number(.read), 0));
+    try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(none, native_arch, number(.read), 0));
 
     // The longest filter, every promise, still fits the kernel's 4096.
     const biggest = buildFilter(&buf, .full, true);

@@ -25,10 +25,11 @@ forms; Go, Rust and ASP.NET Core inherit it directly. PHP keeps distinct `php` a
 
 ## Service forms
 
-The [SSH bastion](bastion/README.md) and [Tailscale subnet router](tailscale/README.md)
-have security notes and tutorials for local Lima and GCP. Destinations,
-routes and credentials come from restricted boot configuration; the image
-keeps the accounts, service permissions and network ports fixed.
+The [SSH bastion](../forms/bastion/README.md) builds its users, keys and
+destinations into its image, from your form. The
+[Tailscale subnet router](tailscale/README.md) takes its routes and
+credentials from restricted boot configuration; its image keeps the
+accounts, service permissions and network ports fixed.
 
 ## Build host
 
@@ -69,13 +70,13 @@ contains the packaged runtime, not the SDK.
 
 ## With werewolf
 
-Each tutorial's form is an ordinary form, so the `werewolf` command runs it
-as it runs any other, from the repository root (`make howl` builds it):
+Each tutorial's form is an ordinary form, so `howl` runs it as it runs
+any other, from the repository root (`make howl` builds it):
 
 ```sh
-build/host/howl create example-python web            # Lima on a Mac, else QEMU here
-build/host/howl create example-python web --on gcp   # Google Compute Engine
-build/host/howl create python web --app ./myapp      # your own app, on the python form
+build/host/howl create web --with example-python            # Lima on a Mac, else QEMU here
+build/host/howl create web --with example-python --on gcp   # Google Compute Engine
+build/host/howl create web --with python --app ./myapp      # your own app, on the python form
 ```
 
 It prints the VM's address; the application answers on :8080 (PHP on :80).

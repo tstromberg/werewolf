@@ -15,6 +15,7 @@ const Certificate = std.crypto.Certificate;
 const der = Certificate.der;
 const rsa = Certificate.rsa;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const policy = @import("update-policy");
 
 /// The image key's public half, as its PEM gives it.
 pub const Key = struct {
@@ -109,10 +110,11 @@ pub const Manifest = struct {
     advisories: []const Advisory = &.{},
 
     pub const File = struct { sha256: []const u8, size: u64 };
+    /// release/advisories' line, as the manifest carries it: its date,
+    /// which no machine compares, is passed over.
     pub const Advisory = struct {
         id: []const u8,
-        date: []const u8,
-        tier: []const u8,
+        tier: policy.Tier,
         title: []const u8,
     };
 
@@ -153,7 +155,7 @@ pub fn open(
     // digits, as the updater makes its own, and nothing else.
     if (m.build.len != 16) return error.BadManifest;
     for (m.build) |c| if (!std.ascii.isDigit(c) and (c < 'a' or c > 'f')) return error.BadManifest;
-    const signed = serialTime(m.serial) catch return error.BadManifest;
+    const signed = policy.parseSerial(m.serial) catch return error.BadManifest;
     if (signed > now + 24 * 3600) return error.BadManifest;
     for (m.advisories) |a| if (!validAdvisory(a)) return error.BadManifest;
     for (Manifest.slot_files) |name|
@@ -168,85 +170,47 @@ fn checkFile(f: Manifest.File) !void {
     for (f.sha256) |c| if (!std.ascii.isHex(c) or std.ascii.isUpper(c)) return error.BadManifest;
 }
 
-/// An advisory as release/manifest checks one: WW-YEAR-NUMBER, a date, a
-/// tier, and a title of printable ASCII without quotes or backslashes.
+/// An advisory as release/manifest checks one: WW-YEAR-NUMBER and a title
+/// of printable ASCII without quotes or backslashes; its tier, a Tier, is
+/// checked as it is parsed.
 pub fn validAdvisory(a: Manifest.Advisory) bool {
     const id = a.id;
     if (id.len < 11 or id.len > 32 or !std.mem.startsWith(u8, id, "WW-") or
         id[7] != '-') return false;
     for (id[3..7]) |c| if (!std.ascii.isDigit(c)) return false;
     for (id[8..]) |c| if (!std.ascii.isDigit(c)) return false;
-    if (a.date.len != 10 or a.date[4] != '-' or a.date[7] != '-') return false;
-    for (a.date, 0..) |c, i| if (i != 4 and i != 7 and !std.ascii.isDigit(c)) return false;
-    const tiers = [_][]const u8{ "urgent", "high", "medium", "low" };
-    for (tiers) |t| {
-        if (std.mem.eql(u8, a.tier, t)) break;
-    } else return false;
     if (a.title.len == 0 or a.title.len > 200) return false;
     for (a.title) |c| if (c < ' ' or c > '~' or c == '"' or c == '\\') return false;
     return true;
 }
 
 test validAdvisory {
-    const good: Manifest.Advisory = .{
-        .id = "WW-2026-001",
-        .date = "2026-10-07",
-        .tier = "high",
-        .title = "fence: x",
-    };
+    const good: Manifest.Advisory = .{ .id = "WW-2026-001", .tier = .high, .title = "fence: x" };
     try std.testing.expect(validAdvisory(good));
     var a = good;
     a.id = "WW-26-1";
     try std.testing.expect(!validAdvisory(a));
     a = good;
-    a.tier = "severe";
-    try std.testing.expect(!validAdvisory(a));
-    a = good;
     a.title = "a \"quote\"";
     try std.testing.expect(!validAdvisory(a));
-    a = good;
-    a.date = "2026-1-07";
-    try std.testing.expect(!validAdvisory(a));
-}
-
-/// A serial, 20261006T151016Z, as seconds since the epoch.
-pub fn serialTime(serial: []const u8) !i64 {
-    if (serial.len != 16 or serial[8] != 'T' or serial[15] != 'Z') return error.BadTime;
-    var buf: [20]u8 = undefined;
-    const s = std.mem.print(&buf, "{s}-{s}-{s}T{s}:{s}:{s}Z", .{
-        serial[0..4], serial[4..6], serial[6..8], serial[9..11], serial[11..13], serial[13..15],
-    }) catch return error.BadTime;
-    return parseTime(s);
-}
-
-/// RFC 3339 in UTC, 2026-10-13T15:10:16Z, as seconds since the epoch.
-pub fn parseTime(s: []const u8) !i64 {
-    if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':' or
-        s[19] != 'Z')
-        return error.BadTime;
-    const num = struct {
-        fn f(t: []const u8) !u32 {
-            for (t) |c| if (!std.ascii.isDigit(c)) return error.BadTime;
-            return std.fmt.parseUnsigned(u32, t, 10) catch error.BadTime;
-        }
-    }.f;
-    const year = try num(s[0..4]);
-    const month = try num(s[5..7]);
-    const day = try num(s[8..10]);
-    const hour = try num(s[11..13]);
-    const minute = try num(s[14..16]);
-    const second = try num(s[17..19]);
-    if (year < 1970 or month < 1 or month > 12 or day < 1 or hour > 23 or minute > 59 or
-        second > 59) return error.BadTime;
-    const leap = std.time.epoch.isLeapYear(@intCast(year));
-    const days_in = [12]u32{ 31, if (leap) 29 else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    if (day > days_in[month - 1]) return error.BadTime;
-    var days: i64 = 0;
-    var y: u32 = 1970;
-    while (y < year) : (y += 1) days += std.time.epoch.getDaysInYear(@intCast(y));
-    for (days_in[0 .. month - 1]) |d| days += d;
-    days += day - 1;
-    return days * 86400 + @as(i64, hour) * 3600 + @as(i64, minute) * 60 + second;
+    // A tier that is not one is no advisory: the manifest is not parsed.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const parsed = try std.json.parseFromSliceLeaky(
+        Manifest.Advisory,
+        arena.allocator(),
+        \\{"id": "WW-2026-001", "date": "2026-10-07", "tier": "high", "title": "fence: x"}
+    ,
+        .{ .ignore_unknown_fields = true },
+    );
+    try std.testing.expectEqual(policy.Tier.high, parsed.tier);
+    try std.testing.expectError(error.InvalidEnumTag, std.json.parseFromSliceLeaky(
+        Manifest.Advisory,
+        arena.allocator(),
+        \\{"id": "WW-2026-001", "tier": "severe", "title": "fence: x"}
+    ,
+        .{ .ignore_unknown_fields = true },
+    ));
 }
 
 const testing = std.testing;
@@ -320,21 +284,4 @@ test "keys that are not the image key's kind" {
         \\MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
         \\-----END PUBLIC KEY-----
     ));
-}
-
-test parseTime {
-    try testing.expectEqual(signed_at + 7 * 86400, try parseTime("2026-10-13T15:10:16Z"));
-    try testing.expectEqual(0, try parseTime("1970-01-01T00:00:00Z"));
-    try testing.expectEqual(951782400, try parseTime("2000-02-29T00:00:00Z"));
-    // release/sign's "expires", which updaters from before 2026-10-08
-    // check: it must read as later than any now.
-    try testing.expect(try parseTime("9999-12-31T23:59:59Z") > signed_at + 100 * 365 * 86400);
-    for ([_][]const u8{
-        "2026-02-29T00:00:00Z",
-        "2026-13-01T00:00:00Z",
-        "2026-10-13 15:10:16Z",
-        "2026-10-13T15:10:16",
-        "+026-10-13T15:10:16Z",
-    }) |bad|
-        try testing.expectError(error.BadTime, parseTime(bad));
 }

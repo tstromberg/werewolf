@@ -8,7 +8,7 @@ exec    /usr/bin/vaultwarden
 user    vaultwarden
 pledge  stdio rpath wpath inet unix listen proc
 listen  tcp/8080
-config  admin-token /run/config/vaultwarden/admin_token
+config  admin-token /run/config/vaultwarden/admin-token
 config  settings /run/config/vaultwarden/settings.json
 setting domain url required as DOMAIN
 render  env site

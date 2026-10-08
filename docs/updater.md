@@ -72,8 +72,11 @@ A check runs only once this slot has committed, since until then the other
 slot is the one to fall back to; and `check`, `outcome` and the reboot
 each hold `lock`, so a check run by hand and the service's never meet.
 
-The build hash is the first 16 hex digits of the sha256 of the new package
-list and kernel. The same inputs give the same hash.
+`build` names what a slot holds, in the log, the reports, `attempt`,
+`pending` and `bad`: 16 hex digits, the same for the same slot. A release's
+is its manifest's, a hash of its files ([releases.md](releases.md)); a slot
+built here, before its files exist, takes the first 16 hex digits of the
+sha256 of its package list and kernel.
 
 ## Releases
 
@@ -88,7 +91,7 @@ them, a check, instead of `userland`, `kernel` and `root`:
 | --- | --- |
 | `release` | Fetch `FORM-ARCH.json` and its `.sig`, as `_update`. Believe nothing in them until the signature checks against `image.pub`: RSA PKCS#1 v1.5 over SHA-256, checked by Zig's standard library. Then refuse a manifest of another format, form or architecture, and one signed more than a day in the future. A manifest does not expire: the next release supersedes it ([releases.md](releases.md)), and its `expires` is read only by updaters from before 2026-10-08. No release of the form yet (404): `skip`. |
 | `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A release that would take a package or the kernel to an older version than this image's, in apk's order, as a slot built here may not either: `skip`, for an image built from a tree, which has no `serial`. A `build` that rolled back before: `skip`. |
-| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst` (on a distro's disk, after bite, `stage0-bitten.zst`, which adds the modules of its filesystem), `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
+| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` (on a distro's disk, after bite, `stage0-bitten.zst`, which adds the modules of its filesystem, as `stage0.zst`), `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
 
 The CVEs, the install, the report and the reboot are as for a built slot;
 the package changes are the manifest's `packages` against the running
@@ -225,7 +228,8 @@ it was written. Alpine's own patches on top of upstream are not counted.
     lock                held while a check, outcome or reboot runs
     pending             the staged slot: its build, and for each tier of
                         its fixes when this machine first saw one
-    rebooted            when the updater last rebooted, for `down`
+    rebooted            when the updater last rebooted, RFC 3339, for
+                        `down`
     cve-tiers.json      the last CVE tiers feed this machine took, and
     cve-tiers.json.sig  its signature, checked again whenever it is read
     cve-tiers.json.serial

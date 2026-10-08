@@ -77,8 +77,9 @@ pub fn network(m: *Machine) void {
 }
 
 /// The static address, and where it came from: the command line's
-/// werewolf.ip, or else the config tar's network file, checked as
-/// howl pack checks it (lib/network.zig). The command line wins,
+/// werewolf.ip, or else the config tar's network file, each checked as
+/// howl pack checks it (lib/network.zig; stage0 checked the command line's
+/// with lib/cmdline.zig, by the same rules). The command line wins,
 /// since whoever set it holds the boot; a file refused is said and
 /// left, as if absent.
 fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {

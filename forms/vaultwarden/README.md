@@ -9,10 +9,10 @@ Bitwarden password manager's apps, and its web vault.
 | Sends | nothing: no icons fetched, no push relay, no mail, no breach lookups |
 | Runs as | `vaultwarden` (uid 220), leashed |
 | Keeps | the vault, SQLite in WAL mode, and attachments in `/data/svc/vaultwarden` |
-| Config | `vaultwarden/admin_token`, an Argon2id PHC string (`vaultwarden hash`, or as [forms/vaultwarden/test/config](test/config) makes one); setting `domain` (the site's https URL, required) |
+| Config | `vaultwarden/admin-token`, an Argon2id PHC string (`vaultwarden hash`, or as [forms/vaultwarden/test/config](test/config) makes one); setting `domain` (the site's https URL, required) |
 
 ```sh
-build/host/howl pack vaultwarden -o config.tar --config config --domain https://vault.example.com
+build/host/howl pack --with vaultwarden -o config.tar --config config --domain https://vault.example.com
 ```
 
 ## Built by melange, until Wolfi ships it

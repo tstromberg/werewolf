@@ -23,7 +23,7 @@ lists every file and key; `make list-forms` shows the chains;
 | `node`, `python`, `ruby`, `jre` | `app` | running an application on :8080 |
 | `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](../forms/postgresql/README.md)) |
 | `demo` | `postgresql` | nginx and the status page ([demo.md](../forms/demo/README.md)) |
-| `prod-ssh` | `prod` | sshd, for people who log in |
+| `prod-ssh` | `prod`, with `sshd` | sshd, for people who log in with a security key |
 | `bastion` | `prod` | forwarding-only SSH, with explicit destinations ([bastion.md](../forms/bastion/README.md)) |
 | `tailscale` | `prod` | userspace subnet routing ([tailscale.md](../forms/tailscale/README.md)) |
 | `caddy` | `prod` | a web server that gets its own certificates ([caddy.md](../forms/caddy/README.md)) |
@@ -41,8 +41,8 @@ lists every file and key; `make list-forms` shows the chains;
 | `ollama` | `prod` | models served on the CPU, behind a login of your choosing ([ollama.md](../forms/ollama/README.md)) |
 | `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
 | `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
-| `sshd`, `qemu-host` | `minimal` | sshd with a shell; and a host for virtual machines |
-| `lima` | `prod` | the Lima test vehicle (`make lima`) |
+| `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
+| `lima` | `prod`, with `sshd` | the Lima test vehicle (`make lima`), which takes Lima's own key file |
 
 Every form boots the same way: stage0 opens its `root.erofs` read-only,
 through dm-verity, and hands over to init
@@ -154,12 +154,16 @@ it will not stays with its form.
 Use `config NAME PATH` in a service file to give that service one file:
 
 ```text
-config authorized-keys /run/config/bastion/authorized_keys
+config users /run/config/nats/users.conf
 ```
 
-For service `sshd`, this creates `/run/svc/sshd/authorized-keys`, owned by its
+For service `nats`, this creates `/run/svc/nats/users`, owned by its
 user with mode `0600`. Point the program's configuration at that copy.
-The service cannot read the rest of `/run/config`.
+The service cannot read the rest of `/run/config`. NAME is
+`[a-z][a-z0-9-]*`, as a setting's is, since `howl pack` takes it as
+`--NAME FILE`. Name the file in the tar NAME too, `admin-password` from
+`/run/config/FORM/admin-password`, or by its format where that has a
+name of its own (`tls.crt`, `users.json`); never with `_`.
 
 Sources must be beneath `/run/config`; destinations are plain names, not
 paths. A service may name up to 32 files, each at most 64 KiB. Missing or
@@ -178,21 +182,21 @@ instead.
 
 ## Settings
 
-Values that differ per machine but are not secret, such as a bastion's
-destinations or an application's database URL, are *settings*. A service
+Values that differ per machine but are not secret, such as a router's
+routes or an application's database URL, are *settings*. A service
 file declares each one with a type, and says where they go:
 
 ```text
-config  settings /run/config/bastion/settings.json
-setting destinations addrport... as PermitOpen
-render  conf destinations
+config  settings /run/config/tailscale/settings.json
+setting routes cidr... as advertiseRoutes
+render  json config.json from /etc/tailscale/config.json
 ```
 
 The `config settings` line names the file in the boot config that gives
 the values, and may name one that is missing:
 
 ```json
-{"destinations": ["10.20.0.10:22"]}
+{"routes": ["10.20.0.0/24"]}
 ```
 
 At each start, leash copies it into the service's directory and runs
@@ -223,7 +227,7 @@ Each explains declarative configuration
 and what automatic updates do, including their limits for application code.
 
 An application is built into the image, as Chainguard's are with apko,
-not fetched by the machine: a form of your own includes a runtime form,
+not fetched by the machine: a form of your own is built on a runtime form,
 names the Wolfi packages it needs, and carries the application's files. So
 the code is in the verified, read-only root, built, signed, updated and
 rolled back with the rest, and nothing writable ever runs. What the
@@ -233,12 +237,12 @@ application keeps is data, in `/data/svc/app`, its working directory.
 
 Where a runtime form already starts the application as it should be
 started, its files are all a machine needs. `--app DIR` lays a directory
-where the form keeps its application (its `etc/werewolf/app`: `/usr/lib/app`
+where the form keeps its application (form.yaml's `app`: `/usr/lib/app`
 for `python`, `node` and `jre`; nginx's html root for `nginx` and `php`):
 
 ```sh
-build/host/howl create python web --app ./myapp     # ./myapp/main.py, on :8080
-build/host/howl build python --app ./myapp          # the release files, for elsewhere
+build/host/howl create web --with python --app ./myapp     # ./myapp/main.py, on :8080
+build/host/howl build --with python --app ./myapp          # the release files, for elsewhere
 ```
 
 DIR is what the application's own toolchain made (`go build`, `dotnet

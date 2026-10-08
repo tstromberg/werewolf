@@ -37,7 +37,7 @@ GPT, two partitions:
 
 | Partition | Filesystem | Holds |
 | --- | --- | --- |
-| EFI system, 256 MiB | FAT32 | `EFI/BOOT/BOOTAA64.EFI` (systemd-boot; `BOOTX64.EFI` on x86_64), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz`, `werewolf/{a,b}/initramfs.zst` |
+| EFI system, 256 MiB | FAT32 | `EFI/BOOT/BOOTAA64.EFI` (systemd-boot; `BOOTX64.EFI` on x86_64), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz`, `werewolf/{a,b}/stage0.zst` |
 | werewolf, the rest | ext4 | `werewolf/{a,b}/root.erofs`, `werewolf/data/`, `werewolf/config.tar` |
 
 The firmware finds systemd-boot at the removable-media path, so no NVRAM
@@ -62,8 +62,8 @@ title werewolf
 sort-key werewolf
 version 20261006T120000Z
 linux /werewolf/a/vmlinuz
-initrd /werewolf/a/initramfs.zst
-options console=... init=/init panic=10 softlockup_panic=1 werewolf.slot=a werewolf.victim=UUID:/werewolf werewolf.esp=UUID
+initrd /werewolf/a/stage0.zst
+options console=... init=/init panic=10 softlockup_panic=1 werewolf.slot=a werewolf.victim=UUID:/werewolf werewolf.esp=XXXX-XXXX
 ```
 
 systemd-boot sorts entries by `sort-key`, then newest `version` first, with
@@ -76,8 +76,8 @@ The updater recognises the disk by `werewolf.esp=` on the command line, as
 it recognises a bitten machine by `werewolf.grubenv=`. It builds the other
 slot as now, then:
 
-1. Mounts the EFI partition by UUID, `nosuid,nodev,noexec`.
-2. Writes the other slot's `vmlinuz` and `initramfs.zst`, each to a
+1. Mounts the EFI partition by its FAT serial, `nosuid,nodev,noexec`.
+2. Writes the other slot's `vmlinuz` and `stage0.zst`, each to a
    temporary name and renamed into place, and `root.erofs` to the ext4
    partition as now.
 3. Removes any entry for the other slot, and writes
@@ -105,7 +105,7 @@ fallback, and the next update's target.
 | Makefile | `make disk`: the slot, systemd-boot from a pinned Wolfi package (`boot/boot.yaml`), and `boot/mkdisk`, which writes the GPT with a small Zig program (`boot/gpt.zig`, so no `sfdisk`), the EFI partition with mtools, and the ext4 partition with `mke2fs -d`, then makes every file root's with `debugfs`. On a Mac: `brew install mtools e2fsprogs` |
 | updater | a second install path for `werewolf.esp=`; GRUB's stays |
 | `slot-keep` | for `werewolf.esp=`, rename the entry instead of setting `saved_entry` |
-| `minimal.modules` | `fat vfat nls_cp437 nls_utf8`, for the EFI partition |
+| minimal's `modules` | `fat vfat nls_cp437 nls_utf8`, for the EFI partition |
 | stage0, init | nothing: the ext4 partition is a victim filesystem |
 | `make demo` | boots the demo's disk in Lima like a distro's, with no Debian and no bite |
 

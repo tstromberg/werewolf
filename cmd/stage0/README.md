@@ -87,7 +87,7 @@ There is none; the superblock is read directly every 10 ms.
 | A changed root image | dm-verity against the initramfs's root hash: a changed block fails to read. |
 | Unsigned modules | Lockdown at integrity before modload; then the loader closes. |
 | A disk standing in for the victim | Two matching UUIDs refused. |
-| A crafted command line | Checked: UUID, plain directory, slot a or b. |
+| A crafted command line | Every `werewolf.*` word checked, once each, by `lib/cmdline.zig`, which every later program reads the line with; one refused panics here. |
 | A slot that boots but cannot serve | The deadman reboots it after ten minutes. |
 
 ## Reliability Considerations

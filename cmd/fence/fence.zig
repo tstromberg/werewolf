@@ -52,7 +52,7 @@
 //!   3. CAP_NET_ADMIN, which could change the rules, and CAP_NET_RAW, whose
 //!      packet sockets are below them, leave the bounding set, so no process
 //!      after it, root included, holds either until the machine reboots;
-//!      but for a form that allows them (etc/werewolf/allow/netadmin,
+//!      but for a form that allows them (lib/allow.zig: netadmin,
 //!      packet). DHCP's renewal needs neither from here: init starts it
 //!      before fence, as it starts the mount broker, and it keeps the
 //!      CAP_NET_ADMIN and packet socket it opened then. CAP_SYS_ADMIN
@@ -76,16 +76,26 @@
 //! The policy, one entry a line, numbers only, `all` for every user:
 //!
 //!     listen tcp 22
+//!     listen tcp 5432 loopback
 //!     connect 0 tcp 443
 //!     connect all udp 53
 //!     connect 0 icmp
 //!     metadata 68
+//!
+//! A `loopback` listen is a port the machine's own processes may bind and
+//! reach (step 2 allows both) that the network never does: no rule in step
+//! 1 names it, so a packet arriving for it is dropped like any other, and
+//! only loopback, which always passes, carries it. A database a service
+//! beside it uses declares its port so, and nothing outside sees it.
 
 const std = @import("std");
+const sandbox = @import("sandbox");
+const allow = @import("allow");
 const linux = std.os.linux;
 const Io = std.Io;
 
 const policy_path = "/usr/share/werewolf/net";
+const oci_path = "/usr/share/werewolf/oci";
 const max_args = 16;
 const max_entries = 64;
 
@@ -135,6 +145,7 @@ pub fn main(init: std.process.Init) !void {
         "fence",
         .{
             .listen = p.listen[0..p.nlisten],
+            .loopback = p.loopback[0..p.nloopback],
             .connect = p.connectText(&out, &text),
             .metadata = p.metadata[0..p.nmetadata],
             .ipv6 = hasIpv6(),
@@ -152,7 +163,10 @@ pub fn main(init: std.process.Init) !void {
         @ptrCast(init.minimal.environ.block.slice.ptr),
     );
     _ = sys(rc, "execve") catch {};
-    log.event("error", .{ .step = "exec", .detail = detail, .errno = errnoName(detail_errno) });
+    log.event(
+        "error",
+        .{ .step = "exec", .detail = sandbox.failed, .errno = errnoName(sandbox.failed_errno) },
+    );
     linux.exit_group(1);
 }
 
@@ -163,9 +177,9 @@ fn baseName(path: [*:0]const u8) [*:0]const u8 {
     return s[slash + 1 ..].ptr;
 }
 
+/// The step under way; what failed in it, and how, is sandbox.failed and
+/// sandbox.failed_errno.
 var step: []const u8 = "start";
-var detail: []const u8 = "";
-var detail_errno: linux.E = .SUCCESS;
 
 /// The error event for the step that failed, then exit 1: fail closed.
 fn fail(log: *Log, err: anyerror) noreturn {
@@ -174,26 +188,20 @@ fn fail(log: *Log, err: anyerror) noreturn {
         .{
             .step = step,
             .@"error" = @errorName(err),
-            .detail = detail,
-            .errno = errnoName(detail_errno),
+            .detail = sandbox.failed,
+            .errno = errnoName(sandbox.failed_errno),
         },
     );
     linux.exit_group(1);
 }
 
-fn errnoName(e: linux.E) []const u8 {
-    return std.enums.tagName(linux.E, e) orelse "unknown";
-}
+const errnoName = sandbox.errnoName;
 
-/// The capabilities fence takes from every process after it, and the
-/// allowance that keeps each, if any: the two the policy rests on, and
+/// The capabilities fence takes from every process after it, but one the
+/// form allows (lib/allow.zig): the two the policy rests on, and
 /// CAP_SYS_ADMIN, the largest of root's, which only Landlock's
 /// restriction, above, needed.
-const caps = [_]struct { name: []const u8, n: u6, allow: [:0]const u8 }{
-    .{ .name = "net_admin", .n = 12, .allow = "/etc/werewolf/allow/netadmin" },
-    .{ .name = "net_raw", .n = 13, .allow = "/etc/werewolf/allow/packet" },
-    .{ .name = "sys_admin", .n = 21, .allow = "" },
-};
+const caps = [_]allow.Cap{ .net_admin, .net_raw, .sys_admin };
 
 /// Drop each of caps from the bounding set but those the form allows; the
 /// names of those kept.
@@ -201,10 +209,12 @@ fn dropCaps(kept: *[caps.len][]const u8) ![]const []const u8 {
     const PR_CAPBSET_DROP = 24;
     var n: usize = 0;
     for (caps) |c| {
-        if (c.allow.len > 0 and linux.errno(linux.access(c.allow, linux.F_OK)) == .SUCCESS) {
-            kept[n] = c.name;
+        if (c.allowance()) |a| if (allow.has(a)) {
+            kept[n] = @tagName(c);
             n += 1;
-        } else _ = try sys(linux.prctl(PR_CAPBSET_DROP, c.n, 0, 0, 0), "prctl");
+            continue;
+        };
+        _ = try sys(linux.prctl(PR_CAPBSET_DROP, @backingInt(c), 0, 0, 0), "prctl");
     }
     return kept[0..n];
 }
@@ -291,8 +301,12 @@ fn v6(comptime head: []const u8, comptime last: u8) [16]u8 {
 }
 
 const Policy = struct {
+    /// The served ports: bound by their services, reached from the network.
     listen: [max_entries]u16 = undefined,
     nlisten: usize = 0,
+    /// The loopback ports: bound and reached on this machine alone.
+    loopback: [max_entries]u16 = undefined,
+    nloopback: usize = 0,
     connect: [max_entries]Connect = undefined,
     nconnect: usize = 0,
     metadata: [max_entries]u32 = undefined,
@@ -316,9 +330,9 @@ const Policy = struct {
     }
 };
 
-/// The compiled policy: `listen tcp PORT`, `connect UID|all PROTO [PORT]`
-/// and `metadata UID` lines, and nothing else. The build wrote it; anything
-/// it does not expect is an error, not a guess.
+/// The compiled policy: `listen tcp PORT [loopback]`, `connect UID|all PROTO
+/// [PORT] [public]` and `metadata UID` lines, and nothing else. The build
+/// wrote it; anything it does not expect is an error, not a guess.
 fn parsePolicy(text: []const u8) !Policy {
     var p: Policy = .{};
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -328,9 +342,17 @@ fn parsePolicy(text: []const u8) !Policy {
         const key = words.next() orelse continue;
         if (std.mem.eql(u8, key, "listen")) {
             if (!std.mem.eql(u8, words.next() orelse "", "tcp")) return error.BadPolicy;
-            if (p.nlisten == max_entries) return error.BadPolicy;
-            p.listen[p.nlisten] = try port(words.next());
-            p.nlisten += 1;
+            const l = try port(words.next());
+            if (std.mem.eql(u8, words.peek() orelse "", "loopback")) {
+                _ = words.next();
+                if (p.nloopback == max_entries) return error.BadPolicy;
+                p.loopback[p.nloopback] = l;
+                p.nloopback += 1;
+            } else {
+                if (p.nlisten == max_entries) return error.BadPolicy;
+                p.listen[p.nlisten] = l;
+                p.nlisten += 1;
+            }
         } else if (std.mem.eql(u8, key, "connect")) {
             const who = words.next() orelse return error.BadPolicy;
             const uid: ?u32 = if (std.mem.eql(u8, who, "all")) null else try user(who);
@@ -587,7 +609,7 @@ fn routeRules(p: Policy) !void {
             // NLM_F_EXCL the kernel's EEXIST says it is in already, not
             // that anything failed, and PID 1 must not end on it.
             send(nl, ruleMessage(&msg, seq, RTM_NEWRULE, r), seq, "add rule") catch |err|
-                if (err != error.SystemCall or detail_errno != .EXIST) return err;
+                if (err != error.SystemCall or sandbox.failed_errno != .EXIST) return err;
             seq += 1;
         }
         var msg: [256]u8 = undefined;
@@ -715,12 +737,6 @@ fn ackError(reply: []const u8, seq: u32) ?i32 {
 
 // --- the ports: Landlock -----------------------------------------------------
 
-const LANDLOCK_ACCESS_NET_BIND_TCP = 1;
-const LANDLOCK_ACCESS_NET_CONNECT_TCP = 2;
-const LANDLOCK_RULE_NET_PORT = 2;
-const LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET = 1;
-const LANDLOCK_SCOPE_SIGNAL = 2;
-
 /// Restrict this process, and so everything it execs, to binding TCP only
 /// to the policy's ports and to port 0, and to connecting TCP only to the
 /// ports the policy names: those some user may connect to, the served
@@ -734,43 +750,44 @@ const LANDLOCK_SCOPE_SIGNAL = 2;
 /// connect anywhere, from the one process most exposed. Files and
 /// everything else are left to the rules above and each service's jail.
 fn restrict(p: Policy) !void {
-    const LANDLOCK_CREATE_RULESET_VERSION = 1;
-    const abi = linux.syscall3(.landlock_create_ruleset, 0, 0, LANDLOCK_CREATE_RULESET_VERSION);
-    _ = try sys(abi, "landlock version");
-    if (abi < 4) {
-        detail = "Landlock without network rules (ABI 4)";
+    // Every filesystem right this kernel knows, TCP's two, and from ABI 6
+    // scoped: no signal to, and no abstract UNIX socket of, a process
+    // outside the domain. Those are the ones init started before fence,
+    // the mount broker, DHCP's renewal and stage0's deadman, which root in
+    // the domain could otherwise stop or kill; they are asked on their path
+    // socket, or not at all, and the kernel ends them at reboot.
+    const ruleset: sandbox.Ruleset = try .init();
+    if (ruleset.abi < 4) {
+        sandbox.failed = "Landlock without network rules (ABI 4)";
         return error.LandlockTooOld;
     }
-    // Every filesystem right this kernel knows: TRUNCATE from ABI 3,
-    // IOCTL_DEV from 5.
-    const fs_all: u64 = if (abi >= 5) 0xffff else 0x7fff;
-    // struct landlock_ruleset_attr: handled_access_fs, handled_access_net,
-    // and from ABI 6 scoped: no signal to, and no abstract UNIX socket
-    // of, a process outside the domain. Those are the ones init started
-    // before fence, the mount broker, DHCP's renewal and stage0's
-    // deadman, which root in the domain could otherwise stop or kill; they
-    // are asked on their path socket, or not at all, and the kernel ends
-    // them at reboot.
-    const attr = [3]u64{
-        fs_all,
-        LANDLOCK_ACCESS_NET_BIND_TCP | LANDLOCK_ACCESS_NET_CONNECT_TCP,
-        if (abi >= 6) LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET | LANDLOCK_SCOPE_SIGNAL else 0,
-    };
-    const attr_size: usize = if (abi >= 6) 24 else 16;
-    const ruleset: i32 = @intCast(try sys(
-        linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), attr_size, 0),
-        "landlock ruleset",
-    ));
-    defer _ = linux.close(ruleset);
-    try allowPort(ruleset, LANDLOCK_ACCESS_NET_BIND_TCP, 0);
+    try ruleset.port(sandbox.bind_tcp, 0);
     for (p.listen[0..p.nlisten]) |l| {
-        try allowPort(ruleset, LANDLOCK_ACCESS_NET_BIND_TCP, l);
-        try allowPort(ruleset, LANDLOCK_ACCESS_NET_CONNECT_TCP, l);
+        try ruleset.port(sandbox.bind_tcp, l);
+        try ruleset.port(sandbox.connect_tcp, l);
+    }
+    // A loopback port is bound and reached here alone: the rules above
+    // name it nowhere, so nothing arriving from the network finds it.
+    for (p.loopback[0..p.nloopback]) |l| {
+        try ruleset.port(sandbox.bind_tcp, l);
+        try ruleset.port(sandbox.connect_tcp, l);
     }
     for (p.connect[0..p.nconnect]) |c| if (c.proto == .tcp)
-        try allowPort(ruleset, LANDLOCK_ACCESS_NET_CONNECT_TCP, c.port);
-    if (p.nmetadata > 0) try allowPort(ruleset, LANDLOCK_ACCESS_NET_CONNECT_TCP, metadata_port);
-    for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access & fs_all);
+        try ruleset.port(sandbox.connect_tcp, c.port);
+    if (p.nmetadata > 0) try ruleset.port(sandbox.connect_tcp, metadata_port);
+    for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access);
+    // The writable places init bound beneath each image root
+    // (cmd/init/oci.zig). Landlock judges a path by the mounts it crosses
+    // walking up, not by where a bind came from, so /run's and /data's
+    // rules do not reach them, and each needs one of its own.
+    var oci_buf: [16384]u8 = undefined;
+    var binds: Binds = .{ .text = try readOptional(oci_path, &oci_buf) };
+    while (binds.next()) |b| try allowPath(
+        ruleset,
+        linux.AT.FDCWD,
+        b.path,
+        if (b.sockets) writable | sandbox.make_sock | sandbox.make_fifo else writable,
+    );
     // Reading: everything at the root but /dev, each entry by itself, so
     // /dev gets only what is named here and below.
     const root: i32 = @intCast(try sys(
@@ -793,17 +810,17 @@ fn restrict(p: Policy) !void {
             // Landlock takes a directory's rights on a directory alone;
             // a link (bin, to usr/bin) resolves to one that has its own.
             const access: u64 = if (ent.type == linux.DT.DIR)
-                fs_read_file | fs_read_dir
+                sandbox.read_file | sandbox.read_dir
             else
-                fs_read_file;
+                sandbox.read_file;
             try allowPath(ruleset, root, name, access);
         }
     }
     // Pseudo-terminals, where the form allows them (cmd/init mounts devpts
     // then, and only then).
-    if (linux.errno(linux.access("/etc/werewolf/allow/pty", linux.F_OK)) == .SUCCESS) {
-        try allowPath(ruleset, linux.AT.FDCWD, "/dev/ptmx", fs_terminal & fs_all);
-        try allowPath(ruleset, linux.AT.FDCWD, "/dev/pts", fs_terminal & fs_all);
+    if (allow.has(.pty)) {
+        try allowPath(ruleset, linux.AT.FDCWD, "/dev/ptmx", terminal);
+        try allowPath(ruleset, linux.AT.FDCWD, "/dev/pts", terminal);
     }
     // Every terminal: the console the kernel was given (ttyS0, ttyAMA0,
     // hvc0, whichever the machine has), the virtual consoles, and the rest.
@@ -828,26 +845,22 @@ fn restrict(p: Policy) !void {
                     ruleset,
                     dev,
                     name,
-                    (fs_read_file | fs_ioctl_dev) & fs_all,
+                    sandbox.read_file | sandbox.ioctl_dev,
                 );
                 continue;
             }
             if (!std.mem.startsWith(u8, s_name, "tty") and
                 !std.mem.startsWith(u8, s_name, "hvc")) continue;
-            try allowPath(ruleset, dev, name, fs_terminal & fs_all);
+            try allowPath(ruleset, dev, name, terminal);
         }
     }
     // As root, with CAP_SYS_ADMIN, no_new_privs is not needed, and is not
     // set: it would follow into every process on the machine. Every access
-    // the domain refuses is audited, for every program after this one too
-    // (LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON, ABI 7): without it the kernel
-    // says nothing once fence has become runit, so a service reaching for a
-    // disk, a sysctl or an undeclared port would leave no trace.
-    const log_new_exec: usize = if (abi >= 7) 1 << 1 else 0;
-    _ = try sys(
-        linux.syscall2(.landlock_restrict_self, @intCast(ruleset), log_new_exec),
-        "landlock restrict",
-    );
+    // the domain refuses is audited, for every program after this one too:
+    // without it the kernel says nothing once fence has become runit, so a
+    // service reaching for a disk, a sysctl or an undeclared port would
+    // leave no trace.
+    try ruleset.restrict();
 }
 
 /// Whether gpiochip, a /dev name, is a PL061, the GPIO controller QEMU's
@@ -879,109 +892,127 @@ fn compatibleWith(list: []const u8, want: []const u8) bool {
     return false;
 }
 
-/// A rule for access (bind or connect) on a TCP port.
-fn allowPort(ruleset: i32, access: u64, port_number: u16) !void {
-    const rule = [2]u64{ access, port_number }; // struct landlock_net_port_attr
-    _ = try sys(
-        linux.syscall4(
-            .landlock_add_rule,
-            @intCast(ruleset),
-            LANDLOCK_RULE_NET_PORT,
-            @intFromPtr(&rule),
-            0,
-        ),
-        "landlock rule",
-    );
-}
-
 /// access to path, beneath dir, in ruleset; nothing if there is no such
 /// place, as a form may lack /data or /dev/ptmx.
-fn allowPath(ruleset: i32, dir: i32, path: [*:0]const u8, access: u64) !void {
+fn allowPath(ruleset: sandbox.Ruleset, dir: i32, path: [*:0]const u8, access: u64) !void {
     const fd = linux.openat(dir, path, .{ .PATH = true, .CLOEXEC = true }, 0);
     if (linux.errno(fd) == .NOENT) return;
-    const rule = PathBeneath{
-        .allowed_access = access,
-        .parent_fd = @intCast(try sys(fd, "open a place for Landlock")),
-    };
-    defer _ = linux.close(rule.parent_fd);
-    _ = try sys(
-        linux.syscall4(
-            .landlock_add_rule,
-            @intCast(ruleset),
-            LANDLOCK_RULE_PATH_BENEATH,
-            @intFromPtr(&rule),
-            0,
-        ),
-        "landlock path rule",
-    );
+    const place: i32 = @intCast(try sys(fd, "open a place for Landlock"));
+    defer _ = linux.close(place);
+    try ruleset.add(place, access);
 }
-
-/// struct landlock_path_beneath_attr, packed as the kernel declares it.
-const PathBeneath = extern struct {
-    allowed_access: u64 align(4),
-    parent_fd: i32,
-
-    comptime {
-        std.debug.assert(@sizeOf(PathBeneath) == 12);
-    }
-};
-
-const LANDLOCK_RULE_PATH_BENEATH = 1;
-
-// Landlock's filesystem rights (linux/landlock.h).
-const fs_execute: u64 = 0x1;
-const fs_write_file: u64 = 0x2;
-const fs_read_file: u64 = 0x4;
-const fs_read_dir: u64 = 0x8;
-const fs_remove_dir: u64 = 0x10;
-const fs_remove_file: u64 = 0x20;
-const fs_make_char: u64 = 0x40;
-const fs_make_dir: u64 = 0x80;
-const fs_make_reg: u64 = 0x100;
-const fs_make_sock: u64 = 0x200;
-const fs_make_fifo: u64 = 0x400;
-const fs_make_block: u64 = 0x800;
-const fs_make_sym: u64 = 0x1000;
-const fs_refer: u64 = 0x2000;
-const fs_truncate: u64 = 0x4000;
-const fs_ioctl_dev: u64 = 0x8000;
 
 /// What a writable place allows: everything a directory's owner does with
 /// files and directories, and links between them.
-const fs_writable: u64 = fs_read_file | fs_write_file | fs_read_dir | fs_remove_dir |
-    fs_remove_file |
-    fs_make_dir | fs_make_reg | fs_make_sym | fs_refer | fs_truncate;
-const fs_device: u64 = fs_read_file | fs_write_file;
-const fs_terminal: u64 = fs_device | fs_ioctl_dev;
+const writable: u64 = sandbox.read_file | sandbox.write_file | sandbox.read_dir |
+    sandbox.remove_dir | sandbox.remove_file | sandbox.make_dir | sandbox.make_reg |
+    sandbox.make_sym | sandbox.refer | sandbox.truncate;
+const device: u64 = sandbox.read_file | sandbox.write_file;
+const terminal: u64 = device | sandbox.ioctl_dev;
 
 /// The machine's files, as every process sees them. Rights are added up
 /// along the path, so /usr reading everything and /run writing everything
 /// beneath it make /run read-write. / itself may only be listed: reading
 /// is given to each of its entries but /dev (restrict).
 const files = [_]struct { path: [*:0]const u8, access: u64 }{
-    .{ .path = "/", .access = fs_read_dir },
-    .{ .path = "/usr", .access = fs_execute },
+    .{ .path = "/", .access = sandbox.read_dir },
+    .{ .path = "/usr", .access = sandbox.execute },
+    // The image roots (docs/design/adhoc.md): in the verified root like
+    // /usr, and run like it; what is written beneath one is a bind init
+    // made, given below.
+    .{ .path = "/oci", .access = sandbox.execute },
     // runit's FIFOs and the services' sockets.
-    .{ .path = "/run", .access = fs_writable | fs_make_sock | fs_make_fifo },
-    .{ .path = "/tmp", .access = fs_writable },
-    .{ .path = "/var/tmp", .access = fs_writable },
-    .{ .path = "/dev/shm", .access = fs_writable },
+    .{ .path = "/run", .access = writable | sandbox.make_sock | sandbox.make_fifo },
+    .{ .path = "/tmp", .access = writable },
+    .{ .path = "/var/tmp", .access = writable },
+    .{ .path = "/dev/shm", .access = writable },
     // nodev, so a device node made here, as apk may unpack one for a slot
     // being built, opens nothing.
-    .{ .path = "/data", .access = fs_writable | fs_make_char | fs_make_block },
-    .{ .path = "/dev/null", .access = fs_device },
-    .{ .path = "/dev/zero", .access = fs_device },
-    .{ .path = "/dev/full", .access = fs_device },
-    .{ .path = "/dev/random", .access = fs_device },
-    .{ .path = "/dev/urandom", .access = fs_device },
-    .{ .path = "/dev/kmsg", .access = fs_device },
-    .{ .path = "/dev/console", .access = fs_terminal },
+    .{ .path = "/data", .access = writable | sandbox.make_char | sandbox.make_block },
+    .{ .path = "/dev/null", .access = device },
+    .{ .path = "/dev/zero", .access = device },
+    .{ .path = "/dev/full", .access = device },
+    .{ .path = "/dev/random", .access = device },
+    .{ .path = "/dev/urandom", .access = device },
+    .{ .path = "/dev/kmsg", .access = device },
+    .{ .path = "/dev/console", .access = terminal },
     // The power button, as an input event (cmd/power-button): found by
     // listing, read, never given an ioctl.
-    .{ .path = "/dev/input", .access = fs_read_file | fs_read_dir },
+    .{ .path = "/dev/input", .access = sandbox.read_file | sandbox.read_dir },
+};
+
+/// The places written beneath the image roots, from the build's list of
+/// rooted services (/usr/share/werewolf/oci): each root's /tmp and /run,
+/// where a program may make its sockets as it would in the machine's
+/// /run, its /data, and each path its service file writes. A line that is not one the build writes
+/// is skipped: init skipped it too, so there is no mount there.
+const Binds = struct {
+    text: []const u8,
+    at: usize = 0,
+    dir: []const u8 = "",
+    /// Pending for the current root: its /tmp, its /run, then its /data.
+    pending: u8 = 0,
+    buf: [1024]u8 = undefined,
+
+    const Bind = struct { path: [*:0]const u8, sockets: bool };
+
+    fn next(b: *Binds) ?Bind {
+        while (true) {
+            if (b.pending > 0) {
+                b.pending -= 1;
+                return b.make(switch (b.pending) {
+                    2 => "/tmp",
+                    1 => "/run",
+                    else => "/data",
+                }, b.pending > 0);
+            }
+            if (b.at >= b.text.len) return null;
+            const end = std.mem.findScalarPos(u8, b.text, b.at, '\n') orelse b.text.len;
+            const line = b.text[b.at..end];
+            b.at = end + 1;
+            var words = std.mem.tokenizeScalar(u8, line, ' ');
+            const key = words.next() orelse continue;
+            if (std.mem.eql(u8, key, "root")) {
+                _ = words.next() orelse continue;
+                b.dir = words.next() orelse continue;
+                if (b.dir.len == 0 or b.dir[0] != '/') {
+                    b.dir = "";
+                    continue;
+                }
+                b.pending = 3;
+            } else if (std.mem.eql(u8, key, "write") and b.dir.len > 0) {
+                _ = words.next() orelse continue;
+                const path = words.next() orelse continue;
+                if (path.len == 0 or path[0] != '/') continue;
+                return b.make(path, false) orelse continue;
+            }
+        }
+    }
+
+    fn make(b: *Binds, path: []const u8, sockets: bool) ?Bind {
+        const s = std.mem.print(b.buf[0 .. b.buf.len - 1], "{s}{s}", .{ b.dir, path }) catch
+            return null;
+        b.buf[s.len] = 0;
+        return .{ .path = b.buf[0..s.len :0].ptr, .sockets = sockets };
+    }
 };
 
 // --- files, errors, logging ----------------------------------------------------
+
+/// A list the build may have written, or "" where it did not.
+fn readOptional(path: [*:0]const u8, buf: []u8) ![]const u8 {
+    const fd = linux.openat(linux.AT.FDCWD, path, .{ .CLOEXEC = true, .NOFOLLOW = true }, 0);
+    if (linux.errno(fd) == .NOENT) return "";
+    const f: i32 = @intCast(try sys(fd, "open a list"));
+    defer _ = linux.close(f);
+    var got: usize = 0;
+    while (true) {
+        if (got == buf.len) return error.PolicyTooLarge;
+        const n = try sys(linux.read(f, buf[got..].ptr, buf.len - got), "read a list");
+        if (n == 0) return buf[0..got];
+        got += n;
+    }
+}
 
 fn readPolicy(buf: []u8) ![]const u8 {
     const fd: i32 = @intCast(try sys(
@@ -998,13 +1029,7 @@ fn readPolicy(buf: []u8) ![]const u8 {
     }
 }
 
-fn sys(rc: usize, comptime what: []const u8) !usize {
-    const err = linux.errno(rc);
-    if (err == .SUCCESS) return rc;
-    detail = what;
-    detail_errno = err;
-    return error.SystemCall;
-}
+const sys = sandbox.sys;
 
 /// JSON lines on stdout: `fence: {"time":...,"event":...,...}`.
 const Log = struct {
@@ -1042,7 +1067,7 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 // --- tests -------------------------------------------------------------------
 
 const example = "connect 0 tcp 443\nconnect 0 udp 53\nconnect all udp 53\nconnect 0 " ++
-    "icmp\nlisten tcp 22\nmetadata 68\n";
+    "icmp\nlisten tcp 22\nlisten tcp 5432 loopback\nmetadata 68\n";
 
 test compatibleWith {
     try std.testing.expect(compatibleWith("arm,pl061\x00arm,primecell\x00", "arm,pl061"));
@@ -1059,6 +1084,7 @@ test "a program runs under its own name" {
 test "policies" {
     const p = try parsePolicy(example);
     try std.testing.expectEqualSlices(u16, &.{22}, p.listen[0..p.nlisten]);
+    try std.testing.expectEqualSlices(u16, &.{5432}, p.loopback[0..p.nloopback]);
     try std.testing.expectEqualSlices(u32, &.{68}, p.metadata[0..p.nmetadata]);
     try std.testing.expectEqual(4, p.nconnect);
     try std.testing.expectEqual(null, p.connect[2].uid);
@@ -1080,6 +1106,9 @@ test "policies" {
         "listen tcp 0\n",
         "listen tcp 70000\n",
         "listen tcp 22 23\n",
+        "listen tcp 22 loopback loopback\n",
+        "listen tcp loopback\n",
+        "listen tcp 22 public\n",
         "metadata _cloud\n",
         "allow everything\n",
         "listen tcp\n",
@@ -1148,6 +1177,43 @@ test "the plan, in the order the kernel tries it" {
         try std.testing.expectEqual(x.uid, t.uid);
         try std.testing.expectEqual(x.dport, t.dport);
         try std.testing.expectEqual(x.proto, t.proto);
+    }
+}
+
+test "the binds beneath image roots" {
+    var b: Binds = .{
+        .text = "root web /oci/web _oci-web\nwrite web /var/cache/web\nwrite web /srv\n" ++
+            "nonsense here\nroot db /oci/db _oci-db\nwrite db relative\n",
+    };
+    const want = [_]struct { []const u8, bool }{
+        .{ "/oci/web/tmp", true },
+        .{ "/oci/web/run", true },
+        .{ "/oci/web/data", false },
+        .{ "/oci/web/var/cache/web", false },
+        .{ "/oci/web/srv", false },
+        .{ "/oci/db/tmp", true },
+        .{ "/oci/db/run", true },
+        .{ "/oci/db/data", false },
+    };
+    for (want) |w| {
+        const got = b.next().?;
+        try std.testing.expectEqualStrings(w[0], std.mem.span(got.path));
+        try std.testing.expectEqual(w[1], got.sockets);
+    }
+    try std.testing.expectEqual(null, b.next());
+    var none: Binds = .{ .text = "" };
+    try std.testing.expectEqual(null, none.next());
+}
+
+test "a loopback port is in no rule" {
+    var rules: [max_rules]Rule = undefined;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
+        var served = false;
+        for (plan(try parsePolicy(example), fam, &rules)) |x| {
+            try std.testing.expect(x.dport != 5432 and x.sport != 5432);
+            if (x.dport == 22 and x.priority == pref.in_allow) served = true;
+        }
+        try std.testing.expect(served);
     }
 }
 

@@ -147,15 +147,29 @@ expect {
 # ...\nass=82". So what the console says is gathered as it comes, whole
 # kernel records are taken out of it, and the line is looked for in what
 # remains. A panic is a kernel record, so it is looked for before.
+#
+# On x86_64 under KVM, a boot whose posture line a record cut this way has
+# every time stopped there: the rest of the line reached the console only
+# once the monitor was spoken to, 300 s on, as if the UART's transmitter
+# waited on an interrupt it never got (every such log; none passed). A
+# byte sent to the machine raises its receive interrupt, which also
+# drains the transmitter, so one is sent after a while with no line, and
+# the log says so: a boot that needs it is still a boot to look into.
 set seen ""
 set deadline [expr {[clock seconds] + $timeout}]
+set poke [expr {[clock seconds] + 20}]
 while 1 {
-	set left [expr {$deadline - [clock seconds]}]
-	if {$left <= 0} { give_up "posture: no posture line in $timeout s" 1 }
+	set now [clock seconds]
+	if {$now >= $deadline} { give_up "posture: no posture line in $timeout s" 1 }
+	if {$poke > 0 && $now >= $poke} {
+		set poke 0
+		puts $log_chan "\nwerewolf-check: no posture line after 20 s; sending a carriage return"
+		send "\r"
+	}
 	expect {
-		-timeout $left
+		-timeout [expr {min($deadline, $poke > 0 ? $poke : $deadline) - $now}]
 		-re {.+} { append seen $expect_out(0,string) }
-		timeout { give_up "posture: no posture line in $timeout s" 1 }
+		timeout {}
 		eof { give_up "posture: QEMU exited" }
 	}
 	if {[regexp {Kernel panic[^\r\n]*} $seen why]} {
@@ -236,12 +250,34 @@ proc host {cmd} {
 # from the config logs in; a session cannot forward a port, which would
 # carry traffic past fence; and passwords are not offered at all. In that
 # order, since sshd holds a failed login against its source for a while.
+# Root's key is a security key's, made with the software one (make's
+# TEST_SK); where sshd takes security keys alone (the form does not excuse
+# network-ssh-security-keys), root's other key, a file, is refused last,
+# with publickey the only method left.
 if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	set level ERROR
 	if {[info exists env(SSH_MODE)] && ([string match "bastion*" $env(SSH_MODE)] || $env(SSH_MODE) eq "sftpgo" || $env(SSH_MODE) eq "gitea")} { set level DEBUG1 }
 	set ssh [list ssh -F /dev/null -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=$level -o IdentitiesOnly=yes]
 	set key [list -i $env(SSH_KEY)]
+	# sshd's login: the security key's, where make made one.
+	set login $key
+	if {[info exists env(SSH_SK_KEY)] && [file exists $env(SSH_SK_KEY)]} {
+		lappend ssh -o SecurityKeyProvider=$env(SSH_SK_PROVIDER)
+		set login [list -i $env(SSH_SK_KEY)]
+	}
+	set sk_only [expr {[lsearch -regexp $known {^\??network-ssh-security-keys$}] < 0}]
+	# The key file refused, as USER, where sshd takes security keys alone.
+	proc refused {check user args} {
+		global ssh key failed
+		lassign [host [list {*}$ssh {*}$key {*}$args $user@127.0.0.1 true]] status out
+		if {$status != 0 && [string match "*Permission denied (publickey)*" $out]} {
+			say ok $check
+		} else {
+			say FAIL $check "a key file was not refused, or something but a key was offered:\n$out"
+			incr failed
+		}
+	}
 	if {[info exists env(SSH_MODE)] && $env(SSH_MODE) eq "gitea"} {
 		# A git user, from the host: a repository made and the run's key
 		# added through the API as the administrator gitea-init made;
@@ -329,46 +365,52 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 			say ok sftp-keys-only
 		} else { say FAIL sftp-keys-only $out; incr failed }
 	} elseif {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} {
-		set deny_destination 127.0.0.1:22
-		if {$env(SSH_MODE) eq "bastion-config"} {
-			lassign [host [list {*}$ssh {*}$key -W 127.0.0.1:22 bastion@127.0.0.1]] status out
-			if {$status == 0 && [string match "*SSH-2.0-OpenSSH*" $out]} {
-				say ok bastion-permitted-destination
-			} else { say FAIL bastion-permitted-destination $out; incr failed }
-			set deny_destination 127.0.0.2:22
-		}
+		# make check-bastion's form: root's security key is user check's,
+		# who reaches 127.0.0.1:22 alone; 127.0.0.2:22 is user narrow's,
+		# in the bastion's PermitOpen, never check's.
+		lassign [host [list {*}$ssh {*}$login -W 127.0.0.1:22 bastion@127.0.0.1]] status out
+		if {$status == 0 && [string match "*SSH-2.0-OpenSSH*" $out]} {
+			say ok bastion-permitted-destination
+		} else { say FAIL bastion-permitted-destination $out; incr failed }
 		foreach {check args pattern} {
 			bastion-no-session {bastion@127.0.0.1 true} {*open failed*}
-			bastion-no-destination {-W 127.0.0.1:22 bastion@127.0.0.1} {*administratively prohibited*}
+			bastion-no-destination {-W 127.0.0.3:22 bastion@127.0.0.1} {*administratively prohibited*}
+			bastion-not-anothers-destination {-W 127.0.0.2:22 bastion@127.0.0.1} {*administratively prohibited*}
 			bastion-no-remote {-o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 bastion@127.0.0.1 true} {*forwarding failed*}
 			bastion-pq-required {-o KexAlgorithms=curve25519-sha256 bastion@127.0.0.1 true} {*no matching key exchange method*}
 		} {
-			if {$check eq "bastion-no-destination"} { set args [list -W $deny_destination bastion@127.0.0.1] }
-			lassign [host [list {*}$ssh {*}$key {*}$args]] status out
+			lassign [host [list {*}$ssh {*}$login {*}$args]] status out
 			if {$status != 0 && [string match $pattern $out]} {
 				say ok $check
 			} else { say FAIL $check $out; incr failed }
 		}
+		if {$sk_only} { refused bastion-security-keys-only bastion }
 	} else {
 	set in 0
 	for {set i 0} {$i < 30 && !$in} {incr i} {
-		lassign [host [list {*}$ssh {*}$key root@127.0.0.1 id -u]] status out
-		if {$status == 0 && [string trim $out] eq "0"} { set in 1 } else { after 1000 }
+		lassign [host [list {*}$ssh {*}$login root@127.0.0.1 id -u]] status out
+		# The last line: ssh may say first that it asked for a touch.
+		if {$status == 0 && [lindex [split [string trim $out] \n] end] eq "0"} { set in 1 } else { after 1000 }
 	}
 	if {$in} { say ok ssh-login } else { say FAIL ssh-login "root's key did not log in:\n$out"; incr failed }
-	lassign [host [list {*}$ssh {*}$key -o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 root@127.0.0.1 true]] status out
+	lassign [host [list {*}$ssh {*}$login -o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 root@127.0.0.1 true]] status out
 	if {$status != 0 && [string match "*forwarding failed*" $out]} {
 		say ok ssh-no-forwarding
 	} else {
 		say FAIL ssh-no-forwarding "a session could forward a port:\n$out"
 		incr failed
 	}
-	lassign [host [list {*}$ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive root@127.0.0.1 true]] status out
-	if {$status != 0 && [string match "*Permission denied (publickey)*" $out]} {
-		say ok ssh-keys-only
+	if {$sk_only} {
+		# One failed login, not two: sshd holds the first against the second.
+		refused ssh-security-keys-only root
 	} else {
-		say FAIL ssh-keys-only "something but a key was offered:\n$out"
-		incr failed
+		lassign [host [list {*}$ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive root@127.0.0.1 true]] status out
+		if {$status != 0 && [string match "*Permission denied (publickey)*" $out]} {
+			say ok ssh-keys-only
+		} else {
+			say FAIL ssh-keys-only "something but a key was offered:\n$out"
+			incr failed
+		}
 	}
 }
 }

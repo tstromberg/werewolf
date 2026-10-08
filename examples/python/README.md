@@ -22,7 +22,7 @@ image gives each replacement VM the same starting configuration.
 
 ```sh
 make howl
-build/host/howl create example-python web --greeting "Hello from a setting"
+build/host/howl create web --with example-python --greeting "Hello from a setting"
 curl -f http://ADDRESS:8080/          # the address create printed
 build/host/howl delete web
 ```

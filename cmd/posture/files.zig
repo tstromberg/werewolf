@@ -107,7 +107,7 @@ pub fn check(p: *Posture) !void {
         .result = if (vfat.len == 0) .pass else .fail,
         .detail = vfat,
     });
-    const nosuid = try missingOption(p.gpa, mounts, "nosuid", &.{});
+    const nosuid = try missingOption(p.gpa, mounts, "nosuid", &.{}, &.{});
     try p.add(.{
         .id = "files-nosuid-everywhere",
         .area = "files",
@@ -117,7 +117,7 @@ pub fn check(p: *Posture) !void {
         .result = if (nosuid.len == 0) .pass else .fail,
         .detail = nosuid,
     });
-    const noexec = try missingOption(p.gpa, mounts, "noexec", &.{"/"});
+    const noexec = try missingOption(p.gpa, mounts, "noexec", &.{"/"}, &.{});
     try p.add(.{
         .id = "files-noexec-everywhere",
         .area = "files",
@@ -127,14 +127,17 @@ pub fn check(p: *Posture) !void {
         .result = if (noexec.len == 0) .pass else .fail,
         .detail = noexec,
     });
-    // /dev and /dev/pts hold device nodes, terminals among them.
-    const nodev = try missingOption(p.gpa, mounts, "nodev", &.{ "/dev", "/dev/pts" });
+    // The filesystems of device nodes, /dev and /dev/pts, and a device
+    // bound from /dev into an image root (cmd/init/oci.zig), are the
+    // devices; everything else refuses them.
+    const nodev = try missingOption(p.gpa, mounts, "nodev", &.{}, &.{ "devtmpfs", "devpts" });
     try p.add(.{
         .id = "files-nodev-everywhere",
         .area = "files",
         .name = "Device files only in /dev",
         .why = "A device file made anywhere else is not honoured.",
-        .how = "every mount in /proc/self/mounts but /dev and /dev/pts is nodev",
+        .how = "every mount in /proc/self/mounts but the device filesystems (devtmpfs, devpts) " ++
+            "is nodev",
         .result = if (nodev.len == 0) .pass else .fail,
         .detail = nodev,
     });
@@ -146,7 +149,8 @@ pub fn check(p: *Posture) !void {
         p.gpa,
         mounts,
         "nosymfollow",
-        &.{ "/", "/proc", "/sys", "/dev", "/data" },
+        &.{ "/", "/data" },
+        &.{ "proc", "sysfs", "devtmpfs" },
     );
     const planted = followsLink(p);
     try p.add(.{
@@ -155,8 +159,9 @@ pub fn check(p: *Posture) !void {
         .name = "Links in writable places not followed",
         .why = "A link planted in /tmp or another shared place leads nowhere, whoever " ++
             "follows it, root included: the kernel refuses to follow it.",
-        .how = "every mount in /proc/self/mounts but /, /proc, /sys, /dev and /data is " ++
-            "nosymfollow, and opening a link this program makes in /tmp is refused (ELOOP)",
+        .how = "every mount in /proc/self/mounts but /, /data and the kernel's own (proc, " ++
+            "sysfs, devtmpfs) is nosymfollow, and opening a link this program makes in /tmp " ++
+            "is refused (ELOOP)",
         .result = if (follows.len == 0 and !planted) .pass else .fail,
         .detail = if (planted) "a link in /tmp was followed" else follows,
     });

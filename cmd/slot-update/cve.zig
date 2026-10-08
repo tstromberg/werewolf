@@ -10,8 +10,9 @@
 //!             and send root a line per CVE.
 //!
 //! Root checks every line again here (packageFixes, kernelFixes) before any
-//! goes in the report. apk's version order and the kernel's, which both
-//! sides use, are here too.
+//! goes in the report. apk's version order, which both sides use, is here
+//! too; the sources' own shapes are lib/cve.zig's, as the tiers feed's
+//! writer reads them.
 
 const std = @import("std");
 const Io = std.Io;
@@ -19,6 +20,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const sandbox = @import("sandbox");
+const sources = @import("cve");
 
 /// The most a fetcher may write, the memory a reader may map, all told,
 /// and the longest kernel CVE title root takes.
@@ -342,63 +344,6 @@ fn validVersion(s: []const u8) bool {
     return r.t == .end;
 }
 
-/// linux-virt-6.18.55-r0, or 6.18.55, as {6, 18, 55}.
-pub fn kernelVersion(s: []const u8) ?[3]u32 {
-    var v = s;
-    if (std.mem.startsWith(u8, v, "linux-virt-")) v = v["linux-virt-".len..];
-    if (std.mem.findScalar(u8, v, '-')) |i| v = v[0..i];
-    var out: [3]u32 = .{ 0, 0, 0 };
-    var it = std.mem.splitScalar(u8, v, '.');
-    for (&out) |*part| {
-        const field = it.next() orelse return null;
-        // Digits alone: parseInt would also take "+" and "_".
-        if (field.len == 0 or field.len > 9) return null;
-        for (field) |c| if (!std.ascii.isDigit(c)) return null;
-        part.* = std.fmt.parseInt(u32, field, 10) catch return null;
-    }
-    if (it.next() != null) return null;
-    return out;
-}
-
-fn kernelLess(a: [3]u32, b: [3]u32) bool {
-    return std.mem.order(u32, &a, &b) == .lt;
-}
-
-/// The parts of a kernel CNA record (CVE JSON 5) that say which stable
-/// release fixed it on which branch.
-const KernelRecord = struct {
-    cveMetadata: struct { cveId: []const u8 },
-    containers: struct {
-        cna: struct {
-            title: []const u8 = "",
-            affected: []const struct {
-                versions: []const struct {
-                    version: []const u8,
-                    status: []const u8,
-                    lessThanOrEqual: ?[]const u8 = null,
-                    versionType: ?[]const u8 = null,
-                } = &.{},
-            } = &.{},
-        },
-    },
-};
-
-/// The version that fixed this CVE on branch, if it is in (old, new].
-fn kernelFixedIn(rec: KernelRecord, branch: []const u8, old: [3]u32, new: [3]u32) ?[]const u8 {
-    for (rec.containers.cna.affected) |a| {
-        for (a.versions) |v| {
-            if (!std.mem.eql(u8, v.status, "unaffected")) continue;
-            if (!std.mem.eql(u8, v.versionType orelse "", "semver")) continue;
-            const le = v.lessThanOrEqual orelse continue;
-            if (!std.mem.endsWith(u8, le, ".*") or
-                !std.mem.eql(u8, le[0 .. le.len - 2], branch)) continue;
-            const fixed = kernelVersion(v.version) orelse continue;
-            if (kernelLess(old, fixed) and !kernelLess(new, fixed)) return v.version;
-        }
-    }
-    return null;
-}
-
 /// Wolfi's security.json, as the reader's lines, "INDEX FIXED CVE": a CVE
 /// fixed at version FIXED, in the window of origins[INDEX].
 fn secdbLines(
@@ -408,7 +353,7 @@ fn secdbLines(
     w: *Io.Writer,
 ) !void {
     const db = try std.json.parseFromSliceLeaky(
-        SecDb,
+        sources.SecDb,
         gpa,
         json,
         .{ .ignore_unknown_fields = true },
@@ -423,7 +368,7 @@ fn secdbLines(
             while (it.next()) |e| {
                 if (!inWindow(e.key_ptr.*, o.from, o.to)) continue;
                 for (e.value_ptr.*) |id| {
-                    if (validCve(id)) try w.print("{d} {s} {s}\n", .{ i, e.key_ptr.*, id });
+                    if (sources.validCve(id)) try w.print("{d} {s} {s}\n", .{ i, e.key_ptr.*, id });
                 }
             }
         }
@@ -446,7 +391,7 @@ pub fn packageFixes(
         const i = std.fmt.parseUnsigned(usize, f.next().?, 10) catch return error.BadLine;
         const fixed = f.next() orelse return error.BadLine;
         const id = f.next() orelse return error.BadLine;
-        if (f.next() != null or i >= origins.len or !validCve(id)) return error.BadLine;
+        if (f.next() != null or i >= origins.len or !sources.validCve(id)) return error.BadLine;
         if (!inWindow(fixed, origins[i].from, origins[i].to)) return error.BadLine;
         try cves[i].append(gpa, id);
     }
@@ -475,15 +420,6 @@ fn inWindow(fixed: []const u8, from: []const u8, to: []const u8) bool {
         apkOrder(fixed, from) == .gt and apkOrder(fixed, to) != .gt;
 }
 
-/// CVE-2026-52988: the year, and four digits or more.
-fn validCve(id: []const u8) bool {
-    if (id.len < 13 or id.len > 32 or !std.mem.startsWith(u8, id, "CVE-") or
-        id[8] != '-') return false;
-    for (id[4..8]) |c| if (!std.ascii.isDigit(c)) return false;
-    for (id[9..]) |c| if (!std.ascii.isDigit(c)) return false;
-    return true;
-}
-
 /// The kernel CNA's tarball, as the reader's lines, "CVE FIXED TITLE": each
 /// CVE fixed on branch in (old, new], with its title made one line.
 fn kernelLines(
@@ -506,19 +442,22 @@ fn kernelLines(
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
     while (try it.next()) |file| {
-        if (file.kind != .file or !isKernelRecord(file.name)) continue;
+        if (file.kind != .file or !sources.isKernelRecord(file.name)) continue;
         _ = scratch.reset(.retain_capacity);
         const s = scratch.allocator();
         var body: Io.Writer.Allocating = .init(s);
         try it.streamRemaining(file, &body.writer);
         const rec = std.json.parseFromSliceLeaky(
-            KernelRecord,
+            sources.KernelRecord,
             s,
             body.written(),
             .{ .ignore_unknown_fields = true },
         ) catch continue;
-        const fixed = kernelFixedIn(rec, branch, old, new) orelse continue;
-        if (!validCve(rec.cveMetadata.cveId)) continue;
+        // Fixed on the branch, in (old, new].
+        const fixed = sources.kernelFixedOn(rec, branch) orelse continue;
+        const v = sources.kernelVersion(fixed).?;
+        if (!sources.kernelLess(old, v) or sources.kernelLess(new, v)) continue;
+        if (!sources.validCve(rec.cveMetadata.cveId)) continue;
         try w.print(
             "{s} {s} {s}\n",
             .{ rec.cveMetadata.cveId, fixed, try oneLine(s, rec.containers.cna.title) },
@@ -562,8 +501,6 @@ test "versions too long to hold are refused, not overflowed" {
     try std.testing.expect(!validVersion("99999999999999999999"));
     try std.testing.expect(!validVersion("1.99999999999999999999-r0"));
     try std.testing.expect(validVersion("12345678901234567-r0"));
-    try std.testing.expectEqual(@as(?[3]u32, null), kernelVersion("+6.1_8.5_5"));
-    try std.testing.expectEqual(@as(?[3]u32, null), kernelVersion("6.18."));
 }
 
 /// The reader's lines from kernelLines, checked: a CVE id, a version on
@@ -577,9 +514,10 @@ pub fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) !
         const id = f.next().?;
         const fixed = f.next() orelse return error.BadLine;
         const title = f.rest();
-        const v = kernelVersion(fixed) orelse return error.BadLine;
-        if (!validCve(id) or v[0] != new[0] or v[1] != new[1] or !kernelLess(old, v) or
-            kernelLess(new, v)) return error.BadLine;
+        const v = sources.kernelVersion(fixed) orelse return error.BadLine;
+        if (!sources.validCve(id) or v[0] != new[0] or v[1] != new[1] or
+            !sources.kernelLess(old, v) or
+            sources.kernelLess(new, v)) return error.BadLine;
         if (title.len > max_title or !printable(title)) return error.BadLine;
         try out.append(gpa, .{ .id = id, .fixed_in = fixed, .title = title });
     }
@@ -590,23 +528,6 @@ pub fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) !
     }.lt);
     return out.items;
 }
-
-/// vulns-master/cve/published/2026/CVE-2026-52988.json
-fn isKernelRecord(name: []const u8) bool {
-    const base = name[(std.mem.findScalarLast(u8, name, '/') orelse return false) + 1 ..];
-    return std.mem.indexOf(u8, name, "/cve/published/") != null and
-        std.mem.startsWith(u8, base, "CVE-") and std.mem.endsWith(u8, base, ".json");
-}
-
-/// Wolfi's security.json, as much of it as is used.
-const SecDb = struct {
-    packages: []const struct {
-        pkg: struct {
-            name: []const u8,
-            secfixes: ?std.json.ArrayHashMap([]const []const u8) = null,
-        },
-    },
-};
 
 fn lessString(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
@@ -689,56 +610,6 @@ test apkOrder {
     }) |v| try testing.expect(!validVersion(v));
 }
 
-test kernelVersion {
-    try testing.expectEqual([3]u32{ 6, 18, 55 }, kernelVersion("linux-virt-6.18.55-r0").?);
-    try testing.expectEqual([3]u32{ 6, 18, 42 }, kernelVersion("6.18.42").?);
-    try testing.expectEqual(null, kernelVersion("6.18"));
-    try testing.expectEqual(null, kernelVersion("6.18.x"));
-}
-
-test "kernel CVE window" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const json =
-        \\{"cveMetadata":{"cveId":"CVE-2026-52988"},"containers":{"cna":{"title":"netfilter: x",
-        \\ "affected":[{"versions":[{"version":"0","lessThan":"5.15","status":"unaffected","versionType":"semver"},
-        \\   {"version":"6.12.101","lessThanOrEqual":"6.12.*","status":"unaffected","versionType":"semver"},
-        \\   {"version":"6.18.55","lessThanOrEqual":"6.18.*","status":"unaffected","versionType":"semver"},
-        \\   {"version":"abc","lessThan":"def","status":"affected","versionType":"git"}]}]}}}
-    ;
-    const rec = try std.json.parseFromSliceLeaky(
-        KernelRecord,
-        arena.allocator(),
-        json,
-        .{ .ignore_unknown_fields = true },
-    );
-    try testing.expectEqualStrings(
-        "6.18.55",
-        kernelFixedIn(rec, "6.18", .{ 6, 18, 54 }, .{ 6, 18, 55 }).?,
-    );
-    try testing.expectEqualStrings(
-        "6.18.55",
-        kernelFixedIn(rec, "6.18", .{ 6, 18, 1 }, .{ 6, 18, 60 }).?,
-    );
-    try testing.expectEqual(null, kernelFixedIn(rec, "6.18", .{ 6, 18, 55 }, .{ 6, 18, 60 }));
-    try testing.expectEqual(null, kernelFixedIn(rec, "6.18", .{ 6, 18, 50 }, .{ 6, 18, 54 }));
-    try testing.expectEqual(null, kernelFixedIn(rec, "6.1", .{ 6, 1, 1 }, .{ 6, 1, 999 }));
-    try testing.expect(isKernelRecord("vulns-master/cve/published/2026/CVE-2026-52988.json"));
-    try testing.expect(!isKernelRecord("vulns-master/cve/published/2026/CVE-2026-52988.mbox"));
-    try testing.expect(!isKernelRecord("vulns-master/cve/rejected/2026/CVE-2026-1.json"));
-}
-
-test "secdb parses with versions as keys" {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const db = try std.json.parseFromSliceLeaky(SecDb, arena.allocator(),
-        \\{"apkurl":"x","packages":[{"pkg":{"name":"zlib","secfixes":{"0":["CVE-2026-22184"],"1.3.2.1_rc20260601-r0":["CVE-2026-85091","GHSA-x"]}}},{"pkg":{"name":"none"}}]}
-    , .{ .ignore_unknown_fields = true });
-    try testing.expectEqual(2, db.packages.len);
-    try testing.expectEqual(2, db.packages[0].pkg.secfixes.?.map.count());
-    try testing.expectEqual(null, db.packages[1].pkg.secfixes);
-}
-
 test "package CVEs, from a reader and checked" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -818,19 +689,4 @@ test "kernel CVEs, from a reader and checked" {
     long[max_title - 1] = 0xc3;
     long[max_title] = 0xa9;
     try testing.expectEqual(max_title - 1, (try oneLine(a, &long)).len);
-}
-
-test validCve {
-    for ([_][]const u8{
-        "CVE-2026-0001",
-        "CVE-1999-1234567",
-    }) |id| try testing.expect(validCve(id));
-    for ([_][]const u8{
-        "CVE-2026-001",
-        "cve-2026-0001",
-        "CVE-2026-0001 ",
-        "CVE-20260-0001",
-        "GHSA-2026-0001",
-        "CVE-2026-0001a",
-    }) |id| try testing.expect(!validCve(id));
 }

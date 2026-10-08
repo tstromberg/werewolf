@@ -14,7 +14,7 @@ installed:
 
 ```sh
 make howl
-build/host/howl create example-python web --app ./myapp --greeting "Hello"
+build/host/howl create web --with example-python --app ./myapp --greeting "Hello"
 ```
 
 `./myapp` is the application's directory (step 1 below writes one).
@@ -152,7 +152,7 @@ forms it includes) with *overlays* laid on top: each form's directory
 (`forms/NAME/`), werewolf's programs, and `APP`, last. Every overlay is a
 tree that mirrors the root: `$W/stage/usr/lib/app/main.py` above is
 `/usr/lib/app/main.py` on the machine. A runtime form says where it keeps
-its application in `etc/werewolf/app`: `/usr/lib/app` for `python`, `node`
+its application in form.yaml's `app`: `/usr/lib/app` for `python`, `node`
 and `jre`; nginx's html root, `/usr/share/nginx/html`, for `nginx` and `php`.
 
 `APP` is what `--app` does. For anything deployed more than once, a form
@@ -197,7 +197,7 @@ render  env app.env
 
 The application may write only `/run/svc/app` and `/data/svc/app`, its
 working directory, which outlives reboots and updates. It may bind only
-the ports it lists, and reach only what the form's `.net` file allows
+the ports it lists, and reach only what the form's form.yaml `net` allows
 (`forms/python/form.yaml`: `listen tcp/8080`); a database elsewhere is a line
 there, `connect app tcp/5432`. A program that starts differently needs a
 form with its own service file ([forms.md](forms.md#a-python-web-server)).

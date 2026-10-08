@@ -1,9 +1,14 @@
-# This form does not include the interactive-login configuration in minimal.
+# This form does not take the sshd form's interactive-login configuration.
+# What form.yaml's sshd: says (form.conf, written by the build), before
+# anything here: sshd takes a keyword's first value.
+Include /etc/ssh/sshd_config.d/*.conf
 Port 22
 AddressFamily inet
 HostKey /data/svc/sshd/host-key
 PidFile /run/svc/sshd/sshd.pid
-AuthorizedKeysFile /run/svc/sshd/authorized-keys
+# Its users' keys, each held to its user's destinations, from form.yaml's
+# bastion: users: (lib/sshd.zig).
+AuthorizedKeysFile /etc/ssh/bastion/authorized_keys
 AllowUsers bastion
 PermitRootLogin no
 AuthenticationMethods publickey
@@ -15,10 +20,14 @@ UsePAM no
 StrictModes yes
 KexAlgorithms mlkem768x25519-sha256,sntrup761x25519-sha512,sntrup761x25519-sha512@openssh.com
 HostKeyAlgorithms ssh-ed25519
-PubkeyAcceptedAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com
+# A security key, touched, as every werewolf sshd takes (the sshd form's
+# werewolf.conf): a key file copied off a laptop forwards nothing.
+PubkeyAcceptedAlgorithms sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com
+PubkeyAuthOptions touch-required
 MACs -*sha1*,umac-64*
 AllowTcpForwarding local
-Include /run/svc/sshd/destinations
+# Every user's destinations, before PermitOpen none: sshd takes the first.
+Include /etc/ssh/bastion/permit-open
 PermitOpen none
 PermitListen none
 AllowStreamLocalForwarding no

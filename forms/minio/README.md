@@ -15,7 +15,7 @@ application.
 ```sh
 printf '%s' admin >config/minio/root_user
 openssl rand -base64 24 | tr -d '\n' >config/minio/root_password
-build/host/howl pack minio -o config.tar --config config
+build/host/howl pack --with minio -o config.tar --config config
 mc alias set store https://s3.example.com admin "$(cat config/minio/root_password)"
 mc mb store/backups && mc admin user add store restic ...
 ```
