@@ -1,20 +1,22 @@
 #!/bin/sh
-# ci-setup [apko | zig]: install what `make test lint check` needs, on
+# ci-setup [apko] [zig]: install what `make test lint check` needs, on
 # GitHub's Ubuntu 26.04 runners and make ci's VM: tools/install-deps's
 # tools, without asking, and /dev/kvm opened to the user who runs the
-# checks. With `apko` or `zig`, install that alone, for jobs that only
+# checks. With `apko`, `zig` or both, install only those, for jobs that
 # resolve packages or build a tool. Run as root. Used by
 # .github/workflows/check.yml, release.yml, update.yml and test/lima-ci.
 # Like install-deps, it does only what is not done yet, so it runs again
 # in a second.
 set -eu
-case ${1:-} in
-'' | apko | zig) ;;
-*)
-	echo "usage: ci-setup [apko | zig]" >&2
-	exit 2
-	;;
-esac
+for a; do
+	case $a in
+	apko | zig) ;;
+	*)
+		echo "usage: ci-setup [apko] [zig]" >&2
+		exit 2
+		;;
+	esac
+done
 "$(dirname "$0")/../tools/install-deps" -y "$@"
 [ -z "${1:-}" ] || exit 0
 

@@ -320,8 +320,8 @@ is in: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on arm64,
 `native`. [test/ci-setup](../test/ci-setup) installs the tools with
 [tools/install-deps](../tools/install-deps), as `make install-deps` does
 anywhere: Ubuntu's packages, and apko and Zig pinned by version and
-sha256; `ci-setup apko` installs apko alone, for jobs that only resolve
-packages. Each job keeps its logs when it fails.
+sha256; `ci-setup apko zig` installs those two alone, for the release job
+that only resolves packages. Each job keeps its logs when it fails.
 
 The x86_64 runner has KVM, so it emulates fast and runs every group. The
 arm64 runner has none: a full boot there emulates under TCG, slowly. So arm64

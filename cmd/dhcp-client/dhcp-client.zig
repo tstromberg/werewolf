@@ -390,6 +390,11 @@ const Engine = struct {
         };
         var wait: i64 = 250;
         while (nowMs() < deadline) {
+            // secs: the seconds since the lease's first broadcast, as RFC
+            // 2131 has every client say, and some servers act on; 0 in
+            // every message before.
+            const secs: u16 = @intCast(@min(e.since() / 1000, 0xffff));
+            std.mem.writeInt(u16, out[28 + 8 ..][0..2], secs, .big);
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
             e.sent +|= 1;
             const spread: i64 = newXid() % @as(u32, @intCast(wait));
@@ -1098,6 +1103,9 @@ fn message(
     if (server) |a| opts.put(buf, &i, 54, &a);
     opts.put(buf, &i, 55, &wanted);
     opts.put(buf, &i, 57, &.{ 0x05, 0xdc }); // replies up to 1500 bytes
+    // The client identifier, Ethernet and the MAC, as dhclient and
+    // systemd-networkd send it: a server may key its leases by it.
+    opts.put(buf, &i, 61, &([1]u8{1} ++ mac));
     buf[i] = 255;
     // BOOTP's minimum: some servers drop anything shorter.
     return buf[0..@max(i + 1, 300)];
@@ -1473,6 +1481,9 @@ test "messages" {
         &.{ 53, 1, 3, 50, 4, 10, 128, 0, 5, 54, 4, 169, 254, 169, 254 },
         r[240..255],
     );
+
+    const id = std.mem.find(u8, r[240..], &([2]u8{ 61, 7 } ++ [1]u8{1} ++ test_mac));
+    try std.testing.expect(id != null);
 
     const renewal = message(&buf, 3, test_xid, test_mac, .{ 10, 128, 0, 5 }, null, null);
     try std.testing.expectEqualSlices(u8, &.{ 10, 128, 0, 5 }, renewal[12..16]);
