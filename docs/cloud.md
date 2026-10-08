@@ -111,4 +111,5 @@ reaches init.
   ([releases.md](releases.md#deploying)).
 - Every cloud is tested against stand-ins under QEMU, with the firmware's
   strings and the metadata server faked, on every `make check`
-  ([testing.md](testing.md)); GCP also for real, by `make check-gcp`.
+  ([testing.md](testing.md)); GCP, AWS and Azure also for real, by `make
+  check-gcp`, `make check-aws` and `make check-azure`.

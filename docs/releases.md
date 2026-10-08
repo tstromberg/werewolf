@@ -195,9 +195,9 @@ az vm create -g RG -n web-1 --attach-os-disk web-1 --os-type Linux --security-ty
 `prod` carries each cloud's devices (`forms/prod/form.yaml`): virtio, GCP's
 virtio-scsi, NVMe and gVNIC, AWS's ENA and NVMe, and Azure's Hyper-V disks
 and synthetic NIC. Each is tested where it is absent, and the metadata
-fetch against stand-ins for each cloud ([cloud.md](cloud.md)). GCP's
-steps run for real in `make check-gcp`; AWS's and Azure's have not been
-run against the clouds themselves.
+fetch against stand-ins for each cloud ([cloud.md](cloud.md)). Each
+cloud's steps also run for real, in `make check-gcp`, `make check-aws`
+and `make check-azure` ([testing.md](testing.md)).
 
 The disk is 8 GiB, and stays so: a provider's larger disk leaves the rest
 unused ([native-boot.md](design/native-boot.md#open-questions)).

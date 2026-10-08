@@ -27,7 +27,3 @@ modules:
   # and iocharset in Alpine's kernel. Loaded only there (`@esp:`; stage0
   # tells modload when the command line names the partition, werewolf.esp).
   - "@esp: vfat nls_cp437 nls_utf8"
-
-# make check's, for this form alone (forms/README.md)
-check:
-  native: true

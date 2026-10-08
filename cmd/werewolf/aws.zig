@@ -582,6 +582,29 @@ pub fn awaitUp(io: Io, gpa: Allocator, p: Place, id: []const u8) !enum { up, pan
     return .late;
 }
 
+/// The commands that let source reach the instance on ports: rules in its
+/// own security group, one a port, which delete removes with it.
+pub fn openArgs(
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    ports: []const u16,
+    source: []const u8,
+) ![]const []const []const u8 {
+    const all = try gpa.alloc([]const []const u8, ports.len);
+    for (ports, all) |port, *argv| argv.* = try gpa.dupe([]const u8, &.{
+        "aws",                                  "ec2",
+        "authorize-security-group-ingress",     "--region",
+        p.region,                               "--group-name",
+        try gpa.print("werewolf-{s}", .{name}), "--protocol",
+        "tcp",                                  "--port",
+        try gpa.print("{d}", .{port}),          "--cidr",
+        source,                                 "--output",
+        "text",
+    });
+    return all;
+}
+
 /// The instance, then its security group, which AWS frees only once the
 /// instance has gone. Its volume goes with it; the AMI stays.
 pub fn delete(
@@ -619,6 +642,22 @@ pub fn delete(
 }
 
 const testing = std.testing;
+
+test openArgs {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const c = try openArgs(
+        arena.allocator(),
+        .{ .region = "us-east-1" },
+        "web",
+        &.{ 22, 8080 },
+        "10.0.0.0/8",
+    );
+    try testing.expectEqual(@as(usize, 2), c.len);
+    try testing.expectEqualStrings("werewolf-web", c[0][6]);
+    try testing.expectEqualStrings("8080", c[1][10]);
+    try testing.expectEqualStrings("10.0.0.0/8", c[1][12]);
+}
 
 test machine {
     try testing.expectEqualStrings("t4g.small", machine("aarch64").kind);

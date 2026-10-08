@@ -506,6 +506,33 @@ fn awaitUpWithin(
     return .late;
 }
 
+/// The command that lets source reach the VM on ports: a rule in the
+/// security group az made for it, NAMENSG, which delete removes with it.
+pub fn openArgs(
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    ports: []const u16,
+    source: []const u8,
+) ![]const []const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(gpa, &.{
+        "az",                             "network",
+        "nsg",                            "rule",
+        "create",                         "-g",
+        p.group,                          "--nsg-name",
+        try gpa.print("{s}NSG", .{name}), "-n",
+        "allow",                          "--priority",
+        "1000",                           "--access",
+        "Allow",                          "--protocol",
+        "Tcp",                            "--source-address-prefixes",
+        source,                           "-o",
+        "none",                           "--destination-port-ranges",
+    });
+    for (ports) |port| try argv.append(gpa, try gpa.print("{d}", .{port}));
+    return gpa.dupe([]const []const u8, &.{argv.items});
+}
+
 /// The VM, with its OS disk and NIC; then the network az made for it,
 /// named as az names them, and the disk copy, if a failed create left it;
 /// the image stays. Nothing is said of what was gone already.
@@ -543,6 +570,22 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) 
 }
 
 const testing = std.testing;
+
+test openArgs {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const c = try openArgs(
+        arena.allocator(),
+        .{ .group = "werewolf", .location = "eastus" },
+        "web",
+        &.{ 22, 8080 },
+        "0.0.0.0/0",
+    );
+    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expectEqualStrings("webNSG", c[0][8]);
+    try testing.expectEqualStrings("0.0.0.0/0", c[0][18]);
+    try testing.expectEqualStrings("8080", c[0][c[0].len - 1]);
+}
 
 test machine {
     try testing.expectEqualStrings("Arm64", machine("aarch64").arch);

@@ -427,9 +427,20 @@ node, keeping the image. x86_64 only, as Proxmox nodes are.
 
 On GCP, built: `create` builds the release's `disk.qcow2` and makes it an
 image named `werewolf-FORM-ARCH-DIGEST`, the first 16 hex digits of the
-disk's sha256, uploading it only if no such image exists. The VM gets
+disk's sha256, uploading it only if no such image exists, and storing it
+in the zone's region rather than GCP's multi-region default (making one
+took 1 min 30 s so, against 1 min 58 s before). The VM gets
 the config tar in base64 as `user-data`, no service account, no scopes
 and no Secure Boot, a label naming its form, and the default network.
+On GCP, AWS and Azure alike a new machine lets nothing in, and `create`
+ends by printing, to paste as they are, the lines that open the TCP ports
+its form's `net` listens on to this host's address alone (`$ME`, from
+`checkip.amazonaws.com`): a firewall rule `NAME-allow` for the VM's tag,
+rules in its own security group, or one in its NSG; `delete` removes
+them with the machine. `--allow-from me|CIDR` has `create` run them
+itself, for that source; it is off unless given, and refused for a
+machine that exists, whose rules stay as its owner left them: what the
+Internet may reach is its owner's to say, on the command line.
 Its boot disk is `pd-balanced`, SSD, not GCP's HDD default: on a
 t2a-standard-1, a reboot to ssh took 3.8 s on it against 5.3 s on an
 8 GB `pd-standard` disk (about 10 MB/s), for $0.80 a month against $0.32.

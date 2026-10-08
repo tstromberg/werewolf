@@ -194,12 +194,12 @@ cloud's record of the machine's serial port:
 | `metadata-config` | `cloud-metadata` took the config from that cloud's metadata server |
 | `hostname` | posture names the host as the config did |
 | `posture` | what fails is exactly what `prod-ssh`'s weaknesses say it fails |
-| `ssh-login` | root logs in, over the Internet, with the run's key |
+| `ssh-login` | root logs in, over the Internet, with the run's key, through the port `create --allow-from me` opened |
 | `reconfigure` | a second `create` of the name, with a new hostname, restarts the machine on it |
-| `delete` | `werewolf delete` leaves nothing of the machine: instance, disk, network, security group |
+| `delete` | `werewolf delete` leaves nothing of the machine: instance, disk, network, security group, firewall rule |
 
-For the login, port 22 opens to this host's address alone, while the
-check runs. Everything the run made, the image included, is deleted
+The machine is made with `--allow-from me`, so werewolf itself opens the
+form's ports, to this host's address alone, as a user's `create` would. Everything the run made, the image included, is deleted
 however it ends; `CLOUD_KEEP=1` keeps the machine, to look around. The
 serial port is kept in `build/<arch>/prod-ssh/check/CLOUD-serial.log`.
 

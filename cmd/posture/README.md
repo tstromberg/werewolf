@@ -54,7 +54,15 @@ another distribution is a comparison. `docs/posture.md` lists the checks.
 - **Output**: text for people, with every control character shown as `?`;
   `--json`; `--line`, one line for the console. As werewolf's service it
   waits for the others to settle (60 s at most), keeps the JSON in
-  `/run/werewolf/posture.json`, prints the line, and stops itself.
+  `/run/werewolf/posture.json`, prints the line, and stops itself. It runs
+  beside the services, after them; nothing waits for it.
+- **Expected failures**: a werewolf image lists the failures it expects,
+  each with its excuse, in `/usr/share/werewolf/weaknesses` (its form's
+  `weaknesses`, and test/posture-known's line for its kind). A failed
+  check there carries its excuse in the JSON; any other is unexpected, and
+  the service says so on the console, `posture: WARNING: unexpected: ID,...`,
+  as it says which excuses are no longer needed. Without the file, on
+  another Linux, a failure is a failure.
 
 ## Drawbacks
 

@@ -71,7 +71,7 @@ const usage =
     \\       werewolf pack FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       werewolf pack FORM -h          the flags FORM takes
     \\       werewolf run FORM [--dev] [--app DIR] [CONFIG...]
-    \\       werewolf create FORM NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure|qemu] [--arch ARCH] [--size TYPE] [CONFIG...]
+    \\       werewolf create FORM NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure|qemu] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
     \\       werewolf delete NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure]
     \\       werewolf console NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure]
     \\       werewolf upload DISK --on gcp|aws|azure
@@ -212,6 +212,7 @@ const reserved = [_][]const u8{
     "arch",
     "size",
     "app",
+    "allow-from",
 };
 
 /// A form's chain, base first, as the build lays it (lib/form.zig): the
@@ -399,6 +400,9 @@ const Options = struct {
     /// build, run and create's: a directory, laid where the form keeps its
     /// application (app.zig).
     app: ?[]const u8 = null,
+    /// create --on gcp, aws or azure's: who may reach the form's TCP ports,
+    /// me or an IPv4 CIDR; without it, create says the commands instead.
+    allow_from: ?[]const u8 = null,
     /// --FLAG VALUE pairs the form declares, in order.
     flags: []const [2][]const u8 = &.{},
 };
@@ -468,6 +472,8 @@ fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             &o.size
         else if (std.mem.eql(u8, flag, "app"))
             &o.app
+        else if (std.mem.eql(u8, flag, "allow-from"))
+            &o.allow_from
         else
             null;
         if (slot) |s| {
@@ -930,6 +936,10 @@ fn pack(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     const o = try options(gpa, args, why);
     if (o.name) |n| return why.refuse("{s}: pack takes one form, and no name", .{n});
     if (o.arch != null or o.size != null) return why.refuse("--arch and --size are create's", .{});
+    if (o.allow_from != null) return why.refuse(
+        "--allow-from is create's: it opens a machine's ports",
+        .{},
+    );
     if (o.app != null) return why.refuse(
         "--app is build's, run's and create's: an application is in the image",
         .{},
@@ -987,6 +997,8 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     try row(w, "--data-key FILE", "data.key: /data in LUKS2");
     try row(w, "--root-keys FILE", "authorized_keys: root's, where the form runs sshd");
     try row(w, "--update-policy FILE", "update-policy.json: when updates install");
+    if (std.mem.eql(u8, verb, "create"))
+        try row(w, "--allow-from me|CIDR", "opens the form's TCP ports to it (gcp, aws, azure)");
     for (iface.files) |f| try row(
         w,
         try gpa.print("--{s} FILE", .{f.flag}),
@@ -1038,6 +1050,7 @@ fn runForm(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         return why.refuse("run takes no -o, -n or --on: it boots here, under QEMU", .{});
     if (o.name) |n| return why.refuse("{s}: run takes one form, and no name", .{n});
     if (o.arch != null or o.size != null) return why.refuse("--arch and --size are create's", .{});
+    if (o.allow_from != null) return why.refuse("--allow-from is create's: run boots here", .{});
     const iface = try formInterface(io, gpa, o.form, why);
     var out = Io.File.stdout().writerStreaming(io, &.{});
     if (o.help) return help(&out.interface, gpa, "run", o.form, iface);
@@ -1212,6 +1225,16 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         );
         const ab = try appBuild(io, gpa, o.form, hostArch(), o.app, why);
         return bootHere(io, gpa, o.form, false, entries, ab.app, why);
+    }
+    const cloud = std.mem.eql(u8, on, "gcp") or std.mem.eql(u8, on, "aws") or
+        std.mem.eql(u8, on, "azure");
+    if (o.allow_from) |a| {
+        if (!cloud) return why.refuse(
+            "--allow-from is for --on gcp, aws and azure: {s}'s machines are reached as it says",
+            .{on},
+        );
+        // Resolved, and checked, before anything is built or made.
+        o.allow_from = try allowSource(io, gpa, a, why);
     }
     if (std.mem.eql(u8, on, "gcp")) return createGcp(io, gpa, o, name, tar, w, why);
     if (std.mem.eql(u8, on, "aws")) return createAws(io, gpa, o, name, tar, w, why);
@@ -1782,6 +1805,125 @@ fn reconfigure(
     return managed;
 }
 
+/// What a new cloud machine lets in: nothing, but what --allow-from
+/// names, which create opens itself on the TCP ports the form listens on;
+/// without it, create says the commands that would, to paste as they are,
+/// for this host's address alone ($ME). delete removes what they make.
+/// cloud is gcp, aws or azure, and p its place.
+fn sayOpen(
+    io: Io,
+    gpa: Allocator,
+    name: []const u8,
+    form: []const u8,
+    comptime cloud: type,
+    p: cloud.Place,
+    allow_from: ?[]const u8,
+    why: *Why,
+) !void {
+    const ports = try listens(io, gpa, form, why);
+    if (ports.len == 0)
+        return say(io, "{s}: {s} listens on no TCP port; nothing reaches it", .{ name, form });
+    if (allow_from) |source| {
+        for (try cloud.openArgs(gpa, p, name, ports, source)) |argv| try run(io, why, argv);
+        return say(io, "{s}: open to {s} on {s}", .{ name, source, try portList(gpa, ports) });
+    }
+    var text: Io.Writer.Allocating = .init(gpa);
+    try openText(
+        &text.writer,
+        name,
+        try portList(gpa, ports),
+        try cloud.openArgs(gpa, p, name, ports, "$ME/32"),
+    );
+    Io.File.stderr().writeStreamingAll(io, text.written()) catch {};
+}
+
+/// What create says for a machine nothing reaches: why, then commands,
+/// one a line, ready to paste into sh, bash or zsh.
+fn openText(
+    w: *Io.Writer,
+    name: []const u8,
+    ports: []const u8,
+    commands: []const []const []const u8,
+) !void {
+    try w.print(
+        "werewolf: {s}: nothing reaches it yet; to let this host in on {s}, or --allow-from:\n" ++
+            "ME=$(curl -fsS https://checkip.amazonaws.com)\n",
+        .{ name, ports },
+    );
+    for (commands) |argv| {
+        for (argv, 0..) |arg, i| {
+            if (i > 0) try w.writeByte(' ');
+            try shellWord(w, arg);
+        }
+        try w.writeByte('\n');
+    }
+}
+
+/// A word as a shell reads it back: as it is, or in double quotes where it
+/// holds more than letters, digits and . _ / : , = @ - (as "$ME/32" does,
+/// which the shell then expands). Only werewolf's own words come here,
+/// none with a quote or backslash.
+fn shellWord(w: *Io.Writer, word: []const u8) !void {
+    for (word) |ch| {
+        if (!std.ascii.isAlphanumeric(ch) and std.mem.findScalar(u8, "._/:,=@-", ch) == null) {
+            return w.print("\"{s}\"", .{word});
+        }
+    } else if (word.len == 0) return w.writeAll("\"\"");
+    try w.writeAll(word);
+}
+
+/// "port 22", "ports 22 8080".
+fn portList(gpa: Allocator, ports: []const u16) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(gpa, if (ports.len == 1) "port" else "ports");
+    for (ports) |port| try out.print(gpa, " {d}", .{port});
+    return out.items;
+}
+
+/// --allow-from's source, checked: me, this host's public IPv4 address as
+/// checkip.amazonaws.com sees it, or an IPv4 address and prefix.
+fn allowSource(io: Io, gpa: Allocator, given: []const u8, why: *Why) ![]const u8 {
+    if (!std.mem.eql(u8, given, "me")) {
+        if (!isCidr(given)) return why.refuse(
+            "--allow-from {s}: me, or an IPv4 address and prefix: 203.0.113.7/32, 0.0.0.0/0",
+            .{given},
+        );
+        return given;
+    }
+    const r = std.process.run(gpa, io, .{
+        .argv = &.{ "curl", "-fsS", "-m", "10", "https://checkip.amazonaws.com" },
+    }) catch |err| return why.refuse("--allow-from me: curl: {s}", .{@errorName(err)});
+    const me = try gpa.print("{s}/32", .{std.mem.trim(u8, r.stdout, " \r\n")});
+    if (r.term != .exited or r.term.exited != 0 or !isCidr(me)) return why.refuse(
+        "--allow-from me: checkip.amazonaws.com did not say this host's address; give it: " ++
+            "--allow-from ADDRESS/32",
+        .{},
+    );
+    return me;
+}
+
+/// An IPv4 address and a prefix of 0 to 32, in digits: 10.0.0.0/8.
+fn isCidr(s: []const u8) bool {
+    const slash = std.mem.findScalar(u8, s, '/') orelse return false;
+    const bits = s[slash + 1 ..];
+    if (bits.len == 0 or bits.len > 2) return false;
+    for (bits) |c| if (!std.ascii.isDigit(c)) return false;
+    if ((std.fmt.parseInt(u8, bits, 10) catch return false) > 32) return false;
+    _ = std.Io.net.Ip4Address.parse(s[0..slash], 0) catch return false;
+    return true;
+}
+
+/// A second create of a machine keeps its rules as its owner left them:
+/// --allow-from opens a new machine's ports.
+fn newOnly(o: Options, name: []const u8, on: []const u8, why: *Why) error{Refused}!void {
+    if (o.allow_from == null) return;
+    return why.refuse(
+        "{s} exists, and keeps its rules as they are: --allow-from opens a new machine's ports " ++
+            "(werewolf delete {s} --on {s}, then create)",
+        .{ name, name, on },
+    );
+}
+
 /// A machine in a cloud: its architecture, --arch or this host's, where
 /// create keeps its files, and its config tar in base64, as the clouds
 /// take user data, kept private there.
@@ -1856,8 +1998,10 @@ fn createGcp(
 ) !void {
     const p = try gcp.place(io, gpa, why);
     const c = try cloudMachine(io, gpa, o, name, tar, why);
+    var made = false;
     if (gcp.formOf(io, gpa, p, name)) |was| {
         try reconfigurable(o, name, was, "gcp", why);
+        try newOnly(o, name, "gcp", why);
         say(
             io,
             "{s}: replacing its config, and restarting it; its address changes unless it is static",
@@ -1869,6 +2013,7 @@ fn createGcp(
         const image = try gcp.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.zone });
         try gcp.create(io, gpa, p, name, o.form, c.arch, o.size, image, c.b64, why);
+        made = true;
     }
     switch (try gcp.awaitUp(io, gpa, p, name)) {
         .up => {},
@@ -1879,6 +2024,7 @@ fn createGcp(
         ),
     }
     try w.print("{s}\t{s}\t{s}\n", .{ name, gcp.address(io, gpa, p, name) orelse "?", o.form });
+    if (made) try sayOpen(io, gpa, name, o.form, gcp, p, o.allow_from, why);
 }
 
 /// create --on aws: the release's disk as an AMI, imported once; an
@@ -1897,8 +2043,10 @@ fn createAws(
     const p = try aws.place(io, gpa, why);
     const c = try cloudMachine(io, gpa, o, name, tar, why);
     var id: []const u8 = undefined;
+    var made = false;
     if (aws.find(io, gpa, p, name)) |i| {
         try reconfigurable(o, name, i.form, "aws", why);
+        try newOnly(o, name, "aws", why);
         say(
             io,
             "{s}: replacing its config, and restarting it; its address changes unless it is " ++
@@ -1912,13 +2060,7 @@ fn createAws(
         const ami = try aws.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.region });
         id = try aws.create(io, gpa, p, name, o.form, c.arch, o.size, ami, c.b64, why);
-        say(
-            io,
-            "{s}: its security group, werewolf-{s}, lets nothing in: aws ec2 " ++
-                "authorize-security-group-ingress --group-name werewolf-{s} --protocol tcp " ++
-                "--port PORT --cidr ADDRESS/32",
-            .{ name, name, name },
-        );
+        made = true;
     }
     switch (try aws.awaitUp(io, gpa, p, id)) {
         .up => {},
@@ -1929,6 +2071,7 @@ fn createAws(
         ),
     }
     try w.print("{s}\t{s}\t{s}\n", .{ name, aws.address(io, gpa, p, id) orelse "?", o.form });
+    if (made) try sayOpen(io, gpa, name, o.form, aws, p, o.allow_from, why);
 }
 
 /// create --on azure (azure.zig): the release's disk as a managed disk,
@@ -1959,6 +2102,7 @@ fn createAzure(
     try writePrivate(io, gpa, tar_path, tar, why);
     if (azure.find(io, gpa, p, name)) |vm| {
         try reconfigurable(o, name, vm.form, "azure", why);
+        try newOnly(o, name, "azure", why);
         say(io, "{s}: replacing its config, and restarting it", .{name});
         const before = if (azure.console(io, gpa, p, name)) |text| azure.mark(text) else "";
         try azure.reconfigure(io, gpa, p, name, tar, c.dir, why);
@@ -1968,14 +2112,8 @@ fn createAzure(
     const image = try azure.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
     say(io, "{s}: starting it in {s}, {s}", .{ name, p.group, p.location });
     try azure.create(io, gpa, p, name, o.form, c.arch, o.size, image, tar_path, why);
-    say(
-        io,
-        "{s}: its security group, {s}NSG, lets nothing in: az network nsg rule create -g {s} " ++
-            "--nsg-name {s}NSG -n ssh --priority 100 --destination-port-ranges 22 " ++
-            "--source-address-prefixes ADDRESS/32",
-        .{ name, name, p.group, name },
-    );
-    return azureUp(io, gpa, p, name, o.form, "", w, why);
+    try azureUp(io, gpa, p, name, o.form, "", w, why);
+    try sayOpen(io, gpa, name, o.form, azure, p, o.allow_from, why);
 }
 
 /// Wait for an Azure machine's boot, in its console after before, its end
@@ -2462,6 +2600,64 @@ test awaitUp {
     try testing.expect(try awaitUp(io, testing.allocator, log, old.len));
     // A log shorter than what was seen was started again: read from its start.
     try testing.expect(try awaitUp(io, testing.allocator, log, 1 << 30));
+}
+
+test isCidr {
+    for ([_][]const u8{ "10.0.0.0/8", "203.0.113.7/32", "0.0.0.0/0" }) |good|
+        try testing.expect(isCidr(good));
+    for ([_][]const u8{
+        "me",           "10.0.0.0",     "10.0.0.0/",   "10.0.0.0/33",
+        "10.0.0.0/+8",  "10.0.0.0/008", "10.0.0/8",    "fd00::/8",
+        "10.0.0.0/8 x", "$(id)/32",     "10.0.0.0/8;", "",
+    }) |bad| try testing.expect(!isCidr(bad));
+}
+
+test openText {
+    var buf: [1024]u8 = undefined;
+    var w: Io.Writer = .fixed(&buf);
+    try openText(&w, "web", "ports 22 8080", &.{
+        &.{
+            "gcloud",
+            "compute",
+            "firewall-rules",
+            "create",
+            "web-allow",
+            "--source-ranges",
+            "$ME/32",
+        },
+        &.{ "az", "--x", "" },
+    });
+    try testing.expectEqualStrings(
+        "werewolf: web: nothing reaches it yet; to let this host in on ports 22 8080, or " ++
+            "--allow-from:\nME=$(curl -fsS https://checkip.amazonaws.com)\n" ++
+            "gcloud compute firewall-rules create web-allow --source-ranges \"$ME/32\"\n" ++
+            "az --x \"\"\n",
+        w.buffered(),
+    );
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings("port 22", try portList(arena.allocator(), &.{22}));
+}
+
+test "--allow-from is create's, for the clouds alone" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const o = try options(gpa, &.{ "prod", "web", "--allow-from", "10.0.0.0/8" }, &why);
+    try testing.expectEqualStrings("10.0.0.0/8", o.allow_from.?);
+    try testing.expectError(
+        error.Refused,
+        options(gpa, &.{ "prod", "--allow-from", "me", "--allow-from", "me" }, &why),
+    );
+    try testing.expectError(error.Refused, newOnly(o, "web", "aws", &why));
+    try testing.expect(std.mem.find(u8, why.text, "web exists") != null);
+    try newOnly(.{ .form = "prod" }, "web", "aws", &why);
+    try testing.expectError(error.Refused, allowSource(testing.io, gpa, "0.0.0.0", &why));
+    try testing.expectEqualStrings(
+        "0.0.0.0/0",
+        try allowSource(testing.io, gpa, "0.0.0.0/0", &why),
+    );
 }
 
 test listenPorts {

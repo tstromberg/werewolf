@@ -38,7 +38,14 @@
 //! In werewolf it is also a service, run once a boot as /etc/sv/posture/run:
 //! it waits for the other services to settle, so it sees the machine as it
 //! runs, checks, keeps the JSON in /run/werewolf/posture.json, says the
-//! --line on the console, and parks itself.
+//! --line on the console, and parks itself. It runs beside the services,
+//! after them, and nothing waits for it.
+//!
+//! A werewolf image says which failures it expects, each with its excuse,
+//! in /usr/share/werewolf/weaknesses (its form's weaknesses, forms/README.md):
+//! a failed check there is excused, any other is unexpected, and the
+//! service says so on the console. On another Linux there is no such file,
+//! and every failure is simply a failure.
 const attacks = @import("attacks.zig");
 const files = @import("files.zig");
 const kernel = @import("kernel.zig");
@@ -94,7 +101,7 @@ pub fn main(init: std.process.Init) !void {
     switch (format) {
         .text => try printText(&out.writer, report, columns()),
         .json => {
-            try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &out.writer);
+            try std.json.Stringify.value(report, json_options, &out.writer);
             try out.writer.writeByte('\n');
         },
         .line => try printLine(gpa, &out.writer, report),
@@ -106,6 +113,11 @@ pub fn main(init: std.process.Init) !void {
 const Format = enum { text, json, line };
 
 const service_json = "/run/werewolf/posture.json";
+
+const json_options: std.json.Stringify.Options = .{
+    .whitespace = .indent_2,
+    .emit_null_optional_fields = false,
+};
 
 /// How long every other service must have run, or been down by choice.
 const settle_s = 5;
@@ -122,7 +134,7 @@ fn serve(io: Io, gpa: Allocator) !void {
     try p.run();
     const report = try p.report();
     var json: Io.Writer.Allocating = .init(gpa);
-    try std.json.Stringify.value(report, .{ .whitespace = .indent_2 }, &json.writer);
+    try std.json.Stringify.value(report, json_options, &json.writer);
     try json.writer.writeByte('\n');
     const tmp = service_json ++ ".tmp";
     Dir.cwd().writeFile(
@@ -139,6 +151,7 @@ fn serve(io: Io, gpa: Allocator) !void {
 
     var line: Io.Writer.Allocating = .init(gpa);
     try printLine(gpa, &line.writer, report);
+    if (report.known) |k| try printKnown(&line.writer, k);
     try Io.File.stdout().writeStreamingAll(io, line.written());
 
     // Down, so runsv does not run it again until the next boot.
@@ -196,6 +209,8 @@ pub const Report = struct {
     /// built (/etc/werewolf/allow), sorted. The checks still measure it.
     allow: []const []const u8 = &.{},
     summary: struct { pass: usize = 0, fail: usize = 0, skip: usize = 0 },
+    /// Against the image's weaknesses, where it lists them.
+    known: ?Known = null,
     checks: []const Check,
 };
 
@@ -211,7 +226,20 @@ pub const Check = struct {
     result: Result,
     /// What was found, when that adds to the result.
     detail: []const u8 = "",
+    /// Why the image fails it by design, when it does (Known).
+    excuse: ?[]const u8 = null,
 };
+
+/// How the failures compare with what the image expects.
+pub const Known = struct {
+    /// Failed, and not among the image's weaknesses.
+    unexpected: []const []const u8,
+    /// Among them, but passing now: its form can drop them.
+    now_passing: []const []const u8,
+};
+
+/// Where a werewolf image lists the failures it expects.
+const weaknesses_path = "/usr/share/werewolf/weaknesses";
 
 pub const Result = enum {
     pass,
@@ -276,6 +304,8 @@ pub const Posture = struct {
             .fail => r.summary.fail += 1,
             .skip => r.summary.skip += 1,
         };
+        const text = p.read(weaknesses_path);
+        if (text.len > 0) r.known = try compare(p.gpa, p.checks.items, text);
         return r;
     }
 
@@ -508,6 +538,47 @@ pub const Posture = struct {
     }
 };
 
+/// checks against text, the image's weaknesses: a line each, a check's id
+/// and its excuse, ?id for one the host decides. Each failed check found
+/// there takes its excuse.
+fn compare(gpa: Allocator, checks: []Check, text: []const u8) !Known {
+    var unexpected: std.ArrayList([]const u8) = .empty;
+    var now_passing: std.ArrayList([]const u8) = .empty;
+    for (checks) |*c| {
+        if (c.result != .fail) continue;
+        c.excuse = excuseOf(text, c.id) orelse {
+            try unexpected.append(gpa, c.id);
+            continue;
+        };
+    }
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t");
+        const id = words.next() orelse continue;
+        if (id[0] == '?' or id[0] == '#') continue;
+        for (checks) |c| {
+            if (std.mem.eql(u8, c.id, id) and c.result == .fail) break;
+        } else for (now_passing.items) |have| {
+            if (std.mem.eql(u8, have, id)) break;
+        } else try now_passing.append(gpa, id);
+    }
+    std.mem.sort([]const u8, unexpected.items, {}, lessString);
+    std.mem.sort([]const u8, now_passing.items, {}, lessString);
+    return .{ .unexpected = unexpected.items, .now_passing = now_passing.items };
+}
+
+/// The excuse text gives check id, or null when it gives none.
+fn excuseOf(text: []const u8, id: []const u8) ?[]const u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t");
+        const word = words.next() orelse continue;
+        const bare = if (word[0] == '?') word[1..] else word;
+        if (std.mem.eql(u8, bare, id)) return std.mem.trim(u8, words.rest(), " \t\r");
+    }
+    return null;
+}
+
 /// The report as people read it: a mark for each check, by area, and what
 /// was found where a check did not pass. Details are cut to fit cols, the
 /// terminal's width, when there is one.
@@ -538,7 +609,11 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
             try w.print("\n{c}{s}\n", .{ std.ascii.toUpper(area[0]), area[1..] });
         }
         try w.print("  {s} {s}", .{ c.result.mark(), c.name });
-        if (c.result != .pass and c.detail.len > 0) {
+        if (c.excuse) |e| {
+            try w.splatByteAll(' ', width - c.name.len + 2);
+            try w.writeAll("excused: ");
+            try writeClean(w, e[0..fit(e, room -| "excused: ".len).len]);
+        } else if (c.result != .pass and c.detail.len > 0) {
             const f = fit(c.detail, room);
             try w.splatByteAll(' ', width - c.name.len + 2);
             try writeClean(w, c.detail[0..f.len]);
@@ -550,6 +625,30 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
         Result.pass.mark(), r.summary.pass, Result.fail.mark(), r.summary.fail,
         Result.skip.mark(), r.summary.skip,
     });
+    if (r.known) |k| try printKnown(w, k);
+}
+
+/// What the failures were against the image's weaknesses: each failure it
+/// does not excuse, and each excuse no longer needed. Nothing when both
+/// are none.
+fn printKnown(w: *Io.Writer, k: Known) !void {
+    if (k.unexpected.len > 0) {
+        try w.writeAll("posture: WARNING: unexpected: ");
+        try writeList(w, k.unexpected);
+        try w.writeAll(": failures this image does not excuse (" ++ weaknesses_path ++ ")\n");
+    }
+    if (k.now_passing.len > 0) {
+        try w.writeAll("posture: excused, but passing now: ");
+        try writeList(w, k.now_passing);
+        try w.writeAll(": its form can drop them\n");
+    }
+}
+
+fn writeList(w: *Io.Writer, ids: []const []const u8) !void {
+    for (ids, 0..) |id, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeClean(w, id);
+    }
 }
 
 /// text, each control character in it, and each byte that is not UTF-8,
@@ -587,7 +686,7 @@ fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
         try w.writeAll(id);
     }
     try w.print(" pass={d} skip={d} ", .{ r.summary.pass, r.summary.skip });
-    try std.json.Stringify.value(r, .{}, w);
+    try std.json.Stringify.value(r, .{ .emit_null_optional_fields = false }, w);
     try w.writeByte('\n');
 }
 
@@ -738,6 +837,74 @@ pub fn logHas(log: []const u8, needles: []const []const u8) bool {
         return true;
     }
     return false;
+}
+
+test printKnown {
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try printKnown(&out.writer, .{ .unexpected = &.{}, .now_passing = &.{} });
+    try testing.expectEqualStrings("", out.written());
+    try printKnown(&out.writer, .{
+        .unexpected = &.{ "files-suid", "programs-no-shell" },
+        .now_passing = &.{"network-no-login"},
+    });
+    try testing.expectEqualStrings(
+        \\posture: WARNING: unexpected: files-suid,programs-no-shell: failures this image does not excuse (/usr/share/werewolf/weaknesses)
+        \\posture: excused, but passing now: network-no-login: its form can drop them
+        \\
+    , out.written());
+}
+
+test compare {
+    var checks = [_]Check{
+        .{
+            .id = "programs-no-interpreters",
+            .area = "",
+            .name = "",
+            .why = "",
+            .how = "",
+            .result = .fail,
+        },
+        .{
+            .id = "programs-no-shell",
+            .area = "",
+            .name = "",
+            .why = "",
+            .how = "",
+            .result = .fail,
+        },
+        .{
+            .id = "kernel-no-hypervisor",
+            .area = "",
+            .name = "",
+            .why = "",
+            .how = "",
+            .result = .pass,
+        },
+        .{
+            .id = "network-no-login",
+            .area = "",
+            .name = "",
+            .why = "",
+            .how = "",
+            .result = .pass,
+        },
+    };
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const k = try compare(a.allocator(), &checks,
+        \\programs-no-interpreters php-fpm runs the application
+        \\?kernel-no-hypervisor it runs virtual machines
+        \\network-no-login sshd, by key
+        \\network-no-login a DEV=1 build
+        \\
+    );
+    try testing.expectEqualStrings("php-fpm runs the application", checks[0].excuse.?);
+    try testing.expectEqual(null, checks[1].excuse);
+    try testing.expectEqual(1, k.unexpected.len);
+    try testing.expectEqualStrings("programs-no-shell", k.unexpected[0]);
+    try testing.expectEqual(1, k.now_passing.len);
+    try testing.expectEqualStrings("network-no-login", k.now_passing[0]);
 }
 
 test logHas {

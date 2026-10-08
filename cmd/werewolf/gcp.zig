@@ -122,13 +122,13 @@ pub fn ensureImage(
         "disk.raw",
     });
     const bucket = try gpa.print("gs://{s}-werewolf-images", .{p.project});
+    const region = p.zone[0 .. std.mem.findScalarLast(u8, p.zone, '-') orelse p.zone.len];
     if (ask(
         io,
         gpa,
         p,
         &.{ "storage", "buckets", "describe", bucket, "--format", "value(name)" },
     ) == null) {
-        const region = p.zone[0 .. std.mem.findScalarLast(u8, p.zone, '-') orelse p.zone.len];
         try ww.run(io, why, try gcloud(gpa, p, &.{
             "storage",                       "buckets",
             "create",                        bucket,
@@ -152,6 +152,10 @@ pub fn ensureImage(
         "UEFI_COMPATIBLE,GVNIC",
         "--labels",
         try gpa.print("{s}={s}", .{ label, form }),
+        // In the zone's region, beside the machines made of it, not GCP's
+        // default multi-region, which it would be copied across.
+        "--storage-location",
+        region,
     }));
     return name;
 }
@@ -290,9 +294,59 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) 
         why,
         try gcloud(gpa, p, &.{ "compute", "instances", "delete", name, "--zone", p.zone }),
     );
+    // The rule openArgs's command makes, if it was run.
+    _ = ask(
+        io,
+        gpa,
+        p,
+        &.{ "compute", "firewall-rules", "delete", try gpa.print("{s}-allow", .{name}) },
+    );
+}
+
+/// The command that lets source reach the machine on ports: a firewall
+/// rule for its tag, NAME-allow, which delete removes with it.
+pub fn openArgs(
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    ports: []const u16,
+    source: []const u8,
+) ![]const []const []const u8 {
+    var allow: std.ArrayList(u8) = .empty;
+    for (ports, 0..) |port, i| try allow.print(
+        gpa,
+        "{s}tcp:{d}",
+        .{ if (i == 0) "" else ",", port },
+    );
+    const argv = try gpa.dupe([]const u8, &.{
+        "gcloud",                            "compute",
+        "firewall-rules",                    "create",
+        try gpa.print("{s}-allow", .{name}), "--project",
+        p.project,                           "--target-tags",
+        name,                                "--source-ranges",
+        source,                              "--allow",
+        allow.items,
+    });
+    return gpa.dupe([]const []const u8, &.{argv});
 }
 
 const testing = std.testing;
+
+test openArgs {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const c = try openArgs(
+        arena.allocator(),
+        .{ .project = "pr", .zone = "us-central1-a" },
+        "web",
+        &.{ 22, 8080 },
+        "$ME/32",
+    );
+    try testing.expectEqual(@as(usize, 1), c.len);
+    try testing.expectEqualStrings("web-allow", c[0][4]);
+    try testing.expectEqualStrings("$ME/32", c[0][10]);
+    try testing.expectEqualStrings("tcp:22,tcp:8080", c[0][12]);
+}
 
 test booted {
     try testing.expect(!booted("stage0: ...\n"));

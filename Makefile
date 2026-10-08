@@ -12,6 +12,8 @@
 #   make list-forms      each form and the forms it includes
 #   make werewolf        the werewolf command, for this machine: build/host/werewolf;
 #                        werewolf pack FORM packs a config tar from flags (docs/design/cli.md)
+#   make install         that command on your PATH, to run in a werewolf checkout;
+#                        make uninstall removes it
 #
 # Boot
 #   make run             build and boot it under QEMU, the console here
@@ -376,7 +378,7 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-deadman check-metadata check-dist check-gcp check-aws check-azure demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all install uninstall install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-deadman check-metadata check-dist check-gcp check-aws check-azure demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-static-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-cloud
 
 all: image
@@ -627,7 +629,7 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories Makefile
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories test/posture-known Makefile
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -635,6 +637,9 @@ $(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar 
 	for m in $(NATIVE_MODULES); do echo $$m; done > $$d/modules && \
 	for m in $(BITTEN_MODULES); do echo $$m; done > $$d/modules-bitten && \
 	{ for p in $(PRUNE); do echo $$p; done; } > $$d/prune && \
+	{ $(FORM_TOOL) excuses $(FORM_REF) && for id in $(POSTURE_KNOWN_KIND); do \
+		echo "$$id $(if $(DEV),a DEV=1 build: busybox-full and the debug shell,every form on $(ARCH) (test/posture-known))"; \
+	done; } > $$d/weaknesses && \
 	for f in $$(for c in $(ROOTFS_DIRS); do (cd $$c && ls etc/sv/*/service 2>/dev/null); done | LC_ALL=C sort -u); do \
 		w=; for c in $(ROOTFS_DIRS); do [ -f $$c/$$f ] && w=$$c/$$f; done; sed -n 's/#.*//; s/^pledge[[:space:]]//p' $$w; \
 	done | tr -s ' \t' '\n\n' | grep . | LC_ALL=C sort -u | tr '\n' ' ' > $$d/pledge && \
@@ -736,6 +741,34 @@ $(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settin
 	@# as an empty script, exiting 0 having done nothing.
 	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@.tmp
 	mv -f $@.tmp $@
+
+# The werewolf command on your PATH: in the first of ~/bin, ~/.local/bin
+# and /usr/local/bin that is on it and yours to write, or else in
+# ~/.local/bin, made, with a word that it is not on your PATH. Beside the
+# old one, then renamed over it, as above. It reads ./forms and runs make,
+# so it runs in a werewolf checkout, as build/host/werewolf does.
+INSTALL_DIRS = $(HOME)/bin $(HOME)/.local/bin /usr/local/bin
+install: $(WEREWOLF)
+	@set -e; bindir=; \
+	for d in $(INSTALL_DIRS); do \
+		if echo "$$PATH" | tr ':' '\n' | grep -qx "$$d" && [ -d "$$d" ] && [ -w "$$d" ]; then bindir=$$d; break; fi; \
+	done; \
+	if [ -z "$$bindir" ]; then \
+		bindir=$(HOME)/.local/bin; mkdir -p "$$bindir"; \
+		echo "install: $$bindir is not on your PATH; add it"; \
+	fi; \
+	install -m 755 $(WEREWOLF) "$$bindir/werewolf.new" && mv -f "$$bindir/werewolf.new" "$$bindir/werewolf"; \
+	echo "installed $$bindir/werewolf"
+
+# Removes what make install put there: a werewolf that answers as this
+# one does, never another program of the name.
+uninstall:
+	@for d in $(INSTALL_DIRS); do \
+		[ -x "$$d/werewolf" ] || continue; \
+		if "$$d/werewolf" 2>&1 | grep -q 'usage: werewolf build FORM'; then \
+			rm -f "$$d/werewolf" && echo "removed $$d/werewolf"; \
+		else echo "uninstall: $$d/werewolf is another program; left it"; fi; \
+	done
 
 disk: $(DISK)
 
@@ -1002,10 +1035,13 @@ CHECK_STALLS = rcupdate.rcu_cpu_stall_timeout=20 sysctl.kernel.panic_on_rcu_stal
 # allowed, and said with its promise (docs/design/pledge.md).
 SEAL_ARGS = $(if $(SEAL_LEARN),werewolf.seal=learn)
 CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
+# The posture checks known to fail on every form of a kind, as
+# test/posture-known says: a DEV=1 build's, or a shipped one's, and the
+# architecture's.
+POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 # The posture checks known to fail on the form and architecture, for
-# test/boot to expect: test/posture-known's, and the form's own weaknesses.
-export POSTURE_KNOWN := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known) \
-	$(shell $(FORM_TOOL) weaknesses $(FORM_REF))
+# test/boot to expect: those, and the form's own weaknesses.
+export POSTURE_KNOWN := $(POSTURE_KNOWN_KIND) $(shell $(FORM_TOOL) weaknesses $(FORM_REF))
 # The posture checks test/cage expects to fail in a container, beyond the
 # kernel-* checks it allows by their area (the container shares the host's
 # kernel; only kernel-seal, werewolf's own filter, must hold there) and
