@@ -96,11 +96,26 @@ fence reads the policy and then:
    on a network without IPv6) fell through to the refusal and got EACCES,
    which clients take as final, where they would have tried the next
    address after ENETUNREACH. That broke the updater on dual-stack names.
-2. **Binds only declared ports.** It restricts itself with Landlock: a
-   ruleset handling only `BIND_TCP`, allowing the policy's ports and port
-   0, which some clients bind before connecting (busybox's `nc`).
+2. **Binds, and connects, only declared ports.** It restricts itself with
+   Landlock: a ruleset handling `BIND_TCP` and `CONNECT_TCP`. Binding is
+   allowed to the policy's ports and port 0, which some clients bind
+   before connecting (busybox's `nc`). Connecting is allowed to the ports
+   the policy names for any user, to the served ports, which local
+   clients reach over loopback, and to port 80 where some user may read
+   the metadata server; the rules above decide which user and where to.
+   This bounds what a process that may bind a served port can do from
+   it: the rule that lets a server answer from its port names no user
+   and no destination, and the kernel routes a connect from a bound port
+   by the same lookup, so without it a listener, or whatever took its
+   place, could connect anywhere.
 3. **Becomes runit.** Landlock's restriction is inherited by every process
-   that follows and cannot be lifted, by root or anyone, until reboot.
+   that follows and cannot be lifted, by root or anyone, until reboot. On
+   a kernel with Landlock ABI 6 the domain is scoped too: no process in
+   it can signal, or reach the abstract UNIX socket of, a process outside
+   it. Outside it are only what init started before fence, the mount
+   broker, DHCP's renewal and stage0's deadman, so root cannot stop or
+   kill them; the broker is asked on its path socket, which scoping does
+   not touch, and the kernel ends the rest at reboot.
 
 It logs one line, and fails closed: a step that fails exits 1, init is
 PID 1, the kernel panics, and the machine comes back on the slot that last

@@ -128,6 +128,30 @@ pub fn main(init: std.process.Init) !void {
 /// What failed, and how, for the error event.
 var step: []const u8 = "start";
 
+/// Why the fetcher's last try failed, as the error event's detail.
+var why_buf: [96]u8 = undefined;
+
+/// The fetcher's failure, msg's kind and number, in the parent's own
+/// words: nothing of the server's is passed on, only a byte it maps and
+/// a number it prints.
+fn failureText(buf: []u8, msg: []const u8) []const u8 {
+    if (msg.len != 4) return "the fetcher failed and said no more";
+    const n = std.mem.readInt(u16, msg[2..4], .big);
+    const kind = std.enums.fromInt(Failure, msg[1]) orelse return "the fetcher said nonsense";
+    const errno = std.enums.tagName(linux.E, @fromBackingInt(n)) orelse "unknown";
+    return switch (kind) {
+        .connect => std.mem.print(buf, "connecting to 169.254.169.254:80: {s}", .{errno}),
+        .io => std.mem.print(buf, "talking to the metadata server: {s}", .{errno}),
+        .timeout => "no answer from the metadata server within 5 s",
+        .too_long => "the metadata server's answer is too long to be a config",
+        .malformed => "the metadata server's answer is not HTTP as expected",
+        .token => std.mem.print(buf, "no IMDSv2 token: HTTP {d}", .{n}),
+        .status => std.mem.print(buf, "the user data: HTTP {d}", .{n}),
+        .not_google => "the answer lacks Metadata-Flavor: Google; not GCP's server, refused",
+        .request => "the request could not be made",
+    } catch "the fetcher's failure, too long to say";
+}
+
 /// As root: which cloud, then the fork.
 fn run(log: *Log) !void {
     var vendor_buf: [128]u8 = undefined;
@@ -185,7 +209,10 @@ fn run(log: *Log) !void {
     switch (msg[0]) {
         result_body => {},
         result_none => return log.event("none", .{ .provider = p.name, .reason = "no user data" }),
-        else => return error.Unreachable,
+        else => {
+            sandbox.failed = failureText(&why_buf, msg);
+            return error.Unreachable;
+        },
     }
 
     step = "check";
@@ -245,9 +272,34 @@ const result_body: u8 = 0;
 const result_none: u8 = 1;
 const result_failed: u8 = 2;
 
+/// Why a try failed: after result_failed, a byte of this and a u16, an
+/// errno (connect, io) or an HTTP status (token, status), else 0.
+const Failure = enum(u8) {
+    connect,
+    io,
+    timeout,
+    too_long,
+    malformed,
+    token,
+    status,
+    not_google,
+    request,
+};
+
+/// The fetcher's last failure, which it says when it gives up.
+var failure: Failure = .timeout;
+var failure_n: u16 = 0;
+
+/// A failure, kept to say, and null: the caller tries again.
+fn miss(comptime T: type, f: Failure, n: u16) ?T {
+    failure = f;
+    failure_n = n;
+    return null;
+}
+
 /// As _cloud: ask the metadata server, and hand back what it said. Errors
-/// are not explained to the parent, which trusts nothing from here: it
-/// learns only that there is a body, none, or a failure.
+/// are said to the parent only as a Failure and a number, which it maps
+/// to words of its own: it trusts nothing from here.
 fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
     sandbox.tieTo(parent_pid);
     sandbox.dropTo(fetcher_id, empty_dir) catch linux.exit_group(1);
@@ -257,30 +309,27 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
     // A stream socket, exactly as exchange makes one: TCP, never UDP, which
     // Landlock does not hold to a port.
     f.allowArg("socket", 1, socket_type);
-    f.allow("connect");
-    f.allow("getsockopt");
-    f.allow("write");
-    f.allow("read");
-    f.allow("poll");
-    f.allow("ppoll");
-    f.allow("close");
-    f.allow("clock_gettime");
-    f.allow("nanosleep");
-    f.allow("clock_nanosleep");
-    f.allow("restart_syscall");
-    f.allow("exit_group");
-    f.allow("exit");
+    inline for (.{
+        "connect",         "getsockopt", "write",         "read",      "poll",
+        "ppoll",           "close",      "clock_gettime", "nanosleep", "clock_nanosleep",
+        "restart_syscall", "exit_group", "exit",
+    }) |call| f.allow(call);
     f.install() catch linux.exit_group(1);
 
     var buf: [max_response]u8 = undefined;
     const r = fetch(p, &buf);
-    const head = [1]u8{switch (r) {
-        .body => result_body,
-        .none => result_none,
-        .failed => result_failed,
-    }};
-    writeAll(out, &head);
-    if (r == .body) writeAll(out, r.body);
+    switch (r) {
+        .body => |body| {
+            writeAll(out, &.{result_body});
+            writeAll(out, body);
+        },
+        .none => writeAll(out, &.{result_none}),
+        .failed => {
+            var said: [4]u8 = .{ result_failed, @backingInt(failure), 0, 0 };
+            std.mem.writeInt(u16, said[2..4], failure_n, .big);
+            writeAll(out, &said);
+        },
+    }
     linux.exit_group(0);
 }
 
@@ -296,9 +345,15 @@ fn fetch(p: Provider, buf: *[max_response]u8) Fetched {
         if (fetchOnce(p, buf)) |r| return r;
         tries += 1;
         if (tries == 4) return .failed;
-        sleep(wait);
+        _ = linux.nanosleep(&.{ .sec = wait, .nsec = 0 }, null);
         wait *= 2;
     }
+}
+
+/// A failure, kept to say: no trying again.
+fn failedFor(f: Failure, n: u16) Fetched {
+    _ = miss(Fetched, f, n);
+    return .failed;
 }
 
 /// One attempt: null to try again.
@@ -313,27 +368,27 @@ fn fetchOnce(p: Provider, buf: *[max_response]u8) ?Fetched {
                 "PUT",
                 "/latest/api/token",
                 "X-aws-ec2-metadata-token-ttl-seconds: 60",
-            ) orelse return .failed,
+            ) orelse return failedFor(.request, 0),
             buf,
         ) orelse return null;
-        const r = parseResponse(resp) orelse return null;
-        if (r.status != 200 or !validToken(r.body)) return null;
+        const r = parseResponse(resp) orelse return miss(Fetched, .malformed, 0);
+        if (r.status != 200 or !validToken(r.body)) return miss(Fetched, .token, r.status);
         extra = std.mem.print(
             &token_header,
             "X-aws-ec2-metadata-token: {s}",
             .{r.body},
-        ) catch return .failed;
+        ) catch return failedFor(.request, 0);
     }
     const resp = exchange(
-        request(&req, "GET", p.path, extra) orelse return .failed,
+        request(&req, "GET", p.path, extra) orelse return failedFor(.request, 0),
         buf,
     ) orelse return null;
-    const r = parseResponse(resp) orelse return null;
-    if (p.flavor and !r.google) return .failed;
+    const r = parseResponse(resp) orelse return miss(Fetched, .malformed, 0);
+    if (p.flavor and !r.google) return failedFor(.not_google, 0);
     return switch (r.status) {
         200 => if (r.body.len == 0) .none else .{ .body = r.body },
         404 => .none,
-        else => null,
+        else => miss(Fetched, .status, r.status),
     };
 }
 
@@ -362,12 +417,12 @@ fn validToken(t: []const u8) bool {
 const socket_type: u32 = linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK;
 
 /// Send `req` to the metadata server and read its whole response, within
-/// 5 seconds; null on any failure. The response ends where its length says,
+/// 5 seconds; null on any failure, kept to say (miss). The response ends where its length says,
 /// or with its last chunk, or when the server closes.
 fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
     const deadline = nowMs() + 5_000;
     const rc = linux.socket(linux.AF.INET, socket_type, 0);
-    if (linux.errno(rc) != .SUCCESS) return null;
+    if (linux.errno(rc) != .SUCCESS) return miss([]u8, .io, @backingInt(linux.errno(rc)));
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
     const addr: linux.sockaddr.in = .{
@@ -375,8 +430,9 @@ fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
         .addr = @bitCast(metadata_ip),
     };
     const c = linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
-    if (linux.errno(c) != .SUCCESS and linux.errno(c) != .INPROGRESS) return null;
-    if (!waitFor(fd, linux.POLL.OUT, deadline)) return null;
+    if (linux.errno(c) != .SUCCESS and linux.errno(c) != .INPROGRESS)
+        return miss([]u8, .connect, @backingInt(linux.errno(c)));
+    if (!waitFor(fd, linux.POLL.OUT, deadline)) return miss([]u8, .timeout, 0);
     var err: i32 = 0;
     var len: linux.socklen_t = @sizeOf(i32);
     if (linux.errno(linux.getsockopt(
@@ -385,23 +441,23 @@ fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
         linux.SO.ERROR,
         @ptrCast(&err),
         &len,
-    )) != .SUCCESS or err != 0) return null;
+    )) != .SUCCESS or err != 0) return miss([]u8, .connect, @intCast(err));
 
     var off: usize = 0;
     while (off < req.len) {
-        if (!waitFor(fd, linux.POLL.OUT, deadline)) return null;
+        if (!waitFor(fd, linux.POLL.OUT, deadline)) return miss([]u8, .timeout, 0);
         const n = linux.write(fd, req[off..].ptr, req.len - off);
         if (linux.errno(n) == .AGAIN) continue;
-        if (linux.errno(n) != .SUCCESS) return null;
+        if (linux.errno(n) != .SUCCESS) return miss([]u8, .io, @backingInt(linux.errno(n)));
         off += n;
     }
     var got: usize = 0;
     while (true) {
-        if (got == buf.len) return null; // too long to be ours
-        if (!waitFor(fd, linux.POLL.IN, deadline)) return null;
+        if (got == buf.len) return miss([]u8, .too_long, 0); // too long to be ours
+        if (!waitFor(fd, linux.POLL.IN, deadline)) return miss([]u8, .timeout, 0);
         const n = linux.read(fd, buf[got..].ptr, buf.len - got);
         if (linux.errno(n) == .AGAIN) continue;
-        if (linux.errno(n) != .SUCCESS) return null;
+        if (linux.errno(n) != .SUCCESS) return miss([]u8, .io, @backingInt(linux.errno(n)));
         if (n == 0) return buf[0..got];
         got += n;
         if (complete(buf[0..got])) return buf[0..got];
@@ -589,8 +645,14 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
             },
             else => return error.NotAFileOrDirectory,
         };
+        // The name, with ustar's prefix where there is one.
         var name_buf: [256]u8 = undefined;
-        const full = fullName(h, posix, &name_buf) orelse return error.BadName;
+        const short = std.mem.sliceTo(h[0..100], 0);
+        const prefix = if (posix) std.mem.sliceTo(h[345..500], 0) else "";
+        const full = if (prefix.len == 0)
+            short
+        else
+            std.mem.print(&name_buf, "{s}/{s}", .{ prefix, short }) catch return error.BadName;
         const size = octal(h[124..136]) orelse return error.BadSize;
         if (dir and size != 0) return error.BadSize;
         if (size > max_file) return error.FileTooLarge;
@@ -603,7 +665,13 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         if (name.len > 100) return error.BadName;
         if (name.len > 0) {
             if (n == max_entries) return error.TooManyEntries;
-            for (out[0..n]) |*e| if (clash(e, name, dir)) return error.NameClash;
+            // The same name twice, a name beneath a file, or a file above a
+            // name: a config that says two things is refused, not settled by
+            // whichever init meets last.
+            for (out[0..n]) |*e| {
+                if (std.mem.eql(u8, e.name(), name) or (!e.dir and beneath(name, e.name())) or
+                    (!dir and beneath(e.name(), name))) return error.NameClash;
+            }
             out[n] = .{
                 .name_buf = undefined,
                 .name_len = @intCast(name.len),
@@ -617,26 +685,10 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
     }
 }
 
-/// Whether name, a directory's or not, clashes with entry e: the same name
-/// twice, a name beneath a file, or a file above a name. A config that
-/// says two things is refused, not settled by whichever init meets last.
-fn clash(e: *const Entry, name: []const u8, dir: bool) bool {
-    if (std.mem.eql(u8, e.name(), name)) return true;
-    return (!e.dir and beneath(name, e.name())) or (!dir and beneath(e.name(), name));
-}
-
 /// Whether path lies beneath the directory parent.
 fn beneath(path: []const u8, parent: []const u8) bool {
     return path.len > parent.len and std.mem.startsWith(u8, path, parent) and
         path[parent.len] == '/';
-}
-
-/// The entry's name, with ustar's prefix where there is one.
-fn fullName(h: *const [512]u8, posix: bool, buf: *[256]u8) ?[]const u8 {
-    const name = std.mem.sliceTo(h[0..100], 0);
-    const prefix = if (posix) std.mem.sliceTo(h[345..500], 0) else "";
-    if (prefix.len == 0) return name;
-    return std.mem.print(buf, "{s}/{s}", .{ prefix, name }) catch null;
 }
 
 /// A name werewolf will extract, without a leading ./ or a trailing /: ""
@@ -717,15 +769,10 @@ fn sandboxParent(dir: i32, in: i32) !void {
     try sandbox.landlock(&.{.{ .fd = dir, .access = sandbox.own_files }}, &.{});
     var f: sandbox.Filter = .{};
     f.allowArg("read", 0, @intCast(in));
-    f.allow("write");
-    f.allow("openat");
-    f.allow("close");
-    f.allow("renameat");
-    f.allow("renameat2");
-    f.allow("clock_gettime");
-    f.allow("restart_syscall");
-    f.allow("exit_group");
-    f.allow("exit");
+    inline for (.{
+        "write",         "openat",          "close",      "renameat", "renameat2",
+        "clock_gettime", "restart_syscall", "exit_group", "exit",
+    }) |call| f.allow(call);
     try f.install();
 }
 
@@ -784,11 +831,6 @@ fn nowMs() i64 {
     var ts: linux.timespec = undefined;
     _ = linux.clock_gettime(.BOOTTIME, &ts);
     return ts.sec * 1000 + @divFloor(ts.nsec, std.time.ns_per_ms);
-}
-
-fn sleep(seconds: u32) void {
-    const ts: linux.timespec = .{ .sec = seconds, .nsec = 0 };
-    _ = linux.nanosleep(&ts, null);
 }
 
 /// JSON lines on stdout: `cloud-metadata: {"time":...,"event":...,...}`, built in a
@@ -1092,4 +1134,24 @@ fn fuzzInput(_: void, smith: *std.testing.Smith) anyerror!void {
     } else |_| {}
     var raw: [max_config]u8 = undefined;
     _ = decodeBase64(in[0..n], &raw);
+}
+
+test failureText {
+    var buf: [96]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "connecting to 169.254.169.254:80: CONNREFUSED",
+        failureText(&buf, &.{ result_failed, @backingInt(Failure.connect), 0, 111 }),
+    );
+    try std.testing.expectEqualStrings(
+        "the user data: HTTP 403",
+        failureText(&buf, &.{ result_failed, @backingInt(Failure.status), 1, 147 }),
+    );
+    try std.testing.expectEqualStrings(
+        "the fetcher said nonsense",
+        failureText(&buf, &.{ result_failed, 200, 0, 0 }),
+    );
+    try std.testing.expectEqualStrings(
+        "the fetcher failed and said no more",
+        failureText(&buf, &.{result_failed}),
+    );
 }

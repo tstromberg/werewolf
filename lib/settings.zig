@@ -84,14 +84,11 @@ pub fn parseSetting(args: []const []const u8, why: *[]const u8) error{Invalid}!S
     if (args.len < 2) return fail(why, "setting takes NAME and TYPE");
     if (!isName(args[0])) return fail(why, "a setting's name is [a-z][a-z0-9-]*, at most 32");
     const list = std.mem.endsWith(u8, args[1], "...");
-    const t = std.meta.stringToEnum(
-        Type,
-        if (list) args[1][0 .. args[1].len - 3] else args[1],
-    ) orelse
-        return fail(
-            why,
-            "no such type: ip cidr addrport hostport hostname port url int bool string",
-        );
+    const type_name = if (list) args[1][0 .. args[1].len - 3] else args[1];
+    const t = std.meta.stringToEnum(Type, type_name) orelse return fail(
+        why,
+        "no such type: ip cidr addrport hostport hostname port url int bool string",
+    );
     if (list and (t == .int or t == .bool)) return fail(why, "an int or bool is not a list");
     var s: Setting = .{ .name = args[0], .type = t, .list = list };
     var rest = args[2..];
@@ -114,11 +111,8 @@ pub fn parseRender(args: []const []const u8, why: *[]const u8) error{Invalid}!Re
     if (std.mem.eql(u8, args[1], input_file)) return fail(why, "settings is the input's name");
     var r: Render = .{ .format = format, .file = args[1] };
     if (args.len == 4) {
-        if (!std.mem.eql(
-            u8,
-            args[2],
-            "from",
-        )) return fail(why, "render takes FORMAT FILE [from PATH]");
+        if (!std.mem.eql(u8, args[2], "from"))
+            return fail(why, "render takes FORMAT FILE [from PATH]");
         if (format != .json) return fail(why, "from is for json");
         if (!isCleanPath(args[3])) return fail(why, "from takes an absolute path, without . or ..");
         r.from = args[3];

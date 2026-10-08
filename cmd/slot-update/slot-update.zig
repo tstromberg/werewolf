@@ -44,6 +44,8 @@ const state_dir = "/data/svc/autoupdate";
 pub const work_dir = state_dir ++ "/work";
 pub const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
+/// There once a check has finished: the machine's first boot is over.
+const checked_path = state_dir ++ "/checked";
 /// The staged slot, and when this machine first saw each tier of its fixes.
 pub const pending_path = state_dir ++ "/pending";
 /// "SLOT BUILD BOOT" of the slot armed to boot once, and the boot that armed
@@ -68,9 +70,8 @@ pub const form_policy = "/etc/werewolf/update-policy.json";
 pub const operator_policy = "/run/config/update-policy.json";
 /// Where the daemon says it can update (daemon).
 const ready_path = "/run/werewolf/updater-ready";
-const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/vu" ++
-    "lns-" ++
-    "master.tar.gz";
+const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/" ++
+    "vulns-master.tar.gz";
 pub const max_read = 256 << 20;
 
 /// _update, the account the children that fetch run as
@@ -82,6 +83,8 @@ pub const cves_dir = work_dir ++ "/cves";
 /// How long a CVE fetcher, apk's fetcher and a CVE reader may take, in
 /// seconds; what a reader may send back.
 const fetch_seconds = 600;
+/// How long retries of a fetch or of apk may wait, in all (Update.again).
+const max_retry_ms = 120_000;
 pub const apk_seconds = 1800;
 const read_seconds = 300;
 const max_lines = 4 << 20;
@@ -122,7 +125,9 @@ fn fatal(u: *Update, err: anyerror) noreturn {
     std.process.exit(1);
 }
 
-/// An error, logged, and the work directory cleared.
+/// An error, logged. The work directory is not touched here: check clears
+/// it while it holds the lock, and a pass that failed for want of the lock
+/// (error.Busy) must not delete the work of the one that holds it.
 fn failed(u: *Update, err: anyerror) void {
     u.record(.{
         .event = "error",
@@ -130,7 +135,6 @@ fn failed(u: *Update, err: anyerror) void {
         .@"error" = @errorName(err),
         .detail = u.detail,
     }) catch {};
-    Dir.cwd().deleteTree(u.io, work_dir) catch {};
 }
 
 /// The autoupdate service. Once this slot has committed: the settings
@@ -157,9 +161,11 @@ fn daemon(io: Io) noreturn {
         0,
         0,
     );
-    // Before anything is logged: a machine that has never logged has never
-    // checked, and boots whatever its first check stages at once.
-    var ctx: Ctx = .{ .first_boot = neverLogged(io) };
+    // A machine that has never finished a check boots whatever its first
+    // check stages at once. Not "has never logged": a first check that
+    // failed, the network not up yet, logs, and the machine would then
+    // wait out the whole policy for its first update.
+    var ctx: Ctx = .{ .first_boot = neverChecked(io) };
     switch (pass(io, .setup, &ctx)) {
         .ok => Dir.cwd().writeFile(io, .{ .sub_path = ready_path, .data = "" }) catch |err| {
             std.debug.print(
@@ -183,7 +189,14 @@ fn daemon(io: Io) noreturn {
     var next_check = nowSecs(io);
     while (true) {
         if (nowSecs(io) >= next_check) {
-            if (pass(io, .check, &ctx) == .ok) ctx.first_boot = false;
+            if (pass(io, .check, &ctx) == .ok and ctx.first_boot) {
+                ctx.first_boot = false;
+                Dir.cwd().writeFile(io, .{ .sub_path = checked_path, .data = "" }) catch |err|
+                    std.debug.print(
+                        "autoupdate: cannot write {s}: {s}\n",
+                        .{ checked_path, @errorName(err) },
+                    );
+            }
             next_check = nowSecs(io) + every;
         }
         if (!ctx.rebooting) _ = pass(io, .boot, &ctx);
@@ -227,11 +240,10 @@ fn pass(io: Io, step: Step, ctx: *Ctx) PassResult {
     return .ok;
 }
 
-/// Whether this machine's log is missing or empty: it has never checked.
-fn neverLogged(io: Io) bool {
-    const f = Dir.cwd().openFile(io, log_path, .{}) catch return true;
-    defer f.close(io);
-    return (f.length(io) catch return false) == 0;
+/// Whether this machine has never finished a check: no checked_path.
+fn neverChecked(io: Io) bool {
+    Dir.cwd().access(io, checked_path, .{}) catch |err| return err == error.FileNotFound;
+    return false;
 }
 
 pub fn nowSecs(io: Io) i64 {
@@ -293,6 +305,9 @@ pub const Update = struct {
     // Booted into that slot, and committed, it held; booted into the other,
     // it did not, and the same build is not tried again.
     pub fn outcome(u: *Update) !void {
+        // As check: until this slot has committed, it may yet roll back,
+        // and calling it a commit now would leave a bad build untried.
+        Dir.cwd().access(u.io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
         const held_lock = try u.lock();
         defer _ = linux.close(held_lock);
         const attempt = try u.attemptOf() orelse return;
@@ -460,7 +475,7 @@ pub const Update = struct {
         try u.writeReplacing(pending_path, try std.json.Stringify.valueAlloc(u.gpa, next, .{}));
         // outcome keeps a release's serial once its slot commits, so no
         // older one is taken after it.
-        if (plan.from == .release) try u.write(
+        if (plan.from == .release) try u.writeReplacing(
             state_dir ++ "/attempt-serial",
             plan.from.release.manifest.serial,
         );
@@ -609,11 +624,7 @@ pub const Update = struct {
             cves_dir ++ "/manifest.sig",
         );
         const key = try releases.parseKey(u.gpa, try u.read(meta_dir ++ "/image.pub"));
-        const secs: i64 = @intCast(@divFloor(
-            Io.Timestamp.now(u.io, .real).nanoseconds,
-            std.time.ns_per_s,
-        ));
-        const m = try releases.open(u.gpa, key, data, sig, form, arch, secs);
+        const m = try releases.open(u.gpa, key, data, sig, form, arch, nowSecs(u.io));
 
         u.step = "compare";
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
@@ -818,8 +829,20 @@ pub const Update = struct {
     /// GET url, by a fetcher as _update (cve.fetcher), into path, a file
     /// root makes for it: the file, open, with its size and sha256. A
     /// fetcher that says why not fails with error.FetchFailed, its word in
-    /// detail.
+    /// detail, once a failure that may pass (no answer, a 5xx, 408 or 429)
+    /// has been tried again for as long as `again` allows: one moment of
+    /// a flaky network costs a retry, not the hour until the next check.
     pub fn download(u: *Update, url: []const u8, path: [:0]const u8) !Download {
+        var b: Backoff = .{};
+        while (true) {
+            if (u.downloadOnce(url, path)) |got| return got else |err| {
+                if (err != error.FetchFailed or !transient(u.detail) or
+                    !u.again(&b, url)) return err;
+            }
+        }
+    }
+
+    fn downloadOnce(u: *Update, url: []const u8, path: [:0]const u8) !Download {
         const flags: linux.O = .{
             .ACCMODE = .RDWR,
             .CREAT = true,
@@ -847,6 +870,25 @@ pub const Update = struct {
             size += n;
         }
         return .{ .fd = fd, .size = size, .sha256 = std.fmt.bytesToHex(h.finalResult(), .lower) };
+    }
+
+    /// How long the next retry waits, and how long the retries have.
+    pub const Backoff = struct { wait_ms: u64 = 2000, waited_ms: u64 = 0 };
+
+    /// Whether what failed, as detail says, is to be tried again: after a
+    /// wait drawn from half to one and a half of b's, which doubles each
+    /// time (so machines that failed together do not retry in step), until
+    /// max_retry_ms of waiting would pass. Each wait is said.
+    pub fn again(u: *Update, b: *Backoff, what: []const u8) bool {
+        var r: [8]u8 = undefined;
+        u.io.random(&r);
+        const ms = b.wait_ms / 2 + std.mem.readInt(u64, &r, .little) % b.wait_ms;
+        if (b.waited_ms + ms > max_retry_ms) return false;
+        std.debug.print("autoupdate: {s}: {s}; again in {d} ms\n", .{ what, u.detail, ms });
+        u.io.sleep(.fromMilliseconds(@intCast(ms)), .awake) catch {};
+        b.waited_ms += ms;
+        b.wait_ms *= 2;
+        return true;
     }
 
     /// A small file, a manifest or its signature, by download, as bytes.
@@ -997,6 +1039,22 @@ pub const Update = struct {
     /// the last, seq, and names it, prev: the first 16 hex digits of its
     /// SHA-256 (docs/design/update-policy.md, The audit log).
     pub fn record(u: *Update, fields: anytype) !void {
+        // One writer at a time, for as long as it takes to read the tail
+        // and append after it: a check run by hand logs beside the daemon,
+        // and two lines read from the same tail would share a seq and a
+        // prev, and could land over each other.
+        const log_fd: i32 = @intCast(try u.sys(linux.openat(
+            linux.AT.FDCWD,
+            log_path,
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true, .NOFOLLOW = true },
+            0o644,
+        ), "open the log"));
+        defer _ = linux.close(log_fd);
+        while (true) switch (linux.errno(linux.flock(log_fd, std.posix.LOCK.EX))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.LogLock,
+        };
         const tail = try u.logTail();
         const Seq = struct { seq: u64 = 0 };
         var seq = (std.json.parseFromSliceLeaky(Seq, u.gpa, tail.last, .{
@@ -1037,11 +1095,9 @@ pub const Update = struct {
     /// is killed. It fails unless it exits 0, the end of what it said in
     /// detail.
     pub fn run(u: *Update, argv: []const []const u8) !void {
-        var z: std.ArrayList(?[*:0]const u8) = .empty;
-        for (argv) |a| try z.append(u.gpa, try u.gpa.dupeSentinel(u8, a, 0));
         const e = u.child(
             tool,
-            .{try z.toOwnedSliceSentinel(u.gpa, null)},
+            .{try argvZ(u.gpa, argv)},
             max_tool_output,
             tool_seconds,
         ) catch |err| {
@@ -1066,10 +1122,7 @@ pub const Update = struct {
         const buf = try u.gpa.alloc(u8, @intCast(@min(size, 64 << 10)));
         const tail = buf[0..try f.readPositionalAll(u.io, buf, size - buf.len)];
         const end = if (std.mem.findScalarLast(u8, tail, '\n')) |i| i + 1 else 0;
-        const start = if (end > 0) if (std.mem.findScalarLast(u8, tail[0 .. end - 1], '\n')) |i|
-            i + 1
-        else
-            0 else 0;
+        const start = if (std.mem.findScalarLast(u8, tail[0..end -| 1], '\n')) |i| i + 1 else 0;
         return .{ .last = tail[start..end], .torn = tail[end..] };
     }
 
@@ -1237,23 +1290,15 @@ pub fn parseCmdline(text: []const u8) Cmdline {
     var c: Cmdline = .{};
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |arg| {
-        if (std.mem.startsWith(
-            u8,
-            arg,
-            "werewolf.victim=",
-        )) c.victim = arg["werewolf.victim=".len..];
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=")) c.slot = arg["werewolf.slot=".len..];
-        if (std.mem.startsWith(
-            u8,
-            arg,
-            "werewolf.grubenv=",
-        )) c.grubenv = arg["werewolf.grubenv=".len..];
-        if (std.mem.startsWith(u8, arg, "werewolf.esp=")) c.esp = arg["werewolf.esp=".len..];
+        if (std.mem.cutPrefix(u8, arg, "werewolf.victim=")) |v| c.victim = v;
+        if (std.mem.cutPrefix(u8, arg, "werewolf.slot=")) |v| c.slot = v;
+        if (std.mem.cutPrefix(u8, arg, "werewolf.grubenv=")) |v| c.grubenv = v;
+        if (std.mem.cutPrefix(u8, arg, "werewolf.esp=")) |v| c.esp = v;
     }
     return c;
 }
 
-fn uuidOf(spec: []const u8) []const u8 {
+pub fn uuidOf(spec: []const u8) []const u8 {
     return spec[0 .. std.mem.findScalar(u8, spec, ':') orelse spec.len];
 }
 
@@ -1264,6 +1309,13 @@ pub fn pathOf(spec: []const u8) []const u8 {
 
 pub fn parentDir(path: []const u8) []const u8 {
     return path[0 .. std.mem.findScalarLast(u8, path, '/') orelse 0];
+}
+
+/// argv as execve takes it: each argument NUL-terminated, and a null last.
+pub fn argvZ(gpa: Allocator, argv: []const []const u8) ![:null]const ?[*:0]const u8 {
+    const z = try gpa.allocSentinel(?[*:0]const u8, argv.len, null);
+    for (argv, z) |a, *p| p.* = try gpa.dupeSentinel(u8, a, 0);
+    return z;
 }
 
 pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
@@ -1313,18 +1365,12 @@ fn diffPackages(gpa: Allocator, old: []const Package, new: []const Package) ![]c
     var out: std.ArrayList(Change) = .empty;
     for (new) |n| {
         const o = versionOf(old, n.name);
-        if (o == null or
-            !std.mem.eql(
-                u8,
-                o.?,
-                n.version,
-            )) try out.append(gpa, .{ .name = n.name, .from = o, .to = n.version });
+        if (o != null and std.mem.eql(u8, o.?, n.version)) continue;
+        try out.append(gpa, .{ .name = n.name, .from = o, .to = n.version });
     }
     for (old) |o| {
-        if (versionOf(
-            new,
-            o.name,
-        ) == null) try out.append(gpa, .{ .name = o.name, .from = o.version, .to = null });
+        if (versionOf(new, o.name) != null) continue;
+        try out.append(gpa, .{ .name = o.name, .from = o.version, .to = null });
     }
     return out.items;
 }
@@ -1505,4 +1551,21 @@ test rfc3339 {
         "2026-10-06T12:42:29Z",
         try rfc3339(arena.allocator(), 1791290549),
     );
+}
+
+/// Whether a fetcher's word for a failure may pass if tried again: no
+/// answer at all (its error's name), a server's 5xx, 408 or 429; not a
+/// refusal that will be the same next time, as 404 is.
+fn transient(said: []const u8) bool {
+    const status = std.meta.stringToEnum(std.http.Status, said) orelse return true;
+    return @backingInt(status) >= 500 or status == .request_timeout or
+        status == .too_many_requests;
+}
+
+test transient {
+    try std.testing.expect(transient("ConnectionRefused"));
+    try std.testing.expect(transient("service_unavailable"));
+    try std.testing.expect(transient("too_many_requests"));
+    try std.testing.expect(!transient("not_found"));
+    try std.testing.expect(!transient("forbidden"));
 }

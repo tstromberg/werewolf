@@ -11,7 +11,6 @@ const linux = std.os.linux;
 const testing = std.testing;
 const init = @import("init.zig");
 const Machine = init.Machine;
-const phase_seal = @import("seal.zig");
 const executable = init.executable;
 const exists = init.exists;
 const firstLine = init.firstLine;
@@ -20,7 +19,6 @@ const lastField = init.lastField;
 const mount_bin = init.mount_bin;
 const say = init.say;
 const trim = init.trim;
-const never = phase_seal.never;
 
 const max_config_file = 1 << 20;
 
@@ -35,11 +33,8 @@ const max_config_entries = 256;
 pub fn victim(m: *Machine) void {
     const v = m.cmd.victim;
     if (v.len == 0) return;
-    const colon = std.mem.findScalar(
-        u8,
-        v,
-        ':',
-    ) orelse return say("victim's filesystem {s} not found", .{v});
+    const colon = std.mem.findScalar(u8, v, ':') orelse
+        return say("victim's filesystem {s} not found", .{v});
     // stage0 mounts it before it hands over, or the machine never gets
     // here (werewolf.victim comes only with werewolf.slot). Its device
     // is the kernel's word, from the mount table, not a second search
@@ -87,7 +82,7 @@ pub fn config(m: *Machine) void {
         say("config tar on {s}", .{dev});
         tar = dev;
     }
-    if (tar) |t| m.extract(t);
+    if (tar) |t| extract(m, t);
 
     var seeded = false;
     if (seed_dev) |cidata| {
@@ -95,7 +90,7 @@ pub fn config(m: *Machine) void {
             if (exists("/mnt/user-data")) {
                 say("NoCloud user-data on {s}", .{cidata});
                 seeded = true;
-                m.nocloud();
+                nocloud(m);
             }
             _ = linux.umount2("/mnt", 0);
         }
@@ -114,7 +109,7 @@ pub fn metadata(m: *Machine) void {
         exists("/run/werewolf/cloud/config.tar"))
     {
         say("config tar from the cloud's metadata server", .{});
-        m.extract("/run/werewolf/cloud/config.tar");
+        extract(m, "/run/werewolf/cloud/config.tar");
         if (exists("/run/config/network"))
             say(
                 "network: the cloud's network file is not read: the network was up to fetch it",
@@ -127,7 +122,8 @@ pub fn metadata(m: *Machine) void {
     else
         "werewolf";
     const host = if (isHostname(name)) name else blk: {
-        say("hostname '{s}' refused: not a plain name", .{name});
+        var buf: [64]u8 = undefined;
+        say("hostname '{s}' refused: not a plain name", .{shown(&buf, name)});
         break :blk "werewolf";
     };
     m.write("/run/werewolf/hostname", m.fmt("{s}\n", .{host}), 0o644);
@@ -139,10 +135,8 @@ pub fn metadata(m: *Machine) void {
         .{ host, host },
     ), 0o644);
     _ = linux.syscall2(.sethostname, @intFromPtr(host.ptr), host.len);
-    if (exists("/run/config/authorized_keys")) m.keys(
-        "root",
-        m.read("/run/config/authorized_keys"),
-    );
+    if (exists("/run/config/authorized_keys"))
+        keys(m, "root", m.read("/run/config/authorized_keys"));
 }
 
 /// The first user in a NoCloud cloud-config and every ssh key in it,
@@ -150,13 +144,17 @@ pub fn metadata(m: *Machine) void {
 /// machine: plain ones only. Written directly, since /etc is read-only:
 /// "*" is no password, without the lock "!" that sshd reads as refusing
 /// even a key. Home is on /data.
-pub fn nocloud(m: *Machine) void {
-    m.limaConfig();
-    const nc = parseNoCloud(m.gpa, m.read("/mnt/user-data")) catch return;
+fn nocloud(m: *Machine) void {
+    limaConfig(m);
+    const nc = parseNoCloud(m.gpa, m.readRegular("/mnt/user-data")) catch return;
     if (nc.user.len > 0) {
         const passwd = m.read("/run/werewolf/passwd");
+        const group = m.read("/run/werewolf/group");
+        // The name must be new to the group file too: the image's has
+        // groups no account owns (wheel, disk, shadow), and a second line
+        // with one of their names would be a name meaning two groups.
         if (isPlainUser(nc.user) and isPlainUid(nc.uid) and !hasEntry(passwd, nc.user) and
-            !idInUse(passwd, nc.uid) and !idInUse(m.read("/run/werewolf/group"), nc.uid))
+            !hasEntry(group, nc.user) and !idInUse(passwd, nc.uid) and !idInUse(group, nc.uid))
         {
             m.append(
                 "/run/werewolf/passwd",
@@ -167,25 +165,27 @@ pub fn nocloud(m: *Machine) void {
             );
             m.append("/run/werewolf/group", m.fmt("{s}:x:{s}:\n", .{ nc.user, nc.uid }));
             m.append("/run/werewolf/shadow", m.fmt("{s}:*:0:0:99999:7:::\n", .{nc.user}));
-            m.keys(nc.user, nc.keys);
+            keys(m, nc.user, nc.keys);
             m.nocloud_user = nc.user;
         } else {
+            var user_buf: [64]u8 = undefined;
+            var uid_buf: [16]u8 = undefined;
             say(
                 "NoCloud user '{s}' (uid {s}) refused: not a plain name, or a uid from 500 " ++
                     "to 60000 no account has",
-                .{ nc.user, nc.uid },
+                .{ shown(&user_buf, nc.user), shown(&uid_buf, nc.uid) },
             );
         }
     }
     // Lima's readiness probe reads the instance-id back from here; it is
     // what cloud-init's boot scripts would have written.
-    const id = instanceId(m.read("/mnt/meta-data"));
+    const id = instanceId(m.readRegular("/mnt/meta-data"));
     m.write("/run/lima-boot-done", if (id.len > 0) m.fmt("{s}\n", .{id}) else "", 0o644);
 }
 
 /// Import only Lima's data provisioning into root-private /run/config.
 /// Treat lima.env as data, never source it or run any cidata script.
-pub fn limaConfig(m: *Machine) void {
+fn limaConfig(m: *Machine) void {
     var cidata = Dir.cwd().openDir(m.io, "/mnt", .{ .follow_symlinks = false }) catch return;
     defer cidata.close(m.io);
     const env = readLimaFile(m.gpa, m.io, cidata, "lima.env") catch |err| switch (err) {
@@ -214,7 +214,7 @@ pub fn limaConfig(m: *Machine) void {
 }
 
 /// user's ssh keys, where sshd looks (AuthorizedKeysFile).
-pub fn keys(m: *Machine, user: []const u8, text: []const u8) void {
+fn keys(m: *Machine, user: []const u8, text: []const u8) void {
     const path = m.fmtZ("/run/werewolf/keys/{s}", .{user});
     m.write(path, text, 0o600);
     const ids = lookupIds(m.read("/run/werewolf/passwd"), user) orelse return;
@@ -228,11 +228,23 @@ pub fn keys(m: *Machine, user: []const u8, text: []const u8) void {
 /// it, or nothing: at most 256 entries and 16 MiB. Regular files and
 /// directories only, each name relative and plain, no file over 1 MiB;
 /// files 0600 and directories 0700, root's.
-pub fn extract(m: *Machine, path: []const u8) void {
-    const src = linux.open(m.z(path), .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+fn extract(m: *Machine, path: []const u8) void {
+    // A regular file or a disk, no link followed: on a victim's
+    // filesystem a FIFO at the name would hold PID 1 in open for good, a
+    // link would lead it elsewhere.
+    const src = linux.open(m.z(path), .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .NOCTTY = true,
+    }, 0);
     if (linux.errno(src) != .SUCCESS)
         return say("config: {s}: {t}", .{ path, linux.errno(src) });
     defer _ = linux.close(@intCast(src));
+    const kind = init.fileType(@intCast(src));
+    if (kind != linux.S.IFREG and kind != linux.S.IFBLK)
+        return say("config: {s} refused: not a file or a disk", .{path});
     const dir = linux.open(
         "/run/config",
         .{ .PATH = true, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
@@ -243,7 +255,7 @@ pub fn extract(m: *Machine, path: []const u8) void {
     defer _ = linux.close(@intCast(dir));
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) return say("config: fork: {t}", .{linux.errno(pid)});
-    if (pid == 0) m.extractChild(@intCast(src), @intCast(dir), path);
+    if (pid == 0) extractChild(m, @intCast(src), @intCast(dir), path);
     var status: i32 = 0;
     while (linux.errno(linux.wait4(@intCast(pid), &status, 0, null)) == .INTR) {}
     const st: u32 = @bitCast(status);
@@ -253,7 +265,7 @@ pub fn extract(m: *Machine, path: []const u8) void {
 
 /// The child of extract: confined, then the tar checked whole, then
 /// written.
-pub fn extractChild(m: *Machine, src: i32, dir: i32, path: []const u8) noreturn {
+fn extractChild(m: *Machine, src: i32, dir: i32, path: []const u8) noreturn {
     confineExtract(dir) catch {
         say("config: cannot confine the extraction: {s} {s}", .{
             sandbox.failed, sandbox.errnoName(sandbox.failed_errno),
@@ -275,7 +287,7 @@ pub fn extractChild(m: *Machine, src: i32, dir: i32, path: []const u8) noreturn 
 }
 
 /// The tar's entries and file bytes counted, before anything is written.
-pub fn sizeUp(m: *Machine, f: Io.File) !void {
+fn sizeUp(m: *Machine, f: Io.File) !void {
     var rbuf: [8192]u8 = undefined;
     var r = f.readerStreaming(m.io, &rbuf);
     var name_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -295,7 +307,7 @@ pub fn sizeUp(m: *Machine, f: Io.File) !void {
 }
 
 /// Each entry written beneath out: what is not plain is said and left.
-pub fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
+fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
     var rbuf: [8192]u8 = undefined;
     var r = f.readerStreaming(m.io, &rbuf);
     var name_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -304,9 +316,18 @@ pub fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
         &r.interface,
         .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
     );
+    // The caps sizeUp held the tar to, held again on this pass: a disk's
+    // bytes are the hypervisor's to change between the two reads.
+    var entries: usize = 0;
+    var total: u64 = 0;
     while (try it.next()) |e| {
+        entries += 1;
+        if (e.kind == .file) total += e.size;
+        if (entries > max_config_entries) return error.TooManyEntries;
+        if (total > max_config_total) return error.TooLarge;
         const name = safeName(e.name) orelse {
-            say("config: {s} refused: not a plain relative name", .{e.name});
+            var buf: [64]u8 = undefined;
+            say("config: {s} refused: not a plain relative name", .{shown(&buf, e.name)});
             continue;
         };
         if (name.len == 0) continue;
@@ -319,10 +340,7 @@ pub fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
                     say("config: {s} refused: over 1 MiB", .{name});
                     continue;
                 }
-                if (std.fs.path.dirname(name)) |parent| out.createDirPath(
-                    m.io,
-                    parent,
-                ) catch {};
+                if (std.fs.path.dirname(name)) |parent| out.createDirPath(m.io, parent) catch {};
                 var file = out.createFile(
                     m.io,
                     name,
@@ -519,8 +537,6 @@ fn parseNoCloud(gpa: Allocator, text: []const u8) !NoCloud {
     return nc;
 }
 
-const key_types = [_][]const u8{ "ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-nistp", "sk-" };
-
 /// Every ssh public key on line, one a line into out: a type, a space, the
 /// base64 body, and an optional comment to the end of the line or a quote.
 fn sshKeys(gpa: Allocator, line: []const u8, out: *std.ArrayList(u8)) !void {
@@ -638,6 +654,21 @@ pub fn lookupIds(passwd: []const u8, name: []const u8) ?Ids {
 /// A tar entry's name, made relative and plain: no leading /, no . or ..,
 /// no empty parts; "" for the archive's root, ./ itself. null if it cannot
 /// be.
+/// Text from outside as the console may show it: at most buf.len bytes,
+/// each control byte a "?", so a name refused for holding one cannot put
+/// an escape sequence or a false line on the console log.
+fn shown(buf: []u8, s: []const u8) []const u8 {
+    const n = @min(s.len, buf.len);
+    for (s[0..n], buf[0..n]) |c, *o| o.* = if (c < 0x20 or c == 0x7f) '?' else c;
+    return buf[0..n];
+}
+
+test "shown hides control bytes and bounds the text" {
+    var buf: [8]u8 = undefined;
+    try testing.expectEqualStrings("a?b?c", shown(&buf, "a\x1bb\x7fc"));
+    try testing.expectEqualStrings("12345678", shown(&buf, "123456789"));
+}
+
 fn safeName(name: []const u8) ?[]const u8 {
     var n = name;
     while (std.mem.startsWith(u8, n, "./")) n = n[2..];
@@ -654,7 +685,7 @@ fn safeName(name: []const u8) ?[]const u8 {
 }
 
 /// instance-id's value in a NoCloud meta-data.
-pub fn instanceId(text: []const u8) []const u8 {
+fn instanceId(text: []const u8) []const u8 {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
         if (!std.mem.startsWith(u8, line, "instance-id:")) continue;
@@ -773,6 +804,13 @@ test safeName {
     try testing.expectEqualStrings("", safeName("./").?);
     try testing.expectEqualStrings("", safeName(".").?);
     try testing.expectEqual(null, safeName("/"));
+}
+
+test instanceId {
+    try testing.expectEqualStrings(
+        "i-0123",
+        instanceId("local-hostname: x\ninstance-id: i-0123\n"),
+    );
 }
 
 test isCidata {

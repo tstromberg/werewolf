@@ -33,11 +33,8 @@ pub fn parse(text: []const u8, why: *[]const u8) ?Network {
     var n: Network = .{};
     var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
     while (it.next()) |word| {
-        const eq = std.mem.findScalar(
-            u8,
-            word,
-            '=',
-        ) orelse return refuse(why, "a word that is not KEY=VALUE");
+        const eq = std.mem.findScalar(u8, word, '=') orelse
+            return refuse(why, "a word that is not KEY=VALUE");
         const slot: *[]const u8 = if (std.mem.eql(u8, word[0..eq], "werewolf.ip"))
             &n.ip
         else if (std.mem.eql(u8, word[0..eq], "werewolf.gw"))
@@ -88,10 +85,7 @@ pub fn address(cidr: []const u8) error{Address}!Address {
         .prefix = @intCast(try number(cidr[slash + 1 ..], 1, 32)),
     };
     if (!usable(a.addr)) return error.Address;
-    if (a.prefix <= 30) {
-        const host = toInt(a.addr) & ~mask(a.prefix);
-        if (host == 0 or host == ~mask(a.prefix)) return error.Address;
-    }
+    if (a.prefix <= 30 and edge(a.addr, a.prefix)) return error.Address;
     return a;
 }
 
@@ -102,11 +96,15 @@ pub fn gateway(a: Address, s: []const u8) error{ Address, Gateway }!Ip4 {
     const gw = try ip4(s);
     if (!usable(gw)) return error.Address;
     if (std.mem.eql(u8, &gw, &a.addr)) return error.Gateway;
-    if (a.prefix <= 30 and inSubnet(gw, a.addr, a.prefix)) {
-        const host = toInt(gw) & ~mask(a.prefix);
-        if (host == 0 or host == ~mask(a.prefix)) return error.Gateway;
-    }
+    if (a.prefix <= 30 and inSubnet(gw, a.addr, a.prefix) and edge(gw, a.prefix))
+        return error.Gateway;
     return gw;
+}
+
+/// Whether a is its subnet's network or broadcast address.
+fn edge(a: Ip4, prefix: u6) bool {
+    const host = toInt(a) & ~mask(prefix);
+    return host == 0 or host == ~mask(prefix);
 }
 
 /// A dotted quad: four numbers 0 to 255, no leading zeros, nothing else.

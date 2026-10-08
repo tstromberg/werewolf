@@ -18,6 +18,7 @@ const capBit = posture.capBit;
 const exists = posture.exists;
 const joined = posture.joined;
 const lessString = posture.lessString;
+const listAdd = posture.listAdd;
 const statusField = posture.statusField;
 const trim = posture.trim;
 
@@ -58,12 +59,6 @@ fn refused(_: linux.SIG) callconv(.c) void {
     linux.exit_group(0);
 }
 
-/// Whether modify_ldt(2) reads the LDT. x86_64 only.
-fn readsLdt() bool {
-    var ldt: [16]u8 = undefined;
-    return linux.errno(linux.syscall3(.modify_ldt, 0, @intFromPtr(&ldt), ldt.len)) == .SUCCESS;
-}
-
 pub fn check(p: *Posture) !void {
     const level = lockdownLevel(p.read("/sys/kernel/security/lockdown"));
     const locked = isLocked(level);
@@ -89,11 +84,8 @@ pub fn check(p: *Posture) !void {
         "1",
         "0",
     );
-    const tainted = std.fmt.parseInt(
-        u64,
-        trim(p.read("/proc/sys/kernel/tainted")),
-        10,
-    ) catch std.math.maxInt(u64);
+    const tainted = std.fmt.parseInt(u64, p.sysctl("kernel/tainted"), 10) catch
+        std.math.maxInt(u64);
     try p.add(.{
         .id = "kernel-modules-signed",
         .area = "kernel",
@@ -135,11 +127,8 @@ pub fn check(p: *Posture) !void {
         "An exploit cannot read kernel addresses or the kernel's log.",
         &.{ .{ "kernel/kptr_restrict", "2" }, .{ "kernel/dmesg_restrict", "1" } },
     );
-    const perf = std.fmt.parseInt(
-        i32,
-        trim(p.sysctl("kernel/perf_event_paranoid")),
-        10,
-    ) catch -9;
+    const paranoid = p.sysctl("kernel/perf_event_paranoid");
+    const perf = std.fmt.parseInt(i32, paranoid, 10) catch -9;
     try p.add(.{
         .id = "kernel-perf",
         .area = "kernel",
@@ -147,7 +136,7 @@ pub fn check(p: *Posture) !void {
         .why = "Ordinary users cannot watch the kernel through performance counters.",
         .how = "kernel.perf_event_paranoid is 2 or more",
         .result = if (perf >= 2) .pass else .fail,
-        .detail = trim(p.sysctl("kernel/perf_event_paranoid")),
+        .detail = paranoid,
     });
     try p.sysctls(
         "kernel-userns",
@@ -198,31 +187,13 @@ pub fn check(p: *Posture) !void {
     // parameter; aarch64's KVM nests only when the command line asks.
     var nested: std.ArrayList(u8) = .empty;
     for ([_][]const u8{ "kvm_intel", "kvm_amd" }) |m| {
-        const on = trim(p.read(try p.gpa.print(
-            "/sys/module/{s}/parameters/nested",
-            .{m},
-        )));
-        if (std.mem.eql(u8, on, "Y") or
-            std.mem.eql(
-                u8,
-                on,
-                "1",
-            )) try nested.print(
-            p.gpa,
-            "{s}{s}.nested is {s}",
-            .{ if (nested.items.len > 0) ", " else "", m, on },
-        );
+        const on = trim(p.read(try p.gpa.print("/sys/module/{s}/parameters/nested", .{m})));
+        if (std.mem.eql(u8, on, "Y") or std.mem.eql(u8, on, "1"))
+            try listAdd(p.gpa, &nested, "{s}.nested is {s}", .{ m, on });
     }
     var args = std.mem.tokenizeAny(u8, p.read("/proc/cmdline"), " \n");
-    while (args.next()) |a| if (std.mem.eql(
-        u8,
-        a,
-        "kvm-arm.mode=nested",
-    )) try nested.print(
-        p.gpa,
-        "{s}kvm-arm.mode=nested",
-        .{if (nested.items.len > 0) ", " else ""},
-    );
+    while (args.next()) |a| if (std.mem.eql(u8, a, "kvm-arm.mode=nested"))
+        try listAdd(p.gpa, &nested, "kvm-arm.mode=nested", .{});
     try p.add(.{
         .id = "kernel-no-nested",
         .area = "kernel",
@@ -260,21 +231,13 @@ pub fn check(p: *Posture) !void {
     try legacy(p);
     // The bounding set: what no process, root included, can hold again
     // before a reboot. The network's two only where the form allows them.
-    const status1 = p.read("/proc/1/status");
-    const bnd = statusField(status1, "CapBnd");
+    const status = p.read("/proc/1/status");
+    const bnd = statusField(status, "CapBnd");
     const allow = try p.allowances();
     var held: std.ArrayList(u8) = .empty;
     next: for (bounded_caps) |c| {
         for (allow) |a| if (c.allow.len > 0 and std.mem.eql(u8, a, c.allow)) continue :next;
-        if (capBit(
-            status1,
-            "CapBnd",
-            c.n,
-        ) orelse false) try held.print(
-            p.gpa,
-            "{s}{s}",
-            .{ if (held.items.len > 0) ", " else "", c.name },
-        );
+        if (capBit(status, "CapBnd", c.n) orelse false) try listAdd(p.gpa, &held, "{s}", .{c.name});
     }
     try p.add(.{
         .id = "kernel-bounding-set",
@@ -296,19 +259,12 @@ pub fn check(p: *Posture) !void {
     // The programs the kernel starts itself (core dump pipes, modprobe,
     // the uevent helper) descend from kthreadd, not PID 1: only these
     // sysctls bound them. Readable by root alone.
-    const umh = trim(p.read("/proc/sys/kernel/usermodehelper/bset"));
-    const hotplug = trim(p.read("/proc/sys/kernel/hotplug"));
-    const modprobe = trim(p.read("/proc/sys/kernel/modprobe"));
+    const helpers = helperCaps(p.sysctl("kernel/usermodehelper/bset"));
+    const hotplug = p.sysctl("kernel/hotplug");
+    const modprobe = p.sysctl("kernel/modprobe");
     var helper_held: std.ArrayList(u8) = .empty;
-    if (helperCaps(umh)) |set| for (helper_denied) |c| {
-        if (set & (@as(
-            u64,
-            1,
-        ) << c.n) != 0) try helper_held.print(
-            p.gpa,
-            "{s}{s}",
-            .{ if (helper_held.items.len > 0) ", " else "", c.name },
-        );
+    if (helpers) |set| for (helper_denied) |c| {
+        if (set & (@as(u64, 1) << c.n) != 0) try listAdd(p.gpa, &helper_held, "{s}", .{c.name});
     };
     try p.add(.{
         .id = "kernel-helpers",
@@ -322,7 +278,7 @@ pub fn check(p: *Posture) !void {
             "kernel.hotplug and kernel.modprobe are empty",
         .result = if (!p.root)
             .skip
-        else if (helperCaps(umh) == null)
+        else if (helpers == null)
             .fail
         else if (helper_held.items.len == 0 and hotplug.len == 0 and modprobe.len == 0)
             .pass
@@ -330,7 +286,7 @@ pub fn check(p: *Posture) !void {
             .fail,
         .detail = if (!p.root)
             "readable by root alone"
-        else if (helperCaps(umh) == null)
+        else if (helpers == null)
             "cannot read kernel.usermodehelper.bset"
         else if (helper_held.items.len > 0)
             try p.gpa.print("held: {s}", .{helper_held.items})
@@ -344,7 +300,6 @@ pub fn check(p: *Posture) !void {
     // A seccomp filter on PID 1 binds every process after it, root's
     // too, and nothing can remove it before a reboot: werewolf's seal
     // (cmd/init/init.zig) refuses there what no program here calls.
-    const status = status1;
     const filtered = std.mem.eql(u8, statusField(status, "Seccomp") orelse "", "2");
     try p.add(.{
         .id = "kernel-seal",
@@ -412,9 +367,10 @@ pub fn check(p: *Posture) !void {
             "failed exploit often makes it, reboots rather than running on for the " ++
             "exploit to try again.",
         .how = "kernel.panic_on_oops is 1, kernel.warn_limit is 1, so the first warning " ++
-            "panics too, and kernel.panic is above 0, so the panic reboots rather than hangs",
+            "panics too, and kernel.panic is not 0 (below 0 reboots at once), so the " ++
+            "panic reboots rather than hangs",
         .result = if (std.mem.eql(u8, oops, "1") and std.mem.eql(u8, warn, "1") and
-            (std.fmt.parseInt(i64, panic_s, 10) catch 0) > 0)
+            (std.fmt.parseInt(i64, panic_s, 10) catch 0) != 0)
             .pass
         else
             .fail,
@@ -541,19 +497,11 @@ fn cpuVulnerable(p: *Posture) !?[]const u8 {
     var found: std.ArrayList(u8) = .empty;
     for (names.items) |name| {
         const text = trim(p.read(try p.gpa.print("{s}/{s}", .{ dir, name })));
-        if (std.mem.startsWith(
-            u8,
-            text,
-            "Vulnerable",
-        )) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", name });
+        if (std.mem.startsWith(u8, text, "Vulnerable")) try listAdd(p.gpa, &found, "{s}", .{name});
     }
     return found.items;
 }
 
-/// The 32-bit and 16-bit interfaces a 64-bit x86 kernel keeps for old
-/// programs, which none here are: int 0x80, and the LDT 16-bit code
-/// needs. Each is tried. The int 0x80 is made in a child that handles
-/// the SIGSEGV a refusal brings, so the kernel logs nothing.
 /// The first step of four exploited kernel bugs, each tried as the
 /// exploit would try it, so it finds the code whether it is built in,
 /// loaded, or loaded on demand: a kernel that loads a module when asked
@@ -651,6 +599,10 @@ fn exploitEntries(p: *Posture) !void {
     });
 }
 
+/// The 32-bit and 16-bit interfaces a 64-bit x86 kernel keeps for old
+/// programs, which none here are: int 0x80, and the LDT 16-bit code
+/// needs. Each is tried. The int 0x80 is made in a child that handles
+/// the SIGSEGV a refusal brings, so the kernel logs nothing.
 fn legacy(p: *Posture) !void {
     const id = "kernel-legacy";
     const name = "No 32-bit or 16-bit system calls";
@@ -666,14 +618,11 @@ fn legacy(p: *Posture) !void {
         .detail = "only a 32-bit program can make a 32-bit system call here",
     });
     const int80 = inChild(makes32BitSyscall, false);
-    const ldt = readsLdt();
+    var ldt: [16]u8 = undefined;
+    const ldt_read = linux.syscall3(.modify_ldt, 0, @intFromPtr(&ldt), ldt.len);
     var open: std.ArrayList(u8) = .empty;
-    if (int80 orelse false) try open.appendSlice(p.gpa, "int 0x80 works");
-    if (ldt) try open.print(
-        p.gpa,
-        "{s}modify_ldt works",
-        .{if (open.items.len > 0) ", " else ""},
-    );
+    if (int80 orelse false) try listAdd(p.gpa, &open, "int 0x80 works", .{});
+    if (linux.errno(ldt_read) == .SUCCESS) try listAdd(p.gpa, &open, "modify_ldt works", .{});
     try p.add(.{
         .id = id,
         .area = "kernel",
@@ -724,9 +673,6 @@ fn aslr(p: *Posture) !void {
     });
 }
 
-/// sshd's settings as it runs them, from sshd -T, which reads its
-/// configuration, Match blocks and defaults included, as sshd does.
-/// Nothing is checked where there is no sshd; sshd -T needs root.
 /// The kernel's memory hardening that costs a program nothing, judged by
 /// what is in effect rather than by the command line alone, since a
 /// kernel may have it on by default (Alpine's clears memory as it is
@@ -739,30 +685,17 @@ fn memory(p: *Posture) !void {
         n > 0
     else
         (try unsetArgs(p.gpa, cmdline, &.{"slab_nomerge"})).len > 0;
-    if (merged) try missing.print(p.gpa, "kernel caches merged", .{});
-    const shuffle = std.mem.trim(
-        u8,
-        p.read("/sys/module/page_alloc/parameters/shuffle"),
-        " \n",
-    );
+    if (merged) try listAdd(p.gpa, &missing, "kernel caches merged", .{});
+    const shuffle = trim(p.read("/sys/module/page_alloc/parameters/shuffle"));
     const shuffled = if (shuffle.len > 0)
         std.mem.eql(u8, shuffle, "Y")
     else
         (try unsetArgs(p.gpa, cmdline, &.{"page_alloc.shuffle"})).len == 0;
-    if (!shuffled) try missing.print(
-        p.gpa,
-        "{s}pages not shuffled",
-        .{if (missing.items.len > 0) ", " else ""},
-    );
-    const alloc = heapInit(
-        memAutoInit(p),
-        "heap alloc",
-    ) orelse if ((try unsetArgs(p.gpa, cmdline, &.{"init_on_alloc"})).len == 0) true else null;
-    if (alloc == false) try missing.print(
-        p.gpa,
-        "{s}memory not cleared as it is handed out",
-        .{if (missing.items.len > 0) ", " else ""},
-    );
+    if (!shuffled) try listAdd(p.gpa, &missing, "pages not shuffled", .{});
+    // Where the log no longer says, the command line can say on; else unknown.
+    const alloc = heapInit(memAutoInit(p), "heap alloc") orelse
+        if ((try unsetArgs(p.gpa, cmdline, &.{"init_on_alloc"})).len == 0) true else null;
+    if (alloc == false) try listAdd(p.gpa, &missing, "memory not cleared as it is handed out", .{});
     try p.add(.{
         .id = "kernel-memory-hardening",
         .area = "kernel",
@@ -826,10 +759,8 @@ fn memAutoInit(p: *Posture) []const u8 {
 /// Kernel checks werewolf fails by choice, for --extended: clearing
 /// freed memory and forced CPU mitigations cost every workload.
 fn costly(p: *Posture) !void {
-    const free_on = heapInit(
-        memAutoInit(p),
-        "heap free",
-    ) orelse ((try unsetArgs(p.gpa, p.read("/proc/cmdline"), &.{"init_on_free"})).len == 0);
+    const free_on = heapInit(memAutoInit(p), "heap free") orelse
+        ((try unsetArgs(p.gpa, p.read("/proc/cmdline"), &.{"init_on_free"})).len == 0);
     try p.add(.{
         .id = "kernel-memory-wipe",
         .area = "kernel",
@@ -914,7 +845,7 @@ fn missingArgs(gpa: Allocator, want: []const u8, have: []const u8) ![]const u8 {
     next: while (w.next()) |arg| {
         var h = std.mem.tokenizeAny(u8, have, " \n");
         while (h.next()) |x| if (std.mem.eql(u8, x, arg)) continue :next;
-        try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", arg });
+        try listAdd(gpa, &out, "{s}", .{arg});
     }
     return out.items;
 }
@@ -973,8 +904,7 @@ fn featuresPresent(
     var found: std.ArrayList(u8) = .empty;
     for (names) |name| {
         if (hasFilesystem(filesystems, name) or firstWordIs(modules, name) or
-            firstWordIs(protocols, name))
-            try found.print(gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", name });
+            firstWordIs(protocols, name)) try listAdd(gpa, &found, "{s}", .{name});
     }
     return found.items;
 }
@@ -1020,9 +950,16 @@ fn unsetArgs(gpa: Allocator, cmdline: []const u8, names: []const []const u8) ![]
                     std.ascii.eqlIgnoreCase(v, "on");
             }
         }
-        if (!on) try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", name });
+        if (!on) try listAdd(gpa, &out, "{s}", .{name});
     }
     return out.items;
+}
+
+/// Why asking the kernel to stop auditing did not end as refused: null
+/// if it was.
+fn askToStop() ?[]const u8 {
+    audit.setEnabled(0) catch |err| return if (err == error.Refused) null else @errorName(err);
+    return "audit was turned off";
 }
 
 /// Whether what the kernel refuses is on record, and where the record
@@ -1044,25 +981,26 @@ pub fn logged(p: *Posture) !void {
         }
         p.io.sleep(.fromMilliseconds(50), .awake) catch {};
     }
-    const stopped: ?[]const u8 = if (!p.root) null else if (audit.setEnabled(0)) |_|
-        "audit was turned off"
+    // Asked to stop only when it reads locked, or cannot be read for want
+    // of the capability, which setting it takes as well: audit on and
+    // unlocked, as another distribution has it, would stop, and stay off.
+    const stopped: ?[]const u8 = if (!p.root)
+        null
+    else if (audit.enabledNow()) |now|
+        if (now == audit.locked) askToStop() else "audit is not locked"
     else |err| switch (err) {
-        error.Refused => null,
+        error.Refused => askToStop(),
         else => @errorName(err),
     };
+    const how = "running / as a program, which every kernel refuses, leaves its audit record " ++
+        "(type=1300, success=no) in the kernel log";
     try p.add(.{
         .id = "kernel-exec-log",
         .area = "kernel",
         .name = "Refused execs logged, for good",
         .why = "An intruder's first step, running something the machine refuses, leaves a " ++
             "line in the kernel's log that nothing on the machine can prevent or stop.",
-        .how = if (p.root)
-            "running / as a program, which every kernel refuses, leaves its audit " ++
-                "record (type=1300, success=no) in the kernel log, and asking the kernel " ++
-                "to stop auditing is refused"
-        else
-            "running / as a program, which every kernel refuses, leaves its audit " ++
-                "record (type=1300, success=no) in the kernel log",
+        .how = if (p.root) how ++ ", and asking the kernel to stop auditing is refused" else how,
         .result = if (on_record and stopped == null) .pass else .fail,
         .detail = if (!on_record)
             "no audit record of a refused exec"
@@ -1074,8 +1012,8 @@ pub fn logged(p: *Posture) !void {
     // notices. And the console must be one someone can read: a serial
     // port or a hypervisor's console, which a cloud captures, not a
     // virtual terminal nobody watches.
-    const printk = trim(p.read("/proc/sys/kernel/printk"));
-    const level = std.fmt.parseInt(u8, firstField(printk), 10) catch 0;
+    var printk = std.mem.tokenizeAny(u8, p.sysctl("kernel/printk"), " \t");
+    const level = std.fmt.parseInt(u8, printk.next() orelse "", 10) catch 0;
     const console = capturedConsole(p.read("/proc/consoles"));
     try p.add(.{
         .id = "kernel-console-log",
@@ -1101,11 +1039,6 @@ fn execRoot() bool {
     const envp = [_:null]?[*:0]const u8{};
     _ = linux.execve("/", &argv, &envp);
     return false;
-}
-
-fn firstField(s: []const u8) []const u8 {
-    var it = std.mem.tokenizeAny(u8, s, " \t");
-    return it.next() orelse "";
 }
 
 /// The first console in /proc/consoles that is enabled, written to, and not
@@ -1153,7 +1086,7 @@ fn hardCoreLimit(limits: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The real uid on a /proc/PID/status Uid: line.
+/// CAP_SYS_RAWIO's bit in a capability set.
 pub const cap_sys_rawio = 17;
 
 /// The capabilities kernel-bounding-set wants gone from PID 1's bounding

@@ -158,8 +158,10 @@ SELinux's libraries, and busybox's cannot set `nosuid`, `nodev` or `noexec`.
   is given, with their values checked, and only under `/proc`, `/sys`,
   `/dev`, `/run`, `/tmp`, `/data`, `/victim` and `/mnt`: nothing is mounted
   over `/etc`, `/usr` or the root.
-- **No symlinks.** Paths are absolute and clean, and resolved with symlinks
-  refused, so a link planted in `/tmp` cannot steer a mount.
+- **No symlinks.** Paths are absolute and clean, and the mount point and a
+  bind's source are resolved with symlinks refused, so a link planted in
+  `/tmp` cannot steer a mount. A block device's path is the kernel's to
+  resolve, since `/dev/mapper/data` is a link; `/dev` is root's alone.
 - **Pledged.** Before it asks the kernel for anything it sets
   `no_new_privs`, drops every capability but `CAP_SYS_ADMIN`, and installs a
   seccomp filter of the dozen system calls it makes. Anything else kills it.
@@ -212,7 +214,11 @@ cloud-init's user-data, once werewolf has committed.
   `usr/lib`). So a service could plant a link in its own directory for a
   root program walking it to follow. None does today: leash takes each
   service's directory only as a directory, never through a link, and
-  walks no further. Accepted for now. Closing it takes the updater's
+  walks no further, and resolves a service file's `read` and `write`
+  paths with every link refused, so a service cannot make a path in its
+  own directory a link to what another service should be granted; the
+  demo's nginx serves no link either (`disable_symlinks`). Accepted for
+  now. Closing it takes the updater's
   directory on a mount of its own that follows links, with `/data`
   `nosymfollow` around it, and the broker unmounting it first at shutdown.
 - **The kernel's own helpers escape the filter.** A program the kernel

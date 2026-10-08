@@ -31,6 +31,9 @@ pub const Boot = struct {
     userland: []const u8 = "",
     /// From up to the lease.
     address_ns: ?i96 = null,
+    /// The engine ended before the machine was up, as Firecracker's
+    /// supervisor says on the console: no use waiting on.
+    ended: bool = false,
 };
 
 /// Wait for a machine started now to boot, and, given its MAC, for its
@@ -66,6 +69,13 @@ pub fn watch(
                 b.userland = try gpa.dupe(u8, u.userland);
                 up_at = Io.Clock.awake.now(io);
                 if (m == null) return b;
+            } else if (std.mem.find(u8, buf[0..n], "werewolf: firecracker exited ")) |at| {
+                // Exit 0 is a reboot, which the supervisor runs again.
+                const rest = buf[at + "werewolf: firecracker exited ".len .. n];
+                if (!std.mem.startsWith(u8, rest, "0:")) {
+                    b.ended = true;
+                    return b;
+                }
             }
         } else |_| {};
         if (m) |hw| if (Dir.cwd().readFile(io, lima.leases, lbuf)) |text| {

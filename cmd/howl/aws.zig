@@ -144,6 +144,7 @@ pub fn ensureImage(
     defer Dir.cwd().deleteFile(io, raw) catch {};
     try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
     const snapshot = try writeSnapshot(io, gpa, p, name, form, raw, work, why);
+    errdefer _ = ask(io, gpa, p, &.{ "ec2", "delete-snapshot", "--snapshot-id", snapshot });
     const m = machine(arch);
     return need(io, gpa, p, &.{
         "ec2",
@@ -211,6 +212,8 @@ fn writeSnapshot(
         "--query",
         "SnapshotId",
     }, why);
+    // Not left behind, half written or billed, when a step after fails.
+    errdefer _ = ask(io, gpa, p, &.{ "ec2", "delete-snapshot", "--snapshot-id", id });
 
     var slots: [parallel]Slot = undefined;
     for (&slots, 0..) |*s, i| s.* = .{
@@ -322,17 +325,19 @@ pub const Instance = struct { id: []const u8, form: []const u8 };
 
 /// The instance named name that has not gone, and the form its tag names,
 /// "" if none does; null if there is none.
-pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8) ?Instance {
-    const text = ask(io, gpa, p, &.{
+pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !?Instance {
+    // need, not ask: aws failing, as an expired login, is not "none",
+    // which would have delete forget an instance that runs on.
+    const text = try need(io, gpa, p, &.{
         "ec2",
         "describe-instances",
         "--filters",
-        gpa.print("Name=tag:Name,Values={s}", .{name}) catch return null,
+        try gpa.print("Name=tag:Name,Values={s}", .{name}),
         alive,
         "--query",
         "Reservations[].Instances[].[InstanceId,Tags[?Key=='" ++ tag ++ "'].Value|[0]]",
-    }) orelse return null;
-    return instance(text);
+    }, why);
+    return if (std.mem.eql(u8, text, "None")) null else instance(text);
 }
 
 fn instance(text: []const u8) ?Instance {
@@ -347,14 +352,7 @@ fn instance(text: []const u8) ?Instance {
 /// rule lets anything in, and its owner adds what should.
 fn securityGroup(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) ![]const u8 {
     const group = try gpa.print("werewolf-{s}", .{name});
-    if (ask(io, gpa, p, &.{
-        "ec2",
-        "describe-security-groups",
-        "--filters",
-        try gpa.print("Name=group-name,Values={s}", .{group}),
-        "--query",
-        "SecurityGroups[0].GroupId",
-    })) |id| return id;
+    if (try groupId(io, gpa, p, group)) |id| return id;
     return need(io, gpa, p, &.{
         "ec2",
         "create-security-group",
@@ -367,6 +365,18 @@ fn securityGroup(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.
         "--query",
         "GroupId",
     }, why);
+}
+
+/// The id of the security group named group, if there is one.
+fn groupId(io: Io, gpa: Allocator, p: Place, group: []const u8) !?[]const u8 {
+    return ask(io, gpa, p, &.{
+        "ec2",
+        "describe-security-groups",
+        "--filters",
+        try gpa.print("Name=group-name,Values={s}", .{group}),
+        "--query",
+        "SecurityGroups[0].GroupId",
+    });
 }
 
 /// A default subnet in a zone that offers kind: not every zone has every
@@ -442,9 +452,17 @@ pub fn create(
     const kind = size orelse machine(arch).kind;
     const subnet = try defaultSubnet(io, gpa, p, kind, why);
     const group = try securityGroup(io, gpa, p, name, why);
+    // The CLI retries a launch whose answer it lost; with the token, AWS
+    // takes the retry for the same launch, not a second instance of the
+    // same name. New each create: one reused after a delete would bring
+    // back the instance that was terminated.
+    var nonce: [8]u8 = undefined;
+    io.random(&nonce);
     return need(io, gpa, p, &.{
         "ec2",
         "run-instances",
+        "--client-token",
+        try gpa.print("{s}-{x}", .{ name, std.mem.readInt(u64, &nonce, .little) }),
         "--image-id",
         ami,
         "--instance-type",
@@ -627,14 +645,7 @@ pub fn delete(
             try aws(gpa, p, &.{ "ec2", "wait", "instance-terminated", "--instance-ids", i.id }),
         );
     }
-    if (ask(io, gpa, p, &.{
-        "ec2",
-        "describe-security-groups",
-        "--filters",
-        try gpa.print("Name=group-name,Values=werewolf-{s}", .{name}),
-        "--query",
-        "SecurityGroups[0].GroupId",
-    })) |group| try howl.run(
+    if (try groupId(io, gpa, p, try gpa.print("werewolf-{s}", .{name}))) |group| try howl.run(
         io,
         why,
         try aws(gpa, p, &.{ "ec2", "delete-security-group", "--group-id", group }),

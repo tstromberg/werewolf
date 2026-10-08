@@ -367,8 +367,8 @@ a machine more than once an hour.
 
 ### First boot
 
-The first check on a machine whose `autoupdate/log` is empty (it has never
-checked) treats anything it stages as Urgent, with a spread of at most 2
+The first check on a machine that has never finished one (no
+`autoupdate/checked`; a first check that failed does not count) treats anything it stages as Urgent, with a spread of at most 2
 minutes. A new machine has no users and no state, so rebooting it costs
 nothing.
 

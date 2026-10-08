@@ -204,7 +204,7 @@ pub fn calls(p: Promise) []const linux.SYS {
 pub fn promisesOf(nr: u32) Set {
     var set: Set = .empty;
     for (std.enums.values(Promise)) |p| {
-        for (calls(p)) |sys| if (@backingInt(sys) == nr) set.insert(p);
+        for (calls(p)) |sys| if (number(sys) == nr) set.insert(p);
     }
     return set;
 }
@@ -296,9 +296,10 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 };
 
 const max_calls = 512;
-/// The prelude (6), execveat (5), socket's families (3 + 2 * 5), the
-/// machine's refusals (7 + 5 + 7 + 7), the table and its last return.
-pub const max_filter = 6 + 5 + 3 + 2 * 5 + 26 + 2 * max_calls + 1;
+/// The prelude (6), execveat (5), socket's and socketpair's families
+/// (2 * (3 + 2 * 5)), the machine's refusals (7 + 5 + 7 + 7), the table
+/// and its last return.
+pub const max_filter = 6 + 5 + 2 * (3 + 2 * 5) + 26 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 
 /// The socket families each socket promise brings.
@@ -373,6 +374,7 @@ pub fn refusal(nr: u32, args: [6]u64) ?Refusal {
     return null;
 }
 
+/// sys's number, as seccomp_data.nr holds it.
 fn number(sys: linux.SYS) u32 {
     return @intCast(@backingInt(sys));
 }
@@ -423,9 +425,9 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
         put(buf, &n, JGE_K, 0, 1, 0x40000000); // __X32_SYSCALL_BIT
         put(buf, &n, RET_K, 0, 0, RET_KILL_PROCESS);
     }
-    const socket: u32 = @intCast(@backingInt(linux.SYS.socket));
+    const socket = number(.socket);
     if (per_service and !promises.contains(.exec)) {
-        put(buf, &n, JEQ_K, 0, 4, @intCast(@backingInt(linux.SYS.execveat)));
+        put(buf, &n, JEQ_K, 0, 4, number(.execveat));
         put(buf, &n, LD_W_ABS, 0, 0, 48); // seccomp_data.args[4], low word: flags
         put(buf, &n, JSET_K, 0, 1, AT_EMPTY_PATH);
         put(buf, &n, RET_K, 0, 0, RET_ALLOW);
@@ -438,22 +440,26 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
             afs[m] = f.af;
             m += 1;
         };
-        // socket: its family, the low word of args[0] (both architectures
-        // are little-endian), against each promised; else refused.
-        put(buf, &n, JEQ_K, 0, @intCast(2 + 2 * m), socket);
-        put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word
-        for (afs[0..m]) |af| {
-            put(buf, &n, JEQ_K, 0, 1, af);
-            put(buf, &n, RET_K, 0, 0, RET_ALLOW);
+        // socket and socketpair: the family, the low word of args[0] (both
+        // architectures are little-endian), against each promised; else
+        // refused. socketpair too: a few families besides unix make pairs
+        // (TIPC), and a family no promise names stays closed either way.
+        for ([_]u32{ socket, number(.socketpair) }) |sys| {
+            put(buf, &n, JEQ_K, 0, @intCast(2 + 2 * m), sys);
+            put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word
+            for (afs[0..m]) |af| {
+                put(buf, &n, JEQ_K, 0, 1, af);
+                put(buf, &n, RET_K, 0, 0, RET_ALLOW);
+            }
+            put(buf, &n, RET_K, 0, 0, other);
         }
-        put(buf, &n, RET_K, 0, 0, other);
     }
     // The machine's refusals by argument (see refusal). Each block leaves
     // the call's number loaded again for what follows. A service's filter
     // needs none: the machine's binds it too.
     if (!per_service) {
         // setsockopt(_, SOL_TCP, TCP_ULP)
-        put(buf, &n, JEQ_K, 0, 6, @intCast(@backingInt(linux.SYS.setsockopt)));
+        put(buf, &n, JEQ_K, 0, 6, number(.setsockopt));
         put(buf, &n, LD_W_ABS, 0, 0, 24); // args[1]: level
         put(buf, &n, JEQ_K, 0, 3, SOL_TCP);
         put(buf, &n, LD_W_ABS, 0, 0, 32); // args[2]: option
@@ -461,14 +467,14 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
         put(buf, &n, RET_K, 0, 0, other);
         put(buf, &n, LD_W_ABS, 0, 0, 0);
         // pipe2(_, O_NOTIFICATION_PIPE)
-        put(buf, &n, JEQ_K, 0, 4, @intCast(@backingInt(linux.SYS.pipe2)));
+        put(buf, &n, JEQ_K, 0, 4, number(.pipe2));
         put(buf, &n, LD_W_ABS, 0, 0, 24); // args[1]: flags
         put(buf, &n, JSET_K, 0, 1, O_NOTIFICATION_PIPE);
         put(buf, &n, RET_K, 0, 0, other);
         put(buf, &n, LD_W_ABS, 0, 0, 0);
         // timer_create and clock_nanosleep on a CPU-time clock
         for ([_]linux.SYS{ .timer_create, .clock_nanosleep }) |sys| {
-            put(buf, &n, JEQ_K, 0, 6, @intCast(@backingInt(sys)));
+            put(buf, &n, JEQ_K, 0, 6, number(sys));
             put(buf, &n, LD_W_ABS, 0, 0, 16); // args[0]: the clock
             put(buf, &n, JGE_K, 2, 0, 0x80000000);
             put(buf, &n, JEQ_K, 1, 0, CLOCK_PROCESS_CPUTIME_ID);
@@ -481,7 +487,7 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
     var n_seen: usize = 0;
     var it = promises.iterator();
     while (it.next()) |p| for (calls(p)) |sys| {
-        const nr: u32 = @intCast(@backingInt(sys));
+        const nr = number(sys);
         if (nr == socket) continue;
         if (std.mem.findScalar(u32, seen[0..n_seen], nr) != null) continue;
         seen[n_seen] = nr;
@@ -583,24 +589,18 @@ fn actionArgs(filter: []const Filter, arch: u32, nr: u32, args: [6]u32) u32 {
     }
 }
 
-fn nrOf(sys: linux.SYS) u32 {
-    return @intCast(@backingInt(sys));
-}
-
 test buildFilter {
     var buf: [max_filter]Filter = undefined;
+    const socket = number(.socket);
     // Every promise at once fits.
     _ = buildFilter(&buf, .full, true);
     const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), false);
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, nrOf(.read), 0));
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, nrOf(.socket), linux.AF.INET));
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, nrOf(.socket), linux.AF.INET6));
+    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, number(.read), 0));
+    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, socket, linux.AF.INET));
+    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, socket, linux.AF.INET6));
     // A family no promise names goes to the listener, even for root.
     const AF_ALG = 38;
-    try testing.expectEqual(
-        RET_USER_NOTIF,
-        action(machine, native_arch, nrOf(.socket), AF_ALG),
-    );
+    try testing.expectEqual(RET_USER_NOTIF, action(machine, native_arch, socket, AF_ALG));
     // The refusals by argument, and the same calls asking for nothing refused.
     // Each case: the call, its first three arguments, whether it is refused.
     const Case = struct { linux.SYS, u32, u32, u32, bool };
@@ -620,39 +620,57 @@ test buildFilter {
         .{ .clock_nanosleep, 0, 0, 0, false }, // CLOCK_REALTIME
     }) |c| {
         const want = if (c[4]) RET_USER_NOTIF else RET_ALLOW;
-        const nr = nrOf(c[0]);
+        const nr = number(c[0]);
         const args: [6]u32 = .{ c[1], c[2], c[3], 0, 0, 0 };
         try testing.expectEqual(want, actionArgs(machine, native_arch, nr, args));
         // seal-watch's reading of the same call agrees with the filter's.
         try testing.expectEqual(c[4], refusal(nr, .{ c[1], c[2], c[3], 0, 0, 0 }) != null);
     }
     // The call after a refusal block is still judged by its number.
-    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, nrOf(.read), 0));
+    try testing.expectEqual(RET_ALLOW, action(machine, native_arch, number(.read), 0));
     // The machine seal hands the rest to the listener (seal-watch).
-    try testing.expectEqual(RET_USER_NOTIF, action(machine, native_arch, nrOf(.memfd_create), 0));
+    try testing.expectEqual(RET_USER_NOTIF, action(machine, native_arch, number(.memfd_create), 0));
     for (never) |sys| try testing.expectEqual(
         RET_USER_NOTIF,
-        action(machine, native_arch, nrOf(sys), 0),
+        action(machine, native_arch, number(sys), 0),
     );
     try testing.expectEqual(RET_KILL_PROCESS, action(machine, 0x40000028, 0, 0)); // AUDIT_ARCH_ARM
     try testing.expectEqual(RET_KILL_PROCESS, action(machine, 0x40000003, 0, 0)); // AUDIT_ARCH_I386
     if (@import("builtin").cpu.arch == .x86_64)
         try testing.expectEqual(
             RET_KILL_PROCESS,
-            action(machine, native_arch, 0x40000000 | nrOf(.read), 0),
+            action(machine, native_arch, 0x40000000 | number(.read), 0),
         );
 
     // A service's own filter refuses with ENOSYS, needing no listener.
     const service = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), true);
-    try testing.expectEqual(RET_ALLOW, action(service, native_arch, nrOf(.socket), linux.AF.INET));
-    try testing.expectEqual(RET_ALLOW, action(service, native_arch, nrOf(.socket), linux.AF.INET6));
-    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(.socket), linux.AF.UNIX));
+    try testing.expectEqual(RET_ALLOW, action(service, native_arch, socket, linux.AF.INET));
+    try testing.expectEqual(RET_ALLOW, action(service, native_arch, socket, linux.AF.INET6));
+    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, socket, linux.AF.UNIX));
     try testing.expectEqual(
         RET_ENOSYS,
-        action(service, native_arch, nrOf(.socketpair), linux.AF.UNIX),
+        action(service, native_arch, number(.socketpair), linux.AF.UNIX),
     );
-    try testing.expectEqual(RET_ALLOW, action(service, native_arch, nrOf(.write), 0));
-    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(.clone), 0));
+    // socketpair reads the family as socket does: unix where promised,
+    // and never a family no promise names (TIPC makes pairs too).
+    var unix_buf: [max_filter]Filter = undefined;
+    const unix = buildFilter(&unix_buf, .initMany(&.{ .stdio, .unix }), true);
+    try testing.expectEqual(
+        RET_ALLOW,
+        action(unix, native_arch, number(.socketpair), linux.AF.UNIX),
+    );
+    try testing.expectEqual(
+        RET_ENOSYS,
+        action(unix, native_arch, number(.socketpair), linux.AF.TIPC),
+    );
+    var all_buf: [max_filter]Filter = undefined;
+    const all = buildFilter(&all_buf, .initMany(&.{ .stdio, .unix, .inet }), false);
+    try testing.expectEqual(
+        RET_USER_NOTIF,
+        action(all, native_arch, number(.socketpair), linux.AF.TIPC),
+    );
+    try testing.expectEqual(RET_ALLOW, action(service, native_arch, number(.write), 0));
+    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.clone), 0));
     // The findings' risky calls, refused to a plain reader-and-server.
     for ([_]linux.SYS{
         .memfd_create,
@@ -662,34 +680,34 @@ test buildFilter {
         .ptrace,
         .unshare,
     }) |sys|
-        try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(sys), 0));
+        try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(sys), 0));
 
     // Without exec: execveat of a descriptor, the way leash becomes the
     // service, and nothing else that runs a program.
     try testing.expectEqual(
         RET_ALLOW,
-        action(service, native_arch, nrOf(.execveat), AT_EMPTY_PATH),
+        action(service, native_arch, number(.execveat), AT_EMPTY_PATH),
     );
-    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(.execveat), 0));
-    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(.execve), 0));
+    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execveat), 0));
+    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execve), 0));
     const exec = buildFilter(&buf, .initMany(&.{ .stdio, .exec }), true);
-    try testing.expectEqual(RET_ALLOW, action(exec, native_arch, nrOf(.execve), 0));
-    try testing.expectEqual(RET_ALLOW, action(exec, native_arch, nrOf(.execveat), 0));
+    try testing.expectEqual(RET_ALLOW, action(exec, native_arch, number(.execve), 0));
+    try testing.expectEqual(RET_ALLOW, action(exec, native_arch, number(.execveat), 0));
 
     // A service's filter leaves the refusals by argument to the machine's.
     try testing.expectEqual(
         RET_ALLOW,
-        actionArgs(service, native_arch, nrOf(.setsockopt), .{ 3, SOL_TCP, TCP_ULP, 0, 0, 0 }),
+        actionArgs(service, native_arch, number(.setsockopt), .{ 3, SOL_TCP, TCP_ULP, 0, 0, 0 }),
     );
     // splice and tee are no program's here; sendfile is the machine's own.
     try testing.expect(!base.contains(.splice));
     try testing.expect(base.contains(.sendfile));
-    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(.splice), 0));
-    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, nrOf(.sendfile), 0));
+    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.splice), 0));
+    try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.sendfile), 0));
 
     const none = buildFilter(&buf, .initMany(&.{.stdio}), true);
-    try testing.expectEqual(RET_ENOSYS, action(none, native_arch, nrOf(.socket), linux.AF.INET));
-    try testing.expectEqual(RET_ALLOW, action(none, native_arch, nrOf(.read), 0));
+    try testing.expectEqual(RET_ENOSYS, action(none, native_arch, socket, linux.AF.INET));
+    try testing.expectEqual(RET_ALLOW, action(none, native_arch, number(.read), 0));
 
     // The longest filter, every promise, still fits the kernel's 4096.
     const biggest = buildFilter(&buf, .full, true);
@@ -697,7 +715,7 @@ test buildFilter {
     // No never call is ever allowed, even by the fullest filter.
     for (never) |sys| try testing.expectEqual(
         RET_ENOSYS,
-        action(biggest, native_arch, nrOf(sys), 0),
+        action(biggest, native_arch, number(sys), 0),
     );
 }
 
@@ -710,24 +728,18 @@ test calls {
 }
 
 test promisesOf {
-    const socket: u32 = @intCast(@backingInt(linux.SYS.socket));
+    const socket = number(.socket);
     try testing.expect(promisesOf(socket).contains(.inet));
     try testing.expect(promisesOf(socket).contains(.unix));
-    try testing.expect(promisesOf(@intCast(@backingInt(linux.SYS.memfd_create))).contains(.memfd));
+    try testing.expect(promisesOf(number(.memfd_create)).contains(.memfd));
     // inotify is `watch`, not `rpath`, so reading files does not bring it.
-    const inotify: u32 = @intCast(@backingInt(linux.SYS.inotify_add_watch));
+    const inotify = number(.inotify_add_watch);
     try testing.expect(promisesOf(inotify).contains(.watch));
     try testing.expect(!promisesOf(inotify).contains(.rpath));
     // ptrace belongs to no promise, so nothing can ask for it.
-    try testing.expectEqual(
-        @as(usize, 0),
-        promisesOf(@intCast(@backingInt(linux.SYS.ptrace))).count(),
-    );
+    try testing.expectEqual(@as(usize, 0), promisesOf(number(.ptrace)).count());
     // Every never call belongs to no promise.
-    for (never) |sys| try testing.expectEqual(
-        @as(usize, 0),
-        promisesOf(@intCast(@backingInt(sys))).count(),
-    );
+    for (never) |sys| try testing.expectEqual(@as(usize, 0), promisesOf(number(sys)).count());
 }
 
 test "no promise grants a risky call" {
@@ -755,7 +767,7 @@ test "no promise grants a risky call" {
         .{ .sys = .sendfile, .want = .sendfile },
     };
     for (cases) |c| {
-        const set = promisesOf(@intCast(@backingInt(c.sys)));
+        const set = promisesOf(number(c.sys));
         var it = set.iterator();
         while (it.next()) |p| try testing.expectEqual(c.want, p);
         try testing.expect(set.contains(c.want));
@@ -763,14 +775,14 @@ test "no promise grants a risky call" {
     // A plain reader-and-server pledge brings none of them.
     const plain: Set = .initMany(&.{ .stdio, .rpath, .inet, .listen });
     inline for (cases) |c| for (calls(c.want)) |sys| if (!plain.contains(c.want)) {
-        try testing.expect(!hasCall(plain, @intCast(@backingInt(sys))));
+        try testing.expect(!hasCall(plain, number(sys)));
     };
 }
 
 /// Whether the calls of promises include nr (test helper).
 fn hasCall(promises: Set, nr: u32) bool {
     var it = promises.iterator();
-    while (it.next()) |p| for (calls(p)) |sys| if (@backingInt(sys) == nr) return true;
+    while (it.next()) |p| for (calls(p)) |sys| if (number(sys) == nr) return true;
     return false;
 }
 

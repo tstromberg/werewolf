@@ -36,20 +36,16 @@ pub fn place(environ: *const std.process.Environ.Map, why: *howl.Why) !Place {
             "(local-lvm) and PROXMOX_BRIDGE (vmbr0) may follow",
         .{},
     );
-    for ([_][]const u8{
-        host,
-        environ.get("PROXMOX_STORAGE") orelse "",
-        environ.get("PROXMOX_BRIDGE") orelse "",
-    }) |v|
-        if (!plain(v)) return why.refuse(
-            "PROXMOX_*: {s}: letters, digits and . _ - @ : only",
-            .{v},
-        );
-    return .{
+    const p: Place = .{
         .host = host,
         .storage = environ.get("PROXMOX_STORAGE") orelse "local-lvm",
         .bridge = environ.get("PROXMOX_BRIDGE") orelse "vmbr0",
     };
+    for ([_][]const u8{ p.host, p.storage, p.bridge }) |v| if (!plain(v)) return why.refuse(
+        "PROXMOX_*: {s}: letters, digits and . _ - @ : only",
+        .{v},
+    );
+    return p;
 }
 
 /// Whether s reaches the node's shell as itself: every word of a command
@@ -64,7 +60,12 @@ pub fn plain(s: []const u8) bool {
 /// A command on the node: ssh, then its words.
 fn remote(gpa: Allocator, p: Place, args: []const []const u8) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(gpa, &.{ "ssh", "-o", "BatchMode=yes", p.host });
+    // Bounded: a node that drops packets fails each command in seconds,
+    // not the minutes of TCP's own timeout, so every wait keeps its limit.
+    try argv.appendSlice(gpa, &.{
+        "ssh", "-o",                     "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-o",  "ServerAliveInterval=15", p.host,
+    });
     try argv.appendSlice(gpa, args);
     return argv.items;
 }
@@ -134,14 +135,17 @@ pub fn upload(
 pub const Machine = struct { vmid: []const u8, running: bool, form: []const u8 };
 
 /// The VM named name that werewolf made, if any: qm list has the names,
-/// and its config the form.
-pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8) ?Machine {
-    const list = ask(io, gpa, p, &.{ "qm", "list" }) orelse return null;
+/// and its config the form. A node that does not answer is refused: taken
+/// for "none", it would have delete forget a VM that runs on.
+pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !?Machine {
+    const list = ask(io, gpa, p, &.{ "qm", "list" }) orelse
+        return why.refuse("{s}: qm list failed", .{p.host});
     var lines = std.mem.splitScalar(u8, list, '\n');
     while (lines.next()) |line| {
         const row = parseRow(line) orelse continue;
         if (!std.mem.eql(u8, row.name, name)) continue;
-        const config = ask(io, gpa, p, &.{ "qm", "config", row.vmid }) orelse continue;
+        const config = ask(io, gpa, p, &.{ "qm", "config", row.vmid }) orelse
+            return why.refuse("{s}: qm config {s} failed", .{ p.host, row.vmid });
         const form = formOf(config) orelse continue;
         return .{
             .vmid = row.vmid,
@@ -160,7 +164,8 @@ pub fn parseRow(line: []const u8) ?struct {
 } {
     var words = std.mem.tokenizeAny(u8, line, " \t\r");
     const vmid = words.next() orelse return null;
-    if (vmid.len == 0 or !std.ascii.isDigit(vmid[0])) return null;
+    // Digits only: the id goes back to the node's shell, in qm's commands.
+    for (vmid) |c| if (!std.ascii.isDigit(c)) return null;
     return .{
         .vmid = vmid,
         .name = words.next() orelse return null,
@@ -372,9 +377,31 @@ pub fn address(text: []const u8) ?[]const u8 {
         const rest = l[at + "\"addr\":\"".len ..];
         const end = std.mem.findScalar(u8, rest, '"') orelse continue;
         const addr = rest[0..end];
-        found = addr[0 .. std.mem.findScalar(u8, addr, '/') orelse addr.len];
+        const ip = addr[0 .. std.mem.findScalar(u8, addr, '/') orelse addr.len];
+        // The guest wrote it: an address, or nothing, never other text.
+        if (isIp4(ip)) found = ip;
     }
     return found;
+}
+
+/// Whether s is a dotted-quad IPv4 address.
+fn isIp4(s: []const u8) bool {
+    var octets = std.mem.splitScalar(u8, s, '.');
+    var n: usize = 0;
+    while (octets.next()) |o| : (n += 1) {
+        if (o.len == 0 or o.len > 3) return false;
+        for (o) |c| if (!std.ascii.isDigit(c)) return false;
+        if ((std.fmt.parseInt(u16, o, 10) catch return false) > 255) return false;
+    }
+    return n == 4;
+}
+
+test isIp4 {
+    try testing.expect(isIp4("192.168.1.40"));
+    try testing.expect(!isIp4("192.168.1"));
+    try testing.expect(!isIp4("192.168.1.256"));
+    try testing.expect(!isIp4("1.2.3.4.5"));
+    try testing.expect(!isIp4("1.2.3.\x1b[2J"));
 }
 
 const testing = std.testing;

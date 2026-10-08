@@ -49,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     var debug = false;
     while (words.next()) |w| debug = debug or std.mem.eql(u8, w, "werewolf.debug=1");
     if (!debug) park(io, null);
-    if (!exists("/usr/share/werewolf/dev"))
+    if (linux.errno(linux.access("/usr/share/werewolf/dev", linux.F_OK)) != .SUCCESS)
         park(io, "werewolf.debug=1 ignored: only a DEV=1 build gives a console shell");
     if (!executable("/usr/bin/getty") or
         !executable("/bin/ash")) park(io, "werewolf.debug=1, but this form has no shell to give");
@@ -91,10 +91,6 @@ fn consoleName(cmdline: []const u8) []const u8 {
 
 fn executable(path: [:0]const u8) bool {
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
-}
-
-fn exists(path: [:0]const u8) bool {
-    return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
 /// Down, as a service with nothing to do: runsv will not restart it.

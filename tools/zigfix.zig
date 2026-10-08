@@ -101,9 +101,8 @@ fn fixFile(gpa: Allocator, io: Io, path: []const u8, max: usize, check: bool) !b
         std.debug.print("{s}: not as `make fix` leaves it\n", .{path});
         ok = false;
     }
-    var tree = try Ast.parse(gpa, source, .{});
     for (try longLines(gpa, source, max)) |l| {
-        if (commonSense(&tree, l, max)) continue;
+        if (commonSense(source, l, max)) continue;
         std.debug.print("{s}:{d}: {d} bytes\n", .{ path, l.line, l.len });
         ok = false;
     }
@@ -114,8 +113,8 @@ fn fixFile(gpa: Allocator, io: Io, path: []const u8, max: usize, check: bool) !b
 /// Whether a long line is one the style guide's "use common sense" lets
 /// stand: a line of a multiline string, which is data, or a comment whose
 /// excess is one word with no space to break at, such as a URL.
-fn commonSense(tree: *const Ast, l: Long, max: usize) bool {
-    const text = tree.source[l.start .. l.start + l.len];
+fn commonSense(source: []const u8, l: Long, max: usize) bool {
+    const text = source[l.start .. l.start + l.len];
     const trimmed = std.mem.trimStart(u8, text, " ");
     if (std.mem.startsWith(u8, trimmed, "\\\\")) return true;
     return std.mem.startsWith(u8, trimmed, "//") and
@@ -229,11 +228,8 @@ fn breakLine(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?[]const Ed
     const text = source[l.start .. l.start + l.len];
     const trimmed = std.mem.trimStart(u8, text, " ");
     if (std.mem.startsWith(u8, trimmed, "\\\\")) return null;
-    if (std.mem.startsWith(
-        u8,
-        trimmed,
-        "//",
-    )) return single(gpa, try wrapComment(gpa, l, text, max));
+    if (std.mem.startsWith(u8, trimmed, "//"))
+        return single(gpa, try wrapComment(gpa, l, text, max));
     var best: ?Choice = null;
     for ([_]?Choice{
         try operatorBreak(gpa, tree, l, max),
@@ -312,8 +308,8 @@ fn caseBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
         const arrow = starts[case.ast.arrow_token];
         if (at < l.start or arrow >= line_end) continue;
         if (tree.tokenTag(case.ast.arrow_token - 1) == .comma) continue;
-        const after = starts[tree.lastToken(case.ast.values[case.ast.values.len - 1])] +
-            tree.tokenSlice(tree.lastToken(case.ast.values[case.ast.values.len - 1])).len;
+        const last = tree.lastToken(case.ast.values[case.ast.values.len - 1]);
+        const after = starts[last] + tree.tokenSlice(last).len;
         return .{
             .start = at,
             .edits = try gpa.dupe(Edit, &.{.{ .start = after, .end = after, .text = "," }}),
@@ -500,11 +496,8 @@ fn operatorBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Choice
         const op = tree.nodeMainToken(node);
         const end = starts[op] + tree.tokenSlice(op).len;
         if (starts[op] < l.start or end - l.start > max or end >= line_end) continue;
-        if (best == null or
-            end > best.?.end) best = .{
-            .end = end,
-            .start = @max(l.start, starts[tree.firstToken(node)]),
-        };
+        if (best != null and end <= best.?.end) continue;
+        best = .{ .end = end, .start = @max(l.start, starts[tree.firstToken(node)]) };
     }
     const b = best orelse return null;
     const edits = try gpa.dupe(Edit, &.{.{ .start = b.end, .end = b.end, .text = "\n" }});

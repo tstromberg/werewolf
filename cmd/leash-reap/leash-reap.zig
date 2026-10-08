@@ -42,7 +42,8 @@ pub fn main() void {
     if (!write(dir, "cgroup.kill", "1")) return say(name, left, "could not be killed");
     var waited: u64 = 0;
     while (waited < patience_ms) : (waited += 10) {
-        const events = read(dir, "cgroup.events", &buf) orelse break;
+        const events = read(dir, "cgroup.events", &buf) orelse
+            return say(name, left, "killed, but cgroup.events cannot be read to see them gone");
         if (std.mem.find(u8, events, "populated 0\n") != null)
             return say(name, left, "killed");
         _ = linux.nanosleep(&.{ .sec = 0, .nsec = 10 * std.time.ns_per_ms }, null);

@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 
 /// linux/audit.h: the message types sent here.
+const msg_get = 1000;
 const msg_set = 1001;
 const msg_add_rule = 1011;
 
@@ -134,6 +135,46 @@ pub fn setEnabled(enabled: u32) Error!void {
     defer _ = linux.close(sock);
     const s: Status = .{ .mask = status_enabled, .enabled = enabled };
     try send(sock, msg_set, std.mem.asBytes(&s));
+}
+
+/// enabled as the kernel has it now: 0, 1 or locked. Reading it takes
+/// CAP_AUDIT_CONTROL, as setting it does: error.Refused without.
+pub fn enabledNow() Error!u32 {
+    const sock = try open();
+    defer _ = linux.close(sock);
+    const header = @sizeOf(linux.nlmsghdr);
+    const req: linux.nlmsghdr = .{
+        .len = header,
+        .type = @fromBackingInt(msg_get),
+        .flags = linux.NLM_F_REQUEST,
+        .seq = 1,
+        .pid = 0,
+    };
+    const kernel: linux.sockaddr.nl = .{ .pid = 0, .groups = 0 };
+    const sent = linux.sendto(
+        sock,
+        std.mem.asBytes(&req),
+        header,
+        0,
+        @ptrCast(&kernel),
+        @sizeOf(linux.sockaddr.nl),
+    );
+    if (linux.errno(sent) != .SUCCESS) return switch (linux.errno(sent)) {
+        .PERM, .ACCES => error.Refused,
+        .CONNREFUSED => error.NoAudit,
+        else => error.Failed,
+    };
+    // The status, or, refused, an error message in its place.
+    var reply: [header + @sizeOf(Status)]u8 align(4) = undefined;
+    const n = linux.recvfrom(sock, &reply, reply.len, 0, null, null);
+    if (linux.errno(n) != .SUCCESS or n < header + 8) return error.Failed;
+    const rh: *const linux.nlmsghdr = @ptrCast(&reply);
+    if (rh.type == .ERROR) {
+        const code = std.mem.readInt(i32, reply[header..][0..4], .little);
+        return if (code == -@as(i32, @backingInt(linux.E.PERM))) error.Refused else error.Failed;
+    }
+    if (@backingInt(rh.type) != msg_get) return error.Failed;
+    return std.mem.readInt(u32, reply[header + @offsetOf(Status, "enabled") ..][0..4], .little);
 }
 
 fn open() Error!i32 {

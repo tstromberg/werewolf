@@ -346,9 +346,9 @@ pub fn merge(gpa: Allocator, base: Node, over: Node) Allocator.Error!Node {
             try out.append(gpa, e);
             continue;
         };
-        const value: Node = for (whole) |k| {
-            if (mem.eql(u8, k, e.key)) break o;
-        } else if (e.value == .list and o == .list)
+        const value: Node = if (isOneOf(e.key, &whole))
+            o
+        else if (e.value == .list and o == .list)
             .{ .list = try mem.concat(gpa, Node, &.{ e.value.list, o.list }) }
         else if (e.value == .map and o == .map)
             try merge(gpa, e.value, o)
@@ -380,11 +380,13 @@ pub const Form = struct {
     spec: Node,
 
     /// The items of one of form.yaml's lists, unquoted; none when the
-    /// form does not give it.
+    /// form does not give it, or gives it as something else than a list
+    /// of values.
     pub fn items(form: Form, gpa: Allocator, key: []const u8) Allocator.Error![]const []const u8 {
         const list = form.spec.get(key) orelse return &.{};
+        if (list != .list) return &.{};
         var out: std.ArrayList([]const u8) = .empty;
-        for (list.list) |item| try out.append(gpa, item.scalar.text);
+        for (list.list) |item| if (item == .scalar) try out.append(gpa, item.scalar.text);
         return out.items;
     }
 
@@ -449,11 +451,8 @@ pub fn load(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Err
     const name = std.fs.path.basename(dir);
     if (!isName(name)) return f.fail(gpa, "{s}: not a form's name (a-z, 0-9 and -)", .{ref});
     const apko_path = try gpa.print("{s}/apko.yaml", .{dir});
-    root.access(
-        io,
-        apko_path,
-        .{},
-    ) catch return f.fail(gpa, "no form {s}: no {s}", .{ ref, apko_path });
+    root.access(io, apko_path, .{}) catch
+        return f.fail(gpa, "no form {s}: no {s}", .{ ref, apko_path });
     const path = try gpa.print("{s}/form.yaml", .{dir});
     const text = root.readFileAlloc(io, path, gpa, .limited(64 << 10)) catch |err| switch (err) {
         error.FileNotFound => return .{ .name = name, .dir = dir, .spec = .{ .map = &.{} } },
@@ -523,11 +522,8 @@ pub fn chain(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Er
                 .{ form.dir, member },
             );
             for (try bases(io, gpa, root, try load(io, gpa, root, member, f), f)) |c| {
-                if (mem.eql(
-                    u8,
-                    c.dir,
-                    top.dir,
-                )) return f.fail(gpa, "{s}: takes itself, through {s}", .{ top.dir, member });
+                if (mem.eql(u8, c.dir, top.dir))
+                    return f.fail(gpa, "{s}: takes itself, through {s}", .{ top.dir, member });
                 try appendNew(gpa, &out, c);
             }
         }
@@ -573,15 +569,11 @@ pub fn apko(
     var merged: Node = .{ .map = &.{} };
     for (forms) |form| {
         const path = try gpa.print("{s}/apko.yaml", .{form.dir});
-        const text = root.readFileAlloc(
-            io,
-            path,
-            gpa,
-            .limited(256 << 10),
-        ) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => return f.fail(gpa, "{s}: {s}", .{ path, @errorName(err) }),
-        };
+        const text = root.readFileAlloc(io, path, gpa, .limited(256 << 10)) catch |err|
+            switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return f.fail(gpa, "{s}: {s}", .{ path, @errorName(err) }),
+            };
         const doc = try parseFile(gpa, path, text, f);
         if (doc.get("include") != null)
             return f.fail(

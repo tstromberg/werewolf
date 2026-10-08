@@ -20,9 +20,8 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const form = @import("form");
 
-const usage = "usage: form names|dirs|weaknesses|excuses FORM, list|check FORM KEY, having KEY " ++
-    "[VALUE], " ++
-    "every KEY, apko FORM [PKG...], tree";
+const usage = "usage: form names|dirs|weaknesses|excuses FORM, list|check FORM KEY, " ++
+    "having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();

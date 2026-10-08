@@ -61,7 +61,7 @@ fn isRecipePath(p: []const u8) bool {
     if (!std.mem.endsWith(u8, p, ".yaml") or p.len > 255) return false;
     for (p) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._/-", c) == null)
         return false;
-    return std.mem.indexOf(u8, p, "//") == null;
+    return std.mem.find(u8, p, "//") == null;
 }
 
 test isRecipePath {

@@ -1003,7 +1003,7 @@ QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nogr
 # or 80.
 RUN_PORT ?= $(or $(lastword $(filter-out 22,$(patsubst tcp/%,%,$(filter tcp/%,$(shell $(FORM_TOOL) list $(FORM_REF) net | sed -n 's/^listen //p'))))),80)
 
-# RUN_DIR=DIR, absolute, as werewolf run gives it: the machine in the
+# RUN_DIR=DIR, absolute, as howl run gives it: the machine in the
 # background, its console on DIR/console.sock and in DIR/console.log, QEMU's
 # monitor on DIR/monitor.sock and its pid in DIR/qemu.pid; make returns once
 # QEMU has started. Without it, as ever: the console is this terminal's.

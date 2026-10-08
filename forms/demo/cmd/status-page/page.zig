@@ -2,8 +2,6 @@
 
 const std = @import("std");
 const Io = std.Io;
-const Dir = Io.Dir;
-const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const main = @import("status-page.zig");
 const scan = @import("scan.zig");
@@ -14,7 +12,7 @@ const werewolf_owner = scan.werewolf_owner;
 const Event = main.Event;
 const Facts = main.Facts;
 const parseRfc3339 = main.parseRfc3339;
-const rfc3339Buf = main.rfc3339Buf;
+const rfc3339 = main.rfc3339;
 
 /// Plain and quick, as a page of text should be: no script, no fonts to
 /// fetch, the browser's light or dark, and tables that scroll sideways on a
@@ -71,12 +69,11 @@ pub fn writePage(w: *Io.Writer, f: Facts) !void {
         "height=\"64\">\n<div><h1>");
     try esc(w, f.host);
     try w.writeAll("</h1><p class=\"sub\">A self-patching Linux machine: updated hourly from " ++
-        "Wolfi and Alpine, " ++
-        "scanned for known vulnerabilities by grype.</p></div></header>\n" ++
-        "<nav><a href=\"#system\">System</a><a href=\"#security\">Security</a><a " ++
-        "href=\"#patches\">Patches</a>" ++
-        "<a href=\"#vulnerabilities\">Vulnerabilities</a><a href=\"#packages\">Packages</a></nav" ++
-        ">\n");
+        "Wolfi and Alpine, scanned for known vulnerabilities by grype.</p></div></header>\n" ++
+        "<nav><a href=\"#system\">System</a><a href=\"#security\">Security</a>" ++
+        "<a href=\"#patches\">Patches</a>" ++
+        "<a href=\"#vulnerabilities\">Vulnerabilities</a><a href=\"#packages\">Packages</a>" ++
+        "</nav>\n");
     try writeGlance(w, f);
     try writeSystem(w, f);
     try writeSecurity(w, f);
@@ -92,7 +89,7 @@ pub fn writePage(w: *Io.Writer, f: Facts) !void {
 /// it, and is it still looking.
 fn writeGlance(w: *Io.Writer, f: Facts) !void {
     var buf: [32]u8 = undefined;
-    const booted = rfc3339Buf(&buf, f.booted);
+    const booted = rfc3339(&buf, f.booted);
     try w.print(
         "<dl class=\"glance\">\n<div class=\"tile\"><dt>Up</dt><dd><strong><time " ++
             "datetime=\"{s}\" title=\"booted {s} {s} UTC\">",
@@ -185,7 +182,7 @@ fn writeSecurity(w: *Io.Writer, f: Facts) !void {
     const p = f.posture orelse return w.writeAll(
         "<p class=\"note\">Checked once the services have started.</p>\n",
     );
-    try w.print("<p class=\"note\">How this machine protects itself, tested at boot, ", .{});
+    try w.writeAll("<p class=\"note\">How this machine protects itself, tested at boot, ");
     try writeTime(w, parseRfc3339(p.time) orelse 0, f.now_secs);
     try w.print(": {d} of {d} pass. The checks are <code>/usr/lib/werewolf/posture</code>, " ++
         "which runs on any Linux.</p>\n", .{ p.summary.pass, p.summary.pass + p.summary.fail });
@@ -236,9 +233,8 @@ fn writePatches(w: *Io.Writer, f: Facts) !void {
         return w.writeAll("<p class=\"note\">None yet.</p>\n");
     }
     try w.writeAll("<p class=\"note\">Updates it applied to itself, newest first.</p>\n");
-    try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>When</th><th>Package</th><th>C" ++
-        "hange</th>" ++
-        "<th>CVEs fixed</th><th>Outcome</th></tr></thead>\n<tbody>\n");
+    try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>When</th><th>Package</th>" ++
+        "<th>Change</th><th>CVEs fixed</th><th>Outcome</th></tr></thead>\n<tbody>\n");
     for (f.patches) |p| {
         try w.writeAll("<tr><td>");
         try writeTime(w, parseRfc3339(p.time) orelse 0, f.now_secs);
@@ -292,8 +288,7 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
         return w.writeAll("<p class=\"ok\">No known vulnerabilities in this image.</p>\n");
     }
     try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>Severity</th><th>Advisory</th>" ++
-        "<th>Component</th>" ++
-        "<th>Fixed in</th></tr></thead>\n<tbody>\n");
+        "<th>Component</th><th>Fixed in</th></tr></thead>\n<tbody>\n");
     // Findings are worst first, so a package's group starts at its worst
     // finding: the first with that owner.
     for (s.findings, 0..) |first, i| {
@@ -319,8 +314,11 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
         );
         for (s.findings) |x| {
             if (!std.mem.eql(u8, x.in_package, owner)) continue;
-            try w.writeAll("<tr><td>");
-            try writeSeverity(w, x.severity);
+            const r = rank(x.severity);
+            try w.print(
+                "<tr><td><span class=\"sev {s}\">{s}</span>",
+                .{ severityClass(r), severities[r] },
+            );
             try w.writeAll("</td><td>");
             try advisory(w, x.id);
             // The component, where it is not the package itself: a Go
@@ -399,11 +397,6 @@ fn chips(w: *Io.Writer, c: Counts) !void {
     try w.writeAll("</span>");
 }
 
-fn writeSeverity(w: *Io.Writer, name: []const u8) !void {
-    const i = rank(name);
-    try w.print("<span class=\"sev {s}\">{s}</span>", .{ severityClass(i), severities[i] });
-}
-
 fn severityClass(i: usize) []const u8 {
     return ([_][]const u8{ "critical", "high", "medium", "low", "negligible", "unknown" })[i];
 }
@@ -438,7 +431,7 @@ fn row(w: *Io.Writer, name: []const u8, parts: []const []const u8) !void {
 /// machines.
 fn writeTime(w: *Io.Writer, secs: u64, now: u64) !void {
     var buf: [32]u8 = undefined;
-    const stamp = rfc3339Buf(&buf, secs);
+    const stamp = rfc3339(&buf, secs);
     try w.print(
         "<time datetime=\"{s}\" title=\"{s} {s} UTC\">",
         .{ stamp, stamp[0..10], stamp[11..16] },
@@ -502,11 +495,8 @@ pub fn isAdvisoryId(id: []const u8) bool {
 }
 
 pub fn describeEvent(e: Event) []const u8 {
-    if (std.mem.eql(
-        u8,
-        e.event,
-        "check",
-    )) return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
+    if (std.mem.eql(u8, e.event, "check"))
+        return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
     // "update" is the event before staging (docs/design/update-policy.md).
     if (std.mem.eql(u8, e.event, "update")) return "updated, and rebooted into it";
     if (std.mem.eql(u8, e.event, "stage")) return "staged, to boot when due";

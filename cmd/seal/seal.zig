@@ -22,7 +22,6 @@
 
 const std = @import("std");
 const seal = @import("seal");
-const linux = std.os.linux;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;

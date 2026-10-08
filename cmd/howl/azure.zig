@@ -166,14 +166,10 @@ pub fn ensureImage(
         _ = ask(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" });
         _ = try need(io, gpa, p, &.{ "disk", "delete", "-n", name, "--yes", "-o", "none" }, why);
     }
-    blk: {
-        const r = call(io, gpa, &.{ "azcopy", "--version" });
-        if (r.ok) break :blk;
-        return why.refuse(
-            "--on azure: no azcopy here, which uploads the disk (brew install azcopy)",
-            .{},
-        );
-    }
+    if (!call(io, gpa, &.{ "azcopy", "--version" }).ok) return why.refuse(
+        "--on azure: no azcopy here, which uploads the disk (brew install azcopy)",
+        .{},
+    );
     howl.say(io, "image {s}: making it from {s}", .{ name, disk });
     const vhd = try gpa.print("{s}/disk.vhd", .{work});
     defer Dir.cwd().deleteFile(io, vhd) catch {};
@@ -244,9 +240,11 @@ fn uploading(state: []const u8) bool {
 /// A VM of ours: its form, "" if its tag names none.
 pub const Vm = struct { form: []const u8 };
 
-/// The VM named name, if there is one.
-pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8) ?Vm {
-    const text = ask(io, gpa, p, &.{
+/// The VM named name, if there is one. az failing for another reason, as
+/// an expired login, is refused: taken for "none", it would have delete
+/// forget a VM that runs on.
+pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !?Vm {
+    const r = call(io, gpa, try az(gpa, p, &.{
         "vm",
         "show",
         "-n",
@@ -255,8 +253,10 @@ pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8) ?Vm {
         "tags.\"" ++ tag ++ "\"",
         "-o",
         "tsv",
-    }) orelse return null;
-    return .{ .form = text };
+    }));
+    if (r.ok) return .{ .form = r.out };
+    if (std.mem.find(u8, r.err, "NotFound") != null) return null;
+    return why.refuse("az vm show {s}: {s}", .{ name, lastLine(r.err) });
 }
 
 /// The machine's own disk, a copy of the image: Azure has no VM without an
@@ -536,8 +536,8 @@ pub fn openArgs(
 /// The VM, with its OS disk and NIC; then the network az made for it,
 /// named as az names them, and the disk copy, if a failed create left it;
 /// the image stays. Nothing is said of what was gone already.
-pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !void {
-    if (find(io, gpa, p, name) != null)
+pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, vm: ?Vm, why: *howl.Why) !void {
+    if (vm != null)
         _ = try need(io, gpa, p, &.{ "vm", "delete", "-n", name, "--yes", "-o", "none" }, why);
     // Azure frees each only once what uses it has gone, which the VM's
     // delete leaves it to do in the background: a while, then retried,

@@ -176,8 +176,8 @@ pub fn main(init: std.process.Init) !void {
     // when it lets go.
     if (loop) |l| _ = linux.close(l.fd);
     const root_dev = "/dev/mapper/root";
-    if (linux.errno(linux.mknodat(linux.AT.FDCWD, root_dev, linux.S.IFBLK | 0o600, dev)) !=
-        .SUCCESS) fail("cannot make {s}", .{root_dev});
+    const made = linux.mknodat(linux.AT.FDCWD, root_dev, linux.S.IFBLK | 0o600, dev);
+    if (linux.errno(made) != .SUCCESS) fail("cannot make {s}", .{root_dev});
     mkdir("/root");
     const rc = linux.mount(root_dev, "/root", "erofs", MS.RDONLY | MS.NOSUID | MS.NODEV, 0);
     if (linux.errno(rc) != .SUCCESS) fail(
@@ -215,31 +215,25 @@ pub fn main(init: std.process.Init) !void {
         if (std.mem.eql(u8, m, "victim") and boot.slot.len == 0) continue;
         const from = try gpa.printSentinel("/{s}", .{m}, 0);
         const to = try gpa.printSentinel("/root/{s}", .{m}, 0);
-        if (linux.errno(linux.mount(
-            from,
-            to,
-            null,
-            MS.MOVE,
-            0,
-        )) != .SUCCESS) fail("cannot move /{s} into the root", .{m});
+        if (linux.errno(linux.mount(from, to, null, MS.MOVE, 0)) != .SUCCESS)
+            fail("cannot move /{s} into the root", .{m});
     }
     // What switch_root does: put the new root over / and start its init
     // inside it.
     if (linux.errno(linux.chdir("/root")) != .SUCCESS) fail("cannot enter /root", .{});
-    if (linux.errno(linux.mount(
-        ".",
-        "/",
-        null,
-        MS.MOVE,
-        0,
-    )) != .SUCCESS) fail("cannot move the root over /", .{});
+    if (linux.errno(linux.mount(".", "/", null, MS.MOVE, 0)) != .SUCCESS)
+        fail("cannot move the root over /", .{});
     if (linux.errno(linux.chroot(".")) != .SUCCESS) fail("cannot enter the root", .{});
     _ = linux.chdir("/");
     say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
-    var env = try init.environ_map.clone(gpa);
-    // Where the time went, each phase and when it ended, for init to add
-    // its own to: the kernel, the modules, the slot's filesystem found and
-    // mounted, and the root opened through dm-verity.
+    // init's environment holds one thing, and nothing the kernel handed
+    // stage0: every NAME=value on the command line it did not take itself
+    // comes here as environment, and would otherwise go on to every
+    // process on the machine. Where the time went, each phase and when it
+    // ended, for init to add its own to: the kernel, the modules, the
+    // slot's filesystem found and mounted, and the root opened through
+    // dm-verity.
+    var env: std.process.Environ.Map = .init(gpa);
     try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
         try gpa.print(
             "kernel={d} modules={d} slot={d} root={d}",
@@ -289,7 +283,11 @@ fn deadman(slot: []const u8, after: u32) void {
             var pause: linux.timespec = .{ .sec = 1, .nsec = 0 };
             _ = linux.nanosleep(&pause, null);
         }
-        _ = writeFile("/deadman/sysrq-trigger", "b");
+        // sysrq's reset waits for nothing; should its file be gone, the
+        // kernel's own restart, which still holds every capability from
+        // before the seal. Never a silent end: the slot would stay.
+        if (!writeFile("/deadman/sysrq-trigger", "b"))
+            _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
     }
     linux.exit(0);
 }
@@ -297,6 +295,7 @@ fn deadman(slot: []const u8, after: u32) void {
 // --- a loop device -------------------------------------------------------------
 
 /// <linux/loop.h>, which Zig's std does not carry.
+const AT_EMPTY_PATH = 0x1000;
 const LOOP_CTL_GET_FREE = 0x4C82;
 const LOOP_CONFIGURE = 0x4C0A;
 const LO_FLAGS_READ_ONLY = 1;
@@ -346,9 +345,21 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     }
     if (linux.errno(fd) != .SUCCESS) return error.NoLoopDevice;
     errdefer _ = linux.close(@intCast(fd));
-    const backing = linux.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+    // A regular file, no link followed: the slot's filesystem is the
+    // disk's, and a FIFO at the image's name would hold PID 1 in open
+    // for good, with no panic to fall back on, where a wrong file fails.
+    const backing = linux.open(file, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+        .NOCTTY = true,
+    }, 0);
     if (linux.errno(backing) != .SUCCESS) return error.NoImage;
     defer _ = linux.close(@intCast(backing));
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(@intCast(backing), "", AT_EMPTY_PATH, .{ .TYPE = true }, &st)) !=
+        .SUCCESS or st.mode & linux.S.IFMT != linux.S.IFREG) return error.NotAnImageFile;
     // The whole image, data and hash tree, read into the page cache in the
     // background from now: the boot reads most of it, and a cloud's network
     // disk answers a few large reads far sooner than hundreds of small ones.

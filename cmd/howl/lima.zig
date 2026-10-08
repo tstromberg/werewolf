@@ -23,8 +23,6 @@ pub const leases = "/var/db/dhcpd_leases";
 /// guest at, and its gateway, which answers DNS too.
 pub const user_ip = "192.168.5.15/24";
 pub const user_gw = "192.168.5.2";
-/// How long create waits for the machine's address.
-const wait_seconds = 180;
 
 /// Whether this machine runs Lima with vz: macOS, and limactl on the PATH.
 pub fn installed(io: Io, gpa: Allocator) bool {

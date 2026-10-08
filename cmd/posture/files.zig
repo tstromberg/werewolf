@@ -17,18 +17,12 @@ const missingOption = posture.missingOption;
 const mountType = posture.mountType;
 const statx = posture.statx;
 const trim = posture.trim;
+const listAdd = posture.listAdd;
 const logHas = posture.logHas;
 
-/// How opening path for writing, and nothing more, ends.
-fn writeOpen(path: [:0]const u8) linux.E {
-    const rc = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true, .NOFOLLOW = true }, 0);
-    if (linux.errno(rc) == .SUCCESS) _ = linux.close(@intCast(rc));
-    return linux.errno(rc);
-}
-
-/// How opening path for reading, and nothing more, ends.
-fn readOpen(path: [:0]const u8) linux.E {
-    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true }, 0);
+/// How opening path, for reading or for writing and nothing more, ends.
+fn openError(path: [:0]const u8, mode: std.posix.ACCMODE) linux.E {
+    const rc = linux.open(path, .{ .ACCMODE = mode, .CLOEXEC = true, .NOFOLLOW = true }, 0);
     if (linux.errno(rc) == .SUCCESS) _ = linux.close(@intCast(rc));
     return linux.errno(rc);
 }
@@ -164,10 +158,7 @@ pub fn check(p: *Posture) !void {
         .how = "every mount in /proc/self/mounts but /, /proc, /sys, /dev and /data is " ++
             "nosymfollow, and opening a link this program makes in /tmp is refused (ELOOP)",
         .result = if (follows.len == 0 and !planted) .pass else .fail,
-        .detail = if (planted)
-            "a link in /tmp was followed"
-        else
-            follows,
+        .detail = if (planted) "a link in /tmp was followed" else follows,
     });
 
     // The proof: a program put in each place does not start.
@@ -182,12 +173,8 @@ pub fn check(p: *Posture) !void {
         "/data",
     }) |dir| {
         if (!exists(p.io, dir)) continue;
-        try tried.print(p.gpa, "{s}{s}", .{ if (tried.items.len > 0) ", " else "", dir });
-        if (runsFrom(p, dir)) try ran.print(
-            p.gpa,
-            "{s}{s}",
-            .{ if (ran.items.len > 0) ", " else "", dir },
-        );
+        try listAdd(p.gpa, &tried, "{s}", .{dir});
+        if (runsFrom(p, dir)) try listAdd(p.gpa, &ran, "{s}", .{dir});
     }
     try p.add(.{
         .id = "files-exec-refused",
@@ -223,18 +210,19 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
-    try p.sysctls("files-link" ++
-        "s", "files", "Link and FIFO tricks " ++
-        "blocked", "Symlinks, hard links and FIFOs in shared directories cannot be turned " ++
-        "against another user.", &.{
-        .{
-            "fs/protected_symlinks",
-            "1",
+    try p.sysctls(
+        "files-links",
+        "files",
+        "Link and FIFO tricks blocked",
+        "Symlinks, hard links and FIFOs in shared directories cannot be turned against " ++
+            "another user.",
+        &.{
+            .{ "fs/protected_symlinks", "1" },
+            .{ "fs/protected_hardlinks", "1" },
+            .{ "fs/protected_fifos", "2" },
+            .{ "fs/protected_regular", "2" },
         },
-        .{ "fs/protected_hardlinks", "1" },
-        .{ "fs/protected_fifos", "2" },
-        .{ "fs/protected_regular", "2" },
-    });
+    );
     const open = try worldWritable(p);
     try p.add(.{
         .id = "files-world-writable",
@@ -284,7 +272,10 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
-    const unowned = try findUnowned(p, passwd, group);
+    const unowned = try findOnRoot(p, .{ .unowned = .{
+        .uids = try thirdFields(p.gpa, passwd),
+        .gids = try thirdFields(p.gpa, group),
+    } });
     try p.add(.{
         .id = "files-unowned",
         .area = "files",
@@ -315,13 +306,9 @@ pub fn check(p: *Posture) !void {
         };
         for (places) |path| {
             if (path.len == 0) continue;
-            switch (writeOpen(path)) {
+            switch (openError(path, .WRONLY)) {
                 .ACCES, .NOENT => {},
-                else => try writable.print(
-                    p.gpa,
-                    "{s}{s}",
-                    .{ if (writable.items.len > 0) ", " else "", path },
-                ),
+                else => try listAdd(p.gpa, &writable, "{s}", .{path}),
             }
         }
         try p.add(.{
@@ -344,13 +331,9 @@ pub fn check(p: *Posture) !void {
         const devices = [_][:0]const u8{ disk, "/dev/mapper/control", "/dev/loop-control" };
         for (devices) |path| {
             if (path.len == 0) continue;
-            switch (readOpen(path)) {
+            switch (openError(path, .RDONLY)) {
                 .ACCES, .NOENT => {},
-                else => try readable.print(
-                    p.gpa,
-                    "{s}{s}",
-                    .{ if (readable.items.len > 0) ", " else "", path },
-                ),
+                else => try listAdd(p.gpa, &readable, "{s}", .{path}),
             }
         }
         try p.add(.{
@@ -371,8 +354,6 @@ pub fn check(p: *Posture) !void {
     }
 }
 
-/// Whether a copy of this program, put in dir, starts. A place it
-/// cannot be put is one it cannot start from.
 /// Whether a link made in /tmp, to /, opens as / would. A name no one can
 /// know first, as for runsFrom. Where no link can be made there, nothing
 /// planted one either.
@@ -392,6 +373,8 @@ fn followsLink(p: *Posture) bool {
     return true;
 }
 
+/// Whether a copy of this program, put in dir, starts. A place it
+/// cannot be put is one it cannot start from.
 fn runsFrom(p: *Posture, dir: []const u8) bool {
     // A name no one can know first: a fixed one, planted as a directory
     // by anyone in /tmp, would make the copy fail and the check pass.
@@ -463,15 +446,7 @@ pub fn findSetid(p: *Posture) ![]const u8 {
     return findOnRoot(p, .setid);
 }
 
-/// Files on the root filesystem whose uid is in no passwd entry or whose
-/// gid is in no group entry, as a list.
-fn findUnowned(p: *Posture, passwd: []const u8, group: []const u8) ![]const u8 {
-    return findOnRoot(p, .{ .unowned = .{
-        .uids = try thirdFields(p.gpa, passwd),
-        .gids = try thirdFields(p.gpa, group),
-    } });
-}
-
+/// The files on the root filesystem that find looks for, as a list.
 fn findOnRoot(p: *Posture, find: Find) ![]const u8 {
     var found: std.ArrayList(u8) = .empty;
     const root = statx(p.gpa, "/") orelse return "cannot stat /";
@@ -504,8 +479,8 @@ fn mountedAs(gpa: Allocator, mounts: []const u8, fstype: []const u8) ![]const u8
         var f = std.mem.tokenizeScalar(u8, line, ' ');
         _ = f.next();
         const point = f.next() orelse continue;
-        if (std.mem.eql(u8, f.next() orelse continue, fstype))
-            try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", point });
+        const kind = f.next() orelse continue;
+        if (std.mem.eql(u8, kind, fstype)) try listAdd(gpa, &out, "{s}", .{point});
     }
     return out.items;
 }
@@ -559,11 +534,7 @@ fn walk(
                 std.mem.findScalar(u32, ids.gids, st.gid) == null,
             else => isFound(find, st.mode),
         };
-        if (hit) try found.print(
-            p.gpa,
-            "{s}{s}{s}{s}",
-            .{ if (found.items.len > 0) ", " else "", path, sep, e.name },
-        );
+        if (hit) try listAdd(p.gpa, found, "{s}{s}{s}", .{ path, sep, e.name });
         if (st.mode & linux.S.IFMT != linux.S.IFDIR) continue;
         var sub = dir.openDir(
             p.io,
@@ -598,14 +569,11 @@ fn worldWritable(p: *Posture) !struct { found: []const u8, tried: []const u8 } {
     }) |dir| {
         const top = statx(p.gpa, dir) orelse continue;
         if (top.mode & linux.S.IFMT != linux.S.IFDIR) continue;
-        try tried.print(p.gpa, "{s}{s}", .{ if (tried.items.len > 0) ", " else "", dir });
+        try listAdd(p.gpa, &tried, "{s}", .{dir});
         const temporary = std.mem.eql(u8, dir, "/tmp") or std.mem.eql(u8, dir, "/var/tmp") or
             std.mem.eql(u8, dir, "/dev/shm");
         const find: Find = if (temporary) .open_dirs else .open;
-        if (isFound(
-            .open_dirs,
-            top.mode,
-        )) try found.print(p.gpa, "{s}{s}", .{ if (found.items.len > 0) ", " else "", dir });
+        if (isFound(.open_dirs, top.mode)) try listAdd(p.gpa, &found, "{s}", .{dir});
         var d = Dir.cwd().openDir(p.io, dir, .{ .iterate = true }) catch continue;
         defer d.close(p.io);
         try walk(p, d, dir, top, find, &found, 0);
@@ -623,16 +591,16 @@ fn accountFiles(p: *Posture) ![]const u8 {
         const real = realPath(p, path) orelse continue;
         const st = statx(p.gpa, real) orelse continue;
         const dir = std.fs.path.dirname(real) orelse "/";
-        const sep = if (loose.items.len > 0) ", " else "";
         if (st.uid != 0 or st.mode & 0o022 != 0) {
-            try loose.print(p.gpa, "{s}{s} is not root's alone", .{ sep, real });
+            try listAdd(p.gpa, &loose, "{s} is not root's alone", .{real});
         } else if (std.mem.endsWith(u8, path, "shadow") and st.mode & 0o004 != 0) {
-            try loose.print(p.gpa, "{s}{s} is readable by everyone", .{ sep, real });
+            try listAdd(p.gpa, &loose, "{s} is readable by everyone", .{real});
         } else if (statx(p.gpa, dir)) |d| if (d.uid != 0 or d.mode & 0o022 != 0) {
-            try loose.print(
+            try listAdd(
                 p.gpa,
-                "{s}{s}, which holds {s}, is not root's alone",
-                .{ sep, dir, std.fs.path.basename(real) },
+                &loose,
+                "{s}, which holds {s}, is not root's alone",
+                .{ dir, std.fs.path.basename(real) },
             );
         };
     }
@@ -646,11 +614,7 @@ fn realPath(p: *Posture, path: []const u8) ?[]const u8 {
     if (linux.errno(rc) != .SUCCESS) return null;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
-    const link = p.gpa.printSentinel(
-        "/proc/self/fd/{d}",
-        .{fd},
-        0,
-    ) catch return null;
+    const link = p.gpa.printSentinel("/proc/self/fd/{d}", .{fd}, 0) catch return null;
     var buf: [4096]u8 = undefined;
     const n = linux.readlink(link, &buf, buf.len);
     if (linux.errno(n) != .SUCCESS) return null;
@@ -701,7 +665,7 @@ fn accountProblems(
         const gid = f.next() orelse continue;
         try gids.append(gpa, gid);
         if (std.mem.eql(u8, gid, "0") and !std.mem.eql(u8, name, "root"))
-            try out.print(gpa, "{s}group {s} has gid 0", .{ comma(out.items), name });
+            try listAdd(gpa, &out, "group {s} has gid 0", .{name});
         try twice(gpa, &out, &seen, "group", name);
         try twice(gpa, &out, &seen, "gid", gid);
     }
@@ -714,22 +678,18 @@ fn accountProblems(
         const uid = f.next() orelse continue;
         const gid = f.next() orelse continue;
         if (std.mem.eql(u8, uid, "0") and !std.mem.eql(u8, name, "root"))
-            try out.print(gpa, "{s}{s} has uid 0", .{ comma(out.items), name });
+            try listAdd(gpa, &out, "{s} has uid 0", .{name});
         if (std.mem.eql(u8, gid, "0") and !std.mem.eql(u8, name, "root"))
-            try out.print(gpa, "{s}{s} has gid 0", .{ comma(out.items), name });
+            try listAdd(gpa, &out, "{s} has gid 0", .{name});
         if (!std.mem.eql(u8, password, "x"))
-            try out.print(gpa, "{s}{s} has a password in passwd", .{ comma(out.items), name });
+            try listAdd(gpa, &out, "{s} has a password in passwd", .{name});
         try twice(gpa, &out, &seen, "account", name);
         try twice(gpa, &out, &seen, "uid", uid);
         const known = for (gids.items) |g| {
             if (std.mem.eql(u8, g, gid)) break true;
         } else false;
         if (!known and gids.items.len > 0)
-            try out.print(
-                gpa,
-                "{s}{s}'s group {s} does not exist",
-                .{ comma(out.items), name, gid },
-            );
+            try listAdd(gpa, &out, "{s}'s group {s} does not exist", .{ name, gid });
     }
     lines = std.mem.tokenizeScalar(u8, shadow, '\n');
     while (lines.next()) |line| {
@@ -737,16 +697,12 @@ fn accountProblems(
         const name = f.next() orelse continue;
         const hash = f.next() orelse continue;
         if (hash.len == 0) {
-            try out.print(gpa, "{s}{s} has no password", .{ comma(out.items), name });
+            try listAdd(gpa, &out, "{s} has no password", .{name});
         } else if (hash[0] != '!' and hash[0] != '*') {
-            try out.print(gpa, "{s}{s} has a password", .{ comma(out.items), name });
+            try listAdd(gpa, &out, "{s} has a password", .{name});
         }
     }
     return out.items;
-}
-
-fn comma(so_far: []const u8) []const u8 {
-    return if (so_far.len > 0) ", " else "";
 }
 
 /// Note what is there twice: value, of kind, if seen before, which it now is.
@@ -759,7 +715,7 @@ fn twice(
 ) !void {
     const key = try std.mem.concat(gpa, u8, &.{ kind, ":", value });
     for (seen.items) |s| if (std.mem.eql(u8, s, key)) {
-        try out.print(gpa, "{s}{s} {s} is there twice", .{ comma(out.items), kind, value });
+        try listAdd(gpa, out, "{s} {s} is there twice", .{ kind, value });
         return;
     };
     try seen.append(gpa, key);

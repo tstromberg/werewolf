@@ -255,8 +255,7 @@ pub fn whyOf(
 /// This machine's seed for build: by its disk, which outlives every
 /// slot, so its place is the same from boot to boot.
 pub fn seed(u: *Update, build: []const u8) u64 {
-    const colon = std.mem.findScalar(u8, u.cmd.victim, ':') orelse u.cmd.victim.len;
-    return policy.seed(u.cmd.victim[0..colon], build);
+    return policy.seed(m.uuidOf(u.cmd.victim), build);
 }
 
 // --- the tiers feed ---------------------------------------------------------
@@ -267,7 +266,7 @@ pub fn seed(u: *Update, build: []const u8) u64 {
 // there is none to trust: then every fix counts as High.
 pub fn tiersFeed(u: *Update) !?tiers.Feed {
     const base_text = u.read(meta_dir ++ "/tiers") catch |err| switch (err) {
-        error.FileNotFound => return u.noFeed(null, "this image names no tiers feed"),
+        error.FileNotFound => return u.noFeed("this image names no tiers feed"),
         else => return err,
     };
     const base = std.mem.trim(u8, base_text, " \n");
@@ -280,9 +279,18 @@ pub fn tiersFeed(u: *Update) !?tiers.Feed {
     else |_|
         null;
     const kept_data = u.read(feed_path) catch "";
+    // Why the kept feed will not do, if it will not: said with the fetch's
+    // reason, should the fetch fail too.
+    var kept_error: ?[]const u8 = null;
     const kept: ?tiers.Feed = if (kept_data.len > 0) b: {
-        const sig = u.read(feed_sig_path) catch break :b null;
-        break :b tiers.open(u.gpa, key, kept_data, sig, now, last) catch null;
+        const sig = u.read(feed_sig_path) catch |err| {
+            kept_error = @errorName(err);
+            break :b null;
+        };
+        break :b tiers.open(u.gpa, key, kept_data, sig, now, last) catch |err| {
+            kept_error = @errorName(err);
+            break :b null;
+        };
     } else null;
 
     try u.netRoot();
@@ -309,7 +317,10 @@ pub fn tiersFeed(u: *Update) !?tiers.Feed {
             try u.gpa.print("{s}: {s}", .{ @errorName(err), u.detail })
         else
             @errorName(err);
-        const k = kept orelse return u.noFeed(reason, null);
+        const k = kept orelse return u.noFeed(if (kept_error) |ke|
+            try u.gpa.print("{s}; the kept feed: {s}", .{ reason, ke })
+        else
+            reason);
         try u.record(.{
             .event = "feed",
             .serial = k.serial,
@@ -357,11 +368,11 @@ pub fn ownAdvisories(u: *Update) ![]const u8 {
 }
 
 /// No feed to trust, logged with why, and what that means.
-pub fn noFeed(u: *Update, reason: ?[]const u8, why: ?[]const u8) !?tiers.Feed {
+pub fn noFeed(u: *Update, reason: []const u8) !?tiers.Feed {
     try u.record(.{
         .event = "feed",
         .result = "none",
-        .reason = reason orelse why orelse "",
+        .reason = reason,
         .consequence = "every fix counts as High",
     });
     return null;
@@ -371,11 +382,29 @@ pub fn noFeed(u: *Update, reason: ?[]const u8, why: ?[]const u8) !?tiers.Feed {
 /// latest feed: a tier seen for the first time joins pending, logged as
 /// `tier`, and can only bring the boot sooner.
 pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pending {
-    const text = u.read(p.report) catch return p;
+    // Without its report, the staged slot keeps the tiers it has, said:
+    // a fix that has since risen to Urgent would not bring its boot sooner.
+    const text = u.read(p.report) catch |err| {
+        try u.record(.{
+            .event = "error",
+            .step = "retier",
+            .@"error" = @errorName(err),
+            .detail = p.report,
+        });
+        return p;
+    };
     const r = std.json.parseFromSliceLeaky(struct {
         package_cves: []const cve.PackageFix = &.{},
         kernel_cves: cve.KernelFixes = .{},
-    }, u.gpa, text, .{ .ignore_unknown_fields = true }) catch return p;
+    }, u.gpa, text, .{ .ignore_unknown_fields = true }) catch |err| {
+        try u.record(.{
+            .event = "error",
+            .step = "retier",
+            .@"error" = @errorName(err),
+            .detail = p.report,
+        });
+        return p;
+    };
     const feed = try u.tiersFeed();
     const fixes = try tiers.tiersOf(u.gpa, feed, .{
         .changes = try diffOrigins(u.gpa, plan.old_pkgs, plan.new_pkgs),

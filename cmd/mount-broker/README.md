@@ -34,8 +34,8 @@ outside that domain; `lib/broker.zig` is how a program asks.
 
 - **The socket**, `/run/werewolf/mount-broker.sock`, made under umask 077,
   root's alone; `SO_PEERCRED` must say uid 0. At most eight askers.
-- **The words**: `grub` (the filesystem holding GRUB's environment, from
-  `/run/werewolf/grubenv`), `esp` (`werewolf.esp`'s FAT serial), `victim`
+- **The words**: `grub` (the filesystem holding GRUB's environment,
+  `werewolf.grubenv`'s UUID), `esp` (`werewolf.esp`'s FAT serial), `victim`
   (`werewolf.victim`'s UUID), each at `/run/werewolf/mnt/WORD`; `shutdown`
   (`/data` unmounted, or read-only if busy; its LUKS mapping removed; the
   victim read-only, which writes its journal into place for GRUB).
@@ -47,11 +47,14 @@ outside that domain; `lib/broker.zig` is how a program asks.
   attached; bite names its paths by where their links lead. One
   asker holds a word at a time; another is told it is busy.
 - **Releasing**: when the asker closes, or dies, the mount is unmounted,
-  lazily if busy.
+  plainly, never lazily: a lazy unmount would hide a mount some process
+  still had open and report it gone. If it is busy, the word stays held,
+  refused to other askers, and is unmounted again each second until the
+  kernel lets it go; the refusal is logged once, and so is the unmount.
 - **Confined**: CAP_SYS_ADMIN alone and locked (`lib/sandbox.zig`), and a
   seccomp filter of its socket's calls, the new mount calls, the classic
-  `mount(2)` only to remount read-only, `umount2` only plainly or lazily,
-  and the one device-mapper ioctl that removes a mapping.
+  `mount(2)` only to remount read-only, `umount2` only plainly, and the
+  one device-mapper ioctl that removes a mapping.
 
 ## Drawbacks
 

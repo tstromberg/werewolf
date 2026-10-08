@@ -56,7 +56,7 @@ pub fn filesystems(m: *Machine) void {
         "/var/tmp",
     });
     mkdir("/run/config", 0o700);
-    m.cgroups();
+    cgroups(m);
 }
 
 /// A cgroup2 hierarchy for the leashed services (cmd/leash), under /run
@@ -67,7 +67,7 @@ pub fn filesystems(m: *Machine) void {
 /// children included, is killed when it stops (its finish writes
 /// cgroup.kill). Without cgroup2 or its controllers, services still run,
 /// uncapped and without that reaper.
-pub fn cgroups(m: *Machine) void {
+fn cgroups(m: *Machine) void {
     mkdir("/run/cgroup", 0o755);
     if (!m.run(&.{
         mount_bin,
@@ -127,11 +127,8 @@ pub fn kernel(m: *Machine) !void {
     });
     m.mount(&.{ "-o", "remount,nosuid,nodev,noexec,nosymfollow", "/sys/kernel/security" });
     const lockdown = "/sys/kernel/security/lockdown";
-    if (std.mem.indexOf(
-        u8,
-        m.read(lockdown),
-        "[none]",
-    ) != null) _ = writeFile(lockdown, "integrity");
+    if (std.mem.indexOf(u8, m.read(lockdown), "[none]") != null)
+        _ = writeFile(lockdown, "integrity");
     say("lockdown: {s}", .{lockdownLevel(m.read(lockdown))});
 
     if (!m.run(&.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
@@ -243,7 +240,7 @@ fn writeXorExecute(contained: bool) !void {
 /// warning in early boot, before this, counts toward nothing. kernel.panic,
 /// below, makes the panic a reboot. None of it costs a program anything.
 /// See docs/security.md.
-pub const sysctls = [_][2][]const u8{
+const sysctls = [_][2][]const u8{
     .{ "vm/mmap_rnd_bits", switch (builtin.cpu.arch) {
         .aarch64 => "33",
         .x86_64 => "32",
@@ -285,8 +282,15 @@ pub const sysctls = [_][2][]const u8{
 };
 
 /// The level in /sys/kernel/security/lockdown: "none [integrity] confidentiality".
-pub fn lockdownLevel(text: []const u8) []const u8 {
+fn lockdownLevel(text: []const u8) []const u8 {
     const a = std.mem.findScalar(u8, text, '[') orelse return "unavailable";
     const b = std.mem.findScalarPos(u8, text, a, ']') orelse return "unavailable";
     return text[a + 1 .. b];
+}
+
+test lockdownLevel {
+    try std.testing.expectEqualStrings(
+        "integrity",
+        lockdownLevel("none [integrity] confidentiality\n"),
+    );
 }

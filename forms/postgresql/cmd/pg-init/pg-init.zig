@@ -132,12 +132,8 @@ pub fn main(init: std.process.Init) !void {
         defer dir.close(io);
         var it = dir.iterate();
         while (try it.next(io)) |e| {
-            if (e.kind == .file and
-                std.mem.endsWith(
-                    u8,
-                    e.name,
-                    ".sql",
-                )) try names.append(gpa, try gpa.dupe(u8, e.name));
+            if (e.kind != .file or !std.mem.endsWith(u8, e.name, ".sql")) continue;
+            try names.append(gpa, try gpa.dupe(u8, e.name));
         }
     } else |_| {}
     std.mem.sort([]const u8, names.items, {}, lessThan);
@@ -200,10 +196,11 @@ fn mark(io: Io, dir: Dir, name: []const u8) !void {
 /// own descriptor, as Dir's may be O_PATH, which cannot be synced.
 fn syncSvc(io: Io) !void {
     const rc = linux.open(svc_dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
-    const e = if (linux.errno(rc) != .SUCCESS) linux.errno(rc) else blk: {
-        defer _ = linux.close(@intCast(rc));
-        break :blk linux.errno(linux.fsync(@intCast(rc)));
-    };
+    var e = linux.errno(rc);
+    if (e == .SUCCESS) {
+        e = linux.errno(linux.fsync(@intCast(rc)));
+        _ = linux.close(@intCast(rc));
+    }
     if (e == .SUCCESS) return;
     say(io, "syncing {s}: {s}", .{ svc_dir, @tagName(e) });
     return error.SyncFailed;

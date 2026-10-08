@@ -48,14 +48,30 @@ pub fn main(init: std.process.Init) !void {
         say(io, "werewolf.slot={s} is not a or b; not committing", .{cmd.slot});
         park(io);
     }
-    const entry = try gpa.print(
-        "werewolf-{s}",
-        .{if (cmd.slot.len > 0) cmd.slot else "a"},
-    );
+    const entry = try gpa.print("werewolf-{s}", .{if (cmd.slot.len > 0) cmd.slot else "a"});
 
     var said = false;
-    while (true) : (try io.sleep(.fromSeconds(wait), .awake)) {
-        if (!healthy(io)) continue;
+    // The service that holds the commit back, said when it changes once a
+    // boot has had two minutes: a service crash-looping is otherwise a
+    // deadman reboot and a rollback with nothing on the console to say why.
+    var waited: u32 = 0;
+    var blocker_buf: [Dir.max_name_bytes]u8 = undefined;
+    var blocker_said: [Dir.max_name_bytes]u8 = undefined;
+    var blocker_said_len: usize = 0;
+    while (true) : ({
+        try io.sleep(.fromSeconds(wait), .awake);
+        waited += wait;
+    }) {
+        if (unhealthy(io, &blocker_buf)) |blocker| {
+            if (waited >= 120 and
+                !std.mem.eql(u8, blocker, blocker_said[0..blocker_said_len]))
+            {
+                say(io, "{s} is not up and settled; not committing", .{blocker});
+                @memcpy(blocker_said[0..blocker.len], blocker);
+                blocker_said_len = blocker.len;
+            }
+            continue;
+        }
         if (!exists(io, "/etc/sv/autoupdate") or exists(io, updater_ready)) break;
         // Said once, and only when the updater is all that is missing.
         if (!said) say(io, "the updater has not said it can update; not committing", .{});
@@ -86,20 +102,9 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
         say(io, "{s} is already good", .{entry});
         return markCommitted(io);
     }
-    if (exists(
-        io,
-        nodata,
-    )) return say(
-        io,
-        "/data is unavailable ({s}); not committing",
-        .{trim(readAll(io, gpa, nodata))},
-    );
-    const tried = (try triedEntry(
-        io,
-        gpa,
-        d,
-        entry,
-    )) orelse return say(io, "no entry for {s} in {s}; not committing", .{ entry, d });
+    if (dataUnavailable(io, gpa)) return;
+    const tried = (try triedEntry(io, gpa, d, entry)) orelse
+        return say(io, "no entry for {s} in {s}; not committing", .{ entry, d });
     try Dir.rename(Dir.cwd(), tried, Dir.cwd(), good, io);
     linux.sync();
     markCommitted(io);
@@ -111,11 +116,8 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
 /// mount broker mounts it apart and writable, for as long as the write
 /// takes: /victim, if it is the same filesystem, is read-only.
 fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void {
-    const colon = std.mem.findScalar(
-        u8,
-        spec,
-        ':',
-    ) orelse return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
+    const colon = std.mem.findScalar(u8, spec, ':') orelse
+        return say(io, "werewolf.grubenv={s} names no path; not committing", .{spec});
     // Joined to the broker's mount and written as root: within it only.
     if (!isCleanPath(spec[colon + 1 ..]))
         return say(io, "werewolf.grubenv={s}: not a plain absolute path; not committing", .{spec});
@@ -133,49 +135,50 @@ fn commitGrub(io: Io, gpa: Allocator, spec: []const u8, entry: []const u8) !void
         say(io, "{s} is already GRUB's default", .{entry});
         return markCommitted(io);
     }
-    // A slot that cannot reach the machine's data is not healthy, whatever
-    // its services say. Leaving it uncommitted lets the deadman take the
-    // machine back to the slot that last could.
-    if (exists(
-        io,
-        nodata,
-    )) return say(
-        io,
-        "/data is unavailable ({s}); not committing",
-        .{trim(readAll(io, gpa, nodata))},
-    );
-    if (!run(
-        io,
-        &.{ "/usr/lib/werewolf/grub-setenv", f, "saved_entry", entry },
-    )) return say(io, "not committing", .{});
+    if (dataUnavailable(io, gpa)) return;
+    if (!run(io, &.{ "/usr/lib/werewolf/grub-setenv", f, "saved_entry", entry }))
+        return say(io, "not committing", .{});
     markCommitted(io);
     say(io, "healthy for a minute; {s} is now GRUB's default", .{entry});
 }
 
-/// Whether every other service has been running for a minute, or is down
-/// because it asked to be (a service that parks itself), by runsv's own
+/// Whether this slot cannot reach the machine's data, said if so. A slot
+/// that cannot is not healthy, whatever its services say. Leaving it
+/// uncommitted lets the deadman take the machine back to the slot that
+/// last could.
+fn dataUnavailable(io: Io, gpa: Allocator) bool {
+    if (!exists(io, nodata)) return false;
+    say(io, "/data is unavailable ({s}); not committing", .{trim(readAll(io, gpa, nodata))});
+    return true;
+}
+
+/// The first other service that has not been running for a minute, nor
+/// is down because it asked to be, as its name in name_buf; null once
+/// every one has, or is (a service that parks itself), by runsv's own
 /// account in each supervise/status; not down while wanted up, between
 /// crashes, nor finishing, as a crashed service does while leash-reap
 /// clears it, and not one whose runsv has yet to say.
-fn healthy(io: Io) bool {
-    var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return false;
+fn unhealthy(io: Io, name_buf: *[Dir.max_name_bytes]u8) ?[]const u8 {
+    var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return "/etc/sv";
     defer d.close(io);
     const now: u64 = @intCast(@max(
         0,
         @divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s),
     ));
     var it = d.iterate();
-    while (it.next(io) catch return false) |e| {
+    while (it.next(io) catch return "/etc/sv") |e| {
         if (std.mem.eql(u8, e.name, "slot-keep")) continue;
+        const name = name_buf[0..e.name.len];
+        @memcpy(name, e.name);
         var path_buf: [Dir.max_name_bytes + 32]u8 = undefined;
-        const path = std.mem.print(&path_buf, "{s}/supervise/status", .{e.name}) catch return false;
-        var f = d.openFile(io, path, .{}) catch return false;
+        const path = std.mem.print(&path_buf, "{s}/supervise/status", .{name}) catch return name;
+        var f = d.openFile(io, path, .{}) catch return name;
         defer f.close(io);
         var status: [20]u8 = undefined;
-        const n = f.readPositionalAll(io, &status, 0) catch return false;
-        if (n != status.len or !serviceHealthy(status, now)) return false;
+        const n = f.readPositionalAll(io, &status, 0) catch return name;
+        if (n != status.len or !serviceHealthy(status, now)) return name;
     }
-    return true;
+    return null;
 }
 
 /// runsv's supervise/status: the time of the last change as TAI64N
@@ -223,8 +226,8 @@ fn parseCmdline(text: []const u8) Cmdline {
     var c: Cmdline = .{};
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=")) c.slot = arg["werewolf.slot=".len..];
-        if (std.mem.startsWith(u8, arg, "werewolf.esp=")) c.esp = arg["werewolf.esp=".len..];
+        if (std.mem.cutPrefix(u8, arg, "werewolf.slot=")) |v| c.slot = v;
+        if (std.mem.cutPrefix(u8, arg, "werewolf.esp=")) |v| c.esp = v;
     }
     return c;
 }
