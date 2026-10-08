@@ -106,7 +106,7 @@ cleanup() {
 	if [ "${CLOUD_KEEP:-}" = 1 ]; then
 		say "kept $name in $where; delete it with: $howl delete $name --on $cloud"
 	else
-		"$howl" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
+		"$werewolf" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
 		# The image this run's create made, the one it named as it made it,
 		# and no other: not every image new since the run began, as another
 		# run of the same form, at the same time, makes one too, and is
@@ -154,9 +154,9 @@ say "creating $name, $form on $arch, in $where"
 # too, which names the image cleanup deletes: the address on fd 3,
 # create's status in a file, since a pipeline's is tee's (and `|| rc=`,
 # so that set -e lets a failed create reach the line that records it).
-made=$({ { rc=0; "$howl" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" \
+made=$({ { rc=0; "$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" \
 	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
-[ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
+[ "$(cat "$work/create.rc")" = 0 ] || die "werewolf create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
 
 say "waiting for the posture line on the serial port"

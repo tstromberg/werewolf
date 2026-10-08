@@ -113,14 +113,14 @@ another `create`, not a new image.
 ### The verbs
 
 ```
-howl build   FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-howl pack    FORM|--image IMAGE [-o FILE] [-n] [--on TARGET] CONFIG...
-howl run     FORM [--dev] [CONFIG...]                QEMU, in the foreground
-howl create  FORM|--image IMAGE NAME [--on TARGET] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
-howl delete  NAME [--on TARGET]
-howl console NAME [--on TARGET]
-howl upload  FILE --on gcp|aws|azure
-howl build-apk RECIPE [--arch ARCH]                 a form's own melange package
+werewolf build   FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+werewolf pack    FORM|--image IMAGE [-o FILE] [-n] [--on TARGET] CONFIG...
+werewolf run     FORM [--dev] [CONFIG...]                QEMU, in the foreground
+werewolf create  FORM|--image IMAGE NAME [--on TARGET] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
+werewolf delete  NAME [--on TARGET]
+werewolf console NAME [--on TARGET]
+werewolf upload  FILE --on gcp|aws|azure
+werewolf build-apk RECIPE [--arch ARCH]                 a form's own melange package
 ```
 
 `--arch` takes each world's spelling: `aarch64` or `arm64`, and `x86_64`,
@@ -275,9 +275,9 @@ content digest in the manifest is what makes the image reproducible.
 
 `run` is `create`, of the one machine it keeps for trying a form:
 `werewolf-run`, on the engine `create` would pick, with `create`'s flags,
-in place of the last one. With no name, `howl ssh` logs into it,
-`howl console` shows its console (and, under QEMU, joins it until
-Ctrl-] leaves it running), and `howl stop` ends it.
+in place of the last one. With no name, `werewolf ssh` logs into it,
+`werewolf console` shows its console (and, under QEMU, joins it until
+Ctrl-] leaves it running), and `werewolf stop` ends it.
 
 The engine, for both, when `--on` does not say: Lima on macOS, bhyve on
 FreeBSD, Firecracker on Linux with KVM where its network can be set up
@@ -289,7 +289,7 @@ networking, so it needs no root: ssh and the form's last port are
 forwarded from this host's loopback, 2222 and 8080 or free ones when
 those are taken, and it keeps a data disk of its own. `--dev` builds a
 machine here with the debug shell. A form that serves ssh is up when its
-sshd answers, not only when init hands over, so `howl ssh` right after
+sshd answers, not only when init hands over, so `werewolf ssh` right after
 works.
 
 ### What the verbs say

@@ -82,9 +82,9 @@ else
 	# file too, which names the image cleanup deletes: the address on fd 3,
 	# create's status in a file, since a pipeline's is tee's (and `|| rc=`,
 	# so that set -e lets a failed create reach the line that records it).
-	made=$({ { rc=0; "$howl" create "$form" "$name" --on gcp --arch "$arch" ${size:+--size "$size"} \
+	made=$({ { rc=0; "$werewolf" create "$form" "$name" --on gcp --arch "$arch" ${size:+--size "$size"} \
 		--config "$work/config" 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
-	[ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
+	[ "$(cat "$work/create.rc")" = 0 ] || die "werewolf create failed; its output is above"
 	addr=$(echo "$made" | cut -f2)
 fi
 

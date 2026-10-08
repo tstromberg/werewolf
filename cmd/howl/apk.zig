@@ -37,7 +37,7 @@ pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
         } else recipe = a;
     }
     const r = recipe orelse return why.refuse("{s}", .{syntax});
-    arch = howl.archName(arch) orelse return why.refuse(howl.arch_refusal, .{arch});
+    arch = ww.archName(arch) orelse return why.refuse(ww.arch_refusal, .{arch});
     if (!isRecipePath(r)) return why.refuse(
         "{s}: a recipe is a .yaml path of [A-Za-z0-9._/-]",
         .{r},
