@@ -53,17 +53,16 @@ size=
 name=$demo
 [ "$mode" = webshell ] && name=$webshell
 work=$(mktemp -d)
-images() { g compute images list --filter "labels.werewolf-form=$form" --format 'value(name)' | sort; }
-images >"$work/images-before"
 
-# The image create uploaded, deleted however this run ends, once the VM's
-# disk is made from it.
+# The image this run's create made, deleted however the run ends, once the
+# VM's disk is made from it: the one create names as it makes it, and no
+# other. Not every image new since the run began: another run of the same
+# form, at the same time, makes one too, and it is still using it.
 cleanup() {
 	rc=$?
 	trap - EXIT INT TERM
-	images | comm -13 "$work/images-before" - | while read -r image; do
-		g compute images delete "$image" >/dev/null 2>&1 || true
-	done
+	image=$(sed -n 's/^werewolf: image \([a-z0-9-]*\): making it .*/\1/p' "$work/create.err" 2>/dev/null)
+	[ -z "$image" ] || g compute images delete "$image" >/dev/null 2>&1 || true
 	rm -rf "$work"
 	exit "$rc"
 }
@@ -79,8 +78,13 @@ else
 	mkdir "$work/config"
 	echo "$name" >"$work/config/hostname"
 	say "creating $name, $form on $arch, in $zone"
-	made=$("$werewolf" create "$form" "$name" --on gcp --arch "$arch" ${size:+--size "$size"} \
-		--config "$work/config") || die "werewolf create failed; its output is above"
+	# create's output to this run's, as it comes, and its stderr to a
+	# file too, which names the image cleanup deletes: the address on fd 3,
+	# create's status in a file, since a pipeline's is tee's (and `|| rc=`,
+	# so that set -e lets a failed create reach the line that records it).
+	made=$({ { rc=0; "$werewolf" create "$form" "$name" --on gcp --arch "$arch" ${size:+--size "$size"} \
+		--config "$work/config" 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
+	[ "$(cat "$work/create.rc")" = 0 ] || die "werewolf create failed; its output is above"
 	addr=$(echo "$made" | cut -f2)
 fi
 

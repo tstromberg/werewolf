@@ -1149,11 +1149,15 @@ const Ruleset = struct {
         )) != .SUCCESS) return error.RuleRefused;
     }
 
+    /// Every access the service is refused, audited: it is the program
+    /// leash becomes, and without LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
+    /// (ABI 7) the kernel says nothing of a domain's refusals after exec.
     fn restrict(r: *Ruleset) !void {
+        const log_new_exec: usize = if (r.abi >= 7) 1 << 1 else 0;
         if (linux.errno(linux.syscall2(
             .landlock_restrict_self,
             @intCast(r.fd),
-            0,
+            log_new_exec,
         )) != .SUCCESS) return error.Refused;
         _ = linux.close(r.fd);
     }

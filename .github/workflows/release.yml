@@ -3,9 +3,10 @@
 # When that has changed, build them twice on each architecture, on separate
 # runners, and require the builds to match byte for byte; boot and check
 # each form; then sign, attest and publish a release, unless its images are
-# the same as the latest release's. Daily, sign the latest release's
-# manifests again so they do not expire. GitHub runs schedules this often
-# late or not at all, so a change to werewolf itself does not wait on one:
+# the same as the latest release's: a release is published when its images
+# change, and its manifests do not expire (release/sign), so releases are
+# immutable once published. GitHub runs schedules this often late or not
+# at all, so a change to werewolf itself does not wait on one:
 # its push releases once its boots have passed. The CVE tiers feed is
 # tiers.yml's. See docs/releases.md.
 name: release
@@ -13,7 +14,6 @@ name: release
 on:
   schedule:
     - cron: "*/15 * * * *"
-    - cron: "41 4 * * *" # the daily re-signing
   workflow_run:
     workflows: [check]
     types: [completed]
@@ -34,9 +34,7 @@ concurrency:
 
 jobs:
   inputs:
-    if: >-
-      github.event.schedule != '41 4 * * *' &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     outputs:
@@ -157,28 +155,3 @@ jobs:
         with:
           path: build/lock/inputs
           key: ${{ needs.inputs.outputs.key }}
-
-  resign:
-    if: github.event.schedule == '41 4 * * *'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 10
-    environment: release
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          # What check passed, when it was check's passing that started this.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-          persist-credentials: false
-      - name: Sign the latest release's manifests again
-        env:
-          WEREWOLF_IMAGE_KEY: ${{ secrets.WEREWOLF_IMAGE_KEY }}
-        run: |
-          tag=$(gh release view --json tagName --jq .tagName)
-          gh release download "$tag" --dir m --pattern '*-aarch64.json' --pattern '*-x86_64.json'
-          release/sign "$tag" m/*.json
-          gh release upload "$tag" --clobber m/*

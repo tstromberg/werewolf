@@ -60,6 +60,9 @@ const aws = @import("aws.zig");
 const azure = @import("azure.zig");
 const app = @import("app.zig");
 const apk = @import("apk.zig");
+const progress = @import("progress.zig");
+const qemu = @import("qemu.zig");
+const booting = @import("boot.zig");
 const forms = @import("form");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -70,10 +73,11 @@ const usage =
     \\usage: werewolf build FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       werewolf pack FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       werewolf pack FORM -h          the flags FORM takes
-    \\       werewolf run FORM [--dev] [--app DIR] [CONFIG...]
-    \\       werewolf create FORM NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure|qemu] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
-    \\       werewolf delete NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure]
-    \\       werewolf console NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure]
+    \\       werewolf run FORM [--on TARGET] [--dev] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time
+    \\       werewolf ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; werewolf stop ends it
+    \\       werewolf create FORM NAME [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure] [--dev] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
+    \\       werewolf delete NAME [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure]
+    \\       werewolf console [NAME] [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure]
     \\       werewolf upload DISK --on gcp|aws|azure
     \\       werewolf build-apk RECIPE [--arch ARCH]   a form's own package, from a melange recipe
     \\
@@ -88,7 +92,7 @@ const max_cloud_entries = 32;
 const max_name = 100;
 
 /// The environment, for what names a Proxmox node (proxmox.zig).
-var environ: *const std.process.Environ.Map = undefined;
+pub var environ: *const std.process.Environ.Map = undefined;
 
 pub fn main(init: std.process.Init) void {
     const io = init.io;
@@ -104,6 +108,8 @@ pub fn main(init: std.process.Init) void {
             create,
             delete,
             console,
+            stop,
+            ssh,
             upload,
             @"build-apk",
             _bhyve,
@@ -120,6 +126,8 @@ pub fn main(init: std.process.Init) void {
         .create => create(io, gpa, args[2..], &why),
         .delete => delete(io, gpa, args[2..], &why),
         .console => console(io, gpa, args[2..], &why),
+        .stop => stopHere(io, gpa, args[2..], &why),
+        .ssh => sshTo(io, gpa, args[2..], &why),
         .upload => upload(io, gpa, args[2..], &why),
         .@"build-apk" => apk.build(io, gpa, args[2..], &why),
         // create's supervisors on bhyve and Firecracker, not verbs for anyone.
@@ -133,7 +141,11 @@ pub fn main(init: std.process.Init) void {
             firecracker.keep(io, gpa, args[2]),
     };
     done catch |err| switch (err) {
-        error.Refused => fatal(io, "{s}", .{why.text}),
+        // Said already, in full (progress).
+        error.Refused => if (why.text.len == 0)
+            std.process.exit(1)
+        else
+            fatal(io, "{s}", .{why.text}),
         else => fatal(io, "{s}", .{@errorName(err)}),
     };
 }
@@ -151,7 +163,8 @@ pub fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
 
 /// Why pack refused, for the one line that says so.
 pub const Why = struct {
-    buf: [512]u8 = undefined,
+    /// Room for any refusal, the usage it may repeat included.
+    buf: [4096]u8 = undefined,
     text: []const u8 = "",
 
     pub fn refuse(w: *Why, comptime fmt: []const u8, args: anytype) error{Refused} {
@@ -490,6 +503,7 @@ fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
         } else try flags.append(gpa, .{ flag, v });
     }
     if (o.form.len == 0) return why.refuse("no form\n{s}", .{usage});
+    if (o.arch) |a| o.arch = archName(a) orelse return why.refuse(arch_refusal, .{a});
     o.flags = flags.items;
     return o;
 }
@@ -825,9 +839,7 @@ fn buildOptions(args: []const []const u8, host: ?[]const u8, why: *Why) !BuildOp
         if (std.mem.eql(u8, a, "-o")) {
             o.dir = v;
         } else if (std.mem.eql(u8, a, "--arch")) {
-            if (!std.mem.eql(u8, v, "aarch64") and !std.mem.eql(u8, v, "x86_64"))
-                return why.refuse("--arch {s}: aarch64 or x86_64", .{v});
-            o.arch = v;
+            o.arch = archName(v) orelse return why.refuse(arch_refusal, .{v});
         } else if (std.mem.eql(u8, a, "--app")) {
             o.app = v;
         } else if (std.mem.eql(u8, a, "--format")) {
@@ -846,30 +858,35 @@ fn buildOptions(args: []const []const u8, host: ?[]const u8, why: *Why) !BuildOp
     return o;
 }
 
-fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+fn build(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
+    const verbose, const args = try verboseFlag(gpa, all);
     const o = try buildOptions(args, switch (@import("builtin").cpu.arch) {
         .aarch64 => "aarch64",
         .x86_64 => "x86_64",
         else => null,
     }, why);
-    const f = o.form;
+    // The form as make takes it, a name or a directory, and its name.
+    const ref = o.form;
+    const f = std.fs.path.basename(std.mem.trimEnd(u8, ref, "/"));
     const a = o.arch;
     const dir = o.dir;
     const format = o.format;
-    _ = try chain(io, gpa, f, why);
-    const ab = try appBuild(io, gpa, f, a, o.app, why);
+    _ = try chain(io, gpa, ref, why);
+    const ab = try appBuild(io, gpa, ref, a, o.app, why);
+    const command = try gpa.print("werewolf build {s}", .{std.mem.join(gpa, " ", args) catch ref});
+    const log = try gpa.print("build/log/{s}-{s}-build.log", .{ f, a });
 
     // make keeps the build graph; this only names the target, as it ships.
-    try run(io, why, &.{
+    var done = try progress.run(io, gpa, why, &.{
         make_cmd,
         "--no-print-directory",
-        try gpa.print("FORM={s}", .{f}),
+        try gpa.print("FORM={s}", .{ref}),
         try gpa.print("ARCH={s}", .{a}),
         "DEV=",
         ab.app,
         try gpa.print("DIST={s}", .{dir}),
         "_dist-form",
-    });
+    }, .{ .verbose = verbose, .command = command, .log = log, .first = start_phase });
 
     const name = try gpa.print("{s}/{s}-{s}.json", .{ dir, f, a });
     const text = Dir.cwd().readFileAlloc(io, name, gpa, .limited(1 << 20)) catch |err|
@@ -881,36 +898,135 @@ fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     const id = m.object.get("build") orelse return why.refuse("{s}: no build", .{name});
     if (files != .object or id != .string) return why.refuse("{s}: not a manifest", .{name});
 
+    // What a machine boots from: the disk, or, for a form released for
+    // direct boot, its initramfs, unless a format of its own was asked for.
+    var boot = try gpa.print("{s}/{s}-{s}-{s}", .{
+        dir, f, a, if (files.object.get("disk.qcow2") != null) "disk.qcow2" else "initramfs.zst",
+    });
+    if (format != .qcow2) {
+        if (files.object.get("disk.qcow2") == null)
+            return why.refuse("{s} is released for direct boot, without a disk to convert", .{f});
+        const dst = try gpa.print("{s}/{s}-{s}-disk.{t}", .{ dir, f, a, format });
+        // VHD as Azure takes it: fixed, its size exactly the disk's.
+        const convert: []const []const u8 = switch (format) {
+            .raw => &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", boot, dst },
+            .vhd => &.{
+                "qemu-img",
+                "convert",
+                "-f",
+                "qcow2",
+                "-O",
+                "vpc",
+                "-o",
+                "subformat=fixed,force_size=on",
+                boot,
+                dst,
+            },
+            .vmdk => &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "vmdk", boot, dst },
+            .qcow2 => unreachable,
+        };
+        const c = try progress.run(io, gpa, why, convert, .{
+            .verbose = verbose,
+            .command = command,
+            .log = log,
+            .first = .{
+                .name = try gpa.print("Converting the disk to {t}", .{format}),
+                .short = "convert",
+            },
+            .make = false,
+        });
+        done.seconds += c.seconds;
+        done.phases = try std.mem.concat(gpa, progress.Spent, &.{ done.phases, c.phases });
+        boot = dst;
+    }
+
+    // What was made, where, and what to do with it: four lines.
+    const look: progress.Look = .of(io, Io.File.stderr());
+    var err_out: Io.Writer.Allocating = .init(gpa);
+    const e = &err_out.writer;
+    try e.print(
+        "{s} Built {s} for {s} in {f}\n",
+        .{ look.check(), f, a, progress.Clock{ .seconds = done.seconds } },
+    );
+    if (!verbose) try e.print("  {f}\n", .{look.dim(try gpa.print("{f}", .{done}))});
+    Io.File.stderr().writeStreamingAll(io, err_out.written()) catch {};
     var out = Io.File.stdout().writerStreaming(io, &.{});
     const w = &out.interface;
-    try w.print("{s} {s}: build {s}, {s}\n", .{ f, a, id.string, name });
-    var it = files.object.iterator();
-    while (it.next()) |e| try w.print("  {s}/{s}-{s}-{s}\n", .{ dir, f, a, e.key_ptr.* });
-    if (format == .qcow2) return;
-
-    if (files.object.get("disk.qcow2") == null)
-        return why.refuse("{s} is released for direct boot, without a disk to convert", .{f});
-    const src = try gpa.print("{s}/{s}-{s}-disk.qcow2", .{ dir, f, a });
-    const dst = try gpa.print("{s}/{s}-{s}-disk.{t}", .{ dir, f, a, format });
-    // VHD as Azure takes it: fixed, its size exactly the disk's.
-    try run(io, why, switch (format) {
-        .raw => &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", src, dst },
-        .vhd => &.{
-            "qemu-img",
-            "convert",
-            "-f",
-            "qcow2",
-            "-O",
-            "vpc",
-            "-o",
-            "subformat=fixed,force_size=on",
-            src,
-            dst,
+    const size = if (Dir.cwd().statFile(io, boot, .{})) |st| st.size else |_| 0;
+    try w.print(
+        "  {s}  {f}\n",
+        .{
+            boot,
+            look.dim(try gpa.print("{f}, every file in {s}", .{ Size{ .bytes = size }, name })),
         },
-        .vmdk => &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "vmdk", src, dst },
-        .qcow2 => unreachable,
-    });
-    try w.print("  {s}, from disk.qcow2\n", .{dst});
+    );
+    if (verbose) {
+        var it = files.object.iterator();
+        while (it.next()) |x| try w.print("  {s}/{s}-{s}-{s}\n", .{ dir, f, a, x.key_ptr.* });
+    }
+    err_out.clearRetainingCapacity();
+    if (std.mem.eql(u8, a, hostArch())) {
+        try e.print(
+            "  Next: werewolf create {s} NAME   {f}\n",
+            .{ ref, look.dim(try gpa.print("a machine on {s}, kept", .{platform(io, gpa, null)})) },
+        );
+        try e.print(
+            "        werewolf run {s}           {f}\n",
+            .{ ref, look.dim("boot it here, its console in this terminal") },
+        );
+    } else {
+        try e.print("  Next: werewolf upload {s} --on gcp|aws|azure\n", .{boot});
+    }
+    Io.File.stderr().writeStreamingAll(io, err_out.written()) catch {};
+}
+
+/// The phase a build is in before make names one.
+const start_phase: progress.Phase = .{ .name = "Starting the build", .short = "start" };
+
+/// A file's size as people read one: 812 KiB, 44 MiB, 1.2 GiB.
+const Size = struct {
+    bytes: u64,
+
+    pub fn format(s: Size, w: *Io.Writer) Io.Writer.Error!void {
+        const k: u64 = 1 << 10;
+        if (s.bytes < k << 10) return w.print("{d} KiB", .{(s.bytes + k - 1) / k});
+        if (s.bytes < k << 20) return w.print("{d} MiB", .{(s.bytes + (k << 10) - 1) / (k << 10)});
+        return w.print("{d}.{d} GiB", .{ s.bytes >> 30, ((s.bytes >> 20) & 1023) * 10 / 1024 });
+    }
+};
+
+/// --verbose or -v, anywhere on a command line, and the rest of it.
+fn verboseFlag(gpa: Allocator, args: []const []const u8) !struct { bool, []const []const u8 } {
+    return takeFlag(gpa, args, &.{ "--verbose", "-v" });
+}
+
+/// Whether one of names, a flag without a value, is anywhere on a command
+/// line, and the rest of it.
+fn takeFlag(
+    gpa: Allocator,
+    args: []const []const u8,
+    names: []const []const u8,
+) !struct { bool, []const []const u8 } {
+    var rest: std.ArrayList([]const u8) = .empty;
+    var seen = false;
+    for (args) |a| {
+        for (names) |n| {
+            if (std.mem.eql(u8, a, n)) {
+                seen = true;
+                break;
+            }
+        } else try rest.append(gpa, a);
+    }
+    return .{ seen, rest.items };
+}
+
+/// Run argv and say nothing of it, unless it fails: then its last words.
+fn quiet(io: Io, gpa: Allocator, why: *Why, argv: []const []const u8) !void {
+    const r = std.process.run(gpa, io, .{ .argv = argv }) catch |err|
+        return why.refuse("{s}: {s}", .{ argv[0], @errorName(err) });
+    if (r.term == .exited and r.term.exited == 0) return;
+    const said = std.mem.trim(u8, if (r.stderr.len > 0) r.stderr else r.stdout, " \n");
+    return why.refuse("{s} failed: {s}", .{ argv[0], said[said.len -| 400..] });
 }
 
 /// Run argv, its output the user's on standard error, so that standard
@@ -1034,63 +1150,273 @@ pub fn writePrivate(io: Io, gpa: Allocator, path: []const u8, data: []const u8, 
 // --- run ---------------------------------------------------------------------------------
 
 /// Where run leaves the tar it attaches: build/, the checkout's.
-const run_tar = "build/werewolf-run.tar";
-
-/// FORM under QEMU here, as make run boots it, with the config tar the
-/// flags make, checked as pack checks it. werewolf becomes make, and make
-/// QEMU, so the console is this terminal's and Ctrl-a x ends it.
+/// run is create, of the one machine it keeps for trying a form: on the
+/// engine create would pick, with create's flags, named werewolf-run,
+/// and in place of the last one. werewolf ssh, console and stop, with no
+/// name, are its.
 fn runForm(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
-    var dev = false;
-    var rest: std.ArrayList([]const u8) = .empty;
-    for (args) |a| {
-        if (std.mem.eql(u8, a, "--dev")) dev = true else try rest.append(gpa, a);
-    }
-    const o = try options(gpa, rest.items, why);
-    if (o.out != null or o.check or o.on != null)
-        return why.refuse("run takes no -o, -n or --on: it boots here, under QEMU", .{});
-    if (o.name) |n| return why.refuse("{s}: run takes one form, and no name", .{n});
-    if (o.arch != null or o.size != null) return why.refuse("--arch and --size are create's", .{});
-    if (o.allow_from != null) return why.refuse("--allow-from is create's: run boots here", .{});
-    const iface = try formInterface(io, gpa, o.form, why);
-    var out = Io.File.stdout().writerStreaming(io, &.{});
-    if (o.help) return help(&out.interface, gpa, "run", o.form, iface);
-    const entries = try gather(io, gpa, iface, o, why);
-    const ab = try appBuild(io, gpa, o.form, hostArch(), o.app, why);
-    return bootHere(io, gpa, o.form, dev, entries, ab.app, why);
+    for (args) |a| if (std.mem.eql(u8, a, run_name))
+        return why.refuse("{s} is the name run gives its machine: run FORM [flags]", .{a});
+    // The last one, wherever it ran: it has the name, and maybe the ports.
+    if (madeOn(io, gpa, run_name)) |was| remove(io, gpa, run_name, was, why) catch {};
+    var with: std.ArrayList([]const u8) = .empty;
+    try with.appendSlice(gpa, args);
+    try with.append(gpa, run_name);
+    return create(io, gpa, with.items, why);
 }
 
-/// FORM under QEMU here, in the foreground, with the tar of entries:
-/// werewolf becomes make run, and make QEMU.
-fn bootHere(
+/// How create tells what it does: everything, or one line and a summary;
+/// the command, for a failure to repeat; when it began; and, when a
+/// likelier engine was passed over, why.
+const Tell = struct {
+    verbose: bool,
+    command: []const u8,
+    began: Io.Timestamp,
+    note: ?[]const u8 = null,
+    dev: bool = false,
+
+    fn step(t: Tell, gpa: Allocator, dir: []const u8) !progress.Options {
+        return .{
+            .verbose = t.verbose,
+            .command = t.command,
+            .log = try gpa.print("{s}/create.log", .{dir}),
+            .first = start_phase,
+        };
+    }
+};
+
+/// create --on qemu (qemu.zig), and wherever no likelier engine is: the
+/// form built, then booted in the background under QEMU with a data disk
+/// and config tar of its own, ssh and its last port forwarded from free
+/// ports on this host's loopback; a machine of the name stopped first, its
+/// /data kept.
+fn createQemu(
     io: Io,
     gpa: Allocator,
-    form: []const u8,
-    dev: bool,
-    entries: []const Entry,
-    app_arg: []const u8,
+    o: Options,
+    name: []const u8,
+    tar: []const u8,
+    tell: Tell,
     why: *Why,
 ) !void {
-    // The config is what the flags say, not whatever is in ./config.
-    var qemu_config: []const u8 = "QEMU_CONFIG=";
-    if (entries.len > 0) {
-        Dir.cwd().createDirPath(io, "build") catch {};
-        try writePrivate(io, gpa, run_tar, try writeTar(gpa, entries), why);
-        qemu_config = "QEMU_CONFIG=-drive file=" ++ run_tar ++ ",format=raw,if=virtio,readonly=on";
-    }
-    say(io, "{s}{s}: ssh at 127.0.0.1:2222, http at 127.0.0.1:8080; Ctrl-a x quits", .{
-        form,
-        if (dev) ", with a shell" else "",
-    });
-    const err = std.process.replace(io, .{ .argv = &.{
+    const arch = hostArch();
+    const dir = try machineDir(gpa, arch, name);
+    try Dir.cwd().createDirPath(io, dir);
+    var cwd_buf: [Dir.max_path_bytes]u8 = undefined;
+    const cwd = cwd_buf[0..try std.process.currentPath(io, &cwd_buf)];
+    const at = try gpa.print("{s}/{s}", .{ cwd, dir });
+    const replaced = try qemu.stop(io, gpa, dir);
+    const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
+    const step = try tell.step(gpa, dir);
+    const built = try progress.run(io, gpa, why, &.{
         make_cmd,
         "--no-print-directory",
-        try gpa.print("FORM={s}", .{form}),
-        if (dev) "DEV=1" else "DEV=",
-        app_arg,
-        qemu_config,
+        try gpa.print("FORM={s}", .{o.form}),
+        if (tell.dev) "DEV=1" else "DEV=",
+        ab.app,
+        "image",
+    }, step);
+    try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
+    try writePrivate(io, gpa, try gpa.print("{s}/engine", .{dir}), "qemu", why);
+    try qemu.disk(io, try gpa.print("{s}/data.img", .{dir}), 8 << 30);
+    const ssh_port = try qemu.freePort(io, 2222);
+    const web_port = try qemu.freePort(io, 8080);
+    try writePrivate(io, gpa, try gpa.print("{s}/machine", .{dir}), try gpa.print(
+        "form {s}\nssh {d}\nweb {d}\n",
+        .{ o.form, ssh_port, web_port },
+    ), why);
+    var start_step = step;
+    start_step.make = false;
+    start_step.first = .{ .name = "Starting the VM under QEMU", .short = "start" };
+    const launched = Io.Clock.awake.now(io);
+    _ = try progress.run(io, gpa, why, &.{
+        make_cmd,
+        "--no-print-directory",
+        "-s",
+        try gpa.print("FORM={s}", .{o.form}),
+        if (tell.dev) "DEV=1" else "DEV=",
+        ab.app,
+        try gpa.print(
+            "QEMU_CONFIG=-drive file={s}/config.tar,format=raw,if=virtio,readonly=on",
+            .{at},
+        ),
+        try gpa.print("RUN_DATA={s}/data.img", .{at}),
+        try gpa.print("RUN_SSH_PORT={d}", .{ssh_port}),
+        try gpa.print("RUN_WEB_PORT={d}", .{web_port}),
+        try gpa.print("RUN_DIR={s}", .{at}),
         "run",
-    } });
-    return why.refuse("make: {s}", .{@errorName(err)});
+    }, start_step);
+    var spin: progress.Spinner = .init(io);
+    const watch = Io.Clock.awake.now(io);
+    var boot = try booting.watch(
+        io,
+        gpa,
+        try gpa.print("{s}/console.log", .{dir}),
+        0,
+        null,
+        0,
+        &spin,
+    );
+    spin.clear();
+    // The VM's start is QEMU's, then until its console spoke.
+    if (boot.power_ns) |ns| boot.power_ns = ns + launched.durationTo(watch).toNanoseconds();
+    const look: progress.Look = .of(io, Io.File.stderr());
+    if (!boot.up) {
+        try Io.File.stderr().writeStreamingAll(io, try gpa.print(
+            "{s} {s} did not say it was up within 3 minutes\n  {s} · {s}\n",
+            .{ look.cross(), name, try consoleCommand(gpa, name), try stopCommand(gpa, name) },
+        ));
+        why.text = "";
+        return error.Refused;
+    }
+    if (!(Io.File.stdout().isTty(io) catch false)) {
+        var out = Io.File.stdout().writerStreaming(io, &.{});
+        try out.interface.print("{s}\t127.0.0.1:{d}\t{s}\n", .{ name, ssh_port, o.form });
+    }
+    const ports = try listens(io, gpa, o.form, why);
+    const ssh = std.mem.findScalar(u16, ports, 22) != null;
+    const late = sshReady(io, ports, "127.0.0.1", ssh_port);
+    return sayUp(io, gpa, tell.began, try gpa.print("{s} is up here, under QEMU{s}{s}", .{
+        name,
+        if (replaced) ", in place of the last" else "",
+        late,
+    }), built.seconds, boot, try gpa.print("{s}{s}{s}{s} · {s}", .{
+        if (ssh) try sshCommand(gpa, name) else "",
+        if (ssh) " · " else "",
+        try reach(gpa, ports, null, web_port),
+        try consoleCommand(gpa, name),
+        try stopCommand(gpa, name),
+    }), tell.note);
+}
+
+/// How to reach a machine, as a summary says it: the run machine's need no
+/// name.
+fn sshCommand(gpa: Allocator, name: []const u8) ![]const u8 {
+    return if (std.mem.eql(u8, name, run_name))
+        "werewolf ssh"
+    else
+        gpa.print("werewolf ssh {s}", .{name});
+}
+
+fn consoleCommand(gpa: Allocator, name: []const u8) ![]const u8 {
+    return if (std.mem.eql(u8, name, run_name))
+        "werewolf console"
+    else
+        gpa.print("werewolf console {s}", .{name});
+}
+
+fn stopCommand(gpa: Allocator, name: []const u8) ![]const u8 {
+    return if (std.mem.eql(u8, name, run_name))
+        "werewolf stop"
+    else
+        gpa.print("werewolf delete {s}", .{name});
+}
+
+/// werewolf ssh [NAME] [-- COMMAND...]: ssh as root into a machine here,
+/// werewolf run's without a name: under QEMU on the port it forwarded,
+/// under Firecracker at its tap's address, on Lima at its lease's address,
+/// or through Lima's own ssh for one Lima manages. werewolf becomes ssh.
+fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+    var rest: []const []const u8 = args;
+    var command: []const []const u8 = &.{};
+    for (args, 0..) |a, i| if (std.mem.eql(u8, a, "--")) {
+        rest = args[0..i];
+        command = args[i + 1 ..];
+        break;
+    };
+    const name, const on = try machineArgs(gpa, io, rest, why);
+    const dir = try machineDir(gpa, hostArch(), name);
+    // Its host key is its own, kept in /data: learned once, then held to,
+    // beside its other files, not by an address another machine may get;
+    // delete takes it with the machine.
+    const pinned = [_][]const u8{
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", try gpa.print("UserKnownHostsFile={s}/known_hosts", .{dir}),
+        "-o", try gpa.print("HostKeyAlias={s}", .{name}),
+        "-o", "LogLevel=ERROR",
+    };
+    var argv: std.ArrayList([]const u8) = .empty;
+    if (std.mem.eql(u8, on, "qemu")) {
+        if (qemu.running(
+            io,
+            gpa,
+            dir,
+        ) == null) return why.refuse("no machine {s} running under QEMU", .{name});
+        const port = qemu.record(
+            io,
+            gpa,
+            dir,
+            "ssh",
+        ) orelse return why.refuse("{s}: no ssh port on record", .{name});
+        try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
+        try argv.appendSlice(gpa, &pinned);
+        try argv.append(gpa, "root@127.0.0.1");
+    } else if (std.mem.eql(u8, on, "firecracker")) {
+        try argv.append(gpa, "ssh");
+        try argv.appendSlice(gpa, &pinned);
+        try argv.append(gpa, try gpa.print("root@{s}", .{(try firecracker.net(gpa, name)).guest}));
+    } else if (std.mem.eql(u8, on, "lima")) {
+        if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
+        if (lima.addressOf(io, gpa, name)) |addr| {
+            try argv.append(gpa, "ssh");
+            try argv.appendSlice(gpa, &pinned);
+            try argv.append(gpa, try gpa.print("root@{s}", .{addr}));
+        } else try argv.appendSlice(gpa, &.{ "limactl", "shell", name });
+    } else return why.refuse(
+        "ssh reaches machines here (qemu, firecracker, lima); {s}'s address is in create's summary",
+        .{on},
+    );
+    try argv.appendSlice(gpa, command);
+    const err = std.process.replace(io, .{ .argv = argv.items });
+    return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
+}
+
+/// werewolf stop: end the machine werewolf run keeps, wherever it runs.
+fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+    if (args.len > 0) return why.refuse(
+        "stop takes nothing: it ends werewolf run's machine; delete NAME ends another",
+        .{},
+    );
+    const on = madeOn(
+        io,
+        gpa,
+        run_name,
+    ) orelse return why.refuse("no machine from werewolf run", .{});
+    try remove(io, gpa, run_name, on, why);
+    const look: progress.Look = .of(io, Io.File.stderr());
+    try Io.File.stderr().writeStreamingAll(
+        io,
+        try gpa.print(
+            "{s} Stopped {s}, the machine werewolf run kept\n",
+            .{ look.check(), run_name },
+        ),
+    );
+}
+
+/// How this machine reaches one under QEMU: ssh on ssh_port where it serves
+/// ssh, and its last other port on web_port, as make run forwards them, a
+/// URL where the port speaks the web. Each ends " · ".
+fn reach(gpa: Allocator, ports: []const u16, ssh_port: ?u16, web_port: u16) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var web: ?u16 = null;
+    var ssh = false;
+    for (ports) |p| if (p == 22) {
+        ssh = true;
+    } else {
+        web = p;
+    };
+    if (ssh) if (ssh_port) |sp| try out.print(gpa, "ssh -p {d} root@127.0.0.1 · ", .{sp});
+    if (web) |p| {
+        const scheme: ?[]const u8 = switch (p) {
+            443, 8443 => "https://",
+            80, 3000, 8000, 8080, 8081, 9000, 11434 => "http://",
+            else => null,
+        };
+        if (scheme) |sc| {
+            try out.print(gpa, "{s}127.0.0.1:{d} · ", .{ sc, web_port });
+        } else try out.print(gpa, "127.0.0.1:{d} reaches its :{d} · ", .{ web_port, p });
+    }
+    return out.items;
 }
 
 // --- create, delete, console -----------------------------------------------------------
@@ -1150,17 +1476,67 @@ pub fn hostArch() []const u8 {
     };
 }
 
+/// --arch's spellings, as each world writes them, made werewolf's own,
+/// which make and the clouds' code take: aarch64 (arm64) and x86_64
+/// (x86-64, amd64). Each cloud then names it as it does: GCP ARM64 and
+/// X86_64, AWS arm64 and x86_64, Azure Arm64 and x64.
+pub fn archName(given: []const u8) ?[]const u8 {
+    const names = [_][2][]const u8{
+        .{ "aarch64", "aarch64" }, .{ "arm64", "aarch64" },
+        .{ "x86_64", "x86_64" },   .{ "x86-64", "x86_64" },
+        .{ "amd64", "x86_64" },
+    };
+    for (names) |n| if (std.ascii.eqlIgnoreCase(given, n[0])) return n[1];
+    return null;
+}
+
+pub const arch_refusal = "--arch {s}: aarch64 (arm64), or x86_64 (x86-64, amd64)";
+
 /// What a machine runs on when --on does not say: Lima where it is
 /// installed, bhyve on FreeBSD, or Firecracker on Linux with KVM, since
 /// each keeps the machine; else QEMU here, in the foreground.
-fn platform(io: Io, gpa: Allocator, given: ?[]const u8) []const u8 {
-    if (given) |p| return p;
-    if (lima.installed(io, gpa)) return "lima";
-    if (bhyve.installed(io)) return "bhyve";
-    return if (firecracker.installed(io, gpa)) "firecracker" else "qemu";
+/// Where a machine runs when --on does not say: Lima on macOS, bhyve on
+/// FreeBSD, Firecracker on Linux with KVM where its network can be set up
+/// without a password, or QEMU; and, when a likelier one was passed over,
+/// why, for the summary to say. run and create choose alike.
+const Engine = struct { name: []const u8, note: ?[]const u8 = null };
+
+fn engine(io: Io, gpa: Allocator, given: ?[]const u8) Engine {
+    if (given) |p| return .{ .name = p };
+    if (lima.installed(io, gpa)) return .{ .name = "lima" };
+    if (bhyve.installed(io)) return .{ .name = "bhyve" };
+    if (firecracker.installed(io, gpa)) {
+        if (firecracker.rootReady(io, gpa)) return .{ .name = "firecracker" };
+        return .{
+            .name = "qemu",
+            .note = "not Firecracker: its network needs root, and sudo asks a password (sudo " ++
+                "-v, then again)",
+        };
+    }
+    return .{ .name = "qemu" };
 }
 
-fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+fn platform(io: Io, gpa: Allocator, given: ?[]const u8) []const u8 {
+    return engine(io, gpa, given).name;
+}
+
+/// The engine a machine here was made on, as create recorded it.
+fn madeOn(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
+    const path = gpa.print(
+        "{s}/engine",
+        .{machineDir(gpa, hostArch(), name) catch return null},
+    ) catch return null;
+    const text = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64)) catch return null;
+    return std.mem.trim(u8, text, " \n");
+}
+
+/// The name run gives the one machine it keeps.
+const run_name = "werewolf-run";
+
+fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
+    const began = Io.Clock.awake.now(io);
+    const verbose, const some = try verboseFlag(gpa, all);
+    const dev, const args = try takeFlag(gpa, some, &.{"--dev"});
     var o = try options(gpa, args, why);
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: werewolf pack writes a tar", .{});
@@ -1177,7 +1553,38 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         .{name},
     );
 
-    const on = platform(io, gpa, o.platform);
+    const eng = engine(io, gpa, o.platform);
+    const on = eng.name;
+    const tell: Tell = .{
+        .verbose = verbose,
+        .command = try gpa.print("werewolf {s} {s}", .{
+            if (std.mem.eql(u8, name, run_name)) "run" else "create",
+            std.mem.join(
+                gpa,
+                " ",
+                if (std.mem.eql(u8, name, run_name)) args[0 .. args.len - 1] else args,
+            ) catch o.form,
+        }),
+        .began = began,
+        .note = eng.note,
+        .dev = dev,
+    };
+    if (dev) for ([_][]const u8{ "gcp", "aws", "azure", "proxmox" }) |c| if (std.mem.eql(u8, on, c))
+        return why.refuse(
+            "--dev is for machines here: a shell on {s} is a release's choice to make",
+            .{on},
+        );
+    // What engine made a machine here, for the verbs that find it again.
+    for ([_][]const u8{
+        "lima",
+        "bhyve",
+        "firecracker",
+        "qemu",
+    }) |local| if (std.mem.eql(u8, on, local)) {
+        const d = try machineDir(gpa, hostArch(), name);
+        try Dir.cwd().createDirPath(io, d);
+        try writePrivate(io, gpa, try gpa.print("{s}/engine", .{d}), on, why);
+    };
     // A form with no DHCP client is given the hypervisor's own network in
     // its config tar, Lima's as make lima's template gives it on the
     // command line, or slirp's under bhyve, unless the flags or --config
@@ -1217,15 +1624,7 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         t,
     )) |r| return why.refuse("not for {s}: {s}", .{ on, r });
 
-    if (std.mem.eql(u8, on, "qemu")) {
-        if (o.platform == null) say(
-            io,
-            "no Lima here: {s} boots under QEMU, in the foreground, and is not kept",
-            .{name},
-        );
-        const ab = try appBuild(io, gpa, o.form, hostArch(), o.app, why);
-        return bootHere(io, gpa, o.form, false, entries, ab.app, why);
-    }
+    if (std.mem.eql(u8, on, "qemu")) return createQemu(io, gpa, o, name, tar, tell, why);
     const cloud = std.mem.eql(u8, on, "gcp") or std.mem.eql(u8, on, "aws") or
         std.mem.eql(u8, on, "azure");
     if (o.allow_from) |a| {
@@ -1242,7 +1641,7 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     if (std.mem.eql(u8, on, "bhyve")) return createBhyve(io, gpa, o, name, tar, w, why);
     if (std.mem.eql(u8, on, "proxmox")) return createProxmox(io, gpa, o, name, tar, w, why);
     if (std.mem.eql(u8, on, "firecracker"))
-        return createFirecracker(io, gpa, o, name, tar, fc_dns, w, why);
+        return createFirecracker(io, gpa, o, name, tar, fc_dns, tell, why);
     if (o.arch != null or o.size != null)
         return why.refuse(
             "--arch and --size are for --on gcp and aws: {s} runs this machine's arch",
@@ -1262,6 +1661,17 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     try Dir.cwd().createDirPath(io, dir);
     const m = lima.mac(name);
     var managed = try limaManages(io, gpa, o.form, why);
+    // Each step a line that says which it is in, and its output in a log.
+    const step: progress.Options = .{
+        .verbose = verbose,
+        .command = try gpa.print(
+            "werewolf create {s}",
+            .{std.mem.join(gpa, " ", args) catch o.form},
+        ),
+        .log = try gpa.print("{s}/create.log", .{dir}),
+        .first = start_phase,
+    };
+    var built: ?i64 = null;
     if (try lima.exists(io, gpa, name)) {
         if (o.app != null) return why.refuse(
             "{s} exists, and an application is in the image: werewolf delete {s}, then create",
@@ -1279,16 +1689,16 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             // from the image and the template make writes, so Lima manages
             // it, its ssh and its stop included.
             const made = try gpa.print("build/{s}/{s}/lima.yaml", .{ arch, ab.out });
-            try run(io, why, &.{
+            built = (try progress.run(io, gpa, why, &.{
                 make_cmd,
                 "--no-print-directory",
                 try gpa.print("FORM={s}", .{o.form}),
-                "DEV=",
+                if (tell.dev) "DEV=1" else "DEV=",
                 ab.app,
                 "image",
                 try gpa.print("build/{s}/disk.img", .{arch}),
                 made,
-            });
+            }, step)).seconds;
             const base = Dir.cwd().readFileAlloc(io, made, gpa, .limited(1 << 20)) catch |err|
                 return why.refuse("{s}: {s}", .{ made, @errorName(err) });
             template = try lima.managedTemplate(gpa, base, o.form, config_disk);
@@ -1296,11 +1706,11 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             var cwd_buf: [Dir.max_path_bytes]u8 = undefined;
             const cwd = cwd_buf[0..try std.process.currentPath(io, &cwd_buf)];
             const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
-            try run(io, why, &.{
+            built = (try progress.run(io, gpa, why, &.{
                 make_cmd,
                 "--no-print-directory",
                 try gpa.print("FORM={s}", .{o.form}),
-                "DEV=",
+                if (tell.dev) "DEV=1" else "DEV=",
                 ab.app,
                 "disk",
                 try gpa.print("DISK={s}", .{disk}),
@@ -1308,7 +1718,7 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
                     try gpa.print("DISK_ARGS=werewolf.mac={s} console=hvc0", .{m})
                 else
                     "DISK_ARGS=console=hvc0",
-            });
+            }, step)).seconds;
             template = try lima.template(
                 gpa,
                 o.form,
@@ -1324,21 +1734,55 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             io,
             .{ .argv = &.{ "limactl", "disk", "delete", config_disk } },
         ) catch {};
-        try run(io, why, &.{ "limactl", "disk", "import", config_disk, tar_path });
+        var lima_step = step;
+        lima_step.make = false;
+        lima_step.first = .{ .name = "Creating the VM", .short = "create" };
+        _ = try progress.run(
+            io,
+            gpa,
+            why,
+            &.{ "limactl", "disk", "import", config_disk, tar_path },
+            lima_step,
+        );
         const yaml = try gpa.print("{s}/lima.yaml", .{dir});
         try writePrivate(io, gpa, yaml, template, why);
-        try run(io, why, &.{ "limactl", "create", "--name", name, "--tty=false", yaml });
+        _ = try progress.run(
+            io,
+            gpa,
+            why,
+            &.{ "limactl", "create", "--name", name, "--tty=false", yaml },
+            lima_step,
+        );
     }
+    const tty = Io.File.stdout().isTty(io) catch false;
 
     if (managed) {
         // Lima waits for its ssh and boot scripts, then for nothing else;
         // the machine is reached through Lima's ssh forward.
-        try run(io, why, &.{ "limactl", "start", "--tty=false", name });
+        var start_step = step;
+        start_step.make = false;
+        start_step.first = .{ .name = "Starting the VM, and Lima's ssh", .short = "start" };
+        const started = try progress.run(
+            io,
+            gpa,
+            why,
+            &.{ "limactl", "start", "--tty=false", name },
+            start_step,
+        );
         const r = try std.process.run(gpa, io, .{
             .argv = &.{ "limactl", "list", name, "--format", "{{.SSHLocalPort}}" },
         });
         const port = std.mem.trim(u8, r.stdout, " \n");
-        try w.print("{s}\t127.0.0.1:{s}\t{s}\n", .{ name, port, o.form });
+        if (!tty) try w.print("{s}\t127.0.0.1:{s}\t{s}\n", .{ name, port, o.form });
+        try sayUp(io, gpa, began, try gpa.print(
+            "{s} is up on Lima, which manages it",
+            .{name},
+        ), built, .{
+            .power_ns = @as(i96, started.seconds) * std.time.ns_per_s,
+        }, try gpa.print(
+            "{s} · {s}",
+            .{ try sshCommand(gpa, name), try stopCommand(gpa, name) },
+        ), tell.note);
         return;
     }
 
@@ -1358,32 +1802,152 @@ fn create(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         .stdout = .{ .file = log },
         .stderr = .{ .file = log },
     }) catch |err| return why.refuse("limactl start: {s}", .{@errorName(err)});
+    var spin: progress.Spinner = .init(io);
+    const boot = try booting.watch(
+        io,
+        gpa,
+        console_log,
+        seen,
+        if (dhcp) &m else null,
+        before,
+        &spin,
+    );
+    spin.clear();
+    starter.kill(io);
     if (!dhcp) {
-        say(io, "{s}: waiting for it to boot", .{name});
-        const up = try awaitUp(io, gpa, console_log, seen);
-        starter.kill(io);
-        if (!up) return why.refuse(
+        if (!boot.up) return why.refuse(
             "{s} is not up after 3 minutes: werewolf console {s}",
             .{ name, name },
         );
-        say(
-            io,
-            "{s} is up on Lima's own network, which this Mac does not reach: {s} has no " ++
-                "DHCP client for vzNAT. Its console: werewolf console {s}",
-            .{ name, o.form, name },
-        );
-        try w.print("{s}\t-\t{s}\n", .{ name, o.form });
-        return;
+        if (!tty) try w.print("{s}\t-\t{s}\n", .{ name, o.form });
+        return sayUp(io, gpa, began, try gpa.print(
+            "{s} is up on Lima, on its own network, which this Mac does not reach " ++
+                "({s} has no DHCP client)",
+            .{ name, o.form },
+        ), built, boot, try gpa.print(
+            "{s} · {s}",
+            .{ try consoleCommand(gpa, name), try stopCommand(gpa, name) },
+        ), tell.note);
     }
-    say(io, "{s}: waiting for its address", .{name});
-    const ip = try lima.awaitAddress(io, gpa, &m, before);
-    starter.kill(io);
-    const addr = ip orelse
+    const addr = boot.address orelse
         return why.refuse(
             "{s} has no address after 3 minutes: werewolf console {s}",
             .{ name, name },
         );
-    try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
+    if (!tty) try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
+    const late = sshReady(io, try listens(io, gpa, o.form, why), addr, 22);
+    try sayUp(io, gpa, began, try gpa.print(
+        "{s} is up on Lima, at {s}{s}",
+        .{ name, addr, late },
+    ), built, boot, try gpa.print(
+        "{s}{s} · {s}",
+        .{
+            try reachAt(gpa, addr, try listens(io, gpa, o.form, why), name),
+            try consoleCommand(gpa, name),
+            try stopCommand(gpa, name),
+        },
+    ), tell.note);
+}
+
+/// For a form that serves ssh, ports holding 22, wait for its sshd at
+/// host:port, so that "up" means reachable; what the line that says it is
+/// up adds when it never answered.
+fn sshReady(io: Io, ports: []const u16, host: []const u8, port: u16) []const u8 {
+    if (std.mem.findScalar(u16, ports, 22) == null) return "";
+    var spin: progress.Spinner = .init(io);
+    defer spin.clear();
+    return if (booting.awaitSsh(io, host, port, &spin)) "" else ", but its ssh does not answer yet";
+}
+
+/// That a machine is up, and how long each step took, as minikube says
+/// it: the build, the VM's start, the kernel, userland and the address;
+/// then how to reach it. Three lines.
+fn sayUp(
+    io: Io,
+    gpa: Allocator,
+    began: Io.Timestamp,
+    what: []const u8,
+    built: ?i64,
+    boot: booting.Boot,
+    next: []const u8,
+    note: ?[]const u8,
+) !void {
+    const look: progress.Look = .of(io, Io.File.stderr());
+    var steps: std.ArrayList(u8) = .empty;
+    if (built) |b| try steps.print(gpa, "build {f}", .{progress.Clock{ .seconds = b }});
+    if (boot.power_ns) |ns| try steps.print(
+        gpa,
+        "{s}VM start {f}",
+        .{ sep(steps.items), Tenths{ .ns = ns } },
+    );
+    if (boot.kernel.len > 0)
+        try steps.print(
+            gpa,
+            "{s}kernel {s} · userland {s}",
+            .{ sep(steps.items), boot.kernel, boot.userland },
+        );
+    // An address that came with the boot is no step of its own.
+    if (boot.address_ns) |ns| if (ns >= std.time.ns_per_s / 10) {
+        try steps.print(gpa, "{s}address {f}", .{ sep(steps.items), Tenths{ .ns = ns } });
+    };
+    var out: Io.Writer.Allocating = .init(gpa);
+    const ow = &out.writer;
+    try ow.print(
+        "{s} {s}, in {f}\n",
+        .{
+            look.check(),
+            what,
+            progress.Clock{ .seconds = began.untilNow(io, .awake).toSeconds() },
+        },
+    );
+    if (steps.items.len > 0) try ow.print("  {f}\n", .{look.dim(steps.items)});
+    if (note) |n| try ow.print("  {f}\n", .{look.dim(n)});
+    try ow.print("  {s}\n", .{next});
+    Io.File.stderr().writeStreamingAll(io, out.written()) catch {};
+}
+
+fn sep(so_far: []const u8) []const u8 {
+    return if (so_far.len > 0) " · " else "";
+}
+
+/// A time to a tenth of a second: 2.1s.
+const Tenths = struct {
+    ns: i96,
+
+    pub fn format(t: Tenths, w: *Io.Writer) Io.Writer.Error!void {
+        const ns: u64 = @intCast(@max(t.ns, 0));
+        // Under a second, in milliseconds: 42ms, not 0.0s.
+        if (ns < std.time.ns_per_s) return w.print("{d}ms", .{ns / std.time.ns_per_ms});
+        const d = ns / (std.time.ns_per_s / 10);
+        try w.print("{d}.{d}s", .{ d / 10, d % 10 });
+    }
+};
+
+/// How this machine reaches one at addr: ssh where it serves ssh, and its
+/// last other port, as a URL where that port speaks the web. Each ends " · ".
+fn reachAt(gpa: Allocator, addr: []const u8, ports: []const u16, name: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var web: ?u16 = null;
+    var ssh = false;
+    for (ports) |p| if (p == 22) {
+        ssh = true;
+    } else {
+        web = p;
+    };
+    if (ssh) try out.print(gpa, "{s} · ", .{try sshCommand(gpa, name)});
+    if (web) |p| switch (p) {
+        80 => try out.print(gpa, "http://{s} · ", .{addr}),
+        443 => try out.print(gpa, "https://{s} · ", .{addr}),
+        3000,
+        8000,
+        8080,
+        8081,
+        9000,
+        11434,
+        => try out.print(gpa, "http://{s}:{d} · ", .{ addr, p }),
+        else => try out.print(gpa, "{s}:{d} · ", .{ addr, p }),
+    };
+    return out.items;
 }
 
 /// How long create waits for a machine here to say it is up, and how
@@ -1538,7 +2102,7 @@ fn createFirecracker(
     name: []const u8,
     tar: []const u8,
     dns_given: ?[]const u8,
-    w: *Io.Writer,
+    tell: Tell,
     why: *Why,
 ) !void {
     if (!firecracker.installed(io, gpa)) return why.refuse(
@@ -1549,7 +2113,7 @@ fn createFirecracker(
         "--arch and --size are for --on gcp and aws: Firecracker runs this machine's arch",
         .{},
     );
-    const root = firecracker.asRoot(io) catch
+    const root = firecracker.asRoot(io, gpa) catch
         return why.refuse("the machine's tap device needs root, and there is no sudo or doas", .{});
     const user = environ.get("USER") orelse
         return why.refuse("no USER in the environment, whose tap device the machine's is", .{});
@@ -1570,17 +2134,18 @@ fn createFirecracker(
         try firecracker.stop(io, gpa, dir, pid, why);
     }
     const n = try firecracker.net(gpa, name);
+    var built: ?i64 = null;
     if (was.len == 0) {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
-        try run(io, why, &.{
+        built = (try progress.run(io, gpa, why, &.{
             make_cmd,
             "--no-print-directory",
             try gpa.print("FORM={s}", .{o.form}),
-            "DEV=",
+            if (tell.dev) "DEV=1" else "DEV=",
             ab.app,
             "slot",
             try firecracker.kernelPath(gpa, arch),
-        });
+        }, try tell.step(gpa, dir))).seconds;
         const dns = dns_given orelse firecracker.hostDns(io, gpa) orelse return why.refuse(
             "--dns ADDR: this host's resolvers are all on loopback, which the machine cannot reach",
             .{},
@@ -1617,6 +2182,7 @@ fn createFirecracker(
     const self = self_buf[0..try std.process.executablePath(io, &self_buf)];
     // The supervisor keeps the console itself; nothing of its own is said
     // anywhere else.
+    const launched = Io.Clock.awake.now(io);
     var starter = std.process.spawn(io, .{
         .argv = &.{ "setsid", "-f", self, "_firecracker", try gpa.print("{s}/{s}", .{ cwd, dir }) },
         .stdin = .ignore,
@@ -1624,12 +2190,33 @@ fn createFirecracker(
         .stderr = .ignore,
     }) catch |err| return why.refuse("setsid: {s}", .{@errorName(err)});
     _ = starter.wait(io) catch {};
-    say(io, "{s}: waiting for it to boot", .{name});
-    if (!try awaitUp(io, gpa, log, seen)) return why.refuse(
-        "{s} is not up after 3 minutes: werewolf console {s} --on firecracker",
-        .{ name, name },
+    var spin: progress.Spinner = .init(io);
+    const watched = Io.Clock.awake.now(io);
+    var boot = try booting.watch(io, gpa, log, seen, null, 0, &spin);
+    spin.clear();
+    // The VM's start: from Firecracker's launch until its console spoke.
+    if (boot.power_ns) |ns| boot.power_ns = ns + launched.durationTo(watched).toNanoseconds();
+    if (!boot.up) return why.refuse(
+        "{s} is not up after 3 minutes: {s}",
+        .{ name, try consoleCommand(gpa, name) },
     );
-    try w.print("{s}\t{s}\t{s}\n", .{ name, n.guest, o.form });
+    if (!(Io.File.stdout().isTty(io) catch false)) {
+        var out = Io.File.stdout().writerStreaming(io, &.{});
+        try out.interface.print("{s}\t{s}\t{s}\n", .{ name, n.guest, o.form });
+    }
+    const ports = try listens(io, gpa, o.form, why);
+    const late = sshReady(io, ports, n.guest, 22);
+    return sayUp(io, gpa, tell.began, try gpa.print(
+        "{s} is up here, under Firecracker, at {s}{s}",
+        .{ name, n.guest, late },
+    ), built, boot, try gpa.print(
+        "{s}{s} · {s}",
+        .{
+            try reachAt(gpa, n.guest, ports, name),
+            try consoleCommand(gpa, name),
+            try stopCommand(gpa, name),
+        },
+    ), tell.note);
 }
 
 /// create --on proxmox (proxmox.zig): the release's disk on the node,
@@ -1937,9 +2524,8 @@ fn cloudMachine(
     tar: []const u8,
     why: *Why,
 ) !Cloud {
+    // options() made --arch aarch64 or x86_64.
     const arch = o.arch orelse hostArch();
-    if (!std.mem.eql(u8, arch, "aarch64") and !std.mem.eql(u8, arch, "x86_64"))
-        return why.refuse("--arch {s}: aarch64 or x86_64", .{arch});
     const dir = try machineDir(gpa, arch, name);
     try Dir.cwd().createDirPath(io, dir);
     const b64 = try gpa.print("{s}/config.b64", .{dir});
@@ -2226,21 +2812,40 @@ fn machineArgs(
         } else if (args[i].len > 0 and args[i][0] != '-' and name == null) {
             name = args[i];
         } else return why.refuse(
-            "{s}: NAME [--on lima|bhyve|firecracker|proxmox|gcp|aws|azure]",
+            "{s}: [NAME] [--on lima|bhyve|firecracker|qemu|proxmox|gcp|aws|azure]",
             .{args[i]},
         );
     }
-    const n = name orelse return why.refuse("name the machine\n{s}", .{usage});
+    // No name: the machine werewolf run keeps.
+    const n = name orelse run_name;
     if (!isMachineName(n)) return why.refuse("{s}: not a machine's name", .{n});
-    const p = platform(io, gpa, on);
-    for ([_][]const u8{ "lima", "bhyve", "firecracker", "proxmox", "gcp", "aws", "azure" }) |keeper|
+    // A machine made here was made on an engine create recorded.
+    const p = on orelse madeOn(io, gpa, n) orelse platform(io, gpa, null);
+    for ([_][]const u8{
+        "lima",
+        "bhyve",
+        "firecracker",
+        "qemu",
+        "proxmox",
+        "gcp",
+        "aws",
+        "azure",
+    }) |keeper|
         if (std.mem.eql(u8, p, keeper)) return .{ n, p };
-    return why.refuse("--on {s}: QEMU keeps no machine; it boots one in the foreground", .{p});
+    return why.refuse("--on {s}: lima, bhyve, firecracker, qemu, proxmox, gcp, aws or azure", .{p});
 }
 
 fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     const name, const on = try machineArgs(gpa, io, args, why);
-    if (std.mem.eql(u8, on, "gcp")) {
+    try remove(io, gpa, name, on, why);
+    say(io, "{s}: deleted, with its /data", .{name});
+}
+
+/// name, on on, gone, with its disks and files here; said by the caller.
+fn remove(io: Io, gpa: Allocator, name: []const u8, on: []const u8, why: *Why) !void {
+    if (std.mem.eql(u8, on, "qemu")) {
+        _ = try qemu.stop(io, gpa, try machineDir(gpa, hostArch(), name));
+    } else if (std.mem.eql(u8, on, "gcp")) {
         // The machine and its disk, not the image, which others may share.
         const p = try gcp.place(io, gpa, why);
         if (gcp.formOf(io, gpa, p, name) != null) try gcp.delete(io, gpa, p, name, why);
@@ -2262,7 +2867,7 @@ fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         const dir = try machineDir(gpa, hostArch(), name);
         Dir.cwd().deleteFile(io, try gpa.print("{s}/config.tar", .{dir})) catch {};
         if (firecracker.running(io, gpa, dir)) |pid| try firecracker.stop(io, gpa, dir, pid, why);
-        if (firecracker.asRoot(io)) |root|
+        if (firecracker.asRoot(io, gpa)) |root|
             firecracker.networkDown(io, gpa, root, try firecracker.net(gpa, name))
         else |_|
             say(io, "{s}: no sudo or doas, so its tap device and rules stay", .{name});
@@ -2278,7 +2883,11 @@ fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
             );
         }
     } else {
-        if (try lima.exists(io, gpa, name)) try run(io, why, &.{ "limactl", "delete", "-f", name });
+        if (try lima.exists(
+            io,
+            gpa,
+            name,
+        )) try quiet(io, gpa, why, &.{ "limactl", "delete", "-f", name });
         _ = std.process.run(gpa, io, .{
             .argv = &.{ "limactl", "disk", "delete", try gpa.print("{s}-config", .{name}) },
         }) catch {};
@@ -2294,11 +2903,18 @@ fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         Dir.cwd().access(io, try gpa.print("{s}/config.b64", .{dir}), .{}) catch continue;
         Dir.cwd().deleteTree(io, dir) catch {};
     };
-    say(io, "{s}: deleted, with its /data", .{name});
 }
 
 fn console(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     const name, const on = try machineArgs(gpa, io, args, why);
+    if (std.mem.eql(u8, on, "qemu")) {
+        const d = try machineDir(gpa, hostArch(), name);
+        if (qemu.running(io, gpa, d) == null) return why.refuse(
+            "no machine {s} running under QEMU{s}",
+            .{ name, if (std.mem.eql(u8, name, run_name)) ": werewolf run FORM" else "" },
+        );
+        return qemu.attach(io, gpa, d);
+    }
     if (std.mem.eql(u8, on, "gcp")) {
         const p = try gcp.place(io, gpa, why);
         const text = gcp.console(
@@ -2398,6 +3014,9 @@ test {
     _ = app;
     _ = @import("image.zig");
     _ = @import("apk.zig");
+    _ = @import("progress.zig");
+    _ = @import("qemu.zig");
+    _ = @import("boot.zig");
 }
 
 const bastion =
@@ -2410,6 +3029,29 @@ const bastion =
     \\setting destinations addrport... as PermitOpen
     \\render  conf destinations
 ;
+
+test archName {
+    for ([_][2][]const u8{
+        .{ "aarch64", "aarch64" }, .{ "arm64", "aarch64" }, .{ "ARM64", "aarch64" },
+        .{ "x86_64", "x86_64" },   .{ "x86-64", "x86_64" }, .{ "amd64", "x86_64" },
+        .{ "AMD64", "x86_64" },
+    }) |c| try testing.expectEqualStrings(c[1], archName(c[0]).?);
+    for ([_][]const u8{ "", "x86", "i386", "arm", "riscv64", "x64", "aarch64 " }) |bad|
+        try testing.expectEqual(null, archName(bad));
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var why: Why = .{};
+    const o = try options(arena.allocator(), &.{ "prod", "web", "--arch", "amd64" }, &why);
+    try testing.expectEqualStrings("x86_64", o.arch.?);
+    try testing.expectError(
+        error.Refused,
+        options(arena.allocator(), &.{ "prod", "--arch", "i386" }, &why),
+    );
+    try testing.expectEqualStrings(
+        "aarch64",
+        (try buildOptions(&.{ "--arch", "arm64", "prod" }, null, &why)).arch,
+    );
+}
 
 test buildOptions {
     var why: Why = .{};

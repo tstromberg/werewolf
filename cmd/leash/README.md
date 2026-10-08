@@ -47,10 +47,10 @@ line, what it may do: `exec`, `user`, `listen` and `connect` ports, `read`,
    capability, groups, gid and uid changed, capabilities set and ambient
    for that one alone, `no_new_privs`, and a check that root is gone.
 4. **Leashed**: Landlock applied, scoped from signals and abstract sockets
-   outside it; config files copied, as the service, into its own
+   outside it, every refusal audited after exec too; config files copied, as the service, into its own
    directory; settings rendered by `service-config`; each `before` run.
-5. **Pledged**: a seccomp filter of its promises that answers ENOSYS,
-   stacked on the seal; then leash becomes the program by `execveat` of a
+5. **Pledged**: a seccomp filter of its promises that answers ENOSYS, and
+   has the kernel audit each, stacked on the seal; then leash becomes the program by `execveat` of a
    descriptor opened before, which a pledge without `exec` still allows.
 
 ## Drawbacks

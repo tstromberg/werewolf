@@ -63,15 +63,19 @@ Before runit starts, init closes, for the life of the machine:
 | `vm.mmap_rnd_bits` 33 (aarch64), 32 (x86_64) | guessing where a program's code and heap are: Alpine's defaults are 18 and 28 | yes |
 | `vm.mmap_min_addr=65536` | mapping the page a kernel null-pointer bug would read | yes |
 | `net.core.bpf_jit_harden=1` | users' socket and seccomp filters planting chosen machine code in the kernel (JIT spraying) | yes |
-| `kernel.panic_on_oops=1`, and `kernel.panic=10` if the command line gave none | a kernel left wrong by a failed exploit running on for another try | yes |
+| `kernel.panic_on_oops=1`, `kernel.warn_limit=1`, and `kernel.panic=10` if the command line gave none | a kernel left wrong by a failed exploit running on for another try: an oops panics, and so does the first warning after boot, which is all Alpine's kernel does when it catches its own memory corrupted (a list's links, a reference count, KFENCE). Anyone who can make the kernel warn can reboot the machine, as anyone who can make it oops could already. None of the 628 werewolf boot logs on record on 2026-10-08 held a warning | yes |
+| Memory-Deny-Write-Execute on PID 1 (`PR_SET_MDWE`), unless the form allows `jit` | code an exploit writes into a program's memory running: no mapping is ever writable and executable at once, or made executable once written, so only programs and libraries mapped from the read-only root run. Every process inherits it. The forms whose runtime compiles code as it runs carry the allowance: `node`, `jre`, `example-aspnet`, `php` (PCRE2's JIT) and `postgresql` (LLVM, for costly queries), and the forms built on them | no |
 | The kernel's audit of every refused exec, locked (`lib/audit.zig`) | an intruder's first step, a shell that is not there or a program dropped where nothing runs, going unrecorded: the kernel writes the record itself, to its log and the console, with no daemon to stop; `CAP_AUDIT_CONTROL` leaves the bounding set with the seal | no |
+| The kernel's audit of every Landlock refusal and every call a service's own filter refuses | a service reaching for a disk, a sysctl, a file or port its service file does not grant, or a system call its pledge does not name, going unrecorded: fence's, leash's and werewolf's own programs' domains ask Landlock to log after exec too (`LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`), and each service's filter asks seccomp to (`SECCOMP_FILTER_FLAG_LOG`). The machine seal's refusals seal-watch says already | no |
 | The console takes notices once the boot is over (`kernel.printk` 6), and `kernel.printk_ratelimit_burst=100` | the kernel's refusals (audit, lockdown, Yama, Landlock), all notices, staying in a log on the machine; a cloud captures the serial console. The audit records pass printk's rate limit, 10 lines in 5 s by default, which a few refusals together would exceed | yes |
 
 None of these costs a program anything: a database or `../scan` runs as
 fast with them as without. The audit rule is the one near exception: with
 any system call rule loaded, every process enters and leaves each call
 through the kernel's audit hooks, a few nanoseconds beside the seal's 25,
-and a record is written only when an exec fails. No auditd: the
+and a record is written only when an exec, a Landlock check or a
+service's filter refuses. A boot of `minimal` writes none but those
+posture's own attacks provoke. No auditd: the
 benchmarks' rules watch sudo, password changes, module loads and mounts,
 none of which can happen here, and the daemon would be a root process
 with a hand-kept rule list and a log on disk that, when full, is meant to
@@ -97,7 +101,7 @@ the seal before a reboot ([docs/design/lockdown.md](design/lockdown.md)):
 | --- | --- |
 | A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process. And, by their arguments, the way into kernel bugs exploited in the wild: a socket family no promise names (AF_ALG), kernel TLS (`TCP_ULP`), watch queues (`O_NOTIFICATION_PIPE`) and CPU-time timers, each answered as a kernel without it would answer ([docs/cve-mitigation-survey.md](cve-mitigation-survey.md)) |
 | The capability bounding set | loading kernel code (`CAP_SYS_MODULE`, `CAP_BPF`, `CAP_PERFMON`), hardware and `/dev/mem` (`CAP_SYS_RAWIO`), tracing (`CAP_SYS_PTRACE`), device files (`CAP_MKNOD`) and what nothing here uses; once fence has set the network policy, `CAP_NET_ADMIN` and `CAP_NET_RAW` too, on every form: DHCP's renewal, started before fence, holds them alone; and `CAP_SYS_ADMIN`, so no process after fence can mount, configure a filesystem or reach what else it guards: the mount broker, started before fence, makes the few mounts after boot |
-| The helpers' bounding set (`kernel.usermodehelper.bset`, `inheritable`) | a program the kernel starts itself (a core dump piped to a program, `kernel.modprobe`, the uevent helper) holding more than `CAP_SYS_BOOT`: it descends from the kernel, not PID 1, so neither line above reaches it. `kernel.hotplug` is emptied too |
+| The helpers' bounding set (`kernel.usermodehelper.bset`, `inheritable`) | a program the kernel starts itself (a core dump piped to a program, `kernel.modprobe`, the uevent helper) holding more than `CAP_SYS_BOOT`: it descends from the kernel, not PID 1, so neither line above reaches it. `kernel.hotplug` and `kernel.modprobe` are emptied too, so the kernel starts nothing on a device event or a module request |
 
 The seal fails closed: if any part of it cannot be set, PID 1 ends, the kernel panics, and the machine comes back on the slot that last worked. On x86_64 the filter also kills x32 system calls, which Alpine's kernel does not have, so that one that does could not number its way past the table.
 
@@ -129,8 +133,8 @@ head: /dev/mem,kmem,port is restricted`.
 | | |
 | --- | --- |
 | The root | `root.erofs`, mounted read-only at `/` by stage0 on every form: from the initramfs, or from a slot. Through dm-verity: the image carries its hash tree, stage0 the root hash, both from the same build, so a block changed since fails to read, and a changed superblock stops the boot. No overlay: what the system writes (accounts, keys, hostname, `resolv.conf`, runit's state) lives in `/run`, through links |
-| Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. `/dev/pts` is mounted only on a form that allows `pty` (those with ssh logins): elsewhere no process, root included, can open a pseudo-terminal, the way into CVE-2014-0196. And `/dev` is closed, even for reading, but for the devices werewolf names (`null`, `zero`, `full`, `random`, `urandom`, `kmsg`, the console and terminals, the power button's), so a disk, the decrypted data volume or any other device opens for no one (fence; posture's `files-device-reads`) Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
-| `/data` | the machine's data. On a disk or beside the slots, `nosuid,nodev,noexec`; with a `data.key` in the config, in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
+| Memory filesystems | `/tmp`, `/var/tmp`, `/run` and `/dev/shm` are `nosuid,nodev,noexec`, as are `/proc`, `/sys` and securityfs, and `/dev` and `/dev/pts` `nosuid,noexec`, so nothing written to memory runs. All but `/proc` and `/sys`, whose links the kernel makes, and `/dev`, root's alone, where cryptsetup links `/dev/mapper/data`, are `nosymfollow` too, as is every mount werewolf makes but `/data`: a link planted in `/tmp` leads nowhere, whoever follows it, root included, so no root program can be steered through one (posture's `files-nosymfollow-everywhere`). `/dev/pts` is mounted only on a form that allows `pty` (those with ssh logins): elsewhere no process, root included, can open a pseudo-terminal, the way into CVE-2014-0196. And `/dev` is closed, even for reading, but for the devices werewolf names (`null`, `zero`, `full`, `random`, `urandom`, `kmsg`, the console and terminals, the power button's), so a disk, the decrypted data volume or any other device opens for no one (fence; posture's `files-device-reads`) Only `/tmp` and `/dev/shm` are writable by everyone; `/run` is root's. `/proc` is `hidepid=invisible`: each user sees only its own processes |
+| `/data` | the machine's data. On a disk or beside the slots, `nosuid,nodev,noexec`, and it follows links (*Not yet*); with a `data.key` in the config, in LUKS2, keyed from the config, never from beside the disk. A disk init has used is never formatted again: one it cannot use (the wrong type, no key or the wrong one, damage `e2fsck -p` will not repair) is left alone, `/data` is an empty read-only tmpfs, and a new slot will not commit. In RAM (forms without storage tools) it is tmpfs, `nosuid,nodev,noexec` like `/tmp` |
 | The victim's filesystem | read-only at `/victim`; the few writers mount it separately |
 
 ### Mounts
@@ -142,10 +146,13 @@ SELinux's libraries, and busybox's cannot set `nosuid`, `nodev` or `noexec`.
 
 - **One-way, and the kernel holds it to that.** A new mount is built
   detached and gets `nosuid`, `noexec` and, but for device filesystems,
-  `nodev` before it is attached; a bind is cloned and restricted the same
-  way. A remount is `mount_setattr(2)` with nothing to clear, so it cannot
-  lift `ro`, `nosuid`, `nodev`, `noexec` or `nosymfollow` whatever it is
-  given. `suid`, `dev`, `exec`, and `rw` on a remount, are refused.
+  `nodev` before it is attached, and `nosymfollow` but for proc, sysfs and
+  devtmpfs, which hold the links the system follows; a bind is cloned and restricted the
+  same way. `symfollow` withholds `nosymfollow` from a new mount or a bind,
+  and lifts nothing a source has. A remount is `mount_setattr(2)` with
+  nothing to clear, so it cannot lift `ro`, `nosuid`, `nodev`, `noexec` or
+  `nosymfollow` whatever it is given. `suid`, `dev`, `exec`, and `rw` or
+  `symfollow` on a remount, are refused.
 - **Allowlists.** Only werewolf's filesystems (proc, sysfs, securityfs,
   devtmpfs, devpts, tmpfs, ext4, xfs, btrfs, iso9660, vfat), only the options each
   is given, with their values checked, and only under `/proc`, `/sys`,
@@ -199,10 +206,20 @@ cloud-init's user-data, once werewolf has committed.
   lima, prod-ssh) carry busybox, whose `sh` runs any script. The others,
   minimal and prod among them, have no shell or interpreter at all, and
   `posture` checks that they do not.
+- **`/data` follows links.** Every other mount werewolf makes is
+  `nosymfollow`, but the updater builds each new root under `/data`, and
+  apk and the updater resolve the links its packages lay there (`lib` to
+  `usr/lib`). So a service could plant a link in its own directory for a
+  root program walking it to follow. None does today: leash takes each
+  service's directory only as a directory, never through a link, and
+  walks no further. Accepted for now. Closing it takes the updater's
+  directory on a mount of its own that follows links, with `/data`
+  `nosymfollow` around it, and the broker unmounting it first at shutdown.
 - **The kernel's own helpers escape the filter.** A program the kernel
   starts (a core pattern of `|PROGRAM`, `kernel.modprobe`,
-  `kernel.hotplug`) holds no capability but `CAP_SYS_BOOT`, whatever root
-  does, but it is not under PID 1's seccomp filter. Root, which can still
+  `kernel.hotplug`, the last two emptied at boot) holds no capability but
+  `CAP_SYS_BOOT`, whatever root does, but it is not under PID 1's seccomp
+  filter. Root, which can still
   write those sysctls, can so make the calls the filter refuses but needs
   no capability for. Our kernel's `CONFIG_STATIC_USERMODEHELPER`, or a
   read-only `/proc/sys` once `CAP_SYS_ADMIN` goes, closes it.
@@ -267,7 +284,8 @@ as root, on the console (`make run` gives a root shell there) or over ssh:
 | setuid and setgid files | `find / -xdev \( -perm -4000 -o -perm -2000 \) -type f` | nothing |
 | Listeners | `netstat -ltn` | 22, or nothing |
 | `/data` | `grep ' /data ' /proc/mounts` | `nosuid,nodev,noexec` among the options |
-| Memory filesystems | `grep -E ' /(var/)?(tmp\|run\|dev/shm) ' /proc/mounts` | `nosuid,nodev,noexec` on each |
+| Memory filesystems | `grep -E ' /(var/)?(tmp\|run\|dev/shm) ' /proc/mounts` | `nosuid,nodev,noexec,nosymfollow` on each |
+| Planted links | `ln -s / /tmp/x; ls /tmp/x/` | `Too many levels of symbolic links` |
 | `/run` is root's | `chpst -u nobody touch /run/x` | `Permission denied` |
 | User namespaces | `cat /proc/sys/user/max_user_namespaces` | `0` |
 | Planted symlinks | `chpst -u nobody ln -s /run/x /tmp/x; echo hi >/tmp/x` | `Permission denied` |

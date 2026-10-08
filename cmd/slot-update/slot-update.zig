@@ -582,8 +582,8 @@ pub const Update = struct {
 
     /// The other slot as the latest release of this form has it, its
     /// manifest signed with the image key; or null, logged, if this slot
-    /// is that release, or it is not one to take: expired, older than one
-    /// already taken, or not published for this form yet.
+    /// is that release, or it is not one to take: older than one already
+    /// taken, or not published for this form yet.
     fn releasePlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
         u.step = "release";
         try u.netRoot();
@@ -613,17 +613,7 @@ pub const Update = struct {
             Io.Timestamp.now(u.io, .real).nanoseconds,
             std.time.ns_per_s,
         ));
-        const m = releases.open(u.gpa, key, data, sig, form, arch, secs) catch |err| switch (err) {
-            error.Stale => {
-                try u.record(.{
-                    .event = "skip",
-                    .release = release,
-                    .reason = "the latest release has expired",
-                });
-                return null;
-            },
-            else => return err,
-        };
+        const m = try releases.open(u.gpa, key, data, sig, form, arch, secs);
 
         u.step = "compare";
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");

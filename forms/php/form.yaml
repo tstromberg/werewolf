@@ -4,3 +4,4 @@ base: nginx
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs the application, which is what this form is for
+  kernel-write-xor-execute: PCRE2, PHP's regular expressions, compiles each pattern to machine code (allow jit)

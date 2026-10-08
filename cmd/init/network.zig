@@ -8,6 +8,7 @@ const init = @import("init.zig");
 const Machine = init.Machine;
 const executable = init.executable;
 const exists = init.exists;
+const mkdir = init.mkdir;
 const orNone = init.orNone;
 const say = init.say;
 const trim = init.trim;
@@ -42,19 +43,23 @@ pub fn network(m: *Machine) void {
             else
                 say("network: {s} {s} refused", .{ nic, c.ip });
         }
-        if (c.dns.len > 0) m.write(
-            "/run/resolv.conf",
-            m.fmt("nameserver {s}\n", .{c.dns}),
-            0o644,
-        );
+        // Where /etc/resolv.conf leads, and DHCP's client writes when there
+        // is no static address: a file, since no link under /run is
+        // followed (nosymfollow).
+        if (c.dns.len > 0) {
+            mkdir("/run/werewolf/network", 0o755);
+            m.write(
+                "/run/werewolf/network/resolv.conf",
+                m.fmt("nameserver {s}\n", .{c.dns}),
+                0o644,
+            );
+        }
         say(
             "{s} {s} via {s} dns {s}, from {s}",
             .{ nic, c.ip, orNone(c.gw), orNone(c.dns), from },
         );
     } else if (executable("/usr/lib/werewolf/dhcp-client")) {
         m.dhcp = true;
-        _ = linux.unlink("/run/resolv.conf");
-        _ = linux.symlink("werewolf/dhcp/resolv.conf", "/run/resolv.conf");
         if (!m.run(&.{
             "/usr/lib/werewolf/dhcp-client",
             "up",

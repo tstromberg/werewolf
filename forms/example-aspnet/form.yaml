@@ -7,3 +7,4 @@ net:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: dotnet runs the example
+  kernel-write-xor-execute: .NET compiles the example to machine code as it runs (allow jit)

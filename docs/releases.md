@@ -29,7 +29,7 @@ The tag is the manifests' serial, the time CI signed them.
   "form": "prod-ssh",
   "arch": "aarch64",
   "serial": "20261006T144722Z",
-  "expires": "2026-10-13T14:47:23Z",
+  "expires": "9999-12-31T23:59:59Z",
   "build": "ccdf6e096eb6f15d",
   "kernel": "linux-virt-6.18.55-r0",
   "files": {
@@ -78,9 +78,12 @@ load; a push does not wait on one.
    its files are attested with Sigstore, and the draft is published.
 
 A fixed CVE arrives as a new package or kernel, so the next run releases
-it. Each day CI signs the latest release's manifests again with a new
-expiry, a week out: a current release never expires, and a mirror that
-stops updating is noticed within a week.
+it. A release is published only when its images change, and stays as
+published: GitHub keeps releases immutable, and a manifest does not
+expire, since the next release supersedes it and its serial forbids going
+back. Its `expires` is the end of 9999, there only for updaters from
+before 2026-10-08, which require the field. How fresh a machine's view is
+comes from the CVE tiers feed, which expires in three days (below).
 
 CI's cache drops entries unused for a week. A run that loses its entry
 builds again, finds the same images, and publishes nothing.

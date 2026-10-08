@@ -17,8 +17,9 @@ Landlock domain forbids mounting to every process.
 
 ## Goals
 
-- Every mount `nosuid` and `noexec`, and `nodev` but for device filesystems,
-  from the moment it is attached.
+- Every mount `nosuid` and `noexec`, `nodev` but for device filesystems, and
+  `nosymfollow` but for proc, sysfs and devtmpfs, from the moment it is
+  attached; `symfollow` withholds the last from a new mount or bind (`/data`).
 - A remount that cannot lift `ro`, `nosuid`, `nodev`, `noexec` or
   `nosymfollow`, whatever it is told.
 - Nothing mounted over `/etc`, `/usr` or the root.
@@ -41,8 +42,8 @@ Landlock domain forbids mounting to every process.
   attached.
 - **A remount** is `mount_setattr` with nothing cleared, and the one
   filesystem option `hidepid=invisible`.
-- **Refused outright**: `suid`, `dev`, `exec`, `symfollow`, `strictatime`,
-  and `rw` on a remount.
+- **Refused outright**: `suid`, `dev`, `exec`, `strictatime`, and `rw` or
+  `symfollow` on a remount.
 - **Targets** are opened with `openat2`, symlinks refused, so a link in a
   writable directory cannot steer a mount.
 - **Pledge** after parsing, before the kernel hears anything

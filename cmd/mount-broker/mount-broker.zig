@@ -25,7 +25,9 @@
 //! filesystem comes from the kernel command line and what init wrote in
 //! /run, found by the UUID in its superblock, and how it is mounted is
 //! fixed here, as the one-way mount helper mounts: built detached (fsopen,
-//! fsmount) with nosuid, nodev and noexec, then attached.
+//! fsmount) with nosuid, nodev, noexec and nosymfollow, then attached. bite
+//! names GRUB's environment and the victim's directory by where their links
+//! lead (readlink -f), so nothing here needs one followed.
 //!
 //! One process, with CAP_SYS_ADMIN alone and locked, under a seccomp filter
 //! of the calls above and its socket's, the classic mount(2) only to remount
@@ -357,6 +359,7 @@ fn identify(b: []const u8) ?struct { kind: Kind, want: Want } {
 const attr_nosuid = 0x2;
 const attr_nodev = 0x4;
 const attr_noexec = 0x8;
+const attr_nosymfollow = 0x200000;
 /// FSOPEN_CLOEXEC and FSMOUNT_CLOEXEC, both.
 const fs_cloexec = 1;
 const fsconfig_set_string = 1;
@@ -394,7 +397,7 @@ fn attach(kind: Kind, dev: [:0]const u8, place: [:0]const u8) !void {
             .fsmount,
             @bitCast(@as(isize, fc)),
             fs_cloexec,
-            attr_nosuid | attr_nodev | attr_noexec,
+            attr_nosuid | attr_nodev | attr_noexec | attr_nosymfollow,
         ),
         "fsmount",
     );

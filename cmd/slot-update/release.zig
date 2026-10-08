@@ -3,7 +3,8 @@
 //! (docs/releases.md). The image carries the key's public half; nothing
 //! about a release is believed until its manifest's signature checks
 //! against it, and then only for the form and architecture this machine
-//! runs, before the manifest expires.
+//! runs. A manifest does not expire: a release is published when its images
+//! change, and the next one supersedes it (docs/releases.md).
 //!
 //! The signature is RSA PKCS#1 v1.5 over the manifest's SHA-256, as
 //! `openssl dgst -sha256 -sign` makes it, so the standard library checks it.
@@ -99,7 +100,6 @@ pub const Manifest = struct {
     form: []const u8,
     arch: []const u8,
     serial: []const u8,
-    expires: []const u8,
     build: []const u8,
     kernel: []const u8,
     files: std.json.ArrayHashMap(File),
@@ -126,8 +126,8 @@ pub const Manifest = struct {
 };
 
 /// The manifest in data, which must be signed by key with sig, and be one
-/// for this form and architecture, unexpired at now (seconds since the
-/// epoch), and naming a slot's files.
+/// for this form and architecture, signed no later than a day after now
+/// (seconds since the epoch), and naming a slot's files.
 pub fn open(
     gpa: Allocator,
     key: Key,
@@ -148,7 +148,6 @@ pub fn open(
     if (!std.mem.eql(u8, m.format, "werewolf-release/1")) return error.BadManifest;
     if (!std.mem.eql(u8, m.form, form) or
         !std.mem.eql(u8, m.arch, arch)) return error.NotThisMachine;
-    if (now >= try parseTime(m.expires)) return error.Stale;
     const signed = serialTime(m.serial) catch return error.BadManifest;
     if (signed > now + 24 * 3600) return error.BadManifest;
     for (m.advisories) |a| if (!validAdvisory(a)) return error.BadManifest;
@@ -252,7 +251,7 @@ const testing = std.testing;
 const test_key = @embedFile("testdata/image.pub");
 const test_manifest = @embedFile("testdata/prod-ssh-aarch64.json");
 const test_sig = @embedFile("testdata/prod-ssh-aarch64.json.sig");
-/// When the test manifest was signed, and a week later, when it expires.
+/// When the test manifest was signed.
 const signed_at = 1791299416;
 
 test "a release CI signed checks, and nothing else does" {
@@ -275,10 +274,8 @@ test "a release CI signed checks, and nothing else does" {
         error.NotThisMachine,
         open(a, key, test_manifest, test_sig, "prod-ssh", "x86_64", signed_at),
     );
-    try testing.expectError(
-        error.Stale,
-        open(a, key, test_manifest, test_sig, "prod-ssh", "aarch64", signed_at + 7 * 86400),
-    );
+    // A release is good until another supersedes it, however old.
+    _ = try open(a, key, test_manifest, test_sig, "prod-ssh", "aarch64", signed_at + 365 * 86400);
     // Signed, but the clock says not yet: a machine whose clock lags a
     // day still takes it; one a day and more behind does not.
     try testing.expectError(
@@ -327,6 +324,9 @@ test parseTime {
     try testing.expectEqual(signed_at + 7 * 86400, try parseTime("2026-10-13T15:10:16Z"));
     try testing.expectEqual(0, try parseTime("1970-01-01T00:00:00Z"));
     try testing.expectEqual(951782400, try parseTime("2000-02-29T00:00:00Z"));
+    // release/sign's "expires", which updaters from before 2026-10-08
+    // check: it must read as later than any now.
+    try testing.expect(try parseTime("9999-12-31T23:59:59Z") > signed_at + 100 * 365 * 86400);
     for ([_][]const u8{
         "2026-02-29T00:00:00Z",
         "2026-13-01T00:00:00Z",

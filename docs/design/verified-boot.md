@@ -121,7 +121,7 @@ What init and the services write in the root today moves to `/run`:
 
 | Written today | Instead |
 | --- | --- |
-| `/etc/resolv.conf` | a symlink to `/run/resolv.conf` |
+| `/etc/resolv.conf` | a symlink to `/run/werewolf/network/resolv.conf`, a file: no link under `/run` is followed |
 | `/etc/passwd`, `shadow`, `group` (Lima's user) | symlinks to copies in `/run/werewolf`, which init appends to itself: `adduser` replaces files by renaming within `/etc` |
 | `/etc/hostname` | `hostname` set from `/run/config/hostname`; `/etc/hostname` a symlink, for readers |
 | `/root/.ssh`, `/home/<user>/.ssh` | `AuthorizedKeysFile /run/werewolf/keys/%u` |

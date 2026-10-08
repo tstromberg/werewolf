@@ -57,8 +57,8 @@ rebooting machines nightly.
   Both are fetched unsigned over TLS and "inform the report and nothing
   else".
 - **How fast releases follow fixes.** CI builds a release within about an
-  hour of a fix reaching Wolfi or Alpine, re-signs the latest manifests
-  daily, and lets each expire after a week ([releases.md](../releases.md)).
+  hour of a fix reaching Wolfi or Alpine, and publishes it when its images
+  change; manifests do not expire ([releases.md](../releases.md)).
 
 So the policy today is "reboot at once for anything", with up to 20 hours
 before a machine notices. Checked hourly, the same policy would reboot a

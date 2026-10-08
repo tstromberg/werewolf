@@ -39,7 +39,8 @@ forms' `.net` files into the signed image.
    0; files read anywhere but `/dev`, which is closed even for reading but
    for the devices werewolf names, run only beneath `/usr`, written only in `/run`,
    `/tmp`, `/var/tmp`, `/dev/shm`, `/data` and terminals; device ioctls
-   only on terminals and a VM's PL061 GPIO chip; no `mount`.
+   only on terminals and a VM's PL061 GPIO chip; no `mount`. Every refusal
+   is audited, after exec too (`LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON`).
 3. **The bounding set** loses CAP_NET_ADMIN and CAP_NET_RAW, unless a form
    allows them (none does), and CAP_SYS_ADMIN, always: its Landlock step
    needed it, and after boot only the mount broker, outside, mounts.

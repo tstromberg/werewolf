@@ -63,20 +63,20 @@ azure)
 *) die "usage: cloud gcp|aws|azure FORM ARCH" ;;
 esac
 
-# The images of FORM this cloud holds, one per line: create's, which this
-# run deletes if it made one.
+# The images of FORM this cloud holds, one per line: the name werewolf
+# gave it, and on AWS the AMI and its snapshot after it.
 images() {
 	case $cloud in
 	gcp) g compute images list --filter "labels.werewolf-form=$form" --format 'value(name)' ;;
 	aws) aws ec2 describe-images --owners self --filters "Name=tag:werewolf-form,Values=$form" \
-		--query 'Images[].[ImageId,BlockDeviceMappings[0].Ebs.SnapshotId]' --output text ;;
+		--query 'Images[].[Name,ImageId,BlockDeviceMappings[0].Ebs.SnapshotId]' --output text ;;
 	azure) az disk list -g "$group" --query "[?starts_with(name, 'werewolf-$form-')].name" -o tsv ;;
 	esac | LC_ALL=C sort
 }
 image_delete() {
 	case $cloud in
 	gcp) g compute images delete "$1" ;;
-	aws) aws ec2 deregister-image --image-id "$1" && aws ec2 delete-snapshot --snapshot-id "$2" ;;
+	aws) aws ec2 deregister-image --image-id "$2" && aws ec2 delete-snapshot --snapshot-id "$3" ;;
 	azure) az disk delete -g "$group" -n "$1" --yes -o none ;;
 	esac
 }
@@ -99,7 +99,6 @@ leftovers() {
 }
 name=werewolf-check-$(date -u +%Y%m%d%H%M%S)
 work=$(mktemp -d)
-images >"$work/images-before"
 
 cleanup() {
 	rc=$?
@@ -108,8 +107,14 @@ cleanup() {
 		say "kept $name in $where; delete it with: $werewolf delete $name --on $cloud"
 	else
 		"$werewolf" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
-		images | comm -13 "$work/images-before" - | while read -r image snapshot; do
-			image_delete "$image" "$snapshot" >/dev/null 2>&1 || say "could not delete image $image"
+		# The image this run's create made, the one it named as it made it,
+		# and no other: not every image new since the run began, as another
+		# run of the same form, at the same time, makes one too, and is
+		# still using it.
+		made_image=$(sed -n 's/^werewolf: image \([a-z0-9-]*\): making it .*/\1/p' "$work/create.err" 2>/dev/null)
+		[ -z "$made_image" ] || images | while read -r image id snapshot; do
+			[ "$image" = "$made_image" ] || continue
+			image_delete "$image" "$id" "$snapshot" >/dev/null 2>&1 || say "could not delete image $image"
 		done
 	fi
 	rm -rf "$work"
@@ -145,9 +150,13 @@ echo "$name" >"$work/config/hostname"
 ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
 cp "$work/key.pub" "$work/config/authorized_keys"
 say "creating $name, $form on $arch, in $where"
-made=$("$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" \
-	--allow-from me) ||
-	die "werewolf create failed; its output is above"
+# create's output to this run's, as it comes, and its stderr to a file
+# too, which names the image cleanup deletes: the address on fd 3,
+# create's status in a file, since a pipeline's is tee's (and `|| rc=`,
+# so that set -e lets a failed create reach the line that records it).
+made=$({ { rc=0; "$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" \
+	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
+[ "$(cat "$work/create.rc")" = 0 ] || die "werewolf create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
 
 say "waiting for the posture line on the serial port"

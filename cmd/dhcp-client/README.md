@@ -31,8 +31,9 @@ it becomes fence.
   anything, passes only unfragmented UDP from port 67 to 68.
 - **The parent** applies leases with CAP_NET_ADMIN alone and four ioctls
   (address, netmask, MTU, add a route), writing only in
-  `/run/werewolf/dhcp`. It checks every field of the engine's fixed-size
-  message again, and ends both on one it does not like.
+  `/run/werewolf/network`, where `/etc/resolv.conf` leads. It checks every
+  field of the engine's fixed-size message again, and ends both on one it
+  does not like.
 - **Replies are hostile.** Strict bounds; our random transaction ID and MAC;
   the ACK from the server that offered, for the address offered; renewals
   from the server that gave the lease; addresses unicast, routes masked;

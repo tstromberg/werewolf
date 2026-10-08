@@ -9,4 +9,4 @@ unseen no-network       werewolf: no network
 ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
 ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
 ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf
-ok  no-dhcp          [ ! -e /usr/lib/werewolf/dhcp-client ] && [ ! -e /run/werewolf/dhcp ]
+ok  no-dhcp          [ ! -e /usr/lib/werewolf/dhcp-client ] && [ ! -e /run/werewolf/network/lease.json ]

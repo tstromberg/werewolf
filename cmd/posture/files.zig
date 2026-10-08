@@ -144,6 +144,31 @@ pub fn check(p: *Posture) !void {
         .result = if (nodev.len == 0) .pass else .fail,
         .detail = nodev,
     });
+    // The root holds the image's links, /proc and /sys the kernel's own,
+    // /dev device-mapper's (/dev/mapper/data), and only root writes there.
+    // /data follows links, as werewolf's updater builds roots there that
+    // carry them (docs/security.md, "Not yet").
+    const follows = try missingOption(
+        p.gpa,
+        mounts,
+        "nosymfollow",
+        &.{ "/", "/proc", "/sys", "/dev", "/data" },
+    );
+    const planted = followsLink(p);
+    try p.add(.{
+        .id = "files-nosymfollow-everywhere",
+        .area = "files",
+        .name = "Links in writable places not followed",
+        .why = "A link planted in /tmp or another shared place leads nowhere, whoever " ++
+            "follows it, root included: the kernel refuses to follow it.",
+        .how = "every mount in /proc/self/mounts but /, /proc, /sys, /dev and /data is " ++
+            "nosymfollow, and opening a link this program makes in /tmp is refused (ELOOP)",
+        .result = if (follows.len == 0 and !planted) .pass else .fail,
+        .detail = if (planted)
+            "a link in /tmp was followed"
+        else
+            follows,
+    });
 
     // The proof: a program put in each place does not start.
     var ran: std.ArrayList(u8) = .empty;
@@ -348,6 +373,25 @@ pub fn check(p: *Posture) !void {
 
 /// Whether a copy of this program, put in dir, starts. A place it
 /// cannot be put is one it cannot start from.
+/// Whether a link made in /tmp, to /, opens as / would. A name no one can
+/// know first, as for runsFrom. Where no link can be made there, nothing
+/// planted one either.
+fn followsLink(p: *Posture) bool {
+    var nonce: [8]u8 = undefined;
+    p.io.random(&nonce);
+    const path = p.gpa.printSentinel(
+        "/tmp/.posture-link-{x}",
+        .{std.mem.readInt(u64, &nonce, .little)},
+        0,
+    ) catch return true;
+    if (linux.errno(linux.symlink("/", path)) != .SUCCESS) return false;
+    defer _ = linux.unlink(path);
+    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    _ = linux.close(@intCast(rc));
+    return true;
+}
+
 fn runsFrom(p: *Posture, dir: []const u8) bool {
     // A name no one can know first: a fixed one, planted as a directory
     // by anyone in /tmp, would make the copy fail and the check pass.
