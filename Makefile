@@ -1420,7 +1420,10 @@ _check-verity-boot:
 # to commit to. The deadman must say why on the console, the kernel must
 # reset (-no-reboot ends QEMU, which no clean power-off preceded), and
 # nothing must have committed.
-check-deadman: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM)
+# After check-slot, which builds the same slot in the same place: under
+# -j, two sub-makes building it at once each remove the other's
+# modules-bitten directory mid-recipe.
+check-deadman: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM) check-slot
 	@mkdir -p $(CHECK)
 	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) DEV=1 slot >$(CHECK)/deadman-build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/deadman-build.log; echo "FAIL   deadman build: see $(CHECK)/deadman-build.log"; exit 1; }
