@@ -1,0 +1,5 @@
+# oauth2-proxy serves :4180 (behind caddy), reaches the OIDC provider over
+# HTTPS and the names to find it, and the upstream it fronts on this
+# machine or its network over HTTP.
+listen tcp/4180
+connect oauth2-proxy tcp/443 tcp/80 udp/53 tcp/53

@@ -56,8 +56,14 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
     try copyTree(u, r, "usr/share/werewolf");
     // What the form leaves out of its packages (Makefile, forms/NAME.prune):
     // removed here as the build left them out, so this slot holds what the
-    // build's did.
-    for (try u.lines(try u.read(meta_dir ++ "/prune"))) |p| try r.remove(u, p);
+    // build's did. One the packages no longer bring is noted, not an error:
+    // an upstream fix must not stop the machine updating.
+    for (try u.lines(try u.read(meta_dir ++ "/prune"))) |p| {
+        if (!try r.remove(
+            u,
+            p,
+        )) try u.record(.{ .event = "prune", .path = p, .why = "not in the packages now" });
+    }
     const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
     try r.write(
         u,
@@ -731,14 +737,24 @@ const Root = struct {
         return true;
     }
 
-    /// path, a file or link in the root, removed. One already absent is
-    /// an error: the build's list named it, so the packages have changed
-    /// under the form.
-    fn remove(r: Root, u: *Update, path: []const u8) !void {
+    /// path, a file or link in the root, removed: true, or false if there
+    /// was none to remove.
+    fn remove(r: Root, u: *Update, path: []const u8) !bool {
         errdefer u.detail = path;
-        const d: Dir = .{ .handle = try r.openIn(u, parentDir(path), dir_flags) };
+        const d: Dir = .{ .handle = r.openIn(
+            u,
+            parentDir(path),
+            dir_flags,
+        ) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        } };
         defer d.close(u.io);
-        try d.deleteFile(u.io, std.fs.path.basename(path));
+        d.deleteFile(u.io, std.fs.path.basename(path)) catch |err| switch (err) {
+            error.FileNotFound => return false,
+            else => return err,
+        };
+        return true;
     }
 
     fn write(r: Root, u: *Update, path: []const u8, data: []const u8) !void {

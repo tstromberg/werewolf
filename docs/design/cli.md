@@ -10,24 +10,25 @@ While reviewing this proposal, focus on answering for yourself:
 
 Proposed, 2026-10-07. Built (cmd/werewolf, `make werewolf`): `build`,
 `pack`, `run`; `create`, `delete` and `console` on Lima, GCP and AWS; and
-`upload` to GCP and AWS. On AWS (2026-10-07), prod on a t3.small runs end
-to end: imported, booted, its config from IMDSv2, `up in` 1.2 s, posture
-clean, restarted with a new config, deleted. On a t4g.small it boots and
-answers, but Graviton's console shows only the firmware's banner, so
-`create` cannot see `up in` there yet. `build` makes a form as `make dist` makes a release,
+`upload` to GCP and AWS. On AWS (2026-10-07), prod on a t3.small and on
+a t4g.small (Graviton) runs end to end: imported, booted, its config from
+IMDSv2, `up in` in 1.2 to 1.5 s, posture clean, restarted with a new
+config, deleted. Graviton's 16550 is a console only when named, so the
+arm64 disk names `console=ttyS0,115200` before `hvc0` (boot/mkdisk). `build` makes a form as `make dist` makes a release,
 through make's `_dist-form`; `--app DIR` works with `build`, `run` and
 `create`. `pack` reads FORM's
 declarations from `./forms`; `--image` is not built. `pack` makes no
 host keys: the bastion makes its own on first boot and keeps it in
-`/data`. Firecracker and Azure are not built.
+`/data`. bhyve, Firecracker, Proxmox and Azure are built, experimental.
 `make check-gcp`, `make demo` and the GCP demos run through `werewolf
 create`; `test/gcp` keeps only its judging, and `test/lima-demo` its wait
 for the page.
 
 ## Summary
 
-One static Zig binary, `werewolf`, with seven verbs: build an image, pack
-a config, and put the two on a machine, locally or in a cloud. `make`
+One static Zig binary, `werewolf`, with eight verbs: build an image, pack
+a config, and put the two on a machine, locally or in a cloud; and build
+a form's own package from a melange recipe. `make`
 stays the build system and the contributor's interface; `werewolf` is the
 user's. A bastion or a Tailscale router becomes one command, with its
 keys and destinations given as flags, and every deploy path CI tests is
@@ -119,6 +120,7 @@ werewolf create  FORM|--image IMAGE NAME [--on TARGET] [CONFIG...]
 werewolf delete  NAME [--on TARGET]
 werewolf console NAME [--on TARGET]
 werewolf upload  FILE --on gcp|aws|azure
+werewolf build-apk RECIPE [--arch ARCH]                 a form's own melange package
 ```
 
 Two rules, stated once:
@@ -130,6 +132,15 @@ Two rules, stated once:
   with an explicit argument list: `limactl`, `gcloud`, `aws`, `az`. No
   `sh -c`, no SDK, no state file: the provider's list command is the
   state.
+
+`build-apk` builds one melange recipe in Wolfi's style, as a form's
+build builds the recipes `forms/NAME.melange` names (vendor/build.mk):
+for a package Wolfi does not ship yet, tried before a form names it.
+It is `build`'s kind of verb, a file from inputs, and runs make's
+`_build-apk` as `build` runs `_dist-form`, so the form's build and the
+author's are one path. On macOS it boots melange's QEMU runner from
+werewolf's own Alpine kernel; that, and melange's modules bug the
+Makefile works around, are why it is a verb rather than "run melange".
 
 `build` is named for what it does and `image` for what it makes; the verb
 wins because `image` here also names a kernel and an OCI artifact.
@@ -281,10 +292,10 @@ Azure's boot diagnostics): on a shell-free machine it is the only way to
 learn why it did not come up.
 
 Without `--on`, a machine goes where this host keeps machines itself:
-Lima, where it is installed on macOS, or bhyve on FreeBSD with vmm
-loaded, else QEMU here, in the foreground, as `run` boots it, and not
-kept (Firecracker, on Linux with KVM, is where that fallback goes next).
-`delete` and `console` take the same default.
+Lima, where it is installed on macOS, bhyve on FreeBSD with vmm loaded,
+or Firecracker on Linux with KVM and `firecracker` installed, else QEMU
+here, in the foreground, as `run` boots it, and not kept. `delete` and
+`console` take the same default.
 
 On Lima, built: the machine's disk is built for it, since its command
 line names the MAC of its vzNAT network (`werewolf.mac`), which is the
@@ -333,8 +344,12 @@ runs bhyve again after a reboot and destroys the VM when it stops; the
 console is bhyve's standard output, which `daemon` appends to
 `console.log` in `build/ARCH/machines/NAME`, where `console` reads it
 and `create` waits for the `up in` line. The network is slirp's (the
-`libslirp` package), as `run`'s is under QEMU: a form with no DHCP
-client gets `10.0.2.15/24` by `10.0.2.2` in its tar, and this host
+`libslirp` package), as `run`'s is under QEMU, in its `open` mode, so
+the machine reaches out, as its updater must; `open` also keeps slirp's
+helper process out of capability mode, where, run as root, FreeBSD
+15.1's dies on `getpwnam`, and bhyve with it at the first packet. A
+form with no DHCP client gets `10.0.2.15/24` by `10.0.2.2` in its tar,
+and this host
 reaches the machine only through the ports slirp forwards, one host port
 on `127.0.0.1` per `listen tcp/PORT` in the form's `.net` files, from a
 base the name's sha256 picks between 20000 and 59900; `create` says
@@ -346,11 +361,69 @@ to shut down; `delete` destroys the VM the same way, which ends its
 bhyve and supervisor, and removes the directory. bhyve on arm64, new in
 FreeBSD 15 with other firmware, is not built.
 
+On Firecracker, built, and experimental: Linux with KVM
+(`cmd/werewolf/firecracker.zig`; `tools/install-deps` installs the
+pinned release, which no distribution packages). The machine boots as
+`run` boots QEMU: the kernel and the form's initramfs, which holds the
+root, no bootloader and no slots, so no updater; a data disk of its
+own; and the tar as a second virtio drive, read-only. Firecracker has
+no PCI, so `minimal.modules` carries `virtio_mmio`, its bus. Firecracker
+runs as the user and exits when the guest stops, for a reboot as for a
+halt, so `create` starts it detached, under `setsid`, through
+werewolf's own supervisor (`werewolf _firecracker DIR`), which keeps
+the console on `console.log` in `build/ARCH/machines/NAME`, tells a
+reboot from a halt by the kernel's last line there, runs Firecracker
+again after a reboot, and leaves its pid in a pidfile, which is the
+state. Only the network needs root, through `sudo` or `doas`:
+Firecracker has no user-mode network and no DHCP, so each machine gets
+a tap device of the user's and a /30 of `172.16.0.0/16`, both from the
+name's sha256, with this host at `.1` and the machine at `.2`, NAT out
+and forwarding by three `iptables` rules, each added only if absent and
+removed by `delete`. The address goes on the kernel command line, as
+init takes it, with this host's resolver, the first not on loopback
+(systemd-resolved's own file, then `/etc/resolv.conf`), or `--dns`;
+`--ip` and `--gw` are refused. `create` waits for the `up in` line and
+prints the machine's `.2`. A second `create` of the name kills its
+Firecracker, a hard stop, and starts it with the new tar, keeping its
+data disk and its configuration, so `--dns` counts at the first
+`create` alone.
+
+On Proxmox VE, built, experimental, and never yet run against a node
+(`cmd/werewolf/proxmox.zig`). Proxmox's own command, `qm`, runs on the
+node, so `create` runs it there over ssh, with an explicit argument
+list, as it runs `limactl` and `gcloud` here: `PROXMOX_HOST=root@NODE`
+names the node, `PROXMOX_STORAGE` (`local-lvm`) its disks' storage and
+`PROXMOX_BRIDGE` (`vmbr0`) its network. The REST API with a token is
+how Terraform and Ansible drive Proxmox, and would spare the root login;
+it was not chosen because it keeps no serial log and learns no address
+without the guest agent werewolf does not ship, so `create` could say
+neither that the machine is up nor where it is. The node keeps
+werewolf's files in `/var/lib/vz/werewolf`: the release's `disk.qcow2`,
+named `werewolf-FORM-ARCH-DIGEST.qcow2` and copied with `scp` only if
+not there; each machine's config tar; and each machine's console. `qm
+create` makes a q35 VM with OVMF and no vendor keys, two host CPUs and
+2 GiB, the image and the tar imported onto the storage (`import-from`),
+the tar raw and read-only, virtio network on the bridge, a virtio random
+number device, and the console on the file through QEMU's own `-chardev
+file`, passed in `args`, which Proxmox allows root alone, since Proxmox
+keeps a serial port on a socket and no log; the form is in the
+description and the tag `werewolf` marks it ours, and `qm list` is the
+state. `create` waits for the `up in` line in the console file and
+prints the DHCP lease the console reported, or `-` for a static one. A
+second `create` of the name stops the VM hard (`qm shutdown` presses
+the ACPI power button, which no werewolf machine answers on x86_64
+yet), imports the new tar over the old disk and removes the old one;
+`delete` destroys the VM and its disks and removes its files on the
+node, keeping the image. x86_64 only, as Proxmox nodes are.
+
 On GCP, built: `create` builds the release's `disk.qcow2` and makes it an
 image named `werewolf-FORM-ARCH-DIGEST`, the first 16 hex digits of the
 disk's sha256, uploading it only if no such image exists. The VM gets
 the config tar in base64 as `user-data`, no service account, no scopes
 and no Secure Boot, a label naming its form, and the default network.
+Its boot disk is `pd-balanced`, SSD, not GCP's HDD default: on a
+t2a-standard-1, a reboot to ssh took 3.8 s on it against 5.3 s on an
+8 GB `pd-standard` disk (about 10 MB/s), for $0.80 a month against $0.32.
 `create` waits for init's `up in` line on the serial port. A second
 `create` of the same name and form replaces the user-data and stops and
 starts the VM, which GCP stops with its power button; the stop releases
@@ -360,7 +433,7 @@ gcloud's (`gcloud config`, or `CLOUDSDK_COMPUTE_ZONE`), the zone
 `us-central1-a` if gcloud has none; where a zone has no Arm machines
 free, GCP says so and another zone serves.
 
-On AWS, built, and run once: `create` builds the same
+On AWS, built, and run on both arches: `create` builds the same
 `disk.qcow2`, converts it to a dynamic VHD, which holds only the blocks
 written, has VM Import make it an EBS snapshot through
 `werewolf-images-ACCOUNT-REGION`, and registers the AMI under the same
@@ -370,12 +443,48 @@ Import's `vmimport` role are named when missing, not made
 instance gets the tar in base64 as user data, no instance profile, IMDSv2
 with one hop, `Name` and `werewolf-form` tags, and a security group of
 its own, `werewolf-NAME`, with no rule in; `delete` waits for the
-instance to go, then deletes the group. Nitro keeps 64 KiB of console,
-perhaps across a stop, so after a restart `create` looks for `up in` only
-after the earlier console's last lines. A second `create` stops the
+instance to go, then deletes the group. AWS begins a console afresh at
+each start but may answer with the last run's for a while, so `create`
+takes a console as this run's only if AWS last wrote it no earlier than
+the instance's `LaunchTime`: by its text it cannot tell, since a werewolf
+boot prints the same lines every time. A second `create` stops the
 instance, replaces its user data (in base64 once more, which
 `modify-instance-attribute` wants and `run-instances` does itself) and
 starts it.
+
+On Azure, built, experimental, and run once, on x86_64 in eastus
+(`cmd/werewolf/azure.zig`). The subscription is `az`'s own and the
+resource group its default (`az configure --defaults group=RG`), which
+`create` names when it is missing and does not make. The release's
+`disk.qcow2` becomes a fixed VHD and goes straight into a managed disk
+made for upload, named `werewolf-FORM-ARCH-DIGEST` and made only if
+absent (or remade, if a failed `create` left it mid-upload), so no
+storage account is needed. The upload is `azcopy`'s: a disk's upload URL
+takes page writes alone, which `az storage blob upload` does not begin
+with, and `azcopy` writes only the pages that hold data. Azure
+provisions a VM from an image only through an agent in it, which
+werewolf does not carry, so each machine gets its own copy of that disk,
+`werewolf-NAME`, attached as its OS disk: a specialized VM, which Azure
+boots as it is. It is Gen2, with Standard security, since werewolf's
+boot loader is signed by no one Azure trusts; `Standard_D2as_v4`, or
+`Standard_B2pls_v2` on arm64, or `--size`. Not the B-series on x86_64:
+a new subscription is often refused them, as this one was in eastus.
+The tar is its `userData`. `az vm create` reads that file as text and
+encodes it in base64 itself, so a carriage return or a byte past ASCII
+would change on the way; `create` refuses such a file, naming it,
+rather than send it changed. Keys, settings and JSON are text. `az vm
+create` makes it a network of its own with a security group that lets
+nothing in and a public address, and its OS disk and NIC go when it
+goes. Boot diagnostics hold the serial console; `az` makes a VM without
+them, so `create` enables them and restarts the machine once, then waits
+for the `up in` line and prints the public address. Azure keeps only
+the console's last 64 KiB, so a wait after a restart looks past the old
+end it saw, not past a count of bytes. A second `create` of the name
+sets the VM's `userData` to the tar in base64 werewolf makes, from a
+file (`az vm update --set @FILE`), since `--user-data` there encodes
+its argument, the path, and restarts it. `delete` removes the VM, its
+disk and NIC, the network `az` made for it, and any disk copy a failed
+`create` left; the image stays.
 
 ### upload
 
@@ -391,12 +500,13 @@ it.
 | Target | Image | Config | Notes |
 | --- | --- | --- | --- |
 | qemu | the file | second virtio drive | `run` only |
-| firecracker | slot files, no bootloader | second virtio-blk drive | Linux only; no ACPI, so no `power-button`; address on the command line |
+| firecracker | kernel and initramfs, no bootloader | second virtio drive | Linux with KVM; no ACPI, so no `power-button`; address on the command line; experimental |
 | lima | the file | `limactl disk import` | `test/lima-demo` today |
 | gcp | image from tar.gz | metadata `user-data` | `test/gcp` today |
 | aws | AMI via S3 and `vmimport` | user data, 16 KB | `create` names the missing bucket or role rather than making it |
-| azure | fixed VHD, specialized disk | userData, 64 KB | no reusable image without a ready agent; `upload` keeps the source disk, `create` copies it |
-| proxmox, VMware, Hyper-V, a stick | the file | the tar | manual |
+| azure | fixed VHD uploaded to a managed disk, copied per VM | userData, 64 KB | no reusable image without a ready agent; specialized VMs; experimental |
+| proxmox | the file, by scp and `import-from` | second virtio drive, imported raw | `qm` over ssh to the node; experimental, untested |
+| VMware, Hyper-V, a stick | the file | the tar | manual |
 
 Each automated target is one Zig file with five functions: upload,
 create, address, console, delete. If a target cannot be done that thinly

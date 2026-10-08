@@ -499,30 +499,49 @@ pub fn console(io: Io, gpa: Allocator, p: Place, id: []const u8) ?[]const u8 {
     );
 }
 
-/// What the console says after before, the console of an earlier run if
-/// AWS kept it: all of it, if before's last lines are not in it.
-pub fn since(text: []const u8, before: []const u8) []const u8 {
-    const tail = before[before.len -| 256..];
-    if (tail.len == 0) return text;
-    const i = std.mem.findLast(u8, text, tail) orelse return text;
-    return text[i + tail.len ..];
+/// The console of the instance's current run, if AWS has any yet. AWS
+/// begins a console afresh at each start, but may answer with the last
+/// run's for a while after: a console is this run's only if AWS last wrote
+/// it no earlier than the instance's LaunchTime, which each start resets.
+/// Not by its text: a werewolf boot is the same every time, to the pids.
+fn currentConsole(io: Io, gpa: Allocator, p: Place, id: []const u8) ?[]const u8 {
+    const launched = ask(io, gpa, p, &.{
+        "ec2",
+        "describe-instances",
+        "--instance-ids",
+        id,
+        "--query",
+        "Reservations[0].Instances[0].LaunchTime",
+    }) orelse return null;
+    const out = ask(io, gpa, p, &.{
+        "ec2",
+        "get-console-output",
+        "--instance-id",
+        id,
+        "--latest",
+        "--query",
+        "[Timestamp,Output]",
+    }) orelse return null;
+    return ofRun(out, launched);
 }
 
-/// Wait for the boot to finish, or a panic, on a console that follows
-/// before.
-pub fn awaitUp(
-    io: Io,
-    gpa: Allocator,
-    p: Place,
-    id: []const u8,
-    before: []const u8,
-) !enum { up, panic, late } {
+/// get-console-output's TIMESTAMP<tab>OUTPUT, the output if it was written
+/// at or after launched. AWS writes both times as UTC, alike, so their
+/// order is their bytes'.
+fn ofRun(out: []const u8, launched: []const u8) ?[]const u8 {
+    const tab = std.mem.findScalar(u8, out, '\t') orelse return null;
+    const text = out[tab + 1 ..];
+    if (std.mem.eql(u8, text, "None")) return null;
+    return if (std.mem.order(u8, out[0..tab], launched) == .lt) null else text;
+}
+
+/// Wait for this run's boot to finish, or panic.
+pub fn awaitUp(io: Io, gpa: Allocator, p: Place, id: []const u8) !enum { up, panic, late } {
     var waited: u32 = 0;
     while (waited < wait_seconds) : (waited += 5) {
-        if (console(io, gpa, p, id)) |text| {
-            const run = since(text, before);
-            if (std.mem.find(u8, run, "werewolf: up in ") != null) return .up;
-            if (std.mem.find(u8, run, "Kernel panic") != null) return .panic;
+        if (currentConsole(io, gpa, p, id)) |text| {
+            if (std.mem.find(u8, text, "werewolf: up in ") != null) return .up;
+            if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
         }
         try io.sleep(.fromSeconds(5), .awake);
     }
@@ -612,17 +631,20 @@ test instance {
     try testing.expectEqual(null, instance(""));
 }
 
-test since {
-    const first = "stage0: the kernel took 0.2s\nwerewolf: up in 1.0s\nposture: pass=70\n";
-    // A new instance: everything.
-    try testing.expectEqualStrings(first, since(first, ""));
-    // AWS kept the run before: only what follows it, which has not booted yet.
-    try testing.expectEqualStrings("stage0: the k", since(first ++ "stage0: the k", first));
-    // AWS began afresh: all of it.
+test ofRun {
+    const launched = "2026-10-08T00:51:11+00:00";
+    // This run's console.
     try testing.expectEqualStrings(
-        "werewolf: up in 0.9s\n",
-        since("werewolf: up in 0.9s\n", first),
+        "UEFI\r\nwerewolf: up in 1.3s\r\n",
+        ofRun("2026-10-08T00:58:10+00:00\tUEFI\r\nwerewolf: up in 1.3s\r\n", launched).?,
     );
+    // The run before's, written before this one began: not this run's.
+    try testing.expectEqual(
+        null,
+        ofRun("2026-10-08T00:50:14+00:00\twerewolf: up in 1.5s\r\n", launched),
+    );
+    try testing.expectEqual(null, ofRun("2026-10-08T00:58:10+00:00\tNone", launched));
+    try testing.expectEqual(null, ofRun("", launched));
 }
 
 test lastLine {

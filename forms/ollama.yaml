@@ -1,0 +1,21 @@
+# ollama: prod, with Ollama serving models on :11434 to the network. Its
+# API has no login of its own: oauth2-proxy, caddy or a tailnet in front
+# is how it is served beyond the machine, and the form says so. Models
+# are pulled from Ollama's registry into /data/svc/ollama and run on the
+# CPU (a GPU is a device no form carries yet). leash starts it
+# (etc/sv/ollama/service) as the ollama user. See docs/ollama.md.
+include: prod.yaml
+contents:
+  packages:
+    - ollama
+
+accounts:
+  groups:
+    - groupname: ollama
+      gid: 218
+  users:
+    - username: ollama
+      uid: 218
+      gid: 218
+      homedir: /var/empty
+      shell: /sbin/nologin

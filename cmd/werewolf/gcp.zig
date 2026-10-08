@@ -192,6 +192,13 @@ pub fn create(
         size orelse m.kind,
         "--image",
         image,
+        // SSD-backed, not GCP's HDD default (pd-standard): an 8 GB
+        // pd-standard disk read ~10 MB/s at ~6 ms a request, and a boot
+        // reads the kernel, its root and sshd from it. On a t2a-standard-1,
+        // reboot to ssh took 3.8 s on pd-balanced against 5.3 s; it costs
+        // $0.10 a GB-month against $0.04.
+        "--boot-disk-type",
+        "pd-balanced",
         "--network-interface",
         try gpa.print("nic-type={s}", .{m.nic}),
         "--tags",

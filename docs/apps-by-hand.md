@@ -102,11 +102,14 @@ for f in /opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/share/qemu/edk2-aarc
 done
 ACCEL=kvm; [ "$(uname)" = Darwin ] && ACCEL=hvf
 qemu-system-aarch64 -M virt -accel "$ACCEL" -cpu host -m 2048 -nographic \
-  -bios "$FW" -device virtio-rng-pci \
+  -bios "$FW" -boot menu=on,splash-time=0 -device virtio-rng-pci \
   -drive file="$W/disk.img",format=raw,if=virtio \
   -drive file="$W/config.tar",format=raw,if=virtio,readonly=on \
   -netdev user,id=n0,hostfwd=tcp:127.0.0.1:8080-:8080 -device virtio-net-pci,netdev=n0
 ```
+
+`-boot menu=on,splash-time=0` keeps edk2 from waiting 5 seconds at its
+boot menu on every boot.
 
 On x86_64, whose UEFI firmware is a read-only code image and a writable
 copy of its variables:

@@ -1,0 +1,7 @@
+#!/bin/sh
+# config-gatus DIR: the gatus form's config for make check, in DIR: a
+# target to watch, which the page must list whether or not the check's
+# machine can reach it.
+set -eu
+mkdir -p "$1/gatus"
+echo '{"target":"https://example.org/"}' >"$1/gatus/settings.json"

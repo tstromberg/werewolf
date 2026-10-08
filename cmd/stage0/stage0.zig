@@ -17,6 +17,8 @@
 //!
 //!     werewolf.victim=UUID:DIR   the filesystem, and the directory holding a/ and b/
 //!     werewolf.slot=a|b          which slot this boot is
+//!     werewolf.deadman=SECONDS   the deadman's wait, 1 to 600, taken only
+//!                                from a DEV build's root (make check-deadman)
 //!
 //! (both, or neither); or, booted directly (QEMU, Lima), /root.erofs in this
 //! initramfs, which the build appends.
@@ -39,6 +41,7 @@ const dm = @import("dm");
 const verity = @import("verity");
 const MS = linux.MS; // ziglint-ignore: Z032
 
+/// How long a slot has to commit before the deadman reboots it.
 const deadman_after = 600;
 const find_for = 10; // seconds to wait for the victim's disk to appear
 
@@ -58,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
         error.Twice => fail("werewolf.victim or werewolf.slot given twice", .{}),
         error.BadVictim => fail("werewolf.victim must be UUID:/DIR", .{}),
         error.BadSlot => fail("werewolf.slot must be a or b", .{}),
+        error.BadDeadman => fail("werewolf.deadman must be 1 to 600 seconds", .{}),
     };
 
     // Lockdown at integrity before any module: the kernel then loads only
@@ -130,7 +134,7 @@ pub fn main(init: std.process.Init) !void {
     // waited for from devtmpfs.
     const params = verity.Params.parse(readAll(gpa, "/verity")) catch
         fail("no root hash in /verity", .{});
-    const loop = loopDevice(gpa, img, params.hash_start * verity.block_size) catch |err|
+    const loop = loopDevice(gpa, img) catch |err|
         fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
     var table_buf: [512]u8 = undefined;
     const table = verity.table(&table_buf, loop.path, params) catch unreachable;
@@ -161,7 +165,19 @@ pub fn main(init: std.process.Init) !void {
             .{ img, params.root[0..8] },
         );
 
-    if (boot.slot.len > 0) deadman(boot.slot);
+    if (boot.slot.len > 0) {
+        // A shorter wait is for testing the deadman (make check-deadman),
+        // so only a DEV build's root, verified now, may ask for one: a
+        // released machine waits its ten minutes whatever its command line.
+        var after: u32 = deadman_after;
+        if (boot.deadman > 0) {
+            if (linux.errno(linux.access("/root/usr/share/werewolf/dev", linux.F_OK)) == .SUCCESS) {
+                after = boot.deadman;
+                say("the deadman waits {d}s (werewolf.deadman, a DEV build)", .{after});
+            } else say("werewolf.deadman ignored: not a DEV build", .{});
+        }
+        deadman(boot.slot, after);
+    }
 
     // The root is read-only, so its mount points are in the image already.
     for ([_][:0]const u8{ "dev", "proc", "sys", "victim" }) |m| {
@@ -211,7 +227,7 @@ pub fn main(init: std.process.Init) !void {
 /// initramfs once it sleeps, and reaches PID 1 through a /proc of its own,
 /// and the kernel's log through a descriptor opened now: /dev moves into
 /// the new root, leaving this one's empty.
-fn deadman(slot: []const u8) void {
+fn deadman(slot: []const u8, after: u32) void {
     mkdir("/deadman");
     mountFs("proc", "/deadman", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     const kmsg = linux.open("/dev/kmsg", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
@@ -222,7 +238,7 @@ fn deadman(slot: []const u8) void {
         return;
     }
 
-    var ts: linux.timespec = .{ .sec = deadman_after, .nsec = 0 };
+    var ts: linux.timespec = .{ .sec = after, .nsec = 0 };
     while (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) {}
     if (linux.errno(linux.access(
         "/deadman/1/root/run/werewolf/committed",
@@ -231,11 +247,17 @@ fn deadman(slot: []const u8) void {
         var buf: [128]u8 = undefined;
         const msg = std.mem.print(
             &buf,
-            "<2>stage0: slot {s} did not commit in 10 minutes; rebooting into the last good slot\n",
-            .{slot},
+            "<2>stage0: slot {s} did not commit in {d}s; rebooting into the last good slot\n",
+            .{ slot, after },
         ) catch "";
-        // Reaches the console before the sysrq reboot; see fail().
-        if (linux.errno(kmsg) == .SUCCESS) _ = linux.write(@intCast(kmsg), msg.ptr, msg.len);
+        // The kernel prints its log to the console from a thread of its
+        // own, and sysrq's reset waits for nothing, unlike a panic: a
+        // second for the console to say why, or the reboot goes unexplained.
+        if (linux.errno(kmsg) == .SUCCESS) {
+            _ = linux.write(@intCast(kmsg), msg.ptr, msg.len);
+            var pause: linux.timespec = .{ .sec = 1, .nsec = 0 };
+            _ = linux.nanosleep(&pause, null);
+        }
         _ = writeFile("/deadman/sysrq-trigger", "b");
     }
     linux.exit(0);
@@ -275,12 +297,7 @@ const LoopConfig = extern struct {
 /// A free loop device, read-only, holding file, and gone once its last
 /// holder is (autoclear). The caller closes fd once something else holds
 /// the device: closed before, autoclear would detach the image at once.
-/// tree_at is where file's dm-verity hash tree begins, after its data.
-fn loopDevice(
-    gpa: std.mem.Allocator,
-    file: [:0]const u8,
-    tree_at: u64,
-) !struct { path: [:0]const u8, fd: i32 } {
+fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]const u8, fd: i32 } {
     const ctl = linux.open("/dev/loop-control", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
     if (linux.errno(ctl) != .SUCCESS) return error.NoLoopControl;
     defer _ = linux.close(@intCast(ctl));
@@ -301,14 +318,11 @@ fn loopDevice(
     const backing = linux.open(file, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(backing) != .SUCCESS) return error.NoImage;
     defer _ = linux.close(@intCast(backing));
-    // The whole image read into the page cache in the background from now:
-    // the boot reads most of it, and a cloud's network disk answers a few
-    // large reads far sooner than hundreds of small ones. The hash tree
-    // first, which every read checks against, the mount's first among
-    // them; then the data. Read in the other order, mounting the root
-    // waited 50 ms on GCP for the data to be read ahead of the tree.
-    _ = linux.fadvise(@intCast(backing), @intCast(tree_at), 0, linux.POSIX_FADV.WILLNEED);
-    _ = linux.fadvise(@intCast(backing), 0, @intCast(tree_at), linux.POSIX_FADV.WILLNEED);
+    // The whole image, data and hash tree, read into the page cache in the
+    // background from now: the boot reads most of it, and a cloud's network
+    // disk answers a few large reads far sooner than hundreds of small ones.
+    // (Asking for the tree first was measured on GCP too: no faster.)
+    _ = linux.fadvise(@intCast(backing), 0, 0, linux.POSIX_FADV.WILLNEED);
 
     var cfg: LoopConfig = .{
         .fd = @intCast(backing),
@@ -435,7 +449,13 @@ fn parseUuid(s: []const u8) ?[16]u8 {
 
 // --- the command line ----------------------------------------------------------
 
-const Boot = struct { uuid: []const u8 = "", dir: []const u8 = "", slot: []const u8 = "" };
+const Boot = struct {
+    uuid: []const u8 = "",
+    dir: []const u8 = "",
+    slot: []const u8 = "",
+    /// werewolf.deadman, in seconds, or 0 for none given.
+    deadman: u32 = 0,
+};
 
 /// werewolf.victim=UUID:/DIR and werewolf.slot=a|b, both or neither, each
 /// once, and well formed.
@@ -452,6 +472,14 @@ fn parseCmdline(text: []const u8) !Boot {
             b.slot = arg["werewolf.slot=".len..];
             if (!std.mem.eql(u8, b.slot, "a") and
                 !std.mem.eql(u8, b.slot, "b")) return error.BadSlot;
+        } else if (std.mem.startsWith(u8, arg, "werewolf.deadman=")) {
+            if (b.deadman > 0) return error.Twice;
+            const secs = arg["werewolf.deadman=".len..];
+            // Plain digits: no sign, no leading zero.
+            if (secs.len == 0 or secs.len > 3 or secs[0] == '0') return error.BadDeadman;
+            for (secs) |c| if (!std.ascii.isDigit(c)) return error.BadDeadman;
+            b.deadman = std.fmt.parseInt(u32, secs, 10) catch return error.BadDeadman;
+            if (b.deadman > deadman_after) return error.BadDeadman;
         }
     }
     if ((victim == null) != (b.slot.len == 0)) return error.Unpaired;
@@ -580,6 +608,20 @@ test parseCmdline {
     try testing.expectError(
         error.BadVictim,
         parseCmdline("werewolf.victim=nope:/w werewolf.slot=a"),
+    );
+
+    // The deadman's wait: plain seconds, 1 to 600, once.
+    const pair = "werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a ";
+    try testing.expectEqual(20, (try parseCmdline(pair ++ "werewolf.deadman=20")).deadman);
+    try testing.expectEqual(0, (try parseCmdline(pair)).deadman);
+    for ([_][]const u8{ "0", "601", "020", "+20", "2O", "" }) |v| {
+        var buf: [96]u8 = undefined;
+        const line = try std.mem.print(&buf, "{s}werewolf.deadman={s}", .{ pair, v });
+        try testing.expectError(error.BadDeadman, parseCmdline(line));
+    }
+    try testing.expectError(
+        error.Twice,
+        parseCmdline(pair ++ "werewolf.deadman=20 werewolf.deadman=30"),
     );
 }
 

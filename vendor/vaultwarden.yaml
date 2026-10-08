@@ -1,0 +1,63 @@
+# Vaultwarden for werewolf's vaultwarden form, as Wolfi would package it:
+# built by melange in Wolfi's environment with Wolfi's Rust, linked to
+# Wolfi's OpenSSL and SQLite, so their fixes reach a machine with the rest
+# of its packages (vendor/build.mk unpacks it into the image and lists
+# what it links). cargo-auditable records its crates in the binary, for
+# scanners. Offered to wolfi-dev/os as it is; when Wolfi ships it, the
+# form names the package and this file goes.
+package:
+  name: vaultwarden
+  version: 1.37.4
+  epoch: 0
+  description: Bitwarden-compatible password manager server
+  copyright:
+    - license: AGPL-3.0-only
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cargo-auditable
+      - openssl-dev
+      - pkgconf
+      - rust-1.98
+      - sqlite-dev
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://github.com/dani-garcia/vaultwarden/archive/refs/tags/${{package.version}}.tar.gz
+      expected-sha256: d31a3ef5456619cfe424f0586f4ecadd186e22513a93bbeab6bc2f09cda803a7
+
+  # SQLite and OpenSSL from Wolfi, dynamically; mimalloc in its secure mode
+  # (guard pages, encrypted free lists), compiled in.
+  - runs: |
+      cargo auditable build --release --locked --features sqlite_system,enable_mimalloc
+      install -Dm755 target/release/vaultwarden ${{targets.destdir}}/usr/bin/vaultwarden
+
+  - uses: strip
+
+subpackages:
+  - name: vaultwarden-web
+    description: Vaultwarden's web vault, built by the project from Bitwarden's clients
+    pipeline:
+      - runs: mkdir -p web-vault
+      - uses: fetch
+        with:
+          uri: https://github.com/dani-garcia/bw_web_builds/releases/download/v2026.7.0/bw_web_v2026.7.0.tar.gz
+          expected-sha256: 002e972bf0d0487ec0324b06d916de33e29de4c29bffd92ee3b843084c300570
+          directory: web-vault
+      - runs: |
+          mkdir -p ${{targets.subpkgdir}}/usr/share/vaultwarden
+          cp -a web-vault ${{targets.subpkgdir}}/usr/share/vaultwarden/web-vault
+
+update:
+  enabled: true
+  github:
+    identifier: dani-garcia/vaultwarden

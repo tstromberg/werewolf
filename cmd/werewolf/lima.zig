@@ -198,13 +198,15 @@ pub fn previous(io: Io, gpa: Allocator, m: []const u8) u64 {
 
 /// Wait for a lease for m newer than before: limactl start waits for ssh,
 /// which a werewolf machine never answers, so the lease says it is up.
+/// Looked for every 50 ms, read into one buffer the wait keeps: the lease
+/// comes about a second after the start, and the file is a few kilobytes.
 pub fn awaitAddress(io: Io, gpa: Allocator, m: []const u8, before: u64) !?[]const u8 {
-    var waited: u32 = 0;
-    while (waited < wait_seconds) : (waited += 2) {
-        if (Dir.cwd().readFileAlloc(io, leases, gpa, .limited(4 << 20))) |text| {
-            if (lease(text, m)) |l| if (l.expiry > before) return l.ip;
+    const buf = try gpa.alloc(u8, 4 << 20);
+    for (0..wait_seconds * 20) |_| {
+        if (Dir.cwd().readFile(io, leases, buf)) |text| {
+            if (lease(text, m)) |l| if (l.expiry > before) return try gpa.dupe(u8, l.ip);
         } else |_| {}
-        try io.sleep(.fromSeconds(2), .awake);
+        try io.sleep(.fromMilliseconds(50), .awake);
     }
     return null;
 }

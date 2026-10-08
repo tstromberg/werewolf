@@ -81,7 +81,11 @@ untainted, and still load every signed module. And `minimal` boots once
 with one byte of its root image's superblock changed (`make check-verity`):
 dm-verity must name the block, and stage0 must stop before the root is
 mounted. Every other boot checks that its root is mounted through dm-verity
-(`root-verified` in [test/checks](../test/checks)).
+(`root-verified` in [test/checks](../test/checks)). And a slot that boots
+but never commits must be taken back (`make check-deadman`): a DEV build of
+`minimal`, whose root alone lets `werewolf.deadman` shorten stage0's ten
+minutes to twenty seconds, boots with no loader to commit to; the deadman
+must say why on the console and reset the machine.
 
 Seven boots put `prod` behind a stand-in metadata server
 ([test/metadata](../test/metadata), driven by
@@ -317,7 +321,11 @@ container, so cage asserts them directly, and `WEREWOLF_CHECK=1` has the
 in-container posture service attack them too, as `werewolf.check=1` does on a
 booted machine. What a container cannot own -- the kernel's sysctls and boot
 line, dm-verity, a few mount options -- `POSTURE_KNOWN_NATIVE` allows to
-fail; arm64 still emulates `minimal` and `prod` (the `integrity` and `cloud`
+fail. The host sysctls behind `files-links`, `files-links-attack` and
+`files-memfd-exec` cage raises to werewolf's levels first where it may change
+the host (`CAGE_HARDEN_HOST=1`, which CI sets on its throwaway runners), so
+those attacks run for real; elsewhere a host below werewolf's levels makes
+them expected to fail, and cage says so; arm64 still emulates `minimal` and `prod` (the `integrity` and `cloud`
 groups) to assert those, and the attacks a container cannot carry. `persist`
 is skipped on emulated arm64 (Makefile).
 

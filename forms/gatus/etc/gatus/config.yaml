@@ -1,0 +1,26 @@
+# Gatus for the gatus form: one endpoint, the machine's setting (TARGET;
+# werewolf pack --target), a page on :8080 and history on /data. leash
+# starts Gatus (etc/sv/gatus/service) as the gatus user. A form on this
+# one lays its own file here, with its endpoints and alerting.
+web:
+  port: 8080
+storage:
+  type: sqlite
+  path: /data/svc/gatus/data.db
+  caching: true
+  maximum-number-of-results: 1000
+# No Prometheus endpoint, which would tell anyone what is watched and
+# how it is doing; a form that scrapes it turns it on.
+metrics: false
+ui:
+  title: status
+  header: status
+# The page is read-only and has no login of its own.
+security: {}
+endpoints:
+  - name: target
+    url: ${TARGET}
+    interval: 60s
+    conditions:
+      - "[STATUS] == 200"
+      - "[RESPONSE_TIME] < 2000"

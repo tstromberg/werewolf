@@ -6,9 +6,11 @@
 # and the in-container posture service exercises and attacks them faithfully
 # (WEREWOLF_CHECK=1, below). What a container cannot own -- the kernel's
 # sysctls and boot line (every kernel-* check but kernel-seal, werewolf's own
-# filter), the mount options of nspawn's own mounts, a host sysctl behind a
-# files-* check -- is asserted in emulation instead; POSTURE_KNOWN_NATIVE
-# names the few non-kernel ones, as POSTURE_KNOWN does for a booted machine.
+# filter), the mount options of nspawn's own mounts -- is asserted in
+# emulation instead; POSTURE_KNOWN_NATIVE names the few non-kernel ones, as
+# POSTURE_KNOWN does for a booted machine. The host sysctls behind files-*
+# checks are raised to werewolf's levels where the host may be changed
+# (CAGE_HARDEN_HOST=1), and judged as they are where it may not (below).
 #
 # This is the native half of the arm64 checks, where a full-machine boot would
 # otherwise emulate slowly (docs/testing.md). Run where sudo works.
@@ -30,6 +32,33 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { say FAIL "$1"; exit 1; }
+
+# The host settings a container inherits and cannot set, each at the level
+# werewolf sets on its own kernel (cmd/init/kernel.zig), with the files-*
+# checks it decides. With CAGE_HARDEN_HOST=1, on a machine that is thrown
+# away after (CI's runners), each is raised to werewolf's level first, so
+# those attacks run for real and must fail; vm.memfd_noexec at 2 cannot be
+# lowered again until the host reboots. Elsewhere the host is left as it
+# is, and a setting below werewolf's makes its checks expected to fail.
+host_known=""
+while read -r key want ids; do
+	[ -n "$key" ] || continue
+	path=/proc/sys/$(echo "$key" | tr . /)
+	have=$(cat "$path" 2>/dev/null) || continue
+	if [ "$have" -lt "$want" ] && [ "${CAGE_HARDEN_HOST:-}" = 1 ]; then
+		echo "$want" | sudo tee "$path" >/dev/null && have=$(cat "$path")
+	fi
+	if [ "$have" -lt "$want" ]; then
+		say note "host $key is $have, below werewolf's $want: expecting $ids to fail"
+		host_known="$host_known $ids"
+	fi
+done <<EOF
+fs.protected_symlinks 1 files-links files-links-attack
+fs.protected_hardlinks 1 files-links files-links-attack
+fs.protected_fifos 2 files-links
+fs.protected_regular 2 files-links files-links-attack
+vm.memfd_noexec 2 files-memfd-exec
+EOF
 
 # A writable copy of the read-only erofs tree: nspawn and runit write a few
 # files (machine-id, resolv.conf, the supervise directories).
@@ -63,13 +92,14 @@ done
 
 # The posture line ends in the full JSON, which says each check's area. A
 # failing check is expected here if it is a kernel-* check other than
-# kernel-seal (the container shares the host's kernel), or POSTURE_KNOWN_NATIVE
-# names it. Anything else failing is a regression in a protection that should
-# hold natively.
+# kernel-seal (the container shares the host's kernel), if POSTURE_KNOWN_NATIVE
+# names it, or if a host setting below werewolf's decides it (above).
+# Anything else failing is a regression in a protection that should hold
+# natively.
 got=$(printf '%s\n' "$line" | sed -E 's/.*fail=([^ ]*) .*/\1/' | tr ',' ' ')
 passed=$(printf '%s\n' "$line" | sed -E 's/.*pass=([0-9]+).*/\1/')
 json=$(printf '%s\n' "$line" | sed -E 's/^[^{]*(\{.*\})[^}]*$/\1/')
-known=" ${POSTURE_KNOWN_NATIVE:-} "
+known=" ${POSTURE_KNOWN_NATIVE:-} $host_known "
 new=""
 for id in $got; do
 	case $known in *" $id "*) continue ;; esac

@@ -1,0 +1,22 @@
+# gatus: prod, with Gatus watching a service and showing a status page
+# on :8080. The page is read-only and has no login: put it behind caddy
+# or oauth2-proxy, or on a tailnet, to show it beyond the machine. What
+# it watches is a setting (--target); a form of your own lays its
+# config.yaml over etc/gatus/config.yaml for more endpoints and alerts.
+# Its history is in /data/svc/gatus. leash starts it
+# (etc/sv/gatus/service) as the gatus user. See docs/gatus.md.
+include: prod.yaml
+contents:
+  packages:
+    - gatus
+
+accounts:
+  groups:
+    - groupname: gatus
+      gid: 211
+  users:
+    - username: gatus
+      uid: 211
+      gid: 211
+      homedir: /var/empty
+      shell: /sbin/nologin

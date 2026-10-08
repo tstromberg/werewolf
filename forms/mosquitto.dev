@@ -1,0 +1,2 @@
+# The check speaks MQTT with Mosquitto's own clients.
+mosquitto-clients

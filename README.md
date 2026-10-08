@@ -96,6 +96,8 @@ one includes `minimal`. `make list-forms` shows the include chains.
 | `bastion` | forwarding-only SSH with explicit destinations and hybrid post-quantum key exchange ([security and tutorial](examples/bastion/README.md)) |
 | `tailscale` | unprivileged, userspace subnet router ([security and tutorial](examples/tailscale/README.md)) |
 | `caddy`, `valkey`, `openbao`, `step-ca`, `wordpress` | a web server with its own certificates, a cache, a secrets store, an internal CA and a site, each leashed and set up from the config before it serves ([docs/forms.md](docs/forms.md)) |
+| `gatus`, `sftpgo`, `cloudflared`, `oauth2-proxy`, `mosquitto`, `nats`, `minio` | a status page, SFTP, a tunnel with no open port, a login in front of anything, an MQTT broker, a message bus and S3 storage ([docs/forms.md](docs/forms.md)) |
+| `ollama`, `gitea`, `vaultwarden` | model inference, git hosting and a password manager ([docs/forms.md](docs/forms.md)) |
 | `nginx`, `php`, `node`, `python`, `jre` | `prod` and one runtime, leashed: bake your site or application into a form on one ([docs/forms.md](docs/forms.md)) |
 | `postgresql`, `demo` | leashed services |
 | `webshell-example` | a deliberately vulnerable web app, to show the sandbox holds (`make webshell-demo`) |

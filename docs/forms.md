@@ -29,6 +29,16 @@ why there are so few.
 | `openbao` | `prod` | OpenBao, unsealed by a key from the config and set up by itself ([openbao.md](openbao.md)) |
 | `step-ca` | `prod` | an internal certificate authority, ACME for the names the config allows ([step-ca.md](step-ca.md)) |
 | `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](wordpress.md)) |
+| `gatus` | `prod` | a status page watching a service ([gatus.md](gatus.md)) |
+| `sftpgo` | `prod` | SFTP for the users the config names, nothing else ([sftpgo.md](sftpgo.md)) |
+| `cloudflared` | `prod` | a Cloudflare Tunnel: hostnames served with no open port ([cloudflared.md](cloudflared.md)) |
+| `oauth2-proxy` | `prod` | a login in front of anything, by an OIDC provider ([oauth2-proxy.md](oauth2-proxy.md)) |
+| `mosquitto` | `prod` | an MQTT broker over TLS, users and ACLs from the config ([mosquitto.md](mosquitto.md)) |
+| `nats` | `prod` | a NATS server over TLS, with JetStream on `/data` ([nats.md](nats.md)) |
+| `minio` | `prod` | S3 object storage from `/data` ([minio.md](minio.md)) |
+| `ollama` | `prod` | models served on the CPU, behind a login of your choosing ([ollama.md](ollama.md)) |
+| `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](gitea.md)) |
+| `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](vaultwarden.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell; and a host for virtual machines |
 | `lima` | `prod` | the Lima test vehicle (`make lima`) |
 
@@ -93,6 +103,20 @@ it builds, so a slot built on the machine holds what the build's did.
 The package stays installed as far as apk's database and a release's
 manifest know; posture reports what the image holds. It is for a file a
 dependency drags in, never for trimming a package the form uses.
+
+## Packages Wolfi does not ship
+
+A form whose application Wolfi does not package yet names a melange
+recipe for it, in Wolfi's own style, in `forms/<name>.melange`, one path
+a line (werewolf's are in `vendor/`): `vaultwarden` names
+`vendor/vaultwarden.yaml`. The build runs melange in Wolfi's environment,
+checks each source by sha256, unpacks the packages over the image, and
+fails if a library they link is not one of the form's packages, so
+Wolfi's fixes to those reach the machine through its updater. While
+writing a recipe, `werewolf build-apk RECIPE` builds it alone and says
+what each package links. On macOS melange runs in QEMU, booted from
+werewolf's own Alpine kernel; on Linux, in bubblewrap. A recipe is also
+the pull request to wolfi-dev/os that retires it.
 
 ## Private configuration files
 

@@ -29,6 +29,9 @@ apko_version=1.3.1
 zig_version=0.17.0 # the Makefile's ZIG_VERSION
 erofs_version=1.9.4
 erofs_sha256=7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
+# Firecracker, on Linux: werewolf create keeps machines on it where there
+# is KVM (cmd/werewolf/firecracker.zig); no distribution packages it.
+fc_version=1.17.0
 
 die() {
 	echo "install-deps: $*" >&2
@@ -99,10 +102,12 @@ Linux)
 	x86_64)
 		zig_sha256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 		apko_sha256=b8c39ff7e63864efa1296d36a95d3c56f750ef2ab41cdc6d7fad0ae6a483b604
+		fc_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
 		;;
 	aarch64)
 		zig_sha256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
 		apko_sha256=47ec5e9e66372629919598f5176b37e9e47a3be456b2c8c9541a891065123fbb
+		fc_sha256=e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256
 		;;
 	*) die "$arch is not supported: x86_64 or aarch64" ;;
 	esac
@@ -207,10 +212,13 @@ esac
 
 # What is to do: the packages not installed, and upstream's that are
 # missing or not the pinned version.
-need_apko='' need_zig='' need_erofs=''
+need_apko='' need_zig='' need_erofs='' need_fc=''
 if [ -n "$zos" ]; then
 	[ "$only" = zig ] || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes
 	[ "$only" = apko ] || [ "$(zig version 2>/dev/null)" = "$zig_version" ] || need_zig=yes
+fi
+if [ "$zos" = linux ] && [ -z "$only" ]; then
+	[ "$(firecracker --version 2>/dev/null | head -n 1)" = "Firecracker v$fc_version" ] || need_fc=yes
 fi
 [ -n "$only" ] || erofs_ok || need_erofs=yes
 case $only in
@@ -250,7 +258,7 @@ show() { # show COMMAND...: on one line, indented
 	echo
 }
 
-if [ -n "$missing$need_apko$need_zig$need_erofs" ]; then
+if [ -n "$missing$need_apko$need_zig$need_erofs$need_fc" ]; then
 	echo "install-deps: on $system ($arch)${root:+, as root through $root}, this will:"
 	echo
 	if [ -n "$missing" ]; then
@@ -263,6 +271,8 @@ if [ -n "$missing$need_apko$need_zig$need_erofs" ]; then
 	esac
 	[ -z "$need_zig" ] ||
 		echo "  install zig $zig_version from ziglang.org in /usr/local/zig-$zig_version, linked as /usr/local/bin/zig"
+	[ -z "$need_fc" ] ||
+		echo "  install firecracker $fc_version from github.com/firecracker-microvm as /usr/local/bin/firecracker"
 	if [ -n "$need_erofs" ]; then
 		echo "  if mkfs.erofs is then older than 1.9 or has no zstd, build erofs-utils $erofs_version"
 		show into $erofs_prefix, after: $install $erofs_deps
@@ -344,6 +354,14 @@ if [ -n "$need_zig" ]; then
 	$root mkdir -p /usr/local/bin
 	$root cp -R "$tmp/zig" "/usr/local/zig-$zig_version"
 	$root ln -sf "/usr/local/zig-$zig_version/zig" /usr/local/bin/zig
+fi
+
+if [ -n "$need_fc" ]; then
+	fetch "https://github.com/firecracker-microvm/firecracker/releases/download/v$fc_version/firecracker-v$fc_version-$arch.tgz" \
+		"$fc_sha256" firecracker.tgz
+	tar -xzf "$tmp/firecracker.tgz" -C "$tmp" "release-v$fc_version-$arch/firecracker-v$fc_version-$arch"
+	$root mkdir -p /usr/local/bin
+	$root install -m 0755 "$tmp/release-v$fc_version-$arch/firecracker-v$fc_version-$arch" /usr/local/bin/firecracker
 fi
 
 hash -r

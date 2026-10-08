@@ -11,7 +11,7 @@ speaks HTTP and each daemon's own check in test/checks-FORM; and a socket
 bound to loopback alone counted as the machine's own by posture and the
 listeners check (OpenBao's cluster port). `listen udp` waits with the
 forms that need it. What differs from the plan below is noted in each
-form's section.
+form's section. What comes after these is [forms-catalog.md](forms-catalog.md).
 
 Forms for the services people most want on a machine that is hard to take
 over: wordpress and wordpress-mariadb, caddy, haproxy, bastion, wireguard,

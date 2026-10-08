@@ -1,0 +1,3 @@
+# MinIO serves S3, and sends nothing: no KMS, no notifications, no
+# replication, no update check.
+listen tcp/9000

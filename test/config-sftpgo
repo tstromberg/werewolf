@@ -1,0 +1,15 @@
+#!/bin/sh
+# config-sftpgo DIR: the sftpgo form's config for make check, in DIR: one
+# user, check, with the key make check made for the run (DIR's sibling
+# FORM-key.pub, which test/boot logs in with), allowed everything in a
+# directory of its own.
+set -eu
+d=$1/sftpgo
+mkdir -p "$d"
+umask 077
+key=$(cat "${1%-config}-key.pub")
+cat >"$d/users.json" <<JSON
+{"users": [{"username": "check", "status": 1, "home_dir": "/data/svc/sftpgo/users/check",
+  "public_keys": ["$key"],
+  "permissions": {"/": ["list", "download", "upload", "overwrite", "delete", "rename", "create_dirs"]}}]}
+JSON

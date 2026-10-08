@@ -1,0 +1,2 @@
+# A shell script nothing runs, from the package.
+usr/bin/docker-entrypoint.sh

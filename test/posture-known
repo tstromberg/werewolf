@@ -37,7 +37,3 @@ example-aspnet programs-no-interpreters
 webshell-example programs-no-interpreters programs-no-network-tools
 jre programs-no-interpreters
 wordpress programs-no-interpreters
-# Wolfi's valkey depends on posix-libc-utils, whose ldd is a bash script,
-# so the image carries bash until Wolfi drops that dependency
-# (docs/design/service-forms.md, Packages that bring a shell).
-valkey programs-no-shell

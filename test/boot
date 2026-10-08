@@ -219,11 +219,97 @@ proc host {cmd} {
 # order, since sshd holds a failed login against its source for a while.
 if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	set level ERROR
-	if {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} { set level DEBUG1 }
+	if {[info exists env(SSH_MODE)] && ([string match "bastion*" $env(SSH_MODE)] || $env(SSH_MODE) eq "sftpgo" || $env(SSH_MODE) eq "gitea")} { set level DEBUG1 }
 	set ssh [list ssh -F /dev/null -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=$level -o IdentitiesOnly=yes]
 	set key [list -i $env(SSH_KEY)]
-	if {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} {
+	if {[info exists env(SSH_MODE)] && $env(SSH_MODE) eq "gitea"} {
+		# A git user, from the host: a repository made and the run's key
+		# added through the API as the administrator gitea-init made;
+		# cloned over Gitea's SSH, a commit pushed, and the branch there;
+		# a command that is not git's, a remote forward, a password and a
+		# non-post-quantum exchange refused.
+		set api http://127.0.0.1:$env(GITEA_PORT)/api/v1
+		set auth admin:werewolf-check-pass
+		set in 0
+		for {set i 0} {$i < 60 && !$in} {incr i} {
+			lassign [host [list curl -sS -m 10 -u $auth -H {Content-Type: application/json} \
+				-d {{"name":"check","private":true,"default_branch":"main"}} $api/user/repos]] status out
+			# A second boot finds the first's repository kept on /data.
+			if {$status == 0 && ([string match "*\"full_name\":\"admin/check\"*" $out] ||
+				[string match "*same name already exists*" $out])} { set in 1 } else { after 1000 }
+		}
+		if {$in} { say ok gitea-repo-made } else { say FAIL gitea-repo-made $out; incr failed }
+		set f [open $env(SSH_KEY).pub]; set pub [string trim [read $f]]; close $f
+		lassign [host [list curl -sS -m 10 -u $auth -H {Content-Type: application/json} \
+			-d "{\"title\":\"check\",\"key\":\"$pub\"}" $api/user/keys]] status out
+		if {$status == 0 && ([string match "*\"title\":\"check\"*" $out] || [string match "*has been used*" $out])} {
+			say ok gitea-key-added
+		} else { say FAIL gitea-key-added $out; incr failed }
+		set work [file join [file dirname $log] gitea-clone]
+		file delete -force $work
+		set gitssh "ssh -F /dev/null -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o IdentitiesOnly=yes -i [file normalize $env(SSH_KEY)]"
+		set pushed 0
+		for {set i 0} {$i < 20 && !$pushed} {incr i} {
+			lassign [host [list env GIT_SSH_COMMAND=$gitssh git clone -q ssh://git@127.0.0.1:$env(SSH_PORT)/admin/check.git $work]] status out
+			if {$status == 0} { set pushed 1 } else { after 2000 }
+		}
+		if {$pushed} {
+			set f [open [file join $work README] w]; puts $f "werewolf check"; close $f
+			lassign [host [list env GIT_SSH_COMMAND=$gitssh GIT_AUTHOR_NAME=check GIT_AUTHOR_EMAIL=check@example.test \
+				GIT_COMMITTER_NAME=check GIT_COMMITTER_EMAIL=check@example.test git -C $work add README]] s1 o1
+			lassign [host [list env GIT_AUTHOR_NAME=check GIT_AUTHOR_EMAIL=check@example.test GIT_COMMITTER_NAME=check \
+				GIT_COMMITTER_EMAIL=check@example.test git -C $work commit -q -m check]] s2 o2
+			lassign [host [list env GIT_SSH_COMMAND=$gitssh git -C $work push -q -u origin HEAD:main]] status out
+			if {$status != 0} { set pushed 0; append out "\n$o1\n$o2" }
+		}
+		if {$pushed} { say ok gitea-push } else { say FAIL gitea-push $out; incr failed }
+		foreach {check args pattern} {
+			gitea-no-command {git@127.0.0.1 id} {*error:*}
+			gitea-no-remote {-o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 git@127.0.0.1 true} {*}
+			gitea-pq-required {-o KexAlgorithms=curve25519-sha256 git@127.0.0.1 true} {*no matching key exchange method*}
+		} {
+			lassign [host [list {*}$ssh {*}$key {*}$args]] status out
+			if {$status != 0 && [string match $pattern $out] && ![string match "*uid=*" $out]} {
+				say ok $check
+			} else { say FAIL $check $out; incr failed }
+		}
+		lassign [host [list {*}$ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive git@127.0.0.1 true]] status out
+		if {$status != 0 && [string match "*Permission denied (publickey)*" $out]} {
+			say ok gitea-keys-only
+		} else { say FAIL gitea-keys-only $out; incr failed }
+	} elseif {[info exists env(SSH_MODE)] && $env(SSH_MODE) eq "sftpgo"} {
+		# An SFTP user, from the host: files go up and come back as they
+		# went; a shell or command is refused; so are a password, a remote
+		# forward, and a key exchange that is not post-quantum.
+		set up [file join [file dirname $log] sftpgo-upload]
+		set f [open $up w]; puts $f "werewolf check"; close $f
+		set batch [file join [file dirname $log] sftpgo-batch]
+		set f [open $batch w]
+		puts $f "put $up werewolf-check\nls -l\nget werewolf-check $up.back"
+		close $f
+		set in 0
+		for {set i 0} {$i < 30 && !$in} {incr i} {
+			lassign [host [list sftp -F /dev/null -P $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+				-o BatchMode=yes -o ConnectTimeout=10 -o IdentitiesOnly=yes {*}$key -b $batch check@127.0.0.1]] status out
+			if {$status == 0 && [file exists $up.back]} { set in 1 } else { after 1000 }
+		}
+		if {$in && [string match "*werewolf check*" [exec cat $up.back]]} { say ok sftp-round-trip } else { say FAIL sftp-round-trip $out; incr failed }
+		foreach {check args pattern} {
+			sftp-no-session {check@127.0.0.1 true} {*}
+			sftp-no-remote {-o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 check@127.0.0.1 true} {*}
+			sftp-pq-required {-o KexAlgorithms=curve25519-sha256 check@127.0.0.1 true} {*no matching key exchange method*}
+		} {
+			lassign [host [list {*}$ssh {*}$key {*}$args]] status out
+			if {$status != 0 && [string match $pattern $out]} {
+				say ok $check
+			} else { say FAIL $check $out; incr failed }
+		}
+		lassign [host [list {*}$ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive check@127.0.0.1 true]] status out
+		if {$status != 0 && [string match "*Permission denied (publickey)*" $out]} {
+			say ok sftp-keys-only
+		} else { say FAIL sftp-keys-only $out; incr failed }
+	} elseif {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} {
 		set deny_destination 127.0.0.1:22
 		if {$env(SSH_MODE) eq "bastion-config"} {
 			lassign [host [list {*}$ssh {*}$key -W 127.0.0.1:22 bastion@127.0.0.1]] status out

@@ -88,7 +88,11 @@ jobs:
           dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
       - name: Boot and check (${{ matrix.group }})
         # A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no
-        # guest starves.
+        # guest starves. The runner is thrown away after, so test/cage may
+        # raise its link and memfd sysctls to werewolf's own, and the native
+        # attacks on them run for real.
+        env:
+          CAGE_HARDEN_HOST: 1
         run: make -k -j"$(( ($(nproc) + 1) / 2 ))" check-${{ matrix.group }}
       - name: Keep the build and console logs
         if: failure()

@@ -30,8 +30,16 @@ do it on a distro, are not in the image.
 
 - **The name decides**: `reboot` asks for level 6, `poweroff` for level 0.
   Any other name, or any argument, prints usage and exits 2.
-- **Then it becomes `runit-init LEVEL`**, which leaves runit's stop files and
-  signals PID 1. runit runs stage 3 and calls `reboot(2)`.
+- **It sets runit's reboot flag**, `/etc/runit/reboot`, as `runit-init`
+  does: owner-executable to restart, not to power off.
+- **Then it ends stage 2**, `runsvdir`, PID 1's child (from `/proc`), with
+  SIGTERM. runsvdir exits at once, and runit goes to stage 3, which stops
+  the services and puts `/data` down, then calls `reboot(2)` as the flag
+  says. Asked through `runit-init` instead, runit signals stage 2 itself
+  and, unless it has already exited, sleeps a whole second before it looks
+  again: measured under Lima, that second was in six reboots of eight.
+- **Where stage 2 cannot be found or signalled**, it becomes `runit-init
+  LEVEL`, which leaves runit's stop files and signals PID 1, as before.
 - **On failure**, one line, `reboot: runit-init: ERROR`, and exit 1.
 - **Callers**: an operator on the debug shell or over ssh;
   slot-update, after staging an update; power-button, as `poweroff`, after a

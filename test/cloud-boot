@@ -52,7 +52,7 @@ esac
 # and 169.254.169.254:80 reaches the server through nc, one per connection.
 net="user,id=n0,net=169.254.0.0/16,host=169.254.0.2,dhcpstart=169.254.0.15,dns=169.254.0.3,guestfwd=tcp:169.254.169.254:80-cmd:nc 127.0.0.1 $port"
 test/boot "$name" "$checks" "$log" "$@" \
-	${firmware:+-bios "$firmware"} ${smbios:+-smbios "$smbios"} ${chassis:+-smbios "$chassis"} \
+	${firmware:+-bios "$firmware" -boot menu=on,splash-time=0} ${smbios:+-smbios "$smbios"} ${chassis:+-smbios "$chassis"} \
 	-netdev "$net" -device virtio-net-pci,netdev=n0,romfile=
 
 judge() {

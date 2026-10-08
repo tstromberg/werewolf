@@ -128,6 +128,7 @@ gcloud --project="$GCP_PROJECT" compute images create "$GCP_IMAGE" \
   --architecture="$GCP_ARCH" --guest-os-features=UEFI_COMPATIBLE,GVNIC
 gcloud --project="$GCP_PROJECT" compute instances create "$VM" \
   --zone="$GCP_ZONE" --machine-type="$GCP_MACHINE" --image="$GCP_IMAGE" \
+  --boot-disk-type=pd-balanced \
   --network-interface="network=$GCP_NETWORK,subnet=$GCP_SUBNET,nic-type=$GCP_NIC" \
   --tags="$VM" --no-service-account --no-scopes --no-shielded-secure-boot \
   --metadata-from-file="user-data=$SERVICE_BUILD/gcp/config.b64"

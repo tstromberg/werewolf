@@ -1,0 +1,18 @@
+# Gatus, as its own user: it may bind :8080 and no other port, reach
+# what it watches over HTTPS and HTTP and a resolver, read its
+# configuration and the image, and write only its own directories. The
+# target comes from the machine's settings as TARGET, which config.yaml
+# reads.
+exec    /usr/bin/gatus
+user    gatus
+pledge  stdio rpath wpath inet unix connect listen proc
+listen  tcp/8080
+connect tcp/443 tcp/80 tcp/53
+read    /etc/gatus
+config  settings /run/config/gatus/settings.json
+setting target url required as TARGET
+render  env target
+memory  256
+nofile  4096
+env     GATUS_CONFIG_PATH=/etc/gatus/config.yaml
+env     GOMEMLIMIT=192MiB

@@ -1,0 +1,2 @@
+# SFTPGo serves SFTP, and sends nothing.
+listen tcp/22

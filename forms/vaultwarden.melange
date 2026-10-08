@@ -1,0 +1,2 @@
+# Vaultwarden and its web vault, until Wolfi ships them (vendor/build.mk).
+vendor/vaultwarden.yaml

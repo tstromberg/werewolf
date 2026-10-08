@@ -25,11 +25,13 @@
 # kernel registered. That must be the serial port, which every cloud
 # records and QEMU's -nographic shows. On x86_64 it is ttyS0 everywhere. On
 # aarch64 it is not: ttyAMA0 on GCP, Azure, Hetzner and QEMU, ttyS0 on AWS
-# Graviton. So aarch64 names no serial port, and no tty0, which, registered
-# first, would take /dev/console wherever the port named is missing; it
-# names only hvc0, and where there is no hvc0 the kernel takes the serial
-# port the firmware describes in its ACPI SPCR table, whichever it is.
-# Lima's vz, which has no serial port, has hvc0. An ARG of console=hvc0
+# Graviton. ttyAMA0 the kernel takes by itself, from the port the firmware
+# describes in its ACPI SPCR table; Graviton's 16550 it does not, and its
+# console shows the firmware's banner and nothing after. So aarch64 names
+# ttyS0, which registers only where there is a 16550, and then hvc0, last,
+# so /dev/console is the virtio console where there is one (Lima's vz,
+# which has no serial port). No tty0, which, registered first, would take
+# /dev/console wherever the ports named are missing. An ARG of console=hvc0
 # makes /dev/console the virtio console on x86_64 too.
 #
 # Runs on macOS and Linux. Needs mtools (mformat, mmd, mcopy) and
@@ -44,7 +46,7 @@ set -eu
 arch=$1 boot_rootfs=$2 gpt=$3 slot=$4 out=$5 size_mib=$6
 shift 6
 case $arch in
-aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=hvc0' ;;
+aarch64) efi=systemd-bootaa64.efi boot=BOOTAA64.EFI console='console=ttyS0,115200 console=hvc0' ;;
 x86_64) efi=systemd-bootx64.efi boot=BOOTX64.EFI console='console=tty0 console=hvc0 console=ttyS0,115200' ;;
 *)
 	echo "boot/mkdisk: $arch is not supported" >&2

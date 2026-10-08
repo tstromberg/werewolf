@@ -58,8 +58,10 @@
 # for release. ARCH defaults to the host; ARCH=x86_64 on an arm64 host
 # builds fine and boots under TCG, slowly, for checking, not for working in.
 
-ARCH ?= $(shell uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
+# Asked of uname once: `ARCH ?= $(shell ...)` would ask again at every use
+# of $(ARCH), some two hundred times a run, seconds of every make.
 HOST_ARCH := $(shell uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
+ARCH ?= $(HOST_ARCH)
 HOST_OS := $(shell uname -s)
 
 # --- forms --------------------------------------------------------------------
@@ -151,7 +153,8 @@ MODULE_PARAMS = $(if $(and $(filter x86_64,$(ARCH)),$(filter kvm,$(ALLOW))),$(fo
 # one-way mount and the mount broker, posture, the SHELLFREE programs
 # and bite-cleanup are in every form; the rest only in forms whose chain
 # includes the form that needs them: prod (dhcp-client, cloud-metadata,
-# slot-update), postgresql (pg-init, popen-shim) and demo (status-page).
+# slot-update), postgresql (pg-init, popen-shim), gitea (gitea-init,
+# gitea-hook) and demo (status-page).
 # What they share to confine themselves is lib/sandbox.zig, and to mount,
 # lib/broker.zig. Zig is pre-1.0 and changes between releases, so the build
 # insists on the version the code is written for.
@@ -175,6 +178,11 @@ SERVICE_CONFIG_BIN := $(if $(filter prod,$(CHAIN)),$(SERVICE_CONFIG))
 PG_INIT := $(PROGRAMS)/postgresql/usr/lib/werewolf/pg-init
 PG_SHIM := $(PROGRAMS)/postgresql/usr/lib/werewolf/popen-shim.so
 PG_BINS := $(if $(filter postgresql,$(CHAIN)),$(PG_INIT) $(PG_SHIM))
+# Gitea's first administrator, and git's hooks for it without a shell,
+# in any form whose chain includes gitea.
+GITEA_INIT := $(PROGRAMS)/gitea/usr/lib/werewolf/gitea-init
+GITEA_HOOK := $(PROGRAMS)/gitea/usr/lib/werewolf/gitea-hook
+GITEA_BIN := $(if $(filter gitea,$(CHAIN)),$(GITEA_INIT) $(GITEA_HOOK))
 MOUNT_BIN := $(PROGRAMS)/mount/usr/lib/werewolf/mount
 # The mount broker (cmd/mount-broker), which init starts before fence: the
 # mounts root's programs need once fence's Landlock domain forbids their own.
@@ -202,7 +210,7 @@ SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell s
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
 UPDATER_BIN := $(if $(filter prod,$(CHAIN)),$(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update)
 STATUS_BIN := $(if $(filter demo,$(CHAIN)),$(PROGRAMS)/status-page/usr/lib/werewolf/status-page)
-OVERLAY_DIRS = $(CHAIN_DIRS) $(OUT)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
+OVERLAY_DIRS = $(CHAIN_DIRS) $(OUT)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(if $(DHCP_BIN),$(PROGRAMS)/dhcp-client) $(if $(CLOUD_BIN),$(PROGRAMS)/cloud-metadata) $(PROGRAMS)/bite-cleanup $(if $(PG_BINS),$(PROGRAMS)/postgresql) $(if $(GITEA_BIN),$(PROGRAMS)/gitea) $(if $(UPDATER_BIN),$(PROGRAMS)/slot-update) \
 	$(if $(STATUS_BIN),$(PROGRAMS)/status-page) $(if $(SERVICE_CONFIG_BIN),$(PROGRAMS)/service-config)
 
 # --- locks --------------------------------------------------------------------
@@ -221,8 +229,13 @@ LOCKS = $(FORM_LOCK) $(LOCK)/stage0.lock.json $(LOCK)/kernel.lock.json $(LOCK)/b
 # run as root on the console: busybox-full on top of the form's packages,
 # locked apart, and built apart, in build/<arch>/<form>-dev. No form needs
 # it to work; the forms that log people in carry busybox-full themselves.
+# A check that speaks the daemon's own protocol needs its client (mc,
+# mosquitto_sub, nats): forms/<name>.dev names such packages, one a line,
+# along the chain, for DEV=1 builds alone. What ships never has them.
 DEV ?=
 FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev).lock.json
+DEV_LISTS := $(wildcard $(addprefix forms/,$(addsuffix .dev,$(CHAIN))))
+DEV_PACKAGES := busybox-full $(shell cat $(DEV_LISTS) /dev/null | sed 's/\#.*//' | awk 'NF')
 
 # apko lock CONFIG, from CONFIG's directory, where apko resolves include:,
 # and then from forms/, for DEV's config.
@@ -338,7 +351,7 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all install-deps image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-deadman check-metadata check-dist check-gcp demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-static-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-gcp
 
 all: image
@@ -350,6 +363,8 @@ install-deps:
 
 # Compiled tutorial applications; their toolchains stay on the build host.
 include examples/build.mk
+# Applications Wolfi does not ship, built here from pinned releases.
+include vendor/build.mk
 ifneq ($(APP),)
 OVERLAY_DIRS += $(APP)
 $(OUT)/meta.stamp $(OUT)/overlay.tar: $(shell find $(APP) -type f -o -type d)
@@ -362,8 +377,9 @@ $(FORM_LOCK): $(addprefix forms/,$(addsuffix .yaml,$(CHAIN))) $(if $(DEV),$(BUIL
 
 # DEV's config: the form, and a shell. It has a name of its own, since one
 # that included its own name would find itself.
-$(BUILD)/dev/%-dev.yaml:
-	mkdir -p $(dir $@) && printf 'include: %s.yaml\ncontents:\n  packages:\n    - busybox-full\n' $* >$@
+$(BUILD)/dev/%-dev.yaml: $(DEV_LISTS)
+	mkdir -p $(dir $@) && printf 'include: %s.yaml\ncontents:\n  packages:\n' $* >$@ && \
+		for p in $(DEV_PACKAGES); do printf '    - %s\n' $$p >>$@; done
 
 $(LOCK)/stage0.lock.json: cmd/stage0/stage0.yaml
 	$(call apko_lock,$<)
@@ -436,10 +452,10 @@ $(OUT)/modules.tar: $(BUILD)/vmlinuz $(MODULE_LISTS) $(ALLOW_FILES) Makefile
 # Under DEV, busybox-full brings the shell: an extra package by default, or,
 # under FREEZE, pinned by the -dev lock ($(FORM_LOCK)) like the rest.
 $(OUT)/rootfs.tar: $(FORM_LOCK)
-	$(call apko_build,forms/$(FORM).yaml,$<,$(if $(DEV),$(if $(FREEZE),,-p busybox-full)))
+	$(call apko_build,forms/$(FORM).yaml,$<,$(if $(DEV),$(if $(FREEZE),,$(addprefix -p ,$(DEV_PACKAGES)))))
 
 # werewolf's own files: each form's folder along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) $(SERVICE_CONFIG_BIN)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(GITEA_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) $(SERVICE_CONFIG_BIN)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -514,6 +530,8 @@ $(foreach p,dhcp-client cloud-metadata mount mount-broker modload iface-up fence
 $(eval $(call program,bite-cleanup,$(BITE_CLEANUP)))
 $(eval $(call program,service-config,$(SERVICE_CONFIG)))
 $(eval $(call program,pg-init,$(PG_INIT)))
+$(eval $(call program,gitea-init,$(GITEA_INIT)))
+$(eval $(call program,gitea-hook,$(GITEA_HOOK)))
 $(eval $(call program,init,$(INIT_BIN)))
 $(eval $(call program,stage0,$(STAGE0_BIN)))
 
@@ -552,7 +570,7 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(PRUNE_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub release/tiers.pub release/advisories Makefile $(SERVICE_CONFIG_BIN)
+$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/stage0/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(MODULE_LISTS) $(NET_LISTS) $(PRUNE_LISTS) $(shell find $(CHAIN_DIRS) -type f) $(DHCP_BIN) $(CLOUD_BIN) $(BITE_CLEANUP) $(PG_BINS) $(GITEA_BIN) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(UPDATER_BIN) $(STATUS_BIN) release/image.pub release/tiers.pub release/advisories Makefile $(SERVICE_CONFIG_BIN)
 	rm -rf $(OUT)/meta
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
@@ -906,8 +924,13 @@ SHELLFREE_CHECKS = $(addprefix check-shellfree-,$(SHELLFREE_FORMS))
 # vulnerability database in memory while it scans, so demo gets what
 # test/lima-demo gives it.
 CHECK_MEM_demo = 2048
+# A form whose daemon would reach its service on the Internet and exit when
+# refused (cloudflared's tunnel, with a token the check cannot have) is
+# checked with no way out (restrict=on): it keeps trying, which is what the
+# check wants to see, and the host's ports still reach it.
+CHECK_NET_cloudflared = $(comma)restrict=on
 CHECK_QEMU = $(QEMU) -smp 2 -m $(or $(CHECK_MEM_$(FORM)),1024) -no-reboot -device virtio-rng-pci \
-	-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
+	-netdev user,id=n0$(CHECK_NET_$(FORM)) -device virtio-net-pci,netdev=n0,romfile=
 # panic=1 with -no-reboot: a panic ends QEMU at once rather than hanging.
 # werewolf.check=1 adds posture's attacks, which write to the kernel log.
 # A check boot that stalls panics, so the run fails in seconds with the
@@ -926,12 +949,14 @@ export POSTURE_KNOWN = $(shell awk -v b=$(if $(DEV),dev,*) -v f=$(FORM) -v a=$(A
 # The posture checks test/cage expects to fail in a container, beyond the
 # kernel-* checks it allows by their area (the container shares the host's
 # kernel; only kernel-seal, werewolf's own filter, must hold there). These
-# are a host sysctl behind a files-* check, the mount options of nspawn's own
-# mounts, and the tools a -dev build carries; all are asserted in emulation.
-export POSTURE_KNOWN_NATIVE = files-root-readonly files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-memfd-exec files-links files-system-writes processes-mem-attack network-no-login programs-no-shell programs-no-downloaders programs-no-interpreters
+# are the mount options of nspawn's own mounts, and the tools a -dev build
+# carries; all are asserted in emulation. The host sysctls behind files-*
+# checks test/cage judges by the host itself, raising them where it may
+# (CAGE_HARDEN_HOST=1, CI's runners).
+export POSTURE_KNOWN_NATIVE = files-root-readonly files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-system-writes processes-mem-attack network-no-login programs-no-shell programs-no-downloaders programs-no-interpreters
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
-CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update $(SERVICE_CONFIG)
+CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/rootfs.tar $(BUILD)/stage0/init.tar $(DHCP) $(CLOUD) $(BITE_CLEANUP) $(PG_INIT) $(PG_SHIM) $(GITEA_INIT) $(GITEA_HOOK) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(PROGRAMS)/slot-update/usr/lib/werewolf/slot-update $(SERVICE_CONFIG)
 # minimal has no updater, which would fetch from the network once committed.
 CHECK_SLOT_FORM = minimal
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
@@ -945,7 +970,7 @@ DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e
 .PHONY: check-forms check-shellfree check-integrity check-cloud
 check-forms:     $(addprefix check-,$(FORMS))
 check-shellfree: $(SHELLFREE_CHECKS)
-check-integrity: check-slot check-unsigned check-verity
+check-integrity: check-slot check-unsigned check-verity check-deadman
 check-cloud:     check-metadata check-nodata check-lease check-static
 
 check: check-forms check-shellfree check-integrity check-cloud check-persist
@@ -1020,8 +1045,8 @@ _check-form: $(WEREWOLF)
 		$(if $(wildcard test/config-$(FORM)),test/config-$(FORM) $(CHECK)/$(FORM)-config &&) \
 		$(WEREWOLF) pack $(FORM) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
 	@awk '$(if $(filter tailscale,$(FORM)),$$2 != "listeners",1)' test/checks $(wildcard test/checks-$(FORM)) >$(CHECK)/$(FORM)-checks
-	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
-	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
+	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key GITEA_PORT=$(CHECK_WEB) test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
+	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key GITEA_PORT=$(CHECK_WEB) test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
 	@! grep -a -E 'werewolf: (formatting|making LUKS2) ' $(CHECK)/$(FORM)-again.log || \
 		{ echo "FAIL   $(FORM)-again        formatted the disk its first boot left"; exit 1; }
 	@# An ssh host key made and kept on the first boot is the one the second
@@ -1064,7 +1089,10 @@ _check-shellfree-boot:
 # side.
 comma := ,
 CHECK_SSH = $(if $(shell cat $(wildcard $(addprefix forms/,$(addsuffix .net,$(CHAIN)))) /dev/null | grep -x 'listen tcp/22'),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 22200 + $$1 }'))
-CHECK_FORM_QEMU = $(if $(CHECK_SSH),$(subst user$(comma)id=n0,user$(comma)id=n0$(comma)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22,$(CHECK_QEMU)),$(CHECK_QEMU)) \
+# A form test/boot drives through its web API from the host too (gitea):
+# its port, forwarded beside ssh's, from a range of its own.
+CHECK_WEB = $(if $(filter gitea,$(FORM)),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 23200 + $$1 }'))
+CHECK_FORM_QEMU = $(if $(CHECK_SSH),$(subst user$(comma)id=n0,user$(comma)id=n0$(comma)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(comma)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:3000),$(CHECK_QEMU)),$(CHECK_QEMU)) \
 	-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
 	-drive file=$(CHECK)/$(FORM).img,format=raw,if=virtio \
 	-drive file=$(CHECK)/$(FORM)-config.tar,format=raw,if=virtio,readonly=on
@@ -1122,6 +1150,39 @@ _check-verity-boot:
 	@grep -a -E -q 'device-mapper: verity:.* corrupted|cannot read erofs superblock' $(CHECK)/verity.log || \
 		{ echo "FAIL   verity             no dm-verity corruption reported; see $(CHECK)/verity.log"; exit 1; }
 	@echo "pass   verity             a changed root image does not boot"
+
+# A slot that boots but never commits must be taken back: stage0's deadman
+# reboots it, and the loader then boots the slot that last committed. Its
+# ten minutes are 20 s here (werewolf.deadman), which stage0 takes from a
+# DEV build's root alone, and no loader is named, so slot-keep has nothing
+# to commit to. The deadman must say why on the console, the kernel must
+# reset (-no-reboot ends QEMU, which no clean power-off preceded), and
+# nothing must have committed.
+check-deadman: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM)
+	@mkdir -p $(CHECK)
+	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) DEV=1 slot >$(CHECK)/deadman-build.log 2>&1 || \
+		{ tail -n 20 $(CHECK)/deadman-build.log; echo "FAIL   deadman build: see $(CHECK)/deadman-build.log"; exit 1; }
+	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) DEV=1 _check-deadman-boot
+
+_check-deadman-boot:
+	@rm -rf $(CHECK)/deadman $(CHECK)/deadman.img && mkdir -p $(CHECK)/deadman/var/lib/werewolf/a && \
+		cp $(OUT)/slot/root.erofs $(CHECK)/deadman/var/lib/werewolf/a/ && \
+		mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK)/deadman $(CHECK)/deadman.img 128M && rm -r $(CHECK)/deadman
+	@# Not test/boot, which would check the machine and power it off first:
+	@# the machine is left alone, and -no-reboot ends QEMU at the reset.
+	@timeout 180 $(CHECK_QEMU) -kernel $(OUT)/slot/vmlinuz -initrd $(OUT)/slot/initramfs.zst \
+		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.deadman=20" \
+		-drive file=$(CHECK)/deadman.img,format=raw,if=virtio </dev/null >$(CHECK)/deadman.log 2>&1; \
+		[ $$? -ne 124 ] || { echo "FAIL   deadman            no reset in 180 s; see $(CHECK)/deadman.log"; exit 1; }
+	@grep -a -q 'stage0: the deadman waits 20s' $(CHECK)/deadman.log || \
+		{ echo "FAIL   deadman            stage0 did not take werewolf.deadman; see $(CHECK)/deadman.log"; exit 1; }
+	@grep -a -q 'stage0: slot a did not commit in 20s; rebooting into the last good slot' $(CHECK)/deadman.log || \
+		{ echo "FAIL   deadman            the deadman did not say why; see $(CHECK)/deadman.log"; exit 1; }
+	@! grep -a -q 'reboot: Power down' $(CHECK)/deadman.log || \
+		{ echo "FAIL   deadman            the machine powered off rather than reset; see $(CHECK)/deadman.log"; exit 1; }
+	@! grep -a -q 'slot-keep: healthy' $(CHECK)/deadman.log || \
+		{ echo "FAIL   deadman            the slot committed; see $(CHECK)/deadman.log"; exit 1; }
+	@echo "pass   deadman            a slot that does not commit is rebooted, and says why"
 
 # An unsigned module offered at boot must be refused: by init on a RAM root,
 # and by stage0 on a slot. test/unsign cuts the signature off evdev, in a
@@ -1293,7 +1354,11 @@ UEFI_VARS = $(firstword $(wildcard \
 	/opt/homebrew/share/qemu/edk2-i386-vars.fd /usr/local/share/qemu/edk2-i386-vars.fd \
 	/usr/share/qemu/edk2-i386-vars.fd /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.fd))
 UEFI_VARS_COPY = $(CHECK)/ovmf-vars.fd
-UEFI_FLAGS = $(if $(filter aarch64,$(ARCH)),-bios $(UEFI_FIRMWARE),\
+# No wait at the firmware's boot menu: arm64's edk2, with no variables to
+# say otherwise, counts one down for 5 s before every boot (QEMU start to
+# ssh, 5.9 s against 0.7 s without), and takes its length from QEMU's
+# -boot; x86_64's OVMF waits for none either way.
+UEFI_FLAGS = -boot menu=on,splash-time=0 $(if $(filter aarch64,$(ARCH)),-bios $(UEFI_FIRMWARE),\
 	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(UEFI_FIRMWARE) \
 	-drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS_COPY))
 # make the writable variables copy (x86_64), or nothing (aarch64).
