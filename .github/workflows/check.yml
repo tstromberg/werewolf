@@ -86,9 +86,10 @@ jobs:
       - name: Install tools
         run: sudo test/ci-setup
       - name: Install example compilers
-        # Only the forms group builds the compiled tutorial applications, which
-        # compile on the host (examples/build.mk) for an image with no toolchain.
-        if: matrix.group == 'forms'
+        # The groups that build every form build the compiled tutorial
+        # applications, which compile on the host (examples/build.mk) for an
+        # image with no toolchain.
+        if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
         run: |
           command -v go || sudo apt-get install -y golang-go
           command -v rustup || sudo apt-get install -y rustup
