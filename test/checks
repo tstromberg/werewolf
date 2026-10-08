@@ -10,7 +10,7 @@
 #         yet. When one starts holding, make it ok and update the docs.
 #
 # A form declares the ports it listens on in its network policy
-# (forms/FORM.net, `listen tcp/PORT`), which the build compiles into
+# (forms/FORM/form.yaml, `listen tcp/PORT`), which the build compiles into
 # /usr/share/werewolf/net as `listen tcp PORT`; ssh's 22 is declared by
 # sshd being installed. The listeners check fails on anything else
 # listening on the network (a socket bound to loopback alone serves the
@@ -18,7 +18,7 @@
 # answering waits for a socket to listen on each declared port but ssh's,
 # and http-answering for an HTTP answer on each that speaks it. A daemon
 # that speaks another protocol brings a check of its own in
-# test/checks-FORM, as a daemon's checks are skipped where it is not
+# forms/FORM/test/checks, as a daemon's checks are skipped where it is not
 # installed (command -v), the way data-encrypted is.
 #
 # The machine's settings, and the attacks on them, are posture's to judge
@@ -42,7 +42,7 @@ ok  answering        for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 {
 # provider, and a runtime form's application answers 200. Skipped where
 # the form's daemon speaks TLS there and nothing plain (OpenBao's :8200,
 # Mosquitto's :8883, NATS's :4222): their own protocol is checked in
-# test/checks-FORM.
+# forms/FORM/test/checks.
 ok  http-answering   command -v bao >/dev/null || command -v mosquitto >/dev/null || command -v nats-server >/dev/null || for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 && $3 != 443 { print $3 }' /usr/share/werewolf/net); do i=0; until wget -q -T 5 -S -O /dev/null http://127.0.0.1:$p/ 2>&1 | grep -q 'HTTP/1\.[01] [1-5][0-9][0-9]'; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing answers HTTP on :$p"; exit 1; }; sleep 1; done; done
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts

@@ -36,8 +36,9 @@ Each phase is a file: `kernel.zig`, `config.zig`, `network.zig`, `data.zig`,
    filesystems, all `nosuid` and `noexec`; a cgroup2 tree for leash's
    services; accounts seeded into `/run` from the image's copies.
 2. **The kernel**: lockdown raised to integrity, modules loaded and closed,
-   then the protective sysctls. One the kernel refuses ends the boot, but
-   in a container, where they are the host's.
+   the protective sysctls, then the audit of every refused exec, locked
+   (`lib/audit.zig`). A sysctl the kernel refuses ends the boot, but in a
+   container, where they are the host's; audit it cannot is said and passed.
 3. **The config** on the machine's disks, one tar: the victim's
    `config.tar`, or else the first block device holding one; any other is
    said and ignored. A confined child extracts it to `/run/config` (root's
@@ -55,7 +56,8 @@ Each phase is a file: `kernel.zig`, `config.zig`, `network.zig`, `data.zig`,
    or more. Anything it cannot use is left as it is, and `/data` is an
    empty read-only tmpfs, with the reason in `/run/werewolf/nodata`.
 6. **The seal**, then the two programs that must stay outside fence's
-   domain (the mount broker; DHCP's renewal), then `exec fence runit`.
+   domain (the mount broker; DHCP's renewal), the console opened to the
+   kernel's notices, its refusals, then `exec fence runit`.
 
 ## Drawbacks
 

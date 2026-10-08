@@ -1,15 +1,16 @@
-# The posture checks known to fail on each form (make check; test/boot):
+# The posture checks known to fail on every form of a kind (make check;
+# test/boot, test/cage):
 #
-#   FORM ID...
-#   ARCH ID...
+#   dev ID...    on any form built with DEV=1, as make check builds them
+#   * ID...      on any form built as it ships
+#   ARCH ID...   on that architecture (x86_64, aarch64)
 #
-# A form takes the * line, or, built with DEV=1 as make check builds every
-# form, the dev line; a FORM line, and an ARCH line (x86_64, aarch64), add
-# their ids to it, for that form and on that architecture. ?ID may fail
-# or not, as the host decides. Each is a weakness still
-# open (docs/security.md, "Not yet"): test/boot fails a machine on any
-# other failure, and on any of these that starts passing, so this list
-# cannot claim less, or more, than the machines hold.
+# A form takes the dev or * line, the ARCH line, and the weaknesses its
+# own form.yaml names, each with its excuse (forms/README.md). ?ID may
+# fail or not, as the host decides. Each is a weakness still open
+# (docs/security.md, "Not yet"): test/boot fails a machine on any other
+# failure, and on any of these that starts passing, so no list can claim
+# less, or more, than the machines hold.
 #
 # No form carries a shell but those that log people in (sshd, lima,
 # prod-ssh) and DEV=1 builds, which add busybox-full: its shell, awk,
@@ -18,22 +19,3 @@
 
 dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell
 *
-# qemu-host has KVM, as its form allows, wherever its host lends it the
-# hardware: EL2 on aarch64 (Apple M3 and later, QEMU 11), VMX or SVM on
-# x86_64.
-qemu-host ?kernel-no-hypervisor
-prod-ssh network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell
-# The bastion deliberately permits local forwarding, but no login sessions.
-bastion network-no-login network-ssh-config
-# The runtime forms carry an interpreter by design: that is what they are
-# for (docs/design/forms.md). nginx carries none.
-php programs-no-interpreters
-node programs-no-interpreters
-python programs-no-interpreters
-example-php programs-no-interpreters
-example-node programs-no-interpreters
-example-python programs-no-interpreters
-example-aspnet programs-no-interpreters
-webshell-example programs-no-interpreters programs-no-network-tools
-jre programs-no-interpreters
-wordpress programs-no-interpreters

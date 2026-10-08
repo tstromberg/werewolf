@@ -56,19 +56,27 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
         # The groups of make check (Makefile): forms is every form booted;
-        # shellfree the shell-free rebuilds; integrity the slot, its unsigned
-        # refusal and verity; cloud the metadata, no-data and lease boots;
-        # persist the UEFI-firmware power-cut run (skipped on emulated arm).
-        # x86_64 runs them all under KVM. arm64 has no KVM, so rather than
-        # emulate every form it runs them natively under systemd-nspawn
-        # (native, test/cage); integrity and cloud still emulate minimal and
-        # prod there, asserting the kernel, boot-chain and attack checks a
-        # container cannot carry.
-        group: [forms, shellfree, integrity, cloud, persist, native]
-        exclude:
-          - { runner: ubuntu-26.04, group: native }        # x86_64 emulates fast under KVM
-          - { runner: ubuntu-26.04-arm, group: forms }      # arm runs these natively instead
-          - { runner: ubuntu-26.04-arm, group: shellfree }
+        # shellfree every form rebuilt and booted as it ships; integrity the
+        # slot, its unsigned refusal and verity; cloud the metadata, no-data
+        # and lease boots; persist the UEFI-firmware power-cut run (skipped
+        # on emulated arm). x86_64 runs them all under KVM. arm64 has no
+        # KVM, so rather than emulate every form it runs them natively under
+        # systemd-nspawn (native, test/cage); integrity and cloud still
+        # emulate minimal and prod there, asserting the kernel, boot-chain
+        # and attack checks a container cannot carry. forms, shellfree and
+        # native each split over three runners (SHARD=K/N) to finish in the
+        # time allowed.
+        group: [integrity, cloud, persist]
+        include:
+          - { runner: ubuntu-26.04-arm, group: native, shard: 1, shards: 3 }
+          - { runner: ubuntu-26.04-arm, group: native, shard: 2, shards: 3 }
+          - { runner: ubuntu-26.04-arm, group: native, shard: 3, shards: 3 }
+          - { runner: ubuntu-26.04, group: forms, shard: 1, shards: 3 }
+          - { runner: ubuntu-26.04, group: forms, shard: 2, shards: 3 }
+          - { runner: ubuntu-26.04, group: forms, shard: 3, shards: 3 }
+          - { runner: ubuntu-26.04, group: shellfree, shard: 1, shards: 3 }
+          - { runner: ubuntu-26.04, group: shellfree, shard: 2, shards: 3 }
+          - { runner: ubuntu-26.04, group: shellfree, shard: 3, shards: 3 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
@@ -86,17 +94,44 @@ jobs:
           command -v rustup || sudo apt-get install -y rustup
           rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
           dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
-      - name: Boot and check (${{ matrix.group }})
+      # The packages melange builds from forms' recipes (melange.mk), kept
+      # between runs by the recipes' contents: vaultwarden's is a Rust
+      # build. Saved even when a check fails, as the packages are sound.
+      # Checkout leaves the recipes newer than any stamp restored, so the
+      # stamps are touched to say the packages are current.
+      - name: Restore melange packages
+        id: melange
+        if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            build/vendor/packages
+            build/vendor/stamps
+          key: melange-${{ runner.arch }}-${{ hashFiles('forms/*/melange/*.yaml', 'tools/install-deps') }}
+      - name: Mark restored melange packages current
+        if: steps.melange.outputs.cache-hit == 'true'
+        run: find build/vendor/stamps -type f -exec touch {} +
+      - name: Boot and check (${{ matrix.group }}${{ matrix.shard && format(' {0}/{1}', matrix.shard, matrix.shards) || '' }})
         # A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no
         # guest starves. The runner is thrown away after, so test/cage may
         # raise its link and memfd sysctls to werewolf's own, and the native
         # attacks on them run for real.
         env:
           CAGE_HARDEN_HOST: 1
-        run: make -k -j"$(( ($(nproc) + 1) / 2 ))" check-${{ matrix.group }}
+        run: make -k -j"$(( ($(nproc) + 1) / 2 ))" ${{ matrix.shard && format('SHARD={0}/{1}', matrix.shard, matrix.shards) || '' }} check-${{ matrix.group }}
+      - name: Save melange packages
+        if: >-
+          always() && steps.melange.outcome == 'success' && steps.melange.outputs.cache-hit != 'true'
+          && hashFiles('build/vendor/stamps/**') != ''
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            build/vendor/packages
+            build/vendor/stamps
+          key: ${{ steps.melange.outputs.cache-primary-key }}
       - name: Keep the build and console logs
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: check-${{ runner.arch }}-${{ matrix.group }}
+          name: check-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
           path: build/*/check/*.log

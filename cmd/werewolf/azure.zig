@@ -15,9 +15,10 @@
 //! its default (az configure --defaults group=RG), which werewolf does not
 //! make, and names when it is missing. Azure is the state: a VM's name is
 //! the machine's, and its werewolf-form tag the form it was made from. The
-//! serial console is boot diagnostics', enabled after the VM is made,
-//! since az makes one with none, so a new machine is restarted once to be
-//! watched booting.
+//! serial console is boot diagnostics', which az vm create cannot turn on
+//! (but for a storage account): create turns them on from beside it, as
+//! soon as Azure knows the VM, which is mostly early enough to watch its
+//! first boot whole, and restarts the VM once where it was not.
 
 const std = @import("std");
 const ww = @import("werewolf.zig");
@@ -28,6 +29,11 @@ const Allocator = std.mem.Allocator;
 
 /// How long create waits for a machine to say it is up.
 const wait_seconds = 300;
+/// How long create tries to turn boot diagnostics on while az vm create
+/// makes the VM, and then how long it gives the first boot to show "up
+/// in" before restarting the VM to watch it.
+const enable_seconds = 90;
+const first_boot_seconds = 60;
 const tag = "werewolf-form";
 
 /// The resource group, and its location.
@@ -36,8 +42,6 @@ pub const Place = struct { group: []const u8, location: []const u8 };
 /// The resource group the az CLI defaults to, and where it is, or a
 /// refusal saying what to set.
 pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
-    const account = call(io, gpa, &.{ "az", "account", "show", "--query", "name", "-o", "tsv" });
-    if (!account.ok) return why.refuse("--on azure: {s}", .{lastLine(account.err)});
     const group = call(
         io,
         gpa,
@@ -53,9 +57,10 @@ pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
         gpa,
         &.{ "az", "group", "show", "-n", group.out, "--query", "location", "-o", "tsv" },
     );
+    // az's own words say whether it is the login or the group.
     if (!location.ok) return why.refuse(
-        "--on azure: no resource group {s}: az group create -n {s} -l LOCATION",
-        .{ group.out, group.out },
+        "--on azure: resource group {s}: {s}",
+        .{ group.out, lastLine(location.err) },
     );
     return .{ .group = group.out, .location = location.out };
 }
@@ -302,35 +307,77 @@ pub fn create(
         "-o",
         "none",
     }, why);
-    _ = try need(io, gpa, p, &.{
-        "vm",
-        "create",
-        "-n",
-        name,
-        "--attach-os-disk",
-        disk,
-        "--os-type",
-        "linux",
-        "--size",
-        size orelse m.size,
-        "--security-type",
-        "Standard",
-        "--user-data",
-        tar,
-        "--nsg-rule",
-        "NONE",
-        "--public-ip-sku",
-        "Standard",
-        "--os-disk-delete-option",
-        "Delete",
-        "--nic-delete-option",
-        "Delete",
-        "--tags",
-        try gpa.print("{s}={s}", .{ tag, form }),
-        "-o",
-        "none",
-    }, why);
-    _ = try need(io, gpa, p, &.{ "vm", "boot-diagnostics", "enable", "-n", name }, why);
+    // az vm create returns once the VM is made, and running; Azure keeps a
+    // console only once boot diagnostics are on, which it allows only for a
+    // VM it knows, and keeps only what follows, give or take. So they are
+    // turned on from beside az vm create, as soon as Azure knows the VM,
+    // which is mostly before its first boot ends: then that boot is watched
+    // from the start. Where it was not, the VM is restarted once, to be.
+    const err_path = try gpa.print("{s}/vm-create.err", .{std.fs.path.dirname(tar) orelse "."});
+    defer Dir.cwd().deleteFile(io, err_path) catch {};
+    const err_file = try Dir.cwd().createFile(io, err_path, .{});
+    var maker = std.process.spawn(io, .{
+        .argv = try az(gpa, p, &.{
+            "vm",
+            "create",
+            "-n",
+            name,
+            "--attach-os-disk",
+            disk,
+            "--os-type",
+            "linux",
+            "--size",
+            size orelse m.size,
+            "--security-type",
+            "Standard",
+            "--user-data",
+            tar,
+            "--nsg-rule",
+            "NONE",
+            "--public-ip-sku",
+            "Standard",
+            "--os-disk-delete-option",
+            "Delete",
+            "--nic-delete-option",
+            "Delete",
+            "--tags",
+            try gpa.print("{s}={s}", .{ tag, form }),
+            "-o",
+            "none",
+        }),
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .{ .file = err_file },
+    }) catch |err| {
+        err_file.close(io);
+        return why.refuse("az vm create: {s}", .{@errorName(err)});
+    };
+    err_file.close(io);
+    const start = Io.Clock.awake.now(io);
+    var enabled = false;
+    while (!enabled and start.untilNow(io, .awake).toSeconds() < enable_seconds) {
+        enabled = call(io, gpa, try az(gpa, p, &.{
+            "vm", "boot-diagnostics", "enable", "-n", name,
+        })).ok;
+        if (!enabled) try io.sleep(.fromSeconds(1), .awake);
+    }
+    const term = maker.wait(io) catch |err| return why.refuse(
+        "az vm create: {s}",
+        .{@errorName(err)},
+    );
+    if (term != .exited or term.exited != 0) {
+        // A VM Azure would not make leaves the copy, as create leaves what
+        // it made (docs/design/cli.md), but says so, and how it goes.
+        const said = Dir.cwd().readFileAlloc(io, err_path, gpa, .limited(64 << 10)) catch "";
+        return why.refuse(
+            "az vm: {s}; its disk {s} is left, which werewolf delete {s} --on azure removes",
+            .{ lastLine(said), disk, name },
+        );
+    }
+    if (!enabled)
+        _ = try need(io, gpa, p, &.{ "vm", "boot-diagnostics", "enable", "-n", name }, why);
+    if (try awaitUpWithin(io, gpa, p, name, "", first_boot_seconds) != .late) return;
+    ww.say(io, "{s}: its first boot was not watched from the start; restarting it once", .{name});
     _ = try need(io, gpa, p, &.{ "vm", "restart", "-n", name, "-o", "none" }, why);
 }
 
@@ -400,19 +447,32 @@ pub fn console(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
     return std.json.parseFromSliceLeaky([]const u8, gpa, out, .{}) catch null;
 }
 
-/// What the console says since before was its end: Azure keeps a window
-/// of its last bytes, so the old end is found in it, not counted; where it
-/// has scrolled out, all of the window is new.
+/// What the console says since before, the mark of the run before: Azure
+/// keeps a window of its last bytes across restarts, so the old mark is
+/// found in it, not counted; where it has scrolled out, all of the window
+/// is new.
 pub fn since(text: []const u8, before: []const u8) []const u8 {
     if (before.len == 0) return text;
     const at = std.mem.findLast(u8, text, before) orelse return text;
     return text[at + before.len ..];
 }
 
-/// The console's last bytes, to find its end again after a restart.
-pub fn tail(text: []const u8) []const u8 {
+/// The console from its last line that a clock stamped ("time":"...") to
+/// its end, to find this run's end again after a restart. Not its last
+/// bytes alone: a werewolf boot prints the same lines every time, to the
+/// pids, so those recur in the next run, after its "up in"; a time does
+/// not. Its last bytes where no line has one.
+pub fn mark(text: []const u8) []const u8 {
+    var end = text.len;
+    while (std.mem.findScalarLast(u8, text[0..end], '\n')) |nl| : (end = nl) {
+        const start = if (std.mem.findScalarLast(u8, text[0..nl], '\n')) |b| b + 1 else 0;
+        if (std.mem.find(u8, text[start..nl], "\"time\":\"") != null) return text[start..];
+    }
     return text[text.len -| 256..];
 }
+
+/// How a boot ended, as the console says.
+pub const Boot = enum { up, panic, late };
 
 /// Wait for a boot to finish, or panic, in what the console says after
 /// before, its end when the boot began.
@@ -422,15 +482,26 @@ pub fn awaitUp(
     p: Place,
     name: []const u8,
     before: []const u8,
-) !enum { up, panic, late } {
-    var waited: u32 = 0;
-    while (waited < wait_seconds) : (waited += 10) {
+) !Boot {
+    return awaitUpWithin(io, gpa, p, name, before, wait_seconds);
+}
+
+fn awaitUpWithin(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    before: []const u8,
+    seconds: i64,
+) !Boot {
+    const start = Io.Clock.awake.now(io);
+    while (start.untilNow(io, .awake).toSeconds() < seconds) {
         if (console(io, gpa, p, name)) |text| {
             const new = since(text, before);
             if (std.mem.find(u8, new, "werewolf: up in ") != null) return .up;
             if (std.mem.find(u8, new, "Kernel panic") != null) return .panic;
         }
-        try io.sleep(.fromSeconds(10), .awake);
+        try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
 }
@@ -441,20 +512,28 @@ pub fn awaitUp(
 pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) !void {
     if (find(io, gpa, p, name) != null)
         _ = try need(io, gpa, p, &.{ "vm", "delete", "-n", name, "--yes", "-o", "none" }, why);
+    // Azure frees each only once what uses it has gone, which the VM's
+    // delete leaves it to do in the background: a while, then retried,
+    // and what stays is said, with how it goes.
     for ([_][]const u8{
         "public-ip",
         "nsg",
         "vnet",
-    }, [_][]const u8{ "PublicIP", "NSG", "VNET" }) |kind, suffix|
-        _ = ask(io, gpa, p, &.{
-            "network",
-            kind,
-            "delete",
-            "-n",
-            try gpa.print("{s}{s}", .{ name, suffix }),
-            "-o",
-            "none",
-        });
+    }, [_][]const u8{ "PublicIP", "NSG", "VNET" }) |kind, suffix| {
+        const what = try gpa.print("{s}{s}", .{ name, suffix });
+        const args = &.{ "network", kind, "delete", "-n", what, "-o", "none" };
+        var r = call(io, gpa, try az(gpa, p, args));
+        var tries: u32 = 1;
+        while (!r.ok and tries < 10) : (tries += 1) {
+            try io.sleep(.fromSeconds(3), .awake);
+            r = call(io, gpa, try az(gpa, p, args));
+        }
+        if (!r.ok) ww.say(
+            io,
+            "{s}: its {s} {s} is left ({s}): az network {s} delete -g {s} -n {s}",
+            .{ name, kind, what, lastLine(r.err), kind, p.group, what },
+        );
+    }
     _ = ask(
         io,
         gpa,
@@ -498,6 +577,28 @@ test carried {
     try testing.expect(carried("bastion/authorized_keys\x00ssh-ed25519 AAAA x\n"));
     try testing.expect(!carried("key\r\n"));
     try testing.expect(!carried("\xc3\xa9"));
+}
+
+test mark {
+    const boot = "stage0: the kernel took 0.3s\r\n" ++
+        "cloud-metadata: {\"time\":\"TIME\",\"event\":\"config\"}\r\n" ++
+        "werewolf: up in 2.9s\r\nseal-watch: {\"event\":\"start\"}\r\n";
+    const one = comptime replaced(boot, "2026-10-08T12:51:29Z");
+    const two = comptime replaced(boot, "2026-10-08T12:54:40Z");
+    const m = mark(one);
+    try testing.expect(std.mem.find(u8, m, "12:51:29Z") != null);
+    // The next run prints the same lines but its time: only it follows the
+    // mark, and it holds the new "up in".
+    try testing.expectEqualStrings(two, since(one ++ two, m));
+    // While the restart has printed nothing yet, there is nothing after it.
+    try testing.expect(std.mem.find(u8, since(one, m), "werewolf: up in ") == null);
+    // With no clock on any line, the last bytes.
+    try testing.expectEqualStrings("no clock", mark("no clock"));
+}
+
+fn replaced(comptime boot: []const u8, comptime time: []const u8) []const u8 {
+    const at = std.mem.find(u8, boot, "TIME").?;
+    return boot[0..at] ++ time ++ boot[at + "TIME".len ..];
 }
 
 test since {

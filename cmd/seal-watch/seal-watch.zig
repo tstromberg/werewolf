@@ -49,7 +49,7 @@ const seal = @import("seal");
 const sandbox = @import("sandbox");
 const linux = std.os.linux;
 
-/// _seal, seal-watch's own account (forms/minimal.yaml).
+/// _seal, seal-watch's own account (forms/minimal/apko.yaml).
 const seal_id = 66;
 
 pub fn main() void {

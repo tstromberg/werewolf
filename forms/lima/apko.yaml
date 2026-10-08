@@ -1,0 +1,14 @@
+# lima: the test vehicle. Everything a form can be, so one Lima VM can try
+# bite, slots and the updater: prod, sshd (its service is in minimal), and
+# bash for Lima's readiness probes.
+contents:
+  packages:
+    - openssh-server
+    - openssh-sftp-server
+    - busybox-full          # a shell for those who log in, and its tools
+    - bash
+
+paths:
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755

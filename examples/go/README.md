@@ -10,7 +10,7 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-go.yaml) inherits `app.yaml`, which adds an
+The [form](../../forms/example-go/apko.yaml) inherits `app.yaml`, which adds an
 application user to `prod`. It declares the service and port 8080.
 [main.go](main.go) is compiled for Linux and installed at `/usr/lib/app/server`.
 

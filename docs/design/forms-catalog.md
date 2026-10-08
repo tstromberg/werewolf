@@ -38,8 +38,8 @@ WordPress's SQLite plugin does.
 
 ## Goals
 
-- Every form here boots under `make check` with its own `test/checks-FORM`
-  that includes the attack its defaults refuse, a `test/config-FORM` that
+- Every form here boots under `make check` with its own `forms/FORM/test/checks`
+  that includes the attack its defaults refuse, a `forms/FORM/test/config` that
   gives it what an operator would, and a shell-free boot where its config
   allows one.
 - No form waits for its first visitor to claim it, serves a control
@@ -162,7 +162,7 @@ unblock the most:
     must have no trailing newline, which `echo` adds. `config NAME PATH
     oneline` strips it, as `secret` already does.
 12. **A stand-in for what cannot be redistributed**: Minecraft's jar is
-    Mojang's. `test/config-minecraft` uses `$MINECRAFT_JAR` when given and
+    Mojang's. `forms/minecraft/test/config` uses `$MINECRAFT_JAR` when given and
     a stand-in jar (the `jre` form's server) otherwise, saying which; CI
     runs the stand-in, a release runs both.
 
@@ -419,10 +419,10 @@ Go. Listens tcp/4222 (TLS from the config), monitoring :8222 on loopback.
 
 Tier 1 was a day, not a week; each form there is `caddy`'s size. What
 it taught, beyond the list above: a check that speaks the daemon's own
-protocol wants the daemon's client, so `forms/NAME.dev` names packages
+protocol wants the daemon's client, so form.yaml's `dev` names packages
 for DEV=1 builds alone (`mosquitto-clients`, `nats`, `mc`); a daemon that
 would reach the Internet and exit when refused (cloudflared) is checked
-with no way out (`CHECK_NET_FORM`); the shared HTTP check takes any status
+with no way out (form.yaml's `check: offline`); the shared HTTP check takes any status
 line, since an S3 store says 403 and a login wall says 302; a service may
 take 30 s to stop (cloudflared with no network), which the `reaped`
 check now allows; `sftpgo` confirms Go's ssh takes a post-quantum-only
@@ -431,7 +431,7 @@ link in the image points at leash's copy; MinIO needs `netlink` to list
 the host's addresses.
 
 Tier 2 taught three more. An application Wolfi lacks is a melange
-recipe in Wolfi's style (`vendor/NAME.yaml`), built in Wolfi's
+recipe in Wolfi's style (`forms/NAME/melange/`), built in Wolfi's
 environment, unpacked over the image, and linked to the form's Wolfi
 libraries so the updater keeps those current; the recipe is also the
 pull request that retires it. On macOS melange runs in QEMU from
@@ -445,9 +445,9 @@ the real work and should start next.
 
 ### Testing
 
-As the nine built forms are tested: `test/config-FORM` writes what an
+As the nine built forms are tested: `forms/FORM/test/config` writes what an
 operator would (keys, a certificate, an admin's password), `make
-check-FORM` boots it twice and runs `test/checks` plus `test/checks-FORM`,
+check-FORM` boots it twice and runs `test/checks` plus `forms/FORM/test/checks`,
 and the forms that boot without config boot shell-free too. Each form's
 checks end with its attack. A bundle is checked as one machine. CI's
 `forms` group grows by a boot a form, five minutes each here, under

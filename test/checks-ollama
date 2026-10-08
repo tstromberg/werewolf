@@ -1,8 +1,0 @@
-# Ollama answers its API with no models, keeps them on /data, refuses a
-# browser from another origin, and fails a pull cleanly; a model is not
-# pulled here (the registry is not a check's to depend on).
-ok  ollama-user      p=$(head -n 1 /run/cgroup/svc/ollama/cgroup.procs); grep -q '^Uid:[[:space:]]*218[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  ollama-api       i=0; until wget -q -T 5 -O - http://127.0.0.1:11434/api/version 2>/dev/null | grep -q '"version"'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no API"; exit 1; }; sleep 1; done; wget -q -T 5 -O - http://127.0.0.1:11434/api/tags | grep -q '"models":\[\]'
-ok  ollama-origin    wget -q -T 5 -S -O /dev/null --header 'Origin: https://evil.example' http://127.0.0.1:11434/api/tags 2>&1 | grep -q 'HTTP/1.1 403'
-ok  ollama-pull-fails wget -q -T 60 -S -O - --post-data '{"model":"nothing.invalid/none:latest","stream":false}' http://127.0.0.1:11434/api/pull 2>&1 | grep -q 'HTTP/1.1 [45]'
-ok  ollama-models    [ -d /data/svc/ollama ] && [ "$(stat -c %u /data/svc/ollama)" = 218 ]

@@ -46,10 +46,11 @@ Someone who wants a machine that serves a site with nginx writes a form,
 as for any werewolf machine, and no executable at all:
 
 ```
-forms/prod-nginx.yaml                       packages and the service's user
-forms/prod-nginx/etc/sv/nginx/service       how nginx runs
-forms/prod-nginx/etc/nginx/nginx.conf       nginx's own configuration
-forms/prod-nginx/usr/share/nginx/html/      the site
+forms/prod-nginx/apko.yaml                         packages and the service's user
+forms/prod-nginx/form.yaml                         base: prod, and its network policy
+forms/prod-nginx/rootfs/etc/sv/nginx/service       how nginx runs
+forms/prod-nginx/rootfs/etc/nginx/nginx.conf       nginx's own configuration
+forms/prod-nginx/rootfs/usr/share/nginx/html/      the site
 ```
 
 ### The form
@@ -63,11 +64,11 @@ contents:
 accounts:
   groups:
     - groupname: nginx
-      gid: 200
+      gid: 221
   users:
     - username: nginx
-      uid: 200
-      gid: 200
+      uid: 221
+      gid: 221
 ```
 
 It includes `prod`, as production forms do. The user is in the

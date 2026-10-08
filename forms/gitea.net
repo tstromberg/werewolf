@@ -1,5 +1,0 @@
-# Gitea serves the web (behind caddy) and git over its own SSH, and
-# sends nothing: no mirrors, migrations or webhooks leave this machine
-# until a form of your own adds `connect gitea tcp/443 udp/53 tcp/53`.
-listen tcp/3000
-listen tcp/22

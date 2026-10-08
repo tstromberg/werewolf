@@ -8,8 +8,9 @@
 # in werewolf, deletes the distro.
 #
 # IMAGE_DIR holds a slot built for this machine's architecture (`make slot`):
-# vmlinuz, initramfs.zst (stage0) and root.erofs, of any form (see
-# docs/bite.md).
+# vmlinuz, initramfs-bitten.zst (stage0, with the modules a distro's
+# filesystem needs, xfs's and btrfs's, which werewolf's own initramfs.zst
+# leaves out) and root.erofs, of any form (see docs/bite.md).
 #
 # Nothing of the distro is removed. bite adds a GRUB entry and boots it once;
 # werewolf makes itself the default only after its services have stayed up
@@ -101,8 +102,8 @@ fi
 # Everything werewolf cannot find out for itself is found out here, and
 # anything it could not cope with stops bite before it changes a thing.
 [ -n "$image" ] || die "usage: bite [-n] [-i | --reboot] [--config DIR] IMAGE_DIR"
-[ -f "$image/vmlinuz" ] && [ -f "$image/initramfs.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
-	die "$image is not a slot: it needs vmlinuz, initramfs.zst, root.erofs and cmdline (make slot)"
+[ -f "$image/vmlinuz" ] && [ -f "$image/initramfs-bitten.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
+	die "$image is not a slot: it needs vmlinuz, initramfs-bitten.zst, root.erofs and cmdline (make slot)"
 # The image's kernel arguments, which go into GRUB's entries and the script
 # that writes them: words of plain characters, nothing a shell would read.
 args=$(cat "$image/cmdline")
@@ -267,7 +268,7 @@ if [ -n "$zboot" ]; then
 else
 	cp "$image/vmlinuz" "$boot/a/"
 fi
-cp "$image/initramfs.zst" "$boot/a/"
+cp "$image/initramfs-bitten.zst" "$boot/a/initramfs.zst"
 chmod 0700 "$home"
 mkdir -p "$home/a" "$home/data"
 cp "$image/root.erofs" "$home/a/"

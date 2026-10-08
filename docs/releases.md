@@ -15,10 +15,10 @@ sshd, for an operator to reach by key.
 | --- | --- |
 | `prod-ARCH-disk.qcow2`, `prod-ssh-ARCH-disk.qcow2` | a UEFI boot disk of 8 GiB holding the slot: what a VM boots from ([Deploying](#deploying)) |
 | `FORM-ARCH-vmlinuz` | the kernel |
-| `prod-ARCH-stage0.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot the updater installs, and the kernel arguments it boots with ([updater.md](updater.md#releases)) |
+| `prod-ARCH-stage0.zst`, `prod-ARCH-stage0-bitten.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot the updater installs, and the kernel arguments it boots with ([updater.md](updater.md#releases)): stage0 for werewolf's own disk, and for a distro's after bite, which adds the modules of the distro's filesystem (xfs, btrfs) |
 | `minimal-ARCH-initramfs.zst`, `minimal-ARCH-cmdline` | the whole image, and the kernel arguments its host passes, for direct boot |
 | `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest, signed |
-| `minimal.lock.json`, `prod.lock.json`, `prod-ssh.lock.json`, `stage0.lock.json`, `kernel.lock.json`, `boot.lock.json` | every package, pinned: apko's locks |
+| `minimal.lock.json`, `prod.lock.json`, `prod-ssh.lock.json`, `kernel.lock.json`, `boot.lock.json` | every package, pinned: apko's locks |
 | `inputs` | what the release was built from |
 
 The tag is the manifests' serial, the time CI signed them.
@@ -35,6 +35,7 @@ The tag is the manifests' serial, the time CI signed them.
   "files": {
     "vmlinuz": {"sha256": "27e0c04b…", "size": 36306944},
     "stage0.zst": {"sha256": "47bb1201…", "size": 9799501},
+    "stage0-bitten.zst": {"sha256": "…", "size": …},
     "root.erofs": {"sha256": "779f06fb…", "size": 20717568},
     "disk.qcow2": {"sha256": "7d383112…", "size": 26214400}
   },
@@ -161,8 +162,11 @@ gcloud compute images create werewolf --source-uri gs://BUCKET/werewolf.tar.gz \
 `make check-gcp` does this with a disk built from the tree, boots it and
 checks it there, then deletes it ([testing.md](testing.md)).
 
-**AWS**: a raw snapshot, imported through S3 (which needs the `vmimport`
-role), registered as a UEFI image with ENA.
+**AWS**: `werewolf upload prod-ssh-x86_64-disk.qcow2 --on aws` writes
+the disk straight into an EBS snapshot, only its blocks that hold data,
+registers it as a UEFI image with ENA and IMDSv2 alone, and prints the
+AMI's id; nothing needs setting up first. By hand, without werewolf, VM
+Import does the same from S3, more slowly, and needs the `vmimport` role:
 
 ```sh
 qemu-img convert -O raw prod-ssh-x86_64-disk.qcow2 disk.raw
@@ -188,7 +192,7 @@ az vm create -g RG -n web-1 --attach-os-disk web-1 --os-type Linux --security-ty
     --user-data config.tar
 ```
 
-`prod` carries each cloud's devices (`forms/prod.modules`): virtio, GCP's
+`prod` carries each cloud's devices (`forms/prod/form.yaml`): virtio, GCP's
 virtio-scsi, NVMe and gVNIC, AWS's ENA and NVMe, and Azure's Hyper-V disks
 and synthetic NIC. Each is tested where it is absent, and the metadata
 fetch against stand-ins for each cloud ([cloud.md](cloud.md)). GCP's

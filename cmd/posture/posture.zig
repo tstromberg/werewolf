@@ -285,7 +285,31 @@ pub const Posture = struct {
         try processes.programs(p);
         try files.check(p);
         try network.check(p);
+        try kernel.logged(p);
         if (p.root and p.attacksAsked()) return attacks.run(p);
+    }
+
+    /// The kernel's log, every record it still holds, or "" where it
+    /// cannot be read (dmesg_restrict keeps it to root).
+    pub fn kernelLog(p: *Posture) []const u8 {
+        const rc = linux.open(
+            "/dev/kmsg",
+            .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(rc) != .SUCCESS) return "";
+        const fd: i32 = @intCast(rc);
+        defer _ = linux.close(fd);
+        var log: std.ArrayList(u8) = .empty;
+        var record: [8192]u8 = undefined;
+        while (true) {
+            const n = linux.read(fd, &record, record.len);
+            switch (linux.errno(n)) {
+                .SUCCESS => log.appendSlice(p.gpa, record[0..n]) catch return log.items,
+                .PIPE => {}, // records lost to newer ones: read on
+                else => return log.items,
+            }
+        }
     }
 
     /// Whether to attack: --attack or WEREWOLF_CHECK=1 (a container cannot set
@@ -704,6 +728,25 @@ fn dotted(gpa: Allocator, key: []const u8) []const u8 {
 
 pub fn trim(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \r\n");
+}
+
+/// Whether a line of log has every one of needles.
+pub fn logHas(log: []const u8, needles: []const []const u8) bool {
+    var lines = std.mem.tokenizeScalar(u8, log, '\n');
+    next: while (lines.next()) |line| {
+        for (needles) |n| if (std.mem.indexOf(u8, line, n) == null) continue :next;
+        return true;
+    }
+    return false;
+}
+
+test logHas {
+    const log = "audit: type=1300 audit(1.0:1): arch=c00000b7 syscall=221 success=no exit=-13 " ++
+        "ppid=12 pid=13 comm=\"posture\"\naudit: type=1302 audit(1.0:1): item=0 name=\"/tmp/x\"\n";
+    try testing.expect(logHas(log, &.{ "type=1300", "success=no", " ppid=12 " }));
+    try testing.expect(!logHas(log, &.{ "type=1300", "success=no", " ppid=1 " }));
+    try testing.expect(!logHas(log, &.{ "type=1302", "success=no" }));
+    try testing.expect(!logHas("", &.{"x"}));
 }
 
 pub fn exists(io: Io, path: []const u8) bool {

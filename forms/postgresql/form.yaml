@@ -1,0 +1,9 @@
+base: prod
+
+# werewolf's programs from cmd/ this form's machines run, beside the
+# ones every form has (docs/programs.md)
+programs: [popen-shim.so]
+
+# make check's, for this form alone (forms/README.md)
+check:
+  native: true

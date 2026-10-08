@@ -1,0 +1,9 @@
+# What the jre form, booted as it ships, without a shell, must say on its
+# console (make check-shellfree-jre; test/boot; forms/demo/test/console has the
+# format). That it answers is test/checks' answering, on the DEV=1 build.
+# The JDK's web server starts, leashed, and listens.
+
+seen    app-leashed       leash: \{"event":"start","service":"app"
+seen    app-listening     Serving /usr/lib/app/www and subdirectories on 0\.0\.0\.0
+unseen  service-down      leash: \{"event":"(down|retry)"
+unseen  app-failed        Error: |Exception in thread

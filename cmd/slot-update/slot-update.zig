@@ -74,7 +74,7 @@ const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git
 pub const max_read = 256 << 20;
 
 /// _update, the account the children that fetch run as
-/// (forms/prod.yaml).
+/// (forms/prod/apko.yaml).
 pub const update_id: u32 = 69;
 /// The CVE fetcher's root, and where the CVE sources are fetched to.
 const net_root = work_dir ++ "/net";
@@ -450,7 +450,7 @@ pub const Update = struct {
         };
 
         switch (plan.from) {
-            .packages => try u.buildSlot(arch, plan.new_kernel),
+            .packages => try u.buildSlot(plan.new_kernel),
             .release => |r| try u.fetchRelease(r.base, r.name, r.manifest),
         }
         // pending stays as it was, with its first-seen times, until the new
@@ -697,8 +697,15 @@ pub const Update = struct {
             work_dir ++ "/slot/initramfs.zst",
             work_dir ++ "/slot/root.erofs",
         };
-        for (releases.Manifest.slot_files, targets) |file, target| {
-            try u.fetchReleaseFile(base, name, file, m.files.map.get(file).?, target);
+        // A slot on a distro's disk (bite's, under GRUB) needs the stage0
+        // with its filesystem's modules, which werewolf's own disk's leaves out.
+        const stage0 = if (u.cmd.grubenv.len > 0) releases.Manifest.bitten_stage0 else "stage0.zst";
+        for ([_][]const u8{ "vmlinuz", stage0, "root.erofs" }, targets) |file, target| {
+            const want = m.files.map.get(file) orelse {
+                u.detail = try u.gpa.print("the release has no {s}", .{file});
+                return error.BadManifest;
+            };
+            try u.fetchReleaseFile(base, name, file, want, target);
         }
         // The release's own kernel arguments, where its manifest names them:
         // a slot boots with what its image asks for, not this one's.
@@ -1433,11 +1440,6 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
         yd.year,              md.month.numeric(),      md.day_index + 1,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
-}
-
-pub fn appendUnique(gpa: Allocator, list: *std.ArrayList([]const u8), s: []const u8) !void {
-    for (list.items) |x| if (std.mem.eql(u8, x, s)) return;
-    try list.append(gpa, s);
 }
 
 fn lessString(_: void, a: []const u8, b: []const u8) bool {

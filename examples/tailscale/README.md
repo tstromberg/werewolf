@@ -1,6 +1,6 @@
 # Tailscale subnet router on Werewolf
 
-The [tailscale form](../../forms/tailscale.yaml) gives permitted tailnet
+The [tailscale form](../../forms/tailscale/apko.yaml) gives permitted tailnet
 clients access to machines in an advertised subnet. It runs Tailscale's
 userspace network stack as `tailscale` (uid/gid 206).
 
@@ -34,9 +34,9 @@ general-purpose UDP or ICMP routing.
 
 ## Basic usage
 
-Start with [routes and enrollment](../../docs/tailscale.md#routes-and-enrollment),
-then follow either [local Lima](../../docs/tailscale.md#local-lima) or
-[GCP](../../docs/tailscale.md#gcp). Both use `tailscale/settings.json` and a
+Start with [routes and enrollment](../../forms/tailscale/README.md#routes-and-enrollment),
+then follow either [local Lima](../../forms/tailscale/README.md#local-lima) or
+[GCP](../../forms/tailscale/README.md#gcp). Both use `tailscale/settings.json` and a
 private `auth_key` file. Lima carries them as NoCloud data files; GCP carries
 them in a base64 config tar.
 

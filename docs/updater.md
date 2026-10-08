@@ -44,7 +44,7 @@ service stays down.
 | `root` | Add busybox's links, copy werewolf's own files forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
-| `stage0` | Build stage0 from its packages, `init`, the form's modules and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
+| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init`, the module loader, the form's modules (`modules`, and on a distro's disk `modules-bitten` too, as the build's two stage0s are) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
 | `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, the kernel unwrapped to its `Image` for GRUB, which cannot run zboot, `sync`, write `attempt`, set GRUB's `next_entry`. On werewolf's own disk, the kernel goes to the EFI partition as it is. |
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
@@ -88,7 +88,7 @@ them, a check, instead of `userland`, `kernel` and `root`:
 | --- | --- |
 | `release` | Fetch `FORM-ARCH.json` and its `.sig`, as `_update`. Believe nothing in them until the signature checks against `image.pub`: RSA PKCS#1 v1.5 over SHA-256, checked by Zig's standard library. Then refuse a manifest of another format, form or architecture; one past its `expires` (logged `skip`, "expired"), since CI re-signs daily and a frozen mirror must not hold a machine back in silence; and one signed more than a day in the future. No release of the form yet (404): `skip`. |
 | `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A release that would take a package or the kernel to an older version than this image's, in apk's order, as a slot built here may not either: `skip`, for an image built from a tree, which has no `serial`. A `build` that rolled back before: `skip`. |
-| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst`, `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
+| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` as `initramfs.zst` (on a distro's disk, after bite, `stage0-bitten.zst`, which adds the modules of its filesystem), `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
 
 The CVEs, the install, the report and the reboot are as for a built slot;
 the package changes are the manifest's `packages` against the running
@@ -117,7 +117,7 @@ that fails is recorded with its error, and the update goes ahead.
 ## Separation
 
 Root, which builds and installs the slot, has no network at all: the
-form's policy (`forms/prod.net`) lets only `_update` (uid 69) send,
+form's policy (`forms/prod/form.yaml`) lets only `_update` (uid 69) send,
 and only HTTPS and DNS. Everything the updater takes from the network is
 fetched by children running as `_update`, as werewolf's programs are
 written ([programs.md](programs.md)).
@@ -244,7 +244,7 @@ it was written. Alpine's own patches on top of upstream are not counted.
 
 The updater reads `/proc/cmdline`, `/etc/apk/` and the
 build record in `/usr/share/werewolf/`: `form`, `release`, `kernel`,
-`alpine`, `overlay`, `modules`, `stage0.world`, `stage0.init`, `tiers`,
+`alpine`, `overlay`, `modules`, `modules-bitten`, `stage0.init`, `tiers`,
 `tiers.pub` and `advisories`.
 
 ## Events

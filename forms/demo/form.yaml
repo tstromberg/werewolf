@@ -1,0 +1,11 @@
+base: postgresql
+
+# nginx serves the status page.
+net:
+  - listen tcp/80
+  # grype fetches its vulnerability database over HTTPS.
+  - connect grype tcp/443 udp/53 tcp/53
+
+# make check's, for this form alone (forms/README.md)
+check:
+  memory: 2048

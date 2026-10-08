@@ -1,4 +1,0 @@
-# KVM: built into the aarch64 kernel; on x86_64 a module for each vendor,
-# of which the machine's CPU takes one and refuses the other. The build
-# loads them with nested=0 (Makefile, MODULE_PARAMS).
-x86_64: kvm-intel kvm-amd

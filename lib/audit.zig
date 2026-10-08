@@ -1,0 +1,206 @@
+//! audit: the kernel's audit subsystem, over its netlink socket, for the
+//! two programs that speak to it. init turns on one rule, a record of
+//! every exec the kernel refused (a shell that is not there, a program
+//! dropped where nothing may run, a path Landlock denies), and locks the
+//! configuration for the life of the machine; posture asks the kernel to
+//! stop and expects to be refused. No audit daemon: with none, the kernel
+//! prints each record to its log, and so to the console, rate-limited by
+//! printk's own limit, and never makes a process wait for the log.
+
+const std = @import("std");
+const builtin = @import("builtin");
+const linux = std.os.linux;
+
+/// linux/audit.h: the message types sent here.
+const msg_set = 1001;
+const msg_add_rule = 1011;
+
+/// Where a rule applies: as a system call returns, or to each record as it
+/// is written (the exclude list, which names record types to leave out).
+const filter_exit = 4;
+const filter_exclude = 5;
+const always = 2;
+
+/// Rule fields, each compared equal.
+const field_arch = 11;
+const field_msgtype = 12;
+const field_success = 104;
+const equal = 0x40000000;
+
+/// The records a refused exec would bring besides SYSCALL (who, what
+/// call, which error) and PATH (the file): its working directory, its
+/// arguments, its command line and an end-of-event marker. Left out, so a
+/// refusal is two lines on the console, not six.
+const left_out = [_]u32{ 1307, 1309, 1320, 1327 };
+
+/// The architecture a rule names (AUDIT_ARCH_*), so a 32-bit call, which
+/// the seal ends anyway, never matches one meant for native calls.
+const arch: u32 = switch (builtin.cpu.arch) {
+    .aarch64 => 0xc00000b7,
+    .x86_64 => 0xc000003e,
+    else => @compileError("audit runs on aarch64 and x86_64"),
+};
+
+/// struct audit_status: what AUDIT_SET changes, by its mask.
+const Status = extern struct {
+    mask: u32,
+    enabled: u32 = 0,
+    failure: u32 = 0,
+    pid: u32 = 0,
+    rate_limit: u32 = 0,
+    backlog_limit: u32 = 0,
+    lost: u32 = 0,
+    backlog: u32 = 0,
+    feature_bitmap: u32 = 0,
+    backlog_wait_time: u32 = 0,
+    backlog_wait_time_actual: u32 = 0,
+};
+const status_enabled = 0x0001;
+const status_backlog_wait_time = 0x0040;
+
+/// enabled: off, on, or on and locked until reboot.
+pub const locked = 2;
+
+/// struct audit_rule_data, with no string buffer: every field here is a
+/// number.
+const Rule = extern struct {
+    flags: u32,
+    action: u32 = always,
+    field_count: u32 = 0,
+    mask: [64]u32 = @splat(0),
+    fields: [64]u32 = @splat(0),
+    values: [64]u32 = @splat(0),
+    fieldflags: [64]u32 = @splat(0),
+    buflen: u32 = 0,
+
+    fn field(r: *Rule, f: u32, v: u32) void {
+        r.fields[r.field_count] = f;
+        r.values[r.field_count] = v;
+        r.fieldflags[r.field_count] = equal;
+        r.field_count += 1;
+    }
+
+    fn syscall(r: *Rule, sys: linux.SYS) void {
+        const nr: u32 = @intCast(@backingInt(sys));
+        r.mask[nr / 32] |= @as(u32, 1) << @intCast(nr % 32);
+    }
+};
+
+pub const Error = error{
+    /// The kernel has no audit, or this is not the first PID namespace.
+    NoAudit,
+    /// The kernel said no: no CAP_AUDIT_CONTROL, or the configuration is
+    /// locked.
+    Refused,
+    /// Anything else the kernel answered.
+    Failed,
+};
+
+/// Audit on, one rule, every record of a refused exec, the four records
+/// that would pad it left out, and the configuration locked: nothing can
+/// add, remove or stop until a reboot. A process that would wait for room
+/// in the log's queue does not wait (backlog_wait_time 0): the record is
+/// lost and counted instead.
+pub fn enable() Error!void {
+    const sock = try open();
+    defer _ = linux.close(sock);
+    const on: Status = .{
+        .mask = status_enabled | status_backlog_wait_time,
+        .enabled = 1,
+        .backlog_wait_time = 0,
+    };
+    try send(sock, msg_set, std.mem.asBytes(&on));
+    var refused_exec: Rule = .{ .flags = filter_exit };
+    refused_exec.syscall(.execve);
+    refused_exec.syscall(.execveat);
+    refused_exec.field(field_arch, arch);
+    refused_exec.field(field_success, 0);
+    try send(sock, msg_add_rule, std.mem.asBytes(&refused_exec));
+    for (left_out) |t| {
+        var out: Rule = .{ .flags = filter_exclude };
+        out.field(field_msgtype, t);
+        try send(sock, msg_add_rule, std.mem.asBytes(&out));
+    }
+    const lock: Status = .{ .mask = status_enabled, .enabled = locked };
+    try send(sock, msg_set, std.mem.asBytes(&lock));
+}
+
+/// Ask the kernel to set enabled, as a program that would stop the log
+/// would. On a sealed machine the answer is error.Refused: PID 1 dropped
+/// CAP_AUDIT_CONTROL from the bounding set, and the configuration is
+/// locked besides.
+pub fn setEnabled(enabled: u32) Error!void {
+    const sock = try open();
+    defer _ = linux.close(sock);
+    const s: Status = .{ .mask = status_enabled, .enabled = enabled };
+    try send(sock, msg_set, std.mem.asBytes(&s));
+}
+
+fn open() Error!i32 {
+    const rc = linux.socket(
+        linux.AF.NETLINK,
+        linux.SOCK.RAW | linux.SOCK.CLOEXEC,
+        linux.NETLINK.AUDIT,
+    );
+    return switch (linux.errno(rc)) {
+        .SUCCESS => @intCast(rc),
+        .PERM, .ACCES => error.Refused,
+        else => error.NoAudit,
+    };
+}
+
+/// One request, acknowledged: the kernel answers every audit request with
+/// an error message, whose code is 0 when it was done.
+fn send(sock: i32, msg_type: u16, payload: []const u8) Error!void {
+    const header = @sizeOf(linux.nlmsghdr);
+    var buf: [header + @sizeOf(Rule)]u8 align(4) = undefined;
+    const hdr: *linux.nlmsghdr = @ptrCast(&buf);
+    hdr.* = .{
+        .len = @intCast(header + payload.len),
+        .type = @fromBackingInt(@intCast(msg_type)),
+        .flags = linux.NLM_F_REQUEST | linux.NLM_F_ACK,
+        .seq = 1,
+        .pid = 0,
+    };
+    @memcpy(buf[header..][0..payload.len], payload);
+    const kernel: linux.sockaddr.nl = .{ .pid = 0, .groups = 0 };
+    const sent = linux.sendto(
+        sock,
+        &buf,
+        hdr.len,
+        0,
+        @ptrCast(&kernel),
+        @sizeOf(linux.sockaddr.nl),
+    );
+    if (linux.errno(sent) != .SUCCESS) return switch (linux.errno(sent)) {
+        .PERM, .ACCES => error.Refused,
+        .CONNREFUSED => error.NoAudit,
+        else => error.Failed,
+    };
+    var reply: [256]u8 align(4) = undefined;
+    const n = linux.recvfrom(sock, &reply, reply.len, 0, null, null);
+    if (linux.errno(n) != .SUCCESS or n < header + 4) return error.Failed;
+    const rh: *const linux.nlmsghdr = @ptrCast(&reply);
+    if (rh.type != .ERROR) return error.Failed;
+    const code = std.mem.readInt(i32, reply[header..][0..4], .little);
+    return switch (code) {
+        0 => {},
+        -@as(i32, @backingInt(linux.E.PERM)) => error.Refused,
+        else => error.Failed,
+    };
+}
+
+const testing = std.testing;
+
+test Rule {
+    try testing.expectEqual(1040, @sizeOf(Rule));
+    try testing.expectEqual(44, @sizeOf(Status));
+    var r: Rule = .{ .flags = filter_exit };
+    r.syscall(.execve);
+    r.field(field_success, 0);
+    const nr: u32 = @intCast(@backingInt(linux.SYS.execve));
+    try testing.expect(r.mask[nr / 32] & (@as(u32, 1) << @intCast(nr % 32)) != 0);
+    try testing.expectEqual(1, r.field_count);
+    try testing.expectEqual(field_success, r.fields[0]);
+    try testing.expectEqual(equal, r.fieldflags[0]);
+}

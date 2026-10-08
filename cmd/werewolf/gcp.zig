@@ -273,13 +273,13 @@ pub fn booted(text: []const u8) bool {
 /// Wait for the boot to finish, or a panic. GCP keeps the console of the
 /// machine's current run only, so a stop and start begins it afresh.
 pub fn awaitUp(io: Io, gpa: Allocator, p: Place, name: []const u8) !enum { up, panic, late } {
-    var waited: u32 = 0;
-    while (waited < wait_seconds) : (waited += 5) {
+    const start = Io.Clock.awake.now(io);
+    while (start.untilNow(io, .awake).toSeconds() < wait_seconds) {
         if (console(io, gpa, p, name)) |text| {
             if (booted(text)) return .up;
             if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
         }
-        try io.sleep(.fromSeconds(5), .awake);
+        try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
 }

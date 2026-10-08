@@ -2,23 +2,14 @@
 # gcp: a werewolf form on Google Compute Engine, made as a user makes one,
 # with `werewolf create --on gcp` (docs/design/cli.md): its release disk an
 # image, booted under UEFI on a VM, its config in the instance's
-# user-data. Used by `make check-gcp`, `make demo-gcp`, `make
-# demo-gcp-delete`, `make webshell-gcp` and `make webshell-gcp-delete`;
-# see docs/testing.md, docs/demo.md and docs/forms.md.
+# user-data. Used by `make demo-gcp`, `make demo-gcp-delete`, `make
+# webshell-gcp` and `make webshell-gcp-delete`; see forms/demo/README.md
+# and docs/forms.md. `make check-gcp` is test/cloud's.
 #
-#   gcp check FORM ARCH     boot FORM on a fresh VM, judge it, delete it all
 #   gcp demo FORM ARCH      boot the demo on a VM that stays; print its URL
 #   gcp demo-delete         delete the demo's VM and its firewall rule
 #   gcp webshell FORM ARCH  the webshell-example form, likewise, on :8080
 #   gcp webshell-delete     delete the webshell VM and its firewall rule
-#
-# check judges the machine by GCP's record of its serial port: the root
-# verified through dm-verity, the config taken from the metadata server,
-# and posture failing exactly what POSTURE_KNOWN says the form fails
-# (test/posture-known). If sshd listens, root must also log in, over the
-# Internet, with the key the config carried. Everything check made is
-# deleted however it ends, unless GCP_KEEP=1; the image create made is
-# deleted always, once the VM's disk is made from it.
 #
 # The project is gcloud's own, or GCP_PROJECT; the zone GCP_ZONE
 # (us-central1-a, which has Arm machines). ARCH picks the machine:
@@ -53,160 +44,64 @@ if [ "$mode" = demo-delete ] || [ "$mode" = webshell-delete ]; then
 	g compute firewall-rules delete "$svc-http" 2>/dev/null || true
 	exit 0
 fi
-[ $# -eq 3 ] && { [ "$mode" = check ] || [ "$mode" = demo ] || [ "$mode" = webshell ]; } ||
-	die "usage: gcp check FORM ARCH | demo FORM ARCH | webshell FORM ARCH | demo-delete | webshell-delete"
+[ $# -eq 3 ] && { [ "$mode" = demo ] || [ "$mode" = webshell ]; } ||
+	die "usage: gcp demo FORM ARCH | webshell FORM ARCH | demo-delete | webshell-delete"
 form=$2 arch=$3
 size=
 [ "$mode" = demo ] && [ "$arch" = x86_64 ] && size=e2-medium
 
-name=werewolf-$mode-$(date -u +%Y%m%d%H%M%S)
-[ "$mode" = demo ] && name=$demo
+name=$demo
 [ "$mode" = webshell ] && name=$webshell
 work=$(mktemp -d)
 images() { g compute images list --filter "labels.werewolf-form=$form" --format 'value(name)' | sort; }
 images >"$work/images-before"
 
-# What this run made, deleted however it ends: the image create uploaded;
-# for check, the VM and its firewall rule too.
+# The image create uploaded, deleted however this run ends, once the VM's
+# disk is made from it.
 cleanup() {
 	rc=$?
 	trap - EXIT INT TERM
 	images | comm -13 "$work/images-before" - | while read -r image; do
 		g compute images delete "$image" >/dev/null 2>&1 || true
 	done
-	if [ "$mode" = check ]; then
-		if [ "${GCP_KEEP:-}" = 1 ]; then
-			say "kept $name in $zone; delete it with: $werewolf delete $name --on gcp" \
-				"&& gcloud compute firewall-rules delete $name-ssh"
-		else
-			say "deleting $name"
-			"$werewolf" delete "$name" --on gcp >/dev/null 2>&1 || true
-			g compute firewall-rules delete "$name-ssh" >/dev/null 2>&1 || true
-		fi
-	fi
 	rm -rf "$work"
 	exit "$rc"
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-if { [ "$mode" = demo ] || [ "$mode" = webshell ]; } &&
-	g compute instances describe "$name" --zone "$zone" >/dev/null 2>&1; then
+if g compute instances describe "$name" --zone "$zone" >/dev/null 2>&1; then
 	say "$name exists; make $mode-gcp-delete to start over from a fresh disk"
 	addr=$(g compute instances describe "$name" --zone "$zone" \
 		--format 'get(networkInterfaces[0].accessConfigs[0].natIP)')
 else
-	# The config, as docs/cloud.md has it: check's carries a key made for
-	# this run alone.
+	# The config, as docs/cloud.md has it.
 	mkdir "$work/config"
 	echo "$name" >"$work/config/hostname"
-	if [ "$mode" = check ]; then
-		ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
-		cp "$work/key.pub" "$work/config/authorized_keys"
-	fi
 	say "creating $name, $form on $arch, in $zone"
 	made=$("$werewolf" create "$form" "$name" --on gcp --arch "$arch" ${size:+--size "$size"} \
 		--config "$work/config") || die "werewolf create failed; its output is above"
 	addr=$(echo "$made" | cut -f2)
 fi
 
-if [ "$mode" = demo ] || [ "$mode" = webshell ]; then
-	if [ "$mode" = webshell ]; then port=8080; else port=80; fi
-	url=http://$addr
-	[ "$port" = 80 ] || url=$url:$port
-	g compute firewall-rules describe "$name-http" >/dev/null 2>&1 ||
-		g compute firewall-rules create "$name-http" --allow "tcp:$port" --target-tags "$name" \
-			--description "werewolf's $mode on :$port (test/gcp)"
-	say "waiting for werewolf to serve on :$port"
-	i=0
-	until curl -fsS -m 3 -o /dev/null "$url/" 2>/dev/null; do
-		i=$((i + 1))
-		[ $i -le 120 ] || die "no answer after 10 minutes; the console: $werewolf console $name --on gcp"
-		sleep 5
-	done
-	if [ "$mode" = webshell ]; then
-		say "up. A deliberately vulnerable web app, on the Internet. Try to escape it:"
-		say "the webshell: $url/"
-	else
-		say "up. The first scan follows grype's database download, about a minute"
-		say "the demo: $url/"
-	fi
-	exit 0
-fi
-
-# --- check ---------------------------------------------------------------------
-log=$work/serial.log
-serial() {
-	"$werewolf" console "$name" --on gcp 2>/dev/null | tr -d '\r' >"$log" || true
-}
-seen() { grep -a -q -E "$1" "$log"; }
-failed=0
-ok() { say "ok     $1"; }
-fail() {
-	say "FAIL   $1"
-	failed=1
-}
-
-# Until posture speaks, which is after every service has started; a panic,
-# or a machine that rolled back, ends the wait early.
-say "waiting for the posture line on the serial port"
+if [ "$mode" = webshell ]; then port=8080; else port=80; fi
+url=http://$addr
+[ "$port" = 80 ] || url=$url:$port
+g compute firewall-rules describe "$name-http" >/dev/null 2>&1 ||
+	g compute firewall-rules create "$name-http" --allow "tcp:$port" --target-tags "$name" \
+		--description "werewolf's $mode on :$port (test/gcp)"
+say "waiting for werewolf to serve on :$port"
 i=0
-while serial; ! seen 'posture: fail='; do
-	seen 'Kernel panic' && break
+until curl -fsS -m 3 -o /dev/null "$url/" 2>/dev/null; do
 	i=$((i + 1))
-	[ $i -le 60 ] || break
+	[ $i -le 120 ] || die "no answer after 10 minutes; the console: $werewolf console $name --on gcp"
 	sleep 5
 done
-keep=build/$arch/$form/check/gcp-serial.log
-mkdir -p "$(dirname "$keep")"
-cp "$log" "$keep"
-
-seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: stage0 did not verify slot a's root"
-seen 'cloud-metadata: \{.*"event":"config","provider":"gcp"' && ok metadata-config ||
-	fail "metadata-config: no config taken from GCP's metadata server"
-seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
-
-# posture: what fails must be exactly what POSTURE_KNOWN says; ?ID may
-# fail or not (test/posture-known).
-line=$(grep -a -o -E 'posture: fail=[^ ]* pass=[0-9]+' "$log" | tail -n 1 || true)
-if [ -z "$line" ]; then
-	fail "posture: no posture line"
+if [ "$mode" = webshell ]; then
+	say "up. A deliberately vulnerable web app, on the Internet. Try to escape it:"
+	say "the webshell: $url/"
 else
-	got=$(echo "$line" | sed 's/^posture: fail=\([^ ]*\) .*/\1/' | tr ',' '\n' | sed '/^$/d' | LC_ALL=C sort -u)
-	sure=$(echo "${POSTURE_KNOWN:-}" | tr ' ' '\n' | sed '/^$/d;/^?/d' | LC_ALL=C sort -u)
-	maybe=$(echo "${POSTURE_KNOWN:-}" | tr ' ' '\n' | sed -n 's/^?//p' | LC_ALL=C sort -u)
-	new=$(echo "$got" | while read -r id; do
-		[ -z "$id" ] || echo "$sure $maybe" | tr ' ' '\n' | grep -qx "$id" || echo "$id"
-	done)
-	closed=$(echo "$sure" | while read -r id; do
-		[ -z "$id" ] || echo "$got" | grep -qx "$id" || echo "$id"
-	done)
-	if [ -z "$new" ] && [ -z "$closed" ]; then
-		ok posture
-	else
-		fail "posture: failing, not known: $(echo "$new" | tr '\n' ' ')known, now passing: $(echo "$closed" | tr '\n' ' ')"
-	fi
+	say "up. The first scan follows grype's database download, about a minute"
+	say "the demo: $url/"
 fi
-
-# Over the Internet, as an operator would: only while this check runs, and
-# only to this VM, which takes keys alone.
-if seen 'Server listening on 0.0.0.0 port 22'; then
-	g compute firewall-rules create "$name-ssh" --allow tcp:22 --target-tags "$name" \
-		--description "test/gcp's ssh check, deleted when it ends" >/dev/null
-	i=0
-	until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
-		"root@$addr" id -u 2>/dev/null)" = 0 ]; do
-		i=$((i + 1))
-		[ $i -le 12 ] || break
-		sleep 10
-	done
-	[ $i -le 12 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
-fi
-
-if [ $failed = 0 ]; then
-	say "pass   all checks; the serial port is in $keep"
-else
-	say "FAIL   see $keep"
-fi
-exit $failed
+exit 0

@@ -1,0 +1,7 @@
+#!/bin/sh
+# forms/caddy/test/config DIR: the caddy form's config for make check, in DIR: a
+# site name Caddy's own CA signs for, localhost, so HTTPS and the redirect
+# to it can be checked with no CA on the network (forms/caddy/test/checks).
+set -eu
+mkdir -p "$1/caddy"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

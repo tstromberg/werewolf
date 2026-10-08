@@ -1,0 +1,7 @@
+#!/bin/sh
+# forms/tailscale/test/config DIR: the tailscale form's config for make
+# check, in DIR: an auth key no coordination server takes, so the daemon
+# starts, keeps trying, and is checked offline (forms/tailscale/test/checks).
+set -eu
+mkdir -p "$1/tailscale"
+printf '%s\n' tskey-auth-offline-test >"$1/tailscale/auth_key"

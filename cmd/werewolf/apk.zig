@@ -1,6 +1,6 @@
 //! build-apk: a form's own package, from a melange recipe in Wolfi's
-//! style (vendor/build.mk), built as the form's build builds it, for the
-//! recipe's author to try before a form names it in forms/NAME.melange.
+//! style (melange.mk), built as the form's build builds it, for the
+//! recipe's author to try before a form keeps it in forms/NAME/melange/.
 //!
 //!     werewolf build-apk RECIPE [--arch ARCH]
 //!
@@ -66,7 +66,7 @@ fn isRecipePath(p: []const u8) bool {
 }
 
 test isRecipePath {
-    try std.testing.expect(isRecipePath("vendor/vaultwarden.yaml"));
+    try std.testing.expect(isRecipePath("forms/vaultwarden/melange/vaultwarden.yaml"));
     try std.testing.expect(isRecipePath("../myapp/myapp.yaml"));
     try std.testing.expect(isRecipePath("/home/me/app.yaml"));
     for ([_][]const u8{

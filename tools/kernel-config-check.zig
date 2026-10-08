@@ -44,6 +44,8 @@ const rules = [_]Rule{
     .{ "CONFIG_SND_USB_AUDIO", .off, "USB audio: CVE-2024-53150, CVE-2024-53197" },
     .{ "CONFIG_USB_VIDEO_CLASS", .off, "USB video: CVE-2024-53104" },
     .{ "CONFIG_POSIX_CPU_TIMERS_TASK_WORK", .yes, "closes CVE-2025-38352's race" },
+    .{ "CONFIG_AUDIT", .yes, "init logs every refused exec through audit (lib/audit.zig)" },
+    .{ "CONFIG_AUDITSYSCALL", .yes, "audit's system call rules, the refused-exec rule among them" },
 };
 
 pub fn main(init: std.process.Init) !void {

@@ -1,3 +1,0 @@
-listen tcp/22
-# sshd's PermitOpen further restricts these connections by destination.
-connect bastion tcp/22

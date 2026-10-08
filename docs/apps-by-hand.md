@@ -147,7 +147,7 @@ again (step 4): no rebuild. To change the code, stage and build again
 
 ### The image
 
-The image is the form's packages (apko, from `forms/NAME.yaml` and the
+The image is the form's packages (apko, from `forms/NAME/apko.yaml` and the
 forms it includes) with *overlays* laid on top: each form's directory
 (`forms/NAME/`), werewolf's programs, and `APP`, last. Every overlay is a
 tree that mirrors the root: `$W/stage/usr/lib/app/main.py` above is
@@ -157,7 +157,7 @@ and `jre`; nginx's html root, `/usr/share/nginx/html`, for `nginx` and `php`.
 
 `APP` is what `--app` does. For anything deployed more than once, a form
 of your own is better, since it is reviewed in version control: include a
-runtime form and put the files in `forms/NAME/usr/lib/app/`, as the
+runtime form and put the files in `forms/NAME/rootfs/usr/lib/app/`, as the
 [tutorials](../examples/README.md) do. An image with `APP` builds in
 `build/ARCH/FORM-app`, apart from the form's own. `APP` can hold any path,
 a service file too, but then it is a form in all but name. `--app` stages
@@ -198,7 +198,7 @@ render  env app.env
 The application may write only `/run/svc/app` and `/data/svc/app`, its
 working directory, which outlives reboots and updates. It may bind only
 the ports it lists, and reach only what the form's `.net` file allows
-(`forms/python.net`: `listen tcp/8080`); a database elsewhere is a line
+(`forms/python/form.yaml`: `listen tcp/8080`); a database elsewhere is a line
 there, `connect app tcp/5432`. A program that starts differently needs a
 form with its own service file ([forms.md](forms.md#a-python-web-server)).
 
@@ -242,7 +242,7 @@ The two files are all any hypervisor needs:
   it a vzNAT network with that MAC ([service-vms.md](service-vms.md)).
 - **A cloud**: an image of the disk, and `base64 config.tar` as the
   instance's user data ([service-vms.md](service-vms.md#gcp-vm) does GCP by
-  hand; on AWS, VM Import makes the image from a VHD,
+  hand; on AWS, the disk is written into an EBS snapshot,
   [service-vms.md](service-vms.md#aws-vm)).
 
 ### Updates
@@ -262,4 +262,4 @@ were.
 Checks before anything boots (`pack` runs the machine's own setting checks
 on your machine, and refuses a missing key by name), the application's
 digest, and each provider's steps (Lima's template and MAC, GCP's image and
-user data, AWS's import, AMI and security group). The mechanism is the one above.
+user data, AWS's snapshot, AMI and security group). The mechanism is the one above.

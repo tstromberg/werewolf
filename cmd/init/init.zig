@@ -175,6 +175,15 @@ pub fn main(init: std.process.Init) !void {
         if (i == 0) "" else ", ", p.name, p.ms / 1000, p.ms % 1000,
     }) catch {};
     say("phases: {s}", .{line.written()});
+    // The boot is over, so the console takes the kernel's notices from
+    // here on: what the kernel refuses (an exec, lockdown, Yama, Landlock)
+    // it says at that level, which loglevel=5 kept off the console while
+    // the boot's own notices would have cost a millisecond a line on a
+    // cloud's serial port (Makefile, KERNEL_ARGS). dmesg has every one.
+    if (!writeFile(
+        "/proc/sys/kernel/printk",
+        "6",
+    )) say("console loglevel not raised: the kernel's refusals stay in dmesg", .{});
     say("up in {s}s (the kernel {s}s, userland {s}s), handing over to runit", .{
         m.fmt("{d}.{d:0>3}", .{ up_ms / 1000, up_ms % 1000 }),
         m.fmt("{d}.{d:0>3}", .{ kernel_ms / 1000, kernel_ms % 1000 }),

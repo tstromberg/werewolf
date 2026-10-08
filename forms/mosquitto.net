@@ -1,2 +1,0 @@
-# Mosquitto serves MQTT over TLS, and sends nothing: no bridges.
-listen tcp/8883

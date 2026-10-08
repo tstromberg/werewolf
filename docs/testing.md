@@ -8,6 +8,8 @@ make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
 make check-updater-release  # the same, to CI's latest signed release
 make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
+make check-aws      # the same on an EC2 instance
+make check-azure    # the same on an Azure VM
 ```
 
 `make check` needs, beyond the build's tools, QEMU, `expect` and `mke2fs`
@@ -35,12 +37,11 @@ start there, so posture's `kernel-no-hypervisor` proves that
 
 Those checks need a shell, which most forms do not have, so each form is
 built for them with `DEV=1`: busybox-full on top of its packages, in
-`build/<arch>/<form>-dev`, and nothing else changed. The forms that ship
-without a shell, `minimal`, `prod`, the runtime forms and `demo`, are also
-built as they ship and booted once more (`check-shellfree-<form>`), where
+`build/<arch>/<form>-dev`, and nothing else changed. Every form is also
+built as it ships and booted once more (`check-shellfree-<form>`), where
 test/boot runs nothing on the machine and judges it by its posture line,
-no shell and no failure but those the form is for, and by what
-`test/console-<form>` says its console must and must not show.
+no failure but the weaknesses its form.yaml excuses, and by what
+`forms/<form>/test/console` says its console must and must not show.
 
 The checks try what an attacker would and expect to be refused: lower
 lockdown, read `/dev/mem` or another process's memory, undo a one-way
@@ -50,10 +51,10 @@ program from `/tmp`. And a socket must listen on every port it has
 declared, and answer HTTP where the port speaks it, so a runtime form's
 application runs, leashed, and serves; a daemon that speaks another
 protocol (Valkey, OpenBao, step-ca, Caddy's HTTPS) is asked in its own,
-by its form's `test/checks-FORM`, which `make check` appends. A socket
+by its form's `forms/FORM/test/checks`, which `make check` appends. A socket
 bound to loopback alone (OpenBao's cluster port) is the machine's own,
 not a listener the network can reach, to this check and to posture
-alike. What a form's services need from the config, `test/config-FORM`
+alike. What a form's services need from the config, `forms/FORM/test/config`
 writes into the check's config tar: a bastion's key, OpenBao's unseal key
 and certificate, a CA for step-ca, WordPress's admin.
 Where the attacker would be an ordinary user, the check acts as one, with
@@ -103,7 +104,7 @@ load.
 as published: UEFI firmware, systemd-boot, slot a, with `-snapshot` so the
 file is not changed and a network with no way out, so the updater cannot
 install the latest release over it. Its posture line must show exactly
-what the form fails as it ships ([test/posture-known](../test/posture-known)).
+what the form fails as it ships (its form.yaml's `weaknesses`).
 The release workflow runs it on every release.
 
 Every boot so far gives its address on the kernel command line. One more
@@ -177,33 +178,45 @@ than this tree's: the updater takes nothing backwards.
 It needs the network, so it is not part of `make check`. About 4 minutes
 with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.
 
-## What `make check-gcp` does
+## What `make check-gcp`, `check-aws` and `check-azure` do
 
-[test/gcp](../test/gcp) runs `prod-ssh`'s disk, as a release makes it, on
-Google Compute Engine, as a user would: converted to the raw disk GCP
-imports, made an image (UEFI, gVNIC), and booted on a fresh VM (an
-`e2-small`, or a `t2a-standard-1` for `ARCH=aarch64`) with a config in its
-user-data: a hostname, and an ssh key made for this run. It is judged from
-GCP's record of the VM's serial port:
+[test/cloud](../test/cloud) runs `prod-ssh`'s disk, as a release makes
+it, on a real cloud, as a user would: `werewolf create --on CLOUD` makes
+it that cloud's image (a GCP image, an AMI from an EBS snapshot written
+directly, an Azure managed disk) and boots a fresh machine of it, the
+arch's smallest (`ARCH=aarch64` or `x86_64`), with a config in its user
+data: a hostname, and an ssh key made for this run. It is judged from the
+cloud's record of the machine's serial port:
 
 | Check | Passes when |
 | --- | --- |
 | `root-verified` | stage0 opened slot a's root through dm-verity |
-| `metadata-config` | `cloud-metadata` took the config from GCP's metadata server |
+| `metadata-config` | `cloud-metadata` took the config from that cloud's metadata server |
 | `hostname` | posture names the host as the config did |
-| `posture` | what fails is exactly what `test/posture-known` says `prod-ssh` fails |
+| `posture` | what fails is exactly what `prod-ssh`'s weaknesses say it fails |
 | `ssh-login` | root logs in, over the Internet, with the run's key |
+| `reconfigure` | a second `create` of the name, with a new hostname, restarts the machine on it |
+| `delete` | `werewolf delete` leaves nothing of the machine: instance, disk, network, security group |
 
-For the login, a firewall rule opens port 22 to this VM alone, while the
-check runs. The VM, the rule, the image and the upload are deleted however
-the check ends; `GCP_KEEP=1` keeps the VM and the rule, to look around.
-The serial port is kept in `build/<arch>/prod-ssh/check/gcp-serial.log`.
+For the login, port 22 opens to this host's address alone, while the
+check runs. Everything the run made, the image included, is deleted
+however it ends; `CLOUD_KEEP=1` keeps the machine, to look around. The
+serial port is kept in `build/<arch>/prod-ssh/check/CLOUD-serial.log`.
 
-It needs gcloud, logged in, with a project (`GCP_PROJECT`, or gcloud's
-own), and costs a few cents. The zone is `us-central1-a` (`GCP_ZONE`), and
-the image goes up through a bucket it makes, `PROJECT-werewolf-images`
-(`GCP_BUCKET`). About 5 minutes, most of it GCP making the image. Not part
-of `make check`, nor of CI, which holds no GCP credentials.
+Each needs that cloud's CLI logged in, and costs a few cents:
+
+- **GCP:** gcloud with a project (`GCP_PROJECT`, or gcloud's own); the zone
+  is `us-central1-a` (`GCP_ZONE`).
+- **AWS:** the aws CLI's region and credentials (`aws login` or `aws
+  configure`, or `AWS_REGION` and `AWS_PROFILE`); nothing to set up first.
+- **Azure:** az's default resource group (`az configure --defaults
+  group=RG`, or `AZURE_DEFAULTS_GROUP`), whose location must offer the
+  arch's size: some subscriptions offer Arm sizes in few regions
+  (`az vm list-skus -l LOCATION`).
+
+A few minutes each, most of it the cloud making the image and the
+machine. Not part of `make check`, nor of CI, which holds no cloud
+credentials.
 
 ## Writing a check
 
@@ -214,9 +227,9 @@ on the console once its services settle; with `werewolf.check=1`, which
 only `make check` sets, posture also makes the attacks that write to the
 kernel log, and proves each refusal by the kernel's own line.
 [test/boot](../test/boot) waits for that line before anything else and
-fails the machine unless the checks that fail are exactly those
-[test/posture-known](../test/posture-known) gives the form and the
-architecture: a new failure fails, and so
+fails the machine unless the checks that fail are exactly the weaknesses
+its form.yaml excuses, and those [test/posture-known](../test/posture-known)
+gives every DEV=1 build or the architecture: a new failure fails, and so
 does a known one that starts passing, until it leaves the list and the
 docs say so. A new protection belongs in cmd/posture, in the file for its area.
 
@@ -315,13 +328,15 @@ arm64 runner has none: a full boot there emulates under TCG, slowly. So arm64
 runs the `native` group instead of `forms` and `shellfree`:
 [test/cage](../test/cage) boots each form's root under `systemd-nspawn` on
 the runner's own kernel -- no virtual machine -- and judges its posture.
-werewolf's runtime protections (the seal, Landlock, fence's policy routing,
+cage runs nothing on the machine, so each form is built as it ships,
+without `DEV=1`, and arm64 checks the shipped images too. werewolf's runtime protections (the seal, Landlock, fence's policy routing,
 the leash, hidepid, W^X) are the host kernel's own features and hold in a
 container, so cage asserts them directly, and `WEREWOLF_CHECK=1` has the
 in-container posture service attack them too, as `werewolf.check=1` does on a
 booted machine. What a container cannot own -- the kernel's sysctls and boot
 line, dm-verity, a few mount options -- `POSTURE_KNOWN_NATIVE` allows to
-fail. The host sysctls behind `files-links`, `files-links-attack` and
+fail, as the form's own weaknesses allow what the form carries by
+design. The host sysctls behind `files-links`, `files-links-attack` and
 `files-memfd-exec` cage raises to werewolf's levels first where it may change
 the host (`CAGE_HARDEN_HOST=1`, which CI sets on its throwaway runners), so
 those attacks run for real; elsewhere a host below werewolf's levels makes

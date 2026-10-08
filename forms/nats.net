@@ -1,3 +1,0 @@
-# NATS serves its clients over TLS, and sends nothing: no routes, no
-# leaf nodes, no gateways.
-listen tcp/4222

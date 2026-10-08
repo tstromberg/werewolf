@@ -145,6 +145,9 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     }
 
     const link = try Link.open(nic);
+    // What the carrier cost the boot: a NIC that comes up late (Hyper-V's,
+    // after its VMBus handshake) shows here, not in the exchange's time.
+    log.event("link", .{ .nic = nic, .carrier = link.carrier, .waited_ms = link.waited_ms });
     const dir = try sys(
         linux.openat(
             linux.AT.FDCWD,
@@ -806,6 +809,9 @@ const Link = struct {
     packet: i32,
     /// An inet socket, for the parent's ioctls.
     inet: i32,
+    /// How long open waited for the carrier, in ms, and whether it came.
+    waited_ms: i64,
+    carrier: bool,
 
     fn open(nic: []const u8) !Link {
         if (nic.len == 0 or nic.len >= linux.IFNAMESIZE) {
@@ -835,13 +841,17 @@ const Link = struct {
         // DISCOVER of a boot was lost so in three boots of four under QEMU
         // and one of three under Lima, each waiting out a retry. A link
         // slower than that is the retries' to cover.
+        const since = nowMs();
+        l.carrier = false;
         for (0..400) |_| {
             ifr = l.ifreq();
             _ = try sys(linux.ioctl(l.inet, linux.SIOCGIFFLAGS, @intFromPtr(&ifr)), "SIOCGIFFLAGS");
-            if (ifr.ifru.flags.RUNNING) break;
+            l.carrier = ifr.ifru.flags.RUNNING;
+            if (l.carrier) break;
             const ts: linux.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
             _ = linux.nanosleep(&ts, null);
         }
+        l.waited_ms = nowMs() - since;
 
         // The packet socket hears nothing until it is bound: the filter goes
         // on, and is locked, first. Without the filter the kernel would copy

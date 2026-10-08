@@ -1,0 +1,20 @@
+# WordPress was installed from the settings before it served
+# (forms/wordpress/test/config): the site answers with its name; the installer,
+# the configuration, the version page and the package's .git are 404; the
+# admin logs in with the password whose hash the config carries and a
+# wrong one is refused, rate limited; users are not listed to strangers
+# (REST is reached by ?rest_route= under the plain permalinks a fresh
+# site has; /wp-json/ is a page like any other then);
+# pingbacks are off; a .php under uploads is never run, and an uploaded
+# SVG is sandboxed; and what is secret is php's alone.
+ok  wp-user          p=$(pidof php-fpm | cut -d' ' -f1); grep -q '^Uid:[[:space:]]*203[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  wp-installed     i=0; until wget -q -T 10 -O /tmp/wp.html http://localhost/ 2>/dev/null; do i=$((i + 1)); [ $i -le 60 ] || { echo "the site does not answer"; exit 1; }; sleep 1; done; grep -q 'werewolf check site' /tmp/wp.html && ! grep -qi 'install' /tmp/wp.html
+ok  wp-hidden        for u in wp-admin/install.php wp-admin/setup-config.php wp-config.php wp-config-sample.php readme.html license.txt .git/HEAD .git/config wp-content/plugins/sqlite-database-integration/.gitignore; do wget -q -T 10 -S -O /dev/null http://localhost/$u 2>&1 | grep -q 'HTTP/1.1 404' || { echo "served: $u"; exit 1; }; done
+ok  wp-login         wget -q -T 10 -S -O /dev/null --header 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --post-data 'log=admin&pwd=werewolf-check&wp-submit=Log+In&testcookie=1' http://localhost/wp-login.php 2>&1 | grep -q 'Set-Cookie: wordpress_logged_in_'
+ok  wp-wrong-password ! wget -q -T 10 -S -O /dev/null --header 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --post-data 'log=admin&pwd=werewolf-wrong&wp-submit=Log+In&testcookie=1' http://localhost/wp-login.php 2>&1 | grep -q 'Set-Cookie: wordpress_logged_in_'
+ok  wp-rate-limited  c=0; for i in $(seq 30); do wget -q -T 10 -S -O /dev/null http://localhost/wp-login.php 2>&1 | grep -q 'HTTP/1.1 503' && c=$((c + 1)); done; [ $c -gt 0 ] || { echo "30 requests to wp-login.php, none refused"; exit 1; }
+ok  wp-users-hidden  for u in '?rest_route=/wp/v2/users' '?author=1'; do h=$(wget -q -T 10 -S -O /dev/null "http://localhost/$u" 2>&1); echo "$h" | grep -q 'HTTP/1.1 404' || { echo "$u:"; echo "$h" | grep -i 'HTTP/\|Location' ; exit 1; }; done
+ok  wp-no-pingback   ! wget -q -T 10 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'X-Pingback' && ! wget -q -T 10 -O - --header 'Content-Type: text/xml' --post-data '<?xml version="1.0"?><methodCall><methodName>system.listMethods</methodName><params/></methodCall>' http://localhost/xmlrpc.php | grep -q 'pingback.ping'
+ok  wp-uploads-data  printf '<?php echo "ran"; ?>' >/data/svc/php-fpm/uploads/x.php && printf '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>' >/data/svc/php-fpm/uploads/x.svg && wget -q -T 10 -S -O /dev/null http://localhost/wp-content/uploads/x.php 2>&1 | grep -q 'HTTP/1.1 404' && wget -q -T 10 -S -O /dev/null http://localhost/wp-content/uploads/x.svg 2>&1 | grep -qi 'Content-Security-Policy: sandbox'; r=$?; rm -f /data/svc/php-fpm/uploads/x.php /data/svc/php-fpm/uploads/x.svg; exit $r
+ok  wp-no-file-mods  grep -q "define( 'DISALLOW_FILE_MODS', true )" /usr/src/wordpress/wp-config.php && ! chpst -u php touch /usr/src/wordpress/wp-content/plugins/x 2>/dev/null
+ok  wp-private       [ "$(stat -c '%u:%a' /run/svc/php-fpm/admin-password-hash)" = 203:600 ] && [ "$(stat -c '%u:%a' /data/svc/php-fpm/salts.php)" = 203:600 ] && [ "$(stat -c '%u:%a' /data/svc/php-fpm/database)" = 203:700 ] && [ ! -e /run/svc/php-fpm/smtp-password ]

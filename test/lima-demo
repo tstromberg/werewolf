@@ -4,7 +4,7 @@
 # UEFI, on vzNAT, which this Mac reaches directly, since the demo runs no
 # ssh for Lima to forward through. It updates itself, keeps /data on its
 # disk and scans with grype. Used by `make demo` and `make demo-delete`;
-# see docs/demo.md.
+# see forms/demo/README.md.
 #
 #   lima-demo          create the VM, or restart one made before, and print
 #                      the page's URL once it answers

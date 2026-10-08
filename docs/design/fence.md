@@ -10,7 +10,7 @@ no BPF or netfilter: mechanisms built into the kernel enforce it.
 
 ## The policy
 
-Each form may have a `forms/<name>.net`, read along the include chain as
+Each form may have a `forms/<name>/form.yaml`, read along the include chain as
 modules are:
 
 ```
@@ -23,6 +23,7 @@ connect _update tcp/443 udp/53 tcp/53
 | --- | --- |
 | `listen tcp/PORT...` | a TCP port the machine serves |
 | `connect USER\|all tcp/PORT udp/PORT icmp ...` | what processes running as USER, or anyone, may send |
+| `connect USER\|all tcp/PORT udp/PORT ... public` | the same, to public addresses alone |
 | `metadata USER...` | a user who may reach the metadata server's port 80 |
 
 Identity is the user a process runs as. Services with accounts of their
@@ -45,6 +46,16 @@ image, and with verified boot it is signed with the rest. It is the one
 place the machine's network is written down: `posture` and the checks
 read it too.
 
+A service that fetches from the internet on its users' behalf (a model
+pull, a webhook, a feed) is the classic server-side request forgery
+target: told to fetch `http://10.0.0.5/` or `http://[::1]:6379/`, it
+would reach what only the machine should. `public` on a `connect` line
+keeps its ports to public addresses: never loopback, private (10/8,
+172.16/12, 192.168/16, fc00::/7), carrier-grade NAT, link-local (and so
+the metadata server), benchmarking, multicast, reserved, or IPv4 hidden
+in IPv6 (`::/96`, `64:ff9b::/96`). It takes no `icmp`, and compiles to
+`connect 207 tcp 443 public`.
+
 ## Enforcement
 
 init's last step is `exec /usr/lib/werewolf/fence /usr/bin/runit`. As root,
@@ -55,6 +66,7 @@ fence reads the policy and then:
 
    | Priority | Rule |
    | --- | --- |
+   | 5 | sent by a user whose `connect` says `public`, on that protocol and port, to an address that is not public: refuse |
    | 10 | sent here, to this machine or over loopback: deliver |
    | 100 | sent to 169.254.169.254 TCP 80 by a user named: route |
    | 101 | sent there by anyone else: refuse |
@@ -194,7 +206,8 @@ Tested under QEMU, on aarch64:
   asked again over TCP 53, which is declared. A UDP service with large
   datagrams would need its fragments let through some other way.
 - **Destinations.** Outbound rules name protocols and ports, not hosts:
-  `connect root tcp/443` reaches any HTTPS server.
+  `connect root tcp/443` reaches any HTTPS server. `public` narrows a
+  line to the internet, not to a host.
 
 ## Alternatives considered
 

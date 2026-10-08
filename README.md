@@ -83,7 +83,7 @@ leaves it in `/run/config`, readable by root alone. `data.key` puts
 
 ## Forms
 
-A form is an apko config in `forms/<name>.yaml`, with optional files, kernel
+A form is an apko config in `forms/<name>/apko.yaml`, with optional files, kernel
 modules and network policy beside it. Forms build on each other, and every
 one includes `minimal`. `make list-forms` shows the include chains.
 
@@ -123,6 +123,6 @@ after a healthy minute. See [docs/bite.md](docs/bite.md).
 - [docs/forms.md](docs/forms.md): the forms, and building your application into one
 - [docs/programs.md](docs/programs.md): the programs in `cmd/` and what confines them in `lib/`
 - [docs/data.md](docs/data.md): `/data`, disks and encryption
-- [docs/postgresql.md](docs/postgresql.md) and [docs/demo.md](docs/demo.md): running a leashed service
+- [forms/postgresql/README.md](forms/postgresql/README.md) and [forms/demo/README.md](forms/demo/README.md): running a leashed service
 - [docs/cve-mitigation-survey.md](docs/cve-mitigation-survey.md): four years of exploited Linux CVEs from CISA's KEV catalog, and whether each would have worked on werewolf
 - [docs/roadmap.md](docs/roadmap.md): what comes next

@@ -1,0 +1,10 @@
+base: prod
+
+# Ollama serves its API, and pulls models from its registry over HTTPS:
+# public addresses alone, so a pull naming a host on this machine or its
+# network (127.0.0.1, 10.0.0.5, the metadata server) is refused, not sent.
+# DNS is not public: the resolver may be the cloud's own.
+net:
+  - listen tcp/11434
+  - connect ollama tcp/443 public
+  - connect ollama udp/53 tcp/53

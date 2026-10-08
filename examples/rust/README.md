@@ -10,7 +10,7 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-rust.yaml) inherits `app.yaml`, which adds an
+The [form](../../forms/example-rust/apko.yaml) inherits `app.yaml`, which adds an
 application user to `prod`. It declares the service and port 8080.
 [main.rs](main.rs) is compiled into a static Linux executable installed at
 `/usr/lib/app/server`.

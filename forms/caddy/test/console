@@ -1,0 +1,9 @@
+# What the caddy form, booted as it ships, without a shell and with no
+# config, must say on its console (make check-shellfree-caddy; test/boot;
+# forms/demo/test/console has the format). Caddy starts, leashed, serves the
+# site on :80 since no name was given, and stays up.
+
+seen    caddy-leashed     leash: \{"event":"start","service":"caddy"
+seen    caddy-serving     "msg":"serving initial configuration"
+unseen  service-down      leash: \{"event":"(down|retry)"
+unseen  caddy-error       "level":"error"

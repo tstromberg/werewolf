@@ -1,4 +1,0 @@
-# step-ca serves ACME and its API on :443, and validates ACME's http-01
-# challenges on the requester's :80, resolving its name first.
-listen tcp/443
-connect step tcp/80 tcp/53 udp/53

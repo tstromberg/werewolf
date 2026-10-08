@@ -129,6 +129,16 @@ pub fn check(p: *Posture) !void {
         "Packets cannot choose their own way through the machine.",
         if (v6_on) &source_route else source_route[0..1],
     );
+    // Loopback addresses are routed to an interface if all or the interface
+    // says so.
+    try p.sysctls(
+        "network-localnet",
+        "network",
+        "Loopback stays local",
+        "Nothing on the network can reach what listens on 127.0.0.1 alone, by routing " ++
+            "a packet for it through an interface.",
+        &.{.{ "net/ipv4/conf/*/route_localnet", "0" }},
+    );
     // Router advertisements stay on (IPv6 takes its route from them), but
     // limited to what they must give.
     if (v6_on) try p.sysctls("network-ipv6-ra-limit" ++
@@ -231,6 +241,7 @@ fn ssh(p: *Posture) !void {
     var loose: std.ArrayList(u8) = .empty;
     if (settings) |s| {
         try loose.appendSlice(p.gpa, try sshMismatches(p.gpa, s, &ssh_settings));
+        try loose.appendSlice(p.gpa, try sshLimits(p.gpa, s, loose.items.len > 0));
         const config = "/etc/ssh/sshd_config";
         if (statx(p.gpa, config)) |st| if (st.uid != 0 or st.mode & 0o022 != 0)
             try loose.print(
@@ -238,6 +249,18 @@ fn ssh(p: *Posture) !void {
                 "{s}{s} is not root's alone",
                 .{ if (loose.items.len > 0) ", " else "", config },
             );
+        // Each host key, as sshd -T lists them, one "hostkey PATH" a line.
+        var lines = std.mem.tokenizeScalar(u8, s, '\n');
+        while (lines.next()) |line| {
+            if (!std.ascii.startsWithIgnoreCase(line, "hostkey ")) continue;
+            const key = trim(line["hostkey ".len..]);
+            const st = statx(p.gpa, key) orelse continue;
+            if (st.mode & 0o077 != 0) try loose.print(
+                p.gpa,
+                "{s}{s} is readable by others",
+                .{ if (loose.items.len > 0) ", " else "", key },
+            );
+        }
     }
     try p.add(.{
         .id = "network-ssh-config",
@@ -245,9 +268,14 @@ fn ssh(p: *Posture) !void {
         .name = "ssh offers keys and nothing more",
         .why = "Logging in takes a key; no one gets in without a password, through another " ++
             "host's trust, or with their own environment, and a session cannot forward " ++
-            "ports or tunnel past the machine's network policy.",
+            "ports or tunnel past the machine's network policy. A guesser gets few tries " ++
+            "and little time, and a dead session is cut.",
         .how = "sshd -T reports " ++ comptime sshSettingsText() ++
-            ", and /etc/ssh/sshd_config is root's and writable by no one else",
+            ", permitrootlogin no or prohibit-password, maxauthtries at most 4, " ++
+            "logingracetime at most 60, maxsessions at most 10, maxstartups starting " ++
+            "to refuse by 10 and refusing all by 60, clientaliveinterval set and " ++
+            "clientalivecountmax at most 3; /etc/ssh/sshd_config is root's and writable " ++
+            "by no one else, and no host key is readable by others",
         .result = if (settings == null) .skip else if (loose.items.len == 0) .pass else .fail,
         .detail = if (settings == null) skipped else loose.items,
     });
@@ -257,13 +285,81 @@ fn ssh(p: *Posture) !void {
         .area = "network",
         .name = "ssh uses strong cryptography",
         .why = "No ssh connection can be made with a cipher, MAC, key exchange or signature " ++
-            "that is broken or weakening.",
+            "that is broken or weakening, and a recording of one cannot be read by a " ++
+            "quantum computer later.",
         .how = "sshd -T lists no CBC, arcfour or 3DES cipher, no MD5, SHA-1, 64-bit or " ++
-            "truncated MAC, no SHA-1 or 1024-bit key exchange, and no ssh-rsa or ssh-dss " ++
-            "signature",
+            "truncated MAC, no SHA-1 or 1024-bit key exchange, no ssh-rsa or ssh-dss " ++
+            "signature, and a post-quantum key exchange (mlkem768x25519-sha256 or " ++
+            "sntrup761x25519-sha512)",
         .result = if (settings == null) .skip else if (weak.len == 0) .pass else .fail,
         .detail = if (settings == null) skipped else weak,
     });
+}
+
+/// How far a guesser or a forgotten session gets: what sshd -T reports
+/// beyond what the benchmarks allow, as a list, with a comma first if
+/// continuing one.
+fn sshLimits(gpa: Allocator, settings: []const u8, continuing: bool) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    const root = sshValue(settings, "permitrootlogin") orelse "absent";
+    if (!std.mem.eql(u8, root, "no") and !std.mem.eql(u8, root, "prohibit-password") and
+        !std.mem.eql(u8, root, "without-password"))
+        try out.print(gpa, "{s}permitrootlogin is {s}", .{ sep(continuing, out.items), root });
+    for ([_]struct { []const u8, u32 }{
+        .{ "maxauthtries", 4 },
+        .{ "logingracetime", 60 },
+        .{ "maxsessions", 10 },
+        .{ "clientalivecountmax", 3 },
+    }) |limit| {
+        const key, const most = limit;
+        const v = sshValue(settings, key) orelse "absent";
+        const n = std.fmt.parseInt(u32, v, 10) catch std.math.maxInt(u32);
+        if (n > most) try out.print(gpa, "{s}{s} is {s}", .{ sep(continuing, out.items), key, v });
+    }
+    const interval = sshValue(settings, "clientaliveinterval") orelse "absent";
+    if ((std.fmt.parseInt(u32, interval, 10) catch 0) == 0)
+        try out.print(
+            gpa,
+            "{s}clientaliveinterval is {s}",
+            .{ sep(continuing, out.items), interval },
+        );
+    // start:rate:full. Refusing starts at start unauthenticated connections
+    // and is total at full.
+    const startups = sshValue(settings, "maxstartups") orelse "absent";
+    var parts = std.mem.splitScalar(u8, startups, ':');
+    const start = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch std.math.maxInt(u32);
+    _ = parts.next();
+    const full = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch std.math.maxInt(u32);
+    if (start > 10 or full > 60)
+        try out.print(gpa, "{s}maxstartups is {s}", .{ sep(continuing, out.items), startups });
+    return out.items;
+}
+
+fn sep(continuing: bool, so_far: []const u8) []const u8 {
+    return if (continuing or so_far.len > 0) ", " else "";
+}
+
+test sshLimits {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const good = "permitrootlogin prohibit-password\nmaxauthtries 3\nlogingracetime " ++
+        "30\nmaxsessions " ++
+        "0\nclientaliveinterval 60\nclientalivecountmax 3\nmaxstartups 10:30:30\n";
+    try testing.expectEqualStrings("", try sshLimits(a, good, false));
+    const defaults = "permitrootlogin yes\nmaxauthtries 6\nlogingracetime 120\nmaxsessions 10\n" ++
+        "clientaliveinterval 0\nclientalivecountmax 3\nmaxstartups 10:30:100\n";
+    try testing.expectEqualStrings(
+        ", permitrootlogin is yes, maxauthtries is 6, logingracetime is 120, " ++
+            "clientaliveinterval is 0, maxstartups is 10:30:100",
+        try sshLimits(a, defaults, true),
+    );
+    try testing.expectEqualStrings(
+        "permitrootlogin is absent, maxauthtries is absent, logingracetime is absent, " ++
+            "maxsessions is absent, clientalivecountmax is absent, clientaliveinterval is " ++
+            "absent, maxstartups is absent",
+        try sshLimits(a, "", false),
+    );
 }
 
 // werewolf's network policy (docs/design/fence.md): only declared ports can be
@@ -395,6 +491,8 @@ const ssh_settings = [_][2][]const u8{
         "no",
     },
     .{ "x11forwarding", "no" },
+    .{ "gssapiauthentication", "no" },
+    .{ "loglevel", "VERBOSE" },
     .{ "allowagentforwarding", "no" },
     .{
         "allowtcpforwarding",
@@ -428,9 +526,11 @@ fn sshValue(settings: []const u8, key: []const u8) ?[]const u8 {
 fn sshMismatches(gpa: Allocator, settings: []const u8, want: []const [2][]const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (want) |kv| {
-        // An sshd built without X11 (Wolfi's) lists no x11forwarding, and
-        // cannot forward X11 at all.
-        if (std.mem.eql(u8, kv[0], "x11forwarding") and sshValue(settings, kv[0]) == null) continue;
+        // An sshd built without X11 or GSSAPI (Wolfi's) lists neither
+        // setting, and can do neither at all.
+        if ((std.mem.eql(u8, kv[0], "x11forwarding") or
+            std.mem.eql(u8, kv[0], "gssapiauthentication")) and
+            sshValue(settings, kv[0]) == null) continue;
         const v = sshValue(settings, kv[0]) orelse "absent";
         if (!std.mem.eql(
             u8,
@@ -450,7 +550,13 @@ const ssh_weak = [_]struct { []const u8, []const []const u8 }{
     .{ "pubkeyacceptedalgorithms", &.{ "ssh-rsa", "ssh-dss" } },
 };
 
-/// The weak algorithms sshd -T lists, each once.
+/// The key exchanges that stand up to a quantum computer, one of which
+/// sshd must offer: a recording of a session made today could otherwise
+/// be read once one exists.
+const ssh_post_quantum = [_][]const u8{ "mlkem768x25519-sha256", "sntrup761x25519-sha512" };
+
+/// The weak algorithms sshd -T lists, each once, and the post-quantum
+/// key exchange it lacks.
 fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (ssh_weak) |w| {
@@ -464,6 +570,15 @@ fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
             };
         }
     }
+    var kex = std.mem.tokenizeScalar(u8, sshValue(settings, "kexalgorithms") orelse "", ',');
+    const post_quantum = offered: while (kex.next()) |alg| {
+        for (ssh_post_quantum) |pq| if (std.mem.startsWith(u8, alg, pq)) break :offered true;
+    } else false;
+    if (!post_quantum) try out.print(
+        gpa,
+        "{s}no post-quantum key exchange",
+        .{if (out.items.len > 0) ", " else ""},
+    );
     return out.items;
 }
 
@@ -794,7 +909,8 @@ test sshMismatches {
         ),
     );
     try testing.expectEqualStrings(
-        "aes256-cbc, umac-64-etm@openssh.com, hmac-sha1, diffie-hellman-group14-sha1, ssh-rsa",
+        "aes256-cbc, umac-64-etm@openssh.com, hmac-sha1, diffie-hellman-group14-sha1, " ++
+            "ssh-rsa, no post-quantum key exchange",
         try weakSshCrypto(a, settings),
     );
     try testing.expectEqualStrings(

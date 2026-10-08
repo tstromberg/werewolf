@@ -1,0 +1,52 @@
+# prod: the production base, and what a form with a purpose builds on. CI
+# publishes it; see docs/releases.md. On minimal, it adds:
+#
+# - an address from the network's DHCP server when the kernel command line
+#   names none: werewolf's own client (cmd/dhcp-client), and the dhcp-client
+#   service that renews the lease;
+# - its config from a cloud's metadata server (GCP, AWS, Hetzner Cloud,
+#   Azure) when no config tar is on a disk or beside the victim
+#   (cmd/cloud-metadata; docs/cloud.md);
+# - keeping itself current (cmd/slot-update; docs/updater.md): at boot and
+#   every 20 hours it asks Wolfi and Alpine whether anything in this image
+#   has a newer version, and if so builds the other slot on the machine,
+#   boots it once, and keeps it only if it commits;
+# - /data on a disk, when werewolf.data names one, in LUKS2 when the config
+#   brings data.key (docs/data.md).
+#
+# It listens on nothing.
+contents:
+  packages:
+    - apk-tools             # fetch and verify packages, against the keys in the image
+    - erofs-utils           # mkfs.erofs, for the new slot's root
+    - zstd                  # stage0's compression, as the build's
+    - e2fsprogs             # mke2fs, e2fsck, for /data
+    - cryptsetup            # /data's LUKS2
+
+# Each program's half that talks to the network, as a user of its own:
+# _dhcp reads it for the DHCP client, _cloud asks the metadata server, and
+# _update fetches the packages and CVE sources the updater reads.
+accounts:
+  groups:
+    - groupname: _dhcp
+      gid: 67
+    - groupname: _cloud
+      gid: 68
+    - groupname: _update
+      gid: 69
+  users:
+    - username: _dhcp
+      uid: 67
+      gid: 67
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _cloud
+      uid: 68
+      gid: 68
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: _update
+      uid: 69
+      gid: 69
+      homedir: /var/empty
+      shell: /sbin/nologin

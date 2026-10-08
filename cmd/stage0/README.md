@@ -13,8 +13,11 @@ that last worked.
 werewolf's root is one image, `root.erofs`, the same byte for byte on every
 boot. On a machine with slots it is a file on a filesystem the kernel
 command line names (`werewolf.victim=UUID:/DIR`, `werewolf.slot=a|b`): the
-replaced distro's, after bite, or werewolf's own disk. Booted directly
-(QEMU, Lima), it is in the initramfs. The initramfs carries the root
+replaced distro's, after bite, or werewolf's own disk. Booted directly,
+it is in the initramfs (`make run`), or on a disk of its own that
+`werewolf.root=DEV` names (Firecracker's `vdc`): read as it is used,
+where the kernel unpacks an appended image into RAM that nothing frees,
+20 MB for the machine's life and 26 ms of every boot on Firecracker. The initramfs carries the root
 hash the image must match (`/verity`, `lib/verity.zig`). Nothing else runs
 before stage0, so it uses the kernel alone: no shell, no blkid, no mount.
 

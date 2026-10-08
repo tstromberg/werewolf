@@ -20,8 +20,16 @@
 //!     werewolf.deadman=SECONDS   the deadman's wait, 1 to 600, taken only
 //!                                from a DEV build's root (make check-deadman)
 //!
-//! (both, or neither); or, booted directly (QEMU, Lima), /root.erofs in this
-//! initramfs, which the build appends.
+//! (both, or neither); or, booted directly, /root.erofs in this initramfs,
+//! which the build appends (make run), or a disk of its own:
+//!
+//!     werewolf.root=DEV          the disk holding the image, by its name in
+//!                                /dev (Firecracker's vdc), with no slot
+//!
+//! A disk is read as the root is used, where the kernel unpacks an
+//! appended image into RAM before stage0 starts, and nothing frees it: on
+//! Firecracker 20 MB for the machine's life, and 26 ms of every boot,
+//! against 10 ms more of userland reading from the disk.
 //!
 //! Getting back to a slot that works is the loader's job (GRUB or
 //! systemd-boot). A new slot boots once; if anything here fails, stage0
@@ -58,10 +66,12 @@ pub fn main(init: std.process.Init) !void {
 
     const boot = parseCmdline(readAll(gpa, "/proc/cmdline")) catch |err| switch (err) {
         error.Unpaired => fail("werewolf.victim and werewolf.slot come together", .{}),
-        error.Twice => fail("werewolf.victim or werewolf.slot given twice", .{}),
+        error.Twice => fail("werewolf.victim, werewolf.slot or werewolf.root given twice", .{}),
         error.BadVictim => fail("werewolf.victim must be UUID:/DIR", .{}),
         error.BadSlot => fail("werewolf.slot must be a or b", .{}),
         error.BadDeadman => fail("werewolf.deadman must be 1 to 600 seconds", .{}),
+        error.BadRoot => fail("werewolf.root must name a disk in /dev, as vdc", .{}),
+        error.RootAndSlot => fail("werewolf.root is for a direct boot, not a slot's", .{}),
     };
 
     // Lockdown at integrity before any module: the kernel then loads only
@@ -74,10 +84,15 @@ pub fn main(init: std.process.Init) !void {
         !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
 
     // Every module the form needs, then the loader closes for good: the
-    // root that follows finds it closed and loads nothing. The slot's disk
-    // is looked for while the drivers load, its superblock needing none,
-    // and modload then told its filesystem, for the modules that alone
-    // needs (xfs's, btrfs's): none for werewolf's own ext4, or with no slot.
+    // root that follows finds it closed and loads nothing. modload is told
+    // the tags this machine needs, a line each. Hyper-V's first: the kernel
+    // registers VMBus, built in, only on Hyper-V (Azure), and the slot's
+    // disk may sit behind it, so its drivers load before the search; and
+    // FAT's on werewolf's own disk (werewolf.esp), for its EFI partition. The
+    // disk is looked for while the drivers load, its superblock needing
+    // none, and modload then told its filesystem, for the modules that
+    // alone needs (xfs's, btrfs's): none for werewolf's own ext4, or with
+    // no slot.
     var loader: ?std.process.Child = std.process.spawn(io, .{
         .argv = &.{"/usr/lib/werewolf/modload"},
         .stdin = .pipe,
@@ -85,6 +100,11 @@ pub fn main(init: std.process.Init) !void {
         say("cannot run modload: {s}", .{@errorName(err)});
         break :blk null;
     };
+    if (loader) |l| {
+        if (linux.errno(linux.access("/sys/bus/vmbus", linux.F_OK)) == .SUCCESS)
+            l.stdin.?.writeStreamingAll(io, "hyperv\n") catch {};
+        if (boot.esp) l.stdin.?.writeStreamingAll(io, "esp\n") catch {};
+    }
     const found = if (boot.slot.len > 0) findFilesystem(gpa, boot.uuid) else null;
     if (loader) |*l| {
         const name = if (found) |f| @tagName(f.kind) else "none";
@@ -105,6 +125,16 @@ pub fn main(init: std.process.Init) !void {
     const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
+    if (boot.root.len > 0) {
+        // Its driver loaded with the rest; its node may still be coming.
+        img = try gpa.printSentinel("/dev/{s}", .{boot.root}, 0);
+        var waited: usize = 0;
+        while (linux.errno(linux.access(img, linux.F_OK)) != .SUCCESS) : (waited += 1) {
+            if (waited == find_for * 100) fail("no disk {s}", .{img});
+            var ts: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+            _ = linux.nanosleep(&ts, null);
+        }
+    }
     var slot_ms: u64 = 0;
     if (boot.slot.len > 0) {
         const f = found orelse fail("no filesystem {s}", .{boot.uuid});
@@ -127,23 +157,24 @@ pub fn main(init: std.process.Init) !void {
         );
         slot_ms = bootMs();
     }
-    // Read-only, and nothing over it: no overlay to write into. The image,
-    // a file in a slot's filesystem or in this initramfs, goes through a
-    // read-only loop device, which dm-verity then maps, checking each block
-    // as it is read. The device node is made from the number dm gives, not
-    // waited for from devtmpfs.
+    // Read-only, and nothing over it: no overlay to write into. dm-verity
+    // maps the image, checking each block as it is read: a disk as it is,
+    // and a file, in a slot's filesystem or in this initramfs, through a
+    // read-only loop device. The device node is made from the number dm
+    // gives, not waited for from devtmpfs.
     const params = verity.Params.parse(readAll(gpa, "/verity")) catch
         fail("no root hash in /verity", .{});
-    const loop = loopDevice(gpa, img) catch |err|
+    const loop = if (boot.root.len > 0) null else loopDevice(gpa, img) catch |err|
         fail("cannot attach {s} to a loop device: {s}", .{ img, @errorName(err) });
     var table_buf: [512]u8 = undefined;
-    const table = verity.table(&table_buf, loop.path, params) catch unreachable;
+    const table = verity.table(&table_buf, if (loop) |l| l.path else img, params) catch
+        unreachable;
     const sectors = params.data_blocks * (verity.block_size / 512);
     const dev = dm.create("root", "verity", sectors, table) catch |err|
         fail("cannot open {s} through dm-verity: {s}", .{ img, @errorName(err) });
     // dm-verity holds the loop device now: autoclear detaches the image
     // when it lets go.
-    _ = linux.close(loop.fd);
+    if (loop) |l| _ = linux.close(l.fd);
     const root_dev = "/dev/mapper/root";
     if (linux.errno(linux.mknodat(linux.AT.FDCWD, root_dev, linux.S.IFBLK | 0o600, dev)) !=
         .SUCCESS) fail("cannot make {s}", .{root_dev});
@@ -453,12 +484,18 @@ const Boot = struct {
     uuid: []const u8 = "",
     dir: []const u8 = "",
     slot: []const u8 = "",
+    /// werewolf.root: booted directly, the disk holding the image, by its
+    /// name in /dev, or "" for /root.erofs in this initramfs.
+    root: []const u8 = "",
+    /// Whether werewolf.esp names an EFI partition: werewolf's own disk,
+    /// whose updater writes it, so FAT's modules load.
+    esp: bool = false,
     /// werewolf.deadman, in seconds, or 0 for none given.
     deadman: u32 = 0,
 };
 
-/// werewolf.victim=UUID:/DIR and werewolf.slot=a|b, both or neither, each
-/// once, and well formed.
+/// werewolf.victim=UUID:/DIR and werewolf.slot=a|b, both or neither, or
+/// werewolf.root=DEV without them, each once, and well formed.
 fn parseCmdline(text: []const u8) !Boot {
     var b: Boot = .{};
     var victim: ?[]const u8 = null;
@@ -472,6 +509,12 @@ fn parseCmdline(text: []const u8) !Boot {
             b.slot = arg["werewolf.slot=".len..];
             if (!std.mem.eql(u8, b.slot, "a") and
                 !std.mem.eql(u8, b.slot, "b")) return error.BadSlot;
+        } else if (std.mem.startsWith(u8, arg, "werewolf.esp=")) {
+            b.esp = true;
+        } else if (std.mem.startsWith(u8, arg, "werewolf.root=")) {
+            if (b.root.len > 0) return error.Twice;
+            b.root = arg["werewolf.root=".len..];
+            if (!isDeviceName(b.root)) return error.BadRoot;
         } else if (std.mem.startsWith(u8, arg, "werewolf.deadman=")) {
             if (b.deadman > 0) return error.Twice;
             const secs = arg["werewolf.deadman=".len..];
@@ -483,12 +526,21 @@ fn parseCmdline(text: []const u8) !Boot {
         }
     }
     if ((victim == null) != (b.slot.len == 0)) return error.Unpaired;
+    if (b.root.len > 0 and b.slot.len > 0) return error.RootAndSlot;
     const v = victim orelse return b;
     const colon = std.mem.findScalar(u8, v, ':') orelse return error.BadVictim;
     b.uuid = v[0..colon];
     b.dir = v[colon + 1 ..];
     if (parseUuid(b.uuid) == null or !isSafeDir(b.dir)) return error.BadVictim;
     return b;
+}
+
+/// A block device's name in /dev, as the kernel gives it: vdc, nvme0n1.
+/// A letter, then up to 15 lower-case letters and digits; no path.
+fn isDeviceName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 16 or !std.ascii.isLower(name[0])) return false;
+    for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
+    return true;
 }
 
 /// An absolute path of plain names: no ., no .., no empty parts, and only
@@ -585,10 +637,25 @@ test parseCmdline {
     try testing.expectEqualStrings("b", b.slot);
     const direct = try parseCmdline("console=ttyAMA0 werewolf.ip=10.0.2.15/24\n");
     try testing.expectEqualStrings("", direct.slot);
+    try testing.expectEqualStrings("", direct.root);
+    try testing.expect(!direct.esp);
+    try testing.expect((try parseCmdline("werewolf.esp=57E1-F000")).esp);
+    try testing.expectEqualStrings("vdc", (try parseCmdline("werewolf.root=vdc")).root);
+    try testing.expectEqualStrings("nvme0n1", (try parseCmdline("werewolf.root=nvme0n1")).root);
+    for ([_][]const u8{ "", "/dev/vdc", "../vdc", "vdC", "0vd", "vd-c", "abcdefghijklmnopq" }) |v| {
+        var buf: [64]u8 = undefined;
+        const arg = try std.mem.print(&buf, "werewolf.root={s}", .{v});
+        try testing.expectError(error.BadRoot, parseCmdline(arg));
+    }
+    try testing.expectError(error.Twice, parseCmdline("werewolf.root=vdc werewolf.root=vdd"));
 
     const uuid = "57e1f000-77e2-4b0f-8a3c-0000000000a0";
     try testing.expectError(error.Unpaired, parseCmdline("werewolf.slot=a"));
     try testing.expectError(error.Unpaired, parseCmdline("werewolf.victim=" ++ uuid ++ ":/w"));
+    try testing.expectError(
+        error.RootAndSlot,
+        parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=a werewolf.root=vdc"),
+    );
     try testing.expectError(
         error.BadSlot,
         parseCmdline("werewolf.victim=" ++ uuid ++ ":/w werewolf.slot=c"),

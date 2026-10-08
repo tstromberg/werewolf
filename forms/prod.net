@@ -1,8 +1,0 @@
-# The updater's network half, as _update: Wolfi and Alpine for apk, and the
-# CVE sources, Wolfi's security.json and the kernel CNA's records on
-# git.kernel.org, all over HTTPS, and the names to find them. Root, which
-# builds and installs the slot, has no network at all.
-connect _update tcp/443 udp/53 tcp/53
-# No one reaches the metadata server, where the user data and its secrets
-# are: cmd/cloud-metadata's fetcher, the one that asks, runs at boot before
-# this policy is set, held to TCP port 80 by its own Landlock instead.

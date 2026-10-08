@@ -1,3 +1,0 @@
-# Vaultwarden serves the apps and the web vault (behind caddy), and sends
-# nothing.
-listen tcp/8080

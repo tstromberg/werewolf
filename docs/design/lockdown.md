@@ -389,7 +389,7 @@ root (sshd, the updater) sandboxes itself or is not yet sandboxed, below.
 
 | Service | Runs as | Notes |
 | --- | --- | --- |
-| nginx, the demo's status page and scan | their own users | leashed (docs/demo.md) |
+| nginx, the demo's status page and scan | their own users | leashed (forms/demo/README.md) |
 | cloudflared | `cloudflared` | its QUIC to Cloudflare is UDP, which Landlock cannot restrict yet |
 | sshd | root | not leashed: its privilege separation needs root; it is for test forms, and leaves production (roadmap) |
 | autoupdate | root | not leashed: needs `mount` and `reboot`; its fetching and parsing run in children as `_update`, under Landlock and seccomp (docs/updater.md) |

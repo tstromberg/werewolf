@@ -2,7 +2,7 @@
 
 ## Summary
 
-Measures how a Linux machine protects itself, about ninety checks, each
+Measures how a Linux machine protects itself, about a hundred checks, each
 passed, failed or skipped, with why it matters and how it was checked. It
 runs on werewolf once a boot, as a service, and on any Linux by hand.
 
@@ -41,7 +41,9 @@ another distribution is a comparison. `docs/posture.md` lists the checks.
   lowers anything.
 - **Proofs**: a copy of itself, under a random name, in each writable place
   and in a memfd, must not start; opening a sysctl, a sysfs file and the
-  first disk for writing must be refused.
+  first disk for writing must be refused; running `/` as a program, refused
+  everywhere, must leave the kernel's audit record in the kernel log, and
+  asking the kernel to stop auditing must be refused.
 - **Walks** (setuid files on the root, anything anyone may write) go from
   each directory's descriptor, links not followed, within one filesystem.
 - **Attacks**, only with `werewolf.check=1`, `--attack` or
@@ -58,8 +60,9 @@ another distribution is a comparison. `docs/posture.md` lists the checks.
 
 - Root sees the whole picture; another user gets some checks skipped.
 - Network probes are quiet, but the metadata probe opens one TCP connection
-  to `169.254.169.254`.
-- About ninety checks is a lot to keep true as kernels change; `test/posture-known`
+  to `169.254.169.254`, and the exec proofs leave eight refused execs, two
+  audit lines each, in the kernel log and on the console every run.
+- About a hundred checks is a lot to keep true as kernels change; `test/posture-known`
   lists the expected failures per form and architecture.
 
 ## Alternatives Considered

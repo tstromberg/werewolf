@@ -5,13 +5,14 @@
 # -no-reboot (so a panic ends the run) and -nographic (QEMU's monitor on the
 # console). Judge the machine's posture line, which its posture service
 # prints once the services settle: the checks that fail must be exactly
-# those in POSTURE_KNOWN (the form's line of test/posture-known), no more and
+# those in POSTURE_KNOWN (the form's weaknesses, and test/posture-known's
+# lines for every DEV=1 build and the architecture), no more and
 # no fewer. Then run each check in CHECKS (see test/checks) as root on the
 # console, which needs werewolf.debug=1 and a shell, and power the machine
 # off. A machine with no shell is judged from its console instead: CHECKS
 # is - (its posture line alone), or a file of console lines (seen NAME
 # REGEX, which must appear; unseen NAME REGEX, which must not; see
-# test/console-demo), and QEMU ends from its monitor. A file may hold both,
+# forms/demo/test/console), and QEMU ends from its monitor. A file may hold both,
 # for a machine with a shell whose services speak on the console
 # (test/checks-persist-again). Exit 0 only if it
 # booted, its posture and every check came out as expected, and, with a
@@ -168,7 +169,7 @@ if {$passed < 20} {
 } elseif {[llength $new] || [llength $closed]} {
 	set detail ""
 	if {[llength $new]} { append detail "failing, not known: [join $new]\n" }
-	if {[llength $closed]} { append detail "known, now passing: [join $closed]; take it out of test/posture-known, and update the docs\n" }
+	if {[llength $closed]} { append detail "known, now passing: [join $closed]; take it out of the form's weaknesses (or test/posture-known), and update the docs\n" }
 	say FAIL posture $detail
 	incr failed
 } else {
@@ -184,10 +185,12 @@ if {$passed < 20} {
 proc host {cmd} {
 	global log
 	set out $log.host
-	file delete -force $out $out.rc
+	file delete -force $out $out.rc $out.rc.tmp
 	set quoted ""
 	foreach a $cmd { append quoted " '" [string map {' '\''} $a] "'" }
-	exec sh -c "$quoted </dev/null >'$out' 2>&1; echo \$? >'$out.rc'" &
+	# The status is renamed into place, so $out.rc exists only once it is
+	# whole: a redirection makes the file before echo writes to it.
+	exec sh -c "$quoted </dev/null >'$out' 2>&1; echo \$? >'$out.rc.tmp'; mv '$out.rc.tmp' '$out.rc'" &
 	set deadline [expr {[clock seconds] + 60}]
 	while {![file exists $out.rc] && [clock seconds] < $deadline} {
 		expect {

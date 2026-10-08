@@ -3,13 +3,16 @@
 //!     modules   load each module /usr/lib/modules/RELEASE/werewolf.modules
 //!               names, in its order, then set kernel.modules_disabled
 //!
-//! A line may be for one filesystem alone, `@xfs kernel/fs/xfs/xfs.ko`:
-//! what only the slot's own filesystem needs, when it is not werewolf's
-//! ext4 (bite leaves Rocky's xfs and Fedora's btrfs). Those load once the
-//! rest have, and only for the filesystem stdin then names, a line from
-//! stage0, which looks for the slot's disk while the drivers load; at the
-//! end of stdin unnamed, every one loads, as from a list without them.
-//! btrfs's alone cost a boot 0.17 s: raid6's speed test.
+//! A line may be tagged, `@xfs kernel/fs/xfs/xfs.ko`, for what only some
+//! machines need: the slot's own filesystem, when it is not werewolf's ext4
+//! (bite leaves Rocky's xfs and Fedora's btrfs), or Hyper-V's disks. Those
+//! load once the rest have, and only for the tags stdin names, a line each,
+//! from stage0: `hyperv` at once, where the kernel found a VMBus, since the
+//! slot's disk may sit behind it; then the filesystem it found the slot on,
+//! which it looks for while the drivers load. Each tag's lines load as its
+//! line comes; at the end of stdin with none named, every one loads, as
+//! from a list without tags. btrfs's alone cost a boot 0.17 s, raid6's
+//! speed test, and hv_storvsc 18 ms finding no VMBus.
 //!
 //! stage0 runs it; the root it hands over finds the loader closed, and
 //! init's run says so and does nothing.
@@ -42,11 +45,10 @@
 //!   CAP_SYS_MODULE gone, from the bounding set too, never to come back,
 //!   and a seccomp filter of finit_module, read, write, close and exit.
 //!   Anything else, or another architecture's call, kills it.
-//! - No arguments, no environment, and of stdin one short line, a
-//!   filesystem's name, which picks among lines of the list and nothing
-//!   else; one line on the console for what it did, and one for each
-//!   module the kernel refused, with the kernel's reason, as for any call
-//!   that fails.
+//! - No arguments, no environment, and of stdin a few short lines, tags,
+//!   which pick among lines of the list and nothing else; one line on
+//!   the console for what it did, and one for each module the kernel
+//!   refused, with the kernel's reason, as for any call that fails.
 //!
 //! Should closing the loader fail, init boots on, as it cannot tell that
 //! from a driver refused; the seal then takes CAP_SYS_MODULE from every
@@ -106,7 +108,7 @@ pub fn main() void {
             if (r.skipped > 0)
                 std.mem.print(
                     &skipped,
-                    ", {d} for filesystems this boot does not use",
+                    ", {d} for what this machine does not have",
                     .{r.skipped},
                 ) catch ""
             else
@@ -154,88 +156,110 @@ fn load() !Result {
 
     try pledge();
 
-    var refused: usize = 0;
-    var absent: usize = 0;
-    var skipped: usize = 0;
-    // Every module for all, then those for the slot's filesystem alone.
-    var name_buf: [16]u8 = undefined;
-    var want: ?Want = null;
-    for (0..2) |pass| for (fds[0..count], mods[0..count]) |fd, m| {
-        if ((m.tag.len > 0) != (pass == 1)) continue;
-        if (m.tag.len > 0) {
-            const w = want orelse blk: {
-                want = wanted(&name_buf);
-                break :blk want.?;
-            };
-            if (!w.takes(m.tag)) {
-                skipped += 1;
-                close(fd);
-                continue;
-            }
+    var r: Result = .{ .count = count, .refused = 0, .absent = 0, .skipped = 0 };
+    // Every module for all; then, as stdin names each tag, those for it.
+    for (fds[0..count], mods[0..count]) |*fd, m| if (m.tag.len == 0) insert(fd, m, &r);
+    var tags: Tags = .{};
+    var named = false;
+    while (tags.next()) |tag| {
+        named = true;
+        if (!isTag(tag)) {
+            say("modload: stdin named no tag; ignored\n", .{});
+            continue;
         }
-        const rc = linux.syscall3(
-            .finit_module,
-            @bitCast(@as(isize, fd)),
-            @intFromPtr(m.params.ptr),
-            0,
-        );
-        switch (linux.errno(rc)) {
-            .SUCCESS => if (m.params.len > 0) say(
-                "modload: {s}: loaded with {s}\n",
-                .{ m.path, m.params },
-            ),
-            .EXIST => {}, // built in, or loaded already
-            // The module's hardware is not here, as for one CPU vendor's
-            // KVM on the other's: nothing is wrong, and nothing loaded.
-            .NODEV, .OPNOTSUPP => |e| {
-                say("modload: {s}: no hardware for it ({t})\n", .{ m.path, e });
-                absent += 1;
-            },
-            else => |e| {
-                say("modload: {s}: refused by the kernel: {t}\n", .{ m.path, e });
-                refused += 1;
-            },
-        }
-        close(fd);
+        for (fds[0..count], mods[0..count]) |*fd, m|
+            if (std.mem.eql(u8, m.tag, tag)) insert(fd, m, &r);
+    }
+    for (fds[0..count], mods[0..count]) |*fd, m| if (fd.* >= 0) {
+        if (named) {
+            r.skipped += 1;
+            close(fd.*);
+            fd.* = -1;
+        } else insert(fd, m, &r);
     };
-    return .{ .count = count, .refused = refused, .absent = absent, .skipped = skipped };
+    return r;
 }
 
-/// Which of the lines for one filesystem alone to load.
-const Want = union(enum) {
-    /// stdin ended unnamed: every one, as from a list without them.
-    all,
-    /// Those for this filesystem: stdin's line, or "" for none.
-    only: []const u8,
+/// Hand one module to the kernel, and count what it said; its file is
+/// closed after, and marked so, -1, as loaded or tried once and for all.
+fn insert(fd: *i32, m: Module, r: *Result) void {
+    if (fd.* < 0) return;
+    defer {
+        close(fd.*);
+        fd.* = -1;
+    }
+    const rc = linux.syscall3(
+        .finit_module,
+        @bitCast(@as(isize, fd.*)),
+        @intFromPtr(m.params.ptr),
+        0,
+    );
+    switch (linux.errno(rc)) {
+        .SUCCESS => if (m.params.len > 0) say(
+            "modload: {s}: loaded with {s}\n",
+            .{ m.path, m.params },
+        ),
+        .EXIST => {}, // built in, or loaded already
+        // The module's hardware is not here, as for one CPU vendor's
+        // KVM on the other's: nothing is wrong, and nothing loaded.
+        .NODEV, .OPNOTSUPP => |e| {
+            say("modload: {s}: no hardware for it ({t})\n", .{ m.path, e });
+            r.absent += 1;
+        },
+        else => |e| {
+            say("modload: {s}: refused by the kernel: {t}\n", .{ m.path, e });
+            r.refused += 1;
+        },
+    }
+}
 
-    fn takes(w: Want, tag: []const u8) bool {
-        return switch (w) {
-            .all => true,
-            .only => |name| std.mem.eql(u8, name, tag),
+/// stdin's lines, each a tag, read as stage0 writes them: `hyperv`, then
+/// a filesystem, `xfs`, `btrfs`, or `none`, which no line is for.
+const Tags = struct {
+    buf: [64]u8 = undefined,
+    start: usize = 0,
+    end: usize = 0,
+    done: bool = false,
+
+    /// The next line, without its newline, or null at the end of stdin.
+    fn next(t: *Tags) ?[]const u8 {
+        while (true) {
+            if (t.line()) |l| return l;
+            if (t.done) return null;
+            t.fill();
+        }
+    }
+
+    /// The next whole line read; at the end of stdin, whatever is left.
+    fn line(t: *Tags) ?[]const u8 {
+        const rest = t.buf[t.start..t.end];
+        const i = std.mem.findScalar(u8, rest, '\n') orelse {
+            if (!t.done or rest.len == 0) return null;
+            t.start = t.end;
+            return rest;
         };
+        t.start += i + 1;
+        return rest[0..i];
+    }
+
+    fn fill(t: *Tags) void {
+        @memmove(t.buf[0 .. t.end - t.start], t.buf[t.start..t.end]);
+        t.end -= t.start;
+        t.start = 0;
+        if (t.end == t.buf.len) {
+            say("modload: stdin's line is too long for a tag; reading no more\n", .{});
+            t.end = 0;
+            t.done = true;
+            return;
+        }
+        while (true) {
+            const rc = linux.read(0, t.buf[t.end..].ptr, t.buf.len - t.end);
+            if (linux.errno(rc) == .INTR) continue;
+            if (linux.errno(rc) != .SUCCESS or rc == 0) t.done = true else t.end += rc;
+            return;
+        }
     }
 };
-
-/// The filesystem stdin names, read up to its newline: `xfs`, `btrfs`, or
-/// `none`, which no line is for. A name not of a tag's characters takes
-/// none, and says so.
-fn wanted(buf: *[16]u8) Want {
-    var n: usize = 0;
-    while (n < buf.len) {
-        const rc = linux.read(0, buf[n..].ptr, buf.len - n);
-        if (linux.errno(rc) == .INTR) continue;
-        if (linux.errno(rc) != .SUCCESS or rc == 0) break;
-        n += rc;
-        if (std.mem.findScalar(u8, buf[0..n], '\n') != null) break;
-    }
-    if (n == 0) return .all;
-    const name = std.mem.trimEnd(u8, buf[0..n], "\n");
-    if (!isTag(name)) {
-        say("modload: stdin named no filesystem; loading none of their modules\n", .{});
-        return .{ .only = "" };
-    }
-    return .{ .only = name };
-}
 
 fn describe(err: anyerror) []const u8 {
     return switch (err) {
@@ -274,8 +298,8 @@ fn enforced() bool {
 const Module = struct { path: [:0]const u8, params: [:0]const u8, tag: []const u8 = "" };
 
 /// The lines of werewolf.modules, each a clean path to a .ko under kernel/
-/// and, after a space, its parameters; first, for a module one filesystem
-/// alone needs, `@` and its name and a space. Each is copied into lines,
+/// and, after a space, its parameters; first, for a module only some
+/// machines need, `@` and a tag and a space. Each is copied into lines,
 /// its path and its parameters ended by a NUL, as the kernel takes them.
 /// Any other line, or too many, and the whole list is refused.
 fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]Module) !usize {
@@ -310,7 +334,7 @@ fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]M
     return n;
 }
 
-/// A filesystem's name, as a tag: 1 to 15 lower-case letters and digits.
+/// A tag, `xfs` or `hyperv`: 1 to 15 lower-case letters and digits.
 fn isTag(t: []const u8) bool {
     if (t.len == 0 or t.len > 15) return false;
     for (t) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
@@ -509,13 +533,24 @@ test "a line for one filesystem keeps its tag apart from its path" {
     try testing.expectEqual(0, mods[2].path.ptr[mods[2].path.len]);
 }
 
-test Want {
-    const all: Want = .all;
-    try testing.expect(all.takes("xfs") and all.takes("btrfs"));
-    const xfs: Want = .{ .only = "xfs" };
-    try testing.expect(xfs.takes("xfs") and !xfs.takes("btrfs"));
-    const none: Want = .{ .only = "none" };
-    try testing.expect(!none.takes("xfs") and !none.takes("btrfs"));
+test Tags {
+    var tags: Tags = .{ .done = true };
+    const text = "hyperv\nxfs\nbtr";
+    @memcpy(tags.buf[0..text.len], text);
+    tags.end = text.len;
+    try testing.expectEqualStrings("hyperv", tags.next().?);
+    try testing.expectEqualStrings("xfs", tags.next().?);
+    try testing.expectEqualStrings("btr", tags.next().?);
+    try testing.expectEqual(null, tags.next());
+
+    tags = .{ .done = true };
+    try testing.expectEqual(null, tags.next());
+
+    tags = .{};
+    @memcpy(tags.buf[0..4], "xfs\n");
+    tags.end = 4;
+    try testing.expectEqualStrings("xfs", tags.line().?);
+    try testing.expectEqual(null, tags.line());
 }
 
 test "too many modules refuses the list" {

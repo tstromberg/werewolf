@@ -18,7 +18,7 @@ parser are for learning; use an application server/framework when adapting
 them for a public service.
 
 `prod` is application-neutral: it does not declare an `app` user or group.
-Its descendant [app](../forms/app.yaml) declares the unprivileged `app`
+Its descendant [app](../forms/app/apko.yaml) declares the unprivileged `app`
 user and group. Python, Node.js and JRE inherit it through their runtime
 forms; Go, Rust and ASP.NET Core inherit it directly. PHP keeps distinct `php` and
 `nginx` service accounts for its two services in the same VM.

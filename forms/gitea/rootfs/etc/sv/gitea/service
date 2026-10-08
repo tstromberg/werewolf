@@ -1,0 +1,32 @@
+# Gitea, as its own user: it may bind :3000 and :22 and no other port,
+# read its configuration and the image, write only its own directories,
+# and run git, which runs its hooks, which run Gitea. It reaches nothing
+# on the network but its own API on loopback. The site's address
+# and its administrator come from the machine's settings, into Gitea's
+# environment; the administrator's password from the config, which
+# gitea-init gives Gitea once.
+exec    /usr/bin/gitea --config /etc/gitea/app.ini web
+before  /usr/lib/werewolf/gitea-init /etc/gitea/app.ini
+user    gitea
+pledge  stdio rpath wpath inet unix connect listen proc exec
+listen  tcp/3000 tcp/22
+# Its own API, on loopback: its SSH server and git's hooks ask it.
+connect tcp/3000
+read    /etc/gitea
+# git, and what git runs: its own helpers, and the hooks, which are
+# gitea-hook (forms/gitea/cmd/gitea-hook) becoming `gitea hook NAME`, so Gitea's
+# bash hook scripts are never needed.
+run     /usr/bin/git /usr/lib/werewolf/gitea-hook /usr/bin/gitea /usr/bin/ssh-keygen
+config  admin-password /run/config/gitea/admin_password
+config  settings /run/config/gitea/settings.json
+setting url url required as GITEA__server__ROOT_URL
+setting domain hostname required as GITEA__server__DOMAIN
+setting admin string as GITEA_ADMIN
+setting admin-email string required as GITEA_ADMIN_EMAIL
+render  env site
+memory  1024
+nofile  65536
+env     HOME=/run/svc/gitea
+env     GITEA_WORK_DIR=/data/svc/gitea
+env     GITEA_CUSTOM=/etc/gitea
+env     GOMEMLIMIT=768MiB

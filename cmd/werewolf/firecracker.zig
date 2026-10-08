@@ -1,8 +1,15 @@
 //! Firecracker: a werewolf machine as a microVM on Linux with KVM,
-//! experimental, booted as `make run` boots QEMU: the kernel and the
-//! form's initramfs, which holds the root, with no bootloader and no
-//! slots; a data disk of its own; and the config tar as a second virtio
-//! drive, read-only, where init finds it.
+//! experimental, booted directly: the kernel and the slot's initramfs,
+//! with no bootloader and no slots; a data disk of its own; the config tar
+//! as a second virtio drive, read-only, where init finds it; and the
+//! slot's root.erofs as a third, read-only, which stage0 opens through
+//! dm-verity (werewolf.root=vdc). Not appended to the initramfs, as
+//! `make run`'s is: the kernel would unpack it into RAM, 20 MB held for
+//! the machine's life, as nothing frees an initramfs, and 26 ms of every
+//! boot. Read from the disk as it is used, it cost userland 10 ms, so a
+//! boot came up 10 to 15 ms sooner. A rebuild cannot change it under a
+//! running machine: the build makes a new root.erofs, not writing over
+//! the old one, which Firecracker holds open until the next boot.
 //!
 //! Firecracker is a process that exits when the guest stops, for a reboot
 //! as for a halt, so create starts it detached, under setsid, through
@@ -83,13 +90,23 @@ pub fn net(gpa: Allocator, name: []const u8) !Net {
 /// The kernel's arguments: the serial console, a reboot by the keyboard
 /// controller, which Firecracker takes as the guest's exit, no PCI, which
 /// Firecracker has none of, then the image's own arguments, and the
-/// address, with the data disk, as make run gives them.
+/// address, with the data disk, as make run gives them, and the root's.
 pub fn bootArgs(gpa: Allocator, image_args: []const u8, n: Net, dns: []const u8) ![]const u8 {
     return gpa.print(
         "console=ttyS0 reboot=k panic=10 pci=off {s} werewolf.ip={s}/30 werewolf.gw={s} " ++
-            "werewolf.dns={s} werewolf.data=vda",
+            "werewolf.dns={s} werewolf.data=vda werewolf.root=vdc",
         .{ image_args, n.guest, n.host, dns },
     );
+}
+
+/// The kernel Firecracker boots, relative to the checkout: on x86_64 the
+/// ELF vmlinux the build unpacks from the bzImage (Makefile,
+/// $(BUILD)/vmlinux), which Firecracker loads as it is, where given the
+/// bzImage it waits while the bzImage's stub gunzips 39 MB, 0.1 s of every
+/// boot; on aarch64 the raw Image, $(BUILD)/vmlinuz already.
+pub fn kernelPath(gpa: Allocator, arch: []const u8) ![]const u8 {
+    const file = if (std.mem.eql(u8, arch, "x86_64")) "vmlinux" else "vmlinuz";
+    return gpa.print("build/{s}/{s}", .{ arch, file });
 }
 
 const Drive = struct {
@@ -100,7 +117,8 @@ const Drive = struct {
 };
 
 /// Firecracker's configuration file: two CPUs and 2 GiB, as Lima's
-/// machines have; the data disk first, so it is vda, then the tar.
+/// machines have; the data disk first, so it is vda, then the tar, vdb,
+/// then the root, vdc, in the order the kernel finds them.
 pub fn config(
     gpa: Allocator,
     kernel: []const u8,
@@ -108,6 +126,7 @@ pub fn config(
     args: []const u8,
     data: []const u8,
     tar: []const u8,
+    root: []const u8,
     log: []const u8,
     n: Net,
 ) ![]u8 {
@@ -130,6 +149,12 @@ pub fn config(
             .{
                 .drive_id = "config",
                 .path_on_host = tar,
+                .is_root_device = false,
+                .is_read_only = true,
+            },
+            .{
+                .drive_id = "root",
+                .path_on_host = root,
                 .is_root_device = false,
                 .is_read_only = true,
             },
@@ -412,20 +437,42 @@ test config {
         args,
         "console=ttyS0 reboot=k panic=10 pci=off loglevel=5 werewolf.ip=172.16.",
     ));
-    try testing.expect(std.mem.endsWith(u8, args, "werewolf.dns=9.9.9.9 werewolf.data=vda"));
+    try testing.expect(std.mem.endsWith(
+        u8,
+        args,
+        "werewolf.dns=9.9.9.9 werewolf.data=vda werewolf.root=vdc",
+    ));
     const c = try config(
         gpa,
         "/b/vmlinuz",
-        "/b/initramfs.zst",
+        "/b/slot/initramfs.zst",
         args,
         "/m/data.img",
         "/m/config.tar",
+        "/b/slot/root.erofs",
         "/m/firecracker.log",
         n,
     );
     try testing.expect(std.mem.find(u8, c, "\"kernel_image_path\": \"/b/vmlinuz\"") != null);
     try testing.expect(std.mem.find(u8, c, "\"log_path\": \"/m/firecracker.log\"") != null);
     try testing.expect(std.mem.find(u8, c, "\"is_read_only\": true") != null);
+    const data = std.mem.find(u8, c, "\"/m/data.img\"").?;
+    const tar = std.mem.find(u8, c, "\"/m/config.tar\"").?;
+    const root = std.mem.find(u8, c, "\"/b/slot/root.erofs\"").?;
+    try testing.expect(data < tar and tar < root);
     try testing.expect(std.mem.find(u8, c, n.tap) != null);
     try testing.expect(std.mem.find(u8, c, "\"mem_size_mib\": 2048") != null);
+}
+
+test kernelPath {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectEqualStrings(
+        "build/x86_64/vmlinux",
+        try kernelPath(arena.allocator(), "x86_64"),
+    );
+    try testing.expectEqualStrings(
+        "build/aarch64/vmlinuz",
+        try kernelPath(arena.allocator(), "aarch64"),
+    );
 }

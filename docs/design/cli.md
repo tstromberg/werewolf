@@ -134,8 +134,8 @@ Two rules, stated once:
   state.
 
 `build-apk` builds one melange recipe in Wolfi's style, as a form's
-build builds the recipes `forms/NAME.melange` names (vendor/build.mk):
-for a package Wolfi does not ship yet, tried before a form names it.
+build builds the recipes in `forms/NAME/melange/` (melange.mk): for a
+package Wolfi does not ship, tried before a form keeps it.
 It is `build`'s kind of verb, a file from inputs, and runs make's
 `_build-apk` as `build` runs `_dist-form`, so the form's build and the
 author's are one path. On macOS it boots melange's QEMU runner from
@@ -363,10 +363,19 @@ FreeBSD 15 with other firmware, is not built.
 
 On Firecracker, built, and experimental: Linux with KVM
 (`cmd/werewolf/firecracker.zig`; `tools/install-deps` installs the
-pinned release, which no distribution packages). The machine boots as
-`run` boots QEMU: the kernel and the form's initramfs, which holds the
-root, no bootloader and no slots, so no updater; a data disk of its
-own; and the tar as a second virtio drive, read-only. Firecracker has
+pinned release, which no distribution packages). The machine boots
+directly: the kernel and the slot's initramfs, no bootloader and no
+slots, so no updater; a data disk of its own; the tar as a second
+virtio drive, read-only; and the slot's `root.erofs` as a third,
+read-only, which stage0 opens through dm-verity (`werewolf.root=vdc`).
+`run` appends the root to the initramfs instead, which the kernel
+unpacks into RAM and never frees: on Firecracker that held 20 MB for
+the machine's life and cost 26 ms of kernel time a boot, where reading
+the root from the disk as it is used cost userland 10 ms, so the
+machine is up 10 to 15 ms sooner with 20 MB more to spare. A rebuild
+does not change the root under a running machine: the build writes a
+new `root.erofs` rather than over the old, which Firecracker holds
+open until it next boots. Firecracker has
 no PCI, so `minimal.modules` carries `virtio_mmio`, its bus. Firecracker
 runs as the user and exits when the guest stops, for a reboot as for a
 halt, so `create` starts it detached, under `setsid`, through
@@ -434,12 +443,13 @@ gcloud's (`gcloud config`, or `CLOUDSDK_COMPUTE_ZONE`), the zone
 free, GCP says so and another zone serves.
 
 On AWS, built, and run on both arches: `create` builds the same
-`disk.qcow2`, converts it to a dynamic VHD, which holds only the blocks
-written, has VM Import make it an EBS snapshot through
-`werewolf-images-ACCOUNT-REGION`, and registers the AMI under the same
-digest name, for UEFI, the ENA and IMDSv2 alone. The bucket and VM
-Import's `vmimport` role are named when missing, not made
-([service-vms.md](../service-vms.md#once-per-account-and-region)). The
+`disk.qcow2`, writes it into an EBS snapshot through EBS's direct API,
+its 512 KiB blocks that hold data alone, eight at a time, each with its
+sha256, and registers the AMI under the same digest name, for UEFI, the
+ENA and IMDSv2 alone. It began with VM Import, from a VHD in S3, which
+took 6 to 10 minutes and wanted a bucket and a `vmimport` service role
+made once by hand; a hundred-odd blocks written directly take well under
+a minute and want nothing made. The
 instance gets the tar in base64 as user data, no instance profile, IMDSv2
 with one hop, `Name` and `werewolf-form` tags, and a security group of
 its own, `werewolf-NAME`, with no rule in; `delete` waits for the
@@ -452,8 +462,12 @@ instance, replaces its user data (in base64 once more, which
 `modify-instance-attribute` wants and `run-instances` does itself) and
 starts it.
 
-On Azure, built, experimental, and run once, on x86_64 in eastus
-(`cmd/werewolf/azure.zig`). The subscription is `az`'s own and the
+On Azure, built, experimental, and run on both arches (2026-10-08): prod
+on `Standard_D2as_v4` in eastus and on `Standard_B2pls_v2` in westus2,
+each up in 2 to 3 s with posture clean, its root found through
+`hv_storvsc`, a second `create` with a new config, and `delete`
+(`cmd/werewolf/azure.zig`). A subscription may offer Arm sizes only in
+some regions: `az vm list-skus -l LOCATION` says which. The subscription is `az`'s own and the
 resource group its default (`az configure --defaults group=RG`), which
 `create` names when it is missing and does not make. The release's
 `disk.qcow2` becomes a fixed VHD and goes straight into a managed disk
@@ -475,16 +489,24 @@ would change on the way; `create` refuses such a file, naming it,
 rather than send it changed. Keys, settings and JSON are text. `az vm
 create` makes it a network of its own with a security group that lets
 nothing in and a public address, and its OS disk and NIC go when it
-goes. Boot diagnostics hold the serial console; `az` makes a VM without
-them, so `create` enables them and restarts the machine once, then waits
-for the `up in` line and prints the public address. Azure keeps only
-the console's last 64 KiB, so a wait after a restart looks past the old
-end it saw, not past a count of bytes. A second `create` of the name
+goes. Boot diagnostics hold the serial console; `az vm create` can turn
+them on only with a storage account, and Azure keeps only what the
+console says after they are on, so `create` turns them on from beside
+`az vm create`, retrying each second until Azure knows the VM. That is
+mostly early enough to keep its first boot whole (measured, a VM up in
+84 s from the start of the create, against 2 to 3 minutes when every
+new VM was restarted once to be watched); where the first minute shows
+no `up in`, it restarts the VM once, as before, and waits. Then it
+prints the public address. Azure keeps only
+the console's last 64 KiB, across restarts, so a wait after a restart
+looks past the old end it saw: from its last line a clock stamped to its
+end, since a werewolf boot prints its other lines the same every time,
+to the pids, and those recur after the next run's `up in`. A second `create` of the name
 sets the VM's `userData` to the tar in base64 werewolf makes, from a
 file (`az vm update --set @FILE`), since `--user-data` there encodes
 its argument, the path, and restarts it. `delete` removes the VM, its
 disk and NIC, the network `az` made for it, and any disk copy a failed
-`create` left; the image stays.
+`create` left, which that `create` names; the image stays.
 
 ### upload
 
@@ -500,10 +522,10 @@ it.
 | Target | Image | Config | Notes |
 | --- | --- | --- | --- |
 | qemu | the file | second virtio drive | `run` only |
-| firecracker | kernel and initramfs, no bootloader | second virtio drive | Linux with KVM; no ACPI, so no `power-button`; address on the command line; experimental |
+| firecracker | kernel, slot initramfs and root disk, no bootloader | second virtio drive | Linux with KVM; no ACPI, so no `power-button`; address on the command line; experimental |
 | lima | the file | `limactl disk import` | `test/lima-demo` today |
 | gcp | image from tar.gz | metadata `user-data` | `test/gcp` today |
-| aws | AMI via S3 and `vmimport` | user data, 16 KB | `create` names the missing bucket or role rather than making it |
+| aws | AMI from an EBS snapshot written directly | user data, 16 KB | needs EBS direct API permissions; nothing to set up first |
 | azure | fixed VHD uploaded to a managed disk, copied per VM | userData, 64 KB | no reusable image without a ready agent; specialized VMs; experimental |
 | proxmox | the file, by scp and `import-from` | second virtio drive, imported raw | `qm` over ssh to the node; experimental, untested |
 | VMware, Hyper-V, a stick | the file | the tar | manual |
@@ -750,10 +772,11 @@ The tool handles secrets on the host; the guest's protections
 - **Idempotent uploads.** Images are named by content digest, so a
   retried `upload` or `create` after a dropped connection finds the
   image already there.
-- **Errors say the next step.** AWS's missing `vmimport` role is named,
-  with the policy it needs; Azure's missing resource group likewise. The
-  tool does not create either, because a tool that creates IAM roles on
-  a retry is the kind an SRE would rather not have.
+- **Errors say the next step.** Azure's missing resource group is
+  named, with the command that makes it; the tool does not create it,
+  nor any IAM role, because a tool that creates those on a retry is the
+  kind an SRE would rather not have. AWS needs neither: its images are
+  written as snapshots directly.
 - **A dead machine is diagnosable.** `console` works whether or not the
   machine came up, and is the first thing an error from `create` tells
   the user to run.

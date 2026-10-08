@@ -134,7 +134,7 @@ clean=$(grep -c '"error": null' "$dir/report.json")
 check "the report's $listed CVE sources fetched, with their sha256" [ "$listed" -gt 0 -a "$hashed" -eq "$listed" -a "$clean" -eq "$listed" ]
 # A slot built from Wolfi and Alpine leaves apk's caches; a release, none.
 if victim_ls $state | grep -qx cache; then
-	for cache in root kernel stage0; do
+	for cache in root kernel; do
 		n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
 		check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
 	done
@@ -149,8 +149,8 @@ check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.i
 # Second boot: what the update built.
 victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
 victim_dump /boot/werewolf/b/initramfs.zst "$dir/b-initramfs.zst"
-# The device nodes in a stage0, by type, mode and name: apko makes the
-# build's, and slot-update must write the same, /dev/console above all,
+# The device nodes in a stage0, by type, mode and name: the build's
+# (cmd/stage0/stage0.mtree), and slot-update must write the same, /dev/console above all,
 # which the kernel gives stage0 as its stdin, stdout and stderr.
 devices() { zstd -dc "$1" | bsdtar -tvf - 2>/dev/null | awk '$1 ~ /^c/ { print $1, $NF }' | sort; }
 built=$(devices "$dir/initramfs.zst")

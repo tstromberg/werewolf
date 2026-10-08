@@ -60,6 +60,7 @@ const aws = @import("aws.zig");
 const azure = @import("azure.zig");
 const app = @import("app.zig");
 const apk = @import("apk.zig");
+const forms = @import("form");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -85,7 +86,6 @@ const max_cloud_file = 32 << 10;
 const max_cloud_total = 48 << 10;
 const max_cloud_entries = 32;
 const max_name = 100;
-const max_chain = 16;
 
 /// The environment, for what names a Proxmox node (proxmox.zig).
 var environ: *const std.process.Environ.Map = undefined;
@@ -214,40 +214,16 @@ const reserved = [_][]const u8{
     "app",
 };
 
-/// The forms FORM includes, FORM last: forms/NAME.yaml's `include:` lines.
-fn chain(io: Io, gpa: Allocator, forms: Dir, form: []const u8, why: *Why) ![]const []const u8 {
-    var names: std.ArrayList([]const u8) = .empty;
-    var name = form;
-    while (true) {
-        if (!isFormName(name)) return why.refuse("{s}: not a form's name", .{name});
-        if (names.items.len == max_chain) return why.refuse("{s}: includes too deep", .{form});
-        const text = forms.readFileAlloc(
-            io,
-            try gpa.print("{s}.yaml", .{name}),
-            gpa,
-            .limited(64 << 10),
-        ) catch
-            return why.refuse(
-                "no form {s}: forms/{s}.yaml (run werewolf in a checkout)",
-                .{ name, name },
-            );
-        try names.insert(gpa, 0, name);
-        const next = include(text) orelse return names.items;
-        for (names.items) |n| if (std.mem.eql(u8, n, next))
-            return why.refuse("{s}: includes itself", .{form});
-        name = next;
-    }
-}
-
-/// The form a form's yaml includes, without .yaml.
-fn include(text: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "include:")) continue;
-        const f = std.mem.trim(u8, line["include:".len..], " \t\r");
-        if (std.mem.endsWith(u8, f, ".yaml")) return f[0 .. f.len - ".yaml".len];
-    }
-    return null;
+/// A form's chain, base first, as the build lays it (lib/form.zig): the
+/// form in ./forms, or in the directory form names.
+fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.Form {
+    Dir.cwd().access(io, "forms", .{}) catch
+        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
+    var f: forms.Failure = .{};
+    return forms.chain(io, gpa, Dir.cwd(), form, &f) catch |err| switch (err) {
+        error.Form => why.refuse("{s}", .{f.text}),
+        error.OutOfMemory => error.OutOfMemory,
+    };
 }
 
 /// A service's name and its file, as the image will hold it.
@@ -256,10 +232,14 @@ const Service = struct { name: []const u8, text: []const u8 };
 /// The service files of a chain, as the image lays them over each other:
 /// a later form's etc/sv/NAME replaces an earlier one's whole, and one with
 /// no service file (runit's own run) leaves none.
-fn services(io: Io, gpa: Allocator, forms: Dir, names: []const []const u8) ![]const Service {
+fn services(io: Io, gpa: Allocator, c: []const forms.Form) ![]const Service {
     var found: std.array_hash_map.String(?[]const u8) = .empty;
-    for (names) |form| {
-        var sv = forms.openDir(io, try gpa.print("{s}/etc/sv", .{form}), .{ .iterate = true }) catch
+    for (c) |form| {
+        var sv = Dir.cwd().openDir(
+            io,
+            try gpa.print("{s}/rootfs/etc/sv", .{form.dir}),
+            .{ .iterate = true },
+        ) catch
             continue;
         defer sv.close(io);
         var it = sv.iterate();
@@ -870,10 +850,7 @@ fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     const a = o.arch;
     const dir = o.dir;
     const format = o.format;
-    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
-    defer forms.close(io);
-    _ = try chain(io, gpa, forms, f, why);
+    _ = try chain(io, gpa, f, why);
     const ab = try appBuild(io, gpa, f, a, o.app, why);
 
     // make keeps the build graph; this only names the target, as it ships.
@@ -986,17 +963,14 @@ fn pack(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     try w.print("wrote {s}\n", .{o.out.?});
 }
 
-/// The flags FORM takes, from ./forms.
+/// The flags FORM takes, from its chain's files.
 fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface {
-    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
-    defer forms.close(io);
-    const names = try chain(io, gpa, forms, form, why);
-    var iface = try interface(gpa, try services(io, gpa, forms, names), why);
+    const c = try chain(io, gpa, form, why);
+    var iface = try interface(gpa, try services(io, gpa, c), why);
     // As the image lays the forms over each other: the last one's wins.
-    for (names) |name| {
-        const path = try gpa.print("{s}/etc/werewolf/update-policy.json", .{name});
-        if (forms.readFileAlloc(io, path, gpa, .limited(update_policy.max_input + 1))) |text| {
+    for (c) |f| {
+        const path = try gpa.print("{s}/rootfs/etc/werewolf/update-policy.json", .{f.dir});
+        if (Dir.cwd().readFileAlloc(io, path, gpa, .limited(update_policy.max_input + 1))) |text| {
             iface.policy = text;
         } else |_| {}
     }
@@ -1122,10 +1096,7 @@ fn appBuild(
     why: *Why,
 ) !AppBuild {
     const dir = src orelse return .{ .app = "APP=", .out = form };
-    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
-    defer forms.close(io);
-    const at = app.place(io, gpa, forms, try chain(io, gpa, forms, form, why)) catch
+    const at = app.place(io, gpa, try chain(io, gpa, form, why)) catch
         return why.refuse("{s}: its etc/werewolf/app is not an absolute path", .{form});
     const where = at orelse return why.refuse(
         "{s} keeps no application (no etc/werewolf/app in its forms): build on app, python, " ++
@@ -1584,7 +1555,8 @@ fn createFirecracker(
             try gpa.print("FORM={s}", .{o.form}),
             "DEV=",
             ab.app,
-            "image",
+            "slot",
+            try firecracker.kernelPath(gpa, arch),
         });
         const dns = dns_given orelse firecracker.hostDns(io, gpa) orelse return why.refuse(
             "--dns ADDR: this host's resolvers are all on loopback, which the machine cannot reach",
@@ -1603,11 +1575,12 @@ fn createFirecracker(
         try run(io, why, &.{ "truncate", "-s", "8192M", data });
         try writePrivate(io, gpa, try gpa.print("{s}/vm.json", .{dir}), try firecracker.config(
             gpa,
-            try gpa.print("{s}/build/{s}/vmlinuz", .{ cwd, arch }),
-            try gpa.print("{s}/build/{s}/{s}/initramfs.zst", .{ cwd, arch, ab.out }),
+            try gpa.print("{s}/{s}", .{ cwd, try firecracker.kernelPath(gpa, arch) }),
+            try gpa.print("{s}/build/{s}/{s}/slot/initramfs.zst", .{ cwd, arch, ab.out }),
             try firecracker.bootArgs(gpa, image_args, n, dns),
             data,
             try gpa.print("{s}/{s}/config.tar", .{ cwd, dir }),
+            try gpa.print("{s}/build/{s}/{s}/slot/root.erofs", .{ cwd, arch, ab.out }),
             try gpa.print("{s}/{s}/firecracker.log", .{ cwd, dir }),
             n,
         ), why);
@@ -1702,48 +1675,32 @@ fn createProxmox(
     try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
 }
 
-/// The TCP ports form listens on, as its chain's .net files declare them
+/// The TCP ports form listens on, as its chain's net declares them
 /// (listen tcp/80 tcp/443), in order, once each.
 fn listens(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const u16 {
-    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
-    defer forms.close(io);
     var ports: std.ArrayList(u16) = .empty;
-    for (try chain(io, gpa, forms, form, why)) |name| {
-        const text = forms.readFileAlloc(
-            io,
-            try gpa.print("{s}.net", .{name}),
-            gpa,
-            .limited(64 << 10),
-        ) catch continue;
-        try listenPorts(gpa, text, &ports);
-    }
+    for (try chain(io, gpa, form, why)) |f|
+        for (try f.items(gpa, "net")) |line| try listenPorts(gpa, line, &ports);
     return ports.items;
 }
 
-/// Add the TCP ports a .net file's listen lines name to ports, once each.
-fn listenPorts(gpa: Allocator, text: []const u8, ports: *std.ArrayList(u16)) !void {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        var words = std.mem.tokenizeAny(u8, line, " \t\r");
-        if (!std.mem.eql(u8, words.next() orelse continue, "listen")) continue;
-        while (words.next()) |word| {
-            if (word[0] == '#') break;
-            if (!std.mem.startsWith(u8, word, "tcp/")) continue;
-            const p = std.fmt.parseInt(u16, word["tcp/".len..], 10) catch continue;
-            if (std.mem.findScalar(u16, ports.items, p) == null) try ports.append(gpa, p);
-        }
+/// Add the TCP ports a net line names, when it is a listen line, to
+/// ports, once each.
+fn listenPorts(gpa: Allocator, line: []const u8, ports: *std.ArrayList(u16)) !void {
+    var words = std.mem.tokenizeAny(u8, line, " \t\r");
+    if (!std.mem.eql(u8, words.next() orelse return, "listen")) return;
+    while (words.next()) |word| {
+        if (!std.mem.startsWith(u8, word, "tcp/")) continue;
+        const p = std.fmt.parseInt(u16, word["tcp/".len..], 10) catch continue;
+        if (std.mem.findScalar(u16, ports.items, p) == null) try ports.append(gpa, p);
     }
 }
 
-/// Whether form takes an address by DHCP: whether it is built on prod,
-/// which brings dhcp-client, as the Makefile decides.
+/// Whether form takes an address by DHCP: whether its chain runs
+/// dhcp-client, as its form.yaml's programs say.
 fn hasDhcp(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
-    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
-    defer forms.close(io);
-    for (try chain(io, gpa, forms, form, why)) |name|
-        if (std.mem.eql(u8, name, "prod")) return true;
+    for (try chain(io, gpa, form, why)) |f|
+        for (try f.items(gpa, "programs")) |p| if (std.mem.eql(u8, p, "dhcp-client")) return true;
     return false;
 }
 
@@ -1751,17 +1708,14 @@ fn hasDhcp(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
 /// as Lima's user and runs its readiness probes, which want sshd and bash.
 /// Any other starts on vzNAT, unmanaged, and is stopped hard.
 fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
-    var forms = Dir.cwd().openDir(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
-    defer forms.close(io);
     var sshd = false;
     var bash = false;
-    for (try chain(io, gpa, forms, form, why)) |name| {
-        const text = try forms.readFileAlloc(
+    for (try chain(io, gpa, form, why)) |f| {
+        const text = try Dir.cwd().readFileAlloc(
             io,
-            try gpa.print("{s}.yaml", .{name}),
+            try gpa.print("{s}/apko.yaml", .{f.dir}),
             gpa,
-            .limited(64 << 10),
+            .limited(256 << 10),
         );
         var lines = std.mem.splitScalar(u8, text, '\n');
         while (lines.next()) |line| {
@@ -2006,7 +1960,7 @@ fn createAzure(
     if (azure.find(io, gpa, p, name)) |vm| {
         try reconfigurable(o, name, vm.form, "azure", why);
         say(io, "{s}: replacing its config, and restarting it", .{name});
-        const before = if (azure.console(io, gpa, p, name)) |text| azure.tail(text) else "";
+        const before = if (azure.console(io, gpa, p, name)) |text| azure.mark(text) else "";
         try azure.reconfigure(io, gpa, p, name, tar, c.dir, why);
         return azureUp(io, gpa, p, name, o.form, before, w, why);
     }
@@ -2273,12 +2227,6 @@ fn declared(iface: Interface, path: []const u8) bool {
     return false;
 }
 
-fn isFormName(s: []const u8) bool {
-    if (s.len == 0 or s.len > 64) return false;
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
-    return true;
-}
-
 /// A name every reader of a config tar takes: [A-Za-z0-9._-/], relative,
 /// at most 100 bytes, with no empty, . or .. part.
 fn isTarName(s: []const u8) bool {
@@ -2520,11 +2468,13 @@ test listenPorts {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var ports: std.ArrayList(u16) = .empty;
-    try listenPorts(
-        arena.allocator(),
-        "listen tcp/80 tcp/443 # the site\nconnect caddy tcp/443\nlisten udp/53 tcp/80\nlisten\n",
-        &ports,
-    );
+    for ([_][]const u8{
+        "listen tcp/80 tcp/443",
+        "connect caddy tcp/443",
+        "listen udp/53 tcp/80",
+        "listen",
+    }) |line|
+        try listenPorts(arena.allocator(), line, &ports);
     try testing.expectEqualSlices(u16, &.{ 80, 443 }, ports.items);
 }
 

@@ -1,3 +1,0 @@
-# QEMU's user-mode network, as root: the guests' names and HTTP and HTTPS,
-# through the host's own sockets.
-connect root udp/53 tcp/53 tcp/80 tcp/443

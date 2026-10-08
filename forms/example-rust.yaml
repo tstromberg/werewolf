@@ -1,2 +1,0 @@
-# A static musl binary: no Rust toolchain or extra runtime packages in the VM.
-include: app.yaml

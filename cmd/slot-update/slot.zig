@@ -24,7 +24,6 @@ const meta_dir = m.meta_dir;
 const update_id = m.update_id;
 const work_dir = m.work_dir;
 
-const appendUnique = m.appendUnique;
 const Package = m.Package;
 const parentDir = m.parentDir;
 const parseCmdline = m.parseCmdline;
@@ -34,7 +33,7 @@ const testing = std.testing;
 const Update = m.Update;
 
 // --- build ------------------------------------------------------------------
-pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
+pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     const io = u.io;
     const root = work_dir ++ "/root";
     try Dir.cwd().createDirPath(io, work_dir ++ "/slot");
@@ -54,7 +53,7 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
         try u.gpa.print("etc/apk/keys/{s}", .{name}),
     );
     try copyTree(u, r, "usr/share/werewolf");
-    // What the form leaves out of its packages (Makefile, forms/NAME.prune):
+    // What the form leaves out of its packages (Makefile, form.yaml's prune):
     // removed here as the build left them out, so this slot holds what the
     // build's did. One the packages no longer bring is noted, not an error:
     // an upstream fix must not stop the machine updating.
@@ -121,19 +120,12 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
     try u.write(work_dir ++ "/slot/vmlinuz", try k.read(u, "boot/vmlinuz-virt"));
 
     u.step = "stage0";
+    // No packages, as the build's has none (cmd/stage0/stage0.mtree).
     const s = work_dir ++ "/stage0";
-    try apkAdd(
-        u,
-        s,
-        arch,
-        "/etc/apk/keys",
-        &.{ "--repositories-file", "/etc/apk/repositories" },
-        try u.words(try u.read(meta_dir ++ "/stage0.world")),
-    );
+    Dir.cwd().deleteTree(u.io, s) catch {};
+    try Dir.cwd().createDirPath(u.io, s);
     const s0: Root = try .open(u, s);
     defer s0.close(u);
-    try busyboxLinks(u, s0);
-    try stripSetid(u, s);
     // Where writeCpio puts the device nodes.
     (try s0.makeDir(u, "dev")).close(io);
     try s0.copy(u, meta_dir ++ "/stage0.init", "init", .fromMode(0o755));
@@ -144,12 +136,19 @@ pub fn buildSlot(u: *Update, arch: []const u8, new_kernel: []const u8) !void {
     const src = try u.gpa.print("lib/modules/{s}", .{kvers[0]});
     const dst = try u.gpa.print("usr/lib/modules/{s}", .{kvers[0]});
     const dep = try k.read(u, try u.gpa.print("{s}/modules.dep", .{src}));
-    const order = try moduleOrder(u.gpa, dep, try u.lines(try u.read(meta_dir ++ "/modules")));
+    // The form's modules, and on a distro's disk (bite's, under GRUB) its
+    // filesystem's too, which werewolf's own disk leaves out, as the
+    // build's two stage0s do (Makefile, BITTEN_TAGS).
+    var leaves: std.ArrayList([]const u8) = .empty;
+    try leaves.appendSlice(u.gpa, try u.lines(try u.read(meta_dir ++ "/modules")));
+    if (u.cmd.grubenv.len > 0)
+        try leaves.appendSlice(u.gpa, try u.lines(try u.read(meta_dir ++ "/modules-bitten")));
+    const order = try moduleOrder(u.gpa, dep, leaves.items);
     // Decompressed, as the build does: Alpine's kernel cannot, and the
     // loader hands it each file as it is.
-    for (order) |p| {
-        const ko = try gunzip(u.gpa, try k.read(u, try u.gpa.print("{s}/{s}", .{ src, p })));
-        try s0.write(u, try u.gpa.print("{s}/{s}", .{ dst, withoutGz(p) }), ko);
+    for (order) |mod| {
+        const ko = try gunzip(u.gpa, try k.read(u, try u.gpa.print("{s}/{s}", .{ src, mod.path })));
+        try s0.write(u, try u.gpa.print("{s}/{s}", .{ dst, withoutGz(mod.path) }), ko);
     }
     const list = try moduleList(u.gpa, order, try u.read(meta_dir ++ "/module-params"));
     try s0.write(u, try u.gpa.print("{s}/werewolf.modules", .{dst}), list);
@@ -1125,15 +1124,28 @@ fn entrySecs(entry: []const u8) ?u64 {
     return days * std.time.s_per_day + h * 3600 + mi * 60 + s;
 }
 
+/// A module in load order: its path in modules.dep, and the tag a machine
+/// must name for it to load (modload), or "" for every machine.
+const Mod = struct { path: []const u8, tag: []const u8 = "" };
+
 /// The order to load modules in: each leaf's dependencies from modules.dep,
-/// read back to front, then the leaf; each module once.
-fn moduleOrder(
-    gpa: Allocator,
-    dep: []const u8,
-    leaves: []const []const u8,
-) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    for (leaves) |leaf| {
+/// read back to front, then the leaf. A leaf `@TAG:NAME`, a tagged line of
+/// the form's list, is for the machines stage0 names TAG on, and its
+/// modules carry the tag: those for every machine come first, and one an
+/// untagged leaf needs loads for every machine, as the build lists them
+/// (Makefile, modules.tar). One two tags need is listed under each.
+fn moduleOrder(gpa: Allocator, dep: []const u8, leaves: []const []const u8) ![]const Mod {
+    var out: std.ArrayList(Mod) = .empty;
+    for (0..2) |pass| for (leaves) |word| {
+        var tag: []const u8 = "";
+        var leaf = word;
+        if (std.mem.startsWith(u8, word, "@")) {
+            const colon = std.mem.findScalar(u8, word, ':') orelse return error.BadModuleTag;
+            tag = word[1..colon];
+            leaf = word[colon + 1 ..];
+            if (tag.len == 0 or leaf.len == 0) return error.BadModuleTag;
+        }
+        if ((tag.len > 0) != (pass == 1)) continue;
         const suffix = try gpa.print("/{s}.ko.gz", .{leaf});
         var lines_it = std.mem.splitScalar(u8, dep, '\n');
         const line = while (lines_it.next()) |l| {
@@ -1146,21 +1158,28 @@ fn moduleOrder(
         var i = fields.items.len;
         while (i > 0) {
             i -= 1;
-            try appendUnique(gpa, &out, fields.items[i]);
+            const path = fields.items[i];
+            const listed = for (out.items) |x| {
+                if (std.mem.eql(u8, x.path, path) and
+                    (x.tag.len == 0 or std.mem.eql(u8, x.tag, tag))) break true;
+            } else false;
+            if (!listed) try out.append(gpa, .{ .path = path, .tag = tag });
         }
-    }
+    };
     return out.items;
 }
 
-/// werewolf.modules for a load order: each path without .gz, and after it
-/// the parameters /usr/share/werewolf/module-params gives its module, a
-/// line `MODULE KEY=VALUE`, as the build writes them (Makefile,
-/// MODULE_PARAMS). Parameters for a module not in the order are an error,
-/// not a module loaded without them.
-fn moduleList(gpa: Allocator, order: []const []const u8, params: []const u8) ![]const u8 {
+/// werewolf.modules for a load order: each path without .gz, after `@` and
+/// its tag and a space where it has one, and after it the parameters
+/// /usr/share/werewolf/module-params gives its module, a line `MODULE
+/// KEY=VALUE`, as the build writes them (Makefile, MODULE_PARAMS).
+/// Parameters for a module not in the order are an error, not a module
+/// loaded without them.
+fn moduleList(gpa: Allocator, order: []const Mod, params: []const u8) ![]const u8 {
     var out: Io.Writer.Allocating = .init(gpa);
-    for (order) |p| {
-        const path = withoutGz(p);
+    for (order) |mod| {
+        const path = withoutGz(mod.path);
+        if (mod.tag.len > 0) try out.writer.print("@{s} ", .{mod.tag});
         try out.writer.writeAll(path);
         const stem = std.fs.path.basename(path);
         var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
@@ -1177,8 +1196,8 @@ fn moduleList(gpa: Allocator, order: []const []const u8, params: []const u8) ![]
     var lines_it = std.mem.tokenizeScalar(u8, params, '\n');
     next: while (lines_it.next()) |line| {
         const name = line[0 .. std.mem.findScalar(u8, line, ' ') orelse line.len];
-        for (order) |p| {
-            const stem = std.fs.path.basename(withoutGz(p));
+        for (order) |mod| {
+            const stem = std.fs.path.basename(withoutGz(mod.path));
             if (std.mem.eql(u8, name, stem[0 .. stem.len - ".ko".len])) continue :next;
         }
         return error.ParamsForMissingModule;
@@ -1220,8 +1239,8 @@ const Node = struct {
     rdev_minor: u32 = 0,
 };
 
-/// The device nodes in the build's stage0, with its modes: apko makes them,
-/// apk does not (cmd/stage0/stage0.yaml). The kernel opens /dev/console as
+/// The device nodes in the build's stage0, with its modes, as
+/// cmd/stage0/stage0.mtree lists them. The kernel opens /dev/console as
 /// PID 1's stdin, stdout and stderr before anything mounts /dev; without
 /// it stage0 and modload start with none, and what they say is lost or
 /// lands in the first file they open. Root here may not make device files
@@ -1454,26 +1473,47 @@ test withoutGz {
 test moduleOrder {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
+    const a = arena.allocator();
     const dep =
         \\kernel/fs/ext4/ext4.ko.gz: kernel/lib/crc/crc16.ko.gz kernel/fs/mbcache.ko.gz kernel/fs/jbd2/jbd2.ko.gz
         \\kernel/fs/xfs/xfs.ko.gz:
         \\kernel/fs/jbd2/jbd2.ko.gz:
+        \\kernel/fs/btrfs/btrfs.ko.gz: kernel/lib/raid6/raid6_pq.ko.gz kernel/lib/crc/crc16.ko.gz
+        \\kernel/lib/raid6/raid6_pq.ko.gz:
+        \\kernel/fs/zfs/zfs.ko.gz: kernel/lib/raid6/raid6_pq.ko.gz
     ;
-    const order = try moduleOrder(arena.allocator(), dep, &.{ "ext4", "xfs", "jbd2" });
+    const order = try moduleOrder(a, dep, &.{ "ext4", "xfs", "jbd2" });
     try testing.expectEqual(5, order.len);
-    try testing.expectEqualStrings("kernel/fs/jbd2/jbd2.ko.gz", order[0]);
-    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko.gz", order[3]);
-    try testing.expectEqualStrings("kernel/fs/xfs/xfs.ko.gz", order[4]);
-    try testing.expectError(error.ModuleNotFound, moduleOrder(arena.allocator(), dep, &.{"btrfs"}));
+    try testing.expectEqualStrings("kernel/fs/jbd2/jbd2.ko.gz", order[0].path);
+    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko.gz", order[3].path);
+    try testing.expectEqualStrings("kernel/fs/xfs/xfs.ko.gz", order[4].path);
+    for (order) |mod| try testing.expectEqualStrings("", mod.tag);
+    try testing.expectError(error.ModuleNotFound, moduleOrder(a, dep, &.{"f2fs"}));
+
+    // Tagged leaves after the rest, whatever their place in the list; a
+    // module the untagged need too (crc16) stays theirs, and one two tags
+    // need (raid6_pq) is listed under each.
+    const tagged = try moduleOrder(a, dep, &.{ "@btrfs:btrfs", "ext4", "@zfs:zfs" });
+    try testing.expectEqual(4 + 2 + 2, tagged.len);
+    try testing.expectEqualStrings("kernel/fs/ext4/ext4.ko.gz", tagged[3].path);
+    try testing.expectEqualStrings("", tagged[3].tag);
+    try testing.expectEqualStrings("kernel/lib/raid6/raid6_pq.ko.gz", tagged[4].path);
+    try testing.expectEqualStrings("btrfs", tagged[4].tag);
+    try testing.expectEqualStrings("kernel/fs/btrfs/btrfs.ko.gz", tagged[5].path);
+    try testing.expectEqualStrings("kernel/lib/raid6/raid6_pq.ko.gz", tagged[6].path);
+    try testing.expectEqualStrings("zfs", tagged[6].tag);
+    try testing.expectEqualStrings("zfs", tagged[7].tag);
+    for ([_][]const u8{ "@btrfs", "@:btrfs", "@btrfs:" }) |bad|
+        try testing.expectError(error.BadModuleTag, moduleOrder(a, dep, &.{bad}));
 }
 
 test moduleList {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    const order = [_][]const u8{
-        "kernel/arch/x86/kvm/kvm.ko.gz",
-        "kernel/arch/x86/kvm/kvm-intel.ko.gz",
+    const order = [_]Mod{
+        .{ .path = "kernel/arch/x86/kvm/kvm.ko.gz" },
+        .{ .path = "kernel/arch/x86/kvm/kvm-intel.ko.gz" },
     };
     try testing.expectEqualStrings(
         "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko\n",
@@ -1482,6 +1522,10 @@ test moduleList {
     try testing.expectEqualStrings(
         "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\n",
         try moduleList(a, &order, "kvm-intel nested=0\nkvm-intel ept=1\n"),
+    );
+    try testing.expectEqualStrings(
+        "@xfs kernel/fs/xfs/xfs.ko\n",
+        try moduleList(a, &.{.{ .path = "kernel/fs/xfs/xfs.ko.gz", .tag = "xfs" }}, ""),
     );
     try testing.expectError(
         error.ParamsForMissingModule,

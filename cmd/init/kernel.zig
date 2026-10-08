@@ -4,6 +4,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const linux = std.os.linux;
+const audit = @import("audit");
 const init = @import("init.zig");
 const Machine = init.Machine;
 const exists = init.exists;
@@ -155,6 +156,12 @@ pub fn kernel(m: *Machine) !void {
         },
     };
     if (contained) say("in a container: the kernel's settings are the host's", .{});
+    // Every exec the kernel refuses, logged (lib/audit.zig): the record
+    // goes to the kernel's log, and the console, with no daemon to run.
+    // Locked, and CAP_AUDIT_CONTROL leaves the bounding set with the seal,
+    // so nothing can stop it before a reboot. A kernel without audit, or
+    // a container, where audit is the host's, is said and passed.
+    audit.enable() catch |err| say("refused execs not logged: {s}", .{@errorName(err)});
     // Redirects, per interface: a host takes or sends them on one if all
     // or the interface says so, and all and default do not reach the
     // interfaces stage0's drivers made before now. IPv6 has only the
@@ -235,6 +242,11 @@ pub const sysctls = [_][2][]const u8{
     .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" },
     .{ "net/ipv4/icmp_ignore_bogus_error_responses", "1" },
     .{ "net/ipv4/tcp_rfc1337", "1" },
+    // The kernel's audit records (refused execs) reach the log through
+    // printk's rate limit, 10 lines in 5 seconds, which a few refusals
+    // together would exceed: posture's own proofs refuse seven execs in a
+    // row. A hundred keeps a burst on record and a flood bounded.
+    .{ "kernel/printk_ratelimit_burst", "100" },
 };
 
 /// The level in /sys/kernel/security/lockdown: "none [integrity] confidentiality".
