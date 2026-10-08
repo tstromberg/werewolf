@@ -39,7 +39,3 @@ modules:
   - dm-crypt
   - "aarch64: aes-ce-blk"
   - "x86_64: aesni-intel"
-
-# make check's, for this form alone (forms/README.md)
-check:
-  native: true

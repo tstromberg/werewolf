@@ -10,9 +10,10 @@
 # It judges the machine by the cloud's record of its serial port: the root
 # verified through dm-verity, the config taken from the cloud's metadata
 # server, the hostname the config gave, and posture failing exactly what
-# POSTURE_KNOWN says the form fails. If sshd listens, root must log in,
-# over the Internet, from this host's address alone, with the key the
-# config carried. Then a second create of the same name, with a new
+# POSTURE_KNOWN says the form fails. The machine is made with
+# --allow-from me, so werewolf itself opens the form's ports to this host
+# alone; if sshd listens, root must log in through them, over the
+# Internet, with the key the config carried. Then a second create of the same name, with a new
 # hostname, must restart the machine on its new config, and delete must
 # leave nothing of the machine behind. Everything the run made is deleted
 # however it ends, the image create made included, unless CLOUD_KEEP=1.
@@ -82,7 +83,10 @@ image_delete() {
 # What of the machine is left after delete, one per line.
 leftovers() {
 	case $cloud in
-	gcp) g compute instances list --filter "name=$name" --format 'value(name)' ;;
+	gcp)
+		g compute instances list --filter "name=$name" --format 'value(name)'
+		g compute firewall-rules list --filter "name=$name-allow" --format 'value(name)'
+		;;
 	aws)
 		aws ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
 			Name=instance-state-name,Values=pending,running,stopping,stopped \
@@ -93,20 +97,6 @@ leftovers() {
 	azure) az resource list -g "$group" --query "[?contains(name, '$name')].name" -o tsv ;;
 	esac | sed '/^$/d'
 }
-# ssh to the machine, from this host's address alone.
-open_ssh() {
-	me=$(curl -fsS -m 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n')
-	[ -n "$me" ] || return 1
-	case $cloud in
-	gcp) g compute firewall-rules create "$name-ssh" --allow tcp:22 --target-tags "$name" \
-		--source-ranges "$me/32" --description "test/cloud's ssh check, deleted when it ends" ;;
-	aws) aws ec2 authorize-security-group-ingress --group-name "werewolf-$name" \
-		--protocol tcp --port 22 --cidr "$me/32" ;;
-	azure) az network nsg rule create -g "$group" --nsg-name "${name}NSG" -n ssh --priority 100 \
-		--access Allow --protocol Tcp --destination-port-ranges 22 --source-address-prefixes "$me/32" -o none ;;
-	esac >/dev/null
-}
-
 name=werewolf-check-$(date -u +%Y%m%d%H%M%S)
 work=$(mktemp -d)
 images >"$work/images-before"
@@ -118,7 +108,6 @@ cleanup() {
 		say "kept $name in $where; delete it with: $werewolf delete $name --on $cloud"
 	else
 		"$werewolf" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
-		[ "$cloud" != gcp ] || g compute firewall-rules delete "$name-ssh" >/dev/null 2>&1 || true
 		images | comm -13 "$work/images-before" - | while read -r image snapshot; do
 			image_delete "$image" "$snapshot" >/dev/null 2>&1 || say "could not delete image $image"
 		done
@@ -145,8 +134,8 @@ await_posture() {
 	while serial; ! seen "posture: .*\"host\":\"$1\""; do
 		seen 'Kernel panic' && break
 		i=$((i + 1))
-		[ $i -le 60 ] || break
-		sleep 5
+		[ $i -le 150 ] || break
+		sleep 2
 	done
 }
 
@@ -156,7 +145,8 @@ echo "$name" >"$work/config/hostname"
 ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
 cp "$work/key.pub" "$work/config/authorized_keys"
 say "creating $name, $form on $arch, in $where"
-made=$("$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config") ||
+made=$("$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" \
+	--allow-from me) ||
 	die "werewolf create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
 
@@ -193,22 +183,18 @@ else
 	fi
 fi
 
-# Over the Internet, as an operator would, from here alone, only while
-# this check runs, to a machine that takes keys alone.
+# Over the Internet, as an operator would, through the port werewolf
+# opened to this host alone, to a machine that takes keys alone.
 if seen 'Server listening on 0.0.0.0 port 22'; then
-	if open_ssh; then
-		i=0
-		until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-			-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
-			"root@$addr" id -u 2>/dev/null)" = 0 ]; do
-			i=$((i + 1))
-			[ $i -le 12 ] || break
-			sleep 10
-		done
-		[ $i -le 12 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
-	else
-		fail "ssh-login: could not open port 22 to this host's address"
-	fi
+	i=0
+	until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
+		"root@$addr" id -u 2>/dev/null)" = 0 ]; do
+		i=$((i + 1))
+		[ $i -le 40 ] || break
+		sleep 3
+	done
+	[ $i -le 40 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
 fi
 
 # A new config: the same name, another hostname, as an operator changes
@@ -228,7 +214,6 @@ fi
 if [ "${CLOUD_KEEP:-}" != 1 ]; then
 	say "deleting $name"
 	"$werewolf" delete "$name" --on "$cloud" >/dev/null || fail "delete: werewolf delete failed"
-	[ "$cloud" != gcp ] || g compute firewall-rules delete "$name-ssh" >/dev/null 2>&1 || true
 	left=$(leftovers)
 	[ -z "$left" ] && ok delete || fail "delete: left $(echo "$left" | tr '\n' ' ')"
 fi

@@ -5,7 +5,3 @@ base: python
 weaknesses:
   programs-no-interpreters: python3 runs the deliberately vulnerable application
   programs-no-network-tools: net-tools ships on purpose, to show the leash refuses ifconfig and route, not their absence
-
-# make check's, for this form alone (forms/README.md)
-check:
-  native: true

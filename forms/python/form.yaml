@@ -8,7 +8,3 @@ net:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: python3 runs the application, which is what this form is for
-
-# make check's, for this form alone (forms/README.md)
-check:
-  native: true

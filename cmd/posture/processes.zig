@@ -92,11 +92,11 @@ fn servicesLeashed(p: *Posture) !void {
         .area = "processes",
         .name = "Services others wrote run leashed",
         .why = "Programs werewolf did not write, nginx and PostgreSQL among them, run as " ++
-            "users " ++
-            "of their own, with no capability but binding a low port, and can gain none.",
+            "users of their own, with no capability but binding a low port, can gain " ++
+            "none, and make no file another user may write.",
         .how = "for each service with an /etc/sv/NAME/service file, its /proc/PID/status: " ++
-            "no " ++
-            "uid 0, no capability in any set but CAP_NET_BIND_SERVICE, and NoNewPrivs 1",
+            "no uid 0, no capability in any set but CAP_NET_BIND_SERVICE, NoNewPrivs 1, " ++
+            "and a Umask with group and other write cleared (022 or tighter)",
         .result = if (running == 0) .skip else if (bad.items.len == 0) .pass else .fail,
         .detail = if (running == 0) "no leashed service running" else bad.items,
     });
@@ -258,6 +258,11 @@ fn whyNotLeashed(status: []const u8) ?[]const u8 {
         statusField(status, "NoNewPrivs") orelse "",
         "1",
     )) return "may gain privileges";
+    // A kernel before 4.7 shows no umask: nothing to judge.
+    if (statusField(status, "Umask")) |mask| {
+        const m = std.fmt.parseInt(u32, mask, 8) catch return "shows no umask";
+        if (m & 0o022 != 0o022) return "makes files others may write";
+    }
     return null;
 }
 
@@ -274,4 +279,11 @@ test whyNotLeashed {
     const nnp = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t0\nCapAmb:\t" ++
         "0\nNoNewPrivs:\t0\n";
     try testing.expectEqualStrings("may gain privileges", whyNotLeashed(nnp).?);
+    try testing.expectEqual(null, whyNotLeashed(ok ++ "Umask:\t0022\n"));
+    try testing.expectEqual(null, whyNotLeashed(ok ++ "Umask:\t0077\n"));
+    try testing.expectEqualStrings(
+        "makes files others may write",
+        whyNotLeashed(ok ++ "Umask:\t0002\n").?,
+    );
+    try testing.expectEqualStrings("shows no umask", whyNotLeashed(ok ++ "Umask:\tx\n").?);
 }

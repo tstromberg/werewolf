@@ -42,7 +42,11 @@ keys are its own because they describe the machine as built: a form on
 inherit `python`'s excuse. `make check` fails a machine on any posture
 failure its form does not excuse, and on any excused one that passes;
 [test/posture-known](../test/posture-known) holds what every form of a
-kind fails (a DEV=1 build's shell, an architecture's gap).
+kind fails (a DEV=1 build's shell, an architecture's gap). The image
+carries both, with their excuses, in `/usr/share/werewolf/weaknesses`, so
+every machine knows which failures are expected: posture marks each
+excused one in its JSON and warns on the console of any other, wherever
+it boots.
 
 ```yaml
 # forms/python/form.yaml

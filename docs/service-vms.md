@@ -84,8 +84,27 @@ build/host/werewolf delete "$VM" --on gcp     # the VM; its image stays, for oth
 ```
 
 It uses gcloud's project and zone (`CLOUDSDK_COMPUTE_ZONE` picks another),
-uploads the image only once per build, and prints the VM's address. The
-steps below do it by hand, for a VPC and subnet of your own.
+uploads the image only once per build, and prints the VM's address.
+
+On every cloud, a new machine lets nothing in, and `create` ends by
+printing the lines that open the TCP ports its form listens on, to your
+address alone, to paste as they are; `delete` removes what they make. For
+a form that listens on 22 and 8080, on GCP:
+
+```
+werewolf: web: nothing reaches it yet; to let this host in on ports 22 8080:
+ME=$(curl -fsS https://checkip.amazonaws.com)
+gcloud compute firewall-rules create web-allow --project PROJECT --target-tags web --source-ranges "$ME/32" --allow tcp:22,tcp:8080
+```
+
+On AWS they are `aws ec2 authorize-security-group-ingress` lines for the
+machine's own security group, and on Azure an `az network nsg rule create`
+for its network security group. Or let `create` run them itself:
+`--allow-from me` opens the ports to your address, `--allow-from
+0.0.0.0/0` to everyone, for a public service, and any IPv4 CIDR to a
+network.
+
+The steps below do it by hand, for a VPC and subnet of your own.
 
 Complete the [GCP project and bucket setup](../examples/README.md#prepare-gcp-once).
 Set `GCP_PROJECT`, `GCP_BUCKET` and `GCP_ZONE`. Choose a subnet that can reach
@@ -172,12 +191,8 @@ no bucket and no VM Import role. The instance is a `t4g.small` (Graviton)
 or a `t3.small` (`--size` picks another), with no instance profile, the
 config tar in base64 as its user data, and the metadata service reachable
 only from the machine itself (IMDSv2, one hop). Its security group,
-`werewolf-NAME`, lets nothing in; allow what the form listens on:
-
-```sh
-aws ec2 authorize-security-group-ingress --group-name "werewolf-$VM" \
-  --protocol tcp --port 22 --cidr "$(curl -fsS https://checkip.amazonaws.com)/32"
-```
+`werewolf-NAME`, lets nothing in until you run the lines `create` prints
+([above](#gcp-vm)).
 
 AWS user data holds 16 KiB, so the tar's base64 must fit; `werewolf
 pack --on aws` says whether it does. A second `create` of the same name

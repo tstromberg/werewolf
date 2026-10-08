@@ -6,6 +6,7 @@
 //!   form list FORM KEY       form.yaml's KEY along the chain, a line each
 //!   form check FORM KEY      the form's own check KEY, an item a line
 //!   form weaknesses FORM     the posture checks the form's own weaknesses name
+//!   form excuses FORM        the same, each with its excuse, a line each
 //!   form having KEY [VALUE]  the forms in forms/ whose check KEY is VALUE (true)
 //!   form every KEY           form.yaml's KEY in every form in forms/, once each
 //!   form apko FORM [PKG...]  the chain's apko configs as one, and PKGs
@@ -19,7 +20,8 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const form = @import("form");
 
-const usage = "usage: form names|dirs|weaknesses FORM, list|check FORM KEY, having KEY [VALUE], " ++
+const usage = "usage: form names|dirs|weaknesses|excuses FORM, list|check FORM KEY, having KEY " ++
+    "[VALUE], " ++
     "every KEY, apko FORM [PKG...], tree";
 
 pub fn main(init: std.process.Init) !void {
@@ -98,6 +100,9 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         }
     } else if (is(verb, "weaknesses") and args.len == 2) {
         for (forms[forms.len - 1].weaknesses()) |e| try w.print("{s}\n", .{e.key});
+    } else if (is(verb, "excuses") and args.len == 2) {
+        for (forms[forms.len - 1].weaknesses()) |e|
+            try w.print("{s} {s}\n", .{ e.key, e.value.scalar.text });
     } else if (is(verb, "apko")) {
         try form.write(w, try form.apko(io, gpa, root, forms, args[2..], f));
     } else return error.Usage;
