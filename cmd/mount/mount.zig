@@ -7,15 +7,19 @@
 //! One-way by construction, and the kernel holds it to that:
 //!
 //! - A new mount is built detached (fsopen, fsmount) with nosuid and noexec,
-//!   and nodev unless it is a filesystem of device nodes, and only then
-//!   attached: there is no moment it lacks them.
+//!   nodev unless it is a filesystem of device nodes, and nosymfollow unless
+//!   it holds links the system follows (/proc, /sys, /dev) or is told
+//!   symfollow, and
+//!   only then attached: there is no moment it lacks them.
 //! - A bind is cloned detached (open_tree), given the same restrictions,
-//!   then attached.
+//!   then attached. symfollow there only withholds nosymfollow: a clone
+//!   keeps every restriction its source has.
 //! - A remount is mount_setattr(2) with nothing to clear: the call cannot
 //!   lift ro, nosuid, nodev, noexec or nosymfollow, whatever it is given.
 //!   The one filesystem option a remount takes is hidepid=invisible, which
 //!   only narrows what /proc shows.
-//! - suid, dev, exec, and rw on a remount, are refused outright.
+//! - suid, dev, exec, and rw or symfollow on a remount, are refused
+//!   outright.
 //!
 //! And as paranoid as OpenBSD would have it:
 //!
@@ -75,18 +79,22 @@ const Fs = struct {
     block: bool = false,
     /// It holds device nodes, so it is mounted without nodev.
     devices: bool = false,
+    /// It holds links the system needs followed, the kernel's own
+    /// (/proc/self, /sys/class/*) or device-mapper's (/dev/mapper/data,
+    /// which cryptsetup makes), so it is mounted without nosymfollow.
+    links: bool = false,
     /// The filesystem options it may be given.
     options: []const []const u8 = &.{},
 };
 
 const filesystems = [_]Fs{
-    .{ .name = "proc", .options = &.{"hidepid"} },
-    .{ .name = "sysfs" },
+    .{ .name = "proc", .links = true, .options = &.{"hidepid"} },
+    .{ .name = "sysfs", .links = true },
     .{ .name = "securityfs" },
     // The leashed services' cgroup2 hierarchy, under /run (cmd/init); no
     // options, since init mounts it once and the kernel names its files.
     .{ .name = "cgroup2" },
-    .{ .name = "devtmpfs", .devices = true },
+    .{ .name = "devtmpfs", .devices = true, .links = true },
     .{ .name = "devpts", .devices = true },
     .{ .name = "tmpfs", .options = &.{ "mode", "size" } },
     // /data on a disk, plain or inside LUKS2 (cmd/init).
@@ -121,8 +129,9 @@ const attr_options = [_]struct { []const u8, u64 }{
     .{ "nosymfollow", ATTR.NOSYMFOLLOW },
 };
 
-/// Options that would lift a restriction. rw is one only on a remount.
-const loosening = [_][]const u8{ "suid", "dev", "exec", "symfollow", "strictatime" };
+/// Options that would lift a restriction. rw and symfollow are ones only on
+/// a remount: on a new mount or a bind, symfollow withholds nosymfollow.
+const loosening = [_][]const u8{ "suid", "dev", "exec", "strictatime" };
 
 // --- reading the arguments -----------------------------------------------------
 
@@ -167,6 +176,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
     }
 
     var rw = false;
+    var follow = false;
     var remount = false;
     var options: std.ArrayList(Option) = .empty;
     var it = std.mem.tokenizeScalar(u8, opts, ',');
@@ -181,6 +191,10 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
         }
         if (std.mem.eql(u8, o, "rw")) {
             rw = true;
+            continue;
+        }
+        if (std.mem.eql(u8, o, "symfollow")) {
+            follow = true;
             continue;
         }
         if (std.mem.eql(u8, o, "defaults") or std.mem.eql(u8, o, "relatime")) continue;
@@ -202,7 +216,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
     switch (p.action) {
         .tighten => {
             if (n != 1 or fstype != null) return error.Usage;
-            if (rw) return error.Loosens;
+            if (rw or follow) return error.Loosens;
             for (p.options) |o| if (!allowedOnRemount(o)) return error.Option;
             p.target = try place(pos[0]);
         },
@@ -212,6 +226,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
             p.source = try place(pos[0]);
             p.target = try place(pos[1]);
             p.attrs |= ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC;
+            if (!follow) p.attrs |= ATTR.NOSYMFOLLOW;
         },
         .mount => {
             if (n != 2) return error.Usage;
@@ -225,6 +240,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
             for (p.options) |o| if (!allowedOn(fs, o)) return error.Option;
             p.attrs |= ATTR.NOSUID | ATTR.NOEXEC;
             if (!fs.devices) p.attrs |= ATTR.NODEV;
+            if (!fs.links and !follow) p.attrs |= ATTR.NOSYMFOLLOW;
         },
     }
     return p;
@@ -541,17 +557,35 @@ fn tryParse(args: []const [:0]const u8) !Plan {
     return .{ .action = p.action, .fs = p.fs, .attrs = p.attrs };
 }
 
-test "a new mount is nosuid, noexec and nodev, but for device filesystems" {
+test "a new mount is nosuid, noexec, nodev and nosymfollow, but where it cannot be" {
+    const shut = ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW;
     const t = try tryParse(&.{ "-t", "tmpfs", "-o", "mode=1777,size=25%", "tmpfs", "/tmp" });
-    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, t.attrs);
+    try testing.expectEqual(shut, t.attrs);
     const d = try tryParse(&.{ "-t", "devpts", "devpts", "/dev/pts" });
-    try testing.expectEqual(ATTR.NOSUID | ATTR.NOEXEC, d.attrs);
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, d.attrs);
     const i = try tryParse(&.{ "-t", "iso9660", "-o", "ro", "/dev/vdb", "/mnt" });
-    try testing.expectEqual(ATTR.RDONLY | ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, i.attrs);
+    try testing.expectEqual(ATTR.RDONLY | shut, i.attrs);
+    // Links the system follows: /proc/self, /sys/class/net/eth0, and
+    // /dev/mapper/data, which cryptsetup makes.
+    const dev = try tryParse(&.{ "-t", "devtmpfs", "dev", "/dev" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NOEXEC, dev.attrs);
+    const proc = try tryParse(&.{ "-t", "proc", "proc", "/proc" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, proc.attrs);
+    const sysfs = try tryParse(&.{ "-t", "sysfs", "sys", "/sys" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, sysfs.attrs);
+}
+
+test "symfollow withholds nosymfollow from a new mount or a bind, and lifts nothing" {
+    const t = try tryParse(&.{ "-t", "ext4", "-o", "symfollow", "/dev/vdb", "/data" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, t.attrs);
+    const b = try tryParse(&.{ "--bind", "-o", "symfollow", "/data/svc/x", "/data/svc/x" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, b.attrs);
+    try testing.expectError(error.Loosens, tryParse(&.{ "-o", "remount,symfollow", "/data" }));
+    try testing.expectError(error.Loosens, tryParse(&.{ "-o", "remount,bind,symfollow", "/data" }));
 }
 
 test "nothing that would lift a restriction is taken" {
-    for ([_][:0]const u8{ "exec", "suid", "dev", "nosuid,exec", "symfollow" }) |o| {
+    for ([_][:0]const u8{ "exec", "suid", "dev", "nosuid,exec" }) |o| {
         try testing.expectError(
             error.Loosens,
             tryParse(&.{ "-t", "tmpfs", "-o", o, "tmpfs", "/tmp" }),
@@ -627,7 +661,7 @@ test "only werewolf's places, as clean absolute paths" {
 test "binds, and what is not an invocation" {
     const b = try tryParse(&.{ "--bind", "/victim/var/lib/werewolf/data", "/data" });
     try testing.expectEqual(Action.bind, b.action);
-    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, b.attrs);
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, b.attrs);
     // A mount names its filesystem: nothing is probed.
     try testing.expectError(
         error.Usage,

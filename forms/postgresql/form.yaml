@@ -3,3 +3,8 @@ base: prod
 # werewolf's programs from cmd/ this form's machines run, beside the
 # ones every form has (docs/programs.md)
 programs: [popen-shim.so]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (jit = on, its default; allow jit)

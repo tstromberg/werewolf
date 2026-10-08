@@ -6,7 +6,7 @@
 # and the in-container posture service exercises and attacks them faithfully
 # (WEREWOLF_CHECK=1, below). What a container cannot own -- the kernel's
 # sysctls and boot line (every kernel-* check but kernel-seal, werewolf's own
-# filter), the mount options of nspawn's own mounts -- is asserted in
+# filter, and kernel-write-xor-execute, which its init sets), the mount options of nspawn's own mounts -- is asserted in
 # emulation instead; POSTURE_KNOWN_NATIVE names the few non-kernel ones, and
 # the form's POSTURE_KNOWN, as for a booted machine, what the form carries by
 # design; make check-native builds it as it ships, without DEV. The host
@@ -92,9 +92,10 @@ while [ $i -lt 120 ]; do
 done
 [ -n "$line" ] || fail "no posture line in 120 s; see $log"
 
-# The posture line ends in the full JSON, which says each check's area. A
+# The posture line ends in JSON that says each failed check's area. A
 # failing check is expected here if it is a kernel-* check other than
-# kernel-seal (the container shares the host's kernel), if POSTURE_KNOWN_NATIVE
+# kernel-seal and kernel-write-xor-execute, which init sets on PID 1 (the
+# container shares the host's kernel), if POSTURE_KNOWN_NATIVE
 # or the form's own POSTURE_KNOWN (its weaknesses, ?ID as ID) names it,
 # or if a host setting below werewolf's decides it (above). Anything else
 # failing is a regression in a protection that should hold natively.
@@ -105,7 +106,7 @@ known=" ${POSTURE_KNOWN_NATIVE:-} $(printf '%s' "${POSTURE_KNOWN:-}" | tr -d '?'
 new=""
 for id in $got; do
 	case $known in *" $id "*) continue ;; esac
-	[ "$id" != kernel-seal ] &&
+	[ "$id" != kernel-seal ] && [ "$id" != kernel-write-xor-execute ] &&
 		printf '%s' "$json" | grep -q "\"id\":\"$id\",\"area\":\"kernel\"" && continue
 	new="$new $id"
 done

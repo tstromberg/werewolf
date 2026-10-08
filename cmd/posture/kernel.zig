@@ -298,6 +298,7 @@ pub fn check(p: *Posture) !void {
     // sysctls bound them. Readable by root alone.
     const umh = trim(p.read("/proc/sys/kernel/usermodehelper/bset"));
     const hotplug = trim(p.read("/proc/sys/kernel/hotplug"));
+    const modprobe = trim(p.read("/proc/sys/kernel/modprobe"));
     var helper_held: std.ArrayList(u8) = .empty;
     if (helperCaps(umh)) |set| for (helper_denied) |c| {
         if (set & (@as(
@@ -316,14 +317,14 @@ pub fn check(p: *Posture) !void {
         .why = "A program the kernel starts itself, which neither PID 1's seccomp filter " ++
             "nor its bounding set reaches, cannot load kernel code, reach hardware, trace " ++
             "processes, mount or change the network, and no program is started on every " ++
-            "device event.",
+            "device event or to load a module.",
         .how = "kernel.usermodehelper.bset lacks each of those capabilities, and " ++
-            "kernel.hotplug is empty",
+            "kernel.hotplug and kernel.modprobe are empty",
         .result = if (!p.root)
             .skip
         else if (helperCaps(umh) == null)
             .fail
-        else if (helper_held.items.len == 0 and hotplug.len == 0)
+        else if (helper_held.items.len == 0 and hotplug.len == 0 and modprobe.len == 0)
             .pass
         else
             .fail,
@@ -335,6 +336,8 @@ pub fn check(p: *Posture) !void {
             try p.gpa.print("held: {s}", .{helper_held.items})
         else if (hotplug.len > 0)
             try p.gpa.print("kernel.hotplug is {s}", .{hotplug})
+        else if (modprobe.len > 0)
+            try p.gpa.print("kernel.modprobe is {s}", .{modprobe})
         else
             "",
     });
@@ -358,6 +361,7 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
+    try writeXorExecute(p);
     try aslr(p);
     const min_addr = p.sysctl("vm/mmap_min_addr");
     try p.add(.{
@@ -398,23 +402,25 @@ pub fn check(p: *Posture) !void {
             try p.gpa.print("net.core.bpf_jit_harden is {s}", .{harden}),
     });
     const oops = p.sysctl("kernel/panic_on_oops");
+    const warn = p.sysctl("kernel/warn_limit");
     const panic_s = p.sysctl("kernel/panic");
     try p.add(.{
         .id = "kernel-oops",
         .area = "kernel",
         .name = "A kernel bug stops the kernel",
-        .why = "A kernel that hits a bug, as a failed exploit often makes it, reboots " ++
-            "rather than running on for the exploit to try again.",
-        .how = "kernel.panic_on_oops is 1, and kernel.panic is above 0, so the panic " ++
-            "reboots rather than hangs",
-        .result = if (std.mem.eql(u8, oops, "1") and
+        .why = "A kernel that hits a bug, or catches its own memory corrupted, as a " ++
+            "failed exploit often makes it, reboots rather than running on for the " ++
+            "exploit to try again.",
+        .how = "kernel.panic_on_oops is 1, kernel.warn_limit is 1, so the first warning " ++
+            "panics too, and kernel.panic is above 0, so the panic reboots rather than hangs",
+        .result = if (std.mem.eql(u8, oops, "1") and std.mem.eql(u8, warn, "1") and
             (std.fmt.parseInt(i64, panic_s, 10) catch 0) > 0)
             .pass
         else
             .fail,
         .detail = try p.gpa.print(
-            "kernel.panic_on_oops is {s}, kernel.panic is {s}",
-            .{ oops, panic_s },
+            "kernel.panic_on_oops is {s}, kernel.warn_limit is {s}, kernel.panic is {s}",
+            .{ oops, warn, panic_s },
         ),
     });
     // What the kernel can only be told at boot: werewolf's image names
@@ -845,6 +851,48 @@ fn costly(p: *Posture) !void {
         .how = "no file in /sys/devices/system/cpu/vulnerabilities reads Vulnerable",
         .result = if (vulnerable) |v| (if (v.len == 0) .pass else .fail) else .skip,
         .detail = vulnerable orelse "the kernel reports no CPU flaws",
+    });
+}
+
+/// Memory-Deny-Write-Execute, inherited from PID 1 (werewolf's init sets
+/// it): this process holds to it, and an anonymous mapping both writable
+/// and executable, the first step of running code an exploit wrote, is
+/// refused. Tried, not only read: the mapping is unmapped at once if made.
+fn writeXorExecute(p: *Posture) !void {
+    const PR_GET_MDWE = 66;
+    const PR_MDWE_REFUSE_EXEC_GAIN = 1;
+    const rc = linux.prctl(PR_GET_MDWE, 0, 0, 0, 0);
+    const known = linux.errno(rc) == .SUCCESS;
+    const set = known and rc & PR_MDWE_REFUSE_EXEC_GAIN != 0;
+    const len = std.heap.pageSize();
+    const addr = linux.mmap(
+        null,
+        len,
+        .{ .READ = true, .WRITE = true, .EXEC = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
+    const mapped = linux.errno(addr) == .SUCCESS;
+    if (mapped) _ = linux.munmap(@ptrFromInt(addr), len);
+    try p.add(.{
+        .id = "kernel-write-xor-execute",
+        .area = "kernel",
+        .name = "No memory both writable and executable",
+        .why = "Code an exploit writes into a program's memory never runs: no mapping is " ++
+            "writable and executable at once, or made executable once written, so only " ++
+            "programs and libraries from files run.",
+        .how = "prctl(PR_GET_MDWE) reports PR_MDWE_REFUSE_EXEC_GAIN, inherited from PID 1, " ++
+            "and an anonymous mapping that is readable, writable and executable is refused",
+        .result = if (set and !mapped) .pass else .fail,
+        .detail = if (mapped)
+            "a writable and executable mapping was made"
+        else if (!known)
+            "the kernel has no Memory-Deny-Write-Execute (Linux 6.3)"
+        else if (!set)
+            "Memory-Deny-Write-Execute is off"
+        else
+            "",
     });
 }
 

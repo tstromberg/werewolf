@@ -43,7 +43,8 @@ outside that domain; `lib/broker.zig` is how a program asks.
   identified (ext4, xfs, btrfs, FAT), and its UUID or serial compared. Two
   devices that match are refused, as a clone or snapshot attached beside
   the real disk would make them.
-- **Mounting**: built detached, `nosuid,nodev,noexec`, then attached. One
+- **Mounting**: built detached, `nosuid,nodev,noexec,nosymfollow`, then
+  attached; bite names its paths by where their links lead. One
   asker holds a word at a time; another is told it is busy.
 - **Releasing**: when the asker closes, or dies, the mount is unmounted,
   lazily if busy.
@@ -75,7 +76,7 @@ A word leaves it nothing to choose.
 | A non-root asker | Refused by `SO_PEERCRED`, on a socket only root can open. |
 | An asker naming what to mount | It cannot: one word, everything else fixed here. |
 | An attached disk taking the real one's place | Two devices with the same UUID or serial are refused. |
-| A mount without its restrictions | Built detached, `nosuid,nodev,noexec`, then attached. |
+| A mount without its restrictions | Built detached, `nosuid,nodev,noexec,nosymfollow`, then attached. |
 | The broker turned | CAP_SYS_ADMIN alone and locked, under a seccomp allowlist; it runs nothing. |
 
 ## Reliability Considerations

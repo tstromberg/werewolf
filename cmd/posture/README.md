@@ -52,10 +52,10 @@ another distribution is a comparison. `docs/posture.md` lists the checks.
   closed, link and file tricks in `/tmp` refused; and a copy of posture,
   leashed as `nobody`, tries what its service file does not grant.
 - **Output**: text for people, with every control character shown as `?`;
-  `--json`; `--line`, one line for the console. As werewolf's service it
-  waits for the others to settle (60 s at most), keeps the JSON in
-  `/run/werewolf/posture.json`, prints the line, and stops itself. It runs
-  beside the services, after them; nothing waits for it.
+  `--json`; `--line`, one line for the console, with the failures alone.
+  As werewolf's service it waits for the others to settle (60 s at most),
+  keeps the JSON in `/run/werewolf/posture.json`, prints the line, and
+  stops itself. It runs beside the services, after them; nothing waits.
 - **Expected failures**: a werewolf image lists the failures it expects,
   each with its excuse, in `/usr/share/werewolf/weaknesses` (its form's
   `weaknesses`, and test/posture-known's line for its kind). A failed
@@ -68,8 +68,9 @@ another distribution is a comparison. `docs/posture.md` lists the checks.
 
 - Root sees the whole picture; another user gets some checks skipped.
 - Network probes are quiet, but the metadata probe opens one TCP connection
-  to `169.254.169.254`, and the exec proofs leave eight refused execs, two
-  audit lines each, in the kernel log and on the console every run.
+  to `169.254.169.254`, and the proofs leave refused execs and Landlock
+  refusals, two to four audit lines each, in the kernel log and on the
+  console every run.
 - About a hundred checks is a lot to keep true as kernels change; `test/posture-known`
   lists the expected failures per form and architecture.
 

@@ -497,11 +497,15 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
 /// cannot put under it fails the call (TSYNC, with ESRCH so a failure is an
 /// error, not a thread's id), so none is left outside. With listener (the
 /// machine seal, on PID 1, which holds CAP_SYS_ADMIN), the result is a
-/// notification descriptor for seal-watch; without it (a service, after
-/// dropping capabilities), there is none, and no_new_privs is enough.
+/// notification descriptor for seal-watch, which says what it refuses;
+/// without it (a service, after dropping capabilities), there is none, and
+/// no_new_privs is enough, and the kernel's audit says each call the filter
+/// refuses (SECCOMP_FILTER_FLAG_LOG): a record in the kernel's log, as for
+/// a refused exec, which seal-watch never sees.
 pub fn install(filter: []const Filter, listener: bool) !i32 {
     const SECCOMP_SET_MODE_FILTER = 1;
     const SECCOMP_FILTER_FLAG_TSYNC = 1 << 0;
+    const SECCOMP_FILTER_FLAG_LOG = 1 << 1;
     const SECCOMP_FILTER_FLAG_NEW_LISTENER = 1 << 3;
     const SECCOMP_FILTER_FLAG_TSYNC_ESRCH = 1 << 4;
     const prog = extern struct { len: u16, filter: [*]const Filter }{
@@ -511,7 +515,7 @@ pub fn install(filter: []const Filter, listener: bool) !i32 {
     const rc = linux.seccomp(
         SECCOMP_SET_MODE_FILTER,
         SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_TSYNC_ESRCH |
-            @as(u32, if (listener) SECCOMP_FILTER_FLAG_NEW_LISTENER else 0),
+            @as(u32, if (listener) SECCOMP_FILTER_FLAG_NEW_LISTENER else SECCOMP_FILTER_FLAG_LOG),
         &prog,
     );
     if (linux.errno(rc) != .SUCCESS) return error.Seccomp;

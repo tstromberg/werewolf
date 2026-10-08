@@ -116,12 +116,17 @@ another `create`, not a new image.
 werewolf build   FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
 werewolf pack    FORM|--image IMAGE [-o FILE] [-n] [--on TARGET] CONFIG...
 werewolf run     FORM [--dev] [CONFIG...]                QEMU, in the foreground
-werewolf create  FORM|--image IMAGE NAME [--on TARGET] [CONFIG...]
+werewolf create  FORM|--image IMAGE NAME [--on TARGET] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
 werewolf delete  NAME [--on TARGET]
 werewolf console NAME [--on TARGET]
 werewolf upload  FILE --on gcp|aws|azure
 werewolf build-apk RECIPE [--arch ARCH]                 a form's own melange package
 ```
+
+`--arch` takes each world's spelling: `aarch64` or `arm64`, and `x86_64`,
+`x86-64` or `amd64`, in any case. werewolf makes it `aarch64` or `x86_64`,
+which make and release names use, and each cloud names it as it does:
+GCP `ARM64`/`X86_64`, AWS `arm64`/`x86_64`, Azure `Arm64`/`x64`.
 
 Two rules, stated once:
 
@@ -268,15 +273,40 @@ content digest in the manifest is what makes the image reproducible.
 
 ### run
 
-The form under QEMU on this machine, console on the terminal, Ctrl-a x
-ends it. It has no name and no `delete`, because nothing outlives the
-process. werewolf packs the config tar from the flags, checked as `pack`
-checks it, into `build/werewolf-run.tar`, then becomes `make run` with
-that tar attached, so QEMU's arguments stay in one place. The config is
-the flags' alone, not `./config`. `--dev` builds with the debug shell.
-The data disk, `build/ARCH/data.img`, outlives runs, as `make run`'s
-does: one that a `data.key` once put in LUKS2 stays unavailable, never
-reformatted, until a run gives the same key with `--data-key`.
+`run` is `create`, of the one machine it keeps for trying a form:
+`werewolf-run`, on the engine `create` would pick, with `create`'s flags,
+in place of the last one. With no name, `werewolf ssh` logs into it,
+`werewolf console` shows its console (and, under QEMU, joins it until
+Ctrl-] leaves it running), and `werewolf stop` ends it.
+
+The engine, for both, when `--on` does not say: Lima on macOS, bhyve on
+FreeBSD, Firecracker on Linux with KVM where its network can be set up
+without a password (root, or a sudo or doas that asks none), otherwise
+QEMU. The summary names it, and says why when a likelier one was passed
+over ("not Firecracker: its network needs root, and sudo asks a
+password"). Under QEMU the machine runs in the background with user-mode
+networking, so it needs no root: ssh and the form's last port are
+forwarded from this host's loopback, 2222 and 8080 or free ones when
+those are taken, and it keeps a data disk of its own. `--dev` builds a
+machine here with the debug shell. A form that serves ssh is up when its
+sshd answers, not only when init hands over, so `werewolf ssh` right after
+works.
+
+### What the verbs say
+
+`build`, `run` and `create` say little: one line that names the phase
+they are in (make names its own: run with `--debug=b`, it says which
+target it remakes, and the target's path says what it is), how long it
+has run, and, faint, the last thing the commands said, so a long phase is
+seen to move. Everything they said goes to a log. Done, a verb says what
+it made in at most five lines: what, how long each step took (as
+minikube does: the build's phases, or the VM's start, the kernel,
+userland and the address, from init's own "up in" line), where it is, and
+the command to reach or run it next. A failure says which phase failed,
+its last lines, without repeats, where the whole log is, and the same
+command with `--verbose`, which shows everything as it runs, as make
+does. Off a terminal there is no line to redraw, and `create` prints its
+machine line on standard output for scripts; `NO_COLOR` turns color off.
 
 ### create, delete, console
 

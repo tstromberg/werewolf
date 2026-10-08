@@ -144,7 +144,9 @@ case "$(readlink -f "/sys/class/net/$nic/device" 2>/dev/null)" in
 *) nope "$nic is not a virtio NIC" ;;
 esac
 # Checked through the parent directories, so that -n creates nothing.
-lib=$(dirname "$home")
+# Where its links lead: werewolf's broker mounts the filesystem without
+# following any (nosymfollow).
+lib=$(readlink -f "$(dirname "$home")")
 src=$(findmnt -no SOURCE -T "$lib")
 case "$src" in
 /dev/mapper/* | /dev/dm-*) nope "$home is on $src: werewolf cannot open LVM or LUKS" ;;

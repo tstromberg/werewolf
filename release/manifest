@@ -1,7 +1,7 @@
 #!/bin/sh
 # manifest: put a form's release files in DIST as the release names them,
 # FORM-ARCH-NAME, and write its manifest, FORM-ARCH.json. The manifest has
-# no serial or expiry and no signature; release/sign adds those. Everything
+# no serial and no signature; release/sign adds those. Everything
 # here follows from the files, so a rebuild writes the same manifest.
 #
 #   release/manifest FORM ARCH ROOTFS KERNEL DIST NAME=PATH...

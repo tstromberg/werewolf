@@ -33,12 +33,15 @@ Each phase is a file: `kernel.zig`, `config.zig`, `network.zig`, `data.zig`,
 `seal.zig`; `init.zig` runs them in order, as `m.kernel()` and so on.
 
 1. **Filesystems**: `/proc` (`hidepid=invisible`), `/sys`, `/dev`, and RAM
-   filesystems, all `nosuid` and `noexec`; a cgroup2 tree for leash's
-   services; accounts seeded into `/run` from the image's copies.
+   filesystems, all `nosuid` and `noexec`, the RAM ones `nosymfollow`; a
+   cgroup2 tree for leash's services; accounts seeded into `/run` from the
+   image's copies.
 2. **The kernel**: lockdown raised to integrity, modules loaded and closed,
-   the protective sysctls, then the audit of every refused exec, locked
-   (`lib/audit.zig`). A sysctl the kernel refuses ends the boot, but in a
-   container, where they are the host's; audit it cannot is said and passed.
+   the protective sysctls, the audit of every refused exec, locked
+   (`lib/audit.zig`), then Memory-Deny-Write-Execute on PID 1 unless the
+   form allows `jit`. A sysctl or MDWE the kernel refuses ends the boot,
+   but in a container, where they are the host's; audit it cannot is said
+   and passed.
 3. **The config** on the machine's disks, one tar: the victim's
    `config.tar`, or else the first block device holding one; any other is
    said and ignored. A confined child extracts it to `/run/config` (root's

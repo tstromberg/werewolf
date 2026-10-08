@@ -281,29 +281,6 @@ pub const Machine = struct {
         };
     }
 
-    /// blkid's answer, trimmed, or "": the device, or the value asked for.
-    pub fn blkid(m: *Machine, args: []const []const u8) []const u8 {
-        return firstLine(m.blkidAll(args));
-    }
-
-    /// blkid's whole answer, one device or value a line, trimmed, or "".
-    pub fn blkidAll(m: *Machine, args: []const []const u8) []const u8 {
-        const argv = std.mem.concat(
-            m.gpa,
-            []const u8,
-            &.{ &.{ m.which("blkid") orelse return "", "-c", "/dev/null" }, args },
-        ) catch return "";
-        const res = std.process.run(
-            m.gpa,
-            m.io,
-            .{ .argv = argv, .environ_map = &m.env },
-        ) catch return "";
-        return switch (res.term) {
-            .exited => |code| if (code == 0) trim(res.stdout) else "",
-            else => "",
-        };
-    }
-
     pub fn isMounted(m: *Machine, point: []const u8) bool {
         return m.mountSource(point) != null;
     }

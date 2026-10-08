@@ -126,7 +126,12 @@ form_check = $(shell $(FORM_TOOL) check $(FORM_REF) $(1))
 #               Without it /dev/ptmx opens nothing, for root too, and the
 #               TTY layer's pseudo-terminal code is out of reach
 #               (CVE-2014-0196)
-ALLOWANCES = kvm nested-kvm netadmin packet ipv6 pty
+#   jit         memory written and then run, for a runtime that compiles
+#               code as it runs (a JVM, V8, .NET, PCRE2's JIT, LLVM): init
+#               leaves Memory-Deny-Write-Execute off. Without it no process
+#               can make memory both writable and executable, or executable
+#               once written, so code an exploit writes never runs
+ALLOWANCES = kvm nested-kvm netadmin packet ipv6 pty jit
 ALLOW_FILES := $(wildcard $(addsuffix /etc/werewolf/allow/*,$(ROOTFS_DIRS)))
 ALLOW := $(sort $(notdir $(ALLOW_FILES)))
 ifneq ($(filter-out $(ALLOWANCES),$(ALLOW)),)
@@ -254,10 +259,22 @@ DEV ?=
 FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev).lock.json
 DEV_PACKAGES := busybox-full $(call form_list,dev)
 
+# apko_retry COMMAND: COMMAND, tried again 15, 30 and 45 seconds on if it
+# fails reaching the package server: Wolfi's turns a burst of requests away
+# for a few seconds (HTTP 403), as CI's runners resolving forms at once can
+# make. Any other failure, a package no repository has among them, fails
+# at once. Its output streams as it comes, and is kept to be read after.
+APKO_NETWORK = status code (403|408|429|5[0-9][0-9])|connection reset|i/o timeout|TLS handshake|deadline exceeded|unexpected EOF|failed to fetch
+apko_retry = o=$(CURDIR)/$@.apko && for t in 1 2 3 4; do \
+	{ $(1); echo $$? >$$o.rc; } 2>&1 | tee $$o; rc=$$(cat $$o.rc); \
+	if [ "$$rc" = 0 ]; then rm -f $$o $$o.rc; break; fi; \
+	if ! grep -Eq '$(APKO_NETWORK)' $$o || [ $$t -eq 4 ]; then rm -f $$o $$o.rc; exit 1; fi; \
+	echo "apko could not reach the package server; trying again in $$((t * 15))s" >&2; sleep $$((t * 15)); done
+
 # apko lock CONFIG, from CONFIG's directory, where apko resolves the
 # config's relative paths (boot/kernel.yaml's keys).
 apko_lock = mkdir -p $(LOCK) && cd $(dir $(1)) && \
-	apko lock --arch aarch64,x86_64 --output $(CURDIR)/$@ $(notdir $(1))
+	$(call apko_retry,apko lock --arch aarch64$(,)x86_64 --output $(CURDIR)/$@ $(notdir $(1)))
 
 # apko build-minirootfs CONFIG into $@, resolving each package to the version
 # the repositories hold now and verifying it against CONFIG's keyring. Versions
@@ -269,7 +286,7 @@ apko_lock = mkdir -p $(LOCK) && cd $(dir $(1)) && \
 define apko_build
 pins=$(if $(FREEZE),$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(.*\)-\([^-]*-r[0-9]*\)\.apk".*|-p \1=\2|p' $(2))) && \
 	mkdir -p $(dir $@) && cd $(dir $(1)) && \
-	apko build-minirootfs --build-arch $(ARCH) $$pins $(notdir $(1)) $(CURDIR)/$@
+	$(call apko_retry,apko build-minirootfs --build-arch $(ARCH) $$pins $(notdir $(1)) $(CURDIR)/$@)
 endef
 
 # A tar of directories laid over one another in order, whose bytes depend
@@ -738,9 +755,10 @@ $(WEREWOLF): cmd/werewolf/werewolf.zig $(wildcard cmd/werewolf/*.zig) lib/settin
 	$(zig_check)
 	@# Beside it, then renamed over it: a build while werewolf runs (a
 	@# check rebuilds it) never leaves an empty file, which a shell would run
-	@# as an empty script, exiting 0 having done nothing.
-	zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$@.tmp
-	mv -f $@.tmp $@
+	@# as an empty script, exiting 0 having done nothing. Beside it under a
+	@# name of its own, the shell's pid, so two builds at once do not write
+	@# one file.
+	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
 # The werewolf command on your PATH: in the first of ~/bin, ~/.local/bin
 # and /usr/local/bin that is on it and yours to write, or else in
@@ -980,12 +998,28 @@ QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nogr
 # or 80.
 RUN_PORT ?= $(or $(lastword $(filter-out 22,$(patsubst tcp/%,%,$(filter tcp/%,$(shell $(FORM_TOOL) list $(FORM_REF) net | sed -n 's/^listen //p'))))),80)
 
+# RUN_DIR=DIR, absolute, as werewolf run gives it: the machine in the
+# background, its console on DIR/console.sock and in DIR/console.log, QEMU's
+# monitor on DIR/monitor.sock and its pid in DIR/qemu.pid; make returns once
+# QEMU has started. Without it, as ever: the console is this terminal's.
+RUN_DIR ?=
+# This host's ports that reach the machine's ssh and its RUN_PORT; werewolf
+# run picks free ones when these are taken.
+RUN_SSH_PORT ?= 2222
+RUN_WEB_PORT ?= 8080
+# The machine's /data: every make run's, or one of its own, as each machine
+# werewolf keeps under QEMU has.
+RUN_DATA ?= $(BUILD)/data.img
+RUN_IO = $(if $(RUN_DIR),-display none -daemonize -pidfile $(RUN_DIR)/qemu.pid \
+	-chardev socket$(,)id=con$(,)path=$(RUN_DIR)/console.sock$(,)server=on$(,)wait=off$(,)logfile=$(RUN_DIR)/console.log \
+	-serial chardev:con -monitor unix:$(RUN_DIR)/monitor.sock$(,)server$(,)nowait)
 run: image $(BUILD)/data.img $(if $(wildcard config),config-tar)
-	$(QEMU) -smp 4 -m 2048 \
+	$(if $(RUN_DIR),mkdir -p $(RUN_DIR) && rm -f $(RUN_DIR)/console.log $(RUN_DIR)/*.sock &&) \
+	$(if $(RUN_DIR),$(subst -nographic,,$(QEMU)),$(QEMU)) $(RUN_IO) -smp 4 -m 2048 \
 		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst \
 		-append "console=$(CONSOLE) $(KERNEL_ARGS) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 werewolf.data=vda werewolf.debug=1" \
-		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:$(RUN_PORT) -device virtio-net-pci,netdev=n0 \
-		-device virtio-rng-pci -drive file=$(BUILD)/data.img,format=raw,if=virtio $(QEMU_CONFIG)
+		-netdev user,id=n0,hostfwd=tcp:127.0.0.1:$(RUN_SSH_PORT)-:22,hostfwd=tcp:127.0.0.1:$(RUN_WEB_PORT)-:$(RUN_PORT) -device virtio-net-pci,netdev=n0 \
+		-device virtio-rng-pci -drive file=$(RUN_DATA),format=raw,if=virtio $(QEMU_CONFIG)
 
 # No host key to check: this reaches only the port `run` forwards on this
 # host's loopback (the machine keeps its key in /data, which run's disk holds).
@@ -1044,13 +1078,14 @@ POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b
 export POSTURE_KNOWN := $(POSTURE_KNOWN_KIND) $(shell $(FORM_TOOL) weaknesses $(FORM_REF))
 # The posture checks test/cage expects to fail in a container, beyond the
 # kernel-* checks it allows by their area (the container shares the host's
-# kernel; only kernel-seal, werewolf's own filter, must hold there) and
+# kernel; only kernel-seal and kernel-write-xor-execute, werewolf's own,
+# set on PID 1, must hold there) and
 # those POSTURE_KNOWN names for the form, what it carries by design. These
 # are the rest a container cannot hold, nspawn's own mounts chief among
 # them, all asserted in emulation. The host sysctls
 # behind files-* checks test/cage judges by the host itself, raising them
 # where it may (CAGE_HARDEN_HOST=1, CI's runners).
-export POSTURE_KNOWN_NATIVE = files-root-readonly files-root-verity files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-system-writes processes-mem-attack
+export POSTURE_KNOWN_NATIVE = files-root-readonly files-root-verity files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-nosymfollow-everywhere files-system-writes processes-mem-attack
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # What every form shares, built once before the forms build side by side.
 CHECK_SHARED = $(BUILD)/vmlinuz $(BUILD)/stage0/init.tar $(ALL_PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS)

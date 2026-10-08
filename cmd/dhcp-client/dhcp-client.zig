@@ -28,8 +28,9 @@
 //!            routes. It never sees a packet: it checks every field of the
 //!            engine's message again, and treats one it does not like as a
 //!            compromised engine, ending both. Landlock confines what it
-//!            writes to /run/werewolf/dhcp (lease.json, resolv.conf, to which
-//!            /etc/resolv.conf links), and seccomp to the few calls that takes.
+//!            writes to /run/werewolf/network (lease.json, and resolv.conf, to
+//!            which /etc/resolv.conf links), and seccomp to the few calls
+//!            that takes.
 //!
 //! Both are set up before either touches the network: the packet socket is
 //! opened, filtered in the kernel to DHCP replies, and locked first.
@@ -58,7 +59,7 @@ const Allocator = std.mem.Allocator;
 const sandbox = @import("sandbox");
 const sys = sandbox.sys;
 
-const state_dir = "/run/werewolf/dhcp";
+const state_dir = "/run/werewolf/network";
 const nic_path = state_dir ++ "/nic";
 const lease_path = state_dir ++ "/lease.json";
 const empty_dir = "/var/empty";
@@ -210,6 +211,14 @@ const Engine = struct {
     mac: [6]u8,
     step: Step = .sandbox,
     errno: u16 = 0,
+    /// The broadcasts the lease being sought has taken, DISCOVERs and
+    /// then REQUESTs, and when the first went out and the offer came: how
+    /// long a server took, or how many went unanswered (Azure's lease
+    /// takes 2 s), which the log shows.
+    sent: u8 = 0,
+    offered_after: u8 = 0,
+    started: i64 = 0,
+    offer_ms: u32 = 0,
 
     const Step = enum(u8) { sandbox, discover, request, renew, send };
 
@@ -288,7 +297,11 @@ const Engine = struct {
     /// finished one within `seconds`. The ACK must come from the server
     /// that offered, for the address offered.
     fn acquire(e: *Engine, seconds: u32) !?Wire {
-        const deadline = nowMs() + @as(i64, seconds) * 1000;
+        e.sent = 0;
+        e.offered_after = 0;
+        e.offer_ms = 0;
+        e.started = nowMs();
+        const deadline = e.started + @as(i64, seconds) * 1000;
         while (nowMs() < deadline) {
             const xid = newXid();
             var buf: [576]u8 = undefined;
@@ -301,6 +314,8 @@ const Engine = struct {
             ) orelse return null;
             if (offer.kind != .offer or !usable(offer.lease.addr) or
                 !usable(offer.lease.server)) continue;
+            e.offered_after = e.sent;
+            e.offer_ms = e.since();
             e.step = .request;
             const ack = try e.exchange(
                 message(&buf, 3, xid, e.mac, zero, offer.lease.addr, offer.lease.server),
@@ -327,6 +342,10 @@ const Engine = struct {
     /// A renewing REQUEST for the lease held: the server's ACK, for the same
     /// address, or its NAK; null for no answer, or one from anyone else.
     fn renew(e: *Engine, h: Wire, seconds: u32) !?Reply {
+        e.sent = 0;
+        e.offered_after = 0;
+        e.offer_ms = 0;
+        e.started = nowMs();
         const xid = newXid();
         var buf: [576]u8 = undefined;
         e.step = .renew;
@@ -372,6 +391,7 @@ const Engine = struct {
         var wait: i64 = 250;
         while (nowMs() < deadline) {
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
+            e.sent +|= 1;
             const spread: i64 = newXid() % @as(u32, @intCast(wait));
             const until = @min(deadline, nowMs() + @divFloor(wait, 2) + spread);
             while (true) {
@@ -411,6 +431,10 @@ const Engine = struct {
             .event = @backingInt(event),
             .step = @backingInt(e.step),
             .errno = e.errno,
+            .sent = e.sent,
+            .offered_after = e.offered_after,
+            .offer_ms = e.offer_ms,
+            .ms = e.since(),
             .lease = w,
         };
         const n = try e.sys(linux.write(e.sp, std.mem.asBytes(&m), @sizeOf(Msg)));
@@ -428,6 +452,11 @@ const Engine = struct {
         };
         _ = linux.write(e.sp, std.mem.asBytes(&m), @sizeOf(Msg));
         linux.exit_group(1);
+    }
+
+    /// ms since the lease's first broadcast.
+    fn since(e: *const Engine) u32 {
+        return @intCast(std.math.clamp(nowMs() - e.started, 0, std.math.maxInt(u32)));
     }
 
     fn sys(e: *Engine, rc: usize) !usize {
@@ -451,7 +480,7 @@ const Parent = struct {
     log: Log = .{},
 
     /// Keep CAP_NET_ADMIN and nothing else, never gain more, write only in
-    /// /run/werewolf/dhcp, and make any other system call fatal.
+    /// /run/werewolf/network, and make any other system call fatal.
     fn confine(p: *Parent) !void {
         try sandbox.keepOnly(1 << linux.CAP.NET_ADMIN);
         try sandbox.landlock(&.{.{ .fd = p.dir, .access = sandbox.own_files }}, &.{});
@@ -532,6 +561,13 @@ const Parent = struct {
                 var w: Io.Writer = .fixed(&json);
                 try std.json.Stringify.value(text, .{}, &w);
                 try writeFile(p.dir, "lease.json", w.buffered());
+                p.log.event("exchange", .{
+                    .nic = p.nic,
+                    .sent = m.sent,
+                    .ms = m.ms,
+                    .discovers = m.offered_after,
+                    .offer_ms = m.offer_ms,
+                });
                 p.log.event(@tagName(event), text);
                 if (p.mode == .up) linux.exit_group(0);
             },
@@ -613,7 +649,13 @@ const Msg = extern struct {
     event: u8,
     step: u8,
     errno: u16,
-    pad: u32 = 0,
+    /// The engine's broadcasts for this lease, those before the offer,
+    /// and the ms from the first to the offer and to the lease.
+    ms: u32 = 0,
+    offer_ms: u32 = 0,
+    sent: u8 = 0,
+    offered_after: u8 = 0,
+    pad: u16 = 0,
     lease: Wire,
 };
 

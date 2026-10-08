@@ -18,7 +18,7 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-const leases = "/var/db/dhcpd_leases";
+pub const leases = "/var/db/dhcpd_leases";
 /// Lima's own network, as every VM has it: the address it expects its
 /// guest at, and its gateway, which answers DNS too.
 pub const user_ip = "192.168.5.15/24";
@@ -196,19 +196,12 @@ pub fn previous(io: Io, gpa: Allocator, m: []const u8) u64 {
     return if (lease(text, m)) |l| l.expiry else 0;
 }
 
-/// Wait for a lease for m newer than before: limactl start waits for ssh,
-/// which a werewolf machine never answers, so the lease says it is up.
-/// Looked for every 50 ms, read into one buffer the wait keeps: the lease
-/// comes about a second after the start, and the file is a few kilobytes.
-pub fn awaitAddress(io: Io, gpa: Allocator, m: []const u8, before: u64) !?[]const u8 {
-    const buf = try gpa.alloc(u8, 4 << 20);
-    for (0..wait_seconds * 20) |_| {
-        if (Dir.cwd().readFile(io, leases, buf)) |text| {
-            if (lease(text, m)) |l| if (l.expiry > before) return try gpa.dupe(u8, l.ip);
-        } else |_| {}
-        try io.sleep(.fromMilliseconds(50), .awake);
-    }
-    return null;
+/// The address name's lease gives it, if it has one: a machine on vzNAT.
+pub fn addressOf(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
+    const m = mac(name);
+    const text = Dir.cwd().readFileAlloc(io, leases, gpa, .limited(4 << 20)) catch return null;
+    const l = lease(text, &m) orelse return null;
+    return gpa.dupe(u8, l.ip) catch null;
 }
 
 const testing = std.testing;

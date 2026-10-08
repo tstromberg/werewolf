@@ -884,8 +884,16 @@ fn restrict(p: Policy) !void {
         }
     }
     // As root, with CAP_SYS_ADMIN, no_new_privs is not needed, and is not
-    // set: it would follow into every process on the machine.
-    _ = try sys(linux.syscall2(.landlock_restrict_self, @intCast(ruleset), 0), "landlock restrict");
+    // set: it would follow into every process on the machine. Every access
+    // the domain refuses is audited, for every program after this one too
+    // (LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON, ABI 7): without it the kernel
+    // says nothing once fence has become runit, so a service reaching for a
+    // disk, a sysctl or an undeclared port would leave no trace.
+    const log_new_exec: usize = if (abi >= 7) 1 << 1 else 0;
+    _ = try sys(
+        linux.syscall2(.landlock_restrict_self, @intCast(ruleset), log_new_exec),
+        "landlock restrict",
+    );
 }
 
 /// Whether gpiochip, a /dev name, is a PL061, the GPIO controller QEMU's

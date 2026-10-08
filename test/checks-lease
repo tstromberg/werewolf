@@ -12,7 +12,7 @@
 # and its real uid, 0.
 
 ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
-ok  lease            grep -q '10\.0\.2\.15' /run/werewolf/dhcp/lease.json
+ok  lease            grep -q '10\.0\.2\.15' /run/werewolf/network/lease.json
 ok  address          grep -q '10\.0\.2\.15' /proc/net/fib_trie
 ok  gateway          awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
 ok  resolvers        grep -qx 'nameserver 10\.0\.2\.3' /etc/resolv.conf

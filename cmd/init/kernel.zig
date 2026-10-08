@@ -1,5 +1,6 @@
 //! init's first phases: the filesystems, cgroups, the entropy seed, and
-//! the kernel's own protections (lockdown, the modules, the sysctls).
+//! the kernel's own protections (lockdown, the modules, the sysctls, no
+//! memory both writable and executable).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -16,12 +17,16 @@ const writeErrno = init.writeErrno;
 const writeFile = init.writeFile;
 
 /// Every mount is werewolf's own (cmd/mount/mount.zig): nosuid and noexec
-/// unless told otherwise, nodev but on device filesystems, and unable to
+/// unless told otherwise, nodev but on device filesystems, nosymfollow
+/// but on /proc and /sys, whose links the kernel makes, and /dev, where
+/// cryptsetup links /dev/mapper/data and only root writes, and unable to
 /// lift a restriction a mount already has. stage0 mounted the first three
 /// and moved them here, so they are remounted with the same options
-/// either way. Nothing written to memory may run or be setuid: the RAM
-/// filesystems are noexec, and only /tmp, /var/tmp and /dev/shm are
-/// writable by everyone. /proc shows each user only their own processes.
+/// either way. Nothing written to memory may run or be setuid, and no
+/// link on it is followed: the RAM filesystems are noexec and
+/// nosymfollow, so a link planted in /tmp leads nowhere, whoever follows
+/// it, and only /tmp, /var/tmp and /dev/shm are writable by everyone.
+/// /proc shows each user only their own processes.
 pub fn filesystems(m: *Machine) void {
     if (!m.isMounted("/proc")) m.mount(&.{ "-t", "proc", "proc", "/proc" });
     if (!m.isMounted("/sys")) m.mount(&.{ "-t", "sysfs", "sys", "/sys" });
@@ -120,7 +125,7 @@ pub fn kernel(m: *Machine) !void {
         "securityfs",
         "/sys/kernel/security",
     });
-    m.mount(&.{ "-o", "remount,nosuid,nodev,noexec", "/sys/kernel/security" });
+    m.mount(&.{ "-o", "remount,nosuid,nodev,noexec,nosymfollow", "/sys/kernel/security" });
     const lockdown = "/sys/kernel/security/lockdown";
     if (std.mem.indexOf(
         u8,
@@ -180,6 +185,7 @@ pub fn kernel(m: *Machine) !void {
         )) all = false;
     }
     if (!all) say("some sysctls were not applied", .{});
+    try writeXorExecute(contained);
     // A panic reboots in the seconds the command line gave (bite's and
     // boot/mkdisk's say 10), or, given none, in 10: the kernel's own
     // default is to hang, and an oops now panics.
@@ -188,6 +194,26 @@ pub fn kernel(m: *Machine) !void {
             "/proc/sys/kernel/panic",
             "10",
         )) say("kernel.panic not set; a panic will hang", .{});
+}
+
+/// No memory both writable and executable, nor made executable once
+/// written (Memory-Deny-Write-Execute): set on PID 1, so every process the
+/// machine runs holds to it, and one-way. Code an attacker writes into a
+/// program, its heap or a mapping of its own, never runs; only what the
+/// kernel maps from a file, the read-only root's programs and libraries,
+/// does. A form whose runtime compiles code as it runs (a JVM, V8, .NET,
+/// PHP's PCRE, PostgreSQL's LLVM) says so with an allowance, jit. It costs
+/// nothing: nothing else here ever writes code. A protection, so a kernel
+/// that refuses it ends the boot; in a container, it is said and passed.
+fn writeXorExecute(contained: bool) !void {
+    if (exists("/etc/werewolf/allow/jit"))
+        return say("memory may be written and then run: the form allows jit", .{});
+    const PR_SET_MDWE = 65;
+    const PR_MDWE_REFUSE_EXEC_GAIN = 1;
+    const e = linux.errno(linux.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0));
+    if (e == .SUCCESS) return;
+    say("memory-deny-write-execute not set: {t}", .{e});
+    if (!contained) return error.WriteXorExecute;
 }
 
 /// What closes doors root could use against the running kernel or another
@@ -209,7 +235,12 @@ pub fn kernel(m: *Machine) !void {
 /// are randomized as far as the kernel allows (4K pages, 48-bit addresses),
 /// the first 64 KiB cannot be mapped, the filters any user may install are
 /// compiled with their constants blinded, and an oops panics, so a kernel
-/// a failed exploit left wrong reboots rather than runs on; kernel.panic,
+/// a failed exploit left wrong reboots rather than runs on; so does the
+/// first warning once init has set it (warn_limit), as when the kernel
+/// catches its own memory corrupted and carries on: a list's links wrong,
+/// a reference count overflowing, KFENCE finding a use after free. Alpine's
+/// kernel only warns of those (no CONFIG_BUG_ON_DATA_CORRUPTION). A
+/// warning in early boot, before this, counts toward nothing. kernel.panic,
 /// below, makes the panic a reboot. None of it costs a program anything.
 /// See docs/security.md.
 pub const sysctls = [_][2][]const u8{
@@ -221,6 +252,7 @@ pub const sysctls = [_][2][]const u8{
     .{ "vm/mmap_min_addr", "65536" },
     .{ "net/core/bpf_jit_harden", "1" },
     .{ "kernel/panic_on_oops", "1" },
+    .{ "kernel/warn_limit", "1" },
     .{ "kernel/kptr_restrict", "2" },
     .{ "kernel/dmesg_restrict", "1" },
     .{ "kernel/unprivileged_bpf_disabled", "1" },
@@ -234,9 +266,12 @@ pub const sysctls = [_][2][]const u8{
     .{ "fs/protected_regular", "2" },
     .{ "kernel/io_uring_disabled", "2" },
     .{ "kernel/sysrq", "0" },
-    // No program for the kernel to start on every device event: it would
-    // run outside the seal (see seal()). An empty line empties it.
+    // No program for the kernel to start on every device event, or to
+    // load a module it wants: it would run outside the seal (see seal()),
+    // and the loader is closed anyway. An empty line empties each, and
+    // the kernel then starts nothing (request_module answers ENOENT).
     .{ "kernel/hotplug", "\n" },
+    .{ "kernel/modprobe", "\n" },
     .{ "net/ipv4/conf/all/log_martians", "1" },
     .{ "net/ipv4/conf/default/log_martians", "1" },
     .{ "net/ipv4/icmp_echo_ignore_broadcasts", "1" },

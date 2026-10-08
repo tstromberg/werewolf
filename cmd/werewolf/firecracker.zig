@@ -42,16 +42,37 @@ pub fn installed(io: Io, gpa: Allocator) bool {
     return r.term == .exited and r.term.exited == 0;
 }
 
-/// What sets the network up, which needs root: nothing as root, else
-/// sudo, or doas.
-pub fn asRoot(io: Io) error{NoRoot}![]const []const u8 {
+/// Whether the network can be set up now, with no one asked a password:
+/// root, or a sudo or doas that asks none, as create and run need to
+/// choose Firecracker without stopping to ask.
+pub fn rootReady(io: Io, gpa: Allocator) bool {
+    if (isRoot()) return true;
+    return asked(io, gpa, (asRoot(io, gpa) catch return false)[0]);
+}
+
+/// What sets the network up, which needs root: nothing as root; else the
+/// first of sudo and doas that asks no password, or, if both would, the
+/// first there is.
+pub fn asRoot(io: Io, gpa: Allocator) error{NoRoot}![]const []const u8 {
     if (isRoot()) return &.{};
-    inline for (.{ "/usr/bin/sudo", "/usr/bin/doas", "/usr/local/bin/doas" }) |path| {
+    const tools = .{ "/usr/bin/sudo", "/usr/bin/doas", "/usr/local/bin/doas" };
+    var first: ?[]const []const u8 = null;
+    inline for (tools) |path| {
         // Comptime, so what is returned is static, not a temporary's address.
-        const tool = comptime std.fs.path.basename(path);
-        if (Dir.cwd().access(io, path, .{})) |_| return &.{tool} else |_| {}
+        const tool: []const []const u8 = comptime &.{std.fs.path.basename(path)};
+        if (Dir.cwd().access(io, path, .{})) |_| {
+            if (asked(io, gpa, tool[0])) return tool;
+            first = first orelse tool;
+        } else |_| {}
     }
-    return error.NoRoot;
+    return first orelse error.NoRoot;
+}
+
+/// Whether tool runs a command as root without asking a password: -n,
+/// fail rather than ask, which sudo and doas both take.
+fn asked(io: Io, gpa: Allocator, tool: []const u8) bool {
+    const r = std.process.run(gpa, io, .{ .argv = &.{ tool, "-n", "true" } }) catch return false;
+    return r.term == .exited and r.term.exited == 0;
 }
 
 fn isRoot() bool {

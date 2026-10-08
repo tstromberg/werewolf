@@ -97,6 +97,7 @@ rest hold on every form.
 | `kernel.io_uring_disabled=2` | io_uring is a large, frequently exploited surface; glibc does not use it |
 | `user.max_user_namespaces=0` | user namespaces hand any user a root-like view of kernel code; nothing here uses containers |
 | `kernel.panic_on_oops=1` | a kernel left in a bad state by a failed exploit reboots instead of running on; `panic=10` and A/B slots make that safe |
+| `kernel.warn_limit=1` | the same for the first warning after boot: Alpine's kernel only warns when it catches a corrupted list, an overflowing reference count or a KFENCE fault, until our kernel's `CONFIG_BUG_ON_DATA_CORRUPTION`. Done |
 | `kernel.sysrq=0` | no magic SysRq from the console |
 | `fs.suid_dumpable=0` | no core dumps of processes that changed credentials |
 | `fs.protected_symlinks=1`, `fs.protected_hardlinks=1` | the kernel's defaults are 0; distributions set them from systemd |
@@ -288,8 +289,9 @@ file in its folder, `etc/werewolf/allow/<name>`, and gets back only that:
 | `pty` | pseudo-terminals, for ssh logins: init mounts devpts. Without it `/dev/ptmx` opens nothing, for root too, so the TTY layer's pseudo-terminal code (CVE-2014-0196) is out of every process's reach, and nothing after boot can mount it. Done: the forms with logins (`sshd`, `prod-ssh`, `lima`; `qemu-host` through `sshd`); `bastion` forbids terminals (`PermitTTY no`) and has none |
 | `kvm` | KVM, to run virtual machines: on aarch64 the build leaves out `kvm-arm.mode=none`; on x86_64 the form lists `kvm-intel` and `kvm-amd` in its `.modules`, and the build loads them with `nested=0`. Done: `qemu-host` |
 | `nested-kvm` | needs `kvm`: the guests may run virtual machines too, `kvm-arm.mode=nested` or `nested=1`. Done |
+| `jit` | memory written and then run. Without it init sets Memory-Deny-Write-Execute on PID 1 (`PR_SET_MDWE`, `PR_MDWE_REFUSE_EXEC_GAIN`), which every process inherits and none can lift: no mapping is writable and executable at once, or made executable once written. Done: `node`, `jre`, `example-aspnet` (V8, HotSpot, .NET), `php` (PCRE2's JIT, `pcre.jit=1` by default) and `postgresql` (LLVM, `jit = on` by default), and the forms built on them. `qemu-host` has none, so QEMU runs guests under KVM alone: TCG, its emulator, would need it |
 
-`kvm`, `nested-kvm`, `packet`, `netadmin`, `ipv6` and `pty` are built;
+`kvm`, `nested-kvm`, `packet`, `netadmin`, `ipv6`, `pty` and `jit` are built;
 `ebpf` and `io_uring` wait for a form that needs them. No form keeps either network
 capability: DHCP's renewal, started by init before fence, holds them
 alone. The
@@ -462,6 +464,17 @@ kprobes and tracing for `prod-ebpf`; the seal removes them elsewhere.
 | `# CONFIG_BINFMT_MISC` | module | no registering interpreters for new binary formats |
 | `# CONFIG_CRYPTO_USER_API`, `# CONFIG_TLS`, `# CONFIG_WATCH_QUEUE`, `# CONFIG_BRIDGE_NF_EBTABLES`, `# CONFIG_OVERLAY_FS`, no USB sound, video or HID | module, or off | code exploited in the wild that no form uses (docs/cve-mitigation-survey.md); the `crypt` form opens LUKS2 without AF_ALG |
 | `CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y` | on | closes CVE-2025-38352's race |
+| `CONFIG_RANDOM_KMALLOC_CACHES=y` | off | each `kmalloc` size split into 16 caches, picked by call site, so a heap spray rarely lands beside the object it aims at; Ubuntu ships it on |
+| `CONFIG_SLAB_BUCKETS=y` | off | the allocations users steer most (`msg_msg`, `setxattr` and `memdup_user` buffers) in caches of their own, away from the kernel's objects; Ubuntu ships it on |
+| `CONFIG_MSEAL_SYSTEM_MAPPINGS=y`, `# CONFIG_CHECKPOINT_RESTORE` | off; on | the vdso, vvar and sigpage sealed (`mseal`) in every process, so an exploit cannot move or remap them; it needs checkpoint and restore, which nothing here uses, left out |
+
+Two more need the kernel built with clang, not GCC, as Alpine and Ubuntu
+build it: `CONFIG_ARM64_BTI_KERNEL`, branch targets checked in the kernel
+itself (its Kconfig excludes GCC for a code-generation bug), and kCFI
+(`CONFIG_CFI_CLANG`, `CONFIG_CFI` in newer kernels), indirect calls
+checked against their type, Android's main defence for the kernel's
+control flow. Ubuntu's GCC-built 7.0 has neither. Choosing the compiler is the first decision of
+this phase.
 
 Until then, the build checks Alpine's config for those it relies on
 already (tools/kernel-config-check.zig): it fails if Alpine builds AF_ALG,

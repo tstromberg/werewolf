@@ -4,7 +4,8 @@
 //!     posture           check, print, and exit 1 if any check fails
 //!     posture --json    the same, as JSON, with why and how each was checked
 //!     posture --line    the same, as one line for a console or a log:
-//!                       posture: fail=ID,ID pass=N skip=N {JSON}
+//!                       posture: fail=ID,ID pass=N skip=N {JSON}, the
+//!                       JSON holding only the checks that failed
 //!     posture --noop    exit 0 at once: what the run-a-program checks run
 //!     posture --attack  also attack the machine (attacks, below), as
 //!                       werewolf.check=1 does, where the command line cannot
@@ -219,10 +220,11 @@ pub const Check = struct {
     /// kernel, processes, programs, files or network.
     area: []const u8,
     name: []const u8,
-    /// What it protects against, in plain words.
-    why: []const u8,
-    /// How it was checked, exactly.
-    how: []const u8,
+    /// What it protects against, in plain words; null only on the
+    /// console's line (printLine), where it would be noise.
+    why: ?[]const u8,
+    /// How it was checked, exactly; null where why is.
+    how: ?[]const u8,
     result: Result,
     /// What was found, when that adds to the result.
     detail: []const u8 = "",
@@ -674,19 +676,33 @@ fn writeClean(w: *Io.Writer, text: []const u8) !void {
 }
 
 /// One line: the ids that failed, sorted and between commas (none: fail=
-/// and a space), the counts, then the whole report as JSON. A harness can
-/// match the start and parse the rest.
+/// and a space), the counts, then the report as JSON with only the failed
+/// checks, excused or not, and without why and how: the rest is counted,
+/// and the whole report is --json's. A harness can match the start and
+/// parse the rest.
 fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
-    var failed: std.ArrayList([]const u8) = .empty;
-    for (r.checks) |c| if (c.result == .fail) try failed.append(gpa, c.id);
-    std.mem.sort([]const u8, failed.items, {}, lessString);
+    var failed: std.ArrayList(Check) = .empty;
+    for (r.checks) |c| {
+        if (c.result != .fail) continue;
+        var brief = c;
+        brief.why = null;
+        brief.how = null;
+        try failed.append(gpa, brief);
+    }
+    std.mem.sort(Check, failed.items, {}, struct {
+        fn less(_: void, a: Check, b: Check) bool {
+            return lessString({}, a.id, b.id);
+        }
+    }.less);
     try w.writeAll("posture: fail=");
-    for (failed.items, 0..) |id, i| {
+    for (failed.items, 0..) |c, i| {
         if (i > 0) try w.writeByte(',');
-        try w.writeAll(id);
+        try w.writeAll(c.id);
     }
     try w.print(" pass={d} skip={d} ", .{ r.summary.pass, r.summary.skip });
-    try std.json.Stringify.value(r, .{ .emit_null_optional_fields = false }, w);
+    var brief = r;
+    brief.checks = failed.items;
+    try std.json.Stringify.value(brief, .{ .emit_null_optional_fields = false }, w);
     try w.writeByte('\n');
 }
 
@@ -1185,6 +1201,13 @@ test printLine {
     ));
     try testing.expectEqual(1, std.mem.count(u8, line, "\n"));
     try testing.expect(std.mem.endsWith(u8, line, "}\n"));
+    try testing.expect(std.mem.find(
+        u8,
+        line,
+        "\"id\":\"programs-shell\",\"area\":\"programs\"",
+    ) != null);
+    try testing.expect(std.mem.find(u8, line, "kernel-lockdown") == null);
+    try testing.expect(std.mem.find(u8, line, "\"why\"") == null);
 
     const clean: Report = .{
         .time = "t",

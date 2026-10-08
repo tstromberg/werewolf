@@ -141,15 +141,31 @@ expect {
 	eof { give_up "boot: QEMU exited" }
 }
 
-# Before the shell, so no check's output can swallow the line.
-expect {
-	-re {posture: fail=([^ ]*) pass=([0-9]+) skip=([0-9]+) } {
-		set got $expect_out(1,string)
-		set passed $expect_out(2,string)
+# Before the shell, so no check's output can swallow the line. After the
+# handover the console carries the kernel's notices too (cmd/init), and a
+# record can land inside the posture line: "posture: fail= p[ 8.48] audit:
+# ...\nass=82". So what the console says is gathered as it comes, whole
+# kernel records are taken out of it, and the line is looked for in what
+# remains. A panic is a kernel record, so it is looked for before.
+set seen ""
+set deadline [expr {[clock seconds] + $timeout}]
+while 1 {
+	set left [expr {$deadline - [clock seconds]}]
+	if {$left <= 0} { give_up "posture: no posture line in $timeout s" 1 }
+	expect {
+		-timeout $left
+		-re {.+} { append seen $expect_out(0,string) }
+		timeout { give_up "posture: no posture line in $timeout s" 1 }
+		eof { give_up "posture: QEMU exited" }
 	}
-	-re {Kernel panic[^\r\n]*} panicked
-	timeout { give_up "posture: no posture line in $timeout s" 1 }
-	eof { give_up "posture: QEMU exited" }
+	if {[regexp {Kernel panic[^\r\n]*} $seen why]} {
+		expect -timeout 2 eof {} timeout {}
+		give_up "boot: $why"
+	}
+	regsub -all {\[ *[0-9]+\.[0-9]+\] [^\n]*\n} $seen {} clean
+	if {[regexp {posture: fail=([^ ]*) pass=([0-9]+) skip=([0-9]+) } $clean -> got passed]} break
+	# The tail is enough: the line itself, and a record cut short at its end.
+	set seen [string range $seen end-65535 end]
 }
 set known [lsort -unique [regexp -all -inline {[^\s,]+} [expr {[info exists env(POSTURE_KNOWN)] ? $env(POSTURE_KNOWN) : ""}]]]
 set got [lsort -unique [split $got ,]]

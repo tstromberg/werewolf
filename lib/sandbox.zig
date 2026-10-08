@@ -206,7 +206,13 @@ pub fn landlock(rules: []const Rule, ports: []const u16) !void {
         );
     };
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
-    _ = try sys(linux.syscall2(.landlock_restrict_self, ruleset, 0), "landlock restrict");
+    // Refusals audited, after an exec too (LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON,
+    // ABI 7), for a program that runs another inside its domain.
+    const log_new_exec: usize = if (abi >= 7) 1 << 1 else 0;
+    _ = try sys(
+        linux.syscall2(.landlock_restrict_self, ruleset, log_new_exec),
+        "landlock restrict",
+    );
     _ = linux.close(@intCast(ruleset));
 }
 
