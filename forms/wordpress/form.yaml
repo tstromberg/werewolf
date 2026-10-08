@@ -1,0 +1,14 @@
+base: php
+
+# WordPress sends its mail by SMTP submission, to the relay the settings
+# name; nothing else leaves (WP_HTTP_BLOCK_EXTERNAL). A form whose plugins
+# call an API adds `connect php tcp/443 public` and `connect php udp/53
+# tcp/53` here, and the hosts to WP_ACCESSIBLE_HOSTS. The name of the relay
+# is resolved too.
+net:
+  - connect php tcp/587 udp/53 tcp/53
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: php-fpm runs WordPress

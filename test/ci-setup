@@ -18,6 +18,16 @@ esac
 "$(dirname "$0")/../tools/install-deps" -y "$@"
 [ -z "${1:-}" ] || exit 0
 
+# Ubuntu's AppArmor keeps unprivileged programs from making user
+# namespaces, which bubblewrap, melange's sandbox, needs. The machines this
+# runs on are thrown away after, so the restriction is lifted here, never
+# by install-deps on a machine someone keeps.
+r=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+if [ "$(cat $r 2>/dev/null)" = 1 ]; then
+	echo 0 >$r
+	echo "ci-setup: unprivileged user namespaces allowed, for bubblewrap"
+fi
+
 if [ -e /dev/kvm ]; then
 	chmod 0666 /dev/kvm
 	echo "ci-setup: KVM available"

@@ -1,0 +1,8 @@
+# SFTPGo's host key is made once and kept on /data, its users' files are
+# theirs alone, and nothing but SFTP on :22 is served; what the user can
+# and cannot do over SFTP, test/boot checks from the host (sftp, ssh).
+ok  sftpgo-user      p=$(head -n 1 /run/cgroup/svc/sftpgo/cgroup.procs); grep -q '^Uid:[[:space:]]*212[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  sftpgo-host-key  [ "$(stat -c '%u:%a' /data/svc/sftpgo/id_ed25519)" = 212:600 ] && grep -q 'PRIVATE KEY' /data/svc/sftpgo/id_ed25519
+ok  sftpgo-private   [ "$(stat -c '%u:%a' /run/svc/sftpgo/users)" = 212:600 ] && [ "$(stat -c %u /data/svc/sftpgo/sftpgo.db)" = 212 ]
+ok  sftpgo-only-sftp ! netstat -ltn | grep -q ':\(2022\|8080\|8090\|2121\|10000\) '
+ok  sftpgo-uploaded  [ -f /data/svc/sftpgo/users/check/werewolf-check ] && [ "$(stat -c %u /data/svc/sftpgo/users/check/werewolf-check)" = 212 ]

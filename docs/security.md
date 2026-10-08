@@ -34,7 +34,7 @@ not yet, and how to check it on a running machine. Where it is going is in
 | | |
 | --- | --- |
 | No setuid or setgid files | apko's `paths:` clear them from PAM's `unix_chkpwd`, and from util-linux `mount` in stage0; the updater clears any a new package brings |
-| Few listeners | `minimal`, `prod`, `postgresql`: none. `sshd`, `prod-ssh`, `lima`: 22. `nginx`, `php`, `demo`: 80. `node`, `python`, `jre`: 8080. Each form declares its ports in its network policy (`forms/FORM.net`), and `make check` fails on any other |
+| Few listeners | `minimal`, `prod`, `postgresql`: none. `sshd`, `prod-ssh`, `lima`: 22. `nginx`, `php`, `demo`: 80. `node`, `python`, `jre`: 8080. Each form declares its ports in its network policy (`forms/FORM/form.yaml`), and `make check` fails on any other |
 | ssh | keys only (`PasswordAuthentication no`, `KbdInteractiveAuthentication no`, `UsePAM no`); root by key only; no X11 or agent forwarding; `LogLevel VERBOSE`. Host keys are made at each boot and never outlive the machine |
 | Secrets | the config tar's contents go to `/run/config`, tmpfs, 0700. `data.key` is deleted once the volume is open |
 
@@ -64,9 +64,18 @@ Before runit starts, init closes, for the life of the machine:
 | `vm.mmap_min_addr=65536` | mapping the page a kernel null-pointer bug would read | yes |
 | `net.core.bpf_jit_harden=1` | users' socket and seccomp filters planting chosen machine code in the kernel (JIT spraying) | yes |
 | `kernel.panic_on_oops=1`, and `kernel.panic=10` if the command line gave none | a kernel left wrong by a failed exploit running on for another try | yes |
+| The kernel's audit of every refused exec, locked (`lib/audit.zig`) | an intruder's first step, a shell that is not there or a program dropped where nothing runs, going unrecorded: the kernel writes the record itself, to its log and the console, with no daemon to stop; `CAP_AUDIT_CONTROL` leaves the bounding set with the seal | no |
+| The console takes notices once the boot is over (`kernel.printk` 6), and `kernel.printk_ratelimit_burst=100` | the kernel's refusals (audit, lockdown, Yama, Landlock), all notices, staying in a log on the machine; a cloud captures the serial console. The audit records pass printk's rate limit, 10 lines in 5 s by default, which a few refusals together would exceed | yes |
 
 None of these costs a program anything: a database or `../scan` runs as
-fast with them as without.
+fast with them as without. The audit rule is the one near exception: with
+any system call rule loaded, every process enters and leaves each call
+through the kernel's audit hooks, a few nanoseconds beside the seal's 25,
+and a record is written only when an exec fails. No auditd: the
+benchmarks' rules watch sudo, password changes, module loads and mounts,
+none of which can happen here, and the daemon would be a root process
+with a hand-kept rule list and a log on disk that, when full, is meant to
+halt the machine.
 
 Some hardening has no runtime switch, so it is on the kernel command line,
 which the build writes from the form ([docs/design/lockdown.md](design/lockdown.md),

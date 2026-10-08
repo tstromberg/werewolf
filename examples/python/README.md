@@ -9,8 +9,8 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-python.yaml) inherits `python.yaml` and replaces
-[main.py](../../forms/example-python/usr/lib/app/main.py). The parent supplies
+The [form](../../forms/example-python/apko.yaml) inherits `python.yaml` and replaces
+[main.py](../../forms/example-python/rootfs/usr/lib/app/main.py). The parent supplies
 Python, the service and network settings, and inherits its user from `app`.
 For a production application, see the [Flask and gunicorn example](../../docs/forms.md#a-python-web-server).
 

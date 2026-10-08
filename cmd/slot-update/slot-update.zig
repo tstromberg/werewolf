@@ -74,7 +74,7 @@ const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git
 pub const max_read = 256 << 20;
 
 /// _update, the account the children that fetch run as
-/// (forms/prod.yaml).
+/// (forms/prod/apko.yaml).
 pub const update_id: u32 = 69;
 /// The CVE fetcher's root, and where the CVE sources are fetched to.
 const net_root = work_dir ++ "/net";
@@ -450,7 +450,7 @@ pub const Update = struct {
         };
 
         switch (plan.from) {
-            .packages => try u.buildSlot(arch, plan.new_kernel),
+            .packages => try u.buildSlot(plan.new_kernel),
             .release => |r| try u.fetchRelease(r.base, r.name, r.manifest),
         }
         // pending stays as it was, with its first-seen times, until the new
@@ -697,8 +697,15 @@ pub const Update = struct {
             work_dir ++ "/slot/initramfs.zst",
             work_dir ++ "/slot/root.erofs",
         };
-        for (releases.Manifest.slot_files, targets) |file, target| {
-            try u.fetchReleaseFile(base, name, file, m.files.map.get(file).?, target);
+        // A slot on a distro's disk (bite's, under GRUB) needs the stage0
+        // with its filesystem's modules, which werewolf's own disk's leaves out.
+        const stage0 = if (u.cmd.grubenv.len > 0) releases.Manifest.bitten_stage0 else "stage0.zst";
+        for ([_][]const u8{ "vmlinuz", stage0, "root.erofs" }, targets) |file, target| {
+            const want = m.files.map.get(file) orelse {
+                u.detail = try u.gpa.print("the release has no {s}", .{file});
+                return error.BadManifest;
+            };
+            try u.fetchReleaseFile(base, name, file, want, target);
         }
         // The release's own kernel arguments, where its manifest names them:
         // a slot boots with what its image asks for, not this one's.
@@ -1033,31 +1040,27 @@ pub const Update = struct {
         );
     }
 
+    /// Run argv, a tool root runs, by its full path and with no
+    /// environment, in a child (tool) as sandbox.collect hears one: what it
+    /// says on stdout and stderr, together, at most max_tool_output bytes,
+    /// and its exit within tool_seconds, its output closed or not; else it
+    /// is killed. It fails unless it exits 0, the end of what it said in
+    /// detail.
     pub fn run(u: *Update, argv: []const []const u8) !void {
-        _ = try u.output(argv);
-    }
-
-    fn output(u: *Update, argv: []const []const u8) ![]const u8 {
-        const res = std.process.run(u.gpa, u.io, .{
-            .argv = argv,
-            .stdout_limit = .limited(max_tool_output),
-            .stderr_limit = .limited(max_tool_output),
-            .timeout = .{ .deadline = .fromNow(u.io, .{
-                .raw = .fromSeconds(tool_seconds),
-                .clock = .boot,
-            }) },
-        }) catch |err| {
+        var z: std.ArrayList(?[*:0]const u8) = .empty;
+        for (argv) |a| try z.append(u.gpa, try u.gpa.dupeSentinel(u8, a, 0));
+        const e = u.child(
+            tool,
+            .{try z.toOwnedSliceSentinel(u.gpa, null)},
+            max_tool_output,
+            tool_seconds,
+        ) catch |err| {
             u.detail = try u.gpa.print("{s}: {s}", .{ argv[0], @errorName(err) });
             return err;
         };
-        switch (res.term) {
-            .exited => |code| if (code == 0) return res.stdout,
-            else => {},
-        }
-        u.detail = try u.gpa.print(
-            "{s}: {s}",
-            .{ argv[0], std.mem.trim(u8, res.stderr[0..@min(res.stderr.len, 400)], " \n") },
-        );
+        if (e.code == 0) return;
+        const said = std.mem.trim(u8, e.out, " \n");
+        u.detail = try u.gpa.print("{s}: {s}", .{ argv[0], said[said.len -| 400..] });
         return error.CommandFailed;
     }
 
@@ -1170,6 +1173,25 @@ pub const Update = struct {
 // --- the CVE children -------------------------------------------------------
 
 const Said = struct { status: []const u8, rest: []const u8 };
+
+/// A tool root runs (Update.run): argv executed with stdout and stderr on
+/// out, and no other descriptor of root's. It dies with root.
+fn tool(argv: [:null]const ?[*:0]const u8, out: i32, parent: linux.pid_t) noreturn {
+    sandbox.tieTo(parent);
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    execTool(
+        argv,
+        out,
+    ) catch |err| sandbox.say(out, 127, sandbox.whyNot(arena.allocator(), err), "");
+}
+
+fn execTool(argv: [:null]const ?[*:0]const u8, out: i32) !noreturn {
+    try sandbox.closeAllBut(&.{out});
+    for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
+    const envp = [_:null]?[*:0]const u8{};
+    _ = try sandbox.sys(linux.execve(argv[0].?, argv.ptr, &envp), "execve");
+    unreachable;
+}
 
 // --- report -----------------------------------------------------------------
 
@@ -1339,6 +1361,21 @@ fn backwards(
     return null;
 }
 
+test "a tool's output, exit and deadline" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var u: Update = .{ .io = testing.io, .gpa = arena.allocator() };
+    try u.run(&.{ "/bin/sh", "-c", "exit 0" });
+    try testing.expectError(error.CommandFailed, u.run(&.{ "/bin/sh", "-c", "echo said; exit 3" }));
+    try testing.expectEqualStrings("/bin/sh: said", u.detail);
+    try testing.expectError(error.CommandFailed, u.run(&.{"/nonexistent"}));
+    try testing.expectEqualStrings("/nonexistent: execve: NOENT", u.detail);
+    // Its output closed, and then hung: killed at the deadline all the same.
+    const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "exec >&- 2>&-; sleep 30" };
+    try testing.expectError(error.Timeout, u.child(tool, .{&argv}, 1024, 1));
+}
+
 test backwards {
     const up = [_]Change{.{ .name = "curl", .from = "8.17.0-r0", .to = "8.17.0-r1" }};
     try std.testing.expectEqual(
@@ -1403,11 +1440,6 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
         yd.year,              md.month.numeric(),      md.day_index + 1,
         ds.getHoursIntoDay(), ds.getMinutesIntoHour(), ds.getSecondsIntoMinute(),
     });
-}
-
-pub fn appendUnique(gpa: Allocator, list: *std.ArrayList([]const u8), s: []const u8) !void {
-    for (list.items) |x| if (std.mem.eql(u8, x, s)) return;
-    try list.append(gpa, s);
 }
 
 fn lessString(_: void, a: []const u8, b: []const u8) bool {

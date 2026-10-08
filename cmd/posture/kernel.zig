@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const testing = std.testing;
 
+const audit = @import("audit");
 const posture = @import("posture.zig");
 const inChild = @import("attacks.zig").inChild;
 const errnoText = @import("network.zig").errnoText;
@@ -890,7 +891,7 @@ const rare_features = [_][]const u8{
     "p8022",         "p8023",       "can",         "atm",       "bluetooth",
     "firewire_core", "thunderbolt", "usb_storage", "cramfs",    "freevxfs",
     "jffs2",         "hfs",         "hfsplus",     "squashfs",  "udf",
-    "cifs",          "ksmbd",       "gfs2",
+    "cifs",          "ksmbd",       "gfs2",        "cfg80211",  "mac80211",
 };
 
 /// Kernel code that exploits listed in CISA's KEV catalog went through,
@@ -974,6 +975,121 @@ fn unsetArgs(gpa: Allocator, cmdline: []const u8, names: []const []const u8) ![]
         if (!on) try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", name });
     }
     return out.items;
+}
+
+/// Whether what the kernel refuses is on record, and where the record
+/// goes. An exec every kernel refuses, of a directory, made here, must
+/// be in the kernel's log as an audit record (lib/audit.zig).
+pub fn logged(p: *Posture) !void {
+    _ = inChild(execRoot, false);
+    // kauditd writes the record a moment after the call returns.
+    const needles = [_][]const u8{
+        "type=1300",
+        "success=no",
+        try p.gpa.print(" ppid={d} ", .{linux.getpid()}),
+    };
+    var on_record = false;
+    for (0..20) |_| {
+        if (posture.logHas(p.kernelLog(), &needles)) {
+            on_record = true;
+            break;
+        }
+        p.io.sleep(.fromMilliseconds(50), .awake) catch {};
+    }
+    const stopped: ?[]const u8 = if (!p.root) null else if (audit.setEnabled(0)) |_|
+        "audit was turned off"
+    else |err| switch (err) {
+        error.Refused => null,
+        else => @errorName(err),
+    };
+    try p.add(.{
+        .id = "kernel-exec-log",
+        .area = "kernel",
+        .name = "Refused execs logged, for good",
+        .why = "An intruder's first step, running something the machine refuses, leaves a " ++
+            "line in the kernel's log that nothing on the machine can prevent or stop.",
+        .how = if (p.root)
+            "running / as a program, which every kernel refuses, leaves its audit " ++
+                "record (type=1300, success=no) in the kernel log, and asking the kernel " ++
+                "to stop auditing is refused"
+        else
+            "running / as a program, which every kernel refuses, leaves its audit " ++
+                "record (type=1300, success=no) in the kernel log",
+        .result = if (on_record and stopped == null) .pass else .fail,
+        .detail = if (!on_record)
+            "no audit record of a refused exec"
+        else
+            stopped orelse "",
+    });
+    // The console takes notices (level 5) only below console_loglevel 6;
+    // audit records, lockdown's, Yama's and Landlock's refusals are all
+    // notices. And the console must be one someone can read: a serial
+    // port or a hypervisor's console, which a cloud captures, not a
+    // virtual terminal nobody watches.
+    const printk = trim(p.read("/proc/sys/kernel/printk"));
+    const level = std.fmt.parseInt(u8, firstField(printk), 10) catch 0;
+    const console = capturedConsole(p.read("/proc/consoles"));
+    try p.add(.{
+        .id = "kernel-console-log",
+        .area = "kernel",
+        .name = "Refusals reach the console",
+        .why = "What the kernel refused is seen off the machine, on a console a cloud " ++
+            "captures, not only in a log an intruder may read.",
+        .how = "kernel.printk's console level is 6 or more, so notices show, and " ++
+            "/proc/consoles lists an enabled serial or hypervisor console",
+        .result = if (level >= 6 and console != null) .pass else .fail,
+        .detail = if (level < 6)
+            try p.gpa.print("console loglevel is {d}", .{level})
+        else if (console == null)
+            "no serial or hypervisor console"
+        else
+            "",
+    });
+}
+
+/// Run / as a program: the kernel refuses (EACCES), and audits the refusal.
+fn execRoot() bool {
+    const argv = [_:null]?[*:0]const u8{"/"};
+    const envp = [_:null]?[*:0]const u8{};
+    _ = linux.execve("/", &argv, &envp);
+    return false;
+}
+
+fn firstField(s: []const u8) []const u8 {
+    var it = std.mem.tokenizeAny(u8, s, " \t");
+    return it.next() orelse "";
+}
+
+/// The first console in /proc/consoles that is enabled, written to, and not
+/// a virtual terminal (tty0, tty1, …), or null. A line is
+/// "ttyS0  -W- (EC p a)  4:64".
+fn capturedConsole(consoles: []const u8) ?[]const u8 {
+    var lines = std.mem.tokenizeScalar(u8, consoles, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.tokenizeAny(u8, line, " \t");
+        const name = f.next() orelse continue;
+        const ops = f.next() orelse continue;
+        const flags = line[std.mem.findScalar(u8, line, '(') orelse continue ..];
+        if (std.mem.findScalar(u8, ops, 'W') == null) continue;
+        if (std.mem.findScalar(u8, flags, 'E') == null) continue;
+        if (std.mem.startsWith(u8, name, "tty") and name.len > 3 and
+            std.ascii.isDigit(name[3])) continue;
+        return name;
+    }
+    return null;
+}
+
+test capturedConsole {
+    try testing.expectEqualStrings(
+        "ttyS0",
+        capturedConsole(
+            "tty0                 -WU (EC p  )    4:1\nttyS0                -W- (E  p a)    4:64\n",
+        ).?,
+    );
+    try testing.expectEqualStrings("hvc0", capturedConsole("hvc0  -W- (EC p a)  229:0\n").?);
+    try testing.expectEqual(null, capturedConsole("tty0                 -WU (EC p  )    4:1\n"));
+    try testing.expectEqual(null, capturedConsole("ttyS0  -W- (  p a)  4:64\n"));
+    try testing.expectEqual(null, capturedConsole(""));
 }
 
 /// The hard limit on a /proc/PID/limits "Max core file size" line, or null.

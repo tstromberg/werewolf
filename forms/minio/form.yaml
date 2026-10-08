@@ -1,0 +1,14 @@
+base: prod
+
+# MinIO serves S3, and sends nothing: no KMS, no notifications, no
+# replication, no update check.
+net:
+  - listen tcp/9000
+
+# A shell script nothing runs, from the package.
+prune:
+  - usr/bin/docker-entrypoint.sh
+
+# The check speaks S3 with MinIO's own client.
+dev:
+  - mc

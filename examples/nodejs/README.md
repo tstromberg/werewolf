@@ -9,8 +9,8 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-node.yaml) inherits `node.yaml` and replaces
-[server.js](../../forms/example-node/usr/lib/app/server.js). The parent supplies
+The [form](../../forms/example-node/apko.yaml) inherits `node.yaml` and replaces
+[server.js](../../forms/example-node/rootfs/usr/lib/app/server.js). The parent supplies
 Node.js, the service and network settings, and inherits its user from `app`.
 
 A form declares the machine's packages, users, services and network permissions.

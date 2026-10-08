@@ -1,0 +1,12 @@
+# Gitea serves its API with the administrator gitea-init made; the web
+# installer and registration are gone; a private repository is private;
+# the repository test/boot pushed over SSH is on /data; the secrets Gitea
+# made are its own, 0600; and git is the one program beside it.
+ok  gitea-user       p=$(head -n 1 /run/cgroup/svc/gitea/cgroup.procs); grep -q '^Uid:[[:space:]]*219[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  gitea-api        i=0; until wget -q -T 5 -O - http://127.0.0.1:3000/api/v1/version 2>/dev/null | grep -q '"version"'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no API"; exit 1; }; sleep 1; done
+ok  gitea-admin      a="Authorization: Basic $(printf admin:werewolf-check-pass | base64)"; wget -q -T 5 -O - --header "$a" http://127.0.0.1:3000/api/v1/user | grep -q '"is_admin":true' && ! wget -q -T 5 -O /dev/null --header "Authorization: Basic $(printf admin:wrong-password-here | base64)" http://127.0.0.1:3000/api/v1/user 2>/dev/null
+ok  gitea-no-install wget -q -T 5 -S -O /dev/null http://127.0.0.1:3000/install 2>&1 | grep -q 'HTTP/1.1 404' && wget -q -T 5 -O - http://127.0.0.1:3000/user/sign_up | grep -qi 'registration is disabled' && wget -q -T 5 -O /dev/null --post-data 'user_name=stranger&email=stranger@example.test&password=werewolf-check-pass&retype=werewolf-check-pass' http://127.0.0.1:3000/user/sign_up 2>/dev/null; wget -q -T 5 -S -O /dev/null --header "Authorization: Basic $(printf admin:werewolf-check-pass | base64)" http://127.0.0.1:3000/api/v1/users/stranger 2>&1 | grep -q 'HTTP/1.1 404'
+ok  gitea-private    wget -q -T 5 -S -O /dev/null http://127.0.0.1:3000/api/v1/repos/admin/check 2>&1 | grep -q 'HTTP/1.1 404' && wget -q -T 5 -O - --header "Authorization: Basic $(printf admin:werewolf-check-pass | base64)" http://127.0.0.1:3000/api/v1/repos/admin/check | grep -q '"private":true'
+ok  gitea-pushed     [ -d /data/svc/gitea/repos/admin/check.git ] && wget -q -T 5 -O - --header "Authorization: Basic $(printf admin:werewolf-check-pass | base64)" http://127.0.0.1:3000/api/v1/repos/admin/check/branches | grep -q '"name":"main"'
+ok  gitea-secrets    for f in secret_key internal_token; do [ "$(stat -c '%u:%a' /data/svc/gitea/secrets/$f)" = 219:600 ] || { echo "$f"; exit 1; }; done; [ "$(stat -c '%u:%a' /run/svc/gitea/admin-password)" = 219:600 ]
+ok  gitea-host-key   grep -q '^ssh-ed25519 ' /data/svc/gitea/ssh/gitea.ed25519.pub && [ "$(stat -c '%u:%a' /data/svc/gitea/ssh/gitea.ed25519)" = 219:600 ]

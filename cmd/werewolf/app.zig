@@ -18,12 +18,12 @@ const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Where the chain's last form keeps its application, or null.
-pub fn place(io: Io, gpa: Allocator, forms: Dir, names: []const []const u8) !?[]const u8 {
+pub fn place(io: Io, gpa: Allocator, chain: []const @import("form").Form) !?[]const u8 {
     var found: ?[]const u8 = null;
-    for (names) |name| {
-        const text = forms.readFileAlloc(
+    for (chain) |form| {
+        const text = Dir.cwd().readFileAlloc(
             io,
-            try gpa.print("{s}/etc/werewolf/app", .{name}),
+            try gpa.print("{s}/rootfs/etc/werewolf/app", .{form.dir}),
             gpa,
             .limited(4096),
         ) catch

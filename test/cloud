@@ -1,0 +1,241 @@
+#!/bin/sh
+# cloud: a werewolf form on a real cloud, made as a user makes one, with
+# `werewolf create --on CLOUD` (docs/design/cli.md): its release disk made
+# that cloud's image, booted under UEFI, its config in the instance's user
+# data. Used by `make check-gcp`, `make check-aws` and `make check-azure`;
+# see docs/testing.md.
+#
+#   cloud CLOUD FORM ARCH     CLOUD is gcp, aws or azure
+#
+# It judges the machine by the cloud's record of its serial port: the root
+# verified through dm-verity, the config taken from the cloud's metadata
+# server, the hostname the config gave, and posture failing exactly what
+# POSTURE_KNOWN says the form fails. If sshd listens, root must log in,
+# over the Internet, from this host's address alone, with the key the
+# config carried. Then a second create of the same name, with a new
+# hostname, must restart the machine on its new config, and delete must
+# leave nothing of the machine behind. Everything the run made is deleted
+# however it ends, the image create made included, unless CLOUD_KEEP=1.
+#
+# Each cloud's place is its CLI's own: gcloud's project (or GCP_PROJECT)
+# and GCP_ZONE (us-central1-a, which has Arm machines); aws's region and
+# credentials; az's default resource group (or AZURE_DEFAULTS_GROUP), whose
+# location must offer the ARCH's size (az vm list-skus).
+set -eu
+
+say() { echo "$cloud: $*"; }
+die() {
+	say "$*" >&2
+	exit 1
+}
+cloud=${1:-cloud}
+[ $# -eq 3 ] || die "usage: cloud gcp|aws|azure FORM ARCH"
+form=$2 arch=$3
+werewolf=build/host/werewolf
+[ -x "$werewolf" ] || die "no $werewolf; make werewolf"
+
+case $cloud in
+gcp)
+	command -v gcloud >/dev/null || die "no gcloud; install the Google Cloud SDK and gcloud auth login"
+	project=${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
+	[ -n "$project" ] || die "no project: gcloud config set project PROJECT, or GCP_PROJECT"
+	zone=${GCP_ZONE:-us-central1-a}
+	# werewolf takes gcloud's project and zone; these set them for this run.
+	export CLOUDSDK_CORE_PROJECT="$project" CLOUDSDK_COMPUTE_ZONE="$zone"
+	g() { gcloud --quiet --project "$project" "$@"; }
+	g projects describe "$project" --format 'value(projectId)' >/dev/null 2>&1 ||
+		die "$(gcloud config get-value account 2>/dev/null) cannot reach the project $project; set GCP_PROJECT"
+	where=$zone
+	;;
+aws)
+	command -v aws >/dev/null || die "no aws; brew install awscli, then aws login or aws configure"
+	where=$(aws ec2 describe-availability-zones --query 'AvailabilityZones[0].RegionName' --output text 2>&1) ||
+		die "aws: $where"
+	;;
+azure)
+	command -v az >/dev/null || die "no az; brew install azure-cli, then az login"
+	group=${AZURE_DEFAULTS_GROUP:-$(az config get defaults.group --query value -o tsv 2>/dev/null)}
+	[ -n "$group" ] || die "no resource group: az configure --defaults group=RG, or AZURE_DEFAULTS_GROUP"
+	where=$(az group show -n "$group" --query location -o tsv 2>&1) || die "az: $where"
+	export AZURE_DEFAULTS_GROUP="$group"
+	;;
+*) die "usage: cloud gcp|aws|azure FORM ARCH" ;;
+esac
+
+# The images of FORM this cloud holds, one per line: create's, which this
+# run deletes if it made one.
+images() {
+	case $cloud in
+	gcp) g compute images list --filter "labels.werewolf-form=$form" --format 'value(name)' ;;
+	aws) aws ec2 describe-images --owners self --filters "Name=tag:werewolf-form,Values=$form" \
+		--query 'Images[].[ImageId,BlockDeviceMappings[0].Ebs.SnapshotId]' --output text ;;
+	azure) az disk list -g "$group" --query "[?starts_with(name, 'werewolf-$form-')].name" -o tsv ;;
+	esac | LC_ALL=C sort
+}
+image_delete() {
+	case $cloud in
+	gcp) g compute images delete "$1" ;;
+	aws) aws ec2 deregister-image --image-id "$1" && aws ec2 delete-snapshot --snapshot-id "$2" ;;
+	azure) az disk delete -g "$group" -n "$1" --yes -o none ;;
+	esac
+}
+# What of the machine is left after delete, one per line.
+leftovers() {
+	case $cloud in
+	gcp) g compute instances list --filter "name=$name" --format 'value(name)' ;;
+	aws)
+		aws ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
+			Name=instance-state-name,Values=pending,running,stopping,stopped \
+			--query 'Reservations[].Instances[].InstanceId' --output text
+		aws ec2 describe-security-groups --filters "Name=group-name,Values=werewolf-$name" \
+			--query 'SecurityGroups[].GroupId' --output text
+		;;
+	azure) az resource list -g "$group" --query "[?contains(name, '$name')].name" -o tsv ;;
+	esac | sed '/^$/d'
+}
+# ssh to the machine, from this host's address alone.
+open_ssh() {
+	me=$(curl -fsS -m 10 https://checkip.amazonaws.com 2>/dev/null | tr -d '\n')
+	[ -n "$me" ] || return 1
+	case $cloud in
+	gcp) g compute firewall-rules create "$name-ssh" --allow tcp:22 --target-tags "$name" \
+		--source-ranges "$me/32" --description "test/cloud's ssh check, deleted when it ends" ;;
+	aws) aws ec2 authorize-security-group-ingress --group-name "werewolf-$name" \
+		--protocol tcp --port 22 --cidr "$me/32" ;;
+	azure) az network nsg rule create -g "$group" --nsg-name "${name}NSG" -n ssh --priority 100 \
+		--access Allow --protocol Tcp --destination-port-ranges 22 --source-address-prefixes "$me/32" -o none ;;
+	esac >/dev/null
+}
+
+name=werewolf-check-$(date -u +%Y%m%d%H%M%S)
+work=$(mktemp -d)
+images >"$work/images-before"
+
+cleanup() {
+	rc=$?
+	trap - EXIT INT TERM
+	if [ "${CLOUD_KEEP:-}" = 1 ]; then
+		say "kept $name in $where; delete it with: $werewolf delete $name --on $cloud"
+	else
+		"$werewolf" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
+		[ "$cloud" != gcp ] || g compute firewall-rules delete "$name-ssh" >/dev/null 2>&1 || true
+		images | comm -13 "$work/images-before" - | while read -r image snapshot; do
+			image_delete "$image" "$snapshot" >/dev/null 2>&1 || say "could not delete image $image"
+		done
+	fi
+	rm -rf "$work"
+	exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+failed=0
+ok() { say "ok     $1"; }
+fail() {
+	say "FAIL   $1"
+	failed=1
+}
+log=$work/serial.log
+serial() { "$werewolf" console "$name" --on "$cloud" 2>/dev/null | tr -d '\r' >"$log" || true; }
+seen() { grep -a -q -E "$1" "$log"; }
+# Until posture speaks for host, which is after every service has started;
+# a panic ends the wait early.
+await_posture() {
+	i=0
+	while serial; ! seen "posture: .*\"host\":\"$1\""; do
+		seen 'Kernel panic' && break
+		i=$((i + 1))
+		[ $i -le 60 ] || break
+		sleep 5
+	done
+}
+
+# The config, as docs/cloud.md has it, with a key made for this run alone.
+mkdir "$work/config"
+echo "$name" >"$work/config/hostname"
+ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
+cp "$work/key.pub" "$work/config/authorized_keys"
+say "creating $name, $form on $arch, in $where"
+made=$("$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config") ||
+	die "werewolf create failed; its output is above"
+addr=$(echo "$made" | cut -f2)
+
+say "waiting for the posture line on the serial port"
+await_posture "$name"
+keep=build/$arch/$form/check/$cloud-serial.log
+mkdir -p "$(dirname "$keep")"
+cp "$log" "$keep"
+
+seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: stage0 did not verify slot a's root"
+seen "cloud-metadata: \\{.*\"event\":\"config\",\"provider\":\"$cloud\"" && ok metadata-config ||
+	fail "metadata-config: no config taken from the cloud's metadata server"
+seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
+
+# posture: what fails must be exactly what POSTURE_KNOWN says; ?ID may
+# fail or not (forms/README.md).
+line=$(grep -a -o -E 'posture: fail=[^ ]* pass=[0-9]+' "$log" | tail -n 1 || true)
+if [ -z "$line" ]; then
+	fail "posture: no posture line"
+else
+	got=$(echo "$line" | sed 's/^posture: fail=\([^ ]*\) .*/\1/' | tr ',' '\n' | sed '/^$/d' | LC_ALL=C sort -u)
+	sure=$(echo "${POSTURE_KNOWN:-}" | tr ' ' '\n' | sed '/^$/d;/^?/d' | LC_ALL=C sort -u)
+	maybe=$(echo "${POSTURE_KNOWN:-}" | tr ' ' '\n' | sed -n 's/^?//p' | LC_ALL=C sort -u)
+	new=$(echo "$got" | while read -r id; do
+		[ -z "$id" ] || echo "$sure $maybe" | tr ' ' '\n' | grep -qx "$id" || echo "$id"
+	done)
+	closed=$(echo "$sure" | while read -r id; do
+		[ -z "$id" ] || echo "$got" | grep -qx "$id" || echo "$id"
+	done)
+	if [ -z "$new" ] && [ -z "$closed" ]; then
+		ok posture
+	else
+		fail "posture: failing, not known: $(echo "$new" | tr '\n' ' ')known, now passing: $(echo "$closed" | tr '\n' ' ')"
+	fi
+fi
+
+# Over the Internet, as an operator would, from here alone, only while
+# this check runs, to a machine that takes keys alone.
+if seen 'Server listening on 0.0.0.0 port 22'; then
+	if open_ssh; then
+		i=0
+		until [ "$(ssh -i "$work/key" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+			-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR -o IdentitiesOnly=yes \
+			"root@$addr" id -u 2>/dev/null)" = 0 ]; do
+			i=$((i + 1))
+			[ $i -le 12 ] || break
+			sleep 10
+		done
+		[ $i -le 12 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
+	else
+		fail "ssh-login: could not open port 22 to this host's address"
+	fi
+fi
+
+# A new config: the same name, another hostname, as an operator changes
+# one; create restarts the machine on it.
+echo "$name-b" >"$work/config/hostname"
+say "replacing its config"
+if "$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then
+	await_posture "$name-b"
+	cat "$log" >>"$keep"
+	seen "posture: .*\"host\":\"$name-b\"" && ok reconfigure ||
+		fail "reconfigure: posture does not name the new host $name-b"
+else
+	fail "reconfigure: werewolf create of the same name failed; its output is above"
+fi
+
+# delete, as a user runs it, must leave nothing of the machine.
+if [ "${CLOUD_KEEP:-}" != 1 ]; then
+	say "deleting $name"
+	"$werewolf" delete "$name" --on "$cloud" >/dev/null || fail "delete: werewolf delete failed"
+	[ "$cloud" != gcp ] || g compute firewall-rules delete "$name-ssh" >/dev/null 2>&1 || true
+	left=$(leftovers)
+	[ -z "$left" ] && ok delete || fail "delete: left $(echo "$left" | tr '\n' ' ')"
+fi
+
+if [ $failed = 0 ]; then
+	say "pass   all checks; the serial port is in $keep"
+else
+	say "FAIL   see $keep"
+fi
+exit $failed

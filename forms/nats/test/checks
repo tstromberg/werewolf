@@ -1,0 +1,13 @@
+# NATS takes a message from a user over TLS and delivers it to that
+# user's subscriber, keeps a stream on /data, and refuses anonymous
+# clients, a wrong password, plain connections and subjects a user is not
+# allowed; monitoring answers on loopback alone.
+ok  nats-user        p=$(head -n 1 /run/cgroup/svc/nats/cgroup.procs); grep -q '^Uid:[[:space:]]*216[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  nats-round-trip  export HOME=/tmp; c='--server tls://localhost:4222 --tlsca /run/config/nats/tls.crt --user check --password werewolf-check'; i=0; until nats $c pub check.ping ready >/dev/null 2>&1; do i=$((i + 1)); [ $i -le 60 ] || { echo "no server"; exit 1; }; sleep 1; done; nats $c sub check.x --count 1 >/tmp/nats.out 2>&1 & sleep 1; nats $c pub check.x hello >/dev/null; wait; grep -q hello /tmp/nats.out
+ok  nats-no-anonymous export HOME=/tmp; nats --server tls://localhost:4222 --tlsca /run/config/nats/tls.crt pub check.x x 2>&1 | grep -qi 'authorization'
+ok  nats-wrong-password export HOME=/tmp; nats --server tls://localhost:4222 --tlsca /run/config/nats/tls.crt --user check --password wrong pub check.x x 2>&1 | grep -qi 'authorization'
+ok  nats-tls-only    export HOME=/tmp; ! nats --server nats://localhost:4222 --user check --password werewolf-check pub check.x x >/dev/null 2>&1
+ok  nats-permissions export HOME=/tmp; c='--server tls://localhost:4222 --tlsca /run/config/nats/tls.crt --user other --password werewolf-check'; nats $c sub check.x --count 1 2>&1 | grep -qi 'permissions violation' || nats $c pub check.x x 2>&1 | grep -qi 'permissions violation'
+ok  nats-jetstream   export HOME=/tmp; c='--server tls://localhost:4222 --tlsca /run/config/nats/tls.crt --user check --password werewolf-check'; nats $c stream add check --subjects 'check.s.>' --storage file --defaults >/dev/null && nats $c pub check.s.a kept >/dev/null && nats $c stream info check 2>/dev/null | grep -q 'Messages: 1' && ls /data/svc/nats/jetstream >/dev/null
+ok  nats-monitor-local wget -q -T 5 -O - http://127.0.0.1:8222/varz | grep -q '"server_name": "werewolf"' && ! wget -q -T 5 -O /dev/null http://10.0.2.15:8222/varz 2>/dev/null
+ok  nats-private     [ "$(stat -c '%u:%a' /run/svc/nats/tls-key)" = 216:600 ] && [ "$(stat -c '%u:%a' /run/svc/nats/users)" = 216:600 ]

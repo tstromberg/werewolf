@@ -1,6 +1,6 @@
 #!/bin/sh
 # origins OUT: the source packages, Wolfi's "origins", of everything werewolf
-# installs: every form in forms/, stage0 and the boot disk, as their locks
+# installs: every form in forms/ and the boot disk, as their locks
 # resolve them now, for both architectures. The CVE tiers feed
 # (tools/cve-tiers.zig) covers these and the kernel, and nothing else: a
 # CVE in a package werewolf never installs tells no machine anything. A
@@ -9,21 +9,26 @@
 #
 #   release/origins OUT
 #
-# Run from the tree's top, with apko and curl. Writes OUT, one origin a
+# Run from the tree's top, with apko, curl and build/host/form. Writes OUT, one origin a
 # line, sorted, or nothing and fails.
 set -eu
 
 [ $# -eq 1 ] || { echo "usage: release/origins OUT" >&2; exit 2; }
 out=$1
-top=$(pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Every package name each config installs, as apko resolves it now. apko
-# resolves include: against the config's own directory, as make does.
-for config in forms/*.yaml cmd/stage0/stage0.yaml boot/boot.yaml; do
+# Every package name each config installs, as apko resolves it now: each
+# form's chain merged into one config as make merges it (FORM_TOOL,
+# build/host/form, which make builds), and the boot disk's.
+form_tool=${FORM_TOOL:-build/host/form}
+for dir in forms/*/; do
+	name=$(basename "$dir")
+	"$form_tool" apko "$name" >"$work/$name.yaml" || { echo "origins: cannot read form $name" >&2; exit 1; }
+done
+for config in "$work"/*.yaml boot/boot.yaml; do
 	name=$(basename "$config" .yaml)
-	(cd "$(dirname "$config")" && apko lock --arch aarch64,x86_64 --include-paths "$top/forms" \
+	(cd "$(dirname "$config")" && apko lock --arch aarch64,x86_64 \
 		--output "$work/$name.lock.json" "$(basename "$config")" >/dev/null 2>"$work/$name.err") ||
 		{ cat "$work/$name.err" >&2; echo "origins: cannot lock $config" >&2; exit 1; }
 done

@@ -7,11 +7,11 @@ page in docs/; `bastion` and `tailscale` were built before. Of order 0:
 ([settings.md](settings.md)), with `config ... optional` for a file a
 service runs without and a `json` key with dots reaching a nested key;
 `answering` as "a socket listens", with `http-answering` where the port
-speaks HTTP and each daemon's own check in test/checks-FORM; and a socket
+speaks HTTP and each daemon's own check in forms/FORM/test/checks; and a socket
 bound to loopback alone counted as the machine's own by posture and the
 listeners check (OpenBao's cluster port). `listen udp` waits with the
 forms that need it. What differs from the plan below is noted in each
-form's section.
+form's section. What comes after these is [forms-catalog.md](forms-catalog.md).
 
 Forms for the services people most want on a machine that is hard to take
 over: wordpress and wordpress-mariadb, caddy, haproxy, bastion, wireguard,
@@ -129,7 +129,7 @@ For every form:
 ### caddy
 
 A web server that gets its own certificates. Built as planned
-([caddy.md](../caddy.md)), with one site name as a setting (`domain`,
+([caddy.md](../../forms/caddy/README.md)), with one site name as a setting (`domain`,
 which the Caddyfile reads as `{$DOMAIN::80}`); more names, or upstreams,
 are a form of your own with its Caddyfile in the image. Caddy logs JSON
 to the console whatever stderr is. The RAM `/data` console line is not
@@ -279,7 +279,7 @@ it), and nothing is forwarded by the kernel.
 
 Secrets, on a machine where root cannot read another process's memory.
 Integrated storage (raft) in `/data/svc/openbao`. Built as planned
-([openbao.md](../openbao.md)); "the auth method the config names" is
+([openbao.md](../../forms/openbao/README.md)); "the auth method the config names" is
 `userpass`, with an `admin` user whose first password the `initialize`
 stanza reads from the config's file through its `file` source, so no
 secret is in the image or in settings.json; a bcrypt `password_hash`
@@ -318,7 +318,7 @@ does not declare and fence lets no one reach.
 ### step-ca
 
 An internal CA. Named for what runs, as `postgresql` is: "ca" says too
-little. Built ([step-ca.md](../step-ca.md)) with ACME alone: a JWK
+little. Built ([step-ca.md](../../forms/step-ca/README.md)) with ACME alone: a JWK
 provisioner is a key, an object a setting cannot hold, so a form of your
 own lays its `ca.json` over the image's to add one. The ACME names reach
 `authority.policy.x509.allow.dns` through a dotted `json` key.
@@ -342,7 +342,7 @@ own lays its `ca.json` over the image's to add one. The ACME names reach
 A cache or queue for the application on the same machine, on a UNIX
 socket in `/run/svc/valkey`, as `postgresql` answers on one. The socket is
 shared with the application's group, which the form on it names. Built
-([valkey.md](../valkey.md)) with `valkey-9.1-cli` beside it, the
+([valkey.md](../../forms/valkey/README.md)) with `valkey-9.1-cli` beside it, the
 operator's client and the check's, and without the bash its package
 drags in (above).
 
@@ -429,7 +429,7 @@ planned here.
 
 The worked example forms.md promised, on `php`. Wolfi installs WordPress
 in `/usr/src/wordpress`, which becomes nginx's root; the form brings
-`wp-config.php`. Built as planned ([wordpress.md](../wordpress.md)); the
+`wp-config.php`. Built as planned ([wordpress.md](../../forms/wordpress/README.md)); the
 installer is PHP, `usr/share/werewolf-wordpress/install.php`, run as a
 `before` step, and the admin's password is a bcrypt hash in the config.
 Wolfi's package resolves `php` to `php-8.4` once the form names it, and
@@ -513,7 +513,8 @@ It waits with `mariadb` on Wolfi's split, and on `mariadb-init`.
 Each form lands with its check. `make check` boots every form in `forms/`
 already, so a new form is booted and judged by posture as soon as it
 exists. Its own protocol check, and its attack, go in test/checks; its
-expected posture failures, where there are any, in test/posture-known.
+expected posture failures, where there are any, in its form.yaml's
+`weaknesses`, each with its excuse.
 `make seal-learn` finds each service's promises before its `pledge` line
 is written.
 

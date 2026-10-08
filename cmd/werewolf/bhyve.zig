@@ -84,12 +84,15 @@ pub fn forwards(gpa: Allocator, name: []const u8, ports: []const u16) ![]const F
 
 /// bhyve's arguments for the machine: two CPUs and 2 GiB, as Lima's
 /// machines have; the disk and the config tar on virtio, the tar read-only;
-/// slirp with the forwards; a random number device; the serial console on
-/// bhyve's standard output, which the supervisor's log keeps; and the UEFI
-/// firmware, which boots the disk. Linux wants -w, since it reads MSRs
-/// bhyve does not have; -H yields the host's CPU when the guest idles; -u
-/// keeps the clock in UTC. No -A: FreeBSD 15 always makes ACPI tables and
-/// dropped the flag.
+/// slirp with the forwards, open, so the machine reaches out, as updates
+/// need, and so that slirp's helper, which bhyve runs apart since 15.1,
+/// skips capability mode: in it, as root, its getpwnam(nobody) fails and
+/// it dies, and bhyve with it at the first packet, of SIGPIPE; a random
+/// number device; the serial console on bhyve's standard output, which the
+/// supervisor's log keeps; and the UEFI firmware, which boots the disk.
+/// Linux wants -w, since it reads MSRs bhyve does not have; -H yields the
+/// host's CPU when the guest idles; -u keeps the clock in UTC. No -A:
+/// FreeBSD 15 always makes ACPI tables and dropped the flag.
 pub fn argv(
     gpa: Allocator,
     name: []const u8,
@@ -98,7 +101,7 @@ pub fn argv(
     fwds: []const Forward,
 ) ![]const []const u8 {
     var net: std.ArrayList(u8) = .empty;
-    try net.appendSlice(gpa, "virtio-net,slirp");
+    try net.appendSlice(gpa, "virtio-net,slirp,open");
     for (fwds, 0..) |f, i| try net.print(
         gpa,
         "{s}tcp:127.0.0.1:{d}-:{d}",
@@ -214,12 +217,12 @@ test argv {
     try testing.expectEqualStrings("bhyve", a[0]);
     try testing.expectEqualStrings("edge", a[a.len - 1]);
     try testing.expectEqualStrings(
-        "2,virtio-net,slirp,hostfwd=tcp:127.0.0.1:23400-:22;tcp:127.0.0.1:23401-:443",
+        "2,virtio-net,slirp,open,hostfwd=tcp:127.0.0.1:23400-:22;tcp:127.0.0.1:23401-:443",
         a[13],
     );
     try testing.expectEqualStrings("4,virtio-blk,/m/config.tar,ro", a[17]);
     const none = try argv(gpa, "m", "/d", "/c", &.{});
-    try testing.expectEqualStrings("2,virtio-net,slirp", none[13]);
+    try testing.expectEqualStrings("2,virtio-net,slirp,open", none[13]);
     const d = try destroy(gpa, "edge");
     try testing.expectEqualStrings("--vm=edge", d[1]);
 }

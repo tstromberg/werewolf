@@ -3,7 +3,7 @@
 //!
 //! initdb starts the server it is setting up through popen and system,
 //! which glibc runs as `/bin/sh -c COMMAND`; werewolf has no /bin/sh.
-//! pg-init (cmd/pg-init/pg-init.zig) loads this library into initdb with
+//! pg-init (forms/postgresql/cmd/pg-init/pg-init.zig) loads this library into initdb with
 //! LD_PRELOAD. It takes the commands initdb builds, of one shape only:
 //!
 //!     "/usr/libexec/postgresql17/postgres" --boot -F -c log_checkpoints=false

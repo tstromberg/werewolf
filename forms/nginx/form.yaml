@@ -1,0 +1,9 @@
+base: prod
+
+# nginx serves the site.
+net:
+  - listen tcp/80
+
+# make check's, for this form alone (forms/README.md)
+check:
+  native: true

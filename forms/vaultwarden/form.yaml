@@ -1,0 +1,6 @@
+base: prod
+
+# Vaultwarden serves the apps and the web vault (behind caddy), and sends
+# nothing.
+net:
+  - listen tcp/8080

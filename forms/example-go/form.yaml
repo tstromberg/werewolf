@@ -1,0 +1,4 @@
+base: app
+
+net:
+  - listen tcp/8080

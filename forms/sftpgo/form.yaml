@@ -1,0 +1,5 @@
+base: prod
+
+# SFTPGo serves SFTP, and sends nothing.
+net:
+  - listen tcp/22

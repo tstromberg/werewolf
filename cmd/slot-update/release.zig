@@ -118,6 +118,11 @@ pub const Manifest = struct {
 
     /// What a slot needs from a release.
     pub const slot_files = [_][]const u8{ "vmlinuz", "stage0.zst", "root.erofs" };
+    /// stage0 for a slot on a distro's disk, after bite, which a bitten
+    /// machine fetches in place of stage0.zst: the same, with the modules
+    /// only a distro's filesystem needs (Makefile, BITTEN_TAGS), which
+    /// werewolf's own disk and a direct boot leave out.
+    pub const bitten_stage0 = "stage0-bitten.zst";
 };
 
 /// The manifest in data, which must be signed by key with sig, and be one
@@ -147,13 +152,16 @@ pub fn open(
     const signed = serialTime(m.serial) catch return error.BadManifest;
     if (signed > now + 24 * 3600) return error.BadManifest;
     for (m.advisories) |a| if (!validAdvisory(a)) return error.BadManifest;
-    for (Manifest.slot_files) |name| {
-        const f = m.files.map.get(name) orelse return error.BadManifest;
-        if (f.sha256.len != 64 or f.size == 0 or f.size > 256 << 20) return error.BadManifest;
-        for (f.sha256) |c| if (!std.ascii.isHex(c) or
-            std.ascii.isUpper(c)) return error.BadManifest;
-    }
+    for (Manifest.slot_files) |name|
+        try checkFile(m.files.map.get(name) orelse return error.BadManifest);
+    if (m.files.map.get(Manifest.bitten_stage0)) |f| try checkFile(f);
     return m;
+}
+
+/// A slot file's entry: a lower-case sha256, and a size of at most 256 MiB.
+fn checkFile(f: Manifest.File) !void {
+    if (f.sha256.len != 64 or f.size == 0 or f.size > 256 << 20) return error.BadManifest;
+    for (f.sha256) |c| if (!std.ascii.isHex(c) or std.ascii.isUpper(c)) return error.BadManifest;
 }
 
 /// An advisory as release/manifest checks one: WW-YEAR-NUMBER, a date, a

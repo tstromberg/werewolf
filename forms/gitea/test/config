@@ -1,0 +1,9 @@
+#!/bin/sh
+# forms/gitea/test/config DIR: the gitea form's config for make check, in DIR: the
+# site's address, its administrator and the password gitea-init gives
+# Gitea for it, which test/boot and forms/gitea/test/checks use.
+set -eu
+mkdir -p "$1/gitea"
+umask 077
+printf '%s' werewolf-check-pass >"$1/gitea/admin_password"
+echo '{"url":"http://127.0.0.1:3000/","domain":"127.0.0.1","admin":"admin","admin-email":"admin@example.test"}' >"$1/gitea/settings.json"

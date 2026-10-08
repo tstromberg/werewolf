@@ -533,7 +533,7 @@ staged, its tier, and its `due` and `why`.
     included;
   - `make check-updater` grows a case that stages without rebooting, then
     reboots when due, against a feed CI's test key signs.
-- **`cmd/status-page/status-page.zig`:** `stage` for `update`, and what is
+- **`forms/demo/cmd/status-page/status-page.zig`:** `stage` for `update`, and what is
   staged and when.
 - **Docs:** `docs/updater.md`, with a section for auditors that maps their
   usual questions to events; and the settings in `docs/cloud.md`'s config

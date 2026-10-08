@@ -1,0 +1,21 @@
+# sftpgo: prod, with SFTPGo serving SFTP on :22 to the users the config
+# names, each by key, each held to a directory of their own under
+# /data/svc/sftpgo/users, and nothing else: no shell, no web admin, no
+# FTP or WebDAV, no passwords. The host key is made on the first boot and
+# kept in /data; its fingerprint is on the console at every boot. leash
+# starts it (etc/sv/sftpgo/service) as the sftpgo user. See
+# forms/sftpgo/README.md.
+contents:
+  packages:
+    - sftpgo
+
+accounts:
+  groups:
+    - groupname: sftpgo
+      gid: 212
+  users:
+    - username: sftpgo
+      uid: 212
+      gid: 212
+      homedir: /var/empty
+      shell: /sbin/nologin

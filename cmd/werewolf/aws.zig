@@ -1,20 +1,18 @@
 //! AWS: a werewolf machine on EC2, from the same two files every target
 //! takes. The boot disk becomes an AMI, named as GCP's image is
-//! (image.zig): converted to a dynamic VHD, which holds only the blocks
-//! written (tens of MiB of an 8 GiB disk), put in S3, imported as an EBS
-//! snapshot by VM Import, and registered for UEFI, the ENA and IMDSv2
-//! alone. The config tar, in base64, is the instance's user data, which
-//! cloud-metadata fetches through IMDSv2 (docs/cloud.md). The instance has
-//! no instance profile, and a security group of its own, werewolf-NAME,
-//! which lets nothing in until its owner says what may.
+//! (image.zig): written straight into an EBS snapshot through EBS's direct
+//! API, only the 512 KiB blocks that hold data (a hundred or so of an
+//! 8 GiB disk's 16384), several at once, each with its sha256, which EBS
+//! checks; then registered for UEFI, the ENA and IMDSv2 alone. No bucket,
+//! no VM Import, no service role: minutes and a setup fewer. The config
+//! tar, in base64, is the instance's user data, which cloud-metadata
+//! fetches through IMDSv2 (docs/cloud.md). The instance has no instance
+//! profile, and a security group of its own, werewolf-NAME, which lets
+//! nothing in until its owner says what may.
 //!
 //! The region and credentials are the aws CLI's own (aws configure, or
-//! AWS_REGION and AWS_PROFILE). Two things werewolf does not make, and
-//! names when they are missing (docs/service-vms.md#aws-vm): the bucket VM
-//! Import reads, werewolf-images-ACCOUNT-REGION, and VM Import's service
-//! role, vmimport. A tool that makes IAM roles on a retry is not one an
-//! SRE wants. AWS is the state: an instance's Name tag is its name, and
-//! its werewolf-form tag the form it was made from.
+//! AWS_REGION and AWS_PROFILE). AWS is the state: an instance's Name tag
+//! is its name, and its werewolf-form tag the form it was made from.
 
 const std = @import("std");
 const ww = @import("werewolf.zig");
@@ -25,17 +23,22 @@ const Allocator = std.mem.Allocator;
 
 /// How long create waits for a machine to say it is up.
 const wait_seconds = 300;
-/// How long VM Import may take; a small disk takes minutes.
-const import_seconds = 3600;
+/// EBS's block, the unit a direct snapshot is written in.
+const block_size = 512 << 10;
+/// How many blocks go up at once: each is an aws process, which mostly
+/// waits on the network.
+const parallel = 8;
+/// How long a snapshot may take to complete once its blocks are in.
+const snapshot_seconds = 600;
 const tag = "werewolf-form";
 /// The states of an instance that has not gone, nor is going.
 const alive = "Name=instance-state-name,Values=pending,running,stopping,stopped";
 
-pub const Place = struct { region: []const u8, account: []const u8 };
+pub const Place = struct { region: []const u8 };
 
-/// The region and account the aws CLI works in, or a refusal saying why
-/// not. The region is the one the CLI resolves, from the environment or
-/// its config, as an EC2 call shows it.
+/// The region the aws CLI works in, or a refusal saying why not: the one
+/// it resolves, from the environment or its config, as an EC2 call shows
+/// it, which also says whether it has credentials.
 pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
     const region = call(io, gpa, &.{
         "aws",                             "ec2",
@@ -45,13 +48,7 @@ pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
     });
     // The CLI's own words say what to set: a region, or credentials.
     if (!region.ok) return why.refuse("--on aws: {s}", .{lastLine(region.err)});
-    const account = call(
-        io,
-        gpa,
-        &.{ "aws", "sts", "get-caller-identity", "--query", "Account", "--output", "text" },
-    );
-    if (!account.ok) return why.refuse("--on aws: {s}", .{lastLine(account.err)});
-    return .{ .region = region.out, .account = account.out };
+    return .{ .region = region.out };
 }
 
 const Result = struct { ok: bool, out: []const u8 = "", err: []const u8 = "" };
@@ -115,14 +112,8 @@ pub fn machine(arch: []const u8) Machine {
         .{ .arch = "x86_64", .kind = "t3.small" };
 }
 
-/// The bucket VM Import reads the disk from: S3's names are global, so the
-/// account's and region's.
-pub fn bucket(gpa: Allocator, p: Place) ![]const u8 {
-    return gpa.print("werewolf-images-{s}-{s}", .{ p.account, p.region });
-}
-
-/// The AMI of disk, a release's disk.qcow2: there already, or imported
-/// through the bucket, whose upload is then deleted.
+/// The AMI of disk, a release's disk.qcow2: there already, or made from a
+/// snapshot written straight from it.
 pub fn ensureImage(
     io: Io,
     gpa: Allocator,
@@ -147,58 +138,12 @@ pub fn ensureImage(
         ww.say(io, "image {s}: there already, {s}", .{ name, id });
         return id;
     }
-
-    // What werewolf does not make, named before anything is uploaded.
-    const b = try bucket(gpa, p);
-    const head = call(io, gpa, try aws(gpa, p, &.{ "s3api", "head-bucket", "--bucket", b }));
-    if (!head.ok) return why.refuse(
-        "no bucket {s} for VM Import to read ({s}): make it once, aws s3api create-bucket " ++
-            "--bucket {s}{s}{s} (docs/service-vms.md#aws-vm)",
-        .{
-            b,
-            lastLine(head.err),
-            b,
-            if (std.mem.eql(u8, p.region, "us-east-1"))
-                ""
-            else
-                " --create-bucket-configuration LocationConstraint=",
-            if (std.mem.eql(u8, p.region, "us-east-1")) "" else p.region,
-        },
-    );
-    // Asking needs iam:GetRole, which a deployer may not have: only an
-    // answer that the role is missing stops here; the import says the rest.
-    const role = call(io, gpa, try aws(gpa, p, &.{ "iam", "get-role", "--role-name", "vmimport" }));
-    if (!role.ok and std.mem.find(u8, role.err, "NoSuchEntity") != null) return why.refuse(
-        "no vmimport role, which VM Import takes to read {s} and make the snapshot: make it " ++
-            "once, as docs/service-vms.md#aws-vm says",
-        .{b},
-    );
-
     ww.say(io, "image {s}: making it from {s}", .{ name, disk });
-    const vhd = try gpa.print("{s}/disk.vhd", .{work});
-    defer Dir.cwd().deleteFile(io, vhd) catch {};
-    // force_size keeps the disk's own size, which VHD's geometry would
-    // otherwise round, and with it the GPT's backup at the disk's end.
-    try ww.run(io, why, &.{
-        "qemu-img", "convert",                         "-f", "qcow2", "-O", "vpc",
-        "-o",       "subformat=dynamic,force_size=on", disk, vhd,
-    });
-    const key = try gpa.print("{s}.vhd", .{name});
-    const object = try gpa.print("s3://{s}/{s}", .{ b, key });
-    try ww.run(io, why, try aws(gpa, p, &.{ "s3", "cp", "--only-show-errors", vhd, object }));
-    defer _ = ask(io, gpa, p, &.{ "s3", "rm", "--only-show-errors", object });
-
-    const task = try need(io, gpa, p, &.{
-        "ec2",
-        "import-snapshot",
-        "--description",
-        name,
-        "--disk-container",
-        try gpa.print("Format=VHD,UserBucket={{S3Bucket={s},S3Key={s}}}", .{ b, key }),
-        "--query",
-        "ImportTaskId",
-    }, why);
-    const snapshot = try awaitImport(io, gpa, p, name, task, why);
+    // Raw, so a block is at its offset; sparse where the disk is empty.
+    const raw = try gpa.print("{s}/disk.raw", .{work});
+    defer Dir.cwd().deleteFile(io, raw) catch {};
+    try ww.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
+    const snapshot = try writeSnapshot(io, gpa, p, name, form, raw, work, why);
     const m = machine(arch);
     return need(io, gpa, p, &.{
         "ec2",
@@ -228,60 +173,149 @@ pub fn ensureImage(
     }, why);
 }
 
-/// The snapshot VM Import made, once its task is done.
-fn awaitImport(
+/// One aws put-snapshot-block at a time per slot: its block's file, and
+/// where it says what went wrong.
+const Slot = struct {
+    child: ?std.process.Child = null,
+    index: u64 = 0,
+    data: []const u8,
+    err: []const u8,
+};
+
+/// A snapshot of raw, a disk image, written block by block through EBS's
+/// direct API, the blocks that hold data alone: what is never written
+/// reads as zeros. Its id, once EBS says it is complete.
+fn writeSnapshot(
     io: Io,
     gpa: Allocator,
     p: Place,
     name: []const u8,
-    task: []const u8,
+    form: []const u8,
+    raw: []const u8,
+    work: []const u8,
     why: *ww.Why,
 ) ![]const u8 {
-    var last: []const u8 = "";
-    var waited: u32 = 0;
-    while (waited < import_seconds) : (waited += 15) {
-        const text = ask(io, gpa, p, &.{
+    var f = try Dir.cwd().openFile(io, raw, .{});
+    defer f.close(io);
+    const size = try f.length(io);
+    const id = try need(io, gpa, p, &.{
+        "ebs",
+        "start-snapshot",
+        "--volume-size",
+        try gpa.print("{d}", .{gib(size)}),
+        "--description",
+        name,
+        "--tags",
+        try gpa.print("Key={s},Value={s}", .{ tag, form }),
+        try gpa.print("Key=Name,Value={s}", .{name}),
+        "--query",
+        "SnapshotId",
+    }, why);
+
+    var slots: [parallel]Slot = undefined;
+    for (&slots, 0..) |*s, i| s.* = .{
+        .data = try gpa.print("{s}/block-{d}", .{ work, i }),
+        .err = try gpa.print("{s}/block-{d}.err", .{ work, i }),
+    };
+    defer for (&slots) |*s| {
+        if (s.child) |*c| _ = c.wait(io) catch {};
+        Dir.cwd().deleteFile(io, s.data) catch {};
+        Dir.cwd().deleteFile(io, s.err) catch {};
+    };
+    const buf = try gpa.alloc(u8, block_size);
+    var written: u64 = 0;
+    var index: u64 = 0;
+    while (index * block_size < size) : (index += 1) {
+        const n = try f.readPositionalAll(io, buf, index * block_size);
+        @memset(buf[n..], 0);
+        if (std.mem.allEqual(u8, buf, 0)) continue;
+        const s = &slots[written % parallel];
+        try finish(io, gpa, s, why);
+        try Dir.cwd().writeFile(io, .{ .sub_path = s.data, .data = buf });
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(buf, &digest, .{});
+        var sum: [44]u8 = undefined;
+        const err_file = try Dir.cwd().createFile(io, s.err, .{});
+        defer err_file.close(io);
+        s.index = index;
+        s.child = std.process.spawn(io, .{
+            .argv = try aws(gpa, p, &.{
+                "ebs",
+                "put-snapshot-block",
+                "--snapshot-id",
+                id,
+                "--block-index",
+                try gpa.print("{d}", .{index}),
+                // A streaming blob: a path, not fileb://.
+                "--block-data",
+                s.data,
+                "--data-length",
+                std.fmt.comptimePrint("{d}", .{block_size}),
+                "--checksum",
+                std.base64.standard.Encoder.encode(&sum, &digest),
+                "--checksum-algorithm",
+                "SHA256",
+            }),
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .{ .file = err_file },
+        }) catch |err| return why.refuse("aws ebs put-snapshot-block: {s}", .{@errorName(err)});
+        written += 1;
+    }
+    for (&slots) |*s| try finish(io, gpa, s, why);
+    ww.say(io, "image {s}: {d} blocks, {d} MiB, in snapshot {s}", .{
+        name,
+        written,
+        written * block_size >> 20,
+        id,
+    });
+    _ = try need(io, gpa, p, &.{
+        "ebs",
+        "complete-snapshot",
+        "--snapshot-id",
+        id,
+        "--changed-blocks-count",
+        try gpa.print("{d}", .{written}),
+    }, why);
+    const start = Io.Clock.awake.now(io);
+    while (start.untilNow(io, .awake).toSeconds() < snapshot_seconds) {
+        const state = ask(io, gpa, p, &.{
             "ec2",
-            "describe-import-snapshot-tasks",
-            "--import-task-ids",
-            task,
+            "describe-snapshots",
+            "--snapshot-ids",
+            id,
             "--query",
-            "ImportSnapshotTasks[0].SnapshotTaskDetail.[Status,SnapshotId,StatusMessage,Progress]",
+            "Snapshots[0].State",
         }) orelse "";
-        const t = importTask(text);
-        if (std.mem.eql(u8, t.status, "completed")) return t.snapshot;
-        if (std.mem.eql(u8, t.status, "deleting") or std.mem.eql(u8, t.status, "deleted"))
-            return why.refuse("VM Import {s} failed: {s}", .{ task, t.message });
-        if (!std.mem.eql(u8, text, last)) {
-            ww.say(io, "image {s}: importing, {s} {s}%", .{ name, t.message, t.progress });
-            last = text;
-        }
-        try io.sleep(.fromSeconds(15), .awake);
+        if (std.mem.eql(u8, state, "completed")) return id;
+        if (std.mem.eql(u8, state, "error"))
+            return why.refuse("snapshot {s} failed after its blocks were written", .{id});
+        try io.sleep(.fromSeconds(2), .awake);
     }
     return why.refuse(
-        "VM Import {s} not done after an hour: aws ec2 describe-import-snapshot-tasks " ++
-            "--import-task-ids {s}",
-        .{ task, task },
+        "snapshot {s} not complete after 10 minutes: aws ec2 describe-snapshots --snapshot-ids {s}",
+        .{ id, id },
     );
 }
 
-const ImportTask = struct {
-    status: []const u8 = "",
-    snapshot: []const u8 = "",
-    message: []const u8 = "",
-    progress: []const u8 = "",
-};
+/// The block a slot sent, waited for: a refusal, with what aws said, if it
+/// was not taken.
+fn finish(io: Io, gpa: Allocator, s: *Slot, why: *ww.Why) !void {
+    var child = s.child orelse return;
+    s.child = null;
+    const term = child.wait(io) catch |err|
+        return why.refuse("aws ebs put-snapshot-block: {s}", .{@errorName(err)});
+    if (term == .exited and term.exited == 0) return;
+    const said = Dir.cwd().readFileAlloc(io, s.err, gpa, .limited(64 << 10)) catch "";
+    return why.refuse(
+        "aws ebs put-snapshot-block, block {d}: {s}",
+        .{ s.index, lastLine(said) },
+    );
+}
 
-/// describe-import-snapshot-tasks's line: status, snapshot, message and
-/// progress, tab-separated, None for what is not there yet.
-fn importTask(text: []const u8) ImportTask {
-    var f = std.mem.splitScalar(u8, text, '\t');
-    return .{
-        .status = f.next() orelse "",
-        .snapshot = f.next() orelse "",
-        .message = f.next() orelse "",
-        .progress = f.next() orelse "",
-    };
+/// A disk's size in GiB, as EBS takes a volume's: rounded up.
+fn gib(bytes: u64) u64 {
+    return (bytes + (1 << 30) - 1) >> 30;
 }
 
 pub const Instance = struct { id: []const u8, form: []const u8 };
@@ -499,32 +533,51 @@ pub fn console(io: Io, gpa: Allocator, p: Place, id: []const u8) ?[]const u8 {
     );
 }
 
-/// What the console says after before, the console of an earlier run if
-/// AWS kept it: all of it, if before's last lines are not in it.
-pub fn since(text: []const u8, before: []const u8) []const u8 {
-    const tail = before[before.len -| 256..];
-    if (tail.len == 0) return text;
-    const i = std.mem.findLast(u8, text, tail) orelse return text;
-    return text[i + tail.len ..];
+/// The console of the instance's current run, if AWS has any yet. AWS
+/// begins a console afresh at each start, but may answer with the last
+/// run's for a while after: a console is this run's only if AWS last wrote
+/// it no earlier than the instance's LaunchTime, which each start resets.
+/// Not by its text: a werewolf boot is the same every time, to the pids.
+fn currentConsole(io: Io, gpa: Allocator, p: Place, id: []const u8) ?[]const u8 {
+    const launched = ask(io, gpa, p, &.{
+        "ec2",
+        "describe-instances",
+        "--instance-ids",
+        id,
+        "--query",
+        "Reservations[0].Instances[0].LaunchTime",
+    }) orelse return null;
+    const out = ask(io, gpa, p, &.{
+        "ec2",
+        "get-console-output",
+        "--instance-id",
+        id,
+        "--latest",
+        "--query",
+        "[Timestamp,Output]",
+    }) orelse return null;
+    return ofRun(out, launched);
 }
 
-/// Wait for the boot to finish, or a panic, on a console that follows
-/// before.
-pub fn awaitUp(
-    io: Io,
-    gpa: Allocator,
-    p: Place,
-    id: []const u8,
-    before: []const u8,
-) !enum { up, panic, late } {
-    var waited: u32 = 0;
-    while (waited < wait_seconds) : (waited += 5) {
-        if (console(io, gpa, p, id)) |text| {
-            const run = since(text, before);
-            if (std.mem.find(u8, run, "werewolf: up in ") != null) return .up;
-            if (std.mem.find(u8, run, "Kernel panic") != null) return .panic;
+/// get-console-output's TIMESTAMP<tab>OUTPUT, the output if it was written
+/// at or after launched. AWS writes both times as UTC, alike, so their
+/// order is their bytes'.
+fn ofRun(out: []const u8, launched: []const u8) ?[]const u8 {
+    const tab = std.mem.findScalar(u8, out, '\t') orelse return null;
+    const text = out[tab + 1 ..];
+    if (std.mem.eql(u8, text, "None")) return null;
+    return if (std.mem.order(u8, out[0..tab], launched) == .lt) null else text;
+}
+
+/// Wait for this run's boot to finish, or panic.
+pub fn awaitUp(io: Io, gpa: Allocator, p: Place, id: []const u8) !enum { up, panic, late } {
+    const start = Io.Clock.awake.now(io);
+    while (start.untilNow(io, .awake).toSeconds() < wait_seconds) {
+        if (currentConsole(io, gpa, p, id)) |text| {
+            if (std.mem.find(u8, text, "werewolf: up in ") != null) return .up;
+            if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
         }
-        try io.sleep(.fromSeconds(5), .awake);
+        try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
 }
@@ -572,26 +625,12 @@ test machine {
     try testing.expectEqualStrings("x86_64", machine("x86_64").arch);
 }
 
-test bucket {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const b = try bucket(
-        arena.allocator(),
-        .{ .region = "eu-central-1", .account = "123456789012" },
-    );
-    try testing.expectEqualStrings("werewolf-images-123456789012-eu-central-1", b);
-    try testing.expect(b.len <= 63);
-}
-
-test importTask {
-    const t = importTask("active\tNone\tpending\t3");
-    try testing.expectEqualStrings("active", t.status);
-    try testing.expectEqualStrings("3", t.progress);
-    try testing.expectEqualStrings(
-        "snap-0123",
-        importTask("completed\tsnap-0123\tNone\tNone").snapshot,
-    );
-    try testing.expectEqualStrings("", importTask("").snapshot);
+test gib {
+    try testing.expectEqual(@as(u64, 8), gib(8 << 30));
+    try testing.expectEqual(@as(u64, 9), gib((8 << 30) + 1));
+    try testing.expectEqual(@as(u64, 1), gib(1));
+    // A disk is whole blocks, or its last is padded with zeros.
+    try testing.expectEqual(@as(u64, 0), (8 << 30) % block_size);
 }
 
 test pickSubnet {
@@ -612,17 +651,20 @@ test instance {
     try testing.expectEqual(null, instance(""));
 }
 
-test since {
-    const first = "stage0: the kernel took 0.2s\nwerewolf: up in 1.0s\nposture: pass=70\n";
-    // A new instance: everything.
-    try testing.expectEqualStrings(first, since(first, ""));
-    // AWS kept the run before: only what follows it, which has not booted yet.
-    try testing.expectEqualStrings("stage0: the k", since(first ++ "stage0: the k", first));
-    // AWS began afresh: all of it.
+test ofRun {
+    const launched = "2026-10-08T00:51:11+00:00";
+    // This run's console.
     try testing.expectEqualStrings(
-        "werewolf: up in 0.9s\n",
-        since("werewolf: up in 0.9s\n", first),
+        "UEFI\r\nwerewolf: up in 1.3s\r\n",
+        ofRun("2026-10-08T00:58:10+00:00\tUEFI\r\nwerewolf: up in 1.3s\r\n", launched).?,
     );
+    // The run before's, written before this one began: not this run's.
+    try testing.expectEqual(
+        null,
+        ofRun("2026-10-08T00:50:14+00:00\twerewolf: up in 1.5s\r\n", launched),
+    );
+    try testing.expectEqual(null, ofRun("2026-10-08T00:58:10+00:00\tNone", launched));
+    try testing.expectEqual(null, ofRun("", launched));
 }
 
 test lastLine {

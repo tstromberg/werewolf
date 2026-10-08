@@ -12,10 +12,12 @@ dm-verity, a cloud's NIC) are modules. Each form names the ones it needs;
 the build resolves their dependencies, decompresses them (Alpine's kernel
 cannot), and lists them in `/usr/lib/modules/RELEASE/werewolf.modules`, on
 the verified, read-only root. stage0 runs it; init's run finds the loader
-closed already and says so. What only one filesystem needs (Rocky's xfs,
-Fedora's btrfs, which bite leaves) is listed `@xfs PATH`, and loads only
-on a slot that is on it: btrfs's raid6 alone timed itself for 0.17 s of
-every boot.
+closed already and says so. What only some machines need is tagged: a
+filesystem's own (Rocky's xfs, Fedora's btrfs, which bite leaves), listed
+`@xfs PATH`, loads only on a slot that is on it, and Hyper-V's disks,
+`@hyperv PATH`, only where the kernel found a VMBus: btrfs's raid6 alone
+timed itself for 0.17 s of every boot, and hv_storvsc spent 18 ms finding
+no VMBus.
 
 ## Goals
 
@@ -27,7 +29,7 @@ every boot.
 ## Non-Goals
 
 - Choosing modules at run time (udev, modprobe): the form decides at build,
-  and the boot only which filesystem's lines it needs.
+  and the boot only which tags' lines it needs.
 - Judging a module: the kernel does, by its signature.
 
 ## Detailed design
@@ -36,8 +38,8 @@ every boot.
    or `module.sig_enforce`. Otherwise nothing loads, and the loader closes.
 2. **The list, strictly**: paths under `kernel/`, ending `.ko`, of plain
    characters, no `.`, `..` or empty parts, at most 256, each with
-   `KEY=VALUE` parameters of plain characters, and for a filesystem's own,
-   `@` and a name of 1 to 15 letters and digits first. One bad line, and
+   `KEY=VALUE` parameters of plain characters, and for a tagged one, `@`
+   and a tag of 1 to 15 letters and digits first. One bad line, and
    none.
 3. **Open everything first**, beneath the module directory with symlinks
    refused (`openat2`, `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`), and the two
@@ -48,9 +50,12 @@ every boot.
 5. **Load** each by `finit_module` on its open file, so the kernel reads and
    checks what is on disk, not a copy. A module already built in counts as
    loaded; one whose hardware is absent (ENODEV, EOPNOTSUPP) as absent.
-   Untagged lines first; then one line from stdin, the filesystem stage0
-   found the slot on while these loaded (`none` without a slot), picks the
-   tagged lines to load. stdin ending unnamed loads them all, as before.
+   Untagged lines first; then, a line of stdin each, the tags stage0 names,
+   each tag's lines loaded as its line arrives: `hyperv` at once where
+   `/sys/bus/vmbus` is (the kernel registers it only on Hyper-V, and the
+   slot's disk may be behind it), then the filesystem stage0 found the slot
+   on while these loaded (`none` without a slot). Tagged lines no line
+   named are skipped; stdin ending with none named loads them all.
 6. **Close** the loader (`kernel.modules_disabled=1`) whatever happened,
    and read it back: the kernel's answer, not the write's, is reported.
 

@@ -1,0 +1,21 @@
+#!/bin/sh
+# forms/nats/test/config DIR: the nats form's config for make check, in DIR: a
+# certificate for localhost and two users, check (password werewolf-check,
+# bcrypt) allowed check.> and other allowed nothing of it.
+set -eu
+d=$1/nats
+mkdir -p "$d"
+umask 077
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+	-keyout "$d/tls.key" -out "$d/tls.crt" 2>/dev/null
+cat >"$d/users.conf" <<'CONF'
+authorization {
+  users = [
+    { user: check, password: "$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq",
+      permissions: { publish: ["check.>", "$JS.API.>", "_INBOX.>"], subscribe: ["check.>", "_INBOX.>"] } }
+    { user: other, password: "$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq",
+      permissions: { publish: ["other.>"], subscribe: ["other.>"] } }
+  ]
+}
+CONF

@@ -16,6 +16,8 @@ const hasOption = posture.hasOption;
 const missingOption = posture.missingOption;
 const mountType = posture.mountType;
 const statx = posture.statx;
+const trim = posture.trim;
+const logHas = posture.logHas;
 
 /// How opening path for writing, and nothing more, ends.
 fn writeOpen(path: [:0]const u8) linux.E {
@@ -65,6 +67,51 @@ pub fn check(p: *Posture) !void {
         .why = "Nothing can change the running system's programs.",
         .how = "/ is mounted ro",
         .result = if (hasOption(mounts, "/", "ro")) .pass else .fail,
+    });
+    // stage0 maps the image through dm-verity as a device-mapper device
+    // named root, read-only at the device, so no remount can make it
+    // writable; a block that does not hash fails to read, and the kernel
+    // says so.
+    const root_dev = statx(p.gpa, "/");
+    const dm_name = if (root_dev) |st| trim(p.read(try p.gpa.print(
+        "/sys/dev/block/{d}:{d}/dm/name",
+        .{ st.dev_major, st.dev_minor },
+    ))) else "";
+    const dm_ro = if (root_dev) |st| trim(p.read(try p.gpa.print(
+        "/sys/dev/block/{d}:{d}/ro",
+        .{ st.dev_major, st.dev_minor },
+    ))) else "";
+    const corrupted = logHas(p.kernelLog(), &.{ "verity", "corrupted" });
+    try p.add(.{
+        .id = "files-root-verity",
+        .area = "files",
+        .name = "Root verified",
+        .why = "Every block of the system read is the one its build hashed: a changed " ++
+            "image fails to read, and not even root can remount the root writable.",
+        .how = "/ is on a device-mapper device named root (stage0's dm-verity mapping) " ++
+            "that is itself read-only (/sys/dev/block/MAJ:MIN/ro), and the kernel log has " ++
+            "no dm-verity corruption",
+        .result = if (std.mem.eql(u8, dm_name, "root") and std.mem.eql(u8, dm_ro, "1") and
+            !corrupted) .pass else .fail,
+        .detail = if (corrupted)
+            "the kernel log reports a corrupted block"
+        else if (!std.mem.eql(u8, dm_name, "root"))
+            "/ is not on a device-mapper device named root"
+        else if (!std.mem.eql(u8, dm_ro, "1"))
+            "the root device is writable"
+        else
+            "",
+    });
+    const vfat = try mountedAs(p.gpa, mounts, "vfat");
+    try p.add(.{
+        .id = "files-boot-unmounted",
+        .area = "files",
+        .name = "No boot partition mounted",
+        .why = "The EFI system partition, where the kernel and its loader wait on the " ++
+            "disk, is reachable by nothing on the running machine.",
+        .how = "no mount in /proc/self/mounts is vfat",
+        .result = if (vfat.len == 0) .pass else .fail,
+        .detail = vfat,
     });
     const nosuid = try missingOption(p.gpa, mounts, "nosuid", &.{});
     try p.add(.{
@@ -190,17 +237,20 @@ pub fn check(p: *Posture) !void {
         .result = if (loose.len == 0) .pass else .fail,
         .detail = loose,
     });
+    const passwd = p.read("/etc/passwd");
+    const group = p.read("/etc/group");
     const shadow = p.read("/etc/shadow");
     const unread = shadow.len == 0 and exists(p.io, "/etc/shadow");
-    const accounts = try accountProblems(p.gpa, p.read("/etc/passwd"), shadow);
+    const accounts = try accountProblems(p.gpa, passwd, group, shadow);
     try p.add(.{
         .id = "files-accounts",
         .area = "files",
-        .name = "One root, and no empty passwords",
-        .why = "No account but root has root's powers, and none can be logged into without " ++
-            "a password or key.",
-        .how = "only root has uid 0 in /etc/passwd, and no account in /etc/shadow has an " ++
-            "empty password",
+        .name = "One root, and keys only",
+        .why = "No account but root has root's powers or root's group, none can be logged " ++
+            "into with a password, and no two accounts or groups share a name or an id.",
+        .how = "only root has uid 0 or gid 0 in /etc/passwd and only root has gid 0 in " ++
+            "/etc/group; every password is in /etc/shadow (x in passwd) and locked (! or " ++
+            "*); no name, uid or gid is there twice; every account's group exists",
         .result = if (accounts.len > 0) .fail else if (unread) .skip else .pass,
         .detail = if (accounts.len > 0)
             accounts
@@ -208,6 +258,18 @@ pub fn check(p: *Posture) !void {
             "cannot read /etc/shadow"
         else
             "",
+    });
+    const unowned = try findUnowned(p, passwd, group);
+    try p.add(.{
+        .id = "files-unowned",
+        .area = "files",
+        .name = "Every file has an owner",
+        .why = "No file on the system waits for an account not yet made, or made by an " ++
+            "intruder, to claim it.",
+        .how = "every file on the root filesystem has a uid in /etc/passwd and a gid in " ++
+            "/etc/group",
+        .result = if (unowned.len == 0) .pass else .fail,
+        .detail = unowned,
     });
     if (mountType(mounts, "/victim") != null) try p.add(.{
         .id = "files-victim-readonly",
@@ -354,12 +416,69 @@ fn starts(p: *Posture, path: []const u8) bool {
 /// Files on the root filesystem with setuid or setgid, as a list. It
 /// does not cross into other filesystems (/proc, /data and the like).
 pub fn findSetid(p: *Posture) ![]const u8 {
+    return findOnRoot(p, .setid);
+}
+
+/// Files on the root filesystem whose uid is in no passwd entry or whose
+/// gid is in no group entry, as a list.
+fn findUnowned(p: *Posture, passwd: []const u8, group: []const u8) ![]const u8 {
+    return findOnRoot(p, .{ .unowned = .{
+        .uids = try thirdFields(p.gpa, passwd),
+        .gids = try thirdFields(p.gpa, group),
+    } });
+}
+
+fn findOnRoot(p: *Posture, find: Find) ![]const u8 {
     var found: std.ArrayList(u8) = .empty;
     const root = statx(p.gpa, "/") orelse return "cannot stat /";
     var d = Dir.cwd().openDir(p.io, "/", .{ .iterate = true }) catch return "cannot open /";
     defer d.close(p.io);
-    try walk(p, d, "/", root, .setid, &found, 0);
+    try walk(p, d, "/", root, find, &found, 0);
     return found.items;
+}
+
+/// The third field of each line of a passwd- or group-like file that is a
+/// number: its ids.
+fn thirdFields(gpa: Allocator, text: []const u8) ![]const u32 {
+    var ids: std.ArrayList(u32) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ':');
+        _ = f.next();
+        _ = f.next();
+        const id = std.fmt.parseInt(u32, f.next() orelse continue, 10) catch continue;
+        try ids.append(gpa, id);
+    }
+    return ids.items;
+}
+
+/// The mount points in mounts of filesystem type fstype, as a list.
+fn mountedAs(gpa: Allocator, mounts: []const u8, fstype: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, mounts, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.tokenizeScalar(u8, line, ' ');
+        _ = f.next();
+        const point = f.next() orelse continue;
+        if (std.mem.eql(u8, f.next() orelse continue, fstype))
+            try out.print(gpa, "{s}{s}", .{ if (out.items.len > 0) ", " else "", point });
+    }
+    return out.items;
+}
+
+test mountedAs {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mounts = "/dev/mapper/root / erofs ro 0 0\n/dev/vda1 /boot/efi vfat rw 0 0\n" ++
+        "tmpfs /run tmpfs rw 0 0\n/dev/vdb /mnt/seed vfat ro 0 0\n";
+    try testing.expectEqualStrings("/boot/efi, /mnt/seed", try mountedAs(a, mounts, "vfat"));
+    try testing.expectEqualStrings("", try mountedAs(a, mounts, "ext4"));
+    try testing.expectEqualSlices(
+        u32,
+        &.{ 0, 65534 },
+        try thirdFields(a, "root:x:0:0:\nnobody:x:65534:65534:\nbad:x:\n"),
+    );
 }
 
 /// The files under dir, open at path, on top's filesystem, that find
@@ -387,11 +506,16 @@ fn walk(
             dir.handle,
             name,
             linux.AT.SYMLINK_NOFOLLOW,
-            .{ .TYPE = true, .MODE = true },
+            .{ .TYPE = true, .MODE = true, .UID = true, .GID = true },
             &st,
         )) != .SUCCESS) continue;
         if (st.dev_major != top.dev_major or st.dev_minor != top.dev_minor) continue;
-        if (isFound(find, st.mode)) try found.print(
+        const hit = switch (find) {
+            .unowned => |ids| std.mem.findScalar(u32, ids.uids, st.uid) == null or
+                std.mem.findScalar(u32, ids.gids, st.gid) == null,
+            else => isFound(find, st.mode),
+        };
+        if (hit) try found.print(
             p.gpa,
             "{s}{s}{s}{s}",
             .{ if (found.items.len > 0) ", " else "", path, sep, e.name },
@@ -490,9 +614,14 @@ fn realPath(p: *Posture, path: []const u8) ?[]const u8 {
 }
 
 /// What a walk looks for: setuid and setgid programs; anything anyone may
-/// write, but a sticky directory; or only directories anyone may write that
-/// are not sticky.
-const Find = enum { setid, open, open_dirs };
+/// write, but a sticky directory; only directories anyone may write that
+/// are not sticky; or files whose owner or group no account file names.
+const Find = union(enum) {
+    setid,
+    open,
+    open_dirs,
+    unowned: struct { uids: []const u32, gids: []const u32 },
+};
 
 fn isFound(find: Find, mode: u16) bool {
     const kind = mode & linux.S.IFMT;
@@ -502,58 +631,130 @@ fn isFound(find: Find, mode: u16) bool {
         .setid => kind == linux.S.IFREG and mode & (linux.S.ISUID | linux.S.ISGID) != 0,
         .open => open_dir or (kind == linux.S.IFREG and mode & linux.S.IWOTH != 0),
         .open_dirs => open_dir,
+        .unowned => false,
     };
 }
 
-/// Accounts other than root with uid 0 in passwd, and accounts with an
-/// empty password in shadow, as a list.
-fn accountProblems(gpa: Allocator, passwd: []const u8, shadow: []const u8) ![]const u8 {
+/// What is wrong with the account files, as a list: an account other than
+/// root with uid 0 or gid 0, a group other than root with gid 0, a
+/// password in passwd rather than shadow, a password that is not locked
+/// (one could log in with it: here a key is the only way in), a name or
+/// id there twice, and an account whose group does not exist.
+fn accountProblems(
+    gpa: Allocator,
+    passwd: []const u8,
+    group: []const u8,
+    shadow: []const u8,
+) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    var lines = std.mem.tokenizeScalar(u8, passwd, '\n');
+    var gids: std.ArrayList([]const u8) = .empty;
+    var seen: std.ArrayList([]const u8) = .empty;
+    var lines = std.mem.tokenizeScalar(u8, group, '\n');
     while (lines.next()) |line| {
         var f = std.mem.splitScalar(u8, line, ':');
         const name = f.next() orelse continue;
         _ = f.next() orelse continue;
+        const gid = f.next() orelse continue;
+        try gids.append(gpa, gid);
+        if (std.mem.eql(u8, gid, "0") and !std.mem.eql(u8, name, "root"))
+            try out.print(gpa, "{s}group {s} has gid 0", .{ comma(out.items), name });
+        try twice(gpa, &out, &seen, "group", name);
+        try twice(gpa, &out, &seen, "gid", gid);
+    }
+    seen.clearRetainingCapacity();
+    lines = std.mem.tokenizeScalar(u8, passwd, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ':');
+        const name = f.next() orelse continue;
+        const password = f.next() orelse continue;
         const uid = f.next() orelse continue;
-        if (std.mem.eql(u8, uid, "0") and
-            !std.mem.eql(
-                u8,
-                name,
-                "root",
-            )) try out.print(
-            gpa,
-            "{s}{s} has uid 0",
-            .{ if (out.items.len > 0) ", " else "", name },
-        );
+        const gid = f.next() orelse continue;
+        if (std.mem.eql(u8, uid, "0") and !std.mem.eql(u8, name, "root"))
+            try out.print(gpa, "{s}{s} has uid 0", .{ comma(out.items), name });
+        if (std.mem.eql(u8, gid, "0") and !std.mem.eql(u8, name, "root"))
+            try out.print(gpa, "{s}{s} has gid 0", .{ comma(out.items), name });
+        if (!std.mem.eql(u8, password, "x"))
+            try out.print(gpa, "{s}{s} has a password in passwd", .{ comma(out.items), name });
+        try twice(gpa, &out, &seen, "account", name);
+        try twice(gpa, &out, &seen, "uid", uid);
+        const known = for (gids.items) |g| {
+            if (std.mem.eql(u8, g, gid)) break true;
+        } else false;
+        if (!known and gids.items.len > 0)
+            try out.print(
+                gpa,
+                "{s}{s}'s group {s} does not exist",
+                .{ comma(out.items), name, gid },
+            );
     }
     lines = std.mem.tokenizeScalar(u8, shadow, '\n');
     while (lines.next()) |line| {
         var f = std.mem.splitScalar(u8, line, ':');
         const name = f.next() orelse continue;
         const hash = f.next() orelse continue;
-        if (hash.len == 0) try out.print(
-            gpa,
-            "{s}{s} has no password",
-            .{ if (out.items.len > 0) ", " else "", name },
-        );
+        if (hash.len == 0) {
+            try out.print(gpa, "{s}{s} has no password", .{ comma(out.items), name });
+        } else if (hash[0] != '!' and hash[0] != '*') {
+            try out.print(gpa, "{s}{s} has a password", .{ comma(out.items), name });
+        }
     }
     return out.items;
+}
+
+fn comma(so_far: []const u8) []const u8 {
+    return if (so_far.len > 0) ", " else "";
+}
+
+/// Note what is there twice: value, of kind, if seen before, which it now is.
+fn twice(
+    gpa: Allocator,
+    out: *std.ArrayList(u8),
+    seen: *std.ArrayList([]const u8),
+    kind: []const u8,
+    value: []const u8,
+) !void {
+    const key = try std.mem.concat(gpa, u8, &.{ kind, ":", value });
+    for (seen.items) |s| if (std.mem.eql(u8, s, key)) {
+        try out.print(gpa, "{s}{s} {s} is there twice", .{ comma(out.items), kind, value });
+        return;
+    };
+    try seen.append(gpa, key);
 }
 
 test accountProblems {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
+    const group = "root:x:0:root\nwheel:x:10:root\nnobody:x:65534:\n";
     const passwd = "root:x:0:0:root:/root:/sbin/nologin\ntoor:x:0:0::/:/bin/sh\nnobody:x:65534:6" ++
         "5534::/:/sbin/nologin\n";
     const shadow = "root:*:19000::::::\ntoor::19000::::::\nnobody:!:19000::::::\n";
     try testing.expectEqualStrings(
-        "toor has uid 0, toor has no password",
-        try accountProblems(a, passwd, shadow),
+        "toor has uid 0, toor has gid 0, uid 0 is there twice, toor has no password",
+        try accountProblems(a, passwd, group, shadow),
     );
     try testing.expectEqualStrings(
         "",
-        try accountProblems(a, "root:x:0:0::/:/x\n", "root:!::::::::\n"),
+        try accountProblems(a, "root:x:0:0::/:/x\n", "root:x:0:\n", "root:!::::::::\n"),
+    );
+    // Alpine's old accounts in root's group, a hash in passwd, a set
+    // password, a uid and a group name there twice, and a group that is
+    // not there.
+    try testing.expectEqualStrings(
+        "group adm has gid 0, gid 0 is there twice, group root is there twice, sync has gid 0, " ++
+            "old has a password in passwd, uid 5 is there twice, lost's group 7 does not " ++
+            "exist, ann has a password",
+        try accountProblems(
+            a,
+            "root:x:0:0:::\nsync:x:5:0:::\nold:$6$abc:5:10:::\nlost:x:8:7:::\nann:x:9:10:::\n",
+            "root:x:0:\nadm:x:0:\nroot:x:10:\n",
+            "root:*::\nann:$y$j9T$abc::\nold:!::\n",
+        ),
+    );
+    // No group file to judge groups by: nothing said of them.
+    try testing.expectEqualStrings(
+        "",
+        try accountProblems(a, "root:x:0:0:::\nnobody:x:65534:65534:::\n", "", ""),
     );
 }
 

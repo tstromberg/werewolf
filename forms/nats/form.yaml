@@ -1,0 +1,10 @@
+base: prod
+
+# NATS serves its clients over TLS, and sends nothing: no routes, no
+# leaf nodes, no gateways.
+net:
+  - listen tcp/4222
+
+# The check speaks NATS with its own client.
+dev:
+  - nats

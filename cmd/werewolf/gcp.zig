@@ -192,6 +192,13 @@ pub fn create(
         size orelse m.kind,
         "--image",
         image,
+        // SSD-backed, not GCP's HDD default (pd-standard): an 8 GB
+        // pd-standard disk read ~10 MB/s at ~6 ms a request, and a boot
+        // reads the kernel, its root and sshd from it. On a t2a-standard-1,
+        // reboot to ssh took 3.8 s on pd-balanced against 5.3 s; it costs
+        // $0.10 a GB-month against $0.04.
+        "--boot-disk-type",
+        "pd-balanced",
         "--network-interface",
         try gpa.print("nic-type={s}", .{m.nic}),
         "--tags",
@@ -266,13 +273,13 @@ pub fn booted(text: []const u8) bool {
 /// Wait for the boot to finish, or a panic. GCP keeps the console of the
 /// machine's current run only, so a stop and start begins it afresh.
 pub fn awaitUp(io: Io, gpa: Allocator, p: Place, name: []const u8) !enum { up, panic, late } {
-    var waited: u32 = 0;
-    while (waited < wait_seconds) : (waited += 5) {
+    const start = Io.Clock.awake.now(io);
+    while (start.untilNow(io, .awake).toSeconds() < wait_seconds) {
         if (console(io, gpa, p, name)) |text| {
             if (booted(text)) return .up;
             if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
         }
-        try io.sleep(.fromSeconds(5), .awake);
+        try io.sleep(.fromSeconds(2), .awake);
     }
     return .late;
 }

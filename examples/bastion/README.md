@@ -1,6 +1,6 @@
 # SSH bastion on Werewolf
 
-The [bastion form](../../forms/bastion.yaml) runs a forwarding-only OpenSSH
+The [bastion form](../../forms/bastion/apko.yaml) runs a forwarding-only OpenSSH
 server. Clients authenticate to the bastion, then forward TCP connections
 to explicitly permitted destinations. The destination authenticates them
 separately.
@@ -32,9 +32,9 @@ clients. See [OpenSSH's post-quantum explanation](https://www.openssh.org/pq.htm
 
 ## Basic usage
 
-Start with [destinations and keys](../../docs/bastion.md#destinations-and-keys),
-then follow either [local Lima](../../docs/bastion.md#local-lima) or
-[GCP](../../docs/bastion.md#gcp). Both use `bastion/settings.json` and
+Start with [destinations and keys](../../forms/bastion/README.md#destinations-and-keys),
+then follow either [local Lima](../../forms/bastion/README.md#local-lima) or
+[GCP](../../forms/bastion/README.md#gcp). Both use `bastion/settings.json` and
 `authorized_keys` supplied outside the image, in a config tar: a disk under
 Lima, user-data on GCP.
 

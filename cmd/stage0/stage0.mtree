@@ -1,0 +1,13 @@
+#mtree
+# stage0's initramfs, beside /init, the module loader, the modules and
+# /verity: /dev and five device nodes, of which the kernel opens
+# /dev/console as stage0's stdin, stdout and stderr before anything
+# mounts devtmpfs. Nothing else: stage0 makes the directories it mounts
+# on, and reads no file a package would bring. The updater's stage0 has
+# the same nodes (cmd/slot-update/slot.zig, devices).
+dev type=dir uid=0 gid=0 mode=0755 time=0.0
+dev/console type=char device=native,5,1 uid=0 gid=0 mode=0620 time=0.0
+dev/null type=char device=native,1,3 uid=0 gid=0 mode=0666 time=0.0
+dev/random type=char device=native,1,8 uid=0 gid=0 mode=0666 time=0.0
+dev/urandom type=char device=native,1,9 uid=0 gid=0 mode=0666 time=0.0
+dev/zero type=char device=native,1,5 uid=0 gid=0 mode=0666 time=0.0

@@ -1,5 +1,5 @@
 # The demo's first boot on a disk of its own (make check-persist; see
-# test/checks and test/console-demo for the kinds): PostgreSQL makes its
+# test/checks and forms/demo/test/console for the kinds): PostgreSQL makes its
 # cluster on /data, and the page stores this boot's posture in it. Then a
 # clean power-off, so the second boot (test/checks-persist-again) finds
 # what this one left.

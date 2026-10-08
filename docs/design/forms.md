@@ -44,8 +44,8 @@ lima      (on prod, the Lima test vehicle)
 | `prod` | the production base: DHCP, the cloud's metadata, updates itself, `/data` on a disk, in LUKS when the config brings `data.key` | `dhcp`, `cloud`, `autoupdate`, `disk`, `crypt` |
 | `app` | `prod` plus the unprivileged application account; no packages, service or listener | duplicated accounts in node, python and jre |
 | `nginx`, `node`, `python`, `jre`, `php` | `prod` and one runtime, with a leashed service for the application; node, python and jre inherit through `app` | |
-| `postgresql` | `prod` and PostgreSQL 17 on a UNIX socket ([postgresql.md](../postgresql.md)) | |
-| `demo` | `postgresql`, nginx and the status page ([demo.md](../demo.md)) | |
+| `postgresql` | `prod` and PostgreSQL 17 on a UNIX socket ([postgresql.md](../../forms/postgresql/README.md)) | |
+| `demo` | `postgresql`, nginx and the status page ([demo.md](../../forms/demo/README.md)) | |
 
 The forms that go: `dhcp`, `cloud`, `bitten`, `autoupdate`, `disk`,
 `crypt` (gone), and `sshd`, `prod-ssh` (once `SSH=1` is built). Their checks
@@ -121,8 +121,8 @@ machine; and posture says so at every boot.
 
 **An interpreter is the point of these forms.** posture's
 `programs-no-interpreters` fails on them by design, as `kernel-no-hypervisor`
-fails on `qemu-host`. They are listed in test/posture-known for those
-forms. Wolfi's JRE keeps `java` beside the JDK, so the form links it into
+fails on `qemu-host`. Each such form names them in its form.yaml's
+`weaknesses`, with its excuse. Wolfi's JRE keeps `java` beside the JDK, so the form links it into
 `/usr/bin`, and posture looks for `java` and `php-fpm` too: what the form
 carries, posture says.
 
@@ -131,11 +131,15 @@ carries, posture says.
 An application is baked into the image, as Chainguard's are built with
 apko: a form of the user's own includes a runtime form, lists the Wolfi
 packages it needs, and carries the application's files and its leash
-`service` file in its folder.
+`service` file in its rootfs.
 
 ```yaml
-# forms/myapp.yaml
-include: python.yaml
+# forms/myapp/form.yaml
+base: python
+```
+
+```yaml
+# forms/myapp/apko.yaml
 contents:
   packages: [py3.13-flask]
 ```
@@ -150,7 +154,7 @@ writes off (`DISALLOW_FILE_MODS`), and SQLite rather than a second
 database server.
 
 Forms outside this repository build the same way
-(`make FORM=../myapp/myapp.yaml`).
+(`make FORM=../myapp`).
 
 ## Checks
 

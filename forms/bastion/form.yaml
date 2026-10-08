@@ -1,0 +1,12 @@
+base: prod
+
+net:
+  - listen tcp/22
+  # sshd's PermitOpen further restricts these connections by destination.
+  - connect bastion tcp/22
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  network-no-login: sshd, by key, which forwards to the destinations the config names and opens no session
+  network-ssh-config: sshd forwards ports, which is what a bastion is for

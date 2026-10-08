@@ -101,6 +101,7 @@ const metadata_port: u16 = 80;
 /// the policy first. Its rules for the main and default tables, at 32766
 /// and 32767, are never reached.
 const pref = struct {
+    const public_refuse: u32 = 5;
     const local_out: u32 = 10;
     const metadata_allow: u32 = 100;
     const metadata_refuse: u32 = 101;
@@ -250,7 +251,46 @@ const Connect = struct {
     proto: Proto,
     /// 0 for ICMP, which has no ports.
     port: u16,
+    /// To public addresses alone: never to a private, loopback,
+    /// link-local, shared, metadata, multicast or reserved one
+    /// (non_public), whatever the user asks. For a service that fetches
+    /// what strangers name (a fediverse server's previews and media), so a
+    /// request a bug lets them forge cannot reach the machine's own
+    /// network or the cloud's metadata.
+    public: bool = false,
 };
+
+/// What `public` refuses, by family: an address and its prefix length.
+const Prefix = struct { addr: []const u8, len: u8 };
+const non_public4 = [_]Prefix{
+    .{ .addr = &.{ 0, 0, 0, 0 }, .len = 8 }, // "this" network
+    .{ .addr = &.{ 10, 0, 0, 0 }, .len = 8 }, // private
+    .{ .addr = &.{ 100, 64, 0, 0 }, .len = 10 }, // shared: carrier NAT, Tailscale
+    .{ .addr = &.{ 127, 0, 0, 0 }, .len = 8 }, // loopback
+    .{ .addr = &.{ 169, 254, 0, 0 }, .len = 16 }, // link-local: the metadata server
+    .{ .addr = &.{ 172, 16, 0, 0 }, .len = 12 }, // private
+    .{ .addr = &.{ 192, 0, 0, 0 }, .len = 24 }, // IETF protocol assignments
+    .{ .addr = &.{ 192, 168, 0, 0 }, .len = 16 }, // private
+    .{ .addr = &.{ 198, 18, 0, 0 }, .len = 15 }, // benchmarking
+    .{ .addr = &.{ 224, 0, 0, 0 }, .len = 3 }, // multicast and reserved, to 255
+};
+const non_public6 = [_]Prefix{
+    .{ .addr = &v6(&.{0}, 1), .len = 128 }, // loopback
+    .{ .addr = &v6(&.{0}, 0), .len = 96 }, // unspecified, and IPv4-compatible
+    .{ .addr = &v6(&.{ 0, 0x64, 0xff, 0x9b }, 0), .len = 96 }, // NAT64, to IPv4 behind it
+    .{ .addr = &v6(&.{0xfc}, 0), .len = 7 }, // unique local: AWS's metadata
+    .{ .addr = &v6(&.{ 0xfe, 0x80 }, 0), .len = 10 }, // link-local
+    .{ .addr = &v6(&.{ 0xfe, 0xc0 }, 0), .len = 10 }, // site-local, deprecated
+    .{ .addr = &v6(&.{0xff}, 0), .len = 8 }, // multicast
+};
+
+/// An IPv6 address: its first bytes, then zeros, and its last byte.
+fn v6(comptime head: []const u8, comptime last: u8) [16]u8 {
+    var a: [16]u8 = @splat(0);
+    @memcpy(a[0..head.len], head);
+    a[15] = last;
+    return a;
+}
 
 const Policy = struct {
     listen: [max_entries]u16 = undefined,
@@ -271,6 +311,7 @@ const Policy = struct {
                 w.writeAll("all") catch return out[0..i];
             w.print(" {s}", .{@tagName(c.proto)}) catch return out[0..i];
             if (c.proto != .icmp) w.print(" {d}", .{c.port}) catch return out[0..i];
+            if (c.public) w.writeAll(" public") catch return out[0..i];
             out[i] = buf[start..w.end];
         }
         return out[0..p.nconnect];
@@ -306,6 +347,13 @@ fn parsePolicy(text: []const u8) !Policy {
                 .proto = proto,
                 .port = if (proto == .icmp) 0 else try port(words.next()),
             };
+            if (proto != .icmp) {
+                var rest = words;
+                if (rest.next()) |w| if (std.mem.eql(u8, w, "public")) {
+                    p.connect[p.nconnect].public = true;
+                    _ = words.next();
+                };
+            }
             p.nconnect += 1;
         } else if (std.mem.eql(u8, key, "metadata")) {
             if (p.nmetadata == max_entries) return error.BadPolicy;
@@ -348,6 +396,8 @@ const Rule = struct {
     /// An address of the rule's family: 4 bytes, or 16.
     src: ?[]const u8 = null,
     dst: ?[]const u8 = null,
+    /// dst's prefix length; all of it when null.
+    dst_len: ?u8 = null,
     proto: ?Proto = null,
     sport: ?u16 = null,
     dport: ?u16 = null,
@@ -357,10 +407,12 @@ const Rule = struct {
 /// Eight per entry at most: metadata, connect and listen each make a
 /// sending rule and its twin, and connect and listen an arriving rule; and
 /// the fixed ones, the drops among them.
-const max_rules = 16 + dropped.len + 8 * max_entries;
+const max_rules = 16 + dropped.len + (8 + non_public4.len) * max_entries;
 
 /// The policy as rules, in the order the kernel will try them:
 ///
+///   5     sent by a user whose connect says `public`, on that protocol and
+///         port, to an address that is not public: refused
 ///   10    sent here, to this machine or over loopback: local table
 ///   100   sent to the metadata server's TCP 80 by a user named: main
 ///   101   sent to it by anyone else: refused
@@ -402,6 +454,22 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             }
         }
     }.f;
+    const non_public: []const Prefix = if (family == linux.AF.INET6) &non_public6 else &non_public4;
+    for (p.connect[0..p.nconnect]) |c| if (c.public) for (non_public) |np| add(
+        out,
+        &n,
+        family,
+        .{
+            .priority = pref.public_refuse,
+            .action = FR_ACT_PROHIBIT,
+            .from_here = true,
+            .dst = np.addr,
+            .dst_len = np.len,
+            .proto = c.proto,
+            .dport = c.port,
+            .uid = c.uid,
+        },
+    );
     add(
         out,
         &n,
@@ -626,7 +694,7 @@ fn ruleMessage(buf: *[256]u8, seq: u32, kind: u16, r: Rule) []const u8 {
     var b: Builder = .{ .buf = buf, .len = 16 };
     // struct fib_rule_hdr: family, dst_len, src_len, tos, table, res1,
     // res2, action, flags.
-    const dst_len: u8 = if (r.dst) |a| @intCast(a.len * 8) else 0;
+    const dst_len: u8 = if (r.dst) |a| r.dst_len orelse @intCast(a.len * 8) else 0;
     const src_len: u8 = if (r.src) |a| @intCast(a.len * 8) else 0;
     b.bytes(&.{ r.family, dst_len, src_len, 0, r.table, 0, 0, r.action, 0, 0, 0, 0 });
     b.attr(FRA_PRIORITY, std.mem.asBytes(&r.priority));
@@ -1024,6 +1092,10 @@ test "policies" {
     try std.testing.expectEqualStrings("0 tcp 443", t[0]);
     try std.testing.expectEqualStrings("all udp 53", t[2]);
     try std.testing.expectEqualStrings("0 icmp", t[3]);
+    const pub_ = try parsePolicy("connect 207 tcp 443 public\nconnect 207 udp 53\n");
+    try std.testing.expect(pub_.connect[0].public and !pub_.connect[1].public);
+    const pt = pub_.connectText(&out, &text);
+    try std.testing.expectEqualStrings("207 tcp 443 public", pt[0]);
     const none = try parsePolicy("");
     try std.testing.expectEqual(0, none.nlisten + none.nconnect + none.nmetadata);
     for ([_][]const u8{
@@ -1038,6 +1110,9 @@ test "policies" {
         "connect 0 tcp\n",
         "connect 0 icmp 8\n",
         "connect nobody tcp 1\n",
+        "connect 0 tcp 443 private\n",
+        "connect 0 tcp 443 public public\n",
+        "connect 0 icmp public\n",
     }) |bad| {
         try std.testing.expectError(error.BadPolicy, parsePolicy(bad));
     }
@@ -1174,11 +1249,51 @@ test "IPv6: the same rules, its metadata address, and ICMPv6 sent by anyone" {
     try std.testing.expect(hasAttr(icmp, FRA_IP_PROTO, &.{IPPROTO_ICMPV6}));
 }
 
+test "public: refused to every non-public prefix, first, on its port alone" {
+    const p = try parsePolicy("connect 207 tcp 443 public\nconnect 207 udp 53\n");
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
+        var rules: [max_rules]Rule = undefined;
+        const r = plan(p, fam, &rules);
+        const want: usize = if (fam == linux.AF.INET6) non_public6.len else non_public4.len;
+        var refusals: usize = 0;
+        for (r, 0..) |x, i| {
+            if (x.priority != pref.public_refuse) continue;
+            refusals += 1;
+            // Before anything else the kernel tries, local traffic included.
+            try std.testing.expect(i < want);
+            try std.testing.expectEqual(FR_ACT_PROHIBIT, x.action);
+            try std.testing.expectEqual(.tcp, x.proto.?);
+            try std.testing.expectEqual(443, x.dport.?);
+            try std.testing.expectEqual(207, x.uid.?);
+        }
+        try std.testing.expectEqual(want, refusals);
+    }
+    // The metadata server's address is among them, as a prefix on the wire.
+    var buf: [256]u8 = undefined;
+    const m = ruleMessage(&buf, 1, RTM_NEWRULE, .{
+        .priority = pref.public_refuse,
+        .action = FR_ACT_PROHIBIT,
+        .from_here = true,
+        .dst = non_public4[4].addr,
+        .dst_len = non_public4[4].len,
+        .proto = .tcp,
+        .dport = 443,
+        .uid = 207,
+    });
+    try std.testing.expectEqual(16, m[17]); // fib_rule_hdr.dst_len
+    try std.testing.expect(hasAttr(m, FRA_DST, &.{ 169, 254, 0, 0 }));
+}
+
 test "a full policy fits its rules" {
     var p: Policy = .{};
     for (0..max_entries) |i| {
         p.listen[i] = @intCast(1000 + i);
-        p.connect[i] = .{ .uid = @intCast(i), .proto = .udp, .port = @intCast(2000 + i) };
+        p.connect[i] = .{
+            .uid = @intCast(i),
+            .proto = .udp,
+            .port = @intCast(2000 + i),
+            .public = true,
+        };
         p.metadata[i] = @intCast(i);
     }
     p.nlisten = max_entries;

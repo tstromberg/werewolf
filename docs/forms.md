@@ -1,13 +1,15 @@
 # Forms
 
-A form is what a werewolf machine is for: an apko config in
-`forms/<name>.yaml`, the files it lays over the image in `forms/<name>/`,
-and beside it, optionally, its kernel modules (`<name>.modules`), network
-policy (`<name>.net`) and the files it leaves out of its packages
-(`<name>.prune`). A form includes one other with apko's `include:`, and
-gets that form's files, modules, policy and pruning too.
-`make list-forms` shows the chains; [design/forms.md](design/forms.md) is
-why there are so few.
+A form is what a werewolf machine is for, and a directory,
+`forms/<name>/`: `apko.yaml`, the Wolfi packages and accounts apko
+installs; `form.yaml`, what apko cannot say, from the form it is built on
+to its network policy and the posture checks it fails, and why;
+`rootfs/`, the files it lays over its packages; and, where it needs them,
+its own programs (`cmd/`), checks (`test/`), melange recipes (`melange/`)
+and a `README.md`. A form gets the parts of the form it is built on,
+and of that form's base, and adds its own. [forms/README.md](../forms/README.md)
+lists every file and key; `make list-forms` shows the chains;
+[design/forms.md](design/forms.md) is why there are so few.
 
 ## The forms
 
@@ -18,17 +20,27 @@ why there are so few.
 | `app` | `prod` | the unprivileged `app` user and group (204); no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
-| `node`, `python`, `jre` | `app` | running an application on :8080 |
-| `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](postgresql.md)) |
-| `demo` | `postgresql` | nginx and the status page ([demo.md](demo.md)) |
+| `node`, `python`, `ruby`, `jre` | `app` | running an application on :8080 |
+| `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](../forms/postgresql/README.md)) |
+| `demo` | `postgresql` | nginx and the status page ([demo.md](../forms/demo/README.md)) |
 | `prod-ssh` | `prod` | sshd, for people who log in |
-| `bastion` | `prod` | forwarding-only SSH, with explicit destinations ([bastion.md](bastion.md)) |
-| `tailscale` | `prod` | userspace subnet routing ([tailscale.md](tailscale.md)) |
-| `caddy` | `prod` | a web server that gets its own certificates ([caddy.md](caddy.md)) |
-| `valkey` | `prod` | Valkey 9.1 on a UNIX socket, for the application beside it ([valkey.md](valkey.md)) |
-| `openbao` | `prod` | OpenBao, unsealed by a key from the config and set up by itself ([openbao.md](openbao.md)) |
-| `step-ca` | `prod` | an internal certificate authority, ACME for the names the config allows ([step-ca.md](step-ca.md)) |
-| `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](wordpress.md)) |
+| `bastion` | `prod` | forwarding-only SSH, with explicit destinations ([bastion.md](../forms/bastion/README.md)) |
+| `tailscale` | `prod` | userspace subnet routing ([tailscale.md](../forms/tailscale/README.md)) |
+| `caddy` | `prod` | a web server that gets its own certificates ([caddy.md](../forms/caddy/README.md)) |
+| `valkey` | `prod` | Valkey 9.1 on a UNIX socket, for the application beside it ([valkey.md](../forms/valkey/README.md)) |
+| `openbao` | `prod` | OpenBao, unsealed by a key from the config and set up by itself ([openbao.md](../forms/openbao/README.md)) |
+| `step-ca` | `prod` | an internal certificate authority, ACME for the names the config allows ([step-ca.md](../forms/step-ca/README.md)) |
+| `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](../forms/wordpress/README.md)) |
+| `gatus` | `prod` | a status page watching a service ([gatus.md](../forms/gatus/README.md)) |
+| `sftpgo` | `prod` | SFTP for the users the config names, nothing else ([sftpgo.md](../forms/sftpgo/README.md)) |
+| `cloudflared` | `prod` | a Cloudflare Tunnel: hostnames served with no open port ([cloudflared.md](../forms/cloudflared/README.md)) |
+| `oauth2-proxy` | `prod` | a login in front of anything, by an OIDC provider ([oauth2-proxy.md](../forms/oauth2-proxy/README.md)) |
+| `mosquitto` | `prod` | an MQTT broker over TLS, users and ACLs from the config ([mosquitto.md](../forms/mosquitto/README.md)) |
+| `nats` | `prod` | a NATS server over TLS, with JetStream on `/data` ([nats.md](../forms/nats/README.md)) |
+| `minio` | `prod` | S3 object storage from `/data` ([minio.md](../forms/minio/README.md)) |
+| `ollama` | `prod` | models served on the CPU, behind a login of your choosing ([ollama.md](../forms/ollama/README.md)) |
+| `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
+| `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell; and a host for virtual machines |
 | `lima` | `prod` | the Lima test vehicle (`make lima`) |
 
@@ -72,19 +84,28 @@ saying so at every boot.
 
 An interpreter is the point of these forms, so posture's
 `programs-no-interpreters` fails on `php`, `node`, `python` and `jre` by
-design, as `kernel-no-hypervisor` does on `qemu-host`. `nginx` carries
-none.
+design, as `kernel-no-hypervisor` does on `qemu-host`, and each says so in
+its form.yaml, with its excuse:
+
+```yaml
+weaknesses:
+  programs-no-interpreters: php-fpm runs the application, which is what this form is for
+```
+
+`nginx` carries none. `make check` fails a machine on any posture
+failure its form does not excuse, and on any excused one that passes.
 
 ## Files a form leaves out
 
 A package sometimes declares a dependency nothing on the machine runs:
 Wolfi's `valkey-9.1` brings bash, because `posix-libc-utils`, which it
 names, ships `ldd` as a bash script. apk installs what a package declares,
-so `forms/<name>.prune` names the files to leave out, one path a line as
-it is in the image:
+so form.yaml's `prune` names the files to leave out, as each is in the
+image:
 
-```text
-usr/bin/bash
+```yaml
+prune:
+  - usr/bin/bash
 ```
 
 The build makes the root without them, the image records them in
@@ -93,6 +114,40 @@ it builds, so a slot built on the machine holds what the build's did.
 The package stays installed as far as apk's database and a release's
 manifest know; posture reports what the image holds. It is for a file a
 dependency drags in, never for trimming a package the form uses.
+
+## Bundles: one form taking several
+
+A form is built on one other. A machine that runs an application with
+its database is several forms side by side, so a form may take others
+`with` it, whose parts it gets too: their packages and accounts,
+services, policies, modules and pruning.
+
+```yaml
+# forms/mastodon/form.yaml
+base: ruby
+with: [postgresql, valkey, nginx]
+```
+
+The build puts each member's forms that the form's own chain lacks
+before the form itself, in order, so the form's own files win where two
+lay the same path, and merges their apko configs in the same order. Two
+users or groups of one name or id fail the build. `make list-forms` and
+`werewolf pack` follow the same chain.
+
+## Packages Wolfi does not ship
+
+A form whose application Wolfi does not package keeps a melange recipe
+for it, in Wolfi's own style, in `forms/<name>/melange/`: `vaultwarden`
+has `forms/vaultwarden/melange/vaultwarden.yaml`. The build runs melange
+in Wolfi's environment,
+checks each source by sha256, unpacks the packages over the image, and
+fails if a library they link is not one of the form's packages, so
+Wolfi's fixes to those reach the machine through its updater. While
+writing a recipe, `werewolf build-apk RECIPE` builds it alone and says
+what each package links. On macOS melange runs in QEMU, booted from
+werewolf's own Alpine kernel; on Linux, in bubblewrap. A recipe Wolfi
+would take is also the pull request to wolfi-dev/os that retires it; one
+it will not stays with its form.
 
 ## Private configuration files
 
@@ -206,12 +261,16 @@ is a file, given with `config` and read from `/run/svc/app`.
 `helloworld`: a Flask application, served by gunicorn on :8080, counting its
 visitors on `/data`. Three files.
 
-The form names what it is built on and the packages it adds, by their Wolfi
-names:
+The form names what it is built on, and the packages it adds by their
+Wolfi names:
 
 ```yaml
-# forms/helloworld.yaml
-include: python.yaml
+# forms/helloworld/form.yaml
+base: python
+```
+
+```yaml
+# forms/helloworld/apko.yaml
 contents:
   packages:
     - py3.13-flask
@@ -221,7 +280,7 @@ contents:
 The application goes where the `python` form looks for one:
 
 ```python
-# forms/helloworld/usr/lib/app/helloworld.py
+# forms/helloworld/rootfs/usr/lib/app/helloworld.py
 import fcntl
 
 from flask import Flask, jsonify
@@ -253,7 +312,7 @@ own service file, which leash reads to start it
 ([cmd/leash/leash.zig](../cmd/leash/leash.zig) lists every directive):
 
 ```
-# forms/helloworld/etc/sv/app/service
+# forms/helloworld/rootfs/etc/sv/app/service
 exec    /usr/bin/python3 -m gunicorn --bind 0.0.0.0:8080 --workers 2 --worker-tmp-dir /run/svc/app --no-control-socket --pythonpath /usr/lib/app --access-logfile - helloworld:app
 user    app
 pledge  stdio rpath wpath proc inet listen
@@ -294,14 +353,14 @@ again: the image is rebuilt. A machine never changes in place.
 
 ### What the leash holds
 
-The application can do what its service file and the form's `.net` say,
+The application can do what its service file and the form's `net` say,
 and nothing else. The kernel enforces each limit; nothing asks the program:
 
 | It tries | Without a line for it | The line |
 | --- | --- | --- |
 | to make a system call | refused as if the kernel had no such call (seccomp) | `pledge PROMISE...`: what classes of call it may make (`stdio rpath inet listen`), the OpenBSD-pledge words werewolf maps to calls ([design/pledge.md](design/pledge.md)) |
-| to listen on another port | the bind fails (Landlock) | `listen tcp/PORT` in the service, and `listen tcp/PORT` in the form's `.net` for fence |
-| to reach another machine: a database, an API | the connect fails (Landlock), and fence drops the packet | `connect tcp/PORT` in the service, and `connect app tcp/PORT` in the form's `.net` |
+| to listen on another port | the bind fails (Landlock) | `listen tcp/PORT` in the service, and `listen tcp/PORT` in the form's `net` for fence |
+| to reach another machine: a database, an API | the connect fails (Landlock), and fence drops the packet | `connect tcp/PORT` in the service, and `connect app tcp/PORT` in the form's `net` |
 | to write outside `/data/svc/app` and `/run/svc/app` | refused; the root is read-only besides | `write PATH` |
 | to run another program: a shell, `curl` | refused (`pledge exec`, then Landlock); there is no shell in the image anyway | `run PROGRAM` |
 | to read a secret | it has none | `secret NAME PATH`: a variable read from a file in the config |
@@ -315,13 +374,15 @@ a service asks, so an application that does not name them cannot make an
 anonymous executable file, squat another service's IPC key, or watch the
 machine's file activity.
 
-A form's `.net` adds to the ones it includes, so `helloworld` needs one only to
-allow more than `python.net` does. To serve on :8000 instead, change
+A form's `net` adds to its chain's, so `helloworld` needs one only to
+allow more than `python`'s does. To serve on :8000 instead, change
 gunicorn's `--bind` and the service's `listen` to 8000, and add:
 
-```
-# forms/helloworld.net
-listen tcp/8000
+```yaml
+# forms/helloworld/form.yaml
+base: python
+net:
+  - listen tcp/8000
 ```
 
 ### Ship it
@@ -336,7 +397,10 @@ It updates itself, as `prod` does: the updater follows Wolfi's packages,
 builds a new slot with your files carried forward, boots it once, and
 keeps it only if it commits ([updater.md](updater.md)). posture runs at
 every boot and says what holds; `programs-no-interpreters` is the one it
-expects to fail on a Python machine.
+fails on a Python machine, and `python`'s form.yaml excuses it, but only
+for `python` itself: excuses are not inherited, so a form of your own
+that `make check` boots names the weaknesses it has, as `example-python`
+does.
 
 A Node or Java application is the same on `node` or `jre`. A Node one is
 `server.js` in `/usr/lib/app`, or a service file of its own. A Java one is
@@ -429,7 +493,7 @@ on the console, that none escaped; it then runs the three allowlisted
 commands and logs that each ran. `make check` boots it with no shell and
 asserts both -- every attack contained, every allowed command executed
 (`check-shellfree-webshell-example`,
-[test/console-webshell-example](../test/console-webshell-example)) -- so
+[forms/webshell-example/test/console](../forms/webshell-example/test/console)) -- so
 the claim is tested, not just made.
 
 To put it where anyone can attack it, on a real VM on the Internet:

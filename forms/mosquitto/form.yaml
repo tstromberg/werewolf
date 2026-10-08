@@ -1,0 +1,9 @@
+base: prod
+
+# Mosquitto serves MQTT over TLS, and sends nothing: no bridges.
+net:
+  - listen tcp/8883
+
+# The check speaks MQTT with Mosquitto's own clients.
+dev:
+  - mosquitto-clients

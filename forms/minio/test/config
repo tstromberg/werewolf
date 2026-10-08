@@ -1,0 +1,9 @@
+#!/bin/sh
+# forms/minio/test/config DIR: the minio form's config for make check, in DIR: the
+# root user and password, which forms/minio/test/checks uses, with no newline,
+# since they are read into MinIO's environment as they are.
+set -eu
+mkdir -p "$1/minio"
+umask 077
+printf '%s' werewolf-check >"$1/minio/root_user"
+printf '%s' werewolf-check-password >"$1/minio/root_password"

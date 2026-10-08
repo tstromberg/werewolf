@@ -87,7 +87,6 @@ Known gaps, for the next reviewer:
   preimage, not a collision, to forge).
 - A tree-built image of a release form takes a release with its packages
   but older code: only packages and the kernel are compared (use DEV=1).
-- A tool that closes its output and then hangs outlives its deadline.
 
 ## Reliability Considerations
 

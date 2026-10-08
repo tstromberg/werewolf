@@ -1,0 +1,21 @@
+# Ollama, as its own user: it may bind :11434 and no other port, reach
+# the registry over HTTPS and a resolver, read the image, and write only
+# its own directories, where the models are. It starts its own runner
+# (itself) for a loaded model, so it pledges exec and may run only its
+# own program.
+exec    /usr/bin/ollama serve
+user    ollama
+pledge  stdio rpath wpath inet unix connect listen proc exec
+listen  tcp/11434
+connect tcp/443 tcp/53
+run     /usr/bin/ollama
+memory  8192
+nofile  65536
+env     HOME=/run/svc/ollama
+env     OLLAMA_HOST=0.0.0.0:11434
+env     OLLAMA_MODELS=/data/svc/ollama
+env     OLLAMA_KEEP_ALIVE=5m
+env     OLLAMA_NOPRUNE=1
+# Browsers on other origins may not drive it: the API is for the clients
+# that reach the port, and a form in front decides who those are.
+env     OLLAMA_ORIGINS=http://localhost,http://127.0.0.1

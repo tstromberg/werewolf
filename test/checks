@@ -10,7 +10,7 @@
 #         yet. When one starts holding, make it ok and update the docs.
 #
 # A form declares the ports it listens on in its network policy
-# (forms/FORM.net, `listen tcp/PORT`), which the build compiles into
+# (forms/FORM/form.yaml, `listen tcp/PORT`), which the build compiles into
 # /usr/share/werewolf/net as `listen tcp PORT`; ssh's 22 is declared by
 # sshd being installed. The listeners check fails on anything else
 # listening on the network (a socket bound to loopback alone serves the
@@ -18,7 +18,7 @@
 # answering waits for a socket to listen on each declared port but ssh's,
 # and http-answering for an HTTP answer on each that speaks it. A daemon
 # that speaks another protocol brings a check of its own in
-# test/checks-FORM, as a daemon's checks are skipped where it is not
+# forms/FORM/test/checks, as a daemon's checks are skipped where it is not
 # installed (command -v), the way data-encrypted is.
 #
 # The machine's settings, and the attacks on them, are posture's to judge
@@ -37,11 +37,13 @@ ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; 
 ok  boot-quiet       ! dmesg | grep -E 'Lockdown:|ptrace attach' | grep -v -e 'Lockdown: run: /dev/mem' -e 'ptrace attach of "runit"\[1\] was attempted by "\./run"'
 ok  listeners        bad=$(netstat -ltun | awk 'NR > 2 && $4 !~ /^(127\.|::1:)/ { n = split($4, a, ":"); print a[n] }' | sort -u | grep -vx -e none $(command -v sshd >/dev/null && echo -e 22) $(awk '$1 == "listen" { print "-e " $3 }' /usr/share/werewolf/net)); [ -z "$bad" ] || { echo "listening, undeclared: $bad"; exit 1; }
 ok  answering        for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 { print $3 }' /usr/share/werewolf/net); do i=0; until netstat -ltn | awk -v p=$p 'NR > 2 { n = split($4, a, ":"); if (a[n] == p) f = 1 } END { exit !f }'; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing listens on :$p"; exit 1; }; sleep 1; done; done
-# Plain HTTP on every declared port but ssh's and HTTPS's, as the runtime
-# forms' applications answer. Skipped where the form's daemon speaks
-# something else there (caddy redirects :80 to HTTPS; OpenBao's :8200 is
-# TLS): their own protocol is checked in test/checks-FORM.
-ok  http-answering   command -v caddy >/dev/null || command -v bao >/dev/null || for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 && $3 != 443 { print $3 }' /usr/share/werewolf/net); do i=0; until wget -q -T 5 -O /dev/null http://127.0.0.1:$p/; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing answers HTTP on :$p"; exit 1; }; sleep 1; done; done
+# HTTP on every declared port but ssh's and HTTPS's: any status line, as
+# an S3 store answers 403 to a stranger and oauth2-proxy sends one to the
+# provider, and a runtime form's application answers 200. Skipped where
+# the form's daemon speaks TLS there and nothing plain (OpenBao's :8200,
+# Mosquitto's :8883, NATS's :4222): their own protocol is checked in
+# forms/FORM/test/checks.
+ok  http-answering   command -v bao >/dev/null || command -v mosquitto >/dev/null || command -v nats-server >/dev/null || for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 && $3 != 443 { print $3 }' /usr/share/werewolf/net); do i=0; until wget -q -T 5 -S -O /dev/null http://127.0.0.1:$p/ 2>&1 | grep -q 'HTTP/1\.[01] [1-5][0-9][0-9]'; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing answers HTTP on :$p"; exit 1; }; sleep 1; done; done
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
@@ -57,8 +59,11 @@ ok  cgrouped         [ -d /run/cgroup/svc ] || exit 0; for d in /etc/sv/*/; do [
 # What outlives a leashed service is killed when runsv stops it: a process
 # put in the first such service's cgroup, as a detached backdoor would be,
 # dies (137, SIGKILL) at `sv restart`, by leash-reap, its ./finish, and the
-# service comes back up. Skipped on a form with no leashed service.
-ok  reaped           d=$(for d in /etc/sv/*/; do [ -f "$d/service" ] && echo "$d" && break; done); [ -n "$d" ] && [ -d /run/cgroup/svc ] || exit 0; n=$(basename "$d"); sleep 30 & s=$!; echo $s >/run/cgroup/svc/$n/cgroup.procs && sv restart "/etc/sv/$n" >/dev/null; wait $s; [ $? -eq 137 ] || { echo "the process in $n's cgroup outlived it"; exit 1; }; i=0; until sv status "/etc/sv/$n" | grep -q '^run:'; do i=$((i + 1)); [ $i -le 50 ] || { echo "$n did not come back"; exit 1; }; sleep 0.2; done
+# service comes back up. A service may take a while to stop (cloudflared
+# with no way out takes 30 s), so the planted process would live two
+# minutes, and the service has a minute to come back. Skipped on a form
+# with no leashed service.
+ok  reaped           d=$(for d in /etc/sv/*/; do [ -f "$d/service" ] && echo "$d" && break; done); [ -n "$d" ] && [ -d /run/cgroup/svc ] || exit 0; n=$(basename "$d"); sleep 120 & s=$!; echo $s >/run/cgroup/svc/$n/cgroup.procs && sv restart "/etc/sv/$n" >/dev/null; wait $s; [ $? -eq 137 ] || { echo "the process in $n's cgroup outlived it"; exit 1; }; i=0; until sv status "/etc/sv/$n" | grep -q '^run:'; do i=$((i + 1)); [ $i -le 300 ] || { echo "$n did not come back"; exit 1; }; sleep 0.2; done
 # The seal holds, enforcing, and seal-watch, which answers for it, has
 # given root up: _seal (66), no capabilities. Skipped when learning.
 ok  sealed           grep -q werewolf.seal=learn /proc/cmdline || { /usr/lib/werewolf/seal | grep -q '^seal: enforcing;' && p=$(pidof seal-watch) && grep -Eq '^Uid:[[:space:]]+66[[:space:]]+66[[:space:]]+66[[:space:]]+66$' /proc/$p/status && grep -Eq '^CapEff:[[:space:]]+0+$' /proc/$p/status && grep -Eq '^CapBnd:[[:space:]]+0+$' /proc/$p/status; }

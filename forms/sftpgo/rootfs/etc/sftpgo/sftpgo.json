@@ -1,0 +1,48 @@
+{
+  "common": {
+    "idle_timeout": 15,
+    "upload_mode": 0,
+    "max_total_connections": 100,
+    "max_per_host_connections": 20,
+    "temp_path": "/run/svc/sftpgo",
+    "defender": {
+      "enabled": true,
+      "driver": "memory",
+      "ban_time": 30,
+      "ban_time_increment": 50,
+      "threshold": 15,
+      "score_invalid": 2,
+      "score_valid": 1,
+      "score_limit_exceeded": 3,
+      "observation_time": 30,
+      "entries_soft_limit": 100,
+      "entries_hard_limit": 150
+    }
+  },
+  "sftpd": {
+    "bindings": [{ "port": 22, "address": "" }],
+    "max_auth_tries": 3,
+    "banner": "",
+    "host_keys": ["/data/svc/sftpgo/id_ed25519"],
+    "host_key_algorithms": ["ssh-ed25519"],
+    "kex_algorithms": ["mlkem768x25519-sha256"],
+    "ciphers": ["chacha20-poly1305@openssh.com", "aes256-gcm@openssh.com"],
+    "macs": ["hmac-sha2-256-etm@openssh.com"],
+    "public_key_algorithms": ["ssh-ed25519", "sk-ssh-ed25519@openssh.com"],
+    "password_authentication": false,
+    "keyboard_interactive_authentication": false,
+    "enabled_ssh_commands": []
+  },
+  "ftpd": { "bindings": [{ "port": 0 }] },
+  "webdavd": { "bindings": [{ "port": 0 }] },
+  "httpd": { "bindings": [{ "port": 0 }] },
+  "telemetry": { "bindings": [{ "port": 0 }] },
+  "data_provider": {
+    "driver": "sqlite",
+    "name": "/data/svc/sftpgo/sftpgo.db",
+    "users_base_dir": "/data/svc/sftpgo/users",
+    "backups_path": "/data/svc/sftpgo/backups",
+    "create_default_admin": false,
+    "naming_rules": 1
+  }
+}

@@ -145,6 +145,9 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     }
 
     const link = try Link.open(nic);
+    // What the carrier cost the boot: a NIC that comes up late (Hyper-V's,
+    // after its VMBus handshake) shows here, not in the exchange's time.
+    log.event("link", .{ .nic = nic, .carrier = link.carrier, .waited_ms = link.waited_ms });
     const dir = try sys(
         linux.openat(
             linux.AT.FDCWD,
@@ -345,8 +348,14 @@ const Engine = struct {
         }
     }
 
-    /// Broadcast `msg` from `src`, again at 1, 2, 4 and then every 8
-    /// seconds, until a reply to `xid` arrives or `deadline` passes. A send
+    /// Broadcast `msg` from `src`, again after 0.25, 0.5, 1, 2 and 4 and then
+    /// every 8 seconds, until a reply to `xid` arrives or `deadline` passes.
+    /// The first tries come quickly because a boot waits on them: the first
+    /// broadcast of a boot can go unanswered (under Lima's vzNAT, one boot in
+    /// three), and a 1 s first wait was then a second of every such boot. A
+    /// server slower than that sees the same `xid` twice and answers once.
+    /// Each wait is drawn from half to one and a half of its value (RFC 2131
+    /// 4.1), so machines booting together do not retransmit in step. A send
     /// or a receive that fails, as when the link drops for a moment, counts
     /// as a round with no answer: nothing restarts `keep`.
     fn exchange(e: *Engine, msg: []const u8, src: Ip4, xid: u32, deadline: i64) !?Reply {
@@ -360,10 +369,11 @@ const Engine = struct {
             .halen = 6,
             .addr = .{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0 },
         };
-        var wait: i64 = 1000;
+        var wait: i64 = 250;
         while (nowMs() < deadline) {
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
-            const until = @min(deadline, nowMs() + wait);
+            const spread: i64 = newXid() % @as(u32, @intCast(wait));
+            const until = @min(deadline, nowMs() + @divFloor(wait, 2) + spread);
             while (true) {
                 const left = until - nowMs();
                 if (left <= 0) break;
@@ -799,6 +809,9 @@ const Link = struct {
     packet: i32,
     /// An inet socket, for the parent's ioctls.
     inet: i32,
+    /// How long open waited for the carrier, in ms, and whether it came.
+    waited_ms: i64,
+    carrier: bool,
 
     fn open(nic: []const u8) !Link {
         if (nic.len == 0 or nic.len >= linux.IFNAMESIZE) {
@@ -823,6 +836,22 @@ const Link = struct {
         _ = try sys(linux.ioctl(l.inet, linux.SIOCGIFFLAGS, @intFromPtr(&ifr)), "SIOCGIFFLAGS");
         ifr.ifru.flags.UP = true;
         _ = try sys(linux.ioctl(l.inet, linux.SIOCSIFFLAGS, @intFromPtr(&ifr)), "SIOCSIFFLAGS");
+        // Then the carrier, up to 2 s: until the kernel has seen it
+        // (IFF_RUNNING), the NIC's queue drops what is sent, and the first
+        // DISCOVER of a boot was lost so in three boots of four under QEMU
+        // and one of three under Lima, each waiting out a retry. A link
+        // slower than that is the retries' to cover.
+        const since = nowMs();
+        l.carrier = false;
+        for (0..400) |_| {
+            ifr = l.ifreq();
+            _ = try sys(linux.ioctl(l.inet, linux.SIOCGIFFLAGS, @intFromPtr(&ifr)), "SIOCGIFFLAGS");
+            l.carrier = ifr.ifru.flags.RUNNING;
+            if (l.carrier) break;
+            const ts: linux.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
+            _ = linux.nanosleep(&ts, null);
+        }
+        l.waited_ms = nowMs() - since;
 
         // The packet socket hears nothing until it is bound: the filter goes
         // on, and is locked, first. Without the filter the kernel would copy

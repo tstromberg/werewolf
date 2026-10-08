@@ -9,8 +9,8 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-php.yaml) inherits `php.yaml` and replaces
-[index.php](../../forms/example-php/usr/share/nginx/html/index.php).
+The [form](../../forms/example-php/apko.yaml) inherits `php.yaml` and replaces
+[index.php](../../forms/example-php/rootfs/usr/share/nginx/html/index.php).
 It keeps the parent's services and network settings.
 
 A form declares the machine's packages, users, services and network permissions.

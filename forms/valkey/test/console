@@ -1,0 +1,8 @@
+# What the valkey form, booted as it ships, without a shell, must say on
+# its console (make check-shellfree-valkey; test/boot; forms/demo/test/console
+# has the format). Valkey starts, leashed, takes connections on its
+# socket, and stays up.
+
+seen    valkey-leashed    leash: \{"event":"start","service":"valkey"
+seen    valkey-ready      Ready to accept connections unix
+unseen  service-down      leash: \{"event":"(down|retry)"

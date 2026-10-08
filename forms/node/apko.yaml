@@ -1,0 +1,10 @@
+# node: prod, running a Node.js application. leash starts it
+# (etc/sv/app/service) as the app user, able to bind :8080 and nothing
+# else, reading the image and writing only /run/svc/app and /data/svc/app.
+# The application is /usr/lib/app, verified and read-only with the rest of
+# the root: a form of your own includes this one and lays its files there,
+# and its own etc/sv/app/service if it starts differently. Until then, a
+# server of one line. See docs/forms.md.
+contents:
+  packages:
+    - nodejs-22

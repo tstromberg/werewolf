@@ -1,0 +1,21 @@
+base: sshd
+
+# QEMU's user-mode network, as root: the guests' names and HTTP and HTTPS,
+# through the host's own sockets.
+net:
+  - connect root udp/53 tcp/53 tcp/80 tcp/443
+
+# KVM: built into the aarch64 kernel; on x86_64 a module for each vendor,
+# of which the machine's CPU takes one and refuses the other. The build
+# loads them with nested=0 (Makefile, MODULE_PARAMS).
+modules:
+  - "x86_64: kvm-intel kvm-amd"
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
+  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
+  programs-no-interpreters: busybox-full, the tools of those who log in, has awk
+  programs-no-shell: busybox-full's shell, for those who log in
+  ?kernel-no-hypervisor: it runs virtual machines, as its form allows, wherever its host lends it the hardware (EL2 on aarch64, VMX or SVM on x86_64)

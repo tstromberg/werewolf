@@ -1,0 +1,45 @@
+base: minimal
+
+# werewolf's programs from cmd/ this form's machines run, beside the
+# ones every form has (docs/programs.md)
+programs: [dhcp-client, cloud-metadata, slot-update, service-config]
+
+# The updater's network half, as _update: Wolfi and Alpine for apk, and the
+# CVE sources, Wolfi's security.json and the kernel CNA's records on
+# git.kernel.org, all over HTTPS, and the names to find them. Root, which
+# builds and installs the slot, has no network at all.
+net:
+  - connect _update tcp/443 udp/53 tcp/53
+  # No one reaches the metadata server, where the user data and its secrets
+  # are: cmd/cloud-metadata's fetcher, the one that asks, runs at boot before
+  # this policy is set, held to TCP port 80 by its own Landlock instead.
+
+# GCP's disks and NIC: SCSI disks behind virtio-scsi (the boot disk on
+# older machine types), and NVMe and Google's gVNIC (on newer ones, Arm's
+# included). Kept out of minimal, which runs where virtio is enough.
+modules:
+  - virtio_scsi sd_mod nvme gve
+  # AWS's NIC, the ENA; its disks are NVMe, as above.
+  - ena
+  # Azure's disks and synthetic NIC, on Hyper-V's VMBus, which is built in,
+  # as is the NIC on x86_64. Loaded only on Hyper-V (`@hyperv:`; stage0
+  # tells modload where the kernel registered VMBus, before it looks for the
+  # slot's disk, which may be behind it): elsewhere they find no VMBus, and
+  # hv_storvsc alone cost every boot 18 ms finding none. Accelerated
+  # networking's VF, a fast path beside the synthetic NIC, is left out: the
+  # NIC carries everything without it.
+  - "@hyperv: hv_storvsc"
+  - "aarch64: @hyperv: hv_netvsc"
+  # Packet sockets, for the DHCP client, which has no address to send from
+  # until its lease arrives.
+  - af_packet
+  # /data's LUKS. XTS and generic AES are built in, but the hardware AES
+  # drivers are modules, and with the loader closed nothing pulls them in on
+  # demand: without them dm-crypt still works, much slower, and says nothing.
+  - dm-crypt
+  - "aarch64: aes-ce-blk"
+  - "x86_64: aesni-intel"
+
+# make check's, for this form alone (forms/README.md)
+check:
+  native: true

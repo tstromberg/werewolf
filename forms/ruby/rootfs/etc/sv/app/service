@@ -1,0 +1,11 @@
+# The application, as its own user: it may bind :8080 and no other port,
+# read the image, and run only ruby. Gems come with the image; nothing is
+# installed at runtime, and the image is read-only, so Bundler is frozen.
+exec    /usr/bin/ruby /usr/lib/app/main.rb
+user    app
+pledge  stdio rpath proc inet listen
+memory  512
+listen  tcp/8080
+env     BUNDLE_FROZEN=true
+env     BUNDLE_DEPLOYMENT=true
+env     HOME=/run/svc/app

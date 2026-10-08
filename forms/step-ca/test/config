@@ -1,0 +1,25 @@
+#!/bin/sh
+# forms/step-ca/test/config DIR: the step-ca form's config for make check, in DIR, as
+# an operator would make one (forms/step-ca/README.md): a root CA whose key stays
+# here (DIR.work), an intermediate signed by it, with its key encrypted
+# under the password file, the CA's name and the names ACME may issue
+# for (forms/step-ca/test/checks).
+set -eu
+d=$1/step-ca
+w=$1.work
+rm -rf "$w"
+mkdir -p "$d" "$w"
+umask 077
+printf '%s' werewolf-check-password >"$d/password"
+openssl ecparam -name prime256v1 -genkey -noout -out "$w/root.key"
+openssl req -x509 -new -key "$w/root.key" -sha256 -days 30 -subj '/CN=werewolf check root' \
+	-addext 'basicConstraints=critical,CA:TRUE' -addext 'keyUsage=critical,keyCertSign,cRLSign' \
+	-out "$d/root.crt" 2>/dev/null
+openssl ecparam -name prime256v1 -genkey -noout -out "$w/intermediate.key"
+openssl req -new -key "$w/intermediate.key" -subj '/CN=werewolf check intermediate' \
+	-out "$w/intermediate.csr" 2>/dev/null
+printf 'basicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\n' >"$w/intermediate.ext"
+openssl x509 -req -in "$w/intermediate.csr" -CA "$d/root.crt" -CAkey "$w/root.key" -CAcreateserial -CAserial "$w/root.srl" \
+	-days 30 -sha256 -extfile "$w/intermediate.ext" -out "$d/intermediate.crt" 2>/dev/null
+openssl ec -in "$w/intermediate.key" -aes256 -passout "file:$d/password" -out "$d/intermediate.key" 2>/dev/null
+echo '{"names":["localhost"],"domains":["example.test"]}' >"$d/settings.json"

@@ -1,0 +1,15 @@
+# OpenBao is unsealed by the static key and set up by itself on its first
+# start (forms/openbao/test/config): the API answers over TLS alone and nothing
+# plain; the admin logs in with the password the config carries, a wrong
+# one is refused; the stdout audit device is on; the raw
+# storage endpoint is off; raft's cluster port is on loopback alone; and
+# the key and password are the service's, 0600.
+ok  bao-user         p=$(head -n 1 /run/cgroup/svc/openbao/cgroup.procs); grep -q '^Uid:[[:space:]]*208[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  bao-unsealed     i=0; until wget -q -T 5 --no-check-certificate -O /tmp/bao.json https://127.0.0.1:8200/v1/sys/health 2>/dev/null; do i=$((i + 1)); [ $i -le 90 ] || { echo "no healthy answer on :8200"; exit 1; }; sleep 1; done; grep -q '"initialized":true' /tmp/bao.json && grep -q '"sealed":false' /tmp/bao.json
+ok  bao-tls-only     ! wget -q -T 5 -O /dev/null http://127.0.0.1:8200/v1/sys/health 2>/dev/null
+ok  bao-admin-login  wget -q -T 5 --no-check-certificate -O /tmp/bao-login.json --post-data '{"password":"werewolf-check"}' https://127.0.0.1:8200/v1/auth/userpass/login/admin && grep -q '"client_token":"' /tmp/bao-login.json && grep -q '"policies":\["admin","default"\]' /tmp/bao-login.json
+ok  bao-wrong-password ! wget -q -T 5 --no-check-certificate -O /dev/null --post-data '{"password":"werewolf-wrong"}' https://127.0.0.1:8200/v1/auth/userpass/login/admin 2>/dev/null
+ok  bao-audited      t=$(sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p' /tmp/bao-login.json); wget -q -T 5 --no-check-certificate -O - --header "X-Vault-Token: $t" https://127.0.0.1:8200/v1/sys/audit | grep -q '"stdout/"'
+ok  bao-raw-off      t=$(sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p' /tmp/bao-login.json); wget -q -T 5 --no-check-certificate -S -O /dev/null --header "X-Vault-Token: $t" https://127.0.0.1:8200/v1/sys/raw/core 2>&1 | grep -q 'HTTP/1.1 404'
+ok  bao-cluster-local netstat -ltn | awk '{ print $4 }' | grep -qx '127.0.0.1:8201' && ! netstat -ltn | awk '{ print $4 }' | grep -q '^0.0.0.0:8201$'
+ok  bao-private      [ "$(stat -c '%u:%a' /run/svc/openbao/unseal-key)" = 208:600 ] && [ "$(stat -c '%u:%a' /run/svc/openbao/admin-password)" = 208:600 ] && [ "$(stat -c '%u:%a' /run/svc/openbao/tls-key)" = 208:600 ] && [ -f /data/svc/openbao/vault.db ]
