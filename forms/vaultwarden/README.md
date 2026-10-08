@@ -12,7 +12,7 @@ Bitwarden password manager's apps, and its web vault.
 | Config | `vaultwarden/admin_token`, an Argon2id PHC string (`vaultwarden hash`, or as [forms/vaultwarden/test/config](test/config) makes one); setting `domain` (the site's https URL, required) |
 
 ```sh
-build/host/werewolf pack vaultwarden -o config.tar --config config --domain https://vault.example.com
+build/host/howl pack vaultwarden -o config.tar --config config --domain https://vault.example.com
 ```
 
 ## Built by melange, until Wolfi ships it
@@ -36,7 +36,7 @@ runner, booted from werewolf's own Alpine kernel and a guest from
 (melange's own `QEMU_KERNEL_MODULES` writes them under `/lib`, which
 replaces the guest's `/lib` link and breaks its loader). A first build
 takes about five minutes; the package is kept in `build/vendor`, and
-`werewolf build-apk forms/vaultwarden/melange/vaultwarden.yaml` builds it alone.
+`howl build-apk forms/vaultwarden/melange/vaultwarden.yaml` builds it alone.
 
 ## Defaults
 

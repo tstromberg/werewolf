@@ -18,15 +18,15 @@ export SERVICE_BUILD="$PWD/build/$ARCH/$FORM"
 mkdir -p "$SERVICE_BUILD"
 umask 077
 printf '%s\n' "$VM" >"$CONFIG_DIR/hostname"
-make werewolf
-build/host/werewolf pack "$FORM" -o "$SERVICE_BUILD/config.tar" --config "$CONFIG_DIR"
+make howl
+build/host/howl pack "$FORM" -o "$SERVICE_BUILD/config.tar" --config "$CONFIG_DIR"
 ```
 
-`werewolf pack` checks the directory against what the form declares
+`howl pack` checks the directory against what the form declares
 before it writes anything: a missing key, or a destination or route the
 VM would refuse, fails here and names the file. It lists the targets the
 tar fits; cloud metadata limits the config to 32 files of at most 32 KiB,
-and AWS's user data to 16 KiB. `werewolf pack "$FORM" -h` lists the
+and AWS's user data to 16 KiB. `howl pack "$FORM" -h` lists the
 form's files and settings, which can also be given as flags. The tar
 contains secrets. Keep it private and out of Git. Base64 is an encoding,
 not encryption.
@@ -34,11 +34,11 @@ not encryption.
 ## Local Lima VM
 
 ```sh
-export VM_IP=$(build/host/werewolf create "$FORM" "$VM" --config "$CONFIG_DIR" | cut -f2)
+export VM_IP=$(build/host/howl create "$FORM" "$VM" --config "$CONFIG_DIR" | cut -f2)
 printf '%s\n' "$VM_IP"
 ```
 
-`werewolf create` packs and checks the config as `werewolf pack` does,
+`howl create` packs and checks the config as `howl pack` does,
 builds a boot disk for this VM, with A/B update slots and persistent
 `/data`, and starts it under Lima's VZ driver. It prints the VM's name,
 address and form; the line above keeps the address. It takes the same
@@ -56,7 +56,7 @@ If `create` reports no address, or the service is not up, read the VM's
 serial console:
 
 ```sh
-build/host/werewolf console "$VM"
+build/host/howl console "$VM"
 ```
 
 Return to the service tutorial to verify forwarding or tailnet access.
@@ -70,17 +70,17 @@ is a new disk, so delete the VM and create it again. To remove the VM,
 with its `/data` and its config disk:
 
 ```sh
-build/host/werewolf delete "$VM"
+build/host/howl delete "$VM"
 ```
 
 ## GCP VM
 
-On the default network, `werewolf create` does what this section does:
+On the default network, `howl create` does what this section does:
 
 ```sh
-build/host/werewolf create "$FORM" "$VM" --on gcp --config "$CONFIG_DIR"
-build/host/werewolf console "$VM" --on gcp
-build/host/werewolf delete "$VM" --on gcp     # the VM; its image stays, for others of the build
+build/host/howl create "$FORM" "$VM" --on gcp --config "$CONFIG_DIR"
+build/host/howl console "$VM" --on gcp
+build/host/howl delete "$VM" --on gcp     # the VM; its image stays, for others of the build
 ```
 
 It uses gcloud's project and zone (`CLOUDSDK_COMPUTE_ZONE` picks another),
@@ -174,13 +174,13 @@ export VM_IP=$(gcloud --project="$GCP_PROJECT" compute instances describe \
 
 ## AWS VM
 
-`werewolf create` makes the machine in the aws CLI's region (`aws
+`howl create` makes the machine in the aws CLI's region (`aws
 configure`, or `AWS_REGION` and `AWS_PROFILE`), in the default VPC:
 
 ```sh
-build/host/werewolf create "$FORM" "$VM" --on aws --config "$CONFIG_DIR"
-build/host/werewolf console "$VM" --on aws
-build/host/werewolf delete "$VM" --on aws     # the instance, its volume and security group; the AMI stays
+build/host/howl create "$FORM" "$VM" --on aws --config "$CONFIG_DIR"
+build/host/howl console "$VM" --on aws
+build/host/howl delete "$VM" --on aws     # the instance, its volume and security group; the AMI stays
 ```
 
 The first `create` of a build writes its disk straight into an EBS
@@ -206,12 +206,12 @@ groups, subnets) and EBS's direct API for snapshots (`ebs:StartSnapshot`,
 
 ## Change boot configuration
 
-In Lima, run the same `werewolf create` with the changed files or flags.
+In Lima, run the same `howl create` with the changed files or flags.
 It checks the new config, stops the VM, replaces its config disk and
 starts it again; the boot disk and `/data` stay, and with them a Tailscale
 node's identity. The stop is a hard one, a power cut: Lima sends its
 request to shut down only to a guest that answers ssh on Lima's network,
-and a werewolf machine does not. On AWS, run the same `werewolf create`
+and a werewolf machine does not. On AWS, run the same `howl create`
 too. For GCP, update the source files, regenerate the tar/base64 using the packing
 commands above, then replace the metadata and reboot:
 

@@ -114,7 +114,7 @@ be applied, the console must show the client's `bound` event, and the
 client must be split as it says it is, an engine running as `_dhcp`,
 chrooted, with no capabilities, under seccomp, and a parent keeping
 `CAP_NET_ADMIN` alone. Another, `check-static`, boots `minimal`, which has no DHCP client,
-without one too, and with a config tar from `werewolf pack --ip --gw --dns`
+without one too, and with a config tar from `howl pack --ip --gw --dns`
 ([test/checks-static](../test/checks-static)): init must take the address,
 route and DNS server from the tar's `network` file, and say so.
 
@@ -181,7 +181,7 @@ with KVM or HVF; under TCG, much longer. CI runs it nightly on x86_64.
 ## What `make check-gcp`, `check-aws` and `check-azure` do
 
 [test/cloud](../test/cloud) runs `prod-ssh`'s disk, as a release makes
-it, on a real cloud, as a user would: `werewolf create --on CLOUD` makes
+it, on a real cloud, as a user would: `howl create --on CLOUD` makes
 it that cloud's image (a GCP image, an AMI from an EBS snapshot written
 directly, an Azure managed disk) and boots a fresh machine of it, the
 arch's smallest (`ARCH=aarch64` or `x86_64`), with a config in its user
@@ -196,7 +196,7 @@ cloud's record of the machine's serial port:
 | `posture` | what fails is exactly what `prod-ssh`'s weaknesses say it fails |
 | `ssh-login` | root logs in, over the Internet, with the run's key, through the port `create --allow-from me` opened |
 | `reconfigure` | a second `create` of the name, with a new hostname, restarts the machine on it |
-| `delete` | `werewolf delete` leaves nothing of the machine: instance, disk, network, security group, firewall rule |
+| `delete` | `howl delete` leaves nothing of the machine: instance, disk, network, security group, firewall rule |
 
 The machine is made with `--allow-from me`, so werewolf itself opens the
 form's ports, to this host's address alone, as a user's `create` would. Everything the run made, the image included, is deleted

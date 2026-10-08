@@ -14,7 +14,7 @@ your own includes `caddy` and lays its site and Caddyfile over those.
 | Settings | `domain` (a hostname): the site's name. Without one the site is `:80`, plain HTTP, with no certificate |
 
 ```sh
-build/host/werewolf pack caddy -o config.tar --domain www.example.com
+build/host/howl pack caddy -o config.tar --domain www.example.com
 ```
 
 With a public name, Caddy does what it ships doing: a certificate from

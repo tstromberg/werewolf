@@ -11,7 +11,7 @@
 //! state: an instance's label says the form it was made from.
 
 const std = @import("std");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const images = @import("image.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -24,7 +24,7 @@ const label = "werewolf-form";
 pub const Place = struct { project: []const u8, zone: []const u8 };
 
 /// Where gcloud is set to work, or a refusal saying how to set it.
-pub fn place(io: Io, gpa: Allocator, why: *ww.Why) !Place {
+pub fn place(io: Io, gpa: Allocator, why: *howl.Why) !Place {
     const project = configValue(io, gpa, "project") orelse
         return why.refuse(
             "--on gcp: no gcloud, or no project: gcloud auth login, gcloud config set project " ++
@@ -89,7 +89,7 @@ pub fn ensureImage(
     arch: []const u8,
     disk: []const u8,
     work: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) ![]const u8 {
     const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     if (ask(
@@ -98,10 +98,10 @@ pub fn ensureImage(
         p,
         &.{ "compute", "images", "describe", name, "--format", "value(name)" },
     ) != null) {
-        ww.say(io, "image {s}: there already", .{name});
+        howl.say(io, "image {s}: there already", .{name});
         return name;
     }
-    ww.say(io, "image {s}: making it from {s}", .{ name, disk });
+    howl.say(io, "image {s}: making it from {s}", .{ name, disk });
     // GCP takes a raw disk named disk.raw, in a gzipped GNU tar, which
     // keeps the disk's holes where GNU tar is the tar; bsdtar writes them
     // out, and gzip makes them small again.
@@ -109,10 +109,10 @@ pub fn ensureImage(
     const tarball = try gpa.print("{s}/image.tar.gz", .{work});
     defer Dir.cwd().deleteFile(io, raw) catch {};
     defer Dir.cwd().deleteFile(io, tarball) catch {};
-    try ww.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
+    try howl.run(io, why, &.{ "qemu-img", "convert", "-f", "qcow2", "-O", "raw", disk, raw });
     const v = std.process.run(gpa, io, .{ .argv = &.{ "tar", "--version" } }) catch null;
     const gnu = if (v) |r| std.mem.find(u8, r.stdout, "GNU tar") != null else false;
-    try ww.run(io, why, &.{
+    try howl.run(io, why, &.{
         "tar",
         "-C",
         work,
@@ -129,7 +129,7 @@ pub fn ensureImage(
         p,
         &.{ "storage", "buckets", "describe", bucket, "--format", "value(name)" },
     ) == null) {
-        try ww.run(io, why, try gcloud(gpa, p, &.{
+        try howl.run(io, why, try gcloud(gpa, p, &.{
             "storage",                       "buckets",
             "create",                        bucket,
             "--location",                    region,
@@ -137,9 +137,9 @@ pub fn ensureImage(
         }));
     }
     const object = try gpa.print("{s}/{s}.tar.gz", .{ bucket, name });
-    try ww.run(io, why, try gcloud(gpa, p, &.{ "storage", "cp", tarball, object }));
+    try howl.run(io, why, try gcloud(gpa, p, &.{ "storage", "cp", tarball, object }));
     defer _ = ask(io, gpa, p, &.{ "storage", "rm", object });
-    try ww.run(io, why, try gcloud(gpa, p, &.{
+    try howl.run(io, why, try gcloud(gpa, p, &.{
         "compute",
         "images",
         "create",
@@ -182,10 +182,10 @@ pub fn create(
     size: ?[]const u8,
     image: []const u8,
     b64: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     const m = machine(arch);
-    try ww.run(io, why, try gcloud(gpa, p, &.{
+    try howl.run(io, why, try gcloud(gpa, p, &.{
         "compute",
         "instances",
         "create",
@@ -225,20 +225,20 @@ pub fn reconfigure(
     p: Place,
     name: []const u8,
     b64: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
-    try ww.run(io, why, try gcloud(gpa, p, &.{
+    try howl.run(io, why, try gcloud(gpa, p, &.{
         "compute",              "instances",
         "add-metadata",         name,
         "--zone",               p.zone,
         "--metadata-from-file", try gpa.print("user-data={s}", .{b64}),
     }));
-    try ww.run(
+    try howl.run(
         io,
         why,
         try gcloud(gpa, p, &.{ "compute", "instances", "stop", name, "--zone", p.zone }),
     );
-    try ww.run(
+    try howl.run(
         io,
         why,
         try gcloud(gpa, p, &.{ "compute", "instances", "start", name, "--zone", p.zone }),
@@ -288,8 +288,8 @@ pub fn awaitUp(io: Io, gpa: Allocator, p: Place, name: []const u8) !enum { up, p
     return .late;
 }
 
-pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *ww.Why) !void {
-    try ww.run(
+pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !void {
+    try howl.run(
         io,
         why,
         try gcloud(gpa, p, &.{ "compute", "instances", "delete", name, "--zone", p.zone }),

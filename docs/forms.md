@@ -132,7 +132,7 @@ The build puts each member's forms that the form's own chain lacks
 before the form itself, in order, so the form's own files win where two
 lay the same path, and merges their apko configs in the same order. Two
 users or groups of one name or id fail the build. `make list-forms` and
-`werewolf pack` follow the same chain.
+`howl pack` follow the same chain.
 
 ## Packages Wolfi does not ship
 
@@ -143,7 +143,7 @@ in Wolfi's environment,
 checks each source by sha256, unpacks the packages over the image, and
 fails if a library they link is not one of the form's packages, so
 Wolfi's fixes to those reach the machine through its updater. While
-writing a recipe, `werewolf build-apk RECIPE` builds it alone and says
+writing a recipe, `howl build-apk RECIPE` builds it alone and says
 what each package links. On macOS melange runs in QEMU, booted from
 werewolf's own Alpine kernel; on Linux, in bubblewrap. A recipe Wolfi
 would take is also the pull request to wolfi-dev/os that retires it; one
@@ -237,8 +237,8 @@ where the form keeps its application (its `etc/werewolf/app`: `/usr/lib/app`
 for `python`, `node` and `jre`; nginx's html root for `nginx` and `php`):
 
 ```sh
-build/host/werewolf create python web --app ./myapp     # ./myapp/main.py, on :8080
-build/host/werewolf build python --app ./myapp          # the release files, for elsewhere
+build/host/howl create python web --app ./myapp     # ./myapp/main.py, on :8080
+build/host/howl build python --app ./myapp          # the release files, for elsewhere
 ```
 
 DIR is what the application's own toolchain made (`go build`, `dotnet
@@ -246,7 +246,7 @@ publish`, `mvn package`, a checkout): regular files and directories, an
 executable bit kept, nothing setuid, no links. werewolf prints its sha256,
 over every path, executable bit and byte, so the same DIR makes the same
 image. An image with an application builds apart from the form's own, and
-a new application is a new machine: `werewolf delete`, then `create`.
+a new application is a new machine: `howl delete`, then `create`.
 [apps-by-hand.md](apps-by-hand.md) does all of it with `make` and `tar`,
 to show the mechanism underneath.
 

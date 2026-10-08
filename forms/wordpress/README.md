@@ -15,7 +15,7 @@ baked into a form ([forms.md](../../docs/forms.md#applications)).
 ```sh
 umask 077; mkdir -p config/wordpress
 htpasswd -nbB x 'the admin password' | cut -d: -f2 >config/wordpress/admin_password_hash
-build/host/werewolf pack wordpress -o config.tar --config config \
+build/host/howl pack wordpress -o config.tar --config config \
 	--url https://blog.example.com --title 'A blog' --admin-email me@example.com \
 	--smtp smtp.example.com:587 --smtp-user me@example.com --mail-from blog@example.com
 ```

@@ -19,7 +19,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 
 	-subj /CN=bao.example.com -addext subjectAltName=DNS:bao.example.com \
 	-keyout config/openbao/tls.key -out config/openbao/tls.crt
 printf '%s' 'the admin password' >config/openbao/admin_password      # no newline: it is the password
-build/host/werewolf pack openbao -o config.tar --config config --api-addr https://bao.example.com:8200
+build/host/howl pack openbao -o config.tar --config config --api-addr https://bao.example.com:8200
 ```
 
 ## Unsealed by a key, set up by itself

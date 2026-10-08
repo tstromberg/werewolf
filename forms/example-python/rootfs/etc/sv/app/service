@@ -1,5 +1,5 @@
 # python's service (forms/python), and one setting of the machine's own:
-# the greeting, given as `werewolf create example-python NAME --greeting
+# the greeting, given as `howl create example-python NAME --greeting
 # TEXT` or in app/settings.json, reaching the application as GREETING
 # (docs/forms.md, Settings). A secret would be a file instead: `config`.
 exec    /usr/bin/python3 /usr/lib/app/main.py

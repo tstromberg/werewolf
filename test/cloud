@@ -1,6 +1,6 @@
 #!/bin/sh
 # cloud: a werewolf form on a real cloud, made as a user makes one, with
-# `werewolf create --on CLOUD` (docs/design/cli.md): its release disk made
+# `howl create --on CLOUD` (docs/design/cli.md): its release disk made
 # that cloud's image, booted under UEFI, its config in the instance's user
 # data. Used by `make check-gcp`, `make check-aws` and `make check-azure`;
 # see docs/testing.md.
@@ -32,8 +32,8 @@ die() {
 cloud=${1:-cloud}
 [ $# -eq 3 ] || die "usage: cloud gcp|aws|azure FORM ARCH"
 form=$2 arch=$3
-werewolf=build/host/werewolf
-[ -x "$werewolf" ] || die "no $werewolf; make werewolf"
+howl=build/host/howl
+[ -x "$howl" ] || die "no $howl; make howl"
 
 case $cloud in
 gcp)
@@ -104,7 +104,7 @@ cleanup() {
 	rc=$?
 	trap - EXIT INT TERM
 	if [ "${CLOUD_KEEP:-}" = 1 ]; then
-		say "kept $name in $where; delete it with: $werewolf delete $name --on $cloud"
+		say "kept $name in $where; delete it with: $howl delete $name --on $cloud"
 	else
 		"$werewolf" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
 		# The image this run's create made, the one it named as it made it,
@@ -130,7 +130,7 @@ fail() {
 	failed=1
 }
 log=$work/serial.log
-serial() { "$werewolf" console "$name" --on "$cloud" 2>/dev/null | tr -d '\r' >"$log" || true; }
+serial() { "$howl" console "$name" --on "$cloud" 2>/dev/null | tr -d '\r' >"$log" || true; }
 seen() { grep -a -q -E "$1" "$log"; }
 # Until posture speaks for host, which is after every service has started;
 # a panic ends the wait early.
@@ -210,19 +210,19 @@ fi
 # one; create restarts the machine on it.
 echo "$name-b" >"$work/config/hostname"
 say "replacing its config"
-if "$werewolf" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then
+if "$howl" create "$form" "$name" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then
 	await_posture "$name-b"
 	cat "$log" >>"$keep"
 	seen "posture: .*\"host\":\"$name-b\"" && ok reconfigure ||
 		fail "reconfigure: posture does not name the new host $name-b"
 else
-	fail "reconfigure: werewolf create of the same name failed; its output is above"
+	fail "reconfigure: howl create of the same name failed; its output is above"
 fi
 
 # delete, as a user runs it, must leave nothing of the machine.
 if [ "${CLOUD_KEEP:-}" != 1 ]; then
 	say "deleting $name"
-	"$werewolf" delete "$name" --on "$cloud" >/dev/null || fail "delete: werewolf delete failed"
+	"$howl" delete "$name" --on "$cloud" >/dev/null || fail "delete: howl delete failed"
 	left=$(leftovers)
 	[ -z "$left" ] && ok delete || fail "delete: left $(echo "$left" | tr '\n' ' ')"
 fi

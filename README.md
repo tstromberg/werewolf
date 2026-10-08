@@ -38,21 +38,21 @@ privilege-separated binaries for basic functions such as auto-updates. Images ar
 ```sh
 make install-deps          # macOS, Debian, Ubuntu, Fedora, Arch; FreeBSD and NetBSD
                            # (experimental): tools/install-deps, then gmake
-make werewolf              # the werewolf command, for this machine: build/host/werewolf
-alias werewolf=build/host/werewolf
+make howl              # the howl command, for this machine: build/host/howl
+alias werewolf=build/host/howl
 
-werewolf run prod --dev    # the production base under QEMU, here, a shell on the console
-werewolf create bastion edge --authorized-keys ~/.ssh/id_ed25519.pub \
+howl run prod --dev    # the production base under QEMU, here, a shell on the console
+howl create bastion edge --authorized-keys ~/.ssh/id_ed25519.pub \
     --destinations 10.20.0.10:22          # a VM that stays: Lima on a Mac, bhyve on FreeBSD, else QEMU here
-werewolf create python web --app ./myapp  # your application on the python form, on :8080
-werewolf create prod-ssh box --on gcp --root-keys ~/.ssh/id_ed25519.pub
-werewolf console edge      # a VM's serial console, where a machine with no shell speaks
-werewolf delete edge
+howl create python web --app ./myapp  # your application on the python form, on :8080
+howl create prod-ssh box --on gcp --root-keys ~/.ssh/id_ed25519.pub
+howl console edge      # a VM's serial console, where a machine with no shell speaks
+howl delete edge
 make webshell-demo         # a deliberately vulnerable web app on :8080; try to escape it
 ```
 
 `create` builds the form, packs the machine's config, starts it and prints
-its name, address and form. `make` is the build; `werewolf` is how you use
+its name, address and form. `make` is the build; `howl` is how you use
 what it builds ([docs/design/cli.md](docs/design/cli.md)). `make run` and
 `make lima` remain, for working on werewolf itself.
 
@@ -63,13 +63,13 @@ machine and compare. See [docs/posture.md](docs/posture.md).
 ## Configure it
 
 A machine's secrets and settings travel in a config tar, never in the
-image. Its form declares what it takes, and `werewolf` turns flags into
+image. Its form declares what it takes, and `howl` turns flags into
 the tar, checked first with the code the machine checks it with: a bad
 route or a missing key fails on your laptop, naming the file.
 
 ```sh
-werewolf pack bastion -h                   # the flags bastion takes
-werewolf pack bastion -o edge.tar --authorized-keys ~/.ssh/id_ed25519.pub \
+howl pack bastion -h                   # the flags bastion takes
+howl pack bastion -o edge.tar --authorized-keys ~/.ssh/id_ed25519.pub \
     --destinations 10.20.0.10:22 --hostname edge
 ```
 

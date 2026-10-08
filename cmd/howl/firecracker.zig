@@ -13,7 +13,7 @@
 //!
 //! Firecracker is a process that exits when the guest stops, for a reboot
 //! as for a halt, so create starts it detached, under setsid, through
-//! werewolf's own supervisor (`werewolf _firecracker`), which runs it
+//! werewolf's own supervisor (`howl _firecracker`), which runs it
 //! again after a reboot, which the console tells from a halt, and keeps
 //! its console on the machine's console.log. Firecracker runs as this
 //! user; only the machine's network needs root, through sudo or doas: a
@@ -27,7 +27,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -223,7 +223,7 @@ pub fn networkUp(
     root: []const []const u8,
     n: Net,
     user: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     if (!done(io, gpa, root, &.{ "ip", "link", "show", n.tap })) {
         try run(
@@ -310,9 +310,9 @@ fn run(
     gpa: Allocator,
     root: []const []const u8,
     args: []const []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
-    try ww.run(io, why, try std.mem.concat(gpa, []const u8, &.{ root, args }));
+    try howl.run(io, why, try std.mem.concat(gpa, []const u8, &.{ root, args }));
 }
 
 /// The Firecracker the supervisor runs for the machine in dir, by its
@@ -336,7 +336,7 @@ pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
 
 /// A hard stop: Firecracker killed, which ends the machine as cutting its
 /// power would, and its supervisor, which removes the pidfile, waited for.
-pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: *ww.Why) !void {
+pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: *howl.Why) !void {
     if (builtin.os.tag != .linux) return;
     std.posix.kill(pid, .KILL) catch {};
     var waited: u32 = 0;
@@ -347,7 +347,7 @@ pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: 
     return why.refuse("{s}: its Firecracker, pid {d}, did not stop", .{ dir, pid });
 }
 
-/// The supervisor, `werewolf _firecracker DIR`, detached: runs Firecracker
+/// The supervisor, `howl _firecracker DIR`, detached: runs Firecracker
 /// on DIR's vm.json, its console on this process's standard output, with
 /// its standard input a pipe held open and never written, so the console
 /// reads nothing, and its pid in DIR's pidfile. Firecracker exits 0 when

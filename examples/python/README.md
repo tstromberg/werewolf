@@ -21,10 +21,10 @@ image gives each replacement VM the same starting configuration.
 ## Run it with werewolf
 
 ```sh
-make werewolf
-build/host/werewolf create example-python web --greeting "Hello from a setting"
+make howl
+build/host/howl create example-python web --greeting "Hello from a setting"
 curl -f http://ADDRESS:8080/          # the address create printed
-build/host/werewolf delete web
+build/host/howl delete web
 ```
 
 The greeting is a setting the form declares (`etc/sv/app/service`):

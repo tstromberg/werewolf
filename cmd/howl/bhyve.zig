@@ -6,7 +6,7 @@
 //! bhyve is a process, not a service: it runs until the guest halts, and
 //! exits 0 when the guest asks to reboot, to be run again. So create
 //! starts it under daemon(8), detached, with its console on the machine's
-//! console.log, through werewolf's own supervisor (`werewolf _bhyve`),
+//! console.log, through werewolf's own supervisor (`howl _bhyve`),
 //! which runs bhyve again on a reboot and destroys the VM when it stops.
 //! bhyve needs root, so what runs it goes through doas or sudo. The
 //! machine is on slirp's network, as QEMU's user network is: the host
@@ -145,7 +145,7 @@ pub fn destroy(gpa: Allocator, name: []const u8) ![]const []const u8 {
     );
 }
 
-/// The supervisor, `werewolf _bhyve NAME CONFIG BHYVE...`, under daemon(8)
+/// The supervisor, `howl _bhyve NAME CONFIG BHYVE...`, under daemon(8)
 /// as root: runs bhyve, whose console is this process's standard output,
 /// with its standard input a pipe held open and never written, so the
 /// console reads nothing. bhyve exits 0 when the guest asks to reboot, and
@@ -187,7 +187,7 @@ pub fn keep(
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const line = std.mem.print(&buf, "werewolf: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "howl: " ++ fmt ++ "\n", args) catch return;
     Io.File.stderr().writeStreamingAll(io, line) catch {};
 }
 

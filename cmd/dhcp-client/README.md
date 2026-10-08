@@ -73,4 +73,4 @@ Scripts need a shell; dhclient parses far more of the wire, as root.
 - **A link that drops for a moment** costs a round, not the program.
 - **A DHCP server down past the lease** does not take the machine off the
   network: the address is kept, as a cloud's does not change.
-- **Tested:** `make check-lease`, and `werewolf create` on Lima.
+- **Tested:** `make check-lease`, and `howl create` on Lima.

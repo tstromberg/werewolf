@@ -17,7 +17,7 @@
 # /lib -> usr/lib link and leaves it without its loader.
 #
 #   make _build-apk RECIPE=PATH   one recipe's packages, for its author
-#                                 (werewolf build-apk RECIPE)
+#                                 (howl build-apk RECIPE)
 VENDOR = build/vendor
 APKS = $(VENDOR)/packages/$(ARCH)
 MELANGE_GUEST = $(VENDOR)/melange-guest-$(ARCH).cpio

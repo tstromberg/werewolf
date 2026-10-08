@@ -17,7 +17,7 @@
 //! which its console reports, or a static one from its tar.
 
 const std = @import("std");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const images = @import("image.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -30,7 +30,7 @@ const wait_seconds = 180;
 /// The node, and what on it the machine uses.
 pub const Place = struct { host: []const u8, storage: []const u8, bridge: []const u8 };
 
-pub fn place(environ: *const std.process.Environ.Map, why: *ww.Why) !Place {
+pub fn place(environ: *const std.process.Environ.Map, why: *howl.Why) !Place {
     const host = environ.get("PROXMOX_HOST") orelse return why.refuse(
         "--on proxmox: PROXMOX_HOST=root@NODE names the node, by ssh; PROXMOX_STORAGE " ++
             "(local-lvm) and PROXMOX_BRIDGE (vmbr0) may follow",
@@ -88,17 +88,17 @@ pub fn ensureImage(
     form: []const u8,
     arch: []const u8,
     disk: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) ![]const u8 {
     const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     const path = try gpa.print("{s}/{s}.qcow2", .{ dir, name });
     if (ask(io, gpa, p, &.{ "test", "-f", path }) != null) {
-        ww.say(io, "image {s}: on {s} already", .{ name, p.host });
+        howl.say(io, "image {s}: on {s} already", .{ name, p.host });
         return path;
     }
-    ww.say(io, "image {s}: uploading {s} to {s}", .{ name, disk, p.host });
-    try ww.run(io, why, try remote(gpa, p, &.{ "mkdir", "-p", dir }));
-    try ww.run(io, why, &.{ "scp", "-q", disk, try gpa.print("{s}:{s}", .{ p.host, path }) });
+    howl.say(io, "image {s}: uploading {s} to {s}", .{ name, disk, p.host });
+    try howl.run(io, why, try remote(gpa, p, &.{ "mkdir", "-p", dir }));
+    try howl.run(io, why, &.{ "scp", "-q", disk, try gpa.print("{s}:{s}", .{ p.host, path }) });
     return path;
 }
 
@@ -118,10 +118,10 @@ pub fn upload(
     p: Place,
     tar: []const u8,
     name: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
-    try ww.run(io, why, try remote(gpa, p, &.{ "mkdir", "-p", dir }));
-    try ww.run(io, why, &.{
+    try howl.run(io, why, try remote(gpa, p, &.{ "mkdir", "-p", dir }));
+    try howl.run(io, why, &.{
         "scp",
         "-q",
         "-p",
@@ -201,9 +201,9 @@ pub fn create(
     name: []const u8,
     form: []const u8,
     image: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
-    try ww.run(io, why, try remote(gpa, p, try createArgs(gpa, p, vmid, name, form, image)));
+    try howl.run(io, why, try remote(gpa, p, try createArgs(gpa, p, vmid, name, form, image)));
 }
 
 pub fn createArgs(
@@ -268,14 +268,14 @@ fn configDisk(gpa: Allocator, p: Place, name: []const u8) ![]const u8 {
     );
 }
 
-pub fn start(io: Io, gpa: Allocator, p: Place, vmid: []const u8, why: *ww.Why) !void {
-    try ww.run(io, why, try remote(gpa, p, &.{ "qm", "start", vmid }));
+pub fn start(io: Io, gpa: Allocator, p: Place, vmid: []const u8, why: *howl.Why) !void {
+    try howl.run(io, why, try remote(gpa, p, &.{ "qm", "start", vmid }));
 }
 
 /// A hard stop: qm shutdown presses the ACPI power button, which no
 /// werewolf machine answers on x86_64 yet.
-pub fn stop(io: Io, gpa: Allocator, p: Place, vmid: []const u8, why: *ww.Why) !void {
-    try ww.run(io, why, try remote(gpa, p, &.{ "qm", "stop", vmid }));
+pub fn stop(io: Io, gpa: Allocator, p: Place, vmid: []const u8, why: *howl.Why) !void {
+    try howl.run(io, why, try remote(gpa, p, &.{ "qm", "stop", vmid }));
 }
 
 /// A new config for a VM that exists: stopped, its tar's disk replaced by
@@ -287,15 +287,15 @@ pub fn reconfigure(
     p: Place,
     m: Machine,
     name: []const u8,
-    why: *ww.Why,
+    why: *howl.Why,
 ) !void {
     if (m.running) try stop(io, gpa, p, m.vmid, why);
-    try ww.run(
+    try howl.run(
         io,
         why,
         try remote(gpa, p, &.{ "qm", "set", m.vmid, "--virtio1", try configDisk(gpa, p, name) }),
     );
-    try ww.run(
+    try howl.run(
         io,
         why,
         try remote(gpa, p, &.{ "qm", "disk", "unlink", m.vmid, "--idlist", "unused0", "--force" }),
@@ -303,9 +303,16 @@ pub fn reconfigure(
 }
 
 /// The VM, its disks and its files on the node, gone; the image stays.
-pub fn delete(io: Io, gpa: Allocator, p: Place, m: Machine, name: []const u8, why: *ww.Why) !void {
+pub fn delete(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    m: Machine,
+    name: []const u8,
+    why: *howl.Why,
+) !void {
     if (m.running) try stop(io, gpa, p, m.vmid, why);
-    try ww.run(io, why, try remote(gpa, p, &.{
+    try howl.run(io, why, try remote(gpa, p, &.{
         "qm",
         "destroy",
         m.vmid,

@@ -1,6 +1,6 @@
 #!/bin/sh
 # gcp: a werewolf form on Google Compute Engine, made as a user makes one,
-# with `werewolf create --on gcp` (docs/design/cli.md): its release disk an
+# with `howl create --on gcp` (docs/design/cli.md): its release disk an
 # image, booted under UEFI on a VM, its config in the instance's
 # user-data. Used by `make demo-gcp`, `make demo-gcp-delete`, `make
 # webshell-gcp` and `make webshell-gcp-delete`; see forms/demo/README.md
@@ -22,8 +22,8 @@ die() {
 	say "$*" >&2
 	exit 1
 }
-werewolf=build/host/werewolf
-[ -x "$werewolf" ] || die "no $werewolf; make werewolf"
+howl=build/host/howl
+[ -x "$howl" ] || die "no $howl; make howl"
 command -v gcloud >/dev/null || die "no gcloud; install the Google Cloud SDK and gcloud auth login"
 project=${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 [ -n "$project" ] || die "no project: gcloud config set project PROJECT, or GCP_PROJECT"
@@ -40,7 +40,7 @@ mode=${1:-}
 if [ "$mode" = demo-delete ] || [ "$mode" = webshell-delete ]; then
 	svc=$demo
 	[ "$mode" = webshell-delete ] && svc=$webshell
-	"$werewolf" delete "$svc" --on gcp || true
+	"$howl" delete "$svc" --on gcp || true
 	g compute firewall-rules delete "$svc-http" 2>/dev/null || true
 	exit 0
 fi
@@ -98,7 +98,7 @@ say "waiting for werewolf to serve on :$port"
 i=0
 until curl -fsS -m 3 -o /dev/null "$url/" 2>/dev/null; do
 	i=$((i + 1))
-	[ $i -le 120 ] || die "no answer after 10 minutes; the console: $werewolf console $name --on gcp"
+	[ $i -le 120 ] || die "no answer after 10 minutes; the console: $howl console $name --on gcp"
 	sleep 5
 done
 if [ "$mode" = webshell ]; then

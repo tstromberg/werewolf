@@ -1,4 +1,4 @@
-# The werewolf command
+# howl: the werewolf command
 
 **Note for reviewers**:
 While reviewing this proposal, focus on answering for yourself:
@@ -8,7 +8,7 @@ While reviewing this proposal, focus on answering for yourself:
 * Could the proposed implementation be made simpler?
 * Are there other alternatives to consider?
 
-Proposed, 2026-10-07. Built (cmd/werewolf, `make werewolf`): `build`,
+Proposed, 2026-10-07. Built (cmd/howl, `make howl`): `build`,
 `pack`, `run`; `create`, `delete` and `console` on Lima, GCP and AWS; and
 `upload` to GCP and AWS. On AWS (2026-10-07), prod on a t3.small and on
 a t4g.small (Graviton) runs end to end: imported, booted, its config from
@@ -26,10 +26,10 @@ for the page.
 
 ## Summary
 
-One static Zig binary, `werewolf`, with eight verbs: build an image, pack
+One static Zig binary, `howl`, with eight verbs: build an image, pack
 a config, and put the two on a machine, locally or in a cloud; and build
 a form's own package from a melange recipe. `make`
-stays the build system and the contributor's interface; `werewolf` is the
+stays the build system and the contributor's interface; `howl` is the
 user's. A bastion or a Tailscale router becomes one command, with its
 keys and destinations given as flags, and every deploy path CI tests is
 the path users type.
@@ -74,7 +74,7 @@ finished:
 - Every config error that can be found on the host is found on the host:
   a missing file, a bad route, a key in the wrong format, a tar over the
   target's limit. Each names the file.
-- `make check` boots machines through `werewolf`, so no deploy path
+- `make check` boots machines through `howl`, so no deploy path
   exists that CI does not run. `test/gcp`, `test/lima-demo` and the
   shell blocks in `service-vms.md` are deleted.
 - A built image carries a manifest, and the same inputs give the same
@@ -85,7 +85,7 @@ finished:
 ## Non-Goals
 
 - A daemon, a state file, a plugin system, or a config file for the tool.
-- Building without `make`, or `make` deploying without `werewolf`.
+- Building without `make`, or `make` deploying without `howl`.
 - `start`/`stop` apart from `create`/`delete`. A declarative machine is
   recreated, not paused.
 - Provider flags beyond `--on`. Region, project, zone and machine type
@@ -246,7 +246,7 @@ packed the tar, not in a cloud's metadata. So the bastion makes its own
 on first boot, as a distribution does: its `before` step,
 `ssh-host-key`, runs `ssh-keygen` once into `/data/svc/sshd` and logs the
 fingerprint and public half on the console at every boot, for
-`werewolf console` to show and an operator to pin. Without `/data` it
+`howl console` to show and an operator to pin. Without `/data` it
 stays down, rather than take a new identity each boot. To keep an
 identity across machines, keep `/data`.
 
@@ -364,12 +364,12 @@ stops one cleanly. If Lima wraps its probes in `/bin/sh` one day, they
 are managed with no change here.
 
 On bhyve, built, and experimental: FreeBSD on x86_64, with no CI run
-yet (`cmd/werewolf/bhyve.zig`). The machine's disk is built as for Lima,
+yet (`cmd/howl/bhyve.zig`). The machine's disk is built as for Lima,
 and bhyve's UEFI firmware (the `bhyve-firmware` package) boots it; the
 tar is a second virtio disk, read-only. bhyve is a process that needs
 root and exits when the guest halts, or with 0 when it asks to reboot,
 so `create` starts it through `doas` or `sudo` under `daemon(8)`,
-detached, running werewolf's own supervisor (`werewolf _bhyve`), which
+detached, running werewolf's own supervisor (`howl _bhyve`), which
 runs bhyve again after a reboot and destroys the VM when it stops; the
 console is bhyve's standard output, which `daemon` appends to
 `console.log` in `build/ARCH/machines/NAME`, where `console` reads it
@@ -392,7 +392,7 @@ bhyve and supervisor, and removes the directory. bhyve on arm64, new in
 FreeBSD 15 with other firmware, is not built.
 
 On Firecracker, built, and experimental: Linux with KVM
-(`cmd/werewolf/firecracker.zig`; `tools/install-deps` installs the
+(`cmd/howl/firecracker.zig`; `tools/install-deps` installs the
 pinned release, which no distribution packages). The machine boots
 directly: the kernel and the slot's initramfs, no bootloader and no
 slots, so no updater; a data disk of its own; the tar as a second
@@ -409,7 +409,7 @@ open until it next boots. Firecracker has
 no PCI, so `minimal.modules` carries `virtio_mmio`, its bus. Firecracker
 runs as the user and exits when the guest stops, for a reboot as for a
 halt, so `create` starts it detached, under `setsid`, through
-werewolf's own supervisor (`werewolf _firecracker DIR`), which keeps
+werewolf's own supervisor (`howl _firecracker DIR`), which keeps
 the console on `console.log` in `build/ARCH/machines/NAME`, tells a
 reboot from a halt by the kernel's last line there, runs Firecracker
 again after a reboot, and leaves its pid in a pidfile, which is the
@@ -428,7 +428,7 @@ data disk and its configuration, so `--dns` counts at the first
 `create` alone.
 
 On Proxmox VE, built, experimental, and never yet run against a node
-(`cmd/werewolf/proxmox.zig`). Proxmox's own command, `qm`, runs on the
+(`cmd/howl/proxmox.zig`). Proxmox's own command, `qm`, runs on the
 node, so `create` runs it there over ssh, with an explicit argument
 list, as it runs `limactl` and `gcloud` here: `PROXMOX_HOST=root@NODE`
 names the node, `PROXMOX_STORAGE` (`local-lvm`) its disks' storage and
@@ -507,7 +507,7 @@ On Azure, built, experimental, and run on both arches (2026-10-08): prod
 on `Standard_D2as_v4` in eastus and on `Standard_B2pls_v2` in westus2,
 each up in 2 to 3 s with posture clean, its root found through
 `hv_storvsc`, a second `create` with a new config, and `delete`
-(`cmd/werewolf/azure.zig`). A subscription may offer Arm sizes only in
+(`cmd/howl/azure.zig`). A subscription may offer Arm sizes only in
 some regions: `az vm list-skus -l LOCATION` says which. The subscription is `az`'s own and the
 resource group its default (`az configure --defaults group=RG`), which
 `create` names when it is missing and does not make. The release's
@@ -583,7 +583,7 @@ A bastion, forwarding to one host, with the config directory keeping the
 host key for next time:
 
 ```sh
-werewolf create bastion edge --on gcp --config edge \
+howl create bastion edge --on gcp --config edge \
     --authorized-keys ~/.ssh/id_ed25519.pub --destinations 10.20.0.10:22
 ```
 ```
@@ -599,7 +599,7 @@ so another `create` with new routes does not re-enroll:
 
 ```sh
 op read op://infra/tailscale/auth-key |
-    werewolf create tailscale router --on gcp --auth-key - --routes 10.20.0.0/24
+    howl create tailscale router --on gcp --auth-key - --routes 10.20.0.0/24
 ```
 ```
 router  34.1.2.4  tailscale
@@ -609,8 +609,8 @@ approve 10.20.0.0/24 for router at https://login.tailscale.com/admin/machines
 The same two, for a hypervisor this tool does not know:
 
 ```sh
-werewolf build bastion -o edge.qcow2
-werewolf pack bastion -o edge.tar --config edge --authorized-keys ~/.ssh/id_ed25519.pub \
+howl build bastion -o edge.qcow2
+howl pack bastion -o edge.tar --config edge --authorized-keys ~/.ssh/id_ed25519.pub \
     --destinations 10.20.0.10:22
 qm importdisk 100 edge.qcow2 local-lvm
 qm importdisk 100 edge.tar local-lvm --format raw
@@ -656,17 +656,17 @@ instead ride the A/B updater is the updater's question.
 3. `run`, replacing `make run`'s QEMU recipe.
 4. `create`, `delete`, `console`, `upload` for lima and gcp, deleting
    `test/lima-demo` and `test/gcp`. `make demo`, `make webshell-gcp` and
-   the checks call `werewolf`, so CI runs what users type.
+   the checks call `howl`, so CI runs what users type.
 5. firecracker, aws, azure.
 
 Each step removes a block of shell or prose; that is the measure.
 
 ## Drawbacks
 
-- **Two interfaces.** Contributors use `make`, users use `werewolf`, and
-  `werewolf build` calls `make`. The rule that one never does the other's
+- **Two interfaces.** Contributors use `make`, users use `howl`, and
+  `howl build` calls `make`. The rule that one never does the other's
   job has to be kept by hand.
-- **Flags read from service files are indirect.** `werewolf create
+- **Flags read from service files are indirect.** `howl create
   bastion --help` must build its flag list from the form chain, and a
   typo in a service file surfaces as a missing flag. The service file is
   already the schema the guest enforces, so this is one schema rather
@@ -787,7 +787,7 @@ The tool handles secrets on the host; the guest's protections
   argv cannot leak a key it never parsed.
 - **No `sh -c`, anywhere.** Every provider invocation is an argument
   list. A hostname or route that reaches `gcloud` cannot become a shell
-  word, and what `werewolf` runs can be printed with `-v` exactly as
+  word, and what `howl` runs can be printed with `-v` exactly as
   run.
 - **Settings cannot widen policy.** `settings.json` carries routes and
   destinations only; the kernel's egress ports, the service's
@@ -805,7 +805,7 @@ The tool handles secrets on the host; the guest's protections
 ## Reliability Considerations
 
 - **The deploy path is the tested path.** `make check` runs `werewolf
-  run` and `werewolf create --on lima`; `check-gcp` runs `create --on
+  run` and `howl create --on lima`; `check-gcp` runs `create --on
   gcp`. There is no path users take that CI does not.
 - **No state to lose.** `delete` and `console` ask the provider which
   machines exist. A laptop that dies mid-`create` leaves a machine the

@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const ww = @import("werewolf.zig");
+const howl = @import("howl.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -20,7 +20,7 @@ const posix = std.posix;
 pub const Options = struct {
     /// Everything, as it runs, and no log.
     verbose: bool = false,
-    /// What was run, to say again in a failure: "werewolf build caddy".
+    /// What was run, to say again in a failure: "howl build caddy".
     command: []const u8,
     /// Where the output goes.
     log: []const u8,
@@ -78,10 +78,10 @@ const frames = [_][]const u8{
 
 /// Run argv as o says. A failure has been said in full when this returns
 /// error.Refused with nothing in why, so the caller adds nothing.
-pub fn run(io: Io, gpa: Allocator, why: *ww.Why, argv: []const []const u8, o: Options) !Done {
+pub fn run(io: Io, gpa: Allocator, why: *howl.Why, argv: []const []const u8, o: Options) !Done {
     const start = Io.Clock.awake.now(io);
     if (o.verbose) {
-        try ww.run(io, why, argv);
+        try howl.run(io, why, argv);
         return .{ .seconds = start.untilNow(io, .awake).toSeconds() };
     }
     const err = Io.File.stderr();
@@ -375,10 +375,10 @@ pub const Look = struct {
 
     pub fn of(io: Io, f: Io.File) Look {
         const tty = f.isTty(io) catch false;
-        const dumb = if (ww.environ.get("TERM")) |t| std.mem.eql(u8, t, "dumb") else false;
+        const dumb = if (howl.environ.get("TERM")) |t| std.mem.eql(u8, t, "dumb") else false;
         return .{
             .tty = tty,
-            .color = tty and !dumb and ww.environ.get("NO_COLOR") == null,
+            .color = tty and !dumb and howl.environ.get("NO_COLOR") == null,
             .cols = if (tty) columns(f) else 80,
         };
     }

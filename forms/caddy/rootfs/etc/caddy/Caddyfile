@@ -1,5 +1,5 @@
 # Caddy for the caddy form: the site in /usr/share/caddy, from the image,
-# on the name the machine's settings give (DOMAIN; werewolf pack --domain),
+# on the name the machine's settings give (DOMAIN; howl pack --domain),
 # with a certificate Caddy gets itself. leash starts Caddy
 # (etc/sv/caddy/service) as the caddy user. A form on this one lays its
 # own file here.

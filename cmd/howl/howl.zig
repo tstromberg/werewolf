@@ -1,16 +1,19 @@
-//! werewolf: make what a werewolf machine needs, on the machine that makes
-//! it (docs/design/cli.md). Built for this host, not the image.
+//! howl: make what a werewolf machine needs, on the machine that makes
+//! it, and run it (docs/design/cli.md). Built for this host, not the image.
 //!
-//!     werewolf build FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-//!     werewolf pack FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
-//!     werewolf run FORM [--dev] [--app DIR] [CONFIG...]
-//!     werewolf build-apk RECIPE [--arch ARCH]
+//!     howl build FORM [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+//!     howl pack FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
+//!     howl run FORM [--on TARGET] [--dev] [CONFIG...]
+//!     howl create FORM NAME [--on TARGET] [--dev] [CONFIG...]
+//!     howl ssh|console [NAME], howl delete NAME, howl stop
+//!     howl build-apk RECIPE [--arch ARCH]
 //!
 //! build-apk builds a form's own package from a melange recipe (apk.zig).
 //!
-//! run boots FORM under QEMU here, as make run does, with the config tar
-//! the same flags as pack's make, checked as pack checks it, and nothing
-//! else: not ./config. --dev adds the debug shell. Ctrl-a x ends it.
+//! run is create, of the one machine it keeps, werewolf-run, on the engine
+//! create picks: Lima on macOS, bhyve on FreeBSD, Firecracker on Linux
+//! where its network needs no password, else QEMU (qemu.zig). ssh, console
+//! and stop without a name are that machine's.
 //!
 //! build makes FORM as a release is made, with make's _dist-form, never
 //! with a debug shell: its boot disk and slot in DIR (dist), named as a
@@ -157,7 +160,7 @@ fn fatal(io: Io, comptime fmt: []const u8, args: anytype) noreturn {
 
 pub fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [2048]u8 = undefined;
-    const line = std.mem.print(&buf, "werewolf: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "howl: " ++ fmt ++ "\n", args) catch return;
     Io.File.stderr().writeStreamingAll(io, line) catch {};
 }
 
@@ -232,7 +235,7 @@ const reserved = [_][]const u8{
 /// form in ./forms, or in the directory form names.
 fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.Form {
     Dir.cwd().access(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run werewolf in a werewolf checkout", .{});
+        return why.refuse("no ./forms: run howl in a werewolf checkout", .{});
     var f: forms.Failure = .{};
     return forms.chain(io, gpa, Dir.cwd(), form, &f) catch |err| switch (err) {
         error.Form => why.refuse("{s}", .{f.text}),
@@ -581,7 +584,7 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
             continue :flag;
         };
         return why.refuse(
-            "{s} takes no --{s}; werewolf pack {s} -h lists what it does",
+            "{s} takes no --{s}; howl pack {s} -h lists what it does",
             .{ o.form, flag, o.form },
         );
     }
@@ -1539,7 +1542,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     const dev, const args = try takeFlag(gpa, some, &.{"--dev"});
     var o = try options(gpa, args, why);
     if (o.out != null or o.check)
-        return why.refuse("create takes no -o or -n: werewolf pack writes a tar", .{});
+        return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
     const iface = try formInterface(io, gpa, o.form, why);
     var out = Io.File.stdout().writerStreaming(io, &.{});
     const w = &out.interface;
@@ -1649,7 +1652,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
         );
     if (!std.mem.eql(u8, on, "lima"))
         return why.refuse(
-            "--on {s} is not built yet: werewolf build and werewolf pack make its two files",
+            "--on {s} is not built yet: howl build and howl pack make its two files",
             .{on},
         );
     if (!lima.installed(
@@ -1674,7 +1677,7 @@ fn create(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     var built: ?i64 = null;
     if (try lima.exists(io, gpa, name)) {
         if (o.app != null) return why.refuse(
-            "{s} exists, and an application is in the image: werewolf delete {s}, then create",
+            "{s} exists, and an application is in the image: howl delete {s}, then create",
             .{ name, name },
         );
         managed = try reconfigure(io, gpa, name, o.form, dir, tar, why);
@@ -2066,7 +2069,7 @@ fn createBhyve(
     try run(io, why, argv.items);
     say(io, "{s}: waiting for it to boot", .{name});
     if (!try awaitUp(io, gpa, log, seen)) return why.refuse(
-        "{s} is not up after 3 minutes: werewolf console {s} --on bhyve",
+        "{s} is not up after 3 minutes: howl console {s} --on bhyve",
         .{ name, name },
     );
     for (fwds) |fw| say(
@@ -2076,7 +2079,7 @@ fn createBhyve(
     );
     if (fwds.len == 0) say(
         io,
-        "{s} listens on no port, so nothing reaches it; its console: werewolf console {s} --on " ++
+        "{s} listens on no port, so nothing reaches it; its console: howl console {s} --on " ++
             "bhyve",
         .{ name, name },
     );
@@ -2268,11 +2271,11 @@ fn createProxmox(
     switch (try proxmox.awaitUp(io, gpa, p, name, seen)) {
         .up => {},
         .panic => return why.refuse(
-            "{s} panicked: werewolf console {s} --on proxmox",
+            "{s} panicked: howl console {s} --on proxmox",
             .{ name, name },
         ),
         .late => return why.refuse(
-            "{s} not up after 3 minutes: werewolf console {s} --on proxmox",
+            "{s} not up after 3 minutes: howl console {s} --on proxmox",
             .{ name, name },
         ),
     }
@@ -2362,9 +2365,9 @@ fn reconfigure(
         return why.refuse("{s}/lima.yaml: {s}", .{ d, @errorName(err) });
     const managed = lima.isManaged(yaml);
     const was = lima.formOf(yaml) orelse
-        return why.refuse("{s} was not made by werewolf create; it is Lima's alone", .{name});
+        return why.refuse("{s} was not made by howl create; it is Lima's alone", .{name});
     if (!std.mem.eql(u8, was, form)) return why.refuse(
-        "{s} runs {s}, not {s}: another form is another disk; werewolf delete {s}, then create",
+        "{s} runs {s}, not {s}: another form is another disk; howl delete {s}, then create",
         .{ name, was, form, name },
     );
     if (!try lima.running(io, gpa, name)) {
@@ -2506,7 +2509,7 @@ fn newOnly(o: Options, name: []const u8, on: []const u8, why: *Why) error{Refuse
     if (o.allow_from == null) return;
     return why.refuse(
         "{s} exists, and keeps its rules as they are: --allow-from opens a new machine's ports " ++
-            "(werewolf delete {s} --on {s}, then create)",
+            "(howl delete {s} --on {s}, then create)",
         .{ name, name, on },
     );
 }
@@ -2539,15 +2542,15 @@ fn cloudMachine(
 /// application is in the image.
 fn reconfigurable(o: Options, name: []const u8, was: []const u8, on: []const u8, why: *Why) !void {
     if (o.app != null) return why.refuse(
-        "{s} exists, and an application is in the image: werewolf delete {s} --on {s}, then create",
+        "{s} exists, and an application is in the image: howl delete {s} --on {s}, then create",
         .{ name, name, on },
     );
     if (was.len == 0) return why.refuse(
-        "{s} was not made by werewolf create; it is {s}'s alone",
+        "{s} was not made by howl create; it is {s}'s alone",
         .{ name, on },
     );
     if (!std.mem.eql(u8, was, o.form)) return why.refuse(
-        "{s} runs {s}, not {s}: another form is another image; werewolf delete {s} --on {s}, " ++
+        "{s} runs {s}, not {s}: another form is another image; howl delete {s} --on {s}, " ++
             "then create",
         .{ name, was, o.form, name, on },
     );
@@ -2603,9 +2606,9 @@ fn createGcp(
     }
     switch (try gcp.awaitUp(io, gpa, p, name)) {
         .up => {},
-        .panic => return why.refuse("{s} panicked: werewolf console {s} --on gcp", .{ name, name }),
+        .panic => return why.refuse("{s} panicked: howl console {s} --on gcp", .{ name, name }),
         .late => return why.refuse(
-            "{s} not up after 5 minutes: werewolf console {s} --on gcp",
+            "{s} not up after 5 minutes: howl console {s} --on gcp",
             .{ name, name },
         ),
     }
@@ -2650,9 +2653,9 @@ fn createAws(
     }
     switch (try aws.awaitUp(io, gpa, p, id)) {
         .up => {},
-        .panic => return why.refuse("{s} panicked: werewolf console {s} --on aws", .{ name, name }),
+        .panic => return why.refuse("{s} panicked: howl console {s} --on aws", .{ name, name }),
         .late => return why.refuse(
-            "{s} not up after 5 minutes: werewolf console {s} --on aws",
+            "{s} not up after 5 minutes: howl console {s} --on aws",
             .{ name, name },
         ),
     }
@@ -2717,11 +2720,11 @@ fn azureUp(
     switch (try azure.awaitUp(io, gpa, p, name, before)) {
         .up => {},
         .panic => return why.refuse(
-            "{s} panicked: werewolf console {s} --on azure",
+            "{s} panicked: howl console {s} --on azure",
             .{ name, name },
         ),
         .late => return why.refuse(
-            "{s} not up after 5 minutes: werewolf console {s} --on azure",
+            "{s} not up after 5 minutes: howl console {s} --on azure",
             .{ name, name },
         ),
     }
@@ -2746,7 +2749,7 @@ fn upload(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
         base[0 .. base.len - "-disk.qcow2".len]
     else
         return why.refuse(
-            "{s}: a release's FORM-ARCH-disk.qcow2, as werewolf build makes one",
+            "{s}: a release's FORM-ARCH-disk.qcow2, as howl build makes one",
             .{disk},
         );
     const dash = std.mem.findScalarLast(

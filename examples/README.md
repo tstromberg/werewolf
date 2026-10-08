@@ -70,16 +70,16 @@ contains the packaged runtime, not the SDK.
 ## With werewolf
 
 Each tutorial's form is an ordinary form, so the `werewolf` command runs it
-as it runs any other, from the repository root (`make werewolf` builds it):
+as it runs any other, from the repository root (`make howl` builds it):
 
 ```sh
-build/host/werewolf create example-python web            # Lima on a Mac, else QEMU here
-build/host/werewolf create example-python web --on gcp   # Google Compute Engine
-build/host/werewolf create python web --app ./myapp      # your own app, on the python form
+build/host/howl create example-python web            # Lima on a Mac, else QEMU here
+build/host/howl create example-python web --on gcp   # Google Compute Engine
+build/host/howl create python web --app ./myapp      # your own app, on the python form
 ```
 
 It prints the VM's address; the application answers on :8080 (PHP on :80).
-`werewolf delete web` removes it. The Python tutorial's form takes a
+`howl delete web` removes it. The Python tutorial's form takes a
 setting, `--greeting TEXT`, as an example of handing an application
 per-machine values ([docs/forms.md](../docs/forms.md#without-a-form---app)).
 The Makefiles below do the same for QEMU and GCP step by step.

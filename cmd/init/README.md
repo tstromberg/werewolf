@@ -51,7 +51,7 @@ Each phase is a file: `kernel.zig`, `config.zig`, `network.zig`, `data.zig`,
    the tar's, nor its `network-config`.
 4. **The network**: `iface-up` with the command line's address, or else
    the config tar's `network` file's (`lib/network.zig`, checked as
-   `werewolf pack` checks it), or else `dhcp-client up`. Then, where no
+   `howl pack` checks it), or else `dhcp-client up`. Then, where no
    disk held a config, `cloud-metadata`; a `network` file it brings comes
    too late, and is said and not read. Then the hostname and root's keys.
 5. **`/data`**: a directory beside the slots, RAM, or the disk labelled
