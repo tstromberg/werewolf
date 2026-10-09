@@ -646,8 +646,8 @@ TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settin
 	lib/update-policy.zig lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig tools/form.zig boot/gpt.zig \
 	tools/cve-tiers.zig tools/kernel-config-check.zig tools/test-sk.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES))
-	@echo "test: $(words $(TEST_SOURCES)) suites passed"
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke
+	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/lib/sandbox.zig:
 	zig test --dep seal -Mroot=lib/sandbox.zig -Mseal=lib/seal.zig
 _test/lib/cmdline.zig:
@@ -676,6 +676,28 @@ _test/forms/%.zig:
 	zig test $(call ZIG_MODULES,forms/$*.zig)
 _test/%.zig:
 	zig test $*.zig
+
+# The lines the README and the docs advertise, run as a user runs them, as
+# far as a line goes with nothing built or booted: -h and -n. A regression
+# in how the verbs take a form shows here, not on someone's first try.
+.PHONY: _test/howl-smoke
+_test/howl-smoke: build/host/howl
+	@fail() { echo "howl-smoke: $$1"; exit 1; }; \
+	$(HOWL) run -h >/dev/null 2>&1 || fail "howl run -h"; \
+	$(HOWL) run -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"; \
+	$(HOWL) run --on qemu -n 2>&1 | grep -q 'prod-ssh as it is' || fail "howl run --on qemu -n should be prod-ssh"; \
+	$(HOWL) run --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"; \
+	$(HOWL) create smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"; \
+	$(HOWL) pack --with prod -h >/dev/null 2>&1 || fail "howl pack --with prod -h"; \
+	out=$$($(HOWL) run --with caddy,valkey -n 2>&1) || fail "howl run --with caddy,valkey -n: $$out"; \
+	echo "$$out" | grep -q 'with: \[caddy, valkey\]' || fail "run --with caddy,valkey -n did not show the form: $$out"; \
+	out=$$($(HOWL) run --with caddy -n 2>&1) || fail "howl run --with caddy -n: $$out"; \
+	echo "$$out" | grep -q 'as it is' || fail "one form alone should run as it is: $$out"; \
+	rm -rf $(BUILD)/adhoc/smoke; \
+	$(HOWL) form --with caddy --package curl -o $(BUILD)/adhoc/smoke -n >/dev/null 2>&1 || fail "howl form -n"; \
+	[ ! -e $(BUILD)/adhoc/smoke ] || fail "form -n left $(BUILD)/adhoc/smoke"; \
+	! $(HOWL) run caddy >/dev/null 2>&1 || fail "howl run caddy (a positional form) was taken"; \
+	echo "howl-smoke: the advertised lines take their forms"
 
 # posture (docs/posture.md) assumes nothing of werewolf: run here, as root,
 # it says how this Linux, whatever its distribution, protects itself. Built

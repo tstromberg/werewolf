@@ -64,11 +64,21 @@ since two forms in a chain may ship one path (`sshd` and `bastion` both bring
 CI's melange. Every package carries the release's serial as its version and
 `provides: werewolf-format=N`. Nothing is ever deleted.
 
-**The image's repository**, `/usr/share/werewolf/repo`, named by path in
+**The image's repository**, `/usr/share/werewolf/repo`, tagged `@local` in
 `/etc/apk/repositories`: `local-FORM` for each form outside `forms/`, with
 its fragments, `rootfs/`, OCI trees, `--app` and local recipes, its index
 signed by a key the build makes and discards. Closed after the build, which
-is what pinned means: the one layer that is not a package.
+is what pinned means: the one layer that is not a package. apk takes a
+package from a tagged repository only when world names it `name@local`, so
+world is the whole answer to what will not update, a line a package.
+
+**What howl builds.** Nothing of werewolf's, by default: programs and forms
+come from the repository, so a released `howl` alone makes any machine, and
+it updates. `--build` (which `make`'s targets pass) packs the tree's into
+the image's repository as `@local`; packages versioned by commit time are
+byte-identical to released ones from a clean tree, so howl tags only those
+that differ. howl's first line says which, and how many are pinned; the
+updater logs them each check.
 
 **compose**, `lib/compose.zig`, run by `build/host/form` on the host and
 `buildSlot` on the machine. From a root apk filled, it orders the staged

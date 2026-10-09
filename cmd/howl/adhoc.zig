@@ -14,8 +14,9 @@
 //!     howl form --with caddy,valkey -o forms/shop/   # keep the form
 //!
 //! Forms are references, --with, a name in forms/ or a kept form's
-//! directory; none means prod, or lima for a run whose machine goes on
-//! Lima, the form Lima manages. One reference and nothing to add runs
+//! directory; none means prod, or for run the form its environment
+//! wants: lima where the machine goes on Lima, the form Lima manages, and
+//! prod-ssh elsewhere, so there is a way in. One reference and nothing to add runs
 //! that form as it is, its own name, release URL and build; one reference
 //! with more is the generated form's base; several are taken by a form on
 //! the default. create's one positional is its machine's name. A form is
@@ -180,8 +181,12 @@ pub fn take(
     const fallback = if (verb == .run) defaultBase(io, gpa, args) else "prod";
     var p = try plan(gpa, verb, args, fallback, why);
     if (try references(&p, fallback, why)) |ref| {
-        // One form, as it is: its own name, release URL and build.
-        if (p.show_only) {
+        // One form, as it is: its own name, release URL and build. -n, on
+        // any verb but pack, whose own -n it is, has nothing to show.
+        const asked = p.show_only or (verb != .pack and for (args) |a| {
+            if (std.mem.eql(u8, a, "-n")) break true;
+        } else false);
+        if (asked) {
             howl.say(io, "{s} as it is: nothing to generate", .{ref});
             return null;
         }
@@ -517,9 +522,10 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
     return p;
 }
 
-/// run's form when the line names none: lima where the machine goes on
-/// Lima, which manages that form (sshd and bash, as Lima needs); prod
-/// elsewhere, and as the base of what --with, --package and --oci add.
+/// run's form when the line names none, the one its environment wants:
+/// lima where the machine goes on Lima, which manages that form (sshd and
+/// bash, as Lima needs); prod-ssh elsewhere, so there is a way in. Also
+/// the base of what --with, --package and --oci add to a run.
 fn defaultBase(io: Io, gpa: Allocator, args: []const []const u8) []const u8 {
     var on: ?howl.Platform = null;
     for (args, 0..) |a, i| {
@@ -531,7 +537,7 @@ fn defaultBase(io: Io, gpa: Allocator, args: []const []const u8) []const u8 {
             continue;
         on = std.meta.stringToEnum(howl.Platform, v);
     }
-    return if (howl.engine(io, gpa, on).on == .lima) "lima" else "prod";
+    return if (howl.engine(io, gpa, on).on == .lima) "lima" else "prod-ssh";
 }
 
 /// What --with named, or the default: one form and nothing to add is

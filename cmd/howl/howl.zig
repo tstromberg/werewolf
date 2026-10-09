@@ -79,7 +79,7 @@ const usage =
     \\usage: howl build --with FORM,... [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl pack --with FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; prod, or lima on Lima, with no --with
+    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, lima on Lima, else prod-ssh
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
@@ -1138,11 +1138,20 @@ pub fn writePrivate(io: Io, gpa: Allocator, path: []const u8, data: []const u8, 
 /// and in place of the last one. howl ssh, console and stop, with no
 /// name, are its.
 fn runForm(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
+    // run's references and flags, the form first, as create takes them;
+    // create's own taking is done here, once.
     const args = (try adhoc.take(io, gpa, .run, given, why)) orelse return;
     for (args) |a| if (std.mem.eql(u8, a, run_name))
         return why.refuse("{s} is the name run gives its machine: run [--with FORM] [flags]", .{a});
+    const asking = for (args) |a| {
+        if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) break true;
+    } else false;
     // The last one, wherever it ran: it has the name, and maybe the ports.
-    if (madeOn(io, gpa, run_name)) |was| remove(io, gpa, run_name, was, why) catch |err| say(
+    if (!asking) if (madeOn(
+        io,
+        gpa,
+        run_name,
+    )) |was| remove(io, gpa, run_name, was, why) catch |err| say(
         io,
         "{s}: the last one, on {t}, was not removed: {s}",
         .{ run_name, was, if (err == error.Refused) why.text else @errorName(err) },
@@ -1150,7 +1159,7 @@ fn runForm(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
     var with: std.ArrayList([]const u8) = .empty;
     try with.appendSlice(gpa, args);
     try with.append(gpa, run_name);
-    return create(io, gpa, with.items, why);
+    return createFrom(io, gpa, with.items, why);
 }
 
 /// How create tells what it does: everything, or one line and a summary;
@@ -1544,6 +1553,11 @@ const run_name = "werewolf-run";
 
 fn create(io: Io, gpa: Allocator, line: []const []const u8, why: *Why) !void {
     const all = (try adhoc.take(io, gpa, .create, line, why)) orelse return;
+    return createFrom(io, gpa, all, why);
+}
+
+/// create, its line already taken: the form first, then the name and flags.
+fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     const began = Io.Clock.awake.now(io);
     const verbose, const some = try verboseFlag(gpa, all);
     const dev, const args = try takeFlag(gpa, some, &.{"--dev"});
