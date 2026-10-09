@@ -5,7 +5,8 @@
 # coreutils applet; they run as app and gain nothing, held by the read and
 # write floor, the dropped capabilities and the empty network. net-tools
 # ships separate files, so hostname runs and ifconfig and route, unnamed,
-# are refused at the exec. There is no shell to run. No `connect`, so the
+# are refused at the exec. /bin/sh is sh-shim, which runs one of these or
+# nothing (the sh-shim form's `allow: [sh]`). No `connect`, so the
 # app reaches nothing on the network. One worker, so every visitor sees the
 # same history, but threaded: a sync worker blocks on a browser's idle
 # preconnect until its timeout kills it, and every other request waits.

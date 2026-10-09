@@ -563,33 +563,34 @@ line and the form a `loopback` port.
 ## webshell-example: a contained vulnerability
 
 `webshell-example` is a form that ships the worst thing a web application
-can do. Its page takes a string from an unauthenticated request, runs it as
-a command, through a shell or by a direct fork/exec, and shows the output.
-That is remote code execution by design, the bug behind a large share of
-real breaches. The form shows what an attacker gets for it on werewolf:
-nothing worth having.
+can do. Its page takes a string from an unauthenticated request, runs it
+as a command through `/bin/sh`, as an application's `sh -c` would, and
+shows the output. That is remote code execution by design, the bug behind
+a large share of real breaches. The form shows what an attacker gets for
+it on werewolf: nothing worth having.
 
 ```sh
 build/host/howl run --with webshell-example --on qemu
 ```
 
-This boots the form as it ships, with no shell, and forwards its port from
-this host's `http://127.0.0.1:8080` (or the free port it prints). Open it,
+This boots the form as it ships, with no shell: its `/bin/sh` is
+[sh-shim](../cmd/sh-shim/README.md). It forwards its port from this
+host's `http://127.0.0.1:8080` (or the free port it prints). Open it,
 or `curl` it, and try to escape. The page keeps the last 100 attempts, each with its source
 address, User-Agent, exit code and output, so a failed break-in is on the
 screen:
 
 ```sh
-$ curl --data-urlencode 'cmd=cat /etc/shadow' --data 'shell=1' 127.0.0.1:8080 >/dev/null
+$ curl --data-urlencode 'cmd=cat /etc/shadow && echo LEAK' 127.0.0.1:8080 >/dev/null
 $ curl --data-urlencode "cmd=/usr/bin/python3 -c \"open('/pwned','w')\"" 127.0.0.1:8080 >/dev/null
 $ curl -s 127.0.0.1:8080/attempts.json | python3 -m json.tool
-# cat /etc/shadow         -> not found: ... '/bin/sh'          (no shell ships)
+# cat ... && echo LEAK    -> sh-shim: refused: unquoted & is shell syntax   (no shell ships)
 # python3 open('/pwned')  -> OSError: Read-only file system    (dm-verity root)
 ```
 
-Each layer is a different wall. A shell command finds no `/bin/sh`. The
-Landlock floor does not include `/etc/shadow`, so reading a secret is
-denied. The root is read-only, so a write fails. The form declares no
+Each layer is a different wall. The shell is sh-shim, which runs one
+program and refuses `&&`, pipes and `$`. The Landlock floor does not
+include `/etc/shadow`, so reading a secret is denied. The root is read-only, so a write fails. The form declares no
 `connect`, so fence drops any packet going out. Even full Python, through
 the one interpreter that runs, cannot read a secret, change the system,
 persist, or call home, and a reboot returns the machine to the signed
@@ -604,11 +605,11 @@ The form ships coreutils and net-tools, and the service's `run` line names
 $ curl -s --data-urlencode 'cmd=id' 127.0.0.1:8080             # uid=527139628(app) gid=527139628(app) ...
 $ curl -s --data-urlencode 'cmd=cat /etc/passwd' 127.0.0.1:8080  # root:x:0:0:... app:x:527139628:527139628:...
 $ curl -s --data-urlencode 'cmd=cat /etc/shadow' 127.0.0.1:8080
-# refused: [Errno 13] Permission denied: '/etc/shadow'         (cat runs; the read is denied)
+# cat: /etc/shadow: Permission denied                          (cat runs; the read is denied)
 $ curl -s --data-urlencode 'cmd=dd if=/dev/zero of=/pwned' 127.0.0.1:8080
 # dd runs, but: dd: failed to open '/pwned': Read-only file system
 $ curl -s --data-urlencode 'cmd=ifconfig' 127.0.0.1:8080
-# refused: ... 'ifconfig'                                      (a separate binary, exec not allowed)
+# sh-shim: ifconfig: permission denied                        (a separate binary, exec not allowed)
 ```
 
 So remote code execution runs here, and two different walls hold it.
