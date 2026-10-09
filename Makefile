@@ -38,6 +38,9 @@
 #                        make -j check boots them side by side
 #   make check-FORM      one form's boot, built with a shell for the checks;
 #                        check-shellfree-FORM boots it as it ships, without one
+#   make check-compose   the form composed again from what its image stages,
+#                        over its packages' own accounts, as the updater
+#                        composes it: what the build made, or it fails
 #   make check-updater   a whole update, fetched from Wolfi and Alpine;
 #                        check-updater-staged cuts the power once it is staged,
 #                        and the next boot must take it
@@ -214,7 +217,7 @@ SEAL_BINS := $(foreach p,$(SEAL_PROGRAMS),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p)
 # sshd-start, is the sshd form's (programs:).
 SHELLFREE := runit-stage reboot grub-setenv slot-keep power-button debug-shell ssh-host-key leash leash-reap
 SHELLFREE_BINS := $(foreach p,$(SHELLFREE),$(PROGRAMS)/$(p)/usr/lib/werewolf/$(p))
-OVERLAY_DIRS = $(ROOTFS_DIRS) $(OUT)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(PROGRAMS)/bite-cleanup \
+OVERLAY_DIRS = $(OUT)/ro $(PROGRAMS)/init $(PROGRAMS)/modload $(PROGRAMS)/iface-up $(PROGRAMS)/fence $(PROGRAMS)/mount $(PROGRAMS)/mount-broker $(PROGRAMS)/posture $(addprefix $(PROGRAMS)/,$(SEAL_PROGRAMS) $(SHELLFREE)) $(PROGRAMS)/bite-cleanup \
 	$(sort $(foreach b,$(PROGRAM_BINS),$(patsubst %/usr/lib/werewolf/$(notdir $(b)),%,$(b))))
 
 # --- locks --------------------------------------------------------------------
@@ -311,6 +314,7 @@ endef
 # the updater builds a slot's stage0 as the build does (lib/compose.zig).
 NATIVE_MODULES := $(shell $(FORM_ASK) modules $(FORM_REF) $(ARCH) native)
 BITTEN_MODULES := $(shell $(FORM_ASK) modules $(FORM_REF) $(ARCH) bitten)
+ALL_MODULES := $(shell $(FORM_ASK) modules $(FORM_REF) $(ARCH) all)
 
 # Files a form leaves out of its packages, from form.yaml's prune along
 # the chain: a path an item, as it is in the image (usr/bin/bash). For what a package declares it needs and nothing on the
@@ -372,7 +376,7 @@ LIMA_CONSOLE = $(if $(filter vz,$(VMTYPE)),hvc0,$(CONSOLE))
 
 # A target whose name starts with _ is a step another target runs, with
 # FORM set for it; `make help` lists the ones to type.
-.PHONY: all install uninstall install-deps precommit hooks check-adhoc image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-deadman check-metadata check-dist check-gcp check-aws check-azure demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
+.PHONY: all install uninstall install-deps precommit hooks check-adhoc image slot bite-me disk run run-ssh lima lima-delete demo demo-delete webshell-demo _webshell-demo config-tar list-forms test check seal-learn check-slot check-compose check-updater check-updater-staged check-updater-release _check-updater check-nodata check-lease check-static check-unsigned check-verity check-deadman check-metadata check-dist check-gcp check-aws check-azure demo-gcp demo-gcp-delete webshell-gcp webshell-gcp-delete ci relock release-inputs dist posture clean help \
 	_check-form _check-shellfree-boot _check-slot-boot _check-updater-boot _check-nodata-boot _check-lease-boot _check-static-boot _check-unsigned-boot _check-unsigned-slot _check-metadata-boots _dist-form _check-dist-disk _check-cloud
 
 all: image
@@ -473,7 +477,7 @@ $(BUILD)/vmlinux: $(BUILD)/vmlinuz
 # the loader hands it each file as it is. The initramfs is compressed whole.
 # modules.tar for werewolf's own stage0, modules-bitten.tar for bite's.
 $(OUT)/modules.tar: STAGE0_MODULES = $(NATIVE_MODULES)
-$(OUT)/modules-bitten.tar: STAGE0_MODULES = $(MODULES)
+$(OUT)/modules-bitten.tar: STAGE0_MODULES = $(ALL_MODULES)
 $(OUT)/modules.tar $(OUT)/modules-bitten.tar: $(BUILD)/vmlinuz $(FORM_FILES) Makefile
 	rm -rf $(@:.tar=)
 	kver=$$(ls $(BUILD)/kernel/x/lib/modules); \
@@ -555,10 +559,11 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig -Mhostkey=lib/hostkey.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
-	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig
+	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig \
+	--dep form --dep seal --dep service -Mcompose=lib/compose.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
 	--dep update-policy --dep network --dep hostkey --dep form --dep audit --dep service \
-	--dep allow --dep cve --dep cmdline --dep sshd -Mroot=$(1) $(LIB_MODULES)
+	--dep allow --dep cve --dep cmdline --dep sshd --dep compose -Mroot=$(1) $(LIB_MODULES)
 
 define zig_build
 $(zig_check)
@@ -666,24 +671,26 @@ endif
 # was built, so a rebuild matches.
 #
 # compose (lib/compose.zig) derives what the chain says, from the image's
-# accounts: ro, a layer of the overlay, which the updater carries forward;
-# and meta's records. The rest of meta is copied in after it, each a file
-# a package will carry once werewolf's are packages
-# (docs/design/custom-updates.md). The etc/sv directories are
-# prerequisites too: a service removed or renamed changes nothing else Make
-# can see, and its supervise link would stay.
+# accounts: ro, the forms' rootfs and what compose makes, a layer of the
+# overlay; and meta's records, with the chain staged in forms/, from which
+# the updater composes the same again. The rest of meta is copied in after
+# it, each a file a package will carry once werewolf's are packages
+# (docs/design/custom-updates.md); overlay lists what the updater still
+# carries forward, werewolf's programs and the operator's --app. The etc/sv
+# directories are prerequisites too: a service removed or renamed changes
+# nothing else Make can see, and its supervise link would stay.
 $(OUT)/meta.stamp: $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(FORM_TOOL) $(call rootfs_find,-type f) $(call rootfs_find,-type d \( -path '*/etc/sv' -o -path '*/etc/sv/*' \)) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories test/posture-known Makefile
 	rm -rf $(OUT)/meta $(OUT)/ro $(OUT)/accounts
 	mkdir -p $(OUT)/accounts/etc && for f in passwd group shadow; do \
 		$(TAR) -xOf $(OUT)/rootfs.tar etc/$$f > $(OUT)/accounts/etc/$$f || exit 1; \
 	done
-	$(FORM_TOOL) compose $(FORM_REF) $(ARCH) $(OUT)/accounts $(OUT)/ro $(OUT)/meta $(if $(DEV),dev)
+	$(FORM_TOOL) compose $(FORM_REF) $(ARCH) test/posture-known $(OUT)/accounts $(OUT)/ro $(OUT)/meta $(if $(DEV),dev)
 	rm -rf $(OUT)/accounts
 	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
 	echo $$kernel > $$d/kernel && \
 	$(TAR) -xOf $(BUILD)/kernel/rootfs.tar etc/apk/repositories > $$d/alpine && \
-	for c in $(OVERLAY_DIRS); do (cd $$c && find . \( -type f -o -type l \) ! -name .DS_Store | sed 's|^\./||'); done | LC_ALL=C sort -u > $$d/overlay && \
+	for c in $(filter-out $(OUT)/ro,$(OVERLAY_DIRS)); do (cd $$c && find . \( -type f -o -type l \) ! -name .DS_Store | sed 's|^\./||'); done | LC_ALL=C sort -u > $$d/overlay && \
 	$(TAR) -xOf $(OUT)/rootfs.tar etc/apk/world | grep -v = > $(OUT)/meta/etc/apk/world && \
 	cp $(STAGE0_BIN) $$d/stage0.init && \
 	echo "$(FORM) $$kernel built-by-make" > $$d/release && \
@@ -1633,6 +1640,32 @@ _check-persist-boot:
 # installs CI's latest signed release; the claim also makes its root unlike
 # any release's. See test/update.
 CHECK_UPDATE = $(CHECK)/update-$(FORM)
+
+# check-compose: the form composed again as a machine's updater composes it
+# (cmd/slot-update, composeInto): from the chain its image stages, over the
+# account files wolfi-baselayout lays, as apk leaves them before compose
+# adds the forms' accounts. Its ro and its records must be the build's,
+# entry for entry; a difference is an update that would change the
+# machine for no reason the forms gave. No VM: check-updater boots one.
+CHECK_COMPOSE = $(OUT)/check-compose
+BASELAYOUT_URL = $(shell sed -n 's|.*"url": "\([^"]*/$(ARCH)/wolfi-baselayout-[^"]*\.apk\)".*|\1|p' $(FORM_LOCK))
+check-compose: $(OUT)/meta.stamp
+	@[ -n "$(BASELAYOUT_URL)" ] || { echo "check-compose: $(FORM_LOCK) names no wolfi-baselayout" >&2; exit 1; }
+	@rm -rf $(CHECK_COMPOSE) && mkdir -p $(CHECK_COMPOSE)/image/etc $(BUILD)/vendor/baselayout && \
+	pkg=$(BUILD)/vendor/baselayout/$(notdir $(BASELAYOUT_URL)) && \
+	{ [ -s $$pkg ] || { curl -sSfL -o $$pkg.tmp $(BASELAYOUT_URL) && mv $$pkg.tmp $$pkg; }; } && \
+	for f in passwd group shadow; do $(TAR) -xzOf $$pkg etc/$$f > $(CHECK_COMPOSE)/image/etc/$$f || exit 1; done
+	@cd $(OUT)/meta/usr/share/werewolf && $(abspath $(FORM_TOOL)) compose $(FORM) $(ARCH) posture-known \
+		$(abspath $(CHECK_COMPOSE))/image $(abspath $(CHECK_COMPOSE))/ro $(abspath $(CHECK_COMPOSE))/meta $(if $(DEV),dev)
+	@entries() { (cd $$1 && $(TAR) -cf - --format=mtree --options='!all,type,mode,link,sha256' $$2 | sed 1d | LC_ALL=C sort); }; \
+	entries $(OUT)/ro . > $(CHECK_COMPOSE)/build.ro && entries $(CHECK_COMPOSE)/ro . > $(CHECK_COMPOSE)/again.ro && \
+	recs=$$(cd $(CHECK_COMPOSE)/meta/usr/share/werewolf && ls) && \
+	entries $(OUT)/meta/usr/share/werewolf "$$recs" > $(CHECK_COMPOSE)/build.meta && \
+	entries $(CHECK_COMPOSE)/meta/usr/share/werewolf "$$recs" > $(CHECK_COMPOSE)/again.meta && \
+	if diff $(CHECK_COMPOSE)/build.ro $(CHECK_COMPOSE)/again.ro && diff $(CHECK_COMPOSE)/build.meta $(CHECK_COMPOSE)/again.meta; \
+	then echo "PASS   check-compose $(FORM): composed again from its staged chain, as the build made it"; \
+	else echo "FAIL   check-compose $(FORM): the lines above differ (<: the build, >: composed again)"; exit 1; fi
+
 check-updater: | $(CHECK_SHARED)
 	@$(MAKE) --no-print-directory FORM=prod DEV=1 _check-updater
 

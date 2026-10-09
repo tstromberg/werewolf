@@ -11,11 +11,13 @@
 //!   form cmdline FORM ARCH   the kernel arguments the image boots with
 //!   form module-params FORM ARCH  the parameters it loads modules with,
 //!                            MODULE:KEY=VALUE, a line each
-//!   form modules FORM ARCH native|bitten  its modules: for every boot, or
-//!                            those only a distro's disk needs, a line each
-//!   form compose FORM ARCH IMAGE RO META [dev]  what the chain derives,
-//!                            from the image's accounts under IMAGE, into
-//!                            RO and META (lib/compose.zig)
+//!   form modules FORM ARCH native|bitten|all  its modules: for every boot,
+//!                            those only a distro's disk needs, or both in
+//!                            the chain's order, a line each
+//!   form compose FORM ARCH KNOWN ACCOUNTS RO META [dev]  what the chain
+//!                            derives, from posture's known failures in
+//!                            KNOWN and the image's account files under
+//!                            ACCOUNTS/etc, into RO and META (lib/compose.zig)
 //!   form having KEY [VALUE]  the forms in forms/ whose check KEY is VALUE (true)
 //!   form every KEY           form.yaml's KEY in every form in forms/, once each
 //!   form apko FORM [PKG...]  the chain's apko configs as one, and PKGs
@@ -31,8 +33,8 @@ const form = @import("form");
 const compose = @import("compose");
 
 const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
-    "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH native|bitten, " ++
-    "compose FORM ARCH IMAGE RO META [dev], " ++
+    "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH native|bitten|all, " ++
+    "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], " ++
     "having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
 
 pub fn main(init: std.process.Init) !void {
@@ -129,23 +131,32 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
             m.native
         else if (is(args[3], "bitten"))
             m.bitten
+        else if (is(args[3], "all"))
+            m.all
         else
             return error.Usage;
         for (list) |name| try w.print("{s}\n", .{name});
-    } else if (is(verb, "compose") and (args.len == 6 or (args.len == 7 and is(args[6], "dev")))) {
-        const known = try root.readFileAlloc(io, "test/posture-known", gpa, .limited(64 << 10));
+    } else if (is(verb, "compose") and (args.len == 7 or (args.len == 8 and is(args[7], "dev")))) {
         const b: compose.Build = .{
             .arch = try arch(args[2]),
-            .dev = args.len == 7,
-            .posture_known = known,
+            .dev = args.len == 8,
+            .posture_known = try root.readFileAlloc(io, args[3], gpa, .limited(64 << 10)),
         };
-        var image = try root.openDir(io, args[3], .{});
-        defer image.close(io);
-        var ro = try root.createDirPathOpen(io, args[4], .{});
+        var image: [3][]const u8 = undefined;
+        for (&image, [_][]const u8{ "passwd", "group", "shadow" }) |*text, name| {
+            const path = try gpa.print("{s}/etc/{s}", .{ args[4], name });
+            text.* = try root.readFileAlloc(io, path, gpa, .limited(1 << 20));
+        }
+        const accounts: compose.Accounts = .{
+            .passwd = image[0],
+            .group = image[1],
+            .shadow = image[2],
+        };
+        var ro = try root.createDirPathOpen(io, args[5], .{});
         defer ro.close(io);
-        var meta = try root.createDirPathOpen(io, args[5], .{});
+        var meta = try root.createDirPathOpen(io, args[6], .{});
         defer meta.close(io);
-        try compose.compose(io, gpa, root, forms, image, ro, meta, b, f);
+        try compose.compose(io, gpa, root, forms, accounts, ro, meta, b, f);
     } else if (is(verb, "apko")) {
         try form.write(w, try form.apko(io, gpa, root, forms, args[2..], f));
     } else return error.Usage;

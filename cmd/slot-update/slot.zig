@@ -6,6 +6,8 @@
 
 const std = @import("std");
 const apk = @import("apk.zig");
+const compose = @import("compose");
+const form = @import("form");
 const m = @import("slot-update.zig");
 const Io = m.Io;
 const Dir = m.Dir;
@@ -44,16 +46,23 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // What apko does that apk does not: busybox's links, no setuid or setgid.
     u.step = "root";
     try busyboxLinks(u, r);
-    // werewolf's own files as the build laid them, and the apk setup and
-    // build record the next update will need.
-    for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try copyInto(u, r, p);
-    for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try copyInto(u, r, p);
+    // What the forms derive, composed as the build composes it, from the
+    // chain this image stages and the accounts apk laid; first, while the
+    // root's account files are still the packages' own.
+    u.step = "compose";
+    try composeInto(u, r);
+    u.step = "root";
+    // werewolf's own programs and the operator's --app as the build laid
+    // them, the apk setup, and the build's records but compose's.
+    for (try u.lines(try u.read(meta_dir ++ "/overlay"))) |p| try copyInto(u, r, "", p);
+    for (&[_][]const u8{ "etc/apk/repositories", "etc/apk/arch" }) |p| try copyInto(u, r, "", p);
     for (try u.listDir("/etc/apk/keys")) |name| try copyInto(
         u,
         r,
+        "",
         try u.gpa.print("etc/apk/keys/{s}", .{name}),
     );
-    try copyTree(u, r, "usr/share/werewolf");
+    try copyTree(u, r, "", "usr/share/werewolf", &compose.records);
     // What the form leaves out of its packages (Makefile, form.yaml's prune):
     // removed here as the build left them out, so this slot holds what the
     // build's did. One the packages no longer bring is noted, not an error:
@@ -62,14 +71,14 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         if (try r.remove(u, p)) continue;
         try u.record(.{ .event = "prune", .path = p, .why = "not in the packages now" });
     }
-    const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
+    const form_name = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
     try r.write(u, meta_dir ++ "/kernel", try u.gpa.print("{s}\n", .{new_kernel}));
     try r.write(
         u,
         meta_dir ++ "/release",
         try u.gpa.print(
             "{s} {s} {s} updated-on-{s}\n",
-            .{ form, try u.nowText(), new_kernel, u.host },
+            .{ form_name, try u.nowText(), new_kernel, u.host },
         ),
     );
     try stripSetid(u, root);
@@ -584,12 +593,69 @@ fn stripSetid(u: *Update, root: []const u8) !void {
     }
 }
 
-/// path, a directory, and everything under it, from this root into r:
-/// the build record, whose etc/ holds the image's accounts.
-fn copyTree(u: *Update, r: Root, path: []const u8) !void {
+/// What the forms derive (lib/compose.zig), laid into r as the build lays
+/// it. The chain comes from this image's /usr/share/werewolf/forms, which
+/// dm-verity vouches for; the accounts from r, as apk laid them, read as r
+/// reads every file. compose writes only into a scratch directory of this
+/// process's, and r takes that in through its own checks, so no link a
+/// package laid leads a write out of the new root.
+fn composeInto(u: *Update, r: Root) !void {
+    const io = u.io;
+    const scratch = work_dir ++ "/compose";
+    Dir.cwd().deleteTree(io, scratch) catch {};
+    var staged = Dir.cwd().openDir(io, meta_dir, .{}) catch |err| {
+        u.detail = meta_dir;
+        return err;
+    };
+    defer staged.close(io);
+    staged.access(io, "forms", .{}) catch {
+        u.detail = "this image stages no forms (/usr/share/werewolf/forms): it predates " ++
+            "compose; install a newer one";
+        return error.NoStagedForms;
+    };
+    var f: form.Failure = .{};
+    errdefer if (f.text.len > 0) {
+        u.detail = f.text;
+    };
+    const leaf = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
+    const forms = try form.chain(io, u.gpa, staged, leaf, &f);
+    const b: compose.Build = .{
+        .arch = switch (@import("builtin").cpu.arch) {
+            .aarch64 => .aarch64,
+            .x86_64 => .x86_64,
+            else => @compileError("werewolf runs on aarch64 and x86_64"),
+        },
+        .dev = if (staged.access(io, "dev", .{})) true else |_| false,
+        .posture_known = try u.read(meta_dir ++ "/posture-known"),
+    };
+    const image: compose.Accounts = .{
+        .passwd = try r.read(u, "etc/passwd"),
+        .group = try r.read(u, "etc/group"),
+        .shadow = try r.read(u, "etc/shadow"),
+    };
+    var ro = try Dir.cwd().createDirPathOpen(io, scratch ++ "/ro", .{});
+    defer ro.close(io);
+    var meta = try Dir.cwd().createDirPathOpen(io, scratch ++ "/meta", .{});
+    defer meta.close(io);
+    try compose.compose(io, u.gpa, staged, forms, image, ro, meta, b, &f);
+    try copyTree(u, r, scratch ++ "/ro", "", &.{});
+    try copyTree(u, r, scratch ++ "/meta", "", &.{});
+    try Dir.cwd().deleteTree(io, scratch);
+}
+
+/// path, a directory, and everything under it but the names in skip
+/// directly beneath it, from the tree at from ("" for this root) into r,
+/// directories too, so an empty one the build laid is there.
+fn copyTree(
+    u: *Update,
+    r: Root,
+    from: []const u8,
+    path: []const u8,
+    skip: []const []const u8,
+) !void {
     var d = Dir.cwd().openDir(
         u.io,
-        try u.gpa.print("/{s}", .{path}),
+        try u.gpa.print("{s}/{s}", .{ from, path }),
         .{ .iterate = true },
     ) catch |err| {
         u.detail = path;
@@ -598,21 +664,27 @@ fn copyTree(u: *Update, r: Root, path: []const u8) !void {
     defer d.close(u.io);
     var w = try d.walk(u.gpa);
     defer w.deinit();
-    while (try w.next(u.io)) |e| {
-        if (e.kind == .directory) continue;
-        try copyInto(u, r, try u.gpa.print("{s}/{s}", .{ path, e.path }));
+    next: while (try w.next(u.io)) |e| {
+        const top = e.path[0 .. std.mem.findScalar(u8, e.path, '/') orelse e.path.len];
+        for (skip) |s| if (std.mem.eql(u8, s, top)) continue :next;
+        const p = if (path.len == 0) e.path else try u.gpa.print("{s}/{s}", .{ path, e.path });
+        if (e.kind == .directory) {
+            (try r.makeDir(u, p)).close(u.io);
+            continue;
+        }
+        try copyInto(u, r, from, p);
     }
 }
 
-/// path, from this root into r, with its permissions. A symlink stays a
-/// symlink: a form's `run` that links to a binary must not become a copy
-/// of the old one. A .mountpoint is the empty file that keeps a mount
-/// point's directory in the image; here what is mounted there hides it,
-/// so it is made.
-fn copyInto(u: *Update, r: Root, path: []const u8) !void {
+/// path, from the tree at from ("" for this root) into r, with its
+/// permissions. A symlink stays a symlink: a form's `run` that links to a
+/// binary must not become a copy of the old one. A .mountpoint is the empty
+/// file that keeps a mount point's directory in the image; in this root
+/// what is mounted there hides it, so it is made.
+fn copyInto(u: *Update, r: Root, from: []const u8, path: []const u8) !void {
     errdefer u.detail = path;
     if (std.mem.eql(u8, std.fs.path.basename(path), ".mountpoint")) return r.write(u, path, "");
-    const src = try u.gpa.print("/{s}", .{path});
+    const src = try u.gpa.print("{s}/{s}", .{ from, path });
     var buf: [Dir.max_path_bytes]u8 = undefined;
     const n = Dir.cwd().readLink(u.io, src, &buf) catch |err| switch (err) {
         error.NotLink => return r.copy(u, src, path, null),

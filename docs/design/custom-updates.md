@@ -1,6 +1,6 @@
 # One updater: apk
 
-Proposed, 2026-10-08. Phase 1 built the same day (lib/compose.zig).
+Proposed, 2026-10-08. Phases 1 and 2a built the same day (lib/compose.zig).
 
 ## Summary
 
@@ -56,9 +56,10 @@ and werewolf programs (`form.yaml`'s `programs` becomes `depends`). apk
 refuses what cannot combine at build; apko still builds from a lock.
 
 **werewolf's repository**, published with each release, signed by a new key
-(`release/packages.pub`, in every image's `/etc/apk/keys`), on a static host
-as the tiers feed is: `werewolf-PROGRAM`, one a program, packed from what
-`zig build` makes; `form-NAME`, one a form in `forms/`, its `form.yaml`,
+(`release/packages.pub`, in every image's `/etc/apk/keys`), in R2 at
+`https://dist.werewolf-linux.org/apk/ARCH/`: `werewolf-PROGRAM`, one a
+program, packed from what `zig build` makes; `form-NAME`, one a form in
+`forms/`, its `form.yaml`,
 `apko.yaml` and `rootfs/` *staged* under `/usr/share/werewolf/forms/NAME/`,
 since two forms in a chain may ship one path (`sshd` and `bastion` both bring
 `etc/sv/sshd`) and apk refuses that; and in-tree recipes' packages, built by
@@ -105,11 +106,14 @@ the newest packages still providing N, with Wolfi's current fixes, logs
 
 **Phases.** 1, built: compose replaces the Makefile's `ro` and `meta`
 derivations and its kernel arguments, module parameters and module lists;
-every form's overlay, both arches, DEV and not, came out byte-identical. 2:
-`werewolf-*` packages, the key, the pin; the updater calls compose, and
-`check-compose` compares its root with the build's. 3: `form-*` packages;
-the overlay list goes. 4: the image's repository; `buildSlot` copies nothing
-forward. 5: the release path goes.
+every form's overlay, both arches, DEV and not, came out byte-identical.
+2a, built: the image stages its chain in `/usr/share/werewolf/forms`, and
+the updater composes from it, adding apko's accounts to apk's root itself;
+`make check-compose` holds that to the build's, and a slot a machine built
+under `check-updater` matched it file for file. 2b: `werewolf-*` packages,
+the key, the pin. 3: `form-*` packages; the overlay list goes. 4: the
+image's repository; `buildSlot` copies nothing forward. 5: the release
+path goes.
 
 ## Drawbacks
 

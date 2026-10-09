@@ -41,7 +41,8 @@ service stays down.
 | `kernel` | The same for `linux-virt` from Alpine, verified with `/etc/werewolf/alpine-keys`. |
 | `compare` | Diff the new root's installed packages and kernel against the running image's. No difference: log `check` and stop. A package or the kernel at an older version, in apk's order: log `skip` and stop, since an index carries no date, and an older one, signed, would install as readily as a newer. A build that rolled back before: log `skip` and stop. |
 | `cves` | Fetch the CVE sources and find what the update fixes (below), in children of their own ([Separation](#separation)). |
-| `root` | Add busybox's links, copy werewolf's own files forward, clear setuid and setgid bits, run `mkfs.erofs`. |
+| `compose` | Compose what the forms derive (`lib/compose.zig`), as the build composes it: from the chain this image stages in `/usr/share/werewolf/forms`, over the account files apk laid, into a scratch directory, which the root then takes in: the forms' files, accounts, network policy, promises, modules, kernel arguments. |
+| `root` | Add busybox's links, copy werewolf's programs, the operator's `--app` and the build's other records forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
 | `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init`, the module loader, the form's modules (`modules`, and on a distro's disk `modules-bitten` too, as the build's two stage0s are) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
@@ -347,7 +348,9 @@ The machine will find Alpine's current kernel newer, build and boot slot
 
 ## Limits
 
-- werewolf's own files (`init`, the run scripts, `bite`, the updater) are
-  copied forward, so they change only with a new image.
+- werewolf's programs (`init`, `fence`, the updater) are copied forward,
+  and its forms are the ones the image stages, so both change only with a
+  new image; what the forms derive is composed again at each update
+  ([custom-updates.md](design/custom-updates.md)).
 - An update needs the network: Wolfi, Alpine and git.kernel.org.
 - The kernel CVE list is what the CNA had published at update time.

@@ -4,9 +4,15 @@
 //! link; and the records in /usr/share/werewolf that init, fence, posture,
 //! modload and the updater read: the network policy, the promises, the
 //! modules, the kernel arguments. One function of the chain and the image's
-//! accounts, called by the build (build/host/form compose) and, once forms
-//! are packages, by the updater, so a slot built on a machine holds what
-//! the build's did.
+//! accounts, called by the build (build/host/form compose) and by the
+//! updater, from the forms the image stages, so a slot built on a machine
+//! holds what the build's did.
+//!
+//! It reads only the forms and the account files it is handed, and writes
+//! only into the two directories it is handed: on a machine those are a
+//! scratch directory the updater copies into the new root through its own
+//! checks, never the new root, where a package's link could lead a write
+//! out.
 
 const std = @import("std");
 const Io = std.Io;
@@ -32,29 +38,43 @@ pub const Build = struct {
     posture_known: []const u8 = "",
 };
 
+/// What compose makes in /usr/share/werewolf, by name: the updater carries
+/// every other record forward and composes these anew, so none of them is
+/// ever a stale copy.
+pub const records = [_][]const u8{
+    "cmdline",        "dev", "etc", "form",   "forms",         "module-params", "modules",
+    "modules-bitten", "net", "oci", "pledge", "posture-known", "prune",         "weaknesses",
+};
+
+/// An image's account files, as its packages leave them.
+pub const Accounts = struct { passwd: []const u8, group: []const u8, shadow: []const u8 };
+
 /// Writes what the chain derives into two trees: ro, laid over the
-/// packages and the forms' rootfs, which the updater carries forward by
-/// its overlay list; and meta, werewolf's records, /usr/share/werewolf.
-/// root is where the forms' directories resolve; image, the image's root,
-/// its packages installed, for its accounts.
+/// packages: the forms' rootfs, base first, then what compose makes; and
+/// meta, werewolf's records, /usr/share/werewolf, with the chain staged
+/// in it for the updater's compose. root is where the forms' directories
+/// resolve; image, the image's account files.
 pub fn compose(
     io: Io,
     gpa: Allocator,
     root: Dir,
     forms: []const Form,
-    image: Dir,
+    image: Accounts,
     ro: Dir,
     meta: Dir,
     b: Build,
     f: *Failure,
 ) !void {
     const allowed = try allowances(gpa, forms, f);
-    const passwd = try image.readFileAlloc(io, "etc/passwd", gpa, .limited(1 << 20));
-    const group = try image.readFileAlloc(io, "etc/group", gpa, .limited(1 << 20));
-    const shadow = try image.readFileAlloc(io, "etc/shadow", gpa, .limited(1 << 20));
+    const accts = try withAccounts(io, gpa, root, forms, image, f);
+    const passwd = accts.passwd;
+    const group = accts.group;
+    const shadow = accts.shadow;
 
-    // ro: the allowances, an empty file each, where init, fence and
-    // posture read them.
+    // ro: each form's rootfs, base first, so its own files win.
+    for (forms) |fm| try lay(io, gpa, root, try gpa.print("{s}/rootfs", .{fm.dir}), ro, "");
+    // The allowances, an empty file each, where init, fence and posture
+    // read them.
     try ro.createDirPath(io, "etc/werewolf/allow");
     for (allowed) |a| try put(io, ro, try gpa.print("etc/werewolf/allow/{s}", .{a}), "");
     const sshd_config = try form.sshdConfig(gpa, forms, f);
@@ -90,6 +110,40 @@ pub fn compose(
     // meta: the records.
     var rec = try meta.createDirPathOpen(io, "usr/share/werewolf", .{});
     defer rec.close(io);
+    // The chain, staged as forms/NAME, each form's form.yaml, apko.yaml
+    // and rootfs, and what every form of its kind fails: what the updater
+    // composes the next slot from.
+    for (forms, 0..) |fm, i| {
+        for (forms[0..i]) |before| if (mem.eql(u8, before.name, fm.name)) return f.fail(
+            gpa,
+            "{s} and {s}: two forms named {s} in one chain; the image stages each by name",
+            .{ before.dir, fm.dir, fm.name },
+        );
+        const stage = try gpa.print("forms/{s}", .{fm.name});
+        try rec.createDirPath(io, stage);
+        for ([_][]const u8{ "form.yaml", "apko.yaml" }) |file| {
+            const src = try gpa.print("{s}/{s}", .{ fm.dir, file });
+            const text = root.readFileAlloc(
+                io,
+                src,
+                gpa,
+                .limited(256 << 10),
+            ) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+            try put(io, rec, try gpa.print("{s}/{s}", .{ stage, file }), text);
+        }
+        try lay(
+            io,
+            gpa,
+            root,
+            try gpa.print("{s}/rootfs", .{fm.dir}),
+            rec,
+            try gpa.print("{s}/rootfs", .{stage}),
+        );
+    }
+    try put(io, rec, "posture-known", b.posture_known);
     const top = forms[forms.len - 1];
     try put(io, rec, "form", try gpa.print("{s}\n", .{top.name}));
     const mods = try modules(gpa, forms, b.arch);
@@ -111,6 +165,175 @@ pub fn compose(
 
 fn put(io: Io, dir: Dir, path: []const u8, data: []const u8) !void {
     try dir.writeFile(io, .{ .sub_path = path, .data = data });
+}
+
+/// The tree at src, under root, laid into dst at to ("" for dst itself):
+/// files with their modes, links as links, each replacing what is there.
+/// No src lays nothing. A Mac's .DS_Store is left out, as the build leaves
+/// it out.
+fn lay(io: Io, gpa: Allocator, root: Dir, src: []const u8, dst: Dir, to: []const u8) !void {
+    var from = root.openDir(io, src, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => |e| return e,
+    };
+    defer from.close(io);
+    var into = if (to.len == 0) dst else try dst.createDirPathOpen(io, to, .{});
+    defer if (to.len > 0) into.close(io);
+    var w = try from.walk(gpa);
+    defer w.deinit();
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    while (try w.next(io)) |e| {
+        if (mem.eql(u8, e.basename, ".DS_Store")) continue;
+        switch (e.kind) {
+            .directory => try into.createDirPath(io, e.path),
+            .sym_link => {
+                const target = buf[0..try from.readLink(io, e.path, &buf)];
+                into.deleteFile(io, e.path) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => |x| return x,
+                };
+                try into.symLink(io, target, e.path, .{});
+            },
+            .file => try from.copyFile(e.path, into, e.path, io, .{}),
+            else => return error.UnexpectedFileKind,
+        }
+    }
+}
+
+/// The image's account files with the chain's accounts, apko.yaml's
+/// accounts:, as apko adds them: each group to group, each user to passwd
+/// and shadow, after the packages' own, in the chain's order. On the
+/// build's root apko has added them, and each file must end in exactly the
+/// lines apko's rule gives, in that order; on a machine's, which apk
+/// filled, none is there, and compose adds them. Anything between, a root
+/// apko built from other accounts, is refused: what compose gave there, no
+/// machine's update would. A home other than /var/empty or /dev/null is
+/// refused: apko makes it on the build's root, and nothing would on a
+/// machine's.
+pub fn withAccounts(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    forms: []const Form,
+    image: Accounts,
+    f: *Failure,
+) !Accounts {
+    var group: Added = .{ .file = "group" };
+    var passwd: Added = .{ .file = "passwd" };
+    var shadow: Added = .{ .file = "shadow" };
+    const merged = try form.apko(io, gpa, root, forms, &.{}, f);
+    const acc = merged.get("accounts") orelse return image;
+    const top = forms[forms.len - 1].dir;
+    if (acc.get("groups")) |groups| for (try entries(gpa, top, groups, f)) |g| {
+        const name = try scalarAt(gpa, top, g, "groupname", f);
+        const gid = try number(gpa, top, g, "gid", f);
+        var members: std.ArrayList(u8) = .empty;
+        if (g.get("members")) |m| for (try entries(gpa, top, m, f), 0..) |member, i| {
+            if (member != .scalar) return f.fail(
+                gpa,
+                "{s}: accounts: group {s}: members",
+                .{ top, name },
+            );
+            try members.print(gpa, "{s}{s}", .{ if (i > 0) "," else "", member.scalar.text });
+        };
+        try group.add(gpa, name, try gpa.print("{s}:x:{d}:{s}", .{ name, gid, members.items }));
+    };
+    if (acc.get("users")) |users| for (try entries(gpa, top, users, f)) |u| {
+        const name = try scalarAt(gpa, top, u, "username", f);
+        const uid = try number(gpa, top, u, "uid", f);
+        const gid = if (u.get("gid") != null) try number(gpa, top, u, "gid", f) else uid;
+        const home = if (u.get("homedir") != null)
+            try scalarAt(gpa, top, u, "homedir", f)
+        else
+            try gpa.print("/home/{s}", .{name});
+        const shell = if (u.get("shell") != null)
+            try scalarAt(gpa, top, u, "shell", f)
+        else
+            "/bin/sh";
+        if (!mem.eql(u8, home, "/var/empty") and !mem.eql(u8, home, "/dev/null")) return f.fail(
+            gpa,
+            "{s}: accounts: user {s}: homedir {s}: a machine's update would have none; " ++
+                "give /var/empty, and the service a write path for its data",
+            .{ top, name, home },
+        );
+        try passwd.add(gpa, name, try gpa.print(
+            "{s}:x:{d}:{d}:Account created by apko:{s}:{s}",
+            .{ name, uid, gid, home, shell },
+        ));
+        try shadow.add(gpa, name, try gpa.print("{s}:!:::::::", .{name}));
+    };
+    return .{
+        .passwd = try passwd.onto(gpa, image.passwd, f),
+        .group = try group.onto(gpa, image.group, f),
+        .shadow = try shadow.onto(gpa, image.shadow, f),
+    };
+}
+
+/// The lines apko adds to one account file, and their names.
+const Added = struct {
+    file: []const u8,
+    names: std.ArrayList([]const u8) = .empty,
+    lines: std.ArrayList(u8) = .empty,
+
+    fn add(a: *Added, gpa: Allocator, name: []const u8, line: []const u8) Allocator.Error!void {
+        try a.names.append(gpa, name);
+        try a.lines.print(gpa, "{s}\n", .{line});
+    }
+
+    /// text with the lines: as it is, if it ends in them (apko added
+    /// them); with them added, if it has none of their names (apk laid
+    /// it); refused otherwise.
+    fn onto(a: Added, gpa: Allocator, text: []const u8, f: *Failure) Error![]const u8 {
+        if (a.lines.items.len == 0 or mem.endsWith(u8, text, a.lines.items)) return text;
+        var it = fileLines(text);
+        while (it.next()) |have| for (a.names.items) |name| {
+            const at = have[0 .. mem.findScalar(u8, have, ':') orelse have.len];
+            if (mem.eql(u8, at, name)) return f.fail(
+                gpa,
+                "{s}: {s} is there, but the accounts apko added are not those apko.yaml " ++
+                    "gives now, in its order: a root built from older forms; build it again",
+                .{ a.file, name },
+            );
+        };
+        const sep = if (text.len > 0 and text[text.len - 1] != '\n') "\n" else "";
+        return gpa.print("{s}{s}{s}", .{ text, sep, a.lines.items });
+    }
+};
+
+/// A list node's items.
+fn entries(gpa: Allocator, path: []const u8, node: form.Node, f: *Failure) Error![]const form.Node {
+    if (node != .list) return f.fail(gpa, "{s}: accounts: a list expected", .{path});
+    return node.list;
+}
+
+/// A map's scalar under key, or a failure naming it.
+fn scalarAt(
+    gpa: Allocator,
+    path: []const u8,
+    node: form.Node,
+    key: []const u8,
+    f: *Failure,
+) Error![]const u8 {
+    const v = node.get(key) orelse return f.fail(
+        gpa,
+        "{s}: accounts: an entry has no {s}",
+        .{ path, key },
+    );
+    if (v != .scalar) return f.fail(gpa, "{s}: accounts: {s}: one value", .{ path, key });
+    return v.scalar.text;
+}
+
+/// A map's number under key, as apko reads it.
+fn number(
+    gpa: Allocator,
+    path: []const u8,
+    node: form.Node,
+    key: []const u8,
+    f: *Failure,
+) Error!u32 {
+    const text = try scalarAt(gpa, path, node, key, f);
+    return std.fmt.parseInt(u32, text, 10) catch
+        return f.fail(gpa, "{s}: accounts: {s}: {s} is not a number", .{ path, key, text });
 }
 
 /// Each item a line.
@@ -204,11 +427,16 @@ pub fn moduleParams(allowed: []const []const u8, arch: Arch) []const Param {
 }
 
 /// Tags for what only a distro's disk needs, after bite: the modules of
-/// its filesystem. bitten holds them, for stage0-bitten.zst; native the
-/// rest, for werewolf's own disk and a direct boot.
+/// its filesystem. bitten holds them; native the rest, for werewolf's own
+/// disk and a direct boot; all both, in the chain's order, for
+/// stage0-bitten.zst, whose load order it is.
 const bitten_tags = [_][]const u8{ "@xfs:", "@btrfs:" };
 
-pub const Modules = struct { native: []const []const u8, bitten: []const []const u8 };
+pub const Modules = struct {
+    native: []const []const u8,
+    bitten: []const []const u8,
+    all: []const []const u8,
+};
 
 /// The leaf modules the chain's form.yaml names for arch, in order: a line
 /// `ARCH MODULE...` is that arch's alone; one `@TAG MODULE...` gives each
@@ -216,6 +444,7 @@ pub const Modules = struct { native: []const []const u8, bitten: []const []const
 pub fn modules(gpa: Allocator, forms: []const Form, arch: Arch) Allocator.Error!Modules {
     var native: std.ArrayList([]const u8) = .empty;
     var bitten: std.ArrayList([]const u8) = .empty;
+    var all: std.ArrayList([]const u8) = .empty;
     for (forms) |fm| for (try fm.items(gpa, "modules")) |line| {
         var w = try words(gpa, uncommented(line));
         if (w.len == 0) continue;
@@ -230,9 +459,10 @@ pub fn modules(gpa: Allocator, forms: []const Form, arch: Arch) Allocator.Error!
                 if (mem.startsWith(u8, word, t)) break true;
             } else false;
             try (if (is_bitten) &bitten else &native).append(gpa, word);
+            try all.append(gpa, word);
         }
     };
-    return .{ .native = native.items, .bitten = bitten.items };
+    return .{ .native = native.items, .bitten = bitten.items, .all = all.items };
 }
 
 /// `@` and lowercase letters or digits.
@@ -393,7 +623,7 @@ fn serviceNames(io: Io, gpa: Allocator, root: Dir, forms: []const Form) ![]const
 pub fn accounts(gpa: Allocator, passwd: []const u8, f: *Failure) Error![]const u8 {
     try unique(gpa, "passwd", passwd, f);
     var out: std.ArrayList(u8) = .empty;
-    var it = records(passwd);
+    var it = fileLines(passwd);
     while (it.next()) |line| {
         var fields: std.ArrayList([]const u8) = .empty;
         var fi = mem.splitScalar(u8, line, ':');
@@ -415,7 +645,7 @@ fn isZero(field: []const u8) bool {
 }
 
 /// A file's lines, the empty one after its last newline left out.
-fn records(text: []const u8) mem.SplitIterator(u8, .scalar) {
+fn fileLines(text: []const u8) mem.SplitIterator(u8, .scalar) {
     return mem.splitScalar(
         u8,
         if (mem.endsWith(u8, text, "\n")) text[0 .. text.len - 1] else text,
@@ -428,7 +658,7 @@ fn records(text: []const u8) mem.SplitIterator(u8, .scalar) {
 fn unique(gpa: Allocator, file: []const u8, text: []const u8, f: *Failure) Error!void {
     var names: std.array_hash_map.String(void) = .empty;
     var ids: std.array_hash_map.String(void) = .empty;
-    var it = records(text);
+    var it = fileLines(text);
     while (it.next()) |line| {
         var fi = mem.splitScalar(u8, line, ':');
         const name = fi.next() orelse "";
@@ -450,7 +680,7 @@ fn unique(gpa: Allocator, file: []const u8, text: []const u8, f: *Failure) Error
 /// PROTO/PORT|icmp... [public]`, `metadata USER...` (forms/README.md).
 pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure) Error![]const u8 {
     var uids: std.array_hash_map.String([]const u8) = .empty;
-    var pw = records(passwd);
+    var pw = fileLines(passwd);
     while (pw.next()) |line| {
         var fi = mem.splitScalar(u8, line, ':');
         const name = fi.next() orelse "";
@@ -701,76 +931,236 @@ test "weaknesses: the form's own, then its kind's and its arch's from posture-kn
     );
 }
 
-test "compose: ro and meta from a chain and the image's accounts" {
+test "compose: ro and meta from a chain and a package-only image's accounts" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
     const gpa = a.allocator();
     const io = testing.io;
-    for ([_][3][]const u8{
-        .{ "minimal", "", "" },
-        .{
-            "web",
-            "base: minimal\nallow: [ipv6]\nnet:\n  - listen tcp/80\n",
-            "pledge stdio inet listen\n",
-        },
-    }) |c| {
-        try tmp.dir.createDirPath(
-            io,
-            try gpa.print("forms/{s}/rootfs/etc/sv/{s}", .{ c[0], c[0] }),
-        );
-        try tmp.dir.writeFile(
-            io,
-            .{ .sub_path = try gpa.print("forms/{s}/apko.yaml", .{c[0]}), .data = "" },
-        );
-        if (c[1].len > 0) try tmp.dir.writeFile(
-            io,
-            .{ .sub_path = try gpa.print("forms/{s}/form.yaml", .{c[0]}), .data = c[1] },
-        );
-        if (c[2].len > 0) try tmp.dir.writeFile(io, .{
-            .sub_path = try gpa.print("forms/{s}/rootfs/etc/sv/{s}/service", .{ c[0], c[0] }),
-            .data = try gpa.print(
-                "exec /usr/bin/{s}\nuser {s}\nlisten tcp/80\n{s}",
-                .{ c[0], c[0], c[2] },
-            ),
-        });
+    const web_apko =
+        \\accounts:
+        \\  groups:
+        \\    - groupname: web
+        \\      gid: 80
+        \\  users:
+        \\    - username: web
+        \\      uid: 80
+        \\      homedir: /var/empty
+        \\      shell: /sbin/nologin
+        \\
+    ;
+    const web_form =
+        \\base: minimal
+        \\allow: [ipv6]
+        \\net:
+        \\  - listen tcp/80
+        \\  - connect web tcp/443
+        \\
+    ;
+    const web_service = "exec /usr/bin/web\nuser web\nlisten tcp/80\npledge stdio inet listen\n";
+    for ([_][2][]const u8{
+        .{ "forms/minimal/apko.yaml", "" },
+        .{ "forms/minimal/rootfs/etc/sv/minimal/run", "minimal's\n" },
+        .{ "forms/minimal/rootfs/etc/motd", "minimal's\n" },
+        .{ "forms/web/apko.yaml", web_apko },
+        .{ "forms/web/form.yaml", web_form },
+        .{ "forms/web/rootfs/etc/sv/web/service", web_service },
+        .{ "forms/web/rootfs/etc/motd", "web's\n" },
+    }) |file| {
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(file[0]).?);
+        try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
     }
-    try tmp.dir.createDirPath(io, "image/etc");
-    try tmp.dir.writeFile(
-        io,
-        .{ .sub_path = "image/etc/passwd", .data = "root:x:0:0::/root:/x\nweb:x:80:80::/:/x\n" },
-    );
-    try tmp.dir.writeFile(io, .{ .sub_path = "image/etc/group", .data = "root:x:0:\nweb:x:80:\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "image/etc/shadow", .data = "root:*:::::::\n" });
+    try tmp.dir.symLink(io, "/run/werewolf/passwd", "forms/minimal/rootfs/etc/passwd", .{});
     var f: Failure = .{};
     const forms = try form.chain(io, gpa, tmp.dir, "web", &f);
-    var image = try tmp.dir.openDir(io, "image", .{});
-    defer image.close(io);
     var ro = try tmp.dir.createDirPathOpen(io, "ro", .{});
     defer ro.close(io);
     var meta = try tmp.dir.createDirPathOpen(io, "meta", .{});
     defer meta.close(io);
-    try compose(io, gpa, tmp.dir, forms, image, ro, meta, .{ .arch = .aarch64 }, &f);
+    // The packages' own, as apk leaves them on a machine: no web account.
+    const image: Accounts = .{
+        .passwd = "root:x:0:0:root:/root:/bin/sh\nsync:x:5:0:sync:/sbin:/bin/sync\n",
+        .group = "root:x:0:root\n",
+        .shadow = "root:*::0:::::\n",
+    };
+    const b: Build = .{ .arch = .aarch64, .posture_known = "* files-x\naarch64 kernel-y\n" };
+    try compose(io, gpa, tmp.dir, forms, image, ro, meta, b, &f);
 
-    try ro.access(io, "etc/werewolf/allow/ipv6", .{});
+    const added = "web:x:80:80:Account created by apko:/var/empty:/sbin/nologin\n";
     var buf: [64]u8 = undefined;
+    for ([_][2][]const u8{
+        // Each form's rootfs, base first, its own winning.
+        .{ "etc/motd", "web's\n" },
+        .{ "etc/sv/minimal/run", "minimal's\n" },
+        .{ "etc/sv/web/service", web_service },
+        .{ "etc/werewolf/allow/ipv6", "" },
+        // The accounts, the chain's added as apko adds them; only root in group 0.
+        .{ "usr/share/werewolf/etc/passwd", "root:x:0:0:root:/root:/bin/sh\n" ++
+            "sync:x:5:65533:sync:/sbin:/bin/sync\n" ++ added },
+        .{ "usr/share/werewolf/etc/group", "root:x:0:root\nweb:x:80:\n" },
+        .{ "usr/share/werewolf/etc/shadow", "root:*::0:::::\nweb:!:::::::\n" },
+    }) |want| try testing.expectEqualStrings(
+        want[1],
+        try ro.readFileAlloc(io, want[0], gpa, .limited(4096)),
+    );
+    try testing.expectEqualStrings(
+        "/run/werewolf/passwd",
+        buf[0..try ro.readLink(io, "etc/passwd", &buf)],
+    );
     for ([_][]const u8{ "minimal", "web" }) |s| try testing.expectEqualStrings(
         try gpa.print("/run/runit/supervise.{s}", .{s}),
         buf[0..try ro.readLink(io, try gpa.print("etc/sv/{s}/supervise", .{s}), &buf)],
     );
+
+    const cmdline_want = "debugfs=off proc_mem.force_override=never slab_nomerge " ++
+        "page_alloc.shuffle=1 kvm-arm.mode=none loglevel=5\n";
     for ([_][2][]const u8{
-        .{ "usr/share/werewolf/form", "web\n" },
-        .{ "usr/share/werewolf/net", "listen tcp 80\n" },
-        .{ "usr/share/werewolf/pledge", "stdio inet listen\n" },
-        .{ "usr/share/werewolf/module-params", "" },
-        .{ "usr/share/werewolf/cmdlin" ++
-            "e", "debugfs=off proc_mem.force_override=never slab_nomerge " ++
-            "page_alloc.shuffle=1 kvm-arm.mode=none loglevel=5\n" },
+        .{ "form", "web\n" },
+        .{ "net", "connect 80 tcp 443\nlisten tcp 80\n" },
+        .{ "pledge", "stdio inet listen\n" },
+        .{ "module-params", "" },
+        .{ "cmdline", cmdline_want },
+        .{ "weaknesses", "files-x every form on aarch64 (test/posture-known)\n" ++
+            "kernel-y every form on aarch64 (test/posture-known)\n" },
+        // The chain, staged for the updater, and its kind's known failures.
+        .{ "forms/minimal/apko.yaml", "" },
+        .{ "forms/web/apko.yaml", web_apko },
+        .{ "forms/web/form.yaml", web_form },
+        .{ "forms/web/rootfs/etc/motd", "web's\n" },
+        .{ "forms/minimal/rootfs/etc/motd", "minimal's\n" },
+        .{ "posture-known", b.posture_known },
     }) |want| try testing.expectEqualStrings(
         want[1],
-        try meta.readFileAlloc(io, want[0], gpa, .limited(4096)),
+        try meta.readFileAlloc(
+            io,
+            try gpa.print("usr/share/werewolf/{s}", .{want[0]}),
+            gpa,
+            .limited(4096),
+        ),
     );
     try testing.expectError(error.FileNotFound, meta.access(io, "usr/share/werewolf/oci", .{}));
     try testing.expectError(error.FileNotFound, meta.access(io, "usr/share/werewolf/dev", .{}));
+    try testing.expectError(
+        error.FileNotFound,
+        meta.access(io, "usr/share/werewolf/forms/minimal/form.yaml", .{}),
+    );
+    // What it made in /usr/share/werewolf is what records names, so the
+    // updater carries forward none of it.
+    for ([_]Dir{ ro, meta }) |tree| {
+        var d = try tree.openDir(io, "usr/share/werewolf", .{ .iterate = true });
+        defer d.close(io);
+        var it = d.iterate();
+        while (try it.next(io)) |e| {
+            for (records) |r| {
+                if (mem.eql(u8, r, e.name)) break;
+            } else return error.NotInRecords;
+        }
+    }
+
+    // Composed again from what it staged, as a machine's updater does, it
+    // gives the same.
+    var staged = try meta.openDir(io, "usr/share/werewolf", .{});
+    defer staged.close(io);
+    const again = try form.chain(io, gpa, staged, "web", &f);
+    try tmp.dir.createDirPath(io, "again");
+    var ro2 = try tmp.dir.createDirPathOpen(io, "again/ro", .{});
+    defer ro2.close(io);
+    var meta2 = try tmp.dir.createDirPathOpen(io, "again/meta", .{});
+    defer meta2.close(io);
+    try compose(io, gpa, staged, again, image, ro2, meta2, b, &f);
+    for ([_][]const u8{ "etc/motd", "usr/share/werewolf/etc/passwd", "etc/sv/web/service" }) |p|
+        try testing.expectEqualStrings(
+            try ro.readFileAlloc(io, p, gpa, .limited(4096)),
+            try ro2.readFileAlloc(io, p, gpa, .limited(4096)),
+        );
+    for ([_][]const u8{ "net", "cmdline", "weaknesses", "forms/web/form.yaml" }) |p| {
+        const path = try gpa.print("usr/share/werewolf/{s}", .{p});
+        try testing.expectEqualStrings(
+            try meta.readFileAlloc(io, path, gpa, .limited(4096)),
+            try meta2.readFileAlloc(io, path, gpa, .limited(4096)),
+        );
+    }
+}
+
+test "withAccounts: what apko added must be what its rule gives; homes it cannot make refused" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    var f: Failure = .{};
+    const user = "accounts:\n  users:\n    - username: web\n      uid: 80\n";
+    const two =
+        \\accounts:
+        \\  users:
+        \\    - username: one
+        \\      uid: 1
+        \\      homedir: /var/empty
+        \\    - username: two
+        \\      uid: 2
+        \\      homedir: /var/empty
+        \\
+    ;
+    const team =
+        \\accounts:
+        \\  groups:
+        \\    - groupname: team
+        \\      gid: 9
+        \\      members: [web, db]
+        \\
+    ;
+    for ([_][2][]const u8{
+        .{ "forms/plain/apko.yaml", user ++ "      homedir: /var/empty\n" },
+        .{ "forms/home/apko.yaml", user },
+        .{ "forms/two/apko.yaml", two },
+        .{ "forms/team/apko.yaml", team },
+    }) |file| {
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(file[0]).?);
+        try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    }
+    const line = "web:x:80:80:Account created by apko:/var/empty:/bin/sh";
+    const plain = try form.chain(io, gpa, tmp.dir, "plain", &f);
+    // On the build's root, apko's line is there: nothing is added.
+    const built: Accounts = .{
+        .passwd = "root:x:0:0\n" ++ line ++ "\n",
+        .group = "",
+        .shadow = "web:!:::::::\n",
+    };
+    const same = try withAccounts(io, gpa, tmp.dir, plain, built, &f);
+    try testing.expectEqualStrings(built.passwd, same.passwd);
+    try testing.expectEqualStrings(built.shadow, same.shadow);
+    // A line for the name that is not apko's is refused.
+    const other: Accounts = .{ .passwd = "web:x:81:81::/:/bin/sh\n", .group = "", .shadow = "" };
+    try testing.expectError(error.Form, withAccounts(io, gpa, tmp.dir, plain, other, &f));
+    // Some of apko's accounts but not all, a root built from older forms:
+    // refused, rather than given an order no machine's update would give.
+    const empty: Accounts = .{ .passwd = "", .group = "", .shadow = "" };
+    const both = try form.chain(io, gpa, tmp.dir, "two", &f);
+    const fresh = try withAccounts(io, gpa, tmp.dir, both, empty, &f);
+    try testing.expectEqualStrings(
+        fresh.passwd,
+        (try withAccounts(io, gpa, tmp.dir, both, fresh, &f)).passwd,
+    );
+    const second = fresh.passwd[mem.findScalar(u8, fresh.passwd, '\n').? + 1 ..];
+    const older: Accounts = .{ .passwd = second, .group = "", .shadow = "" };
+    try testing.expectError(error.Form, withAccounts(io, gpa, tmp.dir, both, older, &f));
+    // apko's default home, /home/NAME, which a machine's update would not make.
+    const home = try form.chain(io, gpa, tmp.dir, "home", &f);
+    try testing.expectError(
+        error.Form,
+        withAccounts(io, gpa, tmp.dir, home, .{ .passwd = "", .group = "", .shadow = "" }, &f),
+    );
+    // A group's members, joined by commas.
+    const teams = try form.chain(io, gpa, tmp.dir, "team", &f);
+    const got = try withAccounts(
+        io,
+        gpa,
+        tmp.dir,
+        teams,
+        .{ .passwd = "", .group = "root:x:0:root", .shadow = "" },
+        &f,
+    );
+    try testing.expectEqualStrings("root:x:0:root\nteam:x:9:web,db\n", got.group);
 }

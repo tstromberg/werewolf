@@ -57,6 +57,9 @@ Invariants to keep when changing this code:
 - **apk reads only what a key vouched for.** Indexes' signatures, packages'
   control (index SHA-1) and data (datahash) are checked first; the rest of
   the cache is removed. New roots resolve within themselves (`Root`).
+- **compose writes only scratch,** never the new root: from the staged chain
+  and the accounts `Root` reads, into `work/compose`, which `Root` takes in.
+  It makes exactly `compose.records`; every other record is carried forward.
 - **Fail toward sooner.** No valid feed: every fix, or the update itself,
   counts High. A refused form policy blocks the operator's file too.
 - **Durability.** State files go through `writeReplacing`; log lines and

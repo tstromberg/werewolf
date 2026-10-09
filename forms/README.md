@@ -77,6 +77,11 @@ deprecated include used (lists joined, maps merged by key, everything
 else the last form's), and apko builds that. `build/host/form apko NAME`
 prints it.
 
+Its `accounts:` are added again on a machine's update, which installs
+with apk, not apko (lib/compose.zig): a user's `homedir` is `/var/empty`
+(or `/dev/null`), since nothing on the machine would make another, and a
+service writes where its service file's `write` says.
+
 ## A new form
 
 1. `forms/NAME/apko.yaml`: its packages, and an account for each service.
