@@ -12,7 +12,7 @@ const compose = @import("compose");
 const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
     "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH native|bitten|all, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], " ++
-    "having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
+    "having KEY [VALUE], every KEY, apko FORM [PKG...], tree, released";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -54,6 +54,10 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
             }
             try w.writeAll("\n");
         }
+        return;
+    }
+    if (is(verb, "released") and args.len == 1) {
+        for (compose.release_forms) |name| try w.print("{s}\n", .{name});
         return;
     }
     if (is(verb, "having") and (args.len == 2 or args.len == 3)) {

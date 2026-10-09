@@ -1,4 +1,4 @@
-# Included by the root Makefile: packages Wolfi does not ship, each a
+# Included by the Makefile: packages Wolfi does not ship, each a
 # melange recipe in Wolfi's style, built in Wolfi's environment from
 # sources whose sha256 melange checks, then unpacked over the image like a
 # form's files. A form keeps its recipes in forms/NAME/melange/, and has
@@ -81,13 +81,11 @@ _build-apk: $(if $(RECIPE),$(call melange_stamp,$(RECIPE)))
 		echo "$$a"; $(TAR) -xzOf $$a .PKGINFO | sed -n 's/^depend = so:/  links /p'; \
 	done
 
+# Every package of every recipe of the chain, but its metadata, in
+# OUT/melange, which howl lays over the image (cmd/howl/build.zig), each
+# checked for what it links.
 ifneq ($(FORM_RECIPES),)
 MELANGE_OUT = $(OUT)/melange
-OVERLAY_DIRS += $(MELANGE_OUT)
-$(OUT)/meta.stamp $(OUT)/overlay.tar: $(OUT)/melange.stamp
-
-# Every package of every recipe of the chain, but its metadata, over the
-# image, each checked for what it links.
 $(OUT)/melange.stamp: $(foreach r,$(FORM_RECIPES),$(call melange_stamp,$(r))) $(OUT)/rootfs.tar
 	rm -rf $(MELANGE_OUT) && mkdir -p $(MELANGE_OUT)
 	@for a in $(foreach r,$(FORM_RECIPES),$(call melange_apks,$(r))); do \

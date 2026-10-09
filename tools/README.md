@@ -4,11 +4,13 @@ Build-host programs, never in an image. Most build into build/host/.
 
 ## form
 
-`form VERB FORM ...` answers the build's questions about a form: its chain of
-bases, form.yaml keys, ports, weaknesses, kernel arguments, modules, merged
-apko config, and the files the chain derives (lib/form.zig, lib/compose.zig,
-forms/README.md). `form tree` prints every form and its chain. Run it with no
-arguments for the usage. A form that cannot be read fails with file and line.
+`form VERB FORM ...` answers make's questions about a form (howl reads forms
+itself): its chain of bases, form.yaml keys, ports, weaknesses, kernel
+arguments, modules, merged apko config, and the files the chain derives
+(lib/form.zig, lib/compose.zig, forms/README.md). `form tree` prints every
+form and its chain, and `form released` the forms CI publishes
+(lib/compose.zig's `release_forms`). Run it with no arguments for the usage.
+A form that cannot be read fails with file and line.
 
 ## package
 
@@ -37,7 +39,15 @@ key and never uploads.
 
 `verity IMAGE PARAMS` appends IMAGE's dm-verity hash tree and writes the line
 stage0 opens it with to PARAMS (lib/verity.zig). It needs no veritysetup and
-gives the same tree on macOS as on Linux.
+gives the same tree on macOS as on Linux. `make check-updater` uses it;
+howl's build calls lib/verity.zig itself.
+
+## doc-check
+
+`doc-check FILE.md...` runs for `make lint`. It fails on a relative link or
+`#anchor` that leads nowhere (anchors as GitHub makes them from headings), a
+program README over 100 lines, a design doc over 120, or a line that starts
+with TODO: the limits in CONTRIBUTING.md's Style section.
 
 ## zigfix
 
@@ -59,13 +69,6 @@ network, high at 7.0, medium at 4.0 or unscored, else low. Output is sorted
 and has no time, so the same sources give the same bytes; release/sign-tiers
 adds the time and signs it. It needs NVD_API_KEY. A missing, short or
 malformed source fails the run and leaves OUT alone.
-
-## kernel-config-check
-
-`kernel-config-check CONFIG` fails the build when Alpine's kernel config
-reopens a bug exploited in the wild (docs/cve-mitigation-survey.md). A running
-machine cannot read its config, so the build checks it. The rules are
-lib/image.zig's, which howl's build checks in-process.
 
 ## test-sk
 

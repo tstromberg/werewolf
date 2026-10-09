@@ -46,7 +46,7 @@ and key, and `make list-forms` shows the chains.
 | `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
 | `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
-| `lima` | `prod`, with `sshd` | the Lima test vehicle (`make lima`), which takes Lima's own key file |
+| `lima` | `prod`, with `sshd` | the Lima test vehicle (`howl run` on a Mac), which takes Lima's own key file |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init
@@ -256,8 +256,7 @@ the image declared. See [design/settings.md](design/settings.md).
 
 ## Your application
 
-For complete, runnable tutorials with an image-building Makefile and
-`deploy-qemu` / `deploy-gcp` targets, see
+For complete, runnable tutorials, each run here and on GCP with howl, see
 [the language examples](../examples/README.md):
 [PHP](../examples/php/README.md), [Python](../examples/python/README.md),
 [Node.js](../examples/nodejs/README.md), [Go](../examples/go/README.md),
@@ -293,7 +292,7 @@ werewolf prints DIR's sha256, over every path, executable bit and byte, so
 the same DIR makes the same image. An image with an application builds
 apart from the form's own image, and a new application means a new
 machine: `howl delete`, then `create`. [apps-by-hand.md](apps-by-hand.md)
-does all of this with `make` and `tar`, to show the mechanism underneath.
+does all of this with `make disk` and `tar`, to show the mechanism underneath.
 
 What the application needs from each machine, such as a database's address
 or a greeting, is a setting. Its form declares it, so a form of your own
@@ -377,12 +376,12 @@ env     PYTHONUNBUFFERED=1
 Build it and boot it under QEMU, with a disk for `/data`:
 
 ```sh
-make FORM=helloworld run
+build/host/howl create hello --with helloworld --on qemu
 ```
 
-The console shows the boot, posture's line, and gunicorn's log. `make run`
-forwards the form's port to 8080 on this host's loopback, so from another
-terminal:
+howl forwards the form's port from one on this host's loopback, 8080 if it
+is free, and prints it. `howl console hello` shows the boot, posture's
+line, and gunicorn's log. From another terminal:
 
 ```sh
 $ curl http://127.0.0.1:8080/
@@ -391,13 +390,13 @@ $ curl http://127.0.0.1:8080/health
 {"status":"ok"}
 ```
 
-Quit with `Ctrl-a x` and run `make FORM=helloworld run` again. The count
-goes on, because `/data` is `build/<arch>/data.img`, which outlives the
-machine. Delete that file to start over.
+Run the same `howl create` again. The count goes on: under QEMU a second
+create stops the machine and boots it again, keeping its `/data`,
+`build/machines/hello/data.img`. `howl delete hello` removes the machine
+and its `/data`.
 
-To change the application, change its files and run
-`make FORM=helloworld run` again, which rebuilds the image. A machine never
-changes in place.
+To change the application, change its files and run the create again,
+which rebuilds the image. A machine never changes in place.
 
 ### What the leash holds
 
@@ -463,7 +462,7 @@ net:
 
 | | |
 | --- | --- |
-| `make FORM=helloworld disk` | a disk image that boots it under UEFI, for a provider that takes one |
+| `howl build --with helloworld` | `dist/helloworld-ARCH-disk.qcow2`, a disk that boots it under UEFI, for a provider that takes one (`--format raw\|vhd\|vmdk`); `howl create NAME --with helloworld --on gcp\|aws\|azure` makes a cloud machine of it |
 | `make FORM=helloworld bite-me` | run on a Debian, Ubuntu, Fedora or Rocky VM: installs it beside the distro ([bite.md](bite.md)) |
 | `make FORM=helloworld image` | the kernel and initramfs, for QEMU, Firecracker or any host that boots them directly |
 
@@ -565,12 +564,12 @@ real breaches. The form shows what an attacker gets for it on werewolf:
 nothing worth having.
 
 ```sh
-make webshell-demo
+build/host/howl run --with webshell-example --on qemu
 ```
 
-This boots the form as it ships, with no shell, and forwards its port to
-this host's `http://127.0.0.1:8080`. Open it, or `curl` it, and try to
-escape. The page keeps the last 100 attempts, each with its source
+This boots the form as it ships, with no shell, and forwards its port from
+this host's `http://127.0.0.1:8080` (or the free port it prints). Open it,
+or `curl` it, and try to escape. The page keeps the last 100 attempts, each with its source
 address, User-Agent, exit code and output, so a failed break-in is on the
 screen:
 
@@ -637,11 +636,12 @@ So the claim is tested, not just made.
 To put it where anyone can attack it, on a real VM on the Internet:
 
 ```sh
-make webshell-gcp          # import the disk, boot a GCP VM, print its http://ADDR:8080
-make webshell-gcp-delete   # when you are done
+build/host/howl create webshell --with webshell-example --on gcp --allow-from 0.0.0.0/0
+build/host/howl delete webshell --on gcp   # when you are done
 ```
 
-This is the same machine as `make webshell-demo`, built as a release disk
-and run on Google Compute Engine (test/gcp), with a firewall rule that opens
-only :8080 to it. It needs `gcloud`, logged in, with a project. The VM
-costs money until you delete it.
+This is the same machine, built as a release disk and run on Google
+Compute Engine, at the address create prints, with a firewall rule that
+opens only its :8080, to anyone. It needs `gcloud`, logged in, with a
+project ([examples/README.md](../examples/README.md#prepare-gcp-once)). The
+VM costs money until you delete it.

@@ -274,7 +274,8 @@ nothing is done in their place.
 ## Checking a machine
 
 `make check` does this on every form ([testing.md](testing.md)). By hand,
-as root, on the console (`make run` gives a root shell there) or over ssh:
+as root, on the console (`howl run --dev`, then `howl console`, gives a root
+shell there) or over ssh:
 
 | Check | Command | Expect |
 | --- | --- | --- |

@@ -1,10 +1,10 @@
 #!/bin/sh
 # publish makes DIST a draft GitHub release, unless the latest release has
 # the same builds. DIST holds each form and architecture's files and manifest
-# (release/manifest). LOCKS holds the locks and inputs they were built from;
-# the release carries them so anyone can rebuild it. publish signs the
-# manifests with a serial (release/sign), which also tags the release. The
-# workflow then attests the files and publishes the draft.
+# (howl build, cmd/howl/manifest.zig). LOCKS holds the locks and inputs they
+# were built from; the release carries them so anyone can rebuild it.
+# publish signs the manifests with a serial (release/sign), which also tags
+# the release. The workflow then attests the files and publishes the draft.
 #
 #   WEREWOLF_IMAGE_KEY=<PEM> release/publish DIST LOCKS
 #

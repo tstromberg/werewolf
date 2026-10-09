@@ -1,8 +1,7 @@
-//! build makes a form's image as the Makefile's image targets do, step by
-//! step: the same tools with the same arguments, writing the same files at
-//! the same paths, so the bytes match. make still compiles the programs.
-//! The steps are in packages.zig and slot.zig. See README.md and
-//! docs/design/howl-build.md.
+//! build makes a form's image step by step, with the tools and arguments
+//! the Makefile's image recipes used, at their paths, so the bytes match.
+//! make still compiles the programs. The steps are in packages.zig and
+//! slot.zig. See README.md and docs/design/howl-build.md.
 
 const std = @import("std");
 const forms = @import("form");
@@ -13,11 +12,12 @@ const adhoc = @import("adhoc.zig");
 const progress = @import("progress.zig");
 const packages = @import("packages.zig");
 const slot = @import("slot.zig");
+const manifest = @import("manifest.zig");
+const disk = @import("disk.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
-const json = std.json;
 
 /// Goals are the make targets a build stands in for.
 pub const Goals = struct {
@@ -31,6 +31,8 @@ pub const Goals = struct {
     qcow2: bool = false,
     /// vmlinux is BUILD/vmlinux, x86_64's kernel for Firecracker.
     vmlinux: bool = false,
+    /// kernel is BUILD/vmlinuz alone, which every build makes first.
+    kernel: bool = false,
 };
 
 /// Spec is what to build: a form, for an arch, with or without a shell
@@ -45,6 +47,17 @@ pub const Spec = struct {
     app: ?[]const u8 = null,
     /// freeze pins every package to its lock, as FREEZE=1 does.
     freeze: bool = false,
+    /// build and programs replace BUILD and PROGRAMS, as make's BUILD= and
+    /// PROGRAMS= do, to keep a build apart from build/ARCH.
+    build: ?[]const u8 = null,
+    programs: ?[]const u8 = null,
+    /// disk is the disk goal's size and kernel arguments, as make's
+    /// DISK_MIB and DISK_ARGS; the qcow2 goal takes the size only.
+    disk: disk.Options = .{},
+    /// disk_path is where the disk goal writes, as make's DISK; null is
+    /// OUT/disk.img. A machine's disk has its own: the disk is rebuilt by
+    /// file times alone, so a path reused with other arguments would not be.
+    disk_path: ?[]const u8 = null,
 };
 
 /// Paths are where a build writes, as the Makefile names them.
@@ -59,12 +72,13 @@ pub const Paths = struct {
 
 pub fn paths(gpa: Allocator, s: Spec) !Paths {
     const name = std.fs.path.basename(mem.trimEnd(u8, s.form, "/"));
+    const dir = s.build orelse try gpa.print("build/{t}", .{s.arch});
     return .{
-        .build = try gpa.print("build/{t}", .{s.arch}),
-        .out = try gpa.print("build/{t}/{s}{s}{s}", .{
-            s.arch, name, if (s.dev) "-dev" else "", if (s.app != null) "-app" else "",
+        .build = dir,
+        .out = try gpa.print("{s}/{s}{s}{s}", .{
+            dir, name, if (s.dev) "-dev" else "", if (s.app != null) "-app" else "",
         }),
-        .programs = try gpa.print("build/{t}/programs", .{s.arch}),
+        .programs = s.programs orelse try gpa.print("build/{t}/programs", .{s.arch}),
     };
 }
 
@@ -114,7 +128,7 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
 
 /// build makes a form's release files in -o DIR, as make's _dist-form
 /// does: the image's files under their release names, and the manifest,
-/// unsigned (release/manifest).
+/// unsigned (manifest.zig).
 pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const all = (try adhoc.take(io, gpa, .build, given, why)) orelse return;
     const verbose, const args = try howl.verboseFlag(gpa, all);
@@ -133,7 +147,6 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .command = command,
         .log = try gpa.print("build/log/{s}-{s}-build.log", .{ f, a }),
         .first = howl.start_phase,
-        .make = false,
     });
 
     // minimal is released whole, for direct boot; the rest as the slot
@@ -156,51 +169,41 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         ))
     else |_| {}
     try steps.enter(progress.phaseOf("_dist-form").?);
-    var manifest: std.ArrayList([]const u8) = .empty;
-    try manifest.appendSlice(gpa, &.{
-        "release/manifest",
-        f,
-        a,
-        try gpa.print("{s}/rootfs.tar", .{p.out}),
-        try gpa.print("{s}/meta/usr/share/werewolf/kernel", .{p.out}),
-        dir,
-    });
-    const released: []const [2][]const u8 = if (direct) &.{
-        .{ "vmlinuz", try gpa.print("{s}/vmlinuz", .{p.build}) },
-        .{ "initramfs.zst", try gpa.print("{s}/initramfs.zst", .{p.out}) },
-        .{ "cmdline", try gpa.print("{s}/slot/cmdline", .{p.out}) },
+    const released: []const manifest.File = if (direct) &.{
+        .{ .name = "vmlinuz", .path = try gpa.print("{s}/vmlinuz", .{p.build}) },
+        .{ .name = "initramfs.zst", .path = try gpa.print("{s}/initramfs.zst", .{p.out}) },
+        .{ .name = "cmdline", .path = try gpa.print("{s}/slot/cmdline", .{p.out}) },
     } else &.{
-        .{ "vmlinuz", try gpa.print("{s}/slot/vmlinuz", .{p.out}) },
-        .{ "stage0.zst", try gpa.print("{s}/slot/stage0.zst", .{p.out}) },
-        .{ "stage0-bitten.zst", try gpa.print("{s}/slot/stage0-bitten.zst", .{p.out}) },
-        .{ "root.erofs", try gpa.print("{s}/slot/root.erofs", .{p.out}) },
-        .{ "cmdline", try gpa.print("{s}/slot/cmdline", .{p.out}) },
-        .{ "disk.qcow2", try gpa.print("{s}/disk.qcow2", .{p.out}) },
+        .{ .name = "vmlinuz", .path = try gpa.print("{s}/slot/vmlinuz", .{p.out}) },
+        .{ .name = "stage0.zst", .path = try gpa.print("{s}/slot/stage0.zst", .{p.out}) },
+        .{
+            .name = "stage0-bitten.zst",
+            .path = try gpa.print("{s}/slot/stage0-bitten.zst", .{p.out}),
+        },
+        .{ .name = "root.erofs", .path = try gpa.print("{s}/slot/root.erofs", .{p.out}) },
+        .{ .name = "cmdline", .path = try gpa.print("{s}/slot/cmdline", .{p.out}) },
+        .{ .name = "disk.qcow2", .path = try gpa.print("{s}/disk.qcow2", .{p.out}) },
     };
-    for (released) |r| try manifest.append(gpa, try gpa.print("{s}={s}", .{ r[0], r[1] }));
-    const made = try steps.exec(&.{.{ .argv = manifest.items }}, .{});
-    if (!made.ok) return steps.fail("release/manifest failed");
-
+    const id = manifest.write(io, gpa, &steps, dir, .{
+        .form = f,
+        .arch = a,
+        .rootfs = try gpa.print("{s}/rootfs.tar", .{p.out}),
+        .kernel = try gpa.print("{s}/meta/usr/share/werewolf/kernel", .{p.out}),
+        .files = released,
+    }) catch |err| switch (err) {
+        error.Refused => return err,
+        else => return steps.fail(try gpa.print("{s}: {t}", .{ dir, err })),
+    };
+    try steps.note("{s} {s}: build {s}", .{ f, a, &id });
     const name = try gpa.print("{s}/{s}-{s}.json", .{ dir, f, a });
-    const text = Dir.cwd().readFileAlloc(io, name, gpa, .limited(1 << 20)) catch |err|
-        return steps.fail(try gpa.print("{s}: {s}", .{ name, @errorName(err) }));
-    // Parse only the manifest's file list. The updater reads the rest
-    // (cmd/slot-update/release.zig).
-    const m = json.parseFromSliceLeaky(
-        struct { files: json.ArrayHashMap(struct { sha256: []const u8, size: u64 }) },
-        gpa,
-        text,
-        .{ .ignore_unknown_fields = true },
-    ) catch return steps.fail(try gpa.print("{s}: not a manifest", .{name}));
-    const files = m.files.map;
 
     // boot is what a machine boots: the disk, or the initramfs of a form
     // released for direct boot. Another --format replaces it below.
     var boot = try gpa.print("{s}/{s}-{s}-{s}", .{
-        dir, f, a, if (files.contains("disk.qcow2")) "disk.qcow2" else "initramfs.zst",
+        dir, f, a, if (direct) "initramfs.zst" else "disk.qcow2",
     });
     if (format != .qcow2) {
-        if (!files.contains("disk.qcow2")) return steps.fail(
+        if (direct) return steps.fail(
             try gpa.print("{s} is released for direct boot, without a disk to convert", .{f}),
         );
         const dst = try gpa.print("{s}/{s}-{s}-disk.{t}", .{ dir, f, a, format });
@@ -253,7 +256,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         },
     );
     if (verbose) {
-        for (files.keys()) |file| try w.print("  {s}/{s}-{s}-{s}\n", .{ dir, f, a, file });
+        for (released) |file| try w.print("  {s}/{s}-{s}-{s}\n", .{ dir, f, a, file.name });
     }
     err_out.clearRetainingCapacity();
     if (o.arch == howl.hostArch()) {
@@ -277,24 +280,27 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     Io.File.stderr().writeStreamingAll(io, err_out.written()) catch {};
 }
 
-/// buildTargets builds make's targets of one form natively: image, slot,
-/// disk, qcow2 and vmlinux, as `make TARGET` would, at the same paths. It
-/// is how the gate compares the two, until run and create use build.zig.
-///
-///   howl _build --with FORM [--arch ARCH] [--dev] [--app DIR] [--verbose] GOAL...
+/// buildTargets builds make's targets of one form: the Makefile's image,
+/// slot, disk and OUT/disk.qcow2 targets run it, and BUILD/vmlinuz for
+/// melange's VM. --app stages an application as run and create do;
+/// --app-root takes one staged already, as make's APP. --disk, --disk-mib
+/// and --disk-args are make disk's DISK, DISK_MIB and DISK_ARGS; the qcow2
+/// goal takes --disk-mib too.
 pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const verbose, const args = try howl.verboseFlag(gpa, given);
-    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--app DIR] [--verbose] " ++
-        "image|slot|disk|qcow2|vmlinux...";
+    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--app DIR | --app-root DIR] " ++
+        "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
+        "[--verbose] image|slot|disk|qcow2|vmlinux|kernel...";
+    var spec: Spec = .{ .form = "", .arch = undefined, .freeze = frozen() };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
-    var dev = false;
     var app_dir: ?[]const u8 = null;
+    var app_root: ?[]const u8 = null;
     var goals: Goals = .{};
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) {
-            dev = true;
+            spec.dev = true;
         } else if (std.mem.startsWith(u8, args[i], "-")) {
             const flag, const v = try howl.flagValue(args, &i, why);
             if (std.mem.eql(u8, flag, "--with")) {
@@ -303,6 +309,24 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
                 arch = howl.archName(v) orelse return why.refuse(howl.arch_refusal, .{v});
             } else if (std.mem.eql(u8, flag, "--app")) {
                 app_dir = v;
+            } else if (std.mem.eql(u8, flag, "--app-root")) {
+                app_root = v;
+            } else if (std.mem.eql(u8, flag, "--build")) {
+                spec.build = v;
+            } else if (std.mem.eql(u8, flag, "--programs")) {
+                spec.programs = v;
+            } else if (std.mem.eql(u8, flag, "--disk")) {
+                spec.disk_path = v;
+            } else if (std.mem.eql(u8, flag, "--disk-mib")) {
+                spec.disk.size_mib = std.fmt.parseInt(u32, v, 10) catch 0;
+                if (spec.disk.size_mib == 0)
+                    return why.refuse("--disk-mib {s}: a size in MiB", .{v});
+            } else if (std.mem.eql(u8, flag, "--disk-args")) {
+                // Split as make's $(DISK_ARGS) was, by the shell.
+                var words: std.ArrayList([]const u8) = .empty;
+                var it = mem.tokenizeAny(u8, v, " \t\n");
+                while (it.next()) |w| try words.append(gpa, w);
+                spec.disk.args = words.items;
             } else return why.refuse("{s}: {s}", .{ flag, syntax });
         } else {
             const goal = std.meta.stringToEnum(std.meta.FieldEnum(Goals), args[i]) orelse
@@ -313,32 +337,32 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
         }
     }
     const ref = form orelse return why.refuse("{s}", .{syntax});
-    const for_arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
-    if (goals.vmlinux and for_arch != .x86_64)
+    spec.form = ref;
+    spec.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
+    if (goals.vmlinux and spec.arch != .x86_64)
         return why.refuse("vmlinux is x86_64's, for Firecracker", .{});
+    if (app_dir != null and app_root != null)
+        return why.refuse("--app or --app-root: one application", .{});
+    if (!goals.disk and (spec.disk_path != null or spec.disk.args.len > 0))
+        return why.refuse("--disk and --disk-args are the disk goal's", .{});
+    if (!goals.disk and !goals.qcow2 and spec.disk.size_mib != disk.default_mib)
+        return why.refuse("--disk-mib is the disk and qcow2 goals'", .{});
     _ = try howl.chain(io, gpa, ref, why);
-    const ab = try howl.appBuild(io, gpa, ref, for_arch, app_dir, why);
+    spec.app = app_root orelse (try howl.appBuild(io, gpa, ref, spec.arch, app_dir, why)).root;
     const f = std.fs.path.basename(std.mem.trimEnd(u8, ref, "/"));
     var steps: progress.Steps = try .init(io, gpa, why, .{
         .verbose = verbose,
         .command = try gpa.print("howl _build {s}", .{try std.mem.join(gpa, " ", given)}),
-        .log = try gpa.print("build/log/{s}-{t}-build.log", .{ f, for_arch }),
+        .log = try gpa.print("build/log/{s}-{t}-build.log", .{ f, spec.arch }),
         .first = howl.start_phase,
-        .make = false,
     });
-    try make(io, gpa, &steps, .{
-        .form = ref,
-        .arch = for_arch,
-        .dev = dev,
-        .app = ab.root,
-        .freeze = frozen(),
-    }, goals);
+    try make(io, gpa, &steps, spec, goals);
     const done = try steps.finish();
     const look: progress.Look = .of(io, Io.File.stderr());
     howl.say(io, "{s} built {s} for {t} in {f}  {f}", .{
         look.check(),
         f,
-        for_arch,
+        spec.arch,
         progress.Clock{ .seconds = done.seconds },
         look.dim(try gpa.print("{f}", .{done})),
     });
@@ -346,7 +370,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
 
 /// frozen reports whether FREEZE is set, as make's FREEZE=1: every package
 /// pinned to its lock, for a reproducible build.
-fn frozen() bool {
+pub fn frozen() bool {
     const v = howl.environ.get("FREEZE") orelse return false;
     return v.len > 0;
 }
@@ -397,8 +421,7 @@ pub const B = struct {
     app: []const []const u8,
     modules: compose.Modules,
     params: []const image.Param,
-    /// env is howl's environment with COPYFILE_DISABLE=1, so macOS's tar
-    /// adds no AppleDouble files.
+    /// env is the tools' environment (pipeline).
     env: *const std.process.Environ.Map,
 
     /// path formats a path the build names.
@@ -433,13 +456,19 @@ pub const B = struct {
         try b.steps.note("{s} {d}.{d}s", .{ target, ms / 1000, ms % 1000 / 100 });
     }
 
-    /// run runs one command, and fails the build if it fails.
+    /// run runs one command, in env or the build's, and fails the build if
+    /// it fails.
     pub fn run(b: *B, argv: []const []const u8, o: struct {
         cwd: ?[]const u8 = null,
         stdin: ?Io.File = null,
         stdout: ?Io.File = null,
+        env: ?*const std.process.Environ.Map = null,
     }) !void {
-        const ran = try b.steps.exec(&.{.{ .argv = argv, .cwd = o.cwd, .env = b.env }}, .{
+        const ran = try b.steps.exec(&.{.{
+            .argv = argv,
+            .cwd = o.cwd,
+            .env = o.env orelse b.env,
+        }}, .{
             .stdin = o.stdin,
             .stdout = o.stdout,
         });
@@ -518,10 +547,17 @@ pub fn make(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
 
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
     const p = try paths(gpa, s);
+    // The tools' environment: COPYFILE_DISABLE=1, so macOS's tar adds no
+    // AppleDouble files, and no make variables, so a make that runs howl
+    // passes the make howl runs nothing but what howl says.
+    const env = try gpa.create(std.process.Environ.Map);
+    env.* = try howl.environ.clone(gpa);
+    try env.put("COPYFILE_DISABLE", "1");
+    for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL" }) |k| _ = env.swapRemove(k);
     // make compiles werewolf's programs, in a checkout: each compile is
     // mostly one thread, so as many at once as there are CPUs.
     if (exists(io, "Makefile")) {
-        try steps.enter(progress.phaseOf(try gpa.print("{s}/", .{p.programs})).?);
+        if (progress.phaseOf(try gpa.print("{s}/", .{p.programs}))) |ph| try steps.enter(ph);
         const ran = try steps.exec(&.{.{ .argv = &.{
             howl.make_cmd,
             "-s",
@@ -529,11 +565,13 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
             "--no-print-directory",
             try gpa.print("FORM={s}", .{s.form}),
             try gpa.print("ARCH={t}", .{s.arch}),
+            try gpa.print("BUILD={s}", .{p.build}),
+            try gpa.print("PROGRAMS={s}", .{p.programs}),
             "programs",
-        } }}, .{});
+        }, .env = env }}, .{});
         if (!ran.ok) return steps.fail("make programs failed");
     }
-    var b = try plan(io, gpa, steps, s, p);
+    var b = try plan(io, gpa, steps, s, p, env);
     try packages.kernel(&b);
     if (goals.vmlinux) try packages.vmlinux(&b);
     if (!goals.image and !goals.slot and !goals.disk and !goals.qcow2) return;
@@ -563,7 +601,14 @@ const every_program = [_][]const u8{
 };
 
 /// plan reads the form's chain and works out everything the steps need.
-fn plan(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, p: Paths) !B {
+fn plan(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    s: Spec,
+    p: Paths,
+    env: *const std.process.Environ.Map,
+) !B {
     var f: forms.Failure = .{};
     const chain = forms.chain(io, gpa, Dir.cwd(), s.form, &f) catch |err| switch (err) {
         error.Form => return steps.fail(f.text),
@@ -660,9 +705,6 @@ fn plan(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, p: Paths) !B {
     for (compose.moduleParams(allowed, arch)) |mp|
         try params.append(gpa, .{ .module = mp.module, .value = mp.value });
 
-    const env = try gpa.create(std.process.Environ.Map);
-    env.* = try howl.environ.clone(gpa);
-    try env.put("COPYFILE_DISABLE", "1");
     return .{
         .io = io,
         .gpa = gpa,
@@ -776,4 +818,6 @@ test buildOptions {
 test {
     _ = packages;
     _ = slot;
+    _ = manifest;
+    _ = disk;
 }

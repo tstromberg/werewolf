@@ -1341,8 +1341,8 @@ test "systemd-boot entries" {
         \\options x werewolf.slot=b
         \\
     , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b"));
-    // entrySecs reads back versions a new entry must beat (mkdisk's first,
-    // a leap day); versions in other formats count as none.
+    // entrySecs reads back versions a new entry must beat (howl's first
+    // disk's, a leap day); versions in other formats count as none.
     for ([_]i64{ 0, 315532800, 1835481599, 1835481600, 1791288000 }) |secs| {
         const entry = try a.print(
             "title werewolf a\nversion {f}\n",

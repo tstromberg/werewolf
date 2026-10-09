@@ -11,6 +11,7 @@ const proxmox = @import("proxmox.zig");
 const qemu = @import("qemu.zig");
 const booting = @import("boot.zig");
 const progress = @import("progress.zig");
+const native = @import("build.zig");
 const forms = @import("form");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -19,7 +20,6 @@ const Why = howl.Why;
 const say = howl.say;
 const run = howl.run;
 const writePrivate = howl.writePrivate;
-const make_cmd = howl.make_cmd;
 const Options = howl.Options;
 const Platform = howl.Platform;
 const Tell = howl.Tell;
@@ -52,15 +52,14 @@ pub fn createQemu(
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
     const replaced = try qemu.stop(io, gpa, dir);
     const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
-    const step = try tell.step(gpa, dir);
-    const built = try progress.run(io, gpa, why, &.{
-        make_cmd,
-        "--no-print-directory",
-        try gpa.print("FORM={s}", .{o.form}),
-        if (tell.dev) "DEV=1" else "DEV=",
-        ab.app,
-        "image",
-    }, step);
+    var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
+    const p = try howl.buildHere(io, gpa, &steps, .{
+        .form = o.form,
+        .arch = arch,
+        .dev = tell.dev,
+        .app = ab.root,
+    }, .{ .image = true });
+    const built = steps.start.untilNow(io, .awake).toSeconds();
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
     try qemu.disk(io, try gpa.print("{s}/data.img", .{dir}), 8 << 30);
     const ssh_port = try qemu.freePort(io, 2222);
@@ -69,27 +68,40 @@ pub fn createQemu(
         "form {s}\nssh {d}\nweb {d}\n",
         .{ o.form, ssh_port, web_port },
     ), why);
-    var start_step = step;
-    start_step.make = false;
-    start_step.first = .{ .name = "Starting the VM under QEMU", .short = "start" };
+    const ports = try listens(io, gpa, o.form, why);
+    // The machine's port this host's web port reaches: its last but ssh's,
+    // or 80.
+    var guest_web: u16 = 80;
+    for (ports) |port| if (port != 22) {
+        guest_web = port;
+    };
+    try steps.enter(.{ .name = "Starting the VM under QEMU", .short = "start" });
+    // A console log and sockets left by the last machine of this name
+    // would be taken for this one's.
+    for ([_][]const u8{ "console.log", "console.sock", "monitor.sock" }) |f|
+        Dir.cwd().deleteFile(io, try gpa.print("{s}/{s}", .{ dir, f })) catch {};
+    const accel = qemu.accel(io);
+    const argv = try qemu.argv(gpa, .{
+        .arch = arch,
+        .dir = at,
+        .kernel = try gpa.print("{s}/{s}/vmlinuz", .{ cwd, p.build }),
+        .initrd = try gpa.print("{s}/{s}/initramfs.zst", .{ cwd, p.out }),
+        .cmdline = std.mem.trim(u8, Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/slot/cmdline", .{p.out}),
+            gpa,
+            .limited(4096),
+        ) catch |err| return steps.fail(try gpa.print(
+            "{s}/slot/cmdline: {t}",
+            .{ p.out, err },
+        )), " \n"),
+        .ssh_port = ssh_port,
+        .web_port = web_port,
+        .guest_web = guest_web,
+    }, accel, arch == .aarch64 and qemu.hasEl2(io, accel));
     const launched = Io.Clock.awake.now(io);
-    _ = try progress.run(io, gpa, why, &.{
-        make_cmd,
-        "--no-print-directory",
-        "-s",
-        try gpa.print("FORM={s}", .{o.form}),
-        if (tell.dev) "DEV=1" else "DEV=",
-        ab.app,
-        try gpa.print(
-            "QEMU_CONFIG=-drive file={s}/config.tar,format=raw,if=virtio,readonly=on",
-            .{at},
-        ),
-        try gpa.print("RUN_DATA={s}/data.img", .{at}),
-        try gpa.print("RUN_SSH_PORT={d}", .{ssh_port}),
-        try gpa.print("RUN_WEB_PORT={d}", .{web_port}),
-        try gpa.print("RUN_DIR={s}", .{at}),
-        "run",
-    }, start_step);
+    if (!(try steps.exec(&.{.{ .argv = argv }}, .{})).ok) return steps.fail("QEMU did not start");
+    _ = try steps.finish();
     var spin: progress.Spinner = .init(io);
     const watch = Io.Clock.awake.now(io);
     var boot = try booting.watch(
@@ -117,14 +129,13 @@ pub fn createQemu(
         var out = Io.File.stdout().writerStreaming(io, &.{});
         try out.interface.print("{s}\t127.0.0.1:{d}\t{s}\n", .{ name, ssh_port, o.form });
     }
-    const ports = try listens(io, gpa, o.form, why);
     const ssh = std.mem.findScalar(u16, ports, 22) != null;
     const late = sshReady(io, ports, "127.0.0.1", ssh_port);
     return sayUp(io, gpa, tell.began, try gpa.print("{s} is up here, under QEMU{s}{s}", .{
         name,
         if (replaced) ", in place of the last" else "",
         late,
-    }), built.seconds, boot, try gpa.print("{s}{s}{s}{s} · {s}", .{
+    }), built, boot, try gpa.print("{s}{s}{s}{s} · {s}", .{
         if (ssh) try sshCommand(gpa, name) else "",
         if (ssh) " · " else "",
         try reach(gpa, ports, web_port),
@@ -156,9 +167,9 @@ fn stopCommand(gpa: Allocator, name: []const u8) ![]const u8 {
         gpa.print("howl delete {s}", .{name});
 }
 
-/// reach says how this host reaches a machine under QEMU: make run
-/// forwards web_port to its last port other than ssh, shown as a URL if
-/// that port speaks the web. A non-empty result ends in " · ".
+/// reach says how this host reaches a machine under QEMU: web_port
+/// reaches its last port other than ssh, shown as a URL if that port
+/// speaks the web. A non-empty result ends in " · ".
 fn reach(gpa: Allocator, ports: []const u16, web_port: u16) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var web: ?u16 = null;
@@ -216,41 +227,53 @@ pub fn createLima(
         const tar_path = try gpa.print("{s}/config.tar", .{dir});
         const config_disk = try gpa.print("{s}-config", .{name});
         try writePrivate(io, gpa, tar_path, tar, why);
+        const cwd = try std.process.currentPathAlloc(io, gpa);
+        const spec: native.Spec = .{
+            .form = o.form,
+            .arch = arch,
+            .dev = tell.dev,
+            .app = ab.root,
+        };
+        var steps: progress.Steps = try .init(io, gpa, why, step);
         var template: []const u8 = undefined;
         if (managed) {
-            // Boot as make lima does, from the image and the template make
-            // writes, on Lima's network with Lima's user, so Lima manages
-            // it, including ssh and stop.
-            const made = try gpa.print("build/{t}/{s}/lima.yaml", .{ arch, ab.out });
-            built = (try progress.run(io, gpa, why, &.{
-                make_cmd,
-                "--no-print-directory",
-                try gpa.print("FORM={s}", .{o.form}),
-                if (tell.dev) "DEV=1" else "DEV=",
-                ab.app,
-                "image",
-                try gpa.print("build/{t}/disk.img", .{arch}),
-                made,
-            }, step)).seconds;
-            const base = Dir.cwd().readFileAlloc(io, made, gpa, .limited(1 << 20)) catch |err|
-                return why.refuse("{s}: {s}", .{ made, @errorName(err) });
-            template = try lima.managedTemplate(gpa, base, o.form, config_disk);
+            // Lima boots the image directly, on its own network, with its
+            // own user, so it manages the machine, ssh and stop included.
+            const p = try howl.buildHere(io, gpa, &steps, spec, .{ .image = true });
+            // The instance's disk, which Lima copies and grows to 100 GiB,
+            // and the lima form formats as /data: one blank file for all.
+            try qemu.disk(io, try gpa.print("{s}/disk.img", .{p.build}), 64 << 20);
+            const cmdline = Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}/slot/cmdline", .{p.out}),
+                gpa,
+                .limited(4096),
+            ) catch |err| return steps.fail(try gpa.print(
+                "{s}/slot/cmdline: {t}",
+                .{ p.out, err },
+            ));
+            template = try lima.managedTemplate(gpa, .{
+                .form = o.form,
+                .arch = @tagName(arch),
+                .build = try gpa.print("{s}/{s}", .{ cwd, p.build }),
+                .out = try gpa.print("{s}/{s}", .{ cwd, p.out }),
+                .cmdline = std.mem.trim(u8, cmdline, " \n"),
+                .config_disk = config_disk,
+            });
         } else {
-            const cwd = try std.process.currentPathAlloc(io, gpa);
+            // Its own boot disk, whose console is the virtio one, and with
+            // DHCP the vzNAT MAC this host finds its lease by.
             const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
-            built = (try progress.run(io, gpa, why, &.{
-                make_cmd,
-                "--no-print-directory",
-                try gpa.print("FORM={s}", .{o.form}),
-                if (tell.dev) "DEV=1" else "DEV=",
-                ab.app,
-                "disk",
-                try gpa.print("DISK={s}", .{disk}),
-                if (dhcp)
-                    try gpa.print("DISK_ARGS=werewolf.mac={s} console=hvc0", .{m})
-                else
-                    "DISK_ARGS=console=hvc0",
-            }, step)).seconds;
+            var with = spec;
+            with.disk_path = disk;
+            with.disk.args = if (dhcp)
+                try gpa.dupe(
+                    []const u8,
+                    &.{ try gpa.print("werewolf.mac={s}", .{m}), "console=hvc0" },
+                )
+            else
+                &.{"console=hvc0"};
+            _ = try howl.buildHere(io, gpa, &steps, with, .{ .disk = true });
             template = try lima.template(
                 gpa,
                 o.form,
@@ -260,6 +283,7 @@ pub fn createLima(
                 config_disk,
             );
         }
+        built = (try steps.finish()).seconds;
         // Remove a config disk left by a machine deleted with limactl alone.
         _ = std.process.run(
             gpa,
@@ -267,7 +291,6 @@ pub fn createLima(
             .{ .argv = &.{ "limactl", "disk", "delete", config_disk } },
         ) catch {};
         var lima_step = step;
-        lima_step.make = false;
         lima_step.first = .{ .name = "Creating the VM", .short = "create" };
         _ = try progress.run(
             io,
@@ -292,7 +315,6 @@ pub fn createLima(
         // limactl start returns once Lima's ssh and boot scripts are done.
         // The machine is reached through Lima's ssh forward.
         var start_step = step;
-        start_step.make = false;
         start_step.first = .{ .name = "Starting the VM, and Lima's ssh", .short = "start" };
         const started = try progress.run(
             io,
@@ -524,7 +546,7 @@ pub fn createBhyve(
     o: Options,
     name: []const u8,
     tar: []const u8,
-    dev: bool,
+    tell: Tell,
     w: *Io.Writer,
     why: *Why,
 ) !void {
@@ -561,16 +583,15 @@ pub fn createBhyve(
     }
     if (was.len == 0) {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
-        try run(io, why, &.{
-            make_cmd,
-            "--no-print-directory",
-            try gpa.print("FORM={s}", .{o.form}),
-            if (dev) "DEV=1" else "DEV=",
-            ab.app,
-            "disk",
-            try gpa.print("DISK={s}", .{disk}),
-            "DISK_ARGS=",
-        });
+        var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
+        _ = try howl.buildHere(io, gpa, &steps, .{
+            .form = o.form,
+            .arch = arch,
+            .dev = tell.dev,
+            .app = ab.root,
+            .disk_path = disk,
+        }, .{ .disk = true });
+        _ = try steps.finish();
         try writePrivate(io, gpa, form_file, o.form, why);
     }
     try writePrivate(io, gpa, config, tar, why);
@@ -617,7 +638,7 @@ pub fn createBhyve(
     });
 }
 
-/// createFirecracker builds the form's image as make run boots it, writes
+/// createFirecracker builds the form's slot and kernel, writes
 /// its data disk, config tar and Firecracker config, sets up its network as
 /// root, and starts Firecracker (firecracker.zig) under howl's supervisor,
 /// detached by setsid, with the console in console.log. A machine of the
@@ -659,22 +680,21 @@ pub fn createFirecracker(
     var built: ?i64 = null;
     if (was.len == 0) {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
-        built = (try progress.run(io, gpa, why, &.{
-            make_cmd,
-            "--no-print-directory",
-            try gpa.print("FORM={s}", .{o.form}),
-            if (tell.dev) "DEV=1" else "DEV=",
-            ab.app,
-            "slot",
-            try firecracker.kernelPath(gpa, arch),
-        }, try tell.step(gpa, dir))).seconds;
+        var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
+        const p = try howl.buildHere(io, gpa, &steps, .{
+            .form = o.form,
+            .arch = arch,
+            .dev = tell.dev,
+            .app = ab.root,
+        }, .{ .slot = true, .vmlinux = arch == .x86_64 });
+        built = (try steps.finish()).seconds;
         const dns = dns_given orelse firecracker.hostDns(io, gpa) orelse return why.refuse(
             "--dns ADDR: this host's resolvers are all on loopback, which the machine cannot reach",
             .{},
         );
         const image_args = std.mem.trim(u8, Dir.cwd().readFileAlloc(
             io,
-            try gpa.print("build/{t}/{s}/meta/usr/share/werewolf/cmdline", .{ arch, ab.out }),
+            try gpa.print("{s}/slot/cmdline", .{p.out}),
             gpa,
             .limited(4096),
         ) catch |err| return why.refuse(
@@ -695,11 +715,11 @@ pub fn createFirecracker(
         try writePrivate(io, gpa, try gpa.print("{s}/vm.json", .{dir}), try firecracker.config(
             gpa,
             try gpa.print("{s}/{s}", .{ cwd, try firecracker.kernelPath(gpa, arch) }),
-            try gpa.print("{s}/build/{t}/{s}/slot/stage0.zst", .{ cwd, arch, ab.out }),
+            try gpa.print("{s}/{s}/slot/stage0.zst", .{ cwd, p.out }),
             try firecracker.bootArgs(gpa, image_args, n, dns),
             data,
             try gpa.print("{s}/{s}/config.tar", .{ cwd, dir }),
-            try gpa.print("{s}/build/{t}/{s}/slot/root.erofs", .{ cwd, arch, ab.out }),
+            try gpa.print("{s}/{s}/slot/root.erofs", .{ cwd, p.out }),
             try gpa.print("{s}/{s}/firecracker.log", .{ cwd, dir }),
             n,
         ), why);

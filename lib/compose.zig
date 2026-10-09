@@ -35,6 +35,11 @@ pub const records = [_][]const u8{
     "modules-bitten", "net", "oci", "pledge", "posture-known", "prune",         "weaknesses",
 };
 
+/// release_forms are the forms CI publishes, for both arches
+/// (docs/releases.md). As they ship, without DEV, their images say where
+/// the updater finds releases.
+pub const release_forms = [_][]const u8{ "minimal", "prod", "prod-ssh" };
+
 /// Accounts holds an image's account files, as its packages leave them.
 pub const Accounts = struct { passwd: []const u8, group: []const u8, shadow: []const u8 };
 

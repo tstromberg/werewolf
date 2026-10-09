@@ -44,7 +44,7 @@ is a different image, so the shell never ships. runit starts it as
 ## Drawbacks
 
 - On a DEV=1 machine, anyone at the console is root.
-- `make run` of a non-DEV form gives no console shell: use DEV=1, or ssh.
+- `howl run` of a form without `--dev` gives no console shell: use `--dev`, or ssh.
 
 ## Alternatives Considered
 

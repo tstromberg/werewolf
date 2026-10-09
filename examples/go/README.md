@@ -6,8 +6,6 @@ The VM needs no Go compiler.
 Install the [build tools](../README.md#build-host), then run these commands
 from the repository root.
 
-`ARCH` defaults to your host architecture. Keep it the same for QEMU and GCP.
-
 ## Declare the app
 
 The [form](../../forms/example-go/apko.yaml) inherits `app.yaml`, which adds an
@@ -21,35 +19,31 @@ image gives each replacement VM the same starting configuration.
 ## Build and run
 
 ```sh
-make -C examples/go image
-make -C examples/go deploy-qemu
-
-# In another terminal:
-curl -f http://127.0.0.1:8080/
-curl -f http://127.0.0.1:8080/health
+build/host/howl run --with example-go
+curl -f http://ADDRESS/          # ADDRESS as run printed it
+curl -f http://ADDRESS/health
+build/host/howl stop
 ```
 
-You should see `Hello from Go on werewolf!` and `ok`.
-Quit QEMU with `Ctrl-a x`. Relaunching preserves the VM's data and updates;
-to try rebuilt code, choose a [fresh QEMU disk](../README.md#what-the-makefiles-do).
+You should see `Hello from Go on werewolf!` and `ok`. On a Mac `run` boots
+the machine under Lima, at its own address, port 8080; elsewhere, or with
+`--on qemu`, under QEMU, on a loopback port forwarded to it. Each `run`
+replaces the last machine, so it boots what you last built, with an empty
+`/data` ([the tutorials' guide](../README.md#with-werewolf)).
 
 The build selects the Linux architecture and disables cgo. Install Go on
 the build host; the example uses only its standard library.
 
 ## Deploy on GCP
 
-Complete the [GCP setup](../README.md#prepare-gcp-once) to set
-`GCP_PROJECT`, `GCP_BUCKET` and `GCP_SOURCE_RANGES`, then:
+Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-make -C examples/go deploy-gcp
+build/host/howl create go --with example-go --on gcp --allow-from me
+build/host/howl console go --on gcp     # the boot log
 ```
 
-Open the printed URL, then visit `/health`. To read the boot log:
-
-```sh
-make -C examples/go serial-gcp
-```
+Open `http://ADDRESS:8080/`, at the address create printed, then visit `/health`.
 
 ## Automatic updates
 
@@ -60,14 +54,14 @@ for rollback. Both images share `/data`; rolling back does not undo data changes
 Wolfi packages and the kernel update automatically. The Go runtime, standard
 library and modules are compiled into the app; updating them or your code
 requires rebuilding the image with the updated toolchain and dependencies.
-After changing only the toolchain, use `make -B -C examples/go image` to
-force a full rebuild.
+After changing only the toolchain, remove `build/*/example-go*/application`
+so the next build compiles the app again.
 
-For application changes, rebuild, test with a fresh QEMU disk, then deploy
-under a new name:
+For application changes, rebuild, try it here, then create a machine under a
+new name:
 
 ```sh
-make -C examples/go deploy-gcp GCP_NAME=werewolf-go-v2
+build/host/howl create go-v2 --with example-go --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;
@@ -76,13 +70,10 @@ for package refreshes and rollback details.
 
 ## Clean up
 
-These commands remove the example VMs, their disks and data, and deployment
-resources. The shared bucket stays.
+These commands delete the machines, their disks and data, and their
+firewall rules. The image stays ([details](../README.md#change-update-and-remove)).
 
 ```sh
-make -C examples/go delete-gcp
-# If you deployed v2:
-make -C examples/go delete-gcp GCP_NAME=werewolf-go-v2
+build/host/howl delete go --on gcp
+build/host/howl delete go-v2 --on gcp   # if you made it
 ```
-
-Use the same settings as deployment. [Cleanup details](../README.md#change-update-and-remove).

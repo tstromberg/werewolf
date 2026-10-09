@@ -160,9 +160,9 @@ fn checkFile(f: Manifest.File) !void {
     for (f.sha256) |c| if (!std.ascii.isHex(c) or std.ascii.isUpper(c)) return error.BadManifest;
 }
 
-/// validAdvisory applies release/manifest's rules: an id of WW-YEAR-NUMBER
-/// and a title of printable ASCII without quotes or backslashes. JSON
-/// parsing already checks the tier.
+/// validAdvisory applies the rules howl's manifest.zig writes advisories
+/// by: an id of WW-YEAR-NUMBER and a title of printable ASCII without
+/// quotes or backslashes. JSON parsing already checks the tier.
 pub fn validAdvisory(a: Manifest.Advisory) bool {
     const id = a.id;
     if (id.len < 11 or id.len > 32 or !std.mem.startsWith(u8, id, "WW-") or

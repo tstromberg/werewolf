@@ -10,15 +10,13 @@ const verity = @import("verity");
 const image = @import("image");
 const build = @import("build.zig");
 const packages = @import("packages.zig");
+const disk = @import("disk.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 const Dir = Io.Dir;
 const mem = std.mem;
 const B = build.B;
 
-/// release_forms are the forms CI publishes; as they ship, their images
-/// say where the updater finds releases (Makefile, RELEASE_FORMS).
-const release_forms = [_][]const u8{ "minimal", "prod", "prod-ssh" };
 const releases_url = "https://github.com/werewolf-linux/werewolf/releases/latest/download/";
 const tiers_url = "https://raw.githubusercontent.com/werewolf-linux/cve-feed/main/";
 
@@ -108,7 +106,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     try b.copy("release/image.pub", try b.path("{s}/image.pub", .{d}));
     try b.copy("release/tiers.pub", try b.path("{s}/tiers.pub", .{d}));
     try b.put(d, "tiers", tiers_url ++ "\n");
-    for (release_forms) |r| if (mem.eql(u8, r, b.name) and !b.spec.dev)
+    for (compose.release_forms) |r| if (mem.eql(u8, r, b.name) and !b.spec.dev)
         try b.put(d, "releases", releases_url ++ "\n");
     try b.copy("release/advisories", try b.path("{s}/advisories", .{d}));
     try Dir.cwd().writeFile(b.io, .{ .sub_path = stamp, .data = "" });
@@ -150,9 +148,6 @@ fn overlayList(b: *B) ![]const u8 {
     return out.items;
 }
 
-/// disk_mib is the boot disk's size (Makefile, DISK_MIB).
-const disk_mib = "8192";
-
 /// make makes the overlay, the slot, and what else goals ask, from
 /// rootfs, the packages.
 pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
@@ -187,15 +182,19 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         try b.path("{s}/kernel/x/boot/vmlinuz-virt", .{b.p.build}),
     );
     // The kernel arguments the image asks for, beside it, for bite and
-    // boot/mkdisk to boot it with.
+    // the disk to boot it with.
     try copyStep(
         b,
         try b.path("{s}/slot/cmdline", .{out}),
         stamp,
         try b.path("{s}/meta/usr/share/werewolf/cmdline", .{out}),
     );
-    if (goals.disk) try disk(b, try b.path("{s}/disk.img", .{out}), false);
-    if (goals.qcow2) try disk(b, try b.path("{s}/disk.qcow2", .{out}), true);
+    if (goals.disk) try diskStep(
+        b,
+        b.spec.disk_path orelse try b.path("{s}/disk.img", .{out}),
+        false,
+    );
+    if (goals.qcow2) try diskStep(b, try b.path("{s}/disk.qcow2", .{out}), true);
 }
 
 fn layerStep(
@@ -427,6 +426,9 @@ fn stage0(b: *B, name: []const u8, modules_name: []const u8, words: []const []co
     try b.run(argv.items, .{});
     const t = try b.tmp(target);
     try b.run(&.{ "zstd", "-19", "-T0", "-q", "-f", "-o", t, cpio }, .{});
+    // zstd dates its output to the cpio's whole second, older than an input
+    // written in that second: the next build would make it again.
+    try Dir.cwd().setTimestampsNow(b.io, t, .{});
     try b.rename(t, target);
     try Dir.cwd().deleteFile(b.io, cpio);
     try b.done(target, began);
@@ -567,10 +569,12 @@ fn copyStep(b: *B, target: []const u8, input: []const u8, from: []const u8) !voi
     try b.done(target, began);
 }
 
-/// disk writes werewolf's own boot disk of the slot (boot/mkdisk): raw, or
-/// as a release publishes it, qcow2 compressed with zlib, named rather than
-/// left to qemu-img's default, which a later qemu-img may change.
-fn disk(b: *B, target: []const u8, qcow2: bool) !void {
+/// diskStep writes target, werewolf's own boot disk of the slot
+/// (disk.zig), of Spec.disk's size: raw, with Spec.disk's kernel
+/// arguments, or as a release publishes it, qcow2 compressed with zlib and
+/// without them. zlib is named, not left to qemu-img's default, which a
+/// later qemu-img may change.
+fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
     const out = b.p.out;
     // systemd-boot, from Wolfi, pinned by a lock as the kernel is.
     const yaml = "boot/boot.yaml";
@@ -579,18 +583,16 @@ fn disk(b: *B, target: []const u8, qcow2: bool) !void {
     try packages.relock(b, lock, yaml, &.{yaml});
     try packages.apkoBuild(b, boot, yaml, lock, &.{lock});
     const slot = try b.path("{s}/slot", .{out});
-    const gpt = "build/host/gpt";
     const began = try b.begin(target, &.{
         try b.path("{s}/vmlinuz", .{slot}),    try b.path("{s}/stage0.zst", .{slot}),
         try b.path("{s}/root.erofs", .{slot}), try b.path("{s}/cmdline", .{slot}),
-        boot,                                  gpt,
-        "boot/mkdisk",
+        boot,                                  b.self,
     }) orelse return;
-    const arch = @tagName(b.spec.arch);
+    if (std.fs.path.dirname(target)) |parent| try Dir.cwd().createDirPath(b.io, parent);
     const t = try b.tmp(target);
     if (qcow2) {
         const raw = try b.path("{s}/disk.raw", .{out});
-        try b.run(&.{ "boot/mkdisk", arch, boot, gpt, slot, raw, disk_mib }, .{});
+        try disk.write(b, raw, boot, slot, .{ .size_mib = b.spec.disk.size_mib });
         try b.run(&.{
             "qemu-img", "convert", "-f",
             "raw",      "-O",      "qcow2",
@@ -599,7 +601,7 @@ fn disk(b: *B, target: []const u8, qcow2: bool) !void {
         }, .{});
         try Dir.cwd().deleteFile(b.io, raw);
     } else {
-        try b.run(&.{ "boot/mkdisk", arch, boot, gpt, slot, t, disk_mib }, .{});
+        try disk.write(b, t, boot, slot, b.spec.disk);
     }
     try b.rename(t, target);
     try b.done(target, began);

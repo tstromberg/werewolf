@@ -1,6 +1,7 @@
 //! gpt writes a sparse disk image with werewolf's partition table: an EFI
-//! system partition and a root partition, both empty. It runs on the build
-//! host, which may lack sfdisk. See docs/design/native-boot.md.
+//! system partition and a root partition, both empty. howl's disk step
+//! (cmd/howl/disk.zig) imports it as the module "gpt", so a build host
+//! needs no sfdisk. See docs/design/native-boot.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,28 +21,18 @@ const disk_guid = "57e1f000-77e2-4b0f-8a3c-000000000000";
 const esp_guid = "57e1f000-77e2-4b0f-8a3c-000000000001";
 const root_guid = "57e1f000-77e2-4b0f-8a3c-000000000002";
 
-pub fn main(init: std.process.Init) !void {
-    const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 4) usage();
-    const size_mib = std.fmt.parseInt(u32, args[2], 10) catch usage();
-    const esp_mib = std.fmt.parseInt(u32, args[3], 10) catch usage();
-    const l = try layout(size_mib, esp_mib);
-
-    var primary: [(1 + 1 + entry_sectors) * sector]u8 = undefined;
+/// create writes path, a sparse disk of l.sectors sectors that holds the
+/// partition table and nothing else.
+pub fn create(io: Io, path: []const u8, l: Layout) !void {
+    var primary: [(2 + entry_sectors) * sector]u8 = undefined;
     var backup: [(entry_sectors + 1) * sector]u8 = undefined;
     encode(l, &primary, &backup);
 
-    const io = init.io;
-    var f = try Io.Dir.cwd().createFile(io, args[1], .{ .truncate = true });
+    var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
     defer f.close(io);
     try f.setLength(io, l.sectors * sector);
     try f.writePositionalAll(io, &primary, 0);
     try f.writePositionalAll(io, &backup, (l.sectors - entry_sectors - 1) * sector);
-}
-
-fn usage() noreturn {
-    std.debug.print("usage: gpt OUT SIZE_MIB ESP_MIB\n", .{});
-    std.process.exit(2);
 }
 
 /// Layout holds the disk size and partition bounds, in sectors.
@@ -53,6 +44,8 @@ pub const Layout = struct {
     root_last: u64,
 };
 
+/// layout places an EFI partition of esp_mib MiB and the root on a disk of
+/// size_mib MiB. It fails with error.TooSmall if the root gets under 1 MiB.
 pub fn layout(size_mib: u32, esp_mib: u32) !Layout {
     const per_mib = 1024 * 1024 / sector;
     const total = @as(u64, size_mib) * per_mib;

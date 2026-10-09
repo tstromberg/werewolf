@@ -126,8 +126,8 @@ sha256 of its package list and kernel.
 
 ## Releases
 
-A form built as it ships for release (`RELEASE_FORMS` in the Makefile, not
-a `DEV=1` build) carries two more files in its build record:
+A form built as it ships for release (`release_forms` in lib/compose.zig,
+not a `DEV=1` build) carries two more files in its build record:
 `/usr/share/werewolf/releases`, where its releases are (the latest GitHub
 release's downloads), and `/usr/share/werewolf/image.pub`, the public half
 of the image key CI signs manifests with ([releases.md](releases.md)). With

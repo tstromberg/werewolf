@@ -171,10 +171,11 @@ it needs to see, up to a limit, so a fast machine finishes fast and a slow
 one, emulated in CI, still passes. On an M4, `make -j8 check` takes about
 25 s for the forms, and a further minute for the slot to commit.
 
-Logs are in `build/<arch>/check/`. Each build writes `<form>-build.log`,
-and each console, kernel messages and all, goes to `<form>.log`. A
-shell-free boot writes `<form>-shellfree-build.log` and
-`<form>-shellfree.log`.
+Logs are in `build/<arch>/check/`. Each build, howl's `_build` run by
+make, writes `<form>-build.log`, and each console, kernel messages and all,
+goes to `<form>.log`. A shell-free boot writes `<form>-shellfree-build.log`
+and `<form>-shellfree.log`. `shared-build.log` is what every check shares,
+built once first: howl, the programs, the kernel and minimal's DEV=1 image.
 
 ## What `make check-updater` does
 

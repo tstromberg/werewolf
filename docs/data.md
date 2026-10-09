@@ -66,6 +66,8 @@ service stores its data should change it only once its slot has committed
 can still read. Otherwise a fallback runs the old release against data it
 cannot read.
 
-`make run` attaches a sparse 8 GiB `build/<arch>/data.img`, shared by every
-form of an arch. Delete it for a blank disk, and when adding or removing
-`data.key`, since a plain disk and a LUKS one refuse each other's config.
+Under QEMU, `howl create NAME --on qemu` gives each machine a sparse 8 GiB
+`build/machines/NAME/data.img`, which a second create of the name keeps;
+`howl delete NAME` removes it, and `howl run` makes a blank one each time.
+Delete a machine for a blank disk when adding or removing `data.key`, since a
+plain disk and a LUKS one refuse each other's config.

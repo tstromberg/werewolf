@@ -26,10 +26,11 @@ otherwise), and prints its name and address; the application answers on
 
 ## Step by step
 
-The same, with `make`, `tar` and QEMU alone, to cut and paste into `sh`,
-`bash` or `zsh` at the repository root. It makes a one-file application
-that answers with its greeting, builds it into an image, packs a config tar
-that gives the greeting, and boots the two.
+The same by hand, with `make disk` (howl's build, at make's paths), `tar`
+and QEMU, to cut and paste into `sh`, `bash` or `zsh` at the repository
+root. It makes a one-file application that answers with its greeting,
+builds it into an image, packs a config tar that gives the greeting, and
+boots the two.
 
 **0. Where to work.** `build/` is the build's, and kept out of git.
 
@@ -171,9 +172,9 @@ writes a sorted ustar, so the same files make the same bytes. The root,
 packages and overlays together, is an erofs image that stage0 mounts
 read-only through dm-verity ([design/verified-boot.md](design/verified-boot.md)):
 a byte of the application changed on the disk stops the machine booting
-it. `make FORM=example-python DEV= APP=... DIST=out _dist-form` writes the
-release files and their manifest, each file's sha256, as `howl build`
-does ([releases.md](releases.md)).
+it. `howl build --with example-python --app "$W/myapp" -o out` writes the
+release files and their manifest, each file's sha256
+([releases.md](releases.md)).
 
 ### How it runs
 

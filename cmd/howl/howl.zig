@@ -100,7 +100,7 @@ pub fn main(init: std.process.Init) void {
         .upload => cloud.upload(io, gpa, args[2..], &why),
         .@"build-apk" => apk.build(io, gpa, args[2..], &why),
         .form => adhoc.form(io, gpa, args[2..], &why),
-        // Internal: make's targets, built natively (build.zig).
+        // Internal: the Makefile's image targets (build.zig).
         ._build => native.buildTargets(io, gpa, args[2..], &why),
         // Internal: create runs howl again as the bhyve or Firecracker supervisor.
         ._bhyve => if (args.len < 5)
@@ -760,7 +760,7 @@ fn misfit(entries: []const Entry, tar_len: usize, t: Platform) ?[]const u8 {
     return null;
 }
 
-/// start_phase is the phase a build is in before make names one.
+/// start_phase is the phase a build is in before a step names one.
 pub const start_phase: progress.Phase = .{ .name = "Starting the build", .short = "start" };
 
 /// verboseFlag reports whether --verbose or -v is anywhere in args, and
@@ -965,10 +965,10 @@ pub const Tell = struct {
 
 // --- create, delete, console -----------------------------------------------------------
 
-/// AppBuild is make's APP= argument, the form's build directory name, and
-/// where the application is staged, if there is one. With --app the
-/// directory is FORM-app, so the form's own build is untouched.
-const AppBuild = struct { app: []const u8, out: []const u8, root: ?[]const u8 = null };
+/// AppBuild is where an application is staged, if there is one: the
+/// image's root it lays over the form's. Its build is FORM-app, so the
+/// form's own build is untouched.
+const AppBuild = struct { root: ?[]const u8 = null };
 
 pub fn appBuild(
     io: Io,
@@ -978,10 +978,10 @@ pub fn appBuild(
     src: ?[]const u8,
     why: *Why,
 ) !AppBuild {
-    // Outputs are named by the form's base name, as in the Makefile: a
-    // form outside the tree, ../myapp, builds into build/ARCH/myapp.
+    // Outputs are named by the form's base name: a form outside the tree,
+    // ../myapp, builds into build/ARCH/myapp.
     const name = std.fs.path.basename(std.mem.trimEnd(u8, form, "/"));
-    const dir = src orelse return .{ .app = "APP=", .out = name };
+    const dir = src orelse return .{};
     // The last form's app wins; lib/form.zig has checked it is absolute.
     var at: ?[]const u8 = null;
     for (try chain(io, gpa, form, why)) |f| if (f.spec.get("app")) |a| {
@@ -1002,11 +1002,23 @@ pub fn appBuild(
         staged.digest,
         where,
     });
-    return .{
-        .app = try gpa.print("APP={s}", .{root}),
-        .out = try gpa.print("{s}-app", .{name}),
-        .root = root,
-    };
+    return .{ .root = root };
+}
+
+/// buildHere builds goals of s for a machine, reporting through steps, and
+/// returns where it wrote. FREEZE=1 in the environment pins the packages,
+/// as it does for make.
+pub fn buildHere(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    s: native.Spec,
+    goals: native.Goals,
+) !native.Paths {
+    var spec = s;
+    spec.freeze = native.frozen();
+    try native.make(io, gpa, steps, spec, goals);
+    return native.paths(gpa, spec);
 }
 
 /// machineDir returns where create keeps a machine's files on any
@@ -1164,8 +1176,9 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
     if (on.here() and (o.arch != null or o.size != null))
         return why.refuse("{s}: {t} runs this machine's arch", .{ sized_only, on });
     // On Lima or bhyve, a form with no DHCP client gets the hypervisor's
-    // user network in its tar (Lima's, as make lima's template sets it, or
-    // bhyve's slirp), unless the flags or --config DIR give one.
+    // user network in its tar (Lima's, as a Lima-managed machine's command
+    // line sets it, or bhyve's slirp), unless the flags or --config DIR
+    // give one.
     const on_lima = on == .lima;
     // A Firecracker machine's address is its tap's, on the kernel command
     // line. Only --dns is allowed, and it goes there, not in the tar.
@@ -1213,7 +1226,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
         .gcp => return cloud.createGcp(io, gpa, o, name, tar, w, why),
         .aws => return cloud.createAws(io, gpa, o, name, tar, w, why),
         .azure => return cloud.createAzure(io, gpa, o, name, entries, tar, w, why),
-        .bhyve => return local.createBhyve(io, gpa, o, name, tar, tell.dev, w, why),
+        .bhyve => return local.createBhyve(io, gpa, o, name, tar, tell, w, why),
         .proxmox => return local.createProxmox(io, gpa, o, name, tar, w, why),
         .firecracker => return local.createFirecracker(io, gpa, o, name, tar, fc_dns, tell, why),
         .lima => return local.createLima(io, gpa, o, name, tar, dhcp, tell, w, why),
@@ -1268,20 +1281,27 @@ pub fn reconfigurable(
 }
 
 /// releaseDisk returns the form's release disk.qcow2, with --app's
-/// application, and builds it if it is stale.
+/// application, and builds it if it is stale, as howl build would.
 pub fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: Arch, why: *Why) ![]const u8 {
     const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
-    const disk = try gpa.print("build/{t}/{s}/disk.qcow2", .{ arch, ab.out });
-    try run(io, why, &.{
-        make_cmd,
-        "--no-print-directory",
-        try gpa.print("FORM={s}", .{o.form}),
-        try gpa.print("ARCH={t}", .{arch}),
-        "DEV=",
-        ab.app,
-        disk,
+    const name = std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/"));
+    var steps: progress.Steps = try .init(io, gpa, why, .{
+        .command = try gpa.print("howl build --with {s} --arch {t}{s}{s}", .{
+            o.form,
+            arch,
+            if (o.app != null) " --app " else "",
+            o.app orelse "",
+        }),
+        .log = try gpa.print("build/log/{s}-{t}-build.log", .{ name, arch }),
+        .first = start_phase,
     });
-    return disk;
+    const p = try buildHere(io, gpa, &steps, .{
+        .form = o.form,
+        .arch = arch,
+        .app = ab.root,
+    }, .{ .qcow2 = true });
+    _ = try steps.finish();
+    return gpa.print("{s}/disk.qcow2", .{p.out});
 }
 
 pub fn isMachineName(s: []const u8) bool {

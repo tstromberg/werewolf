@@ -64,7 +64,7 @@ one on the machine, so its private half never leaves.
 
 ## Drawbacks
 
-- **Two interfaces**, and `howl run` and `create` call make until howl-build.md's stage 2.
+- **Two interfaces**, though make's image targets now ask howl ([howl-build.md](howl-build.md)).
 - **Flags from service files are indirect**: a typo there is a missing flag.
 - **Five provider CLIs** change output and flags on their own schedules.
 - **Azure copies a disk per machine**: a reusable image needs a root agent.

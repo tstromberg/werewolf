@@ -106,8 +106,10 @@ network.
 
 The steps below do it by hand, for a VPC and subnet of your own.
 
-Complete the [GCP project and bucket setup](../examples/README.md#prepare-gcp-once).
-Set `GCP_PROJECT`, `GCP_BUCKET` and `GCP_ZONE`. Choose a subnet that can reach
+Complete the [GCP project setup](../examples/README.md#prepare-gcp-once), and
+make a bucket for the upload (`gcloud storage buckets create gs://NAME
+--uniform-bucket-level-access`). Set `GCP_PROJECT`, `GCP_BUCKET` (the bucket's
+name, without `gs://`) and `GCP_ZONE`. Choose a subnet that can reach
 your destinations, and set these values to its VPC and regional subnet names:
 
 ```sh
