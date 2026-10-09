@@ -254,11 +254,11 @@ $(PACKAGE_TOOL): tools/package.zig lib/package.zig
 PACKAGE_FORMS = $(shell $(FORM_ASK) packaged)
 packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 	@[ -n "$(PACKAGE_TIME)" ] || { echo "packages: no commit time; set PACKAGE_TIME" >&2; exit 1; }
-	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/empty $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/empty
-	$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/empty werewolf-format $(PACKAGE_FORMAT)-r0 $(ARCH) 0 \
-		"werewolf's format $(PACKAGE_FORMAT) (lib/compose.zig)"
+	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/format $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/format/usr/lib/werewolf
+	echo $(PACKAGE_FORMAT) >$(PACKAGES)/format/usr/lib/werewolf/format && $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/format \
+		werewolf-format$(PACKAGE_FORMAT) - $(ARCH) $(PACKAGE_TIME) "werewolf's format $(PACKAGE_FORMAT) (lib/compose.zig)"
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
-		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format=$(PACKAGE_FORMAT) || exit 1; done
+		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; done
 	for f in $(PACKAGE_FORMS); do t=$(PACKAGES)/forms/$$f && $(FORM_TOOL) stage $$f $$t && \
 		{ [ ! -d $(PROGRAMS)/forms/$$f ] || cp -R $(PROGRAMS)/forms/$$f/. $$t/; } && \
 		$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $$t $$f-form - $(ARCH) $(PACKAGE_TIME) "werewolf's form $$f (forms/$$f)" \
@@ -513,15 +513,15 @@ check-compose: slot
 
 # EROFS_OPTS must match the options lib/image.zig gives mkfs.erofs.
 EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments,dedupe
-check-updater check-updater-staged: | _check-shared
-	@$(MAKE) --no-print-directory FORM=prod DEV=1 $(if $(filter %-staged,$@),STAGED=1) _check-updater
+check-updater check-updater-staged check-updater-published: | _check-shared
+	@$(MAKE) --no-print-directory DEV=1 $(if $(filter %-staged,$@),STAGED=1) $(if $(filter %-published,$@),PUBLISHED=1 FORM=test/published-form,FORM=prod) _check-updater
 check-updater-release: | _check-shared
 	@$(MAKE) --no-print-directory FORM=prod-ssh _check-updater
 _check-updater: $(VERITY_BIN)
 	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }
 	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) VICTIM=$(VICTIM_UUID) PRUNE='$(call form_list,prune)' \
-		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' \
+		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' PUBLISHED='$(PUBLISHED)' \
 		test/check-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 \
 		-device virtio-net-pci,netdev=n0,romfile=
 

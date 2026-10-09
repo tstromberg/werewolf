@@ -152,17 +152,11 @@ fn pick(records: []const apk.Record, pkg: []const u8, pins: []const []const u8) 
     const pinned = for (pins) |p| {
         if (mem.cutPrefix(u8, p, pkg)) |rest| if (rest.len > 1 and rest[0] == '=') break rest[1..];
     } else null;
-    var buf: [32]u8 = undefined;
-    const format = std.mem.print(
-        &buf,
-        "werewolf-format={d}",
-        .{compose.format},
-    ) catch unreachable;
     var best: ?apk.Record = null;
     for (records) |r| {
         if (!mem.eql(u8, r.name, pkg)) continue;
         for (r.depends) |d| {
-            if (mem.eql(u8, d, format)) break;
+            if (mem.eql(u8, d, compose.format_package)) break;
         } else continue;
         if (pinned) |v| {
             if (mem.eql(u8, r.version, v)) return r;
@@ -246,8 +240,8 @@ const testing = std.testing;
 
 test pick {
     const sha: [20]u8 = @splat(0);
-    const f1: []const []const u8 = &.{"werewolf-format=1"};
-    const f2: []const []const u8 = &.{"werewolf-format=2"};
+    const f1: []const []const u8 = &.{"werewolf-format1"};
+    const f2: []const []const u8 = &.{"werewolf-format2"};
     const records = [_]apk.Record{
         .{ .name = "prod-form", .version = "20261009.100000-r0", .depends = f1, .sha1 = sha },
         .{ .name = "prod-form", .version = "20261009.120000-r0", .depends = f1, .sha1 = sha },

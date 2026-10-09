@@ -7,6 +7,7 @@ make -j check       # the same, side by side
 make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
 make check-updater-release  # the same, to CI's latest signed release
+make check-updater-published  # the same, on forms from werewolf's repository
 make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
 make check-aws      # the same on an EC2 instance
 make check-azure    # the same on an Azure VM
@@ -207,6 +208,14 @@ check. It tests the release as much as the updater, because slot b is what
 CI published. So it passes only once CI has published from a tree whose
 slot boots and updates as this one does, and whose packages are no older
 than this tree's: the updater takes nothing backwards.
+
+`make check-updater-published` builds `test/published-form`, a form given by
+path on the published `prod`, from werewolf's repository, and gives slot a
+an older-looking staged `prod`. Slot b must install `minimal-form` and
+`prod-form`, compose `prod` from the package, not slot a's copy, and keep
+the local form's files, carried from slot a (docs/design/custom-updates.md).
+It takes the published packages, so it passes once CI has published this
+tree's format and forms.
 
 `make check-updater-staged` cuts the power the moment slot b is staged, as
 a crash or an operator's reboot would. Slot b must boot all the same,

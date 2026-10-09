@@ -92,8 +92,8 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
     }));
     try b.put(d, "overlay", try overlayList(b));
-    // apk's world as the packages leave it, without the pins FREEZE adds,
-    // but, published, with the format pin: the updater then takes only
+    // apk's world as the packages leave it, without the pins FREEZE adds.
+    // Published, it names the format's package, so the updater takes only
     // programs that read the files compose writes (lib/compose.zig).
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/etc/apk", .{meta_dir}));
     const world = try b.capture(stamp, &.{ "bsdtar", "-xOf", rootfs, "etc/apk/world" });
@@ -102,10 +102,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "{s}: every package in etc/apk/world is pinned",
         .{rootfs},
     );
-    try b.put(meta_dir, "etc/apk/world", if (b.spec.published)
-        try b.path("{s}werewolf-format={d}\n", .{ unpinned, compose.format })
-    else
-        unpinned);
+    try b.put(meta_dir, "etc/apk/world", unpinned);
     try b.put(d, "release", try b.path("{s} {s} built-by-make\n", .{ b.name, kernel_pkg }));
     try b.copy("release/image.pub", try b.path("{s}/image.pub", .{d}));
     try b.copy("release/tiers.pub", try b.path("{s}/tiers.pub", .{d}));

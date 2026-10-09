@@ -48,9 +48,9 @@ lines, its directories, the floor), `write` within what it may write. The
 service promises `rpath exec landlock seccomp`, which narrowing uses, and
 has no `root`. leash checks again at start which directory is its own.
 
-**The link.** The form ships `/etc/sv/NAME/narrow/PROGRAM`, a link to
-`/usr/lib/werewolf/leash`, as it ships `./run`, and leash parks the service
-without it. The application is pointed at it by its own setting
+**The link.** The build makes `/etc/sv/NAME/narrow/PROGRAM`, a link to
+`/usr/lib/werewolf/leash`, for each narrowed program (lib/compose.zig), and
+leash parks the service without it. The application is pointed at it by its own setting
 (`FFMPEG_BINARY`). The service may run leash and read its service file.
 
 **The run.** leash, run by the link (AT_EXECFN) as the service, inside its
@@ -67,7 +67,6 @@ refused calls and paths are audited as the service's are.
 
 ## Drawbacks
 
-- Each link is shipped by hand, as `./run` is; the build does not make it.
 - `memory` caps the private memory it maps, not resident memory: a child
   cannot join a cgroup of its own without root. The service's still holds.
 - The service may still run the program unnarrowed: narrowing keeps the

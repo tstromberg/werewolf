@@ -100,6 +100,20 @@ pub fn compose(
         const target = try gpa.print("/run/runit/supervise.{s}", .{s});
         try ro.symLink(io, target, try gpa.print("etc/sv/{s}/supervise", .{s}), .{});
     }
+    // Link each narrowed program to leash, which, run by the link, runs it
+    // narrowed (docs/design/narrow.md).
+    for (try form.services(io, gpa, root, forms, f)) |s| {
+        for ((try parseService(gpa, s, f)).narrow) |n| {
+            const dir = try gpa.print("etc/sv/{s}/narrow", .{s.name});
+            try ro.createDirPath(io, dir);
+            const link = try gpa.print("{s}/{s}", .{ dir, std.fs.path.basename(n.program) });
+            ro.deleteFile(io, link) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => |e| return e,
+            };
+            try ro.symLink(io, "/usr/lib/werewolf/leash", link, .{});
+        }
+    }
 
     // meta: the records.
     var rec = try meta.createDirPathOpen(io, "usr/share/werewolf", .{});
@@ -278,11 +292,15 @@ pub fn apko(
 }
 
 /// format numbers the files compose writes and werewolf's programs read. Each
-/// of werewolf's packages, programs and forms, depends on
-/// werewolf-format=format, and a published image's world pins it, so a
-/// machine never takes one built for another format; bump it when either
-/// side changes incompatibly.
+/// of werewolf's packages, programs and forms, depends on format_package,
+/// and a published image's world names it, so a machine never takes one
+/// built for another format; bump it when either side changes incompatibly.
 pub const format = 1;
+
+/// format_package is format's package, a name per format, so a world names
+/// it with no version to compare. It holds /usr/lib/werewolf/format: apk
+/// fetches no package without files.
+pub const format_package = std.fmt.comptimePrint("werewolf-format{d}", .{format});
 
 /// image_programs are the programs from cmd/ that every image runs, stage0's
 /// init among them: a machine builds its next stage0 from its next root.
@@ -322,7 +340,7 @@ pub fn formDepends(
     f: *Failure,
 ) ![]const []const u8 {
     var names: std.array_hash_map.String(void) = .empty;
-    try names.put(gpa, try gpa.print("werewolf-format={d}", .{format}), {});
+    try names.put(gpa, format_package, {});
     if (fm.spec.get("base")) |b|
         try names.put(gpa, try gpa.print("{s}-form", .{b.scalar.text}), {})
     else for (image_programs) |p|
@@ -377,7 +395,7 @@ pub fn published(
         for (try formPackages(io, gpa, root, fm, f)) |p| try names.put(gpa, p, {});
     }
     for (extra) |p| try names.put(gpa, p, {});
-    try names.put(gpa, try gpa.print("werewolf-format={d}", .{format}), {});
+    try names.put(gpa, format_package, {});
     const list = try gpa.alloc(form.Node, names.count());
     for (names.keys(), list) |p, *n| n.* = .{ .scalar = .{ .raw = p, .text = p } };
 
@@ -1037,6 +1055,45 @@ test "cmdline and module parameters: what each allowance takes back, by arch" {
         "nested=1",
         moduleParams(&.{ "kvm", "nested-kvm" }, .x86_64)[0].value,
     );
+}
+
+test "compose links each narrowed program to leash" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    const app = "exec /usr/bin/app\nuser app\nrun /usr/bin/ffmpeg /usr/bin/cat\n" ++
+        "pledge stdio rpath exec landlock seccomp\n" ++
+        "narrow /usr/bin/ffmpeg pledge stdio rpath\nnarrow /usr/bin/cat pledge stdio\n";
+    for ([_][2][]const u8{
+        .{ "forms/x/apko.yaml", "" },
+        .{ "forms/x/rootfs/etc/sv/app/service", app },
+        .{ "forms/x/rootfs/etc/sv/web/service", "exec /usr/bin/web\nuser web\npledge stdio\n" },
+    }) |file| {
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(file[0]).?);
+        try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    }
+    var f: Failure = .{};
+    const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
+    var ro = try tmp.dir.createDirPathOpen(io, "ro", .{});
+    defer ro.close(io);
+    var meta = try tmp.dir.createDirPathOpen(io, "meta", .{});
+    defer meta.close(io);
+    const image: Accounts = .{
+        .passwd = "root:x:0:0::/:/sbin/nologin\n",
+        .group = "root:x:0:\n",
+        .shadow = "",
+    };
+    try compose(io, gpa, tmp.dir, forms, image, ro, meta, .{ .arch = .x86_64 }, &f);
+    var buf: [64]u8 = undefined;
+    for ([_][]const u8{ "ffmpeg", "cat" }) |p| try testing.expectEqualStrings(
+        "/usr/lib/werewolf/leash",
+        buf[0..try ro.readLink(io, try gpa.print("etc/sv/app/narrow/{s}", .{p}), &buf)],
+    );
+    // A service that narrows nothing has no narrow directory.
+    try testing.expectError(error.FileNotFound, ro.access(io, "etc/sv/web/narrow", .{}));
 }
 
 test "allowances: along the chain, sorted, once each; nested-kvm needs kvm" {

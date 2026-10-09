@@ -1,14 +1,19 @@
-Werewolf Linux playground: a hardened, image-based Linux to try out.
-The system is a read-only image; only /data keeps what you write.
-
-NOTE: This environment is locked-down by default!
-- / is read-only
-- Only signed binaries execute
-- Processes are controlled by seccomp and Landlock
-- Application firewalling is in place
-
-If you find a way to run arbitrary code - open an issue!
-
-Useful commands:
-- /usr/lib/werewolf/posture: security checks!
-- /usr/lib/werewolf/slot-update: install updated software (A/B)
+            :$&&&&&$X:   ------------------------------------------------------
+        $&+X     X     &&   Werewolf Linux playground:
+      &:       :&.+   $&  ;$   a hardened, declarative environment to play in!
+    &:       +$&&X;&&$&     ;&
+  .&.     ;&&&$&+&&&&&&&     .&   Locked down by default:
+ .&     $&&&$&&&&&&&&&&&&     :&     - / is read-only
+ &&    &&&&&&&&&&&&+$& x&      $&    - /data is the only persistent location
++     :&&&&&&&&X$ X&&&:&&&.      :   - seccomp and Landlock confine processes
+&+   $X$&&&&&x&&&&&$&.  : &$     X   - Application firewalling is in place
+&   +&&&$&&&&$&&$$+X&;$ :&:      &   - Signed binary verification is TBD
+&;  $&&$&&&&&&&$&&: X&           $
+$+  &&&&&&&&&&&&$&&:;;&          .   Useful commands, in /usr/lib/werewolf:
+ &+:&&&&&$&&&&&&&X&Xx &&$       &     posture     security checks
+  & &&&&&&x&&&&&&X&;::$&$      &     slot-update  install updates (A/B)
+   &+&&&&&&X&&&&&$&&$$&&     $&
+    &&&&&&&&&&&&&&&&+&&$&: .+&   Found a way to run arbitrary code as root?
+      &&&&&&&&&&&&&&&X&&&&$&     Open an issue at
+        +&&$&&&x+&&&&$&X$+       https://github.com/werewolf-linux/werewolf
+            :X&&&&&$+:   ------------------------------------------------------

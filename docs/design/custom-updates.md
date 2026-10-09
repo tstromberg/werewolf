@@ -36,7 +36,7 @@ The world file is the spec and apk is the solver: once every input is a
 package, a host and a machine resolve the same answer.
 
 **The image is its world.** The machine above has world `local-shop
-werewolf-format=3`. `local-shop` depends on `prod-form`, `cloudflared-form`,
+werewolf-format3`. `local-shop` depends on `prod-form`, `cloudflared-form`,
 `bastion-form` and `curl`; each form depends on its base's, its Wolfi packages
 and werewolf programs. apk refuses what cannot combine, at build time.
 
@@ -48,7 +48,7 @@ host (lib/package.zig, `make packages`); `NAME-form`, sorting beside the
 package it serves, staging its files under `/usr/share/werewolf/forms/NAME/`
 as two forms may ship one path; and in-tree melange recipes' packages. Each
 version is its commit's time, so a clean tree packs the same bytes. Every
-package depends on `werewolf-format=N`. CI never deletes one.
+package depends on `werewolf-formatN`. CI never deletes one.
 
 **The image's own repository** is `/usr/share/werewolf/repo`, tagged `@local`.
 It holds `local-FORM` for each form outside `forms/`, with its files, OCI
@@ -70,10 +70,10 @@ the image's own copies of the rest, and writes only into scratch.
 `check-updater-release`. `image.pub` stays with howl, to verify fresh-install
 downloads, and werewolf's advisories move into the signed tiers feed.
 
-**The format pin**, an empty `werewolf-format` package versioned N that a
-published world pins, keeps compose and the programs reading the same files.
-After CI moves to N+1, a machine on N takes the newest programs for N and
-logs `held` each check, until it is reinstalled.
+**The format pin**, a package per format, `werewolf-formatN`, that a published
+world names, keeps compose and the programs reading the same files. It holds
+a file, as apk fetches no empty package. After CI moves to N+1, a machine on
+N takes the newest programs for N and logs `held` each check, until reinstalled.
 
 **Phases.**
 1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.
