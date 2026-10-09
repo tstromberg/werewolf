@@ -74,7 +74,7 @@ BTI and kCFI need it built with clang, which Alpine and Ubuntu do not use.
 - **fentry, fexit.** Alpine lacks `FUNCTION_TRACER`; which agents fall back?
 - **The BPF LSM** is not in `CONFIG_LSM`, so enforcing agents need our kernel.
 - **Landlock and UDP.** fence already holds UDP to each user's declared
-  ports; Landlock's UDP rules (ABI 10, Linux 7.2) would repeat it per service.
+  ports; Landlock's UDP rules (ABI 10) would repeat it ([linux-7.md](linux-7.md)).
 - **Devices.** fence closes `/dev`; a GPU or TPM would need a `device` line.
 
 ## Drawbacks

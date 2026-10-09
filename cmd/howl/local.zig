@@ -57,6 +57,7 @@ pub fn createQemu(
         .form = o.form,
         .arch = arch,
         .dev = tell.dev,
+        .published = !o.local,
         .app = ab.root,
     }, .{ .image = true });
     const built = steps.start.untilNow(io, .awake).toSeconds();
@@ -232,6 +233,7 @@ pub fn createLima(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .published = !o.local,
             .app = ab.root,
         };
         var steps: progress.Steps = try .init(io, gpa, why, step);
@@ -588,6 +590,7 @@ pub fn createBhyve(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .published = !o.local,
             .app = ab.root,
             .disk_path = disk,
         }, .{ .disk = true });
@@ -685,6 +688,7 @@ pub fn createFirecracker(
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
+            .published = !o.local,
             .app = ab.root,
         }, .{ .slot = true, .vmlinux = arch == .x86_64 });
         built = (try steps.finish()).seconds;

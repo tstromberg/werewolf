@@ -90,7 +90,7 @@ updates off.
 | `root` | Add busybox's links, copy werewolf's programs, the operator's `--app` and the build's other records forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
-| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init`, the module loader, the form's modules in the build's order (`modules`, or `modules-bitten` on a distro's disk; lib/image.zig) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
+| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init` and the module loader from the new root (`/usr/lib/werewolf/stage0` and `modload`, so a fix to either arrives with its package), the form's modules in the build's order (`modules`, or `modules-bitten` on a distro's disk; lib/image.zig) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
 | `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, the kernel unwrapped to its `Image` for GRUB, which cannot run zboot, `sync`, set GRUB's `next_entry`, then write `attempt`, so an attempt is on record only for a slot that is armed. On werewolf's own disk, the kernel goes to the EFI partition as it is. |
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
@@ -297,7 +297,7 @@ it was written. Alpine's own patches on top of upstream are not counted.
 
 The updater reads `/proc/cmdline`, `/etc/apk/` and the
 build record in `/usr/share/werewolf/`: `form`, `release`, `kernel`,
-`alpine`, `overlay`, `modules`, `modules-bitten`, `stage0.init`, `tiers`,
+`alpine`, `overlay`, `modules`, `modules-bitten`, `tiers`,
 `tiers.pub` and `advisories`.
 
 ## Events
@@ -318,6 +318,7 @@ there ([design/update-policy.md](design/update-policy.md#the-audit-log)).
 | `commit` | `slot`, `build`, `release`, `waited` (per tier: `seen`, and the seconds from then to the commit), `down` (seconds from the update's reboot to this boot's kernel start, or null) |
 | `rollback` | `failed`, `running`, `build`, `release`, `down` |
 | `skip` | `build`, `reason` |
+| `held` | `format` (the world's pin), `offered` (the newest werewolf-format the repository has), `why`: the machine takes only programs for its format |
 | `error` | `step`, `error`, `detail` (what the failed command said) |
 
 ## Report

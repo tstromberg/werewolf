@@ -10,6 +10,7 @@ const mem = std.mem;
 const form = @import("form");
 const seal = @import("seal");
 const service = @import("service");
+const package = @import("package");
 
 const Form = form.Form;
 const Failure = form.Failure;
@@ -277,6 +278,71 @@ pub fn apko(
     });
     const add = try gpa.dupe(form.Entry, &.{.{ .key = "accounts", .value = .{ .map = added } }});
     return form.merge(gpa, merged, .{ .map = add });
+}
+
+/// format numbers the files compose writes and werewolf's programs read. Each
+/// program's package depends on werewolf-format=format, and a published
+/// image's world pins it, so a machine never takes a program built for
+/// another format; bump it when either side changes incompatibly.
+pub const format = 1;
+
+/// image_programs are the programs from cmd/ that every image runs, stage0's
+/// init among them: a machine builds its next stage0 from its next root.
+pub const image_programs = [_][]const u8{
+    "init",         "stage0",       "modload",      "iface-up",    "fence",        "mount",
+    "mount-broker", "posture",      "seal-watch",   "seal",        "runit-stage",  "reboot",
+    "grub-setenv",  "slot-keep",    "power-button", "debug-shell", "ssh-host-key", "leash",
+    "leash-reap",   "bite-cleanup",
+};
+
+/// programPackages returns the werewolf-NAME package of each program the
+/// chain runs: every image's, then form.yaml's programs, once each, a
+/// library's (popen-shim.so) named without its suffix.
+pub fn programPackages(gpa: Allocator, forms: []const Form) ![]const []const u8 {
+    var names: std.array_hash_map.String(void) = .empty;
+    for (image_programs) |p| try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
+    for (forms) |fm| for (try fm.items(gpa, "programs")) |item| {
+        var it = mem.tokenizeAny(u8, item, " \t");
+        while (it.next()) |p| {
+            const stem = p[0 .. mem.findScalarLast(u8, p, '.') orelse p.len];
+            try names.put(gpa, try gpa.print("werewolf-{s}", .{stem}), {});
+        }
+    };
+    return names.keys();
+}
+
+/// published returns config, an apko config, with werewolf's repository,
+/// its key at keyring (a path whose file name is package.repository_key,
+/// the name the index's signature gives), the packages of the programs the
+/// chain runs, so a machine updates them with apk, and the format they read.
+pub fn published(
+    gpa: Allocator,
+    config: form.Node,
+    forms: []const Form,
+    keyring: []const u8,
+) !form.Node {
+    if (!mem.eql(u8, std.fs.path.basename(keyring), package.repository_key))
+        return error.KeyringName;
+    const programs = try programPackages(gpa, forms);
+    const pin = try gpa.print("werewolf-format={d}", .{format});
+    const list = try gpa.alloc(form.Node, programs.len + 1);
+    for (programs, list[0..programs.len]) |p, *n| n.* = .{ .scalar = .{ .raw = p, .text = p } };
+    list[programs.len] = .{ .scalar = .{ .raw = pin, .text = pin } };
+    const one = struct {
+        fn of(a: Allocator, text: []const u8) !form.Node {
+            return .{ .list = try a.dupe(
+                form.Node,
+                &.{.{ .scalar = .{ .raw = text, .text = text } }},
+            ) };
+        }
+    };
+    const contents = try gpa.dupe(form.Entry, &.{
+        .{ .key = "repositories", .value = try one.of(gpa, package.repository) },
+        .{ .key = "keyring", .value = try one.of(gpa, keyring) },
+        .{ .key = "packages", .value = .{ .list = list } },
+    });
+    const add = try gpa.dupe(form.Entry, &.{.{ .key = "contents", .value = .{ .map = contents } }});
+    return form.merge(gpa, config, .{ .map = add });
 }
 
 /// mapOf returns a map node of plain scalars, in the order given.

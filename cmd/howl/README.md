@@ -16,7 +16,7 @@ cloud user data ([docs/cloud.md](../../docs/cloud.md)).
 | --- | --- |
 | `build --with FORM` | builds the image itself, byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)): boot disk (`disk.zig`, with mtools and e2fsprogs) and manifest `FORM-ARCH.json` (`manifest.zig`) in `dist`; `--format raw\|vhd\|vmdk` converts with qemu-img |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
-| `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config |
+| `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's programs in, not the published ones the machine updates |
 | `run` | `create` of `werewolf-run`, replacing the last; default form lima on Lima, else prod-ssh |
 | `ssh`, `console`, `stop`, `delete` | reach, read or remove a machine; with no NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
@@ -74,8 +74,8 @@ Lima, or a restart in a cloud. Another form, or `--app`, is refused.
 
 ## Drawbacks
 
-- howl needs a checkout, GNU make for werewolf's programs, melange and the
-  tutorials' compilers, and provider CLIs, whose changed output breaks it.
+- howl needs a checkout, make and Zig (stage0's and forms' own programs; all
+  of them under `--build`), melange, compilers, and provider CLIs that change.
 
 ## Alternatives Considered
 

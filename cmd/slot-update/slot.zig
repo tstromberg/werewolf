@@ -132,10 +132,17 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     try Dir.cwd().createDirPath(u.io, s);
     const s0: Root = try .open(u, s);
     defer s0.close(u);
-    // writeCpio adds the device nodes here.
+    // writeCpio adds the device nodes here. init and the loader come from
+    // the new root, as the build takes them from its image, so a fix to
+    // either arrives with its package.
     (try s0.makeDir(u, "dev")).close(io);
-    try s0.copy(u, meta_dir ++ "/stage0.init", "init", .fromMode(0o755));
-    try s0.copy(u, "/usr/lib/werewolf/modload", "usr/lib/werewolf/modload", .fromMode(0o755));
+    try s0.writeMode(u, "init", try r.read(u, "usr/lib/werewolf/stage0"), .fromMode(0o755));
+    try s0.writeMode(
+        u,
+        "usr/lib/werewolf/modload",
+        try r.read(u, "usr/lib/werewolf/modload"),
+        .fromMode(0o755),
+    );
     const kvers = try k.list(u, "lib/modules");
     if (kvers.len != 1) return error.NotOneKernel;
     const src = try u.gpa.print("lib/modules/{s}", .{kvers[0]});
@@ -406,7 +413,13 @@ pub fn apkAdd(
         }
     }
     try Dir.cwd().deleteTree(u.io, scratch);
-    try checkCache(u, cache, keys);
+    const idx = try checkCache(u, cache, keys);
+    if (heldFormat(packages, idx)) |h| try u.record(.{
+        .event = "held",
+        .format = h.pinned,
+        .offered = h.offered,
+        .why = "the repository has moved to a newer werewolf-format; reinstall to follow",
+    });
 
     try u.run(try std.mem.concat(u.gpa, []const u8, &.{
         &.{ "/usr/bin/apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
@@ -467,8 +480,9 @@ fn apkFetch(
 /// checkCache verifies the cache before root's apk reads it (apk.zig): each
 /// index signed by a key in keys, each package as an index lists it. A
 /// package no index lists is removed. A bad index or package is removed, so
-/// the next pass fetches it again, and fails this pass.
-fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !void {
+/// the next pass fetches it again, and fails this pass. It returns the
+/// packages the indexes list.
+fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
     var trusted: std.ArrayList(apk.Key) = .empty;
     for (try u.listDir(keys)) |name| {
         const path = try u.gpa.print("{s}/{s}", .{ keys, name });
@@ -509,6 +523,30 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !void {
             return err;
         };
     }
+    return idx;
+}
+
+/// Held is the werewolf-format a world pins and the newest an index offers.
+const Held = struct { pinned: u32, offered: u32 };
+
+/// heldFormat returns the pin and the newest werewolf-format idx lists, if
+/// packages pin one and idx lists a newer: the machine then takes only what
+/// its format allows (lib/compose.zig).
+fn heldFormat(packages: []const []const u8, idx: apk.Index) ?Held {
+    const pin = "werewolf-format=";
+    const pinned = for (packages) |p| {
+        if (std.mem.startsWith(u8, p, pin))
+            break std.fmt.parseInt(u32, p[pin.len..], 10) catch return null;
+    } else return null;
+    var newest = pinned;
+    var it = idx.keyIterator();
+    while (it.next()) |name| {
+        // NAME-VERSION.HASH, VERSION being N-rR.
+        const rest = std.mem.cutPrefix(u8, name.*, "werewolf-format-") orelse continue;
+        const n = rest[0 .. std.mem.findScalar(u8, rest, '-') orelse continue];
+        newest = @max(newest, std.fmt.parseInt(u32, n, 10) catch continue);
+    }
+    return if (newest > pinned) .{ .pinned = pinned, .offered = newest } else null;
 }
 
 /// prune deletes cached packages that root did not install, keeping the
@@ -816,9 +854,23 @@ const Root = struct {
     }
 
     fn write(r: Root, u: *Update, path: []const u8, data: []const u8) !void {
+        try r.writeMode(u, path, data, .default_file);
+    }
+
+    fn writeMode(
+        r: Root,
+        u: *Update,
+        path: []const u8,
+        data: []const u8,
+        mode: Io.File.Permissions,
+    ) !void {
         const d, const name = try r.fresh(u, path);
         defer d.close(u.io);
-        try d.writeFile(u.io, .{ .sub_path = name, .data = data, .flags = .{ .exclusive = true } });
+        try d.writeFile(u.io, .{
+            .sub_path = name,
+            .data = data,
+            .flags = .{ .exclusive = true, .permissions = mode },
+        });
     }
 
     /// copy copies src, from the running system, to path, with mode, or
@@ -1401,6 +1453,22 @@ test isCachedOf {
     try testing.expect(!isCachedOf("libzstd1-1.5.7-r10.933e1e74.apk", pkgs));
     try testing.expect(!isCachedOf("zstd-1.5.7-r10.apk", pkgs));
     try testing.expect(!isCachedOf(".apk", pkgs));
+}
+
+test heldFormat {
+    const gpa = testing.allocator;
+    var idx: apk.Index = .empty;
+    defer idx.deinit(gpa);
+    const sha1: [20]u8 = @splat(0);
+    try idx.put(gpa, "werewolf-format-1-r0.00000000", sha1);
+    try idx.put(gpa, "werewolf-fence-20261009.161730-r0.00000000", sha1);
+    const world = [_][]const u8{ "werewolf-fence", "werewolf-format=1" };
+    try testing.expectEqual(null, heldFormat(&world, idx));
+    try testing.expectEqual(null, heldFormat(&.{"werewolf-fence"}, idx));
+    try idx.put(gpa, "werewolf-format-2-r0.00000000", sha1);
+    try idx.put(gpa, "werewolf-format-x-r0.00000000", sha1);
+    try testing.expectEqual(Held{ .pinned = 1, .offered = 2 }, heldFormat(&world, idx).?);
+    try testing.expectEqual(null, heldFormat(&.{"werewolf-format=2"}, idx));
 }
 
 test withoutGz {

@@ -23,15 +23,15 @@ const tiers_url = "https://raw.githubusercontent.com/werewolf-linux/cve-feed/mai
 /// meta writes OUT/meta, what the image needs to rebuild itself, and
 /// OUT/ro, what compose lays over the packages: compose's records, then
 /// the kernel, Alpine's repositories, the overlay's files, apk's world,
-/// stage0, and the release keys and feeds. Nothing says when or where it
+/// and the release keys and feeds. Nothing says when or where it
 /// was built, so a rebuild matches.
 pub fn meta(b: *B, rootfs: []const u8) !void {
     const out = b.p.out;
     const stamp = try b.path("{s}/meta.stamp", .{out});
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     const fixed = [_][]const u8{
-        rootfs,              kernel_rootfs,       b.stage0_bin,         b.self,
-        "release/image.pub", "release/tiers.pub", "release/advisories", "test/posture-known",
+        rootfs,              kernel_rootfs,        b.self,               "release/image.pub",
+        "release/tiers.pub", "release/advisories", "test/posture-known",
     };
     const inputs = try mem.concat(
         b.gpa,
@@ -92,7 +92,9 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
     }));
     try b.put(d, "overlay", try overlayList(b));
-    // apk's world as the packages leave it, without the pins FREEZE adds.
+    // apk's world as the packages leave it, without the pins FREEZE adds,
+    // but, published, with the format pin: the updater then takes only
+    // programs that read the files compose writes (lib/compose.zig).
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/etc/apk", .{meta_dir}));
     const world = try b.capture(stamp, &.{ "bsdtar", "-xOf", rootfs, "etc/apk/world" });
     const unpinned = try withoutPins(b.gpa, world);
@@ -100,8 +102,10 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "{s}: every package in etc/apk/world is pinned",
         .{rootfs},
     );
-    try b.put(meta_dir, "etc/apk/world", unpinned);
-    try b.copy(b.stage0_bin, try b.path("{s}/stage0.init", .{d}));
+    try b.put(meta_dir, "etc/apk/world", if (b.spec.published)
+        try b.path("{s}werewolf-format={d}\n", .{ unpinned, compose.format })
+    else
+        unpinned);
     try b.put(d, "release", try b.path("{s} {s} built-by-make\n", .{ b.name, kernel_pkg }));
     try b.copy("release/image.pub", try b.path("{s}/image.pub", .{d}));
     try b.copy("release/tiers.pub", try b.path("{s}/tiers.pub", .{d}));
@@ -168,7 +172,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         &.{root},
         &.{try b.path("{s}/verity", .{out})},
     );
-    try stage0Init(b);
+    try stage0Init(b, rootfs);
     try stage0(b, "stage0", "modules", b.modules.native);
     if (goals.slot) try stage0(b, "stage0-bitten", "modules-bitten", b.modules.all);
     if (goals.image) try initramfs(b, root);
@@ -389,16 +393,30 @@ fn checkErofs(b: *B) !void {
     };
 }
 
-/// stage0Init writes BUILD/stage0/init.tar: stage0's /init and the module
-/// loader, which every form's stage0 holds.
-fn stage0Init(b: *B) !void {
-    const target = try b.path("{s}/stage0/init.tar", .{b.p.build});
-    const began = try b.begin(target, &.{ b.stage0_bin, b.loader_bin }) orelse return;
-    const files = try b.path("{s}/stage0/files", .{b.p.build});
+/// stage0Init writes OUT/stage0/init.tar: stage0's /init and the module
+/// loader, the image's own, as the updater takes them from the root it
+/// builds. Published, they come from rootfs, werewolf's packages.
+fn stage0Init(b: *B, rootfs: []const u8) !void {
+    const target = try b.path("{s}/stage0/init.tar", .{b.p.out});
+    const inputs: []const []const u8 = if (b.spec.published)
+        &.{rootfs}
+    else
+        &.{ b.stage0_bin, b.loader_bin };
+    const began = try b.begin(target, inputs) orelse return;
+    const files = try b.path("{s}/stage0/files", .{b.p.out});
     try Dir.cwd().deleteTree(b.io, files);
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/usr/lib/werewolf", .{files}));
-    try b.copy(b.stage0_bin, try b.path("{s}/init", .{files}));
-    try b.copy(b.loader_bin, try b.path("{s}/usr/lib/werewolf/modload", .{files}));
+    const init = try b.path("{s}/init", .{files});
+    if (b.spec.published) {
+        try b.run(&.{
+            "bsdtar",                  "-xf",                      rootfs, "-C", files,
+            "usr/lib/werewolf/stage0", "usr/lib/werewolf/modload",
+        }, .{});
+        try b.rename(try b.path("{s}/usr/lib/werewolf/stage0", .{files}), init);
+    } else {
+        try b.copy(b.stage0_bin, init);
+        try b.copy(b.loader_bin, try b.path("{s}/usr/lib/werewolf/modload", .{files}));
+    }
     try layer(b, target, &.{files});
     try b.done(target, began);
 }
@@ -411,7 +429,7 @@ fn stage0(b: *B, name: []const u8, modules_name: []const u8, words: []const []co
     const modules = try b.path("{s}/{s}.tar", .{ out, modules_name });
     try moduleTar(b, modules, words);
     const target = try b.path("{s}/slot/{s}.zst", .{ out, name });
-    const init_tar = try b.path("{s}/stage0/init.tar", .{b.p.build});
+    const init_tar = try b.path("{s}/stage0/init.tar", .{out});
     const verity_tar = try b.path("{s}/verity.tar", .{out});
     const mtree = "cmd/stage0/stage0.mtree";
     const began = try b.begin(target, &.{ modules, mtree, init_tar, verity_tar }) orelse return;

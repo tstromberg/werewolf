@@ -866,7 +866,7 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
 /// takesNothing reports whether flag is a verb flag with no value; others take
 /// the next word.
 fn takesNothing(flag: []const u8) bool {
-    for ([_][]const u8{ "--dev", "--verbose", "-v", "-h", "--help" }) |f|
+    for ([_][]const u8{ "--dev", "--build", "--verbose", "-v", "-h", "--help" }) |f|
         if (std.mem.eql(u8, flag, f)) return true;
     return false;
 }

@@ -1,6 +1,6 @@
 # One updater: apk
 
-Proposed 2026-10-08. Phases 1 and 2a are built; 2b is in progress.
+Proposed 2026-10-08. Phases 1 and 2 and the format pin are built.
 
 ## Summary
 
@@ -51,7 +51,7 @@ without a VM (lib/package.zig, `make packages`); `form-NAME`, one per form,
 staging its files under `/usr/share/werewolf/forms/NAME/` because two forms
 may ship the same path; and packages from in-tree melange recipes. Each
 version is its commit's time, so a clean tree packs the same bytes. Every
-package provides `werewolf-format=N`. CI never deletes a published package.
+program depends on `werewolf-format=N`. CI never deletes a published package.
 
 **The image's own repository** is `/usr/share/werewolf/repo`, tagged `@local`.
 It holds `local-FORM` for each form outside `forms/`, with its files, OCI
@@ -59,9 +59,9 @@ trees, `--app` and local recipes, signed by a key the build makes and then
 discards. apk takes a package from a tagged repository only when world names
 it `name@local`, so world lists exactly what will not update.
 
-**What howl builds.** howl takes werewolf's programs and forms from the
-repository, so any machine it makes updates. `--build` packs the tree's own
-as `@local`, pinning only those whose bytes differ from the published ones.
+**What howl builds.** howl takes werewolf's programs from the repository
+(make's PUBLISHED=1), so any machine it makes updates them; `--build` lays
+the tree's own, which do not. Phase 4 makes those `@local`.
 
 **compose** (lib/compose.zig; lib/README.md) lays the staged forms and writes
 what the chain derives. The updater runs it from the running image's staged
@@ -71,15 +71,15 @@ chain over the accounts apk laid, and writes only into scratch.
 `check-updater-release`. `image.pub` stays with howl, to verify fresh-install
 downloads, and werewolf's advisories move into the signed tiers feed.
 
-**The format pin** keeps compose and the programs reading the same files.
-After CI moves to format N+1, a machine on N takes the newest packages that
-provide N, logs `held` each check, and fails posture's `update-format-held`.
+**The format pin**, an empty `werewolf-format` package versioned N that a
+published world pins, keeps compose and the programs reading the same files.
+After CI moves to N+1, a machine on N takes the newest programs for N and
+logs `held` each check, until it is reinstalled.
 
 **Phases.**
 1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.
-2. 2a, built: images stage their chain and the updater composes from it.
-   2b, in progress: the packer, the key and R2 exist; next, images install
-   `werewolf-*`, then CI signs and uploads.
+2. Built: images stage their chain and the updater composes from it; CI
+   publishes changed programs, and a published machine took eight.
 3. `form-*` packages; the overlay list goes.
 4. The image's repository; `buildSlot` copies nothing forward.
 5. The release path goes.

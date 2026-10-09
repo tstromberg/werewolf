@@ -1,6 +1,6 @@
 # howl builds images
 
-Stages 2 and 3 and the ports built, 2026-10-09: howl builds every image; make asks it.
+Built, 2026-10-09: howl builds every image and make asks it; the Makefile is 599 lines.
 
 ## Summary
 

@@ -97,12 +97,15 @@ const DiskFormat = enum { qcow2, raw, vhd, vmdk };
 const BuildOptions = struct {
     form: []const u8,
     app: ?[]const u8 = null,
+    /// local takes werewolf's programs from this checkout (--build), not
+    /// from its repository.
+    local: bool = false,
     dir: []const u8 = "dist",
     arch: howl.Arch,
     format: DiskFormat = .qcow2,
 };
 
-/// buildOptions parses build's command line: FORM, and -o, --arch,
+/// buildOptions parses build's command line: FORM, --build, and -o, --arch,
 /// --format and --app, each with a value. host is this machine's arch, or
 /// null if werewolf does not build for it.
 fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !BuildOptions {
@@ -116,6 +119,10 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             form = args[i];
             continue;
         }
+        if (std.mem.eql(u8, args[i], "--build")) {
+            o.local = true;
+            continue;
+        }
         const a, const v = try howl.flagValue(args, &i, why);
         if (std.mem.eql(u8, a, "-o")) {
             o.dir = v;
@@ -127,7 +134,7 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
-            "{s}: build takes -o, --arch, --format and --app\n{s}",
+            "{s}: build takes --build, -o, --arch, --format and --app\n{s}",
             .{ a, howl.usage },
         );
     }
@@ -162,7 +169,13 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     // minimal is released whole, for direct boot; the rest as the slot
     // the updater follows, and as a disk to boot a VM from.
     const direct = std.mem.eql(u8, f, "minimal");
-    const spec: Spec = .{ .form = ref, .arch = o.arch, .app = ab.root, .freeze = frozen() };
+    const spec: Spec = .{
+        .form = ref,
+        .arch = o.arch,
+        .app = ab.root,
+        .freeze = frozen(),
+        .published = !o.local,
+    };
     try make(
         io,
         gpa,
@@ -420,15 +433,14 @@ pub const B = struct {
     /// rootfs are the chain's rootfs files and etc/sv directories, whose
     /// removal changes nothing else a step could see.
     rootfs: []const []const u8,
-    /// bins are the programs the overlay lays in; stage0's are apart.
+    /// bins are the programs the overlay lays in.
     bins: []const []const u8,
+    /// stage0_bin and loader_bin are stage0's init and module loader in
+    /// PROGRAMS, which stage0 takes when the overlay lays them.
     stage0_bin: []const u8,
     loader_bin: []const u8,
     /// overlay are the directories laid over the packages, OUT/ro first.
     overlay: []const []const u8,
-    /// published are the werewolf-NAME packages a published build installs
-    /// in place of PROGRAMS' programs; none otherwise.
-    published: []const []const u8,
     /// made are the targets of the overlay's compiled parts: a tutorial's
     /// application (app.zig) and melange's packages (melange.zig).
     made: []const []const u8,
@@ -621,15 +633,15 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
 }
 
 /// every_program are the programs in every form but init and bite-cleanup,
-/// each in PROGRAMS/NAME/usr/lib/werewolf/NAME, in the Makefile's overlay
-/// order: the module loader, the network's setup and policy, the mounts,
+/// each in PROGRAMS/NAME/usr/lib/werewolf/NAME, in overlay order: stage0's
+/// init, the module loader, the network's setup and policy, the mounts,
 /// posture, the seal's two, and those that replace shell scripts
 /// (docs/design/shell-free.md).
 const every_program = [_][]const u8{
-    "modload",     "iface-up",   "fence",        "mount",       "mount-broker",
-    "posture",     "seal-watch", "seal",         "runit-stage", "reboot",
-    "grub-setenv", "slot-keep",  "power-button", "debug-shell", "ssh-host-key",
-    "leash",       "leash-reap",
+    "stage0",       "modload",     "iface-up",   "fence",        "mount",
+    "mount-broker", "posture",     "seal-watch", "seal",         "runit-stage",
+    "reboot",       "grub-setenv", "slot-keep",  "power-button", "debug-shell",
+    "ssh-host-key", "leash",       "leash-reap",
 };
 
 /// plan reads the form's chain and works out everything the steps need.
@@ -650,19 +662,11 @@ fn plan(
 
     // The overlay's directories, in the Makefile's order (OVERLAY_DIRS),
     // and the programs in them. Published, werewolf's packaged programs
-    // come from its repository instead (packages.apkoConfig).
+    // come from its repository instead (compose.published).
     var bins: std.ArrayList([]const u8) = .empty;
     var overlay: std.ArrayList([]const u8) = .empty;
-    var published: std.ArrayList([]const u8) = .empty;
     try overlay.append(gpa, try gpa.print("{s}/ro", .{p.out}));
-    if (s.published) {
-        try published.append(gpa, "werewolf-init");
-        for (every_program) |prog| try published.append(
-            gpa,
-            try gpa.print("werewolf-{s}", .{prog}),
-        );
-        try published.append(gpa, "werewolf-bite-cleanup");
-    } else {
+    if (!s.published) {
         try bins.append(gpa, try gpa.print("{s}/init/init", .{p.programs}));
         try overlay.append(gpa, try gpa.print("{s}/init", .{p.programs}));
         for (every_program) |prog| {
@@ -692,10 +696,7 @@ fn plan(
             var it = mem.tokenizeAny(u8, item, " \t");
             while (it.next()) |prog| {
                 const stem = prog[0 .. mem.findScalarLast(u8, prog, '.') orelse prog.len];
-                if (s.published) {
-                    try published.append(gpa, try gpa.print("werewolf-{s}", .{stem}));
-                    continue;
-                }
+                if (s.published) continue;
                 const dir = try gpa.print("{s}/{s}", .{ p.programs, stem });
                 try bins.append(gpa, try gpa.print("{s}/usr/lib/werewolf/{s}", .{ dir, prog }));
                 try dirs.put(gpa, dir, {});
@@ -763,10 +764,9 @@ fn plan(
         .form_files = form_files.items,
         .rootfs = rootfs.items,
         .bins = bins.items,
-        .stage0_bin = try gpa.print("{s}/stage0/init", .{p.programs}),
+        .stage0_bin = try gpa.print("{s}/stage0/usr/lib/werewolf/stage0", .{p.programs}),
         .loader_bin = try gpa.print("{s}/modload/usr/lib/werewolf/modload", .{p.programs}),
         .overlay = overlay.items,
-        .published = published.items,
         .made = made.items,
         .recipes = recipes,
         .app = staged.items,

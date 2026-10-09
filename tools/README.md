@@ -82,6 +82,13 @@ anyone who reads its key file can log in: it is built only for the host.
 checking need, pinned by version and checksum, after asking. It is a shell
 script because it installs Zig.
 
+## install
+
+`tools/install HOWL DIR...` (`make install`) puts howl in the first DIR that
+is on PATH and writable, else in ~/.local/bin, and removes `werewolf`, its
+old name. `tools/install -u DIR...` (`make uninstall`) removes howl from each
+DIR, but only a howl that answers as werewolf's does.
+
 ## git-hooks
 
 `make hooks` points git here. pre-commit runs the unit tests, lint and check-sshd.

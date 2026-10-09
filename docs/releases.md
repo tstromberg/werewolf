@@ -236,7 +236,9 @@ werewolf's programs are also apk packages, at
 the packages workflow packs both arches twice, requires the copies to match,
 and publishes (release/packages) only the packages whose files changed,
 with the index signed again. Published packages are never replaced or
-removed. The index is signed by `release/packages.pub`'s key, the secret
+removed. Each program depends on `werewolf-format`, the version of the files
+compose writes (`format` in lib/compose.zig); bump it on an incompatible
+change, and machines on the old one keep the last programs for it. The index is signed by `release/packages.pub`'s key, the secret
 `WEREWOLF_PACKAGES_KEY` in the environment `release`; R2 takes uploads with
 `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`, a token for that bucket alone.
 Nothing is published until the repository variable `PUBLISH_PACKAGES` is

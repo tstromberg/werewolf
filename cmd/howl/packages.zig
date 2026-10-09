@@ -28,11 +28,6 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             while (it.next()) |pkg| try extra.append(b.gpa, pkg);
         };
     }
-    for (b.published) |name| {
-        for (extra.items) |e| {
-            if (mem.eql(u8, e, name)) break;
-        } else try extra.append(b.gpa, name);
-    }
     var f: forms.Failure = .{};
     var node = compose.apko(
         b.io,
@@ -45,8 +40,8 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
         error.Form => return b.steps.fail(f.text),
         else => |e| return e,
     };
-    // Published, werewolf's repository and its key, which apk must find
-    // under package.repository_key, the name the index's signature gives.
+    // Published, werewolf's repository, its key under the name the index's
+    // signature gives, and the chain's programs (compose.published).
     if (b.spec.published) {
         const key = try b.path("{s}/keys/{s}", .{ b.p.build, package.repository_key });
         const pub_key = try Dir.cwd().readFileAlloc(
@@ -61,24 +56,7 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             try b.write(key, pub_key);
         }
         const keyring = try b.path("../keys/{s}", .{package.repository_key});
-        const scalars = struct {
-            fn one(gpa: Allocator, text: []const u8) !forms.Node {
-                const items = try gpa.dupe(
-                    forms.Node,
-                    &.{.{ .scalar = .{ .raw = text, .text = text } }},
-                );
-                return .{ .list = items };
-            }
-        };
-        const contents = try b.gpa.dupe(forms.Entry, &.{
-            .{ .key = "repositories", .value = try scalars.one(b.gpa, package.repository) },
-            .{ .key = "keyring", .value = try scalars.one(b.gpa, keyring) },
-        });
-        const add = try b.gpa.dupe(
-            forms.Entry,
-            &.{.{ .key = "contents", .value = .{ .map = contents } }},
-        );
-        node = try forms.merge(b.gpa, node, .{ .map = add });
+        node = try compose.published(b.gpa, node, b.chain, keyring);
     }
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);

@@ -63,7 +63,7 @@ undeclared socket, and nginx served php through its declared one.
   and 48 days before that. `linux-lts` takes each 6.18 point release within
   a day. Neither tracks secfixes, so the CVE tiers learn nothing from Alpine.
 - **Churn.** 7.2 reaches end of life about two weeks after 7.3 ships (mid
-  November 2026): a new series every 9–10 weeks, 6.18's support runs to 2028.
+  November 2026): a new series every 9–10 weeks, where 6.18's support is projected to run to 2028.
 - **Weight.** No virt flavor: 2,705 options built in against 1,590 (arm64),
   a 42 MB kernel against 36 MB, and Hyper-V's modules on every boot until
   stage0 learned DMI.
@@ -99,4 +99,4 @@ now has a sysctl or the seal, and posture checks both at every boot.
 The updater replaces the kernel only from a signed release built on it, so
 a series change cannot reach a machine untested. But a series every 9–10
 weeks means a new driver set as often, and `linux-stable` changes its config
-freely (60 commits on 2026-10-06 alone). An LTS changes neither.
+freely (30 or more commits on 2026-10-06 alone). An LTS changes neither.

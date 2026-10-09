@@ -4,7 +4,7 @@ Thanks for helping. This page gets you from a clone to a tested change.
 
 ## Set up
 
-werewolf builds on macOS and Linux (and, experimentally, FreeBSD and NetBSD).
+werewolf builds on macOS and Linux (and, experimentally, FreeBSD and NetBSD, where you run gmake).
 
 ```sh
 make install-deps   # apko, Zig 0.17.0, QEMU, erofs-utils and the rest; asks first
