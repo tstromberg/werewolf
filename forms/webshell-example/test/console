@@ -14,13 +14,20 @@
 # the public account list; /etc/shadow stays unreadable). The point of the
 # form is that a vulnerable web application executes real code and still
 # gains nothing: every attack ran and the cage held, and the allowed
-# commands ran and revealed no secret.
+# commands ran and revealed no secret. Last, cat narrowed (its service's
+# `narrow` line, run by /etc/sv/app/narrow/cat) reads the image but is
+# refused the account list and the app's own file, which plain cat reads.
 
 seen    app-leashed       leash: \{"event":"start","service":"app","user":"app"
 seen    self-test-done    webshell: \{.*"event": "self-test", "attacks": [1-9][0-9]*, "escaped": 0\}
 seen    exec-allowed      webshell: \{.*"event": "exec-allowed", "commands": 7, "ran": 7\}
 seen    cat-passwd        webshell: \{.*"event": "allowed", "command": "cat /etc/passwd", "exit": 0, "ran": true\}
+seen    narrow-reads      webshell: \{.*"event": "narrowed", "file": "/usr/lib/app/webshell.py", "parent": true, "child": true, "leashed": true, "held": true\}
+seen    narrow-passwd     webshell: \{.*"event": "narrowed", "file": "/etc/passwd", "parent": true, "child": false, "leashed": true, "held": true\}
+seen    narrow-own-file   webshell: \{.*"event": "narrowed", "file": "/run/svc/app/narrow-probe", "parent": true, "child": false, "leashed": true, "held": true\}
+seen    narrow-held       webshell: \{.*"event": "narrowing", "leash": "leash: \{\\"event\\":\\"narrow\\",\\"service\\":\\"app\\",\\"program\\":\\"/usr/bin/cat\\".*"checks": 3, "held": 3\}
 unseen  escaped           "escaped": true
 unseen  cage-leaked       webshell: ESCAPED
 unseen  exec-blocked      webshell: \{.*"event": "exec-allowed", "commands": 7, "ran": [0-6]\}
 unseen  service-down      leash: \{"event":"down"
+unseen  narrow-leaked     webshell: the narrowing held

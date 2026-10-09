@@ -62,6 +62,19 @@ pub fn running(io: Io, gpa: Allocator, name: []const u8) !bool {
     return std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \n"), "Running");
 }
 
+/// sshPort returns the port Lima forwards to a machine it manages's sshd,
+/// or null.
+pub fn sshPort(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
+    const r = std.process.run(
+        gpa,
+        io,
+        .{ .argv = &.{ "limactl", "list", name, "--format", "{{.SSHLocalPort}}" } },
+    ) catch return null;
+    const p = std.mem.trim(u8, r.stdout, " \n");
+    const n = std.fmt.parseInt(u16, p, 10) catch return null;
+    return if (n == 0) null else p;
+}
+
 /// dir returns the instance's directory, which holds its console log, or
 /// null if Lima has no such instance.
 pub fn dir(io: Io, gpa: Allocator, name: []const u8) !?[]const u8 {

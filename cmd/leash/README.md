@@ -3,8 +3,8 @@
 ## Summary
 
 leash starts a service someone else wrote (nginx, PostgreSQL, a JVM app) as
-its own user, confined by Landlock for files and TCP ports, a seccomp pledge,
-and a cgroup, with no capability but the one a low port needs.
+its own user, confined by Landlock for files and TCP ports, a seccomp pledge
+and a cgroup, with no capability but a low port's; and narrows a program it runs.
 
 ## Background
 
@@ -27,6 +27,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | `nofile N`, `memory MIB`, `cpu WEIGHT` | open-file limit; `memory.max` (resident memory, not address space); `cpu.weight`, a share of contended CPUs |
 | `share strict\|shared\|browseable` | who may enter its two directories: only its user (`0700`, the default); others, by a name they know, such as a socket (`0711`); others, listing too (`0755`) |
 | `root /oci/NAME`, `dir PATH` | run inside an image in the root (docs/design/adhoc.md), without `render`; start directory |
+| `narrow PROGRAM KEY WORD...` | run a `run` program narrowed: `pledge` (within the service's, no network), `read`, `write` (within the service's), `memory MIB` (`RLIMIT_DATA`) ([narrow.md](../../docs/design/narrow.md)) |
 
 ## Goals
 
@@ -47,10 +48,9 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
    the user with the mode `share` asks; set `nofile`; join
    `/run/cgroup/svc/NAME` with `memory.max` and `pids.max` 4096. With `root`,
    chroot now, so every later path resolves in the image. Build a Landlock
-   ruleset: the floor (`/usr`, `/proc`, `/sys/devices/system/cpu`, `/etc/ssl`,
-   a few `/etc` files, `/dev/null`, `/dev/zero`, `/dev/urandom`; with `root`,
-   the whole image read-only), its directories and paths, each program and
-   its ELF loader, its ports. `read`/`write` paths are opened with no symlink
+   ruleset: the floor (`/usr`, `/proc`, a few files in `/etc` and `/dev`;
+   with `root`, the whole image read-only), its directories and paths, each
+   program and its ELF loader, its ports. `read`/`write` paths are opened with no symlink
    anywhere, since another service could plant one in `/data`.
 2. **Drop root:** empty the bounding set but a low port's capability, clear
    groups, set gid and uid, keep that capability ambient, set
@@ -61,6 +61,10 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
    promises, stacked on the seal (none while the machine learns), then
    `execveat` a descriptor opened earlier, which a pledge without `exec`
    allows. It starts in `dir`, else its data or (no `/data`) run directory.
+5. **Narrowed:** run as `/etc/sv/NAME/narrow/PROGRAM`, a link the form ships
+   as it ships `./run`, leash stacks that program's lines on the service's
+   leash (a smaller floor: no accounts or network files; its paths; it alone
+   runnable; no TCP; its pledge) and execs it, without the service's secrets.
 
 ## Drawbacks
 
@@ -73,13 +77,9 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 
 ## Alternatives Considered
 
-### systemd units
-A large PID 1 with its own parsers. leash exits before the service runs.
-
-### A container runtime
-Namespaces add kernel surface (user namespaces are off machine-wide) for
-what Landlock, seccomp and a cgroup already give one process tree. Seccomp
-alone, without Landlock, would leave every file its uid can reach.
+- **systemd units:** a large PID 1 with its own parsers; leash exits first.
+- **A container runtime:** namespaces add kernel surface (user namespaces are
+  off) for what Landlock, seccomp and a cgroup already give one process tree.
 
 ## Security Considerations
 
@@ -88,9 +88,9 @@ alone, without Landlock, would leave every file its uid can reach.
 | A wrong service file | Parsed whole first; any fault parks the service. |
 | A privileged write or chown the service redirects | Copies are written after the drop, inside Landlock, by unlink and create, refusing symlinks. Only the directory itself is changed, through a descriptor opened `NOFOLLOW`. |
 | Another service reading its files or reaching its sockets | Its directories are `0700` unless `share` opens them; `shared` (`0711`) admits only names one already knows. From Landlock ABI 9 a service reaches only the sockets its `connect` names, its own and those beneath what it writes. The build refuses a `read`, `write` or `connect` inside a strict service's directory (`lib/compose.zig`). |
-| A fork bomb | `pids.max` 4096, in a cgroup joined as root that it cannot leave. |
-| A detached child outliving its service | `leash-reap`, its `./finish`, writes `cgroup.kill`. |
+| A fork bomb, or a child outliving its service | `pids.max` 4096, in a cgroup joined as root that it cannot leave; `leash-reap`, its `./finish`, writes `cgroup.kill`. |
 | Forged console lines | fd 0 is `/dev/null`; no device ioctls are granted. |
+| A narrowed program widening itself | Its lines come from the verified root, and Landlock domains and filters only stack; it keeps no descriptor but 0, 1 and 2. |
 
 ## Reliability Considerations
 

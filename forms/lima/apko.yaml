@@ -1,6 +1,0 @@
-# lima: the test vehicle. Everything a form can be, so one Lima VM can try
-# bite, slots and the updater: prod, the sshd form, and bash for Lima's
-# readiness probes.
-contents:
-  packages:
-    - bash

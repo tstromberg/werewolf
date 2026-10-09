@@ -1,0 +1,10 @@
+# What the cron form, booted as it ships, without a shell, must say on its
+# console (make check-shellfree-cron; test/boot; forms/demo/test/console
+# has the format). supercronic starts, leashed, reads the crontab, takes
+# sh-shim as its shell, and stays up without a complaint.
+
+seen    cron-leashed   leash: \{"event":"start","service":"cron","user":"supercronic"
+seen    cron-read      "msg":"read crontab: /etc/cron/crontab"
+seen    cron-sh-shim    "msg":"processes will be spawned using shell: /usr/lib/werewolf/sh-shim"
+unseen  service-down   leash: \{"event":"(down|retry)"
+unseen  cron-complains "level":"(warning|error|fatal|panic)"

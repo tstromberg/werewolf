@@ -54,7 +54,7 @@ disk slow to appear never quietly becomes RAM ([data.md](../data.md)).
 
 **Variants and bundles.** `DEV=1` adds busybox and the debug shell to any
 form, with its own lock and output directory. SSH needed no flag: `sshd`
-is a form that `prod-ssh`, `lima` or a form of yours takes `with`.
+is a form that `prod-ssh`, `playground` or a form of yours takes `with`.
 
 **Runtime forms** are `prod`, one Wolfi runtime, and a leashed service.
 The application is in the image, not on `/data` or in the config: it is

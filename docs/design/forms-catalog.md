@@ -57,8 +57,10 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 | `prometheus`, `loki` | admin API and remote write off; no `node_exporter` in Wolfi | `render json ... as list` |
 
 **What they teach the base.** Built: bundles, `ruby` (4.0), `exec` with
-a `run` list (gitea's hooks are Zig), `cpu WEIGHT` and the first-run
-pattern ([cpu-and-first-run.md](cpu-and-first-run.md)). Proposed, in order:
+a `run` list (gitea's hooks are Zig), `cpu WEIGHT`, the first-run
+pattern ([cpu-and-first-run.md](cpu-and-first-run.md)), and timed jobs,
+which a form gets by taking the `cron` form
+([forms/cron](../../forms/cron/README.md)). Proposed, in order:
 
 | Improvement | For |
 | --- | --- |

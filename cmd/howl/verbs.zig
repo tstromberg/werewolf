@@ -40,6 +40,17 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         command = args[i + 1 ..];
         break;
     };
+    // One word that names no machine is most likely a command: say how.
+    if (command.len == 0 and rest.len == 1 and !std.mem.startsWith(u8, rest[0], "-")) {
+        if (Dir.cwd().access(
+            io,
+            try machineDir(gpa, rest[0]),
+            .{},
+        )) |_| {} else |_| return why.refuse(
+            "no machine {s}; a command goes after --: howl ssh -- {s}",
+            .{ rest[0], rest[0] },
+        );
+    }
     const name, const on = try machineArgs(io, gpa, rest, why);
     const dir = try machineDir(gpa, name);
     // The guest keeps its host key in /data, so trust it on first use and
@@ -73,11 +84,40 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         try argv.append(gpa, try gpa.print("root@{s}", .{(try firecracker.net(gpa, name)).guest}));
     } else if (on == .lima) {
         if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
-        if (lima.addressOf(io, gpa, name)) |addr| {
+        // A machine Lima manages has no vzNAT lease of its own: one under its
+        // name is an earlier machine's, gone.
+        const yaml = Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/lima.yaml", .{dir}),
+            gpa,
+            .limited(64 << 10),
+        ) catch "";
+        const managed = lima.isManaged(yaml);
+        const addr = if (managed) null else lima.addressOf(io, gpa, name);
+        // Root, by Lima's forwarded port, when its config tar gave root keys.
+        const port = if (managed and try rootKeyed(io, gpa, dir))
+            lima.sshPort(io, gpa, name)
+        else
+            null;
+        if (addr) |a| {
             try argv.append(gpa, "ssh");
             try argv.appendSlice(gpa, &pinned);
-            try argv.append(gpa, try gpa.print("root@{s}", .{addr}));
-        } else try argv.appendSlice(gpa, &.{ "limactl", "shell", name });
+            try argv.append(gpa, try gpa.print("root@{s}", .{a}));
+        } else if (port) |p| {
+            try argv.appendSlice(gpa, &.{ "ssh", "-p", p });
+            try argv.appendSlice(gpa, &pinned);
+            try argv.append(gpa, "root@127.0.0.1");
+        } else {
+            try argv.appendSlice(gpa, &.{ "limactl", "shell", name });
+            // ssh hands the guest's shell the command's words joined; so
+            // does this, where limactl would run them as one program.
+            if (command.len > 0) try argv.appendSlice(gpa, &.{
+                "sh",
+                "-c",
+                try std.mem.join(gpa, " ", command),
+            });
+            command = &.{};
+        }
     } else return why.refuse(
         "ssh reaches machines here (qemu, firecracker, lima); {t}'s address is in create's summary",
         .{on},
@@ -85,6 +125,27 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     try argv.appendSlice(gpa, command);
     const err = std.process.replace(io, .{ .argv = argv.items });
     return why.refuse("{s}: {s}", .{ argv.items[0], @errorName(err) });
+}
+
+/// rootKeyed reports whether the config tar in dir gives root keys.
+fn rootKeyed(io: Io, gpa: Allocator, dir: []const u8) !bool {
+    const tar = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/config.tar", .{dir}),
+        gpa,
+        .limited(64 << 20),
+    ) catch return false;
+    var r: Io.Reader = .fixed(tar);
+    var name_buf: [Dir.max_path_bytes]u8 = undefined;
+    var link_buf: [Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(
+        &r,
+        .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
+    );
+    while (it.next() catch return false) |e| {
+        if (std.mem.eql(u8, e.name, "authorized_keys")) return true;
+    }
+    return false;
 }
 
 /// stopHere is howl stop. It removes the machine howl run keeps, wherever

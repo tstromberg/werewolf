@@ -57,9 +57,9 @@ image lacks as soon as that advisory's tier says
 ## When CI releases
 
 [.github/workflows/release.yml](../.github/workflows/release.yml) runs
-every 15 minutes, for what Wolfi and Alpine change, and whenever the `check`
-workflow passes on `main`, for what werewolf changes, building the commit
-that passed. GitHub runs a schedule this frequent late, or skips it, under
+every 15 minutes, for what Wolfi and Alpine change, and whenever the
+`packages` workflow has run after `check` passes on `main`, for what werewolf
+changes, so the packages a change brings are published first. GitHub runs a schedule this frequent late, or skips it, under
 load, most often on the hour and its quarters, so release.yml's minutes are
 7, 22, 37 and 52; a push does not wait on one.
 

@@ -31,6 +31,11 @@ So even full RCE -- arbitrary Python through the python3 that is allowed
 to run -- cannot read a secret, change the system, persist, or call home.
 A reboot returns the machine to the signed image regardless.
 
+A program the app runs on what a stranger sends -- a media tool, say -- can
+be held tighter than the app: cat, run by its link /etc/sv/app/narrow/cat,
+is narrowed (docs/design/narrow.md). It reads the image, but neither the
+account list nor the app's own files, which the app and plain cat may.
+
 At boot the application attacks itself with a battery of representative
 payloads and logs, as JSON on the console, that none escaped
 (forms/webshell-example/test/console). The page keeps the last 100 attempts,
@@ -104,6 +109,7 @@ def run(cmd, shell, source, agent):
         )
         record["exit"] = done.returncode
         record["stdout"] = done.stdout
+        record["stderr"] = done.stderr
         record["output"] = (done.stdout + done.stderr)[:MAX_OUTPUT]
     except FileNotFoundError as e:
         # No /bin/sh for a shell command, or the named binary is absent.
@@ -144,7 +150,8 @@ only its own python3 and the programs its leash allows (coreutils and
 <code>hostname</code>); no writes outside its own data; no network out;
 and even an allowed tool reads only what the cage permits. Try to escape
 &mdash; or run <code>cat /etc/passwd</code> (works) and
-<code>cat /etc/shadow</code> (refused) and see the difference.</p>
+<code>cat /etc/shadow</code> (refused) and see the difference. Narrowed,
+<code>/etc/sv/app/narrow/cat /etc/passwd</code> is refused too.</p>
 <form method="post">
   <input type="text" name="cmd" placeholder="e.g. cat /etc/shadow" autofocus>
   <label><input type="checkbox" name="shell" value="1"> Run within a shell</label>
@@ -249,6 +256,18 @@ ALLOWED = [
     ("a line it prints itself", "echo contained-rce-works", "contained-rce-works"),
 ]
 
+# cat, narrowed (etc/sv/app/service's `narrow` line), run by its link to
+# leash. Each file, and whether narrowed cat may read it; the app may read
+# each, and plain cat with it. The narrowing holds where both are so and
+# leash said, on narrowed cat's stderr, that it narrowed it.
+NARROW = "/etc/sv/app/narrow/cat"
+PROBE = "/run/svc/app/narrow-probe"
+NARROWED = [
+    ("/usr/lib/app/webshell.py", True),
+    ("/etc/passwd", False),
+    (PROBE, False),
+]
+
 
 def self_test():
     escaped = 0
@@ -291,6 +310,26 @@ def self_test():
         # expected output; if not, the demo is not showing contained
         # execution. The console test fails on this.
         print(f"webshell: only {ran} of {len(ALLOWED)} allowed commands ran", file=sys.stderr, flush=True)
+
+    # The narrowed cat: refused what the app, and plain cat, may read.
+    with open(PROBE, "w") as f:
+        f.write("the app's own\n")
+    held = 0
+    leash = ""
+    for path, child_may in NARROWED:
+        parent = run(f"cat {path}", False, "self-test", "read by cat")
+        child = run(f"{NARROW} {path}", False, "self-test", "read by narrowed cat")
+        parent_read = parent["exit"] == 0 and parent["stdout"] != ""
+        child_read = child["exit"] == 0 and child["stdout"] != ""
+        line = next((x for x in child.get("stderr", "").splitlines() if x.startswith('leash: {"event":"narrow"')), "")
+        leash = leash or line
+        ok = parent_read and child_read == child_may and line != ""
+        held += ok
+        _log("narrowed", file=path, parent=parent_read, child=child_read, leashed=line != "", held=ok)
+    _log("narrowing", leash=leash, checks=len(NARROWED), held=held)
+    if held != len(NARROWED):
+        # The console test fails on this.
+        print(f"webshell: the narrowing held for only {held} of {len(NARROWED)} files", file=sys.stderr, flush=True)
 
 
 # Attack ourselves once the worker is up, off the request path.

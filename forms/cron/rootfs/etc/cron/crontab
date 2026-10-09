@@ -1,0 +1,17 @@
+# The crontab supercronic reads (etc/sv/cron/service): crontab(5) lines,
+# an optional seconds field first, times in UTC. Each job runs as
+# `sh-shim -c COMMAND`: one program and its words, quoted as sh quotes
+# them, and nothing else. sh-shim refuses a pipe, a redirection, a
+# variable, a glob or a `;`, and the job fails in the log, not mangled.
+# SHELL names the shim, not /bin/sh, which is busybox's in a form or a
+# DEV build that has busybox, and which no leash lets the jobs run.
+#
+# As shipped there are no jobs. A form that adds some lays its own file
+# here, keeping the SHELL line (a later form's rootfs files win,
+# forms/README.md), and its own etc/sv/cron/service, whose `run` line
+# names every program the jobs start; its `user` line, supercronic unless
+# it names another user of its own, is who they run as. For example:
+#
+#   SHELL=/usr/lib/werewolf/sh-shim
+#   15 3 * * * /usr/bin/ruby /usr/lib/app/bin/tootctl media remove --days 7
+SHELL=/usr/lib/werewolf/sh-shim

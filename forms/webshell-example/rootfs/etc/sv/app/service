@@ -11,7 +11,8 @@
 # preconnect until its timeout kills it, and every other request waits.
 exec    /usr/bin/python3 -m gunicorn --bind 0.0.0.0:8080 --workers 1 --worker-class gthread --threads 8 --worker-tmp-dir /run/svc/app --no-control-socket --pythonpath /usr/lib/app webshell:app
 user    app
-pledge  stdio rpath wpath proc unix inet listen exec
+# landlock and seccomp let leash, run by cat's link below, narrow it.
+pledge  stdio rpath wpath proc unix inet listen exec landlock seccomp
 # The programs this RCE may exec: who and where it runs, and read-only
 # tools. They can read only what the leash's floor grants -- /etc/passwd
 # prints, /etc/shadow is refused -- and change nothing. Everything else in
@@ -22,3 +23,7 @@ memory  512
 listen  tcp/8080
 env     PYTHONDONTWRITEBYTECODE=1
 env     PYTHONUNBUFFERED=1
+# cat also runs narrowed, by /etc/sv/app/narrow/cat, its link to leash
+# (docs/design/narrow.md): it reads the image, but not the account list or
+# the app's own files, as the app may; it writes nothing and has no network.
+narrow  /usr/bin/cat pledge stdio rpath

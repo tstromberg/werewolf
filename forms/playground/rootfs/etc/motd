@@ -1,0 +1,19 @@
+Werewolf Linux playground: a hardened, image-based Linux to try out.
+The system is a read-only image; only /data keeps what you write.
+
+Protections in force:
+- dm-verity checks every block of the root filesystem as it is read
+- kernel lockdown; only signed kernel modules, and none after boot
+- every process runs under seccomp; each service is confined by Landlock
+- firewall: only declared ports listen, only declared traffic goes out
+- nothing in a writable place executes; setuid bits are ignored
+- ssh by public key only (this playground also takes plain key files)
+See each one checked, and why: /usr/lib/werewolf/posture
+
+Updates: the system has two copies, A and B. Running
+  /usr/lib/werewolf/slot-update
+builds the other copy from the newest packages and boots it when due:
+urgent fixes within 15 minutes, high within 4 hours, the rest after 7 or
+28 days, between 02:00 and 05:00 UTC. If it fails, this copy comes back.
+Log: /data/svc/autoupdate/log. Made by howl run on Lima or QEMU? That boots
+one copy only: run howl run again for the newest.

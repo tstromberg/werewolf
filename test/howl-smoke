@@ -7,7 +7,7 @@ howl=$1 smoke=$2/adhoc/smoke
 fail() { echo "howl-smoke: $1"; exit 1; }
 "$howl" run --build -h >/dev/null 2>&1 || fail "howl run -h"
 "$howl" run --build -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
-"$howl" run --build --on qemu -n 2>&1 | grep -q 'prod-ssh as it is' || fail "howl run --on qemu -n should be prod-ssh"
+"$howl" run --build --on qemu -n 2>&1 | grep -q 'playground as it is' || fail "howl run --on qemu -n should be playground"
 "$howl" run --build --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
 "$howl" create --build smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"
 "$howl" create --build web --with python --app ./myapp -h >/dev/null 2>&1 ||

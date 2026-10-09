@@ -1,0 +1,16 @@
+# supercronic runs leashed as its own user: its uid, no capability, no new
+# privileges, its pledge's filter; and the account's shell is sh-shim.
+ok  cron-leashed     p=$(pidof supercronic); u=$(grep '^supercronic:' /etc/passwd | cut -d: -f3); [ -n "$p" ] && [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status && grep -q '^Seccomp:[[:space:]]*2' /proc/$p/status && grep -q '^supercronic:.*:/usr/lib/werewolf/sh-shim$' /etc/passwd
+# A job runs. The shipped crontab has none and the root is read-only, so
+# leash starts a second supercronic from this service's own file, with
+# only its crontab and one more `run` program changed: a job every second
+# as supercronic, under the same pledge and Landlock. Each job goes
+# through sh-shim, which no `run` line names: the sh allowance lets it.
+# busybox's tee leaves a file owned by supercronic; zstd, which no `run`
+# line names, is refused by Landlock, and sh-shim says so in the log.
+ok  cron-job-runs    d=/run/cron-check; c=/run/svc/cron-check; f=/data/svc/cron-check/ran; b=$(readlink -f "$(command -v busybox)"); rm -rf $d $c /data/svc/cron-check; mkdir -p $d/cron-check $c || exit 1; printf 'SHELL=/usr/lib/werewolf/sh-shim\n* * * * * * * %s tee ran\n* * * * * * * /usr/bin/zstd -V\n' "$b" >$c/crontab; sed "s|/etc/cron/crontab|$c/crontab|" /etc/sv/cron/service >$d/cron-check/service; echo "run $b" >>$d/cron-check/service; (cd $d/cron-check && exec /usr/lib/werewolf/leash) >$d/log 2>&1 & i=0; until [ -f $f ] && grep -q 'sh-shim: /usr/bin/zstd: permission denied' $d/log; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; echo 1 >/run/cgroup/svc/cron-check/cgroup.kill; [ "$(stat -c %U $f 2>/dev/null)" = supercronic ] || { echo "no job ran as supercronic"; cat $d/log; exit 1; }; grep -q 'sh-shim: /usr/bin/zstd: permission denied' $d/log || { echo "zstd was not refused"; cat $d/log; exit 1; }
+# The pledge is all supercronic and sh-shim need: the kernel audits each
+# call a leashed service's filter refuses, and none is theirs. A job's own
+# program is its form's to pledge for: the busybox above is refused the
+# setuid and setgid it calls to drop privileges it never had.
+ok  cron-pledged     u=$(grep '^supercronic:' /etc/passwd | cut -d: -f3); ! dmesg | grep 'type=1326' | grep " uid=$u " | grep -E 'comm="(supercronic|sh-shim)"'

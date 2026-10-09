@@ -1,7 +1,7 @@
 //! slot-update is the autoupdater. It builds or fetches the other slot, stages
 //! it to boot once when its fixes make it due, and logs whether it held.
 //!
-//!     slot-update check     stage the other slot if anything newer exists
+//!     slot-update [check]   stage the other slot if anything newer exists
 //!     slot-update outcome   after a reboot, log whether the last update held
 //!
 //! See README.md and docs/updater.md.
@@ -92,21 +92,37 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(gpa);
     // runsv starts /etc/sv/autoupdate/run, a link to this program, with no
     // arguments. That means daemon.
+    // A person running it with no arguments means check.
     const as_service = args.len == 1 and std.mem.eql(u8, std.fs.path.basename(args[0]), "run");
-    const mode = if (args.len == 2) args[1] else if (as_service) "daemon" else "";
+    const mode = if (args.len == 2)
+        args[1]
+    else if (as_service)
+        "daemon"
+    else if (args.len == 1)
+        "check"
+    else
+        "";
     if (std.mem.eql(u8, mode, "daemon")) daemon(init.io);
+    if (!std.mem.eql(u8, mode, "check") and !std.mem.eql(u8, mode, "outcome")) {
+        std.debug.print("usage: slot-update [check|outcome|daemon]\n", .{});
+        std.process.exit(2);
+    }
 
     var u: Update = .{ .io = init.io, .gpa = gpa };
-    u.setup() catch |err| fatal(&u, err);
+    u.setup() catch |err| {
+        if (err == error.NotBootedFromASlot) std.debug.print(
+            "slot-update: this machine booted its image directly, not from a slot, " ++
+                "so nothing updates it in place; make it again (howl run) for the newest\n",
+            .{},
+        );
+        fatal(&u, err);
+    };
     if (std.mem.eql(u8, mode, "check")) {
         var settings: policy.Settings = .{};
         u.loadPolicy(&settings) catch |err| fatal(&u, err);
         u.check(&settings, false) catch |err| fatal(&u, err);
-    } else if (std.mem.eql(u8, mode, "outcome")) {
-        u.outcome() catch |err| fatal(&u, err);
     } else {
-        std.debug.print("usage: slot-update check|outcome|daemon\n", .{});
-        std.process.exit(2);
+        u.outcome() catch |err| fatal(&u, err);
     }
 }
 
@@ -123,7 +139,12 @@ fn failed(u: *Update, err: anyerror) void {
         .step = u.step,
         .@"error" = @errorName(err),
         .detail = u.detail,
-    }) catch {};
+    }) catch |log_err| std.debug.print("slot-update: {s} {s}: {s}; the log: {s}\n", .{
+        u.step,
+        @errorName(err),
+        u.detail,
+        @errorName(log_err),
+    });
 }
 
 /// daemon is the autoupdate service. After setup succeeds it writes

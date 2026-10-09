@@ -325,11 +325,20 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/slot", .{out}));
     // The root directory itself, first: without an entry for it,
     // mkfs.erofs gives / the builder's uid and mode 0777, which sshd's
-    // StrictModes rightly refuses keys under.
+    // StrictModes rightly refuses keys under. Then, if the image takes the
+    // sh shim, /bin/sh as a link to it, which a package's sh, busybox's,
+    // or a form's replaces (cmd/sh-shim/README.md).
     const mtree = try b.path("{s}/root.mtree", .{out});
+    const head = "#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n";
+    const sh =
+        \\./usr type=dir uid=0 gid=0 mode=0755 time=0.0
+        \\./usr/bin type=dir uid=0 gid=0 mode=0755 time=0.0
+        \\./usr/bin/sh type=link uid=0 gid=0 mode=0777 time=0.0 link=/usr/lib/werewolf/sh-shim
+        \\
+    ;
     try Dir.cwd().writeFile(b.io, .{
         .sub_path = mtree,
-        .data = "#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n",
+        .data = if (try takes(b, "sh-shim")) head ++ sh else head,
     });
     const root_tar = try b.path("{s}/root.tar", .{out});
     var argv: std.ArrayList([]const u8) = .empty;
@@ -373,6 +382,15 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
     try b.write(try b.path("{s}/verity/verity", .{out}), line.written());
     try b.rename(t, target);
     try b.done(target, began);
+}
+
+/// takes reports whether a form of the chain takes program.
+fn takes(b: *B, program: []const u8) !bool {
+    for (b.chain) |c| for (try c.items(b.gpa, "programs")) |item| {
+        var it = mem.tokenizeAny(u8, item, " \t");
+        while (it.next()) |p| if (mem.eql(u8, p, program)) return true;
+    };
+    return false;
 }
 
 /// checkErofs refuses a mkfs.erofs that would write a bad root.
