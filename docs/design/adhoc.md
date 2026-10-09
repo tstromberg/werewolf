@@ -50,8 +50,9 @@ refuses them.
 
 **The generator.** `build`, `run`, `create` and `form` take the flags
 below. Forms are references, `--with`: a name in `forms/`, or a kept
-form's directory; none means `prod`, or `lima` for a run whose machine
-goes on Lima, the form Lima manages. One reference and nothing to add
+form's directory; none means `prod`, or for `run` the form its
+environment wants: `lima` where the machine goes on Lima, the form Lima
+manages, and `prod-ssh` elsewhere, so there is a way in. One reference and nothing to add
 runs that form as it is, its own name, release URL and build; one with
 more is the generated form's base; several are taken by a form on the
 default. `create`'s one positional is its machine's name. A form is

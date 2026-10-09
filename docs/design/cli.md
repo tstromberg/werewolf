@@ -116,7 +116,7 @@ another `create`, not a new image.
 ```
 howl build   --with FORM,... [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
 howl pack    --with FORM [-o FILE] [-n] [--on TARGET] CONFIG...
-howl run     [--with FORM,...] [--on TARGET] [--dev] [CONFIG...]   create's machine werewolf-run; prod, or lima on Lima, with no --with
+howl run     [--with FORM,...] [--on TARGET] [--dev] [CONFIG...]   create's machine werewolf-run; with no --with, lima on Lima, else prod-ssh
 howl ssh     [NAME] [-- COMMAND...]
 howl stop
 howl create  NAME --with FORM,... [--on TARGET] [--dev] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]
