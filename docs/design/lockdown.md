@@ -414,7 +414,7 @@ CI's boot test (verified-boot.md, *Releases*) checks the same, and that
 ### Command line
 
 Some hardening has no runtime switch. The build writes what the image asks
-for, from its architecture and allowances (Makefile, `KERNEL_ARGS`), into
+for, from its architecture and allowances (lib/compose.zig, `cmdline`), into
 the image as `/usr/share/werewolf/cmdline` and beside it as the slot's
 `cmdline`. bite and `boot/mkdisk` write it into the entries they make; the
 Makefile's `run` and `check` and `lima.yaml` pass it; the updater's next

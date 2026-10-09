@@ -8,15 +8,14 @@
 //!   form listens FORM        the TCP ports the chain's net serves, a line each
 //!   form weaknesses FORM     the posture checks the form's own weaknesses name
 //!   form excuses FORM        the same, each with its excuse, a line each
-//!   form oci FORM            the services with a root (an image baked in), a line each:
-//!                            `root NAME DIR USER`, then `write NAME PATH` for each path
-//!   form pledge FORM         the machine's promises: every service's pledge, as one;
-//!                            refused, a service leash refuses or that listens
-//!                            where no net line does
-//!   form sshd FORM           the chain's sshd: as sshd_config lines, or nothing
-//!   form bastion-keys FORM   the bastion's authorized_keys, from bastion: users:
-//!   form bastion-permit FORM the bastion's PermitOpen line, or nothing
-//!   form bastion-service FORM the bastion's service file, connecting where net says
+//!   form cmdline FORM ARCH   the kernel arguments the image boots with
+//!   form module-params FORM ARCH  the parameters it loads modules with,
+//!                            MODULE:KEY=VALUE, a line each
+//!   form modules FORM ARCH native|bitten  its modules: for every boot, or
+//!                            those only a distro's disk needs, a line each
+//!   form compose FORM ARCH IMAGE RO META [dev]  what the chain derives,
+//!                            from the image's accounts under IMAGE, into
+//!                            RO and META (lib/compose.zig)
 //!   form having KEY [VALUE]  the forms in forms/ whose check KEY is VALUE (true)
 //!   form every KEY           form.yaml's KEY in every form in forms/, once each
 //!   form apko FORM [PKG...]  the chain's apko configs as one, and PKGs
@@ -29,12 +28,12 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const form = @import("form");
-const seal = @import("seal");
-const service = @import("service");
+const compose = @import("compose");
 
-const usage = "usage: form names|dirs|listens|weaknesses|excuses|pledge|oci|sshd|bastion-keys|" ++
-    "bastion-permit|bastion-service FORM, " ++
-    "list|check FORM KEY, having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
+const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
+    "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH native|bitten, " ++
+    "compose FORM ARCH IMAGE RO META [dev], " ++
+    "having KEY [VALUE], every KEY, apko FORM [PKG...], tree";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -117,73 +116,36 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     } else if (is(verb, "excuses") and args.len == 2) {
         for (forms[forms.len - 1].weaknesses()) |e|
             try w.print("{s} {s}\n", .{ e.key, e.value.scalar.text });
-    } else if (is(verb, "oci") and args.len == 2) {
-        // What init binds beneath each image root and fence allows there
-        // (cmd/init/oci.zig, cmd/fence): read as leash reads the file.
-        for (try form.services(io, gpa, root, forms, f)) |s| {
-            var bad: service.Bad = .{};
-            const parsed = service.parse(gpa, s.text, &bad) catch |err| switch (err) {
-                error.Invalid => return f.fail(
-                    gpa,
-                    "{s}, line {d}: {s}",
-                    .{ s.path, bad.line, bad.why },
-                ),
-                else => |e| return e,
-            };
-            const dir = parsed.root orelse continue;
-            try w.print("root {s} {s} {s}\n", .{ s.name, dir, parsed.user });
-            for (parsed.write) |path| try w.print("write {s} {s}\n", .{ s.name, path });
-        }
-    } else if (is(verb, "pledge") and args.len == 2) {
-        // Each service file read whole, as leash reads it: one leash would
-        // refuse fails the build, rather than give the machine the wrong
-        // promises; and so does one that listens where the chain's net
-        // does not, whose bind fence would refuse at boot.
-        var declared: std.ArrayList(u16) = .empty;
-        for (forms) |fm| for (try fm.items(gpa, "net")) |line| {
-            var why: []const u8 = "";
-            const l = (form.listen(gpa, line, &why) catch |err| switch (err) {
-                error.Invalid => return f.fail(
-                    gpa,
-                    "{s}/form.yaml: net: {s}: {s}",
-                    .{ fm.dir, line, why },
-                ),
-                error.OutOfMemory => return error.OutOfMemory,
-            }) orelse continue;
-            try declared.appendSlice(gpa, l.ports);
+    } else if (is(verb, "cmdline") and args.len == 3) {
+        const allowed = try compose.allowances(gpa, forms, f);
+        try w.print("{s}\n", .{try compose.cmdline(gpa, allowed, try arch(args[2]))});
+    } else if (is(verb, "module-params") and args.len == 3) {
+        const allowed = try compose.allowances(gpa, forms, f);
+        for (compose.moduleParams(allowed, try arch(args[2]))) |p|
+            try w.print("{s}:{s}\n", .{ p.module, p.value });
+    } else if (is(verb, "modules") and args.len == 4) {
+        const m = try compose.modules(gpa, forms, try arch(args[2]));
+        const list = if (is(args[3], "native"))
+            m.native
+        else if (is(args[3], "bitten"))
+            m.bitten
+        else
+            return error.Usage;
+        for (list) |name| try w.print("{s}\n", .{name});
+    } else if (is(verb, "compose") and (args.len == 6 or (args.len == 7 and is(args[6], "dev")))) {
+        const known = try root.readFileAlloc(io, "test/posture-known", gpa, .limited(64 << 10));
+        const b: compose.Build = .{
+            .arch = try arch(args[2]),
+            .dev = args.len == 7,
+            .posture_known = known,
         };
-        var promises: seal.Set = .empty;
-        for (try form.services(io, gpa, root, forms, f)) |s| {
-            var bad: service.Bad = .{};
-            const parsed = service.parse(gpa, s.text, &bad) catch |err| switch (err) {
-                error.Invalid => return f.fail(
-                    gpa,
-                    "{s}, line {d}: {s}",
-                    .{ s.path, bad.line, bad.why },
-                ),
-                else => |e| return e,
-            };
-            for (parsed.listen) |port| if (std.mem.findScalar(u16, declared.items, port) == null)
-                return f.fail(
-                    gpa,
-                    "{s}: listen tcp/{d}, which no net line declares: fence refuses the bind " ++
-                        "(`listen tcp/{d} loopback` for the machine alone)",
-                    .{ s.path, port, port },
-                );
-            promises.setUnion(parsed.pledge);
-        }
-        var it = promises.iterator();
-        var sep: []const u8 = "";
-        while (it.next()) |p| : (sep = " ") try w.print("{s}{t}", .{ sep, p });
-        try w.writeAll("\n");
-    } else if (is(verb, "sshd") and args.len == 2) {
-        try w.writeAll(try form.sshdConfig(gpa, forms, f));
-    } else if (is(verb, "bastion-keys") and args.len == 2) {
-        try w.writeAll((try form.bastionFiles(gpa, forms, f)).keys);
-    } else if (is(verb, "bastion-permit") and args.len == 2) {
-        try w.writeAll((try form.bastionFiles(gpa, forms, f)).permit);
-    } else if (is(verb, "bastion-service") and args.len == 2) {
-        try w.writeAll(try form.bastionService(io, gpa, root, forms, f));
+        var image = try root.openDir(io, args[3], .{});
+        defer image.close(io);
+        var ro = try root.createDirPathOpen(io, args[4], .{});
+        defer ro.close(io);
+        var meta = try root.createDirPathOpen(io, args[5], .{});
+        defer meta.close(io);
+        try compose.compose(io, gpa, root, forms, image, ro, meta, b, f);
     } else if (is(verb, "apko")) {
         try form.write(w, try form.apko(io, gpa, root, forms, args[2..], f));
     } else return error.Usage;
@@ -191,6 +153,10 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
 
 fn is(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+fn arch(name: []const u8) error{Usage}!compose.Arch {
+    return std.meta.stringToEnum(compose.Arch, name) orelse error.Usage;
 }
 
 /// The names of the forms in forms/, sorted.

@@ -84,11 +84,15 @@ HOST_OS := $(shell uname -s)
 FORM ?= $(if $(filter lima,$(MAKECMDGOALS)),lima,$(if $(filter bite-me,$(MAKECMDGOALS)),prod-ssh,sshd))
 FORM_TOOL = build/host/form
 # Its sources, and the libraries it is built with: lib/form.zig, the
-# forms; lib/allow.zig, the allowances form.yaml may name; lib/service.zig,
-# the service files whose pledges make the machine's promises, and what
-# that imports.
-FORM_TOOL_SOURCES = tools/form.zig lib/form.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
-FORM_TOOL_MODULES = --dep form --dep service --dep seal --dep sshd -Mroot=tools/form.zig \
+# forms; lib/compose.zig, what an image derives from them; lib/allow.zig,
+# the allowances form.yaml may name; lib/service.zig, the service files
+# whose pledges make the machine's promises, and what that imports.
+FORM_TOOL_SOURCES = tools/form.zig lib/form.zig lib/compose.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
+FORM_TOOL_MODULES = --dep form --dep compose -Mroot=tools/form.zig \
+	--dep form --dep seal --dep service -Mcompose=lib/compose.zig \
+	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
+	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
+COMPOSE_MODULES = --dep form --dep seal --dep service -Mroot=lib/compose.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
 # Built before anything else is read, since everything about a form is
@@ -114,51 +118,25 @@ form_check = $(shell $(FORM_TOOL) check $(FORM_REF) $(1))
 # --- allowances ---------------------------------------------------------------
 # What a form may take back of werewolf's defaults, and only when it is
 # built: form.yaml's `allow`, added to along the chain, so no form drops
-# what one it is built on was given; lib/allow.zig says what each is, and
-# build/host/form refuses a name it does not know. meta writes them into
-# the image, /etc/werewolf/allow/NAME, where init, fence and posture read
-# them. Nothing on the machine reads an allowance from its command line,
-# config or metadata, which root can rewrite: the build turns them into
-# the image's kernel arguments and module parameters, below, and the image
-# is what decides (docs/design/lockdown.md, Allowances).
-ALLOW := $(sort $(call form_list,allow))
-ifneq ($(filter nested-kvm,$(ALLOW)),)
-ifeq ($(filter kvm,$(ALLOW)),)
-$(error form $(FORM) allows nested-kvm without kvm)
+# what one it is built on was given; lib/allow.zig says what each is.
+# compose (lib/compose.zig) writes them into the image,
+# /etc/werewolf/allow/NAME, where init, fence and posture read them, and
+# turns them into the image's kernel arguments and module parameters.
+# Nothing on the machine reads an allowance from its command line, config
+# or metadata, which root can rewrite: the image is what decides
+# (docs/design/lockdown.md, Allowances).
+#
+# The kernel arguments, on the command line of every way the image boots:
+# bite's and boot/mkdisk's entries, which read it from the slot's cmdline;
+# the updater's, from the image's /usr/share/werewolf/cmdline; and run,
+# check and Lima, here. lib/compose.zig's cmdline says why each.
+KERNEL_ARGS := $(shell $(FORM_TOOL) cmdline $(FORM_REF) $(ARCH))
+ifeq ($(KERNEL_ARGS),)
+$(error form $(FORM) has no kernel arguments, as build/host/form says above)
 endif
-endif
-
-# The kernel's hardening that has no runtime switch, on the command line of
-# every way the image boots: bite's and boot/mkdisk's entries, which read it
-# from the slot's cmdline; the updater's, from the image's
-# /usr/share/werewolf/cmdline; and run, check and Lima, here. No debugfs; no
-# forced writes through /proc/PID/mem, how a program rewrites its own code;
-# on x86_64 no 32-bit system calls; on aarch64 no KVM, which the kernel
-# builds in and starts whenever a host lends the guest EL2, unless the form
-# allows it, and nested only if it allows that too. Each kernel cache kept
-# apart (slab_nomerge), so an object freed in one cannot be taken over by
-# an attacker's of another type that shares it, and pages handed out in a
-# shuffled order: neither costs a program anything. init_on_alloc and the
-# kernel stack's random offset are Alpine's kernel's defaults already;
-# init_on_free, which costs allocation-heavy work, is left off by choice
-# (docs/security.md). No IPv6, unless the form allows it.
-KERNEL_ARGS = debugfs=off proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1
-KERNEL_ARGS += $(if $(filter ipv6,$(ALLOW)),,ipv6.disable=1)
-ifeq ($(ARCH),aarch64)
-KERNEL_ARGS += $(if $(filter nested-kvm,$(ALLOW)),kvm-arm.mode=nested,$(if $(filter kvm,$(ALLOW)),,kvm-arm.mode=none))
-else
-KERNEL_ARGS += ia32_emulation=0
-endif
-# The console shows the kernel's warnings and worse; dmesg keeps every
-# message. The kernel writes its console as it goes, and a cloud's serial
-# port takes a millisecond a line: on GCP its boot's notices and info took
-# half its time (0.23 s against 0.11 s). Panics, stalls, BUG and the
-# power-down line, which test/boot reads, are all errors or worse.
-KERNEL_ARGS += loglevel=5
-# Parameters the image loads modules with, MODULE:KEY=VALUE, one a word: on
-# x86_64, KVM's nested virtualization, which Linux turns on by default.
+# Parameters the image loads modules with, MODULE:KEY=VALUE, one a word.
 # A parameter for a module the form does not carry fails the build.
-MODULE_PARAMS = $(if $(and $(filter x86_64,$(ARCH)),$(filter kvm,$(ALLOW))),$(foreach m,kvm-intel kvm-amd,$(m):nested=$(if $(filter nested-kvm,$(ALLOW)),1,0)))
+MODULE_PARAMS := $(shell $(FORM_TOOL) module-params $(FORM_REF) $(ARCH))
 
 # werewolf's own programs, cmd/NAME/NAME.zig, are built, not checked in, and
 # laid in like forms' rootfs (docs/programs.md). init, stage0, the module
@@ -304,11 +282,7 @@ endef
 # which modload loads only when stage0 finds the slot on xfs. No kmod index
 # files travel, so there is nothing describing the 880 modules that stay
 # behind. modload closes the loader once these are in.
-MODULES := $(shell $(FORM_TOOL) list $(FORM_REF) modules | \
-	awk -v a=$(ARCH) '{ c = index($$0, sprintf("%c", 35)); if (c) $$0 = substr($$0, 1, c - 1) } \
-		$$1 == "aarch64" || $$1 == "x86_64" { if ($$1 != a) next; $$1 = ""; $$0 = $$0 } \
-		$$1 ~ /^@[a-z0-9]+$$/ { for (i = 2; i <= NF; i++) printf "%s:%s ", $$1, $$i; print ""; next } { print }')
-
+#
 # Tags for what only a distro's disk needs, after bite: the modules of its
 # filesystem (Rocky's xfs, Fedora's btrfs). The slot has two stage0s:
 # stage0.zst, for werewolf's own disk and a direct boot, which leaves
@@ -316,10 +290,9 @@ MODULES := $(shell $(FORM_TOOL) list $(FORM_REF) modules | \
 # stage0-bitten.zst, which bite installs, with them. Booted under
 # Firecracker, the 13 MB less to unpack brought the machine up 25 ms
 # sooner. The image records both lists (meta: modules, modules-bitten), so
-# the updater builds a slot's stage0 as the build does.
-BITTEN_TAGS = xfs btrfs
-BITTEN_MODULES = $(filter $(foreach t,$(BITTEN_TAGS),@$(t):%),$(MODULES))
-NATIVE_MODULES = $(filter-out $(BITTEN_MODULES),$(MODULES))
+# the updater builds a slot's stage0 as the build does (lib/compose.zig).
+NATIVE_MODULES := $(shell $(FORM_TOOL) modules $(FORM_REF) $(ARCH) native)
+BITTEN_MODULES := $(shell $(FORM_TOOL) modules $(FORM_REF) $(ARCH) bitten)
 
 # Files a form leaves out of its packages, from form.yaml's prune along
 # the chain: a path an item, as it is in the image (usr/bin/bash). For what a package declares it needs and nothing on the
@@ -328,11 +301,9 @@ NATIVE_MODULES = $(filter-out $(BITTEN_MODULES),$(MODULES))
 # (/usr/share/werewolf/prune) and the updater removes them from every slot
 # it builds, so a slot built on the machine holds what the build's did.
 # The packages stay installed as far as apk's database and the release's
-# manifest know. A path must be relative and clean.
+# manifest know. A path must be relative and clean, which compose checks
+# before the root is made.
 PRUNE := $(call form_list,prune)
-ifneq ($(filter /% ./% ../% %/ %/.. %/.,$(PRUNE)),)
-$(error form $(FORM) prunes $(filter /% ./% ../% %/ %/.. %/.,$(PRUNE)): a path is relative and clean, usr/bin/bash)
-endif
 
 # The network policy, from form.yaml's net along the chain: `listen tcp/PORT`
 # for what a form serves, a trailing `loopback` for a port its own processes
@@ -424,8 +395,11 @@ FORM_APKO = $(BUILD)/form/$(FORM)$(if $(DEV),-dev).yaml
 $(FORM_LOCK): $(FORM_FILES) | $(FORM_APKO)
 	$(call apko_lock,$(FORM_APKO))
 
+# Replaced only when it says something new, so a change to the tool that
+# changes nothing apko is asked for rebuilds no form's root.
 $(FORM_APKO): $(FORM_FILES) $(FORM_TOOL)
-	mkdir -p $(dir $@) && $(FORM_TOOL) apko $(FORM_REF) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && mv $@.tmp $@
+	mkdir -p $(dir $@) && $(FORM_TOOL) apko $(FORM_REF) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && \
+		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; }
 
 $(LOCK)/kernel.lock.json: boot/kernel.yaml
 	$(call apko_lock,$<)
@@ -512,7 +486,7 @@ $(OUT)/rootfs.tar: $(FORM_LOCK) $(FORM_APKO)
 	$(call apko_build,$(FORM_APKO),$<)
 
 # werewolf's own files: each form's rootfs along the chain, then meta.
-$(OUT)/overlay.tar: $(OUT)/meta.stamp $(OUT)/ro.stamp $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS)
+$(OUT)/overlay.tar: $(OUT)/meta.stamp $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS)
 	$(call layer,$(OVERLAY_DIRS) $(OUT)/meta)
 
 # Booted directly, the machine boots as a slot does, through stage0, onto
@@ -533,45 +507,6 @@ $(OUT)/initramfs.zst: $(OUT)/slot/stage0.zst $(OUT)/slot/root.erofs
 	rm -rf $(OUT)/direct $(OUT)/direct.cpio.zst
 	@echo "form $(FORM): $(CHAIN)"
 	@ls -la $(BUILD)/vmlinuz $@
-
-# What a read-only root needs that a form cannot spell out by hand: each
-# service's supervise directory, along the chain, as a link into
-# /run/runit, and apko's accounts, from which init seeds /run/werewolf
-# (the image's /etc/passwd, group and shadow link there). Alpine's old
-# accounts sync, shutdown, halt and operator have root's group, which
-# reads /etc/shadow: they get nogroup, so only root has gid 0 (posture's
-# files-accounts). And the form's allowances, an empty file each in
-# etc/werewolf/allow; its sshd: keywords, as etc/ssh/sshd_config.d/form.conf,
-# which sshd reads before the policy; and, where the chain has the bastion,
-# its users, as etc/ssh/bastion/authorized_keys and permit-open (lib/sshd.zig),
-# and its service file, connecting where its net says (lib/form.zig).
-# A layer of the overlay, so the updater carries it forward too.
-# The etc/sv directories are prerequisites too: a service removed or renamed
-# changes nothing else Make can see, and its supervise link would stay.
-$(OUT)/ro.stamp: $(OUT)/rootfs.tar $(shell find $(ROOTFS_DIRS) \( -type d \( -path '*/etc/sv' -o -path '*/etc/sv/*' \) \) -o -path '*/etc/sv/sshd/service') $(FORM_FILES) Makefile
-	rm -rf $(OUT)/ro && mkdir -p $(OUT)/ro/usr/share/werewolf/etc $(OUT)/ro/etc/werewolf/allow && \
-	for a in $(ALLOW); do touch $(OUT)/ro/etc/werewolf/allow/$$a || exit 1; done && \
-	s=$$($(FORM_TOOL) sshd $(FORM_REF)) && { [ -z "$$s" ] || { mkdir -p $(OUT)/ro/etc/ssh/sshd_config.d && \
-		printf '%s\n' "$$s" > $(OUT)/ro/etc/ssh/sshd_config.d/form.conf; }; } && \
-	$(if $(filter bastion,$(CHAIN)),mkdir -p $(OUT)/ro/etc/ssh/bastion && \
-		$(FORM_TOOL) bastion-keys $(FORM_REF) > $(OUT)/ro/etc/ssh/bastion/authorized_keys && \
-		$(FORM_TOOL) bastion-permit $(FORM_REF) > $(OUT)/ro/etc/ssh/bastion/permit-open && \
-		mkdir -p $(OUT)/ro/etc/sv/sshd && \
-		$(FORM_TOOL) bastion-service $(FORM_REF) > $(OUT)/ro/etc/sv/sshd/service &&) \
-	for f in passwd group shadow; do \
-		$(TAR) -xOf $(OUT)/rootfs.tar etc/$$f > $(OUT)/ro/usr/share/werewolf/etc/$$f || exit 1; \
-	done && \
-	awk -F: -v OFS=: '$$3 != 0 && $$4 == 0 { $$4 = 65533 } { print }' $(OUT)/ro/usr/share/werewolf/etc/passwd \
-		> $(OUT)/ro/usr/share/werewolf/etc/passwd.tmp && \
-	mv $(OUT)/ro/usr/share/werewolf/etc/passwd.tmp $(OUT)/ro/usr/share/werewolf/etc/passwd && \
-	for f in passwd group; do \
-		awk -F: -v f=$$f 'n[$$1]++ || i[$$3]++ { printf "%s: %s or its id %s is there twice: a bundle'"'"'s forms disagree\n", f, $$1, $$3 > "/dev/stderr"; bad = 1 } END { exit bad }' \
-			$(OUT)/ro/usr/share/werewolf/etc/$$f || exit 1; \
-	done && \
-	for s in $$(for c in $(ROOTFS_DIRS); do [ -d $$c/etc/sv ] && ls $$c/etc/sv; done | LC_ALL=C sort -u); do \
-		mkdir -p $(OUT)/ro/etc/sv/$$s && ln -s /run/runit/supervise.$$s $(OUT)/ro/etc/sv/$$s/supervise || exit 1; \
-	done
-	touch $@
 
 # --- zig ----------------------------------------------------------------------
 define zig_check
@@ -639,7 +574,7 @@ $(call program_bin,popen-shim.so): cmd/popen-shim/popen-shim.zig
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig \
 	lib/update-policy.zig lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig \
-	lib/form.zig lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig tools/form.zig boot/gpt.zig \
+	lib/form.zig lib/compose.zig lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig tools/form.zig boot/gpt.zig \
 	tools/cve-tiers.zig tools/kernel-config-check.zig tools/test-sk.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES))
 	@echo "test: $(words $(TEST_SOURCES)) suites passed"
@@ -659,6 +594,8 @@ _test/lib/service.zig:
 		-Msettings=lib/settings.zig
 _test/tools/form.zig:
 	zig test $(FORM_TOOL_MODULES)
+_test/lib/compose.zig:
+	zig test $(COMPOSE_MODULES)
 _test/tools/cve-tiers.zig:
 	zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/cmd/popen-shim/popen-shim.zig:
@@ -687,22 +624,23 @@ endif
 # update in forms/prod rebuilds a slot as `make slot` does, from these.
 # In every image, in /usr/share/werewolf. Nothing here says when or where it
 # was built, so a rebuild matches.
-$(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(shell find $(ROOTFS_DIRS) -type f) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories test/posture-known Makefile
-	rm -rf $(OUT)/meta
-	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $$d $(OUT)/meta/etc/apk && \
+#
+# compose (lib/compose.zig) derives what the chain says, from the image's
+# accounts: ro, a layer of the overlay, which the updater carries forward;
+# and meta's records. The rest of meta is copied in after it, each a file
+# a package will carry once werewolf's are packages
+# (docs/design/custom-updates.md). The etc/sv directories are
+# prerequisites too: a service removed or renamed changes nothing else Make
+# can see, and its supervise link would stay.
+$(OUT)/meta.stamp: $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar $(STAGE0_BIN) $(FORM_FILES) $(FORM_TOOL) $(shell find $(ROOTFS_DIRS) -type f) $(shell find $(ROOTFS_DIRS) -type d \( -path '*/etc/sv' -o -path '*/etc/sv/*' \)) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) release/image.pub release/tiers.pub release/advisories test/posture-known Makefile
+	rm -rf $(OUT)/meta $(OUT)/ro $(OUT)/accounts
+	mkdir -p $(OUT)/accounts/etc && for f in passwd group shadow; do \
+		$(TAR) -xOf $(OUT)/rootfs.tar etc/$$f > $(OUT)/accounts/etc/$$f || exit 1; \
+	done
+	$(FORM_TOOL) compose $(FORM_REF) $(ARCH) $(OUT)/accounts $(OUT)/ro $(OUT)/meta $(if $(DEV),dev)
+	rm -rf $(OUT)/accounts
+	d=$(OUT)/meta/usr/share/werewolf && mkdir -p $(OUT)/meta/etc/apk && \
 	kernel=$$(sed -n 's|.*"url": "[^"]*/$(ARCH)/\(linux-virt-[^/]*\)\.apk".*|\1|p' $(LOCK)/kernel.lock.json) && \
-	echo $(FORM) > $$d/form && \
-	for m in $(NATIVE_MODULES); do echo $$m; done > $$d/modules && \
-	for m in $(BITTEN_MODULES); do echo $$m; done > $$d/modules-bitten && \
-	{ for p in $(PRUNE); do echo $$p; done; } > $$d/prune && \
-	{ $(FORM_TOOL) excuses $(FORM_REF) && for id in $(POSTURE_KNOWN_KIND); do \
-		echo "$$id $(if $(DEV),a DEV=1 build: busybox-full and the debug shell,every form on $(ARCH) (test/posture-known))"; \
-	done; } > $$d/weaknesses && \
-	$(FORM_TOOL) pledge $(FORM_REF) > $$d/pledge && \
-	$(FORM_TOOL) oci $(FORM_REF) > $$d/oci && { [ -s $$d/oci ] || rm $$d/oci; } && \
-	$(if $(DEV),echo dev > $$d/dev &&) \
-	for p in $(MODULE_PARAMS); do echo "$${p%%:*} $${p#*:}"; done > $$d/module-params && \
-	echo $(KERNEL_ARGS) > $$d/cmdline && \
 	echo $$kernel > $$d/kernel && \
 	$(TAR) -xOf $(BUILD)/kernel/rootfs.tar etc/apk/repositories > $$d/alpine && \
 	for c in $(OVERLAY_DIRS); do (cd $$c && find . \( -type f -o -type l \) ! -name .DS_Store | sed 's|^\./||'); done | LC_ALL=C sort -u > $$d/overlay && \
@@ -711,29 +649,8 @@ $(OUT)/meta.stamp: $(OUT)/ro.stamp $(OUT)/rootfs.tar $(BUILD)/kernel/rootfs.tar 
 	echo "$(FORM) $$kernel built-by-make" > $$d/release && \
 	cp release/image.pub $$d/image.pub && \
 	cp release/tiers.pub $$d/tiers.pub && echo $(TIERS_URL) > $$d/tiers && \
-	cp release/advisories $$d/advisories && \
 	$(if $(and $(filter $(FORM),$(RELEASE_FORMS)),$(if $(DEV),,y)),echo $(RELEASES_URL) > $$d/releases &&) \
-	$(TAR) -xOf $(OUT)/rootfs.tar etc/passwd > $(OUT)/passwd && \
-	$(FORM_TOOL) list $(FORM_REF) net > $(OUT)/net.lines && \
-	awk -v pw=$(OUT)/passwd ' \
-		FILENAME == pw { split($$0, a, ":"); uid[a[1]] = a[3]; next } \
-		{ c = index($$0, sprintf("%c", 35)); if (c) $$0 = substr($$0, 1, c - 1) } \
-		NF == 0 { next } \
-		$$1 == "listen" && NF > 1 { last = NF; lo = ""; if ($$NF == "loopback") { last = NF - 1; lo = " loopback" }; if (last < 2) bad(); \
-			for (i = 2; i <= last; i++) { \
-			if ($$i !~ /^tcp\/[0-9]+$$/ || substr($$i, 5) + 0 < 1 || substr($$i, 5) + 0 > 65535) bad(); \
-			print "listen tcp " substr($$i, 5) + 0 lo } next } \
-		$$1 == "metadata" && NF > 1 { for (i = 2; i <= NF; i++) { if (!($$i in uid)) bad(); print "metadata " uid[$$i] } next } \
-		$$1 == "connect" && NF > 2 { who = $$2 == "all" ? "all" : ($$2 in uid ? uid[$$2] : bad()); \
-			last = NF; pub = ""; if ($$NF == "public") { last = NF - 1; pub = " public" }; if (last < 3) bad(); \
-			for (i = 3; i <= last; i++) { \
-				if ($$i == "icmp") { if (pub != "") bad(); print "connect " who " icmp"; continue } \
-				if ($$i !~ /^(tcp|udp)\/[0-9]+$$/ || substr($$i, 5) + 0 < 1 || substr($$i, 5) + 0 > 65535) bad(); \
-				print "connect " who " " substr($$i, 1, 3) " " substr($$i, 5) + 0 pub } next } \
-		{ bad() } \
-		function bad() { printf "form $(FORM): form.yaml'"'"'s net cannot compile: %s\n", $$0 > "/dev/stderr"; exit 1 }' \
-		$(OUT)/passwd $(OUT)/net.lines > $(OUT)/net && \
-	LC_ALL=C sort -u $(OUT)/net > $$d/net && rm $(OUT)/net $(OUT)/net.lines $(OUT)/passwd
+	cp release/advisories $$d/advisories
 	touch $@
 
 # --- disk ---------------------------------------------------------------------
@@ -1860,7 +1777,7 @@ fix:
 # held to the Style Guide's 100 and nothing the standard library deprecates;
 # and ziglint, with the Style Guide's naming rules (.ziglint.zon says which
 # and why). `make fix` runs tools/zigfix, which makes most of that so.
-ZIG_SOURCES = $(shell find . -name '*.zig' -not -path './build/*' -not -path './out/*' -not -path './.zig-cache/*')
+ZIG_SOURCES = $(shell find . -name '*.zig' -not -path './build/*' -not -path './out/*' -not -path './.zig-cache/*' -not -path './.claude/*')
 
 ZIGFIX := $(LINT_ROOT)/out/tools/zigfix
 $(ZIGFIX): tools/zigfix.zig
