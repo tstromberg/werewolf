@@ -1,14 +1,8 @@
-//! build-apk: a form's own package, from a melange recipe in Wolfi's
-//! style (melange.mk), built as the form's build builds it, for the
-//! recipe's author to try before a form keeps it in forms/NAME/melange/.
+//! build-apk builds a package from a melange recipe the way a form build
+//! would, so an author can try it before adding it to forms/NAME/melange/.
+//! See README.md.
 //!
 //!     howl build-apk RECIPE [--arch ARCH]
-//!
-//! make's _build-apk does the work, as build's _dist-form does: melange in
-//! bubblewrap on Linux, or on macOS in QEMU from werewolf's own Alpine
-//! kernel. It prints each package it made and the libraries each links,
-//! which a form must name among its packages. RECIPE is a path, of
-//! letters, digits and . _ - /, since make takes it as a word.
 
 const std = @import("std");
 const howl = @import("howl.zig");
@@ -18,6 +12,7 @@ const Allocator = std.mem.Allocator;
 
 const syntax = "howl build-apk RECIPE [--arch ARCH]";
 
+/// build runs make's _build-apk for RECIPE. It must run in a werewolf checkout.
 pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
     var recipe: ?[]const u8 = null;
     var arch = howl.hostArch();
@@ -52,8 +47,8 @@ pub fn build(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
     });
 }
 
-/// A path make can take as one word, and melange as a file: relative or
-/// absolute, of [A-Za-z0-9._/-], ending .yaml, no empty part.
+/// isRecipePath reports whether p is a .yaml path of [A-Za-z0-9._/-] with no
+/// empty part. make takes RECIPE as one word, so nothing else is safe.
 fn isRecipePath(p: []const u8) bool {
     if (!std.mem.endsWith(u8, p, ".yaml") or p.len > 255) return false;
     for (p) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._/-", c) == null)

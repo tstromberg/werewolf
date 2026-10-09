@@ -8,7 +8,7 @@ root cannot read another process's memory. Vault is not planned: Wolfi's
 | --- | --- |
 | Listens | tcp/8200, TLS, every address: the API and the UI. raft's cluster port, 8201, on loopback alone |
 | Sends | nothing: the seal is a key on the machine. A cloud KMS is a form of your own, with `connect openbao tcp/443` and `metadata openbao` |
-| Runs as | `openbao` (uid 208), leashed |
+| Runs as | `openbao` (a uid of its own, its name's hash), leashed |
 | Keeps | integrated storage (raft) in `/data/svc/openbao` |
 | Config | `openbao/unseal-key` (32 random bytes), `openbao/tls.crt` and `tls.key`, `openbao/admin-password` (the admin's first); settings `api-addr` (required) and `unseal-key-id` |
 
@@ -41,13 +41,16 @@ would:
    authenticated rotation endpoints replace them.
 
 The `stdout` audit device, every request a line on the console, is an
-`audit` stanza in the same file: declared in the image, it cannot be
-disabled over the API.
+`audit` stanza in the same file, not an `initialize` request, which
+`sys/audit` refuses during self-initialization. Declared in the image, it
+cannot be disabled over the API.
 
 The cost is that whoever holds the config tar can unseal the data, the
 same trust the tar already carries for `data.key`. Rotating the key is
 `previous_key` beside `current_key` in a form of your own; the id in
-`unseal-key-id` names which key encrypted storage.
+`unseal-key-id` names which key encrypted storage. A form that wants a
+person at every unseal uses Shamir, without `initialize`, and unseals
+after each boot.
 
 ## Defaults
 
@@ -59,6 +62,8 @@ same trust the tar already carries for `data.key`. Rotating the key is
   file. No `plugin_directory`, and no `exec` promise: nothing here starts
   a program.
 - Lease lifetimes as OpenBao ships them.
+- No `disable_mlock`: OpenBao 2.5 has no such field and locks no memory;
+  werewolf has no swap.
 - Clustering adds `listen tcp/8201` and peers in the configuration, a
   form of your own.
 

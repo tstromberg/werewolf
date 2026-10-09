@@ -1,16 +1,7 @@
-//! Settings: the values a service takes from one machine's config tar,
-//! declared in its service file and rendered into what its daemon reads
-//! (docs/design/settings.md).
-//!
-//!     setting NAME TYPE[...] [required] [as KEY]
-//!     render  FORMAT FILE [from PATH]
-//!
-//! The declarations come from the verified image; the values from
-//! settings.json in the tar. A value can fill a declared key with a value
-//! of the declared type, and do nothing else: it cannot name a key, and no
-//! type's alphabet holds the delimiters of a format it may be rendered in,
-//! so nothing is ever quoted. leash parses the declarations, service-config
-//! renders them, and the host's howl checks with the same functions.
+//! settings checks the typed values a service takes from the config tar's
+//! settings.json against its declarations, and renders them for its daemon.
+//! It also holds the config tar's naming rules. See lib/README.md and
+//! docs/design/settings.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -24,39 +15,39 @@ pub const max_input = 32 << 10;
 const max_string = 1 << 10;
 const max_url = 2 << 10;
 
-/// What a setting holds. Named as Go's net/netip names them, where it has
-/// a name.
+/// Type is what a setting holds. Names follow Go's net/netip where it has one.
 pub const Type = enum {
-    /// A literal IPv4 or IPv6 address, without a zone.
+    /// ip is a literal IPv4 or IPv6 address, without a zone.
     ip,
-    /// A network: no host bits, and not /0.
+    /// cidr is a network with no host bits set; /0 is refused.
     cidr,
-    /// A literal address and port: 10.0.0.1:22, [fd00::1]:22.
+    /// addrport is a literal address and port: 10.0.0.1:22, [fd00::1]:22.
     addrport,
-    /// A hostname or literal address, and a port.
+    /// hostport is a hostname or literal address, and a port.
     hostport,
-    /// RFC 1123, at most 253 bytes, without a trailing dot.
+    /// hostname follows RFC 1123: at most 253 bytes, no trailing dot.
     hostname,
-    /// 1 to 65535, a JSON number.
+    /// port is a JSON number from 1 to 65535.
     port,
-    /// http or https, without a user or password.
+    /// url is http or https, without a user or password.
     url,
-    /// A signed 64-bit JSON number.
+    /// int is a signed 64-bit JSON number.
     int,
-    /// JSON true or false.
+    /// bool is JSON true or false.
     bool,
-    /// Printable UTF-8 without control characters, at most 1 KiB.
+    /// string is UTF-8 without control characters, at most 1 KiB.
     string,
 };
 
 pub const Format = enum {
-    /// KEY=VALUE lines, a list joined by commas: leash adds them to the
-    /// service's environment.
+    /// env writes KEY=VALUE lines, joining a list with commas. leash adds
+    /// them to the service's environment.
     env,
-    /// One JSON object; with `from`, the image's object, its declared keys
-    /// replaced. A key with dots, a.b.c, is a path into nested objects.
+    /// json writes one object: with `from`, the image's object with the
+    /// declared keys replaced. A dotted key, a.b.c, is a path into nested objects.
     json,
-    /// KEY VALUE... lines, a list joined by spaces, a bool yes or no.
+    /// conf writes KEY VALUE... lines, joining a list with spaces; a bool is
+    /// yes or no.
     conf,
 };
 
@@ -65,7 +56,7 @@ pub const Setting = struct {
     type: Type,
     list: bool = false,
     required: bool = false,
-    /// From `as`; else filled in by `declare`, from the name.
+    /// key comes from `as`, or declare derives it from the name.
     key: ?[]const u8 = null,
 };
 
@@ -75,11 +66,11 @@ pub const Render = struct {
     from: ?[]const u8 = null,
 };
 
-/// The name the copy of settings.json takes in the service's directory.
+/// input_file is the name of settings.json's copy in the service's directory.
 pub const input_file = "settings";
 
-/// `setting NAME TYPE[...] [required] [as KEY]`, without its key word.
-/// On error, why says what is wrong.
+/// parseSetting parses the arguments of `setting NAME TYPE[...] [required]
+/// [as KEY]`. On error, why says what is wrong.
 pub fn parseSetting(args: []const []const u8, why: *[]const u8) error{Invalid}!Setting {
     if (args.len < 2) return fail(why, "setting takes NAME and TYPE");
     if (!isName(args[0])) return fail(why, "a setting's name is [a-z][a-z0-9-]*, at most 32");
@@ -102,7 +93,7 @@ pub fn parseSetting(args: []const []const u8, why: *[]const u8) error{Invalid}!S
     return s;
 }
 
-/// `render FORMAT FILE [from PATH]`, without its key word.
+/// parseRender parses the arguments of `render FORMAT FILE [from PATH]`.
 pub fn parseRender(args: []const []const u8, why: *[]const u8) error{Invalid}!Render {
     if (args.len != 2 and args.len != 4) return fail(why, "render takes FORMAT FILE [from PATH]");
     const format = std.meta.stringToEnum(Format, args[0]) orelse
@@ -120,9 +111,9 @@ pub fn parseRender(args: []const []const u8, why: *[]const u8) error{Invalid}!Re
     return r;
 }
 
-/// Check a service's declarations together and fill in each key: no name
-/// or key twice, at most max_settings, and no type in a format that cannot
-/// hold it.
+/// declare checks a service's declarations together and fills in each key.
+/// It refuses a repeated name or key, more than max_settings, and a type
+/// whose characters could break the format, so no value is ever quoted.
 pub fn declare(
     gpa: Allocator,
     settings: []Setting,
@@ -165,16 +156,17 @@ pub fn declare(
     };
 }
 
-/// Where a value was refused, and why. Never the value: settings are not
-/// secret, but one put there by mistake should not reach a console.
+/// Diagnostic says which value was refused, and why. It never holds the
+/// value: settings are not secret, but a secret put there by mistake must
+/// not reach a console.
 pub const Diagnostic = struct {
     setting: []const u8 = "",
     index: ?usize = null,
     why: []const u8 = "",
 };
 
-/// settings.json, checked against the declarations: one value per setting,
-/// null where it is absent. An empty list is absent.
+/// parseValues checks settings.json against the declarations and returns
+/// one value per setting, null where absent. An empty list counts as absent.
 pub fn parseValues(
     gpa: Allocator,
     settings: []const Setting,
@@ -195,8 +187,8 @@ pub fn parseValues(
         const i = for (settings, 0..) |s, i| {
             if (std.mem.eql(u8, s.name, e.key_ptr.*)) break i;
         } else
-            // Named only if it could be a setting's name: nothing from
-            // outside the image reaches a log unchecked, nor at any length.
+            // Echo the key only if it could be a setting's name, so nothing
+            // unchecked or unbounded from outside the image reaches a log.
             return if (isName(e.key_ptr.*))
                 refuse(diag, e.key_ptr.*, null, "not a setting of this service")
             else
@@ -224,8 +216,8 @@ pub fn parseValues(
     return values;
 }
 
-/// What the daemon reads, from checked values. base is the `from` file's
-/// contents, for json.
+/// render returns the file the daemon reads, from checked values. base is
+/// the `from` file's contents, for json.
 pub fn render(
     gpa: Allocator,
     settings: []const Setting,
@@ -259,9 +251,9 @@ pub fn render(
             }
             for (settings, values) |s, value| {
                 const v = value orelse continue;
-                // A key with dots is a path into the object, a.b.c: each
-                // part but the last an object, made where the base has
-                // none, so a setting can fill a key the daemon nests.
+                // A dotted key, a.b.c, is a path into the object. Missing
+                // objects along it are made, so a setting can fill a key
+                // the daemon nests.
                 var target = &obj;
                 var parts = std.mem.splitScalar(u8, s.key.?, '.');
                 var last = parts.first();
@@ -282,8 +274,8 @@ pub fn render(
     return out.items;
 }
 
-/// An env file service-config rendered, read back by leash: only declared
-/// keys, once each, values without control characters.
+/// parseEnv reads back, for leash, an env file service-config rendered. It
+/// accepts only declared keys, once each, with no control characters.
 pub fn parseEnv(
     gpa: Allocator,
     settings: []const Setting,
@@ -306,8 +298,8 @@ pub fn parseEnv(
     return vars.items;
 }
 
-/// A value given as text, as the host's flags give it, made the JSON value
-/// settings.json carries. Null, with why set, if it is not of the type.
+/// fromText converts text from a host flag to the JSON value settings.json
+/// carries. It returns null, with why set, if text is not of type t.
 pub fn fromText(t: Type, text: []const u8, why: *[]const u8) ?json.Value {
     const v: json.Value = switch (t) {
         .port, .int => .{ .integer = std.fmt.parseInt(i64, text, 10) catch {
@@ -331,7 +323,7 @@ pub fn fromText(t: Type, text: []const u8, why: *[]const u8) ?json.Value {
     return v;
 }
 
-/// Why v is not a value of type t, or null if it is.
+/// reason says why v is not a value of type t, or returns null if it is.
 pub fn reason(t: Type, v: json.Value) ?[]const u8 {
     switch (t) {
         .int => return if (v == .integer) null else "not a whole number",
@@ -379,7 +371,7 @@ fn cidr(s: []const u8) ?[]const u8 {
         break :b buf[0..4];
     };
     if (bits > bytes.len * 8) return "not a network";
-    // A setting that means everything is not a setting.
+    // A network that means everything is not a useful setting.
     if (bits == 0) return "a default route";
     for (bytes, 0..) |byte, i| {
         const used = @min(@as(usize, bits) -| (i * 8), 8);
@@ -389,7 +381,7 @@ fn cidr(s: []const u8) ?[]const u8 {
     return null;
 }
 
-/// A host and port, split: [v6]:port, or host:port.
+/// splitPort splits [v6]:port or host:port, with a port of 1 to 65535.
 fn splitPort(s: []const u8) ?struct { host: []const u8, bracketed: bool } {
     const colon = std.mem.findScalarLast(u8, s, ':') orelse return null;
     const p = s[colon + 1 ..];
@@ -480,15 +472,15 @@ fn refuse(diag: *Diagnostic, setting: []const u8, index: ?usize, why: []const u8
     return error.Invalid;
 }
 
-/// database-url as DATABASE_URL.
+/// envName turns a setting name such as database-url into DATABASE_URL.
 fn envName(gpa: Allocator, name: []const u8) ![]const u8 {
     const key = try gpa.alloc(u8, name.len);
     for (name, key) |c, *k| k.* = if (c == '-') '_' else std.ascii.toUpper(c);
     return key;
 }
 
-/// [a-z][a-z0-9-]*, at most 32: a key in settings.json, a service's config
-/// file's name, and so a flag of howl pack's.
+/// isName reports whether s is [a-z][a-z0-9-]*, at most 32 bytes. It names
+/// settings.json keys and config files, and so howl pack's flags.
 pub fn isName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32 or !std.ascii.isLower(s[0])) return false;
     for (s) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') return false;
@@ -501,7 +493,8 @@ fn isVariable(s: []const u8) bool {
     return true;
 }
 
-/// A conf directive or a JSON key: [A-Za-z0-9_.:-]+, at most 64.
+/// isKey reports whether s is a conf directive or JSON key:
+/// [A-Za-z0-9_.:-]+, at most 64 bytes.
 fn isKey(s: []const u8) bool {
     if (s.len == 0 or s.len > 64) return false;
     for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "_.:-", c) == null)
@@ -509,7 +502,8 @@ fn isKey(s: []const u8) bool {
     return true;
 }
 
-/// A file name: [A-Za-z0-9._-], at most 64, not . or ..
+/// isFile reports whether s is a file name: [A-Za-z0-9._-]+, at most 64
+/// bytes, not . or ..
 fn isFile(s: []const u8) bool {
     if (s.len == 0 or s.len > 64 or std.mem.eql(u8, s, ".") or std.mem.eql(u8, s, ".."))
         return false;
@@ -518,8 +512,8 @@ fn isFile(s: []const u8) bool {
     return true;
 }
 
-/// Absolute, with no empty, . or .. part, no trailing slash, and no space
-/// or control character.
+/// isCleanPath reports whether p is absolute, with no empty, . or .. part,
+/// no trailing slash, and no space or control character.
 fn isCleanPath(p: []const u8) bool {
     if (p.len < 2 or p[0] != '/') return false;
     for (p) |c| if (c <= ' ' or c == 0x7f) return false;
@@ -532,25 +526,25 @@ fn isCleanPath(p: []const u8) bool {
 }
 
 // --- the config tar's own rules -------------------------------------------------
-// What init, cloud-metadata and howl pack all hold a config tar to, so a
-// tar the host packs is one the machine takes.
+// init, cloud-metadata and howl pack share these, so a tar the host packs
+// is one the machine accepts.
 
-/// The most a machine's hostname may be: the kernel's (__NEW_UTS_LEN).
+/// max_hostname is the kernel's limit on a hostname (__NEW_UTS_LEN).
 pub const max_hostname = 64;
 
-/// The least a data.key may be: LUKS2 is made with a quick key derivation,
-/// as a random key needs no slow one, so the key itself must be strong.
+/// min_data_key is the shortest data.key accepted. LUKS2 uses a fast key
+/// derivation, since a random key needs no slow one, so the key must be strong.
 pub const min_data_key = 32;
 
-/// Whether s may be a machine's hostname: a hostname setting's rules, and
-/// no longer than the kernel takes.
+/// isHostname reports whether s may be the machine's hostname: a valid
+/// hostname setting no longer than the kernel allows.
 pub fn isHostname(s: []const u8) bool {
     return s.len <= max_hostname and hostname(s);
 }
 
-/// A config tar entry's name, made relative and plain: no leading /, no
-/// . or .. or empty parts, and only letters, digits and . _ - /; "" for
-/// the archive's root, ./ itself. Null if it cannot be.
+/// entryName returns a config tar entry's name with any leading ./ and
+/// trailing / removed, or "" for the root. It returns null for an absolute
+/// name, a ., .. or empty part, or a byte other than letters, digits and ._-/.
 pub fn entryName(raw: []const u8) ?[]const u8 {
     var n = raw;
     while (std.mem.startsWith(u8, n, "./")) n = n[2..];
@@ -649,7 +643,7 @@ test isHostname {
     try testing.expect(isHostname("db.example.com"));
     for ([_][]const u8{ "", "a b", "-x", "x-", "a..b", "a_b", "x." }) |h|
         try testing.expect(!isHostname(h));
-    // 64 bytes is the kernel's most; a label, 63.
+    // The kernel allows 64 bytes; a label allows 63.
     const a31: [31]u8 = @splat('a');
     const a32: [32]u8 = @splat('a');
     const b32: [32]u8 = @splat('b');
@@ -774,7 +768,7 @@ test "the bastion renders as it did" {
         "PermitOpen 10.20.0.10:22 [fd00::1]:443\n",
         try render(gpa, &s, r, v, null),
     );
-    // Empty or absent: no line, and sshd_config's own PermitOpen none holds.
+    // Empty or absent writes no line, so sshd_config's PermitOpen none holds.
     try testing.expectEqualStrings(
         "",
         try render(gpa, &s, r, try parseValues(gpa, &s, "{\"destinations\":[]}", &diag), null),
@@ -790,7 +784,7 @@ test "the bastion renders as it did" {
     );
     try testing.expectEqualStrings("permit-tty", diag.setting);
     try testing.expectEqualStrings("not a setting of this service", diag.why);
-    // A key that could not be a setting's name is not echoed, whatever it holds.
+    // A key that could not be a setting's name is never echoed.
     try testing.expectError(
         error.Invalid,
         parseValues(gpa, &s, "{\"destinations\":[],\"PermitTTY\":true}", &diag),
@@ -967,7 +961,7 @@ test "a dotted json key fills a nested object" {
         error.Invalid,
         render(gpa, &s, r, &.{ .{ .array = .init(gpa) }, null }, "{\"authority\":1}"),
     );
-    // Without a base, the path is made whole.
+    // Without a base, every object on the path is made.
     const alone = try render(
         gpa,
         &s,

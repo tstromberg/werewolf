@@ -1,18 +1,6 @@
-//! A form (forms/README.md): a directory, forms/NAME, holding apko.yaml,
-//! the packages, accounts and paths apko installs, and form.yaml, what
-//! werewolf adds that apko cannot say: the form it is built on (`base`),
-//! the forms it takes beside it (`with`), its network policy, the posture
-//! checks it fails and why, and the rest. This reads both, resolves a
-//! form's chain, and merges the chain's apko configs into the one apko
-//! builds from, by the rules apko's own `include:` merged by. apko
-//! deprecated `include:`, leaving composition to its caller, and its
-//! include took one file, where a form may take several.
-//!
-//! Both files are YAML, in the small part of it they are written in:
-//! block maps and lists, indented with spaces; scalars plain or quoted;
-//! a list of scalars inline, `[a, b]`; `#` comments. Anchors, tags,
-//! multi-line scalars and inline maps are refused, with the line, rather
-//! than read some other way than apko would.
+//! form reads a form's apko.yaml and form.yaml, resolves its chain of
+//! forms, and merges their apko configs into one. It parses only a small,
+//! strict subset of YAML. See lib/README.md and forms/README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -27,7 +15,7 @@ pub const Node = union(enum) {
     list: []const Node,
     map: []const Entry,
 
-    /// The value under key, when node is a map that has one.
+    /// get returns the value under key, or null if node is not a map with it.
     pub fn get(node: Node, key: []const u8) ?Node {
         if (node != .map) return null;
         for (node.map) |e| if (mem.eql(u8, e.key, key)) return e.value;
@@ -36,23 +24,23 @@ pub const Node = union(enum) {
 };
 
 pub const Scalar = struct {
-    /// As written, quotes and all: what a merged config repeats, so apko
-    /// reads every value as the form's author wrote it.
+    /// raw is the scalar as written, quotes and all. A merged config repeats
+    /// it, so apko reads each value as the author wrote it.
     raw: []const u8,
-    /// What it says, unquoted.
+    /// text is the value, unquoted.
     text: []const u8,
 };
 
 pub const Entry = struct { key: []const u8, value: Node };
 
-/// Where a parse failed, and why.
+/// Diagnostic is the line where a parse failed, and why.
 pub const Diagnostic = struct { line: usize = 0, why: []const u8 = "" };
 
 pub const SyntaxError = error{ Syntax, OutOfMemory };
 
 const Line = struct { n: usize, indent: usize, text: []const u8 };
 
-/// text's YAML, a map; an empty file is an empty map.
+/// parse parses text as a YAML map. An empty file is an empty map.
 pub fn parse(gpa: Allocator, text: []const u8, diag: *Diagnostic) SyntaxError!Node {
     var lines: std.ArrayList(Line) = .empty;
     var it = mem.splitScalar(u8, text, '\n');
@@ -81,8 +69,8 @@ fn failAt(diag: *Diagnostic, n: usize, why: []const u8) error{Syntax} {
     return error.Syntax;
 }
 
-/// line without its comment: from a # that starts it or follows a space,
-/// outside quotes. A quote opens only where a value can start.
+/// uncomment strips a comment: a # outside quotes that starts the line or
+/// follows a space. A quote opens only where a value can start.
 fn uncomment(line: []const u8) []const u8 {
     var quote: u8 = 0;
     var i: usize = 0;
@@ -112,9 +100,9 @@ fn isItem(text: []const u8) bool {
     return text[0] == '-' and (text.len == 1 or text[1] == ' ');
 }
 
-/// `key: rest` or `key:`: the key, and the rest, trimmed. A key is a
-/// word of letters, digits, -, _ and ., and may start with ? (a weakness
-/// a host may or may not show).
+/// splitKey splits `key: rest` or `key:` into the key and the trimmed rest.
+/// A key is letters, digits, -, _ and ., and may start with ? (a weakness a
+/// host may or may not show).
 fn splitKey(text: []const u8) ?struct { []const u8, []const u8 } {
     const colon = mem.findScalar(u8, text, ':') orelse return null;
     const key = text[0..colon];
@@ -154,8 +142,8 @@ const Parser = struct {
         return .{ .map = entries.items };
     }
 
-    /// The value of a key with nothing after its colon: the block under
-    /// it, or a list at its own indent, as YAML allows.
+    /// nested parses the value of a key with nothing after its colon: the
+    /// block under it, or a list at the key's own indent, as YAML allows.
     fn nested(p: *Parser, indent: usize, n: usize) SyntaxError!Node {
         if (p.i < p.lines.len) {
             const next = p.lines[p.i];
@@ -173,13 +161,13 @@ const Parser = struct {
             const l = p.lines[p.i];
             if (l.indent < indent) break;
             if (l.indent > indent) return p.fail(l.n, "indented more than the items around it");
-            // A key at the list's indent: the list was a key's value, and
-            // the keys around that key go on.
+            // A key at the list's indent ends the list; the enclosing map
+            // continues.
             if (!isItem(l.text)) break;
             const rest = mem.trimStart(u8, l.text[1..], " ");
             if (rest.len == 0) return p.fail(l.n, "an empty item");
             if (rest[0] != '"' and rest[0] != '\'' and splitKey(rest) != null) {
-                // A map: its first key on the item's line, the rest under it.
+                // A map item: its first key is on the item's line, the rest below.
                 const at = l.indent + (l.text.len - rest.len);
                 p.lines[p.i] = .{ .n = l.n, .indent = at, .text = rest };
                 try items.append(p.gpa, try p.map(at));
@@ -191,7 +179,7 @@ const Parser = struct {
         return .{ .list = items.items };
     }
 
-    /// A value on its key's or item's line: a scalar, `[a, b]` or `{}`.
+    /// flow parses a value on its key's or item's line: a scalar, `[a, b]` or `{}`.
     fn flow(p: *Parser, text: []const u8, n: usize) SyntaxError!Node {
         if (mem.eql(u8, text, "{}")) return .{ .map = &.{} };
         if (text[0] != '[') return .{ .scalar = try p.scalar(text, n) };
@@ -291,7 +279,7 @@ const Parser = struct {
     }
 };
 
-/// node, a map, as block YAML, each scalar as it was written.
+/// write writes node, a map, as block YAML, each scalar as it was written.
 pub fn write(w: *Io.Writer, node: Node) Io.Writer.Error!void {
     try writeEntries(w, node.map, 0, false);
 }
@@ -309,7 +297,7 @@ fn writeEntries(
     }
 }
 
-/// The rest of a line after `key:` or `-`, and the block under it.
+/// writeValue writes the rest of a line after `key:` or `-`, and the block under it.
 fn writeValue(w: *Io.Writer, node: Node, indent: usize) Io.Writer.Error!void {
     switch (node) {
         .scalar => |s| try w.print(" {s}\n", .{s.raw}),
@@ -333,13 +321,12 @@ fn writeValue(w: *Io.Writer, node: Node, indent: usize) Io.Writer.Error!void {
     }
 }
 
-/// Keys whose value a merged config takes whole from the last form that
-/// gives one, as apko's include did; every other list is joined, base
-/// first, every other map merged key by key, and every other scalar the
-/// last form's.
+/// whole lists the keys a merged config takes whole from the last form
+/// that sets them, as apko's include did. Other lists are joined base
+/// first, maps merge key by key, and scalars come from the last form.
 const whole = [_][]const u8{ "archs", "entrypoint", "layering", "certificates", "baseimage" };
 
-/// base with over laid on it, by apko's include's rules.
+/// merge lays over on base by the rules of apko's include.
 pub fn merge(gpa: Allocator, base: Node, over: Node) Allocator.Error!Node {
     if (base != .map or over != .map) return over;
     var out: std.ArrayList(Entry) = .empty;
@@ -362,7 +349,7 @@ pub fn merge(gpa: Allocator, base: Node, over: Node) Allocator.Error!Node {
     return .{ .map = out.items };
 }
 
-/// Why a form could not be read, for the one who wrote it.
+/// Failure says why a form could not be read, for its author.
 pub const Failure = struct {
     text: []const u8 = "",
 
@@ -376,14 +363,13 @@ pub const Error = error{ Form, OutOfMemory };
 
 pub const Form = struct {
     name: []const u8,
-    /// Its directory: forms/NAME, or wherever a form outside the tree is.
+    /// dir is forms/NAME, or the directory of a form outside the tree.
     dir: []const u8,
-    /// form.yaml, or an empty map when the form has none.
+    /// spec is form.yaml, or an empty map when the form has none.
     spec: Node,
 
-    /// The items of one of form.yaml's lists, unquoted; none when the
-    /// form does not give it, or gives it as something else than a list
-    /// of values.
+    /// items returns the unquoted items of form.yaml's list key. It returns
+    /// none if key is absent or not a list of values.
     pub fn items(form: Form, gpa: Allocator, key: []const u8) Allocator.Error![]const []const u8 {
         const list = form.spec.get(key) orelse return &.{};
         if (list != .list) return &.{};
@@ -392,25 +378,24 @@ pub const Form = struct {
         return out.items;
     }
 
-    /// One of form.yaml's check settings: this form's own, never one a
-    /// form it is built on gives.
+    /// check returns one of this form's check settings. Check settings are
+    /// never inherited from the forms it is built on.
     pub fn check(form: Form, key: []const u8) ?Node {
         const c = form.spec.get("check") orelse return null;
         return c.get(key);
     }
 
-    /// The posture checks this form fails, each with its excuse: this
-    /// form's own, since a form built on it may not fail them.
+    /// weaknesses returns the posture checks this form fails, each with its
+    /// excuse. They are not inherited: a form built on it may not fail them.
     pub fn weaknesses(form: Form) []const Entry {
         const w = form.spec.get("weaknesses") orelse return &.{};
         return w.map;
     }
 };
 
-/// form.yaml's keys: each a list of lines, but base, a name; app, a path;
-/// weaknesses, a map of posture checks to excuses; check, a map of
-/// settings; sshd, a map of sshd_config keywords; and bastion, the
-/// bastion's users (lib/sshd.zig).
+/// keys are form.yaml's keys. Each is a list of lines except base (a name),
+/// app (a path), weaknesses (checks to excuses), check (settings), sshd
+/// (sshd_config keywords) and bastion (its users; lib/sshd.zig).
 const keys = [_][]const u8{
     "base",
     "with",
@@ -426,11 +411,11 @@ const keys = [_][]const u8{
     "sshd",
     "bastion",
 };
-/// check's keys, and what each holds: memory (MiB) and web (a port) a
-/// number, offline and native true or false, skip a list of checks.
+/// check_keys are check's keys: memory (MiB) and web (a port) are numbers,
+/// offline and native are true or false, and skip is a list of checks.
 const check_keys = [_][]const u8{ "memory", "offline", "native", "web", "skip" };
 
-/// Why check's key holds no value of its kind, or null if it does.
+/// checkMisfit says what check's key should hold, or returns null if value fits.
 fn checkMisfit(key: []const u8, value: Node) ?[]const u8 {
     if (mem.eql(u8, key, "skip"))
         return if (isScalars(value)) null else "a list of checks: [listeners]";
@@ -463,16 +448,16 @@ fn isScalars(node: Node) bool {
     return true;
 }
 
-/// A form's name: a-z, 0-9 and -, as a directory, a host name and a make
-/// target all take it.
+/// isName reports whether s is a form name: a-z, 0-9 and -, so it works as
+/// a directory, a host name and a make target.
 pub fn isName(s: []const u8) bool {
     if (s.len == 0 or s.len > 64 or s[0] == '-') return false;
     for (s) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') return false;
     return true;
 }
 
-/// The form ref names: forms/REF, or, when ref holds a slash, the form in
-/// that directory, named after it.
+/// load reads the form ref names: forms/REF, or, when ref holds a slash,
+/// the form in that directory, named after it. It checks every form.yaml key.
 pub fn load(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Error!Form {
     const outside = mem.findScalar(u8, ref, '/') != null;
     const dir = if (outside)
@@ -498,7 +483,7 @@ pub fn load(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Err
             if (e.value != .scalar or !isName(e.value.scalar.text))
                 return f.fail(gpa, "{s}: base is the name of a form in forms/", .{path});
         } else if (mem.eql(u8, e.key, "app")) {
-            // An absolute path, never up through "..".
+            // app must be absolute and must not contain "..".
             const p = if (e.value == .scalar) e.value.scalar.text else "";
             if (p.len < 2 or p[0] != '/' or mem.find(u8, p, "..") != null) return f.fail(
                 gpa,
@@ -536,8 +521,8 @@ pub fn load(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Err
                     error.OutOfMemory => return error.OutOfMemory,
                 };
         } else if (mem.eql(u8, e.key, "bastion")) {
-            // Each user as it is, key files taken: whether sshd takes them
-            // is the chain's sshd: to say (bastionFiles).
+            // Check each user, allowing key files for now; whether sshd
+            // takes them depends on the whole chain (bastionFiles).
             const users = try bastionUsers(gpa, path, e.value, f);
             var why: []const u8 = "";
             _ = sshd.authorizedKeys(gpa, users, true, &why) catch |err| switch (err) {
@@ -581,10 +566,9 @@ fn parseFile(gpa: Allocator, path: []const u8, text: []const u8, f: *Failure) Er
 
 const max_chain = 16;
 
-/// A form's chain, base first, as the build lays its parts: each form it
-/// is built on, after the forms it takes `with` it (their chains' forms
-/// the chain lacks, in order), and the form itself last, so each form's
-/// files win over what it takes.
+/// chain returns ref's chain of forms, base first, in the order the build
+/// lays them. Each form follows the forms it takes `with` it (and their
+/// bases), and ref comes last, so each form's files win over what it takes.
 pub fn chain(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Error![]const Form {
     const top = try load(io, gpa, root, ref, f);
     var out: std.ArrayList(Form) = .empty;
@@ -611,7 +595,7 @@ fn appendNew(gpa: Allocator, out: *std.ArrayList(Form), form: Form) Allocator.Er
     try out.append(gpa, form);
 }
 
-/// form and the forms it is built on, base first.
+/// bases returns form and the forms it is built on, base first.
 pub fn bases(io: Io, gpa: Allocator, root: Dir, form: Form, f: *Failure) Error![]const Form {
     var out: std.ArrayList(Form) = .empty;
     try out.append(gpa, form);
@@ -630,14 +614,13 @@ pub fn bases(io: Io, gpa: Allocator, root: Dir, form: Form, f: *Failure) Error![
     return out.items;
 }
 
-/// A net line that listens: its ports, and whether they serve the
-/// machine alone (`listen tcp/5432 loopback`), which nothing outside it
-/// reaches.
+/// Listen is a net listen line: its ports, and whether they are loopback
+/// only (`listen tcp/5432 loopback`) and so unreachable from outside.
 pub const Listen = struct { ports: []const u16, loopback: bool };
 
-/// line, a net line, as a listen line, `listen tcp/PORT... [loopback]`:
-/// null for a line of another kind, and error.Invalid, with why, for a
-/// listen line of anything else.
+/// listen parses a net line of the form `listen tcp/PORT... [loopback]`.
+/// It returns null for other kinds of line, and error.Invalid, with why,
+/// for a malformed listen line.
 pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
     Invalid,
     OutOfMemory,
@@ -667,11 +650,9 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
     return .{ .ports = ports, .loopback = loopback };
 }
 
-/// The TCP ports a chain serves, as its net's listen lines declare them,
-/// `listen tcp/80 tcp/443`, in order, once each: what a host forwards to
-/// the machine, opens to it, and reaches it on. A loopback line serves the
-/// machine itself alone, so none of its ports are. A listen line of
-/// anything else fails, with its form.
+/// listens returns, in order and once each, the TCP ports the chain's net
+/// listen lines serve: what a host forwards to the machine and reaches it
+/// on. Loopback lines are skipped. A malformed listen line fails.
 pub fn listens(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u16 {
     var ports: std.ArrayList(u16) = .empty;
     for (forms) |form| for (try form.items(gpa, "net")) |line| {
@@ -691,7 +672,7 @@ pub fn listens(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u
     return ports.items;
 }
 
-/// sshd: as pairs, each keyword's value a scalar.
+/// sshdPairs returns a form's sshd: map as pairs; each value must be a scalar.
 fn sshdPairs(gpa: Allocator, path: []const u8, node: Node, f: *Failure) Error![]const sshd.Pair {
     if (node != .map) return f.fail(gpa, "{s}: sshd maps sshd_config keywords to values", .{path});
     var out: std.ArrayList(sshd.Pair) = .empty;
@@ -702,7 +683,8 @@ fn sshdPairs(gpa: Allocator, path: []const u8, node: Node, f: *Failure) Error![]
     return out.items;
 }
 
-/// bastion: users: as users, each a map of keys and destinations, lists.
+/// bastionUsers returns bastion: users:, each user a map of keys and
+/// destinations lists.
 fn bastionUsers(gpa: Allocator, path: []const u8, node: Node, f: *Failure) Error![]const sshd.User {
     const shape = "bastion: holds users:, each user's keys: and destinations:, lists";
     if (node != .map) return f.fail(gpa, "{s}: {s}", .{ path, shape });
@@ -736,16 +718,15 @@ fn scalars(gpa: Allocator, node: ?Node) Allocator.Error![]const []const u8 {
     return out.items;
 }
 
-/// Whether the chain has a form of that name.
+/// has reports whether the chain has a form called name.
 fn has(forms: []const Form, name: []const u8) bool {
     for (forms) |form| if (mem.eql(u8, form.name, name)) return true;
     return false;
 }
 
-/// The chain's sshd: keywords, base first, a later form's value in place
-/// of an earlier one's: what the image's sshd_config.d/form.conf says, ""
-/// for none. Refused where nothing in the chain reads sshd_config.d: the
-/// sshd form's sshd, and the bastion's.
+/// sshdConfig returns the image's sshd_config.d/form.conf from the chain's
+/// sshd: keywords, a later form's value replacing an earlier one, or "" for
+/// none. It fails unless the chain has the sshd or bastion form to read it.
 pub fn sshdConfig(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u8 {
     const pairs = try chainSshd(gpa, forms);
     if (pairs.len == 0) return "";
@@ -767,7 +748,7 @@ fn chainSshd(gpa: Allocator, forms: []const Form) Error![]const sshd.Pair {
     var f: Failure = .{};
     for (forms) |form| {
         const node = form.spec.get("sshd") orelse continue;
-        // load has read it: a failure here cannot be.
+        // load already checked it, so this cannot fail.
         next: for (try sshdPairs(gpa, form.dir, node, &f)) |p| {
             for (out.items) |*have| if (mem.eql(u8, have.flag, p.flag)) {
                 have.* = p;
@@ -779,10 +760,10 @@ fn chainSshd(gpa: Allocator, forms: []const Form) Error![]const sshd.Pair {
     return out.items;
 }
 
-/// The bastion's files from the chain's bastion: users: its
-/// authorized_keys and its PermitOpen line (lib/sshd.zig). Refused where
-/// the chain has no bastion, and for a destination on a port the bastion
-/// may not connect to: its net's `connect bastion tcp/PORT`.
+/// bastionFiles returns the bastion's authorized_keys and PermitOpen line
+/// from the chain's bastion: users: (lib/sshd.zig). It fails if the chain
+/// has no bastion form, or a destination's port has no net line
+/// `connect bastion tcp/PORT`.
 pub fn bastionFiles(
     gpa: Allocator,
     forms: []const Form,
@@ -821,10 +802,10 @@ pub fn bastionFiles(
     return .{ .keys = text, .permit = try sshd.permitOpen(gpa, users.items) };
 }
 
-/// The bastion's service file as the image holds it: the chain's
-/// etc/sv/sshd/service with its connect line the ports the chain's net
-/// lets the bastion connect to, so leash's Landlock and fence say the same
-/// and a form opens a port for its destinations in one place, its net.
+/// bastionService returns the chain's etc/sv/sshd/service with its connect
+/// line replaced by the ports the chain's net lets the bastion connect to.
+/// leash's Landlock and fence then agree, and a form opens a port in one
+/// place, its net.
 pub fn bastionService(
     io: Io,
     gpa: Allocator,
@@ -853,8 +834,8 @@ pub fn bastionService(
     return out.items;
 }
 
-/// The TCP ports the chain's net lets user connect to: its
-/// `connect USER tcp/PORT...` lines, each once.
+/// connects returns, once each, the TCP ports in the chain's
+/// `connect USER tcp/PORT...` net lines for user.
 fn connects(gpa: Allocator, forms: []const Form, user: []const u8) Error![]const u16 {
     var ports: std.ArrayList(u16) = .empty;
     for (forms) |form| for (try form.items(gpa, "net")) |line| {
@@ -869,11 +850,11 @@ fn connects(gpa: Allocator, forms: []const Form, user: []const u8) Error![]const
     return ports.items;
 }
 
-/// A service file, /etc/sv/NAME/service, as the image will hold it.
+/// Service is a service file, /etc/sv/NAME/service, as the image will hold it.
 pub const Service = struct { name: []const u8, path: []const u8, text: []const u8 };
 
-/// The service files of a chain, as the image lays its forms' rootfs over
-/// each other: of each name, the last form's file. Sorted by name.
+/// services returns the chain's service files, sorted by name. As in the
+/// image, a later form's rootfs overrides an earlier one's file.
 pub fn services(
     io: Io,
     gpa: Allocator,
@@ -917,8 +898,8 @@ pub fn services(
     return out;
 }
 
-/// The chain's apko configs as one, and extra's packages after theirs (a
-/// DEV build's shell): what apko builds the form from.
+/// apko merges the chain's apko configs into the one apko builds from,
+/// adding extra's packages last (a DEV build's shell). It refuses include:.
 pub fn apko(
     io: Io,
     gpa: Allocator,
@@ -1163,8 +1144,8 @@ test "chain: base first, each form after what it takes, itself last" {
     try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "loop", &f));
     try testing.expectError(error.Form, chain(io, gpa, tmp.dir, "absent", &f));
 
-    // No weaknesses key, or no form.yaml at all, is no weaknesses: any
-    // posture failure fails the form. A form's own are never inherited.
+    // No weaknesses key, or no form.yaml, means no weaknesses: any posture
+    // failure fails the form. Weaknesses are never inherited.
     const forms = try chain(io, gpa, tmp.dir, "bastion", &f);
     try testing.expectEqual(0, forms[0].weaknesses().len);
     try testing.expectEqual(1, forms[1].weaknesses().len);
@@ -1224,7 +1205,7 @@ test "services: of each name, the last form's file" {
             .data = s[2],
         });
     }
-    // A service with no service file of its own (runit's run) has none.
+    // A service directory with no service file (runit's run) is skipped.
     try tmp.dir.createDirPath(io, "forms/site/rootfs/etc/sv/own");
     const forms = [_]Form{
         .{ .name = "prod", .dir = "forms/prod", .spec = .{ .map = &.{} } },
@@ -1400,7 +1381,7 @@ test "sshd and bastion: what the image's sshd is given, along the chain" {
         );
     }
     var f: Failure = .{};
-    // A later form's value in place of its base's, the rest kept.
+    // A later form's value replaces its base's; the rest are kept.
     try testing.expectEqualStrings(
         "# From form.yaml's sshd: (forms/README.md). sshd takes a keyword's first\n" ++
             "# value, and this file sorts before werewolf.conf.\n" ++
@@ -1427,13 +1408,13 @@ test "sshd and bastion: what the image's sshd is given, along the chain" {
     const bare = try bastionFiles(gpa, try chain(io, gpa, tmp.dir, "bastion", &f), &f);
     try testing.expectEqualStrings("", bare.keys);
     try testing.expectEqualStrings("", bare.permit);
-    // A port the bastion may not connect to, with the line that lets it.
+    // A port the bastion may not connect to fails, naming the line to add.
     try testing.expectError(
         error.Form,
         bastionFiles(gpa, try chain(io, gpa, tmp.dir, "far", &f), &f),
     );
     try testing.expect(mem.indexOf(u8, f.text, "connect bastion tcp/8443") != null);
-    // A key file, until sshd: takes them.
+    // A key file fails until sshd: takes them.
     try testing.expectError(
         error.Form,
         bastionFiles(gpa, try chain(io, gpa, tmp.dir, "files", &f), &f),

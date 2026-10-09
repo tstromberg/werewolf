@@ -11,17 +11,6 @@ contents:
   packages:
     - postgresql-17
 
-accounts:
-  groups:
-    - groupname: postgres
-      gid: 70
-  users:
-    - username: postgres
-      uid: 70
-      gid: 70
-      homedir: /var/empty
-      shell: /sbin/nologin
-
 paths:
   # PAM's password helper, setgid shadow, arrives through PostgreSQL's
   # libraries. Nothing here authenticates with a password.

@@ -1,21 +1,14 @@
-//! gitea-init: Gitea's first administrator, made once from the config,
-//! before Gitea serves, so that no visitor can claim a fresh site.
+//! gitea-init prepares Gitea before each start and creates its first
+//! administrator, so no visitor can claim a fresh site.
 //!
 //!     gitea-init CONFIG
 //!
-//! leash runs it before each start of Gitea, as the gitea user, inside its
-//! leash (forms/gitea/rootfs/etc/sv/gitea/service), with Gitea's
-//! environment (GITEA_WORK_DIR, and the settings' GITEA_ADMIN and
-//! GITEA_ADMIN_EMAIL). It makes its SSH host key once, Ed25519, by
-//! ssh-keygen (lib/hostkey.zig), and says its fingerprint; the directory
-//! Gitea keeps its secrets in, and each secret once (`gitea generate
-//! secret`, 0600), brings the database's schema up to this Gitea's (`gitea
-//! migrate`, which does nothing when it is current), asks Gitea for its
-//! administrators, and if the one the settings name is not among them,
-//! makes it with the password the config brought
-//! (/run/svc/gitea/admin-password; leash's copy). Nothing is printed of
-//! the password, which goes to Gitea as an argument, visible to root
-//! alone (hidepid). A site with its admin is left as it is.
+//! leash runs it as the gitea user (forms/gitea/rootfs/etc/sv/gitea/service),
+//! with GITEA_WORK_DIR, GITEA_ADMIN and GITEA_ADMIN_EMAIL set. It keeps an
+//! Ed25519 SSH host key and Gitea's secrets, runs `gitea migrate`, and creates
+//! the named administrator if missing, with the password in
+//! /run/svc/gitea/admin-password. The password is passed as an argument;
+//! hidepid hides it from everyone but root. It is never printed.
 
 const std = @import("std");
 const hostkey = @import("hostkey");
@@ -26,8 +19,8 @@ const Allocator = std.mem.Allocator;
 const gitea = "/usr/bin/gitea";
 const password_file = "/run/svc/gitea/admin-password";
 const secrets_dir = "/data/svc/gitea/secrets";
-/// Gitea's SSH server's host key: Ed25519, made once by ssh-keygen. Gitea
-/// would make an RSA key of any name it is given.
+/// host_key is the key for Gitea's SSH server. We make it with ssh-keygen
+/// because Gitea would make an RSA key.
 const host_key = "/data/svc/gitea/ssh/gitea.ed25519";
 
 pub fn main(init: std.process.Init) void {
@@ -64,8 +57,8 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ, config: []const u8)
         hostkey.fingerprint(public, &fp) orelse return error.NotAPublicKey,
         if (kept == .new) "new, kept in /data" else "kept in /data",
     });
-    // The secrets app.ini names by file, which Gitea reads and never makes:
-    // made once here, 0600, by Gitea's own generator, and kept.
+    // app.ini names these secrets by file. Gitea reads them but never
+    // creates them, so we do, once.
     for ([_][2][]const u8{
         .{ "secret_key", "SECRET_KEY" },
         .{ "internal_token", "INTERNAL_TOKEN" },
@@ -78,7 +71,8 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ, config: []const u8)
         gpa,
         &.{ gitea, "--config", config, "admin", "user", "list", "--admin" },
     );
-    // ID, Username, Email, IsActive, IsAdmin: a header, then one a line.
+    // The list is a header line, then one user per line:
+    // ID, Username, Email, IsActive, IsAdmin.
     var lines = std.mem.tokenizeScalar(u8, list, '\n');
     _ = lines.next();
     while (lines.next()) |line| {
@@ -112,23 +106,23 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ, config: []const u8)
         "--must-change-password=false",
     });
     say(io, "made administrator {s} ({s}) with the password from the config", .{ admin, email });
-    // The password has done its one job. Its copy here is the service's
-    // own (leash makes it as the service user, and again at every start),
-    // and nothing in Gitea's uid should keep reading the operator's choice.
+    // The password is no longer needed, and nothing running as Gitea's uid
+    // should read it. This is the service's copy; leash makes it again at
+    // every start.
     Dir.cwd().deleteFile(io, password_file) catch |err|
         say(io, "{s} not removed: {s}", .{ password_file, @errorName(err) });
 }
 
-/// secrets_dir/name, made with `gitea generate secret kind` if missing,
-/// written beside its place and renamed over it, so it is never half a
-/// secret, 0600.
+/// makeSecret creates secrets_dir/name, mode 0600, with `gitea generate
+/// secret kind` if it is missing or short. It writes a temporary file and
+/// renames it, so a crash never leaves half a secret.
 fn makeSecret(io: Io, gpa: Allocator, name: []const u8, kind: []const u8) !void {
-    // Opened to be read, as iterate does, not O_PATH, Dir's default,
-    // whose descriptor fsync refuses: the rename below is synced on it.
+    // Open for reading, not with O_PATH (Dir's default): fsync refuses an
+    // O_PATH descriptor, and we sync the rename through it.
     var dir = try Dir.cwd().openDir(io, secrets_dir, .{ .iterate = true });
     defer dir.close(io);
-    // One there already is kept, unless it is short: a power cut could
-    // have left an empty one, and Gitea with it would stay down for good.
+    // Keep an existing secret unless it is short. A power cut could have
+    // left it empty, and Gitea would then never start.
     if (dir.statFile(io, name, .{})) |st| {
         if (st.size >= 32) return;
         say(io, "{s} in {s} is too short; made again", .{ name, secrets_dir });
@@ -149,8 +143,8 @@ fn makeSecret(io: Io, gpa: Allocator, name: []const u8, kind: []const u8) !void 
         );
         defer f.close(io);
         try f.writeStreamingAll(io, value);
-        // On disk before it is named, and the name on disk before it is
-        // trusted: whole or absent after a power cut, never empty.
+        // Sync the data before the rename and the rename after it, so a
+        // power cut leaves the secret whole or absent, never empty.
         try f.sync(io);
     }
     try Dir.rename(dir, tmp, dir, name, io);
@@ -158,8 +152,8 @@ fn makeSecret(io: Io, gpa: Allocator, name: []const u8, kind: []const u8) !void 
     say(io, "made {s} in {s}", .{ name, secrets_dir });
 }
 
-/// argv, run: its standard output, or, when it fails, a line naming the
-/// step (argv[2..4], never the password) and what Gitea said on stderr.
+/// giteaRun runs argv and returns its standard output. On failure it logs
+/// the step (argv[3..6], never the password) and Gitea's stderr.
 fn giteaRun(io: Io, gpa: Allocator, argv: []const []const u8) ![]const u8 {
     const r = try std.process.run(gpa, io, .{
         .argv = argv,
@@ -175,9 +169,9 @@ fn giteaRun(io: Io, gpa: Allocator, argv: []const []const u8) ![]const u8 {
     return error.GiteaFailed;
 }
 
-/// One line on the console. What Gitea says on failure may hold anything
-/// its database does, so each control byte becomes a "?": nothing from
-/// outside carries an escape sequence or a false line to the console log.
+/// say prints one line to the console. Gitea's errors can quote database
+/// contents, so control bytes become "?" to stop escape sequences and forged
+/// log lines.
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const line = std.mem.print(&buf, "gitea-init: " ++ fmt ++ "\n", args) catch return;

@@ -8,7 +8,7 @@ settings allow through to the upstream.
 | --- | --- |
 | Listens | tcp/4180, behind `caddy` or the cloud's balancer, which its secure cookies require |
 | Sends | HTTPS and DNS to the provider; HTTP to the upstream |
-| Runs as | `oauth2-proxy` (uid 214), leashed |
+| Runs as | `oauth2-proxy` (a uid of its own, its name's hash), leashed |
 | Config | `oauth2-proxy/client_secret`, `oauth2-proxy/cookie_secret` (32 characters: 24 random bytes, base64); settings `provider-url`, `client-id`, `redirect-url` (required), `email-domains`, `allowed-groups`, and `skip-discovery` with `login-url`, `redeem-url`, `jwks-url` for a provider without discovery |
 
 ```sh

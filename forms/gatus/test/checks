@@ -1,9 +1,9 @@
 # Gatus serves its page and API, lists the target the settings gave, is
 # read-only (no write answers), exposes no metrics, and keeps its history
 # on /data.
-ok  gatus-user       p=$(head -n 1 /run/cgroup/svc/gatus/cgroup.procs); grep -q '^Uid:[[:space:]]*211[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  gatus-user       p=$(head -n 1 /run/cgroup/svc/gatus/cgroup.procs); u=$(grep '^gatus:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  gatus-health     i=0; until wget -q -T 5 -O - http://127.0.0.1:8080/health 2>/dev/null | grep -q '"status":"UP"'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no health"; exit 1; }; sleep 1; done
 ok  gatus-target     wget -q -T 5 -O - http://127.0.0.1:8080/api/v1/endpoints/statuses | grep -q '"name":"target"'
 ok  gatus-readonly   wget -q -T 5 -S -O /dev/null --post-data x http://127.0.0.1:8080/api/v1/endpoints/statuses 2>&1 | grep -q 'HTTP/1.1 4'
 ok  gatus-no-metrics wget -q -T 5 -S -O /dev/null http://127.0.0.1:8080/metrics 2>&1 | grep -q 'HTTP/1.1 404'
-ok  gatus-history    [ -f /data/svc/gatus/data.db ] && [ "$(stat -c %u /data/svc/gatus/data.db)" = 211 ]
+ok  gatus-history    [ -f /data/svc/gatus/data.db ] && [ "$(stat -c %u /data/svc/gatus/data.db)" = "$(grep '^gatus:' /etc/passwd | cut -d: -f3)" ]

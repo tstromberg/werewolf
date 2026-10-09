@@ -7,7 +7,7 @@ application on the same machine, as `postgresql` is its database.
 | --- | --- |
 | Listens | a UNIX socket, `/run/svc/valkey/valkey.sock`, mode 660 for the `valkey` group, and nothing else: `port 0`, and the form declares none |
 | Sends | nothing |
-| Runs as | `valkey` (uid 210), leashed: it reads the image and writes only its own directories |
+| Runs as | `valkey` (a uid of its own, its name's hash), leashed: it reads the image and writes only its own directories |
 | Keeps | RDB snapshots in `/data/svc/valkey`; the append-only log is a line away (`appendonly yes`) |
 | Limits | `maxmemory 192mb` under the leash's 256 MiB, `noeviction`: a full store refuses writes rather than being killed for them. A cache sets `maxmemory-policy allkeys-lru` |
 

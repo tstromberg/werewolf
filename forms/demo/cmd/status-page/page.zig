@@ -1,4 +1,5 @@
-//! status-page's page: the HTML it writes, everything from outside escaped.
+//! page writes status-page's HTML, escaping every string from outside.
+//! See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -14,8 +15,8 @@ const Facts = main.Facts;
 const parseRfc3339 = main.parseRfc3339;
 const rfc3339 = main.rfc3339;
 
-/// Plain and quick, as a page of text should be: no script, no fonts to
-/// fetch, the browser's light or dark, and tables that scroll sideways on a
+/// style keeps the page plain and fast: no script, no fonts to fetch, the
+/// browser's light or dark scheme, and tables that scroll sideways on a
 /// phone rather than squeeze.
 const style =
     \\:root{color-scheme:light dark;--fg:#1b1b1b;--muted:#5f6368;--line:#e3e3e0;--bg:#fff;--card:#f5f5f2;
@@ -85,8 +86,8 @@ pub fn writePage(w: *Io.Writer, f: Facts) !void {
     try w.writeAll(" · rewritten every minute</footer>\n</body>\n</html>\n");
 }
 
-/// Four answers before any table: is it up, is it patched, how exposed is
-/// it, and is it still looking.
+/// writeGlance answers four questions before any table: is it up, is it
+/// patched, how exposed is it, and is it still scanning.
 fn writeGlance(w: *Io.Writer, f: Facts) !void {
     var buf: [32]u8 = undefined;
     const booted = rfc3339(&buf, f.booted);
@@ -289,8 +290,8 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
     }
     try w.writeAll("<div class=\"scroll\"><table>\n<thead><tr><th>Severity</th><th>Advisory</th>" ++
         "<th>Component</th><th>Fixed in</th></tr></thead>\n<tbody>\n");
-    // Findings are worst first, so a package's group starts at its worst
-    // finding: the first with that owner.
+    // Findings are sorted worst first, so the first finding with an owner
+    // starts that owner's group, and groups come out worst first.
     for (s.findings, 0..) |first, i| {
         const owner = first.in_package;
         const seen = for (s.findings[0..i]) |x| {
@@ -321,8 +322,8 @@ fn writeVulnerabilities(w: *Io.Writer, f: Facts) !void {
             );
             try w.writeAll("</td><td>");
             try advisory(w, x.id);
-            // The component, where it is not the package itself: a Go
-            // module inside a program, say.
+            // Name the component when it is not the package itself, such
+            // as a Go module inside a program.
             try w.writeAll("</td><td>");
             if (std.mem.eql(u8, x.package, x.in_package) and
                 std.mem.eql(u8, x.version, x.in_version))
@@ -401,7 +402,7 @@ fn severityClass(i: usize) []const u8 {
     return ([_][]const u8{ "critical", "high", "medium", "low", "negligible", "unknown" })[i];
 }
 
-/// What grype calls an artifact's type, as a reader would.
+/// kindName turns grype's artifact type into a reader's word.
 fn kindName(kind: []const u8) []const u8 {
     const names = [_][2][]const u8{
         .{ "apk", "package" },           .{ "go-module", "Go module" }, .{ "binary", "program" },
@@ -412,7 +413,7 @@ fn kindName(kind: []const u8) []const u8 {
     return kind;
 }
 
-/// The package a finding was found in, as a reader would.
+/// ownerName names the package a finding was found in for a reader.
 fn ownerName(owner: []const u8) []const u8 {
     if (owner.len == 0) return "Not from a package";
     if (std.mem.eql(u8, owner, werewolf_owner)) return "werewolf's own programs";
@@ -427,8 +428,8 @@ fn row(w: *Io.Writer, name: []const u8, parts: []const []const u8) !void {
     try w.writeAll("</td></tr>\n");
 }
 
-/// A time, as how long ago, with the moment itself on hover and for
-/// machines.
+/// writeTime writes a time as how long ago, with the exact time in the
+/// title and datetime attributes.
 fn writeTime(w: *Io.Writer, secs: u64, now: u64) !void {
     var buf: [32]u8 = undefined;
     const stamp = rfc3339(&buf, secs);
@@ -453,15 +454,15 @@ pub fn plural(n: usize) []const u8 {
     return if (n == 1) "" else "s";
 }
 
-/// An id for package, from characters ids can hold.
+/// anchor writes name as an HTML id, replacing unsafe characters with "-".
 fn anchor(w: *Io.Writer, name: []const u8) !void {
     for (name) |c| try w.writeByte(
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') c else '-',
     );
 }
 
-/// An advisory ID, linked to OSV, which knows CVE, GHSA, GO and the rest.
-/// Only an ID made of the characters IDs use becomes part of a URL.
+/// advisory writes an advisory ID linked to OSV, which knows CVE, GHSA, GO
+/// and others. Only an ID of safe characters goes into the URL.
 fn advisory(w: *Io.Writer, id: []const u8) !void {
     if (!isAdvisoryId(id)) return esc(w, id);
     try w.print("<a class=\"adv\" href=\"https://osv.dev/vulnerability/{s}\">{s}</a>", .{ id, id });
@@ -497,7 +498,7 @@ pub fn isAdvisoryId(id: []const u8) bool {
 pub fn describeEvent(e: Event) []const u8 {
     if (std.mem.eql(u8, e.event, "check"))
         return if (std.mem.eql(u8, e.result, "current")) "up to date" else e.result;
-    // "update" is the event before staging (docs/design/update-policy.md).
+    // Logs from before staging say "update" (docs/design/update-policy.md).
     if (std.mem.eql(u8, e.event, "update")) return "updated, and rebooted into it";
     if (std.mem.eql(u8, e.event, "stage")) return "staged, to boot when due";
     if (std.mem.eql(u8, e.event, "skip")) return e.reason;
@@ -555,8 +556,8 @@ test writePage {
     try testing.expect(std.mem.indexOf(u8, page, "<script") == null);
     try testing.expect(std.mem.endsWith(u8, page, "</html>\n"));
 
-    // With findings: grouped under the package that brought them, worst
-    // group first, each package's count linked from the package list.
+    // Findings are grouped under the package that brought them, worst
+    // group first, and the package list links each package's count.
     var with = facts;
     with.scan = .{
         .time = "2026-10-06T11:58:00Z",

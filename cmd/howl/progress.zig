@@ -1,13 +1,6 @@
-//! Progress: a long make, or another long command, as one line that says
-//! which phase it is in, how long it has run, and the last thing it said,
-//! with all it said kept in a log. On success the line goes, and the verb
-//! says what it made and what to do next; on failure it says which phase
-//! failed, the last lines that say why, and where the whole log is.
-//! --verbose shows everything as it happens, as make shows it.
-//!
-//! make names its phases itself: run with --debug=b, it says which target
-//! it must remake, and a target's path says what it is (phaseOf). Off a
-//! terminal there is no line to redraw, so nothing is said until the end.
+//! progress shows a long run, make or howl's own build, as one status line
+//! and keeps its full output in a log. On failure it prints the failed
+//! phase, the last lines and the log's path. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -18,33 +11,33 @@ const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
 pub const Options = struct {
-    /// Everything, as it runs, and no log.
+    /// verbose streams all output as it runs and keeps no log.
     verbose: bool = false,
-    /// What was run, to say again in a failure: "howl build caddy".
+    /// command is what the user ran, repeated on failure: "howl build caddy".
     command: []const u8,
-    /// Where the output goes.
+    /// log is the file that receives all output.
     log: []const u8,
-    /// The phase until make names one, or the only one, for a command that
-    /// is not make.
+    /// first is the phase shown until make or a step names one, or the
+    /// only phase of a command that is not make.
     first: Phase,
-    /// argv is make's: ask it to say which targets it remakes.
+    /// make says the command is make: run adds --debug=b, so make reports
+    /// the targets it remakes, and the debug banner is hidden.
     make: bool = true,
 };
 
-/// A phase: what the line says, and the word the summary times it by.
+/// Phase is a build step: name is shown on the line, short in the summary.
 pub const Phase = struct { name: []const u8, short: []const u8 };
 
-/// How long a phase took, all its turns together.
+/// Spent is the total time of a phase, summed over all its turns.
 pub const Spent = struct { short: []const u8, ns: i96 };
 
-/// How a run went: its seconds, and where they went, phase by phase, in
-/// the order the phases came.
+/// Done is a successful run's duration and its phases in first-seen order.
 pub const Done = struct {
     seconds: i64,
     phases: []const Spent = &.{},
 
-    /// Where the time went, as one line: each phase that took a second or
-    /// more, "packages 21s · seal 14s".
+    /// format writes each phase of a second or more on one line:
+    /// "packages 21s · seal 14s".
     pub fn format(d: Done, w: *Io.Writer) Io.Writer.Error!void {
         var first = true;
         for (d.phases) |p| {
@@ -59,9 +52,9 @@ pub const Done = struct {
     }
 };
 
-/// The last lines kept, to show why a run failed.
+/// tail_lines is how many output lines a failure shows.
 const tail_lines = 10;
-/// How often the line is drawn again: the spinner's pace.
+/// frame_ms is the redraw interval.
 const frame_ms = 80;
 const frames = [_][]const u8{
     "⠋",
@@ -76,116 +69,250 @@ const frames = [_][]const u8{
     "⠏",
 };
 
-/// Run argv as o says. A failure has been said in full when this returns
-/// error.Refused with nothing in why, so the caller adds nothing.
+/// run runs argv as o says. On failure it prints the report itself and
+/// returns error.Refused with why empty, so the caller adds nothing.
 pub fn run(io: Io, gpa: Allocator, why: *howl.Why, argv: []const []const u8, o: Options) !Done {
-    const start = Io.Clock.awake.now(io);
     if (o.verbose) {
+        const start = Io.Clock.awake.now(io);
         try howl.run(io, why, argv);
         return .{ .seconds = start.untilNow(io, .awake).toSeconds() };
     }
-    const err = Io.File.stderr();
-    const look: Look = .of(io, err);
-
     var args: std.ArrayList([]const u8) = .empty;
     try args.append(gpa, argv[0]);
     if (o.make) try args.append(gpa, "--debug=b");
     try args.appendSlice(gpa, argv[1..]);
-
-    if (std.fs.path.dirname(o.log)) |d| Dir.cwd().createDirPath(io, d) catch {};
-    const log = Dir.cwd().createFile(io, o.log, .{}) catch |e|
-        return why.refuse("{s}: {s}", .{ o.log, @errorName(e) });
-    defer log.close(io);
-
-    var child = std.process.spawn(io, .{
-        .argv = args.items,
-        .stdin = .ignore,
-        .stdout = .pipe,
-        .stderr = .pipe,
-    }) catch |e| return why.refuse("{s}: {s}", .{ argv[0], @errorName(e) });
-
-    var said: Said = .{ .gpa = gpa, .phase = o.first, .since = start, .banner = o.make };
-    var fds = [2]posix.pollfd{
-        .{ .fd = child.stdout.?.handle, .events = posix.POLL.IN, .revents = 0 },
-        .{ .fd = child.stderr.?.handle, .events = posix.POLL.IN, .revents = 0 },
-    };
-    var partial = [2]std.ArrayList(u8){ .empty, .empty };
-    var open: usize = 2;
-    var frame: usize = 0;
-    var buf: [16 << 10]u8 = undefined;
-    while (open > 0) {
-        _ = posix.poll(&fds, frame_ms) catch 0;
-        for (&fds, &partial) |*p, *part| {
-            if (p.fd < 0 or p.revents == 0) continue;
-            const n = posix.read(p.fd, &buf) catch 0;
-            if (n == 0) {
-                if (part.items.len > 0) try said.line(io, part.items);
-                part.clearRetainingCapacity();
-                p.fd = -1;
-                open -= 1;
-                continue;
-            }
-            log.writeStreamingAll(io, buf[0..n]) catch {};
-            for (buf[0..n]) |c| {
-                if (c == '\n' or c == '\r') {
-                    try said.line(io, part.items);
-                    part.clearRetainingCapacity();
-                } else try part.append(gpa, c);
-            }
-        }
-        if (look.tty) {
-            frame += 1;
-            look.draw(
-                io,
-                err,
-                frames[frame % frames.len],
-                said.phase.name,
-                start.untilNow(io, .awake),
-                said.detail,
-            );
-        }
-    }
-    const term = child.wait(io) catch |e| return why.refuse(
-        "{s}: {s}",
-        .{ argv[0], @errorName(e) },
-    );
-    const seconds = start.untilNow(io, .awake).toSeconds();
-    try said.enter(io, null);
-    if (look.tty) err.writeStreamingAll(io, "\r\x1b[2K") catch {};
-    if (term == .exited and
-        term.exited == 0) return .{ .seconds = seconds, .phases = said.spent.items };
-
-    // What failed, why, and where to read more.
-    var out: Io.Writer.Allocating = .init(gpa);
-    const w = &out.writer;
-    try w.print(
-        "{s} {s} failed, after {f}\n",
-        .{ look.cross(), said.phase.name, Clock{ .seconds = seconds } },
-    );
-    for (said.tail()) |l| try w.print("  {s}\n", .{l});
-    try w.print("  {f}\n", .{look.dim(try gpa.print("the whole log: {s}", .{o.log}))});
-    try w.print(
-        "  {f}\n",
-        .{look.dim(try gpa.print("everything, as it runs: {s} --verbose", .{o.command}))},
-    );
-    err.writeStreamingAll(io, out.written()) catch {};
-    why.text = "";
-    return error.Refused;
+    var steps: Steps = try .init(io, gpa, why, o);
+    if (!(try steps.exec(&.{.{ .argv = args.items }}, .{})).ok) return steps.fail("");
+    return steps.finish();
 }
 
-/// What a run has said so far, as the line shows it.
+/// Steps shows a run of commands and work of howl's own, such as a build
+/// howl makes itself, as one status line, and keeps all their output in a
+/// log. Each step enters its phase; a failure prints the phase, the last
+/// lines and the log's path. Verbose, the output streams to standard error
+/// and there is no log.
+pub const Steps = struct {
+    io: Io,
+    gpa: Allocator,
+    why: *howl.Why,
+    o: Options,
+    look: Look,
+    /// log is null when verbose.
+    log: ?Io.File,
+    start: Io.Timestamp,
+    said: Said,
+    frame: usize = 0,
+
+    pub fn init(io: Io, gpa: Allocator, why: *howl.Why, o: Options) !Steps {
+        var log: ?Io.File = null;
+        if (!o.verbose) {
+            if (std.fs.path.dirname(o.log)) |d| Dir.cwd().createDirPath(io, d) catch {};
+            log = Dir.cwd().createFile(io, o.log, .{}) catch |e|
+                return why.refuse("{s}: {s}", .{ o.log, @errorName(e) });
+        }
+        const start = Io.Clock.awake.now(io);
+        return .{
+            .io = io,
+            .gpa = gpa,
+            .why = why,
+            .o = o,
+            .look = .of(io, Io.File.stderr()),
+            .log = log,
+            .start = start,
+            .said = .{ .gpa = gpa, .phase = o.first, .since = start, .banner = o.make },
+        };
+    }
+
+    /// enter starts phase p, adding the time since the last change to the
+    /// phase before it.
+    pub fn enter(s: *Steps, p: Phase) !void {
+        try s.said.enter(s.io, p);
+        s.draw();
+    }
+
+    /// note writes one line of howl's own to the log, prefixed "howl: ".
+    pub fn note(s: *Steps, comptime fmt: []const u8, args: anytype) !void {
+        const line = try s.gpa.print("howl: " ++ fmt ++ "\n", args);
+        s.write(line);
+        try s.said.line(s.io, line[0 .. line.len - 1]);
+        s.draw();
+    }
+
+    /// Cmd is one command of a pipeline: its arguments, and the directory
+    /// and environment it runs in, or howl's.
+    pub const Cmd = struct {
+        argv: []const []const u8,
+        cwd: ?[]const u8 = null,
+        env: ?*const std.process.Environ.Map = null,
+    };
+
+    /// Ran says whether every command succeeded, and holds all they
+    /// printed but the last one's standard output when that went to a file.
+    pub const Ran = struct { ok: bool, output: []const u8 };
+
+    /// exec runs cmds as a pipeline, each one's standard output the next
+    /// one's input; the first reads stdin, or nothing, and the last writes
+    /// stdout, or the log. Their standard error goes to the log.
+    pub fn exec(
+        s: *Steps,
+        cmds: []const Cmd,
+        files: struct { stdin: ?Io.File = null, stdout: ?Io.File = null },
+    ) !Ran {
+        const io = s.io;
+        const children = try s.gpa.alloc(std.process.Child, cmds.len);
+        var outs: std.ArrayList(Io.File) = .empty;
+        var spawned: usize = 0;
+        defer for (children[0..spawned]) |*c| {
+            if (c.id != null) c.kill(io);
+        };
+        for (cmds, children, 0..) |c, *child, i| {
+            const last = i + 1 == cmds.len;
+            child.* = std.process.spawn(io, .{
+                .argv = c.argv,
+                .cwd = if (c.cwd) |d| .{ .path = d } else .inherit,
+                .environ_map = c.env,
+                .stdin = if (i > 0)
+                    .{ .file = children[i - 1].stdout.? }
+                else if (files.stdin) |f| .{ .file = f } else .ignore,
+                .stdout = if (!last) .pipe else if (files.stdout) |f| .{ .file = f } else .pipe,
+                .stderr = .pipe,
+            }) catch |e| return s.fail(try s.gpa.print("{s}: {s}", .{ c.argv[0], @errorName(e) }));
+            spawned += 1;
+            // The child has the pipe now; the reader sees its end only once
+            // this copy is closed too.
+            if (i > 0) {
+                children[i - 1].stdout.?.close(io);
+                children[i - 1].stdout = null;
+            }
+            try outs.append(s.gpa, child.stderr.?);
+            if (last and files.stdout == null) try outs.append(s.gpa, child.stdout.?);
+        }
+        const output = try s.pump(outs.items);
+        var ok = true;
+        for (children) |*c| {
+            const term = c.wait(io) catch |e|
+                return s.fail(try s.gpa.print("{s}: {s}", .{ cmds[0].argv[0], @errorName(e) }));
+            if (term != .exited or term.exited != 0) ok = false;
+        }
+        return .{ .ok = ok, .output = output };
+    }
+
+    /// pump reads files until each ends, copying what it reads to the log
+    /// (or, verbose, to standard error) and its lines to the status line,
+    /// and returns it all.
+    fn pump(s: *Steps, files: []const Io.File) ![]const u8 {
+        const fds = try s.gpa.alloc(posix.pollfd, files.len);
+        const partial = try s.gpa.alloc(std.ArrayList(u8), files.len);
+        for (fds, partial, files) |*p, *part, f| {
+            p.* = .{ .fd = f.handle, .events = posix.POLL.IN, .revents = 0 };
+            part.* = .empty;
+        }
+        var all: std.ArrayList(u8) = .empty;
+        var open = files.len;
+        var buf: [16 << 10]u8 = undefined;
+        while (open > 0) {
+            _ = posix.poll(fds, frame_ms) catch 0;
+            for (fds, partial) |*p, *part| {
+                if (p.fd < 0 or p.revents == 0) continue;
+                const n = posix.read(p.fd, &buf) catch 0;
+                if (n == 0) {
+                    if (part.items.len > 0) try s.said.line(s.io, part.items);
+                    part.clearRetainingCapacity();
+                    p.fd = -1;
+                    open -= 1;
+                    continue;
+                }
+                s.write(buf[0..n]);
+                try all.appendSlice(s.gpa, buf[0..n]);
+                for (buf[0..n]) |c| {
+                    if (c == '\n' or c == '\r') {
+                        try s.said.line(s.io, part.items);
+                        part.clearRetainingCapacity();
+                    } else try part.append(s.gpa, c);
+                }
+            }
+            s.draw();
+        }
+        return all.items;
+    }
+
+    fn write(s: *Steps, bytes: []const u8) void {
+        const to = s.log orelse Io.File.stderr();
+        to.writeStreamingAll(s.io, bytes) catch {};
+    }
+
+    fn draw(s: *Steps) void {
+        if (!s.look.tty or s.o.verbose) return;
+        s.frame += 1;
+        s.look.draw(
+            s.io,
+            Io.File.stderr(),
+            frames[s.frame % frames.len],
+            s.said.phase.name,
+            s.start.untilNow(s.io, .awake),
+            s.said.detail,
+        );
+    }
+
+    /// finish ends a run that succeeded and returns its time and phases.
+    pub fn finish(s: *Steps) !Done {
+        try s.said.enter(s.io, null);
+        if (s.look.tty and
+            !s.o.verbose) Io.File.stderr().writeStreamingAll(s.io, "\r\x1b[2K") catch {};
+        if (s.log) |l| l.close(s.io);
+        return .{
+            .seconds = s.start.untilNow(s.io, .awake).toSeconds(),
+            .phases = s.said.spent.items,
+        };
+    }
+
+    /// fail ends a run that failed for reason, which may be "" when the
+    /// output says it. It reports the phase, the last lines and the log,
+    /// and returns error.Refused with why empty, so the caller adds
+    /// nothing. Verbose, the output is above, and why holds reason.
+    pub fn fail(s: *Steps, reason: []const u8) error{Refused} {
+        if (s.o.verbose) {
+            s.why.text = if (reason.len > 0) reason else "failed; the output is above";
+            return error.Refused;
+        }
+        if (reason.len > 0) s.write(s.gpa.print("howl: {s}\n", .{reason}) catch reason);
+        if (s.log) |l| l.close(s.io);
+        const err = Io.File.stderr();
+        if (s.look.tty) err.writeStreamingAll(s.io, "\r\x1b[2K") catch {};
+        const seconds = s.start.untilNow(s.io, .awake).toSeconds();
+        var out: Io.Writer.Allocating = .init(s.gpa);
+        const w = &out.writer;
+        report: {
+            w.print(
+                "{s} {s} failed, after {f}\n",
+                .{ s.look.cross(), s.said.phase.name, Clock{ .seconds = seconds } },
+            ) catch break :report;
+            for (s.said.tail()) |l| w.print("  {s}\n", .{l}) catch break :report;
+            if (reason.len > 0) w.print("  {s}\n", .{reason}) catch break :report;
+            const log = s.gpa.print("the whole log: {s}", .{s.o.log}) catch break :report;
+            w.print("  {f}\n", .{s.look.dim(log)}) catch break :report;
+            const again = s.gpa.print("everything, as it runs: {s} --verbose", .{s.o.command}) catch
+                break :report;
+            w.print("  {f}\n", .{s.look.dim(again)}) catch break :report;
+        }
+        err.writeStreamingAll(s.io, out.written()) catch {};
+        s.why.text = "";
+        return error.Refused;
+    }
+};
+
+/// Said tracks a run's output for the status line and the failure report.
 const Said = struct {
     gpa: Allocator,
     phase: Phase,
-    /// When phase began.
+    /// since is when phase began.
     since: Io.Timestamp,
     spent: std.ArrayList(Spent) = .empty,
-    /// make with --debug says who it is first: nothing to show, until it
-    /// says it is reading makefiles.
+    /// banner hides make's --debug version banner until "Reading makefiles".
     banner: bool = false,
-    /// The last thing said that is not make's own bookkeeping.
+    /// detail is the last line that is not make's bookkeeping.
     detail: []const u8 = "",
-    /// The last lines said, a ring of tail_lines.
+    /// last is a ring of the last tail_lines lines.
     last: [tail_lines][]const u8 = @splat(""),
     count: usize = 0,
 
@@ -206,8 +333,8 @@ const Said = struct {
         s.count += 1;
     }
 
-    /// The phase done for now, its time added to its own, and next begun:
-    /// none at the end.
+    /// enter adds the current phase's time to its total and starts next.
+    /// A null next ends the run.
     fn enter(s: *Said, io: Io, next: ?Phase) !void {
         if (next) |n| if (std.mem.eql(u8, n.name, s.phase.name)) return;
         const now = Io.Clock.awake.now(io);
@@ -222,8 +349,8 @@ const Said = struct {
         if (next) |n| s.phase = n;
     }
 
-    /// The last lines, oldest first, each once: a command tried again says
-    /// the same thing again.
+    /// tail returns the last lines, oldest first, without repeats, since a
+    /// retried command prints the same lines again.
     fn tail(s: *const Said) []const []const u8 {
         const n = @min(s.count, tail_lines);
         var out: std.ArrayList([]const u8) = .empty;
@@ -241,7 +368,7 @@ const Said = struct {
     }
 };
 
-/// The target a --debug=b line says make must remake, or null.
+/// remade returns the target a --debug=b line says make must remake, or null.
 fn remade(line: []const u8) ?[]const u8 {
     const key = "Must remake target ";
     const at = std.mem.find(u8, line, key) orelse return null;
@@ -253,7 +380,7 @@ fn remade(line: []const u8) ?[]const u8 {
     return rest[1..end];
 }
 
-/// Whether a line is make's --debug=b bookkeeping, not anything a command said.
+/// isBookkeeping reports whether line is make's --debug=b chatter.
 fn isBookkeeping(line: []const u8) bool {
     const t = std.mem.trimStart(u8, line, " ");
     for ([_][]const u8{
@@ -267,8 +394,8 @@ fn isBookkeeping(line: []const u8) bool {
     return false;
 }
 
-/// What a target's path says the build is doing, in words, or null for a
-/// target that names no phase of its own.
+/// phaseOf names the build phase a make target's path implies, or returns
+/// null if the target names none.
 pub fn phaseOf(target: []const u8) ?Phase {
     const t = target;
     const ends = struct {
@@ -303,7 +430,6 @@ pub fn phaseOf(target: []const u8) ?Phase {
         ends(t, ".built")) return P("Building packages with melange", "melange");
     if (ends(t, "modules.tar") or
         ends(t, "modules-bitten.tar")) return P("Choosing kernel modules", "modules");
-    if (ends(t, "/ro.stamp")) return P("Laying out the read-only root", "layout");
     if (ends(t, "/meta.stamp")) return P("Recording what the image holds", "metadata");
     if (ends(t, "/overlay.tar") or has(t, "/apps/") or
         ends(t, "application.stamp")) return P("Adding the form's files", "files");
@@ -317,8 +443,8 @@ pub fn phaseOf(target: []const u8) ?Phase {
     return null;
 }
 
-/// A line as the spinner shows it: without terminal escapes, a log's
-/// timestamp and level, or control characters, its spaces collapsed.
+/// clean strips terminal escapes, control characters, and log timestamps
+/// and levels from raw, and collapses runs of spaces.
 pub fn clean(gpa: Allocator, raw: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
@@ -340,12 +466,12 @@ pub fn clean(gpa: Allocator, raw: []const u8) ![]const u8 {
         try out.append(gpa, c);
     }
     var s: []const u8 = std.mem.trim(u8, out.items, " ");
-    // Lima's and others' logfmt, time="..." level=info msg="...": the message.
+    // From logfmt, time="..." level=info msg="...", as Lima writes, keep msg.
     if (std.mem.startsWith(u8, s, "time=")) if (std.mem.find(u8, s, "msg=\"")) |m| {
         const rest = s[m + 5 ..];
         s = rest[0 .. std.mem.findScalar(u8, rest, '"') orelse rest.len];
     };
-    // melange's and apko's "2026/10/08 09:45:53 WARN ", or "time=... level=... msg=".
+    // Strip melange's and apko's "2026/10/08 09:45:53 WARN " prefix.
     if (s.len > 20 and s[4] == '/' and s[7] == '/' and s[10] == ' ' and s[13] == ':') {
         s = std.mem.trimStart(u8, s[19..], " ");
         for ([_][]const u8{ "INFO ", "WARN ", "DEBUG ", "ERRO ", "ERROR " }) |l| {
@@ -355,7 +481,7 @@ pub fn clean(gpa: Allocator, raw: []const u8) ![]const u8 {
     return s;
 }
 
-/// m:ss, as the line and a summary say a time.
+/// Clock formats seconds as "7s" or "2m05s".
 pub const Clock = struct {
     seconds: i64,
 
@@ -366,8 +492,8 @@ pub const Clock = struct {
     }
 };
 
-/// How the terminal is drawn on: whether it is one, its width, whether it
-/// takes color (not when NO_COLOR is set, or TERM is dumb).
+/// Look describes the output: whether it is a terminal, its width, and
+/// whether to use color (not with NO_COLOR set or TERM=dumb).
 pub const Look = struct {
     tty: bool,
     color: bool,
@@ -391,7 +517,7 @@ pub const Look = struct {
         return if (l.color) "\x1b[31m✗\x1b[0m" else "✗";
     }
 
-    /// text, faint: what matters less than the line around it.
+    /// dim formats text faint, for what matters less than its line.
     pub fn dim(l: Look, text: []const u8) Dim {
         return .{ .text = text, .on = l.color };
     }
@@ -407,8 +533,8 @@ pub const Look = struct {
         }
     };
 
-    /// The line again, in place: spinner, phase, time, and as much of the
-    /// last thing said as fits.
+    /// draw redraws the line in place: spinner, phase, time, and as much
+    /// of detail as fits.
     fn draw(
         l: Look,
         io: Io,
@@ -427,8 +553,8 @@ pub const Look = struct {
             .{Clock{ .seconds = ran.toSeconds() }},
         ) catch "";
         w.print("\r\x1b[2K{s} {s}  {s}", .{ spin, phase, time }) catch return;
-        // The spinner is one column, the rest one a byte, but what a command
-        // said, one a character.
+        // The spinner takes one column, and phase and time one per byte;
+        // detail may hold multibyte characters, so fitColumns counts those.
         const used = 2 + phase.len + 2 + time.len;
         const room = l.cols -| (used + 5);
         if (detail.len > 0 and room > 8) {
@@ -442,8 +568,8 @@ pub const Look = struct {
     }
 };
 
-/// The line, for a wait that is not a command's: draw it as often as the
-/// wait looks, then clear it.
+/// Spinner draws the status line for a wait that is not a command. Call
+/// tick on each poll and clear when done.
 pub const Spinner = struct {
     io: Io,
     look: Look,
@@ -472,7 +598,8 @@ pub const Spinner = struct {
     }
 };
 
-/// The longest start of s that is at most n characters, whole ones.
+/// fitColumns returns the longest prefix of s with at most n whole UTF-8
+/// characters.
 fn fitColumns(s: []const u8, n: usize) []const u8 {
     var cols: usize = 0;
     var i: usize = 0;
@@ -486,7 +613,7 @@ fn fitColumns(s: []const u8, n: usize) []const u8 {
     return s;
 }
 
-/// The terminal's width, or 80 when it will not say.
+/// columns returns the terminal's width, or 80 if it is unknown or tiny.
 fn columns(f: Io.File) usize {
     var ws: posix.winsize = undefined;
     const ok = switch (builtin.os.tag) {

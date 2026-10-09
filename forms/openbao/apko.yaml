@@ -10,14 +10,3 @@
 contents:
   packages:
     - openbao
-
-accounts:
-  groups:
-    - groupname: openbao
-      gid: 208
-  users:
-    - username: openbao
-      uid: 208
-      gid: 208
-      homedir: /var/empty
-      shell: /sbin/nologin

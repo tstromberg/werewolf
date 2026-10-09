@@ -317,8 +317,9 @@ BITTEN_MODULES := $(shell $(FORM_ASK) modules $(FORM_REF) $(ARCH) bitten)
 ALL_MODULES := $(shell $(FORM_ASK) modules $(FORM_REF) $(ARCH) all)
 
 # Files a form leaves out of its packages, from form.yaml's prune along
-# the chain: a path an item, as it is in the image (usr/bin/bash). For what a package declares it needs and nothing on the
-# machine runs: Wolfi's valkey brings bash, for posix-libc-utils' ldd. The
+# the chain, one path each as it is in the image (usr/bin/bash): what a
+# package brings that nothing on the machine runs, such as the bash
+# Wolfi's valkey pulls in for posix-libc-utils' ldd. The
 # root is made without them, the image records them
 # (/usr/share/werewolf/prune) and the updater removes them from every slot
 # it builds, so a slot built on the machine holds what the build's did.
@@ -438,8 +439,8 @@ $(BUILD)/kernel/rootfs.tar: $(LOCK)/kernel.lock.json
 	$(call apko_build,boot/kernel.yaml,$<)
 
 # Alpine's config, checked for what werewolf relies on it to leave out
-# (tools/kernel-config-check.zig): built in, code the module loader keeps
-# out today would be in every machine.
+# (tools/kernel-config-check.zig, with lib/image.zig's rules): built in, code
+# the module loader keeps out today would be in every machine.
 KERNEL_CONFIG_CHECK = build/host/kernel-config-check
 $(BUILD)/vmlinuz: $(BUILD)/kernel/rootfs.tar $(KERNEL_CONFIG_CHECK)
 	rm -rf $(BUILD)/kernel/x
@@ -478,7 +479,13 @@ $(BUILD)/vmlinux: $(BUILD)/vmlinuz
 # modules.tar for werewolf's own stage0, modules-bitten.tar for bite's.
 $(OUT)/modules.tar: STAGE0_MODULES = $(NATIVE_MODULES)
 $(OUT)/modules-bitten.tar: STAGE0_MODULES = $(ALL_MODULES)
+# Every form loads modules, minimal's virtio and erofs among them, and bite's
+# stage0 every one werewolf's own does: an empty list, or a bitten one
+# short of a native module, is the build's mistake, not the form's.
 $(OUT)/modules.tar $(OUT)/modules-bitten.tar: $(BUILD)/vmlinuz $(FORM_FILES) Makefile
+	@[ -n "$(strip $(STAGE0_MODULES))" ] || { echo "$@: no modules to load: the build lost its module list" >&2; exit 1; }
+	@for m in $(NATIVE_MODULES); do case " $(STAGE0_MODULES) " in *" $$m "*) ;; \
+		*) echo "$@: native module $$m missing from its list" >&2; exit 1 ;; esac; done
 	rm -rf $(@:.tar=)
 	kver=$$(ls $(BUILD)/kernel/x/lib/modules); \
 	src=$(BUILD)/kernel/x/lib/modules/$$kver; \
@@ -551,8 +558,9 @@ endef
 # allowances and root's capabilities, as "allow", lib/cve.zig, the CVE
 # sources as the tiers feed and the updater read them, as "cve", and
 # lib/cmdline.zig, the kernel command line's werewolf.* words, as
-# "cmdline", and lib/sshd.zig, what form.yaml writes into sshd, as "sshd",
-# compiled with them, as ReleaseSafe as it is. A library may
+# "cmdline", lib/sshd.zig, what form.yaml writes into sshd, as "sshd", and
+# lib/image.zig, the steps of making a slot howl and the updater share, as
+# "image", compiled with them, as ReleaseSafe as it is. A library may
 # import another, as its --dep says (LIB_MODULES).
 LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
 	-Mverity=lib/verity.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
@@ -560,10 +568,12 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig \
-	--dep form --dep seal --dep service -Mcompose=lib/compose.zig
+	--dep form --dep seal --dep service -Mcompose=lib/compose.zig -Mpackage=lib/package.zig \
+	-Mimage=lib/image.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings \
 	--dep update-policy --dep network --dep hostkey --dep form --dep audit --dep service \
-	--dep allow --dep cve --dep cmdline --dep sshd --dep compose -Mroot=$(1) $(LIB_MODULES)
+	--dep allow --dep cve --dep cmdline --dep sshd --dep compose --dep package --dep image \
+	-Mroot=$(1) $(LIB_MODULES)
 
 define zig_build
 $(zig_check)
@@ -597,8 +607,9 @@ $(call program_bin,popen-shim.so): cmd/popen-shim/popen-shim.zig
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig \
 	lib/update-policy.zig lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig \
-	lib/form.zig lib/compose.zig lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig tools/form.zig boot/gpt.zig \
-	tools/cve-tiers.zig tools/kernel-config-check.zig tools/test-sk.zig $(PROGRAM_SOURCES)
+	lib/form.zig lib/compose.zig lib/package.zig lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig \
+	lib/image.zig tools/form.zig tools/package.zig boot/gpt.zig \
+	tools/cve-tiers.zig tools/test-sk.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/lib/sandbox.zig:
@@ -619,6 +630,8 @@ _test/tools/form.zig:
 	zig test $(FORM_TOOL_MODULES)
 _test/lib/compose.zig:
 	zig test $(COMPOSE_MODULES)
+_test/tools/package.zig:
+	zig test --dep package -Mroot=tools/package.zig -Mpackage=lib/package.zig
 _test/tools/cve-tiers.zig:
 	zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/cmd/popen-shim/popen-shim.zig:
@@ -643,6 +656,8 @@ _test/howl-smoke: build/host/howl
 	$(HOWL) run --on qemu -n 2>&1 | grep -q 'prod-ssh as it is' || fail "howl run --on qemu -n should be prod-ssh"; \
 	$(HOWL) run --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"; \
 	$(HOWL) create smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"; \
+	$(HOWL) create web --with python --app ./myapp -h >/dev/null 2>&1 || fail "README: howl create web --with python --app ./myapp"; \
+	$(HOWL) run --with webshell-example -n 2>&1 | grep -q 'as it is' || fail "README: howl run --with webshell-example"; \
 	$(HOWL) pack --with prod -h >/dev/null 2>&1 || fail "howl pack --with prod -h"; \
 	out=$$($(HOWL) run --with caddy,valkey -n 2>&1) || fail "howl run --with caddy,valkey -n: $$out"; \
 	echo "$$out" | grep -q 'with: \[caddy, valkey\]' || fail "run --with caddy,valkey -n did not show the form: $$out"; \
@@ -663,6 +678,32 @@ ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-$(ARCH))
 else
 	@echo "$(POSTURE_BIN): copy it to a Linux $(ARCH) machine and run it there, as root"
 endif
+
+# --- packages -----------------------------------------------------------------
+# werewolf's programs as apk packages (lib/package.zig; docs/design/
+# custom-updates.md): werewolf-NAME, one a program of cmd/, its files as the
+# build lays them, versioned by when HEAD was committed, so a clean tree
+# packs the same bytes. `make packages` packs ARCH's into $(PACKAGES), with
+# APKINDEX and APKINDEX.member, the bytes a key holder signs: nothing here
+# holds a key or uploads.
+PACKAGE_TOOL = build/host/package
+PACKAGES = $(BUILD)/packages
+PACKAGE_TIME ?= $(shell git log -1 --format=%ct 2>/dev/null)
+PACKAGE_PROGRAMS = init modload iface-up fence mount mount-broker posture bite-cleanup \
+	$(SEAL_PROGRAMS) $(SHELLFREE) $(basename $(shell $(FORM_ASK) every programs))
+$(PACKAGE_TOOL): tools/package.zig lib/package.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe --dep package -Mroot=$< -Mpackage=lib/package.zig -femit-bin=$@
+.PHONY: packages
+packages: $(PACKAGE_TOOL) $(ALL_PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) $(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS)
+	@[ -n "$(PACKAGE_TIME)" ] || { echo "packages: no commit time; set PACKAGE_TIME" >&2; exit 1; }
+	rm -rf $(PACKAGES)/$(ARCH) && mkdir -p $(PACKAGES)/$(ARCH)
+	for p in $(PACKAGE_PROGRAMS); do \
+		$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - $(ARCH) $(PACKAGE_TIME) \
+			"werewolf's $$p (cmd/$$p)" || exit 1; \
+	done
+	$(PACKAGE_TOOL) index $(PACKAGES)/$(ARCH) -
+	@echo "packages: $(words $(PACKAGE_PROGRAMS)) in $(PACKAGES)/$(ARCH); sign APKINDEX.member, then build/host/package sign"
 
 # --- meta ---------------------------------------------------------------------
 # What the build knows that the image will need to rebuild itself: the
@@ -724,9 +765,16 @@ $(GPT_BIN): boot/gpt.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe -femit-bin=$@ $<
 
-$(KERNEL_CONFIG_CHECK): tools/kernel-config-check.zig
+# Every program an image is made of, and boot/gpt for its disk: what howl
+# build (cmd/howl/build.zig) has make compile before it makes the image
+# itself. FORM's own programs too, for a form outside forms/.
+.PHONY: programs
+programs: $(ALL_PROGRAM_BINS) $(PROGRAM_BINS) $(BITE_CLEANUP) $(LOADER_BIN) $(NET_BIN) $(FENCE_BIN) \
+	$(MOUNT_BIN) $(BROKER_BIN) $(POSTURE_BIN) $(INIT_BIN) $(SEAL_BINS) $(SHELLFREE_BINS) $(STAGE0_BIN) $(GPT_BIN)
+
+$(KERNEL_CONFIG_CHECK): tools/kernel-config-check.zig lib/image.zig
 	$(zig_check)
-	zig build-exe -O ReleaseSafe -femit-bin=$@ $<
+	zig build-exe -O ReleaseSafe --dep image -Mroot=$< -Mimage=lib/image.zig -femit-bin=$@
 
 VERITY_BIN = build/host/verity
 $(VERITY_BIN): tools/verity.zig lib/verity.zig
@@ -755,7 +803,8 @@ cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
 .PHONY: howl
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig \
-	lib/network.zig lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig
+	lib/network.zig lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig \
+	lib/compose.zig lib/verity.zig lib/image.zig
 	$(zig_check)
 	@# Beside it, then renamed over it: a build while werewolf runs (a
 	@# check rebuilds it) never leaves an empty file, which a shell would run
@@ -1883,3 +1932,10 @@ zig-lint: $(ZIGFIX) $(ZIGLINT_BIN)
 FIXERS += zig-fix
 zig-fix: $(ZIGFIX)
 	$(ZIGFIX) $(ZIG_SOURCES)
+
+# bite checks a downloaded release against its own copy of the release key.
+.PHONY: bite-key-lint
+LINTERS += bite-key-lint
+bite-key-lint:
+	@sed -n '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/p' bite | cmp -s - release/image.pub || \
+		{ echo "bite: its release key differs from release/image.pub"; exit 1; }

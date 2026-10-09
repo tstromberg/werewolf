@@ -1,139 +1,99 @@
 # Native boot
 
-Proposed, 2026-10-06.
+Proposed, 2026-10-06. Built (boot/mkdisk, boot/gpt.zig, `make disk`;
+`installEsp` in cmd/slot-update; cmd/slot-keep).
 
-A werewolf disk that boots on its own: UEFI firmware, then systemd-boot,
-then a slot. Today a machine updates itself only after bite borrows a
-distro's disk and GRUB; booted directly (`make run`, `make lima`), it gets
-its kernel and image from the host every time and has nothing to update.
-Debian and Fedora update themselves under Lima because their image is a disk
-with its own bootloader. This gives werewolf the same, for Lima, QEMU and
-providers that boot a custom image.
+## Summary
 
-## Not goals
+A werewolf disk that boots on its own (UEFI firmware, systemd-boot, a slot)
+and updates itself as a bitten machine does, wherever a VM boots a disk.
 
-- **Replacing bite.** Bitten machines keep the distro's GRUB, and the updater
-  keeps writing `grubenv` for them.
-- **Secure Boot.** Signing systemd-boot and the kernel is verified-boot.md
-  phase 5; this disk is where it will apply.
-- **Growing the disk.** The data partition is the size the image was built
-  at (see *Open questions*).
+## Background
 
-## Why systemd-boot
+Booted directly (`make run`), a machine takes its kernel from the host and
+has nothing to update; bite lends it a distro's disk and GRUB
+([bite.md](../bite.md)). Debian updates itself under Lima because its image
+is a disk with its own bootloader, as each werewolf release now is
+([releases.md](../releases.md)).
 
-| | systemd-boot | GRUB |
-| --- | --- | --- |
-| What we ship | one file, `systemd-bootaa64.efi` (263 KB), from Wolfi's `systemd-boot` | `grub-mkimage`'s output, which needs Linux to make |
-| Its configuration | a text file per entry on the EFI partition | a script, `grub.cfg`, and `grubenv` |
-| Trying a new slot once | built in: an entry named `werewolf-b+1.conf` has one try; systemd-boot counts it down before booting it, and skips an entry with none left | `next_entry` in `grubenv`, plus our deadman and `slot-keep` |
-| Editing the command line at boot | off (`editor no`) | on unless locked with a password |
+## Goals
 
-The disk builds on a Mac without a Linux step, and the try-once-then-fall-back
-that bitten machines assemble from `grubenv` comes with the bootloader.
+- One disk that boots wherever UEFI firmware finds it, built on a Mac or
+  on Linux, and the same bytes from the same slot.
+- A new slot gets one try and falls back on its own, as on bitten machines.
 
-## The disk
+## Non-Goals
 
-GPT, two partitions:
+- Replacing bite: bitten machines keep the distro's GRUB and `grubenv`.
+- Secure Boot (verified-boot.md phase 5), and growing the disk.
 
-| Partition | Filesystem | Holds |
-| --- | --- | --- |
-| EFI system, 256 MiB | FAT32 | `EFI/BOOT/BOOTAA64.EFI` (systemd-boot; `BOOTX64.EFI` on x86_64), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz`, `werewolf/{a,b}/stage0.zst` |
-| werewolf, the rest | ext4 | `werewolf/{a,b}/root.erofs`, `werewolf/data/`, `werewolf/config.tar` |
+## Detailed design
 
-The firmware finds systemd-boot at the removable-media path, so no NVRAM
-entry is needed and the disk boots wherever it is attached. The ext4
-partition is laid out as bite lays out a distro's: stage0 and init find it
-by `werewolf.victim=UUID:/werewolf` and treat it exactly as they treat a
-bitten machine's filesystem. `/data` is `werewolf/data` on it.
+GPT, two partitions; every GUID, UUID, serial number and time is fixed.
 
-`loader/loader.conf`:
+| Partition | Holds |
+| --- | --- |
+| EFI system, FAT32, 256 MiB | systemd-boot at the removable-media path (`EFI/BOOT/BOOTAA64.EFI` or `BOOTX64.EFI`), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz` and `stage0.zst` |
+| ext4, the rest | `werewolf/{a,b}/root.erofs`; init adds `werewolf/data`, which is `/data` |
 
-```
-timeout 0
-editor no
-auto-entries no
-auto-firmware no
-```
+The removable-media path needs no NVRAM entry, so the disk boots wherever
+it is attached. The ext4 partition is laid out as bite lays out a distro's:
+stage0 finds it by `werewolf.victim=UUID:/werewolf`. systemd-boot sorts
+entries by `sort-key`, then newest `version`, with any entry out of tries
+last. No default is set, so the newest slot not known bad wins; slot a's
+version is 1980, older than any update's. `make disk` needs no Linux: it
+uses `boot/gpt.zig` (no `sfdisk`), mtools and `mke2fs -d`.
 
-`loader/entries/werewolf-a.conf`, as the build writes it:
+The updater knows the disk by `werewolf.esp`. It builds the other slot as
+always, borrows the EFI partition from the mount broker, and:
 
-```
-title werewolf
-sort-key werewolf
-version 20261006T120000Z
-linux /werewolf/a/vmlinuz
-initrd /werewolf/a/stage0.zst
-options console=... init=/init panic=10 softlockup_panic=1 werewolf.slot=a werewolf.victim=UUID:/werewolf werewolf.esp=XXXX-XXXX
-```
-
-systemd-boot sorts entries by `sort-key`, then newest `version` first, with
-any entry out of tries last, and boots the first. No default is configured,
-so the newest slot that is not known bad always wins.
-
-## An update
-
-The updater recognises the disk by `werewolf.esp=` on the command line, as
-it recognises a bitten machine by `werewolf.grubenv=`. It builds the other
-slot as now, then:
-
-1. Mounts the EFI partition by its FAT serial, `nosuid,nodev,noexec`.
-2. Writes the other slot's `vmlinuz` and `stage0.zst`, each to a
-   temporary name and renamed into place, and `root.erofs` to the ext4
-   partition as now.
-3. Removes any entry for the other slot, and writes
-   `werewolf-<other>+1.conf`: version now, or a second past the running
-   entry's if the clock is behind it, so it is always the newest; options
-   this boot's command line with `werewolf.slot` changed. Anything the machine was booted with
-   (`werewolf.mac`, `console`) carries over.
-4. Reboots.
-
-systemd-boot boots the new entry, the newest, renaming it `+0-1` first.
+1. Removes the other slot's entries, writes its kernel and stage0 to the
+   EFI partition and `root.erofs` to ext4, each whole, and syncs.
+2. Writes `werewolf-<other>+1.conf`, with one try, dated now or a second
+   past the newest entry. Its options are this boot's, with `werewolf.slot`
+   and the new image's arguments swapped in.
+3. Reboots. systemd-boot renames the entry `+0-1` and boots it.
 
 | Then | Happens |
 | --- | --- |
-| it commits | `slot-keep` renames the entry to `werewolf-<slot>.conf`, which has no counter: good for good |
-| it panics | the reset finds the entry at `+0-1`, out of tries; the old slot boots, and `update outcome` logs `rollback` as now |
+| it commits | slot-keep renames it `werewolf-<slot>.conf`, with no counter: good for good |
+| it panics | the reset finds it out of tries; the old slot boots, and the updater logs `rollback` |
 | it hangs | stage0's deadman reboots it after ten minutes; as above |
 
-The slot it replaced stays as it was, a good entry with an older version: the
-fallback, and the next update's target.
+The old slot stays a good, older entry: the fallback, and the next target.
 
-## What changes
+### Open questions
 
-| Piece | Change |
+- **Growing the data partition.** A larger disk leaves the partition at its
+  built size. Growing it means rewriting the GPT's end and `resize2fs` at
+  boot, or `/data` on a second disk, as `werewolf.data=` already allows.
+- **Lima's networks.** Under vz, DHCP takes Lima's own NIC, not vzNAT's, so
+  `howl create` pins vzNAT's MAC and builds the disk with `werewolf.mac=`.
+
+## Drawbacks
+
+- The updater and slot-keep each keep two paths, GRUB's and systemd-boot's.
+- The build needs mtools and e2fsprogs.
+
+## Alternatives Considered
+
+- **GRUB, as bite uses.** `grub-mkimage` needs Linux, its configuration is
+  a script plus `grubenv`, and one try takes `next_entry`, the deadman and
+  slot-keep. systemd-boot is one EFI file from Wolfi, a text file per
+  entry, counts tries itself, and its editor can be turned off.
+
+## Security Considerations
+
+| Risk | Mitigation |
 | --- | --- |
-| Makefile | `make disk`: the slot, systemd-boot from a pinned Wolfi package (`boot/boot.yaml`), and `boot/mkdisk`, which writes the GPT with a small Zig program (`boot/gpt.zig`, so no `sfdisk`), the EFI partition with mtools, and the ext4 partition with `mke2fs -d`, then makes every file root's with `debugfs`. On a Mac: `brew install mtools e2fsprogs` |
-| updater | a second install path for `werewolf.esp=`; GRUB's stays |
-| `slot-keep` | for `werewolf.esp=`, rename the entry instead of setting `saved_entry` |
-| minimal's `modules` | `fat vfat nls_cp437 nls_utf8`, for the EFI partition |
-| stage0, init | nothing: the ext4 partition is a victim filesystem |
-| `make demo` | boots the demo's disk in Lima like a distro's, with no Debian and no bite |
+| A console user adds `init=/bin/sh` | `timeout 0` and `editor no`: no menu, no editor. |
+| A file on ext4 owned by the builder's uid, so by whoever has it on the machine (Lima makes the host user's), who could swap a slot | `debugfs` makes every file root's; `werewolf/` is 0700. |
+| The EFI partition | Mounted by the mount broker only to write a slot or commit, `nosuid,nodev,noexec,nosymfollow`. root can still rewrite it, as it can a bitten machine's GRUB, until Secure Boot. |
+| Kernel arguments that start a new entry line | mkdisk takes only letters, digits and `_.,= -`. |
 
-Every GUID, UUID, serial number and timestamp is fixed, so the same slot
-gives the same disk. The fixed identities, `E2FSPROGS_FAKE_TIME` and the
-`debugfs` pass come from an earlier GRUB disk built the same way.
+## Reliability Considerations
 
-## Security
-
-- **No boot menu, no editor.** `timeout 0` and `editor no`: the console
-  cannot add `init=/bin/sh`.
-- **The EFI partition is mounted only to write a slot or commit**, then
-  unmounted, and `nosuid,nodev,noexec` while it is.
-- **Every file on the ext4 partition is root's.** `mke2fs -d` copies the
-  builder's uid; left so, a file would belong to whoever has that uid on
-  the machine (Lima creates the host user's), who could replace a slot's
-  image while the updater has the partition mounted.
-- **The same exposure as bitten machines.** root can rewrite the EFI
-  partition and the entries, as root on a bitten machine can rewrite GRUB's
-  files; Secure Boot (verified-boot.md phase 5) is what closes it.
-
-## Open questions
-
-- **Growing the data partition.** Lima and providers make the disk larger
-  than the image; the partition stays the size it was built. Growing it at
-  boot means rewriting the GPT's end and running `resize2fs`, or putting
-  `/data` on a second disk, as `werewolf.data=` already does.
-- **Lima's networks.** Under vz, Lima's own network is the first NIC and
-  vzNAT the second, and a DHCP client takes the first. `make demo` pins
-  vzNAT's MAC in its Lima config and builds the disk with `werewolf.mac=`,
-  which updates carry over.
+- **Whole files**, copied under a temporary name; vfat has no journal, so
+  deletes are synced before any file changes.
+- **Tested:** `make check-persist` and `make check-dist` boot this disk
+  under UEFI; unit tests cover the updater's entries (cmd/slot-update).

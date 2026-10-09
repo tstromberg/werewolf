@@ -1,20 +1,5 @@
-//! sshd-start: the sshd form's service, in every form that takes it
-//! (prod-ssh, lima): it makes sure of the host key and becomes sshd.
-//!
-//! The host key is made on the machine's first boot and kept in /data, at
-//! /data/svc/sshd/host-key as a leashed sshd keeps its own (ssh-host-key),
-//! root's alone, as a distribution's first boot makes /etc/ssh's; the root
-//! is read-only, so sshd reads a copy in /run. Without /data the key is
-//! made for this boot alone, and a client sees a new one at the next: an
-//! operator who logs in here must still be able to. Every start logs the
-//! key's fingerprint and public half, for an operator to pin (howl
-//! console NAME), never the private half. lib/hostkey.zig keeps the key
-//! whole: a boot cut short leaves a whole key or none.
-//!
-//! A start that fails waits ten seconds before it ends, and runsv tries
-//! again: a passing fault clears, and a lasting one is not a line a second.
-//!
-//! runsv runs it as /etc/sv/sshd/run, with no arguments and no shell.
+//! sshd-start is the sshd form's service: it makes sure the host key exists,
+//! then becomes sshd. runsv runs it as /etc/sv/sshd/run. See README.md.
 
 const std = @import("std");
 const hostkey = @import("hostkey");
@@ -23,20 +8,21 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
-/// Where sshd reads it (the sshd form's sshd_config.d/werewolf.conf).
+/// key is where sshd reads its host key (the sshd form's
+/// sshd_config.d/werewolf.conf). The root is read-only, so it is a copy in /run.
 const key = "/run/sshd/ssh_host_ed25519_key";
-/// Where the machine keeps it, while /data is usable: the sshd service's
-/// directory, as every service's is /data/svc/NAME.
+/// kept is where the key persists when /data is usable. A leashed sshd keeps
+/// its key at the same path (ssh-host-key).
 const kept = "/data/svc/sshd/host-key";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
 
-    // Speculative Store Bypass mitigated for ssh-keygen, sshd and every
-    // session, which werewolf leaves to each program, so workloads do not
-    // pay (docs/security.md). Where the CPU has no control, the kernel
-    // refuses and nothing changes.
+    // Disable Speculative Store Bypass for ssh-keygen, sshd and every
+    // session. werewolf leaves this to each program so workloads do not pay
+    // for it (docs/security.md). On a CPU without the control, prctl fails
+    // and nothing changes.
     _ = linux.prctl(
         @backingInt(linux.PR.SET_SPECULATION_CTRL),
         linux.PR.SPEC_STORE_BYPASS,
@@ -46,6 +32,8 @@ pub fn main(init: std.process.Init) !void {
     );
     _ = linux.mkdir("/run/sshd", 0o700);
     const from = hostKey(io, gpa) catch |err| {
+        // Wait before runsv restarts us, so a lasting fault logs one line
+        // every ten seconds, not one a second.
         say(io, "host key: {s}; trying again in 10s", .{@errorName(err)});
         io.sleep(.fromSeconds(10), .awake) catch {};
         std.process.exit(1);
@@ -56,7 +44,9 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(1);
 }
 
-/// Make sure of key: the kept one, copied, or a new one, kept if it can be.
+/// hostKey makes sure key exists and returns where it came from for the log.
+/// With /data usable, the kept key is made if needed and copied to key.
+/// Without it, key is made for this boot only, so an operator can still log in.
 fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
     const nodata = linux.errno(linux.access("/run/werewolf/nodata", linux.F_OK)) == .SUCCESS;
     const unkept: ?[]const u8 = if (nodata)
@@ -94,7 +84,8 @@ fn hostKey(io: Io, gpa: Allocator) ![]const u8 {
     return from;
 }
 
-/// The key's fingerprint and public half, as one line on the console.
+/// logKey logs the key's fingerprint and public half, for an operator to pin.
+/// It never logs the private half.
 fn logKey(io: Io, gpa: Allocator, from: []const u8) void {
     const public = std.mem.trim(
         u8,

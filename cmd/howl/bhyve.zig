@@ -1,22 +1,5 @@
-//! bhyve: a werewolf machine as a bhyve VM on FreeBSD, experimental, from
-//! the same two files every target takes: a boot disk, which bhyve's UEFI
-//! firmware boots, and the config tar, attached as a second, read-only
-//! virtio disk, where init finds it.
-//!
-//! bhyve is a process, not a service: it runs until the guest halts, and
-//! exits 0 when the guest asks to reboot, to be run again. So create
-//! starts it under daemon(8), detached, with its console on the machine's
-//! console.log, through werewolf's own supervisor (`howl _bhyve`),
-//! which runs bhyve again on a reboot and destroys the VM when it stops.
-//! bhyve needs root, so what runs it goes through doas or sudo. The
-//! machine is on slirp's network, as QEMU's user network is: the host
-//! reaches it only through the ports slirp forwards, one host port per
-//! port the form listens on, from a base the name's sha256 picks. bhyve
-//! is the state: /dev/vmm/NAME exists while the VM does, and nothing here
-//! remembers more than the form, in the machine's directory.
-//!
-//! x86_64 alone: bhyve on arm64 is new in FreeBSD 15, with other firmware
-//! and flags, and is not built here yet.
+//! bhyve runs a machine as a bhyve VM on FreeBSD x86_64 (experimental),
+//! under a supervisor that restarts bhyve on reboot. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -25,31 +8,33 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-/// bhyve's UEFI firmware, from the bhyve-firmware package.
+/// firmware is bhyve's UEFI firmware, from the bhyve-firmware package.
 pub const firmware = "/usr/local/share/uefi-firmware/BHYVE_UEFI.fd";
-/// slirp's network, as every machine has it: the address slirp gives
-/// the guest, its gateway, and its DNS, for a form with no DHCP client.
+/// user_ip, user_gw and user_dns are slirp's fixed guest network, written
+/// into the config tar for a form with no DHCP client.
 pub const user_ip = "10.0.2.15/24";
 pub const user_gw = "10.0.2.2";
 pub const user_dns = "10.0.2.3";
 
-/// Whether this machine runs bhyve: FreeBSD on x86_64, with vmm loaded
-/// (/dev/vmmctl; kldload vmm).
+/// installed reports whether this is FreeBSD on x86_64 with vmm loaded
+/// (/dev/vmmctl exists; kldload vmm). bhyve on arm64 needs other firmware
+/// and flags, which howl does not support yet.
 pub fn installed(io: Io) bool {
     if (builtin.os.tag != .freebsd or builtin.cpu.arch != .x86_64) return false;
     Dir.cwd().access(io, "/dev/vmmctl", .{}) catch return false;
     return true;
 }
 
-/// Whether bhyve has a VM named name: it exists from its first run until
-/// bhyvectl --destroy.
+/// exists reports whether bhyve has a VM named name. A VM exists from its
+/// first run until bhyvectl --destroy.
 pub fn exists(io: Io, gpa: Allocator, name: []const u8) !bool {
     Dir.cwd().access(io, try gpa.print("/dev/vmm/{s}", .{name}), .{}) catch return false;
     return true;
 }
 
-/// What runs bhyve, which needs root: nothing as root, else doas, or
-/// sudo, from the ports, where FreeBSD keeps them.
+/// asRoot returns the command prefix that runs bhyve as root: none when
+/// already root, else doas or sudo from /usr/local/bin. It fails with
+/// error.NoRoot if neither is installed.
 pub fn asRoot(io: Io) error{NoRoot}![]const []const u8 {
     if (howl.isRoot()) return &.{};
     inline for (.{ "doas", "sudo" }) |tool| {
@@ -58,12 +43,12 @@ pub fn asRoot(io: Io) error{NoRoot}![]const []const u8 {
     return error.NoRoot;
 }
 
-/// A port slirp forwards: this host's 127.0.0.1:host to the machine's guest.
+/// Forward is a port slirp forwards from 127.0.0.1:host to guest.
 pub const Forward = struct { host: u16, guest: u16 };
 
-/// The forwards for a machine named name, one per port it listens on: the
-/// ports from a base the name's sha256 picks, 20000 to 59900 by hundreds,
-/// so two machines rarely collide and a name always gets the same ports.
+/// forwards maps up to 100 guest ports to consecutive host ports from a
+/// base that name's sha256 picks (20000 to 59900, by hundreds). A name
+/// always gets the same ports, and two names rarely collide.
 pub fn forwards(gpa: Allocator, name: []const u8, ports: []const u16) ![]const Forward {
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(name, &h, .{});
@@ -76,17 +61,13 @@ pub fn forwards(gpa: Allocator, name: []const u8, ports: []const u16) ![]const F
     return out;
 }
 
-/// bhyve's arguments for the machine: two CPUs and 2 GiB, as Lima's
-/// machines have; the disk and the config tar on virtio, the tar read-only;
-/// slirp with the forwards, open, so the machine reaches out, as updates
-/// need, and so that slirp's helper, which bhyve runs apart since 15.1,
-/// skips capability mode: in it, as root, its getpwnam(nobody) fails and
-/// it dies, and bhyve with it at the first packet, of SIGPIPE; a random
-/// number device; the serial console on bhyve's standard output, which the
-/// supervisor's log keeps; and the UEFI firmware, which boots the disk.
-/// Linux wants -w, since it reads MSRs bhyve does not have; -H yields the
-/// host's CPU when the guest idles; -u keeps the clock in UTC. No -A:
-/// FreeBSD 15 always makes ACPI tables and dropped the flag.
+/// argv returns bhyve's command line: the disk and a read-only config tar
+/// on virtio, slirp with fwds, an RNG, the serial console on stdout, and
+/// UEFI firmware. slirp is "open" so updates can reach out, and so that
+/// FreeBSD 15.1's slirp helper skips capability mode, where, as root,
+/// getpwnam(nobody) fails and the helper dies, killing bhyve with SIGPIPE.
+/// -w: Linux reads MSRs bhyve lacks. -H: yield the CPU when idle. -u: UTC
+/// clock. No -A: FreeBSD 15 always builds ACPI tables and dropped the flag.
 pub fn argv(
     gpa: Allocator,
     name: []const u8,
@@ -130,8 +111,8 @@ pub fn argv(
     });
 }
 
-/// bhyvectl's arguments to destroy the VM named name, which ends its
-/// bhyve, and so its supervisor.
+/// destroy returns the bhyvectl command that destroys the VM name, which
+/// also ends its bhyve and supervisor.
 pub fn destroy(gpa: Allocator, name: []const u8) ![]const []const u8 {
     return try gpa.dupe(
         []const u8,
@@ -139,16 +120,13 @@ pub fn destroy(gpa: Allocator, name: []const u8) ![]const []const u8 {
     );
 }
 
-/// The supervisor, `howl _bhyve NAME CONFIG BHYVE...`, under daemon(8)
-/// as root: runs bhyve, whose console is this process's standard output,
-/// with its standard input a pipe held open and never written, so the
-/// console reads nothing. bhyve exits 0 when the guest asks to reboot, and
-/// is run again once the VM is destroyed, as bhyve wants, so long as the
-/// machine's config tar is still there: delete removes it. A halt ends the
-/// machine, and the VM is destroyed with it. An error, 4, is also what
-/// bhyve exits with when delete or another create destroys the VM under
-/// it, so that one leaves the VM alone: the next bhyve of the name may
-/// already be it.
+/// keep is the supervisor, `howl _bhyve NAME CONFIG BHYVE...`, run as root
+/// under daemon(8). bhyve's stdin is a pipe never written, so the console
+/// reads nothing. On exit 0 (reboot) keep destroys the VM and runs bhyve
+/// again while config exists; delete removes config to stop the loop. On
+/// any other exit it destroys the VM and returns, except on 4: bhyve also
+/// exits 4 when delete or another create destroyed the VM, and the VM of
+/// that name may already be a new one.
 pub fn keep(
     io: Io,
     gpa: Allocator,

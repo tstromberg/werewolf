@@ -8,14 +8,3 @@
 contents:
   packages:
     - gatus
-
-accounts:
-  groups:
-    - groupname: gatus
-      gid: 211
-  users:
-    - username: gatus
-      uid: 211
-      gid: 211
-      homedir: /var/empty
-      shell: /sbin/nologin

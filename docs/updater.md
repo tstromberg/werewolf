@@ -33,6 +33,51 @@ The machine must be booted from a slot: the kernel command line names
 or `werewolf.esp` (werewolf's own disk). Elsewhere the
 service stays down.
 
+## When an update boots
+
+Each fix takes its tier from the signed CVE tiers feed
+([releases.md](releases.md#the-tiers-feed)), or from its advisory for
+werewolf's own fixes; a CVE the feed does not name is `medium`, and an
+update that fixes none is `low`. With no valid feed, every CVE, or else the
+update itself, counts as `high`. A staged slot boots at the soonest time
+any of its tiers sets, counted from when this machine first saw a fix of
+that tier:
+
+| Tier | Boots | Setting: default, limit |
+| --- | --- | --- |
+| `urgent` | within 15 minutes | none |
+| `high` | within `high` | `4h`, `24h` |
+| `medium` | in the first window after `medium` | `7d`, `28d` |
+| `low` | in the first window after `low` | `28d`, `90d` |
+
+A machine's place in each span is the first 8 bytes of SHA-256 of the
+UUID of the filesystem holding its slots and the build, modulo the span,
+so a fleet spreads out and a restart keeps the time.
+
+Two files may change the settings, each one JSON object, read when the
+service starts: the form's `/etc/werewolf/update-policy.json`, then the
+operator's `update-policy.json` in the config tar (howl's
+`--update-policy FILE`, checked by the same code, lib/update-policy.zig).
+
+```json
+{"window": "sun,wed 23:00-02:00", "high": "1h", "medium": "14d"}
+```
+
+- `window`: `daily` or days (`sun` to `sat`, joined by commas), then UTC
+  hours at least an hour apart, which may wrap past midnight. Default
+  `daily 02:00-05:00`.
+- `high`, `medium`, `low`: a whole number of `m`, `h` or `d`, at most the
+  limit. `0d` means the next window.
+- `limits`, in the form's file only: `{"high": ..., "medium": ..., "low":
+  ...}`, each at most werewolf's. A limit below its time lowers the time.
+
+A file is taken whole or refused whole, naming the key: an unknown or
+repeated key, a value of the wrong type or above its limit, or more than
+32 KiB. A form's file that is refused, or cannot be read, stops the
+operator's too, since its lowered limits are lost with it. `policy` logs
+each setting, who set it and its limit, and each refusal. Nothing turns
+updates off.
+
 ## What a check does
 
 | Step | |
@@ -45,7 +90,7 @@ service stays down.
 | `root` | Add busybox's links, copy werewolf's programs, the operator's `--app` and the build's other records forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
-| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init`, the module loader, the form's modules (`modules`, and on a distro's disk `modules-bitten` too, as the build's two stage0s are) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
+| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init`, the module loader, the form's modules in the build's order (`modules`, or `modules-bitten` on a distro's disk; lib/image.zig) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
 | `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, the kernel unwrapped to its `Image` for GRUB, which cannot run zboot, `sync`, set GRUB's `next_entry`, then write `attempt`, so an attempt is on record only for a slot that is armed. On werewolf's own disk, the kernel goes to the EFI partition as it is. |
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
@@ -219,7 +264,8 @@ it was written. Alpine's own patches on top of upstream are not counted.
 
 ```
 /data/svc/autoupdate/
-    log                 one JSON line per event
+    log                 one JSON line per event, never pruned (hourly
+                        checks come to about 2 MB a year)
     reports/TIME-BUILD.json
                         one per update staged, the newest 500 kept
     serial              the last release that committed, when following
@@ -237,6 +283,8 @@ it was written. Alpine's own patches on top of upstream are not counted.
                         the newest feed serial taken: none older is, even
                         once the kept feed has expired
     bad                 builds that rolled back, one per line
+    checked             exists once a check has finished; until then
+                        what a check stages boots within two minutes
     cache/              apk's downloads, one directory per root built
                         (root, kernel, stage0), holding what the last
                         good check installed; root's, lent to _update

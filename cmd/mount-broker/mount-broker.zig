@@ -1,39 +1,6 @@
-//! mount-broker: the few mounts werewolf makes once it has booted, made for
-//! root's own programs, which fence's Landlock domain keeps from mounting
-//! at all (docs/design/pledge.md).
-//!
-//!     mount-broker      serve, until the machine stops
-//!
-//! init starts it just before it becomes fence, so it alone stays outside
-//! fence's domain. It listens on /run/werewolf/mount-broker.sock, root's
-//! alone, answers only uid 0, and takes one word a connection:
-//!
-//!     grub       the filesystem holding GRUB's environment (werewolf.grubenv),
-//!                read-write at /run/werewolf/mnt/grub
-//!     esp        the EFI system partition (werewolf.esp), read-write at
-//!                /run/werewolf/mnt/esp
-//!     victim     the victim's filesystem (werewolf.victim), read-write at
-//!                /run/werewolf/mnt/victim
-//!     shutdown   /data unmounted, or read-only if busy; its LUKS mapping
-//!                closed; the victim's filesystem read-only, which writes
-//!                its journal in place for GRUB, and /victim unmounted if it
-//!                can be
-//!
-//! It answers one line: `ok PATH`, `ok`, or `no WHY`. A mount lasts as long
-//! as the connection that asked for it: when the asker closes it, or dies,
-//! the broker unmounts. Nothing an asker says but the word is used: which
-//! filesystem comes from the kernel command line, read as stage0 read it
-//! (lib/cmdline.zig), found by the UUID in its superblock, and how it is
-//! mounted is fixed here, as the one-way mount helper mounts: built detached (fsopen,
-//! fsmount) with nosuid, nodev, noexec and nosymfollow, then attached. bite
-//! names GRUB's environment and the victim's directory by where their links
-//! lead (readlink -f), so nothing here needs one followed.
-//!
-//! One process, with CAP_SYS_ADMIN alone and locked, under a seccomp filter
-//! of the calls above and its socket's, the classic mount(2) only to remount
-//! read-only and umount2 only plainly; it runs nothing. Two
-//! devices answering to the same UUID or serial are refused, not guessed
-//! between. Every event is one JSON line on the console.
+//! mount-broker mounts the few filesystems root's programs need after boot,
+//! when fence's Landlock domain forbids them to mount. Each connection sends
+//! one word and holds its mount until it closes. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -47,13 +14,13 @@ const mnt_dir = broker.mnt_dir;
 const cap_sys_admin = 21;
 const max_conns = 8;
 
-/// The words and their places are the library's (lib/broker.zig), so an
-/// asker checks the answer against the same places.
+/// Word comes from lib/broker.zig, so an asker checks the answer against
+/// the same places.
 const Word = broker.Word;
 
-/// A connection: what it has said so far, and the mount it holds. An
-/// asker that is gone while something else still holds its mount open
-/// keeps the slot (fd closed, holds set) until a plain unmount succeeds.
+/// Conn is a connection: what it has sent so far and the mount it holds.
+/// If the asker is gone but its mount is busy, the Conn stays an orphan
+/// (fd closed, holds set) until a plain unmount succeeds.
 const Conn = struct {
     fd: i32 = -1,
     buf: [16]u8 = undefined,
@@ -87,7 +54,8 @@ pub fn main() !void {
     serve(&log, listener);
 }
 
-/// The socket, the mount points, and the sandbox, before anyone can ask.
+/// setUp makes the mount points and the listening socket, then confines
+/// the process, all before anyone can ask.
 fn setUp() !i32 {
     _ = linux.mkdirat(linux.AT.FDCWD, mnt_dir, 0o700);
     inline for (.{
@@ -102,7 +70,7 @@ fn setUp() !i32 {
     ));
     var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
     @memcpy(addr.path[0..socket_path.len], socket_path);
-    // Root's alone from the moment it exists.
+    // umask 077 makes the socket root's alone from the moment it exists.
     const old = linux.syscall1(.umask, 0o077);
     _ = try sandbox.sys(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un)), "bind");
     _ = linux.syscall1(.umask, old);
@@ -117,8 +85,8 @@ fn setUp() !i32 {
         "mremap",  "clock_gettime", "nanosleep", "exit_group", "restart_syscall",
     }) |name| f.allow(name);
     f.allowArg("ioctl", 1, dm.dev_remove);
-    // The classic mount(2) only to remount read-only, at shutdown; umount2
-    // only plainly, never lazily: nothing it could mount or move with them.
+    // Classic mount(2) may only remount read-only (at shutdown), and
+    // umount2 may not detach lazily, so neither can mount or move anything.
     f.allowArg("mount", 3, linux.MS.REMOUNT | linux.MS.RDONLY);
     f.allowArg("umount2", 1, 0);
     try f.install();
@@ -131,7 +99,7 @@ fn serve(log: *Log, listener: i32) noreturn {
         var fds: [max_conns + 1]linux.pollfd = undefined;
         fds[0] = .{ .fd = listener, .events = linux.POLL.IN, .revents = 0 };
         for (conns, 1..) |c, i| fds[i] = .{ .fd = c.fd, .events = linux.POLL.IN, .revents = 0 };
-        // A second at a time while an orphaned mount waits to be unmounted.
+        // Wake each second while an orphaned mount waits to be unmounted.
         var waiting = false;
         for (conns) |c| if (c.orphan()) {
             waiting = true;
@@ -140,9 +108,8 @@ fn serve(log: *Log, listener: i32) noreturn {
         switch (linux.errno(n)) {
             .SUCCESS => {},
             .INTR => continue,
-            // Not an asker's doing, and not a reason to stop: the machine
-            // needs the broker to keep its slots. A moment, then again,
-            // rather than a loop that spins.
+            // Not a reason to stop: the machine needs the broker to keep
+            // its slots. Pause rather than spin.
             else => {
                 _ = linux.nanosleep(&.{ .sec = 0, .nsec = 100 * std.time.ns_per_ms }, null);
                 continue;
@@ -156,7 +123,8 @@ fn serve(log: *Log, listener: i32) noreturn {
     }
 }
 
-/// A new asker: root, or turned away; and room for it, or turned away.
+/// accept takes a new asker, turning it away unless it is root and there
+/// is a free Conn.
 fn accept(log: *Log, listener: i32, conns: *[max_conns]Conn) void {
     const rc = linux.accept4(listener, null, null, linux.SOCK.CLOEXEC);
     if (linux.errno(rc) != .SUCCESS) return;
@@ -182,7 +150,7 @@ fn accept(log: *Log, listener: i32, conns: *[max_conns]Conn) void {
     _ = linux.close(fd);
 }
 
-/// Bytes from an asker, or its end.
+/// heard reads from an asker and acts on its word, or hangs up.
 fn heard(log: *Log, c: *Conn, conns: *[max_conns]Conn) void {
     const rc = if (c.len < c.buf.len)
         linux.read(c.fd, c.buf[c.len..].ptr, c.buf.len - c.len)
@@ -221,7 +189,7 @@ fn heard(log: *Log, c: *Conn, conns: *[max_conns]Conn) void {
     reply(c.fd, std.mem.print(&buf, "ok {s}\n", .{word.place()}) catch unreachable);
 }
 
-/// An asker gone: its connection closed, and what it held unmounted.
+/// hangUp closes c's connection and releases what it held.
 fn hangUp(log: *Log, c: *Conn) void {
     if (c.open()) _ = linux.close(c.fd);
     c.fd = -1;
@@ -229,13 +197,11 @@ fn hangUp(log: *Log, c: *Conn) void {
     if (c.holds != null) release(log, c, true);
 }
 
-/// The mount c holds, unmounted plainly, never detached: a lazy unmount
-/// would hide a mount a process in the domain still has open, and the
-/// broker would say it was gone while that process kept writing through
-/// it, and would mount the same filesystem again for the next asker. If
-/// it is busy, the word stays c's, refused to other askers, and serve
-/// tries again each second until the kernel lets it go; the first refusal
-/// is said, and so is the unmount when it comes.
+/// release unmounts c's mount plainly, never lazily: a lazy unmount would
+/// hide a mount some process still has open, and the broker would report
+/// it gone and mount it again for the next asker. If it is busy, c keeps
+/// the word and serve retries each second. first is true on the first try,
+/// which alone logs the busy refusal.
 fn release(log: *Log, c: *Conn, first: bool) void {
     const w = c.holds.?;
     const err = linux.errno(linux.umount2(w.place(), 0));
@@ -243,7 +209,7 @@ fn release(log: *Log, c: *Conn, first: bool) void {
         if (first) log.event("busy", .{ .what = @tagName(w), .held = "by a process still" });
         return;
     }
-    // Unmounted, or no longer a mount at all (EINVAL): either way gone.
+    // EINVAL means it is no longer a mount; either way it is gone.
     if (err == .SUCCESS) {
         log.event("unmounted", .{ .what = @tagName(w), .late = !first });
     } else {
@@ -255,7 +221,7 @@ fn release(log: *Log, c: *Conn, first: bool) void {
     c.* = .{};
 }
 
-/// The kernel's struct ucred, what SO_PEERCRED gives.
+/// Ucred is the kernel's struct ucred, as SO_PEERCRED returns it.
 const Ucred = extern struct { pid: i32, uid: u32, gid: u32 };
 
 fn reply(fd: i32, text: []const u8) void {
@@ -264,11 +230,11 @@ fn reply(fd: i32, text: []const u8) void {
 
 // --- mounting ------------------------------------------------------------------
 
-/// The filesystem a word names, found and mounted at its place.
+/// mountWord finds the filesystem word names and mounts it at its place.
 fn mountWord(log: *Log, word: Word) !void {
-    // Each from the kernel command line itself, never from init's record
-    // of it under /run, which root in fence's domain can rewrite: the
-    // asker may name a word, not a device.
+    // Read the kernel command line itself, never a copy under /run, which
+    // root in fence's domain could rewrite: the asker names a word, not a
+    // device.
     var cmdline_buf: [4096]u8 = undefined;
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(readFile("/proc/cmdline", &cmdline_buf), &refused) orelse
@@ -297,15 +263,14 @@ fn mountWord(log: *Log, word: Word) !void {
 }
 
 const Kind = enum { ext4, xfs, btrfs, vfat };
-/// A device, and the kind of filesystem on it.
+/// Found is a device and the kind of filesystem on it.
 const Found = struct { dev: [:0]const u8, kind: Kind };
 const Want = union(enum) { uuid: [16]u8, serial: u32 };
 
-/// The one block device whose filesystem is want. Two that answer to it, as
-/// a clone or snapshot of a disk attached beside it would, or two FAT
-/// volumes sharing a 32-bit serial, are refused: which one GRUB reads is not
-/// the broker's to guess, and an attached disk must not be mounted, and
-/// written, in the real one's place.
+/// find returns the one block device whose filesystem is want. It fails if
+/// two match (a clone or snapshot attached beside the disk, or two FAT
+/// volumes sharing a serial): an attached disk must not be mounted and
+/// written in the real one's place.
 fn find(want: Want, dev_buf: *[64]u8) !Found {
     const dir = linux.openat(
         linux.AT.FDCWD,
@@ -350,11 +315,9 @@ fn identifyDevice(dev: [:0]const u8, want: Want) ?Kind {
     return if (std.meta.eql(id.want, want)) id.kind else null;
 }
 
-/// The filesystem a device's first bytes describe, and what names it, as
-/// each stores it: ext2/3/4 at 1 KiB in (magic 0xEF53), xfs at 0 ("XFSB"),
-/// btrfs at 64 KiB in ("_BHRfS_M"), each by UUID; FAT by its volume serial,
-/// beside "FAT32   " in a FAT32 boot sector, "FAT16   " or "FAT12   " in an
-/// older one.
+/// identify returns the filesystem in a device's first bytes and its UUID
+/// or serial: ext2/3/4 at 1 KiB (magic 0xEF53), xfs at 0 ("XFSB"), btrfs at
+/// 64 KiB ("_BHRfS_M"), and FAT by the volume serial in its boot sector.
 fn identify(b: []const u8) ?struct { kind: Kind, want: Want } {
     if (b.len >= 1024 + 0x78 and std.mem.readInt(u16, b[1024 + 0x38 ..][0..2], .little) == 0xEF53)
         return .{ .kind = .ext4, .want = .{ .uuid = b[1024 + 0x68 ..][0..16].* } };
@@ -383,16 +346,16 @@ const attr_nosuid = 0x2;
 const attr_nodev = 0x4;
 const attr_noexec = 0x8;
 const attr_nosymfollow = 0x200000;
-/// FSOPEN_CLOEXEC and FSMOUNT_CLOEXEC, both.
+/// fs_cloexec is both FSOPEN_CLOEXEC and FSMOUNT_CLOEXEC.
 const fs_cloexec = 1;
 const fsconfig_set_string = 1;
 const fsconfig_cmd_create = 6;
 const move_mount_f_empty_path = 0x4;
 const move_mount_t_empty_path = 0x40;
 
-/// dev, a kind of filesystem, read-write at place: built detached with
-/// nosuid, nodev, noexec and nosymfollow, then attached, so there is no
-/// moment it lacks them.
+/// attach mounts dev read-write at place. The mount is built detached with
+/// nosuid, nodev, noexec and nosymfollow, then attached, so it never
+/// exists without them.
 fn attach(kind: Kind, dev: [:0]const u8, place: [:0]const u8) !void {
     const name: [:0]const u8 = @tagName(kind);
     const fc = try fdOf(
@@ -451,11 +414,10 @@ fn fdOf(rc: usize, comptime what: []const u8) !i32 {
 
 // --- shutdown ------------------------------------------------------------------
 
-/// What stage 3 asks for last, as it did itself before fence: /data
-/// unmounted, or read-only if something holds it; the LUKS mapping under
-/// it closed; the victim's filesystem read-only, which writes what its
-/// journal holds into place so the next boot's GRUB reads it, and /victim
-/// unmounted if it can be. Each step done whatever the last one did.
+/// shutdown, asked for last by stage 3, unmounts /data (or remounts it
+/// read-only if busy), closes its LUKS mapping, and remounts /victim
+/// read-only, which writes its journal in place for GRUB, then tries to
+/// unmount it. Each step runs whatever the last one did.
 fn shutdown(log: *Log) void {
     linux.sync();
     var mounts_buf: [16 << 10]u8 = undefined;
@@ -481,8 +443,8 @@ fn shutdown(log: *Log) void {
     }
 }
 
-/// The filesystem under dir read-only: mount(2)'s remount, which changes the
-/// filesystem itself, and so writes its journal into place.
+/// remountReadOnly makes the filesystem under dir read-only. A classic
+/// remount changes the filesystem itself, so it writes its journal in place.
 fn remountReadOnly(dir: [*:0]const u8) bool {
     return linux.errno(linux.mount(
         null,
@@ -503,9 +465,9 @@ fn isMounted(mounts: []const u8, dir: []const u8) bool {
     return false;
 }
 
-// --- the machine's own record --------------------------------------------------
+// --- files ---------------------------------------------------------------------
 
-/// A file's bytes, as many as fit; none if it cannot be read.
+/// exists reports whether path can be opened.
 fn exists(path: [*:0]const u8) bool {
     const fd = linux.open(path, .{ .PATH = true, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
@@ -513,6 +475,7 @@ fn exists(path: [*:0]const u8) bool {
     return true;
 }
 
+/// readFile reads as much of path as fits in buf, or nothing if it cannot.
 fn readFile(path: [*:0]const u8, buf: []u8) []const u8 {
     const fd = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return "";
@@ -528,7 +491,8 @@ fn readFile(path: [*:0]const u8, buf: []u8) []const u8 {
 
 // --- the console ---------------------------------------------------------------
 
-/// JSON lines on stdout: `mount-broker: {"time":...,"event":...,...}`.
+/// Log writes events as JSON lines on stdout:
+/// `mount-broker: {"time":...,"event":...,...}`.
 const Log = struct {
     buf: [1024]u8 = undefined,
 

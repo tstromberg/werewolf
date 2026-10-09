@@ -1,10 +1,10 @@
 #!/bin/sh
-# lima-demo: the demo form in a Lima VM, made as a user makes one, with
-# `howl create` (docs/design/cli.md): its own boot disk, booted under
-# UEFI, on vzNAT, which this Mac reaches directly, since the demo runs no
-# ssh for Lima to forward through. It updates itself, keeps /data on its
-# disk and scans with grype. Used by `make demo` and `make demo-delete`;
-# see forms/demo/README.md.
+# lima-demo runs the demo form in a Lima VM, made as a user makes one, with
+# `howl create` (docs/design/cli.md). The VM has its own boot disk, boots
+# under UEFI, and uses vzNAT, which this Mac reaches directly; the demo runs
+# no ssh for Lima to forward through. The demo updates itself, keeps /data
+# on its disk and scans with grype. `make demo` and `make demo-delete` use
+# it; see forms/demo/README.md.
 #
 #   lima-demo          create the VM, or restart one made before, and print
 #                      the page's URL once it answers

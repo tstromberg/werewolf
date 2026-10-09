@@ -7,7 +7,7 @@ devices and automations on a network.
 | --- | --- |
 | Listens | tcp/8883, MQTT over TLS, 1.2 at least |
 | Sends | nothing: no bridges |
-| Runs as | `mosquitto` (uid 215), leashed |
+| Runs as | `mosquitto` (a uid of its own, its name's hash), leashed |
 | Keeps | retained messages, subscriptions and queues in `/data/svc/mosquitto` |
 | Config | `mosquitto/tls.crt` and `tls.key`; `mosquitto/passwords` (as `mosquitto_passwd` writes it); `mosquitto/acls` (Mosquitto's ACL file: who may publish and subscribe to what) |
 

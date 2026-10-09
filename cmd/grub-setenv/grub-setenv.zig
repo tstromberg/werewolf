@@ -1,23 +1,8 @@
-//! grub-setenv: set a variable in GRUB's environment block, in place.
+//! grub-setenv sets one variable in GRUB's environment block, in place.
 //!
 //!     grub-setenv FILE NAME VALUE
 //!
-//! The block is exactly 1024 bytes: a header line, name=value lines, then
-//! '#' to the end. GRUB rewrites it in place, sector by sector, and reads it
-//! without the filesystem's journal, so this writes the same bytes in the
-//! same place rather than a new file: a data write the journal never holds.
-//! Then it syncs the whole filesystem, not the file alone: btrfs answers a
-//! file's fsync from a log GRUB never reads, and only a commit puts the
-//! block where GRUB looks. slot-keep and slot-update use it on machines bite
-//! took over, each while it holds GRUB's filesystem from the mount broker,
-//! which lends it to one at a time.
-//!
-//! The block is read as GRUB reads it: a backslash escapes the character
-//! after it, so a value GRUB stored with a newline in it, escaped, stays one
-//! variable. A name is letters, digits and _, as grub.cfg can use one; a
-//! value has neither a newline nor a backslash, which GRUB would read as an
-//! escape. FILE must be a regular file, not reached through a link at its
-//! last component.
+//! See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -50,7 +35,11 @@ pub fn main(init: std.process.Init) !void {
         error.BadValue => fail("{s}: a value has no newline or backslash", .{args[2]}),
         error.Overflow => fail("{s} would overflow", .{path}),
     };
+    // GRUB reads the block's sectors directly, not through the journal, so
+    // overwrite them in place rather than rename a new file over it.
     f.writePositionalAll(io, &new, 0) catch |err| fail("{s}: {s}", .{ path, @errorName(err) });
+    // btrfs answers fsync from a log GRUB never replays; only syncfs commits
+    // the block where GRUB reads it.
     f.sync(io) catch |err| fail("{s}: {s}", .{ path, @errorName(err) });
     if (linux.errno(linux.syscall1(.syncfs, @intCast(f.handle))) != .SUCCESS)
         fail("{s}: its filesystem could not be synced", .{path});
@@ -61,10 +50,10 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(1);
 }
 
-/// old, with name set to value where it was, as GRUB's own save_env sets
-/// one, or last if it was not there; every other variable in its order,
-/// kept as GRUB wrote it; and '#' to the end. A value of the same length,
-/// as werewolf-a for werewolf-b, so changes no byte but its own.
+/// edit writes old to out with name set to value. Like GRUB's save_env, it
+/// keeps the variable's position, or appends it if absent, and keeps the
+/// others byte for byte, so a same-length value changes only its own bytes.
+/// It returns an error for a bad block, name or value, or if out overflows.
 fn edit(old: []const u8, name: []const u8, value: []const u8, out: *[size]u8) !void {
     if (old.len != size or !std.mem.startsWith(u8, old, header)) return error.NotABlock;
     if (name.len == 0) return error.BadName;
@@ -76,13 +65,13 @@ fn edit(old: []const u8, name: []const u8, value: []const u8, out: *[size]u8) !v
     var at: usize = header.len;
     var set = false;
     while (nextEntry(old, &at)) |entry| {
-        // Padding and comments are dropped; the padding has no newline, so
-        // it is the last entry.
+        // Drop comments and padding. The padding has no newline, so it is
+        // the last entry.
         if (entry.len == 0 or entry[0] == '#') continue;
         if (std.mem.startsWith(u8, entry, name) and entry.len > name.len and
             entry[name.len] == '=')
         {
-            // The variable's place, once: a second entry of it goes.
+            // Set it at its first entry; drop any duplicate.
             if (!set) w.print("{s}={s}\n", .{ name, value }) catch return error.Overflow;
             set = true;
             continue;
@@ -93,8 +82,9 @@ fn edit(old: []const u8, name: []const u8, value: []const u8, out: *[size]u8) !v
     @memset(out[w.end..], '#');
 }
 
-/// The entry at `at.*` in env, up to the next newline no backslash
-/// escapes, and `at.*` moved past it; null at the end.
+/// nextEntry returns the entry at `at.*` in env, up to the next unescaped
+/// newline, and moves `at.*` past it. It returns null at the end. A backslash
+/// escapes the next byte, as GRUB reads it.
 fn nextEntry(env: []const u8, at: *usize) ?[]const u8 {
     if (at.* >= env.len) return null;
     const start = at.*;
@@ -126,7 +116,7 @@ test edit {
     var out: [size]u8 = undefined;
     const old = block("saved_entry=werewolf-a\nnext_entry=werewolf-b\n");
 
-    // Set where it is: the same length changes no byte but its own.
+    // A same-length value changes only its own bytes.
     try edit(&old, "saved_entry", "werewolf-b", &out);
     try testing.expectEqualSlices(
         u8,
@@ -162,23 +152,22 @@ test "a value GRUB escaped stays one variable" {
     var out: [size]u8 = undefined;
     // grub-editenv stores a newline in a value as a backslash and the newline.
     const old = block("kernelopts=a\\\nb\nsaved_entry=werewolf-a\n");
-    // Another variable set: the escaped value is kept whole, as it was.
+    // Setting another variable keeps the escaped value whole.
     try edit(&old, "next_entry", "werewolf-b", &out);
     try testing.expectEqualSlices(
         u8,
         &block("kernelopts=a\\\nb\nsaved_entry=werewolf-a\nnext_entry=werewolf-b\n"),
         &out,
     );
-    // That variable set: all of its old entry goes, not its first line
-    // alone, and the new one takes its place.
+    // Setting that variable replaces its whole entry, not just the first line.
     try edit(&old, "kernelopts", "c", &out);
     try testing.expectEqualSlices(
         u8,
         &block("kernelopts=c\nsaved_entry=werewolf-a\n"),
         &out,
     );
-    // A variable twice, as no writer should leave it: set once, where the
-    // first was.
+    // A duplicate variable, which no writer should leave, is set once at
+    // the first entry.
     const twice = block("a=1\nb=2\na=3\n");
     try edit(&twice, "a", "4", &out);
     try testing.expectEqualSlices(u8, &block("a=4\nb=2\n"), &out);
@@ -211,7 +200,7 @@ test nextEntry {
     try testing.expectEqualStrings("c=\\\\", nextEntry(b, &at).?);
     try testing.expectEqualStrings("###", nextEntry(b, &at).?);
     try testing.expectEqual(null, nextEntry(b, &at));
-    // A backslash last escapes nothing, and stays.
+    // A trailing backslash escapes nothing and stays.
     at = 0;
     try testing.expectEqualStrings("x\\", nextEntry("x\\", &at).?);
 }

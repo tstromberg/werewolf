@@ -1,8 +1,7 @@
 # forms
 
-Each directory here is a form: what a werewolf machine is for
-([docs/forms.md](../docs/forms.md)). Everything about a form is in its
-directory, so a new form is a new directory and nothing else.
+Each directory here is a form ([docs/forms.md](../docs/forms.md)), and
+holds everything about it: a new form is a new directory.
 
 ```text
 forms/NAME/
@@ -19,8 +18,7 @@ forms/NAME/
 ```
 
 A form has the parts of every form in its chain, base first and its own
-last, so its files win: `make list-forms` shows each chain, and
-build/host/form (tools/form.zig) reads them for the build.
+last, so its files win; `make list-forms` shows each chain.
 
 ## form.yaml
 
@@ -81,6 +79,12 @@ Its `accounts:` are added again on a machine's update, which installs
 with apk, not apko (lib/compose.zig): a user's `homedir` is `/var/empty`
 (or `/dev/null`), since nothing on the machine would make another, and a
 service writes where its service file's `write` says.
+
+A service's `user` needs no account there: one apko.yaml does not name
+gets its own, uid and gid a hash of its name in 65536-2147483647, home
+`/var/empty`, shell `/sbin/nologin`, the same on every build. Name the
+account to pick its ids. Each service runs as a user of its own: two
+that share one, or a hash that lands on an id taken, fail the build.
 
 ## A new form
 

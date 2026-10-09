@@ -1,14 +1,14 @@
 #!/bin/sh
-# manifest: put a form's release files in DIST as the release names them,
-# FORM-ARCH-NAME, and write its manifest, FORM-ARCH.json. The manifest has
-# no serial and no signature; release/sign adds those. Everything
-# here follows from the files, so a rebuild writes the same manifest.
+# manifest copies a form's release files into DIST under their release
+# names, FORM-ARCH-NAME, and writes the form's manifest, FORM-ARCH.json. The
+# manifest has no serial or signature yet; release/sign adds them. Everything
+# in it follows from the files, so a rebuild writes the same manifest.
 #
 #   release/manifest FORM ARCH ROOTFS KERNEL DIST NAME=PATH...
 #
-# ROOTFS is the form's apko rootfs, whose packages the manifest lists.
-# KERNEL is a file naming the kernel package. `build` is the first 16 hex
-# digits of the sha256 of the files' sha256sum lines, in the order given.
+# ROOTFS is the form's apko rootfs; the manifest lists its packages. KERNEL
+# is a file that names the kernel package. `build` is the first 16 hex digits
+# of the sha256 of the files' sha256sum lines, in the order given.
 # See docs/releases.md.
 set -eu
 
@@ -32,8 +32,8 @@ for f; do
 done
 build=$(printf %s "$sums" | sha256 | cut -c1-16)
 
-# The installed database: one stanza per package, P: name, V: version,
-# o: origin, separated by blank lines.
+# apk's installed database has one stanza per package (P: name, V: version,
+# o: origin), with a blank line between stanzas.
 packages=$(bsdtar -xOf "$rootfs" usr/lib/apk/db/installed | awk '
 	function emit() { if (p != "") print p, v, (o != "" ? o : p); p = v = o = "" }
 	/^P:/ { p = substr($0, 3) } /^V:/ { v = substr($0, 3) } /^o:/ { o = substr($0, 3) }
@@ -41,8 +41,8 @@ packages=$(bsdtar -xOf "$rootfs" usr/lib/apk/db/installed | awk '
 	awk '{ printf "%s    {\"name\": \"%s\", \"version\": \"%s\", \"origin\": \"%s\"}", (NR > 1 ? ",\n" : ""), $1, $2, $3 }')
 [ -n "$packages" ] || { echo "release/manifest: no packages in $rootfs" >&2; exit 1; }
 
-# werewolf's own advisories (release/advisories), checked line by line: a
-# line this cannot read fails the release rather than ship unread.
+# Read werewolf's own advisories (release/advisories) line by line. A line
+# this cannot parse fails the release, so nothing ships unread.
 advisories=$(awk '
 	/^[ \t]*(#|$)/ { next }
 	{

@@ -12,14 +12,3 @@ contents:
   packages:
     - valkey-9.1
     - valkey-9.1-cli        # the operator's client, and make check's
-
-accounts:
-  groups:
-    - groupname: valkey
-      gid: 210
-  users:
-    - username: valkey
-      uid: 210
-      gid: 210
-      homedir: /var/empty
-      shell: /sbin/nologin

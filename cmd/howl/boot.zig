@@ -1,8 +1,5 @@
-//! A machine here coming up, as create and run watch it: its console,
-//! until init says it is up, with its own times for the kernel and
-//! userland; its address, from Lima's leases, where it has one to wait
-//! for; and, for a form that serves ssh, its sshd's banner, so "up" means
-//! reachable.
+//! boot watches a local machine come up for create and run: its console,
+//! its address in the DHCP leases, and its sshd banner. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -13,47 +10,46 @@ const posix = std.posix;
 const lima = @import("lima.zig");
 const progress = @import("progress.zig");
 
-/// init's line that says a boot finished: "werewolf: up in 0.120s (the
-/// kernel 0.051s, userland 0.069s)".
+/// up_line starts the line init prints when boot finishes:
+/// "werewolf: up in 0.120s (the kernel 0.051s, userland 0.069s)".
 pub const up_line = "werewolf: up in ";
 
-/// How a boot ended, as its console says: init's up line, a kernel panic,
-/// or, when the time to wait ran out, neither.
+/// Outcome is how a boot ended: up, a kernel panic, or late when the wait
+/// ran out first.
 pub const Outcome = enum { up, panic, late };
 
-/// What console text says of a boot so far: up, a panic, or null for
-/// neither yet.
+/// outcome reports what console text says of a boot so far, or null if it
+/// has neither come up nor panicked.
 pub fn outcome(text: []const u8) ?Outcome {
     if (std.mem.find(u8, text, up_line) != null) return .up;
     if (std.mem.find(u8, text, "Kernel panic") != null) return .panic;
     return null;
 }
 
-/// How long a machine may take to come up.
 const wait_seconds = 180;
-/// How long its sshd may take to answer, once it is up.
+/// ssh_seconds bounds the wait for sshd after the machine is up.
 const ssh_seconds = 30;
 
-/// How a machine started, as create tells it: when its console first
-/// spoke, its own account of its boot (init's "up in" line), and when its
-/// address came.
+/// Boot is what watch saw, for create to report.
 pub const Boot = struct {
     up: bool = false,
     address: ?[]const u8 = null,
-    /// From the start to the console's first word: the VM powering on.
+    /// power_ns runs from the start to the console's first output.
     power_ns: ?i96 = null,
-    /// init's own times, as it says them: "0.051s".
+    /// kernel and userland are init's times, as text: "0.051s".
     kernel: []const u8 = "",
     userland: []const u8 = "",
-    /// From up to the lease.
+    /// address_ns runs from up to the DHCP lease.
     address_ns: ?i96 = null,
-    /// The engine ended before the machine was up, as Firecracker's
-    /// supervisor says on the console: no use waiting on.
+    /// ended is set when Firecracker's supervisor reports on the console
+    /// that the VM exited before it was up, so waiting longer is pointless.
     ended: bool = false,
 };
 
-/// Wait for a machine started now to boot, and, given its MAC, for its
-/// address too: its console from seen, and the leases, as spin shows it.
+/// watch polls console_log from offset seen until the machine is up and,
+/// when m names its MAC, until its lease, expiring after before, gives
+/// its address.
+/// It gives up after wait_seconds and returns what it saw.
 pub fn watch(
     io: Io,
     gpa: Allocator,
@@ -72,7 +68,7 @@ pub fn watch(
     for (0..wait_seconds * 20) |_| {
         if (!b.up) if (Dir.cwd().openFile(io, console_log, .{})) |f| {
             defer f.close(io);
-            // A log shorter than before was started again.
+            // A log shorter than seen was truncated by a restart.
             const len = f.length(io) catch 0;
             const from = if (seen <= len) seen else 0;
             if (len > from and
@@ -86,7 +82,7 @@ pub fn watch(
                 up_at = Io.Clock.awake.now(io);
                 if (m == null) return b;
             } else if (std.mem.find(u8, buf[0..n], "werewolf: firecracker exited ")) |at| {
-                // Exit 0 is a reboot, which the supervisor runs again.
+                // Exit 0 is a reboot, which the supervisor restarts.
                 const rest = buf[at + "werewolf: firecracker exited ".len .. n];
                 if (!std.mem.startsWith(u8, rest, "0:")) {
                     b.ended = true;
@@ -115,8 +111,8 @@ pub fn watch(
     return b;
 }
 
-/// init's times in its "werewolf: up in 0.120s (the kernel 0.051s,
-/// userland 0.069s)" line, if text holds one.
+/// upLine returns the kernel and userland times from init's up line, or
+/// null if text holds none.
 fn upLine(text: []const u8) ?struct { kernel: []const u8, userland: []const u8 } {
     const at = std.mem.find(u8, text, up_line) orelse return null;
     const line = text[at..(std.mem.findScalarPos(u8, text, at, '\n') orelse text.len)];
@@ -129,7 +125,7 @@ fn upLine(text: []const u8) ?struct { kernel: []const u8, userland: []const u8 }
     return .{ .kernel = line[ki..ke], .userland = line[ui..ue] };
 }
 
-/// The last line text holds with anything in it, as the spinner shows one.
+/// lastLine returns the last non-blank line of text, cleaned for the spinner.
 fn lastLine(gpa: Allocator, text: []const u8) ![]const u8 {
     var it = std.mem.splitBackwardsScalar(u8, text, '\n');
     while (it.next()) |l| {
@@ -139,9 +135,9 @@ fn lastLine(gpa: Allocator, text: []const u8) ![]const u8 {
     return "";
 }
 
-/// Wait for an sshd at host:port to say who it is, "SSH-", as spin shows
-/// it: a TCP connection alone proves nothing through QEMU's forwarding,
-/// which accepts before the machine listens. Whether it did.
+/// awaitSsh reports whether an sshd at host:port sent its "SSH-" banner
+/// within ssh_seconds. A bare TCP connect proves nothing: QEMU's port
+/// forwarding accepts before the machine listens.
 pub fn awaitSsh(io: Io, host: []const u8, port: u16, spin: *progress.Spinner) bool {
     const addr = net.IpAddress.parse(host, port) catch return false;
     const started = Io.Clock.awake.now(io);
@@ -154,8 +150,8 @@ pub fn awaitSsh(io: Io, host: []const u8, port: u16, spin: *progress.Spinner) bo
 }
 
 fn banner(io: Io, addr: net.IpAddress) bool {
-    // No timeout: Zig's std cannot yet connect with one, and a machine
-    // here answers a closed port at once, with a reset.
+    // No connect timeout: Zig's std has none yet, and a local machine
+    // answers a closed port at once with a reset.
     const s = addr.connect(io, .{ .mode = .stream }) catch return false;
     defer s.close(io);
     var fds = [1]posix.pollfd{.{ .fd = s.socket.handle, .events = posix.POLL.IN, .revents = 0 }};

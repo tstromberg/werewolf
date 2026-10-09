@@ -1,14 +1,5 @@
-//! An ssh host key, made once by ssh-keygen and kept whole: what sshd-start
-//! (root's sshd) and ssh-host-key (a leashed sshd's) share. ssh-keygen
-//! makes every key, as a distribution's first boot does: nothing here
-//! generates key material, only keeps what ssh-keygen wrote whole.
-//!
-//! A key is made as KEY.new, both halves synced, and renamed into place
-//! public half first, so a boot cut short leaves either a whole key or
-//! none: never a private half alone, nor a cut-off one, that every later
-//! boot would keep. A key whose public half is missing has it made again
-//! from the key. Its fingerprint is SHA-256 of the public key, as
-//! ssh-keygen -l gives it, computed here.
+//! hostkey makes an ssh host key once with ssh-keygen and installs it so a
+//! crash never leaves half a key. See lib/README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,8 +11,8 @@ pub const keygen = "/usr/bin/ssh-keygen";
 
 pub const Kept = enum { new, kept };
 
-/// key, made if it is not there; its public half made again if only that
-/// is missing. Whether it was made now.
+/// keep makes key if it is missing, or rebuilds only its public half if
+/// that is missing. It returns .new if it made the key now.
 pub fn keep(io: Io, gpa: Allocator, key: []const u8) !Kept {
     const dir = std.fs.path.dirname(key) orelse return error.NoDirectory;
     const pub_path = try gpa.print("{s}.pub", .{key});
@@ -41,14 +32,14 @@ pub fn keep(io: Io, gpa: Allocator, key: []const u8) !Kept {
     return .kept;
 }
 
-/// An Ed25519 key, made by ssh-keygen as key.new and key.new.pub, each
-/// synced, then the public half renamed into place and the key last: the
-/// key's presence says the pair is whole.
+/// make runs ssh-keygen for an Ed25519 key as key.new and key.new.pub,
+/// syncs both, and renames the public half into place first and the key
+/// last, so the key exists only if the pair is whole.
 pub fn make(io: Io, gpa: Allocator, key: []const u8) !void {
     const dir = std.fs.path.dirname(key) orelse return error.NoDirectory;
     const new = try gpa.print("{s}.new", .{key});
     const new_pub = try gpa.print("{s}.new.pub", .{key});
-    // What a boot cut short left: ssh-keygen would ask before overwriting.
+    // Remove what an interrupted boot left; ssh-keygen would prompt.
     for ([_][]const u8{ new, new_pub }) |p| Dir.cwd().deleteFile(io, p) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
@@ -68,9 +59,9 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.standard;
 pub const fingerprint_len = "SHA256:".len + b64.Encoder.calcSize(Sha256.digest_length) - 1;
 
-/// An OpenSSH public key line's fingerprint, as ssh-keygen -l says it:
-/// SHA256: and the SHA-256 of the key's decoded blob, in base64 without
-/// its padding. Null if the line is not TYPE BASE64 [COMMENT].
+/// fingerprint returns an OpenSSH public key line's fingerprint as
+/// ssh-keygen -l prints it: SHA256: and unpadded base64. It returns null if
+/// the line is not TYPE BASE64 [COMMENT].
 pub fn fingerprint(line: []const u8, out: *[fingerprint_len]u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, line, " \n");
     _ = words.next() orelse return null;
@@ -84,14 +75,14 @@ pub fn fingerprint(line: []const u8, out: *[fingerprint_len]u8) ?[]const u8 {
     var full: [b64.Encoder.calcSize(Sha256.digest_length)]u8 = undefined;
     _ = b64.Encoder.encode(&full, &digest);
     @memcpy(out[0.."SHA256:".len], "SHA256:");
-    @memcpy(out["SHA256:".len..], full[0 .. full.len - 1]); // its one '='
+    @memcpy(out["SHA256:".len..], full[0 .. full.len - 1]); // drop the one '='
     return out;
 }
 
-/// Whether path is on RAM (tmpfs), so nothing kept there outlives the boot:
-/// /data, where a machine has no disk for it.
+/// onRam reports whether path is on tmpfs, so nothing kept there outlives
+/// the boot. /data is tmpfs on a machine with no disk for it.
 pub fn onRam(path: [*:0]const u8) bool {
-    // struct statfs, whose first word is the filesystem's type.
+    // struct statfs; its first word is the filesystem type.
     var buf: [128]u8 align(8) = undefined;
     const rc = linux.syscall2(.statfs, @intFromPtr(path), @intFromPtr(&buf));
     if (linux.errno(rc) != .SUCCESS) return false;
@@ -109,8 +100,8 @@ fn syncFile(io: Io, path: []const u8) !void {
     try f.sync(io);
 }
 
-/// dir's entries on the disk: its own descriptor, as Dir's may be O_PATH,
-/// which cannot be synced.
+/// syncDir flushes dir's entries to disk. It opens its own descriptor
+/// because a Dir may be O_PATH, which cannot be synced.
 fn syncDir(gpa: Allocator, dir: []const u8) !void {
     const rc = linux.open(
         try gpa.dupeSentinel(u8, dir, 0),
@@ -123,7 +114,7 @@ fn syncDir(gpa: Allocator, dir: []const u8) !void {
 }
 
 test fingerprint {
-    // A key ssh-keygen made, and the fingerprint ssh-keygen -l gave it.
+    // A key from ssh-keygen, and the fingerprint ssh-keygen -l gave it.
     var fp: [fingerprint_len]u8 = undefined;
     try std.testing.expectEqualStrings(
         "SHA256:xt7MKcl8CR6CVB+wYaRvOu2p3Xo8cPAYEwXx4ZNcIB8",

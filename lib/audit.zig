@@ -1,40 +1,33 @@
-//! audit: the kernel's audit subsystem, over its netlink socket, for the
-//! two programs that speak to it. init turns on one rule, a record of
-//! every exec the kernel refused (a shell that is not there, a program
-//! dropped where nothing may run, a path Landlock denies), and locks the
-//! configuration for the life of the machine; posture asks the kernel to
-//! stop and expects to be refused. No audit daemon: with none, the kernel
-//! prints each record to its log, and so to the console, rate-limited by
-//! printk's own limit, and never makes a process wait for the log.
+//! audit talks to the kernel's audit subsystem over netlink. init uses it
+//! to log every refused exec and lock the configuration; posture checks
+//! that the lock holds. See lib/README.md.
 
 const std = @import("std");
 const seal = @import("seal");
 const linux = std.os.linux;
 
-/// linux/audit.h: the message types sent here.
+/// Message types from linux/audit.h.
 const msg_get = 1000;
 const msg_set = 1001;
 const msg_add_rule = 1011;
 
-/// Where a rule applies: as a system call returns, or to each record as it
-/// is written (the exclude list, which names record types to leave out).
+/// Rule lists: filter_exit matches as a system call returns; filter_exclude
+/// names record types to drop as they are written.
 const filter_exit = 4;
 const filter_exclude = 5;
 const always = 2;
 
-/// Rule fields, each compared equal.
+/// Rule fields, each compared with equal.
 const field_arch = 11;
 const field_msgtype = 12;
 const field_success = 104;
 const equal = 0x40000000;
 
-/// The records a refused exec would bring besides SYSCALL (who, what
-/// call, which error) and PATH (the file): its working directory, its
-/// arguments, its command line and an end-of-event marker. Left out, so a
-/// refusal is two lines on the console, not six.
+/// left_out drops the CWD, EXECVE, EOE and PROCTITLE records, so a refused
+/// exec is two lines on the console (SYSCALL and PATH), not six.
 const left_out = [_]u32{ 1307, 1309, 1320, 1327 };
 
-/// struct audit_status: what AUDIT_SET changes, by its mask.
+/// Status is struct audit_status; mask says which fields AUDIT_SET changes.
 const Status = extern struct {
     mask: u32,
     enabled: u32 = 0,
@@ -51,11 +44,11 @@ const Status = extern struct {
 const status_enabled = 0x0001;
 const status_backlog_wait_time = 0x0040;
 
-/// enabled: off, on, or on and locked until reboot.
+/// locked is the enabled value for on and locked until reboot (0 is off, 1 on).
 pub const locked = 2;
 
-/// struct audit_rule_data, with no string buffer: every field here is a
-/// number.
+/// Rule is struct audit_rule_data without the string buffer, since every
+/// field used here is a number.
 const Rule = extern struct {
     flags: u32,
     action: u32 = always,
@@ -80,20 +73,17 @@ const Rule = extern struct {
 };
 
 pub const Error = error{
-    /// The kernel has no audit, or this is not the first PID namespace.
+    /// NoAudit means the kernel has no audit, or this is not the first PID namespace.
     NoAudit,
-    /// The kernel said no: no CAP_AUDIT_CONTROL, or the configuration is
-    /// locked.
+    /// Refused means no CAP_AUDIT_CONTROL, or the configuration is locked.
     Refused,
-    /// Anything else the kernel answered.
+    /// Failed is any other answer from the kernel.
     Failed,
 };
 
-/// Audit on, one rule, every record of a refused exec, the four records
-/// that would pad it left out, and the configuration locked: nothing can
-/// add, remove or stop until a reboot. A process that would wait for room
-/// in the log's queue does not wait (backlog_wait_time 0): the record is
-/// lost and counted instead.
+/// enable turns audit on with one rule, which logs every refused exec, and
+/// locks the configuration until reboot. backlog_wait_time is 0, so a full
+/// queue loses and counts records rather than block a process.
 pub fn enable() Error!void {
     const sock = try open();
     defer _ = linux.close(sock);
@@ -106,8 +96,7 @@ pub fn enable() Error!void {
     var refused_exec: Rule = .{ .flags = filter_exit };
     refused_exec.syscall(.execve);
     refused_exec.syscall(.execveat);
-    // Native calls alone: a 32-bit one, which the seal ends anyway, never
-    // matches.
+    // Match native calls only; the seal kills 32-bit ones anyway.
     refused_exec.field(field_arch, seal.native_arch);
     refused_exec.field(field_success, 0);
     try send(sock, msg_add_rule, std.mem.asBytes(&refused_exec));
@@ -120,10 +109,9 @@ pub fn enable() Error!void {
     try send(sock, msg_set, std.mem.asBytes(&lock));
 }
 
-/// Ask the kernel to set enabled, as a program that would stop the log
-/// would. On a sealed machine the answer is error.Refused: PID 1 dropped
-/// CAP_AUDIT_CONTROL from the bounding set, and the configuration is
-/// locked besides.
+/// setEnabled asks the kernel to set enabled, as an attacker stopping the
+/// log would. On a sealed machine it returns error.Refused: PID 1 dropped
+/// CAP_AUDIT_CONTROL, and the configuration is locked as well.
 pub fn setEnabled(enabled: u32) Error!void {
     const sock = try open();
     defer _ = linux.close(sock);
@@ -131,8 +119,8 @@ pub fn setEnabled(enabled: u32) Error!void {
     try send(sock, msg_set, std.mem.asBytes(&s));
 }
 
-/// enabled as the kernel has it now: 0, 1 or locked. Reading it takes
-/// CAP_AUDIT_CONTROL, as setting it does: error.Refused without.
+/// enabledNow returns the kernel's enabled value: 0, 1 or locked. Reading
+/// it needs CAP_AUDIT_CONTROL; without it the error is error.Refused.
 pub fn enabledNow() Error!u32 {
     const sock = try open();
     defer _ = linux.close(sock);
@@ -158,7 +146,7 @@ pub fn enabledNow() Error!u32 {
         .CONNREFUSED => error.NoAudit,
         else => error.Failed,
     };
-    // The status, or, refused, an error message in its place.
+    // The reply is the status, or an error message if refused.
     var reply: [header + @sizeOf(Status)]u8 align(4) = undefined;
     const n = linux.recvfrom(sock, &reply, reply.len, 0, null, null);
     if (linux.errno(n) != .SUCCESS or n < header + 8) return error.Failed;
@@ -184,8 +172,8 @@ fn open() Error!i32 {
     };
 }
 
-/// One request, acknowledged: the kernel answers every audit request with
-/// an error message, whose code is 0 when it was done.
+/// send sends one request and waits for the kernel's acknowledgment, an
+/// error message whose code is 0 on success.
 fn send(sock: i32, msg_type: u16, payload: []const u8) Error!void {
     const header = @sizeOf(linux.nlmsghdr);
     var buf: [header + @sizeOf(Rule)]u8 align(4) = undefined;

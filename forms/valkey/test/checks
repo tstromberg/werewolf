@@ -3,7 +3,7 @@
 # a key directory and then SAVE, fails at its first word, as do the rest
 # of @admin (DEBUG is refused by enable-debug-command no, before the ACL
 # is asked). valkey-cli is the form's own.
-ok  valkey-user      p=$(pidof valkey-server); grep -q '^Uid:[[:space:]]*210[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  valkey-user      p=$(pidof valkey-server); u=$(grep '^valkey:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  valkey-ping      i=0; until [ "$(valkey-cli -s /run/svc/valkey/valkey.sock ping 2>/dev/null)" = PONG ]; do i=$((i + 1)); [ $i -le 60 ] || { echo "no PONG on the socket"; exit 1; }; sleep 1; done
 ok  valkey-socket    [ "$(stat -c '%U:%G:%a' /run/svc/valkey/valkey.sock)" = valkey:valkey:660 ] && ! chpst -u nobody valkey-cli -s /run/svc/valkey/valkey.sock ping 2>/dev/null | grep -q PONG
 ok  valkey-works     [ "$(valkey-cli -s /run/svc/valkey/valkey.sock set werewolf check)" = OK ] && [ "$(valkey-cli -s /run/svc/valkey/valkey.sock get werewolf)" = check ] && [ "$(valkey-cli -s /run/svc/valkey/valkey.sock eval 'return 1' 0)" = 1 ]

@@ -1,51 +1,6 @@
-//! stage0: PID 1 on every werewolf machine, from the kernel to the root's
-//! /init. It raises lockdown, loads the modules, mounts the form's
-//! root.erofs read-only directly as the root, and hands over to its /init.
-//! Nothing can write the root: what the running system writes goes to /run,
-//! /tmp, /var/tmp or /data, and the root is the image, byte for byte, on
-//! every boot.
-//!
-//! The image carries a dm-verity hash tree after its data, and this
-//! initramfs the parameters to open it with, /verity, both from the same
-//! build (lib/verity.zig). The root is mounted through dm-verity, so every
-//! block read from it is checked against the tree, and the tree against its
-//! root hash: a block that does not match fails to read
-//! (docs/design/verified-boot.md).
-//!
-//! The image is a slot's on a machine with slots, found on a filesystem the
-//! kernel command line names:
-//!
-//!     werewolf.victim=UUID:DIR   the filesystem, and the directory holding a/ and b/
-//!     werewolf.slot=a|b          which slot this boot is
-//!     werewolf.deadman=SECONDS   the deadman's wait, 1 to 600, taken only
-//!                                from a DEV build's root (make check-deadman)
-//!
-//! (both, or neither); or, booted directly, /root.erofs in this initramfs,
-//! which the build appends (make run), or a disk of its own:
-//!
-//!     werewolf.root=DEV          the disk holding the image, by its name in
-//!                                /dev (Firecracker's vdc), with no slot
-//!
-//! Every werewolf.* word on the line is checked first, by lib/cmdline.zig,
-//! which every later program reads it with: a line it refuses ends the
-//! boot here, so none of them meets one.
-//!
-//! A disk is read as the root is used, where the kernel unpacks an
-//! appended image into RAM before stage0 starts, and nothing frees it: on
-//! Firecracker 20 MB for the machine's life, and 26 ms of every boot,
-//! against 10 ms more of userland reading from the disk.
-//!
-//! Getting back to a slot that works is the loader's job (GRUB or
-//! systemd-boot). A new slot boots once; if anything here fails, stage0
-//! exits, the kernel panics, panic=10 reboots it, and the loader boots the
-//! slot that last committed. A slot that boots but never commits is caught
-//! by the deadman.
-//!
-//! It is the kernel's first process, so it uses the kernel directly: no
-//! shell, no blkid, no mount program. It finds the filesystem by reading
-//! each block device's superblock for the UUID, and refuses two: the root
-//! image is verified, but /data and the config tar come from that
-//! filesystem too, and a clone attached beside it must not stand in.
+//! stage0 is the initramfs's PID 1. It raises lockdown, loads modules,
+//! opens the root image through dm-verity, mounts it read-only as /, and
+//! execs its /init. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -54,46 +9,41 @@ const verity = @import("verity");
 const cmdline = @import("cmdline");
 const MS = linux.MS; // ziglint-ignore: Z032
 
-/// How long a slot has to commit before the deadman reboots it.
+/// deadman_after is how many seconds a slot has to commit before the
+/// deadman reboots it.
 const deadman_after = 600;
 const find_for = 10; // seconds to wait for the victim's disk to appear
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
-    // How long the kernel took: the boot clock as the first program starts.
-    // init shows it with its own, and the demo's page with the services'.
+    // The boot clock now is how long the kernel took.
     const kernel_ms = bootMs();
 
     mountFs("proc", "/proc", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     mountFs("sys", "/sys", "sysfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     mountFs("dev", "/dev", "devtmpfs", MS.NOSUID | MS.NOEXEC);
 
-    // The whole line, checked here for every program after: one that
-    // reads two ways, or not at all, ends the boot before anything does.
+    // Check the whole line once, for every later program: a line that is
+    // ambiguous or malformed ends the boot here.
     var refused: cmdline.Failure = .{};
     const boot = cmdline.parse(readAll(gpa, "/proc/cmdline"), &refused) orelse
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
 
-    // Lockdown at integrity before any module: the kernel then loads only
-    // those signed by its key, and refuses the rest. It only rises (writing
-    // the level it has is refused too, so it is read first); the root's init
-    // finds it raised.
+    // Raise lockdown to integrity before any module loads, so the kernel
+    // refuses unsigned ones. Writing the current level is refused too, so
+    // read it first.
     mountFs("securityfs", "/sys/kernel/security", "securityfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     const lockdown = "/sys/kernel/security/lockdown";
     if (!isLocked(readAll(gpa, lockdown)) and
         !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
 
-    // Every module the form needs, then the loader closes for good: the
-    // root that follows finds it closed and loads nothing. modload is told
-    // the tags this machine needs, a line each. Hyper-V's first: the kernel
-    // registers VMBus, built in, only on Hyper-V (Azure), and the slot's
-    // disk may sit behind it, so its drivers load before the search; and
-    // FAT's on werewolf's own disk (werewolf.esp), for its EFI partition. The
-    // disk is looked for while the drivers load, its superblock needing
-    // none, and modload then told its filesystem, for the modules that
-    // alone needs (xfs's, btrfs's): none for werewolf's own ext4, or with
-    // no slot.
+    // modload loads the form's modules and closes the loader for good. It
+    // reads tags on stdin, one per line. "hyperv" goes first, since the
+    // slot's disk may sit behind VMBus, which exists only on Hyper-V (Azure).
+    // "esp" adds FAT for werewolf's own EFI partition. The disk search runs
+    // while drivers load; then modload is told the filesystem kind (xfs and
+    // btrfs need modules; ext4 does not).
     var loader: ?std.process.Child = std.process.spawn(io, .{
         .argv = &.{"/usr/lib/werewolf/modload"},
         .stdin = .pipe,
@@ -119,15 +69,15 @@ pub fn main(init: std.process.Init) !void {
         } else |_| false;
         if (!ok) say("not every module loaded; see above", .{});
     }
-    // The initramfs stays in RAM after the switch, as nothing frees it:
-    // its modules, loaded or refused now, would hold 14 MB for good.
+    // Nothing frees the initramfs after the switch, so delete its 14 MB of
+    // modules now that they are loaded or refused.
     std.Io.Dir.cwd().deleteTree(io, "/usr/lib/modules") catch |err|
         say("modules not freed: {s}", .{@errorName(err)});
     const modules_ms = bootMs();
 
     var img: [:0]const u8 = "/root.erofs";
     if (boot.root.len > 0) {
-        // Its driver loaded with the rest; its node may still be coming.
+        // The driver has loaded, but devtmpfs may not have made the node yet.
         img = try gpa.printSentinel("/dev/{s}", .{boot.root}, 0);
         var waited: usize = 0;
         while (linux.errno(linux.access(img, linux.F_OK)) != .SUCCESS) : (waited += 1) {
@@ -158,11 +108,9 @@ pub fn main(init: std.process.Init) !void {
         );
         slot_ms = bootMs();
     }
-    // Read-only, and nothing over it: no overlay to write into. dm-verity
-    // maps the image, checking each block as it is read: a disk as it is,
-    // and a file, in a slot's filesystem or in this initramfs, through a
-    // read-only loop device. The device node is made from the number dm
-    // gives, not waited for from devtmpfs.
+    // dm-verity checks each block of the image as it is read. A disk is
+    // mapped directly; a file goes through a read-only loop device. The
+    // node is made from dm's device number rather than waiting on devtmpfs.
     const params = verity.Params.parse(readAll(gpa, "/verity")) catch
         fail("no root hash in /verity", .{});
     const loop = if (boot.root.len > 0) null else loopDevice(gpa, img) catch |err|
@@ -173,8 +121,8 @@ pub fn main(init: std.process.Init) !void {
     const sectors = params.data_blocks * (verity.block_size / 512);
     const dev = dm.create("root", "verity", sectors, table) catch |err|
         fail("cannot open {s} through dm-verity: {s}", .{ img, @errorName(err) });
-    // dm-verity holds the loop device now: autoclear detaches the image
-    // when it lets go.
+    // dm-verity holds the loop device now; autoclear detaches it when
+    // dm-verity lets go.
     if (loop) |l| _ = linux.close(l.fd);
     const root_dev = "/dev/mapper/root";
     const made = linux.mknodat(linux.AT.FDCWD, root_dev, linux.S.IFBLK | 0o600, dev);
@@ -198,9 +146,9 @@ pub fn main(init: std.process.Init) !void {
         );
 
     if (boot.slot) |slot| {
-        // A shorter wait is for testing the deadman (make check-deadman),
-        // so only a DEV build's root, verified now, may ask for one: a
-        // released machine waits its ten minutes whatever its command line.
+        // A shorter wait is for make check-deadman, so only a DEV build's
+        // root, now verified, may ask for one. A release always waits ten
+        // minutes.
         var after: u32 = deadman_after;
         if (boot.deadman > 0) {
             if (linux.errno(linux.access("/root/usr/share/werewolf/dev", linux.F_OK)) == .SUCCESS) {
@@ -211,7 +159,7 @@ pub fn main(init: std.process.Init) !void {
         deadman(@tagName(slot), after);
     }
 
-    // The root is read-only, so its mount points are in the image already.
+    // The root is read-only, so the image already has these mount points.
     for ([_][:0]const u8{ "dev", "proc", "sys", "victim" }) |m| {
         if (std.mem.eql(u8, m, "victim") and boot.slot == null) continue;
         const from = try gpa.printSentinel("/{s}", .{m}, 0);
@@ -219,21 +167,16 @@ pub fn main(init: std.process.Init) !void {
         if (linux.errno(linux.mount(from, to, null, MS.MOVE, 0)) != .SUCCESS)
             fail("cannot move /{s} into the root", .{m});
     }
-    // What switch_root does: put the new root over / and start its init
-    // inside it.
+    // Do what switch_root does: move the new root over / and chroot into it.
     if (linux.errno(linux.chdir("/root")) != .SUCCESS) fail("cannot enter /root", .{});
     if (linux.errno(linux.mount(".", "/", null, MS.MOVE, 0)) != .SUCCESS)
         fail("cannot move the root over /", .{});
     if (linux.errno(linux.chroot(".")) != .SUCCESS) fail("cannot enter the root", .{});
     _ = linux.chdir("/");
     say("the kernel took {d}.{d:0>3}s", .{ kernel_ms / 1000, kernel_ms % 1000 });
-    // init's environment holds one thing, and nothing the kernel handed
-    // stage0: every NAME=value on the command line it did not take itself
-    // comes here as environment, and would otherwise go on to every
-    // process on the machine. Where the time went, each phase and when it
-    // ended, for init to add its own to: the kernel, the modules, the
-    // slot's filesystem found and mounted, and the root opened through
-    // dm-verity.
+    // Pass init only WEREWOLF_BOOT, each phase's end in boot-clock ms. The
+    // kernel puts every NAME=value it does not take into stage0's
+    // environment, and it must not reach every process on the machine.
     var env: std.process.Environ.Map = .init(gpa);
     try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
         try gpa.print(
@@ -246,13 +189,11 @@ pub fn main(init: std.process.Init) !void {
     fail("cannot start /init: {s}", .{@errorName(err)});
 }
 
-/// The deadman: a child that outlives this initramfs, sleeping, then looking
-/// through PID 1's root for the mark slot-keep leaves; without it, it reboots
-/// at once. The loader has spent this slot's one boot, so the machine comes
-/// back on the slot that last committed. It touches no file of the
-/// initramfs once it sleeps, and reaches PID 1 through a /proc of its own,
-/// and the kernel's log through a descriptor opened now: /dev moves into
-/// the new root, leaving this one's empty.
+/// deadman forks a child that sleeps for after seconds, then reboots unless
+/// slot-keep has left its mark in PID 1's root. The loader has spent this
+/// slot's one boot, so the machine returns on the slot that last committed.
+/// The child reaches PID 1 through its own /proc and the kernel log through
+/// a descriptor opened now, since /dev moves into the new root.
 fn deadman(slot: []const u8, after: u32) void {
     mkdir("/deadman");
     mountFs("proc", "/deadman", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
@@ -276,17 +217,17 @@ fn deadman(slot: []const u8, after: u32) void {
             "<2>stage0: slot {s} did not commit in {d}s; rebooting into the last good slot\n",
             .{ slot, after },
         ) catch "";
-        // The kernel prints its log to the console from a thread of its
-        // own, and sysrq's reset waits for nothing, unlike a panic: a
-        // second for the console to say why, or the reboot goes unexplained.
+        // The kernel prints its log to the console from another thread,
+        // and sysrq's reset, unlike a panic, waits for nothing. Give the
+        // console a second to say why.
         if (linux.errno(kmsg) == .SUCCESS) {
             _ = linux.write(@intCast(kmsg), msg.ptr, msg.len);
             var pause: linux.timespec = .{ .sec = 1, .nsec = 0 };
             _ = linux.nanosleep(&pause, null);
         }
-        // sysrq's reset waits for nothing; should its file be gone, the
-        // kernel's own restart, which still holds every capability from
-        // before the seal. Never a silent end: the slot would stay.
+        // If sysrq-trigger fails, call reboot: this process forked before
+        // the seal and keeps every capability. Exiting quietly would leave
+        // the bad slot running.
         if (!writeFile("/deadman/sysrq-trigger", "b"))
             _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
     }
@@ -295,7 +236,7 @@ fn deadman(slot: []const u8, after: u32) void {
 
 // --- a loop device -------------------------------------------------------------
 
-/// <linux/loop.h>, which Zig's std does not carry.
+// Constants from <linux/loop.h> and <fcntl.h>, which Zig's std lacks.
 const AT_EMPTY_PATH = 0x1000;
 const LOOP_CTL_GET_FREE = 0x4C82;
 const LOOP_CONFIGURE = 0x4C0A;
@@ -325,9 +266,9 @@ const LoopConfig = extern struct {
     reserved: [8]u64 = @splat(0),
 };
 
-/// A free loop device, read-only, holding file, and gone once its last
-/// holder is (autoclear). The caller closes fd once something else holds
-/// the device: closed before, autoclear would detach the image at once.
+/// loopDevice attaches file to a free read-only, autoclearing loop device.
+/// The caller must close fd only after something else holds the device;
+/// closing it sooner would detach the image at once.
 fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]const u8, fd: i32 } {
     const ctl = linux.open("/dev/loop-control", .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
     if (linux.errno(ctl) != .SUCCESS) return error.NoLoopControl;
@@ -346,9 +287,9 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     }
     if (linux.errno(fd) != .SUCCESS) return error.NoLoopDevice;
     errdefer _ = linux.close(@intCast(fd));
-    // A regular file, no link followed: the slot's filesystem is the
-    // disk's, and a FIFO at the image's name would hold PID 1 in open
-    // for good, with no panic to fall back on, where a wrong file fails.
+    // Only a regular file, no link: the slot's filesystem comes from the
+    // disk, and a FIFO there would block PID 1 forever with no panic to
+    // fall back on. A wrong file only fails verification.
     const backing = linux.open(file, .{
         .ACCMODE = .RDONLY,
         .CLOEXEC = true,
@@ -361,10 +302,9 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     var st: linux.Statx = undefined;
     if (linux.errno(linux.statx(@intCast(backing), "", AT_EMPTY_PATH, .{ .TYPE = true }, &st)) !=
         .SUCCESS or st.mode & linux.S.IFMT != linux.S.IFREG) return error.NotAnImageFile;
-    // The whole image, data and hash tree, read into the page cache in the
-    // background from now: the boot reads most of it, and a cloud's network
-    // disk answers a few large reads far sooner than hundreds of small ones.
-    // (Asking for the tree first was measured on GCP too: no faster.)
+    // Read the whole image ahead in the background: the boot reads most of
+    // it, and a cloud's network disk serves a few large reads far faster
+    // than many small ones. Reading the hash tree first was no faster on GCP.
     _ = linux.fadvise(@intCast(backing), 0, 0, linux.POSIX_FADV.WILLNEED);
 
     var cfg: LoopConfig = .{
@@ -384,12 +324,10 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
 const Kind = enum { ext4, xfs, btrfs };
 const Found = struct { dev: [:0]const u8, kind: Kind };
 
-/// The block device whose filesystem has uuid, waiting for it to appear:
-/// its driver is still loading, or probing, as the search begins. Looked
-/// for every 10 ms, so the boot goes on the moment it is there. Two that
-/// answer to it, and stage0 fails rather than guess, as the mount broker
-/// does: the loader falls back, and so will the other slot, until the
-/// second is gone.
+/// findFilesystem returns the block device whose filesystem has uuid,
+/// polling every 10 ms for up to find_for seconds while drivers load. If
+/// two devices have it, stage0 fails rather than guess, as the mount
+/// broker does.
 fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
     const want = cmdline.uuid(uuid) orelse return null;
     var waited: usize = 0;
@@ -411,8 +349,8 @@ fn findFilesystem(gpa: std.mem.Allocator, uuid: []const u8) ?Found {
 
 const Scan = union(enum) { none, one: Found, two: [2][:0]const u8 };
 
-/// Each block device, its superblock read for want: every one, so that a
-/// second with the same UUID is seen.
+/// scan reads every block device's superblock for want. It reads them all,
+/// so it sees a second device with the same UUID.
 fn scan(gpa: std.mem.Allocator, want: [16]u8) Scan {
     const dir = linux.open(
         "/sys/class/block",
@@ -441,7 +379,7 @@ fn scan(gpa: std.mem.Allocator, want: [16]u8) Scan {
     return if (found) |f| .{ .one = f } else .none;
 }
 
-/// The filesystem on dev, if its UUID is want.
+/// superblock returns the filesystem kind on dev if its UUID is want.
 fn superblock(dev: [:0]const u8, want: [16]u8) ?Kind {
     const fd = linux.open(dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return null;
@@ -455,9 +393,9 @@ fn superblock(dev: [:0]const u8, want: [16]u8) ?Kind {
 
 const btrfs_at = 0x10000;
 
-/// The filesystem a device's first bytes describe, and its UUID, as each
-/// stores it: ext2/3/4 at 1 KiB in (magic 0xEF53), xfs at 0 ("XFSB"),
-/// btrfs at 64 KiB in ("_BHRfS_M").
+/// identify returns the filesystem kind and UUID in a device's first bytes:
+/// ext2/3/4 at 1 KiB (magic 0xEF53), xfs at 0 ("XFSB"), btrfs at 64 KiB
+/// ("_BHRfS_M").
 fn identify(b: []const u8) ?struct { kind: Kind, uuid: [16]u8 } {
     if (b.len >= 1024 + 0x78 and std.mem.readInt(u16, b[1024 + 0x38 ..][0..2], .little) == 0xEF53)
         return .{ .kind = .ext4, .uuid = b[1024 + 0x68 ..][0..16].* };
@@ -494,7 +432,8 @@ fn writeFile(path: [:0]const u8, data: []const u8) bool {
     return linux.errno(n) == .SUCCESS and n == data.len;
 }
 
-/// path, read to its end (procfs and sysfs report a size of 0).
+/// readAll returns path's contents, or "". It reads to the end because
+/// procfs and sysfs report a size of 0.
 fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
     const fd = linux.open(path, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return "";
@@ -509,21 +448,18 @@ fn readAll(gpa: std.mem.Allocator, path: [:0]const u8) []const u8 {
     return out.items;
 }
 
-/// One line on the console.
+/// say writes one line to the console.
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(&buf, "stage0: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, line.ptr, line.len);
 }
 
-/// Exiting PID 1 panics the kernel; panic= reboots it, and the loader
-/// boots the slot that last committed. The reason goes through /dev/kmsg,
-/// which a serial console writes synchronously ("<2>", KERN_CRIT, so it
-/// prints whatever the console log level): a plain write to the console tty
-/// can still be draining the UART when the panic reboots the machine, and
-/// on a fast KVM host it is lost -- exactly when the reason matters most --
-/// whereas the kernel flushes its log on panic. The console itself is the
-/// fallback for a machine with no /dev/kmsg.
+/// fail logs why and exits, which panics the kernel; panic= reboots, and
+/// the loader boots the slot that last committed. The reason goes to
+/// /dev/kmsg at KERN_CRIT, which prints at any console loglevel and which
+/// the kernel flushes on panic. A write to the console tty may still be
+/// draining the UART at reboot and be lost, so it is only the fallback.
 fn fail(comptime fmt: []const u8, args: anytype) noreturn {
     var buf: [512]u8 = undefined;
     const line = std.mem.print(
@@ -576,7 +512,7 @@ test isLocked {
     try testing.expect(!isLocked("[none] integrity confidentiality\n"));
 }
 
-/// Milliseconds since the kernel started its clock.
+/// bootMs returns milliseconds since boot (CLOCK_BOOTTIME), or 0.
 fn bootMs() u64 {
     var ts: linux.timespec = undefined;
     if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;

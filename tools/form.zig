@@ -1,29 +1,6 @@
-//! form: what the build asks of a form (lib/form.zig, forms/README.md).
-//! FORM is a form's name in forms/, or a directory holding a form.
-//!
-//!   form names FORM          the chain's forms, base first
-//!   form dirs FORM           their directories
-//!   form list FORM KEY       form.yaml's KEY along the chain, a line each
-//!   form check FORM KEY      the form's own check KEY, an item a line
-//!   form listens FORM        the TCP ports the chain's net serves, a line each
-//!   form weaknesses FORM     the posture checks the form's own weaknesses name
-//!   form excuses FORM        the same, each with its excuse, a line each
-//!   form cmdline FORM ARCH   the kernel arguments the image boots with
-//!   form module-params FORM ARCH  the parameters it loads modules with,
-//!                            MODULE:KEY=VALUE, a line each
-//!   form modules FORM ARCH native|bitten|all  its modules: for every boot,
-//!                            those only a distro's disk needs, or both in
-//!                            the chain's order, a line each
-//!   form compose FORM ARCH KNOWN ACCOUNTS RO META [dev]  what the chain
-//!                            derives, from posture's known failures in
-//!                            KNOWN and the image's account files under
-//!                            ACCOUNTS/etc, into RO and META (lib/compose.zig)
-//!   form having KEY [VALUE]  the forms in forms/ whose check KEY is VALUE (true)
-//!   form every KEY           form.yaml's KEY in every form in forms/, once each
-//!   form apko FORM [PKG...]  the chain's apko configs as one, and PKGs
-//!   form tree                every form in forms/ and its chain
-//!
-//! A form that cannot be read fails the command, with the file and line.
+//! form answers the build's questions about a form: its chain of bases,
+//! form.yaml keys, kernel arguments, modules and composed files.
+//! See README.md and forms/README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -158,7 +135,7 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         defer meta.close(io);
         try compose.compose(io, gpa, root, forms, accounts, ro, meta, b, f);
     } else if (is(verb, "apko")) {
-        try form.write(w, try form.apko(io, gpa, root, forms, args[2..], f));
+        try form.write(w, try compose.apko(io, gpa, root, forms, args[2..], f));
     } else return error.Usage;
 }
 
@@ -170,7 +147,7 @@ fn arch(name: []const u8) error{Usage}!compose.Arch {
     return std.meta.stringToEnum(compose.Arch, name) orelse error.Usage;
 }
 
-/// The names of the forms in forms/, sorted.
+/// all returns the sorted names of the directories in forms/ that hold an apko.yaml.
 fn all(io: Io, gpa: Allocator) ![]const []const u8 {
     var dir = try Dir.cwd().openDir(io, "forms", .{ .iterate = true });
     defer dir.close(io);

@@ -1,42 +1,46 @@
 #!/bin/sh
-# install-deps [-y] [apko] [zig]: install what building, booting and
-# checking werewolf needs, on macOS, Debian, Ubuntu, Fedora, Arch,
-# FreeBSD or NetBSD (the BSDs experimental: no CI runs them), after
-# showing what it will run and asking; -y does not ask.
-# With `apko`, `zig` or both, install only those, for what needs nothing
-# else: resolving packages, or building a tool. Packages come from
-# the system's package manager, as root through doas or sudo (Homebrew's,
-# as the user). What a system lacks at the version the build needs comes
-# from upstream, pinned by version and sha256: apko and Zig, which a
-# release's bytes depend on (docs/releases.md), melange, which builds the
-# packages Wolfi does not ship (melange.mk), crane, which pulls the OCI
-# images a form bakes in (cmd/howl/oci.zig), and erofs-utils, built
-# from source where the system's is older than 1.9 or has no zstd
-# (Homebrew's has none, so on macOS it is always built).
-# The BSDs have no apko or crane release, so they are built with Go,
-# pinned by Go's checksum database.
+# install-deps [-y] [apko] [zig] installs what building, booting and checking
+# werewolf needs, on macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD or NetBSD.
+# The BSDs are experimental: no CI runs them. It shows what it will run and
+# asks first; -y does not ask. With `apko`, `zig` or both, it installs only
+# those, for jobs that need nothing else: resolving packages, or building a
+# tool.
+#
+# Packages come from the system's package manager, run as root through doas
+# or sudo (Homebrew's runs as the user). Tools a system lacks at the version
+# the build needs come from upstream, pinned by version and sha256:
+#   - apko and Zig, which a release's bytes depend on (docs/releases.md);
+#   - melange, which builds the packages Wolfi does not ship (melange.mk);
+#   - crane, which pulls the OCI images a form bakes in (cmd/howl/oci.zig);
+#   - Firecracker, on Linux (cmd/howl/firecracker.zig);
+#   - erofs-utils, built from source where the system's is older than 1.9
+#     or has no zstd (Homebrew's has none, so on macOS it is always built).
+# The BSDs have no apko or crane release, so install-deps builds them with
+# Go, pinned by Go's checksum database.
 #
 # It installs only what is missing or not the pinned version, so a second
 # run installs nothing and takes a second. test/ci-setup runs it for CI.
 #
-# A shell script, not a Zig program: it is what installs Zig.
-# `make install-deps` runs it; on FreeBSD and NetBSD, whose make is not
-# GNU make, run it directly, and use gmake after.
+# It is a shell script, not a Zig program, because it is what installs Zig.
+# `make install-deps` runs it. On FreeBSD and NetBSD, whose make is not GNU
+# make, run it directly and use gmake afterwards.
 #
-# Commands and package lists are words split on purpose, with globbing off.
+# Commands and package lists are split into words on purpose, with globbing
+# off.
 # shellcheck disable=SC2086
 set -euf
 
 apko_version=1.3.1
 melange_version=0.61.4
-# crane, from go-containerregistry: howl pulls the images a form bakes in
-# with it (cmd/howl/oci.zig); Homebrew has it, Linux distributions do not.
+# crane comes from go-containerregistry. howl pulls the images a form bakes
+# in with it (cmd/howl/oci.zig). Homebrew packages it; Linux distributions
+# do not.
 crane_version=0.20.6
 zig_version=0.17.0 # the Makefile's ZIG_VERSION
 erofs_version=1.9.4
 erofs_sha256=7d135aa2550326a5acf20f53c518aea5a8900015ce50700044e40f818c31dd80
-# Firecracker, on Linux: howl create keeps machines on it where there
-# is KVM (cmd/howl/firecracker.zig); no distribution packages it.
+# Firecracker, on Linux: howl create keeps machines on it where there is KVM
+# (cmd/howl/firecracker.zig). No distribution packages it.
 fc_version=1.17.0
 
 die() {
@@ -44,7 +48,7 @@ die() {
 	exit 1
 }
 
-# only: the tools named, or empty for everything.
+# only lists the tools named, or is empty for everything.
 yes='' only=''
 for a; do
 	case $a in
@@ -57,7 +61,7 @@ for a; do
 	esac
 done
 
-# wants TOOL: whether TOOL is to be installed: every tool is, unless some were named.
+# wants TOOL reports whether to install TOOL: every tool, unless some were named.
 wants() {
 	case " $only " in
 	"  " | *" $1 "*) return 0 ;;
@@ -85,12 +89,12 @@ melange_version() { # melange's version, as X.Y.Z, or nothing
 	melange version 2>/dev/null | sed -n 's/^GitVersion: *v*//p'
 }
 
-# Per system: its name; its package manager, pm, and the commands that
+# Per system, set: its name; its package manager (pm) and the commands that
 # refresh its index and install; the packages the build needs, and those
-# apko or Zig alone needs; where upstream's come from, zos, the OS in Zig's
-# release names, and the sha256 of Zig's and apko's; and the packages
-# erofs-utils builds from, if it must, with the make and environment that
-# build it, and where it goes.
+# apko or Zig alone needs; for upstream downloads, zos (the OS in Zig's
+# release names) and the sha256 of each download; and the packages
+# erofs-utils builds from, if it must be built, with the make and
+# environment that build it and where it goes.
 update='' zos='' zig_sha256='' apko_sha256='' melange_sha256='' apko_pkgs='' zig_pkgs='' erofs_deps='' erofs_env=''
 mk='make' erofs_prefix=/usr/local
 case $(uname -s) in
@@ -103,8 +107,8 @@ Darwin)
 	pkgs="apko melange crane lima qemu zstd zig mtools e2fsprogs"
 	apko_pkgs=apko
 	zig_pkgs=zig
-	# Homebrew's erofs-utils has no zstd, so it is built into Homebrew's
-	# prefix, which is the user's and in PATH; Homebrew's own, if
+	# Homebrew's erofs-utils has no zstd, so build it into Homebrew's
+	# prefix, which belongs to the user and is in PATH. Homebrew's own, if
 	# installed, is unlinked first so the two do not fight over the names.
 	b=$(brew --prefix)
 	erofs_deps="autoconf automake libtool pkgconf lz4 zstd"
@@ -134,8 +138,8 @@ Linux)
 		;;
 	*) die "$arch is not supported: x86_64 or aarch64" ;;
 	esac
-	# Each adds python3's pip, for make lint's yamllint, systemd-nspawn,
-	# for make check-native, and bubblewrap, melange's sandbox.
+	# Each system also gets python3's pip, for make lint's yamllint;
+	# systemd-nspawn, for make check-native; and bubblewrap, melange's sandbox.
 	case " ${ID:-} ${ID_LIKE:-} " in
 	*" debian "* | *" ubuntu "*)
 		case $arch in
@@ -143,8 +147,8 @@ Linux)
 		aarch64) qemu="qemu-system-arm qemu-efi-aarch64" ;;
 		esac
 		pm=apt
-		# Install waits out another apt, such as a new machine's first
-		# upgrade; update does not, so it is tried again (retry).
+		# install waits for another apt to finish, such as a new machine's
+		# first upgrade. update does not wait, so it is retried (retry).
 		apt="env DEBIAN_FRONTEND=noninteractive apt-get -q -o DPkg::Lock::Timeout=600"
 		update="$apt update"
 		install="$apt install -y --no-install-recommends"
@@ -174,8 +178,8 @@ Linux)
 		aarch64) qemu="qemu-system-aarch64" ;; # Arch Linux ARM packages no edk2
 		esac
 		pm=pacman
-		# Arch installs onto an up-to-date system only: -Syu. Its
-		# systemd has systemd-nspawn.
+		# Arch installs only onto an up-to-date system, hence -Syu. Its
+		# systemd includes systemd-nspawn.
 		install="pacman -Syu --needed --noconfirm"
 		pkgs="curl make xz zstd libarchive erofs-utils e2fsprogs mtools qemu-img expect openbsd-netcat
 			python-pip bubblewrap $qemu"
@@ -198,8 +202,8 @@ FreeBSD)
 	# ASSUME_ALWAYS_YES also bootstraps pkg itself without asking.
 	install="env ASSUME_ALWAYS_YES=yes pkg install"
 	# Its base has bsdtar, nc, xz and zstd; ports have no erofs-utils.
-	# bhyve-firmware and libslirp are for howl create, which keeps
-	# machines on bhyve: its UEFI firmware, and its user-mode network.
+	# howl create keeps machines on bhyve, which needs bhyve-firmware (its
+	# UEFI firmware) and libslirp (its user-mode network).
 	pkgs="gmake curl qemu-nox11 mtools e2fsprogs-core expect bhyve-firmware libslirp"
 	apko_pkgs=''
 	zig_pkgs=curl
@@ -208,7 +212,7 @@ FreeBSD)
 	erofs_env="CPPFLAGS=-I/usr/local/include LDFLAGS=-L/usr/local/lib"
 	;;
 NetBSD)
-	# Experimental, and amd64 alone: NVMM, which accelerates QEMU, has no
+	# Experimental, and amd64 only: NVMM, which accelerates QEMU, has no
 	# arm64, and uname -m says evbarm there.
 	system="NetBSD $(uname -r)"
 	zos=netbsd
@@ -219,22 +223,22 @@ NetBSD)
 	command -v pkgin >/dev/null || die "needs pkgin: pkg_add pkgin, as sysinst offers"
 	pm=pkgin
 	install="pkgin -y install"
-	# Its base has nc and xz; its tar is not bsdtar, which libarchive
-	# brings; pkgsrc has no erofs-utils.
+	# Its base has nc and xz. Its tar is not bsdtar, so libarchive brings
+	# that. pkgsrc has no erofs-utils.
 	pkgs="gmake curl qemu mtools e2fsprogs tcl-expect libarchive zstd"
 	apko_pkgs=''
 	zig_pkgs=curl
 	erofs_deps="autoconf automake libtool pkgconf lz4 zstd"
 	mk=gmake
-	# One word each, since they are split: the linker takes -L and -R
-	# itself, so the libraries are found at run time too.
+	# Each flag must be one word, since the list is split. The linker gets
+	# -L and -R itself, so the libraries are found at run time too.
 	erofs_env="CPPFLAGS=-I/usr/pkg/include LDFLAGS=-Wl,-L/usr/pkg/lib,-R/usr/pkg/lib"
 	;;
 *) die "$(uname -s) is not supported: macOS, Debian, Ubuntu, Fedora, Arch, FreeBSD or NetBSD" ;;
 esac
 
-# What is to do: the packages not installed, and upstream's that are
-# missing or not the pinned version.
+# Work out what to do: the packages not installed, and upstream tools that
+# are missing or not the pinned version.
 need_apko='' need_melange='' need_crane='' need_zig='' need_erofs='' need_fc=''
 if [ -n "$zos" ]; then
 	! wants apko || [ "$(apko_version)" = "v$apko_version" ] || need_apko=yes
@@ -431,9 +435,9 @@ if [ -n "$need_erofs" ] && ! erofs_ok; then
 	[ "$pm" != brew ] || ! printf '%s\n' "$have" | grep -qx erofs-utils || brew unlink erofs-utils
 	fetch "https://github.com/erofs/erofs-utils/archive/refs/tags/v$erofs_version.tar.gz" "$erofs_sha256" erofs.tar.gz
 	tar -xzf "$tmp/erofs.tar.gz" -C "$tmp"
-	# zstd, which the root is made with, and lz4, which the kernel always
-	# reads; nothing for fetching images (curl, OpenSSL, libxml2), which
-	# werewolf never asks of it.
+	# Build in zstd, which the root is made with, and lz4, which the kernel
+	# always reads. Leave out image fetching (curl, OpenSSL, libxml2), which
+	# werewolf never uses.
 	(cd "$tmp/erofs-utils-$erofs_version" && ./autogen.sh &&
 		env $erofs_env ./configure -q --prefix="$erofs_prefix" --disable-lzma --enable-lz4 --with-libzstd \
 			--without-libcurl --without-openssl --without-libxml2 --disable-fuse &&
@@ -443,7 +447,7 @@ if [ -n "$need_erofs" ] && ! erofs_ok; then
 	hash -r
 fi
 
-# What the build will find, whether or not this run installed it.
+# Check what the build will find, whether or not this run installed it.
 in_path() { # in_path TOOL [DIR]: why TOOL is not what was installed in DIR
 	echo "$1 is $(command -v "$1" || echo missing): is ${2:-/usr/local}/bin first in PATH?"
 }

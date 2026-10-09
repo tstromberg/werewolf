@@ -1,5 +1,5 @@
-//! posture's kernel checks: lockdown, modules, sysctls, the CPU, memory,
-//! and the features exploits reach for.
+//! kernel holds posture's kernel checks: lockdown, modules, sysctls, the
+//! CPU, memory, and the features exploits reach for.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -23,13 +23,13 @@ const listAdd = posture.listAdd;
 const statusField = posture.statusField;
 const trim = posture.trim;
 
-/// What writesOwnReadOnly writes over: a string, so in read-only memory.
+/// read_only is a string constant, so it lives in read-only memory.
 const read_only: []const u8 = "posture: read-only";
 
-/// Whether this process can write to its own read-only memory through
-/// /proc/self/mem, as Linux lets it by default (proc_mem.force_override).
-/// It writes back the bytes already there, so a write that lands changes
-/// nothing.
+/// writesOwnReadOnly reports whether this process can write its own
+/// read-only memory through /proc/self/mem, which Linux allows by default
+/// (proc_mem.force_override). It writes the same bytes back, so a write that
+/// lands changes nothing.
 fn writesOwnReadOnly() bool {
     const rc = linux.open("/proc/self/mem", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return false;
@@ -39,9 +39,9 @@ fn writesOwnReadOnly() bool {
     return linux.errno(n) == .SUCCESS and n == read_only.len;
 }
 
-/// Whether a 32-bit getpid through int 0x80 returns this process's pid. A
-/// kernel without 32-bit system calls answers with SIGSEGV, handled here so
-/// it is not logged. x86_64 only.
+/// makes32BitSyscall reports whether a 32-bit getpid through int 0x80
+/// works. A kernel without 32-bit calls raises SIGSEGV, which is handled
+/// here so it is not logged. x86_64 only.
 fn makes32BitSyscall() bool {
     const act: linux.Sigaction = .{
         .handler = .{ .handler = &refused },
@@ -168,9 +168,9 @@ pub fn check(p: *Posture) !void {
         &.{.{ "fs/suid_dumpable", "0" }},
     );
 
-    // A hypervisor in the guest is the way to the host's nested
-    // virtualization. arm64 kernels build KVM in, and start it whenever
-    // the host lends the guest EL2; closing the module loader cannot help.
+    // A hypervisor in the guest reaches the host's nested-virtualization
+    // code. arm64 kernels build KVM in and start it whenever the host gives
+    // the guest EL2, so closing the module loader does not help.
     const kvm = exists(p.io, "/dev/kvm") or exists(p.io, "/sys/class/misc/kvm");
     try p.add(.{
         .id = "kernel-no-hypervisor",
@@ -182,10 +182,10 @@ pub fn check(p: *Posture) !void {
         .result = if (kvm) .fail else .pass,
         .detail = if (kvm) "KVM is running" else "",
     });
-    // Where KVM runs, its guests must not run hypervisors of their own:
-    // nested virtualization is the code a guest's root reaches the host
-    // through (CVE-2026-53359). x86_64's vendor modules say so in a
-    // parameter; aarch64's KVM nests only when the command line asks.
+    // Where KVM runs, its guests must not nest hypervisors: a guest's root
+    // reaches the host through nested virtualization (CVE-2026-53359).
+    // x86_64's vendor modules expose a parameter; aarch64's KVM nests only
+    // when the command line asks.
     var nested: std.ArrayList(u8) = .empty;
     for ([_][]const u8{ "kvm_intel", "kvm_amd" }) |m| {
         const on = trim(p.read(try p.gpa.print("/sys/module/{s}/parameters/nested", .{m})));
@@ -230,8 +230,8 @@ pub fn check(p: *Posture) !void {
         .detail = if (forced) "the write went through" else "",
     });
     try legacy(p);
-    // The bounding set: what no process, root included, can hold again
-    // before a reboot. The network's two only where the form allows them.
+    // Capabilities gone from PID 1's bounding set are gone for every process
+    // until reboot. NET_ADMIN and NET_RAW may stay if the form allows them.
     const status = p.read("/proc/1/status");
     const bnd = statusField(status, "CapBnd");
     const allowed = try p.allowances();
@@ -262,9 +262,9 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
-    // The programs the kernel starts itself (core dump pipes, modprobe,
-    // the uevent helper) descend from kthreadd, not PID 1: only these
-    // sysctls bound them. Readable by root alone.
+    // Programs the kernel starts itself (core dump pipes, modprobe, the
+    // uevent helper) descend from kthreadd, not PID 1, so only these sysctls
+    // bound them. Only root can read them.
     const helpers = helperCaps(p.sysctl("kernel/usermodehelper/bset"));
     const hotplug = p.sysctl("kernel/hotplug");
     const modprobe = p.sysctl("kernel/modprobe");
@@ -304,9 +304,8 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
-    // A seccomp filter on PID 1 binds every process after it, root's
-    // too, and nothing can remove it before a reboot: werewolf's seal
-    // (cmd/init/init.zig) refuses there what no program here calls.
+    // A seccomp filter on PID 1 binds every later process, root's too, until
+    // reboot. werewolf's seal (cmd/init/seal.zig) installs it.
     const filtered = std.mem.eql(u8, statusField(status, "Seccomp") orelse "", "2");
     try p.add(.{
         .id = "kernel-seal",
@@ -339,7 +338,7 @@ pub fn check(p: *Posture) !void {
             .{if (min_addr.len > 0) min_addr else "absent"},
         ),
     });
-    // Readable by root alone. Absent, the kernel has no BPF JIT.
+    // Only root can read it. If absent, the kernel has no BPF JIT.
     const harden = p.sysctl("net/core/bpf_jit_harden");
     try p.add(.{
         .id = "kernel-bpf-jit",
@@ -386,10 +385,9 @@ pub fn check(p: *Posture) !void {
             .{ oops, warn, panic_s },
         ),
     });
-    // What the kernel can only be told at boot: werewolf's image names
-    // it (the build writes it from the form's allowances), and a
-    // machine booted without it, by a loader entry someone edited or
-    // never rewrote, is missing protections no setting can add later.
+    // Some hardening can only be set at boot. The build writes the image's
+    // command line from the form's allowances; a machine booted from an
+    // edited or stale loader entry lacks protections nothing can add later.
     const own = p.read("/usr/share/werewolf/cmdline");
     const missing = try missingArgs(p.gpa, own, p.read("/proc/cmdline"));
     try p.add(.{
@@ -407,7 +405,7 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
-    // Absent, the kernel has no userfaultfd.
+    // If absent, the kernel has no userfaultfd.
     const uffd = p.sysctl("vm/unprivileged_userfaultfd");
     try p.add(.{
         .id = "kernel-userfaultfd",
@@ -434,7 +432,7 @@ pub fn check(p: *Posture) !void {
         else
             .fail,
     });
-    // Children inherit PID 1's limits, and only root can raise a hard one.
+    // Children inherit PID 1's limits, and only root can raise a hard limit.
     const core = hardCoreLimit(p.read("/proc/1/limits"));
     try p.add(.{
         .id = "kernel-core-limit",
@@ -451,8 +449,8 @@ pub fn check(p: *Posture) !void {
             "cannot read /proc/1/limits",
     });
     try memory(p);
-    // --extended only: what werewolf leaves undone by choice, since it
-    // slows what machines run (docs/security.md, "Not done, by choice").
+    // werewolf skips these by choice because they slow workloads
+    // (docs/security.md, "Not done, by choice"), so only --extended checks them.
     if (p.extended) try costly(p);
     const modules = p.read("/proc/modules");
     const protocols = p.read("/proc/net/protocols");
@@ -491,8 +489,8 @@ pub fn check(p: *Posture) !void {
     try exploitEntries(p);
 }
 
-/// The CPU flaws the kernel reports itself vulnerable to, by name, or
-/// null if it reports on none.
+/// cpuVulnerable lists the CPU flaws the kernel reports itself vulnerable
+/// to, or null if it reports on none.
 fn cpuVulnerable(p: *Posture) !?[]const u8 {
     const dir = "/sys/devices/system/cpu/vulnerabilities";
     var d = Dir.cwd().openDir(p.io, dir, .{ .iterate = true }) catch return null;
@@ -509,11 +507,9 @@ fn cpuVulnerable(p: *Posture) !?[]const u8 {
     return found.items;
 }
 
-/// The first step of four exploited kernel bugs, each tried as the
-/// exploit would try it, so it finds the code whether it is built in,
-/// loaded, or loaded on demand: a kernel that loads a module when asked
-/// loads it here too, and that is what these find
-/// (docs/cve-mitigation-survey.md).
+/// exploitEntries tries the first step of four exploited kernel bugs as the
+/// exploit would, so it finds the code whether built in, loaded, or loaded
+/// on demand (docs/cve-mitigation-survey.md).
 fn exploitEntries(p: *Posture) !void {
     const alg = linux.socket(AF_ALG, linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC, 0);
     const alg_e = linux.errno(alg);
@@ -530,9 +526,8 @@ fn exploitEntries(p: *Posture) !void {
         .detail = if (alg_e == .SUCCESS) "opened" else errnoText(alg_e),
     });
 
-    // Without kernel TLS, the kernel finds no such upper-layer protocol
-    // (ENOENT), or the seal refuses to look; with it, an unconnected
-    // socket is refused for not being connected (ENOTCONN).
+    // Without kernel TLS, setsockopt fails with ENOENT, or the seal refuses
+    // it. With kernel TLS, an unconnected socket gets ENOTCONN.
     const tcp = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     var ulp_e = linux.errno(tcp);
     if (ulp_e == .SUCCESS) {
@@ -575,8 +570,8 @@ fn exploitEntries(p: *Posture) !void {
         .detail = if (pipe_e == .SUCCESS) "made" else errnoText(pipe_e),
     });
 
-    // Without devpts mounted, /dev/ptmx opens nothing (ENODEV). A form
-    // that allows pty, for ssh logins, mounts it, and passes as allowed.
+    // Without devpts mounted, /dev/ptmx fails with ENODEV. A form that
+    // allows pty, for ssh logins, mounts it and passes as allowed.
     const ptmx = linux.open(
         "/dev/ptmx",
         .{ .ACCMODE = .RDWR, .NOCTTY = true, .CLOEXEC = true },
@@ -606,10 +601,9 @@ fn exploitEntries(p: *Posture) !void {
     });
 }
 
-/// The 32-bit and 16-bit interfaces a 64-bit x86 kernel keeps for old
-/// programs, which none here are: int 0x80, and the LDT 16-bit code
-/// needs. Each is tried. The int 0x80 is made in a child that handles
-/// the SIGSEGV a refusal brings, so the kernel logs nothing.
+/// legacy tries the 32-bit and 16-bit interfaces a 64-bit x86 kernel keeps
+/// for old programs: int 0x80, and the LDT that 16-bit code needs. int 0x80
+/// runs in a child that handles the refusal's SIGSEGV, so nothing is logged.
 fn legacy(p: *Posture) !void {
     const id = "kernel-legacy";
     const name = "No 32-bit or 16-bit system calls";
@@ -647,9 +641,9 @@ fn legacy(p: *Posture) !void {
     });
 }
 
-/// Address randomization at the most the kernel allows: mmap_rnd_bits
-/// for a 4K-page kernel with 48-bit addresses, which is what x86_64 and
-/// aarch64 servers run. Readable by root alone.
+/// aslr checks address randomization is at the kernel's maximum: the
+/// mmap_rnd_bits of a 4K-page kernel with 48-bit addresses, as x86_64 and
+/// aarch64 servers run. Only root can read it.
 fn aslr(p: *Posture) !void {
     const full: ?u8 = switch (builtin.cpu.arch) {
         .x86_64 => 32,
@@ -680,10 +674,9 @@ fn aslr(p: *Posture) !void {
     });
 }
 
-/// The kernel's memory hardening that costs a program nothing, judged by
-/// what is in effect rather than by the command line alone, since a
-/// kernel may have it on by default (Alpine's clears memory as it is
-/// handed out unless told not to).
+/// memory checks the kernel memory hardening that costs programs nothing.
+/// It judges what is in effect, not the command line alone, since a kernel
+/// may enable it by default (Alpine's clears memory on allocation).
 fn memory(p: *Posture) !void {
     const cmdline = p.read("/proc/cmdline");
     var missing: std.ArrayList(u8) = .empty;
@@ -699,7 +692,7 @@ fn memory(p: *Posture) !void {
     else
         (try unsetArgs(p.gpa, cmdline, &.{"page_alloc.shuffle"})).len == 0;
     if (!shuffled) try listAdd(p.gpa, &missing, "pages not shuffled", .{});
-    // Where the log no longer says, the command line can say on; else unknown.
+    // If the log has rotated, trust the command line if it says on; else unknown.
     const alloc = heapInit(memAutoInit(p), "heap alloc") orelse
         if ((try unsetArgs(p.gpa, cmdline, &.{"init_on_alloc"})).len == 0) true else null;
     if (alloc == false) try listAdd(p.gpa, &missing, "memory not cleared as it is handed out", .{});
@@ -723,8 +716,8 @@ fn memory(p: *Posture) !void {
     });
 }
 
-/// How many caches in /sys/kernel/slab are another's, merged; null if
-/// it cannot be read.
+/// slabAliases counts the caches in /sys/kernel/slab merged into another,
+/// or returns null if it cannot be read.
 fn slabAliases(p: *Posture) ?usize {
     var d = Dir.cwd().openDir(p.io, "/sys/kernel/slab", .{ .iterate = true }) catch return null;
     defer d.close(p.io);
@@ -736,7 +729,7 @@ fn slabAliases(p: *Posture) ?usize {
     return n;
 }
 
-/// The kernel's "mem auto-init:" line, from the start of its log, or "".
+/// memAutoInit returns the kernel's boot "mem auto-init:" line, or "".
 fn memAutoInit(p: *Posture) []const u8 {
     const rc = linux.open(
         "/dev/kmsg",
@@ -757,14 +750,14 @@ fn memAutoInit(p: *Posture) []const u8 {
                     line[0 .. std.mem.findScalar(u8, line, '\n') orelse line.len],
                 ) catch "";
             },
-            .PIPE => {}, // records lost to newer ones: read on
+            .PIPE => {}, // older records were overwritten; keep reading
             else => return "",
         }
     }
 }
 
-/// Kernel checks werewolf fails by choice, for --extended: clearing
-/// freed memory and forced CPU mitigations cost every workload.
+/// costly adds the kernel checks werewolf fails by choice, for --extended:
+/// wiping freed memory and forcing CPU mitigations slow every workload.
 fn costly(p: *Posture) !void {
     const free_on = heapInit(memAutoInit(p), "heap free") orelse
         ((try unsetArgs(p.gpa, p.read("/proc/cmdline"), &.{"init_on_free"})).len == 0);
@@ -792,10 +785,9 @@ fn costly(p: *Posture) !void {
     });
 }
 
-/// Memory-Deny-Write-Execute, inherited from PID 1 (werewolf's init sets
-/// it): this process holds to it, and an anonymous mapping both writable
-/// and executable, the first step of running code an exploit wrote, is
-/// refused. Tried, not only read: the mapping is unmapped at once if made.
+/// writeXorExecute checks Memory-Deny-Write-Execute, which werewolf's init
+/// sets and every process inherits. It also tries a writable and executable
+/// anonymous mapping, unmapped at once if made, which must be refused.
 fn writeXorExecute(p: *Posture) !void {
     const PR_GET_MDWE = 66;
     const PR_MDWE_REFUSE_EXEC_GAIN = 1;
@@ -834,7 +826,7 @@ fn writeXorExecute(p: *Posture) !void {
     });
 }
 
-/// The level in /sys/kernel/security/lockdown: "none [integrity] confidentiality".
+/// lockdownLevel returns the bracketed level: "none [integrity] confidentiality".
 fn lockdownLevel(text: []const u8) []const u8 {
     const a = std.mem.findScalar(u8, text, '[') orelse return "unavailable";
     const b = std.mem.findScalarPos(u8, text, a, ']') orelse return "unavailable";
@@ -845,7 +837,7 @@ fn isLocked(level: []const u8) bool {
     return std.mem.eql(u8, level, "integrity") or std.mem.eql(u8, level, "confidentiality");
 }
 
-/// The words of want not among the words of have, ", " between them.
+/// missingArgs lists the words of want that are not in have.
 fn missingArgs(gpa: Allocator, want: []const u8, have: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var w = std.mem.tokenizeAny(u8, want, " \n");
@@ -857,7 +849,7 @@ fn missingArgs(gpa: Allocator, want: []const u8, have: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// Whether /proc/filesystems lists name: "nodev\tdebugfs", "\text4".
+/// hasFilesystem reports whether /proc/filesystems lists name: "nodev\tdebugfs", "\text4".
 fn hasFilesystem(text: []const u8, name: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -867,9 +859,9 @@ fn hasFilesystem(text: []const u8, name: []const u8) bool {
     return false;
 }
 
-/// Kernel code few machines use, and exploits keep finding bugs in: by the
-/// names /proc/modules, /proc/net/protocols (without "v6") and
-/// /proc/filesystems give it.
+/// rare_features is kernel code few machines use and exploits keep finding
+/// bugs in, named as /proc/modules, /proc/net/protocols (without "v6") and
+/// /proc/filesystems name it.
 const rare_features = [_][]const u8{
     "dccp",          "sctp",        "rds",         "tipc",      "n_hdlc",
     "ax25",          "netrom",      "x25",         "rose",      "decnet",
@@ -880,16 +872,17 @@ const rare_features = [_][]const u8{
     "cifs",          "ksmbd",       "gfs2",        "cfg80211",  "mac80211",
 };
 
-/// Kernel code that exploits listed in CISA's KEV catalog went through,
-/// and no werewolf form loads: AF_ALG and its sockets, kernel TLS,
-/// nf_tables, ebtables, x_tables and overlayfs (docs/cve-mitigation-survey.md).
+/// exploited_features is kernel code that exploits in CISA's KEV catalog
+/// used and no werewolf form loads: AF_ALG, kernel TLS, nf_tables, ebtables,
+/// x_tables and overlayfs (docs/cve-mitigation-survey.md).
 const exploited_features = [_][]const u8{
     "af_alg",    "algif_aead", "algif_skcipher", "algif_hash", "algif_rng", "tls",
     "nf_tables", "ebtables",   "ip_tables",      "x_tables",   "overlay",
 };
 
-/// AF_ALG, TCP_ULP and O_NOTIFICATION_PIPE (O_EXCL), which Zig's standard
-/// library does not name; O_CLOEXEC and SOL_TCP, as numbers for a raw call.
+/// AF_ALG and the constants below are named here because Zig's standard
+/// library lacks them (O_NOTIFICATION_PIPE reuses O_EXCL's bit) or a raw
+/// call needs them as plain numbers.
 const AF_ALG = 38;
 
 const SOL_TCP = 6;
@@ -900,7 +893,7 @@ const O_CLOEXEC = 0o2000000;
 
 const O_NOTIFICATION_PIPE = 0o200;
 
-/// Those of names the running kernel has, as a list.
+/// featuresPresent lists those of names the running kernel has.
 fn featuresPresent(
     gpa: Allocator,
     names: []const []const u8,
@@ -916,8 +909,8 @@ fn featuresPresent(
     return found.items;
 }
 
-/// Whether a line of text starts with the word name, in any case, or with
-/// name and "v6": "sctp 475136 0 - Live", "SCTPv6    1272 ...".
+/// firstWordIs reports whether a line of text starts with the word name, in
+/// any case, optionally followed by "v6": "sctp 475136 0 - Live", "SCTPv6 ...".
 fn firstWordIs(text: []const u8, name: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -928,8 +921,8 @@ fn firstWordIs(text: []const u8, name: []const u8) bool {
     return false;
 }
 
-/// Whether the kernel's mem auto-init line says what (heap alloc, heap
-/// free) is on; null if it does not say.
+/// heapInit reports whether the mem auto-init line says what (heap alloc,
+/// heap free) is on, or null if it does not say.
 fn heapInit(line: []const u8, what: []const u8) ?bool {
     const i = std.mem.indexOf(u8, line, what) orelse return null;
     const rest = line[i + what.len ..];
@@ -938,9 +931,9 @@ fn heapInit(line: []const u8, what: []const u8) ?bool {
     return null;
 }
 
-/// The switches in names the command line does not turn on, as a list. A
-/// switch is on bare, or set to what the kernel reads as true (1, y, on);
-/// the last setting wins, as in the kernel.
+/// unsetArgs lists the switches in names the command line does not turn
+/// on. A switch is on bare or set to 1, y or on; as in the kernel, the last
+/// setting wins.
 fn unsetArgs(gpa: Allocator, cmdline: []const u8, names: []const []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (names) |name| {
@@ -962,19 +955,19 @@ fn unsetArgs(gpa: Allocator, cmdline: []const u8, names: []const []const u8) ![]
     return out.items;
 }
 
-/// Why asking the kernel to stop auditing did not end as refused: null
-/// if it was.
+/// askToStop asks the kernel to stop auditing. It returns null if refused,
+/// or else what went wrong.
 fn askToStop() ?[]const u8 {
     audit.setEnabled(0) catch |err| return if (err == error.Refused) null else @errorName(err);
     return "audit was turned off";
 }
 
-/// Whether what the kernel refuses is on record, and where the record
-/// goes. An exec every kernel refuses, of a directory, made here, must
-/// be in the kernel's log as an audit record (lib/audit.zig).
+/// logged checks that refusals are recorded and reach the console. An exec
+/// of a directory, which every kernel refuses, must leave an audit record
+/// in the kernel log (lib/audit.zig).
 pub fn logged(p: *Posture) !void {
     _ = inChild(execRoot, false);
-    // kauditd writes the record a moment after the call returns.
+    // kauditd writes the record a moment after the call returns, so retry.
     const needles = [_][]const u8{
         "type=1300",
         "success=no",
@@ -988,9 +981,9 @@ pub fn logged(p: *Posture) !void {
         }
         p.io.sleep(.fromMilliseconds(50), .awake) catch {};
     }
-    // Asked to stop only when it reads locked, or cannot be read for want
-    // of the capability, which setting it takes as well: audit on and
-    // unlocked, as another distribution has it, would stop, and stay off.
+    // Ask audit to stop only if it reads locked, or is unreadable for lack
+    // of the capability that stopping also needs. Unlocked audit, as on
+    // other distributions, would really stop.
     const stopped: ?[]const u8 = if (!p.root)
         null
     else if (audit.enabledNow()) |now|
@@ -1014,10 +1007,9 @@ pub fn logged(p: *Posture) !void {
         else
             stopped orelse "",
     });
-    // The console takes notices (level 5) only below console_loglevel 6;
-    // audit records, lockdown's, Yama's and Landlock's refusals are all
-    // notices. And the console must be one someone can read: a serial
-    // port or a hypervisor's console, which a cloud captures, not a
+    // Audit, lockdown, Yama and Landlock refusals are notices (level 5),
+    // which reach the console only at console_loglevel 6 or more. The
+    // console must be one a cloud captures, serial or hypervisor, not a
     // virtual terminal nobody watches.
     var printk = std.mem.tokenizeAny(u8, p.sysctl("kernel/printk"), " \t");
     const level = std.fmt.parseInt(u8, printk.next() orelse "", 10) catch 0;
@@ -1040,7 +1032,7 @@ pub fn logged(p: *Posture) !void {
     });
 }
 
-/// Run / as a program: the kernel refuses (EACCES), and audits the refusal.
+/// execRoot runs / as a program, which the kernel refuses (EACCES) and audits.
 fn execRoot() bool {
     const argv = [_:null]?[*:0]const u8{"/"};
     const envp = [_:null]?[*:0]const u8{};
@@ -1048,9 +1040,9 @@ fn execRoot() bool {
     return false;
 }
 
-/// The first console in /proc/consoles that is enabled, written to, and not
-/// a virtual terminal (tty0, tty1, …), or null. A line is
-/// "ttyS0  -W- (EC p a)  4:64".
+/// capturedConsole returns the first enabled, writable console in
+/// /proc/consoles that is not a virtual terminal (tty0, tty1, …), or null.
+/// A line is "ttyS0  -W- (EC p a)  4:64".
 fn capturedConsole(consoles: []const u8) ?[]const u8 {
     var lines = std.mem.tokenizeScalar(u8, consoles, '\n');
     while (lines.next()) |line| {
@@ -1080,33 +1072,34 @@ test capturedConsole {
     try testing.expectEqual(null, capturedConsole(""));
 }
 
-/// The hard limit on a /proc/PID/limits "Max core file size" line, or null.
+/// hardCoreLimit returns the hard limit on a /proc/PID/limits "Max core file
+/// size" line, or null.
 fn hardCoreLimit(limits: []const u8) ?[]const u8 {
     const label = "Max core file size";
     var it = std.mem.tokenizeScalar(u8, limits, '\n');
     while (it.next()) |line| {
         if (!std.mem.startsWith(u8, line, label)) continue;
         var f = std.mem.tokenizeAny(u8, line[label.len..], " \t");
-        _ = f.next() orelse return null; // soft
+        _ = f.next() orelse return null; // skip the soft limit
         return f.next();
     }
     return null;
 }
 
-/// The capabilities kernel-bounding-set wants gone from PID 1's bounding
-/// set, and the allowance that keeps each, if any.
+/// bounded_caps are the capabilities kernel-bounding-set wants gone from
+/// PID 1's bounding set, unless an allowance keeps them.
 const bounded_caps = [_]allow.Cap{
     .sys_module, .sys_rawio, .sys_ptrace, .mknod,   .perfmon,
     .bpf,        .sys_admin, .net_admin,  .net_raw,
 };
 
-/// What kernel-helpers wants gone from the helpers' bounding set.
+/// helper_denied is what kernel-helpers wants gone from the helpers' bounding set.
 const helper_denied = [_]allow.Cap{
     .net_admin,  .net_raw,   .sys_module, .sys_rawio,
     .sys_ptrace, .sys_admin, .perfmon,    .bpf,
 };
 
-/// kernel.usermodehelper.bset, "LOW\tHIGH", as one set, or null.
+/// helperCaps parses kernel.usermodehelper.bset, "LOW\tHIGH", as one set, or null.
 fn helperCaps(text: []const u8) ?u64 {
     var it = std.mem.tokenizeAny(u8, text, " \t\n");
     const low = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
@@ -1192,7 +1185,7 @@ test featuresPresent {
             "nodev\toverlay\n\text4\n",
         ),
     );
-    // A name is a whole word: hfsplus is not hfs, can is not candle.
+    // A name must be a whole word: hfsplus is not hfs, candle is not can.
     try testing.expect(!firstWordIs("hfsplus 1 0\ncandle 1 0\n", "hfs"));
     try testing.expect(!firstWordIs("candle 1 0\n", "can"));
 }
@@ -1229,7 +1222,7 @@ test unsetArgs {
         "init_on_alloc, init_on_free, slab_nomerge, page_alloc.shuffle, randomize_kstack_offset",
         try unsetArgs(a, "console=ttyS0 panic=10\n", &names),
     );
-    // The last setting wins; a longer name is not the switch.
+    // The last setting wins, and a longer name is a different switch.
     try testing.expectEqualStrings(
         "init_on_alloc",
         try unsetArgs(a, "init_on_alloc=1 init_on_alloc=0", &.{"init_on_alloc"}),

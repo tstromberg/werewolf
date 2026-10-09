@@ -1,121 +1,6 @@
-//! leash: start a service someone else wrote, as its own user, on a leash.
-//!
-//! On a machine without a shell, runsv can only run ./run, with no
-//! arguments, as root. For our own programs that is enough: they give root
-//! up themselves. A program someone else wrote (nginx, postgres, grype) needs
-//! its user, arguments and environment given to it, and cannot confine
-//! itself. /etc/sv/NAME/run is a link to leash, which reads
-//! /etc/sv/NAME/service and starts the service as that file says:
-//!
-//!     # nginx, as its own user, serving the status page.
-//!     exec    /usr/bin/nginx
-//!     before  /usr/bin/nginx -t -q
-//!     user    nginx
-//!     listen  tcp/80
-//!     read    /etc/nginx /data/svc/status/www
-//!
-//! One directive a line: a key, then words. Double quotes around a whole
-//! word let it hold spaces (env "GREETING=hello world"); there are no
-//! escapes, variables or expansions. A # that starts a word starts a
-//! comment. lib/service.zig reads it, for leash, howl, seal and the build
-//! alike.
-//!
-//!     exec PROGRAM ARG...     what runs; required, once
-//!     before PROGRAM ARG...   run first, in order, leashed; each must exit 0
-//!     user NAME               whom it runs as; required, once; never root
-//!     listen tcp/PORT...      ports it may bind; one below 1024 brings
-//!                             CAP_NET_BIND_SERVICE, and no other capability
-//!     connect tcp/PORT...     ports it may reach; without it, none
-//!     read PATH...            read beyond the floor (below)
-//!     write PATH...           read and write beyond its own directories
-//!     run PROGRAM...          other programs it may start. Landlock grants
-//!                             exec per file, so a multi-call binary (busybox,
-//!                             Wolfi's coreutils, whose applets are symlinks
-//!                             to one file) is all-or-nothing: naming one
-//!                             applet allows them all. What bounds them then
-//!                             is the floor, the capabilities and the network,
-//!                             not the names.
-//!     requires PATH...        stay down unless each exists
-//!     pledge PROMISE...       the system calls it may make, in promises
-//!                             (lib/seal.zig); required, once
-//!     env NAME=VALUE          its environment, otherwise only PATH
-//!     secret NAME PATH        a variable read from a file; never logged
-//!     config NAME PATH [optional]
-//!                             copy a /run/config file to this service's
-//!                             /run/svc/SERVICE/NAME, mode 0600; never logged.
-//!                             NAME is a setting's, [a-z][a-z0-9-]*: howl
-//!                             pack's --NAME.
-//!                             Missing, it keeps the service down, unless
-//!                             optional: then there is no copy
-//!     setting NAME TYPE[...] [required] [as KEY]
-//!                             a value it takes from the machine: from
-//!                             the file a `config settings PATH` names,
-//!                             which may be missing
-//!     render FORMAT FILE [from PATH]
-//!                             where its settings go: env, json or conf, in
-//!                             /run/svc/SERVICE/FILE (lib/settings.zig)
-//!     nofile N                its limit on open files
-//!     memory N                its resident memory ceiling, in MiB: the
-//!                             service's cgroup memory.max, so one service
-//!                             cannot exhaust the machine's memory. A
-//!                             ceiling on memory held, not address space
-//!                             reserved, so the JVM and V8 fit under it.
-//!     root /oci/NAME          an image baked into the root (docs/design/adhoc.md):
-//!                             the service runs inside it, and every path
-//!                             above is the image's. leash enters it as
-//!                             root, before it builds a rule or gives root
-//!                             up, so the image's links resolve inside it.
-//!                             Its floor is the image, readable; /tmp, /run
-//!                             and /data, which init bound from
-//!                             /run/svc/NAME, its run/ and /data/svc/NAME;
-//!                             and the devices init bound in. No render:
-//!                             service-config is not there
-//!     dir PATH                where it starts, inside its root; /data otherwise
-//!
-//! Every service is also held to 4096 tasks, processes and threads together
-//! (its cgroup's pids.max), so one that forks or spawns without end stops
-//! there, not when the machine has no process left for anyone else.
-//!
-//! Every service also gets /run/svc/NAME and, while /data is usable,
-//! /data/svc/NAME, owned by its user and its working directory; and the
-//! floor: read /usr, /proc, /sys/devices/system/cpu (how many CPUs there
-//! are), /etc/ssl and the few files in /etc that every
-//! program reads (passwd, group, hosts, resolv.conf, nsswitch.conf,
-//! ld.so.cache, localtime), and the console and /dev/null, /dev/zero and
-//! /dev/urandom.
-//!
-//! leash reads nothing from outside the image but the secrets it is told
-//! of. It checks the whole file before it does anything. As root, it then
-//! checks requirements, reads secrets, makes the service's directories and
-//! sets its limits; builds a Landlock ruleset of the paths, programs and
-//! ports above; and gives root up for good: groups, gid and uid, every
-//! capability but the one a low port needs, no_new_privs, and a check that
-//! root cannot be had back. Then the ruleset applies, with Landlock's
-//! scoping (no signals or abstract UNIX sockets outside the service), and
-//! leash renders the service's settings with service-config, as the
-//! service, and runs each `before`; then a seccomp filter of the service's
-//! promises, stacked on the seal, whose refusals seal-watch answers and
-//! says, and leash becomes the service. Nothing of leash runs after that,
-//! so the service pays nothing for it.
-//!
-//! A promise is a class of work (docs/design/pledge.md, System calls:
-//! promises): `stdio rpath inet listen` for a server that reads files and
-//! takes connections. leash becomes the service by executing an open
-//! descriptor of its program, which a pledge without exec still allows,
-//! and Landlock lets it execute nothing but that program and, for one
-//! dynamically linked, its ELF loader; `pledge exec` lets it run the
-//! programs its `run` lines name too. The loader, run itself, would load
-//! any program the service can read where the mount allows running one:
-//! the image's /usr, never /data, /run or /tmp, which are noexec. What it
-//! loads stays this service, under its user, Landlock and pledge
-//! (docs/design/pledge.md, Not covered).
-//!
-//! What cannot change by waiting, a bad line, a missing requirement or a
-//! `before` that fails, parks the service: one line on the console says
-//! why, and runsv is told to keep it down. A path another service has not
-//! made yet is not that: leash exits, and runsv tries again in a second.
-//! The `before` programs run before the pledge, under the seal and the
-//! rest of the leash.
+//! leash starts a service someone else wrote as its own user, confined by
+//! Landlock, a seccomp pledge and a cgroup. /etc/sv/NAME/run links to it, and
+//! it reads /etc/sv/NAME/service. See README.md.
 
 const std = @import("std");
 const seal = @import("seal");
@@ -131,24 +16,23 @@ const linux = std.os.linux;
 const path_env = "/usr/sbin:/usr/bin:/sbin:/bin";
 const max_file = 64 << 10;
 const max_secret = 4 << 10;
-/// Every service's tasks, processes and threads together: pids.max.
+/// max_tasks is every service's pids.max, which counts processes and threads.
 const max_tasks = 4096;
 const service_config = "/usr/lib/werewolf/service-config";
 
-/// What failed, for the line that says so.
+/// why_buf holds the message Leash.fail logs.
 var why_buf: [512]u8 = undefined;
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
 
-    // Whatever runsv left open goes at exec; leash's own files close too.
+    // Close at exec whatever runsv left open, and leash's own files too.
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
-    // runsv hands fd 0 the console, write-only: a service that kept it could
-    // forge log lines there (WEBSHELL_VULNS #1). It reads nothing from a
-    // person, so fd 0 becomes /dev/null; it logs on fd 1 and 2, which runsv
-    // routes.
-    // Not CLOEXEC: with fd 0 closed, the open lands on 0, and stays.
+    // runsv gives fd 0 the console, write-only. A service that kept it could
+    // forge log lines there (WEBSHELL_VULNS #1), so make fd 0 /dev/null.
+    // Services log on fd 1 and 2, which runsv routes.
+    // Not CLOEXEC: if fd 0 was closed, open returns 0, and it must survive exec.
     const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
     if (linux.errno(null_fd) != .SUCCESS) {
         record(io, .{
@@ -160,8 +44,8 @@ pub fn main(init: std.process.Init) !void {
         _ = linux.dup2(@intCast(null_fd), 0);
         _ = linux.close(@intCast(null_fd));
     }
-    // runsv's control pipe, opened while root, so a service can be parked
-    // from any step, before or after root is given up.
+    // Open runsv's control pipe while root, so fail can park the service
+    // even after root is given up.
     const ctl_rc = linux.open(
         "supervise/control",
         .{ .ACCMODE = .WRONLY, .NONBLOCK = true, .CLOEXEC = true },
@@ -209,11 +93,10 @@ pub fn main(init: std.process.Init) !void {
             l.fail(.park, "secret {s}: {s}: {s}", .{ sec[0], sec[1], @errorName(err) });
         try env.put(sec[0], value);
     }
-    // Read only the files the image names, while root. Write their copies
-    // only AFTER dropping root and entering Landlock: a service cannot use
-    // a link or a restart race to make a privileged writer act for it.
-    // A service with settings may be given none: its settings file, missing,
-    // is an empty object, and the image's defaults hold.
+    // Read the config files the image names while root, but write the
+    // copies only after dropping root and entering Landlock, so a service
+    // cannot use a link or a restart race to make root write for it.
+    // A missing settings file reads as {}, so the image's defaults hold.
     const configs = try gpa.alloc(?[]const u8, s.configs.len);
     for (s.configs, configs) |cfg, *value| {
         value.* = Dir.cwd().readFileAlloc(io, cfg.path, gpa, .limited(max_file)) catch |err| v: {
@@ -228,24 +111,22 @@ pub fn main(init: std.process.Init) !void {
 
     const run_dir = try gpa.printSentinel("/run/svc/{s}", .{name}, 0);
     const data_dir = try gpa.printSentinel("/data/svc/{s}", .{name}, 0);
+    const mode = s.share.mode();
     _ = linux.mkdir("/run/svc", 0o755);
-    own(l, run_dir, user);
+    own(l, run_dir, user, mode);
     if (!nodata) {
         _ = linux.mkdir("/data/svc", 0o755);
-        own(l, data_dir, user);
+        own(l, data_dir, user, mode);
     }
     if (s.nofile) |n| {
         if (linux.errno(linux.setrlimit(.NOFILE, &.{ .cur = n, .max = n })) != .SUCCESS)
             l.fail(.park, "nofile {d}: refused", .{n});
     }
-    // The service's cgroup (cmd/init made /run/cgroup/svc with memory and
-    // pids delegated): its whole process tree lives here, so `memory` caps
-    // its resident memory -- not its address space, which the JVM and V8
-    // over-reserve -- and its finish reaper kills the tree, detached
-    // children included, when it stops. Joined as root, before the drop, so
-    // the service cannot leave it or raise its own cap. Where cgroup2 is not
-    // available (init said so), the service runs uncapped and unreaped, as
-    // before.
+    // Join the service's cgroup (cmd/init delegates memory and pids under
+    // /run/cgroup/svc). memory.max caps resident memory, not address space,
+    // which the JVM and V8 over-reserve; leash-reap kills the whole tree at
+    // stop. Join as root, before the drop, so the service cannot leave the
+    // cgroup or raise its limits. Without cgroup2 it runs uncapped.
     if (exists("/run/cgroup/svc")) {
         const dir = try gpa.printSentinel("/run/cgroup/svc/{s}", .{name}, 0);
         _ = linux.mkdir(dir, 0o755);
@@ -264,12 +145,10 @@ pub fn main(init: std.process.Init) !void {
         record(io, .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
     }
 
-    // A service with a root runs inside the image beneath it. leash enters
-    // it here, as root and before any rule: every path from here on, the
-    // floor, its programs, its own places, is the image's and resolves
-    // inside it, links and all, and nothing of the machine is reachable
-    // but what init bound in (cmd/init/oci.zig). Its /tmp and /data are
-    // /run/svc/NAME and /data/svc/NAME, bound there, made and owned above.
+    // Chroot into the service's image as root, before building any rule, so
+    // every later path, links included, resolves inside the image. Only what
+    // init bound in (cmd/init/oci.zig) is reachable; the image's /tmp and
+    // /data are /run/svc/NAME and /data/svc/NAME, made above.
     if (s.root) |r| {
         const rz = try gpa.dupeSentinel(u8, r, 0);
         if (linux.errno(linux.chroot(rz)) != .SUCCESS or linux.errno(linux.chdir("/")) != .SUCCESS)
@@ -277,10 +156,9 @@ pub fn main(init: std.process.Init) !void {
     }
     const own_run: [:0]const u8 = if (s.root != null) "/tmp" else run_dir;
     const own_data: [:0]const u8 = if (s.root != null) "/data" else data_dir;
-    // An image logs by reopening /dev/stdout and /dev/stderr, which lead
-    // through /proc/self/fd to runsv's pipes, and a pipe reopened by path
-    // is checked like a file: root's, mode 0600. Given to the service's
-    // user, they open; what they carry goes where it always did.
+    // Images log by reopening /dev/stdout and /dev/stderr. Reopening runsv's
+    // pipes by path checks their owner (root, 0600), so give them to the
+    // service's user.
     if (s.root != null) for ([_]i32{ 1, 2 }) |fd| {
         _ = linux.fchown(fd, user.uid, user.gid);
     };
@@ -300,8 +178,8 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "{s}: {s}", .{ own_run, sandbox.whyNot(gpa, err) });
     if (!nodata) allow(rules, own_data, write_tree, .own) catch |err|
         l.fail(.park, "{s}: {s}", .{ own_data, sandbox.whyNot(gpa, err) });
-    // And an image's /run, where it keeps its pid file and sockets, bound
-    // from its own /run/svc/NAME/run (cmd/init/oci.zig).
+    // An image keeps pid files and sockets in /run, which init binds from
+    // /run/svc/NAME/run (cmd/init/oci.zig).
     if (s.root != null) allow(rules, "/run", write_tree, .own) catch |err|
         l.fail(.park, "/run: {s}", .{sandbox.whyNot(gpa, err)});
     for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
@@ -344,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
         copyConfig(own_run, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
             l.fail(.park, "config {s}: {s}", .{ cfg.name, @errorName(err) });
     }
-    // The pledge, as the words a service file says it in.
+    // The pledge as words, for the start record.
     var pledge: std.ArrayList([]const u8) = .empty;
     var promises = s.pledge.iterator();
     while (promises.next()) |p| try pledge.append(gpa, @tagName(p));
@@ -361,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
             .connect = s.connect,
             .landlock = rules.abi,
             .pledge = pledge.items,
-            // false while the machine learns: no filter of its own.
+            // While the machine learns, the service gets no filter.
             .pledged = !learn,
         },
     );
@@ -376,9 +254,8 @@ pub fn main(init: std.process.Init) !void {
             l.fail(.park, "before {s}: {s}", .{ argv[0], @errorName(err) });
         if (term != .exited or term.exited != 0) l.fail(.park, "before {s} failed", .{argv[0]});
     }
-    // The program, open before the pledge: becoming it is executing this
-    // descriptor. A pledge without exec still allows that one execveat, and
-    // Landlock lets it run only this program.
+    // Open the program before the pledge. A pledge without exec still allows
+    // execveat of this descriptor, and Landlock allows only this program.
     const prog_rc = linux.open(
         try gpa.dupeSentinel(u8, s.exec[0], 0),
         .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true },
@@ -394,10 +271,9 @@ pub fn main(init: std.process.Init) !void {
     while (env_it.next()) |e| : (i += 1)
         envp[i] = try gpa.printSentinel("{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }, 0);
 
-    // The service's own filter, refusing with ENOSYS what its pledge does
-    // not promise: no listener, so no_new_privs (set in dropTo) is enough.
-    // A machine learning (werewolf.seal=learn, a DEV=1 build) installs none,
-    // so every call reaches the machine seal, which records it.
+    // The pledge filter returns ENOSYS for calls outside its promises. It has
+    // no listener, so no_new_privs (set in dropTo) suffices to install it.
+    // A learning machine installs none, so every call reaches seal-watch.
     if (!learn) {
         var filter_buf: [seal.max_filter]seal.Filter = undefined;
         const filter = seal.buildFilter(&filter_buf, s.pledge, true);
@@ -414,11 +290,9 @@ pub fn main(init: std.process.Init) !void {
     l.fail(.park, "exec {s}: {s}", .{ s.exec[0], @tagName(linux.errno(rc)) });
 }
 
-/// Whether the machine is learning its pledges (werewolf.seal=learn, a
-/// DEV=1 build), when a service installs no filter of its own, so every
-/// call reaches the machine seal to be recorded. Read as init read it, by
-/// lib/cmdline.zig, from the kernel's line, which root cannot rewrite, as
-/// it could init's record in /run; a line it refuses is no learning.
+/// learning reports whether the machine is learning pledges: werewolf.seal=learn
+/// on a DEV=1 build. It reads /proc/cmdline, which root cannot rewrite as it
+/// could a file in /run; an unparsable command line means not learning.
 fn learning() bool {
     var buf: [4096]u8 = undefined;
     const fd = linux.open("/proc/cmdline", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
@@ -433,35 +307,39 @@ fn learning() bool {
 
 // --- as root ---------------------------------------------------------------------
 
-/// dir, made if need be, a directory of the user's own, 0755. A directory
-/// someone else owns becomes the user's, but only itself: what is inside
-/// stays as it is, since a recursive chown as root is how a user is handed
-/// a file it should not have.
-fn own(l: Leash, dir: [:0]const u8, user: User) void {
-    _ = linux.mkdir(dir, 0o755);
+/// own makes dir if needed, then gives it, not its contents, to user with
+/// mode. A recursive chown as root could hand the user a file it should not
+/// have. It changes dir through a descriptor opened with NOFOLLOW, so a link
+/// swapped in for dir cannot redirect the chown or chmod. It parks the
+/// service if dir is not a directory or cannot be changed.
+fn own(l: Leash, dir: [:0]const u8, user: User, mode: u32) void {
+    _ = linux.mkdir(dir, @intCast(mode));
+    const rc = linux.open(
+        dir,
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(rc) != .SUCCESS) l.fail(.park, "{s} is not a directory", .{dir});
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
     var st: linux.Statx = undefined;
     if (linux.errno(linux.statx(
-        linux.AT.FDCWD,
-        dir,
-        linux.AT.SYMLINK_NOFOLLOW,
-        .{ .TYPE = true, .UID = true, .GID = true },
+        fd,
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .MODE = true, .UID = true, .GID = true },
         &st,
-    )) != .SUCCESS or
-        st.mode & linux.S.IFMT != linux.S.IFDIR)
-        l.fail(.park, "{s} is not a directory", .{dir});
-    if (st.uid != user.uid or st.gid != user.gid) {
-        if (linux.errno(linux.fchownat(
-            linux.AT.FDCWD,
-            dir,
-            user.uid,
-            user.gid,
-            linux.AT.SYMLINK_NOFOLLOW,
-        )) != .SUCCESS)
-            l.fail(.park, "cannot give {s} to its user", .{dir});
-    }
+    )) != .SUCCESS)
+        l.fail(.park, "{s}: cannot stat it", .{dir});
+    if ((st.uid != user.uid or st.gid != user.gid) and
+        linux.errno(linux.fchown(fd, user.uid, user.gid)) != .SUCCESS)
+        l.fail(.park, "cannot give {s} to its user", .{dir});
+    if (st.mode & 0o7777 != mode and linux.errno(linux.fchmod(fd, mode)) != .SUCCESS)
+        l.fail(.park, "cannot set {s} to {o}", .{ dir, mode });
 }
 
-/// A secret: one line, at most 4 KiB, without its newline.
+/// readSecret returns the one-line secret at path, at most 4 KiB, without
+/// its trailing newline.
 fn readSecret(io: Io, gpa: Allocator, path: []const u8) ![]const u8 {
     const text = try Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_secret));
     const value = std.mem.trimEnd(u8, text, "\n");
@@ -470,11 +348,9 @@ fn readSecret(io: Io, gpa: Allocator, path: []const u8) ![]const u8 {
     return value;
 }
 
-/// Called as the service, inside Landlock, once its `config settings` copy
-/// is made: have service-config render them, given the service file's
-/// declarations on its standard input, so that the tar's JSON is
-/// parsed by neither root nor leash. An env file it rendered joins the
-/// service's environment, and nothing but the keys declared may.
+/// renderSettings runs service-config, as the service inside Landlock, with
+/// the declared settings on its stdin, so neither root nor leash parses the
+/// settings JSON. An env file it renders joins env, declared keys only.
 fn renderSettings(
     l: Leash,
     gpa: Allocator,
@@ -528,11 +404,9 @@ fn renderSettings(
     for (vars) |v| env.put(v[0], v[1]) catch l.fail(.park, "out of memory", .{});
 }
 
-/// value into dir/name, 0600, replacing whatever was there; null, an
-/// optional config the machine does not have, leaves nothing there.
-/// Called as the service, inside Landlock. Never truncate an existing
-/// inode (which could be a hard link); replace the name with a new 0600
-/// file. Pin the directory, refuse symlinks and fail closed on a race.
+/// copyConfig replaces dir/name with a new 0600 file holding value, or
+/// removes it if value is null. It unlinks rather than truncates, since the
+/// old name may be a hard link, and refuses symlinks. Call it as the service.
 fn copyConfig(dir: [:0]const u8, name: [:0]const u8, value: ?[]const u8) !void {
     const d = linux.open(
         dir,
@@ -573,8 +447,8 @@ fn allowPath(
 ) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch l.fail(.park, "out of memory", .{});
     allow(rules, z, access, .plain) catch |err| switch (err) {
-        // Another service makes it; runsv starts this one again in a
-        // second. Not while /data is unavailable: it would not appear.
+        // Another service may yet make it, so let runsv retry. Without
+        // /data, a path under it will never appear, so park.
         error.FileNotFound => l.fail(
             if (nodata and std.mem.startsWith(u8, path, "/data/")) .park else .retry,
             "{s} is not there yet",
@@ -584,8 +458,8 @@ fn allowPath(
     };
 }
 
-/// A program it may start, and the ELF interpreter that loads it, which
-/// the kernel opens for execution too.
+/// allowProgram lets the service run path and its ELF interpreter, which the
+/// kernel also opens for execution. It parks the service on any error.
 fn allowProgram(l: Leash, rules: sandbox.Ruleset, gpa: Allocator, path: []const u8) void {
     const z = gpa.dupeSentinel(u8, path, 0) catch l.fail(.park, "out of memory", .{});
     allow(rules, z, run_file, .follow) catch |err|
@@ -605,8 +479,8 @@ fn allowProgram(l: Leash, rules: sandbox.Ruleset, gpa: Allocator, path: []const 
     }
 }
 
-/// The ELF interpreter a 64-bit little-endian program names (PT_INTERP),
-/// or null for a static one, from the program's first bytes.
+/// interpreter returns the PT_INTERP path of a 64-bit little-endian ELF
+/// program from its first bytes, or null for a static one.
 fn interpreter(head: []const u8) !?[]const u8 {
     if (head.len < 64 or !std.mem.eql(u8, head[0..4], "\x7fELF") or head[4] != 2 or
         head[5] != 1) return error.NotElf;
@@ -634,12 +508,12 @@ fn interpreter(head: []const u8) !?[]const u8 {
     return null;
 }
 
-/// Become user for good: no groups but its own, no capability but
-/// CAP_NET_BIND_SERVICE where a low port needs it, now or in anything it
-/// runs, and no way back to root.
+/// dropTo switches to user for good. It keeps no supplementary groups and
+/// no capability but CAP_NET_BIND_SERVICE when bind_low, which survives exec.
+/// It fails with StillRoot if root can be regained.
 fn dropTo(user: User, bind_low: bool) !void {
-    // A capability the kernel does not know (EINVAL) is one it cannot
-    // grant; any other failure leaves the set whole, and is an error.
+    // EINVAL means the kernel does not know the capability, so it cannot
+    // grant it either. Any other failure is an error.
     var cap: usize = 0;
     while (cap < 64) : (cap += 1) {
         if (bind_low and cap == linux.CAP.NET_BIND_SERVICE) continue;
@@ -654,7 +528,7 @@ fn dropTo(user: User, bind_low: bool) !void {
     var hdr: CapHeader = .{};
     const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep, .inheritable = keep }, .{} };
     try check(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)));
-    // Ambient, so it survives exec into a program with no file capabilities.
+    // Ambient, so it survives exec into a program without file capabilities.
     if (bind_low) try check(linux.prctl(
         @backingInt(linux.PR.CAP_AMBIENT),
         linux.PR.CAP_AMBIENT_RAISE,
@@ -670,7 +544,7 @@ fn check(rc: usize) !void {
     if (linux.errno(rc) != .SUCCESS) return error.SystemCall;
 }
 
-/// The kernel's struct __user_cap_header_struct (lib/sandbox.zig).
+/// CapHeader is the kernel's struct __user_cap_header_struct (lib/sandbox.zig).
 const CapHeader = extern struct {
     version: u32 = 0x20080522, // _LINUX_CAPABILITY_VERSION_3
     pid: i32 = 0,
@@ -683,15 +557,15 @@ const CapSets = extern struct {
 
 // --- Landlock -------------------------------------------------------------------
 
-// Rights, of lib/sandbox.zig's: a tree read, files and listings; a tree
-// written, everything but devices; and a program run.
+// Landlock rights: read_tree reads files and lists directories, write_tree
+// adds every change but making devices, and run_file executes a program.
 const read_tree: u64 = sandbox.read_file | sandbox.read_dir;
 const write_tree: u64 = read_tree | sandbox.write_file | sandbox.remove_dir |
     sandbox.remove_file | sandbox.make_dir | sandbox.make_reg | sandbox.make_sock |
     sandbox.make_fifo | sandbox.make_sym | sandbox.refer | sandbox.truncate;
 const run_file: u64 = sandbox.execute | sandbox.read_file;
 
-// openat2(2), for a path resolved with no link in it.
+// openat2(2) arguments, to open a path with no symlink anywhere in it.
 const OpenHow = extern struct { flags: u64, mode: u64, resolve: u64 };
 const O_PATH = 0o10000000;
 const O_CLOEXEC = 0o2000000;
@@ -716,10 +590,9 @@ const floor = [_]Floor{
     .{ .path = "/dev/urandom", .access = sandbox.read_file },
 };
 
-/// The floor of a service with a root, inside it: the image, readable
-/// whole, /proc and the two writable places beneath it included, and the
-/// devices init bound in (cmd/init/oci.zig). Nothing of the machine's own
-/// /etc or /usr is there to be read.
+/// rooted_floor is the floor of a service with a root: the whole image,
+/// read-only, and the devices init bound in (cmd/init/oci.zig). The
+/// machine's own /etc and /usr are not reachable.
 const rooted_floor = [_]Floor{
     .{ .path = "/", .access = read_tree },
     .{ .path = "/dev/null", .access = sandbox.read_file | sandbox.write_file },
@@ -729,17 +602,15 @@ const rooted_floor = [_]Floor{
     .{ .path = "/dev/urandom", .access = sandbox.read_file },
 };
 
-/// How a path is resolved. follow: the image's programs, through its
-/// links (/lib to usr/lib). plain: a service file's read and write
-/// paths, with no link anywhere in them: one may lie in another
-/// service's directory, under /data, which follows links, and that
-/// service could make the name a link to what it wants this one
-/// granted. own: the service's directories, a link at the end refused.
-/// optional: the floor, which may be absent.
+/// How says how allow resolves a path. follow: programs, through image links
+/// such as /lib. plain: read and write paths, with no symlink anywhere, since
+/// another service could plant one under /data to widen this one's grant.
+/// own: the service's directories, refusing a final symlink.
+/// optional: the floor, whose paths may be absent.
 const How = enum { follow, plain, optional, own };
 
-/// access beneath path, in rules: on a directory, all of it; on a file,
-/// the file's rights alone.
+/// allow adds access to path in rules: the whole tree for a directory, only
+/// file rights for a file.
 fn allow(rules: sandbox.Ruleset, path: [:0]const u8, access: u64, how: How) !void {
     const fd = if (how == .plain) blk: {
         var open_how: OpenHow = .{
@@ -778,7 +649,7 @@ fn allow(rules: sandbox.Ruleset, path: [:0]const u8, access: u64, how: How) !voi
 
 const User = struct { uid: linux.uid_t, gid: linux.gid_t };
 
-/// name's uid and gid in an /etc/passwd.
+/// lookupUser returns name's uid and gid from passwd text, or null.
 fn lookupUser(passwd: []const u8, name: []const u8) ?User {
     var lines = std.mem.tokenizeScalar(u8, passwd, '\n');
     while (lines.next()) |line| {
@@ -794,8 +665,8 @@ fn lookupUser(passwd: []const u8, name: []const u8) ?User {
     return null;
 }
 
-/// Write text to dir/file, which must already exist (a cgroup control
-/// file): opened write-only, no create, no truncate.
+/// writeIn writes text to the existing cgroup control file dir/file,
+/// without creating or truncating it.
 fn writeIn(gpa: Allocator, dir: [:0]const u8, file: []const u8, text: []const u8) bool {
     const path = gpa.printSentinel("{s}/{s}", .{ dir, file }, 0) catch return false;
     const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
@@ -809,16 +680,17 @@ fn exists(path: [:0]const u8) bool {
     return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
-/// The service being started, and how to stop it.
+/// Leash is the service being started, and how to stop it.
 const Leash = struct {
     io: Io,
-    /// runsv's control pipe, to park the service; null if it did not open.
+    /// ctl is runsv's control pipe, used to park the service; null if not open.
     ctl: ?linux.fd_t,
     name: []const u8,
 
     const Outcome = enum { park, retry };
 
-    /// Say why on the console, then stop: parked, or for runsv to try again.
+    /// fail logs why and exits. With .park it also tells runsv to keep the
+    /// service down; with .retry runsv starts it again.
     fn fail(l: Leash, how: Outcome, comptime fmt: []const u8, args: anytype) noreturn {
         const why = std.mem.print(&why_buf, fmt, args) catch fmt;
         const event = if (how == .park) "down" else "retry";
@@ -830,7 +702,7 @@ const Leash = struct {
     }
 };
 
-/// One JSON line on the console.
+/// record logs fields as one JSON line on the console.
 fn record(io: Io, fields: anytype) void {
     var buf: [2048]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
@@ -858,7 +730,7 @@ test interpreter {
     try testing.expectEqualStrings("/lib/ld-linux-aarch64.so.1", (try interpreter(&elf)).?);
     std.mem.writeInt(u32, elf[120..124], 1, .little); // PT_LOAD: a static program
     try testing.expectEqual(null, try interpreter(&elf));
-    std.mem.writeInt(u16, elf[0x38..0x3a], 60, .little); // headers past what was read
+    std.mem.writeInt(u16, elf[0x38..0x3a], 60, .little); // headers past the bytes read
     try testing.expectError(error.NotElf, interpreter(&elf));
     try testing.expectError(error.NotElf, interpreter("#!/bin/sh\n"));
 }
@@ -889,7 +761,7 @@ test "config copies replace links, not their targets" {
     try testing.expectEqual(@as(u32, 0o600), st.permissions.toMode() & 0o777);
     try copyConfig(path, "key", "second\n");
     try testing.expectEqualStrings("second\n", try tmp.dir.readFile(io, "key", &buf));
-    // An optional config the machine lacks leaves no stale copy behind.
+    // A missing optional config leaves no stale copy behind.
     try copyConfig(path, "key", null);
     try testing.expectError(error.FileNotFound, tmp.dir.access(io, "key", .{}));
     try testing.expectEqualStrings("unchanged", try tmp.dir.readFile(io, "victim", &buf));

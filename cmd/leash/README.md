@@ -2,100 +2,99 @@
 
 ## Summary
 
-Starts a service someone else wrote (nginx, PostgreSQL, a JVM app) as its
-own user, on a leash: Landlock for files and TCP ports, a seccomp filter of
-its promises, its own cgroup, and no capability but a low port's. runsv's
-`/etc/sv/NAME/run` is a link to leash, which reads `/etc/sv/NAME/service`.
+leash starts a service someone else wrote (nginx, PostgreSQL, a JVM app) as
+its own user, confined by Landlock for files and TCP ports, a seccomp pledge,
+and a cgroup, with no capability but the one a low port needs.
 
 ## Background
 
-On a machine without a shell, runsv can only run `./run`, with no
-arguments, as root. werewolf's own programs give root up themselves; a
-program someone else wrote cannot. Its service file says, one directive a
-line, what it may do: `exec`, `user`, `listen` and `connect` ports, `read`,
-`write` and `run` paths, `pledge` promises, `env`, `secret`, `config`
-(a file copied in, or `optional` and skipped when the machine lacks it),
-`setting` and `render`, `memory`, `nofile`, `requires`, `before`.
+runsv can only run `./run`, as root, with no arguments. werewolf's own
+programs drop root themselves; other programs cannot. So `/etc/sv/NAME/run`
+links to leash, which reads `/etc/sv/NAME/service` (`lib/service.zig`): a
+key and words per line, `"` to group words, `#` at a word's start to comment.
+
+| Key | Meaning |
+| --- | --- |
+| `exec`, `user`, `pledge` | required, once: the program and arguments; the user (never root); the promises (`lib/seal.zig`) |
+| `before PROGRAM ARG...` | run first, in order, confined; each must exit 0 |
+| `listen` / `connect tcp/PORT...` | ports it may bind / reach; a port below 1024 grants `CAP_NET_BIND_SERVICE` |
+| `read` / `write PATH...` | paths it may read / write, beyond the floor |
+| `run PROGRAM...` | other programs it may start (with `pledge exec`) |
+| `requires PATH...` | stay down unless each exists |
+| `env NAME=VALUE`, `secret NAME PATH` | its environment, otherwise only `PATH`; a secret comes from a file and is never logged |
+| `config NAME PATH [optional]` | copy a `/run/config` file to `/run/svc/SERVICE/NAME`, 0600; if missing, park unless `optional` |
+| `setting`, `render` | settings, written by service-config (`lib/settings.zig`); a missing settings file reads as `{}` |
+| `nofile N`, `memory MIB` | open-file limit; `memory.max`, which caps resident memory, not address space |
+| `share strict\|shared\|browseable` | who may enter its two directories: only its user (`0700`, the default); others, by a name they know, such as a socket (`0711`); others, listing too (`0755`) |
+| `root /oci/NAME`, `dir PATH` | run inside an image in the root (docs/design/adhoc.md), without `render`; start directory |
 
 ## Goals
 
-- No service runs as root, or with a capability beyond binding a low port.
-- A service reaches only the files, programs and ports its file names.
-- It makes only the system calls its promises bring, under the seal.
-- Its whole process tree is bounded and reaped: memory, tasks, and a kill
-  of every process when it stops.
-- A bad file never half-starts a service: it parks, and says why.
+- No service runs as root, or with any capability but binding a low port.
+- A service reaches only the files, programs, ports and calls it declares.
+- Its process tree is bounded (memory, 4096 tasks) and killed when it stops.
+- A bad file never half-starts a service: it parks and logs why.
 
 ## Non-Goals
 
-- Configuring the program itself: its own files, or `render`ed settings.
-- Restarting it: runsv does.
-- Confining werewolf's own programs, which confine themselves.
+- Configuring or restarting the program, or confining werewolf's programs.
 
 ## Detailed design
 
-1. **The file, checked whole** before anything is done: every key known,
-   paths absolute and clean, ports, promises, names, no root user.
-2. **As root**: requirements checked; secrets and config files read (only
-   paths the image names); `/run/svc/NAME` and `/data/svc/NAME` made its
-   user's, the directory alone, never what is inside; `nofile`; its cgroup
-   joined, with `memory.max` from `memory` and `pids.max` of 4096; a
-   Landlock ruleset built of the floor (`/usr`, `/proc`, a few files in
-   `/etc`, `/dev/null`, `/dev/zero`, `/dev/urandom`), its own directories,
-   its paths, its program and ELF loader, and its ports.
-3. **Root given up**: the bounding set emptied but for a low port's
-   capability, groups, gid and uid changed, capabilities set and ambient
-   for that one alone, `no_new_privs`, and a check that root is gone.
-4. **Leashed**: Landlock applied, scoped from signals and abstract sockets
-   outside it, every refusal audited after exec too; config files copied, as the service, into its own
-   directory; settings rendered by `service-config`; each `before` run.
-5. **Pledged**: a seccomp filter of its promises that answers ENOSYS, and
-   has the kernel audit each, stacked on the seal; then leash becomes the program by `execveat` of a
-   descriptor opened before, which a pledge without `exec` still allows.
+1. **As root:** make fd 0 `/dev/null`; parse the whole file; check
+   `requires`; read secrets and configs; make `/run/svc/NAME` and, while
+   `/data` is usable, `/data/svc/NAME`, giving each (never its contents) to
+   the user with the mode `share` asks; set `nofile`; join
+   `/run/cgroup/svc/NAME` with `memory.max` and `pids.max` 4096. With `root`,
+   chroot now, so every later path resolves in the image. Build a Landlock
+   ruleset: the floor (`/usr`, `/proc`, `/sys/devices/system/cpu`, `/etc/ssl`,
+   a few `/etc` files, `/dev/null`, `/dev/zero`, `/dev/urandom`; with `root`,
+   the whole image read-only), its directories and paths, each program and
+   its ELF loader, its ports. `read`/`write` paths are opened with no symlink
+   anywhere, since another service could plant one in `/data`.
+2. **Drop root:** empty the bounding set but a low port's capability, clear
+   groups, set gid and uid, keep that capability ambient, set
+   `no_new_privs`, and fail if root can be regained.
+3. **Confined:** apply Landlock (also scoping signals and abstract sockets),
+   copy configs, run `service-config`, then each `before`.
+4. **Pledge and exec:** install a filter returning ENOSYS outside the
+   promises, stacked on the seal (none while the machine learns), then
+   `execveat` a descriptor opened earlier, which a pledge without `exec`
+   allows. It starts in `dir`, else its data or (no `/data`) run directory.
 
 ## Drawbacks
 
-- A dynamically linked program needs its ELF loader runnable, and the
-  loader, run itself, loads any program the service can read where the
-  mount allows: the image's `/usr`. What it loads stays under the same
-  user, Landlock and pledge.
-- `before` programs and `service-config` run before the pledge, under the
-  seal and Landlock alone.
-- Secrets are environment variables: `before` programs inherit them.
-- Below Landlock ABI 6 (older host kernels), signals and abstract sockets
-  go unscoped; werewolf's own kernel has ABI 6.
+- A dynamic program needs its ELF loader runnable, and the loader can run
+  any readable program on an exec mount (`/usr`), still under its confinement.
+- Landlock grants exec per file, so allowing one busybox applet allows all.
+- `before` and `service-config` run before the pledge, and see secrets.
+- Below Landlock ABI 6 (werewolf's kernel has 6), signals and abstract
+  sockets are not scoped; below ABI 4, a service with ports parks.
 
 ## Alternatives Considered
 
 ### systemd units
-systemd is a large daemon with its own parsers, running as PID 1; leash
-starts once per service and is gone before the service runs.
+A large PID 1 with its own parsers. leash exits before the service runs.
 
 ### A container runtime
 Namespaces add kernel surface (user namespaces are off machine-wide) for
-what Landlock, seccomp and a cgroup already give one process tree.
-
-### Per-service seccomp alone
-Without Landlock, a service could read or write any file its uid can; the
-two together bound both what it calls and what it touches.
+what Landlock, seccomp and a cgroup already give one process tree. Seccomp
+alone, without Landlock, would leave every file its uid can reach.
 
 ## Security Considerations
 
 | Risk | Mitigation |
 | --- | --- |
-| A service file that is wrong | Checked whole first; any fault parks the service, nothing done. |
-| A privileged write the service redirects | Copies are made after root is given up, inside Landlock, refusing links and replacing rather than truncating. |
-| A recursive chown handing over a file | Only the service's directory itself is chowned, with `NOFOLLOW`. |
-| A service that forks without end | `pids.max` of 4096, in a cgroup it joined as root and cannot leave. |
+| A wrong service file | Parsed whole first; any fault parks the service. |
+| A privileged write or chown the service redirects | Copies are written after the drop, inside Landlock, by unlink and create, refusing symlinks. Only the directory itself is changed, through a descriptor opened `NOFOLLOW`. |
+| Another service reading its files or reaching its sockets (Landlock does not check a socket's `connect`) | Its directories are `0700` unless `share` opens them; `shared` (`0711`) admits only names one already knows. The build refuses a `read` or `write` inside a strict service's directory (`lib/compose.zig`). |
+| A fork bomb | `pids.max` 4096, in a cgroup joined as root that it cannot leave. |
 | A detached child outliving its service | `leash-reap`, its `./finish`, writes `cgroup.kill`. |
-| Low port binding | `CAP_NET_BIND_SERVICE` alone, ambient; nothing else, in any set. |
-| The console | fd 0 is `/dev/null`; no device ioctls are granted. |
+| Forged console lines | fd 0 is `/dev/null`; no device ioctls are granted. |
 
 ## Reliability Considerations
 
-- **Park or retry, never half-start:** what waiting cannot fix parks the
-  service and tells runsv; a path another service has not made yet exits,
-  for runsv to try again in a second.
-- **Nothing of leash runs once the service starts**, so it costs nothing.
-- **Tested:** posture's `processes-services-leashed`, `processes-leash-attack`
-  and `make check`'s `cgrouped`, on every form with a service.
+- **Park or retry:** what waiting cannot fix parks the service via runsv's
+  control pipe; a path not made yet, or a missing `exec`, is retried.
+- **Tested:** posture's `processes-services-leashed`, `-service-dirs` and
+  `-leash-attack`, and `make check`'s `cgrouped`, on every form with a service.

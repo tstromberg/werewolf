@@ -1,28 +1,6 @@
-//! status-page: the demo form's one web page, about the machine it runs on, and
-//! the grype scan the page reports. Two services run it, each leashed
-//! (cmd/leash/leash.zig) as a user of its own:
-//!
-//!     status        as the status user: every minute it writes
-//!                   /data/svc/status/www/index.html, which nginx serves:
-//!                   the kernel and uptime, the last update check, the
-//!                   last 25 patches autoupdate applied with the CVEs each
-//!                   fixed, what grype finds in the image, and the
-//!                   packages the image holds. It may reach nothing on
-//!                   the network.
-//!     status scan   as the grype user: once an hour, and at start, it runs
-//!                   grype over the root, with its database in
-//!                   /data/svc/scan, and keeps a summary there for the
-//!                   page, so the page survives a reboot with its last
-//!                   scan. grype is the one that fetches, so only this
-//!                   user may (forms/demo/form.yaml).
-//!
-//! It never runs as root: leash has made its directories its user's and
-//! given root up before it starts. grype's database comes from the
-//! network, and package metadata and grype's findings are other people's
-//! text; everything written into the page is HTML-escaped.
-//!
-//! Each pass allocates from its own arena, freed when the pass ends, so a
-//! process that runs for months uses what one pass needs.
+//! status-page writes the demo form's web page about the machine it runs on,
+//! and, as `status-page scan`, runs the grype scan the page reports.
+//! See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -53,8 +31,8 @@ const render_every = 60;
 const max_patches = 25;
 const max_read = 256 << 20;
 
-/// The most read of what the scan, as grype's user, leaves for the page:
-/// a scan taken over cannot make the page hold more.
+/// max_summary caps what the page reads of the scan's summary, which the
+/// grype user writes, so a compromised scan cannot bloat the page.
 const max_summary = 4 << 20;
 
 const max_scan_error = 4 << 10;
@@ -78,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
             if (failing) record(io, .{ .event = "page", .result = "written again" });
             failing = false;
         } else |err| {
-            // Once per failure, not once a minute.
+            // Log once per failure, not once a minute.
             if (!failing) record(
                 io,
                 .{ .event = "error", .step = "page", .@"error" = @errorName(err) },
@@ -99,15 +77,15 @@ fn render(io: Io) !void {
     try writeAtomic(io, gpa, page_path, out.written());
 }
 
-/// Everything the page says, read from the machine. A part that cannot be
-/// read is shown as missing rather than failing the page.
+/// gather reads everything the page shows. A part that cannot be read is
+/// shown as missing rather than failing the page.
 fn gather(io: Io, gpa: Allocator) !Facts {
     const now_secs = nowSecs(io);
     const uts = std.posix.uname();
     const uptime = parseUptime(readOr(io, gpa, "/proc/uptime", ""));
     const installed = try parseInstalled(gpa, readOr(io, gpa, "/lib/apk/db/installed", ""));
 
-    // The slot this boot is, read as stage0 read it (lib/cmdline.zig).
+    // Parse the boot slot the same way stage0 did (lib/cmdline.zig).
     var refused: cmdline.Failure = .{};
     const slot = if (cmdline.parse(readOr(io, gpa, "/proc/cmdline", ""), &refused)) |c|
         c.slot
@@ -136,15 +114,15 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     const events = try parseLog(gpa, log);
     f.last_check = lastCheck(events);
     f.patches = try patchHistory(gpa, try readReports(io, gpa), events, installed, max_patches);
-    // From PostgreSQL where the form runs it; from the files otherwise.
+    // Use PostgreSQL where the form runs it, and the files otherwise.
     const kept = fromDatabase(io, gpa);
     f.database = kept.said;
     f.database_warn = kept.warn;
     f.boot = boot_said;
     f.posture = kept.posture orelse posture(io, gpa);
-    // The newer of the database's scan and the file's: a scan that ended
-    // while PostgreSQL was down is in the file alone. Both say their time
-    // in RFC 3339, in UTC, which sorts as text.
+    // Show the newer of the database's scan and the file's, since a scan
+    // that ended while PostgreSQL was down is only in the file. Both times
+    // are RFC 3339 in UTC, which sorts as text.
     const file_scan: ?Summary = if (readUpTo(io, gpa, summary_path, max_summary)) |text|
         parsed(Summary, "scan.json", io, gpa, text)
     else |_|
@@ -159,8 +137,8 @@ fn gather(io: Io, gpa: Allocator) !Facts {
     return f;
 }
 
-/// The newest reports first, read only as far as the page needs: each
-/// changes at least one package, so max_patches reports are enough.
+/// readReports returns the newest max_patches update reports, newest first.
+/// Each report changes at least one package, so no more are needed.
 fn readReports(io: Io, gpa: Allocator) ![]const Report {
     var d = Dir.cwd().openDir(
         io,
@@ -173,7 +151,8 @@ fn readReports(io: Io, gpa: Allocator) ![]const Report {
     while (try it.next(io)) |e| {
         if (std.mem.endsWith(u8, e.name, ".json")) try names.append(gpa, try gpa.dupe(u8, e.name));
     }
-    // Named TIME-BUILD.json, with RFC 3339 times: newest sorts last.
+    // Names are TIME-BUILD.json with RFC 3339 times, so a reverse sort
+    // puts the newest first.
     std.mem.sort([]const u8, names.items, {}, moreString);
     var reports: std.ArrayList(Report) = .empty;
     for (names.items[0..@min(names.items.len, max_patches)]) |name| {
@@ -214,11 +193,12 @@ pub const Facts = struct {
     slot: []const u8,
     shell: bool,
     data: []const u8,
-    /// What PostgreSQL keeps, or why the page reads files instead.
+    /// database says what PostgreSQL keeps, or why the page reads files.
     database: []const u8 = "",
-    /// Whether the database row needs a warning: no answer, or lost data.
+    /// database_warn marks the database row as a warning: no answer, or
+    /// lost data.
     database_warn: bool = false,
-    /// How long the boot took, when the page started.
+    /// boot says how long the boot took, measured when the page started.
     boot: []const u8 = "",
     packages: []const Package,
     last_check: ?Event = null,
@@ -228,12 +208,13 @@ pub const Facts = struct {
     posture: ?Posture = null,
 };
 
-// /usr/lib/werewolf/posture (cmd/posture) checks how the machine protects
-// itself. Its service runs it once per boot, when the other services have
-// settled, and keeps the JSON in /run until the next boot.
+// posture (cmd/posture) checks the machine's hardening. Its service runs
+// it once per boot, after the other services settle, and leaves the JSON
+// here.
 const posture_path = "/run/werewolf/posture.json";
 
-/// What posture prints; see posture.zig.
+/// Posture is the part of posture's JSON report the page uses; see
+/// cmd/posture/posture.zig.
 const Posture = struct {
     time: []const u8,
     summary: struct { pass: usize = 0, fail: usize = 0, skip: usize = 0 },
@@ -250,15 +231,16 @@ const Check = struct {
     detail: []const u8 = "",
 };
 
-/// This boot's posture, once the posture service has checked.
+/// posture returns this boot's posture report, or null if the posture
+/// service has not run yet.
 fn posture(io: Io, gpa: Allocator) ?Posture {
     const text = readAll(io, gpa, posture_path) catch return null;
     return parsed(Posture, "posture.json", io, gpa, text);
 }
 
-/// text as a T, or null: said on the console the first time it fails, as
-/// when a field the page reads was renamed, and not again until it has
-/// parsed once more, so a page that runs every minute does not repeat it.
+/// parsed parses text as a T, or returns null. It logs the first failure
+/// (say, a renamed field) and stays quiet until a parse succeeds, so a page
+/// rendered every minute does not repeat the error.
 fn parsed(
     comptime T: type,
     comptime what: []const u8,
@@ -286,23 +268,20 @@ fn parsed(
     return v;
 }
 
-// Where the form runs PostgreSQL (forms/postgresql), the scan keeps each
-// summary there, and the page this boot's posture, and the page shows the
-// newest of each from there. A small client of the server's own protocol
-// (version 3), over its UNIX socket, as the service's own role, which peer
-// authentication takes from its user: no password, no TCP, no libpq.
-// Values go as parameters, never into the SQL. When the server is not
-// there, or says no, the page reads the files in /data/svc as before.
+// Where the form runs PostgreSQL (forms/postgresql), the scan stores each
+// summary and the page stores each boot's posture there, and the page shows
+// the newest of each. pg.zig speaks the wire protocol over the UNIX socket
+// with peer authentication: no password, no TCP, no libpq. If the server is
+// absent or refuses, the page reads the files in /data/svc.
 
 pub const pg_socket = "/run/svc/postgres/.s.PGSQL.5432";
 
-// The kernel's part and userland's (stage0 and init), which init leaves in
-// /run/werewolf/boot, and when nginx and PostgreSQL first answered: nginx
-// listening on :80, and PostgreSQL's socket taking a connection, as the page
-// sees them, looking every 25 ms from its own start for up to 30 seconds.
-// Each is time since the kernel started its clock.
+// The Boot row shows the kernel and userland times that init leaves in
+// /run/werewolf/boot, and when nginx (listening on :80) and PostgreSQL (a
+// login completes) first answered. The page polls every 25 ms from its
+// start, for up to 30 s. All times count from the kernel's clock start.
 
-/// The Boot row, worked out once, as the page starts.
+/// boot_said is the Boot row, computed once when the page starts.
 var boot_said: []const u8 = "";
 
 var boot_buf: [256]u8 = undefined;
@@ -327,8 +306,8 @@ fn timeBoot(io: Io) void {
         _ = arena.reset(.retain_capacity);
         if (want_nginx and nginx_ms == null and
             listening(io, arena.allocator(), 80)) nginx_ms = bootMs();
-        // Answering is a login that completes: the socket takes connections
-        // while the server is still starting, and refuses them all.
+        // Wait for a login to complete: while the server starts, the socket
+        // accepts connections but refuses every login.
         if (want_pg and pg_ms == null) if (Pg.connect(arena.allocator(), "status")) |db| {
             var d = db;
             d.close();
@@ -368,13 +347,15 @@ fn timeBoot(io: Io) void {
     boot_said = w.buffered();
 }
 
-/// Whether something listens on TCP port, by /proc/net/tcp and tcp6.
+/// listening reports whether a socket listens on TCP port, by
+/// /proc/net/tcp and tcp6.
 fn listening(io: Io, gpa: Allocator, port: u16) bool {
     return listensOn(readOr(io, gpa, "/proc/net/tcp", ""), port) or
         listensOn(readOr(io, gpa, "/proc/net/tcp6", ""), port);
 }
 
-/// Whether a /proc/net/tcp table has a socket listening (state 0A) on port.
+/// listensOn reports whether a /proc/net/tcp table has a socket listening
+/// (state 0A) on port.
 fn listensOn(table: []const u8, port: u16) bool {
     var hex: [5]u8 = undefined;
     const want = std.mem.print(&hex, ":{X:0>4}", .{port}) catch return false;
@@ -391,7 +372,7 @@ fn listensOn(table: []const u8, port: u16) bool {
     return false;
 }
 
-/// Milliseconds since the kernel started its clock.
+/// bootMs returns milliseconds since boot (CLOCK_BOOTTIME), or 0 on error.
 fn bootMs() u64 {
     const linux = std.os.linux;
     var ts: linux.timespec = undefined;
@@ -399,13 +380,14 @@ fn bootMs() u64 {
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }
 
-/// This boot's posture, once in the database, is not sent again.
+/// posture_kept stops this boot's posture from being stored twice.
 var posture_kept = false;
 
-/// Said on the console, with what the database holds, once it is kept.
+/// posture_just_kept makes readDatabase log the database's counts once,
+/// right after it stores the posture.
 var posture_just_kept = false;
 
-/// Lost data is said on the console once, not once a minute.
+/// data_lost makes lost data be logged once, not once a minute.
 var data_lost = false;
 
 const Kept = struct {
@@ -415,12 +397,12 @@ const Kept = struct {
     warn: bool = false,
 };
 
-/// The most the database has held, as the page last saw it: a database
-/// that holds less has lost what it was given.
+/// kept_path holds the counts the page last saw in the database. Fewer
+/// rows than that means the database lost data.
 const kept_path = state_dir ++ "/kept";
 
-/// Whether the last pass could not use the database: a failure is said
-/// on the console once, as it begins, not once a minute.
+/// db_failing records that the last pass could not use the database, so a
+/// failure is logged once when it begins, not once a minute.
 var db_failing = false;
 
 fn fromDatabase(io: Io, gpa: Allocator) Kept {
@@ -476,7 +458,7 @@ fn readDatabase(io: Io, gpa: Allocator) !Kept {
         posture_just_kept = false;
         record(io, .{ .event = "database", .kept = "posture", .boots = nb, .scans = ns });
     }
-    // What the page saw before, against what is there now.
+    // Compare the counts the page saw before with those there now.
     var before = std.mem.tokenizeAny(u8, readOr(io, gpa, kept_path, ""), " \n");
     const had_boots = std.fmt.parseInt(u64, before.next() orelse "0", 10) catch 0;
     const had_scans = std.fmt.parseInt(u64, before.next() orelse "0", 10) catch 0;
@@ -514,12 +496,12 @@ fn readDatabase(io: Io, gpa: Allocator) !Kept {
     };
 }
 
-/// The scan's summary into the database, where there is one. The file is
-/// written either way, so a failure here is said and nothing more.
+/// keepScan stores the scan's summary in PostgreSQL, if there is one. The
+/// file is written either way, so a failure here is only logged.
 pub fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
     if (!exists(io, pg_socket)) {
-        // Said only where the form runs PostgreSQL: the scan is in
-        // scan.json alone until the next.
+        // Log only where the form runs PostgreSQL. The scan is only in
+        // scan.json until the next one.
         if (exists(io, "/etc/sv/postgres")) record(
             io,
             .{ .event = "database", .kept = "none", .why = "PostgreSQL is not answering" },
@@ -540,7 +522,8 @@ pub fn keepScan(io: Io, gpa: Allocator, summary: []const u8) void {
     record(io, .{ .event = "database", .kept = "scan" });
 }
 
-/// The parts of an update report (docs/updater.md) the page uses.
+/// Report holds the parts of an update report (docs/updater.md) the page
+/// uses.
 const Report = struct {
     time: []const u8,
     build: []const u8 = "",
@@ -555,7 +538,7 @@ const Change = struct { name: []const u8, from: ?[]const u8 = null, to: ?[]const
 
 const OriginFix = struct { origin: []const u8, cves: []const []const u8 = &.{} };
 
-/// One package changing version in an update.
+/// Patch is one package changing version in an update.
 const Patch = struct {
     time: []const u8,
     name: []const u8,
@@ -565,8 +548,9 @@ const Patch = struct {
     outcome: []const u8,
 };
 
-/// The newest `limit` patches in reports, newest first. Within an update,
-/// the kernel comes first, then packages that fixed CVEs, then the rest.
+/// patchHistory returns the newest limit patches in reports, newest first.
+/// Within an update the kernel comes first, then packages that fixed CVEs,
+/// then the rest.
 fn patchHistory(
     gpa: Allocator,
     reports: []const Report,
@@ -621,15 +605,15 @@ fn cvesFirst(_: void, a: Patch, b: Patch) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
-/// A package's origin, from the installed database while it is installed.
-/// A package since removed is matched by name instead (isSubpackage).
+/// originOf returns the origin of an installed package, or name itself for
+/// a removed one, which callers match with isSubpackage instead.
 fn originOf(installed: []const Package, name: []const u8) []const u8 {
     for (installed) |p| if (std.mem.eql(u8, p.name, name)) return p.origin;
     return name;
 }
 
-/// Whether name is origin itself or one of its subpackages: openssl-4.0 and
-/// openssl-4.0-libcrypto, not openssl-4.0 and openssl-4.01.
+/// isSubpackage reports whether name is origin or one of its subpackages:
+/// openssl-4.0-libcrypto is one of openssl-4.0, openssl-4.01 is not.
 fn isSubpackage(name: []const u8, origin: []const u8) bool {
     if (!std.mem.startsWith(u8, name, origin)) return false;
     return name.len == origin.len or name[origin.len] == '-';
@@ -640,9 +624,9 @@ fn kernelVersion(pkg: []const u8) []const u8 {
     return if (std.mem.startsWith(u8, pkg, prefix)) pkg[prefix.len..] else pkg;
 }
 
-/// What became of the update that built `build`: the updater logs `commit`
-/// or `rollback` for it after the reboot. The newest, unresolved, is still
-/// on probation.
+/// outcomeOf says what became of the update that built build, from the
+/// commit or rollback the updater logs after the reboot. The newest update
+/// with neither is still being verified.
 fn outcomeOf(events: []const Event, build: []const u8, newest: bool) []const u8 {
     var i = events.len;
     while (i > 0) {
@@ -655,7 +639,7 @@ fn outcomeOf(events: []const Event, build: []const u8, newest: bool) []const u8 
     return if (newest) "verifying" else "not recorded";
 }
 
-/// One line of the updater's log (docs/updater.md, "Events").
+/// Event is one line of the updater's log (docs/updater.md, "Events").
 pub const Event = struct {
     time: []const u8 = "",
     event: []const u8 = "",
@@ -680,7 +664,7 @@ fn parseLog(gpa: Allocator, text: []const u8) ![]const Event {
     return out.items;
 }
 
-/// The last thing an update check did.
+/// lastCheck returns the newest event an update check logged.
 fn lastCheck(events: []const Event) ?Event {
     var i = events.len;
     while (i > 0) {
@@ -695,8 +679,9 @@ fn lastCheck(events: []const Event) ?Event {
 
 pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
 
-/// The packages in an apk installed database, by name: P (name), V (version)
-/// and o (origin) of each record; records end at a blank line.
+/// parseInstalled returns the packages in an apk installed database, sorted
+/// by name. It reads P (name), V (version) and o (origin) of each record;
+/// a blank line ends a record.
 fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
     var out: std.ArrayList(Package) = .empty;
     var p: Package = .{ .name = "", .version = "", .origin = "" };
@@ -730,8 +715,8 @@ fn byName(_: void, a: Package, b: Package) bool {
     return std.mem.lessThan(u8, a.name, b.name);
 }
 
-/// The filesystem type mounted at point, from /proc/self/mounts; the last
-/// mount there is the one that shows.
+/// mountType returns the filesystem type mounted at point, from
+/// /proc/self/mounts. The last mount wins, since it hides the others.
 pub fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     var found: ?[]const u8 = null;
     var it = std.mem.tokenizeScalar(u8, mounts, '\n');
@@ -745,13 +730,14 @@ pub fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     return found;
 }
 
-/// Whole seconds since boot, from /proc/uptime.
+/// parseUptime returns whole seconds since boot from /proc/uptime.
 fn parseUptime(text: []const u8) u64 {
     const end = std.mem.indexOfAny(u8, text, ". \n") orelse text.len;
     return std.fmt.parseInt(u64, text[0..end], 10) catch 0;
 }
 
-/// The two largest units: "3 days, 4 hours", "1 hour, 5 min", "12 min".
+/// formatUptime shows the two largest units: "3 days, 4 hours",
+/// "1 hour, 5 min", "12 min".
 fn formatUptime(gpa: Allocator, secs: u64) ![]const u8 {
     const days = secs / 86400;
     const hours = secs % 86400 / 3600;
@@ -782,8 +768,8 @@ fn trimLine(text: []const u8) []const u8 {
     return std.mem.trim(u8, text, " \r\n");
 }
 
-/// An RFC 3339 time in UTC, as the updater writes them, as seconds; null
-/// for anything else.
+/// parseRfc3339 returns a UTC RFC 3339 time, as the updater writes them, in
+/// seconds since 1970, or null for any other form.
 pub fn parseRfc3339(s: []const u8) ?u64 {
     if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or s[16] != ':' or
         s[19] != 'Z') return null;
@@ -809,7 +795,7 @@ pub fn parseRfc3339(s: []const u8) ?u64 {
     return @intCast(secs);
 }
 
-/// secs as an RFC 3339 time in UTC, in buf.
+/// rfc3339 formats secs as an RFC 3339 time in UTC, in buf.
 pub fn rfc3339(buf: *[32]u8, secs: u64) []const u8 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = secs };
     const yd = es.getEpochDay().calculateYearDay();
@@ -834,9 +820,9 @@ pub fn readOr(io: Io, gpa: Allocator, path: []const u8, fallback: []const u8) []
     return readAll(io, gpa, path) catch fallback;
 }
 
-/// path, read to its end. Not Dir.readFileAlloc, which reads only as much
-/// as stat reports, and procfs reports 0 for /proc/uptime, /proc/loadavg
-/// and /proc/self/mounts.
+/// readAll reads path to its end. Dir.readFileAlloc reads only the size
+/// stat reports, and procfs reports 0 for /proc/uptime, /proc/loadavg and
+/// /proc/self/mounts.
 pub fn readAll(io: Io, gpa: Allocator, path: []const u8) ![]u8 {
     return readUpTo(io, gpa, path, max_read);
 }
@@ -854,14 +840,15 @@ pub fn exists(io: Io, path: []const u8) bool {
     return true;
 }
 
-/// Write path whole or not at all: nginx may be reading the old one.
+/// writeAtomic replaces path by renaming a temporary file over it, since
+/// nginx may be reading the old one.
 pub fn writeAtomic(io: Io, gpa: Allocator, path: []const u8, data: []const u8) !void {
     const tmp = try gpa.print("{s}.tmp", .{path});
     try Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data });
     try Dir.rename(Dir.cwd(), tmp, Dir.cwd(), path, io);
 }
 
-/// One JSON line on the console, as the updater logs.
+/// record logs fields as one JSON line on the console, like the updater.
 pub fn record(io: Io, fields: anytype) void {
     var buf: [4096]u8 = undefined;
     var fba: std.heap.FixedBufferAllocator = .init(&buf);
@@ -875,7 +862,7 @@ pub fn record(io: Io, fields: anytype) void {
         }) catch null
     else |_|
         null;
-    // Never nothing: a line too long to say is said to be.
+    // Never log nothing: if the line does not fit, say so.
     Io.File.stdout().writeStreamingAll(
         io,
         line orelse "status-page: {\"event\":\"error\",\"error\":\"a log line too long to say\"}\n",
@@ -997,7 +984,7 @@ test patchHistory {
     try testing.expectEqualStrings("up to date", describeEvent(lastCheck(events).?));
 }
 
-// Each part's tests, with these.
+// Run the other files' tests too.
 test {
     _ = page;
     _ = scan;

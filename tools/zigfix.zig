@@ -1,47 +1,14 @@
-//! zigfix: what `make fix` does to werewolf's Zig, beyond zig fmt, and
-//! what `make lint` checks it did.
-//!
-//!     zigfix [--max N] FILE...           fix the files in place
-//!     zigfix --check [--max N] FILE...   say what fixing would change
-//!
-//! For each file, until nothing changes:
-//!
-//!   - Calls the standard library has deprecated are rewritten to what
-//!     their doc comments name instead: std.fmt.allocPrint(gpa, ...) to
-//!     gpa.print(...), std.mem.indexOfScalar to std.mem.findScalar, and the
-//!     rest of `deprecated` below.
-//!   - A line longer than N bytes (100, as the Zig style guide says: "aim
-//!     for 100; use common sense") is broken, where zig fmt would keep the
-//!     break: an if-else expression one branch to a line; or after its
-//!     last `and`, `or`, `|` or `++` that fits; or the outermost argument
-//!     list, parameter list or initializer that starts and ends on it gets
-//!     a trailing comma, so zig fmt puts one item on each line; or a long
-//!     string literal is split in two joined by `++`, at a space if one is
-//!     near, as the same string; or a comment is wrapped at its last space
-//!     that fits.
-//!     A list of one item that is itself a list, f(.{ ... }), is left for
-//!     its item, which zig fmt then lays out as f(.{ one per line }). A
-//!     struct, enum or union written on one line breaks one field a line.
-//!     A table, a list already laid out in rows, is reflowed to as many
-//!     columns as fit: zig fmt takes the number from its first row.
-//!   - The file is rendered as zig fmt renders it.
-//!
-//! What it cannot break it reports, one line each, `file:line: N bytes`,
-//! leaves for a person, and exits 1. Two kinds of long line are common
-//! sense, and pass: a line of a multiline string, which is data, and a
-//! comment whose excess is one word with no space to break at, such as a
-//! URL.
-//! --check fails on any file fixing would change, and on any other long
-//! line.
+//! zigfix does what `make fix` does to Zig beyond zig fmt: it rewrites
+//! deprecated std calls and breaks lines longer than 100 bytes. With --check
+//! it changes nothing and fails where it would. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
 const Ast = std.zig.Ast;
 const Allocator = std.mem.Allocator;
 
-/// The standard library's deprecated calls werewolf has made, and what
-/// replaces each, from the doc comment that deprecates it. A `.method`
-/// replacement is called on the first argument instead.
+/// deprecated maps each deprecated std call werewolf has used to the
+/// replacement its doc comment names. A method is called on the first argument.
 const deprecated = [_]struct { []const u8, Replacement }{
     .{ "std.fmt.allocPrint", .{ .method = "print" } },
     .{ "std.fmt.allocPrintSentinel", .{ .method = "printSentinel" } },
@@ -54,7 +21,7 @@ const deprecated = [_]struct { []const u8, Replacement }{
 
 const Replacement = union(enum) { function: []const u8, method: []const u8 };
 
-/// A replacement of source[start..end].
+/// Edit replaces source[start..end] with text.
 const Edit = struct { start: usize, end: usize, text: []const u8 };
 
 pub fn main(init: std.process.Init) !void {
@@ -86,8 +53,8 @@ pub fn main(init: std.process.Init) !void {
     if (failed) std.process.exit(1);
 }
 
-/// Fix one file, or with check, say what fixing would change. Whether it
-/// needs nothing more.
+/// fixFile fixes the file at path, or with check reports what fixing would
+/// change. It returns false if the file was not clean or has a long line left.
 fn fixFile(gpa: Allocator, io: Io, path: []const u8, max: usize, check: bool) !bool {
     const dir = Io.Dir.cwd();
     const original = try dir.readFileAllocOptions(io, path, gpa, .limited(16 << 20), .of(u8), 0);
@@ -110,9 +77,9 @@ fn fixFile(gpa: Allocator, io: Io, path: []const u8, max: usize, check: bool) !b
     return ok;
 }
 
-/// Whether a long line is one the style guide's "use common sense" lets
-/// stand: a line of a multiline string, which is data, or a comment whose
-/// excess is one word with no space to break at, such as a URL.
+/// commonSense reports whether a long line may stand, as the style guide's
+/// "use common sense" allows: a multiline string line is data, and a
+/// comment that overflows by one unbreakable word, such as a URL, cannot wrap.
 fn commonSense(source: []const u8, l: Long, max: usize) bool {
     const text = source[l.start .. l.start + l.len];
     const trimmed = std.mem.trimStart(u8, text, " ");
@@ -121,15 +88,15 @@ fn commonSense(source: []const u8, l: Long, max: usize) bool {
         std.mem.findScalar(u8, text[max..], ' ') == null;
 }
 
-/// The source rendered as zig fmt renders it.
+/// render returns source as zig fmt would format it.
 fn render(gpa: Allocator, source: [:0]const u8) ![:0]const u8 {
     var tree = try Ast.parse(gpa, source, .{});
     if (tree.errors.len > 0) return error.ParseFailed;
     return gpa.dupeSentinel(u8, try tree.renderAlloc(gpa), 0);
 }
 
-/// One pass: the deprecated calls rewritten, and each long line given one
-/// break, then rendered. Null when there was nothing to do.
+/// fixOnce rewrites deprecated calls, gives each long line one break, and
+/// renders the result. It returns null when nothing changed.
 fn fixOnce(gpa: Allocator, source: [:0]const u8, max: usize) !?[:0]const u8 {
     var tree = try Ast.parse(gpa, source, .{});
     if (tree.errors.len > 0) return error.ParseFailed;
@@ -145,15 +112,15 @@ fn fixOnce(gpa: Allocator, source: [:0]const u8, max: usize) !?[:0]const u8 {
     return rendered;
 }
 
-/// The edits applied, last first; those that overlap one already taken are
-/// left for the next pass. Null if none could be.
+/// apply applies edits from the end back. An edit that overlaps one already
+/// applied waits for the next pass. It returns null if none applied.
 fn apply(gpa: Allocator, source: []const u8, edits: []Edit) !?[:0]const u8 {
     std.mem.sort(Edit, edits, {}, struct {
         fn lt(_: void, a: Edit, b: Edit) bool {
             return a.start > b.start;
         }
     }.lt);
-    // The pieces, from the end back: what follows each edit, then the edit.
+    // Collect pieces back to front: the text after each edit, then the edit.
     var pieces: std.ArrayList([]const u8) = .empty;
     var end = source.len;
     for (edits) |e| {
@@ -204,7 +171,7 @@ fn deprecations(gpa: Allocator, tree: *const Ast, edits: *std.ArrayList(Edit)) !
 
 const Long = struct { line: usize, start: usize, len: usize };
 
-/// Every line longer than max bytes, numbered from 1.
+/// longLines returns every line longer than max bytes, numbered from 1.
 fn longLines(gpa: Allocator, source: []const u8, max: usize) ![]const Long {
     var out: std.ArrayList(Long) = .empty;
     var start: usize = 0;
@@ -220,9 +187,8 @@ fn longLines(gpa: Allocator, source: []const u8, max: usize) ![]const Long {
     return out.items;
 }
 
-/// The edits that break a long line, or null if none is known. Of the
-/// constructs that could break, the one that starts first on the line does:
-/// the outermost, as a person would break it.
+/// breakLine returns the edits that break l, or null if it knows none. It
+/// breaks the construct that starts first, the outermost, as a person would.
 fn breakLine(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?[]const Edit {
     const source = tree.source;
     const text = source[l.start .. l.start + l.len];
@@ -245,7 +211,8 @@ fn breakLine(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?[]const Ed
     return single(gpa, try stringBreak(gpa, tree, l, max));
 }
 
-/// A way to break a line: where the construct it breaks starts, and how.
+/// Choice is a way to break a line: where the broken construct starts, and
+/// the edits.
 const Choice = struct { start: usize, edits: []const Edit };
 
 fn single(gpa: Allocator, e: ?Edit) !?[]const Edit {
@@ -253,10 +220,8 @@ fn single(gpa: Allocator, e: ?Edit) !?[]const Edit {
     return try gpa.dupe(Edit, &.{edit});
 }
 
-/// The first if-else expression that starts on the line with a branch on
-/// it, each branch then on a line of its own: a line break before every
-/// branch, which zig fmt keeps and indents. Not an if statement, whose
-/// branches are blocks.
+/// ifBreak puts each branch of the first if-else expression on the line on
+/// its own line. It skips if statements, whose branches are blocks.
 fn ifBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
     const starts = tree.tokens.items(.start);
     const line_end = l.start + l.len;
@@ -266,7 +231,7 @@ fn ifBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
         const at = starts[first.ast.if_token];
         if (at < l.start or at >= line_end or first.ast.else_expr == .none) continue;
         if (isBlock(tree, first.ast.then_expr)) continue;
-        // Not an else-if of a chain that starts earlier.
+        // Skip an else-if: its chain starts earlier.
         if (first.ast.if_token > 0 and
             tree.tokenTag(first.ast.if_token - 1) == .keyword_else) continue;
         var edits: std.ArrayList(Edit) = .empty;
@@ -295,8 +260,8 @@ fn ifBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
     return null;
 }
 
-/// A trailing comma for a switch prong's values on the line, which zig fmt
-/// then puts one to a line.
+/// caseBreak adds a trailing comma to a switch prong's values, so zig fmt
+/// puts one value on each line.
 fn caseBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
     const starts = tree.tokens.items(.start);
     const line_end = l.start + l.len;
@@ -325,8 +290,8 @@ fn isBlock(tree: *const Ast, n: Ast.Node.Index) bool {
     };
 }
 
-/// A comment line wrapped at its last space within max: the rest goes on a
-/// new line with the same indent and marker.
+/// wrapComment wraps a comment at its last space within max. The rest goes on
+/// a new line with the same indent and marker.
 fn wrapComment(gpa: Allocator, l: Long, text: []const u8, max: usize) !?Edit {
     const indent = text.len - std.mem.trimStart(u8, text, " ").len;
     const rest = text[indent..];
@@ -349,9 +314,9 @@ fn wrapComment(gpa: Allocator, l: Long, text: []const u8, max: usize) !?Edit {
     return .{ .start = l.start + cut, .end = l.start + cut + 1, .text = next };
 }
 
-/// A trailing comma for the outermost list that opens and closes on the
-/// line, of more than one item if there is one: a call's arguments, a
-/// function's parameters, an initializer, a type's fields.
+/// listBreak adds a trailing comma to the outermost list that opens and
+/// closes on the line, preferring one with several items. zig fmt then puts
+/// one item on each line.
 fn listBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
     const starts = tree.tokens.items(.start);
     const line_end = l.start + l.len;
@@ -368,7 +333,7 @@ fn listBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
         if (starts[open] < l.start or starts[open] >= line_end) continue;
         const close = matching(tree, open) orelse continue;
         if (starts[close] >= line_end) continue;
-        // Nothing to break between ( and ), or already a comma before it.
+        // Skip an empty list, or one that already ends in a comma.
         if (close == open + 1 or tree.tokenTag(close - 1) == .comma) continue;
         const this: List = .{
             .node = node,
@@ -388,8 +353,8 @@ fn listBreak(gpa: Allocator, tree: *const Ast, l: Long) !?Choice {
     return .{ .start = @max(l.start, starts[tree.firstToken(b.node)]), .edits = edits };
 }
 
-/// The token that opens n's list, for the nodes zig fmt breaks one item to a
-/// line when the list ends in a comma.
+/// opener returns the token that opens n's list, if n is a node whose list
+/// zig fmt splits one item per line after a trailing comma.
 fn opener(tree: *const Ast, n: Ast.Node.Index) ?Ast.TokenIndex {
     var one: [1]Ast.Node.Index = undefined;
     var two: [2]Ast.Node.Index = undefined;
@@ -397,7 +362,7 @@ fn opener(tree: *const Ast, n: Ast.Node.Index) ?Ast.TokenIndex {
     if (tree.fullFnProto(&one, n)) |p| return p.lparen;
     if (tree.fullStructInit(&two, n)) |s| return s.ast.lbrace;
     if (tree.fullArrayInit(&two, n)) |a| return a.ast.lbrace;
-    // A type's fields; not the file's, which has no braces.
+    // A type's fields. The root container has no braces.
     if (tree.nodeTag(n) != .root) if (tree.fullContainerDecl(&two, n)) |c| {
         var t = c.ast.main_token;
         while (t < tree.tokens.len and tree.tokenTag(t) != .l_brace) t += 1;
@@ -409,8 +374,8 @@ fn opener(tree: *const Ast, n: Ast.Node.Index) ?Ast.TokenIndex {
     };
 }
 
-/// The innermost table the line is a row of, a list of one-line items in
-/// rows ending in a comma, reflowed to the columns that fit within max.
+/// tableBreak reflows the innermost array the line is a row of into as many
+/// columns as fit within max. zig fmt takes the column count from the first row.
 fn tableBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
     const starts = tree.tokens.items(.start);
     const line_end = l.start + l.len;
@@ -426,7 +391,7 @@ fn tableBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
         const close = matching(tree, a.ast.lbrace) orelse continue;
         if (starts[a.ast.lbrace] >= l.start or starts[close] < line_end) continue;
         if (best != null and a.ast.lbrace < best.?.open) continue;
-        // A short list's elements are in two, which the next node reuses.
+        // Copy: a short list's elements live in two, which the next node reuses.
         best = .{
             .open = a.ast.lbrace,
             .close = close,
@@ -442,7 +407,7 @@ fn tableBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
         widest = @max(widest, text.len);
     }
     const indent = l.len - std.mem.trimStart(u8, tree.source[l.start..line_end], " ").len;
-    // Each column is the widest item, its comma and a space.
+    // A column holds the widest item, its comma and a space.
     const columns = @max(1, (max - indent + 1) / (widest + 2));
     var out: std.ArrayList(u8) = .empty;
     try out.append(gpa, '\n');
@@ -453,7 +418,8 @@ fn tableBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
     return .{ .start = starts[b.open] + 1, .end = starts[b.close], .text = out.items };
 }
 
-/// Whether the list between open and close has a comma of its own.
+/// hasComma reports whether the list between open and close has a comma at
+/// its own depth.
 fn hasComma(tree: *const Ast, open: Ast.TokenIndex, close: Ast.TokenIndex) bool {
     var depth: usize = 0;
     var t = open + 1;
@@ -468,7 +434,7 @@ fn hasComma(tree: *const Ast, open: Ast.TokenIndex, close: Ast.TokenIndex) bool 
     return false;
 }
 
-/// The token that closes the bracket opened at open.
+/// matching returns the token that closes the bracket opened at open.
 fn matching(tree: *const Ast, open: Ast.TokenIndex) ?Ast.TokenIndex {
     var depth: usize = 0;
     var t = open;
@@ -485,9 +451,8 @@ fn matching(tree: *const Ast, open: Ast.TokenIndex) ?Ast.TokenIndex {
     return null;
 }
 
-/// A line break after the last `and`, `or`, `|` or `++` on the line that
-/// ends within max, which zig fmt keeps and indents. From the tree, so a
-/// capture's `|x|` is not taken for an or.
+/// operatorBreak breaks the line after its last `and`, `or`, `|` or `++`
+/// that ends within max. It reads the tree, so a capture's `|x|` is not an or.
 fn operatorBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Choice {
     const starts = tree.tokens.items(.start);
     const line_end = l.start + l.len;
@@ -509,8 +474,8 @@ fn operatorBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Choice
     return .{ .start = b.start, .edits = edits };
 }
 
-/// The first string literal that runs past max, split at its last space
-/// within max into two literals joined by `++`.
+/// stringBreak splits the first string literal of 12 or more bytes that
+/// starts within max into two literals joined by `++`.
 fn stringBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
     const starts = tree.tokens.items(.start);
     for (0..tree.tokens.len) |i| {
@@ -520,10 +485,10 @@ fn stringBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
         if (at >= l.start + l.len) break;
         if (tree.tokenTag(t) != .string_literal) continue;
         const lit = tree.tokenSlice(t);
-        // Past max, or what follows it is.
+        // Skip a literal that starts past max, or is too short to split.
         if (at - l.start >= max or lit.len < 12) continue;
-        // Bare where nothing binds tighter than ++ on either side;
-        // otherwise in parentheses, so "a".* stays ("a" ++ "b").*.
+        // Parenthesize if a neighbour binds tighter than ++, so "a".*
+        // becomes ("a" ++ "b").*.
         const bare = loose(tree.tokenTag(t - 1)) and loose(tree.tokenTag(t + 1));
         const room = max -| (at - l.start) -| @intFromBool(!bare);
         const cut = splitPoint(lit, room) orelse continue;
@@ -538,8 +503,9 @@ fn stringBreak(gpa: Allocator, tree: *const Ast, l: Long, max: usize) !?Edit {
     return null;
 }
 
-/// Whether a token beside a string literal binds no tighter than ++: a
-/// separator, an opening, an assignment, or ++ itself. Not &, .*, [ or .
+/// loose reports whether tag, next to a string literal, binds no tighter
+/// than ++: true for separators, parentheses, braces, assignment, return,
+/// else and ++ itself; false for &, .*, [ and . among others.
 fn loose(tag: std.zig.Token.Tag) bool {
     return switch (tag) {
         .comma,
@@ -559,17 +525,16 @@ fn loose(tag: std.zig.Token.Tag) bool {
     };
 }
 
-/// Where to split a string literal ("..." with its quotes) so the first part
-/// fits in room bytes with its closing quote and " ++": just past the last
-/// space that does, if one is near the end, or else at the last byte that
-/// does. Never within an escape or a UTF-8 character, so the two literals
-/// joined are the string it was. Null if no such place.
+/// splitPoint returns where to split lit, quotes included, so the first part
+/// plus `" ++` fits in room bytes. It prefers a space within 24 bytes of the
+/// last fit. It never splits an escape or a UTF-8 character, so the string
+/// is unchanged. It returns null if nothing fits.
 fn splitPoint(lit: []const u8, room: usize) ?usize {
     var space: ?usize = null;
     var any: ?usize = null;
     var i: usize = 1;
     while (i < lit.len - 1) {
-        // The next character: an escape, a UTF-8 sequence, or one byte.
+        // Step one character: an escape, a UTF-8 sequence, or one byte.
         var next = i + 1;
         if (lit[i] == '\\') {
             next = i + 2;

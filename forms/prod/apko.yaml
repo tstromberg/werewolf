@@ -8,7 +8,7 @@
 #   Azure) when no config tar is on a disk or beside the victim
 #   (cmd/cloud-metadata; docs/cloud.md);
 # - keeping itself current (cmd/slot-update; docs/updater.md): at boot and
-#   every 20 hours it asks Wolfi and Alpine whether anything in this image
+#   every hour it asks Wolfi and Alpine whether anything in this image
 #   has a newer version, and if so builds the other slot on the machine,
 #   boots it once, and keeps it only if it commits;
 # - /data on a disk, when werewolf.data names one, in LUKS2 when the config

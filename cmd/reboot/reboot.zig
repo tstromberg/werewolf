@@ -1,15 +1,5 @@
-//! reboot, poweroff: stop the machine cleanly, then restart it or turn it
-//! off. One program under two names, as OpenBSD's reboot and halt are.
-//!
-//! It sets runit's reboot flag, /etc/runit/reboot, as runit-init does
-//! (executable to restart, not to turn off), and ends stage 2, runsvdir, PID
-//! 1's child, with SIGTERM: runsvdir exits at once, and runit runs stage 3
-//! (/etc/runit/3), which stops the services and puts /data down, then
-//! restarts or powers off as the flag says. runit-init asks runit instead,
-//! and runit then signals stage 2 and, unless it has already exited, waits
-//! a whole second to look again: a second of most reboots, as an update's.
-//! Where stage 2 cannot be found or signalled, it asks through runit-init
-//! (6 to restart, 0 to turn off), as before.
+//! reboot and poweroff stop the machine cleanly through runit's stage 3, then
+//! restart it or turn it off. One program serves both names. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -22,6 +12,8 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: reboot | poweroff\n", .{});
         std.process.exit(2);
     };
+    // Ending stage 2 ourselves skips the second runit-init would wait for it.
+    // If that fails, runit-init does the whole job.
     if (setFlag(std.mem.eql(u8, level, "6"))) if (stageTwo()) |pid| {
         if (linux.errno(linux.kill(pid, linux.SIG.TERM)) == .SUCCESS) std.process.exit(0);
     };
@@ -30,8 +22,8 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(1);
 }
 
-/// runit-init's level for the name this was run as: 6 to restart, 0 to
-/// turn off, and none for any other name, so a stray link (halt, say)
+/// levelFor returns runit-init's level for the program name: 6 for reboot, 0
+/// for poweroff. Any other name returns null, so a stray link such as halt
 /// does nothing.
 fn levelFor(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "reboot")) return "6";
@@ -39,8 +31,8 @@ fn levelFor(name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// runit's reboot flag, made if it is not there: its owner's execute bit
-/// says restart, and none says turn off, which runit reads after stage 3.
+/// setFlag creates runit's reboot flag if needed and sets its mode. runit reads
+/// it after stage 3: owner execute means restart, mode 0 means power off.
 fn setFlag(restart: bool) bool {
     const fd = linux.open(reboot_flag, .{ .ACCMODE = .WRONLY, .CREAT = true, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
@@ -48,7 +40,8 @@ fn setFlag(restart: bool) bool {
     return linux.errno(linux.fchmod(@intCast(fd), if (restart) 0o100 else 0)) == .SUCCESS;
 }
 
-/// runit's stage 2: PID 1's child named runsvdir, read from /proc.
+/// stageTwo returns the pid of runit's stage 2, the runsvdir that is PID 1's
+/// child, or null if /proc has none.
 fn stageTwo() ?linux.pid_t {
     const dir = linux.open("/proc", .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
     if (linux.errno(dir) != .SUCCESS) return null;
@@ -71,9 +64,9 @@ fn stageTwo() ?linux.pid_t {
     }
 }
 
-/// Whether a /proc/PID/stat line is runsvdir's, child of PID 1: "PID
-/// (COMM) STATE PPID ...", the name in parentheses, which may itself hold
-/// spaces or parentheses, so read up to the last ")".
+/// isStageTwo reports whether a /proc/PID/stat line ("PID (COMM) STATE PPID
+/// ...") is runsvdir with parent 1. COMM may hold spaces or parentheses, so
+/// the name ends at the last ")".
 fn isStageTwo(stat: []const u8) bool {
     const open = std.mem.findScalar(u8, stat, '(') orelse return false;
     const close = std.mem.findScalarLast(u8, stat, ')') orelse return false;

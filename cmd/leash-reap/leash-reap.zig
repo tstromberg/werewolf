@@ -1,26 +1,10 @@
-//! leash-reap: a leashed service's ./finish. When runsv stops the service
-//! -- on `sv down`, a crash, a restart, or shutdown -- it runs this, which
-//! kills the service's cgroup, and so its whole process tree, any detached
-//! child included, by writing cgroup.kill. The cgroup is
-//! /run/cgroup/svc/NAME, where NAME is the service directory this runs in
-//! (cmd/init makes the hierarchy, cmd/leash joins each service to its leaf).
-//!
-//! What is still in the cgroup when this runs outlived the service's main
-//! process: workers still stopping, or a child left behind on purpose. It
-//! says how many, and waits, up to five seconds, for the kernel to see them
-//! gone, so runsv starts the service again into an empty cgroup, with its
-//! ports free, rather than into the last one's dying processes.
-//!
-//! runsv runs ./finish as root, in the service's directory, with the run's
-//! exit status as arguments, which this ignores. Where there is no cgroup2
-//! (cmd/init said so at boot), there is nothing to kill and it does
-//! nothing. It is one of werewolf's own tiny programs (docs/programs.md):
-//! no arguments it trusts, and nothing read but the service's own cgroup.
+//! leash-reap is a leashed service's ./finish. It kills whatever is left in
+//! the service's cgroup and waits for it to die. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
 
-/// How long the kernel is given to see the tree gone.
+/// patience_ms bounds the wait for the cgroup to empty, so runsv is never stuck.
 const patience_ms = 5000;
 
 pub fn main() void {
@@ -28,15 +12,12 @@ pub fn main() void {
     const cwd = linux.getcwd(&cwd_buf, cwd_buf.len);
     if (linux.errno(cwd) != .SUCCESS) return;
     const name = std.fs.path.basename(std.mem.sliceTo(cwd_buf[0..], 0));
-    // Refuse a name that is not a plain service name, so the path is only
-    // ever a leaf of /run/cgroup/svc.
-    if (name.len == 0 or name.len > 64) return;
-    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return;
+    if (!isServiceName(name)) return;
 
     var dir_buf: [96]u8 = undefined;
     const dir = std.mem.print(&dir_buf, "/run/cgroup/svc/{s}", .{name}) catch return;
     var buf: [4096]u8 = undefined;
-    const procs = read(dir, "cgroup.procs", &buf) orelse return; // no cgroup: nothing to reap
+    const procs = read(dir, "cgroup.procs", &buf) orelse return; // no cgroup2: nothing to reap
     const left = std.mem.count(u8, procs, "\n");
     if (left == 0) return;
     if (!write(dir, "cgroup.kill", "1")) return say(name, left, "could not be killed");
@@ -51,7 +32,15 @@ pub fn main() void {
     say(name, left, "killed, but not all gone after five seconds");
 }
 
-/// dir/file, read once, or null.
+/// isServiceName reports whether name is a plain service name, which keeps
+/// the cgroup path a leaf of /run/cgroup/svc.
+fn isServiceName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') return false;
+    return true;
+}
+
+/// read returns dir/file from a single read, or null on any error.
 fn read(dir: []const u8, file: []const u8, buf: []u8) ?[]const u8 {
     var path_buf: [128]u8 = undefined;
     const path = std.mem.printSentinel(&path_buf, "{s}/{s}", .{ dir, file }, 0) catch return null;
@@ -63,7 +52,7 @@ fn read(dir: []const u8, file: []const u8, buf: []u8) ?[]const u8 {
     return buf[0..n];
 }
 
-/// text to dir/file, which must exist: a cgroup control file.
+/// write writes text to the existing cgroup control file dir/file.
 fn write(dir: []const u8, file: []const u8, text: []const u8) bool {
     var path_buf: [128]u8 = undefined;
     const path = std.mem.printSentinel(&path_buf, "{s}/{s}", .{ dir, file }, 0) catch
@@ -75,7 +64,7 @@ fn write(dir: []const u8, file: []const u8, text: []const u8) bool {
     return linux.errno(n) == .SUCCESS and n == text.len;
 }
 
-/// One JSON line on the console, as leash writes its own.
+/// say logs one JSON line to the console, in the same form as leash's.
 fn say(name: []const u8, left: usize, what: []const u8) void {
     var line: [256]u8 = undefined;
     const s = std.mem.print(
@@ -84,4 +73,18 @@ fn say(name: []const u8, left: usize, what: []const u8) void {
         .{ name, left, what },
     ) catch return;
     _ = linux.write(1, s.ptr, s.len);
+}
+
+test isServiceName {
+    const t = std.testing;
+    const long: [65]u8 = @splat('a');
+    try t.expect(isServiceName("web"));
+    try t.expect(isServiceName("php-fpm_2"));
+    try t.expect(isServiceName(long[0..64]));
+    try t.expect(!isServiceName(""));
+    try t.expect(!isServiceName(&long));
+    try t.expect(!isServiceName(".."));
+    try t.expect(!isServiceName("a.b"));
+    try t.expect(!isServiceName("a/b"));
+    try t.expect(!isServiceName("a b"));
 }

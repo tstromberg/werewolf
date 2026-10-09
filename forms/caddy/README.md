@@ -9,7 +9,7 @@ your own includes `caddy` and lays its site and Caddyfile over those.
 | --- | --- |
 | Listens | tcp/80 and tcp/443; HTTP/3 (UDP) waits on fence serving UDP |
 | Sends | HTTPS to the ACME CA and DNS to find it (`connect caddy tcp/443 tcp/53 udp/53`); the upstreams a form of your own adds |
-| Runs as | `caddy` (uid 207), leashed: it binds its two ports, reads the image and writes `/run/svc/caddy` and `/data/svc/caddy` |
+| Runs as | `caddy` (a uid of its own, its name's hash), leashed: it binds its two ports, reads the image and writes `/run/svc/caddy` and `/data/svc/caddy` |
 | Keeps | certificates, keys and the ACME account in `/data/svc/caddy`; on a RAM `/data` every boot asks the CA again, whose rate limits will notice |
 | Settings | `domain` (a hostname): the site's name. Without one the site is `:80`, plain HTTP, with no certificate |
 

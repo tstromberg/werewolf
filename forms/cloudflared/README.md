@@ -7,7 +7,7 @@ serves hostnames on the Internet with no port open to it.
 | --- | --- |
 | Listens | nothing; metrics on loopback (:2000) |
 | Sends | QUIC (udp/7844) and HTTPS to Cloudflare's edge; HTTP and HTTPS to the origins it fronts, on this machine or its network |
-| Runs as | `cloudflared` (uid 213), leashed |
+| Runs as | `cloudflared` (a uid of its own, its name's hash), leashed |
 | Config | `cloudflared/token`: the tunnel's token, from the Cloudflare dashboard (a remotely managed tunnel), which also holds the hostnames and origins |
 
 ```sh

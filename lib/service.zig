@@ -1,9 +1,5 @@
-//! service: a service file, /etc/sv/NAME/service, the one way it is read
-//! (cmd/leash/leash.zig lists its lines). leash starts the service by it;
-//! howl pack takes the flags its config, setting and render lines declare;
-//! seal says the pledge; and the build makes the machine's promises of
-//! every pledge (tools/form.zig). Each reads the whole file, so what one
-//! accepts, all do.
+//! service parses a service file, /etc/sv/NAME/service, for every program
+//! that reads one, so they all accept the same files. See lib/README.md.
 
 const std = @import("std");
 const seal = @import("seal");
@@ -27,26 +23,47 @@ pub const Service = struct {
     render: ?settings.Render = null,
     nofile: ?u32 = null,
     memory: ?u32 = null,
+    share: Share = .strict,
     pledge: seal.Set = .empty,
-    /// The image it runs in, beneath /oci, and where it starts there.
+    /// root is the OCI image the service runs in, beneath /oci; dir is
+    /// where it starts there.
     root: ?[]const u8 = null,
     dir: ?[]const u8 = null,
 };
 
-/// A `config` line: the copy's name in the service's directory, its source
-/// beneath /run/config, and whether the service runs without it.
+/// Config is a `config` line: the copy's name in the service's directory,
+/// its source beneath /run/config, and whether the service runs without it.
 pub const Config = struct { name: []const u8, path: []const u8, optional: bool = false };
 
-/// Where the file is wrong, and how.
+/// Share says who may enter the service's directories, /run/svc/NAME and
+/// /data/svc/NAME. strict (0700) admits only the service's user. shared
+/// (0711) lets others open a path they already know, such as a socket or a
+/// file another service reads. browseable (0755) also lets them list it.
+pub const Share = enum {
+    strict,
+    shared,
+    browseable,
+
+    pub fn mode(s: Share) u32 {
+        return switch (s) {
+            .strict => 0o700,
+            .shared => 0o711,
+            .browseable => 0o755,
+        };
+    }
+};
+
+/// Bad is the line that is wrong, and why.
 pub const Bad = struct { line: usize = 0, why: []const u8 = "" };
 
-/// A service file, checked whole: an error sets bad and returns
-/// error.Invalid, and nothing has been done.
+/// parse reads and checks a whole service file. On a bad line it sets bad
+/// and returns error.Invalid.
 pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var exec: ?[]const []const u8 = null;
     var user: ?[]const u8 = null;
     var nofile: ?u32 = null;
     var memory: ?u32 = null;
+    var share: ?Share = null;
     var pledge: ?seal.Set = null;
     var root: ?[]const u8 = null;
     var dir: ?[]const u8 = null;
@@ -158,6 +175,11 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 return invalid(bad, "memory takes a number of MiB");
             if (memory.? == 0 or memory.? > 1 << 20)
                 return invalid(bad, "memory is 1 to 1048576 MiB");
+        } else if (std.mem.eql(u8, key, "share")) {
+            if (share != null) return invalid(bad, "share twice");
+            if (args.len != 1) return invalid(bad, "share takes strict, shared or browseable");
+            share = std.meta.stringToEnum(Share, args[0]) orelse
+                return invalid(bad, "share takes strict, shared or browseable");
         } else if (std.mem.eql(u8, key, "root")) {
             if (root != null) return invalid(bad, "root twice");
             if (args.len != 1 or !isCleanPath(args[0]) or
@@ -213,6 +235,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .render = render,
         .nofile = nofile,
         .memory = memory,
+        .share = share orelse .strict,
         .root = root,
         .dir = dir,
     };
@@ -223,8 +246,8 @@ fn invalid(bad: *Bad, why: []const u8) error{Invalid} {
     return error.Invalid;
 }
 
-/// A line's words: separated by spaces or tabs, grouped by double quotes,
-/// ended by a # that starts a word.
+/// split returns a line's words. Spaces or tabs separate words, double
+/// quotes group them, and a # that starts a word ends the line.
 fn split(gpa: Allocator, line: []const u8, bad: *Bad) ![]const []const u8 {
     var words: std.ArrayList([]const u8) = .empty;
     var i: usize = 0;
@@ -273,7 +296,8 @@ fn tcpPort(word: []const u8, bad: *Bad) !u16 {
     return p;
 }
 
-/// Absolute, with no empty, . or .. part, and no trailing slash but "/".
+/// isCleanPath reports whether p is absolute with no empty, . or .. part,
+/// and no trailing slash unless it is "/".
 pub fn isCleanPath(p: []const u8) bool {
     if (p.len == 0 or p[0] != '/') return false;
     if (p.len == 1) return true;
@@ -285,7 +309,8 @@ pub fn isCleanPath(p: []const u8) bool {
     return true;
 }
 
-/// A user's or service's name: [a-z_][a-z0-9_-]*, at most 32.
+/// isName reports whether s is a user or service name: [a-z_][a-z0-9_-]*,
+/// at most 32 bytes.
 pub fn isName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
     if (!std.ascii.isLower(s[0]) and s[0] != '_') return false;
@@ -294,7 +319,8 @@ pub fn isName(s: []const u8) bool {
     return true;
 }
 
-/// An environment variable's name: [A-Za-z_][A-Za-z0-9_]*.
+/// isVariable reports whether s is an environment variable name:
+/// [A-Za-z_][A-Za-z0-9_]*.
 fn isVariable(s: []const u8) bool {
     if (s.len == 0 or std.ascii.isDigit(s[0])) return false;
     for (s) |c| if (!std.ascii.isAlphanumeric(c) and c != '_') return false;
@@ -323,6 +349,7 @@ test parse {
         \\config  authorized-keys /run/config/ssh/authorized_keys
         \\nofile  65536
         \\memory  512
+        \\share   shared
         \\pledge  stdio rpath inet listen connect exec
     , &bad);
     try testing.expectEqualStrings("/etc/nginx/nginx.conf", s.exec[2]);
@@ -340,7 +367,11 @@ test parse {
     try testing.expect(!s.configs[0].optional);
     try testing.expectEqual(65536, s.nofile.?);
     try testing.expectEqual(512, s.memory.?);
+    try testing.expectEqual(.shared, s.share);
+    try testing.expectEqual(0o711, s.share.mode());
     try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
+    const plain = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\n", &bad);
+    try testing.expectEqual(.strict, plain.share);
 }
 
 test "parse refuses" {
@@ -369,6 +400,9 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\nnofile 0", .line = 3 },
         .{ .text = "exec /a\nuser x\nmemory 0", .line = 3 },
         .{ .text = "exec /a\nuser x\nmemory huge", .line = 3 },
+        .{ .text = "exec /a\nuser x\nshare open", .line = 3 },
+        .{ .text = "exec /a\nuser x\nshare", .line = 3 },
+        .{ .text = "exec /a\nuser x\nshare shared\nshare strict", .line = 4 },
         .{ .text = "user x", .line = 0 },
         .{ .text = "exec /a", .line = 0 },
         .{ .text = "exec /a\x07\nuser x", .line = 1 },
@@ -439,7 +473,7 @@ test "settings are declared, never invented" {
         .{ .text = head ++ "env HOME=/x\nsetting home hostname\nrender env e\n", .line = 0 },
         .{ .text = head ++ "secret A /run/config/a\nsetting a ip\nrender env e\n", .line = 0 },
         .{ .text = head ++ "config x /run/config/x\nsetting a ip\nrender conf x\n", .line = 0 },
-        // No `config settings`: nowhere for the values to come from.
+        // Without `config settings` the values have no source.
         .{ .text = "exec /a\nuser x\npledge stdio\nsetting a ip\nrender conf x\n", .line = 0 },
     };
     for (cases) |c| {

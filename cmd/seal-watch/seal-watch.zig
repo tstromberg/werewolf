@@ -1,47 +1,6 @@
-//! seal-watch: answer for the machine seal what its promises do not allow.
-//!
-//! The seal (cmd/init), on PID 1, allows the system calls of the machine's
-//! promises and hands the rest to this program through a seccomp listener
-//! (SECCOMP_RET_USER_NOTIF), passed over a socket on stdin at boot. Each
-//! service holds itself to its own pledge with a filter of its own that
-//! refuses with ENOSYS, and the kernel takes ENOSYS over a listener, so
-//! what reaches here is what a program running under the machine seal
-//! alone, werewolf's own, makes outside the machine's promises; a leashed
-//! service's refusals are not seen here. It answers each:
-//!
-//!     enforce   refused as if the kernel had no such call (ENOSYS); said
-//!               once, with the promise that would allow it, and counted in
-//!               /run/werewolf/seal/refused, which `seal` shows:
-//!               seal-watch: {"event":"refused","call":"keyctl","promise":"never","pid":97}
-//!     learn     allowed, and said once, with the program that made it, so
-//!               make seal-learn can read what each form needs. A learning
-//!               machine installs no per-service filters either, so every
-//!               call reaches here:
-//!               seal-watch:
-//! {"event":"learned","call":"memfd_create","promise":"memfd","service":"app","exe":"/usr/bin/node"}
-//!
-//! What no promise brings (lib/seal.zig, never) is refused either way, and
-//! so is what the seal refuses by its arguments (lib/seal.zig, refusal): a
-//! socket family no promise names, kernel TLS, a watch queue, a CPU-time
-//! timer. Those are answered as a kernel without the feature would answer,
-//! and said with what was asked for:
-//!               seal-watch:
-//! {"event":"refused","call":"socket","promise":"never","why":"socket family","arg":38,"pid":97}
-//! init decides to learn: only on a DEV=1 build, never released, booted
-//! with werewolf.seal=learn.
-//!
-//! It is one process that answers every caller in turn, so it says each
-//! call once, and past 512 refused counts the rest together, as other,
-//! said once (learning, past 4096 it says no more): a flood of new calls
-//! cannot hold the console, and with it every caller.
-//!
-//! init starts it before the seal, so it is not under it. Enforcing, it
-//! becomes _seal, an account of its own that no service shares and so none
-//! may signal, with no capabilities, under no_new_privs and a filter of its
-//! own (lib/sandbox.zig) that allows the calls of its loop, ioctl only for
-//! the listener's two, and kills it for anything else or another
-//! architecture. Learning, it stays root, to read each caller's
-//! /proc/PID/exe.
+//! seal-watch is the machine seal's seccomp listener. It answers each
+//! system call the seal refers to it, logs each call once, and counts
+//! refusals for seal. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -49,7 +8,8 @@ const seal = @import("seal");
 const sandbox = @import("sandbox");
 const linux = std.os.linux;
 
-/// _seal, seal-watch's own account (forms/minimal/apko.yaml).
+/// seal_id is the uid of _seal, an account no service shares
+/// (forms/minimal/apko.yaml).
 const seal_id = 66;
 
 pub fn main() void {
@@ -60,9 +20,8 @@ pub fn main() void {
     };
     _ = linux.close(0);
     const learn = got.mode.len > 0 and got.mode[0] == 'l';
-    // runit's stage 3 asks every process to stop; refusals still come until
-    // the machine is down, so this one ignores the signals and waits for the
-    // KILL that follows.
+    // runit's stage 3 sends TERM to every process, but refused calls keep
+    // coming until the machine is down, so ignore it and wait for the KILL.
     const ignore: linux.Sigaction = .{
         .handler = .{ .handler = linux.SIG.IGN },
         .mask = linux.sigemptyset(),
@@ -93,8 +52,8 @@ pub fn main() void {
 
 const Received = struct { fd: i32, mode: []const u8 };
 
-/// The listener, sent by init over the socket on stdin (SCM_RIGHTS), with
-/// one byte: l to learn, e to enforce.
+/// receiveListener receives the listener fd that init sends over the socket
+/// on stdin (SCM_RIGHTS), with a mode byte: l to learn, else enforce.
 fn receiveListener(mode_buf: *[8]u8) ?Received {
     var iov = [_]std.posix.iovec{.{ .base = mode_buf, .len = mode_buf.len }};
     var control: [cmsg_space]u8 align(8) = @splat(0);
@@ -117,12 +76,12 @@ fn receiveListener(mode_buf: *[8]u8) ?Received {
 }
 
 const scm_rights = 1;
-/// struct cmsghdr (a size_t and two ints) and one int, aligned.
+/// cmsg_space fits a struct cmsghdr (a size_t and two ints) and one int, aligned.
 const cmsg_space = 24;
 
-/// _seal, with no capabilities, now or ever (the bounding set emptied),
-/// and a filter allowing only what serve and say call: ioctl only to hear
-/// and answer the listener, not on the console it writes to.
+/// confine switches to _seal with no capabilities and an empty bounding
+/// set, then installs a filter that allows only what serve and say call.
+/// ioctl is allowed only for the listener's two requests, not on the console.
 fn confine() !void {
     try sandbox.dropTo(seal_id, null);
     var f: sandbox.Filter = .{};
@@ -135,7 +94,7 @@ fn confine() !void {
     try f.install();
 }
 
-/// struct seccomp_notif, and struct seccomp_notif_resp.
+/// Notif is struct seccomp_notif; Resp is struct seccomp_notif_resp.
 const Notif = extern struct {
     id: u64,
     pid: u32,
@@ -155,13 +114,13 @@ const flag_continue: u32 = 1;
 const max_rows = 512;
 const max_learned = 4096;
 
-/// One call refused this boot; never if no promise could allow it.
+/// Row counts one call refused this boot. never is set if no promise allows it.
 const Row = struct { nr: u32, count: u64, pid: u32, first: i64, never: bool = false };
 
 fn serve(fd: i32, learn: bool, table: i32) noreturn {
     var rows: [max_rows]Row = undefined;
     var n_rows: usize = 0;
-    // Every call past the rows, counted together.
+    // other counts every call once the rows are full.
     var other: Row = .{ .nr = 0, .count = 0, .pid = 0, .first = 0 };
     var learned: [max_learned]u64 = undefined;
     var n_learned: usize = 0;
@@ -203,7 +162,7 @@ fn serve(fd: i32, learn: bool, table: i32) noreturn {
                     "\"service\":\"{s}\",\"exe\":\"{s}\"}}",
                 .{ callName(nr), promiseName(nr), service, exe },
             );
-            // Full: the rest are allowed, unsaid.
+            // Once full, later calls are allowed but not logged.
             if (n_learned == learned.len)
                 say("{{\"event\":\"learning-full\",\"after\":{d}}}", .{max_learned});
             continue;
@@ -254,8 +213,8 @@ fn now() i64 {
     return ts.sec;
 }
 
-/// The refused table: CALL COUNT LAST_PID FIRST_SECONDS PROMISE a line, and
-/// other, every call past the rows, once there is one.
+/// tableText formats the refused table, one "CALL COUNT LAST_PID
+/// FIRST_SECONDS PROMISE" line per row, then an other line if any overflowed.
 fn tableText(buf: []u8, rows: []const Row, other: Row) []const u8 {
     var out: std.Io.Writer = .fixed(buf);
     for (rows) |r| out.print("{s} {d} {d} {d} {s}\n", .{
@@ -272,14 +231,14 @@ fn isNever(nr: u32) bool {
     return false;
 }
 
-/// The promise that would allow the call, or never, or none.
+/// promiseName returns the first promise that allows call nr, or never, or none.
 fn promiseName(nr: u32) []const u8 {
     if (isNever(nr)) return "never";
     var it = seal.promisesOf(nr).iterator();
     return if (it.next()) |p| @tagName(p) else "none";
 }
 
-/// The call's name on this architecture, or its number.
+/// callName returns the name of call nr on this architecture, or its number.
 fn callName(nr: u32) []const u8 {
     for (std.enums.values(linux.SYS)) |sys| if (@backingInt(sys) == nr) return @tagName(sys);
     const S = struct {
@@ -288,7 +247,7 @@ fn callName(nr: u32) []const u8 {
     return std.mem.print(&S.buf, "{d}", .{nr}) catch "?";
 }
 
-/// /proc/PID/exe, as plain characters only, or "?" for a process gone.
+/// exeOf returns the target of /proc/PID/exe, made plain, or "?" if pid is gone.
 fn exeOf(pid: u32, buf: *[256]u8) []const u8 {
     var path: [32]u8 = undefined;
     const p = std.mem.print(path[0 .. path.len - 1], "/proc/{d}/exe", .{pid}) catch return "?";
@@ -298,8 +257,8 @@ fn exeOf(pid: u32, buf: *[256]u8) []const u8 {
     return plain(buf[0..n]);
 }
 
-/// The service pid runs as, from its cgroup, where leash puts each service
-/// (/run/cgroup/svc/NAME); - for werewolf's own programs, or a process gone.
+/// serviceOf returns the service pid belongs to, from the cgroup leash put it
+/// in (/run/cgroup/svc/NAME), or - for werewolf's own programs or a gone pid.
 fn serviceOf(pid: u32, buf: *[256]u8) []const u8 {
     var path: [32]u8 = undefined;
     const p = std.mem.print(path[0 .. path.len - 1], "/proc/{d}/cgroup", .{pid}) catch return "-";
@@ -313,7 +272,7 @@ fn serviceOf(pid: u32, buf: *[256]u8) []const u8 {
     return cgroupService(buf[0..n]);
 }
 
-/// The service in /proc/PID/cgroup's cgroup2 line, 0::/svc/NAME, or -.
+/// cgroupService returns NAME from the cgroup2 line 0::/svc/NAME, or -.
 fn cgroupService(text: []u8) []const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -328,8 +287,8 @@ fn cgroupService(text: []u8) []const u8 {
     return "-";
 }
 
-/// s, each character that is not plain printable ASCII, or would end a
-/// JSON string, made ?.
+/// plain replaces, in place, each byte that is not printable ASCII or would
+/// end a JSON string with ?, so callers cannot forge log fields.
 fn plain(s: []u8) []const u8 {
     for (s) |*c| if (c.* < 0x20 or c.* == '"' or c.* == '\\' or c.* > 0x7e) {
         c.* = '?';
@@ -337,11 +296,11 @@ fn plain(s: []u8) []const u8 {
     return s;
 }
 
-/// Room for the longest line: a learned call's, with an exe and a service
-/// of up to 256 bytes each.
+/// line_buf fits the longest line: a learned call with a 256-byte exe and a
+/// 256-byte service.
 var line_buf: [1024]u8 = undefined;
 
-/// One line on the console.
+/// say writes one line to the console.
 fn say(comptime fmt: []const u8, args: anytype) void {
     const s = std.mem.print(&line_buf, "seal-watch: " ++ fmt ++ "\n", args) catch return;
     _ = linux.write(1, s.ptr, s.len);
@@ -392,7 +351,7 @@ test tableText {
         "keyctl 2 97 1791335742 never\nother 5 98 1791335800 none\n",
         tableText(&buf, &rows, past),
     );
-    // A call some promise allows, refused for what it asked: never.
+    // A call refused for its arguments is never, even if a promise allows it.
     const family = [_]Row{.{
         .nr = @intCast(@backingInt(linux.SYS.socket)),
         .count = 1,
@@ -407,7 +366,7 @@ test tableText {
 }
 
 test "ioctl numbers" {
-    // As the kernel's uapi header has them, for 64-bit architectures.
+    // These match the kernel's uapi header on 64-bit architectures.
     try testing.expectEqual(@as(u32, 0xc0502100), notif_recv);
     try testing.expectEqual(@as(u32, 0xc0182101), notif_send);
 }

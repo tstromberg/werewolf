@@ -8,14 +8,3 @@
 contents:
   packages:
     - mosquitto
-
-accounts:
-  groups:
-    - groupname: mosquitto
-      gid: 215
-  users:
-    - username: mosquitto
-      uid: 215
-      gid: 215
-      homedir: /var/empty
-      shell: /sbin/nologin

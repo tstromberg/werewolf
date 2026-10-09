@@ -1,5 +1,5 @@
-//! posture's process and program checks: hidden processes, leashed
-//! services, and the tools an intruder would want, absent.
+//! processes holds posture's process and program checks: hidden processes,
+//! leashed services, and the absence of tools an intruder would want.
 
 const std = @import("std");
 const Io = std.Io;
@@ -42,7 +42,7 @@ pub fn check(p: *Posture) !void {
         .result = if (setid.len == 0) .pass else .fail,
         .detail = setid,
     });
-    // A web server's workers, which face the network, are not root.
+    // Web server workers face the network, so they must not be root.
     if (p.root) {
         const nginx = try workerUids(p, "nginx: worker");
         try p.add(.{
@@ -55,12 +55,74 @@ pub fn check(p: *Posture) !void {
             .detail = if (nginx.found == 0) "no nginx running" else "",
         });
         try servicesLeashed(p);
+        try serviceDirs(p);
         try imageRoots(p);
     }
 }
 
-/// Each service with a `root` (an OCI image baked in, docs/design/adhoc.md)
-/// runs inside it, and what it may write there is a bind that runs nothing.
+/// serviceDirs checks that each service's directories, /run/svc/NAME and
+/// /data/svc/NAME, have the mode its share line asks for: 0700 by default.
+fn serviceDirs(p: *Posture) !void {
+    var names: std.ArrayList([]const u8) = .empty;
+    if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |d| {
+        var dir = d;
+        defer dir.close(p.io);
+        var it = dir.iterate();
+        while (try it.next(p.io)) |e| try names.append(p.gpa, try p.gpa.dupe(u8, e.name));
+    } else |_| {}
+    std.mem.sort([]const u8, names.items, {}, lessString);
+    var bad: std.ArrayList(u8) = .empty;
+    var checked: usize = 0;
+    for (names.items) |name| {
+        const text = p.read(try p.gpa.print("/etc/sv/{s}/service", .{name}));
+        if (text.len == 0) continue;
+        const want = shareMode(text);
+        for ([_][]const u8{ "/run/svc", "/data/svc" }) |parent| {
+            const path = try p.gpa.print("{s}/{s}", .{ parent, name });
+            const st = posture.statx(p.gpa, path) orelse continue; // not started yet
+            checked += 1;
+            const mode = st.mode & 0o7777;
+            if (want == null or mode != want.?)
+                try listAdd(p.gpa, &bad, "{s} is {o}", .{ path, mode });
+        }
+    }
+    try p.add(.{
+        .id = "processes-service-dirs",
+        .area = "processes",
+        .name = "Services' directories are their own",
+        .why = "A service cannot look inside another's directories, or reach its sockets, " ++
+            "unless that service shares them.",
+        .how = "for each /etc/sv/NAME/service, /run/svc/NAME and /data/svc/NAME are 0700, " ++
+            "or 0711 (share shared) or 0755 (share browseable) as its file says",
+        .result = if (checked == 0) .skip else if (bad.items.len == 0) .pass else .fail,
+        .detail = if (checked == 0)
+            "no service directory"
+        else if (bad.items.len > 0)
+            bad.items
+        else
+            try p.gpa.print("{d} directories", .{checked}),
+    });
+}
+
+/// shareMode returns the mode a service file's first share line asks for:
+/// 0700 when there is none, null when its word is not one leash accepts.
+fn shareMode(text: []const u8) ?u32 {
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r");
+        if (!std.mem.eql(u8, words.next() orelse continue, "share")) continue;
+        const word = words.next() orelse return null;
+        if (std.mem.eql(u8, word, "strict")) return 0o700;
+        if (std.mem.eql(u8, word, "shared")) return 0o711;
+        if (std.mem.eql(u8, word, "browseable")) return 0o755;
+        return null;
+    }
+    return 0o700;
+}
+
+/// imageRoots checks that each service with a `root` (a baked-in OCI image,
+/// docs/design/adhoc.md) runs inside it, and that its writable binds are
+/// noexec and nodev.
 fn imageRoots(p: *Posture) !void {
     const mounts = p.read("/proc/self/mounts");
     var names: std.ArrayList([]const u8) = .empty;
@@ -94,7 +156,7 @@ fn imageRoots(p: *Posture) !void {
                 try listAdd(p.gpa, &bad, "{s}: {s} not a noexec, nodev bind", .{ name, at });
         }
         const pid = trim(p.read(try p.gpa.print("/etc/sv/{s}/supervise/pid", .{name})));
-        if (pid.len == 0) continue; // down, or parked
+        if (pid.len == 0) continue; // down or parked
         var buf: [4096]u8 = undefined;
         const n = Dir.cwd().readLink(
             p.io,
@@ -123,8 +185,8 @@ fn imageRoots(p: *Posture) !void {
     });
 }
 
-/// Each service leash starts, one with an /etc/sv/NAME/service file,
-/// runs as leash left it.
+/// servicesLeashed checks that each service with an /etc/sv/NAME/service
+/// file still runs as leash left it.
 fn servicesLeashed(p: *Posture) !void {
     var names: std.ArrayList([]const u8) = .empty;
     if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |d| {
@@ -245,7 +307,7 @@ pub fn programs(p: *Posture) !void {
         &.{ "gdb", "lldb", "strace", "ltrace" },
     );
 
-    // werewolf's services: each started straight from its program.
+    // Each werewolf service must start straight from an ELF program.
     var d = Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true }) catch return;
     defer d.close(p.io);
     var scripts: std.ArrayList(u8) = .empty;
@@ -275,8 +337,8 @@ pub fn programs(p: *Posture) !void {
     });
 }
 
-/// How many processes have a command line starting with prefix, and how
-/// many of those run as root.
+/// workerUids counts processes whose command line starts with prefix, and
+/// how many of those run as root.
 fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usize } {
     var found: usize = 0;
     var root: usize = 0;
@@ -298,7 +360,7 @@ fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usi
     return .{ .found = found, .root = root };
 }
 
-/// Why a /proc/PID/status is not that of a process leash started, or null.
+/// whyNotLeashed says why a /proc/PID/status does not look leashed, or null.
 fn whyNotLeashed(status: []const u8) ?[]const u8 {
     const uids = statusField(status, "Uid") orelse return "shows no uid";
     var ids = std.mem.tokenizeAny(u8, uids, " \t");
@@ -311,12 +373,20 @@ fn whyNotLeashed(status: []const u8) ?[]const u8 {
     }
     if (!std.mem.eql(u8, statusField(status, "NoNewPrivs") orelse "", "1"))
         return "may gain privileges";
-    // A kernel before 4.7 shows no umask: nothing to judge.
+    // Kernels before 4.7 show no umask, so there is nothing to judge.
     if (statusField(status, "Umask")) |mask| {
         const m = std.fmt.parseInt(u32, mask, 8) catch return "shows no umask";
         if (m & 0o022 != 0o022) return "makes files others may write";
     }
     return null;
+}
+
+test shareMode {
+    try testing.expectEqual(0o700, shareMode("exec /a\nuser x\n").?);
+    try testing.expectEqual(0o711, shareMode("exec /a\nshare   shared\n").?);
+    try testing.expectEqual(0o755, shareMode("share\tbrowseable # all\n").?);
+    try testing.expectEqual(0o700, shareMode("# share shared\nshare strict\n").?);
+    try testing.expectEqual(null, shareMode("share open\n"));
 }
 
 test whyNotLeashed {

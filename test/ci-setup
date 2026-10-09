@@ -1,12 +1,11 @@
 #!/bin/sh
-# ci-setup [apko] [zig]: install what `make test lint check` needs, on
-# GitHub's Ubuntu 26.04 runners and make ci's VM: tools/install-deps's
-# tools, without asking, and /dev/kvm opened to the user who runs the
-# checks. With `apko`, `zig` or both, install only those, for jobs that
-# resolve packages or build a tool. Run as root. Used by
-# .github/workflows/check.yml, release.yml, update.yml and test/lima-ci.
-# Like install-deps, it does only what is not done yet, so it runs again
-# in a second.
+# ci-setup [apko] [zig] installs what `make test lint check` needs on GitHub's
+# Ubuntu 26.04 runners and make ci's VM: tools/install-deps's tools, without
+# asking, and /dev/kvm opened to the user who runs the checks. With `apko`,
+# `zig` or both, it installs only those, for jobs that resolve packages or
+# build a tool. Run it as root. .github/workflows/check.yml, release.yml,
+# update.yml and test/lima-ci use it. Like install-deps, it does only what is
+# not done yet, so a second run takes a second.
 set -eu
 for a; do
 	case $a in
@@ -20,10 +19,10 @@ done
 "$(dirname "$0")/../tools/install-deps" -y "$@"
 [ -z "${1:-}" ] || exit 0
 
-# Ubuntu's AppArmor keeps unprivileged programs from making user
-# namespaces, which bubblewrap, melange's sandbox, needs. The machines this
-# runs on are thrown away after, so the restriction is lifted here, never
-# by install-deps on a machine someone keeps.
+# Ubuntu's AppArmor stops unprivileged programs from making user namespaces,
+# which bubblewrap (melange's sandbox) needs. The machines this runs on are
+# thrown away afterwards, so lift the restriction here. install-deps never
+# lifts it, because it runs on machines people keep.
 r=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
 if [ "$(cat $r 2>/dev/null)" = 1 ]; then
 	echo 0 >$r

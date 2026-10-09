@@ -1,11 +1,6 @@
-//! posture's attacks, for werewolf's tests. With werewolf.check=1 on the
-//! kernel command line, which only werewolf's tests set (or --attack, or
-//! WEREWOLF_CHECK=1), posture also attacks the machine as an intruder
-//! would, and expects each attack refused. Two are meant to leave a line in
-//! the kernel's log: the check is that the kernel both refused and said so.
-//! The rest act as nobody, in a child, against files posture makes and
-//! removes in /tmp and /run; and the leash probe, a copy of posture leashed
-//! as nobody, tries what its service file does not grant.
+//! attacks are posture's checks that attack the machine and expect each
+//! attack refused. They run only with werewolf.check=1, --attack or
+//! WEREWOLF_CHECK=1. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -36,16 +31,15 @@ fn cleanAttacks() void {
     }) |path| _ = linux.unlink(path);
 }
 
-/// attack, run in a child as nobody: uid and gid 65534, no other groups, no
-/// new privileges. Whether it worked, or null if the child could not become
-/// nobody.
+/// asNobody runs attack in a child as nobody (uid and gid 65534, no other
+/// groups, no_new_privs) and reports whether it worked, or null on failure.
 fn asNobody(attack: *const fn () bool) ?bool {
     return inChild(attack, true);
 }
 
-/// attack, run in a child, as nobody if asked. Whether it worked, or null if
-/// there was no child, or it could not become nobody. The child makes only
-/// system calls: the parent may have threads.
+/// inChild runs attack in a child, as nobody if asked, and reports whether
+/// it worked, or null if the child failed to start or become nobody. The
+/// child makes only raw system calls, since the parent may have threads.
 pub fn inChild(attack: *const fn () bool, as_nobody: bool) ?bool {
     const rc = linux.fork();
     if (linux.errno(rc) != .SUCCESS) return null;
@@ -97,7 +91,7 @@ fn plantsFile() bool {
     return created(attack_file, 0o644);
 }
 
-/// Whether path, not there before, can be made with mode.
+/// created reports whether path, which must not exist, can be created with mode.
 fn created(path: [:0]const u8, mode: linux.mode_t) bool {
     const rc = linux.open(
         path,
@@ -109,7 +103,7 @@ fn created(path: [:0]const u8, mode: linux.mode_t) bool {
     return true;
 }
 
-/// Whether root can open path to write, creating it if it is not there.
+/// opensForWrite reports whether path opens for writing, created if missing.
 fn opensForWrite(path: [:0]const u8, append: bool) bool {
     const rc = linux.open(
         path,
@@ -125,7 +119,7 @@ pub fn run(p: *Posture) !void {
     const pid = linux.getpid();
     const comm = trim(p.read("/proc/self/comm"));
 
-    // Yama names both sides by their command lines.
+    // Yama's log line names both processes by their command lines.
     const mem = refusedAndLogged(
         p,
         "/proc/1/mem",
@@ -141,9 +135,8 @@ pub fn run(p: *Posture) !void {
         .result = if (mem == .logged) .pass else .fail,
         .detail = mem.detail(),
     });
-    // Without CAP_SYS_RAWIO, which werewolf's seal takes from every
-    // process, the kernel refuses /dev/mem before lockdown is asked, and
-    // so before it would log anything.
+    // Without CAP_SYS_RAWIO, which init's seal drops machine-wide, the
+    // kernel refuses /dev/mem before lockdown is asked, so nothing is logged.
     const dev = refusedAndLogged(
         p,
         "/dev/mem",
@@ -195,8 +188,7 @@ pub fn run(p: *Posture) !void {
             "could not become nobody",
     });
 
-    // Each trick needs one side planted by nobody and the other tried
-    // by root, or the other way around.
+    // In each trick, one user plants a file and the other uses it.
     var got: std.ArrayList(u8) = .empty;
     var missed = false;
     if (asNobody(plantsLink)) |planted| {
@@ -233,18 +225,15 @@ pub fn run(p: *Posture) !void {
     try leashAttack(p);
 }
 
-/// A service leash starts as an unprivileged user does what its file
-/// grants and nothing more: posture leashes a copy of itself, which
-/// tries (probe, below) and says by its exit code what went as it
-/// should not.
+/// leashAttack checks that a leashed service can do what its file grants and
+/// nothing more. It leashes a copy of posture as nobody, which runs probe and
+/// reports what it should not have been able to do.
 fn leashAttack(p: *Posture) !void {
     if (!exists(p.io, leash_bin)) return;
     var exe: [Dir.max_path_bytes]u8 = undefined;
     const self = exe[0 .. Dir.cwd().readLink(p.io, "/proc/self/exe", &exe) catch return];
-    // Clear any leftover the probe's own directories hold before this
-    // run, not only after: on a kept /data, a boot whose power was cut
-    // mid-probe could leave /data/svc/posture-probe behind, and leash
-    // would then park the probe on it.
+    // Clear the probe's directories before the run too: a power cut mid-probe
+    // can leave /data/svc/posture-probe on a kept /data, which would park it.
     Dir.cwd().deleteTree(p.io, "/run/svc/" ++ probe_name) catch {};
     Dir.cwd().deleteTree(p.io, "/data/svc/" ++ probe_name) catch {};
     Dir.cwd().createDirPath(p.io, probe_dir) catch return;
@@ -253,10 +242,9 @@ fn leashAttack(p: *Posture) !void {
         Dir.cwd().deleteTree(p.io, "/run/svc/" ++ probe_name) catch {};
         Dir.cwd().deleteTree(p.io, "/data/svc/" ++ probe_name) catch {};
     }
-    // The port it is granted must be one fence lets anything connect to,
-    // the policy's own (docs/design/fence.md): a port the policy names no
-    // leash can open, however it is granted. Where the policy names none,
-    // as minimal's, the granted half is not tried.
+    // Grant a port the fence policy names (docs/design/fence.md), since
+    // fence refuses every other port whatever leash grants. If the policy
+    // names none, as minimal's, the granted half is not tried.
     const granted = policyPort(p) orelse 0;
     const file = try p.gpa.print(
         "# posture's probe (werewolf.check=1), granted TCP port {d} and nothing else\n" ++
@@ -280,9 +268,8 @@ fn leashAttack(p: *Posture) !void {
     }) catch return;
     const term = child.wait(p.io) catch return;
     const ran = term == .exited and term.exited == 0x80;
-    // The probe writes a bitmask of what went wrong to its own
-    // directory, where only it may write; posture, as root, reads it.
-    // Not through a link: the directory is nobody's.
+    // The probe writes a bitmask of failures to its own directory. Read it
+    // without following links, since nobody owns that directory.
     var mask: u32 = 0;
     const result = linux.open(
         "/run/svc/" ++ probe_name ++ "/result",
@@ -334,8 +321,8 @@ const Refusal = enum {
     }
 };
 
-/// Whether opening path read-only is refused, with a line in the
-/// kernel's log, written after this open, that has every one of needles.
+/// refusedAndLogged opens path read-only and reports whether it was refused,
+/// and whether a new kernel log line then holds every needle.
 fn refusedAndLogged(p: *Posture, path: [:0]const u8, needles: []const []const u8) Refusal {
     const kmsg_rc = linux.open(
         "/dev/kmsg",
@@ -354,14 +341,15 @@ fn refusedAndLogged(p: *Posture, path: [:0]const u8, needles: []const []const u8
         return .allowed;
     }
     const fd = kmsg orelse return .silent;
-    // One record a read. Yama logs as the open returns; allow a moment.
+    // Each read returns one record. The log line may lag the open, so retry
+    // for up to two seconds.
     var record: [8192]u8 = undefined;
     for (0..20) |_| {
         while (true) {
             const n = linux.read(fd, &record, record.len);
             switch (linux.errno(n)) {
                 .SUCCESS => if (posture.logHas(record[0..n], needles)) return .logged,
-                .PIPE => {}, // records lost to newer ones: read on
+                .PIPE => {}, // older records were overwritten; keep reading
                 else => break,
             }
         }
@@ -374,8 +362,8 @@ const leash_bin = "/usr/lib/werewolf/leash";
 const probe_name = "posture-probe";
 const probe_dir = "/run/werewolf/" ++ probe_name;
 
-/// What the probe tries, in its exit code's bits, each a thing that went
-/// as it should not.
+/// probe_tries names each bit of the probe's result: something that went as
+/// it should not.
 const probe_tries = [_][]const u8{
     "read a file it was not granted",
     "could not read /etc/passwd",
@@ -389,13 +377,8 @@ const probe_tries = [_][]const u8{
     "made SysV shared memory, which its pledge did not promise",
 };
 
-/// posture --probe, as leashed by leashAttack: a bit for each of
-/// probe_tries that went wrong, written to its own directory, which
-/// leashAttack reads; it exits 0x80 to say it ran. It makes only system
-/// calls. Bits 0..6 are the leash's Landlock (files, ports, programs);
-/// 7..9 the pledge's seccomp (calls it did not promise must be ENOSYS).
-/// The first TCP port the machine's policy names, listen or connect: one
-/// fence lets every process connect to. Null where it names none.
+/// policyPort returns the first TCP port the fence policy names, in listen or
+/// connect, which fence lets every process connect to; null if none.
 fn policyPort(p: *Posture) ?u16 {
     const net = Dir.cwd().readFileAlloc(
         p.io,
@@ -403,11 +386,17 @@ fn policyPort(p: *Posture) ?u16 {
         p.gpa,
         .limited(64 << 10),
     ) catch return null;
+    return firstTcpPort(net);
+}
+
+/// firstTcpPort returns the first port of a `listen tcp PORT` or
+/// `connect UID tcp PORT` line in a compiled fence policy.
+fn firstTcpPort(net: []const u8) ?u16 {
     var lines = std.mem.tokenizeScalar(u8, net, '\n');
     while (lines.next()) |line| {
         var words = std.mem.tokenizeScalar(u8, line, ' ');
         const key = words.next() orelse continue;
-        if (std.mem.eql(u8, key, "connect")) _ = words.next(); // the user
+        if (std.mem.eql(u8, key, "connect")) _ = words.next(); // skip the user
         if (!std.mem.eql(u8, key, "listen") and !std.mem.eql(u8, key, "connect")) continue;
         if (!std.mem.eql(u8, words.next() orelse continue, "tcp")) continue;
         return std.fmt.parseInt(u16, words.next() orelse continue, 10) catch continue;
@@ -415,7 +404,10 @@ fn policyPort(p: *Posture) ?u16 {
     return null;
 }
 
-/// granted: the port its leash grants, 0 for none.
+/// probe is posture --probe, run under leash by leashAttack. It writes a bit
+/// for each of probe_tries that went wrong to its own directory and returns
+/// 0x80 to show it ran. Bits 0..6 test Landlock (files, ports, programs);
+/// 7..9 test the pledge. granted is the port its leash grants, or 0.
 pub fn probe(granted: u16) u8 {
     var bits: u32 = 0;
     if (opens("/run/werewolf/hostname")) bits |= 1 << 0;
@@ -425,9 +417,8 @@ pub fn probe(granted: u16) u8 {
     if (!creates("/run/svc/" ++ probe_name ++ "/x")) bits |= 1 << 4;
     if (creates("/tmp/." ++ probe_name)) bits |= 1 << 5;
     if (runs("/usr/bin/sv")) bits |= 1 << 6;
-    // Its pledge promised none of memfd, watch or ipc, so each of these,
-    // which the per-service seccomp filter should refuse (ENOSYS), must not
-    // succeed; a success is a hole in the pledge.
+    // Its pledge omits memfd, watch and ipc, so its seccomp filter must
+    // refuse these with ENOSYS; a success is a hole in the pledge.
     if (made(.memfd_create)) bits |= 1 << 7;
     if (made(.inotify_init1)) bits |= 1 << 8;
     if (made(.shmget)) bits |= 1 << 9;
@@ -445,9 +436,8 @@ pub fn probe(granted: u16) u8 {
     return 0x80;
 }
 
-/// Whether a call the probe's pledge did not promise still worked: the
-/// per-service seccomp filter should answer ENOSYS, so a success is a hole.
-/// Each returns a descriptor or id when allowed, closed or removed at once.
+/// made reports whether sys, which the probe's pledge omits, still worked.
+/// A descriptor or id it returns is closed or removed at once.
 fn made(comptime sys: linux.SYS) bool {
     const rc = switch (sys) {
         .memfd_create => linux.syscall2(sys, @intFromPtr("probe"), 0),
@@ -470,17 +460,16 @@ fn opens(path: [:0]const u8) bool {
     return true;
 }
 
-/// Whether path can be made, and if so, removed again.
+/// creates reports whether path can be created; if so, it removes it again.
 fn creates(path: [:0]const u8) bool {
     if (!created(path, 0o600)) return false;
     _ = linux.unlink(path);
     return true;
 }
 
-/// The error a TCP connect to port on 127.0.0.1 gets. fence lets a connect
-/// to a port the policy names pass, loopback included, so a refusal of
-/// the granted one is the leash's; port 2 fence refuses as well, and the
-/// leash first.
+/// connectError returns the error of a TCP connect to 127.0.0.1:port. fence
+/// passes ports the policy names, so a refusal of the granted port comes
+/// from leash. Both refuse port 2, leash first.
 fn connectError(port: u16) linux.E {
     const fd = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(fd) != .SUCCESS) return linux.errno(fd);
@@ -492,7 +481,7 @@ fn connectError(port: u16) linux.E {
     return linux.errno(linux.connect(@intCast(fd), @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
 }
 
-/// Whether path starts: a child tries it, and says by its exit code.
+/// runs reports whether a child can exec path.
 fn runs(path: [:0]const u8) bool {
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) return false;
@@ -500,7 +489,7 @@ fn runs(path: [:0]const u8) bool {
         const argv = [_:null]?[*:0]const u8{ path, null };
         const envp = [_:null]?[*:0]const u8{null};
         _ = linux.execve(path, &argv, &envp);
-        linux.exit_group(42); // refused
+        linux.exit_group(42); // exec refused
     }
     var status: u32 = 0;
     if (linux.errno(linux.wait4(
@@ -510,4 +499,21 @@ fn runs(path: [:0]const u8) bool {
         null,
     )) != .SUCCESS) return false;
     return !(linux.W.IFEXITED(status) and linux.W.EXITSTATUS(status) == 42);
+}
+
+test firstTcpPort {
+    const t = std.testing;
+    try t.expectEqual(@as(?u16, 80), firstTcpPort("listen tcp 80\n"));
+    try t.expectEqual(@as(?u16, 443), firstTcpPort("connect 69 tcp 443\n"));
+    try t.expectEqual(
+        @as(?u16, 5432),
+        firstTcpPort("connect all icmp\nlisten tcp 5432 loopback\n"),
+    );
+    try t.expectEqual(@as(?u16, 22), firstTcpPort("connect 69 udp 53\nlisten tcp 22\n"));
+    try t.expectEqual(
+        @as(?u16, 8080),
+        firstTcpPort("listen tcp x\nmetadata 300\nlisten tcp 8080\n"),
+    );
+    try t.expectEqual(@as(?u16, null), firstTcpPort("connect all icmp\nmetadata 300\n"));
+    try t.expectEqual(@as(?u16, null), firstTcpPort(""));
 }

@@ -1,18 +1,15 @@
-//! cve: which CVEs an update fixes, found where nothing in them can reach
-//! root. update.zig runs each source through two children of its own
+//! cve finds which CVEs an update fixes without letting CVE data reach root.
+//! slot-update.zig runs each source through two sandboxed children
 //! (docs/updater.md, Separation):
 //!
-//!   fetcher   as _update, rooted in a directory holding only the
-//!             resolver's files, with TCP to 443 and 53 alone: GET the
-//!             source into a file root opened for it.
-//!   reader    as _update in the empty /var/empty, with no network, no
-//!             files, and pread64, write and memory calls alone: parse it,
-//!             and send root a line per CVE.
+//!   fetcher   as _update, chrooted with only the resolver's files, TCP to
+//!             ports 443 and 53 only: GETs the source into a file root opened.
+//!   reader    as _update in /var/empty, with no network or files, and only
+//!             pread64, write and memory calls: parses it and sends root a
+//!             line per CVE.
 //!
-//! Root checks every line again here (packageFixes, kernelFixes) before any
-//! goes in the report. apk's version order, which both sides use, is here
-//! too; the sources' own shapes are lib/cve.zig's, as the tiers feed's
-//! writer reads them.
+//! Root then checks every line (packageFixes, kernelFixes). The sources'
+//! formats are in lib/cve.zig.
 
 const std = @import("std");
 const Io = std.Io;
@@ -22,8 +19,8 @@ const linux = std.os.linux;
 const sandbox = @import("sandbox");
 const sources = @import("cve");
 
-/// The most a fetcher may write, the memory a reader may map, all told,
-/// and the longest kernel CVE title root takes.
+/// Limits: the most a fetcher may write, the total memory a reader may map,
+/// and the longest kernel CVE title root accepts.
 const max_fetch = 256 << 20;
 const reader_memory = 1 << 30;
 const max_title = 512;
@@ -34,9 +31,9 @@ pub const Job = union(enum) {
     kernel: struct { branch: []const u8, old: [3]u32, new: [3]u32 },
 };
 
-/// As id, rooted in root with only the resolver's files to read, TCP only
-/// to ports 443 and 53, and no file bigger than max_fetch: GET url into
-/// body, then say "ok", or why not.
+/// fetcher runs as id, chrooted in root with only the resolver's files
+/// readable, TCP only to ports 443 and 53, and files capped at max_fetch. It
+/// GETs url into body, then writes "ok" or the reason to out.
 pub fn fetcher(
     id: u32,
     root: [*:0]const u8,
@@ -70,7 +67,7 @@ fn fetchInto(
     var threaded: Io.Threaded = .init_single_threaded;
     const io = threaded.io();
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    // The CA bundle, read before the chroot hides it.
+    // Read the CA bundle before the chroot hides it.
     const now = Io.Clock.real.now(io);
     try client.ca_bundle.rescan(gpa, io, now);
     client.now = now;
@@ -87,9 +84,9 @@ fn fetchInto(
     ));
     try sandbox.landlock(&.{.{ .fd = etc, .access = sandbox.read_file }}, &.{ 443, 53 });
     _ = linux.close(etc);
-    // What the request takes, as traced: the resolver's files, DNS over
-    // UDP (bound to port 0) or TCP, TLS over TCP, and the body to the file;
-    // nothing else is written anywhere but the status pipe and /dev/null.
+    // Only what a traced request needs: the resolver's files, DNS over UDP
+    // (bound to port 0) or TCP, TLS over TCP, and writes to body, out and
+    // stderr.
     var f: sandbox.Filter = .{};
     f.allowArg("socket", 0, linux.AF.INET);
     f.allowArg("socket", 0, linux.AF.INET6);
@@ -127,9 +124,9 @@ fn fetchInto(
     return "ok";
 }
 
-/// As _update in the empty /var/empty, with no network, no files, and at
-/// most reader_memory of memory: parse body for job, and say "ok" and a
-/// line per CVE, or why not.
+/// reader runs as id in the empty /var/empty, with no network or files and
+/// at most reader_memory of memory. It parses body for job and writes "ok"
+/// and a line per CVE, or the reason, to out.
 pub fn reader(id: u32, job: Job, body: Body, out: i32, parent: linux.pid_t) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -191,7 +188,8 @@ pub const KernelFixes = struct {
 };
 pub const OriginChange = struct { origin: []const u8, from: []const u8, to: []const u8 };
 
-/// openssl-4.0 -> openssl; a name without a version suffix is its own base.
+/// streamBase strips a versioned stream's suffix: openssl-4.0 -> openssl.
+/// Other names are returned unchanged.
 pub fn streamBase(origin: []const u8) []const u8 {
     const i = std.mem.findScalarLast(u8, origin, '-') orelse return origin;
     const tail = origin[i + 1 ..];
@@ -200,10 +198,10 @@ pub fn streamBase(origin: []const u8) []const u8 {
     return origin[0..i];
 }
 
-// apk's version order, as apk-tools 2.14's src/version.c defines it, so no
-// apk need run to compare two: {digit}{.digit}...{letter}{_suffix{#}}...{-r#}.
-// A version is read as tokens, each kind known from the character that ends
-// the last, in an order that only rises but for a few steps back.
+// apk's version order, ported from apk-tools 2.14's src/version.c so no apk
+// need run: {digit}{.digit}...{letter}{_suffix{#}}...{-r#}. A version is a
+// series of tokens; the separator before each gives its kind, and kinds may
+// only rise, with a few exceptions.
 const Tok = enum(i8) {
     invalid = -1,
     digit_or_zero,
@@ -222,7 +220,7 @@ const VersionReader = struct {
     const pre_suffixes = [_][]const u8{ "alpha", "beta", "pre", "rc" };
     const post_suffixes = [_][]const u8{ "cvs", "svn", "git", "hg", "p" };
 
-    /// The kind of the next token, from what separates it from the last.
+    /// next sets r.t to the next token's kind, from the separator before it.
     fn next(r: *VersionReader) void {
         const s = r.s;
         var n: Tok = .invalid;
@@ -251,7 +249,7 @@ const VersionReader = struct {
         r.t = n;
     }
 
-    /// The value of the token of kind r.t, and past it.
+    /// token returns the value of the token of kind r.t and moves past it.
     fn token(r: *VersionReader) i64 {
         const s = r.s;
         if (s.len == 0) {
@@ -272,8 +270,8 @@ const VersionReader = struct {
                 nt = .digit;
                 v = -@as(i64, @intCast(i));
             } else {
-                // At most 17 digits, refused before they could overflow:
-                // a version is input from below root's trust line.
+                // Refuse more than 17 digits before they overflow: versions
+                // come from untrusted input.
                 while (i < s.len and std.ascii.isDigit(s[i])) : (i += 1) {
                     if (i == 17) return r.fail();
                     v = v * 10 + (s[i] - '0');
@@ -284,7 +282,8 @@ const VersionReader = struct {
                 i = 1;
             },
             .suffix => suffix: {
-                // Before the release (alpha, -4, to rc, -1), or after it.
+                // Pre-release suffixes are negative (alpha -4 to rc -1);
+                // post-release ones are not.
                 for (pre_suffixes, 0..) |p, k| if (std.mem.startsWith(u8, s, p)) {
                     i = p.len;
                     v = @as(i64, @intCast(k)) - pre_suffixes.len;
@@ -316,7 +315,7 @@ const VersionReader = struct {
     }
 };
 
-/// a against b, as `apk version -t a b` orders them.
+/// apkOrder compares a with b as `apk version -t a b` does.
 pub fn apkOrder(a: []const u8, b: []const u8) std.math.Order {
     var x: VersionReader = .{ .s = a };
     var y: VersionReader = .{ .s = b };
@@ -328,8 +327,8 @@ pub fn apkOrder(a: []const u8, b: []const u8) std.math.Order {
     }
     if (xv != yv) return std.math.order(xv, yv);
     if (x.t == y.t) return .eq;
-    // Equal as far as one goes: the longer is newer, unless what it goes
-    // on with is a pre-release suffix.
+    // Equal up to the shorter one: the longer is newer, unless it continues
+    // with a pre-release suffix.
     var xs = x;
     var ys = y;
     if (x.t == .suffix and xs.token() < 0) return .lt;
@@ -337,15 +336,17 @@ pub fn apkOrder(a: []const u8, b: []const u8) std.math.Order {
     return std.math.order(@backingInt(y.t), @backingInt(x.t));
 }
 
-/// Whether apk would take s as a version.
+/// validVersion reports whether apk would accept s as a version.
 fn validVersion(s: []const u8) bool {
     var r: VersionReader = .{ .s = s };
     while (r.t != .end and r.t != .invalid) _ = r.token();
     return r.t == .end;
 }
 
-/// Wolfi's security.json, as the reader's lines, "INDEX FIXED CVE": a CVE
-/// fixed at version FIXED, in the window of origins[INDEX].
+/// secdbLines writes a line "INDEX FIXED CVE" for each CVE that Wolfi's
+/// security.json says was fixed at FIXED within origins[INDEX]'s window. A
+/// versioned stream (openssl-4.0) is also looked up under its base name; the
+/// window keeps other streams' fixes out. "0" lists CVEs that never applied.
 fn secdbLines(
     gpa: Allocator,
     json: []const u8,
@@ -375,9 +376,9 @@ fn secdbLines(
     }
 }
 
-/// The reader's lines from secdbLines, checked: each names an origin asked
-/// about, a version in its window, and a CVE id. A reader that sends any
-/// other line is not believed at all.
+/// packageFixes checks the reader's secdbLines output and groups it by
+/// origin. Each line must name an origin asked about, a version in its
+/// window, and a CVE id; one bad line rejects the whole answer.
 pub fn packageFixes(
     gpa: Allocator,
     text: []const u8,
@@ -413,15 +414,16 @@ pub fn packageFixes(
     return fixes.items;
 }
 
-/// Whether fixed is a version newer than from and no newer than to. "0",
-/// never affected, is in no window.
+/// inWindow reports whether fixed is a valid version in (from, to] in apk's
+/// order. "0" means never affected, so it is never in a window.
 fn inWindow(fixed: []const u8, from: []const u8, to: []const u8) bool {
     return validVersion(fixed) and !std.mem.eql(u8, fixed, "0") and
         apkOrder(fixed, from) == .gt and apkOrder(fixed, to) != .gt;
 }
 
-/// The kernel CNA's tarball, as the reader's lines, "CVE FIXED TITLE": each
-/// CVE fixed on branch in (old, new], with its title made one line.
+/// kernelLines writes "CVE FIXED TITLE" for each CVE in the kernel CNA's
+/// tarball fixed on branch in (old, new]. Each of the ~17,000 records is
+/// parsed in a scratch arena reset between records.
 fn kernelLines(
     gpa: Allocator,
     tarball_gz: []const u8,
@@ -453,7 +455,7 @@ fn kernelLines(
             body.written(),
             .{ .ignore_unknown_fields = true },
         ) catch continue;
-        // Fixed on the branch, in (old, new].
+        // Keep fixes on the branch in (old, new].
         const fixed = sources.kernelFixedOn(rec, branch) orelse continue;
         const v = sources.kernelVersion(fixed).?;
         if (!sources.kernelLess(old, v) or sources.kernelLess(new, v)) continue;
@@ -465,8 +467,8 @@ fn kernelLines(
     }
 }
 
-/// s with control characters as spaces, and cut, on a character's
-/// boundary, to max_title bytes.
+/// oneLine returns s with ASCII controls replaced by spaces, cut on a UTF-8
+/// boundary to at most max_title bytes.
 fn oneLine(gpa: Allocator, s: []const u8) ![]const u8 {
     var end = @min(s.len, max_title);
     if (end < s.len) while (end > 0 and s[end] & 0xc0 == 0x80) : (end -= 1) {};
@@ -477,8 +479,8 @@ fn oneLine(gpa: Allocator, s: []const u8) ![]const u8 {
     return out;
 }
 
-/// UTF-8 a log or a page may show as it is: no C0 or C1 control, and none
-/// of the marks that reorder text (U+200E, U+200F, U+202A-U+202E,
+/// printable reports whether s is UTF-8 safe to show in a log or page: no
+/// C0 or C1 controls, and no bidi marks (U+200E, U+200F, U+202A-U+202E,
 /// U+2066-U+2069), which could make a title read as something else.
 pub fn printable(s: []const u8) bool {
     var it = (std.unicode.Utf8View.init(s) catch return false).iterator();
@@ -503,9 +505,9 @@ test "versions too long to hold are refused, not overflowed" {
     try std.testing.expect(validVersion("12345678901234567-r0"));
 }
 
-/// The reader's lines from kernelLines, checked: a CVE id, a version on
-/// new's branch in (old, new], and a title of printable UTF-8. A reader
-/// that sends any other line is not believed at all.
+/// kernelFixes checks the reader's kernelLines output. Each line must have
+/// a CVE id, a version on new's branch in (old, new], and a printable title;
+/// one bad line rejects the whole answer.
 pub fn kernelFixes(gpa: Allocator, text: []const u8, old: [3]u32, new: [3]u32) ![]const KernelFix {
     var out: std.ArrayList(KernelFix) = .empty;
     var it = std.mem.tokenizeScalar(u8, text, '\n');
@@ -546,7 +548,7 @@ test streamBase {
 }
 
 test apkOrder {
-    // Each as apk-tools 2.14.10's `apk version -t` answered.
+    // Each answer is from apk-tools 2.14.10's `apk version -t`.
     const cases = [_]struct { []const u8, []const u8, std.math.Order }{
         .{ "1.0", "1.0.1", .lt },
         .{ "1.0_alpha", "1.0", .lt },
@@ -590,7 +592,7 @@ test apkOrder {
         try testing.expectEqual(c[2], apkOrder(c[0], c[1]));
         try testing.expectEqual(c[2].invert(), apkOrder(c[1], c[0]));
     }
-    // And as `apk version -c` judged them.
+    // Validity as `apk version -c` judged it.
     for ([_][]const u8{
         "1.0",
         "1.0.",
@@ -640,7 +642,7 @@ test "package CVEs, from a reader and checked" {
     try testing.expectEqualStrings("4.0.2-r0", fixes[1].from);
     try testing.expectEqual(0, (try packageFixes(a, "", origins)).len);
 
-    // A reader that lies in any one line is believed in none.
+    // A reader that lies in one line is believed in none.
     for ([_][]const u8{
         "2 4.0.3-r0 CVE-2026-3333", // no such origin
         "1 4.0.4-r0 CVE-2026-3333", // after the window

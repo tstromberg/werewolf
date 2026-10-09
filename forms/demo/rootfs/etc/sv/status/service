@@ -4,4 +4,6 @@
 exec    /usr/lib/werewolf/status-page
 user    status
 pledge  stdio rpath wpath unix connect
-read    /data/svc /run/werewolf
+read    /data/svc/scan /data/svc/autoupdate /run/werewolf
+# nginx serves its page, /data/svc/status/www.
+share   shared

@@ -1,9 +1,7 @@
-//! adhoc: a form from a command line (docs/design/adhoc.md). build, run
-//! and create take, beside FORM, the forms to combine, the Wolfi packages
-//! to add and the OCI images to run; this writes the form directory
-//! those make (forms/README.md), shows it, and hands the verb that
-//! directory as its FORM, so the one-shot machine and a kept one are
-//! built by one path.
+//! adhoc turns command-line flags (forms, packages, OCI images) into a form
+//! directory and hands it to build, run, create or pack as FORM, so a one-shot
+//! machine and a kept form build the same way. See README.md and
+//! docs/design/adhoc.md.
 //!
 //!     howl run --with caddy                          # one form, as it is
 //!     howl run --with caddy,valkey,postgresql        # forms to combine
@@ -12,47 +10,12 @@
 //!              --web.listen tcp/8080
 //!     howl create shop --with caddy,valkey           # prod, with both
 //!     howl form --with caddy,valkey -o forms/shop/   # keep the form
-//!
-//! Forms are references, --with, a name in forms/ or a kept form's
-//! directory; none means prod, or for run the form its environment
-//! wants: lima where the machine goes on Lima, the form Lima manages, and
-//! prod-ssh elsewhere, so there is a way in. One reference and nothing to add runs
-//! that form as it is, its own name, release URL and build; one reference
-//! with more is the generated form's base; several are taken by a form on
-//! the default. create's one positional is its machine's name. A form is
-//! named after its
-//! directory, as one outside the tree is: create's is build/adhoc/NAME,
-//! run's build/adhoc/run, build's build/adhoc/adhoc, and form's the -o
-//! directory, which must not exist yet. -n shows the form and stops.
-//!
-//! An image (oci.zig) is pulled by crane, pinned to its digest, and baked
-//! beneath rootfs/oci/NAME, with an account _oci-NAME of its own and a
-//! leash service that runs it there (`root`). `--NAME.DIRECTIVE 'LINE'`
-//! is one line of that service file, the whole grammar: listen, connect,
-//! write, read, run, env, secret, exec, dir, memory, nofile, pledge,
-//! before, requires. The image's own words, its exposed ports and
-//! volumes, grant nothing: an image declaring either needs the operator's
-//! listen or write, and without one the form is refused with the lines to
-//! say. `--link A:B` lets image A reach image B's loopback ports.
-//!
-//! The rest of form.yaml is reached by shape, and howl knows no form:
-//! `--KEY LINE` adds a line to one of its lists (net, prune, modules,
-//! programs), `--KEY.SUB VALUE` sets one scalar in one of its maps
-//! (`--sshd.max-auth-tries 3`). What the keys mean, and whether they are
-//! allowed, is the build's to say (lib/form.zig), and howl hears it when it
-//! loads the form. Anything nested, a bastion's users with their keys and
-//! destinations, is the file's: `form -o DIR`, then edit DIR/form.yaml.
-//!
-//! A form's weaknesses are its own, never inherited, so the generated
-//! form restates its chain's.
-//!
-//! Before anything is built, two forms or images serving one port are
-//! refused, naming both; the services' memory limits are summed and said.
 
 const std = @import("std");
 const howl = @import("howl.zig");
 const oci = @import("oci.zig");
 const forms = @import("form");
+const compose = @import("compose");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -64,16 +27,14 @@ const syntax =
     "[--with FORM,...] [--package PKG,...] [--oci NAME=REF --NAME.DIRECTIVE 'LINE'...] " ++
     "[--link A:B,...]; form adds -o DIR, and -n shows the form";
 
-/// Where an image's uids start; the chain's own are skipped.
-const first_uid: u32 = 20000;
-/// What an image's service may do until its operator says otherwise.
+/// default_pledge is an image service's pledge unless --NAME.pledge says otherwise.
 const default_pledge = "stdio rpath wpath inet unix connect listen proc";
 const default_memory = "512";
 
-/// One line of an image's service file, as the operator gave it.
+/// Line is one line of an image's service file, as the operator gave it.
 const Line = struct { key: []const u8, words: []const u8 };
 
-/// A service file's keys the line may be.
+/// line_keys are the service-file directives --NAME.KEY may set (cmd/leash).
 const line_keys = [_][]const u8{
     "listen", "connect", "write",  "read",   "run",    "env",    "secret",
     "exec",   "dir",     "memory", "nofile", "pledge", "before", "requires",
@@ -83,15 +44,14 @@ const Image = struct {
     name: []const u8,
     ref: []const u8,
     lines: []const Line = &.{},
-    /// Filled as the form is made: the pinned reference, and the account.
+    /// pinned is set while the form is made.
     pinned: []const u8 = "",
-    uid: u32 = 0,
 
     fn user(i: Image, gpa: Allocator) ![]const u8 {
         return gpa.print("_oci-{s}", .{i.name});
     }
 
-    /// The operator's lines with key.
+    /// each returns the words of the operator's lines with key.
     fn each(i: Image, key: []const u8, gpa: Allocator) ![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         for (i.lines) |l| if (std.mem.eql(u8, l.key, key)) try out.append(gpa, l.words);
@@ -103,7 +63,7 @@ const Image = struct {
         return false;
     }
 
-    /// The ports its listen lines name, tcp/PORT words alone.
+    /// ports returns the tcp/PORT words of the image's listen lines.
     fn ports(i: Image, gpa: Allocator) ![]const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         for (i.lines) |l| if (std.mem.eql(u8, l.key, "listen")) {
@@ -115,16 +75,16 @@ const Image = struct {
 };
 
 const Link = struct { from: []const u8, to: []const u8 };
-/// A posture check the form fails, and why, as form.yaml says it.
+/// Weakness is a posture check the form fails, and the excuse form.yaml gives.
 const Weakness = struct { check: []const u8, excuse: []const u8 };
-/// form.yaml's keys that are lists of lines, which --KEY LINE adds to.
-/// Not dev: --dev is the verb's, the debug shell.
+/// list_keys are the form.yaml lists that --KEY LINE adds to. dev is left out
+/// because --dev is the verbs' debug-shell flag.
 const list_keys = [_][]const u8{ "net", "prune", "modules", "programs" };
-/// A line for one of form.yaml's lists, and a scalar for one of its maps.
+/// ListLine adds a line to a form.yaml list; MapLine sets a scalar in a map.
 const ListLine = struct { key: []const u8, line: []const u8 };
 const MapLine = struct { key: []const u8, sub: []const u8, value: []const u8 };
 
-/// What a command line asked for, apart from what the verb takes itself.
+/// Plan is what the ad-hoc flags asked for; the verb's own flags stay in rest.
 const Plan = struct {
     verb: Verb,
     base: []const u8 = "prod",
@@ -134,22 +94,22 @@ const Plan = struct {
     links: []const Link = &.{},
     lists: []const ListLine = &.{},
     maps: []const MapLine = &.{},
-    /// Filled as the form is made: the chain's own, restated.
+    /// weaknesses are the chain's, restated while the form is made.
     weaknesses: []const Weakness = &.{},
-    /// Whether the line had any flag of ours, and how many positionals.
+    /// ours reports whether any ad-hoc flag was given.
     ours: bool = false,
     positionals: usize = 0,
-    /// create's machine; the form's directory is named after it.
+    /// name is create's machine name, which also names the form's directory.
     name: ?[]const u8 = null,
-    /// form -o DIR.
+    /// out is form's -o DIR.
     out: ?[]const u8 = null,
     show_only: bool = false,
-    /// The machine's architecture, --arch or this one's: the images' too;
-    /// null on a machine werewolf does not build for, without --arch.
+    /// arch is --arch or the host's, and selects the images' platform too.
+    /// It is null on a host werewolf does not build for, unless --arch is given.
     arch: ?howl.Arch,
-    /// The arguments that were not ours, in order, positionals included.
+    /// rest holds the verb's own arguments, in order.
     rest: []const []const u8,
-    /// The whole line, for the form's first comment.
+    /// line is the whole command line, recorded in the form's first comment.
     line: []const u8,
 
     fn dir(p: Plan, gpa: Allocator) ![]const u8 {
@@ -168,9 +128,9 @@ const Plan = struct {
     }
 };
 
-/// The ad-hoc flags on args, if any, taken: returns the arguments for the
-/// verb to go on with, FORM replaced by the generated directory, or null
-/// when there is nothing more to do (-n, or form, whose work this is).
+/// take consumes the ad-hoc flags in args and returns the verb's arguments, with
+/// the generated directory as FORM. It returns null when nothing is left to do:
+/// for -n, and for the form verb.
 pub fn take(
     io: Io,
     gpa: Allocator,
@@ -181,8 +141,8 @@ pub fn take(
     const fallback = if (verb == .run) defaultBase(io, gpa, args) else "prod";
     var p = try plan(gpa, verb, args, fallback, why);
     if (try references(&p, fallback, why)) |ref| {
-        // One form, as it is: its own name, release URL and build. -n, on
-        // any verb but pack, whose own -n it is, has nothing to show.
+        // A single form with nothing added runs unchanged, so -n has nothing
+        // to show. pack has its own -n, so leave it to pack.
         const asked = p.show_only or (verb != .pack and for (args) |a| {
             if (std.mem.eql(u8, a, "-n")) break true;
         } else false);
@@ -206,11 +166,11 @@ pub fn take(
     } else Dir.cwd().deleteTree(io, dir) catch {};
     Dir.cwd().createDirPath(io, dir) catch |err|
         return why.refuse("{s}: {s}", .{ dir, @errorName(err) });
-    // Made here, so unmade on a refusal, form's included: nothing was there.
+    // The directory did not exist before, so remove it on any refusal.
     errdefer Dir.cwd().deleteTree(io, dir) catch {};
 
-    // The images' references and configs first: what refuses here refuses
-    // before a byte of the tree is pulled.
+    // Resolve and check every image before pulling any, so a refusal costs
+    // no download.
     for (p.images) |*i| {
         i.pinned = try oci.resolve(io, gpa, i.ref, why);
         if (!std.mem.eql(u8, i.pinned, i.ref))
@@ -226,17 +186,15 @@ pub fn take(
         try checklist(i, c.*, why);
     }
 
-    // Written once as named, so the chain can be read; then again with
-    // what the chain decides: the images' uids, the weaknesses restated.
+    // Write the form once so its chain can be read, then again with the
+    // weaknesses that depend on the chain.
     try write(io, gpa, dir, "form.yaml", try renderForm(gpa, p), why);
     try write(io, gpa, dir, "apko.yaml", try renderApko(gpa, p), why);
     const chain = try howl.chain(io, gpa, dir, why);
-    try uids(io, gpa, &p, chain);
     try inherit(gpa, &p, chain);
     try write(io, gpa, dir, "form.yaml", try renderForm(gpa, p), why);
-    try write(io, gpa, dir, "apko.yaml", try renderApko(gpa, p), why);
     for (p.images, configs) |i, c| try bake(io, gpa, p, i, c, dir, why);
-    // The chain as the build will read it: what it refuses, we refuse here.
+    // Read the chain as the build will, so the build's refusals come now.
     const c = try check(io, gpa, dir, why);
 
     var out: Io.Writer.Allocating = .init(gpa);
@@ -260,8 +218,8 @@ pub fn take(
         .{ try flags(gpa, p), if (p.name) |n| n else "NAME" },
     );
     Io.File.stderr().writeStreamingAll(io, out.written()) catch {};
-    // -n shows and leaves nothing where -o pointed: the directory was
-    // written only so the chain could be read and checked.
+    // With -n, leave nothing at -o: the directory was written only to
+    // check the chain.
     if (p.show_only and verb == .form) Dir.cwd().deleteTree(io, dir) catch {};
     if (p.show_only or verb == .form) return null;
 
@@ -272,13 +230,13 @@ pub fn take(
     return next.items;
 }
 
-/// howl form: the verb that only generates.
+/// form is `howl form`: it writes the form to -o DIR and builds nothing.
 pub fn form(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     _ = try take(io, gpa, .form, args, why);
 }
 
-/// Read the ad-hoc flags and positionals off args; null when there are
-/// none and the verb is not form.
+/// plan parses the ad-hoc flags and positionals in args. If there are no
+/// ad-hoc flags and the verb is not form, it returns early with ours false.
 fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, why: *Why) !Plan {
     var p: Plan = .{
         .verb = verb,
@@ -302,8 +260,8 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
             continue;
         }
         if (std.mem.eql(u8, a, "-n")) {
-            // The verb's own -n (pack's check) when nothing here is asked;
-            // decided once the line is read.
+            // -n is the verb's own (pack's check) unless an ad-hoc flag
+            // appears; that is decided below, once the line is read.
             try rest.append(gpa, a);
             continue;
         }
@@ -328,7 +286,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         if (!is_with and !is_packages and !is_oci and !is_link and !is_out and !is_list and
             dot == null)
         {
-            // The verb's own flag, with the value it takes, if it does.
+            // Pass the verb's own flag, and its value if it takes one.
             try rest.append(gpa, a);
             if (std.mem.eql(u8, name, "--arch") or std.mem.eql(u8, name, "-arch")) {
                 const v = value orelse if (i + 1 < args.len) args[i + 1] else "";
@@ -340,7 +298,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
             }
             continue;
         }
-        // --oci NAME=REF: the = is the pair's, not the flag's.
+        // In --oci NAME=REF, the = belongs to the value, not the flag.
         if (is_oci and value != null) value = null;
         const v = value orelse v: {
             i += 1;
@@ -391,7 +349,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
                 .flag = name,
             });
         } else {
-            // A list, repeated or comma-joined, as the reader likes.
+            // --with and --package may repeat or join names with commas.
             const list = try split(gpa, v);
             if (list.len == 0) return why.refuse("{s}: a name, or names separated by commas", .{a});
             const into: *[]const []const u8 = if (is_with) &p.with else &p.packages;
@@ -399,7 +357,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         }
     }
     const pos = positional.items;
-    // Forms are references, --with; the one positional is create's name.
+    // Forms are named with --with; create's one positional is the machine.
     switch (verb) {
         .create => if (pos.len == 1) {
             p.name = pos[0];
@@ -412,7 +370,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
     p.positionals = pos.len;
     if (!ours) return p;
     p.ours = true;
-    // -n is ours now: show the form and stop.
+    // An ad-hoc flag was given, so -n means show the form and stop.
     var kept: std.ArrayList([]const u8) = .empty;
     for (rest.items) |a| if (std.mem.eql(u8, a, "-n")) {
         p.show_only = true;
@@ -431,7 +389,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         );
     }
     for (p.with, 0..) |m, k| {
-        // A name in forms/, or a kept form's directory (one with a slash).
+        // Accept a name in forms/ or a kept form's directory, which has a slash.
         if (!forms.isName(m) and std.mem.findScalar(u8, m, '/') == null)
             return why.refuse("--with {s}: not a form's name", .{m});
         for (p.with[0..k]) |seen| if (std.mem.eql(u8, m, seen))
@@ -446,8 +404,8 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         for (p.packages[0..k]) |seen| if (std.mem.eql(u8, pkg, seen))
             return why.refuse("--package {s}: twice", .{pkg});
     }
-    // Each dotted line to its image, as a service line; or else to
-    // form.yaml, as one scalar of the map named: each only once.
+    // --NAME.KEY goes to image NAME's service file if NAME is an image;
+    // otherwise it sets a scalar in form.yaml's map NAME. Each only once.
     var maps: std.ArrayList(MapLine) = .empty;
     for (lines.items) |l| {
         const img = p.image(l.image) orelse {
@@ -456,8 +414,8 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
                     "{s}: {s} is not a map in form.yaml; --{s} LINE adds to a list",
                     .{ l.flag, l.image, l.image },
                 );
-            // A form's weaknesses are its own: the chain's are restated, the
-            // build derives the rest, and the file takes any other.
+            // Weaknesses are not inherited; the chain's are restated, and
+            // any new one must be written in form.yaml by hand.
             if (std.mem.eql(u8, l.image, "weaknesses")) return why.refuse(
                 "{s}: weaknesses are not the line's; form -o DIR, then edit DIR/form.yaml",
                 .{l.flag},
@@ -511,7 +469,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
             .{ l.from, l.to, l.to, l.to },
         );
     }
-    // Two images on one port: the machine serves a port once.
+    // Refuse two images listening on one port.
     for (p.images, 0..) |a, k| for (try a.ports(
         gpa,
     )) |pa| for (p.images[0..k]) |b| for (try b.ports(gpa)) |pb|
@@ -522,10 +480,9 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
     return p;
 }
 
-/// run's form when the line names none, the one its environment wants:
-/// lima where the machine goes on Lima, which manages that form (sshd and
-/// bash, as Lima needs); prod-ssh elsewhere, so there is a way in. Also
-/// the base of what --with, --package and --oci add to a run.
+/// defaultBase returns run's form when none is named: lima on Lima, which needs
+/// sshd and bash, and prod-ssh elsewhere so there is a way in. It is also the
+/// base that run's --with, --package and --oci build on.
 fn defaultBase(io: Io, gpa: Allocator, args: []const []const u8) []const u8 {
     var on: ?howl.Platform = null;
     for (args, 0..) |a, i| {
@@ -540,9 +497,9 @@ fn defaultBase(io: Io, gpa: Allocator, args: []const []const u8) []const u8 {
     return if (howl.engine(io, gpa, on).on == .lima) "lima" else "prod-ssh";
 }
 
-/// What --with named, or the default: one form and nothing to add is
-/// that form as it is, returned to run; else the form to generate, on one
-/// reference as its base, or on the default taking several, and null.
+/// references returns the form to use unchanged when at most one --with is given
+/// and nothing is added. Otherwise it sets p.base (the single --with, or
+/// fallback) and returns null, meaning a form must be generated.
 fn references(p: *Plan, fallback: []const u8, why: *Why) !?[]const u8 {
     const content = p.packages.len > 0 or p.images.len > 0 or p.lists.len > 0 or
         p.maps.len > 0 or p.links.len > 0;
@@ -559,9 +516,9 @@ fn references(p: *Plan, fallback: []const u8, why: *Why) !?[]const u8 {
     return null;
 }
 
-/// The image's own words grant nothing. One declaring ports or volumes
-/// needs the operator's word, any listen or write; without it, the lines
-/// to say, the closed one first.
+/// checklist refuses an image that declares ports or volumes unless the operator
+/// gave a listen or write line, since the image's config grants nothing. The
+/// refusal lists the lines to add, loopback first.
 fn checklist(i: Image, c: oci.Config, why: *Why) !void {
     if ((c.exposed.len == 0 and c.volumes.len == 0) or i.has("listen") or i.has("write")) return;
     var text: [2048]u8 = undefined;
@@ -588,7 +545,8 @@ fn checklist(i: Image, c: oci.Config, why: *Why) !void {
     return why.refuse("{s}", .{std.mem.trimEnd(u8, w.buffered(), "\n")});
 }
 
-/// form.yaml: base, with, and each image's network policy.
+/// renderForm returns form.yaml: base, with, net (with each image's network
+/// policy), the other lists and maps, and the restated weaknesses.
 fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
     var f: Io.Writer.Allocating = .init(gpa);
     const w = &f.writer;
@@ -609,8 +567,6 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
         try w.writeAll("net:\n");
         for (net.items) |l| try w.print("  - {s}\n", .{l});
     }
-    // The other lists, each key once, its lines in order; then the maps,
-    // each key once, its scalars quoted, since a value may hold [ or ,.
     for (list_keys[1..]) |k| {
         var first = true;
         for (p.lists) |l| if (std.mem.eql(u8, l.key, k)) {
@@ -619,6 +575,7 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
             try w.print("  - {s}\n", .{l.line});
         };
     }
+    // Quote map scalars, since a value may hold [ or ,.
     var done: std.ArrayList([]const u8) = .empty;
     for (p.maps) |m| {
         const seen = for (done.items) |d| {
@@ -638,7 +595,9 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
     return f.written();
 }
 
-/// apko.yaml: the packages, and an account an image.
+/// renderApko returns apko.yaml: the added packages and an account for each
+/// image. Each account gets compose.defaultId, the id the build would give
+/// it, so an image keeps its owner whatever else the command line names.
 fn renderApko(gpa: Allocator, p: Plan) ![]const u8 {
     var a: Io.Writer.Allocating = .init(gpa);
     const w = &a.writer;
@@ -649,56 +608,30 @@ fn renderApko(gpa: Allocator, p: Plan) ![]const u8 {
         try w.writeAll("contents:\n  packages:\n");
         for (p.packages) |pkg| try w.print("    - {s}\n", .{pkg});
     }
-    if (p.images.len > 0 and p.images[0].uid != 0) {
-        try w.writeAll(
-            "\n# Each image runs as a user of its own, no service's and no one's to share.\n",
-        );
-        try w.writeAll("accounts:\n  groups:\n");
-        for (p.images) |i| try w.print(
-            "    - groupname: {s}\n      gid: {d}\n",
-            .{ try i.user(gpa), i.uid },
-        );
-        try w.writeAll("  users:\n");
-        for (p.images) |i| try w.print(
-            "    - username: {s}\n      uid: {d}\n      gid: {d}\n      homedir: /var/empty\n   " ++
-                "   shell: /sbin/nologin\n",
-            .{ try i.user(gpa), i.uid, i.uid },
+    if (p.images.len == 0) return a.written();
+    try w.writeAll(
+        "\n# Each image runs as a user of its own, no service's and no one's to share.\n",
+    );
+    try w.writeAll("accounts:\n  groups:\n");
+    for (p.images) |i| {
+        const user = try i.user(gpa);
+        try w.print("    - groupname: {s}\n      gid: {d}\n", .{ user, compose.defaultId(user) });
+    }
+    try w.writeAll("  users:\n");
+    for (p.images) |i| {
+        const user = try i.user(gpa);
+        const id = compose.defaultId(user);
+        try w.print(
+            "    - username: {s}\n      uid: {d}\n      gid: {d}\n      homedir: /var/empty\n" ++
+                "      shell: /sbin/nologin\n",
+            .{ user, id, id },
         );
     }
     return a.written();
 }
 
-/// Each image's uid: from first_uid up, skipping any the chain's apko
-/// configs name, so no account is two things.
-fn uids(io: Io, gpa: Allocator, p: *Plan, chain: []const forms.Form) !void {
-    if (p.images.len == 0) return;
-    var used: std.ArrayList(u32) = .empty;
-    for (chain) |f| {
-        const text = Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/apko.yaml", .{f.dir}),
-            gpa,
-            .limited(1 << 20),
-        ) catch continue;
-        var lines = std.mem.tokenizeScalar(u8, text, '\n');
-        while (lines.next()) |line| {
-            var words = std.mem.tokenizeAny(u8, line, " \t");
-            const key = words.next() orelse continue;
-            if (!std.mem.eql(u8, key, "uid:") and !std.mem.eql(u8, key, "gid:")) continue;
-            const n = std.fmt.parseInt(u32, words.next() orelse continue, 10) catch continue;
-            try used.append(gpa, n);
-        }
-    }
-    var next = first_uid;
-    for (p.images) |*i| {
-        while (std.mem.findScalar(u32, used.items, next) != null) next += 1;
-        i.uid = next;
-        next += 1;
-    }
-}
-
-/// The chain's own weaknesses, each once, the later form's excuse winning:
-/// restated in the generated form, since a form's are never inherited.
+/// inherit copies the chain's weaknesses into p, each once, the later form's
+/// excuse winning. They must be restated because weaknesses are not inherited.
 fn inherit(gpa: Allocator, p: *Plan, chain: []const forms.Form) !void {
     var out: std.ArrayList(Weakness) = .empty;
     for (chain[0 .. chain.len - 1]) |f| for (f.weaknesses()) |e| {
@@ -714,8 +647,8 @@ fn inherit(gpa: Allocator, p: *Plan, chain: []const forms.Form) !void {
     p.weaknesses = out.items;
 }
 
-/// The image's tree beneath rootfs/oci/NAME, its binds' places, and its
-/// service: root, exec, dir, user, pledge, memory, the image's
+/// bake pulls the image into rootfs/oci/NAME, prepares its bind points, and
+/// writes its leash service: root, exec, dir, user, pledge, memory, the image's
 /// environment, then the operator's lines.
 fn bake(
     io: Io,
@@ -781,8 +714,8 @@ fn bake(
     for (i.lines) |l| {
         if (std.mem.eql(u8, l.key, "exec") or std.mem.eql(u8, l.key, "dir") or
             std.mem.eql(u8, l.key, "pledge") or std.mem.eql(u8, l.key, "memory")) continue;
-        // leash knows TCP ports alone; the rest of a listen or connect
-        // line (loopback, udp, public) is fence's, in form.yaml's net.
+        // leash takes only TCP ports. The rest of a listen or connect line
+        // (loopback, udp, public) is fence's, in form.yaml's net.
         if (std.mem.eql(u8, l.key, "listen") or std.mem.eql(u8, l.key, "connect")) {
             var tcp: std.ArrayList([]const u8) = .empty;
             var words = std.mem.tokenizeAny(u8, l.words, " \t");
@@ -791,7 +724,7 @@ fn bake(
             try w.print("{s} {s}\n", .{ l.key, try std.mem.join(gpa, " ", tcp.items) });
         } else try w.print("{s} {s}\n", .{ l.key, l.words });
     }
-    // Its links: the other image's ports, reached on loopback.
+    // --link A:B lets A connect to B's ports on loopback.
     for (p.links) |l| if (std.mem.eql(u8, l.from, i.name)) {
         const to = p.image(l.to).?;
         try w.print("connect {s}\n", .{try std.mem.join(gpa, " ", try to.ports(gpa))});
@@ -814,8 +747,8 @@ fn bake(
         return why.refuse("{s}/{s}: {s}", .{ sv, link[0], @errorName(err) });
 }
 
-/// A line's words, as a service file splits them (cmd/leash): at blanks,
-/// but for a word in double quotes, which holds its blanks.
+/// splitLine splits line into words as cmd/leash does: at blanks, except inside
+/// double quotes.
 fn splitLine(gpa: Allocator, line: []const u8, name: []const u8, why: *Why) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var at: usize = 0;
@@ -842,8 +775,8 @@ fn splitLine(gpa: Allocator, line: []const u8, name: []const u8, why: *Why) ![]c
     return out.items;
 }
 
-/// A word of a service line: quoted whole when it holds a blank, which is
-/// the file's one quoting; one holding a quote cannot be said.
+/// word writes s as one word of a service line, quoted if it holds a blank. The
+/// format has no escapes, so a quote or control character is refused.
 fn word(w: *Io.Writer, s: []const u8, why: *Why) !void {
     if (std.mem.findScalar(u8, s, '"') != null or std.mem.findAny(u8, s, "\n\r\t") != null)
         return why.refuse("{s}: a service line cannot hold a quote or a control character", .{s});
@@ -866,7 +799,7 @@ fn write(
         return why.refuse("{s}: {s}", .{ path, @errorName(err) });
 }
 
-/// The flags that make the same form again: for the line that keeps it.
+/// flags returns the flags that make the same form, for the `howl form` hint.
 fn flags(gpa: Allocator, p: Plan) ![]const u8 {
     var out: Io.Writer.Allocating = .init(gpa);
     const w = &out.writer;
@@ -890,13 +823,12 @@ fn flags(gpa: Allocator, p: Plan) ![]const u8 {
 
 const Checked = struct { services: usize, memory: u64 };
 
-/// The chain, as the build reads it, refused as the build would refuse
-/// it; and beyond that, two forms serving one port, which the build takes
-/// and the machine finds out about at boot.
+/// check reads the chain as the build would, and refuses what the build refuses.
+/// It also refuses two forms listening on one port, which the build allows but
+/// the machine would fail at boot. It returns the service count and memory total.
 fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
     const c = try howl.chain(io, gpa, dir, why);
-    // Every port, loopback ones included: two services binding one port
-    // collide whether or not the network sees it.
+    // Include loopback ports: two services binding one port collide either way.
     const Port = struct { port: u16, form: []const u8 };
     var ports: std.ArrayList(Port) = .empty;
     for (c) |f| for (try f.items(gpa, "net")) |line| {
@@ -931,14 +863,15 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
     return .{ .services = svcs.len, .memory = memory };
 }
 
-/// The verbs' flags that take no value; every other takes the next word.
+/// takesNothing reports whether flag is a verb flag with no value; others take
+/// the next word.
 fn takesNothing(flag: []const u8) bool {
     for ([_][]const u8{ "--dev", "--verbose", "-v", "-h", "--help" }) |f|
         if (std.mem.eql(u8, flag, f)) return true;
     return false;
 }
 
-/// A list's words, split at commas, blanks dropped.
+/// split splits list at commas, trimming blanks and dropping empty words.
 fn split(gpa: Allocator, list: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, list, ',');
@@ -949,7 +882,8 @@ fn split(gpa: Allocator, list: []const u8) ![]const []const u8 {
     return out.items;
 }
 
-/// A Wolfi package name, pinned or not: what apk takes as a world entry.
+/// isPackage reports whether s is a Wolfi package name, optionally pinned as
+/// NAME=VERSION.
 fn isPackage(s: []const u8) bool {
     if (s.len == 0 or s.len > 128 or !std.ascii.isAlphanumeric(s[0])) return false;
     for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._+-=~", c) == null)

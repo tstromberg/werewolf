@@ -1,28 +1,6 @@
-//! slot-keep: keep this boot's slot, make it the default, once it has proved itself.
-//!
-//! A new slot boots on probation, chosen for this boot only; the next reset
-//! goes back to the slot (or, after bite, the distro) that was good. Once
-//! every other service has stayed up for a minute, /data is there, and,
-//! where the form has an updater, the updater has said it can update
-//! (/run/werewolf/updater-ready, which slot-update writes once its setup
-//! succeeds), slot-keep makes this slot good, and leaves
-//! /run/werewolf/committed for stage0's deadman, which otherwise reboots the
-//! machine after ten minutes. A slot whose updater cannot run is the one
-//! failure no later update could undo, so it is never kept. Then it parks,
-//! as a service that has done its job.
-//!
-//! Two loaders choose slots:
-//!
-//!     werewolf.grubenv=UUID:PATH   a distro's GRUB, after bite: saved_entry
-//!                                  in GRUB's environment block, which
-//!                                  /usr/lib/werewolf/grub-setenv rewrites in place
-//!     werewolf.esp=XXXX-XXXX       systemd-boot, on werewolf's own disk
-//!                                  (docs/design/native-boot.md): the entry is
-//!                                  renamed from werewolf-a+N-M.conf, which
-//!                                  counts tries, to werewolf-a.conf, good for
-//!                                  good
-//!
-//! runsv runs it as /etc/sv/slot-keep/run, with no arguments and no shell.
+//! slot-keep makes this boot's slot the loader's default once every service
+//! has run for a minute, /data works, and the updater is ready. Until then
+//! stage0's deadman reboots into the last good slot. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -40,8 +18,8 @@ const wait = 15;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
-    // Read as stage0 read it (lib/cmdline.zig): the slot a or b, and
-    // GRUB's path plain, as both go into paths written as root.
+    // Parse as stage0 does (lib/cmdline.zig). It allows only slot a or b and
+    // a plain GRUB path, since both end up in paths written as root.
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(readAll(io, gpa, "/proc/cmdline"), &refused) orelse {
         say(io, "the command line's {s}: {s}; not committing", .{ refused.word, refused.why });
@@ -51,9 +29,9 @@ pub fn main(init: std.process.Init) !void {
     const entry = try gpa.print("werewolf-{s}", .{@tagName(cmd.slot orelse .a)});
 
     var said = false;
-    // The service that holds the commit back, said when it changes once a
-    // boot has had two minutes: a service crash-looping is otherwise a
-    // deadman reboot and a rollback with nothing on the console to say why.
+    // After two minutes, log the service that blocks the commit whenever it
+    // changes. Otherwise a crash loop ends in a deadman rollback with nothing
+    // on the console to say why.
     var waited: u32 = 0;
     var blocker_buf: [Dir.max_name_bytes]u8 = undefined;
     var blocker_said: [Dir.max_name_bytes]u8 = undefined;
@@ -73,7 +51,8 @@ pub fn main(init: std.process.Init) !void {
             continue;
         }
         if (!exists(io, "/etc/sv/autoupdate") or exists(io, updater_ready)) break;
-        // Said once, and only when the updater is all that is missing.
+        // A slot whose updater cannot run could never be updated away from,
+        // so it is never kept. Log this once.
         if (!said) say(io, "the updater has not said it can update; not committing", .{});
         said = true;
     }
@@ -85,8 +64,8 @@ pub fn main(init: std.process.Init) !void {
     park(io);
 }
 
-/// systemd-boot: the EFI partition, which the mount broker mounts apart for
-/// as long as the rename takes.
+/// commitEsp commits for systemd-boot by renaming this slot's counting entry
+/// to entry.conf, on the EFI partition the mount broker lends for the rename.
 fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
     const esp = broker.ask(.esp) catch |err|
         return say(
@@ -111,10 +90,9 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
     say(io, "healthy for a minute; {s} is good", .{entry});
 }
 
-/// GRUB: the block is on the victim's root filesystem (Debian), its /boot
-/// partition (Ubuntu, Rocky) or its /boot subvolume (Fedora). Either way the
-/// mount broker mounts it apart and writable, for as long as the write
-/// takes: /victim, if it is the same filesystem, is read-only.
+/// commitGrub sets GRUB's saved_entry to entry. The block lives on the
+/// victim's root (Debian), /boot partition (Ubuntu, Rocky) or /boot subvolume
+/// (Fedora); /victim is read-only, so the mount broker lends a writable mount.
 fn commitGrub(io: Io, gpa: Allocator, spec: cmdline.Place, entry: []const u8) !void {
     const boot = broker.ask(.grub) catch |err| return say(
         io,
@@ -123,7 +101,7 @@ fn commitGrub(io: Io, gpa: Allocator, spec: cmdline.Place, entry: []const u8) !v
     );
     defer boot.release();
 
-    // A plain path (lib/cmdline.zig), so within the broker's mount only.
+    // lib/cmdline.zig rejects "." and "..", so f stays inside the mount.
     const f = try gpa.print("{s}{s}", .{ boot.path(), spec.path });
     const block = readAll(io, gpa, f);
     if (block.len == 0) return say(
@@ -142,22 +120,18 @@ fn commitGrub(io: Io, gpa: Allocator, spec: cmdline.Place, entry: []const u8) !v
     say(io, "healthy for a minute; {s} is now GRUB's default", .{entry});
 }
 
-/// Whether this slot cannot reach the machine's data, said if so. A slot
-/// that cannot is not healthy, whatever its services say. Leaving it
-/// uncommitted lets the deadman take the machine back to the slot that
-/// last could.
+/// dataUnavailable reports, and logs, whether /data failed this boot. Such a
+/// slot is not healthy whatever its services say, so it is left for the
+/// deadman to roll back.
 fn dataUnavailable(io: Io, gpa: Allocator) bool {
     if (!exists(io, nodata)) return false;
     say(io, "/data is unavailable ({s}); not committing", .{trim(readAll(io, gpa, nodata))});
     return true;
 }
 
-/// The first other service that has not been running for a minute, nor
-/// is down because it asked to be, as its name in name_buf; null once
-/// every one has, or is (a service that parks itself), by runsv's own
-/// account in each supervise/status; not down while wanted up, between
-/// crashes, nor finishing, as a crashed service does while leash-reap
-/// clears it, and not one whose runsv has yet to say.
+/// unhealthy returns the name, in name_buf, of the first other service that
+/// serviceHealthy rejects or that has no readable supervise/status yet. It
+/// returns null when every service is healthy.
 fn unhealthy(io: Io, name_buf: *[Dir.max_name_bytes]u8) ?[]const u8 {
     var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return "/etc/sv";
     defer d.close(io);
@@ -181,9 +155,12 @@ fn unhealthy(io: Io, name_buf: *[Dir.max_name_bytes]u8) ?[]const u8 {
     return null;
 }
 
-/// runsv's supervise/status: the time of the last change as TAI64N
-/// (seconds since 1970 plus 2^62 + 10), the pid, paused, want ('u' or
-/// 'd'), a term flag, and the state (0 down, 1 run, 2 finish).
+/// serviceHealthy reports whether a runsv supervise/status shows a service
+/// running for 60 s, or down because it wants to be (parked). Down while
+/// wanted up means between crashes; finish means leash-reap is clearing one.
+/// The 20 bytes hold the last change as TAI64N (seconds since 1970 plus
+/// 2^62 + 10), the pid, paused, want ('u' or 'd'), term, and state (0 down,
+/// 1 run, 2 finish).
 fn serviceHealthy(status: [20]u8, now: u64) bool {
     const since = std.mem.readInt(u64, status[0..8], .big) -| ((1 << 62) + 10);
     return switch (status[19]) {
@@ -193,8 +170,8 @@ fn serviceHealthy(status: [20]u8, now: u64) bool {
     };
 }
 
-/// The entry for this slot that still counts its tries:
-/// werewolf-a+1.conf, or werewolf-a+0-1.conf once systemd-boot has spent one.
+/// triedEntry returns the path of this slot's entry that still counts tries,
+/// such as werewolf-a+1.conf, or werewolf-a+0-1.conf after one try.
 fn triedEntry(io: Io, gpa: Allocator, dir: []const u8, entry: []const u8) !?[]const u8 {
     var d = Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return null;
     defer d.close(io);
@@ -210,7 +187,7 @@ fn isTried(name: []const u8, entry: []const u8) bool {
     return name.len > entry.len and name[entry.len] == '+';
 }
 
-/// Whether GRUB's block already has saved_entry=entry.
+/// isSaved reports whether GRUB's block already has saved_entry=entry.
 fn isSaved(block: []const u8, entry: []const u8) bool {
     var it = std.mem.splitScalar(u8, block, '\n');
     while (it.next()) |line| {
@@ -220,7 +197,7 @@ fn isSaved(block: []const u8, entry: []const u8) bool {
     return false;
 }
 
-/// Left for stage0's deadman, which then lets the machine be.
+/// markCommitted creates the file that tells stage0's deadman not to reboot.
 fn markCommitted(io: Io) void {
     Dir.cwd().writeFile(
         io,
@@ -228,7 +205,7 @@ fn markCommitted(io: Io) void {
     ) catch |err| say(io, "{s}: {s}", .{ committed, @errorName(err) });
 }
 
-/// Down, as a service that has done its job: runsv will not restart it.
+/// park marks the service down so runsv does not restart it.
 fn park(io: Io) noreturn {
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
     say(io, "sv down: {s}", .{@errorName(err)});
@@ -244,7 +221,8 @@ fn run(io: Io, argv: []const []const u8) bool {
     };
 }
 
-/// path, read to its end: procfs reports a size of 0, so not readFileAlloc.
+/// readAll returns path's contents, or "" on error. It reads to the end
+/// because procfs reports a size of 0.
 fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     var f = Dir.cwd().openFile(io, path, .{}) catch return "";
     defer f.close(io);
@@ -272,7 +250,8 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
 
 const testing = std.testing;
 
-/// A supervise/status for state, want, and the last change secs ago.
+/// statusOf builds a supervise/status with state, want, and the last change
+/// ago seconds before 1000.
 fn statusOf(state: u8, want: u8, ago: u64) [20]u8 {
     var st: [20]u8 = @splat(0);
     std.mem.writeInt(u64, st[0..8], (1 << 62) + 10 + 1000 - ago, .big);
@@ -284,7 +263,7 @@ fn statusOf(state: u8, want: u8, ago: u64) [20]u8 {
 test serviceHealthy {
     try testing.expect(serviceHealthy(statusOf(1, 'u', 75), 1000));
     try testing.expect(!serviceHealthy(statusOf(1, 'u', 12), 1000));
-    // Parked by design; the updater is held to more (updater_ready).
+    // Parked on purpose. The updater must also write updater_ready.
     try testing.expect(serviceHealthy(statusOf(0, 'd', 30), 1000));
     // Down between crashes, and finishing after one.
     try testing.expect(!serviceHealthy(statusOf(0, 'u', 1), 1000));

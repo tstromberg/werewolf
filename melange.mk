@@ -21,8 +21,11 @@
 VENDOR = build/vendor
 APKS = $(VENDOR)/packages/$(ARCH)
 MELANGE_GUEST = $(VENDOR)/melange-guest-$(ARCH).cpio
+# melange's QEMU runner makes the guest's disk, a sparse 50 GiB file, in
+# QEMU_DISKS_PATH, or else the current directory, the checkout's root; it
+# leaves the disk behind if the build dies.
 MELANGE_QEMU = env QEMU_KERNEL_IMAGE=$(abspath $(BUILD)/vmlinuz) QEMU_BASE_INITRAMFS=$(abspath $(MELANGE_GUEST)) \
-	melange build --runner qemu
+	QEMU_DISKS_PATH=$(abspath $(VENDOR))/melange-tmp melange build --runner qemu
 MELANGE_LINUX := $(if $(shell command -v bwrap),melange build --runner bubblewrap,$(MELANGE_QEMU))
 MELANGE := $(if $(filter Darwin,$(HOST_OS)),$(MELANGE_QEMU),$(MELANGE_LINUX))
 MELANGE_NEEDS = $(if $(findstring --runner qemu,$(MELANGE)),$(MELANGE_GUEST) $(BUILD)/vmlinuz)

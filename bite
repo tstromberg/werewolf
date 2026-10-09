@@ -1,28 +1,33 @@
 #!/bin/sh
-# bite: turn this Debian, Ubuntu, Fedora or Rocky machine into werewolf.
+# bite turns this Debian, Ubuntu, Fedora or Rocky machine into werewolf.
 #
-#   bite [-n] [-i | --reboot] [--config DIR] IMAGE_DIR    take it over
-#   bite --undo                                      remove werewolf
+#   bite [-n] [-i | --reboot] [--config DIR] [IMAGE_DIR]  install werewolf
+#   bite --undo                                           remove werewolf
 #
-# Run on the distro, as root. Once werewolf has committed, bite-cleanup, run
-# in werewolf, deletes the distro.
+#   sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/werewolf-linux/werewolf/main/bite)" bite [-n | -i]
 #
-# IMAGE_DIR holds a slot built for this machine's architecture (`make slot`):
-# vmlinuz, stage0-bitten.zst (stage0, with the modules a distro's
-# filesystem needs, xfs's and btrfs's, which werewolf's own stage0.zst
-# leaves out) and root.erofs, of any form (see docs/bite.md).
+# Pass the script as an argument, not through a pipe. Then the terminal stays
+# on stdin for -i, and no command bite runs can read the rest of the script.
 #
-# Nothing of the distro is removed. bite adds a GRUB entry and boots it once;
-# werewolf makes itself the default only after its services have stayed up
-# for a minute, so until then any reset comes back here. The disk is not
-# repartitioned: werewolf's files go in /boot/werewolf (the kernel, where
-# GRUB reads the distro's) and /var/lib/werewolf (config.tar, and data/,
-# which becomes /data).
+# Run bite as root on the distro. Once werewolf commits, bite-cleanup (run in
+# werewolf) deletes the distro.
 #
-#   -n            check and show the plan; change nothing
+# IMAGE_DIR holds a slot of any form, built for this machine's architecture
+# (`make slot`, see docs/bite.md): vmlinuz, stage0-bitten.zst, root.erofs and
+# cmdline. stage0-bitten.zst is stage0 plus the xfs and btrfs modules a
+# distro's filesystem may need; the plain stage0.zst leaves them out. Without
+# IMAGE_DIR, bite downloads the latest prod-ssh release and checks its signature.
+#
+# bite removes nothing from the distro. It adds GRUB entries and boots werewolf
+# once. werewolf makes itself the default only after its services stay up for
+# a minute, so until then a reset boots the distro again. The disk is not
+# repartitioned: the kernel goes in /boot/werewolf, where GRUB can read it, and
+# the rest in /var/lib/werewolf (config.tar, and data/, which becomes /data).
+#
+#   -n            check and print the plan; change nothing
 #   -i            then open a shell in the new root, and ask whether to reboot
 #   --reboot      reboot into werewolf now; otherwise at the next reboot
-#   --config DIR  more files for the config tar (data.key, ...)
+#   --config DIR  add the files in DIR to the config tar (data.key, ...)
 #   --undo        remove werewolf; the distro boots as it did before
 set -eu
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
@@ -64,11 +69,10 @@ for t in "$g-probe" "$g-mkrelpath" "$g-editenv" "$g-reboot" "$g-mkconfig"; do
 done
 grubenv=$(readlink -f "/boot/$g/grubenv")
 
-# GRUB reads ext4 and xfs without replaying their journals, so a change still
-# in the journal is invisible to it until it is written in place: a reset
-# moments after bite would boot what was there before. A clean shutdown
-# writes it in place; so does freezing the filesystem, which settle does to
-# each one GRUB reads, so that bite holds even if the next boot is a reset.
+# GRUB reads ext4 and xfs without replaying their journals, so it cannot see
+# a change that is still only in the journal. A reset just after bite would
+# boot the old state. Freezing a filesystem writes its journal in place, as a
+# clean shutdown does, so settle freezes each filesystem GRUB reads.
 settle() {
 	sync
 	for p in "$boot" "$grubenv" /boot/loader/entries; do
@@ -98,14 +102,78 @@ if [ -n "$undo" ]; then
 	exit 0
 fi
 
+arch=$(uname -m)
+
+# --- the release ----------------------------------------------------------------
+# Without IMAGE_DIR, bite fetches the latest prod-ssh release. Its manifest
+# must verify against the release key (release/image.pub; make lint keeps the
+# copy below identical), and each file must match the manifest. So neither the
+# web host nor the network can substitute an image.
+form=prod-ssh
+fetched=''
+get() { # get URL FILE
+	if command -v curl >/dev/null; then
+		curl -fsSL --proto =https -o "$2" "$1"
+	else
+		wget -q --https-only -O "$2" "$1"
+	fi
+}
+fetch() {
+	for t in openssl sha256sum; do
+		command -v "$t" >/dev/null || die "no $t, which checks the download"
+	done
+	command -v curl >/dev/null || command -v wget >/dev/null || die "no curl or wget to download with"
+	# Remove the download at exit: install copies the files, and -n keeps none.
+	fetched=$(mktemp -d /var/tmp/bite.XXXXXX)
+	trap 'rm -rf "$fetched"' EXIT
+	url=https://github.com/werewolf-linux/werewolf/releases
+	m=$fetched/manifest.json
+	get "$url/latest/download/$form-$arch.json" "$m" && get "$url/latest/download/$form-$arch.json.sig" "$m.sig" ||
+		die "cannot download $form-$arch.json from $url"
+	cat >"$fetched/image.pub" <<'EOF'
+-----BEGIN PUBLIC KEY-----
+MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAwicY7lZgZ0ElKQ6nzOz1
+0uK1is9prcYWF4mBJvWP9ysxEM1QtVmsvGBb05FfDlb8J1l2XJ6jfagEiIiBBgWF
+MzJzahm9gFOtmGHAHCtHaj3IG0G1NdELNPWlTu57vwasxq3ZCZCU/zvXU447YFEd
+CRCTeSMEwfdKkKW5tTMHZr4S2AQFVbz/lVUEVUyRdhajIApoZv/f/vd1ZK8Ww4Vs
+kxA+gt+13ziMdtzdG3BY8CEX/oB0yw6ZY6TuUybZ6GU31kE6VbrwoPRRIrTBsl1C
+nUfVXH+mDazpxh8wVRYcjzMTqE90AXUbKVExQHi1LlBjhkoGNLwp3LHtjwDw1kjf
+SK8G2+PyOCwXPrAnVVvjyLT1XqZs4F33IMZLrsrQnPgG8CmrDjEBkp9uUxLE+rKN
+xHnK2BlXpLwu0d0BevWrrYMiMVmwpLTL5lSRZncbdCQwVeQhPZ6kTDQ2XjcXL22h
+GIRD86safrRQ3bRh5r6Afnt95Son1/NwsblFptHZmks0wCKpi2S4P0mj7uBZx/qC
+0n6oEWqVna49fRpvpEv3bsOh3CogUktoxmf9JGxkuH2fxP8zD+0GXI4MQOAov4nH
+birBl1OeOaW07T0qXNqWUonJFyZQycHuoPzwmMoxDtAa9dP89Ak1kiIb+UiSf4ix
+9JmzGC4LyPalyBJ7qiPJz5cCAwEAAQ==
+-----END PUBLIC KEY-----
+EOF
+	openssl dgst -sha256 -verify "$fetched/image.pub" -signature "$m.sig" "$m" >/dev/null 2>&1 ||
+		die "$form-$arch.json is not signed by werewolf's release key"
+	# Every signed manifest verifies, so check that this one is for this form
+	# and arch.
+	grep -q "^  \"form\": \"$form\",\$" "$m" && grep -q "^  \"arch\": \"$arch\",\$" "$m" ||
+		die "$form-$arch.json describes another image"
+	# Fetch the files by the manifest's serial, not from latest, because
+	# latest may move to a newer release between downloads.
+	serial=$(sed -n 's/^  "serial": "\([0-9]\{8\}T[0-9]\{6\}Z\)",$/\1/p' "$m")
+	[ -n "$serial" ] || die "$form-$arch.json has no serial"
+	say "downloading $form $serial for $arch"
+	for f in vmlinuz stage0-bitten.zst root.erofs cmdline; do
+		get "$url/download/$serial/$form-$arch-$f" "$fetched/$f" || die "cannot download $form-$arch-$f"
+		want=$(sed -n "s/^    \"$(echo "$f" | sed 's/\./\\./g')\": {\"sha256\": \"\([0-9a-f]\{64\}\)\".*/\1/p" "$m")
+		got=$(sha256sum <"$fetched/$f" | cut -c1-64)
+		[ -n "$want" ] && [ "$got" = "$want" ] || die "$form-$arch-$f does not match its signed manifest"
+	done
+	image=$fetched
+}
+
 # --- preflight ------------------------------------------------------------------
-# Everything werewolf cannot find out for itself is found out here, and
-# anything it could not cope with stops bite before it changes a thing.
-[ -n "$image" ] || die "usage: bite [-n] [-i | --reboot] [--config DIR] IMAGE_DIR"
+# Preflight finds out what werewolf cannot learn for itself. If werewolf could
+# not run on this machine, bite stops here, before it changes anything.
+[ -n "$image" ] || fetch
 [ -f "$image/vmlinuz" ] && [ -f "$image/stage0-bitten.zst" ] && [ -f "$image/root.erofs" ] && [ -f "$image/cmdline" ] ||
 	die "$image is not a slot: it needs vmlinuz, stage0-bitten.zst, root.erofs and cmdline (make slot)"
-# The image's kernel arguments, which go into GRUB's entries and the script
-# that writes them: words of plain characters, nothing a shell would read.
+# The image's kernel arguments end up in GRUB's entries. Allow only plain
+# characters, which neither GRUB nor a shell treats as syntax.
 args=$(cat "$image/cmdline")
 case $args in *[!A-Za-z0-9_.,=\ -]*) die "$image/cmdline holds more than kernel arguments" ;; esac
 [ -z "$extra" ] || [ -d "$extra" ] || die "--config $extra is not a directory"
@@ -113,11 +181,10 @@ case $args in *[!A-Za-z0-9_.,=\ -]*) die "$image/cmdline holds more than kernel 
 no=''
 nope() { echo "bite: refusing: $*" >&2; no=1; }
 
-# The kernel must be this machine's: an x86 bzImage says HdrS at 0x202, an
-# arm64 Image ARMd at 0x38. An arm64 slot carries Alpine's EFI zboot image
-# instead ("zimg" at 4), which systemd-boot runs but GRUB cannot; install
-# gives GRUB the Image inside it.
-arch=$(uname -m)
+# Check that the kernel is for this machine: an x86 bzImage has HdrS at
+# 0x202, an arm64 Image has ARMd at 0x38. An arm64 slot may instead carry
+# Alpine's EFI zboot image ("zimg" at 4). GRUB cannot boot that, so install
+# unpacks the Image inside it.
 zboot=''
 case "$arch" in
 x86_64) magic=$(dd if="$image/vmlinuz" bs=1 skip=514 count=4 2>/dev/null) want=HdrS ;;
@@ -135,17 +202,31 @@ if [ -n "$sb" ] && [ "$(od -An -t u1 -j 4 -N 1 "$sb" | tr -d ' ')" = 1 ]; then
 	nope "Secure Boot is on, and would not boot werewolf's unsigned kernel"
 fi
 
-# werewolf carries virtio drivers and nothing else, and cannot open LVM or
-# LUKS: the NIC and the disk under /var/lib must be plain virtio.
+# werewolf lets in, as root, root's keys and the keys of the user who ran
+# bite through sudo. An authorized_keys in --config replaces them.
+keys=/root/.ssh/authorized_keys
+if [ -n "${SUDO_USER:-}" ]; then
+	keys="$keys $(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys"
+fi
+[ -z "$extra" ] || [ ! -f "$extra/authorized_keys" ] || keys=$extra/authorized_keys
+# prod-ssh's sshd accepts only security keys (forms/sshd). Without one, the
+# downloaded machine would lock everyone out.
+# shellcheck disable=SC2086 # $keys is paths without spaces
+if [ -n "$fetched" ] && ! cat $keys 2>/dev/null | grep -qE '(^|[ ,])sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com '; then
+	nope "no security key (sk-ssh-ed25519 or sk-ecdsa-sha2-nistp256) in $keys, the only kind prod-ssh lets in; add one, or pass --config DIR with an authorized_keys"
+fi
+
+# werewolf carries only virtio drivers and cannot open LVM or LUKS, so the
+# NIC and the disk under /var/lib must be plain virtio.
 nic=$(ip -4 route show default | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }')
 [ -n "$nic" ] || nope "no IPv4 default route"
 case "$(readlink -f "/sys/class/net/$nic/device" 2>/dev/null)" in
 */virtio*) ;;
 *) nope "$nic is not a virtio NIC" ;;
 esac
-# Checked through the parent directories, so that -n creates nothing.
-# Where its links lead: werewolf's broker mounts the filesystem without
-# following any (nosymfollow).
+# Check the parent directory, which exists, so that -n creates nothing.
+# Resolve its symlinks now, because werewolf's broker mounts the filesystem
+# with nosymfollow.
 lib=$(readlink -f "$(dirname "$home")")
 src=$(findmnt -no SOURCE -T "$lib")
 case "$src" in
@@ -168,9 +249,9 @@ ext4 | xfs | btrfs) ;;
 esac
 [ -n "$no" ] && die "nothing changed"
 
-# Where a path will be when werewolf mounts its filesystem plainly, by UUID:
-# its path under the mount point, below the subvolume the distro mounted
-# (btrfs). Proved by mounting it that way here and finding the path.
+# where prints where PATH will be when werewolf mounts its filesystem by
+# UUID: its path from the filesystem's root, including any btrfs subvolume
+# the distro mounted. It proves this by mounting the filesystem that way.
 where() { # where PATH -> UUID:PATH-IN-FILESYSTEM
 	uuid=$(findmnt -no UUID -T "$1")
 	rel=${1#"$(findmnt -no TARGET -T "$1")"}
@@ -178,9 +259,8 @@ where() { # where PATH -> UUID:PATH-IN-FILESYSTEM
 	root=$(findmnt -no FSROOT -T "$1")
 	p=${root%/}$rel
 	t=$(mktemp -d)
-	# Read-write, as it is already mounted: the kernel will not mount a
-	# filesystem in use read-write a second time read-only. Nothing is
-	# written; the path is only looked at.
+	# Mount read-write, as the filesystem already is: the kernel will not
+	# mount it a second time read-only. Nothing is written.
 	mount "UUID=$uuid" "$t"
 	ok=
 	[ -e "$t$p" ] && [ "$(stat -c %i "$t$p")" = "$(stat -c %i "$1")" ] && ok=1
@@ -192,19 +272,18 @@ where() { # where PATH -> UUID:PATH-IN-FILESYSTEM
 victim=$(where "$lib")/${home##*/}
 genv=$(where "$genvdir")/${grubenv##*/}
 
-# The network as it is now. Cloud addresses come from DHCP but do not
-# change, so they are written down; werewolf has no DHCP client.
+# Write down the network as it is now. Cloud addresses come from DHCP but do
+# not change. With werewolf.ip set, werewolf's init skips its DHCP client.
 cidr=$(ip -4 -o addr show dev "$nic" scope global | awk '{ print $4; exit }')
 gw=$(ip -4 route show default | awk '{ print $3; exit }')
 mac=$(cat "/sys/class/net/$nic/address")
-# stage0 refuses a command line with an empty werewolf.ip or werewolf.gw,
-# and a machine that cannot boot its slot is worse than one not bitten.
+# stage0 refuses an empty werewolf.ip or werewolf.gw. Stop here, because a
+# machine that cannot boot its slot is worse than one never bitten.
 [ -n "$cidr" ] && [ -n "$gw" ] || die "$nic has no IPv4 address and default route to write down"
-# systemd-resolved points /etc/resolv.conf at its own stub on 127.0.0.53
-# and keeps the real servers in a file of its own. werewolf brings up $nic
-# alone, so a server reached through another interface (a second network's
-# resolver, listed first by chance) would answer nobody: take the first
-# that routes through $nic, and failing that the gateway.
+# systemd-resolved points /etc/resolv.conf at its stub on 127.0.0.53 and
+# keeps the real servers in /run/systemd/resolve/resolv.conf. werewolf brings
+# up only $nic, so a server reached through another interface would not
+# answer. Take the first server that routes through $nic, else the gateway.
 dns=
 for s in $(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ && $2 !~ /^127\./ { print $2 }' \
 	/etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null); do
@@ -214,10 +293,10 @@ for s in $(awk '$1 == "nameserver" && $2 ~ /^[0-9.]+$/ && $2 !~ /^127\./ { print
 	fi
 done
 [ -n "$dns" ] || dns=$gw
-# Where the log goes. Cloud images name consoles for every hypervisor they
-# might meet, so keep only those that exist here; then the hypervisor's own
-# console, hvc0, if there is one, last, so it becomes /dev/console. Failing
-# both, the screen and the first serial port.
+# Pick the consoles the log goes to. Cloud images name consoles for every
+# hypervisor they might meet, so keep only those that exist here. Put hvc0
+# last, if it exists, so it becomes /dev/console. If none exist, use the
+# screen and the first serial port.
 console=''
 for c in $(tr ' ' '\n' </proc/cmdline | sed -n 's/^console=//p'); do
 	[ -e "/sys/class/tty/${c%%,*}" ] && [ "${c%%,*}" != hvc0 ] && console="${console}console=$c "
@@ -231,15 +310,15 @@ if [ -z "$console" ]; then
 		fi
 	done
 fi
-# A panic, or a lockup made one, reboots in ten seconds; GRUB then boots the
-# slot that last committed. See cmd/stage0/stage0.zig. init= because a kernel whose
-# /init will not run otherwise tries /sbin/init and then /bin/sh, which is a
-# root shell on the console; named, a failed init is a panic instead.
-# Between head and tail, the kernel arguments each slot's image asks for
-# (its cmdline, from the form's allowances): not written in the entries,
-# but read from GRUB's environment, werewolf_args_a and werewolf_args_b,
-# which bite sets for slot a and the updater for each slot it installs, so
-# an image's new arguments reach a machine bitten before them.
+# A panic, or a lockup turned into one, reboots in ten seconds, and GRUB then
+# boots the slot that last committed (see cmd/stage0/stage0.zig). init= is
+# named because a kernel that cannot run /init would try /sbin/init and then
+# /bin/sh, a root shell on the console. With init= set, it panics instead.
+# Each slot's image arguments (its cmdline, from the form's allowances) go
+# between head and tail. The entries do not hold them: GRUB reads them from
+# werewolf_args_a and werewolf_args_b in its environment. bite sets slot a's,
+# and the updater sets each slot it installs, so an image's new arguments
+# reach machines bitten before it.
 head="${console}init=/init panic=10 softlockup_panic=1"
 tail="werewolf.ip=$cidr werewolf.gw=$gw werewolf.dns=$dns werewolf.mac=$mac werewolf.victim=$victim werewolf.grubenv=$genv"
 
@@ -256,14 +335,14 @@ if [ -n "$dry" ]; then
 fi
 
 # --- install --------------------------------------------------------------------
-# Slot a holds this image; b stays empty until autoupdate builds into it.
-# GRUB reads the kernel and stage0 from /boot; stage0 reads root.erofs from
-# the victim's filesystem, where there is room.
+# Slot a holds this image; b stays empty until an update installs into it.
+# GRUB reads the kernel and stage0 from /boot. stage0 reads root.erofs from
+# the victim's filesystem, which has more room.
 mkdir -p "$boot/a" "$home"
 if [ -n "$zboot" ]; then
-	# The gzipped Image, at the offset and of the size the zboot header
-	# gives as little-endian u32s after "zimg"; checked as preflight checks
-	# a plain one.
+	# Unpack the gzipped Image. The zboot header gives its offset and size
+	# as little-endian u32s after "zimg". Check it as preflight checks a
+	# plain Image.
 	off=$(od -An -t u4 -j 8 -N 4 "$image/vmlinuz" | tr -d ' ')
 	size=$(od -An -t u4 -j 12 -N 4 "$image/vmlinuz" | tr -d ' ')
 	tail -c +$((off + 1)) "$image/vmlinuz" | head -c "$size" | gunzip >"$boot/a/vmlinuz" ||
@@ -277,16 +356,14 @@ cp "$image/stage0-bitten.zst" "$boot/a/stage0.zst"
 chmod 0700 "$home"
 mkdir -p "$home/a" "$home/data"
 cp "$image/root.erofs" "$home/a/"
+if [ -n "$fetched" ]; then
+	rm -rf "$fetched"
+	trap - EXIT
+fi
 [ -f "$grubenv" ] || "$g-editenv" "$grubenv" create
 "$g-editenv" "$grubenv" set "werewolf_args_a=$args"
 t=$(mktemp -d)
-# Root's keys, and those of whoever ran bite through sudo: werewolf lets
-# them all in as root.
-keys=/root/.ssh/authorized_keys
-if [ -n "${SUDO_USER:-}" ]; then
-	keys="$keys $(getent passwd "$SUDO_USER" | cut -d: -f6)/.ssh/authorized_keys"
-fi
-# shellcheck disable=SC2086 # $keys is two paths, neither with spaces
+# shellcheck disable=SC2086 # $keys is paths without spaces
 cat $keys 2>/dev/null | sort -u >"$t/authorized_keys" || true
 hostname >"$t/hostname"
 [ -n "$extra" ] && cp -R "$extra/." "$t/"
@@ -294,18 +371,17 @@ tar -cf "$home/config.tar" --owner=0 --group=0 -C "$t" .
 chmod 0600 "$home/config.tar"
 rm -rf "$t"
 
-# Every distro gets /etc/grub.d/42_werewolf, run by its own grub-mkconfig.
-# It sets GRUB's fallback to the saved default, so that a slot GRUB cannot
-# load (a power cut before its files were written in place) falls back to
-# the slot that last committed instead of stopping at an error. And it sets
-# no wait at the menu: the distro's 00_header, which ran before it, may set
-# 5 seconds (Debian, Rocky) or, after a boot Ubuntu thinks failed, 30, and
-# every reboot for an update would pay it. That is speed, not a lock: Esc
-# or Shift at the console still opens the menu, and only a GRUB password
-# keeps an entry from being edited. Debian and Ubuntu also get the two
-# entries from it, written by the distro's own helpers so GRUB loads
-# whatever it needs to read /boot; Fedora and Rocky take them as Boot
-# Loader Spec files.
+# Every distro gets /etc/grub.d/42_werewolf, which grub-mkconfig runs.
+# It sets GRUB's fallback to the saved default. Then a slot GRUB cannot load
+# (say, after a power cut before its files reached the disk) falls back to the
+# slot that last committed instead of stopping at an error. It also sets the
+# menu timeout to 0. The distro's 00_header runs first and may set 5 seconds
+# (Debian, Rocky), or 30 after a boot Ubuntu thinks failed, and every update
+# reboot would pay it. This is for speed, not a lock: Esc or Shift at the
+# console still opens the menu, and only a GRUB password stops edits. On
+# Debian and Ubuntu, 42_werewolf also writes the two entries with the distro's
+# helpers, so GRUB loads whatever it needs to read /boot. Fedora and Rocky
+# take the entries as Boot Loader Spec files.
 {
 	cat <<EOF
 #!/bin/sh
@@ -338,9 +414,9 @@ options $head \$werewolf_args_$s $tail werewolf.slot=$s
 EOF
 	done
 fi
-# saved_entry, which commit writes, counts only with GRUB_DEFAULT=saved
-# (Fedora and Rocky set it already). Until it is written GRUB falls back to
-# entry 0, the distro, as now.
+# GRUB honors saved_entry, which commit writes, only with GRUB_DEFAULT=saved
+# (Fedora and Rocky set it already). Until commit writes it, GRUB boots entry
+# 0, the distro, as it does now.
 mkdir -p /etc/default/grub.d
 echo 'GRUB_DEFAULT=saved' >/etc/default/grub.d/99-werewolf.cfg
 "$g-mkconfig" -o "/boot/$g/grub.cfg" 2>/dev/null
@@ -349,11 +425,11 @@ echo 'GRUB_DEFAULT=saved' >/etc/default/grub.d/99-werewolf.cfg
 settle
 say "werewolf boots once at the next reboot; it becomes the default after a healthy minute"
 
-# -i: a look before the leap. The new root, read-only, under its own shell
-# if the form has one; then the choice to reboot into it. This is werewolf's
-# files on the distro's kernel, without werewolf's init or lockdown. A
-# kernel that cannot mount the image (erofs, zstd) skips the look, not the
-# question.
+# -i lets you look before you leap. enter mounts the new root read-only and
+# runs its shell, if the form has one; then bite asks whether to reboot. This
+# runs werewolf's files on the distro's kernel, without werewolf's init or
+# lockdown. If this kernel cannot mount the image (erofs, zstd), bite skips
+# the look but still asks.
 enter() {
 	r=$(mktemp -d)
 	if ! mount -t erofs -o ro,loop "$home/a/root.erofs" "$r" 2>/dev/null; then

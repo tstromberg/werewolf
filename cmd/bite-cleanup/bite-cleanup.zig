@@ -1,29 +1,8 @@
-//! bite-cleanup: delete the distro bite took over, once werewolf is GRUB's
-//! default (docs/bite.md).
+//! bite-cleanup deletes the distro bite took over, once werewolf is GRUB's
+//! default. See README.md and docs/bite.md.
 //!
 //!     bite-cleanup        delete it
 //!     bite-cleanup -n     show what would go; change nothing
-//!
-//! Once werewolf commits, the distro is only a fallback, and a stale one:
-//! nothing updates it, and it still holds its secrets, cloud-init's user-data
-//! among them. bite-cleanup deletes everything on the victim's filesystem but
-//! werewolf's directory and, if GRUB's environment block is on the same
-//! filesystem, the directory GRUB's own is in (/boot, which holds GRUB and,
-//! in werewolf/, werewolf's kernels). It refuses until werewolf is GRUB's
-//! default: before that, a reset still boots the distro. And it deletes
-//! nothing unless it finds the running slot, its root.erofs and its kernel,
-//! in what it keeps, reached through no link: a layout it misreads must
-//! leave the distro, not take werewolf with it.
-//!
-//! GRUB's filesystem, then the victim's, are mounted apart and writable by
-//! the mount broker (lib/broker.zig), since /victim is read-only and nothing
-//! under runit may mount. The deleting is done by a child that can do
-//! nothing else: of root's capabilities, only those past files' owners and
-//! modes; Landlock allowing nothing on any filesystem but reading
-//! directories and removing beneath the victim's mount, and no network or
-//! signal outside; and a seccomp filter of the few calls that takes. Then
-//! the parent hands the freed blocks back to the disk (FITRIM), so a thin
-//! cloud volume no longer holds them, and releases the mount.
 
 const std = @import("std");
 const Io = std.Io;
@@ -53,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     const p = plan(gpa, cmd) catch |err|
         fail("cannot tell what to keep: {s}; deleting nothing", .{@errorName(err)});
 
-    // Only a committed machine may lose its fallback.
+    // Before commit, a reset still boots the distro, so it must stay.
     const grub = ask(.grub);
     var block_buf: [4096]u8 = undefined;
     const block = readBlock(grub.path(), cmd.grubenv.path, &block_buf);
@@ -91,10 +70,13 @@ pub fn main(init: std.process.Init) !void {
     if (code == partial) fail("some of the distro stays; see above", .{});
 }
 
-/// The child's exit when all it could delete is gone, but not everything.
+/// partial is the child's exit code when it deleted all it could, but some
+/// entries stay.
 const partial = 3;
 
-/// The child: sure of what it keeps, confined, then deleting everything else.
+/// prune runs in the child. It checks that every needed file is beneath dir
+/// through no link, confines itself, then deletes everything not kept. A
+/// layout it misreads must leave the distro, not take werewolf with it.
 fn prune(io: Io, gpa: Allocator, dir: []const u8, p: Plan, dry: bool) noreturn {
     const root = Dir.cwd().openDir(
         io,
@@ -127,11 +109,13 @@ fn prune(io: Io, gpa: Allocator, dir: []const u8, p: Plan, dry: bool) noreturn {
     std.process.exit(0);
 }
 
-/// What the walk deleted, from the top of each tree, and what it may not.
+/// Tally counts the trees the walk deleted (each counted at its top) and
+/// the entries it was not allowed to delete.
 const Tally = struct { deleted: usize = 0, left: usize = 0 };
 
-/// Everything in dir (at path, from the filesystem's root) that is neither
-/// kept nor above something kept goes. Symlinks are entries, never followed.
+/// walk deletes everything in dir (at path from the filesystem's root) that
+/// is neither kept nor above something kept. Symlinks are deleted, never
+/// followed.
 fn walk(
     io: Io,
     gpa: Allocator,
@@ -175,11 +159,11 @@ fn walk(
     }
 }
 
-/// deleteTree stops at the first entry it may not delete: an immutable or
-/// append-only file (chattr +i, +a), as some cloud agents leave
-/// /etc/resolv.conf. So name, in dir at path, loses all it can of the rest,
-/// and what stays is said. The count of what stays. Only as deep as such
-/// entries lie, and never past max_depth.
+/// salvage deletes all it can of name, in dir at path, and logs and counts
+/// what stays. deleteTree stops at the first entry it may not delete, such
+/// as an immutable or append-only file (chattr +i, +a) that some cloud
+/// agents leave as /etc/resolv.conf. It recurses only toward such entries,
+/// and never past max_depth.
 fn salvage(
     io: Io,
     gpa: Allocator,
@@ -232,8 +216,9 @@ const max_depth = 256;
 
 const Fate = enum { keep, descend, delete };
 
-/// A path kept stays whole, even above another kept: it is looked for in
-/// every keep before any is descended toward.
+/// fate decides what walk does with path. A kept path stays whole even if
+/// another kept path lies beneath it, so every keep is matched before any
+/// is descended toward.
 fn fate(path: []const u8, keep: []const []const u8) Fate {
     for (keep) |k| if (std.mem.eql(u8, k, path)) return .keep;
     for (keep) |k| {
@@ -243,21 +228,21 @@ fn fate(path: []const u8, keep: []const []const u8) Fate {
     return .delete;
 }
 
-/// What stays, and what must be found in it before anything goes.
+/// Plan lists what stays, and what must be found in it before anything goes.
 const Plan = struct { keep: []const []const u8, need: []const []const u8 };
 
-/// werewolf's directory, holding the running slot's root.erofs; and, if
-/// GRUB's environment block is on the same filesystem, the directory GRUB's
-/// own is in, holding the slot's kernel in werewolf/ as bite and slot-update
-/// lay it. On btrfs that directory may be in a subvolume (/@/boot), so it
-/// is found from the block, not from the top of the filesystem.
+/// plan keeps werewolf's directory, which must hold the running slot's
+/// root.erofs. If GRUB's environment block is on the same filesystem, it
+/// also keeps the directory above GRUB's (/boot), which must hold the slot's
+/// kernel in werewolf/. On btrfs that may be in a subvolume (/@/boot), so it
+/// is derived from the block's path, not assumed.
 fn plan(gpa: Allocator, cmd: Bitten) !Plan {
     var keep: std.ArrayList([]const u8) = .empty;
     var need: std.ArrayList([]const u8) = .empty;
     const slot = @tagName(cmd.slot);
     try keep.append(gpa, cmd.victim.path);
     try need.append(gpa, try gpa.print("{s}/{s}/root.erofs", .{ cmd.victim.path, slot }));
-    // The same filesystem by its UUID's bytes, however each was written.
+    // Compare the UUIDs' bytes, so letter case does not matter.
     if (std.mem.eql(u8, &cmdline.uuid(cmd.victim.uuid).?, &cmdline.uuid(cmd.grubenv.uuid).?)) {
         const grub = std.fs.path.dirnamePosix(cmd.grubenv.path) orelse "/";
         const boot = std.fs.path.dirnamePosix(grub) orelse "/";
@@ -268,7 +253,7 @@ fn plan(gpa: Allocator, cmd: Bitten) !Plan {
     return .{ .keep = keep.items, .need = need.items };
 }
 
-/// Whether GRUB's block has werewolf as its saved default.
+/// isCommitted reports whether GRUB's block has werewolf as its saved default.
 fn isCommitted(block: []const u8) bool {
     var it = std.mem.splitScalar(u8, block, '\n');
     while (it.next()) |line| {
@@ -278,8 +263,8 @@ fn isCommitted(block: []const u8) bool {
     return false;
 }
 
-/// What bite left on the command line, read as stage0 read it
-/// (lib/cmdline.zig): werewolf.victim, werewolf.grubenv and werewolf.slot.
+/// Bitten holds the words bite left on the command line: werewolf.victim,
+/// werewolf.grubenv and werewolf.slot (lib/cmdline.zig).
 const Bitten = struct { victim: cmdline.Place, grubenv: cmdline.Place, slot: cmdline.Slot };
 
 // --- confinement -------------------------------------------------------------
@@ -287,11 +272,11 @@ const Bitten = struct { victim: cmdline.Place, grubenv: cmdline.Place, slot: cmd
 const cap_dac_override = 1;
 const cap_fowner = 3;
 
-/// Nothing but deleting beneath root: of root's capabilities, only those
-/// that let it past files' modes (DAC_OVERRIDE, directories' search
-/// included) and owners (FOWNER, for sticky directories such as /tmp);
-/// Landlock granting reading directories and removing, beneath root alone;
-/// and the calls walking and deleting make, every other killing it.
+/// confine leaves the process able only to delete beneath root. It keeps
+/// DAC_OVERRIDE (past file modes, including directory search) and FOWNER
+/// (for sticky directories such as /tmp); Landlock allows only reading
+/// directories and removing, beneath root; seccomp kills any call the walk
+/// does not make.
 fn confine(root: linux.fd_t) !void {
     try sandbox.keepOnly(1 << cap_dac_override | 1 << cap_fowner);
     try sandbox.landlock(&.{.{
@@ -308,9 +293,9 @@ fn confine(root: linux.fd_t) !void {
 
 // --- the rest ----------------------------------------------------------------
 
-/// word's filesystem, from the mount broker. It refuses a filesystem
-/// another holds (slot-keep holds GRUB's a moment, at commit): once more,
-/// a second later.
+/// ask mounts word's filesystem through the mount broker. If another
+/// asker holds it (slot-keep holds GRUB's briefly at commit), it retries
+/// once a second later.
 fn ask(word: broker.Word) broker.Held {
     for (0..2) |i| {
         if (broker.ask(word)) |h| return h else |err| {
@@ -326,7 +311,7 @@ fn ask(word: broker.Word) broker.Held {
     unreachable;
 }
 
-/// The broker's mount at dir, opened to act on.
+/// openMount opens the broker's mount at dir as a directory.
 fn openMount(dir: []const u8) ?i32 {
     var buf: [128]u8 = undefined;
     const z = std.mem.print(&buf, "{s}\x00", .{dir}) catch return null;
@@ -339,7 +324,7 @@ fn openMount(dir: []const u8) ?i32 {
     return @intCast(rc);
 }
 
-/// path, from the top of the filesystem dir is the top of, opened through
+/// openBeneath opens path relative to dir (a leading / means dir), through
 /// no symlink and never above dir (openat2).
 fn openBeneath(dir: i32, path: []const u8, flags: linux.O) ?i32 {
     var buf: [512]u8 = undefined;
@@ -367,9 +352,9 @@ fn openBeneath(dir: i32, path: []const u8, flags: linux.O) ?i32 {
     return @intCast(rc);
 }
 
-/// GRUB's environment block, at path on the filesystem mounted at dir: ""
-/// if it is not there, is reached through a link, or is larger than buf
-/// (GRUB's is 1 KiB). Never blocking, should it be a FIFO.
+/// readBlock returns GRUB's environment block at path on the filesystem at
+/// dir, or "" if it is missing, reached through a link, or larger than buf
+/// (GRUB's is 1 KiB). It opens non-blocking in case it is a FIFO.
 fn readBlock(dir: []const u8, path: []const u8, buf: []u8) []const u8 {
     const d = openMount(dir) orelse return "";
     defer _ = linux.close(d);
@@ -389,8 +374,9 @@ fn readBlock(dir: []const u8, path: []const u8, buf: []u8) []const u8 {
     return "";
 }
 
-/// The filesystem at dir hands its free blocks back to the disk (FITRIM):
-/// false where the filesystem or the disk cannot.
+/// trim hands the free blocks of the filesystem at dir back to the disk
+/// (FITRIM), so a thin cloud volume no longer holds them. It returns false
+/// if the filesystem or the disk cannot.
 fn trim(dir: []const u8) bool {
     const fd = openMount(dir) orelse return false;
     defer _ = linux.close(fd);
@@ -400,7 +386,8 @@ fn trim(dir: []const u8) bool {
     return linux.errno(linux.ioctl(fd, FITRIM, @intFromPtr(&range))) == .SUCCESS;
 }
 
-/// path, read to its end: procfs reports a size of 0, so not readFileAlloc.
+/// readAll returns path's contents, up to 1 MiB. It streams because procfs
+/// reports a size of 0.
 fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     var f = Dir.cwd().openFile(io, path, .{}) catch return "";
     defer f.close(io);
@@ -409,9 +396,9 @@ fn readAll(io: Io, gpa: Allocator, path: []const u8) []const u8 {
     return r.interface.allocRemaining(gpa, .limited(1 << 20)) catch "";
 }
 
-/// One line on stdout, the console log. The names in it are the distro's,
-/// which whoever wrote that disk chose: each control byte becomes a "?",
-/// so none can carry an escape sequence or a false line to the console.
+/// say writes one line to stdout, the console log. Names in it come from
+/// the distro's disk, so each control byte becomes "?", and none can carry
+/// an escape sequence or a false line to the console.
 fn say(comptime fmt: []const u8, args: anytype) void {
     var buf: [1024]u8 = undefined;
     const line = std.mem.print(&buf, "bite-cleanup: " ++ fmt ++ "\n", args) catch return;
@@ -445,7 +432,7 @@ test isCommitted {
     try testing.expect(!isCommitted(""));
 }
 
-/// The command line bite leaves, as main reads it.
+/// bitten parses a command line bite leaves, as main does.
 fn bitten(text: []const u8) !Bitten {
     var refused: cmdline.Failure = .{};
     const c = cmdline.parse(text, &refused) orelse return error.Refused;

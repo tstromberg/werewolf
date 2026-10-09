@@ -6,16 +6,28 @@ boot a custom image. Once werewolf has committed, `bite-cleanup`, a Zig
 program in werewolf, deletes the distro.
 
 ```sh
+sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/werewolf-linux/werewolf/main/bite)" bite -i
+                                        # the latest prod-ssh release: take over, look, ask to reboot
 make bite-me                            # on the VM: build, take over, look, reboot
 make FORM=prod slot                     # build/<arch>/prod/slot/
-sudo ./bite -n DIR                      # check, and show the plan
-sudo ./bite -i [--config X] DIR         # take over, look inside, ask to reboot
-sudo ./bite --reboot [--config X] DIR   # take over, and reboot into werewolf
+sudo ./bite -n [DIR]                    # check, and show the plan
+sudo ./bite -i [--config X] [DIR]       # take over, look inside, ask to reboot
+sudo ./bite --reboot [--config X] [DIR] # take over, and reboot into werewolf
 sudo ./bite --undo                      # from the distro: remove werewolf
 bite-cleanup [-n]                       # in werewolf, after commit: delete the distro
 ```
 
 DIR holds a slot (*Slots*, below) of any form.
+
+**Without DIR, bite downloads the latest `prod-ssh` release** for the
+machine's architecture. Its manifest must verify against the release key
+(`release/image.pub`; bite carries a copy, and `make lint` keeps the two
+identical), and every file must match the manifest's sha256, or bite stops
+before it changes anything. It needs `openssl`, `sha256sum`, and `curl` or
+`wget`. `prod-ssh` lets in security keys alone (`sk-ssh-ed25519`,
+`sk-ecdsa-sha2-nistp256`), so bite refuses when the keys it would carry over
+hold none; `--config DIR` with an `authorized_keys` supplies one. Pass the
+script to `sh -c` rather than piping it, so `-i` can still prompt.
 
 **`make bite-me` does it all on the VM.** Run in a clone of this
 repository, it builds `prod-ssh`'s slot, the form that can still be

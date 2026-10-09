@@ -1,5 +1,5 @@
-//! init's network: the command line's address, or the config tar's, or
-//! DHCP's, and router advertisements limited to what they must give.
+//! init's network phase: a static address from the command line or the
+//! config tar, else DHCP, with IPv6 router advertisements limited.
 
 const std = @import("std");
 const network_file = @import("network");
@@ -14,13 +14,10 @@ const say = init.say;
 const trim = init.trim;
 const writeFile = init.writeFile;
 
-/// One address: the command line's, or else the config tar's network
-/// file's, or else, in forms built on dhcp, the network's DHCP server's.
-/// A static address is for machines whose provider gives none by DHCP,
-/// or which bite took over and so keep the victim's; werewolf's net
-/// (cmd/iface-up/iface-up.zig) applies it. DHCP is werewolf's
-/// own client (cmd/dhcp-client/dhcp-client.zig), which applies the lease, logs it, and
-/// keeps the resolvers in its own directory; its renewal starts before fence.
+/// network brings up lo and one NIC. iface-up applies a static address,
+/// from the command line or else the config tar's network file; it is for
+/// providers without DHCP and for machines bite took over. Otherwise, if
+/// the form has it, dhcp-client gets a lease; init starts its renewal later.
 pub fn network(m: *Machine) void {
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
     const nic = pickNic(m);
@@ -43,11 +40,9 @@ pub fn network(m: *Machine) void {
             else
                 say("network: {s} {s} refused", .{ nic, c.ip });
         }
-        // Where /etc/resolv.conf leads, and DHCP's client writes when there
-        // is no static address: a file, since no link under /run is
-        // followed (nosymfollow). The resolver is checked here, where it
-        // is written, whichever way it came: the config tar's was parsed
-        // by lib/network.zig, the command line's by no one.
+        // /etc/resolv.conf links here; it must be a file, since /run is
+        // nosymfollow. Check the resolver here because nothing checked the
+        // command line's (lib/network.zig checked the config tar's).
         const dns_ok = if (network_file.ip4(c.dns)) |d| network_file.usable(d) else |_| false;
         if (c.dns.len > 0 and !dns_ok) {
             say("network: dns {s} refused: not a usable IPv4 address", .{c.dns});
@@ -76,12 +71,10 @@ pub fn network(m: *Machine) void {
     }
 }
 
-/// The static address, and where it came from: the command line's
-/// werewolf.ip, or else the config tar's network file, each checked as
-/// howl pack checks it (lib/network.zig; stage0 checked the command line's
-/// with lib/cmdline.zig, by the same rules). The command line wins,
-/// since whoever set it holds the boot; a file refused is said and
-/// left, as if absent.
+/// staticNetwork returns the static address and sets from to its source:
+/// werewolf.ip, or else the config tar's network file (checked by
+/// lib/network.zig). The command line wins, since whoever set it controls
+/// the boot. A refused file is logged and treated as absent.
 fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
     const has_file = exists("/run/config/network");
     if (m.cmd.ip.len > 0) {
@@ -102,13 +95,10 @@ fn staticNetwork(m: *Machine, from: *[]const u8) network_file.Network {
     return n;
 }
 
-/// The NIC: the one werewolf.mac names, or else the first but lo.
-/// IPv6 is on, and router advertisements are how most networks give it a
-/// route, so they are taken, but on the machine's NIC alone, before it
-/// is up, and only for what they must give: a rogue router on the same
-/// network cannot rank itself above the real one, add a more specific
-/// route to steal one destination's traffic, or flood the NIC with
-/// addresses. Interfaces made later (default) take none.
+/// routerAdvertisements accepts IPv6 router advertisements only on nic, set
+/// before it is up, and ignores their router preference and route options.
+/// A rogue router then cannot rank itself above the real one, add a more
+/// specific route to steal traffic, or flood the NIC with addresses.
 fn routerAdvertisements(m: *Machine, nic: []const u8) void {
     var all = true;
     for (m.list("/proc/sys/net/ipv6/conf")) |c| {
@@ -120,13 +110,15 @@ fn routerAdvertisements(m: *Machine, nic: []const u8) void {
         }) |kv| {
             if (!writeFile(m.fmtZ("{s}/{s}", .{ d, kv[0] }), kv[1])) all = false;
         }
-        // all's accept_ra governs no interface; each has its own.
+        // "all"'s accept_ra governs no interface; each has its own.
         if (!std.mem.eql(u8, c, nic) and !std.mem.eql(u8, c, "all") and
             !writeFile(m.fmtZ("{s}/accept_ra", .{d}), "0")) all = false;
     }
     if (!all) say("some IPv6 router advertisement limits were not applied", .{});
 }
 
+/// pickNic returns the NIC werewolf.mac names, or else the first that is not
+/// lo, or "".
 fn pickNic(m: *Machine) []const u8 {
     for (m.list("/sys/class/net")) |n| {
         if (std.mem.eql(u8, n, "lo")) continue;

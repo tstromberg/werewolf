@@ -1,11 +1,5 @@
-//! QEMU: a werewolf machine kept here, in the background (make run with
-//! RUN_DIR), where no likelier engine is (Lima, bhyve, Firecracker), or
-//! as --on qemu asks. Its directory, build/machines/NAME, holds its
-//! data disk, its config tar, its console on console.sock and in
-//! console.log, QEMU's monitor on monitor.sock, its pid in qemu.pid, and
-//! the ports this host reaches it by in machine. It has user-mode
-//! networking, so it needs no root: ssh and the form's last port are
-//! forwarded from this host's loopback.
+//! qemu manages a machine that QEMU runs in the background, the engine of
+//! last resort. User-mode networking needs no root. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -15,7 +9,7 @@ const net = Io.net;
 const posix = std.posix;
 const howl = @import("howl.zig");
 
-/// QEMU's pid, while the machine runs.
+/// running returns QEMU's pid from d/qemu.pid, or null if it is not running.
 pub fn running(io: Io, gpa: Allocator, d: []const u8) ?posix.pid_t {
     const path = gpa.print("{s}/qemu.pid", .{d}) catch return null;
     const text = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64)) catch return null;
@@ -24,11 +18,10 @@ pub fn running(io: Io, gpa: Allocator, d: []const u8) ?posix.pid_t {
     return pid;
 }
 
-/// Stop it, as Ctrl-a x does: QEMU's monitor told to quit, or, if that
-/// does not answer, a signal. Whether one was running. A monitor that
-/// is not there, or that nothing listens on, means no QEMU of this
-/// machine's: its pid is a stale one, maybe another process's by now,
-/// and is sent nothing.
+/// stop tells QEMU's monitor to quit, then sends TERM and KILL if it does
+/// not, and reports whether a QEMU was running. If the monitor socket is
+/// gone or refuses, the pid is stale and may belong to another process now,
+/// so it is sent nothing.
 pub fn stop(io: Io, gpa: Allocator, d: []const u8) !bool {
     const pid = running(io, gpa, d) orelse return false;
     const ua = try net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{d}));
@@ -55,8 +48,8 @@ pub fn stop(io: Io, gpa: Allocator, d: []const u8) !bool {
     return true;
 }
 
-/// A port on this host's loopback that nothing listens on: want, or, if
-/// something does, one the kernel picks.
+/// freePort returns want if nothing listens on it on loopback, else a free
+/// port the kernel picks.
 pub fn freePort(io: Io, want: u16) !u16 {
     var a: net.IpAddress = .{ .ip4 = .loopback(want) };
     if (a.listen(io, .{})) |srv| {
@@ -70,7 +63,7 @@ pub fn freePort(io: Io, want: u16) !u16 {
     return s.socket.address.getPort();
 }
 
-/// The value of key in the machine's record, its KEY VALUE lines.
+/// record returns the value of key in d/machine, a file of KEY VALUE lines.
 pub fn record(io: Io, gpa: Allocator, d: []const u8, key: []const u8) ?[]const u8 {
     const path = gpa.print("{s}/machine", .{d}) catch return null;
     const text = Dir.cwd().readFileAlloc(io, path, gpa, .limited(1024)) catch return null;
@@ -82,11 +75,10 @@ pub fn record(io: Io, gpa: Allocator, d: []const u8, key: []const u8) ?[]const u
     return null;
 }
 
-/// path, a sparse disk of size bytes, unless it is there already: a
-/// machine's /data, which outlives its restarts.
+/// disk creates path as a sparse file of size bytes for the machine's /data.
+/// An existing disk is kept, so /data survives restarts.
 pub fn disk(io: Io, path: []const u8, size: u64) !void {
-    // Root's alone on the host: it is the machine's /data, its secrets
-    // and its database, in the clear unless a data key was given.
+    // Mode 0600: /data holds secrets, in the clear unless a data key was given.
     const f = Dir.cwd().createFile(io, path, .{
         .exclusive = true,
         .permissions = .fromMode(0o600),
@@ -98,14 +90,13 @@ pub fn disk(io: Io, path: []const u8, size: u64) !void {
     try f.setLength(io, size);
 }
 
-/// The machine's console, here: what it has said, then, on a terminal,
-/// the console itself, keys and all, until Ctrl-] leaves it running, or it
-/// stops.
+/// attach prints the console log's tail, then, on a terminal, connects to
+/// the live console until Ctrl-] detaches or the machine stops.
 pub fn attach(io: Io, gpa: Allocator, d: []const u8) !void {
     const out = Io.File.stdout();
     const log = try gpa.print("{s}/console.log", .{d});
     const text = Dir.cwd().readFileAlloc(io, log, gpa, .limited(64 << 20)) catch "";
-    // The last 64 KiB: the boot, and what followed.
+    // The last 64 KiB holds the boot and what followed.
     try out.writeStreamingAll(io, text[text.len -| (64 << 10)..]);
     const in = Io.File.stdin();
     if (!(in.isTty(io) catch false)) return;

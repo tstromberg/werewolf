@@ -8,14 +8,3 @@
 contents:
   packages:
     - oauth2-proxy
-
-accounts:
-  groups:
-    - groupname: oauth2-proxy
-      gid: 214
-  users:
-    - username: oauth2-proxy
-      uid: 214
-      gid: 214
-      homedir: /var/empty
-      shell: /sbin/nologin

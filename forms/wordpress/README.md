@@ -2,7 +2,7 @@
 
 The `wordpress` form is `php` with WordPress 7.1 in the image, on SQLite:
 one machine, no second server. It is the worked example of an application
-baked into a form ([forms.md](../../docs/forms.md#applications)).
+baked into a form ([forms.md](../../docs/forms.md#your-application)).
 
 | | |
 | --- | --- |
@@ -54,6 +54,9 @@ the file.
   logins, failures, role changes and password resets on the console.
 - With an `https` address, `FORCE_SSL_ADMIN` and secure cookies follow.
   Application passwords stay, over HTTPS only, as WordPress has them.
+- **Plugins that call an API** need a form of your own that adds
+  `connect php tcp/443 public` to its `net` and the hosts to
+  `WP_ACCESSIBLE_HOSTS` in `wp-config.php`.
 
 ## SQLite
 

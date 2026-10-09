@@ -1,26 +1,29 @@
 #!/usr/bin/env expect
 # boot NAME CHECKS LOG QEMU...
 #
-# Boot a werewolf image with the QEMU command given, which must set
+# boot runs a werewolf image under the QEMU command given, which must set
 # -no-reboot (so a panic ends the run) and -nographic (QEMU's monitor on the
-# console). Judge the machine's posture line, which its posture service
-# prints once the services settle: the checks that fail must be exactly
-# those in POSTURE_KNOWN (the form's weaknesses, and test/posture-known's
-# lines for every DEV=1 build and the architecture), no more and
-# no fewer. Then run each check in CHECKS (see test/checks) as root on the
-# console, which needs werewolf.debug=1 and a shell, and power the machine
-# off. A machine with no shell is judged from its console instead: CHECKS
-# is - (its posture line alone), or a file of console lines (seen NAME
-# REGEX, which must appear; unseen NAME REGEX, which must not; see
-# forms/demo/test/console), and QEMU ends from its monitor. A file may hold both,
-# for a machine with a shell whose services speak on the console
-# (test/checks-persist-again). Exit 0 only if it
-# booted, its posture and every check came out as expected, and, with a
-# shell, it shut down cleanly (or, with POWER_CUT set, lost its power).
+# console). It judges the posture line, which the posture service prints
+# once the services settle. The failing checks must be exactly those in
+# POSTURE_KNOWN: the form's weaknesses, plus test/posture-known's lines for
+# every DEV=1 build and for the architecture. Then boot runs each check in
+# CHECKS (see test/checks) as root on the console, which needs
+# werewolf.debug=1 and a shell, and powers the machine off.
+#
+# A machine with no shell is judged from its console instead. CHECKS is then
+# - (only the posture line) or a file of console lines: "seen NAME REGEX"
+# must appear and "unseen NAME REGEX" must not (see forms/demo/test/console).
+# QEMU is then stopped from its monitor. A file may hold both kinds, for a
+# machine with a shell whose services print to the console
+# (test/checks-persist-again).
+#
+# boot exits 0 only if the machine booted, its posture and every check came
+# out as expected, and, with a shell, it shut down cleanly (or, with
+# POWER_CUT set, lost its power).
 #
 # Nothing waits a fixed time: each step waits for what it needs to see, up
-# to a limit. Each check's output is fenced by a marker its own echo cannot
-# match, so the shell typing the command back is never mistaken for its
+# to a limit. Each check's output ends with a marker that the echoed command
+# cannot match, so the shell echoing the command is never mistaken for its
 # result. The whole console goes to LOG.
 
 if {[llength $argv] < 4} {
@@ -31,13 +34,13 @@ lassign $argv name checks log
 set qemu [lrange $argv 3 end]
 
 log_user 0
-# Opened here, unbuffered, so the console seen so far can be read back.
+# Open the log here, unbuffered, so the console seen so far can be read back.
 set log_chan [open $log w]
 fconfigure $log_chan -buffering none
 log_file -a -open $log_chan
 set failed 0
 
-# The host, first in the log, and in every failure.
+# Describe the host first in the log, and in every failure.
 set accel [lindex $qemu [expr {[lsearch -exact $qemu -accel] + 1}]]
 if {[lsearch -exact $qemu -accel] < 0} { set accel default }
 catch {exec uname -srm} uname
@@ -49,8 +52,8 @@ if {![info exists load]} { set load ? }
 set host "$uname; [lindex [split $qemu_version \n] 0]; accel $accel; $cpus CPUs; load $load"
 puts $log_chan "werewolf-check: host $host"
 
-# CHECKS' console lines (seen, unseen), judged first, and whether it has
-# shell checks (ok, gap) too, which need the console's shell.
+# Collect CHECKS' console lines (seen, unseen), which are judged first, and
+# note whether CHECKS has shell checks (ok, gap), which need the console's shell.
 set console {}
 set shell 0
 if {$checks ne "-"} {
@@ -72,10 +75,10 @@ proc say {status what {detail ""}} {
 	}
 }
 
-# What the machine was doing when it failed, from its console: the last
-# line of werewolf's own progress, and the first thing the kernel said was
-# wrong. With the host's stamp, so a failure on one host and not another
-# shows why at a glance.
+# diagnosis says what the machine was doing when it failed: the last line of
+# werewolf's progress, and the first kernel message of each known kind of
+# error. It adds the host's description, so a failure on one host but not
+# another shows why at a glance.
 proc diagnosis {} {
 	global log host
 	set f [open $log]
@@ -100,9 +103,9 @@ proc diagnosis {} {
 	return $d
 }
 
-# A machine that stopped answering: the state of each virtual CPU, from
-# QEMU's monitor, into the log (a CPU parked in WFI that never wakes is the
-# hypervisor's fault, not the guest's), then QEMU ends.
+# cpu_dump logs the state of each virtual CPU from QEMU's monitor, for a
+# machine that stopped answering, then ends QEMU. A CPU parked in WFI that
+# never wakes is the hypervisor's fault, not the guest's.
 proc cpu_dump {} {
 	send "\001c"
 	expect -timeout 10 "(qemu)" {} timeout { return }
@@ -121,14 +124,14 @@ proc give_up {what {hung 0}} {
 	exit 1
 }
 
-# TCG, without KVM or HVF, boots in tens of seconds, not one. BOOT_TIMEOUT
-# shortens the wait, to see a hang sooner when debugging one.
+# TCG, without KVM or HVF, boots in tens of seconds, not one. Set BOOT_TIMEOUT
+# lower to see a hang sooner when debugging one.
 set timeout [expr {[info exists env(BOOT_TIMEOUT)] ? $env(BOOT_TIMEOUT) : 300}]
 spawn -noecho {*}$qemu
 
 proc panicked {} {
 	global expect_out
-	# The rest of the panic, for the log, then say why.
+	# Log the rest of the panic, then say why.
 	set why $expect_out(0,string)
 	expect -timeout 2 eof {} timeout {}
 	give_up "boot: $why"
@@ -141,20 +144,20 @@ expect {
 	eof { give_up "boot: QEMU exited" }
 }
 
-# Before the shell, so no check's output can swallow the line. After the
-# handover the console carries the kernel's notices too (cmd/init), and a
-# record can land inside the posture line: "posture: fail= p[ 8.48] audit:
-# ...\nass=82". So what the console says is gathered as it comes, whole
-# kernel records are taken out of it, and the line is looked for in what
-# remains. A panic is a kernel record, so it is looked for before.
+# Read the posture line before starting the shell, so no check's output can
+# swallow it. After the handover the console also carries the kernel's
+# messages (cmd/init), and one can land inside the posture line:
+# "posture: fail= p[ 8.48] audit: ...\nass=82". So collect the console as it
+# comes, remove whole kernel records, and look for the line in the rest.
+# A panic is a kernel record, so look for it first.
 #
-# On x86_64 under KVM, a boot whose posture line a record cut this way has
-# every time stopped there: the rest of the line reached the console only
-# once the monitor was spoken to, 300 s on, as if the UART's transmitter
-# waited on an interrupt it never got (every such log; none passed). A
-# byte sent to the machine raises its receive interrupt, which also
-# drains the transmitter, so one is sent after a while with no line, and
-# the log says so: a boot that needs it is still a boot to look into.
+# On x86_64 under KVM, every boot whose posture line was cut this way
+# stalled there. The rest of the line reached the console only when the
+# monitor was used, 300 s later, as if the UART's transmitter waited for an
+# interrupt it never got (every such log; none passed). A byte sent to the
+# machine raises its receive interrupt, which also drains the transmitter.
+# So after 20 s with no line, send one and log it: a boot that needs it
+# still needs looking into.
 set seen ""
 set deadline [expr {[clock seconds] + $timeout}]
 set poke [expr {[clock seconds] + 20}]
@@ -178,12 +181,12 @@ while 1 {
 	}
 	regsub -all {\[ *[0-9]+\.[0-9]+\] [^\n]*\n} $seen {} clean
 	if {[regexp {posture: fail=([^ ]*) pass=([0-9]+) skip=([0-9]+) } $clean -> got passed]} break
-	# The tail is enough: the line itself, and a record cut short at its end.
+	# Keep only the tail: the line itself and any record cut short at its end.
 	set seen [string range $seen end-65535 end]
 }
 set known [lsort -unique [regexp -all -inline {[^\s,]+} [expr {[info exists env(POSTURE_KNOWN)] ? $env(POSTURE_KNOWN) : ""}]]]
 set got [lsort -unique [split $got ,]]
-# ?ID: may fail or not, as the host decides (test/posture-known).
+# A ?ID may fail or pass, as the host decides (test/posture-known).
 set maybe {}
 set sure {}
 foreach id $known {
@@ -206,20 +209,19 @@ if {$passed < 20} {
 	say ok posture
 }
 
-# Run a command on the host while the console is read, so QEMU, whose
-# console would otherwise fill and stall it, keeps the machine answering.
-# The command runs in the background, its output and exit status to files,
-# and only the console is watched: one process to expect from, so the end
-# of the command is never taken for the end of QEMU. Returns its exit
-# status and output.
+# host runs cmd on the host while reading the console, because QEMU stalls
+# the machine when nobody reads its console. The command runs in the
+# background with its output and exit status going to files, and only the
+# console is watched, so the end of the command is never taken for the end
+# of QEMU. host returns the exit status and output.
 proc host {cmd} {
 	global log
 	set out $log.host
 	file delete -force $out $out.rc $out.rc.tmp
 	set quoted ""
 	foreach a $cmd { append quoted " '" [string map {' '\''} $a] "'" }
-	# The status is renamed into place, so $out.rc exists only once it is
-	# whole: a redirection makes the file before echo writes to it.
+	# Rename the status into place, so $out.rc exists only once it is
+	# complete: a redirection creates the file before echo writes to it.
 	exec sh -c "$quoted </dev/null >'$out' 2>&1; echo \$? >'$out.rc.tmp'; mv '$out.rc.tmp' '$out.rc'" &
 	set deadline [expr {[clock seconds] + 60}]
 	while {![file exists $out.rc] && [clock seconds] < $deadline} {
@@ -246,28 +248,29 @@ proc host {cmd} {
 	return [list $status $text]
 }
 
-# A machine that serves ssh, from the host, as an operator would: root's key
-# from the config logs in; a session cannot forward a port, which would
-# carry traffic past fence; and passwords are not offered at all. In that
-# order, since sshd holds a failed login against its source for a while.
-# Root's key is a security key's, made with the software one (make's
-# TEST_SK); where sshd takes security keys alone (the form does not excuse
-# network-ssh-security-keys), root's other key, a file, is refused last,
-# with publickey the only method left.
+# For a machine that serves ssh, test from the host as an operator would:
+# root's key from the config logs in; a session cannot forward a port, which
+# would carry traffic past fence; and passwords are not offered at all. The
+# order matters, because sshd holds a failed login against its source for a
+# while. Root's key is a security key, made with the software provider
+# (make's TEST_SK). Where sshd accepts only security keys (the form does not
+# declare the network-ssh-security-keys weakness), root's other key, a file,
+# is tried last and must be refused, with publickey the only method offered.
 if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	set level ERROR
 	if {[info exists env(SSH_MODE)] && ([string match "bastion*" $env(SSH_MODE)] || $env(SSH_MODE) eq "sftpgo" || $env(SSH_MODE) eq "gitea")} { set level DEBUG1 }
 	set ssh [list ssh -F /dev/null -p $env(SSH_PORT) -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 		-o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=$level -o IdentitiesOnly=yes]
 	set key [list -i $env(SSH_KEY)]
-	# sshd's login: the security key's, where make made one.
+	# Log in with the security key, if make made one.
 	set login $key
 	if {[info exists env(SSH_SK_KEY)] && [file exists $env(SSH_SK_KEY)]} {
 		lappend ssh -o SecurityKeyProvider=$env(SSH_SK_PROVIDER)
 		set login [list -i $env(SSH_SK_KEY)]
 	}
 	set sk_only [expr {[lsearch -regexp $known {^\??network-ssh-security-keys$}] < 0}]
-	# The key file refused, as USER, where sshd takes security keys alone.
+	# refused checks that sshd refuses the key file for user, where sshd
+	# accepts only security keys.
 	proc refused {check user args} {
 		global ssh key failed
 		lassign [host [list {*}$ssh {*}$key {*}$args $user@127.0.0.1 true]] status out
@@ -279,18 +282,18 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 		}
 	}
 	if {[info exists env(SSH_MODE)] && $env(SSH_MODE) eq "gitea"} {
-		# A git user, from the host: a repository made and the run's key
-		# added through the API as the administrator gitea-init made;
-		# cloned over Gitea's SSH, a commit pushed, and the branch there;
-		# a command that is not git's, a remote forward, a password and a
-		# non-post-quantum exchange refused.
+		# Test a git user from the host. Make a repository and add the run's
+		# key through the API, as the administrator gitea-init made. Clone over
+		# Gitea's SSH, push a commit, and check the branch is there. A non-git
+		# command, a remote forward, a password and a non-post-quantum key
+		# exchange must be refused.
 		set api http://127.0.0.1:$env(GITEA_PORT)/api/v1
 		set auth admin:werewolf-check-pass
 		set in 0
 		for {set i 0} {$i < 60 && !$in} {incr i} {
 			lassign [host [list curl -sS -m 10 -u $auth -H {Content-Type: application/json} \
 				-d {{"name":"check","private":true,"default_branch":"main"}} $api/user/repos]] status out
-			# A second boot finds the first's repository kept on /data.
+			# A second boot finds the first boot's repository kept on /data.
 			if {$status == 0 && ([string match "*\"full_name\":\"admin/check\"*" $out] ||
 				[string match "*same name already exists*" $out])} { set in 1 } else { after 1000 }
 		}
@@ -334,9 +337,9 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 			say ok gitea-keys-only
 		} else { say FAIL gitea-keys-only $out; incr failed }
 	} elseif {[info exists env(SSH_MODE)] && $env(SSH_MODE) eq "sftpgo"} {
-		# An SFTP user, from the host: files go up and come back as they
-		# went; a shell or command is refused; so are a password, a remote
-		# forward, and a key exchange that is not post-quantum.
+		# Test an SFTP user from the host. Files must go up and come back
+		# unchanged. A shell or command, a password, a remote forward and a
+		# non-post-quantum key exchange must be refused.
 		set up [file join [file dirname $log] sftpgo-upload]
 		set f [open $up w]; puts $f "werewolf check"; close $f
 		set batch [file join [file dirname $log] sftpgo-batch]
@@ -365,9 +368,9 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 			say ok sftp-keys-only
 		} else { say FAIL sftp-keys-only $out; incr failed }
 	} elseif {[info exists env(SSH_MODE)] && [string match "bastion*" $env(SSH_MODE)]} {
-		# make check-bastion's form: root's security key is user check's,
-		# who reaches 127.0.0.1:22 alone; 127.0.0.2:22 is user narrow's,
-		# in the bastion's PermitOpen, never check's.
+		# make check-bastion's form: root's security key belongs to user
+		# check, who may reach only 127.0.0.1:22. 127.0.0.2:22 is in the
+		# bastion's PermitOpen for user narrow, never for check.
 		lassign [host [list {*}$ssh {*}$login -W 127.0.0.1:22 bastion@127.0.0.1]] status out
 		if {$status == 0 && [string match "*SSH-2.0-OpenSSH*" $out]} {
 			say ok bastion-permitted-destination
@@ -389,7 +392,7 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 	set in 0
 	for {set i 0} {$i < 30 && !$in} {incr i} {
 		lassign [host [list {*}$ssh {*}$login root@127.0.0.1 id -u]] status out
-		# The last line: ssh may say first that it asked for a touch.
+		# Take the last line: ssh may first say that it asked for a touch.
 		if {$status == 0 && [lindex [split [string trim $out] \n] end] eq "0"} { set in 1 } else { after 1000 }
 	}
 	if {$in} { say ok ssh-login } else { say FAIL ssh-login "root's key did not log in:\n$out"; incr failed }
@@ -401,7 +404,7 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 		incr failed
 	}
 	if {$sk_only} {
-		# One failed login, not two: sshd holds the first against the second.
+		# Try only one failed login: sshd would hold it against a second.
 		refused ssh-security-keys-only root
 	} else {
 		lassign [host [list {*}$ssh -o PubkeyAuthentication=no -o PreferredAuthentications=password,keyboard-interactive root@127.0.0.1 true]] status out
@@ -415,8 +418,8 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 }
 }
 
-# By what the machine's console says: each seen line, waited
-# for up to five minutes while the console is read, and no unseen line.
+# Judge the console: wait up to five minutes, reading the console, for every
+# seen line. No unseen line may appear.
 if {[llength $console]} {
 	set deadline [expr {[clock seconds] + 300}]
 	while 1 {
@@ -455,10 +458,11 @@ if {[llength $console]} {
 }
 
 if {!$shell} {
-	# No shell to power off from: the power button, as a hypervisor presses
-	# it (ACPI on x86_64; on arm64 the device tree's GPIO line, which
-	# power-button reads itself). QEMU's monitor (Ctrl-A c) presses it, and
-	# the machine must stop its services and power off, which ends QEMU.
+	# With no shell to power off from, press the power button as a
+	# hypervisor does: ACPI on x86_64, and on arm64 the device tree's GPIO
+	# line, which power-button reads itself. QEMU's monitor (Ctrl-A c)
+	# presses it. The machine must stop its services and power off, which
+	# ends QEMU.
 	send "\001c"
 	expect -timeout 10 "(qemu)" {} timeout { give_up "shutdown: no QEMU monitor" }
 	send "system_powerdown\r"
@@ -516,8 +520,8 @@ while {[gets $f line] >= 0} {
 close $f
 
 if {[info exists env(POWER_CUT)] && $env(POWER_CUT) ne ""} {
-	# POWER_CUT: the power goes, as a reset or a host's hard stop takes it,
-	# for what the next boot must find (QEMU's monitor, Ctrl-A c).
+	# POWER_CUT cuts the power, as a reset or a host's hard stop does, to
+	# test what the next boot finds. QEMU's monitor (Ctrl-A c) quits.
 	send "\001c"
 	expect -timeout 10 "(qemu)" {} timeout { give_up "power cut: no QEMU monitor" }
 	send "quit\r"

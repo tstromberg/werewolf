@@ -1,7 +1,6 @@
-//! verity IMAGE PARAMS: appends IMAGE's dm-verity hash tree to it, and
-//! writes the line stage0 opens it with to PARAMS (lib/verity.zig). The
-//! build runs it on each root.erofs, on the build machine, which needs no
-//! veritysetup and gives the same tree on macOS as on Linux.
+//! verity appends a dm-verity hash tree to an erofs image and writes the
+//! parameters stage0 needs to open it. It runs on the build host, so the
+//! build needs no veritysetup. See README.md.
 
 const std = @import("std");
 const Io = std.Io;

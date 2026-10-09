@@ -11,14 +11,3 @@
 contents:
   packages:
     - minio
-
-accounts:
-  groups:
-    - groupname: minio
-      gid: 217
-  users:
-    - username: minio
-      uid: 217
-      gid: 217
-      homedir: /var/empty
-      shell: /sbin/nologin

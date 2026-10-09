@@ -7,7 +7,7 @@ status page.
 | --- | --- |
 | Listens | tcp/8080, the page and its API, read-only, with no login of its own: `caddy`, `oauth2-proxy` or a tailnet in front to show it beyond the machine |
 | Sends | HTTPS, HTTP, DNS and ping to what it watches |
-| Runs as | `gatus` (uid 211), leashed |
+| Runs as | `gatus` (a uid of its own, its name's hash), leashed |
 | Keeps | its history in `/data/svc/gatus/data.db` |
 | Settings | `target` (a URL, required): what it watches, 60 s apart, for a 200 within 2 s |
 

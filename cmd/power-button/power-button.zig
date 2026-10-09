@@ -1,29 +1,6 @@
-//! power-button: turn the hypervisor's power-button press into a clean poweroff.
-//!
-//! The press reaches the machine as an input event on /dev/input/event*:
-//! struct input_event, 24 bytes on a 64-bit kernel, a time then type, code
-//! and value. EV_KEY (1), KEY_POWER (116), pressed (1) asks runit, PID 1,
-//! to stop the machine and power it off, as poweroff does. Every device is
-//! watched at once with poll(2), each through one open descriptor, so the
-//! kernel's queue holds events between reads.
-//!
-//! The ACPI button (x86, and arm64 servers that boot with ACPI) arrives this
-//! way. arm64 machines described by a device tree (QEMU's virt, Apple's VZ,
-//! which Lima's `limactl stop` presses) wire it to a GPIO line, which the
-//! tree's gpio-keys node names, for a driver Alpine's linux-virt does not
-//! build. So power-button reads the line itself: the gpio-keys entry whose
-//! code is KEY_POWER gives the controller, by phandle, the line and its
-//! polarity; the controller (a PL061, gpio-pl061 from minimal.modules) is
-//! /dev/gpiochipN, and the line, requested for its rising edge, a
-//! descriptor that reads one event per press. fence lets GPIO chips, as it
-//! lets terminals, take the ioctl that requests it.
-//!
-//! With neither, the service parks itself. Once every descriptor is open it
-//! keeps no capability (lib/sandbox.zig): powering off is poweroff's, which
-//! needs only root's uid, to tell runit, PID 1, to stop. A device that goes
-//! away (unplugged from the VM) is let go and said, not polled again.
-//!
-//! runsv runs it as /etc/sv/power-button/run, with no arguments and no shell.
+//! power-button turns the hypervisor's power-button press into a clean
+//! poweroff. It watches input devices and, on device-tree arm64, the GPIO
+//! power line. See README.md.
 
 const std = @import("std");
 const sandbox = @import("sandbox");
@@ -96,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
             n += 1;
         }
     } else |_| {}
-    // Where the tree wires the key to a GPIO line, that line too, last.
+    // On device-tree arm64 the key is a GPIO line. It goes last, at index gpio.
     var gpio: ?usize = null;
     if (n < max_devices) if (gpioPowerLine(io, init.arena.allocator())) |fd| {
         fds[n] = .{ .fd = fd, .events = linux.POLL.IN, .revents = 0 };
@@ -111,6 +88,8 @@ pub fn main(init: std.process.Init) !void {
         if (inputs == 1) "" else "s",
         if (gpio != null) " and the GPIO power key" else "",
     });
+    // Every descriptor is open. poweroff needs only root's uid, so keep no
+    // capability while waiting.
     try sandbox.keepOnly(0);
 
     var ev: [event_size]u8 = undefined;
@@ -123,8 +102,8 @@ pub fn main(init: std.process.Init) !void {
             const gone = p.revents & (linux.POLL.HUP | linux.POLL.ERR | linux.POLL.NVAL) != 0;
             const readable = p.revents & linux.POLL.IN != 0;
             p.revents = 0;
-            // Gone, and nothing left to read: let it go, or poll returns
-            // at once for it, forever. poll skips a negative descriptor.
+            // Close a vanished device once it is drained, or poll returns
+            // at once for it forever. poll skips a negative descriptor.
             if (gone and !readable) {
                 say(io, "{s} is gone", .{name});
                 _ = linux.close(p.fd);
@@ -152,9 +131,9 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-/// The GPIO line a device tree's gpio-keys wires KEY_POWER to, requested
-/// for its rising edge (a press, with an active-low line inverted), as the
-/// descriptor its events are read from; null, said why, if there is none.
+/// gpioPowerLine requests the GPIO line that the device tree's gpio-keys wires
+/// to KEY_POWER, for rising edges (a press; active-low lines are inverted).
+/// It returns the line's event descriptor, or null after logging why.
 fn gpioPowerLine(io: Io, gpa: std.mem.Allocator) ?i32 {
     const key = powerKey(io, gpa) orelse return null;
     const chip = chipFor(io, gpa, key.phandle) orelse {
@@ -190,9 +169,9 @@ fn gpioPowerLine(io: Io, gpa: std.mem.Allocator) ?i32 {
 
 const PowerKey = struct { phandle: u32, line: u32, active_low: bool };
 
-/// The gpio-keys entry for KEY_POWER: its gpios property, three cells of
-/// big-endian u32, the controller's phandle, the line and its flags, of
-/// which bit 0 is GPIO_ACTIVE_LOW.
+/// powerKey finds the gpio-keys entry for KEY_POWER and parses its gpios
+/// property: three big-endian u32 cells, the controller's phandle, the line,
+/// and flags whose bit 0 is GPIO_ACTIVE_LOW.
 fn powerKey(io: Io, gpa: std.mem.Allocator) ?PowerKey {
     var keys = Io.Dir.cwd().openDir(
         io,
@@ -221,8 +200,8 @@ fn parseGpios(cells: []const u8) ?PowerKey {
     };
 }
 
-/// The gpiochip whose device-tree node has phandle: /sys/bus/gpio/devices,
-/// each chip's of_node/phandle.
+/// chipFor returns the name of the gpiochip in /sys/bus/gpio/devices whose
+/// of_node/phandle is phandle.
 fn chipFor(io: Io, gpa: std.mem.Allocator, phandle: u32) ?[]const u8 {
     var chips = Io.Dir.cwd().openDir(
         io,
@@ -241,7 +220,7 @@ fn chipFor(io: Io, gpa: std.mem.Allocator, phandle: u32) ?[]const u8 {
     return null;
 }
 
-/// dir/name/file, into buf.
+/// readIn reads dir/name/file into buf.
 fn readIn(
     io: Io,
     dir: Io.Dir,
@@ -257,8 +236,8 @@ fn readIn(
     return buf[0..n];
 }
 
-/// Whether an input_event is the power key going down: type EV_KEY (1),
-/// code KEY_POWER (116), value 1, after the 16 bytes of its time.
+/// isPowerPress reports whether a 64-bit struct input_event is the power key
+/// going down: after a 16-byte time, type EV_KEY (1), code KEY_POWER, value 1.
 fn isPowerPress(ev: [event_size]u8) bool {
     const kind = std.mem.readInt(u16, ev[16..18], .little);
     const code = std.mem.readInt(u16, ev[18..20], .little);
@@ -266,7 +245,8 @@ fn isPowerPress(ev: [event_size]u8) bool {
     return kind == 1 and code == key_power and value == 1;
 }
 
-/// Down, as a service with nothing to do: runsv will not restart it.
+/// park logs why and marks the service down, so runsv does not restart a
+/// service with nothing to watch.
 fn park(io: Io, why: []const u8) noreturn {
     say(io, "{s}", .{why});
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });

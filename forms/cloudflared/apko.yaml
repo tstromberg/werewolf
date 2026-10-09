@@ -8,14 +8,3 @@
 contents:
   packages:
     - cloudflared
-
-accounts:
-  groups:
-    - groupname: cloudflared
-      gid: 213
-  users:
-    - username: cloudflared
-      uid: 213
-      gid: 213
-      homedir: /var/empty
-      shell: /sbin/nologin

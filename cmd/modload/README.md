@@ -2,22 +2,20 @@
 
 ## Summary
 
-Loads the form's kernel modules, in the order the build listed them, then
-closes the kernel's module loader for the life of the machine.
+modload loads the form's kernel modules, in the order the build listed
+them, then closes the kernel's module loader until the machine reboots.
 
 ## Background
 
 werewolf runs Alpine's kernel, whose drivers (virtio, NVMe, filesystems,
 dm-verity, a cloud's NIC) are modules. Each form names the ones it needs;
 the build resolves their dependencies, decompresses them (Alpine's kernel
-cannot), and lists them in `/usr/lib/modules/RELEASE/werewolf.modules`, on
-the verified, read-only root. stage0 runs it; init's run finds the loader
-closed already and says so. What only some machines need is tagged: a
-filesystem's own (Rocky's xfs, Fedora's btrfs, which bite leaves), listed
-`@xfs PATH`, loads only on a slot that is on it, and Hyper-V's disks,
-`@hyperv PATH`, only where the kernel found a VMBus: btrfs's raid6 alone
-timed itself for 0.17 s of every boot, and hv_storvsc spent 18 ms finding
-no VMBus.
+cannot), and lists them in `/usr/lib/modules/RELEASE/werewolf.modules` on
+the verified root. stage0 runs modload; init runs it again, finds the loader
+closed, and says so. Modules only some machines need are tagged: `@xfs` and
+`@btrfs` for a slot on Rocky's or Fedora's filesystem (bite keeps it),
+`@hyperv` for Hyper-V's disks, `@esp` for FAT. Tags save time: btrfs's raid6
+benchmark cost 0.17 s a boot, and hv_storvsc 18 ms finding no VMBus.
 
 ## Goals
 
@@ -47,15 +45,15 @@ no VMBus.
 4. **Pledge** (`lib/sandbox.zig`): every capability but CAP_SYS_MODULE
    gone, from the bounding set too, securebits locked; a seccomp filter of
    `finit_module`, `read`, `write`, `close` and exit, killing anything else.
-5. **Load** each by `finit_module` on its open file, so the kernel reads and
-   checks what is on disk, not a copy. A module already built in counts as
+5. **Load** each with `finit_module` on its open file, so the kernel reads
+   and checks what is on disk, not a copy. A built-in module counts as
    loaded; one whose hardware is absent (ENODEV, EOPNOTSUPP) as absent.
-   Untagged lines first; then, a line of stdin each, the tags stage0 names,
-   each tag's lines loaded as its line arrives: `hyperv` at once where
-   `/sys/bus/vmbus` is (the kernel registers it only on Hyper-V, and the
-   slot's disk may be behind it), then the filesystem stage0 found the slot
-   on while these loaded (`none` without a slot). Tagged lines no line
-   named are skipped; stdin ending with none named loads them all.
+   Untagged lines load first. Then stage0 names tags on stdin, one a line,
+   and each tag's lines load as it arrives: `hyperv` at once if
+   `/sys/bus/vmbus` exists (the slot's disk may sit behind it), `esp` with
+   `werewolf.esp`, then the filesystem stage0 found the slot on (`none`
+   without a slot). Tagged lines not named are skipped; if stdin ends with
+   no tag named, every line loads.
 6. **Close** the loader (`kernel.modules_disabled=1`) whatever happened,
    and read it back: the kernel's answer, not the write's, is reported.
 

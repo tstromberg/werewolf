@@ -82,8 +82,8 @@ with a hand-kept rule list and a log on disk that, when full, is meant to
 halt the machine.
 
 Some hardening has no runtime switch, so it is on the kernel command line,
-which the build writes from the form ([docs/design/lockdown.md](design/lockdown.md),
-*Command line*): `debugfs=off`; `proc_mem.force_override=never`, so a
+which the build writes from the form ([docs/design/lockdown.md](design/lockdown.md)):
+`debugfs=off`; `proc_mem.force_override=never`, so a
 process cannot rewrite its own code through `/proc/self/mem`, as a shell
 and `dd` do to run a program where nothing written may run; on x86_64
 `ia32_emulation=0`, no 32-bit system calls; on aarch64 `kvm-arm.mode=none`,
@@ -192,18 +192,19 @@ cloud-init's user-data, once werewolf has committed.
 
 ## Not yet
 
-- **root can remount.** The root is read-only, and everywhere writable
-  is `noexec`, but a process running as root can call mount(2) itself and
-  make anything writable or `exec`, `/` included, and can undo the sysctls
-  marked "yes" above. Where the form has a shell (sshd, lima, prod-ssh, and
-  `DEV=1` builds) that takes no more than a script and busybox's `mount`.
-  Mount options and sysctls bind everyone else; IPE (phase 4 of the design)
-  and services that do not run as root are what will bind root.
+- **root can ask the mount broker.** Once fence runs, no process, root
+  included, may mount or write to `/proc` (fence's Landlock domain, and
+  CAP_SYS_ADMIN dropped), so the sysctls marked "yes" above stay set. The
+  mount broker, outside that domain, still mounts the few filesystems it
+  names for any root process that asks (cmd/mount-broker/README.md). What
+  root may run is bounded by what the verified root holds; IPE (phase 4 of
+  the design) would bound it by signature.
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
   them, or GRUB's config, and keep them across reboots. Secure Boot is off,
   since Alpine's kernel is not signed for it.
-- **Images are built on the machine** that runs them, so no signature on
-  one could mean anything.
+- **Forms CI does not publish are built on the machine** that runs
+  them, so no signature on their images could mean anything. `minimal`,
+  `prod` and `prod-ssh` install CI's signed releases ([releases.md](releases.md)).
 - **Scripts, where there is a shell.** The forms that log people in (sshd,
   lima, prod-ssh) carry busybox, whose `sh` runs any script. The others,
   minimal and prod among them, have no shell or interpreter at all, and
@@ -225,10 +226,9 @@ cloud-init's user-data, once werewolf has committed.
   starts (a core pattern of `|PROGRAM`, `kernel.modprobe`,
   `kernel.hotplug`, the last two emptied at boot) holds no capability but
   `CAP_SYS_BOOT`, whatever root does, but it is not under PID 1's seccomp
-  filter. Root, which can still
-  write those sysctls, can so make the calls the filter refuses but needs
-  no capability for. Our kernel's `CONFIG_STATIC_USERMODEHELPER`, or a
-  read-only `/proc/sys` once `CAP_SYS_ADMIN` goes, closes it.
+  filter. Once fence runs no process can write those sysctls, so only
+  what init set at boot can run that way. Our kernel's
+  `CONFIG_STATIC_USERMODEHELPER` would make that structural.
 - **Machines bitten before 2026-10-06 keep bite's old command line.**
   bite's GRUB entries now read each slot's kernel arguments from GRUB's
   environment, which the updater sets for each slot it installs; entries
@@ -236,8 +236,8 @@ cloud-init's user-data, once werewolf has committed.
   posture's `kernel-cmdline` names what such a machine lacks.
 - **The host is trusted.** A hypervisor can change any guest.
 
-Phases 2 to 5 of [the design](design/verified-boot.md) close all but the
-last two.
+Phases 4 and 5 of [the design](design/verified-boot.md), our own kernel
+with IPE and Secure Boot, are what remains of it.
 
 ## Not done, by choice
 

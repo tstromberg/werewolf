@@ -7,7 +7,7 @@ else: no shell, no commands, no FTP, WebDAV or web admin.
 | --- | --- |
 | Listens | tcp/22, SFTP |
 | Sends | nothing |
-| Runs as | `sftpgo` (uid 212), leashed |
+| Runs as | `sftpgo` (a uid of its own, its name's hash), leashed |
 | Keeps | each user's files in `/data/svc/sftpgo/users/NAME`, its database beside them, and its host key, made on the first boot (`id_ed25519`), whose fingerprint is on the console at every boot |
 | Config | `sftpgo/users.json`: the users, each with a key and the permissions it has in its own directory |
 

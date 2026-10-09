@@ -1,0 +1,76 @@
+# When check passes on main, pack werewolf's programs for both arches twice,
+# on separate runners, require the two to match byte for byte, and publish
+# the packages whose files changed to dist.werewolf-linux.org/apk
+# (release/packages). Publishing waits for the repository variable
+# PUBLISH_PACKAGES to be "true". See docs/design/custom-updates.md.
+name: packages
+
+on:
+  workflow_run:
+    workflows: [check]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    strategy:
+      matrix:
+        copy: [1, 2]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - name: Install Zig
+        run: sudo test/ci-setup zig
+      # Zig cross-compiles both arches on one runner; the versions are the
+      # commit's time, so both copies pack the same bytes.
+      - name: Pack
+        run: |
+          make ARCH=aarch64 packages
+          make ARCH=x86_64 packages
+          mkdir packages
+          cp -R build/aarch64/packages/aarch64 build/x86_64/packages/x86_64 packages/
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: packages-${{ matrix.copy }}
+          path: packages/
+
+  publish:
+    needs: build
+    if: vars.PUBLISH_PACKAGES == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+      - name: Install Zig
+        run: sudo test/ci-setup zig
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: packages-*
+          path: copies
+      - name: The two copies match
+        run: diff -r copies/packages-1 copies/packages-2
+      - name: Publish what changed
+        env:
+          WEREWOLF_PACKAGES_KEY: ${{ secrets.WEREWOLF_PACKAGES_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          make build/host/package
+          release/packages copies/packages-1/aarch64 copies/packages-1/x86_64

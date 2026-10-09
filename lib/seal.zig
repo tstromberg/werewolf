@@ -1,9 +1,6 @@
-//! Promises: what a program may do, in a few words, and the system calls
-//! each word brings (docs/design/pledge.md, System calls: promises). The
-//! seal (cmd/init) allows the promises the machine makes, leash a service's
-//! own, and seal-watch and `seal` name a refused call by the promise that
-//! would allow it. Which calls a word brings is known here alone, for both
-//! architectures: a name the one being built for lacks is passed over.
+//! seal maps pledge-style promises to the system calls they allow, and
+//! builds the seccomp filters for the machine seal and for each service.
+//! See lib/README.md and docs/design/pledge.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -43,12 +40,12 @@ pub const Promise = enum(u5) {
     reboot,
 };
 
-/// A set of promises.
+/// Set is a set of promises.
 pub const Set = std.EnumSet(Promise);
 
-/// The calls each promise brings, by name. inet, unix, netlink and packet
-/// bring socket (and unix socketpair): each filter reads the family, the
-/// machine seal allowing any of the four, leash a service's own.
+/// table lists the calls each promise allows, by name. inet, unix, netlink
+/// and packet also allow socket (and unix socketpair); the filter checks the
+/// family against the promises.
 const table = [_]struct { p: Promise, names: []const []const u8 }{
     .{ .p = .stdio, .names = &.{
         "read",                   "write",              "readv",
@@ -104,10 +101,9 @@ const table = [_]struct { p: Promise, names: []const []const u8 }{
         "fchdir",     "getxattr",   "lgetxattr",  "fgetxattr",
         "listxattr",  "llistxattr", "flistxattr",
     } },
-    // inotify sees file events by name even where Landlock denies the
-    // directory (it does not mediate fsnotify), so watching is its own
-    // promise, off unless a service asks: a service that only reads files
-    // cannot watch the machine's activity.
+    // Landlock does not mediate fsnotify, so inotify sees events in
+    // directories Landlock denies. watch is a separate promise so that a
+    // service that only reads files cannot watch the machine's activity.
     .{ .p = .watch, .names = &.{
         "inotify_init",     "inotify_init1", "inotify_add_watch",
         "inotify_rm_watch", "fanotify_init", "fanotify_mark",
@@ -162,16 +158,16 @@ const table = [_]struct { p: Promise, names: []const []const u8 }{
         "semget", "semop",  "semtimedop", "semctl",
         "msgget", "msgsnd", "msgrcv",     "msgctl",
     } },
-    // Moving the page cache's own pages rather than copies of them: into a
-    // socket, sendfile and splice reach the kernel code of three bugs
-    // exploited in 2026 (CVE-2026-31431, CVE-2026-53266, CVE-2026-53362);
-    // into a pipe the caller holds, splice and tee reach Dirty Pipe's
-    // (CVE-2022-0847). sendfile is the machine's: Zig's standard library
-    // copies files with it. splice and tee, nothing here needs.
+    // These calls move page-cache pages rather than copies. Into a socket,
+    // sendfile and splice reach the code of three bugs exploited in 2026
+    // (CVE-2026-31431, CVE-2026-53266, CVE-2026-53362); into a pipe, splice
+    // and tee reach Dirty Pipe (CVE-2022-0847). The machine keeps sendfile
+    // because Zig's standard library copies files with it; nothing needs
+    // splice or tee.
     .{ .p = .sendfile, .names = &.{"sendfile"} },
     .{ .p = .splice, .names = &.{ "splice", "tee" } },
     .{ .p = .mlock, .names = &.{ "mlock", "mlock2", "munlock", "mlockall", "munlockall" } },
-    // Legacy asynchronous file I/O (not io_uring, which no promise brings):
+    // Legacy asynchronous I/O, not io_uring (which no promise allows).
     // nginx sets up an AIO context at startup.
     .{ .p = .aio, .names = &.{
         "io_setup",             "io_destroy",   "io_submit",
@@ -184,7 +180,7 @@ const table = [_]struct { p: Promise, names: []const []const u8 }{
     .{ .p = .reboot, .names = &.{"reboot"} },
 };
 
-/// The calls each promise brings on this architecture, by promise.
+/// by_promise holds the calls of each promise that this architecture has.
 const by_promise = blk: {
     var lists: [std.enums.values(Promise).len][]const linux.SYS = @splat(&.{});
     for (table) |e| for (e.names) |name| {
@@ -195,12 +191,12 @@ const by_promise = blk: {
     break :blk lists;
 };
 
-/// The calls promise p brings on this architecture.
+/// calls returns the calls promise p allows on this architecture.
 pub fn calls(p: Promise) []const linux.SYS {
     return by_promise[@backingInt(p)];
 }
 
-/// The promises that bring the call numbered nr, or none.
+/// promisesOf returns the promises that allow the call numbered nr.
 pub fn promisesOf(nr: u32) Set {
     var set: Set = .empty;
     for (std.enums.values(Promise)) |p| {
@@ -209,8 +205,8 @@ pub fn promisesOf(nr: u32) Set {
     return set;
 }
 
-/// The words of a pledge, as a set; an unknown word is an error, with bad
-/// set to it.
+/// parse returns the promises named in words. On an unknown word it returns
+/// error.UnknownPromise and sets bad to the word.
 pub fn parse(words: []const u8, bad: *[]const u8) !Set {
     var set: Set = .empty;
     var it = std.mem.tokenizeAny(u8, words, " \t\n");
@@ -221,32 +217,28 @@ pub fn parse(words: []const u8, bad: *[]const u8) !Set {
     return set;
 }
 
-/// What werewolf's own programs promise between them, which every machine
-/// makes: init's after the seal, fence, runit and its services, the mount
-/// broker, leash before it confines a service, posture, the updater and
-/// the DHCP client; `syslog`, so `dmesg` can read the kernel's log
-/// (dmesg_restrict still keeps it to root); and `sendfile`, which Zig's
-/// standard library copies files with. Each confines itself further, or
-/// will (pledge.md, Order).
+/// base is what werewolf's own programs need between them (init after the
+/// seal, fence, runit, the mount broker, leash, posture, the updater and the
+/// DHCP client), so every machine allows it. syslog lets dmesg read the log
+/// (dmesg_restrict still limits it to root); Zig's standard library copies
+/// files with sendfile. Each program confines itself further (docs/programs.md).
 pub const base: Set = .initMany(&.{
     .stdio,  .rpath,  .wpath,   .inet,     .unix,   .netlink,   .packet,   .connect,
     .listen, .proc,   .exec,    .setuid,   .setgid, .setgroups, .caps,     .chroot,
     .mount,  .umount, .seccomp, .landlock, .reboot, .syslog,    .sendfile,
 });
 
-/// The system calls no promise brings, whatever a pledge says, each where
-/// the architecture has it:
+/// never_names lists the calls no promise allows, whatever a pledge says:
 ///
-///   bpf, perf_event_open           eBPF and kernel tracing, which rootkits
-///                                  are made of
-///   init_module .. delete_module   modules: the loader closed already
-///   kexec_load, kexec_file_load    another kernel: lockdown refuses already
+///   bpf, perf_event_open           eBPF and kernel tracing, rootkit tools
+///   init_module .. delete_module   modules; the loader is already closed
+///   kexec_load, kexec_file_load    another kernel; lockdown refuses it too
 ///   io_uring_*                     makes kernel.io_uring_disabled permanent
 ///   userfaultfd                    the usual way to win a kernel race
-///   open_by_handle_at, name_..     walking past mounts by inode handle
+///   open_by_handle_at, name_..     walks past mounts by inode handle
 ///   add_key, keyctl, request_key   the kernel keyring; cryptsetup is done
 ///                                  with it before init hands over
-///   process_vm_readv, _writev      another process's memory: Yama refuses
+///   process_vm_readv, _writev      another process's memory; Yama refuses it
 ///   modify_ldt, iopl, ioperm       16-bit code and I/O ports
 ///   acct .. vhangup                unused here; old, rarely audited code
 const never_names = [_][]const u8{
@@ -260,7 +252,7 @@ const never_names = [_][]const u8{
     "vhangup",
 };
 
-/// Those of never_names this architecture has.
+/// never holds the calls of never_names that this architecture has.
 pub const never: []const linux.SYS = blk: {
     var list: []const linux.SYS = &.{};
     for (never_names) |name| {
@@ -271,8 +263,8 @@ pub const never: []const linux.SYS = blk: {
 
 // --- filters -------------------------------------------------------------------
 
-/// A classic BPF instruction (struct sock_filter), and the few opcodes
-/// seccomp's filters here and in lib/sandbox.zig are made of.
+/// Filter is a classic BPF instruction (struct sock_filter). The opcodes
+/// below are all that the filters here and in lib/sandbox.zig use.
 pub const Filter = extern struct { code: u16, jt: u8 = 0, jf: u8 = 0, k: u32 = 0 };
 pub const LD_W_ABS = 0x20;
 pub const JEQ_K = 0x15;
@@ -280,16 +272,14 @@ pub const JGE_K = 0x35;
 pub const JSET_K = 0x45;
 pub const RET_K = 0x06;
 
-/// A refused call fails as if the kernel had no such call, which programs
-/// expect of an older kernel and handle.
+/// RET_ENOSYS fails a call as if the kernel lacked it, which programs
+/// already handle for older kernels.
 pub const RET_ENOSYS: u32 = linux.SECCOMP.RET.ERRNO | @as(u32, @backingInt(linux.E.NOSYS));
 
-/// The architecture every system call must come in as (AUDIT_ARCH_*, from
-/// linux/audit.h), here once for seccomp's filters and the audit rules
-/// (lib/sandbox.zig, lib/audit.zig): std's AUDIT.ARCH.current does not
-/// compile in Zig 0.17. Any other, which on aarch64 is a 32-bit (AArch32)
-/// program's, kills the process: werewolf ships no 32-bit code, and the
-/// kernel has no switch to turn those calls off.
+/// native_arch is the AUDIT_ARCH_* value every system call must carry; the
+/// filters and audit rules kill any other. werewolf ships no 32-bit code,
+/// and the kernel has no switch to disable 32-bit calls. It is defined here
+/// because std's AUDIT.ARCH.current does not compile in Zig 0.17.
 pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
     .aarch64 => 0xc00000b7,
     .x86_64 => 0xc000003e,
@@ -297,13 +287,13 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 };
 
 const max_calls = 512;
-/// The prelude (6), execveat (5), socket's and socketpair's families
-/// (2 * (3 + 2 * 5)), the machine's refusals (7 + 5 + 7 + 7), the table
-/// and its last return.
+/// max_filter counts the prelude (6), execveat (5), the socket and
+/// socketpair families (2 * (3 + 2 * 5)), the machine's refusals
+/// (7 + 5 + 7 + 7), the table and the final return.
 pub const max_filter = 6 + 5 + 2 * (3 + 2 * 5) + 26 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 
-/// The socket families each socket promise brings.
+/// families maps each socket promise to the address families it allows.
 const families = [_]struct { p: Promise, af: u32 }{
     .{ .p = .unix, .af = linux.AF.UNIX },
     .{ .p = .inet, .af = linux.AF.INET },
@@ -312,12 +302,12 @@ const families = [_]struct { p: Promise, af: u32 }{
     .{ .p = .packet, .af = linux.AF.PACKET },
 };
 
-/// What the machine's seal refuses by a call's arguments, whatever a pledge
-/// says: the way into kernel code that exploits in CISA's KEV catalog went
-/// through, which nothing here needs (docs/cve-mitigation-survey.md).
+/// Refusal is a call the machine seal refuses by its arguments, whatever a
+/// pledge says. Each closes a path that exploits in CISA's KEV catalog used
+/// and nothing here needs (docs/cve-mitigation-survey.md).
 ///
-///   socket            a family no promise names: AF_ALG (CVE-2025-39964,
-///                     CVE-2026-31431), and RDS, TIPC, VSOCK, AF_KEY, XDP
+///   socket,           a family no promise names: AF_ALG (CVE-2025-39964,
+///   socketpair        CVE-2026-31431), and RDS, TIPC, VSOCK, AF_KEY, XDP
 ///                     and every other the kernel may have
 ///   setsockopt        TCP_ULP, at the TCP level: kernel TLS (CVE-2025-39682)
 ///                     and every other upper-layer protocol
@@ -325,22 +315,21 @@ const families = [_]struct { p: Promise, af: u32 }{
 ///   timer_create,     a CPU-time clock, the caller's or another process's:
 ///   clock_nanosleep   POSIX CPU timers (CVE-2025-38352)
 ///
-/// Each is refused as a kernel without the feature would refuse it, so a
-/// program that probes for one carries on without it. Only these calls lose
-/// the kernel's cache of what the filter always allows, and none is made
-/// often enough to notice.
+/// Each fails as a kernel without the feature would fail it, so a program
+/// that probes for one carries on. Only these calls miss the kernel's
+/// seccomp cache, and none is frequent enough to matter.
 pub const Refusal = struct {
-    /// What was asked for, for seal-watch to say.
+    /// what names the refused feature, for seal-watch to log.
     what: []const u8,
-    /// The argument that asked for it.
+    /// arg is the argument that asked for it.
     arg: u64,
-    /// The kernel's own answer without the feature.
+    /// errno is what a kernel without the feature would return.
     errno: linux.E,
 };
 
-/// The refusals by argument, as `seal` lists them.
+/// by_argument lists the refusals by argument, as `seal` prints them.
 pub const by_argument = [_][]const u8{
-    "socket (a family no promise names)",
+    "socket and socketpair (a family no promise names)",
     "setsockopt (TCP_ULP)",
     "pipe2 (O_NOTIFICATION_PIPE)",
     "timer_create and clock_nanosleep (a CPU-time clock)",
@@ -348,21 +337,22 @@ pub const by_argument = [_][]const u8{
 
 const SOL_TCP = 6;
 const TCP_ULP = 31;
-/// O_EXCL, on both architectures.
+/// O_NOTIFICATION_PIPE has the value of O_EXCL on both architectures.
 const O_NOTIFICATION_PIPE = 0o200;
 const CLOCK_PROCESS_CPUTIME_ID = 2;
 const CLOCK_THREAD_CPUTIME_ID = 3;
 
-/// The refusal a call with these arguments meets in the machine's seal, or
-/// null. The filter decides; this says why, for seal-watch, from the same
-/// rules.
+/// refusal returns why the machine seal refuses this call, or null. The
+/// filter decides; this repeats its rules so seal-watch can say why.
 pub fn refusal(nr: u32, args: [6]u64) ?Refusal {
     const low = struct {
         fn f(x: u64) u32 {
             return @truncate(x);
         }
     }.f;
-    if (nr == number(.socket)) {
+    // The seal hands seal-watch a socketpair of an unnamed family (TIPC makes
+    // pairs too) just as it does a socket.
+    if (nr == number(.socket) or nr == number(.socketpair)) {
         for (families) |f| if (f.af == low(args[0])) return null;
         return .{ .what = "socket family", .arg = low(args[0]), .errno = .AFNOSUPPORT };
     }
@@ -375,41 +365,37 @@ pub fn refusal(nr: u32, args: [6]u64) ?Refusal {
     return null;
 }
 
-/// sys's number, as seccomp_data.nr holds it.
+/// number returns sys's number as seccomp_data.nr holds it.
 fn number(sys: linux.SYS) u32 {
     return @intCast(@backingInt(sys));
 }
 
-/// Whether a clock is a CPU-time one: the caller's process or thread, or,
-/// below zero, another process's or thread's (or a device's, which have no
-/// timers anyway).
+/// cpuClock reports whether clock measures CPU time: the caller's process
+/// or thread, or, when negative, another one's. Negative also covers device
+/// clocks, which have no timers anyway.
 fn cpuClock(clock: u32) bool {
     return clock == CLOCK_PROCESS_CPUTIME_ID or clock == CLOCK_THREAD_CPUTIME_ID or
         clock >= 0x80000000;
 }
 
-/// A seccomp filter allowing the calls of promises, and handing the rest
-/// to the listener (seal-watch). Load the architecture; kill another; load
-/// the number; each promised call allowed. Each comparison is followed by
-/// its own return, so no jump is longer than a few instructions, however
-/// many calls. On x86_64 a number with bit 30 set is an x32 call, under
-/// x86_64's own architecture: it would pass every comparison as another
-/// number, so it kills the process too.
+/// buildFilter writes into buf a filter that allows the calls of promises.
+/// The machine seal (per_service false) hands other calls to seal-watch; a
+/// service's filter fails them with ENOSYS. A foreign architecture, and on
+/// x86_64 an x32 call (bit 30), kill the process: an x32 number would match
+/// no comparison as intended. Each comparison has its own return, so jumps
+/// stay short however many calls there are.
 ///
-/// Both read socket's family, its first argument, since inet, unix, netlink
-/// and packet are the family: a service's (per_service true) its own
-/// promised, the seal's (false) any promise's, so a family no promise names
-/// is refused even to root. The seal also makes its refusals by argument
-/// (refusal). Every other call is read by number alone, so the kernel
-/// answers it from its cache. And without
-/// exec, it allows only execveat of a descriptor (AT_EMPTY_PATH), which is
-/// how leash becomes the service: Landlock lets a service run only the
-/// program it is, so a service that did not pledge exec can become itself
-/// again and nothing else.
+/// socket and socketpair are checked by family: a service's own promises,
+/// or for the seal any promise's, so even root cannot open an unnamed
+/// family. The seal also adds the refusals by argument (see refusal). Other
+/// calls are matched by number alone, so the kernel can cache the verdict.
+/// A service without exec may only execveat a descriptor (AT_EMPTY_PATH):
+/// that is how leash becomes the service, and Landlock lets it run only
+/// its own program.
 pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) []const Filter {
-    // A service's own filter refuses with ENOSYS, needing no listener (so
-    // leash installs it after dropping CAP_SYS_ADMIN); the machine seal's,
-    // on PID 1, hands the rest to seal-watch to say and count.
+    // A service's filter needs no listener, so leash can install it after
+    // dropping CAP_SYS_ADMIN. The seal on PID 1 hands the rest to
+    // seal-watch to log and count.
     const other = if (per_service) RET_ENOSYS else linux.SECCOMP.RET.USER_NOTIF;
     var n: usize = 0;
     const put = struct {
@@ -441,10 +427,9 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
             afs[m] = f.af;
             m += 1;
         };
-        // socket and socketpair: the family, the low word of args[0] (both
-        // architectures are little-endian), against each promised; else
-        // refused. socketpair too: a few families besides unix make pairs
-        // (TIPC), and a family no promise names stays closed either way.
+        // Compare the family, the low word of args[0] (both architectures
+        // are little-endian), with each promised one. socketpair is checked
+        // too because families besides unix (TIPC) make pairs.
         for ([_]u32{ socket, number(.socketpair) }) |sys| {
             put(buf, &n, JEQ_K, 0, @intCast(2 + 2 * m), sys);
             put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word
@@ -455,9 +440,9 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
             put(buf, &n, RET_K, 0, 0, other);
         }
     }
-    // The machine's refusals by argument (see refusal). Each block leaves
-    // the call's number loaded again for what follows. A service's filter
-    // needs none: the machine's binds it too.
+    // The machine's refusals by argument (see refusal). Each block reloads
+    // the call number for what follows. A service's filter skips them
+    // because the machine's filter applies to it too.
     if (!per_service) {
         // setsockopt(_, SOL_TCP, TCP_ULP)
         put(buf, &n, JEQ_K, 0, 6, number(.setsockopt));
@@ -500,15 +485,12 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
     return buf[0..n];
 }
 
-/// Install filter on every thread of this process: a thread the kernel
-/// cannot put under it fails the call (TSYNC, with ESRCH so a failure is an
-/// error, not a thread's id), so none is left outside. With listener (the
-/// machine seal, on PID 1, which holds CAP_SYS_ADMIN), the result is a
-/// notification descriptor for seal-watch, which says what it refuses;
-/// without it (a service, after dropping capabilities), there is none, and
-/// no_new_privs is enough, and the kernel's audit says each call the filter
-/// refuses (SECCOMP_FILTER_FLAG_LOG): a record in the kernel's log, as for
-/// a refused exec, which seal-watch never sees.
+/// install loads filter on every thread of this process (TSYNC, with ESRCH
+/// so a thread left out is an error, not a thread id). With listener (the
+/// machine seal on PID 1), it returns the notification descriptor for
+/// seal-watch. Without it (a service), it returns -1 and the kernel audits
+/// each refused call instead (SECCOMP_FILTER_FLAG_LOG), which seal-watch
+/// never sees.
 pub fn install(filter: []const Filter, listener: bool) !i32 {
     const SECCOMP_SET_MODE_FILTER = 1;
     const SECCOMP_FILTER_FLAG_TSYNC = 1 << 0;
@@ -529,8 +511,8 @@ pub fn install(filter: []const Filter, listener: bool) !i32 {
     return if (listener) @intCast(rc) else -1;
 }
 
-/// fd, sent over sock (SCM_RIGHTS) with bytes: from init, l to learn or e
-/// to enforce; from leash, the service's name.
+/// sendListener sends fd over sock (SCM_RIGHTS) with bytes: from init, l to
+/// learn or e to enforce; from leash, the service's name. It reports success.
 pub fn sendListener(sock: i32, fd: i32, bytes: []const u8) bool {
     var control: [24]u8 align(8) = @splat(0);
     const e = @import("builtin").cpu.arch.endian();
@@ -551,23 +533,23 @@ pub fn sendListener(sock: i32, fd: i32, bytes: []const u8) bool {
     return linux.errno(linux.sendmsg(sock, &msg, linux.MSG.NOSIGNAL)) == .SUCCESS;
 }
 
-/// Where init writes the seal it installed: `mode enforce|learn`, then
-/// `promises WORD...`, one line each.
+/// policy_path is where init records the seal it installed:
+/// `mode enforce|learn`, then `promises WORD...`, one line each.
 pub const policy_path = "/run/werewolf/seal/policy";
-/// Where seal-watch counts what it refused, one line a call:
-/// `NAME COUNT LAST_PID FIRST_SECONDS PROMISE`; NAME `other` for every call
-/// past the table's rows, counted together.
+/// refused_path is where seal-watch counts refusals, one line per call:
+/// `NAME COUNT LAST_PID FIRST_SECONDS PROMISE`. Calls past the table's last
+/// row are counted together as `other`.
 pub const refused_path = "/run/werewolf/seal/refused";
 
 const testing = std.testing;
 
-/// What a filter returns for a call: run as the kernel runs it, for the
-/// few instructions these use.
+/// action runs filter on a call as the kernel would, for the few opcodes
+/// used here, and returns its verdict.
 fn action(filter: []const Filter, arch: u32, nr: u32, arg0: u32) u32 {
     return actionArgs(filter, arch, nr, .{ arg0, 0, 0, 0, arg0, 0 });
 }
 
-/// action, with each argument's low word.
+/// actionArgs is action with the low word of each argument given.
 fn actionArgs(filter: []const Filter, arch: u32, nr: u32, args: [6]u32) u32 {
     var a: u32 = 0;
     var pc: usize = 0;
@@ -593,7 +575,7 @@ fn actionArgs(filter: []const Filter, arch: u32, nr: u32, args: [6]u32) u32 {
 test buildFilter {
     var buf: [max_filter]Filter = undefined;
     const socket = number(.socket);
-    // Every promise at once fits.
+    // A filter with every promise fits.
     _ = buildFilter(&buf, .full, true);
     const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), false);
     try testing.expectEqual(
@@ -614,12 +596,16 @@ test buildFilter {
         linux.SECCOMP.RET.USER_NOTIF,
         action(machine, native_arch, socket, AF_ALG),
     );
-    // The refusals by argument, and the same calls asking for nothing refused.
-    // Each case: the call, its first three arguments, whether it is refused.
+    // Each case is a call, its first three arguments, and whether the seal
+    // refuses it.
     const Case = struct { linux.SYS, u32, u32, u32, bool };
     const cloexec = 0o2000000;
     const pid1_cpu = 0xfffffff6; // ~1 << 3 | CPUCLOCK_SCHED: pid 1's CPU clock
     for ([_]Case{
+        .{ .socket, linux.AF.ALG, 0, 0, true },
+        .{ .socket, linux.AF.INET, 0, 0, false },
+        .{ .socketpair, linux.AF.TIPC, 0, 0, true },
+        .{ .socketpair, linux.AF.INET, 0, 0, false },
         .{ .setsockopt, 3, SOL_TCP, TCP_ULP, true },
         .{ .setsockopt, 3, SOL_TCP, 1, false }, // TCP_NODELAY
         .{ .setsockopt, 3, 1, TCP_ULP, false }, // SOL_SOCKET's option 31
@@ -667,7 +653,7 @@ test buildFilter {
             action(machine, native_arch, 0x40000000 | number(.read), 0),
         );
 
-    // A service's own filter refuses with ENOSYS, needing no listener.
+    // A service's filter refuses with ENOSYS and needs no listener.
     const service = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), true);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
@@ -705,7 +691,7 @@ test buildFilter {
         action(service, native_arch, number(.write), 0),
     );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.clone), 0));
-    // The findings' risky calls, refused to a plain reader-and-server.
+    // The risky calls from the findings are refused to a plain reader-and-server.
     for ([_]linux.SYS{
         .memfd_create,
         .shmget,
@@ -716,8 +702,8 @@ test buildFilter {
     }) |sys|
         try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(sys), 0));
 
-    // Without exec: execveat of a descriptor, the way leash becomes the
-    // service, and nothing else that runs a program.
+    // Without exec, only execveat of a descriptor runs a program; that is
+    // how leash becomes the service.
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         action(service, native_arch, number(.execveat), AT_EMPTY_PATH),
@@ -736,7 +722,7 @@ test buildFilter {
         linux.SECCOMP.RET.ALLOW,
         actionArgs(service, native_arch, number(.setsockopt), .{ 3, SOL_TCP, TCP_ULP, 0, 0, 0 }),
     );
-    // splice and tee are no program's here; sendfile is the machine's own.
+    // No program here needs splice or tee; the machine needs sendfile.
     try testing.expect(!base.contains(.splice));
     try testing.expect(base.contains(.sendfile));
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.splice), 0));
@@ -746,7 +732,7 @@ test buildFilter {
     try testing.expectEqual(RET_ENOSYS, action(none, native_arch, socket, linux.AF.INET));
     try testing.expectEqual(linux.SECCOMP.RET.ALLOW, action(none, native_arch, number(.read), 0));
 
-    // The longest filter, every promise, still fits the kernel's 4096.
+    // The longest filter, with every promise, fits the kernel's 4096.
     const biggest = buildFilter(&buf, .full, true);
     try testing.expect(biggest.len <= 4096);
     // No never call is ever allowed, even by the fullest filter.
@@ -780,8 +766,8 @@ test promisesOf {
 }
 
 test "no promise grants a risky call" {
-    // The calls an escape would want, each reachable only through the one
-    // narrow promise that names it, never a broad one.
+    // Each call an escape would want is allowed only by one narrow promise,
+    // never a broad one.
     const Case = struct { sys: linux.SYS, want: Promise };
     const cases = [_]Case{
         .{ .sys = .memfd_create, .want = .memfd },
@@ -816,7 +802,7 @@ test "no promise grants a risky call" {
     };
 }
 
-/// Whether the calls of promises include nr (test helper).
+/// hasCall reports whether promises allow the call numbered nr.
 fn hasCall(promises: Set, nr: u32) bool {
     var it = promises.iterator();
     while (it.next()) |p| for (calls(p)) |sys| if (number(sys) == nr) return true;

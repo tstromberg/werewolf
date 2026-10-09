@@ -1,5 +1,5 @@
-//! posture's network checks: listening ports, fence's rules, IPv6, and
-//! ssh's settings.
+//! network holds posture's network checks: listening ports, fence's rules,
+//! IPv6, and sshd's settings.
 
 const std = @import("std");
 const Io = std.Io;
@@ -16,7 +16,7 @@ const statx = posture.statx;
 const trim = posture.trim;
 
 pub fn check(p: *Posture) !void {
-    // IPv6 is on unless disable_ipv6 reads 1, or the kernel has none.
+    // IPv6 is on unless disable_ipv6 reads 1 or the kernel has no IPv6.
     const v6 = p.sysctl("net/ipv6/conf/all/disable_ipv6");
     const v6_on = v6.len > 0 and !std.mem.eql(u8, v6, "1");
     var ports: std.ArrayList(u16) = .empty;
@@ -26,7 +26,7 @@ pub fn check(p: *Posture) !void {
     }) |f| try listenPorts(p.gpa, p.read(f), &ports);
     var list: std.ArrayList(u8) = .empty;
     for (ports.items) |port| try listAdd(p.gpa, &list, "{d}", .{port});
-    // The machine's network policy (fence), or the older list of ports.
+    // Read fence's network policy, or else the older list of ports.
     const policy: ?[]const u8 = Dir.cwd().readFileAlloc(
         p.io,
         "/usr/share/werewolf/net",
@@ -73,7 +73,7 @@ pub fn check(p: *Posture) !void {
         &.{ "sshd", "dropbear", "telnetd", "in.telnetd" },
     );
     try ssh(p);
-    // With IPv6 off (ipv6.disable=1), there is no IPv6 forwarding to check.
+    // With IPv6 off, there is no IPv6 forwarding to check.
     const forwarding = [_][2][]const u8{
         .{ "net/ipv4/ip_forward", "0" },
         .{ "net/ipv6/conf/all/forwarding", "0" },
@@ -85,11 +85,10 @@ pub fn check(p: *Posture) !void {
         "The machine forwards no traffic for others.",
         if (v6_on) &forwarding else forwarding[0..1],
     );
-    // A host takes and sends redirects on an interface if all or the
-    // interface says so, so each interface must say no: all and default
-    // do not reach an interface that was there before they were set.
-    // IPv6 has only the interface's own setting. With IPv6 off, its
-    // settings govern nothing.
+    // IPv4 uses redirects on an interface if either all or the interface
+    // allows them, and all and default do not reach interfaces that already
+    // existed, so every interface must say no. IPv6 has only the interface's
+    // setting, which means nothing with IPv6 off.
     const redirects = [_][2][]const u8{
         .{ "net/ipv4/conf/*/accept_redirects", "0" },
         .{ "net/ipv4/conf/*/secure_redirects", "0" },
@@ -103,7 +102,7 @@ pub fn check(p: *Posture) !void {
         "Nobody on the network can reroute the machine's traffic, and it reroutes nobody's.",
         if (v6_on) &redirects else redirects[0..3],
     );
-    // IPv4 takes a source route only if all and the interface both allow it.
+    // IPv4 accepts a source route only if all and the interface both allow it.
     const source_route = [_][2][]const u8{
         .{ "net/ipv4/conf/all/accept_source_route", "0" },
         .{ "net/ipv6/conf/*/accept_source_route", "0" },
@@ -115,8 +114,8 @@ pub fn check(p: *Posture) !void {
         "Packets cannot choose their own way through the machine.",
         if (v6_on) &source_route else source_route[0..1],
     );
-    // Loopback addresses are routed to an interface if all or the interface
-    // says so.
+    // Loopback addresses are routed through an interface if either all or
+    // the interface allows it, so every interface must say no.
     try p.sysctls(
         "network-localnet",
         "network",
@@ -125,8 +124,8 @@ pub fn check(p: *Posture) !void {
             "a packet for it through an interface.",
         &.{.{ "net/ipv4/conf/*/route_localnet", "0" }},
     );
-    // Router advertisements stay on (IPv6 takes its route from them), but
-    // limited to what they must give.
+    // IPv6 takes its route from router advertisements, so they stay on,
+    // limited to what they must provide.
     if (v6_on) try p.sysctls(
         "network-ipv6-ra-limits",
         "network",
@@ -146,12 +145,11 @@ pub fn check(p: *Posture) !void {
         "Packets from addresses that cannot be, a sign of spoofing, are logged.",
         &.{.{ "net/ipv4/conf/all/log_martians", "1" }},
     );
-    // --extended only, as werewolf fails them by choice (docs/security.md,
-    // "Not done, by choice"): strict reverse-path filtering waits until it
-    // is shown to work with fence, and IPv6 takes its route from router
-    // advertisements.
+    // werewolf fails these by choice (docs/security.md, "Not done, by
+    // choice"), so only --extended checks them: strict reverse-path filtering
+    // is not yet shown to work with fence, and IPv6 needs router advertisements.
     if (p.extended) {
-        // The kernel takes the stricter of all and the interface for both.
+        // The kernel uses the stricter of all and the interface for both.
         try p.sysctls(
             "network-rp-filter",
             "network",
@@ -226,7 +224,7 @@ fn ssh(p: *Posture) !void {
         const config = "/etc/ssh/sshd_config";
         if (statx(p.gpa, config)) |st| if (st.uid != 0 or st.mode & 0o022 != 0)
             try listAdd(p.gpa, &loose, "{s} is not root's alone", .{config});
-        // Each host key, as sshd -T lists them, one "hostkey PATH" a line.
+        // sshd -T lists each host key on a "hostkey PATH" line.
         var lines = std.mem.tokenizeScalar(u8, s, '\n');
         while (lines.next()) |line| {
             if (!std.ascii.startsWithIgnoreCase(line, "hostkey ")) continue;
@@ -283,10 +281,10 @@ fn ssh(p: *Posture) !void {
     });
 }
 
-/// What sshd -T takes that is not a security key's, touched: each
-/// algorithm without the sk- of a FIDO authenticator's, and pubkeyauthoptions
-/// without touch-required, which an authorized_keys line's no-touch-required
-/// could otherwise turn off.
+/// plainSshKeys lists what sshd -T accepts besides touched security keys:
+/// each algorithm without a FIDO authenticator's sk- prefix, and
+/// pubkeyauthoptions without touch-required, which an authorized_keys
+/// no-touch-required could otherwise turn off.
 fn plainSshKeys(gpa: Allocator, settings: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     const algs = sshValue(settings, "pubkeyacceptedalgorithms") orelse "absent";
@@ -331,9 +329,9 @@ test plainSshKeys {
     );
 }
 
-/// How far a guesser or a forgotten session gets: what sshd -T reports
-/// beyond what the benchmarks allow, as a list, with a comma first if
-/// continuing one.
+/// sshLimits lists the sshd -T settings that give a password guesser or a
+/// forgotten session more than the benchmarks allow. If continuing, the
+/// list starts with a comma.
 fn sshLimits(gpa: Allocator, settings: []const u8, continuing: bool) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     const root = sshValue(settings, "permitrootlogin") orelse "absent";
@@ -358,8 +356,8 @@ fn sshLimits(gpa: Allocator, settings: []const u8, continuing: bool) ![]const u8
             "{s}clientaliveinterval is {s}",
             .{ sep(continuing, out.items), interval },
         );
-    // start:rate:full. Refusing starts at start unauthenticated connections
-    // and is total at full.
+    // maxstartups is start:rate:full: sshd starts refusing unauthenticated
+    // connections at start and refuses them all at full.
     const startups = sshValue(settings, "maxstartups") orelse "absent";
     var parts = std.mem.splitScalar(u8, startups, ':');
     const start = std.fmt.parseInt(u32, parts.next() orelse "", 10) catch std.math.maxInt(u32);
@@ -397,12 +395,12 @@ test sshLimits {
     );
 }
 
-/// werewolf's network policy (docs/design/fence.md), "" where there is
-/// none: only declared ports can be bound, only declared traffic sent,
-/// nothing unsolicited received, the metadata server only for those named,
-/// IPv6 off. Each protection is tested where a test is safe and quiet (a
-/// bind, a UDP connect, which sends nothing, a connect the policy refuses
-/// at once), and fails where it is missing, on any Linux.
+/// fence checks werewolf's network policy (docs/design/fence.md); policy is
+/// "" if there is none. Only declared ports can be bound, only declared
+/// traffic sent, nothing unsolicited received, the metadata server reached
+/// only by those named, and IPv6 is off or under the same rules. Tests are
+/// safe and quiet: a bind, a UDP connect that sends nothing, and a connect
+/// the policy refuses at once. On any Linux, a missing protection fails.
 fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
     const port = unusedPort(policy);
     const bound = probeBind(port);
@@ -447,7 +445,7 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
         .result = switch (md) {
             .refused => .pass,
             .reached => .fail,
-            // Nothing there and no policy to refuse it: not a cloud.
+            // Nothing answered and no policy refused it: not a cloud.
             .absent => if (policy.len == 0) .skip else .fail,
         },
         .detail = @tagName(md),
@@ -502,8 +500,8 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
     });
 }
 
-/// What sshd -T must report, by its names: keys only, no host-based trust,
-/// and no forwarding, tunnels or user environment.
+/// ssh_settings is what sshd -T must report: keys only, no host-based
+/// trust, and no forwarding, tunnels or user environment.
 const ssh_settings = [_][2][]const u8{
     .{ "passwordauthentication", "no" },
     .{ "kbdinteractiveauthentication", "no" },
@@ -529,9 +527,9 @@ fn sshSettingsText() []const u8 {
     return s;
 }
 
-/// key's value in sshd -T's output, "key value" a line, or null. Its names
-/// are lowercase in some OpenSSH releases and CamelCase in others (10.x:
-/// StrictModes yes).
+/// sshValue returns key's value in sshd -T output ("key value" lines), or
+/// null. Keys are matched in any case, since some OpenSSH releases print
+/// CamelCase (10.x: StrictModes yes).
 fn sshValue(settings: []const u8, key: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, settings, '\n');
     while (it.next()) |line| {
@@ -541,13 +539,13 @@ fn sshValue(settings: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The settings in want that sshd -T reports otherwise, as a list.
+/// sshMismatches lists the settings in want that sshd -T reports otherwise.
 fn sshMismatches(gpa: Allocator, settings: []const u8, want: []const [2][]const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (want) |kv| {
         const v = sshValue(settings, kv[0]) orelse v: {
-            // An sshd built without X11 or GSSAPI (Wolfi's) lists neither
-            // setting, and can do neither at all.
+            // An sshd built without X11 or GSSAPI (Wolfi's) omits these
+            // settings and cannot do either.
             if (std.mem.eql(u8, kv[0], "x11forwarding") or
                 std.mem.eql(u8, kv[0], "gssapiauthentication")) continue;
             break :v "absent";
@@ -557,7 +555,7 @@ fn sshMismatches(gpa: Allocator, settings: []const u8, want: []const [2][]const 
     return out.items;
 }
 
-/// What makes an algorithm weak, by the sshd -T list it is in.
+/// ssh_weak names, for each sshd -T list, the substrings of weak algorithms.
 const ssh_weak = [_]struct { []const u8, []const []const u8 }{
     .{ "ciphers", &.{ "-cbc", "arcfour", "3des" } },
     .{ "macs", &.{ "md5", "sha1", "umac-64", "-96" } },
@@ -566,13 +564,12 @@ const ssh_weak = [_]struct { []const u8, []const []const u8 }{
     .{ "pubkeyacceptedalgorithms", &.{ "ssh-rsa", "ssh-dss" } },
 };
 
-/// The key exchanges that stand up to a quantum computer, one of which
-/// sshd must offer: a recording of a session made today could otherwise
-/// be read once one exists.
+/// ssh_post_quantum are key exchanges that resist a quantum computer. sshd
+/// must offer one, or sessions recorded today could be read once one exists.
 const ssh_post_quantum = [_][]const u8{ "mlkem768x25519-sha256", "sntrup761x25519-sha512" };
 
-/// The weak algorithms sshd -T lists, each once, and the post-quantum
-/// key exchange it lacks.
+/// weakSshCrypto lists each weak algorithm sshd -T offers, once, and notes
+/// a missing post-quantum key exchange.
 fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (ssh_weak) |w| {
@@ -594,14 +591,12 @@ fn weakSshCrypto(gpa: Allocator, settings: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// The local ports of sockets listening on the network in /proc/net/tcp
-/// or tcp6, each once, in order. A socket bound to a loopback address
-/// alone serves the machine's own processes (a service's cluster port on
-/// 127.0.0.1), and fence lets nothing from the network reach it, so it is
-/// not a port the machine offers.
+/// listenPorts adds to out, once each and sorted, the ports listening in
+/// /proc/net/tcp or tcp6 text. Sockets bound only to loopback are skipped:
+/// fence lets nothing from the network reach them.
 fn listenPorts(gpa: Allocator, text: []const u8, out: *std.ArrayList(u16)) !void {
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
-    _ = lines.next(); // the header
+    _ = lines.next(); // skip the header
     while (lines.next()) |line| {
         var f = std.mem.tokenizeScalar(u8, line, ' ');
         _ = f.next() orelse continue; // sl
@@ -617,8 +612,8 @@ fn listenPorts(gpa: Allocator, text: []const u8, out: *std.ArrayList(u16)) !void
     std.mem.sort(u16, out.items, {}, std.sort.asc(u16));
 }
 
-/// Whether a /proc/net/tcp local address, little-endian hex words, is
-/// 127.0.0.0/8 or ::1 (or ::ffff:127.0.0.0/8).
+/// isLoopback reports whether a /proc/net/tcp local address, in
+/// little-endian hex words, is 127.0.0.0/8, ::1 or ::ffff:127.0.0.0/8.
 fn isLoopback(hex: []const u8) bool {
     if (hex.len == 8) return std.mem.endsWith(u8, hex, "7F");
     if (hex.len != 32) return false;
@@ -627,7 +622,7 @@ fn isLoopback(hex: []const u8) bool {
         std.mem.endsWith(u8, hex, "7F");
 }
 
-/// The ports in a network policy's `listen tcp PORT` lines, one a line.
+/// policyPorts returns the ports of a policy's `listen tcp PORT` lines, one per line.
 fn policyPorts(gpa: Allocator, policy: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, policy, '\n');
@@ -638,15 +633,15 @@ fn policyPorts(gpa: Allocator, policy: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// Whether /etc/werewolf/listen declares port: one a line, or 22 for sshd,
-/// which the image declares by carrying it.
+/// isDeclared reports whether text, numbers separated by spaces or newlines,
+/// holds port.
 fn isDeclared(text: []const u8, port: u16) bool {
     var it = std.mem.tokenizeAny(u8, text, " \n");
     while (it.next()) |d| if ((std.fmt.parseInt(u16, d, 10) catch 0) == port) return true;
     return false;
 }
 
-/// A TCP port the policy does not declare, to try binding.
+/// unusedPort returns a TCP port no number in the policy names, to try binding.
 fn unusedPort(policy: []const u8) u16 {
     var port: u16 = 47321;
     while (isDeclared(policy, port)) port += 1;
@@ -657,8 +652,8 @@ fn inet(addr: [4]u8, port: u16) linux.sockaddr.in {
     return .{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast(addr) };
 }
 
-/// bind() of a fresh TCP socket to `port` on every address: its errno. The
-/// socket never listens, and is closed.
+/// probeBind binds a new TCP socket to port on every address and returns
+/// the errno. The socket never listens and is closed.
 fn probeBind(port: u16) linux.E {
     const rc = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
@@ -668,7 +663,8 @@ fn probeBind(port: u16) linux.E {
     return linux.errno(linux.bind(fd, @ptrCast(&a), @sizeOf(linux.sockaddr.in)));
 }
 
-/// connect() of a UDP socket to 192.0.2.1:9: a route lookup, and no packet.
+/// probeSend connects a UDP socket to 192.0.2.1:9, which looks up a route but
+/// sends nothing, and returns the errno.
 fn probeSend() linux.E {
     const rc = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
@@ -680,8 +676,8 @@ fn probeSend() linux.E {
 
 const Metadata = enum { refused, reached, absent };
 
-/// A TCP connect() to 169.254.169.254:80, given a second: refused by
-/// policy, reached (connected, or something answered), or absent.
+/// probeMetadata tries a TCP connect to 169.254.169.254:80 for up to a second:
+/// refused by policy, reached (connected or actively refused), or absent.
 fn probeMetadata() Metadata {
     const rc = linux.socket(
         linux.AF.INET,
@@ -710,8 +706,8 @@ pub fn errnoText(e: linux.E) []const u8 {
     return if (e == .SUCCESS) "allowed" else std.enums.tagName(linux.E, e) orelse "unknown";
 }
 
-/// A family's policy-routing rules, as the kernel lists them: RTM_GETRULE
-/// messages, one after another. Listing them needs no privilege.
+/// ruleDump returns family's policy-routing rules as the kernel's
+/// RTM_GETRULE dump. Listing them needs no privilege.
 fn ruleDump(gpa: Allocator, family: u8) ![]const u8 {
     const rc = linux.socket(
         linux.AF.NETLINK,
@@ -748,7 +744,7 @@ fn ruleDump(gpa: Allocator, family: u8) ![]const u8 {
     return error.TooLong;
 }
 
-/// Whether a batch of netlink messages ends the dump.
+/// dumpDone reports whether a batch of netlink messages ends the dump.
 fn dumpDone(batch: []const u8) bool {
     var off: usize = 0;
     while (off + 16 <= batch.len) {
@@ -762,19 +758,19 @@ fn dumpDone(batch: []const u8) bool {
 }
 
 const RuleSummary = struct {
-    /// A rule refuses whatever is sent here (from lo) that no earlier rule
-    /// allowed: no selector but the interface, action prohibit.
+    /// outbound_refused is set if a rule with no selector but iif lo
+    /// prohibits whatever locally sent traffic no earlier rule allowed.
     outbound_refused: bool = false,
-    /// A rule drops whatever arrives that no earlier rule allowed, and no
-    /// rule without selectors delivers to the local table before it.
+    /// inbound_dropped is set if arriving traffic is dropped before any
+    /// rule without selectors delivers it to the local table.
     inbound_dropped: bool = false,
 };
 
-/// What a dump of policy-routing rules says about traffic in and out.
+/// summarizeRules reads a policy-routing rule dump for traffic in and out.
 fn summarizeRules(dump: []const u8) RuleSummary {
-    // Where arriving traffic is first dropped: all of it, or TCP and UDP
-    // by name, as fence does so that ARP's lookup still finds the address
-    // local; and where it is first delivered.
+    // Find where arriving traffic is first dropped, either all of it or TCP
+    // and UDP by name (as fence does, so ARP's lookup still finds the address
+    // local), and where it is first delivered.
     var drop_at: ?u32 = null;
     var tcp_drop_at: ?u32 = null;
     var udp_drop_at: ?u32 = null;
@@ -833,7 +829,7 @@ fn summarizeRules(dump: []const u8) RuleSummary {
                 continue;
             at.* = @min(at.* orelse priority, priority);
         }
-        // To the local table.
+        // Delivery to the local table.
         if (action == 1 and table == 255 and proto == null)
             local_at = @min(local_at orelse priority, priority);
     }
@@ -861,7 +857,7 @@ test listenPorts {
         \\   4: 0F05A8C0:2009 00000000:0000 0A 00000000:00000000 00:00000000 00000000   208        0 5 1
     ;
     try listenPorts(arena.allocator(), tcp, &ports);
-    // 22 is bound to 127.0.0.1 alone: the machine's own, not offered.
+    // 22 is bound only to 127.0.0.1, so it is not offered.
     try testing.expectEqualSlices(u16, &.{ 80, 8201 }, ports.items);
     try testing.expect(isLoopback("0100007F") and isLoopback("0A00007F"));
     try testing.expect(isLoopback("00000000000000000000000001000000"));
@@ -931,8 +927,8 @@ test sshMismatches {
     );
 }
 
-/// A netlink rule message for the tests: priority, action, table, and the
-/// iif name and selectors given.
+/// testRule builds a netlink rule message with priority, action, table, and
+/// the given iif name and protocol.
 fn testRule(
     buf: []u8,
     priority: u32,
@@ -966,14 +962,14 @@ test summarizeRules {
     var dump: std.ArrayList(u8) = .empty;
     defer dump.deinit(std.testing.allocator);
     var b: [64]u8 = undefined;
-    // The kernel's own rules: local at 0, main, default. Nothing dropped.
+    // The kernel's own rules (local at 0, main) drop nothing.
     try dump.appendSlice(std.testing.allocator, testRule(&b, 0, 1, 255, null, null));
     try dump.appendSlice(std.testing.allocator, testRule(&b, 32766, 1, 254, null, null));
     try std.testing.expectEqual(RuleSummary{}, summarizeRules(dump.items));
 
-    // fence's: local first only for lo, allowances with selectors, the
-    // refusal from lo, ICMP in, the drops of TCP and UDP, then the local
-    // rule moved after them.
+    // fence's rules: local first only for lo, allowances with selectors, the
+    // refusal from lo, ICMP in, the TCP and UDP drops, then the moved local
+    // rule.
     dump.clearRetainingCapacity();
     try dump.appendSlice(std.testing.allocator, testRule(&b, 10, 1, 255, "lo\x00", null));
     try dump.appendSlice(std.testing.allocator, testRule(&b, 200, 1, 254, "lo\x00", 6));
@@ -988,14 +984,14 @@ test summarizeRules {
         summarizeRules(dump.items),
     );
 
-    // TCP dropped and UDP not is not dropped.
+    // Dropping TCP but not UDP does not count as dropped.
     var half: std.ArrayList(u8) = .empty;
     defer half.deinit(std.testing.allocator);
     try half.appendSlice(std.testing.allocator, dump.items[0..tcp_only]);
     try half.appendSlice(std.testing.allocator, testRule(&b, 400, 1, 255, null, null));
     try std.testing.expect(!summarizeRules(half.items).inbound_dropped);
 
-    // A drop of everything counts too.
+    // Dropping everything counts too.
     var all: std.ArrayList(u8) = .empty;
     defer all.deinit(std.testing.allocator);
     try all.appendSlice(std.testing.allocator, testRule(&b, 399, 6, 0, null, null));
