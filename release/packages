@@ -11,13 +11,14 @@
 # commit that changes no program changes nothing a machine fetches. The
 # published index is verified against release/packages.pub before it is
 # merged and signed again: whoever can write the bucket cannot get CI to sign
-# their entries. Packages go up before the index that names them, and nothing
-# published is ever replaced or deleted. -n shows what would be published and
-# needs no key. PACKAGES_URL, PACKAGES_PUB and PACKAGES_BUCKET (an s3:// URL,
-# or a directory to copy into) point it elsewhere, for testing.
+# their entries. Every read goes to the bucket, never through the CDN, whose
+# cached copy could be stale and make the merge drop published packages.
+# Packages go up before the index that names them, and nothing published is
+# ever replaced or deleted. -n shows what would be published and needs no
+# key. PACKAGES_PUB and PACKAGES_BUCKET (an s3:// URL, or a directory) point
+# it elsewhere, for testing.
 set -eu
 
-base=${PACKAGES_URL:-https://dist.werewolf-linux.org/apk}
 pub=${PACKAGES_PUB:-release/packages.pub}
 bucket=${PACKAGES_BUCKET:-s3://werewolf/apk}
 endpoint=https://c860af766754fb92eec27bc723e6db5d.r2.cloudflarestorage.com
@@ -32,13 +33,22 @@ dry=
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# fetch URL FILE: 0 if fetched, 1 if not there; anything else fails.
+# fetch KEY FILE: the bucket's KEY into FILE: 0 if fetched, 1 if there is no
+# such key; anything else fails.
 fetch() {
-	code=$(curl -sS -o "$2" -w '%{http_code}' "$1") || die "$1: unreachable"
-	case $code in
-	200) return 0 ;;
-	404) rm -f "$2"; return 1 ;;
-	*) die "$1: HTTP $code" ;;
+	rm -f "$2"
+	case $bucket in
+	s3://*)
+		if err=$(AWS_DEFAULT_REGION=auto aws s3 cp --only-show-errors --endpoint-url "$endpoint" \
+			"$bucket/$1" "$2" 2>&1); then
+			return 0
+		fi
+		case $err in
+		*"(404)"* | *NoSuchKey* | *"Not Found"*) return 1 ;;
+		*) die "$1: $err" ;;
+		esac
+		;;
+	*) [ -f "$bucket/$1" ] || return 1; cp "$bucket/$1" "$2" ;;
 	esac
 }
 
@@ -59,7 +69,7 @@ for dir in "$@"; do
 	mkdir -p "$w"
 
 	old=-
-	if fetch "$base/$arch/APKINDEX.tar.gz" "$w/published.tar.gz"; then
+	if fetch "$arch/APKINDEX.tar.gz" "$w/published.tar.gz"; then
 		"$tool" open "$w/published.tar.gz" "$keyname" "$w/published.sig" "$w/published.member"
 		openssl dgst -sha256 -verify "$pub" -signature "$w/published.sig" \
 			"$w/published.member" >/dev/null || die "$arch: the published index is not signed by $pub"
@@ -80,7 +90,7 @@ for dir in "$@"; do
 			[ "$(printf '%s\n%s\n' "$latest" "$version" | LC_ALL=C sort | tail -n 1)" = "$version" ] ||
 				die "$arch: $name $version is older than published $latest"
 			if [ "$version" = "$latest" ] || {
-				fetch "$base/$arch/$name-$latest.apk" "$w/latest.apk" || die "$arch: $name-$latest.apk is indexed but not served"
+				fetch "$arch/$name-$latest.apk" "$w/latest.apk" || die "$arch: $name-$latest.apk is indexed but not in the bucket"
 				[ "$(datahash "$w/latest.apk")" = "$(datahash "$apk")" ]
 			}; then
 				rm "$apk" "$stanza"
@@ -106,16 +116,16 @@ for dir in "$@"; do
 
 	for apk in "$dir"/*.apk; do
 		key=$arch/$(basename "$apk")
-		if fetch "$base/$key" "$w/there.apk"; then
+		if fetch "$key" "$w/there.apk"; then
 			cmp -s "$apk" "$w/there.apk" || die "$key is published with other bytes"
 			continue
 		fi
 		upload "$apk" "$key" "public, max-age=31536000, immutable"
 	done
 	upload "$dir/APKINDEX.tar.gz" "$arch/APKINDEX.tar.gz" "no-cache"
-	if ! { fetch "$base/$arch/APKINDEX.tar.gz" "$w/check.tar.gz" &&
+	if ! { fetch "$arch/APKINDEX.tar.gz" "$w/check.tar.gz" &&
 		cmp -s "$dir/APKINDEX.tar.gz" "$w/check.tar.gz"; }; then
-		die "$arch: the index served is not the one uploaded"
+		die "$arch: the bucket's index is not the one uploaded"
 	fi
 	echo "packages: $arch: $new published"
 done

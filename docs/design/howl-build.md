@@ -93,8 +93,8 @@ A bug in `lib/image.zig` reaches the build and every machine's updates.
 
 The module step refuses an empty list, or a bitten one without a native
 module. apko retries network errors (howl; make, for locks). zstd dates
-`stage0.zst` to its cpio's second, so the step dates it now, or the next
-build would rebuild it. A disk is rebuilt by file times alone, so each
-machine's disk has its own path. Open: a tagged leaf named before an
+`stage0.zst` to its cpio's second, so the step dates it now. A disk's size
+and arguments sit beside it in `disk.img.options`, rewritten only when they
+change, so new ones rebuild it. Open: a tagged leaf named before an
 untagged one sharing a dependency loads first (no form has such a pair;
 fix it with the updater's).
