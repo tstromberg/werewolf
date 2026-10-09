@@ -1,6 +1,6 @@
 # One updater: apk
 
-Proposed, 2026-10-08.
+Proposed, 2026-10-08. Phase 1 built the same day (lib/compose.zig).
 
 ## Summary
 
@@ -20,9 +20,10 @@ its signed slot whole. Any other form on `prod` reinstalls its world into a
 new root each check; what apk installs updates, and the rest is a list of
 paths copied forward from the running image (`cmd/slot-update/slot.zig`,
 `buildSlot`), frozen until a rebuild: werewolf's programs, the updater among
-them; each form's `rootfs/`; what the Makefile derives from the chain
-(`meta.stamp`, `ro.stamp`); local melange packages and baked OCI trees. Part
-of the image is Makefile logic the machine cannot rerun.
+them; each form's `rootfs/`; what the build derives from the chain (the
+Makefile's `ro` and `meta`, `lib/compose.zig` since phase 1); local melange
+packages and baked OCI trees. Part of the image is build logic the machine
+does not rerun.
 
 ## Goals
 
@@ -83,8 +84,8 @@ updater logs them each check.
 **compose**, `lib/compose.zig`, run by `build/host/form` on the host and
 `buildSlot` on the machine. From a root apk filled, it orders the staged
 fragments as `lib/form.zig` orders a chain, lays each `rootfs/` on `/` in
-that order, later winning, and writes what `meta.stamp` and `ro.stamp` write
-today (`net` compiled against the root's accounts, `pledge`, `oci`, `allow`,
+that order, later winning, and writes what the chain derives (`net`
+compiled against the root's accounts, `pledge`, `oci`, `allow`,
 `weaknesses`, `modules`, `cmdline`, sshd's `form.conf`, accounts, supervise
 links), `prune` last. The updater's `root` step is apk then compose, no list
 of paths; `compare` diffs `werewolf-*` versions too, so a release of werewolf
@@ -102,10 +103,13 @@ programs reading the same files. When CI moves to N+1, a machine on N takes
 the newest packages still providing N, with Wolfi's current fixes, logs
 `held` each check and fails posture's `update-format-held`.
 
-**Phases.** 1: compose replaces `meta.stamp`/`ro.stamp`, byte-identical,
-proven by `check-compose`. 2: `werewolf-*` packages, the key, the pin. 3:
-`form-*` packages; the overlay list goes. 4: the image's repository;
-`buildSlot` copies nothing forward. 5: the release path goes.
+**Phases.** 1, built: compose replaces the Makefile's `ro` and `meta`
+derivations and its kernel arguments, module parameters and module lists;
+every form's overlay, both arches, DEV and not, came out byte-identical. 2:
+`werewolf-*` packages, the key, the pin; the updater calls compose, and
+`check-compose` compares its root with the build's. 3: `form-*` packages;
+the overlay list goes. 4: the image's repository; `buildSlot` copies nothing
+forward. 5: the release path goes.
 
 ## Drawbacks
 
