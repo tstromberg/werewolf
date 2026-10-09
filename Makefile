@@ -1,6 +1,5 @@
 # werewolf: a Wolfi userland on an Alpine kernel, for virtual machines.
-# This Makefile builds, tests and releases werewolf. howl builds and runs
-# machines (cmd/howl/README.md).
+# make builds, tests and releases werewolf; howl builds and runs machines (cmd/howl/README.md).
 #
 #   make install-deps     install apko, Zig, QEMU and the rest, after asking
 #   make howl             build build/host/howl; make install puts it on PATH
@@ -95,8 +94,7 @@ hooks:
 	git config core.hooksPath tools/git-hooks
 	@echo "hooks: git runs tools/git-hooks/pre-commit before each commit: test, lint, check-sshd"
 
-# howl builds the images (docs/design/howl-build.md). FREEZE=1 pins packages to
-# the locks; PUBLISHED=1 takes the programs from werewolf's apk repository.
+# howl builds images; FREEZE=1 pins packages, PUBLISHED=1 takes werewolf's programs from its repository.
 HOWL_BUILD = FREEZE=$(FREEZE) $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published)
@@ -108,19 +106,14 @@ disk: $(HOWL)
 $(OUT)/disk.qcow2: $(HOWL)
 	$(HOWL_BUILD) $(if $(DISK_MIB),--disk-mib $(DISK_MIB)) qcow2
 
-# apko locks pin every package for both arches. howl resolves stale locks itself;
-# these rules serve relock and release-inputs, which need only apko and the form tool.
+# apko locks pin every package; these rules serve relock, and release-inputs's boot locks.
 LOCK = build/lock
-FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev)$(if $(PUBLISHED),-published).lock.json
+FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev).lock.json
 BOOT_LOCKS = $(LOCK)/kernel.lock.json $(LOCK)/boot.lock.json
 LOCKS = $(FORM_LOCK) $(BOOT_LOCKS)
 DEV_PACKAGES = busybox-full $(call form_list,dev)
-FORM_APKO = $(BUILD)/form/$(FORM)$(if $(DEV),-dev)$(if $(PUBLISHED),-published).yaml
-# A published config names werewolf's key by the file name its index's
-# signature gives, beside the config (cmd/howl/packages.zig does the same).
-PACKAGES_KEY = $(BUILD)/keys/werewolf-packages.rsa.pub
-# apko_retry COMMAND retries COMMAND after 15, 30 and 45 s if it cannot reach
-# the package server, which refuses bursts of requests (HTTP 403) for a while.
+FORM_APKO = $(BUILD)/form/$(FORM)$(if $(DEV),-dev).yaml
+# apko_retry COMMAND retries after 15, 30 and 45 s: the package server refuses bursts (HTTP 403).
 APKO_NETWORK = status code (403|408|429|5[0-9][0-9])|connection reset|i/o timeout|TLS handshake|deadline exceeded|unexpected EOF|failed to fetch
 apko_retry = o=$(CURDIR)/$@.apko && for t in 1 2 3 4; do \
 	{ $(1); echo $$? >$$o.rc; } 2>&1 | tee $$o; rc=$$(cat $$o.rc); \
@@ -134,12 +127,9 @@ apko_lock = mkdir -p $(LOCK) && cd $(dir $(1)) && \
 $(FORM_LOCK): $(FORM_FILES) | $(FORM_APKO)
 	$(call apko_lock,$(FORM_APKO))
 # Keep an unchanged config's mtime, as howl does, or howl rebuilds the root.
-$(FORM_APKO): $(FORM_FILES) $(FORM_TOOL) $(if $(PUBLISHED),$(PACKAGES_KEY))
-	mkdir -p $(dir $@) && $(FORM_TOOL) apko $(FORM_REF) \
-		$(if $(PUBLISHED),--published ../keys/$(notdir $(PACKAGES_KEY))) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && \
+$(FORM_APKO): $(FORM_FILES) $(FORM_TOOL)
+	mkdir -p $(dir $@) && $(FORM_TOOL) apko $(FORM_REF) $(if $(DEV),$(DEV_PACKAGES)) >$@.tmp && \
 		{ cmp -s $@.tmp $@ && rm $@.tmp || mv $@.tmp $@; }
-$(PACKAGES_KEY): release/packages.pub
-	mkdir -p $(dir $@) && cp $< $@
 $(BOOT_LOCKS): $(LOCK)/%.lock.json: boot/%.yaml
 	$(call apko_lock,$<)
 relock:
@@ -172,10 +162,10 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
-	-Mgpt=boot/gpt.zig
+	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
-	--dep sshd --dep compose --dep package --dep image --dep gpt -Mroot=$(1) $(LIB_MODULES)
+	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk -Mroot=$(1) $(LIB_MODULES)
 
 # program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
 define program
@@ -198,8 +188,7 @@ $(VERITY_BIN): tools/verity.zig lib/verity.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe --dep verity -Mroot=$< -Mverity=lib/verity.zig -femit-bin=$@
 
-# howl is built under a temporary name and renamed, so a check running it
-# never finds an empty file, which a shell would run as a script that passes.
+# Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
@@ -224,20 +213,18 @@ $(TEST_SK): tools/test-sk.zig
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
-	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig tools/form.zig tools/package.zig \
+	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
-_test/lib/form.zig: ; zig test --dep allow --dep sshd -Mroot=lib/form.zig -Mallow=lib/allow.zig --dep settings \
-		-Msshd=lib/sshd.zig -Msettings=lib/settings.zig
+_test/lib/form.zig: ; zig test --dep allow --dep sshd -Mroot=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig -Msettings=lib/settings.zig
 _test/lib/sshd.zig: ; zig test --dep settings -Mroot=lib/sshd.zig -Msettings=lib/settings.zig
-_test/lib/service.zig: ; zig test --dep seal --dep settings -Mroot=lib/service.zig -Mseal=lib/seal.zig \
-		-Msettings=lib/settings.zig
+_test/lib/service.zig: ; zig test --dep seal --dep settings -Mroot=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
 _test/tools/form.zig: ; zig test $(FORM_TOOL_MODULES)
 _test/lib/compose.zig: ; zig test $(COMPOSE_MODULES)
-_test/tools/package.zig: ; zig test --dep package -Mroot=tools/package.zig -Mpackage=lib/package.zig
+_test/tools/package.zig _test/lib/apk.zig: _test/%: ; zig test --dep package -Mroot=$* -Mpackage=lib/package.zig
 _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/cmd/popen-shim/popen-shim.zig: ; zig test cmd/popen-shim/popen-shim.zig -lc
 _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
@@ -262,15 +249,23 @@ PACKAGE_FORMAT = $(shell $(FORM_ASK) format)
 $(PACKAGE_TOOL): tools/package.zig lib/package.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe --dep package -Mroot=$< -Mpackage=lib/package.zig -femit-bin=$@
-packages: $(PACKAGE_TOOL) programs
+# Each form CI publishes is NAME-form: the form as an image stages it, with its
+# own programs, depending on what it is built on, takes and runs (tools/form.zig).
+PACKAGE_FORMS = $(shell $(FORM_ASK) packaged)
+packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 	@[ -n "$(PACKAGE_TIME)" ] || { echo "packages: no commit time; set PACKAGE_TIME" >&2; exit 1; }
-	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/empty && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/empty
+	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/empty $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/empty
 	$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/empty werewolf-format $(PACKAGE_FORMAT)-r0 $(ARCH) 0 \
 		"werewolf's format $(PACKAGE_FORMAT) (lib/compose.zig)"
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
 		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format=$(PACKAGE_FORMAT) || exit 1; done
+	for f in $(PACKAGE_FORMS); do t=$(PACKAGES)/forms/$$f && $(FORM_TOOL) stage $$f $$t && \
+		{ [ ! -d $(PROGRAMS)/forms/$$f ] || cp -R $(PROGRAMS)/forms/$$f/. $$t/; } && \
+		$(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $$t $$f-form - $(ARCH) $(PACKAGE_TIME) "werewolf's form $$f (forms/$$f)" \
+		$$($(FORM_TOOL) depends $$f | sed 's/^/depend:/') || exit 1; done
 	$(PACKAGE_TOOL) index $(PACKAGES)/$(ARCH) -
-	@echo "packages: $(words $(CMDS)) in $(PACKAGES)/$(ARCH); sign APKINDEX.member, then build/host/package sign"
+	@echo "packages: $(words $(CMDS)) programs and $(words $(PACKAGE_FORMS)) forms in $(PACKAGES)/$(ARCH);" \
+		"sign APKINDEX.member, then build/host/package sign"
 
 # cve-tiers reads the NVD key in the recipe, so make never prints it (tools/README.md).
 CVE_TIERS_BIN = build/host/cve-tiers
@@ -294,26 +289,28 @@ bite-me: slot
 list-forms:
 	@$(FORM_TOOL) tree
 
-# CI releases these forms when release-inputs changes (docs/releases.md). dist
-# pins packages to the locks (FREEZE=1), so two runners agree byte for byte.
+# CI releases these forms when release-inputs changes; FREEZE=1 makes two runners agree byte for byte.
 RELEASE_FORMS = $(shell $(FORM_ASK) released)
 DIST_DIRECT_FORMS = minimal
 DIST = dist
-RELEASE_SOURCES = Makefile forms boot cmd lib tools/form.zig release/image.pub release/tiers.pub release/advisories \
-	release/packages.pub
-# Releases take werewolf's programs from its repository (howl build does), so
-# their locks are the published ones: a newly published program is an input.
+RELEASE_SOURCES = Makefile forms boot cmd lib tools/form.zig release/image.pub release/tiers.pub release/advisories release/packages.pub
+# Releases take werewolf's programs from its repository, so a newly published program is an input.
 RELEASE_LOCKS = $(addprefix $(LOCK)/,$(addsuffix -published.lock.json,$(RELEASE_FORMS)) kernel.lock.json boot.lock.json)
 # The inputs are a digest of the sources' bytes and exec bits, and every package's URL.
 release-inputs:
 	rm -f $(RELEASE_LOCKS)
-	$(MAKE) --no-print-directory -j $(addprefix _lock/,$(RELEASE_FORMS)) $(BOOT_LOCKS)
+	$(MAKE) --no-print-directory -j $(BOOT_LOCKS)
+	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory _lock/$$f || exit 1; done
 	{ echo "tree $$({ find $(RELEASE_SOURCES) -type f ! -name .DS_Store | LC_ALL=C sort | xargs $(SHA256); \
 		find $(RELEASE_SOURCES) -type f -perm -100 | LC_ALL=C sort; } | $(SHA256) | cut -c1-64)"; \
 	  sed -n 's|.*"url": "\([^"]*\.apk\)".*|\1|p' $(RELEASE_LOCKS) | LC_ALL=C sort -u; } >$(LOCK)/inputs
 	@echo "inputs: $$($(SHA256) < $(LOCK)/inputs | cut -c1-16), $$(grep -c '^https' $(LOCK)/inputs) packages"
-_lock/%:
-	@$(MAKE) --no-print-directory PUBLISHED=1 FORM=$* $(LOCK)/$*-published.lock.json
+# A release's forms come from werewolf's repository, so howl writes its config and lock,
+# one form at a time: they share the forms it fetches.
+_lock/%: $(HOWL)
+	@$(MAKE) --no-print-directory PUBLISHED=1 FORM=$* _howl-lock
+_howl-lock:
+	$(HOWL_BUILD) lock
 dist:
 	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FREEZE=1 FORM=$$f _dist-form || exit 1; done
 # howl build always builds in build/ARCH, without DEV or APP, so refuse them.
@@ -322,8 +319,7 @@ _dist-form: $(HOWL)
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
 	FREEZE=$(FREEZE) $(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST)
 
-# check-NAME builds what it boots, then runs test/check-NAME (docs/testing.md).
-# Machines share nothing, so make -j check runs them in parallel.
+# check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
 MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
 CONSOLE = $(if $(filter aarch64,$(ARCH)),ttyAMA0,ttyS0)
 # Without KVM, HVF or NVMM (some CI runners, FreeBSD), QEMU emulates.
@@ -334,8 +330,7 @@ else
 ACCEL = tcg
 CPU = max
 endif
-# An aarch64 guest with EL2 starts KVM unless kvm-arm.mode=none, so checks get
-# EL2 where QEMU can lend it, and posture proves the argument holds.
+# Checks lend aarch64 guests EL2 where QEMU can, so posture proves kvm-arm.mode=none holds.
 EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M virt,virtualization=on -accel $(ACCEL) -cpu $(CPU) -nodefaults -display none -monitor stdio -S >/dev/null 2>&1 && echo ,virtualization=on))
 QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
@@ -343,14 +338,12 @@ FORMS := $(patsubst forms/%/apko.yaml,%,$(wildcard forms/*/apko.yaml))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # test/checks needs a root shell on the console, so checks build with DEV=1.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
-# 1 GiB keeps forms lean, unless their check: memory says more. An offline form
-# gets no way out (restrict=on). Direct boot needs no boot ROM, and CI has none.
+# 1 GiB keeps forms lean unless check: memory says more; an offline form gets restrict=on; no boot ROM.
 CHECK_MEMORY := $(or $(call form_check,memory),1024)
 CHECK_OFFLINE := $(if $(filter true,$(call form_check,offline)),$(,)restrict=on)
 CHECK_QEMU = $(QEMU) -smp 2 -m $(CHECK_MEMORY) -no-reboot -device virtio-rng-pci \
 	-netdev user,id=n0$(CHECK_OFFLINE) -device virtio-net-pci,netdev=n0,romfile=
-# A stall panics, and the panic ends QEMU, so a hang fails in seconds with the
-# kernel's reason. A machine in use rides out a slow moment instead.
+# A stall panics and ends QEMU, so a hang fails in seconds with the kernel's reason.
 CHECK_STALLS = rcupdate.rcu_cpu_stall_timeout=20 sysctl.kernel.panic_on_rcu_stall=1 \
 	sysctl.kernel.hung_task_timeout_secs=120 sysctl.kernel.hung_task_panic=1 sysctl.kernel.softlockup_panic=1
 SEAL_ARGS = $(if $(SEAL_LEARN),werewolf.seal=learn)
@@ -371,8 +364,7 @@ built = mkdir -p $(CHECK) && $(2) >$(CHECK)/$(1)-build.log 2>&1 || \
 _check-shared: $(HOWL) $(TEST_SK)
 	@$(call built,shared,$(MAKE) --no-print-directory FORM=minimal DEV=1 APP= image)
 
-# CI runs each group as a job (.github/workflows/check.yml). SHARD=K/N runs
-# every Nth form from the Kth, in name order.
+# CI runs each group as a job; SHARD=K/N runs every Nth form from the Kth, in name order.
 ifneq ($(SHARD),)
 ifeq ($(shell echo '$(SHARD)' | awk -F/ '/^[1-9][0-9]*\/[1-9][0-9]*$$/ && $$1 <= $$2'),)
 $(error SHARD=$(SHARD): K/N, the Kth of N, 1 <= K <= N)
@@ -428,7 +420,7 @@ _check-form: $(HOWL) $(TEST_SK)
 
 check-adhoc: $(HOWL) | _check-shared
 	@mkdir -p $(CHECK) && rm -rf $(BUILD)/adhoc/check-oci
-	@$(HOWL) form --with prod --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
+	@$(HOWL) form --build --with prod --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/check-oci-form.log; echo "FAIL   check-oci form: see $(CHECK)/check-oci-form.log"; exit 1; }
 	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form
@@ -444,8 +436,7 @@ $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
 _check-shellfree:
 	@$(CHECK_ENV) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
-# These boot what a form's check built, so they follow it. The slot is
-# minimal's, which has no updater to reach the network once it commits.
+# These boot what a form's check built, so follow it; minimal's slot has no updater to reach out.
 check-lease check-nodata check-metadata: | _check-shared check-prod
 	@$(CHECK_MAKE) FORM=prod _$@
 check-static check-verity: | _check-shared check-minimal
@@ -465,8 +456,7 @@ _check-metadata:
 	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci
 
-# Each run copies x86_64's UEFI variables, so a boot that writes them, or dies
-# mid-write, spares the template. splash-time=0 skips arm64 edk2's 5 s countdown.
+# Each run copies x86_64's UEFI variables, sparing the template; splash-time=0 skips edk2's 5 s wait.
 UEFI_FIRMWARE = $(firstword $(wildcard $(if $(filter aarch64,$(ARCH)), \
 	/opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd \
 	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd, \
@@ -494,9 +484,7 @@ _check-dist:
 		-nographic -smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 
-# check-persist boots without EL2, since edk2 under HVF with it never reaches
-# the boot manager, and offline, so the updater builds no slot mid-test. CI
-# checks demo in its forms jobs, so it sets PERSIST_AFTER= to boot it once.
+# check-persist boots without EL2 (edk2 under HVF never boots) and offline; CI sets PERSIST_AFTER=.
 PERSIST_ARGS = console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
 PERSIST_AFTER ?= check-demo
 check-persist: | _check-shared $(PERSIST_AFTER)

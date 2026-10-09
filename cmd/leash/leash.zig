@@ -138,6 +138,14 @@ pub fn main(init: std.process.Init) !void {
         }
         if (!writeIn(gpa, dir, "pids.max", std.fmt.comptimePrint("{d}\n", .{max_tasks})))
             l.fail(.park, "cannot set pids.max", .{});
+        // A share of contended CPUs is fairness, not containment, so a
+        // kernel without the cpu controller runs the service anyway.
+        if (s.cpu) |weight| {
+            var buf: [8]u8 = undefined;
+            const w = std.mem.print(&buf, "{d}\n", .{weight}) catch unreachable;
+            if (!writeIn(gpa, dir, "cpu.weight", w))
+                record(io, .{ .event = "uncapped", .service = name, .why = "no cpu controller" });
+        }
         var pid_buf: [24]u8 = undefined;
         const pid = std.mem.print(&pid_buf, "{d}\n", .{linux.getpid()}) catch unreachable;
         if (!writeIn(gpa, dir, "cgroup.procs", pid)) l.fail(.park, "cannot join its cgroup", .{});

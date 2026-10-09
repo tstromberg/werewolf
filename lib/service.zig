@@ -25,6 +25,9 @@ pub const Service = struct {
     render: ?settings.Render = null,
     nofile: ?u32 = null,
     memory: ?u32 = null,
+    /// cpu is the service's cpu.weight, its share of contended CPUs; null
+    /// keeps the kernel's 100 (docs/design/cpu-and-first-run.md).
+    cpu: ?u16 = null,
     share: Share = .strict,
     pledge: seal.Set = .empty,
     /// root is the OCI image the service runs in, beneath /oci; dir is
@@ -65,6 +68,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var user: ?[]const u8 = null;
     var nofile: ?u32 = null;
     var memory: ?u32 = null;
+    var cpu: ?u16 = null;
     var share: ?Share = null;
     var pledge: ?seal.Set = null;
     var root: ?[]const u8 = null;
@@ -184,6 +188,12 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 return invalid(bad, "memory takes a number of MiB");
             if (memory.? == 0 or memory.? > 1 << 20)
                 return invalid(bad, "memory is 1 to 1048576 MiB");
+        } else if (std.mem.eql(u8, key, "cpu")) {
+            if (cpu != null) return invalid(bad, "cpu twice");
+            if (args.len != 1) return invalid(bad, "cpu takes one weight, 1 to 10000");
+            cpu = std.fmt.parseInt(u16, args[0], 10) catch
+                return invalid(bad, "cpu takes a weight, 1 to 10000");
+            if (cpu.? == 0 or cpu.? > 10000) return invalid(bad, "cpu takes a weight, 1 to 10000");
         } else if (std.mem.eql(u8, key, "share")) {
             if (share != null) return invalid(bad, "share twice");
             if (args.len != 1) return invalid(bad, "share takes strict, shared or browseable");
@@ -245,6 +255,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .render = render,
         .nofile = nofile,
         .memory = memory,
+        .cpu = cpu,
         .share = share orelse .strict,
         .root = root,
         .dir = dir,
@@ -359,6 +370,7 @@ test parse {
         \\config  authorized-keys /run/config/ssh/authorized_keys
         \\nofile  65536
         \\memory  512
+        \\cpu     25
         \\share   shared
         \\pledge  stdio rpath inet listen connect exec
     , &bad);
@@ -378,11 +390,13 @@ test parse {
     try testing.expect(!s.configs[0].optional);
     try testing.expectEqual(65536, s.nofile.?);
     try testing.expectEqual(512, s.memory.?);
+    try testing.expectEqual(25, s.cpu.?);
     try testing.expectEqual(.shared, s.share);
     try testing.expectEqual(0o711, s.share.mode());
     try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
     const plain = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\n", &bad);
     try testing.expectEqual(.strict, plain.share);
+    try testing.expectEqual(null, plain.cpu);
 }
 
 test "parse refuses" {
@@ -414,6 +428,10 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\nnofile 0", .line = 3 },
         .{ .text = "exec /a\nuser x\nmemory 0", .line = 3 },
         .{ .text = "exec /a\nuser x\nmemory huge", .line = 3 },
+        .{ .text = "exec /a\nuser x\ncpu 0", .line = 3 },
+        .{ .text = "exec /a\nuser x\ncpu 10001", .line = 3 },
+        .{ .text = "exec /a\nuser x\ncpu half", .line = 3 },
+        .{ .text = "exec /a\nuser x\ncpu 10\ncpu 20", .line = 4 },
         .{ .text = "exec /a\nuser x\nshare open", .line = 3 },
         .{ .text = "exec /a\nuser x\nshare", .line = 3 },
         .{ .text = "exec /a\nuser x\nshare shared\nshare strict", .line = 4 },

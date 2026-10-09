@@ -41,22 +41,31 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
         else => |e| return e,
     };
     // Published, werewolf's repository, its key under the name the index's
-    // signature gives, and the chain's programs (compose.published).
+    // signature gives, and as packages the forms from it, which bring
+    // theirs, and the rest's (compose.published).
     if (b.spec.published) {
         const key = try b.path("{s}/keys/{s}", .{ b.p.build, package.repository_key });
-        const pub_key = try Dir.cwd().readFileAlloc(
-            b.io,
-            "release/packages.pub",
-            b.gpa,
-            .limited(64 << 10),
-        );
+        const pub_key = package.repository_pem ++ "\n";
         const had = Dir.cwd().readFileAlloc(b.io, key, b.gpa, .limited(64 << 10)) catch "";
         if (!mem.eql(u8, had, pub_key)) {
             try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(key).?);
             try b.write(key, pub_key);
         }
         const keyring = try b.path("../keys/{s}", .{package.repository_key});
-        node = try compose.published(b.gpa, node, b.chain, keyring);
+        node = compose.published(
+            b.io,
+            b.gpa,
+            Dir.cwd(),
+            node,
+            b.chain,
+            b.from_repo,
+            extra.items,
+            keyring,
+            &f,
+        ) catch |err| switch (err) {
+            error.Form => return b.steps.fail(f.text),
+            else => |e| return e,
+        };
     }
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);
@@ -151,7 +160,7 @@ fn unreachableServer(output: []const u8) bool {
 
 /// pins returns the packages a lock names for arch, NAME=VER-rN each, from
 /// the lock's "url" lines.
-fn pins(gpa: Allocator, lock: []const u8, arch: []const u8) ![]const []const u8 {
+pub fn pins(gpa: Allocator, lock: []const u8, arch: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var lines = mem.splitScalar(u8, lock, '\n');
     while (lines.next()) |line| {

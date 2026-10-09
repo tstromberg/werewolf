@@ -9,3 +9,5 @@ connect tcp/443 tcp/53
 read    /
 # status reads its findings.
 share   shared
+# A quarter share of contended CPUs, so a scan cannot starve the page.
+cpu     25

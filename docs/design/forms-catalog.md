@@ -48,25 +48,23 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 
 | Form | Defaults; its check's attack | Waits on |
 | --- | --- | --- |
-| `minecraft` on `jre` | whitelist, `online-mode`, no RCON or query port; a join off the list | `cpu`; a stand-in jar, as Mojang's cannot ship |
-| `mattermost` | no open sign-up, plugins off (a plugin is code); a plugin upload | `first-run` |
-| `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | `first-run`, `cpu` |
+| `minecraft` on `jre` | whitelist, `online-mode`, no RCON or query port; a join off the list | a stand-in jar, as Mojang's cannot ship |
+| `mattermost` | no open sign-up, plugins off (a plugin is code); a plugin upload | its first-run program |
+| `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | its first-run program |
 | `miniflux` | admin from the config; a feed on loopback (SSRF) | a recipe |
 | `unbound`, `wireguard`, `chrony` | UDP; chrony an NTS-fed server, `cmdport 0` | `listen udp`; chrony `capability time` |
 | `mariadb` | perl in its closure | `mariadb-init`, as `pg-init` |
 | `prometheus`, `loki` | admin API and remote write off; no `node_exporter` in Wolfi | `render json ... as list` |
 
 **What they teach the base.** Built: bundles, `ruby` (4.0), `exec` with
-a `run` list (gitea's hooks are Zig). Proposed, in order; `cpu` is next:
+a `run` list (gitea's hooks are Zig), `cpu WEIGHT` and the first-run
+pattern ([cpu-and-first-run.md](cpu-and-first-run.md)). Proposed, in order:
 
 | Improvement | For |
 | --- | --- |
 | `listen udp`: Landlock cannot bind UDP, so fence's rule is all of it | wireguard, unbound, chrony |
 | `capability NAME` beside `CAP_NET_BIND_SERVICE`, also an allowance | chrony, dnsmasq |
-| A clock: werewolf syncs none, so TLS and signatures trust the RTC. A Zig SNTP client in `prod` steps at boot, slews hourly | every form |
-| `cpu` in a service file: `cpu.max` or `cpu.weight` | minecraft, jellyfin |
 | `prune` of a tree (`usr/src/wordpress/.git`, 58 MB); the updater removes files only | wordpress |
-| `first-run`: a `before` program posts the config to the API on loopback before the port opens | mattermost, jellyfin |
 | `render json FILE as list`, for Prometheus's `file_sd` | prometheus |
 | `config NAME PATH oneline`: no trailing newline | openbao, wordpress |
 
@@ -76,6 +74,9 @@ a `run` list (gitea's hooks are Zig). Proposed, in order; `cpu` is next:
   attack check catch that. A recipe's pin is its supply chain.
 - Bundles make a form a graph. The build refuses a repeated user or id,
   but only howl's ad-hoc generator refuses two forms on one port.
+- The clock is the host's at boot; a pause or migration leaves it behind
+  until the next, breaking TOTP and signed requests. The fix, when needed,
+  reads the host's PTP clock (`ptp_kvm`, `ptp_vmclock`): no network.
 
 ## Alternatives Considered
 

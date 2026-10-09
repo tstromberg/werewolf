@@ -16,6 +16,7 @@ const aws = @import("aws.zig");
 const azure = @import("azure.zig");
 const app = @import("app.zig");
 const apk = @import("apk.zig");
+const published = @import("published.zig");
 const adhoc = @import("adhoc.zig");
 const oci = @import("oci.zig");
 const progress = @import("progress.zig");
@@ -31,7 +32,7 @@ const json = std.json;
 
 pub const usage =
     \\usage: howl build --with FORM,... [--build] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
-    \\       howl pack --with FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
+    \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
     \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--build] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, lima on Lima, else prod-ssh
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
@@ -87,6 +88,7 @@ pub fn main(init: std.process.Init) void {
         args[1],
     ) orelse
         fatal(io, "no verb {s}\n{s}", .{ args[1], usage });
+    published.choose(args[1], args[2..]);
     var why: Why = .{};
     const done = switch (verb) {
         .build => native.build(io, gpa, args[2..], &why),
@@ -204,12 +206,14 @@ const reserved = [_][]const u8{
 };
 
 /// chain returns form's chain, base first, as the build lays it out
-/// (lib/form.zig). form is a name in ./forms or a directory.
+/// (lib/form.zig). form is a directory, or a name: a published form, or
+/// with --build one in ./forms (published.zig).
 pub fn chain(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const forms.Form {
-    Dir.cwd().access(io, "forms", .{}) catch
-        return why.refuse("no ./forms: run howl in a werewolf checkout", .{});
+    const names = try published.names(io, gpa, published.arch, form, &.{}, why);
+    if (std.mem.eql(u8, names, "forms")) Dir.cwd().access(io, "forms", .{}) catch
+        return why.refuse("no ./forms: --build builds from a werewolf checkout", .{});
     var f: forms.Failure = .{};
-    return forms.chain(io, gpa, Dir.cwd(), form, &f) catch |err| switch (err) {
+    return forms.chainIn(io, gpa, Dir.cwd(), names, form, &f) catch |err| switch (err) {
         error.Form => why.refuse("{s}", .{f.text}),
         error.OutOfMemory => error.OutOfMemory,
     };
@@ -812,7 +816,9 @@ pub fn run(io: Io, why: *Why, argv: []const []const u8) !void {
 // --- pack -------------------------------------------------------------------------------
 
 fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
-    const args = (try adhoc.take(io, gpa, .pack, given, why)) orelse return;
+    const taken = (try adhoc.take(io, gpa, .pack, given, why)) orelse return;
+    // --build, which reads forms from this checkout, main has taken.
+    _, const args = try takeFlag(gpa, taken, &.{"--build"});
     const o = try options(gpa, args, why);
     if (o.name) |n| return why.refuse("{s}: pack takes one form, and no name", .{n});
     if (o.arch != null or o.size != null) return why.refuse("{s}, create's", .{sized_only});
@@ -1362,6 +1368,7 @@ test {
     _ = app;
     _ = @import("image.zig");
     _ = @import("apk.zig");
+    _ = @import("published.zig");
     _ = adhoc;
     _ = oci;
     _ = @import("progress.zig");

@@ -52,24 +52,13 @@ jobs:
       # which every make reads the forms through, is kept by its sources
       # and Zig's pinned version (tools/install-deps), so Zig, ~8 s to
       # install and more to build the tool, is needed only when they change.
-      - name: The form tool, built before?
-        id: form
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-        with:
-          path: build/host/form
-          # The tool's sources: the Makefile's FORM_TOOL_SOURCES.
-          key: >-
-            form-tool-${{ runner.arch }}-${{ hashFiles('tools/form.zig', 'lib/form.zig', 'lib/compose.zig',
-            'lib/allow.zig', 'lib/sshd.zig', 'lib/service.zig', 'lib/seal.zig', 'lib/settings.zig', 'tools/install-deps') }}
-      # apko resolves the locks.
-      - name: Install apko
-        run: sudo test/ci-setup apko ${{ steps.form.outputs.cache-hit != 'true' && 'zig' || '' }}
+      # apko resolves the locks; howl, built with Zig, writes the forms'
+      # configs from werewolf's repository.
+      - name: Install apko and Zig
+        run: sudo test/ci-setup apko zig
       - name: Resolve the locks
         id: inputs
         run: |
-          # Restored, the tool is older than the checkout's sources, which
-          # make would build it again from.
-          [ ! -x build/host/form ] || touch build/host/form
           make release-inputs
           echo "key=inputs-$(sha256sum build/lock/inputs | cut -c1-64)" >>"$GITHUB_OUTPUT"
       # A cache entry per inputs digest records that they were built,

@@ -2,7 +2,7 @@
 //! Update in slot-update.zig re-exports these as its methods. See README.md.
 
 const std = @import("std");
-const apk = @import("apk.zig");
+const apk = @import("apk");
 const compose = @import("compose");
 const form = @import("form");
 const stage0Modules = @import("image").modules;
@@ -14,7 +14,6 @@ const Allocator = m.Allocator;
 const linux = m.linux;
 const sandbox = m.sandbox;
 const policy = m.policy;
-const releases = m.releases;
 const verity = m.verity;
 
 const apk_seconds = m.apk_seconds;
@@ -483,12 +482,12 @@ fn apkFetch(
 /// the next pass fetches it again, and fails this pass. It returns the
 /// packages the indexes list.
 fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
-    var trusted: std.ArrayList(apk.Key) = .empty;
+    var trusted: std.ArrayList(apk.Trusted) = .empty;
     for (try u.listDir(keys)) |name| {
         const path = try u.gpa.print("{s}/{s}", .{ keys, name });
         try trusted.append(u.gpa, .{
             .name = name,
-            .key = releases.parseKey(u.gpa, try u.read(path)) catch |err| {
+            .key = apk.parseKey(u.gpa, try u.read(path)) catch |err| {
                 u.detail = path;
                 return err;
             },
@@ -630,16 +629,26 @@ fn composeInto(u: *Update, r: Root) !void {
     const io = u.io;
     const scratch = work_dir ++ "/compose";
     Dir.cwd().deleteTree(io, scratch) catch {};
-    var staged = Dir.cwd().openDir(io, meta_dir, .{}) catch |err| {
-        u.detail = meta_dir;
-        return err;
-    };
+    // The chain: each form world names as NAME-form as its package laid it
+    // in the new root, so a fix to a form arrives with it; each other form,
+    // a local one, as this image staged it.
+    var staged = try Dir.cwd().createDirPathOpen(io, scratch ++ "/staged", .{});
     defer staged.close(io);
-    staged.access(io, "forms", .{}) catch {
+    var into = try staged.createDirPathOpen(io, "forms", .{});
+    defer into.close(io);
+    const world = try u.words(try u.read("/etc/apk/world"));
+    const running: Root = try .open(u, "/");
+    defer running.close(u);
+    const here = "usr/share/werewolf/forms";
+    const mine = running.list(u, here) catch {
         u.detail = "this image stages no forms (/usr/share/werewolf/forms): it predates " ++
             "compose; install a newer one";
         return error.NoStagedForms;
     };
+    for (r.list(u, here) catch &.{}) |name| if (published(world, name))
+        try copyOut(u, r, try u.gpa.print("{s}/{s}", .{ here, name }), into, name);
+    for (mine) |name| if (!published(world, name))
+        try copyOut(u, running, try u.gpa.print("{s}/{s}", .{ here, name }), into, name);
     var f: form.Failure = .{};
     errdefer if (f.text.len > 0) {
         u.detail = f.text;
@@ -652,7 +661,7 @@ fn composeInto(u: *Update, r: Root) !void {
             .x86_64 => .x86_64,
             else => @compileError("werewolf runs on aarch64 and x86_64"),
         },
-        .dev = if (staged.access(io, "dev", .{})) true else |_| false,
+        .dev = if (Dir.cwd().access(io, meta_dir ++ "/dev", .{})) true else |_| false,
         .posture_known = try u.read(meta_dir ++ "/posture-known"),
     };
     const accounts: compose.Accounts = .{
@@ -668,6 +677,55 @@ fn composeInto(u: *Update, r: Root) !void {
     try copyTree(u, r, scratch ++ "/ro", "", &.{});
     try copyTree(u, r, scratch ++ "/meta", "", &.{});
     try Dir.cwd().deleteTree(io, scratch);
+}
+
+/// published reports whether world takes form name from werewolf's
+/// repository, as NAME-form.
+fn published(world: []const []const u8, name: []const u8) bool {
+    for (world) |w| {
+        const stem = std.mem.cutSuffix(u8, w, "-form") orelse continue;
+        if (std.mem.eql(u8, stem, name)) return true;
+    }
+    return false;
+}
+
+/// copyOut copies directory path in r to dst/to, files with their modes and
+/// links as links. Every open resolves within r, so a link in the tree
+/// leads nowhere outside it.
+fn copyOut(u: *Update, r: Root, path: []const u8, dst: Dir, to: []const u8) !void {
+    errdefer if (u.detail.len == 0) {
+        u.detail = path;
+    };
+    const d: Dir = .{ .handle = try r.openIn(u, path, Root.dir_flags) };
+    defer d.close(u.io);
+    var out = try dst.createDirPathOpen(u.io, to, .{});
+    defer out.close(u.io);
+    var it = d.iterate();
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    while (try it.next(u.io)) |e| {
+        const p = try u.gpa.print("{s}/{s}", .{ path, e.name });
+        switch (e.kind) {
+            .directory => try copyOut(u, r, p, out, e.name),
+            .sym_link => try out.symLink(
+                u.io,
+                buf[0..try d.readLink(u.io, e.name, &buf)],
+                e.name,
+                .{},
+            ),
+            .file => {
+                const st = try d.statFile(u.io, e.name, .{ .follow_symlinks = false });
+                try out.writeFile(u.io, .{
+                    .sub_path = e.name,
+                    .data = try r.read(u, p),
+                    .flags = .{ .permissions = st.permissions },
+                });
+            },
+            else => {
+                u.detail = p;
+                return error.UnexpectedFileKind;
+            },
+        }
+    }
 }
 
 /// copyTree copies directory path from the tree at from ("" for /) into r,
@@ -1453,6 +1511,14 @@ test isCachedOf {
     try testing.expect(!isCachedOf("libzstd1-1.5.7-r10.933e1e74.apk", pkgs));
     try testing.expect(!isCachedOf("zstd-1.5.7-r10.apk", pkgs));
     try testing.expect(!isCachedOf(".apk", pkgs));
+}
+
+test published {
+    const world = [_][]const u8{ "prod-form", "werewolf-format=1", "caddy", "sshd-forms", "-form" };
+    try testing.expect(published(&world, "prod"));
+    try testing.expect(!published(&world, "caddy"));
+    try testing.expect(!published(&world, "sshd"));
+    try testing.expect(!published(&world, "minimal"));
 }
 
 test heldFormat {

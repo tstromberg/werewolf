@@ -70,7 +70,11 @@ fn cgroups(m: *Machine) void {
         return say("cgroup2 without memory/pids; services run uncapped", .{});
     mkdir("/run/cgroup/svc", 0o755);
     _ = writeFile("/run/cgroup/svc/cgroup.subtree_control", "+memory +pids");
-    say("cgroups: a memory cap and a reaper per service", .{});
+    // Apart, so a kernel without the cpu controller still caps memory; a
+    // service's cpu weight then goes unset (docs/design/cpu-and-first-run.md).
+    const cpu = writeFile("/run/cgroup/cgroup.subtree_control", "+cpu") and
+        writeFile("/run/cgroup/svc/cgroup.subtree_control", "+cpu");
+    say("cgroups: a memory cap{s} and a reaper per service", .{if (cpu) ", a cpu share" else ""});
 }
 
 /// seed creates the /run directories that the read-only root's /etc links

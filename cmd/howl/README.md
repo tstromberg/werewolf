@@ -9,14 +9,13 @@ here or in a cloud. The design is [docs/design/cli.md](../../docs/design/cli.md)
 ## Background
 
 A machine is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a
-config tar of secrets and settings that init reads from a block device or from
-cloud user data ([docs/cloud.md](../../docs/cloud.md)).
+config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 
 | Verb | Does |
 | --- | --- |
 | `build --with FORM` | builds the image itself, byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)): boot disk (`disk.zig`, with mtools and e2fsprogs) and manifest `FORM-ARCH.json` (`manifest.zig`) in `dist`; `--format raw\|vhd\|vmdk` converts with qemu-img |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
-| `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's programs in, not the published ones the machine updates |
+| `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's forms and programs in, not the published ones the machine updates |
 | `run` | `create` of `werewolf-run`, replacing the last; default form lima on Lima, else prod-ssh |
 | `ssh`, `console`, `stop`, `delete` | reach, read or remove a machine; with no NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
@@ -36,20 +35,21 @@ cloud user data ([docs/cloud.md](../../docs/cloud.md)).
 
 ## Detailed design
 
-**Config tar.** pack reads FORM's chain in `./forms`; each service's `config`,
-`setting` and `render` lines declare a flag (`lib/service.zig`). howl's own
-flags are `--config DIR`, `--hostname`, `--ip/--gw/--dns`, `--data-key`,
-`--root-keys` and `--update-policy`. A FILE flag reads a file or `-` (stdin),
-never a value on the line. The guest's code (`lib/settings.zig`, `network.zig`,
-`update-policy.zig`) checks every value first. The tar is ustar, sorted, root's,
-0600 and dated 1970, so the same inputs give the same bytes. Names are at most
-100 bytes of `[A-Za-z0-9._-/]`, files at most 1 MiB. Clouds add cloud-metadata's
-limits (32 files, 32 KiB each, 48 KiB in all) and AWS's and Azure's caps on user data.
+**Forms.** A name is NAME-form from werewolf's repository, checked against its
+signed index into `build/published/ARCH` (`published.zig`): the machine updates
+it. A path is the caller's own, never updated. `--build` takes `./forms`.
 
-**Engines.** Without `--on`, create picks Lima (macOS), bhyve (FreeBSD
-x86_64), Firecracker (Linux with KVM, if sudo needs no password), else QEMU.
-Local machines run the host's arch with 2 GiB and 2 CPUs, 4 under QEMU and a
-Lima-managed machine; howl builds each one's image itself, as `build` does.
+**Config tar.** Each service's `config`, `setting` and `render` lines declare a
+flag (`lib/service.zig`); howl's own are `--config DIR`, `--hostname`,
+`--ip/--gw/--dns`, `--data-key`, `--root-keys`, `--update-policy`. A FILE flag
+reads a file or `-`, never a value. The guest's code checks every value first.
+The tar is ustar, sorted, root's, 0600, dated 1970. Names are at most 100 bytes
+of `[A-Za-z0-9._-/]`, files 1 MiB; clouds add cloud-metadata's limits (32 files
+of 32 KiB, 48 KiB in all) and AWS's and Azure's caps on user data.
+
+**Engines.** Without `--on`, create picks Lima (macOS), bhyve (FreeBSD x86_64),
+Firecracker (Linux, KVM, sudo without a password), else QEMU. Local machines run
+the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed), built as `build` does.
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -67,15 +67,14 @@ base64 user data. Cloud images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`), so
 a build uploads once and delete keeps the image. A cloud machine lets nothing in:
 `--allow-from me|CIDR` opens the form's TCP ports, or create prints the commands.
 
-**Second create.** Under QEMU, create replaces the machine and keeps /data.
-Elsewhere a machine of the same form keeps its disks and takes the new config
-after a hard stop (werewolf ignores shutdown requests), a graceful stop under
-Lima, or a restart in a cloud. Another form, or `--app`, is refused.
+**Second create.** Under QEMU it replaces the machine, keeping /data; elsewhere
+the machine keeps its disks and takes the new config after a hard stop, a
+graceful one under Lima, or a cloud restart. Another form or `--app` is refused.
 
 ## Drawbacks
 
-- howl needs a checkout, make and Zig (stage0's and forms' own programs; all
-  of them under `--build`), melange, compilers, and provider CLIs that change.
+- howl needs a checkout, make and Zig (a path form's own programs; all of them
+  under `--build`), melange, compilers, and provider CLIs that change.
 
 ## Alternatives Considered
 
@@ -91,10 +90,11 @@ Lima, or a restart in a cloud. Another form, or `--app`, is refused.
 | howl changes a machine it did not make | delete and create skip or refuse one without the `werewolf-form` tag |
 | Config tar left readable | written 0600 and renamed into place; delete removes `build/machines/NAME` |
 | Untrusted OCI layers | `_unpack` runs with no environment; on Linux, Landlock confines it |
+| A forged or swapped form | a name's form is taken only as the packages key's index lists it (`lib/apk.zig`) |
 
 ## Reliability Considerations
 
-- Images are named by content, so a retried upload or create finds them, and
+- Images are named by content: a retried upload or create finds them, and
   `console` works whether or not the machine came up.
 - create does not roll back: a partial failure leaves named leftovers.
 - Open: Proxmox has never run on a real node.

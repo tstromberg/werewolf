@@ -18,7 +18,10 @@ forms/NAME/
 ```
 
 A form has the parts of every form in its chain, base first and its own
-last, so its files win; `make list-forms` shows each chain.
+last, so its files win; `make list-forms` shows each chain. CI publishes
+each form but those with melange recipes as NAME-form
+([docs/releases.md](../docs/releases.md#packages)), and howl takes a form
+by name from there, so the machine updates it; `--build` takes this tree's.
 
 ## form.yaml
 
@@ -97,4 +100,6 @@ that share one, or a hash that lands on an id taken, fail the build.
    with its excuse, or fix it.
 
 A form outside this tree builds the same way: `make FORM=../myapp`, a
-form named after its directory, built on forms here.
+form named after its directory, built on forms here. howl takes one by its
+path (`--with ./myapp`), built on the published forms, and the machine
+never updates it.

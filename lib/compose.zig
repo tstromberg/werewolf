@@ -113,29 +113,7 @@ pub fn compose(
             "{s} and {s}: two forms named {s} in one chain; the image stages each by name",
             .{ before.dir, fm.dir, fm.name },
         );
-        const stage = try gpa.print("forms/{s}", .{fm.name});
-        try rec.createDirPath(io, stage);
-        for ([_][]const u8{ "form.yaml", "apko.yaml" }) |file| {
-            const src = try gpa.print("{s}/{s}", .{ fm.dir, file });
-            const text = root.readFileAlloc(
-                io,
-                src,
-                gpa,
-                .limited(256 << 10),
-            ) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-            try put(io, rec, try gpa.print("{s}/{s}", .{ stage, file }), text);
-        }
-        try lay(
-            io,
-            gpa,
-            root,
-            try gpa.print("{s}/rootfs", .{fm.dir}),
-            rec,
-            try gpa.print("{s}/rootfs", .{stage}),
-        );
+        try stage(io, gpa, root, fm, rec);
     }
     try put(io, rec, "posture-known", b.posture_known);
     const top = forms[forms.len - 1];
@@ -162,6 +140,25 @@ pub fn compose(
 
 fn put(io: Io, dir: Dir, path: []const u8, data: []const u8) !void {
     try dir.writeFile(io, .{ .sub_path = path, .data = data });
+}
+
+/// stage writes fm under dir as an image stages it, at forms/NAME:
+/// form.yaml, apko.yaml and rootfs. The updater composes from what an image
+/// staged; a form's package (NAME-form) carries the same tree.
+pub fn stage(io: Io, gpa: Allocator, root: Dir, fm: Form, dir: Dir) !void {
+    const at = try gpa.print("forms/{s}", .{fm.name});
+    try dir.createDirPath(io, at);
+    for ([_][]const u8{ "form.yaml", "apko.yaml" }) |file| {
+        const src = try gpa.print("{s}/{s}", .{ fm.dir, file });
+        const text = root.readFileAlloc(io, src, gpa, .limited(256 << 10)) catch |err|
+            switch (err) {
+                error.FileNotFound => continue,
+                else => |e| return e,
+            };
+        try put(io, dir, try gpa.print("{s}/{s}", .{ at, file }), text);
+    }
+    const rootfs = try gpa.print("{s}/rootfs", .{fm.dir});
+    try lay(io, gpa, root, rootfs, dir, try gpa.print("{s}/rootfs", .{at}));
 }
 
 /// lay copies the tree at src, under root, into dst at to ("" for dst
@@ -281,9 +278,10 @@ pub fn apko(
 }
 
 /// format numbers the files compose writes and werewolf's programs read. Each
-/// program's package depends on werewolf-format=format, and a published
-/// image's world pins it, so a machine never takes a program built for
-/// another format; bump it when either side changes incompatibly.
+/// of werewolf's packages, programs and forms, depends on
+/// werewolf-format=format, and a published image's world pins it, so a
+/// machine never takes one built for another format; bump it when either
+/// side changes incompatibly.
 pub const format = 1;
 
 /// image_programs are the programs from cmd/ that every image runs, stage0's
@@ -295,39 +293,106 @@ pub const image_programs = [_][]const u8{
     "leash-reap",   "bite-cleanup",
 };
 
-/// programPackages returns the werewolf-NAME package of each program the
-/// chain runs: every image's, then form.yaml's programs, once each, a
-/// library's (popen-shim.so) named without its suffix.
-pub fn programPackages(gpa: Allocator, forms: []const Form) ![]const []const u8 {
-    var names: std.array_hash_map.String(void) = .empty;
-    for (image_programs) |p| try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
-    for (forms) |fm| for (try fm.items(gpa, "programs")) |item| {
+/// formPrograms adds the packages of fm's form.yaml programs to names.
+fn formPrograms(gpa: Allocator, fm: Form, names: *std.array_hash_map.String(void)) !void {
+    for (try fm.items(gpa, "programs")) |item| {
         var it = mem.tokenizeAny(u8, item, " \t");
         while (it.next()) |p| {
             const stem = p[0 .. mem.findScalarLast(u8, p, '.') orelse p.len];
             try names.put(gpa, try gpa.print("werewolf-{s}", .{stem}), {});
         }
-    };
+    }
+}
+
+/// packaged reports whether CI publishes fm as NAME-form. A form with
+/// melange recipes is not: its packages exist only where it is built.
+pub fn packaged(io: Io, gpa: Allocator, root: Dir, fm: Form) !bool {
+    root.access(io, try gpa.print("{s}/melange", .{fm.dir}), .{}) catch return true;
+    return false;
+}
+
+/// formDepends returns what NAME-form depends on: the format, the forms
+/// fm is built on and takes with it, its packages, and werewolf's programs
+/// it runs, every image's for a form built on none.
+pub fn formDepends(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    fm: Form,
+    f: *Failure,
+) ![]const []const u8 {
+    var names: std.array_hash_map.String(void) = .empty;
+    try names.put(gpa, try gpa.print("werewolf-format={d}", .{format}), {});
+    if (fm.spec.get("base")) |b|
+        try names.put(gpa, try gpa.print("{s}-form", .{b.scalar.text}), {})
+    else for (image_programs) |p|
+        try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
+    for (try fm.items(gpa, "with")) |m| try names.put(gpa, try gpa.print("{s}-form", .{m}), {});
+    try formPrograms(gpa, fm, &names);
+    for (try formPackages(io, gpa, root, fm, f)) |p| try names.put(gpa, p, {});
     return names.keys();
 }
 
-/// published returns config, an apko config, with werewolf's repository,
-/// its key at keyring (a path whose file name is package.repository_key,
-/// the name the index's signature gives), the packages of the programs the
-/// chain runs, so a machine updates them with apk, and the format they read.
+/// formPackages returns the packages fm's apko.yaml names.
+fn formPackages(io: Io, gpa: Allocator, root: Dir, fm: Form, f: *Failure) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    const config = try form.apko(io, gpa, root, &.{fm}, &.{}, f);
+    if (config.get("contents")) |c| if (c.get("packages")) |list| if (list == .list)
+        for (list.list) |p| if (p == .scalar) try out.append(gpa, p.scalar.text);
+    return out.items;
+}
+
+/// published returns config for a build that takes werewolf's programs, and
+/// the forms named in from_repo, from werewolf's repository: its repository
+/// and keyring added, and its packages each such form as NAME-form, which
+/// brings its own, then the other forms' packages and programs, extra, and
+/// the format pin. Every image's programs come with the form built on none,
+/// or are named when that form is not from the repository. keyring must be
+/// named as the index's signature names the key.
 pub fn published(
+    io: Io,
     gpa: Allocator,
+    root: Dir,
     config: form.Node,
     forms: []const Form,
+    from_repo: []const []const u8,
+    extra: []const []const u8,
     keyring: []const u8,
+    f: *Failure,
 ) !form.Node {
     if (!mem.eql(u8, std.fs.path.basename(keyring), package.repository_key))
         return error.KeyringName;
-    const programs = try programPackages(gpa, forms);
-    const pin = try gpa.print("werewolf-format={d}", .{format});
-    const list = try gpa.alloc(form.Node, programs.len + 1);
-    for (programs, list[0..programs.len]) |p, *n| n.* = .{ .scalar = .{ .raw = p, .text = p } };
-    list[programs.len] = .{ .scalar = .{ .raw = pin, .text = pin } };
+    var names: std.array_hash_map.String(void) = .empty;
+    for (forms) |fm| {
+        const repo = for (from_repo) |n| {
+            if (mem.eql(u8, n, fm.name)) break true;
+        } else false;
+        if (repo) {
+            try names.put(gpa, try gpa.print("{s}-form", .{fm.name}), {});
+            continue;
+        }
+        if (fm.spec.get("base") == null) for (image_programs) |p|
+            try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
+        try formPrograms(gpa, fm, &names);
+        for (try formPackages(io, gpa, root, fm, f)) |p| try names.put(gpa, p, {});
+    }
+    for (extra) |p| try names.put(gpa, p, {});
+    try names.put(gpa, try gpa.print("werewolf-format={d}", .{format}), {});
+    const list = try gpa.alloc(form.Node, names.count());
+    for (names.keys(), list) |p, *n| n.* = .{ .scalar = .{ .raw = p, .text = p } };
+
+    // The packages replace the chain's; the repository and key join its.
+    var contents: std.ArrayList(form.Entry) = .empty;
+    if (config.get("contents")) |c| if (c == .map) for (c.map) |e|
+        if (!mem.eql(u8, e.key, "packages")) try contents.append(gpa, e);
+    try contents.append(gpa, .{ .key = "packages", .value = .{ .list = list } });
+    var top: std.ArrayList(form.Entry) = .empty;
+    for (config.map) |e| try top.append(gpa, if (mem.eql(u8, e.key, "contents"))
+        .{ .key = e.key, .value = .{ .map = contents.items } }
+    else
+        e);
+    if (config.get("contents") == null)
+        try top.append(gpa, .{ .key = "contents", .value = .{ .map = contents.items } });
     const one = struct {
         fn of(a: Allocator, text: []const u8) !form.Node {
             return .{ .list = try a.dupe(
@@ -336,13 +401,12 @@ pub fn published(
             ) };
         }
     };
-    const contents = try gpa.dupe(form.Entry, &.{
+    const repo = try gpa.dupe(form.Entry, &.{
         .{ .key = "repositories", .value = try one.of(gpa, package.repository) },
         .{ .key = "keyring", .value = try one.of(gpa, keyring) },
-        .{ .key = "packages", .value = .{ .list = list } },
     });
-    const add = try gpa.dupe(form.Entry, &.{.{ .key = "contents", .value = .{ .map = contents } }});
-    return form.merge(gpa, config, .{ .map = add });
+    const add = try gpa.dupe(form.Entry, &.{.{ .key = "contents", .value = .{ .map = repo } }});
+    return form.merge(gpa, .{ .map = top.items }, .{ .map = add });
 }
 
 /// mapOf returns a map node of plain scalars, in the order given.

@@ -230,19 +230,25 @@ workflow builds and checks, then fails at signing and publishes nothing.
 
 ## Packages
 
-werewolf's programs are also apk packages, at
+werewolf's programs and forms are also apk packages, at
 `https://dist.werewolf-linux.org/apk/ARCH/` in the R2 bucket `werewolf`
-([custom-updates.md](design/custom-updates.md)). When check passes on main,
-the packages workflow packs both arches twice, requires the copies to match,
-and publishes (release/packages) only the packages whose files changed,
-with the index signed again. Published packages are never replaced or
-removed. Each program depends on `werewolf-format`, the version of the files
-compose writes (`format` in lib/compose.zig); bump it on an incompatible
-change, and machines on the old one keep the last programs for it. The index is signed by `release/packages.pub`'s key, the secret
-`WEREWOLF_PACKAGES_KEY` in the environment `release`; R2 takes uploads with
-`R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`, a token for that bucket alone.
-Nothing is published until the repository variable `PUBLISH_PACKAGES` is
-`true`.
+([custom-updates.md](design/custom-updates.md)): `werewolf-PROGRAM` for each
+program, and `NAME-form` for each form but those with melange recipes, its
+files as an image stages them, depending on its base's, the forms it takes,
+its packages and its programs. When check passes on main, the packages
+workflow packs both arches twice, requires the copies to match, and publishes
+(release/packages) only the packages whose files changed, with the index
+signed again. Published packages are never replaced or removed.
+
+Each package depends on `werewolf-format`, the version of the files compose
+writes (`format` in lib/compose.zig); bump it on an incompatible change, and
+machines on the old one keep the last packages for it. The index is signed
+by `release/packages.pub`'s key, the secret `WEREWOLF_PACKAGES_KEY` in the
+environment `release`; R2 takes uploads with `R2_ACCESS_KEY_ID` and
+`R2_SECRET_ACCESS_KEY`, a token for that bucket alone. Nothing is published
+until the repository variable `PUBLISH_PACKAGES` is `true`. A release's forms
+are the published ones, so howl writes its configs and locks (`make
+release-inputs`), from the forms the repository holds then.
 
 ## The tiers feed
 

@@ -17,6 +17,7 @@ const packages = @import("packages.zig");
 const slot = @import("slot.zig");
 const manifest = @import("manifest.zig");
 const disk = @import("disk.zig");
+const published = @import("published.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -34,6 +35,8 @@ pub const Goals = struct {
     qcow2: bool = false,
     /// vmlinux is BUILD/vmlinux, x86_64's kernel for Firecracker.
     vmlinux: bool = false,
+    /// lock is the form's apko config and lock, for make's release-inputs.
+    lock: bool = false,
 };
 
 /// Spec is what to build: a form, for an arch, with or without a shell
@@ -423,6 +426,9 @@ pub const B = struct {
     /// arch is spec's, as compose names it.
     arch: compose.Arch,
     chain: []const forms.Form,
+    /// from_repo are the chain's forms that came from werewolf's repository
+    /// (published.zig), each NAME-form in the image's world.
+    from_repo: []const []const u8,
     /// name is the form's name, the last of its chain's.
     name: []const u8,
     /// self is howl's executable, which holds the steps' code: what the
@@ -577,7 +583,7 @@ pub fn make(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
 /// prepare plans a build of s and runs no step: build-apk's, whose melange
 /// VM boots the kernel any form's build fetches.
 pub fn prepare(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec) !B {
-    return plan(io, gpa, steps, s, try paths(gpa, s), try toolEnv(gpa));
+    return plan(io, gpa, steps, s, try paths(gpa, s), try toolEnv(gpa), "forms");
 }
 
 /// toolEnv returns the tools' environment: COPYFILE_DISABLE=1, so macOS's
@@ -594,9 +600,31 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
     const p = try paths(gpa, s);
     const env = try toolEnv(gpa);
-    // make compiles werewolf's programs, in a checkout: each compile is
-    // mostly one thread, so as many at once as there are CPUs.
-    if (exists(io, "Makefile")) {
+    // Published, the forms a name reaches come from werewolf's repository,
+    // at the versions a frozen build's lock names.
+    const names = try published.names(
+        io,
+        gpa,
+        if (s.published) s.arch else null,
+        s.form,
+        try lockedForms(io, gpa, s),
+        steps.why,
+    );
+    var b = try plan(io, gpa, steps, s, p, env, names);
+    const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2;
+    const suffix = try gpa.print("{s}{s}", .{
+        if (s.dev) "-dev" else "",
+        if (s.published) "-published" else "",
+    });
+    const config = try b.path("{s}/form/{s}{s}.yaml", .{ p.build, b.name, suffix });
+    const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
+    if (goals.lock and !image_goals and !goals.vmlinux) {
+        try packages.apkoConfig(&b, config);
+        return packages.relock(&b, lock, config, b.form_files);
+    }
+    // make compiles the programs the overlay lays, in a checkout: each
+    // compile is mostly one thread, so as many at once as there are CPUs.
+    if (b.bins.len > 0 and exists(io, "Makefile")) {
         if (progress.phaseOf(try gpa.print("{s}/", .{p.programs}))) |ph| try steps.enter(ph);
         const ran = try steps.exec(&.{.{ .argv = &.{
             howl.make_cmd,
@@ -611,19 +639,12 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         }, .env = env }}, .{});
         if (!ran.ok) return steps.fail("make programs failed");
     }
-    var b = try plan(io, gpa, steps, s, p, env);
     try packages.kernel(&b);
     if (goals.vmlinux) try packages.vmlinux(&b);
-    if (!goals.image and !goals.slot and !goals.disk and !goals.qcow2) return;
-
-    const suffix = try gpa.print("{s}{s}", .{
-        if (s.dev) "-dev" else "",
-        if (s.published) "-published" else "",
-    });
-    const config = try b.path("{s}/form/{s}{s}.yaml", .{ p.build, b.name, suffix });
-    const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
+    if (!image_goals and !goals.lock) return;
     try packages.apkoConfig(&b, config);
     try packages.relock(&b, lock, config, b.form_files);
+    if (!image_goals) return;
     const rootfs = try b.path("{s}/rootfs.tar", .{p.out});
     try packages.apkoBuild(&b, rootfs, config, lock, &.{ lock, config });
     try app.compile(&b);
@@ -645,6 +666,24 @@ const every_program = [_][]const u8{
 };
 
 /// plan reads the form's chain and works out everything the steps need.
+/// lockedForms returns the form packages a frozen published build's lock
+/// pins, NAME=VERSION each, so its forms are the ones it installs.
+fn lockedForms(io: Io, gpa: Allocator, s: Spec) ![]const []const u8 {
+    if (!s.freeze or !s.published) return &.{};
+    const name = std.fs.path.basename(mem.trimEnd(u8, s.form, "/"));
+    const path = try gpa.print("build/lock/{s}{s}-published.lock.json", .{
+        name,
+        if (s.dev) "-dev" else "",
+    });
+    const lock = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20)) catch return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (try packages.pins(gpa, lock, @tagName(s.arch))) |pin| {
+        const eq = mem.findScalar(u8, pin, '=') orelse continue;
+        if (mem.endsWith(u8, pin[0..eq], "-form")) try out.append(gpa, pin);
+    }
+    return out.items;
+}
+
 fn plan(
     io: Io,
     gpa: Allocator,
@@ -652,13 +691,19 @@ fn plan(
     s: Spec,
     p: Paths,
     env: *const std.process.Environ.Map,
+    names: []const u8,
 ) !B {
     var f: forms.Failure = .{};
-    const chain = forms.chain(io, gpa, Dir.cwd(), s.form, &f) catch |err| switch (err) {
+    const chain = forms.chainIn(io, gpa, Dir.cwd(), names, s.form, &f) catch |err| switch (err) {
         error.Form => return steps.fail(f.text),
         else => |e| return e,
     };
     const name = chain[chain.len - 1].name;
+    var from_repo: std.ArrayList([]const u8) = .empty;
+    if (s.published) for (chain) |c| {
+        const under = mem.cutPrefix(u8, c.dir, names) orelse continue;
+        if (under.len > 0 and under[0] == '/') try from_repo.append(gpa, c.name);
+    };
 
     // The overlay's directories, in the Makefile's order (OVERLAY_DIRS),
     // and the programs in them. Published, werewolf's packaged programs
@@ -759,6 +804,7 @@ fn plan(
         .p = p,
         .arch = arch,
         .chain = chain,
+        .from_repo = from_repo.items,
         .name = name,
         .self = try std.process.executablePathAlloc(io, gpa),
         .form_files = form_files.items,

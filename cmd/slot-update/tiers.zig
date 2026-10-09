@@ -8,6 +8,7 @@ const policy = @import("update-policy");
 const sources = @import("cve");
 const cve = @import("cve.zig");
 const releases = @import("release.zig");
+const apk = @import("apk");
 
 pub const format = "werewolf-cve-tiers/1";
 
@@ -39,13 +40,13 @@ pub const Feed = struct {
 /// feed if check accepts it.
 pub fn open(
     gpa: Allocator,
-    key: releases.Key,
+    key: apk.Key,
     data: []const u8,
     sig: []const u8,
     now: i64,
     last: ?[]const u8,
 ) !Feed {
-    try releases.verify(key, data, sig);
+    try apk.verify(key, data, sig);
     const f = try std.json.parseFromSliceLeaky(Feed, gpa, data, .{ .ignore_unknown_fields = true });
     try check(f, now, last);
     return f;

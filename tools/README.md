@@ -9,13 +9,16 @@ itself): its chain of bases, form.yaml keys, ports, weaknesses, kernel
 arguments, modules, merged apko config, and the files the chain derives
 (lib/form.zig, lib/compose.zig, forms/README.md). `form tree` prints every
 form and its chain, and `form released` the forms CI publishes
-(lib/compose.zig's `release_forms`). Run it with no arguments for the usage.
-A form that cannot be read fails with file and line.
+(lib/compose.zig's `release_forms`). For `make packages`, `form packaged`
+lists the forms CI publishes as NAME-form, `form stage FORM DIR` writes one's
+files as an image stages them, and `form depends FORM` what it depends on.
+Run it with no arguments for the usage. A form that cannot be read fails
+with file and line.
 
 ## package
 
-Packs werewolf's programs as apk packages and indexes and signs their
-repository (lib/package.zig). `make packages` runs the first two for ARCH.
+Packs werewolf's programs and forms as apk packages and indexes and signs
+their repository (lib/package.zig). `make packages` runs the first two for ARCH.
 
 - `package pack DIR TREE NAME VERSION ARCH TIME DESCRIPTION [depend:D|provide:P]...`
   packs the files under TREE as NAME into `DIR/NAME-VERSION.apk`, with its

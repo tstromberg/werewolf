@@ -141,7 +141,11 @@ new root, where a package's symlink could redirect a write. See
 [docs/design/custom-updates.md](../docs/design/custom-updates.md).
 
 Each image stages its chain (form.yaml, apko.yaml, rootfs) and
-posture-known in /usr/share/werewolf, and the updater composes from that.
+posture-known in /usr/share/werewolf. A form CI publishes, NAME-form, holds
+the same staged tree (`stage`) and depends on what the form names
+(`formDepends`); `published` makes a build's world those packages, so the
+updater composes from the new root's forms, and from the image's own copy
+of a form given as a path.
 compose adds apko.yaml's accounts the way apko does: on the build's root it
 checks that apko's lines end each account file, in order; on a machine's,
 which apk filled, it adds them. It refuses a root holding only some of them,
@@ -170,9 +174,20 @@ DESCRIPTION and APKINDEX, which is what the signature covers. A member that
 another follows is a tar without its end, as abuild writes it, so the
 members read as one tar. Nothing records when a package was built, so the
 same input gives the same bytes. Packages carry no signature of their own,
-as Wolfi's carry none: the index's `C:` vouches for them. slot-update
-checks all of this before apk reads a byte (cmd/slot-update/apk.zig), and a
-test there runs those checks on what this writes.
+as Wolfi's carry none: the index's `C:` vouches for them. `apk` checks all
+of this before anything reads a byte, and a test there runs those checks on
+what this writes. `repository_pem` is release/packages.pub, which howl
+checks fetched forms with.
+
+## apk
+
+Verifies apk indexes and packages before any parser but its own reads
+them: an index's signature by a trusted RSA key (`parseKey`, `verifyHash`:
+PKCS#1 v1.5 over SHA-1 or SHA-256), then each package's control member by
+the index's SHA-1 and its data by `datahash`. slot-update checks apk's
+cache with it before root's apk runs (`readIndex`, `checkPackage`); howl
+checks the forms it fetches (`records`, `contents`). Release manifests and
+the tiers feed use the same key code.
 
 ## allow
 

@@ -459,11 +459,24 @@ pub fn isName(s: []const u8) bool {
 /// load reads the form ref names: forms/REF, or, when ref holds a slash,
 /// the form in that directory, named after it. It checks every form.yaml key.
 pub fn load(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Error!Form {
+    return loadIn(io, gpa, root, "forms", ref, f);
+}
+
+/// loadIn is load with names resolved in directory names, not forms:
+/// howl's published forms, fetched from werewolf's repository.
+pub fn loadIn(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    names: []const u8,
+    ref: []const u8,
+    f: *Failure,
+) Error!Form {
     const outside = mem.findScalar(u8, ref, '/') != null;
     const dir = if (outside)
         mem.trimEnd(u8, ref, "/")
     else
-        try gpa.print("forms/{s}", .{ref});
+        try gpa.print("{s}/{s}", .{ names, ref });
     const name = std.fs.path.basename(dir);
     if (!isName(name)) return f.fail(gpa, "{s}: not a form's name (a-z, 0-9 and -)", .{ref});
     const apko_path = try gpa.print("{s}/apko.yaml", .{dir});
@@ -570,16 +583,29 @@ const max_chain = 16;
 /// lays them. Each form follows the forms it takes `with` it (and their
 /// bases), and ref comes last, so each form's files win over what it takes.
 pub fn chain(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Error![]const Form {
-    const top = try load(io, gpa, root, ref, f);
+    return chainIn(io, gpa, root, "forms", ref, f);
+}
+
+/// chainIn is chain with names resolved in directory names (loadIn).
+pub fn chainIn(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    names: []const u8,
+    ref: []const u8,
+    f: *Failure,
+) Error![]const Form {
+    const top = try loadIn(io, gpa, root, names, ref, f);
     var out: std.ArrayList(Form) = .empty;
-    for (try bases(io, gpa, root, top, f)) |form| {
+    for (try basesIn(io, gpa, root, names, top, f)) |form| {
         for (try form.items(gpa, "with")) |member| {
             if (!isName(member)) return f.fail(
                 gpa,
                 "{s}: with names forms in forms/, not {s}",
                 .{ form.dir, member },
             );
-            for (try bases(io, gpa, root, try load(io, gpa, root, member, f), f)) |c| {
+            const m = try loadIn(io, gpa, root, names, member, f);
+            for (try basesIn(io, gpa, root, names, m, f)) |c| {
                 if (mem.eql(u8, c.dir, top.dir))
                     return f.fail(gpa, "{s}: takes itself, through {s}", .{ top.dir, member });
                 try appendNew(gpa, &out, c);
@@ -597,6 +623,17 @@ fn appendNew(gpa: Allocator, out: *std.ArrayList(Form), form: Form) Allocator.Er
 
 /// bases returns form and the forms it is built on, base first.
 pub fn bases(io: Io, gpa: Allocator, root: Dir, form: Form, f: *Failure) Error![]const Form {
+    return basesIn(io, gpa, root, "forms", form, f);
+}
+
+fn basesIn(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    names: []const u8,
+    form: Form,
+    f: *Failure,
+) Error![]const Form {
     var out: std.ArrayList(Form) = .empty;
     try out.append(gpa, form);
     var at = form;
@@ -606,7 +643,7 @@ pub fn bases(io: Io, gpa: Allocator, root: Dir, form: Form, f: *Failure) Error![
             "{s}: built on forms {d} deep",
             .{ form.dir, max_chain },
         );
-        at = try load(io, gpa, root, b.scalar.text, f);
+        at = try loadIn(io, gpa, root, names, b.scalar.text, f);
         for (out.items) |have| if (mem.eql(u8, have.dir, at.dir))
             return f.fail(gpa, "{s}: built on itself, through {s}", .{ form.dir, have.dir });
         try out.insert(gpa, 0, at);
