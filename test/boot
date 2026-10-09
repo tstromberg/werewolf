@@ -82,6 +82,7 @@ proc say {status what {detail ""}} {
 proc diagnosis {} {
 	global log host
 	set f [open $log]
+	fconfigure $f -translation binary
 	set text [string map [list "\r" ""] [read $f]]
 	close $f
 	set d ""
@@ -423,9 +424,17 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 if {[llength $console]} {
 	set deadline [expr {[clock seconds] + 300}]
 	while 1 {
+		# Binary, so a lone carriage return stays one: Tcl's default turns
+		# each into a newline, and the console ends lines \r\r\n.
 		set f [open $log]
+		fconfigure $f -translation binary
 		set text [string map [list "\r" ""] [read $f]]
 		close $f
+		# A kernel record can land inside a line, as with the posture line
+		# above, so judge the console as it came and with its kernel records
+		# removed: a line counts if it is in either.
+		regsub -all {\[ *[0-9]+\.[0-9]+\] [^\n]*\n} $text {} clean
+		set text "$text\n$clean"
 		set missing 0
 		foreach c $console {
 			lassign $c kind check re

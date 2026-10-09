@@ -1,0 +1,46 @@
+#!/bin/sh
+# install HOWL DIR... puts HOWL on PATH as howl (make install): in the first
+# DIR that is on PATH, exists and is writable, else in ~/.local/bin. It then
+# removes werewolf, howl's old name, from each DIR where it answers as the
+# old command did.
+#
+# install -u DIR... removes howl from each DIR (make uninstall), but only a
+# howl that answers as werewolf's does, never another program of that name.
+set -e
+if [ "$1" = -u ]; then
+	shift
+	for d; do
+		[ -x "$d/howl" ] || continue
+		if "$d/howl" 2>&1 | grep -q 'usage: howl build FORM'; then
+			rm -f "$d/howl" && echo "removed $d/howl"
+		else
+			echo "uninstall: $d/howl is another program; left it"
+		fi
+	done
+	exit
+fi
+
+set -e
+howl=$1
+shift
+bindir=
+for d; do
+	if echo "$PATH" | tr ':' '\n' | grep -qx "$d" && [ -d "$d" ] && [ -w "$d" ]; then
+		bindir=$d
+		break
+	fi
+done
+if [ -z "$bindir" ]; then
+	bindir=$HOME/.local/bin
+	mkdir -p "$bindir"
+	echo "install: $bindir is not on your PATH; add it"
+fi
+# Beside it, then renamed over it, so a failed copy leaves the old howl.
+install -m 755 "$howl" "$bindir/howl.new"
+mv -f "$bindir/howl.new" "$bindir/howl"
+echo "installed $bindir/howl"
+for d; do
+	[ -x "$d/werewolf" ] && "$d/werewolf" 2>&1 | grep -q 'usage: werewolf build FORM' &&
+		rm -f "$d/werewolf" && echo "removed $d/werewolf, as howl was once called"
+done
+true

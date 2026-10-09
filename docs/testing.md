@@ -160,11 +160,15 @@ pass   sshd-again         all checks
 
 Each machine gets its own blank disk and config disk. The config disk
 holds only a fixed test `data.key`, so `prod` and the forms on it put
-`/data` in LUKS2. No machine forwards ports. So machines never share state,
-and `make -j` runs them together. A few forms boot a second time from the
-disk the first boot left, to show what it kept (`AGAIN_FORMS`, Makefile).
-Every form runs the same code, so these few stand for all, chosen for what
-they keep. `AGAIN_FORMS=all` boots every form twice.
+`/data` in LUKS2. A form that serves ssh forwards it from 127.0.0.1, on
+port 22200 plus the form's place among the forms, and its check's web port
+from 23200 plus that place. So machines never share state or ports, and
+`make -j` runs them together. A few forms boot a second time from the disk
+the first boot left, to show what it kept (`AGAIN_FORMS`, Makefile):
+`minimal` keeps nothing, `sshd` a host key, `prod-ssh` a host key under an
+updater, `gitea` and `vaultwarden` an application's data, and `demo`
+PostgreSQL's. Every form runs the same code, so these few stand for all.
+`AGAIN_FORMS=all` boots every form twice.
 
 Nothing waits a fixed time. [test/boot](../test/boot) waits for each thing
 it needs to see, up to a limit, so a fast machine finishes fast and a slow
@@ -203,6 +207,10 @@ check. It tests the release as much as the updater, because slot b is what
 CI published. So it passes only once CI has published from a tree whose
 slot boots and updates as this one does, and whose packages are no older
 than this tree's: the updater takes nothing backwards.
+
+`make check-updater-staged` cuts the power the moment slot b is staged, as
+a crash or an operator's reboot would. Slot b must boot all the same,
+because a staged slot is armed (docs/design/update-policy.md).
 
 It needs the network, so it is not part of `make check`. It takes about 4
 minutes with KVM or HVF, and much longer under TCG. CI runs it nightly on
@@ -294,8 +302,12 @@ ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } 
 A check that needs more than a boot and these lines is a script,
 `test/check-NAME`, which `make check-NAME` runs once it has built what the
 script boots. The script takes the machine, `QEMU...`, as its arguments,
-and the form's values in its environment (the Makefile's `CHECK_ENV`). It
-says `pass` or `FAIL` in test/boot's columns.
+and the form's values in its environment (the Makefile's `CHECK_ENV`):
+`CHECK`, the log directory; `FORM` and `OUT`, the form and its build;
+`KERNEL`, with its command line without an address (`BOOT`) and with one
+(`CMDLINE`); `VICTIM`, the UUID stage0 finds a slot's disk by; and the
+tools `HOWL`, `TAR` and `DEBUGFS`. It says `pass` or `FAIL` in test/boot's
+columns.
 
 Test the attack, not the setting. `ptrace_scope` reading 3 proves less than
 a refused `cat /proc/1/mem`, which is why posture asks the kernel to undo a
@@ -359,7 +371,9 @@ test` on GitHub's x86_64 and arm64 Ubuntu runners, and `make lint` on one.
 It splits `make check` into jobs that run in parallel, so a failure names
 its area: `forms`, `shellfree`, `integrity`, `cloud`, `persist` and, on
 arm64, `native`. `forms`, `shellfree` and `native` are split again over
-runners (`SHARD=K/N`). That makes 19 jobs in all, under the 20 the account
+runners: `SHARD=K/N` takes every Nth form from the Kth, in name order. The
+forms jobs check `demo`, so the `persist` job passes `PERSIST_AFTER=` to
+skip it. That makes 19 jobs in all, under the 20 the account
 runs at once. Each job boots four machines at a time on its four CPUs. It
 keeps Zig's and apko's caches from one run to the next, a week at a time,
 so a program or package that has not changed is not built or fetched again.

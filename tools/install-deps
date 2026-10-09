@@ -75,7 +75,7 @@ amd64) arch=x86_64 ;;
 arm64) arch=aarch64 ;;
 esac
 
-erofs_ok() { # mkfs.erofs is 1.9 or later, with zstd, as the Makefile insists
+erofs_ok() { # mkfs.erofs is 1.9 or later, with zstd, as howl insists (lib/image.zig)
 	v=$(mkfs.erofs --version 2>/dev/null | sed -n 's/.*erofs-utils) *//p')
 	case $v in '' | 1.[0-8] | 1.[0-8].*) return 1 ;; esac
 	{ mkfs.erofs --version; mkfs.erofs --help; } 2>&1 | grep -q 'available compressors:.*zstd'

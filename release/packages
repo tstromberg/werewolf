@@ -7,12 +7,13 @@
 #   release/packages [-n] DIR...
 #
 # Each DIR is `make packages` output, build/ARCH/packages/ARCH. Only packages
-# whose files differ from their latest published version are published, so a
-# commit that changes no program changes nothing a machine fetches. The
-# published index is verified against release/packages.pub before it is
-# merged and signed again: whoever can write the bucket cannot get CI to sign
-# their entries. Every read goes to the bucket, never through the CDN, whose
-# cached copy could be stale and make the merge drop published packages.
+# whose files or dependencies differ from their latest published version are
+# published, so a commit that changes no program changes nothing a machine
+# fetches. The published index is verified against release/packages.pub
+# before it is merged and signed again: whoever can write the bucket cannot
+# get CI to sign their entries. Every read goes to the bucket, never through
+# the CDN, whose cached copy could be stale and make the merge drop published
+# packages.
 # Packages go up before the index that names them, and nothing published is
 # ever replaced or deleted. -n shows what would be published and needs no
 # key. PACKAGES_PUB and PACKAGES_BUCKET (an s3:// URL, or a directory) point
@@ -52,8 +53,9 @@ fetch() {
 	esac
 }
 
-# datahash APK: the SHA-256 its .PKGINFO names for its files.
-datahash() { tar -xzOf "$1" .PKGINFO | sed -n 's/^datahash = //p'; }
+# identity APK: what a machine gets from APK: its files' SHA-256 (datahash)
+# and what it depends on and provides, as its .PKGINFO names them.
+identity() { tar -xzOf "$1" .PKGINFO | grep -E '^(datahash|depend|provides) = ' || true; }
 
 upload() { # FILE KEY CACHE-CONTROL
 	case $bucket in
@@ -91,7 +93,7 @@ for dir in "$@"; do
 				die "$arch: $name $version is older than published $latest"
 			if [ "$version" = "$latest" ] || {
 				fetch "$arch/$name-$latest.apk" "$w/latest.apk" || die "$arch: $name-$latest.apk is indexed but not in the bucket"
-				[ "$(datahash "$w/latest.apk")" = "$(datahash "$apk")" ]
+				[ "$(identity "$w/latest.apk")" = "$(identity "$apk")" ]
 			}; then
 				rm "$apk" "$stanza"
 				continue

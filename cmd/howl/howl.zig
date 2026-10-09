@@ -30,14 +30,14 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 
 pub const usage =
-    \\usage: howl build --with FORM,... [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+    \\usage: howl build --with FORM,... [--build] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl pack --with FORM [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, lima on Lima, else prod-ssh
+    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--build] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, lima on Lima, else prod-ssh
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--dev] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]\n" ++
+    "] [--dev] [--build] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
@@ -350,6 +350,9 @@ pub const Options = struct {
     /// app is a directory to lay where the form keeps its application
     /// (app.zig). build, run and create take it.
     app: ?[]const u8 = null,
+    /// local takes werewolf's programs from this checkout (--build), not
+    /// from its repository, so the machine does not update them.
+    local: bool = false,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -1132,8 +1135,10 @@ fn create(io: Io, gpa: Allocator, line: []const []const u8, why: *Why) !void {
 fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
     const began = Io.Clock.awake.now(io);
     const verbose, const some = try verboseFlag(gpa, all);
-    const dev, const args = try takeFlag(gpa, some, &.{"--dev"});
+    const dev, const rest = try takeFlag(gpa, some, &.{"--dev"});
+    const from_tree, const args = try takeFlag(gpa, rest, &.{"--build"});
     var o = try options(gpa, args, why);
+    o.local = from_tree;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
     const iface = try formInterface(io, gpa, o.form, why);
@@ -1299,6 +1304,7 @@ pub fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: Arch, why: *Why) ![
         .form = o.form,
         .arch = arch,
         .app = ab.root,
+        .published = !o.local,
     }, .{ .qcow2 = true });
     _ = try steps.finish();
     return gpa.print("{s}/disk.qcow2", .{p.out});

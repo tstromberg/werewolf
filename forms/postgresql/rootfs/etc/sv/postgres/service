@@ -5,7 +5,10 @@
 exec    /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres
 before  /usr/lib/werewolf/pg-init
 user    postgres
-pledge  stdio rpath wpath proc ipc unix listen
+# connect: peer authentication looks the client's uid up, and glibc first
+# tries nscd's socket, which is not there; refused, each login would leave
+# two audit records. It reaches no network: there is no inet promise.
+pledge  stdio rpath wpath proc ipc unix listen connect
 run     /usr/bin/initdb
 # Local clients reach its socket, /run/svc/postgres/.s.PGSQL.5432.
 share   shared

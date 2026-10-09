@@ -11,8 +11,8 @@ const compose = @import("compose");
 
 const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
     "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH native|bitten|all, " ++
-    "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], " ++
-    "having KEY [VALUE], every KEY, apko FORM [PKG...], tree, released";
+    "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
+    "apko FORM [--published KEYRING] [PKG...], tree, released, format";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -54,6 +54,10 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
             }
             try w.writeAll("\n");
         }
+        return;
+    }
+    if (is(verb, "format") and args.len == 1) {
+        try w.print("{d}\n", .{compose.format});
         return;
     }
     if (is(verb, "released") and args.len == 1) {
@@ -139,7 +143,13 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         defer meta.close(io);
         try compose.compose(io, gpa, root, forms, accounts, ro, meta, b, f);
     } else if (is(verb, "apko")) {
-        try form.write(w, try compose.apko(io, gpa, root, forms, args[2..], f));
+        // --published adds werewolf's repository, the key at KEYRING and the
+        // chain's programs, as howl's published builds do.
+        const keyring = if (args.len >= 4 and is(args[2], "--published")) args[3] else null;
+        const extra = args[if (keyring != null) 4 else 2..];
+        var config = try compose.apko(io, gpa, root, forms, extra, f);
+        if (keyring) |k| config = try compose.published(gpa, config, forms, k);
+        try form.write(w, config);
     } else return error.Usage;
 }
 
