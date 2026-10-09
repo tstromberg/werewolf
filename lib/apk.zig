@@ -1,13 +1,18 @@
-//! apk checks apk's cache before root's apk reads it. apk verifies indexes
-//! and packages only while it unpacks them, after its gzip and tar parsers
-//! have run; here nothing a trusted key has not vouched for gets that far.
+//! apk verifies apk indexes and packages before anything parses them: the
+//! updater checks apk's cache with it before root's apk reads it, and howl
+//! the forms it fetches. apk verifies only while it unpacks, after its gzip
+//! and tar parsers have run; here nothing a trusted key has not vouched for
+//! gets that far. Signatures are RSA PKCS#1 v1.5, as `openssl dgst -sign`
+//! makes them. See README.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const Certificate = std.crypto.Certificate;
+const der = Certificate.der;
+const rsa = Certificate.rsa;
 const Sha1 = std.crypto.hash.Sha1;
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const releases = @import("release.zig");
 const package = @import("package");
 
 /// Inflated size limits for a signature segment, a control segment and an
@@ -17,20 +22,54 @@ const max_control = 16 << 20;
 const max_index = 256 << 20;
 const max_head = 32 << 20;
 
-/// Key is a key apk checks an index against. name is its file name, which
-/// the index's signature file names.
-pub const Key = struct { name: []const u8, key: releases.Key };
+/// Trusted is a key an index is checked against. name is its file name,
+/// which the index's signature file names.
+pub const Trusted = struct { name: []const u8, key: Key };
 
 /// Index maps a package's cache name, NAME-VERSION.HASH (HASH is the first
 /// 4 bytes of C: in hex), to the SHA-1 of its control segment.
 pub const Index = std.StringHashMapUnmanaged([Sha1.digest_length]u8);
 
 /// readIndex verifies an APKINDEX.tar.gz against keys and adds its packages
-/// to idx. The index is two gzip segments: a tar holding only
+/// to idx. It returns the index with the signature segment rebuilt by
+/// root, so apk parses only bytes root has checked.
+pub fn readIndex(gpa: Allocator, keys: []const Trusted, idx: *Index, data: []const u8) ![]const u8 {
+    const v = try verified(gpa, keys, data);
+    for (try parseRecords(gpa, v.list)) |r| try idx.put(
+        gpa,
+        try gpa.print("{s}-{s}.{x}", .{ r.name, r.version, r.sha1[0..4] }),
+        r.sha1,
+    );
+    return std.mem.concat(gpa, u8, &.{ try signatureSegment(gpa, v.name, v.signature), v.signed });
+}
+
+/// Record is one package an index lists: its name, version, what it
+/// depends on, and the SHA-1 of its control segment.
+pub const Record = struct {
+    name: []const u8,
+    version: []const u8,
+    depends: []const []const u8,
+    sha1: [Sha1.digest_length]u8,
+};
+
+/// records verifies an APKINDEX.tar.gz against keys and returns its packages.
+pub fn records(gpa: Allocator, keys: []const Trusted, data: []const u8) ![]const Record {
+    return parseRecords(gpa, (try verified(gpa, keys, data)).list);
+}
+
+/// Verified is an index whose signature checked: its signature file's name
+/// and contents, the segment they sign, and the APKINDEX within.
+const Verified = struct {
+    name: []const u8,
+    signature: []const u8,
+    signed: []const u8,
+    list: []const u8,
+};
+
+/// verified checks an index. It is two gzip segments: a tar holding only
 /// .SIGN.RSA.KEY (SHA-1) or .SIGN.RSA256.KEY (SHA-256), signing the second,
-/// which holds APKINDEX. It returns the index with the signature segment
-/// rebuilt by root, so apk parses only bytes root has checked.
-pub fn readIndex(gpa: Allocator, keys: []const Key, idx: *Index, data: []const u8) ![]const u8 {
+/// which holds APKINDEX.
+fn verified(gpa: Allocator, keys: []const Trusted, data: []const u8) !Verified {
     const sig = try segment(gpa, data, 0, max_signature);
     const files = try tarFiles(gpa, sig.bytes);
     if (files.len != 1) return error.BadSignatureSegment;
@@ -43,9 +82,9 @@ pub fn readIndex(gpa: Allocator, keys: []const Key, idx: *Index, data: []const u
             std.mem.eql(u8, name[".SIGN.RSA.".len..], k.name)) break .{ k.key, false };
     } else return error.UnknownKey;
     if (sha256)
-        try releases.verifyHash(Sha256, key, signed, files[0].data)
+        try verifyHash(Sha256, key, signed, files[0].data)
     else
-        try releases.verifyHash(Sha1, key, signed, files[0].data);
+        try verifyHash(Sha1, key, signed, files[0].data);
 
     // Refuse anything after the signed segment.
     const body = try segment(gpa, signed, 0, max_index);
@@ -53,19 +92,20 @@ pub fn readIndex(gpa: Allocator, keys: []const Key, idx: *Index, data: []const u
     const list = for (try tarFiles(gpa, body.bytes)) |f| {
         if (std.mem.eql(u8, f.name, "APKINDEX")) break f.data;
     } else return error.NoApkIndex;
-    try addPackages(gpa, idx, list);
-    return std.mem.concat(gpa, u8, &.{ try signatureSegment(gpa, name, files[0].data), signed });
+    return .{ .name = name, .signature = files[0].data, .signed = signed, .list = list };
 }
 
-/// addPackages adds an APKINDEX's packages to idx. Records are KEY:VALUE
-/// lines separated by blank lines; each needs P (name), V (version) and C
-/// ("Q1" and the base64 SHA-1 of the control segment).
-fn addPackages(gpa: Allocator, idx: *Index, list: []const u8) !void {
-    var records = std.mem.splitSequence(u8, list, "\n\n");
-    while (records.next()) |record| {
+/// parseRecords parses an APKINDEX. Records are KEY:VALUE lines separated
+/// by blank lines; each needs P (name), V (version) and C ("Q1" and the
+/// base64 SHA-1 of the control segment); D lists what it depends on.
+fn parseRecords(gpa: Allocator, list: []const u8) ![]const Record {
+    var out: std.ArrayList(Record) = .empty;
+    var it = std.mem.splitSequence(u8, list, "\n\n");
+    while (it.next()) |record| {
         var name: ?[]const u8 = null;
         var version: ?[]const u8 = null;
         var csum: ?[]const u8 = null;
+        var depends: []const []const u8 = &.{};
         var lines = std.mem.tokenizeScalar(u8, record, '\n');
         while (lines.next()) |l| {
             if (l.len < 2 or l[1] != ':') return error.BadApkIndex;
@@ -73,6 +113,12 @@ fn addPackages(gpa: Allocator, idx: *Index, list: []const u8) !void {
                 'P' => name = l[2..],
                 'V' => version = l[2..],
                 'C' => csum = l[2..],
+                'D' => {
+                    var words: std.ArrayList([]const u8) = .empty;
+                    var w = std.mem.tokenizeScalar(u8, l[2..], ' ');
+                    while (w.next()) |d| try words.append(gpa, d);
+                    depends = words.items;
+                },
                 else => {},
             }
         }
@@ -84,12 +130,14 @@ fn addPackages(gpa: Allocator, idx: *Index, list: []const u8) !void {
         if ((decoder.calcSizeForSlice(c[2..]) catch return error.BadApkIndex) != sha1.len)
             return error.BadApkIndex;
         decoder.decode(&sha1, c[2..]) catch return error.BadApkIndex;
-        try idx.put(gpa, try gpa.print("{s}-{s}.{x}", .{
-            name orelse return error.BadApkIndex,
-            version orelse return error.BadApkIndex,
-            sha1[0..4],
-        }), sha1);
+        try out.append(gpa, .{
+            .name = name orelse return error.BadApkIndex,
+            .version = version orelse return error.BadApkIndex,
+            .depends = depends,
+            .sha1 = sha1,
+        });
     }
+    return out.items;
 }
 
 /// Control locates a package's control segment and holds datahash, the
@@ -164,6 +212,18 @@ pub fn checkPackage(
         try f.sync(io);
         try dir.rename(tmp, dir, name, io);
     }
+}
+
+/// contents verifies package, fetched whole, against its record and returns
+/// its files, the tar apk unpacks.
+pub fn contents(gpa: Allocator, package_bytes: []const u8, want: Record) ![]const u8 {
+    const c = try control(gpa, package_bytes[0..@min(package_bytes.len, max_head)], want.sha1);
+    var h: [Sha256.digest_length]u8 = undefined;
+    Sha256.hash(package_bytes[c.end..], &h, .{});
+    if (!std.mem.eql(u8, &h, &c.datahash)) return error.NotAsIndexed;
+    const data = try segment(gpa, package_bytes, c.end, max_index);
+    if (data.end != package_bytes.len) return error.TrailingData;
+    return data.bytes;
 }
 
 /// segment inflates the gzip member at start, up to max bytes, and returns
@@ -248,15 +308,92 @@ fn sha1Of(data: []const u8) [Sha1.digest_length]u8 {
     return out;
 }
 
+/// Key is an RSA public key, such as the image key or the packages key.
+pub const Key = struct {
+    modulus: []const u8,
+    exponent: []const u8,
+};
+
+/// rsa_encryption is the DER encoding of OID 1.2.840.113549.1.1.1.
+const rsa_encryption = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
+
+/// parseKey parses a PEM `PUBLIC KEY` (X.509 SubjectPublicKeyInfo). It
+/// accepts only RSA keys of 2048, 3072 or 4096 bits.
+pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
+    const begin = "-----BEGIN PUBLIC KEY-----";
+    const end = "-----END PUBLIC KEY-----";
+    const a = (std.mem.find(u8, pem, begin) orelse return error.BadKey) + begin.len;
+    const b = std.mem.findPos(u8, pem, a, end) orelse return error.BadKey;
+    var b64: std.ArrayList(u8) = .empty;
+    for (pem[a..b]) |c| if (!std.ascii.isWhitespace(c)) try b64.append(gpa, c);
+    const decoder = std.base64.standard.Decoder;
+    const bytes = try gpa.alloc(u8, decoder.calcSizeForSlice(b64.items) catch return error.BadKey);
+    decoder.decode(bytes, b64.items) catch return error.BadKey;
+
+    // SEQUENCE { SEQUENCE { OID rsaEncryption, NULL }, BIT STRING { 0, RSAPublicKey } }
+    const spki = try element(bytes, 0, .sequence);
+    const algorithm = try element(bytes, spki.slice.start, .sequence);
+    const oid = try element(bytes, algorithm.slice.start, .object_identifier);
+    if (!std.mem.eql(
+        u8,
+        bytes[oid.slice.start..oid.slice.end],
+        &rsa_encryption,
+    )) return error.BadKey;
+    const bits = try element(bytes, algorithm.slice.end, .bitstring);
+    if (bits.slice.end != spki.slice.end or bits.slice.end - bits.slice.start < 2 or
+        bytes[bits.slice.start] != 0)
+        return error.BadKey;
+    const inner = bytes[bits.slice.start + 1 .. bits.slice.end];
+    // parseDer trusts the lengths in inner, so check them here first.
+    const seq = try element(inner, 0, .sequence);
+    const n = try element(inner, seq.slice.start, .integer);
+    _ = try element(inner, n.slice.end, .integer);
+    const parts = rsa.PublicKey.parseDer(inner) catch return error.BadKey;
+    switch (parts.modulus.len) {
+        256, 384, 512 => {},
+        else => return error.BadKey,
+    }
+    _ = rsa.PublicKey.fromBytes(parts.exponent, parts.modulus) catch return error.BadKey;
+    return .{ .modulus = parts.modulus, .exponent = parts.exponent };
+}
+
+/// element parses the DER element at index and checks its tag and bounds.
+fn element(bytes: []const u8, index: u32, tag: der.Tag) !der.Element {
+    if (index + 2 > bytes.len) return error.BadKey;
+    const e = der.Element.parse(bytes, index) catch return error.BadKey;
+    if (e.identifier.tag != tag or e.slice.end > bytes.len or
+        e.slice.start > e.slice.end) return error.BadKey;
+    return e;
+}
+
+/// verify returns an error unless sig is key's signature of data's SHA-256.
+pub fn verify(key: Key, data: []const u8, sig: []const u8) !void {
+    return verifyHash(Sha256, key, data, sig);
+}
+
+/// verifyHash is verify with another hash: apk's older indexes use SHA-1.
+pub fn verifyHash(comptime Hash: type, key: Key, data: []const u8, sig: []const u8) !void {
+    if (sig.len != key.modulus.len) return error.BadSignature;
+    const public_key = rsa.PublicKey.fromBytes(key.exponent, key.modulus) catch return error.BadKey;
+    switch (key.modulus.len) {
+        inline 256,
+        384,
+        512,
+        => |len| rsa.PKCS1v1_5Signature.verify(len, sig[0..len], data, public_key, Hash) catch
+            return error.BadSignature,
+        else => return error.BadKey,
+    }
+}
+
 // --- tests ----------------------------------------------------------------------
 // testdata/apk/ holds a key, an index signed with each hash, and two packages
 // it lists: hello, built as Wolfi does, and signed, built as Alpine does.
 
 const testing = std.testing;
 
-fn testKeys(gpa: Allocator) ![]const Key {
-    const k = try releases.parseKey(gpa, @embedFile("testdata/apk/test.rsa.pub"));
-    return gpa.dupe(Key, &.{.{ .name = "test.rsa.pub", .key = k }});
+fn testKeys(gpa: Allocator) ![]const Trusted {
+    const k = try parseKey(gpa, @embedFile("testdata/apk/test.rsa.pub"));
+    return gpa.dupe(Trusted, &.{.{ .name = "test.rsa.pub", .key = k }});
 }
 
 test readIndex {
@@ -282,7 +419,7 @@ test readIndex {
         const bad = try a.dupe(u8, data);
         bad[bad.len - 20] ^= 1;
         try testing.expectError(error.BadSignature, readIndex(a, keys, &idx, bad));
-        const other = [_]Key{.{ .name = "other.rsa.pub", .key = keys[0].key }};
+        const other = [_]Trusted{.{ .name = "other.rsa.pub", .key = keys[0].key }};
         try testing.expectError(error.UnknownKey, readIndex(a, &other, &idx, data));
         // Anything after the signed segment.
         const more = try std.mem.concat(a, u8, &.{ data, "x" });
@@ -307,11 +444,13 @@ test "what lib/package.zig writes, the updater takes" {
         .{ .path = "usr/bin", .kind = .dir },
         .{ .path = "usr/bin/hello", .kind = .file, .data = "hello\n" },
     });
+    const listed = try parseRecords(a, p.stanza);
+    try testing.expectEqual(1, listed.len);
     var idx: Index = .empty;
-    try addPackages(a, &idx, p.stanza);
-    try testing.expectEqual(1, idx.count());
-    var keys = idx.keyIterator();
-    const name = try a.print("{s}.apk", .{keys.next().?.*});
+    const r = listed[0];
+    const cache_name = try a.print("{s}-{s}.{x}", .{ r.name, r.version, r.sha1[0..4] });
+    try idx.put(a, cache_name, r.sha1);
+    const name = try a.print("{s}.apk", .{cache_name});
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(io, .{ .sub_path = name, .data = p.bytes });
@@ -320,10 +459,17 @@ test "what lib/package.zig writes, the updater takes" {
     changed[changed.len - 30] ^= 1;
     try tmp.dir.writeFile(io, .{ .sub_path = name, .data = changed });
     try testing.expectError(error.NotAsIndexed, checkPackage(a, io, tmp.dir, name, &idx));
+    // Fetched whole, as howl fetches a form: its files, or nothing.
+    const tar = try contents(a, p.bytes, r);
+    try testing.expect(std.mem.indexOf(u8, tar, "usr/bin/hello") != null);
+    try testing.expectError(error.NotAsIndexed, contents(a, changed, r));
+    var other = r;
+    other.sha1[0] ^= 1;
+    try testing.expectError(error.NotAsIndexed, contents(a, p.bytes, other));
 
     // The same package's index as build/host/package signs one (testdata,
     // signed offline with the key beside it): read, and the same package.
-    const k = try releases.parseKey(a, @embedFile("testdata/apk/werewolf-test.rsa.pub"));
+    const k = try parseKey(a, @embedFile("testdata/apk/werewolf-test.rsa.pub"));
     var signed_idx: Index = .empty;
     _ = try readIndex(
         a,
@@ -333,6 +479,13 @@ test "what lib/package.zig writes, the updater takes" {
     );
     try testing.expectEqual(1, signed_idx.count());
     try testing.expect(signed_idx.contains(name[0 .. name.len - ".apk".len]));
+    const signed_records = try records(
+        a,
+        &.{.{ .name = "werewolf-test.rsa.pub", .key = k }},
+        @embedFile("testdata/apk/APKINDEX.werewolf.tar.gz"),
+    );
+    try testing.expectEqual(1, signed_records.len);
+    try testing.expectEqualSlices(u8, &r.sha1, &signed_records[0].sha1);
 }
 
 test checkPackage {
@@ -386,18 +539,38 @@ test checkPackage {
     );
 }
 
-test addPackages {
+test parseRecords {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var idx: Index = .empty;
-    try addPackages(a, &idx, "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:x\nV:1-r0\n\n\n");
-    try testing.expect(idx.contains("x-1-r0.00000000"));
+    const got = try parseRecords(a, "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:x\nV:1-r0\nD:y z=1\n\n\n");
+    try testing.expectEqual(1, got.len);
+    try testing.expectEqualStrings("x", got[0].name);
+    try testing.expectEqualStrings("1-r0", got[0].version);
+    try testing.expectEqual(2, got[0].depends.len);
+    try testing.expectEqualStrings("z=1", got[0].depends[1]);
     for ([_][]const u8{
         "P:x\nV:1-r0\n",
         "C:Q2AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:x\nV:1-r0\n",
         "C:Q1AAAA\nP:x\nV:1-r0\n",
         "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nV:1-r0\n",
         "nonsense\n",
-    }) |list| try testing.expectError(error.BadApkIndex, addPackages(a, &idx, list));
+    }) |list| try testing.expectError(error.BadApkIndex, parseRecords(a, list));
+}
+
+test "keys that are not RSA keys of 2048 to 4096 bits" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectError(error.BadKey, parseKey(a, "no key here"));
+    try testing.expectError(
+        error.BadKey,
+        parseKey(a, "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----\n"),
+    );
+    // An Ed25519 key: right wrapper, wrong algorithm.
+    try testing.expectError(error.BadKey, parseKey(a,
+        \\-----BEGIN PUBLIC KEY-----
+        \\MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
+        \\-----END PUBLIC KEY-----
+    ));
 }

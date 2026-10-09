@@ -20,6 +20,7 @@ const werewolf_repository = @import("package").repository;
 pub const cve = @import("cve.zig");
 const kernelVersion = @import("cve").kernelVersion;
 pub const releases = @import("release.zig");
+const apk = @import("apk");
 pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
@@ -611,7 +612,7 @@ pub const Update = struct {
             try u.gpa.print("{s}{s}.json.sig", .{ base, name }),
             cves_dir ++ "/manifest.sig",
         );
-        const key = try releases.parseKey(u.gpa, try u.read(meta_dir ++ "/image.pub"));
+        const key = try apk.parseKey(u.gpa, try u.read(meta_dir ++ "/image.pub"));
         const m = try releases.open(u.gpa, key, data, sig, form, arch, nowSecs(u.io));
 
         u.step = "compare";
@@ -1476,7 +1477,6 @@ test {
     _ = tiers;
     _ = stage;
     _ = slot;
-    _ = @import("apk.zig");
 }
 
 /// transient reports whether a fetch failure may pass on retry: no answer

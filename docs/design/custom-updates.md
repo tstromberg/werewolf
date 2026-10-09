@@ -1,6 +1,6 @@
 # One updater: apk
 
-Proposed 2026-10-08. Phases 1 and 2 and the format pin are built.
+Proposed 2026-10-08. Phases 1 to 3 and the format pin are built.
 
 ## Summary
 
@@ -13,10 +13,9 @@ machine updates werewolf's programs and forms too. Releases serve installs.
 
 ## Background
 
-A form CI publishes fetches its signed slot whole; any other `prod` form
-reinstalls its world ([updater.md](../updater.md)) and copies werewolf's
-programs forward, so a fix to `fence` or the updater reaches no `howl`-built
-machine until someone rebuilds it.
+A form CI releases fetched its signed slot whole; any other `prod` form
+reinstalled its world ([updater.md](../updater.md)) and copied werewolf's
+programs forward, so a fix to `fence` reached no `howl`-built machine.
 
 ## Goals
 
@@ -33,25 +32,23 @@ machine until someone rebuilds it.
 
 ## Detailed design
 
-The world file is the spec and apk is the solver. Once every input is a
-package, a host and a machine resolve the same answer, so a machine can
-build its own slot.
+The world file is the spec and apk is the solver: once every input is a
+package, a host and a machine resolve the same answer.
 
 **The image is its world.** The machine above has world `local-shop
-werewolf-format=3`. `local-shop` depends on `form-prod`, `form-cloudflared`,
-`form-bastion` and `curl`; each form depends on its Wolfi packages and
-werewolf programs. apk refuses what cannot combine, at build time.
+werewolf-format=3`. `local-shop` depends on `prod-form`, `cloudflared-form`,
+`bastion-form` and `curl`; each form depends on its base's, its Wolfi packages
+and werewolf programs. apk refuses what cannot combine, at build time.
 
 **werewolf's repository** lives in R2 at
 `https://dist.werewolf-linux.org/apk/ARCH/` and is signed by the key in
-`release/packages.pub`, which images install as
-`/etc/apk/keys/werewolf-packages.rsa.pub`. It holds `werewolf-PROGRAM`, one
-package per program, packed from Zig's cross-compiled output on any host
-without a VM (lib/package.zig, `make packages`); `form-NAME`, one per form,
-staging its files under `/usr/share/werewolf/forms/NAME/` because two forms
-may ship the same path; and packages from in-tree melange recipes. Each
+`release/packages.pub`, installed as `/etc/apk/keys/werewolf-packages.rsa.pub`.
+It holds `werewolf-PROGRAM`, packed from Zig's cross-compiled output on any
+host (lib/package.zig, `make packages`); `NAME-form`, sorting beside the
+package it serves, staging its files under `/usr/share/werewolf/forms/NAME/`
+as two forms may ship one path; and in-tree melange recipes' packages. Each
 version is its commit's time, so a clean tree packs the same bytes. Every
-program depends on `werewolf-format=N`. CI never deletes a published package.
+package depends on `werewolf-format=N`. CI never deletes one.
 
 **The image's own repository** is `/usr/share/werewolf/repo`, tagged `@local`.
 It holds `local-FORM` for each form outside `forms/`, with its files, OCI
@@ -59,13 +56,15 @@ trees, `--app` and local recipes, signed by a key the build makes and then
 discards. apk takes a package from a tagged repository only when world names
 it `name@local`, so world lists exactly what will not update.
 
-**What howl builds.** howl takes werewolf's programs from the repository
-(make's PUBLISHED=1), so any machine it makes updates them; `--build` lays
-the tree's own, which do not. Phase 4 makes those `@local`.
+**What howl builds.** A form named is the published one, fetched with the
+forms it names and checked against the signed index (lib/apk.zig), so the
+machine updates it. A path is the caller's own, never updated; its names are
+published. `--build` takes the tree's forms and programs; phase 4 makes them `@local`.
 
 **compose** (lib/compose.zig; lib/README.md) lays the staged forms and writes
-what the chain derives. The updater runs it from the running image's staged
-chain over the accounts apk laid, and writes only into scratch.
+what the chain derives. The updater runs it over the accounts apk laid, from
+the forms world names as NAME-form as the new root's packages laid them, and
+the image's own copies of the rest, and writes only into scratch.
 
 **One path.** The release path goes: `release.zig`, the manifest compare and
 `check-updater-release`. `image.pub` stays with howl, to verify fresh-install
@@ -80,7 +79,8 @@ logs `held` each check, until it is reinstalled.
 1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.
 2. Built: images stage their chain and the updater composes from it; CI
    publishes changed programs, and a published machine took eight.
-3. `form-*` packages; the overlay list goes.
+3. Built: `NAME-form` packages, fetched by name; stage0 is a package. Left:
+   no checkout (howl still reads keys, locks and test files from one).
 4. The image's repository; `buildSlot` copies nothing forward.
 5. The release path goes.
 

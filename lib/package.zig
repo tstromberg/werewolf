@@ -16,6 +16,25 @@ pub const repository = "https://dist.werewolf-linux.org/apk";
 /// /etc/apk/keys: the index's signature names it, so it must match.
 pub const repository_key = "werewolf-packages.rsa.pub";
 
+/// repository_pem is release/packages.pub, which signs the repository's
+/// index, for howl to check what it fetches with no checkout beside it.
+pub const repository_pem =
+    \\-----BEGIN PUBLIC KEY-----
+    \\MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAuw8NWSPQp1DhkJ0hRJbf
+    \\nDYZArR6ZwFNDxuwv4TtXefvhJbrVYpsNy60LSUN5aoE62vZzj8fMhGm5IgGE7FQ
+    \\drORwy+2lLuVDDW6FsYc5k6jEP9mSo/X3b/JjYqteS4fv1qO6lw8+LSrs5paS75g
+    \\ptzPmE2JYQeYz/PTXeM2ClB7F3kT/D1fpBAugid3Au2PdSinhFZzsdweBTcnl0z0
+    \\4R3Q1BhLn5zqzpTTU+kDvR+9Ov8+wVgQUL8L8hxzuilUn47fZoZMuGHBuofnpVYh
+    \\Rbx4Mu2FzoXcZkGW9CBm0lqjkK+SQ/+nYf8EYI9j6c3mgJF2sN/pGUwBrEyVj3AE
+    \\euuAH9nCGZuoGHTqjr3MJarpYqj3Jz7xjmNj/UOpoP0v12PTdBcEcxuJA2t7dqC1
+    \\o0aa3BLZTXHAfA2oULArDSrSQoq0oCfQxMzV1UiEkrCAGbGn3Nmg1zSykgs3t0CJ
+    \\1S3fB2b9JFLgezZzYlZbmwc5i9aQ2Zjq6kc0TOLuOHVxJLe2Q5iVR+LY55MZwSd9
+    \\YX/jmkVQnW1+Dl01FbiEbYdPnLpHAIu+snxaROLe1hDbOQf7ZT0Zbu6mGE2/pxga
+    \\DRuuOsHb7WALJEWs61FgxPp71O2oRv1mk59ph0aFgkbQA5g0Pp1gC7k8HcqJa3Lv
+    \\qMuO4+8mkGYIhu4SDj5xX6MCAwEAAQ==
+    \\-----END PUBLIC KEY-----
+;
+
 /// Info is what a package says of itself, in .PKGINFO and its index entry.
 pub const Info = struct {
     name: []const u8,
@@ -69,24 +88,26 @@ pub const Packed = struct {
 pub fn pack(gpa: Allocator, info: Info, entries: []const Entry) !Packed {
     var data_tar: std.ArrayList(u8) = .empty;
     var size: u64 = 0;
-    for (entries) |e| switch (e.kind) {
-        .dir => try header(gpa, &data_tar, e.path, '5', e.mode, 0, ""),
-        .link => try header(gpa, &data_tar, e.path, '2', 0o777, 0, e.data),
-        .file => {
-            var sha: [Sha1.digest_length]u8 = undefined;
-            Sha1.hash(e.data, &sha, .{});
-            const record = try pax(
-                gpa,
-                "APK-TOOLS.checksum.SHA1",
-                &std.fmt.bytesToHex(sha, .lower),
-            );
-            try header(gpa, &data_tar, "PaxHeader", 'x', 0o644, record.len, "");
-            try body(gpa, &data_tar, record);
-            try header(gpa, &data_tar, e.path, '0', e.mode, e.data.len, "");
-            try body(gpa, &data_tar, e.data);
-            size += e.data.len;
-        },
-    };
+    for (entries) |e| {
+        if (e.kind == .dir) {
+            try header(gpa, &data_tar, e.path, '5', e.mode, 0, "");
+            continue;
+        }
+        // apk checks each file and link: a file's SHA-1 is its contents',
+        // a link's its target's, as abuild-tar writes them.
+        var sha: [Sha1.digest_length]u8 = undefined;
+        Sha1.hash(e.data, &sha, .{});
+        const record = try pax(gpa, "APK-TOOLS.checksum.SHA1", &std.fmt.bytesToHex(sha, .lower));
+        try header(gpa, &data_tar, "PaxHeader", 'x', 0o644, record.len, "");
+        try body(gpa, &data_tar, record);
+        if (e.kind == .link) {
+            try header(gpa, &data_tar, e.path, '2', 0o777, 0, e.data);
+            continue;
+        }
+        try header(gpa, &data_tar, e.path, '0', e.mode, e.data.len, "");
+        try body(gpa, &data_tar, e.data);
+        size += e.data.len;
+    }
     try data_tar.appendNTimes(gpa, 0, 2 * block);
     const data = try gzip(gpa, data_tar.items);
     var datahash: [Sha256.digest_length]u8 = undefined;
@@ -395,7 +416,11 @@ test "pack: a control member vouched for by C:, then the data its datahash names
     while (try it.next()) |f| try seen.append(gpa, try gpa.dupe(u8, f.name));
     try testing.expectEqual(5, seen.items.len);
     try testing.expectEqualStrings("usr/lib/werewolf/fence", seen.items[3]);
-    try testing.expect(mem.indexOf(u8, data, "APK-TOOLS.checksum.SHA1=") != null);
+    // Each file and link after its SHA-1: a link's is its target's.
+    try testing.expectEqual(2, mem.count(u8, data, "APK-TOOLS.checksum.SHA1="));
+    var target: [Sha1.digest_length]u8 = undefined;
+    Sha1.hash("fence", &target, .{});
+    try testing.expect(mem.indexOf(u8, data, &std.fmt.bytesToHex(target, .lower)) != null);
 
     // The same input, the same bytes.
     const again = try pack(gpa, .{
@@ -486,4 +511,16 @@ test "pack: the same files in another commit, the same data member" {
         d.* = p.bytes[at..];
     }
     try testing.expectEqualSlices(u8, data[0], data[1]);
+}
+
+test "repository_pem is release/packages.pub" {
+    const io = testing.io;
+    const file = try std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "release/packages.pub",
+        testing.allocator,
+        .limited(64 << 10),
+    );
+    defer testing.allocator.free(file);
+    try testing.expectEqualStrings(std.mem.trimEnd(u8, file, "\n"), repository_pem);
 }

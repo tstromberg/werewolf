@@ -1,0 +1,3 @@
+# The scan, grype over the image, takes a quarter share of contended CPUs
+# (its service's `cpu 25`), so a scan cannot starve the page or nginx.
+ok  scan-cpu-share   i=0; until [ -f /run/cgroup/svc/scan/cpu.weight ]; do i=$((i + 1)); [ $i -le 30 ] || { echo "no scan cgroup"; exit 1; }; sleep 1; done; grep -qx 25 /run/cgroup/svc/scan/cpu.weight

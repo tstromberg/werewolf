@@ -1,28 +1,29 @@
 #!/bin/sh
 # howl-smoke HOWL BUILD runs the lines the README and the docs advertise, as
 # a user runs them, as far as a line goes with nothing built or booted: -h
-# and -n (make test). BUILD holds what howl form -n must not write.
+# and -n (make test). BUILD holds what howl form -n must not write. Each line
+# takes --build, this checkout's forms, so none needs werewolf's repository.
 howl=$1 smoke=$2/adhoc/smoke
 fail() { echo "howl-smoke: $1"; exit 1; }
-"$howl" run -h >/dev/null 2>&1 || fail "howl run -h"
-"$howl" run -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
-"$howl" run --on qemu -n 2>&1 | grep -q 'prod-ssh as it is' || fail "howl run --on qemu -n should be prod-ssh"
-"$howl" run --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
-"$howl" create smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"
-"$howl" create web --with python --app ./myapp -h >/dev/null 2>&1 ||
+"$howl" run --build -h >/dev/null 2>&1 || fail "howl run -h"
+"$howl" run --build -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
+"$howl" run --build --on qemu -n 2>&1 | grep -q 'prod-ssh as it is' || fail "howl run --on qemu -n should be prod-ssh"
+"$howl" run --build --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
+"$howl" create --build smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"
+"$howl" create --build web --with python --app ./myapp -h >/dev/null 2>&1 ||
 	fail "README: howl create web --with python --app ./myapp"
-"$howl" run --with webshell-example -n 2>&1 | grep -q 'as it is' || fail "README: howl run --with webshell-example"
-"$howl" run --with example-go -n 2>&1 | grep -q 'as it is' || fail "examples: howl run --with example-go"
-"$howl" create web --with example-python --on gcp -h >/dev/null 2>&1 ||
+"$howl" run --build --with webshell-example -n 2>&1 | grep -q 'as it is' || fail "README: howl run --with webshell-example"
+"$howl" run --build --with example-go -n 2>&1 | grep -q 'as it is' || fail "examples: howl run --with example-go"
+"$howl" create --build web --with example-python --on gcp -h >/dev/null 2>&1 ||
 	fail "examples: howl create web --with example-python --on gcp"
-"$howl" pack --with prod -h >/dev/null 2>&1 || fail "howl pack --with prod -h"
-out=$("$howl" run --with caddy,valkey -n 2>&1) || fail "howl run --with caddy,valkey -n: $out"
+"$howl" pack --build --with prod -h >/dev/null 2>&1 || fail "howl pack --with prod -h"
+out=$("$howl" run --build --with caddy,valkey -n 2>&1) || fail "howl run --with caddy,valkey -n: $out"
 echo "$out" | grep -q 'with: \[caddy, valkey\]' || fail "run --with caddy,valkey -n did not show the form: $out"
-out=$("$howl" run --with caddy -n 2>&1) || fail "howl run --with caddy -n: $out"
+out=$("$howl" run --build --with caddy -n 2>&1) || fail "howl run --with caddy -n: $out"
 echo "$out" | grep -q 'as it is' || fail "one form alone should run as it is: $out"
 rm -rf "$smoke"
-"$howl" form --with caddy --package curl -o "$smoke" -n >/dev/null 2>&1 || fail "howl form -n"
+"$howl" form --build --with caddy --package curl -o "$smoke" -n >/dev/null 2>&1 || fail "howl form -n"
 [ ! -e "$smoke" ] || fail "form -n left $smoke"
-! "$howl" run caddy >/dev/null 2>&1 || fail "howl run caddy (a positional form) was taken"
+! "$howl" run --build caddy >/dev/null 2>&1 || fail "howl run caddy (a positional form) was taken"
 ! "$howl" _build --with minimal --disk-args x slot >/dev/null 2>&1 || fail "_build took --disk-args without disk"
 echo "howl-smoke: the advertised lines take their forms"

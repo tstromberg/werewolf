@@ -18,7 +18,7 @@ release (`prod`, `prod-ssh`), or is built from Wolfi and Alpine (other forms).
 | `slot-update.zig` | daemon, `check`, `outcome`, the plans, the log |
 | `stage.zig` | settings, tiers feed, `attempt`, `pending`, lock, reboot |
 | `slot.zig` | building and installing the other slot; new roots (`Root`) |
-| `apk.zig` | checking apk's cache before root's apk reads it |
+| `../../lib/apk.zig` | checking apk's cache before root's apk reads it; RSA keys |
 | `cve.zig` | CVE fetcher and reader children; root's checks of their lines |
 | `release.zig` | release manifest: signature, checks, advisories |
 | `tiers.zig` | the signed CVE tiers feed; tiering an update's fixes |
@@ -58,9 +58,9 @@ Invariants to keep:
 - **apk reads only what a key vouched for.** Index signatures, package control
   (index SHA-1) and data (datahash) are checked first; the rest of the cache
   is removed. New roots resolve paths within themselves (`Root`).
-- **compose writes only scratch** (`work/compose`), from the staged form chain
-  and the accounts `Root` reads; `Root` copies it in. It writes exactly
-  `compose.records`; other records carry over.
+- **compose writes only scratch** (`work/compose`), from the forms world names
+  NAME-form as the new root's packages laid them, the rest as staged here, and
+  `Root`'s accounts; it writes exactly `compose.records`, the rest carries over.
 - **Fail toward sooner.** With no valid feed, every fix, or else the update
   itself, counts High. A refused form policy blocks the operator's file too.
 - **Durability.** State files go through `writeReplacing`; log lines are fsync'd.

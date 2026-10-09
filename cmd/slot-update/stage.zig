@@ -11,6 +11,7 @@ const linux = m.linux;
 const policy = m.policy;
 const cve = m.cve;
 const releases = m.releases;
+const apk = @import("apk");
 const tiers = m.tiers;
 
 const attempt_path = m.attempt_path;
@@ -260,7 +261,7 @@ pub fn tiersFeed(u: *Update) !?tiers.Feed {
         else => return err,
     };
     const base = std.mem.trim(u8, base_text, " \n");
-    const key = try releases.parseKey(u.gpa, try u.read(meta_dir ++ "/tiers.pub"));
+    const key = try apk.parseKey(u.gpa, try u.read(meta_dir ++ "/tiers.pub"));
     const now = nowSecs(u.io);
     // The newest serial is kept apart from the feed, so no older feed is
     // taken even after the kept one expires.
@@ -326,7 +327,7 @@ pub fn tiersFeed(u: *Update) !?tiers.Feed {
 pub fn fetchFeed(
     u: *Update,
     base: []const u8,
-    key: releases.Key,
+    key: apk.Key,
     now: i64,
     last: ?[]const u8,
 ) !struct { feed: tiers.Feed, data: []const u8, sig: []const u8 } {

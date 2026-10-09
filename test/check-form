@@ -21,7 +21,7 @@ if [ -n "${SSH_PORT:-}" ]; then
 	cat "$c-key.pub" "$c-sk-key.pub" >"$c-config/authorized_keys"
 fi
 [ ! -e "$FORM_DIR/test/config" ] || "$FORM_DIR/test/config" "$c-config"
-"$HOWL" pack --with "$FORM_REF" -o "$c-config.tar" --config "$c-config" >/dev/null
+"$HOWL" pack --build --with "$FORM_REF" -o "$c-config.tar" --config "$c-config" >/dev/null
 own=
 [ ! -e "$FORM_DIR/test/checks" ] || own=$FORM_DIR/test/checks
 awk -v skip="${SKIP:-}" 'BEGIN { n = split(skip, s, " "); for (i = 1; i <= n; i++) drop[s[i]] = 1 }

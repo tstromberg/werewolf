@@ -24,7 +24,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | `env NAME=VALUE`, `secret NAME PATH` | its environment, otherwise only `PATH`; a secret comes from a file and is never logged |
 | `config NAME PATH [optional]` | copy a `/run/config` file to `/run/svc/SERVICE/NAME`, 0600; if missing, park unless `optional` |
 | `setting`, `render` | settings, written by service-config (`lib/settings.zig`); a missing settings file reads as `{}` |
-| `nofile N`, `memory MIB` | open-file limit; `memory.max`, which caps resident memory, not address space |
+| `nofile N`, `memory MIB`, `cpu WEIGHT` | open-file limit; `memory.max` (resident memory, not address space); `cpu.weight`, a share of contended CPUs |
 | `share strict\|shared\|browseable` | who may enter its two directories: only its user (`0700`, the default); others, by a name they know, such as a socket (`0711`); others, listing too (`0755`) |
 | `root /oci/NAME`, `dir PATH` | run inside an image in the root (docs/design/adhoc.md), without `render`; start directory |
 

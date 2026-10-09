@@ -5,7 +5,7 @@
 # the tar's network file. make passes CHECK_ENV (Makefile).
 set -eu
 tar=$CHECK/static-config.tar
-"$HOWL" pack --with minimal -o "$tar" --ip 10.0.2.15/24 --gw 10.0.2.2 --dns 10.0.2.3 >/dev/null
+"$HOWL" pack --build --with minimal -o "$tar" --ip 10.0.2.15/24 --gw 10.0.2.2 --dns 10.0.2.3 >/dev/null
 exec test/boot static test/checks-static "$CHECK/static.log" "$@" \
 	-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$BOOT" \
 	-drive "file=$tar,format=raw,if=virtio,readonly=on"
