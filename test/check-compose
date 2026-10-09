@@ -1,0 +1,35 @@
+#!/bin/sh
+# check-compose composes FORM again as a machine's updater composes it
+# (cmd/slot-update), from the chain its slot stages in OUT/meta, over
+# wolfi-baselayout's accounts, which it fetches once into VENDOR (make
+# check-compose). The ro tree and records must be the build's, file for
+# file. make passes OUT, FORM, ARCH, DEV, LOCK (the form's lock),
+# VENDOR, FORM_TOOL and TAR.
+set -eu
+dir=$OUT/check-compose
+url=$(sed -n "s|.*\"url\": \"\([^\"]*/$ARCH/wolfi-baselayout-[^\"]*\.apk\)\".*|\1|p" "$LOCK") || true
+[ -n "$url" ] || { echo "check-compose: $LOCK names no wolfi-baselayout" >&2; exit 1; }
+rm -rf "$dir" && mkdir -p "$dir/image/etc" "$VENDOR/baselayout"
+pkg=$VENDOR/baselayout/${url##*/}
+[ -s "$pkg" ] || { curl -sSfL -o "$pkg.tmp" "$url" && mv "$pkg.tmp" "$pkg"; }
+for f in passwd group shadow; do "$TAR" -xzOf "$pkg" "etc/$f" >"$dir/image/etc/$f"; done
+abs=$(cd "$dir" && pwd)
+(cd "$OUT/meta/usr/share/werewolf" && "$FORM_TOOL" compose "$FORM" "$ARCH" posture-known \
+	"$abs/image" "$abs/ro" "$abs/meta" ${DEV:+dev})
+
+# entries DIR NAMES: the mtree lines of NAMES under DIR, sorted.
+entries() {
+	# shellcheck disable=SC2086 # NAMES are words
+	(cd "$1" && "$TAR" -cf - --format=mtree --options='!all,type,mode,link,sha256' $2 | sed 1d | LC_ALL=C sort)
+}
+entries "$OUT/ro" . >"$dir/build.ro"
+entries "$dir/ro" . >"$dir/again.ro"
+recs=$(cd "$dir/meta/usr/share/werewolf" && ls)
+entries "$OUT/meta/usr/share/werewolf" "$recs" >"$dir/build.meta"
+entries "$dir/meta/usr/share/werewolf" "$recs" >"$dir/again.meta"
+if diff "$dir/build.ro" "$dir/again.ro" && diff "$dir/build.meta" "$dir/again.meta"; then
+	echo "PASS   check-compose $FORM: composed again from its staged chain, as the build made it"
+else
+	echo "FAIL   check-compose $FORM: the lines above differ (<: the build, >: composed again)"
+	exit 1
+fi

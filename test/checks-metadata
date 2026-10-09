@@ -1,4 +1,4 @@
-# The cloud form on a known cloud, whose metadata server holds a good config
+# prod on a known cloud, whose metadata server holds a good config
 # tar (make check; see test/checks for the format). init must have taken it:
 # the hostname, root's key, and the tar as cmd/cloud-metadata/cloud-metadata.zig rewrote it,
 # every entry root's and 0600.

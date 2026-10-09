@@ -23,12 +23,12 @@ vault, each checked by sha256, built in Wolfi's environment with Wolfi's
 Rust, linked to Wolfi's OpenSSL 4 and SQLite, mimalloc's secure mode
 (guard pages, encrypted free lists) compiled in, and its crates recorded
 in the binary by cargo-auditable for scanners. [forms/vaultwarden/form.yaml](form.yaml) names it,
-[melange.mk](../../melange.mk) unpacks the package over the image,
-and checks that every library it
-links is one of the form's packages, so Wolfi's fixes to those reach the
-machine through its updater; a new Vaultwarden is a new pin and a new
-image. The same recipe is meant for wolfi-dev/os, after which the form
-names the package and the recipe goes.
+howl ([melange.zig](../../cmd/howl/melange.zig)) unpacks the package over
+the image and checks that every library it links is one of the form's
+packages, so Wolfi's fixes to those reach the machine through its
+updater; a new Vaultwarden is a new pin and a new image. The same recipe
+is meant for wolfi-dev/os, after which the form names the package and the
+recipe goes.
 
 melange builds on Linux with bubblewrap. On macOS it uses its QEMU
 runner, booted from werewolf's own Alpine kernel and a guest from

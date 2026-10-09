@@ -86,5 +86,5 @@ stayed down for good.
 - **Whole or absent**: an interrupted first boot leaves no key, so the next
   boot makes one.
 - **Repairs**: a lost public half is made again from the key.
-- **Tested**: `check-bastion`'s second boot must offer the fingerprint the
-  first boot logged.
+- **Tested**: the second boot of `check-sshd` and `check-prod-ssh`
+  (test/check-form) must offer the fingerprint the first boot logged.

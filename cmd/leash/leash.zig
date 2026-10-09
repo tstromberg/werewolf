@@ -163,7 +163,7 @@ pub fn main(init: std.process.Init) !void {
         _ = linux.fchown(fd, user.uid, user.gid);
     };
 
-    const rules = sandbox.Ruleset.init() catch |err| l.fail(
+    const rules = sandbox.Ruleset.init(.{ .sockets = true }) catch |err| l.fail(
         .park,
         "Landlock: {s}; this kernel cannot leash a service",
         .{sandbox.whyNot(gpa, err)},
@@ -195,6 +195,10 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
     for (s.connect) |port| rules.port(sandbox.connect_tcp, port) catch |err|
         l.fail(.park, "connect tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+    // A socket's directory, not the socket, which its server makes anew
+    // each time it starts; nothing there but reaching sockets.
+    if (rules.fs & sandbox.resolve_unix != 0) for (s.sockets) |p|
+        allowPath(l, rules, gpa, std.fs.path.dirname(p).?, sandbox.resolve_unix, nodata);
 
     const cwd: [:0]const u8 = if (s.dir) |d|
         try gpa.dupeSentinel(u8, d, 0)
@@ -558,11 +562,13 @@ const CapSets = extern struct {
 // --- Landlock -------------------------------------------------------------------
 
 // Landlock rights: read_tree reads files and lists directories, write_tree
-// adds every change but making devices, and run_file executes a program.
+// adds every change but making devices, and reaching the sockets there, a
+// past run's too; run_file executes a program.
 const read_tree: u64 = sandbox.read_file | sandbox.read_dir;
 const write_tree: u64 = read_tree | sandbox.write_file | sandbox.remove_dir |
     sandbox.remove_file | sandbox.make_dir | sandbox.make_reg | sandbox.make_sock |
-    sandbox.make_fifo | sandbox.make_sym | sandbox.refer | sandbox.truncate;
+    sandbox.make_fifo | sandbox.make_sym | sandbox.refer | sandbox.truncate |
+    sandbox.resolve_unix;
 const run_file: u64 = sandbox.execute | sandbox.read_file;
 
 // openat2(2) arguments, to open a path with no symlink anywhere in it.

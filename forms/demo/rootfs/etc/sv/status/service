@@ -5,5 +5,6 @@ exec    /usr/lib/werewolf/status-page
 user    status
 pledge  stdio rpath wpath unix connect
 read    /data/svc/scan /data/svc/autoupdate /run/werewolf
+connect /run/svc/postgres/.s.PGSQL.5432
 # nginx serves its page, /data/svc/status/www.
 share   shared

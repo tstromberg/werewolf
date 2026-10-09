@@ -181,8 +181,8 @@ built once first: howl, the programs, the kernel and minimal's DEV=1 image.
 
 It runs a whole update, as a machine does one. `prod` is built with
 `DEV=1`, so it follows no releases and builds its own slot. It boots from
-slot a of a disk, and its build record claims the kernel release before its
-own (`linux-virt-6.18.55-r0` claims `6.18.54-r0`). The claim is one file,
+slot a of a disk that [test/check-updater](../test/check-updater) makes,
+and its build record claims the kernel release before its own (`linux-virt-6.18.55-r0` claims `6.18.54-r0`). The claim is one file,
 laid over the slot's root as a later tar entry; nothing in `build/`
 changes. The machine commits and finds Alpine's kernel newer. As
 `_update`, it fetches Wolfi's and Alpine's packages and the CVE sources,
@@ -194,7 +194,7 @@ must have kept its packages, slot b's root must be owned by root with mode
 0755, and GRUB must boot b next. Then test/update boots slot b, which must
 commit, and the updater must record that the update held. No seccomp
 filter may have killed anything in either boot. The consoles are in
-`build/<arch>/check/update-autoupdate/`.
+`build/<arch>/check/update-prod/`.
 
 `make check-updater-release` does the same with `prod-ssh`, a form CI
 publishes. Its updater installs the latest signed release instead of
@@ -291,6 +291,12 @@ ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } 
   the docs cannot claim a protection the machines lack, or miss one they
   have.
 
+A check that needs more than a boot and these lines is a script,
+`test/check-NAME`, which `make check-NAME` runs once it has built what the
+script boots. The script takes the machine, `QEMU...`, as its arguments,
+and the form's values in its environment (the Makefile's `CHECK_ENV`). It
+says `pass` or `FAIL` in test/boot's columns.
+
 Test the attack, not the setting. `ptrace_scope` reading 3 proves less than
 a refused `cat /proc/1/mem`, which is why posture asks the kernel to undo a
 setting and expects a refusal. And make a check fail before you trust it to
@@ -376,8 +382,8 @@ the leash, hidepid, W^X) are features of the host kernel and hold in a
 container. So cage checks them directly, and `WEREWOLF_CHECK=1` makes the
 posture service in the container attack them too, as `werewolf.check=1`
 does on a booted machine. A container cannot own the kernel's sysctls and
-boot line, dm-verity, or a few mount options. `POSTURE_KNOWN_NATIVE` allows
-those checks to fail, as the form's weaknesses allow what the form carries
+boot line, dm-verity, or a few mount options. test/cage's
+`POSTURE_KNOWN_NATIVE` allows those checks to fail, as the form's weaknesses allow what the form carries
 by design.
 
 Where cage may change the host (`CAGE_HARDEN_HOST=1`, which CI sets on its

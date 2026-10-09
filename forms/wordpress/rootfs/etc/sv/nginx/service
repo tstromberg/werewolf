@@ -7,3 +7,4 @@ user    nginx
 pledge  stdio rpath wpath proc unix inet listen connect aio sendfile
 listen  tcp/80
 read    /etc/nginx /data/svc/php-fpm/uploads
+connect /run/svc/php-fpm/php.sock

@@ -1,0 +1,27 @@
+#!/bin/sh
+# bastion-form CHECK FORM_TOOL PROVIDER writes CHECK/bastion-check, a form
+# on the bastion naming two users, as an operator makes one (make
+# check-bastion). check, whose key is root's security key in test/boot, may
+# reach 127.0.0.1:22. narrow may reach 127.0.0.2:22, which check must not
+# (forms/bastion/test/checks). Their keys are made here, to be baked in.
+set -eu
+check=$1 form_tool=$2 provider=$3
+dir=$check/bastion-check
+mkdir -p "$check" && rm -rf "$dir" && mkdir -p "$dir/test"
+test/keys "$dir" "$provider"
+test/keys "$check/bastion-narrow" "$provider"
+cp forms/bastion/test/checks "$dir/test/checks"
+echo '# make check-bastion: the bastion, with two users.' >"$dir/apko.yaml"
+{
+	echo 'base: bastion'
+	echo 'bastion:'
+	echo '  users:'
+	echo '    check:'
+	echo "      keys: [\"$(cut -d' ' -f1,2 "$dir-sk-key.pub")\"]"
+	echo '      destinations: [127.0.0.1:22]'
+	echo '    narrow:'
+	echo "      keys: [\"$(cut -d' ' -f1,2 "$check/bastion-narrow-sk-key.pub")\"]"
+	echo '      destinations: [127.0.0.2:22]'
+	echo 'weaknesses:'
+	"$form_tool" excuses bastion | sed 's/^\([^ ]*\) \(.*\)/  \1: "\2"/'
+} >"$dir/form.yaml"

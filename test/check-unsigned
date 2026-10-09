@@ -1,0 +1,20 @@
+#!/bin/sh
+# check-unsigned QEMU... offers evdev with its signature cut off
+# (test/unsign), in a cpio the kernel unpacks last so it replaces the signed
+# one, and runs test/checks-unsigned (make check-unsigned). It boots twice:
+# init loads the modules on a RAM root, and stage0 on the slot check-slot
+# left. The kernel must refuse the module both times. make passes CHECK_ENV
+# (Makefile).
+set -eu
+cpio=$CHECK/unsigned-$FORM.cpio.zst
+initrd=$CHECK/unsigned-$FORM.zst
+test/unsign "$OUT/modules.tar" evdev "$cpio"
+cat "$OUT/initramfs.zst" "$cpio" >"$initrd"
+test/boot unsigned test/checks-unsigned "$CHECK/unsigned.log" "$@" \
+	-kernel "$KERNEL" -initrd "$initrd" -append "$CMDLINE"
+cat "$OUT/slot/stage0.zst" "$cpio" >"$initrd"
+cp "$CHECK/victim.img" "$CHECK/unsigned-victim.img"
+exec test/boot unsigned-slot test/checks-unsigned "$CHECK/unsigned-slot.log" "$@" \
+	-kernel "$OUT/slot/vmlinuz" -initrd "$initrd" \
+	-append "$CMDLINE init=/init werewolf.slot=a werewolf.victim=$VICTIM:/var/lib/werewolf werewolf.grubenv=$VICTIM:/boot/grub/grubenv" \
+	-drive "file=$CHECK/unsigned-victim.img,format=raw,if=virtio"

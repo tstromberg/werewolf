@@ -41,7 +41,7 @@ pub const usage =
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
-    \\       howl build-apk RECIPE [--arch ARCH]   a form's own package, from a melange recipe
+    \\       howl build-apk RECIPE [--arch ARCH] [--verbose]   a form's own package, from a melange recipe
     \\       howl form --with FORM,... --package PKG,... --oci NAME=REF --KEY LINE --KEY.SUB VALUE -o DIR   a form from the line, kept;
     \\            build, run, create and pack take the same flags: one form alone is run as it is, more is generated (-n shows it)
     \\

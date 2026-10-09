@@ -1,0 +1,24 @@
+#!/bin/sh
+# check-deadman QEMU... boots minimal's slot and never commits it (make
+# check-deadman). stage0's deadman, cut to 20 s by werewolf.deadman, which
+# only a DEV build takes, must say why and reset the machine. No loader is
+# named, so nothing commits. Not test/boot, which would check the machine
+# and power it off. make passes CHECK_ENV (Makefile).
+set -eu
+d=$CHECK/deadman
+log=$CHECK/deadman.log
+rm -rf "$d" "$d.img" && mkdir -p "$d/var/lib/werewolf/a"
+cp "$OUT/slot/root.erofs" "$d/var/lib/werewolf/a/"
+mke2fs -q -F -t ext4 -U "$VICTIM" -d "$d" "$d.img" 128M && rm -r "$d"
+fail() { echo "FAIL   deadman            $1; see $log"; exit 1; }
+rc=0
+timeout 180 "$@" -kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0.zst" \
+	-append "$CMDLINE init=/init werewolf.slot=a werewolf.victim=$VICTIM:/var/lib/werewolf werewolf.deadman=20" \
+	-drive "file=$d.img,format=raw,if=virtio" </dev/null >"$log" 2>&1 || rc=$?
+[ $rc -ne 124 ] || fail "no reset in 180 s"
+grep -a -q 'stage0: the deadman waits 20s' "$log" || fail "stage0 did not take werewolf.deadman"
+grep -a -q 'stage0: slot a did not commit in 20s; rebooting into the last good slot' "$log" ||
+	fail "the deadman did not say why"
+! grep -a -q 'reboot: Power down' "$log" || fail "the machine powered off rather than reset"
+! grep -a -q 'slot-keep: healthy' "$log" || fail "the slot committed"
+echo "pass   deadman            a slot that does not commit is rebooted, and says why"

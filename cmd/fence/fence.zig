@@ -654,7 +654,7 @@ fn restrict(p: Policy) !void {
     // from ABI 6 scopes signals and abstract UNIX sockets. Scoping keeps root
     // in the domain from signalling what init started before fence: the
     // mount broker, DHCP's renewal and stage0's deadman.
-    const ruleset: sandbox.Ruleset = try .init();
+    const ruleset: sandbox.Ruleset = try .init(.{});
     if (ruleset.abi < 4) {
         sandbox.failed = "Landlock without network rules (ABI 4)";
         return error.LandlockTooOld;

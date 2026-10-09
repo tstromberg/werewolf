@@ -12,6 +12,8 @@ pub const Service = struct {
     user: []const u8 = "",
     listen: []const u16 = &.{},
     connect: []const u16 = &.{},
+    /// sockets are the pathname UNIX sockets a `connect` line names.
+    sockets: []const []const u8 = &.{},
     read: []const []const u8 = &.{},
     write: []const []const u8 = &.{},
     run: []const []const u8 = &.{},
@@ -70,6 +72,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var before: std.ArrayList([]const []const u8) = .empty;
     var listen: std.ArrayList(u16) = .empty;
     var connect: std.ArrayList(u16) = .empty;
+    var sockets: std.ArrayList([]const u8) = .empty;
     var read: std.ArrayList([]const u8) = .empty;
     var write: std.ArrayList([]const u8) = .empty;
     var run: std.ArrayList([]const u8) = .empty;
@@ -100,10 +103,16 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             if (std.mem.eql(u8, args[0], "root"))
                 return invalid(bad, "user root: a service runs as a user of its own");
             user = args[0];
-        } else if (std.mem.eql(u8, key, "listen") or std.mem.eql(u8, key, "connect")) {
+        } else if (std.mem.eql(u8, key, "listen")) {
             if (args.len == 0) return invalid(bad, "no ports");
-            const list = if (std.mem.eql(u8, key, "listen")) &listen else &connect;
-            for (args) |a| try list.append(gpa, try tcpPort(a, bad));
+            for (args) |a| try listen.append(gpa, try tcpPort(a, bad));
+        } else if (std.mem.eql(u8, key, "connect")) {
+            if (args.len == 0) return invalid(bad, "no ports or sockets");
+            for (args) |a| if (a.len > 0 and a[0] == '/') {
+                if (!isCleanPath(a) or std.mem.findScalar(u8, a[1..], '/') == null)
+                    return invalid(bad, "a socket's path must be absolute, clean, in a directory");
+                try sockets.append(gpa, a);
+            } else try connect.append(gpa, try tcpPort(a, bad));
         } else if (std.mem.eql(u8, key, "read") or std.mem.eql(u8, key, "write") or
             std.mem.eql(u8, key, "run") or std.mem.eql(u8, key, "requires"))
         {
@@ -224,6 +233,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .before = before.items,
         .listen = listen.items,
         .connect = connect.items,
+        .sockets = sockets.items,
         .read = read.items,
         .write = write.items,
         .run = run.items,
@@ -339,7 +349,7 @@ test parse {
         \\before  /usr/bin/nginx -t -q   # check first
         \\user    nginx
         \\listen  tcp/80 tcp/443
-        \\connect tcp/443
+        \\connect tcp/443 /run/svc/php-fpm/php.sock
         \\read    /etc/nginx /data/svc/status/www
         \\write   /var/lib/nginx
         \\run     /usr/bin/grype
@@ -356,6 +366,7 @@ test parse {
     try testing.expectEqual(3, s.before[0].len);
     try testing.expectEqualSlices(u16, &.{ 80, 443 }, s.listen);
     try testing.expectEqualSlices(u16, &.{443}, s.connect);
+    try testing.expectEqualStrings("/run/svc/php-fpm/php.sock", s.sockets[0]);
     try testing.expectEqual(2, s.read.len);
     try testing.expectEqualStrings("/var/lib/nginx", s.write[0]);
     try testing.expectEqualStrings("/usr/bin/grype", s.run[0]);
@@ -385,6 +396,9 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser root", .line = 2 },
         .{ .text = "exec /a\nuser x\nlisten udp/53", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nlisten /run/x.sock", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconnect /run/../x.sock", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconnect /x.sock", .line = 3 },
         .{ .text = "exec /a\nuser x\nread /etc//x", .line = 3 },
         .{ .text = "exec /a\nuser x\nenv 1X=y", .line = 3 },
         .{ .text = "exec /a\nuser x\nconfig ../key /run/config/key", .line = 3 },

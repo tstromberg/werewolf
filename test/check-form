@@ -1,0 +1,48 @@
+#!/bin/sh
+# check-form QEMU... boots FORM, built with a shell, and runs test/checks and
+# the form's own test/checks on it as root (make check-FORM, through
+# test/boot). The machine gets a blank 1 GiB disk for /data and a config
+# disk: the fixed test data.key, root's keys if the form serves ssh, and
+# what the form's test/config writes. With AGAIN set it boots again on the
+# disks the first boot left (test/checks-again). init must not format them
+# again, and an ssh host key kept in /data must be the one offered.
+#
+# QEMU... is the machine, forwarding the form's ports. make passes CHECK_ENV
+# (Makefile) and FORM_REF, FORM_DIR, SKIP (test/checks lines to leave out),
+# AGAIN, and for ssh SSH_PORT, SSH_SK_PROVIDER, KEPT_KEYS (keys made already,
+# baked in) and GITEA_PORT, which test/boot reads.
+set -eu
+c=$CHECK/$FORM
+rm -f "$c.img" && dd if=/dev/zero of="$c.img" bs=1048576 count=0 seek=1024 2>/dev/null
+rm -rf "$c-config" && mkdir -p "$c-config"
+head -c 64 /dev/zero | tr '\0' k >"$c-config/data.key"
+if [ -n "${SSH_PORT:-}" ]; then
+	[ -n "${KEPT_KEYS:-}" ] || test/keys "$c" "$SSH_SK_PROVIDER"
+	cat "$c-key.pub" "$c-sk-key.pub" >"$c-config/authorized_keys"
+fi
+[ ! -e "$FORM_DIR/test/config" ] || "$FORM_DIR/test/config" "$c-config"
+"$HOWL" pack --with "$FORM_REF" -o "$c-config.tar" --config "$c-config" >/dev/null
+own=
+[ ! -e "$FORM_DIR/test/checks" ] || own=$FORM_DIR/test/checks
+awk -v skip="${SKIP:-}" 'BEGIN { n = split(skip, s, " "); for (i = 1; i <= n; i++) drop[s[i]] = 1 }
+	!($2 in drop)' test/checks ${own:+"$own"} >"$c-checks"
+
+boot() { # boot NAME CHECKS QEMU...
+	name=$1 checks=$2
+	shift 2
+	SSH_MODE=$FORM SSH_KEY=$c-key SSH_SK_KEY=$c-sk-key test/boot "$name" "$checks" "$CHECK/$name.log" "$@" \
+		-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$CMDLINE werewolf.data=vda" \
+		-drive "file=$c.img,format=raw,if=virtio" \
+		-drive "file=$c-config.tar,format=raw,if=virtio,readonly=on"
+}
+boot "$FORM" "$c-checks" "$@"
+[ -n "${AGAIN:-}" ] || exit 0
+
+boot "$FORM-again" test/checks-again "$@"
+! grep -a -E 'werewolf: (formatting|making LUKS2) ' "$c-again.log" ||
+	{ echo "FAIL   $FORM-again        formatted the disk its first boot left"; exit 1; }
+a=$(grep -a '"event":"host-key"' "$c.log" | grep -a 'kept in /data' |
+	grep -ao '"fingerprint":"[^"]*"' | head -n 1)
+b=$(grep -a '"event":"host-key"' "$c-again.log" | grep -ao '"fingerprint":"[^"]*"' | head -n 1)
+[ -z "$a" ] || [ "$a" = "$b" ] ||
+	{ echo "FAIL   $FORM-again        host key not kept: [$a] then [$b]"; exit 1; }

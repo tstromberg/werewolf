@@ -20,9 +20,11 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len == 2 and std.mem.eql(u8, args[1], "--noop")) return;
-    if (args.len == 3 and std.mem.eql(u8, args[1], "--probe")) std.process.exit(attacks.probe(
-        std.fmt.parseInt(u16, args[2], 10) catch 0,
-    ));
+    if ((args.len == 3 or args.len == 4) and std.mem.eql(u8, args[1], "--probe"))
+        std.process.exit(attacks.probe(
+            std.fmt.parseInt(u16, args[2], 10) catch 0,
+            args.len == 4 and std.mem.eql(u8, args[3], "sockets"),
+        ));
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "run")) return serve(io, gpa);
     var format: Format = .text;
     var extended = false;

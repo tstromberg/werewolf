@@ -97,10 +97,10 @@ pub fn seed(m: *Machine) void {
     for (m.list("/etc/sv")) |s| mkdir(m.fmtZ("/run/runit/supervise.{s}", .{s}), 0o755);
 }
 
-/// kernel raises lockdown to integrity, loads modules and closes the loader
+/// kernel raises lockdown to confidentiality, loads modules and closes the loader
 /// (cmd/modload), and applies the sysctls and MDWE. stage0 has done the
 /// first two already; init repeats them rather than trust the command line.
-/// At integrity the kernel refuses modules not signed by Alpine's key.
+/// Locked down, the kernel refuses modules not signed by Alpine's key.
 /// It returns an error if a protection is refused outside a container.
 pub fn kernel(m: *Machine) !void {
     if (!m.isMounted("/sys/kernel/security")) m.mount(&.{
@@ -111,8 +111,8 @@ pub fn kernel(m: *Machine) !void {
     });
     m.mount(&.{ "-o", "remount,nosuid,nodev,noexec,nosymfollow", "/sys/kernel/security" });
     const lockdown = "/sys/kernel/security/lockdown";
-    if (std.mem.indexOf(u8, m.read(lockdown), "[none]") != null)
-        _ = writeFile(lockdown, "integrity");
+    if (std.mem.indexOf(u8, m.read(lockdown), "[confidentiality]") == null)
+        _ = writeFile(lockdown, "confidentiality");
     say("lockdown: {s}", .{lockdownLevel(m.read(lockdown))});
 
     if (!m.run(&.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
@@ -228,6 +228,9 @@ const sysctls = [_][2][]const u8{
     .{ "kernel/io_uring_disabled", "2" },
     // stage0's deadman writes /proc/sysrq-trigger, which this does not govern.
     .{ "kernel/sysrq", "0" },
+    // No process may push input into a terminal it shares (TIOCSTI), whatever
+    // the kernel was built to allow.
+    .{ "dev/tty/legacy_tiocsti", "0" },
     // The kernel must not start a helper for device events or module
     // requests: it would run outside the seal, and the loader is closed.
     // An empty value makes request_module answer ENOENT.

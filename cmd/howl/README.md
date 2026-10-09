@@ -20,9 +20,9 @@ cloud user data ([docs/cloud.md](../../docs/cloud.md)).
 | `run` | `create` of `werewolf-run`, replacing the last; default form lima on Lima, else prod-ssh |
 | `ssh`, `console`, `stop`, `delete` | reach, read or remove a machine; with no NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
-| `build-apk RECIPE` | `make _build-apk`: a form's package from a melange recipe |
+| `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
 | `form ... -o DIR` | writes an ad-hoc form ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same flags |
-| `_build`, `_bhyve`, `_firecracker`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets and `BUILD/vmlinuz` (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); two supervisors; the OCI unpacker ([oci.md](../../docs/design/oci.md)) |
+| `_build`, `_bhyve`, `_firecracker`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); two supervisors; the OCI unpacker ([oci.md](../../docs/design/oci.md)) |
 
 ## Goals
 
@@ -32,7 +32,7 @@ cloud user data ([docs/cloud.md](../../docs/cloud.md)).
 
 ## Non-Goals
 
-- Compiling programs, or managing cloud accounts, groups, IAM or networks.
+- Compiling werewolf's programs, or managing cloud accounts, groups, IAM or networks.
 
 ## Detailed design
 
@@ -74,8 +74,8 @@ Lima, or a restart in a cloud. Another form, or `--app`, is refused.
 
 ## Drawbacks
 
-- howl needs a checkout, GNU make for werewolf's programs, melange's packages
-  and the tutorials' apps, and provider CLIs, whose changed output breaks it.
+- howl needs a checkout, GNU make for werewolf's programs, melange and the
+  tutorials' compilers, and provider CLIs, whose changed output breaks it.
 
 ## Alternatives Considered
 

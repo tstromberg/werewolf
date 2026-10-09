@@ -1,4 +1,4 @@
-# The cloud form where its config must not be taken (make check; see
+# prod where its config must not be taken (make check; see
 # test/checks for the format): a hostile tar on a known cloud, with a
 # symlink and a ../ entry beside a hostname, or a good one on no cloud at
 # all. Nothing of it may reach the machine; test/cloud-boot judges the

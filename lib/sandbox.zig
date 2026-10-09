@@ -164,6 +164,11 @@ pub const refer: u64 = 0x2000;
 pub const truncate: u64 = 0x4000;
 /// ioctl_dev needs Landlock ABI 5.
 pub const ioctl_dev: u64 = 0x8000;
+/// resolve_unix lets a program connect, or send, to a UNIX socket beneath a
+/// directory by its path. It needs ABI 9, and fsAll leaves it out: only a
+/// ruleset made with init(.{ .sockets = true }) handles it, so fence and
+/// werewolf's own programs reach sockets as before.
+pub const resolve_unix: u64 = 0x10000;
 /// file_rights are the rights a rule on a file, not a directory, may hold.
 pub const file_rights: u64 = execute | write_file | read_file | truncate | ioctl_dev;
 /// own_files lets a program read, write, make, remove and truncate files
@@ -195,14 +200,22 @@ pub fn fsAll(abi: usize) u64 {
 pub const Ruleset = struct {
     fd: i32,
     abi: usize,
+    /// fs is the filesystem rights the ruleset handles.
+    fs: u64,
 
-    pub fn init() !Ruleset {
+    /// Options: sockets also handles resolve_unix where the kernel knows it
+    /// (ABI 9), so no pathname UNIX socket made outside the domain is
+    /// reached but beneath a rule that grants it.
+    pub const Options = struct { sockets: bool = false };
+
+    pub fn init(o: Options) !Ruleset {
         // LANDLOCK_CREATE_RULESET_VERSION
         const abi = try sys(linux.syscall3(.landlock_create_ruleset, 0, 0, 1), "landlock version");
+        const fs = fsAll(abi) | if (o.sockets and abi >= 9) resolve_unix else 0;
         // struct landlock_ruleset_attr: handled_access_fs, handled_access_net,
         // scoped (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and _SIGNAL).
         const attr: [3]u64 = .{
-            fsAll(abi),
+            fs,
             if (abi >= 4) bind_tcp | connect_tcp else 0,
             if (abi >= 6) 0x3 else 0,
         };
@@ -211,15 +224,15 @@ pub const Ruleset = struct {
             linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
             "landlock ruleset",
         );
-        return .{ .fd = @intCast(fd), .abi = abi };
+        return .{ .fd = @intCast(fd), .abi = abi, .fs = fs };
     }
 
-    /// add grants access beneath fd, masked to the rights this kernel knows.
-    /// A rule on a file may hold only file_rights.
+    /// add grants access beneath fd, masked to the rights the ruleset
+    /// handles. A rule on a file may hold only file_rights.
     pub fn add(r: Ruleset, fd: i32, access: u64) !void {
         // struct landlock_path_beneath_attr, packed.
         var beneath: [12]u8 = undefined;
-        std.mem.writeInt(u64, beneath[0..8], access & fsAll(r.abi), .little);
+        std.mem.writeInt(u64, beneath[0..8], access & r.fs, .little);
         std.mem.writeInt(i32, beneath[8..12], fd, .little);
         _ = try sys(
             linux.syscall4(.landlock_add_rule, @intCast(r.fd), 1, @intFromPtr(&beneath), 0),
@@ -257,7 +270,7 @@ pub const Rule = struct { fd: i32, access: u64 };
 /// leave unrestricted what they do not know: ports before ABI 4 (6.7),
 /// sockets and signals before ABI 6 (6.12). werewolf's kernel knows all.
 pub fn landlock(rules: []const Rule, ports: []const u16) !void {
-    const ruleset: Ruleset = try .init();
+    const ruleset: Ruleset = try .init(.{});
     for (rules) |r| try ruleset.add(r.fd, r.access);
     if (ruleset.abi >= 4) for (ports) |p| try ruleset.port(connect_tcp, p);
     _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");

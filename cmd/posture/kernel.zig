@@ -68,12 +68,12 @@ pub fn check(p: *Posture) !void {
         .id = "kernel-lockdown",
         .area = "kernel",
         .name = "Kernel lockdown",
-        .why = "Root cannot change the running kernel: no /dev/mem, no unsigned code, no " ++
-            "hibernation images.",
+        .why = "Root cannot change the running kernel or read its memory: no /dev/mem, no " ++
+            "unsigned code, no hibernation images, no kcore, kprobes or BPF reads of it.",
         .how = if (p.root)
-            "lockdown is integrity or higher, and writing none is refused"
+            "lockdown is confidentiality, and writing none is refused"
         else
-            "lockdown is integrity or higher",
+            "lockdown is confidentiality",
         .result = if (locked and !lowered) .pass else .fail,
         .detail = level,
     });
@@ -152,6 +152,13 @@ pub fn check(p: *Posture) !void {
         "No io_uring",
         "Removes a large interface that has carried many kernel exploits.",
         &.{.{ "kernel/io_uring_disabled", "2" }},
+    );
+    try p.sysctls(
+        "kernel-tiocsti",
+        "kernel",
+        "No terminal input injection",
+        "A process cannot type commands into a terminal it shares with another.",
+        &.{.{ "dev/tty/legacy_tiocsti", "0" }},
     );
     try p.sysctls(
         "kernel-sysrq",
@@ -834,7 +841,7 @@ fn lockdownLevel(text: []const u8) []const u8 {
 }
 
 fn isLocked(level: []const u8) bool {
-    return std.mem.eql(u8, level, "integrity") or std.mem.eql(u8, level, "confidentiality");
+    return std.mem.eql(u8, level, "confidentiality");
 }
 
 /// missingArgs lists the words of want that are not in have.
@@ -1116,6 +1123,7 @@ test lockdownLevel {
     try testing.expectEqualStrings("unavailable", lockdownLevel(""));
     try testing.expect(isLocked("confidentiality"));
     try testing.expect(!isLocked("none"));
+    try testing.expect(!isLocked("integrity"));
 }
 
 test missingArgs {

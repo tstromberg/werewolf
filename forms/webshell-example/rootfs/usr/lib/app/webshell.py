@@ -240,7 +240,7 @@ ATTACKS = [
 # execution does happen and is bounded by the allowlist, not by the tools
 # being absent. Each should run and print something; none reveals a secret.
 ALLOWED = [
-    ("the account it runs as", "id", "uid=204"),
+    ("the account it runs as", "id", "(app)"),
     ("the kernel it runs on", "uname -a", "Linux"),
     ("the host it runs on", "hostname", ""),
     ("the public account list", "cat /etc/passwd", "root:x:0:0"),

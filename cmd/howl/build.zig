@@ -1,7 +1,8 @@
 //! build makes a form's image step by step, with the tools and arguments
 //! the Makefile's image recipes used, at their paths, so the bytes match.
-//! make still compiles the programs. The steps are in packages.zig and
-//! slot.zig. See README.md and docs/design/howl-build.md.
+//! make still compiles the programs. The steps are in packages.zig,
+//! melange.zig, app.zig and slot.zig. See README.md and
+//! docs/design/howl-build.md.
 
 const std = @import("std");
 const forms = @import("form");
@@ -9,6 +10,8 @@ const compose = @import("compose");
 const image = @import("image");
 const howl = @import("howl.zig");
 const adhoc = @import("adhoc.zig");
+const app = @import("app.zig");
+const melange = @import("melange.zig");
 const progress = @import("progress.zig");
 const packages = @import("packages.zig");
 const slot = @import("slot.zig");
@@ -31,8 +34,6 @@ pub const Goals = struct {
     qcow2: bool = false,
     /// vmlinux is BUILD/vmlinux, x86_64's kernel for Firecracker.
     vmlinux: bool = false,
-    /// kernel is BUILD/vmlinuz alone, which every build makes first.
-    kernel: bool = false,
 };
 
 /// Spec is what to build: a form, for an arch, with or without a shell
@@ -54,6 +55,11 @@ pub const Spec = struct {
     /// disk is the disk goal's size and kernel arguments, as make's
     /// DISK_MIB and DISK_ARGS; the qcow2 goal takes the size only.
     disk: disk.Options = .{},
+    /// published takes werewolf's programs from its apk repository, as make's
+    /// PUBLISHED=1 does, not from PROGRAMS: a machine built so updates them
+    /// with apk (docs/design/custom-updates.md). stage0's and a form's own
+    /// programs, which are not packaged, still come from PROGRAMS.
+    published: bool = false,
     /// disk_path is where the disk goal writes, as make's DISK; null is
     /// OUT/disk.img. A machine's disk has its own: the disk is rebuilt by
     /// file times alone, so a path reused with other arguments would not be.
@@ -64,7 +70,7 @@ pub const Spec = struct {
 pub const Paths = struct {
     /// build is BUILD, build/ARCH: the kernel and stage0, shared by forms.
     build: []const u8,
-    /// out is OUT, build/ARCH/FORM[-dev][-app].
+    /// out is OUT, build/ARCH/FORM[-dev][-app][-published].
     out: []const u8,
     /// programs is PROGRAMS, where make compiles them.
     programs: []const u8,
@@ -75,8 +81,12 @@ pub fn paths(gpa: Allocator, s: Spec) !Paths {
     const dir = s.build orelse try gpa.print("build/{t}", .{s.arch});
     return .{
         .build = dir,
-        .out = try gpa.print("{s}/{s}{s}{s}", .{
-            dir, name, if (s.dev) "-dev" else "", if (s.app != null) "-app" else "",
+        .out = try gpa.print("{s}/{s}{s}{s}{s}", .{
+            dir,
+            name,
+            if (s.dev) "-dev" else "",
+            if (s.app != null) "-app" else "",
+            if (s.published) "-published" else "",
         }),
         .programs = s.programs orelse try gpa.print("build/{t}/programs", .{s.arch}),
     };
@@ -281,16 +291,16 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
 }
 
 /// buildTargets builds make's targets of one form: the Makefile's image,
-/// slot, disk and OUT/disk.qcow2 targets run it, and BUILD/vmlinuz for
-/// melange's VM. --app stages an application as run and create do;
-/// --app-root takes one staged already, as make's APP. --disk, --disk-mib
-/// and --disk-args are make disk's DISK, DISK_MIB and DISK_ARGS; the qcow2
-/// goal takes --disk-mib too.
+/// slot, disk and OUT/disk.qcow2 targets run it. --app stages an
+/// application as run and create do; --app-root takes one staged already,
+/// as make's APP. --disk, --disk-mib and --disk-args are make disk's DISK,
+/// DISK_MIB and DISK_ARGS; the qcow2 goal takes --disk-mib too.
 pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const verbose, const args = try howl.verboseFlag(gpa, given);
-    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--app DIR | --app-root DIR] " ++
+    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--published] " ++
+        "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
-        "[--verbose] image|slot|disk|qcow2|vmlinux|kernel...";
+        "[--verbose] image|slot|disk|qcow2|vmlinux...";
     var spec: Spec = .{ .form = "", .arch = undefined, .freeze = frozen() };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
@@ -301,6 +311,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) {
             spec.dev = true;
+        } else if (std.mem.eql(u8, args[i], "--published")) {
+            spec.published = true;
         } else if (std.mem.startsWith(u8, args[i], "-")) {
             const flag, const v = try howl.flagValue(args, &i, why);
             if (std.mem.eql(u8, flag, "--with")) {
@@ -414,9 +426,14 @@ pub const B = struct {
     loader_bin: []const u8,
     /// overlay are the directories laid over the packages, OUT/ro first.
     overlay: []const []const u8,
-    /// made are what make still builds for the overlay: melange's packages
-    /// and a tutorial's compiled application.
+    /// published are the werewolf-NAME packages a published build installs
+    /// in place of PROGRAMS' programs; none otherwise.
+    published: []const []const u8,
+    /// made are the targets of the overlay's compiled parts: a tutorial's
+    /// application (app.zig) and melange's packages (melange.zig).
     made: []const []const u8,
+    /// recipes are the chain's melange recipes.
+    recipes: []const []const u8,
     /// app are --app's directories and files.
     app: []const []const u8,
     modules: compose.Modules,
@@ -514,12 +531,12 @@ pub const B = struct {
             b.fail("{s}: {t}", .{ p, err });
     }
 
-    /// absolute returns p from the current directory, for a tool that runs
-    /// in another.
+    /// absolute returns p from the current directory, cleaned as make's
+    /// abspath cleans it, for a tool that runs in another or records it.
     pub fn absolute(b: *B, p: []const u8) ![]const u8 {
         const cwd = std.process.currentPathAlloc(b.io, b.gpa) catch |err|
             return b.fail("the current directory: {t}", .{err});
-        return std.fs.path.join(b.gpa, &.{ cwd, p });
+        return std.fs.path.resolveAlloc(b.gpa, &.{ cwd, p });
     }
 
     /// capture returns what argv writes to standard output, which goes to
@@ -545,15 +562,26 @@ pub fn make(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     };
 }
 
-fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
-    const p = try paths(gpa, s);
-    // The tools' environment: COPYFILE_DISABLE=1, so macOS's tar adds no
-    // AppleDouble files, and no make variables, so a make that runs howl
-    // passes the make howl runs nothing but what howl says.
+/// prepare plans a build of s and runs no step: build-apk's, whose melange
+/// VM boots the kernel any form's build fetches.
+pub fn prepare(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec) !B {
+    return plan(io, gpa, steps, s, try paths(gpa, s), try toolEnv(gpa));
+}
+
+/// toolEnv returns the tools' environment: COPYFILE_DISABLE=1, so macOS's
+/// tar adds no AppleDouble files, and no make variables, so a make that
+/// runs howl passes the make howl runs nothing but what howl says.
+fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
     const env = try gpa.create(std.process.Environ.Map);
     env.* = try howl.environ.clone(gpa);
     try env.put("COPYFILE_DISABLE", "1");
     for ([_][]const u8{ "MAKEFLAGS", "MFLAGS", "MAKELEVEL" }) |k| _ = env.swapRemove(k);
+    return env;
+}
+
+fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
+    const p = try paths(gpa, s);
+    const env = try toolEnv(gpa);
     // make compiles werewolf's programs, in a checkout: each compile is
     // mostly one thread, so as many at once as there are CPUs.
     if (exists(io, "Makefile")) {
@@ -576,14 +604,18 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     if (goals.vmlinux) try packages.vmlinux(&b);
     if (!goals.image and !goals.slot and !goals.disk and !goals.qcow2) return;
 
-    const suffix = if (s.dev) "-dev" else "";
+    const suffix = try gpa.print("{s}{s}", .{
+        if (s.dev) "-dev" else "",
+        if (s.published) "-published" else "",
+    });
     const config = try b.path("{s}/form/{s}{s}.yaml", .{ p.build, b.name, suffix });
     const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
     try packages.apkoConfig(&b, config);
     try packages.relock(&b, lock, config, b.form_files);
     const rootfs = try b.path("{s}/rootfs.tar", .{p.out});
     try packages.apkoBuild(&b, rootfs, config, lock, &.{ lock, config });
-    try packages.madeByMake(&b);
+    try app.compile(&b);
+    try melange.lay(&b, rootfs);
     try slot.meta(&b, rootfs);
     try slot.make(&b, rootfs, goals);
 }
@@ -617,21 +649,32 @@ fn plan(
     const name = chain[chain.len - 1].name;
 
     // The overlay's directories, in the Makefile's order (OVERLAY_DIRS),
-    // and the programs in them.
+    // and the programs in them. Published, werewolf's packaged programs
+    // come from its repository instead (packages.apkoConfig).
     var bins: std.ArrayList([]const u8) = .empty;
     var overlay: std.ArrayList([]const u8) = .empty;
+    var published: std.ArrayList([]const u8) = .empty;
     try overlay.append(gpa, try gpa.print("{s}/ro", .{p.out}));
-    try bins.append(gpa, try gpa.print("{s}/init/init", .{p.programs}));
-    try overlay.append(gpa, try gpa.print("{s}/init", .{p.programs}));
-    for (every_program) |prog| {
-        try bins.append(
+    if (s.published) {
+        try published.append(gpa, "werewolf-init");
+        for (every_program) |prog| try published.append(
             gpa,
-            try gpa.print("{s}/{s}/usr/lib/werewolf/{s}", .{ p.programs, prog, prog }),
+            try gpa.print("werewolf-{s}", .{prog}),
         );
-        try overlay.append(gpa, try gpa.print("{s}/{s}", .{ p.programs, prog }));
+        try published.append(gpa, "werewolf-bite-cleanup");
+    } else {
+        try bins.append(gpa, try gpa.print("{s}/init/init", .{p.programs}));
+        try overlay.append(gpa, try gpa.print("{s}/init", .{p.programs}));
+        for (every_program) |prog| {
+            try bins.append(
+                gpa,
+                try gpa.print("{s}/{s}/usr/lib/werewolf/{s}", .{ p.programs, prog, prog }),
+            );
+            try overlay.append(gpa, try gpa.print("{s}/{s}", .{ p.programs, prog }));
+        }
+        try bins.append(gpa, try gpa.print("{s}/bite-cleanup/usr/bin/bite-cleanup", .{p.programs}));
+        try overlay.append(gpa, try gpa.print("{s}/bite-cleanup", .{p.programs}));
     }
-    try bins.append(gpa, try gpa.print("{s}/bite-cleanup/usr/bin/bite-cleanup", .{p.programs}));
-    try overlay.append(gpa, try gpa.print("{s}/bite-cleanup", .{p.programs}));
 
     var form_files: std.ArrayList([]const u8) = .empty;
     var rootfs: std.ArrayList([]const u8) = .empty;
@@ -649,6 +692,10 @@ fn plan(
             var it = mem.tokenizeAny(u8, item, " \t");
             while (it.next()) |prog| {
                 const stem = prog[0 .. mem.findScalarLast(u8, prog, '.') orelse prog.len];
+                if (s.published) {
+                    try published.append(gpa, try gpa.print("werewolf-{s}", .{stem}));
+                    continue;
+                }
                 const dir = try gpa.print("{s}/{s}", .{ p.programs, stem });
                 try bins.append(gpa, try gpa.print("{s}/usr/lib/werewolf/{s}", .{ dir, prog }));
                 try dirs.put(gpa, dir, {});
@@ -672,25 +719,23 @@ fn plan(
     mem.sortUnstable([]const u8, sorted, {}, lessThan);
     try overlay.appendSlice(gpa, sorted);
 
-    // Then what make builds for the overlay (examples/build.mk, then
-    // melange.mk), then --app.
+    // Then the compiled parts, a tutorial's application and melange's
+    // packages, then --app.
     var made: std.ArrayList([]const u8) = .empty;
-    if (isExample(name)) {
+    if (app.example(name)) |e| {
         try overlay.append(gpa, try gpa.print("{s}/application", .{p.out}));
-        try made.append(gpa, if (mem.eql(u8, name, "example-aspnet"))
-            try gpa.print("{s}/application.stamp", .{p.out})
-        else
-            try gpa.print("{s}/application/usr/lib/app/server", .{p.out}));
+        try made.append(gpa, try app.compiled(gpa, p.out, e));
     }
-    if (try hasRecipes(io, gpa, chain)) {
+    const recipes = try melange.recipes(io, gpa, chain);
+    if (recipes.len > 0) {
         try overlay.append(gpa, try gpa.print("{s}/melange", .{p.out}));
         try made.append(gpa, try gpa.print("{s}/melange.stamp", .{p.out}));
     }
-    var app: std.ArrayList([]const u8) = .empty;
+    var staged: std.ArrayList([]const u8) = .empty;
     if (s.app) |root| {
         try overlay.append(gpa, root);
-        try app.append(gpa, root);
-        try tree(io, gpa, root, &app);
+        try staged.append(gpa, root);
+        try tree(io, gpa, root, &staged);
     }
 
     const arch: compose.Arch = switch (s.arch) {
@@ -721,8 +766,10 @@ fn plan(
         .stage0_bin = try gpa.print("{s}/stage0/init", .{p.programs}),
         .loader_bin = try gpa.print("{s}/modload/usr/lib/werewolf/modload", .{p.programs}),
         .overlay = overlay.items,
+        .published = published.items,
         .made = made.items,
-        .app = app.items,
+        .recipes = recipes,
+        .app = staged.items,
         .modules = try compose.modules(gpa, chain, arch),
         .params = params.items,
         .env = env,
@@ -763,30 +810,6 @@ fn tree(io: Io, gpa: Allocator, dir: []const u8, out: *std.ArrayList([]const u8)
         try out.append(gpa, try gpa.print("{s}/{s}", .{ dir, e.path }));
 }
 
-/// isExample reports whether name is a tutorial form whose application
-/// make compiles (examples/build.mk).
-fn isExample(name: []const u8) bool {
-    for ([_][]const u8{ "example-go", "example-rust", "example-aspnet" }) |e|
-        if (mem.eql(u8, name, e)) return true;
-    return false;
-}
-
-/// hasRecipes reports whether the chain has melange recipes (melange.mk).
-fn hasRecipes(io: Io, gpa: Allocator, chain: []const forms.Form) !bool {
-    for (chain) |c| {
-        var d = Dir.cwd().openDir(
-            io,
-            try gpa.print("{s}/melange", .{c.dir}),
-            .{ .iterate = true },
-        ) catch
-            continue;
-        defer d.close(io);
-        var it = d.iterate();
-        while (try it.next(io)) |e| if (mem.endsWith(u8, e.name, ".yaml")) return true;
-    }
-    return false;
-}
-
 const testing = std.testing;
 
 test buildOptions {
@@ -817,6 +840,7 @@ test buildOptions {
 
 test {
     _ = packages;
+    _ = melange;
     _ = slot;
     _ = manifest;
     _ = disk;

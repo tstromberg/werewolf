@@ -1,9 +1,9 @@
-# The dhcp form booted with no werewolf.ip, so init asks QEMU's DHCP server
+# prod booted with no werewolf.ip, so init asks QEMU's DHCP server
 # for an address (make check; see test/checks for the format). The lease must be
 # applied, and the client must be split as cmd/dhcp-client/dhcp-client.zig says: an engine
 # that reads the network as _dhcp, chrooted, with no capabilities, under
-# seccomp; a parent that keeps CAP_NET_ADMIN alone. The Makefile also wants
-# its "bound" event on the console. Root cannot read the engine's root link,
+# seccomp; a parent that keeps CAP_NET_ADMIN alone. test/check-lease also
+# wants its "bound" event on the console. Root cannot read the engine's root link,
 # which takes CAP_SYS_PTRACE, gone with the seal (cmd/init/init.zig); its chroot
 # shows instead in its mountinfo, which lists only the mounts reachable
 # from its root: none, from the empty /var/empty. Both run outside fence's

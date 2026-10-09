@@ -10,7 +10,7 @@
 # or sudo (Homebrew's runs as the user). Tools a system lacks at the version
 # the build needs come from upstream, pinned by version and sha256:
 #   - apko and Zig, which a release's bytes depend on (docs/releases.md);
-#   - melange, which builds the packages Wolfi does not ship (melange.mk);
+#   - melange, which builds the packages Wolfi does not ship (cmd/howl/melange.zig);
 #   - crane, which pulls the OCI images a form bakes in (cmd/howl/oci.zig);
 #   - Firecracker, on Linux (cmd/howl/firecracker.zig);
 #   - erofs-utils, built from source where the system's is older than 1.9

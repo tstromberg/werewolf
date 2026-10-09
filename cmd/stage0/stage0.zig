@@ -30,17 +30,20 @@ pub fn main(init: std.process.Init) !void {
     const boot = cmdline.parse(readAll(gpa, "/proc/cmdline"), &refused) orelse
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
 
-    // Raise lockdown to integrity before any module loads, so the kernel
-    // refuses unsigned ones. Writing the current level is refused too, so
-    // read it first.
+    // Raise lockdown to confidentiality before any module loads, so the
+    // kernel refuses unsigned ones, and no one, root included, reads its
+    // memory (kcore, BPF and perf reads, kprobes). Writing the current level
+    // is refused too, so read it first.
     mountFs("securityfs", "/sys/kernel/security", "securityfs", MS.NOSUID | MS.NODEV | MS.NOEXEC);
     const lockdown = "/sys/kernel/security/lockdown";
     if (!isLocked(readAll(gpa, lockdown)) and
-        !writeFile(lockdown, "integrity")) fail("cannot raise lockdown", .{});
+        !writeFile(lockdown, "confidentiality")) fail("cannot raise lockdown", .{});
 
     // modload loads the form's modules and closes the loader for good. It
     // reads tags on stdin, one per line. "hyperv" goes first, since the
     // slot's disk may sit behind VMBus, which exists only on Hyper-V (Azure).
+    // Hyper-V is known by the VMBus a kernel with it built in has made, or,
+    // where VMBus is a module (newer kernels), by its firmware's vendor.
     // "esp" adds FAT for werewolf's own EFI partition. The disk search runs
     // while drivers load; then modload is told the filesystem kind (xfs and
     // btrfs need modules; ext4 does not).
@@ -52,7 +55,12 @@ pub fn main(init: std.process.Init) !void {
         break :blk null;
     };
     if (loader) |l| {
-        if (linux.errno(linux.access("/sys/bus/vmbus", linux.F_OK)) == .SUCCESS)
+        if (linux.errno(linux.access("/sys/bus/vmbus", linux.F_OK)) == .SUCCESS or
+            std.mem.eql(
+                u8,
+                std.mem.trimEnd(u8, readAll(gpa, "/sys/class/dmi/id/sys_vendor"), "\n"),
+                "Microsoft Corporation",
+            ))
             l.stdin.?.writeStreamingAll(io, "hyperv\n") catch {};
         if (boot.esp != null) l.stdin.?.writeStreamingAll(io, "esp\n") catch {};
     }
@@ -407,8 +415,7 @@ fn identify(b: []const u8) ?struct { kind: Kind, uuid: [16]u8 } {
 }
 
 fn isLocked(text: []const u8) bool {
-    return std.mem.indexOf(u8, text, "[integrity]") != null or
-        std.mem.indexOf(u8, text, "[confidentiality]") != null;
+    return std.mem.indexOf(u8, text, "[confidentiality]") != null;
 }
 
 // --- the kernel, directly ------------------------------------------------------
@@ -508,7 +515,8 @@ test LoopConfig {
 }
 
 test isLocked {
-    try testing.expect(isLocked("none [integrity] confidentiality\n"));
+    try testing.expect(isLocked("none integrity [confidentiality]\n"));
+    try testing.expect(!isLocked("none [integrity] confidentiality\n"));
     try testing.expect(!isLocked("[none] integrity confidentiality\n"));
 }
 

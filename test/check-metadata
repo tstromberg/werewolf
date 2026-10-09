@@ -1,0 +1,25 @@
+#!/bin/sh
+# check-metadata QEMU... boots prod seven ways behind a stand-in metadata
+# server (test/cloud-boot, make check-metadata): a good config on GCP, AWS,
+# Hetzner and Azure taken, a hostile one refused whole, and no cloud, or
+# Hyper-V that is not Azure, never asked. arm64 guests have SMBIOS only
+# under UEFI, so FIRMWARE, edk2, is needed there. QEMU... is the machine,
+# without a network; make passes CHECK_ENV (Makefile), ARCH and FIRMWARE.
+set -u
+[ "$ARCH" != aarch64 ] || [ -n "$FIRMWARE" ] ||
+	{ echo "FAIL   metadata           no UEFI firmware for arm64 (edk2-aarch64-code.fd)"; exit 1; }
+failed=0
+meta() { # meta PROVIDER PAYLOAD CHECKS QEMU...
+	name=meta-$1-$2 provider=$1 payload=$2 checks=test/checks-$3
+	shift 3
+	test/cloud-boot "$name" "$provider" "$payload" "$checks" "$CHECK/$name.log" "$FIRMWARE" "$@" \
+		-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$BOOT" || failed=1
+}
+meta gcp good metadata "$@"
+meta aws good metadata "$@"
+meta hetzner good metadata "$@"
+meta azure good metadata "$@"
+meta gcp hostile metadata-refused "$@"
+meta none good metadata-refused "$@"
+meta hyperv good metadata-refused "$@"
+exit $failed

@@ -16,6 +16,7 @@ const broker = @import("broker");
 const cmdline = @import("cmdline");
 pub const verity = @import("verity");
 pub const policy = @import("update-policy");
+const werewolf_repository = @import("package").repository;
 pub const cve = @import("cve.zig");
 const kernelVersion = @import("cve").kernelVersion;
 pub const releases = @import("release.zig");
@@ -408,7 +409,11 @@ pub const Update = struct {
         u.step = "cves";
         try u.netRoot();
         var sources: std.ArrayList(Source) = .empty;
-        const repo = (try u.words(try u.read("/etc/apk/repositories")))[0];
+        // Wolfi's security.json, from the first repository that is not
+        // werewolf's own: werewolf's packages have no CVE feed there.
+        const repo = for (try u.words(try u.read("/etc/apk/repositories"))) |r| {
+            if (!std.mem.eql(u8, r, werewolf_repository)) break r;
+        } else return error.NoWolfiRepository;
         const package_cves = try u.packageCves(&sources, repo, plan.old_pkgs, plan.new_pkgs);
         const kernel_changed = !std.mem.eql(u8, plan.old_kernel, plan.new_kernel);
         const kernel_cves = if (kernel_changed)

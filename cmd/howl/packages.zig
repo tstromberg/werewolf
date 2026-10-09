@@ -6,7 +6,7 @@ const std = @import("std");
 const forms = @import("form");
 const compose = @import("compose");
 const image = @import("image");
-const howl = @import("howl.zig");
+const package = @import("package");
 const progress = @import("progress.zig");
 const build = @import("build.zig");
 const Io = std.Io;
@@ -28,8 +28,13 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             while (it.next()) |pkg| try extra.append(b.gpa, pkg);
         };
     }
+    for (b.published) |name| {
+        for (extra.items) |e| {
+            if (mem.eql(u8, e, name)) break;
+        } else try extra.append(b.gpa, name);
+    }
     var f: forms.Failure = .{};
-    const node = compose.apko(
+    var node = compose.apko(
         b.io,
         b.gpa,
         Dir.cwd(),
@@ -40,6 +45,41 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
         error.Form => return b.steps.fail(f.text),
         else => |e| return e,
     };
+    // Published, werewolf's repository and its key, which apk must find
+    // under package.repository_key, the name the index's signature gives.
+    if (b.spec.published) {
+        const key = try b.path("{s}/keys/{s}", .{ b.p.build, package.repository_key });
+        const pub_key = try Dir.cwd().readFileAlloc(
+            b.io,
+            "release/packages.pub",
+            b.gpa,
+            .limited(64 << 10),
+        );
+        const had = Dir.cwd().readFileAlloc(b.io, key, b.gpa, .limited(64 << 10)) catch "";
+        if (!mem.eql(u8, had, pub_key)) {
+            try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(key).?);
+            try b.write(key, pub_key);
+        }
+        const keyring = try b.path("../keys/{s}", .{package.repository_key});
+        const scalars = struct {
+            fn one(gpa: Allocator, text: []const u8) !forms.Node {
+                const items = try gpa.dupe(
+                    forms.Node,
+                    &.{.{ .scalar = .{ .raw = text, .text = text } }},
+                );
+                return .{ .list = items };
+            }
+        };
+        const contents = try b.gpa.dupe(forms.Entry, &.{
+            .{ .key = "repositories", .value = try scalars.one(b.gpa, package.repository) },
+            .{ .key = "keyring", .value = try scalars.one(b.gpa, keyring) },
+        });
+        const add = try b.gpa.dupe(
+            forms.Entry,
+            &.{.{ .key = "contents", .value = .{ .map = contents } }},
+        );
+        node = try forms.merge(b.gpa, node, .{ .map = add });
+    }
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);
     const was = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(1 << 20)) catch "";
@@ -181,25 +221,6 @@ fn apkOf(line: []const u8, arch: []const u8) ?[]const u8 {
     return url[in + dir.len .. url.len - ".apk".len];
 }
 
-/// madeByMake has make build what it still builds for the overlay.
-pub fn madeByMake(b: *B) !void {
-    for (b.made) |target| {
-        if (progress.phaseOf(target)) |ph| try b.steps.enter(ph);
-        try b.run(&.{
-            howl.make_cmd,
-            "-s",
-            "--no-print-directory",
-            try b.path("FORM={s}", .{b.spec.form}),
-            try b.path("ARCH={t}", .{b.spec.arch}),
-            try b.path("BUILD={s}", .{b.p.build}),
-            try b.path("PROGRAMS={s}", .{b.p.programs}),
-            if (b.spec.dev) "DEV=1" else "DEV=",
-            try b.path("APP={s}", .{b.spec.app orelse ""}),
-            target,
-        }, .{});
-    }
-}
-
 // --- kernel -----------------------------------------------------------------------------
 
 /// kernel installs Alpine's linux-virt, unpacks its kernel, modules and
@@ -212,7 +233,12 @@ pub fn kernel(b: *B) !void {
     try relock(b, lock, yaml, &.{yaml});
     try apkoBuild(b, rootfs, yaml, lock, &.{lock});
     const target = try b.path("{s}/vmlinuz", .{b.p.build});
-    const began = try b.begin(target, &.{ rootfs, b.self }) orelse return;
+    // The step's own stamp says when it last ran; vmlinuz is rewritten only
+    // when its bytes change, so a new howl that unpacks the same kernel
+    // leaves what is built from it, melange's guest among them, up to date.
+    const stamp = try b.path("{s}/kernel/unpacked", .{b.p.build});
+    Dir.cwd().access(b.io, target, .{}) catch Dir.cwd().deleteFile(b.io, stamp) catch {};
+    const began = try b.begin(stamp, &.{ rootfs, b.self }) orelse return;
     const x = try b.path("{s}/kernel/x", .{b.p.build});
     try Dir.cwd().deleteTree(b.io, x);
     try Dir.cwd().createDirPath(b.io, x);
@@ -238,7 +264,9 @@ pub fn kernel(b: *B) !void {
         "unwrapping EFI zboot image (payload at {d}, {d} bytes)",
         .{ mem.readInt(u32, shipped[8..12], .little), mem.readInt(u32, shipped[12..16], .little) },
     );
-    try b.write(target, kern);
+    const was = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(image.max_gunzip)) catch "";
+    if (!mem.eql(u8, was, kern)) try b.write(target, kern);
+    try b.write(stamp, "");
     try b.done(target, began);
 }
 

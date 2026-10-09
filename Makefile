@@ -91,7 +91,7 @@ BUILD = build/$(ARCH)
 # laid over the image. An image with one builds apart.
 APP ?=
 DEV ?=
-OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)
+OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)
 TAR ?= $(shell command -v bsdtar || echo tar)
 SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 
@@ -120,19 +120,17 @@ hooks:
 	git config core.hooksPath tools/git-hooks
 	@echo "hooks: git runs tools/git-hooks/pre-commit before each commit: test, lint, check-sshd"
 
-# The tutorials' compiled applications and melange's packages, which howl's
-# build has make build for the image (cmd/howl/packages.zig).
-include examples/build.mk
-include melange.mk
-
 # --- the image ----------------------------------------------------------------
 # howl builds it (cmd/howl/build.zig, docs/design/howl-build.md); these
 # targets ask it to, at make's paths. FREEZE=1 pins every package to its
-# lock. DISK, DISK_MIB and DISK_ARGS say where the disk goes, its size, and
+# lock. PUBLISHED=1 takes werewolf's programs from its apk repository, so the
+# machine updates them (docs/design/custom-updates.md); OUT gains -published.
+# DISK, DISK_MIB and DISK_ARGS say where the disk goes, its size, and
 # what else goes on its kernel command line: howl's defaults are
 # OUT/disk.img, 8 GiB (cmd/howl/disk.zig's default_mib) and nothing.
 HOWL_BUILD = FREEZE=$(FREEZE) $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
-	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP))
+	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
+	$(if $(PUBLISHED),--published)
 .PHONY: $(OUT)/disk.qcow2
 image slot: $(HOWL)
 	$(HOWL_BUILD) $@
@@ -141,9 +139,6 @@ disk: $(HOWL)
 # The disk a release publishes, of DISK_MIB but never with DISK_ARGS.
 $(OUT)/disk.qcow2: $(HOWL)
 	$(HOWL_BUILD) $(if $(DISK_MIB),--disk-mib $(DISK_MIB)) qcow2
-# The kernel alone, for melange's VM, if it is missing.
-$(BUILD)/vmlinuz: | $(HOWL)
-	$(HOWL_BUILD) kernel
 
 # --- locks --------------------------------------------------------------------
 # Every package in an image is pinned by an apko lock, for both arches: the
@@ -260,7 +255,7 @@ $(VERITY_BIN): tools/verity.zig lib/verity.zig
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig \
-	lib/compose.zig lib/verity.zig lib/image.zig boot/gpt.zig
+	lib/compose.zig lib/package.zig lib/verity.zig lib/image.zig boot/gpt.zig
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -346,30 +341,10 @@ _test/forms/%.zig:
 _test/%.zig:
 	zig test $*.zig
 
-# The lines the README and the docs advertise, run as a user runs them, as
-# far as a line goes with nothing built or booted: -h and -n.
+# The lines the README and the docs advertise, as far as each goes with
+# nothing built or booted (test/howl-smoke).
 _test/howl-smoke: $(HOWL)
-	@fail() { echo "howl-smoke: $$1"; exit 1; }; \
-	$(HOWL) run -h >/dev/null 2>&1 || fail "howl run -h"; \
-	$(HOWL) run -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"; \
-	$(HOWL) run --on qemu -n 2>&1 | grep -q 'prod-ssh as it is' || fail "howl run --on qemu -n should be prod-ssh"; \
-	$(HOWL) run --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"; \
-	$(HOWL) create smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"; \
-	$(HOWL) create web --with python --app ./myapp -h >/dev/null 2>&1 || fail "README: howl create web --with python --app ./myapp"; \
-	$(HOWL) run --with webshell-example -n 2>&1 | grep -q 'as it is' || fail "README: howl run --with webshell-example"; \
-	$(HOWL) run --with example-go -n 2>&1 | grep -q 'as it is' || fail "examples: howl run --with example-go"; \
-	$(HOWL) create web --with example-python --on gcp -h >/dev/null 2>&1 || fail "examples: howl create web --with example-python --on gcp"; \
-	$(HOWL) pack --with prod -h >/dev/null 2>&1 || fail "howl pack --with prod -h"; \
-	out=$$($(HOWL) run --with caddy,valkey -n 2>&1) || fail "howl run --with caddy,valkey -n: $$out"; \
-	echo "$$out" | grep -q 'with: \[caddy, valkey\]' || fail "run --with caddy,valkey -n did not show the form: $$out"; \
-	out=$$($(HOWL) run --with caddy -n 2>&1) || fail "howl run --with caddy -n: $$out"; \
-	echo "$$out" | grep -q 'as it is' || fail "one form alone should run as it is: $$out"; \
-	rm -rf $(BUILD)/adhoc/smoke; \
-	$(HOWL) form --with caddy --package curl -o $(BUILD)/adhoc/smoke -n >/dev/null 2>&1 || fail "howl form -n"; \
-	[ ! -e $(BUILD)/adhoc/smoke ] || fail "form -n left $(BUILD)/adhoc/smoke"; \
-	! $(HOWL) run caddy >/dev/null 2>&1 || fail "howl run caddy (a positional form) was taken"; \
-	! $(HOWL) _build --with minimal --disk-args x slot >/dev/null 2>&1 || fail "_build took --disk-args without disk"; \
-	echo "howl-smoke: the advertised lines take their forms"
+	@test/howl-smoke $(HOWL) $(BUILD)
 
 # posture (docs/posture.md) assumes nothing of werewolf: run here, as root,
 # it says how this Linux protects itself. Elsewhere, a binary to copy over.
@@ -439,7 +414,7 @@ list-forms:
 RELEASE_FORMS = $(shell $(FORM_ASK) released)
 DIST_DIRECT_FORMS = minimal
 DIST = dist
-RELEASE_SOURCES = Makefile melange.mk forms boot cmd lib tools/form.zig release/image.pub release/tiers.pub release/advisories
+RELEASE_SOURCES = Makefile forms boot cmd lib tools/form.zig release/image.pub release/tiers.pub release/advisories
 RELEASE_LOCKS = $(addprefix $(LOCK)/,$(addsuffix .lock.json,$(RELEASE_FORMS) kernel boot))
 release-inputs:
 	rm -f $(RELEASE_LOCKS)
@@ -465,18 +440,12 @@ _dist-form: $(HOWL)
 
 # --- checks -------------------------------------------------------------------
 # `make check` boots every form under QEMU, then a slot as bite leaves one,
-# and runs test/checks on each as root on its console (test/boot). Each
-# machine gets a blank disk and a config disk of its own, and nothing
-# listens on the host, so `make -j check` runs them side by side. The config
-# holds data.key, a fixed test key, and what form.yaml's check and the
-# form's test/config say. Logs are in build/ARCH/check (docs/testing.md).
-ifeq ($(ARCH),aarch64)
-MACHINE = virt
-CONSOLE = ttyAMA0
-else
-MACHINE = q35
-CONSOLE = ttyS0
-endif
+# and attacks each (docs/testing.md). make builds what a check boots, then
+# runs its script, test/check-NAME, which boots and judges it. Each machine
+# has disks of its own and nothing listens on the host, so `make -j check`
+# runs them side by side. Logs are in build/ARCH/check.
+MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
+CONSOLE = $(if $(filter aarch64,$(ARCH)),ttyAMA0,ttyS0)
 # Without /dev/kvm (some CI runners), and on FreeBSD, QEMU emulates; NetBSD
 # accelerates with NVMM once loaded: experimental.
 ifeq ($(ARCH),$(HOST_ARCH))
@@ -495,12 +464,9 @@ QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nogr
 
 FORMS := $(patsubst forms/%/apko.yaml,%,$(wildcard forms/*/apko.yaml))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
-# Every form is checked built with DEV=1, as test/checks needs a root shell
-# on the console, and booted as it ships (check-shellfree-%), where its
-# posture may fail only as its form.yaml's weaknesses excuse.
+# test/checks needs a root shell on the console, so a check builds its form
+# with DEV=1; check-shellfree-FORM boots it as it ships.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1
-SHELLFREE_FORMS = $(FORMS)
-SHELLFREE_CHECKS = $(addprefix check-shellfree-,$(SHELLFREE_FORMS))
 # 1 GB keeps a form's memory honest, unless its check's memory says more. A
 # form whose check is offline (restrict=on) has no way out, as a daemon
 # that would reach its service on the Internet and exit when refused.
@@ -522,26 +488,24 @@ CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 were
 # DEV=1 or shipped build and the arch, and the form's weaknesses.
 POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 export POSTURE_KNOWN := $(POSTURE_KNOWN_KIND) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
-# Those test/cage expects to fail in a container too, which shares the
-# host's kernel and has nspawn's mounts (CAGE_HARDEN_HOST=1 raises the
-# host's sysctls where it may).
-export POSTURE_KNOWN_NATIVE = files-root-readonly files-root-verity files-nosuid-everywhere files-noexec-everywhere files-nodev-everywhere files-nosymfollow-everywhere files-system-writes processes-mem-attack
+# A check's script takes the machine, QEMU..., as its arguments, and in its
+# environment: CHECK, its directory; FORM and OUT, the form and its build;
+# KERNEL, and its command line without an address (BOOT) and with one
+# (CMDLINE); VICTIM, the UUID stage0 finds a slot's disk by; and tools.
+# debugfs is e2fsprogs', which Homebrew keeps off the PATH.
+VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
+DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e2fsprogs/sbin/debugfs /usr/local/opt/e2fsprogs/sbin/debugfs))
+CHECK_ENV = CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) KERNEL=$(BUILD)/vmlinuz BOOT='$(CHECK_BOOT)' \
+	CMDLINE='$(CHECK_CMDLINE)' VICTIM=$(VICTIM_UUID) DEBUGFS=$(DEBUGFS) HOWL=$(HOWL) TAR=$(TAR)
 # built NAME, COMMAND: COMMAND, its output in CHECK/NAME-build.log, whose
 # tail a failure shows.
-built = $(2) >$(CHECK)/$(1)-build.log 2>&1 || \
+built = mkdir -p $(CHECK) && $(2) >$(CHECK)/$(1)-build.log 2>&1 || \
 	{ tail -n 20 $(CHECK)/$(1)-build.log; echo "FAIL   $(1) build: see $(CHECK)/$(1)-build.log"; exit 1; }
 # What every check shares, built once before forms build side by side: howl,
 # the software security key, the programs, the kernel and stage0's /init,
 # with minimal's DEV=1 image, which half the checks boot.
-CHECK_SHARED = _check-shared
 _check-shared: $(HOWL) $(TEST_SK)
-	@mkdir -p $(CHECK)
 	@$(call built,shared,$(MAKE) --no-print-directory FORM=minimal DEV=1 APP= image)
-# minimal has no updater, which would fetch from the network once committed.
-CHECK_SLOT_FORM = minimal
-VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
-# debugfs, from e2fsprogs, which Homebrew keeps off the PATH.
-DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e2fsprogs/sbin/debugfs /usr/local/opt/e2fsprogs/sbin/debugfs))
 
 # Groups, so CI (.github/workflows/check.yml) runs each as a job and a
 # failure names its area. SHARD=K/N runs the Kth of N slices of forms,
@@ -554,7 +518,7 @@ endif
 shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 	awk -F/ -v s=$(SHARD) 'BEGIN { split(s, a, "/") } (NR - 1) % a[2] == a[1] - 1'),$(1))
 check-forms:     $(addprefix check-,$(call shard,$(FORMS)))
-check-shellfree: $(addprefix check-shellfree-,$(call shard,$(SHELLFREE_FORMS)))
+check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
 check-integrity: check-slot check-unsigned check-verity check-deadman
 # The ad-hoc form pulls its OCI image; not on emulated arm64, too slow there.
 check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
@@ -565,11 +529,9 @@ check: check-forms check-shellfree check-integrity check-cloud check-persist
 # posture (test/cage): the fast half of the arm64 checks, as built to ship.
 # A form's form.yaml may say `check: native: false`, and why.
 NATIVE_FORMS := $(filter-out $(shell $(FORM_ASK) having native false),$(FORMS))
-NATIVE_CHECKS = $(addprefix check-native-,$(NATIVE_FORMS))
-.PHONY: $(NATIVE_CHECKS)
+.PHONY: $(addprefix check-native-,$(NATIVE_FORMS))
 check-native: $(addprefix check-native-,$(call shard,$(NATIVE_FORMS)))
-$(NATIVE_CHECKS): check-native-%: | $(CHECK_SHARED)
-	@mkdir -p $(CHECK)
+$(addprefix check-native-,$(NATIVE_FORMS)): check-native-%: | _check-shared
 	@$(call built,$*-native,$(MAKE) --no-print-directory FORM=$* DEV= slot)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-native
 _check-native:
@@ -577,228 +539,84 @@ _check-native:
 
 # What the forms' services need that their pledges do not promise: the
 # checks' boots, learning (docs/design/pledge.md), then each call once.
-SEAL_LEARN_CHECKS = $(addprefix check-,$(FORMS)) check-slot check-persist check-nodata check-lease check-static check-unsigned check-metadata
-seal-learn: | $(CHECK_SHARED)
-	-@$(MAKE) --no-print-directory -k SEAL_LEARN=1 $(SEAL_LEARN_CHECKS)
-	@grep -aho 'seal-watch: {"event":"learned"[^}]*}' $(BUILD)/check-learn/*.log | \
-		sed 's/.*"call":"\([^"]*\)","promise":"\([^"]*\)","service":"\([^"]*\)","exe":"\([^"]*\)".*/\3 \2 \1 \4/' | \
-		LC_ALL=C sort -u | awk 'BEGIN { print "service promise call program" } { print }' | column -t
+seal-learn: | _check-shared
+	-@$(MAKE) --no-print-directory -k SEAL_LEARN=1 $(addprefix check-,$(FORMS)) check-slot check-persist \
+		check-nodata check-lease check-static check-unsigned check-metadata
+	@test/seal-learn $(BUILD)/check-learn
 
 # make check-one FORM=prod REPEAT=20: a flake chased, each failing boot's
 # console kept as FORM-one-N.log; ACCEL=tcg rules the hypervisor out.
 REPEAT ?= 10
-check-one: | $(CHECK_SHARED)
-	@mkdir -p $(CHECK)
+check-one: | _check-shared
 	@$(call built,$(FORM),$(CHECK_MAKE) FORM=$(FORM) image)
-	@failed=0; for i in $$(seq $(REPEAT)); do \
-		$(CHECK_MAKE) FORM=$(FORM) _check-form >$(CHECK)/$(FORM)-one.out 2>&1 || { \
-			failed=$$((failed + 1)); cp $(CHECK)/$(FORM).log $(CHECK)/$(FORM)-one-$$i.log; \
-			echo "boot $$i of $(REPEAT):"; grep -E -A6 '^FAIL' $(CHECK)/$(FORM)-one.out | head -8; }; \
-	done; echo "$(FORM): $$failed of $(REPEAT) boots failed"; [ $$failed -eq 0 ]
+	@test/check-one $(REPEAT) $(CHECK) $(FORM) $(CHECK_MAKE) FORM=$(FORM) _check-form
 
-check-%: | $(CHECK_SHARED)
-	@mkdir -p $(CHECK)
+check-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
 	@$(CHECK_MAKE) FORM=$* _check-form
+# A form that serves ssh is logged into through port 22, forwarded from
+# 22200 plus the form's place among FORMS, and its check's web port from
+# 23200 plus that place, so forms boot side by side.
+check_port = $(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(2)' | cut -d: -f1 | awk '{ print $(1) + $$1 }')
+CHECK_SSH := $(if $(filter 22,$(shell $(FORM_ASK) listens $(FORM_REF))),$(call check_port,22200,$(FORM)))
+CHECK_WEB_PORT := $(call form_check,web)
+CHECK_WEB := $(if $(CHECK_WEB_PORT),$(call check_port,23200,$(FORM)))
+CHECK_FWD = $(if $(CHECK_SSH),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)))
+# The forms booted again from the disks they left, chosen for what they
+# keep: minimal nothing, sshd a host key, prod-ssh one under an updater,
+# gitea and vaultwarden an application's data, demo PostgreSQL's.
+AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo
+ifeq ($(AGAIN_FORMS),all)
+override AGAIN_FORMS := $(FORMS)
+endif
+_check-form: $(HOWL) $(TEST_SK)
+	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) SKIP='$(call form_check,skip)' \
+		AGAIN=$(filter $(AGAIN_FORMS),$(FORM)) SSH_PORT=$(CHECK_SSH) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
+		KEPT_KEYS=$(CHECK_KEPT_KEYS) GITEA_PORT=$(CHECK_WEB) test/check-form \
+		$(subst user$(,)id=n0,user$(,)id=n0$(CHECK_FWD),$(CHECK_QEMU))
 
 # An ad-hoc form (docs/design/adhoc.md): a stock OCI image, pulled with crane.
-check-adhoc: $(HOWL) | $(CHECK_SHARED)
+check-adhoc: $(HOWL) | _check-shared
 	@mkdir -p $(CHECK) && rm -rf $(BUILD)/adhoc/check-oci
 	@$(HOWL) form --with prod --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/check-oci-form.log; echo "FAIL   check-oci form: see $(CHECK)/check-oci-form.log"; exit 1; }
 	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form
 
-# A form that serves ssh gives root two keys, a key file and the software
-# security key's: one that takes security keys alone must log the second in
-# and refuse the first (test/boot). CHECK_KEPT_KEYS: made already, baked in.
-# check_keys PREFIX: PREFIX-key and PREFIX-sk-key.
-check_keys = rm -f $(1)-key $(1)-key.pub $(1)-sk-key $(1)-sk-key.pub && \
-	ssh-keygen -q -t ed25519 -N '' -C werewolf-check -f $(1)-key && \
-	ssh-keygen -q -t ed25519-sk -w $(CURDIR)/$(TEST_SK) -N '' -C werewolf-check-sk -f $(1)-sk-key
-_check-form: $(HOWL) $(TEST_SK)
-	@rm -f $(CHECK)/$(FORM).img && dd if=/dev/zero of=$(CHECK)/$(FORM).img bs=1048576 count=0 seek=1024 2>/dev/null
-	@rm -rf $(CHECK)/$(FORM)-config && mkdir -p $(CHECK)/$(FORM)-config && \
-		head -c 64 /dev/zero | tr '\0' k >$(CHECK)/$(FORM)-config/data.key && \
-		$(if $(CHECK_SSH),$(if $(CHECK_KEPT_KEYS),,$(call check_keys,$(CHECK)/$(FORM)) &&) \
-			cat $(CHECK)/$(FORM)-key.pub $(CHECK)/$(FORM)-sk-key.pub >$(CHECK)/$(FORM)-config/authorized_keys &&) \
-		$(if $(wildcard $(FORM_DIR)/test/config),$(FORM_DIR)/test/config $(CHECK)/$(FORM)-config &&) \
-		$(HOWL) pack --with $(FORM_REF) -o $(CHECK)/$(FORM)-config.tar --config $(CHECK)/$(FORM)-config >/dev/null
-	@awk '$(foreach c,$(call form_check,skip),$$2 != "$(c)" &&) 1' test/checks $(wildcard $(FORM_DIR)/test/checks) >$(CHECK)/$(FORM)-checks
-	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key SSH_SK_KEY=$(CHECK)/$(FORM)-sk-key SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) GITEA_PORT=$(CHECK_WEB) test/boot $(FORM) $(CHECK)/$(FORM)-checks $(CHECK)/$(FORM).log $(CHECK_FORM_QEMU)
-	@$(if $(filter $(AGAIN_FORMS),$(FORM)),$(CHECK_MAKE) FORM=$(FORM) _check-form-again,:)
+# The bastion as an operator makes one, on a form naming two users whose
+# keys are baked in (test/bastion-form). An explicit rule, not check-%.
+check-bastion: $(HOWL) $(TEST_SK) | _check-shared
+	@test/bastion-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
+	@$(call built,bastion,$(CHECK_MAKE) FORM=$(CHECK)/bastion-check image)
+	@$(CHECK_MAKE) FORM=$(CHECK)/bastion-check CHECK_SSH=$(call check_port,22200,bastion) CHECK_KEPT_KEYS=1 _check-form
 
-# The second boot, from the disk the first left, for forms chosen for what
-# they keep: minimal nothing, sshd a host key, prod-ssh one under an
-# updater, gitea and vaultwarden an application's data, demo PostgreSQL's.
-# AGAIN_FORMS=all boots every form twice.
-AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo
-ifeq ($(AGAIN_FORMS),all)
-override AGAIN_FORMS := $(FORMS)
-endif
-_check-form-again:
-	@SSH_MODE=$(FORM) SSH_PORT=$(CHECK_SSH) SSH_KEY=$(CHECK)/$(FORM)-key SSH_SK_KEY=$(CHECK)/$(FORM)-sk-key SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) GITEA_PORT=$(CHECK_WEB) test/boot $(FORM)-again test/checks-again $(CHECK)/$(FORM)-again.log $(CHECK_FORM_QEMU)
-	@! grep -a -E 'werewolf: (formatting|making LUKS2) ' $(CHECK)/$(FORM)-again.log || \
-		{ echo "FAIL   $(FORM)-again        formatted the disk its first boot left"; exit 1; }
-	@# A host key kept in /data on the first boot is the one the second offers.
-	@a=$$(grep -a '"event":"host-key"' $(CHECK)/$(FORM).log | grep -a 'kept in /data' | \
-		grep -ao '"fingerprint":"[^"]*"' | head -n 1); \
-	b=$$(grep -a '"event":"host-key"' $(CHECK)/$(FORM)-again.log | grep -ao '"fingerprint":"[^"]*"' | head -n 1); \
-	[ -z "$$a" ] || [ "$$a" = "$$b" ] || \
-		{ echo "FAIL   $(FORM)-again        host key not kept: [$$a] then [$$b]"; exit 1; }
-
-# The bastion as an operator makes one, on a form naming two users, their
-# keys made here and baked in: check, root's security key in test/boot,
-# reaching 127.0.0.1:22, and narrow, reaching 127.0.0.2:22, which check must
-# not (forms/bastion/test/checks). An explicit rule, so check-% is not used.
-CHECK_BASTION = $(CHECK)/bastion-check
-CHECK_BASTION_SSH = $(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x bastion | cut -d: -f1 | awk '{ print 22200 + $$1 }')
-check-bastion: $(HOWL) $(TEST_SK) | $(CHECK_SHARED)
-	@mkdir -p $(CHECK) && rm -rf $(CHECK_BASTION) && mkdir -p $(CHECK_BASTION)/test && \
-		$(call check_keys,$(CHECK_BASTION)) && $(call check_keys,$(CHECK)/bastion-narrow) && \
-		cp forms/bastion/test/checks $(CHECK_BASTION)/test/checks && \
-		echo '# make check-bastion: the bastion, with two users.' >$(CHECK_BASTION)/apko.yaml && \
-		{ echo 'base: bastion' && echo 'bastion:' && echo '  users:' && \
-		echo '    check:' && echo "      keys: [\"$$(cut -d' ' -f1,2 $(CHECK_BASTION)-sk-key.pub)\"]" && \
-		echo '      destinations: [127.0.0.1:22]' && \
-		echo '    narrow:' && echo "      keys: [\"$$(cut -d' ' -f1,2 $(CHECK)/bastion-narrow-sk-key.pub)\"]" && \
-		echo '      destinations: [127.0.0.2:22]' && \
-		echo 'weaknesses:' && $(FORM_TOOL) excuses bastion | sed 's/^\([^ ]*\) \(.*\)/  \1: "\2"/'; \
-		} >$(CHECK_BASTION)/form.yaml
-	@$(call built,bastion,$(CHECK_MAKE) FORM=$(CHECK_BASTION) image)
-	@$(CHECK_MAKE) FORM=$(CHECK_BASTION) CHECK_SSH=$(CHECK_BASTION_SSH) CHECK_KEPT_KEYS=1 _check-form
-
-# Every form booted as it ships, judged by its posture line and its
-# test/console. A static pattern, so check-% is not used.
-$(SHELLFREE_CHECKS): check-shellfree-%: | $(CHECK_SHARED)
-	@mkdir -p $(CHECK)
+# Every form booted as it ships. A static pattern, so check-% is not used.
+$(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= image)
-	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree-boot
-_check-shellfree-boot:
-	@rm -f $(CHECK)/$(FORM)-shellfree.img && dd if=/dev/zero of=$(CHECK)/$(FORM)-shellfree.img bs=1048576 count=0 seek=1024 2>/dev/null
-	@test/boot $(FORM)-shellfree $(or $(wildcard $(FORM_DIR)/test/console),-) $(CHECK)/$(FORM)-shellfree.log $(CHECK_QEMU) \
-		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
-		-drive file=$(CHECK)/$(FORM)-shellfree.img,format=raw,if=virtio
+	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree
+_check-shellfree:
+	@$(CHECK_ENV) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
-# A form that serves ssh is logged into from here, through port 22
-# forwarded from a port of its own, and gitea's web API likewise, from a
-# range of its own, so forms boot side by side.
-FORM_LISTENS := $(shell $(FORM_ASK) listens $(FORM_REF))
-CHECK_SSH := $(if $(filter 22,$(FORM_LISTENS)),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 22200 + $$1 }'))
-CHECK_WEB_PORT := $(call form_check,web)
-CHECK_WEB := $(if $(CHECK_WEB_PORT),$(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(FORM)' | cut -d: -f1 | awk '{ print 23200 + $$1 }'))
-CHECK_FORM_QEMU = $(if $(CHECK_SSH),$(subst user$(,)id=n0,user$(,)id=n0$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)),$(CHECK_QEMU)),$(CHECK_QEMU)) \
-	-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
-	-drive file=$(CHECK)/$(FORM).img,format=raw,if=virtio \
-	-drive file=$(CHECK)/$(FORM)-config.tar,format=raw,if=virtio,readonly=on
-
-# The checks below boot what a form's own check built, so they follow it.
-# prod with no werewolf.ip: its address from QEMU's DHCP server.
-check-lease: | $(CHECK_SHARED) check-prod
-	@$(CHECK_MAKE) FORM=prod _check-lease-boot
-_check-lease-boot:
-	@test/boot lease test/checks-lease $(CHECK)/lease.log $(CHECK_QEMU) \
-		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)"
-	@grep -a -q 'dhcp-client: {.*"event":"bound"' $(CHECK)/lease.log || \
-		{ echo "FAIL   lease              no \"bound\" event on the console"; exit 1; }
-
-# minimal, which has no DHCP client: its address from the config tar's
-# network file, as howl pack --ip writes it.
-check-static: | $(CHECK_SHARED) check-minimal
-	@$(CHECK_MAKE) FORM=minimal _check-static-boot
-_check-static-boot: $(HOWL)
-	@$(HOWL) pack --with minimal -o $(CHECK)/static-config.tar \
-		--ip 10.0.2.15/24 --gw 10.0.2.2 --dns 10.0.2.3 >/dev/null
-	@test/boot static test/checks-static $(CHECK)/static.log $(CHECK_QEMU) \
-		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)" \
-		-drive file=$(CHECK)/static-config.tar,format=raw,if=virtio,readonly=on
-
-# A root image changed after its build must not boot: stage0 must refuse
-# minimal's root.erofs with one byte of its superblock changed, before erofs
-# uses it. dm-verity's own line varies by kernel, so it is checked loosely.
-check-verity: | $(CHECK_SHARED) check-minimal
-	@$(CHECK_MAKE) FORM=minimal _check-verity-boot
-_check-verity-boot:
-	@rm -rf $(CHECK)/verity && mkdir -p $(CHECK)/verity && cp $(OUT)/slot/root.erofs $(CHECK)/verity/ && \
-		printf x | dd of=$(CHECK)/verity/root.erofs bs=1 seek=1024 conv=notrunc 2>/dev/null && \
-		(cd $(CHECK)/verity && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs) | \
-		zstd -1 -q -c | cat $(OUT)/slot/stage0.zst - >$(CHECK)/verity.zst && rm -r $(CHECK)/verity
-	@! test/boot verity - $(CHECK)/verity.log $(CHECK_QEMU) \
-		-kernel $(BUILD)/vmlinuz -initrd $(CHECK)/verity.zst -append "$(CHECK_CMDLINE)" >/dev/null
-	@grep -a -q 'stage0: cannot mount /root.erofs' $(CHECK)/verity.log || \
-		{ echo "FAIL   verity             stage0 did not refuse the changed image; see $(CHECK)/verity.log"; exit 1; }
-	@! grep -a -q 'handing over to runit' $(CHECK)/verity.log || \
-		{ echo "FAIL   verity             the changed image booted; see $(CHECK)/verity.log"; exit 1; }
-	@grep -a -E -q 'device-mapper: verity:.* corrupted|cannot read erofs superblock' $(CHECK)/verity.log || \
-		{ echo "FAIL   verity             no dm-verity corruption reported; see $(CHECK)/verity.log"; exit 1; }
-	@echo "pass   verity             a changed root image does not boot"
-
-# A slot that boots but never commits is taken back: stage0's deadman, 20 s
-# here (werewolf.deadman, which only a DEV build takes), reboots it and says
-# why, with no loader named, so nothing commits. After check-slot, which
-# builds the same slot in the same place.
-check-deadman: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM) check-slot
-	@mkdir -p $(CHECK)
-	@$(call built,deadman,$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) DEV=1 slot)
-	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) DEV=1 _check-deadman-boot
-_check-deadman-boot:
-	@rm -rf $(CHECK)/deadman $(CHECK)/deadman.img && mkdir -p $(CHECK)/deadman/var/lib/werewolf/a && \
-		cp $(OUT)/slot/root.erofs $(CHECK)/deadman/var/lib/werewolf/a/ && \
-		mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK)/deadman $(CHECK)/deadman.img 128M && rm -r $(CHECK)/deadman
-	@# Not test/boot, which would check the machine and power it off.
-	@timeout 180 $(CHECK_QEMU) -kernel $(OUT)/slot/vmlinuz -initrd $(OUT)/slot/stage0.zst \
-		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.deadman=20" \
-		-drive file=$(CHECK)/deadman.img,format=raw,if=virtio </dev/null >$(CHECK)/deadman.log 2>&1; \
-		[ $$? -ne 124 ] || { echo "FAIL   deadman            no reset in 180 s; see $(CHECK)/deadman.log"; exit 1; }
-	@grep -a -q 'stage0: the deadman waits 20s' $(CHECK)/deadman.log || \
-		{ echo "FAIL   deadman            stage0 did not take werewolf.deadman; see $(CHECK)/deadman.log"; exit 1; }
-	@grep -a -q 'stage0: slot a did not commit in 20s; rebooting into the last good slot' $(CHECK)/deadman.log || \
-		{ echo "FAIL   deadman            the deadman did not say why; see $(CHECK)/deadman.log"; exit 1; }
-	@! grep -a -q 'reboot: Power down' $(CHECK)/deadman.log || \
-		{ echo "FAIL   deadman            the machine powered off rather than reset; see $(CHECK)/deadman.log"; exit 1; }
-	@! grep -a -q 'slot-keep: healthy' $(CHECK)/deadman.log || \
-		{ echo "FAIL   deadman            the slot committed; see $(CHECK)/deadman.log"; exit 1; }
-	@echo "pass   deadman            a slot that does not commit is rebooted, and says why"
-
-# An unsigned module offered at boot is refused, by init on a RAM root and
-# by stage0 on a slot: test/unsign cuts evdev's signature off, in a cpio
-# the kernel unpacks last.
-check-unsigned: | $(CHECK_SHARED) check-minimal check-slot
-	@$(CHECK_MAKE) FORM=minimal _check-unsigned-boot
-	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) _check-unsigned-slot
-_check-unsigned-boot:
-	@test/unsign $(OUT)/modules.tar evdev $(CHECK)/unsigned-$(FORM).cpio.zst
-	@cat $(OUT)/initramfs.zst $(CHECK)/unsigned-$(FORM).cpio.zst >$(CHECK)/unsigned-$(FORM).zst
-	@test/boot unsigned test/checks-unsigned $(CHECK)/unsigned.log $(CHECK_QEMU) \
-		-kernel $(BUILD)/vmlinuz -initrd $(CHECK)/unsigned-$(FORM).zst -append "$(CHECK_CMDLINE)"
-_check-unsigned-slot:
-	@test/unsign $(OUT)/modules.tar evdev $(CHECK)/unsigned-$(FORM).cpio.zst
-	@cat $(OUT)/slot/stage0.zst $(CHECK)/unsigned-$(FORM).cpio.zst >$(CHECK)/unsigned-$(FORM).zst
-	@cp $(CHECK)/victim.img $(CHECK)/unsigned-victim.img
-	@test/boot unsigned-slot test/checks-unsigned $(CHECK)/unsigned-slot.log $(CHECK_QEMU) \
-		-kernel $(OUT)/slot/vmlinuz -initrd $(CHECK)/unsigned-$(FORM).zst \
-		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
-		-drive file=$(CHECK)/unsigned-victim.img,format=raw,if=virtio
-
-# prod against a stand-in metadata server (test/metadata), seven ways: a
-# good config on GCP, AWS, Hetzner and Azure taken, a hostile one refused
-# whole, and no cloud, or Hyper-V that is not Azure, never asked
-# (test/cloud-boot). arm64 guests have SMBIOS only under UEFI.
-CLOUD_FIRMWARE = $(if $(filter aarch64,$(ARCH)),$(firstword $(wildcard \
-	/opt/homebrew/share/qemu/edk2-aarch64-code.fd /usr/local/share/qemu/edk2-aarch64-code.fd \
-	/usr/share/qemu/edk2-aarch64-code.fd /usr/share/qemu-efi-aarch64/QEMU_EFI.fd /usr/share/AAVMF/AAVMF_CODE.fd)))
-METADATA_QEMU = $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci \
-	-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_BOOT)"
-METADATA_BOOTS = "gcp good metadata" "aws good metadata" "hetzner good metadata" "azure good metadata" \
-	"gcp hostile metadata-refused" "none good metadata-refused" "hyperv good metadata-refused"
-check-metadata: | $(CHECK_SHARED) check-prod
-	@$(CHECK_MAKE) FORM=prod _check-metadata-boots
-_check-metadata-boots:
-	@[ "$(ARCH)" != aarch64 ] || [ -n "$(CLOUD_FIRMWARE)" ] || \
-		{ echo "FAIL   metadata           no UEFI firmware for arm64 (edk2-aarch64-code.fd)"; exit 1; }
-	@failed=0; for b in $(METADATA_BOOTS); do set -- $$b; \
-		test/cloud-boot meta-$$1-$$2 $$1 $$2 test/checks-$$3 $(CHECK)/meta-$$1-$$2.log "$(CLOUD_FIRMWARE)" $(METADATA_QEMU) || failed=1; \
-	done; exit $$failed
+# These boot what a form's own check built, so they follow it. The slot is
+# minimal's, which has no updater to reach the network once it commits.
+check-lease check-nodata check-metadata: | _check-shared check-prod
+	@$(CHECK_MAKE) FORM=prod _$@
+check-static check-verity: | _check-shared check-minimal
+	@$(CHECK_MAKE) FORM=minimal _$@
+check-slot: | _check-shared check-minimal
+	@$(call built,slot,$(CHECK_MAKE) FORM=minimal slot)
+	@$(CHECK_MAKE) FORM=minimal _check-slot
+# After check-slot, which builds the same slot in the same place.
+check-deadman: | _check-shared check-minimal check-slot
+	@$(call built,deadman,$(CHECK_MAKE) FORM=minimal slot)
+	@$(CHECK_MAKE) FORM=minimal _check-deadman
+check-unsigned: | _check-shared check-minimal check-slot
+	@$(CHECK_MAKE) FORM=minimal _check-unsigned
+_check-lease _check-nodata _check-static _check-verity _check-slot _check-deadman _check-unsigned: $(HOWL)
+	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
+_check-metadata:
+	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
+		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci
 
 # UEFI firmware for the disk boots: aarch64's edk2 loads with -bios;
 # x86_64's OVMF is read-only code and writable variables, a per-run copy so
@@ -816,188 +634,78 @@ UEFI_VARS_COPY = $(CHECK)/ovmf-vars.fd
 UEFI_FLAGS = -boot menu=on,splash-time=0 $(if $(filter aarch64,$(ARCH)),-bios $(UEFI_FIRMWARE),\
 	-drive if=pflash,format=raw,unit=0,readonly=on,file=$(UEFI_FIRMWARE) \
 	-drive if=pflash,format=raw,unit=1,file=$(UEFI_VARS_COPY))
-uefi-vars = $(if $(filter aarch64,$(ARCH)),:,cp $(UEFI_VARS) $(UEFI_VARS_COPY))
+UEFI_ENV = CHECK=$(CHECK) FORM=$(FORM) ARCH=$(ARCH) FIRMWARE=$(UEFI_FIRMWARE) \
+	UEFI_VARS=$(UEFI_VARS) UEFI_VARS_COPY=$(UEFI_VARS_COPY)
 
-# The release's disks, booted as published after `make dist`, under UEFI,
-# judged by the posture line on the serial port. -snapshot leaves the bytes
-# be; a network with no way out keeps the updater from replacing them. Not
-# on emulated arm64, where edk2 never reaches systemd-boot in time.
-DIST_DISK_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
-	-smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
-	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
+# The release's disks, booted as published after `make dist` (test/check-dist).
+# Not on emulated arm64, where edk2 never reaches systemd-boot in time.
 check-dist:
 ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
 	@echo "skip   dist               emulated arm64 (no EL2): UEFI boot too slow; x86_64 covers it"
 else
 	@failed=0; for f in $(filter-out $(DIST_DIRECT_FORMS),$(RELEASE_FORMS)); do \
-		$(MAKE) --no-print-directory FORM=$$f _check-dist-disk || failed=1; \
+		$(MAKE) --no-print-directory FORM=$$f _check-dist || failed=1; \
 	done; exit $$failed
 endif
-_check-dist-disk:
-	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   dist-$(FORM)     no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
-	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   dist-$(FORM)     no UEFI variables template for $(ARCH)"; exit 1; }
-	@[ -f $(DIST)/$(FORM)-$(ARCH)-disk.qcow2 ] || \
-		{ echo "FAIL   dist-$(FORM)     no $(DIST)/$(FORM)-$(ARCH)-disk.qcow2: make dist first"; exit 1; }
-	@mkdir -p $(CHECK)
-	@$(uefi-vars)
-	@test/boot dist-$(FORM) - $(CHECK)/dist.log $(DIST_DISK_QEMU) \
-		-drive file=$(DIST)/$(FORM)-$(ARCH)-disk.qcow2,format=qcow2,if=virtio
+_check-dist:
+	@$(UEFI_ENV) DIST=$(DIST) test/check-dist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
+		-nographic -smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
+		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 
-# prod-ssh on a real cloud as howl create makes it (test/cloud): an image, a
-# machine judged from its serial port and an ssh login, a second create with
-# a new config, then all of it deleted. Each needs its CLI logged in and
-# costs a few cents; not part of check.
+# The demo's data through a reboot and a power cut (test/check-persist).
+# Without EL2: edk2 under HVF with it never reaches the boot manager. No
+# way out (restrict=on), so the updater builds no slot mid-test. Skipped on
+# emulated arm64, where it could only time out. CI's forms jobs check demo
+# on their own, so pass PERSIST_AFTER=.
+PERSIST_ARGS = console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
+PERSIST_AFTER ?= check-demo
+check-persist: | _check-shared $(PERSIST_AFTER)
+ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
+	@echo "skip   persist            emulated arm64 (no EL2): UEFI boot too slow; x86_64 covers it"
+else
+	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
+	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   persist            no UEFI variables template for $(ARCH) (edk2-i386-vars.fd or OVMF_VARS.fd)"; exit 1; }
+	@rm -f $(CHECK)/persist.img
+	@$(call built,persist,$(CHECK_MAKE) FORM=demo disk DISK=$(CHECK)/persist.img DISK_MIB=2048 DISK_ARGS="$(PERSIST_ARGS)")
+	@$(CHECK_MAKE) FORM=demo _check-persist
+endif
+_check-persist:
+	@$(UEFI_ENV) test/check-persist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
+		-smp 2 -m 2048 -no-reboot -device virtio-rng-pci $(UEFI_FLAGS) \
+		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
+		-drive file=$(CHECK)/persist.img,format=raw,if=virtio
+
+# prod-ssh on a real cloud, as howl create makes it, then deleted
+# (test/cloud). Each needs its CLI logged in and costs a few cents; not
+# part of check.
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
 _check-cloud: $(HOWL)
 	@test/cloud $(CLOUD) $(FORM) $(ARCH)
 
-# prod's LUKS2 disk, as its own check left it, booted with no data.key:
-# refused, not formatted again.
-check-nodata: | $(CHECK_SHARED) check-prod
-	@$(CHECK_MAKE) FORM=prod _check-nodata-boot
-_check-nodata-boot:
-	@cp $(CHECK)/prod.img $(CHECK)/nodata.img
-	@test/boot nodata test/checks-nodata $(CHECK)/nodata.log $(CHECK_QEMU) \
-		-kernel $(BUILD)/vmlinuz -initrd $(OUT)/initramfs.zst -append "$(CHECK_CMDLINE) werewolf.data=vda" \
-		-drive file=$(CHECK)/nodata.img,format=raw,if=virtio
-
-# The slot path, as bite leaves it: stage0 finding root.erofs by filesystem
-# UUID on a small ext4 victim, /victim read-only, bite-cleanup deleting the
-# distro beside it, and commit making the slot GRUB's default.
-check-slot: | $(CHECK_SHARED) check-$(CHECK_SLOT_FORM)
-	@mkdir -p $(CHECK)
-	@$(call built,slot,$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) slot)
-	@$(CHECK_MAKE) FORM=$(CHECK_SLOT_FORM) _check-slot-boot
-_check-slot-boot:
-	@rm -rf $(CHECK)/victim $(CHECK)/victim.img
-	@mkdir -p $(CHECK)/victim/var/lib/werewolf/a $(CHECK)/victim/boot/grub $(CHECK)/victim/boot/werewolf/a
-	@cp $(OUT)/slot/root.erofs $(CHECK)/victim/var/lib/werewolf/a/
-	@# A stand-in for the kernel bite lays beside GRUB's directory.
-	@echo kernel >$(CHECK)/victim/boot/werewolf/a/vmlinuz
-	@# A distro: what bite-cleanup must delete, a name that only begins like
-	@# one it keeps, links that lead out, and (below) a file it may not delete.
-	@v=$(CHECK)/victim; mkdir -p $$v/etc $$v/home/user/.ssh $$v/var/log $$v/var/lib/werewolf2 && \
-		echo ID=debian >$$v/etc/os-release && echo secret >$$v/home/user/.ssh/id && echo log >$$v/var/log/syslog && \
-		echo nameserver 10.0.2.3 >$$v/etc/resolv.conf && \
-		touch $$v/bootx && ln -s /run/werewolf $$v/etc/escape && ln -s ../../.. $$v/var/lib/up
-	@env=$(CHECK)/victim/boot/grub/grubenv; \
-		printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >$$env; \
-		head -c $$((1024 - $$(wc -c <$$env))) /dev/zero | tr '\0' '#' >>$$env
-	@mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK)/victim $(CHECK)/victim.img 128M
-	@# resolv.conf immutable, as some cloud agents leave it.
-	@d="$(DEBUGFS)"; img=$(CHECK)/victim.img; [ -n "$$d" ] || { echo "FAIL   slot               no debugfs (e2fsprogs)"; exit 1; }; \
-		flags() { "$$d" -R "stat /etc/resolv.conf" $$img 2>/dev/null | sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p'; }; \
-		f=$$(flags); [ -n "$$f" ] && "$$d" -w -R "set_inode_field /etc/resolv.conf flags $$((f | 0x10))" $$img 2>/dev/null && \
-		f=$$(flags) && [ -n "$$f" ] && [ $$((f & 0x10)) -ne 0 ] || \
-		{ echo "FAIL   slot               /etc/resolv.conf not made immutable"; exit 1; }
-	@test/boot slot test/checks $(CHECK)/slot.log $(CHECK_QEMU) \
-		-kernel $(OUT)/slot/vmlinuz -initrd $(OUT)/slot/stage0-bitten.zst \
-		-append "$(CHECK_CMDLINE) init=/init werewolf.slot=a werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
-		-drive file=$(CHECK)/victim.img,format=raw,if=virtio
-	@grep -a -o 'saved_entry=werewolf-[ab]' $(CHECK)/victim.img | sort -u | grep -qx saved_entry=werewolf-a || \
-		{ echo "FAIL   slot               GRUB's default is not werewolf-a after commit"; exit 1; }
-	@echo "pass   slot               GRUB's default is werewolf-a"
-
-# PostgreSQL's data must outlive a reboot and a power cut: the demo as it
-# ships, on its own disk, booted three times under UEFI (test/checks-persist,
-# -again, -cut). Without EL2: edk2 under HVF with it never reaches the boot
-# manager. No way out (restrict=on), so the updater builds no slot mid-test.
-# Skipped on emulated arm64, where it could only time out; x86_64 covers it.
-# CI's forms jobs check demo on their own, so pass PERSIST_AFTER=.
-PERSIST_QEMU = qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic \
-	-smp 2 -m 2048 -no-reboot -device virtio-rng-pci $(UEFI_FLAGS) \
-	-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
-	-drive file=$(CHECK)/persist.img,format=raw,if=virtio
-PERSIST_ARGS = console=$(CONSOLE) werewolf.debug=1 werewolf.check=1 $(CHECK_STALLS) $(SEAL_ARGS)
-PERSIST_AFTER ?= check-demo
-check-persist: | $(CHECK_SHARED) $(PERSIST_AFTER)
-ifeq ($(ARCH)-$(ACCEL),aarch64-tcg)
-	@echo "skip   persist            emulated arm64 (no EL2): UEFI boot too slow; x86_64 covers it"
-else
-	@mkdir -p $(CHECK)
-	@[ -n "$(UEFI_FIRMWARE)" ] || { echo "FAIL   persist            no UEFI firmware for $(ARCH) (edk2 or OVMF)"; exit 1; }
-	@[ "$(ARCH)" = aarch64 ] || [ -n "$(UEFI_VARS)" ] || { echo "FAIL   persist            no UEFI variables template for $(ARCH) (edk2-i386-vars.fd or OVMF_VARS.fd)"; exit 1; }
-	@rm -f $(CHECK)/persist.img
-	@$(call built,persist,$(CHECK_MAKE) FORM=demo disk DISK=$(CHECK)/persist.img DISK_MIB=2048 DISK_ARGS="$(PERSIST_ARGS)")
-	@$(CHECK_MAKE) FORM=demo _check-persist-boot
-endif
-_check-persist-boot:
-	@$(uefi-vars)
-	@test/boot persist test/checks-persist $(CHECK)/persist.log $(PERSIST_QEMU)
-	@POWER_CUT=1 test/boot persist-again test/checks-persist-again $(CHECK)/persist-again.log $(PERSIST_QEMU)
-	@test/boot persist-cut test/checks-persist-cut $(CHECK)/persist-cut.log $(PERSIST_QEMU)
-	@echo "pass   persist            $$(grep -a -c 'pg-init: removed the lock the last boot left' $(CHECK)/persist-cut.log) stale lock(s) removed after the cut"
-
-# check-compose: the form composed again as a machine's updater composes it
-# (cmd/slot-update), from the chain its image stages, over
-# wolfi-baselayout's accounts. Its ro and records must be the build's.
-CHECK_COMPOSE = $(OUT)/check-compose
-BASELAYOUT_URL = $(shell sed -n 's|.*"url": "\([^"]*/$(ARCH)/wolfi-baselayout-[^"]*\.apk\)".*|\1|p' $(FORM_LOCK))
+# The form composed again as a machine's updater composes it, from the
+# chain its slot stages; it must match the build (test/check-compose).
 check-compose: slot
-	@[ -n "$(BASELAYOUT_URL)" ] || { echo "check-compose: $(FORM_LOCK) names no wolfi-baselayout" >&2; exit 1; }
-	@rm -rf $(CHECK_COMPOSE) && mkdir -p $(CHECK_COMPOSE)/image/etc $(BUILD)/vendor/baselayout && \
-	pkg=$(BUILD)/vendor/baselayout/$(notdir $(BASELAYOUT_URL)) && \
-	{ [ -s $$pkg ] || { curl -sSfL -o $$pkg.tmp $(BASELAYOUT_URL) && mv $$pkg.tmp $$pkg; }; } && \
-	for f in passwd group shadow; do $(TAR) -xzOf $$pkg etc/$$f > $(CHECK_COMPOSE)/image/etc/$$f || exit 1; done
-	@cd $(OUT)/meta/usr/share/werewolf && $(abspath $(FORM_TOOL)) compose $(FORM) $(ARCH) posture-known \
-		$(abspath $(CHECK_COMPOSE))/image $(abspath $(CHECK_COMPOSE))/ro $(abspath $(CHECK_COMPOSE))/meta $(if $(DEV),dev)
-	@entries() { (cd $$1 && $(TAR) -cf - --format=mtree --options='!all,type,mode,link,sha256' $$2 | sed 1d | LC_ALL=C sort); }; \
-	entries $(OUT)/ro . > $(CHECK_COMPOSE)/build.ro && entries $(CHECK_COMPOSE)/ro . > $(CHECK_COMPOSE)/again.ro && \
-	recs=$$(cd $(CHECK_COMPOSE)/meta/usr/share/werewolf && ls) && \
-	entries $(OUT)/meta/usr/share/werewolf "$$recs" > $(CHECK_COMPOSE)/build.meta && \
-	entries $(CHECK_COMPOSE)/meta/usr/share/werewolf "$$recs" > $(CHECK_COMPOSE)/again.meta && \
-	if diff $(CHECK_COMPOSE)/build.ro $(CHECK_COMPOSE)/again.ro && diff $(CHECK_COMPOSE)/build.meta $(CHECK_COMPOSE)/again.meta; \
-	then echo "PASS   check-compose $(FORM): composed again from its staged chain, as the build made it"; \
-	else echo "FAIL   check-compose $(FORM): the lines above differ (<: the build, >: composed again)"; exit 1; fi
+	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) LOCK=$(FORM_LOCK) VENDOR=$(BUILD)/vendor \
+		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
 
-# A whole update, over the network, so not in check (test/update): a form
-# on slot a of a disk, its record claiming the kernel before its own,
-# updates itself to slot b, which must boot and commit. check-updater: prod
-# with DEV=1, which follows no releases, so builds from Wolfi and Alpine;
-# -staged cuts the power once the update is staged; -release: prod-ssh,
-# which installs CI's latest signed release.
-CHECK_UPDATE = $(CHECK)/update-$(FORM)
-# What the form leaves out of its packages, and mkfs.erofs's options, as
-# lib/compose.zig and lib/image.zig give them to howl's build.
-PRUNE = $(call form_list,prune)
+# A whole update, over the network, so not in check (test/check-updater):
+# prod with DEV=1, which builds its slot from Wolfi and Alpine; -staged
+# cuts the power once the update is staged; -release is prod-ssh, which
+# installs CI's latest signed release. EROFS_OPTS: mkfs.erofs's options,
+# as lib/image.zig gives them to howl.
 EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments,dedupe
-check-updater: | $(CHECK_SHARED)
-	@$(MAKE) --no-print-directory FORM=prod DEV=1 _check-updater
-check-updater-staged: | $(CHECK_SHARED)
-	@$(MAKE) --no-print-directory FORM=prod DEV=1 STAGED=1 _check-updater
-check-updater-release: | $(CHECK_SHARED)
+check-updater check-updater-staged: | _check-shared
+	@$(MAKE) --no-print-directory FORM=prod DEV=1 $(if $(filter %-staged,$@),STAGED=1) _check-updater
+check-updater-release: | _check-shared
 	@$(MAKE) --no-print-directory FORM=prod-ssh _check-updater
-_check-updater:
-	@mkdir -p $(CHECK_UPDATE)
-	@$(MAKE) --no-print-directory slot >$(CHECK_UPDATE)/build.log 2>&1 || \
-		{ tail -n 20 $(CHECK_UPDATE)/build.log; echo "FAIL   update build: see $(CHECK_UPDATE)/build.log"; exit 1; }
-	@$(MAKE) --no-print-directory _check-updater-boot
-_check-updater-boot: $(VERITY_BIN)
-	@rm -rf $(CHECK_UPDATE)/claim $(CHECK_UPDATE)/victim $(CHECK_UPDATE)/victim.img
-	@mkdir -p $(CHECK_UPDATE)/claim/usr/share/werewolf $(CHECK_UPDATE)/victim/var/lib/werewolf/a $(CHECK_UPDATE)/victim/boot/grub
-	@# linux-virt-6.18.55-r0 claims linux-virt-6.18.54-r0.
-	@awk -F. '{ split($$3, z, "-"); if (z[1] < 1) exit 1; printf "%s.%s.%d-%s\n", $$1, $$2, z[1] - 1, z[2] }' \
-		$(OUT)/meta/usr/share/werewolf/kernel >$(CHECK_UPDATE)/claim/usr/share/werewolf/kernel
-	@printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >$(CHECK_UPDATE)/root.mtree
-	@$(TAR) -C $(CHECK_UPDATE)/claim -cf $(CHECK_UPDATE)/claim.tar --uid 0 --gid 0 --numeric-owner usr/share/werewolf/kernel
-	@$(TAR) -cf $(CHECK_UPDATE)/root.tar --uid 0 --gid 0 --numeric-owner $(foreach p,$(PRUNE),--exclude $(p)) \
-		@$(CHECK_UPDATE)/root.mtree @$(OUT)/rootfs.tar @$(OUT)/overlay.tar @$(CHECK_UPDATE)/claim.tar
-	@mkfs.erofs $(EROFS_OPTS) -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
-		$(CHECK_UPDATE)/victim/var/lib/werewolf/a/root.erofs $(CHECK_UPDATE)/root.tar >/dev/null
-	@rm -rf $(CHECK_UPDATE)/root.tar $(CHECK_UPDATE)/verity && mkdir -p $(CHECK_UPDATE)/verity
-	@$(VERITY_BIN) $(CHECK_UPDATE)/victim/var/lib/werewolf/a/root.erofs $(CHECK_UPDATE)/verity/verity
-	@env=$(CHECK_UPDATE)/victim/boot/grub/grubenv; \
-		printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >$$env; \
-		head -c $$((1024 - $$(wc -c <$$env))) /dev/zero | tr '\0' '#' >>$$env
-	@mke2fs -q -F -t ext4 -U $(VICTIM_UUID) -d $(CHECK_UPDATE)/victim $(CHECK_UPDATE)/victim.img 3G
-	@# The build's stage0, then this root's /verity in a cpio of its own.
-	@cp $(OUT)/slot/vmlinuz $(CHECK_UPDATE)/
-	@(cd $(CHECK_UPDATE)/verity && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) | \
-		zstd -q -c | cat $(OUT)/slot/stage0.zst - >$(CHECK_UPDATE)/stage0.zst
-	@STAGED='$(STAGED)' test/update $(CHECK_UPDATE) \
-		"console=$(CONSOLE) panic=1 $$(cat $(OUT)/slot/cmdline) $(SEAL_ARGS) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3 init=/init werewolf.victim=$(VICTIM_UUID):/var/lib/werewolf werewolf.grubenv=$(VICTIM_UUID):/boot/grub/grubenv" \
-		$(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
+_check-updater: $(VERITY_BIN)
+	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
+		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }
+	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) VICTIM=$(VICTIM_UUID) PRUNE='$(call form_list,prune)' \
+		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' \
+		test/check-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 \
+		-device virtio-net-pci,netdev=n0,romfile=
 
 # CI's check job, here, in an Ubuntu VM like GitHub's runners (test/lima-ci).
 ci:

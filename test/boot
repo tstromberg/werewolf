@@ -495,6 +495,12 @@ for {set i 0} {$i < 60 && !$ready} {incr i} {
 }
 if {!$ready} { give_up "console: no root shell; is werewolf.debug=1 set?" 1 }
 
+# The kernel's own records (audits of the refusals the checks provoke) can
+# land inside a check's "@@NAME=N" line on the serial console, and the match
+# below then waits out its timeout. From here only emergencies, a panic
+# among them, reach the console; dmesg still holds every record.
+send "dmesg -n 1\r"
+
 set f [open $checks]
 while {[gets $f line] >= 0} {
 	if {![regexp {^(ok|gap)\s+(\S+)\s+(.+)$} $line -> kind check cmd]} { continue }

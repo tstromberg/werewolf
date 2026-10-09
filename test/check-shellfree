@@ -1,0 +1,12 @@
+#!/bin/sh
+# check-shellfree QEMU... boots FORM as it ships, with no shell, on a blank
+# disk (make check-shellfree-FORM). test/boot runs nothing on the machine;
+# it judges it by its posture line and by CONSOLE, the form's test/console
+# if it has one: what the console must and must not show. make passes
+# CHECK_ENV (Makefile) and CONSOLE.
+set -eu
+img=$CHECK/$FORM-shellfree.img
+rm -f "$img" && dd if=/dev/zero of="$img" bs=1048576 count=0 seek=1024 2>/dev/null
+exec test/boot "$FORM-shellfree" "${CONSOLE:--}" "$CHECK/$FORM-shellfree.log" "$@" \
+	-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$CMDLINE werewolf.data=vda" \
+	-drive "file=$img,format=raw,if=virtio"

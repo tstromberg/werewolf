@@ -1,8 +1,9 @@
 # The second boot of a machine, on the disks its first boot left (make
 # check; see test/checks for the format). /data may hold real data, so a
 # disk werewolf formatted once must come back as it was left: opened,
-# checked, mounted, and holding the mark the first boot wrote. The Makefile
-# also requires that this console never says it formatted anything.
+# checked, mounted, and holding the mark the first boot wrote.
+# test/check-form also requires that this console never says it formatted
+# anything.
 
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  data-kept        grep -q ' /data tmpfs ' /proc/mounts || grep -qx kept /data/.werewolf-check

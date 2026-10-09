@@ -1,0 +1,47 @@
+#!/bin/sh
+# check-slot QEMU... boots minimal's slot as bite leaves one, on a 128 MiB ext4
+# victim with a stand-in distro, and runs test/checks (make check-slot).
+# stage0 must find root.erofs by filesystem UUID, /victim must be
+# read-only, bite-cleanup must delete the distro around werewolf, and
+# slot-keep must make the slot GRUB's default once it commits. make passes
+# CHECK_ENV (Makefile).
+set -eu
+v=$CHECK/victim
+img=$CHECK/victim.img
+rm -rf "$v" "$img"
+mkdir -p "$v/var/lib/werewolf/a" "$v/boot/grub" "$v/boot/werewolf/a"
+cp "$OUT/slot/root.erofs" "$v/var/lib/werewolf/a/"
+# A stand-in for the kernel bite lays beside GRUB's directory.
+echo kernel >"$v/boot/werewolf/a/vmlinuz"
+# A distro: what bite-cleanup must delete, a name that only begins like one
+# it keeps, links that lead out, and (below) a file it may not delete.
+mkdir -p "$v/etc" "$v/home/user/.ssh" "$v/var/log" "$v/var/lib/werewolf2"
+echo ID=debian >"$v/etc/os-release"
+echo secret >"$v/home/user/.ssh/id"
+echo log >"$v/var/log/syslog"
+echo nameserver 10.0.2.3 >"$v/etc/resolv.conf"
+touch "$v/bootx"
+ln -s /run/werewolf "$v/etc/escape"
+ln -s ../../.. "$v/var/lib/up"
+# GRUB's environment block, 1024 bytes, booting slot a once.
+env=$v/boot/grub/grubenv
+printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >"$env"
+pad=$((1024 - $(wc -c <"$env")))
+head -c "$pad" /dev/zero | tr '\0' '#' >>"$env"
+mke2fs -q -F -t ext4 -U "$VICTIM" -d "$v" "$img" 128M
+
+# resolv.conf immutable, as some cloud agents leave it.
+[ -n "$DEBUGFS" ] || { echo "FAIL   slot               no debugfs (e2fsprogs)"; exit 1; }
+flags() { "$DEBUGFS" -R "stat /etc/resolv.conf" "$img" 2>/dev/null | sed -n 's/.*Flags: \(0x[0-9a-f]*\).*/\1/p'; }
+f=$(flags)
+[ -n "$f" ] && "$DEBUGFS" -w -R "set_inode_field /etc/resolv.conf flags $((f | 0x10))" "$img" 2>/dev/null &&
+	f=$(flags) && [ -n "$f" ] && [ $((f & 0x10)) -ne 0 ] ||
+	{ echo "FAIL   slot               /etc/resolv.conf not made immutable"; exit 1; }
+
+test/boot slot test/checks "$CHECK/slot.log" "$@" \
+	-kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0-bitten.zst" \
+	-append "$CMDLINE init=/init werewolf.slot=a werewolf.victim=$VICTIM:/var/lib/werewolf werewolf.grubenv=$VICTIM:/boot/grub/grubenv" \
+	-drive "file=$img,format=raw,if=virtio"
+grep -a -o 'saved_entry=werewolf-[ab]' "$img" | sort -u | grep -qx saved_entry=werewolf-a ||
+	{ echo "FAIL   slot               GRUB's default is not werewolf-a after commit"; exit 1; }
+echo "pass   slot               GRUB's default is werewolf-a"

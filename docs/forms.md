@@ -21,7 +21,7 @@ and key, and `make list-forms` shows the chains.
 | --- | --- | --- |
 | `minimal` | | boots anywhere, from the initramfs, its own disk or a slot bite installed; a static address; listens on nothing |
 | `prod` | `minimal` | the production base: DHCP, the cloud's metadata, updates itself, `/data` on a disk, in LUKS2 when the config brings `data.key` ([data.md](data.md)); no shell, nothing listening. Build yours on this, or on a runtime form below |
-| `app` | `prod` | the unprivileged `app` user and group (204); no runtime, service or listener |
+| `app` | `prod` | where an application is laid; its service's `app` user gets a hashed uid; no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
 | `node`, `python`, `ruby`, `jre` | `app` | running an application on :8080 |
@@ -146,15 +146,18 @@ and `howl pack` follow the same chain.
 When Wolfi does not package a form's application, the form keeps a melange
 recipe for it in `forms/<name>/melange/`, written in Wolfi's style. For
 example, `vaultwarden` has `forms/vaultwarden/melange/vaultwarden.yaml`.
-The build runs melange in Wolfi's environment and checks each source by
-sha256. It unpacks the packages over the image, and fails if they link a
-library that is not one of the form's packages. That way Wolfi's fixes to
-those libraries reach the machine through its updater. While you write a
-recipe, `howl build-apk RECIPE` builds it alone and reports what each
-package links. On macOS melange runs in QEMU, booted from werewolf's own
-Alpine kernel; on Linux it runs in bubblewrap. A recipe Wolfi would accept
-doubles as the pull request to wolfi-dev/os that retires it. A recipe Wolfi
-will not take stays with its form.
+howl's build runs melange in Wolfi's environment, which checks each source
+by sha256 ([melange.zig](../cmd/howl/melange.zig)). It unpacks the packages
+over the image, and fails if they link a library that is not one of the
+form's packages. That way Wolfi's fixes to those libraries reach the
+machine through its updater. `build/vendor` keeps the packages until the
+recipe, or under QEMU the kernel, changes. While you write a recipe,
+`howl build-apk RECIPE` builds it alone and reports what each package links. On macOS melange runs in QEMU,
+booted from werewolf's own Alpine kernel, with half the host's CPUs and
+8 GiB (`MELANGE_CPU` and `MELANGE_MEMORY` change them); on Linux it runs in
+bubblewrap. A recipe Wolfi would accept doubles as the pull request to
+wolfi-dev/os that retires it. A recipe Wolfi will not take stays with its
+form.
 
 ## Private configuration files
 
