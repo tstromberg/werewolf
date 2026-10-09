@@ -2,15 +2,15 @@
 
 ## Summary
 
-A library that pg-init preloads into PostgreSQL's `initdb`, replacing
-`popen(3)`, `pclose(3)` and `system(3)` with versions that need no shell and
-run only commands of the one shape `initdb` writes.
+popen-shim.so is a library that pg-init preloads into PostgreSQL's
+`initdb`. It replaces `popen(3)`, `pclose(3)` and `system(3)` with versions
+that need no shell and run only commands of the one shape `initdb` writes.
 
 ## Background
 
 `initdb` starts the server it is setting up through `popen` and `system`,
 which glibc runs as `/bin/sh -c COMMAND`. werewolf has no `/bin/sh`, and
-posture checks there is none. `initdb`'s commands are all one shape:
+posture checks that there is none. `initdb`'s commands all have one shape:
 
 ```
 "/usr/libexec/postgresql17/postgres" --boot -F -c log_checkpoints=false
@@ -26,8 +26,8 @@ posture checks there is none. `initdb`'s commands are all one shape:
 
 ## Non-Goals
 
-- Being a shell: no pipes, variables, globs or quoting beyond plain double
-  quotes.
+- Being a shell. It has no pipes, variables, globs, or quoting beyond plain
+  double quotes.
 - Serving anything but `initdb` and the servers it starts.
 
 ## Detailed design
@@ -38,35 +38,38 @@ posture checks there is none. `initdb`'s commands are all one shape:
   `| & ; < > ( ) $ \ ' " * ? [ ] { } ~ # !`. A quoted word may not hold
   `"`, `$`, a backtick, `\` or a control character.
   At most 64 words and 4096 bytes.
-- **Refused**: anything else. `popen` returns NULL and `system` -1, errno
-  `ENOEXEC`, and one line on stderr with control characters shown as `?`,
-  so `initdb` fails visibly and a command cannot write to the terminal.
-- **Running**: `fork`, then only system calls in the child: the pipe end
-  onto stdin or stdout, `/dev/null` opened onto what is redirected, then
-  `execve` with the caller's environment. If `execve` fails, it exits 127,
-  as a shell would.
-- **`locale -a`**: a setup server keeps the library and runs this, to
-  import the system's locales. There are none, so it reads as empty and
+- **Refused**: anything else. `popen` returns NULL and `system` -1, with
+  errno `ENOEXEC`, and one line on stderr names the command with control
+  characters shown as `?`. So `initdb` fails visibly, and a command cannot
+  write escape sequences to the terminal.
+- **Running**: it forks, and the child makes only system calls: it moves
+  the pipe end onto stdin or stdout, opens `/dev/null` onto what is
+  redirected, then calls `execve` with the caller's environment. If
+  `execve` fails, the child exits 127, as a shell would.
+- **`locale -a`**: the servers `initdb` starts keep the library, and one
+  runs this to import the system's locales as collations. There are none
+  (PostgreSQL's C and POSIX need no import), so it reads as empty and
   closes with success.
-- **Bookkeeping**: eight streams at once; `pclose` of a stream it did not
-  open is `ECHILD`, as in glibc. Its pipes are close-on-exec, so one child
-  never holds another's.
+- **Bookkeeping**: at most eight streams are open at once. `pclose` of a
+  stream it did not open fails with `ECHILD`, as in glibc. Its pipes are
+  close-on-exec, so one child never holds another's.
 
 ## Drawbacks
 
 - A future `initdb` that writes another shape fails until the shim learns
-  it, though the failure is loud and names the command.
-- Built against glibc, as `initdb` is, unlike werewolf's static programs.
+  it. The failure is loud and names the command.
+- It is built against glibc, as `initdb` is, unlike werewolf's static
+  programs.
 
 ## Alternatives Considered
 
 ### Ship a shell for initdb
-One shell anywhere on the root is a shell for every exploit. posture's
-no-shell check would have to except it.
+One shell anywhere on the root is a shell for every exploit, and posture's
+no-shell check would need an exception.
 
 ### Patch initdb
-A patched PostgreSQL would be werewolf's to carry on every release. The
-library replaces three functions without touching the package.
+werewolf would have to carry a patched PostgreSQL across every release.
+The library replaces three functions without touching the package.
 
 ### Any redirection target
 `initdb` names only `/dev/null`. Taking any file would let the library

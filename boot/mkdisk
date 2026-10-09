@@ -1,12 +1,13 @@
 #!/bin/sh
-# build: werewolf's own boot disk, from a slot (docs/design/native-boot.md).
+# mkdisk builds werewolf's own boot disk from a slot
+# (docs/design/native-boot.md).
 #
 #   boot/mkdisk ARCH BOOT_ROOTFS GPT SLOT_DIR OUT SIZE_MIB [ARG...]
 #
-# BOOT_ROOTFS is boot/boot.yaml's rootfs, holding systemd-boot; GPT is
-# boot/gpt.zig, built for this host; SLOT_DIR holds vmlinuz, stage0.zst,
-# root.erofs, and cmdline, the kernel arguments the image asks
-# for (Makefile, KERNEL_ARGS). OUT becomes a sparse disk of SIZE_MIB MiB:
+# BOOT_ROOTFS is boot/boot.yaml's rootfs, which holds systemd-boot. GPT is
+# boot/gpt.zig, built for this host. SLOT_DIR holds vmlinuz, stage0.zst,
+# root.erofs, and cmdline, the kernel arguments the image asks for
+# (Makefile, KERNEL_ARGS). OUT becomes a sparse disk of SIZE_MIB MiB:
 #
 #   GPT    fixed disk and partition GUIDs (boot/gpt.zig)
 #   1      EFI system partition, FAT32, 256 MiB: systemd-boot at the
@@ -15,28 +16,28 @@
 #   2      ext4, the rest: /werewolf/a/root.erofs; init adds /werewolf/data,
 #          which is /data
 #
-# Each ARG is added to the kernel command line, as werewolf.mac= for `make
-# demo`; updates carry them over. No address is on the command line, so the
-# machine asks DHCP. Every GUID, UUID, serial number and time is fixed, so
-# the same slot gives the same disk.
+# Each ARG is added to the kernel command line, such as werewolf.mac= for
+# `make demo`; updates carry them over. The command line has no address, so
+# the machine asks DHCP. Every GUID, UUID, serial number and time is fixed,
+# so the same slot gives the same disk.
 #
-# The kernel speaks on every console named; userland on the last that
-# exists, which is /dev/console, or, if none does, on the first console the
-# kernel registered. That must be the serial port, which every cloud
-# records and QEMU's -nographic shows. On x86_64 it is ttyS0 everywhere. On
-# aarch64 it is not: ttyAMA0 on GCP, Azure, Hetzner and QEMU, ttyS0 on AWS
-# Graviton. ttyAMA0 the kernel takes by itself, from the port the firmware
-# describes in its ACPI SPCR table; Graviton's 16550 it does not, and its
-# console shows the firmware's banner and nothing after. So aarch64 names
-# ttyS0, which registers only where there is a 16550, and then hvc0, last,
-# so /dev/console is the virtio console where there is one (Lima's vz,
-# which has no serial port). No tty0, which, registered first, would take
-# /dev/console wherever the ports named are missing. An ARG of console=hvc0
-# makes /dev/console the virtio console on x86_64 too.
+# The kernel prints to every console named. Userland prints to the last one
+# that exists, which becomes /dev/console, or, if none does, to the first
+# console the kernel registered. That must be the serial port, which every
+# cloud records and QEMU's -nographic shows. On x86_64 it is ttyS0
+# everywhere. On aarch64 it is ttyAMA0 on GCP, Azure, Hetzner and QEMU, and
+# ttyS0 on AWS Graviton. The kernel finds ttyAMA0 by itself, from the port
+# the firmware describes in its ACPI SPCR table. It does not find Graviton's
+# 16550, whose console then shows the firmware's banner and nothing after.
+# So aarch64 names ttyS0, which registers only where there is a 16550, and
+# then hvc0, last, so /dev/console is the virtio console where there is one
+# (Lima's vz, which has no serial port). aarch64 names no tty0: registered
+# first, it would take /dev/console wherever the named ports are missing.
+# An ARG of console=hvc0 makes /dev/console the virtio console on x86_64 too.
 #
-# Runs on macOS and Linux. Needs mtools (mformat, mmd, mcopy) and
-# e2fsprogs' mke2fs and debugfs: Homebrew's on macOS, which keeps them out
-# of PATH, so its prefix is searched too.
+# mkdisk runs on macOS and Linux. It needs mtools (mformat, mmd, mcopy) and
+# e2fsprogs' mke2fs and debugfs. On macOS these are Homebrew's, which keeps
+# them off the PATH, so mkdisk searches its prefix too.
 set -eu
 
 [ $# -ge 6 ] || {
@@ -57,8 +58,8 @@ esac
 	echo "boot/mkdisk: $slot has no cmdline, the image's kernel arguments (make slot)" >&2
 	exit 1
 }
-# The image's kernel arguments go on the loader entry's options line: words
-# of plain characters, no newline to start another line, as bite takes them.
+# The image's kernel arguments go on the loader entry's options line. Allow
+# only plain characters, with no newline to start another line, as bite does.
 args=$(cat "$slot/cmdline")
 case $args in *[!A-Za-z0-9_.,=\ -]*)
 	echo "boot/mkdisk: $slot/cmdline holds more than kernel arguments" >&2
@@ -75,17 +76,17 @@ for t in mformat mmd mcopy mke2fs debugfs; do
 	}
 done
 
-# Fixed identities. The EFI partition's serial number is its UUID to blkid,
-# as 57E1-F000.
+# Fixed identities. blkid reports the EFI partition's serial number as its
+# UUID, 57E1-F000.
 esp_mib=256
 esp_serial=57E1F000
 esp_uuid=57E1-F000
 root_uuid=57e1f000-77e2-4b0f-8a3c-0000000000a0
-# FAT's first day, and mtools' and mke2fs's clocks stopped there.
+# Stop mtools' and mke2fs's clocks at FAT's first day.
 export SOURCE_DATE_EPOCH=315532800 E2FSPROGS_FAKE_TIME=315532800 MTOOLS_SKIP_CHECK=1 TZ=UTC
 
-# Sectors, as boot/gpt.zig lays them out: the EFI partition from 1 MiB; the
-# root after it, to 1 MiB short of the end.
+# Sectors, as boot/gpt.zig lays them out: the EFI partition starts at 1 MiB,
+# and the root follows it up to 1 MiB short of the end.
 esp_first=2048
 root_first=$((esp_first + esp_mib * 2048))
 root_sectors=$((size_mib * 2048 - root_first - 2048))
@@ -104,8 +105,8 @@ editor no
 auto-entries no
 auto-firmware no
 EOF
-# Slot a, good from the start: no try count. The version is older than any
-# update's, so the first update's slot sorts ahead of it.
+# Slot a is good from the start, so it has no try count. Its version is older
+# than any update's, so the first update's slot sorts ahead of it.
 cat >"$w/esp/loader/entries/werewolf-a.conf" <<EOF
 title werewolf a
 sort-key werewolf
@@ -130,15 +131,15 @@ done
 cp "$slot/root.erofs" "$w/root/werewolf/a/"
 chmod -R u=rwX,go=rX "$w/root"
 chmod 0700 "$w/root/werewolf"
-# No orphan_file (e2fsprogs 1.47's default): ext4 reads all of it, 512
-# blocks one at a time, at every mount, and stage0 mounts this on every
-# boot. On a cloud's network disk that was 543 reads and 0.21 s, against
-# 48 without it; the orphan list in the superblock serves instead.
+# Turn off orphan_file (e2fsprogs 1.47's default). ext4 reads all 512 of its
+# blocks, one at a time, at every mount, and stage0 mounts this disk on every
+# boot. On a cloud's network disk that cost 543 reads and 0.21 s, against 48
+# reads without it. The orphan list in the superblock serves instead.
 mke2fs -q -F -t ext4 -b 4096 -L werewolf -U "$root_uuid" -O ^orphan_file \
 	-E "offset=$((root_first * 512)),hash_seed=$root_uuid,root_owner=0:0" \
 	-d "$w/root" "$out" $((root_sectors / 8))
-# mke2fs -d keeps the builder's owners and times: make them root's, and
-# 1980. A file left with the builder's uid would belong to whichever user
+# mke2fs -d keeps the builder's owners and times, so make them root's and
+# 1980's. A file left with the builder's uid would belong to whichever user
 # has that uid on the machine.
 (cd "$w/root" && find . -mindepth 1 | sed 's|^\.||') | while read -r p; do
 	for f in uid gid; do echo "sif $p $f 0"; done

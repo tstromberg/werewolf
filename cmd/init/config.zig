@@ -1,5 +1,6 @@
-//! init's config: the victim's filesystem, one config tar, a NoCloud seed,
-//! or the cloud's metadata; extracted by a confined child, and checked.
+//! init's config phase: it finds one config tar (on the victim, a disk or
+//! the cloud's metadata) and a NoCloud seed, and extracts the tar in a
+//! confined child.
 
 const std = @import("std");
 const seal_lib = @import("seal");
@@ -23,35 +24,31 @@ const trim = init.trim;
 
 const max_config_file = 1 << 20;
 
-/// What a config tar may hold in all, so one from a disk cannot fill /run.
+/// max_config_total bounds a config tar's file bytes, so a tar from a disk
+/// cannot fill /run.
 const max_config_total = 16 << 20;
 
 const max_config_entries = 256;
 
-/// On a machine with slots, the filesystem holding them also holds, in
-/// one directory, config.tar and data/ for /data. stage0 has mounted it
-/// already, to read root.erofs.
+/// victim sets m.victim_dir on a machine with slots. The filesystem that
+/// holds the slots also holds config.tar and data/; stage0 mounted it on
+/// /victim to read root.erofs.
 pub fn victim(m: *Machine) void {
     const v = m.cmd.victim orelse return;
-    // stage0 mounts it before it hands over, or the machine never gets
-    // here (werewolf.victim comes only with werewolf.slot). Its device
-    // is the kernel's word, from the mount table, not a second search
-    // of every disk that could name a different one.
+    // Take the device from the mount table. Searching the disks again
+    // could find a different one with the same UUID.
     const dev = m.mountSource("/victim") orelse
         return say("victim's filesystem {s} is not on /victim", .{v.uuid});
     m.victim_dir = m.fmt("/victim{s}", .{v.path});
     say("victim's filesystem {s} on /victim, werewolf in {s}", .{ dev, m.victim_dir });
 }
 
-/// One config tar: the victim's config.tar, or else the first block
-/// device holding one ("ustar" at byte 257). Never a merge: any other is
-/// said and ignored, so a disk someone attached cannot quietly replace
-/// root's keys. Then a NoCloud seed, but only an ISO9660 volume labelled
-/// cidata, found in the same pass by its volume descriptor alone, so no
-/// other disk is ever mounted to look, and no blkid probes every
-/// superblock of every disk (85 ms on GCP's network disks, where there
-/// is never a seed); the first, and any other said and ignored, as a
-/// second tar is. Before the network, as the tar may hold its address.
+/// config extracts one config tar: the victim's config.tar, or else the
+/// first block device holding one. Others are logged and ignored, so an
+/// attached disk cannot quietly replace root's keys. In the same pass it
+/// finds the first NoCloud seed by reading each disk's ISO 9660 volume
+/// descriptor, which mounts nothing and avoids blkid (85 ms on GCP).
+/// It runs before the network, since the tar may set the address.
 pub fn config(m: *Machine) void {
     var tar: ?[]const u8 = null;
     if (m.victim_dir.len > 0) {
@@ -96,11 +93,9 @@ pub fn config(m: *Machine) void {
     m.configured = tar != null or seeded;
 }
 
-/// Where no disk held a config and the form has werewolf's cloud
-/// program, the config from the cloud's metadata server, checked and
-/// rewritten by that program first (docs/cloud.md); a network file in
-/// it comes too late, the network being up to fetch it. Then the
-/// hostname and root's keys, from whichever config there is.
+/// metadata fetches the config from the cloud's metadata server with
+/// cloud-metadata (docs/cloud.md) if no disk held one. Then it sets the
+/// hostname and root's keys from whichever config there is.
 pub fn metadata(m: *Machine) void {
     if (!m.configured and executable("/usr/lib/werewolf/cloud-metadata") and
         m.run(&.{"/usr/lib/werewolf/cloud-metadata"}) and
@@ -125,9 +120,8 @@ pub fn metadata(m: *Machine) void {
         break :blk "werewolf";
     };
     m.write("/run/werewolf/hostname", m.fmt("{s}\n", .{host}), 0o644);
-    // The machine's own name resolves, to itself, with no DNS: programs
-    // that look it up (Java's getLocalHost) need it, and a lookup that
-    // left the machine would say its name to the network.
+    // The hostname resolves locally: programs such as Java's getLocalHost
+    // need it, and a DNS lookup would leak the name to the network.
     m.write("/run/werewolf/hosts", m.fmt(
         "127.0.0.1\tlocalhost {s}\n::1\t\tlocalhost {s}\n",
         .{ host, host },
@@ -137,20 +131,19 @@ pub fn metadata(m: *Machine) void {
         keys(m, "root", m.read("/run/config/authorized_keys"));
 }
 
-/// The first user in a NoCloud cloud-config and every ssh key in it,
-/// which is what Lima provides. The name and uid come from outside the
-/// machine: plain ones only. Written directly, since /etc is read-only:
-/// "*" is no password, without the lock "!" that sshd reads as refusing
-/// even a key. Home is on /data.
+/// nocloud adds the first user in a NoCloud cloud-config, with its ssh keys,
+/// as Lima provides them. Name and uid come from outside, so only plain ones
+/// are taken. The password is "*", not the lock "!", which sshd treats as
+/// refusing even a key. Home is on /data.
 fn nocloud(m: *Machine) void {
     limaConfig(m);
     const nc = parseNoCloud(m.gpa, m.readRegular("/mnt/user-data")) catch return;
     if (nc.user.len > 0) {
         const passwd = m.read("/run/werewolf/passwd");
         const group = m.read("/run/werewolf/group");
-        // The name must be new to the group file too: the image's has
-        // groups no account owns (wheel, disk, shadow), and a second line
-        // with one of their names would be a name meaning two groups.
+        // The name must be new to the group file too: the image has groups
+        // with no account (wheel, disk, shadow), and a duplicate name would
+        // mean two groups.
         if (isPlainUser(nc.user) and isPlainUid(nc.uid) and !hasEntry(passwd, nc.user) and
             !hasEntry(group, nc.user) and !idInUse(passwd, nc.uid) and !idInUse(group, nc.uid))
         {
@@ -175,14 +168,14 @@ fn nocloud(m: *Machine) void {
             );
         }
     }
-    // Lima's readiness probe reads the instance-id back from here; it is
-    // what cloud-init's boot scripts would have written.
+    // Lima's readiness probe reads the instance-id back from here, where
+    // cloud-init would have written it.
     const id = instanceId(m.readRegular("/mnt/meta-data"));
     m.write("/run/lima-boot-done", if (id.len > 0) m.fmt("{s}\n", .{id}) else "", 0o644);
 }
 
-/// Import only Lima's data provisioning into root-private /run/config.
-/// Treat lima.env as data, never source it or run any cidata script.
+/// limaConfig copies Lima's data files into /run/config. lima.env is
+/// parsed as data; it is never sourced, and no cidata script runs.
 fn limaConfig(m: *Machine) void {
     var cidata = Dir.cwd().openDir(m.io, "/mnt", .{ .follow_symlinks = false }) catch return;
     defer cidata.close(m.io);
@@ -199,7 +192,7 @@ fn limaConfig(m: *Machine) void {
     var n: usize = 0;
     for (files, values) |file, value| {
         const dest = m.fmt("/run/config/{s}", .{file.name});
-        // The config tar's word stands: Lima's adds, never replaces.
+        // Lima's files add to the config tar's, never replace them.
         if (exists(m.z(dest))) {
             say("Lima config: {s} kept, as the config tar gave it", .{file.name});
             continue;
@@ -211,7 +204,7 @@ fn limaConfig(m: *Machine) void {
     say("Lima config: imported {d} data files", .{n});
 }
 
-/// user's ssh keys, where sshd looks (AuthorizedKeysFile).
+/// keys writes user's ssh keys where sshd looks (AuthorizedKeysFile).
 fn keys(m: *Machine, user: []const u8, text: []const u8) void {
     const path = m.fmtZ("/run/werewolf/keys/{s}", .{user});
     m.write(path, text, 0o600);
@@ -219,17 +212,13 @@ fn keys(m: *Machine, user: []const u8, text: []const u8) void {
     _ = linux.fchownat(linux.AT.FDCWD, path, ids.uid, ids.gid, 0);
 }
 
-/// A config tar into /run/config, by a child that can do nothing else:
-/// root's uid with no capabilities, Landlock letting it write beneath
-/// /run/config alone and read nothing else, and a filter of file calls
-/// alone. It reads the whole tar once to check its size, then extracts
-/// it, or nothing: at most 256 entries and 16 MiB. Regular files and
-/// directories only, each name relative and plain, no file over 1 MiB;
-/// files 0600 and directories 0700, root's.
+/// extract unpacks the tar at path into /run/config in a confined child
+/// (see confineExtract). The child reads the tar once to check its size and
+/// writes nothing if it has over 256 entries or 16 MiB. It writes only
+/// directories and files, at most 1 MiB each, with plain relative names.
 fn extract(m: *Machine, path: []const u8) void {
-    // A regular file or a disk, no link followed: on a victim's
-    // filesystem a FIFO at the name would hold PID 1 in open for good, a
-    // link would lead it elsewhere.
+    // Only a regular file or a disk, and no link: on a victim's filesystem
+    // a FIFO would block PID 1 forever, and a link could point anywhere.
     const src = linux.open(m.z(path), .{
         .ACCMODE = .RDONLY,
         .CLOEXEC = true,
@@ -261,8 +250,7 @@ fn extract(m: *Machine, path: []const u8) void {
         say("config: {s} not extracted", .{path});
 }
 
-/// The child of extract: confined, then the tar checked whole, then
-/// written.
+/// extractChild confines itself, checks the whole tar, then writes it.
 fn extractChild(m: *Machine, src: i32, dir: i32, path: []const u8) noreturn {
     confineExtract(dir) catch {
         say("config: cannot confine the extraction: {s} {s}", .{
@@ -284,7 +272,7 @@ fn extractChild(m: *Machine, src: i32, dir: i32, path: []const u8) noreturn {
     linux.exit_group(0);
 }
 
-/// The tar's entries and file bytes counted, before anything is written.
+/// sizeUp fails if the tar has too many entries or file bytes.
 fn sizeUp(m: *Machine, f: Io.File) !void {
     var rbuf: [8192]u8 = undefined;
     var r = f.readerStreaming(m.io, &rbuf);
@@ -304,7 +292,7 @@ fn sizeUp(m: *Machine, f: Io.File) !void {
     }
 }
 
-/// Each entry written beneath out: what is not plain is said and left.
+/// writeOut writes each entry beneath out, and logs and skips the rest.
 fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
     var rbuf: [8192]u8 = undefined;
     var r = f.readerStreaming(m.io, &rbuf);
@@ -314,8 +302,8 @@ fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
         &r.interface,
         .{ .file_name_buffer = &name_buf, .link_name_buffer = &link_buf },
     );
-    // The caps sizeUp held the tar to, held again on this pass: a disk's
-    // bytes are the hypervisor's to change between the two reads.
+    // Check sizeUp's limits again: the hypervisor can change a disk's bytes
+    // between the two reads.
     var entries: usize = 0;
     var total: u64 = 0;
     while (try it.next()) |e| {
@@ -360,10 +348,8 @@ fn writeOut(m: *Machine, f: Io.File, out: Dir) !void {
     }
 }
 
-/// What a config tar's extraction may do: write beneath /run/config, which
-/// dir names, and nothing else; root's uid with no capabilities, so no
-/// other file it could not reach as an owner; no socket, process or mount
-/// call, refused as if the kernel had none.
+/// confineExtract keeps root's uid without capabilities, lets Landlock
+/// write only beneath dir (/run/config), and allows only file system calls.
 fn confineExtract(dir: i32) !void {
     try sandbox.keepOnly(0);
     try sandbox.landlock(&.{.{ .fd = dir, .access = sandbox.own_dir }}, &.{});
@@ -389,8 +375,8 @@ fn readLimaData(gpa: Allocator, io: Io, cidata: Dir, files: []const LimaFile) ![
 }
 
 fn readLimaFile(gpa: Allocator, io: Io, dir: Dir, name: []const u8) ![]const u8 {
-    // cidata is read-only. Refuse special files before opening: a FIFO
-    // could otherwise wait forever for a writer before f.stat sees it.
+    // Refuse special files before opening: open on a FIFO would wait
+    // forever for a writer.
     const entry = try dir.statFile(io, name, .{ .follow_symlinks = false });
     if (entry.kind != .file or entry.size > 32 * 1024) return error.InvalidLimaDataFile;
     var f = try dir.openFile(io, name, .{ .follow_symlinks = false });
@@ -508,8 +494,8 @@ test "Lima data imports only plain config paths" {
     ));
 }
 
-/// The first user's name and uid in a cloud-config, quotes dropped, and
-/// every ssh public key in it, one a line.
+/// parseNoCloud returns the first user's name and uid in a cloud-config,
+/// without quotes, and every ssh public key in it, one per line.
 fn parseNoCloud(gpa: Allocator, text: []const u8) !NoCloud {
     var nc: NoCloud = .{};
     var user_found = false;
@@ -535,8 +521,9 @@ fn parseNoCloud(gpa: Allocator, text: []const u8) !NoCloud {
     return nc;
 }
 
-/// Every ssh public key on line, one a line into out: a type, a space, the
-/// base64 body, and an optional comment to the end of the line or a quote.
+/// sshKeys appends each ssh public key on line to out, one per line. A key
+/// is a type, a space, a base64 body, and an optional comment that ends at
+/// a quote or the end of the line.
 fn sshKeys(gpa: Allocator, line: []const u8, out: *std.ArrayList(u8)) !void {
     var i: usize = 0;
     while (i < line.len) {
@@ -561,8 +548,8 @@ fn sshKeys(gpa: Allocator, line: []const u8, out: *std.ArrayList(u8)) !void {
     }
 }
 
-/// Where the key type at the start of s ends, with its space: ssh-ed25519,
-/// ssh-rsa, ecdsa-sha2-nistpN, sk-...@openssh.com.
+/// keyTypeEnd returns the length of the key type and its space at the start
+/// of s (ssh-ed25519, ssh-rsa, ecdsa-sha2-nistpN, sk-...@openssh.com), or null.
 fn keyTypeEnd(s: []const u8) ?usize {
     if (std.mem.startsWith(u8, s, "ssh-ed25519 ")) return "ssh-ed25519 ".len;
     if (std.mem.startsWith(u8, s, "ssh-rsa ")) return "ssh-rsa ".len;
@@ -585,7 +572,7 @@ fn isBase64(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '+' or c == '/' or c == '=';
 }
 
-/// A NoCloud name: [a-z_][a-z0-9_-]{0,31}.
+/// isPlainUser reports whether s matches [a-z_][a-z0-9_-]{0,31}.
 fn isPlainUser(s: []const u8) bool {
     if (s.len == 0 or s.len > 32) return false;
     if (!std.ascii.isLower(s[0]) and s[0] != '_') return false;
@@ -594,9 +581,9 @@ fn isPlainUser(s: []const u8) bool {
     return true;
 }
 
-/// A NoCloud uid: 500 to 60000, written plainly, so macOS's users (501
-/// and up, which Lima passes on) fit and root's never does. Taking a system
-/// account's is stopped by idInUse, not by the range.
+/// isPlainUid reports whether s is a decimal uid from 500 to 60000. The
+/// range fits macOS's users (501 and up, passed on by Lima) and never root;
+/// idInUse stops a uid that a system account has.
 fn isPlainUid(s: []const u8) bool {
     if (s.len == 0 or s.len > 5 or s[0] == '0') return false;
     for (s) |c| if (!std.ascii.isDigit(c)) return false;
@@ -604,8 +591,8 @@ fn isPlainUid(s: []const u8) bool {
     return n >= 500 and n <= 60000;
 }
 
-/// Whether an /etc/passwd- or /etc/group-like file already has id as an
-/// entry's third field: its uid, or its gid.
+/// idInUse reports whether a passwd or group file has id as an entry's
+/// third field (its uid or gid).
 fn idInUse(text: []const u8, id: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -617,7 +604,7 @@ fn idInUse(text: []const u8, id: []const u8) bool {
     return false;
 }
 
-/// Whether an /etc/passwd-like file has an entry for name.
+/// hasEntry reports whether a passwd or group file has an entry for name.
 fn hasEntry(text: []const u8, name: []const u8) bool {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -629,7 +616,7 @@ fn hasEntry(text: []const u8, name: []const u8) bool {
 
 pub const Ids = struct { uid: u32, gid: u32 };
 
-/// name's uid and gid in an /etc/passwd.
+/// lookupIds returns name's uid and gid in passwd, or null.
 pub fn lookupIds(passwd: []const u8, name: []const u8) ?Ids {
     var it = std.mem.tokenizeScalar(u8, passwd, '\n');
     while (it.next()) |line| {
@@ -643,9 +630,9 @@ pub fn lookupIds(passwd: []const u8, name: []const u8) ?Ids {
     return null;
 }
 
-/// Text from outside as the console may show it: at most buf.len bytes,
-/// each control byte a "?", so a name refused for holding one cannot put
-/// an escape sequence or a false line on the console log.
+/// shown copies at most buf.len bytes of s, with each control byte made
+/// "?", so outside text cannot put an escape sequence or a false line on
+/// the console.
 fn shown(buf: []u8, s: []const u8) []const u8 {
     const n = @min(s.len, buf.len);
     for (s[0..n], buf[0..n]) |c, *o| o.* = if (c < 0x20 or c == 0x7f) '?' else c;
@@ -658,7 +645,7 @@ test "shown hides control bytes and bounds the text" {
     try testing.expectEqualStrings("12345678", shown(&buf, "123456789"));
 }
 
-/// instance-id's value in a NoCloud meta-data.
+/// instanceId returns instance-id's value in a NoCloud meta-data, or "".
 fn instanceId(text: []const u8) []const u8 {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -669,7 +656,7 @@ fn instanceId(text: []const u8) []const u8 {
     return "";
 }
 
-/// Whether dev holds a tar: "ustar" at byte 257.
+/// hasUstar reports whether dev holds a tar ("ustar" at byte 257).
 pub fn hasUstar(dev: [:0]const u8) bool {
     const fd = linux.open(dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;
@@ -679,10 +666,10 @@ pub fn hasUstar(dev: [:0]const u8) bool {
     return linux.errno(n) == .SUCCESS and n == 5 and std.mem.eql(u8, &magic, "ustar");
 }
 
-/// Whether dev is an ISO9660 volume labelled cidata (or CIDATA), as a
-/// NoCloud seed is: its primary volume descriptor, at 32 KiB, says CD001,
-/// and its volume identifier, from byte 40, is the label: padded with
-/// spaces, as the standard says, or with NULs, as Lima's and macOS's are.
+/// isNoCloud reports whether dev is an ISO 9660 volume labelled cidata or
+/// CIDATA, as a NoCloud seed is. The primary volume descriptor is at
+/// 32 KiB; its label, at byte 40, is padded with spaces (the standard) or
+/// NULs (Lima and macOS).
 fn isNoCloud(dev: [:0]const u8) bool {
     const fd = linux.open(dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return false;

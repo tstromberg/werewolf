@@ -1,24 +1,13 @@
-//! gpt: a sparse disk image with werewolf's partition table, and nothing
-//! in the partitions yet (docs/design/native-boot.md).
-//!
-//!     gpt OUT SIZE_MIB ESP_MIB
-//!
-//! OUT becomes a SIZE_MIB MiB disk, sparse, with a protective MBR and the
-//! primary and backup GPT:
-//!
-//!     1   EFI system partition, from 1 MiB, ESP_MIB long
-//!     2   Linux filesystem ("werewolf"), from there to 1 MiB short of the end
-//!
-//! The filesystems are written into those ranges afterwards, by mtools and
-//! mke2fs at an offset. The disk and partition GUIDs are fixed, so the same
-//! sizes give the same table. It runs on the build host, macOS or Linux,
-//! where sfdisk may not be.
+//! gpt writes a sparse disk image with werewolf's partition table: an EFI
+//! system partition and a root partition, both empty. It runs on the build
+//! host, which may lack sfdisk. See docs/design/native-boot.md.
 
 const std = @import("std");
 const Io = std.Io;
 
 pub const sector = 512;
-/// Sectors before the first partition and after the last: 1 MiB each.
+/// margin is the gap before the first partition and after the last, in
+/// sectors: 1 MiB each.
 pub const margin = 2048;
 const entries = 128;
 const entry_size = 128;
@@ -26,6 +15,7 @@ const entry_sectors = entries * entry_size / sector;
 
 const esp_type = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b";
 const linux_type = "0fc63daf-8483-4772-8e79-3d69d8477de4";
+// Fixed GUIDs make the same sizes give the same bytes.
 const disk_guid = "57e1f000-77e2-4b0f-8a3c-000000000000";
 const esp_guid = "57e1f000-77e2-4b0f-8a3c-000000000001";
 const root_guid = "57e1f000-77e2-4b0f-8a3c-000000000002";
@@ -54,7 +44,7 @@ fn usage() noreturn {
     std.process.exit(2);
 }
 
-/// Where everything goes, in sectors.
+/// Layout holds the disk size and partition bounds, in sectors.
 pub const Layout = struct {
     sectors: u64,
     esp_first: u64,
@@ -68,7 +58,7 @@ pub fn layout(size_mib: u32, esp_mib: u32) !Layout {
     const total = @as(u64, size_mib) * per_mib;
     const esp_first: u64 = margin;
     const root_first = esp_first + @as(u64, esp_mib) * per_mib;
-    // The root needs room for a filesystem, and the end the backup table.
+    // Leave the root at least 1 MiB, and the end room for the backup table.
     if (esp_mib == 0 or root_first + per_mib + margin > total) return error.TooSmall;
     return .{
         .sectors = total,
@@ -79,8 +69,8 @@ pub fn layout(size_mib: u32, esp_mib: u32) !Layout {
     };
 }
 
-/// The protective MBR, primary header and entries into primary; the backup
-/// entries and header, which end the disk, into backup.
+/// encode writes the protective MBR, primary header and entries into
+/// primary, and the backup entries and header, which end the disk, into backup.
 pub fn encode(l: Layout, primary: []u8, backup: []u8) void {
     @memset(primary, 0);
     @memset(backup, 0);
@@ -136,7 +126,7 @@ fn writeHeader(h: []u8, mine: u64, alternate: u64, table_lba: u64, l: Layout, ta
     std.mem.writeInt(u32, h[80..84], entries, .little);
     std.mem.writeInt(u32, h[84..88], entry_size, .little);
     std.mem.writeInt(u32, h[88..92], table_crc, .little);
-    // The header's own CRC covers its 92 bytes with the field zeroed.
+    // The header CRC covers its 92 bytes with the CRC field still zero.
     std.mem.writeInt(u32, h[16..20], std.hash.Crc32.hash(h[0..92]), .little);
 }
 
@@ -156,9 +146,8 @@ fn writeEntry(
     for (name, 0..) |c, i| e[56 + 2 * i] = c;
 }
 
-/// A GUID as GPT stores it: the first three fields little-endian, the
-/// rest in order. The strings are constants here, so a malformed one is a
-/// bug, caught by the tests.
+/// guid encodes s as GPT stores a GUID: the first three fields little-endian,
+/// the rest in order. Every s is a constant, so the tests catch a bad one.
 fn guid(out: *[16]u8, s: []const u8) void {
     var raw: [16]u8 = undefined;
     var n: usize = 0;

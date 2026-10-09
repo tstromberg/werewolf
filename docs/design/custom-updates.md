@@ -1,146 +1,120 @@
 # One updater: apk
 
-Proposed, 2026-10-08.
+Proposed 2026-10-08. Phases 1 and 2a are built; 2b is in progress.
 
 ## Summary
 
-A werewolf image becomes a function of its `/etc/apk/world` and one
-deterministic step, `compose`, shared by the build and the updater.
-Everything else is a package: Wolfi's, werewolf's programs and forms from a
-repository CI signs, and the operator's inputs from one sealed into the
-image. Every machine then updates one way, by apk into its other slot;
-releases are for fresh installs alone. A machine from `howl create shop
---with cloudflared,bastion --package curl` updates werewolf's programs, its
-forms and its packages, where today only the packages move.
+An image becomes its `/etc/apk/world` plus compose, one deterministic step
+the build and the updater share. Everything else is a package: Wolfi's,
+werewolf's programs and forms from a repository CI signs, and the operator's
+inputs from one sealed into the image. Every machine updates one way, by apk
+into its other slot, so a `howl create shop --with cloudflared,bastion`
+machine updates werewolf's programs and forms too. Releases serve installs.
 
 ## Background
 
-Two paths today ([updater.md](../updater.md)). A form CI publishes fetches
-its signed slot whole. Any other form on `prod` reinstalls its world into a
-new root each check; what apk installs updates, and the rest is a list of
-paths copied forward from the running image (`cmd/slot-update/slot.zig`,
-`buildSlot`), frozen until a rebuild: werewolf's programs, the updater among
-them; each form's `rootfs/`; what the Makefile derives from the chain
-(`meta.stamp`, `ro.stamp`); local melange packages and baked OCI trees. Part
-of the image is Makefile logic the machine cannot rerun.
+A form CI publishes fetches its signed slot whole; any other `prod` form
+reinstalls its world ([updater.md](../updater.md)) and copies werewolf's
+programs forward, so a fix to `fence` or the updater reaches no `howl`-built
+machine until someone rebuilds it.
 
 ## Goals
 
-- A fix to any werewolf program reaches every machine on `prod` by the
-  update policy's tiers, with no rebuild and no operator.
+- A fix to any werewolf program reaches every `prod` machine within the
+  [update policy](update-policy.md)'s tiers, with no rebuild or operator.
 - One update path, one trust path (apk's keys), one test (`check-updater`).
-- The machine builds the slot the host would, byte for byte, and CI proves
-  it on every change (`make check-compose`).
-- The Makefile's `meta` and `ro` shell and awk become one Zig library.
+- A machine builds the slot the host would, and `make check-compose` proves it.
 
 ## Non-Goals
 
-What the operator pinned (OCI digests, `--app`, local recipes, bastion
-users) changes with a rebuild. No apko or compiler on the machine. A
-CI-gated mirror of Wolfi: later (Reliability).
+- Updating what the operator pinned (OCI digests, `--app`, local recipes,
+  bastion users), or putting apko or a compiler on the machine.
+- A CI-gated mirror of Wolfi, for now (see Reliability).
 
 ## Detailed design
 
-ChromeOS never composes on the device; Pike wants one builder, not two paths
-sharing a shape but not code; de Raadt wants nothing on the machine that
-need not be there and every input signed. Ariadne breaks the tie: the world
-is the spec and apk the solver; once every input is a package, the same
-answer comes out on a host or a machine, so the machine may as well be the
-one to ask.
+The world file is the spec and apk is the solver. Once every input is a
+package, a host and a machine resolve the same answer, so a machine can
+build its own slot.
 
 **The image is its world.** The machine above has world `local-shop
 werewolf-format=3`. `local-shop` depends on `form-prod`, `form-cloudflared`,
-`form-bastion`, `curl` and `werewolf-format=3`; a form on its Wolfi packages
-and werewolf programs (`form.yaml`'s `programs` becomes `depends`). apk
-refuses what cannot combine at build; apko still builds from a lock.
+`form-bastion` and `curl`; each form depends on its Wolfi packages and
+werewolf programs. apk refuses what cannot combine, at build time.
 
-**werewolf's repository**, published with each release, signed by a new key
-(`release/packages.pub`, in every image's `/etc/apk/keys`), on a static host
-as the tiers feed is: `werewolf-PROGRAM`, one a program, packed from what
-`zig build` makes; `form-NAME`, one a form in `forms/`, its `form.yaml`,
-`apko.yaml` and `rootfs/` *staged* under `/usr/share/werewolf/forms/NAME/`,
-since two forms in a chain may ship one path (`sshd` and `bastion` both bring
-`etc/sv/sshd`) and apk refuses that; and in-tree recipes' packages, built by
-CI's melange. Every package carries the release's serial as its version and
-`provides: werewolf-format=N`. Nothing is ever deleted.
+**werewolf's repository** lives in R2 at
+`https://dist.werewolf-linux.org/apk/ARCH/` and is signed by the key in
+`release/packages.pub`, which images install as
+`/etc/apk/keys/werewolf-packages.rsa.pub`. It holds `werewolf-PROGRAM`, one
+package per program, packed from Zig's cross-compiled output on any host
+without a VM (lib/package.zig, `make packages`); `form-NAME`, one per form,
+staging its files under `/usr/share/werewolf/forms/NAME/` because two forms
+may ship the same path; and packages from in-tree melange recipes. Each
+version is its commit's time, so a clean tree packs the same bytes. Every
+package provides `werewolf-format=N`. CI never deletes a published package.
 
-**The image's repository**, `/usr/share/werewolf/repo`, tagged `@local` in
-`/etc/apk/repositories`: `local-FORM` for each form outside `forms/`, with
-its fragments, `rootfs/`, OCI trees, `--app` and local recipes, its index
-signed by a key the build makes and discards. Closed after the build, which
-is what pinned means: the one layer that is not a package. apk takes a
-package from a tagged repository only when world names it `name@local`, so
-world is the whole answer to what will not update, a line a package.
+**The image's own repository** is `/usr/share/werewolf/repo`, tagged `@local`.
+It holds `local-FORM` for each form outside `forms/`, with its files, OCI
+trees, `--app` and local recipes, signed by a key the build makes and then
+discards. apk takes a package from a tagged repository only when world names
+it `name@local`, so world lists exactly what will not update.
 
-**What howl builds.** Nothing of werewolf's, by default: programs and forms
-come from the repository, so a released `howl` alone makes any machine, and
-it updates. `--build` (which `make`'s targets pass) packs the tree's into
-the image's repository as `@local`; packages versioned by commit time are
-byte-identical to released ones from a clean tree, so howl tags only those
-that differ. howl's first line says which, and how many are pinned; the
-updater logs them each check.
+**What howl builds.** howl takes werewolf's programs and forms from the
+repository, so any machine it makes updates. `--build` packs the tree's own
+as `@local`, pinning only those whose bytes differ from the published ones.
 
-**compose**, `lib/compose.zig`, run by `build/host/form` on the host and
-`buildSlot` on the machine. From a root apk filled, it orders the staged
-fragments as `lib/form.zig` orders a chain, lays each `rootfs/` on `/` in
-that order, later winning, and writes what `meta.stamp` and `ro.stamp` write
-today (`net` compiled against the root's accounts, `pledge`, `oci`, `allow`,
-`weaknesses`, `modules`, `cmdline`, sshd's `form.conf`, accounts, supervise
-links), `prune` last. The updater's `root` step is apk then compose, no list
-of paths; `compare` diffs `werewolf-*` versions too, so a release of werewolf
-alone is an update.
+**compose** (lib/compose.zig; lib/README.md) lays the staged forms and writes
+what the chain derives. The updater runs it from the running image's staged
+chain over the accounts apk laid, and writes only into scratch.
 
-**One path.** `release.zig`, the manifest `compare`, `meta/releases` and
-`check-updater-release` go; `image.pub` leaves the machine, kept for `howl`
-to verify a fresh-install download; werewolf's own advisories move into the
-tiers feed, already signed. A release is `disk.qcow2` and `initramfs.zst`
-from the same apko and compose: a fresh install and a slot a machine builds
-from the same lock are one image.
+**One path.** The release path goes: `release.zig`, the manifest compare and
+`check-updater-release`. `image.pub` stays with howl, to verify fresh-install
+downloads, and werewolf's advisories move into the signed tiers feed.
 
-**The format pin** keeps the running updater's compose and the new root's
-programs reading the same files. When CI moves to N+1, a machine on N takes
-the newest packages still providing N, with Wolfi's current fixes, logs
-`held` each check and fails posture's `update-format-held`.
+**The format pin** keeps compose and the programs reading the same files.
+After CI moves to format N+1, a machine on N takes the newest packages that
+provide N, logs `held` each check, and fails posture's `update-format-held`.
 
-**Phases.** 1: compose replaces `meta.stamp`/`ro.stamp`, byte-identical,
-proven by `check-compose`. 2: `werewolf-*` packages, the key, the pin. 3:
-`form-*` packages; the overlay list goes. 4: the image's repository;
-`buildSlot` copies nothing forward. 5: the release path goes.
+**Phases.**
+1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.
+2. 2a, built: images stage their chain and the updater composes from it.
+   2b, in progress: the packer, the key and R2 exist; next, images install
+   `werewolf-*`, then CI signs and uploads.
+3. `form-*` packages; the overlay list goes.
+4. The image's repository; `buildSlot` copies nothing forward.
+5. The release path goes.
 
 ## Drawbacks
 
-A second key and a host CI keeps up forever. A compose bug ships to every
-machine at once, bounded by one try and rollback. Every machine builds as
-root now, `prod` included, trusting signed packages rather than a list of
-paths. No `prod` machine runs an image CI booted first.
+CI keeps a second key and a package host forever. A compose bug reaches every
+machine at once, bounded by one boot try and rollback. No `prod` machine runs
+an image CI booted first.
 
 ## Alternatives Considered
 
-**Keep the release path** for `prod`: CI-gated images, one small request a
-check. Two code paths, two trust paths and two tests for one result, and the
-gating only for the forms CI builds; the tiers already hold Medium and Low
-fixes for days, in which CI's hourly `prod` build would have failed.
-**Publish instead of build**: `howl release`, the operator's key, the
-machine following as `prod` did. A fleet's path, built on this one, later.
-**A signed tarball of programs**: not forms or derived files, and a second
-verifier. **Upgrade in place**: drift, and verity needs an image built whole.
+- **Keep the release path for `prod`**: CI-gated images, but two code paths,
+  trust paths and tests for one result. The tiers already hold Medium and
+  Low fixes for days, long enough for CI's hourly build to fail first.
+- **Publish instead of build** (`howl release` with the operator's key) suits
+  a fleet, and can be built on this design later.
+- **A signed tarball of programs** misses the forms; **upgrading in place**
+  drifts, and verity needs a whole image.
 
 ## Security Considerations
 
-`packages.pub` is as powerful as a Wolfi key: its own key, CI-held; a leak
-means a signed malicious `werewolf-init`, with `compare`'s refusal of older
-versions and the one-try boot standing. Compose parses signed data as root,
-the fragments of packages whose binaries root runs anyway. The image's
-repository is trusted as copy-forward is, by dm-verity, now with apk
-checking it. The host can withhold or replay, never forge. apk following
-package-laid links as root stays the gap it is.
+`packages.pub` is as powerful as a Wolfi key: a leak lets the holder ship a
+malicious `werewolf-init` to every machine, so its private half lives only in
+a CI secret and offline. The updater refuses older versions, and a new slot
+boots once before it is kept. compose parses signed data as root, from
+packages whose binaries root runs anyway. The image's own repository is
+trusted through dm-verity, as copied files are today. The host can withhold
+or replay, never forge. apk following package-laid links as root remains a
+known gap.
 
 ## Reliability Considerations
 
-A deleted package strands every machine resolving through it: CI checks each
-published one is still served. Hourly checks fetch three indexes, Wolfi's in
-megabytes: the `_update` fetcher asks conditionally and hands apk nothing
-unchanged. A held format is loud: `held` each check, a posture weakness.
-Should ungated Wolfi prove too fast, the werewolf repository becomes a
-CI-tested mirror of the forms' locked packages, Wolfi reached only for
-tagged extras (`curl@wolfi`). `check-compose` makes the two builders agree.
+A removed package would strand every machine that needs it, so CI checks
+each published one is still served. Hourly checks fetch three indexes, so the
+`_update` fetcher asks conditionally. If ungated Wolfi proves too fast, the
+werewolf repository can become a CI-tested mirror of the forms' locked
+packages, with Wolfi reached only for tagged extras (`curl@wolfi`).

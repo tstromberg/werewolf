@@ -6,7 +6,7 @@ The `ollama` form is `prod` with Ollama serving models to a network.
 | --- | --- |
 | Listens | tcp/11434, Ollama's API, which has no login of its own: `oauth2-proxy`, `caddy` or a tailnet in front to serve it beyond the machine |
 | Sends | HTTPS and DNS, to pull models from `registry.ollama.ai` |
-| Runs as | `ollama` (uid 218), leashed; it starts its own runner for a loaded model, so it pledges `exec` and may run only itself |
+| Runs as | `ollama` (a uid of its own, its name's hash), leashed; it starts its own runner for a loaded model, so it pledges `exec` and may run only itself |
 | Keeps | models in `/data/svc/ollama` |
 
 ```sh

@@ -1,52 +1,6 @@
-//! posture: measure a Linux machine's security posture, and print it as a
-//! list of what passed and failed, or as JSON.
-//!
-//!     posture           check, print, and exit 1 if any check fails
-//!     posture --json    the same, as JSON, with why and how each was checked
-//!     posture --line    the same, as one line for a console or a log:
-//!                       posture: fail=ID,ID pass=N skip=N {JSON}, the
-//!                       JSON holding only the checks that failed
-//!     posture --noop    exit 0 at once: what the run-a-program checks run
-//!     posture --attack  also attack the machine (attacks, below), as
-//!                       werewolf.check=1 does, where the command line cannot
-//!                       say so -- a check run in a container. WEREWOLF_CHECK=1
-//!                       in the environment asks the same of the boot service.
-//!
-//! --extended adds the checks werewolf fails by choice, because meeting
-//! them would slow what machines run, or is not yet shown safe with fence
-//! (docs/security.md, "Not done, by choice"): wiping freed memory,
-//! forced CPU mitigations, strict reverse-path filtering, and ignoring
-//! IPv6 router advertisements. Any Linux can be measured against them.
-//!
-//! Each check says what it protects against in plain words, how it was
-//! checked, and whether it passed. Where it is safe, a check tests rather
-//! than reads: it asks the kernel to undo a one-way setting and expects a
-//! refusal, and it copies itself into each writable place and into a memfd
-//! and expects the copy not to start. It asks the kernel only when the
-//! setting already reads as locked, when the refusal is certain, so a check
-//! that fails never weakens the machine. Nothing touches another process or
-//! /dev/mem, which would write to the kernel log, unless asked: the kernel
-//! command line has werewolf.check=1 (werewolf's tests set it), or --attack
-//! or WEREWOLF_CHECK=1 asks where the command line cannot be set. posture then
-//! also attacks the machine and expects each attack refused (attacks, below).
-//! None of the attacks harm a sound machine; each expects to be refused.
-//!
-//! Run as root for the whole picture; as another user some checks read what
-//! they can and some are skipped. It assumes nothing of werewolf: run it on
-//! any Linux to compare. werewolf's own checks (its services, its declared
-//! ports, /victim) are skipped where those do not exist.
-//!
-//! In werewolf it is also a service, run once a boot as /etc/sv/posture/run:
-//! it waits for the other services to settle, so it sees the machine as it
-//! runs, checks, keeps the JSON in /run/werewolf/posture.json, says the
-//! --line on the console, and parks itself. It runs beside the services,
-//! after them, and nothing waits for it.
-//!
-//! A werewolf image says which failures it expects, each with its excuse,
-//! in /usr/share/werewolf/weaknesses (its form's weaknesses, forms/README.md):
-//! a failed check there is excused, any other is unexpected, and the
-//! service says so on the console. On another Linux there is no such file,
-//! and every failure is simply a failure.
+//! posture measures a Linux machine's security posture and reports each
+//! check as passed, failed or skipped, as text, JSON or one console line.
+//! On werewolf it also runs once a boot as a service. See README.md.
 const attacks = @import("attacks.zig");
 const cmdline = @import("cmdline");
 const files = @import("files.zig");
@@ -119,10 +73,10 @@ const json_options: std.json.Stringify.Options = .{
     .emit_null_optional_fields = false,
 };
 
-/// How long every other service must have run, or been down by choice.
+/// settle_s is how long every other service must have run before checking.
 const settle_s = 5;
 
-/// How long to wait for that before checking anyway.
+/// settle_max_s bounds the wait, so a crash-looping service cannot stall posture.
 const settle_max_s = 60;
 
 fn serve(io: Io, gpa: Allocator) !void {
@@ -162,14 +116,14 @@ fn serve(io: Io, gpa: Allocator) !void {
     if (report.known) |k| try printKnown(&line.writer, k);
     try Io.File.stdout().writeStreamingAll(io, line.written());
 
-    // Down, so runsv does not run it again until the next boot.
+    // Park the service, so runsv does not run it again until the next boot.
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
     std.debug.print("posture: sv down: {s}\n", .{@errorName(err)});
     std.process.exit(1);
 }
 
-/// The first service but this one that has not settled, by runsv's own
-/// account; null once all have.
+/// unsettled returns the first other service that runsv says has not
+/// settled, or null once all have.
 fn unsettled(io: Io, gpa: Allocator) ?[]const u8 {
     var d = Dir.cwd().openDir(io, "/etc/sv", .{ .iterate = true }) catch return null;
     defer d.close(io);
@@ -191,11 +145,10 @@ fn unsettled(io: Io, gpa: Allocator) ?[]const u8 {
     return null;
 }
 
-/// Whether runsv's supervise/status says the service is down because it
-/// was asked to be, or has run for settle_s. The 20 bytes are the time of
-/// the last change, as TAI64N (seconds since 1970 plus 2^62 + 10), the pid,
-/// paused, want ('u' or 'd'), a term flag, and the state (0 down, 1 run, 2
-/// finish).
+/// serviceSettled reports whether runsv's supervise/status shows the service
+/// down on request, or running for settle_s. The 20 bytes are the last
+/// change as TAI64N (seconds since 1970 plus 2^62 + 10), the pid, paused,
+/// want ('u' or 'd'), a term flag, and the state (0 down, 1 run, 2 finish).
 fn serviceSettled(status: [20]u8, now: u64) bool {
     const since = std.mem.readInt(u64, status[0..8], .big) -| ((1 << 62) + 10);
     return switch (status[19]) {
@@ -205,51 +158,51 @@ fn serviceSettled(status: [20]u8, now: u64) bool {
     };
 }
 
-/// What posture prints.
+/// Report is what posture prints.
 pub const Report = struct {
     tool: []const u8 = "posture",
     version: u32 = 1,
     time: []const u8,
-    /// The distribution, as /etc/os-release names it.
+    /// os is the distribution's PRETTY_NAME from os-release.
     os: []const u8,
     host: []const u8,
     kernel: []const u8,
     root: bool,
-    /// What the machine's form took back of werewolf's defaults when it was
-    /// built (/etc/werewolf/allow), sorted. The checks still measure it.
+    /// allow lists, sorted, the werewolf defaults the form gave up at build
+    /// time (/etc/werewolf/allow). The checks still measure them.
     allow: []const []const u8 = &.{},
     summary: struct { pass: usize = 0, fail: usize = 0, skip: usize = 0 },
-    /// Against the image's weaknesses, where it lists them.
+    /// known compares failures with the image's weaknesses, if it lists any.
     known: ?Known = null,
     checks: []const Check,
 };
 
 pub const Check = struct {
     id: []const u8,
-    /// kernel, processes, programs, files or network.
+    /// area is kernel, processes, programs, files or network.
     area: []const u8,
     name: []const u8,
-    /// What it protects against, in plain words; null only on the
-    /// console's line (printLine), where it would be noise.
+    /// why says in plain words what the check protects against. printLine
+    /// sets it null, where it would be noise.
     why: ?[]const u8,
-    /// How it was checked, exactly; null where why is.
+    /// how says exactly how it was checked; null whenever why is.
     how: ?[]const u8,
     result: Result,
-    /// What was found, when that adds to the result.
+    /// detail says what was found, when that adds to the result.
     detail: []const u8 = "",
-    /// Why the image fails it by design, when it does (Known).
+    /// excuse says why the image fails the check by design, if it does.
     excuse: ?[]const u8 = null,
 };
 
-/// How the failures compare with what the image expects.
+/// Known compares the failures with what the image expects.
 pub const Known = struct {
-    /// Failed, and not among the image's weaknesses.
+    /// unexpected lists failed checks the image does not excuse.
     unexpected: []const []const u8,
-    /// Among them, but passing now: its form can drop them.
+    /// now_passing lists excused checks that pass, so the form can drop them.
     now_passing: []const []const u8,
 };
 
-/// Where a werewolf image lists the failures it expects.
+/// weaknesses_path lists the failures a werewolf image expects.
 const weaknesses_path = "/usr/share/werewolf/weaknesses";
 
 pub const Result = enum {
@@ -270,11 +223,10 @@ pub const Posture = struct {
     io: Io,
     gpa: Allocator,
     root: bool,
-    /// Also the checks werewolf fails by choice (--extended).
+    /// extended adds the checks werewolf fails by choice (--extended).
     extended: bool = false,
-    /// Attack the machine (attacks, below), whatever the command line says:
-    /// --attack, or WEREWOLF_CHECK=1 in the environment, for a check that
-    /// cannot set the kernel command line, such as one run in a container.
+    /// attack runs attacks.zig even without werewolf.check=1 (--attack), for
+    /// a run that cannot set the kernel command line, such as in a container.
     attack: bool = false,
     checks: std.ArrayList(Check) = .empty,
 
@@ -282,7 +234,7 @@ pub const Posture = struct {
         try p.checks.append(p.gpa, c);
     }
 
-    /// The names in /etc/werewolf/allow (lib/allow.zig), sorted.
+    /// allowances returns the names in /etc/werewolf/allow (lib/allow.zig), sorted.
     pub fn allowances(p: *Posture) ![]const []const u8 {
         var names: std.ArrayList([]const u8) = .empty;
         var d = Dir.cwd().openDir(
@@ -330,8 +282,8 @@ pub const Posture = struct {
         if (p.root and p.attacksAsked()) return attacks.run(p);
     }
 
-    /// The kernel's log, every record it still holds, or "" where it
-    /// cannot be read (dmesg_restrict keeps it to root).
+    /// kernelLog returns every record the kernel log still holds, or "" if
+    /// it cannot be read (dmesg_restrict limits it to root).
     pub fn kernelLog(p: *Posture) []const u8 {
         const rc = linux.open(
             "/dev/kmsg",
@@ -347,14 +299,14 @@ pub const Posture = struct {
             const n = linux.read(fd, &record, record.len);
             switch (linux.errno(n)) {
                 .SUCCESS => log.appendSlice(p.gpa, record[0..n]) catch return log.items,
-                .PIPE => {}, // records lost to newer ones: read on
+                .PIPE => {}, // older records were overwritten; keep reading
                 else => return log.items,
             }
         }
     }
 
-    /// Whether to attack: --attack or WEREWOLF_CHECK=1 (a container cannot set
-    /// the kernel command line), or werewolf.check=1 on a real machine's line.
+    /// attacksAsked reports whether to attack: --attack, WEREWOLF_CHECK=1 in
+    /// the environment, or werewolf.check=1 on the kernel command line.
     pub fn attacksAsked(p: *Posture) bool {
         if (p.attack) return true;
         var env = std.mem.tokenizeScalar(u8, p.read("/proc/self/environ"), 0);
@@ -366,7 +318,7 @@ pub const Posture = struct {
         return cmd.check;
     }
 
-    /// None of names is on the system's PATH directories.
+    /// absent adds a check that none of names is in the usual bin directories.
     pub fn absent(
         p: *Posture,
         id: []const u8,
@@ -407,8 +359,9 @@ pub const Posture = struct {
         });
     }
 
-    /// A setting the kernel lets rise but never fall: it must read locked,
-    /// and as root, writing the unlocked value must be refused.
+    /// oneWay adds a check of a sysctl the kernel lets rise but never fall.
+    /// It must read locked; as root, writing unlocked must also be refused.
+    /// It writes only when the value reads locked, so it never lowers it.
     pub fn oneWay(
         p: *Posture,
         id: []const u8,
@@ -442,9 +395,9 @@ pub const Posture = struct {
         });
     }
 
-    /// Settings that must hold these values. A * in a key stands for every
-    /// entry in its directory, such as every interface, all and default
-    /// among them; a directory that is not there has none to fail.
+    /// sysctls adds a check that each setting holds its value. A * in a key
+    /// stands for every entry in its directory, such as every interface,
+    /// all and default included; a missing directory has none to fail.
     pub fn sysctls(
         p: *Posture,
         id: []const u8,
@@ -478,8 +431,8 @@ pub const Posture = struct {
         });
     }
 
-    /// key, or where it has a /*/, the key for each entry in that directory
-    /// of /proc/sys, in order.
+    /// expand returns key, or if it has a /*/, one key for each entry of
+    /// that /proc/sys directory, in order.
     pub fn expand(p: *Posture, key: []const u8) ![]const []const u8 {
         const star = std.mem.indexOf(u8, key, "/*/") orelse return p.gpa.dupe([]const u8, &.{key});
         var d = Dir.cwd().openDir(
@@ -498,13 +451,13 @@ pub const Posture = struct {
         return keys.items;
     }
 
-    /// A setting's value, without its newline.
+    /// sysctl returns a setting's value, without its newline.
     pub fn sysctl(p: *Posture, key: []const u8) []const u8 {
         return trim(p.read(p.gpa.print("/proc/sys/{s}", .{key}) catch return ""));
     }
 
-    /// path, read to its end, or "". Not Dir.readFileAlloc, which reads
-    /// only as much as stat reports: procfs reports 0.
+    /// read returns the whole file at path, or "". It avoids
+    /// Dir.readFileAlloc, which trusts stat's size, and procfs reports 0.
     pub fn read(p: *Posture, path: []const u8) []const u8 {
         var f = Dir.cwd().openFile(p.io, path, .{}) catch return "";
         defer f.close(p.io);
@@ -513,7 +466,7 @@ pub const Posture = struct {
         return r.interface.allocRemaining(p.gpa, .limited(16 << 20)) catch "";
     }
 
-    /// Whether writing value to path fails.
+    /// refused reports whether writing value to path fails.
     pub fn refused(p: *Posture, path: []const u8, value: []const u8) bool {
         Dir.cwd().writeFile(p.io, .{ .sub_path = path, .data = value }) catch return true;
         return false;
@@ -528,9 +481,9 @@ pub const Posture = struct {
     }
 };
 
-/// checks against text, the image's weaknesses: a line each, a check's id
-/// and its excuse, ?id for one the host decides. Each failed check found
-/// there takes its excuse.
+/// compare matches checks against the image's weaknesses: one line each, a
+/// check id and its excuse, or ?id when the host decides. It sets each
+/// failed check's excuse and returns what is unexpected and now passing.
 fn compare(gpa: Allocator, checks: []Check, text: []const u8) !Known {
     var unexpected: std.ArrayList([]const u8) = .empty;
     var now_passing: std.ArrayList([]const u8) = .empty;
@@ -544,8 +497,8 @@ fn compare(gpa: Allocator, checks: []Check, text: []const u8) !Known {
         var words = std.mem.tokenizeAny(u8, line, " \t");
         const id = words.next() orelse continue;
         if (id[0] == '?' or id[0] == '#') continue;
-        // Passing now only if it ran and passed: one skipped, as a check
-        // that cannot run here is, says nothing about the excuse.
+        // Count it only if it ran and passed. A skip says nothing about
+        // whether the excuse is still needed.
         var passed = false;
         for (checks) |c| if (std.mem.eql(u8, c.id, id)) {
             passed = c.result == .pass;
@@ -561,7 +514,7 @@ fn compare(gpa: Allocator, checks: []Check, text: []const u8) !Known {
     return .{ .unexpected = unexpected.items, .now_passing = now_passing.items };
 }
 
-/// The excuse text gives check id, or null when it gives none.
+/// excuseOf returns the excuse text gives for check id, or null.
 fn excuseOf(text: []const u8, id: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -573,9 +526,9 @@ fn excuseOf(text: []const u8, id: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The report as people read it: a mark for each check, by area, and what
-/// was found where a check did not pass. Details are cut to fit cols, the
-/// terminal's width, when there is one.
+/// printText writes the report for people: a mark for each check, by
+/// area, and what was found when a check did not pass. Details are cut to
+/// fit cols, the terminal's width, if there is one.
 fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     try writeClean(w, r.os);
     try w.writeAll(", Linux ");
@@ -593,7 +546,7 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     }
     var width: usize = 0;
     for (r.checks) |c| width = @max(width, c.name.len);
-    // Two spaces, a mark two columns wide, a space, the name padded to
+    // A line is two spaces, a two-column mark, a space, the name padded to
     // width, two spaces, then the detail.
     const room = if (cols) |n| n -| (width + 7) else std.math.maxInt(usize);
     var area: []const u8 = "";
@@ -622,9 +575,8 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     if (r.known) |k| try printKnown(w, k);
 }
 
-/// What the failures were against the image's weaknesses: each failure it
-/// does not excuse, and each excuse no longer needed. Nothing when both
-/// are none.
+/// printKnown writes each failure the image does not excuse and each
+/// excuse no longer needed, or nothing if there are none.
 fn printKnown(w: *Io.Writer, k: Known) !void {
     if (k.unexpected.len > 0) {
         try w.writeAll("posture: WARNING: unexpected: ");
@@ -645,16 +597,15 @@ fn writeList(w: *Io.Writer, ids: []const []const u8) !void {
     }
 }
 
-/// text, each control character in it, and each byte that is not UTF-8,
-/// as ?: what a check found is the machine's, file names others chose
-/// among it, and must not write to the terminal it is shown on. The JSON
-/// escapes them itself.
+/// writeClean writes text with each control character and invalid UTF-8
+/// byte as ?. Details hold file names others chose, which must not drive
+/// the terminal. JSON output escapes them itself.
 fn writeClean(w: *Io.Writer, text: []const u8) !void {
     var i: usize = 0;
     while (i < text.len) {
         const n = std.unicode.utf8ByteSequenceLength(text[i]) catch 0;
         const char = if (n > 0 and i + n <= text.len) text[i..][0..n] else "";
-        // C0 and DEL, and C1, which a terminal may take even as UTF-8.
+        // C0, DEL, and C1, which a terminal may obey even as UTF-8.
         const control = (char.len == 1 and (char[0] < 0x20 or char[0] == 0x7f)) or
             (char.len == 2 and char[0] == 0xc2 and char[1] < 0xa0);
         if (char.len > 0 and !control and std.unicode.utf8ValidateSlice(char)) {
@@ -667,10 +618,9 @@ fn writeClean(w: *Io.Writer, text: []const u8) !void {
     }
 }
 
-/// One line: the ids that failed, sorted and between commas (none: fail=
-/// and a space), the counts, then the report as JSON with only the failed
-/// checks, excused or not, and without why and how: the rest is counted,
-/// and the whole report is --json's. A harness can match the start and
+/// printLine writes one line: fail= and the failed ids, sorted and
+/// comma-separated, the counts, then the report as JSON holding only the
+/// failed checks, without why and how. A harness can match the start and
 /// parse the rest.
 fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
     var failed: std.ArrayList(Check) = .empty;
@@ -698,9 +648,9 @@ fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
     try w.writeByte('\n');
 }
 
-/// How much of detail, items between ", ", fits in max bytes: whole items,
-/// with room left to say how many more there are. The first item is kept
-/// even when it alone is too long.
+/// fit returns how many bytes of detail, a ", "-separated list, fit in max
+/// as whole items with room to say how many more there are. The first item
+/// is kept even if it alone is too long.
 fn fit(detail: []const u8, max: usize) struct { len: usize, more: usize } {
     if (detail.len <= max) return .{ .len = detail.len, .more = 0 };
     const items = std.mem.count(u8, detail, ", ") + 1;
@@ -715,7 +665,7 @@ fn fit(detail: []const u8, max: usize) struct { len: usize, more: usize } {
     return .{ .len = len, .more = items - shown };
 }
 
-/// stdout's width in columns, or null when it is not a terminal.
+/// columns returns stdout's width, or null if it is not a terminal.
 fn columns() ?usize {
     var ws: std.posix.winsize = undefined;
     const rc = linux.ioctl(Io.File.stdout().handle, linux.T.IOCGWINSZ, @intFromPtr(&ws));
@@ -723,7 +673,7 @@ fn columns() ?usize {
     return ws.col;
 }
 
-/// PRETTY_NAME in an os-release file, unquoted, or "Linux", its default.
+/// prettyName returns PRETTY_NAME from os-release text, unquoted, or "Linux".
 fn prettyName(text: []const u8) []const u8 {
     var it = std.mem.tokenizeScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -734,8 +684,8 @@ fn prettyName(text: []const u8) []const u8 {
     return "Linux";
 }
 
-/// Whether the mount at point (the last there, which is the one that shows)
-/// has option among its options.
+/// hasOption reports whether the mount at point has option. Of stacked
+/// mounts, the last one counts, since it is the one visible.
 pub fn hasOption(mounts: []const u8, point: []const u8, option: []const u8) bool {
     var found = false;
     var it = std.mem.tokenizeScalar(u8, mounts, '\n');
@@ -759,8 +709,8 @@ pub fn mountType(mounts: []const u8, point: []const u8) ?[]const u8 {
     return found;
 }
 
-/// Adds an item, what fmt makes of args, to a list: items between ", ",
-/// as checks give what they found.
+/// listAdd appends fmt and args to list as a ", "-separated item, the form
+/// checks use for detail.
 pub fn listAdd(
     gpa: Allocator,
     list: *std.ArrayList(u8),
@@ -771,7 +721,7 @@ pub fn listAdd(
     try list.print(gpa, fmt, args);
 }
 
-/// names, between commas.
+/// joined returns names separated by ", ".
 pub fn joined(comptime names: []const []const u8) []const u8 {
     comptime var s: []const u8 = "";
     inline for (names, 0..) |n, i| s = s ++ (if (i > 0) ", " else "") ++ n;
@@ -789,8 +739,8 @@ fn parseMount(line: []const u8) ?Mount {
     return .{ .dir = dir, .kind = kind, .opts = opts };
 }
 
-/// The mount points, but those in except and those of a filesystem kind
-/// in except_kinds, whose options lack option, each once.
+/// missingOption returns each mount point whose options lack option, once,
+/// skipping those in except and filesystem kinds in except_kinds.
 pub fn missingOption(
     gpa: Allocator,
     mounts: []const u8,
@@ -812,15 +762,15 @@ pub fn missingOption(
     return out.items;
 }
 
-/// Whether capability n is in a /proc/PID/status set, given in hex, or null
-/// if the field is missing.
+/// capBit reports whether capability n is in a /proc/PID/status hex set,
+/// or null if the field is missing.
 pub fn capBit(status: []const u8, field: []const u8, n: u6) ?bool {
     const hex = statusField(status, field) orelse return null;
     const set = std.fmt.parseInt(u64, hex, 16) catch return null;
     return set & (@as(u64, 1) << n) != 0;
 }
 
-/// A field's value on a /proc/PID/status line, "Name:\tvalue".
+/// statusField returns a field's value from a /proc/PID/status "Name:\tvalue" line.
 pub fn statusField(status: []const u8, name: []const u8) ?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, status, '\n');
     while (it.next()) |line| {
@@ -830,7 +780,7 @@ pub fn statusField(status: []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The real uid on a /proc/PID/status Uid: line.
+/// uidOf returns the real uid from a /proc/PID/status Uid: line.
 pub fn uidOf(status: []const u8) ?u32 {
     var it = std.mem.tokenizeScalar(u8, status, '\n');
     while (it.next()) |line| {
@@ -841,7 +791,7 @@ pub fn uidOf(status: []const u8) ?u32 {
     return null;
 }
 
-/// kernel/yama/ptrace_scope as sysctl names it: kernel.yama.ptrace_scope.
+/// dotted turns kernel/yama/ptrace_scope into kernel.yama.ptrace_scope.
 fn dotted(gpa: Allocator, key: []const u8) []const u8 {
     const out = gpa.dupe(u8, key) catch return key;
     std.mem.replaceScalar(u8, out, '/', '.');
@@ -852,7 +802,7 @@ pub fn trim(s: []const u8) []const u8 {
     return std.mem.trim(u8, s, " \r\n");
 }
 
-/// Whether a line of log has every one of needles.
+/// logHas reports whether one line of log contains every needle.
 pub fn logHas(log: []const u8, needles: []const []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, log, '\n');
     next: while (lines.next()) |line| {
@@ -979,7 +929,7 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
 
 const testing = std.testing;
 
-// Each area's tests, with these.
+// Run each area's tests along with these.
 test {
     _ = attacks;
     _ = files;
@@ -1120,7 +1070,7 @@ test printText {
         \\
     , out.written());
 
-    // Not a terminal: nothing is cut.
+    // Without a terminal, nothing is cut.
     out.clearRetainingCapacity();
     try printText(&out.writer, r, null);
     try testing.expect(std.mem.indexOf(
@@ -1133,12 +1083,12 @@ test printText {
 test writeClean {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    // A title, a colour, a C1 CSI as UTF-8 and as a byte, a byte that is no
-    // UTF-8, and a sequence cut short; what is printable stays, é included.
+    // A title, a colour, a C1 CSI as UTF-8 and as a byte, an invalid byte,
+    // and a truncated sequence become ?; printable text, é included, stays.
     try writeClean(&out.writer, "/tmp/\x1b]0;owned\x07 \x1b[31m é \xc2\x9b2J \x9b \xff\x7f\xc3");
     try testing.expectEqualStrings("/tmp/?]0;owned? ?[31m é ?2J ? ???", out.written());
 
-    // What printText shows of the host and of a check's detail.
+    // printText cleans the host and each check's detail too.
     const checks = [_]Check{.{
         .id = "w",
         .area = "files",
@@ -1258,7 +1208,7 @@ test fit {
     try testing.expectEqual(1, fit(list, 35).more);
     try testing.expectEqualStrings("/usr/bin/su", list[0..fit(list, 34).len]);
     try testing.expectEqual(2, fit(list, 34).more);
-    // The first item stays, however little room.
+    // The first item stays, however little room there is.
     try testing.expectEqual(11, fit(list, 0).len);
     try testing.expectEqual(2, fit(list, 0).more);
     try testing.expectEqual(13, fit("ran from /tmp", 3).len);

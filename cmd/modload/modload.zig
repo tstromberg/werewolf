@@ -1,62 +1,6 @@
-//! modload: load the form's kernel modules, then close the loader for good.
-//!
-//!     modules   load each module /usr/lib/modules/RELEASE/werewolf.modules
-//!               names, in its order, then set kernel.modules_disabled
-//!
-//! A line may be tagged, `@xfs kernel/fs/xfs/xfs.ko`, for what only some
-//! machines need: the slot's own filesystem, when it is not werewolf's ext4
-//! (bite leaves Rocky's xfs and Fedora's btrfs), or Hyper-V's disks. Those
-//! load once the rest have, and only for the tags stdin names, a line each,
-//! from stage0: `hyperv` at once, where the kernel found a VMBus, since the
-//! slot's disk may sit behind it; then the filesystem it found the slot on,
-//! which it looks for while the drivers load. Each tag's lines load as its
-//! line comes; at the end of stdin with none named, every one loads, as
-//! from a list without tags. btrfs's alone cost a boot 0.17 s, raid6's
-//! speed test, and hv_storvsc 18 ms finding no VMBus.
-//!
-//! stage0 runs it; the root it hands over finds the loader closed, and
-//! init's run says so and does nothing.
-//!
-//! The kernel is the judge of a module, not this program: under lockdown it
-//! loads only those signed with the key it was built with. So this program
-//! fails closed around that:
-//!
-//! - It refuses to load anything unless the kernel will check signatures
-//!   (lockdown at integrity or above, or module.sig_enforce), and then still
-//!   closes the loader. A machine that boots without them loads no modules.
-//! - Each module goes to the kernel as an open file (finit_module(2)), so
-//!   the kernel reads and checks what is on disk, not a copy this program
-//!   made. The build decompresses them, since Alpine's kernel cannot.
-//! - Whatever happens, the loader is closed before it exits, and it reads
-//!   kernel.modules_disabled back to say so: a module that fails does not
-//!   leave the door open for another try, and a write the kernel ignored is
-//!   not mistaken for one it took.
-//!
-//! And as paranoid as the rest of werewolf's programs (docs/programs.md):
-//!
-//! - The list is werewolf's own, checked strictly: paths under kernel/,
-//!   ending in .ko, of plain characters, no . or .. parts, at most 256,
-//!   each with the parameters the build gave it, as KEY=VALUE words
-//!   (`kernel/arch/x86/kvm/kvm-intel.ko nested=0`). One bad line and
-//!   nothing is loaded.
-//! - Every file is opened beneath the module directory with symlinks
-//!   refused (openat2), all of them before it pledges.
-//! - Then it pledges (lib/sandbox.zig): every capability but
-//!   CAP_SYS_MODULE gone, from the bounding set too, never to come back,
-//!   and a seccomp filter of finit_module, read, write, close and exit.
-//!   Anything else, or another architecture's call, kills it.
-//! - No arguments, no environment, and of stdin a few short lines, tags,
-//!   which pick among lines of the list and nothing else; one line on
-//!   the console for what it did, and one for each module the kernel
-//!   refused, with the kernel's reason, as for any call that fails.
-//!
-//! Should closing the loader fail, init boots on, as it cannot tell that
-//! from a driver refused; the seal then takes CAP_SYS_MODULE from every
-//! process, and refuses init_module and finit_module to all, and posture's
-//! kernel-modules-closed checks the setting on every boot.
-//!
-//! There is no privilege separation: nothing it reads comes from outside
-//! the image, and the one judgement that matters is the kernel's.
+//! modload loads the kernel modules listed in
+//! /usr/lib/modules/RELEASE/werewolf.modules, then sets
+//! kernel.modules_disabled so nothing can load another. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -71,10 +15,10 @@ pub fn main() void {
         say("modload: the loader is closed already\n", .{});
         linux.exit_group(0);
     }
-    // One descriptor to close the loader, one to see that it did, both
-    // opened now, before the pledge. A sysctl write lands only at offset 0,
-    // so the write has its own; and the answer is the kernel's, read back,
-    // not the write's return.
+    // Open both descriptors before the pledge: one to close the loader and
+    // one to read the result back. A sysctl write lands only at offset 0, so
+    // the write needs its own; and the kernel's answer is what is read back,
+    // not what the write returns.
     const disabled = openPath(
         modules_disabled,
         O_WRONLY,
@@ -84,7 +28,7 @@ pub fn main() void {
         O_RDONLY,
     ) catch |err| fail("cannot open kernel.modules_disabled", err);
 
-    // Whatever load does, the loader closes after it.
+    // The loader closes whatever load does.
     const result = load() catch |err| blk: {
         say("modload: {s}; loading none\n", .{describe(err)});
         break :blk null;
@@ -124,7 +68,8 @@ pub fn main() void {
 
 const Result = struct { count: usize, refused: usize, absent: usize, skipped: usize };
 
-/// Check, read, open, pledge, load: everything but closing the loader.
+/// load checks enforcement, reads the list, opens every module, pledges,
+/// and loads them. It does everything but close the loader.
 fn load() !Result {
     if (!enforced()) return error.Unenforced;
 
@@ -154,7 +99,7 @@ fn load() !Result {
     try pledge();
 
     var r: Result = .{ .count = count, .refused = 0, .absent = 0, .skipped = 0 };
-    // Every module for all; then, as stdin names each tag, those for it.
+    // Load untagged modules first, then each tag's as stdin names it.
     for (fds[0..count], mods[0..count]) |*fd, m| if (m.tag.len == 0) insert(fd, m, &r);
     var tags: Tags = .{};
     var named = false;
@@ -177,8 +122,8 @@ fn load() !Result {
     return r;
 }
 
-/// Hand one module to the kernel, and count what it said; its file is
-/// closed after, and marked so, -1, as loaded or tried once and for all.
+/// insert hands one module to the kernel and counts the result. It closes
+/// the file and sets fd to -1, so no module is tried twice.
 fn insert(fd: *i32, m: Module, r: *Result) void {
     if (fd.* < 0) return;
     defer {
@@ -197,8 +142,8 @@ fn insert(fd: *i32, m: Module, r: *Result) void {
             .{ m.path, m.params },
         ),
         .EXIST => {}, // built in, or loaded already
-        // The module's hardware is not here, as for one CPU vendor's
-        // KVM on the other's: nothing is wrong, and nothing loaded.
+        // The hardware is absent, as for one CPU vendor's KVM on the
+        // other's. Nothing is wrong.
         .NODEV, .OPNOTSUPP => |e| {
             say("modload: {s}: no hardware for it ({t})\n", .{ m.path, e });
             r.absent += 1;
@@ -210,15 +155,17 @@ fn insert(fd: *i32, m: Module, r: *Result) void {
     }
 }
 
-/// stdin's lines, each a tag, read as stage0 writes them: `hyperv`, then
-/// a filesystem, `xfs`, `btrfs`, or `none`, which no line is for.
+/// Tags reads stdin's lines, each a tag, as stage0 writes them: `hyperv`
+/// and `esp` when needed, then the slot's filesystem (`xfs`, `btrfs`, or
+/// `ext4` or `none`, which no line is for).
 const Tags = struct {
     buf: [64]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
     done: bool = false,
 
-    /// The next line, without its newline, or null at the end of stdin.
+    /// next returns the next line without its newline, or null at the end
+    /// of stdin.
     fn next(t: *Tags) ?[]const u8 {
         while (true) {
             if (t.line()) |l| return l;
@@ -227,7 +174,8 @@ const Tags = struct {
         }
     }
 
-    /// The next whole line read; at the end of stdin, whatever is left.
+    /// line returns the next whole line buffered, or what is left at the
+    /// end of stdin.
     fn line(t: *Tags) ?[]const u8 {
         const rest = t.buf[t.start..t.end];
         const i = std.mem.findScalar(u8, rest, '\n') orelse {
@@ -270,8 +218,8 @@ fn describe(err: anyerror) []const u8 {
 
 const modules_disabled = "/proc/sys/kernel/modules_disabled";
 
-/// Whether the kernel will refuse an unsigned module: lockdown at integrity
-/// or confidentiality, or module.sig_enforce.
+/// enforced reports whether the kernel will refuse an unsigned module:
+/// lockdown at integrity or confidentiality, or module.sig_enforce.
 fn enforced() bool {
     var buf: [128]u8 = undefined;
     if (readSmall("/sys/kernel/security/lockdown", &buf)) |s| {
@@ -288,11 +236,10 @@ fn enforced() bool {
 
 const Module = struct { path: [:0]const u8, params: [:0]const u8, tag: []const u8 = "" };
 
-/// The lines of werewolf.modules, each a clean path to a .ko under kernel/
-/// and, after a space, its parameters; first, for a module only some
-/// machines need, `@` and a tag and a space. Each is copied into lines,
-/// its path and its parameters ended by a NUL, as the kernel takes them.
-/// Any other line, or too many, and the whole list is refused.
+/// parse reads werewolf.modules: each line is an optional `@TAG `, a clean
+/// path to a .ko under kernel/, and optional parameters after a space. It
+/// copies each into lines, with NULs ending the path and the parameters
+/// for the kernel. One bad line, or too many, refuses the whole list.
 fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]Module) !usize {
     var n: usize = 0;
     var it = std.mem.tokenizeScalar(u8, text, '\n');
@@ -324,15 +271,16 @@ fn parse(text: []const u8, lines: *[max_modules][256:0]u8, mods: *[max_modules]M
     return n;
 }
 
-/// A tag, `xfs` or `hyperv`: 1 to 15 lower-case letters and digits.
+/// isTag reports whether t, such as `xfs` or `hyperv`, is 1 to 15
+/// lower-case letters and digits.
 fn isTag(t: []const u8) bool {
     if (t.len == 0 or t.len > 15) return false;
     for (t) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
     return true;
 }
 
-/// KEY=VALUE words, one space apart: a key of lower-case letters, digits
-/// and underscores, a value of letters, digits and _ , . -.
+/// checkParams accepts KEY=VALUE words one space apart: a key of lower-case
+/// letters, digits and underscores, a value of letters, digits and _ , . -.
 fn checkParams(p: []const u8) !void {
     var words = std.mem.splitScalar(u8, p, ' ');
     while (words.next()) |w| {
@@ -391,7 +339,7 @@ fn openat2(dir: i32, path: [:0]const u8, flags: u64, resolve: u64) !i32 {
     return @intCast(rc);
 }
 
-/// Read a whole file, as a stream: procfs and sysfs report a size of 0.
+/// readBeneath reads the file at path beneath dir into buf.
 fn readBeneath(dir: i32, path: [:0]const u8, buf: []u8) ![]const u8 {
     const fd = try openBeneath(dir, path, O_RDONLY);
     defer close(fd);
@@ -404,6 +352,8 @@ fn readSmall(path: [:0]const u8, buf: []u8) ?[]const u8 {
     return readAll(fd, buf) catch null;
 }
 
+/// readAll reads fd to its end, since procfs and sysfs report a size of 0.
+/// It fails if the file fills buf.
 fn readAll(fd: i32, buf: []u8) ![]const u8 {
     var n: usize = 0;
     while (true) {
@@ -422,8 +372,8 @@ fn close(fd: i32) void {
 
 const CAP_SYS_MODULE = 16;
 
-/// CAP_SYS_MODULE alone, never to gain more, and a filter of what loading
-/// and closing take.
+/// pledge keeps only CAP_SYS_MODULE, for good, and installs a seccomp filter
+/// of the calls loading and closing the loader need.
 fn pledge() !void {
     try sandbox.keepOnly(1 << CAP_SYS_MODULE);
     var f: sandbox.Filter = .{};

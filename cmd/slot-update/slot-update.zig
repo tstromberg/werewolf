@@ -1,27 +1,10 @@
-//! slot-update: keep a machine booted from a slot current, from Wolfi and Alpine.
+//! slot-update is the autoupdater. It builds or fetches the other slot, stages
+//! it to boot once when its fixes make it due, and logs whether it held.
 //!
-//!     slot-update check     if Wolfi or Alpine has anything newer than this image,
-//!                           build the other slot and stage it: armed to boot
-//!                           once, and booted by the daemon when it is due
+//!     slot-update check     stage the other slot if anything newer exists
 //!     slot-update outcome   after a reboot, log whether the last update held
 //!
-//! The other slot is built as `make slot` builds one, with apk where the build
-//! has apko: the userland from this image's /etc/apk (world, repositories,
-//! Wolfi's key), the kernel from Alpine's linux-virt checked against the keys
-//! in /etc/werewolf/alpine-keys, and the rest from the build record in
-//! /usr/share/werewolf. apk fetches and verifies every package, and compares
-//! every apk version; nothing here decides what to trust.
-//!
-//! Each update writes a report to /data/svc/autoupdate/reports: what changed,
-//! the CVEs that fixes (Wolfi's security.json for packages, the Linux kernel
-//! CNA's records for the kernel), and the sha256 of every source consulted, so
-//! an auditor can fetch the same files and derive the same list. Every event
-//! is also one JSON line in /data/svc/autoupdate/log and on the console.
-//!
-//! All memory comes from the process arena and is never freed before exit, so
-//! nothing is used after it is freed. The one exception is the kernel's CVE
-//! records, 17,000 of them, each parsed in a scratch arena reset between them,
-//! with only what matches copied out.
+//! See README.md and docs/updater.md.
 
 const std = @import("std");
 pub const Io = std.Io;
@@ -46,64 +29,67 @@ const state_dir = "/data/svc/autoupdate";
 pub const work_dir = state_dir ++ "/work";
 pub const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
-/// There once a check has finished: the machine's first boot is over.
+/// checked_path exists once a check has finished, ending the first boot.
 const checked_path = state_dir ++ "/checked";
-/// The staged slot, and when this machine first saw each tier of its fixes.
+/// pending_path holds the staged build and when each tier of its fixes was
+/// first seen (stage.Pending).
 pub const pending_path = state_dir ++ "/pending";
-/// "SLOT BUILD BOOT" of the slot armed to boot once, and the boot that armed
-/// it (attemptOf).
+/// attempt_path holds "SLOT BUILD BOOT": the slot armed to boot once, its
+/// build, and the boot_id that armed it (attemptOf).
 pub const attempt_path = state_dir ++ "/attempt";
-/// Held while a pass changes anything here, so a check run by hand and the
-/// daemon's never interleave.
+/// lock_path is flocked while a pass changes state, so a check run by hand
+/// and the daemon's never interleave.
 pub const lock_path = state_dir ++ "/lock";
-/// When the last reboot for an update went, as RFC 3339.
+/// rebooted_path holds the RFC 3339 time of the last update reboot.
 pub const rebooted_path = state_dir ++ "/rebooted";
-/// The last tiers feed this machine took, and its signature.
+/// feed_path holds the last tiers feed taken; feed_sig_path its signature.
 pub const feed_path = state_dir ++ "/cve-tiers.json";
 pub const feed_sig_path = feed_path ++ ".sig";
-/// The newest serial of a feed this machine took.
+/// feed_serial_path holds the newest feed serial taken, so a feed never goes
+/// backwards.
 pub const feed_serial_path = feed_path ++ ".serial";
-/// The most a feed or its signature may be.
+/// max_feed is the size limit for a feed or its signature.
 pub const max_feed = 16 << 20;
-/// Reports kept, newest first: years of updates at a few a week.
+/// max_reports is how many reports to keep: years of updates at a few a week.
 const max_reports = 500;
-/// The form's update settings, then the operator's (lib/update-policy.zig).
+/// form_policy and operator_policy are the update settings, the operator's
+/// applied over the form's (lib/update-policy.zig).
 pub const form_policy = "/etc/werewolf/update-policy.json";
 pub const operator_policy = "/run/config/update-policy.json";
-/// Where the daemon says it can update (daemon).
+/// ready_path tells slot-keep that the updater works (see daemon).
 const ready_path = "/run/werewolf/updater-ready";
 const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git/snapshot/" ++
     "vulns-master.tar.gz";
 pub const max_read = 256 << 20;
 
-/// _update, the account the children that fetch run as
+/// update_id is _update's uid, which the fetching and parsing children run as
 /// (forms/prod/apko.yaml).
 pub const update_id: u32 = 69;
-/// The CVE fetcher's root, and where the CVE sources are fetched to.
+/// net_root is the fetcher's chroot; cves_dir receives fetched files.
 const net_root = work_dir ++ "/net";
 pub const cves_dir = work_dir ++ "/cves";
-/// How long a CVE fetcher, apk's fetcher and a CVE reader may take, in
-/// seconds; what a reader may send back.
+/// fetch_seconds, apk_seconds and read_seconds bound the fetchers and the
+/// reader; max_lines bounds what a reader sends back.
 const fetch_seconds = 600;
-/// How long retries of a fetch or of apk may wait, in all (Update.again).
+/// max_retry_ms is the total time retries may wait (Update.again).
 const max_retry_ms = 120_000;
 pub const apk_seconds = 1800;
 const read_seconds = 300;
 const max_lines = 4 << 20;
-/// How long a tool root runs may take (mkfs.erofs, zstd, apk offline,
-/// grub-setenv), in seconds, and the most it may say on each of stdout and
-/// stderr: one that hangs is killed, and the pass fails, to try again.
+/// tool_seconds and max_tool_output bound a tool that root runs (mkfs.erofs,
+/// zstd, apk offline, grub-setenv). A tool that hangs is killed and the pass
+/// fails, to be retried.
 const tool_seconds = 1800;
 const max_tool_output = 1 << 20;
-/// The most any one file apk's fetcher writes may be: an index or a
-/// package, the largest of which (a JDK) is a few hundred megabytes.
+/// max_apk_file bounds each index or package apk's fetcher writes. The
+/// largest package (a JDK) is a few hundred megabytes.
 pub const max_apk_file = 1 << 30;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
     // runsv starts /etc/sv/autoupdate/run, a link to this program, with no
-    // arguments: that is the daemon.
+    // arguments. That means daemon.
     const as_service = args.len == 1 and std.mem.eql(u8, std.fs.path.basename(args[0]), "run");
     const mode = if (args.len == 2) args[1] else if (as_service) "daemon" else "";
     if (std.mem.eql(u8, mode, "daemon")) daemon(init.io);
@@ -127,9 +113,8 @@ fn fatal(u: *Update, err: anyerror) noreturn {
     std.process.exit(1);
 }
 
-/// An error, logged. The work directory is not touched here: check clears
-/// it while it holds the lock, and a pass that failed for want of the lock
-/// (error.Busy) must not delete the work of the one that holds it.
+/// failed logs err. It leaves the work directory alone: a pass that failed
+/// with error.Busy must not delete the work of the pass holding the lock.
 fn failed(u: *Update, err: anyerror) void {
     u.record(.{
         .event = "error",
@@ -139,23 +124,16 @@ fn failed(u: *Update, err: anyerror) void {
     }) catch {};
 }
 
-/// The autoupdate service. Once this slot has committed: the settings
-/// (loadPolicy), outcome, then a check at once and every hour after, or as
-/// often as the form's /etc/werewolf/update-every says, in seconds. A check
-/// stages what it finds; between checks the daemon sleeps until the staged
-/// slot is due, and boots it then (bootIfDue). A check that fails is logged
-/// and tried again next time. Each pass has an arena of its own, freed when
-/// it ends, so months of checks use what one does. Only a machine booted
-/// from a slot can do any of this; elsewhere the service parks itself.
-///
-/// Once setup succeeds, so that it could update if asked, it says so in
-/// /run/werewolf/updater-ready, and slot-keep commits no slot until it
-/// has: a slot whose updater cannot start could never be updated again,
-/// so it must not be kept. /run starts empty each boot.
+/// daemon is the autoupdate service. After setup succeeds it writes
+/// ready_path; slot-keep commits no slot before that, since a slot whose
+/// updater cannot start could never be updated again. Once this slot has
+/// committed, it loads the settings, runs outcome, then checks at once and
+/// every update-every seconds, sleeping until a staged slot is due
+/// (bootIfDue). Off a slot it parks.
 fn daemon(io: Io) noreturn {
-    // Speculative Store Bypass off for the daemon and every child, apk and
-    // mkfs.erofs included: they read what came from the network. Where the
-    // CPU offers no control (EINVAL, ENXIO, EPERM), it runs as it would.
+    // Disable Speculative Store Bypass for the daemon and every child, since
+    // apk and mkfs.erofs parse network data. Errors mean the CPU has no
+    // control, so ignore them.
     _ = linux.prctl(
         @backingInt(linux.PR.SET_SPECULATION_CTRL),
         linux.PR.SPEC_STORE_BYPASS,
@@ -163,10 +141,9 @@ fn daemon(io: Io) noreturn {
         0,
         0,
     );
-    // A machine that has never finished a check boots whatever its first
-    // check stages at once. Not "has never logged": a first check that
-    // failed, the network not up yet, logs, and the machine would then
-    // wait out the whole policy for its first update.
+    // A machine that has never finished a check boots its first update at
+    // once. Test "never finished", not "never logged": a first check that
+    // failed before the network was up still logs.
     var ctx: Ctx = .{ .first_boot = neverChecked(io) };
     switch (pass(io, .setup, &ctx)) {
         .ok => Dir.cwd().writeFile(io, .{ .sub_path = ready_path, .data = "" }) catch |err| {
@@ -207,9 +184,9 @@ fn daemon(io: Io) noreturn {
     }
 }
 
-/// What the daemon keeps between passes: the settings, read once; whether
-/// this machine has yet to finish a check; how long until the staged slot
-/// is due, if one is; and whether it has asked to reboot.
+/// Ctx is the daemon's state between passes: the settings, read once;
+/// whether no check has finished yet; seconds until the staged slot is due;
+/// and whether a reboot was requested.
 pub const Ctx = struct {
     settings: policy.Settings = .{},
     first_boot: bool = false,
@@ -242,7 +219,7 @@ fn pass(io: Io, step: Step, ctx: *Ctx) PassResult {
     return .ok;
 }
 
-/// Whether this machine has never finished a check: no checked_path.
+/// neverChecked reports whether checked_path is absent.
 fn neverChecked(io: Io) bool {
     Dir.cwd().access(io, checked_path, .{}) catch |err| return err == error.FileNotFound;
     return false;
@@ -252,15 +229,15 @@ pub fn nowSecs(io: Io) i64 {
     return @intCast(@divFloor(Io.Timestamp.now(io, .real).nanoseconds, std.time.ns_per_s));
 }
 
-/// Seconds since the kernel started its clock.
+/// bootSecs returns CLOCK_BOOTTIME in seconds, or 0 on error.
 pub fn bootSecs() i64 {
     var ts: linux.timespec = undefined;
     if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
     return ts.sec;
 }
 
-/// Seconds between checks: the form's /etc/werewolf/update-every, or an
-/// hour; never less than five minutes, nor more than a week.
+/// updateEvery returns the seconds between checks: the form's
+/// /etc/werewolf/update-every, or an hour, clamped to five minutes..a week.
 fn updateEvery(io: Io) i64 {
     var buf: [32]u8 = undefined;
     const n = Dir.cwd().readFile(io, "/etc/werewolf/update-every", &buf) catch return 3600;
@@ -268,7 +245,7 @@ fn updateEvery(io: Io) i64 {
     return std.math.clamp(every, 5 * 60, 7 * 24 * 3600);
 }
 
-/// Down, as a service with nothing to do: runsv will not restart it.
+/// park logs why and marks the service down so runsv does not restart it.
 fn park(io: Io, why: []const u8) noreturn {
     Io.File.stdout().writeStreamingAll(io, "autoupdate: ") catch {};
     Io.File.stdout().writeStreamingAll(io, why) catch {};
@@ -283,22 +260,21 @@ pub const Update = struct {
     gpa: Allocator,
     host: []const u8 = "",
     cmd: cmdline.Cmdline = .{},
-    /// The slot this boot is, and the other, which an update builds.
+    /// slot is the slot this boot runs; other is the one an update writes.
     slot: []const u8 = "a",
     other: []const u8 = "b",
     step: []const u8 = "start",
-    /// What the last command that failed said, for the error event.
+    /// detail is what the last failed command said, for the error event.
     detail: []const u8 = "",
 
     pub fn setup(u: *Update) !void {
         try Dir.cwd().createDirPath(u.io, state_dir ++ "/reports");
-        // The kernel's, which init sets whether or not a config named one.
+        // init always sets the kernel's hostname, configured or not.
         const uts = std.posix.uname();
         u.host = try u.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0));
-        // Read as stage0 read it (lib/cmdline.zig): werewolf.slot comes with
-        // werewolf.victim, a slot from a distro's GRUB (bite:
-        // werewolf.grubenv) or from werewolf's own disk under systemd-boot
-        // (werewolf.esp).
+        // Parse as stage0 does (lib/cmdline.zig). A slot boot has
+        // werewolf.slot and werewolf.victim, plus werewolf.grubenv (GRUB,
+        // after bite) or werewolf.esp (systemd-boot on werewolf's own disk).
         var refused: cmdline.Failure = .{};
         u.cmd = cmdline.parse(try u.read("/proc/cmdline"), &refused) orelse
             return error.BadCommandLine;
@@ -309,18 +285,18 @@ pub const Update = struct {
     }
 
     // --- outcome -----------------------------------------------------------
-    // The last update left `attempt`: the slot it built and the build's hash.
-    // Booted into that slot, and committed, it held; booted into the other,
-    // it did not, and the same build is not tried again.
+
+    /// outcome judges the last update from attempt_path: if this boot runs
+    /// the attempted slot, the update held; otherwise it rolled back and its
+    /// build is added to the bad list so it is never tried again.
     pub fn outcome(u: *Update) !void {
-        // As check: until this slot has committed, it may yet roll back,
-        // and calling it a commit now would leave a bad build untried.
+        // Until this slot commits it may still roll back, so judging now
+        // could log a bad build as good.
         Dir.cwd().access(u.io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
         const held_lock = try u.lock();
         defer _ = linux.close(held_lock);
         const attempt = try u.attemptOf() orelse return;
-        // Armed in this boot, so not tried yet: the daemon started again,
-        // and there is nothing to judge until the machine reboots.
+        // Armed during this boot, so not tried yet (the daemon restarted).
         if (std.mem.eql(u8, attempt.boot, try u.bootId())) return;
         const tried = attempt.slot;
         const build = attempt.build;
@@ -379,15 +355,15 @@ pub const Update = struct {
     pub const bootIfDue = stage.bootIfDue;
 
     // --- check -------------------------------------------------------------
-    // What the other slot would be: the latest signed release of this form,
-    // if CI publishes the form (the build record names where), or else what
-    // Wolfi and Alpine have now. Then the same for both: the CVEs it fixes,
-    // the slot, the report, and the slot staged, to boot once when it is due
-    // (bootIfDue).
+
+    /// check plans the other slot, from the form's latest signed release if
+    /// CI publishes the form, else from what Wolfi and Alpine have now. It
+    /// then finds the CVEs fixed, writes the slot and a report, and stages
+    /// the slot to boot once when due (bootIfDue).
     pub fn check(u: *Update, s: *const policy.Settings, first_boot: bool) !void {
         const io = u.io;
-        // Until this slot has committed, the other is the one to fall back
-        // to, and must not be written.
+        // Until this slot commits, the other slot is the fallback and must
+        // not be written.
         Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
         const held_lock = try u.lock();
         defer _ = linux.close(held_lock);
@@ -414,7 +390,7 @@ pub const Update = struct {
         }
         const staged = try u.readPending();
         if (staged) |p| if (std.mem.eql(u8, p.build, plan.build) and try u.armed(p)) {
-            // Staged already: tier its fixes again, and say when it boots.
+            // Already staged: re-tier its fixes and log when it boots.
             const now_p = try u.retier(s, p, plan);
             const d = try u.dueOf(s, now_p);
             return u.record(.{
@@ -440,8 +416,8 @@ pub const Update = struct {
         else
             cve.KernelFixes{};
 
-        // Tiered before anything is installed, so nothing after the install
-        // can fail for want of the feed.
+        // Tier before installing, so nothing after the install can fail for
+        // want of the feed.
         u.step = "stage";
         const feed = try u.tiersFeed();
         const fixes = try tiers.tiersOf(u.gpa, feed, .{
@@ -476,13 +452,13 @@ pub const Update = struct {
             .packages => try u.buildSlot(plan.new_kernel),
             .release => |r| try u.fetchRelease(r.base, r.name, r.manifest),
         }
-        // pending stays as it was, with its first-seen times, until the new
-        // build is armed: install takes `attempt` away first, so the old
-        // build is no longer armed, and bootIfDue boots nothing meanwhile.
+        // Write pending only after install arms the new build, so a failed
+        // install keeps the first-seen times. install removes attempt first,
+        // so bootIfDue boots nothing meanwhile.
         try u.install(plan.build);
         try u.writeReplacing(pending_path, try std.json.Stringify.valueAlloc(u.gpa, next, .{}));
-        // outcome keeps a release's serial once its slot commits, so no
-        // older one is taken after it.
+        // outcome promotes this to serial once the slot commits, so no older
+        // release is taken after it.
         if (plan.from == .release) try u.writeReplacing(
             state_dir ++ "/attempt-serial",
             plan.from.release.manifest.serial,
@@ -535,9 +511,9 @@ pub const Update = struct {
         });
     }
 
-    /// The other slot as Wolfi and Alpine would have it now, installed into
-    /// work_dir/root and work_dir/kernel; or null, logged, if it would be
-    /// this one.
+    /// packagesPlan installs what Wolfi and Alpine have now into
+    /// work_dir/root and work_dir/kernel and returns the plan. It returns
+    /// null, after logging, if nothing changed or a version would go back.
     fn packagesPlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
         u.step = "userland";
         try u.apkAdd(
@@ -572,9 +548,8 @@ pub const Update = struct {
             "linux-virt-{s}",
             .{versionOf(kernel_pkgs, "linux-virt") orelse return error.NoKernel},
         );
-        // apk installs what the index names, and an index carries no date:
-        // a signed index older than this image's would be installed as
-        // happily as a newer one. Nothing goes backwards.
+        // An index carries no date, so apk would install an older signed
+        // index as happily as a newer one. Refuse any downgrade.
         const changes = try diffPackages(u.gpa, old_pkgs, new_pkgs);
         if (backwards(changes, old_kernel, new_kernel)) |what| {
             try u.record(.{
@@ -603,10 +578,10 @@ pub const Update = struct {
         };
     }
 
-    /// The other slot as the latest release of this form has it, its
-    /// manifest signed with the image key; or null, logged, if this slot
-    /// is that release, or it is not one to take: older than one already
-    /// taken, or not published for this form yet.
+    /// releasePlan returns the plan for the form's latest release, whose
+    /// manifest must be signed with the image key. It returns null, after
+    /// logging, if this slot already runs it, no release exists yet, or the
+    /// release is not newer than the last taken or would downgrade a package.
     fn releasePlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
         u.step = "release";
         try u.netRoot();
@@ -669,9 +644,8 @@ pub const Update = struct {
             .version = p.version,
             .origin = p.origin,
         };
-        // Nothing goes backwards, as for a slot built here: a machine that
-        // has taken no release (an image built from a tree) has no serial,
-        // and must not take a release older than what it runs.
+        // An image built from a tree has no serial, so also refuse a release
+        // that would downgrade any package or the kernel.
         const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));
         if (backwards(try diffPackages(u.gpa, old_pkgs, new_pkgs), old_kernel, m.kernel)) |what| {
             try u.record(.{
@@ -691,8 +665,9 @@ pub const Update = struct {
         };
     }
 
-    /// A release's slot files into work_dir/slot as a built slot has them,
-    /// each checked against the manifest's size and sha256.
+    /// fetchRelease downloads a release's slot files into work_dir/slot,
+    /// laid out as buildSlot leaves them, and checks each file's size and
+    /// sha256 against the manifest.
     fn fetchRelease(
         u: *Update,
         base: []const u8,
@@ -706,8 +681,8 @@ pub const Update = struct {
             work_dir ++ "/slot/stage0.zst",
             work_dir ++ "/slot/root.erofs",
         };
-        // A slot on a distro's disk (bite's, under GRUB) needs the stage0
-        // with its filesystem's modules, which werewolf's own disk's leaves out.
+        // A slot under a distro's GRUB (bite) needs the stage0 with that
+        // disk's filesystem modules; werewolf's own disk does not.
         const stage0 = if (u.cmd.grubenv != null) releases.Manifest.bitten_stage0 else "stage0.zst";
         for ([_][]const u8{ "vmlinuz", stage0, "root.erofs" }, targets) |file, target| {
             const want = m.files.map.get(file) orelse {
@@ -716,8 +691,7 @@ pub const Update = struct {
             };
             try u.fetchReleaseFile(base, name, file, want, target);
         }
-        // The release's own kernel arguments, where its manifest names them:
-        // a slot boots with what its image asks for, not this one's.
+        // A slot boots with its own image's kernel arguments, not this one's.
         if (m.files.map.get("cmdline")) |want| {
             if (want.size > 4096) return error.BadManifest;
             try u.fetchReleaseFile(base, name, "cmdline", want, work_dir ++ "/slot/cmdline");
@@ -740,11 +714,10 @@ pub const Update = struct {
         }
     }
 
-    /// The kernel arguments the new slot boots with: its release's, when
-    /// the release carried them (fetchRelease), or else this image's, which
-    /// a slot built from packages carries forward with the rest of
-    /// werewolf's files. One line of printable ASCII, as a loader entry and
-    /// GRUB's environment can hold.
+    /// slotCmdline returns the new slot's kernel arguments: the release's if
+    /// fetchRelease got them, else this image's. It refuses anything but one
+    /// line of printable ASCII without backslashes, so a loader entry and
+    /// GRUB's environment hold it intact.
     pub fn slotCmdline(u: *Update) ![]const u8 {
         const text = u.read(work_dir ++ "/slot/cmdline") catch |err| switch (err) {
             error.FileNotFound => try u.read(meta_dir ++ "/cmdline"),
@@ -756,19 +729,14 @@ pub const Update = struct {
     }
 
     // --- CVEs --------------------------------------------------------------
-    // Root neither fetches a CVE source nor parses one. For each, a fetcher
-    // (below) makes the request as _update and writes the body to a file
-    // root opened for it; root hashes the file for the report; a reader, as
-    // _update with no network and no files, parses it and sends back a line
-    // per CVE, which root checks field by field, the version window again
-    // included, before any goes in the report.
+    // Root never fetches or parses a CVE source. A fetcher, as _update, writes
+    // the body to a file root opened; root hashes it for the report; a reader,
+    // as _update with no network or files, parses it and sends a line per
+    // CVE, which root checks field by field before using it.
 
-    // Wolfi's security.json: for each source package, the version that fixed
-    // each CVE. A CVE counts when that version is newer than the old one and
-    // no newer than the new one, in apk's order. "0" lists CVEs that never
-    // applied. A versioned stream (openssl-4.0) is also looked up under its
-    // base name (openssl); the window keeps other streams' fixes out. The
-    // file is not signed, so it informs the report and nothing else.
+    /// packageCves returns the CVEs that Wolfi's security.json says the
+    /// package changes fix (see cve.zig). The file is unsigned, so it only
+    /// informs the report. Fetch or parse failures are recorded in sources.
     fn packageCves(
         u: *Update,
         sources: *std.ArrayList(Source),
@@ -787,11 +755,9 @@ pub const Update = struct {
         };
     }
 
-    // The Linux kernel CNA's records, from git.kernel.org as one tarball: for
-    // each CVE, the stable releases that fixed it. A CVE counts when its fix
-    // for this kernel's branch (6.18.*) is in (old, new]. Records are often
-    // published weeks after a fix ships, so this is what was known at update
-    // time.
+    /// kernelCves returns the CVEs whose fix for the new kernel's branch is
+    /// in (old, new], from the kernel CNA's records on git.kernel.org. Records
+    /// often lag a fix by weeks, so this is only what was known at update time.
     fn kernelCves(
         u: *Update,
         sources: *std.ArrayList(Source),
@@ -816,8 +782,8 @@ pub const Update = struct {
         return fixes;
     }
 
-    /// GET url, by a fetcher, into cves/name. The file, recorded as a source
-    /// with its sha256; or null, the source recorded with why not.
+    /// fetch downloads url into cves_dir/name and records it in sources with
+    /// its sha256. On failure it records why and returns null.
     pub fn fetch(
         u: *Update,
         sources: *std.ArrayList(Source),
@@ -834,12 +800,11 @@ pub const Update = struct {
         return .{ .fd = got.fd, .size = got.size };
     }
 
-    /// GET url, by a fetcher as _update (cve.fetcher), into path, a file
-    /// root makes for it: the file, open, with its size and sha256. A
-    /// fetcher that says why not fails with error.FetchFailed, its word in
-    /// detail, once a failure that may pass (no answer, a 5xx, 408 or 429)
-    /// has been tried again for as long as `again` allows: one moment of
-    /// a flaky network costs a retry, not the hour until the next check.
+    /// download has a fetcher (cve.fetcher), running as _update, GET url into
+    /// path, a file root creates. It returns the open file, its size and
+    /// sha256. Transient failures are retried while `again` allows, so a
+    /// network blip costs a retry, not an hour. Otherwise it returns
+    /// error.FetchFailed with the fetcher's reason in detail.
     pub fn download(u: *Update, url: []const u8, path: [:0]const u8) !Download {
         var b: Backoff = .{};
         while (true) {
@@ -880,13 +845,13 @@ pub const Update = struct {
         return .{ .fd = fd, .size = size, .sha256 = std.fmt.bytesToHex(h.finalResult(), .lower) };
     }
 
-    /// How long the next retry waits, and how long the retries have.
+    /// Backoff holds the next retry's base wait and the total waited so far.
     pub const Backoff = struct { wait_ms: u64 = 2000, waited_ms: u64 = 0 };
 
-    /// Whether what failed, as detail says, is to be tried again: after a
-    /// wait drawn from half to one and a half of b's, which doubles each
-    /// time (so machines that failed together do not retry in step), until
-    /// max_retry_ms of waiting would pass. Each wait is said.
+    /// again logs and sleeps before a retry, and returns false once the wait
+    /// would pass max_retry_ms. The wait is random in [0.5, 1.5) of b's base,
+    /// which doubles each time, so machines that failed together do not
+    /// retry in step.
     pub fn again(u: *Update, b: *Backoff, what: []const u8) bool {
         var r: [8]u8 = undefined;
         u.io.random(&r);
@@ -899,12 +864,14 @@ pub const Update = struct {
         return true;
     }
 
-    /// A small file, a manifest or its signature, by download, as bytes.
+    /// downloadSmall downloads a file of at most 1 MiB, such as a manifest or
+    /// signature, and returns its bytes.
     fn downloadSmall(u: *Update, url: []const u8, path: [:0]const u8) ![]const u8 {
         return u.downloadMax(url, path, 1 << 20);
     }
 
-    /// A file of at most max bytes, by download, as bytes.
+    /// downloadMax downloads url to path and returns its bytes, or
+    /// error.TooBig if it exceeds max.
     pub fn downloadMax(u: *Update, url: []const u8, path: [:0]const u8, max: usize) ![]const u8 {
         const got = try u.download(url, path);
         _ = linux.close(got.fd);
@@ -912,9 +879,9 @@ pub const Update = struct {
         return u.read(path);
     }
 
-    /// The sha256 of a file, as hex.
+    /// sha256Of returns the hex sha256 of the file at path.
     fn sha256Of(u: *Update, path: []const u8) ![64]u8 {
-        // Read through, not into memory: it is a root image, every hour.
+        // Stream it: this hashes a root image every hour.
         var f = try Dir.cwd().openFile(u.io, path, .{});
         defer f.close(u.io);
         var h: std.crypto.hash.sha2.Sha256 = .init(.{});
@@ -929,8 +896,8 @@ pub const Update = struct {
         return std.fmt.bytesToHex(h.finalResult(), .lower);
     }
 
-    /// What a reader found in body, for job: the lines after its "ok", or
-    /// null, with why not recorded on the last source.
+    /// examine has a reader parse body for job and returns the lines after its
+    /// "ok". On failure it records why on the last source and returns null.
     fn examine(
         u: *Update,
         sources: *std.ArrayList(Source),
@@ -954,10 +921,9 @@ pub const Update = struct {
         return said.rest;
     }
 
-    /// Run f(args..., out, parent) in a process of its own, and take what it
-    /// writes to out until it exits: at most max bytes, within seconds. A
-    /// child that says more or takes longer is killed, and is an error, as
-    /// is one a signal ended.
+    /// child runs f(args..., out, parent) in a forked process and returns what
+    /// it writes to out and its exit. A child that writes more than max bytes
+    /// or runs past seconds is killed; that, or death by signal, is an error.
     pub fn child(
         u: *Update,
         comptime f: anytype,
@@ -979,9 +945,9 @@ pub const Update = struct {
         return sandbox.collect(u.gpa, @intCast(rc), pipe[0], max, seconds);
     }
 
-    /// A CVE child's answer: it exits 0, and the first line it writes is its
-    /// status, "ok" or why not, in printable ASCII; the rest is what it
-    /// found. Anything else is an error.
+    /// ask runs a CVE child and splits its output into a status line ("ok" or
+    /// the reason, printable ASCII) and the rest. A nonzero exit or a
+    /// malformed status is an error.
     fn ask(u: *Update, comptime f: anytype, args: anytype, max: usize, seconds: i64) !Said {
         const e = try u.child(f, args, max, seconds);
         if (e.code != 0) return error.ChildFailed;
@@ -992,7 +958,8 @@ pub const Update = struct {
         return .{ .status = status, .rest = e.out[eol + 1 ..] };
     }
 
-    /// The fetcher's root: copies of the resolver's files, and nothing else.
+    /// netRoot creates the fetcher's chroot, holding only copies of
+    /// resolv.conf and hosts, and cves_dir.
     pub fn netRoot(u: *Update) !void {
         try Dir.cwd().createDirPath(u.io, net_root ++ "/etc");
         try Dir.cwd().createDirPath(u.io, cves_dir);
@@ -1010,7 +977,7 @@ pub const Update = struct {
         }
     }
 
-    /// A system call's result, or an error with what failed in detail.
+    /// sys returns rc, or an error with what failed and the errno in detail.
     pub fn sys(u: *Update, rc: usize, comptime what: []const u8) !usize {
         return sandbox.sys(rc, what) catch |err| {
             u.detail = try u.gpa.print(
@@ -1026,9 +993,8 @@ pub const Update = struct {
 
     pub const apkAdd = slot.apkAdd;
 
-    /// A filesystem the mount broker mounts read-write for as long as it
-    /// is held: fence's Landlock domain refuses this process mount(2)
-    /// itself (cmd/mount-broker).
+    /// held asks the mount broker for a read-write mount of word, kept while
+    /// held. fence's Landlock domain forbids this process mount(2).
     pub fn held(u: *Update, word: broker.Word) !broker.Held {
         return broker.ask(word) catch |err| {
             const why = if (err == error.Refused) broker.refusal else @errorName(err);
@@ -1043,14 +1009,14 @@ pub const Update = struct {
         return false;
     }
 
-    /// One JSON line, in the log and on the console. Each counts on from
-    /// the last, seq, and names it, prev: the first 16 hex digits of its
-    /// SHA-256 (docs/design/update-policy.md, The audit log).
+    /// record appends one JSON line to the log, fsyncs it, and prints it on
+    /// the console. Each line has seq, one more than the last, and prev, the
+    /// first 16 hex digits of the last line's SHA-256
+    /// (docs/design/update-policy.md, The audit log).
     pub fn record(u: *Update, fields: anytype) !void {
-        // One writer at a time, for as long as it takes to read the tail
-        // and append after it: a check run by hand logs beside the daemon,
-        // and two lines read from the same tail would share a seq and a
-        // prev, and could land over each other.
+        // Lock from reading the tail to appending. A check run by hand logs
+        // beside the daemon, and two writers reading the same tail would
+        // share a seq and prev, and could overwrite each other.
         const log_fd: i32 = @intCast(try u.sys(linux.openat(
             linux.AT.FDCWD,
             log_path,
@@ -1068,8 +1034,8 @@ pub const Update = struct {
         var seq = (std.json.parseFromSliceLeaky(Seq, u.gpa, tail.last, .{
             .ignore_unknown_fields = true,
         }) catch Seq{}).seq;
-        // A line a crash cut short is ended, counted, and chained over as it
-        // is, so the chain goes on through it and shows where it broke.
+        // Terminate and count a line a crash cut short, and chain over it, so
+        // the chain continues and shows where it broke.
         var last = tail.last;
         if (tail.torn.len > 0) {
             try u.append(log_path, "\n");
@@ -1087,8 +1053,8 @@ pub const Update = struct {
         try std.json.Stringify.value(fields, .{}, &rest.writer);
         try line.writer.print(",{s}\n", .{rest.written()[1..]});
         try u.append(log_path, line.written());
-        // On the disk before anything follows: a log a power cut can take
-        // lines from is no record of what the machine did.
+        // Sync before anything follows: a log that loses lines to a power
+        // cut is no record of what the machine did.
         try u.syncPath(log_path);
         try Io.File.stdout().writeStreamingAll(
             u.io,
@@ -1096,12 +1062,10 @@ pub const Update = struct {
         );
     }
 
-    /// Run argv, a tool root runs, by its full path and with no
-    /// environment, in a child (tool) as sandbox.collect hears one: what it
-    /// says on stdout and stderr, together, at most max_tool_output bytes,
-    /// and its exit within tool_seconds, its output closed or not; else it
-    /// is killed. It fails unless it exits 0, the end of what it said in
-    /// detail.
+    /// run executes argv[0], a full path, with no environment, collecting
+    /// stdout and stderr up to max_tool_output bytes. A tool still running
+    /// after tool_seconds is killed, even if it closed its output. Unless it
+    /// exits 0, run fails with the end of its output in detail.
     pub fn run(u: *Update, argv: []const []const u8) !void {
         const e = u.child(
             tool,
@@ -1118,8 +1082,8 @@ pub const Update = struct {
         return error.CommandFailed;
     }
 
-    /// The log's last whole line, with its newline, or "" if there is none;
-    /// and what follows it without a newline, a line a crash cut short.
+    /// logTail returns the log's last whole line with its newline ("" if
+    /// none), and any trailing bytes without a newline: a line a crash cut.
     fn logTail(u: *Update) !struct { last: []const u8, torn: []const u8 } {
         var f = Dir.cwd().openFile(u.io, log_path, .{}) catch |err| switch (err) {
             error.FileNotFound => return .{ .last = "", .torn = "" },
@@ -1176,7 +1140,7 @@ pub const Update = struct {
         return out.items;
     }
 
-    /// Now, as RFC 3339 in UTC.
+    /// nowText returns the current time as RFC 3339 in UTC.
     pub fn nowText(u: *Update) ![]const u8 {
         return u.time(nowSecs(u.io));
     }
@@ -1185,8 +1149,8 @@ pub const Update = struct {
         return u.gpa.print("{f}", .{policy.Time{ .secs = secs }});
     }
 
-    /// data to path through a temporary name, so path is whole or absent,
-    /// and on the disk, the rename too, before it returns.
+    /// writeReplacing writes data to path atomically through path.new, and
+    /// syncs both the file and the rename before returning.
     pub fn writeReplacing(u: *Update, path: []const u8, data: []const u8) !void {
         const tmp = try u.gpa.print("{s}.new", .{path});
         try u.write(tmp, data);
@@ -1206,12 +1170,12 @@ pub const Update = struct {
         _ = try u.sys(linux.fsync(fd), "fsync");
     }
 
-    /// The newest max_reports reports kept, the rest removed: a staged
-    /// build that a newer one replaced leaves one each hour it lasted.
+    /// pruneReports deletes all but the newest max_reports reports. Every
+    /// newly staged build writes one, even if a newer build replaces it.
     fn pruneReports(u: *Update) !void {
         const names = try u.listDir(state_dir ++ "/reports");
         if (names.len <= max_reports) return;
-        // Named TIME-BUILD.json, so sorted by name is sorted by time.
+        // Names are TIME-BUILD.json, so name order is time order.
         for (names[0 .. names.len - max_reports]) |name| {
             try Dir.cwd().deleteFile(
                 u.io,
@@ -1225,8 +1189,8 @@ pub const Update = struct {
 
 const Said = struct { status: []const u8, rest: []const u8 };
 
-/// A tool root runs (Update.run): argv executed with stdout and stderr on
-/// out, and no other descriptor of root's. It dies with root.
+/// tool is the child Update.run forks: it execs argv with stdout and stderr
+/// on out, every other descriptor closed, and dies with its parent.
 fn tool(argv: [:null]const ?[*:0]const u8, out: i32, parent: linux.pid_t) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
@@ -1250,7 +1214,7 @@ const Report = struct {
     time: []const u8,
     host: []const u8,
     build: []const u8,
-    /// The update's tier, and why it boots when it does
+    /// tier and why explain when the update boots
     /// (docs/design/update-policy.md).
     tier: []const u8,
     why: []const u8,
@@ -1262,7 +1226,7 @@ const Report = struct {
     sources: []const Source,
 };
 
-/// What the other slot would be, and where it comes from.
+/// Plan describes the other slot: its packages and kernel, and its source.
 pub const Plan = struct {
     build: []const u8,
     old_pkgs: []const Package,
@@ -1291,7 +1255,8 @@ pub fn parentDir(path: []const u8) []const u8 {
     return path[0 .. std.mem.findScalarLast(u8, path, '/') orelse 0];
 }
 
-/// argv as execve takes it: each argument NUL-terminated, and a null last.
+/// argvZ converts argv to execve's form: NUL-terminated strings ending in
+/// null.
 pub fn argvZ(gpa: Allocator, argv: []const []const u8) ![:null]const ?[*:0]const u8 {
     const z = try gpa.allocSentinel(?[*:0]const u8, argv.len, null);
     for (argv, z) |a, *p| p.* = try gpa.dupeSentinel(u8, a, 0);
@@ -1300,8 +1265,9 @@ pub fn argvZ(gpa: Allocator, argv: []const []const u8) ![:null]const ?[*:0]const
 
 pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
 
-/// The packages in an apk installed database: P (name), V (version) and o
-/// (origin, the source package) of each record; records end at a blank line.
+/// parseInstalled parses an apk installed database, sorted by name. Records
+/// end at a blank line; P is the name, V the version, o the origin (source
+/// package), which defaults to the name.
 pub fn parseInstalled(gpa: Allocator, text: []const u8) ![]const Package {
     var out: std.ArrayList(Package) = .empty;
     var p: Package = .{ .name = "", .version = "", .origin = "" };
@@ -1340,7 +1306,8 @@ fn versionOf(pkgs: []const Package, name: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Each package whose version differs: from null is added, to null removed.
+/// diffPackages lists packages whose version differs. A null from means
+/// added; a null to means removed.
 fn diffPackages(gpa: Allocator, old: []const Package, new: []const Package) ![]const Change {
     var out: std.ArrayList(Change) = .empty;
     for (new) |n| {
@@ -1355,8 +1322,8 @@ fn diffPackages(gpa: Allocator, old: []const Package, new: []const Package) ![]c
     return out.items;
 }
 
-/// The first package, or the kernel, that changes would take to an older
-/// version, in apk's order; or null.
+/// backwards returns the first package, or linux-virt, that would move to
+/// an older version in apk's order, or null.
 fn backwards(
     changes: []const Change,
     old_kernel: []const u8,
@@ -1387,7 +1354,7 @@ test "a tool's output, exit and deadline" {
     try testing.expectEqualStrings("/bin/sh: said", u.detail);
     try testing.expectError(error.CommandFailed, u.run(&.{"/nonexistent"}));
     try testing.expectEqualStrings("/nonexistent: execve: NOENT", u.detail);
-    // Its output closed, and then hung: killed at the deadline all the same.
+    // A tool that closes its output and hangs is still killed at the deadline.
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", "exec >&- 2>&-; sleep 30" };
     try testing.expectError(error.Timeout, u.child(tool, .{&argv}, 1024, 1));
 }
@@ -1412,7 +1379,8 @@ test backwards {
     );
 }
 
-/// Source packages present before and after, at different versions.
+/// diffOrigins lists source packages present in both old and new at
+/// different versions, once each.
 pub fn diffOrigins(
     gpa: Allocator,
     old: []const Package,
@@ -1431,7 +1399,8 @@ pub fn diffOrigins(
     return out.items;
 }
 
-/// The first 16 hex digits of the sha256 of what goes into a build.
+/// buildHash identifies a build: the first 16 hex digits of the sha256 of
+/// its package names, versions and kernel.
 fn buildHash(gpa: Allocator, pkgs: []const Package, kernel: []const u8) ![]const u8 {
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
     for (pkgs) |p| {
@@ -1505,9 +1474,9 @@ test {
     _ = @import("apk.zig");
 }
 
-/// Whether a fetcher's word for a failure may pass if tried again: no
-/// answer at all (its error's name), a server's 5xx, 408 or 429; not a
-/// refusal that will be the same next time, as 404 is.
+/// transient reports whether a fetch failure may pass on retry: no answer
+/// (an error name rather than an HTTP status), a 5xx, 408 or 429. A refusal
+/// like 404 will be the same next time.
 fn transient(said: []const u8) bool {
     const status = std.meta.stringToEnum(std.http.Status, said) orelse return true;
     return @backingInt(status) >= 500 or status == .request_timeout or

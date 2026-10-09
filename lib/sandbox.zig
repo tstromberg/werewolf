@@ -1,18 +1,17 @@
-//! sandbox: how werewolf's programs give themselves up (docs/programs.md):
-//! every descriptor closed but those they were handed, an account of their
-//! own, a chroot, no capabilities or only those kept, limits, Landlock, and
-//! a seccomp allowlist. One copy, so one place to audit. And how root hears
-//! a child: what it says, within a limit and a deadline.
+//! sandbox drops a program's privileges: descriptors, user, chroot,
+//! capabilities, limits, Landlock and seccomp. It also reads a child's
+//! output within a size limit and a deadline. See lib/README.md.
 
 const std = @import("std");
 const seal = @import("seal");
 const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
-/// The system call that failed, and how.
+/// failed names the system call that last failed; failed_errno says why.
 pub var failed: []const u8 = "";
 pub var failed_errno: linux.E = .SUCCESS;
 
+/// sys returns rc, or records the failed call and returns error.SystemCall.
 pub fn sys(rc: usize, comptime what: []const u8) !usize {
     const err = linux.errno(rc);
     if (err == .SUCCESS) return rc;
@@ -21,18 +20,17 @@ pub fn sys(rc: usize, comptime what: []const u8) !usize {
     return error.SystemCall;
 }
 
-/// Die with the parent, and not outlive it if it is already gone. dropTo
-/// and keepOnly keep the tie, which the kernel would otherwise forget as
-/// they change who the process is.
+/// tieTo kills this process when parent dies. The kernel clears the
+/// parent-death signal on a credential change, so dropTo and keepOnly
+/// set it again.
 pub fn tieTo(parent: linux.pid_t) void {
     const tie: Tie = .{ .sig = @backingInt(linux.SIG.KILL), .parent = parent };
     tie.keep();
 }
 
-/// The parent-death signal, and the parent it is for. The kernel clears the
-/// signal when a process's uid, gid or capabilities change, so a change of
-/// them notes it before and sets it again after, and ends the process if
-/// the parent died in between.
+/// Tie is the parent-death signal and the parent it watches. The kernel
+/// clears the signal when uid, gid or capabilities change, so callers note
+/// it before the change and keep it after; keep exits if the parent died.
 const Tie = struct {
     sig: u32,
     parent: linux.pid_t,
@@ -50,9 +48,9 @@ const Tie = struct {
     }
 };
 
-/// Close every descriptor but those in keep, at most 8, with 0, 1 and 2 on
-/// /dev/null: nothing of root's open files, its console included, goes
-/// with a child.
+/// closeAllBut closes every descriptor but those in keep (at most 8) and
+/// points 0, 1 and 2 at /dev/null, so a child inherits none of root's
+/// files, not even the console.
 pub fn closeAllBut(keep: []const i32) !void {
     var sorted: [8]i32 = undefined;
     if (keep.len > sorted.len) return error.TooManyKept;
@@ -60,7 +58,7 @@ pub fn closeAllBut(keep: []const i32) !void {
         linux.openat(linux.AT.FDCWD, "/dev/null", .{ .ACCMODE = .RDWR }, 0),
         "open /dev/null",
     ));
-    // Where 0, 1 or 2 was closed, /dev/null opened as it already.
+    // If 0, 1 or 2 was closed, open() reused it, so skip it.
     for ([_]i32{ 0, 1, 2 }) |fd| if (fd != null_fd) {
         _ = try sys(linux.dup3(null_fd, fd, 0), "dup3");
     };
@@ -81,17 +79,16 @@ pub fn closeAllBut(keep: []const i32) !void {
     );
 }
 
-/// At most n of resource, hard and soft.
+/// limit sets both the soft and hard limit of resource to n.
 pub fn limit(resource: linux.rlimit_resource, n: u64) !void {
     const l: linux.rlimit = .{ .cur = n, .max = n };
     _ = try sys(linux.setrlimit(resource, &l), "setrlimit");
 }
 
-/// Become `id`, user and group, rooted at `root` if one is given, with no
-/// capabilities left to anything that follows: the bounding set emptied,
-/// and every set cleared after the change of uid, which alone would keep
-/// them under a keepOnly's NO_SETUID_FIXUP. Then check root cannot be had
-/// back.
+/// dropTo switches to user and group id, chrooted to root when given, and
+/// drops every capability. It returns error.StillRoot if uid 0 can be
+/// regained. It clears the capability sets after setresuid because, after
+/// keepOnly set NO_SETUID_FIXUP, the uid change alone would keep them.
 pub fn dropTo(id: u32, root: ?[*:0]const u8) !void {
     const tie: Tie = .note();
     try bound(0);
@@ -107,10 +104,9 @@ pub fn dropTo(id: u32, root: ?[*:0]const u8) !void {
     tie.keep();
 }
 
-/// Keep only the capabilities in `keep`, a mask of CAP_ numbers below 32,
-/// never to gain more: the bounding set emptied of the rest; NOROOT,
-/// NO_SETUID_FIXUP and NO_CAP_AMBIENT_RAISE set and locked, and KEEP_CAPS
-/// locked off (moot under NO_SETUID_FIXUP), so root's uid brings no others.
+/// keepOnly keeps only the capabilities in keep, a mask of CAP_ numbers
+/// below 32. It locks NOROOT, NO_SETUID_FIXUP and NO_CAP_AMBIENT_RAISE on
+/// and KEEP_CAPS off, so uid 0 can never bring back the others.
 pub fn keepOnly(keep: u32) !void {
     const tie: Tie = .note();
     try bound(keep);
@@ -121,9 +117,9 @@ pub fn keepOnly(keep: u32) !void {
     tie.keep();
 }
 
-/// The bounding set emptied of every capability not in keep, a mask of
-/// those below 32. One the kernel does not know (EINVAL) is one it cannot
-/// grant; any other failure is an error, not a set left whole.
+/// bound drops every capability not in keep from the bounding set. EINVAL
+/// means the kernel does not know the capability, so cannot grant it; any
+/// other failure is an error rather than a set left whole.
 fn bound(keep: u32) !void {
     for (0..64) |cap| {
         if (cap < 32 and keep & (@as(u32, 1) << @intCast(cap)) != 0) continue;
@@ -132,8 +128,8 @@ fn bound(keep: u32) !void {
     }
 }
 
-/// The kernel's struct __user_cap_header_struct: pid is an int, not the
-/// usize std.os.linux declares, which would leave padding the kernel reads.
+/// CapHeader is the kernel's __user_cap_header_struct. Its pid is an int,
+/// not the usize std.os.linux declares, which would add padding the kernel reads.
 const CapHeader = extern struct {
     version: u32 = 0x20080522, // _LINUX_CAPABILITY_VERSION_3
     pid: i32 = 0,
@@ -146,9 +142,9 @@ const CapSets = extern struct { effective: u32 = 0, permitted: u32 = 0, inherita
 
 // --- Landlock ------------------------------------------------------------------
 
-/// Landlock's filesystem rights, from linux/landlock.h: one copy, for this
-/// file, leash and fence. A kernel ignores none it is asked to handle, so
-/// what one does not know is masked off (fsAll).
+/// Landlock's filesystem rights, from linux/landlock.h, shared with leash
+/// and fence. The kernel rejects a right it does not know, so fsAll masks
+/// them by ABI.
 pub const execute: u64 = 0x1;
 pub const write_file: u64 = 0x2;
 pub const read_file: u64 = 0x4;
@@ -162,27 +158,26 @@ pub const make_sock: u64 = 0x200;
 pub const make_fifo: u64 = 0x400;
 pub const make_block: u64 = 0x800;
 pub const make_sym: u64 = 0x1000;
-/// Known from ABI 2.
+/// refer needs Landlock ABI 2.
 pub const refer: u64 = 0x2000;
-/// Known from ABI 3.
+/// truncate needs Landlock ABI 3.
 pub const truncate: u64 = 0x4000;
-/// Known from ABI 5.
+/// ioctl_dev needs Landlock ABI 5.
 pub const ioctl_dev: u64 = 0x8000;
-/// The rights a rule on a file, not a directory, may hold.
+/// file_rights are the rights a rule on a file, not a directory, may hold.
 pub const file_rights: u64 = execute | write_file | read_file | truncate | ioctl_dev;
-/// Files only, beneath a directory: read, write, make, remove and truncate
-/// them, and so replace one by renaming another over it.
+/// own_files lets a program read, write, make, remove and truncate files
+/// beneath a directory, and so replace one by renaming another over it.
 pub const own_files: u64 = read_file | write_file | remove_file | make_reg | truncate;
-/// Everything a directory's owner does: read, write, make and remove files
-/// and directories, truncate. No devices, sockets, FIFOs, links or ioctls.
+/// own_dir adds reading, making and removing directories to own_files. It
+/// grants no devices, sockets, FIFOs, links or ioctls.
 pub const own_dir: u64 = own_files | read_dir | remove_dir | make_dir;
 
-/// Landlock's network rights, known from ABI 4: binding and connecting a
-/// TCP socket to a port.
+/// bind_tcp and connect_tcp are Landlock's TCP port rights; they need ABI 4.
 pub const bind_tcp: u64 = 0x1;
 pub const connect_tcp: u64 = 0x2;
 
-/// Every filesystem right a kernel of Landlock ABI abi knows.
+/// fsAll returns every filesystem right that Landlock ABI abi knows.
 pub fn fsAll(abi: usize) u64 {
     return if (abi >= 5)
         0xffff
@@ -194,10 +189,9 @@ pub fn fsAll(abi: usize) u64 {
         0x1fff;
 }
 
-/// A Landlock ruleset that handles every right this kernel knows, so what
-/// no rule grants is refused: every filesystem right; from ABI 4, binding
-/// and connecting TCP; from ABI 6, scoped, so no abstract UNIX socket of,
-/// and no signal to, a process outside the domain.
+/// Ruleset handles every right this kernel knows, so whatever no rule
+/// grants is refused. From ABI 4 that includes TCP bind and connect. From
+/// ABI 6 it is scoped: no abstract UNIX socket or signal crosses the domain.
 pub const Ruleset = struct {
     fd: i32,
     abi: usize,
@@ -220,8 +214,8 @@ pub const Ruleset = struct {
         return .{ .fd = @intCast(fd), .abi = abi };
     }
 
-    /// access beneath what fd names, of the rights this kernel knows: on a
-    /// directory, all of it; a file's rule may hold file_rights alone.
+    /// add grants access beneath fd, masked to the rights this kernel knows.
+    /// A rule on a file may hold only file_rights.
     pub fn add(r: Ruleset, fd: i32, access: u64) !void {
         // struct landlock_path_beneath_attr, packed.
         var beneath: [12]u8 = undefined;
@@ -233,7 +227,7 @@ pub const Ruleset = struct {
         );
     }
 
-    /// access, bind_tcp or connect_tcp, on TCP port p; ABI 4 and later.
+    /// port grants access (bind_tcp or connect_tcp) on TCP port p. It needs ABI 4.
     pub fn port(r: Ruleset, access: u64, p: u16) !void {
         const attr: [2]u64 = .{ access, p }; // struct landlock_net_port_attr
         _ = try sys(
@@ -242,11 +236,9 @@ pub const Ruleset = struct {
         );
     }
 
-    /// Enter the domain, for good, and close the ruleset. Every access it
-    /// refuses is audited, after an exec too
-    /// (LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON, ABI 7): without it the
-    /// kernel says nothing of a domain's refusals once the program that
-    /// made it has become another.
+    /// restrict enters the domain for good and closes the ruleset. From ABI 7
+    /// it sets LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON; without it the kernel
+    /// stops auditing refusals once the process execs another program.
     pub fn restrict(r: Ruleset) !void {
         const log_new_exec: usize = if (r.abi >= 7) 1 << 1 else 0;
         _ = try sys(
@@ -257,14 +249,13 @@ pub const Ruleset = struct {
     }
 };
 
-/// Access to what fd names: beneath it, for a directory.
+/// Rule grants access to what fd names, and beneath it for a directory.
 pub const Rule = struct { fd: i32, access: u64 };
 
-/// Landlock: of the filesystem, only what `rules` allow; connect over TCP
-/// only to `ports`, and bind none; reach no abstract socket and signal no
-/// process outside. What the kernel's Landlock does not know yet goes
-/// unrestricted: ports before ABI 4 (6.7), sockets and signals before ABI 6
-/// (6.12). werewolf's own kernel knows all of it.
+/// landlock allows only the files in rules, TCP connects only to ports,
+/// and no bind, abstract socket or signal outside the domain. Older kernels
+/// leave unrestricted what they do not know: ports before ABI 4 (6.7),
+/// sockets and signals before ABI 6 (6.12). werewolf's kernel knows all.
 pub fn landlock(rules: []const Rule, ports: []const u16) !void {
     const ruleset: Ruleset = try .init();
     for (rules) |r| try ruleset.add(r.fd, r.access);
@@ -275,15 +266,14 @@ pub fn landlock(rules: []const Rule, ports: []const u16) !void {
 
 const SockFprog = extern struct { len: u16, filter: [*]const seal.Filter };
 
-/// A seccomp filter that allows the calls named, some only with one
-/// argument equal to a value, fails some with EPERM, and kills the process
-/// for anything else, including a call made as another architecture.
+/// Filter is a seccomp allowlist. It kills the process on any call not
+/// named, and on any call made as another architecture.
 pub const Filter = struct {
     prog: [max_insns]seal.Filter = undefined,
     n: usize = 3,
 
     const max_insns = 200;
-    /// Jump targets, until finish knows where they are.
+    /// to_allow and to_refuse are placeholder jumps that finish resolves.
     const to_allow = 0xff;
     const to_refuse = 0xfe;
 
@@ -293,18 +283,17 @@ pub const Filter = struct {
         f.n += 1;
     }
 
-    /// Fail the call with EPERM, as the kernel would without privilege, for
-    /// a program that tries it and carries on.
+    /// refuse fails the call with EPERM, as the kernel would without
+    /// privilege, for programs that try it and carry on.
     pub fn refuse(f: *Filter, comptime name: []const u8) void {
         const n = nr(name) orelse return;
         f.prog[f.n] = .{ .code = seal.JEQ_K, .jt = to_refuse, .k = n };
         f.n += 1;
     }
 
-    /// Allow the call when argument arg equals value, comparing its low 32
-    /// bits alone: only for an argument the kernel reads as 32 bits (a
-    /// descriptor, an ioctl's request, a socket's family), or a value with
-    /// other high bits would pass.
+    /// allowArg allows the call when argument arg equals value. It compares
+    /// only the low 32 bits, so use it only for an argument the kernel reads
+    /// as 32 bits (a descriptor, an ioctl request, a socket family).
     pub fn allowArg(f: *Filter, comptime name: []const u8, comptime arg: u3, value: u32) void {
         const n = nr(name) orelse return;
         f.prog[f.n] = .{ .code = seal.JEQ_K, .jf = 3, .k = n };
@@ -355,17 +344,17 @@ pub const Filter = struct {
 
 // --- children ------------------------------------------------------------------
 
-/// What a child said, and how it ended.
+/// Exit is what a child wrote and its exit code.
 pub const Exit = struct { code: u8, out: []const u8 };
 
-/// A child's error, as its status line: the error, or for a system call,
-/// which and the kernel's reason.
+/// whyNot formats err for a child's status line; for error.SystemCall it
+/// names the call and the kernel's reason.
 pub fn whyNot(gpa: Allocator, err: anyerror) []const u8 {
     if (err != error.SystemCall) return @errorName(err);
     return gpa.print("{s}: {s}", .{ failed, errnoName(failed_errno) }) catch "SystemCall";
 }
 
-/// A child's last words, and its end.
+/// say writes status, a newline and rest to out, then exits with code.
 pub fn say(out: i32, code: u8, status: []const u8, rest: []const u8) noreturn {
     for ([_][]const u8{ status, "\n", rest }) |data| {
         var off: usize = 0;
@@ -375,12 +364,12 @@ pub fn say(out: i32, code: u8, status: []const u8, rest: []const u8) noreturn {
             off += n;
         }
     }
-    // Straight out: the runtime's cleanup would make calls the filter kills.
+    // Exit directly: the runtime's cleanup would make calls the filter kills.
     linux.exit_group(code);
 }
 
-/// What child pid writes to in, and its exit code: at most max bytes,
-/// within seconds. It is killed if it says more, or takes longer.
+/// collect reads at most max bytes that child pid writes to in, then reaps
+/// it, all within seconds. It kills the child if it writes more or takes longer.
 pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i64) !Exit {
     var reaped = false;
     defer if (!reaped) {
@@ -388,7 +377,7 @@ pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i
         var status: i32 = 0;
         while (linux.errno(linux.wait4(pid, &status, 0, null)) == .INTR) {}
     };
-    // A byte past max, to tell a child that said max from one that said more.
+    // Read one byte past max to tell a child that wrote max from one that wrote more.
     const buf = try gpa.alloc(u8, max + 1);
     const deadline = nowMs() + seconds * std.time.ms_per_s;
     var got: usize = 0;
@@ -408,7 +397,7 @@ pub fn collect(gpa: Allocator, pid: linux.pid_t, in: i32, max: usize, seconds: i
         got += n;
         if (got > max) return error.ChildSaidTooMuch;
     }
-    // Its end of the pipe is closed: it has until the deadline to exit.
+    // The child closed its end of the pipe; it has until the deadline to exit.
     while (nowMs() < deadline) {
         var status: i32 = 0;
         const rc = linux.wait4(pid, &status, linux.W.NOHANG, null);

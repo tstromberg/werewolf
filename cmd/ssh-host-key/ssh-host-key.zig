@@ -1,21 +1,7 @@
-//! ssh-host-key: a leashed sshd's host key, made on the machine's first
-//! boot and kept, as a distribution's first boot makes /etc/ssh's.
+//! ssh-host-key makes a leashed sshd's Ed25519 host key in /data on first boot,
+//! keeps it after, and logs its fingerprint on every start. See README.md.
 //!
 //!     ssh-host-key KEY
-//!
-//! leash runs it as a service's `before`, as the service's user, inside its
-//! Landlock rules. KEY is in the service's /data directory, since the root
-//! is read-only: if it is there, it stands; if not, ssh-keygen makes an
-//! Ed25519 key, once. Without /data, or with /data in RAM, there is nowhere
-//! to keep one, and a key made each boot would change the machine's
-//! identity each boot, so the service stays down and says why.
-//!
-//! lib/hostkey.zig keeps it whole: made beside its place and renamed in,
-//! so a boot cut short leaves a whole key or none, and a lost public half
-//! made again from the key.
-//!
-//! Every start logs the key's fingerprint and public half, for an operator
-//! to pin (howl console NAME), never the private half.
 
 const std = @import("std");
 const hostkey = @import("hostkey");

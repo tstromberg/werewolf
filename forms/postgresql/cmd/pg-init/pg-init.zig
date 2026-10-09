@@ -1,26 +1,5 @@
-//! pg-init: PostgreSQL's cluster, made once, and the image's SQL applied.
-//!
-//! leash runs it before the server, as the postgres user, leashed
-//! (forms/postgresql/rootfs/etc/sv/postgres/service). It does two things, and the
-//! server starts only if both succeed:
-//!
-//!   1. The cluster, if /data/svc/postgres/data has none and never had
-//!      one (cluster-made, beside it, says it had: then the data is lost,
-//!      and the server stays down rather than start again empty): initdb, with
-//!      local connections by peer (a role is its system user's name) and
-//!      none by TCP, which the server does not listen on anyway. initdb
-//!      makes it in data.new, which becomes data only once whole, so a
-//!      start stopped partway leaves no cluster rather than half of one.
-//!      initdb runs the server through popen(3) and system(3), which want a
-//!      shell; popen-shim.so (cmd/popen-shim/popen-shim.zig), preloaded into
-//!      initdb alone, runs its commands without one.
-//!   2. The image's SQL: each /usr/share/werewolf-postgres/*.sql, in name order,
-//!      in the postgres database, as the superuser, through the server in
-//!      single-user mode, which runs while the real server is not yet up.
-//!      A form brings its roles, schemas and grants this way, written so
-//!      that applying them again changes nothing; the first error stops it.
-//!
-//! Nothing here comes from outside the image.
+//! pg-init makes the PostgreSQL cluster once and applies the image's SQL
+//! before each start of the server. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -33,11 +12,11 @@ const sql_dir = "/usr/share/werewolf-postgres";
 const initdb = "/usr/bin/initdb";
 const postgres = "/usr/bin/postgres";
 const preload = "/usr/lib/werewolf/popen-shim.so";
-/// Left once the cluster is made, beside it: a cluster that is gone while
-/// this is not was lost, and is not quietly made again, empty.
+/// made marks that a cluster was made. If the cluster is gone but the mark
+/// is not, the data was lost, and pg-init refuses to make an empty one.
 const made = "cluster-made";
-/// Left on the first start of each boot, in /run, which each boot begins
-/// empty: a lock found before it is there is an earlier boot's.
+/// started marks the first start of this boot. /run is empty at boot, so a
+/// lock found before this file exists was left by an earlier boot.
 const started = "/run/svc/postgres/pg-init-started";
 
 pub fn main(init: std.process.Init) !void {
@@ -57,15 +36,14 @@ pub fn main(init: std.process.Init) !void {
 
     if (svc.access(io, "data/PG_VERSION", .{})) |_| {
         say(io, "keeping the cluster in {s}", .{data_dir});
-        // Whole, since data.new becomes data only so: one whose start was
-        // cut before cluster-made was kept is marked now.
+        // data exists only once initdb finished, so the cluster is whole.
+        // Mark it if a crash came before the mark.
         if (svc.access(io, made, .{})) |_| {} else |_| try mark(io, svc, made);
-        // A power cut leaves the last boot's lock behind, naming a pid this
-        // boot may well have given to something else, which the server
-        // would take for itself still running. On the first start of a
-        // boot, the lock can be no one's: it goes. A later start's lock may
-        // be a server of this boot's still stopping, and the server judges
-        // that itself.
+        // A power cut leaves the last boot's lock, whose pid this boot may
+        // have given to another process; the server would think itself
+        // still running. On the first start of a boot the lock is stale, so
+        // remove it. Later, it may be a server still stopping, which the
+        // server checks itself.
         if (first_start) {
             if (svc.deleteFile(io, "data/postmaster.pid")) |_| {
                 say(io, "removed the lock the last boot left", .{});
@@ -84,9 +62,8 @@ pub fn main(init: std.process.Init) !void {
             );
             return error.ClusterLost;
         } else |_| {}
-        // initdb writes PG_VERSION first and the rest after, so a cluster
-        // it was stopped in the middle of would read as made: it makes the
-        // cluster beside its place, which takes it only whole.
+        // initdb writes PG_VERSION first, so an interrupted run would look
+        // like a cluster. Build it in data.new and rename it when whole.
         if (svc.access(io, "data.new", .{})) |_| {
             say(io, "removing the cluster a stopped start left half made", .{});
             try svc.deleteTree(io, "data.new");
@@ -139,8 +116,8 @@ pub fn main(init: std.process.Init) !void {
     std.mem.sort([]const u8, names.items, {}, lessThan);
     if (names.items.len == 0) return;
 
-    // -j: a statement ends at a semicolon before an empty line, so a DO
-    // block may hold semicolons of its own.
+    // With -j a statement ends at a semicolon before an empty line, so a
+    // DO block may contain semicolons.
     var sql: std.ArrayList(u8) = .empty;
     for (names.items) |name| {
         const text = try Dir.cwd().readFileAlloc(
@@ -183,8 +160,8 @@ pub fn main(init: std.process.Init) !void {
     );
 }
 
-/// name, made empty in dir, and on the disk with its entry before this
-/// returns.
+/// mark creates the empty file name in dir and syncs it and its directory
+/// entry to disk.
 fn mark(io: Io, dir: Dir, name: []const u8) !void {
     const f = try dir.createFile(io, name, .{});
     defer f.close(io);
@@ -192,8 +169,9 @@ fn mark(io: Io, dir: Dir, name: []const u8) !void {
     try syncSvc(io);
 }
 
-/// svc_dir's entries on the disk: a rename or a new file in it kept. Its
-/// own descriptor, as Dir's may be O_PATH, which cannot be synced.
+/// syncSvc fsyncs svc_dir so renames and new files in it survive a crash.
+/// It opens its own descriptor because Dir's may be O_PATH, which fsync
+/// refuses.
 fn syncSvc(io: Io) !void {
     const rc = linux.open(svc_dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0);
     var e = linux.errno(rc);

@@ -1,13 +1,6 @@
-//! release: what makes a werewolf release one to install. A release is
-//! files and a manifest naming them, signed in CI with the image key
-//! (docs/releases.md). The image carries the key's public half; nothing
-//! about a release is believed until its manifest's signature checks
-//! against it, and then only for the form and architecture this machine
-//! runs. A manifest does not expire: a release is published when its images
-//! change, and the next one supersedes it (docs/releases.md).
-//!
-//! The signature is RSA PKCS#1 v1.5 over the manifest's SHA-256, as
-//! `openssl dgst -sha256 -sign` makes it, so the standard library checks it.
+//! release checks a werewolf release manifest: its signature by the image key,
+//! then its form, architecture and fields (docs/releases.md). Signatures are
+//! RSA PKCS#1 v1.5 over SHA-256, as `openssl dgst -sha256 -sign` makes them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -17,17 +10,17 @@ const rsa = Certificate.rsa;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const policy = @import("update-policy");
 
-/// The image key's public half, as its PEM gives it.
+/// Key is an RSA public key, such as the image key.
 pub const Key = struct {
     modulus: []const u8,
     exponent: []const u8,
 };
 
-/// rsaEncryption, 1.2.840.113549.1.1.1, as DER writes it.
+/// rsa_encryption is the DER encoding of OID 1.2.840.113549.1.1.1.
 const rsa_encryption = [_]u8{ 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01 };
 
-/// The key in a PEM `PUBLIC KEY` (X.509 SubjectPublicKeyInfo) holding an
-/// RSA key of 2048 to 4096 bits.
+/// parseKey parses a PEM `PUBLIC KEY` (X.509 SubjectPublicKeyInfo). It
+/// accepts only RSA keys of 2048, 3072 or 4096 bits.
 pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
     const begin = "-----BEGIN PUBLIC KEY-----";
     const end = "-----END PUBLIC KEY-----";
@@ -53,7 +46,7 @@ pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
         bytes[bits.slice.start] != 0)
         return error.BadKey;
     const inner = bytes[bits.slice.start + 1 .. bits.slice.end];
-    // parseDer reads within inner; its lengths are checked here first.
+    // parseDer trusts the lengths in inner, so check them here first.
     const seq = try element(inner, 0, .sequence);
     const n = try element(inner, seq.slice.start, .integer);
     _ = try element(inner, n.slice.end, .integer);
@@ -66,7 +59,7 @@ pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
     return .{ .modulus = parts.modulus, .exponent = parts.exponent };
 }
 
-/// The DER element at index, of tag, within bytes.
+/// element parses the DER element at index and checks its tag and bounds.
 fn element(bytes: []const u8, index: u32, tag: der.Tag) !der.Element {
     if (index + 2 > bytes.len) return error.BadKey;
     const e = der.Element.parse(bytes, index) catch return error.BadKey;
@@ -75,13 +68,12 @@ fn element(bytes: []const u8, index: u32, tag: der.Tag) !der.Element {
     return e;
 }
 
-/// Whether sig is key's signature of data's SHA-256.
+/// verify returns an error unless sig is key's signature of data's SHA-256.
 pub fn verify(key: Key, data: []const u8, sig: []const u8) !void {
     return verifyHash(Sha256, key, data, sig);
 }
 
-/// Whether sig is key's signature of data's Hash: SHA-256, or for apk's
-/// older indexes, SHA-1.
+/// verifyHash is verify with another hash: apk's older indexes use SHA-1.
 pub fn verifyHash(comptime Hash: type, key: Key, data: []const u8, sig: []const u8) !void {
     if (sig.len != key.modulus.len) return error.BadSignature;
     const public_key = rsa.PublicKey.fromBytes(key.exponent, key.modulus) catch return error.BadKey;
@@ -95,7 +87,8 @@ pub fn verifyHash(comptime Hash: type, key: Key, data: []const u8, sig: []const 
     }
 }
 
-/// A release's manifest, as much of it as the updater uses.
+/// Manifest is the part of a release manifest the updater uses. Manifests
+/// do not expire: a release stands until the next one supersedes it.
 pub const Manifest = struct {
     format: []const u8,
     form: []const u8,
@@ -105,31 +98,29 @@ pub const Manifest = struct {
     kernel: []const u8,
     files: std.json.ArrayHashMap(File),
     packages: []const struct { name: []const u8, version: []const u8, origin: []const u8 },
-    /// werewolf's own security advisories (release/advisories), signed with
-    /// the rest: fixes to werewolf's code, which no CVE names.
+    /// advisories lists fixes to werewolf's own code, which no CVE names
+    /// (release/advisories).
     advisories: []const Advisory = &.{},
 
     pub const File = struct { sha256: []const u8, size: u64 };
-    /// release/advisories' line, as the manifest carries it: its date,
-    /// which no machine compares, is passed over.
+    /// Advisory is one line of release/advisories. Its date is ignored
+    /// because no machine compares it.
     pub const Advisory = struct {
         id: []const u8,
         tier: policy.Tier,
         title: []const u8,
     };
 
-    /// What a slot needs from a release.
+    /// slot_files are the files a slot needs from a release.
     pub const slot_files = [_][]const u8{ "vmlinuz", "stage0.zst", "root.erofs" };
-    /// stage0 for a slot on a distro's disk, after bite, which a bitten
-    /// machine fetches in place of stage0.zst: the same, with the modules
-    /// only a distro's filesystem needs (Makefile, BITTEN_TAGS), which
-    /// werewolf's own disk and a direct boot leave out.
+    /// bitten_stage0 replaces stage0.zst on a machine bite took over. It adds
+    /// the modules a distro's filesystem needs (Makefile, BITTEN_TAGS).
     pub const bitten_stage0 = "stage0-bitten.zst";
 };
 
-/// The manifest in data, which must be signed by key with sig, and be one
-/// for this form and architecture, signed no later than a day after now
-/// (seconds since the epoch), and naming a slot's files.
+/// open verifies sig over data with key, then parses the manifest. It must
+/// be for this form and arch, have a serial at most a day after now, and
+/// name every slot file with a valid entry.
 pub fn open(
     gpa: Allocator,
     key: Key,
@@ -150,9 +141,8 @@ pub fn open(
     if (!std.mem.eql(u8, m.format, "werewolf-release/1")) return error.BadManifest;
     if (!std.mem.eql(u8, m.form, form) or
         !std.mem.eql(u8, m.arch, arch)) return error.NotThisMachine;
-    // build names report files and lines of the attempt and bad records,
-    // which are read back by their spaces and newlines: 16 lower-case hex
-    // digits, as the updater makes its own, and nothing else.
+    // build goes into report file names and the space- and line-separated
+    // attempt and bad files, so allow only 16 lower-case hex digits.
     if (m.build.len != 16) return error.BadManifest;
     for (m.build) |c| if (!std.ascii.isDigit(c) and (c < 'a' or c > 'f')) return error.BadManifest;
     const signed = policy.parseSerial(m.serial) catch return error.BadManifest;
@@ -164,15 +154,15 @@ pub fn open(
     return m;
 }
 
-/// A slot file's entry: a lower-case sha256, and a size of at most 256 MiB.
+/// checkFile requires a lower-case hex sha256 and a size of 1 byte to 256 MiB.
 fn checkFile(f: Manifest.File) !void {
     if (f.sha256.len != 64 or f.size == 0 or f.size > 256 << 20) return error.BadManifest;
     for (f.sha256) |c| if (!std.ascii.isHex(c) or std.ascii.isUpper(c)) return error.BadManifest;
 }
 
-/// An advisory as release/manifest checks one: WW-YEAR-NUMBER and a title
-/// of printable ASCII without quotes or backslashes; its tier, a Tier, is
-/// checked as it is parsed.
+/// validAdvisory applies release/manifest's rules: an id of WW-YEAR-NUMBER
+/// and a title of printable ASCII without quotes or backslashes. JSON
+/// parsing already checks the tier.
 pub fn validAdvisory(a: Manifest.Advisory) bool {
     const id = a.id;
     if (id.len < 11 or id.len > 32 or !std.mem.startsWith(u8, id, "WW-") or
@@ -193,7 +183,7 @@ test validAdvisory {
     a = good;
     a.title = "a \"quote\"";
     try std.testing.expect(!validAdvisory(a));
-    // A tier that is not one is no advisory: the manifest is not parsed.
+    // An unknown tier fails to parse, so the whole manifest is refused.
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const parsed = try std.json.parseFromSliceLeaky(
@@ -217,7 +207,7 @@ const testing = std.testing;
 const test_key = @embedFile("testdata/image.pub");
 const test_manifest = @embedFile("testdata/prod-ssh-aarch64.json");
 const test_sig = @embedFile("testdata/prod-ssh-aarch64.json.sig");
-/// When the test manifest was signed.
+/// signed_at is when the test manifest was signed.
 const signed_at = 1791299416;
 
 test "a release CI signed checks, and nothing else does" {
@@ -242,14 +232,14 @@ test "a release CI signed checks, and nothing else does" {
     );
     // A release is good until another supersedes it, however old.
     _ = try open(a, key, test_manifest, test_sig, "prod-ssh", "aarch64", signed_at + 365 * 86400);
-    // Signed, but the clock says not yet: a machine whose clock lags a
-    // day still takes it; one a day and more behind does not.
+    // A machine whose clock lags by a day still takes it; one further
+    // behind does not.
     try testing.expectError(
         error.BadManifest,
         open(a, key, test_manifest, test_sig, "prod-ssh", "aarch64", signed_at - 2 * 86400),
     );
 
-    // One byte changed, anywhere, and it is not a release.
+    // Changing any byte breaks the signature.
     const forged = try a.dupe(u8, test_manifest);
     const at = std.mem.find(u8, forged, "\"build\": \"").? + 10;
     forged[at] = if (forged[at] == '0') '1' else '0';

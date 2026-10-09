@@ -1,38 +1,6 @@
-//! cloud-metadata: werewolf's config, from a cloud's metadata server.
-//!
-//!     cloud     on a cloud werewolf knows, fetch the instance's user data,
-//!               and if it is a werewolf config tar, leave it for init in
-//!               /run/werewolf/cloud/config.tar
-//!
-//! init runs it once at boot, after the network is up, when no config tar
-//! was found on a disk or beside the victim. It exits 0 with nothing written
-//! where there is no known cloud, no user data, or user data that is not
-//! werewolf's (someone's #cloud-config, say), and 1 on an error.
-//!
-//! The user data is the config tar, base64-encoded: on GCP the instance's
-//! `user-data` attribute, on AWS its user data, on Hetzner Cloud its
-//! user_data, on Azure its userData. The cloud is known from the firmware's DMI strings before any
-//! packet is sent, so nothing is asked of 169.254.169.254 on a network
-//! where a neighbour might answer for it.
-//!
-//! Two processes, as werewolf's programs are written (docs/programs.md):
-//!
-//!   fetcher   runs as _cloud (uid 68), chrooted to the empty /var/empty,
-//!             with no capabilities, under Landlock, which lets it reach
-//!             no file and connect over TCP to port 80 alone, and a seccomp
-//!             filter that allows a TCP socket and little else: no UDP. It
-//!             runs before fence sets the network policy, so these are what
-//!             hold it. It makes the HTTP requests, reads at most 128 KiB,
-//!             and sends the parent the response's body.
-//!   parent    stays root's uid with no capabilities at all, under Landlock,
-//!             which confines its writes to /run/werewolf/cloud, and seccomp.
-//!             It never touches the network. It decodes the body, checks the
-//!             tar entry by entry (regular files and directories, names of a
-//!             few safe characters, no absolute paths, no "..", sizes in
-//!             bounds), and writes a new tar of what passed, every entry
-//!             owned by root, so init extracts only what werewolf wrote.
-//!
-//! Every event is one JSON line on stdout, from the parent.
+//! cloud-metadata fetches werewolf's config tar from a cloud's metadata server
+//! and leaves a checked copy for init in /run/werewolf/cloud/config.tar.
+//! See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -43,7 +11,7 @@ const sys = sandbox.sys;
 
 const out_dir = "/run/werewolf/cloud";
 const empty_dir = "/var/empty";
-/// _cloud, in prod.yaml's accounts.
+/// fetcher_id is the _cloud account in forms/prod/apko.yaml.
 const fetcher_id: u32 = 68;
 const metadata_ip = [4]u8{ 169, 254, 169, 254 };
 
@@ -52,23 +20,23 @@ const max_config = 48 << 10;
 const max_file = 32 << 10;
 const max_entries = 32;
 
-/// The clouds werewolf knows: how the firmware names them, and where each
-/// keeps an instance's user data.
+/// Provider is a cloud werewolf knows: how its firmware names it, and where
+/// it keeps an instance's user data.
 const Provider = struct {
     name: []const u8,
-    /// DMI sys_vendor, exactly.
+    /// vendor must equal DMI sys_vendor.
     vendor: []const u8,
-    /// DMI product_name, exactly, where the vendor alone is not enough.
+    /// product must equal DMI product_name, when the vendor is not enough.
     product: ?[]const u8 = null,
-    /// DMI chassis_asset_tag, exactly, where the product is not enough.
+    /// asset must equal DMI chassis_asset_tag, when the product is not enough.
     asset: ?[]const u8 = null,
     path: []const u8,
-    /// One extra request header, if the server insists on it.
+    /// header is one extra request header the server requires, if any.
     header: []const u8 = "",
-    /// AWS's IMDSv2: a session token from a PUT before the GET.
+    /// token asks for an IMDSv2 session token with a PUT before the GET (AWS).
     token: bool = false,
-    /// GCP's server says `Metadata-Flavor: Google` on every answer; one that
-    /// does not is not it.
+    /// flavor refuses an answer without `Metadata-Flavor: Google`, which GCP's
+    /// server always sends; anything else is an impostor.
     flavor: bool = false,
 };
 
@@ -83,7 +51,7 @@ const providers = [_]Provider{
     },
     .{ .name = "aws", .vendor = "Amazon EC2", .path = "/latest/user-data", .token = true },
     .{ .name = "hetzner", .vendor = "Hetzner", .path = "/hetzner/v1/userdata" },
-    // Hyper-V on a desktop names itself as Azure does; only Azure sets
+    // Desktop Hyper-V uses Azure's vendor and product; only Azure sets
     // this asset tag.
     .{
         .name = "azure",
@@ -97,10 +65,9 @@ const providers = [_]Provider{
 
 pub fn main(init: std.process.Init) !void {
     _ = init;
-    // Speculative Store Bypass mitigated for this process and all it starts,
-    // which werewolf leaves to each program, so workloads do not pay
-    // (docs/security.md). Where the CPU has no control, the kernel refuses
-    // and nothing changes.
+    // Disable Speculative Store Bypass for this process and its children.
+    // werewolf leaves this to each program so workloads do not pay for it
+    // (docs/security.md). On a CPU without the control, the call just fails.
     _ = linux.prctl(
         @backingInt(linux.PR.SET_SPECULATION_CTRL),
         linux.PR.SPEC_STORE_BYPASS,
@@ -121,20 +88,20 @@ pub fn main(init: std.process.Init) !void {
         );
         linux.exit_group(1);
     };
-    // Straight out: the runtime's cleanup would make system calls the
-    // seccomp filter does not allow, and be killed for them.
+    // Exit directly: the runtime's cleanup makes system calls the seccomp
+    // filter would kill the process for.
     linux.exit_group(0);
 }
 
-/// What failed, and how, for the error event.
+/// step names the stage that failed, for the error event.
 var step: []const u8 = "start";
 
-/// Why the fetcher's last try failed, as the error event's detail.
+/// why_buf holds why the fetcher's last try failed, for the error event.
 var why_buf: [96]u8 = undefined;
 
-/// The fetcher's failure, msg's kind and number, in the parent's own
-/// words: nothing of the server's is passed on, only a byte it maps and
-/// a number it prints.
+/// failureText puts the fetcher's failure message, a kind byte and a number,
+/// into the parent's own words. No text from the fetcher reaches the log,
+/// since a compromised fetcher could write anything.
 fn failureText(buf: []u8, msg: []const u8) []const u8 {
     if (msg.len != 4) return "the fetcher failed and said no more";
     const n = std.mem.readInt(u16, msg[2..4], .big);
@@ -153,7 +120,8 @@ fn failureText(buf: []u8, msg: []const u8) []const u8 {
     } catch "the fetcher's failure, too long to say";
 }
 
-/// As root: which cloud, then the fork.
+/// run identifies the cloud as root, then forks the fetcher and checks
+/// what it returns.
 fn run(log: *Log) !void {
     var vendor_buf: [128]u8 = undefined;
     var product_buf: [128]u8 = undefined;
@@ -248,7 +216,7 @@ fn identify(vendor: []const u8, product: []const u8, asset: []const u8) ?Provide
     return null;
 }
 
-/// A DMI string, trimmed; empty where the firmware has none.
+/// dmi returns the trimmed DMI string at path, or "" if the firmware has none.
 fn dmi(path: [*:0]const u8, buf: *[128]u8) []const u8 {
     const rc = linux.openat(linux.AT.FDCWD, path, .{ .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return "";
@@ -259,8 +227,8 @@ fn dmi(path: [*:0]const u8, buf: *[128]u8) []const u8 {
     return std.mem.trim(u8, buf[0..n], " \n\t");
 }
 
-/// For logging DMI strings, which are the firmware's: letters, digits and
-/// a little punctuation, or nothing.
+/// printable returns s if it holds only letters, digits and a little
+/// punctuation, else "?", so odd firmware strings never reach the log.
 fn printable(s: []const u8) []const u8 {
     for (s) |c| if (!std.ascii.isAlphanumeric(c) and
         std.mem.findScalar(u8, " .-_()", c) == null) return "?";
@@ -273,8 +241,9 @@ const result_body: u8 = 0;
 const result_none: u8 = 1;
 const result_failed: u8 = 2;
 
-/// Why a try failed: after result_failed, a byte of this and a u16, an
-/// errno (connect, io) or an HTTP status (token, status), else 0.
+/// Failure says why a try failed. The fetcher sends result_failed, a Failure
+/// byte and a u16: an errno (connect, io), an HTTP status (token, status),
+/// or 0.
 const Failure = enum(u8) {
     connect,
     io,
@@ -287,28 +256,28 @@ const Failure = enum(u8) {
     request,
 };
 
-/// The fetcher's last failure, which it says when it gives up.
+/// failure and failure_n hold the fetcher's last failure, sent when it gives up.
 var failure: Failure = .timeout;
 var failure_n: u16 = 0;
 
-/// A failure, kept to say, and null: the caller tries again.
+/// miss records a failure and returns null, so the caller tries again.
 fn miss(comptime T: type, f: Failure, n: u16) ?T {
     failure = f;
     failure_n = n;
     return null;
 }
 
-/// As _cloud: ask the metadata server, and hand back what it said. Errors
-/// are said to the parent only as a Failure and a number, which it maps
-/// to words of its own: it trusts nothing from here.
+/// fetcher drops to _cloud, asks the metadata server, and writes the result
+/// to out. It reports errors only as a Failure and a number, since the
+/// parent trusts no text from here.
 fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
     sandbox.tieTo(parent_pid);
     sandbox.dropTo(fetcher_id, empty_dir) catch linux.exit_group(1);
-    // No file, and TCP to port 80 alone: fence's policy is not set yet.
+    // Allow no files and only TCP to port 80: fence's policy is not set yet.
     sandbox.landlock(&.{}, &.{80}) catch linux.exit_group(1);
     var f: sandbox.Filter = .{};
-    // A stream socket, exactly as exchange makes one: TCP, never UDP, which
-    // Landlock does not hold to a port.
+    // Allow only the stream socket exchange makes. Landlock cannot limit UDP
+    // to a port, so UDP must be refused here.
     f.allowArg("socket", 1, socket_type);
     inline for (.{
         "connect",         "getsockopt", "write",         "read",      "poll",
@@ -336,9 +305,9 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
 
 const Fetched = union(enum) { body: []const u8, none, failed };
 
-/// The provider's user data, in four tries 1, 2 and 4 seconds apart, as the
-/// metadata server may not answer the moment the network is up: at most 27
-/// seconds, or 47 where a token is asked for first (5 an exchange).
+/// fetch gets the provider's user data in up to four tries, 1, 2 and 4
+/// seconds apart, since the server may not answer as soon as the network is
+/// up. With 5 s per exchange, that is at most 27 s, or 47 s with a token.
 fn fetch(p: Provider, buf: *[max_response]u8) Fetched {
     var wait: u32 = 1;
     var tries: u32 = 0;
@@ -351,13 +320,13 @@ fn fetch(p: Provider, buf: *[max_response]u8) Fetched {
     }
 }
 
-/// A failure, kept to say: no trying again.
+/// failedFor records a failure that is not worth retrying.
 fn failedFor(f: Failure, n: u16) Fetched {
     _ = miss(Fetched, f, n);
     return .failed;
 }
 
-/// One attempt: null to try again.
+/// fetchOnce makes one attempt. It returns null when a retry may help.
 fn fetchOnce(p: Provider, buf: *[max_response]u8) ?Fetched {
     var req: [512]u8 = undefined;
     var extra: []const u8 = p.header;
@@ -393,9 +362,9 @@ fn fetchOnce(p: Provider, buf: *[max_response]u8) ?Fetched {
     };
 }
 
-/// An HTTP/1.1 request that closes the connection after the response. The
-/// path and header are ours, or a token checked by validToken: nothing in
-/// them can end a line.
+/// request formats an HTTP/1.1 request that closes the connection after the
+/// response. It refuses control characters in path and header, so neither
+/// can end a line and inject headers.
 fn request(buf: []u8, method: []const u8, path: []const u8, header: []const u8) ?[]const u8 {
     for ([_][]const u8{ path, header }) |s| {
         for (s) |c| if (c < 0x20 or c > 0x7e) return null;
@@ -406,7 +375,8 @@ fn request(buf: []u8, method: []const u8, path: []const u8, header: []const u8) 
     }) catch null;
 }
 
-/// IMDSv2's tokens are base64-ish: anything else is not put in a header.
+/// validToken reports whether t looks like an IMDSv2 token (base64-ish), so
+/// it is safe to put in a header.
 fn validToken(t: []const u8) bool {
     if (t.len == 0 or t.len > 200) return false;
     for (t) |c| if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_' and c != '=' and
@@ -414,12 +384,13 @@ fn validToken(t: []const u8) bool {
     return true;
 }
 
-/// The only socket the fetcher makes, and so the only one its filter allows.
+/// socket_type is the only socket the fetcher makes, and the only one its
+/// filter allows.
 const socket_type: u32 = linux.SOCK.STREAM | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK;
 
-/// Send `req` to the metadata server and read its whole response, within
-/// 5 seconds; null on any failure, kept to say (miss). The response ends where its length says,
-/// or with its last chunk, or when the server closes.
+/// exchange sends req to the metadata server and reads the whole response
+/// within 5 seconds. The response ends at its length, its last chunk, or the
+/// server's close. It returns null on failure, recorded by miss.
 fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
     const deadline = nowMs() + 5_000;
     const rc = linux.socket(linux.AF.INET, socket_type, 0);
@@ -465,9 +436,9 @@ fn exchange(req: []const u8, buf: *[max_response]u8) ?[]u8 {
     }
 }
 
-/// Whether `resp` holds a whole response: its headers, and all of a body
-/// whose last chunk has come or whose length is given, read as
-/// parseResponse reads them, chunks first.
+/// complete reports whether resp holds a whole response: the head, and a
+/// body whose last chunk or full length has arrived. It reads the head as
+/// parseResponse does, so chunked encoding wins over Content-Length.
 fn complete(resp: []const u8) bool {
     const end = std.mem.find(u8, resp, "\r\n\r\n") orelse return false;
     const h = parseHead(resp[0..end]) orelse return false;
@@ -490,19 +461,18 @@ fn waitFor(fd: i32, events: i16, deadline: i64) bool {
 
 const Response = struct { status: u16, body: []const u8, google: bool };
 
-/// What werewolf reads of a response's head: its status, how its body
-/// ends, and GCP's mark.
+/// Head is what werewolf reads of a response's head: the status, how the
+/// body ends, and GCP's mark.
 const Head = struct {
     status: u16,
     length: ?usize = null,
     chunked: bool = false,
-    /// Metadata-Flavor: Google, as GCP's server says on every answer.
+    /// google is set by `Metadata-Flavor: Google`, which GCP sends on every answer.
     google: bool = false,
 };
 
-/// An HTTP/1.x response's head, the status line and headers before the
-/// blank line. Null for anything malformed, or a body encoded other than
-/// in chunks.
+/// parseHead parses an HTTP/1.x status line and headers. It returns null if
+/// they are malformed or the body has an encoding other than chunked.
 fn parseHead(head: []const u8) ?Head {
     var lines = std.mem.splitSequence(u8, head, "\r\n");
     const status_line = lines.next() orelse return null;
@@ -526,9 +496,8 @@ fn parseHead(head: []const u8) ?Head {
     return h;
 }
 
-/// An HTTP/1.x response: its status and body, the body decoded from
-/// chunks, in place, or cut to Content-Length where the server says so.
-/// Null for anything malformed.
+/// parseResponse parses an HTTP/1.x response. It dechunks the body in place,
+/// or cuts it to Content-Length if given. It returns null if malformed.
 fn parseResponse(resp: []u8) ?Response {
     const end = std.mem.find(u8, resp, "\r\n\r\n") orelse return null;
     const h = parseHead(resp[0..end]) orelse return null;
@@ -543,8 +512,8 @@ fn parseResponse(resp: []u8) ?Response {
     return .{ .status = h.status, .body = raw[0..l], .google = h.google };
 }
 
-/// text as digits in base and nothing else: no sign and no _ between them,
-/// which std.fmt.parseInt would take. Null for anything else, or too large.
+/// digits parses text as digits in base and nothing else. Unlike
+/// std.fmt.parseInt, it refuses a sign or _. It returns null on overflow.
 fn digits(text: []const u8, base: u8) ?usize {
     if (text.len == 0) return null;
     var v: usize = 0;
@@ -556,9 +525,8 @@ fn digits(text: []const u8, base: u8) ?usize {
     return v;
 }
 
-/// A chunked body, its chunks moved together in place: the decoded body is
-/// never longer than the encoded one, and always behind it. Null if
-/// malformed.
+/// dechunk decodes a chunked body in place, which is safe because the
+/// output never overtakes the input. It returns null if malformed.
 fn dechunk(body: []u8) ?[]const u8 {
     const out = body.ptr;
     var in: usize = 0;
@@ -581,8 +549,8 @@ fn dechunk(body: []u8) ?[]const u8 {
 
 // --- the parent's checks -----------------------------------------------------
 
-/// Standard base64, whitespace allowed between characters; null if it is
-/// not, or decodes to more than `out` holds.
+/// decodeBase64 decodes standard base64, ignoring whitespace. It returns null
+/// if text is not base64 or decodes to more than out holds.
 fn decodeBase64(text: []const u8, out: *[max_config]u8) ?[]const u8 {
     var clean: [max_response]u8 = undefined;
     var n: usize = 0;
@@ -600,11 +568,11 @@ fn decodeBase64(text: []const u8, out: *[max_config]u8) ?[]const u8 {
 }
 
 const Entry = struct {
-    /// ustar's name field holds 100 bytes, and only names that fit pass.
+    /// name_buf is 100 bytes, ustar's name field, so writeTar needs no prefix.
     name_buf: [100]u8,
     name_len: u8,
     dir: bool,
-    /// The file's contents, within the tar checked.
+    /// data is the file's contents, a slice of the checked tar.
     data: []const u8,
 
     fn name(e: *const Entry) []const u8 {
@@ -612,14 +580,11 @@ const Entry = struct {
     }
 };
 
-/// Check a tar entry by entry. Only regular files and directories pass,
-/// under names of letters, digits and . _ - /, relative, without . or ..
-/// components, each at most 32 KiB, at most 32 of them, and no name twice
-/// or beneath a file. A POSIX ustar or a
-/// GNU tar, as tar and bsdtar write them. pax headers, which macOS's tar
-/// adds for extended attributes, are skipped and never applied: what they
-/// say about the next entry is ignored, since the tar init extracts is
-/// written anew from the plain fields alone.
+/// checkTar checks a POSIX or GNU ustar entry by entry into out and returns
+/// the count. It passes only regular files and directories with safe relative
+/// names (settings.entryName), at most 32 entries of 32 KiB and 48 KiB in all,
+/// and no name twice or beneath a file. It skips pax headers, which macOS's tar adds: writeTar
+/// rebuilds the tar from plain fields, so nothing they say is applied.
 fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
     var n: usize = 0;
     var off: usize = 0;
@@ -646,7 +611,6 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
             },
             else => return error.NotAFileOrDirectory,
         };
-        // The name, with ustar's prefix where there is one.
         var name_buf: [256]u8 = undefined;
         const short = std.mem.sliceTo(h[0..100], 0);
         const prefix = if (posix) std.mem.sliceTo(h[345..500], 0) else "";
@@ -666,9 +630,9 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
         if (name.len > 100) return error.BadName;
         if (name.len > 0) {
             if (n == max_entries) return error.TooManyEntries;
-            // The same name twice, a name beneath a file, or a file above a
-            // name: a config that says two things is refused, not settled by
-            // whichever init meets last.
+            // Refuse a name twice, a name beneath a file, or a file above a
+            // name. A config that says two things must not be settled by
+            // whichever entry init extracts last.
             for (out[0..n]) |*e| {
                 if (std.mem.eql(u8, e.name(), name) or (!e.dir and beneath(name, e.name())) or
                     (!dir and beneath(e.name(), name))) return error.NameClash;
@@ -686,7 +650,7 @@ fn checkTar(tar: []const u8, out: *[max_entries]Entry) !usize {
     }
 }
 
-/// Whether path lies beneath the directory parent.
+/// beneath reports whether path lies under the directory parent.
 fn beneath(path: []const u8, parent: []const u8) bool {
     return path.len > parent.len and std.mem.startsWith(u8, path, parent) and
         path[parent.len] == '/';
@@ -705,8 +669,8 @@ fn checksumOk(h: *const [512]u8) bool {
     return sum == want;
 }
 
-/// A new tar of the entries checked: POSIX ustar, every entry owned by
-/// root, files 0600 and directories 0700, dated 1970, then the end.
+/// writeTar writes entries as a new POSIX ustar into out: every entry owned
+/// by root, files 0600 and directories 0700, dated 1970.
 fn writeTar(out: []u8, entries: []const Entry) []const u8 {
     var off: usize = 0;
     for (entries) |*e| {
@@ -746,8 +710,8 @@ fn writeTar(out: []u8, entries: []const Entry) []const u8 {
 
 // --- sandboxes ---------------------------------------------------------------
 
-/// The parent: no capabilities, never to gain any, writing only in
-/// /run/werewolf/cloud, and any system call beyond these fatal.
+/// sandboxParent drops every capability, limits writes to dir with Landlock,
+/// and kills the process on any system call beyond the few it needs.
 fn sandboxParent(dir: i32, in: i32) !void {
     try sandbox.keepOnly(0);
     try sandbox.landlock(&.{.{ .fd = dir, .access = sandbox.own_files }}, &.{});
@@ -762,7 +726,8 @@ fn sandboxParent(dir: i32, in: i32) !void {
 
 // --- files, pipes, time, logging ----------------------------------------------
 
-/// Write a file whole beneath `dir`: to a new name, then renamed over the old.
+/// writeFile writes data to name.new beneath dir and renames it over name,
+/// so init never sees a partial file.
 fn writeFile(dir: i32, comptime name: [:0]const u8, data: []const u8) !void {
     const tmp = std.fmt.comptimePrint("{s}.new", .{name});
     const fd = try sys(
@@ -789,7 +754,7 @@ fn writeFile(dir: i32, comptime name: [:0]const u8, data: []const u8) !void {
     _ = try sys(linux.renameat(dir, tmp, dir, name), "rename " ++ name);
 }
 
-/// Everything from `fd` until it closes; an error if more than fits.
+/// readAll reads fd until it closes. It fails if buf fills first.
 fn readAll(fd: i32, buf: []u8) ![]const u8 {
     var got: usize = 0;
     while (true) {
@@ -817,8 +782,8 @@ fn nowMs() i64 {
     return ts.sec * 1000 + @divFloor(ts.nsec, std.time.ns_per_ms);
 }
 
-/// JSON lines on stdout: `cloud-metadata: {"time":...,"event":...,...}`, built in a
-/// fixed buffer.
+/// Log writes events as JSON lines on stdout, built in a fixed buffer:
+/// `cloud-metadata: {"time":...,"event":...,...}`.
 const Log = struct {
     buf: [8 << 10]u8 = undefined,
 
@@ -853,7 +818,8 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 
 // --- tests -------------------------------------------------------------------
 
-/// A tar as tar(1) would write one: `entries` of name, typeflag, contents.
+/// testTar builds a tar as tar(1) writes one from entries of name, typeflag
+/// and contents.
 fn testTar(buf: []u8, entries: []const struct { []const u8, u8, []const u8 }) []const u8 {
     var off: usize = 0;
     for (entries) |e| {
@@ -908,7 +874,7 @@ test "a config as tar -C config . writes it" {
     try std.testing.expectEqualStrings("cloudflared", files[2].name());
     try std.testing.expect(files[2].dir);
 
-    // Written again, owned by root: and it checks the same.
+    // The rewritten tar, owned by root, passes the same checks.
     var out: [16384]u8 = undefined;
     const again = writeTar(&out, files[0..n]);
     var files2: [max_entries]Entry = undefined;
@@ -964,7 +930,7 @@ test "entries that are refused" {
             checkTar(testTar(&buf, &.{ c[0], c[1] }), &files),
         );
     }
-    // A directory, then what is in it, passes.
+    // A directory followed by its contents passes.
     try std.testing.expectEqual(2, try checkTar(
         testTar(&buf, &.{ .{ "d/", '5', "" }, .{ "d/x", '0', "a" } }),
         &files,
@@ -989,7 +955,7 @@ test "base64" {
     try std.testing.expectEqual(null, decodeBase64("", &out));
 }
 
-/// parseResponse of a literal, through a copy it may rewrite.
+/// parseText runs parseResponse on a writable copy of text.
 fn parseText(comptime text: []const u8) ?Response {
     const S = struct {
         var buf: [text.len]u8 = text[0..text.len].*;
@@ -1005,7 +971,7 @@ test "HTTP responses" {
     try std.testing.expectEqualStrings("hello", r.body);
     r = parseText("HTTP/1.0 404 Not Found\r\n\r\n").?;
     try std.testing.expectEqual(404, r.status);
-    // Without a length, the body runs to the close.
+    // Without a length, the body runs until the server closes.
     try std.testing.expectEqualStrings(
         "token",
         parseText("HTTP/1.1 200 OK\r\nServer: EC2ws\r\n\r\ntoken").?.body,
@@ -1039,7 +1005,6 @@ test "HTTP responses" {
         null,
         parseText("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+4\r\nwere\r\n0\r\n\r\n"),
     );
-    // GCP's mark, and its absence.
     try std.testing.expect(
         parseText("HTTP/1.1 200 OK\r\nMetadata-Flavor: Google\r\n\r\nx").?.google,
     );
@@ -1060,7 +1025,7 @@ test "a response is whole when its length or last chunk says so" {
         complete("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nwere\r\n0\r\n\r\n"),
     );
     try std.testing.expect(!complete("HTTP/1.1 200 OK\r\n\r\nuntil the close"));
-    // Both: the chunks rule, whichever header comes first.
+    // With both headers, chunked wins, whichever comes first.
     try std.testing.expect(!complete(
         "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n",
     ));
@@ -1098,7 +1063,7 @@ test "clouds by their firmware's names" {
     );
     try std.testing.expectEqual(null, identify("QEMU", "Standard PC (Q35 + ICH9, 2009)", ""));
     try std.testing.expectEqual(null, identify("Google", "Pixel", ""));
-    // Hyper-V on a desktop: Azure's names, without Azure's asset tag.
+    // Desktop Hyper-V has Azure's names but not Azure's asset tag.
     try std.testing.expectEqual(null, identify("Microsoft Corporation", "Virtual Machine", "None"));
     try std.testing.expectEqualStrings("?", printable("Evil\"vendor"));
 }

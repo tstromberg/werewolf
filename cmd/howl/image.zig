@@ -1,7 +1,6 @@
-//! A disk's name in a cloud's image store: werewolf-FORM-ARCH-DIGEST, the
-//! first 16 hex digits of the disk's sha256. The same build has the same
-//! name everywhere, so a second create, or a second person, finds the
-//! image there and uploads nothing.
+//! image names a disk in a cloud's image store by its content, so a second
+//! create, or a second person, finds the image and uploads nothing.
+//! See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -9,8 +8,9 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const howl = @import("howl.zig");
 
-/// werewolf-FORM-ARCH-DIGEST: lower case, digits and -, at most 63, as
-/// GCP wants, so x86_64 is x86-64; the others take it as it is.
+/// name returns werewolf-FORM-ARCH-DIGEST, DIGEST being the first 16 hex
+/// digits of digest. GCP allows only lower case, digits and - (at most 63),
+/// so x86_64 is written x86-64; the other clouds take the same name.
 pub fn name(gpa: Allocator, form: []const u8, arch: howl.Arch, digest: []const u8) ![]const u8 {
     return gpa.print("werewolf-{s}-{s}-{s}", .{
         form,
@@ -22,7 +22,7 @@ pub fn name(gpa: Allocator, form: []const u8, arch: howl.Arch, digest: []const u
     });
 }
 
-/// The hex sha256 of a file.
+/// sha256 returns the hex sha256 of the file at path.
 pub fn sha256(io: Io, path: []const u8) ![64]u8 {
     var f = try Dir.cwd().openFile(io, path, .{});
     defer f.close(io);

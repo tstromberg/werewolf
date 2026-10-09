@@ -8,14 +8,3 @@
 contents:
   packages:
     - sftpgo
-
-accounts:
-  groups:
-    - groupname: sftpgo
-      gid: 212
-  users:
-    - username: sftpgo
-      uid: 212
-      gid: 212
-      homedir: /var/empty
-      shell: /sbin/nologin

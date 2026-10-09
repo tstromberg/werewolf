@@ -1,29 +1,30 @@
 #!/bin/sh
 # update DIR CMDLINE QEMU...
 #
-# A whole update, as a machine does one, over the network: a slot built
-# from Wolfi and Alpine, or, for a form CI publishes, its latest signed
-# release. DIR/victim.img holds slot a, whose build record claims a kernel
-# one release older than its own, and GRUB's environment; DIR/vmlinuz and
-# DIR/stage0.zst boot it. QEMU... is the machine, with the network and
-# -no-reboot; CMDLINE is the kernel command line, but for werewolf.slot.
+# update runs a whole update over the network, as a machine does one. The
+# new slot is built from Wolfi and Alpine or, for a form CI publishes, is its
+# latest signed release. DIR/victim.img holds GRUB's environment and slot a,
+# whose build record claims a kernel one release older than its own.
+# DIR/vmlinuz and DIR/stage0.zst boot it. QEMU... is the machine, with the
+# network and -no-reboot. CMDLINE is the kernel command line, without
+# werewolf.slot.
 #
-# First boot, slot a: it commits, the updater finds Alpine's kernel newer,
-# fetches and builds slot b (or fetches the release's), and stages it; it
-# is the machine's first check, so slot b is due within two minutes, and
-# the updater reboots into it, which ends QEMU
-# (docs/design/update-policy.md).
-# Then, from the disk: the report names both CVE sources with a sha256 and
-# no error; each apk cache kept its packages; slot b's root is root's, mode
-# 0755; GRUB will boot b once; slot b's stage0 has the build's device nodes. Second boot, slot b: it must commit, and the
-# updater record that the update held. In neither boot may a seccomp
+# First boot, slot a: it commits, and the updater finds Alpine's kernel
+# newer. It builds slot b (or fetches the release's) and stages it. This is
+# the machine's first check, so slot b is due within two minutes, and the
+# updater reboots into it, which ends QEMU (docs/design/update-policy.md).
+# Then update checks the disk: the report lists each CVE source with a
+# sha256 and no error; each apk cache kept its packages; slot b's root is
+# owned by root, mode 0755; GRUB will boot b once; and slot b's stage0 has
+# the build's device nodes. Second boot, slot b: it must commit, and the
+# updater must record that the update held. In neither boot may a seccomp
 # filter have killed anything. The consoles are DIR/update-1.log and
 # DIR/update-2.log.
 #
 # With STAGED=1, the machine has checked before (its log is seeded), so the
-# updater stages slot b and waits for it to be due, hours off; QEMU is cut
-# off the moment it is staged, as a crash or an operator's reboot would end
-# it, and slot b must boot all the same: a staged slot is armed
+# updater stages slot b and waits hours for it to be due. update cuts QEMU
+# off the moment slot b is staged, as a crash or an operator's reboot
+# would, and slot b must boot all the same, because a staged slot is armed
 # (docs/design/update-policy.md).
 set -u
 staged=${STAGED:-}
@@ -39,7 +40,7 @@ check() { # check WHAT CONDITION...
 	if "$@"; then say pass "$what"; else say FAIL "$what"; failed=1; fi
 }
 
-# debugfs, from e2fsprogs, which Homebrew keeps off the PATH.
+# Find debugfs, from e2fsprogs; Homebrew keeps it off the PATH.
 debugfs=$(command -v debugfs)
 for d in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
 	[ -n "$debugfs" ] || [ ! -x "$d/debugfs" ] || debugfs=$d/debugfs
@@ -50,9 +51,10 @@ victim_cat() { "$debugfs" -R "cat $1" "$dir/victim.img" 2>/dev/null; }
 victim_dump() { "$debugfs" -R "dump $1 $2" "$dir/victim.img" >/dev/null 2>&1; }
 victim_ls() { "$debugfs" -R "ls -p $1" "$dir/victim.img" 2>/dev/null | awk -F/ '$6 != "" && $6 != "." && $6 != ".." { print $6 }'; }
 
-# boot N SLOT KERNEL INITRD UNTIL LIMIT QEMU...: boot slot SLOT, its console
-# in update-N.log. Ends QEMU when a line matches UNTIL, an extended regex,
-# and fails after LIMIT seconds; QEMU ending by itself ends it too.
+# boot N SLOT KERNEL INITRD UNTIL LIMIT QEMU... boots slot SLOT with its
+# console in update-N.log. It ends QEMU when a line matches UNTIL, an
+# extended regex, and fails after LIMIT seconds. It also returns when QEMU
+# ends by itself.
 boot() {
 	n=$1 slot=$2 kernel=$3 initrd=$4 until=$5 limit=$6
 	shift 6
@@ -86,7 +88,8 @@ event() { grep -a -o "autoupdate: .*\"event\":\"$2\".*" "$dir/update-$1.log" | h
 
 state=/var/lib/werewolf/data/svc/autoupdate
 if [ -n "$staged" ]; then
-	# A log from an earlier check, owned and moded as the updater's own.
+	# Seed a log from an earlier check, with the owner and mode the updater
+	# gives its own.
 	printf '{"time":"2026-01-01T00:00:00Z","host":"werewolf","event":"check","result":"current"}\n' >"$dir/seed.log"
 	for d in /var/lib/werewolf/data /var/lib/werewolf/data/svc $state; do
 		"$debugfs" -w -R "mkdir $d" "$dir/victim.img" >/dev/null 2>&1
@@ -104,9 +107,9 @@ else
 	until='"event":"(check|error)"'
 fi
 
-# First boot. A staged update reboots when due, ending QEMU; a check or an
-# error leaves the machine up, so it is ended then. With STAGED=1, the
-# stage ends it: the power cut.
+# First boot. A staged update reboots when due, which ends QEMU. A check or
+# an error leaves the machine up, so boot ends QEMU then. With STAGED=1, the
+# stage event ends it: that is the power cut.
 boot 1 a "$dir/vmlinuz" "$dir/stage0.zst" "$until" 3600 "$@" || exit 1
 if [ -z "$(event 1 stage)" ]; then
 	say FAIL "no update: $(grep -a -o 'autoupdate: .*"event":"\(check\|error\)".*' "$dir/update-1.log" | head -1)"
@@ -115,9 +118,8 @@ fi
 say pass "slot a staged an update: $(event 1 stage | sed 's/.*"kernel":"\([^"]*\)".*"cves":\([0-9]*\).*/\1, \2 CVEs/')"
 if [ -n "$staged" ]; then
 	check "staged, and not yet due: the updater did not reboot" absent '"event":"reboot"' "$dir/update-1.log"
-	# Cut off, the filesystem's last changes are in its journal, which the
-	# next mount replays; debugfs does not, so replay it first, as that
-	# mount would.
+	# After the cut, the filesystem's last changes are in its journal. The
+	# next mount replays it, but debugfs does not, so replay it first.
 	"$e2fsck" -y -E journal_only "$dir/victim.img" >/dev/null 2>&1
 	check "what was staged is on the disk: the log's stage line" sh -c \
 		"'$debugfs' -R 'cat $state/log' '$dir/victim.img' 2>/dev/null | grep -q '\"event\":\"stage\"'"
@@ -127,12 +129,12 @@ fi
 check "no seccomp kill in slot a" absent 'type=1326' "$dir/update-1.log"
 
 victim_cat "$state/reports/$(victim_ls $state/reports | tail -1)" >"$dir/report.json"
-# One source or two: the kernel's only when the kernel changed.
+# The report lists one source or two: the kernel's only when the kernel changed.
 listed=$(grep -c '"url": ' "$dir/report.json")
 hashed=$(grep -c '"sha256": "[0-9a-f]\{64\}"' "$dir/report.json")
 clean=$(grep -c '"error": null' "$dir/report.json")
 check "the report's $listed CVE sources fetched, with their sha256" [ "$listed" -gt 0 -a "$hashed" -eq "$listed" -a "$clean" -eq "$listed" ]
-# A slot built from Wolfi and Alpine leaves apk's caches; a release, none.
+# A slot built from Wolfi and Alpine leaves apk's caches; a release leaves none.
 if victim_ls $state | grep -qx cache; then
 	for cache in root kernel; do
 		n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
@@ -146,11 +148,11 @@ root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gi
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]
 check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.img"
 
-# Second boot: what the update built.
+# Second boot: boot what the update built.
 victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
 victim_dump /boot/werewolf/b/stage0.zst "$dir/b-stage0.zst"
-# The device nodes in a stage0, by type, mode and name: the build's
-# (cmd/stage0/stage0.mtree), and slot-update must write the same, /dev/console above all,
+# devices lists a stage0's device nodes by type, mode and name. slot-update
+# must write the build's (cmd/stage0/stage0.mtree), above all /dev/console,
 # which the kernel gives stage0 as its stdin, stdout and stderr.
 devices() { zstd -dc "$1" | bsdtar -tvf - 2>/dev/null | awk '$1 ~ /^c/ { print $1, $NF }' | sort; }
 built=$(devices "$dir/stage0.zst")

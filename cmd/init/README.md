@@ -2,109 +2,99 @@
 
 ## Summary
 
-PID 1 from stage0's handover until runit: it makes the machine reachable
-(filesystems, the kernel's settings, one address, the operator's keys,
-`/data`), seals it, and hands over to fence, which becomes runit.
+init is PID 1 from stage0's handover until runit. It mounts filesystems,
+sets the kernel's protections, reads the config, brings up the network and
+`/data`, seals the machine, and execs fence, which becomes runit.
 
 ## Background
 
-stage0 mounts the verified, read-only root and hands over. Nothing after can
-write the root, so what changes lives in `/run`, `/tmp`, `/var/tmp` and
-`/data`. init decides from what the image carries (a DHCP client, mke2fs,
-cryptsetup) and what it is told: the kernel command line (`werewolf.ip`,
-`.gw`, `.dns`, `.mac`, `.data`, `.victim`; `lib/cmdline.zig`), and one config.
-It runs no shell: werewolf's programs and the form's tools, by full path.
+stage0 mounts the verified, read-only root, so all that changes lives in
+`/run`, `/tmp`, `/var/tmp` and `/data`. init is in every form and must not
+know which: it decides from the tools the image carries (DHCP client,
+mke2fs, cryptsetup), the command line's `werewolf.*` words
+(`lib/cmdline.zig`) and one config tar. It runs no shell.
 
 ## Goals
 
-- On the network, with its keys and `/data`, in under a second of userland.
-- Every protection (lockdown, sysctls, the seal, fence) before any service.
-- Fail closed on what protects the machine; boot on, and say so, on the rest.
-- Never destroy data: a disk is formatted once, while blank, and never again.
+- Reach the network, with keys and `/data`, in under a second of userland.
+- Set every protection (lockdown, sysctls, MDWE, seal, fence) first.
+- Fail closed on what protects the machine; log and boot on for the rest.
+- Never destroy data: format a disk only while it is blank.
 
 ## Non-Goals
 
-- Running services (runit does), or cloud-init: a seed gives a user and
-  keys, never scripts. Knowing the form: it only has the tools or not.
+- Running services (runit does), or scripts from a cloud-init seed.
 
 ## Detailed design
 
-Each phase is a file: `kernel.zig`, `config.zig`, `network.zig`, `data.zig`,
-`oci.zig`, `seal.zig`; `init.zig` runs them in order, as `m.kernel()` and
-so on. `oci.zig` runs only where the build listed image roots
-(`/usr/share/werewolf/oci`): beneath each, a procfs of its own, the CPU
-count, five devices, the resolver, the service's `/tmp`, `/run` and
-`/data` from its own places, and each path it writes, all before fence
-closes mounting ([adhoc.md](../../docs/design/adhoc.md)).
+`init.zig` runs the phases in order, each in its own file:
 
-1. **Filesystems**: `/proc` (`hidepid=invisible`), `/sys`, `/dev`, and RAM
-   filesystems, all `nosuid` and `noexec`, the RAM ones `nosymfollow`; a
-   cgroup2 tree for leash's services; accounts seeded into `/run` from the
-   image's copies.
-2. **The kernel**: lockdown raised to integrity, modules loaded and closed,
-   the protective sysctls, the audit of every refused exec, locked
-   (`lib/audit.zig`), then Memory-Deny-Write-Execute on PID 1 unless the
-   form allows `jit`. A sysctl or MDWE the kernel refuses ends the boot,
-   but in a container, where they are the host's; audit it cannot is said
-   and passed.
-3. **The config** on the machine's disks, one tar: the victim's
-   `config.tar`, or else the first block device holding one; any other is
-   said and ignored. A confined child extracts it to `/run/config` (root's
-   uid without capabilities, Landlock on `/run/config` alone, seccomp of
-   file calls; at most 256 entries and 16 MiB). Beside it, a NoCloud
-   volume labelled `cidata` adds a user, keys and Lima's data files, never
-   the tar's, nor its `network-config`.
-4. **The network**: `iface-up` with the command line's address, or else
-   the config tar's `network` file's (`lib/network.zig`, checked as
-   `howl pack` checks it), or else `dhcp-client up`. Then, where no
-   disk held a config, `cloud-metadata`; a `network` file it brings comes
-   too late, and is said and not read. Then the hostname and root's keys.
-5. **`/data`**: a directory beside the slots, RAM, or the disk labelled
-   `werewolf-data`, in LUKS2 when the config has a `data.key` of 32 bytes
-   or more. Anything it cannot use is left as it is, and `/data` is an
-   empty read-only tmpfs, with the reason in `/run/werewolf/nodata`.
-6. **The seal**, then the two programs that must stay outside fence's
-   domain (the mount broker; DHCP's renewal), the console opened to the
-   kernel's notices, its refusals, then `exec fence runit`.
+1. **Filesystems** (`kernel.zig`): `/proc` (`hidepid=invisible`), `/sys`,
+   `/dev`, RAM filesystems (`nosymfollow`), all `nosuid,noexec`; devpts only
+   if the form allows `pty`; cgroup2 for leash; accounts copied to `/run`.
+2. **Kernel** (`kernel.zig`): lockdown to integrity, modules loaded and the
+   loader closed (`cmd/modload`), sysctls, audit of refused execs, then MDWE
+   on PID 1 unless the form allows `jit`. A refused sysctl or MDWE ends the
+   boot, except in a container, where they are the host's.
+3. **Config** (`config.zig`): one tar, the victim's `config.tar` or else
+   the first block device holding one; others are logged and ignored. A
+   confined child (no capabilities, Landlock, seccomp) extracts it to
+   `/run/config`. A NoCloud volume labelled `cidata` adds a user, keys and
+   Lima's data files, never replacing the tar's.
+4. **Network** (`network.zig`): `iface-up` with the command line's or the
+   tar's address (`lib/network.zig`), else `dhcp-client up`. Router
+   advertisements count on that NIC only. Without a disk config,
+   `cloud-metadata` fetches one. Then the hostname and root's keys.
+5. **`/data`** (`data.zig`): a directory beside the slots, RAM, or the disk
+   labelled `werewolf-data`, in LUKS2 when the config has a `data.key`.
+   Otherwise `/data` is an empty read-only tmpfs and `/run/werewolf/nodata`
+   says why, which also stops a slot on probation from committing.
+6. **Image roots** (`oci.zig`), if the build listed any: binds for each,
+   made before fence forbids mounting ([adhoc.md](../../docs/design/adhoc.md)).
+7. **Seal** (`seal.zig`): core dumps off, helpers cut to CAP_SYS_BOOT,
+   seal-watch started, bounding set cut, seccomp filter installed. The mount
+   broker and DHCP renewal start outside fence; then `exec fence runit`.
 
 ## Drawbacks
 
-- Before the seal it runs as root with every capability, and the kernel
-  still parses whatever filesystem a config or seed disk carries.
+- Until the seal it runs as root with every capability, and the kernel
+  parses whatever filesystem a config or seed disk carries.
 - A single-slot machine that fails closed reboots into the same image.
+- `/data` follows links (`symfollow`), since the updater and apk build
+  roots there, so a service could plant a link for a root program walking
+  its directory. None does today. Open; listed in docs/security.md.
 
 ## Alternatives Considered
 
-### A shell script, as most distributions' initramfs
-A shell is what werewolf ships without; a program parses its inputs strictly
-and can run with no interpreter in the image.
+### A shell script, as most initramfs use
+werewolf ships no shell, and a program parses its inputs strictly.
 
 ### Merging every config found
-A disk attached by anyone would then add to or replace root's keys. One
-source, said, leaves no doubt which config the machine runs.
+Any attached disk could then add to or replace root's keys. One source,
+logged, leaves no doubt which config the machine runs.
 
 ### Probing every disk for a NoCloud seed
-That mounts every disk through the kernel's ISO 9660 parser. Each disk's
-volume descriptor, read directly, names the one that is a seed.
+That mounts every disk through the kernel's ISO 9660 parser, and blkid
+costs 85 ms on GCP. Reading each disk's volume descriptor finds the seed.
 
 ## Security Considerations
 
 | Risk | Mitigation |
 | --- | --- |
-| A hostile config tar on a disk | Extracted by a confined child; plain relative names, files and directories only, no links; 1 MiB a file, 16 MiB and 256 entries in all. |
-| A second config disk, attached later | Ignored, and said: one source only. |
-| A hostile disk mounted to look for a seed | Only a device labelled `cidata` is mounted, read-only, `nosuid`, `noexec`. |
-| A weak `data.key` with a quick KDF | LUKS2 is not made with one under 32 bytes; an existing disk opened with one is warned of. |
+| A hostile config tar | Confined child; plain relative names, files and directories only; size limits checked on both passes. |
+| A hostile seed disk | Only a device labelled `cidata` is mounted, read-only, `nosuid`, `noexec`. |
+| A FIFO or link on a victim or seed | Opened `O_NOFOLLOW`; only a regular file (or a disk, for a tar) is read, so PID 1 cannot block. |
+| A weak `data.key` | LUKS2 is not made with one under 32 bytes; an existing disk opened with one is warned of. |
 | A disk that claims to be `/data` | Two with the label are refused, as is a device holding a config tar. |
 | A security sysctl not applied | The boot ends, and the machine returns on the slot that last worked. |
-| Helpers the kernel starts outside the seal | Their capabilities are cut to CAP_SYS_BOOT before the seal. |
+| Usermode helpers outside the seal | Cut to CAP_SYS_BOOT; `kernel.modprobe` and `kernel.hotplug` emptied. |
 
 ## Reliability Considerations
 
-- **Fails closed** on the sysctls, the seal and fence: PID 1 ends, the
-  kernel panics (`panic=10`), and GRUB's one-try entry falls back. Any
-  other step, a hostname or a key, is said and passed.
-- **Never formats twice**: a disk with the label is checked (`e2fsck -p`)
-  and mounted, or left alone; stdin is `/dev/null`, so no tool can prompt.
+- **Fails closed** on the command line, the sysctls, MDWE, the seal and
+  fence: PID 1 exits, the kernel panics (`panic=10`), and GRUB's one-try
+  entry falls back. Other steps, such as a hostname or a key, log and pass.
+- **Never formats twice**: a labelled disk is checked (`e2fsck -p`) and
+  mounted, or left alone. stdin is `/dev/null`, so no tool can prompt.
 - **Tested**: every `make check` boot runs it, with a static address, DHCP,
   a config disk, LUKS, slots, metadata servers and Lima.

@@ -1,20 +1,6 @@
-//! Proxmox VE: a werewolf machine as a VM on a Proxmox node, experimental
-//! and never yet run against a node, from the same two files every target
-//! takes: the release's disk, which the node's OVMF boots, and the config
-//! tar, imported as a second, read-only virtio disk, where init finds it.
-//!
-//! Proxmox's own command, qm, runs on the node, so everything here is qm
-//! over ssh, with an explicit argument list, to the node PROXMOX_HOST
-//! names (root@NODE, or an ssh config Host); PROXMOX_STORAGE (local-lvm)
-//! holds the disks and PROXMOX_BRIDGE (vmbr0) is the network. The node
-//! keeps werewolf's files in /var/lib/vz/werewolf: each image, named by
-//! its digest, so a second create uploads nothing; each machine's config
-//! tar, which qm imports; and each machine's console, a file QEMU writes
-//! through an extra argument, since Proxmox keeps a serial port on a
-//! socket and no log. qm is the state: a VM with the tag werewolf and a
-//! description naming its form is one of ours, and nothing here remembers
-//! more. The machine takes its address from the network's DHCP server,
-//! which its console reports, or a static one from its tar.
+//! proxmox runs werewolf machines as VMs on a Proxmox VE node, by running
+//! qm over ssh. It is experimental and has never run against a real node.
+//! See README.md.
 
 const std = @import("std");
 const howl = @import("howl.zig");
@@ -23,14 +9,17 @@ const booting = @import("boot.zig");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
-/// Where the node keeps werewolf's files.
+/// dir holds werewolf's images, config tars and console logs on the node.
 pub const dir = "/var/lib/vz/werewolf";
-/// How long create waits for a machine to say it is up.
+/// wait_seconds is how long create waits for the machine to boot.
 const wait_seconds = 180;
 
-/// The node, and what on it the machine uses.
+/// Place is the node's ssh host and the storage and bridge VMs use there.
 pub const Place = struct { host: []const u8, storage: []const u8, bridge: []const u8 };
 
+/// place reads PROXMOX_HOST, PROXMOX_STORAGE (default local-lvm) and
+/// PROXMOX_BRIDGE (default vmbr0). It refuses a missing host or any value
+/// that is not plain.
 pub fn place(environ: *const std.process.Environ.Map, why: *howl.Why) !Place {
     const host = environ.get("PROXMOX_HOST") orelse return why.refuse(
         "--on proxmox: PROXMOX_HOST=root@NODE names the node, by ssh; PROXMOX_STORAGE " ++
@@ -49,20 +38,20 @@ pub fn place(environ: *const std.process.Environ.Map, why: *howl.Why) !Place {
     return p;
 }
 
-/// Whether s reaches the node's shell as itself: every word of a command
-/// is joined by ssh and split there again, so none may hold a space or a
-/// character the shell reads. Names, paths and ids here never do.
+/// plain reports whether s passes through the node's shell unchanged. ssh
+/// joins the words of a command and the remote shell splits them again, so
+/// a space or shell metacharacter could inject commands.
 pub fn plain(s: []const u8) bool {
     for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._-@:", c) == null)
         return false;
     return true;
 }
 
-/// A command on the node: ssh, then its words.
+/// remote returns the argv that runs args on the node over ssh.
 fn remote(gpa: Allocator, p: Place, args: []const []const u8) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
-    // Bounded: a node that drops packets fails each command in seconds,
-    // not the minutes of TCP's own timeout, so every wait keeps its limit.
+    // Time out in seconds, not TCP's minutes, so a node that drops packets
+    // cannot stretch a wait past its limit.
     try argv.appendSlice(gpa, &.{
         "ssh", "-o",                     "BatchMode=yes", "-o", "ConnectTimeout=10",
         "-o",  "ServerAliveInterval=15", p.host,
@@ -71,7 +60,8 @@ fn remote(gpa: Allocator, p: Place, args: []const []const u8) ![]const []const u
     return argv.items;
 }
 
-/// The node's answer, trimmed, or null if the command failed.
+/// ask runs args on the node and returns its trimmed output, or null if it
+/// failed.
 fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
     const r = std.process.run(gpa, io, .{ .argv = remote(gpa, p, args) catch return null }) catch
         return null;
@@ -81,8 +71,8 @@ fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
         null;
 }
 
-/// The image's file on the node, werewolf-FORM-ARCH-DIGEST.qcow2, uploaded
-/// unless it is there already.
+/// ensureImage returns the image's path on the node, uploading disk unless
+/// the file is there. The name holds the digest, so each build uploads once.
 pub fn ensureImage(
     io: Io,
     gpa: Allocator,
@@ -104,16 +94,17 @@ pub fn ensureImage(
     return path;
 }
 
-/// The machine's config tar's and console's files on the node.
+/// tarPath returns the path of machine name's config tar on the node.
 pub fn tarPath(gpa: Allocator, name: []const u8) ![]const u8 {
     return gpa.print("{s}/{s}-config.tar", .{ dir, name });
 }
 
+/// logPath returns the path of machine name's console log on the node.
 pub fn logPath(gpa: Allocator, name: []const u8) ![]const u8 {
     return gpa.print("{s}/{s}.console", .{ dir, name });
 }
 
-/// The config tar, copied to the node as itself, kept 0600 as it was.
+/// upload copies the config tar to the node, keeping its 0600 mode.
 pub fn upload(
     io: Io,
     gpa: Allocator,
@@ -132,12 +123,12 @@ pub fn upload(
     });
 }
 
-/// A VM of ours on the node: its id, whether it runs, and its form.
+/// Machine is a werewolf VM on the node.
 pub const Machine = struct { vmid: []const u8, running: bool, form: []const u8 };
 
-/// The VM named name that werewolf made, if any: qm list has the names,
-/// and its config the form. A node that does not answer is refused: taken
-/// for "none", it would have delete forget a VM that runs on.
+/// find returns the werewolf VM called name, or null if there is none. A
+/// node that does not answer is refused: treating it as "no VM" would make
+/// delete forget a VM that is still running.
 pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !?Machine {
     const list = ask(io, gpa, p, &.{ "qm", "list" }) orelse
         return why.refuse("{s}: qm list failed", .{p.host});
@@ -157,7 +148,8 @@ pub fn find(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) 
     return null;
 }
 
-/// A row of qm list: VMID NAME STATUS ..., skipping its header.
+/// parseRow parses a qm list row (VMID NAME STATUS ...). It returns null
+/// for the header.
 pub fn parseRow(line: []const u8) ?struct {
     vmid: []const u8,
     name: []const u8,
@@ -165,7 +157,7 @@ pub fn parseRow(line: []const u8) ?struct {
 } {
     var words = std.mem.tokenizeAny(u8, line, " \t\r");
     const vmid = words.next() orelse return null;
-    // Digits only: the id goes back to the node's shell, in qm's commands.
+    // Accept digits only: the id is passed back to the node's shell.
     for (vmid) |c| if (!std.ascii.isDigit(c)) return null;
     return .{
         .vmid = vmid,
@@ -174,8 +166,8 @@ pub fn parseRow(line: []const u8) ?struct {
     };
 }
 
-/// The form a VM's config says it was made from, in the description
-/// create wrote, or null for a VM that is not ours.
+/// formOf returns the form named in the description create wrote, or null
+/// for a VM werewolf did not make.
 pub fn formOf(config: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, config, '\n');
     const prefix = "description: " ++ howl.form_tag ++ ": ";
@@ -186,20 +178,14 @@ pub fn formOf(config: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The next free VMID in the cluster.
+/// nextId returns the cluster's next free VMID.
 pub fn nextId(io: Io, gpa: Allocator, p: Place) ?[]const u8 {
     const id = ask(io, gpa, p, &.{ "pvesh", "get", "/cluster/nextid" }) orelse return null;
     const t = std.mem.trim(u8, id, "\"");
     return if (t.len > 0 and plain(t)) t else null;
 }
 
-/// The VM, made: q35 with OVMF and no vendor keys, since werewolf's boot
-/// loader is signed by no one it knows; two CPUs of the host's kind and
-/// 2 GiB; the image and the tar imported onto the storage, the tar raw and
-/// read-only; virtio network on the bridge, and a virtio random number
-/// device; and the serial console on a file on the node, by QEMU's own
-/// arguments, which Proxmox passes through for root (args). The form is in
-/// the description, and the tag werewolf marks it ours.
+/// create makes VM vmid from image, without starting it. See createArgs.
 pub fn create(
     io: Io,
     gpa: Allocator,
@@ -213,6 +199,11 @@ pub fn create(
     try howl.run(io, why, try remote(gpa, p, try createArgs(gpa, p, vmid, name, form, image)));
 }
 
+/// createArgs returns the qm create command. OVMF gets no pre-enrolled keys
+/// because no vendor signs werewolf's loader. The config tar is a raw,
+/// read-only second disk. Proxmox keeps no serial log, so QEMU args (root
+/// only) write the console to a file. The tag and description mark the VM
+/// as werewolf's.
 pub fn createArgs(
     gpa: Allocator,
     p: Place,
@@ -227,7 +218,7 @@ pub fn createArgs(
         vmid,
         "--name",
         name,
-        // Quoted for the node's shell, which splits what ssh joined.
+        // Quote it: the node's shell splits what ssh joined.
         "--description",
         try gpa.print("'{s}: {s}'", .{ howl.form_tag, form }),
         "--tags",
@@ -266,8 +257,8 @@ pub fn createArgs(
     });
 }
 
-/// The config tar as a disk: imported raw, so the bytes are the tar's,
-/// and read-only.
+/// configDisk returns the spec that imports the config tar as a raw,
+/// read-only disk, so init reads the tar's bytes as they are.
 fn configDisk(gpa: Allocator, p: Place, name: []const u8) ![]const u8 {
     return gpa.print(
         "{s}:0,import-from={s},format=raw,ro=1",
@@ -279,15 +270,14 @@ pub fn start(io: Io, gpa: Allocator, p: Place, vmid: []const u8, why: *howl.Why)
     try howl.run(io, why, try remote(gpa, p, &.{ "qm", "start", vmid }));
 }
 
-/// A hard stop: qm shutdown presses the ACPI power button, which no
-/// werewolf machine answers on x86_64 yet.
+/// stop powers the VM off hard. qm shutdown would press the ACPI power
+/// button, which werewolf does not yet answer on x86_64.
 pub fn stop(io: Io, gpa: Allocator, p: Place, vmid: []const u8, why: *howl.Why) !void {
     try howl.run(io, why, try remote(gpa, p, &.{ "qm", "stop", vmid }));
 }
 
-/// A new config for a VM that exists: stopped, its tar's disk replaced by
-/// one imported from the new tar, the old one, left unused, removed, and
-/// started again.
+/// reconfigure stops the VM, swaps its config disk for one imported from the
+/// uploaded tar, and removes the old disk. The caller starts it again.
 pub fn reconfigure(
     io: Io,
     gpa: Allocator,
@@ -309,7 +299,8 @@ pub fn reconfigure(
     );
 }
 
-/// The VM, its disks and its files on the node, gone; the image stays.
+/// delete destroys the VM, its disks, and its config tar and console log.
+/// The image stays for later machines.
 pub fn delete(
     io: Io,
     gpa: Allocator,
@@ -331,14 +322,15 @@ pub fn delete(
     _ = ask(io, gpa, p, &.{ "rm", "-f", try tarPath(gpa, name), try logPath(gpa, name) });
 }
 
-/// The console's size on the node now, so a wait reads only what follows.
+/// logSize returns the console log's current size, so a later wait reads
+/// only new output.
 pub fn logSize(io: Io, gpa: Allocator, p: Place, name: []const u8) u64 {
     const s = ask(io, gpa, p, &.{ "stat", "-c", "%s", logPath(gpa, name) catch return 0 }) orelse
         return 0;
     return std.fmt.parseInt(u64, s, 10) catch 0;
 }
 
-/// The console from byte from on: the whole of it for 0.
+/// console returns the console log from byte offset from on.
 pub fn console(io: Io, gpa: Allocator, p: Place, name: []const u8, from: u64) ?[]const u8 {
     return ask(io, gpa, p, &.{
         "tail",
@@ -348,7 +340,8 @@ pub fn console(io: Io, gpa: Allocator, p: Place, name: []const u8, from: u64) ?[
     });
 }
 
-/// Wait for init's "up in" line on the console, past the first seen bytes.
+/// awaitUp waits for the boot to finish or panic, ignoring the first seen
+/// bytes of the console.
 pub fn awaitUp(
     io: Io,
     gpa: Allocator,
@@ -364,9 +357,8 @@ pub fn awaitUp(
     return .late;
 }
 
-/// The address the console says the machine took: the last DHCP lease
-/// dhcp-client reported ("event":"bound", "addr":"A/N"), without its
-/// prefix length; null where none was.
+/// address returns the IPv4 address of the last lease dhcp-client logged on
+/// the console ("event":"bound"), without its prefix length, or null.
 pub fn address(text: []const u8) ?[]const u8 {
     var found: ?[]const u8 = null;
     var lines = std.mem.splitScalar(u8, text, '\n');
@@ -377,13 +369,13 @@ pub fn address(text: []const u8) ?[]const u8 {
         const end = std.mem.findScalar(u8, rest, '"') orelse continue;
         const addr = rest[0..end];
         const ip = addr[0 .. std.mem.findScalar(u8, addr, '/') orelse addr.len];
-        // The guest wrote it: an address, or nothing, never other text.
+        // The guest wrote this text, so accept only a real address.
         if (isIp4(ip)) found = ip;
     }
     return found;
 }
 
-/// Whether s is a dotted-quad IPv4 address.
+/// isIp4 reports whether s is a dotted-quad IPv4 address.
 fn isIp4(s: []const u8) bool {
     var octets = std.mem.splitScalar(u8, s, '.');
     var n: usize = 0;

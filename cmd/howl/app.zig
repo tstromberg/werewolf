@@ -1,14 +1,5 @@
-//! --app DIR: an application's files, laid over a form's image where the
-//! form keeps its application. The form says where, in form.yaml's app
-//! (the app forms /usr/lib/app, nginx its html root), and its service file
-//! how to run it and which settings it takes; DIR is what to run. DIR is
-//! built by its own toolchain (go build, dotnet publish, mvn package), and
-//! werewolf only copies it: regular files and directories, an executable
-//! bit kept, nothing setuid, no links. The copy is staged apart, laid over
-//! the image by make (APP), and verified and read-only there with the rest
-//! of the root. Its digest, over every path, executable bit and byte, is
-//! the application's name: the same DIR gives the same digest, and so the
-//! same image.
+//! app stages --app DIR, a built application, for make to lay over a form's
+//! image at the path form.yaml's app: names. See README.md.
 
 const std = @import("std");
 const howl = @import("howl.zig");
@@ -21,8 +12,11 @@ const File = struct { path: []const u8, exec: bool };
 
 pub const Staged = struct { files: usize, bytes: u64, digest: [64]u8 };
 
-/// Copy src to root/place, refusing what an application has no need of,
-/// and the digest of what was copied.
+/// stage copies the regular files and directories under src to root/at and
+/// returns their count, size and digest. It refuses links, devices and
+/// setuid or setgid files, which an application never needs. The digest
+/// covers every path, executable bit and byte, so the same DIR gives the
+/// same image.
 pub fn stage(
     io: Io,
     gpa: Allocator,
@@ -40,6 +34,7 @@ pub fn stage(
     var walker = try from.walk(gpa);
     defer walker.deinit();
     while (try walker.next(io)) |e| {
+        // Skip macOS Finder files so they do not change the digest.
         if (std.mem.eql(u8, e.basename, ".DS_Store") or
             std.mem.startsWith(u8, e.basename, "._")) continue;
         const path = try gpa.dupe(u8, e.path);
@@ -140,7 +135,7 @@ test stage {
         .limited(64),
     );
     try testing.expectEqualStrings("x = 1\n", copied);
-    // The same files, the same digest; a byte changed, another.
+    // The same files give the same digest; one changed byte changes it.
     const b = try stage(
         io,
         gpa,

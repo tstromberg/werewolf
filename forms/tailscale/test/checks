@@ -1,9 +1,9 @@
 # Offline startup only: no real auth key is supplied to the test VM.
-ok  tailscale-private [ "$(stat -c '%u:%a' /run/svc/tailscale/auth-key)" = 206:600 ]
-ok  tailscale-user   p=$(pidof tailscaled); grep -q '^Uid:[[:space:]]*206[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  tailscale-private [ "$(stat -c '%u:%a' /run/svc/tailscale/auth-key)" = "$(grep '^tailscale:' /etc/passwd | cut -d: -f3):600" ]
+ok  tailscale-user   p=$(pidof tailscaled); u=$(grep '^tailscale:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  tailscale-no-tun [ ! -e /dev/net/tun ] && [ "$(cat /proc/sys/net/ipv4/ip_forward)" = 0 ]
 # tailscaled binds UDP locally; fence deliberately grants it no inbound rule.
 ok  tailscale-no-ingress ! grep -q '^listen ' /usr/share/werewolf/net
 ok  tailscale-listeners bad=$(netstat -ltun | awk 'NR > 2 { n = split($4, a, ":"); print $1 "/" a[n] }' | sort -u | grep -vx -e udp/41641 -e udp6/41641); [ -z "$bad" ] || { echo "$bad"; exit 1; }
 # The config's route, rendered into the image's configuration, the rest kept.
-ok  tailscale-config grep -q '"advertiseRoutes":\["10.20.0.0/24"\]' /run/svc/tailscale/config.json && grep -q '"locked":true' /run/svc/tailscale/config.json && [ "$(stat -c '%u:%a' /run/svc/tailscale/config.json)" = 206:600 ]
+ok  tailscale-config grep -q '"advertiseRoutes":\["10.20.0.0/24"\]' /run/svc/tailscale/config.json && grep -q '"locked":true' /run/svc/tailscale/config.json && [ "$(stat -c '%u:%a' /run/svc/tailscale/config.json)" = "$(grep '^tailscale:' /etc/passwd | cut -d: -f3):600" ]

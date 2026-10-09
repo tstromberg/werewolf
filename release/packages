@@ -1,0 +1,121 @@
+#!/bin/sh
+# packages publishes werewolf's packages to its apk repository, the R2 bucket
+# behind dist.werewolf-linux.org. See tools/README.md and
+# docs/design/custom-updates.md.
+#
+#   WEREWOLF_PACKAGES_KEY=<PEM> AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+#   release/packages [-n] DIR...
+#
+# Each DIR is `make packages` output, build/ARCH/packages/ARCH. Only packages
+# whose files differ from their latest published version are published, so a
+# commit that changes no program changes nothing a machine fetches. The
+# published index is verified against release/packages.pub before it is
+# merged and signed again: whoever can write the bucket cannot get CI to sign
+# their entries. Packages go up before the index that names them, and nothing
+# published is ever replaced or deleted. -n shows what would be published and
+# needs no key. PACKAGES_URL, PACKAGES_PUB and PACKAGES_BUCKET (an s3:// URL,
+# or a directory to copy into) point it elsewhere, for testing.
+set -eu
+
+base=${PACKAGES_URL:-https://dist.werewolf-linux.org/apk}
+pub=${PACKAGES_PUB:-release/packages.pub}
+bucket=${PACKAGES_BUCKET:-s3://werewolf/apk}
+endpoint=https://c860af766754fb92eec27bc723e6db5d.r2.cloudflarestorage.com
+keyname=werewolf-packages.rsa.pub
+tool=build/host/package
+
+die() { echo "packages: $*" >&2; exit 1; }
+dry=
+[ "${1:-}" = -n ] && { dry=1; shift; }
+[ $# -gt 0 ] || die "usage: release/packages [-n] DIR..."
+[ -x "$tool" ] || die "no $tool: make packages builds it"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# fetch URL FILE: 0 if fetched, 1 if not there; anything else fails.
+fetch() {
+	code=$(curl -sS -o "$2" -w '%{http_code}' "$1") || die "$1: unreachable"
+	case $code in
+	200) return 0 ;;
+	404) rm -f "$2"; return 1 ;;
+	*) die "$1: HTTP $code" ;;
+	esac
+}
+
+# datahash APK: the SHA-256 its .PKGINFO names for its files.
+datahash() { tar -xzOf "$1" .PKGINFO | sed -n 's/^datahash = //p'; }
+
+upload() { # FILE KEY CACHE-CONTROL
+	case $bucket in
+	s3://*) AWS_DEFAULT_REGION=auto aws s3 cp --only-show-errors --endpoint-url "$endpoint" \
+		--cache-control "$3" "$1" "$bucket/$2" ;;
+	*) mkdir -p "$bucket/$(dirname "$2")" && cp "$1" "$bucket/$2" ;;
+	esac
+}
+
+for dir in "$@"; do
+	arch=$(basename "$dir")
+	w=$work/$arch
+	mkdir -p "$w"
+
+	old=-
+	if fetch "$base/$arch/APKINDEX.tar.gz" "$w/published.tar.gz"; then
+		"$tool" open "$w/published.tar.gz" "$keyname" "$w/published.sig" "$w/published.member"
+		openssl dgst -sha256 -verify "$pub" -signature "$w/published.sig" \
+			"$w/published.member" >/dev/null || die "$arch: the published index is not signed by $pub"
+		tar -xzOf "$w/published.member" APKINDEX >"$w/APKINDEX.old"
+		old=$w/APKINDEX.old
+	fi
+
+	new=0
+	for stanza in "$dir"/*.apk.stanza; do
+		name=$(sed -n 's/^P://p' "$stanza")
+		version=$(sed -n 's/^V://p' "$stanza")
+		apk=${stanza%.stanza}
+		latest=
+		[ "$old" = - ] || latest=$(awk -v n="$name" '/^P:/ { p = substr($0, 3) } /^V:/ && p == n { print substr($0, 3) }' "$old" |
+			LC_ALL=C sort | tail -n 1)
+		if [ -n "$latest" ]; then
+			# Versions are commit times, YYYYMMDD.HHMMSS-r0, so they sort as text.
+			[ "$(printf '%s\n%s\n' "$latest" "$version" | LC_ALL=C sort | tail -n 1)" = "$version" ] ||
+				die "$arch: $name $version is older than published $latest"
+			if [ "$version" = "$latest" ] || {
+				fetch "$base/$arch/$name-$latest.apk" "$w/latest.apk" || die "$arch: $name-$latest.apk is indexed but not served"
+				[ "$(datahash "$w/latest.apk")" = "$(datahash "$apk")" ]
+			}; then
+				rm "$apk" "$stanza"
+				continue
+			fi
+		fi
+		echo "packages: $arch: $name $version${latest:+ (after $latest)}"
+		new=$((new + 1))
+	done
+	if [ "$new" -eq 0 ]; then
+		echo "packages: $arch: nothing changed"
+		continue
+	fi
+	"$tool" index "$dir" "$old"
+	[ -z "$dry" ] || continue
+
+	(umask 077 && printf '%s\n' "${WEREWOLF_PACKAGES_KEY:?the packages key}" >"$work/key")
+	openssl dgst -sha256 -sign "$work/key" -out "$w/sig" "$dir/APKINDEX.member"
+	rm "$work/key"
+	openssl dgst -sha256 -verify "$pub" -signature "$w/sig" "$dir/APKINDEX.member" >/dev/null ||
+		die "WEREWOLF_PACKAGES_KEY is not $pub's key"
+	"$tool" sign "$dir" "$keyname" "$w/sig"
+
+	for apk in "$dir"/*.apk; do
+		key=$arch/$(basename "$apk")
+		if fetch "$base/$key" "$w/there.apk"; then
+			cmp -s "$apk" "$w/there.apk" || die "$key is published with other bytes"
+			continue
+		fi
+		upload "$apk" "$key" "public, max-age=31536000, immutable"
+	done
+	upload "$dir/APKINDEX.tar.gz" "$arch/APKINDEX.tar.gz" "no-cache"
+	if ! { fetch "$base/$arch/APKINDEX.tar.gz" "$w/check.tar.gz" &&
+		cmp -s "$dir/APKINDEX.tar.gz" "$w/check.tar.gz"; }; then
+		die "$arch: the index served is not the one uploaded"
+	fi
+	echo "packages: $arch: $new published"
+done

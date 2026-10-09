@@ -1,11 +1,12 @@
 #!/bin/sh
-# pre-commit: what every commit must pass: the unit tests, side by side,
-# lint, and one machine booted and attacked, sshd (minimal with a login),
-# once: its build, an ssh login, every console check, a clean power-off.
-# Half a minute when the programs are built, a minute or so when a library
-# changed and they are not. `make hooks` points git here (core.hooksPath).
-# The other forms, the slot and the persist run (make -j check) take
-# minutes even on a fast machine: run them before a push, as CI will.
+# pre-commit runs what every commit must pass: the unit tests in parallel,
+# lint, and one machine, sshd (minimal with a login), built, booted and
+# attacked once: an ssh login, every console check and a clean power-off.
+# It takes half a minute when the programs are built, and a minute or so
+# when a library changed and they are not. `make hooks` points git here
+# (core.hooksPath). The other forms, the slot and the persist run
+# (make -j check) take minutes even on a fast machine; run them before a
+# push, as CI will.
 set -eu
 cd "$(git rev-parse --show-toplevel)"
 n=$(getconf _NPROCESSORS_ONLN)

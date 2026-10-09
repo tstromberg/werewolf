@@ -55,7 +55,8 @@ def main():
         def answer(self, code, data=b"", google=False):
             self.send_response(code)
             self.send_header("Content-Length", str(len(data)))
-            # GCP's server marks every answer; cloud-metadata refuses one without.
+            # GCP's server marks every answer with Metadata-Flavor, and
+            # cloud-metadata refuses an answer without it.
             if google:
                 self.send_header("Metadata-Flavor", "Google")
             self.end_headers()

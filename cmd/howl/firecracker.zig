@@ -1,29 +1,6 @@
-//! Firecracker: a werewolf machine as a microVM on Linux with KVM,
-//! experimental, booted directly: the kernel and the slot's stage0,
-//! with no bootloader and no slots; a data disk of its own; the config tar
-//! as a second virtio drive, read-only, where init finds it; and the
-//! slot's root.erofs as a third, read-only, which stage0 opens through
-//! dm-verity (werewolf.root=vdc). Not appended to the initramfs, as
-//! `make run`'s is: the kernel would unpack it into RAM, 20 MB held for
-//! the machine's life, as nothing frees an initramfs, and 26 ms of every
-//! boot. Read from the disk as it is used, it cost userland 10 ms, so a
-//! boot came up 10 to 15 ms sooner. A rebuild cannot change it under a
-//! running machine: the build makes a new root.erofs, not writing over
-//! the old one, which Firecracker holds open until the next boot.
-//!
-//! Firecracker is a process that exits when the guest stops, for a reboot
-//! as for a halt, so create starts it detached, under setsid, through
-//! werewolf's own supervisor (`howl _firecracker`), which runs it
-//! again after a reboot, which the console tells from a halt, and keeps
-//! its console on the machine's console.log. Firecracker runs as this
-//! user; only the machine's network needs root, through sudo or doas: a
-//! tap device of the name's, on a /30 of 172.16.0.0/16 the name's sha256
-//! picks, with the host at .1, the guest at .2 and NAT out through
-//! iptables, since Firecracker has no user-mode network and no DHCP. So
-//! the address goes on the kernel command line, as init takes it
-//! (werewolf.ip), with this host's resolver, the first not on loopback.
-//! The supervisor's pidfile is the state: the machine runs while the
-//! Firecracker it names does.
+//! firecracker runs a machine as a Firecracker microVM on Linux with KVM
+//! (experimental). It boots the kernel and stage0 directly, with no
+//! bootloader or slots, under a supervisor. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -32,8 +9,8 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-/// Whether this machine runs Firecracker: Linux with /dev/kvm, and
-/// firecracker on the PATH (tools/install-deps installs it).
+/// installed reports whether this is Linux with /dev/kvm and firecracker
+/// on the PATH (tools/install-deps installs it).
 pub fn installed(io: Io, gpa: Allocator) bool {
     if (builtin.os.tag != .linux) return false;
     Dir.cwd().access(io, "/dev/kvm", .{}) catch return false;
@@ -42,23 +19,22 @@ pub fn installed(io: Io, gpa: Allocator) bool {
     return r.term == .exited and r.term.exited == 0;
 }
 
-/// Whether the network can be set up now, with no one asked a password:
-/// root, or a sudo or doas that asks none, as create and run need to
-/// choose Firecracker without stopping to ask.
+/// rootReady reports whether the network can be set up without a password
+/// prompt. create and run only pick Firecracker by default when it can.
 pub fn rootReady(io: Io, gpa: Allocator) bool {
     const root = asRoot(io, gpa) catch return false;
     return root.len == 0 or asked(io, gpa, root[0]);
 }
 
-/// What sets the network up, which needs root: nothing as root; else the
-/// first of sudo and doas that asks no password, or, if both would, the
-/// first there is.
+/// asRoot returns the command prefix for root: none when already root,
+/// else the first of sudo and doas that needs no password, else the first
+/// installed. It fails with error.NoRoot if neither is installed.
 pub fn asRoot(io: Io, gpa: Allocator) error{NoRoot}![]const []const u8 {
     if (howl.isRoot()) return &.{};
     const tools = .{ "/usr/bin/sudo", "/usr/bin/doas", "/usr/local/bin/doas" };
     var first: ?[]const []const u8 = null;
     inline for (tools) |path| {
-        // Comptime, so what is returned is static, not a temporary's address.
+        // Comptime, so the returned slice is static, not a temporary's address.
         const tool: []const []const u8 = comptime &.{std.fs.path.basename(path)};
         if (Dir.cwd().access(io, path, .{})) |_| {
             if (asked(io, gpa, tool[0])) return tool;
@@ -68,21 +44,21 @@ pub fn asRoot(io: Io, gpa: Allocator) error{NoRoot}![]const []const u8 {
     return first orelse error.NoRoot;
 }
 
-/// Whether tool runs a command as root without asking a password: -n,
-/// fail rather than ask, which sudo and doas both take.
+/// asked reports whether tool runs a command without a password. Both sudo
+/// and doas take -n to fail instead of prompting.
 fn asked(io: Io, gpa: Allocator, tool: []const u8) bool {
     const r = std.process.run(gpa, io, .{ .argv = &.{ tool, "-n", "true" } }) catch return false;
     return r.term == .exited and r.term.exited == 0;
 }
 
-/// A machine's network: its tap device and MAC, and its /30, all from the
-/// name's sha256, so nothing records them.
+/// Net is a machine's tap device, MAC and /30, all derived from the name's
+/// sha256 so nothing needs to record them.
 pub const Net = struct {
     tap: []const u8,
     mac: []const u8,
-    /// This host's address on the tap, the machine's gateway.
+    /// host is this host's address on the tap and the machine's gateway.
     host: []const u8,
-    /// The machine's address, and the /30 both are in.
+    /// guest is the machine's address; subnet is the /30 holding both.
     guest: []const u8,
     subnet: []const u8,
 };
@@ -101,10 +77,10 @@ pub fn net(gpa: Allocator, name: []const u8) !Net {
     };
 }
 
-/// The kernel's arguments: the serial console, a reboot by the keyboard
-/// controller, which Firecracker takes as the guest's exit, no PCI, which
-/// Firecracker has none of, then the image's own arguments, and the
-/// address, with the data disk, as make run gives them, and the root's.
+/// bootArgs returns the kernel command line. Firecracker has no DHCP, so
+/// the address goes here. reboot=k reboots through the keyboard
+/// controller, which Firecracker treats as the guest exiting; pci=off
+/// because Firecracker has no PCI.
 pub fn bootArgs(gpa: Allocator, image_args: []const u8, n: Net, dns: []const u8) ![]const u8 {
     return gpa.print(
         "console=ttyS0 reboot=k panic=10 pci=off {s} werewolf.ip={s}/30 werewolf.gw={s} " ++
@@ -113,11 +89,10 @@ pub fn bootArgs(gpa: Allocator, image_args: []const u8, n: Net, dns: []const u8)
     );
 }
 
-/// The kernel Firecracker boots, relative to the checkout: on x86_64 the
-/// ELF vmlinux the build unpacks from the bzImage (Makefile,
-/// $(BUILD)/vmlinux), which Firecracker loads as it is, where given the
-/// bzImage it waits while the bzImage's stub gunzips 39 MB, 0.1 s of every
-/// boot; on aarch64 the raw Image, $(BUILD)/vmlinuz already.
+/// kernelPath returns the kernel to boot, relative to the checkout. On
+/// x86_64 it is the ELF vmlinux the Makefile unpacks from the bzImage:
+/// booting the bzImage costs 0.1 s per boot while its stub gunzips 39 MB.
+/// On aarch64 vmlinuz is already a raw Image.
 pub fn kernelPath(gpa: Allocator, arch: howl.Arch) ![]const u8 {
     const file = switch (arch) {
         .x86_64 => "vmlinux",
@@ -133,9 +108,9 @@ const Drive = struct {
     is_read_only: bool,
 };
 
-/// Firecracker's configuration file: two CPUs and 2 GiB, as Lima's
-/// machines have; the data disk first, so it is vda, then the tar, vdb,
-/// then the root, vdc, in the order the kernel finds them.
+/// config returns Firecracker's JSON configuration. The kernel names
+/// drives in order, so data is vda, the config tar vdb and the root vdc,
+/// as bootArgs expects.
 pub fn config(
     gpa: Allocator,
     kernel: []const u8,
@@ -153,8 +128,7 @@ pub fn config(
             .initrd_path = initrd,
             .boot_args = args,
         },
-        // Firecracker's own log on a file of its own, so the console is
-        // the machine's alone.
+        // Send Firecracker's log to a separate file to keep the console clean.
         .logger = .{ .log_path = log, .level = "Warning" },
         .drives = [_]Drive{
             .{
@@ -185,9 +159,9 @@ pub fn config(
     }, .{ .whitespace = .indent_2 });
 }
 
-/// This host's resolver, for the machine: the first nameserver not on
-/// loopback, in systemd-resolved's own file, where the real ones are
-/// when /etc/resolv.conf names its stub, else in /etc/resolv.conf.
+/// hostDns returns this host's first non-loopback nameserver. It reads
+/// systemd-resolved's file first, since /etc/resolv.conf may name only the
+/// 127.0.0.53 stub, which the guest cannot reach.
 pub fn hostDns(io: Io, gpa: Allocator) ?[]const u8 {
     for ([_][]const u8{ "/run/systemd/resolve/resolv.conf", "/etc/resolv.conf" }) |path| {
         const text = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 10)) catch continue;
@@ -196,7 +170,7 @@ pub fn hostDns(io: Io, gpa: Allocator) ?[]const u8 {
     return null;
 }
 
-/// The first nameserver line's address that is not loopback.
+/// nameserver returns the first non-loopback nameserver in resolv.conf text.
 pub fn nameserver(text: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -209,10 +183,9 @@ pub fn nameserver(text: []const u8) ?[]const u8 {
     return null;
 }
 
-/// The machine's network, up: its tap, this user's, so Firecracker opens
-/// it unprivileged; this host's address on it; forwarding; and NAT out,
-/// with the forward rules the host may need. Each step is skipped where
-/// it is done already, so a second create changes nothing.
+/// networkUp creates the tap, owned by user so Firecracker opens it
+/// unprivileged, gives the host its address, enables forwarding and adds
+/// NAT and FORWARD rules. Each step is skipped if already done.
 pub fn networkUp(
     io: Io,
     gpa: Allocator,
@@ -238,10 +211,9 @@ pub fn networkUp(
         );
     }
     try run(io, gpa, root, &.{ "ip", "link", "set", n.tap, "up" }, why);
-    // Forwarding is the host's, not the machine's: turned on only if it
-    // was off, and noted so, for the last machine's networkDown to turn
-    // it off again. A host forwarding already for its own reasons keeps
-    // forwarding.
+    // Enable forwarding only if it was off, and leave a marker so the last
+    // machine's networkDown turns it off again. A host that already
+    // forwarded keeps forwarding.
     const forward = Dir.cwd().readFileAlloc(io, ip_forward, gpa, .limited(8)) catch "";
     if (std.mem.eql(u8, std.mem.trim(u8, forward, "\n"), "0")) {
         if (Dir.cwd().createFile(io, forward_marker, .{ .exclusive = true })) |f| {
@@ -255,9 +227,9 @@ pub fn networkUp(
     }
 }
 
-/// The machine's network, down: its rules and its tap, and, when it was
-/// the last machine's and networkUp turned the host's forwarding on, that
-/// too. Nothing is said of what was gone already.
+/// networkDown removes the rules and the tap, and turns forwarding off if
+/// networkUp turned it on and no machine's tap is left. It ignores
+/// anything already gone.
 pub fn networkDown(io: Io, gpa: Allocator, root: []const []const u8, n: Net) void {
     for (rules(
         gpa,
@@ -271,10 +243,11 @@ pub fn networkDown(io: Io, gpa: Allocator, root: []const []const u8, n: Net) voi
 }
 
 const ip_forward = "/proc/sys/net/ipv4/ip_forward";
-/// Beside howl's own build: networkUp turned the host's forwarding on.
+/// forward_marker records that networkUp turned on the host's forwarding.
 const forward_marker = "build/host/ip_forward-was-off";
 
-/// Whether any machine's tap remains: one named as net names them.
+/// tapsLeft reports whether any tap named like net's remains. It answers
+/// true when unsure, so forwarding stays on.
 fn tapsLeft(io: Io) bool {
     var d = Dir.cwd().openDir(io, "/sys/class/net", .{ .iterate = true }) catch return true;
     defer d.close(io);
@@ -289,16 +262,15 @@ fn tapsLeft(io: Io) bool {
     return false;
 }
 
-/// An iptables rule: its table, if not the filter table, its chain and
-/// its specification.
+/// Rule is an iptables rule. An empty table means the filter table.
 const Rule = struct {
     table: []const []const u8 = &.{},
     chain: []const u8,
     spec: []const []const u8,
 };
 
-/// The rules the machine's network takes: NAT out for its /30, and its
-/// tap's traffic forwarded both ways.
+/// rules returns NAT for the machine's /30 and FORWARD accepts both ways on
+/// its tap.
 fn rules(gpa: Allocator, n: Net) ![3]Rule {
     return .{
         .{
@@ -317,8 +289,7 @@ fn rules(gpa: Allocator, n: Net) ![3]Rule {
     };
 }
 
-/// iptables VERB on the rule: -C asks whether it is there, -A adds it, -D
-/// removes it.
+/// iptables returns the argv for verb on r: -C checks, -A adds, -D removes.
 pub fn iptables(gpa: Allocator, verb: []const u8, r: Rule) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(gpa, "iptables");
@@ -328,7 +299,7 @@ pub fn iptables(gpa: Allocator, verb: []const u8, r: Rule) ![]const []const u8 {
     return argv.items;
 }
 
-/// Whether a command here, as root, succeeds; quietly.
+/// done runs args under root quietly and reports whether it succeeded.
 fn done(io: Io, gpa: Allocator, root: []const []const u8, args: []const []const u8) bool {
     const argv = std.mem.concat(gpa, []const u8, &.{ root, args }) catch return false;
     const r = std.process.run(gpa, io, .{ .argv = argv }) catch return false;
@@ -345,8 +316,7 @@ fn run(
     try howl.run(io, why, try std.mem.concat(gpa, []const u8, &.{ root, args }));
 }
 
-/// The Firecracker the supervisor runs for the machine in dir, by its
-/// pidfile, if it is alive.
+/// running returns the pid in dir's pidfile if that Firecracker is alive.
 pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
     const text = Dir.cwd().readFileAlloc(
         io,
@@ -364,8 +334,8 @@ pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
     return pid;
 }
 
-/// A hard stop: Firecracker killed, which ends the machine as cutting its
-/// power would, and its supervisor, which removes the pidfile, waited for.
+/// stop kills Firecracker, like cutting power, and waits up to 10 s for
+/// the supervisor to remove the pidfile.
 pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: *howl.Why) !void {
     if (builtin.os.tag != .linux) return;
     std.posix.kill(pid, .KILL) catch {};
@@ -377,22 +347,18 @@ pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: 
     return why.refuse("{s}: its Firecracker, pid {d}, did not stop", .{ dir, pid });
 }
 
-/// The supervisor, `howl _firecracker DIR`, detached: runs Firecracker
-/// on DIR's vm.json, its console on this process's standard output, with
-/// its standard input a pipe held open and never written, so the console
-/// reads nothing, and its pid in DIR's pidfile. Firecracker exits 0 when
-/// the guest stops, for a reboot as for a halt: the console tells them
-/// apart, so a reboot runs it again, so long as the machine's config tar
-/// is still there (delete removes it), and a halt ends the machine. Any
-/// other exit, an error or a kill by delete or create, ends it too.
+/// keep is the supervisor, `howl _firecracker DIR`. It runs Firecracker on
+/// DIR/vm.json with the console appended to DIR/console.log and stdin a
+/// pipe never written. Firecracker exits 0 on both reboot and halt, so
+/// keep reads the console to tell them apart, and restarts on reboot while
+/// config.tar exists; delete removes it. Any other exit ends the machine.
 pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
     const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
     const fc_log = try gpa.print("{s}/firecracker.log", .{dir});
     const pidfile = try gpa.print("{s}/firecracker.pid", .{dir});
     const config_tar = try gpa.print("{s}/config.tar", .{dir});
-    // The console, opened to append: every boot's output follows the last,
-    // and what create saw before it started is still there to skip.
+    // Append, so each boot follows the last and watch can skip what it saw.
     const out: Io.File = .{
         .handle = try std.posix.openat(
             std.posix.AT.FDCWD,
@@ -403,8 +369,7 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
         .flags = .{ .nonblocking = false },
     };
     defer out.close(io);
-    // The end of a boot's console, where a halt says so: read through this
-    // one buffer every boot, never the whole log, which grows without end.
+    // Read only the log's tail, where a halt shows; the log grows forever.
     const tail = try gpa.alloc(u8, 1 << 20);
     while (true) {
         const seen = if (Dir.cwd().statFile(io, log, .{})) |st| st.size else |_| 0;

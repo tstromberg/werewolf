@@ -1,14 +1,5 @@
-//! GCP: a werewolf machine on Google Compute Engine, from the same two
-//! files every target takes. The boot disk becomes a GCP image, named by
-//! the sha256 of the release's disk.qcow2, so a build is uploaded once and
-//! every machine of it shares the image. The config tar, in base64, is the
-//! instance's user-data, which cloud-metadata fetches (docs/cloud.md). The
-//! VM has no service account and no Secure Boot, which werewolf's loader
-//! does not support yet.
-//!
-//! The project and zone are gcloud's own (gcloud config); the zone, if
-//! gcloud has none, us-central1-a, which has Arm machines. GCP is the
-//! state: an instance's label says the form it was made from.
+//! gcp runs werewolf machines on Google Compute Engine through the gcloud CLI.
+//! See README.md.
 
 const std = @import("std");
 const howl = @import("howl.zig");
@@ -18,13 +9,14 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-/// How long create waits for a machine to say it is up.
+/// wait_seconds is how long create waits for the machine to boot.
 const wait_seconds = 300;
 const label = howl.form_tag;
 
 pub const Place = struct { project: []const u8, zone: []const u8 };
 
-/// Where gcloud is set to work, or a refusal saying how to set it.
+/// place returns gcloud's configured project and zone. The zone defaults to
+/// us-central1-a, which has Arm machines. It refuses if gcloud has no project.
 pub fn place(io: Io, gpa: Allocator, why: *howl.Why) !Place {
     const project = configValue(io, gpa, "project") orelse
         return why.refuse(
@@ -48,7 +40,7 @@ fn configValue(io: Io, gpa: Allocator, key: []const u8) ?[]const u8 {
     return if (r.term == .exited and r.term.exited == 0 and v.len > 0) v else null;
 }
 
-/// gcloud, quiet, in p's project, with args.
+/// gcloud returns the argv that runs gcloud quietly in p's project with args.
 fn gcloud(gpa: Allocator, p: Place, args: []const []const u8) ![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(gpa, &.{ "gcloud", "--quiet", "--project", p.project });
@@ -56,7 +48,7 @@ fn gcloud(gpa: Allocator, p: Place, args: []const []const u8) ![]const []const u
     return argv.items;
 }
 
-/// gcloud's output, or null if it failed.
+/// ask runs gcloud and returns its trimmed output, or null if it failed.
 fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
     const r = std.process.run(
         gpa,
@@ -69,8 +61,8 @@ fn ask(io: Io, gpa: Allocator, p: Place, args: []const []const u8) ?[]const u8 {
         null;
 }
 
-/// The machine a form runs on, for an arch: GCP's name for the arch, the
-/// machine type, and the NIC werewolf has a driver for.
+/// Machine holds GCP's name for an arch, the default machine type, and the
+/// NIC type werewolf has a driver for.
 pub const Machine = struct { arch: []const u8, size: []const u8, nic: []const u8 };
 
 pub fn machine(arch: howl.Arch) Machine {
@@ -80,8 +72,9 @@ pub fn machine(arch: howl.Arch) Machine {
     };
 }
 
-/// The image of disk, a release's disk.qcow2: there already, or made from
-/// it through PROJECT-werewolf-images, whose upload is then deleted.
+/// ensureImage returns the name of the image for disk (a disk.qcow2), creating
+/// it if needed. The upload goes through bucket PROJECT-werewolf-images and is
+/// deleted afterwards.
 pub fn ensureImage(
     io: Io,
     gpa: Allocator,
@@ -103,9 +96,8 @@ pub fn ensureImage(
         return name;
     }
     howl.say(io, "image {s}: making it from {s}", .{ name, disk });
-    // GCP takes a raw disk named disk.raw, in a gzipped GNU tar, which
-    // keeps the disk's holes where GNU tar is the tar; bsdtar writes them
-    // out, and gzip makes them small again.
+    // GCP wants disk.raw in a gzipped GNU-format tar. GNU tar keeps the
+    // disk sparse; bsdtar writes the holes as zeros, which gzip shrinks.
     const raw = try gpa.print("{s}/disk.raw", .{work});
     const tarball = try gpa.print("{s}/image.tar.gz", .{work});
     defer Dir.cwd().deleteFile(io, raw) catch {};
@@ -153,18 +145,18 @@ pub fn ensureImage(
         "UEFI_COMPATIBLE,GVNIC",
         "--labels",
         try gpa.print("{s}={s}", .{ label, form }),
-        // In the zone's region, beside the machines made of it, not GCP's
-        // default multi-region, which it would be copied across.
+        // Store the image in the zone's region, not GCP's default
+        // multi-region, so it is not copied across regions.
         "--storage-location",
         region,
     }));
     return name;
 }
 
-/// The form an instance was made from, as its label says: "" for one
-/// without it; null if there is no such instance. gcloud failing for
-/// another reason, as an expired login, is refused: taken for "none", it
-/// would have delete forget a machine that runs on.
+/// formOf returns the form label of instance name, "" if it has none, or null
+/// if there is no such instance. Any other gcloud failure, such as an expired
+/// login, is refused: treating it as "no instance" would make delete forget a
+/// machine that is still running.
 pub fn formOf(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why) !?[]const u8 {
     const r = std.process.run(gpa, io, .{ .argv = try gcloud(gpa, p, &.{
         "compute",  "instances",                     "describe", name, "--zone", p.zone,
@@ -179,9 +171,10 @@ pub fn formOf(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why
     });
 }
 
-/// A VM of image, its config in user-data from b64: no service account,
-/// no scopes, and Secure Boot off. size is the machine type, if not the
-/// arch's smallest that werewolf runs well on.
+/// create starts VM name from image, with the base64 config file b64 as its
+/// user-data. It has no service account or scopes, and Secure Boot is off
+/// because werewolf's loader does not support it yet. A null size picks
+/// machine(arch).size.
 pub fn create(
     io: Io,
     gpa: Allocator,
@@ -206,11 +199,10 @@ pub fn create(
         size orelse m.size,
         "--image",
         image,
-        // SSD-backed, not GCP's HDD default (pd-standard): an 8 GB
-        // pd-standard disk read ~10 MB/s at ~6 ms a request, and a boot
-        // reads the kernel, its root and sshd from it. On a t2a-standard-1,
-        // reboot to ssh took 3.8 s on pd-balanced against 5.3 s; it costs
-        // $0.10 a GB-month against $0.04.
+        // Use SSD, not GCP's HDD default (pd-standard), which read an 8 GB
+        // disk at ~10 MB/s and ~6 ms a request. On a t2a-standard-1, reboot
+        // to ssh took 3.8 s on pd-balanced against 5.3 s, for $0.10 a
+        // GB-month against $0.04.
         "--boot-disk-type",
         "pd-balanced",
         "--network-interface",
@@ -227,8 +219,8 @@ pub fn create(
     }));
 }
 
-/// A new config for an instance: its user-data replaced, and the machine
-/// stopped, which GCP asks of it with its power button, and started again.
+/// reconfigure replaces the instance's user-data with b64, then stops and
+/// starts it. GCP stops the machine by pressing its power button.
 pub fn reconfigure(
     io: Io,
     gpa: Allocator,
@@ -255,7 +247,7 @@ pub fn reconfigure(
     );
 }
 
-/// The instance's external address.
+/// address returns the instance's external IP address.
 pub fn address(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
     return ask(io, gpa, p, &.{
         "compute",
@@ -269,7 +261,7 @@ pub fn address(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
     });
 }
 
-/// The serial console, as GCP keeps it.
+/// console returns the instance's serial console output.
 pub fn console(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
     return ask(
         io,
@@ -279,8 +271,8 @@ pub fn console(io: Io, gpa: Allocator, p: Place, name: []const u8) ?[]const u8 {
     );
 }
 
-/// Wait for the boot to finish, or a panic. GCP keeps the console of the
-/// machine's current run only, so a stop and start begins it afresh.
+/// awaitUp waits for the boot to finish or panic. GCP keeps only the current
+/// run's console, so after a stop and start the old boot is not mistaken for it.
 pub fn awaitUp(io: Io, gpa: Allocator, p: Place, name: []const u8) !booting.Outcome {
     const start = Io.Clock.awake.now(io);
     while (start.untilNow(io, .awake).toSeconds() < wait_seconds) {
@@ -296,7 +288,7 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why
         why,
         try gcloud(gpa, p, &.{ "compute", "instances", "delete", name, "--zone", p.zone }),
     );
-    // The rule openArgs's command makes, if it was run.
+    // Delete the rule openArgs's command makes, if the user ran it.
     _ = ask(
         io,
         gpa,
@@ -305,8 +297,8 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why
     );
 }
 
-/// The command that lets source reach the machine on ports: a firewall
-/// rule for its tag, NAME-allow, which delete removes with it.
+/// openArgs returns the command that lets source reach the machine on ports:
+/// a firewall rule NAME-allow on the machine's tag. delete removes it.
 pub fn openArgs(
     gpa: Allocator,
     p: Place,

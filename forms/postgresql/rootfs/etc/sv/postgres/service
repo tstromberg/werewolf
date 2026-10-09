@@ -7,3 +7,5 @@ before  /usr/lib/werewolf/pg-init
 user    postgres
 pledge  stdio rpath wpath proc ipc unix listen
 run     /usr/bin/initdb
+# Local clients reach its socket, /run/svc/postgres/.s.PGSQL.5432.
+share   shared

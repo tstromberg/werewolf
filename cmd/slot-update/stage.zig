@@ -1,8 +1,6 @@
-//! stage: when a staged slot boots, and what says so
-//! (docs/design/update-policy.md). The settings, the CVE tiers feed, the
-//! slot armed for one try and the boot that armed it (`attempt`), the
-//! deadlines kept in `pending`, the lock, and the reboot. Each takes the
-//! Update of slot-update.zig, whose methods call these as their own.
+//! stage decides when a staged slot boots (docs/design/update-policy.md). It
+//! holds the settings, the CVE tiers feed, `attempt`, `pending`, the lock and
+//! the reboot. Update in slot-update.zig re-exports these as its methods.
 
 const std = @import("std");
 const m = @import("slot-update.zig");
@@ -37,8 +35,8 @@ const Update = m.Update;
 
 // --- attempt ----------------------------------------------------------------
 
-/// The slot armed to boot once: which, its build, and the boot that
-/// armed it; empty for an attempt written before boots were named.
+/// Attempt is the slot armed to boot once, its build, and the boot_id that
+/// armed it. boot is empty in attempts written before boot_ids were recorded.
 pub const Attempt = struct { slot: []const u8, build: []const u8, boot: []const u8 };
 
 pub fn attemptOf(u: *Update) !?Attempt {
@@ -54,10 +52,9 @@ pub fn attemptOf(u: *Update) !?Attempt {
     };
 }
 
-/// This boot, as the kernel names it. Read with pread, not u.read:
-/// procfs gives its files a size of 0, which readFileAlloc believes. An
-/// empty one is an error, never a match: every attempt would look armed
-/// in this boot, and no outcome would ever be judged.
+/// bootId returns the kernel's boot_id. It uses pread because procfs reports
+/// a size of 0, which readFileAlloc trusts. An empty id is an error: it would
+/// match every old attempt, and no outcome would ever be judged.
 pub fn bootId(u: *Update) ![]const u8 {
     var f = try Dir.cwd().openFile(u.io, "/proc/sys/kernel/random/boot_id", .{});
     defer f.close(u.io);
@@ -67,15 +64,16 @@ pub fn bootId(u: *Update) ![]const u8 {
     return id;
 }
 
-/// Whether p's slot is armed: this boot armed the other slot with p's
-/// build. Only then does a reboot boot it, and only then is it staged.
+/// armed reports whether this boot armed the other slot with p's build. Only
+/// then is p staged, and only then does a reboot boot it.
 pub fn armed(u: *Update, p: Pending) !bool {
     const a = try u.attemptOf() orelse return false;
     return std.mem.eql(u8, a.build, p.build) and std.mem.eql(u8, a.slot, u.other) and
         std.mem.eql(u8, a.boot, try u.bootId());
 }
 
-/// The lock on state_dir, or error.Busy if another pass holds it.
+/// lock takes the state lock and returns its descriptor, or error.Busy if
+/// another pass holds it.
 pub fn lock(u: *Update) !i32 {
     const fd: i32 = @intCast(try u.sys(linux.openat(
         linux.AT.FDCWD,
@@ -91,19 +89,18 @@ pub fn lock(u: *Update) !i32 {
     return fd;
 }
 
-/// Seconds from the reboot bootIfDue logged to this kernel's start: the
-/// old slot stopping, the firmware and the loader, and, after a
-/// rollback, the failed slot's boot too. Null if that reboot left no
-/// mark. Both ends are the wall clock, so it is as exact as the clock
-/// the kernel read at boot, about a second.
+/// downtime returns the seconds from the reboot bootIfDue logged to this
+/// kernel's start: shutdown, firmware and loader, plus the failed slot's
+/// boot after a rollback. It is null if no reboot was logged. Both ends use
+/// the wall clock, so it is accurate to about a second.
 pub fn downtime(u: *Update) ?i64 {
     const text = u.read(rebooted_path) catch return null;
     const at = policy.parseTime(std.mem.trim(u8, text, " \n")) catch return null;
     return nowSecs(u.io) - bootSecs() - at;
 }
 
-/// For each tier the committed slot carried, when this machine first
-/// saw it and the seconds from then to now.
+/// waited returns, for each tier the committed slot carried, when this
+/// machine first saw it and the seconds since.
 pub fn waited(u: *Update) !Waits {
     var w: Waits = .{};
     const p = try u.readPending() orelse return w;
@@ -115,9 +112,10 @@ pub fn waited(u: *Update) !Waits {
 }
 
 // --- policy -----------------------------------------------------------------
-// werewolf's settings, then the form's, then the operator's
-// (docs/design/update-policy.md, Settings): each file all or nothing,
-// and what is in force logged.
+
+/// loadPolicy applies the form's settings, then the operator's, over
+/// werewolf's defaults (docs/design/update-policy.md, Settings), and logs the
+/// result. Each file is taken whole or refused whole.
 pub fn loadPolicy(u: *Update, s: *policy.Settings) !void {
     var refused: std.ArrayList(Refused) = .empty;
     const files = [_]struct { path: []const u8, source: policy.Source }{
@@ -125,8 +123,8 @@ pub fn loadPolicy(u: *Update, s: *policy.Settings) !void {
         .{ .path = operator_policy, .source = .operator },
     };
     for (files) |f| {
-        // The form's file refused, its lowered limits are lost, and the
-        // operator's could then reach werewolf's: so it is not read.
+        // If the form's file was refused, its lowered limits are lost, and the
+        // operator's file could exceed them. Refuse it too.
         if (f.source == .operator and refused.items.len > 0) {
             try refused.append(u.gpa, .{
                 .file = f.path,
@@ -185,9 +183,9 @@ pub fn loadPolicy(u: *Update, s: *policy.Settings) !void {
     });
 }
 
-/// The staged slot, or null. One that cannot be read, cut short by a
-/// crash, is logged and removed: it costs its first-seen times, never
-/// the updater.
+/// readPending returns the staged slot, or null. An unreadable file (a
+/// crash cut it short) is logged and removed: that loses its first-seen
+/// times but never wedges the updater.
 pub fn readPending(u: *Update) !?Pending {
     const data = u.read(pending_path) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -207,9 +205,8 @@ pub fn readPending(u: *Update) !?Pending {
     };
 }
 
-/// When the staged slot p is due, and the tier that makes it then: the
-/// policy's time, held until an hour after boot unless a first check
-/// staged it.
+/// dueOf returns when p is due and the tier that sets it. Unless a first
+/// check staged p, the time is held to at least an hour after boot.
 pub fn dueOf(u: *Update, s: *const policy.Settings, p: Pending) !policy.Due {
     var seen: policy.Seen = .initFill(null);
     for (std.enums.values(policy.Tier)) |t| if (p.get(t)) |x| {
@@ -221,7 +218,7 @@ pub fn dueOf(u: *Update, s: *const policy.Settings, p: Pending) !policy.Due {
     return d;
 }
 
-/// The log's why for the staged slot p, due as d.
+/// whyOf returns the log's explanation of why p is due at d.
 pub fn whyOf(
     u: *Update,
     s: *const policy.Settings,
@@ -245,18 +242,18 @@ pub fn whyOf(
     return out.written();
 }
 
-/// This machine's seed for build: by its disk, which outlives every
-/// slot, so its place is the same from boot to boot.
+/// seed returns this machine's seed for build. It derives from the disk's
+/// UUID, which outlives every slot, so it is stable across boots.
 pub fn seed(u: *Update, build: []const u8) u64 {
     return policy.seed(u.cmd.victim.?.uuid, build);
 }
 
 // --- the tiers feed ---------------------------------------------------------
-// Fetched as _update, as the CVE sources are; checked against the image's
-// tiers.pub before it is read; and kept once taken, so that whenever a
-// newer one cannot be had, does not check, or is older, the one kept
-// serves until it expires (docs/design/update-policy.md). Null when
-// there is none to trust: then every fix counts as High.
+
+/// tiersFeed fetches the tiers feed as _update and checks it against the
+/// image's tiers.pub. It keeps the last good feed, which serves until it
+/// expires when a newer one cannot be fetched or verified. It returns null
+/// when no feed can be trusted; then every fix counts as High.
 pub fn tiersFeed(u: *Update) !?tiers.Feed {
     const base_text = u.read(meta_dir ++ "/tiers") catch |err| switch (err) {
         error.FileNotFound => return u.noFeed("this image names no tiers feed"),
@@ -265,15 +262,14 @@ pub fn tiersFeed(u: *Update) !?tiers.Feed {
     const base = std.mem.trim(u8, base_text, " \n");
     const key = try releases.parseKey(u.gpa, try u.read(meta_dir ++ "/tiers.pub"));
     const now = nowSecs(u.io);
-    // The newest serial ever taken, kept apart from the feed, so no
-    // older feed is taken even once the one kept has expired.
+    // The newest serial is kept apart from the feed, so no older feed is
+    // taken even after the kept one expires.
     const last: ?[]const u8 = if (u.read(feed_serial_path)) |t|
         std.mem.trim(u8, t, " \n")
     else |_|
         null;
     const kept_data = u.read(feed_path) catch "";
-    // Why the kept feed will not do, if it will not: said with the fetch's
-    // reason, should the fetch fail too.
+    // Why the kept feed is unusable, logged if the fetch fails too.
     var kept_error: ?[]const u8 = null;
     const kept: ?tiers.Feed = if (kept_data.len > 0) b: {
         const sig = u.read(feed_sig_path) catch |err| {
@@ -325,8 +321,8 @@ pub fn tiersFeed(u: *Update) !?tiers.Feed {
     }
 }
 
-/// The feed at base and its signature, as _update fetches them, taken
-/// only if they check.
+/// fetchFeed downloads the feed at base and its signature and returns them
+/// if they verify and are not older than last.
 pub fn fetchFeed(
     u: *Update,
     base: []const u8,
@@ -351,8 +347,8 @@ pub fn fetchFeed(
     };
 }
 
-/// The advisories this image's own code has (release/advisories, in
-/// the build record); none, for an image built before there were any.
+/// ownAdvisories returns the advisories already fixed in this image's code
+/// (release/advisories in the build record), or "" for older images.
 pub fn ownAdvisories(u: *Update) ![]const u8 {
     return u.read(meta_dir ++ "/advisories") catch |err| switch (err) {
         error.FileNotFound => "",
@@ -360,7 +356,8 @@ pub fn ownAdvisories(u: *Update) ![]const u8 {
     };
 }
 
-/// No feed to trust, logged with why, and what that means.
+/// noFeed logs that no feed can be trusted, why, and that every fix counts
+/// as High. It returns null.
 pub fn noFeed(u: *Update, reason: []const u8) !?tiers.Feed {
     try u.record(.{
         .event = "feed",
@@ -371,12 +368,12 @@ pub fn noFeed(u: *Update, reason: []const u8) !?tiers.Feed {
     return null;
 }
 
-/// The staged slot's fixes, from its report, tiered again against the
-/// latest feed: a tier seen for the first time joins pending, logged as
-/// `tier`, and can only bring the boot sooner.
+/// retier tiers the staged slot's fixes from its report against the latest
+/// feed. A tier seen for the first time is added to pending and logged as
+/// `tier`; this can only bring the boot sooner.
 pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pending {
-    // Without its report, the staged slot keeps the tiers it has, said:
-    // a fix that has since risen to Urgent would not bring its boot sooner.
+    // Without its report, keep the current tiers and log it: a fix that has
+    // since risen to Urgent will not bring the boot sooner.
     const text = u.read(p.report) catch |err| {
         try u.record(.{
             .event = "error",
@@ -439,14 +436,16 @@ pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pe
 }
 
 // --- boot -------------------------------------------------------------------
-// The staged slot, booted once it is due; until then, how long that is.
+
+/// bootIfDue reboots into the staged slot once it is due. Until then it sets
+/// ctx.due_in to the seconds left.
 pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
     ctx.due_in = null;
     const held_lock = try u.lock();
     defer _ = linux.close(held_lock);
     const p = try u.readPending() orelse return;
-    // Not armed: its try is spent or was never set. Rebooting would boot
-    // this slot again, so wait for the next check to stage it anew.
+    // Not armed: its try is spent or was never set. A reboot would boot this
+    // slot again, so wait for the next check to stage it.
     if (!try u.armed(p)) return;
     const d = try u.dueOf(&ctx.settings, p);
     const now = nowSecs(u.io);
@@ -464,8 +463,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
         .late = now - d.at,
         .why = try u.whyOf(&ctx.settings, p, d, now),
     });
-    // For the next boot's outcome to say how long the machine was down;
-    // without it, the reboot still goes.
+    // Lets the next boot's outcome log the downtime. Reboot even if it fails.
     u.writeReplacing(rebooted_path, try u.gpa.print("{s}\n", .{try u.time(now)})) catch {};
     u.run(&.{"/usr/bin/reboot"}) catch |err| {
         Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
@@ -476,12 +474,12 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
 
 // --- state ------------------------------------------------------------------
 
-/// The staged slot, in pending: its build, whether a machine's first check
-/// staged it, and for each tier of the fixes it carries, when this machine
-/// first saw one and the first such fix, for the log's why.
+/// Pending is the staged slot: its build, whether a first check staged it,
+/// and for each tier of its fixes, when this machine first saw one and which
+/// fix it was, for the log's why.
 pub const Pending = struct {
     build: []const u8,
-    /// Its report, whose CVEs each check tiers again.
+    /// report is the path of the report whose CVEs each check re-tiers.
     report: []const u8 = "",
     first_boot: bool = false,
     urgent: ?Seen = null,
@@ -503,7 +501,7 @@ pub const Pending = struct {
         };
     }
 
-    /// When each tier was first seen, for the log.
+    /// seenTimes returns when each tier was first seen, for the log.
     pub fn seenTimes(p: Pending) std.enums.EnumFieldStruct(
         policy.Tier,
         ?[]const u8,
@@ -522,8 +520,8 @@ pub const Waits = std.enums.EnumFieldStruct(policy.Tier, ?Waited, @as(?Waited, n
 const Valued = struct { value: []const u8, source: []const u8, limit: []const u8 };
 const Refused = struct { file: []const u8, key: []const u8, why: []const u8 };
 
-/// werewolf's own advisories a plan's release carries; a slot built from
-/// packages carries werewolf's code forward unchanged, and so none.
+/// advisoriesOf returns the werewolf advisories a plan's release carries. A
+/// slot built from packages keeps werewolf's code unchanged, so it has none.
 pub fn advisoriesOf(plan: Plan) []const releases.Manifest.Advisory {
     return switch (plan.from) {
         .packages => &.{},

@@ -11,14 +11,3 @@
 contents:
   packages:
     - step-ca
-
-accounts:
-  groups:
-    - groupname: step
-      gid: 222
-  users:
-    - username: step
-      uid: 222
-      gid: 222
-      homedir: /var/empty
-      shell: /sbin/nologin

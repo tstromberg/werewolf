@@ -1,15 +1,15 @@
 #!/bin/sh
-# publish: make DIST a draft GitHub release, unless the latest release has
-# the same builds. DIST holds each form and architecture's files and
-# manifest (release/manifest); LOCKS holds the locks and inputs they were
-# built from, which the release carries so anyone can rebuild it. The
-# manifests are signed (release/sign) with a serial, which tags the release.
-# The workflow attests the files, then publishes the draft.
+# publish makes DIST a draft GitHub release, unless the latest release has
+# the same builds. DIST holds each form and architecture's files and manifest
+# (release/manifest). LOCKS holds the locks and inputs they were built from;
+# the release carries them so anyone can rebuild it. publish signs the
+# manifests with a serial (release/sign), which also tags the release. The
+# workflow then attests the files and publishes the draft.
 #
 #   WEREWOLF_IMAGE_KEY=<PEM> release/publish DIST LOCKS
 #
-# Run by .github/workflows/release.yml, with gh logged in. Writes
-# tag=SERIAL to $GITHUB_OUTPUT when it made a draft.
+# .github/workflows/release.yml runs it, with gh logged in. When it makes a
+# draft, it writes tag=SERIAL to $GITHUB_OUTPUT.
 set -eu
 
 [ $# -eq 2 ] || { echo "usage: release/publish DIST LOCKS" >&2; exit 2; }
@@ -20,7 +20,7 @@ trap 'rm -rf "$last"' EXIT
 build() { sed -n 's/^  "build": "\(.*\)",$/\1/p' "$1" 2>/dev/null || true; }
 packages() { sed -n 's/^    {"name": "\([^"]*\)", "version": "\([^"]*\)".*/\1 \2/p' "$1" 2>/dev/null || true; }
 
-# The latest release's manifests; none before the first release.
+# Fetch the latest release's manifests. Before the first release, there are none.
 prev=$(gh release view --json tagName --jq .tagName 2>/dev/null || echo none)
 [ "$prev" = none ] || gh release download "$prev" --dir "$last" --pattern '*-aarch64.json' --pattern '*-x86_64.json'
 
@@ -46,7 +46,7 @@ serial=$(date -u +%Y%m%dT%H%M%SZ)
 		n=${m##*/}
 		echo "| ${n%.json} | $(build "$m") | $(sed -n 's/^  "kernel": "\(.*\)",$/\1/p' "$m") |"
 	done
-	# Package changes, against a previous release; the first has none.
+	# List package changes against the previous release; the first has none.
 	[ "$prev" = none ] || for n in $changed; do
 		echo
 		echo "**$n**"

@@ -8,14 +8,3 @@
 contents:
   packages:
     - nats-server
-
-accounts:
-  groups:
-    - groupname: nats
-      gid: 216
-  users:
-    - username: nats
-      uid: 216
-      gid: 216
-      homedir: /var/empty
-      shell: /sbin/nologin

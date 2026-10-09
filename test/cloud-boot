@@ -1,20 +1,19 @@
 #!/bin/sh
 # cloud-boot NAME PROVIDER PAYLOAD CHECKS LOG FIRMWARE QEMU...
 #
-# Boot prod as a machine on PROVIDER (gcp, aws, hetzner, azure; hyperv,
-# Azure's names on a desktop; or none for a machine on no cloud), with no
-# address and no config disk, against test/metadata serving PAYLOAD (good
-# or hostile) at 169.254.169.254. Run
-# CHECKS on its console (test/boot), then judge what the console and the
-# metadata server saw:
+# cloud-boot boots prod as a machine on PROVIDER (gcp, aws, hetzner, azure;
+# hyperv, which uses Azure's names on a desktop; or none, for a machine on no
+# cloud), with no address and no config disk. test/metadata serves PAYLOAD
+# (good or hostile) at 169.254.169.254. cloud-boot runs CHECKS on the console
+# (test/boot), then judges what the console and the metadata server saw:
 #
-#   good, on a cloud   the config is taken: a "config" event for PROVIDER;
-#                      on AWS, a token was fetched first and then used
-#   hostile            it is refused whole: a "refused" event
+#   good, on a cloud   the machine takes the config: a "config" event for
+#                      PROVIDER; on AWS, it fetched a token first and used it
+#   hostile            the machine refuses the whole config: a "refused" event
 #   none, hyperv       no request reached the server at all
 #
 # FIRMWARE is UEFI for arm64, where only firmware gives the guest SMBIOS
-# tables; empty on x86_64, whose default firmware does.
+# tables. It is empty on x86_64, whose default firmware does.
 set -eu
 name=$1 provider=$2 payload=$3 checks=$4 log=$5 firmware=$6
 shift 6
@@ -40,7 +39,7 @@ case $provider in
 gcp) smbios='type=1,manufacturer=Google,product=Google Compute Engine' ;;
 aws) smbios='type=1,manufacturer=Amazon EC2,product=m7g.large' ;;
 hetzner) smbios='type=1,manufacturer=Hetzner,product=vServer' ;;
-# Hyper-V's names, and the chassis asset tag only Azure sets.
+# Azure uses Hyper-V's names; only Azure sets the chassis asset tag.
 azure) smbios='type=1,manufacturer=Microsoft Corporation,product=Virtual Machine'
 	chassis='type=3,asset=7783-7084-3265-9085-8269-3286-77' ;;
 hyperv) smbios='type=1,manufacturer=Microsoft Corporation,product=Virtual Machine' ;;
@@ -48,8 +47,9 @@ none) smbios= ;;
 *) echo "cloud-boot: no provider $provider" >&2; exit 2 ;;
 esac
 
-# QEMU's user network as a cloud's: the guest gets 169.254.0.15 by DHCP,
-# and 169.254.169.254:80 reaches the server through nc, one per connection.
+# Make QEMU's user network look like a cloud's: the guest gets 169.254.0.15
+# by DHCP, and 169.254.169.254:80 reaches the server through one nc per
+# connection.
 net="user,id=n0,net=169.254.0.0/16,host=169.254.0.2,dhcpstart=169.254.0.15,dns=169.254.0.3,guestfwd=tcp:169.254.169.254:80-cmd:nc 127.0.0.1 $port"
 test/boot "$name" "$checks" "$log" "$@" \
 	${firmware:+-bios "$firmware" -boot menu=on,splash-time=0} ${smbios:+-smbios "$smbios"} ${chassis:+-smbios "$chassis"} \

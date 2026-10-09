@@ -1,12 +1,10 @@
-//! dm: the device mapper, through its ioctls (linux/dm-ioctl.h), for the
-//! programs that run before any tool could: stage0 opens the root through
-//! dm-verity, and the mount broker removes /data's LUKS mapping at
-//! shutdown, as `dmsetup create` and `cryptsetup close` would.
+//! dm drives the device mapper through its ioctls (linux/dm-ioctl.h), for
+//! programs that cannot run dmsetup or cryptsetup. See lib/README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
 
-/// The kernel's struct dm_ioctl, version 4.
+/// Ioctl is the kernel's struct dm_ioctl, version 4.
 const Ioctl = extern struct {
     version: [3]u32 = .{ 4, 0, 0 },
     data_size: u32 = @sizeOf(Ioctl),
@@ -22,8 +20,8 @@ const Ioctl = extern struct {
     data: [7]u8 = @splat(0),
 };
 
-/// The kernel's struct dm_target_spec, which a table load's targets follow
-/// the header as, each with its parameters after it.
+/// TargetSpec is the kernel's struct dm_target_spec. In a table load each
+/// follows the header, with its parameters after it.
 const TargetSpec = extern struct {
     sector_start: u64 = 0,
     length: u64,
@@ -34,7 +32,7 @@ const TargetSpec = extern struct {
 
 const readonly_flag = 1 << 0;
 
-/// _IOWR(0xfd, nr, struct dm_ioctl).
+/// request returns _IOWR(0xfd, nr, struct dm_ioctl).
 fn request(nr: u8) u32 {
     return 0xc0000000 | (@as(u32, @sizeOf(Ioctl)) << 16) | (0xfd << 8) | nr;
 }
@@ -43,10 +41,9 @@ pub const dev_remove = request(4);
 const dev_suspend = request(6);
 const table_load = request(9);
 
-/// A device named name, read-only, of sectors 512-byte sectors, all mapped
-/// by one target of kind with params, and live: created, loaded and
-/// resumed. Its device number, encoded as mknod takes one.
-/// The kernel says why on the console when it refuses a table.
+/// create makes a live read-only device called name, of sectors 512-byte
+/// sectors, mapped by one target of kind with params. It returns the device
+/// number as mknod takes it. The kernel logs why when it refuses a table.
 pub fn create(name: []const u8, kind: []const u8, sectors: u64, params: []const u8) !linux.dev_t {
     if (name.len >= 128 or kind.len >= 16) return error.NameTooLong;
     const ctl = try control();
@@ -56,7 +53,7 @@ pub fn create(name: []const u8, kind: []const u8, sectors: u64, params: []const 
     try call(ctl, dev_create, &io, error.Create);
     errdefer _ = remove(name);
 
-    // The header, one target, its parameters with their NUL, 8-byte aligned.
+    // The header, one target, then its NUL-terminated parameters, 8-byte aligned.
     var buf: [@sizeOf(Ioctl) + @sizeOf(TargetSpec) + 512]u8 align(8) = @splat(0);
     const params_at = @sizeOf(Ioctl) + @sizeOf(TargetSpec);
     if (params.len + 1 > buf.len - params_at) return error.ParamsTooLong;
@@ -72,15 +69,14 @@ pub fn create(name: []const u8, kind: []const u8, sectors: u64, params: []const 
     @memcpy(buf[params_at..][0..params.len], params);
     try call(ctl, table_load, head, error.TableLoad);
 
-    // Without the suspend flag, DM_DEV_SUSPEND resumes: the loaded table goes
-    // live.
+    // Without the suspend flag, DM_DEV_SUSPEND resumes, so the table goes live.
     io = named(name);
     try call(ctl, dev_suspend, &io, error.Resume);
     return std.math.cast(linux.dev_t, io.dev) orelse error.DeviceNumber;
 }
 
-/// The device named name removed, and whatever its table held with it: a
-/// LUKS mapping's key. Whether there was one.
+/// remove removes the device called name, and with it what its table held,
+/// such as a LUKS key. It reports whether it succeeded.
 pub fn remove(name: []const u8) bool {
     if (name.len >= 128) return false;
     const ctl = control() catch return false;

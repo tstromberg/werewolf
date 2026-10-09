@@ -2,13 +2,3 @@
 contents:
   packages:
     - tailscale
-accounts:
-  groups:
-    - groupname: tailscale
-      gid: 206
-  users:
-    - username: tailscale
-      uid: 206
-      gid: 206
-      homedir: /var/empty
-      shell: /sbin/nologin

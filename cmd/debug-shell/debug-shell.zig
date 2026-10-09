@@ -1,17 +1,6 @@
-//! debug-shell: a root shell on the serial console, without a password, for
-//! debugging: on a DEV=1 build alone (/usr/share/werewolf/dev, on its
-//! verified read-only root), booted with werewolf.debug=1. Otherwise it
-//! parks itself. A released form that carries a shell (prod-ssh, sshd)
-//! gives none: the kernel command line is a switch that root, or anyone at
-//! a bitten machine's console who can edit GRUB's menu, can flip, so it
-//! loosens nothing (docs/design/lockdown.md). It says so on the console
-//! when it opens one.
-//!
-//! runsv runs it as /etc/sv/debug-shell/run, and as /etc/sv/debug-shell/control/t
-//! in place of sending TERM. The shell is an interactive ash, which ignores
-//! TERM, so stage 3 would wait out its whole timeout; as t it sends the
-//! shell HUP, which it honours, and exits 0, which tells runsv the signal
-//! has been sent.
+//! debug-shell gives a passwordless root shell on the serial console, but
+//! only on a DEV=1 build booted with werewolf.debug=1; otherwise it parks.
+//! runsv also runs it as control/t to stop the shell. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -22,6 +11,8 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
+    // As control/t: an interactive ash ignores TERM, so send it HUP. Exit 0
+    // tells runsv the signal was sent.
     if (std.mem.eql(u8, std.fs.path.basename(args[0]), "t")) {
         const text = Io.Dir.cwd().readFileAlloc(
             io,
@@ -46,7 +37,9 @@ pub fn main(init: std.process.Init) !void {
     else
         0;
     const line = if (linux.errno(n) == .SUCCESS) buf[0..n] else "";
-    // Read as stage0 read it (lib/cmdline.zig); a line it refuses gives no shell.
+    // Parse the line as stage0 did (lib/cmdline.zig); a refused line gives
+    // no shell. The command line alone is no gate, since root or anyone at
+    // a bitten machine's GRUB menu can set it, so the image must be DEV=1.
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(line, &refused) orelse park(io, null);
     if (!cmd.debug) park(io, null);
@@ -75,8 +68,8 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(1);
 }
 
-/// The kernel's console, as the last console= names it, without its
-/// options ("ttyS0,115200" is ttyS0); "console" if there is none.
+/// consoleName returns the device the last console= names, cut to its
+/// leading letters and digits ("ttyS0,115200" is ttyS0), or "console".
 fn consoleName(line: []const u8) []const u8 {
     var name: []const u8 = "console";
     var words = std.mem.tokenizeAny(u8, line, " \n");
@@ -94,7 +87,8 @@ fn executable(path: [:0]const u8) bool {
     return linux.errno(linux.access(path, linux.X_OK)) == .SUCCESS;
 }
 
-/// Down, as a service with nothing to do: runsv will not restart it.
+/// park logs why, if given, and runs `sv down .` so runsv does not restart
+/// the service.
 fn park(io: Io, why: ?[]const u8) noreturn {
     if (why) |w| say(io, "{s}", .{w});
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });

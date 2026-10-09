@@ -2,7 +2,7 @@
 # provider, a forged cookie is thrown out, the auth endpoint says 401,
 # and only the ping answers plainly; its secrets are root's, read into
 # its environment and nowhere else.
-ok  o2p-user         p=$(head -n 1 /run/cgroup/svc/oauth2-proxy/cgroup.procs); grep -q '^Uid:[[:space:]]*214[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  o2p-user         p=$(head -n 1 /run/cgroup/svc/oauth2-proxy/cgroup.procs); u=$(grep '^oauth2-proxy:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  o2p-ping         i=0; until wget -q -T 5 -O - http://127.0.0.1:4180/ping 2>/dev/null | grep -q OK; do i=$((i + 1)); [ $i -le 60 ] || { echo "no ping"; exit 1; }; sleep 1; done
 ok  o2p-wall         h=$(wget -q -T 5 -S -O /dev/null http://127.0.0.1:4180/ 2>&1); echo "$h" | grep -q 'HTTP/1.1 302' && echo "$h" | grep -q 'Location: https://idp.example.test/authorize'
 ok  o2p-auth-401     wget -q -T 5 -S -O /dev/null http://127.0.0.1:4180/oauth2/auth 2>&1 | grep -q 'HTTP/1.1 401'

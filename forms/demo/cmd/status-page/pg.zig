@@ -1,5 +1,6 @@
-//! status-page's PostgreSQL client: the wire protocol over the server's
-//! UNIX socket, every value a parameter, never part of the SQL.
+//! pg is status-page's PostgreSQL client. It speaks the wire protocol over
+//! the server's UNIX socket and sends every value as a parameter, never in
+//! the SQL. See README.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -9,8 +10,8 @@ const pg_socket = main.pg_socket;
 
 const pg_max_message = 16 << 20;
 
-/// PostgreSQL's own words for the last refusal: its ErrorResponse's
-/// message (M), each control character as ?, at most 200 bytes.
+/// refusal_buf holds the message (M) of the last ErrorResponse, at most 200
+/// bytes, with each control character as "?".
 var refusal_buf: [200]u8 = undefined;
 
 var refusal: []const u8 = "";
@@ -27,13 +28,13 @@ fn keepRefusal(body: []const u8) void {
     }
 }
 
-/// Why the database could not be used: the error, and PostgreSQL's words
-/// where it refused.
+/// dbWhy says why the database could not be used: PostgreSQL's message
+/// if it refused, or else the error's name.
 pub fn dbWhy(err: anyerror) []const u8 {
     return if (err == error.Refused and refusal.len > 0) refusal else @errorName(err);
 }
 
-/// One connection to the server, as one role, to the postgres database.
+/// Pg is one connection to the postgres database as one role.
 pub const Pg = struct {
     fd: i32,
 
@@ -43,9 +44,8 @@ pub const Pg = struct {
         if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
         var p: Pg = .{ .fd = @intCast(rc) };
         errdefer _ = linux.close(p.fd);
-        // A server that stops answering costs the page half its minute,
-        // not the page; one that is merely slow, on a loaded machine, is
-        // waited for.
+        // A hung server costs the page 30 s instead of hanging it, and a
+        // slow server on a loaded machine still gets time to answer.
         const tv: linux.timeval = .{ .sec = 30, .usec = 0 };
         for ([_]u32{
             linux.SO.RCVTIMEO,
@@ -98,8 +98,8 @@ pub const Pg = struct {
         }
     }
 
-    /// One statement, its parameters as text; its rows, each column text,
-    /// or null for NULL.
+    /// query runs one statement with text parameters and returns its rows,
+    /// each column as text or null for NULL.
     pub fn query(
         p: *Pg,
         gpa: Allocator,
@@ -108,13 +108,13 @@ pub const Pg = struct {
     ) ![]const []const ?[]const u8 {
         if (std.mem.findScalar(u8, sql, 0) != null) return error.BadValue;
         var m: std.ArrayList(u8) = .empty;
-        // Parse: the unnamed statement, its parameters' types inferred.
+        // Parse the unnamed statement; the server infers parameter types.
         var start = try messageStart(gpa, &m, 'P');
         try m.appendSlice(gpa, "\x00");
         try m.appendSlice(gpa, sql);
         try m.appendSlice(gpa, &.{ 0, 0, 0 });
         messageEnd(&m, start);
-        // Bind: the unnamed portal, every value as text.
+        // Bind the unnamed portal, with every value as text.
         start = try messageStart(gpa, &m, 'B');
         try m.appendSlice(gpa, &.{ 0, 0, 0, 0 });
         try appendInt(gpa, &m, u16, @intCast(params.len));
@@ -182,8 +182,8 @@ pub const Pg = struct {
         }
     }
 
-    /// What a read or write on the socket that moved nothing means: the
-    /// timeout passing, or the server gone.
+    /// ioError turns a read or write result into an error: Timeout when the
+    /// socket timed out, Lost when the server is gone.
     fn ioError(n: usize) !void {
         switch (std.os.linux.errno(n)) {
             .SUCCESS => if (n == 0) return error.Lost,
@@ -200,8 +200,8 @@ fn messageStart(gpa: Allocator, m: *std.ArrayList(u8), kind: u8) !usize {
     return at;
 }
 
-/// The length of the message whose length field is at start: itself and
-/// what follows.
+/// messageEnd writes the length field at start: the length of the field
+/// itself and what follows.
 fn messageEnd(m: *std.ArrayList(u8), start: usize) void {
     std.mem.writeInt(u32, m.items[start..][0..4], @intCast(m.items.len - start), .big);
 }
@@ -212,8 +212,8 @@ fn appendInt(gpa: Allocator, m: *std.ArrayList(u8), comptime T: type, v: T) !voi
     try m.appendSlice(gpa, &b);
 }
 
-/// A DataRow's columns: a count, then each a length (-1 for NULL) and
-/// its bytes.
+/// dataRow parses a DataRow: a column count, then each column's length
+/// (-1 for NULL) and bytes. It checks every length against the body.
 fn dataRow(gpa: Allocator, body: []const u8) ![]const ?[]const u8 {
     if (body.len < 2) return error.Lost;
     const n = std.mem.readInt(u16, body[0..2], .big);

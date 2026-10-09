@@ -1,38 +1,6 @@
-//! sshd: what form.yaml writes into an image's sshd (forms/README.md), as
-//! the build checks and writes it (lib/form.zig, tools/form.zig).
-//!
-//! `sshd:` is sshd_config keywords, each named as sshd_config names it but
-//! in lowercase words joined by -, as howl's --sshd.KEYWORD VALUE sets them:
-//!
-//!     sshd:
-//!       pubkey-accepted-algorithms: ssh-ed25519,sk-ssh-ed25519@openssh.com
-//!
-//! The build writes them to etc/ssh/sshd_config.d/form.conf. sshd takes a
-//! keyword's first value, and form.conf sorts before the sshd form's
-//! werewolf.conf, so a value here wins over the policy. A keyword is one
-//! of a closed list: those that set how sshd lets people in and what a
-//! session may do. None names a file or a program to run
-//! (AuthorizedKeysCommand, ForceCommand, Subsystem, HostKey), or changes the
-//! file's shape (Match, Include). A value is printable ASCII without
-//! sshd_config's quotes, comments or escapes, so it is one line and ends
-//! where the keyword's value does.
-//!
-//! `bastion: users:` is the bastion's users, each with keys and the
-//! destinations they may reach:
-//!
-//!     bastion:
-//!       users:
-//!         alice:
-//!           keys:
-//!             - sk-ssh-ed25519@openssh.com AAAA... alice@laptop
-//!           destinations: [10.20.0.10:22]
-//!
-//! The build writes them as the bastion's authorized_keys, a line a key,
-//! each held to its user's destinations (permitopen), and the bastion's
-//! PermitOpen, every user's destinations: a key reaches its own user's and
-//! no other's. A key is a public key and nothing more: the options are the
-//! build's to write. It is a security key's, as sshd takes no other,
-//! unless the form's `sshd:` says sshd takes key files too.
+//! sshd checks form.yaml's `sshd:` and `bastion:` sections and writes the
+//! sshd_config fragment and the bastion's authorized_keys at build time.
+//! See lib/README.md and forms/README.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -50,8 +18,9 @@ const header =
     \\
 ;
 
-/// One keyword sshd_config takes from form.yaml, and the posture check its
-/// value can fail: a form that changes it says so in its weaknesses.
+/// Keyword maps a form.yaml flag to its sshd_config name and the posture
+/// check a changed value can fail; a form that sets it declares that check
+/// in its weaknesses.
 const Keyword = struct { []const u8, []const u8, []const u8 };
 
 const keys_check = "network-ssh-security-keys";
@@ -88,21 +57,21 @@ const keywords = [_]Keyword{
     .{ "host-key-algorithms", "HostKeyAlgorithms", crypto_check },
 };
 
-/// One of `sshd:`'s keywords and its value: form.yaml's KEYWORD: VALUE,
-/// or howl's --sshd.KEYWORD=VALUE.
+/// Pair is one `sshd:` keyword and its value, from form.yaml's
+/// KEYWORD: VALUE or howl's --sshd.KEYWORD=VALUE.
 pub const Pair = struct { flag: []const u8, value: []const u8 };
 
 pub const Fragment = struct {
-    /// The file's text: a line a keyword, in the order given.
+    /// text is the file, one line per keyword in the order given.
     text: []const u8,
-    /// The posture checks the values may fail, each once, for the form's
-    /// weaknesses as `?ID`: whether one does is the value's to say, and
-    /// the boot's posture line says it.
+    /// checks lists, once each, the posture checks the values may fail. The
+    /// form declares them as `?ID` weaknesses, since only the boot's posture
+    /// line knows whether a value fails.
     checks: []const []const u8,
 };
 
-/// The fragment from pairs, or error.Invalid with why saying which keyword
-/// and what is wrong, never the value.
+/// fragment builds form.conf from pairs. On error.Invalid, why names the
+/// keyword and the problem but never the value.
 pub fn fragment(gpa: Allocator, pairs: []const Pair, why: *[]const u8) !Fragment {
     var text: std.ArrayList(u8) = .empty;
     var checks: std.ArrayList([]const u8) = .empty;
@@ -131,10 +100,9 @@ pub fn fragment(gpa: Allocator, pairs: []const Pair, why: *[]const u8) !Fragment
     return .{ .text = text.items, .checks = checks.items };
 }
 
-/// Whether pairs let sshd take a key file, not a security key's alone:
-/// a pubkey-accepted-algorithms naming an algorithm without the sk- of a
-/// FIDO authenticator's, or changing OpenSSH's default list (+, -, ^),
-/// which holds key files.
+/// takesKeyFiles reports whether pairs let sshd accept plain key files, not
+/// only security keys: pubkey-accepted-algorithms names a non-sk- algorithm,
+/// or edits OpenSSH's default list (+, -, ^), which includes key files.
 pub fn takesKeyFiles(pairs: []const Pair) bool {
     for (pairs) |p| if (std.mem.eql(u8, p.flag, "pubkey-accepted-algorithms")) {
         const v = std.mem.trim(u8, p.value, " ");
@@ -145,9 +113,9 @@ pub fn takesKeyFiles(pairs: []const Pair) bool {
     return false;
 }
 
-/// What a value may hold: none of sshd_config's quotes ("), comment (#),
-/// escape (\), = (a keyword's other separator), % (a path's tokens), a
-/// tab or a line's end.
+/// valueByte reports whether c may appear in a value. It excludes
+/// sshd_config's quote ("), comment (#), escape (\), = (a separator),
+/// % (path tokens), tabs and newlines.
 fn valueByte(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or std.mem.findScalar(u8, " @._,:+*^!?/[]-", c) != null;
 }
@@ -158,14 +126,14 @@ fn flagList() []const u8 {
     return s;
 }
 
-/// A bastion's user, as form.yaml names it.
+/// User is a bastion user from form.yaml.
 pub const User = struct {
     name: []const u8,
     keys: []const []const u8,
     destinations: []const []const u8,
 };
 
-/// The key types sshd may be given, security keys' first.
+/// The key types sshd accepts: security keys, then plain key files.
 const security_key_types = [_][]const u8{
     "sk-ssh-ed25519@openssh.com",
     "sk-ecdsa-sha2-nistp256@openssh.com",
@@ -178,14 +146,12 @@ const key_file_types = [_][]const u8{
     "ssh-rsa",
 };
 
-/// The bastion's authorized_keys from users: a line a key, its options
-/// `restrict,port-forwarding` and a permitopen for each of its user's
-/// destinations, its comment the user's name. key_files: whether sshd
-/// takes key files (takesKeyFiles), or security keys' alone. Refused, with
-/// why naming the user and what is wrong: a name that is not one, a user
-/// with no key or no destination, a line that is not a public key, a key
-/// file sshd would refuse, a key twice, a destination that is not a
-/// literal address and port.
+/// authorizedKeys writes the bastion's authorized_keys: one line per key,
+/// with `restrict,port-forwarding`, a permitopen per destination of its
+/// user, and the user's name as comment. key_files says whether plain key
+/// files are allowed (see takesKeyFiles). It fails with why naming the user
+/// on a bad name, no keys or destinations, a malformed or disallowed key, a
+/// repeated key, or a destination that is not a literal address and port.
 pub fn authorizedKeys(
     gpa: Allocator,
     users: []const User,
@@ -234,8 +200,8 @@ pub fn authorizedKeys(
     return out.items;
 }
 
-/// The bastion's PermitOpen: every user's destinations, each once, as one
-/// sshd_config line, or "" for none, leaving its PermitOpen none.
+/// permitOpen returns the bastion's PermitOpen line listing every user's
+/// destinations once, or "" for none, which leaves PermitOpen none.
 pub fn permitOpen(gpa: Allocator, users: []const User) ![]const u8 {
     var all: std.ArrayList([]const u8) = .empty;
     for (users) |u| for (u.destinations) |d| {
@@ -247,8 +213,8 @@ pub fn permitOpen(gpa: Allocator, users: []const User) ![]const u8 {
     return gpa.print("PermitOpen {s}\n", .{try std.mem.join(gpa, " ", all.items)});
 }
 
-/// A destination's port: what is after its last colon. Only for one
-/// authorizedKeys took.
+/// port returns the port after a destination's last colon. Use it only on
+/// destinations authorizedKeys accepted.
 pub fn port(destination: []const u8) u16 {
     const colon = std.mem.findScalarLast(u8, destination, ':') orelse return 0;
     return std.fmt.parseInt(u16, destination[colon + 1 ..], 10) catch 0;
@@ -256,7 +222,8 @@ pub fn port(destination: []const u8) u16 {
 
 const Key = struct { type: []const u8, body: []const u8 };
 
-/// line as TYPE BASE64 [COMMENT], the comment dropped.
+/// publicKey parses line as TYPE BASE64 [COMMENT] and drops the comment.
+/// It refuses options, unknown types, and key files unless key_files.
 fn publicKey(
     gpa: Allocator,
     user: []const u8,
@@ -342,12 +309,12 @@ test "fragment refuses what is not one keyword's value" {
     const a = arena.allocator();
     var why: []const u8 = "";
     for ([_]struct { Pair, []const u8 }{
-        // A program run as root, a new block, a file read.
+        // Keywords that run a program as root, open a block, or read a file.
         .{ .{ .flag = "authorized-keys-command", .value = "/bin/sh" }, "sshd takes" },
         .{ .{ .flag = "match", .value = "all" }, "sshd takes" },
         .{ .{ .flag = "include", .value = "/data/x" }, "sshd takes" },
         .{ .{ .flag = "PubkeyAuthOptions", .value = "none" }, "sshd takes" },
-        // A second line, a comment, a quote, an escape, a token.
+        // Values with a second line, a comment, a quote, an escape or a token.
         .{ .{ .flag = "allow-users", .value = "root\nForceCommand /bin/sh" }, "a value is" },
         .{ .{ .flag = "allow-users", .value = "root # x" }, "a value is" },
         .{ .{ .flag = "allow-users", .value = "\"root\"" }, "a value is" },
@@ -420,7 +387,7 @@ test authorizedKeys {
     try testing.expectEqualStrings("", try permitOpen(a, &.{}));
     try testing.expectEqual(2222, port("[fd00::1]:2222"));
     try testing.expectEqual(22, port("10.20.0.10:22"));
-    // A key file, once sshd takes them.
+    // A key file is accepted once sshd takes them.
     const files = [_]User{.{
         .name = "carol",
         .keys = &.{file_key},
@@ -438,7 +405,7 @@ test "authorizedKeys refuses what would let more in than the user says" {
     var why: []const u8 = "";
     const d: []const []const u8 = &.{"10.0.0.1:22"};
     for ([_]struct { User, []const u8 }{
-        // Options of the user's own: a command, any destination.
+        // The user may not add options, such as a command or any destination.
         .{
             .{ .name = "a", .keys = &.{"command=\"/bin/sh\" " ++ sk_key}, .destinations = d },
             "without options",
@@ -457,7 +424,7 @@ test "authorizedKeys refuses what would let more in than the user says" {
         },
         .{ .{ .name = "a", .keys = &.{}, .destinations = d }, "keys" },
         .{ .{ .name = "a", .keys = &.{sk_key}, .destinations = &.{} }, "destinations" },
-        // A hostname, a wildcard, a quote that would end permitopen's.
+        // A hostname, a wildcard, or a quote that would end permitopen's.
         .{
             .{ .name = "a", .keys = &.{sk_key}, .destinations = &.{"db.internal:22"} },
             "literal address",

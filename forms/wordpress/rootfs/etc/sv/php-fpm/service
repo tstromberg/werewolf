@@ -16,6 +16,9 @@ pledge  stdio rpath wpath proc unix inet connect listen
 connect tcp/587 tcp/53
 memory  512
 read    /etc/php
+# nginx reaches its socket, /run/svc/php-fpm/php.sock, mode 0660 for
+# nginx's group, and serves the uploads.
+share   shared
 # SQLite's temporary files, for the installer; php-fpm.conf gives the
 # workers the same.
 env     SQLITE_TMPDIR=/run/svc/php-fpm

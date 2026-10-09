@@ -1,0 +1,6 @@
+---
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/werewolf-linux/werewolf/security/advisories/new
+    about: Report it privately, never in a public issue (SECURITY.md).

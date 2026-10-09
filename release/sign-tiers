@@ -1,16 +1,15 @@
 #!/bin/sh
-# sign-tiers: stamp the CVE tiers feed (tools/cve-tiers.zig) with SERIAL and
-# an expiry three days out, sign it with the tiers key as FEED.sig, and
-# check the signature against release/tiers.pub. CI signs the feed at
-# least daily, so a current one never expires, and a machine whose feed has
-# stopped coming counts every fix as High within three days
-# (docs/design/update-policy.md).
+# sign-tiers stamps the CVE tiers feed (tools/cve-tiers.zig) with SERIAL and
+# an expiry three days out, signs it with the tiers key as FEED.sig, and
+# checks the signature against release/tiers.pub. CI signs the feed at least
+# daily, so a current feed never expires. If the feed stops coming, a machine
+# counts every fix as High within three days (docs/design/update-policy.md).
 #
 #   WEREWOLF_TIERS_KEY=<PEM> release/sign-tiers SERIAL FEED
 #
-# The signature is RSA PKCS#1 v1.5 over the sha256 of FEED, as
+# The signature is RSA PKCS#1 v1.5 over the sha256 of FEED, which
 #   openssl dgst -sha256 -verify release/tiers.pub -signature F.sig F
-# checks it. See docs/releases.md.
+# checks. See docs/releases.md.
 set -eu
 
 [ $# -eq 2 ] || { echo "usage: release/sign-tiers SERIAL FEED" >&2; exit 2; }

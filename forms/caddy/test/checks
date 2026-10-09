@@ -2,7 +2,7 @@
 # own CA (forms/caddy/test/config): HTTPS answers with the site and its headers
 # and no Server line, :80 redirects there, the admin API is nowhere, and
 # what it issued is kept on /data.
-ok  caddy-user       p=$(pidof caddy); grep -q '^Uid:[[:space:]]*207[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  caddy-user       p=$(pidof caddy); u=$(grep '^caddy:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  caddy-https      i=0; until wget -q -T 5 --no-check-certificate -O /tmp/caddy.html https://localhost/ 2>/dev/null; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing answers HTTPS on localhost"; exit 1; }; sleep 1; done; grep -q Caddy /tmp/caddy.html
 ok  caddy-headers    h=$(wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/ 2>&1); echo "$h" | grep -qi 'X-Content-Type-Options: nosniff' && echo "$h" | grep -qi 'Referrer-Policy: strict-origin-when-cross-origin' && ! echo "$h" | grep -qi '^ *Server:'
 ok  caddy-redirect   wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'

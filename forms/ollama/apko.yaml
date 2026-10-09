@@ -7,14 +7,3 @@
 contents:
   packages:
     - ollama
-
-accounts:
-  groups:
-    - groupname: ollama
-      gid: 218
-  users:
-    - username: ollama
-      uid: 218
-      gid: 218
-      homedir: /var/empty
-      shell: /sbin/nologin

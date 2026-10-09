@@ -1,55 +1,6 @@
-//! dhcp-client: an IPv4 address from the network's DHCP server.
-//!
-//!     dhcp up NIC   get a lease for NIC and apply it; exit 0 once bound, or
-//!                   1 if no server has given one within 30 seconds
-//!     dhcp keep     keep that lease for as long as the machine runs: renew
-//!                   it, or get another
-//!
-//! init runs `dhcp up` when the kernel command line names no werewolf.ip,
-//! and then starts `dhcp keep` itself, before it becomes fence, as it
-//! starts the mount broker: so keep has CAP_NET_ADMIN, to apply a lease,
-//! and its packet socket, which fence then takes from every process after
-//! it, root's included. runit does not restart it, so it treats a failed
-//! receive, as when the link drops for a moment, as a round with no answer;
-//! should it end anyway, the address it applied stays.
-//!
-//! The program is two processes, as OpenBSD's dhclient is, so the one that
-//! reads the network can do nothing else:
-//!
-//!   engine   speaks DHCP. It alone parses what comes off the wire. It runs
-//!            as _dhcp (uid 67), chrooted to the empty /var/empty, with no
-//!            capabilities, and a seccomp filter that kills it for any system
-//!            call beyond sending and receiving on its packet socket, writing
-//!            to the parent, waiting, the clock and random numbers. When a
-//!            lease is given or renewed, it sends the parent a fixed-size
-//!            message describing it.
-//!   parent   applies leases. It stays root but keeps one capability,
-//!            CAP_NET_ADMIN, for the ioctls that set the address, MTU and
-//!            routes. It never sees a packet: it checks every field of the
-//!            engine's message again, and treats one it does not like as a
-//!            compromised engine, ending both. Landlock confines what it
-//!            writes to /run/werewolf/network (lease.json, and resolv.conf, to
-//!            which /etc/resolv.conf links), and seccomp to the few calls
-//!            that takes.
-//!
-//! Both are set up before either touches the network: the packet socket is
-//! opened, filtered in the kernel to DHCP replies, and locked first.
-//!
-//! The engine treats every reply as hostile: it is read with strict bounds,
-//! must answer our transaction from our hardware address, renewals must come
-//! from the server that gave the lease, and only these options are used:
-//! message type, server, subnet mask, router, classless static routes (RFC
-//! 3442, which GCP sends with a /32 address), DNS servers, MTU, and the lease
-//! times. Every event is one JSON line on stdout, from the parent.
-//!
-//! A lease that puts a different address, mask or routes on the NIC than
-//! the one before is applied clean: the old address is taken off first, and
-//! with it, the kernel flushes every route through the NIC, so no route of
-//! the old lease is left beside the new one's. A server's NAK
-//! takes the address off. A lease that runs out with no server answering
-//! is kept until another comes, as a cloud's address does not change and a
-//! DHCP server that is down for a moment should not take the machine off
-//! the network (RFC 2131 would drop it).
+//! dhcp-client gets an IPv4 address from the network's DHCP server and keeps
+//! it: `dhcp up NIC` gets a lease, `dhcp keep` renews it. An unprivileged
+//! engine parses the wire; its parent applies leases. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -64,7 +15,7 @@ const state_dir = "/run/werewolf/network";
 const nic_path = state_dir ++ "/nic";
 const lease_path = state_dir ++ "/lease.json";
 const empty_dir = "/var/empty";
-/// _dhcp, in prod.yaml's accounts.
+/// engine_id is the uid of _dhcp, defined in forms/prod/apko.yaml.
 const engine_id: u32 = 67;
 
 const client_port = 68;
@@ -72,8 +23,8 @@ const server_port = 67;
 const cookie = [4]u8{ 99, 130, 83, 99 };
 const max_routes = 8;
 const max_dns = 3;
-/// The options asked for: subnet mask, router, DNS, MTU, lease time,
-/// server, renewal and rebinding times, classless static routes.
+/// wanted lists the options we ask for: subnet mask, router, DNS, MTU, lease
+/// time, server, renewal and rebinding times, classless static routes.
 const wanted = [_]u8{ 1, 3, 6, 26, 51, 54, 58, 59, 121 };
 
 const Ip4 = [4]u8;
@@ -81,10 +32,10 @@ const zero: Ip4 = .{ 0, 0, 0, 0 };
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
-    // Speculative Store Bypass mitigated for this process and all it starts,
-    // which werewolf leaves to each program, so workloads do not pay
-    // (docs/security.md). Where the CPU has no control, the kernel refuses
-    // and nothing changes.
+    // Disable Speculative Store Bypass for both processes. werewolf leaves
+    // this to each program so workloads do not pay for it
+    // (docs/security.md). On a CPU without the control, prctl fails and
+    // nothing changes.
     _ = linux.prctl(
         @backingInt(linux.PR.SET_SPECULATION_CTRL),
         linux.PR.SPEC_STORE_BYPASS,
@@ -118,7 +69,9 @@ pub fn main(init: std.process.Init) !void {
 
 const Mode = enum { up, keep };
 
-/// As root: everything both processes need, then the fork.
+/// start runs as root. It opens everything both processes need, including
+/// the filtered packet socket, before it forks, so neither process needs
+/// privilege to open anything later.
 fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     var log: Log = .{};
     try Dir.cwd().createDirPath(io, state_dir);
@@ -136,8 +89,8 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     };
     if (mode == .up) try Dir.cwd().writeFile(io, .{ .sub_path = nic_path, .data = nic });
 
-    // The lease `up` left, for `keep` to renew. One that cannot be read is
-    // no lease: the engine gets another.
+    // keep renews the lease up left. If it cannot be read, the engine gets
+    // a new one.
     var held: ?Wire = null;
     if (mode == .keep) {
         if (Dir.cwd().readFileAlloc(io, lease_path, gpa, .limited(64 << 10))) |data| {
@@ -147,8 +100,8 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     }
 
     const link = try Link.open(nic);
-    // What the carrier cost the boot: a NIC that comes up late (Hyper-V's,
-    // after its VMBus handshake) shows here, not in the exchange's time.
+    // Log the carrier wait separately, so a NIC that comes up late (Hyper-V's,
+    // after its VMBus handshake) is not blamed on the DHCP exchange.
     log.event("link", .{ .nic = nic, .carrier = link.carrier, .waited_ms = link.waited_ms });
     const dir = try sys(
         linux.openat(
@@ -190,8 +143,8 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     p.run();
 }
 
-/// No NIC that `up` named: nothing to keep, for as long as the machine runs,
-/// as _dhcp in an empty root with nothing but sleep allowed.
+/// park idles forever when up left no NIC to keep. It runs as _dhcp in an
+/// empty root and may only sleep.
 fn park() noreturn {
     sandbox.dropTo(engine_id, empty_dir) catch linux.exit_group(1);
     var f: sandbox.Filter = .{};
@@ -210,10 +163,9 @@ const Engine = struct {
     mac: [6]u8,
     step: Step = .sandbox,
     errno: u16 = 0,
-    /// The broadcasts the lease being sought has taken, DISCOVERs and
-    /// then REQUESTs, and when the first went out and the offer came: how
-    /// long a server took, or how many went unanswered (Azure's lease
-    /// takes 2 s), which the log shows.
+    /// sent counts the broadcasts for the lease being sought, DISCOVERs then
+    /// REQUESTs. With the fields below it lets the log show how slow a
+    /// server was, or how many broadcasts went unheard (Azure takes 2 s).
     sent: u8 = 0,
     offered_after: u8 = 0,
     started: i64 = 0,
@@ -221,9 +173,10 @@ const Engine = struct {
 
     const Step = enum(u8) { sandbox, discover, request, renew, send };
 
-    /// Never to return to root: die with the parent, give up every
-    /// capability, live as _dhcp in an empty root, and make any system call
-    /// beyond these few fatal.
+    /// confine ties the engine to the parent's life, drops to _dhcp in an
+    /// empty chroot with no capabilities, and installs a seccomp filter that
+    /// kills it for any call beyond its packet socket, writes to the parent,
+    /// polling, the clock and random numbers.
     fn confine(e: *Engine, parent_pid: linux.pid_t) !void {
         _ = try e.sys(linux.prctl(
             @backingInt(linux.PR.SET_PDEATHSIG),
@@ -287,16 +240,15 @@ const Engine = struct {
         }
     }
 
-    /// DISCOVER, OFFER, REQUEST, ACK: the lease, or null if no server
-    /// finished one within `seconds`. The ACK must come from the server
-    /// that offered, for the address offered.
+    /// acquire runs DISCOVER, OFFER, REQUEST, ACK and returns the lease, or
+    /// null if no server finished within seconds. The ACK must come from the
+    /// server that offered, for the address it offered.
     fn acquire(e: *Engine, seconds: u32) !?Wire {
         e.begin();
         const deadline = e.started + @as(i64, seconds) * 1000;
-        // A round that ended without a lease (an OFFER not usable, an
-        // answer from another server, a NAK) waits before the next, 0.25 s
-        // doubling to 8: a peer that answers at once with what is refused
-        // must not set the pace of our broadcasts.
+        // After a round with no lease (an unusable OFFER, an answer from
+        // another server, a NAK), wait 0.25 s, doubling to 8 s. Otherwise a
+        // peer that answers at once with junk would set our broadcast rate.
         var pause: i64 = 0;
         while (nowMs() < deadline) {
             if (pause > 0) {
@@ -348,8 +300,9 @@ const Engine = struct {
         return null;
     }
 
-    /// A renewing REQUEST for the lease held: the server's ACK, for the same
-    /// address, or its NAK; null for no answer, or one from anyone else.
+    /// renew sends a REQUEST for the held lease. It returns the server's ACK
+    /// for the same address, or its NAK; null for no answer, or an answer
+    /// from any other server.
     fn renew(e: *Engine, h: Wire, seconds: u32) !?Reply {
         e.begin();
         const xid = newXid();
@@ -374,21 +327,19 @@ const Engine = struct {
         }
     }
 
-    /// Broadcast `msg` from `src`, again every 0.25 seconds for the first
-    /// `quick_ms` of the lease, then after 0.5, 1, 2 and 4 and then every 8
-    /// seconds, until a reply to `xid` arrives or `deadline` passes. The
-    /// first tries come quickly because a boot waits on them: the first
-    /// broadcasts of a boot can go unheard, under Lima's vzNAT one boot in
-    /// three, and on Azure most boots, for 0.6 to 4.4 s, the server
-    /// answering 15 to 50 ms after the first it hears; each wait doubled
-    /// then left up to 2 s of every such boot waiting on the next try. A
-    /// server slower than that sees the same `xid` twice and may answer each
-    /// (ISC dhcpd, dnsmasq): an OFFER is taken only when `offer` asks for
-    /// one, and a late second OFFER is passed over while the ACK is awaited.
-    /// Each wait is drawn from half to one and a half of its value (RFC 2131
-    /// 4.1), so machines booting together do not retransmit in step. A send
-    /// or a receive that fails, as when the link drops for a moment, counts
-    /// as a round with no answer: nothing restarts `keep`.
+    /// exchange broadcasts msg from src until a reply to xid arrives or
+    /// deadline passes. It resends every 0.25 s for the first quick_ms, then
+    /// backs off 0.5, 1, 2, 4 and 8 s. offer says whether to take an OFFER
+    /// or an ACK/NAK.
+    ///
+    /// The first broadcasts of a boot often go unheard (one boot in three
+    /// under Lima's vzNAT, most on Azure, for 0.6 to 4.4 s), so the quick
+    /// phase saves up to 2 s per boot. A server may answer the same xid
+    /// twice (ISC dhcpd, dnsmasq), so a late second OFFER is skipped while
+    /// waiting for the ACK. Each wait is jittered from half to one and a half
+    /// of its value (RFC 2131 4.1) so machines booting together do not
+    /// resend in step. A failed send or receive, such as a brief link drop,
+    /// counts as an unanswered round, because nothing restarts keep.
     fn exchange(
         e: *Engine,
         msg: []const u8,
@@ -409,9 +360,8 @@ const Engine = struct {
         };
         var wait: i64 = 250;
         while (nowMs() < deadline) {
-            // secs: the seconds since the lease's first broadcast, as RFC
-            // 2131 has every client say, and some servers act on; 0 in
-            // every message before.
+            // RFC 2131 has the client fill secs with the seconds since its
+            // first broadcast, and some servers act on it.
             const secs: u16 = @intCast(@min(e.since() / 1000, 0xffff));
             std.mem.writeInt(u16, out[28 + 8 ..][0..2], secs, .big);
             _ = linux.sendto(e.pkt, pkt.ptr, pkt.len, 0, @ptrCast(&to), @sizeOf(linux.sockaddr.ll));
@@ -431,8 +381,8 @@ const Engine = struct {
                     .SUCCESS => {},
                     .INTR, .AGAIN => continue,
                     else => {
-                        // The rest of the round waited out, not spun away on
-                        // an error poll reports at once.
+                        // Sleep out the round: poll would report the error
+                        // at once, and we would spin.
                         const ts: linux.timespec = .{
                             .sec = @divFloor(left, 1000),
                             .nsec = @mod(left, 1000) * std.time.ns_per_ms,
@@ -465,7 +415,7 @@ const Engine = struct {
         if (n != @sizeOf(Msg)) return error.ShortWrite;
     }
 
-    /// Tell the parent what failed, and end.
+    /// fail tells the parent which step failed, and exits.
     fn fail(e: *Engine) noreturn {
         if (e.errno == 0) e.errno = 1;
         const m: Msg = .{
@@ -478,7 +428,7 @@ const Engine = struct {
         linux.exit_group(1);
     }
 
-    /// A lease sought anew: no broadcasts yet, and the clock starts now.
+    /// begin resets the counters and starts the clock for a new lease.
     fn begin(e: *Engine) void {
         e.sent = 0;
         e.offered_after = 0;
@@ -486,7 +436,7 @@ const Engine = struct {
         e.started = nowMs();
     }
 
-    /// ms since the lease's first broadcast.
+    /// since returns the ms since begin.
     fn since(e: *const Engine) u32 {
         return @intCast(std.math.clamp(nowMs() - e.started, 0, std.math.maxInt(u32)));
     }
@@ -507,12 +457,13 @@ const Parent = struct {
     dir: i32,
     link: Link,
     nic: []const u8,
-    /// The lease on the NIC: `keep` starts from the one `up` applied.
+    /// applied is the lease on the NIC. keep starts from the one up applied.
     applied: ?Wire = null,
     log: Log = .{},
 
-    /// Keep CAP_NET_ADMIN and nothing else, never gain more, write only in
-    /// /run/werewolf/network, and make any other system call fatal.
+    /// confine keeps only CAP_NET_ADMIN, lets Landlock limit writes to
+    /// /run/werewolf/network, and installs a seccomp filter that kills the
+    /// parent for any call but the four ioctls and the file calls it needs.
     fn confine(p: *Parent) !void {
         try sandbox.keepOnly(1 << linux.CAP.NET_ADMIN);
         try sandbox.landlock(&.{.{ .fd = p.dir, .access = sandbox.own_files }}, &.{});
@@ -530,7 +481,8 @@ const Parent = struct {
         try f.install();
     }
 
-    /// Take the engine's messages until it ends, which ends the parent too.
+    /// run handles the engine's messages. When the engine exits or sends a
+    /// bad message, the parent exits too.
     fn run(p: *Parent) noreturn {
         while (true) {
             var m: Msg = undefined;
@@ -567,8 +519,8 @@ const Parent = struct {
         const event = std.enums.fromInt(Event, m.event) orelse return error.BadMessage;
         switch (event) {
             .bound, .renewed => {
-                // The engine checked this already; a lease that fails here
-                // means the engine is not what it was.
+                // The engine checked this already. A lease that fails here
+                // means the engine is compromised.
                 if (!valid(m.lease) or m.lease.bound > boottime()) return error.InvalidLease;
                 if (p.applied) |a| if (!samePlan(a, m.lease)) {
                     try p.link.withdraw();
@@ -599,8 +551,8 @@ const Parent = struct {
                 if (p.mode == .up) linux.exit_group(0);
             },
             .refused => {
-                // The server says the address is not ours: off the NIC, if it
-                // is the one there.
+                // The server says the address is not ours. Remove it if it
+                // is the one on the NIC.
                 const ours = if (p.applied) |a| std.mem.eql(u8, &a.addr, &m.lease.addr) else false;
                 if (ours) {
                     try p.link.withdraw();
@@ -614,7 +566,9 @@ const Parent = struct {
                 });
             },
             .expired => {
-                // No server answered: kept until another lease comes.
+                // No server answered. Keep the address until a new lease
+                // comes: a cloud's address does not change, and a server
+                // that is briefly down should not take the machine offline.
                 var ip: [16]u8 = undefined;
                 p.log.event("expired", .{
                     .nic = p.nic,
@@ -640,7 +594,8 @@ const Parent = struct {
     }
 };
 
-/// Write a file whole beneath `dir`: to a new name, then renamed over the old.
+/// writeFile replaces name in dir atomically: it writes name.new, then
+/// renames it over name.
 fn writeFile(dir: i32, comptime name: [:0]const u8, data: []const u8) !void {
     const tmp = std.fmt.comptimePrint("{s}.new", .{name});
     const fd = try sys(
@@ -671,13 +626,14 @@ fn writeFile(dir: i32, comptime name: [:0]const u8, data: []const u8) !void {
 
 const Event = enum(u8) { bound, renewed, refused, expired, waiting, failed, @"error" };
 
-/// One message from the engine to the parent, always this size.
+/// Msg is one message from the engine to the parent. It has a fixed size, so
+/// the parent rejects any read of another length.
 const Msg = extern struct {
     event: u8,
     step: u8,
     errno: u16,
-    /// The engine's broadcasts for this lease, those before the offer,
-    /// and the ms from the first to the offer and to the lease.
+    /// ms and offer_ms are the ms from the first broadcast to the lease and
+    /// to the offer; sent and offered_after count broadcasts likewise.
     ms: u32 = 0,
     offer_ms: u32 = 0,
     sent: u8 = 0,
@@ -686,12 +642,12 @@ const Msg = extern struct {
     lease: Wire,
 };
 
-/// A lease, as the engine read it and the parent applies it.
+/// Wire is a lease as the engine parsed it and the parent applies it.
 const Wire = extern struct {
     addr: Ip4,
     mask: Ip4 = .{ 255, 255, 255, 255 },
     server: Ip4 = zero,
-    /// zero: none.
+    /// router is zero when the server sent none.
     router: Ip4 = zero,
     dns: [max_dns]Ip4 = @splat(zero),
     routes: [max_routes]Route = @splat(.{ .dst = zero, .gw = zero, .prefix = 0 }),
@@ -701,34 +657,34 @@ const Wire = extern struct {
     lease: u32 = 0,
     t1: u32 = 0,
     t2: u32 = 0,
-    /// CLOCK_BOOTTIME seconds when the lease was given.
+    /// bound is the CLOCK_BOOTTIME second the lease was given.
     bound: i64 = 0,
 };
 
-/// How long the lease's broadcasts go out every 0.25 s before backing off
-/// (Engine.exchange): longer than Azure's server took to first hear one.
+/// quick_ms is how long Engine.exchange resends every 0.25 s before backing
+/// off. It is longer than Azure's server takes to hear the first broadcast.
 const quick_ms = 5000;
 
-/// The largest MTU taken from a server: EC2 offers 9001, and ENA allows
-/// up to 9216.
+/// max_mtu is the largest MTU taken from a server. EC2 offers 9001, and ENA
+/// allows up to 9216.
 const max_mtu = 9216;
 
 const Route = extern struct {
     dst: Ip4,
-    /// zero: on the link, no gateway.
+    /// gw is zero for a route on the link.
     gw: Ip4,
     prefix: u8,
     pad: [3]u8 = .{ 0, 0, 0 },
 };
 
-/// Whether a lease is one to put on a NIC. The engine asks before sending a
-/// lease, and the parent again before applying it.
+/// valid reports whether a lease is safe to put on a NIC. The engine checks
+/// before sending a lease, and the parent again before applying it.
 fn valid(w: Wire) bool {
     if (!usable(w.addr) or !usable(w.server)) return false;
     const p = prefixOf(w.mask);
     if (p < 8 or p > 32) return false;
     if (p <= 30) {
-        // Not the subnet's own address, nor its broadcast address.
+        // Reject the subnet's network and broadcast addresses.
         const host = std.mem.readInt(u32, &w.addr, .big) & ~std.mem.readInt(u32, &w.mask, .big);
         if (host == 0 or host == ~std.mem.readInt(u32, &w.mask, .big)) return false;
     }
@@ -741,14 +697,14 @@ fn valid(w: Wire) bool {
         if (!usableGateway(r.gw, w.addr)) return false;
     }
     if (w.mtu != 0 and (w.mtu < 576 or w.mtu > max_mtu)) return false;
-    // A boot's seconds, so bound plus any of the lease's u32 times cannot
-    // overflow; the parent holds it to the clock as well (Parent.handle).
+    // Cap bound so adding any u32 lease time cannot overflow. The parent
+    // also checks it against the clock (Parent.handle).
     if (w.bound < 0 or w.bound > 1 << 40) return false;
     return w.lease > 0;
 }
 
-/// Whether gw, a router or a route's gateway, is none (zero), or a usable
-/// address other than the lease's own.
+/// usableGateway reports whether gw is zero (none), or a usable address
+/// other than the lease's.
 fn usableGateway(gw: Ip4, addr: Ip4) bool {
     if (std.mem.eql(u8, &gw, &zero)) return true;
     return usable(gw) and !std.mem.eql(u8, &gw, &addr);
@@ -756,15 +712,15 @@ fn usableGateway(gw: Ip4, addr: Ip4) bool {
 
 // --- the parent's view: text, logged and kept --------------------------------
 
-/// What is kept in lease.json and logged: the lease, as text, its ip and gw
-/// named as a static network's are (lib/network.zig).
+/// Lease is the lease as text, kept in lease.json and logged. ip and gw use
+/// the same names as a static network's (lib/network.zig).
 const Lease = struct {
     nic: []const u8,
-    /// The address and prefix: "10.128.0.5/32".
+    /// ip is the address and prefix, such as "10.128.0.5/32".
     ip: []const u8,
     server: []const u8,
     gw: ?[]const u8 = null,
-    /// "10.128.0.1/32" (on the link) or "0.0.0.0/0 via 10.128.0.1".
+    /// routes holds "10.128.0.1/32" (on the link) or "0.0.0.0/0 via 10.128.0.1".
     routes: []const []const u8 = &.{},
     dns: []const []const u8 = &.{},
     mtu: u16 = 0,
@@ -810,10 +766,9 @@ fn describe(gpa: Allocator, nic: []const u8, w: Wire) !Lease {
     };
 }
 
-/// What lease.json says is on the NIC: for the engine to renew, the
-/// address, the server and the times; for the parent to know what it is
-/// replacing, the mask and the routes, kept as plan made them. Null for
-/// anything it cannot use.
+/// heldFrom parses lease.json into the lease on the NIC, or returns null.
+/// The engine needs the address, server and times to renew; the parent needs
+/// the mask and routes to tell whether a new lease changes the NIC.
 fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
     const l = std.json.parseFromSliceLeaky(
         Lease,
@@ -837,8 +792,8 @@ fn heldFrom(gpa: Allocator, data: []const u8) ?Wire {
     return if (valid(w)) w else null;
 }
 
-/// A route as describe writes it: "D.D.D.D/N" on the link, or
-/// "D.D.D.D/N via G.G.G.G".
+/// parseRoute parses a route as describe writes it: "D.D.D.D/N" on the
+/// link, or "D.D.D.D/N via G.G.G.G".
 fn parseRoute(s: []const u8) ?Route {
     var dst_text = s;
     var gw = zero;
@@ -850,8 +805,8 @@ fn parseRoute(s: []const u8) ?Route {
     return .{ .dst = dst.addr, .gw = gw, .prefix = dst.prefix };
 }
 
-/// JSON lines on stdout: `dhcp-client: {"time":...,"event":...,...}`. Built in a
-/// fixed buffer, so logging allocates nothing.
+/// Log writes JSON lines to stdout: `dhcp-client: {"time":...,"event":...}`.
+/// It uses a fixed buffer, so logging cannot fail for lack of memory.
 const Log = struct {
     buf: [8 << 10]u8 = undefined,
 
@@ -866,7 +821,7 @@ const Log = struct {
         ) catch return;
         const mark = w.end;
         std.json.Stringify.value(fields, .{}, &w) catch return;
-        // Drop the fields' own opening brace: they continue the line's object.
+        // Drop the fields' opening brace so they continue the line's object.
         @memmove(l.buf[mark .. w.end - 1], l.buf[mark + 1 .. w.end]);
         w.end -= 1;
         w.writeByte('\n') catch return;
@@ -877,15 +832,15 @@ const Log = struct {
 // --- the link ----------------------------------------------------------------
 
 const Link = struct {
-    /// NUL-terminated, as the kernel wants it.
+    /// name is NUL-terminated, as the kernel wants it.
     name: [linux.IFNAMESIZE]u8,
     index: i32,
     mac: [6]u8,
-    /// The packet socket, for the engine.
+    /// packet is the engine's packet socket.
     packet: i32,
-    /// An inet socket, for the parent's ioctls.
+    /// inet is an inet socket for the parent's ioctls.
     inet: i32,
-    /// How long open waited for the carrier, in ms, and whether it came.
+    /// waited_ms is how long open waited for carrier; carrier says if it came.
     waited_ms: i64,
     carrier: bool,
 
@@ -912,11 +867,10 @@ const Link = struct {
         _ = try sys(linux.ioctl(l.inet, linux.SIOCGIFFLAGS, @intFromPtr(&ifr)), "SIOCGIFFLAGS");
         ifr.ifru.flags.UP = true;
         _ = try sys(linux.ioctl(l.inet, linux.SIOCSIFFLAGS, @intFromPtr(&ifr)), "SIOCSIFFLAGS");
-        // Then the carrier, up to 2 s: until the kernel has seen it
-        // (IFF_RUNNING), the NIC's queue drops what is sent, and the first
-        // DISCOVER of a boot was lost so in three boots of four under QEMU
-        // and one of three under Lima, each waiting out a retry. A link
-        // slower than that is the retries' to cover.
+        // Wait up to 2 s for carrier (IFF_RUNNING). Until then the NIC's
+        // queue drops what is sent: the first DISCOVER was lost this way in
+        // three boots of four under QEMU and one of three under Lima. Retries
+        // cover a slower link.
         const since = nowMs();
         l.carrier = false;
         for (0..400) |_| {
@@ -929,9 +883,9 @@ const Link = struct {
         }
         l.waited_ms = nowMs() - since;
 
-        // The packet socket hears nothing until it is bound: the filter goes
-        // on, and is locked, first. Without the filter the kernel would copy
-        // every IPv4 packet the machine receives into it.
+        // Attach and lock the filter before bind, so the socket never sees
+        // an unfiltered packet. Without it the kernel would copy every IPv4
+        // packet the machine receives into the socket.
         l.packet = @intCast(try sys(
             linux.socket(linux.AF.PACKET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0),
             "socket packet",
@@ -980,12 +934,10 @@ const Link = struct {
         return ifr;
     }
 
-    /// Put a lease on the NIC: address and netmask, MTU, routes, resolvers.
-    /// Applying one that is already there changes nothing: the kernel keeps
-    /// an address or mask set to what it is, and a route that exists is
-    /// left as it is. An MTU the NIC cannot take, or a route the kernel
-    /// refuses, is logged and passed over: the address is on by then, and
-    /// ending here would end `keep`, and with it every renewal of the boot.
+    /// apply puts a lease on the NIC: address, netmask, MTU, routes and
+    /// resolvers. Reapplying the same lease changes nothing. A refused MTU or
+    /// route is logged and skipped, because the address is already on and
+    /// failing would end keep, and with it every later renewal.
     fn apply(l: *Link, dir: i32, w: Wire, log: *Log, nic: []const u8) !void {
         try l.setAddr(linux.SIOCSIFADDR, w.addr, "SIOCSIFADDR");
         try l.setAddr(linux.SIOCSIFNETMASK, w.mask, "SIOCSIFNETMASK");
@@ -1022,9 +974,8 @@ const Link = struct {
         }
     }
 
-    /// Take the lease off the NIC: its address set to 0.0.0.0, which removes
-    /// it, and with the NIC's last address the kernel flushes every route
-    /// through it.
+    /// withdraw removes the address by setting it to 0.0.0.0. With the
+    /// NIC's last address gone, the kernel flushes every route through it.
     fn withdraw(l: *Link) !void {
         try l.setAddr(linux.SIOCSIFADDR, zero, "SIOCSIFADDR");
     }
@@ -1051,8 +1002,8 @@ const Link = struct {
     }
 };
 
-/// Linux's struct rtentry, for SIOCADDRT; the layout is the same on both
-/// 64-bit architectures werewolf builds for.
+/// RtEntry is Linux's struct rtentry, for SIOCADDRT. The layout is the same
+/// on both 64-bit architectures werewolf builds for.
 const RtEntry = extern struct {
     pad1: usize = 0,
     dst: linux.sockaddr,
@@ -1097,8 +1048,8 @@ const BPF_JEQ_K = 0x15;
 const BPF_JSET_K = 0x45;
 const BPF_RET_K = 0x06;
 
-/// The packet socket keeps only what could be a DHCP reply: unfragmented
-/// UDP from port 67 to port 68. It sees the packet from its IPv4 header.
+/// reply_filter passes only what could be a DHCP reply: unfragmented UDP
+/// from port 67 to port 68. Offsets start at the IPv4 header.
 const reply_filter = [_]SockFilter{
     .{ .code = BPF_LD_B_ABS, .k = 9 }, // protocol
     .{ .code = BPF_JEQ_K, .jf = 8, .k = 17 },
@@ -1115,9 +1066,9 @@ const reply_filter = [_]SockFilter{
 
 // --- DHCP messages -----------------------------------------------------------
 
-/// A DHCP message of `kind` (1 DISCOVER, 3 REQUEST) from `mac`. A REQUEST
-/// that answers an OFFER names the address and the server; one that renews
-/// has the address held in ciaddr instead.
+/// message builds a DHCP message of kind (1 DISCOVER, 3 REQUEST) from mac.
+/// A REQUEST that answers an OFFER names the address and server; a renewal
+/// puts the held address in ciaddr instead.
 fn message(
     buf: *[576]u8,
     kind: u8,
@@ -1149,8 +1100,8 @@ fn message(
     if (server) |a| opts.put(buf, &i, 54, &a);
     opts.put(buf, &i, 55, &wanted);
     opts.put(buf, &i, 57, &.{ 0x05, 0xdc }); // replies up to 1500 bytes
-    // The client identifier, Ethernet and the MAC, as dhclient and
-    // systemd-networkd send it: a server may key its leases by it.
+    // Send the client identifier (type 1, the MAC) as dhclient and
+    // systemd-networkd do: a server may key its leases by it.
     opts.put(buf, &i, 61, &([1]u8{1} ++ mac));
     buf[i] = 255;
     // BOOTP's minimum: some servers drop anything shorter.
@@ -1164,10 +1115,10 @@ const Reply = struct {
     lease: Wire,
 };
 
-/// A server's reply to transaction `xid` for `mac`, or null for anything
-/// else: too short, malformed, someone else's, or of no kind we take. An
-/// option we use that is malformed rejects the message, except the routes
-/// and MTU, which are then ignored, as RFC 3442 asks for the routes.
+/// parseReply returns a server's reply to transaction xid for mac, or null
+/// if it is short, malformed, someone else's, or of a kind we do not take.
+/// A malformed option rejects the message, except that bad routes are
+/// ignored, as RFC 3442 asks, and so is an MTU out of range.
 fn parseReply(msg: []const u8, xid: u32, mac: [6]u8) ?Reply {
     if (msg.len < 240) return null;
     if (msg[0] != 2 or msg[1] != 1 or msg[2] != 6) return null;
@@ -1233,9 +1184,9 @@ fn parseReply(msg: []const u8, xid: u32, mac: [6]u8) ?Reply {
     return .{ .kind = kind orelse return null, .lease = w };
 }
 
-/// RFC 3442's classless static routes: a prefix length, the significant
-/// octets of the destination, then the router. The first `max_routes` are
-/// kept; a malformed option is null.
+/// parseRoutes parses RFC 3442 classless static routes (prefix length,
+/// significant destination octets, router) into out and returns the count.
+/// It keeps the first max_routes and returns null for a malformed option.
 fn parseRoutes(v: []const u8, out: *[max_routes]Route) ?u8 {
     var n: u8 = 0;
     var i: usize = 0;
@@ -1259,11 +1210,10 @@ fn parseRoutes(v: []const u8, out: *[max_routes]Route) ?u8 {
     return n;
 }
 
-/// The routes a lease asks for. Classless routes, when sent, replace the
-/// router (RFC 3442), those on the link first, in the server's order, so a
-/// gateway is reachable before a route through it is added, whatever order
-/// the server sent them in. A router outside the subnet, such as GCP's for
-/// a /32 address, is first made reachable on the link.
+/// plan returns the routes to add for a lease. Classless routes, when sent,
+/// replace the router (RFC 3442). Routes on the link go first, so a gateway
+/// is reachable before a route through it is added. A router outside the
+/// subnet, such as GCP's for a /32 address, gets a host route on the link.
 fn plan(w: Wire, out: *[max_routes + 2]Route) []const Route {
     if (w.nroutes > 0) {
         var n: usize = 0;
@@ -1284,7 +1234,8 @@ fn plan(w: Wire, out: *[max_routes + 2]Route) []const Route {
     return out[0 .. n + 1];
 }
 
-/// Whether two leases put the same address, mask and routes on the NIC.
+/// samePlan reports whether two leases put the same address, mask and
+/// routes on the NIC.
 fn samePlan(a: Wire, b: Wire) bool {
     if (!std.mem.eql(u8, &a.addr, &b.addr) or !std.mem.eql(u8, &a.mask, &b.mask)) return false;
     var pa: [max_routes + 2]Route = undefined;
@@ -1296,10 +1247,9 @@ fn samePlan(a: Wire, b: Wire) bool {
     return true;
 }
 
-/// When to renew and when the lease ends, in seconds from when it was given:
-/// half and seven eighths of the lease unless the server says otherwise, and
-/// never sooner than a minute, so a server that hands out short leases
-/// cannot keep the client busy.
+/// timers returns when to renew and when the lease ends, in seconds from
+/// when it was given: by default half and seven eighths of the lease. A lease
+/// is at least a minute, so a server cannot keep the client busy.
 fn timers(lease: u32, t1: u32, t2: u32) struct { t1: i64, t2: i64, lease: i64 } {
     const l: i64 = @max(lease, 60);
     var a: i64 = if (t1 > 0) t1 else @divFloor(l, 2);
@@ -1311,7 +1261,8 @@ fn timers(lease: u32, t1: u32, t2: u32) struct { t1: i64, t2: i64, lease: i64 } 
 
 // --- IP and UDP --------------------------------------------------------------
 
-/// `payload` in UDP from port 68 to 67, in IPv4 from `src` to everyone.
+/// frame wraps payload in UDP from port 68 to 67 and IPv4 from src to the
+/// broadcast address.
 fn frame(out: []u8, src: Ip4, payload: []const u8) []const u8 {
     const total = 28 + payload.len;
     const ip = out[0..20];
@@ -1327,10 +1278,10 @@ fn frame(out: []u8, src: Ip4, payload: []const u8) []const u8 {
     return out[0..total];
 }
 
-/// The UDP payload of an unfragmented IPv4 packet from port 67 to 68, or
-/// null. The socket filter has checked this much already; it is checked
-/// again here, where the bounds matter. Checksums are left to the link: the
-/// packet arrived whole from the hypervisor's NIC.
+/// unframe returns the UDP payload of an unfragmented IPv4 packet from port
+/// 67 to 68, or null. The socket filter checked this already; it is checked
+/// again here because the bounds matter. Checksums are not checked: the
+/// packet came from the hypervisor's virtual NIC.
 fn unframe(pkt: []const u8) ?[]const u8 {
     if (pkt.len < 28 or pkt[0] >> 4 != 4) return null;
     const ihl: usize = @as(usize, pkt[0] & 0x0f) * 4;
@@ -1365,7 +1316,8 @@ fn u32Of(v: []const u8) ?u32 {
     return if (v.len == 4) std.mem.readInt(u32, v[0..4], .big) else null;
 }
 
-/// A host's address, as a static network's must be too.
+/// usable reports whether an address can be a host's. Static networks use
+/// the same check.
 const usable = network.usable;
 
 fn maskOf(prefix: u8) Ip4 {
@@ -1381,7 +1333,8 @@ fn masked(a: Ip4, prefix: u8) Ip4 {
     return out;
 }
 
-/// The prefix length of a contiguous mask, or 33 for one that is not.
+/// prefixOf returns the prefix length of a contiguous mask, or 33 if it is
+/// not contiguous.
 fn prefixOf(m: Ip4) u8 {
     const bits = std.mem.readInt(u32, &m, .big);
     const ones: u8 = @clz(~bits);
@@ -1442,7 +1395,8 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 const test_mac = [6]u8{ 0x42, 0x01, 0x0a, 0x80, 0x00, 0x05 };
 const test_xid: u32 = 0x5eed_beef;
 
-/// A server's reply carrying `options` (each code, length, value), ended.
+/// testReply builds a server reply carrying options (code, length, value
+/// triples) and the end option.
 fn testReply(buf: []u8, kind: u8, yiaddr: Ip4, options: []const u8) []const u8 {
     @memset(buf, 0);
     buf[0] = 2;
@@ -1535,7 +1489,7 @@ test "frame and unframe" {
     try std.testing.expectEqual(0, checksum(pkt[0..20])); // a valid header sums to all ones
     try std.testing.expectEqualSlices(u8, &.{ 255, 255, 255, 255 }, pkt[16..20]);
 
-    // The same packet, as a server's: ports swapped, unframed.
+    // Swap the ports to make it a server's packet, then unframe it.
     var reply = out;
     std.mem.writeInt(u16, reply[20..22], server_port, .big);
     std.mem.writeInt(u16, reply[22..24], client_port, .big);
@@ -1612,12 +1566,12 @@ test "lease.json round trip" {
 test "a lease that changes the NIC is told apart" {
     const qemu = testLease(&qemu_options, .{ 10, 0, 2, 15 });
     try std.testing.expect(samePlan(qemu, qemu));
-    // Renewed with new times: the same on the NIC.
+    // A renewal with new times leaves the NIC unchanged.
     var later = qemu;
     later.bound += 3600;
     later.lease = 7200;
     try std.testing.expect(samePlan(qemu, later));
-    // Another router, mask or address is not.
+    // A new router, mask or address changes it.
     var moved = qemu;
     moved.router = .{ 10, 0, 2, 1 };
     try std.testing.expect(!samePlan(qemu, moved));
@@ -1628,8 +1582,8 @@ test "a lease that changes the NIC is told apart" {
     other.addr = .{ 10, 0, 2, 16 };
     try std.testing.expect(!samePlan(qemu, other));
 
-    // What lease.json keeps is the same, for the parent to compare a
-    // renewal against after `keep` starts.
+    // lease.json must round-trip the plan, so the parent can compare a
+    // renewal against it after keep starts.
     var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer a.deinit();
     for ([_]Wire{ qemu, testLease(&gcp_options, .{ 10, 128, 0, 5 }) }) |w| {
@@ -1879,8 +1833,8 @@ fn fuzzWire(_: void, smith: *std.testing.Smith) anyerror!void {
     const n = smith.slice(&in);
     const pkt = in[0..n];
     if (unframe(pkt)) |payload| _ = parseReply(payload, test_xid, test_mac);
-    // And the same bytes as a reply already out of its packet, ours from
-    // the start, so the options are reached.
+    // Also feed the bytes as options of a reply that is ours, so the option
+    // parser is reached.
     var msg: [1536]u8 = undefined;
     const m = testReply(&msg, 5, .{ 10, 0, 2, 15 }, pkt[0..@min(n, msg.len - 245)]);
     if (parseReply(m, test_xid, test_mac)) |r| {

@@ -2,17 +2,18 @@
 
 ## Summary
 
-Brings a network interface up, and gives it an address and a default route:
-`iface-up NIC [ADDR/PREFIX [GATEWAY]]`. It replaces net-tools' `ifconfig`
-and `route`, in one small program that refuses anything odd.
+iface-up brings a network interface up, optionally with an address and a
+default route: `iface-up NIC [ADDR/PREFIX [GATEWAY]]`. It replaces
+net-tools' `ifconfig` and `route` with one small program that refuses
+anything odd.
 
 ## Background
 
-init brings up `lo` with it, then, when the kernel command line names an
-address (`werewolf.ip`, `werewolf.gw`), the machine's NIC. That is how a
-machine on a network without DHCP, or one bite took over and so keeps the
-distro's static address, gets on the network. Where the command line names
-none, dhcp-client applies its own leases instead.
+init brings up `lo` with it, then the machine's NIC when there is a static
+address: from the kernel command line (`werewolf.ip`, `werewolf.gw`), or
+else the config tar's `network` file. That is how a machine on a network
+without DHCP, or one bite took over and that keeps the distro's static
+address, gets online. Otherwise dhcp-client applies its own leases.
 
 ## Goals
 
@@ -29,24 +30,25 @@ none, dhcp-client applies its own leases instead.
 
 ## Detailed design
 
-- **Parsing**, strict, as its arguments come from the kernel command line:
-  an interface name of 1 to 15 letters, digits, `_`, `-` and `.`, not `.`
-  or `..`; a dotted quad with no leading zeros; a prefix of 1 to 32. The
-  address may not be zero, broadcast, loopback or multicast, nor, below a
-  /31, the subnet's own or broadcast address. The gateway may be none of
-  those, nor the address itself.
-- **Pledge** before any request (`lib/sandbox.zig`): its one socket opened,
-  every capability but CAP_NET_ADMIN gone, from the bounding set too, with
-  securebits locked so root's uid brings none back; and a seccomp filter
-  allowing write, close, exit, and ioctl only for its five requests.
-  Anything else, or another architecture's call, kills it.
+- **Parsing** is strict, since the arguments come from the kernel command
+  line: an interface name of 1 to 15 letters, digits, `_`, `-` and `.`,
+  not `.` or `..`; a dotted quad with no leading zeros; a prefix of 1 to 32.
+  The address may not be zero, broadcast, loopback or multicast, nor, below
+  a /31, the subnet's own or broadcast address. The gateway may be none of
+  those, nor the address itself. The rules are `lib/network.zig`'s, which
+  also check the config tar's `network` file and `howl pack`, so all agree.
+- **Pledge** before any request (`lib/sandbox.zig`): after opening its one
+  socket it keeps only CAP_NET_ADMIN, dropped from the bounding set too and
+  with securebits locked so root's uid brings none back, and installs a
+  seccomp filter allowing write, close, exit, and ioctl only for its five
+  requests. Any other call, or another architecture's, kills it.
 - **Requests**: set the address (SIOCSIFADDR) and netmask (SIOCSIFNETMASK),
   set the interface up (SIOCGIFFLAGS, SIOCSIFFLAGS), and add routes
   (SIOCADDRT). A gateway outside the subnet first gets a host route through
   the NIC, so the default route through it can be added. A route that is
   already there, gateway and all, counts as done.
-- **Saying so**: nothing on success; one line on failure, naming the
-  request and the kernel's reason.
+- **Output**: nothing on success; one line on failure, naming the request
+  and the kernel's reason. It reads no environment and no files.
 
 ## Drawbacks
 

@@ -1,33 +1,21 @@
-//! A static network, as a config tar's `network` file gives one: the
-//! kernel command line's own words, and only these, each at most once.
-//!
-//!     werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
-//!
-//! For machines whose network gives no address by DHCP: a hypervisor of
-//! your own, bare metal, a form with no DHCP client. init reads it when
-//! the command line has no werewolf.ip, before it brings the network up,
-//! and the host's howl pack checks it with this same parser; iface-up,
-//! which gives the NIC the address, checks it with the same rules (address
-//! and gateway, below), so what the host packs the machine takes. IPv4: a
-//! dotted quad with no leading zeros, a prefix of 1 to 32 in plain digits,
-//! a usable host that is not its subnet's network or broadcast address; a
-//! gateway, usable, not the address, and inside the subnet not its network
-//! or broadcast either, or outside it, on the link, as GCP gives a /32's;
-//! a usable resolver.
+//! network parses and checks a static IPv4 network: werewolf.ip, .gw and
+//! .dns, from the kernel command line or a config tar's `network` file.
+//! See lib/README.md.
 
 const std = @import("std");
 
-/// The most a network file may hold.
+/// max_len is the largest network file accepted, in bytes.
 pub const max_len = 512;
 
 pub const Network = struct {
-    /// Address and prefix, as werewolf.ip takes them: 10.0.0.5/24.
+    /// ip is the address and prefix, such as 10.0.0.5/24.
     ip: []const u8 = "",
     gw: []const u8 = "",
     dns: []const u8 = "",
 };
 
-/// The file's words, checked; or null, with why set.
+/// parse reads and checks a network file. It returns null and sets why
+/// on an unknown, repeated or empty key, or on a value check refuses.
 pub fn parse(text: []const u8, why: *[]const u8) ?Network {
     if (text.len > max_len) return refuse(why, "over 512 bytes");
     var n: Network = .{};
@@ -50,8 +38,8 @@ pub fn parse(text: []const u8, why: *[]const u8) ?Network {
     return check(n, why);
 }
 
-/// n, checked: the file's rules, and the kernel command line's, which
-/// lib/cmdline.zig holds to them too.
+/// check returns n if it is valid, or null with why set. lib/cmdline.zig
+/// applies it to the command line too, so both sources obey one set of rules.
 pub fn check(n: Network, why: *[]const u8) ?Network {
     if (n.ip.len == 0) return refuse(why, "no werewolf.ip");
     const a = address(n.ip) catch return refuse(
@@ -69,7 +57,7 @@ pub fn check(n: Network, why: *[]const u8) ?Network {
     return n;
 }
 
-/// The file's text for a network.
+/// format writes n as a network file.
 pub fn format(buf: []u8, n: Network) ![]const u8 {
     var w: std.Io.Writer = .fixed(buf);
     try w.print("werewolf.ip={s}", .{n.ip});
@@ -82,8 +70,8 @@ pub fn format(buf: []u8, n: Network) ![]const u8 {
 pub const Ip4 = [4]u8;
 pub const Address = struct { addr: Ip4, prefix: u6 };
 
-/// ADDR/PREFIX: a usable host, a prefix of 1 to 32 in plain digits, and,
-/// below /31 (RFC 3021), neither its subnet's network nor its broadcast.
+/// address parses ADDR/PREFIX for a host: a usable address, a prefix of 1
+/// to 32 and, below /31 (RFC 3021), not the subnet's network or broadcast.
 pub fn address(s: []const u8) error{Address}!Address {
     const a = try cidr(s);
     if (a.prefix == 0 or !usable(a.addr)) return error.Address;
@@ -91,9 +79,9 @@ pub fn address(s: []const u8) error{Address}!Address {
     return a;
 }
 
-/// A gateway for a: a usable host, not a's own address, and inside its
-/// subnet not the network or broadcast either. One outside the subnet is
-/// on the link, as GCP gives a /32's, reached by a host route first.
+/// gateway parses a gateway for a: a usable address other than a's, and
+/// not the network or broadcast of a's subnet. A gateway outside the subnet
+/// is allowed (GCP gives a /32); iface-up adds a host route to it first.
 pub fn gateway(a: Address, s: []const u8) error{ Address, Gateway }!Ip4 {
     const gw = try ip4(s);
     if (!usable(gw)) return error.Address;
@@ -103,8 +91,8 @@ pub fn gateway(a: Address, s: []const u8) error{ Address, Gateway }!Ip4 {
     return gw;
 }
 
-/// ADDR/PREFIX as written, any address and a prefix of 0 to 32 in plain
-/// digits: a route's destination, 0.0.0.0/0 included.
+/// cidr parses ADDR/PREFIX with any address and a prefix of 0 to 32, as a
+/// route's destination, 0.0.0.0/0 included.
 pub fn cidr(s: []const u8) error{Address}!Address {
     const slash = std.mem.findScalar(u8, s, '/') orelse return error.Address;
     return .{
@@ -113,13 +101,13 @@ pub fn cidr(s: []const u8) error{Address}!Address {
     };
 }
 
-/// Whether a is its subnet's network or broadcast address.
+/// edge reports whether a is its subnet's network or broadcast address.
 fn edge(a: Ip4, prefix: u6) bool {
     const host = toInt(a) & ~mask(prefix);
     return host == 0 or host == ~mask(prefix);
 }
 
-/// A dotted quad: four numbers 0 to 255, no leading zeros, nothing else.
+/// ip4 parses a dotted quad: four numbers 0 to 255 with no leading zeros.
 pub fn ip4(s: []const u8) error{Address}!Ip4 {
     var out: Ip4 = undefined;
     var parts = std.mem.splitScalar(u8, s, '.');
@@ -128,7 +116,7 @@ pub fn ip4(s: []const u8) error{Address}!Ip4 {
     return out;
 }
 
-/// Plain digits, no sign and no leading zero, from min to max.
+/// number parses min to max: plain digits, no sign or leading zero.
 fn number(s: []const u8, min: u32, max: u32) error{Address}!u32 {
     if (s.len == 0 or s.len > 3 or (s.len > 1 and s[0] == '0')) return error.Address;
     var v: u32 = 0;
@@ -140,8 +128,9 @@ fn number(s: []const u8, min: u32, max: u32) error{Address}!u32 {
     return v;
 }
 
-/// A host's: 1.0.0.0 to 223.255.255.255 outside 127.0.0.0/8. Not 0.0.0.0/8,
-/// "this network" (RFC 1122), loopback, multicast, reserved or broadcast.
+/// usable reports whether a can be a host: 1.0.0.0 to 223.255.255.255
+/// outside 127.0.0.0/8. That excludes 0.0.0.0/8 (RFC 1122), loopback,
+/// multicast, reserved and broadcast.
 pub fn usable(a: Ip4) bool {
     return a[0] != 0 and a[0] != 127 and a[0] < 224;
 }
@@ -180,8 +169,8 @@ test parse {
     );
     _ = parse("werewolf.ip=10.0.0.0/31 werewolf.gw=10.0.0.1", &why).?;
     _ = parse("werewolf.ip=10.0.0.9/32", &why).?;
-    // A gateway outside the subnet is on the link, as iface-up and the
-    // command line take it: GCP's /32, or a provider's gateway elsewhere.
+    // A gateway outside the subnet is taken as on the link: GCP's /32,
+    // or a provider's gateway elsewhere.
     _ = parse("werewolf.ip=10.128.0.5/32 werewolf.gw=10.128.0.1", &why).?;
     _ = parse("werewolf.ip=10.0.0.5/24 werewolf.gw=10.0.1.1", &why).?;
     for ([_][]const u8{

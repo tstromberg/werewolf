@@ -1,16 +1,5 @@
-//! Lima: a werewolf machine as a Lima VM under macOS's Virtualization
-//! framework (vz), from the same two files every target takes: a boot disk
-//! and the config tar, which Lima attaches as a second disk, unformatted,
-//! where init finds it.
-//!
-//! Lima reaches a guest through ssh or its agent, and a werewolf machine
-//! runs neither, so the VM has a second network, vzNAT, whose address this
-//! Mac reaches directly. Its MAC is the name's, hashed, so nothing records
-//! it; the disk's command line names it (werewolf.mac), so DHCP runs there,
-//! and macOS's DHCP server records the address it gave. A form with no
-//! DHCP client has no vzNAT: it takes Lima's own network from its config
-//! tar's network file, and its console says it is up. Lima is the state:
-//! `limactl list` says what exists, and nothing here remembers more.
+//! lima runs a machine as a Lima VM under macOS's Virtualization framework
+//! (vz). Lima keeps all the state; howl records nothing. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,12 +9,12 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
 pub const leases = "/var/db/dhcpd_leases";
-/// Lima's own network, as every VM has it: the address it expects its
-/// guest at, and its gateway, which answers DNS too.
+/// user_ip and user_gw are the guest address and gateway of Lima's user
+/// network in every VM. The gateway also answers DNS.
 pub const user_ip = "192.168.5.15/24";
 pub const user_gw = "192.168.5.2";
 
-/// Whether this machine runs Lima with vz: macOS, and limactl on the PATH.
+/// installed reports whether this is macOS with limactl on the PATH.
 pub fn installed(io: Io, gpa: Allocator) bool {
     if (builtin.os.tag != .macos) return false;
     const r = std.process.run(
@@ -36,9 +25,9 @@ pub fn installed(io: Io, gpa: Allocator) bool {
     return r.term == .exited and r.term.exited == 0;
 }
 
-/// The vzNAT MAC for a machine named name: locally administered, and the
-/// rest the name's sha256. No octet is below 0x10, since macOS's lease file
-/// writes them without the leading zero.
+/// mac derives a locally administered vzNAT MAC from name's sha256, so
+/// nothing needs to record it. Every octet is at least 0x10 because macOS's
+/// lease file drops leading zeros.
 pub fn mac(name: []const u8) [17]u8 {
     var h: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(name, &h, .{});
@@ -51,7 +40,7 @@ pub fn mac(name: []const u8) [17]u8 {
     return out;
 }
 
-/// Whether Lima has an instance named name.
+/// exists reports whether Lima has an instance named name.
 pub fn exists(io: Io, gpa: Allocator, name: []const u8) !bool {
     const r = try std.process.run(
         gpa,
@@ -63,7 +52,7 @@ pub fn exists(io: Io, gpa: Allocator, name: []const u8) !bool {
     return false;
 }
 
-/// Whether Lima says the instance is running.
+/// running reports whether Lima says the instance is running.
 pub fn running(io: Io, gpa: Allocator, name: []const u8) !bool {
     const r = try std.process.run(
         gpa,
@@ -73,7 +62,8 @@ pub fn running(io: Io, gpa: Allocator, name: []const u8) !bool {
     return std.mem.eql(u8, std.mem.trim(u8, r.stdout, " \n"), "Running");
 }
 
-/// The instance's directory, where Lima keeps its console log.
+/// dir returns the instance's directory, which holds its console log, or
+/// null if Lima has no such instance.
 pub fn dir(io: Io, gpa: Allocator, name: []const u8) !?[]const u8 {
     const r = try std.process.run(
         gpa,
@@ -84,9 +74,9 @@ pub fn dir(io: Io, gpa: Allocator, name: []const u8) !?[]const u8 {
     return if (r.term == .exited and r.term.exited == 0 and d.len > 0) d else null;
 }
 
-/// The Lima template: the disk, the vzNAT network with MAC m, unless the
-/// form has no DHCP client to take an address there, the config tar's
-/// disk, and nothing of Lima's own: no mounts, no ssh, no provisioning.
+/// template returns a Lima template that boots disk with config_disk as a
+/// second, unformatted disk, and no mounts, ssh or provisioning. A null m
+/// omits the vzNAT network, for forms without a DHCP client.
 pub fn template(
     gpa: Allocator,
     form: []const u8,
@@ -129,9 +119,8 @@ pub fn template(
     });
 }
 
-/// The template for a machine Lima manages: make's, from boot/lima.yaml.in,
-/// as make lima uses it, with the config tar's disk and what werewolf
-/// recalls of it later added.
+/// managedTemplate appends the config disk and howl's marker comments to
+/// base, make's template from boot/lima.yaml.in, for a machine Lima manages.
 pub fn managedTemplate(
     gpa: Allocator,
     base: []const u8,
@@ -150,7 +139,7 @@ pub fn managedTemplate(
     , .{ howl.form_tag, form, std.mem.trimEnd(u8, base, "\n"), config_disk });
 }
 
-/// Whether a machine's template is one Lima manages.
+/// isManaged reports whether yaml came from managedTemplate.
 pub fn isManaged(yaml: []const u8) bool {
     var lines = std.mem.splitScalar(u8, yaml, '\n');
     while (lines.next()) |l|
@@ -158,8 +147,8 @@ pub fn isManaged(yaml: []const u8) bool {
     return false;
 }
 
-/// The form a machine was made from, as its template's comment says: Lima
-/// keeps the template, so Lima is where it is recorded.
+/// formOf returns the form named in the template's comment. Lima keeps the
+/// template, so the form needs no other record.
 pub fn formOf(yaml: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, yaml, '\n');
     const prefix = "# " ++ howl.form_tag ++ ": ";
@@ -170,11 +159,11 @@ pub fn formOf(yaml: []const u8) ?[]const u8 {
     return null;
 }
 
-/// A DHCP lease: the address, and when it expires, in seconds since 1970.
+/// Lease is a DHCP lease: an address and its expiry in Unix seconds.
 pub const Lease = struct { ip: []const u8, expiry: u64 };
 
-/// The lease macOS's DHCP server gave m, from its lease file: the one that
-/// expires last, if any.
+/// lease returns the latest-expiring lease for m in the text of macOS's
+/// lease file, or null.
 pub fn lease(text: []const u8, m: []const u8) ?Lease {
     var best: ?Lease = null;
     var blocks = std.mem.splitScalar(u8, text, '}');
@@ -199,14 +188,15 @@ pub fn lease(text: []const u8, m: []const u8) ?Lease {
     return best;
 }
 
-/// m's lease now, before the machine starts: one a deleted machine of the
-/// same name left, which create must not mistake for the new one's.
+/// previous returns the expiry of m's current lease, or 0. create calls it
+/// before boot so a lease left by a deleted machine of the same name is not
+/// taken for the new one's.
 pub fn previous(io: Io, gpa: Allocator, m: []const u8) u64 {
     const text = Dir.cwd().readFileAlloc(io, leases, gpa, .limited(4 << 20)) catch return 0;
     return if (lease(text, m)) |l| l.expiry else 0;
 }
 
-/// The address name's lease gives it, if it has one: a machine on vzNAT.
+/// addressOf returns the leased vzNAT address of the machine name, or null.
 pub fn addressOf(io: Io, gpa: Allocator, name: []const u8) ?[]const u8 {
     const m = mac(name);
     const text = Dir.cwd().readFileAlloc(io, leases, gpa, .limited(4 << 20)) catch return null;

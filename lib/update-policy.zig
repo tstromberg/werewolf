@@ -1,20 +1,6 @@
-//! update-policy: when a staged update boots, and why
-//! (docs/design/update-policy.md). slot-update decides with it; howl
-//! checks an operator's update-policy.json with the same apply.
-//!
-//! Each fix has a tier. Urgent and High boot within a time of when this
-//! machine first saw them; Medium and Low wait at least a time, then boot
-//! in the maintenance window. Where in its time or window a machine boots
-//! is its place: the same for the same machine and build, different across
-//! a fleet. A form and then an operator may change the times and the
-//! window, never past the limits, and never Urgent's.
-//!
-//! Everything here is pure: times are seconds since the epoch, UTC, passed
-//! in, so all of it is tested without a clock. Times are written in two
-//! forms alone, each read and written here: RFC 3339 (Time), in logs,
-//! reports, state files and expiries, and a serial (Serial), the same
-//! without dashes or colons, which a git tag can carry, for a release's and
-//! a feed's serial and a loader entry's version.
+//! update-policy decides when a staged update boots, and explains why. It
+//! also reads and writes werewolf's two time formats. See lib/README.md and
+//! docs/design/update-policy.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -26,12 +12,12 @@ pub const hour = 60 * minute;
 pub const day = 24 * hour;
 
 /// Urgent fixes, and anything a machine's first check stages, boot within
-/// these; update reboots are at least reboot_gap apart.
+/// these times. Update reboots are at least reboot_gap apart.
 const urgent_time = 15 * minute;
 const first_boot_time = 2 * minute;
 const reboot_gap = hour;
 
-/// In order of urgency.
+/// Tier is a fix's urgency, lowest first.
 pub const Tier = enum(u2) {
     low,
     medium,
@@ -48,12 +34,12 @@ pub const Tier = enum(u2) {
     }
 };
 
-/// Who set a setting.
+/// Source says who set a setting.
 pub const Source = enum { werewolf, form, operator };
 
-/// When Medium and Low fixes boot: on the days in days (bit 0 Sunday, as
-/// the epoch's weekdays count), from start to end, seconds into the day in
-/// UTC. An end before its start wraps past midnight.
+/// Window is when Medium and Low fixes boot: on days (bit 0 is Sunday),
+/// from start to end, in seconds into the UTC day. An end before its start
+/// wraps past midnight.
 pub const Window = struct {
     days: u7 = 0x7f,
     start: u32 = 2 * hour,
@@ -83,7 +69,7 @@ pub const Window = struct {
 
 const day_names = [7][]const u8{ "sun", "mon", "tue", "wed", "thu", "fri", "sat" };
 
-/// High's time, Medium's and Low's waits, each at most its limit.
+/// Times holds High's time and Medium's and Low's waits, each at most its limit.
 pub const Times = struct { high: u32, medium: u32, low: u32 };
 
 pub const Settings = struct {
@@ -98,26 +84,26 @@ pub const Settings = struct {
     } = .{},
 };
 
-/// The most an update-policy.json may hold.
+/// max_input is the largest update-policy.json accepted, in bytes.
 pub const max_input = 32 << 10;
 
-/// Why a file was refused, and the key it is about ("" for the whole).
+/// Refusal says why a file was refused, and which key ("" for the whole file).
 pub const Refusal = struct { key: []const u8, why: []const u8 };
 
-/// Apply input, a form's /etc/werewolf/update-policy.json or an operator's
-/// update-policy.json from the config tar, to s: all of it, or none of it
-/// and the reason. A missing file changes nothing. One JSON object:
+/// apply applies input, a form's /etc/werewolf/update-policy.json or an
+/// operator's from the config tar, to s. It applies all of it, or none and
+/// returns the reason. input is one JSON object:
 ///
 ///   "window"  "daily 02:00-05:00" or "sun,wed 03:00-05:00": UTC, an hour at
 ///             least
 ///   "high", "medium", "low"
 ///             "30m", "4h", "7d": each at most its limit
-///   "limits"  a form's only: {"high": ..., "medium": ..., "low": ...},
-///             each only lower than werewolf's; a limit below its time
-///             brings the time down with it
+///   "limits"  forms only: {"high": ..., "medium": ..., "low": ...},
+///             each at most werewolf's; a limit below its time lowers
+///             the time too
 ///
-/// An unknown key, one given twice, or a value of the wrong type refuses
-/// the file, as does anything over max_input.
+/// An unknown or repeated key, a value of the wrong type, or input over
+/// max_input refuses the whole file.
 pub fn apply(
     gpa: Allocator,
     s: *Settings,
@@ -137,7 +123,7 @@ pub fn apply(
     };
     if (doc != .object) return .{ .key = "", .why = "not a JSON object" };
     var next = s.*;
-    // Limits first, so the times are held to them whatever the order.
+    // Apply limits first, so times are held to them whatever the key order.
     if (doc.object.get("limits")) |v| {
         if (source != .form) return .{ .key = "limits", .why = "only a form may set limits" };
         if (v != .object) return .{ .key = "limits", .why = "not an object" };
@@ -157,7 +143,7 @@ pub fn apply(
             limit.* = value;
             const time = timeOf(&next.time, e.key_ptr.*).?;
             if (value < time.*) {
-                // The form's limit set it now, not werewolf's default.
+                // The form's limit set the time, not werewolf's default.
                 time.* = value;
                 sourceOf(&next, e.key_ptr.*).* = .form;
             }
@@ -190,8 +176,8 @@ pub fn apply(
     return null;
 }
 
-/// The tiers whose times a setting names: Times' fields, and Settings'
-/// sources'.
+/// Timed names the tiers that have settable times, matching the fields of
+/// Times and of Settings.source.
 const Timed = enum { high, medium, low };
 
 fn timeOf(t: *Times, key: []const u8) ?*u32 {
@@ -257,8 +243,8 @@ fn parseClock(s: []const u8) ?u32 {
     return h * hour + m * minute;
 }
 
-/// A machine's seed for a build: the first 8 bytes of SHA-256(machine ‖
-/// build). A machine's place in any span is its seed modulo the span.
+/// seed returns the first 8 bytes of SHA-256(machine ‖ build). A machine's
+/// place in any span is its seed modulo the span, so a fleet spreads out.
 pub fn seed(machine: []const u8, build: []const u8) u64 {
     var h: std.crypto.hash.sha2.Sha256 = .init(.{});
     h.update(machine);
@@ -270,7 +256,8 @@ fn place(sd: u64, span: u32) u32 {
     return if (span == 0) 0 else @intCast(sd % span);
 }
 
-/// When a fix of tier, first seen at seen, boots on a machine of seed sd.
+/// due returns when a fix of tier, first seen at seen, boots on the machine
+/// with seed sd.
 pub fn due(s: *const Settings, tier: Tier, seen: i64, sd: u64) i64 {
     return switch (tier) {
         .urgent => seen + place(sd, urgent_time),
@@ -280,15 +267,15 @@ pub fn due(s: *const Settings, tier: Tier, seen: i64, sd: u64) i64 {
     };
 }
 
-/// The first of this machine's places in a window at or after earliest. A
-/// window that began the day before may still hold it, so the search
-/// starts there.
+/// inWindow returns the first of this machine's places in a window at or
+/// after earliest. The search starts a day early, because a window that
+/// began the day before may still be open.
 fn inWindow(w: Window, earliest: i64, sd: u64) i64 {
     std.debug.assert(w.days != 0);
     const offset = place(sd, w.len());
     var d = @divFloor(earliest, day) - 1;
     while (true) : (d += 1) {
-        // The epoch began on a Thursday.
+        // 1970-01-01 was a Thursday.
         const weekday: u3 = @intCast(@mod(d + 4, 7));
         if (w.days & (@as(u7, 1) << weekday) == 0) continue;
         const t = d * day + w.start + offset;
@@ -296,15 +283,14 @@ fn inWindow(w: Window, earliest: i64, sd: u64) i64 {
     }
 }
 
-/// When a fix boots by its rule alone: due, or on a machine's first check,
-/// within first_boot_time of when it was seen.
+/// byRule returns when a fix boots by its rule alone: due, or on the
+/// machine's first check, within first_boot_time of when it was seen.
 fn byRule(s: *const Settings, tier: Tier, seen: i64, sd: u64, first_boot: bool) i64 {
     return if (first_boot) seen + place(sd, first_boot_time) else due(s, tier, seen, sd);
 }
 
-/// When the tiers seen first were seen; null for a tier not seen. A tier,
-/// once seen, stays until the slot boots, so a fix whose tier rises never
-/// boots later than it would have.
+/// Seen holds when each tier was first seen, or null. A tier stays seen
+/// until the slot boots, so a fix whose tier rises never boots later.
 pub const Seen = std.enums.EnumArray(Tier, ?i64);
 
 pub fn see(seen: *Seen, tier: Tier, now: i64) void {
@@ -314,9 +300,9 @@ pub fn see(seen: *Seen, tier: Tier, now: i64) void {
 
 pub const Due = struct { at: i64, tier: Tier };
 
-/// When the staged slot boots, and the tier that makes it then: the
-/// earliest of each seen tier's time; on a machine's first check, within
-/// first_boot_time of the first fix seen. Null when nothing is seen.
+/// when returns when the staged slot boots and the tier that sets the time:
+/// the earliest of the seen tiers' times, or on a machine's first check
+/// within first_boot_time. It returns null when nothing is seen.
 pub fn when(s: *const Settings, seen: Seen, sd: u64, first_boot: bool) ?Due {
     var best: ?Due = null;
     for (std.enums.values(Tier)) |tier| {
@@ -329,16 +315,18 @@ pub fn when(s: *const Settings, seen: Seen, sd: u64, first_boot: bool) ?Due {
     return best;
 }
 
-/// at, held until reboot_gap after the last update reboot.
+/// spaced delays at until reboot_gap after last_reboot. The updater passes
+/// the machine's boot time, so update reboots are at least reboot_gap apart.
 pub fn spaced(at: i64, last_reboot: ?i64) i64 {
     const last = last_reboot orelse return at;
     return @max(at, last + reboot_gap);
 }
 
-/// A fix, as the log names it: "CVE-2026-1111 in busybox", "no score yet".
+/// Fix names a fix for the log, such as "CVE-2026-1111 in busybox" with
+/// evidence "no score yet".
 pub const Fix = struct { subject: []const u8, evidence: []const u8 };
 
-/// One sentence from evidence to rule to time, for the log's why:
+/// why writes one sentence from evidence to rule to time, for the log:
 ///
 ///   Medium: CVE-2026-1111 in busybox, no score yet, first seen
 ///   2026-10-07T14:02:11Z. The operator's medium wait is 14d, then the
@@ -358,7 +346,7 @@ pub fn why(
     try out.print("{s}: {s}, {s}, first seen {f}. ", .{
         tier.title(), fix.subject, fix.evidence, Time{ .secs = seen },
     });
-    // The rule, then this machine's place in the span it boots within.
+    // State the rule, then this machine's place in the span.
     const span: u32 = if (first_boot) first_boot_time else switch (tier) {
         .urgent => urgent_time,
         .high => s.time.high,
@@ -406,7 +394,8 @@ fn whose(src: Source) []const u8 {
     };
 }
 
-/// RFC 3339 in UTC: 2026-10-07T14:02:11Z.
+/// Time formats as RFC 3339 in UTC, 2026-10-07T14:02:11Z, for logs,
+/// reports, state files and expiries.
 pub const Time = struct {
     secs: i64,
 
@@ -419,8 +408,8 @@ pub const Time = struct {
     }
 };
 
-/// A serial: RFC 3339 in UTC without its dashes and colons,
-/// 20261007T140211Z, which a git tag can carry and a string compare orders.
+/// Serial formats as RFC 3339 in UTC without dashes or colons,
+/// 20261007T140211Z. A git tag can carry it and string order is time order.
 pub const Serial = struct {
     secs: i64,
 
@@ -430,7 +419,7 @@ pub const Serial = struct {
     }
 };
 
-/// secs as year, month, day, hour, minute and second.
+/// civil splits secs into year, month, day, hour, minute and second.
 fn civil(secs: i64) [6]u32 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(secs) };
     const yd = es.getEpochDay().calculateYearDay();
@@ -442,21 +431,21 @@ fn civil(secs: i64) [6]u32 {
     };
 }
 
-/// RFC 3339 in UTC, as Time writes it, as seconds since the epoch.
+/// parseTime parses what Time writes into seconds since the epoch.
 pub fn parseTime(s: []const u8) error{BadTime}!i64 {
     if (s.len != 20 or s[4] != '-' or s[7] != '-' or s[10] != 'T' or s[13] != ':' or
         s[16] != ':' or s[19] != 'Z') return error.BadTime;
     return secsOf(.{ s[0..4], s[5..7], s[8..10], s[11..13], s[14..16], s[17..19] });
 }
 
-/// A serial, as Serial writes it, as seconds since the epoch.
+/// parseSerial parses what Serial writes into seconds since the epoch.
 pub fn parseSerial(s: []const u8) error{BadTime}!i64 {
     if (s.len != 16 or s[8] != 'T' or s[15] != 'Z') return error.BadTime;
     return secsOf(.{ s[0..4], s[4..6], s[6..8], s[9..11], s[11..13], s[13..15] });
 }
 
-/// Year, month, day, hour, minute and second, each in digits alone, as
-/// seconds since the epoch; a date that is not one, Feb 31, is refused.
+/// secsOf converts year, month, day, hour, minute and second, all digits,
+/// to seconds since the epoch. It refuses impossible dates such as Feb 31.
 fn secsOf(fields: [6][]const u8) error{BadTime}!i64 {
     var n: [6]u32 = undefined;
     for (fields, &n) |digits, *v| {
@@ -477,8 +466,8 @@ fn secsOf(fields: [6][]const u8) error{BadTime}!i64 {
     return days * day + @as(i64, h) * hour + @as(i64, mi) * minute + s;
 }
 
-/// A span for people: at most its three largest units, "14d 13h 38m",
-/// "2h 45m 42s", "15m", "0s".
+/// Duration formats a span for people in at most three units from the
+/// largest: "14d 13h 38m", "2h 45m 42s", "15m", "0s".
 pub const Duration = struct {
     secs: u64,
 
@@ -506,7 +495,7 @@ pub const Duration = struct {
     }
 };
 
-/// A setting as it is written: in its largest whole unit, "4h", "14d".
+/// Setting formats a time setting in its largest whole unit: "4h", "14d".
 pub const Setting = struct {
     secs: u32,
 
@@ -517,8 +506,8 @@ pub const Setting = struct {
     }
 };
 
-/// The log's chain: prev for the line after line, as written with its
-/// newline, the first 16 hex digits of its SHA-256.
+/// chain returns the prev value for the log line after line: the first 16
+/// hex digits of SHA-256 of line, newline included.
 pub fn chain(line: []const u8) [16]u8 {
     var sum: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(line, &sum, .{});
@@ -630,7 +619,7 @@ test "settings: a form lowers a limit, and the operator stays under it" {
     defer arena.deinit();
     const gpa = arena.allocator();
     var s: Settings = .{};
-    // The order of keys does not matter: limits apply first.
+    // Key order does not matter: limits apply first.
     try std.testing.expectEqual(@as(?Refusal, null), try apply(gpa, &s, .form,
         \\{"medium": "2d", "limits": {"medium": "3d"}}
     ));
@@ -669,13 +658,13 @@ test "due: Medium waits, then the window" {
     // The design's example: 1h 41m 7s into the default window.
     const sd: u64 = 6067;
     try expectText("2026-10-22T03:41:07Z", Time{ .secs = due(&s, .medium, t0, sd) });
-    // A wait that ends inside the window, before this machine's place: the
-    // same day. After it: the next day's window.
+    // A wait that ends in the window before this machine's place boots the
+    // same day; one that ends after it boots in the next day's window.
     s.time.medium = 12 * hour; // ends 2026-10-08T02:02:11Z
     try expectText("2026-10-08T03:41:07Z", Time{ .secs = due(&s, .medium, t0, sd) });
     s.time.medium = 13 * hour + 40 * minute; // ends 03:42:11
     try expectText("2026-10-09T03:41:07Z", Time{ .secs = due(&s, .medium, t0, sd) });
-    // A wait of nothing is the next window.
+    // A zero wait boots in the next window.
     s.time.medium = 0;
     try expectText("2026-10-08T03:41:07Z", Time{ .secs = due(&s, .medium, t0, sd) });
 }
@@ -686,10 +675,10 @@ test "due: windows on some days, and past midnight" {
     // Sundays only: the Wednesday's next Sunday is 2026-10-11.
     s.window = .{ .days = 1, .start = 2 * hour, .end = 5 * hour };
     try expectText("2026-10-11T02:00:00Z", Time{ .secs = due(&s, .low, t0, 0) });
-    // 23:00-02:00 on Wednesdays: Wednesday's window runs into Thursday.
+    // A 23:00-02:00 window on Wednesdays runs into Thursday.
     s.window = .{ .days = 1 << 3, .start = 23 * hour, .end = 2 * hour };
     try expectText("2026-10-08T01:00:00Z", Time{ .secs = due(&s, .low, t0, 2 * hour) });
-    // Seen inside that window, after this machine's place: next week's.
+    // Seen inside that window after this machine's place: next week's.
     try expectText(
         "2026-10-14T23:30:00Z",
         Time{ .secs = due(&s, .low, t0 + 10 * hour, 30 * minute) },
@@ -707,7 +696,7 @@ test "when: the earliest tier, kept as tiers rise" {
     // A later sighting does not move the first.
     see(&seen, .medium, t0 + day);
     try std.testing.expectEqual(before, when(&s, seen, 0, false).?);
-    // A fix that rises to High a week later: High's time is sooner.
+    // A fix that rises to High a week later boots by High's sooner time.
     see(&seen, .high, t0 + 6 * day);
     const after = when(&s, seen, 0, false).?;
     try std.testing.expectEqual(Tier.high, after.tier);
@@ -797,7 +786,7 @@ test "why: Urgent, Low and a first check" {
             "Due 2026-10-07T14:02:41Z, in 30s.",
         w.buffered(),
     );
-    // Held for the hour after boot: the sentence says so.
+    // A reboot held for the hour after boot is explained in the sentence.
     w = .fixed(&buf);
     try why(&w, &s, .urgent, fix, t0, 61, false, t0 + hour, t0);
     try std.testing.expectEqualStrings(
@@ -839,8 +828,8 @@ test "times, written and read" {
             try std.mem.print(&buf, "{f}", .{Time{ .secs = secs }}),
         ));
     }
-    // release/sign's "expires", which updaters from before 2026-10-08
-    // check: it must read as later than any now.
+    // Updaters from before 2026-10-08 check release/sign's "expires", so
+    // it must parse as later than any now.
     try std.testing.expect(try parseTime("9999-12-31T23:59:59Z") > t0 + 100 * 365 * day);
     for ([_][]const u8{
         "2026-02-29T00:00:00Z",

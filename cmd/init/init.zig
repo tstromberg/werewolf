@@ -1,49 +1,6 @@
-//! init: PID 1 from stage0 handing over until runit takes it.
-//!
-//! stage0 has mounted the form's root.erofs read-only at / and handed over:
-//! nothing here or after can write the root, so what changes lives in /run,
-//! /tmp, /var/tmp and /data. init only has to make the machine reachable:
-//! filesystems, the kernel's settings, one address, the operator's keys,
-//! /data. Then it hands over to fence, which sets the network policy and
-//! becomes runit; /etc/runit/2 runs the services and /etc/runit/3 shuts down.
-//!
-//! Every form includes minimal, so this program is in every image. It must
-//! not know which form it is in: it prepares the machine and starts runit,
-//! and the services a form adds take care of themselves. It decides from
-//! what the image carries (a DHCP client, mke2fs, cryptsetup) and what it
-//! is told, instead.
-//!
-//! Everything it reads comes from two places, in this order:
-//!
-//!     kernel command line   werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
-//!                             (without werewolf.ip, the address is DHCP's)
-//!                           werewolf.mac=ADDR (which NIC, when there are several)
-//!                           werewolf.data=DEV (/data on a disk: DEV, formatted once)
-//!                           (werewolf.debug=1, a root shell on the console where
-//!                             the form has one, is the debug-shell service's)
-//!                           and, on a machine with slots:
-//!                           werewolf.victim=UUID:DIR (the filesystem holding the
-//!                             slots, config.tar and data/)
-//!                           every werewolf.* word read by lib/cmdline.zig, as
-//!                             stage0 read it
-//!     config                one tar: config.tar in the victim's directory, or
-//!                           else the first block device written with one;
-//!                           never two, merged. It is extracted to /run/config,
-//!                           by a confined child, for the services to read
-//!                           (hostname and authorized_keys are applied here).
-//!                           Beside it, a NoCloud volume labelled `cidata`, from
-//!                           which the first user, its ssh keys and Lima's data
-//!                           files beneath /run/config are taken, never in
-//!                           place of the tar's, and without running
-//!                           provisioning scripts. Failing both, the cloud's
-//!                           metadata server.
-//!
-//! It runs no shell. What it cannot do itself it asks of werewolf's programs
-//! (mount, modules, net, dhcp, cloud, fence) and of the filesystem tools the
-//! form carries (blkid, mke2fs, e2fsck, cryptsetup), each by its full path.
-//! A step that fails is said on the console and the boot goes on, as far as
-//! it can; only failing to start fence ends it, which panics the kernel and
-//! sends the machine back to its last good slot.
+//! init is PID 1 between stage0 and runit. It mounts filesystems, sets the
+//! kernel's protections, reads the config, brings up the network and /data,
+//! seals the machine, and execs fence, which becomes runit. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -68,28 +25,26 @@ pub fn main(init: std.process.Init) !void {
         .gpa = init.arena.allocator(),
         .env = .init(init.arena.allocator()),
     };
-    // The environment every program on the machine inherits, through
-    // fence and runit, made here from nothing: the kernel's own two
-    // words, and the PATH werewolf's tools are found on. Nothing init was
-    // given passes through: on a RAM root that is every NAME=value on the
-    // command line the kernel did not take, which blkid, e2fsprogs and
-    // the loader read settings from.
+    // Build from nothing the environment every program inherits through
+    // fence and runit. init's own holds each NAME=value the kernel did not
+    // take from its command line, which blkid, e2fsprogs and the loader
+    // would read as settings.
     try m.env.put("PATH", path_env);
     try m.env.put("HOME", "/");
     try m.env.put("TERM", "linux");
-    // Where the boot's time goes: stage0's phases, then init's, each marked
-    // as it ends.
+    // Each phase is marked as it ends, stage0's first, to show where the
+    // boot's time goes.
     var phases = Phases.parse(init.environ_map.get("WEREWOLF_BOOT") orelse "");
 
-    // Nothing here may wait on a person. A tool that prompts (mke2fs does,
-    // over an old signature) reads end of file instead of stalling the boot.
+    // No tool may wait on a person. One that prompts (mke2fs does, over an
+    // old signature) reads end of file instead of stalling the boot.
     const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(null_fd) == .SUCCESS) _ = linux.dup2(@intCast(null_fd), 0);
 
     m.filesystems();
     m.seed();
-    // stage0 checked the line by the same rules, so one refused here is
-    // one that changed under it.
+    // stage0 checked the line by the same rules, so a refusal here means
+    // the line changed under it.
     var refused: cmdline.Failure = .{};
     m.cmd = cmdline.parse(m.read("/proc/cmdline"), &refused) orelse {
         say("the command line's {s}: {s}; not handing over", .{ refused.word, refused.why });
@@ -101,8 +56,8 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     phases.add("sysctls", bootMs());
-    // The config on the machine's disks first, since it may hold the
-    // network; the cloud's, which comes over the network, after it.
+    // The config on disk comes first, since it may set the network; the
+    // cloud's metadata needs the network.
     m.victim();
     phases.add("victim", bootMs());
     m.config();
@@ -113,51 +68,39 @@ pub fn main(init: std.process.Init) !void {
     phases.add("metadata", bootMs());
     m.data();
     phases.add("data", bootMs());
-    // The image roots' binds (oci.zig), where the form has any.
     if (m.oci()) phases.add("oci", bootMs());
 
-    // fence sets the network policy the build compiled from the forms,
-    // binding only declared TCP ports and the metadata server only for those
-    // named, then becomes runit, so every process inherits it. If it cannot,
-    // PID 1 ends, and the machine falls back to the slot that last worked.
-    // No core dumps, by anyone it starts: a crash leaves no copy of a
-    // program's memory, and its secrets, behind. A hard limit, so no
-    // process can raise its own.
+    // No process may dump core, so a crash leaves no copy of its memory and
+    // secrets behind. The hard limit is 0, so no process can raise it.
     const no_core: linux.rlimit = .{ .cur = 0, .max = 0 };
     if (linux.errno(linux.setrlimit(.CORE, &no_core)) != .SUCCESS)
         say("core dumps not limited", .{});
-    // The seal fails closed, as fence does: PID 1 ends, the kernel panics,
-    // and the machine comes back on the slot that last worked.
+    // The seal fails closed: PID 1 exits, the kernel panics, and the machine
+    // comes back on the slot that last worked.
     phase_seal.seal(&m) catch |err| {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
-    // The mount broker (cmd/mount-broker), which mounts for the few that
-    // must once fence's Landlock domain forbids mounting to everyone in
-    // it: started here, so it is outside that domain, and after the seal,
-    // so it is under it like every other process. It never exits; without
-    // it nothing can keep this slot, so a machine whose broker would not
-    // start falls back to the slot that last worked.
+    // The mount broker mounts for the few programs that must, once fence's
+    // Landlock domain forbids mounting. Starting it here puts it outside that
+    // domain but under the seal. Without it nothing can keep this slot, so
+    // the machine falls back to the slot that last worked.
     if (std.process.spawn(m.io, .{
         .argv = &.{"/usr/lib/werewolf/mount-broker"},
         .environ_map = &m.env,
         .stdin = .ignore,
     })) |_| {} else |broker_err| say("no mount broker: {s}", .{@errorName(broker_err)});
-    // The DHCP lease's renewal (cmd/dhcp-client), started here too, so it
-    // keeps CAP_NET_ADMIN to apply a lease, and its packet socket, which
-    // fence then takes from every process after it, root's included: no
-    // form need keep either for DHCP. runit does not restart it; should it
-    // end, the address it applied stays.
+    // DHCP renewal starts before fence, which takes CAP_NET_ADMIN and packet
+    // sockets from every later process, root included. runit does not
+    // restart it; if it exits, the address it applied stays.
     if (m.dhcp) if (std.process.spawn(m.io, .{
         .argv = &.{ "/usr/lib/werewolf/dhcp-client", "keep" },
         .environ_map = &m.env,
         .stdin = .ignore,
     })) |_| {} else |dhcp_err| say("no DHCP renewal: {s}", .{@errorName(dhcp_err)});
-    // The seal, and starting the broker and the renewal.
     phases.add("seal", bootMs());
-    // How long the boot took, for the console and the demo's page: the
-    // kernel's part, which stage0 measured, and userland's, stage0 and init,
-    // phase by phase.
+    // The boot's timing goes to the console and /run/werewolf/boot (read by
+    // the demo's page). stage0 measured the kernel's part.
     const kernel_ms = phases.endOf("kernel");
     const up_ms = bootMs();
     const took = phases.durations(m.gpa);
@@ -175,11 +118,10 @@ pub fn main(init: std.process.Init) !void {
         if (i == 0) "" else ", ", p.name, p.ms / 1000, p.ms % 1000,
     }) catch {};
     say("phases: {s}", .{line.written()});
-    // The boot is over, so the console takes the kernel's notices from
-    // here on: what the kernel refuses (an exec, lockdown, Yama, Landlock)
-    // it says at that level, which loglevel=5 kept off the console while
-    // the boot's own notices would have cost a millisecond a line on a
-    // cloud's serial port (Makefile, KERNEL_ARGS). dmesg has every one.
+    // Raise the console loglevel now the boot is over, so the kernel's
+    // refusals (exec, lockdown, Yama, Landlock) reach it. loglevel=5 kept
+    // them off during boot, where each line costs a millisecond on a
+    // cloud's serial port (Makefile, KERNEL_ARGS).
     if (!writeFile("/proc/sys/kernel/printk", "6"))
         say("console loglevel not raised: the kernel's refusals stay in dmesg", .{});
     say("up in {s}s (the kernel {s}s, userland {s}s), handing over to runit", .{
@@ -202,13 +144,13 @@ pub const Machine = struct {
     cmd: cmdline.Cmdline = .{},
     victim_dir: []const u8 = "",
     nocloud_user: []const u8 = "",
-    /// Whether a config tar or a NoCloud seed was found on a disk, so the
-    /// cloud's metadata server is not asked.
+    /// configured is set when a disk held a config tar or a NoCloud seed;
+    /// the cloud's metadata server is then not asked.
     configured: bool = false,
-    /// Whether the address is DHCP's, for its renewal to be started.
+    /// dhcp is set when DHCP gave the address, so its renewal is started.
     dhcp: bool = false,
 
-    // Each phase is in a file of its own, and still m.phase() here.
+    // Each phase lives in its own file but is still called as m.phase().
     pub const filesystems = phase_kernel.filesystems;
     pub const seed = phase_kernel.seed;
     pub const kernel = phase_kernel.kernel;
@@ -219,7 +161,8 @@ pub const Machine = struct {
     pub const data = phase_data.data;
     pub const oci = phase_oci.oci;
 
-    /// werewolf's mount, which says what went wrong itself; the boot goes on.
+    /// mount runs werewolf's mount with args. mount reports its own errors,
+    /// and the boot goes on.
     pub fn mount(m: *Machine, args: []const []const u8) void {
         const argv = std.mem.concat(m.gpa, []const u8, &.{ &.{mount_bin}, args }) catch return;
         _ = m.run(argv);
@@ -229,15 +172,15 @@ pub const Machine = struct {
         return m.spawn(argv, false) == 0;
     }
 
-    /// As run, with the program's own complaints silenced: for probes, whose
+    /// runQuiet is run with the program's output discarded, for probes whose
     /// failure is an answer.
     pub fn runQuiet(m: *Machine, argv: []const []const u8) bool {
         return m.spawn(argv, true) == 0;
     }
 
-    /// name's path in PATH, as the shell's command -v finds it. Programs
-    /// run by their full path: spawn would resolve a bare name against
-    /// init's own environment, and the kernel gives it no PATH.
+    /// which returns name's path in path_env, or null. Programs run by full
+    /// path because spawn resolves a bare name against init's environment,
+    /// and the kernel gives init no PATH.
     pub fn which(m: *Machine, name: []const u8) ?[:0]const u8 {
         var dirs = std.mem.tokenizeScalar(u8, path_env, ':');
         while (dirs.next()) |dir| {
@@ -247,7 +190,8 @@ pub const Machine = struct {
         return null;
     }
 
-    /// argv's exit code, or 255 if it did not run or was killed.
+    /// spawn runs argv and returns its exit code, or 255 if it did not run
+    /// or was killed.
     pub fn spawn(m: *Machine, argv: []const []const u8, quiet: bool) u32 {
         var child = std.process.spawn(m.io, .{
             .argv = argv,
@@ -267,8 +211,8 @@ pub const Machine = struct {
         return m.mountSource(point) != null;
     }
 
-    /// What is mounted on point, as the kernel's mount table names it, or
-    /// null if nothing is.
+    /// mountSource returns the source mounted on point, as
+    /// /proc/self/mounts names it, or null.
     pub fn mountSource(m: *Machine, point: []const u8) ?[]const u8 {
         var it = std.mem.tokenizeScalar(u8, m.read("/proc/self/mounts"), '\n');
         while (it.next()) |line| {
@@ -279,7 +223,8 @@ pub const Machine = struct {
         return null;
     }
 
-    /// path, read to its end, or "" (procfs and sysfs report a size of 0).
+    /// read returns path's contents, up to 1 MiB, or "". It reads to the end
+    /// because procfs and sysfs report a size of 0.
     pub fn read(m: *Machine, path: []const u8) []const u8 {
         var f = Dir.cwd().openFile(m.io, path, .{}) catch return "";
         defer f.close(m.io);
@@ -288,8 +233,8 @@ pub const Machine = struct {
         return r.interface.allocRemaining(m.gpa, .limited(1 << 20)) catch "";
     }
 
-    /// read, for a file from outside the image: a regular file alone, no
-    /// link followed (openRegular), at most 1 MiB; "" otherwise.
+    /// readRegular is read for a file from outside the image: it must be a
+    /// regular file, not a link (see openRegular). It returns "" otherwise.
     pub fn readRegular(m: *Machine, path: []const u8) []const u8 {
         const fd = openRegular(m.z(path)) orelse return "";
         var f: Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
@@ -299,7 +244,7 @@ pub const Machine = struct {
         return r.interface.allocRemaining(m.gpa, .limited(1 << 20)) catch "";
     }
 
-    /// text to path, with mode; a failure is said.
+    /// write writes text to path with mode, and logs a failure.
     pub fn write(m: *Machine, path: []const u8, text: []const u8, mode: u32) void {
         Dir.cwd().writeFile(
             m.io,
@@ -324,7 +269,7 @@ pub const Machine = struct {
         ) catch |err| say("{s}: {s}", .{ path, @errorName(err) });
     }
 
-    /// The names in dir, sorted, as the shell's glob gives them.
+    /// list returns the names in dir, sorted, without dot files.
     pub fn list(m: *Machine, dir: []const u8) []const []const u8 {
         var out: std.ArrayList([]const u8) = .empty;
         var d = Dir.cwd().openDir(m.io, dir, .{ .iterate = true }) catch return out.items;
@@ -402,7 +347,7 @@ pub fn isBlockDevice(path: [:0]const u8) bool {
     return st.mode & linux.S.IFMT == linux.S.IFBLK;
 }
 
-/// The kind of file fd is open on (S.IFREG, S.IFBLK, ...), or 0.
+/// fileType returns the type bits of fd's mode (S.IFREG, S.IFBLK, ...), or 0.
 pub fn fileType(fd: i32) u32 {
     var st: linux.Statx = undefined;
     if (linux.errno(linux.statx(fd, "", AT_EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS)
@@ -412,10 +357,10 @@ pub fn fileType(fd: i32) u32 {
 
 const AT_EMPTY_PATH = 0x1000;
 
-/// A file from outside the image (a cidata ISO's, a victim's) opened for
-/// reading as a regular file alone, with links refused: a FIFO or a
-/// device at the name would otherwise hold PID 1 in open or read for good,
-/// and a link would lead it elsewhere. Null if it is not one.
+/// openRegular opens path for reading if it is a regular file and not a
+/// link, or returns null. It is for files from outside the image (a cidata
+/// ISO, a victim): a FIFO or device could block PID 1 forever, and a link
+/// could point anywhere.
 pub fn openRegular(path: [:0]const u8) ?i32 {
     const fd = linux.open(path, .{
         .ACCMODE = .RDONLY,
@@ -436,8 +381,8 @@ pub fn writeFile(path: [:0]const u8, data: []const u8) bool {
     return writeErrno(path, data) == .SUCCESS;
 }
 
-/// writeFile, but returning why it failed, so a caller can tell a read-only
-/// /proc/sys (a container) from a refusal that matters on real hardware.
+/// writeErrno is writeFile returning the errno, so a caller can tell a
+/// read-only /proc/sys (a container) from a refusal that matters.
 pub fn writeErrno(path: [:0]const u8, data: []const u8) linux.E {
     const fd = linux.open(path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return linux.errno(fd);
@@ -453,10 +398,9 @@ pub fn say(comptime f: []const u8, args: anytype) void {
     _ = linux.write(1, line.ptr, line.len);
 }
 
-/// Where the boot's time went: each phase's name and when it ended, in
-/// milliseconds of the boot clock. stage0 hands its own over as
-/// WEREWOLF_BOOT, `kernel=225 modules=611 slot=838 root=851`; init adds
-/// its own after them.
+/// Phases records when each boot phase ended, in milliseconds of the boot
+/// clock. stage0 passes its phases in WEREWOLF_BOOT as
+/// `kernel=225 modules=611 slot=838 root=851`; init appends its own.
 const Phases = struct {
     names: [max][]const u8 = undefined,
     ends: [max]u64 = undefined,
@@ -465,8 +409,9 @@ const Phases = struct {
     const max = 16;
     const Took = struct { name: []const u8, ms: u64 };
 
-    /// stage0's phases: each a name of lowercase letters and when it ended,
-    /// none before the last. The first that is not stops the list.
+    /// parse reads stage0's phases. Each name is lowercase letters, and no
+    /// phase may end before the one before it; parsing stops at the first
+    /// bad word.
     fn parse(text: []const u8) Phases {
         var p: Phases = .{};
         var it = std.mem.tokenizeScalar(u8, text, ' ');
@@ -482,7 +427,7 @@ const Phases = struct {
         return p;
     }
 
-    /// A phase that ended at end; past max, nothing.
+    /// add records a phase that ended at end. Past max it does nothing.
     fn add(p: *Phases, name: []const u8, end: u64) void {
         if (p.len == max) return;
         p.names[p.len] = name;
@@ -490,14 +435,14 @@ const Phases = struct {
         p.len += 1;
     }
 
-    /// When the phase name ended, or 0 if there was none.
+    /// endOf returns when phase name ended, or 0 if there was none.
     fn endOf(p: *const Phases, name: []const u8) u64 {
         for (p.names[0..p.len], p.ends[0..p.len]) |n, e| if (std.mem.eql(u8, n, name)) return e;
         return 0;
     }
 
-    /// How long each phase took: from the end of the one before, or, for the
-    /// first, from the boot clock's start.
+    /// durations returns how long each phase took, from the end of the one
+    /// before, or from boot for the first.
     fn durations(p: *const Phases, gpa: Allocator) []const Took {
         const out = gpa.alloc(Took, p.len) catch return &.{};
         for (out, 0..) |*t, i| t.* = .{
@@ -509,6 +454,14 @@ const Phases = struct {
 };
 
 const testing = std.testing;
+
+test lastField {
+    try testing.expectEqualStrings("bob", lastField("name: bob"));
+    try testing.expectEqualStrings("bob", lastField("name:\tbob \r"));
+    try testing.expectEqualStrings("\"1000\"", lastField("uid: \"1000\""));
+    try testing.expectEqualStrings("only", lastField("only"));
+    try testing.expectEqualStrings("", lastField(""));
+}
 
 test Phases {
     var p = Phases.parse("kernel=225 modules=611 slot=838 root=851");
@@ -538,14 +491,14 @@ test Phases {
     try testing.expectEqual(Phases.max, full.len);
 }
 
-/// Milliseconds since the kernel started its clock.
+/// bootMs returns milliseconds since boot (CLOCK_BOOTTIME), or 0.
 fn bootMs() u64 {
     var ts: linux.timespec = undefined;
     if (linux.errno(linux.clock_gettime(.BOOTTIME, &ts)) != .SUCCESS) return 0;
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / 1_000_000;
 }
 
-// Each phase's tests, with these.
+// Run each phase's tests too.
 test {
     _ = phase_kernel;
     _ = phase_network;

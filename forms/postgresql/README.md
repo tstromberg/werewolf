@@ -8,7 +8,7 @@ there ([demo.md](../demo/README.md)).
 | --- | --- |
 | Listens | a UNIX socket in `/run/svc/postgres`, and nothing else: `listen_addresses` is empty and the form declares no port, so fence would refuse one anyway |
 | Data | `/data/svc/postgres/data`, made by `initdb` on the first start, in `data.new` until whole |
-| Runs as | `postgres` (uid 70), leashed ([programs.md](../../docs/programs.md)): it reads the image and writes only its own directories |
+| Runs as | `postgres` (a uid of its own, its name's hash), leashed ([programs.md](../../docs/programs.md)): it reads the image and writes only its own directories |
 | Logs in | by peer authentication: a local role is its system user's name, and TCP logins are refused |
 | Updates | within PostgreSQL 17, with the rest of the image; the major version is the package's name, since a new one needs `pg_upgrade` |
 

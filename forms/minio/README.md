@@ -8,7 +8,7 @@ application.
 | --- | --- |
 | Listens | tcp/9000, the S3 API, plain HTTP behind `caddy` or the cloud's balancer |
 | Sends | nothing: no KMS, notifications, replication or update check |
-| Runs as | `minio` (uid 217), leashed |
+| Runs as | `minio` (a uid of its own, its name's hash), leashed |
 | Keeps | the objects in `/data/svc/minio` |
 | Config | `minio/root_user` and `minio/root_password`, read into its environment |
 

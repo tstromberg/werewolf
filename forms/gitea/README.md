@@ -7,7 +7,7 @@ The `gitea` form is `prod` with Gitea 1.26 hosting git repositories, with
 | --- | --- |
 | Listens | tcp/3000, the web and API, behind `caddy`; tcp/22, git over Gitea's own SSH server, keys only, post-quantum exchange only, no shell |
 | Sends | nothing: mirrors, migrations and webhooks leave the machine only when a form of your own adds `connect gitea tcp/443 udp/53 tcp/53` |
-| Runs as | `gitea` (uid 219), leashed; it may run git, git's hooks (`gitea-hook`), itself and `ssh-keygen`, and reach its own API on loopback |
+| Runs as | `gitea` (a uid of its own, its name's hash), leashed; it may run git, git's hooks (`gitea-hook`), itself and `ssh-keygen`, and reach its own API on loopback |
 | Keeps | repositories, LFS, the SQLite database, indexes, queues, the SSH host key and its generated secrets in `/data/svc/gitea` |
 | Config | `gitea/admin-password` (12 characters at least); settings `url` and `domain` (required), `admin` (default `admin`), `admin-email` (required) |
 

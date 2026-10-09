@@ -1,21 +1,23 @@
 #!/bin/sh
-# cage NAME EROFS LOG: boot a werewolf form's root under systemd-nspawn on
-# this kernel -- no virtual machine -- and judge its posture. werewolf's
-# runtime protections (the seal, Landlock, fence's policy routing, the leash,
-# hidepid, W^X) are the host kernel's own features: they hold in a container,
-# and the in-container posture service exercises and attacks them faithfully
-# (WEREWOLF_CHECK=1, below). What a container cannot own -- the kernel's
-# sysctls and boot line (every kernel-* check but kernel-seal, werewolf's own
-# filter, and kernel-write-xor-execute, which its init sets), the mount options of nspawn's own mounts -- is asserted in
-# emulation instead; POSTURE_KNOWN_NATIVE names the few non-kernel ones, and
-# the form's POSTURE_KNOWN, as for a booted machine, what the form carries by
-# design; make check-native builds it as it ships, without DEV. The host
-# sysctls behind files-* checks are raised to werewolf's levels where the
-# host may be changed (CAGE_HARDEN_HOST=1), and judged as they are where it
-# may not (below).
+# cage NAME EROFS LOG boots a werewolf form's root under systemd-nspawn on
+# this kernel, with no virtual machine, and judges its posture.
 #
-# This is the native half of the arm64 checks, where a full-machine boot would
-# otherwise emulate slowly (docs/testing.md). Run where sudo works.
+# werewolf's runtime protections (the seal, Landlock, fence's policy routing,
+# the leash, hidepid, W^X) are features of the host kernel, so they hold in a
+# container. The posture service inside tests and attacks them for real
+# (WEREWOLF_CHECK=1, below). A container cannot own the kernel's sysctls and
+# boot line, or the mount options of nspawn's mounts, so those are checked
+# under emulation instead. That covers every kernel-* check except
+# kernel-seal (werewolf's own filter) and kernel-write-xor-execute (which its
+# init sets). POSTURE_KNOWN_NATIVE names the few non-kernel checks expected
+# to fail here. The form's POSTURE_KNOWN names what the form fails by design,
+# as for a booted machine; make check-native builds the form as it ships,
+# without DEV. Where the host may be changed (CAGE_HARDEN_HOST=1), the host
+# sysctls behind the files-* checks are raised to werewolf's levels;
+# elsewhere they are judged as they are (below).
+#
+# This is the native half of the arm64 checks, where booting a whole machine
+# would emulate slowly (docs/testing.md). Run it where sudo works.
 set -u
 
 name=${1:?usage: cage NAME EROFS LOG}
@@ -35,13 +37,13 @@ cleanup() {
 trap cleanup EXIT
 fail() { say FAIL "$1"; exit 1; }
 
-# The host settings a container inherits and cannot set, each at the level
-# werewolf sets on its own kernel (cmd/init/kernel.zig), with the files-*
-# checks it decides. With CAGE_HARDEN_HOST=1, on a machine that is thrown
-# away after (CI's runners), each is raised to werewolf's level first, so
-# those attacks run for real and must fail; vm.memfd_noexec at 2 cannot be
-# lowered again until the host reboots. Elsewhere the host is left as it
-# is, and a setting below werewolf's makes its checks expected to fail.
+# These are host settings a container inherits and cannot set, each with the
+# level werewolf sets on its own kernel (cmd/init/kernel.zig) and the files-*
+# checks that depend on it. With CAGE_HARDEN_HOST=1, on a machine thrown away
+# after the run (CI's runners), each is raised to werewolf's level first, so
+# those attacks run for real and must fail. vm.memfd_noexec at 2 cannot be
+# lowered again until the host reboots. Elsewhere the host is left as it is,
+# and a setting below werewolf's makes its checks expected to fail.
 host_known=""
 while read -r key want ids; do
 	[ -n "$key" ] || continue
@@ -62,26 +64,28 @@ fs.protected_regular 2 files-links files-links-attack
 vm.memfd_noexec 2 files-memfd-exec
 EOF
 
-# A writable copy of the read-only erofs tree: nspawn and runit write a few
-# files (machine-id, resolv.conf, the supervise directories).
+# Copy the read-only erofs tree to a writable directory: nspawn and runit
+# write a few files (machine-id, resolv.conf, the supervise directories).
 sudo mount -t erofs -o loop,ro "$erofs" "$mnt" || fail "cannot mount $erofs"
 sudo cp -a "$mnt/." "$work/" || fail "cannot copy the root"
 sudo umount "$mnt"
 
-# Boot it. --console=pipe keeps init non-interactive, its console to the log.
-# --capability=all lets init raise the seal (the listener needs CAP_SYS_ADMIN)
-# and fence set the policy; the seal then drops what the services may not keep.
-# --private-network gives a net namespace of its own, so fence's policy routing
-# applies cleanly, every run alike, and never touches the host's.
-# WEREWOLF_CHECK=1 reaches the posture service through init and runit, so it
-# attacks the machine (posture --attack) as a PID 1 descendant, under the seal,
-# the leash and fence's Landlock, as a real machine with werewolf.check=1 does.
+# Boot it. --console=pipe keeps init non-interactive, with its console in the
+# log. --capability=all lets init raise the seal (the listener needs
+# CAP_SYS_ADMIN) and lets fence set its policy; the seal then drops what the
+# services may not keep. --private-network gives the container its own
+# network namespace, so fence's policy routing applies cleanly, the same on
+# every run, and never touches the host's. WEREWOLF_CHECK=1 reaches the
+# posture service through init and runit, so it attacks the machine
+# (posture --attack) as a descendant of PID 1, under the seal, the leash and
+# fence's Landlock, as a real machine with werewolf.check=1 does.
 sudo systemd-nspawn --quiet --directory="$work" --machine="cage-$name" \
 	--console=pipe --capability=all --private-network \
 	--setenv=WEREWOLF_CHECK=1 /init >>"$log" 2>&1 </dev/null &
 pid=$!
 
-# Wait for the posture line the posture service prints once services settle.
+# Wait for the posture line, which the posture service prints once services
+# settle.
 line=""
 i=0
 while [ $i -lt 120 ]; do
@@ -92,13 +96,15 @@ while [ $i -lt 120 ]; do
 done
 [ -n "$line" ] || fail "no posture line in 120 s; see $log"
 
-# The posture line ends in JSON that says each failed check's area. A
-# failing check is expected here if it is a kernel-* check other than
-# kernel-seal and kernel-write-xor-execute, which init sets on PID 1 (the
-# container shares the host's kernel), if POSTURE_KNOWN_NATIVE
-# or the form's own POSTURE_KNOWN (its weaknesses, ?ID as ID) names it,
-# or if a host setting below werewolf's decides it (above). Anything else
-# failing is a regression in a protection that should hold natively.
+# The posture line ends in JSON that gives each failed check's area. A
+# failing check is expected here if:
+#   - it is a kernel-* check other than kernel-seal and
+#     kernel-write-xor-execute, which init sets on PID 1 (the container
+#     shares the host's kernel);
+#   - POSTURE_KNOWN_NATIVE or the form's POSTURE_KNOWN (its weaknesses, with
+#     ?ID read as ID) names it; or
+#   - a host setting below werewolf's decides it (above).
+# Any other failure is a regression in a protection that should hold natively.
 got=$(printf '%s\n' "$line" | sed -E 's/.*fail=([^ ]*) .*/\1/' | tr ',' ' ')
 passed=$(printf '%s\n' "$line" | sed -E 's/.*pass=([0-9]+).*/\1/')
 json=$(printf '%s\n' "$line" | sed -E 's/^[^{]*(\{.*\})[^}]*$/\1/')

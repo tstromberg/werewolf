@@ -7,3 +7,5 @@ user    grype
 pledge  stdio rpath wpath proc exec inet unix connect
 connect tcp/443 tcp/53
 read    /
+# status reads its findings.
+share   shared

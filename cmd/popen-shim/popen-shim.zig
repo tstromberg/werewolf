@@ -1,30 +1,5 @@
-//! popen-shim.so: popen(3), pclose(3) and system(3) without a shell, for
-//! PostgreSQL's initdb alone.
-//!
-//! initdb starts the server it is setting up through popen and system,
-//! which glibc runs as `/bin/sh -c COMMAND`; werewolf has no /bin/sh.
-//! pg-init (forms/postgresql/cmd/pg-init/pg-init.zig) loads this library into initdb with
-//! LD_PRELOAD. It takes the commands initdb builds, of one shape only:
-//!
-//!     "/usr/libexec/postgresql17/postgres" --boot -F -c log_checkpoints=false
-//!     "/usr/libexec/postgresql17/postgres" --single -F -O -j template1 >/dev/null
-//!     "/usr/libexec/postgresql17/postgres" --check -c max_connections=100 < "/dev/null" >
-//! "/dev/null" 2>&1
-//!
-//! that is, an absolute program and plain words, either of which may be in
-//! double quotes, and then the redirections </dev/null, >/dev/null and 2>&1,
-//! the one file initdb ever names, so the library never creates a file. It runs
-//! the program itself, with no shell between, with the words a shell would
-//! have given it. A command with anything else (a pipe, a ;, a $ or ` or \
-//! even in double quotes, a glob outside them, a quote of the other kind)
-//! is not run: popen returns NULL and system -1, with errno ENOEXEC, and the
-//! command is said on stderr, so initdb fails where it can be seen.
-//!
-//! The servers initdb starts keep the library: setting up the cluster, one
-//! of them runs `locale -a` through popen, to import the system's locales
-//! as collations. There are none here (PostgreSQL's own C and POSIX need
-//! no import), so that one command reads as empty. The server leash starts
-//! afterwards is not one of them, and never has the library.
+//! popen-shim.so replaces popen(3), pclose(3) and system(3) with versions that
+//! need no shell, so PostgreSQL's initdb can run on werewolf. See README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -38,8 +13,8 @@ extern "c" var environ: [*:null]?[*:0]u8;
 const max_words = 64;
 const max_command = 4096;
 
-/// A command, parsed: argv, whether stdin and stdout are /dev/null, and
-/// whether stderr follows stdout.
+/// Command is a parsed command: its argv, whether stdin and stdout are
+/// /dev/null, and whether stderr follows stdout.
 const Command = struct {
     buf: [max_command + 1]u8 = undefined,
     argv: [max_words + 1]?[*:0]const u8 = @splat(null),
@@ -48,13 +23,14 @@ const Command = struct {
     err_to_out: bool = false,
 };
 
-/// command into c, or false if it is not of the one shape taken.
+/// parse fills c from command. It returns false if command is not of the one
+/// shape initdb writes.
 fn parse(command: []const u8, c: *Command) bool {
     if (command.len > max_command) return false;
     var n: usize = 0; // words
     var used: usize = 0; // bytes of c.buf
     var i: usize = 0;
-    // What the next word is: an argument, or a file to redirect from or to.
+    // next says whether the coming word is an argument or a redirection's file.
     var next: enum { arg, in, out } = .arg;
     while (true) {
         while (i < command.len and (command[i] == ' ' or command[i] == '\t')) i += 1;
@@ -73,7 +49,6 @@ fn parse(command: []const u8, c: *Command) bool {
             }
             if (c.in or c.out) return false; // words after a redirection
         }
-        // A word: in double quotes, or plain.
         var word: []const u8 = undefined;
         if (command[i] == '"') {
             const end = std.mem.findScalarPos(u8, command, i + 1, '"') orelse return false;
@@ -87,7 +62,7 @@ fn parse(command: []const u8, c: *Command) bool {
             }
             word = command[begin..i];
         }
-        // What a shell reads specially even in double quotes, and controls.
+        // A shell expands these even inside double quotes. Controls are refused too.
         for (word) |ch| switch (ch) {
             0...0x1f, 0x7f, '"', '$', '`', '\\' => return false,
             else => {},
@@ -101,7 +76,7 @@ fn parse(command: []const u8, c: *Command) bool {
                 used += word.len + 1;
                 n += 1;
             },
-            // Only the file initdb names, once each.
+            // initdb only redirects to /dev/null, so no file is ever created.
             .in, .out => {
                 const seen = if (next == .in) &c.in else &c.out;
                 if (seen.* or !std.mem.eql(u8, word, "/dev/null")) return false;
@@ -111,13 +86,13 @@ fn parse(command: []const u8, c: *Command) bool {
         next = .arg;
     }
     if (next != .arg or n == 0) return false;
-    // The program by its full path: no PATH to search, as no shell would.
+    // Require an absolute program, so there is no PATH to search.
     // span's slice ends in its NUL, so an empty program reads as 0 here.
     return std.mem.span(c.argv[0].?)[0] == '/';
 }
 
-/// What a plain word may hold: none of what a shell would read as more
-/// than a character.
+/// isPlain reports whether ch may appear in an unquoted word: printable
+/// ASCII that a shell reads as just itself.
 fn isPlain(ch: u8) bool {
     return switch (ch) {
         '|',
@@ -148,8 +123,8 @@ fn isPlain(ch: u8) bool {
     };
 }
 
-/// Start c, with stdin or stdout (which) on the pipe end fd, if any.
-/// The child's pid, or null with errno set.
+/// start forks and runs c, with the pipe end fd, if given, as its stdin or
+/// stdout (which). It returns the child's pid, or null with errno set.
 fn start(c: *const Command, pipe_end: ?struct { fd: i32, which: i32 }) ?linux.pid_t {
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) {
@@ -157,9 +132,9 @@ fn start(c: *const Command, pipe_end: ?struct { fd: i32, which: i32 }) ?linux.pi
         return null;
     }
     if (pid == 0) {
-        // The child: only system calls until it becomes the command. A pipe
-        // end that is already the descriptor it should be (the caller had
-        // closed it) only loses close-on-exec.
+        // The child makes only system calls until execve. If the pipe end is
+        // already the right descriptor (the caller had closed it), dup3 would
+        // fail with EINVAL, so just clear close-on-exec.
         if (pipe_end) |p| {
             if (p.fd == p.which)
                 _ = linux.fcntl(p.fd, linux.F.SETFD, 0)
@@ -175,8 +150,8 @@ fn start(c: *const Command, pipe_end: ?struct { fd: i32, which: i32 }) ?linux.pi
     return @intCast(pid);
 }
 
-/// /dev/null opened onto descriptor to, or the child ends as a shell's
-/// would. Opened as the lowest free descriptor, it may be to already.
+/// toNull opens /dev/null onto descriptor to, or exits 127 as a shell would.
+/// open returns the lowest free descriptor, so the result may already be to.
 fn toNull(mode: @FieldType(linux.O, "ACCMODE"), to: i32) void {
     const rc = linux.open("/dev/null", .{ .ACCMODE = mode }, 0);
     if (linux.errno(rc) != .SUCCESS) linux.exit_group(127);
@@ -205,9 +180,9 @@ fn setErrno(e: linux.E) void {
     std.c._errno().* = @backingInt(e);
 }
 
-/// Say on stderr that command was not run, its first max_command bytes
-/// with every control character as ?, so a command cannot write to the
-/// terminal or log it is shown on; and set errno.
+/// refuse says on stderr that command was not run and sets errno to ENOEXEC.
+/// It shows control characters as ?, so a command cannot drive the terminal
+/// or log it is shown on.
 fn refuse(command: [*:0]const u8) void {
     const prefix = "popen-shim: not run, not a command of initdb's shape: ";
     var buf: [prefix.len + max_command + 1]u8 = undefined;
@@ -223,8 +198,8 @@ fn refuse(command: [*:0]const u8) void {
     setErrno(.NOEXEC);
 }
 
-/// The streams popen has open, and the children behind them: none, pid 0,
-/// for `locale -a`.
+/// open_streams holds the streams popen has open and their children.
+/// pid 0 marks `locale -a`, which runs nothing.
 var open_streams: [8]struct { stream: ?*FILE = null, pid: linux.pid_t = 0 } = @splat(.{});
 
 export fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
@@ -239,7 +214,8 @@ export fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
         setErrno(.MFILE);
         return null;
     };
-    // The system's locales, of which there are none.
+    // A setup server imports the system's locales. There are none, so read
+    // as empty.
     if (reading and std.mem.eql(u8, std.mem.span(command), "locale -a")) {
         const fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
         if (linux.errno(fd) != .SUCCESS) {
@@ -264,8 +240,6 @@ export fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*FILE {
         setErrno(linux.errno(piped));
         return null;
     }
-    // Reading: the child writes stdout into fds[1]. Writing: it reads
-    // stdin from fds[0].
     const theirs = if (reading) fds[1] else fds[0];
     const ours = if (reading) fds[0] else fds[1];
     const pid = start(&c, .{ .fd = theirs, .which = if (reading) 1 else 0 }) orelse {
@@ -289,16 +263,16 @@ export fn pclose(stream: *FILE) c_int {
         const pid = s.pid;
         s.* = .{};
         _ = fclose(stream);
-        // `locale -a`, which ran nothing, ends as a command that succeeded.
+        // `locale -a` ran nothing, so report success.
         return if (pid == 0) 0 else wait(pid);
     }
-    // Not a stream popen opened: as glibc, ECHILD, and the stream untouched.
+    // Like glibc, refuse a stream popen did not open with ECHILD and leave it open.
     setErrno(.CHILD);
     return -1;
 }
 
 export fn system(command: ?[*:0]const u8) c_int {
-    const cmd = command orelse return 1; // a command processor is here
+    const cmd = command orelse return 1; // system(NULL) asks if a shell is there
     var c: Command = .{};
     if (!parse(std.mem.span(cmd), &c)) {
         refuse(cmd);
@@ -366,7 +340,7 @@ test "anything else is not run" {
         "",
         "   ",
         "/usr/bin/postgres\n/usr/bin/x",
-        // What a shell reads even in double quotes.
+        // A shell expands these even in double quotes.
         "\"/usr/bin/postgres\" \"$HOME\"",
         "\"/usr/bin/postgres\" \"`id`\"",
         "\"/usr/bin/postgres\" \"a\\b\"",
@@ -395,7 +369,7 @@ test "anything else is not run" {
         "/usr/bin/postgres >/dev/./null",
         "/usr/bin/postgres </dev/null </dev/null",
         "/usr/bin/postgres >/dev/null >/dev/null",
-        // Quotes that a shell would join or read otherwise.
+        // A shell would join these quotes or read them differently.
         "/usr/bin/postgres a\"b\"",
         "/usr/bin/postgres \"a\"b",
         "/usr/bin/postgres 'a'",
@@ -408,7 +382,7 @@ test "anything else is not run" {
         "/usr/bin/postgres #c",
         "/usr/bin/postgres a!",
         "/usr/bin/postgres a &",
-        // Controls and what is not ASCII, outside quotes or in them.
+        // Controls and non-ASCII, outside quotes or in them.
         "/usr/bin/postgres a\rb",
         "/usr/bin/postgres \"a\x01b\"",
         "/usr/bin/postgres \"a\x7fb\"",
@@ -445,7 +419,7 @@ test "accepted commands, word for word" {
             .err = true,
         },
         .{ .cmd = "/bin/x -c=1,2:3@4%5+6^7.8_9/", .argv = &.{ "/bin/x", "-c=1,2:3@4%5+6^7.8_9/" } },
-        // In double quotes a shell takes these as they are.
+        // A shell takes these literally inside double quotes.
         .{
             .cmd = "/bin/x \"a|b;c&d*e?f[g]h{i}~#!'(j)<k>\"",
             .argv = &.{ "/bin/x", "a|b;c&d*e?f[g]h{i}~#!'(j)<k>" },
@@ -489,16 +463,16 @@ test "as many words and bytes as there is room for, and no more" {
     try testing.expect(!parse(cmd.items, &c));
 }
 
-/// Pieces random commands are made of: what initdb writes, and what a
-/// shell would read as more than a character.
+/// pieces are what random commands are made of: what initdb writes, and
+/// what a shell would read specially.
 const pieces = [_][]const u8{
     "a",  "b", "-c", "=", "/",  ".",  " ",    " ",    "\t",       "\"",     "\"", "'", "$", "`",
     "\\", "|", ";",  "&", "<",  ">",  "2>&1", "(",    ")",        "*",      "?",  "[", "]", "{",
     "}",  "~", "#",  "!", "\n", "\r", "\x01", "\x7f", "\xc3\xa9", "/tmp/f",
 };
 
-/// A random command of pieces, most after a program as initdb writes one;
-/// the length of that program, or 0 for none.
+/// randomCommand fills buf with random pieces, most after a program as
+/// initdb writes one. It returns the program's length, or 0 for none.
 fn randomCommand(r: std.Random, buf: *std.ArrayList(u8)) !usize {
     buf.clearRetainingCapacity();
     const program: []const u8 = switch (r.int(u2)) {
@@ -532,13 +506,13 @@ test "random commands: never a crash, and nothing a shell would read specially" 
             ch >= 0x20 and ch != 0x7f and ch != '"' and ch != '$' and ch != '`' and ch != '\\',
         );
     }
-    // The generator reaches both sides.
+    // Check the generator makes both accepted and refused commands.
     try testing.expect(accepted > 1000 and accepted < 49_000);
 }
 
 // --- on Linux: against a shell, and the functions themselves -----------------
 //
-// These run where the shim does, and are skipped elsewhere (macOS).
+// These run only on Linux, where the shim does, and are skipped elsewhere.
 
 const builtin = @import("builtin");
 extern "c" fn fread(ptr: [*]u8, size: usize, n: usize, stream: *FILE) usize;
@@ -549,7 +523,7 @@ fn onLinux() !void {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 }
 
-/// /tmp/popen-shim-test-PID-NAME.
+/// scratch returns /tmp/popen-shim-test-PID-NAME.
 fn scratch(buf: *[256]u8, name: []const u8) [:0]const u8 {
     const s = std.mem.print(
         buf[0..255],
@@ -589,7 +563,7 @@ fn exists(path: [:0]const u8) bool {
     return linux.errno(linux.access(path, linux.F_OK)) == .SUCCESS;
 }
 
-/// What stream gives until its end.
+/// drain reads stream to its end, or until buf is full.
 fn drain(stream: *FILE, buf: []u8) []const u8 {
     var n: usize = 0;
     while (n < buf.len) {
@@ -614,9 +588,9 @@ test "random commands: the words /bin/sh gives" {
     defer _ = linux.unlink(script);
     defer _ = linux.unlink(out);
 
-    // Each accepted command without redirections, its program swapped for
-    // a function that prints its arguments, each ended by a NUL, and then
-    // a record's end.
+    // The script runs each accepted command without redirections, with the
+    // program swapped for a function that prints each argument and a NUL,
+    // then \001 and a NUL to end the record.
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(testing.allocator);
     try text.appendSlice(
@@ -633,7 +607,7 @@ test "random commands: the words /bin/sh gives" {
         const program_end = try randomCommand(prng.random(), &buf);
         var c: Command = .{};
         if (program_end == 0 or !parse(buf.items, &c) or c.in or c.out or c.err_to_out) continue;
-        // A piece run on into the program makes another program: /bin/x-c.
+        // Skip a piece run on into the program, which makes another one: /bin/x-c.
         if (!std.mem.eql(u8, std.mem.span(c.argv[0].?), "/bin/x")) continue;
         try text.print(testing.allocator, "p{s}\n", .{buf.items[program_end..]});
         for (argvOf(&c)[1..]) |w| try want.print(testing.allocator, "{s}\x00", .{std.mem.span(w)});
@@ -698,8 +672,7 @@ test "system: statuses, redirections, and a program not there" {
     defer _ = linux.unlink(out);
     defer _ = linux.unlink(err);
     var b: [256]u8 = undefined;
-    // Without a redirection, cat copies its stdin to its stdout; with
-    // one, /dev/null takes the place of either.
+    // cat copies stdin to stdout; a redirection puts /dev/null in place of either.
     try testing.expect(try systemWith("/bin/cat", out, err));
     try testing.expectEqualStrings("abc\n", try readAll(out, &b));
     try testing.expect(try systemWith("/bin/cat </dev/null", out, err));
@@ -707,7 +680,7 @@ test "system: statuses, redirections, and a program not there" {
     try testing.expect(try systemWith("/bin/cat >/dev/null", out, err));
     try testing.expectEqualStrings("", try readAll(out, &b));
 
-    // 2>&1: what the program says on stderr follows stdout to /dev/null.
+    // With 2>&1, stderr follows stdout to /dev/null.
     try testing.expect(!try systemWith("/bin/ls /nonexistent/popen-shim-test", out, err));
     try testing.expect((try readAll(err, &b)).len > 0);
     try testing.expect(!try systemWith(
@@ -717,12 +690,12 @@ test "system: statuses, redirections, and a program not there" {
     ));
     try testing.expectEqualStrings("", try readAll(err, &b));
     try testing.expectEqualStrings("", try readAll(out, &b));
-    // A file other than /dev/null is not opened: the command is not run.
+    // A file other than /dev/null is refused, so the command does not run.
     try testing.expectEqual(-1, system("/bin/cat </nonexistent/popen-shim-test"));
 }
 
-/// Whether system(cmd) succeeded, run in a child whose stdin holds "abc\n"
-/// and whose stdout and stderr are the files out and err.
+/// systemWith reports whether system(cmd) succeeded, run in a child whose
+/// stdin holds "abc\n" and whose stdout and stderr are the files out and err.
 fn systemWith(cmd: [*:0]const u8, out: [:0]const u8, err: [:0]const u8) !bool {
     var p: [2]i32 = undefined;
     if (linux.errno(linux.pipe2(&p, .{})) != .SUCCESS) return error.Pipe;
@@ -755,7 +728,7 @@ test "refused: nothing runs, ENOEXEC, and a line on stderr" {
         0,
     );
 
-    // stderr into a pipe, for the line.
+    // Send stderr into a pipe to read the line.
     var p: [2]i32 = undefined;
     try testing.expectEqual(.SUCCESS, linux.errno(linux.pipe2(&p, .{ .CLOEXEC = true })));
     const saved: i32 = @intCast(linux.dup(2));
@@ -764,7 +737,7 @@ test "refused: nothing runs, ENOEXEC, and a line on stderr" {
     const e1 = errno();
     const s = popen(bad, "r");
     const e2 = errno();
-    // A command that would set the terminal's title and colour.
+    // This command would set the terminal's title and colour if echoed raw.
     _ = system("/bin/x \x1b]0;owned\x07 \x1b[31m");
     _ = linux.dup3(saved, 2, 0);
     _ = linux.close(saved);
@@ -793,7 +766,7 @@ test "popen: locale -a reads as empty and closes as a success" {
     const s = popen("locale -a", "r") orelse return error.NotRun;
     try testing.expectEqual(0, drain(s, &b).len);
     try testing.expectEqual(0, pclose(s));
-    // Written to, it is a command of the wrong shape.
+    // Opened for writing, it is refused like any other command.
     try testing.expectEqual(null, popen("locale -a", "w"));
     try testing.expectEqual(.NOEXEC, errno());
     try testing.expectEqual(null, popen("/bin/true", "x"));
@@ -846,9 +819,9 @@ test "a caller with stdin closed" {
     var cmd2: [300]u8 = undefined;
     const written = try std.mem.printSentinel(&cmd2, "/usr/bin/tee {s} >/dev/null", .{out}, 0);
 
-    // In a child, so the test's own stdin is left alone: the /dev/null
-    // </dev/null opens, and the pipe popen makes, each take descriptor 0
-    // itself. tee fails on a stdin it cannot read.
+    // Run in a child so the test's stdin stays open. With 0 closed, the
+    // /dev/null for </dev/null and popen's pipe each land on descriptor 0.
+    // tee fails on a stdin it cannot read.
     for ([_]bool{ false, true }) |use_popen| {
         _ = linux.unlink(out);
         const pid = linux.fork();

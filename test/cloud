@@ -1,27 +1,28 @@
 #!/bin/sh
-# cloud: a werewolf form on a real cloud, made as a user makes one, with
-# `howl create --on CLOUD` (docs/design/cli.md): its release disk made
-# that cloud's image, booted under UEFI, its config in the instance's user
-# data. Used by `make check-gcp`, `make check-aws` and `make check-azure`;
+# cloud tests a werewolf form on a real cloud, made as a user makes one, with
+# `howl create --on CLOUD` (docs/design/cli.md): its release disk becomes the
+# cloud's image, it boots under UEFI, and its config goes in the instance's
+# user data. `make check-gcp`, `make check-aws` and `make check-azure` use it;
 # see docs/testing.md.
 #
 #   cloud CLOUD FORM ARCH     CLOUD is gcp, aws or azure
 #
-# It judges the machine by the cloud's record of its serial port: the root
-# verified through dm-verity, the config taken from the cloud's metadata
-# server, the hostname the config gave, and posture failing exactly what
-# POSTURE_KNOWN says the form fails. The machine is made with
-# --allow-from me, so werewolf itself opens the form's ports to this host
-# alone; if sshd listens, root must log in through them, over the
-# Internet, with the key the config carried. Then a second create of the same name, with a new
-# hostname, must restart the machine on its new config, and delete must
-# leave nothing of the machine behind. Everything the run made is deleted
-# however it ends, the image create made included, unless CLOUD_KEEP=1.
+# It judges the machine by the cloud's record of its serial port: stage0
+# verified the root through dm-verity, cloud-metadata took the config from
+# the cloud's metadata server, the hostname is the config's, and posture
+# fails exactly what POSTURE_KNOWN says the form fails. The machine is made
+# with --allow-from me, so werewolf opens the form's ports to this host only.
+# If sshd listens, the test reaches it over the Internet with the key the
+# config carried: root must log in, or, where sshd accepts only security
+# keys, the key must be refused. Then a second create of the same name, with
+# a new hostname, must restart the machine on its new config, and delete
+# must leave nothing of the machine behind. However the run ends, it deletes
+# everything it made, including the image create made, unless CLOUD_KEEP=1.
 #
-# Each cloud's place is its CLI's own: gcloud's project (or GCP_PROJECT)
+# Each cloud's location comes from its CLI: gcloud's project (or GCP_PROJECT)
 # and GCP_ZONE (us-central1-a, which has Arm machines); aws's region and
 # credentials; az's default resource group (or AZURE_DEFAULTS_GROUP), whose
-# location must offer the ARCH's size (az vm list-skus).
+# location must offer the size for ARCH (az vm list-skus).
 set -eu
 
 say() { echo "$cloud: $*"; }
@@ -41,7 +42,7 @@ gcp)
 	project=${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 	[ -n "$project" ] || die "no project: gcloud config set project PROJECT, or GCP_PROJECT"
 	zone=${GCP_ZONE:-us-central1-a}
-	# werewolf takes gcloud's project and zone; these set them for this run.
+	# werewolf reads gcloud's project and zone; set them for this run.
 	export CLOUDSDK_CORE_PROJECT="$project" CLOUDSDK_COMPUTE_ZONE="$zone"
 	g() { gcloud --quiet --project "$project" "$@"; }
 	g projects describe "$project" --format 'value(projectId)' >/dev/null 2>&1 ||
@@ -63,8 +64,8 @@ azure)
 *) die "usage: cloud gcp|aws|azure FORM ARCH" ;;
 esac
 
-# The images of FORM this cloud holds, one per line: the name werewolf
-# gave it, and on AWS the AMI and its snapshot after it.
+# images lists the images of FORM this cloud holds, one per line: the name
+# werewolf gave each, and on AWS its AMI and snapshot after the name.
 images() {
 	case $cloud in
 	gcp) g compute images list --filter "labels.werewolf-form=$form" --format 'value(name)' ;;
@@ -80,7 +81,7 @@ image_delete() {
 	azure) az disk delete -g "$group" -n "$1" --yes -o none ;;
 	esac
 }
-# What of the machine is left after delete, one per line.
+# leftovers lists what is left of the machine after delete, one per line.
 leftovers() {
 	case $cloud in
 	gcp)
@@ -106,11 +107,10 @@ cleanup() {
 	if [ "${CLOUD_KEEP:-}" = 1 ]; then
 		say "kept $name in $where; delete it with: $howl delete $name --on $cloud"
 	else
-		"$werewolf" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
-		# The image this run's create made, the one it named as it made it,
-		# and no other: not every image new since the run began, as another
-		# run of the same form, at the same time, makes one too, and is
-		# still using it.
+		"$howl" delete "$name" --on "$cloud" >/dev/null 2>&1 || true
+		# Delete only the image this run's create made, by the name create
+		# printed. Do not delete every image newer than the run: another run
+		# of the same form, at the same time, makes one too and still uses it.
 		made_image=$(sed -n 's/^werewolf: image \([a-z0-9-]*\): making it .*/\1/p' "$work/create.err" 2>/dev/null)
 		[ -z "$made_image" ] || images | while read -r image id snapshot; do
 			[ "$image" = "$made_image" ] || continue
@@ -132,8 +132,8 @@ fail() {
 log=$work/serial.log
 serial() { "$howl" console "$name" --on "$cloud" 2>/dev/null | tr -d '\r' >"$log" || true; }
 seen() { grep -a -q -E "$1" "$log"; }
-# Until posture speaks for host, which is after every service has started;
-# a panic ends the wait early.
+# await_posture waits until posture reports host $1, which it does after
+# every service has started. A panic ends the wait early.
 await_posture() {
 	i=0
 	while serial; ! seen "posture: .*\"host\":\"$1\""; do
@@ -144,17 +144,17 @@ await_posture() {
 	done
 }
 
-# The config, as docs/cloud.md has it, with a key made for this run alone.
+# Write the config as docs/cloud.md describes, with a key made for this run only.
 mkdir "$work/config"
 echo "$name" >"$work/config/hostname"
 ssh-keygen -q -t ed25519 -N '' -C "$name" -f "$work/key"
 cp "$work/key.pub" "$work/config/authorized_keys"
 say "creating $name, $form on $arch, in $where"
-# create's output to this run's, as it comes, and its stderr to a file
-# too, which names the image cleanup deletes: the address on fd 3,
-# create's status in a file, since a pipeline's is tee's (and `|| rc=`,
-# so that set -e lets a failed create reach the line that records it).
-made=$({ { rc=0; "$werewolf" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" \
+# Show create's output as it comes, and save its stderr in a file too, since
+# it names the image cleanup deletes. The address comes back on fd 3.
+# create's status goes to a file, because a pipeline's status is tee's.
+# `|| rc=` lets a failed create get past set -e to the line that records it.
+made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" \
 	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
 [ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
@@ -170,8 +170,8 @@ seen "cloud-metadata: \\{.*\"event\":\"config\",\"provider\":\"$cloud\"" && ok m
 	fail "metadata-config: no config taken from the cloud's metadata server"
 seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
 
-# posture: what fails must be exactly what POSTURE_KNOWN says; ?ID may
-# fail or not (forms/README.md).
+# posture: what fails must be exactly what POSTURE_KNOWN says; a ?ID may fail
+# or pass (forms/README.md).
 line=$(grep -a -o -E 'posture: fail=[^ ]* pass=[0-9]+' "$log" | tail -n 1 || true)
 if [ -z "$line" ]; then
 	fail "posture: no posture line"
@@ -192,10 +192,10 @@ else
 	fi
 fi
 
-# Over the Internet, as an operator would, through the port werewolf
-# opened to this host alone, to a machine that takes keys alone; where it
-# takes security keys alone (POSTURE_KNOWN does not excuse
-# network-ssh-security-keys), this run's key, a file, must be refused.
+# Test ssh over the Internet, as an operator would, through the port werewolf
+# opened to this host only. sshd accepts only keys. Where it accepts only
+# security keys (POSTURE_KNOWN does not list network-ssh-security-keys), this
+# run's key, a file, must be refused.
 if seen 'Server listening on 0.0.0.0 port 22' &&
 	! echo " ${POSTURE_KNOWN:-} " | tr ' ' '\n' | grep -qx -e network-ssh-security-keys -e '?network-ssh-security-keys'; then
 	i=0
@@ -220,8 +220,8 @@ elif seen 'Server listening on 0.0.0.0 port 22'; then
 	[ $i -le 40 ] && ok ssh-login || fail "ssh-login: root's key did not log in at $addr"
 fi
 
-# A new config: the same name, another hostname, as an operator changes
-# one; create restarts the machine on it.
+# Replace the config as an operator would: the same name, another hostname.
+# create restarts the machine on it.
 echo "$name-b" >"$work/config/hostname"
 say "replacing its config"
 if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" >/dev/null; then

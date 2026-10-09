@@ -1,24 +1,6 @@
-//! seal: say what the machine and each service promised, and what was
-//! refused.
-//!
-//!     $ seal
-//!     seal: enforcing; the machine promises stdio rpath wpath inet unix ...
-//!     services:
-//!       app          stdio rpath inet listen
-//!       nginx        stdio rpath inet listen
-//!       slot-keep    (werewolf's own: the machine's promises alone)
-//!     refused this boot:
-//!       keyctl         never   1 time, last by pid 97, first at 2026-10-07 01:14:03 UTC
-//!     never allowed: bpf perf_event_open init_module ...
-//!     never allowed for what they ask: socket (a family no promise names); ...
-//!
-//! A refusal's promise is the one that would have allowed the call. These
-//! are the machine seal's: a leashed service holds itself to its pledge and
-//! refuses the rest silently, so what is counted here is what werewolf's
-//! own programs made outside the machine's promises
-//! (docs/design/pledge.md, System calls: promises). It reads what init wrote
-//! as it sealed the machine, the services' files as leash reads them, and
-//! what seal-watch counts; it changes nothing, and anyone may run it.
+//! seal reports the machine's seccomp promises, each service's pledge, and
+//! the calls refused this boot. It changes nothing; anyone may run it.
+//! See README.md.
 
 const std = @import("std");
 const seal = @import("seal");
@@ -74,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     reported catch std.process.exit(1);
 }
 
-/// A service, and what binds it: its pledge, or why it has none.
+/// Service is a service name and its pledge, or why it has none.
 const Service = struct {
     name: []const u8,
     bound: []const u8,
@@ -84,9 +66,8 @@ const Service = struct {
     }
 };
 
-/// What binds a leashed service, from its service file read as leash reads
-/// it (lib/service.zig): its pledge, or why leash refuses the file, and so
-/// the service does not run.
+/// boundBy parses a service file as leash does (lib/service.zig) and returns
+/// its pledge, or why leash refuses the file and so will not run the service.
 fn boundBy(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
     var bad: service.Bad = .{};
     const s = service.parse(gpa, text, &bad) catch |err| switch (err) {
@@ -106,7 +87,8 @@ fn boundBy(gpa: std.mem.Allocator, text: []const u8) ![]const u8 {
     return words.items;
 }
 
-/// The rest of the line in text that starts with key and a space.
+/// field returns the rest of the line in text that starts with key and a
+/// space, "" for a bare key, or null.
 fn field(text: []const u8, key: []const u8) ?[]const u8 {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
@@ -123,8 +105,8 @@ fn report(
     services: []const Service,
     refused: []const u8,
 ) !void {
-    // Enforcing only when init said so: an empty or unknown mode is a seal
-    // this cannot vouch for, not one to call enforcing.
+    // Say enforcing only when init wrote "mode enforce". Any other mode is
+    // unknown, and calling it enforcing would mislead.
     const mode = field(policy, "mode") orelse "";
     const state = if (std.mem.eql(u8, mode, "enforce"))
         "enforcing"
@@ -168,7 +150,7 @@ fn report(
     try w.writeByte('\n');
 }
 
-/// Seconds since the epoch, as a UTC date and time.
+/// utc writes secs since the epoch as a UTC date and time, or ? if not positive.
 fn utc(w: *std.Io.Writer, secs: i64) !void {
     if (secs <= 0) return w.writeAll("?");
     const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(secs) };
@@ -200,12 +182,12 @@ test boundBy {
         "(leash refuses it: line 3: pledge takes promises)",
         try boundBy(a, head ++ "pledge # none\n"),
     );
-    // As leash reads it: # ends the line only where it starts a word.
+    // As in leash, # starts a comment only at the start of a word.
     try testing.expectEqualStrings(
         "(leash refuses it: line 3: no such promise)",
         try boundBy(a, head ++ "pledge stdio#x\n"),
     );
-    // Refused for more than its pledge: the service does not run either.
+    // A bad key elsewhere also stops the service from running.
     try testing.expectEqualStrings(
         "(leash refuses it: line 4: unknown key)",
         try boundBy(a, head ++ "pledge stdio\nfrobnicate\n"),
@@ -260,6 +242,7 @@ test report {
     try testing.expect(std.mem.indexOf(
         u8,
         text,
-        "never allowed for what they ask: socket (a family no promise names); setsockopt",
+        "never allowed for what they ask: socket and socketpair (a family no promise names); " ++
+            "setsockopt",
     ) != null);
 }

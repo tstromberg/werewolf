@@ -1,12 +1,10 @@
-//! cve: the CVE sources, as the tiers feed's writer (tools/cve-tiers.zig)
-//! and the updater's reader (cmd/slot-update/cve.zig) both read them:
-//! Wolfi's security.json, and the kernel CNA's records with the stable
-//! release that fixed each CVE on a branch. One reading on both sides, so
-//! nothing the writer signs into the feed is something a machine refuses.
+//! cve parses the CVE sources, Wolfi's security.json and the kernel CNA's
+//! records, for both the tiers feed's writer and the updater. See lib/README.md.
 
 const std = @import("std");
 
-/// CVE-2026-52988: the year, and four digits or more.
+/// validCve reports whether id looks like CVE-2026-52988: a year, then four
+/// or more digits.
 pub fn validCve(id: []const u8) bool {
     if (id.len < 13 or id.len > 32 or !std.mem.startsWith(u8, id, "CVE-") or
         id[8] != '-') return false;
@@ -15,7 +13,7 @@ pub fn validCve(id: []const u8) bool {
     return true;
 }
 
-/// linux-virt-6.18.55-r0, or 6.18.55, as {6, 18, 55}.
+/// kernelVersion parses linux-virt-6.18.55-r0 or 6.18.55 as {6, 18, 55}.
 pub fn kernelVersion(s: []const u8) ?[3]u32 {
     var v = s;
     if (std.mem.startsWith(u8, v, "linux-virt-")) v = v["linux-virt-".len..];
@@ -24,7 +22,7 @@ pub fn kernelVersion(s: []const u8) ?[3]u32 {
     var it = std.mem.splitScalar(u8, v, '.');
     for (&out) |*part| {
         const field = it.next() orelse return null;
-        // Digits alone: parseInt would also take "+" and "_".
+        // Check digits ourselves: parseInt would also take "+" and "_".
         if (field.len == 0 or field.len > 9) return null;
         for (field) |c| if (!std.ascii.isDigit(c)) return null;
         part.* = std.fmt.parseInt(u32, field, 10) catch return null;
@@ -33,18 +31,18 @@ pub fn kernelVersion(s: []const u8) ?[3]u32 {
     return out;
 }
 
-/// Whether kernel version a is older than b.
+/// kernelLess reports whether kernel version a is older than b.
 pub fn kernelLess(a: [3]u32, b: [3]u32) bool {
     return std.mem.order(u32, &a, &b) == .lt;
 }
 
-/// Whether version is a kernel release on branch: 6.18.55 on 6.18.
+/// onBranch reports whether version is a release on branch, as 6.18.55 is on 6.18.
 pub fn onBranch(version: []const u8, branch: []const u8) bool {
     return kernelVersion(version) != null and version.len > branch.len and
         std.mem.startsWith(u8, version, branch) and version[branch.len] == '.';
 }
 
-/// Wolfi's security.json, as much of it as is used.
+/// SecDb is the part of Wolfi's security.json that werewolf uses.
 pub const SecDb = struct {
     packages: []const struct {
         pkg: struct {
@@ -54,8 +52,8 @@ pub const SecDb = struct {
     },
 };
 
-/// The parts of a kernel CNA record (CVE JSON 5) that say which stable
-/// release fixed it on which branch.
+/// KernelRecord is the part of a kernel CNA record (CVE JSON 5) that says
+/// which stable release fixed it on which branch.
 pub const KernelRecord = struct {
     cveMetadata: struct { cveId: []const u8 },
     containers: struct {
@@ -73,9 +71,10 @@ pub const KernelRecord = struct {
     },
 };
 
-/// The release that fixed rec on branch (6.18): its "unaffected" semver
-/// entry whose lessThanOrEqual is the branch's wildcard, and whose version
-/// is a release on the branch itself (onBranch), 6.18.55 for 6.18.*.
+/// kernelFixedOn returns the release that fixed rec on branch, such as
+/// 6.18.55 for 6.18. It is the "unaffected" semver entry whose
+/// lessThanOrEqual is the branch wildcard (6.18.*) and whose version is on
+/// the branch.
 pub fn kernelFixedOn(rec: KernelRecord, branch: []const u8) ?[]const u8 {
     for (rec.containers.cna.affected) |a| {
         for (a.versions) |v| {
@@ -90,7 +89,8 @@ pub fn kernelFixedOn(rec: KernelRecord, branch: []const u8) ?[]const u8 {
     return null;
 }
 
-/// vulns-master/cve/published/2026/CVE-2026-52988.json
+/// isKernelRecord reports whether name is a record path in the kernel's
+/// vulns archive, such as vulns-master/cve/published/2026/CVE-2026-52988.json.
 pub fn isKernelRecord(name: []const u8) bool {
     const base = name[(std.mem.findScalarLast(u8, name, '/') orelse return false) + 1 ..];
     return std.mem.find(u8, name, "/cve/published/") != null and
@@ -149,7 +149,7 @@ test kernelFixedOn {
     try testing.expectEqualStrings("6.18.55", kernelFixedOn(rec, "6.18").?);
     try testing.expectEqualStrings("6.12.101", kernelFixedOn(rec, "6.12").?);
     try testing.expectEqual(null, kernelFixedOn(rec, "6.1"));
-    // Not a release on the branch: 6.19 is its first, not a stable fix.
+    // 6.19 is the branch's first release, not a stable fix on it.
     try testing.expectEqual(null, kernelFixedOn(rec, "6.19"));
     try testing.expectEqual(null, kernelFixedOn(rec, "6.20"));
     try testing.expect(isKernelRecord("vulns-master/cve/published/2026/CVE-2026-52988.json"));

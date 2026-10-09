@@ -1,31 +1,24 @@
-//! broker: asking cmd/mount-broker for a mount, for root's own programs,
-//! which fence's Landlock domain keeps from mounting themselves.
-//!
-//!     const grub = try broker.ask(.grub);   // mounted read-write
-//!     defer grub.release();                 // and unmounted
-//!     ... grub.path ...
-//!
-//! The mount lasts while the connection does: release closes it, and so
-//! does the asker's exit, however it exits.
+//! broker is the client for cmd/mount-broker. fence's Landlock domain stops
+//! root's programs from mounting, so they ask the broker. See lib/README.md.
 
 const std = @import("std");
 const linux = std.os.linux;
 
 pub const socket_path = "/run/werewolf/mount-broker.sock";
 
-/// Where the broker mounts what it is asked for.
+/// mnt_dir is where the broker mounts what it is asked for.
 pub const mnt_dir = "/run/werewolf/mnt";
 
-/// What can be asked for: three filesystems, and the shutdown.
+/// Word is a request: one of three filesystems, or shutdown.
 pub const Word = enum {
     grub,
     esp,
     victim,
     shutdown,
 
-    /// Where a word's filesystem is mounted: fixed, so an asker takes no
-    /// path from the answer. The socket lives in /run, where root in
-    /// fence's domain could put a listener of its own.
+    /// place returns where w's filesystem is mounted. It is fixed so the
+    /// asker never takes a path from the answer: root inside fence's domain
+    /// could put its own listener at the socket in /run.
     pub fn place(w: Word) [:0]const u8 {
         return switch (w) {
             .grub => mnt_dir ++ "/grub",
@@ -36,7 +29,8 @@ pub const Word = enum {
     }
 };
 
-/// A filesystem the broker has mounted for us, and where.
+/// Held is a filesystem the broker has mounted for us. It stays mounted
+/// while fd, the connection, is open.
 pub const Held = struct {
     fd: i32,
     word: Word,
@@ -45,17 +39,18 @@ pub const Held = struct {
         return h.word.place();
     }
 
-    /// Unmounted: the broker sees the connection close.
+    /// release closes the connection, and the broker unmounts.
     pub fn release(h: Held) void {
         _ = linux.close(h.fd);
     }
 };
 
-/// What went wrong, in the broker's words, after error.Refused.
+/// refusal holds the broker's answer after error.Refused.
 pub var refusal_buf: [128]u8 = undefined;
 pub var refusal: []const u8 = "";
 
-/// word, asked of the broker: for a filesystem, held until released.
+/// ask sends word to the broker. For a filesystem, the mount lasts until
+/// release or until this process exits.
 pub fn ask(word: Word) !Held {
     const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
@@ -81,9 +76,8 @@ pub fn ask(word: Word) !Held {
         got += n;
     };
     const h: Held = .{ .fd = fd, .word = word };
-    // The answer must name the word's own place, no other: a listener
-    // put at the socket's name by root in the domain could otherwise
-    // send the asker's writes where it liked.
+    // The answer must name the word's fixed place. Otherwise a fake
+    // listener at the socket could send the asker's writes anywhere.
     if (word == .shutdown) {
         if (std.mem.eql(u8, answer, "ok")) return h;
     } else if (std.mem.startsWith(u8, answer, "ok ") and

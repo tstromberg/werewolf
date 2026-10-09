@@ -1,18 +1,18 @@
 #!/bin/sh
-# lima-ci: make ci; run the CI job here, before pushing: test/ci-setup, then make
-# test, lint and check, in an Ubuntu VM under Lima, as GitHub runs them.
+# lima-ci (make ci) runs the CI job here, before pushing: test/ci-setup, then
+# make test, lint and check, in an Ubuntu VM under Lima, as GitHub runs them.
 # Nested virtualization (Apple M3 or later, macOS 15 or later) gives the VM
-# KVM; without it QEMU emulates, and the checks take minutes.
+# KVM. Without it QEMU emulates, and the checks take minutes.
 #
-# LIMA_TEMPLATE picks the Ubuntu, ubuntu-24.04 by default: under 26.04's
-# kernel (7.0) and QEMU (10.2), nested guests here lose a CPU's timer early
-# in boot and stall (rcu: "timer wakeup didn't happen"), which 24.04's do
-# not. GitHub's runners are 26.04, without this nesting.
+# LIMA_TEMPLATE picks the Ubuntu release, ubuntu-24.04 by default. Under
+# 26.04's kernel (7.0) and QEMU (10.2), nested guests here lose a CPU's timer
+# early in boot and stall (rcu: "timer wakeup didn't happen"); under 24.04's
+# they do not. GitHub's runners are 26.04, without this nesting.
 #
 # The VM, werewolf-ci-VERSION, is kept between runs with its tools and build
-# cache; `limactl delete -f werewolf-ci-24.04` starts over. The tree is copied in fresh
-# each run, without config/ (keys stay on this machine) or .git, so what is
-# checked is what is here, committed or not.
+# cache; `limactl delete -f werewolf-ci-24.04` starts over. Each run copies
+# the tree in fresh, without config/ (keys stay on this machine) or .git, so
+# the run checks what is here, committed or not.
 set -eu
 template=${LIMA_TEMPLATE:-ubuntu-24.04}
 vm=werewolf-ci-${template#ubuntu-}
@@ -23,9 +23,9 @@ if ! limactl list --format '{{.Name}}' | grep -qx "$vm"; then
 fi
 [ "$(limactl list --format '{{.Status}}' "$vm")" = Running ] || limactl start "$vm"
 
-# Lima mounts the home directory read-only at the same path, so the tree is
-# copied from there. ci-setup runs every time: it installs only what is
-# missing or changed, and opens /dev/kvm, whose mode a restart resets.
+# Lima mounts the home directory read-only at the same path, so copy the tree
+# from there. ci-setup runs every time: it installs only what is missing or
+# changed, and opens /dev/kvm, whose mode a restart resets.
 limactl shell --workdir / "$vm" sh -euc "
 	command -v rsync >/dev/null || sudo apt-get install -y -q rsync
 	rsync -a --delete --exclude /build --exclude /out --exclude /config --exclude /.git '$repo/' ~/werewolf/
@@ -38,7 +38,8 @@ limactl shell --workdir / "$vm" sh -euc "
 	command -v rustup >/dev/null || sudo apt-get install -y rustup
 	rustup toolchain install stable --profile minimal --target \"\$(uname -m)-unknown-linux-musl\"
 	dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
-	# A boot takes two CPUs (CHECK_QEMU's -smp 2): one per two, so no guest
-	# starves, which nested virtualization makes fatal (RCU stalls).
+	# A boot takes two CPUs (CHECK_QEMU's -smp 2), so run one boot per two
+	# CPUs. Then no guest starves, which nested virtualization makes fatal
+	# (RCU stalls).
 	make -k -j\$(( (\$(nproc) + 1) / 2 )) check
 "

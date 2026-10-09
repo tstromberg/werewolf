@@ -7,7 +7,7 @@ authority, named for what runs, as `postgresql` is.
 | --- | --- |
 | Listens | tcp/443: ACME, and the CA's API |
 | Sends | to a requester's tcp/80, ACME's http-01, and DNS to find it (`connect step tcp/80 tcp/53 udp/53`) |
-| Runs as | `step` (uid 222), leashed |
+| Runs as | `step` (a uid of its own, its name's hash), leashed |
 | Keeps | its database (badger) in `/data/svc/step-ca/db` |
 | Config | `step-ca/root.crt`, `step-ca/intermediate.crt`, `step-ca/intermediate.key` (encrypted), `step-ca/password` (the key's); settings `names` (the CA's own, required) and `domains` (what ACME may issue for, required) |
 

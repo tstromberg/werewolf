@@ -1,6 +1,6 @@
 # My Design Doc
 
-**Note for authors**: 100 lines maximum. No unnecessary words or sentences - value the readers time.
+**Note for authors**: 100 lines maximum. No unnecessary words or sentences - value the reader's time.
 **Note for reviewers**: While reviewing this proposal, focus on answering for yourself:
 
 * Does this proposal fit with our engineering principles?
@@ -13,7 +13,7 @@
 1-2 sentence summary of the idea, including the expected impact if implemented.
 
 ## Background
-The background serves to ground all readers in the same context that you have as an author. You should describe how the problem came to be, why it's worth solving, and whether there were previous attempts to solve it. Assume that the reader is new to this project but not the company.
+The background serves to ground all readers in the same context that you have as an author. You should describe how the problem came to be, why it's worth solving, and whether there were previous attempts to solve it. Assume that the reader is new to this project.
 
 Define or add hyperlinks to terms the reader may not yet be familiar with.
 
@@ -21,14 +21,14 @@ Define or add hyperlinks to terms the reader may not yet be familiar with.
 
 A bulleted list of specific goals for this proposal
 How will we know that this proposal has succeeded?
-Include specific, measurable outcomes that can be cited or tracked on a dashboard.
+Include specific, measurable outcomes, such as a check that passes or a number that moves.
 
 ## Non-Goals
 A bulleted list of what is out of scope for this proposal
 Is there something specific that is too difficult to solve at this time?
 
 ## Detailed design
-This section constitutes the bulk of the RFC and is typically 1-4 pages long. It should focus on the novel implementation idea and specific corner cases.
+This section is the bulk of the document. It should focus on the novel implementation idea and specific corner cases.
 
 ## Drawbacks
 There are tradeoffs to choosing any path: this is where you identify them. Why should we not implement this design? Consider costs in additional complexity, training, reliability, and dollars.

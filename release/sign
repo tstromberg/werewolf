@@ -1,16 +1,16 @@
 #!/bin/sh
-# sign: stamp each manifest with SERIAL, sign it with the image key as
-# MANIFEST.sig, and check that signature against release/image.pub.
+# sign stamps each manifest with SERIAL, signs it with the image key as
+# MANIFEST.sig, and checks that signature against release/image.pub.
 #
-# A manifest does not expire: the next release supersedes it. It still
-# carries an "expires", at the end of 9999, because updaters from before
+# A manifest does not expire; the next release supersedes it. It still
+# carries "expires" set to the end of 9999, because updaters from before
 # 2026-10-08 require one and refuse a release past it.
 #
 #   WEREWOLF_IMAGE_KEY=<PEM> release/sign SERIAL MANIFEST...
 #
-# The signature is RSA PKCS#1 v1.5 over the sha256 of the file, as
+# The signature is RSA PKCS#1 v1.5 over the sha256 of the file, which
 #   openssl dgst -sha256 -verify release/image.pub -signature M.sig M
-# checks it. See docs/releases.md.
+# checks. See docs/releases.md.
 set -eu
 
 [ $# -ge 2 ] || { echo "usage: release/sign SERIAL MANIFEST..." >&2; exit 2; }

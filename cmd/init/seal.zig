@@ -1,5 +1,5 @@
-//! init's last step: the machine seal (lib/seal.zig), the capabilities
-//! dropped for good, and seal-watch started to answer what is refused.
+//! init's seal phase: it starts seal-watch, drops capabilities for good,
+//! and installs the machine-wide seccomp seal (lib/seal.zig).
 
 const std = @import("std");
 const seal_lib = @import("seal");
@@ -15,7 +15,8 @@ const mkdir = init.mkdir;
 const say = init.say;
 const writeErrno = init.writeErrno;
 
-/// What policy_path says: the mode, and the promises the seal allows.
+/// policyText returns the text of seal_lib.policy_path: the mode and the
+/// promises the seal allows.
 fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.print(gpa, "mode {s}\npromises", .{if (learn) "learn" else "enforce"});
@@ -25,28 +26,25 @@ fn policyText(gpa: Allocator, learn: bool, promises: seal_lib.Set) ![]const u8 {
     return out.items;
 }
 
-/// Capabilities no process needs once init hands over, dropped from the
-/// bounding set, so not even root gets them back before a reboot: code in
-/// the kernel (SYS_MODULE, BPF, PERFMON), hardware and ports (SYS_RAWIO),
-/// other processes (SYS_PTRACE), device files (MKNOD), and what nothing here
-/// uses. fence drops NET_ADMIN and NET_RAW after it sets the network
-/// policy, unless the form allows them. SYSLOG stays, for dmesg.
+/// dropped_caps leave the bounding set, so not even root gets them back
+/// before a reboot. They reach into the kernel (SYS_MODULE, BPF, PERFMON),
+/// hardware (SYS_RAWIO), other processes (SYS_PTRACE) and device files
+/// (MKNOD), or nothing here uses them. fence drops NET_ADMIN and NET_RAW
+/// unless the form allows them. SYSLOG stays, for dmesg.
 const dropped_caps = [_]allow.Cap{
     .linux_immutable, .sys_module,    .sys_rawio,     .sys_ptrace,   .sys_pacct,
     .sys_time,        .mknod,         .audit_control, .mac_override, .mac_admin,
     .wake_alarm,      .block_suspend, .perfmon,       .bpf,          .checkpoint_restore,
 };
 
-/// The capabilities a program the kernel starts itself may have: a
-/// usermode helper, which kthreadd starts, not PID 1, so neither the seal's
-/// filter nor its bounding set reach it. Root could name one (a core
-/// pattern of `|PROGRAM`, kernel.modprobe, kernel.hotplug) and have it run
-/// with every capability, outside the seal. Only CAP_SYS_BOOT is left, for
-/// the kernel's own orderly poweroff. The kernel lets these only fall, and
-/// only for a holder of CAP_SYS_MODULE, which the seal then takes.
+/// helper_caps bounds a usermode helper, a program the kernel starts from
+/// kthreadd, outside the seal. Root could name one (core_pattern `|PROG`,
+/// kernel.modprobe, kernel.hotplug) to run with every capability. Only
+/// CAP_SYS_BOOT stays, for orderly poweroff. Lowering this needs
+/// CAP_SYS_MODULE, which the seal then drops, and it can never be raised.
 const helper_caps: u64 = 1 << @backingInt(allow.Cap.sys_boot);
 
-/// "LOW HIGH": a capability set as kernel.usermodehelper.bset reads it.
+/// capWords formats set as "LOW HIGH", as kernel.usermodehelper.bset reads it.
 fn capWords(buf: []u8, set: u64) []const u8 {
     return std.mem.print(
         buf,
@@ -55,10 +53,10 @@ fn capWords(buf: []u8, set: u64) []const u8 {
     ) catch unreachable;
 }
 
-/// seal-watch, started before the seal so it is not under it, with one end
-/// of a socket as its stdin, over which it is sent the seal's listener; the
-/// other end, or null if it cannot be started. Raw calls only between fork
-/// and exec: this process may have threads.
+/// startWatch starts seal-watch before the seal, so it is not under it,
+/// with one end of a socket pair as its stdin. It returns the other end,
+/// for sending the listener, or null. Only raw calls run between fork and
+/// exec, since this process may have threads.
 fn startWatch() ?i32 {
     const path = "/usr/lib/werewolf/seal-watch";
     if (!executable(path)) return null;
@@ -82,31 +80,24 @@ fn startWatch() ?i32 {
     return sv[0];
 }
 
-/// The seal (docs/design/lockdown.md) denies by default, in promises
-/// (docs/design/pledge.md, System calls: promises): every process the
-/// machine will run may make the calls of the promises werewolf's own
-/// programs make (seal_lib.base) and of every promise the image's services
-/// make, which the build gathers from their service files' `pledge` lines
-/// into /usr/share/werewolf/pledge. leash then holds each service to its
-/// own. The rest go to seal-watch (cmd/seal-watch), which refuses them as
-/// if the kernel had no such call and says so once each, with the promise
-/// that would allow it; or, on a DEV=1 build booted with
-/// werewolf.seal=learn, allows and records them. What no promise brings
-/// goes to seal-watch too, so an attempt by a program the machine's
-/// promises alone bind is seen; a leashed service's own filter refuses it
-/// first, and the kernel takes that ENOSYS over the listener, unseen.
+/// seal installs a default-deny seccomp filter on PID 1, which every process
+/// inherits and none can remove before a reboot (docs/design/lockdown.md).
+/// It allows the calls of werewolf's base promises and of every promise in
+/// the services' `pledge` lines (/usr/share/werewolf/pledge,
+/// docs/design/pledge.md); leash then narrows each service to its own.
+/// Other calls go to seal-watch, which refuses them with ENOSYS and logs
+/// each once, or allows and records them under werewolf.seal=learn on a
+/// DEV=1 build. A leashed service's own filter refuses first; the kernel
+/// audits those refusals (SECCOMP_FILTER_FLAG_LOG).
 ///
-/// Install the seal on PID 1, which every process inherits and none, root
-/// included, can remove until the machine reboots: the helpers' bounding
-/// set, PID 1's, then the filter. PID 1 holds CAP_SYS_ADMIN, so it needs no
-/// no_new_privs, which would bind every program after it. Any step that
-/// fails is an error; a capability the kernel does not know (EINVAL) is
-/// one it cannot grant.
+/// The order is the helpers' bounding set, PID 1's, then the filter. PID 1
+/// holds CAP_SYS_ADMIN, so it needs no no_new_privs, which would bind every
+/// later program. Any failed step is an error, except a capability the
+/// kernel does not know (EINVAL), which it cannot grant anyway.
 pub fn seal(m: *Machine) !void {
-    // Learning: what the promises do not allow, seal-watch allows and
-    // records, with the promise that would, so a service's author learns
-    // what its pledge lacks. Only on a DEV=1 build, never released;
-    // anywhere else the word is ignored.
+    // In learn mode seal-watch allows and records each unpromised call with
+    // the promise that would allow it, so an author learns what a pledge
+    // lacks. Only DEV=1 builds, which are never released, honor it.
     const learn = m.cmd.seal == .learn and exists("/usr/share/werewolf/dev");
     if (m.cmd.seal == .learn and !learn)
         say("werewolf.seal=learn ignored: only a DEV=1 build learns", .{});
@@ -117,13 +108,10 @@ pub fn seal(m: *Machine) !void {
     };
     const promises = seal_lib.base.unionWith(pledged);
     var buf: [32]u8 = undefined;
-    // The bounding set for the programs the kernel starts itself, which the
-    // seccomp filter does not reach. On real hardware /proc/sys is writable --
-    // init has just mounted /proc -- so a failure here is real and fatal. In a
-    // container /proc/sys is read-only (EROFS) and these are the host's to set,
-    // not ours, and the kernel's helpers never run in the container's
-    // namespaces anyway; tolerate that one case, and that one alone, so the
-    // read-only mount cannot be forged into skipping the limit on a real boot.
+    // On a real machine init has just mounted /proc, so a failure here is
+    // real and fatal. In a container /proc/sys is read-only (EROFS) and the
+    // helpers are the host's. Tolerate EROFS alone, so no other error can
+    // skip the limit on a real boot.
     for ([_][:0]const u8{
         "/proc/sys/kernel/usermodehelper/bset",
         "/proc/sys/kernel/usermodehelper/inheritable",
@@ -165,8 +153,8 @@ pub fn seal(m: *Machine) !void {
         say("seccomp: {s}", .{@errorName(err)});
         return err;
     };
-    // The listener goes to seal-watch alone. Once no one holds it, the
-    // kernel refuses every call the promises do not allow, itself.
+    // Only seal-watch keeps the listener. If no one holds it, the kernel
+    // refuses every unpromised call itself.
     if (watch) |sock| {
         if (!seal_lib.sendListener(sock, listener, if (learn) "l" else "e"))
             say("seal-watch did not take the listener: unlisted calls are refused unsaid", .{});

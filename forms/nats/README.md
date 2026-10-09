@@ -7,7 +7,7 @@ application's parts, with JetStream for what must be kept.
 | --- | --- |
 | Listens | tcp/4222, TLS; monitoring on loopback (:8222) |
 | Sends | nothing: no routes, leaf nodes or gateways |
-| Runs as | `nats` (uid 216), leashed |
+| Runs as | `nats` (a uid of its own, its name's hash), leashed |
 | Keeps | JetStream's streams in `/data/svc/nats`, 8 GB at most |
 | Config | `nats/tls.crt` and `tls.key`; `nats/users.conf`, an `authorization` block of users with bcrypt passwords or nkeys and what each may publish and subscribe to |
 

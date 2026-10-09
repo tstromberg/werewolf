@@ -1,29 +1,18 @@
-//! test-sk: a security key in software, for make check alone. It is an
-//! OpenSSH security key provider (sk-api.h), the library ssh-keygen -w and
-//! ssh's SecurityKeyProvider load, so a check can log in to a machine that
-//! takes security keys alone (the sshd form's werewolf.conf, the bastion's
-//! sshd_config) with no key to touch.
-//!
-//! It asserts its user's presence without one: whoever reads its key file
-//! logs in, which is what a security key exists to prevent. So it is built
-//! for this host, into build/host, and never into an image.
-//!
-//! Ed25519 alone; the key handle is the key's seed. A signature is as
-//! OpenSSH's own regress/misc/sk-dummy makes it, an authenticator's:
-//! Ed25519 over SHA-256(application), the flags, a big-endian counter and
-//! SHA-256(data). Everything handed back is malloc's, for ssh to free.
+//! test-sk is a software security key for make check: an OpenSSH security
+//! key provider (sk-api.h) that signs without a touch. Anyone who reads its
+//! key file can log in, so it is built only for the host. See README.md.
 
 const std = @import("std");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// sk-api.h's SSH_SK_VERSION_MAJOR: ssh refuses a provider whose major
-/// version is not its own.
+/// version_major is sk-api.h's SSH_SK_VERSION_MAJOR. ssh refuses a
+/// provider whose major version differs from its own.
 const version_major = 0x000a0000;
 const alg_ed25519 = 0x01;
 const err_general = -1;
 const err_unsupported = -2;
-/// The counter every signature carries: no clone detection to satisfy.
+/// counter is fixed: nothing checks it for clone detection.
 const counter = 1;
 
 const EnrollResponse = extern struct {
@@ -80,7 +69,7 @@ export fn sk_enroll( // ziglint-ignore: Z001
     r.public_key_len = Ed25519.PublicKey.encoded_length;
     r.key_handle = dup(&seed);
     r.key_handle_len = seed.len;
-    // ssh wants a signature to free, and checks none: there is no attestation.
+    // ssh frees the signature but never checks it, as there is no attestation.
     r.signature = @ptrCast(std.c.calloc(1, 1));
     if (r.public_key == null or r.key_handle == null or r.signature == null) {
         freeEnroll(r);
@@ -136,8 +125,8 @@ export fn sk_load_resident_keys( // ziglint-ignore: Z001
     return err_unsupported;
 }
 
-/// What an authenticator signs: SHA-256(application), flags, the counter
-/// big-endian, and SHA-256(data).
+/// toSign returns the bytes an authenticator signs: SHA-256(application),
+/// flags, the big-endian counter, and SHA-256(data).
 fn toSign(application: []const u8, flags: u8, data: []const u8) [32 + 1 + 4 + 32]u8 {
     var out: [32 + 1 + 4 + 32]u8 = undefined;
     Sha256.hash(application, out[0..32], .{});
@@ -147,7 +136,8 @@ fn toSign(application: []const u8, flags: u8, data: []const u8) [32 + 1 + 4 + 32
     return out;
 }
 
-/// bytes, in memory malloc's, or null.
+/// dup copies bytes into malloc'd memory, which ssh frees. It returns null
+/// when malloc fails.
 fn dup(bytes: []const u8) ?[*]u8 {
     const p: [*]u8 = @ptrCast(std.c.malloc(bytes.len) orelse return null);
     @memcpy(p[0..bytes.len], bytes);

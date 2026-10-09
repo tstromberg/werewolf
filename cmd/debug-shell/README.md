@@ -2,14 +2,14 @@
 
 ## Summary
 
-A root shell on the serial console, without a password, for debugging a
-DEV=1 build booted with `werewolf.debug=1`. On any other image it parks
-itself and gives nothing.
+debug-shell gives a root shell on the serial console, without a password,
+for debugging a DEV=1 build booted with `werewolf.debug=1`. On any other
+image it parks itself and gives nothing.
 
 ## Background
 
-werewolf ships with no shell and no ssh, which makes a boot that goes wrong
-hard to see into. A DEV=1 build adds busybox and this console shell, so a
+Most werewolf forms ship with no shell and no ssh, which makes a boot that
+goes wrong hard to see into. A DEV=1 build adds busybox and this console shell, so a
 developer, and `make check`'s tests, can look inside. The production image
 is a different image, so the shell never ships. runit starts it as
 `/etc/sv/debug-shell/run` once the machine is up.

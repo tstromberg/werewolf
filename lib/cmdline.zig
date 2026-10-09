@@ -1,27 +1,5 @@
-//! The kernel command line's werewolf.* words, read one way by every
-//! program that reads them:
-//!
-//!     werewolf.ip=CIDR werewolf.gw=ADDR werewolf.dns=ADDR
-//!                                a static network, by lib/network.zig's rules
-//!     werewolf.mac=ADDR          which NIC, when there are several
-//!     werewolf.data=DEV          /data's disk, by its name in /dev: vda
-//!     werewolf.victim=UUID:/DIR  the filesystem holding the slots, and their
-//!                                directory on it
-//!     werewolf.slot=a|b          which slot this boot is; with werewolf.victim
-//!     werewolf.grubenv=UUID:/PATH  GRUB's environment block, after bite
-//!     werewolf.esp=XXXX-XXXX     the EFI system partition, by its FAT serial,
-//!                                on werewolf's own disk
-//!     werewolf.root=DEV          booted directly, the disk holding the image
-//!     werewolf.deadman=SECONDS   the deadman's wait, 1 to 600
-//!     werewolf.seal=learn|enforce  a DEV=1 build's seal, learning or not
-//!     werewolf.debug=1           a DEV=1 build's root shell on the console
-//!     werewolf.check=1           posture's attacks, for werewolf's tests
-//!
-//! Each at most once, and well formed, or the whole line is refused: a
-//! word that is not werewolf's, a value two programs could read two ways,
-//! or a key given twice is a mistake, not a choice between readings.
-//! stage0, the first program to read the line, panics on one it refuses,
-//! so every program after it reads a line this took.
+//! cmdline parses the werewolf.* words of the kernel command line, so every
+//! program reads them the same way. See lib/README.md for the words.
 
 const std = @import("std");
 const network = @import("network");
@@ -38,13 +16,13 @@ pub const Slot = enum {
     }
 };
 
-/// UUID:/PATH: a filesystem, by the UUID in its superblock, and a path on
-/// it, absolute and plain (isPlainPath).
+/// Place is UUID:/PATH: a filesystem, by the UUID in its superblock, and a
+/// plain absolute path on it (see isPlainPath).
 pub const Place = struct { uuid: []const u8, path: []const u8 };
 
 pub const Seal = enum { enforce, learn };
 
-/// The line's words, each werewolf.NAME by its NAME.
+/// Cmdline holds each werewolf.NAME word in the field NAME.
 pub const Cmdline = struct {
     ip: []const u8 = "",
     gw: []const u8 = "",
@@ -54,10 +32,10 @@ pub const Cmdline = struct {
     victim: ?Place = null,
     slot: ?Slot = null,
     grubenv: ?Place = null,
-    /// The FAT serial, as a number.
+    /// esp is the FAT serial, as a number.
     esp: ?u32 = null,
     root: []const u8 = "",
-    /// Seconds, or 0 for none given.
+    /// deadman is in seconds; 0 means none was given.
     deadman: u32 = 0,
     seal: Seal = .enforce,
     debug: bool = false,
@@ -66,14 +44,15 @@ pub const Cmdline = struct {
 
 const Key = std.meta.FieldEnum(Cmdline);
 
-/// The most the deadman may wait, in seconds.
+/// max_deadman is the longest the deadman may wait, in seconds.
 pub const max_deadman = 600;
 
-/// What parse refused: the word, and why.
+/// Failure is the word parse refused, and why.
 pub const Failure = struct { word: []const u8 = "", why: []const u8 = "" };
 
-/// The werewolf.* words of text, the kernel's command line; or null, with
-/// f set. Words that are not werewolf's are the kernel's and init's.
+/// parse reads the werewolf.* words of text, the kernel command line. It
+/// returns null and sets f on any bad, unknown or repeated word. Other words
+/// belong to the kernel and init and are skipped.
 pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
     var c: Cmdline = .{};
     var seen: std.EnumSet(Key) = .empty;
@@ -128,17 +107,17 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
 const not_device = "not a disk's name in /dev, as vdc";
 const not_place = "not UUID:/PATH, a plain absolute path";
 
-/// A block device's name in /dev, as the kernel gives it: vdc, nvme0n1.
-/// A letter, then up to 15 lower-case letters and digits; no path.
+/// isDeviceName reports whether name is a block device name in /dev, such
+/// as vdc or nvme0n1: a lower-case letter, then up to 15 letters and digits.
 pub fn isDeviceName(name: []const u8) bool {
     if (name.len == 0 or name.len > 16 or !std.ascii.isLower(name[0])) return false;
     for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
     return true;
 }
 
-/// An absolute path of plain names: no ., no .., no empty parts, not /
-/// itself, and only the characters a path here may hold; @ for btrfs
-/// subvolumes, as Ubuntu's /@.
+/// isPlainPath reports whether path is absolute and plain: not / itself, no
+/// empty, . or .. parts, and only safe characters. @ is allowed for btrfs
+/// subvolumes such as Ubuntu's /@.
 pub fn isPlainPath(path: []const u8) bool {
     if (path.len < 2 or path[0] != '/' or path[path.len - 1] == '/') return false;
     var parts = std.mem.splitScalar(u8, path[1..], '/');
@@ -150,8 +129,8 @@ pub fn isPlainPath(path: []const u8) bool {
     return true;
 }
 
-/// 57e1f000-77e2-4b0f-8a3c-0000000000a0 as its 16 bytes, in order: hex
-/// digits only, dashes where a UUID has them.
+/// uuid parses a UUID such as 57e1f000-77e2-4b0f-8a3c-0000000000a0 into
+/// its 16 bytes, in order. It returns null unless the form is exact.
 pub fn uuid(s: []const u8) ?[16]u8 {
     if (s.len != 36) return null;
     var out: [16]u8 = undefined;
@@ -172,7 +151,7 @@ pub fn uuid(s: []const u8) ?[16]u8 {
     return out;
 }
 
-/// A FAT volume's serial, XXXX-XXXX in hex digits, as blkid shows it.
+/// serial parses a FAT volume serial, XXXX-XXXX in hex, as blkid shows it.
 pub fn serial(s: []const u8) ?u32 {
     if (s.len != 9 or s[4] != '-') return null;
     var n: u32 = 0;
@@ -194,14 +173,14 @@ fn isOne(s: []const u8) bool {
     return std.mem.eql(u8, s, "1");
 }
 
-/// Six pairs of hex digits, joined by colons.
+/// isMac reports whether s is six pairs of hex digits joined by colons.
 fn isMac(s: []const u8) bool {
     if (s.len != 17) return false;
     for (s, 0..) |c, i| if (if (i % 3 == 2) c != ':' else !std.ascii.isHex(c)) return false;
     return true;
 }
 
-/// Plain digits, no sign and no leading zero, 1 to max_deadman.
+/// seconds parses 1 to max_deadman: plain digits, no sign or leading zero.
 fn seconds(s: []const u8) ?u32 {
     if (s.len == 0 or s.len > 3 or s[0] == '0') return null;
     for (s) |c| if (!std.ascii.isDigit(c)) return null;
@@ -253,7 +232,7 @@ test parse {
     try testing.expectEqual(null, direct.slot);
     try testing.expect(direct.check);
     try testing.expectEqual(Seal.enforce, parse("", &f).?.seal);
-    // Words that are not werewolf's are not read.
+    // Words that are not werewolf's are skipped.
     _ = parse("ip=dhcp root=/dev/vda werewolfx=1 init=/init", &f).?;
 
     try testing.expectEqualStrings("given twice", (try refused("werewolf.ip=10.0.0.5/24 " ++

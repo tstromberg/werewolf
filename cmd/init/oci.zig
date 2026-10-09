@@ -1,22 +1,15 @@
-//! init's image roots (docs/design/adhoc.md): what a service with a leash
-//! `root` needs bound into the image it runs in, made before fence closes
-//! mounting to everyone.
+//! init's image roots phase: it mounts what each OCI image root needs
+//! (proc, devices, its own /tmp, /run, /data) before fence forbids
+//! mounting. See docs/design/adhoc.md.
 //!
-//! The build compiled the rooted services into /usr/share/werewolf/oci,
-//! from their service files:
+//! The build lists the roots in /usr/share/werewolf/oci:
 //!
 //!     root web /oci/web _oci-web
 //!     write web /var/cache/web
 //!
-//! For each root, beneath it: a procfs of its own, hidepid=invisible; the
-//! machine's CPU count, read-only; its five devices, null, zero, full,
-//! random and urandom; the resolvers, where DHCP writes them; /tmp from
-//! /run/svc/NAME, /run from its run/ and /data from /data/svc/NAME, all
-//! noexec and the service's own; and each `write` path from
-//! /data/svc/NAME/PATH, noexec.
-//! Every target is a place the image carries for it (an empty directory
-//! or file), which the mount tool opens with no link followed. A bind that
-//! fails is said, and the boot goes on: the service finds out, and parks.
+//! Each target already exists in the image, and mount opens it without
+//! following links. A failed bind is logged and the boot goes on; the
+//! service will fail and park.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -31,7 +24,8 @@ const say = init.say;
 const list = "/usr/share/werewolf/oci";
 const devices = [_][]const u8{ "null", "zero", "full", "random", "urandom" };
 
-/// Bind what the image roots need; whether there were any.
+/// oci mounts what the listed image roots need, and reports whether there
+/// were any.
 pub fn oci(m: *Machine) bool {
     const text = m.read(list);
     if (text.len == 0) return false;
@@ -70,6 +64,8 @@ pub fn oci(m: *Machine) bool {
     return true;
 }
 
+/// root mounts into dir a private procfs, the CPU list, five devices and
+/// the resolver, and binds the service's own /tmp, /run and /data.
 fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, nodata: bool) void {
     m.mount(&.{ "-t", "proc", "-o", "hidepid=invisible", "proc", m.fmt("{s}/proc", .{dir}) });
     m.mount(&.{
@@ -84,18 +80,21 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
         m.fmt("/dev/{s}", .{d}),
         m.fmt("{s}/dev/{s}", .{ dir, d }),
     });
-    // Where /etc/resolv.conf leads (cmd/init/network.zig); a machine with
-    // no resolver has no file, and the image's own, empty, stands.
+    // With no resolver there is no file, and the image's empty one stays.
     const resolv = "/run/werewolf/network/resolv.conf";
     if (exists(resolv)) m.mount(&.{ "--bind", resolv, m.fmt("{s}/etc/resolv.conf", .{dir}) });
-    // Its own two places, made here as leash would make them, and owned
-    // by its user, so the service writes there from its first moment.
+    // Make the service's directories as leash would, owned by its user, so
+    // it can write there from the start. They are 0711 while init binds
+    // what is inside them, since the mount tool, root without
+    // CAP_DAC_OVERRIDE, must pass through; leash sets the mode its share
+    // line asks for when the service starts, and the binds stay.
     mkdir("/run/svc", 0o755);
     const run_dir = m.fmtZ("/run/svc/{s}", .{name});
-    mkdir(run_dir, 0o755);
+    mkdir(run_dir, 0o711);
+    _ = linux.fchmodat(linux.AT.FDCWD, run_dir, 0o711);
     own(run_dir, ids);
     m.mount(&.{ "--bind", run_dir, m.fmt("{s}/tmp", .{dir}) });
-    // Its /run, for a pid file or a socket, as every runtime gives one.
+    // A /run for a pid file or a socket, as every runtime provides.
     const run_run = m.fmtZ("/run/svc/{s}/run", .{name});
     mkdir(run_run, 0o755);
     own(run_run, ids);
@@ -103,7 +102,8 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
     if (nodata) return;
     mkdir("/data/svc", 0o755);
     const data_dir = m.fmtZ("/data/svc/{s}", .{name});
-    mkdir(data_dir, 0o755);
+    mkdir(data_dir, 0o711);
+    _ = linux.fchmodat(linux.AT.FDCWD, data_dir, 0o711);
     own(data_dir, ids);
     m.mount(&.{ "--bind", data_dir, m.fmt("{s}/data", .{dir}) });
 }

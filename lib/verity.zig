@@ -1,14 +1,5 @@
-//! verity: a dm-verity hash tree for a root image, as the kernel reads one
-//! (Documentation/admin-guide/device-mapper/verity.rst, format version 1,
-//! no superblock): 4 KiB blocks, SHA-256 of the salt and each block, the
-//! levels laid out top first, right after the data. stage0 opens the image
-//! through dm-verity with the parameters this gives, so every block read is
-//! checked against the tree, and the tree against its root hash
-//! (docs/design/verified-boot.md).
-//!
-//! The build and the updater both make the tree, and must make the same one
-//! for the same image: the salt is derived from the image, not drawn at
-//! random, so builds stay byte for byte reproducible.
+//! verity builds the dm-verity hash tree for a root image and the table
+//! stage0 opens it with. See lib/README.md and docs/design/verified-boot.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -18,22 +9,21 @@ pub const block_size = 4096;
 const digest_len = Sha256.digest_length;
 const per_block = block_size / digest_len; // 128 digests a block
 
-/// What stage0 needs to open an image: as dm-verity's table takes them.
+/// Params are what stage0 needs to open an image through dm-verity.
 pub const Params = struct {
     data_blocks: u64,
-    /// Where the tree starts, in blocks from the image's start: right after
-    /// the data.
+    /// hash_start is where the tree starts, in blocks; it follows the data.
     hash_start: u64,
     salt: [digest_len]u8,
     root: [digest_len]u8,
 
-    /// One line, as stage0 reads it from /verity:
+    /// format writes the line stage0 reads from /verity:
     /// `DATA_BLOCKS HASH_START SALT ROOT`, the last two in hex.
     pub fn format(p: Params, w: *std.Io.Writer) !void {
         try w.print("{d} {d} {x} {x}\n", .{ p.data_blocks, p.hash_start, &p.salt, &p.root });
     }
 
-    /// The line format writes, back: exactly, every digest in full.
+    /// parse reads a line written by format. Both digests must be complete.
     pub fn parse(line: []const u8) !Params {
         var it = std.mem.tokenizeAny(u8, line, " \n");
         var p: Params = undefined;
@@ -55,20 +45,20 @@ pub const Params = struct {
     }
 };
 
-/// out from hex: every byte of it, never fewer, which would leave the rest
-/// as it was.
+/// fullHex decodes hex into out. A short value is an error, so no byte of
+/// out is left stale.
 fn fullHex(out: *[digest_len]u8, hex: []const u8) !void {
     const got = std.fmt.hexToBytes(out, hex) catch return error.BadVerity;
     if (got.len != out.len) return error.BadVerity;
 }
 
-/// A tree, to go right after the image it is for, and the parameters to
-/// open the two with.
+/// Tree is a hash tree, to be appended to its image, and the parameters
+/// to open them with.
 pub const Tree = struct { tree: []u8, params: Params };
 
-/// The tree for the image in file, whole blocks of it. The image is read
-/// twice in pieces, for the salt and then for the blocks' digests, and is
-/// never held whole: it is as large as a root, its tree a 128th of that.
+/// build returns the tree for the image in file, which must be whole blocks.
+/// It reads the image twice in pieces, once for the salt and once for the
+/// digests, and never holds it whole; the tree is 1/128 of its size.
 pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
     const size = try file.length(io);
     if (size == 0 or size % block_size != 0) return error.NotWholeBlocks;
@@ -84,8 +74,8 @@ pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
     }
     h.final(&salt);
 
-    // Each level's blocks, bottom first: level 0 holds the data blocks'
-    // digests, each level above its own blocks', up to one block.
+    // Build levels bottom first: level 0 holds the data blocks' digests,
+    // and each level above holds the digests of the one below, up to one block.
     var levels: std.ArrayList([]u8) = .empty;
     try levels.append(gpa, try level(gpa, data_blocks));
     off = 0;
@@ -93,8 +83,8 @@ pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
         const piece = try readAt(io, file, buf, off, size);
         digests(&salt, piece, levels.items[0][@intCast(off / block_size * digest_len)..]);
     }
-    // One block needs no tree: the kernel counts no levels, and the root
-    // hash is the block's own digest.
+    // A single block needs no tree: the kernel counts no levels, and the
+    // root hash is the block's digest.
     if (data_blocks == 1) return .{ .tree = &.{}, .params = .{
         .data_blocks = 1,
         .hash_start = 1,
@@ -109,7 +99,7 @@ pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
     }
     const top = levels.items[levels.items.len - 1];
 
-    // Top first, as the kernel lays them out.
+    // Write levels top first, as the kernel expects.
     var tree_size: usize = 0;
     for (levels.items) |l| tree_size += l.len;
     const tree = try gpa.alloc(u8, tree_size);
@@ -128,21 +118,21 @@ pub fn build(gpa: Allocator, io: std.Io, file: std.Io.File) !Tree {
     } };
 }
 
-/// The piece of file at off: buf's length of it, or what is left.
+/// readAt reads into buf the piece of file at off, or what is left of it.
 fn readAt(io: std.Io, file: std.Io.File, buf: []u8, off: u64, size: u64) ![]const u8 {
     const want = buf[0..@intCast(@min(buf.len, size - off))];
     if (try file.readPositionalAll(io, want, off) != want.len) return error.ImageChanged;
     return want;
 }
 
-/// A level for n blocks below it: their digests, in whole blocks, zeroed.
+/// level allocates a zeroed level for n blocks' digests, in whole blocks.
 fn level(gpa: Allocator, n: u64) ![]u8 {
     const l = try gpa.alloc(u8, @intCast((n + per_block - 1) / per_block * block_size));
     @memset(l, 0);
     return l;
 }
 
-/// The digest of each block of blocks, into out, in order.
+/// digests writes the digest of each block in blocks to out, in order.
 fn digests(salt: *const [digest_len]u8, blocks: []const u8, out: []u8) void {
     for (0..blocks.len / block_size) |i| out[i * digest_len ..][0..digest_len].* = digest(
         salt,
@@ -150,7 +140,7 @@ fn digests(salt: *const [digest_len]u8, blocks: []const u8, out: []u8) void {
     );
 }
 
-/// The digest of a block: SHA-256 of the salt, then the block (version 1).
+/// digest returns SHA-256 of the salt, then the block (format version 1).
 fn digest(salt: *const [digest_len]u8, block: *const [block_size]u8) [digest_len]u8 {
     var h: Sha256 = .init(.{});
     h.update(salt);
@@ -158,9 +148,8 @@ fn digest(salt: *const [digest_len]u8, block: *const [block_size]u8) [digest_len
     return h.finalResult();
 }
 
-/// The table dm-verity takes for a device holding both data and tree, as
-/// stage0 loads it: version 1, the same device twice, block sizes, the
-/// data's size and the tree's start, the hash, the root and the salt.
+/// table writes the dm-verity table for dev, which holds both the data and
+/// the tree, as stage0 loads it.
 pub fn table(buf: []u8, dev: []const u8, p: Params) ![]const u8 {
     return std.mem.print(buf, "1 {s} {s} {d} {d} {d} {d} sha256 {x} {x}", .{
         dev, dev, block_size, block_size, p.data_blocks, p.hash_start, &p.root, &p.salt,
@@ -169,7 +158,7 @@ pub fn table(buf: []u8, dev: []const u8, p: Params) ![]const u8 {
 
 const testing = std.testing;
 
-/// The tree for data, built as an image's is: from a file holding it.
+/// buildOf builds the tree for data by writing it to a file first.
 fn buildOf(gpa: Allocator, data: []const u8) !Tree {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -195,7 +184,7 @@ test "two blocks, one level" {
     const data: [2 * block_size]u8 = @splat(0);
     const t = try buildOf(arena.allocator(), &data);
     try testing.expectEqual(block_size, t.tree.len);
-    // The one hash block: the data blocks' digests, then zeros.
+    // The single hash block holds the two digests, then zeros.
     const d = digest(&t.params.salt, data[0..block_size]);
     try testing.expectEqualSlices(u8, &(d ++ d), t.tree[0 .. 2 * digest_len]);
     try testing.expect(std.mem.allEqual(u8, t.tree[2 * digest_len ..], 0));
@@ -236,14 +225,14 @@ test "levels, top first" {
 test "an image read in pieces: each block's digest where it belongs" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    // Past two of build's pieces of 256 blocks, each block its own.
+    // Span more than two of build's 256-block pieces, each block different.
     const data = try arena.allocator().alloc(u8, 513 * block_size);
     for (data, 0..) |*b, i| b.* = @truncate(i / block_size);
     const t = try buildOf(arena.allocator(), data);
     var salt: [digest_len]u8 = undefined;
     Sha256.hash(data, &salt, .{});
     try testing.expectEqualSlices(u8, &salt, &t.params.salt);
-    // The top block, then level 0's five.
+    // The top block, then level 0's five blocks.
     try testing.expectEqual(6 * block_size, t.tree.len);
     const level0 = t.tree[block_size..];
     for ([_]usize{ 0, 255, 256, 511, 512 }) |b| try testing.expectEqualSlices(
@@ -262,7 +251,7 @@ test Params {
     try p.format(&out.writer);
     try testing.expectEqual(p, try Params.parse(out.written()));
     try testing.expectError(error.BadVerity, Params.parse("2 1 00 00\n"));
-    // A digest short of 32 bytes, with the counts right.
+    // A digest shorter than 32 bytes is refused even with valid counts.
     var short: std.Io.Writer.Allocating = .init(arena.allocator());
     try short.writer.print("2 2 {x} abcd\n", .{&p.salt});
     try testing.expectError(error.BadVerity, Params.parse(short.written()));

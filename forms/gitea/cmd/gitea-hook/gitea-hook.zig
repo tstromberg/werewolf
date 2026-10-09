@@ -1,14 +1,11 @@
-//! gitea-hook: git's server-side hooks for Gitea, without a shell.
+//! gitea-hook runs Gitea's git server hooks without a shell.
 //!
 //!     /usr/lib/werewolf/gitea-hooks/pre-receive [ARG...]
 //!
-//! Gitea writes each repository's hooks as bash scripts that run `gitea
-//! hook NAME`, and werewolf has no bash. The gitea form points git's
-//! core.hooksPath at /usr/lib/werewolf/gitea-hooks instead, whose
-//! pre-receive, update, post-receive and proc-receive are links to this
-//! program: it takes the hook's name from argv[0] and becomes `gitea
-//! --config /etc/gitea/app.ini hook NAME ARG...`, with git's standard
-//! input, output and environment as they are. No other name is run.
+//! Gitea writes each repository's hooks as bash scripts, and werewolf has no
+//! bash. The gitea form points git's core.hooksPath at a directory of links
+//! to this program, which execs `gitea --config /etc/gitea/app.ini hook NAME
+//! ARG...` for the hook named by argv[0], keeping git's stdio and environment.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -21,9 +18,9 @@ const max_args = 16;
 pub fn main(init: std.process.Init.Minimal) void {
     const argv = init.args.vector;
     if (argv.len == 0 or argv.len > max_args) die("usage: HOOK [ARG...], as git runs it");
-    // The table's own name is what Gitea gets: argv[0]'s basename is a
-    // slice of it, with no end of its own (".../pre-receive/" would pass
-    // as "pre-receive" and be handed on with the slash).
+    // Pass the table's name, not argv[0]'s basename: the basename is not
+    // NUL-terminated where it ends, so ".../pre-receive/" would pass the
+    // check and reach Gitea with the slash.
     const name = std.fs.path.basename(std.mem.span(argv[0]));
     const hook = for (hooks) |h| {
         if (std.mem.eql(u8, name, h)) break h;

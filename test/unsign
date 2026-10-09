@@ -1,14 +1,14 @@
 #!/bin/sh
 # unsign MODULES_TAR NAME OUT
 #
-# Make OUT, a zstd-compressed cpio holding one module from MODULES_TAR with
-# its signature cut off. Appended to an initramfs, the kernel unpacks it
-# last, so it replaces the signed module of the same name, and a machine
-# that loads only signed modules must refuse it (make check-unsigned).
+# unsign writes OUT, a zstd-compressed cpio holding one module from
+# MODULES_TAR with its signature cut off. Appended to an initramfs, it is
+# unpacked last, so it replaces the signed module of the same name. A
+# machine that loads only signed modules must refuse it (make check-unsigned).
 #
-# A signed module ends in its signature, a 12-byte struct module_signature
-# whose last four bytes are the signature's length (big-endian), and the
-# marker "~Module signature appended~\n".
+# A signed module ends with its signature, then a 12-byte struct
+# module_signature whose last four bytes are the signature's length
+# (big-endian), then the marker "~Module signature appended~\n".
 set -eu
 tar=$1 name=$2 out=$3
 tmp=$(mktemp -d)

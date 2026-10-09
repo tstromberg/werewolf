@@ -1,22 +1,6 @@
-//! oci: an OCI image baked into a form (docs/design/adhoc.md). The image
-//! goes into the verified root at /oci/NAME, where a leashed service runs
-//! it (cmd/leash, `root`), so nothing is pulled or mounted on the machine.
-//!
-//! crane (go-containerregistry) does the registry's part: `crane digest`
-//! pins a tag to its digest once, here, so the form carries bytes and
-//! never a name that may move; `crane config` says what the image would
-//! run; `crane export` pulls by digest, verifies every blob and flattens
-//! the layers to one tar on a pipe, which `howl _unpack DIR` reads with no
-//! network, no environment and none of the operator's credentials, sealed
-//! on Linux to writing beneath DIR. The unpacker is werewolf's own: a
-//! device, a FIFO, a name with .. or through a link, a hard link out of
-//! the tree and a whiteout are refused, setuid is dropped with the rest
-//! of the mode (the build keeps only whether a file runs), and the image
-//! is refused whole at the first refusal. Then the places init binds into
-//! the root (cmd/init/oci.zig) are made empty, replacing whatever the
-//! image had there, and the entrypoint is resolved inside the tree and
-//! must be an ELF program: a `#!` script is refused, since its
-//! interpreter would have to run too.
+//! oci pulls an OCI image with crane and unpacks it into a form's root at
+//! /oci/NAME, so the machine never pulls or mounts anything. See README.md
+//! and docs/design/oci.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -28,7 +12,7 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 const Why = howl.Why;
 
-// Fixed limits, as oci.md fixes them: no knobs.
+// The unpacker's limits are fixed by docs/design/oci.md, not configurable.
 const max_entries = 500_000;
 const max_bytes: u64 = 8 << 30;
 const max_name = 4096;
@@ -38,15 +22,16 @@ const max_config = 4 << 20;
 const max_links = 40;
 
 pub const default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-/// The devices init binds beneath a root.
+/// devices are the device nodes init binds into an image's root.
 pub const devices = [_][]const u8{ "null", "zero", "full", "random", "urandom" };
 
-/// The platform crane pulls for: the image's architecture is the machine's.
+/// platform returns crane's --platform for the machine's architecture.
 pub fn platform(arch: []const u8) []const u8 {
     return if (std.mem.eql(u8, arch, "aarch64")) "linux/arm64" else "linux/amd64";
 }
 
-/// An image reference as crane takes one: a repository, a tag or digest.
+/// isRef reports whether s can be an image reference: up to 512 letters,
+/// digits and ._:/@-, starting with a letter or digit, so it is never a flag.
 pub fn isRef(s: []const u8) bool {
     if (s.len == 0 or s.len > 512 or !std.ascii.isAlphanumeric(s[0])) return false;
     for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._:/@-", c) == null)
@@ -54,9 +39,8 @@ pub fn isRef(s: []const u8) bool {
     return true;
 }
 
-/// ref pinned to its digest, REPO@sha256:HEX: as given, or resolved once
-/// here by crane, a tag or none (the registry's latest) becoming the
-/// digest of what is pulled, which the form then carries.
+/// resolve returns ref pinned as REPO@sha256:HEX. A tag, or no tag, is resolved
+/// once with crane, so the form records bytes rather than a name that may move.
 pub fn resolve(io: Io, gpa: Allocator, ref: []const u8, why: *Why) ![]const u8 {
     if (std.mem.find(u8, ref, "@sha256:")) |at| {
         if (ref.len != at + "@sha256:".len + 64) return why.refuse(
@@ -69,8 +53,8 @@ pub fn resolve(io: Io, gpa: Allocator, ref: []const u8, why: *Why) ![]const u8 {
     const digest = std.mem.trim(u8, said, " \r\n");
     if (!std.mem.startsWith(u8, digest, "sha256:") or digest.len != "sha256:".len + 64)
         return why.refuse("crane digest {s}: said {s}", .{ ref, digest });
-    // The repository: the reference without its tag, a colon after the
-    // last slash (a registry's port is before it).
+    // Strip the tag: a colon after the last slash. A colon before it is a
+    // registry port.
     const slash = std.mem.findScalarLast(u8, ref, '/') orelse 0;
     const repo = if (std.mem.findScalarLast(u8, ref, ':')) |c|
         (if (c > slash) ref[0..c] else ref)
@@ -79,18 +63,18 @@ pub fn resolve(io: Io, gpa: Allocator, ref: []const u8, why: *Why) ![]const u8 {
     return gpa.print("{s}@{s}", .{ repo, digest });
 }
 
-/// What the image's config says it runs, as crane reports it.
+/// Config is what the image's config says to run, as crane reports it.
 pub const Config = struct {
     entrypoint: []const []const u8 = &.{},
     cmd: []const []const u8 = &.{},
     env: []const []const u8 = &.{},
     workdir: []const u8 = "",
     user: []const u8 = "",
-    /// As declared: "8080/tcp".
+    /// exposed holds ports as declared, such as "8080/tcp".
     exposed: []const []const u8 = &.{},
     volumes: []const []const u8 = &.{},
 
-    /// The image's PATH, or the usual one.
+    /// path returns the image's PATH, or default_path if it sets none.
     pub fn path(c: Config) []const u8 {
         for (c.env) |e| if (std.mem.startsWith(u8, e, "PATH=")) return e["PATH=".len..];
         return default_path;
@@ -141,7 +125,8 @@ fn keys(gpa: Allocator, v: ?json.Value) ![]const []const u8 {
     return out.items;
 }
 
-/// crane's standard output, or a refusal with its last line.
+/// crane runs crane with args and returns its standard output. On failure it
+/// refuses with the last line crane wrote to standard error.
 fn crane(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) ![]const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.append(gpa, "crane");
@@ -167,11 +152,13 @@ fn lastLine(text: []const u8) []const u8 {
     return if (t.len == 0) "failed" else t[start..];
 }
 
-/// What was unpacked, and the device nodes, FIFOs and sockets left out.
+/// Unpacked counts the entries and bytes unpacked, and the device nodes, FIFOs
+/// and sockets left out.
 pub const Unpacked = struct { files: usize = 0, bytes: u64 = 0, left_out: usize = 0 };
 
-/// The image's root filesystem beneath dir, which is made: crane's pull
-/// on a pipe into howl _unpack, a child with no environment.
+/// pull unpacks the image's root filesystem into dir, creating it. crane export
+/// pipes the flattened layers into `howl _unpack`, which runs with no
+/// environment so it cannot see the operator's credentials.
 pub fn pull(
     io: Io,
     gpa: Allocator,
@@ -213,8 +200,8 @@ pub fn pull(
         "crane export: {s}",
         .{@errorName(err)},
     );
-    // The unpacker's refusal first: crane, its reader gone, dies of the
-    // pipe, and would otherwise be blamed.
+    // Check the unpacker first: when it refuses, crane dies of a broken
+    // pipe and would otherwise be blamed.
     if (ut != .exited or ut.exited != 0) return why.refuse(
         "{s}: the image was refused, as said above",
         .{ref},
@@ -231,9 +218,8 @@ pub fn pull(
     };
 }
 
-/// howl _unpack DIR: a root filesystem as a tar on standard input, beneath
-/// DIR, with the refusals above; one line on standard output says how
-/// many files and bytes, and a refusal is said on standard error.
+/// unpackMain is `howl _unpack DIR`: it unpacks a tar from standard input into
+/// DIR and prints one line, "FILES BYTES LEFT_OUT". Refusals go to standard error.
 pub fn unpackMain(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     if (args.len != 1) return why.refuse("_unpack DIR", .{});
     const dir = args[0];
@@ -242,9 +228,8 @@ pub fn unpackMain(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !
     var root = Dir.cwd().openDir(io, dir, .{}) catch |err|
         return why.refuse("{s}: {s}", .{ dir, @errorName(err) });
     defer root.close(io);
-    // Sealed: of the filesystem, DIR alone, for files, directories and
-    // links; no port. Every other process on this machine, and every
-    // file of the operator's, is out of its reach before a byte is read.
+    // Confine to DIR before reading a byte, so a hostile tar cannot write
+    // anywhere else or reach the network.
     if (builtin.os.tag == .linux) sandbox.landlock(&.{.{
         .fd = @intCast(root.handle),
         .access = sandbox.own_dir | 0x1000 | 0x2000, // and MAKE_SYM, REFER
@@ -257,9 +242,10 @@ pub fn unpackMain(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !
     try out.interface.flush();
 }
 
-/// The tar on r, as a tree beneath root; refused whole at the first entry
-/// that is not a directory, a regular file, a symbolic link or a hard link
-/// to a file already in the tree, with a clean name, through no link.
+/// unpack writes the tar on r beneath root. It refuses the whole image at the
+/// first unclean name, path through a link, or hard link to anything but a file
+/// already unpacked. Device nodes, FIFOs and sockets are counted and skipped.
+/// Only the execute bit of a mode survives, so setuid bits are dropped.
 pub fn unpack(io: Io, gpa: Allocator, r: *Io.Reader, root: Dir, why: *Why) !Unpacked {
     var tar: Tar = .{ .r = r };
     var u: Unpacked = .{};
@@ -317,19 +303,17 @@ pub fn unpack(io: Io, gpa: Allocator, r: *Io.Reader, root: Dir, why: *Why) !Unpa
                 Dir.hardLink(root, target, root, name, io, .{}) catch |err|
                     return why.refuse("{s}: {s}", .{ name, @errorName(err) });
             },
-            // A device node, a FIFO or a socket in a root image is usual
-            // (/dev/console, as apko lays it) and harmless left out: the
-            // tree gets the machine's own devices bound in, and nothing
-            // else of the kind.
+            // Root images often hold device nodes, such as apko's
+            // /dev/console. Skipping them is safe: init binds in the
+            // devices the service gets.
             .other => u.left_out += 1,
         }
     }
     return u;
 }
 
-/// name as the tree knows it: no leading ./ or /, no trailing /, parts
-/// of 1 to 255 bytes that are not . or .., none a whiteout; "" for the
-/// root itself; null if it cannot be made so.
+/// clean strips leading ./ and /, and trailing /. It returns "" for the root,
+/// and null if any part is empty, too long, . or .., or a whiteout.
 fn clean(name: []const u8) ?[]const u8 {
     var s = name;
     while (std.mem.startsWith(u8, s, "./")) s = s[2..];
@@ -346,8 +330,8 @@ fn clean(name: []const u8) ?[]const u8 {
     return s;
 }
 
-/// Every directory above name is a directory in the tree, not a link: a
-/// link there would take what follows to wherever it points.
+/// throughNoLink refuses name if any directory above it is a symbolic link,
+/// which could redirect the write outside the tree.
 fn throughNoLink(io: Io, gpa: Allocator, root: Dir, name: []const u8, why: *Why) !void {
     var buf: [max_name]u8 = undefined;
     var at: usize = 0;
@@ -366,13 +350,12 @@ fn parentOf(io: Io, root: Dir, name: []const u8, why: *Why) !void {
         return why.refuse("{s}: {s}", .{ d, @errorName(err) });
 }
 
-/// A tar, read entry by entry: ustar, with PAX path, linkpath and size
-/// records and GNU long names, which is what crane and every tool since
-/// POSIX writes. Nothing else is understood, and nothing is guessed.
+/// Tar reads ustar entries, with PAX path, linkpath and size records and GNU
+/// long names. That covers what crane writes; nothing else is understood.
 const Tar = struct {
     r: *Io.Reader,
-    /// Of the current entry's body, what is not read yet, and the padding
-    /// after it to the block.
+    /// left is the unread part of the current entry's body, and pad is the
+    /// padding after it to the next 512-byte block.
     left: u64 = 0,
     pad: usize = 0,
     name_buf: [max_name]u8 = undefined,
@@ -386,7 +369,7 @@ const Tar = struct {
         size: u64,
         mode: u32,
         kind: Kind,
-        /// For a refusal: what the other kind was.
+        /// what names an .other entry's type, for messages.
         what: []const u8 = "",
     };
 
@@ -427,7 +410,7 @@ const Tar = struct {
                     );
                     var at: usize = 0;
                     while (at < pax.len) {
-                        // "LEN key=value\n", LEN the record's whole length.
+                        // Each record is "LEN key=value\n"; LEN counts the whole record.
                         const sp = std.mem.findScalarPos(u8, pax, at, ' ') orelse break;
                         const len = std.fmt.parseInt(usize, pax[at..sp], 10) catch
                             return why.refuse("an extended header record is malformed", .{});
@@ -502,8 +485,8 @@ fn padding(size: u64) usize {
     return @intCast((512 - size % 512) % 512);
 }
 
-/// A header's numeric field: octal, as written, or base-256 when its first
-/// bit is set, which GNU tar uses past 8 GiB.
+/// number parses a header's numeric field: octal, or base-256 when the first
+/// bit is set, as GNU tar writes sizes past 8 GiB.
 fn number(field: []const u8) ?u64 {
     if (field[0] & 0x80 != 0) {
         var v: u64 = 0;
@@ -522,7 +505,7 @@ fn checksumOk(hdr: *const [512]u8) bool {
     return sum == want;
 }
 
-/// The ustar name: the prefix field, a slash, the name field.
+/// ustarName joins the ustar prefix and name fields with a slash.
 fn ustarName(hdr: *const [512]u8, buf: *[max_name]u8) []const u8 {
     const name = std.mem.sliceTo(hdr[0..100], 0);
     const prefix = if (std.mem.eql(u8, hdr[257..262], "ustar"))
@@ -539,11 +522,10 @@ fn ustarName(hdr: *const [512]u8, buf: *[max_name]u8) []const u8 {
     return buf[0 .. prefix.len + 1 + name.len];
 }
 
-/// The places init binds into the root, made empty beneath dir after the
-/// unpacker is done, replacing whatever the image had there, a link
-/// included: the service's /tmp, /run and /data, each path it writes, its
-/// /proc, the CPU count, the devices, the resolver, and its hosts file,
-/// naming itself.
+/// prepare creates, empty, every path init binds into the root (cmd/init/oci.zig):
+/// /proc, the CPU directory, /tmp, /run, /data, each path in writes, the devices,
+/// resolv.conf and hosts. It replaces whatever the image had there, links too,
+/// and writes a hosts file naming the service.
 pub fn prepare(
     io: Io,
     gpa: Allocator,
@@ -559,8 +541,8 @@ pub fn prepare(
         try place(io, root, d, .dir, why);
     for (writes) |w| try place(io, root, std.mem.trimStart(u8, w, "/"), .dir, why);
     for (devices) |d| try place(io, root, try gpa.print("dev/{s}", .{d}), .file, why);
-    // As devtmpfs has them: a program's own descriptors, through the
-    // procfs init mounts beneath the root, which is where images log to.
+    // Images log to /dev/stdout and friends, so link them as devtmpfs
+    // does, through the procfs init mounts in the root.
     for ([_][2][]const u8{
         .{ "stdin", "/proc/self/fd/0" },
         .{ "stdout", "/proc/self/fd/1" },
@@ -580,9 +562,8 @@ pub fn prepare(
     }) catch |err| return why.refuse("{s}/etc/hosts: {s}", .{ dir, @errorName(err) });
 }
 
-/// An empty directory or file at path, every directory above it a real
-/// one: a link anywhere on the way is replaced by a directory, so the
-/// bind lands in the image and nowhere else.
+/// place creates an empty directory or file at path. It replaces any link
+/// above path with a directory, so a bind mount cannot land outside the image.
 fn place(io: Io, root: Dir, path: []const u8, kind: enum { dir, file }, why: *Why) !void {
     var buf: [max_name]u8 = undefined;
     var at: usize = 0;
@@ -607,9 +588,10 @@ fn place(io: Io, root: Dir, path: []const u8, kind: enum { dir, file }, why: *Wh
     }
 }
 
-/// What the service runs: the operator's command, or the image's
-/// entrypoint and command, the program found on the image's PATH inside
-/// the tree, its links followed there alone, and an ELF program.
+/// entrypoint returns the service's argv: override, or the image's entrypoint
+/// and command. The program is looked up on the image's PATH, following links
+/// only inside the tree, and must be ELF. A `#!` script is refused because its
+/// interpreter would have to run too.
 pub fn entrypoint(
     io: Io,
     gpa: Allocator,
@@ -671,9 +653,9 @@ pub fn entrypoint(
     return argv.items;
 }
 
-/// path, absolute in the image, as a path on this machine beneath dir,
-/// with every link on the way followed inside the tree: an absolute
-/// target is the tree's root's. null if there is nothing there.
+/// resolveIn maps path, absolute in the image, to a host path beneath dir. It
+/// follows links inside the tree, treating absolute targets as relative to dir.
+/// It returns null if nothing is there or it follows more than max_links links.
 fn resolveIn(io: Io, gpa: Allocator, dir: []const u8, path: []const u8) !?[]const u8 {
     var todo: std.ArrayList([]const u8) = .empty;
     try pushParts(gpa, &todo, path);
@@ -703,7 +685,7 @@ fn resolveIn(io: Io, gpa: Allocator, dir: []const u8, path: []const u8) !?[]cons
     return host;
 }
 
-/// path's parts onto the stack, last first, so they pop in order.
+/// pushParts pushes path's parts last first, so they pop in order.
 fn pushParts(gpa: Allocator, todo: *std.ArrayList([]const u8), path: []const u8) !void {
     var parts = std.mem.splitScalar(u8, path, '/');
     var list: std.ArrayList([]const u8) = .empty;
@@ -749,7 +731,7 @@ test isRef {
     for ([_][]const u8{ "", "-x", "a b", "/etc", "a;b" }) |bad| try testing.expect(!isRef(bad));
 }
 
-/// A tar in memory, for the unpacker: entries as (name, type, body, link).
+/// tarOf builds a tar in memory from (name, type, body, link) entries.
 fn tarOf(
     gpa: Allocator,
     entries: []const struct { []const u8, u8, []const u8, []const u8 },

@@ -1,10 +1,6 @@
-//! tiers: the CVE tiers feed (docs/design/update-policy.md), as a machine
-//! reads it. Root checks its signature against the image's tiers.pub
-//! before it reads a byte, as it does a release manifest's, and refuses one
-//! expired, or older than the feed this machine last took. Then it answers
-//! two questions about an update: which tier each CVE the update fixes is
-//! in, and which Urgent and High fixes the update carries that the
-//! unsigned sources left out, found from the signed feed alone.
+//! tiers reads the signed CVE tiers feed (docs/design/update-policy.md) and
+//! tiers an update's fixes by it, including Urgent and High fixes that the
+//! unsigned sources missed.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -15,9 +11,9 @@ const releases = @import("release.zig");
 
 pub const format = "werewolf-cve-tiers/1";
 
-/// One CVE in one tier. Urgent and High entries name the package (origin),
-/// or none for the kernel's, on the feed's branch, and the version that
-/// fixed it; every entry carries what its tier rests on.
+/// Entry is one CVE in one tier, with the evidence for its tier. Urgent and
+/// High entries must name the fixed version and the package (origin), or no
+/// origin for a kernel fix on the feed's branch.
 pub const Entry = struct {
     cve: []const u8,
     origin: ?[]const u8 = null,
@@ -39,8 +35,8 @@ pub const Feed = struct {
     low: []const Entry = &.{},
 };
 
-/// data, signed as sig by key, as a feed: only if the signature checks and
-/// check says it may be taken.
+/// open verifies sig over data with key before parsing it, then returns the
+/// feed if check accepts it.
 pub fn open(
     gpa: Allocator,
     key: releases.Key,
@@ -55,17 +51,12 @@ pub fn open(
     return f;
 }
 
-/// Whether f may be taken at now: its format this one, not expired, and its
-/// serial no older than last, the serial of the feed this machine last took,
-/// so no cache or stale copy can take a machine backwards.
-///
-/// Its serial must be a serial, no more than a day ahead of now, and it may
-/// expire no more than a week after it: a feed signed to last forever, or
-/// to outrank every later one, is refused, so not even a leaked key pins a
-/// machine to one feed. Every Urgent and High entry must name a version
-/// that fixed it, and a package, or none for a kernel release on the
-/// feed's branch, or the promise that they are found from signed data
-/// alone would not hold.
+/// check returns an error unless f may be taken at now. The format must
+/// match, the feed must not be expired, and its serial must not be older
+/// than last, so a stale copy cannot take a machine backwards. The serial
+/// may be at most a day ahead and expiry at most a week after it, so even a
+/// leaked key cannot pin a machine to one feed. Urgent and High entries must
+/// be well formed (see Entry), since they are matched from the feed alone.
 pub fn check(f: Feed, now: i64, last: ?[]const u8) !void {
     if (!std.mem.eql(u8, f.format, format)) return error.BadFormat;
     const signed = policy.parseSerial(f.serial) catch return error.BadSerial;
@@ -80,8 +71,7 @@ pub fn check(f: Feed, now: i64, last: ?[]const u8) !void {
     };
 }
 
-/// Each tier's first fix, and how many fixes each tier has, among those an
-/// update carries.
+/// Tiers holds, for an update, each tier's first fix and its fix count.
 pub const Tiers = struct {
     first: std.enums.EnumArray(policy.Tier, ?policy.Fix) = .initFill(null),
     count: std.enums.EnumArray(policy.Tier, u32) = .initFill(0),
@@ -92,26 +82,26 @@ pub const Tiers = struct {
     }
 };
 
-/// What an update changes, and the CVEs the unsigned sources say it fixes.
+/// Update is what an update changes and the CVEs the unsigned sources say it
+/// fixes.
 pub const Update = struct {
     changes: []const cve.OriginChange,
     package_cves: []const cve.PackageFix,
     kernel_cves: cve.KernelFixes,
     old_kernel: []const u8,
     new_kernel: []const u8,
-    /// A release's advisories, and the running image's own list of them.
+    /// advisories are the release's; have is the running image's list.
     advisories: []const releases.Manifest.Advisory = &.{},
     have: []const u8 = "",
 };
 
-/// The tier of every fix an update carries, werewolf's own advisories
-/// included (addAdvisories). With a feed: each CVE the
-/// sources name takes the feed's tier, or Medium if the feed does not name
-/// it yet; and every Urgent or High fix the feed names, in a version this
-/// update brings, counts whether or not the sources named it. Without one,
-/// missing, expired or not to be trusted, every CVE counts as High, and so
-/// does the update itself if the sources named none, since nothing signed
-/// says what it fixes. With one, an update that fixes no CVE is Low.
+/// tiersOf tiers every fix the update carries, werewolf's advisories
+/// included. With a feed, each CVE the sources name takes the feed's tier,
+/// or Medium if the feed does not list it yet; every Urgent or High fix the
+/// feed places in this update's version range counts even if the sources
+/// missed it; and an update with no fixes is Low. Without a feed, every CVE
+/// is High, and so is the update itself if no fix is Urgent or High, since
+/// nothing signed says what it fixes.
 pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
     var t: Tiers = .{};
     var counted: std.StringHashMapUnmanaged(void) = .empty;
@@ -142,14 +132,14 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
         return t;
     };
 
-    // Each CVE by the most urgent tier that names it.
+    // Index each CVE under the most urgent tier that lists it.
     var named: std.StringHashMapUnmanaged(Named) = .empty;
     inline for (.{ .urgent, .high, .medium, .low }) |tier| for (@field(f, @tagName(tier))) |e| {
         const slot = try named.getOrPut(gpa, e.cve);
         if (!slot.found_existing) slot.value_ptr.* = .{ .tier = tier, .entry = e };
     };
 
-    // What the sources found, each by the feed's tier.
+    // Tier what the sources found by the feed.
     for (u.package_cves) |p| for (p.cves) |id| {
         if ((try counted.getOrPut(gpa, id)).found_existing) continue;
         try addNamed(gpa, &t, named.get(id), id, p.origin);
@@ -159,7 +149,7 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
         try addNamed(gpa, &t, named.get(k.id), k.id, null);
     }
 
-    // What the feed alone says this update fixes, Urgent and High.
+    // Add Urgent and High fixes the feed alone places in this update.
     const old_kernel = sources.kernelVersion(u.old_kernel);
     const new_kernel = sources.kernelVersion(u.new_kernel);
     inline for (.{ .urgent, .high }) |tier| for (@field(f, @tagName(tier))) |e| {
@@ -169,7 +159,7 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
                 !std.mem.eql(u8, origin, cve.streamBase(c.origin))) continue;
             if (cve.apkOrder(fixed, c.from) == .gt and cve.apkOrder(fixed, c.to) != .gt) break true;
         } else false else if (old_kernel != null and new_kernel != null) b: {
-            // The running kernel's branch only: 6.18.56 is no fix to 6.12.
+            // Only the new kernel's branch: 6.18.56 does not fix 6.12.
             const v = sources.kernelVersion(fixed) orelse break :b false;
             if (v[0] != new_kernel.?[0] or v[1] != new_kernel.?[1]) break :b false;
             break :b sources.kernelLess(old_kernel.?, v) and !sources.kernelLess(new_kernel.?, v);
@@ -186,14 +176,13 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
     return t;
 }
 
-/// A CVE the feed names, and in which tier.
+/// Named is a feed entry and its tier.
 const Named = struct { tier: policy.Tier, entry: Entry };
 
-/// werewolf's own advisories a release carries that the running image
-/// does not: their ids not among those in have, the image's
-/// /usr/share/werewolf/advisories (release/advisories), each counted as a
-/// fix at its tier, its title the evidence. A machine knows exactly which
-/// fixes its own code has, so no date or serial is compared.
+/// addAdvisories adds each werewolf advisory the release carries whose id is
+/// not in have (/usr/share/werewolf/advisories), at its tier, with its title
+/// as evidence. The image lists exactly what its code fixes, so no date or
+/// serial is compared.
 fn addAdvisories(
     gpa: Allocator,
     t: *Tiers,
@@ -230,7 +219,7 @@ fn addNamed(
         t.add(.medium, .{ .subject = s, .evidence = "not in the tiers feed yet" });
 }
 
-/// "CVE-2026-1111 in busybox", or "in the kernel".
+/// subject returns "CVE-2026-1111 in busybox", or "... in the kernel".
 fn subject(gpa: Allocator, id: []const u8, origin: ?[]const u8) ![]const u8 {
     return if (origin) |o|
         gpa.print("{s} in {s}", .{ id, o })
@@ -238,8 +227,9 @@ fn subject(gpa: Allocator, id: []const u8, origin: ?[]const u8) ![]const u8 {
         gpa.print("{s} in the kernel", .{id});
 }
 
-/// What a tier rests on, for the log's why: "CVSS 8.1 from NVD
-/// (CVSS:3.1/AV:N/...), in KEV since 2026-10-06", or "no score yet".
+/// evidence describes what an entry's tier rests on, for the log's why:
+/// "CVSS 8.1 from NVD (CVSS:3.1/AV:N/...), in KEV since 2026-10-06", or
+/// "no score yet".
 pub fn evidence(gpa: Allocator, e: Entry) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(gpa);
     if (e.score) |s| {
@@ -300,7 +290,7 @@ test "check: serial and expiry bounded, signed entries whole" {
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
     f = feedOf(&.{.{ .cve = "CVE-2026-1", .fixed = "1-r0" }}, &.{}, &.{});
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
-    // The kernel's, on another branch than the feed's, or not a release.
+    // A kernel fix on another branch, or not a release version.
     f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .fixed = "6.12.1" }}, &.{});
     try std.testing.expectError(error.BadEntry, check(f, t0, null));
     f = feedOf(&.{}, &.{.{ .cve = "CVE-2026-1", .fixed = "6.18.x" }}, &.{});
@@ -400,7 +390,7 @@ test "tiers: Urgent and High from the feed alone, in this update's versions" {
         },
         &.{},
     );
-    // The sources named nothing: a source that hid them, or failed.
+    // The sources named nothing, as if one hid them or failed.
     const t = try tiersOf(gpa, f, .{
         .changes = &.{
             .{ .origin = "curl", .from = "8.17.0-r0", .to = "8.17.0-r2" },
@@ -411,9 +401,9 @@ test "tiers: Urgent and High from the feed alone, in this update's versions" {
         .old_kernel = "linux-virt-6.18.55-r0",
         .new_kernel = "linux-virt-6.18.56-r0",
     });
-    // CVE-2026-10 (6.18.56, in the window) and CVE-2026-20 (8.17.0-r1); not
-    // CVE-2026-11 (fixed long before), CVE-2026-21 (not yet), or
-    // CVE-2026-22 (openssl, a stream this update leaves alone).
+    // CVE-2026-10 (6.18.56, in range) and CVE-2026-20 (8.17.0-r1) count;
+    // CVE-2026-11 (fixed long before), CVE-2026-21 (not yet) and
+    // CVE-2026-22 (an openssl stream this update does not touch) do not.
     try std.testing.expectEqual([4]u32{ 0, 0, 1, 1 }, t.count.values);
     try std.testing.expectEqualStrings("CVE-2026-10 in the kernel", t.first.get(.urgent).?.subject);
     try std.testing.expectEqualStrings("CVE-2026-20 in curl", t.first.get(.high).?.subject);
@@ -440,7 +430,7 @@ test "tiers: without a feed, every CVE is High" {
     });
     try std.testing.expectEqual([4]u32{ 0, 0, 2, 0 }, t.count.values);
     try std.testing.expectEqualStrings("no valid tiers feed", t.first.get(.high).?.evidence);
-    // Nothing named, and nothing signed to say so: High, not Low.
+    // Nothing named and nothing signed to say so: High, not Low.
     const quiet = try tiersOf(arena.allocator(), null, .{
         .changes = &.{},
         .package_cves = &.{},

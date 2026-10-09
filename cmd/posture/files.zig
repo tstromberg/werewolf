@@ -1,5 +1,5 @@
-//! posture's filesystem checks: mounts, what runs from where, shared
-//! places, and the account files.
+//! files holds posture's filesystem checks: mounts, where programs can run,
+//! shared directories, and the account files.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,14 +20,16 @@ const trim = posture.trim;
 const listAdd = posture.listAdd;
 const logHas = posture.logHas;
 
-/// How opening path, for reading or for writing and nothing more, ends.
+/// openError opens path with mode, without following a final link, closes
+/// it, and returns the errno.
 fn openError(path: [:0]const u8, mode: std.posix.ACCMODE) linux.E {
     const rc = linux.open(path, .{ .ACCMODE = mode, .CLOEXEC = true, .NOFOLLOW = true }, 0);
     if (linux.errno(rc) == .SUCCESS) _ = linux.close(@intCast(rc));
     return linux.errno(rc);
 }
 
-/// The first whole disk, /dev/vda say: not a loop, RAM or mapped device.
+/// firstDisk returns the first whole disk, such as /dev/vda, skipping loop,
+/// RAM and device-mapper devices.
 fn firstDisk(buf: *[64]u8) [:0]const u8 {
     const dir = linux.open(
         "/sys/block",
@@ -62,10 +64,9 @@ pub fn check(p: *Posture) !void {
         .how = "/ is mounted ro",
         .result = if (hasOption(mounts, "/", "ro")) .pass else .fail,
     });
-    // stage0 maps the image through dm-verity as a device-mapper device
-    // named root, read-only at the device, so no remount can make it
-    // writable; a block that does not hash fails to read, and the kernel
-    // says so.
+    // stage0 maps the image through dm-verity as a read-only device-mapper
+    // device named root, so no remount can make it writable, and a block
+    // that fails its hash fails to read.
     const root_dev = statx(p.gpa, "/");
     const dm_name = if (root_dev) |st| trim(p.read(try p.gpa.print(
         "/sys/dev/block/{d}:{d}/dm/name",
@@ -127,9 +128,8 @@ pub fn check(p: *Posture) !void {
         .result = if (noexec.len == 0) .pass else .fail,
         .detail = noexec,
     });
-    // The filesystems of device nodes, /dev and /dev/pts, and a device
-    // bound from /dev into an image root (cmd/init/oci.zig), are the
-    // devices; everything else refuses them.
+    // Only devtmpfs and devpts may hold devices; that includes a device
+    // bound from /dev into an image root (cmd/init/oci.zig).
     const nodev = try missingOption(p.gpa, mounts, "nodev", &.{}, &.{ "devtmpfs", "devpts" });
     try p.add(.{
         .id = "files-nodev-everywhere",
@@ -141,10 +141,9 @@ pub fn check(p: *Posture) !void {
         .result = if (nodev.len == 0) .pass else .fail,
         .detail = nodev,
     });
-    // The root holds the image's links, /proc and /sys the kernel's own,
-    // /dev device-mapper's (/dev/mapper/data), and only root writes there.
-    // /data follows links, as werewolf's updater builds roots there that
-    // carry them (docs/security.md, "Not yet").
+    // /, /proc, /sys and /dev hold links that only the image, the kernel or
+    // root make. /data follows links because the updater builds roots there
+    // that contain them (docs/security.md, "Not yet").
     const follows = try missingOption(
         p.gpa,
         mounts,
@@ -166,7 +165,7 @@ pub fn check(p: *Posture) !void {
         .detail = if (planted) "a link in /tmp was followed" else follows,
     });
 
-    // The proof: a program put in each place does not start.
+    // Prove it: a program copied into each place must not start.
     var ran: std.ArrayList(u8) = .empty;
     var tried: std.ArrayList(u8) = .empty;
     for ([_][]const u8{
@@ -330,8 +329,8 @@ pub fn check(p: *Posture) !void {
             else
                 try p.gpa.print("opened for writing: {s}", .{writable.items}),
         });
-        // /dev is closed but for the devices werewolf names: a disk, and
-        // the device mapper's and loop devices' controls, open for no one.
+        // fence closes /dev but for the devices werewolf names, so a disk and
+        // the device-mapper and loop controls must open for no one.
         var readable: std.ArrayList(u8) = .empty;
         const devices = [_][:0]const u8{ disk, "/dev/mapper/control", "/dev/loop-control" };
         for (devices) |path| {
@@ -359,9 +358,8 @@ pub fn check(p: *Posture) !void {
     }
 }
 
-/// Whether a link made in /tmp, to /, opens as / would. A name no one can
-/// know first, as for runsFrom. Where no link can be made there, nothing
-/// planted one either.
+/// followsLink reports whether a link to / made in /tmp opens. The name is
+/// random, as in runsFrom. If no link can be made, none could be planted.
 fn followsLink(p: *Posture) bool {
     var nonce: [8]u8 = undefined;
     p.io.random(&nonce);
@@ -378,11 +376,11 @@ fn followsLink(p: *Posture) bool {
     return true;
 }
 
-/// Whether a copy of this program, put in dir, starts. A place it
-/// cannot be put is one it cannot start from.
+/// runsFrom reports whether a copy of this program in dir starts. If the
+/// copy cannot be made, it cannot start.
 fn runsFrom(p: *Posture, dir: []const u8) bool {
-    // A name no one can know first: a fixed one, planted as a directory
-    // by anyone in /tmp, would make the copy fail and the check pass.
+    // Use a random name: anyone could plant a directory at a fixed name in
+    // /tmp, making the copy fail and the check pass.
     var nonce: [8]u8 = undefined;
     p.io.random(&nonce);
     const path = p.gpa.print(
@@ -400,8 +398,8 @@ fn runsFrom(p: *Posture, dir: []const u8) bool {
     return starts(p, path);
 }
 
-/// Whether a copy of this program in a memfd starts. memfd_create's flags
-/// are none but close-on-exec, as malware's would be.
+/// runsFromMemfd reports whether a copy of this program in a memfd starts.
+/// It passes only MFD_CLOEXEC, as malware would.
 fn runsFromMemfd(p: *Posture) bool {
     const rc = linux.memfd_create("posture", linux.MFD.CLOEXEC);
     if (linux.errno(rc) != .SUCCESS) return false;
@@ -419,7 +417,7 @@ fn runsFromMemfd(p: *Posture) bool {
         if (linux.errno(n) != .SUCCESS or n == 0) return false;
         off += n;
     }
-    // The child reaches the memfd through this process's fd table.
+    // The child execs the memfd through this process's fd table.
     const path = p.gpa.print(
         "/proc/{d}/fd/{d}",
         .{ linux.getpid(), fd },
@@ -427,7 +425,7 @@ fn runsFromMemfd(p: *Posture) bool {
     return starts(p, path);
 }
 
-/// Whether path starts, run with --noop, and exits 0.
+/// starts reports whether path, run with --noop, exits 0.
 fn starts(p: *Posture, path: []const u8) bool {
     var child = std.process.spawn(
         p.io,
@@ -445,13 +443,13 @@ fn starts(p: *Posture, path: []const u8) bool {
     };
 }
 
-/// Files on the root filesystem with setuid or setgid, as a list. It
-/// does not cross into other filesystems (/proc, /data and the like).
+/// findSetid lists the setuid and setgid files on the root filesystem,
+/// without crossing into other filesystems such as /proc or /data.
 pub fn findSetid(p: *Posture) ![]const u8 {
     return findOnRoot(p, .setid);
 }
 
-/// The files on the root filesystem that find looks for, as a list.
+/// findOnRoot lists the files on the root filesystem that match find.
 fn findOnRoot(p: *Posture, find: Find) ![]const u8 {
     var found: std.ArrayList(u8) = .empty;
     const root = statx(p.gpa, "/") orelse return "cannot stat /";
@@ -461,8 +459,8 @@ fn findOnRoot(p: *Posture, find: Find) ![]const u8 {
     return found.items;
 }
 
-/// The third field of each line of a passwd- or group-like file that is a
-/// number: its ids.
+/// thirdFields returns the numeric ids in the third field of a passwd or
+/// group file.
 fn thirdFields(gpa: Allocator, text: []const u8) ![]const u32 {
     var ids: std.ArrayList(u32) = .empty;
     var lines = std.mem.tokenizeScalar(u8, text, '\n');
@@ -476,7 +474,7 @@ fn thirdFields(gpa: Allocator, text: []const u8) ![]const u32 {
     return ids.items;
 }
 
-/// The mount points in mounts of filesystem type fstype, as a list.
+/// mountedAs lists the mount points in mounts of filesystem type fstype.
 fn mountedAs(gpa: Allocator, mounts: []const u8, fstype: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines = std.mem.tokenizeScalar(u8, mounts, '\n');
@@ -505,11 +503,10 @@ test mountedAs {
     );
 }
 
-/// The files under dir, open at path, on top's filesystem, that find
-/// looks for, added to found. Each entry is looked at, and each
-/// directory opened, from its parent's descriptor, links not followed:
-/// a directory swapped for a link while it is walked, by whoever may
-/// write there, leads nowhere.
+/// walk adds to found the files under dir (open at path) on top's
+/// filesystem that match find. It stats and opens each entry from its
+/// parent's descriptor without following links, so a directory swapped for
+/// a link mid-walk leads nowhere.
 fn walk(
     p: *Posture,
     dir: Dir,
@@ -559,8 +556,8 @@ fn walk(
     }
 }
 
-/// Where everyone may write, a directory must be sticky; outside the
-/// temporary directories, no file may be writable by everyone.
+/// worldWritable lists directories anyone may write that are not sticky
+/// and, outside the temporary directories, files anyone may write.
 fn worldWritable(p: *Posture) !struct { found: []const u8, tried: []const u8 } {
     var found: std.ArrayList(u8) = .empty;
     var tried: std.ArrayList(u8) = .empty;
@@ -586,10 +583,9 @@ fn worldWritable(p: *Posture) !struct { found: []const u8, tried: []const u8 } {
     return .{ .found = found.items, .tried = tried.items };
 }
 
-/// Who could change the account files, wherever their links lead:
-/// each must be root's and writable by no one else, in a directory
-/// that is the same, and the shadow files readable by root's group at
-/// most.
+/// accountFiles lists problems with the account files, after following
+/// links: each and its directory must be root's and writable by no one
+/// else, and the shadow files must not be readable by everyone.
 fn accountFiles(p: *Posture) ![]const u8 {
     var loose: std.ArrayList(u8) = .empty;
     for ([_][]const u8{ "/etc/passwd", "/etc/group", "/etc/shadow", "/etc/gshadow" }) |path| {
@@ -612,7 +608,7 @@ fn accountFiles(p: *Posture) ![]const u8 {
     return loose.items;
 }
 
-/// The real path of path, every link followed, or null if it is not there.
+/// realPath returns path with every link resolved, or null if it is missing.
 fn realPath(p: *Posture, path: []const u8) ?[]const u8 {
     const z = p.gpa.printSentinel("{s}", .{path}, 0) catch return null;
     const rc = linux.open(z, .{ .PATH = true, .CLOEXEC = true }, 0);
@@ -626,9 +622,9 @@ fn realPath(p: *Posture, path: []const u8) ?[]const u8 {
     return p.gpa.dupe(u8, buf[0..n]) catch null;
 }
 
-/// What a walk looks for: setuid and setgid programs; anything anyone may
-/// write, but a sticky directory; only directories anyone may write that
-/// are not sticky; or files whose owner or group no account file names.
+/// Find is what a walk looks for: setuid and setgid programs; anything
+/// anyone may write but a sticky directory; only non-sticky directories
+/// anyone may write; or files whose owner or group no account file names.
 const Find = union(enum) {
     setid,
     open,
@@ -648,11 +644,10 @@ fn isFound(find: Find, mode: u16) bool {
     };
 }
 
-/// What is wrong with the account files, as a list: an account other than
-/// root with uid 0 or gid 0, a group other than root with gid 0, a
-/// password in passwd rather than shadow, a password that is not locked
-/// (one could log in with it: here a key is the only way in), a name or
-/// id there twice, and an account whose group does not exist.
+/// accountProblems lists what is wrong in the account files: an account
+/// or group other than root with id 0, a password in passwd, a password
+/// that is not locked (only keys may log in), a name or id listed twice,
+/// and an account whose group does not exist.
 fn accountProblems(
     gpa: Allocator,
     passwd: []const u8,
@@ -710,7 +705,7 @@ fn accountProblems(
     return out.items;
 }
 
-/// Note what is there twice: value, of kind, if seen before, which it now is.
+/// twice notes in out if value, of kind, was seen before, then records it.
 fn twice(
     gpa: Allocator,
     out: *std.ArrayList(u8),
@@ -743,8 +738,7 @@ test accountProblems {
         try accountProblems(a, "root:x:0:0::/:/x\n", "root:x:0:\n", "root:!::::::::\n"),
     );
     // Alpine's old accounts in root's group, a hash in passwd, a set
-    // password, a uid and a group name there twice, and a group that is
-    // not there.
+    // password, a duplicate uid and group name, and a missing group.
     try testing.expectEqualStrings(
         "group adm has gid 0, gid 0 is there twice, group root is there twice, sync has gid 0, " ++
             "old has a password in passwd, uid 5 is there twice, lost's group 7 does not " ++
@@ -756,7 +750,7 @@ test accountProblems {
             "root:*::\nann:$y$j9T$abc::\nold:!::\n",
         ),
     );
-    // No group file to judge groups by: nothing said of them.
+    // Without a group file, groups are not judged.
     try testing.expectEqualStrings(
         "",
         try accountProblems(a, "root:x:0:0:::\nnobody:x:65534:65534:::\n", "", ""),
@@ -784,7 +778,7 @@ test "walk: from descriptors, links not followed" {
     try tmp.dir.createDir(io, "closed", .fromMode(0o755));
     try tmp.dir.writeFile(io, .{ .sub_path = "closed/anyones", .data = "" });
     try tmp.dir.writeFile(io, .{ .sub_path = "mine", .data = "" });
-    // chmod past the umask: a directory and a file anyone may write.
+    // chmod past the umask to make a directory and a file anyone may write.
     var path_buf: [Dir.max_path_bytes]u8 = undefined;
     const base = path_buf[0..try tmp.dir.realPath(io, &path_buf)];
     for ([_][]const u8{ "open", "closed/anyones" }, [_]linux.mode_t{ 0o777, 0o666 }) |name, mode| {
@@ -792,7 +786,7 @@ test "walk: from descriptors, links not followed" {
         defer testing.allocator.free(z);
         try testing.expectEqual(.SUCCESS, linux.errno(linux.chmod(z, mode)));
     }
-    // A link to a tree with its own world-writable places, never entered.
+    // A link to a tree with world-writable places, which must not be entered.
     try tmp.dir.symLink(io, "/tmp", "elsewhere", .{ .is_directory = true });
 
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -801,7 +795,7 @@ test "walk: from descriptors, links not followed" {
     const top = statx(p.gpa, base) orelse return error.NoStat;
     var found: std.ArrayList(u8) = .empty;
     try walk(&p, tmp.dir, "T", top, .open, &found, 0);
-    // Order is the directory's; both, and nothing through the link.
+    // Both are found, in directory order, and nothing through the link.
     try testing.expect(std.mem.find(u8, found.items, "T/open") != null);
     try testing.expect(std.mem.find(u8, found.items, "T/closed/anyones") != null);
     try testing.expectEqual(1, std.mem.count(u8, found.items, ", "));

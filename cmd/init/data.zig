@@ -1,5 +1,5 @@
-//! init's /data: a werewolf.data disk made once, encrypted when it has a
-//! key, checked and mounted; or RAM, said as such.
+//! init's /data phase: a directory on the victim, RAM, or the disk named by
+//! werewolf.data, formatted only while blank and encrypted when there is a key.
 
 const std = @import("std");
 const settings = @import("settings");
@@ -17,50 +17,22 @@ const lookupIds = phase_config.lookupIds;
 
 const label = "werewolf-data";
 
-/// The least data.key LUKS is made with, which howl pack holds a key to too.
+/// min_data_key is the shortest data.key LUKS2 is made with; howl pack
+/// checks keys against it too.
 const min_data_key = settings.min_data_key;
 
-/// /data is the machine's one writable home, and what is on it may be
-/// the only copy: a database, someone's files. So init formats a disk
-/// once, when werewolf.data names it and blkid finds nothing on it at
-/// all, and never again. A disk that carries our label but is not what
-/// the form wants (plain where it wants LUKS, no key or a key that does
-/// not open it, damage that e2fsck -p will not repair) is left as it is,
-/// for a person to look at.
-///
-/// /data is then unavailable: an empty, read-only tmpfs, so a service
-/// that needs it fails where it can be seen, rather than writing to RAM
-/// what it believes is kept. /run/werewolf/nodata says why, and stops a
-/// slot on probation from committing, so an update that broke /data
-/// falls back.
-///
-/// /data follows links, the one writable place that does (symfollow):
-/// the updater builds each new root there, and apk and the updater
-/// resolve the links its packages lay (lib to usr/lib) inside it. So a
-/// service could plant a link in its own directory for a root program
-/// walking it to follow. None does today: leash, which makes each
-/// service's directory as root, takes it only as a directory, never
-/// through a link, and walks no further. Accepted for now, and listed in
-/// docs/security.md, "Not yet".
-///
-/// The command line and the config decide what /data is, never which
-/// form this is; the form only has the tools or not:
-///
-///     no werewolf.data, or no mke2fs   tmpfs, capped at a quarter of RAM: nothing is kept
-///     werewolf.data                    ext4 on the disk labelled werewolf-data
-///     + data.key in the config         the same inside LUKS2, keyed by it
-///
-/// So a disk is used only where the command line says one is wanted,
-/// and a disk that is slow to appear, or gone, is not quietly replaced
-/// by RAM. The disk is found by its label, so its device name may
-/// differ from boot to boot; werewolf.data names the device to format
-/// when there is none yet.
+/// data mounts /data: the victim's data/ directory on a machine with slots,
+/// else RAM without werewolf.data or mke2fs, else the disk labelled
+/// werewolf-data, in LUKS2 when the config has a data.key. A disk is
+/// formatted only while blkid finds it blank, since /data may hold the
+/// only copy of something. When it cannot use a disk, /data is an empty
+/// read-only tmpfs and /run/werewolf/nodata says why (see README.md).
 pub fn data(m: *Machine) void {
     mkdir("/data", 0o755);
     if (m.victim_dir.len > 0) {
-        // On a machine with slots /data is a directory beside them, on a
-        // filesystem the kernel repairs as it mounts it: nothing to
-        // format, check or label. It takes precedence over any disk.
+        // The victim's filesystem is repaired by the kernel as it mounts,
+        // so there is nothing to format, check or label. It wins over any
+        // disk.
         const dir = m.fmtZ("{s}/data", .{m.victim_dir});
         mkdir(dir, 0o755);
         if (m.run(&.{ mount_bin, "--bind", "-o", "symfollow", dir, "/data" }) and
@@ -70,10 +42,9 @@ pub fn data(m: *Machine) void {
         } else {
             nodata(m, m.fmt("cannot bind {s}", .{dir}));
         }
-        // From here /victim is for looking at. Read-only is a property of
-        // the mount, not the filesystem, so /data, bound from it, stays
-        // writable. What must write there (slot-keep; slot-update) mounts
-        // it again, apart.
+        // Make /victim read-only. That is a property of the mount, so /data,
+        // bound from it, stays writable; slot-keep and slot-update mount the
+        // victim again to write it.
         if (m.run(&.{
             mount_bin,
             "-o",
@@ -100,9 +71,8 @@ pub fn data(m: *Machine) void {
             say("/data is {s}", .{what});
         } else nodata(m, why);
     }
-    // /data holds /data/svc/<service>, which each service makes for
-    // itself, and /data/home/<user> for people. The only person init
-    // creates is the NoCloud user (Lima's).
+    // Services make their own /data/svc/NAME. init makes a home only for
+    // the NoCloud user (Lima's).
     if (m.nocloud_user.len > 0 and !exists("/run/werewolf/nodata")) {
         const home = m.fmtZ("/data/home/{s}", .{m.nocloud_user});
         m.mkdirAll(home);
@@ -110,13 +80,13 @@ pub fn data(m: *Machine) void {
             _ = linux.fchownat(linux.AT.FDCWD, home, ids.uid, ids.gid, 0);
         _ = linux.fchmodat(linux.AT.FDCWD, home, 0o700);
     }
-    // The key now lives in the kernel's dm table. No service needs it,
-    // and the config directory is the one place a service would look.
+    // The key now lives in the kernel's dm table. No service needs it, and
+    // /run/config is where a service would look.
     _ = linux.unlink("/run/config/data.key");
 }
 
-/// The form's disk on /data; what it is and where, as said on the
-/// console, or null with why set.
+/// dataHome mounts the werewolf-data disk on /data and describes it, or
+/// returns null with why set.
 fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
     const key = "/run/config/data.key";
     const key_len = m.read(key).len;
@@ -127,11 +97,9 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
     const want: []const u8 = if (crypt != null) "crypto_LUKS" else "ext4";
     var fresh = false;
 
-    // The disk labelled so, found by reading each disk's first 2 KiB, as
-    // config's search does, not by blkid, which probes every superblock
-    // of every disk: 19 ms of a boot under Firecracker. Two disks with the
-    // label leave no telling which is /data: an attached one could take
-    // its place.
+    // Find the label by reading each disk's first 2 KiB, not with blkid,
+    // which probes every superblock (19 ms under Firecracker). Two disks
+    // with the label are refused, since an attached one could take /data.
     var labelled: std.ArrayList([]const u8) = .empty;
     var have: []const u8 = "";
     for (m.list("/sys/class/block")) |name| {
@@ -170,11 +138,10 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
             why.* = m.fmt("werewolf.data: {s} holds a config tar", .{src});
             return null;
         }
-        // Blank as blkid sees it, every signature it knows probed: the
-        // one judgement before a format, so it stays blkid's. Only its
-        // exit 2, nothing found, is blank: 0 found something, 8 found
-        // more than one thing, and 4, or blkid not running at all, said
-        // nothing, and a disk not known blank is never formatted.
+        // Formatting needs blkid's full probe of every signature it knows.
+        // Only exit 2 (nothing found) is blank: 0 found something, 8 found
+        // several, 4 or 255 is an error. A disk not known blank is never
+        // formatted.
         const blkid_bin = m.which("blkid") orelse {
             why.* = "no blkid, so no telling a blank disk from one in use";
             return null;
@@ -189,13 +156,12 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
 
     var fs = src;
     if (crypt) |cryptsetup| {
-        // No udev here: libdevmapper must make /dev/mapper nodes itself,
-        // here and in /etc/runit/3, which closes the volume and inherits
-        // this environment through fence and runit.
+        // With no udev, libdevmapper must make /dev/mapper nodes itself.
+        // /etc/runit/3 closes the volume and inherits this environment.
         m.env.put("DM_DISABLE_UDEV", "1") catch {};
         mkdir("/run/cryptsetup", 0o700);
         // The key is random, so a slow KDF adds nothing; argon2id's
-        // default would spend up to 1 GiB and two seconds every boot.
+        // default would cost up to 1 GiB and two seconds every boot.
         const open = [_][]const u8{
             cryptsetup,
             "open",
@@ -250,14 +216,12 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
         fs = "/dev/mapper/data";
     }
 
-    // Inside LUKS the filesystem goes unlabelled: the label belongs to
-    // the disk, and two devices answering to it would make the search
-    // ambiguous. -F: the device is blank as far as blkid can tell, or a
-    // LUKS volume made a moment ago, so a stale signature deeper in is no
-    // reason to stop. ^orphan_file: e2fsprogs 1.47 turns it on, and ext4
-    // then reads all of it, a block at a time, at every mount (0.2s a
-    // boot on GCP's disks); without it, orphans go on the list ext4
-    // always kept.
+    // Inside LUKS the filesystem has no label: the disk has it, and two
+    // devices with it would make the search ambiguous. -F because blkid
+    // found the device blank (or it is a new LUKS volume), so a stale
+    // signature deeper in does not matter. ^orphan_file: e2fsprogs 1.47
+    // enables it, and ext4 then reads it block by block at every mount
+    // (0.2 s a boot on GCP); without it ext4 uses the classic orphan list.
     if (fresh) {
         say("formatting {s}", .{fs});
         const mke2fs = m.which("mke2fs").?;
@@ -273,11 +237,10 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
             return null;
         }
     } else {
-        // -p repairs only what is safe without a person. Anything more
-        // is theirs to decide, with the disk attached where there are
-        // tools. Run when the superblock says it has work, as e2fsck -p
-        // itself decides: on a clean disk it changes nothing, and cost 13
-        // ms of a boot; the kernel replays the journal as it mounts.
+        // -p repairs only what is safe without a person. Run it only when
+        // the superblock says it has work, as e2fsck -p would decide: on a
+        // clean disk it did nothing and cost 13 ms. The kernel replays the
+        // journal as it mounts.
         var head: Head = undefined;
         var ts: linux.timespec = undefined;
         _ = linux.clock_gettime(.REALTIME, &ts);
@@ -309,7 +272,8 @@ fn dataHome(m: *Machine, why: *[]const u8) ?[]const u8 {
     return m.fmt("{s} on {s}", .{ want, src });
 }
 
-/// A disk's first 2 KiB: LUKS's header at 0, ext4's superblock at 1024.
+/// Head is a disk's first 2 KiB: the LUKS header at 0, the ext4 superblock
+/// at 1024.
 const Head = [2048]u8;
 
 fn readHead(dev: [:0]const u8, head: *Head) bool {
@@ -320,10 +284,9 @@ fn readHead(dev: [:0]const u8, head: *Head) bool {
     return linux.errno(n) == .SUCCESS and n == head.len;
 }
 
-/// What a disk holds, as far as /data asks: LUKS (its magic at 0, and
-/// LUKS2's label at 24), or ext4 (its magic at 1080, its label at 1144),
-/// as mke2fs -t ext4 made it; ext2 and ext3 share the magic, and ext4
-/// mounts them too. The label is a slice of head.
+/// Disk is what identify finds: LUKS (magic at 0, LUKS2 label at 24) or
+/// ext4 (magic at 1080, label at 1144). ext2 and ext3 share the magic, and
+/// ext4 mounts them too. label is a slice of the head.
 const Disk = struct { kind: enum { ext4, luks, other }, label: []const u8 = "" };
 
 fn identify(head: *const Head) Disk {
@@ -336,11 +299,10 @@ fn identify(head: *const Head) Disk {
     return .{ .kind = .other };
 }
 
-/// Why e2fsck -p has work on ext4's superblock sb, at now (seconds since
-/// the epoch), or null where it would only find it clean: not marked
-/// clean (s_state), errors recorded (s_state, s_error_count), or a check
-/// due by mounts (s_mnt_count of s_max_mnt_count) or by time
-/// (s_lastcheck and s_checkinterval), as e2fsck -p decides.
+/// checkDue returns why e2fsck -p has work on ext4 superblock sb at now
+/// (Unix seconds), or null if it would find it clean. It checks s_state,
+/// s_error_count, s_mnt_count against s_max_mnt_count, and s_lastcheck
+/// plus s_checkinterval, as e2fsck -p does.
 fn checkDue(sb: []const u8, now: i64) ?[]const u8 {
     const state = std.mem.readInt(u16, sb[0x3a..0x3c], .little);
     if (state & 1 == 0) return "not marked clean";

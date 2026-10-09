@@ -227,6 +227,20 @@ Then limit the environment to `main` (Settings, Environments), commit
 `release/image.pub`, and keep `image.key` offline. Until both exist, the
 workflow builds and checks, then fails at signing and publishes nothing.
 
+## Packages
+
+werewolf's programs are also apk packages, at
+`https://dist.werewolf-linux.org/apk/ARCH/` in the R2 bucket `werewolf`
+([custom-updates.md](design/custom-updates.md)). When check passes on main,
+the packages workflow packs both arches twice, requires the copies to match,
+and publishes (release/packages) only the packages whose files changed,
+with the index signed again. Published packages are never replaced or
+removed. The index is signed by `release/packages.pub`'s key, the secret
+`WEREWOLF_PACKAGES_KEY` in the environment `release`; R2 takes uploads with
+`R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`, a token for that bucket alone.
+Nothing is published until the repository variable `PUBLISH_PACKAGES` is
+`true`.
+
 ## The tiers feed
 
 `cve-tiers.json` tells a machine how soon to boot an update: within 15

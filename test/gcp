@@ -1,20 +1,20 @@
 #!/bin/sh
-# gcp: a werewolf form on Google Compute Engine, made as a user makes one,
-# with `howl create --on gcp` (docs/design/cli.md): its release disk an
-# image, booted under UEFI on a VM, its config in the instance's
-# user-data. Used by `make demo-gcp`, `make demo-gcp-delete`, `make
-# webshell-gcp` and `make webshell-gcp-delete`; see forms/demo/README.md
-# and docs/forms.md. `make check-gcp` is test/cloud's.
+# gcp runs a werewolf form on Google Compute Engine, made as a user makes
+# one, with `howl create --on gcp` (docs/design/cli.md): its release disk
+# becomes an image, it boots under UEFI on a VM, and its config goes in the
+# instance's user-data. `make demo-gcp`, `make demo-gcp-delete`, `make
+# webshell-gcp` and `make webshell-gcp-delete` use it; see
+# forms/demo/README.md and docs/forms.md. `make check-gcp` uses test/cloud.
 #
 #   gcp demo FORM ARCH      boot the demo on a VM that stays; print its URL
 #   gcp demo-delete         delete the demo's VM and its firewall rule
 #   gcp webshell FORM ARCH  the webshell-example form, likewise, on :8080
 #   gcp webshell-delete     delete the webshell VM and its firewall rule
 #
-# The project is gcloud's own, or GCP_PROJECT; the zone GCP_ZONE
+# The project is gcloud's, or GCP_PROJECT. The zone is GCP_ZONE
 # (us-central1-a, which has Arm machines). ARCH picks the machine:
-# t2a-standard-1, or e2-small (the demo, which runs PostgreSQL and grype,
-# e2-medium).
+# t2a-standard-1 on arm64, or e2-small on x86_64. The demo on x86_64 gets
+# e2-medium, because it runs PostgreSQL and grype.
 set -eu
 
 say() { echo "gcp: $*"; }
@@ -28,7 +28,7 @@ command -v gcloud >/dev/null || die "no gcloud; install the Google Cloud SDK and
 project=${GCP_PROJECT:-$(gcloud config get-value project 2>/dev/null)}
 [ -n "$project" ] || die "no project: gcloud config set project PROJECT, or GCP_PROJECT"
 zone=${GCP_ZONE:-us-central1-a}
-# werewolf takes gcloud's project and zone; these set them for this run.
+# werewolf reads gcloud's project and zone; set them for this run.
 export CLOUDSDK_CORE_PROJECT=$project CLOUDSDK_COMPUTE_ZONE=$zone
 g() { gcloud --quiet --project "$project" "$@"; }
 demo=werewolf-demo
@@ -54,10 +54,10 @@ name=$demo
 [ "$mode" = webshell ] && name=$webshell
 work=$(mktemp -d)
 
-# The image this run's create made, deleted however the run ends, once the
-# VM's disk is made from it: the one create names as it makes it, and no
-# other. Not every image new since the run began: another run of the same
-# form, at the same time, makes one too, and it is still using it.
+# cleanup deletes the image this run's create made, however the run ends,
+# once the VM's disk is made from it. It deletes only the image create
+# named, not every image newer than the run: another run of the same form,
+# at the same time, makes one too and still uses it.
 cleanup() {
 	rc=$?
 	trap - EXIT INT TERM
@@ -74,15 +74,16 @@ if g compute instances describe "$name" --zone "$zone" >/dev/null 2>&1; then
 	addr=$(g compute instances describe "$name" --zone "$zone" \
 		--format 'get(networkInterfaces[0].accessConfigs[0].natIP)')
 else
-	# The config, as docs/cloud.md has it.
+	# Write the config as docs/cloud.md describes.
 	mkdir "$work/config"
 	echo "$name" >"$work/config/hostname"
 	say "creating $name, $form on $arch, in $zone"
-	# create's output to this run's, as it comes, and its stderr to a
-	# file too, which names the image cleanup deletes: the address on fd 3,
-	# create's status in a file, since a pipeline's is tee's (and `|| rc=`,
-	# so that set -e lets a failed create reach the line that records it).
-	made=$({ { rc=0; "$werewolf" create "$name" --with "$form" --on gcp --arch "$arch" ${size:+--size "$size"} \
+	# Show create's output as it comes, and save its stderr in a file too,
+	# since it names the image cleanup deletes. The address comes back on
+	# fd 3. create's status goes to a file, because a pipeline's status is
+	# tee's. `|| rc=` lets a failed create get past set -e to the line that
+	# records it.
+	made=$({ { rc=0; "$howl" create "$name" --with "$form" --on gcp --arch "$arch" ${size:+--size "$size"} \
 		--config "$work/config" 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
 	[ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
 	addr=$(echo "$made" | cut -f2)

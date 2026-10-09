@@ -1,16 +1,16 @@
 #!/bin/sh
-# origins OUT: the source packages, Wolfi's "origins", of everything werewolf
-# installs: every form in forms/ and the boot disk, as their locks
-# resolve them now, for both architectures. The CVE tiers feed
-# (tools/cve-tiers.zig) covers these and the kernel, and nothing else: a
-# CVE in a package werewolf never installs tells no machine anything. A
-# package of a form built elsewhere, which this list does not name, a
-# machine counts as Medium (docs/design/update-policy.md).
+# origins writes the source packages (Wolfi's "origins") of everything
+# werewolf installs: every form in forms/ and the boot disk, as their locks
+# resolve now, for both architectures. The CVE tiers feed
+# (tools/cve-tiers.zig) covers these and the kernel, and nothing else,
+# because a CVE in a package werewolf never installs tells no machine
+# anything. A machine counts a package this list does not name, from a form
+# built elsewhere, as Medium (docs/design/update-policy.md).
 #
 #   release/origins OUT
 #
-# Run from the tree's top, with apko, curl and build/host/form. Writes OUT, one origin a
-# line, sorted, or nothing and fails.
+# Run it from the top of the tree, with apko, curl and build/host/form. It
+# writes OUT, one origin per line, sorted; on failure it writes nothing.
 set -eu
 
 [ $# -eq 1 ] || { echo "usage: release/origins OUT" >&2; exit 2; }
@@ -18,9 +18,9 @@ out=$1
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# Every package name each config installs, as apko resolves it now: each
-# form's chain merged into one config as make merges it (FORM_TOOL,
-# build/host/form, which make builds), and the boot disk's.
+# List every package each config installs, as apko resolves it now. make's
+# form tool (FORM_TOOL, by default build/host/form) merges each form's chain
+# into one config, as make does; the boot disk has its own config.
 form_tool=${FORM_TOOL:-build/host/form}
 for dir in forms/*/; do
 	name=$(basename "$dir")
@@ -34,8 +34,9 @@ for config in "$work"/*.yaml boot/boot.yaml; do
 done
 sed -n 's|^ *"name": "\([^"]*\)",$|\1|p' "$work"/*.lock.json | LC_ALL=C sort -u >"$work/names"
 
-# Each package's origin, from Wolfi's index for each architecture: records
-# of KEY:VALUE lines, P the package, o its origin, a blank line between.
+# Map each package to its origin with Wolfi's index for each architecture.
+# The index holds KEY:VALUE records (P the package, o its origin), with a
+# blank line between records.
 for arch in x86_64 aarch64; do
 	curl -fsS --retry 5 --retry-all-errors --connect-timeout 20 --max-time 300 \
 		"https://packages.wolfi.dev/os/$arch/APKINDEX.tar.gz" | tar -xzOf - APKINDEX |

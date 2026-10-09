@@ -1,35 +1,9 @@
-//! iface-up: bring a network interface up, with an address and a default route.
+//! iface-up brings a network interface up, optionally with an address and a
+//! default route. See README.md.
 //!
 //!     iface-up NIC                          bring NIC up (lo, say)
 //!     iface-up NIC ADDR/PREFIX [GATEWAY]    and give it ADDR, and a default route
 //!                                           through GATEWAY
-//!
-//! init runs it for the address the kernel command line gives; the dhcp
-//! form's client applies its own leases. It replaces net-tools' ifconfig
-//! and route, which brought nothing but those two commands.
-//!
-//! A gateway outside the subnet, as GCP gives a /32 address, gets a host
-//! route through NIC first, so the default route through it can be added.
-//!
-//! As paranoid as werewolf's other programs (docs/programs.md):
-//!
-//! - Its arguments come from the kernel command line, so they are parsed
-//!   strictly and refused if odd: an interface name of plain characters, a
-//!   dotted quad with no leading zeros, a prefix of 1 to 32, an address
-//!   that is not the subnet's network or broadcast, loopback, multicast or
-//!   zero, and a gateway that is none of those either, nor the address.
-//!   The rules are lib/network.zig's, which the config tar's network file
-//!   and howl pack are held to as well, so all three agree.
-//! - It opens its one socket, then pledges (lib/sandbox.zig): every
-//!   capability but CAP_NET_ADMIN gone, from the bounding set too, never to
-//!   come back, and a seccomp filter allowing ioctl only for the five
-//!   requests it makes, and write, close and exit. Anything else, or
-//!   another architecture's call, kills it.
-//! - No environment, no files; nothing printed on success, one line on
-//!   failure, naming the request that failed and the kernel's reason.
-//!
-//! There is no privilege separation: it reads nothing from the network,
-//! and what it is told comes from whoever booted the machine.
 
 const std = @import("std");
 const linux = std.os.linux;
@@ -73,8 +47,8 @@ fn parse(args: []const [:0]const u8) !Plan {
     return p;
 }
 
-/// An interface name: 1 to 15 plain characters, as the kernel allows, but
-/// none of its odder ones.
+/// nic returns s if it is a plain interface name: 1 to 15 letters, digits,
+/// _, - or ., and not . or .. (the kernel allows odder ones).
 fn nic(s: [:0]const u8) ![:0]const u8 {
     if (s.len == 0 or s.len > 15 or std.mem.eql(u8, s, ".") or
         std.mem.eql(u8, s, "..")) return error.Interface;
@@ -104,14 +78,14 @@ const SockaddrIn = extern struct {
     zero: [8]u8 = @splat(0),
 };
 
-/// struct ifreq: the name, then a 24-byte union, of which net uses an
-/// address and the flags.
+/// Ifreq is struct ifreq: the name, then a 24-byte union, of which
+/// iface-up uses an address and the flags.
 const Ifreq = extern struct {
     name: [16]u8 = @splat(0),
     data: extern union { addr: SockaddrIn, flags: i16, pad: [24]u8 } = .{ .pad = @splat(0) },
 };
 
-/// struct rtentry, as both 64-bit architectures lay it out.
+/// Rtentry is struct rtentry as aarch64 and x86_64 lay it out.
 const Rtentry = extern struct {
     pad1: usize = 0,
     dst: SockaddrIn = .{},
@@ -146,7 +120,8 @@ fn apply(sock: i32, p: Plan) !void {
 
     const gw = p.gateway orelse return;
     if (!network.inSubnet(gw, p.addr.?, p.prefix)) {
-        // Reach the gateway itself through the NIC first.
+        // A gateway outside the subnet (GCP's /32) needs a host route
+        // through the NIC before the default route can use it.
         try route(
             sock,
             .{
@@ -172,7 +147,7 @@ fn ifreq(name: []const u8, data: @FieldType(Ifreq, "data")) Ifreq {
 fn route(sock: i32, rt: Rtentry) !void {
     var r = rt;
     const rc = linux.ioctl(sock, SIOCADDRT, @intFromPtr(&r));
-    // The very route already there, gateway and all: as asked.
+    // The same route already exists, so the request is already met.
     if (linux.errno(rc) == .EXIST) return;
     _ = try sandbox.sys(rc, "SIOCADDRT");
 }
@@ -185,8 +160,8 @@ fn ioctl(sock: i32, request: u32, arg: anytype, comptime what: []const u8) !void
 
 const CAP_NET_ADMIN = 12;
 
-/// CAP_NET_ADMIN alone, never to gain more, and a filter of what apply
-/// calls: ioctl for its five requests, write, close and exit.
+/// pledge keeps only CAP_NET_ADMIN, for good, and installs a seccomp filter
+/// of what apply calls: ioctl for its five requests, write, close and exit.
 fn pledge() !void {
     try sandbox.keepOnly(1 << CAP_NET_ADMIN);
     var f: sandbox.Filter = .{};

@@ -1,22 +1,6 @@
-//! service-config: render a service's settings into what its daemon reads.
-//!
-//!     service-config DIR
-//!
-//! leash runs it at each start of a service whose file has `setting` lines
-//! (lib/settings.zig, docs/design/settings.md), as the service's user,
-//! inside its Landlock rules, with DIR the service's /run/svc/NAME. Its
-//! standard input is the service file's `setting` and `render` lines, from
-//! the image, a word apart; DIR/settings is root's copy of the machine's
-//! settings.json. It checks every value before it writes anything, then
-//! replaces the render line's file in DIR.
-//!
-//! It knows no service. A refusal is one line naming the service, the
-//! setting and why, never the value, and keeps the service down.
-//!
-//! It reads everything first, then holds itself to the calls that remain
-//! (lib/sandbox.zig): memory, unlinking and making the one file, writing
-//! it and its line, and exit. settings.json, from outside the image, is
-//! parsed only after that.
+//! service-config renders a service's settings into the file its daemon reads.
+//! leash runs it as `service-config DIR` at each start of a service with settings.
+//! See README.md.
 
 const std = @import("std");
 const settings = @import("settings");
@@ -95,7 +79,8 @@ fn run(io: Io, gpa: Allocator, path: []const u8, service: []const u8) !void {
             else => return err,
         };
 
-    // As the service's user: replace the name, never truncate a linked inode.
+    // Unlink and create anew rather than truncate: a planted hard link would
+    // make the write land in another file.
     dir.deleteFile(io, decl.render.file) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
@@ -118,10 +103,9 @@ const Declarations = struct {
     render: settings.Render,
 };
 
-/// What is left once every input is read: the arena's memory, replacing
-/// the one file in the service's directory, its writes, and exit, where
-/// Zig's I/O puts back the SIGIO handler it set. Any other call kills it,
-/// and leash keeps the service down.
+/// pledge allows only the calls left once every input is read: memory,
+/// replacing one file, writes and exit. rt_sigaction is there because Zig's
+/// I/O restores its SIGIO handler at exit. Any other call kills the process.
 fn pledge() !void {
     var f: sandbox.Filter = .{};
     inline for (.{
@@ -131,10 +115,9 @@ fn pledge() !void {
     try f.install();
 }
 
-/// The `setting` and `render` lines leash passed, checked as leash checked
-/// them: it parsed the same lines with the same functions before it ran
-/// this, so a refusal here is a bug in one of the two, and why says which
-/// line.
+/// declarations parses the `setting` and `render` lines leash passed. leash
+/// already checked them with the same functions, so a refusal here is a bug;
+/// why says which line.
 fn declarations(gpa: Allocator, text: []const u8, why: *[]const u8) !Declarations {
     var list: std.ArrayList(settings.Setting) = .empty;
     var r: ?settings.Render = null;
@@ -169,8 +152,8 @@ fn declarations(gpa: Allocator, text: []const u8, why: *[]const u8) !Declaration
     return .{ .settings = list.items, .render = render };
 }
 
-/// One JSON line on stderr; if it does not fit, a short one that says so,
-/// never nothing, since leash points at this line when it parks a service.
+/// log writes one JSON line to stderr. If it does not fit, it writes a short
+/// line saying so, never nothing: leash points at this line when it parks a service.
 fn log(io: Io, fields: anytype) void {
     var buf: [2048]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);

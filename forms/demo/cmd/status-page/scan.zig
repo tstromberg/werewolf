@@ -1,4 +1,5 @@
-//! status-page scan: grype over the image, as grype's user, and its summary.
+//! scan runs grype over the image as the grype user, hourly, and keeps a
+//! summary for the page. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -25,15 +26,15 @@ const grype_bin = "/usr/bin/grype";
 const grype_out = grype_dir ++ "/grype.json";
 const scan_every = 3600;
 
-/// What grype must not walk: the kernel's own trees, RAM, and /data, which
-/// holds grype's database and is not part of the image.
-/// How long grype may run without a word, which, --quiet, is its whole
-/// run: its database download and the scan, done in minutes.
+/// grype_seconds bounds a whole grype run. The database download and the
+/// scan normally take minutes.
 const grype_seconds = 30 * 60;
 
-/// The most grype may say, on stdout or stderr, kept to relay.
+/// max_grype_said caps what is kept of grype's stdout and stderr.
 const max_grype_said = 1 << 20;
 
+/// grype_args exclude the kernel's trees, RAM-backed directories, and
+/// /data, which holds grype's database and is not part of the image.
 const grype_args = [_][]const u8{
     grype_bin,     "dir:/",
     "--output",    "json",
@@ -48,7 +49,8 @@ const grype_args = [_][]const u8{
     "./victim/**",
 };
 
-/// The scan service: a scan an hour.
+/// scanLoop is the scan service: it scans at start and then hourly, and
+/// writes the error to scan_error_path when a scan fails.
 pub fn scanLoop(io: Io) !void {
     record(io, .{ .event = "start" });
 
@@ -72,7 +74,8 @@ pub fn scanLoop(io: Io) !void {
     }
 }
 
-/// One grype run. step says what it was doing, for the error if it fails.
+/// scan runs grype once. It sets step to what it is doing, for the error
+/// if it fails.
 fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
     step.* = "checking /data";
     if (exists(io, "/run/werewolf/nodata")) return error.DataUnavailable;
@@ -81,7 +84,7 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
         "/data",
     ) orelse return error.DataNotMounted;
     // grype's database is a 190 MB download that unpacks to several times
-    // that; it does not belong in RAM.
+    // that, too big for RAM.
     if (std.mem.eql(u8, kind, "tmpfs")) return error.DataInRam;
     if (!exists(io, grype_bin)) return error.NoGrype;
 
@@ -104,9 +107,8 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
 
     step.* = "running grype";
     record(io, .{ .event = "scan", .result = "started" });
-    // Bounded: grype fetches its database, and a fetch that never ends
-    // would stop every scan after it. --quiet, it says nothing until it
-    // fails, so the wait for its next word is the wait for all of it.
+    // Bound the run: grype fetches its database, and a fetch that hangs
+    // would block every later scan.
     const run = std.process.run(gpa, io, .{
         .argv = &grype_args,
         .environ_map = &env,
@@ -146,14 +148,14 @@ fn scan(io: Io, gpa: Allocator, step: *[]const u8) !void {
     });
 }
 
-/// grype's stderr onto the console, a line at a time, each control
-/// character but tab as ?: grype reads a database from the network, and
-/// what it says must not drive the terminal it is shown on.
+/// relay copies grype's stderr to the console a line at a time, with each
+/// control character but tab shown as "?". grype reads a database from the
+/// network, and its output must not drive the terminal.
 fn relay(io: Io, said: []const u8) void {
     var lines = std.mem.splitScalar(u8, std.mem.trimEnd(u8, said, "\n"), '\n');
     while (lines.next()) |whole| {
         if (whole.len == 0) continue;
-        // A line longer than the buffer is said in pieces.
+        // Split a line longer than the buffer.
         var rest = whole;
         while (rest.len > 0) {
             const line = rest[0..@min(rest.len, 4096)];
@@ -167,7 +169,7 @@ fn relay(io: Io, said: []const u8) void {
     }
 }
 
-/// What the page keeps of a grype run.
+/// Summary is what the page keeps of a grype run.
 pub const Summary = struct {
     time: []const u8,
     grype: []const u8,
@@ -188,29 +190,29 @@ pub const Counts = struct {
 const Finding = struct {
     severity: []const u8,
     id: []const u8,
-    /// The component grype matched, and its version and type.
+    /// package, version and kind describe the component grype matched.
     package: []const u8,
     version: []const u8,
     kind: []const u8,
     fixed_in: []const u8,
-    /// The image's package that put the component here, and its version:
-    /// grype itself for a Go module inside /usr/bin/grype. werewolf_owner
-    /// for werewolf's own programs; empty when no package claims the file.
+    /// in_package and in_version name the image's package that holds the
+    /// component: grype for a Go module inside /usr/bin/grype, werewolf_owner
+    /// for werewolf's programs, or empty when no package claims the file.
     in_package: []const u8 = "",
     in_version: []const u8 = "",
 };
 
 pub const werewolf_owner = "(werewolf)";
 
-/// Which package installed each file, from the apk database, and which
-/// files are werewolf's own, from the build record.
+/// Owners maps each file to the apk package that installed it, and lists
+/// werewolf's own files from the build record.
 const Owners = struct {
     files: std.StringHashMapUnmanaged(Package) = .empty,
     werewolf: std.StringHashMapUnmanaged(void) = .empty,
 
-    /// The package that owns path, as grype reports it (/usr/bin/grype).
-    /// The image's /bin, /sbin and /lib are links into /usr, so a path
-    /// under them is also looked up there.
+    /// of returns the package that owns path, as grype reports it
+    /// (/usr/bin/grype). /bin, /sbin and /lib link into /usr, so it also
+    /// looks the path up under /usr.
     fn of(o: Owners, path: []const u8) ?Package {
         const rel = std.mem.trimStart(u8, path, "/");
         if (o.files.get(rel)) |p| return p;
@@ -227,9 +229,9 @@ const Owners = struct {
     }
 };
 
-/// The files of an apk installed database (F: directory, R: file within
-/// it, after the P: and V: of their package), and the build record's list
-/// of werewolf's own files, one path a line.
+/// parseOwners reads the files of an apk installed database (F: is a
+/// directory, R: a file in it, after their package's P: and V:) and the
+/// build record's list of werewolf's files, one path per line.
 fn parseOwners(gpa: Allocator, installed: []const u8, overlay: []const u8) !Owners {
     var o: Owners = .{};
     var pkg: Package = .{ .name = "", .version = "", .origin = "" };
@@ -253,7 +255,7 @@ fn parseOwners(gpa: Allocator, installed: []const u8, overlay: []const u8) !Owne
     return o;
 }
 
-/// The parts of grype's JSON the page uses.
+/// GrypeOutput holds the parts of grype's JSON the page uses.
 const GrypeOutput = struct {
     matches: []const Match = &.{},
     descriptor: struct { version: []const u8 = "", db: ?std.json.Value = null } = .{},
@@ -273,8 +275,8 @@ const GrypeOutput = struct {
     };
 };
 
-/// grype's findings, one per vulnerability and component, worst first, each
-/// with the package that put it in the image.
+/// summarize returns grype's findings, one per vulnerability and component,
+/// worst first, each with the image package that holds it.
 fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners) !Summary {
     const g = try std.json.parseFromSliceLeaky(
         GrypeOutput,
@@ -293,8 +295,8 @@ fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners)
             .kind = m.artifact.type,
             .fixed_in = try std.mem.join(gpa, ", ", m.vulnerability.fix.versions),
         };
-        // An apk package is its own; anything else belongs to the package
-        // whose file grype found it in.
+        // An apk package is its own owner. Anything else belongs to the
+        // package whose file grype found it in.
         if (std.mem.eql(u8, f.kind, "apk")) {
             f.in_package = f.package;
             f.in_version = f.version;
@@ -305,7 +307,7 @@ fn summarize(gpa: Allocator, text: []const u8, time: []const u8, owners: Owners)
             break;
         }
         // grype matches one vulnerability several ways (by CPE, by package
-        // name, in two locations); the page lists it once.
+        // name, in two locations). List it once.
         for (findings.items) |x| {
             if (std.mem.eql(u8, x.id, f.id) and std.mem.eql(u8, x.package, f.package) and
                 std.mem.eql(u8, x.version, f.version) and
@@ -357,8 +359,8 @@ fn worseFirst(_: void, a: Finding, b: Finding) bool {
     return std.mem.lessThan(u8, a.id, b.id);
 }
 
-/// The first string under key, anywhere in v: grype's descriptor has moved
-/// the database's build time between schema versions.
+/// findString returns the first string under key anywhere in v. grype has
+/// moved the database's build time between schema versions.
 fn findString(v: std.json.Value, key: []const u8) ?[]const u8 {
     switch (v) {
         .object => |o| {
