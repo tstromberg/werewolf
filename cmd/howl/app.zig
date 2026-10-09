@@ -12,14 +12,14 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const B = native.B;
 
 /// Example is a tutorial whose application compiles on this host, for an
-/// image with no toolchain: form example-go, example-rust or example-aspnet.
+/// image with no toolchain: form go-example, rust-example or aspnet-example.
 pub const Example = enum { go, rust, aspnet };
 
 /// example returns which compiled tutorial form name is, or null.
 pub fn example(name: []const u8) ?Example {
-    const prefix = "example-";
-    if (!std.mem.startsWith(u8, name, prefix)) return null;
-    return std.meta.stringToEnum(Example, name[prefix.len..]);
+    const suffix = "-example";
+    if (!std.mem.endsWith(u8, name, suffix)) return null;
+    return std.meta.stringToEnum(Example, name[0 .. name.len - suffix.len]);
 }
 
 /// compiled returns what compile makes in out, OUT: aspnet's stamp, or the
@@ -213,9 +213,10 @@ pub fn stage(
 const testing = std.testing;
 
 test example {
-    try testing.expectEqual(Example.go, example("example-go").?);
-    try testing.expectEqual(Example.aspnet, example("example-aspnet").?);
-    try testing.expectEqual(null, example("example-python"));
+    try testing.expectEqual(Example.go, example("go-example").?);
+    try testing.expectEqual(Example.aspnet, example("aspnet-example").?);
+    try testing.expectEqual(null, example("python-example"));
+    try testing.expectEqual(null, example("example-go"));
     try testing.expectEqual(null, example("rust"));
 }
 

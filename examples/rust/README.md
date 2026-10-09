@@ -8,7 +8,7 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-rust/apko.yaml) inherits `app.yaml`, which adds an
+The [form](../../forms/rust-example/apko.yaml) inherits `app.yaml`, which adds an
 application user to `prod`. It declares the service and port 8080.
 [main.rs](main.rs) is compiled into a static Linux executable installed at
 `/usr/lib/app/server`.
@@ -21,7 +21,7 @@ image gives each replacement VM the same starting configuration.
 ## Build and run
 
 ```sh
-build/host/howl run --with example-rust
+build/host/howl run --with rust-example
 curl -f http://ADDRESS/          # ADDRESS as run printed it
 curl -f http://ADDRESS/health
 build/host/howl stop
@@ -42,7 +42,7 @@ and uses Rust's bundled linker.
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-build/host/howl create rust --with example-rust --on gcp --allow-from me
+build/host/howl create rust --with rust-example --on gcp --allow-from me
 build/host/howl console rust --on gcp     # the boot log
 ```
 
@@ -57,14 +57,14 @@ for rollback. Both images share `/data`; rolling back does not undo data changes
 Wolfi packages and the kernel update automatically. Rust's standard library,
 musl and any linked crates stay inside the compiled app; updating them or
 your code requires rebuilding the image with the updated toolchain and dependencies.
-After changing only the toolchain, remove `build/*/example-rust*/application`
+After changing only the toolchain, remove `build/*/rust-example*/application`
 so the next build compiles the app again.
 
 For application changes, rebuild, try it here, then create a machine under a
 new name:
 
 ```sh
-build/host/howl create rust-v2 --with example-rust --on gcp --allow-from me
+build/host/howl create rust-v2 --with rust-example --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;

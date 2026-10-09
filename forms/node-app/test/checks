@@ -1,0 +1,2 @@
+# The form ships no application: /usr/lib/app holds nothing.
+ok  app-unshipped    [ -z "$(ls -A /usr/lib/app 2>/dev/null)" ]

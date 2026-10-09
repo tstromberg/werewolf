@@ -10,12 +10,12 @@ fail() { echo "howl-smoke: $1"; exit 1; }
 "$howl" run --build --on qemu -n 2>&1 | grep -q 'playground as it is' || fail "howl run --on qemu -n should be playground"
 "$howl" run --build --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
 "$howl" create --build smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"
-"$howl" create --build web --with python --app ./myapp -h >/dev/null 2>&1 ||
-	fail "README: howl create web --with python --app ./myapp"
+"$howl" create --build web --with python-app --app ./myapp -h >/dev/null 2>&1 ||
+	fail "README: howl create web --with python-app --app ./myapp"
 "$howl" run --build --with webshell-example -n 2>&1 | grep -q 'as it is' || fail "README: howl run --with webshell-example"
-"$howl" run --build --with example-go -n 2>&1 | grep -q 'as it is' || fail "examples: howl run --with example-go"
-"$howl" create --build web --with example-python --on gcp -h >/dev/null 2>&1 ||
-	fail "examples: howl create web --with example-python --on gcp"
+"$howl" run --build --with go-example -n 2>&1 | grep -q 'as it is' || fail "examples: howl run --with go-example"
+"$howl" create --build web --with python-example --on gcp -h >/dev/null 2>&1 ||
+	fail "examples: howl create web --with python-example --on gcp"
 "$howl" pack --build --with prod -h >/dev/null 2>&1 || fail "howl pack --with prod -h"
 out=$("$howl" run --build --with caddy,valkey -n 2>&1) || fail "howl run --with caddy,valkey -n: $out"
 echo "$out" | grep -q 'with: \[caddy, valkey\]' || fail "run --with caddy,valkey -n did not show the form: $out"

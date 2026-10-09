@@ -6,7 +6,9 @@
 # CHECK_ENV (Makefile) and CONSOLE.
 set -eu
 img=$CHECK/$FORM-shellfree.img
-rm -f "$img" && dd if=/dev/zero of="$img" bs=1048576 count=0 seek=1024 2>/dev/null
+# /data: 4 GiB, sparse, so it costs only what is written. demo's Grype
+# unpacks a 2.4 GB database there, beside its 188 MB download.
+rm -f "$img" && dd if=/dev/zero of="$img" bs=1048576 count=0 seek=4096 2>/dev/null
 exec test/boot "$FORM-shellfree" "${CONSOLE:--}" "$CHECK/$FORM-shellfree.log" "$@" \
 	-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$CMDLINE werewolf.data=vda" \
 	-drive "file=$img,format=raw,if=virtio"

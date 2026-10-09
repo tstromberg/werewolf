@@ -4,12 +4,8 @@ base: app
 # the application to machine code as it runs.
 allow: [jit]
 
-# The application serves on 8080.
-net:
-  - listen tcp/8080
-
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
-  programs-no-interpreters: java runs the application, which is what this form is for
-  kernel-write-xor-execute: the JVM, which runs the application, compiles it to machine code as it runs (allow jit)
+  programs-no-interpreters: java, for the application a form on this one brings
+  kernel-write-xor-execute: the JVM compiles the application to machine code as it runs (allow jit)

@@ -1,0 +1,17 @@
+base: node
+
+# The application serves on 8080.
+net:
+  - listen tcp/8080
+
+# make check's, for this form alone (forms/README.md): it ships no
+# application, so its service stays down: nothing listens on 8080, and
+# nothing is in its cgroup to count or reap.
+check:
+  skip: [answering, http-answering, cgrouped, reaped]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: node runs the application laid in /usr/lib/app
+  kernel-write-xor-execute: V8 compiles the application to machine code as it runs (allow jit, from node)

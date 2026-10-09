@@ -7,9 +7,14 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-node/apko.yaml) inherits `node.yaml` and replaces
-[server.js](../../forms/example-node/rootfs/usr/lib/app/server.js). The parent supplies
-Node.js, the service and network settings, and inherits its user from `app`.
+The [form](../../forms/node-example/form.yaml) builds on
+[node-app](../../forms/node-app/form.yaml), which supplies Node.js, a
+[service](../../forms/node-app/rootfs/etc/sv/app/service) that starts
+`/usr/lib/app/server.js`, and its network settings, and ships no
+application. The example brings
+[server.js](../../forms/node-example/rootfs/usr/lib/app/server.js). The
+service's `app` user gets its account from the build. Your own application
+is `--with node-app --app ./myapp`, with `./myapp/server.js`.
 
 A form declares the machine's packages, users, services and network permissions.
 Keep it with your code in version control. Building changes into a read-only
@@ -18,7 +23,7 @@ image gives each replacement VM the same starting configuration.
 ## Build and run
 
 ```sh
-build/host/howl run --with example-node
+build/host/howl run --with node-example
 curl -f http://ADDRESS/          # ADDRESS as run printed it
 curl -f http://ADDRESS/health
 build/host/howl stop
@@ -39,7 +44,7 @@ Linux with the guest's architecture and Node.js version, and include
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-build/host/howl create node --with example-node --on gcp --allow-from me
+build/host/howl create node --with node-example --on gcp --allow-from me
 build/host/howl console node --on gcp     # the boot log
 ```
 
@@ -59,7 +64,7 @@ For application changes, rebuild, try it here, then create a machine under a
 new name:
 
 ```sh
-build/host/howl create node-v2 --with example-node --on gcp --allow-from me
+build/host/howl create node-v2 --with node-example --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;

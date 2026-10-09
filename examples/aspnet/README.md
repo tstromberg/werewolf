@@ -8,8 +8,8 @@ these commands from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-aspnet/apko.yaml) inherits `app.yaml` and adds
-Wolfi's ASP.NET Core 10 runtime. Its [service](../../forms/example-aspnet/rootfs/etc/sv/app/service)
+The [form](../../forms/aspnet-example/apko.yaml) inherits `app.yaml` and adds
+Wolfi's ASP.NET Core 10 runtime. Its [service](../../forms/aspnet-example/rootfs/etc/sv/app/service)
 runs [Program.cs](Program.cs), published as `/usr/lib/app/App.dll`, on port 8080.
 The SDK stays on the build host.
 
@@ -23,7 +23,7 @@ each replacement VM starts with the same configuration.
 ## Build and run
 
 ```sh
-build/host/howl run --with example-aspnet
+build/host/howl run --with aspnet-example
 curl -f http://ADDRESS/          # ADDRESS as run printed it
 curl -f http://ADDRESS/health
 build/host/howl stop
@@ -40,7 +40,7 @@ replaces the last machine, so it boots what you last built, with an empty
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-build/host/howl create aspnet --with example-aspnet --on gcp --allow-from me
+build/host/howl create aspnet --with aspnet-example --on gcp --allow-from me
 build/host/howl console aspnet --on gcp     # the boot log
 ```
 
@@ -56,14 +56,14 @@ This is a [framework-dependent application](https://learn.microsoft.com/en-us/do
 Wolfi's .NET 10 runtime packages and the kernel update automatically. Your
 code and any NuGet dependencies stay as built. Changes to those need a new
 image, as does a .NET major-version upgrade.
-After changing only the SDK, remove `build/*/example-aspnet*/application.stamp`
+After changing only the SDK, remove `build/*/aspnet-example*/application.stamp`
 so the next build publishes the app again.
 
 For application changes, rebuild, try it here, then create a machine under a
 new name:
 
 ```sh
-build/host/howl create aspnet-v2 --with example-aspnet --on gcp --allow-from me
+build/host/howl create aspnet-v2 --with aspnet-example --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;

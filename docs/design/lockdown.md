@@ -56,7 +56,7 @@ its length is free, since verdicts are cached. On an M4 Max, `getpid` took
 
 A form takes back a default by name in form.yaml's `allow` (`lib/allow.zig`):
 `kvm`, `nested-kvm` (`qemu-host`), `packet`, `netadmin`, `ipv6`, `pty`
-(`sshd`), `jit` (`node`, `jre`, `php`, `postgresql`, `example-aspnet`) and
+(`sshd`), `jit` (`node`, `jre`, `php`, `postgresql`, `aspnet-example`) and
 `sh` (`sh-shim`).
 Only the image decides: nothing reads one from the command line or config.
 

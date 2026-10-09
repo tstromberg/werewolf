@@ -1,5 +1,9 @@
 base: python
 
+# The page serves on 8080.
+net:
+  - listen tcp/8080
+
 # /bin/sh as sh-shim, so the page's shell commands, as an application's
 # `sh -c` would, run one allowed program or are refused (cmd/sh-shim).
 with: [sh-shim]
