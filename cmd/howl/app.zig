@@ -1,12 +1,120 @@
 //! app stages --app DIR, a built application, for the build to lay over a form's
-//! image at the path form.yaml's app: names. See README.md.
+//! image at the path form.yaml's app: names, and compiles the tutorials'
+//! applications (examples/README.md). See README.md.
 
 const std = @import("std");
 const howl = @import("howl.zig");
+const native = @import("build.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
+const B = native.B;
+
+/// Example is a tutorial whose application compiles on this host, for an
+/// image with no toolchain: form example-go, example-rust or example-aspnet.
+pub const Example = enum { go, rust, aspnet };
+
+/// example returns which compiled tutorial form name is, or null.
+pub fn example(name: []const u8) ?Example {
+    const prefix = "example-";
+    if (!std.mem.startsWith(u8, name, prefix)) return null;
+    return std.meta.stringToEnum(Example, name[prefix.len..]);
+}
+
+/// compiled returns what compile makes in out, OUT: aspnet's stamp, or the
+/// server binary.
+pub fn compiled(gpa: Allocator, out: []const u8, e: Example) ![]const u8 {
+    return if (e == .aspnet)
+        gpa.print("{s}/application.stamp", .{out})
+    else
+        gpa.print("{s}/application/usr/lib/app/server", .{out});
+}
+
+/// compile builds the form's tutorial application, if it is one, into
+/// OUT/application/usr/lib/app, unless it is newer than its source and
+/// howl. Each arch has its own; nothing is written into examples/.
+pub fn compile(b: *B) !void {
+    const e = example(b.name) orelse return;
+    const target = try compiled(b.gpa, b.p.out, e);
+    const sources: []const []const u8 = switch (e) {
+        .go => &.{"examples/go/main.go"},
+        .rust => &.{"examples/rust/main.rs"},
+        .aspnet => &.{ "examples/aspnet/Program.cs", "examples/aspnet/App.csproj" },
+    };
+    const inputs = try std.mem.concat(b.gpa, []const u8, &.{ sources, &.{b.self} });
+    const began = try b.begin(target, inputs) orelse return;
+    const arm = b.spec.arch == .aarch64;
+    switch (e) {
+        .go => {
+            try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
+            var env = try b.env.clone(b.gpa);
+            try env.put("CGO_ENABLED", "0");
+            try env.put("GOOS", "linux");
+            try env.put("GOARCH", if (arm) "arm64" else "amd64");
+            try b.run(&.{
+                "go",
+                "build",
+                "-trimpath",
+                "-buildvcs=false",
+                "-ldflags=-s -w",
+                "-o",
+                target,
+                sources[0],
+            }, .{ .env = &env });
+        },
+        .rust => {
+            try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
+            try b.run(try std.mem.concat(b.gpa, []const u8, &.{ try rustc(b.gpa), &.{
+                "--edition=2021",
+                "--target",
+                try b.path("{t}-unknown-linux-musl", .{b.spec.arch}),
+                "-C",
+                "linker=rust-lld",
+                "-C",
+                "target-feature=+crt-static",
+                "-C",
+                "opt-level=2",
+                "-C",
+                "strip=symbols",
+                "-o",
+                target,
+                sources[0],
+            } }), .{});
+        },
+        // App.dll and App.pdb hold these absolute paths, and the sources'.
+        .aspnet => {
+            try b.run(&.{
+                "dotnet",
+                "publish",
+                sources[1],
+                "--configuration",
+                "Release",
+                "--runtime",
+                if (arm) "linux-arm64" else "linux-x64",
+                "--self-contained",
+                "false",
+                "-p:UseAppHost=false",
+                "--artifacts-path",
+                try b.absolute(try b.path("{s}/dotnet", .{b.p.out})),
+                "--output",
+                try b.absolute(try b.path("{s}/application/usr/lib/app", .{b.p.out})),
+            }, .{});
+            try Dir.cwd().writeFile(b.io, .{ .sub_path = target, .data = "" });
+        },
+    }
+    try b.done(target, began);
+}
+
+/// rustc returns the command that compiles Rust: RUSTC, split at spaces, if
+/// it is set, else rustup's stable rustc.
+fn rustc(gpa: Allocator) ![]const []const u8 {
+    var words: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, howl.environ.get("RUSTC") orelse "", " \t\n");
+    while (it.next()) |w| try words.append(gpa, w);
+    if (words.items.len == 0) return &.{ "rustup", "run", "stable", "rustc" };
+    return words.items;
+}
 
 const File = struct { path: []const u8, exec: bool };
 
@@ -103,6 +211,13 @@ pub fn stage(
 }
 
 const testing = std.testing;
+
+test example {
+    try testing.expectEqual(Example.go, example("example-go").?);
+    try testing.expectEqual(Example.aspnet, example("example-aspnet").?);
+    try testing.expectEqual(null, example("example-python"));
+    try testing.expectEqual(null, example("rust"));
+}
 
 test stage {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;

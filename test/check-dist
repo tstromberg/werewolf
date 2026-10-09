@@ -1,0 +1,15 @@
+#!/bin/sh
+# check-dist QEMU... boots FORM's release disk in DIST as published, after
+# make dist: UEFI firmware, systemd-boot, slot a (make check-dist). QEMU...
+# runs it with -snapshot, so the file does not change, and a network with
+# no way out, so the updater cannot replace it. test/boot judges its
+# posture line. make passes UEFI_ENV (Makefile) and DIST.
+set -eu
+disk=$DIST/$FORM-$ARCH-disk.qcow2
+[ -n "$FIRMWARE" ] || { echo "FAIL   dist-$FORM     no UEFI firmware for $ARCH (edk2 or OVMF)"; exit 1; }
+[ "$ARCH" = aarch64 ] || [ -n "$UEFI_VARS" ] ||
+	{ echo "FAIL   dist-$FORM     no UEFI variables template for $ARCH"; exit 1; }
+[ -f "$disk" ] || { echo "FAIL   dist-$FORM     no $disk: make dist first"; exit 1; }
+mkdir -p "$CHECK"
+[ "$ARCH" = aarch64 ] || cp "$UEFI_VARS" "$UEFI_VARS_COPY"
+exec test/boot "dist-$FORM" - "$CHECK/dist.log" "$@" -drive "file=$disk,format=qcow2,if=virtio"

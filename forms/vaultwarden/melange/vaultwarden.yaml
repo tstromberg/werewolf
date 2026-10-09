@@ -1,10 +1,10 @@
 # Vaultwarden for werewolf's vaultwarden form, as Wolfi would package it:
 # built by melange in Wolfi's environment with Wolfi's Rust, linked to
 # Wolfi's OpenSSL and SQLite, so their fixes reach a machine with the rest
-# of its packages (melange.mk unpacks it into the image and lists
-# what it links). cargo-auditable records its crates in the binary, for
-# scanners. Offered to wolfi-dev/os as it is; when Wolfi ships it, the
-# form names the package and this file goes.
+# of its packages (howl unpacks it into the image and checks what it
+# links: cmd/howl/melange.zig). cargo-auditable records its crates in the
+# binary, for scanners. Offered to wolfi-dev/os as it is; when Wolfi ships
+# it, the form names the package and this file goes.
 package:
   name: vaultwarden
   version: 1.37.4

@@ -2,7 +2,7 @@
 # manager's apps, and its web vault, on :8080 behind caddy (whose TLS the
 # apps require). Wolfi does not ship it yet: melange builds it from a
 # pinned release in Wolfi's environment (forms/vaultwarden/melange/vaultwarden.yaml,
-# melange.mk), and the libraries it links are named below, so the
+# cmd/howl/melange.zig), and the libraries it links are named below, so the
 # updater keeps them current. Nobody
 # signs up: the admin, whose Argon2 token the config brings, invites each
 # user. It sends nothing: no icons fetched, no push, no mail, no breach

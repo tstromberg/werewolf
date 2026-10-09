@@ -1,0 +1,12 @@
+#!/bin/sh
+# check-persist QEMU... boots the demo as it ships three times, under UEFI,
+# on its own disk (make check-persist). PostgreSQL's data must outlive a
+# reboot (test/checks-persist) and a power cut (test/checks-persist-again),
+# and the third boot must recover (test/checks-persist-cut). QEMU... is the
+# machine with the disk; make passes UEFI_ENV (Makefile).
+set -eu
+[ "$ARCH" = aarch64 ] || cp "$UEFI_VARS" "$UEFI_VARS_COPY"
+test/boot persist test/checks-persist "$CHECK/persist.log" "$@"
+POWER_CUT=1 test/boot persist-again test/checks-persist-again "$CHECK/persist-again.log" "$@"
+test/boot persist-cut test/checks-persist-cut "$CHECK/persist-cut.log" "$@"
+echo "pass   persist            $(grep -a -c 'pg-init: removed the lock the last boot left' "$CHECK/persist-cut.log") stale lock(s) removed after the cut"

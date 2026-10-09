@@ -46,8 +46,8 @@ zig version  # must match the version above
 make howl          # build/host/howl
 ```
 
-The compiled tutorials' applications are built on this host, by make for
-howl ([build.mk](build.mk)), so their compilers must be here; none goes into
+The compiled tutorials' applications are built on this host by howl
+([app.zig](../cmd/howl/app.zig)), so their compilers must be here; none goes into
 the image. Go needs the Go compiler. Rust needs rustup and its stable
 toolchain, including the Linux musl target (even on a Mac):
 

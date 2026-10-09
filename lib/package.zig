@@ -9,6 +9,13 @@ const flate = std.compress.flate;
 const Sha1 = std.crypto.hash.Sha1;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
+/// repository is werewolf's own: apk adds `/ARCH/APKINDEX.tar.gz`.
+pub const repository = "https://dist.werewolf-linux.org/apk";
+
+/// repository_key is the file name apk knows release/packages.pub by, in
+/// /etc/apk/keys: the index's signature names it, so it must match.
+pub const repository_key = "werewolf-packages.rsa.pub";
+
 /// Info is what a package says of itself, in .PKGINFO and its index entry.
 pub const Info = struct {
     name: []const u8,

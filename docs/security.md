@@ -49,7 +49,7 @@ Before runit starts, init closes, for the life of the machine:
 | | Stops | Undone by root? |
 | --- | --- | --- |
 | `kernel.modules_disabled=1` | loading any kernel code | no |
-| lockdown at integrity | `kexec`, `/dev/mem`, unsigned modules | no: it only rises |
+| lockdown at confidentiality | `kexec`, `/dev/mem`, unsigned modules, reading kernel memory | no: it only rises |
 | `kernel.yama.ptrace_scope=3` | ptrace and `/proc/<pid>/mem`, so no process writes code into another | no |
 | `vm.memfd_noexec=2` | running code from a memfd | yes: it binds non-root code and child namespaces, not root |
 | `kernel.kptr_restrict=2`, `kernel.dmesg_restrict=1` | leaking kernel addresses | yes |
@@ -279,7 +279,7 @@ shell there) or over ssh:
 
 | Check | Command | Expect |
 | --- | --- | --- |
-| Lockdown | `cat /sys/kernel/security/lockdown` | `none [integrity] confidentiality` |
+| Lockdown | `cat /sys/kernel/security/lockdown` | `none integrity [confidentiality]` |
 | It stays up | `echo none >/sys/kernel/security/lockdown` | `Operation not permitted` |
 | Module loader | `cat /proc/sys/kernel/modules_disabled` | `1` |
 | ptrace | `cat /proc/sys/kernel/yama/ptrace_scope` | `3` |
@@ -299,7 +299,7 @@ shell there) or over ssh:
 | Other users' processes | `chpst -u nobody ls /proc` | no numbered entries but its own |
 | ssh | `sshd -T \| grep -iE '^(passwordauth\|kbdinteractive\|permitrootlogin\|usepam)'` | `no`, `no`, `prohibit-password`, `no` |
 
-init also says it on the console: `werewolf: lockdown: integrity`.
+init also says it on the console: `werewolf: lockdown: confidentiality`.
 
 ## Tested
 

@@ -10,7 +10,7 @@ forms/NAME/
   rootfs/         files laid over the packages: path here, path in the image
   cmd/PROGRAM/    a program only this form needs, PROGRAM.zig, built and laid
                   at /usr/lib/werewolf/PROGRAM (docs/programs.md)
-  melange/        recipes for packages Wolfi does not ship (melange.mk)
+  melange/        recipes for packages Wolfi does not ship (docs/forms.md)
   test/checks     make check's checks for it, beside test/checks
   test/config     writes its config for make check: config DIR
   test/console    console lines its as-shipped boot must show

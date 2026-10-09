@@ -246,15 +246,29 @@ fn leashAttack(p: *Posture) !void {
     // fence refuses every other port whatever leash grants. If the policy
     // names none, as minimal's, the granted half is not tried.
     const granted = policyPort(p) orelse 0;
+    // Two UNIX sockets made here, outside the probe's Landlock domain, which
+    // anyone may reach by their mode: the probe's file names one. A kernel
+    // with Landlock ABI 9 lets it reach that one alone; an older one, both,
+    // and the probe does not try.
+    const sockets = landlockAbi() >= 9;
+    const listeners = [_]i32{
+        listenAt(probe_dir ++ "/undeclared.sock"),
+        listenAt(probe_dir ++ "/granted/granted.sock"),
+    };
+    defer for (listeners) |fd| if (fd >= 0) {
+        _ = linux.close(fd);
+    };
     const file = try p.gpa.print(
         "# posture's probe (werewolf.check=1), granted TCP port {d} and nothing else\n" ++
-            "exec {s} --probe {d}\nuser nobody\n{s}pledge stdio rpath wpath inet " ++
-            "connect proc exec\n",
+            "exec {s} --probe {d}{s}\nuser nobody\n{s}connect {s}\n" ++
+            "pledge stdio rpath wpath inet unix connect proc exec\n",
         .{
             granted,
             self,
             granted,
+            if (sockets) " sockets" else "",
             if (granted == 0) "" else try p.gpa.print("connect tcp/{d}\n", .{granted}),
+            probe_dir ++ "/granted/granted.sock",
         },
     );
     Dir.cwd().writeFile(
@@ -299,7 +313,8 @@ fn leashAttack(p: *Posture) !void {
                 "/run/werewolf/hostname, write /tmp, run /usr/bin/sv, connect to port 2, " ++
                 "or (its pledge not promising them) make a memfd, an inotify watch or " ++
                 "SysV shared memory; and can read /etc/passwd, write its own directory " ++
-                "and connect to port {d}",
+                "and connect to port {d}; with Landlock ABI 9, it reaches the UNIX " ++
+                "socket its file names and no other",
             .{ granted, granted },
         ),
         .result = if (ran and got.items.len == 0) .pass else .fail,
@@ -375,7 +390,48 @@ const probe_tries = [_][]const u8{
     "made a memfd, which its pledge did not promise",
     "made an inotify watch, which its pledge did not promise",
     "made SysV shared memory, which its pledge did not promise",
+    "connected to a UNIX socket it was not granted",
+    "could not connect to the UNIX socket it was granted",
 };
+
+/// landlockAbi returns the kernel's Landlock ABI version, or 0.
+fn landlockAbi() usize {
+    const rc = linux.syscall3(.landlock_create_ruleset, 0, 0, 1);
+    return if (linux.errno(rc) == .SUCCESS) rc else 0;
+}
+
+/// listenAt makes a UNIX socket listening at path, mode 0777, and returns
+/// its descriptor, or -1.
+fn listenAt(path: [:0]const u8) i32 {
+    if (std.fs.path.dirname(path)) |dir| {
+        var buf: [Dir.max_path_bytes]u8 = undefined;
+        const z = std.mem.printSentinel(&buf, "{s}", .{dir}, 0) catch return -1;
+        _ = linux.mkdir(z, 0o755);
+    }
+    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return -1;
+    const fd: i32 = @intCast(rc);
+    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    @memcpy(addr.path[0..path.len], path);
+    if (linux.errno(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) != .SUCCESS or
+        linux.errno(linux.listen(fd, 4)) != .SUCCESS or
+        linux.errno(linux.fchmodat(linux.AT.FDCWD, path, 0o777)) != .SUCCESS)
+    {
+        _ = linux.close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/// unixError returns how connecting to the UNIX socket at path went.
+fn unixError(path: [:0]const u8) linux.E {
+    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
+    defer _ = linux.close(@intCast(rc));
+    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
+    @memcpy(addr.path[0..path.len], path);
+    return linux.errno(linux.connect(@intCast(rc), @ptrCast(&addr), @sizeOf(linux.sockaddr.un)));
+}
 
 /// policyPort returns the first TCP port the fence policy names, in listen or
 /// connect, which fence lets every process connect to; null if none.
@@ -407,8 +463,9 @@ fn firstTcpPort(net: []const u8) ?u16 {
 /// probe is posture --probe, run under leash by leashAttack. It writes a bit
 /// for each of probe_tries that went wrong to its own directory and returns
 /// 0x80 to show it ran. Bits 0..6 test Landlock (files, ports, programs);
-/// 7..9 test the pledge. granted is the port its leash grants, or 0.
-pub fn probe(granted: u16) u8 {
+/// 7..9 test the pledge; 10..11 Landlock's UNIX sockets, when sockets says
+/// the kernel has them. granted is the port its leash grants, or 0.
+pub fn probe(granted: u16, sockets: bool) u8 {
     var bits: u32 = 0;
     if (opens("/run/werewolf/hostname")) bits |= 1 << 0;
     if (!opens("/etc/passwd")) bits |= 1 << 1;
@@ -422,6 +479,8 @@ pub fn probe(granted: u16) u8 {
     if (made(.memfd_create)) bits |= 1 << 7;
     if (made(.inotify_init1)) bits |= 1 << 8;
     if (made(.shmget)) bits |= 1 << 9;
+    if (sockets and unixError(probe_dir ++ "/undeclared.sock") != .ACCES) bits |= 1 << 10;
+    if (sockets and unixError(probe_dir ++ "/granted/granted.sock") != .SUCCESS) bits |= 1 << 11;
     var buf: [4]u8 = undefined;
     std.mem.writeInt(u32, &buf, bits, .little);
     const fd = linux.open(

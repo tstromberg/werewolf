@@ -1,7 +1,7 @@
 # Lockdown
 
-Proposed, 2026-10-06. Built (cmd/init, lib/seal.zig, cmd/fence) but for
-`confidentiality` lockdown, the `ebpf` and `io_uring` allowances, our kernel.
+Proposed, 2026-10-06. Built (cmd/stage0, cmd/init, lib/seal.zig, cmd/fence)
+but for the `ebpf` and `io_uring` allowances and our kernel.
 
 ## Summary
 
@@ -33,7 +33,7 @@ Each control holds until a reboot. [security.md](../security.md) has more.
 
 | Control | Stops | posture check |
 | --- | --- | --- |
-| Lockdown `integrity`; module loader closed | `/dev/mem`, unsigned kexec, new kernel code | `kernel-lockdown`, `kernel-modules-closed` |
+| Lockdown `confidentiality`; module loader closed | `/dev/mem`, unsigned kexec, new kernel code | `kernel-lockdown`, `kernel-modules-closed` |
 | Sysctls: ptrace 3, no user namespaces or io_uring, hidden pointers and log, link protections, panic on oops and first warning; MDWE unless `jit` | other processes' memory; paths exploits start from; a corrupt kernel running on; written code running | `kernel-ptrace`, `kernel-userns`, `kernel-oops`, `kernel-write-xor-execute` |
 | The seal: seccomp on PID 1 | every call no promise names; other architectures' calls | `kernel-seal`, `kernel-legacy`, `kernel-af-alg` |
 | Bounding set; helpers' set `CAP_SYS_BOOT`, `kernel.hotplug` and `modprobe` empty | modules, BPF, perf, raw I/O, ptrace, mknod; after fence, network changes, packet sockets, mounts; helpers with every capability | `kernel-bounding-set`, `kernel-helpers` |
@@ -61,7 +61,8 @@ Only the image decides: nothing reads one from the command line or config.
 
 **Not built: eBPF.** `ebpf` would give `prod-ebpf` `bpf`, `perf_event_open`,
 `CAP_BPF`, `CAP_PERFMON` and `CAP_NET_ADMIN`, never `bpf_probe_write_user`.
-Other forms would raise lockdown to `confidentiality`, losing only tracing.
+It would hold lockdown at `integrity`; every form now raises it to
+`confidentiality`, losing only tracing.
 
 **Our kernel** (verified-boot.md phase 4) adds arm64 KASLR, hardened free
 lists, shadow stacks, data-corruption checks and a static usermode helper,
@@ -72,7 +73,8 @@ BTI and kCFI need it built with clang, which Alpine and Ubuntu do not use.
 
 - **fentry, fexit.** Alpine lacks `FUNCTION_TRACER`; which agents fall back?
 - **The BPF LSM** is not in `CONFIG_LSM`, so enforcing agents need our kernel.
-- **Landlock and UDP.** Landlock has no UDP rules, so QUIC and DNS are open.
+- **Landlock and UDP.** fence already holds UDP to each user's declared
+  ports; Landlock's UDP rules (ABI 10, Linux 7.2) would repeat it per service.
 - **Devices.** fence closes `/dev`; a GPU or TPM would need a `device` line.
 
 ## Drawbacks
@@ -84,7 +86,7 @@ BTI and kCFI need it built with clang, which Alpine and Ubuntu do not use.
 ## Alternatives Considered
 
 - **A command-line switch for eBPF**: root on a bitten machine rewrites GRUB.
-- **`integrity` everywhere**, as today, lets a kprobe rootkit read the kernel.
+- **`integrity` everywhere**, as before, lets a kprobe rootkit read the kernel.
 - **eBPF built out** needs a second kernel; **the BPF LSM** uses eBPF.
 - **A list of calls**: allowed, it breaks on glibc updates; refused, it ages.
 

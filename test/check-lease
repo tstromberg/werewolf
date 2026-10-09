@@ -1,0 +1,10 @@
+#!/bin/sh
+# check-lease QEMU... boots prod with no werewolf.ip, so init asks QEMU's
+# DHCP server for its address, and runs test/checks-lease (make
+# check-lease). The console must also show dhcp-client's "bound" event.
+# make passes CHECK_ENV (Makefile).
+set -eu
+log=$CHECK/lease.log
+test/boot lease test/checks-lease "$log" "$@" -kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$BOOT"
+grep -a -q 'dhcp-client: {.*"event":"bound"' "$log" ||
+	{ echo "FAIL   lease              no \"bound\" event on the console"; exit 1; }

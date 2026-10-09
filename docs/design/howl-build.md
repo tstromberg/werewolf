@@ -1,6 +1,6 @@
 # howl builds images
 
-Stage 2 and the ports built, 2026-10-09: howl builds every image; make asks it.
+Stages 2 and 3 and the ports built, 2026-10-09: howl builds every image; make asks it.
 
 ## Summary
 
@@ -20,8 +20,7 @@ depended on make's target names and `--debug=b` output, and:
 
 ## Goals
 
-- `howl build`, `run` and `create` run make only for the programs,
-  melange's packages and the tutorials' applications.
+- `howl build`, `run` and `create` run make only for the programs.
 - One copy of each shared step, in `lib/image.zig`, used by howl and the updater.
 - With `FREEZE=1`, every form builds byte-identical `root.erofs`,
   `stage0*.zst`, `initramfs.zst`, disks and manifests to the old recipes.
@@ -40,16 +39,15 @@ bytes, never paths: module order and `werewolf.modules`; gunzip; the zboot
 unwrap and x86 `vmlinux`; the kernel config's rules; mkfs.erofs's options
 and version check. Module order is the Makefile's; the updater's is not yet.
 
-**cmd/howl/build.zig** (with `packages.zig` and `slot.zig`) runs the
-pipeline as steps, each skipped when its output is newer than its inputs,
-howl's executable among them: config, locks, rootfs and kernel (apko), meta
+**cmd/howl/build.zig** (with `packages.zig`, `app.zig`, `melange.zig` and
+`slot.zig`) runs the pipeline as steps, each skipped when its output is
+newer than its inputs, howl's executable among them: config, locks, rootfs
+and kernel (apko), a tutorial's application, melange's packages, meta
 (`lib/compose.zig`), overlay, root.erofs and verity, both stage0s,
 initramfs, slot, disk, each to a temporary name, renamed. `disk.zig` and
 `manifest.zig` replaced `boot/mkdisk` (with the GPT in process, from
-`boot/gpt.zig`) and `release/manifest`. make compiles the programs first
-and, where a form needs them, melange's packages and the tutorials'
-applications, with make's own variables cleared, so an outer make passes
-it nothing.
+`boot/gpt.zig`) and `release/manifest`. make compiles the programs first,
+with make's own variables cleared, so an outer make passes it nothing.
 
 **What identity takes.** The same tools with the same arguments, and the
 `layer` macro's normalisation in Zig: a file laid over another keeps the
@@ -60,16 +58,18 @@ second cpio still goes through `bsdtar | bsdtar | zstd`.
 **Stage 2.** `run` and `create` build with build.zig on every engine. QEMU's
 command line is `qemu.zig`'s; the Lima-managed template, `lima.zig`'s. The
 Makefile's `image`, `slot`, `disk` and `OUT/disk.qcow2` wrap `howl _build`,
-passing BUILD, PROGRAMS, DEV, APP, FREEZE and DISK, DISK_MIB and DISK_ARGS
-(`Spec.disk_path`, `Spec.disk`; the qcow2 takes the size alone);
+passing BUILD, PROGRAMS, DEV, APP, FREEZE, DISK, DISK_MIB and DISK_ARGS;
 `_dist-form` runs `howl build`. Gone: the image recipes, the run, lima, demo
 and webshell targets, `examples/vm.mk`, `test/gcp`, `test/lima-demo`, the
 scripts and `build/host/gpt`. make keeps the locks' rules, for CI's
-`release-inputs`, which runs with apko and the form tool alone. The
-Makefile is 1,112 lines, mostly `make check`. The gate (FREEZE=1,
-fresh roots) matched 11 aarch64 builds (DEV=1, `--app`, ad hoc) and x86_64
-minimal and prod-ssh; then the wrappers, the tutorials and vaultwarden;
-then the ports' disks (both arches, other sizes and arguments) and release files.
+`release-inputs`, which runs with apko and the form tool alone. The gate
+(FREEZE=1, fresh roots) matched 11 aarch64 builds (DEV=1, `--app`, ad hoc)
+and x86_64 minimal and prod-ssh; then the wrappers, the tutorials and
+vaultwarden; then the ports' disks (both arches, other sizes and arguments)
+and release files. **Stage 3** moved `examples/build.mk` and `melange.mk`
+into `app.zig` and `melange.zig`, commands, environment and stamps alike,
+and `build-apk` too. Its gate matched aarch64 vaultwarden and the three
+compiled tutorials (aspnet in one root: dotnet records absolute paths).
 
 ## Drawbacks
 

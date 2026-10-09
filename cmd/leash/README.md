@@ -17,7 +17,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | --- | --- |
 | `exec`, `user`, `pledge` | required, once: the program and arguments; the user (never root); the promises (`lib/seal.zig`) |
 | `before PROGRAM ARG...` | run first, in order, confined; each must exit 0 |
-| `listen` / `connect tcp/PORT...` | ports it may bind / reach; a port below 1024 grants `CAP_NET_BIND_SERVICE` |
+| `listen` / `connect tcp/PORT...` | ports it may bind / reach; a port below 1024 grants `CAP_NET_BIND_SERVICE`. `connect PATH` names a UNIX socket it may reach (Landlock ABI 9), beyond its own and those beneath what it writes |
 | `read` / `write PATH...` | paths it may read / write, beyond the floor |
 | `run PROGRAM...` | other programs it may start (with `pledge exec`) |
 | `requires PATH...` | stay down unless each exists |
@@ -87,7 +87,7 @@ alone, without Landlock, would leave every file its uid can reach.
 | --- | --- |
 | A wrong service file | Parsed whole first; any fault parks the service. |
 | A privileged write or chown the service redirects | Copies are written after the drop, inside Landlock, by unlink and create, refusing symlinks. Only the directory itself is changed, through a descriptor opened `NOFOLLOW`. |
-| Another service reading its files or reaching its sockets (Landlock does not check a socket's `connect`) | Its directories are `0700` unless `share` opens them; `shared` (`0711`) admits only names one already knows. The build refuses a `read` or `write` inside a strict service's directory (`lib/compose.zig`). |
+| Another service reading its files or reaching its sockets | Its directories are `0700` unless `share` opens them; `shared` (`0711`) admits only names one already knows. From Landlock ABI 9 a service reaches only the sockets its `connect` names, its own and those beneath what it writes. The build refuses a `read`, `write` or `connect` inside a strict service's directory (`lib/compose.zig`). |
 | A fork bomb | `pids.max` 4096, in a cgroup joined as root that it cannot leave. |
 | A detached child outliving its service | `leash-reap`, its `./finish`, writes `cgroup.kill`. |
 | Forged console lines | fd 0 is `/dev/null`; no device ioctls are granted. |

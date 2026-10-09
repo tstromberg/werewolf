@@ -1,0 +1,8 @@
+#!/bin/sh
+# seal-learn DIR lists, once each, the calls the seal allowed and logged in
+# learning mode on DIR's consoles (make seal-learn): the service, the
+# promise that would allow the call, the call, and the program
+# (docs/design/pledge.md).
+grep -aho 'seal-watch: {"event":"learned"[^}]*}' "$1"/*.log |
+	sed 's/.*"call":"\([^"]*\)","promise":"\([^"]*\)","service":"\([^"]*\)","exe":"\([^"]*\)".*/\3 \2 \1 \4/' |
+	LC_ALL=C sort -u | awk 'BEGIN { print "service promise call program" } { print }' | column -t

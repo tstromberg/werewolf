@@ -646,7 +646,7 @@ pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failur
     }
     for (services, parsed) |s, ps| {
         if (ps.root != null) continue; // its paths are inside its image
-        for ([_][]const []const u8{ ps.read, ps.write }) |paths| for (paths) |path| {
+        for ([_][]const []const u8{ ps.read, ps.write, ps.sockets }) |paths| for (paths) |path| {
             const owner = serviceDirOwner(path) orelse continue;
             if (mem.eql(u8, owner, s.name)) continue;
             for (services, parsed) |o, po| {

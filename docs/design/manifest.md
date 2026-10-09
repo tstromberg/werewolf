@@ -36,7 +36,7 @@ change by `apply`, *config* by the boot config, *machine* by a new machine.
 | `base`, `with` | the form it is built on, `prod` if none, on every host alike; forms taken beside it. Any form's `with` counts | chain |
 | `packages` | Wolfi packages by name; a form's pins own a package both name | added to |
 | `services` | one a name: leash's directives as keys (a scalar is one line, a list one each), `image: REF` (an OCI tree at `/oci/NAME`, run as `_oci-NAME`), `group` (another service's, as php shares nginx's socket). `listen` and `connect` take `tcp/`, `udp/`, `icmp`, `public`, `loopback`: leash takes the TCP, fence the rest. No `net` key | whole, last by name |
-| `users`, `secrets` | people, one an account: `keys` (security keys), on a bastion `destinations`, `admin: true` (the keys are root's too: a root session takes the key's touch, as sshd proves, attributed by fingerprint). Needs `with: [sshd]` or the bastion, said. Users and secret files are packed into the boot config, never the image, with the cloud's users where `machine.metadata-users` says; made as init makes Lima's user: home `/data/home/NAME`, the chain's shell or none, uid the name's hash in 1000 to 60000. cloud-metadata refetches the config and GCP's `ssh-keys` every minute and init redoes accounts and keys: a new user is a login away, never a boot | config |
+| `users`, `secrets` | people, one an account: `keys` (security keys), on a bastion `destinations`, `admin: true` (the keys are root's too: a root session takes the key's touch, as sshd proves, attributed by fingerprint). Needs `with: [sshd]` or the bastion, said. Users and secret files are packed into the boot config, never the image, with the cloud's users where `machine.metadata-users` says; made as init makes Lima's user: home `/data/home/NAME`, the chain's shell or none, uid the name's hash in 1000 to 60000. cloud-metadata polls the config and GCP's `ssh-keys` (Clouds, below) and init redoes accounts and keys: a new user is a login away, never a boot | config |
 | `updates` | on everywhere: every image boots from a slot, `minimal` included; `every`, `policy`, `from` (where `apply` publishes); `off` is a weakness the build excuses | last |
 | `machine`, `app`, `settings` | howl's flags today, `hostname`, `ip`, `dns`, `data`, `data-key`, `on`, `arch`, `size`, `allow-from`, and `metadata-users`, off unless said: a new machine. The application directory, laid where the chain's `app-dir` says, and settings, baked at `/etc/werewolf/settings`: image | machine |
 | `ssh`, `allow`, `modules`, `prune`, `paths`, `app-dir`, `programs`, `dev`, `bastion`, `weaknesses`, `check` | as today; `ssh` is `sshd:`'s keywords | as today |
@@ -93,8 +93,9 @@ kept if it commits. A downgrade is a boot of the other slot, never a build:
 an older manifest it holds, or `slot-update try`, arms it; any other is
 refused. An unsolvable pin holds the last image, logged, `update-held` failing.
 
-**Refused on the host:** an unknown key, a machine key in a form, a package
-not in the APKINDEX, two forms on one port, an image with ports and no grant.
+**Clouds.** The metadata server is the config channel, always: polled (GCP's
+wait-for-change, else each minute) as werewolf's config tar or cloud-init's
+`#cloud-config`, for users, keys and hostname alone; images never come from it.
 
 **Phases.** 1: one format, byte-identical. 2: services inline, `net` derived,
 users, updates in `minimal`. 3: howl's schema, `-f`. 4: the lock. 5: `apply`.
@@ -105,9 +106,8 @@ Forty forms change shape at once; a lost `~/.howl` key means a new machine.
 
 ## Alternatives Considered
 
-**Services in files only**: a form cannot be written inline. **`net` beside
-services**: two authorities for one port. **doas**: nothing setuid runs here.
-**Touch per command**, by a forwarded agent: a compromised machine holds it.
+**Services in files only**: a form cannot be written inline. **Touch per
+command**, by a forwarded agent: a compromised machine holds the agent.
 
 ## Security Considerations
 

@@ -1,0 +1,23 @@
+#!/bin/sh
+# check-verity QEMU... boots minimal's root.erofs with one byte of its
+# superblock changed (make check-verity). A root image changed after its
+# build must not boot: stage0 must refuse it before erofs reads it.
+# dm-verity's own line varies by kernel, so it is matched loosely. make
+# passes CHECK_ENV (Makefile).
+set -eu
+dir=$CHECK/verity
+log=$CHECK/verity.log
+rm -rf "$dir" && mkdir -p "$dir" && cp "$OUT/slot/root.erofs" "$dir/"
+printf x | dd of="$dir/root.erofs" bs=1 seek=1024 conv=notrunc 2>/dev/null
+(cd "$dir" && "$TAR" -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs) |
+	zstd -1 -q -c | cat "$OUT/slot/stage0.zst" - >"$CHECK/verity.zst"
+rm -r "$dir"
+if test/boot verity - "$log" "$@" -kernel "$KERNEL" -initrd "$CHECK/verity.zst" -append "$CMDLINE" >/dev/null; then
+	exit 1
+fi
+fail() { echo "FAIL   verity             $1; see $log"; exit 1; }
+grep -a -q 'stage0: cannot mount /root.erofs' "$log" || fail "stage0 did not refuse the changed image"
+! grep -a -q 'handing over to runit' "$log" || fail "the changed image booted"
+grep -a -E -q 'device-mapper: verity:.* corrupted|cannot read erofs superblock' "$log" ||
+	fail "no dm-verity corruption reported"
+echo "pass   verity             a changed root image does not boot"

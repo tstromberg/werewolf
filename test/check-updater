@@ -1,0 +1,46 @@
+#!/bin/sh
+# check-updater QEMU... makes the disk test/update updates, then runs it on
+# QEMU..., the machine, with a network (make check-updater). The disk is an
+# ext4 as bite leaves a distro's: GRUB's environment and FORM's slot a. The
+# slot's root is the build's, its record claiming the kernel release before
+# its own, laid over as a later tar entry, so the updater finds Alpine's
+# kernel newer. Its stage0 is the build's, with this root's dm-verity table.
+#
+# make passes CHECK, FORM, OUT, TAR, VICTIM, PRUNE (what the form leaves
+# out of its packages), EROFS_OPTS, VERITY (build/host/verity), CONSOLE,
+# SEAL_ARGS and STAGED, which test/update reads.
+set -eu
+dir=$CHECK/update-$FORM
+rm -rf "$dir/claim" "$dir/victim" "$dir/victim.img"
+mkdir -p "$dir/claim/usr/share/werewolf" "$dir/victim/var/lib/werewolf/a" "$dir/victim/boot/grub"
+# linux-virt-6.18.55-r0 claims linux-virt-6.18.54-r0.
+awk -F. '{ split($3, z, "-"); if (z[1] < 1) exit 1; printf "%s.%s.%d-%s\n", $1, $2, z[1] - 1, z[2] }' \
+	"$OUT/meta/usr/share/werewolf/kernel" >"$dir/claim/usr/share/werewolf/kernel"
+printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >"$dir/root.mtree"
+"$TAR" -C "$dir/claim" -cf "$dir/claim.tar" --uid 0 --gid 0 --numeric-owner usr/share/werewolf/kernel
+# roottar writes the slot's root: the build's, less what the form prunes,
+# then the claim.
+roottar() {
+	set -f --
+	for p in $PRUNE; do set -- "$@" --exclude "$p"; done
+	set +f
+	"$TAR" -cf "$dir/root.tar" --uid 0 --gid 0 --numeric-owner "$@" \
+		"@$dir/root.mtree" "@$OUT/rootfs.tar" "@$OUT/overlay.tar" "@$dir/claim.tar"
+}
+roottar
+# shellcheck disable=SC2086 # EROFS_OPTS are words
+mkfs.erofs $EROFS_OPTS -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
+	"$dir/victim/var/lib/werewolf/a/root.erofs" "$dir/root.tar" >/dev/null
+rm -rf "$dir/root.tar" "$dir/verity" && mkdir -p "$dir/verity"
+"$VERITY" "$dir/victim/var/lib/werewolf/a/root.erofs" "$dir/verity/verity"
+# GRUB's environment block, 1024 bytes, booting slot a once.
+env=$dir/victim/boot/grub/grubenv
+printf '# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n' >"$env"
+pad=$((1024 - $(wc -c <"$env")))
+head -c "$pad" /dev/zero | tr '\0' '#' >>"$env"
+mke2fs -q -F -t ext4 -U "$VICTIM" -d "$dir/victim" "$dir/victim.img" 3G
+cp "$OUT/slot/vmlinuz" "$dir/"
+(cd "$dir/verity" && "$TAR" -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) |
+	zstd -q -c | cat "$OUT/slot/stage0.zst" - >"$dir/stage0.zst"
+cmdline="console=$CONSOLE panic=1 $(cat "$OUT/slot/cmdline") $SEAL_ARGS werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3"
+exec test/update "$dir" "$cmdline init=/init werewolf.victim=$VICTIM:/var/lib/werewolf werewolf.grubenv=$VICTIM:/boot/grub/grubenv" "$@"

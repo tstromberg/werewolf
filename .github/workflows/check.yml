@@ -114,7 +114,7 @@ jobs:
           restore-keys: apko-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard }}-${{ steps.versions.outputs.week }}-
       - name: Install example compilers
         # The groups that build every form build the compiled tutorial
-        # applications, which compile on the host (examples/build.mk) for an
+        # applications, which compile on the host (cmd/howl/app.zig) for an
         # image with no toolchain.
         if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
         run: |
@@ -122,8 +122,8 @@ jobs:
           command -v rustup || sudo apt-get install -y rustup
           rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
           dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
-      # The packages melange builds from forms' recipes (melange.mk), kept
-      # between runs by the recipes' contents and melange's version:
+      # The packages melange builds from forms' recipes (cmd/howl/melange.zig),
+      # kept between runs by the recipes' contents and melange's version:
       # vaultwarden's is a Rust build of twenty minutes. Saved even when a
       # check fails, as the packages are sound.
       # Checkout leaves the recipes newer than any stamp restored, so the

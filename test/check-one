@@ -1,0 +1,18 @@
+#!/bin/sh
+# check-one N DIR NAME COMMAND... runs COMMAND, a check of the form NAME, N
+# times, to chase a flake (make check-one). Each failing boot's console,
+# DIR/NAME.log, is kept as DIR/NAME-one-I.log, and its FAIL lines shown.
+set -u
+n=$1 dir=$2 name=$3
+shift 3
+failed=0
+for i in $(seq "$n"); do
+	"$@" >"$dir/$name-one.out" 2>&1 || {
+		failed=$((failed + 1))
+		cp "$dir/$name.log" "$dir/$name-one-$i.log"
+		echo "boot $i of $n:"
+		grep -E -A6 '^FAIL' "$dir/$name-one.out" | head -8
+	}
+done
+echo "$name: $failed of $n boots failed"
+[ "$failed" -eq 0 ]
