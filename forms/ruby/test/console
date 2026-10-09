@@ -1,8 +1,0 @@
-# What the ruby form, booted as it ships, without a shell, must say on its
-# console (make check-shellfree-ruby; test/boot; forms/demo/test/console has the
-# format). That it answers is test/checks' answering, on the DEV=1 build.
-# The application starts, leashed, and listens.
-
-seen    app-leashed       leash: \{"event":"start","service":"app"
-seen    app-listening     app: listening on :8080
-unseen  service-down      leash: \{"event":"(down|retry)"

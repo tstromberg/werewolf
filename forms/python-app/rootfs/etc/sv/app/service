@@ -1,0 +1,12 @@
+# The application, as its own user: it may bind :8080 and no other port,
+# read the image, and run only python. The image is read-only, so Python
+# writes no bytecode beside it. Down until main.py is there: this form
+# ships none.
+exec    /usr/bin/python3 /usr/lib/app/main.py
+user    app
+requires /usr/lib/app/main.py
+pledge  stdio rpath proc inet listen
+memory  512
+listen  tcp/8080
+env     PYTHONDONTWRITEBYTECODE=1
+env     PYTHONUNBUFFERED=1

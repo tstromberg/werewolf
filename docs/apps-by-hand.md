@@ -14,15 +14,16 @@ installed:
 
 ```sh
 make howl
-build/host/howl create web --with example-python --app ./myapp --greeting "Hello"
+build/host/howl create web --with python-example --app ./myapp --greeting "Hello"
 ```
 
 `./myapp` is the application's directory (step 1 below writes one).
-`create` lays it where the form keeps its application, builds the
-image, packs the config tar from `--greeting` (the one setting the
-`example-python` form declares), starts a VM (Lima on a Mac, QEMU here
-otherwise), and prints its name and address; the application answers on
-:8080. `build/host/howl delete web` removes it. See [forms.md](forms.md#without-a-form---app).
+`create` lays it where the form keeps its application, in place of the
+example's own `main.py`, builds the image, packs the config tar from
+`--greeting` (the one setting the `python-example` form declares), starts
+a VM (Lima on a Mac, QEMU here otherwise), and prints its name and
+address; the application answers on :8080. `build/host/howl delete web`
+removes it. See [forms.md](forms.md#without-a-form---app).
 
 ## Step by step
 
@@ -67,15 +68,16 @@ EOF
 
 **2. The image.** Stage the application as a tree from the root, at the
 path the form keeps it, and build a boot disk with it laid over the
-`example-python` form: Python, a service that starts
-`/usr/lib/app/main.py` as the `app` user on :8080, and the `greeting`
-setting.
+`python-example` form: Python, a service that starts
+`/usr/lib/app/main.py` as the `app` user on :8080, the `greeting` setting,
+and a sample `main.py`, which yours replaces. `python-app` is the same
+without the setting and the sample.
 
 ```sh
 mkdir -p "$W/stage/usr/lib/app"
 cp -R "$W/myapp/." "$W/stage/usr/lib/app/"
-make FORM=example-python DEV= APP="$PWD/$W/stage" disk
-cp "build/$ARCH/example-python-app/disk.img" "$W/disk.img"
+make FORM=python-example DEV= APP="$PWD/$W/stage" disk
+cp "build/$ARCH/python-example-app/disk.img" "$W/disk.img"
 ```
 
 The copy is the machine's disk: it keeps `/data` and its updates, so the
@@ -153,8 +155,8 @@ forms it includes) with *overlays* laid on top: each form's directory
 (`forms/NAME/`), werewolf's programs, and `APP`, last. Every overlay is a
 tree that mirrors the root: `$W/stage/usr/lib/app/main.py` above is
 `/usr/lib/app/main.py` on the machine. A runtime form says where it keeps
-its application in form.yaml's `app`: `/usr/lib/app` for `python`, `node`
-and `jre`; nginx's html root, `/usr/share/nginx/html`, for `nginx` and `php`.
+its application in form.yaml's `app`: `/usr/lib/app` for `app` and the
+forms on it; nginx's html root, `/usr/share/nginx/html`, for `nginx` and `php`.
 
 `APP` is what `--app` does. For anything deployed more than once, a form
 of your own is better, since it is reviewed in version control: include a
@@ -172,7 +174,7 @@ writes a sorted ustar, so the same files make the same bytes. The root,
 packages and overlays together, is an erofs image that stage0 mounts
 read-only through dm-verity ([design/verified-boot.md](design/verified-boot.md)):
 a byte of the application changed on the disk stops the machine booting
-it. `howl build --with example-python --app "$W/myapp" -o out` writes the
+it. `howl build --with python-example --app "$W/myapp" -o out` writes the
 release files and their manifest, each file's sha256
 ([releases.md](releases.md)).
 
@@ -181,11 +183,12 @@ release files and their manifest, each file's sha256
 leash starts the application from the form's service file,
 `etc/sv/app/service`, as its own user, with only what the file names
 ([programs.md](programs.md); `cmd/leash/leash.zig` lists every directive).
-`example-python`'s:
+`python-example`'s:
 
 ```
 exec    /usr/bin/python3 /usr/lib/app/main.py
 user    app
+requires /usr/lib/app/main.py
 pledge  stdio rpath proc inet listen
 memory  512
 listen  tcp/8080
@@ -199,7 +202,7 @@ render  env app.env
 The application may write only `/run/svc/app` and `/data/svc/app`, its
 working directory, which outlives reboots and updates. It may bind only
 the ports it lists, and reach only what the form's form.yaml `net` allows
-(`forms/python/form.yaml`: `listen tcp/8080`); a database elsewhere is a line
+(`forms/python-app/form.yaml`: `listen tcp/8080`); a database elsewhere is a line
 there, `connect app tcp/5432`. A program that starts differently needs a
 form with its own service file ([forms.md](forms.md#a-python-web-server)).
 

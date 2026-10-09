@@ -7,9 +7,15 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-python/apko.yaml) inherits `python.yaml` and replaces
-[main.py](../../forms/example-python/rootfs/usr/lib/app/main.py). The parent supplies
-Python, the service and network settings, and inherits its user from `app`.
+The [form](../../forms/python-example/form.yaml) builds on
+[python-app](../../forms/python-app/form.yaml), which supplies Python, a
+service that starts `/usr/lib/app/main.py`, and its network settings, and
+ships no application. The example brings
+[main.py](../../forms/python-example/rootfs/usr/lib/app/main.py), and its
+own [service](../../forms/python-example/rootfs/etc/sv/app/service), which
+adds a setting. The service's `app` user gets its account from the build.
+Your own application is `--with python-app --app ./myapp`, with
+`./myapp/main.py`.
 For a production application, see the [Flask and gunicorn example](../../docs/forms.md#a-python-web-server).
 
 A form declares the machine's packages, users, services and network permissions.
@@ -19,7 +25,7 @@ image gives each replacement VM the same starting configuration.
 ## Build and run
 
 ```sh
-build/host/howl run --with example-python
+build/host/howl run --with python-example
 curl -f http://ADDRESS/          # ADDRESS as run printed it
 curl -f http://ADDRESS/health
 build/host/howl stop
@@ -36,8 +42,8 @@ checks it, the machine hands it to the application as `GREETING`, and a
 second `create` with a new one changes it without a rebuild:
 
 ```sh
-build/host/howl create web --with example-python --greeting "Hello from a setting"
-build/host/howl create web --with example-python --greeting "Hello again"
+build/host/howl create web --with python-example --greeting "Hello from a setting"
+build/host/howl create web --with python-example --greeting "Hello again"
 build/host/howl delete web
 ```
 
@@ -46,7 +52,7 @@ build/host/howl delete web
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-build/host/howl create python --with example-python --on gcp --allow-from me
+build/host/howl create python --with python-example --on gcp --allow-from me
 build/host/howl console python --on gcp     # the boot log
 ```
 
@@ -66,7 +72,7 @@ For application changes, rebuild, try it here, then create a machine under a
 new name:
 
 ```sh
-build/host/howl create python-v2 --with example-python --on gcp --allow-from me
+build/host/howl create python-v2 --with python-example --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;

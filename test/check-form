@@ -13,7 +13,9 @@
 # baked in) and GITEA_PORT, which test/boot reads.
 set -eu
 c=$CHECK/$FORM
-rm -f "$c.img" && dd if=/dev/zero of="$c.img" bs=1048576 count=0 seek=1024 2>/dev/null
+# /data: 4 GiB, sparse, so it costs only what is written. demo's Grype
+# unpacks a 2.4 GB database there, beside its 188 MB download.
+rm -f "$c.img" && dd if=/dev/zero of="$c.img" bs=1048576 count=0 seek=4096 2>/dev/null
 rm -rf "$c-config" && mkdir -p "$c-config"
 head -c 64 /dev/zero | tr '\0' k >"$c-config/data.key"
 if [ -n "${SSH_PORT:-}" ]; then

@@ -25,7 +25,7 @@ howl run
 Build your application into an immutable VM, here or in a cloud (`--on gcp`, `aws`, `azure`, `proxmox`):
 
 ```sh
-howl create web --with python --app ./myapp
+howl create web --with python-app --app ./myapp
 ```
 
 Tutorials: [PHP](examples/php/README.md), [Python](examples/python/README.md), [Node.js](examples/nodejs/README.md), [Go](examples/go/README.md), [Rust](examples/rust/README.md), [ASP.NET Core](examples/aspnet/README.md).

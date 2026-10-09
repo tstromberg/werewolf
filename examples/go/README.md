@@ -8,7 +8,7 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-go/apko.yaml) inherits `app.yaml`, which adds an
+The [form](../../forms/go-example/apko.yaml) inherits `app.yaml`, which adds an
 application user to `prod`. It declares the service and port 8080.
 [main.go](main.go) is compiled for Linux and installed at `/usr/lib/app/server`.
 
@@ -19,7 +19,7 @@ image gives each replacement VM the same starting configuration.
 ## Build and run
 
 ```sh
-build/host/howl run --with example-go
+build/host/howl run --with go-example
 curl -f http://ADDRESS/          # ADDRESS as run printed it
 curl -f http://ADDRESS/health
 build/host/howl stop
@@ -39,7 +39,7 @@ the build host; the example uses only its standard library.
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-build/host/howl create go --with example-go --on gcp --allow-from me
+build/host/howl create go --with go-example --on gcp --allow-from me
 build/host/howl console go --on gcp     # the boot log
 ```
 
@@ -54,14 +54,14 @@ for rollback. Both images share `/data`; rolling back does not undo data changes
 Wolfi packages and the kernel update automatically. The Go runtime, standard
 library and modules are compiled into the app; updating them or your code
 requires rebuilding the image with the updated toolchain and dependencies.
-After changing only the toolchain, remove `build/*/example-go*/application`
+After changing only the toolchain, remove `build/*/go-example*/application`
 so the next build compiles the app again.
 
 For application changes, rebuild, try it here, then create a machine under a
 new name:
 
 ```sh
-build/host/howl create go-v2 --with example-go --on gcp --allow-from me
+build/host/howl create go-v2 --with go-example --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;

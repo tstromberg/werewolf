@@ -1,0 +1,7 @@
+# What the python-app form, booted as it ships, without a shell, must say on its
+# console (make check-shellfree-python-app; test/boot; forms/demo/test/console has the
+# format). It ships no application, so its service stays down and says why.
+
+seen    app-waits         leash: \{"event":"down","service":"app","why":"requires /usr/lib/app/main\.py, which is not there"\}
+unseen  app-leashed       leash: \{"event":"start","service":"app"
+unseen  app-retried       leash: \{"event":"retry","service":"app"

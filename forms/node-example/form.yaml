@@ -1,0 +1,7 @@
+base: node-app
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: node runs the example
+  kernel-write-xor-execute: V8 compiles the example to machine code as it runs (allow jit, from node)

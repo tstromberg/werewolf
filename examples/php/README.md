@@ -7,9 +7,9 @@ from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/example-php/apko.yaml) inherits `php.yaml` and replaces
-[index.php](../../forms/example-php/rootfs/usr/share/nginx/html/index.php).
-It keeps the parent's services and network settings.
+The [form](../../forms/php-example/form.yaml) builds on `php`, which
+supplies nginx, php-fpm, their services and network settings, and brings
+[index.php](../../forms/php-example/rootfs/usr/share/nginx/html/index.php).
 
 A form declares the machine's packages, users, services and network permissions.
 Keep it with your code in version control. Building changes into a read-only
@@ -18,7 +18,7 @@ image gives each replacement VM the same starting configuration.
 ## Build and run
 
 ```sh
-build/host/howl run --with example-php
+build/host/howl run --with php-example
 curl -f http://ADDRESS/          # ADDRESS as run printed it
 curl -f http://ADDRESS/health
 build/host/howl stop
@@ -39,7 +39,7 @@ example at `/usr/lib/app/vendor`, and load its autoloader from there.
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-build/host/howl create php --with example-php --on gcp --allow-from me
+build/host/howl create php --with php-example --on gcp --allow-from me
 build/host/howl console php --on gcp     # the boot log
 ```
 
@@ -59,7 +59,7 @@ For application changes, rebuild, try it here, then create a machine under a
 new name:
 
 ```sh
-build/host/howl create php-v2 --with example-php --on gcp --allow-from me
+build/host/howl create php-v2 --with php-example --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;

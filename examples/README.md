@@ -4,12 +4,12 @@ Six small HTTP services, each with a form and a tutorial:
 
 | Tutorial | Form | Builds on | Guest port |
 | --- | --- | --- | --- |
-| [PHP](php/README.md) | `example-php` | `php` (nginx and PHP-FPM) | 80 |
-| [Python](python/README.md) | `example-python` | `python` | 8080 |
-| [Node.js](nodejs/README.md) | `example-node` | `node` | 8080 |
-| [Go](go/README.md) | `example-go` | `app`, with a static binary | 8080 |
-| [Rust](rust/README.md) | `example-rust` | `app`, with a static musl binary | 8080 |
-| [ASP.NET Core](aspnet/README.md) | `example-aspnet` | `app`, with ASP.NET Core 10 | 8080 |
+| [PHP](php/README.md) | `php-example` | `php` (nginx and PHP-FPM) | 80 |
+| [Python](python/README.md) | `python-example` | `python-app` | 8080 |
+| [Node.js](nodejs/README.md) | `node-example` | `node-app` | 8080 |
+| [Go](go/README.md) | `go-example` | `app`, with a static binary | 8080 |
+| [Rust](rust/README.md) | `rust-example` | `app`, with a static musl binary | 8080 |
+| [ASP.NET Core](aspnet/README.md) | `aspnet-example` | `app`, with ASP.NET Core 10 | 8080 |
 
 Each serves a greeting at `/`, `ok` at `/health`, and 404 for an unknown
 path. These are small teaching applications, with no database or external
@@ -69,10 +69,10 @@ Each tutorial's form is an ordinary form, so `howl` runs it as it runs any
 other, from the repository root:
 
 ```sh
-build/host/howl run --with example-python                    # here: Lima on a Mac, else QEMU
-build/host/howl create web --with example-python             # the same, a machine named web
-build/host/howl create web --with python --app ./myapp       # your own app, on the python form
-build/host/howl build --with example-python                  # its release disk, in dist/
+build/host/howl run --with python-example                    # here: Lima on a Mac, else QEMU
+build/host/howl create web --with python-example             # the same, a machine named web
+build/host/howl create web --with python-app --app ./myapp   # your own ./myapp/main.py, and no example
+build/host/howl build --with python-example                  # its release disk, in dist/
 ```
 
 `run` builds the image, boots it, and prints how to reach it: on Lima, the
@@ -91,7 +91,7 @@ new config, so `howl delete` the machine first to boot changed code.
 `howl build` writes `dist/FORM-ARCH-disk.qcow2`, an 8 GiB virtual UEFI disk
 with a verified root and update slots, and its manifest. The compressed file
 is smaller than its virtual size. The package locks in `build/lock/` make
-repeated builds use the same package versions; `make FORM=example-python
+repeated builds use the same package versions; `make FORM=python-example
 relock` resolves them again. `--arch x86_64` builds for the other
 architecture.
 
@@ -124,7 +124,7 @@ upload after. Machines use the `default` VPC.
 ## Deploy and inspect
 
 ```sh
-build/host/howl create web --with example-python --on gcp --allow-from me
+build/host/howl create web --with python-example --on gcp --allow-from me
 curl -f http://ADDRESS:8080/          # the address create printed
 curl -f http://ADDRESS:8080/health
 build/host/howl console web --on gcp  # the serial port: boot, posture, the app's log

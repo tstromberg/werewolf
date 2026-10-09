@@ -24,7 +24,8 @@ and key, and `make list-forms` shows the chains.
 | `app` | `prod` | where an application is laid; its service's `app` user gets a hashed uid; no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
-| `node`, `python`, `ruby`, `jre` | `app` | running an application on :8080 |
+| `node`, `python`, `ruby`, `jre` | `app` | a runtime, for the service and application a form on it brings |
+| `node-app`, `python-app`, `ruby-app` | `node`, `python`, `ruby` | a service for the application `--app` lays, on :8080; none shipped |
 | `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](../forms/postgresql/README.md)) |
 | `demo` | `postgresql` | nginx and the status page ([demo.md](../forms/demo/README.md)) |
 | `prod-ssh` | `prod`, with `sshd` | sshd, for people who log in with a security key |
@@ -64,24 +65,34 @@ ships is built without it.
 
 `prod` has no `app` user or group, and neither has its descendant `app`,
 which adds only where an application is laid: no packages, service or
-listening port. The `node`, `python` and `jre` forms, and the Go, Rust
-and ASP.NET Core examples, build on it, and their service's `user app`
+listening port. The `node`, `python`, `ruby` and `jre` forms, and the Go,
+Rust and ASP.NET Core examples, build on it, and a service's `user app`
 gets the account from the build: uid and gid its name's hash, home
 `/var/empty` and shell `/sbin/nologin` (forms/README.md). PHP and nginx
 keep separate service accounts, because they run separate services in
 the same VM.
 
-`nginx`, `php`, `node`, `python` and `jre` are each `prod` plus one runtime
-from Wolfi, as Chainguard's images are. Each has its own sample site or
-application, which answers until yours replaces it:
+`nginx`, `php`, `node`, `python`, `ruby` and `jre` are each `prod` plus
+one runtime from Wolfi, as Chainguard's images are, and no application.
+`nginx` and `php` serve the site laid in their html root. The others start
+nothing until a form on them brings a service. `node-app`, `python-app` and
+`ruby-app` bring one for the application laid in `/usr/lib/app`, and ship
+no application: until yours is there, the service stays down and says why
+on the console.
 
 | Form | Runs | As | On | Yours goes in |
 | --- | --- | --- | --- | --- |
 | `nginx` | nginx (`etc/sv/nginx`) | `nginx` | :80 | `/usr/share/nginx/html`, and `etc/nginx/nginx.conf` |
 | `php` | nginx, and php-fpm (`etc/sv/php-fpm`) on a socket only nginx may use | `nginx`, `php` | :80 | `/usr/share/nginx/html` |
-| `node` | `node /usr/lib/app/server.js` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
-| `python` | `python3 /usr/lib/app/main.py` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
-| `jre` | the JDK's web server (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app`, and `etc/sv/app/service` |
+| `node-app` | `node /usr/lib/app/server.js` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
+| `python-app` | `python3 /usr/lib/app/main.py` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
+| `ruby-app` | `ruby /usr/lib/app/main.rb` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
+| `jre` | your jar, as your service file says ([below](#ship-it)) | `app` | yours | `/usr/lib/app`, and `etc/sv/app/service` |
+
+`node-example`, `python-example` and `ruby-example` are those `-app` forms
+with a sample application, and `jre-example` is `jre` serving a page with
+the JDK's own web server. Each is a tutorial
+([examples/README.md](../examples/README.md)).
 
 Every one of those programs runs on a leash ([programs.md](programs.md)).
 It runs as its own user, with no capability except binding a port below
@@ -92,9 +103,10 @@ shell or package manager, nothing the form did not declare leaves the
 machine, and posture reports all this at every boot.
 
 An interpreter is the point of these forms. So posture's
-`programs-no-interpreters` check fails on `php`, `node`, `python` and `jre`
-by design, as `kernel-no-hypervisor` does on `qemu-host`. Each of these
-forms says so in its form.yaml, with its excuse:
+`programs-no-interpreters` check fails on `php`, `node`, `python`, `ruby`
+and `jre`, and every form on them, by design, as `kernel-no-hypervisor`
+does on `qemu-host`. Each of these forms says so in its form.yaml, with its
+excuse:
 
 ```yaml
 weaknesses:
@@ -278,15 +290,16 @@ application keeps is data, in its working directory, `/data/svc/app`.
 
 ### Without a form: `--app`
 
-When a runtime form already starts the application the right way, the
-application's files are all a machine needs. `--app DIR` lays a directory
-where the form keeps its application (form.yaml's `app`): `/usr/lib/app`
-for `python`, `node` and `jre`, and nginx's html root for `nginx` and
-`php`.
+When a form already starts the application the right way, as
+`python-app`, `node-app` and `ruby-app` do, the application's files are all
+a machine needs.
+`--app DIR` lays a directory where the form keeps its application
+(form.yaml's `app`): `/usr/lib/app` for the forms on `app`, and nginx's
+html root for `nginx` and `php`.
 
 ```sh
-build/host/howl create web --with python --app ./myapp     # ./myapp/main.py, on :8080
-build/host/howl build --with python --app ./myapp          # the release files, for elsewhere
+build/host/howl create web --with python-app --app ./myapp     # ./myapp/main.py, on :8080
+build/host/howl build --with python-app --app ./myapp          # the release files, for elsewhere
 ```
 
 DIR is what the application's own toolchain made (`go build`, `dotnet
@@ -301,7 +314,7 @@ does all of this with `make disk` and `tar`, to show the mechanism underneath.
 
 What the application needs from each machine, such as a database's address
 or a greeting, is a setting. Its form declares it, so a form of your own
-declares it. `examples/python`'s form takes `--greeting TEXT` and hands it
+declares it. `python-example` takes `--greeting TEXT` and hands it
 to the application as `GREETING` (`render env`, [Settings](#settings)). A
 secret is a file, given with `config` and read from `/run/svc/app`.
 
@@ -316,6 +329,8 @@ Wolfi names:
 ```yaml
 # forms/helloworld/form.yaml
 base: python
+net:
+  - listen tcp/8080
 ```
 
 ```yaml
@@ -326,7 +341,7 @@ contents:
     - py3.13-gunicorn
 ```
 
-The application goes where the `python` form looks for one:
+The application goes in `/usr/lib/app`, form.yaml's `app`:
 
 ```python
 # forms/helloworld/rootfs/usr/lib/app/helloworld.py
@@ -356,8 +371,8 @@ def health():
     return jsonify(status="ok")
 ```
 
-It starts differently from the `python` form's `main.py`, so it brings its
-own service file, which leash reads to start it
+It starts differently from `python-app`'s `main.py`, so it builds on
+`python` and brings its own service file, which leash reads to start it
 ([cmd/leash/leash.zig](../cmd/leash/leash.zig) lists every directive):
 
 ```
@@ -453,16 +468,10 @@ No promise brings `ptrace`, eBPF, perf, modules, `kexec`, io_uring,
 `userfaultfd`, the kernel keyring, file handles or another process's
 memory.
 
-A form's `net` adds to its chain's, so `helloworld` needs one only to allow
-more than `python`'s does. To serve on :8000 instead, change gunicorn's
-`--bind` and the service's `listen` to 8000, and add:
-
-```yaml
-# forms/helloworld/form.yaml
-base: python
-net:
-  - listen tcp/8000
-```
+A form's `net` adds to its chain's, and `python` declares none: the
+application says where it serves. To serve on :8000 instead, change
+gunicorn's `--bind`, the service's `listen` and form.yaml's `listen` to
+8000.
 
 ### Ship it
 
@@ -478,12 +487,12 @@ it only if it commits ([updater.md](updater.md)). posture runs at every
 boot and reports what holds. On a Python machine, `programs-no-interpreters`
 is the one check it fails. `python`'s form.yaml excuses it, but only for
 `python` itself, because excuses are not inherited. So a form of your own
-that `make check` boots names the weaknesses it has, as `example-python`
+that `make check` boots names the weaknesses it has, as `python-example`
 does.
 
-A Node or Java application works the same way, on `node` or `jre`. A Node
-application is `server.js` in `/usr/lib/app`, or brings its own service
-file. A Java application is a jar and a service file:
+A Node, Ruby or Java application works the same way, on `node`, `ruby` or
+`jre`, with a service file of its own. A Java application is a jar and
+this:
 
 ```
 exec    /usr/bin/java -XX:-UsePerfData -Djava.io.tmpdir=/run/svc/app -jar /usr/lib/app/app.jar
@@ -508,7 +517,7 @@ keeps it, so DIR builds what the flags built
 ([design/adhoc.md](design/adhoc.md)):
 
 ```sh
-build/host/howl run --with python --app ./api --package py3.13-flask
+build/host/howl run --with python-app --app ./api --package py3.13-flask
 build/host/howl create shop --with caddy,valkey,postgresql --domain shop.example.com
 build/host/howl run --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp
 build/host/howl form --with caddy,valkey -o forms/shop/
