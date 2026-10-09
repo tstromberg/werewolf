@@ -13,9 +13,9 @@ const mem = std.mem;
 
 /// offer returns root's authorized_keys for machine name: the keys in
 /// ~/.ssh the chain's sshd takes, security keys unless it takes key files
-/// too, once the person agrees or yes answers for them. It returns null,
-/// saying why, when there are none or the person declines; a machine with
-/// no key still boots, reached by console.
+/// too, once the person agrees, or at once when yes (--yes, or a machine
+/// here). It returns null, saying why, when there are none or the person
+/// declines; a machine with no key still boots, reached by console.
 pub fn offer(
     io: Io,
     gpa: Allocator,

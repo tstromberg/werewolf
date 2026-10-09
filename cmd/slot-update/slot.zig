@@ -421,7 +421,7 @@ pub fn apkAdd(
         .event = "held",
         .format = h.pinned,
         .offered = h.offered,
-        .why = "the repository has moved to a newer werewolf-format; reinstall to follow",
+        .why = "the repository has moved to a newer format; reinstall to follow",
     });
 
     try u.run(try std.mem.concat(u.gpa, []const u8, &.{
@@ -529,27 +529,33 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
     return idx;
 }
 
-/// Held is the werewolf-format a world pins and the newest an index offers.
+/// Held is the format a world names and the newest an index offers.
 const Held = struct { pinned: u32, offered: u32 };
 
-/// heldFormat returns the pin and the newest werewolf-format idx lists, if
-/// packages pin one and idx lists a newer: the machine then takes only what
-/// its format allows (lib/compose.zig).
+/// heldFormat returns the format packages name, werewolf-formatN (lib/compose.zig),
+/// and the newest idx lists, if idx lists a newer: the machine then takes only
+/// what its format allows.
 fn heldFormat(packages: []const []const u8, idx: apk.Index) ?Held {
-    const pin = "werewolf-format=";
     const pinned = for (packages) |p| {
-        if (std.mem.startsWith(u8, p, pin))
-            break std.fmt.parseInt(u32, p[pin.len..], 10) catch return null;
+        const f = formatOf(p) orelse continue;
+        if (f.rest.len == 0) break f.n;
     } else return null;
     var newest = pinned;
     var it = idx.keyIterator();
     while (it.next()) |name| {
-        // NAME-VERSION.HASH, VERSION being N-rR.
-        const rest = std.mem.cutPrefix(u8, name.*, "werewolf-format-") orelse continue;
-        const n = rest[0 .. std.mem.findScalar(u8, rest, '-') orelse continue];
-        newest = @max(newest, std.fmt.parseInt(u32, n, 10) catch continue);
+        // NAME-VERSION.HASH.
+        const f = formatOf(name.*) orelse continue;
+        if (f.rest.len > 0 and f.rest[0] == '-') newest = @max(newest, f.n);
     }
     return if (newest > pinned) .{ .pinned = pinned, .offered = newest } else null;
+}
+
+/// formatOf returns N in a name werewolf-formatN starts with, and what follows.
+fn formatOf(name: []const u8) ?struct { n: u32, rest: []const u8 } {
+    const rest = std.mem.cutPrefix(u8, name, "werewolf-format") orelse return null;
+    const end = std.mem.findNone(u8, rest, "0123456789") orelse rest.len;
+    const n = std.fmt.parseInt(u32, rest[0..end], 10) catch return null;
+    return .{ .n = n, .rest = rest[end..] };
 }
 
 /// prune deletes cached packages that root did not install, keeping the
@@ -1518,7 +1524,7 @@ test isCachedOf {
 }
 
 test published {
-    const world = [_][]const u8{ "prod-form", "werewolf-format=1", "caddy", "sshd-forms", "-form" };
+    const world = [_][]const u8{ "prod-form", "werewolf-format1", "caddy", "sshd-forms", "-form" };
     try testing.expect(published(&world, "prod"));
     try testing.expect(!published(&world, "caddy"));
     try testing.expect(!published(&world, "sshd"));
@@ -1530,15 +1536,16 @@ test heldFormat {
     var idx: apk.Index = .empty;
     defer idx.deinit(gpa);
     const sha1: [20]u8 = @splat(0);
-    try idx.put(gpa, "werewolf-format-1-r0.00000000", sha1);
+    try idx.put(gpa, "werewolf-format1-20261009.120000-r0.00000000", sha1);
     try idx.put(gpa, "werewolf-fence-20261009.161730-r0.00000000", sha1);
-    const world = [_][]const u8{ "werewolf-fence", "werewolf-format=1" };
+    const world = [_][]const u8{ "werewolf-fence", "werewolf-format1" };
     try testing.expectEqual(null, heldFormat(&world, idx));
     try testing.expectEqual(null, heldFormat(&.{"werewolf-fence"}, idx));
-    try idx.put(gpa, "werewolf-format-2-r0.00000000", sha1);
-    try idx.put(gpa, "werewolf-format-x-r0.00000000", sha1);
+    try idx.put(gpa, "werewolf-format2-20261010.120000-r0.00000000", sha1);
+    try idx.put(gpa, "werewolf-format-1-r0.00000000", sha1);
     try testing.expectEqual(Held{ .pinned = 1, .offered = 2 }, heldFormat(&world, idx).?);
-    try testing.expectEqual(null, heldFormat(&.{"werewolf-format=2"}, idx));
+    try testing.expectEqual(null, heldFormat(&.{"werewolf-format2"}, idx));
+    try testing.expectEqual(null, heldFormat(&.{"werewolf-formats"}, idx));
 }
 
 test withoutGz {

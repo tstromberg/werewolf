@@ -240,7 +240,7 @@ workflow packs both arches twice, requires the copies to match, and publishes
 (release/packages) only the packages whose files changed, with the index
 signed again. Published packages are never replaced or removed.
 
-Each package depends on `werewolf-format`, the version of the files compose
+Each package depends on `werewolf-formatN`, N numbering the files compose
 writes (`format` in lib/compose.zig); bump it on an incompatible change, and
 machines on the old one keep the last packages for it. The index is signed
 by `release/packages.pub`'s key, the secret `WEREWOLF_PACKAGES_KEY` in the

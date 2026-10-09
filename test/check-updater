@@ -6,18 +6,31 @@
 # its own, laid over as a later tar entry, so the updater finds Alpine's
 # kernel newer. Its stage0 is the build's, with this root's dm-verity table.
 #
+# With PUBLISHED=1, the slot's forms are werewolf's published ones but its
+# own, and the claim adds a marker to prod's staged copy and to the root, as
+# an older prod-form would have: the slot the updater builds must have
+# neither, as it composes prod from the package it installs (test/update).
+#
 # make passes CHECK, FORM, OUT, TAR, VICTIM, PRUNE (what the form leaves
 # out of its packages), EROFS_OPTS, VERITY (build/host/verity), CONSOLE,
-# SEAL_ARGS and STAGED, which test/update reads.
+# SEAL_ARGS, STAGED and PUBLISHED, which test/update reads.
 set -eu
 dir=$CHECK/update-$FORM
-rm -rf "$dir/claim" "$dir/victim" "$dir/victim.img"
+rm -rf "$dir/claim" "$dir/victim" "$dir/victim.img" "$dir/b"
 mkdir -p "$dir/claim/usr/share/werewolf" "$dir/victim/var/lib/werewolf/a" "$dir/victim/boot/grub"
 # linux-virt-6.18.55-r0 claims linux-virt-6.18.54-r0.
 awk -F. '{ split($3, z, "-"); if (z[1] < 1) exit 1; printf "%s.%s.%d-%s\n", $1, $2, z[1] - 1, z[2] }' \
 	"$OUT/meta/usr/share/werewolf/kernel" >"$dir/claim/usr/share/werewolf/kernel"
 printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >"$dir/root.mtree"
-"$TAR" -C "$dir/claim" -cf "$dir/claim.tar" --uid 0 --gid 0 --numeric-owner usr/share/werewolf/kernel
+claimed=usr/share/werewolf/kernel
+if [ -n "${PUBLISHED:-}" ]; then
+	old=usr/share/werewolf/forms/prod/rootfs/etc/werewolf-old-form
+	mkdir -p "$dir/claim/${old%/*}" "$dir/claim/etc"
+	echo "an older prod-form's" | tee "$dir/claim/$old" >"$dir/claim/etc/werewolf-old-form"
+	claimed="$claimed $old etc/werewolf-old-form"
+fi
+# shellcheck disable=SC2086 # claimed is paths
+"$TAR" -C "$dir/claim" -cf "$dir/claim.tar" --uid 0 --gid 0 --numeric-owner $claimed
 # roottar writes the slot's root: the build's, less what the form prunes,
 # then the claim.
 roottar() {

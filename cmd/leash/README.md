@@ -61,10 +61,10 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
    promises, stacked on the seal (none while the machine learns), then
    `execveat` a descriptor opened earlier, which a pledge without `exec`
    allows. It starts in `dir`, else its data or (no `/data`) run directory.
-5. **Narrowed:** run as `/etc/sv/NAME/narrow/PROGRAM`, a link the form ships
-   as it ships `./run`, leash stacks that program's lines on the service's
-   leash (a smaller floor: no accounts or network files; its paths; it alone
-   runnable; no TCP; its pledge) and execs it, without the service's secrets.
+5. **Narrowed:** run by `/etc/sv/NAME/narrow/PROGRAM`, the build's link
+   for a `narrow` line, leash stacks that program's lines on the service's
+   leash (a smaller floor without accounts or network files; its paths; it
+   alone runnable; no TCP; its pledge) and execs it, without secrets.
 
 ## Drawbacks
 

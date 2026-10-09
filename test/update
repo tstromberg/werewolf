@@ -21,6 +21,11 @@
 # filter have killed anything. The consoles are DIR/update-1.log and
 # DIR/update-2.log.
 #
+# With PUBLISHED=1 (test/check-updater), slot b must take prod from the
+# prod-form it installs, not slot a's staged copy, and keep the local form
+# slot a was built from: its world lists both forms, it has the local form's
+# marker, and neither copy of the older prod's.
+#
 # With STAGED=1, the machine has checked before (its log is seeded), so the
 # updater stages slot b and waits hours for it to be due. update cuts QEMU
 # off the moment slot b is staged, as a crash or an operator's reboot
@@ -146,6 +151,14 @@ fi
 victim_dump /var/lib/werewolf/b/root.erofs "$dir/b.erofs"
 root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]
+if [ -n "${PUBLISHED:-}" ]; then
+	mkdir -p "$dir/b" && fsck.erofs --extract="$dir/b" --no-preserve "$dir/b.erofs" >/dev/null 2>&1
+	world=$(awk '/^P:/ { print substr($0, 3) }' "$dir/b/usr/lib/apk/db/installed" | grep -- '-form$' | sort | tr '\n' ' ')
+	check "slot b installed the published forms: $world" [ "$world" = "minimal-form prod-form " ]
+	check "slot b keeps the local form, from slot a" [ -f "$dir/b/etc/werewolf-local-form" ]
+	check "slot b's prod is the package's, not slot a's older copy" sh -c \
+		"[ ! -e '$dir/b/etc/werewolf-old-form' ] && [ ! -e '$dir/b/usr/share/werewolf/forms/prod/rootfs/etc/werewolf-old-form' ]"
+fi
 check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.img"
 
 # Second boot: boot what the update built.

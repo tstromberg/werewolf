@@ -318,7 +318,7 @@ there ([design/update-policy.md](design/update-policy.md#the-audit-log)).
 | `commit` | `slot`, `build`, `release`, `waited` (per tier: `seen`, and the seconds from then to the commit), `down` (seconds from the update's reboot to this boot's kernel start, or null) |
 | `rollback` | `failed`, `running`, `build`, `release`, `down` |
 | `skip` | `build`, `reason` |
-| `held` | `format` (the world's pin), `offered` (the newest werewolf-format the repository has), `why`: the machine takes only programs for its format |
+| `held` | `format` (the N of the `werewolf-formatN` world names), `offered` (the newest format the repository has), `why`: the machine takes only programs for its format |
 | `error` | `step`, `error`, `detail` (what the failed command said) |
 
 ## Report

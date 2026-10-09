@@ -1227,7 +1227,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
             o.dns = if (on_lima) lima.user_gw else bhyve.user_dns;
         }
     }
-    // Root's keys, where none are given: the person's own, if they agree.
+    // Root's keys, where none are given: the person's own, at once for a
+    // machine here, theirs already; elsewhere if they agree.
     const given_keys = o.root_keys != null or if (o.config) |d|
         if (Dir.cwd().access(io, try std.fs.path.join(gpa, &.{ d, "authorized_keys" }), .{}))
             true
@@ -1236,7 +1237,13 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
     else
         false;
     if (!given_keys)
-        o.own_keys = try keys.offer(io, gpa, try chain(io, gpa, o.form, why), name, yes);
+        o.own_keys = try keys.offer(
+            io,
+            gpa,
+            try chain(io, gpa, o.form, why),
+            name,
+            yes or on.here(),
+        );
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
