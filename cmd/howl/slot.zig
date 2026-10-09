@@ -583,12 +583,22 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
     try packages.relock(b, lock, yaml, &.{yaml});
     try packages.apkoBuild(b, boot, yaml, lock, &.{lock});
     const slot = try b.path("{s}/slot", .{out});
+    if (std.fs.path.dirname(target)) |parent| try Dir.cwd().createDirPath(b.io, parent);
+    // The disk's size and kernel arguments, beside it and rewritten only when
+    // they change, are an input: steps rebuild by file times, so new options
+    // must make a newer file, or a disk built with the old ones would stay.
+    const options = try b.path("{s}.options", .{target});
+    var want: Io.Writer.Allocating = .init(b.gpa);
+    try want.writer.print("size-mib {d}\n", .{b.spec.disk.size_mib});
+    if (!qcow2) for (b.spec.disk.args) |arg| try want.writer.print("arg {s}\n", .{arg});
+    const was = Dir.cwd().readFileAlloc(b.io, options, b.gpa, .limited(64 << 10)) catch "";
+    if (!mem.eql(u8, was, want.written())) try b.write(options, want.written());
     const began = try b.begin(target, &.{
         try b.path("{s}/vmlinuz", .{slot}),    try b.path("{s}/stage0.zst", .{slot}),
         try b.path("{s}/root.erofs", .{slot}), try b.path("{s}/cmdline", .{slot}),
         boot,                                  b.self,
+        options,
     }) orelse return;
-    if (std.fs.path.dirname(target)) |parent| try Dir.cwd().createDirPath(b.io, parent);
     const t = try b.tmp(target);
     if (qcow2) {
         const raw = try b.path("{s}/disk.raw", .{out});
