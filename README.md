@@ -5,12 +5,12 @@ So secure that you can just give out the root password.
 
 Werewolf Linux is an experimental, secure-by-default distro for virtual machines:
 
-* **Locked down**: a read-only, verified root (ChromeOS's dm-verity) and every program confined by promises (OpenBSD's pledge).
-* **Declarative**: a VM is a form plus a few flags, built from Wolfi packages (apko), like NixOS but as a one-liner.
-* **Minimal**: production images carry no shell (Chainguard).
+* **Locked down**: read-only, verified root (ChromeOS's dm-verity) and every program confined by promises (OpenBSD's unveil/pledge).
+* **Declarative**: a VM is a form plus a few flags, built from Wolfi/Alpine packages, like NixOS but as a one-liner.
+* **Minimal**: production images carry no shell by default (Chainguard OS).
 * **Self-updating**: on by default, into A/B slots that roll back on failure (ChromeOS).
 
-None of the 49 Linux exploits in CISA's Known Exploited Vulnerabilities catalog would have worked against werewolf as it ships: 36 because the component isn't there, 12 because hardening stops them, and 1 we accept by choice ([survey](docs/cve-mitigation-survey.md)).
+Prevents 48 of 49 Linux exploits in CISA's Known Exploited Vulnerabilities catalog ([survey](docs/cve-mitigation-survey.md)).
 
 ## Try it
 
@@ -18,8 +18,8 @@ None of the 49 Linux exploits in CISA's Known Exploited Vulnerabilities catalog 
 
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf
-make install   # installs howl, and the tools it needs
-howl run       # builds and boots a werewolf VM here
+make install
+howl run
 ```
 
 Build your application into an immutable VM, here or in a cloud (`--on gcp`, `aws`, `azure`, `proxmox`):
