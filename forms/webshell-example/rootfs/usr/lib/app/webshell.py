@@ -2,8 +2,8 @@
 contains one.
 
 It does the worst thing a web application can do: it takes a string from an
-unauthenticated HTTP request and runs it as a command, by a shell or by
-fork/exec, with the response showing the output. That is remote code
+unauthenticated HTTP request and runs it as a command, through /bin/sh,
+with the response showing the output. That is remote code
 execution by design -- the bug class behind a large share of real
 breaches.
 
@@ -11,7 +11,9 @@ The point is what the attacker gets for it on werewolf: nothing worth
 having. The command runs as the leashed `app` user (cmd/leash), on a root
 that is read-only and dm-verity-checked, with:
 
-  * no shell in the image, so a shell command finds no interpreter;
+  * no shell in the image: /bin/sh is sh-shim (cmd/sh-shim), so a shell
+    command runs one program the leash allows, or is refused, and
+    chains, pipes and expands nothing;
   * Landlock allowing exec of only the service's own python3 and the
     programs the `run` line names; Landlock grants exec per file, and
     Wolfi's coreutils is one multi-call binary, so naming id or cat allows
@@ -31,6 +33,11 @@ So even full RCE -- arbitrary Python through the python3 that is allowed
 to run -- cannot read a secret, change the system, persist, or call home.
 A reboot returns the machine to the signed image regardless.
 
+A program the app runs on what a stranger sends -- a media tool, say -- can
+be held tighter than the app: cat, run by its link /etc/sv/app/narrow/cat,
+is narrowed (docs/design/narrow.md). It reads the image, but neither the
+account list nor the app's own files, which the app and plain cat may.
+
 At boot the application attacks itself with a battery of representative
 payloads and logs, as JSON on the console, that none escaped
 (forms/webshell-example/test/console). The page keeps the last 100 attempts,
@@ -42,7 +49,6 @@ import collections
 import datetime
 import json
 import os
-import shlex
 import subprocess
 import sys
 import threading
@@ -68,19 +74,17 @@ def _log(event, **fields):
     print("webshell: " + json.dumps(rec), flush=True)
 
 
-def run(cmd, shell, source, agent):
+def run(cmd, source, agent):
     """Run cmd and record the attempt. Returns the record.
 
-    This is the vulnerability: cmd comes straight from the request. shell
-    chooses `sh -c cmd` over a fork/exec of cmd's own words, so a visitor
-    can see that werewolf ships no shell for the first and confines the
-    exec of the second.
+    This is the vulnerability: cmd comes straight from the request and runs
+    as `sh -c cmd`, as an application's shell command would. /bin/sh is
+    sh-shim, so it runs one program the leash allows, or nothing.
     """
     record = {
         "time": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "source": source,
         "agent": agent,
-        "mode": "shell" if shell else "exec",
         "cmd": cmd,
     }
     # stdout holds only what the command itself wrote; a Python traceback
@@ -88,15 +92,9 @@ def run(cmd, shell, source, agent):
     # stdout alone, never from the command text repeated back in an error.
     record["stdout"] = ""
     try:
-        if shell:
-            argv = cmd
-        else:
-            argv = shlex.split(cmd)
-            if not argv:
-                raise ValueError("empty command")
         done = subprocess.run(
-            argv,
-            shell=shell,
+            cmd,
+            shell=True,
             capture_output=True,
             text=True,
             timeout=TIMEOUT,
@@ -104,13 +102,14 @@ def run(cmd, shell, source, agent):
         )
         record["exit"] = done.returncode
         record["stdout"] = done.stdout
+        record["stderr"] = done.stderr
         record["output"] = (done.stdout + done.stderr)[:MAX_OUTPUT]
     except FileNotFoundError as e:
-        # No /bin/sh for a shell command, or the named binary is absent.
+        # No /bin/sh at all.
         record["exit"] = None
         record["output"] = f"not found: {e}"
     except PermissionError as e:
-        # Landlock refused the exec: the binary is there but not allowed.
+        # Landlock refused /bin/sh itself: a DEV build's is busybox's.
         record["exit"] = None
         record["output"] = f"refused: {e}"
     except subprocess.TimeoutExpired:
@@ -139,25 +138,26 @@ PAGE = """<!doctype html>
 </style>
 <h1>werewolf webshell &mdash; a contained vulnerability</h1>
 <p class="warn">This runs whatever you type, as a real web application with
-remote code execution would. On werewolf it is caged: no shell; exec of
+remote code execution would. On werewolf it is caged: no shell, as
+<code>/bin/sh</code> is sh-shim, which runs one program and refuses
+<code>&amp;&amp;</code>, pipes and <code>$</code>; exec of
 only its own python3 and the programs its leash allows (coreutils and
 <code>hostname</code>); no writes outside its own data; no network out;
 and even an allowed tool reads only what the cage permits. Try to escape
 &mdash; or run <code>cat /etc/passwd</code> (works) and
-<code>cat /etc/shadow</code> (refused) and see the difference.</p>
+<code>cat /etc/shadow</code> (refused) and see the difference. Narrowed,
+<code>/etc/sv/app/narrow/cat /etc/passwd</code> is refused too.</p>
 <form method="post">
   <input type="text" name="cmd" placeholder="e.g. cat /etc/shadow" autofocus>
-  <label><input type="checkbox" name="shell" value="1"> Run within a shell</label>
   <button type="submit">Run</button>
 </form>
 <p>The last {{ attempts|length }} attempts (newest first):</p>
 <table>
- <tr><th>time</th><th>source</th><th>mode</th><th>command</th><th>exit</th><th>output</th></tr>
+ <tr><th>time</th><th>source</th><th>command</th><th>exit</th><th>output</th></tr>
  {% for a in attempts %}
  <tr>
   <td>{{ a.time }}</td>
   <td>{{ a.source }}<br><small>{{ a.agent }}</small></td>
-  <td>{{ a.mode }}</td>
   <td class="out">{{ a.cmd }}</td>
   <td class="{{ 'exit0' if a.exit == 0 else 'exitX' }}">{{ a.exit if a.exit is not none else '-' }}</td>
   <td class="out">{{ a.output }}</td>
@@ -166,9 +166,9 @@ and even an allowed tool reads only what the cage permits. Try to escape
 </table>
 <footer>
  <p><small>Everything running here is open: the application
- (<a href="https://github.com/werewolf-linux/werewolf/blob/main/forms/webshell-example/usr/lib/app/webshell.py">webshell.py</a>),
+ (<a href="https://github.com/werewolf-linux/werewolf/blob/main/forms/webshell-example/rootfs/usr/lib/app/webshell.py">webshell.py</a>),
  its leash policy
- (<a href="https://github.com/werewolf-linux/werewolf/blob/main/forms/webshell-example/etc/sv/app/service">etc/sv/app/service</a>),
+ (<a href="https://github.com/werewolf-linux/werewolf/blob/main/forms/webshell-example/rootfs/etc/sv/app/service">etc/sv/app/service</a>),
  and the form that builds it
  (<a href="https://github.com/werewolf-linux/werewolf/tree/main/forms/webshell-example">forms/webshell-example</a>).
  How it runs and is contained: <a href="https://github.com/werewolf-linux/werewolf/blob/main/docs/forms.md">docs/forms.md</a>.</small></p>
@@ -180,9 +180,8 @@ and even an allowed tool reads only what the cage permits. Try to escape
 def index():
     if request.method == "POST":
         cmd = request.form.get("cmd", "")
-        shell = request.form.get("shell") == "1"
         if cmd.strip():
-            run(cmd, shell, request.remote_addr or "?", request.headers.get("User-Agent", "?"))
+            run(cmd, request.remote_addr or "?", request.headers.get("User-Agent", "?"))
     # Jinja autoescapes, so an attacker's command and its output cannot
     # inject HTML into this page.
     with _lock:
@@ -198,41 +197,36 @@ def attempts_json():
 
 # Representative attacks, as a visitor would type them. Each aims at a real
 # breach -- reading a secret, writing the root, reading another service's
-# data, reaching the network -- so success is the same on the shipped image
-# and on a DEV build that ships a shell: the shell is one more way in, not a
-# breach by itself. goal is a string the attack prints to its own stdout
+# data, reaching the network -- not merely at a shell, which is one more way
+# in, not a breach by itself. goal is a string the attack prints to its own stdout
 # only when it got what it was after, so finding it means the cage leaked.
 # (A denied operation raises, printing a traceback to stderr, which echoes
 # the command; stdout stays empty, and only stdout is judged.)
 ATTACKS = [
-    ("read a secret, via a shell", "cat /etc/shadow && echo LEAK", True, "LEAK"),
-    ("read a secret, via fork/exec", "/bin/cat /etc/shadow", False, "root:"),
+    ("read a secret, chaining commands", "cat /etc/shadow && echo LEAK", "LEAK"),
+    ("read a secret, by its full path", "/bin/cat /etc/shadow", "root:"),
     (
         "read a secret, through the one binary that runs",
         "/usr/bin/python3 -c \"print('SECRET='+open('/etc/shadow').read())\"",
-        False,
         "SECRET=",
     ),
     (
         "write the root filesystem",
         "/usr/bin/python3 -c \"open('/pwned','w').write('x'); print('WROTE')\"",
-        False,
         "WROTE",
     ),
     (
         "read another service's data",
         "/usr/bin/python3 -c \"print('DATA='+open('/data/svc/postgres/data/postgresql.conf').read())\"",
-        False,
         "DATA=",
     ),
     (
         "call home",
         "/usr/bin/python3 -c \"import socket; socket.create_connection(('10.0.2.2',9999),2); print('CONNECTED')\"",
-        False,
         "CONNECTED",
     ),
-    ("spawn a shell to read a secret", "sh -c 'cat /etc/shadow && echo LEAK'", True, "LEAK"),
-    ("read a secret with an allowed tool", "cat /etc/shadow", False, "root:"),
+    ("spawn a shell to read a secret", "sh -c 'cat /etc/shadow && echo LEAK'", "LEAK"),
+    ("read a secret with an allowed tool", "cat /etc/shadow", "root:"),
 ]
 
 # The commands the service's `run` line allows (etc/sv/app/service): real
@@ -249,11 +243,26 @@ ALLOWED = [
     ("a line it prints itself", "echo contained-rce-works", "contained-rce-works"),
 ]
 
+# cat, narrowed (etc/sv/app/service's `narrow` line), run by its link to
+# leash. Each file, and whether narrowed cat may read it; the app may read
+# each, and plain cat with it. The narrowing holds where both are so and
+# leash said, on narrowed cat's stderr, that it narrowed it.
+NARROW = "/etc/sv/app/narrow/cat"
+PROBE = "/run/svc/app/narrow-probe"
+NARROWED = [
+    ("/usr/lib/app/webshell.py", True),
+    ("/etc/passwd", False),
+    (PROBE, False),
+]
+
 
 def self_test():
+    # Every command runs through /bin/sh: as shipped, sh-shim; in a DEV
+    # build, busybox's, which the leash refuses.
+    _log("shell", sh=os.path.realpath("/bin/sh"))
     escaped = 0
-    for name, cmd, shell, goal in ATTACKS:
-        rec = run(cmd, shell, "self-test", name)
+    for name, cmd, goal in ATTACKS:
+        rec = run(cmd, "self-test", name)
         # Escaped only if the command exited cleanly and printed, on its
         # own stdout, the proof it produced the forbidden result. A denied
         # read, write or connect raises, so it exits non-zero with nothing
@@ -265,7 +274,7 @@ def self_test():
         rec["escaped"] = leaked
         if leaked:
             escaped += 1
-        _log("attempt", attack=name, mode=rec["mode"], exit=rec["exit"], escaped=leaked)
+        _log("attempt", attack=name, exit=rec["exit"], escaped=leaked)
     _log("self-test", attacks=len(ATTACKS), escaped=escaped)
     if escaped:
         # The cage leaked: say so loudly. The console test fails on this.
@@ -275,7 +284,7 @@ def self_test():
     # proving the RCE executes and the `run` list permits exactly these.
     ran = 0
     for name, cmd, expect in ALLOWED:
-        rec = run(cmd, False, "self-test", name)
+        rec = run(cmd, "self-test", name)
         out = rec.get("stdout", "")
         # It ran if it exited cleanly with output, and gave the expected
         # content: `cat /etc/passwd` must show the public account list,
@@ -291,6 +300,26 @@ def self_test():
         # expected output; if not, the demo is not showing contained
         # execution. The console test fails on this.
         print(f"webshell: only {ran} of {len(ALLOWED)} allowed commands ran", file=sys.stderr, flush=True)
+
+    # The narrowed cat: refused what the app, and plain cat, may read.
+    with open(PROBE, "w") as f:
+        f.write("the app's own\n")
+    held = 0
+    leash = ""
+    for path, child_may in NARROWED:
+        parent = run(f"cat {path}", "self-test", "read by cat")
+        child = run(f"{NARROW} {path}", "self-test", "read by narrowed cat")
+        parent_read = parent["exit"] == 0 and parent["stdout"] != ""
+        child_read = child["exit"] == 0 and child["stdout"] != ""
+        line = next((x for x in child.get("stderr", "").splitlines() if x.startswith('leash: {"event":"narrow"')), "")
+        leash = leash or line
+        ok = parent_read and child_read == child_may and line != ""
+        held += ok
+        _log("narrowed", file=path, parent=parent_read, child=child_read, leashed=line != "", held=ok)
+    _log("narrowing", leash=leash, checks=len(NARROWED), held=held)
+    if held != len(NARROWED):
+        # The console test fails on this.
+        print(f"webshell: the narrowing held for only {held} of {len(NARROWED)} files", file=sys.stderr, flush=True)
 
 
 # Attack ourselves once the worker is up, off the request path.

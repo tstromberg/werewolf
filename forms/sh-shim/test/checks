@@ -1,0 +1,17 @@
+# sh-shim runs one program with its words, as sh splits them; an empty
+# command runs nothing. glibc and musl pass -- before the command.
+ok  sh-shim-words     n=/usr/lib/werewolf/sh-shim; [ "$($n -c "busybox echo 'a  b' \"c d\" e'f g'")" = 'a  b c d ef g' ] && [ "$($n -c -- 'busybox echo x')" = x ] && $n -c '' && $n -c ' '
+# It refuses with 126, before running anything, what sh would read
+# specially: syntax, expansions, a glob, an assignment, sh's own words, an
+# open quote, a control character. It never shows the command, which may
+# hold a secret.
+ok  sh-shim-refuses   n=/usr/lib/werewolf/sh-shim; for c in 'a | b' 'a >/tmp/x' 'a; b' 'a && b' 'echo $HOME' 'echo "$HOME"' 'echo `id`' 'a *' 'A=1 a' "a 'b" 'exit 3' 'cd /' "'exec' a" "$(printf 'a\rb')" "$(printf 'a\nb')"; do $n -c "$c" 2>/dev/null; [ $? -eq 126 ] || { echo "not refused: $c"; exit 1; }; done; ! $n -c 'busybox | secret' 2>&1 | grep -q secret
+# Called other than as sh -c COMMAND, as a login, by a script's #! line or
+# with an option, it runs nothing: 1.
+ok  sh-shim-no-shell  n=/usr/lib/werewolf/sh-shim; for a in '' -s -i '-ec busybox' '-c -e busybox' -c /etc/passwd; do $n $a </dev/null 2>/dev/null; [ $? -eq 1 ] || { echo "ran: $a"; exit 1; }; done
+# A program is found along PATH, never in the current directory, even by
+# an empty or relative entry; none found is 127.
+ok  sh-shim-path      n=/usr/lib/werewolf/sh-shim; cd /usr/bin && PATH=/usr/bin $n -c 'busybox true' && { PATH=: $n -c busybox 2>/dev/null; [ $? -eq 127 ]; } && { PATH=. $n -c busybox 2>/dev/null; [ $? -eq 127 ]; } && { $n -c no-such-program 2>/dev/null; [ $? -eq 127 ]; }
+# A DEV build's busybox-full brings a shell, and its /bin/sh wins over the
+# shim's, as any package's or later form's would. The allowance is laid.
+ok  sh-shim-yields    [ "$(readlink /usr/bin/sh)" = /bin/busybox ] && [ -e /etc/werewolf/allow/sh ]

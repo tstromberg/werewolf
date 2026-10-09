@@ -138,7 +138,9 @@ pub fn take(
     args: []const []const u8,
     why: *Why,
 ) !?[]const []const u8 {
-    const fallback = if (verb == .run) defaultBase(io, gpa, args) else "prod";
+    // run's form when none is named, and the base its flags build on, on
+    // every engine: playground, which Lima manages and anyone may log in to.
+    const fallback = if (verb == .run) "playground" else "prod";
     var p = try plan(gpa, verb, args, fallback, why);
     if (try references(&p, fallback, why)) |ref| {
         // A single form with nothing added runs unchanged, so -n has nothing
@@ -478,23 +480,6 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
             .{ b.name, a.name, pa },
         );
     return p;
-}
-
-/// defaultBase returns run's form when none is named: lima on Lima, which needs
-/// sshd and bash, and prod-ssh elsewhere so there is a way in. It is also the
-/// base that run's --with, --package and --oci build on.
-fn defaultBase(io: Io, gpa: Allocator, args: []const []const u8) []const u8 {
-    var on: ?howl.Platform = null;
-    for (args, 0..) |a, i| {
-        const v = if (std.mem.startsWith(u8, a, "--on="))
-            a["--on=".len..]
-        else if (std.mem.eql(u8, a, "--on") and i + 1 < args.len)
-            args[i + 1]
-        else
-            continue;
-        on = std.meta.stringToEnum(howl.Platform, v);
-    }
-    return if (howl.engine(io, gpa, on).on == .lima) "lima" else "prod-ssh";
 }
 
 /// references returns the form to use unchanged when at most one --with is given
@@ -866,7 +851,7 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
 /// takesNothing reports whether flag is a verb flag with no value; others take
 /// the next word.
 fn takesNothing(flag: []const u8) bool {
-    for ([_][]const u8{ "--dev", "--build", "--verbose", "-v", "-h", "--help" }) |f|
+    for ([_][]const u8{ "--dev", "--build", "--yes", "--verbose", "-v", "-h", "--help" }) |f|
         if (std.mem.eql(u8, flag, f)) return true;
     return false;
 }
@@ -919,12 +904,18 @@ test "a line with none of our flags is left alone" {
     );
     try testing.expect(!p.ours);
     try testing.expectEqual(1, p.positionals);
-    const bare = try plan(arena.allocator(), .run, &.{ "--on", "lima", "--dev" }, "lima", &why);
+    const bare = try plan(
+        arena.allocator(),
+        .run,
+        &.{ "--on", "lima", "--dev" },
+        "playground",
+        &why,
+    );
     try testing.expect(!bare.ours);
     try testing.expectEqual(0, bare.positionals);
-    const with = try plan(arena.allocator(), .run, &.{ "--with", "valkey" }, "lima", &why);
+    const with = try plan(arena.allocator(), .run, &.{ "--with", "valkey" }, "playground", &why);
     try testing.expect(with.ours);
-    try testing.expectEqualStrings("lima", with.base);
+    try testing.expectEqualStrings("playground", with.base);
 }
 
 test "positionals: create names the machine; run and build name a base" {
@@ -950,8 +941,8 @@ test "positionals: create names the machine; run and build name a base" {
     try testing.expectEqual(null, try references(&one_more, "prod", &why));
     try testing.expectEqualStrings("caddy", one_more.base);
     try testing.expectEqual(0, one_more.with.len);
-    var none = try plan(gpa, .run, &.{"--dev"}, "lima", &why);
-    try testing.expectEqualStrings("lima", (try references(&none, "lima", &why)).?);
+    var none = try plan(gpa, .run, &.{"--dev"}, "playground", &why);
+    try testing.expectEqualStrings("playground", (try references(&none, "playground", &why)).?);
     var kept = try plan(gpa, .run, &.{ "--with", "forms/shop/" }, "prod", &why);
     try testing.expectEqualStrings("forms/shop/", (try references(&kept, "prod", &why)).?);
     var kept_more = try plan(

@@ -1,8 +1,10 @@
 //! leash starts a service someone else wrote as its own user, confined by
 //! Landlock, a seccomp pledge and a cgroup. /etc/sv/NAME/run links to it, and
-//! it reads /etc/sv/NAME/service. See README.md.
+//! it reads /etc/sv/NAME/service. Run by /etc/sv/NAME/narrow/PROGRAM, it
+//! starts that program on a narrower leash. See README.md.
 
 const std = @import("std");
+const allowances = @import("allow");
 const seal = @import("seal");
 const settings = @import("settings");
 const sandbox = @import("sandbox");
@@ -19,6 +21,8 @@ const max_secret = 4 << 10;
 /// max_tasks is every service's pids.max, which counts processes and threads.
 const max_tasks = 4096;
 const service_config = "/usr/lib/werewolf/service-config";
+const leash_bin = "/usr/lib/werewolf/leash";
+const sh_shim = "/usr/lib/werewolf/sh-shim";
 
 /// why_buf holds the message Leash.fail logs.
 var why_buf: [512]u8 = undefined;
@@ -26,6 +30,19 @@ var why_buf: [512]u8 = undefined;
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
+
+    // AT_EXECFN is the path this program was run by, through any link.
+    const at = linux.getauxval(std.elf.AT.EXECFN);
+    const run_by = if (at == 0) "" else std.mem.span(@as([*:0]const u8, @ptrFromInt(at)));
+    if (narrowLink(run_by)) |link| try narrow(io, gpa, link, init.minimal);
+    // Anything else must be runsv, or posture's probe, as root.
+    if (linux.getuid() != 0) {
+        record(io, .stderr(), .{
+            .event = "refused",
+            .why = "leash runs as root, or by a narrowed program's link",
+        });
+        std.process.exit(1);
+    }
 
     // Close at exec whatever runsv left open, and leash's own files too.
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
@@ -35,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
     // Not CLOEXEC: if fd 0 was closed, open returns 0, and it must survive exec.
     const null_fd = linux.open("/dev/null", .{ .ACCMODE = .RDONLY }, 0);
     if (linux.errno(null_fd) != .SUCCESS) {
-        record(io, .{
+        record(io, .stdout(), .{
             .event = "warning",
             .why = "cannot open /dev/null; fd 0 stays as runsv left it",
             .errno = @tagName(linux.errno(null_fd)),
@@ -77,6 +94,23 @@ pub fn main(init: std.process.Init) !void {
     const user = lookupUser(passwd, s.user) orelse
         l.fail(.park, "no user {s} in /etc/passwd", .{s.user});
     if (user.uid == 0 or user.gid == 0) l.fail(.park, "{s} is root's", .{s.user});
+    // The build could not tell this service's directories from another's.
+    // Each narrowed program's link ships in the image, as ./run does.
+    for (s.narrow) |n| {
+        for (n.read) |p| if (!service.reaches(s, name, p, false))
+            l.fail(.park, "narrow {s}: {s} is not the service's to read", .{ n.program, p });
+        for (n.write) |p| if (!service.reaches(s, name, p, true))
+            l.fail(.park, "narrow {s}: {s} is not the service's to write", .{ n.program, p });
+        const link = try gpa.printSentinel(
+            "/etc/sv/{s}/narrow/{s}",
+            .{ name, std.fs.path.basename(n.program) },
+            0,
+        );
+        var buf: [Dir.max_path_bytes]u8 = undefined;
+        const len = linux.readlink(link, &buf, buf.len);
+        if (linux.errno(len) != .SUCCESS or !std.mem.eql(u8, buf[0..len], leash_bin))
+            l.fail(.park, "narrow {s}: {s} is not a link to {s}", .{ n.program, link, leash_bin });
+    }
 
     // --- as root ------------------------------------------------------------
 
@@ -144,13 +178,17 @@ pub fn main(init: std.process.Init) !void {
             var buf: [8]u8 = undefined;
             const w = std.mem.print(&buf, "{d}\n", .{weight}) catch unreachable;
             if (!writeIn(gpa, dir, "cpu.weight", w))
-                record(io, .{ .event = "uncapped", .service = name, .why = "no cpu controller" });
+                record(
+                    io,
+                    .stdout(),
+                    .{ .event = "uncapped", .service = name, .why = "no cpu controller" },
+                );
         }
         var pid_buf: [24]u8 = undefined;
         const pid = std.mem.print(&pid_buf, "{d}\n", .{linux.getpid()}) catch unreachable;
         if (!writeIn(gpa, dir, "cgroup.procs", pid)) l.fail(.park, "cannot join its cgroup", .{});
     } else if (s.memory != null) {
-        record(io, .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
+        record(io, .stdout(), .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
     }
 
     // Chroot into the service's image as root, before building any rule, so
@@ -193,11 +231,19 @@ pub fn main(init: std.process.Init) !void {
     for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
     for (s.write) |p| allowPath(l, rules, gpa, p, write_tree, nodata);
     for (s.run) |p| allowProgram(l, rules, gpa, p);
+    // The image's sh shim, which a service in an image of its own lacks.
+    if (allowances.has(.sh) and s.root == null) allowProgram(l, rules, gpa, sh_shim);
     allowProgram(l, rules, gpa, s.exec[0]);
     for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
     if (s.render) |r| {
         allowProgram(l, rules, gpa, service_config);
         if (r.from) |from| allowPath(l, rules, gpa, from, sandbox.read_file, nodata);
+    }
+    // A narrowed program's leash is leash, reading this file.
+    if (s.narrow.len > 0) {
+        allowProgram(l, rules, gpa, leash_bin);
+        const file = try gpa.printSentinel("/etc/sv/{s}/service", .{name}, 0);
+        allowPath(l, rules, gpa, file, sandbox.read_file, nodata);
     }
     for (s.listen) |port| rules.port(sandbox.bind_tcp, port) catch |err|
         l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
@@ -215,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
     else
         own_data;
     const cd = linux.chdir(cwd);
-    if (linux.errno(cd) != .SUCCESS) record(io, .{
+    if (linux.errno(cd) != .SUCCESS) record(io, .stdout(), .{
         .event = "warning",
         .service = name,
         .why = "cannot enter its directory; it starts where runsv did",
@@ -234,13 +280,10 @@ pub fn main(init: std.process.Init) !void {
         copyConfig(own_run, try gpa.dupeSentinel(u8, cfg.name, 0), value) catch |err|
             l.fail(.park, "config {s}: {s}", .{ cfg.name, @errorName(err) });
     }
-    // The pledge as words, for the start record.
-    var pledge: std.ArrayList([]const u8) = .empty;
-    var promises = s.pledge.iterator();
-    while (promises.next()) |p| try pledge.append(gpa, @tagName(p));
     const learn = learning();
     record(
         io,
+        .stdout(),
         .{
             .event = "start",
             .service = name,
@@ -250,7 +293,7 @@ pub fn main(init: std.process.Init) !void {
             .listen = s.listen,
             .connect = s.connect,
             .landlock = rules.abi,
-            .pledge = pledge.items,
+            .pledge = try words(gpa, s.pledge),
             // While the machine learns, the service gets no filter.
             .pledged = !learn,
         },
@@ -282,24 +325,165 @@ pub fn main(init: std.process.Init) !void {
     var i: usize = 0;
     while (env_it.next()) |e| : (i += 1)
         envp[i] = try gpa.printSentinel("{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }, 0);
+    pledgeAndExec(l, prog_rc, s.exec[0], s.pledge, learn, argv.ptr, envp.ptr);
+}
 
-    // The pledge filter returns ENOSYS for calls outside its promises. It has
-    // no listener, so no_new_privs (set in dropTo) suffices to install it.
-    // A learning machine installs none, so every call reaches seal-watch.
+/// pledgeAndExec installs a pledge of promises and becomes the program
+/// opened as prog, which a pledge without exec allows. The pledge returns
+/// ENOSYS outside its promises and has no listener, so no_new_privs
+/// suffices to install it. While the machine learns there is none, so
+/// every call reaches seal-watch.
+fn pledgeAndExec(
+    l: Leash,
+    prog: usize,
+    path: []const u8,
+    promises: seal.Set,
+    learn: bool,
+    argv: [*:null]const ?[*:0]const u8,
+    envp: [*:null]const ?[*:0]const u8,
+) noreturn {
     if (!learn) {
         var filter_buf: [seal.max_filter]seal.Filter = undefined;
-        const filter = seal.buildFilter(&filter_buf, s.pledge, true);
+        const filter = seal.buildFilter(&filter_buf, promises, true);
         _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
     }
     const rc = linux.syscall5(
         .execveat,
-        prog_rc,
+        prog,
         @intFromPtr(""),
-        @intFromPtr(argv.ptr),
-        @intFromPtr(envp.ptr),
+        @intFromPtr(argv),
+        @intFromPtr(envp),
         0x1000, // AT_EMPTY_PATH
     );
-    l.fail(.park, "exec {s}: {s}", .{ s.exec[0], @tagName(linux.errno(rc)) });
+    l.fail(.park, "exec {s}: {s}", .{ path, @tagName(linux.errno(rc)) });
+}
+
+// --- a narrowed program ------------------------------------------------------------
+
+/// Link is a narrowed program's link to leash, /etc/sv/SERVICE/narrow/NAME.
+const Link = struct { service: []const u8, name: []const u8 };
+
+/// narrowLink splits path, the path leash was run by, if it is a narrowed
+/// program's link.
+fn narrowLink(path: []const u8) ?Link {
+    if (!std.mem.startsWith(u8, path, "/etc/sv/")) return null;
+    const rest = path["/etc/sv/".len..];
+    const slash = std.mem.findScalar(u8, rest, '/') orelse return null;
+    if (!std.mem.startsWith(u8, rest[slash..], "/narrow/")) return null;
+    const name = rest[slash + "/narrow/".len ..];
+    if (!service.isName(rest[0..slash]) or name.len == 0 or
+        std.mem.findScalar(u8, name, '/') != null or
+        std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) return null;
+    return .{ .service = rest[0..slash], .name = name };
+}
+
+/// narrow is leash run by a narrowed program's link, as the service, inside
+/// its leash. It reads the program's narrow lines from the service's file,
+/// root's on the verified root; stacks on the service's Landlock domain and
+/// pledge its own, which no_new_privs lets it install; and becomes the
+/// program, with the arguments it was given and the environment less the
+/// service's secrets.
+fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !noreturn {
+    const l: Leash = .{ .io = io, .ctl = null, .name = link.service, .narrowed = true };
+    // Close at exec all but stdin, stdout and stderr: a descriptor the
+    // service left open, a socket above all, would reach past the narrowing.
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
+    if (linux.getuid() == 0) l.fail(.park, "{s}: run as its service, never as root", .{link.name});
+    const file = try gpa.printSentinel("/etc/sv/{s}/service", .{link.service}, 0);
+    const text = readRootFile(gpa, file) catch |err|
+        l.fail(.park, "{s}: {s}", .{ file, @errorName(err) });
+    var bad: service.Bad = .{};
+    const s = service.parse(gpa, text, &bad) catch
+        l.fail(.park, "{s}, line {d}: {s}", .{ file, bad.line, bad.why });
+    const n = for (s.narrow) |n| {
+        if (std.mem.eql(u8, std.fs.path.basename(n.program), link.name)) break n;
+    } else l.fail(.park, "{s} narrows no program named {s}", .{ file, link.name });
+
+    check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) catch
+        l.fail(.park, "no_new_privs: refused", .{});
+    const rules = sandbox.Ruleset.init(.{ .sockets = true }) catch |err|
+        l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
+    for (narrow_floor) |f| allow(rules, f.path, f.access, .optional) catch {};
+    for ([_][:0]const u8{ "/proc/self/fd/1", "/proc/self/fd/2" }) |fd|
+        allow(rules, fd, sandbox.write_file, .optional) catch {};
+    for (n.read) |p| allowPath(l, rules, gpa, p, read_tree, false);
+    for (n.write) |p| allowPath(l, rules, gpa, p, write_tree, false);
+    allowProgram(l, rules, gpa, n.program);
+    if (n.memory) |mib| {
+        const max = @as(u64, mib) << 20;
+        if (linux.errno(linux.setrlimit(.DATA, &.{ .cur = max, .max = max })) != .SUCCESS)
+            l.fail(.park, "memory {d}: refused", .{mib});
+    }
+    const learn = learning();
+    rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
+    record(io, .stderr(), .{
+        .event = "narrow",
+        .service = link.service,
+        .program = n.program,
+        .landlock = rules.abi,
+        .pledge = try words(gpa, n.pledge),
+        .memory = n.memory,
+        .pledged = !learn,
+    });
+
+    const prog_rc = linux.open(
+        try gpa.dupeSentinel(u8, n.program, 0),
+        .{ .ACCMODE = .RDONLY, .PATH = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(prog_rc) != .SUCCESS)
+        l.fail(.park, "exec {s}: {s}", .{ n.program, @tagName(linux.errno(prog_rc)) });
+    const argv = try gpa.allocSentinel(?[*:0]const u8, m.args.vector.len, null);
+    for (m.args.vector, argv) |a, *p| p.* = a;
+    const envp = try unsecret(gpa, m.environ.block.slice, s.secrets);
+    pledgeAndExec(l, prog_rc, n.program, n.pledge, learn, argv.ptr, envp.ptr);
+}
+
+/// readRootFile reads the file at path, at most max_file bytes, if root
+/// owns it and no one else may write it. It does not follow a final link.
+fn readRootFile(gpa: Allocator, path: [:0]const u8) ![]const u8 {
+    const rc = linux.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return error.CannotOpen;
+    const fd: linux.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(
+        fd,
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .UID = true, .SIZE = true },
+        &st,
+    )) != .SUCCESS) return error.CannotStat;
+    if (st.uid != 0 or st.mode & 0o022 != 0 or st.mode & linux.S.IFMT != linux.S.IFREG)
+        return error.NotRootsAlone;
+    if (st.size > max_file) return error.TooBig;
+    const buf = try gpa.alloc(u8, @intCast(st.size));
+    var off: usize = 0;
+    while (off < buf.len) {
+        const got = linux.pread(fd, buf[off..].ptr, buf.len - off, @intCast(off));
+        if (linux.errno(got) == .INTR) continue;
+        if (linux.errno(got) != .SUCCESS or got == 0) return error.ReadFailed;
+        off += got;
+    }
+    return buf;
+}
+
+/// unsecret returns environ without the variables the service's secret
+/// lines name, so a narrowed program does not hold them.
+fn unsecret(
+    gpa: Allocator,
+    environ: []const ?[*:0]const u8,
+    secrets: []const [2][]const u8,
+) ![:null]?[*:0]const u8 {
+    var kept: std.ArrayList(?[*:0]const u8) = .empty;
+    for (environ) |e| {
+        const entry = std.mem.span(e orelse continue);
+        const name = entry[0 .. std.mem.findScalar(u8, entry, '=') orelse entry.len];
+        for (secrets) |sec| {
+            if (std.mem.eql(u8, sec[0], name)) break;
+        } else try kept.append(gpa, e);
+    }
+    return kept.toOwnedSliceSentinel(gpa, null);
 }
 
 /// learning reports whether the machine is learning pledges: werewolf.seal=learn
@@ -587,18 +771,27 @@ const RESOLVE_NO_MAGICLINKS = 0x02;
 const RESOLVE_NO_SYMLINKS = 0x04;
 
 const Floor = struct { path: [:0]const u8, access: u64 };
-const floor = [_]Floor{
+/// floor is service.floor, which a service reads; /dev/null it writes too.
+const floor = blk: {
+    var f: [service.floor.len]Floor = undefined;
+    for (service.floor, &f) |path, *r| {
+        const writes = std.mem.eql(u8, path, "/dev/null");
+        r.* = .{
+            .path = path,
+            .access = if (writes) read_tree | sandbox.write_file else read_tree,
+        };
+    }
+    break :blk f;
+};
+
+/// narrow_floor is a narrowed program's floor: its service's, but neither
+/// the accounts nor what only the network needs.
+const narrow_floor = [_]Floor{
     .{ .path = "/usr", .access = read_tree },
     .{ .path = "/proc", .access = read_tree },
     .{ .path = "/sys/devices/system/cpu", .access = read_tree },
-    .{ .path = "/etc/passwd", .access = sandbox.read_file },
-    .{ .path = "/etc/group", .access = sandbox.read_file },
-    .{ .path = "/etc/hosts", .access = sandbox.read_file },
-    .{ .path = "/etc/resolv.conf", .access = sandbox.read_file },
-    .{ .path = "/etc/nsswitch.conf", .access = sandbox.read_file },
     .{ .path = "/etc/ld.so.cache", .access = sandbox.read_file },
     .{ .path = "/etc/localtime", .access = sandbox.read_file },
-    .{ .path = "/etc/ssl", .access = read_tree },
     .{ .path = "/dev/null", .access = sandbox.read_file | sandbox.write_file },
     .{ .path = "/dev/zero", .access = sandbox.read_file },
     .{ .path = "/dev/urandom", .access = sandbox.read_file },
@@ -700,6 +893,10 @@ const Leash = struct {
     /// ctl is runsv's control pipe, used to park the service; null if not open.
     ctl: ?linux.fd_t,
     name: []const u8,
+    /// narrowed is set while leash starts a narrowed program: it then logs
+    /// on stderr, since the program's stdout may be what its service reads,
+    /// and has no runsv to tell.
+    narrowed: bool = false,
 
     const Outcome = enum { park, retry };
 
@@ -707,8 +904,12 @@ const Leash = struct {
     /// service down; with .retry runsv starts it again.
     fn fail(l: Leash, how: Outcome, comptime fmt: []const u8, args: anytype) noreturn {
         const why = std.mem.print(&why_buf, fmt, args) catch fmt;
+        if (l.narrowed) {
+            record(l.io, .stderr(), .{ .event = "refused", .service = l.name, .why = why });
+            std.process.exit(1);
+        }
         const event = if (how == .park) "down" else "retry";
-        record(l.io, .{ .event = event, .service = l.name, .why = why });
+        record(l.io, .stdout(), .{ .event = event, .service = l.name, .why = why });
         if (how == .park) if (l.ctl) |fd| {
             _ = linux.write(fd, "d", 1);
         };
@@ -716,14 +917,23 @@ const Leash = struct {
     }
 };
 
-/// record logs fields as one JSON line on the console.
-fn record(io: Io, fields: anytype) void {
+/// record logs fields as one JSON line on out: stdout, which runsv routes
+/// to the console, or a narrowed program's stderr.
+fn record(io: Io, out: Io.File, fields: anytype) void {
     var buf: [2048]u8 = undefined;
     var w: Io.Writer = .fixed(&buf);
     w.writeAll("leash: ") catch return;
     std.json.Stringify.value(fields, .{}, &w) catch return;
     w.writeByte('\n') catch return;
-    Io.File.stdout().writeStreamingAll(io, w.buffered()) catch {};
+    out.writeStreamingAll(io, w.buffered()) catch {};
+}
+
+/// words returns promises as words, for a log line.
+fn words(gpa: Allocator, promises: seal.Set) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    var it = promises.iterator();
+    while (it.next()) |p| try list.append(gpa, @tagName(p));
+    return list.items;
 }
 
 // --- tests ---------------------------------------------------------------------------
@@ -793,4 +1003,52 @@ test "config copies replace links, not their targets" {
     try testing.expectEqualStrings("replacement", try tmp.dir.readFile(io, "hard", &buf));
     try tmp.dir.createDir(io, "directory", .default_dir);
     try testing.expectError(error.Unlink, copyConfig(path, "directory", "no"));
+}
+
+test narrowLink {
+    const l = narrowLink("/etc/sv/mastodon-sidekiq/narrow/ffmpeg").?;
+    try testing.expectEqualStrings("mastodon-sidekiq", l.service);
+    try testing.expectEqualStrings("ffmpeg", l.name);
+    for ([_][]const u8{
+        "/usr/lib/werewolf/leash", // leash itself, not a link
+        "/etc/sv/app/run",
+        "/etc/sv/app/narrow/",
+        "/etc/sv/app/narrow/..",
+        "/etc/sv/app/narrow/a/b",
+        "/etc/sv/App/narrow/cat",
+        "/etc/sv//narrow/cat",
+        "/etc/sv/app/narrowed/cat",
+        "/run/svc/app/narrow/cat",
+        "etc/sv/app/narrow/cat",
+        "",
+    }) |path| try testing.expectEqual(null, narrowLink(path));
+}
+
+test "a narrowed program's floor is within its service's" {
+    for (narrow_floor) |f| {
+        for (floor) |g| {
+            if (std.mem.eql(u8, f.path, g.path) and f.access & ~g.access == 0) break;
+        } else return error.TestUnexpectedResult;
+    }
+    // Neither the accounts nor what only the network needs.
+    for ([_][]const u8{ "/etc/passwd", "/etc/hosts", "/etc/resolv.conf", "/etc/ssl" }) |p|
+        for (narrow_floor) |f| try testing.expect(!std.mem.eql(u8, f.path, p));
+    // A service's floor reads every path, and writes /dev/null alone.
+    for (floor) |f| {
+        try testing.expect(f.access & sandbox.read_file != 0);
+        const writes = f.access & sandbox.write_file != 0;
+        try testing.expectEqual(std.mem.eql(u8, f.path, "/dev/null"), writes);
+    }
+}
+
+test unsecret {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const environ = [_:null]?[*:0]const u8{ "PATH=/usr/bin", "TOKEN=hunter2", "TOKENS=x", "LANG" };
+    const kept = try unsecret(arena.allocator(), &environ, &.{.{ "TOKEN", "/run/config/x" }});
+    try testing.expectEqual(3, kept.len);
+    try testing.expectEqualStrings("PATH=/usr/bin", std.mem.span(kept[0].?));
+    try testing.expectEqualStrings("TOKENS=x", std.mem.span(kept[1].?));
+    try testing.expectEqualStrings("LANG", std.mem.span(kept[2].?));
+    try testing.expectEqual(null, kept[kept.len]);
 }

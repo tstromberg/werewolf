@@ -32,7 +32,7 @@ busybox `sh` in every image. Removing it matters because:
 
 ## Non-Goals
 
-- **Forms that log people in** (`sshd`, `lima`, `prod-ssh`) carry
+- **Forms that log people in** (`sshd`, `playground`, `prod-ssh`) carry
   busybox-full; runtime forms (`python`, `node`, `php`, `jre`) carry their
   interpreter. Each names the failure in `weaknesses:` (forms/README.md).
 - **bite**, which runs on the victim's distro; an interpreter inside a
@@ -45,6 +45,12 @@ runit's three stages (`runit-stage`, under three names), `reboot`,
 `grub-setenv`, `slot-keep`, `power-button`, `debug-shell`, `ssh-host-key`,
 `sshd-start`, `bite-cleanup`, and `mount`, since busybox's cannot set
 `noexec`. init ends in `exec fence runit`, so runit stays PID 1.
+
+**`sh -c` without a shell.** A program that insists on one (supercronic, a
+library's `system`) gets sh-shim from the `sh-shim` form: it runs one
+program with sh's words and refuses the rest. It is `/bin/sh` only where
+no package or later form gives one, and posture counts it as no shell
+([cmd/sh-shim/README.md](../../cmd/sh-shim/README.md)).
 
 **Service files.** A service someone else wrote is `/etc/sv/NAME/service`,
 with `run` linked to leash and `finish` to leash-reap. A line is a key and

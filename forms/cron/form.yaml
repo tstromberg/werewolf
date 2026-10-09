@@ -1,0 +1,5 @@
+base: prod
+
+# sh-shim, the crontab's SHELL, and the allowance that lets the leash run
+# it: supercronic runs each job as `sh-shim -c COMMAND`.
+with: [sh-shim]

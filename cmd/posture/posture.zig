@@ -331,10 +331,15 @@ pub const Posture = struct {
     ) !void {
         var found: std.ArrayList(u8) = .empty;
         var how: std.ArrayList(u8) = .empty;
+        // A name that is the sh shim, as /bin/sh is where nothing else
+        // gives one (cmd/sh-shim), runs one program: it is none of these.
+        const shim = fileId(p.gpa, sh_shim, false);
+        var shims: std.ArrayList(u8) = .empty;
         try how.appendSlice(p.gpa, "none of ");
         for (names, 0..) |n, i| {
             if (i > 0) try how.appendSlice(p.gpa, ", ");
             try how.appendSlice(p.gpa, n);
+            var shim_at: ?[]const u8 = null;
             for ([_][]const u8{
                 "/bin",
                 "/sbin",
@@ -345,11 +350,20 @@ pub const Posture = struct {
             }) |dir| {
                 const path = try p.gpa.print("{s}/{s}", .{ dir, n });
                 if (!exists(p.io, path)) continue;
+                if (shim) |s| if (fileId(p.gpa, path, true)) |f| if (std.meta.eql(f, s)) {
+                    shim_at = shim_at orelse path;
+                    continue;
+                };
                 try listAdd(p.gpa, &found, "{s}", .{path});
                 break;
             }
+            if (shim_at) |at| try listAdd(p.gpa, &shims, "{s} is the sh shim", .{at});
         }
-        try how.appendSlice(p.gpa, " in /bin, /sbin, /usr/bin, /usr/sbin or /usr/local");
+        try how.appendSlice(
+            p.gpa,
+            " in /bin, /sbin, /usr/bin, /usr/sbin or /usr/local, but for a link to " ++
+                sh_shim,
+        );
         try p.add(.{
             .id = id,
             .area = area,
@@ -357,7 +371,7 @@ pub const Posture = struct {
             .why = why,
             .how = how.items,
             .result = if (found.items.len == 0) .pass else .fail,
-            .detail = found.items,
+            .detail = if (found.items.len == 0) shims.items else found.items,
         });
     }
 
@@ -908,6 +922,22 @@ pub fn statx(gpa: Allocator, path: []const u8) ?linux.Statx {
     );
     if (linux.errno(rc) != .SUCCESS) return null;
     return st;
+}
+
+const sh_shim = "/usr/lib/werewolf/sh-shim";
+
+/// FileId is a file's device and inode.
+const FileId = struct { major: u32, minor: u32, ino: u64 };
+
+/// fileId returns the device and inode of the regular file at path, or null
+/// if there is none; follow says whether a final link is followed.
+fn fileId(gpa: Allocator, path: []const u8, follow: bool) ?FileId {
+    const z = gpa.printSentinel("{s}", .{path}, 0) catch return null;
+    var st: linux.Statx = undefined;
+    const flags: u32 = if (follow) 0 else linux.AT.SYMLINK_NOFOLLOW;
+    const rc = linux.statx(linux.AT.FDCWD, z, flags, .{ .TYPE = true, .INO = true }, &st);
+    if (linux.errno(rc) != .SUCCESS or st.mode & linux.S.IFMT != linux.S.IFREG) return null;
+    return .{ .major = st.dev_major, .minor = st.dev_minor, .ino = st.ino };
 }
 
 pub fn lessString(_: void, a: []const u8, b: []const u8) bool {

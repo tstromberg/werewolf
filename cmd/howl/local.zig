@@ -243,7 +243,7 @@ pub fn createLima(
             // own user, so it manages the machine, ssh and stop included.
             const p = try howl.buildHere(io, gpa, &steps, spec, .{ .image = true });
             // The instance's disk, which Lima copies and grows to 100 GiB,
-            // and the lima form formats as /data: one blank file for all.
+            // and the playground form formats as /data: one blank file for all.
             try qemu.disk(io, try gpa.print("{s}/disk.img", .{p.build}), 64 << 20);
             const cmdline = Dir.cwd().readFileAlloc(
                 io,

@@ -30,7 +30,7 @@ by name from there, so the machine updates it; `--build` takes this tree's.
 | `base` | the form it is built on, a name in forms/ | |
 | `with` | forms it takes beside its base, as a Mastodon takes `[postgresql, valkey, nginx]`: their parts come before its own | added to |
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `popen-shim.so` (a library) | added to |
-| `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
+| `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
 | `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
 | `net` | its network policy: `listen tcp/PORT... [loopback]`, `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER` ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
 | `prune` | files its packages bring that nothing runs, as each is in the image: `usr/bin/bash` | added to |

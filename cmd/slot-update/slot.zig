@@ -63,6 +63,10 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         try u.gpa.print("etc/apk/keys/{s}", .{name}),
     );
     try copyTree(u, r, "", "usr/share/werewolf", &compose.records);
+    // The sh shim is /bin/sh where no package (busyboxLinks laid
+    // busybox's) or form gave one, as the build lays it (cmd/sh-shim).
+    if (try r.exists(u, "usr/lib/werewolf/sh-shim") and !try r.exists(u, "usr/bin/sh"))
+        try r.symLink(u, "/usr/lib/werewolf/sh-shim", "usr/bin/sh");
     // Remove what the form prunes (form.yaml's prune), as the build does. A
     // path the packages no longer bring is logged, not an error, so an
     // upstream change cannot stop updates.

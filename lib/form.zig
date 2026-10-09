@@ -761,6 +761,18 @@ fn has(forms: []const Form, name: []const u8) bool {
     return false;
 }
 
+/// runsSshd reports whether the chain runs sshd: it has the sshd form or
+/// the bastion.
+pub fn runsSshd(forms: []const Form) bool {
+    return has(forms, "sshd") or has(forms, "bastion");
+}
+
+/// takesKeyFiles reports whether the chain's sshd accepts plain key files,
+/// not only security keys (lib/sshd.zig).
+pub fn takesKeyFiles(gpa: Allocator, forms: []const Form) Error!bool {
+    return sshd.takesKeyFiles(try chainSshd(gpa, forms));
+}
+
 /// sshdConfig returns the image's sshd_config.d/form.conf from the chain's
 /// sshd: keywords, a later form's value replacing an earlier one, or "" for
 /// none. It fails unless the chain has the sshd or bastion form to read it.

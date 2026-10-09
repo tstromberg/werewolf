@@ -29,6 +29,11 @@ pub const Allowance = enum {
     /// code (a JVM, V8, .NET, PCRE2's JIT, LLVM). Without it no process can
     /// make written memory executable, so code an exploit writes never runs.
     jit,
+    /// sh lets every leashed service run the sh shim (cmd/sh-shim), which
+    /// starts only what the service's `run` lines name. The grant is the
+    /// shim's file, so it covers /bin/sh only where /bin/sh is the shim,
+    /// never a package's shell.
+    sh,
 };
 
 /// dir holds one empty file per allowance the form grants.

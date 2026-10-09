@@ -34,7 +34,38 @@ pub const Service = struct {
     /// where it starts there.
     root: ?[]const u8 = null,
     dir: ?[]const u8 = null,
+    /// narrow lists the programs it runs on a narrower leash.
+    narrow: []const Narrow = &.{},
 };
+
+/// Narrow is a program its service runs on a narrower leash, by the link
+/// /etc/sv/NAME/narrow/PROGRAM (docs/design/narrow.md): promises within the
+/// service's, no network, and the paths beyond its floor that it may read
+/// and write, within the service's. memory caps what it may allocate, in MiB.
+pub const Narrow = struct {
+    program: []const u8,
+    pledge: seal.Set = .empty,
+    read: []const []const u8 = &.{},
+    write: []const []const u8 = &.{},
+    memory: ?u32 = null,
+};
+
+/// floor is what leash lets every service without a root read beyond its
+/// file's lines; of it, the service may write only /dev/null.
+pub const floor = [_][:0]const u8{
+    "/usr",             "/proc",              "/sys/devices/system/cpu",
+    "/etc/passwd",      "/etc/group",         "/etc/hosts",
+    "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/ld.so.cache",
+    "/etc/localtime",   "/etc/ssl",           "/dev/null",
+    "/dev/zero",        "/dev/urandom",
+};
+
+/// narrowing is what a service with narrowed programs must promise: their
+/// leash reads its file, stacks Landlock and seccomp, and runs them.
+const narrowing: seal.Set = .initMany(&.{ .rpath, .exec, .landlock, .seccomp });
+
+/// network is what no narrowed program may promise.
+const network: seal.Set = .initMany(&.{ .inet, .unix, .netlink, .packet, .connect, .listen });
 
 /// Config is a `config` line: the copy's name in the service's directory,
 /// its source beneath /run/config, and whether the service runs without it.
@@ -86,6 +117,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var configs: std.ArrayList(Config) = .empty;
     var declared: std.ArrayList(settings.Setting) = .empty;
     var render: ?settings.Render = null;
+    var narrowed: std.ArrayList(Narrowing) = .empty;
 
     var lines = std.mem.splitScalar(u8, text, '\n');
     var n: usize = 0;
@@ -168,13 +200,9 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             render = settings.parseRender(args, &bad.why) catch return error.Invalid;
         } else if (std.mem.eql(u8, key, "pledge")) {
             if (pledge != null) return invalid(bad, "pledge twice");
-            if (args.len == 0) return invalid(bad, "pledge takes promises");
-            var set: seal.Set = .empty;
-            for (args) |a| set.insert(
-                std.meta.stringToEnum(seal.Promise, a) orelse
-                    return invalid(bad, "no such promise"),
-            );
-            pledge = set;
+            pledge = try promised(args, bad);
+        } else if (std.mem.eql(u8, key, "narrow")) {
+            try narrowLine(gpa, &narrowed, args, n, bad);
         } else if (std.mem.eql(u8, key, "nofile")) {
             if (nofile != null) return invalid(bad, "nofile twice");
             if (args.len != 1) return invalid(bad, "nofile takes one number");
@@ -183,11 +211,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             if (nofile.? == 0 or nofile.? > 1 << 20) return invalid(bad, "nofile is 1 to 1048576");
         } else if (std.mem.eql(u8, key, "memory")) {
             if (memory != null) return invalid(bad, "memory twice");
-            if (args.len != 1) return invalid(bad, "memory takes one number of MiB");
-            memory = std.fmt.parseInt(u32, args[0], 10) catch
-                return invalid(bad, "memory takes a number of MiB");
-            if (memory.? == 0 or memory.? > 1 << 20)
-                return invalid(bad, "memory is 1 to 1048576 MiB");
+            memory = try mib(args, bad);
         } else if (std.mem.eql(u8, key, "cpu")) {
             if (cpu != null) return invalid(bad, "cpu twice");
             if (args.len != 1) return invalid(bad, "cpu takes one weight, 1 to 10000");
@@ -236,7 +260,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 return invalid(bad, "a setting's key is a secret's too");
         };
     } else if (declared.items.len > 0) return invalid(bad, "setting without render");
-    return .{
+    var s: Service = .{
         .exec = exec orelse return invalid(bad, "no exec"),
         .user = user orelse return invalid(bad, "no user"),
         .pledge = promises,
@@ -260,11 +284,173 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .root = root,
         .dir = dir,
     };
+    s.narrow = try narrowWithin(gpa, s, narrowed.items, bad);
+    return s;
+}
+
+/// Narrowing gathers one program's `narrow` lines; line is its first.
+const Narrowing = struct {
+    program: []const u8,
+    line: usize,
+    pledge: ?seal.Set = null,
+    read: std.ArrayList([]const u8) = .empty,
+    write: std.ArrayList([]const u8) = .empty,
+    memory: ?u32 = null,
+};
+
+/// narrowLine adds a `narrow PROGRAM KEY WORD...` line, numbered line, to
+/// the program's lines in list.
+fn narrowLine(
+    gpa: Allocator,
+    list: *std.ArrayList(Narrowing),
+    args: []const []const u8,
+    line: usize,
+    bad: *Bad,
+) !void {
+    if (args.len < 2)
+        return invalid(bad, "narrow takes PROGRAM, then pledge, read, write or memory");
+    const prog = (try program(args[0..1], bad))[0];
+    const words = args[2..];
+    const nw = for (list.items) |*x| {
+        if (std.mem.eql(u8, x.program, prog)) break x;
+    } else blk: {
+        try list.append(gpa, .{ .program = prog, .line = line });
+        break :blk &list.items[list.items.len - 1];
+    };
+    if (std.mem.eql(u8, args[1], "pledge")) {
+        if (nw.pledge != null) return invalid(bad, "narrow pledge twice for one program");
+        const set = try promised(words, bad);
+        if (set.intersectWith(network).count() > 0) return invalid(
+            bad,
+            "a narrowed program has no network: no inet, unix, netlink, packet, connect or listen",
+        );
+        nw.pledge = set;
+    } else if (std.mem.eql(u8, args[1], "read") or std.mem.eql(u8, args[1], "write")) {
+        if (words.len == 0) return invalid(bad, "no paths");
+        for (words) |a| {
+            if (!isCleanPath(a))
+                return invalid(bad, "a path must be absolute, without . or .. or //");
+            const paths = if (std.mem.eql(u8, args[1], "read")) &nw.read else &nw.write;
+            try paths.append(gpa, a);
+        }
+    } else if (std.mem.eql(u8, args[1], "memory")) {
+        if (nw.memory != null) return invalid(bad, "narrow memory twice for one program");
+        nw.memory = try mib(words, bad);
+    } else return invalid(bad, "narrow PROGRAM takes pledge, read, write or memory");
+}
+
+/// narrowWithin checks each narrowed program against its service s and
+/// returns them. On a fault it sets bad to the program's first line.
+fn narrowWithin(gpa: Allocator, s: Service, list: []Narrowing, bad: *Bad) ![]const Narrow {
+    const out = try gpa.alloc(Narrow, list.len);
+    for (list, out) |*nw, *o| {
+        bad.line = nw.line;
+        if (s.root != null) return invalid(bad, "narrow under a root: leash is not in the image");
+        for (s.run) |r| {
+            if (std.mem.eql(u8, r, nw.program)) break;
+        } else return invalid(bad, "a narrowed program must be named by a run line");
+        const name = std.fs.path.basename(nw.program);
+        for (list) |*other| if (other != nw and
+            std.mem.eql(u8, std.fs.path.basename(other.program), name))
+            return invalid(bad, "two narrowed programs share a name, which their links need");
+        const set = nw.pledge orelse return invalid(bad, "a narrowed program needs a pledge");
+        var lacking = set.differenceWith(s.pledge).iterator();
+        if (lacking.next()) |p| return invalidFmt(
+            gpa,
+            bad,
+            "narrow pledge {t}: the service does not promise it",
+            .{p},
+        );
+        var needed = narrowing.differenceWith(s.pledge).iterator();
+        if (needed.next()) |p| return invalidFmt(
+            gpa,
+            bad,
+            "narrowing needs the service to promise {t}",
+            .{p},
+        );
+        for (nw.read.items) |p| if (!reaches(s, null, p, false)) return invalidFmt(
+            gpa,
+            bad,
+            "narrow read {s}: the service may not read it",
+            .{p},
+        );
+        for (nw.write.items) |p| if (!reaches(s, null, p, true)) return invalidFmt(
+            gpa,
+            bad,
+            "narrow write {s}: the service may not write it",
+            .{p},
+        );
+        o.* = .{
+            .program = nw.program,
+            .pledge = set,
+            .read = nw.read.items,
+            .write = nw.write.items,
+            .memory = nw.memory,
+        };
+    }
+    bad.line = 0;
+    return out;
+}
+
+/// reaches reports whether service s, named name, may read path, or write
+/// it if write: within its read or write lines, its own directories or, to
+/// read, the floor. Without a name, as at build, any service's directory
+/// passes; leash checks again with it.
+pub fn reaches(s: Service, name: ?[]const u8, path: []const u8, write: bool) bool {
+    for (s.write) |p| if (within(path, p)) return true;
+    if (write) {
+        if (std.mem.eql(u8, path, "/dev/null")) return true;
+    } else {
+        for (s.read) |p| if (within(path, p)) return true;
+        for (floor) |p| if (within(path, p)) return true;
+    }
+    for ([_][]const u8{ "/run/svc/", "/data/svc/" }) |dirs| {
+        if (!std.mem.startsWith(u8, path, dirs)) continue;
+        const rest = path[dirs.len..];
+        const owner = rest[0 .. std.mem.findScalar(u8, rest, '/') orelse rest.len];
+        if (owner.len > 0 and (name == null or std.mem.eql(u8, owner, name.?))) return true;
+    }
+    return false;
+}
+
+/// within reports whether path is dir or beneath it.
+fn within(path: []const u8, dir: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, dir)) return false;
+    return path.len == dir.len or std.mem.eql(u8, dir, "/") or path[dir.len] == '/';
 }
 
 fn invalid(bad: *Bad, why: []const u8) error{Invalid} {
     bad.why = why;
     return error.Invalid;
+}
+
+/// invalidFmt is invalid with a message that names what is wrong.
+fn invalidFmt(
+    gpa: Allocator,
+    bad: *Bad,
+    comptime fmt: []const u8,
+    args: anytype,
+) error{ Invalid, OutOfMemory } {
+    return invalid(bad, gpa.print(fmt, args) catch return error.OutOfMemory);
+}
+
+/// promised returns the promises args name, at least one.
+fn promised(args: []const []const u8, bad: *Bad) !seal.Set {
+    if (args.len == 0) return invalid(bad, "pledge takes promises");
+    var set: seal.Set = .empty;
+    for (args) |a| set.insert(
+        std.meta.stringToEnum(seal.Promise, a) orelse return invalid(bad, "no such promise"),
+    );
+    return set;
+}
+
+/// mib returns the one number of MiB args holds, 1 to 1048576.
+fn mib(args: []const []const u8, bad: *Bad) !u32 {
+    if (args.len != 1) return invalid(bad, "memory takes one number of MiB");
+    const m = std.fmt.parseInt(u32, args[0], 10) catch
+        return invalid(bad, "memory takes a number of MiB");
+    if (m == 0 or m > 1 << 20) return invalid(bad, "memory is 1 to 1048576 MiB");
+    return m;
 }
 
 /// split returns a line's words. Spaces or tabs separate words, double
@@ -555,4 +741,114 @@ test "config file count is bounded" {
     try testing.expectEqual(@as(usize, 32), (try parse(gpa, text.items, &bad)).configs.len);
     try text.appendSlice(gpa, "config extra /run/config/extra\n");
     try testing.expectError(error.Invalid, parse(gpa, text.items, &bad));
+}
+
+test "narrowed programs" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    // Lines 1 to 6; a case's narrow lines start at 7.
+    const head = "exec /usr/bin/app\nuser app\nrun /usr/bin/ffmpeg /usr/bin/ffprobe\n" ++
+        "read /srv/media\nwrite /var/cache/app\n" ++
+        "pledge stdio rpath wpath proc exec inet listen landlock seccomp\n";
+    // With ffmpeg's pledge, line 7.
+    const ff = head ++ "narrow /usr/bin/ffmpeg pledge stdio\n";
+    var bad: Bad = .{};
+    const s = try parse(gpa, head ++
+        \\narrow /usr/bin/ffmpeg pledge stdio rpath wpath proc
+        \\narrow /usr/bin/ffmpeg read /srv/media/in /etc/localtime /run/svc/app/in
+        \\narrow /usr/bin/ffmpeg write /var/cache/app/out /run/svc/app/tmp /dev/null
+        \\narrow /usr/bin/ffmpeg memory 512
+        \\narrow /usr/bin/ffprobe pledge stdio rpath
+    , &bad);
+    try testing.expectEqual(2, s.narrow.len);
+    const ffmpeg = s.narrow[0];
+    try testing.expectEqualStrings("/usr/bin/ffmpeg", ffmpeg.program);
+    try testing.expect(ffmpeg.pledge.contains(.proc) and !ffmpeg.pledge.contains(.exec));
+    try testing.expectEqual(3, ffmpeg.read.len);
+    try testing.expectEqualStrings("/run/svc/app/tmp", ffmpeg.write[1]);
+    try testing.expectEqual(512, ffmpeg.memory.?);
+    try testing.expectEqual(null, s.narrow[1].memory);
+    try testing.expectEqual(0, s.narrow[1].read.len);
+
+    const cases = [_]struct { text: []const u8, line: usize, why: []const u8 = "" }{
+        // The program: absolute, clean, named by a run line, a name of its own.
+        .{ .text = head ++ "narrow ffmpeg pledge stdio\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/../bin/ffmpeg pledge stdio\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/cat pledge stdio\n", .line = 7, .why = "run line" },
+        .{
+            .text = head ++ "run /opt/bin/ffmpeg\nnarrow /usr/bin/ffmpeg pledge stdio\n" ++
+                "narrow /opt/bin/ffmpeg pledge stdio\n",
+            .line = 8,
+            .why = "share a name",
+        },
+        // Sub-keys: known, with their words, and once where once is all.
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg frob x\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg pledge\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg read\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg read /srv//media\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg memory 0\n", .line = 7 },
+        .{ .text = ff ++ "narrow /usr/bin/ffmpeg pledge rpath\n", .line = 8 },
+        .{
+            .text = ff ++ "narrow /usr/bin/ffmpeg memory 1\nnarrow /usr/bin/ffmpeg memory 2\n",
+            .line = 9,
+        },
+        // Promises: some, within the service's, and no network.
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg read /srv/media\n", .line = 7, .why = "pledge" },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg pledge mlock\n", .line = 7, .why = "mlock" },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg pledge stdio inet\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg pledge stdio unix\n", .line = 7 },
+        .{
+            .text = "exec /a\nuser x\nrun /b\npledge stdio rpath exec seccomp\n" ++
+                "narrow /b pledge stdio\n",
+            .line = 5,
+            .why = "landlock",
+        },
+        // Paths: within what the service may read or write.
+        .{
+            .text = ff ++ "narrow /usr/bin/ffmpeg read /etc/shadow\n",
+            .line = 7,
+            .why = "/etc/shadow",
+        },
+        .{
+            .text = ff ++ "narrow /usr/bin/ffmpeg write /srv/media\n",
+            .line = 7,
+            .why = "/srv/media",
+        },
+        .{ .text = ff ++ "narrow /usr/bin/ffmpeg write /etc/passwd\n", .line = 7 },
+        .{ .text = ff ++ "narrow /usr/bin/ffmpeg read /srv/mediax\n", .line = 7 },
+        // Not under a root: leash is not in the image.
+        .{
+            .text = "exec /a\nuser x\nrun /b\npledge stdio rpath exec landlock seccomp\n" ++
+                "root /oci/a\nnarrow /b pledge stdio\n",
+            .line = 6,
+        },
+    };
+    for (cases) |c| {
+        try testing.expectError(error.Invalid, parse(gpa, c.text, &bad));
+        try testing.expectEqual(c.line, bad.line);
+        try testing.expect(std.mem.find(u8, bad.why, c.why) != null);
+    }
+}
+
+test reaches {
+    const s: Service = .{ .read = &.{"/srv/www"}, .write = &.{"/var/lib/app"} };
+    try testing.expect(reaches(s, "app", "/srv/www/index.html", false));
+    try testing.expect(!reaches(s, "app", "/srv/www/index.html", true));
+    try testing.expect(reaches(s, "app", "/var/lib/app/db", true));
+    try testing.expect(reaches(s, "app", "/var/lib/app", false));
+    try testing.expect(!reaches(s, "app", "/var/lib/application", false));
+    try testing.expect(reaches(s, "app", "/etc/passwd", false)); // the floor
+    try testing.expect(!reaches(s, "app", "/etc/passwd", true));
+    try testing.expect(reaches(s, "app", "/dev/null", true));
+    try testing.expect(!reaches(s, "app", "/etc/shadow", false));
+    // Its own directories, and at build any service's, which leash
+    // checks again by name.
+    try testing.expect(reaches(s, "app", "/run/svc/app/tmp", true));
+    try testing.expect(reaches(s, "app", "/data/svc/app", true));
+    try testing.expect(!reaches(s, "app", "/run/svc/db/socket", false));
+    try testing.expect(!reaches(s, "app", "/run/svc/application", false));
+    try testing.expect(reaches(s, null, "/run/svc/db/socket", false));
+    try testing.expect(!reaches(s, null, "/run/svc", false));
 }

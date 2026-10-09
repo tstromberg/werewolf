@@ -46,7 +46,9 @@ and key, and `make list-forms` shows the chains.
 | `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
 | `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
-| `lima` | `prod`, with `sshd` | the Lima test vehicle (`howl run` on a Mac), which takes Lima's own key file |
+| `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
+| `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
+| `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init
@@ -414,6 +416,7 @@ program's cooperation:
 | to reach another machine: a database, an API | the connect fails (Landlock), and fence drops the packet | `connect tcp/PORT` in the service, and `connect app tcp/PORT` in the form's `net` |
 | to write outside `/data/svc/app` and `/run/svc/app` | refused; the root is read-only anyway | `write PATH` |
 | to run another program: a shell, `curl` | refused (`pledge exec`, then Landlock); there is no shell in the image anyway | `run PROGRAM` |
+| through a program it runs on a stranger's file (ffmpeg), taken over, to do all the service may | it may: the program holds the service's leash | `narrow PROGRAM pledge\|read\|write\|memory ...`, run by its link `/etc/sv/NAME/narrow/PROGRAM`: fewer promises, no network, fewer files ([design/narrow.md](design/narrow.md)) |
 | to read a secret | it has none | `secret NAME PATH`: a variable read from a file in the config |
 | to exhaust the machine's memory | capped where the service sets a cap | `memory MiB`: its cgroup's `memory.max`, a ceiling on resident memory (not address space), so it suits an interpreter, the JVM and V8 alike |
 | to leave a process running after it is stopped | killed with the service | nothing to add: each leashed service is a cgroup, and its `finish` writes `cgroup.kill` on stop, restart and shutdown, so its whole tree, a detached backdoor included, goes with it |
@@ -513,7 +516,7 @@ build/host/howl form --with caddy,valkey -o forms/shop/
 
 | Flag | Writes |
 | --- | --- |
-| `--with FORM,...` | nothing, for one form alone: it runs as it is. One form with more flags becomes `base:`; several are taken `with` on `prod` (for `run`, `lima` on Lima, else `prod-ssh`) |
+| `--with FORM,...` | nothing, for one form alone: it runs as it is. One form with more flags becomes `base:`; several are taken `with` on `prod` (for `run`, on `playground`) |
 | `--package PKG,...` | apko.yaml's packages |
 | `--oci NAME=REF` | an OCI image, baked in at `/oci/NAME` and run as `_oci-NAME` |
 | `--NAME.KEY 'LINE'` | one line of image NAME's service file, as it stands in the file: `listen`, `connect`, `write`, `read`, `run`, `env`, `secret`, `exec`, `dir`, `memory`, `nofile`, `pledge`, `before` or `requires` |
@@ -560,33 +563,34 @@ line and the form a `loopback` port.
 ## webshell-example: a contained vulnerability
 
 `webshell-example` is a form that ships the worst thing a web application
-can do. Its page takes a string from an unauthenticated request, runs it as
-a command, through a shell or by a direct fork/exec, and shows the output.
-That is remote code execution by design, the bug behind a large share of
-real breaches. The form shows what an attacker gets for it on werewolf:
-nothing worth having.
+can do. Its page takes a string from an unauthenticated request, runs it
+as a command through `/bin/sh`, as an application's `sh -c` would, and
+shows the output. That is remote code execution by design, the bug behind
+a large share of real breaches. The form shows what an attacker gets for
+it on werewolf: nothing worth having.
 
 ```sh
 build/host/howl run --with webshell-example --on qemu
 ```
 
-This boots the form as it ships, with no shell, and forwards its port from
-this host's `http://127.0.0.1:8080` (or the free port it prints). Open it,
+This boots the form as it ships, with no shell: its `/bin/sh` is
+[sh-shim](../cmd/sh-shim/README.md). It forwards its port from this
+host's `http://127.0.0.1:8080` (or the free port it prints). Open it,
 or `curl` it, and try to escape. The page keeps the last 100 attempts, each with its source
 address, User-Agent, exit code and output, so a failed break-in is on the
 screen:
 
 ```sh
-$ curl --data-urlencode 'cmd=cat /etc/shadow' --data 'shell=1' 127.0.0.1:8080 >/dev/null
+$ curl --data-urlencode 'cmd=cat /etc/shadow && echo LEAK' 127.0.0.1:8080 >/dev/null
 $ curl --data-urlencode "cmd=/usr/bin/python3 -c \"open('/pwned','w')\"" 127.0.0.1:8080 >/dev/null
 $ curl -s 127.0.0.1:8080/attempts.json | python3 -m json.tool
-# cat /etc/shadow         -> not found: ... '/bin/sh'          (no shell ships)
+# cat ... && echo LEAK    -> sh-shim: refused: unquoted & is shell syntax   (no shell ships)
 # python3 open('/pwned')  -> OSError: Read-only file system    (dm-verity root)
 ```
 
-Each layer is a different wall. A shell command finds no `/bin/sh`. The
-Landlock floor does not include `/etc/shadow`, so reading a secret is
-denied. The root is read-only, so a write fails. The form declares no
+Each layer is a different wall. The shell is sh-shim, which runs one
+program and refuses `&&`, pipes and `$`. The Landlock floor does not
+include `/etc/shadow`, so reading a secret is denied. The root is read-only, so a write fails. The form declares no
 `connect`, so fence drops any packet going out. Even full Python, through
 the one interpreter that runs, cannot read a secret, change the system,
 persist, or call home, and a reboot returns the machine to the signed
@@ -601,11 +605,11 @@ The form ships coreutils and net-tools, and the service's `run` line names
 $ curl -s --data-urlencode 'cmd=id' 127.0.0.1:8080             # uid=527139628(app) gid=527139628(app) ...
 $ curl -s --data-urlencode 'cmd=cat /etc/passwd' 127.0.0.1:8080  # root:x:0:0:... app:x:527139628:527139628:...
 $ curl -s --data-urlencode 'cmd=cat /etc/shadow' 127.0.0.1:8080
-# refused: [Errno 13] Permission denied: '/etc/shadow'         (cat runs; the read is denied)
+# cat: /etc/shadow: Permission denied                          (cat runs; the read is denied)
 $ curl -s --data-urlencode 'cmd=dd if=/dev/zero of=/pwned' 127.0.0.1:8080
 # dd runs, but: dd: failed to open '/pwned': Read-only file system
 $ curl -s --data-urlencode 'cmd=ifconfig' 127.0.0.1:8080
-# refused: ... 'ifconfig'                                      (a separate binary, exec not allowed)
+# sh-shim: ifconfig: permission denied                        (a separate binary, exec not allowed)
 ```
 
 So remote code execution runs here, and two different walls hold it.
@@ -628,11 +632,23 @@ allowlists *files*. A multi-call binary is all-or-nothing, and the real
 containment is the floor, the capabilities and the network policy around
 whatever runs, not the list of names.
 
+A program the app runs on what a stranger sends can be held tighter than
+the app. `cat` also runs narrowed, by its link `/etc/sv/app/narrow/cat`
+([design/narrow.md](design/narrow.md)): it reads the image, but neither
+the account list nor the app's own files, which plain `cat` reads.
+
+```sh
+$ curl -s --data-urlencode 'cmd=/etc/sv/app/narrow/cat /etc/passwd' 127.0.0.1:8080
+# leash: {"event":"narrow","service":"app","program":"/usr/bin/cat",...}
+# ...: /etc/passwd: Permission denied                           (cat runs; the read is denied)
+```
+
 At boot, the application attacks itself with that battery of commands, and
-logs as JSON on the console that none escaped. It then runs the three
-allowlisted commands and logs that each one ran. `make check` boots it with
-no shell and checks both: every attack contained, and every allowed command
-run (`check-shellfree-webshell-example`,
+logs as JSON on the console that none escaped. It then runs the
+allowlisted commands and logs that each one ran, and narrowed `cat`, that
+it held. `make check` boots it with no shell and checks all three: every
+attack contained, every allowed command run, and the narrowing held
+(`check-shellfree-webshell-example`,
 [forms/webshell-example/test/console](../forms/webshell-example/test/console)).
 So the claim is tested, not just made.
 

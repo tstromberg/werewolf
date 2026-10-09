@@ -192,7 +192,7 @@ the tiers feed use the same key code.
 ## allow
 
 Lists the allowances a form may grant (`kvm`, `nested-kvm`, `netadmin`,
-`packet`, `ipv6`, `pty`, `jit`) and the capabilities werewolf takes from
+`packet`, `ipv6`, `pty`, `jit`, `sh`) and the capabilities werewolf takes from
 root. Allowances in form.yaml's `allow` accumulate along the chain; the
 build writes one empty file each to /etc/werewolf/allow and derives
 kernel arguments from them. Nothing reads an allowance from the command
@@ -217,8 +217,8 @@ Checks form.yaml's `sshd:` and `bastion:` at build time (via lib/form).
 ## service
 
 Parses a service file, `/etc/sv/NAME/service`, for leash (which starts the
-service), howl pack (its config and setting flags), `seal` (its pledge)
-and compose (the machine's promises). Each reads the whole file the same
+service, and narrows a program it runs), howl pack (its config and setting
+flags), `seal` (its pledge) and compose (the machine's promises). Each reads the whole file the same
 way. cmd/leash/README.md documents the lines.
 
 ## settings

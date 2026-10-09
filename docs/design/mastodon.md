@@ -1,7 +1,7 @@
 # Mastodon
 
-Proposed, 2026-10-08; part of its base work is built (below). The first
-form of [forms-catalog.md](forms-catalog.md)'s tier 4.
+Proposed, 2026-10-08; its base work is built (below), the form not yet.
+The first form of [forms-catalog.md](forms-catalog.md)'s tier 4.
 
 ## Summary
 
@@ -48,15 +48,19 @@ form is `base: ruby` with `[postgresql, valkey, nginx]`
 ([docs/forms.md](../forms.md#bundles-one-form-taking-several)); and
 `connect USER tcp/443 public`, which fence keeps off private, loopback,
 link-local and metadata addresses ([cmd/fence](../../cmd/fence/README.md)).
-To build:
+Built for it:
 
-1. **A narrower leash for a child**: `run PROGRAM with POLICY` gives it
-   its own pledge, write paths, no network, and memory and CPU ceilings,
-   set by a small launcher before exec. ffmpeg and ffprobe run so.
+1. **A narrower leash for a child**: `narrow` lines give ffmpeg and
+   ffprobe their own pledge, paths and memory, and no network, run by
+   their links ([narrow.md](narrow.md)).
 2. **First run**: a `before` step, as `gitea-init` is, runs `db:prepare`
-   and makes the owner from the config with `tootctl` before Puma serves.
-3. **Timed services** (`every 1d`) for media and preview-card cleanup.
+   and makes the owner from the config with `tootctl` before Puma serves
+   ([cpu-and-first-run.md](cpu-and-first-run.md)).
+3. **Timed jobs** for media and preview-card cleanup: the `cron` form,
+   taken `with` ([forms/cron](../../forms/cron/README.md)).
 4. **`cpu`** beside `memory`, so a federation flood cannot starve nginx.
+5. **`/bin/sh -c`**, which Terrapin, Paperclip's runner, starts ffmpeg
+   through: the `sh-shim` form ([cmd/sh-shim](../../cmd/sh-shim/README.md)).
 
 **Defaults.**
 

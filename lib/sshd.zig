@@ -146,6 +146,19 @@ const key_file_types = [_][]const u8{
     "ssh-rsa",
 };
 
+/// isSecurityKey reports whether t, a public key line's first word, is a
+/// security key's type.
+pub fn isSecurityKey(t: []const u8) bool {
+    for (security_key_types) |s| if (std.mem.eql(u8, s, t)) return true;
+    return false;
+}
+
+/// isKeyFile reports whether t is a plain key file's type.
+pub fn isKeyFile(t: []const u8) bool {
+    for (key_file_types) |s| if (std.mem.eql(u8, s, t)) return true;
+    return false;
+}
+
 /// authorizedKeys writes the bastion's authorized_keys: one line per key,
 /// with `restrict,port-forwarding`, a permitopen per destination of its
 /// user, and the user's name as comment. key_files says whether plain key

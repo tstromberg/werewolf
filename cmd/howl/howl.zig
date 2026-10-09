@@ -17,6 +17,7 @@ const azure = @import("azure.zig");
 const app = @import("app.zig");
 const apk = @import("apk.zig");
 const published = @import("published.zig");
+const keys = @import("keys.zig");
 const adhoc = @import("adhoc.zig");
 const oci = @import("oci.zig");
 const progress = @import("progress.zig");
@@ -34,11 +35,12 @@ pub const usage =
     \\usage: howl build --with FORM,... [--build] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--build] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, lima on Lima, else prod-ssh
+    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, playground
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--dev] [--build] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] [CONFIG...]\n" ++
+    "] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] " ++
+    "[CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
@@ -347,6 +349,9 @@ pub const Options = struct {
     data_key: ?[]const u8 = null,
     update_policy: ?[]const u8 = null,
     root_keys: ?[]const u8 = null,
+    /// own_keys are the keys from ~/.ssh create copies to root (keys.zig),
+    /// where no --root-keys or --config gives root any.
+    own_keys: ?[]const u8 = null,
     /// arch and size are the machine's architecture and type, for create on
     /// a cloud.
     arch: ?Arch = null,
@@ -498,6 +503,10 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
         .path = "authorized_keys",
         .data = try readInput(io, gpa, f, "--root-keys", &stdin_used, why),
         .from = "--root-keys",
+    }, why) else if (o.own_keys) |k| try add(gpa, &entries, .{
+        .path = "authorized_keys",
+        .data = k,
+        .from = "~/.ssh",
     }, why);
     if (o.update_policy) |f| try add(gpa, &entries, .{
         .path = "update-policy.json",
@@ -1142,7 +1151,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
     const began = Io.Clock.awake.now(io);
     const verbose, const some = try verboseFlag(gpa, all);
     const dev, const rest = try takeFlag(gpa, some, &.{"--dev"});
-    const from_tree, const args = try takeFlag(gpa, rest, &.{"--build"});
+    const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
+    const yes, const args = try takeFlag(gpa, more, &.{"--yes"});
     var o = try options(gpa, args, why);
     o.local = from_tree;
     if (o.out != null or o.check)
@@ -1217,6 +1227,16 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
             o.dns = if (on_lima) lima.user_gw else bhyve.user_dns;
         }
     }
+    // Root's keys, where none are given: the person's own, if they agree.
+    const given_keys = o.root_keys != null or if (o.config) |d|
+        if (Dir.cwd().access(io, try std.fs.path.join(gpa, &.{ d, "authorized_keys" }), .{}))
+            true
+        else |_|
+            false
+    else
+        false;
+    if (!given_keys)
+        o.own_keys = try keys.offer(io, gpa, try chain(io, gpa, o.form, why), name, yes);
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
@@ -1369,6 +1389,7 @@ test {
     _ = @import("image.zig");
     _ = @import("apk.zig");
     _ = @import("published.zig");
+    _ = @import("keys.zig");
     _ = adhoc;
     _ = oci;
     _ = @import("progress.zig");

@@ -1,0 +1,14 @@
+Werewolf Linux playground: a hardened, image-based Linux to try out.
+The system is a read-only image; only /data keeps what you write.
+
+NOTE: This environment is locked-down by default!
+- / is read-only
+- Only signed binaries execute
+- Processes are controlled by seccomp and Landlock
+- Application firewalling is in place
+
+If you find a way to run arbitrary code - open an issue!
+
+Useful commands:
+- /usr/lib/werewolf/posture: security checks!
+- /usr/lib/werewolf/slot-update: install updated software (A/B)

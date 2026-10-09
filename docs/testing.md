@@ -328,8 +328,8 @@ into its log. A CPU parked and never woken is the hypervisor's fault, not
 the guest's.
 
 ```sh
-make check-one FORM=lima REPEAT=20          # how often does it fail?
-make check-one FORM=lima REPEAT=20 ACCEL=tcg   # without the hypervisor
+make check-one FORM=playground REPEAT=20          # how often does it fail?
+make check-one FORM=playground REPEAT=20 ACCEL=tcg   # without the hypervisor
 BOOT_TIMEOUT=20 make check-minimal          # see a hang sooner
 ```
 
