@@ -10,5 +10,5 @@
 # printable ASCII, no quotes or backslashes, at most 200 characters. Every
 # image carries this file, so it knows which fixes it has; a release's
 # manifest carries it too, signed, and a machine applies each advisory its
-# own image lacks at its tier (cmd/slot-update). release/manifest refuses
-# a release whose file has a line it cannot read.
+# own image lacks at its tier (cmd/slot-update). howl build refuses a
+# release whose file has a line it cannot read (cmd/howl/manifest.zig).

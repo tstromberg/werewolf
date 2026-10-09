@@ -66,8 +66,8 @@ mount-broker removes /data's LUKS mapping at shutdown.
 
 Builds the dm-verity hash tree for a root image (format version 1, no
 superblock, 4 KiB blocks, SHA-256, levels top first after the data) and
-the table stage0 loads. Used by the build (`tools/verity.zig`),
-slot-update and stage0. The salt is SHA-256 of the image rather than
+the table stage0 loads. Used by howl's build, slot-update and stage0, and
+by `tools/verity.zig` for `make check-updater`. The salt is SHA-256 of the image rather than
 random, so the build and the updater make the same tree and builds stay
 reproducible. See [docs/design/verified-boot.md](../docs/design/verified-boot.md).
 
@@ -76,8 +76,9 @@ reproducible. See [docs/design/verified-boot.md](../docs/design/verified-boot.md
 The steps of making a slot that howl's build (`cmd/howl/build.zig`) and,
 in time, slot-update share, as functions of bytes rather than paths: the
 modules a stage0 loads and `werewolf.modules`, from `modules.dep`, in the
-Makefile's order; gunzip; the arm64 zboot unwrap and x86_64's `vmlinux`;
-the kernel config's rules (`tools/kernel-config-check.zig`); and
+order the Makefile's build used; gunzip; the arm64 zboot unwrap and
+x86_64's `vmlinux`; the kernel config's rules, which the build checks
+Alpine's config against (`configMisses`); and
 mkfs.erofs's options and the version check that refuses one before 1.9,
 which writes empty files from a tar. See
 [docs/design/howl-build.md](../docs/design/howl-build.md).

@@ -72,7 +72,7 @@ appears mid-check. Every form boots with `DEV=1` and as it ships;
 test/posture-known holds what every form of a kind fails.
 
 **Open:** which forms are published. Today `minimal`, `prod` and
-`prod-ssh` (the Makefile's `RELEASE_FORMS`); perhaps every runtime form.
+`prod-ssh` (lib/compose.zig's `release_forms`); perhaps every runtime form.
 
 ## Drawbacks
 

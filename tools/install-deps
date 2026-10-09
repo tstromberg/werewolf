@@ -316,7 +316,7 @@ if [ -n "$missing$need_apko$need_melange$need_crane$need_zig$need_erofs$need_fc"
 	fi
 	if [ -n "$zos" ] && [ -z "$only" ]; then
 		echo
-		echo "  Lima, which make lima and make demo use, is not installed; make run needs only QEMU."
+		echo "  Lima is not installed; howl uses it only on a Mac, and runs machines here without it."
 	fi
 	echo
 	if [ -z "$yes" ]; then

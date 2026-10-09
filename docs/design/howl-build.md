@@ -1,22 +1,18 @@
 # howl builds images
 
-Stage 1 built, 2026-10-09: `howl build` is native; run and create still use make.
+Stage 2 and the ports built, 2026-10-09: howl builds every image; make asks it.
 
 ## Summary
 
-`howl build` makes a form's image itself, in Zig. The Makefile shrinks to
-what contributors run: compiling werewolf's programs, tests, lint, `make
-check` and releases. Users and the checks build through one path: howl.
+howl makes a form's image itself, in Zig, for users and the checks alike.
+The Makefile keeps the programs' compiles, tests, lint, checks and releases.
 
 ## Background
 
-Before stage 1 every image howl made came from `make`: `howl build` ran
-`make _dist-form`, `howl run` runs `make image` and `make run`, the other
-engines `make disk` or `make slot`. The Makefile (1,850 lines) holds the
-pipeline as shell and awk. [cli.md](cli.md) chose that split; it costs:
+Before stage 1, make built every image howl made, as shell and awk in a
+1,940-line Makefile and two scripts, the split [cli.md](cli.md) chose. howl
+depended on make's target names and `--debug=b` output, and:
 
-- Contributors must read make recipes to learn how an image is made, and
-  howl depends on make's target names and the `--debug=b` output it parses.
 - A released howl cannot build without a checkout and make, against
   [custom-updates.md](custom-updates.md)'s goal that it needs no Zig.
 - The updater (`cmd/slot-update/slot.zig`) does module order, decompression,
@@ -24,61 +20,64 @@ pipeline as shell and awk. [cli.md](cli.md) chose that split; it costs:
 
 ## Goals
 
-- `howl build`, `run` and `create` never run make.
+- `howl build`, `run` and `create` run make only for the programs,
+  melange's packages and the tutorials' applications.
 - One copy of each shared step, in `lib/image.zig`, used by howl and the updater.
-- With `FREEZE=1`, every form on both arches, with and without `DEV`,
-  builds byte-identical `root.erofs`, `stage0*.zst`, `initramfs.zst` and
-  module tars to the Makefile's.
+- With `FREEZE=1`, every form builds byte-identical `root.erofs`,
+  `stage0*.zst`, `initramfs.zst`, disks and manifests to the old recipes.
 - The Makefile falls below 600 lines, and `make help` fits on a screen.
 
 ## Non-Goals
 
 - Compiling werewolf's programs in howl: that needs Zig. howl takes them
   from `build/ARCH/programs` until custom-updates publishes them as packages.
-- Replacing apko, bsdtar, mkfs.erofs, zstd or qemu-img, or `make check`.
+- Replacing apko, bsdtar, mkfs.erofs, zstd, mtools, mke2fs, qemu-img or `make check`.
 
 ## Detailed design
 
 **lib/image.zig** holds what howl and the updater share, as functions of
 bytes, never paths: module order and `werewolf.modules`; gunzip; the zboot
-unwrap and x86 `vmlinux` extraction; the kernel config's rules; mkfs.erofs's
-options and version check. Module order is the Makefile's (the chain's,
-tagged and untagged mixed); the updater's is not yet.
+unwrap and x86 `vmlinux`; the kernel config's rules; mkfs.erofs's options
+and version check. Module order is the Makefile's; the updater's is not yet.
 
 **cmd/howl/build.zig** (with `packages.zig` and `slot.zig`) runs the
 pipeline as steps, each skipped when its output is newer than its inputs,
-howl's executable among them as the Makefile was: config, locks, rootfs and
-kernel (apko), meta (`lib/compose.zig`, then a few records), overlay,
-root.erofs and verity, both stage0s, initramfs, slot, disk (`boot/mkdisk`).
-Each writes a temporary name, renames it, and logs a line with its time.
-make compiles the programs (`make programs`) and, where a form needs them,
-melange's packages and the tutorials' applications. `howl _build --with
-FORM GOAL...` builds make's image, slot, disk, qcow2 and vmlinux targets.
+howl's executable among them: config, locks, rootfs and kernel (apko), meta
+(`lib/compose.zig`), overlay, root.erofs and verity, both stage0s,
+initramfs, slot, disk, each to a temporary name, renamed. `disk.zig` and
+`manifest.zig` replaced `boot/mkdisk` (with the GPT in process, from
+`boot/gpt.zig`) and `release/manifest`. make compiles the programs first
+and, where a form needs them, melange's packages and the tutorials'
+applications, with make's own variables cleared, so an outer make passes
+it nothing.
 
 **What identity takes.** The same tools with the same arguments, and the
-`layer` macro's normalisation done in Zig: a file laid over another keeps
-the first's mode, as cp leaves it, and the names are listed by walking the
-staged tree, as find does. zstd writes a frame's content size when it reads
-a file and none from a pipe, so the initramfs's second cpio still goes
-through `bsdtar | bsdtar | zstd`. The gate (FREEZE=1, fresh roots on both
-sides) matched every compared file of aarch64 minimal, prod, prod-ssh,
-prod-ssh DEV=1, sshd, bastion, lima, postgresql, caddy, python with
-`--app`, an ad-hoc form, and x86_64 minimal and prod-ssh.
+`layer` macro's normalisation in Zig: a file laid over another keeps the
+first's mode, as cp leaves it, and names are listed as find lists them.
+zstd writes a frame's content size only for a file, so the initramfs's
+second cpio still goes through `bsdtar | bsdtar | zstd`.
 
-**Switching over.** build.zig writes where make did (`build/ARCH/FORM`),
-so make's targets can call `howl _build`. Then run and create stop calling
-make, and the Makefile's image, run, lima, demo and webshell targets go,
-with `examples/vm.mk`, `test/gcp` and `test/lima-demo`.
+**Stage 2.** `run` and `create` build with build.zig on every engine. QEMU's
+command line is `qemu.zig`'s; the Lima-managed template, `lima.zig`'s. The
+Makefile's `image`, `slot`, `disk` and `OUT/disk.qcow2` wrap `howl _build`,
+passing BUILD, PROGRAMS, DEV, APP, FREEZE and DISK, DISK_MIB and DISK_ARGS
+(`Spec.disk_path`, `Spec.disk`; the qcow2 takes the size alone);
+`_dist-form` runs `howl build`. Gone: the image recipes, the run, lima, demo
+and webshell targets, `examples/vm.mk`, `test/gcp`, `test/lima-demo`, the
+scripts and `build/host/gpt`. make keeps the locks' rules, for CI's
+`release-inputs`, which runs with apko and the form tool alone. The
+Makefile is 1,112 lines, mostly `make check`. The gate (FREEZE=1,
+fresh roots) matched 11 aarch64 builds (DEV=1, `--app`, ad hoc) and x86_64
+minimal and prod-ssh; then the wrappers, the tutorials and vaultwarden;
+then the ports' disks (both arches, other sizes and arguments) and release files.
 
 ## Drawbacks
 
-- A large port of shell that works; the byte-identical gate makes it safe.
-- A bug in `lib/image.zig` reaches the build and every machine's updates.
+A bug in `lib/image.zig` reaches the build and every machine's updates.
 
 ## Alternatives Considered
 
-- **Keep make as the build system** (cli.md): it keeps the duplication with
-  the updater and the coupling between howl and make.
+- **Keep make** (cli.md): the duplication with the updater, and the coupling.
 - **build.zig**: it still shells out to apko and mkfs.erofs, and a released
   howl would carry the build runner.
 
@@ -92,9 +91,10 @@ with `examples/vm.mk`, `test/gcp` and `test/lima-demo`.
 
 ## Reliability Considerations
 
-The module step refuses an empty list, and a bitten list that lacks a
-native module, as the Makefile does since the `$(MODULES)` bug left bite's
-stage0 without modules. apko's retry on network errors moved with it.
-Open: the Makefile's order lists a tagged module where its leaf is, so a
-tagged leaf named before an untagged one that shares a dependency loads
-before it; today's forms name no such pair. Fix it in both at once.
+The module step refuses an empty list, or a bitten one without a native
+module. apko retries network errors (howl; make, for locks). zstd dates
+`stage0.zst` to its cpio's second, so the step dates it now, or the next
+build would rebuild it. A disk is rebuilt by file times alone, so each
+machine's disk has its own path. Open: a tagged leaf named before an
+untagged one sharing a dependency loads first (no form has such a pair;
+fix it with the updater's).

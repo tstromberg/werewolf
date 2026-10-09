@@ -131,8 +131,8 @@ fn unreachableServer(output: []const u8) bool {
     return false;
 }
 
-/// pins returns the packages a lock names for arch, NAME=VER-rN each, as
-/// the Makefile's sed read them from the lock's "url" lines.
+/// pins returns the packages a lock names for arch, NAME=VER-rN each, from
+/// the lock's "url" lines.
 fn pins(gpa: Allocator, lock: []const u8, arch: []const u8) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var lines = mem.splitScalar(u8, lock, '\n');
@@ -191,6 +191,8 @@ pub fn madeByMake(b: *B) !void {
             "--no-print-directory",
             try b.path("FORM={s}", .{b.spec.form}),
             try b.path("ARCH={t}", .{b.spec.arch}),
+            try b.path("BUILD={s}", .{b.p.build}),
+            try b.path("PROGRAMS={s}", .{b.p.programs}),
             if (b.spec.dev) "DEV=1" else "DEV=",
             try b.path("APP={s}", .{b.spec.app orelse ""}),
             target,

@@ -18,8 +18,8 @@ See [service VM deployment](service-vms.md).
 ## Setting it up
 
 For an end-to-end image build and GCP deployment, start with the
-[language tutorials](../examples/README.md). Each includes a form, a Makefile
-for QEMU and GCP, verification commands and cloud resource cleanup.
+[language tutorials](../examples/README.md). Each includes a form, the howl
+commands to run it here and on GCP, verification commands and cleanup.
 
 Make the config tar as for a config disk (`howl pack`; [cmd/howl/README.md](../cmd/howl/README.md)),
 then hand it to the cloud in base64:

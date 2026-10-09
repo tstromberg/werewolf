@@ -90,7 +90,7 @@ pub fn bootArgs(gpa: Allocator, image_args: []const u8, n: Net, dns: []const u8)
 }
 
 /// kernelPath returns the kernel to boot, relative to the checkout. On
-/// x86_64 it is the ELF vmlinux the Makefile unpacks from the bzImage:
+/// x86_64 it is the ELF vmlinux the build unpacks from the bzImage:
 /// booting the bzImage costs 0.1 s per boot while its stub gunzips 39 MB.
 /// On aarch64 vmlinuz is already a raw Image.
 pub fn kernelPath(gpa: Allocator, arch: howl.Arch) ![]const u8 {

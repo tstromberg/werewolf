@@ -17,7 +17,7 @@ The image comes from one of three places, named on the kernel command line:
 | --- | --- |
 | `werewolf.victim=UUID:DIR`, `werewolf.slot=a\|b` | `DIR/SLOT/root.erofs` on that filesystem (bite's victim, or werewolf's own disk) |
 | `werewolf.root=DEV` | the disk `/dev/DEV` (Firecracker's `vdc`) |
-| neither | `/root.erofs` appended to the initramfs (`make run`) |
+| neither | `/root.erofs` appended to the initramfs (a direct boot, `howl run --on qemu`) |
 
 A disk is read as it is used; an appended image is unpacked into RAM that
 nothing frees (20 MB and 26 ms a boot on Firecracker). The initramfs holds

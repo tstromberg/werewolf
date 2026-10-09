@@ -4,8 +4,7 @@ Run a small C# HTTP service as the unprivileged `app` user.
 
 Install the [build tools](../README.md#build-host) and the
 [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0), then run
-these commands from the repository root. `ARCH` defaults to your host
-architecture; keep it the same for QEMU and GCP.
+these commands from the repository root.
 
 ## Declare the app
 
@@ -24,28 +23,28 @@ each replacement VM starts with the same configuration.
 ## Build and run
 
 ```sh
-make -C examples/aspnet image
-make -C examples/aspnet deploy-qemu
-
-# In another terminal:
-curl -f http://127.0.0.1:8080/
-curl -f http://127.0.0.1:8080/health
+build/host/howl run --with example-aspnet
+curl -f http://ADDRESS/          # ADDRESS as run printed it
+curl -f http://ADDRESS/health
+build/host/howl stop
 ```
 
-You should see `Hello from ASP.NET Core on werewolf!` and `ok`.
-Quit QEMU with `Ctrl-a x`. Relaunching preserves data and updates; to try
-rebuilt code, choose a [fresh disk](../README.md#what-the-makefiles-do).
+You should see `Hello from ASP.NET Core on werewolf!` and `ok`. On a Mac `run` boots
+the machine under Lima, at its own address, port 8080; elsewhere, or with
+`--on qemu`, under QEMU, on a loopback port forwarded to it. Each `run`
+replaces the last machine, so it boots what you last built, with an empty
+`/data` ([the tutorials' guide](../README.md#with-werewolf)).
 
 ## Deploy on GCP
 
 Complete the [GCP setup](../README.md#prepare-gcp-once), then:
 
 ```sh
-make -C examples/aspnet deploy-gcp
-make -C examples/aspnet serial-gcp
+build/host/howl create aspnet --with example-aspnet --on gcp --allow-from me
+build/host/howl console aspnet --on gcp     # the boot log
 ```
 
-Open the printed URL, then visit `/health`.
+Open `http://ADDRESS:8080/`, at the address create printed, then visit `/health`.
 
 ## Automatic updates
 
@@ -57,13 +56,14 @@ This is a [framework-dependent application](https://learn.microsoft.com/en-us/do
 Wolfi's .NET 10 runtime packages and the kernel update automatically. Your
 code and any NuGet dependencies stay as built. Changes to those need a new
 image, as does a .NET major-version upgrade.
-After changing only the SDK, use `make -B -C examples/aspnet image` to force
-a full rebuild.
+After changing only the SDK, remove `build/*/example-aspnet*/application.stamp`
+so the next build publishes the app again.
 
-Rebuild and test changes with a fresh QEMU disk, then deploy under a new name:
+For application changes, rebuild, try it here, then create a machine under a
+new name:
 
 ```sh
-make -C examples/aspnet deploy-gcp GCP_NAME=werewolf-aspnet-v2
+build/host/howl create aspnet-v2 --with example-aspnet --on gcp --allow-from me
 ```
 
 Check the new VM before moving traffic. New VMs start with empty data;
@@ -71,13 +71,10 @@ migrate any saved data first. See the [update guide](../README.md#change-update-
 
 ## Clean up
 
-These commands remove the VMs, their disks and data, and deployment resources.
-The shared bucket stays.
+These commands delete the machines, their disks and data, and their
+firewall rules. The image stays ([details](../README.md#change-update-and-remove)).
 
 ```sh
-make -C examples/aspnet delete-gcp
-# If you deployed v2:
-make -C examples/aspnet delete-gcp GCP_NAME=werewolf-aspnet-v2
+build/host/howl delete aspnet --on gcp
+build/host/howl delete aspnet-v2 --on gcp   # if you made it
 ```
-
-Use the same settings as deployment. [Cleanup details](../README.md#change-update-and-remove).

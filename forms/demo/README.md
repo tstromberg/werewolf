@@ -79,8 +79,8 @@ they consist of the characters IDs use.
 
 grype's database is a 190 MB download, rebuilt daily, which unpacks to
 several times that. It is fetched again when grype finds a newer one. A
-`/data` in RAM cannot hold it, so on a machine booted directly (`make run`)
-status does not scan, and the page says why.
+`/data` in RAM cannot hold it, so on a machine without a data disk status
+does not scan, and the page says why.
 
 ## Running it
 
@@ -112,13 +112,12 @@ machine is; the first scan follows the database download.
 | Disk | 8 GiB, its disk's size; with bite, 10 GB free in `/var/lib/werewolf` |
 | Network | Wolfi, Alpine, git.kernel.org (updates); grype.anchore.io (the database) |
 
-On a Mac with Apple silicon, `make demo` runs `howl create werewolf-demo
---with demo --on lima`, which builds the disk and boots it in Lima, as Lima boots
-a distro, and prints the page's URL:
+On a Mac with Apple silicon, howl builds the disk and boots it in Lima, as
+Lima boots a distro, and prints the page's URL:
 
 ```sh
-make demo                               # http://192.168.64.N/, when it is up
-make demo-delete                        # delete the VM, and the /data it kept
+build/host/howl create werewolf-demo --with demo --on lima   # http://192.168.64.N/
+build/host/howl delete werewolf-demo --on lima               # the VM, and the /data it kept
 ```
 
 Lima forwards ports through ssh or its guest agent, and the demo runs
@@ -126,32 +125,32 @@ neither, so the VM gets a second network, vzNAT, whose address the Mac
 reaches directly. The disk names that network's MAC (`werewolf.mac=`),
 derived from the VM's name, so DHCP runs there, and macOS's DHCP server
 records the address it gave. `limactl start` waits for ssh that never
-answers, so `howl create` waits for that address, and `make demo` for
-the page. A second `make demo` restarts the VM, keeping its `/data`, and
-prints the URL again. A `werewolf-demo` VM made before `howl create`
-was is refused: `make demo-delete` first. Building the disk on a Mac needs `brew install mtools e2fsprogs`.
+answers, so `howl create` waits for that address instead. A second create
+restarts the VM with a new config, keeping its `/data`. Building the disk
+on a Mac needs `brew install mtools e2fsprogs`.
 
-On Google Compute Engine, `make demo-gcp` builds the same disk, makes it a
-GCP image, boots it on a VM (an `e2-medium`, or a `t2a-standard-1` for
-`ARCH=aarch64`), opens port 80 to it, and prints the page's URL
-([test/gcp](../../test/gcp)):
+On Google Compute Engine, howl makes the same disk a GCP image, once, boots
+a VM of it, and with `--allow-from` opens port 80 to this host:
 
 ```sh
-make demo-gcp                           # http://IP/, when it is up
-make demo-gcp-delete                    # delete the VM, its disk and the firewall rule
+build/host/howl create werewolf-demo --with demo --on gcp --allow-from me
+build/host/howl console werewolf-demo --on gcp               # the serial port: the boot
+build/host/howl delete werewolf-demo --on gcp                # the VM, its disk and firewall rule
 ```
 
-It uses gcloud's project and the zone `us-central1-a` (`GCP_PROJECT`,
-`GCP_ZONE`), and uploads the image through a bucket it makes,
-`PROJECT-werewolf-images` (`GCP_BUCKET`); the upload and the image are
-deleted once the VM's disk is made. The VM costs what its machine type
-costs until it is deleted. Its serial port shows the boot:
-`gcloud compute instances get-serial-port-output werewolf-demo`.
+It uses gcloud's project and zone (`us-central1-a` if none), and uploads the
+image through a bucket it makes, `PROJECT-werewolf-images`, deleting the
+upload once the image is made. The VM is this host's arch, or `--arch`'s:
+a `t2a-standard-1` on aarch64; on x86_64 add `--size e2-medium`, since the
+default `e2-small` is too small for PostgreSQL and grype. It costs what its
+machine type costs until it is deleted
+([examples/README.md](../../examples/README.md#prepare-gcp-once)).
 
-To boot the image directly instead, without slots, updates or a scan:
+To boot the image directly instead, without slots or updates, under QEMU
+with an 8 GiB `/data` disk:
 
 ```sh
-make run FORM=demo                      # then http://127.0.0.1:8080/
+build/host/howl run --with demo --on qemu                    # prints the page's URL
 ```
 
 ## Costs

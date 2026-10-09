@@ -1,4 +1,4 @@
-//! app stages --app DIR, a built application, for make to lay over a form's
+//! app stages --app DIR, a built application, for the build to lay over a form's
 //! image at the path form.yaml's app: names. See README.md.
 
 const std = @import("std");

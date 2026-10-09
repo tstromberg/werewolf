@@ -113,7 +113,8 @@ What makes the bytes repeat:
 - **Images made from tars alone.** The cpio carries no inode numbers;
   `mkfs.erofs -T0` dates everything 1970 and the UUID is fixed.
 - **Disks with fixed identities.** Every GUID, UUID, serial number and time
-  on the disk is fixed (`boot/mkdisk`), and the qcow2 names its compression.
+  on the disk is fixed (`cmd/howl/disk.zig`), and the qcow2 names its
+  compression.
 - **Nothing records the build.** No time, host or path reaches an image.
 
 The toolchain must match too: a different zstd, mkfs.erofs or qemu-img can

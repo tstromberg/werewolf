@@ -1,6 +1,6 @@
 # Native boot
 
-Proposed, 2026-10-06. Built (boot/mkdisk, boot/gpt.zig, `make disk`;
+Proposed, 2026-10-06. Built (cmd/howl/disk.zig, boot/gpt.zig, `make disk`;
 `installEsp` in cmd/slot-update; cmd/slot-keep).
 
 ## Summary
@@ -10,8 +10,8 @@ and updates itself as a bitten machine does, wherever a VM boots a disk.
 
 ## Background
 
-Booted directly (`make run`), a machine takes its kernel from the host and
-has nothing to update; bite lends it a distro's disk and GRUB
+Booted directly (`howl run --on qemu`), a machine takes its kernel from the
+host and has nothing to update; bite lends it a distro's disk and GRUB
 ([bite.md](../bite.md)). Debian updates itself under Lima because its image
 is a disk with its own bootloader, as each werewolf release now is
 ([releases.md](../releases.md)).
@@ -89,7 +89,7 @@ The old slot stays a good, older entry: the fallback, and the next target.
 | A console user adds `init=/bin/sh` | `timeout 0` and `editor no`: no menu, no editor. |
 | A file on ext4 owned by the builder's uid, so by whoever has it on the machine (Lima makes the host user's), who could swap a slot | `debugfs` makes every file root's; `werewolf/` is 0700. |
 | The EFI partition | Mounted by the mount broker only to write a slot or commit, `nosuid,nodev,noexec,nosymfollow`. root can still rewrite it, as it can a bitten machine's GRUB, until Secure Boot. |
-| Kernel arguments that start a new entry line | mkdisk takes only letters, digits and `_.,= -`. |
+| Kernel arguments that start a new entry line | `disk.zig` takes only letters, digits and `_.,= -` from the image, and no control character from `DISK_ARGS`. |
 
 ## Reliability Considerations
 

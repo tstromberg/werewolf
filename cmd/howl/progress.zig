@@ -1,5 +1,5 @@
-//! progress shows a long run, make or howl's own build, as one status line
-//! and keeps its full output in a log. On failure it prints the failed
+//! progress shows a long run, such as a build, as one status line and
+//! keeps its full output in a log. On failure it prints the failed
 //! phase, the last lines and the log's path. See README.md.
 
 const std = @import("std");
@@ -17,12 +17,8 @@ pub const Options = struct {
     command: []const u8,
     /// log is the file that receives all output.
     log: []const u8,
-    /// first is the phase shown until make or a step names one, or the
-    /// only phase of a command that is not make.
+    /// first is the phase shown until a step names another.
     first: Phase,
-    /// make says the command is make: run adds --debug=b, so make reports
-    /// the targets it remakes, and the debug banner is hidden.
-    make: bool = true,
 };
 
 /// Phase is a build step: name is shown on the line, short in the summary.
@@ -77,12 +73,8 @@ pub fn run(io: Io, gpa: Allocator, why: *howl.Why, argv: []const []const u8, o: 
         try howl.run(io, why, argv);
         return .{ .seconds = start.untilNow(io, .awake).toSeconds() };
     }
-    var args: std.ArrayList([]const u8) = .empty;
-    try args.append(gpa, argv[0]);
-    if (o.make) try args.append(gpa, "--debug=b");
-    try args.appendSlice(gpa, argv[1..]);
     var steps: Steps = try .init(io, gpa, why, o);
-    if (!(try steps.exec(&.{.{ .argv = args.items }}, .{})).ok) return steps.fail("");
+    if (!(try steps.exec(&.{.{ .argv = argv }}, .{})).ok) return steps.fail("");
     return steps.finish();
 }
 
@@ -119,7 +111,7 @@ pub const Steps = struct {
             .look = .of(io, Io.File.stderr()),
             .log = log,
             .start = start,
-            .said = .{ .gpa = gpa, .phase = o.first, .since = start, .banner = o.make },
+            .said = .{ .gpa = gpa, .phase = o.first, .since = start },
         };
     }
 
@@ -134,7 +126,7 @@ pub const Steps = struct {
     pub fn note(s: *Steps, comptime fmt: []const u8, args: anytype) !void {
         const line = try s.gpa.print("howl: " ++ fmt ++ "\n", args);
         s.write(line);
-        try s.said.line(s.io, line[0 .. line.len - 1]);
+        try s.said.line(line[0 .. line.len - 1]);
         s.draw();
     }
 
@@ -216,7 +208,7 @@ pub const Steps = struct {
                 if (p.fd < 0 or p.revents == 0) continue;
                 const n = posix.read(p.fd, &buf) catch 0;
                 if (n == 0) {
-                    if (part.items.len > 0) try s.said.line(s.io, part.items);
+                    if (part.items.len > 0) try s.said.line(part.items);
                     part.clearRetainingCapacity();
                     p.fd = -1;
                     open -= 1;
@@ -226,7 +218,7 @@ pub const Steps = struct {
                 try all.appendSlice(s.gpa, buf[0..n]);
                 for (buf[0..n]) |c| {
                     if (c == '\n' or c == '\r') {
-                        try s.said.line(s.io, part.items);
+                        try s.said.line(part.items);
                         part.clearRetainingCapacity();
                     } else try part.append(s.gpa, c);
                 }
@@ -308,24 +300,13 @@ const Said = struct {
     /// since is when phase began.
     since: Io.Timestamp,
     spent: std.ArrayList(Spent) = .empty,
-    /// banner hides make's --debug version banner until "Reading makefiles".
-    banner: bool = false,
-    /// detail is the last line that is not make's bookkeeping.
+    /// detail is the last line, shown beside the phase.
     detail: []const u8 = "",
     /// last is a ring of the last tail_lines lines.
     last: [tail_lines][]const u8 = @splat(""),
     count: usize = 0,
 
-    fn line(s: *Said, io: Io, raw: []const u8) !void {
-        if (s.banner) {
-            if (std.mem.find(u8, raw, "Reading makefiles") != null) s.banner = false;
-            return;
-        }
-        if (remade(raw)) |target| {
-            if (phaseOf(target)) |p| try s.enter(io, p);
-            return;
-        }
-        if (isBookkeeping(raw)) return;
+    fn line(s: *Said, raw: []const u8) !void {
         const text = try clean(s.gpa, raw);
         if (text.len == 0) return;
         s.detail = text;
@@ -368,34 +349,8 @@ const Said = struct {
     }
 };
 
-/// remade returns the target a --debug=b line says make must remake, or null.
-fn remade(line: []const u8) ?[]const u8 {
-    const key = "Must remake target ";
-    const at = std.mem.find(u8, line, key) orelse return null;
-    const rest = line[at + key.len ..];
-    if (rest.len < 3) return null;
-    // `target' from make 3.81, 'target' from 4.
-    const end = std.mem.findScalarLast(u8, rest, '\'') orelse return null;
-    if (end < 1) return null;
-    return rest[1..end];
-}
-
-/// isBookkeeping reports whether line is make's --debug=b chatter.
-fn isBookkeeping(line: []const u8) bool {
-    const t = std.mem.trimStart(u8, line, " ");
-    for ([_][]const u8{
-        "Reading makefiles",   "Updating goal targets",  "Updating makefiles",
-        "Successfully remade", "File `",                 "File '",
-        "Prerequisite `",      "Prerequisite '",         "No need to remake",
-        "Considering target",  "Finished prerequisites", "Pruning file",
-        "Trying ",             "Must remake",            "GNU Make",
-        "Built for",           "Copyright",              "This program built",
-    }) |p| if (std.mem.startsWith(u8, t, p)) return true;
-    return false;
-}
-
-/// phaseOf names the build phase a make target's path implies, or returns
-/// null if the target names none.
+/// phaseOf names the build phase a step's target implies, or returns null
+/// if the target names none.
 pub fn phaseOf(target: []const u8) ?Phase {
     const t = target;
     const ends = struct {
@@ -420,25 +375,17 @@ pub fn phaseOf(target: []const u8) ?Phase {
     if (ends(t, "/boot/rootfs.tar")) return P("Fetching the boot loader", "boot loader");
     if (has(t, "/form/") and ends(t, ".yaml")) return P("Reading the form", "form");
     if (ends(t, "/rootfs.tar")) return P("Installing packages", "packages");
-    if (has(t, "/programs/") or
-        std.mem.startsWith(
-            u8,
-            t,
-            "build/host/",
-        )) return P("Compiling werewolf's programs", "programs");
-    if (has(t, "melange") or
-        ends(t, ".built")) return P("Building packages with melange", "melange");
+    if (has(t, "/programs/")) return P("Compiling werewolf's programs", "programs");
+    if (has(t, "melange")) return P("Building packages with melange", "melange");
     if (ends(t, "modules.tar") or
         ends(t, "modules-bitten.tar")) return P("Choosing kernel modules", "modules");
     if (ends(t, "/meta.stamp")) return P("Recording what the image holds", "metadata");
-    if (ends(t, "/overlay.tar") or has(t, "/apps/") or
-        ends(t, "application.stamp")) return P("Adding the form's files", "files");
+    if (ends(t, "/overlay.tar") or
+        has(t, "/application")) return P("Adding the form's files", "files");
     if (ends(t, "/root.erofs")) return P("Sealing the root (erofs, dm-verity)", "seal");
     if (ends(t, "initramfs.zst") or ends(t, "/stage0.zst") or
         ends(t, "/stage0-bitten.zst")) return P("Packing the boot image", "boot image");
     if (ends(t, "/disk.img") or ends(t, "/disk.qcow2")) return P("Making the boot disk", "disk");
-    if (ends(t, "/data.img")) return P("Making a disk for /data", "data disk");
-    if (ends(t, "config.tar")) return P("Packing the config", "config");
     if (std.mem.eql(u8, t, "_dist-form")) return P("Writing the release", "release");
     return null;
 }
@@ -670,18 +617,6 @@ test phaseOf {
     try testing.expectEqual(null, phaseOf("image"));
 }
 
-test remade {
-    try testing.expectEqualStrings(
-        "build/a/x.tar",
-        remade("    Must remake target `build/a/x.tar'.").?,
-    );
-    try testing.expectEqualStrings(
-        "build/a/x.tar",
-        remade("Must remake target 'build/a/x.tar'.").?,
-    );
-    try testing.expectEqual(null, remade("Successfully remade target file `x'."));
-}
-
 test clean {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
@@ -699,12 +634,6 @@ test clean {
             "time=\"2026-10-08T11:37:17-04:00\" level=info msg=\"Starting the instance\" name=x",
         ),
     );
-}
-
-test isBookkeeping {
-    try testing.expect(isBookkeeping("      Successfully remade target file `x'."));
-    try testing.expect(isBookkeeping("Reading makefiles..."));
-    try testing.expect(!isBookkeeping("apko build-minirootfs --build-arch aarch64"));
 }
 
 test fitColumns {

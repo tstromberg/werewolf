@@ -14,7 +14,7 @@ cloud user data ([docs/cloud.md](../../docs/cloud.md)).
 
 | Verb | Does |
 | --- | --- |
-| `build --with FORM` | builds the image itself, as make would, byte for byte ([howl-build.md](../../docs/design/howl-build.md)): boot disk and manifest `FORM-ARCH.json` in `dist`; `--format raw\|vhd\|vmdk` converts with qemu-img |
+| `build --with FORM` | builds the image itself, byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)): boot disk (`disk.zig`, with mtools and e2fsprogs) and manifest `FORM-ARCH.json` (`manifest.zig`) in `dist`; `--format raw\|vhd\|vmdk` converts with qemu-img |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config |
 | `run` | `create` of `werewolf-run`, replacing the last; default form lima on Lima, else prod-ssh |
@@ -22,7 +22,7 @@ cloud user data ([docs/cloud.md](../../docs/cloud.md)).
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | `make _build-apk`: a form's package from a melange recipe |
 | `form ... -o DIR` | writes an ad-hoc form ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same flags |
-| `_build`, `_bhyve`, `_firecracker`, `_unpack` | internal: make's image targets, built natively; two supervisors; the OCI unpacker ([oci.md](../../docs/design/oci.md)) |
+| `_build`, `_bhyve`, `_firecracker`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets and `BUILD/vmlinuz` (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); two supervisors; the OCI unpacker ([oci.md](../../docs/design/oci.md)) |
 
 ## Goals
 
@@ -48,14 +48,15 @@ limits (32 files, 32 KiB each, 48 KiB in all) and AWS's and Azure's caps on user
 
 **Engines.** Without `--on`, create picks Lima (macOS), bhyve (FreeBSD
 x86_64), Firecracker (Linux with KVM, if sudo needs no password), else QEMU.
-Local machines run the host's arch with 2 CPUs and 2 GiB.
+Local machines run the host's arch with 2 GiB and 2 CPUs, 4 under QEMU and a
+Lima-managed machine; howl builds each one's image itself, as `build` does.
 
 | `--on` | How | Needs |
 | --- | --- | --- |
-| lima | vz VM; Lima-managed if the form has sshd and bash, else vzNAT and the DHCP lease | limactl |
+| lima | vz VM; Lima-managed if the form has sshd and bash (howl's template boots the image directly, on a blank `build/ARCH/disk.img` Lima copies), else its own disk on vzNAT and the DHCP lease | limactl |
 | bhyve | under `howl _bhyve` via daemon(8); slirp, loopback forwards | doas/sudo, vmm, bhyve-firmware |
 | firecracker | kernel and stage0 booted directly under `howl _firecracker`; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, sudo/doas |
-| qemu | background QEMU, user networking; ssh and web on free loopback ports | qemu |
+| qemu | `qemu-system` in the background, booted directly (`qemu.zig`): hvf, kvm or nvmm, else tcg, and EL2 on aarch64 where the host lends it; `data.img` as vda; user networking, ssh and web on free loopback ports | qemu |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
 | gcp | image via a `gs://PROJECT-werewolf-images` bucket | gcloud |
 | aws | AMI written straight into an EBS snapshot | aws CLI |
@@ -73,9 +74,8 @@ Lima, or a restart in a cloud. Another form, or `--app`, is refused.
 
 ## Drawbacks
 
-- howl needs a checkout (`./forms`, the Makefile), GNU make (for the programs,
-  and for run's and create's images until they build as `build` does), and
-  provider CLIs whose output it parses; a changed field breaks it.
+- howl needs a checkout, GNU make for werewolf's programs, melange's packages
+  and the tutorials' apps, and provider CLIs, whose changed output breaks it.
 
 ## Alternatives Considered
 
