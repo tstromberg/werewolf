@@ -51,6 +51,8 @@ and key, and `make list-forms` shows the chains.
 | `mox` | `prod` | a domain's mail: SMTP, IMAP, submission, webmail and its own certificates, as its own user, never root, built here with one patch ([mox.md](../forms/mox/README.md)) |
 | `haproxy` | `prod` | HAProxy 3.4 balancing HTTP over the backends its settings name, HTTPS with a certificate from the config, nothing to control it by but its configuration ([haproxy.md](../forms/haproxy/README.md)) |
 | `miniflux` | `prod`, with `postgresql`, `caddy` | a feed reader fetching from public addresses alone, its administrator from the config, built here ([miniflux.md](../forms/miniflux/README.md)) |
+| `prometheus` | `prod` | scraping the targets its settings name, and itself, one user on its web and API, its admin, lifecycle and remote-write APIs off ([prometheus.md](../forms/prometheus/README.md)) |
+| `loki` | `prod` | keeping pushed logs 31 days, behind Caddy's HTTPS and one user, Loki on loopback reaching nothing ([loki.md](../forms/loki/README.md)) |
 | `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
 | `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
 | `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
@@ -413,9 +415,9 @@ $ curl http://127.0.0.1:8080/health
 ```
 
 Run the same `howl create` again. The count goes on: under QEMU a second
-create stops the machine and boots it again, keeping its `/data`,
-`build/machines/hello/data.img`. `howl delete hello` removes the machine
-and its `/data`.
+create stops the machine and boots it again, keeping its disk,
+`build/machines/hello/disk.img`, and so its `/data`. `howl delete hello`
+removes the machine and its `/data`.
 
 To change the application, change its files and run the create again,
 which rebuilds the image. A machine never changes in place.

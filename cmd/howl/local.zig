@@ -33,10 +33,11 @@ const releaseDisk = howl.releaseDisk;
 const run_name = howl.run_name;
 const testing = std.testing;
 
-/// createQemu builds the form and boots it in the background under QEMU
-/// (qemu.zig), with its own data disk and config tar. ssh and the form's
-/// last port are forwarded from free loopback ports. A machine of the same
-/// name is stopped first; its /data is kept. QEMU is the fallback engine.
+/// createQemu builds the form's boot disk and boots it in the background
+/// under QEMU (qemu.zig), with its config tar: from its slots, so it
+/// updates in place. ssh and the form's last port are forwarded from free
+/// loopback ports. A machine of the same name is stopped and keeps its
+/// disk, taking the new config. QEMU is the fallback engine.
 pub fn createQemu(
     io: Io,
     gpa: Allocator,
@@ -50,19 +51,48 @@ pub fn createQemu(
     const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
+    const fw = qemu.firmware(io, arch) orelse return why.refuse(
+        "--on qemu: no UEFI firmware for {t} (edk2, which QEMU's packages bring)",
+        .{arch},
+    );
     const replaced = try qemu.stop(io, gpa, dir);
-    const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
+    // The machine is its disk, booted from slots and updated in place, so a
+    // machine of this name keeps it and takes the new config; howl run
+    // removed its last machine first.
+    const disk = try gpa.print("{s}/disk.img", .{at});
+    const kept = if (Dir.cwd().access(io, disk, .{})) |_| true else |_| false;
+    if (kept) try howl.reconfigurable(
+        o,
+        name,
+        qemu.record(io, gpa, dir, "form") orelse "",
+        .qemu,
+        why,
+    );
     var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
-    const p = try howl.buildHere(io, gpa, &steps, .{
-        .form = o.form,
-        .arch = arch,
-        .dev = tell.dev,
-        .published = !o.local,
-        .app = ab.root,
-    }, .{ .image = true });
-    const built = steps.start.untilNow(io, .awake).toSeconds();
+    var built: ?i64 = null;
+    if (!kept) {
+        const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
+        var spec: native.Spec = .{
+            .form = o.form,
+            .arch = arch,
+            .dev = tell.dev,
+            .published = !o.local,
+            .app = ab.root,
+            .disk_path = disk,
+        };
+        spec.disk.args = qemu.bootArgs(arch);
+        _ = try howl.buildHere(io, gpa, &steps, spec, .{ .disk = true });
+        built = steps.start.untilNow(io, .awake).toSeconds();
+        if (fw.vars) |v| try Dir.copyFile(
+            Dir.cwd(),
+            v,
+            Dir.cwd(),
+            try gpa.print("{s}/vars.fd", .{dir}),
+            io,
+            .{},
+        );
+    }
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
-    try qemu.disk(io, try gpa.print("{s}/data.img", .{dir}), 8 << 30);
     const ssh_port = try qemu.freePort(io, 2222);
     const web_port = try qemu.freePort(io, 8080);
     try writePrivate(io, gpa, try gpa.print("{s}/machine", .{dir}), try gpa.print(
@@ -85,21 +115,11 @@ pub fn createQemu(
     const argv = try qemu.argv(gpa, .{
         .arch = arch,
         .dir = at,
-        .kernel = try gpa.print("{s}/{s}/vmlinuz", .{ cwd, p.build }),
-        .initrd = try gpa.print("{s}/{s}/initramfs.zst", .{ cwd, p.out }),
-        .cmdline = std.mem.trim(u8, Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/slot/cmdline", .{p.out}),
-            gpa,
-            .limited(4096),
-        ) catch |err| return steps.fail(try gpa.print(
-            "{s}/slot/cmdline: {t}",
-            .{ p.out, err },
-        )), " \n"),
+        .firmware = fw,
         .ssh_port = ssh_port,
         .web_port = web_port,
         .guest_web = guest_web,
-    }, accel, arch == .aarch64 and qemu.hasEl2(io, accel));
+    }, accel);
     const launched = Io.Clock.awake.now(io);
     if (!(try steps.exec(&.{.{ .argv = argv }}, .{})).ok) return steps.fail("QEMU did not start");
     _ = try steps.finish();
@@ -134,7 +154,12 @@ pub fn createQemu(
     const late = sshReady(io, ports, "127.0.0.1", ssh_port);
     return sayUp(io, gpa, tell.began, try gpa.print("{s} is up here, under QEMU{s}{s}", .{
         name,
-        if (replaced) ", in place of the last" else "",
+        if (kept)
+            ", its disk kept, with the new config"
+        else if (replaced)
+            ", in place of the last"
+        else
+            "",
         late,
     }), built, boot, try gpa.print("{s}{s}{s}{s} · {s}", .{
         if (ssh) try sshCommand(gpa, name) else "",
@@ -238,36 +263,18 @@ pub fn createLima(
         };
         var steps: progress.Steps = try .init(io, gpa, why, step);
         var template: []const u8 = undefined;
+        // The machine's own boot disk, booted from its slots, so it updates
+        // in place: under Lima's management on Lima's network, with Lima's
+        // user and ssh, or on vzNAT, whose console is the virtio one and,
+        // with DHCP, whose MAC this host finds its lease by.
+        const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
+        var with = spec;
+        with.disk_path = disk;
         if (managed) {
-            // Lima boots the image directly, on its own network, with its
-            // own user, so it manages the machine, ssh and stop included.
-            const p = try howl.buildHere(io, gpa, &steps, spec, .{ .image = true });
-            // The instance's disk, which Lima copies and grows to 100 GiB,
-            // and the playground form formats as /data: one blank file for all.
-            try qemu.disk(io, try gpa.print("{s}/disk.img", .{p.build}), 64 << 20);
-            const cmdline = Dir.cwd().readFileAlloc(
-                io,
-                try gpa.print("{s}/slot/cmdline", .{p.out}),
-                gpa,
-                .limited(4096),
-            ) catch |err| return steps.fail(try gpa.print(
-                "{s}/slot/cmdline: {t}",
-                .{ p.out, err },
-            ));
-            template = try lima.managedTemplate(gpa, .{
-                .form = o.form,
-                .arch = @tagName(arch),
-                .build = try gpa.print("{s}/{s}", .{ cwd, p.build }),
-                .out = try gpa.print("{s}/{s}", .{ cwd, p.out }),
-                .cmdline = std.mem.trim(u8, cmdline, " \n"),
-                .config_disk = config_disk,
-            });
+            with.disk.args = &lima.managed_args;
+            _ = try howl.buildHere(io, gpa, &steps, with, .{ .disk = true });
+            template = try lima.managedTemplate(gpa, o.form, @tagName(arch), disk, config_disk);
         } else {
-            // Its own boot disk, whose console is the virtio one, and with
-            // DHCP the vzNAT MAC this host finds its lease by.
-            const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
-            var with = spec;
-            with.disk_path = disk;
             with.disk.args = if (dhcp)
                 try gpa.dupe(
                     []const u8,

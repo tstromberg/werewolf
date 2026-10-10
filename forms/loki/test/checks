@@ -1,0 +1,12 @@
+# Loki is ready, on loopback: wait for its ring to settle.
+ok  loki-ready       i=0; until wget -q -T 5 -O - http://127.0.0.1:3100/ready 2>/dev/null | grep -q '^ready'; do i=$((i + 1)); [ $i -le 120 ] || { echo "not ready in 120 s"; exit 1; }; sleep 1; done
+# Through Caddy, over HTTPS with a certificate from Caddy's own CA for
+# localhost, a stranger's query and push are refused.
+ok  loki-auth        i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/loki/api/v1/labels 2>&1 | grep -q 'HTTP/1.1 401'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no 401 in 60 s"; exit 1; }; sleep 1; done; wget -q -T 5 --no-check-certificate -S -O /dev/null --post-data '{}' https://localhost/loki/api/v1/push 2>&1 | grep -q 'HTTP/1.1 401'
+# A line pushed to Loki is read back through Caddy by its user. nc holds
+# the connection open while Loki answers, which cancels a push whose
+# client has gone.
+ok  loki-roundtrip   t=$(date +%s)000000000; b="{\"streams\":[{\"stream\":{\"job\":\"check\"},\"values\":[[\"$t\",\"werewolf-check-line\"]]}]}"; (printf 'POST /loki/api/v1/push HTTP/1.0\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s' ${#b} "$b"; sleep 3) | nc -w 5 127.0.0.1 3100 | grep -q ' 204 ' && a="Authorization: Basic $(printf %s alloy:werewolf-check-pass-1 | base64)" && i=0 && until wget -q -T 5 --no-check-certificate -O - --header "$a" 'https://localhost/loki/api/v1/query_range?query=%7Bjob%3D%22check%22%7D&since=1h' | grep -q werewolf-check-line; do i=$((i + 1)); [ $i -le 30 ] || { echo "the line did not come back"; exit 1; }; sleep 1; done
+# Loki reaches nothing but its own gRPC on loopback, so it reports to no
+# one; loki-auth wrote a bcrypt hash and took the password's copy away.
+ok  loki-alone       u=$(grep '^loki:' /etc/passwd | cut -d: -f3); [ "$(grep -c "^connect $u " /usr/share/werewolf/net)" = 1 ] && grep -qx "connect $u tcp 9095" /usr/share/werewolf/net && grep -qF 'alloy $2b$10$' /run/svc/caddy/loki-auth.caddy && ! grep -q werewolf-check-pass-1 /run/svc/caddy/loki-auth.caddy && [ ! -e /run/svc/caddy/loki-password ]

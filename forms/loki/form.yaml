@@ -1,0 +1,58 @@
+# loki: prod, with Loki keeping logs pushed to it for 31 days on /data,
+# behind Caddy, which serves its push and query APIs over HTTPS for the
+# machine's domain, with a certificate from Let's Encrypt, to one user
+# alone (Loki has no authentication of its own). Loki listens on loopback,
+# reaches nothing, and sends no usage reports. leash starts each part
+# (etc/sv/loki/service, etc/sv/caddy/service) as its own user. See
+# forms/loki/README.md.
+base: prod
+
+packages:
+  - loki-3.7
+  - caddy
+
+services:
+  # Loki, as its own user: it serves on loopback alone, behind Caddy, keeps
+  # its chunks, index and compactor's work in /data/svc/loki, reaches
+  # nothing on the network, and runs nothing.
+  loki:
+    exec: /usr/bin/loki -config.file=/etc/loki/loki.yaml
+    user: loki
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/3100 loopback, tcp/9095 loopback]
+    connect: [tcp/9095]
+    read: /etc/loki
+    memory: 768
+    nofile: 65536
+    env:
+      - GOMEMLIMIT=512MiB
+
+  # Caddy, as its own user, for Loki: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Loki on
+  # loopback, read its configuration, and write only its own directories.
+  # Before it starts, loki-auth writes the one user it lets through, from
+  # the machine's settings and a bcrypt hash of the config's password.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before:
+      - /usr/lib/werewolf/loki-auth
+      - /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/3100]
+    read: /etc/caddy
+    config:
+      - loki-password /run/config/caddy/loki-password
+      - settings /run/config/caddy/settings.json
+    setting:
+      - domain hostname required as DOMAIN
+      - loki-user string required as LOKI_USER
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

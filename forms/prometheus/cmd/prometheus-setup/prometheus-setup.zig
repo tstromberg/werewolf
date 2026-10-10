@@ -170,12 +170,15 @@ fn scrape(gpa: Allocator, s: Settings) ![]const u8 {
 
 /// check runs promtool, printing what it says when it refuses.
 fn check(io: Io, gpa: Allocator, argv: []const []const u8) !void {
-    const r = try std.process.run(gpa, io, .{
+    const r = std.process.run(gpa, io, .{
         .argv = argv,
         .stdout_limit = .limited(64 << 10),
         .stderr_limit = .limited(64 << 10),
         .timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } },
-    });
+    }) catch |err| {
+        say(io, "{s}: {s}", .{ argv[0], @errorName(err) });
+        return err;
+    };
     if (r.term == .exited and r.term.exited == 0) return;
     var lines = std.mem.splitScalar(u8, if (r.stderr.len > 0) r.stderr else r.stdout, '\n');
     while (lines.next()) |line| if (line.len > 0) say(io, "promtool {s}: {s}", .{ argv[2], line });
