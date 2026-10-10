@@ -9,8 +9,8 @@ and which CVEs that fixes.
 
 It is one Zig program, `cmd/slot-update/slot-update.zig` with `cmd/slot-update/release.zig` (a
 release's manifest and signature), `cmd/slot-update/cve.zig` (the CVE children and
-the checks of what they say) and `lib/sandbox.zig`, in `prod` and every
-form on it.
+the checks of what they say) and `lib/sandbox.zig`, in `minimal` and so every
+form.
 
 ## Running
 
@@ -167,7 +167,7 @@ that fails is recorded with its error, and the update goes ahead.
 ## Separation
 
 Root, which builds and installs the slot, has no network at all: the
-form's policy (`forms/prod/form.yaml`) lets only `_update` (uid 69) send,
+form's policy (`forms/minimal/form.yaml`) lets only `_update` (uid 69) send,
 and only HTTPS and DNS. Everything the updater takes from the network is
 fetched by children running as `_update`, as werewolf's programs are
 written ([programs.md](programs.md)).

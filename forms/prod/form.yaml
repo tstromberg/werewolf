@@ -7,10 +7,6 @@
 # - its config from a cloud's metadata server (GCP, AWS, Hetzner Cloud,
 #   Azure) when no config tar is on a disk or beside the victim
 #   (cmd/cloud-metadata; docs/cloud.md);
-# - keeping itself current (cmd/slot-update; docs/updater.md): at boot and
-#   every hour it asks Wolfi and Alpine whether anything in this image
-#   has a newer version, and if so builds the other slot on the machine,
-#   boots it once, and keeps it only if it commits;
 # - /data on a disk, when werewolf.data names one, in LUKS2 when the config
 #   brings data.key (docs/data.md).
 #
@@ -18,23 +14,17 @@
 base: minimal
 
 packages:
-  - apk-tools             # fetch and verify packages, against the keys in the image
-  - erofs-utils           # mkfs.erofs, for the new slot's root
-  - zstd                  # stage0's compression, as the build's
   - e2fsprogs             # mke2fs, e2fsck, for /data
   - cryptsetup            # /data's LUKS2
 
 # Each program's half that talks to the network, as a user of its own:
-# _dhcp reads it for the DHCP client, _cloud asks the metadata server, and
-# _update fetches the packages and CVE sources the updater reads.
+# _dhcp reads it for the DHCP client, and _cloud asks the metadata server.
 accounts:
   groups:
     - groupname: _dhcp
       gid: 67
     - groupname: _cloud
       gid: 68
-    - groupname: _update
-      gid: 69
   users:
     - username: _dhcp
       uid: 67
@@ -46,25 +36,14 @@ accounts:
       gid: 68
       homedir: /var/empty
       shell: /sbin/nologin
-    - username: _update
-      uid: 69
-      gid: 69
-      homedir: /var/empty
-      shell: /sbin/nologin
 
 # werewolf's programs from cmd/ this form's machines run, beside the
 # ones every form has (docs/programs.md)
-programs: [dhcp-client, cloud-metadata, slot-update, service-config]
+programs: [dhcp-client, cloud-metadata, service-config]
 
-# The updater's network half, as _update: Wolfi and Alpine for apk, and the
-# CVE sources, Wolfi's security.json and the kernel CNA's records on
-# git.kernel.org, all over HTTPS, and the names to find them. Root, which
-# builds and installs the slot, has no network at all.
-net:
-  - connect _update tcp/443 udp/53 tcp/53
-  # No one reaches the metadata server, where the user data and its secrets
-  # are: cmd/cloud-metadata's fetcher, the one that asks, runs at boot before
-  # this policy is set, held to TCP port 80 by its own Landlock instead.
+# No one reaches the metadata server, where the user data and its secrets
+# are: cmd/cloud-metadata's fetcher, the one that asks, runs at boot before
+# the network policy is set, held to TCP port 80 by its own Landlock instead.
 
 # GCP's disks and NIC: SCSI disks behind virtio-scsi (the boot disk on
 # older machine types), and NVMe and Google's gVNIC (on newer ones, Arm's

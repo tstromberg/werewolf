@@ -1,0 +1,22 @@
+# Mox answers SMTP for its host name once mox-setup has made the domain
+# and written the configuration: the first start runs quickstart, which
+# asks DNS, so wait.
+ok  mox-smtp         i=0; until printf 'QUIT\r\n' | nc 127.0.0.1 25 2>/dev/null | grep -q '^220 mail\.example\.com ESMTP'; do i=$((i + 1)); [ $i -le 120 ] || { echo "no SMTP banner in 120 s"; exit 1; }; sleep 1; done
+# Its ports are its own; nothing listens on :80.
+ok  mox-listening    for p in 25 443 465 587 993; do netstat -ltn | awk -v p=$p 'NR > 2 { n = split($4, a, ":"); if (a[n] == p) f = 1 } END { exit !f }' || { echo "nothing on :$p"; exit 1; }; done; ! netstat -ltn | awk 'NR > 2 { n = split($4, a, ":"); if (a[n] == 80) f = 1 } END { exit !f }'
+# Mail for the domain from a stranger is taken and kept in the first
+# account. The null sender, a bounce's, needs no DNS; Mox holds a first
+# sender back 15 s before it answers the message, so wait for its 250.
+ok  mox-inbound      (printf 'EHLO check.example.org\r\nMAIL FROM:<>\r\nRCPT TO:<postmaster@example.com>\r\nDATA\r\n'; sleep 1; printf 'From: mailer-daemon@check.invalid\r\nTo: postmaster@example.com\r\nSubject: werewolf-check-inbound\r\n\r\nhello\r\n.\r\n'; sleep 25; printf 'QUIT\r\n') | nc 127.0.0.1 25 | grep -q '^250 2\.2\.0' && grep -rq werewolf-check-inbound /data/svc/mox/data/accounts/postmaster/msg
+# It relays nothing for a stranger.
+ok  mox-no-relay     (printf 'EHLO check.example.org\r\nMAIL FROM:<>\r\nRCPT TO:<someone@example.net>\r\nQUIT\r\n'; sleep 2) | nc 127.0.0.1 25 | grep -q '^550 '
+# The web over TLS: webmail, and the domain's MTA-STS policy by its name.
+ok  mox-web          wget -q -T 10 --no-check-certificate -O /dev/null https://localhost/webmail/ && wget -q -T 10 --no-check-certificate -O - --header 'Host: mta-sts.example.com' https://localhost/.well-known/mta-sts.txt | grep -q '^mode: enforce'
+# mox-setup wrote the configuration from the settings and the config: the
+# admin password as a bcrypt hash, the relay and its route; it took
+# leash's copies of the passwords away; what it wrote is Mox's alone.
+ok  mox-setup        c=/data/svc/mox/config; grep -q '^\$2b\$10\$' $c/adminpasswd && [ "$(stat -c '%a %U' $c/mox.conf)" = '600 mox' ] && [ "$(stat -c '%a %U' $c/adminpasswd)" = '600 mox' ] && grep -q 'Host: smtp\.example\.net$' $c/mox.conf && grep -q '^Routes:' $c/domains.conf && [ ! -e /run/svc/mox/admin-password ] && [ ! -e /run/svc/mox/relay-password ]
+# A message the first account sends, by Mox's web API with a password set
+# over its control socket in /run (as the admin web would), is DKIM-signed
+# and queued for the relay, which never answers here.
+ok  mox-submitted    m="env MOX_CTL=/run/svc/mox/ctl mox -config /data/svc/mox/config/mox.conf"; printf 'werewolf-check-pass-1\n' | $m setaccountpassword postmaster >/dev/null && wget -q -T 10 --no-check-certificate -O - --header "Authorization: Basic $(printf %s postmaster@example.com:werewolf-check-pass-1 | base64)" --post-data 'request={"To":[{"Address":"someone@example.net"}],"Subject":"werewolf-check-submitted","Text":"hello"}' https://localhost/webapi/v0/Send | grep -q QueueMsgID && id=$($m queue list | sed -n 's/^ *\([0-9][0-9]*\) .*to:someone@example\.net.*/\1/p' | head -1) && [ -n "$id" ] && $m queue dump "$id" | grep -q '^DKIM-Signature: '

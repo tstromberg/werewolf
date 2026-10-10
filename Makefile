@@ -436,7 +436,7 @@ $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
 _check-shellfree:
 	@$(CHECK_ENV) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
-# These boot what a form's check built, so follow it; minimal's slot has no updater to reach out.
+# These boot what a form's check built, so follow it; they need prod's DHCP, metadata and /data.
 check-lease check-nodata check-metadata: | _check-shared check-prod
 	@$(CHECK_MAKE) FORM=prod _$@
 check-static check-verity: | _check-shared check-minimal

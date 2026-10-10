@@ -1,0 +1,16 @@
+#!/bin/sh
+# forms/mox/test/config DIR: the mox form's config for make check, in DIR:
+# its domain, example.com, and first account, postmaster; the admin
+# password; a certificate made here in Let's Encrypt's place, which no
+# check machine could get; and a relay that never answers, as the checks
+# look only at what Mox was given and what it queued for it.
+set -eu
+mkdir -p "$1/mox"
+umask 077
+printf '%s' werewolf-check-admin-1 >"$1/mox/admin-password"
+printf '%s' werewolf-check-relay-1 >"$1/mox/relay-password"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+	-subj /CN=mail.example.com \
+	-addext subjectAltName=DNS:mail.example.com,DNS:mta-sts.example.com,DNS:autoconfig.example.com \
+	-keyout "$1/mox/tls-key" -out "$1/mox/tls-cert" 2>/dev/null
+echo '{"domain":"example.com","postmaster":"postmaster","relay-server":"smtp.example.net","relay-port":587,"relay-login":"mox"}' >"$1/mox/settings.json"

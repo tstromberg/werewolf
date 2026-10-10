@@ -1,0 +1,8 @@
+# What the mox form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-mox; test/boot;
+# forms/demo/test/console has the format). Mox, given no admin password,
+# parks before mox-setup makes or writes anything, and says why. make
+# check-mox boots it with its config, and checks it serves.
+
+seen    mox-needs-config  leash: \{"event":"down","service":"mox","why":"config admin-password: FileNotFound"\}
+unseen  setup-ran         mox-setup: (made|mox\.conf|admin)

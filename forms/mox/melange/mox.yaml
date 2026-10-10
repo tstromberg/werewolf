@@ -1,0 +1,135 @@
+# Mox for werewolf's mox form, as Wolfi would package it but for one
+# patch: built by melange in Wolfi's environment with Wolfi's Go, static
+# (no cgo), from the release tag's commit, so Go stamps the binary with
+# its version (v0.0.17+dirty: the patch) for `mox version`, its logs and
+# scanners. Its Go modules are vendored in the tree; nothing else is
+# fetched. When upstream takes the patch's two changes
+# (https://github.com/mjl-/mox/issues/194) the patch goes, and the recipe
+# can go to wolfi-dev/os.
+package:
+  name: mox
+  version: 0.0.17
+  epoch: 0
+  description: Modern full-featured open source secure mail server
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - go-1.27
+      - patch
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/mjl-/mox
+      tag: v${{package.version}}
+      expected-commit: 1c9587665b321199312e11b6a47a0480a9e2750f
+
+  # Two changes, for leash. Upstream, mox starts as root, binds its ports
+  # and execs itself as its user, handing the listeners over in
+  # MOX_SOCKETS; started as any other user without them, it refuses. leash
+  # starts it as its user with the low ports granted, so it binds them
+  # itself. And its control socket goes where MOX_CTL says, as fence lets
+  # sockets be made only beneath /run, not in /data. Inline, not files
+  # beside this one, so this recipe is the build's one input
+  # (cmd/howl/melange.zig).
+  - runs: |
+      patch -p1 --fuzz=0 --no-backup-if-mismatch <<'EOF'
+      --- a/ctl.go
+      +++ b/ctl.go
+      @@ -48,7 +48,7 @@
+
+       // xctl opens a ctl connection.
+       func xctl() *ctl {
+      -	p := mox.DataDirPath("ctl")
+      +	p := mox.CtlPath()
+       	conn, err := net.Dial("unix", p)
+       	if err != nil {
+       		log.Fatalf("connecting to control socket at %q: %v", p, err)
+      --- a/mox-/dir.go
+      +++ b/mox-/dir.go
+      @@ -1,6 +1,7 @@
+       package mox
+
+       import (
+      +	"os"
+       	"path/filepath"
+       )
+
+      @@ -22,6 +23,16 @@
+       // configuration.
+       func DataDirPath(f string) string {
+       	return dataDirPath(ConfigStaticPath, Conf.Static.DataDir, f)
+      +}
+      +
+      +// CtlPath returns the path of the control socket: $MOX_CTL if set, for
+      +// systems that allow sockets only beneath /run (werewolf), else "ctl" in
+      +// the data directory.
+      +func CtlPath() string {
+      +	if p := os.Getenv("MOX_CTL"); p != "" {
+      +		return p
+      +	}
+      +	return DataDirPath("ctl")
+       }
+
+       // return f interpreted relative to the directory of the config dir. f is returned
+      --- a/serve.go
+      +++ b/serve.go
+      @@ -47,7 +47,7 @@
+       			log.Print("shutting down with pending sockets")
+       		}
+       	}
+      -	err := os.Remove(mox.DataDirPath("ctl"))
+      +	err := os.Remove(mox.CtlPath())
+       	log.Check(err, "removing ctl unix domain socket during shutdown")
+       }
+
+      --- a/serve_unix.go
+      +++ b/serve_unix.go
+      @@ -210,7 +210,15 @@
+       			}
+       		}
+       	} else {
+      -		mox.RestorePassedFiles()
+      +		// Started unprivileged by a supervisor that grants the low ports
+      +		// (werewolf's leash), not by mox's root parent: no sockets or files
+      +		// were passed, so listen and open them directly. See
+      +		// https://github.com/mjl-/mox/issues/194.
+      +		if os.Getenv("MOX_SOCKETS") == "" {
+      +			mox.FilesImmediate = true
+      +		} else {
+      +			mox.RestorePassedFiles()
+      +		}
+       		mox.MustLoadConfig(true, checkACMEHosts)
+       		log.Print("starting as unprivileged user",
+       			slog.String("user", mox.Conf.Static.User),
+      @@ -365,7 +373,7 @@
+
+       	go monitorDNSBL(log)
+
+      -	ctlpath := mox.DataDirPath("ctl")
+      +	ctlpath := mox.CtlPath()
+       	_ = os.Remove(ctlpath)
+       	ctl, err := net.Listen("unix", ctlpath)
+       	if err != nil {
+      EOF
+
+  - runs: |
+      CGO_ENABLED=0 GOFLAGS=-mod=vendor go build -trimpath -ldflags='-s -w' -o mox .
+      ./mox version
+      install -Dm755 mox ${{targets.destdir}}/usr/bin/mox
+
+update:
+  enabled: true
+  github:
+    identifier: mjl-/mox
+    strip-prefix: v
