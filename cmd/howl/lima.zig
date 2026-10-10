@@ -132,25 +132,28 @@ pub fn template(
     });
 }
 
-/// Managed is what a machine Lima manages boots: build's kernel and blank
-/// disk, out's initramfs, both directories absolute, and the image's
-/// kernel arguments.
-pub const Managed = struct {
-    form: []const u8,
-    arch: []const u8,
-    build: []const u8,
-    out: []const u8,
-    cmdline: []const u8,
-    config_disk: []const u8,
+/// managedArgs are the kernel arguments a managed machine's disk boots
+/// with: Lima's user network, whose gateway answers DNS. vz has no serial
+/// port, so the console is hvc0.
+pub const managed_args = [_][]const u8{
+    "console=hvc0",
+    "werewolf.ip=" ++ user_ip,
+    "werewolf.gw=" ++ user_gw,
+    "werewolf.dns=" ++ user_gw,
 };
 
 /// managedTemplate returns the template of a machine Lima manages, in plain
-/// mode: Lima boots it and forwards ssh, nothing else. There is no
-/// cloud-init in the guest; init reads the ssh key Lima puts in its cidata
-/// volume and makes that user itself. The blank disk is the instance's,
-/// which Lima grows and keeps until limactl delete and the form formats as
-/// /data; the config tar is a second disk.
-pub fn managedTemplate(gpa: Allocator, m: Managed) ![]const u8 {
+/// mode: Lima boots its disk, from the slots on it, and forwards ssh,
+/// nothing else. There is no cloud-init in the guest; init reads the ssh
+/// key Lima puts in its cidata volume and makes that user itself. The
+/// config tar is a second disk.
+pub fn managedTemplate(
+    gpa: Allocator,
+    form: []const u8,
+    arch: []const u8,
+    disk: []const u8,
+    config_disk: []const u8,
+) ![]const u8 {
     return gpa.print(
         \\# Written by howl create: Lima manages it.
         \\# {s}: {s}
@@ -161,25 +164,14 @@ pub fn managedTemplate(gpa: Allocator, m: Managed) ![]const u8 {
         \\cpus: 4
         \\memory: {d}MiB
         \\images:
-        \\  - location: "{s}/disk.img"
+        \\  - location: "{s}"
         \\    arch: {s}
-        \\    kernel:
-        \\      location: "{s}/vmlinuz"
-        \\      # Lima's user network; its gateway answers DNS. vz has no
-        \\      # serial port, so the console is hvc0.
-        \\      cmdline: "console=hvc0 {s} werewolf.ip={s} werewolf.gw={s} werewolf.dns={s} werewolf.data=vda"
-        \\    initrd:
-        \\      location: "{s}/initramfs.zst"
         \\mounts: []
         \\additionalDisks:
         \\  - name: "{s}"
         \\    format: false
         \\
-    , .{
-        howl.form_tag, m.form,  m.arch,        howl.local_mib, m.build,
-        m.arch,        m.build, m.cmdline,     user_ip,        user_gw,
-        user_gw,       m.out,   m.config_disk,
-    });
+    , .{ howl.form_tag, form, arch, howl.local_mib, disk, arch, config_disk });
 }
 
 /// isManaged reports whether yaml came from managedTemplate.
@@ -300,21 +292,22 @@ test template {
     );
     try testing.expect(std.mem.find(u8, plain, "networks:") == null);
     try testing.expect(std.mem.find(u8, plain, "    arch: aarch64\nmounts: []") != null);
-    const mt = try managedTemplate(arena.allocator(), .{
-        .form = "lima",
-        .arch = "aarch64",
-        .build = "/w/build/aarch64",
-        .out = "/w/build/aarch64/lima",
-        .cmdline = "debugfs=off",
-        .config_disk = "x-config",
-    });
+    const mt = try managedTemplate(
+        arena.allocator(),
+        "playground",
+        "aarch64",
+        "/m/disk.img",
+        "x-config",
+    );
     try testing.expect(isManaged(mt));
-    try testing.expectEqualStrings("lima", formOf(mt).?);
-    for ([_][]const u8{
-        "  - location: \"/w/build/aarch64/disk.img\"\n    arch: aarch64\n",
-        "cmdline: \"console=hvc0 debugfs=off werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2",
-        "location: \"/w/build/aarch64/lima/initramfs.zst\"\nmounts: []\nadditionalDisks:\n" ++
+    try testing.expectEqualStrings("playground", formOf(mt).?);
+    try testing.expect(std.mem.find(u8, mt, "kernel:") == null);
+    try testing.expect(std.mem.find(
+        u8,
+        mt,
+        "  - location: \"/m/disk.img\"\n    arch: aarch64\nmounts: []\nadditionalDisks:\n" ++
             "  - name: \"x-config\"",
-    }) |want| try testing.expect(std.mem.find(u8, mt, want) != null);
+    ) != null);
+    try testing.expectEqualStrings("werewolf.ip=192.168.5.15/24", managed_args[1]);
     try testing.expectEqual(null, formOf("vmType: vz\n"));
 }

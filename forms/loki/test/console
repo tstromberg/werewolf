@@ -1,0 +1,10 @@
+# What the loki form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-loki; test/boot;
+# forms/demo/test/console has the format). Caddy, given no password for
+# Loki's user, parks before loki-auth writes anything or Caddy binds a
+# port, and says why; Loki runs, on loopback, reachable by nothing. make
+# check-loki boots it with its config, and checks it keeps a line.
+
+seen    caddy-needs-config  leash: \{"event":"down","service":"caddy","why":"config loki-password: FileNotFound"\}
+unseen  loki-down           leash: \{"event":"down","service":"loki"
+unseen  auth-ran            loki-auth: Loki

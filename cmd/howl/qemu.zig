@@ -13,18 +13,71 @@ const howl = @import("howl.zig");
 /// Machine is what a machine under QEMU boots, and where its state is.
 pub const Machine = struct {
     arch: howl.Arch,
-    /// dir holds the console, monitor, pid, data disk and config tar. It
-    /// and the files below are absolute: QEMU daemonized runs in /.
+    /// dir holds the console, monitor, pid, boot disk (disk.img), UEFI
+    /// variables and config tar. It and firmware are absolute: QEMU
+    /// daemonized runs in /.
     dir: []const u8,
-    kernel: []const u8,
-    initrd: []const u8,
-    /// cmdline is the kernel arguments the image asks for.
-    cmdline: []const u8,
+    firmware: Firmware,
     ssh_port: u16,
     /// web_port is this host's port that reaches the machine's guest_web.
     web_port: u16,
     guest_web: u16,
 };
+
+/// Firmware is edk2's code and, on x86_64, the template of its variables,
+/// which each machine copies to vars.fd.
+pub const Firmware = struct { code: []const u8, vars: ?[]const u8 = null };
+
+/// firmware finds edk2 for arch where QEMU's packages put it, or null.
+pub fn firmware(io: Io, arch: howl.Arch) ?Firmware {
+    const codes: []const []const u8 = switch (arch) {
+        .aarch64 => &.{
+            "/opt/homebrew/share/qemu/edk2-aarch64-code.fd",
+            "/usr/local/share/qemu/edk2-aarch64-code.fd",
+            "/usr/share/qemu/edk2-aarch64-code.fd",
+            "/usr/share/qemu-efi-aarch64/QEMU_EFI.fd",
+            "/usr/share/AAVMF/AAVMF_CODE.fd",
+        },
+        .x86_64 => &.{
+            "/opt/homebrew/share/qemu/edk2-x86_64-code.fd",
+            "/usr/local/share/qemu/edk2-x86_64-code.fd",
+            "/usr/share/qemu/edk2-x86_64-code.fd",
+            "/usr/share/ovmf/OVMF.fd",
+        },
+    };
+    const code = first(io, codes) orelse return null;
+    if (arch == .aarch64) return .{ .code = code };
+    return .{ .code = code, .vars = first(io, &.{
+        "/opt/homebrew/share/qemu/edk2-i386-vars.fd",
+        "/usr/local/share/qemu/edk2-i386-vars.fd",
+        "/usr/share/qemu/edk2-i386-vars.fd",
+        "/usr/share/OVMF/OVMF_VARS_4M.fd",
+        "/usr/share/OVMF/OVMF_VARS.fd",
+    }) orelse return null };
+}
+
+fn first(io: Io, paths: []const []const u8) ?[]const u8 {
+    for (paths) |p| if (Dir.cwd().access(io, p, .{})) |_| return p else |_| {};
+    return null;
+}
+
+/// bootArgs are the kernel arguments a machine's disk boots with: the
+/// console QEMU logs, and user networking's address, gateway and resolver.
+pub fn bootArgs(arch: howl.Arch) []const []const u8 {
+    return switch (arch) {
+        .aarch64 => &boot_args_aarch64,
+        .x86_64 => &boot_args_x86_64,
+    };
+}
+
+const user_net = [_][]const u8{
+    "werewolf.ip=10.0.2.15/24",
+    "werewolf.gw=10.0.2.2",
+    "werewolf.dns=10.0.2.3",
+    "werewolf.debug=1",
+};
+const boot_args_aarch64 = [_][]const u8{"console=ttyAMA0"} ++ user_net;
+const boot_args_x86_64 = [_][]const u8{"console=ttyS0"} ++ user_net;
 
 /// Accel is how QEMU runs a guest of this machine's arch.
 pub const Accel = enum { hvf, kvm, nvmm, tcg };
@@ -41,51 +94,38 @@ pub fn accel(io: Io) Accel {
     return .kvm;
 }
 
-/// hasEl2 reports whether QEMU can give an aarch64 guest EL2 here: TCG
-/// always, HVF on Apple M3 and later, KVM where the host nests. Given EL2,
-/// the guest's kernel would start its built-in KVM, so werewolf boots with
-/// kvm-arm.mode=none and posture proves it holds. QEMU, started paused and
-/// told to quit, says in milliseconds.
-pub fn hasEl2(io: Io, a: Accel) bool {
-    var child = std.process.spawn(io, .{
-        .argv = &.{
-            "qemu-system-aarch64", "-M",   "virt,virtualization=on", "-accel",
-            @tagName(a),           "-cpu", cpu(a),                   "-nodefaults",
-            "-display",            "none", "-monitor",               "stdio",
-            "-S",
-        },
-        .stdin = .pipe,
-        .stdout = .ignore,
-        .stderr = .ignore,
-    }) catch return false;
-    child.stdin.?.writeStreamingAll(io, "quit\n") catch {};
-    child.stdin.?.close(io);
-    child.stdin = null;
-    const term = child.wait(io) catch return false;
-    return term == .exited and term.exited == 0;
-}
-
 fn cpu(a: Accel) []const u8 {
     return if (a == .tcg) "max" else "host";
 }
 
-/// argv returns the QEMU command that starts m in the background, booted
-/// directly: the console on dir/console.sock and in console.log, the
-/// monitor on monitor.sock, the pid in qemu.pid; user networking, with
-/// ssh and the web port forwarded from loopback; data.img as vda, /data,
-/// and the config tar read-only after it.
-pub fn argv(gpa: Allocator, m: Machine, a: Accel, el2: bool) ![]const []const u8 {
+/// argv returns the QEMU command that starts m in the background, its
+/// disk booted by UEFI firmware, so the machine boots whichever slot it
+/// last committed and updates in place: the console on dir/console.sock
+/// and in console.log, the monitor on monitor.sock, the pid in qemu.pid;
+/// user networking, with ssh and the web port forwarded from loopback; the
+/// disk as vda, /data on it, and the config tar read-only after it. edk2
+/// under HVF never boots with EL2, so the guest has none.
+pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
     // QEMU reads a doubled comma as one in an option's value, so a path
     // cannot add options of its own.
     const d = try std.mem.replaceOwned(u8, gpa, m.dir, ",", ",,");
-    const machine, const console = switch (m.arch) {
-        .aarch64 => .{ "virt", "ttyAMA0" },
-        .x86_64 => .{ "q35", "ttyS0" },
+    const code = try std.mem.replaceOwned(u8, gpa, m.firmware.code, ",", ",,");
+    const machine = switch (m.arch) {
+        .aarch64 => "virt",
+        .x86_64 => "q35",
     };
-    return gpa.dupe([]const u8, &.{
+    // splash-time=0 skips edk2's five-second wait.
+    const boot: []const []const u8 = switch (m.arch) {
+        .aarch64 => &.{ "-bios", m.firmware.code },
+        .x86_64 => &.{
+            "-drive", try gpa.print("if=pflash,format=raw,unit=0,readonly=on,file={s}", .{code}),
+            "-drive", try gpa.print("if=pflash,format=raw,unit=1,file={s}/vars.fd", .{d}),
+        },
+    };
+    return std.mem.concat(gpa, []const u8, &.{ &.{
         try gpa.print("qemu-system-{t}", .{m.arch}),
         "-M",
-        try gpa.print("{s}{s}", .{ machine, if (el2) ",virtualization=on" else "" }),
+        machine,
         "-accel",
         @tagName(a),
         "-cpu",
@@ -108,16 +148,9 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel, el2: bool) ![]const []const u8
         "4",
         "-m",
         std.fmt.comptimePrint("{d}", .{howl.local_mib}),
-        "-kernel",
-        m.kernel,
-        "-initrd",
-        m.initrd,
-        "-append",
-        try gpa.print(
-            "console={s} {s} werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 " ++
-                "werewolf.dns=10.0.2.3 werewolf.data=vda werewolf.debug=1",
-            .{ console, m.cmdline },
-        ),
+        "-boot",
+        "menu=on,splash-time=0",
+    }, boot, &.{
         "-netdev",
         try gpa.print(
             "user,id=n0,hostfwd=tcp:127.0.0.1:{d}-:22,hostfwd=tcp:127.0.0.1:{d}-:{d}",
@@ -128,10 +161,10 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel, el2: bool) ![]const []const u8
         "-device",
         "virtio-rng-pci",
         "-drive",
-        try gpa.print("file={s}/data.img,format=raw,if=virtio", .{d}),
+        try gpa.print("file={s}/disk.img,format=raw,if=virtio", .{d}),
         "-drive",
         try gpa.print("file={s}/config.tar,format=raw,if=virtio,readonly=on", .{d}),
-    });
+    } });
 }
 
 /// running returns QEMU's pid from d/qemu.pid, or null if it is not running.
@@ -288,37 +321,37 @@ test argv {
     const m: Machine = .{
         .arch = .aarch64,
         .dir = "/w,x/m",
-        .kernel = "/w/vmlinuz",
-        .initrd = "/w/initramfs.zst",
-        .cmdline = "debugfs=off",
+        .firmware = .{ .code = "/q/edk2-aarch64-code.fd" },
         .ssh_port = 2222,
         .web_port = 8080,
         .guest_web = 80,
     };
-    const a = try argv(arena.allocator(), m, .hvf, true);
+    const a = try argv(arena.allocator(), m, .hvf);
     const line = try std.mem.join(arena.allocator(), " ", a);
     try std.testing.expectEqualStrings("qemu-system-aarch64", a[0]);
     for ([_][]const u8{
-        "-M virt,virtualization=on -accel hvf -cpu host",
+        "-M virt -accel hvf -cpu host",
         "-pidfile /w,x/m/qemu.pid",
         "path=/w,,x/m/console.sock",
-        "-append console=ttyAMA0 debugfs=off werewolf.ip=10.0.2.15/24",
+        "-boot menu=on,splash-time=0 -bios /q/edk2-aarch64-code.fd",
         "hostfwd=tcp:127.0.0.1:2222-:22,hostfwd=tcp:127.0.0.1:8080-:80",
+        "file=/w,,x/m/disk.img,format=raw,if=virtio",
         "file=/w,,x/m/config.tar,format=raw,if=virtio,readonly=on",
     }) |want| try std.testing.expect(std.mem.find(u8, line, want) != null);
+    try std.testing.expect(std.mem.find(u8, line, "-kernel") == null);
     const x = try argv(arena.allocator(), .{
         .arch = .x86_64,
         .dir = "/m",
-        .kernel = "k",
-        .initrd = "i",
-        .cmdline = "",
+        .firmware = .{ .code = "/q/code.fd", .vars = "/q/vars.fd" },
         .ssh_port = 1,
         .web_port = 2,
         .guest_web = 3,
-    }, .tcg, false);
+    }, .tcg);
     const xl = try std.mem.join(arena.allocator(), " ", x);
     try std.testing.expect(std.mem.find(u8, xl, "-M q35 -accel tcg -cpu max") != null);
-    try std.testing.expect(std.mem.find(u8, xl, "console=ttyS0") != null);
+    try std.testing.expect(std.mem.find(u8, xl, "unit=0,readonly=on,file=/q/code.fd") != null);
+    try std.testing.expect(std.mem.find(u8, xl, "unit=1,file=/m/vars.fd") != null);
+    try std.testing.expectEqualStrings("console=ttyS0", bootArgs(.x86_64)[0]);
 }
 
 test freePort {

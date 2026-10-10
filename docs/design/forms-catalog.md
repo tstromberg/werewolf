@@ -1,8 +1,8 @@
 # A catalog of forms: the top 25 uses of a locked-down VM
 
 Proposed, 2026-10-07. Tiers 1 and 2, ten forms in forms/, built
-2026-10-08; of tier 3, bundles (`with:`) and `ruby`, and `miniflux`
-2026-10-10.
+2026-10-08; of tier 3, bundles (`with:`) and `ruby`, and `miniflux`,
+`prometheus` and `loki` 2026-10-10.
 
 ## Summary
 
@@ -55,7 +55,7 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 | `miniflux` | admin from the config; a feed on loopback (SSRF) | built 2026-10-10 (forms/miniflux) |
 | `unbound`, `wireguard`, `chrony` | UDP; chrony an NTS-fed server, `cmdport 0` | `listen udp`; chrony `capability time` |
 | `mariadb` | perl in its closure | `mariadb-init`, as `pg-init` |
-| `prometheus`, `loki` | admin API and remote write off; no `node_exporter` in Wolfi | `render json ... as list` |
+| `prometheus`, `loki` | admin API and remote write off; no `node_exporter` in Wolfi | built 2026-10-10: prometheus-setup writes the targets, so no `render ... as list`; Loki behind Caddy, which has its one user |
 
 **What they teach the base.** Built: bundles, `ruby` (4.0), `exec` with
 a `run` list (gitea's hooks are Zig), `cpu WEIGHT`, the first-run
@@ -68,7 +68,6 @@ which a form gets by taking the `cron` form
 | `listen udp`: Landlock cannot bind UDP, so fence's rule is all of it | wireguard, unbound, chrony |
 | `capability NAME` beside `CAP_NET_BIND_SERVICE`, also an allowance | chrony, dnsmasq |
 | `prune` of a tree (`usr/src/wordpress/.git`, 58 MB); the updater removes files only | wordpress |
-| `render json FILE as list`, for Prometheus's `file_sd` | prometheus |
 | `config NAME PATH oneline`: no trailing newline | openbao, wordpress |
 
 ## Drawbacks
