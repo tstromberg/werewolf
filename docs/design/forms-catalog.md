@@ -55,7 +55,7 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 | `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | built 2026-10-10: jellyfin-setup completes the wizard on loopback before Caddy starts; media over ssh (forms/jellyfin) |
 | `miniflux` | admin from the config; a feed on loopback (SSRF) | built 2026-10-10 (forms/miniflux) |
 | `unbound`, `wireguard`, `chrony` | UDP; chrony an NTS-fed server, `cmdport 0` | `listen udp`; chrony `capability time` |
-| `mariadb` | perl in its closure | `mariadb-init`, as `pg-init` |
+| `mariadb-local`, `mariadb-tcp` | perl in its closure | `mariadb-init`, as `pg-init` |
 | `prometheus`, `loki` | admin API and remote write off; no `node_exporter` in Wolfi | built 2026-10-10: prometheus-setup writes the targets, so no `render ... as list`; Loki behind Caddy, which has its one user |
 
 **What they teach the base.** Built: bundles, `ruby` (4.0), `exec` with

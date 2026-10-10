@@ -1,26 +1,41 @@
-# Gatus
+# Gatus - Hardened VM
 
-The `gatus` form is `prod` with Gatus 5, watching a service and showing a
-status page.
+A status page for one service: [Gatus](https://gatus.io) 5. The form's manifest is [form.yaml](form.yaml).
 
-| | |
-| --- | --- |
-| Listens | tcp/8080, the page and its API, read-only, with no login of its own: `caddy`, `oauth2-proxy` or a tailnet in front to show it beyond the machine |
-| Sends | HTTPS, HTTP, DNS and ping to what it watches |
-| Runs as | `gatus` (a uid of its own, its name's hash), leashed |
-| Keeps | its history in `/data/svc/gatus/data.db` |
-| Settings | `target` (a URL, required): what it watches, 60 s apart, for a 200 within 2 s |
+## Security Posture
+
+Gatus runs as its own user. There is no shell. Landlock and seccomp hold it to port 8080 and to `/data/svc/gatus`. The root is read-only.
+
+- The page and its API are read-only. A write is refused.
+- There is no login. Put Caddy, oauth2-proxy or a tailnet in front before you show the page past this machine.
+- The Prometheus endpoint is off. It would tell anyone what is watched.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-build/host/howl pack --with gatus -o config.tar --target https://www.example.com/
+howl create gatus --with gatus --target https://www.example.com/
 ```
 
-More endpoints, groups and alerting are a form of your own, with its
-`etc/gatus/config.yaml` over this one's. The Prometheus endpoint is off,
-since it tells anyone what is watched and how it is doing.
+Open `http://ADDRESS:8080`. Gatus asks the target every 60 seconds for a 200 within 2 seconds. History is in `/data/svc/gatus/data.db`. Endpoints and alerts are in [Gatus's documentation](https://gatus.io/).
 
-## Checked
+### Cloud production deployment (aws, gcp, azure, proxmox)
 
-`make check-gatus` runs [forms/gatus/test/checks](test/checks): the page
-and API answer, the target is listed, a write to the API is refused,
-`/metrics` is 404, and the history is `gatus`'s on `/data`.
+```sh
+howl create gatus --with gatus --on gcp --allow-from me --target https://www.example.com/
+```
+
+`--allow-from me` admits your address to port 8080.
+
+### Migrating data in
+
+This machine starts empty. What it watches is `--target`. The history on the old server stays there. There is no database to import.
+
+### Known Quirks
+
+- More endpoints are a form of your own, with its `etc/gatus/config.yaml` over this one.
+
+### Network Exposure
+
+tcp/8080

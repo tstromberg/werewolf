@@ -62,6 +62,9 @@ pub fn main(init: std.process.Init) !void {
     phases.add("victim", bootMs());
     m.config();
     phases.add("config", bootMs());
+    // The import disk is not /data. Mount it before services, and always
+    // leave the directory, so a service's read of it does not spin.
+    m.importDisk();
     m.network();
     phases.add("network", bootMs());
     m.metadata();
@@ -162,6 +165,7 @@ pub const Machine = struct {
     pub const config = phase_config.config;
     pub const metadata = phase_config.metadata;
     pub const data = phase_data.data;
+    pub const importDisk = phase_data.importDisk;
     pub const oci = phase_oci.oci;
 
     /// mount runs werewolf's mount with args. mount reports its own errors,

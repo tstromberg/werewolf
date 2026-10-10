@@ -2,7 +2,7 @@
 
 Proposed, 2026-10-07. Built: `caddy`, `valkey`, `openbao`, `step-ca`,
 `wordpress`, `bastion` and `tailscale` (forms/NAME/README.md); `haproxy`,
-`mariadb` and `wordpress-mariadb` 2026-10-10. `unbound` and `wireguard`
+`mariadb-local`, `mariadb-tcp`, `wordpress-mariadb` and `valkey-tcp` 2026-10-10. `unbound` and `wireguard`
 wait (below), on [listen-udp.md](listen-udp.md).
 What follows them is [forms-catalog.md](forms-catalog.md).
 
@@ -66,8 +66,8 @@ WordPress sending mail), stricter is a line in the form.
 | --- | --- | --- |
 | `haproxy` | `-db`, no master-worker (its reloads re-execute haproxy); no external checks, Lua or stats socket; timeouts 5s connect, 30s client and server, 10s `http-request`, 1h `tunnel`; `del-header Proxy` (httpoxy); `maxconn` from its memory; `-nocaps`, as leash grants low ports | built 2026-10-10: 3.4, `haproxy-reload`, `haproxy-dump-certs` and bash pruned (forms/haproxy) |
 | `unbound` | recursive and validating on every address, answering only loopback, RFC 1918, 100.64/10, ULA and link-local: no open resolver; no `private-address`, which breaks internal names in public DNS; a cloud's private zones by `forward-zone`; the trust anchor seeded from the image into `/data` (RFC 5011), since `unbound-anchor` needs the network first | `listen udp`; Wolfi splitting out `unbound-control-setup` |
-| `mariadb` | 11.8, an LTS into 2028: Wolfi's MySQL is short-lived Innovation releases, whose one-way data-dictionary upgrades would leave a rolled-back slot unable to read its data; a new major is a new form. As `postgresql`: a socket, roles by `unix_socket`, `local_infile=0`, an empty `secure_file_priv`, no `FILE`, `SUPER` or `PROCESS` for applications | built 2026-10-10 on 12.3, the LTS Wolfi keeps (its 11.8 stopped at 11.8.3 in 2025): bash and perl pruned, mariadb-init in Zig (forms/mariadb) |
-| `wordpress-mariadb` | `wordpress` `with` `mariadb`; a `db.php` that does nothing over SQLite's, since a form cannot remove a file; role `php` by `unix_socket`, all on its database, no `FILE` | built 2026-10-10 (forms/wordpress-mariadb) |
+| `mariadb-local` | 11.8, an LTS into 2028: Wolfi's MySQL is short-lived Innovation releases, whose one-way data-dictionary upgrades would leave a rolled-back slot unable to read its data; a new major is a new form. As `postgresql`: a socket, roles by `unix_socket`, `local_infile=0`, an empty `secure_file_priv`, no `FILE`, `SUPER` or `PROCESS` for applications. `mariadb-tcp` is that server on port 3306 | built 2026-10-10 on 12.3, the LTS Wolfi keeps (its 11.8 stopped at 11.8.3 in 2025): bash and perl pruned, mariadb-init in Zig (forms/mariadb-local) |
+| `wordpress-mariadb` | `wordpress` `with` `mariadb-local`; a `db.php` that does nothing over SQLite's, since a form cannot remove a file; role `php` by `unix_socket`, all on its database, no `FILE` | built 2026-10-10 (forms/wordpress-mariadb) |
 | `wireguard` | the kernel's module, set up from `/run/config/wireguard/wg0.conf` by a Zig `wireguard-up` that init runs before fence, with `CAP_NET_ADMIN`; overlapping `AllowedIPs` refused, as they misroute a peer's traffic; fence forwards from `wg0` to declared networks (the tunnel's own only if peers may reach each other); no NAT, as fence uses no netfilter | `listen udp`; a `forward` allowance, since init sets `ip_forward=0`; forwarding rules in fence |
 
 ## Drawbacks

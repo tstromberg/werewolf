@@ -42,9 +42,9 @@ and `image:` runs a project's OCI image ([oci.md](oci.md)).
 | Use | Forms | State |
 | --- | --- | --- |
 | Application servers | `jre-app`, `node-app`, `python-app`, `ruby-app`, `php` | built |
-| Relational databases | `postgresql`, `mariadb` | built |
+| Relational databases | `postgresql`, `mariadb-local`, `mariadb-tcp` | built |
 | Load balancing and the edge | `haproxy`, `nginx`, `caddy`, `oauth2-proxy` | built |
-| Cache | `valkey` | built |
+| Cache | `valkey`, `valkey-tcp` | built |
 | Messaging and event streams | `kafka`, `nats`, `mosquitto` | built |
 | Directory and sign-on | `openldap`, `keycloak` | built; `keycloak` in [academic.md](academic.md) |
 | Metrics, logs and traces | `prometheus`, `loki`, `grafana`, `otel-collector`, `opensearch` | built |

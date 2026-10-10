@@ -2,7 +2,8 @@
 # answers on a UNIX socket in /run/svc/postgres and nothing else: no TCP
 # port, and the form declares none. Its data is in /data/svc/postgres.
 # leash starts it as the postgres user (etc/sv/postgres/service); before
-# each start pg-init makes the cluster if there is none, and applies the
+# each start pg-init makes the cluster if there is none, streams
+# /run/werewolf/import/*.sql into that first cluster, and applies the
 # SQL a form brings in /usr/share/werewolf-postgres. Local roles are
 # their system users (peer authentication). The major version is the
 # package's name: a new one is a new form, since its data needs
@@ -46,5 +47,7 @@ services:
     # two audit records. It reaches no network: there is no inet promise.
     pledge: stdio rpath wpath proc ipc unix listen connect
     run: /usr/bin/initdb
+    # pg-init streams /run/werewolf/import/*.sql once, while it makes the cluster.
+    read: /run/werewolf/import
     # Local clients reach its socket, /run/svc/postgres/.s.PGSQL.5432.
     share: shared

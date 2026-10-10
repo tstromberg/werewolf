@@ -295,6 +295,9 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
             _ = std.process.run(gpa, io, .{
                 .argv = &.{ "limactl", "disk", "delete", try gpa.print("{s}-config", .{name}) },
             }) catch {};
+            _ = std.process.run(gpa, io, .{
+                .argv = &.{ "limactl", "disk", "delete", try gpa.print("{s}-import", .{name}) },
+            }) catch {};
         },
         .disk => unreachable,
     }

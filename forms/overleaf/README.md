@@ -1,6 +1,13 @@
 # Overleaf
 
-Collaborative LaTeX: [Overleaf Community Edition](https://github.com/overleaf/overleaf) 6.3, from Overleaf's own image, with MongoDB, Valkey and Caddy. The image is published for x86_64 only.
+Collaborative LaTeX: [Overleaf Community Edition](https://github.com/overleaf/overleaf) 6.3, from Overleaf's own image, with MongoDB, Valkey and Caddy. The image is published for x86_64 only. The form's manifest is [form.yaml](form.yaml).
+
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- Node compiles as it runs. That is named in `form.yaml`.
+- `\write18` can run only TeX Live's restricted helpers, not a command a document names.
 
 ## Getting Started
 
@@ -9,24 +16,28 @@ Collaborative LaTeX: [Overleaf Community Edition](https://github.com/overleaf/ov
 ```sh
 mkdir -p config/overleaf
 openssl rand -base64 24 >config/overleaf/admin-password
-howl create latex --with overleaf --on qemu \
+howl create overleaf --with overleaf \
 	--config config --base-url https://latex.home.arpa \
 	--admin-email you@example.com
 ```
 
-The host must be x86_64: Overleaf publishes no Arm image. Give the machine 8 GB. Sign in with your email.
+The host must be x86_64: Overleaf publishes no Arm image, so this command is skipped on any other machine. Give it 8 GB. Open `https://latex.home.arpa` and sign in with your email. The password is in `config/overleaf/admin-password`. Projects are in [Overleaf's documentation](https://www.overleaf.com/learn).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh
 mkdir -p config/overleaf
 openssl rand -base64 24 >config/overleaf/admin-password
-howl create latex --with overleaf --on gcp --arch x86_64 --allow-from 0.0.0.0/0 \
+howl create overleaf --with overleaf --on gcp --arch x86_64 --allow-from me \
 	--config config --base-url https://latex.example.com \
 	--admin-email you@example.com
 ```
 
-Point the name at the machine. Make other accounts under Admin, Manage users. Add `--email-from`, `--smtp-host`, `--smtp-port`, `--smtp-user` and `config/overleaf/smtp-password` and Overleaf mails each a link; without them it shows you the link.
+Sign in at `https://latex.example.com`. Make other accounts under Admin, Manage users. Add `--email-from`, `--smtp-host`, `--smtp-port`, `--smtp-user` and `config/overleaf/smtp-password` and Overleaf mails each a link; without them it shows you the link.
+
+### Migrating data in
+
+Projects live in MongoDB. This form does not import a MongoDB dump. `--import` can carry Valkey's `dump.rdb`, which is a cache, not the projects. Bring a project in through the site after this machine is up.
 
 ### Known Quirks
 
@@ -39,8 +50,3 @@ Point the name at the machine. Make other accounts under Admin, Manage users. Ad
 ### Network Exposure
 
 - tcp/80 and tcp/443, Caddy. MongoDB, Valkey and the compiler listen on loopback.
-
-### Security Weaknesses
-
-- Node compiles as it runs. That is named in `form.yaml`.
-- `\write18` can run only TeX Live's restricted helpers, not a command a document names.

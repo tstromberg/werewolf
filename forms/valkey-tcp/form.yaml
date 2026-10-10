@@ -1,0 +1,34 @@
+# valkey-tcp: valkey, and TCP port 6379. The process may bind that port.
+# A client needs the password in the config: the socket form's nopass
+# does not leave the machine. --maxmemory, in MiB, is the store's cap.
+# 0, or leaving it off, clears the image's 192mb. There is no cgroup
+# memory line. That 256 MiB keeps a cache from taking the application
+# beside it down, and a number in the image cannot follow this flag. A
+# form that must have both restates this service with memory set above
+# --maxmemory. 6379 is not HTTP, so the check does not wait for a web
+# answer. See forms/valkey-tcp/README.md.
+base: valkey
+
+check:
+  skip: [http-answering]
+
+services:
+  # The valkey service from valkey, plus inet and tcp/6379, and without
+  # its memory line. A later form's service replaces the earlier one
+  # whole, so this restates it.
+  valkey:
+    exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
+    before: /usr/lib/werewolf/valkey-init
+    user: valkey
+    pledge: stdio rpath wpath unix inet listen proc
+    listen: [tcp/6379]
+    read: /etc/valkey /run/werewolf/import
+    share: shared
+    nofile: 10240
+    secret: VALKEY_PASSWORD /run/config/valkey/password
+    config:
+      - settings /run/config/valkey/settings.json
+    setting: maxmemory int as MAXMEMORY
+    render: env override.env
+    env:
+      - PORT=6379

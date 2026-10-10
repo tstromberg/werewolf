@@ -1,0 +1,6 @@
+# mariadb-tcp, booted as it ships: the data is made, and the server
+# answers on its socket and on port 3306.
+
+seen    data-made      mariadb-init: making the data in /data/svc/mariadb/data
+seen    ready          ready for connections.*socket: '/run/svc/mariadb/mariadb.sock'  port: 3306
+unseen  mariadb-down   leash: \{"event":"down","service":"mariadb"

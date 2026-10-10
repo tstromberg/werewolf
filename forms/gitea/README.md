@@ -1,59 +1,50 @@
-# Gitea
+# Gitea - Hardened VM
 
-The `gitea` form is `prod` with Gitea 1.26 hosting git repositories, with
-`git` beside it as the one program it may run.
+Git hosting: [Gitea](https://gitea.com) 1.26, with git as the one program it may run. The form's manifest is [form.yaml](form.yaml).
 
-| | |
-| --- | --- |
-| Listens | tcp/3000, the web and API, behind `caddy`; tcp/22, git over Gitea's own SSH server, keys only, post-quantum exchange only, no shell |
-| Sends | nothing: mirrors, migrations and webhooks leave the machine only when a form of your own adds `connect gitea tcp/443 udp/53 tcp/53` |
-| Runs as | `gitea` (a uid of its own, its name's hash), leashed; it may run git, git's hooks (`gitea-hook`), itself and `ssh-keygen`, and reach its own API on loopback |
-| Keeps | repositories, LFS, the SQLite database, indexes, queues, the SSH host key and its generated secrets in `/data/svc/gitea` |
-| Config | `gitea/admin-password` (12 characters at least); settings `url` and `domain` (required), `admin` (default `admin`), `admin-email` (required) |
+## Security Posture
+
+Gitea runs as its own user. There is no shell. Landlock and seccomp hold it to its ports and to `/data/svc/gitea`. The root is read-only.
+
+- Nothing runs a repository's code. Hooks a repository admin would write, Actions, the package registry and mirrors are off.
+- Gitea's hooks are links to `gitea-hook`, which becomes `gitea hook`. Git does not run a shell.
+- SSH is keys only, Ed25519, with a post-quantum key exchange. A session is told there is no shell.
+- There is no installer and no registration. The administrator invites people.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
+mkdir -p config/gitea
 printf '%s' 'a long administrator password' >config/gitea/admin-password
-build/host/howl pack --with gitea -o config.tar --config config \
+howl create gitea --with gitea --config config \
+	--url https://git.home.arpa/ --domain git.home.arpa --admin-email me@example.com
+```
+
+Open `https://git.home.arpa` once something serves TLS in front of port 3000. Sign in as `admin`. Git over SSH is port 22. Repositories are in [Gitea's documentation](https://docs.gitea.com/).
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+mkdir -p config/gitea
+printf '%s' 'a long administrator password' >config/gitea/admin-password
+howl create gitea --with gitea --on gcp --allow-from me --config config \
 	--url https://git.example.com/ --domain git.example.com --admin-email me@example.com
 ```
 
-## Installed before it serves
+Point the name at the address howl prints, and put TLS in front of port 3000. `--allow-from me` admits your address to ports 3000 and 22.
 
-`gitea-init` (`forms/gitea/cmd/gitea-init`) runs before Gitea, as `gitea`, inside its
-leash. It makes the SSH host key once, Ed25519, with `ssh-keygen`
-(Gitea would make RSA under any name), and logs its fingerprint; makes
-each secret `app.ini` names by file once, 0600, with `gitea generate
-secret`; brings the schema up with `gitea migrate`; and, if the
-administrator the settings name is missing, makes it with the config's
-password. There is no web
-installer (`INSTALL_LOCK`) and no registration; users are invited by the
-administrator.
+### Migrating data in
 
-## Defaults
+Repositories and the SQLite database are in `/data/svc/gitea`, and the host cannot write that directory. After this machine is up, push each repository over HTTPS or SSH, or use the site's migrate-from-URL.
 
-- **Nothing runs a repository's code:** hooks a repository admin writes
-  are off (each is a script run on the server), Actions and the package
-  registry are off, mirrors are off. Each is a line in a form of your
-  own, with the ports it needs.
-- **Gitea's own hooks without a shell.** Gitea writes each repository's
-  hooks as bash scripts. git's `core.hooksPath` points instead at
-  `/usr/lib/werewolf/gitea-hooks`, whose four hooks are links to
-  `gitea-hook` (`forms/gitea/cmd/gitea-hook`), which becomes `gitea hook NAME` with
-  git's input and environment. Pushes work; no shell is in the image.
-- Repositories are private by default; emails are private; passwords are
-  argon2 and 12 characters at least; cookies are secure, so TLS is in
-  front.
-- SSH as the bastion and `sftpgo` have it: Ed25519 host key made once on
-  `/data`, `mlkem768x25519-sha256` alone, `chacha20-poly1305` and
-  `aes256-gcm`; a session gets Gitea's line saying there is no shell.
+### Known Quirks
 
-## Checked
+- The password is at least 12 characters. Cookies are secure, so TLS is in front.
+- Repositories are private until the administrator says otherwise.
+- Mirrors and webhooks leave the machine only when a form of your own allows them out.
 
-`make check-gitea` ([forms/gitea/test/config](test/config)): from the
-host, test/boot makes a repository and adds the run's key through the
-API, clones it over SSH, commits, pushes, and sees a remote forward, a password and a non-post-quantum exchange refused, and
-a command that is not git's refused without running. On
-the machine, [forms/gitea/test/checks](test/checks) finds the
-administrator and no other way in, the installer and registration gone,
-the repository private to strangers and pushed to `main`, the host key
-Ed25519, and the secrets `gitea`'s alone.
+### Network Exposure
+
+tcp/3000 tcp/22

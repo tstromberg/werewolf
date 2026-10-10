@@ -1,7 +1,8 @@
-# MariaDB for the mariadb form: a UNIX socket alone, no files read or
-# written for clients, its data in /data/svc/mariadb. mariadb-init
-# (forms/mariadb/cmd/mariadb-init) reads this too. Errors go to stderr,
-# the console's: no log file.
+# MariaDB for mariadb-local: a UNIX socket, no files read or written for
+# clients, its data in /data/svc/mariadb. mariadb-tcp is the same file
+# with port 3306 in the include. mariadb-init
+# (forms/mariadb-local/cmd/mariadb-init) writes that include and reads
+# this too. Errors go to stderr, the console's: no log file.
 [mariadbd]
 datadir = /data/svc/mariadb/data
 socket = /run/svc/mariadb/mariadb.sock
@@ -9,8 +10,10 @@ pid-file = /run/svc/mariadb/mariadb.pid
 plugin-dir = /usr/lib/mariadb-12.3/plugin
 # Its sorts and temporary tables, on disk with its data (mariadb-init makes it).
 tmpdir = /data/svc/mariadb/tmp
-skip-networking
 skip-name-resolve
+# mariadb-init writes this before each start: skip-networking, or port
+# 3306 when PORT is set. Missing, the server does not start.
+!include /run/svc/mariadb/network.cnf
 # No LOAD DATA LOCAL, and the server's own files only in an empty
 # directory none may write: no client reads or writes the machine's files.
 local-infile = 0

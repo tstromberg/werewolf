@@ -108,8 +108,10 @@ extract() {
 		in_section && /^```sh[[:space:]]*$/ { fence = 1; fences++; next }
 		in_section && fence && /^```[[:space:]]*$/ { fence = 0; next }
 		in_section && fence {
-			sub(/\\[[:space:]]*$/, "")
-			body = body $0 "\n"
+			if (sub(/\\[[:space:]]*$/, "") > 0)
+				body = body $0 " "
+			else
+				body = body $0 "\n"
 			next
 		}
 		END {
@@ -215,7 +217,14 @@ probe_tcp() {
 			;;
 		*) dest=$port ;;
 		esac
-		connect_port "$host" "$dest" || die "$form: nothing accepted tcp/$port at $host:$dest"
+		# A service can bind after the first posture line. Connection
+		# refused comes back at once, so this waits about a minute.
+		i=0
+		while ! connect_port "$host" "$dest"; do
+			i=$((i + 1))
+			[ "$i" -le 60 ] || die "$form: nothing accepted tcp/$port at $host:$dest"
+			sleep 1
+		done
 		say "$form: tcp/$port accepted"
 	done
 	return 0
@@ -231,6 +240,10 @@ run_section() {
 		say "skip $form: no $(section_title "$section")"
 		exit 0
 	fi
+	[ "$mode" = check ] && {
+		say "ok $form $section"
+		return 0
+	}
 	if [ "$section" = local ]; then
 		hostarch=$(uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
 		archs=$(awk '
@@ -254,15 +267,17 @@ run_section() {
 			}
 		fi
 	fi
-	[ "$mode" = check ] && {
-		say "ok $form $section"
-		return 0
-	}
 	howl=$root/build/host/howl
 	[ -x "$howl" ] || die "no $howl; make howl"
 	[ -x "$root/build/host/form" ] || die "no build/host/form; make list-forms"
 	work=$(mktemp -d)
 	chmod 700 "$work"
+	# howl --build reads ./forms and the Makefile from its working directory.
+	# The fence's own files stay in this directory, not in the checkout.
+	for entry in "$root"/* "$root"/.[!.]*; do
+		[ -e "$entry" ] || continue
+		ln -s "$entry" "$work/$(basename "$entry")"
+	done
 	if [ -d "$root/forms/$form/example" ]; then
 		cp -R "$root/forms/$form/example/." "$work/"
 	fi
@@ -288,9 +303,24 @@ run_section() {
 	began=$(date +%s)
 	(
 		cd "$work"
-		PATH="$root/build/host:$PATH"
+		# create from this checkout. The README omits --build: a user takes
+		# the published form, and this format is not published yet.
+		mkdir -p "$work/bin"
+		cat >"$work/bin/howl" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = create ]; then
+	shift
+	for a in "\$@"; do
+		[ "\$a" = --build ] && exec "$root/build/host/howl" create "\$@"
+	done
+	exec "$root/build/host/howl" create --build "\$@"
+fi
+exec "$root/build/host/howl" "\$@"
+EOF
+		chmod 755 "$work/bin/howl"
+		PATH="$work/bin:$PATH"
 		export PATH
-		sh ./fence.sh >"$work/create.out" 2>"$work/create.err"
+		sh -e ./fence.sh >"$work/create.out" 2>"$work/create.err"
 	) || {
 		tail -n 20 "$work/create.err" >&2 || true
 		die "$form: the fence failed"
@@ -331,7 +361,8 @@ selftest() {
 ### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-howl create blocky --with blocky
+howl create blocky --with blocky \
+	--domain home.arpa
 ```
 
 A note.
@@ -353,6 +384,8 @@ EOF
 	# The samples live under tmp, so point extract at that README directly.
 	out=$(extract "$readme" local blocky)
 	printf '%s\n' "$out" | grep -q 'howl create blocky --with blocky' || die "selftest: local fence"
+	printf '%s\n' "$out" | grep -q -- '--domain home.arpa' || die "selftest: continued line"
+	printf '%s\n' "$out" | grep -q '^--domain' && die "selftest: continuation split"
 	out=$(extract "$readme" gcp blocky)
 	printf '%s\n' "$out" | grep -q -- '--on gcp' || die "selftest: gcp fence"
 	printf '%s\n' "$out" | grep -q proxmox && die "selftest: text block ran"

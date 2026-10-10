@@ -21,6 +21,39 @@ build/host/howl pack --with step-ca -o config.tar --config config \
 	--names ca.example.internal --domains example.internal,app.example.internal
 ```
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create step-ca --with step-ca --config config \
+	--names ca.home.arpa --domains home.arpa
+```
+
+`config/step-ca` holds `root.crt`, `intermediate.crt`, `intermediate.key` and `password`. Make them where the root key lives. That key never comes to the machine. ACME is on port 443.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create step-ca --with step-ca --on gcp --allow-from me --config config \
+	--names ca.example.com --domains example.com
+```
+
+`--allow-from me` admits your address to port 443. `--domains` is what ACME may issue for, up to 32 names.
+
+### Migrating data in
+
+Issued certificates stay on the old server. This machine starts its own CA. There is no database to import.
+
+### Network Exposure
+
+tcp/443
+
+
 ## Defaults
 
 - **One provisioner, ACME**, which is most of why people run one, with

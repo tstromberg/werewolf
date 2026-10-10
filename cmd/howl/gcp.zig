@@ -172,9 +172,10 @@ pub fn formOf(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why
 }
 
 /// create starts VM name from image, with the base64 config file b64 as its
-/// user-data. It has no service account or scopes, and Secure Boot is off
-/// because werewolf's loader does not support it yet. A null size picks
-/// machine(arch).size.
+/// user-data. It has no service account or scopes, its vTPM measures each
+/// boot and integrity monitoring reports a change off the machine, and
+/// Secure Boot is off because werewolf's loader is not signed for it yet
+/// (docs/design/verified-boot.md). A null size picks machine(arch).size.
 pub fn create(
     io: Io,
     gpa: Allocator,
@@ -214,6 +215,8 @@ pub fn create(
         "--no-service-account",
         "--no-scopes",
         "--no-shielded-secure-boot",
+        "--shielded-vtpm",
+        "--shielded-integrity-monitoring",
         "--metadata-from-file",
         try gpa.print("user-data={s}", .{b64}),
     }));

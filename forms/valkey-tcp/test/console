@@ -1,0 +1,6 @@
+# valkey-tcp, booted as it ships: the cap is the setting, and the
+# server answers on its socket and on port 6379.
+
+seen    cap            valkey-init: maxmemory 64mb
+seen    ready          Ready to accept connections
+unseen  valkey-down    leash: \{"event":"down","service":"valkey"

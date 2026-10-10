@@ -103,8 +103,8 @@ const Drive = struct {
     is_read_only: bool,
 };
 
-/// config returns Firecracker's JSON configuration: the boot disk as vda,
-/// the config tar as vdb.
+/// config returns Firecracker's JSON configuration: the boot disk, the
+/// config tar, and the import disk when import_disk is set.
 fn config(
     gpa: Allocator,
     kernel: []const u8,
@@ -112,18 +112,18 @@ fn config(
     args: []const u8,
     disk: []const u8,
     tar: []const u8,
+    import_disk: ?[]const u8,
     log: []const u8,
     n: Net,
 ) ![]u8 {
-    return std.json.Stringify.valueAlloc(gpa, .{
-        .@"boot-source" = .{
-            .kernel_image_path = kernel,
-            .initrd_path = initrd,
-            .boot_args = args,
-        },
-        // Send Firecracker's log to a separate file to keep the console clean.
-        .logger = .{ .log_path = log, .level = "Warning" },
-        .drives = [_]Drive{
+    const extra: []const Drive = if (import_disk) |p| &.{.{
+        .drive_id = "import",
+        .path_on_host = p,
+        .is_root_device = false,
+        .is_read_only = true,
+    }} else &.{};
+    const drives = try mem.concat(gpa, Drive, &.{
+        &.{
             .{
                 .drive_id = "disk",
                 .path_on_host = disk,
@@ -137,6 +137,17 @@ fn config(
                 .is_read_only = true,
             },
         },
+        extra,
+    });
+    return std.json.Stringify.valueAlloc(gpa, .{
+        .@"boot-source" = .{
+            .kernel_image_path = kernel,
+            .initrd_path = initrd,
+            .boot_args = args,
+        },
+        // Send Firecracker's log to a separate file to keep the console clean.
+        .logger = .{ .log_path = log, .level = "Warning" },
+        .drives = drives,
         .@"network-interfaces" = [_]struct {
             iface_id: []const u8,
             guest_mac: []const u8,
@@ -483,6 +494,11 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) ![]const u8 {
         if (added(w)) continue;
         try args.print(gpa, "{s}{s}", .{ if (args.items.len > 0) " " else "", w });
     }
+    const import_path = try gpa.print("{s}/import.img", .{dir});
+    const import_disk: ?[]const u8 = if (Dir.cwd().access(io, import_path, .{})) |_|
+        import_path
+    else |_|
+        null;
     try Dir.cwd().writeFile(io, .{
         .sub_path = try gpa.print("{s}/vm.json", .{dir}),
         .data = try config(
@@ -492,6 +508,7 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) ![]const u8 {
             args.items,
             disk,
             try gpa.print("{s}/config.tar", .{dir}),
+            import_disk,
             try gpa.print("{s}/firecracker.log", .{dir}),
             try net(gpa, std.fs.path.basename(dir)),
         ),
@@ -640,6 +657,7 @@ test config {
         args,
         "/m/disk.img",
         "/m/config.tar",
+        null,
         "/m/firecracker.log",
         n,
     );
@@ -648,6 +666,19 @@ test config {
     const disk = mem.find(u8, c, "\"/m/disk.img\"").?;
     const tar = mem.find(u8, c, "\"/m/config.tar\"").?;
     try testing.expect(disk < tar);
+    const brought = try config(
+        gpa,
+        "/m/kernel",
+        "/m/stage0.zst",
+        args,
+        "/m/disk.img",
+        "/m/config.tar",
+        "/m/import.img",
+        "/m/firecracker.log",
+        n,
+    );
+    const imported = mem.find(u8, brought, "\"/m/import.img\"").?;
+    try testing.expect(mem.find(u8, brought, "\"/m/config.tar\"").? < imported);
     try testing.expect(mem.find(u8, c, "\"is_read_only\": false") != null);
     try testing.expect(mem.find(u8, c, n.tap) != null);
     const mib = std.fmt.comptimePrint("\"mem_size_mib\": {d}", .{howl.local_mib});

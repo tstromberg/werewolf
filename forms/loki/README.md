@@ -6,6 +6,40 @@ query APIs over HTTPS for your domain to one user alone, each on a leash
 of its own ([design/forms-catalog.md](../../docs/design/forms-catalog.md)).
 Loki has no authentication of its own; Caddy's is the door.
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+openssl rand -base64 24 >loki-password
+howl create loki --with loki --domain logs.home.arpa --loki-user alloy --loki-password loki-password
+```
+
+Point the name at the address howl prints and open `https://logs.home.arpa`. Shippers push to `/loki/api/v1/push` as `alloy`, with that password. Logs are kept 31 days.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+openssl rand -base64 24 >loki-password
+howl create loki --with loki --on gcp --allow-from me \
+	--domain logs.example.com --loki-user alloy --loki-password loki-password
+```
+
+`--allow-from me` admits your address to ports 80 and 443. Caddy gets a certificate once the name resolves.
+
+### Migrating data in
+
+This machine starts empty and takes logs from here on. The old history stays where it is. There is no copy of it into `/data`.
+
+### Network Exposure
+
+tcp/80 tcp/443
+
+
 ## Run your own
 
 You need a domain name you can point at the machine.

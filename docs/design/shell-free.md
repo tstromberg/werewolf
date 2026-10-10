@@ -16,7 +16,8 @@ busybox `sh` in every image. Removing it matters because:
 
 - **Exec rules stop new binaries, not scripts.** fence's Landlock, and IPE
   once built ([verified-boot.md](verified-boot.md)), judge what is
-  executed, not what an interpreter reads. Without one, code that takes
+  executed, not what an interpreter reads
+  ([script-argv.md](script-argv.md)). Without one, code that takes
   over nginx cannot `sh -c`, pipe a download into a shell, or chain tools.
 - **It is one claim to check**, for root and PID 1 as for services; a
   service file shows its whole reach; no shell parses config at boot.

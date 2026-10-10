@@ -1,29 +1,36 @@
-# cloudflared
+# cloudflared - Hardened VM
 
-The `cloudflared` form is `prod` with a Cloudflare Tunnel: a machine that
-serves hostnames on the Internet with no port open to it.
+A machine that serves hostnames on the Internet with no port open to it: [cloudflared](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). The form's manifest is [form.yaml](form.yaml).
 
-| | |
-| --- | --- |
-| Listens | nothing; metrics on loopback (:2000) |
-| Sends | QUIC (udp/7844) and HTTPS to Cloudflare's edge; HTTP and HTTPS to the origins it fronts, on this machine or its network |
-| Runs as | `cloudflared` (a uid of its own, its name's hash), leashed |
-| Config | `cloudflared/token`: the tunnel's token, from the Cloudflare dashboard (a remotely managed tunnel), which also holds the hostnames and origins |
+## Security Posture
+
+cloudflared runs as its own user. There is no shell. Landlock and seccomp hold it to Cloudflare's edge and to the origins its tunnel names. The root is read-only. Nothing listens on the network.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-printf '%s' 'eyJhIjoi...' >config/cloudflared/token
-build/host/howl pack --with cloudflared -o config.tar --config config
+printf '%s' 'eyJhIjoi...' >token
+howl create cloudflared --with cloudflared --tunnel-token token
 ```
 
-The token is read into the service's environment (`TUNNEL_TOKEN`) by
-leash and is nowhere the service can read it as a file. `--no-autoupdate`:
-updates come with the image.
+The token is a remotely managed tunnel, from the Cloudflare dashboard. It names the hostnames and the origins. Replace the placeholder before you create the machine. The token is an environment variable, not a file the service can read.
 
-## Checked
+### Cloud production deployment (aws, gcp, azure, proxmox)
 
-`make check-cloudflared` gives the machine a token of the right shape and
-no way out ([forms/cloudflared/test/config](test/config); the
-Makefile's `restrict=on`), and runs
-[forms/cloudflared/test/checks](test/checks): nothing listens on
-the network, the metrics answer on loopback alone, the tunnel keeps
-trying, and the token is root's.
+```sh
+printf '%s' 'eyJhIjoi...' >token
+howl create cloudflared --with cloudflared --on gcp --allow-from me --tunnel-token token
+```
+
+`--allow-from` opens no port: there is no listener. The tunnel connects out.
+
+### Migrating data in
+
+This machine starts empty. The tunnel's hostnames live in the Cloudflare dashboard, with the token. There is no database to import.
+
+### Known Quirks
+
+- `--no-autoupdate` is set. A new cloudflared arrives with the machine's next image.
+- Metrics answer on loopback port 2000, and nowhere else.

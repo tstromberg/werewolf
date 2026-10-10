@@ -5,6 +5,37 @@ The `haproxy` form balances HTTP over backends you name: HAProxy 3.4 on
 to control it by but the configuration its settings write
 ([design/service-forms.md](../../docs/design/service-forms.md)).
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create haproxy --with haproxy --backends 127.0.0.1:8080
+```
+
+HAProxy answers on port 80 and sends each request to the next backend that answers. `--health PATH` checks with `GET PATH`. Without it, a TCP connect is enough. Backends are names or IPv4 addresses, on port 80, 443 or 8080.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create haproxy --with haproxy --on gcp --allow-from me --backends 10.0.0.5:8080
+```
+
+`--allow-from me` admits your address to ports 80 and 443. Add `--tls-cert FILE --tls-key FILE` and port 443 serves HTTPS, and port 80 redirects to it. A wider allowance is below, in a block the example run does not execute.
+
+### Migrating data in
+
+This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
+
+### Network Exposure
+
+tcp/80 tcp/443
+
+
 ## Run your own
 
 ```sh

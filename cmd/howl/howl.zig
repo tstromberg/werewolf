@@ -40,7 +40,7 @@ pub const usage =
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
     "] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] " ++
-    "[CONFIG...]\n" ++
+    "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
@@ -388,6 +388,9 @@ pub const Options = struct {
     /// app is a directory to lay where the form keeps its application
     /// (app.zig). build, run and create take it.
     app: ?[]const u8 = null,
+    /// import_dir is files on a read-only disk, for the form to import
+    /// once while it first makes its data (import.zig). run and create.
+    import_dir: ?[]const u8 = null,
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository, so the machine does not update them.
     local: bool = false,
@@ -451,6 +454,8 @@ pub fn options(gpa: Allocator, args: []const []const u8, why: *Why) !Options {
             &o.size
         else if (std.mem.eql(u8, flag, "app"))
             &o.app
+        else if (std.mem.eql(u8, flag, "import"))
+            &o.import_dir
         else if (std.mem.eql(u8, flag, "allow-from"))
             &o.allow_from
         else
@@ -887,6 +892,10 @@ fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
         "--app is build's, run's and create's: an application is in the image",
         .{},
     );
+    if (o.import_dir != null) return why.refuse(
+        "--import is run's and create's: it attaches a disk to a machine",
+        .{},
+    );
     const iface = try formInterface(io, gpa, o.form, why);
     var out = Io.File.stdout().writerStreaming(io, &.{});
     const w = &out.interface;
@@ -960,8 +969,10 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
         "users: NAME's security key (repeat); --users.NAME.admin makes it root's too",
     );
     try row(w, "--update-policy FILE", "update-policy.json: when updates install");
-    if (std.mem.eql(u8, verb, "create"))
+    if (std.mem.eql(u8, verb, "create")) {
         try row(w, "--allow-from me|CIDR", "opens the form's TCP ports to it (gcp, aws, azure)");
+        try row(w, "--import DIR", "files on a read-only disk, imported once as the data is first made");
+    }
     for (iface.files) |f| try row(
         w,
         try gpa.print("--{s} FILE", .{f.flag}),
@@ -1264,6 +1275,10 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
         "--on disk is pack's: howl build and howl pack make a disk and its tar",
         .{},
     );
+    if (o.import_dir != null and !on.here()) return why.refuse(
+        "--import attaches a read-only disk; {t} cannot",
+        .{on},
+    );
     if (dev and !on.here()) return why.refuse(
         "--dev is for machines here: a shell on {t} is a release's choice to make",
         .{on},
@@ -1373,7 +1388,8 @@ pub fn notMade(name: []const u8, on: Platform, why: *Why) error{Refused} {
 
 /// reconfigurable refuses a new config for an existing machine made of the
 /// form was ("" if create did not make it) unless the form is the same and
-/// there is no --app, since an application is in the image.
+/// there is no --app, since an application is in the image. --import runs
+/// only while the data is first made, so an existing machine refuses it too.
 pub fn reconfigurable(
     o: Options,
     name: []const u8,
@@ -1383,6 +1399,10 @@ pub fn reconfigurable(
 ) !void {
     if (o.app != null) return why.refuse(
         "{s} exists, and an application is in the image: howl delete {s} --on {t}, then create",
+        .{ name, name, on },
+    );
+    if (o.import_dir != null) return why.refuse(
+        "{s} exists, and an import runs only while its data is first made: howl delete {s} --on {t}, then create",
         .{ name, name, on },
     );
     if (was.len == 0) return notMade(name, on, why);
@@ -1401,6 +1421,8 @@ test "reconfigure accepts a cloud form label for a local manifest path" {
     var why: Why = .{};
     const o: Options = .{ .form = "build/adhoc/web/" };
     try reconfigurable(o, "web-vm", "web", .gcp, &why);
+    const again: Options = .{ .form = "build/adhoc/web/", .import_dir = "dump" };
+    try testing.expectError(error.Refused, reconfigurable(again, "web-vm", "web", .qemu, &why));
     try testing.expectError(error.Refused, reconfigurable(o, "web-vm", "other", .gcp, &why));
     try testing.expectError(error.Refused, reconfigurable(o, "web-vm", "", .gcp, &why));
 }

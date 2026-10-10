@@ -5,6 +5,52 @@ The `miniflux` form is a feed reader: [Miniflux](https://miniflux.app)
 URL with a certificate from Let's Encrypt, each part on a leash of its own
 ([design/forms-catalog.md](../../docs/design/forms-catalog.md)).
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+openssl rand -base64 24 >admin-password
+howl create miniflux --with miniflux \
+	--base-url https://feeds.home.arpa --admin alice --admin-password admin-password
+```
+
+Point the name at the address howl prints and sign in at `https://feeds.home.arpa` as `alice`. The administrator is made before anyone can claim the site.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+openssl rand -base64 24 >admin-password
+howl create miniflux --with miniflux --on gcp --allow-from me \
+	--base-url https://feeds.example.com --admin alice --admin-password admin-password
+```
+
+`--allow-from me` admits your address to ports 80 and 443. Change the password in Miniflux. A later start does not reset it.
+
+### Migrating data in
+
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud cannot attach the disk.
+
+```sh
+openssl rand -base64 24 >admin-password
+howl create miniflux --with miniflux \
+	--base-url https://feeds.home.arpa --admin alice \
+	--admin-password admin-password --import ./dump
+```
+
+Files the application stores itself are not on that disk. Bring those through the service after it is up.
+
+### Network Exposure
+
+tcp/80 tcp/443
+
+
 ## Run your own
 
 You need a domain name you can point at the machine.

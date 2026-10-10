@@ -11,7 +11,7 @@
 # cloud's load balancer. See forms/limesurvey/README.md.
 base: php
 
-with: [mariadb]
+with: [mariadb-local]
 
 packages:
   - php-8.4               # the php command, for the installer

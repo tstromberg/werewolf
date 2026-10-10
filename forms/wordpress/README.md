@@ -20,6 +20,48 @@ build/host/howl pack --with wordpress -o config.tar --config config \
 	--smtp smtp.example.com:587 --smtp-user me@example.com --mail-from blog@example.com
 ```
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- php-fpm runs WordPress
+- PCRE2 compiles PHP's patterns to machine code (allow jit, from php)
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+umask 077
+mkdir -p config/wordpress
+htpasswd -nbB x 'a long admin password' | cut -d: -f2 >config/wordpress/admin-password-hash
+howl create wordpress --with wordpress --config config \
+	--url https://blog.home.arpa --admin-email me@example.com
+```
+
+Open the URL. Sign in as `admin` with the password you hashed. TLS is in front: Caddy, or the cloud's load balancer, which sets `X-Forwarded-Proto`.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+umask 077
+mkdir -p config/wordpress
+htpasswd -nbB x 'a long admin password' | cut -d: -f2 >config/wordpress/admin-password-hash
+howl create wordpress --with wordpress --on gcp --allow-from me --config config \
+	--url https://blog.example.com --admin-email me@example.com
+```
+
+`--allow-from me` admits your address to port 80. Mail is `--smtp`, `--smtp-user` and `config/wordpress/smtp-password`.
+
+### Migrating data in
+
+The database is SQLite in `/data`, and the host cannot write that directory. Export the old site as a WordPress XML file and import it under Tools after this one is up.
+
+### Network Exposure
+
+tcp/80
+
+
 ## Installed before it serves
 
 A fresh WordPress belongs to whoever finds it first. Here

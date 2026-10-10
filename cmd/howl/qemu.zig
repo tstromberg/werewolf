@@ -22,6 +22,8 @@ pub const Machine = struct {
     /// web_port is this host's port that reaches the machine's guest_web.
     web_port: u16,
     guest_web: u16,
+    /// import_disk is the read-only ext4 image of --import, or null.
+    import_disk: ?[]const u8 = null,
 };
 
 /// Firmware is edk2's code and, on x86_64, the template of its variables,
@@ -122,7 +124,7 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
             "-drive", try gpa.print("if=pflash,format=raw,unit=1,file={s}/vars.fd", .{d}),
         },
     };
-    return std.mem.concat(gpa, []const u8, &.{ &.{
+    const base = try std.mem.concat(gpa, []const u8, &.{ &.{
         try gpa.print("qemu-system-{t}", .{m.arch}),
         "-M",
         machine,
@@ -164,6 +166,12 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
         try gpa.print("file={s}/disk.img,format=raw,if=virtio", .{d}),
         "-drive",
         try gpa.print("file={s}/config.tar,format=raw,if=virtio,readonly=on", .{d}),
+    } });
+    const imp = m.import_disk orelse return base;
+    const p = try std.mem.replaceOwned(u8, gpa, imp, ",", ",,");
+    return std.mem.concat(gpa, []const u8, &.{ base, &.{
+        "-drive",
+        try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{p}),
     } });
 }
 
@@ -352,6 +360,14 @@ test argv {
     try std.testing.expect(std.mem.find(u8, xl, "unit=0,readonly=on,file=/q/code.fd") != null);
     try std.testing.expect(std.mem.find(u8, xl, "unit=1,file=/m/vars.fd") != null);
     try std.testing.expectEqualStrings("console=ttyS0", bootArgs(.x86_64)[0]);
+    var brought = m;
+    brought.import_disk = "/w,x/m/import.img";
+    const with = try std.mem.join(arena.allocator(), " ", try argv(arena.allocator(), brought, .hvf));
+    try std.testing.expect(std.mem.find(
+        u8,
+        with,
+        "file=/w,,x/m/import.img,format=raw,if=virtio,readonly=on",
+    ) != null);
 }
 
 test freePort {

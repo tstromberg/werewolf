@@ -702,6 +702,23 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
     return f.written();
 }
 
+/// fileKeys reports whether the line has sshd taking public key algorithms
+/// that admit a key file: an algorithm that is neither a security key
+/// (sk-) nor an exclusion. Posture fails network-ssh-security-keys on such
+/// a machine, so the form the line makes must excuse it.
+fn fileKeys(p: Plan) bool {
+    const sshd = p.spec.get("sshd") orelse return false;
+    const algos = sshd.get("pubkey-accepted-algorithms") orelse return false;
+    if (algos != .scalar) return false;
+    var it = std.mem.tokenizeAny(u8, algos.scalar.text, ", ");
+    while (it.next()) |a| {
+        if (a.len == 0 or a[0] == '-' or std.mem.startsWith(u8, a, "sk-")) continue;
+        if (std.mem.startsWith(u8, a, "cert-")) continue;
+        return true;
+    }
+    return false;
+}
+
 /// inherit restates the chain's weaknesses in the manifest, each once, the
 /// later form's excuse winning and the manifest's own over all: a form's
 /// weaknesses are not inherited.
@@ -717,6 +734,16 @@ fn inherit(gpa: Allocator, p: *Plan, chain: []const forms.Form) !void {
         else
             try out.append(gpa, .{ .check = e.key, .excuse = excuse });
     };
+    if (fileKeys(p.*)) {
+        const have = for (out.items) |*have| {
+            if (std.mem.eql(u8, have.check, "network-ssh-security-keys")) break have;
+        } else null;
+        if (have == null)
+            try out.append(gpa, .{
+                .check = "network-ssh-security-keys",
+                .excuse = "the command line has sshd take key files, beside security keys",
+            });
+    }
     const own = p.spec.get("weaknesses") orelse Node{ .map = &.{} };
     for (out.items) |x| if (own.get(x.check) == null) {
         p.spec = try put(gpa, p.spec, &.{ "weaknesses", x.check }, .{ .scalar = .{
@@ -1520,4 +1547,28 @@ test isPackage {
         try testing.expect(isPackage(ok));
     for ([_][]const u8{ "", "-x", "a b", "x=", "a=b=c", "../etc", "a;b" }) |bad|
         try testing.expect(!isPackage(bad));
+}
+
+test fileKeys {
+    const t = std.testing;
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var base: Plan = .{ .verb = .create, .arch = .aarch64, .rest = &.{}, .line = "" };
+    try t.expect(!fileKeys(base));
+    base.spec = try put(gpa, base.spec, &.{ "sshd", "pubkey-accepted-algorithms" }, .{ .scalar = .{
+        .raw = "ssh-ed25519",
+        .text = "ssh-ed25519",
+    } }, false);
+    try t.expect(fileKeys(base));
+    base.spec = try put(gpa, base.spec, &.{ "sshd", "pubkey-accepted-algorithms" }, .{ .scalar = .{
+        .raw = "sk-ssh-ed25519@openssh.com",
+        .text = "sk-ssh-ed25519@openssh.com",
+    } }, false);
+    try t.expect(!fileKeys(base));
+    base.spec = try put(gpa, base.spec, &.{ "sshd", "pubkey-accepted-algorithms" }, .{ .scalar = .{
+        .raw = "-ssh-rsa*",
+        .text = "-ssh-rsa*",
+    } }, false);
+    try t.expect(!fileKeys(base));
 }

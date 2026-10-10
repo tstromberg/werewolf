@@ -4,6 +4,55 @@ The `mastodon` form is a Mastodon 4.7 server: HTTPS for your domain from
 Let's Encrypt, its owner made from your settings, each part on a leash of
 its own ([design/mastodon.md](../../docs/design/mastodon.md)).
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- ruby and node run Mastodon, which is what this form is for
+- PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+openssl rand -base64 24 >owner-password
+howl create mastodon --with mastodon \
+	--domain social.home.arpa --owner alice --owner-email alice@example.com \
+	--owner-password owner-password
+```
+
+Point the name at the address howl prints and sign in at `https://social.home.arpa` as `alice@example.com`. The first start makes the database and the owner. Sign-ups stay closed.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+openssl rand -base64 24 >owner-password
+howl create mastodon --with mastodon --on gcp --allow-from me \
+	--domain social.example.com --owner alice --owner-email alice@example.com \
+	--owner-password owner-password
+```
+
+`--allow-from me` admits your address to ports 80 and 443. The default machine has the 4 GB Mastodon needs. Mail, and a wider allowance, are below.
+
+### Migrating data in
+
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. The same directory may hold `dump.rdb` for Valkey. A cloud cannot attach the disk.
+
+```sh
+openssl rand -base64 24 >owner-password
+howl create mastodon --with mastodon \
+	--domain social.home.arpa --owner alice --owner-email alice@example.com \
+	--owner-password owner-password --import ./dump
+```
+
+Files the application stores itself are not on that disk. Bring those through the service after it is up.
+
+### Network Exposure
+
+tcp/80 tcp/443
+
+
 ## Run your own
 
 You need a domain name you can point at the machine, and a cloud account

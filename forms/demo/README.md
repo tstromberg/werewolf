@@ -28,6 +28,39 @@ fonts, light or dark as the browser prefers, and readable on a phone.
 Times read as "2 hours ago", with the moment itself on hover. The logo is
 `docs/media/logo-small.png`, served from the image.
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create demo --with demo
+```
+
+Open `http://ADDRESS`. The page is the machine: its uptime, the patches it applied, and what a scan finds. The first scan follows a download of the vulnerability database.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create demo --with demo --on gcp --allow-from me
+```
+
+`--allow-from me` admits your address to port 80. Give the machine a data disk. A scan does not fit in RAM.
+
+### Migrating data in
+
+The page keeps its history on `/data`. This form does not import that history. It collects again after the machine is up.
+
+### Network Exposure
+
+tcp/80
+
+
 ## How it works
 
 | Piece | Runs as | Does |

@@ -81,16 +81,18 @@ services:
     pledge: stdio rpath wpath inet proc ipc unix listen connect
     listen: [tcp/5432 loopback]
     run: /usr/bin/initdb
+    read: /run/werewolf/import
     share: shared
 
   # Valkey, as valkey's form runs it, but also on loopback TCP for Immich's
   # queue (etc/valkey/valkey.conf).
   valkey:
     exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
+    before: /usr/lib/werewolf/valkey-init
     user: valkey
     pledge: stdio rpath wpath inet unix listen proc
     listen: [tcp/6379 loopback]
-    read: /etc/valkey
+    read: /etc/valkey /run/werewolf/import
     share: shared
     memory: 256
     nofile: 10240

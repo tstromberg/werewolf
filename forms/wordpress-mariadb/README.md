@@ -1,11 +1,62 @@
 # WordPress on MariaDB
 
 The `wordpress-mariadb` form is the [wordpress](../wordpress/README.md)
-form with its tables in MariaDB, beside it ([mariadb](../mariadb/README.md)),
+form with its tables in MariaDB, beside it ([mariadb-local](../mariadb-local/README.md)),
 instead of SQLite: for a site whose plugins want MySQL, or that outgrows
 one file ([design/service-forms.md](../../docs/design/service-forms.md)).
 Everything else, its settings, config, defenses and checks, is the
 wordpress form's; read that README first.
+
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- php-fpm runs WordPress
+- PCRE2 compiles PHP's patterns to machine code (allow jit, from php)
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+umask 077
+htpasswd -nbB x 'a long admin password' | cut -d: -f2 >admin-password-hash
+howl create wordpress-mariadb --with wordpress-mariadb \
+	--url https://blog.home.arpa --admin-email me@example.com \
+	--admin-password-hash admin-password-hash
+```
+
+The flags are the wordpress form's. The tables are in MariaDB, beside it, and php-fpm is the database role by its UNIX socket. TLS is in front, as there.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+umask 077
+htpasswd -nbB x 'a long admin password' | cut -d: -f2 >admin-password-hash
+howl create wordpress-mariadb --with wordpress-mariadb --on gcp --allow-from me \
+	--url https://blog.example.com --admin-email me@example.com \
+	--admin-password-hash admin-password-hash
+```
+
+`--allow-from me` admits your address to port 80.
+
+### Migrating data in
+
+The database has no TCP port. `--import` attaches a directory of SQL. MariaDB applies it once, while it makes the data directory. See [mariadb-local](../mariadb-local/README.md). A cloud cannot attach the disk.
+
+```sh
+htpasswd -nbB x 'a long admin password' | cut -d: -f2 >admin-password-hash
+howl create wordpress-mariadb --with wordpress-mariadb \
+	--url https://blog.home.arpa --admin-email me@example.com \
+	--admin-password-hash admin-password-hash --import ./dump
+```
+
+Files the application stores itself are not on that disk. Bring those through the service after it is up.
+
+### Network Exposure
+
+tcp/80
+
 
 ## Run your own
 

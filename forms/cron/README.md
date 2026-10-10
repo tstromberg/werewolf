@@ -16,6 +16,33 @@ Schedules are crontab(5) lines, with an optional seconds field first, in
 UTC. A job never overlaps its own last run. The user is not `cron`
 because Wolfi's base layout has that account already (uid 16).
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create cron --with cron
+```
+
+This command runs the form alone, which has no jobs. A form takes it beside its own and lays a crontab over `etc/cron/crontab`, as below.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create cron --with cron --on gcp --allow-from me
+```
+
+`--allow-from` opens no port: there is no listener.
+
+### Migrating data in
+
+This machine starts empty. The jobs are in the create command or `--config`. There is no database to import.
+
+
 ## Inheriting it
 
 There is no shell, so supercronic runs each job through sh-shim, the

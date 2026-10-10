@@ -33,6 +33,7 @@ and key, and `make list-forms` shows the chains.
 | `tailscale` | `prod` | userspace subnet routing ([tailscale.md](../forms/tailscale/README.md)) |
 | `caddy` | `prod` | a web server that gets its own certificates ([caddy.md](../forms/caddy/README.md)) |
 | `valkey` | `prod` | Valkey 9.1 on a UNIX socket, for the application beside it ([valkey.md](../forms/valkey/README.md)) |
+| `valkey-tcp` | `valkey` | the same server on TCP port 6379, capped by `--maxmemory` ([valkey-tcp.md](../forms/valkey-tcp/README.md)) |
 | `openbao` | `prod` | OpenBao, unsealed by a key from the config and set up by itself ([openbao.md](../forms/openbao/README.md)) |
 | `step-ca` | `prod` | an internal certificate authority, ACME for the names the config allows ([step-ca.md](../forms/step-ca/README.md)) |
 | `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](../forms/wordpress/README.md)) |
@@ -53,8 +54,9 @@ and key, and `make list-forms` shows the chains.
 | `miniflux` | `prod`, with `postgresql`, `caddy` | a feed reader fetching from public addresses alone, its administrator from the config, built here ([miniflux.md](../forms/miniflux/README.md)) |
 | `prometheus` | `prod` | scraping the targets its settings name, and itself, one user on its web and API, its admin, lifecycle and remote-write APIs off ([prometheus.md](../forms/prometheus/README.md)) |
 | `loki` | `prod` | keeping pushed logs 31 days, behind Caddy's HTTPS and one user, Loki on loopback reaching nothing ([loki.md](../forms/loki/README.md)) |
-| `mariadb` | `prod` | MariaDB 12.3, the long-term release, on a UNIX socket alone for the machine's own services, made without a shell by mariadb-init ([mariadb.md](../forms/mariadb/README.md)) |
-| `wordpress-mariadb` | `wordpress`, with `mariadb` | WordPress with its tables in MariaDB, its role `php` by unix_socket, holding its database alone ([wordpress-mariadb.md](../forms/wordpress-mariadb/README.md)) |
+| `mariadb-local` | `prod` | MariaDB 12.3, the long-term release, on a UNIX socket alone for the machine's own services, made without a shell by mariadb-init ([mariadb-local.md](../forms/mariadb-local/README.md)) |
+| `mariadb-tcp` | `mariadb-local` | the same server on TCP port 3306, for a client that is not on this machine ([mariadb-tcp.md](../forms/mariadb-tcp/README.md)) |
+| `wordpress-mariadb` | `wordpress`, with `mariadb-local` | WordPress with its tables in MariaDB, its role `php` by unix_socket, holding its database alone ([wordpress-mariadb.md](../forms/wordpress-mariadb/README.md)) |
 | `jellyfin` | `prod-ssh` | Jellyfin behind Caddy's HTTPS, media copied in over ssh, its wizard completed before anyone reaches it, ffmpeg narrowed, reaching nothing ([jellyfin.md](../forms/jellyfin/README.md)) |
 | `kafka` | `prod` | Kafka 4.3 in KRaft, one broker and controller, SCRAM over TLS, users from the config, ACLs denying what none allows ([kafka.md](../forms/kafka/README.md)) |
 | `openldap` | `prod` | OpenLDAP 2.6 on LDAPS alone, no anonymous binds, passwords stored as Argon2id and never read back ([openldap.md](../forms/openldap/README.md)) |
@@ -77,7 +79,7 @@ and key, and `make list-forms` shows the chains.
 | `nextcloud` | `prod`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | files, calendars and contacts, installed from the config, its code read-only ([nextcloud.md](../forms/nextcloud/README.md)) |
 | `moodle` | `prod`, with `postgresql`, `caddy`, `cron`, `sh-shim` | Moodle for a school's courses, no sign-up and no plugin from the web ([moodle.md](../forms/moodle/README.md)) |
 | `mediawiki` | `php` | a department's wiki on SQLite, strangers unable to read or edit until a setting says so ([mediawiki.md](../forms/mediawiki/README.md)) |
-| `limesurvey` | `php`, with `mariadb` | surveys, installed from the config, plugins from the image alone ([limesurvey.md](../forms/limesurvey/README.md)) |
+| `limesurvey` | `php`, with `mariadb-local` | surveys, installed from the config, plugins from the image alone ([limesurvey.md](../forms/limesurvey/README.md)) |
 | `keycloak` | `jre`, with `postgresql`, `caddy` | single sign-on by OpenID Connect and SAML, its administrator from the config ([keycloak.md](../forms/keycloak/README.md)) |
 | `galene` | `prod`, with `caddy` | lectures and seminars by video, rooms and passwords from the config ([galene.md](../forms/galene/README.md)) |
 | `overleaf` | `prod`, with `valkey`, `caddy` | collaborative LaTeX, x86_64 only, the compiler apart from the services ([overleaf.md](../forms/overleaf/README.md)) |

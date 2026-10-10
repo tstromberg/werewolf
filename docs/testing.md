@@ -448,3 +448,48 @@ between runs, and `limactl delete -f werewolf-ci-24.04` starts over.
 are, in a separate VM. There, nested guests lose a CPU's timer early in
 boot and stall, so 24.04 is the default. Its old erofs-utils is replaced by
 [tools/install-deps](../tools/install-deps), which builds 1.9.4.
+
+## Secure Boot
+
+`make check-secureboot` proves the boot chain's first verified slice
+([design/verified-boot.md](design/verified-boot.md)): minimal's slot as a
+signed UKI — kernel, stage0, root image and command line as one PE
+(`tools/uki`) — boots on firmware with Secure Boot on and only the test key
+enrolled, and the same image with one byte changed is refused. It runs on
+arm64 hosts with their own accelerator (`hvf`, `kvm`); emulated arm64
+skips it, as it skips the other UEFI boots.
+
+It needs a directory the host cannot make, given as `SECUREBOOT_DIR=DIR`:
+
+- `stub.efi` — systemd's `linuxaa64.efi.stub`, from Alpine's
+  `systemd-efistub` package (`apk fetch` and untar).
+- `code.fd` and `vars.fd` — firmware that enforces Secure Boot and its
+  empty variable store, as Ubuntu's `qemu-efi-aarch64` ships them:
+  `AAVMF_CODE.secboot.fd` and `AAVMF_VARS.fd` from `/usr/share/AAVMF`.
+- `wk.key`, `wk.crt` and `vars-sb.fd` — a throwaway key, its certificate,
+  and the store with it enrolled as PK, KEK and db — only where
+  `virt-fw-vars` (Ubuntu's `python3-virt-firmware`) is not installed;
+  with it, the check makes a fresh key and enrolls it itself.
+
+On macOS, the pieces come from the CI VM:
+`limactl shell werewolf-ci-24.04 -- sudo apt-get install -y
+qemu-efi-aarch64 python3-virt-firmware`, copy the firmware out, and enroll
+once with `virt-fw-vars` there. `osslsigncode` signs; `brew install
+osslsigncode` brings it.
+
+## Firecracker
+
+`make check-firecracker` boots the `sshd` form as a real Firecracker
+microVM on `FIRECRACKER_HOST` (default `galadriel`), a Linux host with
+KVM, Firecracker, mtools, erofs-utils and passwordless `doas`. The tree,
+built for x86_64 here, is copied with a howl, a form tool and a verity
+tool cross-compiled for it, so the host needs no toolchain; the form is
+sshd relaxed to take a key file, which the host holds, and the adhoc
+generator then declares the `network-ssh-security-keys` weakness it
+costs. The machine must hand over to runit with its root verified through
+dm-verity, posture must fail exactly what the form and test/posture-known
+allow, ssh must reach it through its tap with the host's key, and delete
+must remove the machine. `FIRECRACKER_KEEP=1` leaves it for a look.
+
+The host resolves any lock the copy does not match with `go install`'s
+apko, at the version tools/install-deps pins.

@@ -9,6 +9,10 @@ const Dir = Io.Dir;
 const svc_dir = "/data/svc/postgres";
 const data_dir = svc_dir ++ "/data";
 const sql_dir = "/usr/share/werewolf-postgres";
+/// import_dir is the read-only disk init mounts. Its .sql is applied once,
+/// into the postgres database, as the cluster is first made.
+const import_dir = "/run/werewolf/import";
+const import_failed = import_dir ++ "/import-failed";
 const initdb = "/usr/bin/initdb";
 const postgres = "/usr/bin/postgres";
 const preload = "/usr/lib/werewolf/popen-shim.so";
@@ -62,6 +66,11 @@ pub fn main(init: std.process.Init) !void {
             );
             return error.ClusterLost;
         } else |_| {}
+        if (importBlocked(io)) {
+            say(io, "import disk did not mount; not making an empty cluster", .{});
+            return error.ImportFailed;
+        }
+        const dump = try sqlFiles(io, gpa, import_dir);
         // initdb writes PG_VERSION first, so an interrupted run would look
         // like a cluster. Build it in data.new and rename it when whole.
         if (svc.access(io, "data.new", .{})) |_| {
@@ -95,12 +104,20 @@ pub fn main(init: std.process.Init) !void {
             say(io, "{s} failed; see above", .{initdb});
             return error.InitdbFailed;
         }
+        if (dump.len > 0) importSql(io, svc_dir ++ "/data.new", dump) catch |err| {
+            svc.deleteTree(io, "data.new") catch |del| {
+                say(io, "removing {s}/data.new: {s}", .{ svc_dir, @errorName(del) });
+            };
+            say(io, "import kept on {s}", .{import_dir});
+            return err;
+        };
         svc.rename("data.new", svc, "data", io) catch |err| {
             say(io, "{s} holds something, but no cluster: {s}", .{ data_dir, @errorName(err) });
             return err;
         };
         try syncSvc(io);
         try mark(io, svc, made);
+        for (dump) |path| say(io, "imported {s}", .{path});
     }
 
     var names: std.ArrayList([]const u8) = .empty;
@@ -184,8 +201,113 @@ fn syncSvc(io: Io) !void {
     return error.SyncFailed;
 }
 
+/// importBlocked reports that init could not mount the import disk.
+fn importBlocked(io: Io) bool {
+    return if (Dir.cwd().access(io, import_failed, .{})) |_| true else |_| false;
+}
+
+/// sqlFiles returns dir's regular .sql files, in name order. A symlink is
+/// refused.
+fn sqlFiles(io: Io, gpa: std.mem.Allocator, dir: []const u8) ![]const []const u8 {
+    var d = Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => return err,
+    };
+    defer d.close(io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = d.iterate();
+    while (try it.next(io)) |e| {
+        if (e.name.len == 0 or e.name[0] == '.') continue;
+        if (std.mem.eql(u8, e.name, "import-failed")) continue;
+        switch (e.kind) {
+            .file => if (std.mem.endsWith(u8, e.name, ".sql"))
+                try names.append(gpa, try gpa.dupe(u8, e.name)),
+            .sym_link => {
+                say(io, "{s}/{s} is a symlink; not importing", .{ dir, e.name });
+                return error.Symlink;
+            },
+            else => {},
+        }
+    }
+    std.mem.sort([]const u8, names.items, {}, lessThan);
+    var paths: std.ArrayList([]const u8) = .empty;
+    for (names.items) |name| try paths.append(gpa, try gpa.print("{s}/{s}", .{ dir, name }));
+    return paths.items;
+}
+
+/// importSql streams each path into the single-user backend on datadir,
+/// the postgres database. A short read does not count as success.
+fn importSql(io: Io, datadir: []const u8, paths: []const []const u8) !void {
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            postgres,
+            "--single",
+            "-D",
+            datadir,
+            "-j",
+            "-c",
+            "exit_on_error=true",
+            "-c",
+            "log_checkpoints=false",
+            "postgres",
+        },
+        .stdin = .pipe,
+        .stdout = .ignore,
+    });
+    var read_err = false;
+    for (paths) |p| {
+        streamFile(io, child.stdin.?, p) catch |err| {
+            say(io, "{s}: {s}", .{ p, @errorName(err) });
+            read_err = true;
+            break;
+        };
+        child.stdin.?.writeStreamingAll(io, "\n\n") catch break;
+    }
+    child.stdin.?.close(io);
+    child.stdin = null;
+    const term = try child.wait(io);
+    if (term != .exited or term.exited != 0) {
+        say(io, "{s} --single failed; see above", .{postgres});
+        return error.SqlFailed;
+    }
+    if (read_err) return error.ImportFailed;
+}
+
+fn streamFile(io: Io, w: Io.File, path: []const u8) !void {
+    var f = try Dir.cwd().openFile(io, path, .{ .follow_symlinks = false });
+    defer f.close(io);
+    var buf: [1 << 16]u8 = undefined;
+    while (true) {
+        const n = f.readStreaming(io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        w.writeStreamingAll(io, buf[0..n]) catch return;
+    }
+}
+
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
+}
+
+test "import lists regular sql files and refuses a symlink" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.sql", .data = "select 2;\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.sql", .data = "select 1;\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "note.txt", .data = "no" });
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const dir = std.fs.path.dirname(try tmp.dir.realPathFileAlloc(io, "a.sql", gpa)).?;
+    const names = try sqlFiles(io, gpa, dir);
+    try std.testing.expectEqual(@as(usize, 2), names.len);
+    try std.testing.expect(std.mem.endsWith(u8, names[0], "/a.sql"));
+    try std.testing.expect(std.mem.endsWith(u8, names[1], "/b.sql"));
+    try tmp.dir.symLink(io, "a.sql", "c.sql", .{});
+    try std.testing.expectError(error.Symlink, sqlFiles(io, gpa, dir));
 }
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {

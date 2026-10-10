@@ -1,32 +1,41 @@
 # Blocky
 
-DNS for a home or an office that blocks ads and trackers: [Blocky](https://0xerr0r.github.io/blocky/) 0.35, from its own image. There is no web interface.
+DNS for a home or an office that blocks ads and trackers: [Blocky](https://0xerr0r.github.io/blocky/) 0.35, from its own image. There is no web interface. The form's manifest is [form.yaml](form.yaml).
+
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
 
 ## Getting Started
 
 ### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-howl create dns --with blocky --on lima
+howl create blocky --with blocky
 ```
 
-Point one device at the address howl prints. A blocked name answers 0.0.0.0. Other names resolve.
+Point one device at the address howl prints. A blocked name answers 0.0.0.0. Other names resolve. Lists and upstreams are in [Blocky's configuration](https://0xerr0r.github.io/blocky/latest/configuration/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh
-howl create dns --with blocky --on proxmox
+howl create blocky --with blocky --on gcp --allow-from me
 ```
 
-Put the machine on the private network your devices already use, and give its address to the router's DHCP as the DNS server. To replace the defaults:
+`--allow-from me` opens port 53 to the address you run this from. A house more often runs on Proxmox, on the LAN the devices already use:
 
-```sh
-howl create dns --with blocky --on proxmox \
+```text
+howl create blocky --with blocky --on proxmox \
+	--allow-from 192.168.0.0/16 \
 	--upstreams tcp-tls:dns.mullvad.net \
 	--blocklists https://example.org/list.txt
 ```
 
-Repeat a flag for another entry. An upstream must be `tcp-tls:` or `https:`. Plain DNS from Blocky is refused.
+Give the address to the router's DHCP as the DNS server. Repeat a flag for another entry. An upstream must be `tcp-tls:` or `https:`.
+
+### Migrating data in
+
+This machine starts empty. What it must remember is in the create command or `--config`. There is no database to import.
 
 ### Known Quirks
 

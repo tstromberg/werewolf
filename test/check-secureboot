@@ -1,0 +1,93 @@
+#!/bin/sh
+# check-secureboot QEMU... boots minimal's slot as a signed UKI -- kernel,
+# stage0, root image and command line as one PE (tools/uki) -- on firmware
+# with Secure Boot on and nothing but werewolf's test key enrolled. The
+# machine must boot, with its posture judged, and the same image with one
+# byte of its embedded initrd changed must be refused, Access Denied, and
+# never hand over: the first slice of phase 5
+# (docs/design/verified-boot.md). make passes CHECK_ENV (Makefile).
+#
+# SECUREBOOT_DIR holds what the host cannot make: stub.efi (systemd's
+# linuxaa64.efi.stub), code.fd (firmware that enforces Secure Boot),
+# vars.fd (its empty variable store) and, where virt-fw-vars is not
+# installed, wk.key, wk.crt and vars-sb.fd, the store with that key
+# enrolled. docs/testing.md tells how to gather one.
+set -eu
+dir=${SECUREBOOT_DIR:-}
+say() { echo "skip   secureboot        $*"; exit 0; }
+[ -n "$dir" ] || say "no SECUREBOOT_DIR (docs/testing.md)"
+for f in stub.efi code.fd vars.fd; do [ -f "$dir/$f" ] || say "$dir holds no $f"; done
+command -v osslsigncode >/dev/null || say "no osslsigncode"
+
+# The key: a fresh one, enrolled now, or the one SECUREBOOT_DIR holds.
+guid=a0420f26-3a13-4a1b-9c77-134e29b24bf1
+key=$dir/wk.key
+crt=$dir/wk.crt
+vars=$dir/vars-sb.fd
+if command -v virt-fw-vars >/dev/null; then
+	key=$CHECK/sb.key
+	crt=$CHECK/sb.crt
+	vars=$CHECK/sb-vars.fd
+	openssl req -newkey rsa:2048 -nodes -keyout "$key" -x509 -new \
+		-subj /CN=werewolf-test -days 30 -out "$crt" 2>/dev/null
+	openssl x509 -in "$crt" -outform DER -out "$CHECK/sb.der"
+	virt-fw-vars --input "$dir/vars.fd" --output "$vars" \
+		--set-pk "$guid" "$CHECK/sb.der" --add-kek "$guid" "$CHECK/sb.der" \
+		--add-db "$guid" "$CHECK/sb.der" --sb >/dev/null
+else
+	for f in "$key" "$crt" "$vars"; do [ -f "$f" ] || say "$dir holds no $(basename "$f") and no virt-fw-vars"; done
+fi
+
+# The UKI: the slot's kernel, and stage0 with the root image, as check-verity
+# embeds it, in the .initrd section; the check's command line in .cmdline.
+mkdir -p "$CHECK/sb/EFI/BOOT" "$CHECK/sb-root"
+rm -f "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI" "$CHECK/sb-initrd" "$CHECK/sb-cmdline" "$CHECK/sb-run.fd"
+cp "$OUT/slot/root.erofs" "$CHECK/sb-root/"
+	(cd "$CHECK/sb-root" && "$TAR" -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs) |
+		zstd -1 -q -c >"$CHECK/sb-root.cpio.zst"
+cat "$OUT/slot/stage0.zst" "$CHECK/sb-root.cpio.zst" >"$CHECK/sb-initrd"
+printf '%s\0' "$(cat "$OUT/slot/cmdline") $CMDLINE" >"$CHECK/sb-cmdline"
+# The kernel as the stub loads it: an arm64 Image. The slot ships Alpine's
+# EFI zboot wrapper, which the firmware would load itself but the stub
+# starts cold, so unpack the Image inside, as bite does.
+off=$(od -An -t u4 -j 8 -N 4 "$OUT/slot/vmlinuz" | tr -d ' ')
+size=$(od -An -t u4 -j 12 -N 4 "$OUT/slot/vmlinuz" | tr -d ' ')
+tail -c +$((off + 1)) "$OUT/slot/vmlinuz" | head -c "$size" | gunzip >"$CHECK/sb-vmlinuz"
+[ "$(dd if="$CHECK/sb-vmlinuz" bs=1 skip=56 count=4 2>/dev/null)" = ARMd ] ||
+	{ echo "FAIL   secureboot        $OUT/slot/vmlinuz holds no arm64 Image"; exit 1; }
+build/host/uki "$dir/stub.efi" "$CHECK/sb.uki" \
+	.linux="$CHECK/sb-vmlinuz" .initrd="$CHECK/sb-initrd" .cmdline="$CHECK/sb-cmdline"
+osslsigncode sign -certs "$crt" -key "$key" -in "$CHECK/sb.uki" -out "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI" >/dev/null 2>&1
+printf 'FS0:\\EFI\\BOOT\\BOOTAA64.EFI\r\n' >"$CHECK/sb/startup.nsh"
+
+boot() { # boot VARS LOG BOOTS-OR-REFUSED, then QEMU's arguments
+	rm -f "$CHECK/sb-run.fd"
+	cp "$1" "$CHECK/sb-run.fd"
+	log=$2
+	wanted=$3
+	shift 3
+	if test/boot secureboot - "$log" "$@" \
+		-drive if=pflash,format=raw,file="$dir/code.fd",readonly=on \
+		-drive if=pflash,format=raw,file="$CHECK/sb-run.fd" \
+		-drive id=sbdisk,if=none,file=fat:rw:"$CHECK/sb",format=raw \
+		-device virtio-blk-pci,drive=sbdisk; then
+		[ "$wanted" = boots ] || { echo "FAIL   secureboot        the changed image booted; see $log"; exit 1; }
+	else
+		[ "$wanted" = refused ] || { echo "FAIL   secureboot        the signed image did not boot; see $log"; exit 1; }
+		grep -a -q 'Access Denied' "$log" ||
+			{ echo "FAIL   secureboot        no Access Denied for the changed image; see $log"; exit 1; }
+	fi
+}
+
+boot "$vars" "$CHECK/secureboot.log" boots "$@"
+cp "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI" "$CHECK/sb-tampered.efi"
+python3 - "$CHECK/sb-tampered.efi" <<'EOF'
+import sys
+d = bytearray(open(sys.argv[1], 'rb').read())
+off = len(d) // 3 * 2
+d[off] ^= 0xff
+open(sys.argv[1], 'wb').write(d)
+EOF
+cp "$CHECK/sb-tampered.efi" "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI"
+boot "$vars" "$CHECK/secureboot-tamper.log" refused "$@"
+echo "pass   secureboot        a signed image boots under Secure Boot; a changed one is refused"

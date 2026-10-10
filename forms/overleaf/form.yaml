@@ -117,9 +117,10 @@ services:
   # reach it.
   valkey:
     exec: /usr/bin/valkey-server /etc/valkey/valkey.conf --port 6379 --bind 127.0.0.1 --maxmemory 448mb
+    before: /usr/lib/werewolf/valkey-init
     user: valkey
     pledge: stdio rpath wpath inet unix listen proc
-    read: /etc/valkey
+    read: /etc/valkey /run/werewolf/import
     listen: tcp/6379 loopback
     share: shared
     memory: 512

@@ -151,6 +151,8 @@ pub fn ensureImage(
         "--boot-mode",
         "uefi",
         "--ena-support",
+        "--tpm-support",
+        "v2.0",
         "--virtualization-type",
         "hvm",
         "--imds-support",

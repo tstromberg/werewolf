@@ -74,6 +74,7 @@ pub fn argv(
     disk: []const u8,
     config: []const u8,
     fwds: []const Forward,
+    import_disk: ?[]const u8,
 ) ![]const []const u8 {
     var net: std.ArrayList(u8) = .empty;
     try net.appendSlice(gpa, "virtio-net,slirp,open");
@@ -82,7 +83,8 @@ pub fn argv(
         "{s}tcp:127.0.0.1:{d}-:{d}",
         .{ if (i == 0) ",hostfwd=" else ";", f.host, f.guest },
     );
-    return try gpa.dupe([]const u8, &.{
+    var out: std.ArrayList([]const u8) = .empty;
+    try out.appendSlice(gpa, &.{
         "bhyve",
         "-H",
         "-w",
@@ -103,12 +105,19 @@ pub fn argv(
         try gpa.print("4,virtio-blk,{s},ro", .{config}),
         "-s",
         "5,virtio-rnd",
+    });
+    if (import_disk) |p| try out.appendSlice(gpa, &.{
+        "-s",
+        try gpa.print("6,virtio-blk,{s},ro", .{p}),
+    });
+    try out.appendSlice(gpa, &.{
         "-l",
         "com1,stdio",
         "-l",
         "bootrom," ++ firmware,
         name,
     });
+    return out.items;
 }
 
 /// destroy returns the bhyvectl command that destroys the VM name, which
@@ -179,7 +188,7 @@ test argv {
     const a = try argv(gpa, "edge", "/m/disk.img", "/m/config.tar", &.{
         .{ .host = 23400, .guest = 22 },
         .{ .host = 23401, .guest = 443 },
-    });
+    }, null);
     try testing.expectEqualStrings("bhyve", a[0]);
     try testing.expectEqualStrings("edge", a[a.len - 1]);
     try testing.expectEqualStrings(
@@ -187,7 +196,9 @@ test argv {
         a[13],
     );
     try testing.expectEqualStrings("4,virtio-blk,/m/config.tar,ro", a[17]);
-    const none = try argv(gpa, "m", "/d", "/c", &.{});
+    const brought = try argv(gpa, "edge", "/m/disk.img", "/m/config.tar", &.{}, "/m/import.img");
+    try testing.expectEqualStrings("6,virtio-blk,/m/import.img,ro", brought[21]);
+    const none = try argv(gpa, "m", "/d", "/c", &.{}, null);
     try testing.expectEqualStrings("2,virtio-net,slirp,open", none[13]);
     const d = try destroy(gpa, "edge");
     try testing.expectEqualStrings("--vm=edge", d[1]);

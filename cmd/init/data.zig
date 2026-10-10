@@ -16,6 +16,9 @@ const hasUstar = phase_config.hasUstar;
 const lookupIds = phase_config.lookupIds;
 
 const label = "werewolf-data";
+const import_label = "werewolf-import";
+const import_dir = "/run/werewolf/import";
+const import_failed = import_dir ++ "/import-failed";
 
 /// min_data_key is the shortest data.key LUKS2 is made with; howl pack
 /// checks keys against it too.
@@ -313,6 +316,50 @@ fn checkDue(sb: []const u8, now: i64) ?[]const u8 {
     const interval = std.mem.readInt(u32, sb[0x44..0x48], .little);
     if (interval != 0 and now >= @as(i64, last) + interval) return "its check interval has passed";
     return null;
+}
+
+/// importDisk mounts the one ext4 disk labelled werewolf-import on
+/// import_dir, read-only. The directory is always there: a service may
+/// read it, and an empty one means there is nothing to import. Two disks
+/// with the label, or a mount that fails, leave import-failed in the
+/// directory and mount nothing, so the form does not make an empty database.
+pub fn importDisk(m: *Machine) void {
+    mkdir(import_dir, 0o755);
+    var found: ?[:0]const u8 = null;
+    var two = false;
+    for (m.list("/sys/class/block")) |name| {
+        const dev = m.fmtZ("/dev/{s}", .{name});
+        if (!isBlockDevice(dev)) continue;
+        var head: Head = undefined;
+        if (!readHead(dev, &head)) continue;
+        const d = identify(&head);
+        if (d.kind != .ext4 or !std.mem.eql(u8, d.label, import_label)) continue;
+        if (found != null) {
+            two = true;
+            break;
+        }
+        found = dev;
+    }
+    if (two) {
+        say("import: two disks labelled {s}", .{import_label});
+        m.write(import_failed, "two disks\n", 0o644);
+        return;
+    }
+    const dev = found orelse return;
+    if (!m.run(&.{
+        mount_bin,
+        "-t",
+        "ext4",
+        "-o",
+        "ro,nosuid,nodev,noexec,nosymfollow",
+        dev,
+        import_dir,
+    })) {
+        say("import: cannot mount {s}", .{dev});
+        m.write(import_failed, "cannot mount\n", 0o644);
+        return;
+    }
+    say("import: {s} on {s}", .{ dev, import_dir });
 }
 
 fn nodata(m: *Machine, why: []const u8) void {

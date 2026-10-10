@@ -1,0 +1,6 @@
+# Port 6379 answers only with the password, the cap is the setting, and
+# the cgroup has no memory.max of its own. valkey-cli is the form's own.
+ok  valkey-tcp       i=0; until valkey-cli -a werewolf-check-password -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -qx PONG; do i=$((i + 1)); [ $i -le 60 ] || { echo "no PONG in 60 s"; exit 1; }; sleep 1; done; netstat -ltn | grep -q ':6379 '
+ok  valkey-auth      valkey-cli -h 127.0.0.1 -p 6379 ping 2>&1 | grep -q NOAUTH
+ok  valkey-cap       grep -qx 'maxmemory 64mb' /run/svc/valkey/override.conf
+ok  valkey-uncapped  [ "$(cat /run/cgroup/svc/valkey/memory.max)" = max ]

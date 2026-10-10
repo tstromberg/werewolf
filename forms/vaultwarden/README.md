@@ -15,6 +15,41 @@ Bitwarden password manager's apps, and its web vault.
 build/host/howl pack --with vaultwarden -o config.tar --config config --domain https://vault.example.com
 ```
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+mkdir -p config/vaultwarden
+howl create vaultwarden --with vaultwarden --config config \
+	--domain https://vault.home.arpa
+```
+
+`config/vaultwarden/admin-token` is an Argon2id PHC string (`vaultwarden hash`). Without it the service stays down. Put TLS in front of port 8080. The apps require it. Sign-up and the admin page are in [Vaultwarden's documentation](https://github.com/dani-garcia/vaultwarden/wiki).
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+mkdir -p config/vaultwarden
+howl create vaultwarden --with vaultwarden --on gcp --allow-from me --config config \
+	--domain https://vault.example.com
+```
+
+`--allow-from me` admits your address to port 8080.
+
+### Migrating data in
+
+Export the old vault as JSON and import it in this machine's web vault after it is up. The host cannot write `/data`.
+
+### Network Exposure
+
+tcp/8080
+
+
 ## Built by melange, until Wolfi ships it
 
 Wolfi does not ship Vaultwarden yet, so [forms/vaultwarden/melange/vaultwarden.yaml](melange/vaultwarden.yaml)

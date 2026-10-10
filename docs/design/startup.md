@@ -40,7 +40,7 @@ pinned by digest, in a tree of its own ([oci.md](oci.md); forms/grafana).
 | Use | Forms | State |
 | --- | --- | --- |
 | The product: app, TLS, balancing | runtime forms, `caddy`, `nginx`, `haproxy` | built |
-| Its database | `postgresql`, `mariadb` | built |
+| Its database | `postgresql`, `mariadb-local`, `mariadb-tcp` | built |
 | Cache, queues, jobs | `valkey`, `nats`, `cron` | built |
 | Files and uploads | `minio` | built |
 | Secrets and internal TLS | `openbao`, `step-ca` | built |

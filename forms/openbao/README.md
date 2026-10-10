@@ -22,6 +22,52 @@ printf '%s' 'the admin password' >config/openbao/admin-password      # no newlin
 build/host/howl pack --with openbao -o config.tar --config config --api-addr https://bao.example.com:8200
 ```
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+umask 077
+mkdir -p config/openbao
+openssl rand -out config/openbao/unseal-key 32
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
+	-subj /CN=bao.home.arpa -addext subjectAltName=DNS:bao.home.arpa \
+	-keyout config/openbao/tls.key -out config/openbao/tls.crt
+printf '%s' 'a long admin password' >config/openbao/admin-password
+howl create openbao --with openbao --config config --api-addr https://bao.home.arpa:8200
+```
+
+Open `https://bao.home.arpa:8200` and sign in as `admin`. The password file has no newline. The unseal key is 32 random bytes. Keep both.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+umask 077
+mkdir -p config/openbao
+openssl rand -out config/openbao/unseal-key 32
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 365 \
+	-subj /CN=bao.example.com -addext subjectAltName=DNS:bao.example.com \
+	-keyout config/openbao/tls.key -out config/openbao/tls.crt
+printf '%s' 'a long admin password' >config/openbao/admin-password
+howl create openbao --with openbao --on gcp --allow-from me --config config \
+	--api-addr https://bao.example.com:8200
+```
+
+`--allow-from me` admits your address to port 8200. Use a certificate clients already trust. Change the admin password at the first login.
+
+### Migrating data in
+
+This machine starts empty. Initialize and unseal it as its own setup describes. There is no database to import.
+
+### Network Exposure
+
+tcp/8200
+
+
 ## Unsealed by a key, set up by itself
 
 werewolf reboots itself into every update; with Shamir shares, every

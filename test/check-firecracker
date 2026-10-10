@@ -1,0 +1,106 @@
+#!/bin/sh
+# check-firecracker boots a werewolf form as a Firecracker microVM on a
+# Linux host with KVM (make check-firecracker; docs/testing.md). The tree,
+# built for x86_64 here, is copied to FIRECRACKER_HOST (default galadriel)
+# with a howl cross-compiled for it, so the host needs no toolchain; howl
+# makes the machine as a user's would, through doas for the tap and its
+# routes. The machine must hand over to runit with its root verified
+# through dm-verity, posture must fail exactly what POSTURE_KNOWN allows,
+# ssh must reach it through the tap with the host's key, and delete must
+# remove the machine. make passes CHECK_ENV (Makefile).
+set -eu
+host=${FIRECRACKER_HOST:-galadriel}
+work=werewolf-check-fc
+name=check-fc
+known=${POSTURE_KNOWN:?}
+log=$CHECK/firecracker-console.log
+
+say() { echo "skip   firecracker        $*"; exit 0; }
+fail() { echo "FAIL   firecracker        $1; see $log"; exit 1; }
+
+# What the host must have: KVM, Firecracker, mtools for the boot entries,
+# erofs-utils and doas without a password for the tap and its routes.
+ssh -o BatchMode=yes "$host" true 2>/dev/null || say "no ssh to $host"
+have=$(ssh "$host" 'ls /dev/kvm >/dev/null 2>&1 && command -v firecracker >/dev/null && command -v mdir >/dev/null && command -v mkfs.erofs >/dev/null && doas -n true 2>/dev/null && echo yes') ||
+	true
+[ "$have" = yes ] || say "$host lacks KVM, Firecracker, mtools, erofs-utils or passwordless doas"
+
+# The tree, then only the x86_64 build the form needs -- the whole
+# directory would carry every form ever built -- and its locks, so make on
+# the host has nothing to do and no toolchain is needed. build/host/howl
+# goes along unread, so make finds howl built.
+rsync -a --delete --exclude /build --exclude /.git --exclude /config --exclude /.zig-cache --exclude /dist ./ "$host:$work/"
+# The host tools go to the remote as linux builds, so the Makefile reads
+# its forms there without a toolchain, and make finds every tool built.
+ssh "$host" "mkdir -p $work/build/host $work/build/x86_64"
+rsync -a build/x86_64/tools/howl build/x86_64/tools/form build/x86_64/tools/verity "$host:$work/build/host/"
+rsync -a build/x86_64/form build/x86_64/programs build/x86_64/apko build/x86_64/kernel \
+	build/x86_64/check-fc "$host:$work/build/x86_64/"
+rsync -a build/adhoc/ "$host:$work/build/adhoc/"
+rsync -a build/lock/ "$host:$work/build/lock/"
+
+cleanup() {
+	if [ "${FIRECRACKER_KEEP:-}" = 1 ]; then
+		echo "keep   firecracker        $name stays on $host in $work; delete with:"
+		echo "  ssh $host $work/build/host/howl delete $name --on firecracker"
+		return
+	fi
+	ssh "$host" "cd $work && build/host/howl delete $name --on firecracker >/dev/null 2>&1" || true
+}
+trap cleanup EXIT
+
+# apko, at the version tools/install-deps pins, so a lock the tree's copy
+# does not match can be resolved on the host after all.
+apko_version=1.3.1
+ssh "$host" "[ -x \$HOME/go/bin/apko ] && \$HOME/go/bin/apko --version >/dev/null 2>&1 | grep -q $apko_version" ||
+	ssh "$host" "go install chainguard.dev/apko@v$apko_version" ||
+	skip "no apko on $host and go could not install one"
+
+ssh "$host" "cd $work && build/host/howl delete $name --on firecracker" >/dev/null 2>&1 || true
+
+ssh "$host" "cd $work && PATH=\$HOME/go/bin:\$PATH build/host/howl create $name --with sshd --sshd.pubkey-accepted-algorithms=ssh-ed25519 --on firecracker --build --yes" ||
+	fail "create failed on $host"
+
+# The posture line lands in the console log once the machine has settled.
+ssh "$host" "cd $work && sh -c 'for i in \$(seq 36); do
+	grep -a -m1 \"posture: fail=\" build/machines/$name/console.log 2>/dev/null && exit 0
+	sleep 5
+done; exit 1'" || fail "no posture line on the console"
+scp -q "$host:$work/build/machines/$name/console.log" "$log"
+# A kernel record can land inside the console's posture line; strip whole
+# records, as test/boot does, so the line's halves join.
+clean=$CHECK/firecracker-console.clean
+python3 - "$log" "$clean" <<'EOF'
+import re
+import sys
+t = open(sys.argv[1], errors="replace").read().replace("\r", "")
+t = re.sub(r"\[\s*\d+\.\d+\][^\n]*\n", "", t)
+open(sys.argv[2], "w").write(t)
+EOF
+
+grep -a -q 'handing over to runit' "$clean" || fail "the machine never reached runit"
+grep -a -E -q 'stage0: slot [ab]:.*verified' "$clean" || fail "the root was not verified through dm-verity"
+
+# Posture must fail exactly what the form and test/posture-known allow, as
+# test/boot judges a QEMU boot: nothing unexpected, nothing closed.
+line=$(grep -a -m1 'posture: fail=' "$clean")
+got=$(printf '%s\n' "$line" | sed -E 's/.*fail=([^ ]*).*/\1/' | tr ',' ' ')
+passed=$(printf '%s\n' "$line" | sed -E 's/.*pass=([0-9]+).*/\1/')
+[ "$passed" -ge 20 ] || fail "only $passed checks passed; did posture run?"
+for id in $got; do
+	case " $known " in *" $id "*) continue ;; esac
+	case "$id" in *:*) ;; *) fail "$id fails, and nothing excuses it" ;; esac
+done
+
+# ssh reaches the machine through its tap, with the host's key, and runs
+# posture there again: the line must agree with the console's.
+again=$(ssh "$host" "cd $work && build/host/howl ssh $name -- /usr/lib/werewolf/posture --line" |
+	python3 -c 'import re,sys; print(re.sub(r"\[\s*\d+\.\d+\][^\n]*\n", "", sys.stdin.read().replace("\r","")), end="")') ||
+	fail "ssh did not reach the machine"
+got2=$(printf '%s\n' "$again" | sed -E 's/.*fail=([^ ]*).*/\1/' | tr ',' ' ')
+[ "$got2" = "$got" ] || fail "posture over ssh disagrees with the console's"
+
+ssh "$host" "cd $work && build/host/howl delete $name --on firecracker" || fail "delete failed"
+trap - EXIT
+ssh "$host" "[ ! -d $work/build/machines/$name ]" || fail "delete left the machine behind"
+echo "pass   firecracker        sshd boots on Firecracker, verified, its posture held, and ssh reaches it"

@@ -1,48 +1,46 @@
-# Valkey
+# Valkey - Hardened VM
 
-The `valkey` form is `prod` with Valkey 9.1, a cache or queue for the
-application on the same machine, as `postgresql` is its database.
+A cache or queue for the other services on this machine: [Valkey](https://valkey.io) 9.1, on a UNIX socket. The form's manifest is [form.yaml](form.yaml). The same server on a reachable port is [valkey-tcp](../valkey-tcp/README.md).
 
-| | |
-| --- | --- |
-| Listens | a UNIX socket, `/run/svc/valkey/valkey.sock`, mode 660 for the `valkey` group, which a client's service joins with `group valkey`, and nothing else: `port 0`, and the form declares none |
-| Sends | nothing |
-| Runs as | `valkey` (a uid of its own, its name's hash), leashed: it reads the image and writes only its own directories |
-| Keeps | RDB snapshots in `/data/svc/valkey`; the append-only log is a line away (`appendonly yes`) |
-| Limits | `maxmemory 192mb` under the leash's 256 MiB, `noeviction`: a full store refuses writes rather than being killed for them. A cache sets `maxmemory-policy allkeys-lru` |
+## Security Posture
 
-The application's form includes `valkey` and puts its user in the `valkey`
-group (gid 210) to reach the socket; `valkey-cli -s
-/run/svc/valkey/valkey.sock` is the operator's client, in the image.
+The server runs as its own user. There is no shell. Landlock and seccomp hold it to its socket and to `/data/svc/valkey`. The root is read-only.
 
-## Defaults
+- No TCP. The socket is mode 660 for the `valkey` group. A client's service joins that group.
+- The default user may do everything except administer the server. `CONFIG`, `DEBUG`, `MODULE`, `REPLICAOF`, `SHUTDOWN`, `MONITOR` and ACL changes are refused.
+- Modules, debug, and protected config changes are off. Lua stays, for Sidekiq and BullMQ, inside this leash.
+- `maxmemory` is 192 MB, under the leash's 256 MB, and a full store refuses writes.
 
-- **The default user may do all but administer the server:** `+@all
-  -@admin`. No `CONFIG`, `DEBUG`, `MODULE`, `REPLICAOF`, `SHUTDOWN`,
-  `MONITOR` or ACL changes, so the old attack, `CONFIG SET dir` to a key
-  directory and then `SAVE`, fails at its first word, and would find
-  Landlock holding the process to `/data/svc/valkey`, and no sshd. Lua
-  stays: Sidekiq and BullMQ are built on it, and a sandbox escape lands in
-  a leashed process that can start nothing.
-- `enable-module-command no`, `enable-debug-command no`,
-  `enable-protected-configs no`, as they ship, and said so in the file.
-- A form that serves the network adds `port 6379`, `listen tcp/6379` to
-  its service file and `.net`, and then a password is required: an ACL
-  file from the config. TLS when the config brings a certificate.
+## Getting Started
 
-## No shell, after all
+### Local test deployment (lima, qemu, firecracker)
 
-Wolfi's `valkey-9.1` depends on `posix-libc-utils`, whose `ldd` is a bash
-script, so bash would come with it. Nothing on the machine runs either:
-Valkey is leashed to its own program, and there is no login. The form
-leaves `usr/bin/bash` out of the image ([forms/valkey/form.yaml](form.yaml),
-[forms.md](../../docs/forms.md#files-a-form-leaves-out)), and posture's
-`programs-no-shell` passes as on every other form.
+```sh
+howl create valkey --with valkey
+```
 
-## Checked
+Nothing answers on the network. A form takes this one `with` and puts its service in group `valkey`. The client is `valkey-cli -s /run/svc/valkey/valkey.sock`. Commands are in [Valkey's command reference](https://valkey.io/commands/).
 
-`make check-valkey` runs [forms/valkey/test/checks](test/checks): the
-socket answers `PING`, is `valkey:valkey` 660 and refuses `nobody`; a key
-is set, read and a Lua script runs; every `@admin` command above is
-`NOPERM`, `SHUTDOWN` among them, and the server is still there; nothing
-listens on `:6379`; and `BGSAVE` lands in `/data/svc/valkey`.
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create valkey --with valkey --on gcp --allow-from me
+```
+
+`--allow-from` opens no port: there is no listener. Keep the store on the same machine as the service that uses it.
+
+### Migrating data in
+
+The host cannot reach this server. `--import` attaches a directory. `valkey-init` copies `dump.rdb` from it once, before the first start, and the server loads that file. Take the file from the old server with `valkey-cli --rdb dump.rdb`.
+
+```sh
+howl create valkey --with valkey --import ./dump
+```
+
+[valkey-tcp](../valkey-tcp/README.md) is this server on port 6379. Its cap is `--maxmemory`, and `0` removes it.
+
+### Known Quirks
+
+- The append-only log is off. A form that must not lose a job sets `appendonly yes`.
+- A cache sets `maxmemory-policy allkeys-lru`. This one keeps every key until it is full, then refuses writes. To raise or drop the 192 MiB cap, use [valkey-tcp](../valkey-tcp/README.md).
+- A second start that finds `dump.rdb` keeps it. `--import` does not replace a store that exists.

@@ -66,9 +66,10 @@ base64 user data. Cloud images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`), so
 a build uploads once and delete keeps the image. A cloud machine lets nothing in:
 `--allow-from me|CIDR` opens the form's TCP ports, or create prints the commands.
 
-**Second create.** The machine keeps its disk, updated in place, and takes the
-new config after a hard stop, a graceful one under Lima, or a cloud restart;
-`howl run` makes a new one. Another form or `--app` is refused.
+**Second create.** The machine keeps its disk and takes the new config.
+`howl run` makes a new one. Another form, `--app`, or `--import` is refused.
+`--import DIR` is a read-only disk the form reads once, while its data is
+first made ([data.md](../../docs/data.md)). A cloud cannot attach it.
 
 ## Drawbacks
 

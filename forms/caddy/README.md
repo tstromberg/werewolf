@@ -1,51 +1,44 @@
-# Caddy
+# Caddy - Hardened VM
 
-The `caddy` form is `prod` with Caddy 2.11, a web server that gets its own
-certificates. The site is in the image, `/usr/share/caddy`, with the
-form's Caddyfile over it (`forms/caddy/rootfs/etc/caddy/Caddyfile`); a form of
-your own includes `caddy` and lays its site and Caddyfile over those.
+A web server that gets its own certificates: [Caddy](https://caddyserver.com) 2.11. The form's manifest is [form.yaml](form.yaml). A form of your own includes this one and lays its site and Caddyfile over the image's.
 
-| | |
-| --- | --- |
-| Listens | tcp/80 and tcp/443; HTTP/3 (UDP) waits on fence serving UDP |
-| Sends | HTTPS to the ACME CA and DNS to find it (`connect caddy tcp/443 tcp/53 udp/53`); the upstreams a form of your own adds |
-| Runs as | `caddy` (a uid of its own, its name's hash), leashed: it binds its two ports, reads the image and writes `/run/svc/caddy` and `/data/svc/caddy` |
-| Keeps | certificates, keys and the ACME account in `/data/svc/caddy`; on a RAM `/data` every boot asks the CA again, whose rate limits will notice |
-| Settings | `domain` (a hostname): the site's name. Without one the site is `:80`, plain HTTP, with no certificate |
+## Security Posture
+
+Caddy runs as its own user. There is no shell. Landlock and seccomp hold it to ports 80 and 443 and to `/data/svc/caddy`. The root is read-only.
+
+- The admin API is off. The configuration is in the image, so there is nothing to reload.
+- The placeholder site sends `X-Content-Type-Options: nosniff` and a strict referrer policy, and no `Server`.
+- On-demand TLS needs an `ask` endpoint, so a stranger cannot make Caddy request certificates without limit.
+- Protocols are HTTP/1 and HTTP/2. HTTP/3 waits until the firewall can serve UDP.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-build/host/howl pack --with caddy -o config.tar --domain www.example.com
+howl create caddy --with caddy --domain www.home.arpa
 ```
 
-With a public name, Caddy does what it ships doing: a certificate from
-Let's Encrypt (ZeroSSL behind it), renewed in time, and `:80` redirected
-to HTTPS. `localhost`, and names under `.localhost`, `.local`, `.internal`
-and `.home.arpa`, get a certificate from Caddy's own CA instead, which is
-how `make check-caddy` checks HTTPS with no CA on the network.
+Open `https://www.home.arpa`. A name under `.home.arpa`, `.local`, `.internal` or `.localhost` gets a certificate from Caddy's own CA. Without `--domain` the site is plain HTTP on port 80. The site is in [Caddy's documentation](https://caddyserver.com/docs/).
 
-## Defaults
+### Cloud production deployment (aws, gcp, azure, proxmox)
 
-- **`admin off`.** The admin API on `:2019` lets any local process rewrite
-  the configuration. werewolf's configuration is in the image, so there is
-  nothing to reload.
-- **Headers.** The placeholder site sends `X-Content-Type-Options:
-  nosniff` and `Referrer-Policy: strict-origin-when-cross-origin`, and no
-  `Server`. HSTS is the site's to choose: it locks a name to HTTPS for
-  months.
-- **Timeouts.** `read_header 10s`, `idle 2m`, against slowloris. No body
-  or write timeout, which would cut off uploads and streams.
-- **On-demand TLS** only with an `ask` endpoint (a comment in the
-  Caddyfile shows where), so a stranger cannot make Caddy ask for
-  certificates without limit.
-- **Protocols `h1 h2`**, until fence serves UDP. Wolfi's caddy is the
-  standard build, with no plugins.
-- **No shell, no interpreter.** Caddy is one Go binary; posture passes
-  every check on this form.
+```sh
+howl create caddy --with caddy --on gcp --allow-from me --domain www.example.com
+```
 
-## Checked
+Point the name at the address howl prints. Caddy gets a certificate from Let's Encrypt once the name resolves, and renews it. Certificates live in `/data/svc/caddy`.
 
-`make check-caddy` boots it with `domain localhost` ([forms/caddy/test/config](test/config))
-and, beyond every form's checks, [forms/caddy/test/checks](test/checks):
-HTTPS answers with the site and its headers and no `Server`; `:80`
-redirects to HTTPS; nothing listens on `:2019` and the admin API does not
-answer; and the certificate it made is kept on `/data`.
+### Migrating data in
+
+This machine starts empty. The site and the Caddyfile are in the image. What differs per machine is `--domain`. There is no database to import.
+
+### Known Quirks
+
+- Timeouts are 10 seconds to read a header and 2 minutes idle. There is no body timeout, which would cut off an upload.
+- HSTS is the site's to choose. It locks a name to HTTPS for months.
+- Wolfi's Caddy is the standard build, with no plugins.
+
+### Network Exposure
+
+tcp/80 tcp/443

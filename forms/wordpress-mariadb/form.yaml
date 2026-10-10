@@ -7,7 +7,7 @@
 # MariaDB answers. See forms/wordpress-mariadb/README.md.
 base: wordpress
 
-with: [mariadb]
+with: [mariadb-local]
 
 packages:
   - php-8.4-mysqlnd

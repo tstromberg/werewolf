@@ -1,26 +1,48 @@
-# Ollama
+# Ollama - Hardened VM
 
-The `ollama` form is `prod` with Ollama serving models to a network.
+Models on this machine: [Ollama](https://ollama.com). The form's manifest is [form.yaml](form.yaml).
 
-| | |
-| --- | --- |
-| Listens | tcp/11434, Ollama's API, which has no login of its own: `oauth2-proxy`, `caddy` or a tailnet in front to serve it beyond the machine |
-| Sends | HTTPS and DNS, to pull models from `registry.ollama.ai` |
-| Runs as | `ollama` (a uid of its own, its name's hash), leashed; it starts its own runner for a loaded model, so it pledges `exec` and may run only itself |
-| Keeps | models in `/data/svc/ollama` |
+## Security Posture
+
+Ollama runs as its own user. There is no shell. Landlock and seccomp hold it to port 11434, to the registry, and to `/data/svc/ollama`. The root is read-only.
+
+- The API has no login. Put oauth2-proxy, Caddy or a tailnet in front before you serve it past this machine.
+- A browser on another origin is refused.
+- It may run only itself, which is how a model is loaded.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-curl http://ollama.internal:11434/api/pull -d '{"model": "gemma3:4b"}'
+howl create ollama --with ollama
 ```
 
-Models run on the CPU: a GPU is a device no form carries yet. `memory
-8192` in the service file is the leash's ceiling; the models decide the
-rest. Browsers on other origins are refused (`OLLAMA_ORIGINS`).
+Pull a model against the address howl prints:
 
-## Checked
+```text
+curl http://ADDRESS:11434/api/pull -d '{"model":"gemma3:4b"}'
+```
 
-`make check-ollama` runs [forms/ollama/test/checks](test/checks): the
-API answers with no models, a cross-origin request is 403, a pull of a
-model that cannot exist fails cleanly, and the model directory is
-`ollama`'s on `/data`. No model is pulled: the registry is not a check's
-to depend on.
+Models and the API are in [Ollama's documentation](https://github.com/ollama/ollama/blob/main/docs/api.md).
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create ollama --with ollama --on gcp --allow-from me
+```
+
+`--allow-from me` admits your address to port 11434. The API still has no login.
+
+### Migrating data in
+
+This machine starts empty. Pull a model with the client against the address howl prints. Models already on disk are in `/data/svc/ollama`, and the host cannot write that directory.
+
+### Known Quirks
+
+- Models run on the CPU. A GPU is a device no form carries yet.
+- The leash is 8 GiB. The model decides the rest.
+
+### Network Exposure
+
+tcp/11434

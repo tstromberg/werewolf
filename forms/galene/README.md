@@ -1,6 +1,10 @@
 # Galène
 
-Videoconference for lectures and seminars: [Galène](https://galene.org) 1.2, with Caddy in front.
+Videoconference for lectures and seminars: [Galène](https://galene.org) 1.2, with Caddy in front. The form's manifest is [form.yaml](form.yaml).
+
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
 
 ## Getting Started
 
@@ -8,27 +12,29 @@ Videoconference for lectures and seminars: [Galène](https://galene.org) 1.2, wi
 
 ```sh
 openssl rand -base64 18 >operator-password
-openssl rand -base64 9 >password
-howl create lectures --with galene --on lima \
+openssl rand -base64 12 >password
+howl create galene --with galene \
 	--base-url https://meet.home.arpa --groups cs101 \
 	--operator ada --operator-password operator-password --password password
 ```
 
-Open `https://meet.home.arpa/group/cs101/`. UDP port 10000 must reach the machine, beside 80 and 443.
+Open `https://meet.home.arpa/group/cs101/`. The operator password is in `operator-password`; everyone else uses `password`. UDP port 10000 must reach the machine. Rooms and keys are in [Galène's documentation](https://galene.org/galene.html).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh
 openssl rand -base64 18 >operator-password
-openssl rand -base64 9 >password
-howl create lectures --with galene --on gcp --allow-from 0.0.0.0/0 \
+openssl rand -base64 12 >password
+howl create galene --with galene --on gcp --allow-from me \
 	--base-url https://meet.example.edu --groups cs101 --groups seminar \
 	--operator ada --operator-password operator-password --password password
 ```
 
-Point the name at the machine and open UDP 10000. The operator presents, mutes and locks. Everyone else joins with the shared password. Omit `--password` and the operator is alone until they invite someone. `--recording true` writes to `/data/svc/galene/recordings`. Students whose network blocks UDP need `--ice-servers` pointing at a TURN server you run elsewhere.
+Point the name at the machine and open `https://meet.example.edu/group/cs101/`. Also open UDP 10000. Omit `--password` and the operator is alone until they invite someone. `--recording true` writes to `/data/svc/galene/recordings`. Students whose network blocks UDP need `--ice-servers` pointing at a TURN server you run elsewhere.
 
-Run the same create line again to change rooms or passwords. Groups not named are removed.
+### Migrating data in
+
+Rooms and keys are in the create command or `--config`. There is no database to import.
 
 ### Known Quirks
 

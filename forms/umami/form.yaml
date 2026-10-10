@@ -72,7 +72,7 @@ services:
     user: postgres
     pledge: stdio rpath wpath proc ipc inet unix listen connect
     run: /usr/bin/initdb
-    read: /etc/postgresql
+    read: /etc/postgresql /run/werewolf/import
     listen: tcp/5432 loopback
     share: shared
 

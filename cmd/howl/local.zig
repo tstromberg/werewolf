@@ -9,6 +9,7 @@ const bhyve = @import("bhyve.zig");
 const firecracker = @import("firecracker.zig");
 const proxmox = @import("proxmox.zig");
 const qemu = @import("qemu.zig");
+const import_disk = @import("import.zig");
 const booting = @import("boot.zig");
 const progress = @import("progress.zig");
 const native = @import("build.zig");
@@ -119,6 +120,7 @@ pub fn createQemu(
         .ssh_port = ssh_port,
         .web_port = web_port,
         .guest_web = guest_web,
+        .import_disk = try attachImport(io, gpa, if (kept) null else o.import_dir, at, why),
     }, accel);
     const launched = Io.Clock.awake.now(io);
     if (!(try steps.exec(&.{.{ .argv = argv }}, .{})).ok) return steps.fail("QEMU did not start");
@@ -247,6 +249,10 @@ pub fn createLima(
             "{s} exists, and an application is in the image: howl delete {s}, then create",
             .{ name, name },
         );
+        if (o.import_dir != null) return why.refuse(
+            "{s} exists, and an import runs only while its data is first made: howl delete {s}, then create",
+            .{ name, name },
+        );
         managed = try reconfigure(io, gpa, name, o.form, dir, tar, why);
     } else {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
@@ -292,6 +298,10 @@ pub fn createLima(
                 config_disk,
             );
         }
+        if (o.import_dir != null) template = try gpa.print(
+            "{s}  - name: \"{s}-import\"\n    format: false\n",
+            .{ template, name },
+        );
         built = (try steps.finish()).seconds;
         // Remove a config disk left by a machine deleted with limactl alone.
         _ = std.process.run(
@@ -308,6 +318,21 @@ pub fn createLima(
             &.{ "limactl", "disk", "import", config_disk, tar_path },
             lima_step,
         );
+        if (o.import_dir) |src| {
+            const image = try gpa.print("{s}/{s}/import.img", .{ cwd, dir });
+            try import_disk.write(io, gpa, src, std.fs.path.dirname(image).?, why);
+            const disk_name = try gpa.print("{s}-import", .{name});
+            _ = std.process.run(gpa, io, .{
+                .argv = &.{ "limactl", "disk", "delete", disk_name },
+            }) catch {};
+            _ = try progress.run(
+                io,
+                gpa,
+                why,
+                &.{ "limactl", "disk", "import", disk_name, image },
+                lima_step,
+            );
+        }
         const yaml = try gpa.print("{s}/lima.yaml", .{dir});
         try writePrivate(io, gpa, yaml, template, why);
         _ = try progress.run(
@@ -619,7 +644,20 @@ pub fn createBhyve(
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(gpa, root);
     try argv.appendSlice(gpa, &.{ "daemon", "-f", "-o", log, self, "_bhyve", name, config });
-    try argv.appendSlice(gpa, try bhyve.argv(gpa, name, disk, config, fwds));
+    try argv.appendSlice(gpa, try bhyve.argv(
+        gpa,
+        name,
+        disk,
+        config,
+        fwds,
+        try attachImport(
+            io,
+            gpa,
+            if (was.len == 0) o.import_dir else null,
+            try gpa.print("{s}/{s}", .{ cwd, dir }),
+            why,
+        ),
+    ));
     try run(io, why, argv.items);
     say(io, "{s}: waiting for it to boot", .{name});
     switch (try awaitUp(io, gpa, log, seen)) {
@@ -709,6 +747,13 @@ pub fn createFirecracker(
         built = (try steps.finish()).seconds;
         try writePrivate(io, gpa, form_file, o.form, why);
     }
+    _ = try attachImport(
+        io,
+        gpa,
+        if (kept) null else o.import_dir,
+        try gpa.print("{s}/{s}", .{ cwd, dir }),
+        why,
+    );
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
     const log = try gpa.print("{s}/{s}/console.log", .{ cwd, dir });
     const seen = if (Dir.cwd().statFile(io, log, .{})) |st| st.size else |_| 0;
@@ -893,6 +938,19 @@ fn reconfigure(
     );
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
     return managed;
+}
+
+/// attachImport writes --import's disk into dir when src is set, and
+/// returns the image when one is there to attach on this start.
+fn attachImport(
+    io: Io,
+    gpa: Allocator,
+    src: ?[]const u8,
+    dir: []const u8,
+    why: *Why,
+) !?[]const u8 {
+    if (src) |s| try import_disk.write(io, gpa, s, dir, why);
+    return import_disk.existing(io, gpa, dir);
 }
 
 // --- tests -------------------------------------------------------------------------------

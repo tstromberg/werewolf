@@ -1,6 +1,10 @@
 # Grafana
 
-Dashboards and alerts: [Grafana](https://grafana.com) 13, from Grafana's own image, behind Caddy.
+Dashboards and alerts: [Grafana](https://grafana.com) 13, from Grafana's own image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
+
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
 
 ## Getting Started
 
@@ -9,24 +13,26 @@ Dashboards and alerts: [Grafana](https://grafana.com) 13, from Grafana's own ima
 ```sh
 mkdir -p config/grafana
 openssl rand -base64 24 >config/grafana/admin-password
-howl create dash --with grafana --on lima --config config \
+howl create grafana --with grafana --config config \
 	--base-url https://grafana.home.arpa
 ```
 
-Sign in as `admin`. The password creates that user once, when the database is new. Change it later in Grafana.
+Open `https://grafana.home.arpa` and sign in as `admin`. The password is in `config/grafana/admin-password`. It creates that user once, when the database is new. Data sources are in [Grafana's documentation](https://grafana.com/docs/grafana/latest/datasources/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh
 mkdir -p config/grafana
 openssl rand -base64 24 >config/grafana/admin-password
-howl create dash --with grafana --on gcp --allow-from 0.0.0.0/0 \
+howl create grafana --with grafana --on gcp --allow-from me \
 	--config config --base-url https://grafana.example.com
 ```
 
-Point the name at the machine. Add data sources and users in Grafana's own pages. On one machine, `--with grafana,prometheus` puts Prometheus at `127.0.0.1:9090`.
+Sign in at `https://grafana.example.com`. On one machine, `--with grafana,prometheus` puts Prometheus at `127.0.0.1:9090`. A key encrypts stored data-source credentials. The form makes one at `/data/svc/grafana/secret-key`. To keep it across a new disk, put the same bytes in `config/grafana/secret-key`.
 
-A key encrypts the credentials Grafana stores for data sources. The form makes one before the first start and keeps it at `/data/svc/grafana/secret-key`. To keep it across a new disk, put the same bytes in `config/grafana/secret-key`. A different key makes stored credentials unreadable.
+### Migrating data in
+
+The database is SQLite in `/data`, and the host cannot write that directory. After the site is up, import a dashboard's JSON in the UI. History before that stays on the old server.
 
 ### Known Quirks
 

@@ -85,7 +85,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-static check-unsigned check-verity check-deadman check-metadata check-persist \
-	check-dist check-gcp check-gcp-metadata check-aws check-azure seal-learn $(OUT)/disk.qcow2
+	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker seal-learn $(OUT)/disk.qcow2
 
 all: image
 install-deps:
@@ -190,6 +190,11 @@ $(VERITY_BIN): tools/verity.zig lib/verity.zig
 	$(zig_check)
 	zig build-exe -O ReleaseSafe --dep verity -Mroot=$< -Mverity=lib/verity.zig -femit-bin=$@
 
+UKI_BIN = build/host/uki
+$(UKI_BIN): tools/uki.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -Mroot=$< -femit-bin=$@
+
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
@@ -216,7 +221,7 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig $(PROGRAM_SOURCES)
+	boot/gpt.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
@@ -380,7 +385,11 @@ shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 	awk -F/ -v s=$(SHARD) 'BEGIN { split(s, a, "/") } (NR - 1) % a[2] == a[1] - 1'),$(1))
 check-forms:     $(addprefix check-,$(call shard,$(FORMS)))
 check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
-check-integrity: check-slot check-unsigned check-verity check-deadman
+# check-secureboot runs where firmware boots fast enough: an arm64 host
+# with its own accelerator. Emulated arm64 skips it, as it skips the UEFI
+# boots below.
+check-integrity: check-slot check-unsigned check-verity check-deadman \
+	$(if $(filter aarch64-hvf aarch64-kvm,$(ARCH)-$(ACCEL)),check-secureboot)
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
 check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check: check-forms check-shellfree check-integrity check-cloud check-persist
@@ -456,8 +465,31 @@ check-deadman: | _check-shared check-minimal check-slot
 	@$(CHECK_MAKE) FORM=minimal _check-deadman
 check-unsigned: | _check-shared check-minimal check-slot
 	@$(CHECK_MAKE) FORM=minimal _check-unsigned
+check-secureboot: $(UKI_BIN) | _check-shared check-minimal check-slot
+	@$(CHECK_MAKE) FORM=minimal _check-secureboot
+# check-firecracker builds for x86_64 here and boots on FIRECRACKER_HOST
+# (default galadriel) through a cross-compiled howl, so the host needs no
+# toolchain (docs/testing.md). The form is sshd relaxed to take a key file,
+# which the host has, as a posture weakness it declares.
+FIRECRACKER_HOST ?= galadriel
+FC_FORM = build/adhoc/check-fc
+POSTURE_KNOWN_X64 := $(shell awk -v b='*' -v a=x86_64 '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known) \
+	network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell network-ssh-security-keys
+check-firecracker: | _check-shared
+	@rm -rf $(FC_FORM) && $(HOWL) form --build --with sshd --sshd.pubkey-accepted-algorithms ssh-ed25519 -o $(FC_FORM)/
+	@$(call built,firecracker,$(MAKE) --no-print-directory ARCH=x86_64 FORM=$(FC_FORM) DEV= programs disk)
+	@mkdir -p $(CHECK) build/x86_64/tools
+	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,cmd/howl/howl.zig) -femit-bin=build/x86_64/tools/howl
+	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(FORM_TOOL_MODULES) -femit-bin=build/x86_64/tools/form
+	zig build-exe -O ReleaseSafe -target x86_64-linux-musl --dep verity -Mroot=tools/verity.zig -Mverity=lib/verity.zig -femit-bin=build/x86_64/tools/verity
+	@$(CHECK_ENV) FIRECRACKER_HOST=$(FIRECRACKER_HOST) FORM_DIR=$(FC_FORM) \
+		POSTURE_KNOWN='$(POSTURE_KNOWN_X64)' test/check-firecracker
 _check-lease _check-nodata _check-static _check-verity _check-slot _check-deadman _check-unsigned: $(HOWL)
 	@$(CHECK_ENV) test/$(@:_%=%) $(CHECK_QEMU)
+_check-secureboot: $(HOWL)
+	@$(CHECK_ENV) SECUREBOOT_DIR=$(SECUREBOOT_DIR) test/check-secureboot \
+		qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) -nographic -smp 2 \
+		-m $(CHECK_MEMORY) -no-reboot
 _check-metadata:
 	@$(CHECK_ENV) ARCH=$(ARCH) FIRMWARE=$(if $(filter aarch64,$(ARCH)),$(UEFI_FIRMWARE)) \
 		test/check-metadata $(QEMU) -smp 2 -m 1024 -no-reboot -device virtio-rng-pci

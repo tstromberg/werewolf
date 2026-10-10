@@ -1,0 +1,28 @@
+# mariadb-tcp: mariadb-local, and TCP port 3306. The process may bind
+# that port, and mariadb-init opens it because PORT=3306. A client on
+# the network needs a password account: unix_socket does not leave the
+# machine. 3306 is the database protocol, not HTTP, so the check does
+# not wait for a web answer. See forms/mariadb-tcp/README.md.
+base: mariadb-local
+
+check:
+  skip: [http-answering]
+
+services:
+  # The mariadb service from mariadb-local, plus inet and tcp/3306.
+  # A later form's service replaces the earlier one whole, so this
+  # restates it. Keep the rest the same as forms/mariadb-local/form.yaml.
+  mariadb:
+    exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf
+    before: /usr/lib/werewolf/mariadb-init
+    user: mariadb
+    pledge: stdio rpath wpath unix inet listen proc aio
+    listen: [tcp/3306]
+    read: /etc/mariadb /run/werewolf/import
+    share: shared
+    memory: 1024
+    nofile: 16384
+    env:
+      - UMASK=0640
+      - UMASK_DIR=0750
+      - PORT=3306

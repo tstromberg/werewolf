@@ -6,6 +6,41 @@ leash, its web and API taking one user, its admin, lifecycle and
 remote-write APIs off, as Prometheus ships
 ([design/forms-catalog.md](../../docs/design/forms-catalog.md)).
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+openssl rand -base64 24 >metrics-password
+howl create prometheus --with prometheus --targets 127.0.0.1:9090 \
+	--admin grafana --admin-password metrics-password
+```
+
+Prometheus answers at `http://ADDRESS:9090` as `grafana`, with that password. Targets are names or IPv4 addresses on port 80, 443, 8080, 9090 or 9100, scraped at `/metrics`.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+openssl rand -base64 24 >metrics-password
+howl create prometheus --with prometheus --on gcp --allow-from me \
+	--targets 10.0.0.5:9100 --admin grafana --admin-password metrics-password
+```
+
+`--allow-from me` admits your address to port 9090. Add `--tls-cert FILE --tls-key FILE` for HTTPS. Metrics are kept 15 days.
+
+### Migrating data in
+
+This machine starts empty and scrapes from here on. The old history stays where it is. There is no copy of it into `/data`.
+
+### Network Exposure
+
+tcp/9090
+
+
 ## Run your own
 
 ```sh

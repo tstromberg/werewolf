@@ -1,8 +1,8 @@
-# What the mariadb form, booted as it ships, without a shell, must say on
-# its console (make check-shellfree-mariadb; test/boot;
+# What the mariadb-local form, booted as it ships, without a shell, must
+# say on its console (make check-shellfree-mariadb-local; test/boot;
 # forms/demo/test/console has the format). It needs no config: on the
 # blank disk mariadb-init makes the data, and the server starts on its
-# socket alone. make check-mariadb checks what it refuses.
+# socket alone. make check-mariadb-local checks what it refuses.
 
 seen    data-made      mariadb-init: making the data in /data/svc/mariadb/data
 seen    ready          ready for connections.*socket: '/run/svc/mariadb/mariadb.sock'  port: 0

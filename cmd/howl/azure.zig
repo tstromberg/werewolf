@@ -202,12 +202,15 @@ pub fn ensureImage(
         "tsv",
     }, why);
     howl.say(io, "image {s}: uploading {d} bytes", .{ name, size });
-    try howl.run(
+    const upload_err: ?anyerror = if (howl.run(
         io,
         why,
         &.{ "azcopy", "copy", vhd, sas, "--blob-type", "PageBlob", "--log-level", "ERROR" },
-    );
+    )) null else |err| err;
+    // The write SAS is revoked even when the upload failed, so none
+    // outlives the attempt: hours of write access buy nothing.
     _ = try need(io, gpa, p, &.{ "disk", "revoke-access", "-n", name, "-o", "none" }, why);
+    if (upload_err) |err| return err;
     return name;
 }
 

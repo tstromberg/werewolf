@@ -1,0 +1,3 @@
+# Port 3306 is open, and the socket still answers. The client is
+# mariadb-local's dev package.
+ok  mariadb-tcp      m="mariadb -S /run/svc/mariadb/mariadb.sock -N"; i=0; until $m -e 'select 1' 2>/dev/null | grep -qx 1; do i=$((i + 1)); [ $i -le 60 ] || { echo "no answer in 60 s"; exit 1; }; sleep 1; done; [ "$($m -e 'select @@skip_networking')" = 0 ] && [ "$($m -e 'select @@port')" = 3306 ] && netstat -ltn | grep -q ':3306 '

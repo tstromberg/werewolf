@@ -5,6 +5,46 @@ The `mox` form is a mail server for your domain: [Mox](https://github.com/mjl-/m
 webmail and certificates from Let's Encrypt, on one leash
 ([design/mail.md](../../docs/design/mail.md)).
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+openssl rand -base64 24 >admin-password
+printf '%s' 'the SMTP password' >relay-password
+howl create mox --with mox --domain example.com --postmaster alice \
+	--admin-password admin-password --relay-server smtp.example.com \
+	--relay-login postmaster --relay-password relay-password
+```
+
+Point `mail.example.com` at the address howl prints, and publish the DNS records Mox prints on the console. Sign in at `https://mail.example.com/admin/` and set `alice`'s password. Clouds block mail leaving on port 25, so the relay sends it.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+openssl rand -base64 24 >admin-password
+printf '%s' 'the SMTP password' >relay-password
+howl create mox --with mox --on gcp --allow-from me --domain example.com \
+	--postmaster alice --admin-password admin-password \
+	--relay-server smtp.example.com --relay-login postmaster \
+	--relay-password relay-password
+```
+
+`--allow-from me` admits your address to the mail ports. A wider allowance, and the DNS records, are below.
+
+### Migrating data in
+
+Mail starts empty. Point delivery at the address howl prints. This form does not import a mailbox.
+
+### Network Exposure
+
+tcp/25 tcp/443 tcp/465 tcp/587 tcp/993
+
+
 ## Run your own
 
 You need a domain whose DNS you can edit, and a cloud account howl can

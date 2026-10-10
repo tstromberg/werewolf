@@ -13,7 +13,7 @@ forms/NAME/
   test/checks     make check's checks for it, beside test/checks
   test/config     writes its config for make check: config DIR
   test/console    console lines its as-shipped boot must show
-  README.md       what it is, how to use it, what it refuses
+  README.md       what it is, how to use it, what it refuses, and how data comes in (TEMPLATE.md)
 ```
 
 A form has the parts of every form in its chain, base first and its own

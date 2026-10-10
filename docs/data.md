@@ -57,6 +57,16 @@ is never opened without it. Keep each
 machine's key somewhere other than the machine, since without it the data
 is gone. Encryption does not detect tampering.
 
+**Import.** `howl create --import DIR` builds an ext4 disk labelled
+`werewolf-import` and attaches it read-only. init mounts one such disk at
+`/run/werewolf/import`. The form reads it once, while it first makes its
+data: MariaDB and PostgreSQL stream `*.sql` into the new database, and
+Valkey copies one `dump.rdb`. The directory is there even when empty. Two
+disks with the label, or a mount that fails, leave `import-failed` in it
+and the form makes no empty database. A cloud cannot attach the disk. A
+machine that already exists refuses `--import`. See
+[data-import.md](design/data-import.md).
+
 **Backups** are yours. werewolf keeps `/data` across reboots and updates,
 and copies it nowhere.
 

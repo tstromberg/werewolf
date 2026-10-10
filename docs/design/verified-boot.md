@@ -2,13 +2,13 @@
 
 Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0,
 cmd/init); 2, a read-only root; 3, its dm-verity hash tree (lib/verity.zig)
-and signed releases ([docs/releases.md](../releases.md)). Not built: 4, our
-own kernel with IPE; 5, Secure Boot. Posture holds each unbuilt phase open
-in every machine's report, as the `boot-` checks (docs/posture.md): Secure
-Boot on, module signatures enforced by the kernel's build, and rollback
-refused by a TPM counter. Each fails today, and every image excuses it
-(test/posture-known), so a machine whose boot chain improves says so, and
-one that claims more than it holds fails its own posture.
+and signed releases ([docs/releases.md](../releases.md)); and phase 5's
+first slice, a signed UKI on a local disk (make check-secureboot). Not
+built: 4, our own kernel with IPE; the rest of 5, Secure Boot in the
+clouds. Posture holds each unbuilt phase open, as the `boot-` checks
+(docs/posture.md): Secure Boot on, module signatures enforced by the
+kernel's build, rollback refused by a TPM counter, each failing today
+and excused by every image (test/posture-known).
 
 ## Summary
 
@@ -65,18 +65,33 @@ and the slot falls back. The deadman must then exec and map nothing.
 options. With no policy, a busybox copy in `/tmp` ran. With a signed
 policy, busybox ran from the named dm-verity image and was refused, with
 an audit record, from an unnamed verified image, from `/tmp` and through
-`ld.so`. An initramfs copy ran where `boot_verified=TRUE` was allowed, and
-root could write 0 to `ipe/enforce`.
+`ld.so`.
 
 **Phase 5: Secure Boot**, where a provider takes our keys: AWS
-(`register-image --uefi-data`) and GCP (an image's signature database).
-Each slot is a signed UKI of kernel, stage0 and a fixed command line, so
-the address comes by DHCP. The boot key is RSA-2048, as firmware needs.
+(`register-image --uefi-data`), GCP (an image's signature database) and
+Azure (a Trusted Launch key vault). Each slot is a signed UKI of kernel,
+stage0 and a fixed command line, so the address comes by DHCP; the boot
+key is RSA-2048, as firmware needs. Until the loader is signed for a
+cloud, `howl create` takes what it gives beside it — GCP a vTPM with
+integrity monitoring, AWS a NitroTPM (`test/cloud` checks both).
+
+**Phase 5, first slice (built): a signed UKI on a local disk.**
+`tools/uki` assembles one PE from systemd's stub and the slot's kernel,
+stage0, root and command line; `osslsigncode` signs it, and `make
+check-secureboot` (docs/testing.md) boots it under firmware with only
+that key and proves a one-byte change refused.
+
+**Updates under Secure Boot.** A machine that boots a signed UKI cannot
+build its own next slot: nothing on it may hold the boot key. So where
+Secure Boot is on, CI signs each release's UKI, the manifest lists it
+with its hash, and the updater fetches and lays it where the firmware
+boots it, serial in line for a TPM to check.
 
 **Open.** Key custody in a KMS. Rollback: root on a bitten machine can
 install an older signed release; TPM counters would stop it. The module
-key makes kernel builds differ, and CI requires two to match. A slot built
-on the machine cannot carry a signed policy. Phase 5 may sign systemd-boot.
+key makes kernel builds differ, and CI requires two to match. A slot
+built on the machine cannot carry a signed policy. Phase 5 may sign
+systemd-boot.
 
 ## Drawbacks
 

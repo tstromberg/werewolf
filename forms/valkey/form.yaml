@@ -2,8 +2,13 @@
 # the same machine. It answers on a UNIX socket in /run/svc/valkey and
 # nothing else: no TCP port, and the form declares none. Its snapshots
 # are in /data/svc/valkey. leash starts it as the valkey user
-# (etc/sv/valkey/service); the default user may do all but administer it
-# (etc/valkey/valkey.conf). The application's form includes this one and
+# (etc/sv/valkey/service). valkey-init copies dump.rdb from
+# /run/werewolf/import once, before the first start. The default user
+# may do all but administer it
+# (etc/valkey/valkey.conf). Its memory cap is 192 MiB under a 256 MiB
+# leash, so a full cache refuses writes. valkey-tcp is the same server
+# on port 6379, and --maxmemory replaces that cap. The application's
+# form includes this one and
 # puts its user in the valkey group, which the socket is shared with. The
 # major version is in the package's name: a new one is a new form. See
 # forms/valkey/README.md. Wolfi's valkey depends on posix-libc-utils, whose ldd is
@@ -29,9 +34,10 @@ services:
   # rather than being killed for them.
   valkey:
     exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
+    before: /usr/lib/werewolf/valkey-init
     user: valkey
     pledge: stdio rpath wpath unix listen proc
-    read: /etc/valkey
+    read: /etc/valkey /run/werewolf/import
     # Its clients, members of its group (`group valkey`), reach the socket in
     # its directory, which they may enter but not list.
     share: shared

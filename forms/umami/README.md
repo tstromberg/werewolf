@@ -1,6 +1,12 @@
 # Umami
 
-Web analytics without cookies: [Umami](https://umami.is) 3.4, with PostgreSQL and Caddy.
+Web analytics without cookies: [Umami](https://umami.is) 3.4, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
+
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- Node and PostgreSQL may compile as they run. Named in `form.yaml`.
 
 ## Getting Started
 
@@ -8,23 +14,35 @@ Web analytics without cookies: [Umami](https://umami.is) 3.4, with PostgreSQL an
 
 ```sh
 openssl rand -base64 32 >app-secret
-htpasswd -nBC 10 admin | cut -d: -f2 >admin-hash
-howl create stats --with umami --on lima \
+openssl rand -base64 18 >admin-password
+htpasswd -nbBC 10 admin "$(cat admin-password)" | cut -d: -f2 >admin-hash
+howl create umami --with umami \
 	--domain stats.home.arpa --app-secret app-secret --admin-hash admin-hash
 ```
 
-`htpasswd` asks for the password. Sign in at `https://stats.home.arpa` as `admin`.
+Open `https://stats.home.arpa` and sign in as `admin`. The password is in `admin-password`. Sites and the tracking script are in [Umami's documentation](https://umami.is/docs).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
 ```sh
 openssl rand -base64 32 >app-secret
-htpasswd -nBC 10 admin | cut -d: -f2 >admin-hash
-howl create stats --with umami --on gcp --allow-from 0.0.0.0/0 \
+openssl rand -base64 18 >admin-password
+htpasswd -nbBC 10 admin "$(cat admin-password)" | cut -d: -f2 >admin-hash
+howl create umami --with umami --on gcp --allow-from me \
 	--domain stats.example.com --app-secret app-secret --admin-hash admin-hash
 ```
 
-Point the name at the machine, add a site, and put the script Umami shows you on its pages. The tracker and the collector are public. Statistics are not.
+Sign in at `https://stats.example.com`, add a site, and put the script Umami shows you on its pages. The tracker and the collector are public. Statistics are not.
+
+### Migrating data in
+
+PostgreSQL has no TCP port. `--import` attaches a directory of SQL. It is applied once, in the `postgres` database, while the cluster is first made. See [postgresql](../postgresql/README.md). `CREATE DATABASE` is not available there. A cloud cannot attach the disk.
+
+```sh
+howl create umami --with umami --import ./dump
+```
+
+Files the application stores itself are not on that disk. Bring those through the service after it is up.
 
 ### Known Quirks
 
@@ -36,7 +54,3 @@ Point the name at the machine, add a site, and put the script Umami shows you on
 ### Network Exposure
 
 - tcp/80 and tcp/443, Caddy. Umami and PostgreSQL are on loopback. Nothing else leaves the machine.
-
-### Security Weaknesses
-
-- Node and PostgreSQL may compile as they run. Named in `form.yaml`.

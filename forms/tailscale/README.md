@@ -14,6 +14,41 @@ umask 077
 mkdir -p "$CONFIG_DIR/tailscale"
 ```
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+umask 077
+mkdir -p config/tailscale
+printf '%s\n' '{"routes":["10.20.0.0/24"]}' >config/tailscale/settings.json
+printf '%s' 'tskey-auth-REPLACE' >config/tailscale/auth-key
+howl create tailscale --with tailscale --config config
+```
+
+Replace the auth key with a tagged, preauthorized, single-use key from the Tailscale admin console before you create the machine. Approve the advertised subnet there. Routes, grants and the key are below.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+umask 077
+mkdir -p config/tailscale
+printf '%s\n' '{"routes":["10.128.0.0/20"]}' >config/tailscale/settings.json
+printf '%s' 'tskey-auth-REPLACE' >config/tailscale/auth-key
+howl create tailscale --with tailscale --on gcp --allow-from me --config config
+```
+
+`--allow-from` opens no port: the router connects out. Use a fresh key, and a subnet of the VPC.
+
+### Migrating data in
+
+This machine starts empty. What it must remember is in the create command. There is no database to import.
+
+
 ## Routes and enrollment
 
 Create `$CONFIG_DIR/tailscale/settings.json`:

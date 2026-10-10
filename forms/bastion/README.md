@@ -11,6 +11,40 @@ verified, read-only root. To change a user, change the form and create
 the machine again. The `bastion` form itself has no users and lets no one
 in: build your own on it, as below.
 
+## Security Posture
+
+The service runs as its own user. Landlock and seccomp hold it to the files and ports its manifest names. The root is read-only. An update replaces the image, and `/data` is what survives.
+
+- sshd, by security key, which forwards to the destinations form.yaml names and opens no session
+- sshd forwards ports, which is what a bastion is for
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create bastion --with bastion
+```
+
+This form has no users and lets no one in. A form of your own lists them, their keys and their destinations, as the sections below do. The destination authenticates them again.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+howl create bastion --with bastion --on gcp --allow-from me
+```
+
+`--allow-from me` admits your address to port 22. The users are still the form's, not this command's.
+
+### Migrating data in
+
+Destinations are in the form. There is no database to import, and no session to copy through.
+
+### Network Exposure
+
+tcp/22
+
+
 ## 1. A security key for each user
 
 Each user makes a key on their own security key (a YubiKey, a SoloKey,

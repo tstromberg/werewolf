@@ -1,60 +1,51 @@
-# PostgreSQL
+# PostgreSQL - Hardened VM
 
-The `postgresql` form is `prod` with PostgreSQL 17, for the machine's own
-services. `demo` is built on it: its page and scan keep what they find
-there ([demo.md](../demo/README.md)).
+A database for the other services on this machine: [PostgreSQL](https://www.postgresql.org) 17, on a UNIX socket. The form's manifest is [form.yaml](form.yaml).
 
-| | |
-| --- | --- |
-| Listens | a UNIX socket in `/run/svc/postgres`, and nothing else: `listen_addresses` is empty and the form declares no port, so fence would refuse one anyway |
-| Data | `/data/svc/postgres/data`, made by `initdb` on the first start, in `data.new` until whole |
-| Runs as | `postgres` (a uid of its own, its name's hash), leashed ([programs.md](../../docs/programs.md)): it reads the image and writes only its own directories |
-| Logs in | by peer authentication: a local role is its system user's name, and TCP logins are refused |
-| Updates | within PostgreSQL 17, with the rest of the image; the major version is the package's name, since a new one needs `pg_upgrade` |
+## Security Posture
 
-## Starting without a shell
+The server runs as its own user, and nothing else does. There is no shell. Landlock and seccomp hold it to its socket and to `/data/svc/postgres`. The root is read-only.
 
-`initdb` runs the server it is setting up through `popen(3)` and
-`system(3)`, which glibc runs as `/bin/sh -c`, and werewolf has no
-`/bin/sh`. Its commands are all of one shape, a program and its arguments
-with a redirection or two:
+- No TCP. `listen_addresses` is empty. A local role is the system user's name, and a TCP login is refused.
+- `initdb` would run a shell. `pg-init` runs those commands itself, and only when they are one program and its arguments.
+- The cluster is mode 0700. If it was made and then lost, the next start refuses to create an empty one over it.
+- PostgreSQL compiles costly queries to machine code with LLVM. `jit` stays on, which is its default.
 
-```
-"/usr/libexec/postgresql17/postgres" --check -c max_connections=100 < "/dev/null" > "/dev/null" 2>&1
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create postgresql --with postgresql
 ```
 
-So `pg-init` (`forms/postgresql/cmd/pg-init/pg-init.zig`), which leash runs before the server,
-preloads `popen-shim.so` (`cmd/popen-shim/popen-shim.zig`) into `initdb`. Its
-`popen`, `pclose` and `system` take that shape and nothing else: an
-absolute program and plain or double-quoted words, then `</dev/null`,
-`>/dev/null` and `2>&1`. They run the program directly. Anything more (a
-pipe, `;`, `$`, a glob, a single quote, a file other than `/dev/null`) is
-not run, and the command is printed on stderr,
-so `initdb` fails where it can be seen. The servers `initdb` starts to
-set the cluster up keep the library, since one of them runs `locale -a` to
-import the system's locales; there are none to import, so that command
-reads as empty. The server leash starts afterwards never has it. Nothing
-on the machine is a shell, and posture's check that there is none still
-passes.
+Nothing answers on the network. A form takes this one `with` and brings its own database. Statements are in [PostgreSQL's SQL reference](https://www.postgresql.org/docs/17/sql.html).
 
-## The image's SQL
+### Cloud production deployment (aws, gcp, azure, proxmox)
 
-Before each start, while the server is still down, pg-init applies every
-`/usr/share/werewolf-postgres/*.sql`, in name order, to the `postgres`
-database as the superuser, through the server in single-user mode. A form
-brings its roles, schemas and grants this way, written so that applying
-them again changes nothing (`CREATE ... IF NOT EXISTS`, and `DO` blocks
-for roles); the first error keeps the server down, with the reason on the
-console. A statement ends at a semicolon before an empty line.
+```sh
+howl create postgresql --with postgresql --on gcp --allow-from me
+```
 
-The demo's (`forms/demo/rootfs/usr/share/werewolf-postgres/status.sql`) makes
-the roles `status` and `grype` and a schema `status` with two tables:
-each boot's posture report, and each scan's summary, as `jsonb`. The
-`status` role owns them; `grype` may add scans and nothing more.
+`--allow-from` opens no port: there is no listener. Keep the database on the same machine as the service that queries it.
+
+### Migrating data in
+
+The host cannot reach this server. `--import` attaches a directory of SQL. `pg-init` applies it once, in the `postgres` database, while it makes the cluster. [example/shop.sql](example/shop.sql) is a two-row shop. `CREATE DATABASE` is not available in that backend.
+
+```sh
+howl create postgresql --with postgresql --import ./dump
+```
+
+A form can still carry `rootfs/usr/share/werewolf-postgres/NAME.sql`. That SQL runs on every start.
+
+### Known Quirks
+
+- Debian's PostgreSQL listens on port 5432. This one does not.
+- A dump's roles must be system users on this machine. Peer authentication has no passwords.
+- The image's SQL files run on every start. An `INSERT` needs a conflict target, or the rows multiply. `--import` runs once.
+- Stay on 17. A new major version is a new form: the data needs `pg_upgrade`.
 
 ## Size
 
-Wolfi's PostgreSQL brings LLVM, for its query compiler, and ICU's data:
-about 200 MB of the 300 MB it adds unpacked. The demo's `root.erofs` grows
-from 28 MB to 96 MB. On a slot, which the demo boots from, that is disk,
-not memory.
+PostgreSQL brings LLVM and ICU. The demo's image grows by about 70 MB for them.

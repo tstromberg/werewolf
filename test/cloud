@@ -154,7 +154,7 @@ say "creating $name, $form on $arch, in $where"
 # it names the image cleanup deletes. The address comes back on fd 3.
 # create's status goes to a file, because a pipeline's status is tee's.
 # `|| rc=` lets a failed create get past set -e to the line that records it.
-made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --config "$work/config" \
+made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --build --config "$work/config" \
 	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
 [ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
 addr=$(echo "$made" | cut -f2)
@@ -169,6 +169,26 @@ seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: st
 seen "cloud-metadata: \\{.*\"event\":\"config\",\"provider\":\"$cloud\"" && ok metadata-config ||
 	fail "metadata-config: no config taken from the cloud's metadata server"
 seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
+
+# Each cloud's integrity protections, as the cloud reports them: a vTPM
+# beside the machine and, where the cloud offers it, a record of the boot it
+# measured. Secure Boot stays off everywhere until werewolf's loader is
+# signed (docs/design/verified-boot.md).
+case $cloud in
+gcp)
+	v=$(gcloud compute instances describe "$name" --zone "$GCP_ZONE" \
+		--format='value(shieldedInstanceConfig.enableVtpm,shieldedInstanceConfig.enableIntegrityMonitoring)' 2>/dev/null) ||
+		true
+	[ "$v" = 'True True' ] && ok shielded || fail "shielded: vTPM and integrity monitoring are not both on: $v"
+	;;
+aws)
+	ami=$(aws ec2 describe-images --owners self --filters "Name=tag:werewolf-form,Values=$form" \
+		--query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text 2>/dev/null) || true
+	v=$(aws ec2 describe-images --image-ids "$ami" --query 'Images[0].TpmSupport' --output text 2>/dev/null) ||
+		true
+	[ "$v" = 'v2.0' ] && ok nitro-tpm || fail "nitro-tpm: the image does not give the machine one: $v"
+	;;
+esac
 
 # posture: what fails must be exactly what POSTURE_KNOWN says; a ?ID may fail
 # or pass (forms/README.md).

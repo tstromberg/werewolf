@@ -1,32 +1,54 @@
-# MinIO
+# MinIO - Hardened VM
 
-The `minio` form is `prod` with MinIO serving S3 from `/data/svc/minio`:
-the backup target for `restic` and `rclone`, the object store for an
-application.
+S3 on this machine: [MinIO](https://min.io), for restic, rclone, or an application. The form's manifest is [form.yaml](form.yaml).
 
-| | |
-| --- | --- |
-| Listens | tcp/9000, the S3 API, plain HTTP behind `caddy` or the cloud's balancer |
-| Sends | nothing: no KMS, notifications, replication or update check |
-| Runs as | `minio` (a uid of its own, its name's hash), leashed |
-| Keeps | the objects in `/data/svc/minio` |
-| Config | `minio/root_user` and `minio/root_password`, read into its environment |
+## Security Posture
+
+MinIO runs as its own user. There is no shell. Landlock and seccomp hold it to port 9000 and to `/data/svc/minio`. The root is read-only.
+
+- The console is off. The API is the interface, and `mc` is the client.
+- Nothing is anonymous until a bucket's policy says so.
+- There is no update check, telemetry, replication or notification.
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
+mkdir -p config/minio
 printf '%s' admin >config/minio/root_user
 openssl rand -base64 24 | tr -d '\n' >config/minio/root_password
-build/host/howl pack --with minio -o config.tar --config config
-mc alias set store https://s3.example.com admin "$(cat config/minio/root_password)"
-mc mb store/backups && mc admin user add store restic ...
+howl create minio --with minio --config config
 ```
 
-The console is off (`MINIO_BROWSER=off`): the API is the interface and
-`mc` its client. Nothing is anonymous until a bucket's policy says so.
+The API is `http://ADDRESS:9000`. TLS belongs in front, Caddy or the cloud's balancer. Then:
 
-## Checked
+```text
+mc alias set store http://ADDRESS:9000 admin "$(cat config/minio/root_password)"
+```
 
-`make check-minio` runs [forms/minio/test/checks](test/checks) with
-`mc`, which the DEV build carries: the health endpoint answers; an
-anonymous request is 403; a bucket is made and an object goes up and
-comes back as it went, on `/data`; the object is 403 to anyone else;
-nothing listens for a console; the credentials are root's files.
+Buckets and users are in [MinIO's documentation](https://min.io/docs/minio/linux/index.html).
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+mkdir -p config/minio
+printf '%s' admin >config/minio/root_user
+openssl rand -base64 24 | tr -d '\n' >config/minio/root_password
+howl create minio --with minio --on gcp --allow-from me --config config
+```
+
+`--allow-from me` admits your address to port 9000. Put TLS in front before a client sends the root password.
+
+### Migrating data in
+
+This machine starts empty. Once port 9000 answers, mirror the old buckets to it with `mc`. The host cannot write `/data`.
+
+### Known Quirks
+
+- The root user and password files have no newline. They are read into the environment as they are.
+- Objects live in `/data/svc/minio`.
+
+### Network Exposure
+
+tcp/9000
