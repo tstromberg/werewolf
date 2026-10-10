@@ -1,0 +1,54 @@
+# mariadb: prod, with MariaDB 12.3, the long-term release, for the
+# machine's own services. It answers on a UNIX socket in /run/svc/mariadb
+# and nothing else: no TCP port, and the form declares none. Its data is
+# in /data/svc/mariadb. leash starts it as the mariadb user
+# (etc/sv/mariadb/service); before each start mariadb-init makes the data
+# if there is none, as mariadb-install-db would, and applies the SQL a
+# form brings in /usr/share/werewolf-mariadb. Local users log in as their
+# system users (unix_socket). The major version is the package's name: a
+# new one is a new form. See forms/mariadb/README.md.
+base: prod
+
+packages:
+  - mariadb-12.3
+
+# The interpreters its scripts name, which nothing here runs: mariadb-init
+# does mariadb-install-db's work, and mariadbd-safe, mytop and the
+# cluster's tools are not for a leashed server.
+prune:
+  - usr/bin/bash
+  - usr/bin/perl
+  - usr/bin/perl5.44.0
+
+paths:
+  # PAM's password helper, setgid shadow, arrives through MariaDB's PAM
+  # plugin's library. Nothing here authenticates with a password.
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755
+
+# The check speaks SQL with MariaDB's own client.
+dev:
+  - mariadb-12.3-client
+
+services:
+  # MariaDB, as its own user, for local clients over its UNIX socket
+  # alone. mariadb-init makes the data on the first start, and applies the
+  # image's SQL before each, through the server in bootstrap mode.
+  mariadb:
+    exec: /usr/bin/mariadbd --defaults-file=/etc/mariadb/werewolf.cnf
+    before: /usr/lib/werewolf/mariadb-init
+    user: mariadb
+    # aio: InnoDB's reads and writes, by Linux native AIO. It reaches no
+    # network: there is no inet promise.
+    pledge: stdio rpath wpath unix listen proc aio
+    read: /etc/mariadb
+    # Local clients reach its socket, /run/svc/mariadb/mariadb.sock.
+    share: shared
+    memory: 1024
+    nofile: 16384
+    # mariadbd sets its umask from these, files 0640 and directories 0750,
+    # where its default would let the group write.
+    env:
+      - UMASK=0640
+      - UMASK_DIR=0750

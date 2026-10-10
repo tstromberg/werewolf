@@ -1,0 +1,11 @@
+# WordPress was installed from the settings before it served, into
+# MariaDB, once MariaDB answered (forms/wordpress-mariadb/test/config):
+# the site answers with its name, and the admin logs in with the password
+# whose hash the config carries.
+ok  wpm-installed    i=0; until wget -q -T 10 -O /tmp/wp.html http://localhost/ 2>/dev/null; do i=$((i + 1)); [ $i -le 90 ] || { echo "the site does not answer"; exit 1; }; sleep 1; done; grep -q 'werewolf check site' /tmp/wp.html && ! grep -qi 'install' /tmp/wp.html
+ok  wpm-login        wget -q -T 10 -S -O /dev/null --header 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --post-data 'log=admin&pwd=werewolf-check&wp-submit=Log+In&testcookie=1' http://localhost/wp-login.php 2>&1 | grep -q 'Set-Cookie: wordpress_logged_in_'
+# Its tables are MariaDB's, and no SQLite database was made.
+ok  wpm-in-mariadb   [ "$(mariadb -S /run/svc/mariadb/mariadb.sock -N -e 'select count(*) from wordpress.wp_users')" = 1 ] && [ -z "$(ls -A /data/svc/php-fpm/database 2>/dev/null)" ]
+# The role php logs in by unix_socket, may do anything to its database
+# and nothing beyond it: asked as php, MariaDB reads it no file.
+ok  wpm-php-role     m="mariadb -S /run/svc/mariadb/mariadb.sock -N"; g=$($m -e "show grants for 'php'@'localhost'"); echo "$g" | grep -q 'unix_socket' && echo "$g" | grep -q 'ALL PRIVILEGES ON `wordpress`' && ! echo "$g" | grep 'ON \*\.\*' | grep -qv 'GRANT USAGE' && [ "$(chpst -u php $m -e "select load_file('/etc/passwd') is null")" = 1 ]

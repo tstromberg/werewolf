@@ -1,0 +1,58 @@
+# restic-server: restic's REST server, the backup target for your other
+# machines, behind Caddy, which serves it over HTTPS for the machine's
+# domain with a certificate from Let's Encrypt. It is append-only: a
+# client adds snapshots but can delete or rewrite nothing, so a machine
+# broken into cannot take its backups with it. Each user reaches only the
+# repository of its own name; the users are the config's, as bcrypt
+# htpasswd lines, and none is built in. It runs restic's own image,
+# pinned by digest, in a tree of its own (docs/design/oci.md), and keeps
+# the repositories in /data/svc/restic-server. See
+# forms/restic-server/README.md.
+base: prod
+
+with: [caddy]
+
+# The check backs up to it with restic itself.
+dev:
+  - restic
+
+services:
+  # rest-server, in its image, as _oci-restic-server: it serves on
+  # loopback alone, behind Caddy, and reaches nothing. Its users come from
+  # the config, which leash copies to the image's /tmp; missing, it parks
+  # with a line naming the file. The image's entrypoint is a shell script,
+  # so it runs the program itself.
+  restic-server:
+    image: docker.io/restic/rest-server@sha256:d2aff06f47eb38637dff580c3e6bce4af98f386c396a25d32eb6727ec96214a5
+    exec: /usr/bin/rest-server --path /data --listen 127.0.0.1:8000 --append-only --private-repos --htpasswd-file /tmp/restic-users
+    pledge: stdio rpath wpath inet listen proc
+    listen: tcp/8000 loopback
+    config: restic-users /run/config/restic-server/restic-users
+    memory: 512
+    nofile: 4096
+    env: GOMEMLIMIT=384MiB
+    # Never --no-verify-upload: rest-server checks each blob's hash as it
+    # arrives. No --prometheus: no metrics, so nothing to guard.
+
+  # Caddy, as its own user, for rest-server: it may bind :80 and :443 and
+  # no other port, reach the ACME CA over HTTPS, a resolver, and
+  # rest-server on loopback, read its configuration, and write only its
+  # own directories. Its site is the machine's domain, from the settings.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

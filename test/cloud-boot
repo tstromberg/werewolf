@@ -76,5 +76,9 @@ aws/good)
 */good)
 	{ event config && grep -a -q "\"provider\":\"$provider\"" "$log"; } || judge "no \"config\" event from $provider"
 	;;
+*/good\>*)
+	{ event config && grep -a -q "\"provider\":\"$provider\"" "$log"; } || judge "no \"config\" event from $provider"
+	event people || judge "no \"people\" event: the service did not take the changed config"
+	;;
 esac
 echo "pass   $name            the metadata server saw what it should"

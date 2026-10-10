@@ -1,0 +1,14 @@
+# Jellyfin answers through Caddy, over HTTPS with a certificate from
+# Caddy's own CA for localhost, once jellyfin-setup has completed its
+# first-run wizard on loopback: Jellyfin's first start makes its
+# database, so wait.
+ok  jf-set-up        i=0; until wget -q -T 10 --no-check-certificate -O - https://localhost/System/Info/Public 2>/dev/null | grep -q '"StartupWizardCompleted":true'; do i=$((i + 1)); [ $i -le 600 ] || { echo "not set up in 600 s"; exit 1; }; sleep 1; done
+# The administrator is the config's: Jellyfin signs it in.
+ok  jf-admin         b='{"Username":"admin","Pw":"werewolf-check-pass-1"}'; (printf 'POST /Users/AuthenticateByName HTTP/1.0\r\nContent-Type: application/json\r\nAuthorization: MediaBrowser Client="check", Device="check", DeviceId="check", Version="1"\r\nContent-Length: %d\r\n\r\n%s' ${#b} "$b"; sleep 3) | nc -w 10 127.0.0.1 8096 >/tmp/jf-auth; grep -q '"AccessToken":"' /tmp/jf-auth
+# The wizard is closed to a stranger, through Caddy.
+ok  jf-wizard-shut   wget -q -T 10 --no-check-certificate -S -O /dev/null --post-data '{"Name":"x","Password":"y"}' https://localhost/Startup/User 2>&1 | grep -q 'HTTP/1.1 40[13]'
+# Its library is the media directory, where the admin copies files in.
+ok  jf-library       t=$(sed -n 's/.*"AccessToken":"\([^"]*\)".*/\1/p' /tmp/jf-auth); (printf 'GET /Library/VirtualFolders HTTP/1.0\r\nAuthorization: MediaBrowser Token="%s"\r\n\r\n' "$t"; sleep 3) | nc -w 10 127.0.0.1 8096 | grep -q '/data/svc/jellyfin/media'
+# Jellyfin reaches nothing: fence has no line for its user to connect
+# anywhere; it was told loopback alone; ffmpeg runs by its narrow link.
+ok  jf-alone         u=$(grep '^jellyfin:' /etc/passwd | cut -d: -f3); ! grep -q "^connect $u " /usr/share/werewolf/net && grep -q '<string>127.0.0.1</string>' /data/svc/jellyfin/config/network.xml && [ -e /etc/sv/jellyfin/narrow/ffmpeg ] && [ ! -e /run/svc/caddy/jellyfin-password ]

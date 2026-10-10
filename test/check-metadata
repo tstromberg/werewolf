@@ -10,7 +10,7 @@ set -u
 	{ echo "FAIL   metadata           no UEFI firmware for arm64 (edk2-aarch64-code.fd)"; exit 1; }
 failed=0
 meta() { # meta PROVIDER PAYLOAD CHECKS QEMU...
-	name=meta-$1-$2 provider=$1 payload=$2 checks=test/checks-$3
+	name=meta-$1-$(echo "$2" | tr '>@' '--') provider=$1 payload=$2 checks=test/checks-$3
 	shift 3
 	test/cloud-boot "$name" "$provider" "$payload" "$checks" "$CHECK/$name.log" "$FIRMWARE" "$@" \
 		-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$BOOT" || failed=1
@@ -20,6 +20,7 @@ meta aws good metadata "$@"
 meta hetzner good metadata "$@"
 meta azure good metadata "$@"
 meta gcp hostile metadata-refused "$@"
+meta gcp "good>people@1" metadata-poll "$@"
 meta none good metadata-refused "$@"
 meta hyperv good metadata-refused "$@"
 exit $failed

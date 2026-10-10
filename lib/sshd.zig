@@ -213,6 +213,38 @@ pub fn authorizedKeys(
     return out.items;
 }
 
+/// peopleKeys checks a manifest's people as authorizedKeys checks a
+/// bastion's users, less the destinations: plain names, each once, 1 to
+/// max_keys keys each, every key a .pub line of a type sshd takes (key
+/// files only with key_files), and no key given twice.
+pub fn peopleKeys(
+    gpa: Allocator,
+    users: []const User,
+    key_files: bool,
+    why: *[]const u8,
+) !void {
+    if (users.len > max_users) return fail(gpa, why, "users: more than {d} people", .{max_users});
+    var seen: std.ArrayList([]const u8) = .empty;
+    for (users, 0..) |u, i| {
+        if (!isUserName(u.name)) return fail(
+            gpa,
+            why,
+            "users: {s}: a name is a-z, 0-9 and -, starting with a letter, at most 32",
+            .{u.name},
+        );
+        for (users[0..i]) |other| if (std.mem.eql(u8, other.name, u.name))
+            return fail(gpa, why, "users: {s}: named twice", .{u.name});
+        if (u.keys.len == 0 or u.keys.len > max_keys)
+            return fail(gpa, why, "users: {s}: 1 to {d} keys", .{ u.name, max_keys });
+        for (u.keys) |line| {
+            const k = try publicKey(gpa, u.name, line, key_files, why);
+            for (seen.items) |s| if (std.mem.eql(u8, s, k.body))
+                return fail(gpa, why, "users: {s}: a key given twice", .{u.name});
+            try seen.append(gpa, k.body);
+        }
+    }
+}
+
 /// permitOpen returns the bastion's PermitOpen line listing every user's
 /// destinations once, or "" for none, which leaves PermitOpen none.
 pub fn permitOpen(gpa: Allocator, users: []const User) ![]const u8 {

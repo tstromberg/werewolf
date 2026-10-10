@@ -167,7 +167,9 @@ fn render(gpa: Allocator, s: Settings) ![]const u8 {
     if (s.tls) try o.writeAll(
         "    bind :443 ssl crt \"@/site\" alpn h2,http/1.1\n" ++
             "    http-request redirect scheme https code 301 unless { ssl_fc }\n" ++
-            "    http-response set-header Strict-Transport-Security \"max-age=63072000\"\n",
+            // After every response, HAProxy's own errors too.
+            "    http-after-response set-header Strict-Transport-Security \"max-age=63072000\" " ++
+            "if { ssl_fc }\n",
     );
     // httpoxy: a Proxy header becomes HTTP_PROXY in a CGI backend.
     try o.writeAll("    http-request del-header Proxy\n    default_backend app\n" ++
@@ -296,6 +298,8 @@ test "render: HTTPS with a health path" {
         "crt-store\n    load crt \"/run/svc/haproxy/tls-cert\" key \"/run/svc/haproxy/tls-key\"",
         "    bind :443 ssl crt \"@/site\"",
         "redirect scheme https code 301 unless { ssl_fc }",
+        "    http-after-response set-header Strict-Transport-Security \"max-age=63072000\" " ++
+            "if { ssl_fc }\n",
         "    option httpchk GET /health\n",
     }) |want| try testing.expect(std.mem.find(u8, cfg, want) != null);
 }

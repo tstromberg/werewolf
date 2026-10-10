@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const Io = std.Io;
 const sandbox = @import("sandbox");
 const settings = @import("settings");
+const people = @import("people");
 const sys = sandbox.sys;
 
 const out_dir = "/run/werewolf/cloud";
@@ -64,7 +65,6 @@ const providers = [_]Provider{
 };
 
 pub fn main(init: std.process.Init) !void {
-    _ = init;
     // Disable Speculative Store Bypass for this process and its children.
     // werewolf leaves this to each program so workloads do not pay for it
     // (docs/security.md). On a CPU without the control, the call just fails.
@@ -76,6 +76,10 @@ pub fn main(init: std.process.Init) !void {
         0,
     );
     var log: Log = .{};
+    // `once`, as init runs it at boot: fetch, check, write, exit. With no
+    // argument it is the cloud-metadata service, which polls (poll).
+    const args = init.minimal.args.toSlice(std.heap.page_allocator) catch &.{};
+    if (args.len < 2 or !std.mem.eql(u8, args[1], "once")) poll(&log);
     run(&log) catch |err| {
         log.event(
             "error",
@@ -91,6 +95,242 @@ pub fn main(init: std.process.Init) !void {
     // Exit directly: the runtime's cleanup makes system calls the seccomp
     // filter would kill the process for.
     linux.exit_group(0);
+}
+
+/// poll_every is how often the service asks the metadata server again.
+const poll_every: u32 = 60;
+
+/// poll is the cloud-metadata service: on a machine whose config came from
+/// the cloud at boot, every poll_every seconds it fetches the user data
+/// again, as `once` does, in a child confined as that is, and when the
+/// config has changed writes it and makes its people's accounts anew
+/// (lib/people.zig): the account files, each person's keys and home, an
+/// admin's keys in root's, the gone removed. Elsewhere it stays down. It
+/// holds CAP_CHOWN, for the homes, and what its children spend becoming
+/// _cloud in /var/empty; Landlock lets it write only
+/// the cloud's directory, the account and keys files and /data/home, and
+/// read root's keys from the config; no seccomp filter, since its children
+/// must install their own and a filter only ever narrows.
+fn poll(log: *Log) noreturn {
+    const gpa = std.heap.page_allocator;
+    if (linux.faccessat(linux.AT.FDCWD, out_dir ++ "/config.tar", linux.F_OK, 0) != 0)
+        park(log, "no config came from the cloud at boot, staying down");
+    _ = linux.mkdirat(linux.AT.FDCWD, "/data/home", 0o755);
+    const cloud = openDir(out_dir) catch park(log, "cannot open " ++ out_dir);
+    const run_dir = openDir("/run/werewolf") catch park(log, "cannot open /run/werewolf");
+    const keys_dir = openDir("/run/werewolf/keys") catch park(
+        log,
+        "cannot open /run/werewolf/keys",
+    );
+    const home_dir = openDir("/data/home") catch park(log, "cannot open /data/home");
+    const config_dir = openDir("/run/config") catch park(log, "cannot open /run/config");
+    // /sys/class/dmi/id is a link to this directory, which Landlock rules on.
+    const dmi_dir = openDir("/sys/devices/virtual/dmi/id") catch park(
+        log,
+        "cannot open the DMI directory",
+    );
+    // CAP_CHOWN for the homes, and what each round's child spends on its
+    // fetcher: CAP_SETGID and CAP_SETUID to become _cloud, CAP_SYS_CHROOT
+    // for /var/empty (lib/sandbox.zig dropTo). The child keeps none after.
+    // CAP_SETPCAP too, which the child spends dropping its own (keepOnly).
+    const chown: u32 = 1 << 0;
+    const setgid: u32 = 1 << 6;
+    const setuid: u32 = 1 << 7;
+    const setpcap: u32 = 1 << 8;
+    const sys_chroot: u32 = 1 << 18;
+    sandbox.keepOnly(chown | setgid | setuid | setpcap | sys_chroot) catch
+        park(log, "cannot drop capabilities");
+    // What the children inherit: once's child identifies the cloud by DMI
+    // and writes the cloud's directory, and its fetcher connects to port 80.
+    sandbox.landlock(&.{
+        .{ .fd = cloud, .access = sandbox.own_files },
+        .{ .fd = run_dir, .access = sandbox.own_files },
+        .{ .fd = keys_dir, .access = sandbox.own_files },
+        .{ .fd = home_dir, .access = sandbox.make_dir | sandbox.read_dir },
+        .{ .fd = config_dir, .access = sandbox.read_file },
+        .{ .fd = dmi_dir, .access = sandbox.read_file },
+    }, &.{80}) catch park(log, "cannot confine the service");
+    var last = readFrom(gpa, cloud, "config.tar") catch "";
+    log.event(
+        "poll",
+        .{ .every = poll_every, .people = countLines(readFrom(gpa, run_dir, "people") catch "") },
+    );
+    while (true) {
+        var ts: linux.timespec = .{ .sec = poll_every, .nsec = 0 };
+        _ = linux.nanosleep(&ts, null);
+        const pid = linux.fork();
+        if (pid == 0) {
+            run(log) catch |err| {
+                log.event("error", .{ .step = step, .@"error" = @errorName(err) });
+                linux.exit_group(1);
+            };
+            linux.exit_group(0);
+        }
+        var status: i32 = 0;
+        _ = linux.wait4(@intCast(pid), &status, 0, null);
+        const now = readFrom(gpa, cloud, "config.tar") catch continue;
+        if (std.mem.eql(u8, now, last)) {
+            gpa.free(now);
+            continue;
+        }
+        if (last.len > 0) gpa.free(last);
+        last = now;
+        apply(gpa, log, now, run_dir, keys_dir, home_dir, config_dir);
+    }
+}
+
+/// apply makes the people of a changed config their accounts, as init did
+/// at boot, and logs what changed.
+fn apply(
+    gpa: std.mem.Allocator,
+    log: *Log,
+    tar: []const u8,
+    run_dir: i32,
+    keys_dir: i32,
+    home_dir: i32,
+    config_dir: i32,
+) void {
+    var files: [max_entries]Entry = undefined;
+    const n = checkTar(
+        tar,
+        &files,
+    ) catch |err| return log.event("refused", .{ .reason = @errorName(err) });
+    var text: []const u8 = "";
+    for (files[0..n]) |*f| if (std.mem.eql(u8, f.name(), "users")) {
+        text = f.data;
+    };
+    const shell: []const u8 = if (linux.faccessat(linux.AT.FDCWD, "/bin/ash", linux.X_OK, 0) == 0)
+        "/bin/ash"
+    else
+        "/sbin/nologin";
+    const c = people.apply(gpa, .{
+        .passwd = readFrom(gpa, run_dir, "passwd") catch "",
+        .group = readFrom(gpa, run_dir, "group") catch "",
+        .shadow = readFrom(gpa, run_dir, "shadow") catch "",
+        .made = readFrom(gpa, run_dir, "people") catch "",
+    }, text, shell) catch return log.event(
+        "error",
+        .{ .step = "people", .@"error" = "OutOfMemory" },
+    );
+    putFile(
+        run_dir,
+        "passwd",
+        c.passwd,
+        0o644,
+    ) catch return log.event("error", .{ .step = "passwd" });
+    putFile(run_dir, "group", c.group, 0o644) catch return log.event("error", .{ .step = "group" });
+    putFile(
+        run_dir,
+        "shadow",
+        c.shadow,
+        0o600,
+    ) catch return log.event("error", .{ .step = "shadow" });
+    putFile(
+        run_dir,
+        "people",
+        c.made,
+        0o600,
+    ) catch return log.event("error", .{ .step = "people" });
+    for (c.removed) |name| _ = linux.unlinkat(keys_dir, nameZ(name), 0);
+    for (c.keys) |k| {
+        const name = nameZ(k.name);
+        putFile(keys_dir, name, k.text, 0o600) catch continue;
+        const id = people.userId(k.name);
+        _ = linux.fchownat(keys_dir, name, id, id, 0);
+        _ = linux.mkdirat(home_dir, name, 0o700);
+        _ = linux.fchownat(home_dir, name, id, id, 0);
+        _ = linux.fchmodat(home_dir, name, 0o700);
+    }
+    const base = readFrom(gpa, config_dir, "authorized_keys") catch "";
+    const root_keys = std.mem.concat(gpa, u8, &.{ base, c.root_keys }) catch return;
+    putFile(
+        keys_dir,
+        "root",
+        root_keys,
+        0o600,
+    ) catch return log.event("error", .{ .step = "root keys" });
+    log.event("people", .{
+        .made = countLines(c.made),
+        .removed = c.removed.len,
+        .refused = c.refused,
+    });
+}
+
+/// park says why and marks the service down, so runsv does not start it again.
+fn park(log: *Log, why: []const u8) noreturn {
+    log.event("down", .{ .reason = why });
+    const argv = [_:null]?[*:0]const u8{ "/usr/bin/sv", "down", "." };
+    const envp = [_:null]?[*:0]const u8{};
+    _ = linux.execve("/usr/bin/sv", &argv, &envp);
+    linux.exit_group(1);
+}
+
+fn openDir(path: [*:0]const u8) !i32 {
+    return @intCast(try sys(linux.openat(
+        linux.AT.FDCWD,
+        path,
+        .{ .PATH = true, .DIRECTORY = true, .CLOEXEC = true, .NOFOLLOW = true },
+        0,
+    ), "open directory"));
+}
+
+/// readFrom reads the file name under dir, at most max_file bytes.
+fn readFrom(gpa: std.mem.Allocator, dir: i32, name: [*:0]const u8) ![]u8 {
+    const fd: i32 = @intCast(try sys(
+        linux.openat(dir, name, .{ .CLOEXEC = true, .NOFOLLOW = true }, 0),
+        "open",
+    ));
+    defer _ = linux.close(fd);
+    const buf = try gpa.alloc(u8, max_file);
+    errdefer gpa.free(buf);
+    var n: usize = 0;
+    while (n < buf.len) {
+        const got = try sys(linux.read(fd, buf[n..].ptr, buf.len - n), "read");
+        if (got == 0) break;
+        n += got;
+    }
+    return buf[0..n];
+}
+
+/// putFile writes data to name.new under dir, mode as given, and renames it
+/// over name, so a reader never sees a partial file.
+fn putFile(dir: i32, name: [*:0]const u8, data: []const u8, mode: u32) !void {
+    var tmp_buf: [64]u8 = undefined;
+    const n = std.mem.len(name);
+    if (n + 5 > tmp_buf.len) return error.NameTooLong;
+    @memcpy(tmp_buf[0..n], name[0..n]);
+    @memcpy(tmp_buf[n .. n + 4], ".new");
+    tmp_buf[n + 4] = 0;
+    const tmp: [*:0]const u8 = tmp_buf[0 .. n + 4 :0];
+    const fd: i32 = @intCast(try sys(linux.openat(
+        dir,
+        tmp,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .CLOEXEC = true, .NOFOLLOW = true },
+        mode,
+    ), "create"));
+    writeAll(fd, data);
+    _ = linux.fchmod(fd, mode);
+    _ = linux.close(fd);
+    _ = try sys(linux.renameat(dir, tmp, dir, name), "rename");
+}
+
+/// nameZ returns name as a C string, in a buffer that holds a person's name.
+fn nameZ(name: []const u8) [*:0]const u8 {
+    const S = struct {
+        var buf: [40]u8 = undefined;
+    };
+    const n = @min(name.len, S.buf.len - 1);
+    @memcpy(S.buf[0..n], name[0..n]);
+    S.buf[n] = 0;
+    return S.buf[0..n :0];
+}
+
+fn countLines(text: []const u8) usize {
+    var n: usize = 0;
+    for (text) |c| if (c == '\n') {
+        n += 1;
+    };
+    return n;
 }
 
 /// step names the stage that failed, for the error event.

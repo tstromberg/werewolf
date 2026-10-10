@@ -41,9 +41,15 @@ accounts:
 # ones every form has (docs/programs.md)
 programs: [dhcp-client, cloud-metadata, service-config]
 
-# No one reaches the metadata server, where the user data and its secrets
-# are: cmd/cloud-metadata's fetcher, the one that asks, runs at boot before
-# the network policy is set, held to TCP port 80 by its own Landlock instead.
+# The metadata server, where the user data and its secrets are, is reached
+# by one user alone: _cloud, cmd/cloud-metadata's fetcher, which asks at
+# boot before this policy is set, held to TCP port 80 by its own Landlock,
+# and then every minute as the cloud-metadata service, so a config changed
+# at the cloud (its people, its secrets) reaches the running machine. The
+# machine has no service account there (howl gives it none), so the server
+# holds no token for anyone.
+net:
+  - metadata _cloud
 
 # GCP's disks and NIC: SCSI disks behind virtio-scsi (the boot disk on
 # older machine types), and NVMe and Google's gVNIC (on newer ones, Arm's

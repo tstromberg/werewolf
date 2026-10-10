@@ -6,6 +6,7 @@ const std = @import("std");
 const seal_lib = @import("seal");
 const sandbox = @import("sandbox");
 const settings = @import("settings");
+const people = @import("people");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -98,7 +99,7 @@ pub fn config(m: *Machine) void {
 /// hostname and root's keys from whichever config there is.
 pub fn metadata(m: *Machine) void {
     if (!m.configured and executable("/usr/lib/werewolf/cloud-metadata") and
-        m.run(&.{"/usr/lib/werewolf/cloud-metadata"}) and
+        m.run(&.{ "/usr/lib/werewolf/cloud-metadata", "once" }) and
         exists("/run/werewolf/cloud/config.tar"))
     {
         say("config tar from the cloud's metadata server", .{});
@@ -129,6 +130,38 @@ pub fn metadata(m: *Machine) void {
     _ = linux.syscall2(.sethostname, @intFromPtr(host.ptr), host.len);
     if (exists("/run/config/authorized_keys"))
         keys(m, "root", m.read("/run/config/authorized_keys"));
+    if (exists("/run/config/users")) users(m, m.read("/run/config/users"));
+}
+
+/// users makes the config's people their accounts (lib/people.zig): the
+/// account files as apply returns them, each person's keys file, an
+/// admin's keys in root's, and /run/werewolf/people, the names made, which
+/// cloud-metadata reads to apply the next config. Homes are data's.
+fn users(m: *Machine, text: []const u8) void {
+    const shell: []const u8 = if (exists("/bin/ash")) "/bin/ash" else "/sbin/nologin";
+    const c = people.apply(m.gpa, .{
+        .passwd = m.read("/run/werewolf/passwd"),
+        .group = m.read("/run/werewolf/group"),
+        .shadow = m.read("/run/werewolf/shadow"),
+    }, text, shell) catch return say("users: out of memory", .{});
+    for (c.refused) |why| say("users: {s}", .{why});
+    m.write("/run/werewolf/passwd", c.passwd, 0o644);
+    m.write("/run/werewolf/group", c.group, 0o644);
+    m.write("/run/werewolf/shadow", c.shadow, 0o600);
+    m.write("/run/werewolf/people", c.made, 0o600);
+    for (c.keys) |k| keys(m, k.name, k.text);
+    if (c.root_keys.len > 0) {
+        const had = if (exists("/run/werewolf/keys/root"))
+            m.read("/run/werewolf/keys/root")
+        else
+            "";
+        keys(m, "root", m.fmt("{s}{s}", .{ had, c.root_keys }));
+    }
+    var names: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeScalar(u8, c.made, '\n');
+    while (it.next()) |n| names.append(m.gpa, n) catch return;
+    m.users = names.items;
+    say("users: {d} accounts made", .{names.items.len});
 }
 
 /// nocloud adds the first user in a NoCloud cloud-config, with its ssh keys,

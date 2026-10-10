@@ -1,0 +1,11 @@
+# MariaDB answers on its socket once mariadb-init has made its data, to
+# root as itself (unix_socket): wait.
+ok  mariadb-socket   s=/run/svc/mariadb/mariadb.sock; i=0; until mariadb -S $s -N -e 'select 1' 2>/dev/null | grep -qx 1; do i=$((i + 1)); [ $i -le 60 ] || { echo "no answer in 60 s"; exit 1; }; sleep 1; done
+# It serves no TCP: networking off, nothing on 3306.
+ok  mariadb-no-tcp   [ "$(mariadb -S /run/svc/mariadb/mariadb.sock -N -e 'select @@skip_networking')" = 1 ] && ! netstat -ltn | grep -q ':3306 '
+# A client cannot read or write the machine's files: no LOAD DATA LOCAL;
+# the server's own files only in an empty directory none may write, even
+# for root's FILE privilege.
+ok  mariadb-no-files m="mariadb -S /run/svc/mariadb/mariadb.sock -N"; [ "$($m -e 'select @@local_infile')" = 0 ] && [ "$($m -e 'select @@secure_file_priv')" = /var/empty/ ] && ! $m -e "select 1 into outfile '/tmp/werewolf-check'" 2>/dev/null && [ ! -e /tmp/werewolf-check ] && [ "$($m -e "select load_file('/etc/passwd') is null")" = 1 ]
+# Its data was made once, on /data, and is the service user's alone.
+ok  mariadb-data     [ -d /data/svc/mariadb/data/mysql ] && [ -e /data/svc/mariadb/data-made ] && [ "$(stat -c '%a %U' /data/svc/mariadb/data)" = '700 mariadb' ]

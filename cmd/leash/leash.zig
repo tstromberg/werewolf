@@ -278,9 +278,11 @@ pub fn main(init: std.process.Init) !void {
         .dir = cwd,
         .errno = @tagName(linux.errno(cd)),
     });
-    const low_port = for (s.listen) |p| {
-        if (p < 1024) break true;
-    } else false;
+    // A port below 1024, TCP or UDP, takes CAP_NET_BIND_SERVICE.
+    var low_port = false;
+    for ([_][]const u16{ s.listen, s.listen_udp }) |ports| {
+        for (ports) |p| low_port = low_port or p < 1024;
+    }
     dropTo(user, groups, low_port) catch |err|
         l.fail(.park, "giving root up: {s}", .{@errorName(err)});
 
@@ -302,6 +304,7 @@ pub fn main(init: std.process.Init) !void {
             .exec = s.exec[0],
             .root = s.root,
             .listen = s.listen,
+            .listen_udp = s.listen_udp,
             .connect = s.connect,
             .landlock = rules.abi,
             .pledge = try words(gpa, s.pledge),

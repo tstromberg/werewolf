@@ -75,7 +75,8 @@ to (443, say) passes, but reaches only a socket that exists.
 
 ### Not covered
 
-- **UDP listeners.** Landlock has TCP rules only; UDP hears what 300 admits.
+- **UDP listeners.** Landlock has TCP rules only; UDP hears what 300 admits,
+  and a served UDP port answers only as its user ([listen-udp.md](listen-udp.md)).
 - **Fragmented UDP.** Later fragments carry no ports and meet the drop;
   DNS, the one UDP declared, fits 512 bytes (no EDNS0) or retries on TCP.
 - **Destinations.** `connect USER tcp/443` reaches any HTTPS server.

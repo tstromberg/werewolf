@@ -79,3 +79,8 @@ slowly are cut off with a 408 after 10 s; the configuration has no stats
 socket, Lua or external checks. `make check-shellfree-haproxy` boots it
 as it ships, with no config: its settings are refused for want of
 backends, and HAProxy stays down, binding nothing.
+
+TLS is not in `make check`, whose backend holds :443. It was booted by
+hand on 2026-10-10, as a form on `base: haproxy` with a certificate:
+HTTPS answered with it, :80 sent requests there, and the configuration
+loaded the certificate and key from the config.

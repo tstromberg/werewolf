@@ -1,0 +1,94 @@
+# grafana: prod, with Grafana, dashboards and alerts over Prometheus, Loki
+# and the other sources it ships, behind Caddy, which serves it over HTTPS
+# at the machine's base URL with a certificate from Let's Encrypt. Grafana
+# runs from its project's OCI image, baked into the verified root, its own
+# binary started in place of the image's shell script. Its administrator
+# and secret key come from the config before it serves; nobody signs up,
+# strangers see nothing, and it phones nothing home. Its database and the
+# plugins its administrator installs are in /data/svc/grafana. See
+# forms/grafana/README.md.
+base: prod
+
+with: [caddy]
+
+# make check's (forms/README.md): Grafana and its data-source plugins want
+# more than the default.
+check:
+  memory: 2048
+
+services:
+  # Grafana, as _oci-grafana, inside its image: it serves on loopback,
+  # behind Caddy, keeps its SQLite database and plugins in its /data, and
+  # reaches data sources and grafana.com's plugin catalog on the ports they
+  # serve. It starts each data source's backend, a program of the image's
+  # (data/plugins-bundled), so its pledge has exec. The administrator's
+  # password, the key that encrypts data-source credentials, and the root
+  # URL its links use come from the config: Grafana's own default key is
+  # public, so a missing one parks the service.
+  grafana:
+    image: docker.io/grafana/grafana@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    exec: /usr/share/grafana/bin/grafana server --homepath /usr/share/grafana --config /etc/grafana/grafana.ini
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: [tcp/3000 loopback]
+    connect: [tcp/443 tcp/80 tcp/9090 tcp/3100 udp/53 tcp/53]
+    secret:
+      - GF_SECURITY_ADMIN_PASSWORD /run/config/grafana/admin-password
+      - GF_SECURITY_SECRET_KEY /run/config/grafana/secret-key
+      - GF_SERVER_ROOT_URL /run/config/grafana/root-url optional
+    memory: 1024
+    nofile: 65536
+    env:
+      - GF_PATHS_DATA=/data
+      - GF_PATHS_LOGS=/data/log
+      - GF_PATHS_PLUGINS=/data/plugins
+      - GF_LOG_MODE=console
+      - GF_SERVER_HTTP_ADDR=127.0.0.1
+      - GF_SERVER_HTTP_PORT=3000
+      - GF_DATABASE_WAL=true
+      # Nobody signs up or looks without signing in; the administrator
+      # invites. Behind Caddy's TLS: secure cookies, and a policy for
+      # what the page may load.
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_ALLOW_ORG_CREATE=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_SECURITY_COOKIE_SECURE=true
+      - GF_SECURITY_CONTENT_SECURITY_POLICY=true
+      - GF_SECURITY_DISABLE_GRAVATAR=true
+      # Nothing sent home or fetched unasked: no usage reports, update
+      # checks, news, feedback links or public snapshots, and no plugins
+      # installed at start. The administrator may still install one from
+      # the catalog; one with a program of its own will not run, as /data
+      # is noexec.
+      - GF_ANALYTICS_REPORTING_ENABLED=false
+      - GF_ANALYTICS_CHECK_FOR_UPDATES=false
+      - GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false
+      - GF_ANALYTICS_FEEDBACK_LINKS_ENABLED=false
+      - GF_NEWS_NEWS_FEED_ENABLED=false
+      - GF_SNAPSHOTS_EXTERNAL_ENABLED=false
+      - GF_PLUGINS_PREINSTALL_DISABLED=true
+      - GOMEMLIMIT=768MiB
+
+  # Caddy, as its own user, for Grafana: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Grafana on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the base URL, from the machine's settings, as BASE_URL,
+  # which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/3000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

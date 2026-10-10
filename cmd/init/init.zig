@@ -144,6 +144,9 @@ pub const Machine = struct {
     cmd: cmdline.Cmdline = .{},
     victim_dir: []const u8 = "",
     nocloud_user: []const u8 = "",
+    /// users are the people the config's users file named, whose homes
+    /// data makes on /data (cmd/init/config.zig).
+    users: []const []const u8 = &.{},
     /// configured is set when a disk held a config tar or a NoCloud seed;
     /// the cloud's metadata server is then not asked.
     configured: bool = false,

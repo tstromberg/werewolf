@@ -1,0 +1,16 @@
+# rest-server answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once Caddy has made it: wait. A stranger
+# and a wrong password are refused.
+ok  rs-user          p=$(head -n 1 /run/cgroup/svc/restic-server/cgroup.procs); u=$(grep '^_oci-restic-server:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  rs-stranger      i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/alice/config 2>&1 | grep -q 'HTTP/1.1 401'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no 401 in 60 s"; exit 1; }; sleep 1; done
+ok  rs-wrong-password wget -q -T 5 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s alice:wrong | base64)" https://localhost/alice/config 2>&1 | grep -q 'HTTP/1.1 401'
+# alice makes her repository and backs up to it, with restic, through
+# Caddy; it is on /data, the service's.
+ok  rs-backup        export HOME=/tmp RESTIC_PASSWORD=werewolf-check-repo; r=rest:https://alice:werewolf-check-alice@localhost/alice/; restic --insecure-tls --no-cache -q -r $r init && restic --insecure-tls --no-cache -q -r $r backup /etc/hostname && [ "$(restic --insecure-tls --no-cache -q -r $r snapshots --json | grep -o '"id"' | wc -l)" = 1 ] && [ "$(stat -c %u /data/svc/restic-server/alice/config)" = "$(grep '^_oci-restic-server:' /etc/passwd | cut -d: -f3)" ]
+# bob, a user too, reaches only his own repository: not alice's.
+ok  rs-private       export HOME=/tmp RESTIC_PASSWORD=werewolf-check-repo; ! restic --insecure-tls --no-cache -q -r rest:https://bob:werewolf-check-bob@localhost/alice/ snapshots 2>/dev/null && wget -q -T 5 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s bob:werewolf-check-bob | base64)" https://localhost/alice/config 2>&1 | grep -q 'HTTP/1.1 40[13]'
+# rest-server reaches nothing: fence has no line for its user.
+ok  rs-alone         u=$(grep '^_oci-restic-server:' /etc/passwd | cut -d: -f3); ! grep -q "^connect $u " /usr/share/werewolf/net
+# The attack: alice's credentials, as a machine broken into holds them,
+# cannot delete her snapshot, which is still there.
+ok  rs-append-only   export HOME=/tmp RESTIC_PASSWORD=werewolf-check-repo; r=rest:https://alice:werewolf-check-alice@localhost/alice/; s=$(restic --insecure-tls --no-cache -q -r $r snapshots --json | sed -n 's/.*"id":"\([0-9a-f]*\)".*/\1/p' | head -n 1); [ -n "$s" ] && ! restic --insecure-tls --no-cache -q -r $r forget "$s" 2>/dev/null && restic --insecure-tls --no-cache -q -r $r snapshots --json | grep -q "\"id\":\"$s\""

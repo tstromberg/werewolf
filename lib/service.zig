@@ -11,6 +11,9 @@ pub const Service = struct {
     before: []const []const []const u8 = &.{},
     user: []const u8 = "",
     listen: []const u16 = &.{},
+    /// listen_udp are its UDP ports, which fence alone holds: Landlock
+    /// cannot restrict a UDP bind (docs/design/listen-udp.md).
+    listen_udp: []const u16 = &.{},
     connect: []const u16 = &.{},
     /// sockets are the pathname UNIX sockets a `connect` line names.
     sockets: []const []const u8 = &.{},
@@ -118,6 +121,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var dir: ?[]const u8 = null;
     var before: std.ArrayList([]const []const u8) = .empty;
     var listen: std.ArrayList(u16) = .empty;
+    var listen_udp: std.ArrayList(u16) = .empty;
     var connect: std.ArrayList(u16) = .empty;
     var sockets: std.ArrayList([]const u8) = .empty;
     var read: std.ArrayList([]const u8) = .empty;
@@ -160,7 +164,10 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             }
         } else if (std.mem.eql(u8, key, "listen")) {
             if (args.len == 0) return invalid(bad, "no ports");
-            for (args) |a| try listen.append(gpa, try tcpPort(a, bad));
+            for (args) |a| if (std.mem.startsWith(u8, a, "udp/"))
+                try listen_udp.append(gpa, try portNumber(a[4..], bad))
+            else
+                try listen.append(gpa, try tcpPort(a, bad));
         } else if (std.mem.eql(u8, key, "connect")) {
             if (args.len == 0) return invalid(bad, "no ports or sockets");
             for (args) |a| if (a.len > 0 and a[0] == '/') {
@@ -289,6 +296,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .pledge = promises,
         .before = before.items,
         .listen = listen.items,
+        .listen_udp = listen_udp.items,
         .connect = connect.items,
         .sockets = sockets.items,
         .read = read.items,
@@ -520,8 +528,12 @@ fn program(args: []const []const u8, bad: *Bad) ![]const []const u8 {
 
 fn tcpPort(word: []const u8, bad: *Bad) !u16 {
     if (!std.mem.startsWith(u8, word, "tcp/"))
-        return invalid(bad, "a port is tcp/PORT: Landlock cannot restrict UDP");
-    const p = std.fmt.parseInt(u16, word[4..], 10) catch
+        return invalid(bad, "a port is tcp/PORT; only listen takes udp/PORT");
+    return portNumber(word[4..], bad);
+}
+
+fn portNumber(digits: []const u8, bad: *Bad) !u16 {
+    const p = std.fmt.parseInt(u16, digits, 10) catch
         return invalid(bad, "a port is 1 to 65535");
     if (p == 0) return invalid(bad, "a port is 1 to 65535");
     return p;
@@ -569,7 +581,7 @@ test parse {
         \\exec    /usr/bin/nginx -c "/etc/nginx/nginx.conf"
         \\before  /usr/bin/nginx -t -q   # check first
         \\user    nginx
-        \\listen  tcp/80 tcp/443
+        \\listen  tcp/80 tcp/443 udp/443
         \\connect tcp/443 /run/svc/php-fpm/php.sock
         \\read    /etc/nginx /data/svc/status/www
         \\write   /var/lib/nginx
@@ -587,6 +599,7 @@ test parse {
     try testing.expectEqualStrings("/etc/nginx/nginx.conf", s.exec[2]);
     try testing.expectEqual(3, s.before[0].len);
     try testing.expectEqualSlices(u16, &.{ 80, 443 }, s.listen);
+    try testing.expectEqualSlices(u16, &.{443}, s.listen_udp);
     try testing.expectEqualSlices(u16, &.{443}, s.connect);
     try testing.expectEqualStrings("/run/svc/php-fpm/php.sock", s.sockets[0]);
     try testing.expectEqual(2, s.read.len);
@@ -638,7 +651,8 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\nsecret P /run/config/p maybe", .line = 3 },
         .{ .text = "exec /a\nuser x\ngroup", .line = 3 },
         .{ .text = "exec /a\nuser x\ngroup Valkey", .line = 3 },
-        .{ .text = "exec /a\nuser x\nlisten udp/53", .line = 3 },
+        .{ .text = "exec /a\nuser x\nlisten udp/0", .line = 3 },
+        .{ .text = "exec /a\nuser x\nconnect udp/53", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten /run/x.sock", .line = 3 },
         .{ .text = "exec /a\nuser x\nconnect /run/../x.sock", .line = 3 },

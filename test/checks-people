@@ -1,0 +1,5 @@
+# People: init makes each an account from the config's users file.
+ok  people-accounts  grep -q '^tom:x:45219:45219::/data/home/tom:/bin/ash$' /etc/passwd && grep -q '^ann:x:58760:58760::/data/home/ann:/bin/ash$' /etc/passwd && grep -q '^tom:\*:' /etc/shadow && grep -q '^tom:x:45219:$' /etc/group
+ok  people-homes     [ "$(stat -c '%u:%g:%a' /data/home/tom)" = 45219:45219:700 ] && [ "$(stat -c '%u:%g:%a' /data/home/ann)" = 58760:58760:700 ]
+ok  people-keys      [ "$(stat -c '%u:%a' /run/werewolf/keys/tom)" = 45219:600 ] && grep -q 'tom@yubikey$' /run/werewolf/keys/tom && grep -q 'ann@laptop$' /run/werewolf/keys/ann && ! grep -q ann@laptop /run/werewolf/keys/tom
+ok  people-admin     grep -q 'tom@yubikey$' /run/werewolf/keys/root && ! grep -q 'ann@laptop' /run/werewolf/keys/root && [ "$(stat -c '%u:%a' /run/werewolf/keys/root)" = 0:600 ]

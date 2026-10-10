@@ -53,6 +53,8 @@ and key, and `make list-forms` shows the chains.
 | `miniflux` | `prod`, with `postgresql`, `caddy` | a feed reader fetching from public addresses alone, its administrator from the config, built here ([miniflux.md](../forms/miniflux/README.md)) |
 | `prometheus` | `prod` | scraping the targets its settings name, and itself, one user on its web and API, its admin, lifecycle and remote-write APIs off ([prometheus.md](../forms/prometheus/README.md)) |
 | `loki` | `prod` | keeping pushed logs 31 days, behind Caddy's HTTPS and one user, Loki on loopback reaching nothing ([loki.md](../forms/loki/README.md)) |
+| `mariadb` | `prod` | MariaDB 12.3, the long-term release, on a UNIX socket alone for the machine's own services, made without a shell by mariadb-init ([mariadb.md](../forms/mariadb/README.md)) |
+| `wordpress-mariadb` | `wordpress`, with `mariadb` | WordPress with its tables in MariaDB, its role `php` by unix_socket, holding its database alone ([wordpress-mariadb.md](../forms/wordpress-mariadb/README.md)) |
 | `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
 | `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
 | `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
@@ -212,6 +214,24 @@ needed in an environment variable, use `secret NAME PATH` instead, ending
 in `optional` if the service runs without it. howl takes each as a file
 flag named for its variable: `secret SMTP_PASSWORD PATH` is
 `--smtp-password FILE`.
+
+## People
+
+A form that runs sshd takes root's keys from the boot config (`--root-keys`).
+A manifest can also name people, each with security keys, and make some
+of them admins, whose keys log in as root too:
+
+```yaml
+users:
+  tom:
+    keys: [sk-ssh-ed25519@openssh.com AAAAGnNr... tom@yubikey]
+    admin: true
+```
+
+They are never in the image: howl packs them into the boot config, and at
+boot init makes each an account of its own (uid its name's hash, home on
+`/data`, a shell where busybox gives one) and writes its keys where sshd
+looks. A form others take may name none; the people are the machine's.
 
 ## Settings
 

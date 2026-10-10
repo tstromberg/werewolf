@@ -1,0 +1,139 @@
+# open-webui: Open WebUI, a chat interface for language models, with
+# Ollama, PostgreSQL and Caddy beside it (with): Caddy serves it over
+# HTTPS at the machine's base URL, with a certificate from Let's Encrypt;
+# Ollama runs the models on loopback; PostgreSQL keeps its accounts, chats
+# and, by pgvector, the documents it searches. Wolfi's Open WebUI is the
+# full build and lags: melange builds upstream's slim one, which needs no
+# torch, from a pinned release (forms/open-webui/melange/open-webui.yaml).
+# Its administrator comes from the config and is made before it serves;
+# nobody signs up. See forms/open-webui/README.md.
+base: prod
+
+with: [ollama, postgresql, caddy]
+
+packages:
+  # What forms/open-webui/melange/open-webui.yaml's environment runs on
+  # and links, from Wolfi; the build fails if one is missing.
+  - python-3.12
+  - libstdc++
+  - libgcc
+  - zlib
+  - pgvector-17
+
+# make check's, for this form alone (forms/README.md)
+check:
+  memory: 3072
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: python3 runs Open WebUI, which is what this form is for
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+services:
+  # Caddy, as its own user, for Open WebUI: it may bind :80 and :443 and
+  # no other port, reach the ACME CA over HTTPS, a resolver, and Open
+  # WebUI on loopback, read its configuration, and write only its own
+  # directories. Its site is the base URL Open WebUI takes too, from the
+  # machine's settings, as BASE_URL, which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
+
+  # Ollama, as its own user, for Open WebUI alone: as forms/ollama runs it,
+  # but on loopback, since its API has no login and Open WebUI's has.
+  ollama:
+    exec: /usr/bin/ollama serve
+    user: ollama
+    pledge: stdio rpath wpath inet unix connect listen proc exec
+    listen: [tcp/11434 loopback]
+    connect: [tcp/443 public, udp/53 tcp/53]
+    run: /usr/bin/ollama
+    memory: 8192
+    nofile: 65536
+    env:
+      - HOME=/run/svc/ollama
+      - OLLAMA_HOST=127.0.0.1:11434
+      - OLLAMA_MODELS=/data/svc/ollama
+      - OLLAMA_KEEP_ALIVE=5m
+      - OLLAMA_NOPRUNE=1
+      - OLLAMA_ORIGINS=http://localhost,http://127.0.0.1
+
+  # Open WebUI, as its own user: it serves on loopback, behind Caddy,
+  # keeps its tables and vectors in the schema open-webui in PostgreSQL
+  # (by its socket, as the role of its name) and uploads in
+  # /data/svc/open-webui, reaches Ollama on loopback, and the APIs and
+  # pages a user names on public addresses alone. It runs no program:
+  # tools and functions are Python it runs itself, an administrator's to
+  # add, and what they import must be in the image. The administrator is
+  # made from the config before the port opens; the signing key is made
+  # once, on /data, before the first start.
+  open-webui:
+    # Its own command, by the interpreter (leash runs a program, not a
+    # script), -P keeping the data directory it starts in off the import
+    # path. Upstream's would make the key with random, not secrets.
+    exec: /usr/lib/open-webui/bin/python3 -P -c "from open_webui import app; app()" serve --host 127.0.0.1 --port 8080
+    before: /usr/lib/open-webui/bin/python3 -I -c "import os,secrets; os.path.exists('.webui_secret_key') or open('.webui_secret_key','x').write(secrets.token_urlsafe(32))"
+    user: open-webui
+    # netlink: aiohttp's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/8080 loopback]
+    connect:
+      - tcp/11434
+      - tcp/443 tcp/80 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+    config: settings /run/config/open-webui/settings.json
+    secret: WEBUI_ADMIN_PASSWORD /run/config/open-webui/admin-password
+    setting:
+      - base-url url required as CORS_ALLOW_ORIGIN
+      - admin-email string required as WEBUI_ADMIN_EMAIL
+    render: env site
+    memory: 2048
+    nofile: 16384
+    env:
+      - HOME=/run/svc/open-webui
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - ENV=prod
+      - USE_SLIM_DOCKER=true
+      - DATA_DIR=/data/svc/open-webui
+      - STATIC_DIR=/run/svc/open-webui/static
+      - DATABASE_URL=postgresql://open-webui@/postgres?host=/run/svc/postgres
+      - VECTOR_DB=pgvector
+      - OLLAMA_BASE_URL=http://127.0.0.1:11434
+      - RAG_EMBEDDING_ENGINE=ollama
+      - RAG_EMBEDDING_MODEL=nomic-embed-text
+      # Nobody signs up: the administrator adds each user.
+      - WEBUI_AUTH=true
+      - ENABLE_SIGNUP=false
+      - DEFAULT_USER_ROLE=pending
+      # Behind Caddy's TLS: secure cookies.
+      - WEBUI_SESSION_COOKIE_SECURE=true
+      - WEBUI_AUTH_COOKIE_SECURE=true
+      # Nothing sent home, nothing fetched unasked: no version check, no
+      # telemetry, no chats shared to openwebui.com, no Hugging Face, no
+      # OpenAI until the administrator adds a key, no pip for a plugin.
+      - ENABLE_VERSION_UPDATE_CHECK=false
+      - SCARF_NO_ANALYTICS=true
+      - DO_NOT_TRACK=true
+      - ANONYMIZED_TELEMETRY=false
+      - ENABLE_COMMUNITY_SHARING=false
+      - HF_HUB_OFFLINE=1
+      - ENABLE_OPENAI_API=false
+      - ENABLE_PIP_INSTALL_FRONTMATTER_REQUIREMENTS=false

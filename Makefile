@@ -80,7 +80,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 # A target named _NAME is a step of another target.
 .PHONY: all install uninstall install-deps precommit hooks image slot disk bite-me list-forms test \
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
-	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion \
+	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-static check-unsigned check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-aws check-azure seal-learn $(OUT)/disk.qcow2
@@ -162,10 +162,10 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
-	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig
+	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
-	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files -Mroot=$(1) $(LIB_MODULES)
+	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
 # program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
 define program
@@ -213,7 +213,7 @@ $(TEST_SK): tools/test-sk.zig
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
-	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig tools/form.zig tools/package.zig \
+	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
@@ -427,11 +427,11 @@ check-adhoc: $(HOWL) | _check-shared
 	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form
 
-# Rules of their own, so check-% takes neither check-bastion nor check-shellfree-FORM.
-check-bastion: $(HOWL) $(TEST_SK) | _check-shared
-	@test/bastion-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
-	@$(call built,bastion,$(CHECK_MAKE) FORM=$(CHECK)/bastion-check image)
-	@$(CHECK_MAKE) FORM=$(CHECK)/bastion-check CHECK_SSH=$(call check_port,22200,bastion) CHECK_KEPT_KEYS=1 _check-form
+# Generated forms (test/bastion-form, test/people-form): rules of their own, so check-% takes none of these nor check-shellfree-FORM.
+check-bastion check-people: check-%: $(HOWL) $(TEST_SK) | _check-shared
+	@test/$*-form $(CHECK) $(FORM_TOOL) $(CURDIR)/$(TEST_SK)
+	@$(call built,$*,$(CHECK_MAKE) FORM=$(CHECK)/$*-check image)
+	@$(CHECK_MAKE) FORM=$(CHECK)/$*-check CHECK_SSH=$(call check_port,22200,$(if $(filter bastion,$*),bastion,prod-ssh)) $(if $(filter bastion,$*),CHECK_KEPT_KEYS=1) _check-form
 $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree

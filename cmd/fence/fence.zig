@@ -60,6 +60,7 @@ pub fn main(init: std.process.Init) !void {
         .{
             .listen = p.listen[0..p.nlisten],
             .loopback = p.loopback[0..p.nloopback],
+            .udp = p.udp[0..p.nudp],
             .connect = p.connectText(&out, &text),
             .metadata = p.metadata[0..p.nmetadata],
             .ipv6 = hasIpv6(),
@@ -166,6 +167,8 @@ const Proto = enum(u8) {
 /// dropped lists the protocols whose arriving packets are dropped unanswered.
 const dropped = [_]Proto{ .tcp, .udp, .udplite, .sctp, .dccp, .ipip, .ipv6, .gre, .esp, .ah };
 
+const Udp = struct { port: u16, uid: u32 };
+
 const Connect = struct {
     /// uid is null for every user.
     uid: ?u32,
@@ -218,6 +221,11 @@ const Policy = struct {
     /// loopback holds ports bound and reached only from this machine.
     loopback: [max_entries]u16 = undefined,
     nloopback: usize = 0,
+    /// udp holds the served UDP ports, each with the one user that may send
+    /// from it: Landlock cannot hold a UDP bind, so the reply is what fence
+    /// holds (docs/design/listen-udp.md).
+    udp: [max_entries]Udp = undefined,
+    nudp: usize = 0,
     connect: [max_entries]Connect = undefined,
     nconnect: usize = 0,
     metadata: [max_entries]u32 = undefined,
@@ -241,8 +249,8 @@ const Policy = struct {
     }
 };
 
-/// parsePolicy parses `listen tcp PORT [loopback]`, `connect UID|all PROTO
-/// [PORT] [public]` and `metadata UID` lines. The build wrote the file, so
+/// parsePolicy parses `listen tcp PORT [loopback]`, `listen UID udp PORT`,
+/// `connect UID|all PROTO [PORT] [public]` and `metadata UID` lines. The build wrote the file, so
 /// anything else is BadPolicy rather than a guess.
 fn parsePolicy(text: []const u8) !Policy {
     var p: Policy = .{};
@@ -252,7 +260,16 @@ fn parsePolicy(text: []const u8) !Policy {
         var words = std.mem.tokenizeScalar(u8, line, ' ');
         const key = words.next() orelse continue;
         if (std.mem.eql(u8, key, "listen")) {
-            if (!std.mem.eql(u8, words.next() orelse "", "tcp")) return error.BadPolicy;
+            const proto = words.next() orelse "";
+            if (!std.mem.eql(u8, proto, "tcp")) {
+                const uid = try user(proto);
+                if (!std.mem.eql(u8, words.next() orelse "", "udp")) return error.BadPolicy;
+                if (p.nudp == max_entries) return error.BadPolicy;
+                p.udp[p.nudp] = .{ .port = try port(words.next()), .uid = uid };
+                p.nudp += 1;
+                if (words.next() != null) return error.BadPolicy;
+                continue;
+            }
             const l = try port(words.next());
             if (std.mem.eql(u8, words.peek() orelse "", "loopback")) {
                 _ = words.next();
@@ -332,10 +349,10 @@ const Rule = struct {
     uid: ?u32 = null,
 };
 
-/// max_rules bounds plan's output. Per entry index, listen, connect and
-/// metadata make at most 3 + 3 + 2 rules, and a public connect one more per
-/// non-public prefix; the rest are fixed.
-const max_rules = 16 + wire_server_ports.len + dropped.len + (8 + non_public4.len) * max_entries;
+/// max_rules bounds plan's output. Per entry index, listen, UDP listen,
+/// connect and metadata make at most 3 + 3 + 3 + 2 rules, and a public
+/// connect one more per non-public prefix; the rest are fixed.
+const max_rules = 16 + wire_server_ports.len + dropped.len + (11 + non_public4.len) * max_entries;
 
 /// plan returns the rules for family, in the order the kernel tries them:
 ///
@@ -343,8 +360,9 @@ const max_rules = 16 + wire_server_ports.len + dropped.len + (8 + non_public4.le
 ///   10    sent to this machine or over loopback: local table
 ///   100   sent to the metadata server's TCP 80 by a named user: main
 ///   101   sent to it by anyone else, or to Azure's wire server: refused
-///   200   sent as declared (user, protocol, port), from a served port, or
-///         ICMPv6 (which neighbour discovery needs): main
+///   200   sent as declared (user, protocol, port), from a served port (a
+///         UDP one by its user alone), or ICMPv6 (which neighbour discovery
+///         needs): main
 ///   299   anything else sent: refused (EACCES)
 ///   300   arriving at a served port, from a connected port or the metadata
 ///         server, or ICMP: local
@@ -442,6 +460,17 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .tcp,
         .sport = l,
     });
+    // Landlock holds a TCP port's bind; nothing holds a UDP one's, so only
+    // its user's datagrams leave from it, and a squatter cannot answer.
+    for (p.udp[0..p.nudp]) |u| rules.add(.{
+        .priority = pref.out_allow,
+        .action = FR_ACT_TO_TBL,
+        .table = RT_TABLE_MAIN,
+        .from_here = true,
+        .proto = .udp,
+        .sport = u.port,
+        .uid = u.uid,
+    });
     if (family == linux.AF.INET6) rules.add(.{
         .priority = pref.out_allow,
         .action = FR_ACT_TO_TBL,
@@ -457,6 +486,13 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .table = RT_TABLE_LOCAL,
         .proto = .tcp,
         .dport = l,
+    });
+    for (p.udp[0..p.nudp]) |u| rules.add(.{
+        .priority = pref.in_allow,
+        .action = FR_ACT_TO_TBL,
+        .table = RT_TABLE_LOCAL,
+        .proto = .udp,
+        .dport = u.port,
     });
     // Let replies in from each protocol and port some user connects to, once.
     for (p.connect[0..p.nconnect], 0..) |c, i| {
@@ -958,7 +994,7 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 // --- tests -------------------------------------------------------------------
 
 const example = "connect 0 tcp 443\nconnect 0 udp 53\nconnect all udp 53\nconnect 0 " ++
-    "icmp\nlisten tcp 22\nlisten tcp 5432 loopback\nmetadata 68\n";
+    "icmp\nlisten tcp 22\nlisten tcp 5432 loopback\nlisten 207 udp 53\nmetadata 68\n";
 
 test compatibleWith {
     try std.testing.expect(compatibleWith("arm,pl061\x00arm,primecell\x00", "arm,pl061"));
@@ -994,6 +1030,10 @@ test "policies" {
     try std.testing.expectEqual(0, none.nlisten + none.nconnect + none.nmetadata);
     for ([_][]const u8{
         "listen udp 53\n",
+        "listen 207 udp\n",
+        "listen 207 tcp 53\n",
+        "listen 207 udp 53 loopback\n",
+        "listen nobody udp 53\n",
         "listen tcp 0\n",
         "listen tcp 70000\n",
         "listen tcp 22 23\n",
@@ -1057,6 +1097,17 @@ test "the plan, in the order the kernel tries it" {
     }
     try std.testing.expect(refused_out);
     try std.testing.expectEqual(1, dns_replies); // two users connect to udp 53: one reply rule
+
+    // A served UDP port: queries arrive for anyone, answers leave as its user.
+    var udp_in = false;
+    var udp_out = false;
+    for (r) |x| {
+        if (x.proto != .udp) continue;
+        if (x.priority == pref.in_allow and x.dport == 53) udp_in = x.uid == null;
+        if (x.priority == pref.out_allow and x.sport == 53 and x.action == FR_ACT_TO_TBL)
+            udp_out = x.uid == 207;
+    }
+    try std.testing.expect(udp_in and udp_out);
 
     // Every rule that routes traffic out is followed by its unreachable twin.
     for (r, 0..) |x, i| {

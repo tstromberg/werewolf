@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/grafana/test/config DIR: the grafana form's config for make check,
+# in DIR: the administrator's password, which test/checks signs in with;
+# a secret key; Grafana's root URL and Caddy's base URL, https://localhost,
+# for which Caddy's own CA signs.
+set -eu
+mkdir -p "$1/grafana" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/grafana/admin-password"
+openssl rand -hex 32 >"$1/grafana/secret-key"
+echo https://localhost/ >"$1/grafana/root-url"
+echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"
