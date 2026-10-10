@@ -162,10 +162,10 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
-	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig
+	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
-	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk -Mroot=$(1) $(LIB_MODULES)
+	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files -Mroot=$(1) $(LIB_MODULES)
 
 # program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
 define program
@@ -192,7 +192,7 @@ $(VERITY_BIN): tools/verity.zig lib/verity.zig
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
-	lib/verity.zig lib/image.zig boot/gpt.zig
+	lib/verity.zig lib/image.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 

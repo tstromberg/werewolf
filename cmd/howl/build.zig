@@ -620,7 +620,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
     if (goals.lock and !image_goals and !goals.vmlinux) {
         try packages.apkoConfig(&b, config);
-        return packages.relock(&b, lock, config, b.form_files);
+        return packages.relock(&b, lock, config);
     }
     // make compiles the programs the overlay lays, in a checkout: each
     // compile is mostly one thread, so as many at once as there are CPUs.
@@ -643,7 +643,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     if (goals.vmlinux) try packages.vmlinux(&b);
     if (!image_goals and !goals.lock) return;
     try packages.apkoConfig(&b, config);
-    try packages.relock(&b, lock, config, b.form_files);
+    try packages.relock(&b, lock, config);
     if (!image_goals) return;
     const rootfs = try b.path("{s}/rootfs.tar", .{p.out});
     try packages.apkoBuild(&b, rootfs, config, lock, &.{ lock, config });

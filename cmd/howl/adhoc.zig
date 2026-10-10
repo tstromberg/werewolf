@@ -80,6 +80,11 @@ const Weakness = struct { check: []const u8, excuse: []const u8 };
 /// list_keys are the form.yaml lists that --KEY LINE adds to. dev is left out
 /// because --dev is the verbs' debug-shell flag.
 const list_keys = [_][]const u8{ "net", "prune", "modules", "programs" };
+/// scalar_keys are the form.yaml keys --KEY VALUE sets to one value, as
+/// `--updates off` writes `updates: off`; --KEY.SUB VALUE sets their maps.
+const scalar_keys = [_][]const u8{"updates"};
+/// ScalarLine sets a form.yaml key to one value.
+const ScalarLine = struct { key: []const u8, value: []const u8 };
 /// ListLine adds a line to a form.yaml list; MapLine sets a scalar in a map.
 const ListLine = struct { key: []const u8, line: []const u8 };
 const MapLine = struct { key: []const u8, sub: []const u8, value: []const u8 };
@@ -94,6 +99,7 @@ const Plan = struct {
     links: []const Link = &.{},
     lists: []const ListLine = &.{},
     maps: []const MapLine = &.{},
+    scalars: []const ScalarLine = &.{},
     /// weaknesses are the chain's, restated while the form is made.
     weaknesses: []const Weakness = &.{},
     /// ours reports whether any ad-hoc flag was given.
@@ -247,6 +253,7 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
     var images: std.ArrayList(Image) = .empty;
     var lines: std.ArrayList(struct { image: []const u8, line: Line, flag: []const u8 }) = .empty;
     var lists_: std.ArrayList(ListLine) = .empty;
+    var scalars: std.ArrayList(ScalarLine) = .empty;
     var links: std.ArrayList(Link) = .empty;
     var ours = verb == .form;
     var i: usize = 0;
@@ -275,13 +282,16 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         const is_list = for (list_keys) |k| {
             if (name.len > 2 and std.mem.eql(u8, name[2..], k)) break true;
         } else false;
+        const is_scalar = for (scalar_keys) |k| {
+            if (name.len > 2 and std.mem.eql(u8, name[2..], k)) break true;
+        } else false;
         const is_with = std.mem.eql(u8, name, "--with");
         const is_packages = std.mem.eql(u8, name, "--package");
         const is_oci = std.mem.eql(u8, name, "--oci");
         const is_link = std.mem.eql(u8, name, "--link");
         const is_out = verb == .form and std.mem.eql(u8, name, "-o");
         if (!is_with and !is_packages and !is_oci and !is_link and !is_out and !is_list and
-            dot == null)
+            !is_scalar and dot == null)
         {
             // Pass the verb's own flag, and its value if it takes one.
             try rest.append(gpa, a);
@@ -325,6 +335,12 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
                     return why.refuse("--link {s}: A:B, A reaching B", .{pair});
                 try links.append(gpa, .{ .from = pair[0..colon], .to = pair[colon + 1 ..] });
             }
+        } else if (is_scalar) {
+            const value_ = std.mem.trim(u8, v, " \t");
+            if (value_.len == 0) return why.refuse("{s}: an empty value", .{name});
+            for (scalars.items) |have| if (std.mem.eql(u8, have.key, name[2..]))
+                return why.refuse("{s}: twice", .{name});
+            try scalars.append(gpa, .{ .key = name[2..], .value = value_ });
         } else if (is_list) {
             if (std.mem.trim(
                 u8,
@@ -439,8 +455,15 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         try more.append(gpa, l.line);
         img.lines = more.items;
     }
+    // A key given one value is not also a map: --updates off, or --updates.every 1h.
+    for (maps.items) |m| for (scalars.items) |s| if (std.mem.eql(u8, m.key, s.key))
+        return why.refuse(
+            "--{s} {s} and --{s}.{s}: one or the other",
+            .{ s.key, s.value, m.key, m.sub },
+        );
     p.maps = maps.items;
     p.lists = lists_.items;
+    p.scalars = scalars.items;
     for (p.images) |img| for (list_keys) |k| if (std.mem.eql(u8, img.name, k))
         return why.refuse(
             "--oci {s}: a form.yaml key's name; call the image something else",
@@ -543,6 +566,7 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
         try w.writeAll("packages:\n");
         for (p.packages) |pkg| try w.print("  - {s}\n", .{pkg});
     }
+    for (p.scalars) |s| try w.print("{s}: {s}\n", .{ s.key, s.value });
     var net: std.ArrayList([]const u8) = .empty;
     for (p.lists) |l| if (std.mem.eql(u8, l.key, "net")) try net.append(gpa, l.line);
     for (p.images) |i| {
@@ -794,6 +818,7 @@ fn flags(gpa: Allocator, p: Plan) ![]const u8 {
     for (p.links) |l| try w.print(" --link {s}:{s}", .{ l.from, l.to });
     for (p.lists) |l| try w.print(" --{s} '{s}'", .{ l.key, l.line });
     for (p.maps) |m| try w.print(" --{s}.{s} '{s}'", .{ m.key, m.sub, m.value });
+    for (p.scalars) |s| try w.print(" --{s} {s}", .{ s.key, s.value });
     return std.mem.trimStart(u8, out.written(), " ");
 }
 
@@ -807,7 +832,11 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
     // Include loopback ports: two services binding one port collide either way.
     const Port = struct { port: u16, form: []const u8 };
     var ports: std.ArrayList(Port) = .empty;
-    for (c) |f| for (try f.items(gpa, "net")) |line| {
+    var failure: forms.Failure = .{};
+    for (c) |f| for (forms.netLines(gpa, &.{f}, &failure) catch |err| switch (err) {
+        error.Form => return why.refuse("{s}", .{failure.text}),
+        else => return err,
+    }) |line| {
         var bad: []const u8 = "";
         const l = (forms.listen(gpa, line, &bad) catch |err| switch (err) {
             error.Invalid => return why.refuse("{s}/form.yaml: {s}", .{ f.dir, bad }),
@@ -823,7 +852,6 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
         }
     };
     var memory: u64 = 0;
-    var failure: forms.Failure = .{};
     const svcs = forms.services(io, gpa, Dir.cwd(), c, &failure) catch |err| switch (err) {
         error.Form => return why.refuse("{s}", .{failure.text}),
         error.OutOfMemory => return error.OutOfMemory,
@@ -1103,6 +1131,22 @@ test "the files say where they came from" {
         "--with python,valkey --package py3.13-flask",
         try flags(gpa, p),
     );
+}
+
+test "a scalar key: --updates off is updates: off, once, and not also a map" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const p = try plan(gpa, .run, &.{ "--with", "python", "--updates", "off" }, "prod", &why);
+    try testing.expectEqualStrings("off", p.scalars[0].value);
+    try testing.expect(std.mem.indexOf(u8, try renderForm(gpa, p), "\nupdates: off\n") != null);
+    try testing.expectEqualStrings("--with python --updates off", try flags(gpa, p));
+    for ([_][]const []const u8{
+        &.{ "--updates", "off", "--updates", "off" },
+        &.{ "--updates", "off", "--updates.every", "1h" },
+        &.{"--updates"},
+    }) |args| try testing.expectError(error.Refused, plan(gpa, .run, args, "prod", &why));
 }
 
 test "the chain's weaknesses are restated, each once, the later excuse winning" {

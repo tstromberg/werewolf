@@ -36,7 +36,7 @@ Times read as "2 hours ago", with the moment itself on hover. The logo is
 | `scan` (the same program) | `grype` | once an hour, and at start, runs grype over the root (`dir:/`, without `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/data`, `/victim`) and keeps a summary for the page; the only user allowed to fetch |
 | PostgreSQL | `postgres` | keeps every boot's posture report and every scan's summary, which the page reads back, newest first; on a UNIX socket only ([postgresql.md](../postgresql/README.md)) |
 | nginx | `nginx`, master and workers | serves `index.html` from `/data/svc/status/www`, `GET` only, and nothing else; able to bind :80 and nothing else |
-| autoupdate | root | checks Wolfi and Alpine every hour (`/etc/werewolf/update-every`), and on anything newer builds the other slot and reboots into it |
+| autoupdate | root | checks Wolfi and Alpine every hour (form.yaml's `updates: every: 1h`), and on anything newer builds the other slot and reboots into it |
 
 nginx, status and scan are leashed ([programs.md](../../docs/programs.md)): each
 `/etc/sv/NAME/run` is a link to `leash`, which reads the `service` file

@@ -13,6 +13,10 @@ packages:
   - nginx-mainline        # shares openssl 4 with the rest of the image
   - grype
 
+# Wolfi and Alpine are asked hourly, so the page shows patches as they land.
+updates:
+  every: 1h
+
 # make check's, for this form alone (forms/README.md)
 check:
   memory: 2048

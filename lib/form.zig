@@ -408,6 +408,7 @@ const keys = [_][]const u8{
     "accounts",
     "paths",
     "services",
+    "updates",
     "allow",
     "app",
     "programs",
@@ -455,6 +456,46 @@ fn isScalars(node: Node) bool {
     if (node != .list) return false;
     for (node.list) |item| if (item != .scalar) return false;
     return true;
+}
+
+/// duration returns the seconds a time such as 30m, 1h, 20h or 2d names
+/// (s, m, h or d; digits alone are seconds), from five minutes to a week,
+/// or null for anything else.
+pub fn duration(text: []const u8) ?u32 {
+    if (text.len == 0) return null;
+    const unit: u32 = switch (text[text.len - 1]) {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        '0'...'9' => 0,
+        else => return null,
+    };
+    const digits = if (unit == 0) text else text[0 .. text.len - 1];
+    if (!isDigits(digits)) return null;
+    const n = std.fmt.parseInt(u32, digits, 10) catch return null;
+    const seconds = std.math.mul(u32, n, if (unit == 0) 1 else unit) catch return null;
+    return if (seconds >= 5 * 60 and seconds <= 7 * 86400) seconds else null;
+}
+
+/// Updates is form.yaml's updates key along a chain: off, or how often the
+/// machine checks (seconds; null leaves the updater's default).
+pub const Updates = struct { off: bool = false, every: ?u32 = null };
+
+/// updates returns the chain's updates: the last form that says anything
+/// wins whole, so a form on one that turned them off can turn them on.
+pub fn updates(forms: []const Form) Updates {
+    var out: Updates = .{};
+    for (forms) |form| {
+        const u = form.spec.get("updates") orelse continue;
+        if (u == .scalar) {
+            out = .{ .off = true };
+            continue;
+        }
+        out = .{};
+        if (u.get("every")) |e| out.every = duration(e.scalar.text);
+    }
+    return out;
 }
 
 /// isName reports whether s is a form name: a-z, 0-9 and -, so it works as
@@ -510,6 +551,27 @@ pub fn loadIn(
                 "{s}: accounts is apko's: groups and users, each a list",
                 .{path},
             );
+        } else if (mem.eql(u8, e.key, "updates")) {
+            if (e.value == .scalar) {
+                if (!mem.eql(u8, e.value.scalar.text, "off")) return f.fail(
+                    gpa,
+                    "{s}: updates is off, or a map: every: 1h",
+                    .{path},
+                );
+            } else if (e.value != .map) {
+                return f.fail(gpa, "{s}: updates is off, or a map: every: 1h", .{path});
+            } else for (e.value.map) |u| {
+                if (!mem.eql(u8, u.key, "every")) return f.fail(
+                    gpa,
+                    "{s}: updates has no key {s}: every",
+                    .{ path, u.key },
+                );
+                if (u.value != .scalar or duration(u.value.scalar.text) == null) return f.fail(
+                    gpa,
+                    "{s}: updates: every is a time between checks, 5m to 7d: 30m, 1h, 20h, 2d",
+                    .{path},
+                );
+            }
         } else if (mem.eql(u8, e.key, "services")) {
             if (e.value != .map) return f.fail(
                 gpa,
@@ -1465,6 +1527,54 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
         services(io, gpa, tmp.dir, try chain(io, gpa, tmp.dir, "site", &f), &f),
     );
     try testing.expect(mem.indexOf(u8, f.text, "say it once") != null);
+}
+
+test "updates: off, or every so often; the last form that says wins" {
+    try testing.expectEqual(1800, duration("30m").?);
+    try testing.expectEqual(3600, duration("1h").?);
+    try testing.expectEqual(2 * 86400, duration("2d").?);
+    try testing.expectEqual(3600, duration("3600").?);
+    try testing.expectEqual(null, duration("1m")); // under five minutes
+    try testing.expectEqual(null, duration("8d")); // over a week
+    try testing.expectEqual(null, duration("1x"));
+    try testing.expectEqual(null, duration(""));
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    var f: Failure = .{};
+    for ([_][2][]const u8{
+        .{ "base", "updates:\n  every: 20h\n" },
+        .{ "quiet", "base: base\nupdates: off\n" },
+        .{ "loud", "base: quiet\nupdates:\n  every: 30m\n" },
+        .{ "bad-key", "updates:\n  when: never\n" },
+        .{ "bad-time", "updates:\n  every: 1m\n" },
+        .{ "bad-word", "updates: never\n" },
+    }) |form| {
+        try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
+        try tmp.dir.writeFile(
+            io,
+            .{ .sub_path = try gpa.print("forms/{s}/form.yaml", .{form[0]}), .data = form[1] },
+        );
+    }
+    try testing.expectEqual(
+        Updates{ .every = 20 * 3600 },
+        updates(try chain(io, gpa, tmp.dir, "base", &f)),
+    );
+    try testing.expectEqual(
+        Updates{ .off = true },
+        updates(try chain(io, gpa, tmp.dir, "quiet", &f)),
+    );
+    try testing.expectEqual(
+        Updates{ .every = 1800 },
+        updates(try chain(io, gpa, tmp.dir, "loud", &f)),
+    );
+    for ([_][]const u8{ "bad-key", "bad-time", "bad-word" }) |name| {
+        try testing.expectError(error.Form, load(io, gpa, tmp.dir, name, &f));
+        try testing.expect(mem.indexOf(u8, f.text, "updates") != null);
+    }
 }
 
 test "isName" {
