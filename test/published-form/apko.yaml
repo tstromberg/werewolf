@@ -1,3 +1,0 @@
-# published-form: make check-updater-published's form, given by path, on the
-# published prod. It adds no package; its rootfs marker must reach the slot
-# the updater builds, carried from the running image (test/update).

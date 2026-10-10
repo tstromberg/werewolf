@@ -1,0 +1,5 @@
+# Mastodon's cleanup, in UTC, each job through sh-shim (forms/cron): remote
+# media after 7 days and link-preview cards after 14, as Mastodon advises.
+SHELL=/usr/lib/werewolf/sh-shim
+15 3 * * * /usr/bin/ruby /usr/lib/mastodon/bin/tootctl media remove --days 7
+45 3 * * * /usr/bin/ruby /usr/lib/mastodon/bin/tootctl preview_cards remove --days 14

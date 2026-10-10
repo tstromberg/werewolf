@@ -1,3 +1,4 @@
+# The tutorial's code replaces php's default site; services and policy inherit.
 base: php
 
 # The posture checks this form fails, and why: its own, never inherited

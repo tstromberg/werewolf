@@ -1,4 +1,21 @@
+# webshell-example: a deliberately vulnerable web application, leashed, to
+# show werewolf contains remote code execution (docs/forms.md, and
+# usr/lib/app/webshell.py). It is prod and Python, as the python form is;
+# the app runs arbitrary commands from HTTP and proves it gains nothing.
+#
+# It ships coreutils and net-tools too, so the image holds dozens of real
+# programs -- cat, dd, chroot, ifconfig, route among them. The leash lets
+# the application exec only three of them (hostname, id, uname; see
+# etc/sv/app/service), so the demo shows both that remote execution does
+# run and that the `run` allowlist, not the mere absence of tools, is what
+# bounds it: cat /etc/shadow and ifconfig are right there and still refused.
 base: python
+
+packages:
+  - py3.13-flask
+  - py3.13-gunicorn
+  - coreutils             # id, uname (and cat, dd, chroot: present, not allowed to run)
+  - net-tools             # hostname (and ifconfig, route: present, not allowed to run)
 
 # The page serves on 8080.
 net:

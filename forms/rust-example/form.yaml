@@ -1,3 +1,4 @@
+# A static musl binary: no Rust toolchain or extra runtime packages in the VM.
 base: app
 
 net:

@@ -79,6 +79,13 @@ pub fn stamp(b: *B, recipe: []const u8) ![]const u8 {
 /// its stamp is newer than the recipe and, under QEMU, than the guest and
 /// kernel. melange checks each source by sha256.
 pub fn build(b: *B, recipe: []const u8) !void {
+    // One melange at a time, across builds: they share the guest's scratch
+    // files, the cache and the packages, and two at once read each other's
+    // half-written files. One that waited finds its package made.
+    try Dir.cwd().createDirPath(b.io, vendor);
+    const lock = try Dir.cwd().createFile(b.io, vendor ++ "/melange.lock", .{ .truncate = false });
+    defer lock.close(b.io);
+    try lock.lock(b.io, .exclusive);
     const r = try runner(b);
     const at = try b.absolute(vendor);
     const scratch = try b.path("{s}/melange-tmp", .{at});

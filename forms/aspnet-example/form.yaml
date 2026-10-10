@@ -1,5 +1,8 @@
 base: app
 
+packages:
+  - aspnet-10-runtime
+
 # Taken back of werewolf's defaults (lib/allow.zig): .NET compiles the
 # example to machine code as it runs.
 allow: [jit]

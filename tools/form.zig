@@ -82,7 +82,7 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     }
     if (is(verb, "depends") and args.len == 2) {
         const fm = try form.load(io, gpa, root, args[1], f);
-        for (try compose.formDepends(io, gpa, root, fm, f)) |d| try w.print("{s}\n", .{d});
+        for (try compose.formDepends(gpa, fm)) |d| try w.print("{s}\n", .{d});
         return;
     }
     if (is(verb, "released") and args.len == 1) {
@@ -180,7 +180,7 @@ fn arch(name: []const u8) error{Usage}!compose.Arch {
     return std.meta.stringToEnum(compose.Arch, name) orelse error.Usage;
 }
 
-/// all returns the sorted names of the directories in forms/ that hold an apko.yaml.
+/// all returns the sorted names of the directories in forms/ that hold a form.yaml.
 fn all(io: Io, gpa: Allocator) ![]const []const u8 {
     var dir = try Dir.cwd().openDir(io, "forms", .{ .iterate = true });
     defer dir.close(io);
@@ -188,7 +188,7 @@ fn all(io: Io, gpa: Allocator) ![]const []const u8 {
     var it = dir.iterate();
     while (try it.next(io)) |e| {
         if (e.kind != .directory or !form.isName(e.name)) continue;
-        const path = try gpa.print("{s}/apko.yaml", .{e.name});
+        const path = try gpa.print("{s}/form.yaml", .{e.name});
         dir.access(io, path, .{}) catch continue;
         try names.append(gpa, try gpa.dupe(u8, e.name));
     }

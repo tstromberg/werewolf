@@ -1,6 +1,6 @@
 # Tailscale subnet router
 
-Give allowed tailnet clients access to a subnet using [the Tailscale form](apko.yaml).
+Give allowed tailnet clients access to a subnet using [the Tailscale form](form.yaml).
 See its [security precautions](../../examples/tailscale/README.md#security-precautions).
 The image supplies the network and service restrictions; boot configuration
 supplies routes and enrollment credentials.

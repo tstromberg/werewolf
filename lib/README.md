@@ -119,8 +119,8 @@ route to it.
 
 ## form
 
-Reads a form (`forms/NAME`: apko.yaml and form.yaml), resolves its chain
-of `base` and `with` forms, and merges their apko configs by the rules of
+Reads a form (`forms/NAME/form.yaml`), resolves its chain
+of `base` and `with` forms, and merges what they give apko by the rules of
 apko's deprecated `include:`. Used by tools/form.zig, howl and slot-update.
 It parses a strict YAML subset (block maps and lists, scalars, `[a, b]`,
 comments) and refuses anchors, tags, multi-line scalars and inline maps by
@@ -140,20 +140,20 @@ scratch directory the updater copies in with its own checks, never the
 new root, where a package's symlink could redirect a write. See
 [docs/design/custom-updates.md](../docs/design/custom-updates.md).
 
-Each image stages its chain (form.yaml, apko.yaml, rootfs) and
+Each image stages its chain (form.yaml, rootfs) and
 posture-known in /usr/share/werewolf. A form CI publishes, NAME-form, holds
 the same staged tree (`stage`) and depends on what the form names
 (`formDepends`); `published` makes a build's world those packages, so the
 updater composes from the new root's forms, and from the image's own copy
 of a form given as a path.
-compose adds apko.yaml's accounts the way apko does: on the build's root it
+compose adds the forms' accounts the way apko does: on the build's root it
 checks that apko's lines end each account file, in order; on a machine's,
 which apk filled, it adds them. It refuses a root holding only some of them,
 and a home other than /var/empty or /dev/null, which no machine would make.
 `make check-compose` recomposes a built image from what it staged and must
 match the build.
 
-A service user that apko.yaml does not declare gets a user and group of
+A service user that no form's accounts declare gets a user and group of
 its own, with id `defaultId(name)`: an FNV-1a hash of the name in
 [65536, 2^31), so the id is the same on every build and machine and the
 service keeps its files on /data. The build fails if two services share a

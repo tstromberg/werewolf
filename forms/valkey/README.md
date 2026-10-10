@@ -5,7 +5,7 @@ application on the same machine, as `postgresql` is its database.
 
 | | |
 | --- | --- |
-| Listens | a UNIX socket, `/run/svc/valkey/valkey.sock`, mode 660 for the `valkey` group, and nothing else: `port 0`, and the form declares none |
+| Listens | a UNIX socket, `/run/svc/valkey/valkey.sock`, mode 660 for the `valkey` group, which a client's service joins with `group valkey`, and nothing else: `port 0`, and the form declares none |
 | Sends | nothing |
 | Runs as | `valkey` (a uid of its own, its name's hash), leashed: it reads the image and writes only its own directories |
 | Keeps | RDB snapshots in `/data/svc/valkey`; the append-only log is a line away (`appendonly yes`) |

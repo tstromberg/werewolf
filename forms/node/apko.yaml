@@ -1,8 +1,0 @@
-# node: prod with Node.js, for an application a form on this one brings:
-# its program in /usr/lib/app (form.yaml's app), verified and read-only
-# with the rest of the root, and etc/sv/app/service, which starts it.
-# node-app brings the service, for howl's --app to lay the program over;
-# node-example brings both. See docs/forms.md.
-contents:
-  packages:
-    - nodejs-22

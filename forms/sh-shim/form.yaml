@@ -1,3 +1,4 @@
+# sh-shim: no packages of its own. See forms/sh-shim/form.yaml.
 base: minimal
 
 # sh-shim, /bin/sh for programs that run `sh -c COMMAND`: one program and

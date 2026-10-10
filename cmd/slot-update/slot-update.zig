@@ -65,7 +65,7 @@ const kernel_cves_url = "https://git.kernel.org/pub/scm/linux/security/vulns.git
 pub const max_read = 256 << 20;
 
 /// update_id is _update's uid, which the fetching and parsing children run as
-/// (forms/prod/apko.yaml).
+/// (forms/prod/form.yaml).
 pub const update_id: u32 = 69;
 /// net_root is the fetcher's chroot; cves_dir receives fetched files.
 const net_root = work_dir ++ "/net";

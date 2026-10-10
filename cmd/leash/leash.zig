@@ -93,6 +93,15 @@ pub fn main(init: std.process.Init) !void {
     const passwd = Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
     const user = lookupUser(passwd, s.user) orelse
         l.fail(.park, "no user {s} in /etc/passwd", .{s.user});
+    // The groups it joins, each another service's (lib/compose.zig checks
+    // that at build), and never one below the services' ids: a system's.
+    const group_file = Dir.cwd().readFileAlloc(io, "/etc/group", gpa, .limited(1 << 20)) catch "";
+    const groups = try gpa.alloc(linux.gid_t, s.groups.len);
+    for (s.groups, groups) |group_name, *gid| {
+        gid.* = lookupGroup(group_file, group_name) orelse
+            l.fail(.park, "no group {s} in /etc/group", .{group_name});
+        if (gid.* < 1 << 16) l.fail(.park, "group {s} is a system's", .{group_name});
+    }
     if (user.uid == 0 or user.gid == 0) l.fail(.park, "{s} is root's", .{s.user});
     // The build could not tell this service's directories from another's.
     // Each narrowed program's link ships in the image, as ./run does.
@@ -145,12 +154,11 @@ pub fn main(init: std.process.Init) !void {
 
     const run_dir = try gpa.printSentinel("/run/svc/{s}", .{name}, 0);
     const data_dir = try gpa.printSentinel("/data/svc/{s}", .{name}, 0);
-    const mode = s.share.mode();
     _ = linux.mkdir("/run/svc", 0o755);
-    own(l, run_dir, user, mode);
+    own(l, run_dir, user, s.share);
     if (!nodata) {
         _ = linux.mkdir("/data/svc", 0o755);
-        own(l, data_dir, user, mode);
+        own(l, data_dir, user, s.share);
     }
     if (s.nofile) |n| {
         if (linux.errno(linux.setrlimit(.NOFILE, &.{ .cur = n, .max = n })) != .SUCCESS)
@@ -271,7 +279,8 @@ pub fn main(init: std.process.Init) !void {
     const low_port = for (s.listen) |p| {
         if (p < 1024) break true;
     } else false;
-    dropTo(user, low_port) catch |err| l.fail(.park, "giving root up: {s}", .{@errorName(err)});
+    dropTo(user, groups, low_port) catch |err|
+        l.fail(.park, "giving root up: {s}", .{@errorName(err)});
 
     // --- leashed --------------------------------------------------------------
 
@@ -504,11 +513,13 @@ fn learning() bool {
 // --- as root ---------------------------------------------------------------------
 
 /// own makes dir if needed, then gives it, not its contents, to user with
-/// mode. A recursive chown as root could hand the user a file it should not
-/// have. It changes dir through a descriptor opened with NOFOLLOW, so a link
-/// swapped in for dir cannot redirect the chown or chmod. It parks the
-/// service if dir is not a directory or cannot be changed.
-fn own(l: Leash, dir: [:0]const u8, user: User, mode: u32) void {
+/// share's mode, and for `share group` its default ACL. A recursive chown
+/// as root could hand the user a file it should not have. It changes dir
+/// through a descriptor opened with NOFOLLOW, so a link swapped in for dir
+/// cannot redirect the chown, chmod or ACL. It parks the service if dir is
+/// not a directory or cannot be changed.
+fn own(l: Leash, dir: [:0]const u8, user: User, share: service.Share) void {
+    const mode = share.mode();
     _ = linux.mkdir(dir, @intCast(mode));
     const rc = linux.open(
         dir,
@@ -532,7 +543,34 @@ fn own(l: Leash, dir: [:0]const u8, user: User, mode: u32) void {
         l.fail(.park, "cannot give {s} to its user", .{dir});
     if (st.mode & 0o7777 != mode and linux.errno(linux.fchmod(fd, mode)) != .SUCCESS)
         l.fail(.park, "cannot set {s} to {o}", .{ dir, mode });
+    if (share == .group) {
+        const set = linux.fsetxattr(fd, "system.posix_acl_default", &group_acl, group_acl.len, 0);
+        if (linux.errno(set) != .SUCCESS)
+            l.fail(.park, "cannot share {s} with its group: {t}", .{ dir, linux.errno(set) });
+    }
 }
+
+/// group_acl is the default ACL of a `share group` directory, as the kernel
+/// takes it (system.posix_acl_default, version 2): what is made in it gets
+/// its user's and group's rights in full and others' read and search, the
+/// umask aside. So the group writes what any of its services made, and
+/// others read it as they would under umask 022.
+const group_acl = acl: {
+    const Entry = struct { tag: u16, perm: u16 };
+    const entries = [_]Entry{
+        .{ .tag = 0x01, .perm = 7 }, // ACL_USER_OBJ rwx
+        .{ .tag = 0x04, .perm = 7 }, // ACL_GROUP_OBJ rwx
+        .{ .tag = 0x20, .perm = 5 }, // ACL_OTHER r-x
+    };
+    var b: [4 + entries.len * 8]u8 = undefined;
+    std.mem.writeInt(u32, b[0..4], 2, .little);
+    for (entries, 0..) |e, i| {
+        std.mem.writeInt(u16, b[4 + i * 8 ..][0..2], e.tag, .little);
+        std.mem.writeInt(u16, b[6 + i * 8 ..][0..2], e.perm, .little);
+        std.mem.writeInt(u32, b[8 + i * 8 ..][0..4], 0xffff_ffff, .little);
+    }
+    break :acl b;
+};
 
 /// readSecret returns the one-line secret at path, at most 4 KiB, without
 /// its trailing newline.
@@ -707,7 +745,7 @@ fn interpreter(head: []const u8) !?[]const u8 {
 /// dropTo switches to user for good. It keeps no supplementary groups and
 /// no capability but CAP_NET_BIND_SERVICE when bind_low, which survives exec.
 /// It fails with StillRoot if root can be regained.
-fn dropTo(user: User, bind_low: bool) !void {
+fn dropTo(user: User, groups: []const linux.gid_t, bind_low: bool) !void {
     // EINVAL means the kernel does not know the capability, so it cannot
     // grant it either. Any other failure is an error.
     var cap: usize = 0;
@@ -717,7 +755,7 @@ fn dropTo(user: User, bind_low: bool) !void {
         if (linux.errno(rc) != .INVAL) try check(rc);
     }
     if (bind_low) try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
-    try check(linux.setgroups(0, &[_]linux.gid_t{}));
+    try check(linux.setgroups(groups.len, groups.ptr));
     try check(linux.setresgid(user.gid, user.gid, user.gid));
     try check(linux.setresuid(user.uid, user.uid, user.uid));
     const keep: u32 = if (bind_low) 1 << linux.CAP.NET_BIND_SERVICE else 0;
@@ -872,6 +910,18 @@ fn lookupUser(passwd: []const u8, name: []const u8) ?User {
     return null;
 }
 
+/// lookupGroup returns name's gid from group text, or null.
+fn lookupGroup(group: []const u8, name: []const u8) ?linux.gid_t {
+    var lines = std.mem.tokenizeScalar(u8, group, '\n');
+    while (lines.next()) |line| {
+        var f = std.mem.splitScalar(u8, line, ':');
+        if (!std.mem.eql(u8, f.next() orelse continue, name)) continue;
+        _ = f.next() orelse return null;
+        return std.fmt.parseInt(linux.gid_t, f.next() orelse return null, 10) catch null;
+    }
+    return null;
+}
+
 /// writeIn writes text to the existing cgroup control file dir/file,
 /// without creating or truncating it.
 fn writeIn(gpa: Allocator, dir: [:0]const u8, file: []const u8, text: []const u8) bool {
@@ -957,6 +1007,28 @@ test interpreter {
     std.mem.writeInt(u16, elf[0x38..0x3a], 60, .little); // headers past the bytes read
     try testing.expectError(error.NotElf, interpreter(&elf));
     try testing.expectError(error.NotElf, interpreter("#!/bin/sh\n"));
+}
+
+test group_acl {
+    // The header, then user::rwx, group::rwx and other::r-x, in the tag
+    // order the kernel requires, each with no id.
+    try testing.expectEqualSlices(u8, &.{
+        2,    0,    0,    0,
+        0x01, 0,    7,    0,
+        0xff, 0xff, 0xff, 0xff,
+        0x04, 0,    7,    0,
+        0xff, 0xff, 0xff, 0xff,
+        0x20, 0,    5,    0,
+        0xff, 0xff, 0xff, 0xff,
+    }, &group_acl);
+}
+
+test lookupGroup {
+    const group = "root:x:0:root\nvalkey:x:1234567:\nvalkey2:x:5:\nbad:x:z:\n";
+    try testing.expectEqual(1234567, lookupGroup(group, "valkey").?);
+    try testing.expectEqual(null, lookupGroup(group, "valk"));
+    try testing.expectEqual(null, lookupGroup(group, "bad"));
+    try testing.expectEqual(null, lookupGroup("", "valkey"));
 }
 
 test lookupUser {

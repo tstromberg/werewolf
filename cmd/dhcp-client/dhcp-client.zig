@@ -15,7 +15,7 @@ const state_dir = "/run/werewolf/network";
 const nic_path = state_dir ++ "/nic";
 const lease_path = state_dir ++ "/lease.json";
 const empty_dir = "/var/empty";
-/// engine_id is the uid of _dhcp, defined in forms/prod/apko.yaml.
+/// engine_id is the uid of _dhcp, defined in forms/prod/form.yaml.
 const engine_id: u32 = 67;
 
 const client_port = 68;

@@ -24,6 +24,9 @@ pub var arch: ?howl.Arch = null;
 /// index is the repository's packages for arch, fetched once a run.
 var index: ?[]const apk.Record = null;
 
+/// warned are the forms a run has warned are not published, so it warns once.
+var warned: std.array_hash_map.String(void) = .empty;
+
 const max_index = 64 << 20;
 const max_package = 16 << 20;
 
@@ -56,6 +59,15 @@ pub fn names(
     const a = for_arch orelse return "forms";
     const dir = try gpa.print("build/published/{t}", .{a});
     const records = try fetchIndex(io, gpa, a, why);
+    // Every program depends on the format's package: without it, nothing
+    // published installs.
+    for (records) |r| {
+        if (mem.eql(u8, r.name, compose.format_package)) break;
+    } else return why.refuse(
+        "werewolf's repository has no {s} yet, this checkout's format: CI publishes it " ++
+            "once main's checks pass; --build builds from this checkout until then",
+        .{compose.format_package},
+    );
     var queue: std.ArrayList([]const u8) = .empty;
     if (mem.findScalar(u8, ref, '/') == null) {
         try queue.append(gpa, ref);
@@ -120,13 +132,13 @@ fn fetchForm(
     why: *Why,
 ) !void {
     const pkg = try gpa.print("{s}-form", .{name});
-    const want = pick(records, pkg, pins) orelse return why.refuse(
-        "no published form {s}: werewolf's repository has no {s} for format {d}; " ++
-            "a form of your own is a path (./{s}), and --build takes forms/{s}",
-        .{ name, pkg, compose.format, name, name },
-    );
     const into = try gpa.print("{s}/{s}", .{ dir, name });
     const mark = try gpa.print("{s}/.{s}.version", .{ dir, name });
+    const want = pick(
+        records,
+        pkg,
+        pins,
+    ) orelse return fromTree(io, gpa, name, pkg, into, mark, why);
     const had = Dir.cwd().readFileAlloc(io, mark, gpa, .limited(256)) catch "";
     if (mem.eql(u8, had, want.version)) {
         if (Dir.cwd().access(io, into, .{})) |_| return else |_| {}
@@ -143,6 +155,49 @@ fn fetchForm(
     try Dir.cwd().deleteTree(io, into);
     try Dir.cwd().rename(tmp, Dir.cwd(), into, io);
     try Dir.cwd().writeFile(io, .{ .sub_path = mark, .data = want.version });
+}
+
+/// fromTree takes forms/NAME from this checkout for a form the repository
+/// does not have yet, as main's new forms are until CI publishes them: into
+/// links to it, with no version mark, so the build counts it local
+/// (fetched), and a machine made from it never updates it. It warns.
+fn fromTree(
+    io: Io,
+    gpa: Allocator,
+    name: []const u8,
+    pkg: []const u8,
+    into: []const u8,
+    mark: []const u8,
+    why: *Why,
+) !void {
+    const tree = try gpa.print("forms/{s}", .{name});
+    Dir.cwd().access(io, try gpa.print("{s}/form.yaml", .{tree}), .{}) catch return why.refuse(
+        "no published form {s}: werewolf's repository has no {s} for format {d}; " ++
+            "a form of your own is a path (./{s}), and --build takes forms/{s}",
+        .{ name, pkg, compose.format, name, name },
+    );
+    if (!(try warned.getOrPut(gpa, name)).found_existing) howl.say(
+        io,
+        "warning: {s} is not published yet ({s}): building ./forms/{s}, " ++
+            "which a machine made now never updates; make it again once CI publishes it",
+        .{ name, pkg, name },
+    );
+    Dir.cwd().deleteFile(io, mark) catch {};
+    Dir.cwd().deleteTree(io, into) catch {};
+    try Dir.cwd().createDirPath(io, std.fs.path.dirname(into).?);
+    const abs = try std.fs.path.resolveAlloc(
+        gpa,
+        &.{ try std.process.currentPathAlloc(io, gpa), tree },
+    );
+    try Dir.cwd().symLink(io, abs, into, .{});
+}
+
+/// fetched reports whether form name in dir came from werewolf's
+/// repository: it has a version mark, which fromTree's never has.
+pub fn fetched(io: Io, gpa: Allocator, dir: []const u8, name: []const u8) bool {
+    const mark = gpa.print("{s}/.{s}.version", .{ dir, name }) catch return false;
+    Dir.cwd().access(io, mark, .{}) catch return false;
+    return true;
 }
 
 /// pick returns pkg's record: the version pins name, or the newest for

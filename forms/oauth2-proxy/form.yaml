@@ -1,4 +1,14 @@
+# oauth2-proxy: prod, with a login in front of anything: it asks an OIDC
+# provider (Google, Entra, Keycloak, Authentik, GitHub) who the visitor
+# is, and lets those the settings allow through to the upstream, which
+# is a form of your own's (static://200 here, a wall with nothing behind
+# it). TLS is in front of it, caddy or the cloud's balancer, which its
+# cookies require. leash starts it (etc/sv/oauth2-proxy/service) as the
+# oauth2-proxy user. See forms/oauth2-proxy/README.md.
 base: prod
+
+packages:
+  - oauth2-proxy
 
 # oauth2-proxy serves :4180 (behind caddy), reaches the OIDC provider over
 # HTTPS and the names to find it, and the upstream it fronts on this

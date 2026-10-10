@@ -60,7 +60,7 @@ endif
 endif
 FORM_DIRS := $(shell $(FORM_ASK) dirs $(FORM_REF))
 FORM_DIR := $(lastword $(FORM_DIRS))
-FORM_FILES := $(wildcard $(addsuffix /apko.yaml,$(FORM_DIRS)) $(addsuffix /form.yaml,$(FORM_DIRS)))
+FORM_FILES := $(wildcard $(addsuffix /form.yaml,$(FORM_DIRS)))
 # form_list KEY is form.yaml's KEY along the chain; form_check KEY, its check: KEY.
 form_list = $(shell $(FORM_ASK) list $(FORM_REF) $(1))
 form_check = $(shell $(FORM_ASK) check $(FORM_REF) $(1))
@@ -334,7 +334,7 @@ endif
 EL2 = $(if $(filter aarch64,$(ARCH)),$(shell echo quit | qemu-system-aarch64 -M virt,virtualization=on -accel $(ACCEL) -cpu $(CPU) -nodefaults -display none -monitor stdio -S >/dev/null 2>&1 && echo ,virtualization=on))
 QEMU = qemu-system-$(ARCH) -M $(MACHINE)$(EL2) -accel $(ACCEL) -cpu $(CPU) -nographic
 
-FORMS := $(patsubst forms/%/apko.yaml,%,$(wildcard forms/*/apko.yaml))
+FORMS := $(patsubst forms/%/form.yaml,%,$(wildcard forms/*/form.yaml))
 CHECK = $(BUILD)/check$(if $(SEAL_LEARN),-learn)
 # test/checks needs a root shell on the console, so checks build with DEV=1.
 CHECK_MAKE = $(MAKE) --no-print-directory DEV=1

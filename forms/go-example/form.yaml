@@ -1,3 +1,4 @@
+# A compiled application needs prod, with no Go toolchain in the VM.
 base: app
 
 net:

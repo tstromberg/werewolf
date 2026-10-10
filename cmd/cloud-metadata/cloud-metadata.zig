@@ -11,7 +11,7 @@ const sys = sandbox.sys;
 
 const out_dir = "/run/werewolf/cloud";
 const empty_dir = "/var/empty";
-/// fetcher_id is the _cloud account in forms/prod/apko.yaml.
+/// fetcher_id is the _cloud account in forms/prod/form.yaml.
 const fetcher_id: u32 = 68;
 const metadata_ip = [4]u8{ 169, 254, 169, 254 };
 

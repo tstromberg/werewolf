@@ -1,0 +1,78 @@
+# mastodon: Mastodon, on ruby, with PostgreSQL, Valkey, Caddy, supercronic
+# and sh-shim beside it (form.yaml's with). Wolfi does not ship Mastodon:
+# melange builds it from a pinned release in Wolfi's environment
+# (forms/mastodon/melange/mastodon.yaml, cmd/howl/melange.zig) into
+# /usr/lib/mastodon, its assets compiled and its gems vendored. The
+# libraries they link are named below, so the updater keeps them current.
+# Three services run it: the web (etc/sv/mastodon), the streaming server
+# (etc/sv/mastodon-streaming) and the jobs (etc/sv/mastodon-jobs), each on
+# its own leash. See forms/mastodon/README.md.
+base: ruby
+
+packages:
+  - nodejs-24
+  - jemalloc
+  # Media: libvips in the web and jobs, by FFI; ffmpeg, ffprobe and file
+  # each narrowed (docs/design/narrow.md).
+  - libvips
+  - ffmpeg-9.0
+  - file
+  # What forms/mastodon/melange/mastodon.yaml's gems link, from Wolfi;
+  # the build fails if one is missing.
+  - icu-libs
+  - libidn
+  - libpq-17
+  - libffi
+  - libxml2
+  - libxslt
+  - zlib
+
+# The web's, the jobs' and cron's users share the web's group, its primary
+# one, since leash keeps no other: the media and secrets in the web's
+# `share group` directory are theirs (README.md). Each id is the one its
+# name's hash would give it (forms/README.md).
+accounts:
+  groups:
+    - groupname: mastodon
+      gid: 986418474
+  users:
+    - username: mastodon
+      uid: 986418474
+      gid: 986418474
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: mastodon-jobs
+      uid: 979281085
+      gid: 986418474
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: mastodon-cron
+      uid: 1924668105
+      gid: 986418474
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+# Mastodon's parts beside it: its database, its queue and cache, Caddy in
+# front with HTTPS for the domain, its timers, and /bin/sh for the
+# commands Paperclip runs through it (cmd/sh-shim). See
+# forms/mastodon/README.md.
+with: [postgresql, valkey, caddy, cron, sh-shim]
+
+net:
+  # Puma and the streaming server, behind Caddy, for the machine alone.
+  - listen tcp/3000 tcp/4000 loopback
+  # Federation, link previews and remote media, to public addresses only:
+  # fence keeps them off private, loopback, link-local and metadata ones.
+  # DNS from the machine's resolver; mail by submission.
+  - connect mastodon tcp/443 tcp/80 tcp/587 public
+  - connect mastodon udp/53 tcp/53
+
+# make check's, for this form alone (forms/README.md)
+check:
+  memory: 4096
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: ruby and node run Mastodon, which is what this form is for
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)

@@ -22,7 +22,7 @@ Zig is pinned to the version in the Makefile's `ZIG_VERSION`. Zig changes betwee
 | `cmd/NAME/` | one program per job, written in Zig, each with a README on how it works |
 | `cmd/howl/` | `howl`, the command users build and run machines with |
 | `lib/` | code the programs share: sandboxing, seccomp promises, verity, forms |
-| `forms/NAME/` | a form: `apko.yaml` (packages), `form.yaml` (what werewolf adds), `rootfs/`, `test/` ([forms/README.md](forms/README.md)) |
+| `forms/NAME/` | a form: `form.yaml` (its packages, and what werewolf adds), `rootfs/`, `test/` ([forms/README.md](forms/README.md)) |
 | `test/` | the scripts `make check` boots and attacks machines with |
 | `release/` | building, signing and publishing releases |
 | `docs/` | user docs; `docs/design/` holds design docs |

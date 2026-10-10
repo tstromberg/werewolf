@@ -1,4 +1,0 @@
-# A userspace subnet router, without TUN or host firewall privileges.
-contents:
-  packages:
-    - tailscale

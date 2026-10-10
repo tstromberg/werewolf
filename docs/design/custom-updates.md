@@ -56,10 +56,10 @@ trees, `--app` and local recipes, signed by a key the build makes and then
 discards. apk takes a package from a tagged repository only when world names
 it `name@local`, so world lists exactly what will not update.
 
-**What howl builds.** A form named is the published one, fetched with the
-forms it names and checked against the signed index (lib/apk.zig), so the
-machine updates it. A path is the caller's own, never updated; its names are
-published. `--build` takes the tree's forms and programs; phase 4 makes them `@local`.
+**What howl builds.** A form named is the published one, fetched and checked
+against the signed index (lib/apk.zig), which the machine updates; one not yet
+published is the checkout's, with a warning. A path is the caller's, never
+updated. `--build` takes the tree's forms and programs; phase 4 makes them `@local`.
 
 **compose** (lib/compose.zig; lib/README.md) lays the staged forms and writes
 what the chain derives. The updater runs it over the accounts apk laid, from

@@ -1,4 +1,13 @@
+# qemu-host: sshd plus QEMU and KVM, to run virtual machines of its own.
+# It allows kvm (form.yaml's allow): KVM starts, but its guests cannot
+# run virtual machines in turn, as nested virtualization is how a guest
+# reaches its host's hypervisor. A form that wants that too allows
+# nested-kvm. Wolfi's qemu brings both system emulators, the firmware and
+# qemu-img; the guests' images belong on /data, which QEMU reads, not runs.
 base: sshd
+
+packages:
+  - qemu
 
 # Taken back of werewolf's defaults (lib/allow.zig): KVM, for its guests,
 # which cannot run virtual machines of their own (no nested-kvm).

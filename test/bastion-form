@@ -11,8 +11,8 @@ mkdir -p "$check" && rm -rf "$dir" && mkdir -p "$dir/test"
 test/keys "$dir" "$provider"
 test/keys "$check/bastion-narrow" "$provider"
 cp forms/bastion/test/checks "$dir/test/checks"
-echo '# make check-bastion: the bastion, with two users.' >"$dir/apko.yaml"
 {
+	echo '# make check-bastion: the bastion, with two users.'
 	echo 'base: bastion'
 	echo 'bastion:'
 	echo '  users:'

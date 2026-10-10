@@ -848,11 +848,7 @@ pub fn createProxmox(
 /// on vzNAT, unmanaged, and is stopped hard.
 fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
     const c = try chain(io, gpa, form, why);
-    var f: forms.Failure = .{};
-    const config = forms.apko(io, gpa, Dir.cwd(), c, &.{}, &f) catch |err| switch (err) {
-        error.Form => return why.refuse("{s}", .{f.text}),
-        error.OutOfMemory => return error.OutOfMemory,
-    };
+    const config = try forms.apko(gpa, c, &.{});
     var sshd = false;
     var bash = false;
     const packages = (config.get("contents") orelse return false).get("packages") orelse

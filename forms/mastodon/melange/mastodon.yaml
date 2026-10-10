@@ -1,0 +1,101 @@
+# Mastodon for werewolf's mastodon form, as Wolfi would package it: built
+# by melange in Wolfi's environment with Wolfi's Ruby 4.0 and Node 24, its
+# gems' native parts linked to Wolfi's libpq, ICU, libidn, libyaml and
+# OpenSSL, so their fixes reach a machine with the rest of its packages
+# (howl unpacks it into the image and checks what it links:
+# cmd/howl/melange.zig). The assets are built here, so the machine runs
+# Node only for the streaming server. Offered to wolfi-dev/os as it is;
+# when Wolfi ships it, the form names the package and this file goes.
+package:
+  name: mastodon
+  version: 4.7.3
+  epoch: 0
+  description: Decentralized social network server
+  copyright:
+    - license: AGPL-3.0-or-later
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - corepack
+      - gdbm-dev
+      - git
+      - gmp-dev
+      - icu-dev
+      - libffi-dev
+      - libidn-dev
+      - libvips
+      - libxml2-dev
+      - libxslt-dev
+      - nodejs-24
+      - openssl-dev
+      - postgresql-17-dev
+      - python-3.13
+      - ruby-4.0
+      - ruby-4.0-dev
+      - ruby4.0-bundler
+      - shared-mime-info
+      - yaml-dev
+      - zlib-dev
+  environment:
+    RAILS_ENV: production
+    NODE_ENV: production
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://github.com/mastodon/mastodon/archive/refs/tags/v${{package.version}}.tar.gz
+      expected-sha256: b9fca0d53c9005c2e84f23f55b2e32b045909afeb1931ae6de350a63497b85b2
+
+  # Built where it runs, /usr/lib/mastodon, since bootsnap's cache and
+  # some gems record their paths. Gems as Mastodon's image installs them,
+  # less those for development and tests, into vendor/bundle, each from
+  # source against Wolfi's libraries: never a gem's own build of libpq,
+  # libxml2 or libffi, which Wolfi's fixes would not reach. The image's
+  # Bundler runs them, not the lockfile's, which would fetch its own.
+  - runs: |
+      mkdir -p /usr/lib/mastodon
+      cp -a . /usr/lib/mastodon
+      cd /usr/lib/mastodon
+      rm -f v${{package.version}}.tar.gz
+      bundle config set --local deployment true
+      bundle config set --local without 'development test'
+      bundle config set --local version system
+      bundle config set --local force_ruby_platform true
+      NOKOGIRI_USE_SYSTEM_LIBRARIES=1 bundle install -j"$(nproc)"
+
+  # The assets, built here, so the machine serves them as files; then only
+  # the streaming server's modules, the one part that runs Node; then
+  # bootsnap's cache, which the machine reads and never writes.
+  - runs: |
+      cd /usr/lib/mastodon
+      export COREPACK_HOME="$PWD/.corepack"
+      # Mastodon's Vite builder runs yarn from PATH.
+      corepack enable --install-directory /usr/local/bin yarn
+      yarn workspaces focus --production @mastodon/mastodon
+      SECRET_KEY_BASE_DUMMY=1 bundle exec rails assets:precompile
+      rm -rf node_modules
+      yarn workspaces focus --production @mastodon/streaming
+      bundle exec bootsnap precompile --gemfile app/ lib/ config/
+
+  - runs: |
+      cd /usr/lib/mastodon
+      rm -rf .corepack .yarn/cache .github log spec tmp/cache/vite vendor/bundle/ruby/*/cache
+      mkdir -p ${{targets.destdir}}/usr/lib
+      cp -a /usr/lib/mastodon ${{targets.destdir}}/usr/lib/mastodon
+
+  - uses: strip
+
+update:
+  enabled: true
+  github:
+    identifier: mastodon/mastodon
+    strip-prefix: v

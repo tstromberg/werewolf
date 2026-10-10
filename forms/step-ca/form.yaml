@@ -1,4 +1,17 @@
+# step-ca: prod, with step-ca as an internal certificate authority, named
+# for what runs, as postgresql is. The intermediate's key and certificate,
+# the root's certificate and the intermediate key's password come from
+# the config; the root's key never comes to the machine. One provisioner,
+# ACME, bound by an x509 policy to the names the config allows (--domains);
+# remote administration is off, so ca.json in the image is the only way
+# to change provisioners, and a form of your own adds a JWK one for its
+# operators. Its database (badger) is in /data/svc/step-ca. leash starts
+# it (etc/sv/step-ca/service) as the step user, on :443. See
+# forms/step-ca/README.md.
 base: prod
+
+packages:
+  - step-ca
 
 # step-ca serves ACME and its API on :443, and validates ACME's http-01
 # challenges on the requester's :80, resolving its name first.

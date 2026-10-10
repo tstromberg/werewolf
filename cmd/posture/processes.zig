@@ -93,7 +93,8 @@ fn serviceDirs(p: *Posture) !void {
         .why = "A service cannot look inside another's directories, or reach its sockets, " ++
             "unless that service shares them.",
         .how = "for each /etc/sv/NAME/service, /run/svc/NAME and /data/svc/NAME are 0700, " ++
-            "or 0711 (share shared) or 0755 (share browseable) as its file says",
+            "or 0711 (share shared), 0755 (share browseable) or 02771 (share group) " ++
+            "as its file says",
         .result = if (checked == 0) .skip else if (bad.items.len == 0) .pass else .fail,
         .detail = if (checked == 0)
             "no service directory"
@@ -115,6 +116,7 @@ fn shareMode(text: []const u8) ?u32 {
         if (std.mem.eql(u8, word, "strict")) return 0o700;
         if (std.mem.eql(u8, word, "shared")) return 0o711;
         if (std.mem.eql(u8, word, "browseable")) return 0o755;
+        if (std.mem.eql(u8, word, "group")) return 0o2771;
         return null;
     }
     return 0o700;
@@ -384,6 +386,7 @@ fn whyNotLeashed(status: []const u8) ?[]const u8 {
 test shareMode {
     try testing.expectEqual(0o700, shareMode("exec /a\nuser x\n").?);
     try testing.expectEqual(0o711, shareMode("exec /a\nshare   shared\n").?);
+    try testing.expectEqual(0o2771, shareMode("exec /a\nshare group\n").?);
     try testing.expectEqual(0o755, shareMode("share\tbrowseable # all\n").?);
     try testing.expectEqual(0o700, shareMode("# share shared\nshare strict\n").?);
     try testing.expectEqual(null, shareMode("share open\n"));

@@ -1,4 +1,13 @@
+# python: prod with Python, for an application a form on this one brings:
+# its program in /usr/lib/app (form.yaml's app), verified and read-only
+# with the rest of the root; its packages (py3.13-*) in its contents; and
+# etc/sv/app/service, which starts it. python-app brings the service, for
+# howl's --app to lay the program over; python-example brings both. See
+# docs/forms.md.
 base: app
+
+packages:
+  - python-3.13
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.

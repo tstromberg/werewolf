@@ -1,0 +1,11 @@
+#!/bin/sh
+# forms/mastodon/test/config DIR: the mastodon form's config for make check,
+# in DIR: its domain, localhost, for which Caddy's own CA signs, its owner
+# and the owner's password, which forms/mastodon/test/checks signs in with.
+set -eu
+mkdir -p "$1/mastodon"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/mastodon/owner-password"
+mkdir -p "$1/caddy"
+echo '{"domain":"localhost","owner":"owner","owner-email":"owner@example.com"}' >"$1/mastodon/settings.json"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

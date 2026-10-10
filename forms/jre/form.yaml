@@ -1,4 +1,12 @@
+# jre: prod with a Java runtime, for an application a form on this one
+# brings: its jar in /usr/lib/app (form.yaml's app), verified and read-only
+# with the rest of the root, and etc/sv/app/service, which starts it (exec
+# /usr/bin/java -jar /usr/lib/app/app.jar). jre-example brings both: a
+# page, and the JDK's own web server to serve it. See docs/forms.md.
 base: app
+
+packages:
+  - openjdk-21-jre
 
 # Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
 # the application to machine code as it runs.

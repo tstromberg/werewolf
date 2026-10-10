@@ -1,0 +1,65 @@
+# Mastodon's web, Puma, as mastodon: it serves on loopback, behind Caddy,
+# reaches its database and queue by their sockets, and fetches from
+# public addresses only (form.yaml). Before it serves, under this leash:
+# its secrets and domain, made once on /data (secrets.rb); its schema,
+# made or migrated (db:prepare); the owner from the config, and the
+# streaming server's grants (owner.rb).
+exec    /usr/bin/ruby -C /usr/lib/mastodon /usr/bin/bundle exec puma -C config/puma.rb
+before  /usr/bin/ruby /usr/share/werewolf-mastodon/secrets.rb
+before  /usr/bin/ruby -C /usr/lib/mastodon bin/rails db:prepare
+before  /usr/bin/ruby -C /usr/lib/mastodon bin/rails runner /usr/share/werewolf-mastodon/owner.rb
+user    mastodon
+# Valkey's group, for its socket.
+group   valkey
+# Its directories are its group's: the jobs and cron, whose users share
+# it, write the media and read the secrets in them, and nginx reads the
+# media by name.
+share   group
+# netlink: glibc's resolver lists the host's addresses before a lookup.
+pledge  stdio rpath wpath inet unix netlink connect listen proc exec landlock seccomp
+listen  tcp/3000
+connect tcp/443 tcp/80 tcp/53 /run/svc/postgres/.s.PGSQL.5432 /run/svc/valkey/valkey.sock
+# What Paperclip runs on an upload, through /bin/sh: each by its narrow
+# link, with no network, its own pledge, and the upload's directory alone.
+run     /usr/bin/file /usr/bin/ffprobe /usr/bin/ffmpeg
+narrow  /usr/bin/file pledge stdio rpath
+narrow  /usr/bin/file read /data/svc/mastodon
+narrow  /usr/bin/ffprobe pledge stdio rpath proc
+narrow  /usr/bin/ffprobe read /data/svc/mastodon
+narrow  /usr/bin/ffmpeg pledge stdio rpath wpath proc
+narrow  /usr/bin/ffmpeg read /data/svc/mastodon
+narrow  /usr/bin/ffmpeg write /data/svc/mastodon
+narrow  /usr/bin/ffmpeg memory 512
+# The site's domain (Caddy's too), its owner and the owner's password,
+# from the machine's config. The domain is Mastodon's identity: secrets.rb
+# records it on the first start and refuses another. single-user makes it
+# one person's: no sign-ups, the front page the owner's profile.
+config  owner-password /run/config/mastodon/owner-password
+config  settings /run/config/mastodon/settings.json
+setting domain hostname required as LOCAL_DOMAIN
+setting owner string required as MASTODON_OWNER
+setting owner-email string required as MASTODON_OWNER_EMAIL
+setting single-user bool as SINGLE_USER_MODE
+render  env site
+memory  1536
+env     RAILS_ENV=production
+env     BUNDLE_GEMFILE=/usr/lib/mastodon/Gemfile
+env     RAILS_LOG_LEVEL=warn
+env     BIND=127.0.0.1
+env     PORT=3000
+env     WEB_CONCURRENCY=2
+env     MAX_THREADS=5
+env     DB_HOST=/run/svc/postgres
+env     DB_PORT=5432
+env     DB_USER=mastodon
+env     DB_NAME=mastodon
+env     REDIS_URL=unix:///run/svc/valkey/valkey.sock
+env     PAPERCLIP_ROOT_PATH=/data/svc/mastodon/system
+env     PAPERCLIP_ROOT_URL=/system
+env     TMPDIR=/data/svc/mastodon
+env     HOME=/run/svc/mastodon
+env     BOOTSNAP_READONLY=true
+env     MALLOC_CONF=narenas:2,background_thread:true,thp:never,dirty_decay_ms:1000,muzzy_decay_ms:0
+env     PATH=/etc/sv/mastodon/narrow:/usr/bin
+env     FFMPEG_BINARY=/etc/sv/mastodon/narrow/ffmpeg
+env     FFPROBE_BINARY=/etc/sv/mastodon/narrow/ffprobe

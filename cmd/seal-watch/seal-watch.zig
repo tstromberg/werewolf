@@ -9,7 +9,7 @@ const sandbox = @import("sandbox");
 const linux = std.os.linux;
 
 /// seal_id is the uid of _seal, an account no service shares
-/// (forms/minimal/apko.yaml).
+/// (forms/minimal/form.yaml).
 const seal_id = 66;
 
 pub fn main() void {

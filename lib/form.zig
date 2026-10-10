@@ -1,6 +1,7 @@
-//! form reads a form's apko.yaml and form.yaml, resolves its chain of
-//! forms, and merges their apko configs into one. It parses only a small,
-//! strict subset of YAML. See lib/README.md and forms/README.md.
+//! form reads a form's form.yaml, resolves its chain of forms, and merges
+//! what they give apko (packages, accounts, paths) into one apko config. It
+//! parses only a small, strict subset of YAML. See lib/README.md and
+//! forms/README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -395,10 +396,17 @@ pub const Form = struct {
 
 /// keys are form.yaml's keys. Each is a list of lines except base (a name),
 /// app (a path), weaknesses (checks to excuses), check (settings), sshd
-/// (sshd_config keywords) and bastion (its users; lib/sshd.zig).
+/// (sshd_config keywords), bastion (its users; lib/sshd.zig), and what is
+/// apko's, in apko's shape: accounts (groups and users) and paths.
 const keys = [_][]const u8{
     "base",
     "with",
+    "packages",
+    "repositories",
+    "keyring",
+    "archs",
+    "accounts",
+    "paths",
     "allow",
     "app",
     "programs",
@@ -479,20 +487,31 @@ pub fn loadIn(
         try gpa.print("{s}/{s}", .{ names, ref });
     const name = std.fs.path.basename(dir);
     if (!isName(name)) return f.fail(gpa, "{s}: not a form's name (a-z, 0-9 and -)", .{ref});
-    const apko_path = try gpa.print("{s}/apko.yaml", .{dir});
-    root.access(io, apko_path, .{}) catch
-        return f.fail(gpa, "no form {s}: no {s}", .{ ref, apko_path });
     const path = try gpa.print("{s}/form.yaml", .{dir});
-    const text = root.readFileAlloc(io, path, gpa, .limited(64 << 10)) catch |err| switch (err) {
-        error.FileNotFound => return .{ .name = name, .dir = dir, .spec = .{ .map = &.{} } },
+    const text = root.readFileAlloc(io, path, gpa, .limited(256 << 10)) catch |err| switch (err) {
+        error.FileNotFound => return f.fail(gpa, "no form {s}: no {s}", .{ ref, path }),
         error.OutOfMemory => return error.OutOfMemory,
         else => return f.fail(gpa, "{s}: {s}", .{ path, @errorName(err) }),
     };
+    const apko_path = try gpa.print("{s}/apko.yaml", .{dir});
+    if (root.access(io, apko_path, .{})) |_| return f.fail(
+        gpa,
+        "{s}: apko.yaml is form.yaml's now: packages, accounts and paths go there",
+        .{apko_path},
+    ) else |_| {}
     const spec = try parseFile(gpa, path, text, f);
     for (spec.map) |e| {
         if (!isOneOf(e.key, &keys))
             return f.fail(gpa, "{s}: no key {s} (forms/README.md lists them)", .{ path, e.key });
-        if (mem.eql(u8, e.key, "base")) {
+        if (mem.eql(u8, e.key, "accounts")) {
+            if (e.value != .map) return f.fail(
+                gpa,
+                "{s}: accounts is apko's: groups and users, each a list",
+                .{path},
+            );
+        } else if (mem.eql(u8, e.key, "paths")) {
+            if (e.value != .list) return f.fail(gpa, "{s}: paths is apko's: a list", .{path});
+        } else if (mem.eql(u8, e.key, "base")) {
             if (e.value != .scalar or !isName(e.value.scalar.text))
                 return f.fail(gpa, "{s}: base is the name of a form in forms/", .{path});
         } else if (mem.eql(u8, e.key, "app")) {
@@ -947,32 +966,23 @@ pub fn services(
     return out;
 }
 
-/// apko merges the chain's apko configs into the one apko builds from,
-/// adding extra's packages last (a DEV build's shell). It refuses include:.
-pub fn apko(
-    io: Io,
-    gpa: Allocator,
-    root: Dir,
-    forms: []const Form,
-    extra: []const []const u8,
-    f: *Failure,
-) Error!Node {
+/// apko merges what the chain's forms give apko into the one config apko
+/// builds from, base first, as apko's deprecated include: merged (lists
+/// joined, maps by key, archs the last form's), adding extra's packages
+/// last (a DEV build's shell). A form's repositories, keyring and packages
+/// are apko's contents; its archs, accounts and paths are apko's own keys.
+pub fn apko(gpa: Allocator, forms: []const Form, extra: []const []const u8) Allocator.Error!Node {
     var merged: Node = .{ .map = &.{} };
     for (forms) |form| {
-        const path = try gpa.print("{s}/apko.yaml", .{form.dir});
-        const text = root.readFileAlloc(io, path, gpa, .limited(256 << 10)) catch |err|
-            switch (err) {
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return f.fail(gpa, "{s}: {s}", .{ path, @errorName(err) }),
-            };
-        const doc = try parseFile(gpa, path, text, f);
-        if (doc.get("include") != null)
-            return f.fail(
-                gpa,
-                "{s}: include: is apko's, and deprecated: name the form in form.yaml's base",
-                .{path},
-            );
-        merged = try merge(gpa, merged, doc);
+        var contents: std.ArrayList(Entry) = .empty;
+        for ([_][]const u8{ "repositories", "keyring", "packages" }) |key|
+            if (form.spec.get(key)) |v| try contents.append(gpa, .{ .key = key, .value = v });
+        var doc: std.ArrayList(Entry) = .empty;
+        if (contents.items.len > 0)
+            try doc.append(gpa, .{ .key = "contents", .value = .{ .map = contents.items } });
+        for ([_][]const u8{ "archs", "accounts", "paths" }) |key|
+            if (form.spec.get(key)) |v| try doc.append(gpa, .{ .key = key, .value = v });
+        merged = try merge(gpa, merged, .{ .map = doc.items });
     }
     if (extra.len == 0) return merged;
     const packages = try gpa.alloc(Node, extra.len);
@@ -1173,10 +1183,6 @@ test "chain: base first, each form after what it takes, itself last" {
         try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
         try tmp.dir.writeFile(
             io,
-            .{ .sub_path = try gpa.print("forms/{s}/apko.yaml", .{form[0]}), .data = "" },
-        );
-        if (form[1].len > 0) try tmp.dir.writeFile(
-            io,
             .{ .sub_path = try gpa.print("forms/{s}/form.yaml", .{form[0]}), .data = form[1] },
         );
     }
@@ -1217,10 +1223,6 @@ test "load: allow names allowances; app is an absolute path" {
         .{ "up", "app: /usr/../etc\n" },
     }) |form| {
         try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
-        try tmp.dir.writeFile(
-            io,
-            .{ .sub_path = try gpa.print("forms/{s}/apko.yaml", .{form[0]}), .data = "" },
-        );
         try tmp.dir.writeFile(
             io,
             .{ .sub_path = try gpa.print("forms/{s}/form.yaml", .{form[0]}), .data = form[1] },
@@ -1354,7 +1356,6 @@ test "load: modules without colons, check values of their kind" {
     const gpa = a.allocator();
     const io = testing.io;
     try tmp.dir.createDirPath(io, "forms/x");
-    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/apko.yaml", .data = "" });
     var f: Failure = .{};
     for ([_]struct { []const u8, bool }{
         .{ "modules:\n  - aarch64 @hyperv hv_netvsc\n  - \"@xfs xfs\"\n", true },
@@ -1422,10 +1423,6 @@ test "sshd and bastion: what the image's sshd is given, along the chain" {
         try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
         try tmp.dir.writeFile(
             io,
-            .{ .sub_path = try gpa.print("forms/{s}/apko.yaml", .{form[0]}), .data = "" },
-        );
-        try tmp.dir.writeFile(
-            io,
             .{ .sub_path = try gpa.print("forms/{s}/form.yaml", .{form[0]}), .data = form[1] },
         );
     }
@@ -1487,13 +1484,11 @@ test bastionService {
     try tmp.dir.createDirPath(io, "forms/bastion/rootfs/etc/sv/sshd");
     try tmp.dir.createDirPath(io, "forms/edge");
     for ([_][2][]const u8{
-        .{ "forms/bastion/apko.yaml", "" },
         .{ "forms/bastion/form.yaml", "net:\n  - connect bastion tcp/22\n" },
         .{
             "forms/bastion/rootfs/etc/sv/sshd/service",
             "user    bastion\nconnect tcp/22\nmemory  256\n",
         },
-        .{ "forms/edge/apko.yaml", "" },
         .{ "forms/edge/form.yaml", "base: bastion\nnet:\n  - connect bastion tcp/2222 tcp/22\n" },
     }) |file| try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
     var f: Failure = .{};

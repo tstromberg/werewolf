@@ -1,0 +1,13 @@
+# What the mastodon form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-mastodon;
+# test/boot; forms/demo/test/console has the format). The streaming
+# server starts on its leash and listens on loopback. The web, given no
+# owner, parks before anything is made or served, and says why; the jobs,
+# cron and nginx wait for what its first start makes. Nothing else fails.
+# make check-mastodon boots it with its config, and checks it serves.
+
+seen    stream-leashed    leash: \{"event":"start","service":"mastodon-streaming","user":"mastodon-stream"
+seen    stream-listening  Streaming API now listening on 127\.0\.0\.1:4000
+seen    web-needs-owner   leash: \{"event":"down","service":"mastodon","why":"config owner-password: FileNotFound"\}
+unseen  others-down       leash: \{"event":"down","service":"(mastodon-streaming|mastodon-jobs|cron|nginx|postgres|valkey)"
+unseen  secrets-made      mastodon: made the secrets

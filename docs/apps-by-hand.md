@@ -150,7 +150,7 @@ again (step 4): no rebuild. To change the code, stage and build again
 
 ### The image
 
-The image is the form's packages (apko, from `forms/NAME/apko.yaml` and the
+The image is the form's packages (apko, from `forms/NAME/form.yaml` and the
 forms it includes) with *overlays* laid on top: each form's directory
 (`forms/NAME/`), werewolf's programs, and `APP`, last. Every overlay is a
 tree that mirrors the root: `$W/stage/usr/lib/app/main.py` above is

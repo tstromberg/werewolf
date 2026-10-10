@@ -34,7 +34,7 @@ bastion:
 howl form --with bastion -o forms/edge
 ```
 
-It writes `forms/edge/apko.yaml` and a `form.yaml` built on the bastion,
+It writes `forms/edge/form.yaml`, built on the bastion,
 with what posture finds on any bastion, and why, copied in: a form states
 its own (forms/README.md). Add your users to `forms/edge/form.yaml`, each
 key pasted from a user's `.pub`:

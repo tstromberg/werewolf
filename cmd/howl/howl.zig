@@ -258,17 +258,26 @@ fn interface(gpa: Allocator, svcs: []const forms.Service, why: *Why) !Interface 
     }
 
     // Every flag means one thing, and every path in the tar has one source.
-    var flags: std.ArrayList(struct { []const u8, []const u8 }) = .empty;
-    for (files.items) |f| try flags.append(gpa, .{ f.flag, f.service });
-    for (sets.items) |s| for (s.decl) |d| try flags.append(gpa, .{ d.name, s.service });
+    // A setting several services declare alike, of one type, is one flag,
+    // its value given to each: a site's domain, to its web server and its
+    // application.
+    const Flag = struct { name: []const u8, service: []const u8, setting: ?settings.Setting };
+    var flags: std.ArrayList(Flag) = .empty;
+    for (files.items) |f|
+        try flags.append(gpa, .{ .name = f.flag, .service = f.service, .setting = null });
+    for (sets.items) |s| for (s.decl) |d|
+        try flags.append(gpa, .{ .name = d.name, .service = s.service, .setting = d });
     for (flags.items, 0..) |a, i| {
-        for (reserved) |r| if (std.mem.eql(u8, a[0], r))
-            return why.refuse("{s} declares --{s}, which is werewolf's own", .{ a[1], a[0] });
-        for (flags.items[0..i]) |b| if (std.mem.eql(u8, a[0], b[0]))
+        for (reserved) |r| if (std.mem.eql(u8, a.name, r))
             return why.refuse(
-                "--{s} is declared by {s} and by {s}: rename one",
-                .{ a[0], b[1], a[1] },
+                "{s} declares --{s}, which is werewolf's own",
+                .{ a.service, a.name },
             );
+        for (flags.items[0..i]) |b| if (std.mem.eql(u8, a.name, b.name)) {
+            const x = a.setting orelse return unalike(why, a, b);
+            const y = b.setting orelse return unalike(why, a, b);
+            if (x.type != y.type or x.list != y.list) return unalike(why, a, b);
+        };
     }
     var paths: std.ArrayList([]const u8) = .empty;
     for (files.items) |f| try paths.append(gpa, f.path);
@@ -463,6 +472,14 @@ pub fn flagValue(
 /// Entry is one file in the tar, and the flag it came from.
 pub const Entry = struct { path: []const u8, data: []const u8, from: []const u8 };
 
+/// unalike refuses a flag two services declare differently.
+fn unalike(why: *Why, a: anytype, b: anytype) error{Refused} {
+    return why.refuse(
+        "--{s} is declared by {s} and by {s}, not as one setting of one type: rename one",
+        .{ a.name, b.service, a.service },
+    );
+}
+
 /// gather reads what the flags name, checks it against the form, and
 /// returns the tar's entries sorted by path. It writes nothing.
 fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]const Entry {
@@ -528,10 +545,13 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
             }, why);
             continue :flag;
         };
+        // A setting several services declare goes to each.
+        var set = false;
         for (iface.settings, values) |s, *obj| for (s.decl) |d| if (std.mem.eql(u8, d.name, flag)) {
             try setValue(gpa, obj, d, value, why);
-            continue :flag;
+            set = true;
         };
+        if (set) continue :flag;
         return why.refuse(
             "{s} takes no --{s}; howl pack {s} -h lists what it does",
             .{ o.form, flag, o.form },
@@ -904,11 +924,24 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
         try gpa.print("--{s} FILE", .{f.flag}),
         try gpa.print("{s}{s}", .{ f.path, if (f.optional) "" else ", required" }),
     );
-    for (iface.settings) |st| for (st.decl) |d| try row(
-        w,
-        try gpa.print("--{s} {t}{s}", .{ d.name, d.type, if (d.list) "..." else "" }),
-        try gpa.print("{s}{s}", .{ st.path, if (d.required) ", required" else "" }),
-    );
+    // A setting several services declare is one row: each file it goes
+    // to, and required if any requires it.
+    var listed: std.array_hash_map.String(void) = .empty;
+    for (iface.settings) |st| for (st.decl) |d| {
+        if ((try listed.getOrPut(gpa, d.name)).found_existing) continue;
+        var paths: std.ArrayList(u8) = .empty;
+        var required = false;
+        for (iface.settings) |other| for (other.decl) |e| if (std.mem.eql(u8, e.name, d.name)) {
+            if (paths.items.len > 0) try paths.appendSlice(gpa, ", ");
+            try paths.appendSlice(gpa, other.path);
+            required = required or e.required;
+        };
+        try row(
+            w,
+            try gpa.print("--{s} {t}{s}", .{ d.name, d.type, if (d.list) "..." else "" }),
+            try gpa.print("{s}{s}", .{ paths.items, if (required) ", required" else "" }),
+        );
+    };
 }
 
 /// writePrivate writes data to path with mode 0600. It writes a file
@@ -1504,6 +1537,25 @@ test interface {
         &.{.{ "a", head ++ "config settings /run/config/a/s.json optional" }},
         &.{.{ "a", head ++ "config ../k /run/config/a/k" }},
         &.{.{ "a", "config k /run/config/a/k" }},
+        // One flag, two services, not alike: of two types, or a file and
+        // a setting.
+        &.{
+            .{
+                "a",
+                head ++ "config settings /run/config/a/s.json\nsetting d hostname\nrender env e",
+            },
+            .{
+                "b",
+                head ++ "config settings /run/config/b/s.json\nsetting d string\nrender env e",
+            },
+        },
+        &.{
+            .{
+                "a",
+                head ++ "config settings /run/config/a/s.json\nsetting d hostname\nrender env e",
+            },
+            .{ "b", head ++ "config d /run/config/b/d" },
+        },
     };
     for (refused) |texts| {
         var svcs: [2]forms.Service = undefined;
@@ -1584,6 +1636,29 @@ test "settings from flags, checked as the guest checks them" {
     const name: settings.Setting = .{ .name = "team", .type = .string };
     try setValue(gpa, &s, name, "red, blue", &why);
     try testing.expectError(error.Refused, setValue(gpa, &s, name, "green", &why));
+
+    // A setting two services declare alike is one flag, its value in each
+    // service's settings.json, under each one's key.
+    const shared = try interface(gpa, &.{
+        .{ .name = "web", .path = "", .text = "exec /a\nuser a\npledge stdio\n" ++
+            "config settings /run/config/web/s.json\nsetting domain hostname as DOMAIN\nrender " ++
+            "env e" },
+        .{ .name = "app", .path = "", .text = "exec /b\nuser b\npledge stdio\n" ++
+            "config settings /run/config/app/s.json\nsetting domain hostname required\nrender " ++
+            "env e" },
+    }, &why);
+    const e = try gather(
+        testing.io,
+        gpa,
+        shared,
+        try options(gpa, &.{ "x", "--domain", "social.example.com" }, &why),
+        &why,
+    );
+    try testing.expectEqual(@as(usize, 2), e.len);
+    for (e) |entry| try testing.expectEqualStrings(
+        "{\"domain\":\"social.example.com\"}",
+        entry.data,
+    );
 
     // A url may hold a comma, so a list of them is given by repeating.
     var u: json.ObjectMap = .empty;
