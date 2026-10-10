@@ -19,8 +19,8 @@ and key, and `make list-forms` shows the chains.
 
 | Form | Built on | Is |
 | --- | --- | --- |
-| `minimal` | | boots anywhere, from the initramfs, its own disk or a slot bite installed; a static address; listens on nothing |
-| `prod` | `minimal` | the production base: DHCP, the cloud's metadata, updates itself, `/data` on a disk, in LUKS2 when the config brings `data.key` ([data.md](data.md)); no shell, nothing listening. Build yours on this, or on a runtime form below |
+| `minimal` | | boots anywhere, from the initramfs, its own disk or a slot bite installed; a static address; updates itself from a slot; listens on nothing |
+| `prod` | `minimal` | the production base: DHCP, the cloud's metadata, `/data` on a disk, in LUKS2 when the config brings `data.key` ([data.md](data.md)); no shell, nothing listening. Build yours on this, or on a runtime form below |
 | `app` | `prod` | where an application is laid; its service's `app` user gets a hashed uid; no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
@@ -47,7 +47,8 @@ and key, and `make list-forms` shows the chains.
 | `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
 | `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
-| `mastodon` | `ruby`, with `postgresql`, `valkey`, `nginx`, `cron`, `sh-shim` | Mastodon 4.7, each part on a leash and a user of its own, media parsed narrowed, fetches to public addresses only ([mastodon.md](../forms/mastodon/README.md)) |
+| `mastodon` | `ruby`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | Mastodon 4.7, each part on a leash and a user of its own, media parsed narrowed, fetches to public addresses only ([mastodon.md](../forms/mastodon/README.md)) |
+| `mox` | `prod` | a domain's mail: SMTP, IMAP, submission, webmail and its own certificates, as its own user, never root, built here with one patch ([mox.md](../forms/mox/README.md)) |
 | `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
 | `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
 | `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
@@ -480,7 +481,7 @@ instead, change gunicorn's `--bind` and the service's `listen` to 8000.
 | `make FORM=helloworld bite-me` | run on a Debian, Ubuntu, Fedora or Rocky VM: installs it beside the distro ([bite.md](bite.md)) |
 | `make FORM=helloworld image` | the kernel and initramfs, for QEMU, Firecracker or any host that boots them directly |
 
-It updates itself, as `prod` does. The updater follows Wolfi's packages,
+It updates itself, as every form does. The updater follows Wolfi's packages,
 builds a new slot with your files carried forward, boots it once, and keeps
 it only if it commits ([updater.md](updater.md)). posture runs at every
 boot and reports what holds. On a Python machine, `programs-no-interpreters`

@@ -1,0 +1,57 @@
+# mox: prod, with Mox serving a domain's mail: SMTP on :25, submission on
+# :465 and :587, IMAP over TLS on :993, and on :443 its webmail, account
+# and admin pages, MTA-STS and autoconfig, with certificates it gets
+# itself. Wolfi does not ship Mox: melange builds it from a pinned release
+# (forms/mox/melange/mox.yaml), with one patch so it starts as its own
+# user. leash starts it (etc/sv/mox/service) as the mox user, after
+# mox-setup (forms/mox/cmd/mox-setup) writes its configuration from the
+# machine's settings. See forms/mox/README.md.
+base: prod
+
+# No packages beyond prod's: melange's mox is laid over the image
+# (cmd/howl/melange.zig), and, static, it links nothing.
+
+# make check's, for this form alone (forms/README.md): its mail ports speak
+# SMTP and IMAP, not HTTP, and its own test/checks speaks to them.
+check:
+  skip: [http-answering]
+
+services:
+  # Mox, as its own user: it may bind its mail and web ports and no other,
+  # reach public addresses on the ports mail and ACME use, and write only
+  # /data/svc/mox: configuration, mailboxes, queue, certificates. It runs
+  # nothing. Its domain, host name, first account and relay come from the
+  # machine's settings. The admin and relay passwords come from the
+  # config, and mox-setup removes leash's copies once it has written them
+  # into Mox's configuration; a certificate there takes ACME's place.
+  mox:
+    exec: /usr/bin/mox -config /data/svc/mox/config/mox.conf serve
+    before: /usr/lib/werewolf/mox-setup
+    user: mox
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/25 tcp/443 tcp/465 tcp/587 tcp/993]
+    connect:
+      - tcp/25 tcp/443 tcp/465 tcp/587 public
+      - udp/53 tcp/53
+    config:
+      - admin-password /run/config/mox/admin-password
+      - relay-password /run/config/mox/relay-password optional
+      - tls-cert /run/config/mox/tls-cert optional
+      - tls-key /run/config/mox/tls-key optional
+      - settings /run/config/mox/settings.json
+    setting:
+      - domain hostname required as MOX_DOMAIN
+      - mail-host hostname as MOX_HOSTNAME
+      - postmaster string required as MOX_POSTMASTER
+      - admin-web bool as MOX_ADMIN_WEB
+      - relay-server hostname as MOX_RELAY_SERVER
+      - relay-port port as MOX_RELAY_PORT
+      - relay-login string as MOX_RELAY_LOGIN
+    render: env site
+    memory: 1024
+    nofile: 65536
+    env:
+      - GOMEMLIMIT=768MiB
+      # Its control socket, which `mox` commands reach, in /run: fence lets
+      # sockets be made nowhere else (forms/mox/melange/mox.yaml).
+      - MOX_CTL=/run/svc/mox/ctl

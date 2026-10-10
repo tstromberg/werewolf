@@ -1,7 +1,11 @@
 # minimal: boots, takes the address the kernel command line gives, reads
-# config, supervises. Listens on nothing, and has no shell: forms that log
-# people in add busybox-full, as does any form built with DEV=1. Every
-# other form includes this one.
+# config, supervises, and keeps itself current (cmd/slot-update;
+# docs/updater.md): booted from a slot, at boot and every hour it asks Wolfi
+# and Alpine whether anything in this image has a newer version, and if so
+# builds the other slot on the machine, boots it once, and keeps it only if
+# it commits; a form's `updates: off` leaves that out. Listens on nothing,
+# and has no shell: forms that log people in add busybox-full, as does any
+# form built with DEV=1. Every other form includes this one.
 #
 # It boots anywhere werewolf does: directly, from its own disk (make disk),
 # or from a slot bite installed beside a distro, whose filesystem it finds
@@ -16,23 +20,50 @@ packages:
   - wolfi-baselayout
   - runit                 # PID 1 after init: runs services, shuts down cleanly
   - blkid                 # find a filesystem by UUID or label (busybox cannot read xfs or btrfs)
+  - apk-tools             # the updater: fetch and verify packages, against the keys in the image
+  - erofs-utils           # mkfs.erofs, for the new slot's root
+  - zstd                  # stage0's compression, as the build's
 
 archs:
   - aarch64
   - x86_64
 
 # _seal is seal-watch's, once it gives up root: an account no service
-# shares, so none may signal it (cmd/seal-watch).
+# shares, so none may signal it (cmd/seal-watch). _update is the updater's
+# network half, which fetches the packages and CVE sources it reads.
 accounts:
   groups:
     - groupname: _seal
       gid: 66
+    - groupname: _update
+      gid: 69
   users:
     - username: _seal
       uid: 66
       gid: 66
       homedir: /var/empty
       shell: /sbin/nologin
+    - username: _update
+      uid: 69
+      gid: 69
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+# werewolf's programs from cmd/ every form's machines run beyond the ones
+# every image has (docs/programs.md): the updater.
+programs: [slot-update]
+
+# The updater's network half, as _update: Wolfi and Alpine for apk, and the
+# CVE sources, Wolfi's security.json and the kernel CNA's records on
+# git.kernel.org, all over HTTPS, and the names to find them. Root, which
+# builds and installs the slot, has no network at all.
+net:
+  - connect _update tcp/443 udp/53 tcp/53
+
+# make check's, for this form alone (forms/README.md): its checks boot the
+# slot as bite leaves it, with no way out, so the updater finds nothing.
+check:
+  offline: true
 
 # Hypervisor devices: virtio's NIC and disks; the NoCloud ISO, as a SCSI
 # CD-ROM, for Lima; and the ACPI power button. Clouds' own devices are in

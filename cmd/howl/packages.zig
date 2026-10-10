@@ -316,13 +316,13 @@ test unreachableServer {
     try testing.expect(!unreachableServer("solving \"foo\": nothing provides foo"));
 }
 
-test "boot/alpine-keys are the prod form's Alpine keys" {
+test "boot/alpine-keys are the minimal form's Alpine keys" {
     const gpa = std.testing.allocator;
     var n: usize = 0;
     for (files.boot) |f| {
         const name = mem.cutPrefix(u8, f.path, "alpine-keys/") orelse continue;
         const path = try gpa.print(
-            "forms/prod/rootfs/etc/werewolf/alpine-keys/{s}",
+            "forms/minimal/rootfs/etc/werewolf/alpine-keys/{s}",
             .{name},
         );
         defer gpa.free(path);

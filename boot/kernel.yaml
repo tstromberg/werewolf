@@ -1,7 +1,7 @@
 # kernel: Alpine's linux-virt, the KVM guest kernel. The build keeps
 # boot/vmlinuz-virt and the modules; the rest of what the package pulls in
-# stays behind. Alpine's keys, in alpine-keys/, are the ones the prod form
-# carries (cmd/howl's tests keep the two the same).
+# stays behind. Alpine's keys, in alpine-keys/, are the ones the minimal
+# form carries (cmd/howl's tests keep the two the same).
 contents:
   repositories:
     - https://dl-cdn.alpinelinux.org/alpine/v3.24/main
