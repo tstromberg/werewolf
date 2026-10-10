@@ -8,7 +8,7 @@ these commands from the repository root.
 
 ## Declare the app
 
-The [form](../../forms/aspnet-example/apko.yaml) inherits `app.yaml` and adds
+The [form](../../forms/aspnet-example/form.yaml) inherits `app.yaml` and adds
 Wolfi's ASP.NET Core 10 runtime. Its [service](../../forms/aspnet-example/rootfs/etc/sv/app/service)
 runs [Program.cs](Program.cs), published as `/usr/lib/app/App.dll`, on port 8080.
 The SDK stays on the build host.

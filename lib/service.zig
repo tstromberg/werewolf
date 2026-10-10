@@ -29,6 +29,9 @@ pub const Service = struct {
     /// keeps the kernel's 100 (docs/design/cpu-and-first-run.md).
     cpu: ?u16 = null,
     share: Share = .strict,
+    /// groups are other services' users whose groups it joins, to reach
+    /// what they share with their group, such as Valkey's socket.
+    groups: []const []const u8 = &.{},
     pledge: seal.Set = .empty,
     /// root is the OCI image the service runs in, beneath /oci; dir is
     /// where it starts there.
@@ -75,16 +78,21 @@ pub const Config = struct { name: []const u8, path: []const u8, optional: bool =
 /// /data/svc/NAME. strict (0700) admits only the service's user. shared
 /// (0711) lets others open a path they already know, such as a socket or a
 /// file another service reads. browseable (0755) also lets them list it.
+/// group (02771) is shared, and lets the services whose users have its
+/// user's group write in it too: leash gives it a default ACL, so what
+/// they make there is the group's to change, whatever their umask.
 pub const Share = enum {
     strict,
     shared,
     browseable,
+    group,
 
     pub fn mode(s: Share) u32 {
         return switch (s) {
             .strict => 0o700,
             .shared => 0o711,
             .browseable => 0o755,
+            .group => 0o2771,
         };
     }
 };
@@ -111,6 +119,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var read: std.ArrayList([]const u8) = .empty;
     var write: std.ArrayList([]const u8) = .empty;
     var run: std.ArrayList([]const u8) = .empty;
+    var groups: std.ArrayList([]const u8) = .empty;
     var requires: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([2][]const u8) = .empty;
     var secrets: std.ArrayList([2][]const u8) = .empty;
@@ -139,6 +148,12 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             if (std.mem.eql(u8, args[0], "root"))
                 return invalid(bad, "user root: a service runs as a user of its own");
             user = args[0];
+        } else if (std.mem.eql(u8, key, "group")) {
+            if (args.len == 0) return invalid(bad, "group takes names");
+            for (args) |a| {
+                if (!isName(a)) return invalid(bad, "group takes plain names");
+                try groups.append(gpa, a);
+            }
         } else if (std.mem.eql(u8, key, "listen")) {
             if (args.len == 0) return invalid(bad, "no ports");
             for (args) |a| try listen.append(gpa, try tcpPort(a, bad));
@@ -220,9 +235,12 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             if (cpu.? == 0 or cpu.? > 10000) return invalid(bad, "cpu takes a weight, 1 to 10000");
         } else if (std.mem.eql(u8, key, "share")) {
             if (share != null) return invalid(bad, "share twice");
-            if (args.len != 1) return invalid(bad, "share takes strict, shared or browseable");
+            if (args.len != 1) return invalid(
+                bad,
+                "share takes strict, shared, browseable or group",
+            );
             share = std.meta.stringToEnum(Share, args[0]) orelse
-                return invalid(bad, "share takes strict, shared or browseable");
+                return invalid(bad, "share takes strict, shared, browseable or group");
         } else if (std.mem.eql(u8, key, "root")) {
             if (root != null) return invalid(bad, "root twice");
             if (args.len != 1 or !isCleanPath(args[0]) or
@@ -281,6 +299,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .memory = memory,
         .cpu = cpu,
         .share = share orelse .strict,
+        .groups = groups.items,
         .root = root,
         .dir = dir,
     };
@@ -582,6 +601,16 @@ test parse {
     try testing.expect(s.pledge.contains(.listen) and !s.pledge.contains(.proc));
     const plain = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\n", &bad);
     try testing.expectEqual(.strict, plain.share);
+    const group = try parse(
+        arena.allocator(),
+        "exec /a\nuser x\npledge stdio\nshare group\ngroup valkey\ngroup a b\n",
+        &bad,
+    );
+    try testing.expectEqual(.group, group.share);
+    try testing.expectEqual(0o2771, group.share.mode());
+    try testing.expectEqual(3, group.groups.len);
+    try testing.expectEqualStrings("valkey", group.groups[0]);
+    try testing.expectEqual(0, plain.groups.len);
     try testing.expectEqual(null, plain.cpu);
 }
 
@@ -594,6 +623,8 @@ test "parse refuses" {
         .{ .text = "exec a\nuser x", .line = 1 },
         .{ .text = "exec /a/../b\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser root", .line = 2 },
+        .{ .text = "exec /a\nuser x\ngroup", .line = 3 },
+        .{ .text = "exec /a\nuser x\ngroup Valkey", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten udp/53", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten tcp/0", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten /run/x.sock", .line = 3 },

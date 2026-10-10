@@ -43,7 +43,7 @@ narrow as a call number allows, and the risky ones stand alone (`exec`,
 or the `never` calls (lib/README.md). A file without a `pledge` is
 parked: there is no default. `/run/svc/NAME` and `/data/svc/NAME` are
 `0700`, the service user's alone, unless its `share` line opens them
-(`shared` 0711, `browseable` 0755).
+(`shared` 0711, `browseable` 0755, `group` 02771 with its group writing).
 
 ### Two filters
 

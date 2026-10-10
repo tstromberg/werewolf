@@ -1,4 +1,8 @@
+# A userspace subnet router, without TUN or host firewall privileges.
 base: prod
+
+packages:
+  - tailscale
 
 # Relayed tailnet transport: no public listener or arbitrary UDP egress.
 # Add application ports here AND in the service when routes need them.

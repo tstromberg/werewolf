@@ -1,4 +1,0 @@
-# app: prod for an application, laid where form.yaml's app says. No
-# runtime, service, listening port or account: descendants declare those
-# for their workload, and their service's `user app` gets an account of
-# its own from the build (forms/README.md).

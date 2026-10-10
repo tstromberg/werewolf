@@ -1,5 +1,0 @@
-# node-app: node, starting an application of yours from /usr/lib/app
-# (form.yaml's app) as `node server.js`, on :8080 (etc/sv/app/service).
-# It ships none: the service stays down, saying why, until howl's --app or
-# a form on this one lays server.js there, as node-example does. See
-# docs/forms.md.

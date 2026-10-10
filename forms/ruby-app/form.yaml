@@ -1,3 +1,8 @@
+# ruby-app: ruby, starting an application of yours from /usr/lib/app
+# (form.yaml's app) as `ruby main.rb`, on :8080 (etc/sv/app/service), its
+# gems vendored into it (bundle install --deployment, at build). It ships
+# none: the service stays down, saying why, until howl's --app or a form on
+# this one lays main.rb there, as ruby-example does. See docs/forms.md.
 base: ruby
 
 # The application serves on 8080.

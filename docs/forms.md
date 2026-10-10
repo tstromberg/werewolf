@@ -3,9 +3,9 @@
 A form says what a werewolf machine is for. Each form is a directory,
 `forms/<name>/`, that holds:
 
-- `apko.yaml`: the Wolfi packages and accounts apko installs;
-- `form.yaml`: what apko cannot say, from the form it is built on to its
-  network policy and the posture checks it fails, and why;
+- `form.yaml`: the Wolfi packages and accounts apko installs, and what
+  apko cannot say, from the form it is built on to its network policy and
+  the posture checks it fails, and why;
 - `rootfs/`: the files it lays over its packages;
 - where it needs them, its own programs (`cmd/`), checks (`test/`), melange
   recipes (`melange/`) and a `README.md`.
@@ -47,6 +47,7 @@ and key, and `make list-forms` shows the chains.
 | `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
 | `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
+| `mastodon` | `ruby`, with `postgresql`, `valkey`, `nginx`, `cron`, `sh-shim` | Mastodon 4.7, each part on a leash and a user of its own, media parsed narrowed, fetches to public addresses only ([mastodon.md](../forms/mastodon/README.md)) |
 | `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
 | `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
 | `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
@@ -321,7 +322,7 @@ secret is a file, given with `config` and read from `/run/svc/app`.
 ### A Python web server
 
 `helloworld` is a Flask application, served by gunicorn on :8080, that
-counts its visitors on `/data`. It takes three files.
+counts its visitors on `/data`. It takes two files.
 
 The form names the form it is built on, and the packages it adds, by their
 Wolfi names:
@@ -329,16 +330,9 @@ Wolfi names:
 ```yaml
 # forms/helloworld/form.yaml
 base: python
+packages: [py3.13-flask, py3.13-gunicorn]
 net:
   - listen tcp/8080
-```
-
-```yaml
-# forms/helloworld/apko.yaml
-contents:
-  packages:
-    - py3.13-flask
-    - py3.13-gunicorn
 ```
 
 The application goes in `/usr/lib/app`, form.yaml's `app`:
@@ -526,7 +520,7 @@ build/host/howl form --with caddy,valkey -o forms/shop/
 | Flag | Writes |
 | --- | --- |
 | `--with FORM,...` | nothing, for one form alone: it runs as it is. One form with more flags becomes `base:`; several are taken `with` on `prod` (for `run`, on `playground`) |
-| `--package PKG,...` | apko.yaml's packages |
+| `--package PKG,...` | form.yaml's `packages` |
 | `--oci NAME=REF` | an OCI image, baked in at `/oci/NAME` and run as `_oci-NAME` |
 | `--NAME.KEY 'LINE'` | one line of image NAME's service file, as it stands in the file: `listen`, `connect`, `write`, `read`, `run`, `env`, `secret`, `exec`, `dir`, `memory`, `nofile`, `pledge`, `before` or `requires` |
 | `--link A:B` | `connect` from image A to image B's ports on loopback |
@@ -565,7 +559,7 @@ and its memory 512 MiB. The image is its root, read-only. Its `/tmp`,
 `full`, `random` and `urandom`, and the machine's `/etc/resolv.conf`;
 `/etc/hosts`, written at build, names `localhost` and NAME. Its
 account's uid and gid are its user's hash (`compose.defaultId`), the id
-the build gives any service user that apko.yaml does not declare. A
+the build gives any service user no form declares. A
 `--link` to a form's service is not built yet: give the image a `connect`
 line and the form a `loopback` port.
 

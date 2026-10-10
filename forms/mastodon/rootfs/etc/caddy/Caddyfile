@@ -1,0 +1,60 @@
+# Caddy for the mastodon form: HTTPS for the machine's domain (DOMAIN; howl
+# --domain), with a certificate Caddy gets itself, and :80 redirected
+# there. Mastodon's assets from the image and its media from /data, as
+# files; the streaming server's WebSockets and everything else proxied to
+# it on loopback. leash starts Caddy (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris; no body timeout, which would cut off uploads
+		# and streams.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN::80} {
+	root * /usr/lib/mastodon/public
+	encode zstd gzip
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+	}
+
+	handle /api/v1/streaming* {
+		reverse_proxy 127.0.0.1:4000
+	}
+
+	# Media: strangers' files, served as nothing that runs.
+	handle_path /system/* {
+		root * /data/svc/mastodon/system
+		header Cache-Control "public, max-age=2419200, immutable"
+		header Content-Security-Policy "default-src 'none'; form-action 'none'"
+		file_server
+	}
+
+	# The assets, compiled into the image.
+	@static file
+	handle @static {
+		header Cache-Control "public, max-age=2419200, must-revalidate"
+		file_server
+	}
+
+	# Mastodon, which takes the scheme and the client from Caddy's
+	# X-Forwarded-Proto and X-Forwarded-For.
+	handle {
+		reverse_proxy 127.0.0.1:3000
+	}
+}

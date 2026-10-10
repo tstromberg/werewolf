@@ -7,5 +7,8 @@ exec    /usr/bin/valkey-server /etc/valkey/valkey.conf
 user    valkey
 pledge  stdio rpath wpath unix listen proc
 read    /etc/valkey
+# Its clients, members of its group (`group valkey`), reach the socket in
+# its directory, which they may enter but not list.
+share   shared
 memory  256
 nofile  10240

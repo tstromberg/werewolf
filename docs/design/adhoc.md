@@ -47,7 +47,7 @@ _unpack` lays them out holding no network, environment or credentials.
 **Accounts.** Each image runs as `_oci-NAME`, shared with no one. Its
 account is written with its uid set to its user's hash
 (`compose.defaultId`), the same id the build gives any service user
-apko.yaml does not declare, so an image keeps its owner.
+no form declares, so an image keeps its owner.
 
 **leash `root`.** leash enters the image with `chroot`, as root, before
 any rule, so every path resolves inside it

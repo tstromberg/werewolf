@@ -1,4 +1,18 @@
+# sshd: minimal plus operator access by security key: OpenSSH, its service
+# (sshd-start) and its policy (etc/ssh/sshd_config.d/werewolf.conf).
 base: minimal
+
+packages:
+  - openssh-server
+  - openssh-sftp-server   # scp and `limactl copy`
+  - busybox-full          # a shell for those who log in, and its tools
+
+paths:
+  # PAM's password helper, setgid shadow, arrives through openssh-server.
+  # Nothing here authenticates with a password.
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755
 
 # sshd-start, the service: the host key, then sshd. The forms that log
 # people in take this form (prod-ssh, lima), so minimal carries no sshd.

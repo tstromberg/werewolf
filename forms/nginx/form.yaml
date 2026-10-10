@@ -1,4 +1,25 @@
+# nginx: prod, serving a site from the image. leash starts nginx
+# (etc/sv/nginx/service) as the nginx user, master and workers alike, able
+# to bind :80 and nothing else, reading its configuration and the image.
+# The site is /usr/share/nginx/html, verified and read-only with the rest
+# of the root: a form of your own includes this one and lays its files
+# there, or its own etc/nginx/nginx.conf over this one's. See
+# docs/forms.md.
 base: prod
+
+packages:
+  - nginx-mainline
+
+accounts:
+  groups:
+    - groupname: nginx
+      gid: 221
+  users:
+    - username: nginx
+      uid: 221
+      gid: 221
+      homedir: /var/empty
+      shell: /sbin/nologin
 
 # Where it keeps its site: howl's --app DIR is laid here
 # (cmd/howl/app.zig).

@@ -118,9 +118,8 @@ pub fn compose(
     // meta: the records.
     var rec = try meta.createDirPathOpen(io, "usr/share/werewolf", .{});
     defer rec.close(io);
-    // Stage the chain as forms/NAME (form.yaml, apko.yaml, rootfs) and
-    // the known posture failures; the updater composes the next slot from
-    // them.
+    // Stage the chain as forms/NAME (form.yaml, rootfs) and the known
+    // posture failures; the updater composes the next slot from them.
     for (forms, 0..) |fm, i| {
         for (forms[0..i]) |before| if (mem.eql(u8, before.name, fm.name)) return f.fail(
             gpa,
@@ -157,20 +156,14 @@ fn put(io: Io, dir: Dir, path: []const u8, data: []const u8) !void {
 }
 
 /// stage writes fm under dir as an image stages it, at forms/NAME:
-/// form.yaml, apko.yaml and rootfs. The updater composes from what an image
-/// staged; a form's package (NAME-form) carries the same tree.
+/// form.yaml and rootfs. The updater composes from what an image staged; a
+/// form's package (NAME-form) carries the same tree.
 pub fn stage(io: Io, gpa: Allocator, root: Dir, fm: Form, dir: Dir) !void {
     const at = try gpa.print("forms/{s}", .{fm.name});
     try dir.createDirPath(io, at);
-    for ([_][]const u8{ "form.yaml", "apko.yaml" }) |file| {
-        const src = try gpa.print("{s}/{s}", .{ fm.dir, file });
-        const text = root.readFileAlloc(io, src, gpa, .limited(256 << 10)) catch |err|
-            switch (err) {
-                error.FileNotFound => continue,
-                else => |e| return e,
-            };
-        try put(io, dir, try gpa.print("{s}/{s}", .{ at, file }), text);
-    }
+    const src = try gpa.print("{s}/form.yaml", .{fm.dir});
+    const text = try root.readFileAlloc(io, src, gpa, .limited(256 << 10));
+    try put(io, dir, try gpa.print("{s}/form.yaml", .{at}), text);
     const rootfs = try gpa.print("{s}/rootfs", .{fm.dir});
     try lay(io, gpa, root, rootfs, dir, try gpa.print("{s}/rootfs", .{at}));
 }
@@ -216,7 +209,7 @@ fn lay(io: Io, gpa: Allocator, root: Dir, src: []const u8, dst: Dir, to: []const
 const default_id_first: u32 = 1 << 16;
 const default_id_count: u32 = (1 << 31) - (1 << 16);
 
-/// defaultId returns the uid and gid of a service user apko.yaml does not
+/// defaultId returns the uid and gid of a service user no form's accounts
 /// declare: an FNV-1a hash of its name, in [65536, 2^31). It depends on the
 /// name alone, so the id is the same on every build and machine whatever
 /// forms come and go, and the service keeps owning its files on /data.
@@ -225,12 +218,12 @@ pub fn defaultId(name: []const u8) u32 {
 }
 
 /// apko returns the chain's merged apko config (form.apko, with extra) plus
-/// an account for each service user apko.yaml does not declare: a group and
+/// an account for each service user no form's accounts declare: a group and
 /// a user, both with id defaultId(name), home /var/empty and shell
 /// /sbin/nologin, after the declared ones. It refuses two services that run
 /// as one user, since strict share could not then keep them apart. It also
 /// refuses a default id that a declared uid or gid, or another default,
-/// already holds; apko.yaml must then give one of them a uid.
+/// already holds; a form's accounts must then give one of them a uid.
 pub fn apko(
     io: Io,
     gpa: Allocator,
@@ -239,7 +232,7 @@ pub fn apko(
     extra: []const []const u8,
     f: *Failure,
 ) !form.Node {
-    const merged = try form.apko(io, gpa, root, forms, extra, f);
+    const merged = try form.apko(gpa, forms, extra);
     const top = forms[forms.len - 1].dir;
     var declared: std.array_hash_map.String(void) = .empty;
     var ids: std.array_hash_map.Auto(u32, []const u8) = .empty;
@@ -257,7 +250,8 @@ pub fn apko(
     var runs_as: std.array_hash_map.String([]const u8) = .empty;
     var groups: std.ArrayList(form.Node) = .empty;
     var users: std.ArrayList(form.Node) = .empty;
-    for (try form.services(io, gpa, root, forms, f)) |s| {
+    const services = try form.services(io, gpa, root, forms, f);
+    for (services) |s| {
         const user = (try parseService(gpa, s, f)).user;
         if (try runs_as.fetchPut(gpa, user, s.name)) |other| return f.fail(
             gpa,
@@ -268,7 +262,7 @@ pub fn apko(
         const id = defaultId(user);
         if (ids.get(id)) |holder| return f.fail(
             gpa,
-            "{s}: user {s}'s default id {d} is {s}'s: give one of them a uid in apko.yaml",
+            "{s}: user {s}'s default id {d} is {s}'s: give one of them a uid in accounts",
             .{ s.path, user, id, holder },
         );
         try ids.put(gpa, id, user);
@@ -282,6 +276,20 @@ pub fn apko(
             .{ "shell", "/sbin/nologin" },
         }));
     }
+    // A group a service joins is another service's user's, never a
+    // system group such as shadow's or disk's.
+    for (services) |s| for ((try parseService(gpa, s, f)).groups) |g| {
+        const owner = runs_as.get(g) orelse return f.fail(
+            gpa,
+            "{s}: group {s}: no service runs as {s}, whose group it would join",
+            .{ s.path, g, g },
+        );
+        if (mem.eql(
+            u8,
+            owner,
+            s.name,
+        )) return f.fail(gpa, "{s}: group {s} is its own", .{ s.path, g });
+    };
     if (users.items.len == 0) return merged;
     const added = try gpa.dupe(form.Entry, &.{
         .{ .key = "groups", .value = .{ .list = groups.items } },
@@ -295,7 +303,9 @@ pub fn apko(
 /// of werewolf's packages, programs and forms, depends on format_package,
 /// and a published image's world names it, so a machine never takes one
 /// built for another format; bump it when either side changes incompatibly.
-pub const format = 1;
+/// 2: a form is form.yaml alone (its packages, accounts and paths in it);
+/// a staged apko.yaml is refused.
+pub const format = 2;
 
 /// format_package is format's package, a name per format, so a world names
 /// it with no version to compare. It holds /usr/lib/werewolf/format: apk
@@ -332,13 +342,7 @@ pub fn packaged(io: Io, gpa: Allocator, root: Dir, fm: Form) !bool {
 /// formDepends returns what NAME-form depends on: the format, the forms
 /// fm is built on and takes with it, its packages, and werewolf's programs
 /// it runs, every image's for a form built on none.
-pub fn formDepends(
-    io: Io,
-    gpa: Allocator,
-    root: Dir,
-    fm: Form,
-    f: *Failure,
-) ![]const []const u8 {
+pub fn formDepends(gpa: Allocator, fm: Form) ![]const []const u8 {
     var names: std.array_hash_map.String(void) = .empty;
     try names.put(gpa, format_package, {});
     if (fm.spec.get("base")) |b|
@@ -347,17 +351,8 @@ pub fn formDepends(
         try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
     for (try fm.items(gpa, "with")) |m| try names.put(gpa, try gpa.print("{s}-form", .{m}), {});
     try formPrograms(gpa, fm, &names);
-    for (try formPackages(io, gpa, root, fm, f)) |p| try names.put(gpa, p, {});
+    for (try fm.items(gpa, "packages")) |p| try names.put(gpa, p, {});
     return names.keys();
-}
-
-/// formPackages returns the packages fm's apko.yaml names.
-fn formPackages(io: Io, gpa: Allocator, root: Dir, fm: Form, f: *Failure) ![]const []const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    const config = try form.apko(io, gpa, root, &.{fm}, &.{}, f);
-    if (config.get("contents")) |c| if (c.get("packages")) |list| if (list == .list)
-        for (list.list) |p| if (p == .scalar) try out.append(gpa, p.scalar.text);
-    return out.items;
 }
 
 /// published returns config for a build that takes werewolf's programs, and
@@ -368,15 +363,12 @@ fn formPackages(io: Io, gpa: Allocator, root: Dir, fm: Form, f: *Failure) ![]con
 /// or are named when that form is not from the repository. keyring must be
 /// named as the index's signature names the key.
 pub fn published(
-    io: Io,
     gpa: Allocator,
-    root: Dir,
     config: form.Node,
     forms: []const Form,
     from_repo: []const []const u8,
     extra: []const []const u8,
     keyring: []const u8,
-    f: *Failure,
 ) !form.Node {
     if (!mem.eql(u8, std.fs.path.basename(keyring), package.repository_key))
         return error.KeyringName;
@@ -392,7 +384,7 @@ pub fn published(
         if (fm.spec.get("base") == null) for (image_programs) |p|
             try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
         try formPrograms(gpa, fm, &names);
-        for (try formPackages(io, gpa, root, fm, f)) |p| try names.put(gpa, p, {});
+        for (try fm.items(gpa, "packages")) |p| try names.put(gpa, p, {});
     }
     for (extra) |p| try names.put(gpa, p, {});
     try names.put(gpa, format_package, {});
@@ -437,7 +429,7 @@ fn mapOf(gpa: Allocator, pairs: []const [2][]const u8) Allocator.Error!form.Node
     return .{ .map = out };
 }
 
-/// withAccounts adds the accounts apko() returns (apko.yaml's and the
+/// withAccounts adds the accounts apko() returns (the forms' and the
 /// service defaults) to the image's account files, after the packages' own,
 /// as the apko tool would. On the build's root apko already added them, so
 /// each file must end in exactly those lines; on a machine's root, which apk
@@ -525,8 +517,8 @@ const Added = struct {
             const at = have[0 .. mem.findScalar(u8, have, ':') orelse have.len];
             if (mem.eql(u8, at, name)) return f.fail(
                 gpa,
-                "{s}: {s} is there, but the accounts apko added are not those apko.yaml " ++
-                    "gives now, in its order: a root built from older forms; build it again",
+                "{s}: {s} is there, but the accounts apko added are not those the forms " ++
+                    "give now, in their order: a root built from older forms; build it again",
                 .{ a.file, name },
             );
         };
@@ -1068,7 +1060,7 @@ test "compose links each narrowed program to leash" {
         "pledge stdio rpath exec landlock seccomp\n" ++
         "narrow /usr/bin/ffmpeg pledge stdio rpath\nnarrow /usr/bin/cat pledge stdio\n";
     for ([_][2][]const u8{
-        .{ "forms/x/apko.yaml", "" },
+        .{ "forms/x/form.yaml", "" },
         .{ "forms/x/rootfs/etc/sv/app/service", app },
         .{ "forms/x/rootfs/etc/sv/web/service", "exec /usr/bin/web\nuser web\npledge stdio\n" },
     }) |file| {
@@ -1239,7 +1231,7 @@ test "pledge: a path inside a strict service's directory fails the build" {
     const io = testing.io;
     try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/db");
     try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/web");
-    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/apko.yaml", .data = "" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data = "" });
     try tmp.dir.writeFile(io, .{
         .sub_path = "forms/x/rootfs/etc/sv/web/service",
         .data = "exec /w\nuser web\npledge stdio\nread /data/svc/web/a /data/svc /data/svc/db/x\n",
@@ -1284,7 +1276,7 @@ test "apko: a service user apko.yaml does not name gets an account, its id its n
     ;
     try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/web");
     try tmp.dir.createDirPath(io, "forms/x/rootfs/etc/sv/db");
-    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/apko.yaml", .data = declared });
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data = declared });
     try tmp.dir.writeFile(io, .{
         .sub_path = "forms/x/rootfs/etc/sv/web/service",
         .data = "exec /w\nuser web\npledge stdio\n",
@@ -1323,6 +1315,23 @@ test "apko: a service user apko.yaml does not name gets an account, its id its n
         .{ id, id },
     )) != null);
 
+    // A service joins another's group; never a group no service runs as,
+    // nor its own.
+    for ([_]struct { text: []const u8, refused: ?[]const u8 }{
+        .{ .text = "exec /d\nuser db\npledge stdio\ngroup web\n", .refused = null },
+        .{
+            .text = "exec /d\nuser db\npledge stdio\ngroup shadow\n",
+            .refused = "no service runs as shadow",
+        },
+        .{ .text = "exec /d\nuser db\npledge stdio\ngroup db\n", .refused = "group db is its own" },
+    }) |case| {
+        try tmp.dir.writeFile(io, .{ .sub_path = db_service, .data = case.text });
+        if (case.refused) |why| {
+            try testing.expectError(error.Form, apko(io, gpa, tmp.dir, forms, &.{}, &f));
+            try testing.expect(mem.find(u8, f.text, why) != null);
+        } else _ = try apko(io, gpa, tmp.dir, forms, &.{}, &f);
+    }
+
     // Two services running as one user are refused.
     try tmp.dir.writeFile(
         io,
@@ -1337,10 +1346,11 @@ test "apko: a service user apko.yaml does not name gets an account, its id its n
         .{ .sub_path = db_service, .data = "exec /d\nuser db\npledge stdio\n" },
     );
     try tmp.dir.writeFile(io, .{
-        .sub_path = "forms/x/apko.yaml",
+        .sub_path = "forms/x/form.yaml",
         .data = try gpa.print("accounts:\n  users:\n    - username: old\n      uid: {d}\n", .{id}),
     });
-    try testing.expectError(error.Form, apko(io, gpa, tmp.dir, forms, &.{}, &f));
+    const again = try form.chain(io, gpa, tmp.dir, "x", &f);
+    try testing.expectError(error.Form, apko(io, gpa, tmp.dir, again, &.{}, &f));
     try testing.expect(mem.find(u8, f.text, "is old's") != null);
 }
 
@@ -1381,11 +1391,10 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     ;
     const web_service = "exec /usr/bin/web\nuser web\nlisten tcp/80\npledge stdio inet listen\n";
     for ([_][2][]const u8{
-        .{ "forms/minimal/apko.yaml", "" },
+        .{ "forms/minimal/form.yaml", "" },
         .{ "forms/minimal/rootfs/etc/sv/minimal/run", "minimal's\n" },
         .{ "forms/minimal/rootfs/etc/motd", "minimal's\n" },
-        .{ "forms/web/apko.yaml", web_apko },
-        .{ "forms/web/form.yaml", web_form },
+        .{ "forms/web/form.yaml", web_form ++ web_apko },
         .{ "forms/web/rootfs/etc/sv/web/service", web_service },
         .{ "forms/web/rootfs/etc/motd", "web's\n" },
     }) |file| {
@@ -1445,9 +1454,8 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
         .{ "weaknesses", "files-x every form on aarch64 (test/posture-known)\n" ++
             "kernel-y every form on aarch64 (test/posture-known)\n" },
         // The chain staged for the updater, and its kind's known failures.
-        .{ "forms/minimal/apko.yaml", "" },
-        .{ "forms/web/apko.yaml", web_apko },
-        .{ "forms/web/form.yaml", web_form },
+        .{ "forms/minimal/form.yaml", "" },
+        .{ "forms/web/form.yaml", web_form ++ web_apko },
         .{ "forms/web/rootfs/etc/motd", "web's\n" },
         .{ "forms/minimal/rootfs/etc/motd", "minimal's\n" },
         .{ "posture-known", b.posture_known },
@@ -1462,10 +1470,6 @@ test "compose: ro and meta from a chain and a package-only image's accounts" {
     );
     try testing.expectError(error.FileNotFound, meta.access(io, "usr/share/werewolf/oci", .{}));
     try testing.expectError(error.FileNotFound, meta.access(io, "usr/share/werewolf/dev", .{}));
-    try testing.expectError(
-        error.FileNotFound,
-        meta.access(io, "usr/share/werewolf/forms/minimal/form.yaml", .{}),
-    );
     // Everything made in /usr/share/werewolf is named in records, so the
     // updater carries none of it forward.
     for ([_]Dir{ ro, meta }) |tree| {
@@ -1533,10 +1537,10 @@ test "withAccounts: what apko added must be what its rule gives; homes it cannot
         \\
     ;
     for ([_][2][]const u8{
-        .{ "forms/plain/apko.yaml", user ++ "      homedir: /var/empty\n" },
-        .{ "forms/home/apko.yaml", user },
-        .{ "forms/two/apko.yaml", two },
-        .{ "forms/team/apko.yaml", team },
+        .{ "forms/plain/form.yaml", user ++ "      homedir: /var/empty\n" },
+        .{ "forms/home/form.yaml", user },
+        .{ "forms/two/form.yaml", two },
+        .{ "forms/team/form.yaml", team },
     }) |file| {
         try tmp.dir.createDirPath(io, std.fs.path.dirname(file[0]).?);
         try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });

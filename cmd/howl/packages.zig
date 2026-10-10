@@ -15,7 +15,7 @@ const Allocator = std.mem.Allocator;
 const mem = std.mem;
 const B = build.B;
 
-/// apkoConfig writes the chain's apko config, its apko.yaml files merged,
+/// apkoConfig writes the chain's apko config, its forms' packages, accounts and paths merged,
 /// and under dev the dev packages after the rest. It is replaced only when
 /// it says something new, so a change to howl that changes nothing apko
 /// is asked for rebuilds no root.
@@ -52,20 +52,7 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
             try b.write(key, pub_key);
         }
         const keyring = try b.path("../keys/{s}", .{package.repository_key});
-        node = compose.published(
-            b.io,
-            b.gpa,
-            Dir.cwd(),
-            node,
-            b.chain,
-            b.from_repo,
-            extra.items,
-            keyring,
-            &f,
-        ) catch |err| switch (err) {
-            error.Form => return b.steps.fail(f.text),
-            else => |e| return e,
-        };
+        node = try compose.published(b.gpa, node, b.chain, b.from_repo, extra.items, keyring);
     }
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);

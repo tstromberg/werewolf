@@ -35,9 +35,9 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 
 ## Detailed design
 
-**Forms.** A name is NAME-form from werewolf's repository, checked against its
-signed index into `build/published/ARCH` (`published.zig`): the machine updates
-it. A path is the caller's own, never updated. `--build` takes `./forms`.
+**Forms.** A name is NAME-form, from werewolf's repository by its signed index
+(`published.zig`), which the machine updates; one not published yet is
+`./forms/NAME`, with a warning. A path is the caller's own, never updated.
 
 **Config tar.** Each service's `config`, `setting` and `render` lines declare a
 flag (`lib/service.zig`); howl's own are `--config DIR`, `--hostname`,

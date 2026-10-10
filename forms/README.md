@@ -5,8 +5,7 @@ holds everything about it: a new form is a new directory.
 
 ```text
 forms/NAME/
-  apko.yaml       the Wolfi packages, accounts and paths apko installs
-  form.yaml       what apko cannot say (below); optional
+  form.yaml       the form: what apko installs, and what apko cannot say (below)
   rootfs/         files laid over the packages: path here, path in the image
   cmd/PROGRAM/    a program only this form needs, PROGRAM.zig, built and laid
                   at /usr/lib/werewolf/PROGRAM (docs/programs.md)
@@ -29,6 +28,8 @@ by name from there, so the machine updates it; `--build` takes this tree's.
 | --- | --- | --- |
 | `base` | the form it is built on, a name in forms/ | |
 | `with` | forms it takes beside its base, as a Mastodon takes `[postgresql, valkey, nginx]`: their parts come before its own | added to |
+| `packages` | the Wolfi packages apko installs, by name | added to |
+| `accounts`, `paths` | what apko installs beyond packages, in apko's own shape: `accounts` its `groups` and `users` (each with a numbered id), `paths` its permissions. `repositories`, `keyring` and `archs` are minimal's alone | added to; `archs` the last form's |
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `popen-shim.so` (a library) | added to |
 | `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
 | `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
@@ -70,33 +71,34 @@ and `#` comments. A key this page does not list, or YAML apko might read
 some other way (anchors, tags, multi-line scalars, inline maps), fails
 the build with its file and line.
 
-## apko.yaml
+## What apko installs
 
-An apko config, as apko documents it, without `include:`: werewolf
-merges the chain's configs into one, base first, by the rules apko's
-deprecated include used (lists joined, maps merged by key, everything
+A form's `packages`, `accounts` and `paths` (and minimal's `repositories`,
+`keyring` and `archs`) are an apko config in form.yaml's own keys:
+werewolf merges the chain's into one, base first, by the rules apko's
+deprecated `include:` used (lists joined, maps merged by key, everything
 else the last form's), and apko builds that. `build/host/form apko NAME`
 prints it.
 
-Its `accounts:` are added again on a machine's update, which installs
-with apk, not apko (lib/compose.zig): a user's `homedir` is `/var/empty`
-(or `/dev/null`), since nothing on the machine would make another, and a
+`accounts` are added again on a machine's update, which installs with
+apk, not apko (lib/compose.zig): a user's `homedir` is `/var/empty` (or
+`/dev/null`), since nothing on the machine would make another, and a
 service writes where its service file's `write` says.
 
-A service's `user` needs no account there: one apko.yaml does not name
-gets its own, uid and gid a hash of its name in 65536-2147483647, home
+A service's `user` needs no account there: one no form names gets its
+own, uid and gid a hash of its name in 65536-2147483647, home
 `/var/empty`, shell `/sbin/nologin`, the same on every build. Name the
 account to pick its ids. Each service runs as a user of its own: two
 that share one, or a hash that lands on an id taken, fail the build.
 
 ## A new form
 
-1. `forms/NAME/apko.yaml`: its packages, and an account for each service.
-2. `forms/NAME/form.yaml`: `base: prod`, or a runtime form, and its `net`.
-3. `forms/NAME/rootfs/etc/sv/SERVICE/service`: how leash starts it
+1. `forms/NAME/form.yaml`: `base: prod`, or a runtime form; its
+   `packages`; and its `net`.
+2. `forms/NAME/rootfs/etc/sv/SERVICE/service`: how leash starts it
    ([cmd/leash](../cmd/leash/leash.zig) lists the directives).
-4. `forms/NAME/test/checks`: what proves it works, and what it refuses.
-5. `make check-NAME`, then name each posture failure in `weaknesses`
+3. `forms/NAME/test/checks`: what proves it works, and what it refuses.
+4. `make check-NAME`, then name each posture failure in `weaknesses`
    with its excuse, or fix it.
 
 A form outside this tree builds the same way: `make FORM=../myapp`, a

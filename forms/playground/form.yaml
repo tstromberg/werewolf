@@ -1,4 +1,10 @@
+# playground: a machine to try werewolf on, here: howl run's form on Lima,
+# QEMU, Firecracker and bhyve. prod, the sshd form taking key files beside
+# security keys, and bash, for Lima's readiness probes, so Lima manages it.
 base: prod
+
+packages:
+  - bash
 
 # sshd, its service and its policy, taking key files too: Lima's own, and
 # whatever ~/.ssh holds (OpenSSH's defaults, less RSA over SHA-1).

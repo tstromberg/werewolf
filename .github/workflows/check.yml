@@ -110,7 +110,7 @@ jobs:
           path: ~/.cache/dev.chainguard.go-apk
           key: >-
             apko-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard }}-${{ steps.versions.outputs.week
-            }}-${{ hashFiles('forms/*/apko.yaml', 'boot/*.yaml') }}
+            }}-${{ hashFiles('forms/*/form.yaml', 'boot/*.yaml') }}
           restore-keys: apko-${{ runner.arch }}-${{ matrix.group }}${{ matrix.shard }}-${{ steps.versions.outputs.week }}-
       - name: Install example compilers
         # The groups that build every form build the compiled tutorial

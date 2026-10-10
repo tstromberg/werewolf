@@ -1,0 +1,15 @@
+# Mastodon answers over HTTPS for its domain, through Caddy, with a
+# certificate from Caddy's own CA for localhost: the first start loads the
+# schema and makes the owner before Puma serves, so wait.
+ok  mastodon-health   i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/health 2>/dev/null | grep -qx OK; do i=$((i + 1)); [ $i -le 170 ] || { echo "no /health in 170 s"; exit 1; }; sleep 1; done
+# It is the config's server, and the owner the config names exists.
+ok  mastodon-instance wget -q -T 5 --no-check-certificate -O - https://localhost/api/v2/instance | grep -q '"domain":"localhost"'
+ok  mastodon-owner    wget -q -T 5 --no-check-certificate -O - 'https://localhost/api/v1/accounts/lookup?acct=owner' | grep -q '"username":"owner"'
+# The streaming server answers through Caddy, and plain HTTP is sent to HTTPS.
+ok  streaming-health  i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/api/v1/streaming/health 2>/dev/null | grep -qx OK; do i=$((i + 1)); [ $i -le 60 ] || { echo "no streaming health"; exit 1; }; sleep 1; done
+ok  https-redirect    wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# The assets are files from the image, the media directory is Caddy's to read.
+ok  assets-served     f=$(cd /usr/lib/mastodon/public && ls packs/*.js 2>/dev/null | head -1); [ -n "$f" ] && wget -q -T 5 --no-check-certificate -O /dev/null "https://localhost/$f"
+# Its secrets are on /data, for its group alone; its directory is the
+# group's, and what the jobs make there the web may change.
+ok  secrets-private   [ "$(stat -c '%a %U %G' /data/svc/mastodon/env)" = '640 mastodon mastodon' ] && [ "$(stat -c '%a %G' /data/svc/mastodon)" = '2771 mastodon' ]

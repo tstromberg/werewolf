@@ -1,4 +1,23 @@
+# A forwarding-only OpenSSH service, with no login shell.
 base: prod
+
+packages:
+  - openssh-server
+  - coreutils             # /usr/bin/false is the account's login shell
+accounts:
+  groups:
+    - groupname: bastion
+      gid: 205
+  users:
+    - username: bastion
+      uid: 205
+      gid: 205
+      homedir: /var/empty
+      shell: /usr/bin/false
+paths:
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755
 
 # A forwarding-only sshd, by security key. It has no users: a form built on
 # it names them, each with keys and destinations (bastion: users:,

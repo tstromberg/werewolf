@@ -1,0 +1,20 @@
+# Mastodon's streaming server, Node, as mastodon-stream: it holds the
+# clients' WebSockets on loopback, behind nginx, reads the database by a
+# role that may only read, and subscribes to the queue. It runs nothing,
+# reaches nothing else, and runs with no JIT.
+exec    /usr/bin/node --jitless /usr/lib/mastodon/streaming/index.js
+user    mastodon-stream
+# Valkey's group, for its socket.
+group   valkey
+pledge  stdio rpath inet unix connect listen proc
+listen  tcp/4000
+connect /run/svc/postgres/.s.PGSQL.5432 /run/svc/valkey/valkey.sock
+memory  384
+env     NODE_ENV=production
+env     BIND=127.0.0.1
+env     PORT=4000
+env     DB_HOST=/run/svc/postgres
+env     DB_PORT=5432
+env     DB_USER=mastodon-stream
+env     DB_NAME=mastodon
+env     REDIS_URL=unix:///run/svc/valkey/valkey.sock

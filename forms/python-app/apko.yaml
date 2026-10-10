@@ -1,5 +1,0 @@
-# python-app: python, starting an application of yours from /usr/lib/app
-# (form.yaml's app) as `python3 main.py`, on :8080 (etc/sv/app/service).
-# It ships none: the service stays down, saying why, until howl's --app or
-# a form on this one lays main.py there, as python-example does. See
-# docs/forms.md.

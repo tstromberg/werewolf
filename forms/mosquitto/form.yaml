@@ -1,4 +1,14 @@
+# mosquitto: prod, with Mosquitto as an MQTT broker for the devices and
+# automations on a network: TLS on :8883 with a certificate from the
+# config, users and what each may publish and subscribe to from the
+# config, nothing anonymous, and nothing plain (1883 is a line in
+# etc/mosquitto/mosquitto.conf, for a LAN that must have it). Retained
+# messages and queues are kept in /data/svc/mosquitto. leash starts it
+# (etc/sv/mosquitto/service) as the mosquitto user. See forms/mosquitto/README.md.
 base: prod
+
+packages:
+  - mosquitto
 
 # Mosquitto serves MQTT over TLS, and sends nothing: no bridges.
 net:

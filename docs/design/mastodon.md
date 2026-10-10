@@ -1,7 +1,8 @@
 # Mastodon
 
-Proposed, 2026-10-08; its base work is built (below), the form not yet.
-The first form of [forms-catalog.md](forms-catalog.md)'s tier 4.
+Built, 2026-10-09 ([forms/mastodon](../../forms/mastodon/README.md));
+proposed 2026-10-08. The first form of
+[forms-catalog.md](forms-catalog.md)'s tier 4.
 
 ## Summary
 
@@ -36,11 +37,12 @@ sha256 and followed by melange's `update:`
 
 | Part | User | Listens | Reaches | Runs |
 | --- | --- | --- | --- | --- |
-| nginx | `nginx` | tcp/80 (TLS in front: `caddy`, or the cloud's) | web, streaming on loopback | nothing |
-| web (Puma) | `mastodon` | 127.0.0.1:3000 | PostgreSQL, Valkey sockets; tcp/443 public | nothing |
+| nginx | `nginx` | tcp/80 (TLS in front: the cloud's, or a proxy's) | web, streaming on loopback | nothing |
+| web (Puma) | `mastodon` | 127.0.0.1:3000 | PostgreSQL, Valkey sockets; tcp/443 public | `media` only, on uploads |
 | streaming (Node 24) | `mastodon-stream` | 127.0.0.1:4000 | PostgreSQL (read-only role), Valkey | nothing |
 | jobs (Sidekiq) | `mastodon-jobs` | nothing | PostgreSQL, Valkey; tcp/443 public, tcp/587 | `media` only |
-| media (ffmpeg, ffprobe) | `mastodon-jobs`, narrower leash | nothing | nothing | nothing |
+| media (file, ffmpeg, ffprobe) | the web's or the jobs', narrowed | nothing | nothing | nothing |
+| cleanup (supercronic, tootctl) | `mastodon-cron` | nothing | PostgreSQL, Valkey | ruby |
 | PostgreSQL, Valkey | `postgres`, `valkey` | sockets | nothing | nothing |
 
 **Base work.** Built: the `ruby` form (Ruby 4.0) and bundles, so the
@@ -66,9 +68,11 @@ Built for it:
 
 - Registrations by approval; 2FA for owner, admins and moderators;
   secure mode (`AUTHORIZED_FETCH`); no Sidekiq web UI; secrets made once
-  on `/data`, 0600, unless the config brings them.
-- No `allow: jit`, so MDWE holds: Node runs `--jitless`, Ruby without
-  YJIT; whether YJIT is worth `jit` is measured and recorded here.
+  on `/data`, 0640, the web's group's (`share group`: the jobs' and cron's
+  users have it, and write the media too).
+- Node runs `--jitless`, Ruby without YJIT. PostgreSQL's `allow: jit`
+  turns MDWE off for the machine; whether YJIT is worth it is measured
+  and recorded here.
 - Puma workers from the CPUs, `MAX_THREADS` and Sidekiq's concurrency
   matched to the database pool; libvips, not ImageMagick; assets
   precompiled at build; jemalloc, as Mastodon ships. Media in

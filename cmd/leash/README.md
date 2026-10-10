@@ -25,7 +25,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | `config NAME PATH [optional]` | copy a `/run/config` file to `/run/svc/SERVICE/NAME`, 0600; if missing, park unless `optional` |
 | `setting`, `render` | settings, written by service-config (`lib/settings.zig`); a missing settings file reads as `{}` |
 | `nofile N`, `memory MIB`, `cpu WEIGHT` | open-file limit; `memory.max` (resident memory, not address space); `cpu.weight`, a share of contended CPUs |
-| `share strict\|shared\|browseable` | who may enter its two directories: only its user (`0700`, the default); others, by a name they know, such as a socket (`0711`); others, listing too (`0755`) |
+| `share strict\|shared\|browseable\|group`, `group NAME...` | who may enter its two directories: only its user (`0700`, the default); others, by a name they know, such as a socket (`0711`); others, listing too (`0755`); others by name, and services whose users have its user's group, writing too (`02771`, with a default ACL that makes what is made there the group's, whatever the umask). `group` joins other services' users' groups, to reach what they share with them (Valkey's socket) |
 | `root /oci/NAME`, `dir PATH` | run inside an image in the root (docs/design/adhoc.md), without `render`; start directory |
 | `narrow PROGRAM KEY WORD...` | run a `run` program narrowed: `pledge` (within the service's, no network), `read`, `write` (within the service's), `memory MIB` (`RLIMIT_DATA`) ([narrow.md](../../docs/design/narrow.md)) |
 
@@ -52,9 +52,9 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
    with `root`, the whole image read-only), its directories and paths, each
    program and its ELF loader, its ports. `read`/`write` paths are opened with no symlink
    anywhere, since another service could plant one in `/data`.
-2. **Drop root:** empty the bounding set but a low port's capability, clear
-   groups, set gid and uid, keep that capability ambient, set
-   `no_new_privs`, and fail if root can be regained.
+2. **Drop root:** empty the bounding set but a low port's capability, set
+   groups to its `group` lines' alone, set gid and uid, keep that
+   capability ambient, set `no_new_privs`, and fail if root returns.
 3. **Confined:** apply Landlock (also scoping signals and abstract sockets),
    copy configs, run `service-config`, then each `before`.
 4. **Pledge and exec:** install a filter returning ENOSYS outside the

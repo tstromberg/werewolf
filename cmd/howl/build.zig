@@ -434,7 +434,7 @@ pub const B = struct {
     /// self is howl's executable, which holds the steps' code: what the
     /// Makefile and build/host/form were to make's targets.
     self: []const u8,
-    /// form_files are the chain's apko.yaml and form.yaml files.
+    /// form_files are the chain's form.yaml files.
     form_files: []const []const u8,
     /// rootfs are the chain's rootfs files and etc/sv directories, whose
     /// removal changes nothing else a step could see.
@@ -702,7 +702,8 @@ fn plan(
     var from_repo: std.ArrayList([]const u8) = .empty;
     if (s.published) for (chain) |c| {
         const under = mem.cutPrefix(u8, c.dir, names) orelse continue;
-        if (under.len > 0 and under[0] == '/') try from_repo.append(gpa, c.name);
+        if (under.len > 0 and under[0] == '/' and published.fetched(io, gpa, names, c.name))
+            try from_repo.append(gpa, c.name);
     };
 
     // The overlay's directories, in the Makefile's order (OVERLAY_DIRS),
@@ -732,10 +733,7 @@ fn plan(
     // basename names it), and a form's own, F/cmd/P, in PROGRAMS/forms/F.
     var dirs: std.array_hash_map.String(void) = .empty;
     for (chain) |c| {
-        for ([_][]const u8{ "apko.yaml", "form.yaml" }) |file| {
-            const at = try gpa.print("{s}/{s}", .{ c.dir, file });
-            if (exists(io, at)) try form_files.append(gpa, at);
-        }
+        try form_files.append(gpa, try gpa.print("{s}/form.yaml", .{c.dir}));
         try rootfsInputs(io, gpa, try gpa.print("{s}/rootfs", .{c.dir}), &rootfs);
         for (try c.items(gpa, "programs")) |item| {
             var it = mem.tokenizeAny(u8, item, " \t");

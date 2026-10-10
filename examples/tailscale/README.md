@@ -1,6 +1,6 @@
 # Tailscale subnet router on Werewolf
 
-The [tailscale form](../../forms/tailscale/apko.yaml) gives permitted tailnet
+The [tailscale form](../../forms/tailscale/form.yaml) gives permitted tailnet
 clients access to machines in an advertised subnet. It runs Tailscale's
 userspace network stack as `tailscale` (uid/gid 206).
 
