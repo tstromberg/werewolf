@@ -19,7 +19,7 @@ pub const Service = struct {
     run: []const []const u8 = &.{},
     requires: []const []const u8 = &.{},
     env: []const [2][]const u8 = &.{},
-    secrets: []const [2][]const u8 = &.{},
+    secrets: []const Secret = &.{},
     configs: []const Config = &.{},
     settings: []const settings.Setting = &.{},
     render: ?settings.Render = null,
@@ -69,6 +69,10 @@ const narrowing: seal.Set = .initMany(&.{ .rpath, .exec, .landlock, .seccomp });
 
 /// network is what no narrowed program may promise.
 const network: seal.Set = .initMany(&.{ .inet, .unix, .netlink, .packet, .connect, .listen });
+
+/// Secret is a `secret` line: a variable read from a file beneath
+/// /run/config, which is never logged; an optional one may be missing.
+pub const Secret = struct { name: []const u8, path: []const u8, optional: bool = false };
 
 /// Config is a `config` line: the copy's name in the service's directory,
 /// its source beneath /run/config, and whether the service runs without it.
@@ -122,7 +126,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var groups: std.ArrayList([]const u8) = .empty;
     var requires: std.ArrayList([]const u8) = .empty;
     var env: std.ArrayList([2][]const u8) = .empty;
-    var secrets: std.ArrayList([2][]const u8) = .empty;
+    var secrets: std.ArrayList(Secret) = .empty;
     var configs: std.ArrayList(Config) = .empty;
     var declared: std.ArrayList(settings.Setting) = .empty;
     var render: ?settings.Render = null;
@@ -188,11 +192,12 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             if (!isVariable(args[0][0..eq])) return invalid(bad, "not a variable name");
             try env.append(gpa, .{ args[0][0..eq], args[0][eq + 1 ..] });
         } else if (std.mem.eql(u8, key, "secret")) {
-            if (args.len != 2 or !isVariable(args[0]))
-                return invalid(bad, "secret takes NAME and PATH");
+            const optional = args.len == 3 and std.mem.eql(u8, args[2], "optional");
+            if ((args.len != 2 and !optional) or !isVariable(args[0]))
+                return invalid(bad, "secret takes NAME and PATH, then optional");
             if (!isCleanPath(args[1]) or !std.mem.startsWith(u8, args[1], "/run/config/"))
                 return invalid(bad, "secret source must be beneath /run/config");
-            try secrets.append(gpa, .{ args[0], args[1] });
+            try secrets.append(gpa, .{ .name = args[0], .path = args[1], .optional = optional });
         } else if (std.mem.eql(u8, key, "config")) {
             const optional = args.len == 3 and std.mem.eql(u8, args[2], "optional");
             if ((args.len != 2 and !optional) or !settings.isName(args[0]))
@@ -274,7 +279,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         if (r.format == .env) for (declared.items) |d| {
             for (env.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
                 return invalid(bad, "a setting's key is an env line's too");
-            for (secrets.items) |e| if (std.mem.eql(u8, e[0], d.key.?))
+            for (secrets.items) |e| if (std.mem.eql(u8, e.name, d.key.?))
                 return invalid(bad, "a setting's key is a secret's too");
         };
     } else if (declared.items.len > 0) return invalid(bad, "setting without render");
@@ -589,7 +594,14 @@ test parse {
     try testing.expectEqualStrings("/usr/bin/grype", s.run[0]);
     try testing.expectEqualStrings("/run/config/nginx/cert.pem", s.requires[0]);
     try testing.expectEqualStrings("hello world", s.env[0][1]);
-    try testing.expectEqualStrings("TOKEN", s.secrets[0][0]);
+    try testing.expectEqualStrings("TOKEN", s.secrets[0].name);
+    try testing.expect(!s.secrets[0].optional);
+    const maybe = try parse(
+        arena.allocator(),
+        "exec /a\nuser x\npledge stdio\nsecret PASS /run/config/x/pass optional\n",
+        &bad,
+    );
+    try testing.expect(maybe.secrets[0].optional);
     try testing.expectEqualStrings("authorized-keys", s.configs[0].name);
     try testing.expectEqualStrings("/run/config/ssh/authorized_keys", s.configs[0].path);
     try testing.expect(!s.configs[0].optional);
@@ -623,6 +635,7 @@ test "parse refuses" {
         .{ .text = "exec a\nuser x", .line = 1 },
         .{ .text = "exec /a/../b\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser root", .line = 2 },
+        .{ .text = "exec /a\nuser x\nsecret P /run/config/p maybe", .line = 3 },
         .{ .text = "exec /a\nuser x\ngroup", .line = 3 },
         .{ .text = "exec /a\nuser x\ngroup Valkey", .line = 3 },
         .{ .text = "exec /a\nuser x\nlisten udp/53", .line = 3 },

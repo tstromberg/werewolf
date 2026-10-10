@@ -9,7 +9,7 @@ from the repository root.
 
 The [form](../../forms/node-example/form.yaml) builds on
 [node-app](../../forms/node-app/form.yaml), which supplies Node.js, a
-[service](../../forms/node-app/rootfs/etc/sv/app/service) that starts
+[service](../../forms/node-app/form.yaml) that starts
 `/usr/lib/app/server.js`, and its network settings, and ships no
 application. The example brings
 [server.js](../../forms/node-example/rootfs/usr/lib/app/server.js). The

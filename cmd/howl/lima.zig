@@ -159,7 +159,7 @@ pub fn managedTemplate(gpa: Allocator, m: Managed) ![]const u8 {
         \\plain: true
         \\arch: {s}
         \\cpus: 4
-        \\memory: 2GiB
+        \\memory: {d}MiB
         \\images:
         \\  - location: "{s}/disk.img"
         \\    arch: {s}
@@ -176,9 +176,9 @@ pub fn managedTemplate(gpa: Allocator, m: Managed) ![]const u8 {
         \\    format: false
         \\
     , .{
-        howl.form_tag, m.form,        m.arch,  m.build, m.arch,
-        m.build,       m.cmdline,     user_ip, user_gw, user_gw,
-        m.out,         m.config_disk,
+        howl.form_tag, m.form,  m.arch,        howl.local_mib, m.build,
+        m.arch,        m.build, m.cmdline,     user_ip,        user_gw,
+        user_gw,       m.out,   m.config_disk,
     });
 }
 

@@ -26,4 +26,30 @@ rm -rf "$smoke"
 [ ! -e "$smoke" ] || fail "form -n left $smoke"
 ! "$howl" run --build caddy >/dev/null 2>&1 || fail "howl run caddy (a positional form) was taken"
 ! "$howl" _build --with minimal --disk-args x slot >/dev/null 2>&1 || fail "_build took --disk-args without disk"
+# forms/mastodon/README.md's line, packed as create packs it: one --domain
+# for Caddy and Mastodon, each settings file holding it.
+mkdir -p "$smoke.m" && printf x >"$smoke.m/pw"
+"$howl" pack --build --with mastodon -o "$smoke.m/c.tar" --domain social.example.com \
+	--owner alice --owner-email alice@example.com --owner-password "$smoke.m/pw" >/dev/null 2>&1 ||
+	fail "forms/mastodon/README.md: howl pack --with mastodon --domain ... --owner-password FILE"
+for f in caddy/settings.json mastodon/settings.json; do
+	tar -xOf "$smoke.m/c.tar" "$f" 2>/dev/null | grep -q '"domain":"social.example.com"' ||
+		fail "mastodon: --domain did not reach $f"
+done
+rm -rf "$smoke.m"
+# forms/mastodon/README.md's lines, packed as create packs them: one
+# --domain for Caddy and Mastodon, and the relay's password a file.
+mkdir -p "$smoke.m" && printf x >"$smoke.m/pw"
+"$howl" pack --build --with mastodon -o "$smoke.m/c.tar" --domain social.example.com \
+	--owner alice --owner-email alice@example.com --owner-password "$smoke.m/pw" \
+	--smtp-server smtp.postmarkapp.com --smtp-port 587 --smtp-login u \
+	--smtp-from notifications@social.example.com --smtp-password "$smoke.m/pw" >/dev/null 2>&1 ||
+	fail "forms/mastodon/README.md: howl pack --with mastodon, its flags"
+for f in caddy/settings.json mastodon/settings.json; do
+	tar -xOf "$smoke.m/c.tar" "$f" 2>/dev/null | grep -q '"domain":"social.example.com"' ||
+		fail "mastodon: --domain did not reach $f"
+done
+tar -tf "$smoke.m/c.tar" | grep -qx mastodon-jobs/smtp-password ||
+	fail "mastodon: --smtp-password is not mastodon-jobs/smtp-password"
+rm -rf "$smoke.m"
 echo "howl-smoke: the advertised lines take their forms"

@@ -130,8 +130,9 @@ curl -f http://ADDRESS:8080/health
 build/host/howl console web --on gcp  # the serial port: boot, posture, the app's log
 ```
 
-`--arch` picks the machine: `t2a-standard-1` with gVNIC on aarch64,
-`e2-small` with VirtIO networking on x86_64; `--size` names another type.
+`--arch` picks the machine, 4 GB either way: `t2a-standard-1` with gVNIC
+on aarch64, `e2-medium` with VirtIO networking on x86_64; `--size` names
+another type.
 A machine lets nothing in: `--allow-from me` opens the form's TCP ports to
 this host's address (`--allow-from CIDR` to a network), or create prints the
 gcloud commands that would. The machine has no service account, and Secure

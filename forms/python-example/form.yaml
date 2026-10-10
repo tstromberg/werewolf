@@ -4,3 +4,20 @@ base: python-app
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: python3 runs the example
+
+services:
+  # python-app's service, and one setting of the machine's own: the
+  # greeting, given as `howl create NAME --with python-example --greeting
+  # TEXT` or in app/settings.json, reaching the application as GREETING
+  # (docs/forms.md, Settings). A secret would be a file instead: `config`.
+  app:
+    exec: /usr/bin/python3 /usr/lib/app/main.py
+    user: app
+    requires: /usr/lib/app/main.py
+    pledge: stdio rpath proc inet listen
+    memory: 512
+    listen: [tcp/8080]
+    env: [PYTHONDONTWRITEBYTECODE=1, PYTHONUNBUFFERED=1]
+    config: settings /run/config/app/settings.json
+    setting: greeting string
+    render: env app.env

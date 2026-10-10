@@ -13,7 +13,7 @@ The `postgresql` form (and `demo`, built on it) runs PostgreSQL 17 as the
 cluster before it will start, and a form's roles, schemas and grants must be
 in it. Distros do this with a shell script; werewolf has no shell. leash runs
 each `before` program as the service's user, under the service's Landlock
-rules (forms/postgresql/rootfs/etc/sv/postgres/service), and parks the
+rules (forms/postgresql/form.yaml, services: postgres), and parks the
 service if one fails.
 
 ## Goals

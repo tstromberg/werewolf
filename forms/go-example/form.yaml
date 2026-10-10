@@ -1,5 +1,11 @@
 # A compiled application needs prod, with no Go toolchain in the VM.
 base: app
 
-net:
-  - listen tcp/8080
+services:
+  app:
+    exec: /usr/lib/app/server
+    user: app
+    pledge: stdio rpath proc inet listen
+    memory: 256
+    listen: [tcp/8080]
+    env: GOMEMLIMIT=192MiB

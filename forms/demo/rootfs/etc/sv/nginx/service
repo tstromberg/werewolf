@@ -1,8 +1,0 @@
-# nginx, as its own user, serving the status page: it may bind :80 and no
-# other port, read its configuration and the page, and run only itself.
-exec    /usr/bin/nginx -e stderr
-before  /usr/bin/nginx -e stderr -t -q
-user    nginx
-pledge  stdio rpath wpath proc unix inet listen aio sendfile
-listen  tcp/80
-read    /etc/nginx /data/svc/status/www

@@ -43,6 +43,17 @@ pub fn readIndex(gpa: Allocator, keys: []const Trusted, idx: *Index, data: []con
     return std.mem.concat(gpa, u8, &.{ try signatureSegment(gpa, v.name, v.signature), v.signed });
 }
 
+/// signer returns the name of the key an index's signature names, unchecked:
+/// enough to tell whose index a cached one is.
+pub fn signer(gpa: Allocator, data: []const u8) ![]const u8 {
+    const sig = try segment(gpa, data, 0, max_signature);
+    const files = try tarFiles(gpa, sig.bytes);
+    if (files.len != 1) return error.BadSignatureSegment;
+    const name = files[0].name;
+    return std.mem.cutPrefix(u8, name, ".SIGN.RSA256.") orelse
+        std.mem.cutPrefix(u8, name, ".SIGN.RSA.") orelse error.BadSignatureSegment;
+}
+
 /// Record is one package an index lists: its name, version, what it
 /// depends on, and the SHA-1 of its control segment.
 pub const Record = struct {
@@ -537,6 +548,21 @@ test checkPackage {
         error.NotAsIndexed,
         checkPackage(a, io, tmp.dir, "hello-1.0-r0.5c7ecd94.apk", &idx),
     );
+}
+
+test signer {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expectEqualStrings(
+        "werewolf-test.rsa.pub",
+        try signer(a, @embedFile("testdata/apk/APKINDEX.werewolf.tar.gz")),
+    );
+    try testing.expectEqualStrings(
+        "test.rsa.pub",
+        try signer(a, @embedFile("testdata/apk/APKINDEX.sha1.tar.gz")),
+    );
+    try testing.expect(std.meta.isError(signer(a, "not an index")));
 }
 
 test parseRecords {

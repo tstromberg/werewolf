@@ -12,7 +12,7 @@ The [form](../../forms/python-example/form.yaml) builds on
 service that starts `/usr/lib/app/main.py`, and its network settings, and
 ships no application. The example brings
 [main.py](../../forms/python-example/rootfs/usr/lib/app/main.py), and its
-own [service](../../forms/python-example/rootfs/etc/sv/app/service), which
+own [service](../../forms/python-example/form.yaml), which
 adds a setting. The service's `app` user gets its account from the build.
 Your own application is `--with python-app --app ./myapp`, with
 `./myapp/main.py`.

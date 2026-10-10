@@ -13,11 +13,6 @@ base: prod
 packages:
   - minio
 
-# MinIO serves S3, and sends nothing: no KMS, no notifications, no
-# replication, no update check.
-net:
-  - listen tcp/9000
-
 # A shell script nothing runs, from the package.
 prune:
   - usr/bin/docker-entrypoint.sh
@@ -25,3 +20,29 @@ prune:
 # The check speaks S3 with MinIO's own client.
 dev:
   - mc
+
+services:
+  # MinIO, as its own user: it may bind :9000 and no other port, read the
+  # image, and write only its own directories, where the objects are. It
+  # reaches nothing on the network. The root user and password come from
+  # the config into its environment; missing, the service parks with a
+  # line naming the file.
+  minio:
+    exec: /usr/bin/minio server --address :9000 --quiet /data/svc/minio
+    user: minio
+    # netlink: it lists the host's addresses at start, as Go's net.Interfaces does.
+    pledge: stdio rpath wpath inet unix netlink listen proc sendfile
+    listen: [tcp/9000]
+    secret:
+      - MINIO_ROOT_USER /run/config/minio/root_user
+      - MINIO_ROOT_PASSWORD /run/config/minio/root_password
+    memory: 768
+    nofile: 65536
+    env:
+      - HOME=/run/svc/minio
+      - MINIO_BROWSER=off
+      - MINIO_UPDATE=off
+      - MINIO_API_ROOT_ACCESS=on
+      - GOMEMLIMIT=512MiB
+    # No console (the API is the interface, mc its client), no update
+    # check, TLS in front.

@@ -33,7 +33,8 @@ by name from there, so the machine updates it; `--build` takes this tree's.
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `popen-shim.so` (a library) | added to |
 | `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
 | `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
-| `net` | its network policy: `listen tcp/PORT... [loopback]`, `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER` ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
+| `services` | its leashed services, one a name: leash's directives as keys ([cmd/leash](../cmd/leash/leash.zig) lists them), a value one line, a list one line each, which the build writes as `etc/sv/NAME/service` with `run` and `finish` on leash. `listen` and `connect` take a net line's words (`tcp/PORT`, `udp/PORT`, `icmp`, `public`, `loopback`): leash holds the TCP, fence the rest, so a service's network is said once | whole, last by name |
+| `net` | the network of what is no service, as the updater's fetcher (`connect _update tcp/443 udp/53 tcp/53`) or root's: `listen tcp/PORT... [loopback]`, `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER`; a line for a service's user is refused ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
 | `prune` | files its packages bring that nothing runs, as each is in the image: `usr/bin/bash` | added to |
 | `dev` | packages for DEV=1 builds alone: a daemon's client, for its checks | added to |
 | `modules` | kernel modules it loads, `MODULE...`; `ARCH MODULE...` for one arch (`aarch64 virtio_mmio`); `@TAG MODULE...` for a machine stage0 tags (`"@xfs xfs"`, quoted, as YAML wants a value that starts with @); both, arch first: `aarch64 @hyperv hv_netvsc` | added to |
@@ -95,7 +96,7 @@ that share one, or a hash that lands on an id taken, fail the build.
 
 1. `forms/NAME/form.yaml`: `base: prod`, or a runtime form; its
    `packages`; and its `net`.
-2. `forms/NAME/rootfs/etc/sv/SERVICE/service`: how leash starts it
+2. its `services`: how leash starts each, as whom, on which ports
    ([cmd/leash](../cmd/leash/leash.zig) lists the directives).
 3. `forms/NAME/test/checks`: what proves it works, and what it refuses.
 4. `make check-NAME`, then name each posture failure in `weaknesses`

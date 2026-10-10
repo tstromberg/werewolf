@@ -13,12 +13,6 @@ packages:
   - nginx-mainline        # shares openssl 4 with the rest of the image
   - grype
 
-# nginx serves the status page.
-net:
-  - listen tcp/80
-  # grype fetches its vulnerability database over HTTPS.
-  - connect grype tcp/443 udp/53 tcp/53
-
 # make check's, for this form alone (forms/README.md)
 check:
   memory: 2048
@@ -27,3 +21,41 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+services:
+  # nginx, as its own user, serving the status page: it may bind :80 and no
+  # other port, read its configuration and the page, and run only itself.
+  nginx:
+    exec: /usr/bin/nginx -e stderr
+    before: /usr/bin/nginx -e stderr -t -q
+    user: nginx
+    pledge: stdio rpath wpath proc unix inet listen aio sendfile
+    listen: [tcp/80]
+    read: /etc/nginx /data/svc/status/www
+
+  # grype over the image, hourly, as its own user, the only one that may
+  # fetch (forms/demo/form.yaml): it reads everything, writes only its own
+  # directory, and runs nothing but grype.
+  scan:
+    exec: /usr/lib/werewolf/status-page scan
+    run: /usr/bin/grype
+    user: grype
+    pledge: stdio rpath wpath proc exec inet unix connect
+    connect: [tcp/443 udp/53 tcp/53]
+    read: /
+    # status reads its findings.
+    share: shared
+    # A quarter share of contended CPUs, so a scan cannot starve the page.
+    cpu: 25
+
+  # The demo's page, as its own user: it reads what the other services keep
+  # and the machine's state, writes only its own directory, and reaches
+  # nothing on the network.
+  status:
+    exec: /usr/lib/werewolf/status-page
+    user: status
+    pledge: stdio rpath wpath unix connect
+    read: /data/svc/scan /data/svc/autoupdate /run/werewolf
+    connect: [/run/svc/postgres/.s.PGSQL.5432]
+    # nginx serves its page, /data/svc/status/www.
+    share: shared

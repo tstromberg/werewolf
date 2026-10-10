@@ -256,7 +256,7 @@ packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 	@[ -n "$(PACKAGE_TIME)" ] || { echo "packages: no commit time; set PACKAGE_TIME" >&2; exit 1; }
 	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/format $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/format/usr/lib/werewolf
 	echo $(PACKAGE_FORMAT) >$(PACKAGES)/format/usr/lib/werewolf/format && $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/format \
-		werewolf-format$(PACKAGE_FORMAT) - $(ARCH) $(PACKAGE_TIME) "werewolf's format $(PACKAGE_FORMAT) (lib/compose.zig)"
+		werewolf-format$(PACKAGE_FORMAT) - $(ARCH) $(PACKAGE_TIME) "werewolf's format (lib/compose.zig)" provide:werewolf-format=$(PACKAGE_FORMAT)
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
 		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; done
 	for f in $(PACKAGE_FORMS); do t=$(PACKAGES)/forms/$$f && $(FORM_TOOL) stage $$f $$t && \

@@ -5,10 +5,6 @@
 # docs/forms.md.
 base: node
 
-# The application serves on 8080.
-net:
-  - listen tcp/8080
-
 # make check's, for this form alone (forms/README.md): it ships no
 # application, so its service stays down: nothing listens on 8080, and
 # nothing is in its cgroup to count or reap.
@@ -20,3 +16,16 @@ check:
 weaknesses:
   programs-no-interpreters: node runs the application laid in /usr/lib/app
   kernel-write-xor-execute: V8 compiles the application to machine code as it runs (allow jit, from node)
+
+services:
+  # The application, as its own user: it may bind :8080 and no other port,
+  # read the image, and run only node. Down until server.js is there: this
+  # form ships none.
+  app:
+    exec: /usr/bin/node /usr/lib/app/server.js
+    user: app
+    requires: /usr/lib/app/server.js
+    pledge: stdio rpath wpath proc inet listen
+    memory: 1024
+    listen: [tcp/8080]
+    env: NODE_ENV=production

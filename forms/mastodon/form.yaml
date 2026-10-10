@@ -58,15 +58,6 @@ accounts:
 # forms/mastodon/README.md.
 with: [postgresql, valkey, caddy, cron, sh-shim]
 
-net:
-  # Puma and the streaming server, behind Caddy, for the machine alone.
-  - listen tcp/3000 tcp/4000 loopback
-  # Federation, link previews and remote media, to public addresses only:
-  # fence keeps them off private, loopback, link-local and metadata ones.
-  # DNS from the machine's resolver; mail by submission.
-  - connect mastodon tcp/443 tcp/80 tcp/587 public
-  - connect mastodon udp/53 tcp/53
-
 # make check's, for this form alone (forms/README.md)
 check:
   memory: 4096
@@ -76,3 +67,226 @@ check:
 weaknesses:
   programs-no-interpreters: ruby and node run Mastodon, which is what this form is for
   kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+services:
+  # Caddy, as its own user, for Mastodon: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS and a resolver over TCP, Puma
+  # and the streaming server on loopback, read its configuration, the image
+  # and Mastodon's media, and write only its own directories. The domain
+  # comes from the machine's settings, the same --domain Mastodon's web
+  # takes, as DOMAIN, which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80, tcp/443]
+    connect: [tcp/443 tcp/53 tcp/3000 tcp/4000]
+    read: /etc/caddy /data/svc/mastodon/system
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
+
+  # supercronic, as mastodon-cron, of the web's group, starts Mastodon's cleanup on its schedule
+  # (etc/cron/crontab): tootctl, through sh-shim, under this leash. It reads
+  # Mastodon's secrets, reaches its database and queue by their sockets,
+  # and removes the media it no longer keeps; it reaches nothing else.
+  cron:
+    exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
+    user: mastodon-cron
+    # Valkey's group, for its socket.
+    group: valkey
+    pledge: stdio rpath wpath unix connect proc exec
+    connect: [/run/svc/postgres/.s.PGSQL.5432, /run/svc/valkey/valkey.sock]
+    run: /usr/bin/ruby
+    read: /etc/cron /data/svc/mastodon/env
+    write: /data/svc/mastodon/system
+    memory: 768
+    cpu: 25
+    env:
+      - RAILS_ENV=production
+      - BUNDLE_GEMFILE=/usr/lib/mastodon/Gemfile
+      - RAILS_LOG_LEVEL=warn
+      - DB_HOST=/run/svc/postgres
+      - DB_PORT=5432
+      - DB_USER=mastodon-cron
+      - DB_NAME=mastodon
+      - REDIS_URL=unix:///run/svc/valkey/valkey.sock
+      - PAPERCLIP_ROOT_PATH=/data/svc/mastodon/system
+      - PAPERCLIP_ROOT_URL=/system
+      - HOME=/run/svc/cron
+      - BOOTSNAP_READONLY=true
+
+  # Mastodon's web, Puma, as mastodon: it serves on loopback, behind Caddy,
+  # reaches its database and queue by their sockets, and fetches from
+  # public addresses only (form.yaml). Before it serves, under this leash:
+  # its secrets and domain, made once on /data (secrets.rb); its schema,
+  # made or migrated (db:prepare); the owner from the config, and the
+  # streaming server's grants (owner.rb).
+  mastodon:
+    exec: /usr/bin/ruby -C /usr/lib/mastodon /usr/bin/bundle exec puma -C config/puma.rb
+    before:
+      - /usr/bin/ruby /usr/share/werewolf-mastodon/secrets.rb
+      - /usr/bin/ruby -C /usr/lib/mastodon bin/rails db:prepare
+      - /usr/bin/ruby -C /usr/lib/mastodon bin/rails runner /usr/share/werewolf-mastodon/owner.rb
+    user: mastodon
+    # Valkey's group, for its socket.
+    group: valkey
+    # Its directories are its group's: the jobs and cron, whose users share
+    # it, write the media and read the secrets in them, and nginx reads the
+    # media by name.
+    share: group
+    # netlink: glibc's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec landlock seccomp
+    listen: [tcp/3000 loopback]
+    connect:
+      - tcp/443 tcp/80 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+      - /run/svc/valkey/valkey.sock
+    # What Paperclip runs on an upload, through /bin/sh: each by its narrow
+    # link, with no network, its own pledge, and the upload's directory alone.
+    run: /usr/bin/file /usr/bin/ffprobe /usr/bin/ffmpeg
+    narrow:
+      - /usr/bin/file pledge stdio rpath
+      - /usr/bin/file read /data/svc/mastodon
+      - /usr/bin/ffprobe pledge stdio rpath proc
+      - /usr/bin/ffprobe read /data/svc/mastodon
+      - /usr/bin/ffmpeg pledge stdio rpath wpath proc
+      - /usr/bin/ffmpeg read /data/svc/mastodon
+      - /usr/bin/ffmpeg write /data/svc/mastodon
+      - /usr/bin/ffmpeg memory 512
+    # The site's domain (Caddy's too), its owner and the owner's password,
+    # from the machine's config. The domain is Mastodon's identity: secrets.rb
+    # records it on the first start and refuses another. single-user makes it
+    # one person's: no sign-ups, the front page the owner's profile.
+    config:
+      - owner-password /run/config/mastodon/owner-password
+      - settings /run/config/mastodon/settings.json
+    setting:
+      - domain hostname required as LOCAL_DOMAIN
+      - owner string required as MASTODON_OWNER
+      - owner-email string required as MASTODON_OWNER_EMAIL
+      - single-user bool as SINGLE_USER_MODE
+    render: env site
+    memory: 1536
+    env:
+      - RAILS_ENV=production
+      - BUNDLE_GEMFILE=/usr/lib/mastodon/Gemfile
+      - RAILS_LOG_LEVEL=warn
+      - BIND=127.0.0.1
+      - PORT=3000
+      - WEB_CONCURRENCY=2
+      - MAX_THREADS=5
+      - DB_HOST=/run/svc/postgres
+      - DB_PORT=5432
+      - DB_USER=mastodon
+      - DB_NAME=mastodon
+      - REDIS_URL=unix:///run/svc/valkey/valkey.sock
+      - PAPERCLIP_ROOT_PATH=/data/svc/mastodon/system
+      - PAPERCLIP_ROOT_URL=/system
+      - TMPDIR=/data/svc/mastodon
+      - HOME=/run/svc/mastodon
+      - BOOTSNAP_READONLY=true
+      - MALLOC_CONF=narenas:2,background_thread:true,thp:never,dirty_decay_ms:1000,muzzy_decay_ms:0
+      - PATH=/etc/sv/mastodon/narrow:/usr/bin
+      - FFMPEG_BINARY=/etc/sv/mastodon/narrow/ffmpeg
+      - FFPROBE_BINARY=/etc/sv/mastodon/narrow/ffprobe
+
+  # Mastodon's jobs, Sidekiq, as mastodon-jobs, of the web's group: federation in and out, mail,
+  # remote media and link previews. It reaches public addresses only
+  # (form.yaml), its database and queue by their sockets, and the media
+  # nginx serves. What Paperclip runs on a stranger's media, through
+  # /bin/sh, runs by its narrow link: no network, its own pledge, the media
+  # alone.
+  mastodon-jobs:
+    exec: /usr/bin/ruby -C /usr/lib/mastodon /usr/bin/bundle exec sidekiq -c 5
+    user: mastodon-jobs
+    # Valkey's group, for its socket.
+    group: valkey
+    # netlink: glibc's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect proc exec landlock seccomp
+    connect:
+      - tcp/443 tcp/80 tcp/587 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+      - /run/svc/valkey/valkey.sock
+    # Its secrets, which the web's secrets.rb made (/usr/lib/mastodon/.env.production).
+    read: /data/svc/mastodon/env
+    write: /data/svc/mastodon/system
+    run: /usr/bin/file /usr/bin/ffprobe /usr/bin/ffmpeg
+    narrow:
+      - /usr/bin/file pledge stdio rpath
+      - /usr/bin/file read /data/svc/mastodon-jobs /data/svc/mastodon/system
+      - /usr/bin/ffprobe pledge stdio rpath proc
+      - /usr/bin/ffprobe read /data/svc/mastodon-jobs /data/svc/mastodon/system
+      - /usr/bin/ffmpeg pledge stdio rpath wpath proc
+      - /usr/bin/ffmpeg read /data/svc/mastodon-jobs /data/svc/mastodon/system
+      - /usr/bin/ffmpeg write /data/svc/mastodon-jobs
+      - /usr/bin/ffmpeg memory 512
+    # Mail, which the jobs send for the web: by an e-mail provider's SMTP
+    # relay, from the machine's settings, over TLS it verifies. Without them
+    # no mail leaves. The password is a secret, never logged, and narrowed
+    # programs never see it.
+    config: settings /run/config/mastodon-jobs/settings.json
+    setting:
+      - smtp-server hostname as SMTP_SERVER
+      - smtp-port port as SMTP_PORT
+      - smtp-login string as SMTP_LOGIN
+      - smtp-from string as SMTP_FROM_ADDRESS
+    render: env site
+    secret: SMTP_PASSWORD /run/config/mastodon-jobs/smtp-password optional
+    env:
+      - SMTP_ENABLE_STARTTLS=always
+      - SMTP_OPENSSL_VERIFY_MODE=peer
+      - RAILS_ENV=production
+      - BUNDLE_GEMFILE=/usr/lib/mastodon/Gemfile
+      - RAILS_LOG_LEVEL=warn
+      - DB_HOST=/run/svc/postgres
+      - DB_PORT=5432
+      - DB_USER=mastodon-jobs
+      - DB_NAME=mastodon
+      - REDIS_URL=unix:///run/svc/valkey/valkey.sock
+      - PAPERCLIP_ROOT_PATH=/data/svc/mastodon/system
+      - PAPERCLIP_ROOT_URL=/system
+      - TMPDIR=/data/svc/mastodon-jobs
+      - HOME=/run/svc/mastodon-jobs
+      - BOOTSNAP_READONLY=true
+      - MALLOC_CONF=narenas:2,background_thread:true,thp:never,dirty_decay_ms:1000,muzzy_decay_ms:0
+      - PATH=/etc/sv/mastodon-jobs/narrow:/usr/bin
+      - FFMPEG_BINARY=/etc/sv/mastodon-jobs/narrow/ffmpeg
+      - FFPROBE_BINARY=/etc/sv/mastodon-jobs/narrow/ffprobe
+    memory: 1024
+    # Background work: half a share of contended CPUs, so a federation flood
+    # cannot starve the web or nginx.
+    cpu: 50
+
+  # Mastodon's streaming server, Node, as mastodon-stream: it holds the
+  # clients' WebSockets on loopback, behind nginx, reads the database by a
+  # role that may only read, and subscribes to the queue. It runs nothing,
+  # reaches nothing else, and runs with no JIT.
+  mastodon-streaming:
+    exec: /usr/bin/node --jitless /usr/lib/mastodon/streaming/index.js
+    user: mastodon-stream
+    # Valkey's group, for its socket.
+    group: valkey
+    pledge: stdio rpath inet unix connect listen proc
+    listen: [tcp/4000 loopback]
+    connect: [/run/svc/postgres/.s.PGSQL.5432, /run/svc/valkey/valkey.sock]
+    memory: 384
+    env:
+      - NODE_ENV=production
+      - BIND=127.0.0.1
+      - PORT=4000
+      - DB_HOST=/run/svc/postgres
+      - DB_PORT=5432
+      - DB_USER=mastodon-stream
+      - DB_NAME=mastodon
+      - REDIS_URL=unix:///run/svc/valkey/valkey.sock

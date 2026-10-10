@@ -10,14 +10,25 @@ base: prod
 packages:
   - cloudflared
 
-# The tunnel to Cloudflare's edge, QUIC with HTTP/2 behind it, and the
-# names to find it; and the origins it fronts, HTTP and HTTPS, on this
-# machine or its network. It serves nothing: its metrics are on
-# loopback, for the machine alone.
-net:
-  - listen tcp/2000 loopback
-  - connect cloudflared udp/7844 tcp/7844 tcp/443 tcp/80 udp/53 tcp/53
-
 # make check's, for this form alone (forms/README.md)
 check:
   offline: true
+
+services:
+  # cloudflared, as its own user: it may reach Cloudflare's edge and the
+  # origins it fronts, bind its metrics on loopback (:2000, which fence
+  # lets no one outside reach), read the image, and write only its own
+  # directory. The tunnel's token comes from the config as TUNNEL_TOKEN;
+  # missing, the service parks with a line naming the file.
+  # A short grace period: a reboot for an update should not wait half a
+  # minute for the tunnel to drain.
+  cloudflared:
+    exec: /usr/bin/cloudflared --no-autoupdate --metrics 127.0.0.1:2000 --protocol quic tunnel --grace-period 2s run
+    user: cloudflared
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/2000 loopback]
+    connect: [udp/7844 tcp/7844 tcp/443 tcp/80 udp/53 tcp/53]
+    secret: TUNNEL_TOKEN /run/config/cloudflared/token
+    memory: 256
+    nofile: 4096
+    env: [HOME=/run/svc/cloudflared, GOMEMLIMIT=192MiB]

@@ -100,8 +100,8 @@ pub const Machine = struct { arch: []const u8, size: []const u8 };
 
 pub fn machine(arch: howl.Arch) Machine {
     return switch (arch) {
-        .aarch64 => .{ .arch = "arm64", .size = "t4g.small" },
-        .x86_64 => .{ .arch = "x86_64", .size = "t3.small" },
+        .aarch64 => .{ .arch = "arm64", .size = "t4g.medium" },
+        .x86_64 => .{ .arch = "x86_64", .size = "t3.medium" },
     };
 }
 
@@ -662,7 +662,7 @@ test openArgs {
 }
 
 test machine {
-    try testing.expectEqualStrings("t4g.small", machine(.aarch64).size);
+    try testing.expectEqualStrings("t4g.medium", machine(.aarch64).size);
     try testing.expectEqualStrings("x86_64", machine(.x86_64).arch);
 }
 

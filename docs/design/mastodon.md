@@ -37,7 +37,7 @@ sha256 and followed by melange's `update:`
 
 | Part | User | Listens | Reaches | Runs |
 | --- | --- | --- | --- | --- |
-| nginx | `nginx` | tcp/80 (TLS in front: the cloud's, or a proxy's) | web, streaming on loopback | nothing |
+| Caddy | `caddy` | tcp/80, tcp/443, HTTPS for `--domain` from Let's Encrypt | web, streaming on loopback; the ACME CA | nothing |
 | web (Puma) | `mastodon` | 127.0.0.1:3000 | PostgreSQL, Valkey sockets; tcp/443 public | `media` only, on uploads |
 | streaming (Node 24) | `mastodon-stream` | 127.0.0.1:4000 | PostgreSQL (read-only role), Valkey | nothing |
 | jobs (Sidekiq) | `mastodon-jobs` | nothing | PostgreSQL, Valkey; tcp/443 public, tcp/587 | `media` only |
@@ -46,7 +46,7 @@ sha256 and followed by melange's `update:`
 | PostgreSQL, Valkey | `postgres`, `valkey` | sockets | nothing | nothing |
 
 **Base work.** Built: the `ruby` form (Ruby 4.0) and bundles, so the
-form is `base: ruby` with `[postgresql, valkey, nginx]`
+form is `base: ruby` with `[postgresql, valkey, caddy]`
 ([docs/forms.md](../forms.md#bundles-one-form-taking-several)); and
 `connect USER tcp/443 public`, which fence keeps off private, loopback,
 link-local and metadata addresses ([cmd/fence](../../cmd/fence/README.md)).
@@ -60,7 +60,7 @@ Built for it:
    ([cpu-and-first-run.md](cpu-and-first-run.md)).
 3. **Timed jobs** for media and preview-card cleanup: the `cron` form,
    taken `with` ([forms/cron](../../forms/cron/README.md)).
-4. **`cpu`** beside `memory`, so a federation flood cannot starve nginx.
+4. **`cpu`** beside `memory`, so a federation flood cannot starve Caddy.
 5. **`/bin/sh -c`**, which Terrapin, Paperclip's runner, starts ffmpeg
    through: the `sh-shim` form ([cmd/sh-shim](../../cmd/sh-shim/README.md)).
 
@@ -77,8 +77,11 @@ Built for it:
   matched to the database pool; libvips, not ImageMagick; assets
   precompiled at build; jemalloc, as Mastodon ships. Media in
   `/data/svc/mastodon/system`, shared by group, served with `sendfile`.
-- rack-attack as shipped, and nginx `limit_req` on sign-in, sign-up and
-  the API's writes. Remote media kept 7 days, preview cards 14.
+- rack-attack as shipped; Caddy has no rate limits without a plugin.
+  Remote media kept 7 days, preview cards 14.
+- Mail by an e-mail provider's SMTP relay, as Mastodon's guide advises,
+  over 587 with STARTTLS required; only the jobs hold its password.
+  Sign-ups stay closed, as Mastodon ships, until the owner opens them.
 
 ## Drawbacks
 

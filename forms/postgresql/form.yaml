@@ -31,3 +31,20 @@ programs: [popen-shim.so]
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (jit = on, its default; allow jit)
+
+services:
+  # PostgreSQL, as its own user, for local clients over its UNIX socket
+  # alone. pg-init makes the cluster on the first start, and applies the
+  # image's SQL before each; initdb, which it runs, needs popen-shim.so and
+  # starts the server itself.
+  postgres:
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres
+    before: /usr/lib/werewolf/pg-init
+    user: postgres
+    # connect: peer authentication looks the client's uid up, and glibc first
+    # tries nscd's socket, which is not there; refused, each login would leave
+    # two audit records. It reaches no network: there is no inet promise.
+    pledge: stdio rpath wpath proc ipc unix listen connect
+    run: /usr/bin/initdb
+    # Local clients reach its socket, /run/svc/postgres/.s.PGSQL.5432.
+    share: shared

@@ -21,7 +21,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | `read` / `write PATH...` | paths it may read / write, beyond the floor |
 | `run PROGRAM...` | other programs it may start (with `pledge exec`) |
 | `requires PATH...` | stay down unless each exists |
-| `env NAME=VALUE`, `secret NAME PATH` | its environment, otherwise only `PATH`; a secret comes from a file and is never logged |
+| `env NAME=VALUE`, `secret NAME PATH [optional]` | its environment, otherwise only `PATH`; a secret comes from a file and is never logged; if missing, park unless `optional` |
 | `config NAME PATH [optional]` | copy a `/run/config` file to `/run/svc/SERVICE/NAME`, 0600; if missing, park unless `optional` |
 | `setting`, `render` | settings, written by service-config (`lib/settings.zig`); a missing settings file reads as `{}` |
 | `nofile N`, `memory MIB`, `cpu WEIGHT` | open-file limit; `memory.max` (resident memory, not address space); `cpu.weight`, a share of contended CPUs |

@@ -203,7 +203,10 @@ replaces existing destination links rather than following them.
 
 Put credentials in the boot config, not the image; see
 [cloud.md](cloud.md). These runtime copies disappear at reboot. For a value
-needed in an environment variable, use `secret NAME PATH` instead.
+needed in an environment variable, use `secret NAME PATH` instead, ending
+in `optional` if the service runs without it. howl takes each as a file
+flag named for its variable: `secret SMTP_PASSWORD PATH` is
+`--smtp-password FILE`.
 
 ## Settings
 
@@ -331,8 +334,6 @@ Wolfi names:
 # forms/helloworld/form.yaml
 base: python
 packages: [py3.13-flask, py3.13-gunicorn]
-net:
-  - listen tcp/8080
 ```
 
 The application goes in `/usr/lib/app`, form.yaml's `app`:
@@ -366,17 +367,21 @@ def health():
 ```
 
 It starts differently from `python-app`'s `main.py`, so it builds on
-`python` and brings its own service file, which leash reads to start it
-([cmd/leash/leash.zig](../cmd/leash/leash.zig) lists every directive):
+`python` and says its own service, which the build writes as the service
+file leash reads to start it ([cmd/leash/leash.zig](../cmd/leash/leash.zig)
+lists every directive; a value is one line, a list one line each):
 
-```
-# forms/helloworld/rootfs/etc/sv/app/service
-exec    /usr/bin/python3 -m gunicorn --bind 0.0.0.0:8080 --workers 2 --worker-tmp-dir /run/svc/app --no-control-socket --pythonpath /usr/lib/app --access-logfile - helloworld:app
-user    app
-pledge  stdio rpath wpath proc inet listen
-listen  tcp/8080
-env     PYTHONDONTWRITEBYTECODE=1
-env     PYTHONUNBUFFERED=1
+```yaml
+# forms/helloworld/form.yaml
+base: python
+packages: [py3.13-flask, py3.13-gunicorn]
+services:
+  app:
+    exec: /usr/bin/python3 -m gunicorn --bind 0.0.0.0:8080 --workers 2 --worker-tmp-dir /run/svc/app --no-control-socket --pythonpath /usr/lib/app --access-logfile - helloworld:app
+    user: app
+    pledge: stdio rpath wpath proc inet listen
+    listen: [tcp/8080]
+    env: [PYTHONDONTWRITEBYTECODE=1, PYTHONUNBUFFERED=1]
 ```
 
 - `--worker-tmp-dir` is needed because the root is read-only, and the app
@@ -462,10 +467,10 @@ No promise brings `ptrace`, eBPF, perf, modules, `kexec`, io_uring,
 `userfaultfd`, the kernel keyring, file handles or another process's
 memory.
 
-A form's `net` adds to its chain's, and `python` declares none: the
-application says where it serves. To serve on :8000 instead, change
-gunicorn's `--bind`, the service's `listen` and form.yaml's `listen` to
-8000.
+A service's `listen` and `connect` are its network policy, for leash and
+for fence alike (`listen: [tcp/8080]`; `connect: [tcp/443 udp/53 tcp/53]`,
+with `public` or `loopback` as a net line takes them). To serve on :8000
+instead, change gunicorn's `--bind` and the service's `listen` to 8000.
 
 ### Ship it
 

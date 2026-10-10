@@ -27,3 +27,30 @@ allow: [jit]
 weaknesses:
   programs-no-interpreters: php-fpm runs the application, which is what this form is for
   kernel-write-xor-execute: PCRE2, PHP's regular expressions, compiles each pattern to machine code (allow jit)
+
+services:
+  # nginx, as its own user: it may bind :80 and no other port, read its
+  # configuration and the image, connect to php-fpm's socket, and run only
+  # itself.
+  nginx:
+    exec: /usr/bin/nginx -e stderr
+    before: /usr/bin/nginx -e stderr -t -q
+    user: nginx
+    pledge: stdio rpath wpath proc unix inet listen connect aio sendfile
+    listen: [tcp/80]
+    read: /etc/nginx
+    connect: [/run/svc/php-fpm/php.sock]
+
+  # php-fpm, as its own user, its socket in its own directory: it reads its
+  # configuration and the image, reaches nothing on the network, and runs
+  # only itself.
+  php-fpm:
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf
+    before: /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf
+    user: php
+    pledge: stdio rpath wpath proc unix listen
+    memory: 512
+    read: /etc/php
+    # nginx reaches its socket, /run/svc/php-fpm/php.sock, mode 0660 for
+    # nginx's group.
+    share: shared

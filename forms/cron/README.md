@@ -51,17 +51,19 @@ RAILS_ENV=production
 45 3 * * * /usr/bin/ruby /usr/lib/app/bin/tootctl preview_cards remove --days 14
 ```
 
-```
-# forms/mastodon/rootfs/etc/sv/cron/service
-exec    /usr/bin/supercronic -json -no-reap /etc/cron/crontab
-user    supercronic
-pledge  stdio rpath wpath proc exec unix connect
-run     /usr/bin/ruby
-read    /etc/cron
-write   /data/svc/mastodon/system
-connect /run/svc/postgres/.s.PGSQL.5432
-memory  768
-cpu     25
+```yaml
+# forms/mastodon/form.yaml
+services:
+  cron:
+    exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
+    user: supercronic
+    pledge: stdio rpath wpath proc exec unix connect
+    run: /usr/bin/ruby
+    read: /etc/cron
+    write: /data/svc/mastodon/system
+    connect: [/run/svc/postgres/.s.PGSQL.5432]
+    memory: 768
+    cpu: 25
 ```
 
 tootctl reaches PostgreSQL as its peer, the `supercronic` role, and

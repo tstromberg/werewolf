@@ -483,7 +483,8 @@ test config {
     const root = std.mem.find(u8, c, "\"/b/slot/root.erofs\"").?;
     try testing.expect(data < tar and tar < root);
     try testing.expect(std.mem.find(u8, c, n.tap) != null);
-    try testing.expect(std.mem.find(u8, c, "\"mem_size_mib\": 2048") != null);
+    const mib = std.fmt.comptimePrint("\"mem_size_mib\": {d}", .{howl.local_mib});
+    try testing.expect(std.mem.find(u8, c, mib) != null);
 }
 
 test kernelPath {

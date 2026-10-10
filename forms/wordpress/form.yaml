@@ -38,16 +38,67 @@ packages:
   - php-8.4-curl
   - php-8.4-opcache
 
-# WordPress sends its mail by SMTP submission, to the relay the settings
-# name; nothing else leaves (WP_HTTP_BLOCK_EXTERNAL). A form whose plugins
-# call an API adds `connect php tcp/443 public` and `connect php udp/53
-# tcp/53` here, and the hosts to WP_ACCESSIBLE_HOSTS. The name of the relay
-# is resolved too.
-net:
-  - connect php tcp/587 udp/53 tcp/53
-
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: php-fpm runs WordPress
   kernel-write-xor-execute: PCRE2 compiles PHP's patterns to machine code (allow jit, from php)
+
+services:
+  # nginx, as its own user: it may bind :80 and no other port, read its
+  # configuration, the image and WordPress's uploads on /data, connect to
+  # php-fpm's socket, and run only itself.
+  nginx:
+    exec: /usr/bin/nginx -e stderr
+    before: /usr/bin/nginx -e stderr -t -q
+    user: nginx
+    pledge: stdio rpath wpath proc unix inet listen connect aio sendfile
+    listen: [tcp/80]
+    read: /etc/nginx /data/svc/php-fpm/uploads
+    connect: [/run/svc/php-fpm/php.sock]
+
+  # php-fpm running WordPress, as the php user: it reads its configuration
+  # and the image, writes only its own directories (the database and
+  # uploads in /data/svc/php-fpm), and reaches the mail relay's submission
+  # port and nothing else. Before it serves, install.php sets the site up
+  # from the settings, so no first visitor claims it; a missing admin
+  # password hash parks the service.
+  # The opcode cache is set up as php-fpm starts, before any pool's values
+  # apply, so its settings go on the line: its lock file in php's own
+  # directory (not /tmp, which the leash does not grant), and no looking
+  # for changed files, since the image cannot change.
+  php-fpm:
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d opcache.validate_timestamps=0 -d opcache.memory_consumption=128 -d opcache.interned_strings_buffer=16
+    before:
+      - /usr/bin/php /usr/share/werewolf-wordpress/install.php
+      - /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
+    user: php
+    pledge: stdio rpath wpath proc unix inet connect listen
+    connect: [tcp/587 udp/53 tcp/53]
+    memory: 512
+    read: /etc/php
+    # nginx reaches its socket, /run/svc/php-fpm/php.sock, mode 0660 for
+    # nginx's group, and serves the uploads.
+    share: shared
+    # SQLite's temporary files, for the installer; php-fpm.conf gives the
+    # workers the same.
+    env: [SQLITE_TMPDIR=/run/svc/php-fpm, TMPDIR=/run/svc/php-fpm]
+    # The admin's bcrypt password hash: required, since a WordPress without
+    # an admin belongs to whoever finds it first. Salts and the relay's
+    # password only if the machine brings them: salts are otherwise made once
+    # on /data, and mail is otherwise off.
+    config:
+      - admin-password-hash /run/config/wordpress/admin-password-hash
+      - salts /run/config/wordpress/salts.php optional
+      - smtp-password /run/config/wordpress/smtp-password optional
+      - settings /run/config/wordpress/settings.json
+    # The site: its address, name and admin; its mail relay.
+    setting:
+      - url url required
+      - title string
+      - admin-user string
+      - admin-email string required
+      - smtp hostport
+      - smtp-user string
+      - mail-from string
+    render: json site.json

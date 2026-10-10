@@ -9,3 +9,7 @@ printf '%s' werewolf-check-pass-1 >"$1/mastodon/owner-password"
 mkdir -p "$1/caddy"
 echo '{"domain":"localhost","owner":"owner","owner-email":"owner@example.com"}' >"$1/mastodon/settings.json"
 echo '{"domain":"localhost"}' >"$1/caddy/settings.json"
+# A relay that is never reached: the checks look only for its settings.
+mkdir -p "$1/mastodon-jobs"
+printf '%s' werewolf-check-smtp >"$1/mastodon-jobs/smtp-password"
+echo '{"smtp-server":"smtp.example.com","smtp-port":587,"smtp-login":"mastodon","smtp-from":"mastodon@example.com"}' >"$1/mastodon-jobs/settings.json"

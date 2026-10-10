@@ -4,11 +4,27 @@ base: prod
 packages:
   - tailscale
 
-# Relayed tailnet transport: no public listener or arbitrary UDP egress.
-# Add application ports here AND in the service when routes need them.
-net:
-  - connect tailscale tcp/443 tcp/53 udp/53 tcp/22
-
 # make check's, for this form alone (forms/README.md)
 check:
   skip: [listeners]
+
+services:
+  tailscale:
+    exec: /usr/bin/tailscaled --tun=userspace-networking --port=41641 --state=/data/svc/tailscale/tailscaled.state --statedir=/data/svc/tailscale --socket=/run/svc/tailscale/tailscaled.sock --config=/run/svc/tailscale/config.json
+    user: tailscale
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    read: /etc/tailscale
+    config:
+      - auth-key /run/config/tailscale/auth-key
+      - settings /run/config/tailscale/settings.json
+    # The subnets it advertises, into the image's own configuration.
+    setting: routes cidr... as advertiseRoutes
+    render: json config.json from /etc/tailscale/config.json
+    # HTTPS to coordination and DERP relays; DNS; SSH to advertised subnets.
+    connect: [tcp/443 tcp/53 udp/53 tcp/22]
+    memory: 512
+    nofile: 4096
+    env:
+      - HOME=/data/svc/tailscale
+      - TMPDIR=/run/svc/tailscale
+      - GOMEMLIMIT=384MiB

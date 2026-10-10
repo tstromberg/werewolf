@@ -189,8 +189,8 @@ The first `create` of a build writes its disk straight into an EBS
 snapshot through EBS's direct API, only the blocks that hold data, and
 registers it as an AMI named `werewolf-FORM-ARCH-DIGEST` (UEFI, ENA,
 IMDSv2 alone); later ones find the AMI. There is nothing to set up first:
-no bucket and no VM Import role. The instance is a `t4g.small` (Graviton)
-or a `t3.small` (`--size` picks another), with no instance profile, the
+no bucket and no VM Import role. The instance is a `t4g.medium` (Graviton)
+or a `t3.medium`, 4 GB (`--size` picks another), with no instance profile, the
 config tar in base64 as its user data, and the metadata service reachable
 only from the machine itself (IMDSv2, one hop). Its security group,
 `werewolf-NAME`, lets nothing in until you run the lines `create` prints

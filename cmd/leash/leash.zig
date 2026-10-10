@@ -132,9 +132,11 @@ pub fn main(init: std.process.Init) !void {
     try env.put("PATH", path_env);
     for (s.env) |e| try env.put(e[0], e[1]);
     for (s.secrets) |sec| {
-        const value = readSecret(io, gpa, sec[1]) catch |err|
-            l.fail(.park, "secret {s}: {s}: {s}", .{ sec[0], sec[1], @errorName(err) });
-        try env.put(sec[0], value);
+        const value = readSecret(io, gpa, sec.path) catch |err| {
+            if (sec.optional and err == error.FileNotFound) continue;
+            l.fail(.park, "secret {s}: {s}: {s}", .{ sec.name, sec.path, @errorName(err) });
+        };
+        try env.put(sec.name, value);
     }
     // Read the config files the image names while root, but write the
     // copies only after dropping root and entering Landlock, so a service
@@ -482,14 +484,14 @@ fn readRootFile(gpa: Allocator, path: [:0]const u8) ![]const u8 {
 fn unsecret(
     gpa: Allocator,
     environ: []const ?[*:0]const u8,
-    secrets: []const [2][]const u8,
+    secrets: []const service.Secret,
 ) ![:null]?[*:0]const u8 {
     var kept: std.ArrayList(?[*:0]const u8) = .empty;
     for (environ) |e| {
         const entry = std.mem.span(e orelse continue);
         const name = entry[0 .. std.mem.findScalar(u8, entry, '=') orelse entry.len];
         for (secrets) |sec| {
-            if (std.mem.eql(u8, sec[0], name)) break;
+            if (std.mem.eql(u8, sec.name, name)) break;
         } else try kept.append(gpa, e);
     }
     return kept.toOwnedSliceSentinel(gpa, null);
@@ -1117,7 +1119,11 @@ test unsecret {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const environ = [_:null]?[*:0]const u8{ "PATH=/usr/bin", "TOKEN=hunter2", "TOKENS=x", "LANG" };
-    const kept = try unsecret(arena.allocator(), &environ, &.{.{ "TOKEN", "/run/config/x" }});
+    const kept = try unsecret(
+        arena.allocator(),
+        &environ,
+        &.{.{ .name = "TOKEN", .path = "/run/config/x" }},
+    );
     try testing.expectEqual(3, kept.len);
     try testing.expectEqualStrings("PATH=/usr/bin", std.mem.span(kept[0].?));
     try testing.expectEqualStrings("TOKENS=x", std.mem.span(kept[1].?));
