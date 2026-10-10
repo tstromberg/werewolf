@@ -2,10 +2,8 @@
 //! so a howl binary builds with no checkout beside it. See
 //! cmd/howl/README.md.
 
-/// image_pub and tiers_pub are the keys an image checks releases and the
-/// CVE tiers feed with; advisories are werewolf's own fixes
-/// (docs/releases.md).
-pub const image_pub = @embedFile("release/image.pub");
+/// tiers_pub is the key an image checks the CVE tiers feed with;
+/// advisories are werewolf's own fixes (docs/releases.md).
 pub const tiers_pub = @embedFile("release/tiers.pub");
 pub const advisories = @embedFile("release/advisories");
 

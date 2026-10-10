@@ -7,7 +7,6 @@ const Allocator = std.mem.Allocator;
 const policy = @import("update-policy");
 const sources = @import("cve");
 const cve = @import("cve.zig");
-const releases = @import("release.zig");
 const apk = @import("apk");
 
 pub const format = "werewolf-cve-tiers/1";
@@ -91,8 +90,8 @@ pub const Update = struct {
     kernel_cves: cve.KernelFixes,
     old_kernel: []const u8,
     new_kernel: []const u8,
-    /// advisories are the release's; have is the running image's list.
-    advisories: []const releases.Manifest.Advisory = &.{},
+    /// advisories are the new slot's list; have is the running image's.
+    advisories: []const policy.Advisory = &.{},
     have: []const u8 = "",
 };
 
@@ -180,14 +179,14 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
 /// Named is a feed entry and its tier.
 const Named = struct { tier: policy.Tier, entry: Entry };
 
-/// addAdvisories adds each werewolf advisory the release carries whose id is
-/// not in have (/usr/share/werewolf/advisories), at its tier, with its title
-/// as evidence. The image lists exactly what its code fixes, so no date or
-/// serial is compared.
+/// addAdvisories adds each werewolf advisory the new slot lists
+/// (werewolf-advisories) whose id is not in have, this image's
+/// /usr/share/werewolf/advisories, at its tier, with its title as evidence.
+/// An image lists exactly what its code fixes, so no date is compared.
 fn addAdvisories(
     gpa: Allocator,
     t: *Tiers,
-    advisories: []const releases.Manifest.Advisory,
+    advisories: []const policy.Advisory,
     have: []const u8,
 ) !void {
     var held: std.StringHashMapUnmanaged(void) = .empty;
@@ -448,8 +447,8 @@ test "advisories: only those this image lacks" {
     const gpa = arena.allocator();
     var t: Tiers = .{};
     try addAdvisories(gpa, &t, &.{
-        .{ .id = "WW-2026-001", .tier = .high, .title = "fence: old" },
-        .{ .id = "WW-2026-002", .tier = .urgent, .title = "init: new" },
+        .{ .id = "WW-2026-001", .date = "2026-10-01", .tier = .high, .title = "fence: old" },
+        .{ .id = "WW-2026-002", .date = "2026-10-09", .tier = .urgent, .title = "init: new" },
     }, "# comment\nWW-2026-001  2026-10-01  high  fence: old\n");
     try std.testing.expectEqual([4]u32{ 0, 0, 0, 1 }, t.count.values);
     try std.testing.expectEqualStrings("WW-2026-002 in werewolf", t.first.get(.urgent).?.subject);

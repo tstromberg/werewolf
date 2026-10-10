@@ -19,8 +19,6 @@ pub const policy = @import("update-policy");
 const werewolf_repository = @import("package").repository;
 pub const cve = @import("cve.zig");
 const kernelVersion = @import("cve").kernelVersion;
-pub const releases = @import("release.zig");
-const apk = @import("apk");
 pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
@@ -326,13 +324,6 @@ pub const Update = struct {
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
         const down = u.downtime();
         if (std.mem.eql(u8, tried, u.slot)) {
-            Dir.cwd().rename(
-                state_dir ++ "/attempt-serial",
-                Dir.cwd(),
-                state_dir ++ "/serial",
-                u.io,
-            ) catch |err|
-                if (err != error.FileNotFound) return err;
             try u.record(.{
                 .event = "commit",
                 .slot = u.slot,
@@ -352,7 +343,6 @@ pub const Update = struct {
                 .down = down,
             });
         }
-        Dir.cwd().deleteFile(u.io, state_dir ++ "/attempt-serial") catch {};
         Dir.cwd().deleteFile(u.io, pending_path) catch {};
         Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
         try Dir.cwd().deleteFile(u.io, attempt_path);
@@ -395,14 +385,7 @@ pub const Update = struct {
         defer Dir.cwd().deleteTree(io, work_dir) catch {};
         const arch = std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n");
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
-        const published = if (Dir.cwd().access(io, meta_dir ++ "/releases", .{}))
-            true
-        else |_|
-            false;
-        const plan = (if (published)
-            try u.releasePlan(arch, release)
-        else
-            try u.packagesPlan(arch, release)) orelse return;
+        const plan = (try u.packagesPlan(arch, release)) orelse return;
 
         if (u.isBad(plan.build)) {
             return u.record(.{
@@ -453,7 +436,7 @@ pub const Update = struct {
             .kernel_cves = kernel_cves,
             .old_kernel = plan.old_kernel,
             .new_kernel = plan.new_kernel,
-            .advisories = stage.advisoriesOf(plan),
+            .advisories = plan.advisories,
             .have = try u.ownAdvisories(),
         });
         const now = nowSecs(io);
@@ -475,21 +458,12 @@ pub const Update = struct {
             };
         };
 
-        switch (plan.from) {
-            .packages => try u.buildSlot(plan.new_kernel),
-            .release => |r| try u.fetchRelease(r.base, r.name, r.manifest),
-        }
+        try u.buildSlot(plan.new_kernel);
         // Write pending only after install arms the new build, so a failed
         // install keeps the first-seen times. install removes attempt first,
         // so bootIfDue boots nothing meanwhile.
         try u.install(plan.build);
         try u.writeReplacing(pending_path, try std.json.Stringify.valueAlloc(u.gpa, next, .{}));
-        // outcome promotes this to serial once the slot commits, so no older
-        // release is taken after it.
-        if (plan.from == .release) try u.writeReplacing(
-            state_dir ++ "/attempt-serial",
-            plan.from.release.manifest.serial,
-        );
         const d = try u.dueOf(s, next);
         const why = try u.whyOf(s, next, d, now);
 
@@ -595,161 +569,38 @@ pub const Update = struct {
             });
             return null;
         }
+        // werewolf's own fixes, as werewolf-advisories lists them in the new
+        // root; an image built from a tree has none.
+        const listed = slot.readIn(
+            u,
+            work_dir ++ "/root",
+            "usr/share/werewolf/advisories",
+        ) catch |err|
+            switch (err) {
+                error.FileNotFound => "",
+                else => return err,
+            };
+        var bad: policy.BadLine = .{};
+        const advisories = policy.parseAdvisories(u.gpa, listed, &bad) catch |err| {
+            u.detail = try u.gpa.print("advisories:{d}: {s}", .{ bad.n, bad.line });
+            return err;
+        };
         return .{
             .build = try buildHash(u.gpa, new_pkgs, new_kernel),
             .old_pkgs = old_pkgs,
             .new_pkgs = new_pkgs,
             .old_kernel = old_kernel,
             .new_kernel = new_kernel,
-            .from = .packages,
+            .advisories = advisories,
         };
     }
 
-    /// releasePlan returns the plan for the form's latest release, whose
-    /// manifest must be signed with the image key. It returns null, after
-    /// logging, if this slot already runs it, no release exists yet, or the
-    /// release is not newer than the last taken or would downgrade a package.
-    fn releasePlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
-        u.step = "release";
-        try u.netRoot();
-        const base = std.mem.trim(u8, try u.read(meta_dir ++ "/releases"), " \n");
-        const form = std.mem.trim(u8, try u.read(meta_dir ++ "/form"), "\n");
-        const name = try u.gpa.print("{s}-{s}", .{ form, arch });
-        const data = u.downloadSmall(
-            try u.gpa.print("{s}{s}.json", .{ base, name }),
-            cves_dir ++ "/manifest.json",
-        ) catch |err| {
-            if (err == error.FetchFailed and std.mem.eql(u8, u.detail, "not_found")) {
-                try u.record(.{
-                    .event = "skip",
-                    .release = release,
-                    .reason = "no release of this form yet",
-                });
-                return null;
-            }
-            return err;
-        };
-        const sig = try u.downloadSmall(
-            try u.gpa.print("{s}{s}.json.sig", .{ base, name }),
-            cves_dir ++ "/manifest.sig",
-        );
-        const key = try apk.parseKey(u.gpa, try u.read(meta_dir ++ "/image.pub"));
-        const m = try releases.open(u.gpa, key, data, sig, form, arch, nowSecs(u.io));
-
-        u.step = "compare";
-        const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
-        const running = try u.gpa.print(
-            "/victim{s}/{s}/root.erofs",
-            .{ u.cmd.victim.?.path, u.slot },
-        );
-        const root = m.files.map.get("root.erofs").?;
-        if (std.mem.eql(u8, &try u.sha256Of(running), root.sha256) and
-            std.mem.eql(u8, m.kernel, old_kernel))
-        {
-            try u.record(.{
-                .event = "check",
-                .slot = u.slot,
-                .release = release,
-                .result = "current",
-            });
-            return null;
-        }
-        if (u.read(state_dir ++ "/serial")) |taken| {
-            if (std.mem.order(u8, m.serial, std.mem.trim(u8, taken, "\n")) != .gt) {
-                try u.record(.{
-                    .event = "skip",
-                    .build = m.build,
-                    .reason = "not newer than the release last taken",
-                });
-                return null;
-            }
-        } else |err| if (err != error.FileNotFound) return err;
-
-        const new_pkgs = try u.gpa.alloc(Package, m.packages.len);
-        for (m.packages, new_pkgs) |p, *n| n.* = .{
-            .name = p.name,
-            .version = p.version,
-            .origin = p.origin,
-        };
-        // An image built from a tree has no serial, so also refuse a release
-        // that would downgrade any package or the kernel.
-        const old_pkgs = try parseInstalled(u.gpa, try u.read("/lib/apk/db/installed"));
-        if (backwards(try diffPackages(u.gpa, old_pkgs, new_pkgs), old_kernel, m.kernel)) |what| {
-            try u.record(.{
-                .event = "skip",
-                .build = m.build,
-                .reason = try u.gpa.print("{s} would go backwards", .{what}),
-            });
-            return null;
-        }
-        return .{
-            .build = m.build,
-            .old_pkgs = old_pkgs,
-            .new_pkgs = new_pkgs,
-            .old_kernel = old_kernel,
-            .new_kernel = m.kernel,
-            .from = .{ .release = .{ .base = base, .name = name, .manifest = m } },
-        };
-    }
-
-    /// fetchRelease downloads a release's slot files into work_dir/slot,
-    /// laid out as buildSlot leaves them, and checks each file's size and
-    /// sha256 against the manifest.
-    fn fetchRelease(
-        u: *Update,
-        base: []const u8,
-        name: []const u8,
-        m: releases.Manifest,
-    ) !void {
-        u.step = "fetch";
-        try Dir.cwd().createDirPath(u.io, work_dir ++ "/slot");
-        const targets = [_][:0]const u8{
-            work_dir ++ "/slot/vmlinuz",
-            work_dir ++ "/slot/stage0.zst",
-            work_dir ++ "/slot/root.erofs",
-        };
-        // A slot under a distro's GRUB (bite) needs the stage0 with that
-        // disk's filesystem modules; werewolf's own disk does not.
-        const stage0 = if (u.cmd.grubenv != null) releases.Manifest.bitten_stage0 else "stage0.zst";
-        for ([_][]const u8{ "vmlinuz", stage0, "root.erofs" }, targets) |file, target| {
-            const want = m.files.map.get(file) orelse {
-                u.detail = try u.gpa.print("the release has no {s}", .{file});
-                return error.BadManifest;
-            };
-            try u.fetchReleaseFile(base, name, file, want, target);
-        }
-        // A slot boots with its own image's kernel arguments, not this one's.
-        if (m.files.map.get("cmdline")) |want| {
-            if (want.size > 4096) return error.BadManifest;
-            try u.fetchReleaseFile(base, name, "cmdline", want, work_dir ++ "/slot/cmdline");
-        }
-    }
-
-    fn fetchReleaseFile(
-        u: *Update,
-        base: []const u8,
-        name: []const u8,
-        file: []const u8,
-        want: releases.Manifest.File,
-        target: [:0]const u8,
-    ) !void {
-        const got = try u.download(try u.gpa.print("{s}{s}-{s}", .{ base, name, file }), target);
-        _ = linux.close(got.fd);
-        if (got.size != want.size or !std.mem.eql(u8, &got.sha256, want.sha256)) {
-            u.detail = try u.gpa.print("{s}: not the file the manifest names", .{file});
-            return error.ReleaseFileMismatch;
-        }
-    }
-
-    /// slotCmdline returns the new slot's kernel arguments: the release's if
-    /// fetchRelease got them, else this image's. It refuses anything but one
-    /// line of printable ASCII without backslashes, so a loader entry and
-    /// GRUB's environment hold it intact.
+    /// slotCmdline returns the new slot's kernel arguments, as compose wrote
+    /// them into its root from its forms. It refuses anything but one line
+    /// of printable ASCII without backslashes, so a loader entry and GRUB's
+    /// environment hold it intact.
     pub fn slotCmdline(u: *Update) ![]const u8 {
-        const text = u.read(work_dir ++ "/slot/cmdline") catch |err| switch (err) {
-            error.FileNotFound => try u.read(meta_dir ++ "/cmdline"),
-            else => return err,
-        };
+        const text = try slot.readIn(u, work_dir ++ "/root", "usr/share/werewolf/cmdline");
         const line = std.mem.trimEnd(u8, text, "\n");
         for (line) |c| if (c < ' ' or c > '~' or c == '\\') return error.BadCmdline;
         return line;
@@ -1260,10 +1111,9 @@ pub const Plan = struct {
     new_pkgs: []const Package,
     old_kernel: []const u8,
     new_kernel: []const u8,
-    from: union(enum) {
-        packages,
-        release: struct { base: []const u8, name: []const u8, manifest: releases.Manifest },
-    },
+    /// advisories are werewolf's own fixes the new root lists
+    /// (werewolf-advisories), which tiers counts against this image's.
+    advisories: []const policy.Advisory,
 };
 
 pub const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
@@ -1494,7 +1344,6 @@ test "installed database, diffs and origins" {
 test {
     _ = sandbox;
     _ = cve;
-    _ = releases;
     _ = tiers;
     _ = stage;
     _ = slot;

@@ -10,8 +10,8 @@ it once due; a slot that does not prove healthy rolls back. See
 
 A werewolf root is an immutable dm-verity erofs image, so a fix lands only as
 a new image in the other of two slots, `a` and `b`; the loader boots it once and
-falls back unless slot-keep commits it. It comes from the form's latest signed
-release (`prod`, `prod-ssh`), or is built from Wolfi and Alpine (other forms).
+falls back unless slot-keep commits it. It is built on the machine from what
+werewolf's repository, Wolfi and Alpine hold now, for every form.
 
 | File | Holds |
 | --- | --- |
@@ -20,7 +20,6 @@ release (`prod`, `prod-ssh`), or is built from Wolfi and Alpine (other forms).
 | `slot.zig` | building and installing the other slot; new roots (`Root`) |
 | `../../lib/apk.zig` | checking apk's cache before root's apk reads it; RSA keys |
 | `cve.zig` | CVE fetcher and reader children; root's checks of their lines |
-| `release.zig` | release manifest: signature, checks, advisories |
 | `tiers.zig` | the signed CVE tiers feed; tiering an update's fixes |
 | `../../lib/update-policy.zig` | due times, settings, `why`, the log's chain |
 
@@ -53,8 +52,8 @@ Invariants to keep:
   boot; the other order would log a try that never happened as a rollback and
   mark an unjudged build bad. `pending` survives the install (first-seen times).
 - **Nothing goes backwards.** Packages and the kernel never get older (apk's
-  order); a release must be newer than `serial`; the feed never older than
-  `cve-tiers.json.serial`. Signatures are verified before parsing.
+  order); the feed never older than `cve-tiers.json.serial`. Signatures are
+  verified before parsing.
 - **apk reads only what a key vouched for.** Index signatures, package control
   (index SHA-1) and data (datahash) are checked first; the rest of the cache
   is removed. New roots resolve paths within themselves (`Root`).
@@ -82,13 +81,13 @@ Invariants to keep:
   uid 69, no capabilities, Landlock, seccomp, size and time limits. Root
   re-checks every line a reader sends and rejects a source on one bad line.
   Speculative Store Bypass is disabled for the daemon and every child.
-- **Signed inputs:** release manifests (image key) and the tiers feed (its own
-  key). A leaked feed key costs timing within bounds (serial at most a day
-  ahead, expiry at most a week); a leaked image key costs what runs.
+- **Signed inputs:** package indexes (Wolfi's, Alpine's, werewolf's keys) and
+  the tiers feed (its own key). A leaked feed key costs timing within bounds
+  (serial at most a day ahead, expiry at most a week); a leaked packages key
+  costs what runs.
 - **Open:** apk, installing as root, follows links that signed packages lay.
   Alpine's index signatures and every package hash are SHA-1 (forging needs a
-  second preimage). A tree-built image of a release form takes a release with
-  newer packages but older code: only packages and kernel compare (use DEV=1).
+  second preimage).
 
 ## Reliability Considerations
 

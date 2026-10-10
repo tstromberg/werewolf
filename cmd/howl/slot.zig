@@ -18,13 +18,13 @@ const Dir = Io.Dir;
 const mem = std.mem;
 const B = build.B;
 
-const releases_url = "https://github.com/werewolf-linux/werewolf/releases/latest/download/";
 const tiers_url = "https://raw.githubusercontent.com/werewolf-linux/cve-feed/main/";
 
 /// meta writes OUT/meta, what the image needs to rebuild itself, and
 /// OUT/ro, what compose lays over the packages: compose's records, then
 /// the kernel, Alpine's repositories, the overlay's files, apk's world,
-/// and the release keys and feeds. Nothing says when or where it
+/// the tiers feed and its key, and werewolf's advisories where no package
+/// brings them. Nothing says when or where it
 /// was built, so a rebuild matches.
 pub fn meta(b: *B, rootfs: []const u8) !void {
     const out = b.p.out;
@@ -104,12 +104,14 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     );
     try b.put(meta_dir, "etc/apk/world", unpinned);
     try b.put(d, "release", try b.path("{s} {s} built-by-make\n", .{ b.name, kernel_pkg }));
-    try b.put(d, "image.pub", embedded.image_pub);
     try b.put(d, "tiers.pub", embedded.tiers_pub);
     try b.put(d, "tiers", tiers_url ++ "\n");
-    for (compose.release_forms) |r| if (mem.eql(u8, r, b.name) and !b.spec.dev)
-        try b.put(d, "releases", releases_url ++ "\n");
-    try b.put(d, "advisories", embedded.advisories);
+    // The repository's minimal-form brings werewolf-advisories, and the
+    // list updates with it; any other image carries howl's.
+    const advised = for (b.from_repo) |n| {
+        if (mem.eql(u8, n, b.chain[0].name)) break true;
+    } else false;
+    if (!advised) try b.put(d, "advisories", embedded.advisories);
     try Dir.cwd().writeFile(b.io, .{ .sub_path = stamp, .data = "" });
     try b.done(stamp, began);
 }

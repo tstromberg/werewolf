@@ -6,7 +6,6 @@ make check          # boot every form, and a slot, and check each one
 make -j check       # the same, side by side
 make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
-make check-updater-release  # the same, to CI's latest signed release
 make check-updater-published  # the same, on forms from werewolf's repository
 make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
 make check-aws      # the same on an EC2 instance
@@ -200,14 +199,6 @@ must have kept its packages, slot b's root must be owned by root with mode
 commit, and the updater must record that the update held. No seccomp
 filter may have killed anything in either boot. The consoles are in
 `build/<arch>/check/update-prod/`.
-
-`make check-updater-release` does the same with `prod-ssh`, a form CI
-publishes. Its updater installs the latest signed release instead of
-building one (docs/updater.md, Releases), so there are no apk caches to
-check. It tests the release as much as the updater, because slot b is what
-CI published. So it passes only once CI has published from a tree whose
-slot boots and updates as this one does, and whose packages are no older
-than this tree's: the updater takes nothing backwards.
 
 `make check-updater-published` builds `test/published-form`, a form given by
 path on the published `prod`, from werewolf's repository, and gives slot a

@@ -49,6 +49,8 @@ and key, and `make list-forms` shows the chains.
 | `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
 | `mastodon` | `ruby`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | Mastodon 4.7, each part on a leash and a user of its own, media parsed narrowed, fetches to public addresses only ([mastodon.md](../forms/mastodon/README.md)) |
 | `mox` | `prod` | a domain's mail: SMTP, IMAP, submission, webmail and its own certificates, as its own user, never root, built here with one patch ([mox.md](../forms/mox/README.md)) |
+| `haproxy` | `prod` | HAProxy 3.4 balancing HTTP over the backends its settings name, HTTPS with a certificate from the config, nothing to control it by but its configuration ([haproxy.md](../forms/haproxy/README.md)) |
+| `miniflux` | `prod`, with `postgresql`, `caddy` | a feed reader fetching from public addresses alone, its administrator from the config, built here ([miniflux.md](../forms/miniflux/README.md)) |
 | `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
 | `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
 | `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |

@@ -52,6 +52,7 @@ services:
     exec: /usr/bin/nginx -e stderr
     before: /usr/bin/nginx -e stderr -t -q
     user: nginx
+    group: php
     pledge: stdio rpath wpath proc unix inet listen connect aio sendfile
     listen: [tcp/80]
     read: /etc/nginx /data/svc/php-fpm/uploads

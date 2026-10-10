@@ -1,0 +1,9 @@
+#!/bin/sh
+# forms/prometheus/test/config DIR: the prometheus form's config for make
+# check, in DIR: its user, ops, and password, which test/checks signs in
+# with, and one target nothing answers, which it scrapes to no avail.
+set -eu
+mkdir -p "$1/prometheus"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/prometheus/admin-password"
+echo '{"targets":["127.0.0.1:9100"],"admin":"ops"}' >"$1/prometheus/settings.json"

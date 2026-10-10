@@ -514,6 +514,62 @@ pub fn chain(line: []const u8) [16]u8 {
     return std.fmt.bytesToHex(sum[0..8].*, .lower);
 }
 
+/// Advisory is one line of release/advisories: werewolf's own fix, which no
+/// CVE names.
+pub const Advisory = struct { id: []const u8, date: []const u8, tier: Tier, title: []const u8 };
+
+/// BadLine is the line parseAdvisories refused, and its number from 1.
+pub const BadLine = struct { n: usize = 0, line: []const u8 = "" };
+
+/// parseAdvisories reads release/advisories: lines of ID DATE TIER TITLE,
+/// and blank or # lines. The title is the rest of the line, as it is. On
+/// error.BadAdvisory, bad holds the line.
+pub fn parseAdvisories(gpa: Allocator, text: []const u8, bad: *BadLine) ![]const Advisory {
+    var out: std.ArrayList(Advisory) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    var n: usize = 0;
+    while (lines.next()) |line| {
+        n += 1;
+        const rest = std.mem.trimStart(u8, line, " \t");
+        if (rest.len == 0 or rest[0] == '#') continue;
+        bad.* = .{ .n = n, .line = line };
+        var fields = std.mem.tokenizeAny(u8, line, " \t");
+        const id = fields.next() orelse return error.BadAdvisory;
+        const date = fields.next() orelse return error.BadAdvisory;
+        const tier = fields.next() orelse return error.BadAdvisory;
+        if (fields.next() == null) return error.BadAdvisory;
+        // The title starts at the fourth field and keeps trailing blanks.
+        var i: usize = 0;
+        for (0..3) |_| {
+            while (line[i] == ' ' or line[i] == '\t') i += 1;
+            while (line[i] != ' ' and line[i] != '\t') i += 1;
+        }
+        const title = std.mem.trimStart(u8, line[i..], " \t");
+
+        // ID is WW-YEAR-NUMBER, with a number of three digits or more.
+        if (id.len < 11 or !std.mem.startsWith(u8, id, "WW-") or id[7] != '-' or
+            !allDigits(id[3..7]) or !allDigits(id[8..])) return error.BadAdvisory;
+        // DATE is YYYY-MM-DD, with a month of 0x or 1x and a day of 0x to 3x.
+        if (date.len != 10 or date[4] != '-' or date[7] != '-' or !allDigits(date[0..4]) or
+            date[5] > '1' or !allDigits(date[5..7]) or date[8] > '3' or !allDigits(date[8..10]))
+            return error.BadAdvisory;
+        const t = std.meta.stringToEnum(Tier, tier) orelse return error.BadAdvisory;
+        // TITLE is at most 200 characters of printable ASCII, with no quote
+        // or backslash, which the manifest's JSON would have to escape.
+        if (title.len > 200) return error.BadAdvisory;
+        for (title) |c| if (c < ' ' or c > '~' or c == '"' or c == '\\') return error.BadAdvisory;
+        if (try seen.fetchPut(gpa, id, {}) != null) return error.BadAdvisory;
+        try out.append(gpa, .{ .id = id, .date = date, .tier = t, .title = title });
+    }
+    return out.items;
+}
+
+fn allDigits(s: []const u8) bool {
+    for (s) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
+}
+
 // --- tests ---------------------------------------------------------------------
 
 const t0 = 1791381731; // 2026-10-07T14:02:11Z, a Wednesday
@@ -853,4 +909,69 @@ test "seed and chain" {
     try std.testing.expectEqual(seed("m", "b"), seed("m", "b"));
     try std.testing.expect(seed("a", "b") != seed("a", "c"));
     try std.testing.expectEqualStrings("5891b5b522d5df08", &chain("hello\n"));
+}
+
+test parseAdvisories {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var bad: BadLine = .{};
+    const text = "# a comment\n\n  \t# indented\n" ++
+        "WW-2026-001  2026-10-07  high\tfence: a title  \n" ++
+        "\tWW-2026-0002 2026-10-08 low x\n";
+    const got = try parseAdvisories(a, text, &bad);
+    try std.testing.expectEqual(2, got.len);
+    try std.testing.expectEqualStrings("WW-2026-001", got[0].id);
+    try std.testing.expectEqualStrings("2026-10-07", got[0].date);
+    try std.testing.expectEqual(Tier.high, got[0].tier);
+    // The title keeps its trailing blanks, as awk's sub left them.
+    try std.testing.expectEqualStrings("fence: a title  ", got[0].title);
+    try std.testing.expectEqualStrings("x", got[1].title);
+    try std.testing.expectEqual(0, (try parseAdvisories(a, "", &bad)).len);
+
+    const long: [201]u8 = @splat('t');
+    for ([_][]const u8{
+        "WW-2026-001 2026-10-07 high",
+        "WW-2026-01 2026-10-07 high x",
+        "WW-26-001 2026-10-07 high x",
+        "WX-2026-001 2026-10-07 high x",
+        "WW-2026-00a 2026-10-07 high x",
+        "WW-2026-001 2026-20-07 high x",
+        "WW-2026-001 2026-10-40 high x",
+        "WW-2026-001 2026/10/07 high x",
+        "WW-2026-001 2026-10-07 severe x",
+        "WW-2026-001 2026-10-07 high a \"quote\"",
+        "WW-2026-001 2026-10-07 high back\\slash",
+        "WW-2026-001 2026-10-07 high tab\there",
+        "WW-2026-001 2026-10-07 high caf\xc3\xa9",
+        "WW-2026-001 2026-10-07 high " ++ long,
+        "WW-2026-001 2026-10-07 high x\r",
+        "\r",
+    }) |line| {
+        const t = try a.dupe(u8, "# ok\n" ++ "WW-2026-009 2026-10-07 low fine\n");
+        const all = try std.mem.concat(a, u8, &.{ t, line, "\n" });
+        try std.testing.expectError(error.BadAdvisory, parseAdvisories(a, all, &bad));
+        try std.testing.expectEqual(3, bad.n);
+        try std.testing.expectEqualStrings(line, bad.line);
+    }
+    const twice = "WW-2026-001 2026-10-07 high x\nWW-2026-001 2026-10-08 low y\n";
+    try std.testing.expectError(error.BadAdvisory, parseAdvisories(a, twice, &bad));
+    try std.testing.expectEqual(2, bad.n);
+}
+
+test "release/advisories reads" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const text = try std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "release/advisories",
+        a,
+        .limited(1 << 20),
+    );
+    var bad: BadLine = .{};
+    _ = parseAdvisories(a, text, &bad) catch |err| {
+        std.debug.print("release/advisories:{d}: {s}\n", .{ bad.n, bad.line });
+        return err;
+    };
 }

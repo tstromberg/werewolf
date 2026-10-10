@@ -1,0 +1,78 @@
+# miniflux: Miniflux, a feed reader, with PostgreSQL and Caddy beside it
+# (with): Caddy serves it over HTTPS at the machine's base URL, with a
+# certificate from Let's Encrypt; Miniflux, on loopback, keeps its tables
+# in a schema of its own and fetches feeds from public addresses alone.
+# Wolfi does not ship Miniflux: melange builds it from a pinned release
+# (forms/miniflux/melange/miniflux.yaml). Its administrator comes from the
+# config before it serves. See forms/miniflux/README.md.
+base: prod
+
+with: [postgresql, caddy]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+services:
+  # Caddy, as its own user, for Miniflux: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Miniflux on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the base URL Miniflux takes too, from the machine's
+  # settings, as BASE_URL, which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
+
+  # Miniflux, as its own user: it serves on loopback, behind Caddy, keeps
+  # its tables in the schema miniflux in PostgreSQL (by its socket, as the
+  # role of its name), and fetches feeds and their images from public
+  # addresses alone, which it also insists on itself. Its migrations run
+  # and its administrator is made, from the config, before it serves.
+  miniflux:
+    exec: /usr/bin/miniflux
+    user: miniflux
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/8080 loopback]
+    connect:
+      - tcp/443 tcp/80 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+    config:
+      - admin-password /run/config/miniflux/admin-password
+      - settings /run/config/miniflux/settings.json
+    setting:
+      - base-url url required as BASE_URL
+      - admin string required as ADMIN_USERNAME
+    render: env site
+    memory: 256
+    nofile: 16384
+    env:
+      - LISTEN_ADDR=127.0.0.1:8080
+      - DATABASE_URL=postgres:///postgres?host=/run/svc/postgres&user=miniflux&sslmode=disable
+      - RUN_MIGRATIONS=1
+      - CREATE_ADMIN=1
+      - ADMIN_PASSWORD_FILE=/run/svc/miniflux/admin-password
+      # Behind Caddy's TLS: secure cookies, and Caddy's word for the
+      # client's address.
+      - HTTPS=1
+      - TRUSTED_REVERSE_PROXY_NETWORKS=127.0.0.1/32
+      - FETCHER_ALLOW_PRIVATE_NETWORKS=0
+      - INTEGRATION_ALLOW_PRIVATE_NETWORKS=0
+      - GOMEMLIMIT=192MiB

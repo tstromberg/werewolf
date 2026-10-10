@@ -594,6 +594,19 @@ pub fn loadIn(
                     "{s}: services: {s}: {s} is a value or a list of values",
                     .{ path, s.key, d.key },
                 );
+                if (s.value.get("image")) |img| if (img != .scalar or img.scalar.text.len == 0 or
+                    mem.findAny(u8, img.scalar.text, " \t") != null)
+                    return f.fail(
+                        gpa,
+                        "{s}: services: {s}: image is one reference, REPO[:TAG][@sha256:...]",
+                        .{ path, s.key },
+                    );
+                if (s.value.get("link") != null and s.value.get("image") == null) return f.fail(
+                    gpa,
+                    "{s}: services: {s}: link is an image's: a service of the image's own says " ++
+                        "connect",
+                    .{ path, s.key },
+                );
             }
         } else if (mem.eql(u8, e.key, "paths")) {
             if (e.value != .list) return f.fail(gpa, "{s}: paths is apko's: a list", .{path});
@@ -805,9 +818,10 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
     for (forms) |form| {
         const svcs = form.spec.get("services") orelse continue;
         for (svcs.map) |s| {
-            const user = if (s.value.get(
-                "user",
-            )) |u| (if (u == .scalar) u.scalar.text else "") else "";
+            const user = if (scalarOf(s.value, "image") != null)
+                try imageUser(gpa, s.key)
+            else
+                scalarOf(s.value, "user") orelse "";
             if (user.len > 0) try runs_as.put(gpa, user, s.key);
             for (s.value.map) |d| {
                 const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
@@ -1072,12 +1086,125 @@ fn fenceOnly(word: []const u8) bool {
         mem.eql(u8, word, "public") or mem.eql(u8, word, "loopback");
 }
 
+/// An image service's defaults: its pledge and memory unless the service
+/// says otherwise, and the PATH it runs with unless the image sets one.
+pub const image_pledge = "stdio rpath wpath inet unix connect listen proc";
+pub const image_memory = "512";
+pub const image_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// ImageRecord is what howl's bake writes beside an image's tree, at
+/// rootfs/usr/share/werewolf/images/NAME.json, for compose to render the
+/// service from on the host and the machine alike: the image pinned by
+/// digest, the command it runs (its entrypoint and cmd, or the service's
+/// exec, checked against the tree), its environment and working directory.
+pub const ImageRecord = struct {
+    image: []const u8,
+    argv: []const []const u8,
+    env: []const []const u8 = &.{},
+    workdir: []const u8 = "",
+};
+
+/// imageUser returns the user an image service runs as, _oci-NAME.
+pub fn imageUser(gpa: Allocator, name: []const u8) Allocator.Error![]const u8 {
+    return gpa.print("_oci-{s}", .{name});
+}
+
+/// scalarOf returns the text of spec's key when it is one value.
+fn scalarOf(spec: Node, key: []const u8) ?[]const u8 {
+    const v = spec.get(key) orelse return null;
+    return if (v == .scalar) v.scalar.text else null;
+}
+
+/// listenPorts returns the tcp/PORT words of a service's listen values.
+fn listenPorts(gpa: Allocator, spec: Node) Allocator.Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    const l = spec.get("listen") orelse return &.{};
+    const values: []const Node = if (l == .scalar) &.{l} else l.list;
+    for (values) |v| {
+        var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
+        while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/")) try out.append(gpa, w);
+    }
+    return out.items;
+}
+
 /// render returns a service file from form.yaml's services.NAME: one line a
 /// directive, a list one line each, in the form's order; listen and connect
-/// lines keep leash's words alone.
-fn render(gpa: Allocator, spec: Node) Allocator.Error![]const u8 {
+/// lines keep leash's words alone. A service with `image` runs in that
+/// image's tree, baked at /oci/NAME (docs/design/oci.md): its record gives
+/// the command, environment and directory, it runs as _oci-NAME, with
+/// image_pledge and image_memory unless the service says otherwise; `link`
+/// names services it reaches on loopback, a connect line of their ports.
+fn render(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    forms: []const Form,
+    form: Form,
+    name: []const u8,
+    spec: Node,
+    f: *Failure,
+) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
+    var skip: []const []const u8 = &.{};
+    if (scalarOf(spec, "image")) |ref| {
+        const path = try gpa.print(
+            "{s}/rootfs/usr/share/werewolf/images/{s}.json",
+            .{ form.dir, name },
+        );
+        const text = root.readFileAlloc(
+            io,
+            path,
+            gpa,
+            .limited(64 << 10),
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return f.fail(
+                gpa,
+                "{s}/form.yaml: services: {s}: image {s}: no {s}: howl form bakes the image",
+                .{ form.dir, name, ref, path },
+            ),
+        };
+        const rec = std.json.parseFromSliceLeaky(ImageRecord, gpa, text, .{}) catch
+            return f.fail(gpa, "{s}: not an image record howl wrote", .{path});
+        if (!mem.eql(u8, rec.image, ref)) return f.fail(
+            gpa,
+            "{s}/form.yaml: services: {s}: image {s}, but {s} was baked: howl form again",
+            .{ form.dir, name, ref, rec.image },
+        );
+        if (spec.get("user") != null) return f.fail(
+            gpa,
+            "{s}/form.yaml: services: {s}: an image's service runs as _oci-{s}, not a user of " ++
+                "its own",
+            .{ form.dir, name, name },
+        );
+        try out.print(gpa, "root /oci/{s}\nexec", .{name});
+        for (rec.argv) |a| {
+            if (mem.findScalar(u8, a, '"') != null or mem.findAny(u8, a, "\n\r\t") != null)
+                return f.fail(gpa, "{s}: a word holds a quote or a control character", .{path});
+            if (mem.findScalar(u8, a, ' ') != null)
+                try out.print(gpa, " \"{s}\"", .{a})
+            else
+                try out.print(gpa, " {s}", .{a});
+        }
+        try out.print(gpa, "\ndir {s}\nuser {s}\npledge {s}\nmemory {s}\n", .{
+            scalarOf(spec, "dir") orelse (if (rec.workdir.len > 0) rec.workdir else "/data"),
+            try imageUser(gpa, name),
+            scalarOf(spec, "pledge") orelse image_pledge,
+            scalarOf(spec, "memory") orelse image_memory,
+        });
+        var has_path = false;
+        var has_home = false;
+        for (rec.env) |e| {
+            if (mem.startsWith(u8, e, "PATH=")) has_path = true;
+            if (mem.startsWith(u8, e, "HOME=")) has_home = true;
+            try out.print(gpa, "env {s}\n", .{e});
+        }
+        if (!has_path) try out.print(gpa, "env PATH={s}\n", .{image_path});
+        if (!has_home) try out.appendSlice(gpa, "env HOME=/data\n");
+        skip = &.{ "image", "exec", "dir", "pledge", "memory", "link" };
+    }
     for (spec.map) |d| {
+        if (isOneOf(d.key, skip)) continue;
         const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
         for (values) |v| {
             var line = v.scalar.text;
@@ -1089,6 +1216,29 @@ fn render(gpa: Allocator, spec: Node) Allocator.Error![]const u8 {
                 line = try mem.join(gpa, " ", kept.items);
             }
             try out.print(gpa, "{s} {s}\n", .{ d.key, line });
+        }
+    }
+    // link: the named services' listen ports, reached on loopback, which
+    // fence delivers before any rule: leash's connect line alone.
+    if (spec.get("link")) |links| {
+        const values: []const Node = if (links == .scalar) &.{links} else links.list;
+        for (values) |v| {
+            const to = v.scalar.text;
+            const target = for (forms) |fm| {
+                const svcs = fm.spec.get("services") orelse continue;
+                if (svcs.get(to)) |t| break t;
+            } else return f.fail(
+                gpa,
+                "{s}/form.yaml: services: {s}: link {s}: no service {s} in the chain",
+                .{ form.dir, name, to, to },
+            );
+            const ports = try listenPorts(gpa, target);
+            if (ports.len == 0) return f.fail(
+                gpa,
+                "{s}/form.yaml: services: {s}: link {s}: {s} listens on no tcp port",
+                .{ form.dir, name, to, to },
+            );
+            try out.print(gpa, "connect {s}\n", .{try mem.join(gpa, " ", ports)});
         }
     }
     return out.items;
@@ -1145,7 +1295,7 @@ pub fn services(
             try found.put(gpa, s.key, .{
                 .name = s.key,
                 .path = try gpa.print("{s}/form.yaml: services.{s}", .{ form.dir, s.key }),
-                .text = try render(gpa, s.value),
+                .text = try render(io, gpa, root, forms, form, s.key, s.value, f),
             });
         }
     }

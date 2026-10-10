@@ -1,16 +1,15 @@
 # The updater
 
-`/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current. On a
-form CI publishes (`prod`, `prod-ssh`), it installs the latest signed
-release of that form ([Releases](#releases)). On any other, it asks Wolfi
-and Alpine for anything newer than the running image and builds the other
-slot from it. Either way it boots that slot once, and records what changed
-and which CVEs that fixes.
+`/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current. It
+asks werewolf's repository, Wolfi and Alpine for anything newer than the
+running image, builds the other slot from it on the machine (werewolf's
+programs and forms are packages: [custom-updates.md](design/custom-updates.md)),
+boots that slot once, and records what changed and which CVEs that fixes.
+Releases are for installs; every machine updates this one way.
 
-It is one Zig program, `cmd/slot-update/slot-update.zig` with `cmd/slot-update/release.zig` (a
-release's manifest and signature), `cmd/slot-update/cve.zig` (the CVE children and
-the checks of what they say) and `lib/sandbox.zig`, in `minimal` and so every
-form.
+It is one Zig program, `cmd/slot-update/slot-update.zig` with
+`cmd/slot-update/cve.zig` (the CVE children and the checks of what they say)
+and `lib/sandbox.zig`, in `minimal` and so every form.
 
 ## Running
 
@@ -93,7 +92,7 @@ updates off.
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
 | `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init` and the module loader from the new root (`/usr/lib/werewolf/stage0` and `modload`, so a fix to either arrives with its package), the form's modules in the build's order (`modules`, or `modules-bitten` on a distro's disk; lib/image.zig) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
 | `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, the kernel unwrapped to its `Image` for GRUB, which cannot run zboot, `sync`, set GRUB's `next_entry`, then write `attempt`, so an attempt is on record only for a slot that is armed. On werewolf's own disk, the kernel goes to the EFI partition as it is. |
-| `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the release carries and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
+| `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the new slot lists (`werewolf-advisories`) and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
 
 When the staged slot is due, the service logs `reboot` and reboots cleanly.
@@ -120,35 +119,8 @@ slot is the one to fall back to; and `check`, `outcome` and the reboot
 each hold `lock`, so a check run by hand and the service's never meet.
 
 `build` names what a slot holds, in the log, the reports, `attempt`,
-`pending` and `bad`: 16 hex digits, the same for the same slot. A release's
-is its manifest's, a hash of its files ([releases.md](releases.md)); a slot
-built here, before its files exist, takes the first 16 hex digits of the
-sha256 of its package list and kernel.
-
-## Releases
-
-A form built as it ships for release (`release_forms` in lib/compose.zig,
-not a `DEV=1` build) carries two more files in its build record:
-`/usr/share/werewolf/releases`, where its releases are (the latest GitHub
-release's downloads), and `/usr/share/werewolf/image.pub`, the public half
-of the image key CI signs manifests with ([releases.md](releases.md)). With
-them, a check, instead of `userland`, `kernel` and `root`:
-
-| Step | |
-| --- | --- |
-| `release` | Fetch `FORM-ARCH.json` and its `.sig`, as `_update`. Believe nothing in them until the signature checks against `image.pub`: RSA PKCS#1 v1.5 over SHA-256, checked by Zig's standard library. Then refuse a manifest of another format, form or architecture, and one signed more than a day in the future. A manifest does not expire: the next release supersedes it ([releases.md](releases.md)), and its `expires` is read only by updaters from before 2026-10-08. No release of the form yet (404): `skip`. |
-| `compare` | This slot is the release if its root image's sha256 and kernel are the manifest's: `check`, `current`. A release no newer, by `serial`, than the last one that committed: `skip`. A release that would take a package or the kernel to an older version than this image's, in apk's order, as a slot built here may not either: `skip`, for an image built from a tree, which has no `serial`. A `build` that rolled back before: `skip`. |
-| `fetch` | Fetch the slot's three files as `_update`, each checked against the manifest's size and sha256, into the slot as a built one would be: `vmlinuz`, `stage0.zst` (on a distro's disk, after bite, `stage0-bitten.zst`, which adds the modules of its filesystem, as `stage0.zst`), `root.erofs`; and `cmdline`, where the manifest names it, so the slot boots with the kernel arguments its own image asks for, not the running one's. |
-
-The CVEs, the install, the report and the reboot are as for a built slot;
-the package changes are the manifest's `packages` against the running
-image's. When the slot commits, `outcome` keeps the release's `serial` in
-`serial`.
-
-A machine that follows releases runs exactly what CI built, tested and
-signed: werewolf's own programs update with it, which a built slot cannot
-do. Until our kernel and IPE (docs/design/verified-boot.md, phase 4), the
-signature guards against a bad mirror, not against root on the machine.
+`pending` and `bad`: 16 hex digits, the same for the same slot, the first
+16 hex digits of the sha256 of its package list and kernel.
 
 ## Trust
 
@@ -269,8 +241,6 @@ it was written. Alpine's own patches on top of upstream are not counted.
                         checks come to about 2 MB a year)
     reports/TIME-BUILD.json
                         one per update staged, the newest 500 kept
-    serial              the last release that committed, when following
-                        releases
     attempt             "SLOT BUILD BOOT" of the slot armed to boot once,
                         and the boot that armed it
     lock                held while a check, outcome or reboot runs

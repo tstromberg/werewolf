@@ -1,0 +1,14 @@
+# HAProxy passes a request to the backend the settings name: a listener
+# this check starts on loopback :443, answering each connection and
+# recording what reaches it. HAProxy's own TCP checks connect there too,
+# and it answers 503 while the backend is down, so try for a while.
+ok  haproxy-proxies  (while :; do (printf 'HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nwerewolf-backend'; sleep 1) | nc -l -p 443 -s 127.0.0.1 -w 3 >>/tmp/backend 2>/dev/null; done) >/dev/null 2>&1 & i=0; until wget -q -T 5 -O - --header 'Proxy: http://evil.example/' http://127.0.0.1/werewolf-check 2>/dev/null | grep -qx werewolf-backend; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing through HAProxy in 60 s"; exit 1; }; sleep 1; done
+# The request arrived with the client's address added and without its
+# Proxy header, which a CGI backend would make HTTP_PROXY (httpoxy).
+ok  haproxy-httpoxy  grep -q '^GET /werewolf-check ' /tmp/backend && grep -qi '^x-forwarded-for: 127\.0\.0\.1' /tmp/backend && ! grep -qi '^proxy:' /tmp/backend
+# A client sending its headers too slowly is cut off with a 408 after
+# 10 s, as a slowloris attack would be.
+ok  haproxy-slow     (printf 'GET / HTTP/1.1\r\nHost: x\r\n'; sleep 14) | nc -w 20 127.0.0.1 80 | grep -q '^HTTP/1.1 408'
+# haproxy-setup wrote the configuration from the settings; HAProxy has no
+# socket to control it by, and serves no HTTPS without a certificate.
+ok  haproxy-setup    c=/run/svc/haproxy/haproxy.cfg; grep -q '^    server app1 127\.0\.0\.1:443 check$' $c && ! grep -qE 'stats|lua|external-check|:443 ssl' $c && [ -z "$(find /run/svc/haproxy -type s)" ]

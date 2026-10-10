@@ -1,0 +1,9 @@
+# What the miniflux form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-miniflux;
+# test/boot; forms/demo/test/console has the format). Miniflux, given no
+# administrator's password, parks before it migrates or serves anything,
+# and says why; PostgreSQL and Caddy run. make check-miniflux boots it
+# with its config, and checks it serves.
+
+seen    miniflux-needs-config  leash: \{"event":"down","service":"miniflux","why":"config admin-password: FileNotFound"\}
+unseen  others-down            leash: \{"event":"down","service":"(caddy|postgres)"

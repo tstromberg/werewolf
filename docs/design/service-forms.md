@@ -1,8 +1,9 @@
 # Service forms
 
 Proposed, 2026-10-07. Built: `caddy`, `valkey`, `openbao`, `step-ca`,
-`wordpress`, `bastion` and `tailscale` (forms/NAME/README.md). `haproxy`,
-`mariadb`, `wordpress-mariadb`, `unbound` and `wireguard` wait (below).
+`wordpress`, `bastion` and `tailscale` (forms/NAME/README.md); `haproxy`
+2026-10-10, on 3.4 with its scripts pruned. `mariadb`, `wordpress-mariadb`,
+`unbound` and `wireguard` wait (below).
 What follows them is [forms-catalog.md](forms-catalog.md).
 
 ## Summary
@@ -63,7 +64,7 @@ WordPress sending mail), stricter is a line in the form.
 
 | Form | Decides | Waits on |
 | --- | --- | --- |
-| `haproxy` | `-db`, no master-worker (its reloads re-execute haproxy); no external checks, Lua or stats socket; timeouts 5s connect, 30s client and server, 10s `http-request`, 1h `tunnel`; `del-header Proxy` (httpoxy); `maxconn` from its memory; `-nocaps`, as leash grants low ports | Wolfi splitting out `haproxy-dump-certs` and `haproxy-reload` |
+| `haproxy` | `-db`, no master-worker (its reloads re-execute haproxy); no external checks, Lua or stats socket; timeouts 5s connect, 30s client and server, 10s `http-request`, 1h `tunnel`; `del-header Proxy` (httpoxy); `maxconn` from its memory; `-nocaps`, as leash grants low ports | built 2026-10-10: 3.4, `haproxy-reload`, `haproxy-dump-certs` and bash pruned (forms/haproxy) |
 | `unbound` | recursive and validating on every address, answering only loopback, RFC 1918, 100.64/10, ULA and link-local: no open resolver; no `private-address`, which breaks internal names in public DNS; a cloud's private zones by `forward-zone`; the trust anchor seeded from the image into `/data` (RFC 5011), since `unbound-anchor` needs the network first | `listen udp`; Wolfi splitting out `unbound-control-setup` |
 | `mariadb` | 11.8, an LTS into 2028: Wolfi's MySQL is short-lived Innovation releases, whose one-way data-dictionary upgrades would leave a rolled-back slot unable to read its data; a new major is a new form. As `postgresql`: a socket, roles by `unix_socket`, `local_infile=0`, an empty `secure_file_priv`, no `FILE`, `SUPER` or `PROCESS` for applications | Wolfi splitting out its scripts; a Zig `mariadb-init`, as `pg-init`, in their place |
 | `wordpress-mariadb` | `wordpress` `with` `mariadb`; a `db.php` that does nothing over SQLite's, since a form cannot remove a file; role `php` by `unix_socket`, all on its database, no `FILE` | `mariadb` |

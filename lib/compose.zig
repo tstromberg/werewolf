@@ -36,9 +36,8 @@ pub const records = [_][]const u8{
     "modules-bitten", "net", "oci", "pledge", "posture-known", "prune",         "weaknesses",
 };
 
-/// release_forms are the forms CI publishes, for both arches
-/// (docs/releases.md). As they ship, without DEV, their images say where
-/// the updater finds releases.
+/// release_forms are the forms CI releases as disks, for both arches
+/// (docs/releases.md): for installs; machines update through apk.
 pub const release_forms = [_][]const u8{ "minimal", "prod", "prod-ssh" };
 
 /// Accounts holds an image's account files, as its packages leave them.
@@ -375,10 +374,14 @@ pub fn packaged(io: Io, gpa: Allocator, root: Dir, fm: Form) !bool {
 pub fn formDepends(gpa: Allocator, fm: Form) ![]const []const u8 {
     var names: std.array_hash_map.String(void) = .empty;
     try names.put(gpa, format_package, {});
-    if (fm.spec.get("base")) |b|
-        try names.put(gpa, try gpa.print("{s}-form", .{b.scalar.text}), {})
-    else for (image_programs) |p|
-        try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
+    // The form built on none brings every image's programs, and
+    // werewolf's advisories, which its machine's updates are tiered by.
+    if (fm.spec.get("base")) |b| {
+        try names.put(gpa, try gpa.print("{s}-form", .{b.scalar.text}), {});
+    } else {
+        for (image_programs) |p| try names.put(gpa, try gpa.print("werewolf-{s}", .{p}), {});
+        try names.put(gpa, "werewolf-advisories", {});
+    }
     for (try fm.items(gpa, "with")) |m| try names.put(gpa, try gpa.print("{s}-form", .{m}), {});
     try formPrograms(gpa, fm, &names);
     for (try fm.items(gpa, "packages")) |p| try names.put(gpa, p, {});

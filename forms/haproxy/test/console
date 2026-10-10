@@ -1,0 +1,10 @@
+# What the haproxy form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-haproxy;
+# test/boot; forms/demo/test/console has the format). Given no backends,
+# service-config refuses its settings and HAProxy parks, saying why,
+# before haproxy-setup writes anything or HAProxy binds a port. make
+# check-haproxy boots it with its config, and checks it proxies.
+
+seen    haproxy-needs-backends  service-config: \{"event":"settings","service":"haproxy","setting":"backends","why":"required"\}
+seen    haproxy-parked          leash: \{"event":"down","service":"haproxy","why":"settings refused; service-config said why"\}
+unseen  setup-ran               haproxy-setup: haproxy\.cfg

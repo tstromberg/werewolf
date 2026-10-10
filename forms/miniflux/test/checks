@@ -1,0 +1,12 @@
+# Miniflux answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its migrations have run and its
+# administrator is made: wait.
+ok  miniflux-health  i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/healthcheck 2>/dev/null | grep -qx OK; do i=$((i + 1)); [ $i -le 120 ] || { echo "no /healthcheck in 120 s"; exit 1; }; sleep 1; done
+# Plain HTTP is sent to HTTPS.
+ok  miniflux-https   wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# The administrator is the config's: the API takes its password.
+ok  miniflux-admin   wget -q -T 5 --no-check-certificate -O - --header "Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)" https://localhost/v1/me | grep -q '"username":"admin"'
+# A feed on a private address is refused, as a fetch a stranger's feed
+# could aim at the machine itself would be (SSRF): by Miniflux, and
+# beneath it by fence, which lets it reach public addresses alone.
+ok  miniflux-ssrf    a="Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)"; ! wget -q -T 20 --no-check-certificate -O /dev/null --header "$a" --post-data '{"feed_url":"http://127.0.0.1:8080/","category_id":1}' https://localhost/v1/feeds 2>/dev/null && l=$(wget -q -T 5 --no-check-certificate -O - --header "$a" https://localhost/v1/feeds) && ! echo "$l" | grep -q 127.0.0.1 && u=$(grep '^miniflux:' /etc/passwd | cut -d: -f3) && grep -qx "connect $u tcp 443 public" /usr/share/werewolf/net && grep -qx "connect $u tcp 80 public" /usr/share/werewolf/net
