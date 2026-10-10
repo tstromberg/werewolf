@@ -17,7 +17,7 @@ key and words per line, `"` to group words, `#` at a word's start to comment.
 | --- | --- |
 | `exec`, `user`, `pledge` | required, once: the program and arguments; the user (never root); the promises (`lib/seal.zig`) |
 | `before PROGRAM ARG...` | run first, in order, confined; each must exit 0 |
-| `listen` / `connect tcp/PORT...` | ports it may bind / reach; a port below 1024 grants `CAP_NET_BIND_SERVICE`. `connect PATH` names a UNIX socket it may reach (Landlock ABI 9), beyond its own and those beneath what it writes |
+| `listen` / `connect tcp/PORT...` | ports it may bind / reach; a port below 1024 grants `CAP_NET_BIND_SERVICE`. `listen udp/PORT` is fence's to hold (Landlock names TCP alone), and leash's only for a low port's capability. `connect PATH` names a UNIX socket it may reach (Landlock ABI 9), beyond its own and those beneath what it writes |
 | `read` / `write PATH...` | paths it may read / write, beyond the floor |
 | `run PROGRAM...` | other programs it may start (with `pledge exec`) |
 | `requires PATH...` | stay down unless each exists |

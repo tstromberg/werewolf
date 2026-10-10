@@ -177,6 +177,9 @@ const Interface = struct {
     /// policy is the form's etc/werewolf/update-policy.json, if any. An
     /// operator's update-policy.json is applied over it.
     policy: ?[]const u8 = null,
+    /// people is the manifest's users as the config tar's `users` file
+    /// (lib/form.zig peopleFile); empty when it names no one.
+    people: []const u8 = "",
 };
 
 /// own_files are the tar files werewolf's programs read, each set by a howl
@@ -187,6 +190,7 @@ const own_files = [_][]const u8{
     "network",
     "data.key",
     "authorized_keys",
+    "users",
     "update-policy.json",
 };
 
@@ -500,6 +504,14 @@ fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]co
     var stdin_used: ?[]const u8 = null;
 
     if (o.config) |dir| try readConfigDir(io, gpa, dir, &entries, why);
+    // The manifest's people, as init makes their accounts and keys files
+    // (lib/form.zig peopleFile): the machine's own, never a taken form's.
+    if (iface.people.len > 0) try add(
+        gpa,
+        &entries,
+        .{ .path = "users", .data = iface.people, .from = "form.yaml's users" },
+        why,
+    );
     if (o.hostname) |h| {
         try add(
             gpa,
@@ -910,6 +922,10 @@ fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface
         error.OutOfMemory => return error.OutOfMemory,
     };
     var iface = try interface(gpa, svcs, why);
+    iface.people = forms.peopleFile(gpa, c, &failure) catch |err| switch (err) {
+        error.Form => return why.refuse("{s}", .{failure.text}),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
     // The image lays the forms over each other, so the last one's wins.
     for (c) |f| {
         const path = try gpa.print("{s}/rootfs/etc/werewolf/update-policy.json", .{f.dir});
@@ -929,6 +945,11 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     try row(w, "--dns ADDR", "network: the resolver");
     try row(w, "--data-key FILE", "data.key: /data in LUKS2");
     try row(w, "--root-keys FILE", "authorized_keys: root's, where the form runs sshd");
+    try row(
+        w,
+        "--users.NAME.keys LINE",
+        "users: NAME's security key (repeat); --users.NAME.admin makes it root's too",
+    );
     try row(w, "--update-policy FILE", "update-policy.json: when updates install");
     if (std.mem.eql(u8, verb, "create"))
         try row(w, "--allow-from me|CIDR", "opens the form's TCP ports to it (gcp, aws, azure)");

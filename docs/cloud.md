@@ -2,7 +2,9 @@
 
 On GCP, AWS, Hetzner Cloud and Azure, a werewolf machine can take its config from
 the cloud's metadata server: the same config tar a config disk carries,
-set as the instance's user data. `prod`, and every form on it, asks.
+set as the instance's user data. `prod`, and every form on it, asks, at
+boot and then every minute: a changed config's people get their accounts
+on the running machine (cmd/cloud-metadata/README.md).
 
 The [Tailscale router](../examples/tailscale/README.md) tutorial uses
 restricted JSON boot settings for its routes, plus a separate credential

@@ -1,0 +1,24 @@
+#!/bin/sh
+# people-form CHECK FORM_TOOL [PROVIDER] writes CHECK/people-check, a form on prod-ssh
+# naming two people, one an admin, as a manifest does (make check-people).
+# Their keys are fixed security keys: init makes the accounts from the
+# config's users file, and test/checks-people looks for them; no one logs
+# in as them. The form restates prod-ssh's weaknesses, which are not
+# inherited.
+set -eu
+check=$1 form_tool=$2 # a third argument, the key provider, is the bastion's and unused
+dir=$check/people-check
+mkdir -p "$check" && rm -rf "$dir" && mkdir -p "$dir/test"
+cp test/checks-people "$dir/test/checks"
+{
+	echo '# make check-people: prod-ssh, with two people.'
+	echo 'base: prod-ssh'
+	echo 'users:'
+	echo '  tom:'
+	echo '    keys: ["sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGx0 tom@yubikey"]'
+	echo '    admin: true'
+	echo '  ann:'
+	echo '    keys: ["sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIHl1 ann@laptop"]'
+	echo 'weaknesses:'
+	"$form_tool" excuses prod-ssh | sed 's/^\([^ ]*\) \(.*\)/  \1: "\2"/'
+} >"$dir/form.yaml"

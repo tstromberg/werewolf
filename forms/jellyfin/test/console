@@ -1,0 +1,9 @@
+# What the jellyfin form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-jellyfin;
+# test/boot; forms/demo/test/console has the format). Jellyfin starts on
+# loopback; Caddy, given no administrator's password, parks before the
+# wizard is touched or a port opened, and says why.
+
+seen    caddy-needs-config  leash: \{"event":"down","service":"caddy","why":"config jellyfin-password: FileNotFound"\}
+unseen  jellyfin-down       leash: \{"event":"down","service":"jellyfin"
+unseen  wizard-ran          jellyfin-setup: set up

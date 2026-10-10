@@ -1,0 +1,97 @@
+# jellyfin: prod-ssh, with Jellyfin serving the media its admin copies in
+# over ssh, behind Caddy, which serves it over HTTPS for the machine's
+# domain with a certificate from Let's Encrypt. Jellyfin listens on
+# loopback and reaches nothing; its first-run wizard is completed from
+# the machine's settings and config before Caddy lets anyone in
+# (forms/jellyfin/cmd/jellyfin-setup); what it runs on a file, ffmpeg and
+# ffprobe, runs narrowed. See forms/jellyfin/README.md.
+base: prod-ssh
+
+packages:
+  - jellyfin
+  - jellyfin-web
+  - caddy
+
+# Taken back of werewolf's defaults (lib/allow.zig): .NET compiles
+# Jellyfin to machine code as it runs.
+allow: [jit]
+
+# bash, which a dependency brings and nothing runs; the admin's shell is
+# prod-ssh's busybox.
+prune:
+  - usr/bin/bash
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  network-no-login: sshd, by security key, is how the media comes in; busybox-full brings telnetd too, which nothing starts
+  programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
+  programs-no-interpreters: busybox-full, the tools of those who log in, has awk; dotnet runs Jellyfin
+  programs-no-shell: busybox-full's shell, for those who log in
+  kernel-write-xor-execute: .NET compiles Jellyfin to machine code as it runs (allow jit)
+
+services:
+  # Jellyfin, as its own user: it serves on loopback alone, behind Caddy,
+  # keeps its database, cache and the media in /data/svc/jellyfin, reaches
+  # nothing on the network (no metadata, plugins or discovery), and runs
+  # ffmpeg and ffprobe only by their narrow links: no network, their own
+  # pledge, its directory alone.
+  jellyfin:
+    exec: /usr/lib/jellyfin/jellyfin
+    before: /usr/lib/werewolf/jellyfin-setup network
+    user: jellyfin
+    # landlock, seccomp: it narrows what it runs, ffmpeg and ffprobe.
+    pledge: stdio rpath wpath inet unix netlink listen connect proc exec landlock seccomp
+    listen: [tcp/8096 loopback]
+    run: /usr/bin/ffmpeg /usr/bin/ffprobe
+    narrow:
+      - /usr/bin/ffprobe pledge stdio rpath proc
+      - /usr/bin/ffprobe read /data/svc/jellyfin
+      - /usr/bin/ffmpeg pledge stdio rpath wpath proc
+      - /usr/bin/ffmpeg read /data/svc/jellyfin
+      - /usr/bin/ffmpeg write /data/svc/jellyfin
+      - /usr/bin/ffmpeg memory 1024
+    memory: 2048
+    nofile: 65536
+    env:
+      - JELLYFIN_DATA_DIR=/data/svc/jellyfin/data
+      - JELLYFIN_CONFIG_DIR=/data/svc/jellyfin/config
+      - JELLYFIN_CACHE_DIR=/data/svc/jellyfin/cache
+      - JELLYFIN_LOG_DIR=/run/svc/jellyfin/log
+      - JELLYFIN_WEB_DIR=/usr/lib/jellyfin/jellyfin-web
+      - JELLYFIN_FFMPEG=/etc/sv/jellyfin/narrow/ffmpeg
+      - DOTNET_EnableDiagnostics=0
+      # Anonymous memory for the JIT, not memfds, which stay refused.
+      - DOTNET_EnableWriteXorExecute=0
+      - TMPDIR=/run/svc/jellyfin
+
+  # Caddy, as its own user, for Jellyfin: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Jellyfin on
+  # loopback, read its configuration, and write only its own directories.
+  # Before it starts, jellyfin-setup completes Jellyfin's first-run wizard
+  # on loopback, with the administrator from the machine's settings and
+  # config, so no stranger finds it open.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before:
+      - /usr/lib/werewolf/jellyfin-setup wizard
+      - /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8096]
+    read: /etc/caddy
+    config:
+      - jellyfin-password /run/config/caddy/jellyfin-password
+      - settings /run/config/caddy/settings.json
+    setting:
+      - domain hostname required as DOMAIN
+      - jellyfin-admin string required as JELLYFIN_ADMIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

@@ -1,0 +1,179 @@
+# nextcloud: Nextcloud 35, files, calendars and contacts for a household,
+# with PostgreSQL, Valkey, Caddy and cron beside it (with): Caddy serves it
+# over HTTPS at the machine's base URL, with a certificate from Let's
+# Encrypt, and hands its PHP to php-fpm; background jobs run every five
+# minutes. Wolfi's Nextcloud is a container's, a major release behind:
+# melange lays the release in /usr/share/nextcloud
+# (forms/nextcloud/melange/nextcloud.yaml), which no one on the machine can
+# change. Its config, apps from the app store and everyone's files are in
+# /data/svc/nextcloud. It is installed, with its administrator from the
+# config, before it serves, and upgraded by the image, never the web. See
+# forms/nextcloud/README.md.
+base: prod
+
+with: [postgresql, valkey, caddy, cron]
+
+packages:
+  - php-8.4
+  - php-8.4-fpm
+  - php-8.4-apcu          # the local cache
+  - php-8.4-bcmath
+  - php-8.4-ctype
+  - php-8.4-curl
+  - php-8.4-dom
+  - php-8.4-exif          # photos' orientation
+  - php-8.4-fileinfo
+  - php-8.4-gd            # previews
+  - php-8.4-gmp           # passkeys
+  - php-8.4-iconv
+  - php-8.4-intl
+  - php-8.4-mbstring
+  - php-8.4-opcache
+  - php-8.4-openssl
+  - php-8.4-pcntl
+  - php-8.4-pdo
+  - php-8.4-pdo_pgsql     # the database
+  - php-8.4-posix
+  - php-8.4-redis         # Valkey: file locking and the shared cache
+  - php-8.4-simplexml
+  - php-8.4-sodium        # Argon2 password hashes
+  - php-8.4-sysvsem
+  - php-8.4-xml
+  - php-8.4-xmlreader
+  - php-8.4-xmlwriter
+  - php-8.4-zip
+
+# The web's user and the background jobs' share a group, as their files
+# do: the jobs make previews and expire versions in the web's directory.
+# Their ids are those their names' hashes would give them
+# (forms/README.md).
+accounts:
+  groups:
+    - groupname: nextcloud
+      gid: 1680250537
+  users:
+    - username: nextcloud
+      uid: 1680250537
+      gid: 1680250537
+      homedir: /var/empty
+      shell: /sbin/nologin
+    - username: nextcloud-cron
+      uid: 573252680
+      gid: 1680250537
+      homedir: /var/empty
+      shell: /sbin/nologin
+
+check:
+  memory: 3072
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: php-fpm runs Nextcloud, which is what this form is for
+  kernel-write-xor-execute: PostgreSQL compiles costly queries, and PCRE2 PHP's patterns, to machine code (allow jit, from postgresql)
+
+services:
+  # Caddy, as its own user, for Nextcloud: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS and a resolver, and php-fpm's
+  # socket, which it reaches as a member of nextcloud's group. It reads
+  # its configuration, the image and the apps installed from the app
+  # store, whose scripts and styles it serves, and writes only its own
+  # directories. Its site is the base URL Nextcloud takes too, from the
+  # machine's settings, as BASE_URL, which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    group: nextcloud
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53, /run/svc/nextcloud/php.sock]
+    read: /etc/caddy /data/svc/nextcloud/apps
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
+
+  # Nextcloud, php-fpm, as nextcloud: it answers Caddy on a socket in its
+  # own directory, reaches its database and Valkey by their sockets, and
+  # reaches public addresses alone, for the app store, federation and mail.
+  # Before it serves, under this leash: setup.php writes its config from
+  # the settings and, the first time, installs it with the administrator
+  # the config names; occ upgrades it when the image brought a new
+  # Nextcloud, and adds the indices a new release wants.
+  nextcloud:
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/nextcloud -d opcache.memory_consumption=256 -d opcache.interned_strings_buffer=32 -d opcache.max_accelerated_files=20000 -d opcache.revalidate_freq=60
+    before:
+      - /usr/bin/php -d apc.enable_cli=1 -d memory_limit=1G /usr/share/werewolf-nextcloud/setup.php
+      - /usr/bin/php -d apc.enable_cli=1 -d memory_limit=1G /usr/share/nextcloud/occ upgrade --no-interaction
+      - /usr/bin/php -d apc.enable_cli=1 -d memory_limit=1G /usr/share/nextcloud/occ db:add-missing-indices --no-interaction
+      - /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/nextcloud
+    user: nextcloud
+    # Valkey's group, for its socket.
+    group: valkey
+    # Its directories are its group's: the background jobs, whose user
+    # shares it, write in them, and Caddy reaches the socket and reads the
+    # app store's apps.
+    share: group
+    # netlink: glibc's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    connect:
+      - tcp/443 tcp/80 tcp/465 tcp/587 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+      - /run/svc/valkey/valkey.sock
+    read: /etc/php
+    # The administrator's password, and the site's settings, from the
+    # machine's config: without the password the service parks, since an
+    # uninstalled Nextcloud belongs to whoever finds it first.
+    config:
+      - admin-password /run/config/nextcloud/admin-password
+      - settings /run/config/nextcloud/settings.json
+    setting:
+      - base-url url required
+      - admin string
+      - admin-email string
+      - phone-region string
+    render: json site.json
+    memory: 1536
+    nofile: 65536
+    env:
+      - NEXTCLOUD_CONFIG_DIR=/data/svc/nextcloud/config
+      - HOME=/run/svc/nextcloud
+      - TMPDIR=/data/svc/nextcloud/tmp
+
+  # Nextcloud's background jobs: supercronic, as nextcloud-cron, of the
+  # web's group, runs etc/cron/crontab's one job every five minutes,
+  # through sh-shim, under this leash. Nextcloud runs its jobs only as the
+  # owner of its config, so the job copies the web's config into this
+  # service's own directory first (usr/share/werewolf-nextcloud/cron.php),
+  # and logs in to the database as its own role, which acts as Nextcloud's.
+  cron:
+    exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
+    user: nextcloud-cron
+    # Valkey's group, for its socket.
+    group: valkey
+    pledge: stdio rpath wpath inet unix netlink connect proc exec
+    connect:
+      - tcp/443 tcp/80 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+      - /run/svc/valkey/valkey.sock
+    run: /usr/bin/php
+    read: /etc/cron /etc/php
+    write: /data/svc/nextcloud
+    memory: 1024
+    # Background work: a quarter share of contended CPUs, so a preview run
+    # cannot starve the web.
+    cpu: 25
+    env:
+      - NEXTCLOUD_CONFIG_DIR=/run/svc/cron/config
+      - NC_dbuser=nextcloud-cron
+      - HOME=/run/svc/cron
+      - TMPDIR=/data/svc/nextcloud/tmp

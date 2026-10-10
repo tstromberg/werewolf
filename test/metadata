@@ -7,10 +7,14 @@ data only as each cloud does: GCP's with Metadata-Flavor: Google, AWS's
 only through an IMDSv2 session token, Hetzner's plainly, Azure's with
 Metadata: true. Anything else is refused.
 
-PAYLOAD is good (a config tar with a hostname and root's key) or hostile
-(a symlink and a ../ entry beside them), base64-encoded as a cloud holds
-it. It listens on 127.0.0.1, writes its port to PORT_FILE, and logs each
-request, method, path and the headers that matter, to LOG_FILE.
+PAYLOAD is good (a config tar with a hostname and root's key), people
+(good, with a users file naming tom, an admin) or hostile (a symlink and
+a ../ entry beside them), base64-encoded as a cloud holds it; or
+FIRST>THEN@N, which serves FIRST for the first N user-data requests and
+THEN after, as a config changed at the cloud, which the machine's
+cloud-metadata service must take up. It listens on 127.0.0.1, writes its
+port to PORT_FILE, and logs each request, method, path and the headers
+that matter, to LOG_FILE.
 """
 
 import base64
@@ -22,7 +26,8 @@ import tarfile
 TOKEN = "werewolf-check-token"
 
 
-def config_tar(hostile):
+def config_tar(payload):
+    hostile = payload == "hostile"
     out = io.BytesIO()
     with tarfile.open(fileobj=out, mode="w", format=tarfile.USTAR_FORMAT) as tar:
         def add(name, data):
@@ -39,13 +44,25 @@ def config_tar(hostile):
             add("../escaped", b"out\n")
         else:
             add("authorized_keys", b"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl werewolf-check-key\n")
+        if payload == "people":
+            add("users", b"tom admin sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGx0 tom@yubikey\n")
     return base64.b64encode(out.getvalue())
 
 
 def main():
     payload, port_file, log_file = sys.argv[1:4]
-    body = config_tar(payload == "hostile")
+    first, then, switch_at = payload, payload, None
+    if ">" in payload:
+        first, rest = payload.split(">", 1)
+        then, n = rest.split("@", 1)
+        switch_at = int(n)
+    bodies = [config_tar(first), config_tar(then)]
+    served = [0]
     log = open(log_file, "a", buffering=1)
+
+    def body():
+        served[0] += 1
+        return bodies[1] if switch_at is not None and served[0] > switch_at else bodies[0]
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def record(self):
@@ -65,13 +82,13 @@ def main():
         def do_GET(self):
             self.record()
             if self.path == "/computeMetadata/v1/instance/attributes/user-data":
-                return self.answer(200, body, True) if self.headers.get("Metadata-Flavor") == "Google" else self.answer(403, google=True)
+                return self.answer(200, body(), True) if self.headers.get("Metadata-Flavor") == "Google" else self.answer(403, google=True)
             if self.path == "/latest/user-data":
-                return self.answer(200, body) if self.headers.get("X-aws-ec2-metadata-token") == TOKEN else self.answer(401)
+                return self.answer(200, body()) if self.headers.get("X-aws-ec2-metadata-token") == TOKEN else self.answer(401)
             if self.path == "/hetzner/v1/userdata":
-                return self.answer(200, body)
+                return self.answer(200, body())
             if self.path == "/metadata/instance/compute/userData?api-version=2021-01-01&format=text":
-                return self.answer(200, body) if self.headers.get("Metadata") == "true" else self.answer(400)
+                return self.answer(200, body()) if self.headers.get("Metadata") == "true" else self.answer(400)
             self.answer(404)
 
         def do_PUT(self):

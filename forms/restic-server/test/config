@@ -1,0 +1,14 @@
+#!/bin/sh
+# forms/restic-server/test/config DIR: the restic-server form's config for
+# make check, in DIR: its domain, localhost, for which Caddy's own CA
+# signs, and two users, alice and bob, whose passwords are
+# werewolf-check-alice and werewolf-check-bob (htpasswd -nbB made these
+# lines), which test/checks backs up as.
+set -eu
+mkdir -p "$1/restic-server" "$1/caddy"
+umask 077
+cat >"$1/restic-server/restic-users" <<'EOF'
+alice:$2y$10$UpO16oSY6zozgAhiFyT96.0a8eEI1t1aeawJbu3zOpP0uYtGwSqYa
+bob:$2y$10$HLg4stsZdRL3/4l6uwAIsuI.K2fi67V11ZB/ghqBcISKi.CbBoAbG
+EOF
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

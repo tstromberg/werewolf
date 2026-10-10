@@ -1,0 +1,43 @@
+# Nextcloud for werewolf's nextcloud form, as Wolfi would package it: the
+# release tarball, checked by sha256, laid in /usr/share/nextcloud. It is
+# PHP, so nothing is compiled; the form names the PHP it runs on. Wolfi's
+# own nextcloud-server-33 is a container's: Apache, bash and PHP 8.3, a
+# major release behind. Offered to wolfi-dev/os as it is; when Wolfi
+# ships it, the form names the package and this file goes.
+package:
+  name: nextcloud
+  version: 35.0.1
+  epoch: 0
+  description: Nextcloud server, a safe home for all your data
+  copyright:
+    - license: AGPL-3.0-or-later
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - bzip2
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://download.nextcloud.com/server/releases/nextcloud-${{package.version}}.tar.bz2
+      expected-sha256: 7ed305e880192d804ba83179a19dd22257679608d63161a611ce3f8a918d2aa6
+      directory: nextcloud
+
+  # The installer's flag for a web install: this form installs from the
+  # machine's config before the site serves, and keeps its config on /data.
+  - runs: |
+      rm -f nextcloud/config/CAN_INSTALL
+      mkdir -p ${{targets.destdir}}/usr/share
+      mv nextcloud ${{targets.destdir}}/usr/share/nextcloud
+
+update:
+  enabled: true
+  github:
+    identifier: nextcloud/server
+    strip-prefix: v

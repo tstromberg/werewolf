@@ -30,8 +30,9 @@ memcached and syslog-ng would fit when asked.
 
 ## Non-Goals
 
-- Machines that run arbitrary code (Kubernetes nodes, CI runners), and
-  Nextcloud, Immich or Matrix, which are several daemons each.
+- Machines that run arbitrary code (Kubernetes nodes, CI runners).
+- A household's machine: Nextcloud, Immich and the rest of the top ten
+  are [self-hosting.md](self-hosting.md)'s.
 - Packaging for Wolfi. A recipe stays with its form until Wolfi takes it.
 
 ## Detailed design

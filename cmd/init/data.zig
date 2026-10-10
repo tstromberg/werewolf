@@ -71,14 +71,12 @@ pub fn data(m: *Machine) void {
             say("/data is {s}", .{what});
         } else nodata(m, why);
     }
-    // Services make their own /data/svc/NAME. init makes a home only for
-    // the NoCloud user (Lima's).
-    if (m.nocloud_user.len > 0 and !exists("/run/werewolf/nodata")) {
-        const home = m.fmtZ("/data/home/{s}", .{m.nocloud_user});
-        m.mkdirAll(home);
-        if (lookupIds(m.read("/run/werewolf/passwd"), m.nocloud_user)) |ids|
-            _ = linux.fchownat(linux.AT.FDCWD, home, ids.uid, ids.gid, 0);
-        _ = linux.fchmodat(linux.AT.FDCWD, home, 0o700);
+    // Services make their own /data/svc/NAME. init makes a home for each
+    // person: the config's users, and the NoCloud user (Lima's).
+    if (!exists("/run/werewolf/nodata")) {
+        const passwd = m.read("/run/werewolf/passwd");
+        for (m.users) |user| home(m, passwd, user);
+        if (m.nocloud_user.len > 0) home(m, passwd, m.nocloud_user);
     }
     // The key now lives in the kernel's dm table. No service needs it, and
     // /run/config is where a service would look.
@@ -368,4 +366,13 @@ test checkDue {
     std.mem.writeInt(u32, sb[0x44..0x48], 100, .little);
     try testing.expectEqual(null, checkDue(&sb, 1099));
     try testing.expect(checkDue(&sb, 1100) != null);
+}
+
+/// home makes /data/home/USER, the user's alone (0700), where the account
+/// files say user is; a missing account leaves the directory root's.
+fn home(m: *Machine, passwd: []const u8, user: []const u8) void {
+    const dir = m.fmtZ("/data/home/{s}", .{user});
+    m.mkdirAll(dir);
+    if (lookupIds(passwd, user)) |ids| _ = linux.fchownat(linux.AT.FDCWD, dir, ids.uid, ids.gid, 0);
+    _ = linux.fchmodat(linux.AT.FDCWD, dir, 0o700);
 }

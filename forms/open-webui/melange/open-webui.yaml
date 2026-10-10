@@ -1,0 +1,80 @@
+# Open WebUI for werewolf's open-webui form, in its slim build: upstream's
+# own variant for a machine whose models are served elsewhere (here, by
+# Ollama), its vectors kept in PostgreSQL with pgvector, without torch,
+# local speech or document models, or any cloud storage SDK. Built by
+# melange in Wolfi's environment, into a virtual environment on Wolfi's
+# Python 3.12 at /usr/lib/open-webui: the Python packages upstream's slim
+# image installs (backend/requirements-slim.txt at the tag), resolved as
+# PyPI stood on the date below, and the release's wheel, which carries the
+# web interface upstream builds. Wolfi's own open-webui is the full build
+# (torch, 7 GB installed) and lags upstream; when Wolfi ships a slim one,
+# the form names the package and this file goes.
+package:
+  name: open-webui
+  version: 0.11.4
+  epoch: 0
+  description: Self-hosted AI chat interface for Ollama and OpenAI-compatible APIs
+  copyright:
+    - license: LicenseRef-Open-WebUI
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - python-3.12
+      - python-3.12-dev
+      - uv
+  environment:
+    UV_PYTHON_DOWNLOADS: never
+    UV_NO_CACHE: "1"
+    UV_LINK_MODE: copy
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://raw.githubusercontent.com/open-webui/open-webui/v${{package.version}}/backend/requirements-slim.txt
+      expected-sha256: d64e5a7971200320c46ca457f64154ba4b7b50b0caa018e5a66f5ee3378a77eb
+      extract: false
+
+  - uses: fetch
+    with:
+      uri: https://files.pythonhosted.org/packages/py3/o/open-webui/open_webui-${{package.version}}-py3-none-any.whl
+      expected-sha256: e4c2b02607ae984ec8ec08f3f9e02a8de06b1226af0f2df37fe2fab7f9d52523
+      extract: false
+
+  # Built where it runs, since a virtual environment records its path.
+  # The requirements as upstream pins them, and what they pull in as PyPI
+  # stood on --exclude-newer, so a rebuild resolves the same; then the
+  # release itself, which needs nothing the slim list lacks: importing the
+  # whole application, as the slim build, proves it. Bytecode is compiled
+  # here: the machine's image is read-only.
+  - runs: |
+      uv venv --python /usr/bin/python3.12 /usr/lib/open-webui
+      export VIRTUAL_ENV=/usr/lib/open-webui
+      uv pip install --compile-bytecode --exclude-newer 2026-10-10T00:00:00Z \
+        -r requirements-slim.txt
+      uv pip install --compile-bytecode --no-deps \
+        open_webui-${{package.version}}-py3-none-any.whl
+      d=$(mktemp -d)
+      DATA_DIR=$d STATIC_DIR=$d/static USE_SLIM_DOCKER=true WEBUI_SECRET_KEY=build \
+        PYTHONDONTWRITEBYTECODE=1 FROM_INIT_PY=true \
+        /usr/lib/open-webui/bin/python -c 'import open_webui.main'
+      rm -rf "$d"
+
+  - runs: |
+      cd /usr/lib/open-webui
+      rm -f bin/activate* bin/deactivate* .gitignore .lock
+      mkdir -p ${{targets.destdir}}/usr/lib
+      cp -a /usr/lib/open-webui ${{targets.destdir}}/usr/lib/open-webui
+
+update:
+  enabled: true
+  github:
+    identifier: open-webui/open-webui
+    strip-prefix: v

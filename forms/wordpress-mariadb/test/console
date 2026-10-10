@@ -1,0 +1,10 @@
+# What the wordpress-mariadb form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-wordpress-mariadb; test/boot; forms/demo/test/console
+# has the format). MariaDB makes its data and serves its socket; php-fpm,
+# given no admin password hash, parks before WordPress is installed or
+# served, and says why.
+
+seen    mariadb-ready    ready for connections.*socket: '/run/svc/mariadb/mariadb.sock'
+seen    php-needs-hash   leash: \{"event":"down","service":"php-fpm","why":"config admin-password-hash: FileNotFound"\}
+unseen  installed        wordpress-install: installed

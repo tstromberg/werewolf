@@ -1,0 +1,9 @@
+# What the grafana form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-grafana;
+# test/boot; forms/demo/test/console has the format). Grafana, given no
+# administrator's password, parks before it starts, and says why, so its
+# public default key never protects anything; Caddy runs. make
+# check-grafana boots it with its config, and checks it serves.
+
+seen    grafana-needs-config  leash: \{"event":"down","service":"grafana","why":"secret GF_SECURITY_ADMIN_PASSWORD: /run/config/grafana/admin-password: FileNotFound"\}
+unseen  caddy-down            leash: \{"event":"down","service":"caddy"

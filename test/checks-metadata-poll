@@ -1,0 +1,9 @@
+# prod on GCP, whose metadata server first holds a good config and then,
+# from the second request, one naming a person (test/metadata, people):
+# the cloud-metadata service polls every minute and makes the account.
+
+ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -qE 'want up|^fail'
+ok  hostname         [ "$(hostname)" = cloud-check ]
+ok  root-key         grep -q 'werewolf-check-key' /run/werewolf/keys/root
+ok  poller-up        sv status /etc/sv/cloud-metadata | grep -q '^run:'
+ok  people-arrive    i=0; until grep -q '^tom:x:' /etc/passwd; do i=$((i + 1)); [ $i -le 150 ] || { echo "no tom after 150 s"; exit 1; }; sleep 1; done; grep -q '^tom:x:[0-9]*:[0-9]*::/data/home/tom:' /etc/passwd && grep -q tom@yubikey /run/werewolf/keys/tom && grep -q tom@yubikey /run/werewolf/keys/root && grep -q werewolf-check-key /run/werewolf/keys/root && [ -d /data/home/tom ] && [ "$(cat /run/werewolf/people)" = tom ]

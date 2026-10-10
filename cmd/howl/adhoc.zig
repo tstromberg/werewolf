@@ -80,6 +80,9 @@ const list_keys = [_][]const u8{ "net", "prune", "modules", "programs" };
 const scalar_keys = [_][]const u8{"updates"};
 /// ScalarLine sets a form.yaml key to one value.
 const ScalarLine = struct { key: []const u8, value: []const u8 };
+/// UserPlan is form.yaml's users.NAME from --users.NAME.keys LINE (repeated)
+/// and --users.NAME.admin, which takes no value.
+const UserPlan = struct { name: []const u8, keys: []const []const u8 = &.{}, admin: bool = false };
 /// ListLine adds a line to a form.yaml list; MapLine sets a scalar in a map.
 const ListLine = struct { key: []const u8, line: []const u8 };
 const MapLine = struct { key: []const u8, sub: []const u8, value: []const u8 };
@@ -95,6 +98,7 @@ const Plan = struct {
     lists: []const ListLine = &.{},
     maps: []const MapLine = &.{},
     scalars: []const ScalarLine = &.{},
+    users: []const UserPlan = &.{},
     /// weaknesses are the chain's, restated while the form is made.
     weaknesses: []const Weakness = &.{},
     /// ours reports whether any ad-hoc flag was given.
@@ -297,6 +301,9 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
         }
         // In --oci NAME=REF, the = belongs to the value, not the flag.
         if (is_oci and value != null) value = null;
+        // --users.NAME.admin takes no value: the flag is the fact.
+        if (value == null and std.mem.startsWith(u8, name, "--users.") and
+            std.mem.endsWith(u8, name, ".admin")) value = "true";
         const v = value orelse v: {
             i += 1;
             if (i == args.len) return why.refuse("{s} wants a value", .{a});
@@ -410,8 +417,40 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
     // --NAME.KEY goes to image NAME's service file if NAME is an image;
     // otherwise it sets a scalar in form.yaml's map NAME. Each only once.
     var maps: std.ArrayList(MapLine) = .empty;
+    var people: std.ArrayList(UserPlan) = .empty;
     for (lines.items) |l| {
         const img = p.image(l.image) orelse {
+            // --users.NAME.keys LINE, repeated, and --users.NAME.admin.
+            if (std.mem.eql(u8, l.image, "users")) {
+                const dot2 = std.mem.findScalar(u8, l.line.key, '.') orelse return why.refuse(
+                    "{s}: --users.NAME.keys LINE, or --users.NAME.admin",
+                    .{l.flag},
+                );
+                const who = l.line.key[0..dot2];
+                const what = l.line.key[dot2 + 1 ..];
+                if (!forms.isName(who)) return why.refuse(
+                    "{s}: a name is a-z, 0-9 and -",
+                    .{l.flag},
+                );
+                const person = for (people.items) |*u| {
+                    if (std.mem.eql(u8, u.name, who)) break u;
+                } else blk: {
+                    try people.append(gpa, .{ .name = who });
+                    break :blk &people.items[people.items.len - 1];
+                };
+                if (std.mem.eql(u8, what, "keys")) {
+                    var more: std.ArrayList([]const u8) = .empty;
+                    try more.appendSlice(gpa, person.keys);
+                    try more.append(gpa, l.line.words);
+                    person.keys = more.items;
+                } else if (std.mem.eql(u8, what, "admin")) {
+                    person.admin = true;
+                } else return why.refuse(
+                    "{s}: a person has keys and admin, not {s}",
+                    .{ l.flag, what },
+                );
+                continue;
+            }
             for ([_][]const u8{ "base", "with" } ++ list_keys) |k|
                 if (std.mem.eql(u8, l.image, k)) return why.refuse(
                     "{s}: {s} is not a map in form.yaml; --{s} LINE adds to a list",
@@ -451,9 +490,15 @@ fn plan(gpa: Allocator, verb: Verb, args: []const []const u8, base: []const u8, 
             "--{s} {s} and --{s}.{s}: one or the other",
             .{ s.key, s.value, m.key, m.sub },
         );
+    for (people.items) |u| if (u.keys.len == 0)
+        return why.refuse(
+            "--users.{s}.admin: {s} has no keys; add --users.{s}.keys LINE",
+            .{ u.name, u.name, u.name },
+        );
     p.maps = maps.items;
     p.lists = lists_.items;
     p.scalars = scalars.items;
+    p.users = people.items;
     for (p.images) |img| for (list_keys) |k| if (std.mem.eql(u8, img.name, k))
         return why.refuse(
             "--oci {s}: a form.yaml key's name; call the image something else",
@@ -555,6 +600,14 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
         for (p.packages) |pkg| try w.print("  - {s}\n", .{pkg});
     }
     for (p.scalars) |s| try w.print("{s}: {s}\n", .{ s.key, s.value });
+    if (p.users.len > 0) {
+        try w.writeAll("users:\n");
+        for (p.users) |u| {
+            try w.print("  {s}:\n    keys:\n", .{u.name});
+            for (u.keys) |k| try w.print("      - {s}\n", .{try yamlScalar(gpa, k)});
+            if (u.admin) try w.writeAll("    admin: true\n");
+        }
+    }
     var net: std.ArrayList([]const u8) = .empty;
     for (p.lists) |l| if (std.mem.eql(u8, l.key, "net")) try net.append(gpa, l.line);
     if (net.items.len > 0) {
@@ -649,48 +702,22 @@ fn bake(
     dir: []const u8,
     why: *Why,
 ) !void {
-    const tree = try gpa.print("{s}/rootfs/oci/{s}", .{ dir, i.name });
-    const u = try oci.pull(io, gpa, i.pinned, @tagName(p.arch.?), tree, why);
-    howl.say(io, "{s}: {s}: {d} files, {d} bytes{s}", .{
-        i.name,
-        i.pinned,
-        u.files,
-        u.bytes,
-        if (u.left_out > 0) ", device nodes and FIFOs left out" else "",
-    });
     const writes = try i.each("write", gpa);
     for (writes) |path| if (path.len == 0 or path[0] != '/' or
         std.mem.findScalar(u8, path, ' ') != null)
         return why.refuse("--{s}.write {s}: one absolute path a line", .{ i.name, path });
-    try oci.prepare(io, gpa, tree, i.name, writes, why);
-
     var override: ?[]const []const u8 = null;
     const execs = try i.each("exec", gpa);
     if (execs.len > 0) override = try splitLine(gpa, execs[0], i.name, why);
-    const argv = try oci.entrypoint(io, gpa, tree, i.name, c, override, why);
-    for (argv) |a| if (std.mem.findScalar(u8, a, '"') != null or
-        std.mem.findAny(u8, a, "\n\r\t") != null)
-        return why.refuse("{s}: a service line cannot hold a quote or a control character", .{a});
-
-    // The image's record, which compose renders the service from, on the
-    // host and the machine alike (lib/form.zig's ImageRecord): the image
-    // pinned, the command checked against the tree, its environment and
-    // working directory. The service's own lines stay in form.yaml.
-    const rec: forms.ImageRecord = .{
-        .image = i.pinned,
-        .argv = argv,
-        .env = c.env,
-        .workdir = c.workdir,
-    };
-    var s: Io.Writer.Allocating = .init(gpa);
-    try std.json.Stringify.value(rec, .{ .whitespace = .indent_2 }, &s.writer);
-    try s.writer.writeByte('\n');
-    const at = try gpa.print("{s}/rootfs/usr/share/werewolf/images", .{dir});
-    Dir.cwd().createDirPath(
-        io,
-        at,
-    ) catch |err| return why.refuse("{s}: {s}", .{ at, @errorName(err) });
-    try write(io, gpa, at, try gpa.print("{s}.json", .{i.name}), s.written(), why);
+    try oci.bakeTree(io, gpa, .{
+        .pinned = i.pinned,
+        .arch = @tagName(p.arch.?),
+        .config = c,
+        .dir = try gpa.print("{s}/rootfs", .{dir}),
+        .name = i.name,
+        .writes = writes,
+        .override = override,
+    }, why);
 }
 
 /// splitLine splits line into words as cmd/leash does: at blanks, except inside
@@ -774,6 +801,10 @@ fn flags(gpa: Allocator, p: Plan) ![]const u8 {
     for (p.lists) |l| try w.print(" --{s} '{s}'", .{ l.key, l.line });
     for (p.maps) |m| try w.print(" --{s}.{s} '{s}'", .{ m.key, m.sub, m.value });
     for (p.scalars) |s| try w.print(" --{s} {s}", .{ s.key, s.value });
+    for (p.users) |u| {
+        for (u.keys) |k| try w.print(" --users.{s}.keys '{s}'", .{ u.name, k });
+        if (u.admin) try w.print(" --users.{s}.admin", .{u.name});
+    }
     return std.mem.trimStart(u8, out.written(), " ");
 }
 
@@ -1090,6 +1121,38 @@ test "the files say where they came from" {
         "--with python,valkey --package py3.13-flask",
         try flags(gpa, p),
     );
+}
+
+test "people: --users.NAME.keys repeats, --users.NAME.admin takes no value" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var why: Why = .{};
+    const k1 = "sk-ssh-ed25519@openssh.com AAAA1 tom@yubikey";
+    const k2 = "sk-ssh-ed25519@openssh.com AAAA2 tom@spare";
+    const p = try plan(gpa, .run, &.{
+        "--with",            "sshd",             "--users.tom.keys", k1,
+        "--users.tom.admin", "--users.tom.keys", k2,                 "--users.ann.keys",
+        k1,
+    }, "prod", &why);
+    try testing.expectEqual(2, p.users.len);
+    try testing.expectEqual(2, p.users[0].keys.len);
+    try testing.expect(p.users[0].admin and !p.users[1].admin);
+    const f = try renderForm(gpa, p);
+    try testing.expect(std.mem.find(u8, f, "users:\n  tom:\n    keys:\n      - " ++ k1 ++
+        "\n      - " ++
+        k2 ++ "\n    admin: true\n  ann:\n    keys:\n      - " ++ k1 ++ "\n") != null);
+    try testing.expectEqualStrings(
+        "--with sshd --users.tom.keys '" ++ k1 ++ "' --users.tom.keys '" ++ k2 ++
+            "' --users.tom.admin --users.ann.keys '" ++ k1 ++ "'",
+        try flags(gpa, p),
+    );
+    for ([_][]const []const u8{
+        &.{"--users.tom.admin"}, // no keys
+        &.{ "--users.tom.shell", "/bin/sh" },
+        &.{ "--users.Tom.keys", k1 },
+        &.{ "--users.tom", k1 },
+    }) |args| try testing.expectError(error.Refused, plan(gpa, .run, args, "prod", &why));
 }
 
 test "a scalar key: --updates off is updates: off, once, and not also a map" {

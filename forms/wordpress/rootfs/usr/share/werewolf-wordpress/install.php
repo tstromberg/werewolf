@@ -75,7 +75,7 @@ require '/usr/src/wordpress/wp-load.php';
 require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 
 if ( is_blog_installed() ) {
-	say( 'the site in ' . DB_DIR . ' is installed; keeping it' );
+	say( 'the site in ' . ( defined( 'DB_DIR' ) ? DB_DIR : 'the database ' . DB_NAME ) . ' is installed; keeping it' );
 	exit( 0 );
 }
 

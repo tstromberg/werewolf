@@ -791,7 +791,12 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
 /// would deny.
 pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failure) ![]const u8 {
     var declared: std.ArrayList(u16) = .empty;
+    var declared_udp: std.ArrayList(u16) = .empty;
     for (try form.netLines(gpa, forms, f)) |line| {
+        var ws = mem.tokenizeAny(u8, line, " \t");
+        if (mem.eql(u8, ws.next() orelse "", "listen") and ws.next() != null) {
+            while (ws.next()) |w| if (port(w, "udp/")) |p| try declared_udp.append(gpa, p);
+        }
         var why: []const u8 = "";
         const l = (form.listen(gpa, line, &why) catch |err| switch (err) {
             error.Invalid => return f.fail(
@@ -814,6 +819,12 @@ pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failur
                 "{s}: listen tcp/{d}, which no net line declares: fence refuses the bind " ++
                     "(`listen tcp/{d} loopback` for the machine alone)",
                 .{ s.path, p, p },
+            );
+        for (ps.listen_udp) |p| if (mem.findScalar(u16, declared_udp.items, p) == null)
+            return f.fail(
+                gpa,
+                "{s}: listen udp/{d}, which no net line declares: fence drops what arrives",
+                .{ s.path, p },
             );
         promises.setUnion(ps.pledge);
     }
@@ -1002,6 +1013,16 @@ fn netLine(
     out: *std.ArrayList([]const u8),
 ) Allocator.Error!bool {
     if (w.len == 0) return true;
+    // listen USER udp/PORT...: fence delivers the port, and lets only USER
+    // send from it (docs/design/listen-udp.md).
+    if (mem.eql(u8, w[0], "listen") and w.len > 2 and !mem.startsWith(u8, w[1], "tcp/")) {
+        const uid = uids.get(w[1]) orelse return false;
+        for (w[2..]) |p| try out.append(
+            gpa,
+            try gpa.print("listen {s} udp {d}", .{ uid, port(p, "udp/") orelse return false }),
+        );
+        return true;
+    }
     if (mem.eql(u8, w[0], "listen") and w.len > 1) {
         const lo = mem.eql(u8, w[w.len - 1], "loopback");
         const ports = w[1 .. w.len - @intFromBool(lo)];
@@ -1183,11 +1204,12 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         try testForm(gpa, "web", "net:\n  - listen tcp/08080 # leading zeros\n" ++
             "  - listen tcp/5432 loopback\n  - connect web tcp/443 public\n  - connect all " ++
             "icmp\n" ++
-            "  - metadata web\n  - connect _update tcp/443\n"),
+            "  - metadata web\n  - connect _update tcp/443\n  - listen root udp/51820\n"),
     }, passwd, &f);
     try testing.expectEqualStrings(
         "connect 300 tcp 443 public\nconnect 69 tcp 443\nconnect 69 tcp 53\nconnect 69 udp 53\n" ++
-            "connect all icmp\nlisten tcp 5432 loopback\nlisten tcp 8080\nmetadata 300\n",
+            "connect all icmp\nlisten 0 udp 51820\nlisten tcp 5432 loopback\nlisten tcp 8080\n" ++
+            "metadata 300\n",
         got,
     );
     for ([_][]const u8{
@@ -1197,6 +1219,8 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         "connect web public",     "metadata nobody",
         "serve tcp/80",           "connect web sctp/9",
         "listen tcp/",            "listen tcp/99999999999999999999",
+        "listen nobody udp/53",   "listen root udp/0",
+        "listen root tcp/53",     "listen root udp/53 loopback",
     }) |line| {
         const forms = [_]Form{try testForm(gpa, "bad", try gpa.print("net:\n  - {s}\n", .{line}))};
         try testing.expectError(error.Form, net(gpa, &forms, passwd, &f));

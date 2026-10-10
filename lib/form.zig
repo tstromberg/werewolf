@@ -409,6 +409,7 @@ const keys = [_][]const u8{
     "paths",
     "services",
     "updates",
+    "users",
     "allow",
     "app",
     "programs",
@@ -476,6 +477,53 @@ pub fn duration(text: []const u8) ?u32 {
     const n = std.fmt.parseInt(u32, digits, 10) catch return null;
     const seconds = std.math.mul(u32, n, if (unit == 0) 1 else unit) catch return null;
     return if (seconds >= 5 * 60 and seconds <= 7 * 86400) seconds else null;
+}
+
+/// User is a person form.yaml's users: names: their ssh keys, and whether
+/// they administer the machine, which makes their keys root's too.
+pub const User = struct { name: []const u8, keys: []const []const u8, admin: bool };
+
+/// users returns the top form's users, their keys checked as sshd takes
+/// them (security keys, or key files where the chain's sshd: admits them).
+/// A machine's people are the top manifest's alone: a form others take
+/// may not name any.
+pub fn people(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const User {
+    const top = forms[forms.len - 1];
+    for (forms[0 .. forms.len - 1]) |form| if (form.spec.get("users") != null) return f.fail(
+        gpa,
+        "{s}: users: a machine's people are its own manifest's; {s} is taken by {s}",
+        .{ form.dir, form.name, top.name },
+    );
+    const node = top.spec.get("users") orelse return &.{};
+    var out: std.ArrayList(User) = .empty;
+    var checked: std.ArrayList(sshd.User) = .empty;
+    for (node.map) |u| {
+        const admin = if (u.value.get("admin")) |a| mem.eql(u8, a.scalar.text, "true") else false;
+        const keys_ = try scalars(gpa, u.value.get("keys"));
+        try out.append(gpa, .{ .name = u.key, .keys = keys_, .admin = admin });
+        try checked.append(gpa, .{ .name = u.key, .keys = keys_, .destinations = &.{} });
+    }
+    var why: []const u8 = "";
+    sshd.peopleKeys(
+        gpa,
+        checked.items,
+        sshd.takesKeyFiles(try chainSshd(gpa, forms)),
+        &why,
+    ) catch |err| switch (err) {
+        error.Invalid => return f.fail(gpa, "{s}: {s}", .{ top.dir, why }),
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    return out.items;
+}
+
+/// usersFile returns the config tar's `users` file for the chain: one key a
+/// line, `NAME [admin] TYPE KEY [COMMENT]`, which init reads into accounts
+/// and keys files (cmd/init). Empty when the manifest names no one.
+pub fn peopleFile(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (try people(gpa, forms, f)) |u| for (u.keys) |k|
+        try out.print(gpa, "{s} {s}{s}\n", .{ u.name, if (u.admin) "admin " else "", k });
+    return out.items;
 }
 
 /// Updates is form.yaml's updates key along a chain: off, or how often the
@@ -551,6 +599,35 @@ pub fn loadIn(
                 "{s}: accounts is apko's: groups and users, each a list",
                 .{path},
             );
+        } else if (mem.eql(u8, e.key, "users")) {
+            const shape = "users: holds each person's name, with keys: (a list of .pub lines) " ++
+                "and admin: true, whose keys are root's too";
+            if (e.value != .map) return f.fail(gpa, "{s}: {s}", .{ path, shape });
+            for (e.value.map) |u| {
+                if (!isName(u.key) or mem.eql(u8, u.key, "root")) return f.fail(
+                    gpa,
+                    "{s}: users: {s}: a name is a-z, 0-9 and -, and not root: root's keys are " ++
+                        "--root-keys",
+                    .{ path, u.key },
+                );
+                if (u.value != .map) return f.fail(
+                    gpa,
+                    "{s}: users: {s}: {s}",
+                    .{ path, u.key, shape },
+                );
+                var keys_: ?Node = null;
+                for (u.value.map) |k| {
+                    if (mem.eql(u8, k.key, "keys") and isScalars(k.value) and
+                        k.value.list.len > 0)
+                    {
+                        keys_ = k.value;
+                    } else if (mem.eql(u8, k.key, "admin") and k.value == .scalar and
+                        (mem.eql(u8, k.value.scalar.text, "true") or
+                            mem.eql(u8, k.value.scalar.text, "false")))
+                    {} else return f.fail(gpa, "{s}: users: {s}: {s}", .{ path, u.key, shape });
+                }
+                if (keys_ == null) return f.fail(gpa, "{s}: users: {s}: no keys", .{ path, u.key });
+            }
         } else if (mem.eql(u8, e.key, "updates")) {
             if (e.value == .scalar) {
                 if (!mem.eql(u8, e.value.scalar.text, "off")) return f.fail(
@@ -785,6 +862,9 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
     while (it.next()) |word| try words.append(gpa, word);
     const w = words.items;
     if (w.len == 0 or !mem.eql(u8, w[0], "listen")) return null;
+    // `listen USER udp/PORT...` is fence's alone; compose checks it.
+    if (w.len > 2 and !mem.startsWith(u8, w[1], "tcp/") and mem.startsWith(u8, w[2], "udp/"))
+        return null;
     const loopback = mem.eql(u8, w[w.len - 1], "loopback");
     const named = w[1 .. w.len - @intFromBool(loopback)];
     if (named.len == 0) {
@@ -807,7 +887,9 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
 
 /// netLines returns the chain's network policy as net lines, base first:
 /// what each form's services say, then its own `net` lines. A service's
-/// listen values are listen lines as they stand; each connect value's
+/// listen values are listen lines as they stand, but for their udp/PORT
+/// words, which make a `listen USER udp/PORT...` line for the service's
+/// user (none on loopback, which fence never stops); each connect value's
 /// network words (tcp/PORT, udp/PORT, icmp, public), if any, make a
 /// `connect USER ...` line for the service's user. A form's own net line
 /// may name only a user no service runs as, such as the updater's fetcher:
@@ -826,10 +908,32 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
             for (s.value.map) |d| {
                 const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
                 if (mem.eql(u8, d.key, "listen")) {
-                    for (values) |v| try out.append(
-                        gpa,
-                        try gpa.print("listen {s}", .{v.scalar.text}),
-                    );
+                    for (values) |v| {
+                        var tcp: std.ArrayList([]const u8) = .empty;
+                        var udp: std.ArrayList([]const u8) = .empty;
+                        var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
+                        while (it.next()) |w|
+                            try (if (mem.startsWith(u8, w, "udp/")) &udp else &tcp).append(gpa, w);
+                        if (udp.items.len == 0) {
+                            try out.append(gpa, try gpa.print("listen {s}", .{v.scalar.text}));
+                            continue;
+                        }
+                        if (user.len == 0) return f.fail(
+                            gpa,
+                            "{s}/form.yaml: services: {s}: listen udp needs the service's user",
+                            .{ form.dir, s.key },
+                        );
+                        const lo = tcp.items.len > 0 and
+                            mem.eql(u8, tcp.items[tcp.items.len - 1], "loopback");
+                        if (tcp.items.len > @intFromBool(lo)) try out.append(
+                            gpa,
+                            try gpa.print("listen {s}", .{try mem.join(gpa, " ", tcp.items)}),
+                        );
+                        if (!lo) try out.append(gpa, try gpa.print(
+                            "listen {s} {s}",
+                            .{ user, try mem.join(gpa, " ", udp.items) },
+                        ));
+                    }
                 } else if (mem.eql(u8, d.key, "connect")) for (values) |v| {
                     var net: std.ArrayList([]const u8) = .empty;
                     var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
@@ -858,7 +962,8 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
     }
     for (forms) |form| for (try form.items(gpa, "net")) |line| {
         var it = mem.tokenizeAny(u8, line, " \t");
-        if (mem.eql(u8, it.next() orelse "", "connect")) {
+        const key = it.next() orelse "";
+        if (mem.eql(u8, key, "connect") or mem.eql(u8, key, "listen")) {
             const user = it.next() orelse "";
             if (runs_as.get(user)) |svc| return f.fail(
                 gpa,
@@ -1080,7 +1185,7 @@ pub const Service = struct { name: []const u8, path: []const u8, text: []const u
 
 /// fenceOnly reports whether a listen or connect word is fence's alone
 /// (udp/PORT, icmp, public, loopback): leash, which holds TCP by port,
-/// takes the rest of the line.
+/// takes the rest of the line, and a listen's udp/PORT, to grant a low one.
 fn fenceOnly(word: []const u8) bool {
     return mem.startsWith(u8, word, "udp/") or mem.eql(u8, word, "icmp") or
         mem.eql(u8, word, "public") or mem.eql(u8, word, "loopback");
@@ -1211,7 +1316,9 @@ fn render(
             if (mem.eql(u8, d.key, "listen") or mem.eql(u8, d.key, "connect")) {
                 var kept: std.ArrayList([]const u8) = .empty;
                 var it = mem.tokenizeAny(u8, line, " \t");
-                while (it.next()) |w| if (!fenceOnly(w)) try kept.append(gpa, w);
+                while (it.next()) |w| if (!fenceOnly(w) or
+                    (mem.eql(u8, d.key, "listen") and mem.startsWith(u8, w, "udp/")))
+                    try kept.append(gpa, w);
                 if (kept.items.len == 0) continue;
                 line = try mem.join(gpa, " ", kept.items);
             }
@@ -1629,7 +1736,7 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
         \\    exec: /usr/bin/web --port 80
         \\    user: web
         \\    pledge: stdio inet
-        \\    listen: [tcp/80, tcp/8080 loopback]
+        \\    listen: [tcp/80 udp/53, tcp/8080 loopback, udp/5353 loopback]
         \\    connect: [tcp/443 udp/53 tcp/53 public, /run/svc/db/sock, icmp]
         \\    env: [A=1, B=2]
         \\
@@ -1649,13 +1756,14 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
     try testing.expectEqualStrings("web", got[1].name);
     try testing.expectEqualStrings("forms/site/form.yaml: services.web", got[1].path);
     try testing.expectEqualStrings(
-        "exec /usr/bin/web --port 80\nuser web\npledge stdio inet\nlisten tcp/80\n" ++
-            "listen tcp/8080\nconnect tcp/443 tcp/53\nconnect /run/svc/db/sock\nenv A=1\nenv B=2\n",
+        "exec /usr/bin/web --port 80\nuser web\npledge stdio inet\nlisten tcp/80 udp/53\n" ++
+            "listen tcp/8080\nlisten udp/5353\nconnect tcp/443 tcp/53\nconnect /run/svc/db/sock\n" ++
+            "env A=1\nenv B=2\n",
         got[1].text,
     );
     try testing.expectEqualStrings(
-        "listen tcp/80\nlisten tcp/8080 loopback\nconnect web tcp/443 udp/53 tcp/53 public\n" ++
-            "connect web icmp\nconnect _update tcp/443",
+        "listen tcp/80\nlisten web udp/53\nlisten tcp/8080 loopback\n" ++
+            "connect web tcp/443 udp/53 tcp/53 public\nconnect web icmp\nconnect _update tcp/443",
         try mem.join(gpa, "\n", try netLines(gpa, forms, &f)),
     );
     try testing.expectEqualSlices(u16, &.{80}, try listens(gpa, forms, &f));
@@ -1666,6 +1774,11 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
     });
     try testing.expectError(error.Form, netLines(gpa, try chain(io, gpa, tmp.dir, "site", &f), &f));
     try testing.expect(mem.indexOf(u8, f.text, "web runs as web") != null);
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/site/form.yaml",
+        .data = "base: prod\nnet:\n  - listen web udp/53\nservices:\n  web:\n    user: web\n",
+    });
+    try testing.expectError(error.Form, netLines(gpa, try chain(io, gpa, tmp.dir, "site", &f), &f));
     // One form saying a service both ways is refused.
     try tmp.dir.createDirPath(io, "forms/site/rootfs/etc/sv/web");
     try tmp.dir.writeFile(io, .{
@@ -1677,6 +1790,54 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
         services(io, gpa, tmp.dir, try chain(io, gpa, tmp.dir, "site", &f), &f),
     );
     try testing.expect(mem.indexOf(u8, f.text, "say it once") != null);
+}
+
+test "users: the top manifest's people, keys checked, a config file a key a line" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    var f: Failure = .{};
+    const sk = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIGx0";
+    const sk2 = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIHl1";
+    for ([_][2][]const u8{
+        .{ "base", "" },
+        .{ "shop", "base: base\nusers:\n  tom:\n    keys: [\"" ++ sk ++ " tom@yubikey\"]\n" ++
+            "    admin: true\n  ann:\n    keys: [\"" ++ sk2 ++ " ann\"]\n" },
+        .{ "taken", "base: shop\n" },
+        .{
+            "files",
+            "base: base\nusers:\n  bob:\n    keys: [\"ssh-ed25519 " ++
+                "AAAAC3NzaC1lZDI1NTE5AAAAIGx0 bob\"]\n",
+        },
+        .{ "root", "users:\n  root:\n    keys: [x]\n" },
+        .{ "nokeys", "users:\n  tom:\n    admin: true\n" },
+        .{ "bad-key", "users:\n  tom:\n    keys: [x]\n    other: y\n" },
+    }) |form| {
+        try tmp.dir.createDirPath(io, try gpa.print("forms/{s}", .{form[0]}));
+        try tmp.dir.writeFile(
+            io,
+            .{ .sub_path = try gpa.print("forms/{s}/form.yaml", .{form[0]}), .data = form[1] },
+        );
+    }
+    const shop = try people(gpa, try chain(io, gpa, tmp.dir, "shop", &f), &f);
+    try testing.expectEqual(2, shop.len);
+    try testing.expectEqualStrings("tom", shop[0].name);
+    try testing.expect(shop[0].admin and !shop[1].admin);
+    try testing.expectEqualStrings(
+        "tom admin " ++ sk ++ " tom@yubikey\nann " ++ sk2 ++ " ann\n",
+        try peopleFile(gpa, try chain(io, gpa, tmp.dir, "shop", &f), &f),
+    );
+    // A form others take may name no one; a key file needs sshd: to admit it.
+    try testing.expectError(error.Form, people(gpa, try chain(io, gpa, tmp.dir, "taken", &f), &f));
+    try testing.expect(mem.indexOf(u8, f.text, "taken by taken") != null);
+    try testing.expectError(error.Form, people(gpa, try chain(io, gpa, tmp.dir, "files", &f), &f));
+    for ([_][]const u8{ "root", "nokeys", "bad-key" }) |name| {
+        try testing.expectError(error.Form, load(io, gpa, tmp.dir, name, &f));
+        try testing.expect(mem.indexOf(u8, f.text, "users") != null);
+    }
 }
 
 test "updates: off, or every so often; the last form that says wins" {
