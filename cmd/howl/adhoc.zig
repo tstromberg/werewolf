@@ -15,7 +15,6 @@ const std = @import("std");
 const howl = @import("howl.zig");
 const oci = @import("oci.zig");
 const forms = @import("form");
-const compose = @import("compose");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -26,10 +25,6 @@ pub const Verb = enum { build, run, create, form, pack };
 const syntax =
     "[--with FORM,...] [--package PKG,...] [--oci NAME=REF --NAME.DIRECTIVE 'LINE'...] " ++
     "[--link A:B,...]; form adds -o DIR, and -n shows the form";
-
-/// default_pledge is an image service's pledge unless --NAME.pledge says otherwise.
-const default_pledge = "stdio rpath wpath inet unix connect listen proc";
-const default_memory = "512";
 
 /// Line is one line of an image's service file, as the operator gave it.
 const Line = struct { key: []const u8, words: []const u8 };
@@ -208,11 +203,6 @@ pub fn take(
     const w = &out.writer;
     try w.print("howl: {s}/form.yaml:\n", .{dir});
     try indent(w, try renderForm(gpa, p));
-    for (p.images) |i| {
-        const svc = try gpa.print("{s}/rootfs/etc/sv/{s}/service", .{ dir, i.name });
-        try w.print("howl: {s}:\n", .{svc});
-        try indent(w, Dir.cwd().readFileAlloc(io, svc, gpa, .limited(64 << 10)) catch "");
-    }
     try w.print("howl: {d} services", .{c.services});
     if (c.memory > 0) try w.print(", memory limits {d} MiB in all", .{c.memory});
     try w.writeAll("\n");
@@ -548,11 +538,9 @@ fn checklist(i: Image, c: oci.Config, why: *Why) !void {
     return why.refuse("{s}", .{std.mem.trimEnd(u8, w.buffered(), "\n")});
 }
 
-/// renderForm returns form.yaml: base, with, the added packages, net (with
-/// each image's network policy), the other lists and maps, an account for
-/// each image, and the restated weaknesses. Each account gets
-/// compose.defaultId, the id the build would give it, so an image keeps its
-/// owner whatever else the command line names.
+/// renderForm returns form.yaml: base, with, the added packages, the scalar
+/// keys, net, the other lists and maps, each image as a service with its
+/// operator's lines and links, and the restated weaknesses.
 fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
     var f: Io.Writer.Allocating = .init(gpa);
     const w = &f.writer;
@@ -569,11 +557,6 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
     for (p.scalars) |s| try w.print("{s}: {s}\n", .{ s.key, s.value });
     var net: std.ArrayList([]const u8) = .empty;
     for (p.lists) |l| if (std.mem.eql(u8, l.key, "net")) try net.append(gpa, l.line);
-    for (p.images) |i| {
-        for (try i.each("listen", gpa)) |l| try net.append(gpa, try gpa.print("listen {s}", .{l}));
-        for (try i.each("connect", gpa)) |c|
-            try net.append(gpa, try gpa.print("connect {s} {s}", .{ try i.user(gpa), c }));
-    }
     if (net.items.len > 0) {
         try w.writeAll("net:\n");
         for (net.items) |l| try w.print("  - {s}\n", .{l});
@@ -598,28 +581,35 @@ fn renderForm(gpa: Allocator, p: Plan) ![]const u8 {
         for (p.maps) |n| if (std.mem.eql(u8, n.key, m.key))
             try w.print("  {s}: \"{s}\"\n", .{ n.sub, n.value });
     }
+    // Each image is a service in its own tree, run as a user of its own
+    // (_oci-NAME, lib/form.zig): the image, then what its operator said,
+    // each line a key, repeated ones a list, and the links as `link`.
     if (p.images.len > 0) {
-        try w.writeAll(
-            "\n# Each image runs as a user of its own, no service's and no one's to share.\n",
-        );
-        try w.writeAll("accounts:\n  groups:\n");
+        try w.writeAll("\nservices:\n");
         for (p.images) |i| {
-            const user = try i.user(gpa);
             try w.print(
-                "    - groupname: {s}\n      gid: {d}\n",
-                .{ user, compose.defaultId(user) },
+                "  {s}:\n    image: {s}\n",
+                .{ i.name, if (i.pinned.len > 0) i.pinned else i.ref },
             );
-        }
-        try w.writeAll("  users:\n");
-        for (p.images) |i| {
-            const user = try i.user(gpa);
-            const id = compose.defaultId(user);
-            try w.print(
-                "    - username: {s}\n      uid: {d}\n      gid: {d}\n      homedir: " ++
-                    "/var/empty\n" ++
-                    "      shell: /sbin/nologin\n",
-                .{ user, id, id },
-            );
+            var keys_done: std.ArrayList([]const u8) = .empty;
+            for (i.lines) |l| {
+                const seen = for (keys_done.items) |d| {
+                    if (std.mem.eql(u8, d, l.key)) break true;
+                } else false;
+                if (seen) continue;
+                try keys_done.append(gpa, l.key);
+                const values = try i.each(l.key, gpa);
+                if (values.len == 1) {
+                    try w.print("    {s}: {s}\n", .{ l.key, try yamlScalar(gpa, values[0]) });
+                } else {
+                    try w.print("    {s}:\n", .{l.key});
+                    for (values) |v| try w.print("      - {s}\n", .{try yamlScalar(gpa, v)});
+                }
+            }
+            var links: std.ArrayList([]const u8) = .empty;
+            for (p.links) |l| if (std.mem.eql(u8, l.from, i.name)) try links.append(gpa, l.to);
+            if (links.items.len > 0)
+                try w.print("    link: [{s}]\n", .{try std.mem.join(gpa, ", ", links.items)});
         }
     }
     if (p.weaknesses.len > 0) {
@@ -678,73 +668,29 @@ fn bake(
     const execs = try i.each("exec", gpa);
     if (execs.len > 0) override = try splitLine(gpa, execs[0], i.name, why);
     const argv = try oci.entrypoint(io, gpa, tree, i.name, c, override, why);
+    for (argv) |a| if (std.mem.findScalar(u8, a, '"') != null or
+        std.mem.findAny(u8, a, "\n\r\t") != null)
+        return why.refuse("{s}: a service line cannot hold a quote or a control character", .{a});
 
-    var s: Io.Writer.Allocating = .init(gpa);
-    const w = &s.writer;
-    try w.print(
-        "# {s}, from howl form: the image's own entrypoint and environment,\n",
-        .{i.pinned},
-    );
-    try w.writeAll("# then what its operator said (docs/design/adhoc.md).\n");
-    try w.print("root    /oci/{s}\n", .{i.name});
-    try w.writeAll("exec   ");
-    for (argv) |a| try word(w, a, why);
-    try w.writeAll("\n");
-    const dirs = try i.each("dir", gpa);
-    try w.print(
-        "dir     {s}\n",
-        .{if (dirs.len > 0) dirs[0] else if (c.workdir.len > 0) c.workdir else "/data"},
-    );
-    try w.print("user    {s}\n", .{try i.user(gpa)});
-    const pledge = try i.each("pledge", gpa);
-    try w.print("pledge  {s}\n", .{if (pledge.len > 0) pledge[0] else default_pledge});
-    const memory = try i.each("memory", gpa);
-    try w.print("memory  {s}\n", .{if (memory.len > 0) memory[0] else default_memory});
-    var has_path = false;
-    var has_home = false;
-    for (c.env) |e| {
-        if (std.mem.startsWith(u8, e, "PATH=")) has_path = true;
-        if (std.mem.startsWith(u8, e, "HOME=")) has_home = true;
-        try w.writeAll("env    ");
-        try word(w, e, why);
-        try w.writeAll("\n");
-    }
-    if (!has_path) try w.print("env     PATH={s}\n", .{oci.default_path});
-    if (!has_home) try w.writeAll("env     HOME=/data\n");
-    for (i.lines) |l| {
-        if (std.mem.eql(u8, l.key, "exec") or std.mem.eql(u8, l.key, "dir") or
-            std.mem.eql(u8, l.key, "pledge") or std.mem.eql(u8, l.key, "memory")) continue;
-        // leash takes only TCP ports. The rest of a listen or connect line
-        // (loopback, udp, public) is fence's, in form.yaml's net.
-        if (std.mem.eql(u8, l.key, "listen") or std.mem.eql(u8, l.key, "connect")) {
-            var tcp: std.ArrayList([]const u8) = .empty;
-            var words = std.mem.tokenizeAny(u8, l.words, " \t");
-            while (words.next()) |x| if (std.mem.startsWith(u8, x, "tcp/")) try tcp.append(gpa, x);
-            if (tcp.items.len == 0) continue;
-            try w.print("{s} {s}\n", .{ l.key, try std.mem.join(gpa, " ", tcp.items) });
-        } else try w.print("{s} {s}\n", .{ l.key, l.words });
-    }
-    // --link A:B lets A connect to B's ports on loopback.
-    for (p.links) |l| if (std.mem.eql(u8, l.from, i.name)) {
-        const to = p.image(l.to).?;
-        try w.print("connect {s}\n", .{try std.mem.join(gpa, " ", try to.ports(gpa))});
+    // The image's record, which compose renders the service from, on the
+    // host and the machine alike (lib/form.zig's ImageRecord): the image
+    // pinned, the command checked against the tree, its environment and
+    // working directory. The service's own lines stay in form.yaml.
+    const rec: forms.ImageRecord = .{
+        .image = i.pinned,
+        .argv = argv,
+        .env = c.env,
+        .workdir = c.workdir,
     };
-    const sv = try gpa.print("{s}/rootfs/etc/sv/{s}", .{ dir, i.name });
+    var s: Io.Writer.Allocating = .init(gpa);
+    try std.json.Stringify.value(rec, .{ .whitespace = .indent_2 }, &s.writer);
+    try s.writer.writeByte('\n');
+    const at = try gpa.print("{s}/rootfs/usr/share/werewolf/images", .{dir});
     Dir.cwd().createDirPath(
         io,
-        sv,
-    ) catch |err| return why.refuse("{s}: {s}", .{ sv, @errorName(err) });
-    try write(io, gpa, sv, "service", s.written(), why);
-    for ([_][2][]const u8{
-        .{ "run", "/usr/lib/werewolf/leash" },
-        .{ "finish", "/usr/lib/werewolf/leash-reap" },
-    }) |link| Dir.cwd().symLink(
-        io,
-        link[1],
-        try gpa.print("{s}/{s}", .{ sv, link[0] }),
-        .{},
-    ) catch |err|
-        return why.refuse("{s}/{s}: {s}", .{ sv, link[0], @errorName(err) });
+        at,
+    ) catch |err| return why.refuse("{s}: {s}", .{ at, @errorName(err) });
+    try write(io, gpa, at, try gpa.print("{s}.json", .{i.name}), s.written(), why);
 }
 
 /// splitLine splits line into words as cmd/leash does: at blanks, except inside
@@ -777,13 +723,22 @@ fn splitLine(gpa: Allocator, line: []const u8, name: []const u8, why: *Why) ![]c
 
 /// word writes s as one word of a service line, quoted if it holds a blank. The
 /// format has no escapes, so a quote or control character is refused.
-fn word(w: *Io.Writer, s: []const u8, why: *Why) !void {
-    if (std.mem.findScalar(u8, s, '"') != null or std.mem.findAny(u8, s, "\n\r\t") != null)
-        return why.refuse("{s}: a service line cannot hold a quote or a control character", .{s});
-    if (std.mem.findScalar(u8, s, ' ') != null)
-        try w.print(" \"{s}\"", .{s})
-    else
-        try w.print(" {s}", .{s});
+/// yamlScalar returns s as form.yaml's parser reads it back unchanged: as
+/// it is, or double-quoted where a plain value would be misread (a YAML
+/// indicator first, `: ` within, a colon last, or a quote first).
+fn yamlScalar(gpa: Allocator, s: []const u8) ![]const u8 {
+    const plain = s.len > 0 and std.mem.findScalar(u8, "[]{}&*!|>%@`,\"'#", s[0]) == null and
+        !((s[0] == '-' or s[0] == '?' or s[0] == ':') and (s.len == 1 or s[1] == ' ')) and
+        std.mem.find(u8, s, ": ") == null and s[s.len - 1] != ':';
+    if (plain) return s;
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(gpa, '"');
+    for (s) |c| {
+        if (c == '"' or c == '\\') try out.append(gpa, '\\');
+        try out.append(gpa, c);
+    }
+    try out.append(gpa, '"');
+    return out.items;
 }
 
 fn write(
@@ -1053,8 +1008,12 @@ test "images, their lines and links" {
     try testing.expect(std.mem.find(
         u8,
         f,
-        "net:\n  - listen tcp/8080\n  - listen tcp/9090 loopback\n",
+        "services:\n  web:\n    image: ghcr.io/acme/web:1.4\n    listen:\n" ++
+            "      - tcp/8080\n      - tcp/9090 loopback\n    env: LOG_LEVEL=info\n" ++
+            "  worker:\n    image: ghcr.io/acme/worker@sha256:",
     ) != null);
+    try testing.expect(std.mem.find(u8, f, "    memory: 256\n    link: [web]\n") != null);
+    try testing.expect(std.mem.find(u8, f, "net:") == null);
     try testing.expectEqualStrings(
         "--oci web=ghcr.io/acme/web:1.4 --web.listen 'tcp/8080' --web.listen 'tcp/9090 " ++
             "loopback' " ++

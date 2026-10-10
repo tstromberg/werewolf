@@ -10,17 +10,6 @@ base: prod
 packages:
   - nginx-mainline
 
-accounts:
-  groups:
-    - groupname: nginx
-      gid: 221
-  users:
-    - username: nginx
-      uid: 221
-      gid: 221
-      homedir: /var/empty
-      shell: /sbin/nologin
-
 # Where it keeps its site: howl's --app DIR is laid here
 # (cmd/howl/app.zig).
 app: /usr/share/nginx/html

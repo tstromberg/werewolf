@@ -44,10 +44,19 @@ fixed after boot, and boot costs nothing; a new image is a new build, as
 _unpack` lays them out holding no network, environment or credentials.
 `ExposedPorts` and `Volumes` grant nothing until the operator says so.
 
-**Accounts.** Each image runs as `_oci-NAME`, shared with no one. Its
-account is written with its uid set to its user's hash
-(`compose.defaultId`), the same id the build gives any service user
-no form declares, so an image keeps its owner.
+**Accounts.** Each image runs as `_oci-NAME`, shared with no one: a
+service user no form declares, whose uid is its name's hash
+(`compose.defaultId`), so an image keeps its owner.
+
+**The form says `image`.** The generated form.yaml holds each image as a
+service: `services: NAME: {image: REF@sha256:..., listen: ..., write:
+...}`, the operator's lines as keys and `--link A:B` as `link: [B]`. What
+the registry said is a record beside the tree,
+`rootfs/usr/share/werewolf/images/NAME.json` (lib/form.zig's `ImageRecord`):
+the pinned image, the command checked against the tree, its environment
+and working directory. compose renders the service file from the two, on
+the host and on the machine alike, so a kept form carries no service
+file and the machine needs no registry.
 
 **leash `root`.** leash enters the image with `chroot`, as root, before
 any rule, so every path resolves inside it

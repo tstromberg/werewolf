@@ -1,6 +1,6 @@
 # One updater: apk
 
-Proposed 2026-10-08. Phases 1 to 3 and the format pin are built.
+Proposed 2026-10-08. Phases 1, 2, 3 and 5 and the format pin are built.
 
 ## Summary
 
@@ -66,9 +66,9 @@ what the chain derives. The updater runs it over the accounts apk laid, from
 the forms world names as NAME-form as the new root's packages laid them, and
 the image's own copies of the rest, and writes only into scratch.
 
-**One path.** The release path goes: `release.zig`, the manifest compare and
-`check-updater-release`. `image.pub` stays with howl, to verify fresh-install
-downloads, and werewolf's advisories move into the signed tiers feed.
+**One path.** Built: the release path is gone (`release.zig`, the manifest
+compare, `check-updater-release`); `image.pub` stays with bite, for installs,
+and werewolf's advisories are a package, `werewolf-advisories`.
 
 **The format pin**, `werewolf-formatN`, named by a published world, keeps
 compose and the programs reading the same files. It holds a file (apk fetches
@@ -82,7 +82,7 @@ a machine on N takes N's newest and logs `held` each check, until reinstalled.
 3. Built: `NAME-form` packages, fetched by name; stage0 is a package; howl
    builds with no checkout, holding the tree's files it uses (files.zig).
 4. The image's repository; `buildSlot` copies nothing forward.
-5. The release path goes.
+5. Built: the release path is gone; releases serve installs.
 
 ## Drawbacks
 

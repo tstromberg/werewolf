@@ -1,0 +1,50 @@
+# haproxy: prod, with HAProxy balancing HTTP over the backends the
+# machine's settings name: HTTP on :80, and HTTPS on :443 with :80 sent
+# there when the config holds a certificate. leash starts it
+# (etc/sv/haproxy/service) as the haproxy user, after haproxy-setup
+# (forms/haproxy/cmd/haproxy-setup) writes its configuration from the
+# settings. Nothing controls it but that file: no stats socket, Lua or
+# external checks. See forms/haproxy/README.md.
+base: prod
+
+# HAProxy 3.4, the line Wolfi keeps current (3.2 and 3.3 stopped).
+packages:
+  - haproxy-3.4
+
+# Its reload and certificate-dump scripts, which a shell runs, and the
+# bash they bring; nothing on the machine runs them.
+prune:
+  - usr/bin/haproxy-reload
+  - usr/bin/haproxy-dump-certs
+  - usr/bin/bash
+
+# make check's (forms/README.md): with no certificate in its config, as
+# its check has, nothing listens on :443; test/checks puts the backend
+# there instead, on loopback.
+check:
+  skip: [answering]
+
+services:
+  # HAProxy, as its own user: it may bind :80 and :443 and no other port,
+  # reach backends on 80, 443 and 8080 (werewolf's own application forms
+  # serve there) and a resolver, read its configuration, and run nothing.
+  # -db keeps it in the foreground with no master process, so nothing
+  # reloads or re-runs it; -m holds it under leash's memory, so it refuses
+  # connections rather than dying.
+  haproxy:
+    exec: /usr/bin/haproxy -db -m 200 -f /run/svc/haproxy/haproxy.cfg
+    before: /usr/lib/werewolf/haproxy-setup
+    user: haproxy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/80 tcp/443 tcp/8080 udp/53 tcp/53]
+    config:
+      - tls-cert /run/config/haproxy/tls-cert optional
+      - tls-key /run/config/haproxy/tls-key optional
+      - settings /run/config/haproxy/settings.json
+    setting:
+      - backends hostport... required as HAPROXY_BACKENDS
+      - health string as HAPROXY_HEALTH
+    render: env site
+    memory: 256
+    nofile: 16384

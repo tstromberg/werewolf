@@ -1,0 +1,44 @@
+# Miniflux for werewolf's miniflux form, as Wolfi would package it: built
+# by melange in Wolfi's environment with Wolfi's Go, static (no cgo), from
+# the release tag's commit, its version set as upstream's Makefile sets
+# it. Go fetches its modules, which go.sum pins. Offered to wolfi-dev/os
+# as it is; when Wolfi ships it, the form names the package and this file
+# goes.
+package:
+  name: miniflux
+  version: 2.3.3
+  epoch: 0
+  description: Minimalist and opinionated feed reader
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - go-1.27
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/miniflux/v2
+      tag: ${{package.version}}
+      expected-commit: c4d54f87a81b30aa173fddf05d7ff83ae7da5796
+
+  - runs: |
+      CGO_ENABLED=0 go build -trimpath \
+        -ldflags="-s -w -X miniflux.app/v2/internal/version.Version=${{package.version}}" \
+        -o miniflux .
+      ./miniflux -version
+      install -Dm755 miniflux ${{targets.destdir}}/usr/bin/miniflux
+
+update:
+  enabled: true
+  github:
+    identifier: miniflux/v2

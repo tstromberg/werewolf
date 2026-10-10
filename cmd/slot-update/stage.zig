@@ -10,7 +10,6 @@ const Allocator = m.Allocator;
 const linux = m.linux;
 const policy = m.policy;
 const cve = m.cve;
-const releases = m.releases;
 const apk = @import("apk");
 const tiers = m.tiers;
 
@@ -403,7 +402,7 @@ pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pe
         .kernel_cves = r.kernel_cves,
         .old_kernel = plan.old_kernel,
         .new_kernel = plan.new_kernel,
-        .advisories = advisoriesOf(plan),
+        .advisories = plan.advisories,
         .have = try u.ownAdvisories(),
     });
     const now = nowSecs(u.io);
@@ -520,12 +519,3 @@ const Waited = struct { seen: []const u8, seconds: i64 };
 pub const Waits = std.enums.EnumFieldStruct(policy.Tier, ?Waited, @as(?Waited, null));
 const Valued = struct { value: []const u8, source: []const u8, limit: []const u8 };
 const Refused = struct { file: []const u8, key: []const u8, why: []const u8 };
-
-/// advisoriesOf returns the werewolf advisories a plan's release carries. A
-/// slot built from packages keeps werewolf's code unchanged, so it has none.
-pub fn advisoriesOf(plan: Plan) []const releases.Manifest.Advisory {
-    return switch (plan.from) {
-        .packages => &.{},
-        .release => |r| r.manifest.advisories,
-    };
-}

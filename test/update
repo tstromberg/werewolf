@@ -1,16 +1,16 @@
 #!/bin/sh
 # update DIR CMDLINE QEMU...
 #
-# update runs a whole update over the network, as a machine does one. The
-# new slot is built from Wolfi and Alpine or, for a form CI publishes, is its
-# latest signed release. DIR/victim.img holds GRUB's environment and slot a,
+# update runs a whole update over the network, as a machine does one: the
+# new slot is built from the packages the repositories hold now.
+# DIR/victim.img holds GRUB's environment and slot a,
 # whose build record claims a kernel one release older than its own.
 # DIR/vmlinuz and DIR/stage0.zst boot it. QEMU... is the machine, with the
 # network and -no-reboot. CMDLINE is the kernel command line, without
 # werewolf.slot.
 #
 # First boot, slot a: it commits, and the updater finds Alpine's kernel
-# newer. It builds slot b (or fetches the release's) and stages it. This is
+# newer. It builds slot b and stages it. This is
 # the machine's first check, so slot b is due within two minutes, and the
 # updater reboots into it, which ends QEMU (docs/design/update-policy.md).
 # Then update checks the disk: the report lists each CVE source with a
@@ -139,15 +139,11 @@ listed=$(grep -c '"url": ' "$dir/report.json")
 hashed=$(grep -c '"sha256": "[0-9a-f]\{64\}"' "$dir/report.json")
 clean=$(grep -c '"error": null' "$dir/report.json")
 check "the report's $listed CVE sources fetched, with their sha256" [ "$listed" -gt 0 -a "$hashed" -eq "$listed" -a "$clean" -eq "$listed" ]
-# A slot built from Wolfi and Alpine leaves apk's caches; a release leaves none.
-if victim_ls $state | grep -qx cache; then
-	for cache in root kernel; do
-		n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
-		check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
-	done
-else
-	check "a release: its serial kept once slot b commits, not before" [ -z "$(victim_cat $state/serial)" ]
-fi
+# A slot built from packages leaves apk's caches.
+for cache in root kernel; do
+	n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
+	check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
+done
 victim_dump /var/lib/werewolf/b/root.erofs "$dir/b.erofs"
 root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]

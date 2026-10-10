@@ -81,7 +81,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 .PHONY: all install uninstall install-deps precommit hooks image slot disk bite-me list-forms test \
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion \
-	check-slot check-compose check-updater check-updater-staged check-updater-release check-nodata \
+	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-static check-unsigned check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-aws check-azure seal-learn $(OUT)/disk.qcow2
 
@@ -254,9 +254,11 @@ $(PACKAGE_TOOL): tools/package.zig lib/package.zig
 PACKAGE_FORMS = $(shell $(FORM_ASK) packaged)
 packages: $(PACKAGE_TOOL) $(FORM_TOOL) programs
 	@[ -n "$(PACKAGE_TIME)" ] || { echo "packages: no commit time; set PACKAGE_TIME" >&2; exit 1; }
-	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/format $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/format/usr/lib/werewolf
+	rm -rf $(PACKAGES)/$(ARCH) $(PACKAGES)/format $(PACKAGES)/advisories $(PACKAGES)/forms && mkdir -p $(PACKAGES)/$(ARCH) $(PACKAGES)/format/usr/lib/werewolf $(PACKAGES)/advisories/usr/share/werewolf
 	echo $(PACKAGE_FORMAT) >$(PACKAGES)/format/usr/lib/werewolf/format && $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PACKAGES)/format \
 		werewolf-format$(PACKAGE_FORMAT) - $(ARCH) $(PACKAGE_TIME) "werewolf's format (lib/compose.zig)" provide:werewolf-format=$(PACKAGE_FORMAT)
+	cp release/advisories $(PACKAGES)/advisories/usr/share/werewolf/ && $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) \
+		$(PACKAGES)/advisories werewolf-advisories - $(ARCH) $(PACKAGE_TIME) "werewolf's own advisories (release/advisories)"
 	for p in $(CMDS); do $(PACKAGE_TOOL) pack $(PACKAGES)/$(ARCH) $(PROGRAMS)/$$p werewolf-$$p - \
 		$(ARCH) $(PACKAGE_TIME) "werewolf's $$p (cmd/$$p)" depend:werewolf-format$(PACKAGE_FORMAT) || exit 1; done
 	for f in $(PACKAGE_FORMS); do t=$(PACKAGES)/forms/$$f && $(FORM_TOOL) stage $$f $$t && \
@@ -515,8 +517,6 @@ check-compose: slot
 EROFS_OPTS = -b 4096 -zzstd,level=9 -C65536 -Eall-fragments,dedupe
 check-updater check-updater-staged check-updater-published: | _check-shared
 	@$(MAKE) --no-print-directory DEV=1 $(if $(filter %-staged,$@),STAGED=1) $(if $(filter %-published,$@),PUBLISHED=1 FORM=test/published-form,FORM=prod) _check-updater
-check-updater-release: | _check-shared
-	@$(MAKE) --no-print-directory FORM=prod-ssh _check-updater
 _check-updater: $(VERITY_BIN)
 	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }

@@ -1,7 +1,8 @@
 # A catalog of forms: the top 25 uses of a locked-down VM
 
 Proposed, 2026-10-07. Tiers 1 and 2, ten forms in forms/, built
-2026-10-08; of tier 3, bundles (`with:`) and `ruby`.
+2026-10-08; of tier 3, bundles (`with:`) and `ruby`, and `miniflux`
+2026-10-10.
 
 ## Summary
 
@@ -51,7 +52,7 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 | `minecraft` on `jre` | whitelist, `online-mode`, no RCON or query port; a join off the list | a stand-in jar, as Mojang's cannot ship |
 | `mattermost` | no open sign-up, plugins off (a plugin is code); a plugin upload | its first-run program |
 | `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | its first-run program |
-| `miniflux` | admin from the config; a feed on loopback (SSRF) | a recipe |
+| `miniflux` | admin from the config; a feed on loopback (SSRF) | built 2026-10-10 (forms/miniflux) |
 | `unbound`, `wireguard`, `chrony` | UDP; chrony an NTS-fed server, `cmdport 0` | `listen udp`; chrony `capability time` |
 | `mariadb` | perl in its closure | `mariadb-init`, as `pg-init` |
 | `prometheus`, `loki` | admin API and remote write off; no `node_exporter` in Wolfi | `render json ... as list` |

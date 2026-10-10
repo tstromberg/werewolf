@@ -1,0 +1,12 @@
+# Prometheus answers once prometheus-setup has written its configuration,
+# and only to its user: a stranger gets 401, its user its health.
+ok  prom-auth        i=0; until wget -q -T 5 -S -O /dev/null http://127.0.0.1:9090/-/healthy 2>&1 | grep -q 'HTTP/1.1 401'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no 401 in 60 s"; exit 1; }; sleep 1; done; wget -q -T 5 -O - --header "Authorization: Basic $(printf %s ops:werewolf-check-pass-1 | base64)" http://127.0.0.1:9090/-/healthy | grep -q Healthy
+# It scrapes itself, with its own user, and the target its settings name,
+# which nothing answers here: up is 1 and 0 within a scrape or two.
+ok  prom-scrapes     a="Authorization: Basic $(printf %s ops:werewolf-check-pass-1 | base64)"; q=http://127.0.0.1:9090/api/v1/query?query=; i=0; until wget -q -T 5 -O - --header "$a" "${q}up%7Bjob%3D%22prometheus%22%7D%3D%3D1" | grep -q '"job":"prometheus"' && wget -q -T 5 -O - --header "$a" "${q}up%7Bjob%3D%22targets%22%7D%3D%3D0" | grep -q '"instance":"127.0.0.1:9100"'; do i=$((i + 1)); [ $i -le 90 ] || { echo "no scrapes in 90 s"; exit 1; }; sleep 1; done
+# Its admin, lifecycle and remote-write APIs are off, even to its user:
+# no snapshot, no quit, no metrics written in.
+ok  prom-no-admin    a="Authorization: Basic $(printf %s ops:werewolf-check-pass-1 | base64)"; for u in /api/v1/admin/tsdb/snapshot /-/quit /api/v1/write; do s=$(wget -q -T 5 -S -O /dev/null --header "$a" --post-data x http://127.0.0.1:9090$u 2>&1 | sed -n 's/^ *HTTP\/1\.1 \([0-9]*\).*/\1/p' | tail -1); case $s in 4??) ;; *) echo "$u answered ${s:-nothing}"; exit 1;; esac; done
+# prometheus-setup wrote the configuration from the settings: the password
+# as a bcrypt hash alone; the metrics are on /data.
+ok  prom-setup       w=/run/svc/prometheus/web.yml; grep -q "^  ops: '\$2b\$10\$" $w && ! grep -q werewolf-check-pass-1 $w && [ "$(stat -c '%a %U' $w)" = '600 prometheus' ] && grep -q "'127.0.0.1:9100'" /run/svc/prometheus/prometheus.yml && [ -d /data/svc/prometheus/wal ]

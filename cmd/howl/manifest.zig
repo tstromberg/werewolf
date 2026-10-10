@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const files = @import("files");
+const policy = @import("update-policy");
 const progress = @import("progress.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -49,8 +50,8 @@ pub fn write(
 
     // werewolf's own advisories, which every manifest carries (files.zig).
     const text = files.advisories;
-    var bad: Bad = .{};
-    const advisories = parseAdvisories(gpa, text, &bad) catch |err| switch (err) {
+    var bad: policy.BadLine = .{};
+    const advisories = policy.parseAdvisories(gpa, text, &bad) catch |err| switch (err) {
         // A line this cannot read fails the release, so nothing ships unread.
         error.BadAdvisory => return steps.fail(try gpa.print(
             "release/advisories:{d}: cannot read: {s}",
@@ -136,12 +137,6 @@ const Entry = struct { name: []const u8, sha256: [64]u8, size: u64 };
 /// Package is one package of the rootfs, from apk's installed database.
 const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
 
-/// Advisory is one line of release/advisories.
-const Advisory = struct { id: []const u8, date: []const u8, tier: []const u8, title: []const u8 };
-
-/// Bad is the line parseAdvisories refused, and its number from 1.
-const Bad = struct { n: usize = 0, line: []const u8 = "" };
-
 const Manifest = struct {
     form: []const u8,
     arch: []const u8,
@@ -149,7 +144,7 @@ const Manifest = struct {
     kernel: []const u8,
     files: []const Entry,
     packages: []const Package,
-    advisories: []const Advisory,
+    advisories: []const policy.Advisory,
 };
 
 /// buildId is the first 16 hex digits of the sha256 of the files'
@@ -210,56 +205,6 @@ fn parsePackages(gpa: Allocator, db: []const u8) ![]const Package {
     return out;
 }
 
-/// parseAdvisories reads release/advisories: lines of ID DATE TIER TITLE,
-/// and blank or # lines. The title is the rest of the line, as it is. On
-/// error.BadAdvisory, bad holds the line.
-fn parseAdvisories(gpa: Allocator, text: []const u8, bad: *Bad) ![]const Advisory {
-    var out: std.ArrayList(Advisory) = .empty;
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    var lines = mem.splitScalar(u8, text, '\n');
-    var n: usize = 0;
-    while (lines.next()) |line| {
-        n += 1;
-        const rest = mem.trimStart(u8, line, " \t");
-        if (rest.len == 0 or rest[0] == '#') continue;
-        bad.* = .{ .n = n, .line = line };
-        var fields = mem.tokenizeAny(u8, line, " \t");
-        const id = fields.next() orelse return error.BadAdvisory;
-        const date = fields.next() orelse return error.BadAdvisory;
-        const tier = fields.next() orelse return error.BadAdvisory;
-        if (fields.next() == null) return error.BadAdvisory;
-        // The title starts at the fourth field and keeps trailing blanks.
-        var i: usize = 0;
-        for (0..3) |_| {
-            while (line[i] == ' ' or line[i] == '\t') i += 1;
-            while (line[i] != ' ' and line[i] != '\t') i += 1;
-        }
-        const title = mem.trimStart(u8, line[i..], " \t");
-
-        // ID is WW-YEAR-NUMBER, with a number of three digits or more.
-        if (id.len < 11 or !mem.startsWith(u8, id, "WW-") or id[7] != '-' or
-            !digits(id[3..7]) or !digits(id[8..])) return error.BadAdvisory;
-        // DATE is YYYY-MM-DD, with a month of 0x or 1x and a day of 0x to 3x.
-        if (date.len != 10 or date[4] != '-' or date[7] != '-' or !digits(date[0..4]) or
-            date[5] > '1' or !digits(date[5..7]) or date[8] > '3' or !digits(date[8..10]))
-            return error.BadAdvisory;
-        if (std.meta.stringToEnum(enum { urgent, high, medium, low }, tier) == null)
-            return error.BadAdvisory;
-        // TITLE is at most 200 characters of printable ASCII, with no quote
-        // or backslash, which the manifest's JSON would have to escape.
-        if (title.len > 200) return error.BadAdvisory;
-        for (title) |c| if (c < ' ' or c > '~' or c == '"' or c == '\\') return error.BadAdvisory;
-        if (try seen.fetchPut(gpa, id, {}) != null) return error.BadAdvisory;
-        try out.append(gpa, .{ .id = id, .date = date, .tier = tier, .title = title });
-    }
-    return out.items;
-}
-
-fn digits(s: []const u8) bool {
-    for (s) |c| if (!std.ascii.isDigit(c)) return false;
-    return true;
-}
-
 /// render writes m in the layout release/sign edits, with no escaping. It
 /// fails with error.Unsafe if a string holds what JSON would need escaped.
 fn render(gpa: Allocator, m: Manifest) ![]const u8 {
@@ -294,7 +239,7 @@ fn render(gpa: Allocator, m: Manifest) ![]const u8 {
     for (m.advisories, 0..) |a, i| {
         try out.print(
             gpa,
-            "{s}    {{\"id\": \"{s}\", \"date\": \"{s}\", \"tier\": \"{s}\", \"title\": \"{s}\"}}",
+            "{s}    {{\"id\": \"{s}\", \"date\": \"{s}\", \"tier\": \"{t}\", \"title\": \"{s}\"}}",
             .{ if (i > 0) ",\n" else "", a.id, a.date, a.tier, a.title },
         );
     }
@@ -355,54 +300,6 @@ test parsePackages {
     try testing.expectEqual(0, (try parsePackages(arena.allocator(), "\n\nV:1\n")).len);
 }
 
-test parseAdvisories {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var bad: Bad = .{};
-    const text = "# a comment\n\n  \t# indented\n" ++
-        "WW-2026-001  2026-10-07  high\tfence: a title  \n" ++
-        "\tWW-2026-0002 2026-10-08 low x\n";
-    const got = try parseAdvisories(a, text, &bad);
-    try testing.expectEqual(2, got.len);
-    try testing.expectEqualStrings("WW-2026-001", got[0].id);
-    try testing.expectEqualStrings("2026-10-07", got[0].date);
-    try testing.expectEqualStrings("high", got[0].tier);
-    // The title keeps its trailing blanks, as awk's sub left them.
-    try testing.expectEqualStrings("fence: a title  ", got[0].title);
-    try testing.expectEqualStrings("x", got[1].title);
-    try testing.expectEqual(0, (try parseAdvisories(a, "", &bad)).len);
-
-    const long: [201]u8 = @splat('t');
-    for ([_][]const u8{
-        "WW-2026-001 2026-10-07 high",
-        "WW-2026-01 2026-10-07 high x",
-        "WW-26-001 2026-10-07 high x",
-        "WX-2026-001 2026-10-07 high x",
-        "WW-2026-00a 2026-10-07 high x",
-        "WW-2026-001 2026-20-07 high x",
-        "WW-2026-001 2026-10-40 high x",
-        "WW-2026-001 2026/10/07 high x",
-        "WW-2026-001 2026-10-07 severe x",
-        "WW-2026-001 2026-10-07 high a \"quote\"",
-        "WW-2026-001 2026-10-07 high back\\slash",
-        "WW-2026-001 2026-10-07 high tab\there",
-        "WW-2026-001 2026-10-07 high caf\xc3\xa9",
-        "WW-2026-001 2026-10-07 high " ++ long,
-        "WW-2026-001 2026-10-07 high x\r",
-        "\r",
-    }) |line| {
-        const t = try a.dupe(u8, "# ok\n" ++ "WW-2026-009 2026-10-07 low fine\n");
-        const all = try mem.concat(a, u8, &.{ t, line, "\n" });
-        try testing.expectError(error.BadAdvisory, parseAdvisories(a, all, &bad));
-        try testing.expectEqual(3, bad.n);
-        try testing.expectEqualStrings(line, bad.line);
-    }
-    const twice = "WW-2026-001 2026-10-07 high x\nWW-2026-001 2026-10-08 low y\n";
-    try testing.expectError(error.BadAdvisory, parseAdvisories(a, twice, &bad));
-    try testing.expectEqual(2, bad.n);
-}
-
 test render {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -452,8 +349,8 @@ test render {
     , try render(a, m));
 
     m.advisories = &.{
-        .{ .id = "WW-2026-001", .date = "2026-10-07", .tier = "high", .title = "fence: x" },
-        .{ .id = "WW-2026-002", .date = "2026-10-08", .tier = "low", .title = "y" },
+        .{ .id = "WW-2026-001", .date = "2026-10-07", .tier = .high, .title = "fence: x" },
+        .{ .id = "WW-2026-002", .date = "2026-10-08", .tier = .low, .title = "y" },
     };
     const json = try render(a, m);
     try testing.expect(mem.endsWith(u8, json,

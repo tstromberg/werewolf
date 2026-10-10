@@ -63,7 +63,13 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         "",
         try u.gpa.print("etc/apk/keys/{s}", .{name}),
     );
-    try copyTree(u, r, "", "usr/share/werewolf", &compose.records);
+    // werewolf-advisories brings the new root's list; an image built from a
+    // tree carries its own forward.
+    const skip: []const []const u8 = if (try r.exists(u, "usr/share/werewolf/advisories"))
+        &(compose.records ++ [_][]const u8{"advisories"})
+    else
+        &compose.records;
+    try copyTree(u, r, "", "usr/share/werewolf", skip);
     // The sh shim is /bin/sh where no package (busyboxLinks laid
     // busybox's) or form gave one, as the build lays it (cmd/sh-shim).
     if (try r.exists(u, "usr/lib/werewolf/sh-shim") and !try r.exists(u, "usr/bin/sh"))
@@ -153,15 +159,17 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     const dst = try u.gpa.print("usr/lib/modules/{s}", .{kvers[0]});
     const dep = try k.read(u, try u.gpa.print("{s}/modules.dep", .{src}));
     // The build's stage0s, from the same lists in the same order
-    // (lib/image.zig): under a distro's GRUB (bite), modules-bitten, which
-    // adds the distro filesystem's modules to werewolf's own.
-    const native = try u.lines(try u.read(meta_dir ++ "/modules"));
+    // (lib/image.zig), as compose wrote them into the new root from its
+    // forms: under a distro's GRUB (bite), modules-bitten, which adds the
+    // distro filesystem's modules to werewolf's own.
+    const records = "usr/share/werewolf/";
+    const native = try u.lines(try r.read(u, records ++ "modules"));
     const words = if (u.cmd.grubenv != null)
-        try u.lines(try u.read(meta_dir ++ "/modules-bitten"))
+        try u.lines(try r.read(u, records ++ "modules-bitten"))
     else
         native;
     var params: std.ArrayList(ModuleParam) = .empty;
-    for (try u.lines(try u.read(meta_dir ++ "/module-params"))) |line| {
+    for (try u.lines(try r.read(u, records ++ "module-params"))) |line| {
         const space = std.mem.findScalar(u8, line, ' ') orelse return error.BadModuleParams;
         try params.append(u.gpa, .{ .module = line[0..space], .value = line[space + 1 ..] });
     }

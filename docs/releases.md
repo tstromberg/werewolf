@@ -16,7 +16,7 @@ sshd, for an operator to reach by security key (`ed25519-sk` or
 | --- | --- |
 | `prod-ARCH-disk.qcow2`, `prod-ssh-ARCH-disk.qcow2` | a UEFI boot disk of 8 GiB holding the slot: what a VM boots from ([Deploying](#deploying)) |
 | `FORM-ARCH-vmlinuz` | the kernel |
-| `prod-ARCH-stage0.zst`, `prod-ARCH-stage0-bitten.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot the updater installs, and the kernel arguments it boots with ([updater.md](updater.md#releases)): stage0 for werewolf's own disk, and for a distro's after bite, which adds the modules of the distro's filesystem (xfs, btrfs) |
+| `prod-ARCH-stage0.zst`, `prod-ARCH-stage0-bitten.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot, and the kernel arguments it boots with, for bite to install beside a distro ([bite.md](bite.md)): stage0 for werewolf's own disk, and for a distro's after bite, which adds the modules of the distro's filesystem (xfs, btrfs) |
 | `minimal-ARCH-initramfs.zst`, `minimal-ARCH-cmdline` | the whole image, and the kernel arguments its host passes, for direct boot |
 | `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest, signed |
 | `minimal.lock.json`, `prod.lock.json`, `prod-ssh.lock.json`, `kernel.lock.json`, `boot.lock.json` | every package, pinned: apko's locks |
@@ -142,7 +142,8 @@ attestation ties each file to the workflow run and commit that built it.
 ## Deploying
 
 A VM boots the disk under UEFI firmware, on slot a, and from then on keeps
-itself current from these releases ([updater.md](updater.md#releases)).
+itself current through apk, from werewolf's repository and Wolfi's
+([updater.md](updater.md)): releases are for installs.
 Its config comes from a config disk, NoCloud, or the cloud's metadata
 server ([cloud.md](cloud.md)). Secure Boot must be off: systemd-boot is
 not signed yet ([verified-boot.md](design/verified-boot.md)).
@@ -233,7 +234,9 @@ workflow builds and checks, then fails at signing and publishes nothing.
 werewolf's programs and forms are also apk packages, at
 `https://dist.werewolf-linux.org/apk/ARCH/` in the R2 bucket `werewolf`
 ([custom-updates.md](design/custom-updates.md)): `werewolf-PROGRAM` for each
-program, and `NAME-form` for each form but those with melange recipes, its
+program, `werewolf-advisories` (release/advisories, which tiers a machine's
+update by werewolf's own fixes), and `NAME-form` for each form but those
+with melange recipes, its
 files as an image stages them, depending on its base's, the forms it takes,
 its packages and its programs. When check passes on main, the packages
 workflow packs both arches twice, requires the copies to match, and publishes

@@ -1,0 +1,39 @@
+# prometheus: prod, with Prometheus scraping the targets the machine's
+# settings name, and itself, keeping 15 days of metrics in /data. Its web
+# and API take one user, whose password comes from the config, over
+# HTTPS when the config holds a certificate. Its admin, lifecycle and
+# remote-write APIs stay off, as Prometheus ships. leash starts it
+# (etc/sv/prometheus/service) as the prometheus user, after
+# prometheus-setup (forms/prometheus/cmd/prometheus-setup) writes its
+# configuration. See forms/prometheus/README.md.
+base: prod
+
+packages:
+  - prometheus-3.12
+
+services:
+  # Prometheus, as its own user: it may bind :9090 and no other port,
+  # reach its targets on the ports exporters and applications serve
+  # metrics on, itself on loopback, and a resolver; read its
+  # configuration, write only its own directories, and run nothing.
+  prometheus:
+    exec: /usr/bin/prometheus --config.file=/run/svc/prometheus/prometheus.yml --web.config.file=/run/svc/prometheus/web.yml --storage.tsdb.path=/data/svc/prometheus --storage.tsdb.retention.time=15d --web.listen-address=:9090
+    before: /usr/lib/werewolf/prometheus-setup
+    user: prometheus
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/9090]
+    connect: [tcp/80 tcp/443 tcp/8080 tcp/9090 tcp/9100 udp/53 tcp/53]
+    config:
+      - admin-password /run/config/prometheus/admin-password
+      - tls-cert /run/config/prometheus/tls-cert optional
+      - tls-key /run/config/prometheus/tls-key optional
+      - settings /run/config/prometheus/settings.json
+    setting:
+      - targets hostport... required as PROMETHEUS_TARGETS
+      - admin string required as PROMETHEUS_ADMIN
+    render: env site
+    memory: 1024
+    nofile: 65536
+    env:
+      - GOMEMLIMIT=768MiB
