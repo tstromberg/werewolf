@@ -101,7 +101,7 @@ declared people take precedence, and metadata grants neither admin nor root. See
 **Release and verification.** This is package format 3: publish its programs and forms together
 before enrolling; format-2 machines need reinstalling. Tests cover content invalidation, two-arch
 packages, signed indexes, stable revisions, config merging and GCP expiry/precedence. The lock command
-fixture and QEMU SSH boots pass. Cloud publishing and the full apply/rollback cycle need live verification.
+fixture and QEMU SSH boots pass. `make check-gcp-metadata` verifies GCP keys, expiry, precedence, blocking, rotation and invalid user-data retention. Other clouds and the full apply/rollback cycle need live verification.
 
 ## Drawbacks
 

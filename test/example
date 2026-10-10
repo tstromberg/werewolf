@@ -1,0 +1,393 @@
+#!/bin/sh
+# example runs the shell fence in a form's README (docs/design/examples.md).
+#
+#   example check FORM     the fences only, no machine
+#   example local FORM     the local fence, on howl's default engine
+#   example gcp FORM       the production fence, on GCP
+#   example selftest       the fence checker, against built-in samples
+#
+# A README with no Getting Started is skipped. CLOUD_KEEP=1 leaves the
+# machine and the scratch directory.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+say() { printf 'example: %s\n' "$*"; }
+die() {
+	say "$*" >&2
+	exit 1
+}
+
+# heading of local|gcp in a README.
+section_title() {
+	case $1 in
+	local) printf '%s\n' '### Local test deployment' ;;
+	gcp) printf '%s\n' '### Cloud production deployment' ;;
+	*) die "usage: example check|local|gcp FORM" ;;
+	esac
+}
+
+# extract FILE SECTION FORM prints the one sh fence in that section, or
+# returns 2 when the README has no such heading.
+extract() {
+	file=$1 section=$2 form=$3
+	title=$(section_title "$section")
+	awk -v title="$title" -v form="$form" -v section="$section" '
+		function flush() {
+			if (!in_section || seen++) return
+			n = split(body, words, /[[:space:]]+/)
+			creates = 0
+			ons = 0
+			allows = 0
+			withs = 0
+			for (i = 1; i <= n; i++) {
+				if (words[i] == "howl" && words[i + 1] == "create") {
+					creates++
+					name = words[i + 2]
+				}
+				if (words[i] == "--on") {
+					ons++
+					on = words[i + 1]
+				}
+				if (words[i] == "--allow-from") {
+					allows++
+					allow = words[i + 1]
+				}
+				if (words[i] == "--with") {
+					withs++
+					with = words[i + 1]
+				}
+				if (words[i] == "0.0.0.0/0") open = 1
+			}
+			if (fences != 1) {
+				printf "example: %s: %s has %d sh fences, and wants one\n", form, title, fences > "/dev/stderr"
+				bad = 1
+				return
+			}
+			if (creates != 1 || name != form) {
+				printf "example: %s: howl create %s, once\n", form, form > "/dev/stderr"
+				bad = 1
+			}
+			if (withs != 1) {
+				printf "example: %s: one --with\n", form > "/dev/stderr"
+				bad = 1
+			} else {
+				hit = 0
+				m = split(with, items, ",")
+				for (j = 1; j <= m; j++) if (items[j] == form) hit = 1
+				if (!hit) {
+					printf "example: %s: --with must name %s\n", form, form > "/dev/stderr"
+					bad = 1
+				}
+			}
+			if (section == "local") {
+				if (ons != 0) {
+					printf "example: %s: the local fence leaves --on out\n", form > "/dev/stderr"
+					bad = 1
+				}
+			} else {
+				if (ons != 1 || on != "gcp") {
+					printf "example: %s: the production fence passes --on gcp, once\n", form > "/dev/stderr"
+					bad = 1
+				}
+				if (allows != 1 || allow != "me") {
+					printf "example: %s: the production fence passes --allow-from me\n", form > "/dev/stderr"
+					bad = 1
+				}
+				if (open) {
+					printf "example: %s: 0.0.0.0/0 is not a fence\n", form > "/dev/stderr"
+					bad = 1
+				}
+			}
+			if (!bad) printf "%s", body
+		}
+		BEGIN { fences = 0; body = ""; bad = 0; seen = 0 }
+		substr($0, 1, length(title)) == title { in_section = 1; next }
+		in_section && /^##/ { flush(); in_section = 0; next }
+		in_section && /^```sh[[:space:]]*$/ { fence = 1; fences++; next }
+		in_section && fence && /^```[[:space:]]*$/ { fence = 0; next }
+		in_section && fence {
+			sub(/\\[[:space:]]*$/, "")
+			body = body $0 "\n"
+			next
+		}
+		END {
+			if (in_section) flush()
+			if (!seen && !bad) exit 2
+			if (bad) exit 1
+		}
+	' "$file"
+}
+
+# tcp_ports FILE prints tcp/N from Network Exposure, one per line.
+tcp_ports() {
+	awk '
+		/^### Network Exposure/ { in_net = 1; next }
+		in_net && /^##/ { exit }
+		in_net {
+			while (match($0, /tcp\/[0-9]+/)) {
+				print substr($0, RSTART, RLENGTH)
+				$0 = substr($0, RSTART + RLENGTH)
+			}
+		}
+	' "$1" | sed 's|tcp/||' | awk '!seen[$0]++'
+}
+
+# known_weak FORM prints the failures a shipping image of FORM may show.
+known_weak() {
+	form=$1
+	hostarch=$(uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
+	awk -v arch="$hostarch" '
+		/^#/ || NF == 0 { next }
+		$1 == "*" || $1 == arch { for (i = 2; i <= NF; i++) print $i }
+	' test/posture-known
+	build/host/form weaknesses "$form"
+}
+
+# posture_ok FILE FORM returns 0 when the console fails only known weaknesses.
+posture_ok() {
+	log=$1 form=$2
+	line=$(sed -n 's/\r$//; s/^posture: fail=\([^ ]*\) pass=\([0-9][0-9]*\).*/\1 \2/p' "$log" | tail -n 1)
+	[ -n "$line" ] || {
+		say "$form: no posture line"
+		return 1
+	}
+	got=${line%% *}
+	passed=${line##* }
+	[ "$passed" -ge 20 ] || {
+		say "$form: posture passed $passed checks"
+		return 1
+	}
+	known_weak "$form" | awk -v got="$got" '
+		BEGIN { bad = 0; n = split(got, g, ","); if (got == "") n = 0 }
+		{
+			id = $1
+			if (substr(id, 1, 1) == "?") { maybe[substr(id, 2)] = 1; next }
+			sure[id] = 1
+		}
+		END {
+			for (i = 1; i <= n; i++) {
+				id = g[i]
+				if (id == "") continue
+				if (!sure[id] && !maybe[id]) { printf "example: failing, and not a known weakness: %s\n", id > "/dev/stderr"; bad = 1 }
+				got_sure[id] = 1
+			}
+			for (id in sure) if (!got_sure[id]) {
+				printf "example: known weakness, and passing: %s\n", id > "/dev/stderr"
+				bad = 1
+			}
+			exit bad
+		}
+	'
+}
+
+# connect HOST PORT
+connect_port() {
+	nc -z -w 5 "$1" "$2" >/dev/null 2>&1
+}
+
+# probe_tcp FORM ADDRESS connects to each documented tcp port.
+probe_tcp() {
+	form=$1 address=$2 readme=$3
+	[ "$address" != "-" ] || die "$form: howl published no address"
+	engine=$(cat "build/machines/$form/engine" 2>/dev/null || echo "?")
+	host=$address
+	case $address in
+	127.0.0.1:*)
+		[ "$engine" = qemu ] || die "$form: $engine published $address, which is not the service"
+		ssh_port=$(awk '$1 == "ssh" { print $2 }' "build/machines/$form/machine")
+		web_port=$(awk '$1 == "web" { print $2 }' "build/machines/$form/machine")
+		guest_web=$(build/host/form listens "$form" | awk '$1 != 22 { p = $1 } END { print p }')
+		[ -n "$guest_web" ] || guest_web=80
+		host=127.0.0.1
+		;;
+	esac
+	for port in $(tcp_ports "$readme"); do
+		[ -n "$port" ] || continue
+		case $address in
+		127.0.0.1:*)
+			case $port in
+			22) dest=$ssh_port ;;
+			"$guest_web") dest=$web_port ;;
+			*) die "$form: QEMU forwards ssh and tcp/$guest_web; tcp/$port is not forwarded" ;;
+			esac
+			;;
+		*) dest=$port ;;
+		esac
+		connect_port "$host" "$dest" || die "$form: nothing accepted tcp/$port at $host:$dest"
+		say "$form: tcp/$port accepted"
+	done
+	return 0
+}
+
+run_section() {
+	section=$1 form=$2
+	readme=$root/forms/$form/README.md
+	[ -f "$readme" ] || die "no form $form"
+	fence=$(extract "$readme" "$section" "$form") && rc=0 || rc=$?
+	if [ "$rc" -ne 0 ]; then
+		[ "$rc" -eq 2 ] || exit "$rc"
+		say "skip $form: no $(section_title "$section")"
+		exit 0
+	fi
+	if [ "$section" = local ]; then
+		hostarch=$(uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
+		archs=$(awk '
+			$1 == "archs:" {
+				line = $0
+				sub(/^[^:]*:[[:space:]]*/, "", line)
+				gsub(/[\[\],]/, " ", line)
+				if (line ~ /[^[:space:]]/) { print line; exit }
+				gather = 1
+				next
+			}
+			gather && /^  - / { printf "%s ", $2; next }
+			gather { exit }
+		' "forms/$form/form.yaml")
+		if [ -n "$archs" ]; then
+			ok_arch=0
+			for a in $archs; do [ "$a" = "$hostarch" ] && ok_arch=1; done
+			[ "$ok_arch" = 1 ] || {
+				say "skip $form: archs $archs, this host is $hostarch"
+				exit 0
+			}
+		fi
+	fi
+	[ "$mode" = check ] && {
+		say "ok $form $section"
+		return 0
+	}
+	howl=$root/build/host/howl
+	[ -x "$howl" ] || die "no $howl; make howl"
+	[ -x "$root/build/host/form" ] || die "no build/host/form; make list-forms"
+	work=$(mktemp -d)
+	chmod 700 "$work"
+	if [ -d "$root/forms/$form/example" ]; then
+		cp -R "$root/forms/$form/example/." "$work/"
+	fi
+	printf '%s\n' "$fence" >"$work/fence.sh"
+	cleanup() {
+		rc=$?
+		trap - EXIT INT TERM
+		if [ "${CLOUD_KEEP:-}" = 1 ]; then
+			say "kept $form and $work"
+		else
+			if [ -e "$root/build/machines/$form/engine" ]; then
+				"$howl" delete "$form" >/dev/null 2>&1 || say "could not delete $form"
+			fi
+			rm -rf "$work"
+		fi
+		exit "$rc"
+	}
+	trap cleanup EXIT
+	trap 'exit 130' INT TERM
+	if [ -e "$root/build/machines/$form/engine" ]; then
+		"$howl" delete "$form" >/dev/null 2>&1 || die "$form: a machine of that name is already here"
+	fi
+	began=$(date +%s)
+	(
+		cd "$work"
+		PATH="$root/build/host:$PATH"
+		export PATH
+		sh ./fence.sh >"$work/create.out" 2>"$work/create.err"
+	) || {
+		tail -n 20 "$work/create.err" >&2 || true
+		die "$form: the fence failed"
+	}
+	seconds=$(($(date +%s) - began))
+	address=$(awk -F '\t' -v form="$form" 'NF == 3 && $1 == form { a = $2 } END { print a }' "$work/create.out")
+	[ -n "$address" ] || die "$form: howl did not print an address"
+	# howl returns at "up in". Posture runs after the services settle.
+	i=0
+	while :; do
+		"$howl" console "$form" </dev/null >"$work/console.log" 2>"$work/console.err" || true
+		grep -q 'posture: fail=' "$work/console.log" && break
+		i=$((i + 1))
+		[ "$i" -le 180 ] || die "$form: no posture line"
+		sleep 1
+	done
+	posture_ok "$work/console.log" "$form" || die "$form: posture"
+	probe_tcp "$form" "$address" "$readme"
+	if [ -f "$root/forms/$form/test/probe" ]; then
+		ADDRESS=$address SCRATCH=$work sh "$root/forms/$form/test/probe" || die "$form: probe"
+	fi
+	engine=$(cat "$root/build/machines/$form/engine")
+	mkdir -p "$root/build/$(uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')/check"
+	printf '%s %s %s posture\n' "$form" "$engine" "$seconds" >>"$root/build/$(uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')/check/$form-example.log"
+	say "ok $form $section in ${seconds}s at $address"
+}
+
+selftest() {
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+	mkdir -p "$tmp/forms/blocky"
+	readme=$tmp/forms/blocky/README.md
+	cat >"$readme" <<'EOF'
+# Blocky
+
+## Getting Started
+
+### Local test deployment (lima, qemu, firecracker)
+
+```sh
+howl create blocky --with blocky
+```
+
+A note.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```text
+howl create blocky --with blocky --on proxmox
+```
+
+```sh
+howl create blocky --with blocky --on gcp --allow-from me
+```
+
+### Network Exposure
+
+- tcp/53 and udp/53.
+EOF
+	# The samples live under tmp, so point extract at that README directly.
+	out=$(extract "$readme" local blocky)
+	printf '%s\n' "$out" | grep -q 'howl create blocky --with blocky' || die "selftest: local fence"
+	out=$(extract "$readme" gcp blocky)
+	printf '%s\n' "$out" | grep -q -- '--on gcp' || die "selftest: gcp fence"
+	printf '%s\n' "$out" | grep -q proxmox && die "selftest: text block ran"
+	tcp_ports "$readme" | grep -qx 53 || die "selftest: tcp/53"
+	bad=$tmp/bad.md
+	sed 's/howl create blocky --with blocky/howl create blocky --with blocky --on lima/' "$readme" >"$bad"
+	if extract "$bad" local blocky >/dev/null 2>"$tmp/err"; then
+		die "selftest: --on lima was accepted"
+	fi
+	grep -q 'leaves --on out' "$tmp/err" || die "selftest: --on message"
+	sed 's/--allow-from me/--allow-from 0.0.0.0\/0/' "$readme" >"$bad"
+	if extract "$bad" gcp blocky >/dev/null 2>"$tmp/err"; then
+		die "selftest: open allow was accepted"
+	fi
+	grep -q '0.0.0.0/0' "$tmp/err" || die "selftest: open message"
+	printf '# Plain\n\nNo fences.\n' >"$bad"
+	extract "$bad" local blocky >/dev/null 2>&1 && rc=0 || rc=$?
+	[ "$rc" -eq 2 ] || die "selftest: missing heading returned $rc"
+	say "ok selftest"
+	trap - EXIT
+	rm -rf "$tmp"
+}
+
+mode=${1:-}
+form=${2:-}
+case $mode in
+selftest) selftest ;;
+check | local | gcp)
+	[ -n "${form:-}" ] || die "usage: example check|local|gcp FORM"
+	if [ "$mode" = check ]; then
+		run_section local "$form"
+		run_section gcp "$form"
+		exit 0
+	fi
+	run_section "$mode" "$form"
+	;;
+*) die "usage: example check|local|gcp FORM | example selftest" ;;
+esac

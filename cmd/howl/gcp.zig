@@ -144,7 +144,7 @@ pub fn ensureImage(
         "--guest-os-features",
         "UEFI_COMPATIBLE,GVNIC",
         "--labels",
-        try gpa.print("{s}={s}", .{ label, form }),
+        try gpa.print("{s}={s}", .{ label, std.fs.path.basename(std.mem.trimEnd(u8, form, "/")) }),
         // Store the image in the zone's region, not GCP's default
         // multi-region, so it is not copied across regions.
         "--storage-location",
@@ -210,7 +210,7 @@ pub fn create(
         "--tags",
         name,
         "--labels",
-        try gpa.print("{s}={s}", .{ label, form }),
+        try gpa.print("{s}={s}", .{ label, std.fs.path.basename(std.mem.trimEnd(u8, form, "/")) }),
         "--no-service-account",
         "--no-scopes",
         "--no-shielded-secure-boot",

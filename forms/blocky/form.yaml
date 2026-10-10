@@ -25,7 +25,7 @@ services:
     pledge: stdio rpath inet netlink connect listen proc
     listen: [tcp/53 udp/53]
     connect: [tcp/853 tcp/443 public]
-    config: settings /run/config/blocky/settings.json optional
+    config: settings /run/config/blocky/settings.json
     setting:
       - upstreams string... as upstreams.groups.default
       - blocklists url... as blocking.denylists.ads
