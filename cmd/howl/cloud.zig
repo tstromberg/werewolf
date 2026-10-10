@@ -165,6 +165,7 @@ fn cloudMachine(
         return why.refuse("{s}: --arch", .{not_built_here});
     const dir = try machineDir(gpa, name);
     const b64 = try gpa.print("{s}/config.b64", .{dir});
+    try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
     const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(tar.len));
     try writePrivate(io, gpa, b64, std.base64.standard.Encoder.encode(encoded, tar), why);
     return .{ .arch = arch, .dir = dir, .b64 = b64 };

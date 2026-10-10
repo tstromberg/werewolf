@@ -15,6 +15,7 @@
 const std = @import("std");
 const howl = @import("howl.zig");
 const oci = @import("oci.zig");
+const locks = @import("lock.zig");
 const forms = @import("form");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -145,6 +146,35 @@ pub fn take(
     else
         "";
     try apply(gpa, &p, text, why);
+    if (p.spec.get("machine")) |machine| {
+        if (machine != .map) return why.refuse("machine is a map", .{});
+        var rest: std.ArrayList([]const u8) = .empty;
+        try rest.appendSlice(gpa, p.rest);
+        for (machine.map) |setting| {
+            if (std.mem.eql(u8, setting.key, "metadata-users") or verb == .form) continue;
+            if (verb == .build and !std.mem.eql(u8, setting.key, "arch")) continue;
+            if (setting.value != .scalar) return why.refuse(
+                "machine.{s}: one value",
+                .{setting.key},
+            );
+            const flag = try gpa.print("--{s}", .{setting.key});
+            const given = for (p.rest) |arg| {
+                if (std.mem.eql(
+                    u8,
+                    arg[0 .. std.mem.findScalar(u8, arg, '=') orelse arg.len],
+                    flag,
+                )) break true;
+            } else false;
+            if (!given) try rest.appendSlice(gpa, &.{ flag, setting.value.scalar.text });
+            if (!given and std.mem.eql(u8, setting.key, "arch"))
+                p.arch = howl.archName(setting.value.scalar.text) orelse return why.refuse(
+                    howl.arch_refusal,
+                    .{setting.value.scalar.text},
+                );
+        }
+        p.rest = rest.items;
+    }
+    if (@import("published.zig").arch != null) @import("published.zig").arch = p.arch;
     if (try references(gpa, &p, fallback, why)) |ref| {
         // A single form with nothing added runs unchanged, so -n has nothing
         // to show. pack has its own -n, so leave it to pack.
@@ -163,6 +193,42 @@ pub fn take(
         return same.items;
     }
     const dir = try p.dir(gpa);
+    var request = std.crypto.hash.sha2.Sha256.init(.{});
+    var declaration: Io.Writer.Allocating = .init(gpa);
+    try forms.write(&declaration.writer, p.spec);
+    request.update(declaration.written());
+    var app_root: ?[]const u8 = null;
+    for (p.rest, 0..) |arg, at| {
+        const source = if (std.mem.cutPrefix(u8, arg, "--app=")) |v|
+            v
+        else if (std.mem.eql(u8, arg, "--app") and at + 1 < p.rest.len)
+            p.rest[at + 1]
+        else
+            continue;
+        request.update(&try locks.tree(io, gpa, Dir.cwd(), source));
+        app_root = try gpa.print("{s}/build/{t}/apps/{s}", .{
+            try std.process.currentPathAlloc(
+                io,
+                gpa,
+            ),
+            p.arch orelse return why.refuse("give --arch", .{}),
+            std.fs.path.basename(dir),
+        });
+    }
+    const request_hash = std.fmt.bytesToHex(request.finalResult(), .lower);
+    const previous = if (verb != .form and p.arch != null) locks.matching(io, gpa, .{
+        .form = dir,
+        .arch = p.arch.?,
+        .app = app_root,
+        .published = @import("published.zig").arch != null,
+        .dev = for (p.rest) |arg| {
+            if (std.mem.eql(u8, arg, "--dev")) break true;
+        } else false,
+    }) catch null else null;
+    const locked_images: []const locks.Image = if (previous) |record| blk: {
+        const requested = record.requested orelse break :blk &.{};
+        break :blk if (std.mem.eql(u8, requested.inputs, &request_hash)) requested.images else &.{};
+    } else &.{};
     if (verb == .form) {
         if (Dir.cwd().access(io, dir, .{})) |_| return why.refuse(
             "{s} exists: a form is written where nothing is, so nothing is lost under it",
@@ -177,7 +243,8 @@ pub fn take(
     // Resolve and check every image before pulling any, so a refusal costs
     // no download. A tag is pinned in the manifest as the digest it named.
     for (p.images) |*i| {
-        i.pinned = try oci.resolve(io, gpa, i.ref, why);
+        i.pinned = locks.pinned(locked_images, std.fs.path.basename(dir), i.name, i.ref) orelse
+            try oci.resolve(io, gpa, i.ref, why);
         if (!std.mem.eql(u8, i.pinned, i.ref))
             howl.say(io, "{s}: {s} is {s}", .{ i.name, i.ref, i.pinned });
         const path = [_][]const u8{ "services", i.name, "image" };
@@ -200,6 +267,25 @@ pub fn take(
     try inherit(gpa, &p, chain);
     try write(io, gpa, dir, "form.yaml", try renderForm(gpa, p), why);
     for (p.images, configs) |i, c| try bake(io, gpa, p, i, c, dir, why);
+    var requested_images: std.ArrayList(locks.Image) = .empty;
+    for (p.images) |i| try requested_images.append(gpa, .{
+        .form = std.fs.path.basename(dir),
+        .service = i.name,
+        .ref = i.ref,
+        .digest = i.pinned,
+    });
+    try write(
+        io,
+        gpa,
+        dir,
+        ".request.json",
+        try std.json.Stringify.valueAlloc(
+            gpa,
+            locks.Request{ .inputs = &request_hash, .images = requested_images.items },
+            .{},
+        ),
+        why,
+    );
     // Read the chain as the build will, so the build's refusals come now.
     const c = try check(io, gpa, dir, why);
 

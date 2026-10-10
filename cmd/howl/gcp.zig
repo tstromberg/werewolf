@@ -219,9 +219,8 @@ pub fn create(
     }));
 }
 
-/// reconfigure replaces the instance's user-data with b64, then stops and
-/// starts it. GCP stops the machine by pressing its power button.
-pub fn reconfigure(
+/// publishConfig replaces user-data without restarting the instance.
+pub fn publishConfig(
     io: Io,
     gpa: Allocator,
     p: Place,
@@ -235,6 +234,17 @@ pub fn reconfigure(
         "--zone",               p.zone,
         "--metadata-from-file", try gpa.print("user-data={s}", .{b64}),
     }));
+}
+
+pub fn reconfigure(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    b64: []const u8,
+    why: *howl.Why,
+) !void {
+    try publishConfig(io, gpa, p, name, b64, why);
     try howl.run(
         io,
         why,

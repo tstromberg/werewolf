@@ -138,7 +138,12 @@ fn fetchForm(
         records,
         pkg,
         pins,
-    ) orelse return fromTree(io, gpa, name, pkg, into, mark, why);
+    ) orelse {
+        for (pins) |pin| if (mem.startsWith(u8, pin, pkg) and pin.len > pkg.len and
+            pin[pkg.len] == '=')
+            return why.refuse("{s}: the locked form is no longer in the signed repository", .{pin});
+        return fromTree(io, gpa, name, pkg, into, mark, why);
+    };
     const had = Dir.cwd().readFileAlloc(io, mark, gpa, .limited(256)) catch "";
     if (mem.eql(u8, had, want.version)) {
         if (Dir.cwd().access(io, into, .{})) |_| return else |_| {}
@@ -295,15 +300,14 @@ const testing = std.testing;
 
 test pick {
     const sha: [20]u8 = @splat(0);
-    const f1: []const []const u8 = &.{"werewolf-format1"};
-    const f2: []const []const u8 = &.{"werewolf-format2"};
+    const f1: []const []const u8 = &.{compose.format_package};
+    const f2: []const []const u8 = &.{"werewolf-format999"};
     const records = [_]apk.Record{
         .{ .name = "prod-form", .version = "20261009.100000-r0", .depends = f1, .sha1 = sha },
         .{ .name = "prod-form", .version = "20261009.120000-r0", .depends = f1, .sha1 = sha },
         .{ .name = "prod-form", .version = "20261010.090000-r0", .depends = f2, .sha1 = sha },
         .{ .name = "caddy-form", .version = "20261011.000000-r0", .depends = f1, .sha1 = sha },
     };
-    if (compose.format != 1) return error.SkipZigTest;
     try testing.expectEqualStrings(
         "20261009.120000-r0",
         pick(&records, "prod-form", &.{}).?.version,

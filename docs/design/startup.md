@@ -1,7 +1,7 @@
 # A startup's machines: the top ten uses
 
-Proposed, 2026-10-10. Seven of the ten uses are served by forms built
-before; the other three, and two that follow them, are proposed here.
+Built, 2026-10-10. Each of the ten uses has a form, and so do team
+chat and the company's own container images.
 
 ## Summary
 
@@ -47,11 +47,10 @@ pinned by digest, in a tree of its own ([oci.md](oci.md); forms/grafana).
 | Reaching private machines | `tailscale`, `bastion` | built; `wireguard` waits on its forwarding rules |
 | Monitoring and status | `prometheus`, `loki`, `gatus`, `grafana` | built; grafana in self-hosting.md |
 | Code | `gitea` | built |
-| Single sign-on | `authelia` | proposed |
-| Errors and analytics | `bugsink`, `umami` | proposed |
-
-And the two after them: team chat (`mattermost`) and the company's own
-container images (`zot`).
+| Single sign-on | `authelia` | built |
+| Errors and analytics | `bugsink`, `umami` | built |
+| Team chat | `mattermost` | built |
+| The company's images | `zot` | built |
 
 | Form | Built by | Defaults; its check's attack |
 | --- | --- | --- |
@@ -81,9 +80,9 @@ does, and an image that needs its script fails the build.
 
 ## Alternatives Considered
 
-**Keycloak** is what larger companies run for sign-on; werewolf-2d's
-academic forms carry it. Authelia is one Go program whose users fit a
-file in the config, which suits a dozen engineers.
+**Keycloak** is what larger companies run for sign-on; [academic.md](academic.md)
+carries it. Authelia is one Go program whose users fit a file in the
+config, which suits a dozen engineers.
 **GlitchTip and Sentry** speak the same SDKs as Bugsink but need Redis,
 Celery workers and, for Sentry, Kafka and ClickHouse.
 **Plausible** needs ClickHouse beside PostgreSQL; Umami needs neither.

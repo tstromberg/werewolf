@@ -359,11 +359,11 @@ pub fn create(
     _ = try need(io, gpa, p, &.{ "vm", "restart", "-n", name, "-o", "none" }, why);
 }
 
-/// reconfigure replaces the VM's userData with tar while it runs, then
-/// restarts it. It passes base64 through a private file (--set @FILE): az vm
+/// publishConfig replaces userData while the VM runs, passing base64
+/// through a private file (--set @FILE): az vm
 /// update --user-data would encode the path, not the file, and a command
 /// line would expose the secrets.
-pub fn reconfigure(
+pub fn publishConfig(
     io: Io,
     gpa: Allocator,
     p: Place,
@@ -389,6 +389,18 @@ pub fn reconfigure(
         &.{ "vm", "update", "-n", name, "--set", try gpa.print("@{s}", .{set}), "-o", "none" },
         why,
     );
+}
+
+pub fn reconfigure(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    name: []const u8,
+    tar: []const u8,
+    dir: []const u8,
+    why: *howl.Why,
+) !void {
+    try publishConfig(io, gpa, p, name, tar, dir, why);
     _ = try need(io, gpa, p, &.{ "vm", "restart", "-n", name, "-o", "none" }, why);
 }
 

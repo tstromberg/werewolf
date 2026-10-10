@@ -12,6 +12,7 @@ const policy = m.policy;
 const cve = m.cve;
 const apk = @import("apk");
 const tiers = m.tiers;
+const notice = @import("notice.zig");
 
 const attempt_path = m.attempt_path;
 const cves_dir = m.cves_dir;
@@ -205,17 +206,43 @@ pub fn readPending(u: *Update) !?Pending {
     };
 }
 
-/// dueOf returns when p is due and the tier that sets it. Unless a first
-/// check staged p, the time is held to at least an hour after boot.
+/// dueOf returns when p is due and the tier that sets it. A first check
+/// boots within two minutes, and not before 61 seconds. Any later update
+/// reboot waits until an hour after the last one, not after every boot, so
+/// a cold start takes a posture fix that is already due.
 pub fn dueOf(u: *Update, s: *const policy.Settings, p: Pending) !policy.Due {
+    if (p.applied) |at| return .{ .at = try policy.parseTime(at), .tier = .urgent };
     var seen: policy.Seen = .initFill(null);
     for (std.enums.values(policy.Tier)) |t| if (p.get(t)) |x| {
         seen.set(t, try policy.parseTime(x.seen));
     };
     var d = policy.when(s, seen, u.seed(p.build), p.first_boot) orelse
         return error.NothingStaged;
-    if (!p.first_boot) d.at = policy.spaced(d.at, nowSecs(u.io) - bootSecs());
+    if (!p.first_boot) d.at = policy.spaced(d.at, lastReboot(u));
     return d;
+}
+
+/// lastReboot is when this machine last rebooted for an update, or null.
+fn lastReboot(u: *Update) ?i64 {
+    const text = u.read(rebooted_path) catch return null;
+    return policy.parseTime(std.mem.trim(u8, text, " \n")) catch null;
+}
+
+test "an operator declaration is due at once without CVEs or boot spacing" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var u: Update = .{ .io = t.io, .gpa = arena.allocator() };
+    const s: policy.Settings = .{};
+    const p: Pending = .{ .build = "operator", .applied = "2026-10-10T12:00:00Z" };
+    const due = try dueOf(&u, &s, p);
+    try t.expectEqual(try policy.parseTime(p.applied.?), due.at);
+    try t.expectEqual(policy.Tier.urgent, due.tier);
+    try t.expectEqualStrings(
+        "a signed operator declaration, due at once",
+        try whyOf(&u, &s, p, due, due.at),
+    );
 }
 
 /// whyOf returns the log's explanation of why p is due at d.
@@ -226,6 +253,7 @@ pub fn whyOf(
     d: policy.Due,
     now: i64,
 ) ![]const u8 {
+    if (p.applied != null) return u.gpa.dupe(u8, "a signed operator declaration, due at once");
     const x = p.get(d.tier).?;
     var out: Io.Writer.Allocating = .init(u.gpa);
     try policy.why(
@@ -372,6 +400,7 @@ pub fn noFeed(u: *Update, reason: []const u8) !?tiers.Feed {
 /// feed. A tier seen for the first time is added to pending and logged as
 /// `tier`; this can only bring the boot sooner.
 pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pending {
+    if (p.applied != null) return p;
     // Without its report, keep the current tiers and log it: a fix that has
     // since risen to Urgent will not bring the boot sooner.
     const text = u.read(p.report) catch |err| {
@@ -438,38 +467,172 @@ pub fn retier(u: *Update, s: *const policy.Settings, p: Pending, plan: Plan) !Pe
 // --- boot -------------------------------------------------------------------
 
 /// bootIfDue reboots into the staged slot once it is due. Until then it sets
-/// ctx.due_in to the seconds left.
+/// ctx.due_in to the seconds until the next notice or the reboot. The
+/// notices go out at one minute, fifteen seconds and one second, and the
+/// lock is held from the last of those through the reboot.
 pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
     ctx.due_in = null;
     const held_lock = try u.lock();
     defer _ = linux.close(held_lock);
-    const p = try u.readPending() orelse return;
+    const p = try u.readPending() orelse {
+        ctx.clearNotice();
+        return;
+    };
     // Not armed: its try is spent or was never set. A reboot would boot this
     // slot again, so wait for the next check to stage it.
-    if (!try u.armed(p)) return;
-    const d = try u.dueOf(&ctx.settings, p);
-    const now = nowSecs(u.io);
-    if (now < d.at) {
-        ctx.due_in = d.at - now;
+    if (!try u.armed(p)) {
+        ctx.clearNotice();
         return;
     }
+    if (!ctx.noticeIs(p.build)) ctx.clearNotice();
+    ctx.remember(p.build);
+    const d = try u.dueOf(&ctx.settings, p);
+    const now = nowSecs(u.io);
+    ctx.reboot_at = notice.rebootAt(d.at, now, ctx.reboot_at, ctx.spoken != null);
+    const step = notice.plan(ctx.reboot_at.? - now, ctx.spoken);
+    if (step.send) |lead| {
+        // A notice that cannot be written must not cancel the reboot.
+        warn(u, p, d.tier, lead, step.brief) catch {};
+        ctx.spoken = lead;
+    }
+    if (step.wait) |w| {
+        ctx.due_in = w;
+        return;
+    }
+    const left = ctx.reboot_at.? - nowSecs(u.io);
+    // The one-second notice is already out. Sleep that second, but not a
+    // backwards clock: holding the lock across it would stall the next check.
+    if (left > 0) u.io.sleep(.fromSeconds(@intCast(@min(left, notice.floor_secs))), .awake) catch {};
+    // If the reread, the log, or reboot fails, try again shortly. due_in
+    // would otherwise stay unset and the daemon would wait out the hour.
+    ctx.due_in = notice.floor_secs;
+    const again = try u.readPending() orelse {
+        ctx.clearNotice();
+        ctx.due_in = null;
+        return;
+    };
+    if (!std.mem.eql(u8, again.build, p.build) or !try u.armed(again)) {
+        ctx.clearNotice();
+        ctx.due_in = null;
+        return;
+    }
+    const at = nowSecs(u.io);
     u.step = "reboot";
     try u.record(.{
         .event = "reboot",
-        .build = p.build,
+        .build = again.build,
         .tier = @tagName(d.tier),
-        .cause = if (p.first_boot) "first-boot" else "due",
+        .cause = if (again.first_boot) "first-boot" else "due",
         .due = try u.time(d.at),
-        .late = now - d.at,
-        .why = try u.whyOf(&ctx.settings, p, d, now),
+        .late = at - d.at,
+        .why = try u.whyOf(&ctx.settings, again, d, at),
     });
-    // Lets the next boot's outcome log the downtime. Reboot even if it fails.
-    u.writeReplacing(rebooted_path, try u.gpa.print("{s}\n", .{try u.time(now)})) catch {};
+    // Lets the next boot's outcome log the downtime, and holds the next
+    // update reboot an hour off. A reboot that does not happen puts the
+    // previous time back.
+    const prior = u.read(rebooted_path) catch null;
+    u.writeReplacing(rebooted_path, try u.gpa.print("{s}\n", .{try u.time(at)})) catch {};
     u.run(&.{"/usr/bin/reboot"}) catch |err| {
-        Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
+        if (prior) |old| {
+            u.writeReplacing(rebooted_path, old) catch {};
+        } else Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
         return err;
     };
+    ctx.due_in = null;
     ctx.rebooting = true;
+}
+
+/// warn writes the wall notice for p and records it. The console and the
+/// log are best-effort: a stuck serial line must not leave the fix unbooted.
+fn warn(u: *Update, p: Pending, tier: policy.Tier, lead: i64, brief: bool) !void {
+    const msg = try notice.text(u.gpa, .{
+        .host = u.host,
+        .now = nowSecs(u.io),
+        .lead = lead,
+        .tier = tier,
+        .brief = brief,
+        .report = p.report,
+        .body = noticeBody(u, p.report),
+        .feed = keptFeed(u),
+    });
+    const console = writeDev("/dev/console", msg);
+    const sessions = writePts(u, msg);
+    u.record(.{
+        .event = "warn",
+        .build = p.build,
+        .tier = @tagName(tier),
+        .lead = lead,
+        .console = console,
+        .sessions = sessions,
+    }) catch {};
+}
+
+fn noticeBody(u: *Update, path: []const u8) notice.Body {
+    const text = u.read(path) catch return .{};
+    return std.json.parseFromSliceLeaky(notice.Body, u.gpa, text, .{
+        .ignore_unknown_fields = true,
+    }) catch .{};
+}
+
+/// keptFeed is the tiers feed already on disk. The notice fetches nothing.
+fn keptFeed(u: *Update) ?tiers.Feed {
+    const data = u.read(feed_path) catch return null;
+    if (data.len == 0) return null;
+    const sig = u.read(feed_sig_path) catch return null;
+    const key = apk.parseKey(u.gpa, u.read(meta_dir ++ "/tiers.pub") catch return null) catch return null;
+    const last: ?[]const u8 = if (u.read(feed_serial_path)) |t|
+        std.mem.trim(u8, t, " \n")
+    else |_|
+        null;
+    return tiers.open(u.gpa, key, data, sig, nowSecs(u.io), last) catch null;
+}
+
+fn writeDev(path: [*:0]const u8, text: []const u8) bool {
+    const rc = linux.openat(linux.AT.FDCWD, path, .{
+        .ACCMODE = .WRONLY,
+        .CLOEXEC = true,
+        .NOCTTY = true,
+        .NONBLOCK = true,
+    }, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var off: usize = 0;
+    while (off < text.len) {
+        const n = linux.write(fd, text[off..].ptr, text.len - off);
+        switch (linux.errno(n)) {
+            .SUCCESS => {
+                if (n == 0) return false;
+                off += n;
+            },
+            .INTR => continue,
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn writePts(u: *Update, text: []const u8) usize {
+    var d = Dir.cwd().openDir(u.io, "/dev/pts", .{ .iterate = true }) catch return 0;
+    defer d.close(u.io);
+    var n: usize = 0;
+    var it = d.iterate();
+    while (it.next(u.io) catch return n) |e| {
+        if (!digits(e.name)) continue;
+        const path = u.gpa.dupeSentinel(
+            u8,
+            u.gpa.print("/dev/pts/{s}", .{e.name}) catch continue,
+            0,
+        ) catch continue;
+        if (writeDev(path, text)) n += 1;
+    }
+    return n;
+}
+
+fn digits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| if (c < '0' or c > '9') return false;
+    return true;
 }
 
 // --- state ------------------------------------------------------------------
@@ -482,6 +645,7 @@ pub const Pending = struct {
     /// report is the path of the report whose CVEs each check re-tiers.
     report: []const u8 = "",
     first_boot: bool = false,
+    applied: ?[]const u8 = null,
     urgent: ?Seen = null,
     high: ?Seen = null,
     medium: ?Seen = null,

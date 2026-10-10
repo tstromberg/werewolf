@@ -12,6 +12,10 @@ base: prod
 
 with: [caddy]
 
+check:
+  # :53 speaks DNS, not HTTP. Caddy's HTTPS is forms/pi-hole/test/checks.
+  skip: [http-answering]
+
 services:
   # pihole-FTL, in its image, as _oci-pi-hole: it answers DNS on :53, TCP
   # and UDP, from anywhere fence lets in, but only clients on the

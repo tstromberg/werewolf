@@ -2,6 +2,7 @@
 //! check as passed, failed or skipped, as text, JSON or one console line.
 //! On werewolf it also runs once a boot as a service. See README.md.
 const attacks = @import("attacks.zig");
+const boot = @import("boot.zig");
 const cmdline = @import("cmdline");
 const files = @import("files.zig");
 const kernel = @import("kernel.zig");
@@ -275,6 +276,7 @@ pub const Posture = struct {
     }
 
     pub fn run(p: *Posture) !void {
+        try boot.check(p);
         try kernel.check(p);
         try processes.check(p);
         try processes.programs(p);

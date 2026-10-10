@@ -201,7 +201,14 @@ cloud-init's user-data, once werewolf has committed.
   the design) would bound it by signature.
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
   them, or GRUB's config, and keep them across reboots. Secure Boot is off,
-  since Alpine's kernel is not signed for it.
+  since Alpine's kernel is not signed for it. Posture measures the whole
+  chain as it stands: `boot-secure-boot`, `boot-sig-enforced` and
+  `boot-rollback-protected` (docs/posture.md).
+- **Nothing stops a rollback.** An older release, still signed, can be
+  installed and booted again; a TPM counter at least the running slot's
+  serial would refuse it (phase 5 of
+  [design/verified-boot.md](design/verified-boot.md)). Posture's
+  `boot-rollback-protected` holds the gap open.
 - **Forms CI does not publish are built on the machine** that runs
   them, so no signature on their images could mean anything. `minimal`,
   `prod` and `prod-ssh` install CI's signed releases ([releases.md](releases.md)).

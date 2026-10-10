@@ -92,7 +92,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
     }));
     try b.put(d, "overlay", try overlayList(b));
-    // apk's world as the packages leave it, without the pins FREEZE adds.
+    // apk's world as the packages leave it, without the build-only lock pins.
     // Published, it names the format's package, so the updater takes only
     // programs that read the files compose writes (lib/compose.zig).
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/etc/apk", .{meta_dir}));
@@ -103,6 +103,20 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         .{rootfs},
     );
     try b.put(meta_dir, "etc/apk/world", unpinned);
+    if (b.deployment) |local| {
+        const repositories = try b.capture(
+            stamp,
+            &.{ "bsdtar", "-xOf", rootfs, "etc/apk/repositories" },
+        );
+        var remote: std.ArrayList(u8) = .empty;
+        var lines = mem.tokenizeScalar(u8, repositories, '\n');
+        while (lines.next()) |line| {
+            if (mem.eql(u8, line, local.repository)) continue;
+            try remote.print(b.gpa, "{s}\n", .{line});
+        }
+        try remote.print(b.gpa, "{s}\n", .{local.from});
+        try b.put(meta_dir, "etc/apk/repositories", remote.items);
+    }
     try b.put(d, "release", try b.path("{s} {s} built-by-make\n", .{ b.name, kernel_pkg }));
     try b.put(d, "tiers.pub", embedded.tiers_pub);
     try b.put(d, "tiers", tiers_url ++ "\n");
@@ -134,6 +148,10 @@ fn withoutPins(gpa: Allocator, world: []const u8) ![]const u8 {
 fn overlayList(b: *B) ![]const u8 {
     var seen: std.array_hash_map.String(void) = .empty;
     for (b.overlay[1..]) |dir| {
+        // A local-NAME package owns the app; copying the running slot's
+        // files over its successor would undo an apply, including removals.
+        if (b.deployment != null and b.spec.app != null and
+            mem.eql(u8, dir, b.spec.app.?)) continue;
         var d = Dir.cwd().openDir(b.io, dir, .{ .iterate = true }) catch continue;
         defer d.close(b.io);
         var w = try d.walk(b.gpa);

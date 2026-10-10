@@ -421,6 +421,7 @@ pub const keys = [_]Key{
     .{ .name = "services", .shape = .maps },
     .{ .name = "updates", .shape = .map },
     .{ .name = "users", .shape = .maps },
+    .{ .name = "machine", .shape = .map },
     .{ .name = "allow", .shape = .list },
     .{ .name = "app", .shape = .scalar },
     .{ .name = "programs", .shape = .list },
@@ -497,6 +498,16 @@ pub fn duration(text: []const u8) ?u32 {
     return if (seconds >= 5 * 60 and seconds <= 7 * 86400) seconds else null;
 }
 
+/// repositoryUrl accepts a public HTTPS directory, without credentials,
+/// queries or fragments; apk appends the arch and APKINDEX.tar.gz.
+pub fn repositoryUrl(text: []const u8) bool {
+    if (!mem.startsWith(u8, text, "https://")) return false;
+    for (text) |c| if (c <= 0x20 or c >= 0x7f or
+        mem.findScalar(u8, "?#@\\", c) != null) return false;
+    const host = text["https://".len..];
+    return host.len > 0 and host[0] != '/';
+}
+
 /// User is a person form.yaml's users: names: their ssh keys, and whether
 /// they administer the machine, which makes their keys root's too.
 pub const User = struct { name: []const u8, keys: []const []const u8, admin: bool };
@@ -546,7 +557,12 @@ pub fn peopleFile(gpa: Allocator, forms: []const Form, f: *Failure) Error![]cons
 
 /// Updates is form.yaml's updates key along a chain: off, or how often the
 /// machine checks (seconds; null leaves the updater's default).
-pub const Updates = struct { off: bool = false, every: ?u32 = null };
+pub const Updates = struct {
+    off: bool = false,
+    every: ?u32 = null,
+    from: ?[]const u8 = null,
+    policy: ?[]const u8 = null,
+};
 
 /// updates returns the chain's updates: the last form that says anything
 /// wins whole, so a form on one that turned them off can turn them on.
@@ -560,6 +576,8 @@ pub fn updates(forms: []const Form) Updates {
         }
         out = .{};
         if (u.get("every")) |e| out.every = duration(e.scalar.text);
+        if (u.get("from")) |e| out.from = e.scalar.text;
+        if (u.get("policy")) |e| out.policy = e.scalar.text;
     }
     return out;
 }
@@ -646,6 +664,33 @@ pub fn loadIn(
                 }
                 if (keys_ == null) return f.fail(gpa, "{s}: users: {s}: no keys", .{ path, u.key });
             }
+        } else if (mem.eql(u8, e.key, "machine")) {
+            if (e.value != .map) return f.fail(gpa, "{s}: machine is a map", .{path});
+            for (e.value.map) |m| {
+                if (!isOneOf(
+                    m.key,
+                    &.{
+                        "hostname",
+                        "ip",
+                        "gw",
+                        "dns",
+                        "data-key",
+                        "on",
+                        "arch",
+                        "size",
+                        "allow-from",
+                        "metadata-users",
+                    },
+                ) or m.value != .scalar)
+                    return f.fail(
+                        gpa,
+                        "{s}: machine.{s}: no such scalar machine setting",
+                        .{ path, m.key },
+                    );
+                if (mem.eql(u8, m.key, "metadata-users") and
+                    !isOneOf(m.value.scalar.text, &.{ "true", "false" }))
+                    return f.fail(gpa, "{s}: machine.metadata-users is true or false", .{path});
+            }
         } else if (mem.eql(u8, e.key, "updates")) {
             if (e.value == .scalar) {
                 if (!mem.eql(u8, e.value.scalar.text, "off")) return f.fail(
@@ -656,9 +701,38 @@ pub fn loadIn(
             } else if (e.value != .map) {
                 return f.fail(gpa, "{s}: updates is off, or a map: every: 1h", .{path});
             } else for (e.value.map) |u| {
+                if (mem.eql(u8, u.key, "from")) {
+                    if (u.value != .scalar or !repositoryUrl(u.value.scalar.text))
+                        return f.fail(
+                            gpa,
+                            "{s}: updates: from is an HTTPS repository URL",
+                            .{path},
+                        );
+                    continue;
+                }
+                if (mem.eql(u8, u.key, "policy")) {
+                    if (u.value != .scalar) return f.fail(
+                        gpa,
+                        "{s}: updates: policy is JSON",
+                        .{path},
+                    );
+                    const parsed = std.json.parseFromSliceLeaky(
+                        std.json.Value,
+                        gpa,
+                        u.value.scalar.text,
+                        .{},
+                    ) catch
+                        return f.fail(gpa, "{s}: updates: policy is JSON", .{path});
+                    if (parsed != .object) return f.fail(
+                        gpa,
+                        "{s}: updates: policy is a JSON object",
+                        .{path},
+                    );
+                    continue;
+                }
                 if (!mem.eql(u8, u.key, "every")) return f.fail(
                     gpa,
-                    "{s}: updates has no key {s}: every",
+                    "{s}: updates has no key {s}: every, from, policy",
                     .{ path, u.key },
                 );
                 if (u.value != .scalar or duration(u.value.scalar.text) == null) return f.fail(

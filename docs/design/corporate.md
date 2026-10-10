@@ -1,8 +1,7 @@
 # A corporation's machines: the top ten uses
 
-Proposed, 2026-10-10. Six of the ten uses are served by forms built
-before; the other four, and the forms that complete them, are proposed
-here. Kubernetes nodes are the eleventh use, and are not built.
+Built, 2026-10-10. Each of the ten uses has a form. Kubernetes nodes
+are the eleventh use, and are not built.
 
 ## Summary
 
@@ -42,16 +41,16 @@ and `image:` runs a project's OCI image ([oci.md](oci.md)).
 
 | Use | Forms | State |
 | --- | --- | --- |
-| Application servers | `jre-app`, `node-app`, `python-app`, `ruby-app`, `php` | `jre-app` proposed; Java is most of what runs |
+| Application servers | `jre-app`, `node-app`, `python-app`, `ruby-app`, `php` | built |
 | Relational databases | `postgresql`, `mariadb` | built |
 | Load balancing and the edge | `haproxy`, `nginx`, `caddy`, `oauth2-proxy` | built |
 | Cache | `valkey` | built |
-| Messaging and event streams | `kafka`, `nats`, `mosquitto` | `kafka` proposed |
-| Directory and sign-on | `openldap`, `keycloak` | `openldap` proposed; `keycloak` in werewolf-2d's academic.md |
-| Metrics, logs and traces | `prometheus`, `loki`, `grafana`, `otel-collector`, `opensearch` | `otel-collector`, `opensearch` proposed |
+| Messaging and event streams | `kafka`, `nats`, `mosquitto` | built |
+| Directory and sign-on | `openldap`, `keycloak` | built; `keycloak` in [academic.md](academic.md) |
+| Metrics, logs and traces | `prometheus`, `loki`, `grafana`, `otel-collector`, `opensearch` | built |
 | Secrets and internal PKI | `openbao`, `step-ca` | built |
-| Network services | `unbound`, `squid`, `bastion`, `tailscale` | `unbound`, `squid` proposed |
-| Code, images and files | `gitea`, `zot`, `minio`, `sftpgo`, `restic-server` | built; `zot` in startup.md |
+| Network services | `unbound`, `squid`, `bastion`, `tailscale` | built |
+| Code, images and files | `gitea`, `zot`, `minio`, `sftpgo`, `restic-server` | built; `zot` in [startup.md](startup.md) |
 
 | Form | Built by | Defaults; its check's attack |
 | --- | --- | --- |

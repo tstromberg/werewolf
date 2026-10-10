@@ -1,2 +1,18 @@
-ok  ph-debug1        sleep 45; netstat -lnu 2>/dev/null | grep -v tcp6; netstat -lnt 2>/dev/null | grep -v tcp6; grep -E 'forced|listening on|ERROR' /data/svc/pi-hole/var/log/pihole/FTL.log | grep -v 'TOML\|Config backup' | tail -12; nslookup pi.hole 127.0.0.1; false
-ok  ph-debug2        tail -30 /data/svc/pi-hole/var/log/pihole/FTL.log; tail -8 /data/svc/pi-hole/var/log/pihole/pihole.log; false
+# pihole-FTL answers DNS as its own user, holding no capability but the
+# low port's, from the configuration its first start wrote. Gravity may
+# still be fetching the list: the name checks wait.
+ok  ph-user          i=0; until p=$(head -n 1 /run/cgroup/svc/pi-hole/cgroup.procs 2>/dev/null) && [ -n "$p" ]; do i=$((i + 1)); [ $i -le 120 ] || { echo "pihole-FTL did not start"; exit 1; }; sleep 1; done; u=$(grep '^_oci-pi-hole:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  ph-resolves      i=0; until timeout 15 nslookup example.org 127.0.0.1 2>/dev/null | grep -A1 '^Name:' | grep -q 'Address: [1-9]'; do i=$((i + 1)); [ $i -le 4 ] || { echo "example.org unresolved"; echo "ftl:"; tail -20 /data/svc/pi-hole/var/log/pihole/FTL.log; exit 1; }; sleep 2; done
+# Local networks only, and no DHCP server: both are forced, and the web
+# interface cannot change them.
+ok  ph-local         f=/data/svc/pi-hole/etc/pihole/pihole.toml; grep -q 'listeningMode = "LOCAL"' $f && grep -q 'active = false' $f || { echo "toml:"; ls -l /data/svc/pi-hole/etc/pihole 2>&1 | head; grep -n listeningMode $f 2>&1 | head; exit 1; }
+ok  ph-blocks        i=0; until timeout 15 nslookup ad.doubleclick.net 127.0.0.1 2>/dev/null | grep -q 'Address: 0\.0\.0\.0'; do i=$((i + 1)); [ $i -le 6 ] || { echo "ad.doubleclick.net not blocked"; timeout 15 nslookup ad.doubleclick.net 127.0.0.1; exit 1; }; sleep 1; done
+# The web interface is Caddy's to show, over HTTPS. The API takes the
+# config's password.
+ok  ph-login         i=0; until wget -q -T 5 --no-check-certificate -O /tmp/ph.auth --header 'Content-Type: application/json' --post-data '{"password":"werewolf-check-pihole"}' https://localhost/api/auth 2>/dev/null && grep -q '"valid":true' /tmp/ph.auth; do i=$((i + 1)); [ $i -le 15 ] || { echo "no login"; cat /tmp/ph.auth 2>/dev/null; exit 1; }; sleep 1; done
+ok  ph-wrong         wget -q -T 10 --no-check-certificate -S -O /dev/null --header 'Content-Type: application/json' --post-data '{"password":"wrong"}' https://localhost/api/auth 2>&1 | grep -q 'HTTP/1.1 401'
+# A stranger reads no configuration.
+ok  ph-stranger      wget -q -T 10 --no-check-certificate -S -O /dev/null https://localhost/api/config 2>&1 | grep -q 'HTTP/1.1 401'
+# The attack on UDP's unguarded bind (docs/design/listen-udp.md): with
+# pihole-FTL down, root takes :53, but cannot answer a client from it.
+ok  ph-squatter      sv -w 30 down /etc/sv/pi-hole; i=0; while netstat -lun 2>/dev/null | grep -q ':53 '; do i=$((i + 1)); [ $i -le 30 ] || exit 1; sleep 1; done; { nc -u -l -p 53 >/dev/null 2>&1 & l=$!; }; sleep 1; netstat -lun 2>/dev/null | grep -q ':53 '; held=$?; o=$(echo x | nc -v -u -w 1 -p 53 10.0.2.2 40000 2>&1); kill $l 2>/dev/null; sv up /etc/sv/pi-hole; echo "held $held: $o"; [ $held = 0 ] && echo "$o" | grep -q 'Permission denied'

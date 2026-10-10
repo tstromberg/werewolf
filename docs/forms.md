@@ -71,6 +71,22 @@ and key, and `make list-forms` shows the chains.
 | `headscale` | `prod`, with `caddy` | a coordination server for Tailscale's clients from Headscale's own image, joined only by key, approval or an OpenID sign-in ([headscale.md](../forms/headscale/README.md)) |
 | `blocky` | `prod` | DNS for a network, blocking ads and trackers, upstreams over TLS alone, every name blocked for strangers, from Blocky's own image ([blocky.md](../forms/blocky/README.md)) |
 | `adguard-home` | `prod`, with `caddy` | AdGuard Home blocking ads and trackers for a network, no setup wizard, its UI behind Caddy's login, strangers refused, from its own image ([adguard-home.md](../forms/adguard-home/README.md)) |
+| `pi-hole` | `prod`, with `caddy` | Pi-hole answering a network's DNS, local clients alone, its web interface behind Caddy, lists refreshed by the image's own gravity ([pi-hole.md](../forms/pi-hole/README.md)) |
+| `home-assistant` | `prod`, with `caddy` | Home Assistant for a home's devices, its owner from the config, onboarding already done, from its own image ([home-assistant.md](../forms/home-assistant/README.md)) |
+| `immich` | `prod`, with `postgresql`, `valkey`, `caddy` | a photo library from Immich's own image, its administrator from the config, no telemetry ([immich.md](../forms/immich/README.md)) |
+| `nextcloud` | `prod`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | files, calendars and contacts, installed from the config, its code read-only ([nextcloud.md](../forms/nextcloud/README.md)) |
+| `moodle` | `prod`, with `postgresql`, `caddy`, `cron`, `sh-shim` | Moodle for a school's courses, no sign-up and no plugin from the web ([moodle.md](../forms/moodle/README.md)) |
+| `mediawiki` | `php` | a department's wiki on SQLite, strangers unable to read or edit until a setting says so ([mediawiki.md](../forms/mediawiki/README.md)) |
+| `limesurvey` | `php`, with `mariadb` | surveys, installed from the config, plugins from the image alone ([limesurvey.md](../forms/limesurvey/README.md)) |
+| `keycloak` | `jre`, with `postgresql`, `caddy` | single sign-on by OpenID Connect and SAML, its administrator from the config ([keycloak.md](../forms/keycloak/README.md)) |
+| `galene` | `prod`, with `caddy` | lectures and seminars by video, rooms and passwords from the config ([galene.md](../forms/galene/README.md)) |
+| `overleaf` | `prod`, with `valkey`, `caddy` | collaborative LaTeX, x86_64 only, the compiler apart from the services ([overleaf.md](../forms/overleaf/README.md)) |
+| `authelia` | `prod`, with `caddy` | a password and a second factor in front of every site under a domain ([authelia.md](../forms/authelia/README.md)) |
+| `bugsink` | `prod`, with `caddy` | error tracking for Sentry's SDKs, sign-up off, events taken by DSN alone ([bugsink.md](../forms/bugsink/README.md)) |
+| `umami` | `prod`, with `postgresql`, `caddy` | web analytics without cookies, the default administrator password refused ([umami.md](../forms/umami/README.md)) |
+| `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
+| `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
+| `opensearch` | `prod` | one node of log search, TLS and the security plugin on, no demo users ([opensearch.md](../forms/opensearch/README.md)) |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init
@@ -513,13 +529,20 @@ instead, change gunicorn's `--bind` and the service's `listen` to 8000.
 
 ### Ship it
 
+For later declaration and app changes, set `updates.from` to a dedicated
+HTTPS apk repository before creation. `howl apply FILE` signs and publishes
+`local-NAME`; `-n` prepares it without upload. The updater composes it into
+the other slot and tries it once. [The manifest design](design/manifest.md)
+describes publishing, locks, configuration transports and rollback.
+
 | | |
 | --- | --- |
 | `howl build --with helloworld` | `dist/helloworld-ARCH-disk.qcow2`, a disk that boots it under UEFI, for a provider that takes one (`--format raw\|vhd\|vmdk`); `howl create NAME --with helloworld --on gcp\|aws\|azure` makes a cloud machine of it |
 | `make FORM=helloworld bite-me` | run on a Debian, Ubuntu, Fedora or Rocky VM: installs it beside the distro ([bite.md](bite.md)) |
 | `make FORM=helloworld image` | the kernel and initramfs, for QEMU, Firecracker or any host that boots them directly |
 
-It updates itself, as every form does. The updater follows Wolfi's packages,
+It updates itself, unless `updates: off` explicitly disables the updater
+and records the `updates-enabled` posture weakness. The updater follows Wolfi's packages,
 builds a new slot with your files carried forward, boots it once, and keeps
 it only if it commits ([updater.md](updater.md)). posture runs at every
 boot and reports what holds. On a Python machine, `programs-no-interpreters`

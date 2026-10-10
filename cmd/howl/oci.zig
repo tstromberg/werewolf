@@ -6,6 +6,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const howl = @import("howl.zig");
 const native = @import("build.zig");
+const locks = @import("lock.zig");
 const forms = @import("form");
 const sandbox = @import("sandbox");
 const Io = std.Io;
@@ -599,17 +600,37 @@ pub fn lay(b: *native.B) !void {
                 fm.dir,
                 svc.key,
             });
-            if (exists(io, own)) continue;
+            if (exists(io, own)) {
+                const rec = try json.parseFromSliceLeaky(
+                    forms.ImageRecord,
+                    gpa,
+                    try b.read(own, max_config),
+                    .{},
+                );
+                try b.resolved_images.append(gpa, .{
+                    .form = fm.name,
+                    .service = svc.key,
+                    .ref = ref,
+                    .digest = rec.image,
+                });
+                continue;
+            }
             const base = try b.path("{s}/oci/{s}", .{ b.p.build, fm.name });
             const last = try gpa.print("{s}/{s}.last", .{ base, svc.key });
-            const pinned = resolve(io, gpa, ref, &why) catch |err| {
-                if (err != error.Refused) return err;
-                const kept = Dir.cwd().readFileAlloc(io, last, gpa, .limited(4096)) catch
-                    return b.fail("{s}: services: {s}: {s}", .{ fm.dir, svc.key, why.text });
-                try b.steps.note("oci: {s}: {s}; keeping the last bake", .{ svc.key, why.text });
-                try images.append(gpa, std.mem.trim(u8, kept, "\n"));
-                continue;
+            const pinned = locks.pinned(b.locked_images, fm.name, svc.key, ref) orelse
+                resolve(io, gpa, ref, &why) catch |err| switch (err) {
+                error.Refused => return b.fail(
+                    "{s}: services: {s}: {s}",
+                    .{ fm.dir, svc.key, why.text },
+                ),
+                else => return err,
             };
+            try b.resolved_images.append(gpa, .{
+                .form = fm.name,
+                .service = svc.key,
+                .ref = ref,
+                .digest = pinned,
+            });
             var writes: std.ArrayList([]const u8) = .empty;
             for (try valuesOf(gpa, svc.value, "write")) |w| {
                 if (w.len == 0 or w[0] != '/' or std.mem.findScalar(u8, w, ' ') != null)
@@ -705,7 +726,8 @@ fn exists(io: Io, path: []const u8) bool {
 /// prepare creates, empty, every path init binds into the root (cmd/init/oci.zig):
 /// /proc, the CPU directory, /tmp, /run, /data, each path in writes, the
 /// devices, resolv.conf and hosts; and /usr/lib/werewolf, where the build
-/// copies werewolf's programs (slot.zig). It replaces whatever the image had there, links too, and writes a
+/// copies werewolf's programs (slot.zig). It replaces whatever the image had there, links too, and
+/// writes a
 /// hosts file naming the service.
 pub fn prepare(
     io: Io,

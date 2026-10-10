@@ -33,8 +33,7 @@ programs forward, so a fix to `fence` reached no `howl`-built machine.
 
 ## Detailed design
 
-The world file is the spec and apk is the solver: once every input is a
-package, a host and a machine resolve the same answer.
+The world file is the spec and apk is the solver: a host and machine resolve the same answer.
 
 **The image is its world.** The machine above has world `local-shop
 werewolf-format3`. `local-shop` depends on `prod-form`, `cloudflared-form`,
@@ -53,6 +52,7 @@ package depends on `werewolf-formatN`. CI never deletes one.
 
 **What is not published** (forms outside `forms/`, OCI trees, `--app`) stays
 in the image, and each update copies it forward from the running slot.
+With `updates.from`, [manifest apply](manifest.md) uses a persistent signed repository and format 3's `local-NAME`.
 
 **What howl builds.** A form named is the published one, fetched and checked
 against the signed index (lib/apk.zig), which the machine updates; one not yet
@@ -81,7 +81,7 @@ a machine on N takes N's newest and logs `held` each check, until reinstalled.
    builds with no checkout, holding the tree's files it uses (files.zig).
 4. Declined 2026-10-10: an `@local` repository in the image, signed by a
    throwaway key. It stores local content twice and adds signing machinery,
-   where copying forward is built and tested.
+   where copying forward is built and tested; manifest apply instead explicitly opts into a persistent key and remote repository.
 5. Built: the release path is gone; releases serve installs.
 
 ## Drawbacks

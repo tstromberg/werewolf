@@ -26,6 +26,14 @@ pub fn filesystems(m: *Machine) void {
     if (!m.isMounted("/dev")) m.mount(&.{ "-t", "devtmpfs", "dev", "/dev" });
     m.mount(&.{ "-o", "remount,nosuid,nodev,noexec,hidepid=invisible", "/proc" });
     m.mount(&.{ "-o", "remount,nosuid,nodev,noexec", "/sys" });
+    // The firmware's variables, read-only, so posture can read the Secure
+    // Boot state (cmd/posture/boot.zig). Alpine's kernel carries no
+    // efivarfs, so on it there is nothing to mount until werewolf builds
+    // its own kernel (phase 4 of the boot design).
+    if (init.exists("/sys/firmware/efi") and
+        std.mem.indexOf(u8, m.read("/proc/filesystems"), "efivarfs") != null and
+        !m.isMounted("/sys/firmware/efi/efivars"))
+        m.mount(&.{ "-t", "efivarfs", "-o", "ro", "efivarfs", "/sys/firmware/efi/efivars" });
     m.mount(&.{ "-o", "remount,nosuid,noexec", "/dev" });
     for ([_][:0]const u8{ "/dev/pts", "/dev/shm" }) |d| mkdir(d, 0o755);
     // devpts is mounted only if the form allows pty (ssh logins). Without

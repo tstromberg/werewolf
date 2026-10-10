@@ -6,6 +6,7 @@ slot-update is the autoupdater: it builds or fetches the other slot and boots
 it once due; a slot that does not prove healthy rolls back. See
 [docs/updater.md](../../docs/updater.md) and [update-policy.md](../../docs/design/update-policy.md).
 
+Signed `local-NAME` updates are due immediately; `try [HASH]` selects the parked slot; failed solves fail `update-held` ([manifest.md](../../docs/design/manifest.md)).
 ## Background
 
 A werewolf root is an immutable dm-verity erofs image, so a fix lands only as
@@ -92,8 +93,9 @@ Invariants to keep:
 ## Reliability Considerations
 
 - A bad update costs a reboot and a rollback; `bad` stops it being retried.
-- No update reboot within an hour of boot, except after a first check.
-  Transient fetch failures retry with jittered backoff for up to 2 minutes.
+- Update reboots are an hour apart, after the last one, not after every
+  boot. A boot check that fails is retried for 10 minutes. Transient fetch
+  failures retry with jittered backoff for up to 2 minutes.
 - Tested by `make test`, `make check-updater` (a whole update),
   `make check-updater-staged` (power cut with an update staged) and
   `make SEAL_LEARN=1 check-updater` (what the seal would refuse).

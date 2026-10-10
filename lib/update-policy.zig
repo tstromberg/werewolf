@@ -11,10 +11,12 @@ pub const minute = 60;
 pub const hour = 60 * minute;
 pub const day = 24 * hour;
 
-/// Urgent fixes, and anything a machine's first check stages, boot within
-/// these times. Update reboots are at least reboot_gap apart.
+/// Urgent fixes boot within urgent_time. A machine's first check boots
+/// within first_boot_time, and not before first_boot_floor, so the three
+/// notices fit. Update reboots are at least reboot_gap apart.
 const urgent_time = 15 * minute;
 const first_boot_time = 2 * minute;
+const first_boot_floor = 61;
 const reboot_gap = hour;
 
 /// Tier is a fix's urgency, lowest first.
@@ -24,7 +26,7 @@ pub const Tier = enum(u2) {
     high,
     urgent,
 
-    fn title(t: Tier) []const u8 {
+    pub fn title(t: Tier) []const u8 {
         return switch (t) {
             .low => "Low",
             .medium => "Medium",
@@ -256,6 +258,12 @@ fn place(sd: u64, span: u32) u32 {
     return if (span == 0) 0 else @intCast(sd % span);
 }
 
+/// firstPlace is this machine's place in the first-check window, held to
+/// first_boot_floor so a new VM has a minute to be told before it reboots.
+fn firstPlace(sd: u64) u32 {
+    return @max(place(sd, first_boot_time), first_boot_floor);
+}
+
 /// due returns when a fix of tier, first seen at seen, boots on the machine
 /// with seed sd.
 pub fn due(s: *const Settings, tier: Tier, seen: i64, sd: u64) i64 {
@@ -286,7 +294,7 @@ fn inWindow(w: Window, earliest: i64, sd: u64) i64 {
 /// byRule returns when a fix boots by its rule alone: due, or on the
 /// machine's first check, within first_boot_time of when it was seen.
 fn byRule(s: *const Settings, tier: Tier, seen: i64, sd: u64, first_boot: bool) i64 {
-    return if (first_boot) seen + place(sd, first_boot_time) else due(s, tier, seen, sd);
+    return if (first_boot) seen + firstPlace(sd) else due(s, tier, seen, sd);
 }
 
 /// Seen holds when each tier was first seen, or null. A tier stays seen
@@ -316,7 +324,8 @@ pub fn when(s: *const Settings, seen: Seen, sd: u64, first_boot: bool) ?Due {
 }
 
 /// spaced delays at until reboot_gap after last_reboot. The updater passes
-/// the machine's boot time, so update reboots are at least reboot_gap apart.
+/// the time of the last update reboot, so those reboots are at least
+/// reboot_gap apart. A cold boot is not one, and does not move the time.
 pub fn spaced(at: i64, last_reboot: ?i64) i64 {
     const last = last_reboot orelse return at;
     return @max(at, last + reboot_gap);
@@ -373,10 +382,10 @@ pub fn why(
     }
     try out.print(
         ", where this machine's place is {f} in.",
-        .{Duration{ .secs = place(sd, span) }},
+        .{Duration{ .secs = if (first_boot) firstPlace(sd) else place(sd, span) }},
     );
     if (at > byRule(s, tier, seen, sd, first_boot)) try out.print(
-        " An update reboot waits until {f} after boot.",
+        " An update reboot waits until {f} after the last one.",
         .{Duration{ .secs = reboot_gap }},
     );
     try out.print(" Due {f}, ", .{Time{ .secs = at }});
@@ -420,7 +429,7 @@ pub const Serial = struct {
 };
 
 /// civil splits secs into year, month, day, hour, minute and second.
-fn civil(secs: i64) [6]u32 {
+pub fn civil(secs: i64) [6]u32 {
     const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(secs) };
     const yd = es.getEpochDay().calculateYearDay();
     const md = yd.calculateMonthDay();
@@ -757,9 +766,12 @@ test "when: the earliest tier, kept as tiers rise" {
     const after = when(&s, seen, 0, false).?;
     try std.testing.expectEqual(Tier.high, after.tier);
     try std.testing.expect(after.at < before.at);
-    // On a first check, everything boots within two minutes.
+    // On a first check, everything boots within two minutes, and not before
+    // 61 seconds, so the notices have their minute.
     const first = when(&s, seen, 61, true).?;
     try std.testing.expectEqual(@as(i64, t0 + 61), first.at);
+    const early = when(&s, seen, 0, true).?;
+    try std.testing.expectEqual(@as(i64, t0 + 61), early.at);
 }
 
 test "spaced: an hour between update reboots" {
@@ -835,21 +847,21 @@ test "why: Urgent, Low and a first check" {
         w.buffered(),
     );
     w = .fixed(&buf);
-    try why(&w, &s, .low, no_cve, t0, 30, true, t0 + 30, t0);
+    try why(&w, &s, .low, no_cve, t0, 30, true, t0 + 61, t0);
     try std.testing.expectEqualStrings(
         "Low: an update, no CVE, first seen 2026-10-07T14:02:11Z. It is this machine's first " ++
-            "check, so it boots within 2m, where this machine's place is 30s in. " ++
-            "Due 2026-10-07T14:02:41Z, in 30s.",
+            "check, so it boots within 2m, where this machine's place is 1m 1s in. " ++
+            "Due 2026-10-07T14:03:12Z, in 1m 1s.",
         w.buffered(),
     );
-    // A reboot held for the hour after boot is explained in the sentence.
+    // A reboot held for the hour after the last update reboot is explained.
     w = .fixed(&buf);
     try why(&w, &s, .urgent, fix, t0, 61, false, t0 + hour, t0);
     try std.testing.expectEqualStrings(
         "Urgent: CVE-2026-2222 in curl, in KEV since 2026-10-06, first seen " ++
             "2026-10-07T14:02:11Z. " ++
             "Urgent fixes boot within 15m, where this machine's place is 1m 1s in. " ++
-            "An update reboot waits until 1h after boot. Due 2026-10-07T15:02:11Z, in 1h.",
+            "An update reboot waits until 1h after the last one. Due 2026-10-07T15:02:11Z, in 1h.",
         w.buffered(),
     );
 }

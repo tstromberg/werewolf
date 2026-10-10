@@ -1,16 +1,12 @@
 # Authelia
 
-The `authelia` form is single sign-on with a second factor:
-[Authelia](https://www.authelia.com) 4.39, with Caddy in front, guarding
-every site under your domain. One sign-in, with a password and a TOTP
-app or a security key, reaches them all; nothing is reachable without it
-([design/forms-catalog.md](../../docs/design/forms-catalog.md)).
+One sign-in for every site under your domain: [Authelia](https://www.authelia.com) 4.39, a password plus a TOTP app or a security key, with Caddy in front.
 
-## Run your own
+## Getting Started
 
-You need a domain, with `example.com` and `*.example.com` pointing at the
-machine. Hash each user's password with `authelia crypto hash generate
-argon2` (or `argon2`, Argon2id, m=65536, t=3, p=4), into `users.yml`:
+### Local test deployment (lima, qemu, firecracker)
+
+Hash each password with `authelia crypto hash generate argon2` (Argon2id, m=65536, t=3, p=4) into `users.yml`:
 
 ```yaml
 users:
@@ -23,7 +19,19 @@ users:
 
 ```sh
 openssl rand -hex 32 >session-secret
-openssl rand -hex 32 >storage-key      # encrypts the database; keep it
+openssl rand -hex 32 >storage-key
+howl create sso --with authelia --on lima \
+	--domain home.arpa --sso-users users.yml \
+	--session-secret session-secret --storage-key storage-key
+```
+
+Open `https://auth.home.arpa`. Without SMTP, registering a second factor has no mail channel: use the cloud command once you have a relay.
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+openssl rand -hex 32 >session-secret
+openssl rand -hex 32 >storage-key
 howl create sso --with authelia --on gcp --allow-from 0.0.0.0/0 \
 	--domain example.com --sso-users users.yml \
 	--session-secret session-secret --storage-key storage-key \
@@ -31,70 +39,19 @@ howl create sso --with authelia --on gcp --allow-from 0.0.0.0/0 \
 	--smtp-username auth@example.com --smtp-password smtp-password
 ```
 
-Each user signs in at `https://auth.example.com`, receives a one-time
-code by mail, and registers a TOTP app or a security key.
+Point `example.com` and `*.example.com` at the machine. Each person signs in at `https://auth.example.com`, receives a one-time code by mail, and registers a TOTP app or a security key. Keep `storage-key`: it encrypts the database.
 
-| Flag | |
-| --- | --- |
-| `--domain NAME` | required. The cookie's domain: the portal is `auth.NAME`, and NAME and every name under it need both factors |
-| `--sso-users FILE`, `--session-secret FILE`, `--storage-key FILE` | required. Users, and the two secrets, never printed or logged |
-| `--smtp-server HOST:PORT` | the mail server for one-time codes: 587 STARTTLS, 465 TLS; TLS 1.2 at least, verified |
-| `--smtp-sender`, `--smtp-username`, `--smtp-password FILE` | its sender, and its login |
+### Known Quirks
 
-Without a mail server, codes go to `/data/svc/authelia/notification.txt`,
-which only root reads: a machine with no shell then has no way to
-register a second factor. Give it one.
+- Default policy is deny. A site is reachable only after a sign-in Authelia accepts.
+- Repeated failures are banned.
+- No secret is generated on the machine. A missing file parks the service and says which one.
+- Users live in the file you passed, not in a directory.
 
-## Your sites behind it
+### Network Exposure
 
-A form of your own takes `with: [authelia]`, and adds a file per site
-in `rootfs/etc/caddy/sites/NAME.caddy`, which Caddy reads after the
-domain's own:
+- tcp/80 and tcp/443, Caddy. Authelia is on loopback. Mail leaves on the SMTP port you name.
 
-```text
-grafana.{$DOMAIN} {
-	import authelia
-	reverse_proxy 127.0.0.1:3000
-}
-```
+### Security Weaknesses
 
-`import authelia` asks Authelia about every request; one that passes
-carries `Remote-User`, `Remote-Groups`, `Remote-Email` and `Remote-Name`,
-set by Caddy from Authelia's answer, never the client's. Add the site's
-port to Caddy's `connect` in your form's `caddy` service.
-
-## How the parts are held
-
-| Part | Runs as | Reaches |
-| --- | --- | --- |
-| Caddy | `caddy` | :80 and :443; Authelia on loopback; the ACME CA |
-| Authelia | `authelia` | a mail server on 587 or 465 |
-
-- **Deny by default.** No rule, no access; every name under the domain
-  needs two factors.
-- **Users from the config.** No sign-up; password reset and change are
-  off, since the next start copies the file again. Change the file.
-- **Brute force is banned.** Three wrong passwords in two minutes ban
-  the user for ten.
-- **Nothing phoned home.** No NTP check, no telemetry.
-- **Built here.** melange builds the portal with Wolfi's Node and the
-  server with Wolfi's Go, linked to Wolfi's SQLite
-  ([melange/authelia.yaml](melange/authelia.yaml)).
-
-## Drawbacks
-
-- No OpenID Connect provider yet: apps that sign in by OIDC (Gitea,
-  Grafana) use it only behind `forward_auth`, by header.
-- Users in a file: a directory (LDAP) is not wired.
-
-## Checked
-
-`make check-authelia` boots it with its test config ([test/config](test/config)),
-domain `werewolf.internal`, for which Caddy's own CA signs: the portal
-answers its health check; a visitor without a session is sent to the
-portal, as is one forging `Remote-User`; alice's right password alone
-leaves her at one factor, sent back to the portal; and three wrong
-passwords ban bob, whose right one is then refused.
-`make check-shellfree-authelia` boots it as it ships, with no config:
-no posture failure but those named, Authelia parked for want of its
-users, Caddy for want of its domain.
+None the form does not already refuse: a password alone does not sign in.

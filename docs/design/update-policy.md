@@ -94,7 +94,9 @@ once the head is kept off the machine ([events](../updater.md#events)).
 
 ## Reliability Considerations
 
-- No update reboot comes within an hour of boot, so no source can cause a
-  reboot loop. An Urgent fix restarts a whole fleet within 15 minutes.
+- Update reboots are an hour apart, counted from the last one, so no
+  source can cause a reboot loop. A cold boot is not that reboot: a due
+  posture fix is taken then, after a short notice. An Urgent fix restarts
+  a whole fleet within 15 minutes.
 - Open: draining (`/etc/werewolf/drain-seconds`) is not built; what hourly
   checks cost Wolfi's mirrors; a CDN for the feed, for large fleets.

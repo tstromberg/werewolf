@@ -19,6 +19,8 @@ const slot = @import("slot.zig");
 const manifest = @import("manifest.zig");
 const disk = @import("disk.zig");
 const published = @import("published.zig");
+const locks = @import("lock.zig");
+const deployment = @import("deployment.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -48,8 +50,6 @@ pub const Spec = struct {
     dev: bool = false,
     /// app is the staged application's root (howl.appBuild), or null.
     app: ?[]const u8 = null,
-    /// freeze pins every package to its lock, as FREEZE=1 does.
-    freeze: bool = false,
     /// build and programs replace BUILD and PROGRAMS, as make's BUILD= and
     /// PROGRAMS= do, to keep a build apart from build/ARCH.
     build: ?[]const u8 = null,
@@ -175,7 +175,6 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .form = ref,
         .arch = o.arch,
         .app = ab.root,
-        .freeze = frozen(),
         .published = !o.local,
     };
     try make(
@@ -316,7 +315,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
         "[--verbose] image|slot|disk|qcow2...";
-    var spec: Spec = .{ .form = "", .arch = undefined, .freeze = frozen() };
+    var spec: Spec = .{ .form = "", .arch = undefined };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
     var app_dir: ?[]const u8 = null;
@@ -393,13 +392,6 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     });
 }
 
-/// frozen reports whether FREEZE is set, as make's FREEZE=1: every package
-/// pinned to its lock, for a reproducible build.
-pub fn frozen() bool {
-    const v = howl.environ.get("FREEZE") orelse return false;
-    return v.len > 0;
-}
-
 /// Size formats a byte count for people: 812 KiB, 44 MiB, 1.2 GiB.
 const Size = struct {
     bytes: u64,
@@ -426,6 +418,9 @@ pub const B = struct {
     /// from_repo are the chain's forms that came from werewolf's repository
     /// (published.zig), each NAME-form in the image's world.
     from_repo: []const []const u8,
+    locked_images: []const locks.Image = &.{},
+    resolved_images: std.ArrayList(locks.Image) = .empty,
+    deployment: ?deployment.Prepared = null,
     /// name is the form's name, the last of its chain's.
     name: []const u8,
     /// self is howl's executable, which holds the steps' code: what the
@@ -572,7 +567,7 @@ pub const B = struct {
 /// make builds goals of s, logging each step and its time to steps.
 pub fn make(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
     pipeline(io, gpa, steps, s, goals) catch |err| switch (err) {
-        error.Refused => return err,
+        error.Refused, error.OlderDeclaration => return err,
         else => return steps.fail(@errorName(err)),
     };
 }
@@ -597,17 +592,20 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
     const p = try paths(gpa, s);
     const env = try toolEnv(gpa);
+    const fingerprint = try locks.inputs(io, gpa, s);
+    const previous = try locks.matching(io, gpa, s);
     // Published, the forms a name reaches come from werewolf's repository,
-    // at the versions a frozen build's lock names.
+    // at the versions the matching input lock names.
     const names = try published.names(
         io,
         gpa,
         if (s.published) s.arch else null,
         s.form,
-        try lockedForms(io, gpa, s),
+        if (previous) |rec| try locks.formPins(gpa, rec) else &.{},
         steps.why,
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
+    if (previous) |rec| b.locked_images = rec.images;
     // The chain's images, baked before anything renders their services.
     try oci.lay(&b);
     const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2;
@@ -619,7 +617,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
     if (goals.lock and !image_goals) {
         try packages.apkoConfig(&b, config);
-        return packages.relock(&b, lock, config);
+        return packages.boundLock(&b, lock, config, &fingerprint, previous != null);
     }
     // make compiles the programs the overlay lays, in a checkout: each
     // compile is mostly one thread, so as many at once as there are CPUs.
@@ -641,7 +639,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     try packages.kernel(&b);
     if (!image_goals and !goals.lock) return;
     try packages.apkoConfig(&b, config);
-    try packages.relock(&b, lock, config);
+    try packages.boundLock(&b, lock, config, &fingerprint, previous != null);
     if (!image_goals) return;
     const rootfs = try b.path("{s}/rootfs.tar", .{p.out});
     try packages.apkoBuild(&b, rootfs, config, lock, &.{ lock, config });
@@ -664,24 +662,6 @@ const every_program = [_][]const u8{
 };
 
 /// plan reads the form's chain and works out everything the steps need.
-/// lockedForms returns the form packages a frozen published build's lock
-/// pins, NAME=VERSION each, so its forms are the ones it installs.
-fn lockedForms(io: Io, gpa: Allocator, s: Spec) ![]const []const u8 {
-    if (!s.freeze or !s.published) return &.{};
-    const name = std.fs.path.basename(mem.trimEnd(u8, s.form, "/"));
-    const path = try gpa.print("build/lock/{s}{s}-published.lock.json", .{
-        name,
-        if (s.dev) "-dev" else "",
-    });
-    const lock = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20)) catch return &.{};
-    var out: std.ArrayList([]const u8) = .empty;
-    for (try packages.pins(gpa, lock, @tagName(s.arch))) |pin| {
-        const eq = mem.findScalar(u8, pin, '=') orelse continue;
-        if (mem.endsWith(u8, pin[0..eq], "-form")) try out.append(gpa, pin);
-    }
-    return out.items;
-}
-
 fn plan(
     io: Io,
     gpa: Allocator,
@@ -881,6 +861,8 @@ test buildOptions {
 }
 
 test {
+    _ = locks;
+    _ = deployment;
     _ = packages;
     _ = melange;
     _ = slot;

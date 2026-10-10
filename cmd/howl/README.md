@@ -2,9 +2,7 @@
 
 ## Summary
 
-howl is werewolf's command-line tool. It builds a form's image, packs the
-config tar a machine boots with, and creates, reaches and deletes machines,
-here or in a cloud. The design is [docs/design/cli.md](../../docs/design/cli.md).
+howl builds images, packs boot config, and creates, updates, reaches and deletes machines here or in a cloud. The design is [docs/design/cli.md](../../docs/design/cli.md).
 
 ## Background
 
@@ -16,6 +14,7 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 | `build --with FORM` | builds the image itself, byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)): boot disk (`disk.zig`, with mtools and e2fsprogs) and manifest `FORM-ARCH.json` (`manifest.zig`) in `dist`; `--format raw\|vhd\|vmdk` converts with qemu-img |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's forms and programs in, not the published ones the machine updates |
+| `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
 | `run` | `create` of `werewolf-run`, replacing the last; default form playground, on every engine |
 | `ssh`, `console`, `stop`, `delete` | reach, read or remove a machine; with no NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
@@ -27,7 +26,7 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 
 - One command from form to running machine; what pack accepts, the machine
   accepts, because both run the same checks.
-- No state but `build/machines/NAME`; each platform lists its own machines.
+- Machine records in `build/machines/NAME`, signing keys and history in `~/.howl`.
 
 ## Non-Goals
 

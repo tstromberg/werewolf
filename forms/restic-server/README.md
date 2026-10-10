@@ -1,85 +1,42 @@
 # restic-server
 
-The `restic-server` form is `prod` with restic's REST server 0.14, the
-backup target for your other machines, behind Caddy, which serves it
-over HTTPS for your domain. It is append-only: a client adds snapshots,
-but cannot delete or rewrite one, so a machine broken into cannot take
-its backups with it.
+A place restic sends backups: [rest-server](https://github.com/restic/rest-server), append-only, from restic's own image, behind Caddy. Each user can see only the repository of their own name, and cannot delete a snapshot.
 
-| | |
-| --- | --- |
-| Listens | tcp/80 and tcp/443, Caddy's; rest-server on loopback alone |
-| Sends | nothing but Caddy's ACME requests |
-| Runs as | `_oci-restic-server` in restic's own image, and `caddy`, each leashed |
-| Keeps | one repository a user in `/data/svc/restic-server/USER` |
-| Config | `restic-server/restic-users`, htpasswd lines, bcrypt (`htpasswd -nB NAME`); setting `domain` (required) |
+## Getting Started
 
-## Run your own
-
-You need a domain name you can point at the machine.
+### Local test deployment (lima, qemu, firecracker)
 
 ```sh
-htpasswd -nB laptop >restic-users     # one line a machine; -B is bcrypt
+htpasswd -nB laptop >restic-users
+howl create backup --with restic-server --on lima \
+	--domain backup.home.arpa --restic-users restic-users
+```
+
+`htpasswd -nB` is bcrypt and asks for the password. On the machine you are backing up:
+
+```sh
+export RESTIC_REPOSITORY=rest:https://laptop:PASSWORD@backup.home.arpa/laptop/
+restic init && restic backup ~
+```
+
+### Cloud production deployment (aws, gcp, azure, proxmox)
+
+```sh
+htpasswd -nB laptop >restic-users
+htpasswd -nB nas >>restic-users
 howl create backup --with restic-server --on gcp --allow-from 0.0.0.0/0 \
 	--domain backup.example.com --restic-users restic-users
 ```
 
-Point `backup.example.com` at the address howl prints. Then, on the
-machine backed up:
+Point the name at the machine. Add a line and run create again to add a user. Repositories already on `/data` stay. Forget and prune are done by a restic that is allowed to, which this server is not: a stolen client password cannot erase history.
 
-```sh
-export RESTIC_REPOSITORY=rest:https://laptop:PASSWORD@backup.example.com/laptop/
-restic init && restic backup ~
-```
+### Known Quirks
 
-A user reaches only the repository of its own name. To add one, add a
-line and run the create line again: howl replaces the config and
-restarts the service; the repositories on `/data` stay.
+- The repository name in the URL is the username. `laptop` cannot open `nas`.
+- Append-only means a backup can be added and read, not deleted, from this server.
+- There is no web page. restic is the client.
+- The image is pinned by digest at each build.
 
-## Defaults
+### Network Exposure
 
-- **Append-only, always.** rest-server refuses every delete and every
-  overwrite, so `restic forget` and `prune` fail from a client. A thief
-  holding a client's password reads that client's backups (they hold the
-  data anyway) but cannot destroy them.
-- **Private repositories.** Each user's requests stay under `/USER/`.
-- **No users built in**, and no `--no-auth`: with no `restic-users` file
-  rest-server parks before it binds, saying so.
-- **Uploads are verified.** rest-server checks each blob's hash as it
-  arrives.
-- **No metrics**, no outbound network: fence has no line for its user.
-- **restic's own image**, `latest`, pinned by digest at each build, so a
-  new image follows each rest-server release; run in a tree of its own
-  ([oci.md](../../docs/design/oci.md)): its entrypoint is a shell
-  script, so leash runs `/usr/bin/rest-server` itself, and nothing else in
-  the image can run.
-
-## Pruning
-
-Append-only means nothing on the network can remove a snapshot, this
-form included: repositories grow until you prune them. Prune from a
-machine you trust with the disk's files (restic's own advice), with the
-repository's password: `restic -r /mnt/USER forget --keep-daily 7
---keep-weekly 5 --prune`. A prune service on this machine, with
-credentials of its own that no client holds, is open (below).
-
-## Drawbacks
-
-- The repository password is the client's alone: the server holds
-  encrypted packs, and cannot check or prune them by itself.
-- Only bcrypt and `{SHA}` lines are accepted by rest-server; use bcrypt.
-  `{SHA}` is unsalted SHA-1, quick to crack from a stolen file.
-- Open: pruning on the machine. It needs a second rest-server, without
-  `--append-only`, sharing the repositories, which image services cannot
-  do yet.
-
-## Checked
-
-`make check-restic-server` boots it with its test config
-([test/config](test/config)), domain `localhost`, for which Caddy's own
-CA signs: a stranger and a wrong password get 401; alice makes her
-repository and backs up to it with restic; bob cannot reach hers; fence
-has no line for rest-server; and alice's credentials cannot delete her
-snapshot, which is still there. `make check-shellfree-restic-server`
-boots it as it ships, with no config: rest-server and Caddy park, each
-saying why.
+- tcp/80 and tcp/443, Caddy. rest-server is on loopback.

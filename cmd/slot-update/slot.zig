@@ -66,10 +66,19 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // werewolf-advisories brings the new root's list; an image built from a
     // tree carries its own forward.
     const skip: []const []const u8 = if (try r.exists(u, "usr/share/werewolf/advisories"))
-        &(compose.records ++ [_][]const u8{"advisories"})
+        &(compose.records ++ [_][]const u8{ "advisories", "local" })
     else
-        &compose.records;
+        &(compose.records ++ [_][]const u8{"local"});
     try copyTree(u, r, "", "usr/share/werewolf", skip);
+    // local-NAME owns this isolated tree. Lay its application after the
+    // carried programs, and never copy the running declaration over it.
+    if (try r.exists(u, "usr/share/werewolf/local/overlay")) {
+        const app = work_dir ++ "/local-overlay";
+        var scratch = try Dir.cwd().createDirPathOpen(io, app, .{});
+        defer scratch.close(io);
+        try copyOut(u, r, "usr/share/werewolf/local/overlay", scratch, ".");
+        try copyTree(u, r, app, "", &.{});
+    }
     // The sh shim is /bin/sh where no package (busyboxLinks laid
     // busybox's) or form gave one, as the build lays it (cmd/sh-shim).
     if (try r.exists(u, "usr/lib/werewolf/sh-shim") and !try r.exists(u, "usr/bin/sh"))
@@ -77,7 +86,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     // Remove what the form prunes (form.yaml's prune), as the build does. A
     // path the packages no longer bring is logged, not an error, so an
     // upstream change cannot stop updates.
-    for (try u.lines(try u.read(meta_dir ++ "/prune"))) |p| {
+    for (try u.lines(try r.read(u, "usr/share/werewolf/prune"))) |p| {
         if (try r.remove(u, p)) continue;
         try u.record(.{ .event = "prune", .path = p, .why = "not in the packages now" });
     }
@@ -257,6 +266,7 @@ pub fn install(u: *Update, build: []const u8) !void {
         io,
         .{},
     );
+    try rememberDeclaration(u, v, rdir);
     linux.sync();
     // bite's GRUB entries read each slot's kernel arguments from the
     // environment, so an update's new arguments reach older machines.
@@ -281,6 +291,82 @@ fn writeAttempt(u: *Update, build: []const u8) !void {
         attempt_path,
         try u.gpa.print("{s} {s} {s}\n", .{ u.other, build, try u.bootId() }),
     );
+}
+
+/// Record which declaration each slot holds while both are known. These
+/// records select an existing slot; they never authorize package bytes.
+fn rememberDeclaration(u: *Update, victim: []const u8, other: []const u8) !void {
+    const current = u.read(meta_dir ++ "/local/inputs") catch "";
+    const next = readIn(u, work_dir ++ "/root", "usr/share/werewolf/local/inputs") catch "";
+    if (current.len == 64) try u.writeReplacing(try u.gpa.print("{s}{s}/{s}/declaration", .{
+        victim, u.cmd.victim.?.path, u.slot,
+    }), current);
+    if (next.len == 64) try u.writeReplacing(try u.gpa.print("{s}/declaration", .{other}), next);
+}
+
+/// tryOther arms the other slot as it stands. With expected, an older
+/// manifest may select only the slot that holds its exact image inputs.
+pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
+    Dir.cwd().access(u.io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
+    const lock = try u.lock();
+    defer _ = linux.close(lock);
+    const victim = try u.held(.victim);
+    defer victim.release();
+    const root = try u.gpa.print("{s}{s}/{s}", .{ victim.path(), u.cmd.victim.?.path, u.other });
+    try Dir.cwd().access(u.io, try u.gpa.print("{s}/root.erofs", .{root}), .{});
+    if (expected) |hash| {
+        if (hash.len != 64) return error.BadDeclarationHash;
+        const held = try u.read(try u.gpa.print("{s}/declaration", .{root}));
+        if (!std.mem.eql(u8, hash, held)) return error.DeclarationNotInOtherSlot;
+    }
+    if (u.cmd.grubenv) |grubenv| {
+        const grub = try u.held(.grub);
+        defer grub.release();
+        const env = try u.gpa.print("{s}{s}", .{ grub.path(), grubenv.path });
+        try u.run(&.{
+            "/usr/lib/werewolf/grub-setenv",
+            env,
+            "next_entry",
+            try u.gpa.print("werewolf-{s}", .{u.other}),
+        });
+    } else {
+        const esp = try u.held(.esp);
+        defer esp.release();
+        const entries = try u.gpa.print("{s}/loader/entries", .{esp.path()});
+        var options: ?[]const u8 = null;
+        var newest: i64 = 0;
+        const names = try u.listDir(entries);
+        for (names) |name| {
+            const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
+            newest = @max(newest, entrySecs(text) orelse 0);
+            if (!isEntryOf(name, u.other)) continue;
+            var lines = std.mem.splitScalar(u8, text, '\n');
+            while (lines.next()) |line| if (std.mem.cutPrefix(
+                u8,
+                line,
+                "options ",
+            )) |o| {
+                options = o;
+            };
+        }
+        const opts = options orelse return error.NoOtherSlotEntry;
+        const serial = try u.gpa.print(
+            "{f}",
+            .{policy.Serial{ .secs = @max(nowSecs(u.io), newest + 1) }},
+        );
+        const entry = try loaderEntry(u.gpa, u.other, serial, opts);
+        for (names) |name| if (isEntryOf(name, u.other))
+            try Dir.cwd().deleteFile(u.io, try u.gpa.print("{s}/{s}", .{ entries, name }));
+        try u.writeReplacing(
+            try u.gpa.print("{s}/werewolf-{s}+1.conf", .{ entries, u.other }),
+            entry,
+        );
+    }
+    Dir.cwd().deleteFile(u.io, m.pending_path) catch {};
+    try writeAttempt(u, expected orelse "operator-try");
+    try u.record(.{ .event = "try", .slot = u.other, .declaration = expected });
+    linux.sync();
+    try u.run(&.{"/usr/bin/reboot"});
 }
 
 /// installEsp installs the other slot on werewolf's own disk
@@ -338,6 +424,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
             .{},
         );
     }
+    try rememberDeclaration(u, v, rdir);
     linux.sync();
 
     // systemd-boot boots the newest version, so the new entry must be newer
@@ -682,9 +769,13 @@ fn composeInto(u: *Update, r: Root) !void {
             "compose; install a newer one";
         return error.NoStagedForms;
     };
-    for (r.list(u, here) catch &.{}) |name| if (published(world, name))
+    const local = "usr/share/werewolf/local/forms";
+    const local_names = r.list(u, local) catch &.{};
+    for (local_names) |name|
+        try copyOut(u, r, try u.gpa.print("{s}/{s}", .{ local, name }), into, name);
+    for (r.list(u, here) catch &.{}) |name| if (published(world, name) or local_names.len > 0)
         try copyOut(u, r, try u.gpa.print("{s}/{s}", .{ here, name }), into, name);
-    for (mine) |name| if (!published(world, name))
+    for (mine) |name| if (!published(world, name) and local_names.len == 0)
         try copyOut(u, running, try u.gpa.print("{s}/{s}", .{ here, name }), into, name);
     var f: form.Failure = .{};
     errdefer if (f.text.len > 0) {
