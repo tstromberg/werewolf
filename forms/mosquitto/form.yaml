@@ -10,10 +10,26 @@ base: prod
 packages:
   - mosquitto
 
-# Mosquitto serves MQTT over TLS, and sends nothing: no bridges.
-net:
-  - listen tcp/8883
-
 # The check speaks MQTT with Mosquitto's own clients.
 dev:
   - mosquitto-clients
+
+services:
+  # Mosquitto, as its own user: it may bind :8883 and no other port, read
+  # its configuration and the image, and write only its own directories.
+  # It reaches nothing on the network. Its certificate, users and ACLs come
+  # from the machine's config: missing, the service parks with a line
+  # naming the file.
+  mosquitto:
+    exec: /usr/bin/mosquitto -c /etc/mosquitto/mosquitto.conf
+    user: mosquitto
+    pledge: stdio rpath wpath inet unix listen proc
+    listen: [tcp/8883]
+    read: /etc/mosquitto
+    config:
+      - tls-cert /run/config/mosquitto/tls.crt
+      - tls-key /run/config/mosquitto/tls.key
+      - passwords /run/config/mosquitto/passwords
+      - acls /run/config/mosquitto/acls
+    memory: 128
+    nofile: 4096

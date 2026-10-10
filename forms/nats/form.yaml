@@ -10,13 +10,27 @@ base: prod
 packages:
   - nats-server
 
-# NATS serves its clients over TLS, and sends nothing: no routes, no
-# leaf nodes, no gateways. Its monitor, on 127.0.0.1:8222, serves the
-# machine alone.
-net:
-  - listen tcp/4222
-  - listen tcp/8222 loopback
-
 # The check speaks NATS with its own client.
 dev:
   - nats
+
+services:
+  # nats-server, as its own user: it may bind :4222, and :8222 on loopback
+  # for monitoring (which fence lets no one outside reach), read its
+  # configuration and the image, and write only its own directories. It
+  # reaches nothing on the network. Its certificate, key and the users'
+  # file come from the machine's config: missing, the service parks with a
+  # line naming the file.
+  nats:
+    exec: /usr/bin/nats-server -c /etc/nats/nats-server.conf
+    user: nats
+    pledge: stdio rpath wpath inet unix listen proc
+    listen: [tcp/4222, tcp/8222 loopback]
+    read: /etc/nats
+    config:
+      - tls-cert /run/config/nats/tls.crt
+      - tls-key /run/config/nats/tls.key
+      - users /run/config/nats/users.conf
+    memory: 512
+    nofile: 65536
+    env: [HOME=/run/svc/nats, GOMEMLIMIT=384MiB]

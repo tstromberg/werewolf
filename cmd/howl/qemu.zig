@@ -107,7 +107,7 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel, el2: bool) ![]const []const u8
         "-smp",
         "4",
         "-m",
-        "2048",
+        std.fmt.comptimePrint("{d}", .{howl.local_mib}),
         "-kernel",
         m.kernel,
         "-initrd",

@@ -5,10 +5,6 @@
 # this one lays main.rb there, as ruby-example does. See docs/forms.md.
 base: ruby
 
-# The application serves on 8080.
-net:
-  - listen tcp/8080
-
 # make check's, for this form alone (forms/README.md): it ships no
 # application, so its service stays down: nothing listens on 8080, and
 # nothing is in its cgroup to count or reap.
@@ -19,3 +15,17 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: ruby runs the application laid in /usr/lib/app
+
+services:
+  # The application, as its own user: it may bind :8080 and no other port,
+  # read the image, and run only ruby. Gems come with the image; nothing is
+  # installed at runtime, and the image is read-only, so Bundler is frozen.
+  # Down until main.rb is there: this form ships none.
+  app:
+    exec: /usr/bin/ruby /usr/lib/app/main.rb
+    user: app
+    requires: /usr/lib/app/main.rb
+    pledge: stdio rpath proc inet listen
+    memory: 512
+    listen: [tcp/8080]
+    env: [BUNDLE_FROZEN=true, BUNDLE_DEPLOYMENT=true, HOME=/run/svc/app]

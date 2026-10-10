@@ -12,11 +12,32 @@ base: prod
 packages:
   - openbao
 
-# OpenBao serves its API and UI on :8200, and sends nothing: its seal is
-# a key on the machine. A form that unseals with a cloud KMS adds
-# `connect openbao tcp/443 udp/53 tcp/53` and `metadata openbao`; one that
-# clusters makes `listen tcp/8201` public; here raft's cluster listener
-# is on loopback, for the machine alone.
-net:
-  - listen tcp/8200
-  - listen tcp/8201 loopback
+services:
+  # OpenBao, as its own user: it may bind :8200, and :8201 on loopback for
+  # raft's cluster listener, which fence lets no one outside reach; read
+  # its configuration and the image; and write only its own directories,
+  # raft's storage being /data/svc/openbao itself. It reaches nothing on
+  # the network.
+  openbao:
+    exec: /usr/bin/bao server -config=/run/svc/openbao/config.json -config=/etc/openbao/openbao.hcl
+    user: openbao
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/8200, tcp/8201 loopback]
+    read: /etc/openbao
+    # The unseal key (32 random bytes), the API's certificate and key, and
+    # the admin's first password, from the machine's config: missing, the
+    # service parks with a line naming the file.
+    config:
+      - unseal-key /run/config/openbao/unseal-key
+      - tls-cert /run/config/openbao/tls.crt
+      - tls-key /run/config/openbao/tls.key
+      - admin-password /run/config/openbao/admin-password
+      - settings /run/config/openbao/settings.json
+    # The address clients reach it at, into the image's configuration.
+    setting:
+      - api-addr url required as api_addr
+      - unseal-key-id string as seal.static.current_key_id
+    render: json config.json from /etc/openbao/config.json
+    memory: 768
+    nofile: 65536
+    env: [HOME=/run/svc/openbao, GOMEMLIMIT=512MiB]

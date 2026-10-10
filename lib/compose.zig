@@ -66,8 +66,27 @@ pub fn compose(
     const group = accts.group;
     const shadow = accts.shadow;
 
-    // ro: each form's rootfs, base first, so later forms' files win.
+    // ro: each form's rootfs, base first, so later forms' files win; then
+    // the services form.yaml renders, each on a leash: its file, and run
+    // and finish links to leash where the rootfs laid none.
     for (forms) |fm| try lay(io, gpa, root, try gpa.print("{s}/rootfs", .{fm.dir}), ro, "");
+    for (try form.services(io, gpa, root, forms, f)) |s| {
+        if (mem.find(u8, s.path, "form.yaml: services.") == null) continue;
+        const dir = try gpa.print("etc/sv/{s}", .{s.name});
+        try ro.createDirPath(io, dir);
+        try put(io, ro, try gpa.print("{s}/service", .{dir}), s.text);
+        for ([_][2][]const u8{ .{ "run", "leash" }, .{ "finish", "leash-reap" } }) |link| {
+            ro.symLink(
+                io,
+                try gpa.print("/usr/lib/werewolf/{s}", .{link[1]}),
+                try gpa.print("{s}/{s}", .{ dir, link[0] }),
+                .{},
+            ) catch |err| switch (err) {
+                error.PathAlreadyExists => {},
+                else => |e| return e,
+            };
+        }
+    }
     // One empty file per allowance, for init, fence and posture.
     try ro.createDirPath(io, "etc/werewolf/allow");
     for (allowed) |a| try put(io, ro, try gpa.print("etc/werewolf/allow/{s}", .{a}), "");
@@ -758,18 +777,18 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
 /// would deny.
 pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failure) ![]const u8 {
     var declared: std.ArrayList(u16) = .empty;
-    for (forms) |fm| for (try fm.items(gpa, "net")) |line| {
+    for (try form.netLines(gpa, forms, f)) |line| {
         var why: []const u8 = "";
         const l = (form.listen(gpa, line, &why) catch |err| switch (err) {
             error.Invalid => return f.fail(
                 gpa,
-                "{s}/form.yaml: net: {s}: {s}",
-                .{ fm.dir, line, why },
+                "{s}: net: {s}: {s}",
+                .{ forms[forms.len - 1].dir, line, why },
             ),
             error.OutOfMemory => return error.OutOfMemory,
         }) orelse continue;
         try declared.appendSlice(gpa, l.ports);
-    };
+    }
     var promises: seal.Set = .empty;
     const services = try form.services(io, gpa, root, forms, f);
     const parsed = try gpa.alloc(service.Service, services.len);
@@ -863,6 +882,8 @@ fn serviceNames(io: Io, gpa: Allocator, root: Dir, forms: []const Form) ![]const
             {},
         );
     }
+    for (forms) |fm| if (fm.spec.get("services")) |svcs| for (svcs.map) |s|
+        try set.put(gpa, s.key, {});
     const out = set.keys();
     sortStrings(out);
     return out;
@@ -939,14 +960,14 @@ pub fn net(gpa: Allocator, forms: []const Form, passwd: []const u8, f: *Failure)
         try uids.put(gpa, name, fi.next() orelse "");
     }
     var out: std.ArrayList([]const u8) = .empty;
-    for (forms) |fm| for (try fm.items(gpa, "net")) |item| {
+    for (try form.netLines(gpa, forms, f)) |item| {
         const line = uncommented(item);
         if (!try netLine(gpa, try words(gpa, line), &uids, &out)) return f.fail(
             gpa,
-            "form {s}: form.yaml's net cannot compile: {s}",
+            "form {s}: a net line cannot compile: {s}",
             .{ forms[forms.len - 1].name, line },
         );
-    };
+    }
     sortStrings(out.items);
     var text: std.ArrayList(u8) = .empty;
     for (out.items, 0..) |line, i| {

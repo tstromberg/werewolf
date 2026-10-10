@@ -68,7 +68,7 @@ pub const Machine = struct { arch: []const u8, size: []const u8, nic: []const u8
 pub fn machine(arch: howl.Arch) Machine {
     return switch (arch) {
         .aarch64 => .{ .arch = "ARM64", .size = "t2a-standard-1", .nic = "GVNIC" },
-        .x86_64 => .{ .arch = "X86_64", .size = "e2-small", .nic = "VIRTIO_NET" },
+        .x86_64 => .{ .arch = "X86_64", .size = "e2-medium", .nic = "VIRTIO_NET" },
     };
 }
 

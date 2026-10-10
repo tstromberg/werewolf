@@ -28,3 +28,24 @@ accounts:
 # sh-shim, the crontab's SHELL, and the allowance that lets the leash run
 # it: supercronic runs each job as `sh-shim -c COMMAND`.
 with: [sh-shim]
+
+services:
+  # supercronic, as its own user, starts the crontab's jobs on their
+  # schedule: it reads the crontab and the image, writes only its own
+  # directories, and reaches nothing on the network. Each job is its child,
+  # under this same leash: the user, pledge, files, programs and ceilings
+  # here are the jobs' too, and a job runs as `sh-shim -c COMMAND` (the
+  # sh-shim form's `allow: [sh]` lets it), which can start only a program a
+  # `run` line names. A form with jobs lays its own
+  # file here: a `run` line naming each job's program, and what they need
+  # beyond these (`wpath`, `connect`, `write`, more `memory`). -no-reap:
+  # supercronic is not PID 1, and leash-reap kills what a job leaves.
+  cron:
+    exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
+    user: supercronic
+    pledge: stdio rpath proc exec
+    read: /etc/cron
+    memory: 64
+    # Jobs are background work: a quarter share of contended CPUs, so a job
+    # cannot starve the services it runs beside.
+    cpu: 25

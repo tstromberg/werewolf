@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const apk = @import("apk");
+const package = @import("package");
 const compose = @import("compose");
 const form = @import("form");
 const stage0Modules = @import("image").modules;
@@ -402,6 +403,12 @@ pub fn apkAdd(
         "chown scratch",
     );
 
+    // apk fetches an index only if it changed since its cached copy was
+    // written, so a copy a CDN served stale outlives the publish it missed.
+    // werewolf's own index, a few kilobytes, is fetched whole each time;
+    // Wolfi's and Alpine's, megabytes and changed hourly, stay conditional.
+    try forgetIndex(u, cache, package.repository_key);
+
     // Fetch indexes, then packages: `cache download` fetches no index.
     const world = try std.mem.join(u.gpa, "\n", packages);
     for ([_][]const []const u8{ &.{"update"}, &.{ "cache", "download" } }) |applet| {
@@ -556,6 +563,18 @@ fn formatOf(name: []const u8) ?struct { n: u32, rest: []const u8 } {
     const end = std.mem.findNone(u8, rest, "0123456789") orelse rest.len;
     const n = std.fmt.parseInt(u32, rest[0..end], 10) catch return null;
     return .{ .n = n, .rest = rest[end..] };
+}
+
+/// forgetIndex removes from cache the indexes the key named key signs.
+fn forgetIndex(u: *Update, cache: []const u8, key: []const u8) !void {
+    var d = try Dir.cwd().openDir(u.io, cache, .{ .follow_symlinks = false });
+    defer d.close(u.io);
+    for (try u.listDir(cache)) |name| {
+        if (!std.mem.startsWith(u8, name, "APKINDEX.")) continue;
+        const data = d.readFileAlloc(u.io, name, u.gpa, .limited(max_read)) catch continue;
+        const by = apk.signer(u.gpa, data) catch continue;
+        if (std.mem.eql(u8, by, key)) try d.deleteFile(u.io, name);
+    }
 }
 
 /// prune deletes cached packages that root did not install, keeping the

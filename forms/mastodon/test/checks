@@ -13,3 +13,10 @@ ok  assets-served     f=$(cd /usr/lib/mastodon/public && ls packs/*.js 2>/dev/nu
 # Its secrets are on /data, for its group alone; its directory is the
 # group's, and what the jobs make there the web may change.
 ok  secrets-private   [ "$(stat -c '%a %U %G' /data/svc/mastodon/env)" = '640 mastodon mastodon' ] && [ "$(stat -c '%a %G' /data/svc/mastodon)" = '2771 mastodon' ]
+# fence lets the jobs, which do most of the federation, reach public
+# addresses on 443, as it lets the web.
+ok  jobs-egress       for n in mastodon mastodon-jobs; do u=$(grep "^$n:" /etc/passwd | cut -d: -f3); grep -q "^connect $u tcp 443" /usr/share/werewolf/net || { echo "$n has no tcp/443"; exit 1; }; done
+# The jobs, which send the mail, are given the relay's settings and its
+# password. Their environment is unreadable even to root here, which has
+# no CAP_SYS_PTRACE, so the check reads what leash rendered and was given.
+ok  jobs-smtp         s=/run/svc/mastodon-jobs/site; grep -qx 'SMTP_SERVER=smtp.example.com' $s && grep -qx 'SMTP_PORT=587' $s && grep -qx 'SMTP_FROM_ADDRESS=mastodon@example.com' $s && [ -s /run/config/mastodon-jobs/smtp-password ] && ! grep -q SMTP_PASSWORD $s

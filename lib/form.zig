@@ -407,6 +407,7 @@ const keys = [_][]const u8{
     "archs",
     "accounts",
     "paths",
+    "services",
     "allow",
     "app",
     "programs",
@@ -509,6 +510,29 @@ pub fn loadIn(
                 "{s}: accounts is apko's: groups and users, each a list",
                 .{path},
             );
+        } else if (mem.eql(u8, e.key, "services")) {
+            if (e.value != .map) return f.fail(
+                gpa,
+                "{s}: services maps each service's name to its directives",
+                .{path},
+            );
+            for (e.value.map) |s| {
+                if (!isName(s.key)) return f.fail(
+                    gpa,
+                    "{s}: services: {s}: not a service's name (a-z, 0-9 and -)",
+                    .{ path, s.key },
+                );
+                if (s.value != .map) return f.fail(
+                    gpa,
+                    "{s}: services: {s}: a map of leash's directives, each a value or a list",
+                    .{ path, s.key },
+                );
+                for (s.value.map) |d| if (d.value != .scalar and !isScalars(d.value)) return f.fail(
+                    gpa,
+                    "{s}: services: {s}: {s} is a value or a list of values",
+                    .{ path, s.key, d.key },
+                );
+            }
         } else if (mem.eql(u8, e.key, "paths")) {
             if (e.value != .list) return f.fail(gpa, "{s}: paths is apko's: a list", .{path});
         } else if (mem.eql(u8, e.key, "base")) {
@@ -706,25 +730,90 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
     return .{ .ports = ports, .loopback = loopback };
 }
 
+/// netLines returns the chain's network policy as net lines, base first:
+/// what each form's services say, then its own `net` lines. A service's
+/// listen values are listen lines as they stand; each connect value's
+/// network words (tcp/PORT, udp/PORT, icmp, public), if any, make a
+/// `connect USER ...` line for the service's user. A form's own net line
+/// may name only a user no service runs as, such as the updater's fetcher:
+/// a service's network is the service's to say.
+pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    var runs_as: std.array_hash_map.String([]const u8) = .empty;
+    for (forms) |form| {
+        const svcs = form.spec.get("services") orelse continue;
+        for (svcs.map) |s| {
+            const user = if (s.value.get(
+                "user",
+            )) |u| (if (u == .scalar) u.scalar.text else "") else "";
+            if (user.len > 0) try runs_as.put(gpa, user, s.key);
+            for (s.value.map) |d| {
+                const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
+                if (mem.eql(u8, d.key, "listen")) {
+                    for (values) |v| try out.append(
+                        gpa,
+                        try gpa.print("listen {s}", .{v.scalar.text}),
+                    );
+                } else if (mem.eql(u8, d.key, "connect")) for (values) |v| {
+                    var net: std.ArrayList([]const u8) = .empty;
+                    var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
+                    while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w))
+                        try net.append(gpa, w);
+                    if (net.items.len == 0) continue;
+                    if (user.len == 0) return f.fail(
+                        gpa,
+                        "{s}/form.yaml: services: {s}: connect needs the service's user",
+                        .{ form.dir, s.key },
+                    );
+                    try out.append(gpa, try gpa.print(
+                        "connect {s} {s}",
+                        .{ user, try mem.join(gpa, " ", net.items) },
+                    ));
+                };
+            }
+        }
+    }
+    // The bastion reaches its users' destinations, and nothing else: each
+    // one's port is a connect line (bastionService rewrites sshd's to them).
+    for (forms) |form| {
+        const node = form.spec.get("bastion") orelse continue;
+        for (try bastionUsers(gpa, form.dir, node, f)) |u| for (u.destinations) |d|
+            try out.append(gpa, try gpa.print("connect bastion tcp/{d}", .{sshd.port(d)}));
+    }
+    for (forms) |form| for (try form.items(gpa, "net")) |line| {
+        var it = mem.tokenizeAny(u8, line, " \t");
+        if (mem.eql(u8, it.next() orelse "", "connect")) {
+            const user = it.next() orelse "";
+            if (runs_as.get(user)) |svc| return f.fail(
+                gpa,
+                "{s}/form.yaml: net: {s}: {s} runs as {s}: say its network in the service",
+                .{ form.dir, line, svc, user },
+            );
+        }
+        try out.append(gpa, line);
+    };
+    return out.items;
+}
+
 /// listens returns, in order and once each, the TCP ports the chain's net
 /// listen lines serve: what a host forwards to the machine and reaches it
 /// on. Loopback lines are skipped. A malformed listen line fails.
 pub fn listens(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u16 {
     var ports: std.ArrayList(u16) = .empty;
-    for (forms) |form| for (try form.items(gpa, "net")) |line| {
+    for (try netLines(gpa, forms, f)) |line| {
         var why: []const u8 = "";
         const l = (listen(gpa, line, &why) catch |err| switch (err) {
             error.Invalid => return f.fail(
                 gpa,
-                "{s}/form.yaml: net: {s}: {s}",
-                .{ form.dir, line, why },
+                "{s}: net: {s}: {s}",
+                .{ forms[forms.len - 1].dir, line, why },
             ),
             error.OutOfMemory => return error.OutOfMemory,
         }) orelse continue;
         if (l.loopback) continue;
         for (l.ports) |port| if (mem.findScalar(u16, ports.items, port) == null)
             try ports.append(gpa, port);
-    };
+    }
     return ports.items;
 }
 
@@ -858,15 +947,6 @@ pub fn bastionFiles(
         error.Invalid => return f.fail(gpa, "{s}: {s}", .{ top, why }),
         error.OutOfMemory => return error.OutOfMemory,
     };
-    const ports = try connects(gpa, forms, "bastion");
-    for (users.items) |u| for (u.destinations) |d| {
-        if (mem.findScalar(u16, ports, sshd.port(d)) == null) return f.fail(
-            gpa,
-            "{s}: bastion user {s}: destination {s}: the bastion connects to no port " ++
-                "{d}; add to form.yaml's net:  - connect bastion tcp/{d}",
-            .{ top, u.name, d, sshd.port(d), sshd.port(d) },
-        );
-    };
     return .{ .keys = text, .permit = try sshd.permitOpen(gpa, users.items) };
 }
 
@@ -884,7 +964,7 @@ pub fn bastionService(
     const svc = for (try services(io, gpa, root, forms, f)) |s| {
         if (mem.eql(u8, s.name, "sshd")) break s;
     } else return f.fail(gpa, "{s}: the bastion has no etc/sv/sshd/service", .{forms[0].dir});
-    const ports = try connects(gpa, forms, "bastion");
+    const ports = try connects(gpa, forms, "bastion", f);
     var out: std.ArrayList(u8) = .empty;
     var lines = mem.splitScalar(u8, mem.trimEnd(u8, svc.text, "\n"), '\n');
     while (lines.next()) |line| {
@@ -904,9 +984,9 @@ pub fn bastionService(
 
 /// connects returns, once each, the TCP ports in the chain's
 /// `connect USER tcp/PORT...` net lines for user.
-fn connects(gpa: Allocator, forms: []const Form, user: []const u8) Error![]const u16 {
+fn connects(gpa: Allocator, forms: []const Form, user: []const u8, f: *Failure) Error![]const u16 {
     var ports: std.ArrayList(u16) = .empty;
-    for (forms) |form| for (try form.items(gpa, "net")) |line| {
+    for (try netLines(gpa, forms, f)) |line| {
         var it = mem.tokenizeAny(u8, line, " \t");
         if (!mem.eql(u8, it.next() orelse "", "connect")) continue;
         if (!mem.eql(u8, it.next() orelse "", user)) continue;
@@ -914,15 +994,48 @@ fn connects(gpa: Allocator, forms: []const Form, user: []const u8) Error![]const
             const p = std.fmt.parseInt(u16, word[4..], 10) catch continue;
             if (mem.findScalar(u16, ports.items, p) == null) try ports.append(gpa, p);
         };
-    };
+    }
     return ports.items;
 }
 
-/// Service is a service file, /etc/sv/NAME/service, as the image will hold it.
+/// Service is a service file, /etc/sv/NAME/service, as the image will hold
+/// it: from a form's rootfs, or rendered from its form.yaml's services.
 pub const Service = struct { name: []const u8, path: []const u8, text: []const u8 };
 
-/// services returns the chain's service files, sorted by name. As in the
-/// image, a later form's rootfs overrides an earlier one's file.
+/// fenceOnly reports whether a listen or connect word is fence's alone
+/// (udp/PORT, icmp, public, loopback): leash, which holds TCP by port,
+/// takes the rest of the line.
+fn fenceOnly(word: []const u8) bool {
+    return mem.startsWith(u8, word, "udp/") or mem.eql(u8, word, "icmp") or
+        mem.eql(u8, word, "public") or mem.eql(u8, word, "loopback");
+}
+
+/// render returns a service file from form.yaml's services.NAME: one line a
+/// directive, a list one line each, in the form's order; listen and connect
+/// lines keep leash's words alone.
+fn render(gpa: Allocator, spec: Node) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (spec.map) |d| {
+        const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
+        for (values) |v| {
+            var line = v.scalar.text;
+            if (mem.eql(u8, d.key, "listen") or mem.eql(u8, d.key, "connect")) {
+                var kept: std.ArrayList([]const u8) = .empty;
+                var it = mem.tokenizeAny(u8, line, " \t");
+                while (it.next()) |w| if (!fenceOnly(w)) try kept.append(gpa, w);
+                if (kept.items.len == 0) continue;
+                line = try mem.join(gpa, " ", kept.items);
+            }
+            try out.print(gpa, "{s} {s}\n", .{ d.key, line });
+        }
+    }
+    return out.items;
+}
+
+/// services returns the chain's services, sorted by name: each form's
+/// rootfs/etc/sv/NAME/service files, then those its form.yaml renders. As
+/// in the image, a later form's overrides an earlier one's by name; one
+/// form saying a service both ways is refused.
 pub fn services(
     io: Io,
     gpa: Allocator,
@@ -932,29 +1045,46 @@ pub fn services(
 ) Error![]const Service {
     var found: std.array_hash_map.String(Service) = .empty;
     for (forms) |form| {
+        var files: std.ArrayList([]const u8) = .empty;
         const sv_path = try gpa.print("{s}/rootfs/etc/sv", .{form.dir});
-        var sv = root.openDir(io, sv_path, .{ .iterate = true }) catch continue;
-        defer sv.close(io);
-        var it = sv.iterate();
-        while (it.next(io) catch |err| return f.fail(
-            gpa,
-            "{s}: {s}",
-            .{ sv_path, @errorName(err) },
-        )) |e| {
-            if (e.kind != .directory) continue;
-            const path = try gpa.print("{s}/{s}/service", .{ sv_path, e.name });
-            const text = root.readFileAlloc(
-                io,
-                path,
+        if (root.openDir(io, sv_path, .{ .iterate = true })) |opened| {
+            var sv = opened;
+            defer sv.close(io);
+            var it = sv.iterate();
+            while (it.next(io) catch |err| return f.fail(
                 gpa,
-                .limited(64 << 10),
-            ) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                error.OutOfMemory => return error.OutOfMemory,
-                else => return f.fail(gpa, "{s}: {s}", .{ path, @errorName(err) }),
-            };
-            const name = try gpa.dupe(u8, e.name);
-            try found.put(gpa, name, .{ .name = name, .path = path, .text = text });
+                "{s}: {s}",
+                .{ sv_path, @errorName(err) },
+            )) |e| {
+                if (e.kind != .directory) continue;
+                const path = try gpa.print("{s}/{s}/service", .{ sv_path, e.name });
+                const text = root.readFileAlloc(
+                    io,
+                    path,
+                    gpa,
+                    .limited(64 << 10),
+                ) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return f.fail(gpa, "{s}: {s}", .{ path, @errorName(err) }),
+                };
+                const name = try gpa.dupe(u8, e.name);
+                try files.append(gpa, name);
+                try found.put(gpa, name, .{ .name = name, .path = path, .text = text });
+            }
+        } else |_| {}
+        const inline_services = form.spec.get("services") orelse continue;
+        for (inline_services.map) |s| {
+            for (files.items) |have| if (mem.eql(u8, have, s.key)) return f.fail(
+                gpa,
+                "{s}: service {s} is in form.yaml and in rootfs/etc/sv: say it once",
+                .{ form.dir, s.key },
+            );
+            try found.put(gpa, s.key, .{
+                .name = s.key,
+                .path = try gpa.print("{s}/form.yaml: services.{s}", .{ form.dir, s.key }),
+                .text = try render(gpa, s.value),
+            });
         }
     }
     const out = found.values();
@@ -1271,6 +1401,72 @@ test "services: of each name, the last form's file" {
     try testing.expectEqualStrings("forms/site/rootfs/etc/sv/web/service", got[1].path);
 }
 
+test "services in form.yaml: rendered as leash reads them, their network fence's" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    const site =
+        \\base: prod
+        \\net:
+        \\  - connect _update tcp/443
+        \\services:
+        \\  web:
+        \\    exec: /usr/bin/web --port 80
+        \\    user: web
+        \\    pledge: stdio inet
+        \\    listen: [tcp/80, tcp/8080 loopback]
+        \\    connect: [tcp/443 udp/53 tcp/53 public, /run/svc/db/sock, icmp]
+        \\    env: [A=1, B=2]
+        \\
+    ;
+    try tmp.dir.createDirPath(io, "forms/prod/rootfs/etc/sv/db");
+    try tmp.dir.createDirPath(io, "forms/site");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/prod/form.yaml", .data = "" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/prod/rootfs/etc/sv/db/service",
+        .data = "exec /db\nuser db\npledge stdio\n",
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/site/form.yaml", .data = site });
+    var f: Failure = .{};
+    const forms = try chain(io, gpa, tmp.dir, "site", &f);
+    const got = try services(io, gpa, tmp.dir, forms, &f);
+    try testing.expectEqual(2, got.len);
+    try testing.expectEqualStrings("web", got[1].name);
+    try testing.expectEqualStrings("forms/site/form.yaml: services.web", got[1].path);
+    try testing.expectEqualStrings(
+        "exec /usr/bin/web --port 80\nuser web\npledge stdio inet\nlisten tcp/80\n" ++
+            "listen tcp/8080\nconnect tcp/443 tcp/53\nconnect /run/svc/db/sock\nenv A=1\nenv B=2\n",
+        got[1].text,
+    );
+    try testing.expectEqualStrings(
+        "listen tcp/80\nlisten tcp/8080 loopback\nconnect web tcp/443 udp/53 tcp/53 public\n" ++
+            "connect web icmp\nconnect _update tcp/443",
+        try mem.join(gpa, "\n", try netLines(gpa, forms, &f)),
+    );
+    try testing.expectEqualSlices(u16, &.{80}, try listens(gpa, forms, &f));
+    // A net line for a service's user is the service's to say.
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/site/form.yaml",
+        .data = "base: prod\nnet:\n  - connect web tcp/22\nservices:\n  web:\n    user: web\n",
+    });
+    try testing.expectError(error.Form, netLines(gpa, try chain(io, gpa, tmp.dir, "site", &f), &f));
+    try testing.expect(mem.indexOf(u8, f.text, "web runs as web") != null);
+    // One form saying a service both ways is refused.
+    try tmp.dir.createDirPath(io, "forms/site/rootfs/etc/sv/web");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/site/rootfs/etc/sv/web/service",
+        .data = "exec /w\nuser web\npledge stdio\n",
+    });
+    try testing.expectError(
+        error.Form,
+        services(io, gpa, tmp.dir, try chain(io, gpa, tmp.dir, "site", &f), &f),
+    );
+    try testing.expect(mem.indexOf(u8, f.text, "say it once") != null);
+}
+
 test "isName" {
     try testing.expect(isName("prod-ssh"));
     try testing.expect(isName("step-ca"));
@@ -1454,12 +1650,15 @@ test "sshd and bastion: what the image's sshd is given, along the chain" {
     const bare = try bastionFiles(gpa, try chain(io, gpa, tmp.dir, "bastion", &f), &f);
     try testing.expectEqualStrings("", bare.keys);
     try testing.expectEqualStrings("", bare.permit);
-    // A port the bastion may not connect to fails, naming the line to add.
-    try testing.expectError(
-        error.Form,
-        bastionFiles(gpa, try chain(io, gpa, tmp.dir, "far", &f), &f),
+    // A destination's port is a connect line of the bastion's own: nothing
+    // to add. The bastion's net line (connect bastion tcp/22) stands beside
+    // them until its sshd is a service of form.yaml's.
+    const far = try chain(io, gpa, tmp.dir, "far", &f);
+    _ = try bastionFiles(gpa, far, &f);
+    try testing.expectEqualStrings(
+        "connect bastion tcp/8443\nconnect bastion tcp/22",
+        try mem.join(gpa, "\n", try netLines(gpa, far, &f)),
     );
-    try testing.expect(mem.indexOf(u8, f.text, "connect bastion tcp/8443") != null);
     // A key file fails until sshd: takes them.
     try testing.expectError(
         error.Form,

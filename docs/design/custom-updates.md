@@ -70,10 +70,10 @@ the image's own copies of the rest, and writes only into scratch.
 `check-updater-release`. `image.pub` stays with howl, to verify fresh-install
 downloads, and werewolf's advisories move into the signed tiers feed.
 
-**The format pin**, a package per format, `werewolf-formatN`, that a published
-world names, keeps compose and the programs reading the same files. It holds
-a file, as apk fetches no empty package. After CI moves to N+1, a machine on
-N takes the newest programs for N and logs `held` each check, until reinstalled.
+**The format pin**, `werewolf-formatN`, named by a published world, keeps
+compose and the programs reading the same files. It holds a file (apk fetches
+no empty package) and provides `werewolf-format=N`, so apk installs one format:
+a machine on N takes N's newest and logs `held` each check, until reinstalled.
 
 **Phases.**
 1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.

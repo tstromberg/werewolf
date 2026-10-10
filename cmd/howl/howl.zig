@@ -248,6 +248,19 @@ fn interface(gpa: Allocator, svcs: []const forms.Service, why: *Why) !Interface 
                 .{ .flag = cfg.name, .path = path, .service = svc.name, .optional = cfg.optional },
             );
         }
+        // A secret is a file flag too, named for its variable:
+        // SMTP_PASSWORD is --smtp-password.
+        for (s.secrets) |sec| {
+            const path = sec.path["/run/config/".len..];
+            if (!isTarName(path))
+                return why.refuse("{s}: {s} cannot be in a config tar", .{ svc.name, sec.path });
+            const flag = try gpa.dupe(u8, sec.name);
+            for (flag) |*c| c.* = if (c.* == '_') '-' else std.ascii.toLower(c.*);
+            try files.append(
+                gpa,
+                .{ .flag = flag, .path = path, .service = svc.name, .optional = sec.optional },
+            );
+        }
         // service.parse refuses render without `config settings`, so
         // settings_path is set here.
         if (s.render != null)
@@ -1104,10 +1117,11 @@ pub fn hostArch() ?Arch {
 pub const not_built_here = "this machine is neither aarch64 nor x86_64";
 
 /// local_cpus and local_mib size a machine here or on Proxmox: two CPUs
-/// and 2 GiB, like the smallest cloud type werewolf runs well on
-/// (gcp.machine).
+/// and 4 GiB, like the default cloud types (gcp.machine), enough for an
+/// application with its database, Mastodon's among them. A guest takes the
+/// host's memory only as it uses it.
 pub const local_cpus = 2;
-pub const local_mib = 2048;
+pub const local_mib = 4096;
 
 /// form_tag marks a machine create made and names its form: in a cloud's
 /// label or tag, a Proxmox description, or a Lima template.
@@ -1510,6 +1524,16 @@ test interface {
 
     // Each service starts with lines leash takes; what follows is refused.
     const head = "exec /a\nuser x\npledge stdio\n";
+
+    // A secret is a file flag named for its variable, optional as its line says.
+    const sec = try interface(gpa, &.{.{
+        .name = "jobs",
+        .path = "",
+        .text = head ++ "secret SMTP_PASSWORD /run/config/m/smtp-password optional",
+    }}, &why);
+    try testing.expectEqualStrings("smtp-password", sec.files[0].flag);
+    try testing.expectEqualStrings("m/smtp-password", sec.files[0].path);
+    try testing.expect(sec.files[0].optional);
     const refused = [_][]const [2][]const u8{
         // Two services declare one flag, as a form on prod-ssh with a bastion would.
         &.{

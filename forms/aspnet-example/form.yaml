@@ -7,11 +7,24 @@ packages:
 # example to machine code as it runs.
 allow: [jit]
 
-net:
-  - listen tcp/8080
-
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: dotnet runs the example
   kernel-write-xor-execute: .NET compiles the example to machine code as it runs (allow jit)
+
+services:
+  app:
+    exec: /usr/bin/dotnet /usr/lib/app/App.dll
+    user: app
+    pledge: stdio rpath wpath proc inet listen
+    memory: 512
+    listen: [tcp/8080]
+    env:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
+      - DOTNET_EnableDiagnostics=0
+      - TMPDIR=/run/svc/app
+      - DOTNET_EnableWriteXorExecute=0
+    # Configuration is baked into the read-only image, not watched for edits.
+    # Use writable/executable anonymous JIT memory; executable memfds stay blocked.

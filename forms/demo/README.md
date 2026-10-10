@@ -141,8 +141,8 @@ build/host/howl delete werewolf-demo --on gcp                # the VM, its disk 
 It uses gcloud's project and zone (`us-central1-a` if none), and uploads the
 image through a bucket it makes, `PROJECT-werewolf-images`, deleting the
 upload once the image is made. The VM is this host's arch, or `--arch`'s:
-a `t2a-standard-1` on aarch64; on x86_64 add `--size e2-medium`, since the
-default `e2-small` is too small for PostgreSQL and grype. It costs what its
+a `t2a-standard-1` on aarch64, an `e2-medium` on x86_64, 4 GB either way,
+which PostgreSQL and grype need. It costs what its
 machine type costs until it is deleted
 ([examples/README.md](../../examples/README.md#prepare-gcp-once)).
 
