@@ -1,0 +1,64 @@
+# unbound: prod, with Unbound resolving for the private networks around
+# it: recursive and validating, on every address, answering loopback,
+# RFC 1918, 100.64/10, link-local and IPv6's unique local addresses alone,
+# and refusing the rest. Its configuration is the image's
+# (/etc/unbound/unbound.conf), and the forward zones the machine's
+# settings name. leash starts it (etc/sv/unbound/service) as the unbound
+# user, after unbound-setup (forms/unbound/cmd/unbound-setup) seeds the
+# root's trust anchor into /data and writes those zones. Nothing controls
+# it but that file. See forms/unbound/README.md.
+base: prod
+
+# Unbound, and the root's keys, which unbound-setup seeds its trust
+# anchor from (unbound-anchor would need the network first).
+packages:
+  - unbound
+  - dnssec-root
+
+# What nothing here runs: the control client and its key maker (a shell
+# script), with no control socket to speak to; unbound-anchor, as the
+# image brings the anchor; unbound-host and unbound-checkconf, tools for a
+# person with a shell; and bash, with its /usr/bin/sh, which unbound
+# depends on for unbound-control-setup alone.
+prune:
+  - usr/bin/unbound-control
+  - usr/bin/unbound-control-setup
+  - usr/bin/unbound-anchor
+  - usr/bin/unbound-host
+  - usr/bin/unbound-checkconf
+  - usr/bin/sh
+  - usr/bin/bash
+
+# The check queries Unbound by UDP and TCP with drill.
+dev:
+  - drill
+
+# make check's (forms/README.md): :53 speaks DNS, not HTTP, and its own
+# test/checks speaks to it. Offline, so nothing it checks rests on the
+# root servers answering. Unbound's caches fill a quarter of its 256 MiB.
+check:
+  memory: 512
+  offline: true
+  skip: [http-answering]
+
+services:
+  # Unbound, as its own user: it may bind :53, by UDP and TCP, and no
+  # other port, reach name servers on 53, read its configuration, write
+  # only /data/svc/unbound (its trust anchor), and run nothing. -d keeps it
+  # in the foreground, -p writes no pid file.
+  unbound:
+    exec: /usr/bin/unbound -d -p -c /etc/unbound/unbound.conf
+    before: /usr/lib/werewolf/unbound-setup
+    user: unbound
+    pledge: stdio rpath wpath inet unix netlink connect listen
+    listen: [tcp/53 udp/53]
+    connect: [udp/53 tcp/53]
+    read: [/etc/unbound]
+    config:
+      - settings /run/config/unbound/settings.json
+    setting:
+      - forward-zones hostname... as UNBOUND_FORWARD_ZONES
+      - forward-to ip... as UNBOUND_FORWARD_TO
+    render: env site
+    memory: 256
+    nofile: 8192

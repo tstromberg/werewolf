@@ -1,0 +1,24 @@
+# Umami answers through Caddy over HTTPS, with a certificate from Caddy's
+# own CA for localhost, once its migrations have run and its
+# administrator's password is set: wait.
+ok  umami-health     i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/api/heartbeat 2>/dev/null | grep -q '"ok":true'; do i=$((i + 1)); [ $i -le 180 ] || { echo "no /api/heartbeat in 180 s"; exit 1; }; sleep 1; done
+ok  umami-user       p=$(head -n 1 /run/cgroup/svc/umami/cgroup.procs); u=$(grep '^_oci-umami:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+# Plain HTTP is sent to HTTPS.
+ok  umami-https      wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# The attack: Umami's default administrator, admin with the password
+# umami, is refused; the config's password signs in.
+ok  umami-default    wget -q -T 10 --no-check-certificate -S -O /dev/null --header 'Content-Type: application/json' --post-data '{"username":"admin","password":"umami"}' https://localhost/api/auth/login 2>&1 | grep -q 'HTTP/1.1 401'
+ok  umami-admin      t=$(wget -q -T 10 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data '{"username":"admin","password":"werewolf-check-pass-1"}' https://localhost/api/auth/login | sed -n 's/.*"token":"\([^"]*\)".*/\1/p') && [ -n "$t" ] && wget -q -T 5 --no-check-certificate -O - --header "Authorization: Bearer $t" https://localhost/api/me | grep -q '"username":"admin"'
+# A stranger reads no statistics, and no list of sites.
+ok  umami-anon       wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/websites 2>&1 | grep -q 'HTTP/1.1 401'
+# The tracker is public, and so is the collector: an event for a site
+# Umami knows is kept; one for a site it does not is refused and not kept.
+ok  umami-tracker    wget -q -T 5 --no-check-certificate -O - https://localhost/script.js | grep -q 'api/send'
+ok  umami-collect    ua='Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0'; t=$(wget -q -T 10 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data '{"username":"admin","password":"werewolf-check-pass-1"}' https://localhost/api/auth/login | sed -n 's/.*"token":"\([^"]*\)".*/\1/p') && w=$(wget -q -T 10 --no-check-certificate -O - --header "Authorization: Bearer $t" --header 'Content-Type: application/json' --post-data '{"name":"check","domain":"localhost"}' https://localhost/api/websites | sed -n 's/.*"id":"\([0-9a-f-]*\)".*/\1/p' | head -n 1) && [ -n "$w" ] && wget -q -T 10 --no-check-certificate -O /dev/null -U "$ua" --header 'Content-Type: application/json' --post-data "{\"type\":\"event\",\"payload\":{\"website\":\"$w\",\"hostname\":\"localhost\",\"url\":\"/\",\"language\":\"en-US\",\"screen\":\"1920x1080\",\"title\":\"check\"}}" https://localhost/api/send && [ "$(psql -h 127.0.0.1 -U umami -d postgres -Atc "SELECT count(*) FROM umami.website_event WHERE website_id = '$w'")" -ge 1 ]
+ok  umami-unknown    ua='Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0'; w=0e7e1f00-c4ec-4b00-8000-0000000000aa; wget -q -T 10 --no-check-certificate -S -O /dev/null -U "$ua" --header 'Content-Type: application/json' --post-data "{\"type\":\"event\",\"payload\":{\"website\":\"$w\",\"hostname\":\"localhost\",\"url\":\"/\",\"language\":\"en-US\",\"screen\":\"1920x1080\",\"title\":\"check\"}}" https://localhost/api/send 2>&1 | grep -q 'HTTP/1.1 400' && [ "$(psql -h 127.0.0.1 -U umami -d postgres -Atc "SELECT count(*) FROM umami.website_event WHERE website_id = '$w'")" = 0 ]
+# PostgreSQL takes the role umami over loopback, and no other: not its
+# superuser, and not a role a stranger might guess.
+ok  umami-pg-only    ! psql -h 127.0.0.1 -U postgres -d postgres -Atc 'SELECT 1' 2>/dev/null && ! psql -h 127.0.0.1 -U umami -d template1 -Atc 'SELECT 1' 2>/dev/null
+# Umami reaches PostgreSQL alone: fence has no other line for its user,
+# and none public; its tables are in /data, PostgreSQL's.
+ok  umami-alone      u=$(grep '^_oci-umami:' /etc/passwd | cut -d: -f3); [ "$(grep -c "^connect $u " /usr/share/werewolf/net)" = 0 ] || ! grep "^connect $u " /usr/share/werewolf/net | grep -qv ' tcp 5432$'

@@ -5,6 +5,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const howl = @import("howl.zig");
+const native = @import("build.zig");
+const locks = @import("lock.zig");
+const forms = @import("form");
 const sandbox = @import("sandbox");
 const Io = std.Io;
 const Dir = Io.Dir;
@@ -522,10 +525,210 @@ fn ustarName(hdr: *const [512]u8, buf: *[max_name]u8) []const u8 {
     return buf[0 .. prefix.len + 1 + name.len];
 }
 
+/// Bake is one image service to bake: its image pinned, the machine's arch,
+/// its config, the rootfs-shaped directory it goes in, its name, its write
+/// paths, and the command that replaces the image's, if any.
+pub const Bake = struct {
+    pinned: []const u8,
+    arch: []const u8,
+    config: Config,
+    dir: []const u8,
+    name: []const u8,
+    writes: []const []const u8 = &.{},
+    override: ?[]const []const u8 = null,
+};
+
+/// bakeTree pulls an image into DIR/oci/NAME, readies it for init's binds,
+/// and writes its record at DIR/usr/share/werewolf/images/NAME.json, which
+/// compose renders the service from on the host and the machine alike
+/// (lib/form.zig's ImageRecord): the image pinned, the command checked
+/// against the tree, its environment and working directory.
+pub fn bakeTree(io: Io, gpa: Allocator, k: Bake, why: *Why) !void {
+    const tree = try gpa.print("{s}/oci/{s}", .{ k.dir, k.name });
+    const u = try pull(io, gpa, k.pinned, k.arch, tree, why);
+    howl.say(io, "{s}: {s}: {d} files, {d} bytes{s}", .{
+        k.name,
+        k.pinned,
+        u.files,
+        u.bytes,
+        if (u.left_out > 0) ", device nodes and FIFOs left out" else "",
+    });
+    try prepare(io, gpa, tree, k.name, k.writes, why);
+    const argv = try entrypoint(io, gpa, tree, k.name, k.config, k.override, why);
+    for (argv) |a| if (std.mem.findScalar(u8, a, '"') != null or
+        std.mem.findAny(u8, a, "\n\r\t") != null)
+        return why.refuse("{s}: a service line cannot hold a quote or a control character", .{a});
+    const rec: forms.ImageRecord = .{
+        .image = k.pinned,
+        .argv = argv,
+        .env = k.config.env,
+        .workdir = k.config.workdir,
+    };
+    var s: Io.Writer.Allocating = .init(gpa);
+    try json.Stringify.value(rec, .{ .whitespace = .indent_2 }, &s.writer);
+    try s.writer.writeByte('\n');
+    const at = try gpa.print("{s}/usr/share/werewolf/images", .{k.dir});
+    const path = try gpa.print("{s}/{s}.json", .{ at, k.name });
+    Dir.cwd().createDirPath(io, at) catch |err|
+        return why.refuse("{s}: {s}", .{ at, @errorName(err) });
+    Dir.cwd().writeFile(io, .{ .sub_path = path, .data = s.written() }) catch |err|
+        return why.refuse("{s}: {s}", .{ path, @errorName(err) });
+}
+
+/// lay bakes the `image:` services of the build's chain, as `howl form
+/// --oci` bakes one into a form's own rootfs, into BUILD/oci/FORM/NAME-KEY,
+/// KEY a hash of what the bake depends on, and lays each after its form's
+/// rootfs (Form.images). A tag is resolved at every build, so a form that
+/// names one follows its image's releases; a moved tag is a new KEY, baked
+/// into a new directory and renamed into place, so builds side by side
+/// never see half a tree. When the registry cannot be reached, the last
+/// tree baked is kept, and the build says so. A form that carries its own
+/// baked image (howl form) keeps it.
+pub fn lay(b: *native.B) !void {
+    const io = b.io;
+    const gpa = b.gpa;
+    var why: Why = .{};
+    const chain = try gpa.dupe(forms.Form, b.chain);
+    var rootfs: std.ArrayList([]const u8) = .empty;
+    try rootfs.appendSlice(gpa, b.rootfs);
+    for (chain) |*fm| {
+        const services = fm.spec.get("services") orelse continue;
+        var images: std.ArrayList([]const u8) = .empty;
+        for (services.map) |svc| {
+            const ref = valueOf(svc.value, "image") orelse continue;
+            const own = try gpa.print("{s}/rootfs/usr/share/werewolf/images/{s}.json", .{
+                fm.dir,
+                svc.key,
+            });
+            if (exists(io, own)) {
+                const rec = try json.parseFromSliceLeaky(
+                    forms.ImageRecord,
+                    gpa,
+                    try b.read(own, max_config),
+                    .{},
+                );
+                try b.resolved_images.append(gpa, .{
+                    .form = fm.name,
+                    .service = svc.key,
+                    .ref = ref,
+                    .digest = rec.image,
+                });
+                continue;
+            }
+            const base = try b.path("{s}/oci/{s}", .{ b.p.build, fm.name });
+            const last = try gpa.print("{s}/{s}.last", .{ base, svc.key });
+            const pinned = locks.pinned(b.locked_images, fm.name, svc.key, ref) orelse
+                resolve(io, gpa, ref, &why) catch |err| switch (err) {
+                error.Refused => return b.fail(
+                    "{s}: services: {s}: {s}",
+                    .{ fm.dir, svc.key, why.text },
+                ),
+                else => return err,
+            };
+            try b.resolved_images.append(gpa, .{
+                .form = fm.name,
+                .service = svc.key,
+                .ref = ref,
+                .digest = pinned,
+            });
+            var writes: std.ArrayList([]const u8) = .empty;
+            for (try valuesOf(gpa, svc.value, "write")) |w| {
+                if (w.len == 0 or w[0] != '/' or std.mem.findScalar(u8, w, ' ') != null)
+                    return b.fail("{s}: services: {s}: write {s}: one absolute path", .{
+                        fm.dir, svc.key, w,
+                    });
+                try writes.append(gpa, w);
+            }
+            var override: ?[]const []const u8 = null;
+            if (valueOf(svc.value, "exec")) |e| {
+                if (std.mem.findAny(u8, e, "\"'\\") != null)
+                    return b.fail("{s}: services: {s}: exec: words without quotes", .{
+                        fm.dir, svc.key,
+                    });
+                var words: std.ArrayList([]const u8) = .empty;
+                var it = std.mem.tokenizeAny(u8, e, " \t");
+                while (it.next()) |w| try words.append(gpa, w);
+                override = words.items;
+            }
+            var h = std.crypto.hash.sha2.Sha256.init(.{});
+            h.update(bake_format);
+            for ([_][]const u8{ pinned, svc.key, valueOf(svc.value, "exec") orelse "" }) |part| {
+                h.update(part);
+                h.update("\x00");
+            }
+            for (writes.items) |w| {
+                h.update(w);
+                h.update("\x00");
+            }
+            const key = std.fmt.bytesToHex(h.finalResult(), .lower);
+            const dir = try gpa.print("{s}/{s}-{s}", .{ base, svc.key, key[0..16] });
+            try images.append(gpa, dir);
+            if (!exists(io, dir)) {
+                const tmp = try gpa.print("{s}.tmp", .{dir});
+                const began = Io.Clock.awake.now(io);
+                Dir.cwd().deleteTree(io, tmp) catch {};
+                bakeTree(io, gpa, .{
+                    .pinned = pinned,
+                    .arch = @tagName(b.spec.arch),
+                    .config = config(io, gpa, pinned, @tagName(b.spec.arch), &why) catch
+                        return b.fail("{s}: services: {s}: {s}", .{ fm.dir, svc.key, why.text }),
+                    .dir = tmp,
+                    .name = svc.key,
+                    .writes = writes.items,
+                    .override = override,
+                }, &why) catch |err| switch (err) {
+                    error.Refused => return b.fail("{s}: services: {s}: {s}", .{
+                        fm.dir, svc.key, why.text,
+                    }),
+                    else => return err,
+                };
+                // Another build may have baked the same key meanwhile: either
+                // tree is the same bytes, so keep whichever landed first.
+                Dir.cwd().rename(tmp, Dir.cwd(), dir, io) catch {};
+                Dir.cwd().deleteTree(io, tmp) catch {};
+                try b.done(dir, began);
+            }
+            Dir.cwd().writeFile(io, .{ .sub_path = last, .data = dir }) catch |err|
+                return b.fail("{s}: {t}", .{ last, err });
+            try rootfs.append(
+                gpa,
+                try gpa.print("{s}/usr/share/werewolf/images/{s}.json", .{ dir, svc.key }),
+            );
+        }
+        fm.images = images.items;
+    }
+    b.chain = chain;
+    b.rootfs = rootfs.items;
+}
+
+/// bake_format names what prepare makes of a tree; a change to it is a new
+/// format, so every tree is baked again.
+const bake_format = "2: usr/lib/werewolf\x00";
+
+fn valueOf(spec: forms.Node, key: []const u8) ?[]const u8 {
+    const v = spec.get(key) orelse return null;
+    return if (v == .scalar) v.scalar.text else null;
+}
+
+fn valuesOf(gpa: Allocator, spec: forms.Node, key: []const u8) ![]const []const u8 {
+    const v = spec.get(key) orelse return &.{};
+    if (v == .scalar) return gpa.dupe([]const u8, &.{v.scalar.text});
+    var out: std.ArrayList([]const u8) = .empty;
+    for (v.list) |x| if (x == .scalar) try out.append(gpa, x.scalar.text);
+    return out.items;
+}
+
+fn exists(io: Io, path: []const u8) bool {
+    Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
 /// prepare creates, empty, every path init binds into the root (cmd/init/oci.zig):
-/// /proc, the CPU directory, /tmp, /run, /data, each path in writes, the devices,
-/// resolv.conf and hosts. It replaces whatever the image had there, links too,
-/// and writes a hosts file naming the service.
+/// /proc, the CPU directory, /tmp, /run, /data, each path in writes, the
+/// devices, resolv.conf and hosts; and /usr/lib/werewolf, where the build
+/// copies werewolf's programs (slot.zig). It replaces whatever the image had there, links too, and
+/// writes a
+/// hosts file naming the service.
 pub fn prepare(
     io: Io,
     gpa: Allocator,
@@ -537,8 +740,9 @@ pub fn prepare(
     var root = Dir.cwd().openDir(io, dir, .{}) catch |err|
         return why.refuse("{s}: {s}", .{ dir, @errorName(err) });
     defer root.close(io);
-    for ([_][]const u8{ "proc", "sys/devices/system/cpu", "tmp", "run", "data" }) |d|
-        try place(io, root, d, .dir, why);
+    for ([_][]const u8{
+        "proc", "sys/devices/system/cpu", "tmp", "run", "data", "usr/lib/werewolf",
+    }) |d| try place(io, root, d, .dir, why);
     for (writes) |w| try place(io, root, std.mem.trimStart(u8, w, "/"), .dir, why);
     for (devices) |d| try place(io, root, try gpa.print("dev/{s}", .{d}), .file, why);
     // Images log to /dev/stdout and friends, so link them as devtmpfs

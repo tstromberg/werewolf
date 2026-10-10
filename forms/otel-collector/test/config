@@ -1,0 +1,16 @@
+#!/bin/sh
+# forms/otel-collector/test/config DIR: the otel-collector form's config
+# for make check, in DIR, as an operator would make one (its README): a
+# certificate for localhost, the token senders give, which test/checks
+# sends spans with, the collector's own token, and an endpoint where
+# nothing answers, so what it takes waits in its queue.
+set -eu
+d=$1/otel-collector
+mkdir -p "$d"
+umask 077
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+	-keyout "$d/tls-key" -out "$d/tls-cert" 2>/dev/null
+echo werewolf-check-token >"$d/token"
+echo werewolf-check-export >"$d/export-token"
+echo '{"export":"127.0.0.1:443"}' >"$d/settings.json"

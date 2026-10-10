@@ -1,0 +1,57 @@
+# opensearch: prod, with OpenSearch 3 as one node of log search, its data
+# in /data, its security plugin on: HTTPS on :9200 with the config's
+# certificate, its transport on loopback alone and in TLS too, and one
+# user, admin, whose password comes from the config. No demo certificate,
+# demo user or anonymous access. melange lays upstream's release
+# (forms/opensearch/melange/opensearch.yaml), and java starts it directly,
+# without its bash scripts, after opensearch-setup
+# (forms/opensearch/cmd/opensearch-setup) writes its configuration.
+# See forms/opensearch/README.md.
+base: prod
+
+packages:
+  - openjdk-25-jre
+
+# Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
+# OpenSearch to machine code as it runs.
+allow: [jit]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: java runs OpenSearch, which is what this form is for
+  kernel-write-xor-execute: the JVM compiles OpenSearch to machine code as it runs (allow jit)
+
+# The check speaks HTTPS with curl.
+dev:
+  - curl
+
+# make check's (forms/README.md): OpenSearch's heap and the JVM's own
+# beside the machine's.
+check:
+  memory: 3072
+  # :9200 speaks HTTPS alone; test/checks speaks it.
+  skip: [http-answering]
+
+services:
+  # OpenSearch, as its own user: it may bind :9200, and its transport :9300
+  # on loopback alone; it reads its configuration, which opensearch-setup
+  # writes into its own /run, and the image, writes only its own
+  # directories, reaches nothing on the network, and runs nothing. A
+  # missing password or certificate parks it, saying which.
+  opensearch:
+    exec: /usr/lib/jvm/java-25-openjdk/bin/java -Xms1g -Xmx1g -XX:MaxDirectMemorySize=512m @/usr/share/opensearch/java.args
+    before: /usr/lib/werewolf/opensearch-setup
+    user: opensearch
+    # netlink: the JVM lists the host's addresses.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/9200, tcp/9300 loopback]
+    # os-release: OpenSearch reports the system it runs on.
+    read: /etc/opensearch /etc/os-release
+    config:
+      - admin-password /run/config/opensearch/admin-password
+      - tls-cert /run/config/opensearch/tls-cert
+      - tls-key /run/config/opensearch/tls-key
+      - tls-ca /run/config/opensearch/tls-ca
+    memory: 2048
+    nofile: 65536

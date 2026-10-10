@@ -1,0 +1,31 @@
+# Caddy for the adguard-home form: HTTPS for the machine's domain (DOMAIN;
+# howl --domain), with a certificate Caddy gets itself, and :80 sent
+# there; AdGuard Home's web UI behind it, to the one user the config names
+# (ADMIN_USER, and ADMIN_HASH, a bcrypt hash). leash starts Caddy
+# (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN} {
+	basic_auth {
+		{$ADMIN_USER} {$ADMIN_HASH}
+	}
+	header -Server
+	reverse_proxy 127.0.0.1:3000
+}

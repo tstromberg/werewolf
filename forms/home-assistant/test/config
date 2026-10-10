@@ -1,0 +1,11 @@
+#!/bin/sh
+# forms/home-assistant/test/config DIR: the home-assistant form's config
+# for make check, in DIR: its domain, localhost, for which Caddy's own CA
+# signs; the owner and password test/checks logs in with; and a location.
+set -eu
+mkdir -p "$1/home-assistant" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-owner >"$1/home-assistant/owner-password"
+echo '{"owner":"owner","domain":"localhost","time-zone":"Europe/Berlin","latitude":"52.52","longitude":"13.405","country":"DE"}' \
+	>"$1/home-assistant/settings.json"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

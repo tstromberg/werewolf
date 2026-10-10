@@ -1,0 +1,11 @@
+# What the mattermost form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-mattermost; test/boot; forms/demo/test/console has the
+# format). Caddy, given no admin's password, parks before
+# mattermost-setup runs, so Mattermost is never opened unclaimed;
+# Mattermost, given no base URL, parks and says why; PostgreSQL runs.
+# make check-mattermost boots it with its config, and checks it serves.
+
+seen    caddy-needs-config  leash: \{"event":"down","service":"caddy","why":"config admin-password: FileNotFound"\}
+seen    mm-needs-url        service-config: \{"event":"settings","service":"mattermost","setting":"base-url","why":"required"\}
+unseen  postgres-down       leash: \{"event":"down","service":"postgres"

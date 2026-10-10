@@ -1,0 +1,22 @@
+# pi-hole-setup: run by bash before pihole-FTL starts, inside Pi-hole's
+# image as _oci-pi-hole (forms/pi-hole/form.yaml). It does what the
+# image's start.sh would, and no more: the default blocklist on the first
+# start, then gravity when the lists are missing or a week old. A failed
+# fetch keeps the lists Pi-hole has, and FTL starts anyway.
+dir=/etc/pihole
+# On a first start, with no pihole.toml and no backup of one, pihole-FTL
+# writes its defaults and ignores FTLCONF_ variables; an empty file is a
+# config it reads, so the form's settings hold from the first start.
+[ -e $dir/pihole.toml ] || : >$dir/pihole.toml
+if [ ! -f $dir/adlists.list ] && [ ! -f $dir/gravity.db ]; then
+	echo https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts >$dir/adlists.list
+fi
+# Gravity gives each file it makes to the image's pihole user, and fails
+# when it cannot. Here everything is _oci-pi-hole's already, and no
+# service may change an owner, so its chown does nothing.
+chown() { :; }
+export -f chown
+if [ ! -f $dir/gravity.db ] || [ -n "$(find $dir/gravity.db -mtime +6)" ]; then
+	bash /opt/pihole/gravity.sh || echo "pi-hole-setup: gravity failed; Pi-hole keeps the lists it had"
+fi
+exit 0

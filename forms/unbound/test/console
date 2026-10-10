@@ -1,0 +1,12 @@
+# What the unbound form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-unbound;
+# test/boot; forms/demo/test/console has the format). It needs no
+# settings: unbound-setup seeds the root's keys into /data and writes no
+# forward zones, and Unbound starts validating, with no control socket.
+
+seen    anchor-seeded     unbound-setup: trust anchor seeded from /usr/share/dnssec-root/trusted-key\.key into /data/svc/unbound/root\.key
+seen    setup-wrote       unbound-setup: unbound-setup\.conf written: IPv4 on :53, no forward zones
+seen    validating        unbound\[[0-9]+:0\] notice: init module 0: validator
+seen    serving           unbound\[[0-9]+:0\] info: start of service
+unseen  unbound-failed    unbound\[[0-9]+:0\] fatal error
+unseen  control           unbound\[[0-9]+:0\] .*remote control

@@ -23,6 +23,8 @@ environment:
       - bzip2
 
 pipeline:
+  - runs: mkdir -p nextcloud
+
   - uses: fetch
     with:
       uri: https://download.nextcloud.com/server/releases/nextcloud-${{package.version}}.tar.bz2

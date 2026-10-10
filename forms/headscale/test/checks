@@ -1,0 +1,15 @@
+# Headscale answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its database is made: wait.
+ok  hs-health        i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/health 2>/dev/null | grep -q '"status": *"pass"'; do i=$((i + 1)); [ $i -le 120 ] || { echo "no /health in 120 s"; exit 1; }; sleep 1; done
+ok  hs-user          p=$(head -n 1 /run/cgroup/svc/headscale/cgroup.procs); u=$(grep '^_oci-headscale:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+# Plain HTTP is sent to HTTPS.
+ok  hs-https         wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# Its key, database and CLI socket are its own.
+ok  hs-state         u=$(grep '^_oci-headscale:' /etc/passwd | cut -d: -f3); for f in /data/svc/headscale/noise_private.key /data/svc/headscale/db.sqlite /run/svc/headscale/run/headscale.sock; do [ "$(stat -c %u "$f")" = "$u" ] || { echo "$f is not _oci-headscale's"; exit 1; }; done
+# Nothing listens but the clients' port: no gRPC, no metrics.
+ok  hs-no-admin      ! grep -qiE ':(C50B|2382) ' /proc/net/tcp /proc/net/tcp6
+# The API takes no request without an API key, or with a made-up one.
+ok  hs-api-closed    wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/v1/node 2>&1 | grep -q 'HTTP/1.1 401' && wget -q -T 5 --no-check-certificate -S -O /dev/null --header 'Authorization: Bearer hskey-api-abcdefghijkl-0123456789abcdef0123456789abcdef' https://localhost/api/v1/node 2>&1 | grep -q 'HTTP/1.1 401'
+# Tailscale's own client cannot join with a made-up pre-auth key, and the
+# server has no node afterwards.
+ok  hs-join-refused  mkdir -p /run/ts && { HOME=/run/ts /usr/bin/tailscaled --no-logs-no-support --tun=userspace-networking --state=mem: --statedir=/run/ts --socket=/run/ts/sock >/run/ts/log 2>&1 & }; i=0; until [ -S /run/ts/sock ]; do i=$((i + 1)); [ $i -le 30 ] || { cat /run/ts/log; exit 1; }; sleep 1; done; o=$(/usr/bin/tailscale --socket=/run/ts/sock up --login-server http://127.0.0.1:8080 --auth-key hskey-auth-abcdefghijkl-0123456789abcdef0123456789abcdef --timeout 30s 2>&1); s=$?; echo "$o"; [ $s -ne 0 ] && echo "$o" | grep -qi 'invalid\|not found\|unauthorized\|auth' && [ -z "$(/usr/bin/tailscale --socket=/run/ts/sock ip -4 2>/dev/null)" ]

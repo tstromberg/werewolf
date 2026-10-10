@@ -40,7 +40,9 @@ pub const attempt_path = state_dir ++ "/attempt";
 /// lock_path is flocked while a pass changes state, so a check run by hand
 /// and the daemon's never interleave.
 pub const lock_path = state_dir ++ "/lock";
-/// rebooted_path holds the RFC 3339 time of the last update reboot.
+/// rebooted_path holds the RFC 3339 time of the last update reboot. outcome
+/// leaves it, so the next update reboot waits an hour after it. A cold boot
+/// is not an update reboot and does not move the time.
 pub const rebooted_path = state_dir ++ "/rebooted";
 /// feed_path holds the last tiers feed taken; feed_sig_path its signature.
 pub const feed_path = state_dir ++ "/cve-tiers.json";
@@ -92,7 +94,7 @@ pub fn main(init: std.process.Init) !void {
     // arguments. That means daemon.
     // A person running it with no arguments means check.
     const as_service = args.len == 1 and std.mem.eql(u8, std.fs.path.basename(args[0]), "run");
-    const mode = if (args.len == 2)
+    const mode = if (args.len == 2 or (args.len == 3 and std.mem.eql(u8, args[1], "try")))
         args[1]
     else if (as_service)
         "daemon"
@@ -101,8 +103,10 @@ pub fn main(init: std.process.Init) !void {
     else
         "";
     if (std.mem.eql(u8, mode, "daemon")) daemon(init.io);
-    if (!std.mem.eql(u8, mode, "check") and !std.mem.eql(u8, mode, "outcome")) {
-        std.debug.print("usage: slot-update [check|outcome|daemon]\n", .{});
+    if (!std.mem.eql(u8, mode, "check") and !std.mem.eql(u8, mode, "outcome") and
+        !std.mem.eql(u8, mode, "try"))
+    {
+        std.debug.print("usage: slot-update [check|outcome|daemon|try [DECLARATION-HASH]]\n", .{});
         std.process.exit(2);
     }
 
@@ -115,7 +119,9 @@ pub fn main(init: std.process.Init) !void {
         );
         fatal(&u, err);
     };
-    if (std.mem.eql(u8, mode, "check")) {
+    if (std.mem.eql(u8, mode, "try")) {
+        slot.tryOther(&u, if (args.len == 3) args[2] else null) catch |err| fatal(&u, err);
+    } else if (std.mem.eql(u8, mode, "check")) {
         var settings: policy.Settings = .{};
         u.loadPolicy(&settings) catch |err| fatal(&u, err);
         u.check(&settings, false) catch |err| fatal(&u, err);
@@ -149,8 +155,10 @@ fn failed(u: *Update, err: anyerror) void {
 /// ready_path; slot-keep commits no slot before that, since a slot whose
 /// updater cannot start could never be updated again. Once this slot has
 /// committed, it loads the settings, runs outcome, then checks at once and
-/// every update-every seconds, sleeping until a staged slot is due
-/// (bootIfDue). Off a slot it parks.
+/// every update-every seconds, sleeping until the next notice or check
+/// (bootIfDue). A check that fails before this boot has finished one, and
+/// before the machine has been up ten minutes, is tried again in 30
+/// seconds. Off a slot it parks.
 fn daemon(io: Io) noreturn {
     // Disable Speculative Store Bypass for the daemon and every child, since
     // apk and mkfs.erofs parse network data. Errors mean the CPU has no
@@ -187,17 +195,23 @@ fn daemon(io: Io) noreturn {
     _ = pass(io, .policy, &ctx);
     _ = pass(io, .outcome, &ctx);
     var next_check = nowSecs(io);
+    var boot_checked = false;
     while (true) {
         if (nowSecs(io) >= next_check) {
-            if (pass(io, .check, &ctx) == .ok and ctx.first_boot) {
-                ctx.first_boot = false;
-                Dir.cwd().writeFile(io, .{ .sub_path = checked_path, .data = "" }) catch |err|
-                    std.debug.print(
-                        "autoupdate: cannot write {s}: {s}\n",
-                        .{ checked_path, @errorName(err) },
-                    );
-            }
-            next_check = nowSecs(io) + every;
+            if (pass(io, .check, &ctx) == .ok) {
+                boot_checked = true;
+                if (ctx.first_boot) {
+                    ctx.first_boot = false;
+                    Dir.cwd().writeFile(io, .{ .sub_path = checked_path, .data = "" }) catch |err|
+                        std.debug.print(
+                            "autoupdate: cannot write {s}: {s}\n",
+                            .{ checked_path, @errorName(err) },
+                        );
+                }
+                next_check = nowSecs(io) + every;
+            } else if (!boot_checked and bootSecs() < boot_retry_for) {
+                next_check = nowSecs(io) + boot_retry_every;
+            } else next_check = nowSecs(io) + every;
         }
         if (!ctx.rebooting) _ = pass(io, .boot, &ctx);
         const wait = @min(next_check - nowSecs(io), ctx.due_in orelse every);
@@ -205,14 +219,42 @@ fn daemon(io: Io) noreturn {
     }
 }
 
+/// boot_retry_every is how soon a boot's check is tried again when it
+/// failed. boot_retry_for is how long after boot those retries last.
+const boot_retry_every = 30;
+const boot_retry_for = 10 * 60;
+
 /// Ctx is the daemon's state between passes: the settings, read once;
-/// whether no check has finished yet; seconds until the staged slot is due;
-/// and whether a reboot was requested.
+/// whether no check has finished yet; seconds until the next notice or
+/// check; whether a reboot was requested; and the countdown for the
+/// staged build, which restarts when that build changes.
 pub const Ctx = struct {
     settings: policy.Settings = .{},
     first_boot: bool = false,
     due_in: ?i64 = null,
     rebooting: bool = false,
+    notice_build: [16]u8 = @splat(0),
+    notice_len: u8 = 0,
+    reboot_at: ?i64 = null,
+    /// spoken is the lead, in seconds, of the notice already sent.
+    spoken: ?i64 = null,
+
+    pub fn clearNotice(ctx: *Ctx) void {
+        ctx.notice_len = 0;
+        ctx.reboot_at = null;
+        ctx.spoken = null;
+    }
+
+    pub fn noticeIs(ctx: *const Ctx, build: []const u8) bool {
+        return ctx.notice_len == build.len and
+            std.mem.eql(u8, ctx.notice_build[0..ctx.notice_len], build);
+    }
+
+    pub fn remember(ctx: *Ctx, build: []const u8) void {
+        const n = @min(build.len, ctx.notice_build.len);
+        @memcpy(ctx.notice_build[0..n], build[0..n]);
+        ctx.notice_len = @intCast(n);
+    }
 };
 
 const Step = enum { setup, policy, outcome, check, boot };
@@ -343,8 +385,8 @@ pub const Update = struct {
                 .down = down,
             });
         }
+        // rebooted stays, so a second update reboot waits an hour after it.
         Dir.cwd().deleteFile(u.io, pending_path) catch {};
-        Dir.cwd().deleteFile(u.io, rebooted_path) catch {};
         try Dir.cwd().deleteFile(u.io, attempt_path);
     }
 
@@ -385,7 +427,14 @@ pub const Update = struct {
         defer Dir.cwd().deleteTree(io, work_dir) catch {};
         const arch = std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n");
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
-        const plan = (try u.packagesPlan(arch, release)) orelse return;
+        const plan = (u.packagesPlan(arch, release) catch |err| {
+            try u.writeReplacing(state_dir ++ "/held", @errorName(err));
+            return err;
+        }) orelse {
+            Dir.cwd().deleteFile(io, state_dir ++ "/held") catch {};
+            return;
+        };
+        Dir.cwd().deleteFile(io, state_dir ++ "/held") catch {};
 
         if (u.isBad(plan.build)) {
             return u.record(.{
@@ -419,9 +468,13 @@ pub const Update = struct {
         const repo = for (try u.words(try u.read("/etc/apk/repositories"))) |r| {
             if (!std.mem.eql(u8, r, werewolf_repository)) break r;
         } else return error.NoWolfiRepository;
-        const package_cves = try u.packageCves(&sources, repo, plan.old_pkgs, plan.new_pkgs);
+        const applied = localChanged(plan.old_pkgs, plan.new_pkgs);
+        const package_cves: []const cve.PackageFix = if (applied)
+            &.{}
+        else
+            try u.packageCves(&sources, repo, plan.old_pkgs, plan.new_pkgs);
         const kernel_changed = !std.mem.eql(u8, plan.old_kernel, plan.new_kernel);
-        const kernel_cves = if (kernel_changed)
+        const kernel_cves = if (kernel_changed and !applied)
             try u.kernelCves(&sources, plan.old_kernel, plan.new_kernel)
         else
             cve.KernelFixes{};
@@ -429,7 +482,7 @@ pub const Update = struct {
         // Tier before installing, so nothing after the install can fail for
         // want of the feed.
         u.step = "stage";
-        const feed = try u.tiersFeed();
+        const feed = if (applied) null else try u.tiersFeed();
         const fixes = try tiers.tiersOf(u.gpa, feed, .{
             .changes = try diffOrigins(u.gpa, plan.old_pkgs, plan.new_pkgs),
             .package_cves = package_cves,
@@ -439,6 +492,13 @@ pub const Update = struct {
             .advisories = plan.advisories,
             .have = try u.ownAdvisories(),
         });
+        try u.buildSlot(plan.new_kernel);
+        // Write pending only after install arms the new build, so a failed
+        // install keeps the first-seen times. install removes attempt first,
+        // so bootIfDue boots nothing meanwhile. Seen is stamped here, not
+        // before the install: a first check's minute of notice has to still
+        // be ahead when the slot can actually boot.
+        try u.install(plan.build);
         const now = nowSecs(io);
         const stamp = try u.time(now);
         const report_path = try u.gpa.print(
@@ -449,6 +509,7 @@ pub const Update = struct {
         next.build = plan.build;
         next.report = report_path;
         next.first_boot = next.first_boot or first_boot;
+        next.applied = if (applied) try u.time(now) else null;
         for (std.enums.values(policy.Tier)) |t| if (fixes.first.get(t)) |f| {
             const seen = next.tier(t);
             if (seen.* == null) seen.* = .{
@@ -457,12 +518,6 @@ pub const Update = struct {
                 .evidence = f.evidence,
             };
         };
-
-        try u.buildSlot(plan.new_kernel);
-        // Write pending only after install arms the new build, so a failed
-        // install keeps the first-seen times. install removes attempt first,
-        // so bootIfDue boots nothing meanwhile.
-        try u.install(plan.build);
         try u.writeReplacing(pending_path, try std.json.Stringify.valueAlloc(u.gpa, next, .{}));
         const d = try u.dueOf(s, next);
         const why = try u.whyOf(s, next, d, now);
@@ -480,6 +535,7 @@ pub const Update = struct {
             .packages = changes,
             .package_cves = package_cves,
             .kernel_cves = kernel_cves,
+            .advisories = try tiers.missing(u.gpa, plan.advisories, try u.ownAdvisories()),
             .sources = sources.items,
         };
         var out: Io.Writer.Allocating = .init(u.gpa);
@@ -1101,6 +1157,7 @@ const Report = struct {
     packages: []const Change,
     package_cves: []const cve.PackageFix,
     kernel_cves: cve.KernelFixes,
+    advisories: []const policy.Advisory = &.{},
     sources: []const Source,
 };
 
@@ -1117,6 +1174,19 @@ pub const Plan = struct {
 };
 
 pub const Download = struct { fd: i32, size: usize, sha256: [64]u8 };
+
+/// A signed operator declaration is due at once, independently of CVEs.
+fn localChanged(old: []const Package, new: []const Package) bool {
+    for (new) |n| {
+        if (!std.mem.startsWith(u8, n.name, "local-")) continue;
+        for (old) |o| {
+            if (!std.mem.eql(u8, o.name, n.name)) continue;
+            if (!std.mem.eql(u8, o.version, n.version)) return true;
+            break;
+        } else return true;
+    }
+    return false;
+}
 
 const Change = struct { name: []const u8, from: ?[]const u8, to: ?[]const u8 };
 const Source = struct {
@@ -1347,6 +1417,7 @@ test {
     _ = tiers;
     _ = stage;
     _ = slot;
+    _ = @import("notice.zig");
 }
 
 /// transient reports whether a fetch failure may pass on retry: no answer

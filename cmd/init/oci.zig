@@ -61,6 +61,17 @@ pub fn oci(m: *Machine) bool {
             m.mount(&.{ "--bind", from, m.fmt("{s}{s}", .{ dir, path }) });
         } else say("oci: {s}: not a line the build writes", .{line});
     }
+    // The binds are made: close each service's directories to its user
+    // alone, as leash would, so one that parks before it starts leaves
+    // none open. leash widens them for a share line when it starts.
+    lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeScalar(u8, line, ' ');
+        if (!std.mem.eql(u8, words.next() orelse "", "root")) continue;
+        const svc = words.next() orelse continue;
+        _ = linux.fchmodat(linux.AT.FDCWD, m.fmtZ("/run/svc/{s}", .{svc}), 0o700);
+        if (!nodata) _ = linux.fchmodat(linux.AT.FDCWD, m.fmtZ("/data/svc/{s}", .{svc}), 0o700);
+    }
     return true;
 }
 
@@ -86,8 +97,8 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
     // Make the service's directories as leash would, owned by its user, so
     // it can write there from the start. They are 0711 while init binds
     // what is inside them, since the mount tool, root without
-    // CAP_DAC_OVERRIDE, must pass through; leash sets the mode its share
-    // line asks for when the service starts, and the binds stay.
+    // CAP_DAC_OVERRIDE, must pass through, and 0700 once oci is done;
+    // leash sets the mode its share line asks for when the service starts.
     mkdir("/run/svc", 0o755);
     const run_dir = m.fmtZ("/run/svc/{s}", .{name});
     mkdir(run_dir, 0o711);

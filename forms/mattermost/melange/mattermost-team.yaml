@@ -1,0 +1,58 @@
+# Mattermost Team Edition for werewolf's mattermost form: upstream's
+# release for each arch, pinned by sha256, as Mattermost publishes it
+# (its images are amd64 alone, Ubuntu's userland beside the server). The
+# server is one static Go program; beside it the web app, translations,
+# mail templates and fonts it finds from its own path. mmctl and the
+# prepackaged plugins stay out: the form runs neither. 11.7 is Mattermost's
+# extended support release, supported into 2027-05: its migrations run one
+# way, so a rolled-back slot reads its data only within one release line.
+# Wolfi's mattermost-11.7 stopped at 11.7.2 and brings bash.
+package:
+  name: mattermost-team
+  version: 11.7.12
+  epoch: 0
+  description: Open source collaboration for developer teams (Team Edition)
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+
+pipeline:
+  - if: ${{build.arch}} == 'aarch64'
+    uses: fetch
+    with:
+      uri: https://releases.mattermost.com/${{package.version}}/mattermost-team-${{package.version}}-linux-arm64.tar.gz
+      expected-sha256: 448740a2a6442108ce35178e6487a3ab35020699501204733221a7a9969382f8
+
+  - if: ${{build.arch}} == 'x86_64'
+    uses: fetch
+    with:
+      uri: https://releases.mattermost.com/${{package.version}}/mattermost-team-${{package.version}}-linux-amd64.tar.gz
+      expected-sha256: 7a247b1debfb369244e7c620a5648be9035cb9a3991b27eb457909e56c8b4145
+
+  - runs: |
+      home=${{targets.destdir}}/usr/lib/mattermost
+      mkdir -p $home/bin
+      install -m755 bin/mattermost $home/bin/mattermost
+      cp -R client fonts i18n templates NOTICE.txt MIT-COMPILED-LICENSE.md $home/
+      # The tarball's files are world-writable.
+      chmod -R u=rwX,go=rX $home
+      # What Mattermost writes at its first start for a site at /, which
+      # it cannot in a read-only image: the page's script policy, its own
+      # scripts alone (Stripe's is for its cloud's billing).
+      sed -i -E "s|(<meta http-equiv=\"Content-Security-Policy\" content=\"script-src 'self')[^\"]*\">|\1\">|" $home/client/root.html
+      grep -q "content=\"script-src 'self'\">" $home/client/root.html
+
+update:
+  enabled: true
+  github:
+    identifier: mattermost/mattermost
+    strip-prefix: v
+    tag-filter-prefix: v11.7.

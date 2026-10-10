@@ -1,0 +1,9 @@
+# What the otel-collector form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-otel-collector; test/boot; forms/demo/test/console has
+# the format). Given no certificate, the collector parks before anything
+# is rendered or bound, and says why. make check-otel-collector boots it
+# with its config, and sends it spans.
+
+seen    otel-needs-config  leash: \{"event":"down","service":"otel-collector","why":"config tls-cert: FileNotFound"\}
+unseen  otel-ran           Everything is ready

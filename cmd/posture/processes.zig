@@ -19,6 +19,33 @@ const trim = posture.trim;
 const uidOf = posture.uidOf;
 
 pub fn check(p: *Posture) !void {
+    try p.add(.{
+        .id = "update-held",
+        .area = "processes",
+        .name = "Updates resolve",
+        .why = "An unsolvable package pin must not silently hold the last image forever.",
+        .how = "the last update resolution left no held marker",
+        .result = if (!p.root or !exists(p.io, "/usr/share/werewolf/form"))
+            .skip
+        else if (exists(p.io, "/data/svc/autoupdate/held"))
+            .fail
+        else
+            .pass,
+        .detail = if (p.root) p.read("/data/svc/autoupdate/held") else "",
+    });
+    try p.add(.{
+        .id = "updates-enabled",
+        .area = "processes",
+        .name = "Automatic updates enabled",
+        .why = "Security fixes reach the machine without an operator rebuilding it.",
+        .how = "werewolf's autoupdate service is present and not marked down",
+        .result = if (!exists(p.io, "/usr/share/werewolf/form"))
+            .skip
+        else if ((exists(p.io, "/etc/sv/autoupdate/run") or exists(p.io, "/etc/sv/autoupdate/service")) and !exists(p.io, "/etc/sv/autoupdate/down"))
+            .pass
+        else
+            .fail,
+    });
     const mounts = p.read("/proc/self/mounts");
     try p.add(.{
         .id = "processes-hidden",

@@ -39,6 +39,9 @@ const places = [_][]const u8{
     // Image roots: init binds what a rooted service needs beneath its
     // image (cmd/init/oci.zig).
     "/oci",
+    // The firmware's variables, read-only, so posture can read the
+    // Secure Boot state (cmd/posture/boot.zig).
+    "/sys/firmware/efi/efivars",
 };
 
 const Fs = struct {
@@ -65,6 +68,8 @@ const filesystems = [_]Fs{
     .{ .name = "devtmpfs", .devices = true, .links = true },
     .{ .name = "devpts", .devices = true },
     .{ .name = "tmpfs", .options = &.{ "mode", "size" } },
+    // The firmware's variables, mounted read-only (cmd/init).
+    .{ .name = "efivarfs" },
     // /data on a disk, plain or inside LUKS2 (cmd/init).
     .{ .name = "ext4", .block = true },
     // A NoCloud seed, read-only.

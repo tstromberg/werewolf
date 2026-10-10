@@ -1,0 +1,9 @@
+#!/bin/sh
+# forms/immich/test/config DIR: the immich form's config for make check, in
+# DIR: its base URL, https://localhost, for which Caddy's own CA signs, and
+# the admin's address and password, which test/checks signs in with.
+set -eu
+mkdir -p "$1/caddy"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/caddy/admin-password"
+echo '{"base-url":"https://localhost","admin-email":"admin@example.com","admin-name":"Check"}' >"$1/caddy/settings.json"

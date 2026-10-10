@@ -1,0 +1,33 @@
+# jre-app: jre, starting an application of yours from /usr/lib/app
+# (form.yaml's app) as `java -jar app.jar`, on :8080 (etc/sv/app/service),
+# as a Spring Boot or Quarkus jar serves by default. It ships none: the
+# service stays down, saying why, until howl's --app or a form on this one
+# lays app.jar there. See docs/forms.md.
+base: jre
+
+# make check's, for this form alone (forms/README.md): it ships no
+# application, so its service stays down: nothing listens on 8080, and
+# nothing is in its cgroup to count or reap.
+check:
+  skip: [answering, http-answering, cgrouped, reaped]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: java runs the application laid in /usr/lib/app
+  kernel-write-xor-execute: the JVM compiles the application to machine code as it runs (allow jit, from jre)
+
+services:
+  # The application, as its own user: it may bind :8080 and no other port,
+  # read the image, and run only java. Its heap is held under its memory,
+  # and it exits when the heap runs out, so leash starts it again rather
+  # than leave it half alive. Without its performance-data file, which it
+  # would write in /tmp; with its temporary directory in its own /run.
+  # Down until app.jar is there: this form ships none.
+  app:
+    exec: /usr/bin/java -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Xmx640m -Djava.io.tmpdir=/run/svc/app -jar /usr/lib/app/app.jar
+    user: app
+    requires: /usr/lib/app/app.jar
+    pledge: stdio rpath wpath proc inet listen unix
+    memory: 1024
+    listen: [tcp/8080]

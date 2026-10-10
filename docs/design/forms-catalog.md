@@ -52,7 +52,7 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 | --- | --- | --- |
 | `minecraft` on `jre` | whitelist, `online-mode`, no RCON or query port; a join off the list | a stand-in jar, as Mojang's cannot ship |
 | `mattermost` | no open sign-up, plugins off (a plugin is code); a plugin upload | its first-run program |
-| `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | its first-run program |
+| `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | built 2026-10-10: jellyfin-setup completes the wizard on loopback before Caddy starts; media over ssh (forms/jellyfin) |
 | `miniflux` | admin from the config; a feed on loopback (SSRF) | built 2026-10-10 (forms/miniflux) |
 | `unbound`, `wireguard`, `chrony` | UDP; chrony an NTS-fed server, `cmdport 0` | `listen udp`; chrony `capability time` |
 | `mariadb` | perl in its closure | `mariadb-init`, as `pg-init` |

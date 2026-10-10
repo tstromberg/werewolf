@@ -10,6 +10,8 @@ const package = @import("package");
 const files = @import("files");
 const progress = @import("progress.zig");
 const build = @import("build.zig");
+const locks = @import("lock.zig");
+const deployment = @import("deployment.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -55,6 +57,28 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
         const keyring = try b.path("../keys/{s}", .{package.repository_key});
         node = try compose.published(b.gpa, node, b.chain, b.from_repo, extra.items, keyring);
     }
+    b.deployment = try deployment.prepare(b, node);
+    if (b.deployment) |p| node = try deployment.configure(b.gpa, node, p);
+    // Resolve the same form serials that were checked and composed, even
+    // if the repository advances during this build. These build-only pins
+    // are removed from the installed world; machines still follow forms.
+    var serials: std.ArrayList(forms.Node) = .empty;
+    for (b.chain) |fm| for (b.from_repo) |name| {
+        if (!mem.eql(u8, fm.name, name)) continue;
+        const version = try b.read(
+            try b.path("{s}/.{s}.version", .{ std.fs.path.dirname(fm.dir).?, name }),
+            256,
+        );
+        const pin = try b.path("{s}-form={s}", .{ name, version });
+        try serials.append(b.gpa, .{ .scalar = .{ .raw = pin, .text = pin } });
+        break;
+    };
+    if (serials.items.len > 0) node = try forms.merge(b.gpa, node, .{
+        .map = &.{.{
+            .key = "contents",
+            .value = .{ .map = &.{.{ .key = "packages", .value = .{ .list = serials.items } }} },
+        }},
+    });
     var out: Io.Writer.Allocating = .init(b.gpa);
     try forms.write(&out.writer, node);
     const was = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(1 << 20)) catch "";
@@ -88,12 +112,8 @@ pub fn keep(b: *B, path: []const u8, data: []const u8) !void {
 /// is: a lock records its config's sha256, so a changed config resolves
 /// again, and a file's time never does.
 pub fn relock(b: *B, target: []const u8, config: []const u8) !void {
-    var sum: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(try b.read(config, 1 << 20), &sum, .{});
-    var b64: [std.base64.standard.Encoder.calcSize(sum.len)]u8 = undefined;
-    const want = try b.path("\"sha256-{s}\"", .{std.base64.standard.Encoder.encode(&b64, &sum)});
     const had = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(64 << 20)) catch "";
-    if (mem.indexOf(u8, had, want) != null) return;
+    if (try configMatches(b.gpa, had, try b.read(config, 1 << 20))) return;
     if (progress.phaseOf(target)) |ph| try b.steps.enter(ph);
     const began = Io.Clock.awake.now(b.io);
     try Dir.cwd().createDirPath(b.io, "build/lock");
@@ -104,9 +124,43 @@ pub fn relock(b: *B, target: []const u8, config: []const u8) !void {
     try b.done(target, began);
 }
 
+/// boundLock commits packages and their declaration together. A changed
+/// rootfs or application resolves again even if apko's config is unchanged.
+pub fn boundLock(
+    b: *B,
+    target: []const u8,
+    config: []const u8,
+    inputs: []const u8,
+    matches: bool,
+) !void {
+    if (matches) {
+        const text = try b.read(target, 64 << 20);
+        if (try configMatches(b.gpa, text, try b.read(config, 1 << 20))) return;
+    }
+    const fresh = try b.path("{s}.resolve", .{target});
+    // An interrupted resolution is never a reusable declaration lock.
+    Dir.cwd().deleteFile(b.io, fresh) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+    defer Dir.cwd().deleteFile(b.io, fresh) catch {};
+    try relock(b, fresh, config);
+    try locks.write(b, target, try b.read(fresh, 64 << 20), inputs);
+}
+
+fn configMatches(gpa: Allocator, text: []const u8, config: []const u8) !bool {
+    const doc = std.json.parseFromSliceLeaky(struct {
+        config: struct { checksum: []const u8 },
+    }, gpa, text, .{ .ignore_unknown_fields = true }) catch return false;
+    var sum: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(config, &sum, .{});
+    var buf: [44]u8 = undefined;
+    const want = try gpa.print("sha256-{s}", .{std.base64.standard.Encoder.encode(&buf, &sum)});
+    return mem.eql(u8, doc.config.checksum, want);
+}
+
 /// apkoBuild installs config's packages into target, a tar, verified
-/// against its keyring, at the versions the repositories hold now; with
-/// freeze, pinned to those lock names, for a reproducible build.
+/// against its keyring, at the exact versions in the lock on every build.
 pub fn apkoBuild(
     b: *B,
     target: []const u8,
@@ -117,7 +171,7 @@ pub fn apkoBuild(
     const began = try b.begin(target, inputs) orelse return;
     var args: std.ArrayList([]const u8) = .empty;
     try args.appendSlice(b.gpa, &.{ "build-minirootfs", "--build-arch", @tagName(b.spec.arch) });
-    if (b.spec.freeze) {
+    {
         const locked = try b.read(lock, 64 << 20);
         for (try pins(b.gpa, locked, @tagName(b.spec.arch))) |pin|
             try args.appendSlice(b.gpa, &.{ "-p", pin });
@@ -240,7 +294,11 @@ pub fn kernel(b: *B) !void {
     const stamp = try b.path("{s}/kernel/unpacked", .{b.p.build});
     Dir.cwd().access(b.io, target, .{}) catch Dir.cwd().deleteFile(b.io, stamp) catch {};
     const began = try b.begin(stamp, &.{ rootfs, b.self }) orelse return;
-    const x = try b.path("{s}/kernel/x", .{b.p.build});
+    // Unpacked beside BUILD/kernel/x and renamed in, so builds side by side
+    // rarely see a half-made tree (there is a moment with none).
+    const final = try b.path("{s}/kernel/x", .{b.p.build});
+    const nonce = Io.Clock.real.now(b.io).nanoseconds;
+    const x = try b.path("{s}.{d}", .{ final, nonce });
     try Dir.cwd().deleteTree(b.io, x);
     try Dir.cwd().createDirPath(b.io, x);
     var config: ?[]const u8 = null;
@@ -267,18 +325,15 @@ pub fn kernel(b: *B) !void {
     );
     const was = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(image.max_gunzip)) catch "";
     if (!mem.eql(u8, was, kern)) try b.write(target, kern);
+    const old = try b.path("{s}.old.{d}", .{ final, nonce });
+    Dir.rename(Dir.cwd(), final, Dir.cwd(), old, b.io) catch {};
+    // Another build's tree landing first is as good as ours.
+    Dir.rename(Dir.cwd(), x, Dir.cwd(), final, b.io) catch |err|
+        try b.steps.note("{s}: {t}; keeping the one there", .{ final, err });
+    Dir.cwd().deleteTree(b.io, x) catch {};
+    Dir.cwd().access(b.io, final, .{}) catch |err| return b.fail("{s}: {t}", .{ final, err });
+    Dir.cwd().deleteTree(b.io, old) catch {};
     try b.write(stamp, "");
-    try b.done(target, began);
-}
-
-/// vmlinux unpacks x86_64's bzImage into the ELF kernel Firecracker boots.
-pub fn vmlinux(b: *B) !void {
-    const src = try b.path("{s}/vmlinuz", .{b.p.build});
-    const target = try b.path("{s}/vmlinux", .{b.p.build});
-    const began = try b.begin(target, &.{src}) orelse return;
-    const elf = image.vmlinux(b.gpa, try b.read(src, image.max_gunzip)) catch |err|
-        return b.fail("{s}: {t}", .{ src, err });
-    try b.write(target, elf);
     try b.done(target, began);
 }
 

@@ -1,0 +1,37 @@
+# Caddy for the syncthing form: HTTPS at the machine's base URL (BASE_URL;
+# howl --base-url), with a certificate Caddy gets itself, and :80 sent
+# there; without one, plain HTTP on :80. Syncthing's GUI is behind it on
+# loopback, to the one user syncthing-auth writes
+# (forms/syncthing/cmd/syncthing-auth). leash starts Caddy
+# (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris; no body timeout, which would cut off the
+		# GUI's long polls for events.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+}
+
+{$BASE_URL::80} {
+	import /run/svc/caddy/syncthing-auth.caddy
+	encode zstd gzip
+	header -Server
+	reverse_proxy 127.0.0.1:8384 {
+		# Syncthing answers requests for its own address alone, which
+		# stops DNS rebinding; Caddy has checked who is asking.
+		header_up Host 127.0.0.1:8384
+	}
+}

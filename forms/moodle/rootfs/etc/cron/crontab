@@ -1,0 +1,6 @@
+# Moodle's cron, every minute, as its documentation asks, through sh-shim
+# (forms/cron): admin/cli/cron.php, as moodle-cron. It runs Moodle's due
+# scheduled and queued tasks (mail, forum digests, backups, cleanup) and
+# exits; supercronic never starts a run while the last is going.
+SHELL=/usr/lib/werewolf/sh-shim
+* * * * * /usr/bin/php -d memory_limit=1G -d max_input_vars=5000 /usr/share/moodle/admin/cli/cron.php

@@ -1,0 +1,19 @@
+
+# Keycloak answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its tables are made and its
+# administrator is: wait. Its issuer is the base URL's.
+ok  keycloak-oidc        i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/realms/master/.well-known/openid-configuration 2>/dev/null | grep -q '"issuer":"https://localhost/realms/master"'; do i=$((i + 1)); [ $i -le 170 ] || { echo "no discovery document in 170 s"; exit 1; }; sleep 1; done
+# Plain HTTP is sent to HTTPS.
+ok  keycloak-https       wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# The administrator is the config's: the master realm gives it a token,
+# and with it the realm, which lets no one sign up.
+ok  keycloak-admin       t=$(wget -q -T 20 --no-check-certificate -O - --post-data 'grant_type=password&client_id=admin-cli&username=admin&password=werewolf-check-pass-1' https://localhost/realms/master/protocol/openid-connect/token | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4) && [ -n "$t" ] && wget -q -T 20 --no-check-certificate -O - --header "Authorization: Bearer $t" https://localhost/admin/realms/master | grep -q '"registrationAllowed":false'
+# A wrong password gets no token.
+ok  keycloak-refused     ! wget -q -T 20 --no-check-certificate -O - --post-data 'grant_type=password&client_id=admin-cli&username=admin&password=werewolf-check-pass-2' https://localhost/realms/master/protocol/openid-connect/token 2>/dev/null | grep -q access_token
+# A forged Host or X-Forwarded-Host, through Caddy or straight to
+# Keycloak, gets links for the base URL alone: no password-reset mail
+# or token pointing a user at someone else's host.
+ok  keycloak-host        for r in "https://localhost/ --no-check-certificate --header X-Forwarded-Host:evil.example" "http://127.0.0.1:8180/ --header Host:evil.example --header X-Forwarded-Host:evil.example --header X-Forwarded-Proto:http"; do set -- $r; u=$1; shift; d=$(wget -q -T 10 -O - "$@" ${u}realms/master/.well-known/openid-configuration) || exit 1; echo "$d" | grep -q '"issuer":"https://localhost/realms/master"' && ! echo "$d" | grep -q evil.example || { echo "forged host in: $d" | head -c 300; exit 1; }; done
+# Health and metrics answer on their own port, on loopback alone, which
+# Caddy does not pass on; Keycloak's own port is on loopback alone too.
+ok  keycloak-management  wget -q -T 5 -O - http://127.0.0.1:9180/health/ready | grep -q '"status": *"UP"' && ! wget -q -T 5 --no-check-certificate -O - https://localhost/health/ready 2>/dev/null | grep -q UP && ! netstat -ltn | awk '{ n = split($4, a, ":"); if (a[n] == "9180" || a[n] == "8180") print $4 }' | grep -q -v '^127\.0\.0\.1:'

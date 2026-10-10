@@ -1,0 +1,11 @@
+# What the umami form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-umami; test/boot;
+# forms/demo/test/console has the format). With no key to sign logins,
+# Umami parks before it migrates or serves anything, and says why; with no
+# domain, so does Caddy; PostgreSQL runs. make check-umami boots it with
+# its config, and checks it serves.
+
+seen    umami-needs-secret  leash: \{"event":"down","service":"umami","why":"secret APP_SECRET: /run/config/umami/app-secret: FileNotFound"\}
+seen    caddy-needs-domain  service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
+seen    caddy-parked        leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}
+unseen  postgres-down       leash: \{"event":"down","service":"postgres"

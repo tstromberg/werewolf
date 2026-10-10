@@ -1,0 +1,58 @@
+# otel-collector: prod, with the OpenTelemetry Collector (contrib) taking
+# traces, metrics and logs over OTLP, gRPC on :4317 and HTTP on :4318,
+# both TLS with a certificate from the config and both asking for a
+# bearer token from the config, and passing them through its memory
+# limiter and batches to the one OTLP endpoint the machine's settings
+# name, over TLS with a token of its own. No debug exporter, zpages,
+# pprof or health check, and its own metrics off. leash starts it
+# (etc/sv/otel-collector/service) as the otelcol user, from the image's
+# configuration with the settings filled in. See
+# forms/otel-collector/README.md.
+base: prod
+
+packages:
+  - opentelemetry-collector-contrib
+
+# The check speaks OTLP over HTTP/1.1 and gRPC with curl.
+dev:
+  - curl
+
+# make check's (forms/README.md): :4317 speaks gRPC over TLS alone, which
+# answers no plain HTTP; test/checks speaks to both ports itself.
+check:
+  memory: 1024
+  skip: [http-answering]
+
+services:
+  # The collector, as its own user: it may bind :4317 and :4318 and no
+  # other port, reach an OTLP endpoint on 4317 or 443 and a resolver,
+  # read its configuration, and write nothing. It watches its token
+  # files, as the bearer-token extension does, and runs nothing; the
+  # `validate` before it is the same program, checking what
+  # service-config rendered. Certificate, key and both tokens come from
+  # the machine's config: missing, the service parks with a line naming
+  # the file. The endpoint comes from the settings, into the image's
+  # config.json. leash's 512 MiB holds it; Go's heap is held to 360 MiB,
+  # and the memory limiter refuses data above 320 MiB and forces a
+  # collection at 400.
+  otel-collector:
+    exec: /usr/bin/otelcol-contrib --config=/run/svc/otel-collector/config.json
+    before: /usr/bin/otelcol-contrib validate --config=/run/svc/otel-collector/config.json
+    user: otelcol
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath watch inet netlink connect listen proc
+    listen: [tcp/4317 tcp/4318]
+    connect: [tcp/4317 tcp/443 udp/53 tcp/53]
+    config:
+      - tls-cert /run/config/otel-collector/tls-cert
+      - tls-key /run/config/otel-collector/tls-key
+      - token /run/config/otel-collector/token
+      - export-token /run/config/otel-collector/export-token
+      - settings /run/config/otel-collector/settings.json
+    setting:
+      - export hostport required as exporters.otlp_grpc.endpoint
+    render: json config.json from /etc/otel-collector/config.json
+    memory: 512
+    nofile: 65536
+    env:
+      - GOMEMLIMIT=360MiB

@@ -1,0 +1,35 @@
+# blocky: prod, with Blocky, a DNS resolver that blocks ads and trackers
+# for a home or office network, on :53 over UDP and TCP. It asks its
+# upstreams over TLS alone, keeps no query log, and blocks every name for
+# a client outside private networks, so it is no open resolver. It runs
+# Blocky's own image, its latest release, pinned by digest when built, in
+# a tree of its own (docs/design/oci.md). Its configuration is the image's
+# (rootfs/oci/blocky/app/blocky.json), with the upstreams and blocklists
+# the machine's settings give. See forms/blocky/README.md.
+base: prod
+
+check:
+  # :53 speaks DNS, not HTTP; test/checks asks it questions.
+  skip: [http-answering]
+
+services:
+  # Blocky, in its image, as _oci-blocky: it may bind :53 (leash grants
+  # the low port), and reach its upstreams over DNS-over-TLS and its lists
+  # over HTTPS, at public addresses alone. It writes nothing: the lists
+  # and its cache are in memory. Its configuration is rendered at each
+  # start, into its own /tmp, from the image's with the settings' upstreams
+  # and blocklists in place of its own.
+  blocky:
+    image: ghcr.io/0xerr0r/blocky:latest
+    exec: /app/blocky --config /tmp/config.yml
+    pledge: stdio rpath inet netlink connect listen proc
+    listen: [tcp/53 udp/53]
+    connect: [tcp/853 tcp/443 public]
+    config: settings /run/config/blocky/settings.json optional
+    setting:
+      - upstreams string... as upstreams.groups.default
+      - blocklists url... as blocking.denylists.ads
+    render: json config.yml from /app/blocky.json
+    memory: 384
+    nofile: 16384
+    env: GOMEMLIMIT=256MiB

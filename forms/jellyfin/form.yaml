@@ -40,8 +40,9 @@ services:
     exec: /usr/lib/jellyfin/jellyfin
     before: /usr/lib/werewolf/jellyfin-setup network
     user: jellyfin
-    # landlock, seccomp: it narrows what it runs, ffmpeg and ffprobe.
-    pledge: stdio rpath wpath inet unix netlink listen connect proc exec landlock seccomp
+    # landlock, seccomp: it narrows what it runs, ffmpeg and ffprobe. watch:
+    # inotify, for its configuration and for media added to the library.
+    pledge: stdio rpath wpath watch inet unix netlink listen connect proc exec landlock seccomp
     listen: [tcp/8096 loopback]
     run: /usr/bin/ffmpeg /usr/bin/ffprobe
     narrow:

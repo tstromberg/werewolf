@@ -1,0 +1,29 @@
+# Bugsink answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its migrations have run and its
+# administrator is made: wait.
+ok  bs-health        i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/health/ready 2>&1 | grep -q 'HTTP/1.1 200'; do i=$((i + 1)); [ $i -le 180 ] || { echo "no /health/ready in 180 s"; exit 1; }; sleep 1; done
+ok  bs-user          u=$(grep '^_oci-bugsink:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && for p in $(cat /run/cgroup/svc/bugsink/cgroup.procs); do grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status || exit 1; done
+# gunicorn and snappea both run, under monofy.
+ok  bs-snappea       for p in $(cat /run/cgroup/svc/bugsink/cgroup.procs); do tr '\0' ' ' </proc/$p/cmdline; echo; done | grep -q bugsink-runsnappea
+# Plain HTTP is sent to HTTPS.
+ok  bs-https         wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# A stranger is sent to the login page, and may not sign up.
+ok  bs-anon          for u in / /projects/ /teams/ /bsmain/auth_tokens/; do wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost$u 2>&1 | grep -q 'Location: /accounts/login/' || { echo "$u: no login"; exit 1; }; done
+ok  bs-signup        wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/accounts/signup/ 2>&1 | grep -q 'HTTP/1.1 404'
+ok  bs-no-admin      wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/admin/ 2>&1 | grep -q 'HTTP/1.1 404'
+# A wrong password gets no session; the administrator, the config's, gets
+# a secure one, in curl's jar, /tmp/bs-jar, which the checks after this
+# use, with its CSRF token.
+ok  bs-wrong         j=/tmp/bs-wrong-jar; curl -sfk -c $j -b $j -o /tmp/bs-login.html https://localhost/accounts/login/ && t=$(awk '$6 == "csrftoken" { print $7 }' $j) && [ -n "$t" ] && [ "$(curl -sk -c $j -b $j -e https://localhost/accounts/login/ -d "csrfmiddlewaretoken=$t&username=admin@example.test&password=wrong" -o /dev/null -w '%{http_code}' https://localhost/accounts/login/)" = 200 ] && ! grep -q sessionid $j
+ok  bs-login         j=/tmp/bs-jar; curl -sfk -c $j -b $j -o /dev/null https://localhost/accounts/login/ && t=$(awk '$6 == "csrftoken" { print $7 }' $j) && [ "$(curl -sk -c $j -b $j -e https://localhost/accounts/login/ -d "csrfmiddlewaretoken=$t&username=admin@example.test&password=werewolf-check-pass-1" -o /dev/null -w '%{http_code} %{redirect_url}' https://localhost/accounts/login/)" = "302 https://localhost/" ] && awk '$6 == "sessionid" && $4 == "TRUE" { f = 1 } END { exit !f }' $j
+# The administrator makes a team and a project, whose DSN the checks after
+# this keep in /tmp/bs-dsn.
+ok  bs-project       j=/tmp/bs-jar; t=$(awk '$6 == "csrftoken" { print $7 }' $j); team=$(curl -sk -b $j -e https://localhost/teams/new/ -d "csrfmiddlewaretoken=$t&name=check&visibility=1" -o /dev/null -w '%{redirect_url}' https://localhost/teams/new/ | sed -n 's,^https://localhost/teams/\([^/]*\)/.*,\1,p'); [ -n "$team" ] || { echo "no team"; exit 1; }; curl -sfk -b $j -o /tmp/bs-new.html https://localhost/projects/new/; g=$(sed -n '/name="grouping_mechanism"/,/<\/select>/p' /tmp/bs-new.html | sed -n 's/.*<option value="\([^"]*\)"[^>]*selected.*/\1/p' | head -n 1); p=$(curl -sk -b $j -e https://localhost/projects/new/ -d "csrfmiddlewaretoken=$t&team=$team&name=check&visibility=10&retention_max_event_count=10000&grouping_mechanism=$g" -o /tmp/bs-made.html -w '%{redirect_url}' https://localhost/projects/new/ | sed -n 's,^https://localhost/projects/\([0-9]*\)/sdk-setup/$,\1,p'); [ -n "$p" ] || { echo "no project; grouping [$g]"; grep -o 'errorlist[^<]*<li>[^<]*' /tmp/bs-made.html; exit 1; }; curl -sfk -b $j https://localhost/projects/$p/sdk-setup/ | grep -o "https://[0-9a-f]*@localhost/$p" | head -n 1 >/tmp/bs-dsn && [ -s /tmp/bs-dsn ]
+# The attack: an event sent with a key not the project's is refused, and
+# not kept; one with the project's key is stored, and shows in its issues.
+ok  bs-wrong-key     d=$(cat /tmp/bs-dsn); p=${d##*/}; e='{"event_id":"0123456789abcdef0123456789abcdef","message":"werewolf-check-forged","level":"error","platform":"other"}'; [ "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -H 'X-Sentry-Auth: Sentry sentry_version=7, sentry_key=00000000000000000000000000000000' --data "$e" https://localhost/api/$p/store/)" = 403 ]
+ok  bs-event         d=$(cat /tmp/bs-dsn); p=${d##*/}; k=${d#https://}; k=${k%%@*}; e='{"event_id":"fedcba9876543210fedcba9876543210","message":"werewolf-check-event","level":"error","platform":"other"}'; curl -sfk -H 'Content-Type: application/json' -H "X-Sentry-Auth: Sentry sentry_version=7, sentry_key=$k" --data "$e" https://localhost/api/$p/store/ | grep -q fedcba9876543210fedcba9876543210 || { echo "not taken"; exit 1; }; i=0; until curl -sfk -b /tmp/bs-jar https://localhost/issues/$p/ | grep -q werewolf-check-event; do i=$((i + 1)); [ $i -le 30 ] || { echo "event not in its issues in 30 s"; exit 1; }; sleep 1; done; ! curl -sfk -b /tmp/bs-jar https://localhost/issues/$p/ | grep -q werewolf-check-forged
+# Its database is on /data, and _oci-bugsink's; its queue is in /run.
+ok  bs-data          u=$(grep '^_oci-bugsink:' /etc/passwd | cut -d: -f3); [ "$(stat -c %u /data/svc/bugsink/db.sqlite3)" = "$u" ] && [ "$(stat -c %u /run/svc/bugsink/snappea.sqlite3)" = "$u" ]
+# fence lets it reach public addresses on 443 alone, and a resolver.
+ok  bs-net           u=$(grep '^_oci-bugsink:' /etc/passwd | cut -d: -f3); grep -qx "connect $u tcp 443 public" /usr/share/werewolf/net && ! grep "^connect $u " /usr/share/werewolf/net | grep -v -e ' 443 public$' -e ' 53$' | grep -q .

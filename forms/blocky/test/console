@@ -1,0 +1,6 @@
+# What the blocky form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-blocky;
+# test/boot; forms/demo/test/console has the format). It needs no config:
+# Blocky serves DNS as it ships, and never goes down.
+
+unseen  blocky-down        leash: \{"event":"down","service":"blocky"

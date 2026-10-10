@@ -1,0 +1,9 @@
+# What the mediawiki form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-mediawiki;
+# test/boot; forms/demo/test/console has the format). Without its
+# settings, php-fpm parks before the setup installs anything, and says
+# why; nginx runs. make check-mediawiki boots it with its config, and
+# checks it serves.
+
+seen    mediawiki-needs-config  leash: \{"event":"down","service":"php-fpm","why":"config admin-password: FileNotFound"\}
+unseen  nginx-down              leash: \{"event":"down","service":"nginx"

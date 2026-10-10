@@ -1,0 +1,8 @@
+#!/bin/sh
+# forms/headscale/test/config DIR: the headscale form's config for make
+# check, in DIR: the base URL, https://localhost, Headscale's server URL
+# and Caddy's site, for which Caddy's own CA signs.
+set -eu
+mkdir -p "$1/headscale" "$1/caddy"
+echo '{"base-url":"https://localhost"}' >"$1/headscale/settings.json"
+echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"

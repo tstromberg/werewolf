@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/galene/test/config DIR: the galene form's config for make check, in
+# DIR: its base URL, https://localhost, for which Caddy's own CA signs, two
+# groups with the operator ada, and the operator's and the others'
+# passwords, which test/checks joins with.
+set -eu
+mkdir -p "$1/galene" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-op-1 >"$1/galene/operator-password"
+printf '%s' werewolf-check-1 >"$1/galene/password"
+echo '{"base-url":"https://localhost","groups":["lecture","seminar"],"operator":"ada"}' >"$1/galene/settings.json"
+echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"

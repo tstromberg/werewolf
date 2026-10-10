@@ -1,5 +1,5 @@
 # open-webui: Open WebUI, a chat interface for language models, with
-# Ollama, PostgreSQL and Caddy beside it (with): Caddy serves it over
+# Ollama, and PostgreSQL and Caddy beside it (with): Caddy serves it over
 # HTTPS at the machine's base URL, with a certificate from Let's Encrypt;
 # Ollama runs the models on loopback; PostgreSQL keeps its accounts, chats
 # and, by pgvector, the documents it searches. Wolfi's Open WebUI is the
@@ -9,9 +9,12 @@
 # nobody signs up. See forms/open-webui/README.md.
 base: prod
 
-with: [ollama, postgresql, caddy]
+# Not with ollama: its form serves the API to the network, and a service
+# named again here would still bring that form's listen line to fence.
+with: [postgresql, caddy]
 
 packages:
+  - ollama
   # What forms/open-webui/melange/open-webui.yaml's environment runs on
   # and links, from Wolfi; the build fails if one is missing.
   - python-3.12
@@ -56,7 +59,9 @@ services:
       - GOMEMLIMIT=384MiB
 
   # Ollama, as its own user, for Open WebUI alone: as forms/ollama runs it,
-  # but on loopback, since its API has no login and Open WebUI's has.
+  # but on loopback, since its API has no login and Open WebUI's has. It
+  # may reach the registry over HTTPS and a resolver, and run only itself,
+  # its runner for a loaded model.
   ollama:
     exec: /usr/bin/ollama serve
     user: ollama
@@ -88,9 +93,10 @@ services:
     # script), -P keeping the data directory it starts in off the import
     # path. Upstream's would make the key with random, not secrets.
     exec: /usr/lib/open-webui/bin/python3 -P -c "from open_webui import app; app()" serve --host 127.0.0.1 --port 8080
-    before: /usr/lib/open-webui/bin/python3 -I -c "import os,secrets; os.path.exists('.webui_secret_key') or open('.webui_secret_key','x').write(secrets.token_urlsafe(32))"
+    before: /usr/lib/open-webui/bin/python3 -I -c "import os,secrets; k='.webui_secret_key'; os.path.exists(k) or os.write(os.open(k, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600), secrets.token_urlsafe(32).encode())"
     user: open-webui
-    # netlink: aiohttp's resolver lists the host's addresses before a lookup.
+    # netlink: glibc lists the host's addresses for aiohttp's lookups
+    # (AI_ADDRCONFIG).
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: [tcp/8080 loopback]
     connect:

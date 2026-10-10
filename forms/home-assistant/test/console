@@ -1,0 +1,10 @@
+# What the home-assistant form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-home-assistant; test/boot; forms/demo/test/console has
+# the format). With no owner, Home Assistant parks before
+# home-assistant-setup or Home Assistant runs, and says why; Caddy, with
+# no domain, serves plain HTTP. make check-home-assistant boots it with
+# its config, and logs in.
+
+seen    ha-needs-password  leash: \{"event":"down","service":"home-assistant","why":"config owner-password: FileNotFound"\}
+unseen  caddy-down         leash: \{"event":"down","service":"caddy"

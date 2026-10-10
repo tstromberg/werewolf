@@ -1,0 +1,67 @@
+# squid: prod, with Squid as an egress proxy: on :3128 it takes clients
+# from the networks the machine's settings name, and CONNECTs them to port
+# 443 of the domains they name, at public addresses alone. No plain HTTP,
+# no cache, no cache manager, no helpers. leash starts it
+# (etc/sv/squid/service) as the squid user, after squid-setup
+# (forms/squid/cmd/squid-setup) writes its two lists from the settings.
+# See forms/squid/README.md.
+base: prod
+
+# Squid 7, the one line Wolfi builds.
+packages:
+  - squid
+
+# Helpers in perl and sh that Squid would start for authentication,
+# rewriting and logging; this Squid starts none, and the image has neither.
+prune:
+  - usr/libexec/basic_db_auth
+  - usr/libexec/basic_pop3_auth
+  - usr/libexec/basic_smb_auth.sh
+  - usr/libexec/ext_delayer_acl
+  - usr/libexec/ext_kerberos_sid_group_acl
+  - usr/libexec/ext_sql_session_acl
+  - usr/libexec/ext_wbinfo_group_acl
+  - usr/libexec/helper-mux
+  - usr/libexec/log_db_daemon
+  - usr/libexec/security_fake_certverify
+  - usr/libexec/storeid_file_rewrite
+  - usr/libexec/url_fake_rewrite.sh
+  - usr/libexec/url_lfs_rewrite
+
+paths:
+  # PAM's password helper, setgid shadow, arrives through libcap, which
+  # Squid links. Nothing here authenticates with a password.
+  - path: /usr/bin/unix_chkpwd
+    type: permissions
+    permissions: 0o755
+
+# make check's (forms/README.md): Squid resolves names itself, from an
+# unconnected UDP socket on an ephemeral port, which test/checks' listeners
+# counts as listening; this form's own checks run it, letting that socket
+# alone through (squid-listeners).
+check:
+  memory: 512
+  skip: [listeners]
+
+services:
+  # Squid, as its own user: it may bind :3128 and no other port, reach
+  # port 443 at public addresses alone and a resolver, read its
+  # configuration, and run nothing. -N keeps it in the foreground as one
+  # process: no master, no workers, no IPC sockets. Squid 7 keeps its
+  # collapsed-forwarding queue in shared memory even so, in /dev/shm.
+  squid:
+    exec: /usr/bin/squid -N -d 1 -f /etc/squid.conf
+    before: /usr/lib/werewolf/squid-setup
+    user: squid
+    pledge: stdio rpath wpath inet unix connect listen
+    listen: [tcp/3128]
+    connect: [tcp/443 public, udp/53 tcp/53]
+    read: [/etc/squid.conf /etc/mime.conf /etc/errorpage.css]
+    write: /dev/shm
+    config: settings /run/config/squid/settings.json
+    setting:
+      - networks cidr... required
+      - domains string... required
+    render: json site.json
+    memory: 128
+    nofile: 16384

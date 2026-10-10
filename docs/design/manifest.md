@@ -1,120 +1,120 @@
 # One manifest: a machine from one YAML file
 
-Proposed, 2026-10-09; revised after review. On [adhoc.md](adhoc.md), [custom-updates.md](custom-updates.md) and [howl-build.md](howl-build.md).
+Designed 2026-10-09; phases 1–5 implemented 2026-10-10. Live apply verification remains before release.
+Built on [adhoc.md](adhoc.md), [custom-updates.md](custom-updates.md) and [howl-build.md](howl-build.md).
 
 ## Summary
 
-A werewolf machine is one YAML file, a manifest; a form is a manifest in
-`forms/` others take by name. It is the machine's whole policy; a lock pins
-what the network resolved; the machine updates itself, never its declaration.
+A manifest is `form.yaml`; a named form is one others take by name. A lock pins resolutions; packages update without changing policy.
 
 ## Background
 
-Policy is split over five files; the machine has no lock; only `prod` updates.
+Previously policy was split over five files and only `prod` updated. Host and updater now share `lib/compose.zig`.
 
 ## Goals
 
-- One reference alone is that form, byte for byte; `howl create FLAGS -n`
-  prints a manifest `-f` rebuilds; a lock whose inputs match rebuilds exactly.
-- Everything a form says, a manifest says inline, and the reverse.
-- Three tiers, by apk alone: forms follow their latest release and its pins,
-  `packages:` follow Wolfi, `local-NAME` moves only by `howl apply`.
+- One reference alone runs that form unchanged; `-n` prints a manifest `-f` reads back.
+- A matching input lock reuses package versions, form serials and OCI digests.
+- Published forms follow releases, extra packages follow Wolfi, and `local-NAME` moves by `howl apply`.
 
 ## Non-Goals
 
-Inline files, timers, conditionals, doas, sudo, su, OS Login, a new disk or
-address in place, compatibility.
+Inline files, timers, conditionals, doas, sudo, su, OS Login, changing a disk or address in place.
 
 ## Detailed design
 
-**The manifest** is `form.yaml`, every key optional. A *form* key merges
-along the chain; a *machine* key is the top manifest's alone. *Image* keys
-change by `apply`, *config* by the boot config, *machine* by a new machine.
+**Keys and flags.** `--KEY VALUE` sets a scalar or appends to a list by `lib/form.zig`'s schema.
+`--updates off` takes its value; boolean flags such as `--users.NAME.admin` take none.
+`-f FILE` reads a manifest and flags layer over it; setting a scalar twice on the line is refused.
 
-| Key | Is | Merge |
-| --- | --- | --- |
-| `base`, `with` | the form it is built on, `prod` if none, on every host alike; forms taken beside it. Any form's `with` counts | chain |
-| `packages` | Wolfi packages by name; a form's pins own a package both name | added to |
-| `services` | one a name: leash's directives as keys (a scalar is one line, a list one each), `image: REF` (an OCI tree at `/oci/NAME`, run as `_oci-NAME`), `group` (another service's, as php shares nginx's socket). `listen` and `connect` take `tcp/`, `udp/`, `icmp`, `public`, `loopback`: leash takes the TCP, fence the rest. No `net` key | whole, last by name |
-| `users`, `secrets` | people, one an account: `keys` (security keys), on a bastion `destinations`, `admin: true` (the keys are root's too: a root session takes the key's touch, as sshd proves, attributed by fingerprint). Needs `with: [sshd]` or the bastion, said. Users and secret files are packed into the boot config, never the image, with the cloud's users where `machine.metadata-users` says; made as init makes Lima's user: home `/data/home/NAME`, the chain's shell or none, uid the name's hash in 1000 to 60000. cloud-metadata polls the config and GCP's `ssh-keys` (Clouds, below) and init redoes accounts and keys: a new user is a login away, never a boot | config |
-| `updates` | on everywhere: every image boots from a slot, `minimal` included; `every`, `policy`, `from` (where `apply` publishes); `off` is a weakness the build excuses | last |
-| `machine`, `app`, `settings` | howl's flags today, `hostname`, `ip`, `dns`, `data`, `data-key`, `on`, `arch`, `size`, `allow-from`, and `metadata-users`, off unless said: a new machine. The application directory, laid where the chain's `app-dir` says, and settings, baked at `/etc/werewolf/settings`: image | machine |
-| `ssh`, `allow`, `modules`, `prune`, `paths`, `app-dir`, `programs`, `dev`, `bastion`, `weaknesses`, `check` | as today; `ssh` is `sshd:`'s keywords | as today |
+| Key | Meaning |
+| --- | --- |
+| `base`, `with` | Form chain; every form's `with` counts; ad-hoc creation defaults to `prod` |
+| `packages` | Additional Wolfi packages; form dependencies retain their own constraints |
+| `services` | Named leash directives, replaced whole by name; `image` pins OCI, `link` reaches another service; listeners and connections derive fence policy |
+| `users` | Named people with security keys, optional `admin` or bastion destinations; boot config only, never the image; needs sshd or bastion |
+| `updates` | `every`, `from`, `policy`, or `off`; last declaration wins. `policy` is quoted JSON using [update-policy.md](update-policy.md) |
+| `machine` | Top manifest only: hostname, ip, gw, dns, data-key, on, arch, size, allow-from, metadata-users; forwarded at creation, immutable on apply |
+| `app` | Destination in the image; `--app DIR` supplies its source tree |
+| `sshd`, `allow`, `modules`, `prune`, `paths`, `programs`, `dev`, `bastion`, `weaknesses`, `check` | Existing form policy; service setting and file flags supply boot config |
 
-```yaml
-# forms/valkey/form.yaml: Valkey on a UNIX socket, for the app beside it
-base: prod
-packages: [valkey-9.1, valkey-9.1-cli]
-services:
-  valkey:
-    exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
-    user: valkey
-    pledge: stdio rpath wpath unix listen proc
-```
 ```yaml
 # shop.yaml
-with: [chrony]
+with: [sshd]
+packages: [curl]
 users:
   tom:
     keys: [sk-ssh-ed25519@openssh.com AAAAGnNr... tom@yubikey]
 updates:
   every: 1h
-services:
-  web:
-    image: ghcr.io/acme/web:1.4
-    listen: [tcp/8080]
+  from: https://packages.example.com/shop
 ```
 ```sh
-howl create shop --with chrony --updates.every 1h \
-  --users.tom.keys 'sk-ssh-ed25519@openssh.com AAAAGnNr... tom@yubikey' \
-  --services.web.image ghcr.io/acme/web:1.4 --services.web.listen tcp/8080
+howl create shop -f shop.yaml
+howl apply shop.yaml -n
+howl apply shop.yaml --to ssh://deploy@host/srv/apk/shop
 ```
 
-**The flags are the keys.** `--KEY VALUE` sets a scalar or appends to a list,
-by the schema in `lib/form.zig`; `off` and booleans take no value. `-f FILE`
-reads a manifest, flags layer over it; `-n` prints it, with no side effects.
+**Composition.** Host and updater use the same renderer for services, fence policy and accounts.
+People and secrets travel in boot config. `updates: off` removes the updater and records the `updates-enabled` posture weakness.
 
-**compose** renders each service's directory, the keys, fence's policy and
-the accounts, on host and machine from one function, checked by leash's
-parser. A service's user is its name's hash; renamed, it is new. Excuses are
-the chain's, each with its form, and the build's; one that passes fails.
+**The lock.** `build/lock/NAME[-dev][-published].lock.json` is apko JSON with a `werewolf` record:
+packages for both arches, form serials, image digests, app hash and an input hash. Inputs cover
+local manifests and form chains, rootfs and app bytes, modes and symlink targets; mtimes do not count.
+Published forms are resolution outputs; local fallback forms remain inputs. Generated invocation
+comments do not count. Matching inputs reuse exact versions; changed inputs resolve again, and a
+failed resolution preserves the old lock. Kernel and boot-loader locks remain separate.
+`make clean` keeps locks; `make relock FORM=...` refreshes them. Reproduction needs the same tools and artifacts; `FREEZE=1` is obsolete.
 
-**The lock** is apko's widened: packages on both arches, form serials, image
-digests, the app's hash, and `inputs`, the sha256 of manifest, `rootfs/` and
-app: matching, it builds exactly; else it is resolved again. The image's is
-apk's database, composed per slot, never read.
+**Publishing.** Set `updates.from` before creation to enroll. Howl packages caller-owned forms
+and the staged app as `local-NAME`, signs the index with `~/.howl/packages.rsa`, and gives the
+machine its public key. Published forms stay separate dependencies. People and boot secrets stay out.
+Apply defaults NAME to the file stem; `--name` overrides it and `--app DIR` replaces the remembered
+app source. `-n` prepares locally without uploading. Run apply once after creation to seed the repository.
+Uploads use HTTPS PUT, or SSH with `--to`; machines always fetch HTTPS without publishing credentials.
+Use a dedicated repository URL and one publisher per declaration. Packages upload before the signed
+index. A remote index containing versions absent locally is refused rather than overwritten.
+Identical inputs reuse a revision; changed inputs advance monotonically. History lives under
+`~/.howl/repositories/`, protected by a file lock and retained across clean builds. Back it up with
+the signing key and `build/machines/NAME/declaration.json`, which identifies the enrolled machine.
 
-**apply.** What the manifest derives is a package, `local-NAME`, versioned by
-the build, signed by howl's key (`~/.howl`; public half in `/etc/apk/keys`).
-`howl apply shop.yaml` publishes the config half as the boot config, metadata
-or the config disk, and the image half to `updates.from`, HTTPS or ssh; the
-updater takes it as any newer package, due at once: the other slot, one boot,
-kept if it commits. A downgrade is a boot of the other slot, never a build:
-an older manifest it holds, or `slot-update try`, arms it; any other is
-refused. An unsolvable pin holds the last image, logged, `update-held` failing.
+**Updating and rollback.** A changed operator package is due immediately at the next successful
+package check, without a CVE-feed delay. The updater composes it into the other slot, boots it once,
+and keeps it only after commit. Failed resolution retains the current image and fails `update-held`.
+An older declaration is never republished as a new version: apply requests `slot-update try HASH`,
+which requires the parked slot to hold those exact image inputs. Automatic requests use `howl ssh`
+(QEMU, Firecracker, Lima); elsewhere run `/usr/lib/werewolf/slot-update try HASH` through root access.
+`slot-update try` without a hash explicitly tries whatever is parked. Neither rolls back data or config.
 
-**Clouds.** The metadata server is the config channel, always: polled (GCP's
-wait-for-change, else each minute) as werewolf's config tar or cloud-init's
-`#cloud-config`, for users, keys and hostname alone; images never come from it.
+**Config transports.** GCP and Azure publish metadata live. People and root keys change within the
+minute poll; other config takes effect at boot. AWS stops and starts to replace user data. QEMU,
+Firecracker, Lima, bhyve and Proxmox replace their config disk through their existing restart path,
+retaining image and data disks. Image-only applies do not restart the VM. A changed machine map,
+address, platform, signing key or repository needs a new machine. Package and config publication
+are separate operations; retry partial failures with the same declaration.
 
-**Phases.** 1: one format, byte-identical. 2: services inline, `net` derived,
-users, updates in `minimal`. 3: howl's schema, `-f`. 4: the lock. 5: `apply`.
+**Cloud people.** `machine.metadata-users: true` opts into GCP instance and project `ssh-keys`.
+`block-project-ssh-keys: TRUE` excludes project keys. Expired or malformed `google-ssh` keys are ignored;
+declared people take precedence, and metadata grants neither admin nor root. See Google's
+[key format](https://docs.cloud.google.com/compute/docs/connect/add-ssh-keys) and [project-key control](https://docs.cloud.google.com/compute/docs/connect/restrict-ssh-keys).
+
+**Release and verification.** This is package format 3: publish its programs and forms together
+before enrolling; format-2 machines need reinstalling. Tests cover content invalidation, two-arch
+packages, signed indexes, stable revisions, config merging and GCP expiry/precedence. The lock command
+fixture and QEMU SSH boots pass. Cloud publishing and the full apply/rollback cycle need live verification.
 
 ## Drawbacks
 
-Forty forms change shape at once; a lost `~/.howl` key means a new machine.
+The operator keeps a signing key and repository history; losing the key requires a new machine.
 
 ## Alternatives Considered
 
-**Services in files only**: a form cannot be written inline. **Touch per
-command**, by a forwarded agent: a compromised machine holds the agent.
+Without `updates.from`, local files are copied forward. Signed packages allow intentional changes; forwarded agents would expose credentials.
 
 ## Security Considerations
 
-The machine cannot change what it runs: only a package signed by a key in
-`/etc/apk/keys` can. A metadata user is trusted as the boot config is; an
-admin's touch is proven at login, not per command. Root can replace a slot.
+Trusted keys authorize images; root can replace slots. Admin touch is proven at login. Metadata supplies config, never images.
 
 ## Reliability Considerations
 
-Commit proves services up, not an application right; data outlives a rollback.
+Commit proves services are up, not that the application is right. Data and config outlive rollback.

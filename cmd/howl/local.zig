@@ -648,12 +648,12 @@ pub fn createBhyve(
     });
 }
 
-/// createFirecracker builds the form's slot and kernel, writes
-/// its data disk, config tar and Firecracker config, sets up its network as
-/// root, and starts Firecracker (firecracker.zig) under howl's supervisor,
-/// detached by setsid, with the console in console.log. A machine of the
-/// same form gets a new config with a hard stop; its data disk and
-/// Firecracker config stay, so only the first create reads --dns.
+/// createFirecracker builds the form's boot disk for the machine, as
+/// createQemu does, writes its config tar, sets up its network as root,
+/// and starts Firecracker under howl's supervisor (firecracker.zig),
+/// detached by setsid, with the console in console.log. A machine of this
+/// name keeps its disk and takes the new config with a hard stop, so only
+/// the first create reads --dns.
 pub fn createFirecracker(
     io: Io,
     gpa: Allocator,
@@ -676,64 +676,37 @@ pub fn createFirecracker(
     const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const form_file = try gpa.print("{s}/form", .{dir});
-    const was = std.mem.trim(
+    const disk = try gpa.print("{s}/{s}/disk.img", .{ cwd, dir });
+    const kept = if (Dir.cwd().access(io, disk, .{})) |_| true else |_| false;
+    if (kept) try reconfigurable(o, name, std.mem.trim(
         u8,
         Dir.cwd().readFileAlloc(io, form_file, gpa, .limited(256)) catch "",
         " \n",
-    );
-    if (was.len > 0) try reconfigurable(o, name, was, .firecracker, why);
+    ), .firecracker, why);
     if (firecracker.running(io, gpa, dir)) |pid| {
         say(io, "{s}: replacing its config, with a hard stop", .{name});
         try firecracker.stop(io, gpa, dir, pid, why);
     }
     const n = try firecracker.net(gpa, name);
     var built: ?i64 = null;
-    if (was.len == 0) {
+    if (!kept) {
+        const dns = dns_given orelse firecracker.hostDns(io, gpa) orelse return why.refuse(
+            "--dns ADDR: this host's resolvers are all on loopback, which the machine cannot reach",
+            .{},
+        );
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
         var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
-        const p = try howl.buildHere(io, gpa, &steps, .{
+        var spec: native.Spec = .{
             .form = o.form,
             .arch = arch,
             .dev = tell.dev,
             .published = !o.local,
             .app = ab.root,
-        }, .{ .slot = true, .vmlinux = arch == .x86_64 });
+            .disk_path = disk,
+        };
+        spec.disk.args = try firecracker.bootArgs(gpa, n, dns);
+        _ = try howl.buildHere(io, gpa, &steps, spec, .{ .disk = true });
         built = (try steps.finish()).seconds;
-        const dns = dns_given orelse firecracker.hostDns(io, gpa) orelse return why.refuse(
-            "--dns ADDR: this host's resolvers are all on loopback, which the machine cannot reach",
-            .{},
-        );
-        const image_args = std.mem.trim(u8, Dir.cwd().readFileAlloc(
-            io,
-            try gpa.print("{s}/slot/cmdline", .{p.out}),
-            gpa,
-            .limited(4096),
-        ) catch |err| return why.refuse(
-            "{s}: no cmdline in its image: {s}",
-            .{ o.form, @errorName(err) },
-        ), " \n");
-        const data = try gpa.print("{s}/{s}/data.img", .{ cwd, dir });
-        // The guest's /data is sparse and mode 0600: it holds the machine's
-        // state, secrets included.
-        const data_file = Dir.cwd().createFile(
-            io,
-            data,
-            .{ .truncate = false, .permissions = .fromMode(0o600) },
-        ) catch |err| return why.refuse("{s}: {s}", .{ data, @errorName(err) });
-        defer data_file.close(io);
-        data_file.setLength(io, 8192 << 20) catch |err|
-            return why.refuse("{s}: {s}", .{ data, @errorName(err) });
-        try writePrivate(io, gpa, try gpa.print("{s}/vm.json", .{dir}), try firecracker.config(
-            gpa,
-            try gpa.print("{s}/{s}", .{ cwd, try firecracker.kernelPath(gpa, arch) }),
-            try gpa.print("{s}/{s}/slot/stage0.zst", .{ cwd, p.out }),
-            try firecracker.bootArgs(gpa, image_args, n, dns),
-            data,
-            try gpa.print("{s}/{s}/config.tar", .{ cwd, dir }),
-            try gpa.print("{s}/{s}/slot/root.erofs", .{ cwd, p.out }),
-            try gpa.print("{s}/{s}/firecracker.log", .{ cwd, dir }),
-            n,
-        ), why);
         try writePrivate(io, gpa, form_file, o.form, why);
     }
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
@@ -759,7 +732,7 @@ pub fn createFirecracker(
     // output.
     if (boot.power_ns) |ns| boot.power_ns = ns + launched.durationTo(watched).toNanoseconds();
     if (boot.ended) return why.refuse(
-        "{s}: Firecracker exited before it was up: {s}",
+        "{s} ended before it was up: {s}",
         .{ name, try consoleCommand(gpa, name) },
     );
     if (!boot.up) return why.refuse(

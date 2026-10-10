@@ -1,0 +1,9 @@
+# What the zot form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-zot; test/boot;
+# forms/demo/test/console has the format). With no users, zot parks
+# before it binds anything, and says why; with no domain, so does Caddy.
+# make check-zot boots it with its config, and pushes to it.
+
+seen    zot-needs-users    leash: \{"event":"down","service":"zot","why":"config htpasswd: FileNotFound"\}
+seen    caddy-needs-domain service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
+seen    caddy-parked       leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}

@@ -99,7 +99,7 @@ the seal before a reboot ([docs/design/lockdown.md](design/lockdown.md)):
 
 | | Stops |
 | --- | --- |
-| A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process. And, by their arguments, the way into kernel bugs exploited in the wild: a socket family no promise names (AF_ALG), kernel TLS (`TCP_ULP`), watch queues (`O_NOTIFICATION_PIPE`) and CPU-time timers, each answered as a kernel without it would answer ([docs/cve-mitigation-survey.md](cve-mitigation-survey.md)) |
+| A seccomp filter, which every process inherits | eBPF, perf, module and kexec calls, io_uring, userfaultfd, the kernel keyring, file handles, another process's memory, `modify_ldt` and I/O ports, and old unused calls: 24 system calls on aarch64, answered `ENOSYS`; any other architecture's call, on aarch64 a 32-bit program's, ends the process. And, by their arguments, the way into kernel bugs exploited in the wild: a socket family no promise names (AF_ALG), kernel TLS (`TCP_ULP`), watch queues (`O_NOTIFICATION_PIPE`), CPU-time timers and seccomp's user-notification listener, each answered as a kernel without it would answer ([docs/cve-mitigation-survey.md](cve-mitigation-survey.md)) |
 | The capability bounding set | loading kernel code (`CAP_SYS_MODULE`, `CAP_BPF`, `CAP_PERFMON`), hardware and `/dev/mem` (`CAP_SYS_RAWIO`), tracing (`CAP_SYS_PTRACE`), device files (`CAP_MKNOD`) and what nothing here uses; once fence has set the network policy, `CAP_NET_ADMIN` and `CAP_NET_RAW` too, on every form: DHCP's renewal, started before fence, holds them alone; and `CAP_SYS_ADMIN`, so no process after fence can mount, configure a filesystem or reach what else it guards: the mount broker, started before fence, makes the few mounts after boot |
 | The helpers' bounding set (`kernel.usermodehelper.bset`, `inheritable`) | a program the kernel starts itself (a core dump piped to a program, `kernel.modprobe`, the uevent helper) holding more than `CAP_SYS_BOOT`: it descends from the kernel, not PID 1, so neither line above reaches it. `kernel.hotplug` and `kernel.modprobe` are emptied too, so the kernel starts nothing on a device event or a module request |
 
@@ -201,7 +201,14 @@ cloud-init's user-data, once werewolf has committed.
   the design) would bound it by signature.
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
   them, or GRUB's config, and keep them across reboots. Secure Boot is off,
-  since Alpine's kernel is not signed for it.
+  since Alpine's kernel is not signed for it. Posture measures the whole
+  chain as it stands: `boot-secure-boot`, `boot-sig-enforced` and
+  `boot-rollback-protected` (docs/posture.md).
+- **Nothing stops a rollback.** An older release, still signed, can be
+  installed and booted again; a TPM counter at least the running slot's
+  serial would refuse it (phase 5 of
+  [design/verified-boot.md](design/verified-boot.md)). Posture's
+  `boot-rollback-protected` holds the gap open.
 - **Forms CI does not publish are built on the machine** that runs
   them, so no signature on their images could mean anything. `minimal`,
   `prod` and `prod-ssh` install CI's signed releases ([releases.md](releases.md)).

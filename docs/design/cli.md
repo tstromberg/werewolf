@@ -44,7 +44,7 @@ prints `NAME ADDRESS FORM`. `run` is `create` of one throwaway machine,
 | Target | Choice, and why |
 | --- | --- |
 | lima | vzNAT unless the form has sshd and bash, which Lima's probes need; bash in every image costs too much |
-| firecracker | `root.erofs` as a drive: in the initramfs it pins 20 MB of RAM and boots 10–15 ms slower |
+| firecracker | QEMU's UEFI disk, its supervisor in systemd-boot's place: Firecracker has no firmware, and one disk format updates everywhere |
 | proxmox | `qm` over ssh: the REST API has no serial log, and no address without a guest agent |
 | aws | an EBS snapshot written directly: VM Import took 6–10 minutes and a hand-made bucket and role |
 

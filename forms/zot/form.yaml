@@ -1,0 +1,59 @@
+# zot: zot, an OCI image registry for your own images, behind Caddy,
+# which serves its API over HTTPS for the machine's domain with a
+# certificate from Let's Encrypt. Every request names its user: the users
+# are the config's, as bcrypt htpasswd lines, and none is built in. Each
+# user pulls; only those the settings name push or delete. zot keeps the
+# images in /data/svc/zot, deduplicated, and collects what no tag holds.
+# Wolfi does not ship zot: melange builds the registry alone, with no
+# extensions (forms/zot/melange/zot.yaml). See forms/zot/README.md.
+base: prod
+
+with: [caddy]
+
+# The check pushes and pulls with crane.
+dev:
+  - crane
+
+services:
+  # zot, as its own user: it serves on loopback alone, behind Caddy, and
+  # reaches nothing. Its users come from the config; missing, it parks
+  # with a line naming the file. Those who push come from the settings,
+  # into the image's configuration, which zot checks before it serves.
+  zot:
+    exec: /usr/bin/zot serve /run/svc/zot/config.json
+    before: /usr/bin/zot verify /run/svc/zot/config.json
+    user: zot
+    pledge: stdio rpath wpath inet listen proc
+    listen: tcp/5000 loopback
+    read: /etc/zot
+    config:
+      - htpasswd /run/config/zot/htpasswd
+      - settings /run/config/zot/settings.json
+    setting: pushers string... required as http.accessControl.adminPolicy.users
+    render: json config.json from /etc/zot/config.json
+    memory: 512
+    nofile: 65536
+    env: GOMEMLIMIT=384MiB
+
+  # Caddy, as its own user, for zot: it may bind :80 and :443 and no other
+  # port, reach the ACME CA over HTTPS, a resolver, and zot on loopback,
+  # read its configuration, and write only its own directories. Its site
+  # is the machine's domain, from the settings.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/5000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

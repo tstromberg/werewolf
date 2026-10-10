@@ -1,0 +1,127 @@
+# immich: Immich, a photo and video library, from the image its project
+# publishes (ghcr.io/immich-app/immich-server, its 3.x releases, pinned by
+# digest when built and baked at /oci/immich; docs/design/oci.md,
+# cmd/howl/oci.zig), with PostgreSQL, pgvector, Valkey and Caddy beside it
+# (with). Caddy serves it over HTTPS at the machine's base URL, and opens
+# only once immich-setup has made the admin from the config, so no visitor
+# claims it. Immich reaches its database and queue on loopback and nothing
+# else; machine learning is off, as this form runs none. Its library is
+# in /data/svc/immich. See forms/immich/README.md.
+base: prod
+
+with: [postgresql, valkey, caddy]
+
+packages:
+  # The vector type Immich's search tables need, and the extensions its
+  # migrations make: cube and earthdistance for places, pg_trgm and
+  # unaccent for names, uuid-ossp for ids.
+  - pgvector-17
+  - postgresql-17-contrib
+
+# Taken back of werewolf's defaults (lib/allow.zig): V8 compiles Immich to
+# machine code as it runs.
+allow: [jit]
+
+# make check's, for this form alone (forms/README.md)
+check:
+  memory: 4096
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: V8 compiles Immich to machine code as it runs, and PostgreSQL its costly queries with LLVM (allow jit)
+
+services:
+  # Immich, from its project's image, as _oci-immich: the API and its
+  # workers, on loopback behind Caddy. It reaches PostgreSQL and Valkey on
+  # loopback and no other address, and runs only node, for its
+  # workers, ffmpeg and ffprobe for video, and pg_dump and gzip for its
+  # nightly database backup. Its library, thumbnails and backups are its
+  # /data, /data/svc/immich on the machine.
+  immich:
+    # v3 follows Immich 3's releases; a new major, whose upgrade may ask
+    # more of the operator, is a change to this line.
+    image: ghcr.io/immich-app/immich-server:v3
+    # The image's entrypoint is bash; start.sh, which it runs, execs this.
+    exec: /usr/local/bin/node /usr/src/app/server/dist/main.js
+    # netlink: glibc's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: [tcp/2283 loopback]
+    connect: [tcp/5432 tcp/6379]
+    run:
+      - /usr/local/bin/node
+      - /usr/lib/jellyfin-ffmpeg/ffmpeg
+      - /usr/lib/jellyfin-ffmpeg/ffprobe
+      - /usr/lib/postgresql/17/bin/pg_dump
+      - /usr/bin/gzip
+    memory: 2560
+    env:
+      - IMMICH_HOST=127.0.0.1
+      - IMMICH_PORT=2283
+      - IMMICH_MEDIA_LOCATION=/data
+      - IMMICH_TRUSTED_PROXIES=127.0.0.1
+      - IMMICH_LOG_LEVEL=log
+      - NO_COLOR=1
+      - DB_HOSTNAME=127.0.0.1
+      - DB_PORT=5432
+      - DB_USERNAME=immich
+      - DB_DATABASE_NAME=postgres
+      - DB_VECTOR_EXTENSION=pgvector
+      - REDIS_HOSTNAME=127.0.0.1
+      - REDIS_PORT=6379
+
+  # PostgreSQL, as postgresql's form runs it, but also on loopback TCP, as
+  # Immich's image cannot reach its socket: pg_hba.conf lets the role immich
+  # alone in that way, to the postgres database, and only services whose
+  # leash lets them connect to :5432 reach it at all.
+  postgres:
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/usr/share/werewolf-immich/pg_hba.conf
+    before: /usr/lib/werewolf/pg-init
+    user: postgres
+    pledge: stdio rpath wpath inet proc ipc unix listen connect
+    listen: [tcp/5432 loopback]
+    run: /usr/bin/initdb
+    share: shared
+
+  # Valkey, as valkey's form runs it, but also on loopback TCP for Immich's
+  # queue (etc/valkey/valkey.conf).
+  valkey:
+    exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
+    user: valkey
+    pledge: stdio rpath wpath inet unix listen proc
+    listen: [tcp/6379 loopback]
+    read: /etc/valkey
+    share: shared
+    memory: 256
+    nofile: 10240
+
+  # Caddy, as its own user, for Immich: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Immich on
+  # loopback, read its configuration, and write only its own directories.
+  # Before it opens, immich-setup makes Immich's admin from the config and
+  # sets its defaults, once. The base URL is Immich's too, for shared links.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before:
+      - /usr/lib/werewolf/immich-setup
+      - /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/2283]
+    read: /etc/caddy
+    config:
+      - admin-password /run/config/caddy/admin-password
+      - settings /run/config/caddy/settings.json
+    setting:
+      - base-url url as BASE_URL
+      - admin-email string required as IMMICH_ADMIN_EMAIL
+      - admin-name string as IMMICH_ADMIN_NAME
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

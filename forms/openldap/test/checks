@@ -1,0 +1,23 @@
+# slapd answers over LDAPS once openldap-setup has made the directory, and
+# its admin binds: wait.
+ok  ldap-admin       export LDAPTLS_CACERT=/run/config/openldap/tls-cert; i=0; until ldapwhoami -H ldaps://localhost -x -D cn=ops,dc=example,dc=com -w werewolf-check-admin-1 2>/dev/null | grep -qx 'dn:cn=ops,dc=example,dc=com'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no bind in 60 s"; exit 1; }; sleep 1; done
+# The admin adds a person, with a password sent in the clear over TLS,
+# and finds it by a search.
+ok  ldap-add-search  export LDAPTLS_CACERT=/run/config/openldap/tls-cert; a='-H ldaps://localhost -x -D cn=ops,dc=example,dc=com -w werewolf-check-admin-1'; printf 'dn: uid=alice,dc=example,dc=com\nobjectClass: inetOrgPerson\nuid: alice\ncn: Alice\nsn: Check\nuserPassword: werewolf-alice-pass-1\n' | ldapadd $a >/dev/null && ldapsearch $a -LLL -b dc=example,dc=com '(uid=alice)' cn | grep -qx 'cn: Alice'
+# The password was kept as an Argon2id hash, the admin's in slapd.conf
+# too, and leash's copy of the admin's is gone.
+ok  ldap-hashed      export LDAPTLS_CACERT=/run/config/openldap/tls-cert; p=$(ldapsearch -H ldaps://localhost -x -D cn=ops,dc=example,dc=com -w werewolf-check-admin-1 -LLL -o ldif_wrap=no -b uid=alice,dc=example,dc=com -s base userPassword | sed -n 's/^userPassword:: //p' | base64 -d); case $p in '{ARGON2}$argon2id$v=19$m=19456,t=2,p=1$'*) ;; *) echo "stored: $p"; exit 1;; esac; c=/run/svc/openldap/slapd.conf; grep -q '^rootpw {ARGON2}\$argon2id\$' $c && ! grep -rq werewolf-check-admin-1 /run/svc/openldap && [ ! -e /run/svc/openldap/admin-password ] && [ "$(stat -c '%a %U' $c)" = '600 openldap' ]
+# The person binds with it, and reads entries, but no password, its own
+# included.
+ok  ldap-user        export LDAPTLS_CACERT=/run/config/openldap/tls-cert; u='-H ldaps://localhost -x -D uid=alice,dc=example,dc=com -w werewolf-alice-pass-1'; o=$(ldapsearch $u -LLL -b dc=example,dc=com '(uid=*)' '*' userPassword); echo "$o" | grep -qx 'dn: uid=alice,dc=example,dc=com' && ! echo "$o" | grep -qi '^userPassword'
+# A password sent already hashed is refused: its cost would be the
+# sender's to choose.
+ok  ldap-no-prehashed export LDAPTLS_CACERT=/run/config/openldap/tls-cert; printf 'dn: uid=alice,dc=example,dc=com\nchangetype: modify\nreplace: userPassword\nuserPassword: {ARGON2}$argon2id$v=19$m=4194304,t=1,p=1$c2FsdHNhbHQ$aGFzaGhhc2g\n' | ldapmodify -H ldaps://localhost -x -D uid=alice,dc=example,dc=com -w werewolf-alice-pass-1 2>&1 | grep -q 'Constraint violation'
+# The config database answers no one, its admin's neither.
+ok  ldap-no-config   export LDAPTLS_CACERT=/run/config/openldap/tls-cert; o=$(ldapsearch -H ldaps://localhost -x -D cn=ops,dc=example,dc=com -w werewolf-check-admin-1 -LLL -b cn=config 2>&1); [ $? -ne 0 ] && ! echo "$o" | grep -q '^dn:'
+# The attacks: an anonymous search is refused at its bind, over LDAPS
+# too, as is one bound by a name without a password (an unauthenticated
+# bind); nothing serves plain LDAP on :389, so a password is never sent
+# in the clear.
+ok  ldap-no-anonymous export LDAPTLS_CACERT=/run/config/openldap/tls-cert; s='-H ldaps://localhost -x -LLL -b dc=example,dc=com'; o=$(ldapsearch $s '(uid=*)' 2>&1); echo "$o" | grep -q 'anonymous bind disallowed' && ! echo "$o" | grep -q '^dn:' && o=$(ldapsearch $s -D uid=alice,dc=example,dc=com -w '' '(uid=*)' 2>&1); echo "$o" | grep -q 'unauthenticated bind' && ! echo "$o" | grep -q '^dn:'
+ok  ldap-no-cleartext ! netstat -ltn | grep -q ':389 ' && ldapwhoami -H ldap://127.0.0.1 -x -D cn=ops,dc=example,dc=com -w werewolf-check-admin-1 2>&1 | grep -q "Can't contact LDAP server" && ! ldapwhoami -H ldap://10.0.2.15 -x -D cn=ops,dc=example,dc=com -w werewolf-check-admin-1 >/dev/null 2>&1

@@ -68,7 +68,6 @@ fn report(
     var b = try native.prepare(io, gpa, steps, .{
         .form = "minimal",
         .arch = arch,
-        .freeze = native.frozen(),
     });
     try melange.build(&b, recipe);
     const made = try melange.made(&b, recipe, try melange.stamp(&b, recipe));

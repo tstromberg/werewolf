@@ -92,7 +92,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
     }));
     try b.put(d, "overlay", try overlayList(b));
-    // apk's world as the packages leave it, without the pins FREEZE adds.
+    // apk's world as the packages leave it, without the build-only lock pins.
     // Published, it names the format's package, so the updater takes only
     // programs that read the files compose writes (lib/compose.zig).
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/etc/apk", .{meta_dir}));
@@ -103,6 +103,20 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         .{rootfs},
     );
     try b.put(meta_dir, "etc/apk/world", unpinned);
+    if (b.deployment) |local| {
+        const repositories = try b.capture(
+            stamp,
+            &.{ "bsdtar", "-xOf", rootfs, "etc/apk/repositories" },
+        );
+        var remote: std.ArrayList(u8) = .empty;
+        var lines = mem.tokenizeScalar(u8, repositories, '\n');
+        while (lines.next()) |line| {
+            if (mem.eql(u8, line, local.repository)) continue;
+            try remote.print(b.gpa, "{s}\n", .{line});
+        }
+        try remote.print(b.gpa, "{s}\n", .{local.from});
+        try b.put(meta_dir, "etc/apk/repositories", remote.items);
+    }
     try b.put(d, "release", try b.path("{s} {s} built-by-make\n", .{ b.name, kernel_pkg }));
     try b.put(d, "tiers.pub", embedded.tiers_pub);
     try b.put(d, "tiers", tiers_url ++ "\n");
@@ -134,6 +148,10 @@ fn withoutPins(gpa: Allocator, world: []const u8) ![]const u8 {
 fn overlayList(b: *B) ![]const u8 {
     var seen: std.array_hash_map.String(void) = .empty;
     for (b.overlay[1..]) |dir| {
+        // A local-NAME package owns the app; copying the running slot's
+        // files over its successor would undo an apply, including removals.
+        if (b.deployment != null and b.spec.app != null and
+            mem.eql(u8, dir, b.spec.app.?)) continue;
         var d = Dir.cwd().openDir(b.io, dir, .{ .iterate = true }) catch continue;
         defer d.close(b.io);
         var w = try d.walk(b.gpa);
@@ -211,11 +229,14 @@ fn layerStep(
     try b.done(target, began);
 }
 
-/// layer writes target, a tar of dirs laid over one another in order,
-/// whose bytes depend only on the files' contents and whether each is
-/// executable: sorted, owned by root, modes 644 or 755, dated 1970 as apko
-/// dates its own files, and carrying nothing of the builder's (owners,
-/// extended attributes, .DS_Store). Images are made from tars alone, so no
+/// layer writes target, a tar of dirs laid over one another in order, in
+/// restricted pax: ustar's bytes, but for a pax header where a path or a
+/// link is too long for ustar, which would otherwise drop it with a mere
+/// warning (an image's node_modules has both). Its bytes depend only on
+/// the files' contents and whether each is executable: sorted, owned by
+/// root, modes 644 or 755, dated 1970 as apko dates its own files, and
+/// carrying nothing of the builder's (owners, extended attributes,
+/// .DS_Store). Images are made from tars alone, so no
 /// inode number or time of the build host reaches one.
 fn layer(b: *B, target: []const u8, dirs: []const []const u8) !void {
     const io = b.io;
@@ -252,7 +273,7 @@ fn layer(b: *B, target: []const u8, dirs: []const []const u8) !void {
         defer names_in.close(io);
         try b.run(&.{
             "bsdtar",      "-cf",             try b.absolute(t), "--format",
-            "ustar",       "--uid",           "0",               "--gid",
+            "paxr",        "--uid",           "0",               "--gid",
             "0",           "--numeric-owner", "--no-xattrs",     "--no-acls",
             "--no-fflags", "-n",              "-T",              "-",
         }, .{ .cwd = stage, .stdin = names_in });
@@ -357,6 +378,29 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
         try b.path("@{s}", .{overlay}),
     });
     try b.run(argv.items, .{});
+    // An image service runs in its own tree, which lacks werewolf's
+    // programs: a form's `before` helpers, and service-config for its
+    // settings. Each tree gets the root's /usr/lib/werewolf, in the root's
+    // order and bytes (erofs keeps one copy of the data); Landlock lets a
+    // service run only what its service file names.
+    var roots: std.ArrayList([]const u8) = .empty;
+    for (b.chain) |c| {
+        const svcs = c.spec.get("services") orelse continue;
+        for (svcs.map) |svc|
+            if (svc.value.get("image") != null) try roots.append(b.gpa, svc.key);
+    }
+    if (roots.items.len > 0) {
+        const programs = try b.path("{s}/programs.tar", .{out});
+        const from_root = try b.path("@{s}", .{root_tar});
+        const ours = "usr/lib/werewolf/*";
+        try b.run(&.{ "bsdtar", "-cf", programs, "--include", ours, from_root }, .{});
+        const from_programs = try b.path("@{s}", .{programs});
+        for (roots.items) |name| {
+            const into = try b.path(",^usr/,oci/{s}/usr/,", .{name});
+            try b.run(&.{ "bsdtar", "-rf", root_tar, "-s", into, from_programs }, .{});
+        }
+        try Dir.cwd().deleteFile(b.io, programs);
+    }
     Dir.cwd().deleteFile(b.io, target) catch {};
     try checkErofs(b);
     // -T0 dates every file and the image 1970, and the UUID is fixed

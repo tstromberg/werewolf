@@ -1,0 +1,56 @@
+# openldap: prod, with OpenLDAP 2.6, the long-term release, serving a
+# company's directory over LDAPS on :636 alone, with the certificate and
+# key from the config. Its suffix comes from the domain the machine's
+# settings name, its admin's password from the config. No anonymous bind
+# or search; passwords are kept as Argon2id hashes, and read by no one.
+# leash starts slapd (etc/sv/openldap/service) as the openldap user, after
+# openldap-setup (forms/openldap/cmd/openldap-setup) writes its
+# configuration and, on the first start, makes the directory in /data.
+# See forms/openldap/README.md.
+base: prod
+
+# libldap-2.6 by name: libldap-2.7 provides the same library, and slapd
+# 2.6 is built against its own.
+packages:
+  - openldap-2.6
+  - openldap-2.6-back-mdb
+  - openldap-2.6-overlay-ppolicy
+  - openldap-2.6-passwd-argon2
+  - libldap-2.6
+
+# The check speaks LDAP with OpenLDAP's own clients.
+dev:
+  - openldap-2.6-clients
+
+# make check's (forms/README.md): :636 speaks LDAPS, not HTTP; its own
+# test/checks speaks to it.
+check:
+  skip: [http-answering]
+
+services:
+  # slapd, as its own user: it may bind :636 and no other port, reach
+  # nothing on the network, read its schemas, and write only its own
+  # directories, its database in /data/svc/openldap/db. It runs nothing;
+  # openldap-setup runs slapd itself as slapadd (-T add) on the first
+  # start. -d stats keeps it in the foreground, logging each connection,
+  # operation and refusal on the console. The admin's password, the
+  # certificate and its key come from the config: missing, the service
+  # parks with a line naming the file.
+  openldap:
+    exec: /usr/bin/slapd -h ldaps:/// -f /run/svc/openldap/slapd.conf -d stats
+    before: /usr/lib/werewolf/openldap-setup
+    user: openldap
+    pledge: stdio rpath wpath inet unix listen proc
+    listen: [tcp/636]
+    read: /etc/openldap
+    config:
+      - admin-password /run/config/openldap/admin-password
+      - tls-cert /run/config/openldap/tls-cert
+      - tls-key /run/config/openldap/tls-key
+      - settings /run/config/openldap/settings.json
+    setting:
+      - domain hostname required as OPENLDAP_DOMAIN
+      - admin string as OPENLDAP_ADMIN
+    render: env site
+    memory: 512
+    nofile: 16384

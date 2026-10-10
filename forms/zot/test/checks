@@ -1,0 +1,22 @@
+# zot runs as its own user, without a capability.
+ok  zot-user         i=0; until [ -n "$(cat /run/cgroup/svc/zot/cgroup.procs)" ]; do i=$((i + 1)); [ $i -le 60 ] || exit 1; sleep 1; done; p=$(head -n 1 /run/cgroup/svc/zot/cgroup.procs); u=$(grep '^zot:' /etc/passwd | cut -d: -f3); grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+# zot answers through Caddy over HTTPS, with a certificate from Caddy's
+# own CA for localhost, once Caddy has made it: wait. A stranger and a
+# wrong password are refused, the second after five seconds.
+ok  zot-stranger     i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/v2/ 2>&1 | grep -q 'HTTP/1.1 401'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no 401 in 60 s"; exit 1; }; sleep 1; done
+ok  zot-wrong-password wget -q -T 15 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s alice:wrong | base64)" https://localhost/v2/ 2>&1 | grep -q 'HTTP/1.1 401'
+# Caddy serves the registry's API alone: not zot's metrics, even to a user.
+ok  zot-only-v2      wget -q -T 5 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s alice:werewolf-check-alice | base64)" https://localhost/metrics 2>&1 | grep -q 'HTTP/1.1 404'
+# alice pushes an image of one layer, with crane, trusting Caddy's CA; it
+# is on /data, zot's, and one copy.
+ok  zot-push         export HOME=/tmp DOCKER_CONFIG=/tmp/zot-alice SSL_CERT_FILE=/data/svc/caddy/pki/authorities/local/root.crt; mkdir -p /tmp/zot-l && echo pushed-by-alice >/tmp/zot-l/hello && tar -cf /tmp/zot-layer.tar -C /tmp/zot-l hello && crane auth login localhost -u alice -p werewolf-check-alice && crane append -f /tmp/zot-layer.tar -t localhost/app/hello:1 && crane digest localhost/app/hello:1 >/tmp/zot-digest && [ "$(stat -c %U /data/svc/zot/app/hello/index.json)" = zot ]
+# bob pulls it by its digest, and gets alice's layer back.
+ok  zot-pull         export HOME=/tmp DOCKER_CONFIG=/tmp/zot-bob SSL_CERT_FILE=/data/svc/caddy/pki/authorities/local/root.crt; crane auth login localhost -u bob -p werewolf-check-bob && crane export "localhost/app/hello@$(cat /tmp/zot-digest)" /tmp/zot-pulled.tar && [ "$(tar -xOf /tmp/zot-pulled.tar hello)" = pushed-by-alice ]
+# zot reaches nothing: fence has no line for its user.
+ok  zot-alone        u=$(grep '^zot:' /etc/passwd | cut -d: -f3); ! grep -q "^connect $u " /usr/share/werewolf/net
+# The attacks: a stranger cannot push or pull, and bob, who only pulls (a
+# CI job's stolen password), cannot replace alice's image or delete it,
+# which is still the one she pushed.
+ok  zot-stranger-pull export HOME=/tmp DOCKER_CONFIG=/tmp/zot-none SSL_CERT_FILE=/data/svc/caddy/pki/authorities/local/root.crt; ! crane digest localhost/app/hello:1 2>/tmp/zot-err && grep -q UNAUTHORIZED /tmp/zot-err
+ok  zot-stranger-push export HOME=/tmp DOCKER_CONFIG=/tmp/zot-none SSL_CERT_FILE=/data/svc/caddy/pki/authorities/local/root.crt; ! crane append -f /tmp/zot-layer.tar -t localhost/app/evil:1 2>/tmp/zot-err && grep -q 401 /tmp/zot-err && [ ! -e /data/svc/zot/app/evil ]
+ok  zot-reader-push  export HOME=/tmp DOCKER_CONFIG=/tmp/zot-bob SSL_CERT_FILE=/data/svc/caddy/pki/authorities/local/root.crt; tar -cf /tmp/zot-evil.tar -C /etc passwd && ! crane append -f /tmp/zot-evil.tar -t localhost/app/hello:1 2>/tmp/zot-err && grep -q DENIED /tmp/zot-err && ! crane delete "localhost/app/hello@$(cat /tmp/zot-digest)" 2>/dev/null && [ "$(crane digest localhost/app/hello:1)" = "$(cat /tmp/zot-digest)" ]

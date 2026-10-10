@@ -1,0 +1,12 @@
+# What the syncthing form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-syncthing;
+# test/boot; forms/demo/test/console has the format). Caddy, given no
+# password for the GUI's user, parks before syncthing-auth writes
+# anything or Caddy binds a port, and says why; Syncthing runs, its GUI on
+# loopback, reachable by nothing. make check-syncthing boots it with its
+# config, and checks the GUI takes its user alone.
+
+seen    caddy-needs-config  leash: \{"event":"down","service":"caddy","why":"config gui-password: FileNotFound"\}
+seen    setup-ran           syncthing-setup: made the device key and config
+unseen  syncthing-down      leash: \{"event":"down","service":"syncthing"
+unseen  auth-ran            syncthing-auth: Syncthing

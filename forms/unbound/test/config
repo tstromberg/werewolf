@@ -1,0 +1,8 @@
+#!/bin/sh
+# forms/unbound/test/config DIR: the unbound form's config for make check,
+# in DIR: two private zones, a name and a reverse zone, forwarded to the
+# check's gateway. The check is offline: nothing answers for them, and
+# test/checks looks at what unbound-setup wrote.
+set -eu
+mkdir -p "$1/unbound"
+echo '{"forward-zones":["corp.example","10.in-addr.arpa"],"forward-to":["10.0.2.3"]}' >"$1/unbound/settings.json"

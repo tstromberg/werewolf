@@ -176,6 +176,37 @@ pub fn tiersOf(gpa: Allocator, feed: ?Feed, u: Update) !Tiers {
     return t;
 }
 
+/// tierOf is the feed's tier for id: the most urgent listing, Medium when
+/// the feed does not name it, and High when there is no feed.
+pub fn tierOf(feed: ?Feed, id: []const u8) policy.Tier {
+    const f = feed orelse return .high;
+    inline for (.{ .urgent, .high, .medium, .low }) |tier| {
+        for (@field(f, @tagName(tier))) |e| {
+            if (std.mem.eql(u8, e.cve, id)) return tier;
+        }
+    }
+    return .medium;
+}
+
+/// missing returns the advisories in listed whose id is not in have, the
+/// running image's advisory file.
+pub fn missing(
+    gpa: Allocator,
+    listed: []const policy.Advisory,
+    have: []const u8,
+) ![]const policy.Advisory {
+    var held: std.StringHashMapUnmanaged(void) = .empty;
+    var lines = std.mem.splitScalar(u8, have, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t");
+        const id = words.next() orelse continue;
+        if (id.len > 0 and id[0] != '#') try held.put(gpa, id, {});
+    }
+    var out: std.ArrayList(policy.Advisory) = .empty;
+    for (listed) |a| if (!held.contains(a.id)) try out.append(gpa, a);
+    return out.items;
+}
+
 /// Named is a feed entry and its tier.
 const Named = struct { tier: policy.Tier, entry: Entry };
 
@@ -189,15 +220,7 @@ fn addAdvisories(
     advisories: []const policy.Advisory,
     have: []const u8,
 ) !void {
-    var held: std.StringHashMapUnmanaged(void) = .empty;
-    var lines = std.mem.splitScalar(u8, have, '\n');
-    while (lines.next()) |line| {
-        var words = std.mem.tokenizeAny(u8, line, " \t");
-        const id = words.next() orelse continue;
-        if (id[0] != '#') try held.put(gpa, id, {});
-    }
-    for (advisories) |a| {
-        if (held.contains(a.id)) continue;
+    for (try missing(gpa, advisories, have)) |a| {
         t.add(
             a.tier,
             .{ .subject = try gpa.print("{s} in werewolf", .{a.id}), .evidence = a.title },

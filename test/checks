@@ -10,8 +10,9 @@
 #         yet. When one starts holding, make it ok and update the docs.
 #
 # A form declares the ports it listens on in its network policy
-# (forms/FORM/form.yaml, `listen tcp/PORT`), which the build compiles into
-# /usr/share/werewolf/net as `listen tcp PORT`; ssh's 22 is declared by
+# (forms/FORM/form.yaml, `listen tcp/PORT` or `udp/PORT`), which the build
+# compiles into /usr/share/werewolf/net as `listen tcp PORT` or `listen UID
+# udp PORT`; ssh's 22 is declared by
 # sshd being installed. The listeners check fails on anything else
 # listening on the network (a socket bound to loopback alone serves the
 # machine's own processes, and fence lets nothing from outside reach it);
@@ -35,7 +36,7 @@
 ok  network          grep -q '10\.0\.2\.15' /proc/net/fib_trie && awk '$2 == "00000000" && $3 == "0202000A" { f = 1 } END { exit !f }' /proc/net/route
 ok  services-up      i=0; while sv status /etc/sv/* | grep -qE 'want up|^fail'; do i=$((i + 1)); [ $i -le 30 ] || break; sleep 1; done; sleep 2; ! sv status /etc/sv/* | grep -E 'want up|^fail'
 ok  boot-quiet       ! dmesg | grep -E 'Lockdown:|ptrace attach' | grep -v -e 'Lockdown: run: /dev/mem' -e 'ptrace attach of "runit"\[1\] was attempted by "\./run"'
-ok  listeners        bad=$(netstat -ltun | awk 'NR > 2 && $4 !~ /^(127\.|::1:)/ { n = split($4, a, ":"); print a[n] }' | sort -u | grep -vx -e none $(command -v sshd >/dev/null && echo -e 22) $(awk '$1 == "listen" { print "-e " $3 }' /usr/share/werewolf/net)); [ -z "$bad" ] || { echo "listening, undeclared: $bad"; exit 1; }
+ok  listeners        bad=$(netstat -ltun | awk 'NR > 2 && $4 !~ /^(127\.|::1:)/ { n = split($4, a, ":"); print a[n] }' | sort -u | grep -vx -e none $(command -v sshd >/dev/null && echo -e 22) $(awk '$1 == "listen" { print "-e " ($2 == "tcp" ? $3 : $4) }' /usr/share/werewolf/net)); [ -z "$bad" ] || { echo "listening, undeclared: $bad"; exit 1; }
 ok  answering        for p in $(awk '$1 == "listen" && $2 == "tcp" && $3 != 22 { print $3 }' /usr/share/werewolf/net); do i=0; until netstat -ltn | awk -v p=$p 'NR > 2 { n = split($4, a, ":"); if (a[n] == p) f = 1 } END { exit !f }'; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing listens on :$p"; exit 1; }; sleep 1; done; done
 # HTTP on every declared port but ssh's and HTTPS's: any status line, as
 # an S3 store answers 403 to a stranger and oauth2-proxy sends one to the

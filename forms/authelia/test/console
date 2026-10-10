@@ -1,0 +1,8 @@
+# What the authelia form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-authelia;
+# test/boot; forms/demo/test/console has the format). Authelia, given no
+# users, parks before it serves anything, and says why; so does Caddy,
+# given no domain. make check-authelia boots it with its config.
+
+seen    authelia-needs-config  leash: \{"event":"down","service":"authelia","why":"config sso-users: FileNotFound"\}
+seen    caddy-needs-domain     service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}

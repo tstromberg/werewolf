@@ -1,0 +1,14 @@
+#!/bin/sh
+# forms/kafka/test/config DIR: the kafka form's config for make check, in
+# DIR: a certificate for localhost, the admin ops, and two users, app,
+# whom test/checks grants a topic, and stranger, whom no ACL names.
+set -eu
+d=$1/kafka
+mkdir -p "$d"
+umask 077
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 30 \
+	-subj '/CN=localhost' -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+	-keyout "$d/tls.key" -out "$d/tls.crt" 2>/dev/null
+printf '%s' werewolf-check-admin >"$d/admin-password"
+printf 'app werewolf-check-app\nstranger werewolf-check-stranger\n' >"$d/users"
+echo '{"domain":"localhost","admin":"ops"}' >"$d/settings.json"

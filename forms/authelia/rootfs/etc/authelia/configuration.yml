@@ -1,0 +1,82 @@
+# Authelia for the authelia form: single sign-on, with a second factor,
+# for every site under the machine's domain (DOMAIN; howl --domain),
+# behind Caddy. Its portal is auth.DOMAIN. The template filter
+# (X_AUTHELIA_CONFIG_FILTERS) fills in DOMAIN and the SMTP settings; the
+# secrets come from leash's copies of the config's files. leash starts
+# it (etc/sv/authelia/service) as authelia. See forms/authelia/README.md.
+
+server:
+  # Loopback alone: Caddy is in front.
+  address: 'tcp://127.0.0.1:9091/'
+
+log:
+  level: 'info'
+  format: 'json'
+
+# The machine's clock is the host's; nothing is asked of an NTP server.
+ntp:
+  disable_startup_check: true
+
+totp:
+  issuer: '{{ env "DOMAIN" }}'
+
+webauthn:
+  display_name: '{{ env "DOMAIN" }}'
+
+# Users are the config's: users.yml, with Argon2id hashes. A password
+# reset or change would be lost at the next start, which copies the file
+# again, so both are off: change the file.
+authentication_backend:
+  password_reset:
+    disable: true
+  password_change:
+    disable: true
+  file:
+    path: '/run/svc/authelia/sso-users'
+    watch: false
+
+# Nothing is reachable without a rule, and every site under the domain
+# needs both factors.
+access_control:
+  default_policy: 'deny'
+  rules:
+    - domain:
+        - '{{ env "DOMAIN" }}'
+        - '*.{{ env "DOMAIN" }}'
+      policy: 'two_factor'
+
+session:
+  cookies:
+    - domain: '{{ env "DOMAIN" }}'
+      authelia_url: 'https://auth.{{ env "DOMAIN" }}'
+      default_redirection_url: 'https://{{ env "DOMAIN" }}'
+
+# Three wrong passwords in two minutes ban the user for ten.
+regulation:
+  modes:
+    - 'user'
+  max_retries: 3
+  find_time: '2 minutes'
+  ban_time: '10 minutes'
+
+storage:
+  local:
+    path: '/data/svc/authelia/db.sqlite3'
+
+# A one-time code, to register a second factor, goes by mail when the
+# settings name a server; without one, to a file only root can read.
+notifier:
+{{- if env "SMTP_SERVER" }}
+  smtp:
+    address: '{{ if hasSuffix ":465" (env "SMTP_SERVER") }}submissions{{ else }}submission{{ end }}://{{ env "SMTP_SERVER" }}'
+    sender: '{{ env "SMTP_SENDER" }}'
+{{- if env "SMTP_USERNAME" }}
+    username: '{{ env "SMTP_USERNAME" }}'
+    password: '{{ secret "/run/svc/authelia/smtp-password" }}'
+{{- end }}
+    tls:
+      minimum_version: 'TLS1.2'
+{{- else }}
+  filesystem:
+    filename: '/data/svc/authelia/notification.txt'
+{{- end }}

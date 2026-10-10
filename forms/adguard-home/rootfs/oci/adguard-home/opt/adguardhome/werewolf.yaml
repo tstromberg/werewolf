@@ -1,0 +1,67 @@
+# AdGuard Home for the adguard-home form, copied to /data on its first
+# start by adguard-home-setup, where AdGuard Home then keeps it and its web
+# UI changes it; the machine's settings, where given, replace upstream_dns
+# and filters at each start. It blocks ads and trackers for a home or
+# office network, asks its upstreams over TLS, answers no one outside
+# private networks, keeps no query log, and has no setup wizard: the file
+# exists. Its web UI is on loopback, behind Caddy and its login. See
+# forms/adguard-home/README.md.
+http:
+  address: 127.0.0.1:3000
+  session_ttl: 720h
+# Caddy asks for the password; AdGuard Home's own login stays empty.
+users: []
+dns:
+  bind_hosts:
+    - 0.0.0.0
+  port: 53
+  upstream_dns:
+    - tls://dns.quad9.net
+    - tls://one.one.one.one
+  upstream_mode: load_balance
+  # Only to find the upstreams' addresses.
+  bootstrap_dns:
+    - 9.9.9.9
+    - 149.112.112.112
+    - 1.1.1.1
+  # Not an open resolver: anyone else is refused.
+  allowed_clients:
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 169.254.0.0/16
+    - ::1/128
+    - fc00::/7
+    - fe80::/10
+  ratelimit: 20
+  refuse_any: true
+  enable_dnssec: true
+# No query log: what a household looks up is its own. Counts alone.
+querylog:
+  enabled: false
+  file_enabled: false
+statistics:
+  enabled: true
+filters:
+  - enabled: true
+    url: https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+    name: AdGuard DNS filter
+    id: 1
+# The machine's network has its own DHCP server.
+dhcp:
+  enabled: false
+# No lookups of clients' names beyond the machine: no WHOIS, no reverse
+# DNS, and no `arp`, which AdGuard Home would run as a program.
+clients:
+  runtime_sources:
+    whois: false
+    arp: false
+    rdns: false
+    dhcp: false
+    hosts: true
+log:
+  file: ""
+  verbose: false
+schema_version: 34

@@ -1,0 +1,95 @@
+# keycloak: Keycloak, single sign-on by OpenID Connect and SAML, on jre,
+# with PostgreSQL and Caddy beside it (with): Caddy serves it over HTTPS
+# at the machine's base URL, with a certificate from Let's Encrypt;
+# Keycloak, on loopback, keeps its tables in a schema of its own, reached
+# by PostgreSQL's socket. Its links name the base URL alone, whatever a
+# request's Host says. Its first administrator comes from the config
+# before it serves. Wolfi's Keycloak is old and brings bash: melange
+# builds upstream's release (forms/keycloak/melange/keycloak.yaml), and
+# java starts it, without kc.sh. See forms/keycloak/README.md.
+base: jre
+
+with: [postgresql, caddy]
+
+# make check's (forms/README.md): Keycloak's heap beside PostgreSQL's and
+# Caddy's.
+check:
+  memory: 3072
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: java runs Keycloak, which is what this form is for
+  kernel-write-xor-execute: the JVM compiles Keycloak to machine code as it runs, and PostgreSQL its costly queries (allow jit, from jre and postgresql)
+
+services:
+  # Caddy, as its own user, for Keycloak: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Keycloak on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the base URL Keycloak takes too, from the machine's
+  # settings, as BASE_URL, which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8180]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
+
+  # Keycloak, as its own user: it serves on loopback, behind Caddy, its
+  # health and metrics on a loopback port of their own that Caddy does not
+  # pass; it keeps its tables in the schema keycloak in PostgreSQL, by its
+  # socket, as the role of its name. It reaches LDAP (a campus directory),
+  # mail submission, and HTTPS (federation metadata, other providers'
+  # keys), anywhere, as a university's are on its own network as often as
+  # not. Its links and tokens name the base URL alone. Its first
+  # administrator, from the config, is made before it serves. The heap is
+  # under the memory limit, with room for the JVM's own.
+  keycloak:
+    exec: /usr/bin/java -Xms128m -Xmx768m -Djava.io.tmpdir=/run/svc/keycloak @/usr/lib/keycloak/java.args start --optimized
+    user: keycloak
+    # netlink: the JVM lists the host's addresses.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/8180 tcp/9180 loopback]
+    connect:
+      - tcp/443 tcp/389 tcp/636 tcp/587 tcp/465
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+    secret: KC_BOOTSTRAP_ADMIN_PASSWORD /run/config/keycloak/admin-password
+    config: settings /run/config/keycloak/settings.json
+    setting:
+      - base-url url required as KC_HOSTNAME
+      - admin string required as KC_BOOTSTRAP_ADMIN_USERNAME
+    render: env site
+    memory: 1536
+    nofile: 65536
+    env:
+      - KC_DB_URL=jdbc:postgresql://localhost/postgres?socketFactory=werewolf.pg.UnixSocketFactory&socketFactoryArg=/run/svc/postgres/.s.PGSQL.5432&sslmode=disable&gssEncMode=disable
+      - KC_DB_USERNAME=keycloak
+      - KC_DB_SCHEMA=keycloak
+      - KC_DB_POOL_MAX_SIZE=32
+      # One node: its caches local, no JGroups port to find peers on.
+      - KC_CACHE=local
+      # Plain HTTP on loopback, behind Caddy's TLS, which alone may say
+      # who the client is.
+      - KC_HTTP_ENABLED=true
+      - KC_HTTP_HOST=127.0.0.1
+      - KC_HTTP_PORT=8180
+      - KC_HTTP_MANAGEMENT_PORT=9180
+      - KC_PROXY_HEADERS=xforwarded
+      - KC_PROXY_TRUSTED_ADDRESSES=127.0.0.1/32
+      - KC_HOSTNAME_STRICT=true
+      - KC_HOSTNAME_BACKCHANNEL_DYNAMIC=false
+      - KC_LOG=console
+      - KC_LOG_CONSOLE_OUTPUT=json

@@ -11,7 +11,7 @@
 # forms/nextcloud/README.md.
 base: prod
 
-with: [postgresql, valkey, caddy, cron]
+with: [postgresql, valkey, caddy, cron, sh-shim]
 
 packages:
   - php-8.4
@@ -147,6 +147,9 @@ services:
       - NEXTCLOUD_CONFIG_DIR=/data/svc/nextcloud/config
       - HOME=/run/svc/nextcloud
       - TMPDIR=/data/svc/nextcloud/tmp
+      # occ's terminal size, which it would otherwise ask stty for.
+      - COLUMNS=120
+      - LINES=40
 
   # Nextcloud's background jobs: supercronic, as nextcloud-cron, of the
   # web's group, runs etc/cron/crontab's one job every five minutes,

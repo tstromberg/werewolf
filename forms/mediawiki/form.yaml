@@ -1,0 +1,100 @@
+# mediawiki: php, with MediaWiki 1.43, the long-term release, on SQLite:
+# a wiki for a lab's or a department's notes, on one machine. Wolfi does
+# not ship MediaWiki: melange lays the release's code in
+# /usr/share/mediawiki (forms/mediawiki/melange/mediawiki.yaml), which is
+# nginx's root; the form brings LocalSettings.php and the extensions it
+# loads, in /etc/mediawiki, and the setup that installs the wiki from the
+# machine's settings before php-fpm serves it, and updates its database
+# after an update of the image (usr/share/werewolf-mediawiki/setup.php).
+# Only accounts edit, only an administrator makes them, and by default
+# only accounts read. The database and uploads are on /data. TLS is in
+# front of it: a caddy machine or the cloud's load balancer. See
+# forms/mediawiki/README.md.
+base: php
+
+packages:
+  - php-8.4               # the php command, for the setup and updates
+  - php-8.4-pdo
+  - php-8.4-pdo_sqlite    # the database
+  - php-8.4-apcu          # the cache, which also counts failed logins
+  - php-8.4-apcu-config
+  - php-8.4-calendar
+  - php-8.4-ctype
+  - php-8.4-dom
+  - php-8.4-fileinfo      # uploads' types, by content
+  - php-8.4-gd            # thumbnails
+  - php-8.4-iconv
+  - php-8.4-intl
+  - php-8.4-mbstring
+  - php-8.4-opcache
+  - php-8.4-openssl
+  - php-8.4-simplexml
+  - php-8.4-xml
+  - php-8.4-xmlreader
+
+# make check's (forms/README.md): the installer and VisualEditor's parser
+# want more than the default.
+check:
+  memory: 2048
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: php-fpm runs MediaWiki
+  kernel-write-xor-execute: PCRE2 compiles PHP's patterns to machine code (allow jit, from php)
+
+services:
+  # nginx, as its own user: it may bind :80 and no other port, read its
+  # configuration and the image, connect to php-fpm's socket, and run only
+  # itself. Uploads it never reads: img_auth.php hands them out.
+  nginx:
+    exec: /usr/bin/nginx -e stderr
+    before: /usr/bin/nginx -e stderr -t -q
+    user: nginx
+    group: php
+    pledge: stdio rpath wpath proc unix inet listen connect aio sendfile
+    listen: [tcp/80]
+    read: /etc/nginx
+    connect: [/run/svc/php-fpm/php.sock]
+
+  # php-fpm running MediaWiki, as the php user: it reads its configuration
+  # and the image, writes only its own directories (the database, uploads
+  # and caches in /data/svc/php-fpm), and reaches nothing on the network.
+  # Before it serves, setup.php installs the wiki from the settings, or
+  # updates its database for new code, so no first visitor claims it; a
+  # missing administrator's password parks the service. Its PHP may run no
+  # program, and the setup's neither.
+  # The opcode cache and APCu are set up as php-fpm starts, before any
+  # pool's values apply, so their settings go on the line: the opcode
+  # cache's lock file in php's own directory (not /tmp, which the leash
+  # does not grant), and no looking for changed files, since the image
+  # cannot change.
+  php-fpm:
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d opcache.validate_timestamps=0 -d opcache.memory_consumption=128 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000 -d apc.shm_size=64M
+    before:
+      - /usr/bin/php -d disable_functions=exec,passthru,shell_exec,system,proc_open,popen,pcntl_exec /usr/share/werewolf-mediawiki/setup.php
+      - /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
+    user: php
+    pledge: stdio rpath wpath proc unix listen
+    memory: 768
+    read: /etc/php /etc/mediawiki
+    # nginx reaches its socket, /run/svc/php-fpm/php.sock, mode 0660 for
+    # nginx's group.
+    share: shared
+    # SQLite's temporary files, for the setup; php-fpm.conf gives the
+    # workers the same.
+    env: [SQLITE_TMPDIR=/run/svc/php-fpm, TMPDIR=/run/svc/php-fpm]
+    # The administrator's password: required, since a wiki without one
+    # belongs to whoever finds it first.
+    config:
+      - admin-password /run/config/mediawiki/admin-password
+      - settings /run/config/mediawiki/settings.json
+    # The wiki: its address, name, language and administrator, and whether
+    # those without an account may read it.
+    setting:
+      - url url required
+      - name string
+      - language string
+      - admin string
+      - public-read bool
+    render: json site.json

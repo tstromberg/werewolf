@@ -1,0 +1,117 @@
+# OpenSearch for werewolf's opensearch form: upstream's minimal release
+# for each arch, pinned by sha256, without its bundled JDK (the form runs
+# Wolfi's openjdk-25-jre) or its bin/ scripts, which are bash, and with
+# JNA's library unpacked from its jar; the security plugin from Maven
+# Central, without its tools and demo configuration, laid in plugins/ as
+# opensearch-plugin would. Beside them, java.args: what bin/opensearch
+# would pass java (its launcher's system options, jvm.options and the
+# classpath), but the heap, which the service sizes to its memory.
+# Wolfi's opensearch-3 stopped at 3.6.0 and brings bash and busybox.
+package:
+  name: opensearch-werewolf
+  version: 3.9.0
+  epoch: 0
+  description: Open source distributed and RESTful search engine, with its security plugin
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+
+pipeline:
+  - if: ${{build.arch}} == 'aarch64'
+    uses: fetch
+    with:
+      uri: https://artifacts.opensearch.org/releases/core/opensearch/${{package.version}}/opensearch-min-${{package.version}}-linux-arm64.tar.gz
+      expected-sha256: 1bdceaf2eee8cfe294205c28f4be1c62ebf97348aeb82348e12f396d0aff4b42
+
+  - if: ${{build.arch}} == 'x86_64'
+    uses: fetch
+    with:
+      uri: https://artifacts.opensearch.org/releases/core/opensearch/${{package.version}}/opensearch-min-${{package.version}}-linux-x64.tar.gz
+      expected-sha256: 6126bdf7437446c19c42e2313e534cb432ef9cd87a412fc5dbad25ab45b89d26
+
+  - uses: fetch
+    with:
+      uri: https://repo1.maven.org/maven2/org/opensearch/plugin/opensearch-security/${{package.version}}.0/opensearch-security-${{package.version}}.0.zip
+      expected-sha256: 6b77366827a2df73655e7d04d42d0ff166b6a00ffcd556f2cb5d63762d43f096
+      extract: false
+
+  - runs: |
+      home=/usr/share/opensearch
+      d=${{targets.destdir}}$home
+      # bin/ empty: OpenSearch wants path.home/bin there.
+      mkdir -p $d/bin $d/native $d/plugins/opensearch-security
+      cp -a agent lib modules LICENSE.txt NOTICE.txt $d/
+      # JNA's library, which it would unpack into the temporary directory
+      # and could not map there (noexec): OpenSearch installs its seccomp
+      # filter and reads its limits through it.
+      case ${{build.arch}} in
+      aarch64) jna=linux-aarch64 ;;
+      x86_64) jna=linux-x86-64 ;;
+      esac
+      unzip -q -j lib/jna-*.jar com/sun/jna/$jna/libjnidispatch.so -d $d/native
+      unzip -q opensearch-security-${{package.version}}.0.zip -d security
+      cp -a security/*.jar security/plugin-descriptor.properties \
+        security/plugin-security.policy $d/plugins/opensearch-security/
+      find $d -type d -exec chmod 755 {} +
+      find $d -type f -exec chmod 644 {} +
+      chmod 755 $d/native/libjnidispatch.so
+      # One argument a line. OpenSearch's configuration directory is the
+      # service's own, which opensearch-setup writes; its temporary files
+      # go there too. No GC log or heap dump files: the console has what
+      # matters, and /data is not for 1 GiB dumps. No container support:
+      # the JVM would read the service's cgroup in /run/cgroup, which
+      # OpenSearch's agent refuses it (its policy names /sys/fs/cgroup),
+      # and OpenSearch would refuse to start, knowing no memory.
+      cat >$d/java.args <<EOF
+      -Dopensearch.networkaddress.cache.ttl=60
+      -Dopensearch.networkaddress.cache.negative.ttl=10
+      -XX:+AlwaysPreTouch
+      -Xss1m
+      -Djava.awt.headless=true
+      -Dfile.encoding=UTF-8
+      -Djna.nosys=true
+      -Djna.boot.library.path=$home/native
+      --enable-native-access=ALL-UNNAMED
+      -XX:-OmitStackTraceInFastThrow
+      -XX:+ShowCodeDetailsInExceptionMessages
+      -Dio.netty.noUnsafe=true
+      -Dio.netty.noKeySetOptimization=true
+      -Dio.netty.recycler.maxCapacityPerThread=0
+      -Dio.netty.allocator.numDirectArenas=0
+      -Dlog4j.shutdownHookEnabled=false
+      -Dlog4j2.disable.jmx=true
+      -Djava.locale.providers=SPI,CLDR
+      -XX:+UseG1GC
+      -XX:G1ReservePercent=25
+      -XX:InitiatingHeapOccupancyPercent=30
+      -XX:-UsePerfData
+      -XX:-UseContainerSupport
+      -XX:ErrorFile=/run/svc/opensearch/hs_err_pid%p.log
+      -Djava.io.tmpdir=/run/svc/opensearch
+      --add-modules=jdk.incubator.vector
+      -javaagent:$home/agent/opensearch-agent.jar
+      --add-opens=java.base/java.nio=ALL-UNNAMED
+      -Dorg.apache.lucene.store.MMapDirectory.sharedArenaMaxPermits=1
+      -XX:+UseCompactObjectHeaders
+      -Dopensearch.path.home=$home
+      -Dopensearch.path.conf=/run/svc/opensearch
+      -Dopensearch.distribution.type=tar
+      -Dopensearch.bundled_jdk=false
+      -cp
+      $home/lib/*
+      org.opensearch.bootstrap.OpenSearch
+      EOF
+
+update:
+  enabled: true
+  github:
+    identifier: opensearch-project/OpenSearch
+    tag-filter-prefix: "3."

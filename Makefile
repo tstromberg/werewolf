@@ -94,8 +94,8 @@ hooks:
 	git config core.hooksPath tools/git-hooks
 	@echo "hooks: git runs tools/git-hooks/pre-commit before each commit: test, lint, check-sshd"
 
-# howl builds images; FREEZE=1 pins packages, PUBLISHED=1 takes werewolf's programs from its repository.
-HOWL_BUILD = FREEZE=$(FREEZE) $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
+# howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
+HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published)
 image slot: $(HOWL)
@@ -108,7 +108,7 @@ $(OUT)/disk.qcow2: $(HOWL)
 
 # apko locks pin every package; these rules serve relock, and release-inputs's boot locks.
 LOCK = build/lock
-FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev).lock.json
+FORM_LOCK = $(LOCK)/$(FORM)$(if $(DEV),-dev)$(if $(PUBLISHED),-published).lock.json
 BOOT_LOCKS = $(LOCK)/kernel.lock.json $(LOCK)/boot.lock.json
 LOCKS = $(FORM_LOCK) $(BOOT_LOCKS)
 DEV_PACKAGES = busybox-full $(call form_list,dev)
@@ -134,7 +134,7 @@ $(BOOT_LOCKS): $(LOCK)/%.lock.json: boot/%.yaml
 	$(call apko_lock,$<)
 relock:
 	rm -f $(LOCKS)
-	$(MAKE) --no-print-directory FORM=$(FORM) $(LOCKS)
+	$(MAKE) --no-print-directory FORM=$(FORM_REF) $(BOOT_LOCKS) _howl-lock
 
 # Zig is pre-1.0, so insist on the version the code is written for.
 ZIG_VERSION = 0.17.0
@@ -215,7 +215,7 @@ TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settin
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
@@ -233,6 +233,8 @@ _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
 _test/%.zig: ; zig test $*.zig
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
+_test/howl-lock: $(HOWL)
+	@python3 test/howl-lock $(HOWL)
 
 posture: $(POSTURE_BIN)
 ifeq ($(HOST_OS)-$(HOST_ARCH),Linux-$(ARCH))
@@ -291,7 +293,7 @@ bite-me: slot
 list-forms:
 	@$(FORM_TOOL) tree
 
-# CI releases these forms when release-inputs changes; FREEZE=1 makes two runners agree byte for byte.
+# CI releases these forms when release-inputs changes; locks pin both runners to the same packages.
 RELEASE_FORMS = $(shell $(FORM_ASK) released)
 DIST_DIRECT_FORMS = minimal
 DIST = dist
@@ -311,15 +313,15 @@ release-inputs:
 # one form at a time: they share the forms it fetches.
 _lock/%: $(HOWL)
 	@$(MAKE) --no-print-directory PUBLISHED=1 FORM=$* _howl-lock
-_howl-lock:
+_howl-lock: $(HOWL)
 	$(HOWL_BUILD) lock
 dist:
-	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FREEZE=1 FORM=$$f _dist-form || exit 1; done
+	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory FORM=$$f _dist-form || exit 1; done
 # howl build always builds in build/ARCH, without DEV or APP, so refuse them.
 _dist-form: $(HOWL)
 	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
-	FREEZE=$(FREEZE) $(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST)
+	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST)
 
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
 MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
@@ -422,7 +424,7 @@ _check-form: $(HOWL) $(TEST_SK)
 
 check-adhoc: $(HOWL) | _check-shared
 	@mkdir -p $(CHECK) && rm -rf $(BUILD)/adhoc/check-oci
-	@$(HOWL) form --build --with prod --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
+	@$(HOWL) form --build --with prod --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/check-oci-form.log; echo "FAIL   check-oci form: see $(CHECK)/check-oci-form.log"; exit 1; }
 	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form

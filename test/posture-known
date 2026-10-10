@@ -16,6 +16,12 @@
 # prod-ssh) and DEV=1 builds, which add busybox-full: its shell, awk,
 # wget, nc and telnetd. make check-dist boots prod-ssh's release disk as it
 # ships: busybox for the logins sshd serves, and sshd listening.
+#
+# The boot chain is not verified end to end yet (docs/design/
+# verified-boot.md): Secure Boot is off (?boot-secure-boot: it is on
+# wherever the firmware takes the key), Alpine's kernel does not enforce
+# module signatures (boot-sig-enforced), and no TPM counter guards the
+# slot serial (boot-rollback-protected). Phase 4 and phase 5 close these.
 
-dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell
-*
+dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?boot-secure-boot boot-rollback-protected boot-sig-enforced
+* ?boot-secure-boot boot-rollback-protected boot-sig-enforced

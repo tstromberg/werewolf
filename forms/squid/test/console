@@ -1,0 +1,10 @@
+# What the squid form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-squid; test/boot;
+# forms/demo/test/console has the format). Given no client networks,
+# service-config refuses its settings and Squid parks, saying why, before
+# squid-setup writes a list or Squid binds :3128. make check-squid boots
+# it with its config, and checks what it lets through.
+
+seen    squid-needs-networks  service-config: \{"event":"settings","service":"squid","setting":"networks","why":"required"\}
+seen    squid-parked          leash: \{"event":"down","service":"squid","why":"settings refused; service-config said why"\}
+unseen  setup-ran             squid-setup: clients from

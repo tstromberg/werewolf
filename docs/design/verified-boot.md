@@ -3,7 +3,12 @@
 Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0,
 cmd/init); 2, a read-only root; 3, its dm-verity hash tree (lib/verity.zig)
 and signed releases ([docs/releases.md](../releases.md)). Not built: 4, our
-own kernel with IPE; 5, Secure Boot.
+own kernel with IPE; 5, Secure Boot. Posture holds each unbuilt phase open
+in every machine's report, as the `boot-` checks (docs/posture.md): Secure
+Boot on, module signatures enforced by the kernel's build, and rollback
+refused by a TPM counter. Each fails today, and every image excuses it
+(test/posture-known), so a machine whose boot chain improves says so, and
+one that claims more than it holds fails its own posture.
 
 ## Summary
 

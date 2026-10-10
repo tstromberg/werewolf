@@ -45,8 +45,9 @@ pub const usage =
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
     \\       howl build-apk RECIPE [--arch ARCH] [--verbose]   a form's own package, from a melange recipe
-    \\       howl form --with FORM,... --package PKG,... --oci NAME=REF --KEY LINE --KEY.SUB VALUE -o DIR   a form from the line, kept;
-    \\            build, run, create and pack take the same flags: one form alone is run as it is, more is generated (-n shows it)
+    \\       howl apply FILE [--name NAME] [--app DIR] [--to ssh://HOST/PATH] [-n]   publish an enrolled machine's declaration
+    \\       howl form [-f FILE] --with FORM,... --packages PKG,... --KEY LINE --KEY.SUB VALUE --services.NAME.KEY LINE -o DIR   a form from a manifest and the line, kept;
+    \\            build, run, create and pack take the same flags, form.yaml's keys: one form alone is run as it is, more is generated (-n shows it)
     \\
 ;
 
@@ -75,6 +76,7 @@ pub fn main(init: std.process.Init) void {
             pack,
             run,
             create,
+            apply,
             delete,
             console,
             stop,
@@ -97,6 +99,7 @@ pub fn main(init: std.process.Init) void {
         .pack => pack(io, gpa, args[2..], &why),
         .run => runForm(io, gpa, args[2..], &why),
         .create => create(io, gpa, args[2..], &why),
+        .apply => @import("apply.zig").apply(io, gpa, args[2..], &why),
         .delete => verbs.delete(io, gpa, args[2..], &why),
         .console => verbs.console(io, gpa, args[2..], &why),
         .stop => verbs.stopHere(io, gpa, args[2..], &why),
@@ -499,7 +502,7 @@ fn unalike(why: *Why, a: anytype, b: anytype) error{Refused} {
 
 /// gather reads what the flags name, checks it against the form, and
 /// returns the tar's entries sorted by path. It writes nothing.
-fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]const Entry {
+pub fn gather(io: Io, gpa: Allocator, iface: Interface, o: Options, why: *Why) ![]const Entry {
     var entries: std.ArrayList(Entry) = .empty;
     var stdin_used: ?[]const u8 = null;
 
@@ -779,7 +782,7 @@ fn readConfigDir(
 /// writeTar returns entries as a POSIX ustar archive, as cloud-metadata
 /// writes one: owned by root, mode 0600, dated 1970. It has no directory
 /// entries; init makes the parents.
-fn writeTar(gpa: Allocator, entries: []const Entry) ![]const u8 {
+pub fn writeTar(gpa: Allocator, entries: []const Entry) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (entries) |e| {
         var h: [512]u8 = @splat(0);
@@ -806,7 +809,7 @@ fn writeTar(gpa: Allocator, entries: []const Entry) ![]const u8 {
 /// misfit returns why the tar does not fit t, or null if it does. AWS caps
 /// user data at 16 KiB and Azure at 64 KiB, both after base64; GCP's
 /// 256 KiB is more than cloud-metadata takes.
-fn misfit(entries: []const Entry, tar_len: usize, t: Platform) ?[]const u8 {
+pub fn misfit(entries: []const Entry, tar_len: usize, t: Platform) ?[]const u8 {
     if (!t.is(.cloud)) return null;
     if (entries.len > max_cloud_entries) return "more than 32 files";
     var total: usize = 0;
@@ -914,7 +917,7 @@ fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
 }
 
 /// formInterface returns the flags form takes, from its chain's files.
-fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface {
+pub fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface {
     const c = try chain(io, gpa, form, why);
     var failure: forms.Failure = .{};
     const svcs = forms.services(io, gpa, Dir.cwd(), c, &failure) catch |err| switch (err) {
@@ -932,6 +935,12 @@ fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface
         if (Dir.cwd().readFileAlloc(io, path, gpa, .limited(update_policy.max_input + 1))) |text| {
             iface.policy = text;
         } else |_| {}
+    }
+    if (forms.updates(c).policy) |text| iface.policy = text;
+    if (iface.policy) |text| {
+        var policy: update_policy.Settings = .{};
+        if (try update_policy.apply(gpa, &policy, .form, text)) |r|
+            return why.refuse("{s}: updates.policy: {s}: {s}", .{ form, r.key, r.why });
     }
     return iface;
 }
@@ -1091,8 +1100,7 @@ pub fn appBuild(
 }
 
 /// buildHere builds goals of s for a machine, reporting through steps, and
-/// returns where it wrote. FREEZE=1 in the environment pins the packages,
-/// as it does for make.
+/// returns where it wrote. Every package is pinned by the input-bound lock.
 pub fn buildHere(
     io: Io,
     gpa: Allocator,
@@ -1100,10 +1108,8 @@ pub fn buildHere(
     s: native.Spec,
     goals: native.Goals,
 ) !native.Paths {
-    var spec = s;
-    spec.freeze = native.frozen();
-    try native.make(io, gpa, steps, spec, goals);
-    return native.paths(gpa, spec);
+    try native.make(io, gpa, steps, s, goals);
+    return native.paths(gpa, s);
 }
 
 /// machineDir returns where create keeps a machine's files on any
@@ -1262,7 +1268,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
         "--dev is for machines here: a shell on {t} is a release's choice to make",
         .{on},
     );
-    if (on.here() and (o.arch != null or o.size != null))
+    if (on.here() and ((o.arch != null and o.arch != hostArch()) or o.size != null))
         return why.refuse("{s}: {t} runs this machine's arch", .{ sized_only, on });
     // On Lima or bhyve, a form with no DHCP client gets the hypervisor's
     // user network in its tar (Lima's, as a Lima-managed machine's command
@@ -1328,16 +1334,17 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
     try Dir.cwd().createDirPath(io, dir);
     try writePrivate(io, gpa, try gpa.print("{s}/engine", .{dir}), @tagName(on), why);
     switch (on) {
-        .qemu => return local.createQemu(io, gpa, o, name, tar, tell, why),
-        .gcp => return cloud.createGcp(io, gpa, o, name, tar, w, why),
-        .aws => return cloud.createAws(io, gpa, o, name, tar, w, why),
-        .azure => return cloud.createAzure(io, gpa, o, name, entries, tar, w, why),
-        .bhyve => return local.createBhyve(io, gpa, o, name, tar, tell, w, why),
-        .proxmox => return local.createProxmox(io, gpa, o, name, tar, w, why),
-        .firecracker => return local.createFirecracker(io, gpa, o, name, tar, fc_dns, tell, why),
-        .lima => return local.createLima(io, gpa, o, name, tar, dhcp, tell, w, why),
+        .qemu => try local.createQemu(io, gpa, o, name, tar, tell, why),
+        .gcp => try cloud.createGcp(io, gpa, o, name, tar, w, why),
+        .aws => try cloud.createAws(io, gpa, o, name, tar, w, why),
+        .azure => try cloud.createAzure(io, gpa, o, name, entries, tar, w, why),
+        .bhyve => try local.createBhyve(io, gpa, o, name, tar, tell, w, why),
+        .proxmox => try local.createProxmox(io, gpa, o, name, tar, w, why),
+        .firecracker => try local.createFirecracker(io, gpa, o, name, tar, fc_dns, tell, why),
+        .lima => try local.createLima(io, gpa, o, name, tar, dhcp, tell, w, why),
         .disk => unreachable,
     }
+    try @import("apply.zig").enroll(io, gpa, name, o, on, why);
 }
 
 /// listens returns the TCP ports form serves, as its chain's net lines
@@ -1453,6 +1460,7 @@ fn beneath(path: []const u8, parent: []const u8) bool {
 const testing = std.testing;
 
 test {
+    _ = @import("apply.zig");
     _ = lima;
     _ = bhyve;
     _ = firecracker;

@@ -1,0 +1,11 @@
+#!/bin/sh
+# forms/mattermost/test/config DIR: the mattermost form's config for make
+# check, in DIR: its base URL, https://localhost, for which Caddy's own CA
+# signs, and the system admin's name, address and password, which
+# test/checks signs in with.
+set -eu
+mkdir -p "$1/mattermost" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/caddy/admin-password"
+echo '{"base-url":"https://localhost","admin":"admin","admin-email":"admin@example.com"}' >"$1/caddy/settings.json"
+echo '{"base-url":"https://localhost"}' >"$1/mattermost/settings.json"

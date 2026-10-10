@@ -1,0 +1,36 @@
+{
+  "distSpecVersion": "1.1.1",
+  "storage": {
+    "rootDirectory": "/data/svc/zot",
+    "dedupe": true,
+    "gc": true,
+    "gcDelay": "1h",
+    "gcInterval": "24h",
+    "commit": true
+  },
+  "http": {
+    "address": "127.0.0.1",
+    "port": "5000",
+    "compat": ["docker2s2"],
+    "auth": {
+      "htpasswd": {
+        "path": "/run/svc/zot/htpasswd"
+      },
+      "failDelay": 5
+    },
+    "accessControl": {
+      "repositories": {
+        "**": {
+          "defaultPolicy": ["read"]
+        }
+      },
+      "adminPolicy": {
+        "users": [],
+        "actions": ["read", "create", "update", "delete"]
+      }
+    }
+  },
+  "log": {
+    "level": "info"
+  }
+}

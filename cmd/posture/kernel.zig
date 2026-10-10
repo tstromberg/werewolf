@@ -577,6 +577,21 @@ fn exploitEntries(p: *Posture) !void {
         .detail = if (pipe_e == .SUCCESS) "made" else errnoText(pipe_e),
     });
 
+    // The seal refuses a listener and asking its messages' sizes alike;
+    // asking is the probe, since it installs nothing.
+    var sizes: [3]u16 = undefined;
+    const notif_e = linux.errno(linux.seccomp(SECCOMP_GET_NOTIF_SIZES, 0, &sizes));
+    try p.add(.{
+        .id = "kernel-seccomp-listener",
+        .area = "kernel",
+        .name = "No seccomp listeners",
+        .why = "No program can answer another's system calls with a seccomp listener, as a " ++
+            "broken-into service could to tell leash its narrowing held.",
+        .how = "seccomp(SECCOMP_GET_NOTIF_SIZES) fails, as the seal refuses it",
+        .result = if (notif_e == .SUCCESS) .fail else .pass,
+        .detail = if (notif_e == .SUCCESS) "answered" else errnoText(notif_e),
+    });
+
     // Without devpts mounted, /dev/ptmx fails with ENODEV. A form that
     // allows pty, for ssh logins, mounts it and passes as allowed.
     const ptmx = linux.open(
@@ -899,6 +914,8 @@ const TCP_ULP = 31;
 const O_CLOEXEC = 0o2000000;
 
 const O_NOTIFICATION_PIPE = 0o200;
+
+const SECCOMP_GET_NOTIF_SIZES = 3;
 
 /// featuresPresent lists those of names the running kernel has.
 fn featuresPresent(

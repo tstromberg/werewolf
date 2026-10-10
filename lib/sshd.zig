@@ -18,43 +18,37 @@ const header =
     \\
 ;
 
-/// Keyword maps a form.yaml flag to its sshd_config name and the posture
-/// check a changed value can fail; a form that sets it declares that check
-/// in its weaknesses.
-const Keyword = struct { []const u8, []const u8, []const u8 };
-
-const keys_check = "network-ssh-security-keys";
-const config_check = "network-ssh-config";
-const crypto_check = "network-ssh-crypto";
+/// Keyword maps a form.yaml key to its sshd_config name.
+const Keyword = struct { []const u8, []const u8 };
 
 const keywords = [_]Keyword{
-    .{ "pubkey-accepted-algorithms", "PubkeyAcceptedAlgorithms", keys_check },
-    .{ "pubkey-auth-options", "PubkeyAuthOptions", keys_check },
-    .{ "authentication-methods", "AuthenticationMethods", config_check },
-    .{ "permit-root-login", "PermitRootLogin", config_check },
-    .{ "allow-users", "AllowUsers", config_check },
-    .{ "deny-users", "DenyUsers", config_check },
-    .{ "allow-groups", "AllowGroups", config_check },
-    .{ "deny-groups", "DenyGroups", config_check },
-    .{ "max-auth-tries", "MaxAuthTries", config_check },
-    .{ "max-sessions", "MaxSessions", config_check },
-    .{ "max-startups", "MaxStartups", config_check },
-    .{ "login-grace-time", "LoginGraceTime", config_check },
-    .{ "client-alive-interval", "ClientAliveInterval", config_check },
-    .{ "client-alive-count-max", "ClientAliveCountMax", config_check },
-    .{ "log-level", "LogLevel", config_check },
-    .{ "permit-tty", "PermitTTY", config_check },
-    .{ "allow-tcp-forwarding", "AllowTcpForwarding", config_check },
-    .{ "allow-stream-local-forwarding", "AllowStreamLocalForwarding", config_check },
-    .{ "allow-agent-forwarding", "AllowAgentForwarding", config_check },
-    .{ "permit-open", "PermitOpen", config_check },
-    .{ "permit-listen", "PermitListen", config_check },
-    .{ "gateway-ports", "GatewayPorts", config_check },
-    .{ "permit-tunnel", "PermitTunnel", config_check },
-    .{ "ciphers", "Ciphers", crypto_check },
-    .{ "macs", "MACs", crypto_check },
-    .{ "kex-algorithms", "KexAlgorithms", crypto_check },
-    .{ "host-key-algorithms", "HostKeyAlgorithms", crypto_check },
+    .{ "pubkey-accepted-algorithms", "PubkeyAcceptedAlgorithms" },
+    .{ "pubkey-auth-options", "PubkeyAuthOptions" },
+    .{ "authentication-methods", "AuthenticationMethods" },
+    .{ "permit-root-login", "PermitRootLogin" },
+    .{ "allow-users", "AllowUsers" },
+    .{ "deny-users", "DenyUsers" },
+    .{ "allow-groups", "AllowGroups" },
+    .{ "deny-groups", "DenyGroups" },
+    .{ "max-auth-tries", "MaxAuthTries" },
+    .{ "max-sessions", "MaxSessions" },
+    .{ "max-startups", "MaxStartups" },
+    .{ "login-grace-time", "LoginGraceTime" },
+    .{ "client-alive-interval", "ClientAliveInterval" },
+    .{ "client-alive-count-max", "ClientAliveCountMax" },
+    .{ "log-level", "LogLevel" },
+    .{ "permit-tty", "PermitTTY" },
+    .{ "allow-tcp-forwarding", "AllowTcpForwarding" },
+    .{ "allow-stream-local-forwarding", "AllowStreamLocalForwarding" },
+    .{ "allow-agent-forwarding", "AllowAgentForwarding" },
+    .{ "permit-open", "PermitOpen" },
+    .{ "permit-listen", "PermitListen" },
+    .{ "gateway-ports", "GatewayPorts" },
+    .{ "permit-tunnel", "PermitTunnel" },
+    .{ "ciphers", "Ciphers" },
+    .{ "macs", "MACs" },
+    .{ "kex-algorithms", "KexAlgorithms" },
+    .{ "host-key-algorithms", "HostKeyAlgorithms" },
 };
 
 /// Pair is one `sshd:` keyword and its value, from form.yaml's
@@ -64,21 +58,16 @@ pub const Pair = struct { flag: []const u8, value: []const u8 };
 pub const Fragment = struct {
     /// text is the file, one line per keyword in the order given.
     text: []const u8,
-    /// checks lists, once each, the posture checks the values may fail. The
-    /// form declares them as `?ID` weaknesses, since only the boot's posture
-    /// line knows whether a value fails.
-    checks: []const []const u8,
 };
 
 /// fragment builds form.conf from pairs. On error.Invalid, why names the
 /// keyword and the problem but never the value.
 pub fn fragment(gpa: Allocator, pairs: []const Pair, why: *[]const u8) !Fragment {
     var text: std.ArrayList(u8) = .empty;
-    var checks: std.ArrayList([]const u8) = .empty;
     try text.appendSlice(gpa, header);
     for (pairs, 0..) |p, i| {
-        const name, const check = for (keywords) |k| {
-            if (std.mem.eql(u8, k[0], p.flag)) break .{ k[1], k[2] };
+        const name = for (keywords) |k| {
+            if (std.mem.eql(u8, k[0], p.flag)) break k[1];
         } else return fail(gpa, why, "sshd {s}: sshd takes {s}", .{ p.flag, flagList() });
         for (pairs[0..i]) |seen| if (std.mem.eql(u8, seen.flag, p.flag))
             return fail(gpa, why, "sshd {s}: twice; sshd would take the first alone", .{p.flag});
@@ -93,11 +82,8 @@ pub fn fragment(gpa: Allocator, pairs: []const Pair, why: *[]const u8) !Fragment
             .{p.flag},
         );
         try text.print(gpa, "{s} {s}\n", .{ name, value });
-        for (checks.items) |c| {
-            if (std.mem.eql(u8, c, check)) break;
-        } else try checks.append(gpa, check);
     }
-    return .{ .text = text.items, .checks = checks.items };
+    return .{ .text = text.items };
 }
 
 /// takesKeyFiles reports whether pairs let sshd accept plain key files, not
@@ -343,9 +329,6 @@ test fragment {
             "PubkeyAuthOptions none\nMaxStartups 10:30:60\nPermitOpen 10.0.0.1:22 [fd00::1]:22\n",
         f.text,
     );
-    try testing.expectEqual(2, f.checks.len);
-    try testing.expectEqualStrings("network-ssh-security-keys", f.checks[0]);
-    try testing.expectEqualStrings("network-ssh-config", f.checks[1]);
 }
 
 test "fragment refuses what is not one keyword's value" {

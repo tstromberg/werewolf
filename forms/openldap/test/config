@@ -1,0 +1,14 @@
+#!/bin/sh
+# forms/openldap/test/config DIR: the openldap form's config for make
+# check, in DIR: its domain, example.com, and admin, ops; the admin's
+# password, which test/checks binds with; and a certificate for
+# localhost, made here in the company's CA's place.
+set -eu
+d=$1/openldap
+mkdir -p "$d"
+umask 077
+printf '%s\n' werewolf-check-admin-1 >"$d/admin-password"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+	-subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
+	-keyout "$d/tls-key" -out "$d/tls-cert" 2>/dev/null
+echo '{"domain":"example.com","admin":"ops"}' >"$d/settings.json"

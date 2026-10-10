@@ -25,7 +25,7 @@ and key, and `make list-forms` shows the chains.
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
 | `node`, `python`, `ruby`, `jre` | `app` | a runtime, for the service and application a form on it brings |
-| `node-app`, `python-app`, `ruby-app` | `node`, `python`, `ruby` | a service for the application `--app` lays, on :8080; none shipped |
+| `node-app`, `python-app`, `ruby-app`, `jre-app` | `node`, `python`, `ruby`, `jre` | a service for the application `--app` lays, on :8080; none shipped |
 | `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](../forms/postgresql/README.md)) |
 | `demo` | `postgresql` | nginx and the status page ([demo.md](../forms/demo/README.md)) |
 | `prod-ssh` | `prod`, with `sshd` | sshd, for people who log in with a security key |
@@ -55,9 +55,38 @@ and key, and `make list-forms` shows the chains.
 | `loki` | `prod` | keeping pushed logs 31 days, behind Caddy's HTTPS and one user, Loki on loopback reaching nothing ([loki.md](../forms/loki/README.md)) |
 | `mariadb` | `prod` | MariaDB 12.3, the long-term release, on a UNIX socket alone for the machine's own services, made without a shell by mariadb-init ([mariadb.md](../forms/mariadb/README.md)) |
 | `wordpress-mariadb` | `wordpress`, with `mariadb` | WordPress with its tables in MariaDB, its role `php` by unix_socket, holding its database alone ([wordpress-mariadb.md](../forms/wordpress-mariadb/README.md)) |
+| `jellyfin` | `prod-ssh` | Jellyfin behind Caddy's HTTPS, media copied in over ssh, its wizard completed before anyone reaches it, ffmpeg narrowed, reaching nothing ([jellyfin.md](../forms/jellyfin/README.md)) |
+| `kafka` | `prod` | Kafka 4.3 in KRaft, one broker and controller, SCRAM over TLS, users from the config, ACLs denying what none allows ([kafka.md](../forms/kafka/README.md)) |
+| `openldap` | `prod` | OpenLDAP 2.6 on LDAPS alone, no anonymous binds, passwords stored as Argon2id and never read back ([openldap.md](../forms/openldap/README.md)) |
+| `otel-collector` | `prod` | the OpenTelemetry Collector taking OTLP over TLS with a bearer token, passing it to the one endpoint its settings name ([otel-collector.md](../forms/otel-collector/README.md)) |
+| `unbound` | `prod` | a recursive, validating resolver answering private ranges alone, its forward zones from the settings ([unbound.md](../forms/unbound/README.md)) |
+| `squid` | `prod` | an egress proxy: CONNECT to port 443 of the domains its settings list, from the networks they list, no cache ([squid.md](../forms/squid/README.md)) |
 | `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
 | `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
 | `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
+| `restic-server` | `prod`, with `caddy` | restic's REST server as an append-only backup target, a private repository a user, from restic's own image ([restic-server.md](../forms/restic-server/README.md)) |
+| `open-webui` | `prod`, with `postgresql`, `caddy` | a chat interface for models Ollama runs on loopback, its administrator from the config, nobody signing up, built here in upstream's slim form ([open-webui.md](../forms/open-webui/README.md)) |
+| `syncthing` | `prod`, with `caddy` | folders kept in sync with your devices over TCP and QUIC, from Syncthing's own image, no local discovery, UPnP or reports, its GUI behind Caddy for one user ([syncthing.md](../forms/syncthing/README.md)) |
+| `grafana` | `prod`, with `caddy` | dashboards and alerts from Grafana's own image, its administrator from the config, no sign-up, nothing sent home ([grafana.md](../forms/grafana/README.md)) |
+| `headscale` | `prod`, with `caddy` | a coordination server for Tailscale's clients from Headscale's own image, joined only by key, approval or an OpenID sign-in ([headscale.md](../forms/headscale/README.md)) |
+| `blocky` | `prod` | DNS for a network, blocking ads and trackers, upstreams over TLS alone, every name blocked for strangers, from Blocky's own image ([blocky.md](../forms/blocky/README.md)) |
+| `adguard-home` | `prod`, with `caddy` | AdGuard Home blocking ads and trackers for a network, no setup wizard, its UI behind Caddy's login, strangers refused, from its own image ([adguard-home.md](../forms/adguard-home/README.md)) |
+| `pi-hole` | `prod`, with `caddy` | Pi-hole answering a network's DNS, local clients alone, its web interface behind Caddy, lists refreshed by the image's own gravity ([pi-hole.md](../forms/pi-hole/README.md)) |
+| `home-assistant` | `prod`, with `caddy` | Home Assistant for a home's devices, its owner from the config, onboarding already done, from its own image ([home-assistant.md](../forms/home-assistant/README.md)) |
+| `immich` | `prod`, with `postgresql`, `valkey`, `caddy` | a photo library from Immich's own image, its administrator from the config, no telemetry ([immich.md](../forms/immich/README.md)) |
+| `nextcloud` | `prod`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | files, calendars and contacts, installed from the config, its code read-only ([nextcloud.md](../forms/nextcloud/README.md)) |
+| `moodle` | `prod`, with `postgresql`, `caddy`, `cron`, `sh-shim` | Moodle for a school's courses, no sign-up and no plugin from the web ([moodle.md](../forms/moodle/README.md)) |
+| `mediawiki` | `php` | a department's wiki on SQLite, strangers unable to read or edit until a setting says so ([mediawiki.md](../forms/mediawiki/README.md)) |
+| `limesurvey` | `php`, with `mariadb` | surveys, installed from the config, plugins from the image alone ([limesurvey.md](../forms/limesurvey/README.md)) |
+| `keycloak` | `jre`, with `postgresql`, `caddy` | single sign-on by OpenID Connect and SAML, its administrator from the config ([keycloak.md](../forms/keycloak/README.md)) |
+| `galene` | `prod`, with `caddy` | lectures and seminars by video, rooms and passwords from the config ([galene.md](../forms/galene/README.md)) |
+| `overleaf` | `prod`, with `valkey`, `caddy` | collaborative LaTeX, x86_64 only, the compiler apart from the services ([overleaf.md](../forms/overleaf/README.md)) |
+| `authelia` | `prod`, with `caddy` | a password and a second factor in front of every site under a domain ([authelia.md](../forms/authelia/README.md)) |
+| `bugsink` | `prod`, with `caddy` | error tracking for Sentry's SDKs, sign-up off, events taken by DSN alone ([bugsink.md](../forms/bugsink/README.md)) |
+| `umami` | `prod`, with `postgresql`, `caddy` | web analytics without cookies, the default administrator password refused ([umami.md](../forms/umami/README.md)) |
+| `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
+| `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
+| `opensearch` | `prod` | one node of log search, TLS and the security plugin on, no demo users ([opensearch.md](../forms/opensearch/README.md)) |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init
@@ -83,10 +112,10 @@ the same VM.
 `nginx`, `php`, `node`, `python`, `ruby` and `jre` are each `prod` plus
 one runtime from Wolfi, as Chainguard's images are, and no application.
 `nginx` and `php` serve the site laid in their html root. The others start
-nothing until a form on them brings a service. `node-app`, `python-app` and
-`ruby-app` bring one for the application laid in `/usr/lib/app`, and ship
-no application: until yours is there, the service stays down and says why
-on the console.
+nothing until a form on them brings a service. `node-app`, `python-app`,
+`ruby-app` and `jre-app` bring one for the application laid in
+`/usr/lib/app`, and ship no application: until yours is there, the
+service stays down and says why on the console.
 
 | Form | Runs | As | On | Yours goes in |
 | --- | --- | --- | --- | --- |
@@ -95,6 +124,7 @@ on the console.
 | `node-app` | `node /usr/lib/app/server.js` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
 | `python-app` | `python3 /usr/lib/app/main.py` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
 | `ruby-app` | `ruby /usr/lib/app/main.rb` (`etc/sv/app`) | `app` | :8080 | `/usr/lib/app` |
+| `jre-app` | `java -jar /usr/lib/app/app.jar` (`etc/sv/app`), its heap 640 MiB | `app` | :8080 | `/usr/lib/app` |
 | `jre` | your jar, as your service file says ([below](#ship-it)) | `app` | yours | `/usr/lib/app`, and `etc/sv/app/service` |
 
 `node-example`, `python-example` and `ruby-example` are those `-app` forms
@@ -499,13 +529,20 @@ instead, change gunicorn's `--bind` and the service's `listen` to 8000.
 
 ### Ship it
 
+For later declaration and app changes, set `updates.from` to a dedicated
+HTTPS apk repository before creation. `howl apply FILE` signs and publishes
+`local-NAME`; `-n` prepares it without upload. The updater composes it into
+the other slot and tries it once. [The manifest design](design/manifest.md)
+describes publishing, locks, configuration transports and rollback.
+
 | | |
 | --- | --- |
 | `howl build --with helloworld` | `dist/helloworld-ARCH-disk.qcow2`, a disk that boots it under UEFI, for a provider that takes one (`--format raw\|vhd\|vmdk`); `howl create NAME --with helloworld --on gcp\|aws\|azure` makes a cloud machine of it |
 | `make FORM=helloworld bite-me` | run on a Debian, Ubuntu, Fedora or Rocky VM: installs it beside the distro ([bite.md](bite.md)) |
 | `make FORM=helloworld image` | the kernel and initramfs, for QEMU, Firecracker or any host that boots them directly |
 
-It updates itself, as every form does. The updater follows Wolfi's packages,
+It updates itself, unless `updates: off` explicitly disables the updater
+and records the `updates-enabled` posture weakness. The updater follows Wolfi's packages,
 builds a new slot with your files carried forward, boots it once, and keeps
 it only if it commits ([updater.md](updater.md)). posture runs at every
 boot and reports what holds. On a Python machine, `programs-no-interpreters`
@@ -536,32 +573,37 @@ service's IPC or file activity.
 ## Forms from the command line
 
 To try something, you need not write a form. howl's `build`, `run`,
-`create` and `pack` take flags that write one, and `howl form ... -o DIR`
-keeps it, so DIR builds what the flags built
-([design/adhoc.md](design/adhoc.md)):
+`create` and `pack` take a manifest, `-f FILE`, and flags that are its
+keys; together they write a form, and `howl form ... -o DIR` keeps it,
+so DIR builds what the line built ([design/adhoc.md](design/adhoc.md),
+[design/manifest.md](design/manifest.md)):
 
 ```sh
-build/host/howl run --with python-app --app ./api --package py3.13-flask
+build/host/howl run --with python-app --app ./api --packages py3.13-flask
 build/host/howl create shop --with caddy,valkey,postgresql --domain shop.example.com
-build/host/howl run --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp
+build/host/howl run --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp
+build/host/howl create shop -f shop.yaml --updates.every 1h
 build/host/howl form --with caddy,valkey -o forms/shop/
 ```
 
 | Flag | Writes |
 | --- | --- |
+| `-f FILE` | the manifest, as written; the flags layer over it |
 | `--with FORM,...` | nothing, for one form alone: it runs as it is. One form with more flags becomes `base:`; several are taken `with` on `prod` (for `run`, on `playground`) |
-| `--package PKG,...` | form.yaml's `packages` |
-| `--oci NAME=REF` | an OCI image, baked in at `/oci/NAME` and run as `_oci-NAME` |
-| `--NAME.KEY 'LINE'` | one line of image NAME's service file, as it stands in the file: `listen`, `connect`, `write`, `read`, `run`, `env`, `secret`, `exec`, `dir`, `memory`, `nofile`, `pledge`, `before` or `requires` |
-| `--link A:B` | `connect` from image A to image B's ports on loopback |
-| `--net`, `--prune`, `--modules`, `--programs` `LINE` | one more line in that list of form.yaml |
-| `--KEY.SUB VALUE` | one scalar in form.yaml's map KEY: `--sshd.max-auth-tries 3` |
+| `--packages PKG,...` | form.yaml's `packages` |
+| `--KEY LINE` | one more line in a list key: `--net 'connect bastion tcp/5432'`, `--prune usr/bin/bash` |
+| `--KEY.SUB VALUE` | one value in a map key: `--sshd.max-auth-tries 3`, `--updates.every 1h`; `--updates off` alone |
+| `--services.NAME.KEY LINE` | a service's line, as it stands in form.yaml: `image REF` makes it an OCI image's, baked in at `/oci/NAME` and run as `_oci-NAME`; `link NAME` reaches another service's loopback port; the rest are leash's directives |
+| `--users.NAME.keys LINE`, `--users.NAME.admin` | a person, and that their keys are root's too |
 
-List flags repeat or take commas. `-n` prints the form and stops.
-`create NAME` writes `build/adhoc/NAME`, and `run` writes
-`build/adhoc/run`; the form is named after its directory. Its first
-comment is the command line. It restates its chain's `weaknesses`, since
-a form's are never inherited; to add one, keep the form and edit it.
+A key's shape decides ([lib/form.zig](../lib/form.zig) `keys`): a list
+takes a line a flag, repeated; a map's value set twice is refused; a
+value set over the file's replaces it. `accounts`, `paths`, `bastion`
+and `weaknesses` hold structure the line cannot: keep the form and edit
+it. `-n` prints the form and stops. `create NAME` writes
+`build/adhoc/NAME`, and `run` writes `build/adhoc/run`; the form is
+named after its directory. Its first comment is the command line. It
+restates its chain's `weaknesses`, since a form's are never inherited.
 
 An image is pinned: a tag is resolved once with `crane` and printed as
 the `REF@sha256:...` to use next time. `crane export` pulls the image and
@@ -573,10 +615,10 @@ device nodes and FIFOs are left out, and only the execute bit of a mode
 is kept, with no extended attribute, so nothing is setuid or carries a
 file capability. The entrypoint, looked up on the image's `PATH` inside
 the tree, must be an ELF program: a `#!` script would need a shell (say
-`--NAME.exec '/PROGRAM ARGS'` instead). The image's `ExposedPorts` and
-`Volumes` grant nothing. Until you give a `listen` or `write` line, howl
-refuses, and prints the lines to choose from,
-`--web.listen 'tcp/8080 loopback'` (for linked images only) first.
+`--services.NAME.exec '/PROGRAM ARGS'` instead). The image's
+`ExposedPorts` and `Volumes` grant nothing. Until you give a `listen` or
+`write` line, howl refuses, and prints the lines to choose from,
+`--services.web.listen 'tcp/8080 loopback'` (for linked images only) first.
 
 The service runs inside the image, as `_oci-NAME` whatever its `User`
 says, with the image's entrypoint, working directory (else `/data`) and
@@ -589,9 +631,9 @@ and its memory 512 MiB. The image is its root, read-only. Its `/tmp`,
 `full`, `random` and `urandom`, and the machine's `/etc/resolv.conf`;
 `/etc/hosts`, written at build, names `localhost` and NAME. Its
 account's uid and gid are its user's hash (`compose.defaultId`), the id
-the build gives any service user no form declares. A
-`--link` to a form's service is not built yet: give the image a `connect`
-line and the form a `loopback` port.
+the build gives any service user no form declares. A `link` to a form's
+service is not built yet: give the image a `connect` line and the form a
+`loopback` port.
 
 ## webshell-example: a contained vulnerability
 

@@ -1,7 +1,6 @@
 # Self-hosting: the top ten uses
 
-Proposed, 2026-10-10. Of the ten uses, five are served today; five
-wait on the forms proposed here.
+Built, 2026-10-10. Each of the ten uses has a form.
 
 ## Summary
 
@@ -38,35 +37,34 @@ devices (TVs, phones, sensors) over UDP, multicast and USB.
 
 | Use | Forms | State |
 | --- | --- | --- |
-| Media streaming | `jellyfin` | proposed in the catalog |
+| Media streaming | `jellyfin` | built |
 | Passwords | `vaultwarden` | built |
-| Files and sync | `nextcloud`, `syncthing` | proposed |
-| Photos | `immich` | proposed |
-| Network ad-blocking | `pi-hole`, `adguard-home`, `blocky` | proposed |
-| Home automation | `home-assistant` with `mosquitto` | mosquitto built |
-| Remote access | `tailscale`, `wireguard`, `headscale` | tailscale built; wireguard in [service-forms.md](service-forms.md) |
+| Files and sync | `nextcloud`, `syncthing` | built |
+| Photos | `immich` | built |
+| Network ad-blocking | `pi-hole`, `adguard-home`, `blocky` | built |
+| Home automation | `home-assistant` with `mosquitto` | built |
+| Remote access | `tailscale`, `wireguard`, `headscale` | tailscale and headscale built; wireguard waits on forwarding |
 | Code | `gitea` | built |
-| Monitoring | `gatus`, `prometheus`, `loki`, `grafana` | grafana proposed |
-| Local AI | `ollama`, `open-webui` | ollama built |
+| Monitoring | `gatus`, `prometheus`, `loki`, `grafana` | built |
+| Local AI | `ollama`, `open-webui` | built |
 
 The forms neither the catalog nor service-forms.md carries:
 
-| Form | Defaults; its check's attack | Waits on |
+| Form | Defaults; its check's attack | State |
 | --- | --- | --- |
-| `nextcloud` on `php`, with `postgresql`, `valkey`, `cron` | admin from the config; `config.php` and apps on `/data`, its own code read-only (web updater off); a web update of Nextcloud | its first-run program (`occ maintenance:install`) |
-| `syncthing` | GUI on loopback behind `caddy`, its password from the config; no UPnP or usage reports; the GUI without a password | `listen udp` for QUIC and LAN discovery; TCP 22000 works without |
-| `immich` with `postgresql`, `valkey` | the server and machine learning as two users; admin from the config, so no first visitor claims it; models from a public HTTPS host alone; the admin sign-up page | recipes (Node, Python); VectorChord for PostgreSQL |
-| `pi-hole` | its web password from the config; DHCP off; answers private ranges alone (no open resolver); the API without a password | `listen udp`; gravity's shell scripts, under busybox `sh` or bash, a weakness declared |
-| `adguard-home` | its YAML written from the config, the admin's hash in it, so no setup wizard; DHCP off; private ranges alone; the UI behind `caddy`; the wizard's install endpoint | `listen udp`; a recipe |
-| `blocky` | blocklists and DNS-over-TLS upstreams from the config; answers private ranges alone (no open resolver); no API on the network; a query from a public address | `listen udp` |
-| `home-assistant` | owner from the config, no onboarding; discovery off; the onboarding page | a recipe and its integrations' packages; multicast; a USB radio, or a network Zigbee coordinator through `mosquitto` |
-| `headscale` | no open registration: pre-auth keys from the config; gRPC and metrics on loopback; TLS by `caddy`; a node registering without a key | a recipe |
-| `grafana` | admin from the config; sign-up and anonymous access off; Prometheus and Loki provisioned when bundled; the API without a login | `prune` of the bash its package brings |
-| `open-webui` with `ollama` | admin from the config, sign-up off; tools and functions an admin's alone, each being Python the server runs; a user's function upload | Python's closure; its first-run program |
+| `nextcloud` | admin from the config; code read-only; a web update of Nextcloud | built |
+| `syncthing` | GUI on loopback behind `caddy`; no UPnP or reports; the GUI without a password | built |
+| `immich` | admin from the config; no version check or telemetry; the admin sign-up page | built |
+| `pi-hole` | password from the config; DHCP off; local networks alone; the API without a password | built; gravity runs bash from the image |
+| `adguard-home` | no setup wizard; UI behind `caddy`; strangers refused | built |
+| `blocky` | upstreams over TLS; strangers get no answer; no API | built |
+| `home-assistant` | owner from the config; onboarding done; discovery off | built; multicast and USB still off |
+| `headscale` | joined by key or an allowed OpenID user; a node with neither | built |
+| `grafana` | admin from the config; sign-up off; the API without a login | built |
+| `open-webui` | admin from the config; sign-up off; a user's function upload | built |
 
-The next five: backups (restic's `rest-server --append-only`; its check
-deletes a snapshot, and fails), chat (Matrix by `continuwuity`),
-documents (Paperless-ngx), file shares (Samba), games (`minecraft`).
+Next: chat (Matrix by `continuwuity`), documents (Paperless-ngx),
+file shares (Samba) and games (`minecraft`). Backups are `restic-server`.
 
 **Plugins** (Nextcloud apps, Home Assistant integrations, Grafana
 plugins, Open WebUI functions) install at run time into `/data`, as each

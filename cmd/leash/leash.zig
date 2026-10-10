@@ -240,7 +240,13 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "/run: {s}", .{sandbox.whyNot(gpa, err)});
     for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
     for (s.write) |p| allowPath(l, rules, gpa, p, write_tree, nodata);
-    for (s.run) |p| allowProgram(l, rules, gpa, p);
+    for (s.run) |p| if (p[p.len - 1] == '/') {
+        // Every program beneath an image's directory, as Grafana runs one
+        // for each data source: the image is read-only, in the verified root.
+        const z = try gpa.dupeSentinel(u8, p[0 .. p.len - 1], 0);
+        allow(rules, z, run_file, .follow) catch |err|
+            l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
+    } else allowProgram(l, rules, gpa, p);
     // The image's sh shim, which a service in an image of its own lacks.
     if (allowances.has(.sh) and s.root == null) allowProgram(l, rules, gpa, sh_shim);
     allowProgram(l, rules, gpa, s.exec[0]);
@@ -313,7 +319,9 @@ pub fn main(init: std.process.Init) !void {
         },
     );
 
-    if (s.render) |r| renderSettings(l, gpa, run_dir, s, r, &env);
+    // In an image's root, service-config is init's bind of the machine's
+    // (cmd/init/oci.zig), and the service's run directory is its /tmp.
+    if (s.render) |r| renderSettings(l, gpa, own_run, name, s, r, &env);
     for (s.before) |argv| {
         var child = std.process.spawn(
             io,
@@ -594,6 +602,7 @@ fn renderSettings(
     l: Leash,
     gpa: Allocator,
     run_dir: [:0]const u8,
+    name: []const u8,
     s: service.Service,
     r: settings.Render,
     env: *std.process.Environ.Map,
@@ -617,7 +626,7 @@ fn renderSettings(
     var child_env: std.process.Environ.Map = .init(gpa);
     child_env.put("PATH", path_env) catch l.fail(.park, "out of memory", .{});
     var child = std.process.spawn(io, .{
-        .argv = &.{ service_config, run_dir },
+        .argv = &.{ service_config, run_dir, name },
         .environ_map = &child_env,
         .stdin = .pipe,
     }) catch |err| l.fail(.park, "service-config: {s}", .{@errorName(err)});

@@ -89,6 +89,7 @@ refused calls and paths are audited as the service's are.
 | --- | --- |
 | The program widens its leash | Its lines come from the dm-verity root; domains and filters only stack, under `no_new_privs`. |
 | The service escapes through leash | Unprivileged and not run by a link, leash refuses; by one, it only adds limits. |
+| The service fakes the narrowing, answering leash's calls from a seccomp listener | The seal refuses a listener once it holds (lib/seal.zig); posture's `kernel-seccomp-listener`. |
 | The service's secrets | Not in its environment; Landlock's ptrace scope hides the service's `/proc/PID/environ` and memory. |
 | A socket the service left open | Closed at exec; no socket promise, no TCP. |
 

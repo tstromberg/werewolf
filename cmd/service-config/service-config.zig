@@ -1,5 +1,6 @@
 //! service-config renders a service's settings into the file its daemon reads.
-//! leash runs it as `service-config DIR` at each start of a service with settings.
+//! leash runs it as `service-config DIR [NAME]` at each start of a service with
+//! settings; NAME, for a service in an image's tree, whose DIR is its /tmp.
 //! See README.md.
 
 const std = @import("std");
@@ -13,11 +14,11 @@ pub fn main(init: std.process.Init) void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = init.minimal.args.toSlice(gpa) catch std.process.exit(1);
-    if (args.len != 2 or args[1].len == 0 or args[1][0] != '/') {
-        log(io, .{ .event = "settings", .why = "usage: service-config DIR" });
+    if (args.len < 2 or args.len > 3 or args[1].len == 0 or args[1][0] != '/') {
+        log(io, .{ .event = "settings", .why = "usage: service-config DIR [NAME]" });
         std.process.exit(1);
     }
-    const service = std.fs.path.basename(args[1]);
+    const service = if (args.len == 3) args[2] else std.fs.path.basename(args[1]);
     if (std.os.linux.getuid() == 0) {
         log(io, .{ .event = "settings", .service = service, .why = "run as root" });
         std.process.exit(1);

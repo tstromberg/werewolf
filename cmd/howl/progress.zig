@@ -369,8 +369,7 @@ pub fn phaseOf(target: []const u8) ?Phase {
         }
     }.p;
     if (ends(t, ".lock.json")) return P("Resolving packages", "resolve");
-    if (has(t, "/kernel/") or ends(t, "/vmlinuz") or
-        ends(t, "/vmlinux")) return P("Fetching the kernel", "kernel");
+    if (has(t, "/kernel/") or ends(t, "/vmlinuz")) return P("Fetching the kernel", "kernel");
     if (has(t, "/stage0/")) return P("Building stage0", "stage0");
     if (ends(t, "/boot/rootfs.tar")) return P("Fetching the boot loader", "boot loader");
     if (has(t, "/form/") and ends(t, ".yaml")) return P("Reading the form", "form");

@@ -1,0 +1,9 @@
+# What the galene form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-galene; test/boot;
+# forms/demo/test/console has the format). Galène, given no operator's
+# password, parks before galene-setup writes a group or it serves
+# anything, and says why; Caddy runs. make check-galene boots it with its
+# config, and checks it serves.
+
+seen    galene-needs-config  leash: \{"event":"down","service":"galene","why":"config operator-password: FileNotFound"\}
+unseen  caddy-down           leash: \{"event":"down","service":"caddy"

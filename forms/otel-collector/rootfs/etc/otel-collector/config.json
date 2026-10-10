@@ -1,0 +1,49 @@
+{
+  "extensions": {
+    "bearertokenauth/in": { "filename": "/run/svc/otel-collector/token" },
+    "bearertokenauth/out": { "filename": "/run/svc/otel-collector/export-token" }
+  },
+  "receivers": {
+    "otlp": {
+      "protocols": {
+        "grpc": {
+          "endpoint": "0.0.0.0:4317",
+          "tls": {
+            "cert_file": "/run/svc/otel-collector/tls-cert",
+            "key_file": "/run/svc/otel-collector/tls-key",
+            "min_version": "1.2"
+          },
+          "auth": { "authenticator": "bearertokenauth/in" }
+        },
+        "http": {
+          "endpoint": "0.0.0.0:4318",
+          "tls": {
+            "cert_file": "/run/svc/otel-collector/tls-cert",
+            "key_file": "/run/svc/otel-collector/tls-key",
+            "min_version": "1.2"
+          },
+          "auth": { "authenticator": "bearertokenauth/in" }
+        }
+      }
+    }
+  },
+  "processors": {
+    "memory_limiter": { "check_interval": "1s", "limit_mib": 400, "spike_limit_mib": 80 },
+    "batch": {}
+  },
+  "exporters": {
+    "otlp_grpc": {
+      "endpoint": "",
+      "auth": { "authenticator": "bearertokenauth/out" }
+    }
+  },
+  "service": {
+    "extensions": ["bearertokenauth/in", "bearertokenauth/out"],
+    "pipelines": {
+      "traces": { "receivers": ["otlp"], "processors": ["memory_limiter", "batch"], "exporters": ["otlp_grpc"] },
+      "metrics": { "receivers": ["otlp"], "processors": ["memory_limiter", "batch"], "exporters": ["otlp_grpc"] },
+      "logs": { "receivers": ["otlp"], "processors": ["memory_limiter", "batch"], "exporters": ["otlp_grpc"] }
+    },
+    "telemetry": { "metrics": { "level": "none" } }
+  }
+}

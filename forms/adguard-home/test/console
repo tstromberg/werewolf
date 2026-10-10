@@ -1,0 +1,11 @@
+# What the adguard-home form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-adguard-home; test/boot; forms/demo/test/console has
+# the format). adguard-home-setup copies the first configuration to
+# /data, from which AdGuard Home serves DNS; Caddy, given no user's
+# password, parks and says why. make check-adguard-home boots it with its
+# config, and signs in.
+
+seen    agh-first-start    adguard-home-setup: first start: configuration copied to /data
+seen    caddy-needs-user   leash: \{"event":"down","service":"caddy","why":"secret ADMIN_HASH: /run/config/caddy/admin-hash: FileNotFound"\}
+unseen  agh-down           leash: \{"event":"down","service":"adguard-home"

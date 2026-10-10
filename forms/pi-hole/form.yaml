@@ -1,0 +1,85 @@
+# pi-hole: Pi-hole, network-wide ad blocking, answering DNS on :53 for
+# the machine's local networks alone, with its web interface behind Caddy,
+# which serves it over HTTPS for the machine's domain. It runs Pi-hole's
+# own image, its latest release, pinned by digest when built, in a tree
+# of its own (docs/design/oci.md, cmd/howl/oci.zig): pihole-FTL itself,
+# not the image's shell entrypoint. The admin password is the config's.
+# Its blocklists are fetched at the first start and refreshed at a start
+# a week later, by Pi-hole's own gravity script under bash, from the
+# image. Its databases are in /data/svc/pi-hole. See
+# forms/pi-hole/README.md.
+base: prod
+
+with: [caddy]
+
+check:
+  # :53 speaks DNS, not HTTP. Caddy's HTTPS is forms/pi-hole/test/checks.
+  skip: [http-answering]
+
+services:
+  # pihole-FTL, in its image, as _oci-pi-hole: it answers DNS on :53, TCP
+  # and UDP, from anywhere fence lets in, but only clients on the
+  # machine's own networks get an answer (listeningMode LOCAL), so it is
+  # never an open resolver. Its web interface and API are on loopback,
+  # behind Caddy. It asks its upstreams over :53 and fetches blocklists
+  # from public addresses over HTTPS. pi-hole-setup runs first: it seeds
+  # the default blocklist and upstreams once, and runs gravity when the
+  # lists are missing or a week old; a failed fetch keeps the old lists.
+  # The settings forced here cannot be changed from the web interface;
+  # the rest (upstreams, lists, local records) can, and are kept on /data.
+  pi-hole:
+    image: docker.io/pihole/pihole:latest
+    exec: /usr/bin/pihole-FTL no-daemon
+    before: /bin/bash /usr/lib/pi-hole-setup
+    # exec: gravity is a bash script, which runs curl, Pi-hole's FTL as
+    # SQLite's shell, and busybox's and coreutils' tools.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: [tcp/53 udp/53, tcp/8080 loopback]
+    connect: [udp/53 tcp/53, tcp/443 tcp/80 public]
+    write: [/etc/pihole, /var/log/pihole, /dev/shm]
+    run:
+      - /bin/bash
+      - /bin/busybox
+      - /bin/coreutils
+      - /usr/bin/env
+      - /usr/bin/getent
+      - /usr/bin/curl
+    secret: FTLCONF_webserver_api_password /run/config/pi-hole/password
+    memory: 512
+    nofile: 4096
+    env:
+      - FTLCONF_dns_listeningMode=LOCAL
+      # Quad9: no logs of who asked, and it refuses known malware domains.
+      - FTLCONF_dns_upstreams=9.9.9.9;149.112.112.112
+      - FTLCONF_dhcp_active=false
+      - FTLCONF_ntp_ipv4_active=false
+      - FTLCONF_ntp_ipv6_active=false
+      - FTLCONF_ntp_sync_active=false
+      - FTLCONF_webserver_port=127.0.0.1:8080
+      - FTLCONF_files_macvendor=/macvendor.db
+    # No DHCP server, NTP server or clock sync: each would need more of the
+    # machine than DNS does. The password comes from the config, so no
+    # visitor sets it, and the web interface cannot change it.
+
+  # Caddy, as its own user, for Pi-hole's web interface: it may bind :80
+  # and :443 and no other port, reach the ACME CA over HTTPS, a resolver,
+  # and pihole-FTL on loopback, read its configuration, and write only its
+  # own directories. Its site is the machine's domain, from the settings.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

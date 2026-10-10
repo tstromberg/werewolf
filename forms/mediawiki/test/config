@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/mediawiki/test/config DIR: the mediawiki form's config for make
+# check, in DIR, as an operator would make one (forms/mediawiki/README.md):
+# the wiki's address and name, its administrator, and the administrator's
+# password, which forms/mediawiki/test/checks logs in with. Reading takes
+# an account, as by default.
+set -eu
+d=$1/mediawiki
+mkdir -p "$d"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$d/admin-password"
+echo '{"url":"http://localhost","name":"Werewolf check wiki","admin":"Admin"}' >"$d/settings.json"

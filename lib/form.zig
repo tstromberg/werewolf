@@ -368,6 +368,10 @@ pub const Form = struct {
     dir: []const u8,
     /// spec is form.yaml, or an empty map when the form has none.
     spec: Node,
+    /// images are directories laid after rootfs, each holding one image
+    /// service's tree and record as `howl form` bakes an `image:` into
+    /// rootfs: howl's build bakes a form's `image:` services there.
+    images: []const []const u8 = &.{},
 
     /// items returns the unquoted items of form.yaml's list key. It returns
     /// none if key is absent or not a list of values.
@@ -394,34 +398,49 @@ pub const Form = struct {
     }
 };
 
-/// keys are form.yaml's keys. Each is a list of lines except base (a name),
-/// app (a path), weaknesses (checks to excuses), check (settings), sshd
-/// (sshd_config keywords), bastion (its users; lib/sshd.zig), and what is
-/// apko's, in apko's shape: accounts (groups and users) and paths.
-const keys = [_][]const u8{
-    "base",
-    "with",
-    "packages",
-    "repositories",
-    "keyring",
-    "archs",
-    "accounts",
-    "paths",
-    "services",
-    "updates",
-    "users",
-    "allow",
-    "app",
-    "programs",
-    "net",
-    "prune",
-    "dev",
-    "modules",
-    "weaknesses",
-    "check",
-    "sshd",
-    "bastion",
+/// Shape is a key's shape, which says how the line sets it (cmd/howl/adhoc.zig):
+/// a scalar by `--KEY VALUE`, a list one line more by the same, a map's
+/// value by `--KEY.SUB VALUE`, a map of maps' (services, users) by
+/// `--KEY.NAME.SUB VALUE`. A file key is the form's alone, in its own shape.
+pub const Shape = enum { scalar, list, map, maps, file };
+
+pub const Key = struct { name: []const u8, shape: Shape };
+
+/// keys are form.yaml's keys (forms/README.md says what each holds).
+/// Those of apko's are in apko's shape: accounts (groups and users) and
+/// paths; bastion holds its users; weaknesses maps checks to excuses.
+pub const keys = [_]Key{
+    .{ .name = "base", .shape = .scalar },
+    .{ .name = "with", .shape = .list },
+    .{ .name = "packages", .shape = .list },
+    .{ .name = "repositories", .shape = .list },
+    .{ .name = "keyring", .shape = .list },
+    .{ .name = "archs", .shape = .list },
+    .{ .name = "accounts", .shape = .file },
+    .{ .name = "paths", .shape = .file },
+    .{ .name = "services", .shape = .maps },
+    .{ .name = "updates", .shape = .map },
+    .{ .name = "users", .shape = .maps },
+    .{ .name = "machine", .shape = .map },
+    .{ .name = "allow", .shape = .list },
+    .{ .name = "app", .shape = .scalar },
+    .{ .name = "programs", .shape = .list },
+    .{ .name = "net", .shape = .list },
+    .{ .name = "prune", .shape = .list },
+    .{ .name = "dev", .shape = .list },
+    .{ .name = "modules", .shape = .list },
+    .{ .name = "weaknesses", .shape = .map },
+    .{ .name = "check", .shape = .map },
+    .{ .name = "sshd", .shape = .map },
+    .{ .name = "bastion", .shape = .file },
 };
+
+/// keyShape returns a key's shape, or null for a key form.yaml has not.
+pub fn keyShape(key: []const u8) ?Shape {
+    for (keys) |k| if (mem.eql(u8, k.name, key)) return k.shape;
+    return null;
+}
+
 /// check_keys are check's keys: memory (MiB) and web (a port) are numbers,
 /// offline and native are true or false, and skip is a list of checks.
 const check_keys = [_][]const u8{ "memory", "offline", "native", "web", "skip" };
@@ -479,6 +498,16 @@ pub fn duration(text: []const u8) ?u32 {
     return if (seconds >= 5 * 60 and seconds <= 7 * 86400) seconds else null;
 }
 
+/// repositoryUrl accepts a public HTTPS directory, without credentials,
+/// queries or fragments; apk appends the arch and APKINDEX.tar.gz.
+pub fn repositoryUrl(text: []const u8) bool {
+    if (!mem.startsWith(u8, text, "https://")) return false;
+    for (text) |c| if (c <= 0x20 or c >= 0x7f or
+        mem.findScalar(u8, "?#@\\", c) != null) return false;
+    const host = text["https://".len..];
+    return host.len > 0 and host[0] != '/';
+}
+
 /// User is a person form.yaml's users: names: their ssh keys, and whether
 /// they administer the machine, which makes their keys root's too.
 pub const User = struct { name: []const u8, keys: []const []const u8, admin: bool };
@@ -528,7 +557,12 @@ pub fn peopleFile(gpa: Allocator, forms: []const Form, f: *Failure) Error![]cons
 
 /// Updates is form.yaml's updates key along a chain: off, or how often the
 /// machine checks (seconds; null leaves the updater's default).
-pub const Updates = struct { off: bool = false, every: ?u32 = null };
+pub const Updates = struct {
+    off: bool = false,
+    every: ?u32 = null,
+    from: ?[]const u8 = null,
+    policy: ?[]const u8 = null,
+};
 
 /// updates returns the chain's updates: the last form that says anything
 /// wins whole, so a form on one that turned them off can turn them on.
@@ -542,6 +576,8 @@ pub fn updates(forms: []const Form) Updates {
         }
         out = .{};
         if (u.get("every")) |e| out.every = duration(e.scalar.text);
+        if (u.get("from")) |e| out.from = e.scalar.text;
+        if (u.get("policy")) |e| out.policy = e.scalar.text;
     }
     return out;
 }
@@ -591,7 +627,7 @@ pub fn loadIn(
     ) else |_| {}
     const spec = try parseFile(gpa, path, text, f);
     for (spec.map) |e| {
-        if (!isOneOf(e.key, &keys))
+        if (keyShape(e.key) == null)
             return f.fail(gpa, "{s}: no key {s} (forms/README.md lists them)", .{ path, e.key });
         if (mem.eql(u8, e.key, "accounts")) {
             if (e.value != .map) return f.fail(
@@ -628,6 +664,33 @@ pub fn loadIn(
                 }
                 if (keys_ == null) return f.fail(gpa, "{s}: users: {s}: no keys", .{ path, u.key });
             }
+        } else if (mem.eql(u8, e.key, "machine")) {
+            if (e.value != .map) return f.fail(gpa, "{s}: machine is a map", .{path});
+            for (e.value.map) |m| {
+                if (!isOneOf(
+                    m.key,
+                    &.{
+                        "hostname",
+                        "ip",
+                        "gw",
+                        "dns",
+                        "data-key",
+                        "on",
+                        "arch",
+                        "size",
+                        "allow-from",
+                        "metadata-users",
+                    },
+                ) or m.value != .scalar)
+                    return f.fail(
+                        gpa,
+                        "{s}: machine.{s}: no such scalar machine setting",
+                        .{ path, m.key },
+                    );
+                if (mem.eql(u8, m.key, "metadata-users") and
+                    !isOneOf(m.value.scalar.text, &.{ "true", "false" }))
+                    return f.fail(gpa, "{s}: machine.metadata-users is true or false", .{path});
+            }
         } else if (mem.eql(u8, e.key, "updates")) {
             if (e.value == .scalar) {
                 if (!mem.eql(u8, e.value.scalar.text, "off")) return f.fail(
@@ -638,9 +701,38 @@ pub fn loadIn(
             } else if (e.value != .map) {
                 return f.fail(gpa, "{s}: updates is off, or a map: every: 1h", .{path});
             } else for (e.value.map) |u| {
+                if (mem.eql(u8, u.key, "from")) {
+                    if (u.value != .scalar or !repositoryUrl(u.value.scalar.text))
+                        return f.fail(
+                            gpa,
+                            "{s}: updates: from is an HTTPS repository URL",
+                            .{path},
+                        );
+                    continue;
+                }
+                if (mem.eql(u8, u.key, "policy")) {
+                    if (u.value != .scalar) return f.fail(
+                        gpa,
+                        "{s}: updates: policy is JSON",
+                        .{path},
+                    );
+                    const parsed = std.json.parseFromSliceLeaky(
+                        std.json.Value,
+                        gpa,
+                        u.value.scalar.text,
+                        .{},
+                    ) catch
+                        return f.fail(gpa, "{s}: updates: policy is JSON", .{path});
+                    if (parsed != .object) return f.fail(
+                        gpa,
+                        "{s}: updates: policy is a JSON object",
+                        .{path},
+                    );
+                    continue;
+                }
                 if (!mem.eql(u8, u.key, "every")) return f.fail(
                     gpa,
-                    "{s}: updates has no key {s}: every",
+                    "{s}: updates has no key {s}: every, from, policy",
                     .{ path, u.key },
                 );
                 if (u.value != .scalar or duration(u.value.scalar.text) == null) return f.fail(
@@ -886,7 +978,8 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
 }
 
 /// netLines returns the chain's network policy as net lines, base first:
-/// what each form's services say, then its own `net` lines. A service's
+/// what each form's services say (a service the last form to name it
+/// says), then its own `net` lines. A service's
 /// listen values are listen lines as they stand, but for their udp/PORT
 /// words, which make a `listen USER udp/PORT...` line for the service's
 /// user (none on loopback, which fence never stops); each connect value's
@@ -897,9 +990,16 @@ pub fn listen(gpa: Allocator, line: []const u8, why: *[]const u8) error{
 pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     var runs_as: std.array_hash_map.String([]const u8) = .empty;
-    for (forms) |form| {
+    for (forms, 0..) |form, at| {
         const svcs = form.spec.get("services") orelse continue;
         for (svcs.map) |s| {
+            // A later form's service of this name replaces this one whole,
+            // network and all.
+            const replaced = for (forms[at + 1 ..]) |later| {
+                const ls = later.spec.get("services") orelse continue;
+                if (ls.get(s.key) != null) break true;
+            } else false;
+            if (replaced) continue;
             const user = if (scalarOf(s.value, "image") != null)
                 try imageUser(gpa, s.key)
             else
@@ -1209,6 +1309,10 @@ pub const ImageRecord = struct {
     workdir: []const u8 = "",
 };
 
+/// unbaked starts the service file of an image service whose image is not
+/// baked yet, a comment naming the image, so compose can say what to do.
+pub const unbaked = "# unbaked image";
+
 /// imageUser returns the user an image service runs as, _oci-NAME.
 pub fn imageUser(gpa: Allocator, name: []const u8) Allocator.Error![]const u8 {
     return gpa.print("_oci-{s}", .{name});
@@ -1252,10 +1356,17 @@ fn render(
     var out: std.ArrayList(u8) = .empty;
     var skip: []const []const u8 = &.{};
     if (scalarOf(spec, "image")) |ref| {
-        const path = try gpa.print(
+        var path = try gpa.print(
             "{s}/rootfs/usr/share/werewolf/images/{s}.json",
             .{ form.dir, name },
         );
+        for (form.images) |dir| {
+            const baked = try gpa.print("{s}/usr/share/werewolf/images/{s}.json", .{ dir, name });
+            root.access(io, baked, .{}) catch continue;
+            path = baked;
+        }
+        // Not yet baked, the service runs nothing: what it takes (config,
+        // settings, memory) can be read, but compose refuses to build it.
         const text = root.readFileAlloc(
             io,
             path,
@@ -1263,15 +1374,23 @@ fn render(
             .limited(64 << 10),
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return f.fail(
-                gpa,
-                "{s}/form.yaml: services: {s}: image {s}: no {s}: howl form bakes the image",
-                .{ form.dir, name, ref, path },
-            ),
+            else => try gpa.print("{{\"image\":\"{s}\",\"argv\":[\"/unbaked\"]}}", .{ref}),
         };
         const rec = std.json.parseFromSliceLeaky(ImageRecord, gpa, text, .{}) catch
             return f.fail(gpa, "{s}: not an image record howl wrote", .{path});
-        if (!mem.eql(u8, rec.image, ref)) return f.fail(
+        if (rec.argv.len == 0) return f.fail(gpa, "{s}: not an image record howl wrote", .{path});
+        if (mem.eql(u8, rec.argv[0], "/unbaked"))
+            try out.print(gpa, "{s} {s}\n", .{ unbaked, ref });
+        // A tag is pinned when it is baked: REPO:TAG as REPO@sha256:HEX.
+        const slash = mem.findScalarLast(u8, ref, '/') orelse 0;
+        const repo = if (mem.findScalarLast(u8, ref, ':')) |c|
+            (if (c > slash) ref[0..c] else ref)
+        else
+            ref;
+        const pinned_from = mem.findScalar(u8, ref, '@') == null and
+            mem.startsWith(u8, rec.image, repo) and
+            mem.startsWith(u8, rec.image[repo.len..], "@sha256:");
+        if (!mem.eql(u8, rec.image, ref) and !pinned_from) return f.fail(
             gpa,
             "{s}/form.yaml: services: {s}: image {s}, but {s} was baked: howl form again",
             .{ form.dir, name, ref, rec.image },
@@ -1302,7 +1421,14 @@ fn render(
         for (rec.env) |e| {
             if (mem.startsWith(u8, e, "PATH=")) has_path = true;
             if (mem.startsWith(u8, e, "HOME=")) has_home = true;
-            try out.print(gpa, "env {s}\n", .{e});
+            // Quoted as the command's words are: a value may hold spaces
+            // (NODE_OPTIONS), never a quote or a control character.
+            if (mem.findScalar(u8, e, '"') != null or mem.findAny(u8, e, "\n\r\t") != null)
+                return f.fail(gpa, "{s}: an env holds a quote or a control character", .{path});
+            if (mem.findScalar(u8, e, ' ') != null)
+                try out.print(gpa, "env \"{s}\"\n", .{e})
+            else
+                try out.print(gpa, "env {s}\n", .{e});
         }
         if (!has_path) try out.print(gpa, "env PATH={s}\n", .{image_path});
         if (!has_home) try out.appendSlice(gpa, "env HOME=/data\n");
@@ -1331,8 +1457,12 @@ fn render(
         const values: []const Node = if (links == .scalar) &.{links} else links.list;
         for (values) |v| {
             const to = v.scalar.text;
-            const target = for (forms) |fm| {
-                const svcs = fm.spec.get("services") orelse continue;
+            // The last form's, as the image runs: a later form's service
+            // replaces an earlier one's whole.
+            var i = forms.len;
+            const target = while (i > 0) {
+                i -= 1;
+                const svcs = forms[i].spec.get("services") orelse continue;
                 if (svcs.get(to)) |t| break t;
             } else return f.fail(
                 gpa,
@@ -1720,6 +1850,32 @@ test "services: of each name, the last form's file" {
     try testing.expectEqualStrings("forms/site/rootfs/etc/sv/web/service", got[1].path);
 }
 
+test "a service a later form names again is that form's, network and all" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/db");
+    try tmp.dir.createDirPath(io, "forms/site");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/db/form.yaml",
+        .data = "services:\n  db:\n    exec: /db\n    user: db\n    listen: tcp/5432\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/site/form.yaml",
+        .data = "with: [db]\nservices:\n  db:\n    exec: /db\n    user: db\n" ++
+            "    listen: tcp/5432 loopback\n",
+    });
+    var f: Failure = .{};
+    const forms = try chain(io, gpa, tmp.dir, "site", &f);
+    try testing.expectEqualStrings(
+        "listen tcp/5432 loopback",
+        try mem.join(gpa, "\n", try netLines(gpa, forms, &f)),
+    );
+}
+
 test "services in form.yaml: rendered as leash reads them, their network fence's" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1757,8 +1913,8 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
     try testing.expectEqualStrings("forms/site/form.yaml: services.web", got[1].path);
     try testing.expectEqualStrings(
         "exec /usr/bin/web --port 80\nuser web\npledge stdio inet\nlisten tcp/80 udp/53\n" ++
-            "listen tcp/8080\nlisten udp/5353\nconnect tcp/443 tcp/53\nconnect /run/svc/db/sock\n" ++
-            "env A=1\nenv B=2\n",
+            "listen tcp/8080\nlisten udp/5353\nconnect tcp/443 tcp/53\n" ++
+            "connect /run/svc/db/sock\nenv A=1\nenv B=2\n",
         got[1].text,
     );
     try testing.expectEqualStrings(

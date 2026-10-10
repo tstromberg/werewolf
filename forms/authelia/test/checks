@@ -1,0 +1,14 @@
+# The check's client finds the domain and the portal on loopback, where
+# Caddy serves both with certificates from its own CA.
+ok  authelia-hosts      echo '127.0.0.1 werewolf.internal auth.werewolf.internal' >>/etc/hosts && grep -q auth.werewolf.internal /etc/hosts
+# Authelia answers through Caddy once its storage is ready: wait.
+ok  authelia-health     i=0; until curl -sfk https://auth.werewolf.internal/api/health 2>/dev/null | grep -q '"status":"OK"'; do i=$((i + 1)); [ $i -le 120 ] || { echo "no /api/health in 120 s"; exit 1; }; sleep 1; done
+# A visitor without a session is sent to the portal, and sees nothing of
+# the site; so is one claiming to be alice in the header Caddy would set.
+ok  authelia-portal     c=$(curl -sk -H 'Accept: text/html' -o /tmp/anon -w '%{http_code} %{redirect_url}' https://werewolf.internal/) && echo "$c" | grep -q '^302 https://auth.werewolf.internal/' && ! grep -q 'signed in' /tmp/anon
+ok  authelia-forged     c=$(curl -sk -H 'Accept: text/html' -H 'Remote-User: alice' -o /tmp/forged -w '%{http_code}' https://werewolf.internal/) && [ "$c" = 302 ] && ! grep -q 'signed in' /tmp/forged
+# alice's right password alone is one factor of two: Authelia takes it,
+# and the site still sends her to the portal for the second.
+ok  authelia-one-factor curl -sk -c /tmp/alice -H 'Content-Type: application/json' -d '{"username":"alice","password":"werewolf-check-pass-1","targetURL":"https://werewolf.internal/"}' https://auth.werewolf.internal/api/firstfactor | grep -q '"status":"OK"' && curl -sk -b /tmp/alice https://auth.werewolf.internal/api/state | grep -q '"authentication_level":1' && c=$(curl -sk -b /tmp/alice -H 'Accept: text/html' -o /tmp/alice.body -w '%{http_code}' https://werewolf.internal/) && [ "$c" = 302 ] && ! grep -q 'signed in' /tmp/alice.body
+# Three wrong passwords ban bob: then his right one is refused too.
+ok  authelia-ban        for i in 1 2 3; do curl -sk -o /dev/null -H 'Content-Type: application/json' -d '{"username":"bob","password":"wrong"}' https://auth.werewolf.internal/api/firstfactor; done; curl -sk -H 'Content-Type: application/json' -d '{"username":"bob","password":"werewolf-check-pass-1"}' https://auth.werewolf.internal/api/firstfactor | grep -q '"status":"KO"'

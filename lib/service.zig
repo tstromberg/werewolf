@@ -188,7 +188,9 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             else
                 &requires;
             for (args) |a| {
-                if (!isCleanPath(a))
+                // run DIR/: every program beneath DIR, in an image's tree.
+                const tree = list == &run and a.len > 1 and a[a.len - 1] == '/';
+                if (!isCleanPath(if (tree) a[0 .. a.len - 1] else a))
                     return invalid(bad, "a path must be absolute, without . or .. or //");
                 try list.append(gpa, a);
             }
@@ -269,8 +271,6 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     }
     bad.line = 0;
     if (dir != null and root == null) return invalid(bad, "dir without root");
-    if (root != null and render != null)
-        return invalid(bad, "render under a root: service-config is not in the image");
     const promises = pledge orelse return invalid(bad, "no pledge: say what it does");
     if (render) |r| {
         settings.declare(gpa, declared.items, r, &bad.why) catch |err| switch (err) {
@@ -290,6 +290,8 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 return invalid(bad, "a setting's key is a secret's too");
         };
     } else if (declared.items.len > 0) return invalid(bad, "setting without render");
+    if (root == null) for (run.items) |r| if (r[r.len - 1] == '/')
+        return invalid(bad, "run DIR/ is for a service in an image's own tree");
     var s: Service = .{
         .exec = exec orelse return invalid(bad, "no exec"),
         .user = user orelse return invalid(bad, "no user"),
@@ -690,11 +692,6 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a/b", .line = 4 },
         .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\nroot /oci/b", .line = 5 },
         .{ .text = "exec /a\nuser x\npledge stdio\ndir /data", .line = 0 }, // dir without root
-        .{
-            .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\nconfig settings /run/config/s\n" ++
-                "setting port port\nrender env e",
-            .line = 0,
-        }, // render under a root
     };
     for (cases) |c| {
         var bad: Bad = .{};
@@ -710,10 +707,19 @@ test "a service with a root" {
     const s = try parse(
         arena.allocator(),
         "exec /app/server --port 8080\nuser _oci-web\npledge stdio inet listen\n" ++
-            "root /oci/web\ndir /app\nwrite /var/cache/web\nlisten tcp/8080\n",
+            "root /oci/web\ndir /app\nwrite /var/cache/web\nlisten tcp/8080\nrun /app/plugins/\n",
         &bad,
     );
     try testing.expectEqualStrings("/oci/web", s.root.?);
+    try testing.expectEqualStrings("/app/plugins/", s.run[0]);
+    // Settings render under a root too: init binds service-config in.
+    _ = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\nroot /oci/a\n" ++
+        "config settings /run/config/s\nsetting port port\nrender env e\n", &bad);
+    // run DIR/ is an image's alone; a machine's directory stays program by program.
+    try testing.expectError(
+        error.Invalid,
+        parse(arena.allocator(), "exec /a\nuser x\npledge stdio\nrun /usr/lib/\n", &bad),
+    );
     try testing.expectEqualStrings("/app", s.dir.?);
     try testing.expectEqualStrings("/var/cache/web", s.write[0]);
     const plain = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\n", &bad);

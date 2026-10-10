@@ -1,0 +1,4 @@
+# Nextcloud's background jobs, every five minutes, through sh-shim
+# (forms/cron): usr/share/werewolf-nextcloud/cron.php, as nextcloud-cron.
+SHELL=/usr/lib/werewolf/sh-shim
+*/5 * * * * /usr/bin/php -d apc.enable_cli=1 -d memory_limit=1G -f /usr/share/werewolf-nextcloud/cron.php

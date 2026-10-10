@@ -1,0 +1,22 @@
+# Galène answers through Caddy over HTTPS, with a certificate from Caddy's
+# own CA for localhost, once galene-setup has written its groups: wait.
+ok  galene-https       i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/ 2>/dev/null | grep -q mainpage.js; do i=$((i + 1)); [ $i -le 120 ] || { echo "no front page in 120 s"; exit 1; }; sleep 1; done
+# Plain HTTP is sent to HTTPS.
+ok  galene-redirect    wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# A group the settings name is served, and one they do not is not.
+ok  galene-group       wget -q -T 5 --no-check-certificate -O - https://localhost/group/lecture/ | grep -q galene.js && ! wget -q -T 5 --no-check-certificate -O /dev/null https://localhost/group/nosuch/ 2>/dev/null
+# No group is listed for strangers to find.
+ok  galene-unlisted    [ "$(wget -q -T 5 --no-check-certificate -O - https://localhost/public-groups.json)" = "[]" ]
+# The passwords are kept as bcrypt hashes alone: leash's copies are gone,
+# and the group file holds no password as written.
+ok  galene-hashed      ! [ -e /run/svc/galene/operator-password ] && ! [ -e /run/svc/galene/password ] && grep -q '"type": "bcrypt"' /run/svc/galene/groups/lecture.json && ! grep -q werewolf-check /run/svc/galene/groups/lecture.json
+# The operator joins a group by Galène's own protocol over its WebSocket,
+# on loopback: once it has upgraded the connection, a handshake, then a
+# join, each a frame with a zero mask.
+ok  galene-join        r=$( (printf 'GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: d2VyZXdvbGYtY2hlY2stMQ==\r\nSec-WebSocket-Version: 13\r\n\r\n'; sleep 1; for m in '{"type":"handshake","version":["2"],"id":"check"}' '{"type":"join","kind":"join","group":"lecture","username":"ada","password":"werewolf-check-op-1"}'; do printf "\\201\\$(printf %o $((128 + ${#m})))\\0\\0\\0\\0%s" "$m"; done; sleep 3) | timeout 10 nc 127.0.0.1 8443 | grep -aoE '"kind":"[a-z]*"|not authorised'); echo "$r" | grep -q '"kind":"join"' || { echo "$r" | tail -c 300; exit 1; }
+# A stranger guessing a password is refused, as is one with none: no one
+# joins a lecture without the config's password.
+ok  galene-join-refused r=$( (printf 'GET /ws HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: d2VyZXdvbGYtY2hlY2stMg==\r\nSec-WebSocket-Version: 13\r\n\r\n'; sleep 1; for m in '{"type":"handshake","version":["2"],"id":"check"}' '{"type":"join","kind":"join","group":"lecture","username":"mallory","password":"guess"}'; do printf "\\201\\$(printf %o $((128 + ${#m})))\\0\\0\\0\\0%s" "$m"; done; sleep 3) | timeout 10 nc 127.0.0.1 8443 | grep -aoE '"kind":"[a-z]*"|not authorised'); echo "$r" | grep -q '"kind":"fail"' && echo "$r" | grep -q 'not authorised' && ! echo "$r" | grep -q '"kind":"join"' || { echo "$r" | tail -c 300; exit 1; }
+# The media port: fence delivers udp/10000 and lets only Galène's user
+# send from it, and Galène holds it.
+ok  galene-udp         u=$(grep '^galene:' /etc/passwd | cut -d: -f3) && grep -qx "listen $u udp 10000" /usr/share/werewolf/net && netstat -lun | grep -q ':10000 '

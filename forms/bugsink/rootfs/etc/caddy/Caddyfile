@@ -1,0 +1,34 @@
+# Caddy for the bugsink form: HTTPS for the machine's domain (DOMAIN;
+# howl --domain), with a certificate Caddy gets itself, and :80 sent
+# there. Bugsink is behind it on loopback.
+# leash starts Caddy (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris; no body timeout, which would cut off a large
+		# envelope from a slow client.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	header -Server
+	reverse_proxy 127.0.0.1:8000 {
+		# Bugsink takes the client's address from X-Real-IP: Caddy's
+		# word, replacing any a client sent.
+		header_up X-Real-IP {remote_host}
+	}
+}

@@ -1,13 +1,19 @@
 //! firecracker runs a machine as a Firecracker microVM on Linux with KVM
-//! (experimental). It boots the kernel and stage0 directly, with no
-//! bootloader or slots, under a supervisor. See README.md.
+//! (experimental). The machine is the boot disk QEMU boots, slots and all.
+//! Firecracker has no firmware, so its supervisor does systemd-boot's part
+//! before each start: it picks the disk's entry, spends a try, and boots
+//! that slot's kernel and stage0. Updates work as anywhere. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
+const gpt = @import("gpt");
+const image = @import("image");
 const howl = @import("howl.zig");
+const booting = @import("boot.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
+const mem = std.mem;
 
 /// installed reports whether this is Linux with /dev/kvm and firecracker
 /// on the PATH (tools/install-deps installs it).
@@ -69,7 +75,7 @@ pub fn net(gpa: Allocator, name: []const u8) !Net {
     const a = h[0];
     const b: u8 = (h[1] & 0x3f) << 2;
     return .{
-        .tap = try gpa.print("fc{x:0>8}", .{std.mem.readInt(u32, h[2..6], .big)}),
+        .tap = try gpa.print("fc{x:0>8}", .{mem.readInt(u32, h[2..6], .big)}),
         .mac = try gpa.print("06:00:{x:0>2}:{x:0>2}:{x:0>2}:{x:0>2}", .{ h[6], h[7], h[8], h[9] }),
         .host = try gpa.print("172.16.{d}.{d}", .{ a, b + 1 }),
         .guest = try gpa.print("172.16.{d}.{d}", .{ a, b + 2 }),
@@ -77,28 +83,17 @@ pub fn net(gpa: Allocator, name: []const u8) !Net {
     };
 }
 
-/// bootArgs returns the kernel command line. Firecracker has no DHCP, so
-/// the address goes here. reboot=k reboots through the keyboard
-/// controller, which Firecracker treats as the guest exiting; pci=off
-/// because Firecracker has no PCI.
-pub fn bootArgs(gpa: Allocator, image_args: []const u8, n: Net, dns: []const u8) ![]const u8 {
-    return gpa.print(
-        "console=ttyS0 reboot=k panic=10 pci=off {s} werewolf.ip={s}/30 werewolf.gw={s} " ++
-            "werewolf.dns={s} werewolf.data=vda werewolf.root=vdc",
-        .{ image_args, n.guest, n.host, dns },
-    );
-}
-
-/// kernelPath returns the kernel to boot, relative to the checkout. On
-/// x86_64 it is the ELF vmlinux the build unpacks from the bzImage:
-/// booting the bzImage costs 0.1 s per boot while its stub gunzips 39 MB.
-/// On aarch64 vmlinuz is already a raw Image.
-pub fn kernelPath(gpa: Allocator, arch: howl.Arch) ![]const u8 {
-    const file = switch (arch) {
-        .x86_64 => "vmlinux",
-        .aarch64 => "vmlinuz",
-    };
-    return gpa.print("build/{t}/{s}", .{ arch, file });
+/// bootArgs returns the machine's arguments, which the disk's entry adds
+/// to the image's and updates carry over. Firecracker has no DHCP, so the
+/// address goes here. reboot=k reboots through the keyboard controller,
+/// which Firecracker treats as the guest exiting.
+pub fn bootArgs(gpa: Allocator, n: Net, dns: []const u8) ![]const []const u8 {
+    return gpa.dupe([]const u8, &.{
+        "reboot=k",
+        try gpa.print("werewolf.ip={s}/30", .{n.guest}),
+        try gpa.print("werewolf.gw={s}", .{n.host}),
+        try gpa.print("werewolf.dns={s}", .{dns}),
+    });
 }
 
 const Drive = struct {
@@ -108,17 +103,15 @@ const Drive = struct {
     is_read_only: bool,
 };
 
-/// config returns Firecracker's JSON configuration. The kernel names
-/// drives in order, so data is vda, the config tar vdb and the root vdc,
-/// as bootArgs expects.
-pub fn config(
+/// config returns Firecracker's JSON configuration: the boot disk as vda,
+/// the config tar as vdb.
+fn config(
     gpa: Allocator,
     kernel: []const u8,
     initrd: []const u8,
     args: []const u8,
-    data: []const u8,
+    disk: []const u8,
     tar: []const u8,
-    root: []const u8,
     log: []const u8,
     n: Net,
 ) ![]u8 {
@@ -132,20 +125,14 @@ pub fn config(
         .logger = .{ .log_path = log, .level = "Warning" },
         .drives = [_]Drive{
             .{
-                .drive_id = "data",
-                .path_on_host = data,
+                .drive_id = "disk",
+                .path_on_host = disk,
                 .is_root_device = false,
                 .is_read_only = false,
             },
             .{
                 .drive_id = "config",
                 .path_on_host = tar,
-                .is_root_device = false,
-                .is_read_only = true,
-            },
-            .{
-                .drive_id = "root",
-                .path_on_host = root,
                 .is_root_device = false,
                 .is_read_only = true,
             },
@@ -172,12 +159,12 @@ pub fn hostDns(io: Io, gpa: Allocator) ?[]const u8 {
 
 /// nameserver returns the first non-loopback nameserver in resolv.conf text.
 pub fn nameserver(text: []const u8) ?[]const u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
+    var lines = mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
-        var words = std.mem.tokenizeAny(u8, line, " \t\r");
-        if (!std.mem.eql(u8, words.next() orelse continue, "nameserver")) continue;
+        var words = mem.tokenizeAny(u8, line, " \t\r");
+        if (!mem.eql(u8, words.next() orelse continue, "nameserver")) continue;
         const ns = words.next() orelse continue;
-        if (std.mem.startsWith(u8, ns, "127.") or std.mem.eql(u8, ns, "::1")) continue;
+        if (mem.startsWith(u8, ns, "127.") or mem.eql(u8, ns, "::1")) continue;
         return ns;
     }
     return null;
@@ -214,8 +201,10 @@ pub fn networkUp(
     // Enable forwarding only if it was off, and leave a marker so the last
     // machine's networkDown turns it off again. A host that already
     // forwarded keeps forwarding.
-    const forward = Dir.cwd().readFileAlloc(io, ip_forward, gpa, .limited(8)) catch "";
-    if (std.mem.eql(u8, std.mem.trim(u8, forward, "\n"), "0")) {
+    // readFile, not readFileAlloc, which takes /proc's size of 0 as empty.
+    var fwd: [8]u8 = undefined;
+    const forward = Dir.cwd().readFile(io, ip_forward, &fwd) catch "";
+    if (mem.eql(u8, mem.trim(u8, forward, "\n"), "0")) {
         if (Dir.cwd().createFile(io, forward_marker, .{ .exclusive = true })) |f| {
             f.close(io);
         } else |err| if (err != error.PathAlreadyExists) return err;
@@ -253,7 +242,7 @@ fn tapsLeft(io: Io) bool {
     defer d.close(io);
     var it = d.iterate();
     while (it.next(io) catch return true) |e| {
-        if (e.name.len != 10 or !std.mem.startsWith(u8, e.name, "fc")) continue;
+        if (e.name.len != 10 or !mem.startsWith(u8, e.name, "fc")) continue;
         const hex = for (e.name[2..]) |c| {
             if (!std.ascii.isHex(c)) break false;
         } else true;
@@ -301,7 +290,7 @@ pub fn iptables(gpa: Allocator, verb: []const u8, r: Rule) ![]const []const u8 {
 
 /// done runs args under root quietly and reports whether it succeeded.
 fn done(io: Io, gpa: Allocator, root: []const []const u8, args: []const []const u8) bool {
-    const argv = std.mem.concat(gpa, []const u8, &.{ root, args }) catch return false;
+    const argv = mem.concat(gpa, []const u8, &.{ root, args }) catch return false;
     const r = std.process.run(gpa, io, .{ .argv = argv }) catch return false;
     return r.term == .exited and r.term.exited == 0;
 }
@@ -313,7 +302,7 @@ fn run(
     args: []const []const u8,
     why: *howl.Why,
 ) !void {
-    try howl.run(io, why, try std.mem.concat(gpa, []const u8, &.{ root, args }));
+    try howl.run(io, why, try mem.concat(gpa, []const u8, &.{ root, args }));
 }
 
 /// running returns the pid in dir's pidfile if that Firecracker is alive.
@@ -326,7 +315,7 @@ pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
     ) catch return null;
     const pid = std.fmt.parseInt(
         std.posix.pid_t,
-        std.mem.trim(u8, text, " \n"),
+        mem.trim(u8, text, " \n"),
         10,
     ) catch return null;
     if (builtin.os.tag != .linux) return null;
@@ -347,11 +336,184 @@ pub fn stop(io: Io, gpa: Allocator, dir: []const u8, pid: std.posix.pid_t, why: 
     return why.refuse("{s}: its Firecracker, pid {d}, did not stop", .{ dir, pid });
 }
 
-/// keep is the supervisor, `howl _firecracker DIR`. It runs Firecracker on
-/// DIR/vm.json with the console appended to DIR/console.log and stdin a
-/// pipe never written. Firecracker exits 0 on both reboot and halt, so
-/// keep reads the console to tell them apart, and restarts on reboot while
-/// config.tar exists; delete removes it. Any other exit ends the machine.
+/// Entry is a Boot Loader Specification entry on the disk's EFI partition.
+/// werewolf's have one line of each key.
+const Entry = struct {
+    /// name is the file's: werewolf-a.conf, or werewolf-b+1.conf while it
+    /// counts tries.
+    name: []const u8,
+    version: []const u8 = "",
+    linux: []const u8 = "",
+    initrd: []const u8 = "",
+    options: []const u8 = "",
+
+    fn parse(name: []const u8, text: []const u8) Entry {
+        var e: Entry = .{ .name = name };
+        var lines = mem.tokenizeScalar(u8, text, '\n');
+        while (lines.next()) |raw| {
+            const line = mem.trim(u8, raw, " \t\r");
+            const sp = mem.findAny(u8, line, " \t") orelse continue;
+            const key = line[0..sp];
+            const value = mem.trim(u8, line[sp..], " \t");
+            if (mem.eql(u8, key, "version")) e.version = value;
+            if (mem.eql(u8, key, "linux")) e.linux = value;
+            if (mem.eql(u8, key, "initrd")) e.initrd = value;
+            if (mem.eql(u8, key, "options")) e.options = value;
+        }
+        return e;
+    }
+
+    /// Tries is the count in an entry's name: werewolf-b+1.conf has one try
+    /// left, werewolf-b+0-1.conf none, after one.
+    const Tries = struct { left: u32, done: u32 };
+
+    fn tries(e: Entry) ?Tries {
+        const stem = mem.cutSuffix(u8, e.name, ".conf") orelse return null;
+        const count = stem[(mem.findScalarLast(u8, stem, '+') orelse return null) + 1 ..];
+        const dash = mem.findScalar(u8, count, '-');
+        return .{
+            .left = std.fmt.parseUnsigned(u32, count[0 .. dash orelse count.len], 10) catch
+                return null,
+            .done = if (dash) |d|
+                std.fmt.parseUnsigned(u32, count[d + 1 ..], 10) catch return null
+            else
+                0,
+        };
+    }
+
+    /// spent returns the name after one more try, or null if e counts none
+    /// or has none left.
+    fn spent(e: Entry, gpa: Allocator) !?[]const u8 {
+        const t = e.tries() orelse return null;
+        if (t.left == 0) return null;
+        const stem = e.name[0..mem.findScalarLast(u8, e.name, '+').?];
+        return try gpa.print("{s}+{d}-{d}.conf", .{ stem, t.left - 1, t.done + 1 });
+    }
+
+    /// before reports whether systemd-boot puts a ahead of b, for entries
+    /// that share a sort-key, as werewolf's do: one with no tries left goes
+    /// last, then the newest version first (serials, which sort as text),
+    /// then the name, so the order is total.
+    fn before(a: Entry, b: Entry) bool {
+        const a_out = if (a.tries()) |t| t.left == 0 else false;
+        const b_out = if (b.tries()) |t| t.left == 0 else false;
+        if (a_out != b_out) return b_out;
+        return switch (mem.order(u8, a.version, b.version)) {
+            .gt => true,
+            .lt => false,
+            .eq => mem.order(u8, a.name, b.name) == .gt,
+        };
+    }
+};
+
+/// Esp reads and renames files on the EFI partition of a stopped
+/// machine's disk with mtools.
+const Esp = struct {
+    io: Io,
+    gpa: Allocator,
+    /// image is the partition as mtools names it: DISK@@OFFSET.
+    image: []const u8,
+    env: *const std.process.Environ.Map,
+    why: *howl.Why,
+
+    /// run runs an mtools command on the partition and returns its output.
+    fn run(esp: Esp, tool: []const u8, args: []const []const u8) ![]const u8 {
+        const argv = try mem.concat(esp.gpa, []const u8, &.{ &.{ tool, "-i", esp.image }, args });
+        const r = std.process.run(esp.gpa, esp.io, .{
+            .argv = argv,
+            .environ_map = esp.env,
+            .stdout_limit = .limited(image.max_gunzip),
+            .stderr_limit = .limited(4096),
+        }) catch |err| return esp.why.refuse("{s}: {t}", .{ tool, err });
+        if (r.term != .exited or r.term.exited != 0) return esp.why.refuse(
+            "{s} {s}: {s}",
+            .{ tool, args[args.len - 1], mem.trim(u8, r.stderr, " \n") },
+        );
+        return r.stdout;
+    }
+};
+
+/// boot does systemd-boot's part for the machine in dir: it picks the
+/// entry on disk.img's EFI partition, renames it to spend a try if it
+/// counts them, takes its kernel and stage0, and writes vm.json. It
+/// returns what it chose, for the console log. The kernel is made one
+/// Firecracker loads: on x86_64 the ELF inside the bzImage, on aarch64
+/// the Image inside an EFI zboot wrapper.
+fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) ![]const u8 {
+    const env = try gpa.create(std.process.Environ.Map);
+    env.* = try howl.environ.clone(gpa);
+    // mtools otherwise refuses a partition that is no whole number of tracks.
+    try env.put("MTOOLS_SKIP_CHECK", "1");
+    const disk = try gpa.print("{s}/disk.img", .{dir});
+    const esp: Esp = .{
+        .io = io,
+        .gpa = gpa,
+        .image = try gpa.print("{s}@@{d}", .{ disk, gpt.margin * gpt.sector }),
+        .env = env,
+        .why = why,
+    };
+    var chosen: ?Entry = null;
+    var listed = mem.tokenizeScalar(u8, try esp.run("mdir", &.{ "-b", "::/loader/entries" }), '\n');
+    while (listed.next()) |path| {
+        if (!mem.endsWith(u8, path, ".conf")) continue;
+        const e: Entry = .parse(path["::/loader/entries/".len..], try esp.run("mtype", &.{path}));
+        if (chosen == null or e.before(chosen.?)) chosen = e;
+    }
+    const e = chosen orelse return why.refuse("{s}: no boot entries", .{disk});
+    if (e.linux.len == 0 or e.initrd.len == 0)
+        return why.refuse("{s}: no linux or initrd line", .{e.name});
+    var said = try gpa.print("booting {s}", .{e.name});
+    if (try e.spent(gpa)) |name| {
+        _ = try esp.run("mren", &.{ try gpa.print("::/loader/entries/{s}", .{e.name}), name });
+        said = try gpa.print("{s}, a try spent: {s}", .{ said, name });
+    }
+    const shipped = try esp.run("mtype", &.{try gpa.print("::{s}", .{e.linux})});
+    const kernel = switch (builtin.cpu.arch) {
+        .x86_64 => image.vmlinux(gpa, shipped),
+        else => image.unwrapZboot(gpa, shipped),
+    } catch |err| return why.refuse("{s}: {t}", .{ e.linux, err });
+    const stage0 = try esp.run("mtype", &.{try gpa.print("::{s}", .{e.initrd})});
+    const kernel_path = try gpa.print("{s}/kernel", .{dir});
+    const stage0_path = try gpa.print("{s}/stage0.zst", .{dir});
+    try Dir.cwd().writeFile(io, .{ .sub_path = kernel_path, .data = kernel });
+    try Dir.cwd().writeFile(io, .{ .sub_path = stage0_path, .data = stage0 });
+    var args: std.ArrayList(u8) = .empty;
+    var words = mem.tokenizeScalar(u8, e.options, ' ');
+    while (words.next()) |w| {
+        if (added(w)) continue;
+        try args.print(gpa, "{s}{s}", .{ if (args.items.len > 0) " " else "", w });
+    }
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = try gpa.print("{s}/vm.json", .{dir}),
+        .data = try config(
+            gpa,
+            kernel_path,
+            stage0_path,
+            args.items,
+            disk,
+            try gpa.print("{s}/config.tar", .{dir}),
+            try gpa.print("{s}/firecracker.log", .{dir}),
+            try net(gpa, std.fs.path.basename(dir)),
+        ),
+    });
+    return said;
+}
+
+/// added reports whether Firecracker adds arg to every command line:
+/// pci=off, earlycon= for its serial port, virtio_mmio.device= for each
+/// device on x86_64. An update carries the running command line into its
+/// entry, so boot drops them, lest each update add them once more.
+fn added(arg: []const u8) bool {
+    return mem.eql(u8, arg, "pci=off") or mem.startsWith(u8, arg, "earlycon=") or
+        mem.startsWith(u8, arg, "virtio_mmio.device=");
+}
+
+/// keep is the supervisor, `howl _firecracker DIR`. Before each start it
+/// boots as systemd-boot would (boot). It runs Firecracker on DIR/vm.json
+/// with the console appended to DIR/console.log and stdin a pipe never
+/// written. Firecracker exits 0 on both reboot and halt, so keep reads the
+/// console to tell them apart, and restarts on reboot while config.tar
+/// exists; delete removes it. Any other exit ends the machine.
 pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
     const vm = try gpa.print("{s}/vm.json", .{dir});
     const log = try gpa.print("{s}/console.log", .{dir});
@@ -371,7 +533,22 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
     defer out.close(io);
     // Read only the log's tail, where a halt shows; the log grows forever.
     const tail = try gpa.alloc(u8, 1 << 20);
+    var buf: [4352]u8 = undefined;
     while (true) {
+        // Each boot holds a kernel in memory; free it before the next.
+        var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+        defer arena.deinit();
+        var why: howl.Why = .{};
+        const said = boot(io, arena.allocator(), dir, &why) catch |err| {
+            out.writeStreamingAll(io, mem.print(
+                &buf,
+                booting.no_slot ++ "{s}\n",
+                .{if (why.text.len > 0) why.text else @errorName(err)},
+            ) catch unreachable) catch {};
+            return;
+        };
+        out.writeStreamingAll(io, mem.print(&buf, "werewolf: {s}\n", .{said}) catch
+            "werewolf: booting\n") catch {};
         const seen = if (Dir.cwd().statFile(io, log, .{})) |st| st.size else |_| 0;
         // Firecracker's log must exist before it opens it.
         (try Dir.cwd().createFile(io, fc_log, .{ .truncate = false })).close(io);
@@ -383,7 +560,7 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
         });
         try Dir.cwd().writeFile(io, .{
             .sub_path = pidfile,
-            .data = try gpa.print("{d}\n", .{child.id orelse 0}),
+            .data = try arena.allocator().print("{d}\n", .{child.id orelse 0}),
         });
         const term = try child.wait(io);
         Dir.cwd().deleteFile(io, pidfile) catch {};
@@ -394,9 +571,8 @@ pub fn keep(io: Io, gpa: Allocator, dir: []const u8) !void {
             const from = @max(seen, len -| tail.len);
             break :read tail[0 .. f.readPositionalAll(io, tail, from) catch 0];
         } else |_| "";
-        const halted = std.mem.find(u8, since, "reboot: Power down") != null;
-        var buf: [256]u8 = undefined;
-        out.writeStreamingAll(io, std.mem.print(
+        const halted = mem.find(u8, since, "reboot: Power down") != null;
+        out.writeStreamingAll(io, mem.print(
             &buf,
             "werewolf: firecracker exited {d}: {s}\n",
             .{ code, if (code != 0)
@@ -417,13 +593,13 @@ test net {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const n = try net(arena.allocator(), "edge");
-    try testing.expect(n.tap.len == 10 and std.mem.startsWith(u8, n.tap, "fc"));
-    try testing.expect(std.mem.startsWith(u8, n.mac, "06:00:") and n.mac.len == 17);
-    try testing.expect(std.mem.startsWith(u8, n.host, "172.16."));
-    try testing.expect(std.mem.endsWith(u8, n.subnet, "/30"));
+    try testing.expect(n.tap.len == 10 and mem.startsWith(u8, n.tap, "fc"));
+    try testing.expect(mem.startsWith(u8, n.mac, "06:00:") and n.mac.len == 17);
+    try testing.expect(mem.startsWith(u8, n.host, "172.16."));
+    try testing.expect(mem.endsWith(u8, n.subnet, "/30"));
     const again = try net(arena.allocator(), "edge");
     try testing.expectEqualStrings(n.guest, again.guest);
-    try testing.expect(!std.mem.eql(u8, n.tap, (try net(arena.allocator(), "router")).tap));
+    try testing.expect(!mem.eql(u8, n.tap, (try net(arena.allocator(), "router")).tap));
 }
 
 test iptables {
@@ -453,49 +629,79 @@ test config {
     defer arena.deinit();
     const gpa = arena.allocator();
     const n = try net(gpa, "edge");
-    const args = try bootArgs(gpa, "loglevel=5", n, "9.9.9.9");
-    try testing.expect(std.mem.startsWith(
-        u8,
-        args,
-        "console=ttyS0 reboot=k panic=10 pci=off loglevel=5 werewolf.ip=172.16.",
-    ));
-    try testing.expect(std.mem.endsWith(
-        u8,
-        args,
-        "werewolf.dns=9.9.9.9 werewolf.data=vda werewolf.root=vdc",
-    ));
+    const args = try mem.join(gpa, " ", try bootArgs(gpa, n, "9.9.9.9"));
+    try testing.expect(mem.startsWith(u8, args, "reboot=k werewolf.ip=172.16."));
+    try testing.expect(mem.find(u8, args, "/30 werewolf.gw=172.16.") != null);
+    try testing.expect(mem.endsWith(u8, args, " werewolf.dns=9.9.9.9"));
     const c = try config(
         gpa,
-        "/b/vmlinuz",
-        "/b/slot/stage0.zst",
+        "/m/kernel",
+        "/m/stage0.zst",
         args,
-        "/m/data.img",
+        "/m/disk.img",
         "/m/config.tar",
-        "/b/slot/root.erofs",
         "/m/firecracker.log",
         n,
     );
-    try testing.expect(std.mem.find(u8, c, "\"kernel_image_path\": \"/b/vmlinuz\"") != null);
-    try testing.expect(std.mem.find(u8, c, "\"log_path\": \"/m/firecracker.log\"") != null);
-    try testing.expect(std.mem.find(u8, c, "\"is_read_only\": true") != null);
-    const data = std.mem.find(u8, c, "\"/m/data.img\"").?;
-    const tar = std.mem.find(u8, c, "\"/m/config.tar\"").?;
-    const root = std.mem.find(u8, c, "\"/b/slot/root.erofs\"").?;
-    try testing.expect(data < tar and tar < root);
-    try testing.expect(std.mem.find(u8, c, n.tap) != null);
+    try testing.expect(mem.find(u8, c, "\"kernel_image_path\": \"/m/kernel\"") != null);
+    try testing.expect(mem.find(u8, c, "\"log_path\": \"/m/firecracker.log\"") != null);
+    const disk = mem.find(u8, c, "\"/m/disk.img\"").?;
+    const tar = mem.find(u8, c, "\"/m/config.tar\"").?;
+    try testing.expect(disk < tar);
+    try testing.expect(mem.find(u8, c, "\"is_read_only\": false") != null);
+    try testing.expect(mem.find(u8, c, n.tap) != null);
     const mib = std.fmt.comptimePrint("\"mem_size_mib\": {d}", .{howl.local_mib});
-    try testing.expect(std.mem.find(u8, c, mib) != null);
+    try testing.expect(mem.find(u8, c, mib) != null);
 }
 
-test kernelPath {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    try testing.expectEqualStrings(
-        "build/x86_64/vmlinux",
-        try kernelPath(arena.allocator(), .x86_64),
+test added {
+    try testing.expect(added("pci=off"));
+    try testing.expect(added("earlycon=uart,mmio,0x40002000"));
+    try testing.expect(added("virtio_mmio.device=4K@0xd0000000:5"));
+    try testing.expect(!added("reboot=k"));
+    try testing.expect(!added("werewolf.slot=a"));
+}
+
+test "Entry.parse" {
+    const e: Entry = .parse("werewolf-b+1.conf",
+        \\title werewolf b
+        \\sort-key werewolf
+        \\version 20261010T120000Z
+        \\linux /werewolf/b/vmlinuz
+        \\initrd  /werewolf/b/stage0.zst
+        \\options console=ttyS0,115200 werewolf.slot=b
+        \\
     );
-    try testing.expectEqualStrings(
-        "build/aarch64/vmlinuz",
-        try kernelPath(arena.allocator(), .aarch64),
-    );
+    try testing.expectEqualStrings("20261010T120000Z", e.version);
+    try testing.expectEqualStrings("/werewolf/b/vmlinuz", e.linux);
+    try testing.expectEqualStrings("/werewolf/b/stage0.zst", e.initrd);
+    try testing.expectEqualStrings("console=ttyS0,115200 werewolf.slot=b", e.options);
+}
+
+test "Entry.tries" {
+    const gpa = testing.allocator;
+    try testing.expectEqual(null, (Entry{ .name = "werewolf-a.conf" }).tries());
+    try testing.expectEqual(null, try (Entry{ .name = "werewolf-a.conf" }).spent(gpa));
+    const fresh: Entry = .{ .name = "werewolf-b+1.conf" };
+    try testing.expectEqual(Entry.Tries{ .left = 1, .done = 0 }, fresh.tries().?);
+    const name = (try fresh.spent(gpa)).?;
+    defer gpa.free(name);
+    try testing.expectEqualStrings("werewolf-b+0-1.conf", name);
+    const out: Entry = .{ .name = name };
+    try testing.expectEqual(Entry.Tries{ .left = 0, .done = 1 }, out.tries().?);
+    try testing.expectEqual(null, try out.spent(gpa));
+    try testing.expectEqual(null, (Entry{ .name = "werewolf-b+x.conf" }).tries());
+    try testing.expectEqual(null, (Entry{ .name = "werewolf-b+1-.conf" }).tries());
+}
+
+test "Entry.before" {
+    const a: Entry = .{ .name = "werewolf-a.conf", .version = "19800101T000000Z" };
+    const b: Entry = .{ .name = "werewolf-b+1.conf", .version = "20261010T120000Z" };
+    const b_out: Entry = .{ .name = "werewolf-b+0-1.conf", .version = "20261010T120000Z" };
+    const b_good: Entry = .{ .name = "werewolf-b.conf", .version = "20261010T120000Z" };
+    // The update boots first, once; out of tries, the old slot does.
+    try testing.expect(b.before(a) and !a.before(b));
+    try testing.expect(a.before(b_out) and !b_out.before(a));
+    try testing.expect(b_good.before(a));
+    try testing.expect(!a.before(a));
 }

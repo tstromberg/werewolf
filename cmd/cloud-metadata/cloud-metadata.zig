@@ -8,6 +8,7 @@ const Io = std.Io;
 const sandbox = @import("sandbox");
 const settings = @import("settings");
 const people = @import("people");
+const policy = @import("update-policy");
 const sys = sandbox.sys;
 
 const out_dir = "/run/werewolf/cloud";
@@ -20,6 +21,7 @@ const max_response = 128 << 10;
 const max_config = 48 << 10;
 const max_file = 32 << 10;
 const max_entries = 32;
+var metadata_users = false;
 
 /// Provider is a cloud werewolf knows: how its firmware names it, and where
 /// it keeps an instance's user data.
@@ -76,6 +78,12 @@ pub fn main(init: std.process.Init) !void {
         0,
     );
     var log: Log = .{};
+    metadata_users = linux.faccessat(
+        linux.AT.FDCWD,
+        "/etc/werewolf/metadata-users",
+        linux.F_OK,
+        0,
+    ) == 0;
     // `once`, as init runs it at boot: fetch, check, write, exit. With no
     // argument it is the cloud-metadata service, which polls (poll).
     const args = init.minimal.args.toSlice(std.heap.page_allocator) catch &.{};
@@ -175,7 +183,7 @@ fn poll(log: *Log) noreturn {
         }
         if (last.len > 0) gpa.free(last);
         last = now;
-        apply(gpa, log, now, run_dir, keys_dir, home_dir, config_dir);
+        apply(gpa, log, now, run_dir, keys_dir, home_dir);
     }
 }
 
@@ -188,7 +196,6 @@ fn apply(
     run_dir: i32,
     keys_dir: i32,
     home_dir: i32,
-    config_dir: i32,
 ) void {
     var files: [max_entries]Entry = undefined;
     const n = checkTar(
@@ -241,7 +248,9 @@ fn apply(
         _ = linux.fchownat(home_dir, name, id, id, 0);
         _ = linux.fchmodat(home_dir, name, 0o700);
     }
-    const base = readFrom(gpa, config_dir, "authorized_keys") catch "";
+    const base = for (files[0..n]) |*f| {
+        if (std.mem.eql(u8, f.name(), "authorized_keys")) break f.data;
+    } else "";
     const root_keys = std.mem.concat(gpa, u8, &.{ base, c.root_keys }) catch return;
     putFile(
         keys_dir,
@@ -281,7 +290,7 @@ fn readFrom(gpa: std.mem.Allocator, dir: i32, name: [*:0]const u8) ![]u8 {
         "open",
     ));
     defer _ = linux.close(fd);
-    const buf = try gpa.alloc(u8, max_file);
+    const buf = try gpa.alloc(u8, max_response);
     errdefer gpa.free(buf);
     var n: usize = 0;
     while (n < buf.len) {
@@ -412,11 +421,11 @@ fn run(log: *Log) !void {
     step = "sandbox";
     try sandboxParent(dir, pipe[0]);
     step = "fetch";
-    var buf: [max_response + 8]u8 = undefined;
+    var buf: [max_response * 3 + 16]u8 = undefined;
     const msg = try readAll(pipe[0], &buf);
     if (msg.len < 1) return error.FetcherFailed;
     switch (msg[0]) {
-        result_body => {},
+        result_body, result_bundle => {},
         result_none => return log.event("none", .{ .provider = p.name, .reason = "no user data" }),
         else => {
             sandbox.failed = failureText(&why_buf, msg);
@@ -425,8 +434,16 @@ fn run(log: *Log) !void {
     }
 
     step = "check";
+    const bundle = if (msg[0] == result_bundle)
+        try readBundle(msg[1..])
+    else
+        Bundle{ .config = msg[1..] };
     var raw: [max_config]u8 = undefined;
-    const tar = decodeBase64(msg[1..], &raw) orelse
+    if (bundle.config.len == 0) @memset(raw[0..1024], 0);
+    const tar = (if (bundle.config.len == 0)
+        raw[0..1024]
+    else
+        decodeBase64(bundle.config, &raw)) orelse
         return log.event(
             "none",
             .{
@@ -435,11 +452,42 @@ fn run(log: *Log) !void {
             },
         );
     var files: [max_entries]Entry = undefined;
-    const n = checkTar(tar, &files) catch |err|
+    var n = checkTar(tar, &files) catch |err|
         return log.event("refused", .{ .provider = p.name, .reason = @errorName(err) });
+    var users_buf: [max_file]u8 = undefined;
+    if (msg[0] == result_bundle) {
+        const at = for (files[0..n], 0..) |*file, i| {
+            if (std.mem.eql(u8, file.name(), "users")) break i;
+        } else n;
+        if (at == n and n == max_entries) return error.TooManyEntries;
+        const declared = if (at < n) files[at].data else "";
+        if (declared.len > users_buf.len) return error.TooLong;
+        @memcpy(users_buf[0..declared.len], declared);
+        var used = declared.len;
+        if (used > 0 and users_buf[used - 1] != '\n') {
+            if (used == users_buf.len) return error.TooLong;
+            users_buf[used] = '\n';
+            used += 1;
+        }
+        var now: linux.timespec = undefined;
+        _ = linux.clock_gettime(linux.CLOCK.REALTIME, &now);
+        for ([_][]const u8{ bundle.instance, bundle.project }) |source|
+            used += (try gcpUsers(users_buf[used..], source, declared, now.sec)).len;
+        files[at] = .{
+            .name_buf = @splat(0),
+            .name_len = 5,
+            .dir = false,
+            .data = users_buf[0..used],
+        };
+        @memcpy(files[at].name_buf[0..5], "users");
+        if (at == n) n += 1;
+        var total: usize = 0;
+        for (files[0..n]) |file| total += file.data.len;
+        if (total > max_config) return error.TooLong;
+    }
 
     step = "write";
-    var out: [max_config + (max_entries + 2) * 512]u8 = undefined;
+    var out: [max_config + max_file + (max_entries + 2) * 512]u8 = undefined;
     try writeFile(dir, "config.tar", writeTar(&out, files[0..n]));
     var names: [max_entries][]const u8 = undefined;
     for (files[0..n], 0..) |*f, i| names[i] = f.name();
@@ -480,6 +528,7 @@ fn printable(s: []const u8) []const u8 {
 const result_body: u8 = 0;
 const result_none: u8 = 1;
 const result_failed: u8 = 2;
+const result_bundle: u8 = 3;
 
 /// Failure says why a try failed. The fetcher sends result_failed, a Failure
 /// byte and a u16: an errno (connect, io), an HTTP status (token, status),
@@ -528,6 +577,32 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
 
     var buf: [max_response]u8 = undefined;
     const r = fetch(p, &buf);
+    if (p.flavor and metadata_users and r != .failed) {
+        var ibuf: [max_response]u8 = undefined;
+        var pbuf: [max_response]u8 = undefined;
+        var block_buf: [max_response]u8 = undefined;
+        var query = p;
+        query.path = "/computeMetadata/v1/instance/attributes/block-project-ssh-keys";
+        const block = fetch(query, &block_buf);
+        if (block == .failed) sendFailure(out);
+        query.path = "/computeMetadata/v1/instance/attributes/ssh-keys";
+        const instance = fetch(query, &ibuf);
+        if (instance == .failed) sendFailure(out);
+        const blocked = block == .body and
+            std.ascii.eqlIgnoreCase(std.mem.trim(u8, block.body, " \r\n"), "true");
+        query.path = "/computeMetadata/v1/project/attributes/ssh-keys";
+        const project = if (blocked) Fetched.none else fetch(query, &pbuf);
+        if (project == .failed) sendFailure(out);
+        writeAll(out, &.{result_bundle});
+        for ([_]Fetched{ r, instance, project }) |part| {
+            const body = if (part == .body) part.body else "";
+            var len: [4]u8 = undefined;
+            std.mem.writeInt(u32, &len, @intCast(body.len), .big);
+            writeAll(out, &len);
+            writeAll(out, body);
+        }
+        linux.exit_group(0);
+    }
     switch (r) {
         .body => |body| {
             writeAll(out, &.{result_body});
@@ -541,6 +616,84 @@ fn fetcher(p: Provider, out: i32, parent_pid: linux.pid_t) noreturn {
         },
     }
     linux.exit_group(0);
+}
+
+fn sendFailure(out: i32) noreturn {
+    var said: [4]u8 = .{ result_failed, @backingInt(failure), 0, 0 };
+    std.mem.writeInt(u16, said[2..4], failure_n, .big);
+    writeAll(out, &said);
+    linux.exit_group(1);
+}
+
+const Bundle = struct { config: []const u8, instance: []const u8 = "", project: []const u8 = "" };
+
+fn readBundle(text: []const u8) !Bundle {
+    var fields: [3][]const u8 = undefined;
+    var rest = text;
+    for (&fields) |*field| {
+        if (rest.len < 4) return error.BadBundle;
+        const len = std.mem.readInt(u32, rest[0..4], .big);
+        rest = rest[4..];
+        if (len > rest.len or len > max_response) return error.BadBundle;
+        field.* = rest[0..len];
+        rest = rest[len..];
+    }
+    if (rest.len != 0) return error.BadBundle;
+    return .{ .config = fields[0], .instance = fields[1], .project = fields[2] };
+}
+
+/// GCP metadata keys never grant admin and cannot add a key to a person
+/// declared in the boot config. Expired or malformed google-ssh records
+/// are omitted. sshd still enforces the manifest's accepted key types.
+fn gcpUsers(out: []u8, text: []const u8, declared: []const u8, now: i64) ![]const u8 {
+    var n: usize = 0;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    next: while (lines.next()) |line| {
+        const colon = std.mem.findScalar(u8, line, ':') orelse continue;
+        const name = line[0..colon];
+        if (!people.isName(name) or std.mem.eql(u8, name, "root") or
+            std.mem.findAny(u8, line, "\r\x00") != null) continue;
+        var own = std.mem.splitScalar(u8, declared, '\n');
+        while (own.next()) |entry| {
+            var words = std.mem.tokenizeAny(u8, entry, " \t");
+            if (std.mem.eql(u8, words.next() orelse "", name)) continue :next;
+        }
+        var ssh_key = line[colon + 1 ..];
+        if (std.mem.find(u8, ssh_key, " google-ssh ")) |at| {
+            var memory: [4096]u8 = undefined;
+            var allocator = std.heap.FixedBufferAllocator.init(&memory);
+            const expiry = std.json.parseFromSliceLeaky(struct {
+                userName: []const u8,
+                expireOn: []const u8,
+            }, allocator.allocator(), ssh_key[at + " google-ssh ".len ..], .{}) catch continue;
+            if (!std.mem.eql(u8, expiry.userName, name)) continue;
+            var normalized: [20]u8 = undefined;
+            const time = if (expiry.expireOn.len == 24 and
+                std.mem.endsWith(u8, expiry.expireOn, "+0000"))
+            blk: {
+                @memcpy(
+                    normalized[0..19],
+                    expiry.expireOn[0..19],
+                );
+                normalized[19] = 'Z';
+                break :blk normalized[0..];
+            } else expiry.expireOn;
+            if ((policy.parseTime(time) catch continue) <= now) continue;
+            ssh_key = ssh_key[0..at];
+        } else if (std.mem.find(u8, ssh_key, "google-ssh") != null) continue;
+        var words = std.mem.tokenizeScalar(u8, ssh_key, ' ');
+        const kind = words.next() orelse continue;
+        if (!std.mem.startsWith(u8, kind, "ssh-") and !std.mem.startsWith(u8, kind, "sk-") and
+            !std.mem.startsWith(u8, kind, "ecdsa-")) continue;
+        if (words.next() == null) continue;
+        const written = std.mem.print(
+            out[n..],
+            "{s} {s}\n",
+            .{ name, ssh_key },
+        ) catch return error.TooLong;
+        n += written.len;
+    }
+    return out[0..n];
 }
 
 const Fetched = union(enum) { body: []const u8, none, failed };
@@ -1057,6 +1210,26 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 }
 
 // --- tests -------------------------------------------------------------------
+
+test "GCP people: expiry, explicit people and admin remain authoritative" {
+    const t = std.testing;
+    var out: [4096]u8 = undefined;
+    const now = try policy.parseTime("2026-10-10T12:00:00Z");
+    const text = "alice:ssh-ed25519 AAAA laptop\n" ++
+        "root:ssh-ed25519 AAAA\n" ++
+        "boss:ssh-ed25519 injected\n" ++
+        "old:ssh-ed25519 AAAA google-ssh {\"userName\":\"old\",\"expireOn\":\"2026-10-10T11:59:5" ++
+        "9+0000\"}\n" ++
+        "new:ssh-ed25519 AAAA google-ssh {\"userName\":\"new\",\"expireOn\":\"2026-10-10T12:00:0" ++
+        "1+0000\"}\n" ++
+        "bad:ssh-ed25519 AAAA google-ssh {}\n";
+    try t.expectEqualStrings(
+        "alice ssh-ed25519 AAAA laptop\nnew ssh-ed25519 AAAA\n",
+        try gcpUsers(&out, text, "boss admin sk-ssh-ed25519@openssh.com AAAA\n", now),
+    );
+    try t.expectError(error.BadBundle, readBundle(&.{ 0, 0, 0, 8 }));
+    try t.expectError(error.TooLong, gcpUsers(out[0..1], text, "", now));
+}
 
 /// testTar builds a tar as tar(1) writes one from entries of name, typeflag
 /// and contents.

@@ -1,0 +1,120 @@
+# mattermost: Mattermost, team chat, with PostgreSQL and Caddy beside it
+# (with): Caddy serves it over HTTPS at the machine's base URL, with a
+# certificate from Let's Encrypt, and opens only once mattermost-setup has
+# made the system admin from the config, so no visitor claims it. Nobody
+# signs up without an invitation, and plugins, which are code, are off.
+# Mattermost keeps its tables and its configuration in a schema of its
+# own, and its files in /data/svc/mattermost. melange packages upstream's
+# release (forms/mattermost/melange/mattermost-team.yaml). See
+# forms/mattermost/README.md.
+base: prod
+
+with: [postgresql, caddy]
+
+# The check reads Mattermost's schema with psql.
+dev:
+  - postgresql-17-client
+
+# make check's, for this form alone (forms/README.md)
+check:
+  memory: 2048
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+
+services:
+  # Mattermost, as its own user: it serves on loopback, behind Caddy,
+  # keeps its tables and configuration in the schema mattermost in
+  # PostgreSQL (by its socket, as the role of its name), and its uploads
+  # in /data/svc/mattermost. It reaches public addresses alone: link
+  # previews, webhooks and mail, whose targets its users name. The
+  # environment wins over the stored configuration, so an admin cannot
+  # turn on open sign-up, plugins or telemetry from the console.
+  mattermost:
+    exec: /usr/lib/mattermost/bin/mattermost
+    user: mattermost
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/8065 loopback]
+    connect:
+      - tcp/443 tcp/80 tcp/587 tcp/465 public
+      - udp/53 tcp/53
+      - /run/svc/postgres/.s.PGSQL.5432
+    read: /etc/mattermost
+    config: settings /run/config/mattermost/settings.json
+    setting: base-url url required as MM_SERVICESETTINGS_SITEURL
+    render: env site
+    memory: 1536
+    nofile: 65536
+    env:
+      - MM_CONFIG=postgres:///postgres?host=/run/svc/postgres&user=mattermost&sslmode=disable
+      # The stored configuration's first values, which the admin may
+      # change: no mail until SMTP is set.
+      - MM_CUSTOM_DEFAULTS_PATH=/etc/mattermost/defaults.json
+      - MM_SQLSETTINGS_DRIVERNAME=postgres
+      - MM_SQLSETTINGS_DATASOURCE=postgres:///postgres?host=/run/svc/postgres&user=mattermost&sslmode=disable
+      - MM_FILESETTINGS_DIRECTORY=/data/svc/mattermost/files/
+      - MM_PLUGINSETTINGS_DIRECTORY=/data/svc/mattermost/plugins
+      - MM_PLUGINSETTINGS_CLIENTDIRECTORY=/data/svc/mattermost/client-plugins
+      - MM_SERVICESETTINGS_LISTENADDRESS=127.0.0.1:8065
+      # Behind Caddy, which sets the client's address in this header and
+      # overwrites any a client sends.
+      - MM_SERVICESETTINGS_TRUSTEDPROXYIPHEADER=X-Forwarded-For
+      - MM_SERVICESETTINGS_ENABLELOCALMODE=false
+      - MM_RATELIMITSETTINGS_ENABLE=true
+      # Accounts by invitation alone; the first, the system admin, is
+      # mattermost-setup's.
+      - MM_TEAMSETTINGS_ENABLEOPENSERVER=false
+      - MM_TEAMSETTINGS_ENABLEUSERCREATION=true
+      # A plugin is code the server runs: none, from a file or a market.
+      - MM_PLUGINSETTINGS_ENABLE=false
+      - MM_PLUGINSETTINGS_ENABLEUPLOADS=false
+      - MM_PLUGINSETTINGS_ENABLEMARKETPLACE=false
+      - MM_PLUGINSETTINGS_ENABLEREMOTEMARKETPLACE=false
+      - MM_PLUGINSETTINGS_AUTOMATICPREPACKAGEDPLUGINS=false
+      # Nothing sent home or fetched unasked: no telemetry, security or
+      # product notices, and no messages through Mattermost's push proxy.
+      - MM_LOGSETTINGS_ENABLEDIAGNOSTICS=false
+      - MM_SERVICESETTINGS_ENABLESECURITYFIXALERT=false
+      - MM_ANNOUNCEMENTSETTINGS_ADMINNOTICESENABLED=false
+      - MM_ANNOUNCEMENTSETTINGS_USERNOTICESENABLED=false
+      - MM_EMAILSETTINGS_SENDPUSHNOTIFICATIONS=false
+      # Logs on the console alone, as JSON.
+      - MM_LOGSETTINGS_ENABLEFILE=false
+      - MM_LOGSETTINGS_CONSOLEJSON=true
+      - MM_NOTIFICATIONLOGSETTINGS_ENABLEFILE=false
+      - MM_EXPERIMENTALAUDITSETTINGS_FILEENABLED=false
+      - GOMEMLIMIT=1200MiB
+
+  # Caddy, as its own user, for Mattermost: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Mattermost on
+  # loopback, read its configuration, and write only its own directories.
+  # Before it opens, mattermost-setup makes the system admin from the
+  # config, once.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before:
+      - /usr/lib/werewolf/mattermost-setup
+      - /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8065]
+    read: /etc/caddy
+    config:
+      - admin-password /run/config/caddy/admin-password
+      - settings /run/config/caddy/settings.json
+    setting:
+      - base-url url as BASE_URL
+      - admin string required as MM_ADMIN_USERNAME
+      - admin-email string required as MM_ADMIN_EMAIL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

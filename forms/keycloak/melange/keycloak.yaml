@@ -1,0 +1,282 @@
+# Keycloak for werewolf's keycloak form: upstream's release, its server
+# built once here (kc.sh build) for PostgreSQL, a single node's local
+# caches and health checks, so the image holds a server that starts
+# --optimized and never rewrites itself. Wolfi's keycloak is 26.3.3, from
+# 2025-08, and brings bash; the form starts java directly, by the argument
+# file this writes, with what kc.sh would pass. kc.sh and the admin CLIs
+# stay out: they are shell scripts. Beside it, a socket factory of a few
+# lines (below, inline, as the build's cache keys hash this file alone)
+# that lets pgjdbc reach PostgreSQL by its UNIX socket with the JDK's own
+# AF_UNIX channels: no native library, no TCP port, peer authentication.
+package:
+  name: keycloak-werewolf
+  version: 26.8.0
+  epoch: 0
+  description: Open Source Identity and Access Management, built for PostgreSQL by its socket
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - openjdk-21
+      - openjdk-21-default-jvm
+  environment:
+    JAVA_HOME: /usr/lib/jvm/default-jvm
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://github.com/keycloak/keycloak/releases/download/${{package.version}}/keycloak-${{package.version}}.tar.gz
+      expected-sha256: 9e41da899f838a58cd510fc98ed4f7cadc715aed5683e42aca20a0c9a2a3980a
+
+  # The socket factory, in providers/ so the build puts it on the
+  # server's class path, where pgjdbc finds it by name.
+  - runs: |
+      export PATH=$JAVA_HOME/bin:$PATH
+      mkdir -p unix/src/werewolf/pg unix/classes
+      cat >unix/src/werewolf/pg/UnixSocketFactory.java <<'EOF'
+      package werewolf.pg;
+
+      import java.io.IOException;
+      import java.io.InputStream;
+      import java.io.OutputStream;
+      import java.net.InetAddress;
+      import java.net.Socket;
+      import java.net.SocketAddress;
+      import java.net.SocketTimeoutException;
+      import java.net.UnixDomainSocketAddress;
+      import java.nio.ByteBuffer;
+      import java.nio.channels.SelectionKey;
+      import java.nio.channels.Selector;
+      import java.nio.channels.SocketChannel;
+      import javax.net.SocketFactory;
+
+      /**
+       * UnixSocketFactory connects pgjdbc to the UNIX socket its
+       * socketFactoryArg names, whatever host the URL gives.
+       */
+      public final class UnixSocketFactory extends SocketFactory {
+          private final UnixDomainSocketAddress path;
+
+          public UnixSocketFactory(String path) {
+              this.path = UnixDomainSocketAddress.of(path);
+          }
+
+          @Override
+          public Socket createSocket() throws IOException {
+              return new UnixSocket(SocketChannel.open(path));
+          }
+
+          @Override
+          public Socket createSocket(String host, int port) throws IOException {
+              return createSocket();
+          }
+
+          @Override
+          public Socket createSocket(String host, int port, InetAddress local, int localPort) throws IOException {
+              return createSocket();
+          }
+
+          @Override
+          public Socket createSocket(InetAddress host, int port) throws IOException {
+              return createSocket();
+          }
+
+          @Override
+          public Socket createSocket(InetAddress host, int port, InetAddress local, int localPort) throws IOException {
+              return createSocket();
+          }
+
+          /**
+           * UnixSocket is a connected channel as the Socket pgjdbc wants:
+           * non-blocking, so a read honours the timeout pgjdbc sets.
+           */
+          private static final class UnixSocket extends Socket {
+              private final SocketChannel ch;
+              private final Selector readable;
+              private final Selector writable;
+              private volatile int timeout;
+
+              UnixSocket(SocketChannel ch) throws IOException {
+                  this.ch = ch;
+                  ch.configureBlocking(false);
+                  readable = Selector.open();
+                  writable = Selector.open();
+                  ch.register(readable, SelectionKey.OP_READ);
+                  ch.register(writable, SelectionKey.OP_WRITE);
+              }
+
+              @Override
+              public void connect(SocketAddress a, int t) {
+              }
+
+              @Override
+              public boolean isConnected() {
+                  return ch.isConnected();
+              }
+
+              @Override
+              public boolean isClosed() {
+                  return !ch.isOpen();
+              }
+
+              @Override
+              public synchronized void close() throws IOException {
+                  readable.close();
+                  writable.close();
+                  ch.close();
+              }
+
+              @Override
+              public void setSoTimeout(int t) {
+                  timeout = t;
+              }
+
+              @Override
+              public int getSoTimeout() {
+                  return timeout;
+              }
+
+              @Override
+              public void setTcpNoDelay(boolean on) {
+              }
+
+              @Override
+              public void setKeepAlive(boolean on) {
+              }
+
+              @Override
+              public void setReceiveBufferSize(int size) {
+              }
+
+              @Override
+              public void setSendBufferSize(int size) {
+              }
+
+              @Override
+              public void shutdownInput() throws IOException {
+                  ch.shutdownInput();
+              }
+
+              @Override
+              public void shutdownOutput() throws IOException {
+                  ch.shutdownOutput();
+              }
+
+              @Override
+              public InputStream getInputStream() {
+                  return new InputStream() {
+                      @Override
+                      public int read() throws IOException {
+                          byte[] b = new byte[1];
+                          return read(b, 0, 1) < 0 ? -1 : b[0] & 0xff;
+                      }
+
+                      @Override
+                      public int read(byte[] b, int off, int len) throws IOException {
+                          if (len == 0) return 0;
+                          ByteBuffer buf = ByteBuffer.wrap(b, off, len);
+                          for (;;) {
+                              int n = ch.read(buf);
+                              if (n != 0) return n;
+                              if (readable.select(timeout) == 0 && timeout > 0)
+                                  throw new SocketTimeoutException("read timed out");
+                              readable.selectedKeys().clear();
+                          }
+                      }
+                  };
+              }
+
+              @Override
+              public OutputStream getOutputStream() {
+                  return new OutputStream() {
+                      @Override
+                      public void write(int b) throws IOException {
+                          write(new byte[] {(byte) b}, 0, 1);
+                      }
+
+                      @Override
+                      public void write(byte[] b, int off, int len) throws IOException {
+                          ByteBuffer buf = ByteBuffer.wrap(b, off, len);
+                          while (buf.hasRemaining()) {
+                              if (ch.write(buf) != 0) continue;
+                              writable.select();
+                              writable.selectedKeys().clear();
+                          }
+                      }
+                  };
+              }
+          }
+      }
+      EOF
+      javac --release 21 -d unix/classes unix/src/werewolf/pg/UnixSocketFactory.java
+      jar --create --file providers/werewolf-pg-unix.jar -C unix/classes .
+      # The build records each provider's mtime, and a start whose jar's
+      # differs refuses: give it the one the package's files get.
+      touch -d "@${SOURCE_DATE_EPOCH:?}" providers/werewolf-pg-unix.jar
+
+  # The server, built for what the form runs: build-time options cannot
+  # change at a start --optimized, so these are the form's.
+  - runs: |
+      bin/kc.sh build --db=postgres --cache=local --health-enabled=true --metrics-enabled=true
+      rm -rf data
+
+  # What kc.sh passes java, but the heap, which the service sizes to its
+  # memory, one argument a line; and two changes. Vert.x serves nothing
+  # from the class path here, so it keeps no cache directory, which it
+  # would make writable by all; the transaction manager names its process
+  # by a UUID, not by binding a port, which fence would refuse.
+  - runs: |
+      home=/usr/lib/keycloak
+      cat >java.args <<EOF
+      -XX:-UsePerfData
+      -XX:MetaspaceSize=96M
+      -XX:MaxMetaspaceSize=256m
+      -XX:+ExitOnOutOfMemoryError
+      -XX:+UseG1GC
+      -XX:FlightRecorderOptions=stackdepth=512
+      -Dfile.encoding=UTF-8
+      -Dsun.stdout.encoding=UTF-8
+      -Dsun.err.encoding=UTF-8
+      -Dstdout.encoding=UTF-8
+      -Dstderr.encoding=UTF-8
+      -Djava.security.egd=file:/dev/urandom
+      -Djdk.tls.rejectClientInitiatedRenegotiation=true
+      --add-opens=java.base/java.util=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.security=ALL-UNNAMED
+      --add-opens=java.base/java.lang=ALL-UNNAMED
+      --enable-native-access=ALL-UNNAMED
+      -Duser.language=en
+      -Duser.country=US
+      -Djava.util.concurrent.ForkJoinPool.common.threadFactory=io.quarkus.bootstrap.forkjoin.QuarkusForkJoinWorkerThreadFactory
+      -Dkc.home.dir=$home
+      -Djboss.server.config.dir=$home/conf
+      -Djava.util.logging.manager=org.jboss.logmanager.LogManager
+      -Dpicocli.disable.closures=true
+      -Dquarkus-log-max-startup-records=10000
+      -Dquarkus.vertx.classpath-resolving=false
+      -Dquarkus.vertx.caching=false
+      -Dcom.arjuna.ats.internal.arjuna.utils.processImplementation=com.arjuna.ats.internal.arjuna.utils.UuidProcessId
+      -DCoreEnvironmentBean.processImplementationClassName=com.arjuna.ats.internal.arjuna.utils.UuidProcessId
+      -cp
+      $home/lib/quarkus-run.jar
+      io.quarkus.bootstrap.runner.QuarkusEntryPoint
+      EOF
+      mkdir -p ${{targets.destdir}}$home
+      cp -a conf lib providers themes version.txt LICENSE.txt java.args ${{targets.destdir}}$home/
+      # What the server writes beneath its home (temporary files, the
+      # transaction log) goes to the service's directory on /data.
+      ln -s /data/svc/keycloak ${{targets.destdir}}$home/data
+
+update:
+  enabled: true
+  github:
+    identifier: keycloak/keycloak

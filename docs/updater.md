@@ -95,10 +95,17 @@ updates off.
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the new slot lists (`werewolf-advisories`) and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
 
-When the staged slot is due, the service logs `reboot` and reboots cleanly.
-On the machine's first check, ever, that is within two minutes; otherwise
-at the soonest of each tier's time, and never within an hour of boot.
-Any reboot before then boots the staged slot too: its one try is set.
+When the staged slot is due, the service writes a wall notice to
+`/dev/console` and to every login, then logs `reboot` and reboots. The
+notices are one minute, fifteen seconds and one second ahead, and name
+each package, CVE and risk ([current.md](design/current.md)). On the
+machine's first check, ever, the reboot is within two minutes and not
+before 61 seconds; otherwise at the soonest of each tier's time. A second
+update reboot waits an hour after the last one. A cold boot does not:
+a posture fix that is already due reboots on that boot, after the notices.
+A check that fails before one has finished this boot, and before the
+machine has been up ten minutes, is tried again in 30 seconds.
+Any reboot before the slot is due boots it too: its one try is set.
 
 The slot keeps itself or not: `slot-keep` makes it GRUB's default once it is
 healthy, and anything else ends on the previous slot ([bite.md](bite.md#slots)).
@@ -246,8 +253,9 @@ it was written. Alpine's own patches on top of upstream are not counted.
     lock                held while a check, outcome or reboot runs
     pending             the staged slot: its build, and for each tier of
                         its fixes when this machine first saw one
-    rebooted            when the updater last rebooted, RFC 3339, for
-                        `down`
+    rebooted            when the updater last rebooted for an update, RFC
+                        3339. Kept, so the next update reboot waits an
+                        hour. Also the start of `down`
     cve-tiers.json      the last CVE tiers feed this machine took, and
     cve-tiers.json.sig  its signature, checked again whenever it is read
     cve-tiers.json.serial
@@ -255,7 +263,8 @@ it was written. Alpine's own patches on top of upstream are not counted.
                         once the kept feed has expired
     bad                 builds that rolled back, one per line
     checked             exists once a check has finished; until then
-                        what a check stages boots within two minutes
+                        what a check stages boots within two minutes,
+                        and not before 61 seconds
     cache/              apk's downloads, one directory per root built
                         (root, kernel, stage0), holding what the last
                         good check installed; root's, lent to _update
@@ -283,6 +292,7 @@ there ([design/update-policy.md](design/update-policy.md#the-audit-log)).
 | `policy` | `settings` (each one's `value`, `source` and `limit`), `refused` (each file refused, with `key` and `why`) |
 | `check` | `slot`, `release`, `result`; when `staged`: `build`, `tier`, `due`, `due_in` |
 | `stage` | `slot`, `from`, `build`, `kernel`, `packages` (count), `cves` (count), `tier`, `seen` (per tier), `fixes` (count per tier), `due`, `due_in` (seconds), `why`, `report` |
+| `warn` | `build`, `tier`, `lead` (seconds), `console` (written), `sessions` (logins written) |
 | `reboot` | `build`, `tier`, `cause` (`due` or `first-boot`), `due`, `late` (seconds), `why` |
 | `feed` | `serial`, `expires`, `result` (`ok`, `unchanged`, `kept`: the feed kept from before, as a new one could not be had or did not check; `none`), `reason`, and with `none`, `consequence` |
 | `tier` | `build`, `fix`, `cause` (the evidence), `feed` (its serial), `from`, `to`, `was_due`, `due`, `due_in`, `why`: a staged fix's tier rose |
