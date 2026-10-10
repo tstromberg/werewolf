@@ -11,6 +11,8 @@
 #   make check-one        boot FORM REPEAT times, to chase a flake
 #   make check-updater    run a whole update, over the network
 #   make check-gcp        check prod-ssh on GCP; also check-aws and check-azure
+#   make check-gcp-metadata check GCP people, key expiry, precedence and rotation
+#   make example-FORM     run that form's local README fence; examples-gcp runs GCP
 #   make ci               run CI's check job in an Ubuntu VM under Lima
 #   make image|slot|disk  build FORM's initramfs, bite slot or UEFI disk
 #   make bite-me          take over this Debian, Ubuntu, Fedora or Rocky VM
@@ -83,7 +85,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-static check-unsigned check-verity check-deadman check-metadata check-persist \
-	check-dist check-gcp check-aws check-azure seal-learn $(OUT)/disk.qcow2
+	check-dist check-gcp check-gcp-metadata check-aws check-azure seal-learn $(OUT)/disk.qcow2
 
 all: image
 install-deps:
@@ -507,8 +509,21 @@ _check-persist:
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile= \
 		-drive file=$(CHECK)/persist.img,format=raw,if=virtio
 
+check-gcp-metadata: $(HOWL) $(TEST_SK)
+	@python3 test/gcp-metadata $(HOWL) $(CURDIR)/$(TEST_SK) $(ARCH)
+
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
+
+# A form README's fences (docs/design/examples.md). Not part of make check:
+# the console checks stay, and a README with no Getting Started is skipped.
+example-%: $(HOWL)
+	@test/example local $*
+examples examples-gcp: $(HOWL)
+examples:
+	@status=0; for f in $(call shard,$(FORMS)); do test/example local $$f || status=1; done; exit $$status
+examples-gcp:
+	@status=0; for f in $(call shard,$(FORMS)); do test/example gcp $$f || status=1; done; exit $$status
 _check-cloud: $(HOWL)
 	@test/cloud $(CLOUD) $(FORM) $(ARCH)
 check-compose: slot

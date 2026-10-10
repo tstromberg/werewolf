@@ -12,6 +12,16 @@
 # AGAIN, and for ssh SSH_PORT, SSH_SK_PROVIDER, KEPT_KEYS (keys made already,
 # baked in) and GITEA_PORT, which test/boot reads.
 set -eu
+# macOS openssl is LibreSSL. It has no kdf, and the EC keys it writes are
+# not the named-curve PKCS#8 Java reads. Homebrew's OpenSSL 3 matches the
+# openssl the checks use on Ubuntu.
+case $(openssl version 2>/dev/null) in
+*LibreSSL*)
+	for cand in /opt/homebrew/opt/openssl@3/bin /usr/local/opt/openssl@3/bin; do
+		if [ -x "$cand/openssl" ]; then PATH=$cand:$PATH; export PATH; break; fi
+	done
+	;;
+esac
 c=$CHECK/$FORM
 # /data: 4 GiB, sparse, so it costs only what is written. demo's Grype
 # unpacks a 2.4 GB database there, beside its 188 MB download.

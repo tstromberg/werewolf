@@ -6,6 +6,14 @@ set as the instance's user data. `prod`, and every form on it, asks, at
 boot and then every minute: a changed config's people get their accounts
 on the running machine (cmd/cloud-metadata/README.md).
 
+On GCP, `machine.metadata-users: true` also imports instance and project
+`ssh-keys`. These keys create ordinary people; they cannot grant root or
+admin, or add keys to a person declared in the manifest. The instance's
+`block-project-ssh-keys: TRUE` excludes project keys. Expired or malformed
+`google-ssh` records are ignored, and expiry is checked every minute even
+when the metadata has not changed. Without this opt-in, only the werewolf
+config tar supplies people and keys.
+
 The [Tailscale router](../examples/tailscale/README.md) tutorial uses
 restricted JSON boot settings for its routes, plus a separate credential
 file. The [bastion](../forms/bastion/README.md) takes nothing from the
@@ -76,18 +84,25 @@ cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws"
 
 ## Separation
 
-The program is two processes ([programs.md](programs.md)):
+Each fetch uses two processes ([programs.md](programs.md)):
 
 - **The fetcher** speaks HTTP. It runs as `_cloud` (uid 68), chrooted to
   the empty `/var/empty`, with no capabilities, under Landlock, which lets
   it reach no file and connect over TCP to port 80 alone, and a seccomp
-  filter that allows a TCP socket and little else. It runs before fence
-  sets the network policy, so those are what hold it. It reads at most
-  128 KiB.
+  filter that allows a TCP socket and little else. At boot it runs before
+  fence sets the network policy; later fence permits only `_cloud` to
+  reach the metadata server. Each response is limited to 128 KiB.
 - **The parent** decodes, checks and writes. It never touches the network.
   It has no capabilities at all, Landlock lets it write only beneath
   `/run/werewolf/cloud`, and seccomp allows only reading the fetcher's
   pipe and writing its file.
+
+The polling supervisor runs those confined fetches once a minute. Its
+Landlock rules also let it update the account files, keys and homes. It
+keeps the capabilities needed to own those files and to drop its fetcher
+to `_cloud`. Accepted changes replace the running machine's people and
+root keys; rejected data leaves the last accepted set in place. Other
+config takes effect at the next boot.
 
 A fetcher that misbehaves can hand the parent no more than a well-formed
 config, which whoever sets the user data can do anyway: because the parent
@@ -96,12 +111,11 @@ reaches init.
 
 ## Limits
 
-- **No one reaches the metadata server's port 80 once the machine is up.**
-  fence's routing rules refuse everyone, root included
-  ([docs/design/fence.md](design/fence.md)), so the user data, and any
-  secret in it, stays out of every process's reach. The fetcher asks at
-  boot, before those rules exist. Root could delete the rules until the
-  seal takes `CAP_NET_ADMIN` away.
+- **Only `_cloud` reaches the metadata server's port 80 once the machine is up.**
+  fence's routing rules refuse other users, root included
+  ([docs/design/fence.md](design/fence.md)). The confined fetcher can read
+  user data for the poller; application processes cannot. Root could
+  delete the rules until the seal takes `CAP_NET_ADMIN` away.
 - **Whoever sets the user data is root on the machine**: it carries root's
   ssh keys. That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are
@@ -116,3 +130,5 @@ reaches init.
   strings and the metadata server faked, on every `make check`
   ([testing.md](testing.md)); GCP, AWS and Azure also for real, by `make
   check-gcp`, `make check-aws` and `make check-azure`.
+  `make check-gcp-metadata` additionally tests live people, key expiry,
+  precedence, project-key blocking and root-key rotation on GCP.

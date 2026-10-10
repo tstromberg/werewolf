@@ -12,12 +12,19 @@ const howl = @import("howl.zig");
 /// digits of digest. GCP allows only lower case, digits and - (at most 63),
 /// so x86_64 is written x86-64; the other clouds take the same name.
 pub fn name(gpa: Allocator, form: []const u8, arch: howl.Arch, digest: []const u8) ![]const u8 {
+    const base = std.fs.path.basename(std.mem.trimEnd(u8, form, "/"));
+    const architecture = switch (arch) {
+        .aarch64 => "aarch64",
+        .x86_64 => "x86-64",
+    };
+    // Keep the content digest intact when a form's name fills GCP's limit.
+    const short = try gpa.dupe(u8, base[0..@min(base.len, 63 - 9 - 1 - architecture.len - 1 - 16)]);
+    for (short) |*c| if (c.* == '_') {
+        c.* = '-';
+    };
     return gpa.print("werewolf-{s}-{s}-{s}", .{
-        form,
-        switch (arch) {
-            .aarch64 => "aarch64",
-            .x86_64 => "x86-64",
-        },
+        short,
+        architecture,
         digest[0..16],
     });
 }
@@ -54,6 +61,13 @@ test name {
         "werewolf-prod-x86-64-0123456789abcdef",
         try name(arena.allocator(), "prod", .x86_64, digest),
     );
+    try testing.expectEqualStrings(
+        "werewolf-prod-ssh-aarch64-0123456789abcdef",
+        try name(arena.allocator(), "build/adhoc/prod-ssh/", .aarch64, digest),
+    );
+    const long = try name(arena.allocator(), "werewolf-metadata-20261010140540", .aarch64, digest);
+    try testing.expectEqual(@as(usize, 63), long.len);
+    try testing.expect(std.mem.endsWith(u8, long, "-aarch64-0123456789abcdef"));
 }
 
 test sha256 {

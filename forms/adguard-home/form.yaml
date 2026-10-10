@@ -33,7 +33,7 @@ services:
     connect:
       - tcp/853 tcp/443 public
       - udp/53 tcp/53 public
-    config: settings /run/config/adguard-home/settings.json optional
+    config: settings /run/config/adguard-home/settings.json
     setting:
       - upstreams string...
       - blocklists url...

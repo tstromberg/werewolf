@@ -8,6 +8,7 @@ make ci             # the CI job, in an Ubuntu VM under Lima
 make check-updater  # a whole update, over the network
 make check-updater-published  # the same, on forms from werewolf's repository
 make check-gcp      # prod-ssh's disk on a Google Compute Engine VM
+make check-gcp-metadata # live GCP people, key expiry, precedence and rotation
 make check-aws      # the same on an EC2 instance
 make check-azure    # the same on an Azure VM
 ```
@@ -257,6 +258,30 @@ Each check needs that cloud's CLI logged in, and costs a few cents:
 Each takes a few minutes, most of it the cloud making the image and the
 machine. They are not part of `make check`, nor of CI, which holds no cloud
 credentials.
+
+## What `make check-gcp-metadata` does
+
+[test/gcp-metadata](../test/gcp-metadata) builds this checkout's `prod-ssh`
+with `machine.metadata-users: true` and creates a fresh GCP VM. It uses
+the software security-key provider from [test/keys](../test/keys), so SSH
+keeps its production key policy. It checks user-data at boot, instance
+and project keys, declared-user precedence, refusal of root access,
+expired and malformed Google key records, expiry without a metadata
+edit, project-key blocking and unblocking, account removal, root-key
+rotation, and retention of the last accepted people after invalid user-data.
+Removing user-data must leave only metadata people; restoring it must
+restore the declared people and root keys. The boot ID must stay the same
+through every change.
+
+Use `GCP_PROJECT`, `GCP_ZONE` and `ARCH` as for `check-gcp`. The test
+temporarily appends its public test key to the project's `ssh-keys`, then
+removes that key even if a check fails. Use a test project where temporary
+project SSH keys are appropriate; the account needs project-metadata write
+permission as well as permission to create and delete the test resources.
+The test deletes its VM, disk, firewall rule and newly created image.
+`CLOUD_KEEP=1` keeps those resources and their test private keys. Logs stay
+in `build/check/gcp-metadata-*`. This live test is outside `make check` and
+CI.
 
 ## Writing a check
 

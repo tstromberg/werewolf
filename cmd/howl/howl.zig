@@ -1386,11 +1386,23 @@ pub fn reconfigurable(
         .{ name, name, on },
     );
     if (was.len == 0) return notMade(name, on, why);
-    if (!std.mem.eql(u8, was, o.form)) return why.refuse(
+    if (!std.mem.eql(
+        u8,
+        std.fs.path.basename(std.mem.trimEnd(u8, was, "/")),
+        std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/")),
+    )) return why.refuse(
         "{s} runs {s}, not {s}: another form is another image; howl delete {s} --on {t}, " ++
             "then create",
         .{ name, was, o.form, name, on },
     );
+}
+
+test "reconfigure accepts a cloud form label for a local manifest path" {
+    var why: Why = .{};
+    const o: Options = .{ .form = "build/adhoc/web/" };
+    try reconfigurable(o, "web-vm", "web", .gcp, &why);
+    try testing.expectError(error.Refused, reconfigurable(o, "web-vm", "other", .gcp, &why));
+    try testing.expectError(error.Refused, reconfigurable(o, "web-vm", "", .gcp, &why));
 }
 
 /// releaseDisk returns the form's release disk.qcow2, with --app's

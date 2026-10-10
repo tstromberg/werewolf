@@ -64,6 +64,7 @@ window and the cap on High, Medium and Low; a site's `--update-policy`
 moves them, inside `limits`. Their package is due in that window, as
 Low is, so Tuesday's publish installs Sunday. Today it reboots at the
 check that sees it. Urgent still reboots within 15 minutes.
+The log is `/data/svc/autoupdate/log`.
 
 **Their server.** `updates.from` is the only repository, kernel and
 tiers URL. It holds `local-NAME` (signed with `~/.howl/packages.rsa`)

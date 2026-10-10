@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Live GCP metadata regression: make check-gcp-metadata.
+
+Builds this checkout, creates its own VM/image/firewall, and removes them on
+success or failure. Temporarily appends a test public key to project ssh-keys
+and restores that attribute in finally, preserving unrelated metadata. Logs
+stay in build/check/gcp-metadata-*. CLOUD_KEEP=1 keeps the VM and its test keys.
+Requires gcloud login, cloud create/delete and project metadata permissions.
+"""
+import base64
+import datetime
+import io
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import traceback
+
+def g(*args):
+    r = subprocess.run(['gcloud', '--quiet', '--project', project, *args], capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(r.stderr)
+    return r.stdout.strip()
+
+def ssh(key='root', user='root', command='id -u'):
+    return subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5',
+        '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile='+str(p/'known_hosts'),
+        '-o', 'IdentitiesOnly=yes', '-o', 'SecurityKeyProvider='+provider,
+        '-i', str(p/key), user+'@'+ip, command], capture_output=True, text=True, timeout=15)
+
+def transient(result):
+    # Production sshd penalizes repeated failed logins from one source.
+    # A transport drop cannot prove that a particular key was refused.
+    return any(text in result.stderr for text in (
+        'Connection reset', 'Connection closed', 'kex_exchange_identification'))
+
+def ok(key='root', user='root', command='id -u'):
+    until=time.monotonic()+90
+    while True:
+        r=ssh(key,user,command)
+        if r.returncode==0 or time.monotonic()>=until or not transient(r):
+            break
+        time.sleep(5)
+    assert r.returncode == 0, (key,user,r.stderr)
+    return r.stdout.strip()
+
+def refused(key,user):
+    until=time.monotonic()+90
+    while True:
+        r=ssh(key,user)
+        if 'Permission denied' in r.stderr or time.monotonic()>=until or not transient(r):
+            break
+        time.sleep(5)
+    assert r.returncode == 255 and 'Permission denied' in r.stderr, (key,user,r.returncode,r.stderr)
+
+def wait(command, expected, key='root', user='root'):
+    until=time.monotonic()+160
+    while time.monotonic()<until:
+        r=ssh(key,user,command)
+        if r.returncode==0 and r.stdout.strip()==expected:
+            return
+        time.sleep(3)
+    raise AssertionError(('poll timeout',command,r.stdout,r.stderr))
+
+def metadata(file, **values):
+    args=['compute','instances','add-metadata',name,'--zone',zone]
+    if file:
+        args += ['--metadata-from-file',file]
+    if values:
+        args += ['--metadata',','.join(k+'='+v for k,v in values.items())]
+    g(*args)
+
+def key(which): return (p/(which+'.pub')).read_text().strip()
+def log(text):
+    message = 'PASS ' + text
+    print(message, flush=True)
+    with (p / 'checks.log').open('a') as output:
+        output.write(message + '\n')
+
+def checks():
+    global ip
+    ip = g('compute', 'instances', 'describe', name, '--zone', zone,
+           '--format=value(networkInterfaces[0].accessConfigs[0].natIP)')
+    (p / 'ip').write_text(ip)
+
+
+    wait('hostname','gcp-metadata-check')
+    boot=ok(command='cat /proc/sys/kernel/random/boot_id')
+    assert ok('declared','declared') != '0'
+    assert ok('declared') == '0'
+    log('user-data boot config and declared admin key')
+
+    future=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S+0000')
+    fleeting=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=180)).strftime('%Y-%m-%dT%H:%M:%S+0000')
+    rows=[
+        'alice:'+key('instance'),
+        'declared:'+key('instance'),
+        'root:'+key('instance'),
+        'expired:'+key('instance')+' google-ssh '+json.dumps({'userName':'expired','expireOn':'2020-01-01T00:00:00+0000'}),
+        'malformed:'+key('instance')+' google-ssh {}',
+        'mismatch:'+key('instance')+' google-ssh '+json.dumps({'userName':'other','expireOn':future}),
+        'fresh:'+key('instance')+' google-ssh '+json.dumps({'userName':'fresh','expireOn':future}),
+        'fleeting:'+key('instance')+' google-ssh '+json.dumps({'userName':'fleeting','expireOn':fleeting}),
+    ]
+    (p/'instance.keys').write_text('\n'.join(rows)+'\n')
+    metadata('ssh-keys='+str(p/'instance.keys'))
+    wait("grep '^alice:' /etc/passwd >/dev/null && echo yes",'yes')
+    assert ok('instance','alice') != '0'
+    assert ok('instance','fresh') != '0'
+    assert ok('instance','fleeting') != '0'
+    for user in ['root','declared','expired','malformed','mismatch']:
+        refused('instance',user)
+    assert ok('declared','declared') != '0'
+    assert ok(command="grep -E '^(expired|malformed|mismatch):' /etc/passwd || true") == ''
+    log('instance SSH keys, declared precedence, no root/admin, expiry and malformed records')
+
+    # Restore only this attribute, even if unrelated project metadata changes.
+    baseline=json.loads(g('compute','project-info','describe','--format=json(commonInstanceMetadata)'))
+    items=baseline.get('commonInstanceMetadata',{}).get('items',[])
+    old=next((i['value'] for i in items if i['key']=='ssh-keys'),None)
+    projectuser='gcpcheck'+p.name[-6:].replace('_', 'a')
+    test=projectuser+':'+key('project')+'\n'
+    written=(old+'\n' if old else '')+test
+    (p/'project.keys').write_text(written)
+    project_changed=False
+    try:
+        project_changed=True
+        g('compute','project-info','add-metadata','--metadata-from-file','ssh-keys='+str(p/'project.keys'))
+        wait("grep '^"+projectuser+":' /etc/passwd >/dev/null && echo yes",'yes')
+        assert ok('project',projectuser) != '0'
+        refused('project','root')
+        log('project SSH keys grant an ordinary account')
+        metadata(None, **{'block-project-ssh-keys':'TRUE'})
+        wait("grep '^"+projectuser+":' /etc/passwd >/dev/null || echo absent",'absent')
+        refused('project',projectuser)
+        assert ok('instance','alice') != '0'
+        log('block-project-ssh-keys revokes project access and preserves instance access')
+        metadata(None, **{'block-project-ssh-keys':'FALSE'})
+        wait("grep '^"+projectuser+":' /etc/passwd >/dev/null && echo yes",'yes')
+        assert ok('project',projectuser) != '0'
+        log('unblocking project keys restores access live')
+    finally:
+        if project_changed:
+            current=json.loads(g('compute','project-info','describe','--format=json(commonInstanceMetadata)'))
+            value=next((i['value'] for i in current['commonInstanceMetadata'].get('items',[]) if i['key']=='ssh-keys'), '')
+            # Remove only this run's unique key, including when somebody has
+            # appended their own keys since we added ours.
+            if test in value.splitlines(keepends=True):
+                restored=old if value == written else ''.join(
+                    line for line in value.splitlines(keepends=True) if line != test)
+                if restored is not None:
+                    (p/'project.restore').write_text(restored)
+                    g('compute','project-info','add-metadata','--metadata-from-file','ssh-keys='+str(p/'project.restore'))
+                else:
+                    g('compute','project-info','remove-metadata','--keys','ssh-keys')
+            print('RESTORED project ssh-keys',flush=True)
+
+    wait("grep '^fleeting:' /etc/passwd >/dev/null || echo absent",'absent')
+    refused('instance','fleeting')
+    log('an initially valid key expires and is revoked without a metadata edit')
+    (p/'instance.keys').write_text('bob:'+key('project')+'\n')
+    metadata('ssh-keys='+str(p/'instance.keys'))
+    wait("grep '^bob:' /etc/passwd >/dev/null && echo yes",'yes')
+    assert ok('project','bob') != '0'
+    refused('instance','alice')
+    refused('instance','fresh')
+    assert ok(command="grep -E '^(alice|fresh):' /etc/passwd || true") == ''
+    log('live replacement revokes old accounts and admits new keys')
+
+    original=Path('build/machines')/name/'config.tar'
+    buf=io.BytesIO()
+    with tarfile.open(original) as src, tarfile.open(fileobj=buf,mode='w',format=tarfile.USTAR_FORMAT) as dst:
+        for entry in src:
+            if entry.isfile():
+                data=src.extractfile(entry).read()
+                if entry.name.strip('./')=='authorized_keys': data=(key('project')+'\n').encode()
+                entry.size=len(data)
+                dst.addfile(entry,io.BytesIO(data))
+            else: dst.addfile(entry)
+    (p/'rotated.b64').write_bytes(base64.b64encode(buf.getvalue()))
+    metadata('user-data='+str(p/'rotated.b64'))
+    wait('id -u','0','project')
+    refused('root','root')
+    assert ok('declared')=='0'
+    log('user-data root-key rotation revokes old key and retains declared admin')
+
+    (p/'bad.b64').write_text('not-a-config')
+    metadata('user-data='+str(p/'bad.b64'))
+    time.sleep(70)
+    assert ok('project')=='0'
+    assert ok('project','bob')!='0'
+    assert ok('declared')=='0'
+    log('invalid user-data retains the last accepted people and root keys')
+    g('compute', 'instances', 'remove-metadata', name, '--zone', zone, '--keys', 'user-data')
+    wait("grep '^declared:' /etc/passwd >/dev/null || echo absent", 'absent', 'project', 'bob')
+    assert ok('project', 'bob') != '0'
+    refused('declared', 'root')
+    refused('project', 'root')
+    log('absent user-data keeps metadata people and removes declared people/root keys')
+    metadata('user-data='+str(p/'rotated.b64'))
+    wait('id -u', '0', 'project')
+    assert ok('declared') == '0'
+    assert ok('project',command='cat /proc/sys/kernel/random/boot_id')==boot
+    log('all metadata changes applied without reboot')
+    (p/'serial.log').write_text(g('compute','instances','get-serial-port-output',name,'--zone',zone))
+    print('ALL LIVE GCP METADATA CHECKS PASSED',flush=True)
+
+def main():
+    global p, name, project, zone, provider, ip
+    if len(sys.argv) != 4:
+        raise SystemExit("usage: gcp-metadata HOWL SK_PROVIDER ARCH")
+    howl = str(Path(sys.argv[1]).resolve())
+    provider = str(Path(sys.argv[2]).resolve())
+    arch = sys.argv[3]
+    project = os.environ.get("GCP_PROJECT") or subprocess.check_output(
+        ["gcloud", "config", "get-value", "project"], text=True).strip()
+    if not project or project == "(unset)":
+        raise SystemExit("set GCP_PROJECT or gcloud's project")
+    zone = os.environ.get("GCP_ZONE", "us-central1-a")
+    os.environ.update(CLOUDSDK_CORE_PROJECT=project, CLOUDSDK_COMPUTE_ZONE=zone)
+    Path("build/check").mkdir(parents=True, exist_ok=True)
+    p = Path(tempfile.mkdtemp(prefix="gcp-metadata-", dir="build/check")).resolve()
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%y%m%d%H%M%S")
+    name = "ww-metadata-" + stamp + "-" + p.name[-6:].lower().replace("_", "a")
+    (p / "name").write_text(name)
+    print("GCP metadata logs: " + str(p), flush=True)
+    (p / "config").mkdir()
+    for which in ["root", "declared", "instance", "project"]:
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519-sk", "-w", provider,
+                        "-N", "", "-C", "gcp-metadata-" + which, "-f", str(p / which)], check=True)
+    (p / "config/authorized_keys").write_text((p / "root.pub").read_text())
+    (p / "config/hostname").write_text("gcp-metadata-check\n")
+    (p / "form.yaml").write_text(
+        "base: prod-ssh\nupdates: off\nmachine:\n  metadata-users: true\n"
+        "users:\n  declared:\n    admin: true\n    keys:\n      - " + key("declared") + "\n")
+    try:
+        with (p / "create.log").open("w") as output:
+            r = subprocess.run([howl, "create", name, "--build", "-f", str(p / "form.yaml"),
+                                "--on", "gcp", "--arch", arch, "--config", str(p / "config"),
+                                "--allow-from", "me"], stdout=output, stderr=subprocess.STDOUT)
+        if r.returncode:
+            raise RuntimeError((p / "create.log").read_text()[-5000:])
+        checks()
+    except BaseException:
+        (p / "failure.log").write_text(traceback.format_exc())
+        raise
+    finally:
+        if not (p / 'serial.log').exists():
+            result = subprocess.run(['gcloud', '--quiet', '--project', project, 'compute',
+                'instances', 'get-serial-port-output', name, '--zone', zone],
+                capture_output=True, text=True)
+            (p / 'serial.log').write_text(result.stdout)
+            if result.returncode:
+                (p / 'serial-error.log').write_text(result.stderr)
+        if os.environ.get("CLOUD_KEEP") == "1":
+            print("KEPT " + name + "; keys and logs: " + str(p), flush=True)
+        else:
+            cleanup(howl)
+
+
+def cleanup(howl):
+    errors = []
+    # howl delete removes only this unique machine, its disk and its firewall.
+    r = subprocess.run(['gcloud', '--quiet', '--project', project, 'compute', 'instances',
+                        'describe', name, '--zone', zone, '--format=value(name)'],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        r = subprocess.run([howl, "delete", name, "--on", "gcp"], capture_output=True, text=True)
+    if r.returncode and 'was not found' not in r.stderr:
+        errors.append(r.stderr)
+    created = re.findall(r"howl: image ([a-z0-9-]+): making it", (p / "create.log").read_text())
+    for image in created:
+        r = subprocess.run(["gcloud", "--quiet", "--project", project, "compute", "images",
+                            "delete", image], capture_output=True, text=True)
+        if r.returncode and "was not found" not in r.stderr:
+            errors.append(r.stderr)
+    for resource, selector in [('instances', 'name='+name), ('disks', 'name='+name),
+                               ('firewall-rules', 'name='+name+'-allow')]:
+        remaining = g('compute', resource, 'list', '--filter', selector, '--format=value(name)')
+        if remaining:
+            errors.append(resource + ' left behind: ' + remaining)
+    if errors:
+        raise RuntimeError("cleanup failed: " + "\n".join(errors))
+    for which in ["root", "declared", "instance", "project"]:
+        (p / which).unlink(missing_ok=True)
+    print("CLEANED " + name + " and its image/firewall", flush=True)
+
+
+if __name__ == "__main__":
+    main()
