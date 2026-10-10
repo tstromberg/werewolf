@@ -10,6 +10,7 @@ const verity = @import("verity");
 const image = @import("image");
 const build = @import("build.zig");
 const packages = @import("packages.zig");
+const embedded = @import("files");
 const disk = @import("disk.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -29,10 +30,9 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const out = b.p.out;
     const stamp = try b.path("{s}/meta.stamp", .{out});
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
-    const fixed = [_][]const u8{
-        rootfs,              kernel_rootfs,        b.self,               "release/image.pub",
-        "release/tiers.pub", "release/advisories", "test/posture-known",
-    };
+    // howl itself holds the release keys, advisories and known posture
+    // failures (files.zig), so b.self covers them.
+    const fixed = [_][]const u8{ rootfs, kernel_rootfs, b.self };
     const inputs = try mem.concat(
         b.gpa,
         []const u8,
@@ -62,7 +62,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         const kind: compose.Build = .{
             .arch = b.arch,
             .dev = b.spec.dev,
-            .posture_known = try b.read("test/posture-known", 64 << 10),
+            .posture_known = embedded.posture_known,
         };
         var f: forms.Failure = .{};
         compose.compose(
@@ -104,12 +104,12 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     );
     try b.put(meta_dir, "etc/apk/world", unpinned);
     try b.put(d, "release", try b.path("{s} {s} built-by-make\n", .{ b.name, kernel_pkg }));
-    try b.copy("release/image.pub", try b.path("{s}/image.pub", .{d}));
-    try b.copy("release/tiers.pub", try b.path("{s}/tiers.pub", .{d}));
+    try b.put(d, "image.pub", embedded.image_pub);
+    try b.put(d, "tiers.pub", embedded.tiers_pub);
     try b.put(d, "tiers", tiers_url ++ "\n");
     for (compose.release_forms) |r| if (mem.eql(u8, r, b.name) and !b.spec.dev)
         try b.put(d, "releases", releases_url ++ "\n");
-    try b.copy("release/advisories", try b.path("{s}/advisories", .{d}));
+    try b.put(d, "advisories", embedded.advisories);
     try Dir.cwd().writeFile(b.io, .{ .sub_path = stamp, .data = "" });
     try b.done(stamp, began);
 }
@@ -446,7 +446,8 @@ fn stage0(b: *B, name: []const u8, modules_name: []const u8, words: []const []co
     const target = try b.path("{s}/slot/{s}.zst", .{ out, name });
     const init_tar = try b.path("{s}/stage0/init.tar", .{out});
     const verity_tar = try b.path("{s}/verity.tar", .{out});
-    const mtree = "cmd/stage0/stage0.mtree";
+    const mtree = try b.path("{s}/stage0.mtree", .{b.p.build});
+    try packages.keep(b, mtree, embedded.stage0_mtree);
     const began = try b.begin(target, &.{ modules, mtree, init_tar, verity_tar }) orelse return;
     try Dir.cwd().createDirPath(b.io, try b.path("{s}/slot", .{out}));
     const cpio = try b.path("{s}/slot/{s}.cpio", .{ out, name });
@@ -610,10 +611,10 @@ fn copyStep(b: *B, target: []const u8, input: []const u8, from: []const u8) !voi
 fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
     const out = b.p.out;
     // systemd-boot, from Wolfi, pinned by a lock as the kernel is.
-    const yaml = "boot/boot.yaml";
+    const yaml = try packages.bootConfig(b, "boot.yaml");
     const lock = "build/lock/boot.lock.json";
     const boot = try b.path("{s}/boot/rootfs.tar", .{b.p.build});
-    try packages.relock(b, lock, yaml, &.{yaml});
+    try packages.relock(b, lock, yaml);
     try packages.apkoBuild(b, boot, yaml, lock, &.{lock});
     const slot = try b.path("{s}/slot", .{out});
     if (std.fs.path.dirname(target)) |parent| try Dir.cwd().createDirPath(b.io, parent);

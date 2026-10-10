@@ -7,6 +7,7 @@ const forms = @import("form");
 const compose = @import("compose");
 const image = @import("image");
 const package = @import("package");
+const files = @import("files");
 const progress = @import("progress.zig");
 const build = @import("build.zig");
 const Io = std.Io;
@@ -64,11 +65,37 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
     try b.steps.note("{s} written", .{target});
 }
 
+/// bootConfig lays the kernel's and the boot loader's apko configs, and the
+/// keys kernel.yaml names, in BUILD/apko from howl's copy of boot/
+/// (files.zig), and returns name's path there.
+pub fn bootConfig(b: *B, name: []const u8) ![]const u8 {
+    const dir = try b.path("{s}/apko", .{b.p.build});
+    for (files.boot) |f| try keep(b, try b.path("{s}/{s}", .{ dir, f.path }), f.data);
+    return b.path("{s}/{s}", .{ dir, name });
+}
+
+/// keep writes data to path, making its directory, unless path holds it
+/// already: a step that takes path as an input runs only when it changes.
+pub fn keep(b: *B, path: []const u8, data: []const u8) !void {
+    const was = Dir.cwd().readFileAlloc(b.io, path, b.gpa, .limited(64 << 20)) catch "";
+    if (mem.eql(u8, was, data)) return;
+    try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(path).?);
+    try b.write(path, data);
+}
+
 /// relock resolves target, an apko lock of config for both arches, from
-/// the repositories as they are now, when it is missing or older than
-/// inputs.
-pub fn relock(b: *B, target: []const u8, config: []const u8, inputs: []const []const u8) !void {
-    const began = try b.begin(target, inputs) orelse return;
+/// the repositories as they are now, unless it is a lock of config as it
+/// is: a lock records its config's sha256, so a changed config resolves
+/// again, and a file's time never does.
+pub fn relock(b: *B, target: []const u8, config: []const u8) !void {
+    var sum: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(try b.read(config, 1 << 20), &sum, .{});
+    var b64: [std.base64.standard.Encoder.calcSize(sum.len)]u8 = undefined;
+    const want = try b.path("\"sha256-{s}\"", .{std.base64.standard.Encoder.encode(&b64, &sum)});
+    const had = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(64 << 20)) catch "";
+    if (mem.indexOf(u8, had, want) != null) return;
+    if (progress.phaseOf(target)) |ph| try b.steps.enter(ph);
+    const began = Io.Clock.awake.now(b.io);
     try Dir.cwd().createDirPath(b.io, "build/lock");
     const t = try b.tmp(target);
     const out = try b.absolute(t);
@@ -201,10 +228,10 @@ fn apkOf(line: []const u8, arch: []const u8) ?[]const u8 {
 /// config into BUILD/kernel/x, checks the config for what werewolf relies
 /// on it to leave out (image.configMisses), and writes BUILD/vmlinuz.
 pub fn kernel(b: *B) !void {
-    const yaml = "boot/kernel.yaml";
+    const yaml = try bootConfig(b, "kernel.yaml");
     const lock = "build/lock/kernel.lock.json";
     const rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
-    try relock(b, lock, yaml, &.{yaml});
+    try relock(b, lock, yaml);
     try apkoBuild(b, rootfs, yaml, lock, &.{lock});
     const target = try b.path("{s}/vmlinuz", .{b.p.build});
     // The step's own stamp says when it last ran; vmlinuz is rewritten only
@@ -287,4 +314,22 @@ test unreachableServer {
     try testing.expect(unreachableServer("read tcp: connection reset by peer"));
     try testing.expect(!unreachableServer("unexpected status code 404 Not Found"));
     try testing.expect(!unreachableServer("solving \"foo\": nothing provides foo"));
+}
+
+test "boot/alpine-keys are the prod form's Alpine keys" {
+    const gpa = std.testing.allocator;
+    var n: usize = 0;
+    for (files.boot) |f| {
+        const name = mem.cutPrefix(u8, f.path, "alpine-keys/") orelse continue;
+        const path = try gpa.print(
+            "forms/prod/rootfs/etc/werewolf/alpine-keys/{s}",
+            .{name},
+        );
+        defer gpa.free(path);
+        const prod = try Dir.cwd().readFileAlloc(std.testing.io, path, gpa, .limited(64 << 10));
+        defer gpa.free(prod);
+        try std.testing.expectEqualStrings(prod, f.data);
+        n += 1;
+    }
+    try std.testing.expect(n > 0);
 }

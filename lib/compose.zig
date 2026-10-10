@@ -87,6 +87,17 @@ pub fn compose(
             };
         }
     }
+    // updates: how often the updater checks, where a form says (slot-update
+    // reads /etc/werewolf/update-every); off, and the autoupdate service
+    // is not in the image at all.
+    const upd = form.updates(forms);
+    if (upd.every) |every| try put(
+        io,
+        ro,
+        "etc/werewolf/update-every",
+        try gpa.print("{d}\n", .{every}),
+    );
+    if (upd.off) try ro.deleteTree(io, "etc/sv/autoupdate");
     // One empty file per allowance, for init, fence and posture.
     try ro.createDirPath(io, "etc/werewolf/allow");
     for (allowed) |a| try put(io, ro, try gpa.print("etc/werewolf/allow/{s}", .{a}), "");
@@ -884,6 +895,8 @@ fn serviceNames(io: Io, gpa: Allocator, root: Dir, forms: []const Form) ![]const
     }
     for (forms) |fm| if (fm.spec.get("services")) |svcs| for (svcs.map) |s|
         try set.put(gpa, s.key, {});
+    // updates: off leaves the autoupdate service out of the image (compose).
+    if (form.updates(forms).off) _ = set.swapRemove("autoupdate");
     const out = set.keys();
     sortStrings(out);
     return out;

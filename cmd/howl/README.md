@@ -73,8 +73,8 @@ graceful one under Lima, or a cloud restart. Another form or `--app` is refused.
 
 ## Drawbacks
 
-- howl needs a checkout, make and Zig (a path form's own programs; all of them
-  under `--build`), melange, compilers, and provider CLIs that change.
+- A published build needs only howl (`files.zig`); `--build` and a path form's
+  own programs need a checkout, make and Zig; melange, compilers, cloud CLIs.
 
 ## Alternatives Considered
 

@@ -79,8 +79,8 @@ a machine on N takes N's newest and logs `held` each check, until reinstalled.
 1. Built: compose replaces the Makefile's `ro` and `meta` shell, byte-identical.
 2. Built: images stage their chain and the updater composes from it; CI
    publishes changed programs, and a published machine took eight.
-3. Built: `NAME-form` packages, fetched by name; stage0 is a package. Left:
-   no checkout (howl still reads keys, locks and test files from one).
+3. Built: `NAME-form` packages, fetched by name; stage0 is a package; howl
+   builds with no checkout, holding the tree's files it uses (files.zig).
 4. The image's repository; `buildSlot` copies nothing forward.
 5. The release path goes.
 

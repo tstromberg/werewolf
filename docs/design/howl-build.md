@@ -13,8 +13,9 @@ Before stage 1, make built every image howl made, as shell and awk in a
 1,940-line Makefile and two scripts, the split [cli.md](cli.md) chose. howl
 depended on make's target names and `--debug=b` output, and:
 
-- A released howl cannot build without a checkout and make, against
-  [custom-updates.md](custom-updates.md)'s goal that it needs no Zig.
+- A released howl could not build without a checkout and make, against
+  [custom-updates.md](custom-updates.md)'s goal that it needs no Zig; now it
+  holds the tree's files it uses (files.zig).
 - The updater (`cmd/slot-update/slot.zig`) does module order, decompression,
   the zboot unwrap and verity in Zig too: twice, in two languages.
 

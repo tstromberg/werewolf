@@ -21,8 +21,9 @@ update outcome    after a reboot, log whether the last update held
 
 The `autoupdate` service waits for the running slot to commit, reads its
 settings and logs them (`policy`), runs `outcome` once, then `check` at
-once and every hour (`/etc/werewolf/update-every` sets another interval,
-in seconds). A check stages what it finds; the service boots a staged slot
+once and every hour (a form's `updates:` names another interval with
+`every: 30m`, 5m to 7d; `updates: off` leaves the service out of the
+image). A check stages what it finds; the service boots a staged slot
 when it is due, by how urgent its fixes are, and in between sleeps until
 the next check or that time, whichever comes first
 ([design/update-policy.md](design/update-policy.md)). A failed check is

@@ -6,6 +6,7 @@
 //! its field order, indentation and line breaks must not change.
 
 const std = @import("std");
+const files = @import("files");
 const progress = @import("progress.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -32,9 +33,6 @@ pub const Release = struct {
     files: []const File,
 };
 
-/// advisories_path is werewolf's own advisories, which every manifest carries.
-const advisories_path = "release/advisories";
-
 /// write copies r's files into dir and writes the manifest there, and
 /// returns the manifest's build. Everything in it follows from the files,
 /// so a rebuild writes the same manifest.
@@ -49,14 +47,14 @@ pub fn write(
         return steps.fail(try gpa.print("{s}: {t}", .{ r.kernel, err }));
     const kernel = mem.trimEnd(u8, kernel_text, "\n");
 
-    const text = Dir.cwd().readFileAlloc(io, advisories_path, gpa, .limited(1 << 20)) catch |err|
-        return steps.fail(try gpa.print("{s}: {t}", .{ advisories_path, err }));
+    // werewolf's own advisories, which every manifest carries (files.zig).
+    const text = files.advisories;
     var bad: Bad = .{};
     const advisories = parseAdvisories(gpa, text, &bad) catch |err| switch (err) {
         // A line this cannot read fails the release, so nothing ships unread.
         error.BadAdvisory => return steps.fail(try gpa.print(
-            "{s}:{d}: cannot read: {s}",
-            .{ advisories_path, bad.n, bad.line },
+            "release/advisories:{d}: cannot read: {s}",
+            .{ bad.n, bad.line },
         )),
         error.OutOfMemory => return error.OutOfMemory,
     };
