@@ -1,0 +1,78 @@
+# Authelia for werewolf's authelia form, as Wolfi would package it: built
+# by melange in Wolfi's environment, its web portal with Wolfi's Node and
+# the pnpm upstream names, then the server with Wolfi's Go, the portal
+# embedded, as upstream's authelia-scripts build does. SQLite is Wolfi's,
+# linked (the libsqlite3 tag), so its fixes reach a machine with the rest
+# of its packages (cmd/howl/melange.zig checks what it links). Go fetches
+# its modules, which go.sum pins, and pnpm its packages, which
+# pnpm-lock.yaml pins. Offered to wolfi-dev/os as it is; when Wolfi ships
+# it, the form names the package and this file goes.
+package:
+  name: authelia
+  version: 4.39.28
+  epoch: 0
+  description: Single sign-on and two-factor authentication portal
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - corepack
+      - git
+      - go-1.27
+      - nodejs-24
+      - sqlite-dev
+  environment:
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+    GOTOOLCHAIN: local
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/authelia/authelia
+      tag: v${{package.version}}
+      expected-commit: 8da42b2348b0351c6284a2940a9c5eec3d4cd3fd
+
+  # The portal, into internal/server/public_html, where the server embeds
+  # it; package scripts off, as upstream builds it.
+  - runs: |
+      export COREPACK_HOME="$PWD/.corepack"
+      cd web
+      corepack pnpm@12.10.1 install --frozen-lockfile --ignore-scripts
+      corepack pnpm@12.10.1 build
+      cd ..
+      cp -r api internal/server/public_html/
+
+  # The server, with upstream's flags: PIE, hardened cgo, and its build
+  # stamps from the tag.
+  - runs: |
+      x=github.com/authelia/authelia/v4/internal/utils
+      date=$(git log -1 --format=%cd --date=format:'%a, %d %b %Y %H:%M:%S %z')
+      CGO_ENABLED=1 \
+      CGO_CPPFLAGS="-D_FORTIFY_SOURCE=2 -fstack-protector-strong" \
+      CGO_LDFLAGS="-Wl,-z,relro,-z,now" \
+      go build -buildmode=pie -trimpath -tags libsqlite3 -o authelia \
+        -ldflags "-linkmode=external -s -w \
+          -X '$x.BuildTag=v${{package.version}}' \
+          -X '$x.BuildBranch=v${{package.version}}' \
+          -X '$x.BuildCommit=$(git rev-parse HEAD)' \
+          -X '$x.BuildDate=$date' \
+          -X '$x.BuildState=tagged clean' \
+          -X '$x.BuildNumber=0'" \
+        ./cmd/authelia
+      ./authelia --version
+      install -Dm755 authelia ${{targets.destdir}}/usr/bin/authelia
+
+update:
+  enabled: true
+  github:
+    identifier: authelia/authelia
+    strip-prefix: v

@@ -1,0 +1,19 @@
+# Syncthing runs from its image as _oci-syncthing, alone in its cgroup
+# (no monitor process to upload crash reports), keeps its device key on
+# /data, and serves its GUI on loopback alone.
+ok  st-user          p=$(head -n 1 /run/cgroup/svc/syncthing/cgroup.procs); u=$(grep '^_oci-syncthing:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status && [ "$(wc -l </run/cgroup/svc/syncthing/cgroup.procs)" = 1 ]
+ok  st-health        i=0; until wget -q -T 5 -O - http://127.0.0.1:8384/rest/noauth/health 2>/dev/null | grep -q '"status": *"OK"'; do i=$((i + 1)); [ $i -le 90 ] || { echo "no health"; exit 1; }; sleep 1; done
+ok  st-keys          [ -s /data/svc/syncthing/var/syncthing/config/cert.pem ] && [ -s /data/svc/syncthing/var/syncthing/config/key.pem ] && [ -s /data/svc/syncthing/var/syncthing/config/config.xml ]
+# syncthing-setup held its options: no local discovery, UPnP, usage or
+# crash reports; TCP, QUIC and relays to listen on; global discovery off,
+# as the settings say.
+ok  st-options       c=/data/svc/syncthing/var/syncthing/config/config.xml; for o in '<localAnnounceEnabled>false<' '<natEnabled>false<' '<urAccepted>-1<' '<crashReportingEnabled>false<' '<autoUpgradeIntervalH>0<' '<relaysEnabled>true<' '<globalAnnounceEnabled>false<' '<listenAddress>tcp://0.0.0.0:22000<' '<listenAddress>quic://0.0.0.0:22000<' '<listenAddress>dynamic+https://relays.syncthing.net/endpoint<'; do grep -qF "$o" $c || { echo "not in config.xml: $o"; exit 1; }; done; [ "$(grep -c '<listenAddress>' $c)" = 3 ]
+ok  st-gui-loopback  grep -qx 'listen tcp 8384 loopback' /usr/share/werewolf/net && grep -qx 'listen tcp 22000' /usr/share/werewolf/net && grep -q ' 0100007F:20C0 00000000:0000 0A ' /proc/net/tcp && ! grep -q ' 00000000:20C0 00000000:0000 0A ' /proc/net/tcp
+# Through Caddy, over HTTPS with a certificate from Caddy's own CA for
+# localhost, the user from the config reaches the GUI and its API;
+# syncthing-auth kept a bcrypt hash and took the password's copy away.
+ok  st-gui           a="Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)"; i=0; until wget -q -T 5 --no-check-certificate -O - --header "$a" https://localhost/rest/noauth/health 2>/dev/null | grep -q '"status": *"OK"'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no GUI through Caddy"; exit 1; }; sleep 1; done; wget -q -T 5 --no-check-certificate -O - --header "$a" https://localhost/ | grep -qi syncthing
+ok  st-auth-file     grep -qF 'admin $2b$10$' /run/svc/caddy/syncthing-auth.caddy && ! grep -q werewolf-check-pass-1 /run/svc/caddy/syncthing-auth.caddy && [ ! -e /run/svc/caddy/gui-password ]
+# The attack: the GUI and API, which run the device, without the password,
+# or with a wrong one, are refused; plain HTTP is sent to HTTPS.
+ok  st-no-password   w="wget -q -T 5 --no-check-certificate -S -O /dev/null"; $w https://localhost/ 2>&1 | grep -q 'HTTP/1.1 401' && $w https://localhost/rest/system/status 2>&1 | grep -q 'HTTP/1.1 401' && $w --header "Authorization: Basic $(printf %s admin:wrong-password-1 | base64)" https://localhost/rest/noauth/health 2>&1 | grep -q 'HTTP/1.1 401' && wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'

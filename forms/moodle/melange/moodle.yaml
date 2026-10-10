@@ -1,0 +1,54 @@
+# Moodle for werewolf's moodle form, as Wolfi would package it: the
+# release tarball, checked by sha256 (Moodle publishes it beside the
+# tarball), laid in /usr/share/moodle. It is PHP, so nothing is compiled;
+# the form names the PHP it runs on. 5.3 is a long-term release, secured
+# into October 2029: a new Moodle upgrades its tables one way, so a slot
+# rolled back must still read them, and minor releases alone keep that.
+# A new long-term release is a new recipe. Offered to wolfi-dev/os as it
+# is; when Wolfi ships it, the form names the package and this file goes.
+package:
+  name: moodle
+  version: "5.3"
+  epoch: 0
+  description: Moodle, a learning management system
+  copyright:
+    - license: GPL-3.0-or-later
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+
+pipeline:
+  - runs: mkdir -p moodle
+
+  - uses: fetch
+    with:
+      uri: https://download.moodle.org/download.php/direct/stable503/moodle-${{package.version}}.tgz
+      expected-sha256: 7e5edf110555956571f40e42acffde0eb23681ebebd212a2fec0fe7d795dd511
+      directory: moodle
+
+  # The developers' dotfiles (lint, Grunt, Jest, GitHub's) run nothing on
+  # a machine. One change: PHP-DI makes the container Moodle compiles into
+  # its local cache, PHP that Moodle then includes, writable by everyone
+  # (chmod 0666); the umask, 0007 from Moodle's own setup, decides instead.
+  # The code is otherwise as Moodle ships it, and the form lays its
+  # config.php beside it.
+  - runs: |
+      find moodle -maxdepth 1 -name '.?*' -exec rm -rf {} +
+      c=moodle/public/lib/php-di/php-di/src/Compiler/Compiler.php
+      sed -i 's/@chmod(\$tmpFile, 0666);/@chmod($tmpFile, 0666 \& ~umask());/' $c
+      [ "$(grep -c '0666 & ~umask()' $c)" = 2 ]
+      mkdir -p ${{targets.destdir}}/usr/share
+      mv moodle ${{targets.destdir}}/usr/share/moodle
+
+update:
+  enabled: true
+  github:
+    identifier: moodle/moodle
+    strip-prefix: v
+    tag-filter: v5.3

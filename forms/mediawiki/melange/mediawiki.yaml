@@ -1,0 +1,54 @@
+# MediaWiki for werewolf's mediawiki form, as Wolfi would package it: the
+# release tarball, checked by sha256, laid in /usr/share/mediawiki. It is
+# PHP, so nothing is compiled; the form names the PHP it runs on. 1.43 is
+# the long-term release, supported into December 2027: an update's schema
+# changes are one way, and a slot rolled back must still read /data. The
+# test suite and the web installer are left out: the form installs from
+# the machine's config before the wiki serves. Offered to wolfi-dev/os as
+# it is; when Wolfi ships it, the form names the package and this file
+# goes.
+package:
+  name: mediawiki
+  version: 1.43.11
+  epoch: 0
+  description: The wiki engine of Wikipedia, long-term release
+  copyright:
+    - license: GPL-2.0-or-later
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+
+pipeline:
+  - runs: mkdir -p mediawiki
+
+  - uses: fetch
+    with:
+      uri: https://releases.wikimedia.org/mediawiki/1.43/mediawiki-${{package.version}}.tar.gz
+      expected-sha256: 86a5b8e2fb7ca10228d66c8b2659a0a692958e5c520fd023c78bd713a68142f0
+      directory: mediawiki
+
+  # Left out besides: the bundled extensions that run a program (Scribunto
+  # carries Lua binaries for x86, SyntaxHighlight pygmentize, Math and
+  # PdfHandler their renderers), and every file's execute bit, as nothing
+  # here is run but by PHP.
+  - runs: |
+      cd mediawiki
+      rm -rf tests mw-config extensions/Scribunto extensions/SyntaxHighlight_GeSHi \
+        extensions/Math extensions/PdfHandler
+      find . -type f -exec chmod a-x {} +
+      cd ..
+      mkdir -p ${{targets.destdir}}/usr/share
+      mv mediawiki ${{targets.destdir}}/usr/share/mediawiki
+
+update:
+  enabled: true
+  github:
+    identifier: wikimedia/mediawiki
+    use-tag: true
+    tag-filter-prefix: "1.43."

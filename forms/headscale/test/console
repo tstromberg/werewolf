@@ -1,0 +1,9 @@
+# What the headscale form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-headscale;
+# test/boot; forms/demo/test/console has the format). Headscale, given no
+# base URL, parks before it starts, and says why; Caddy runs. make
+# check-headscale boots it with its config, and checks it serves.
+
+seen    headscale-needs-url     service-config: \{"event":"settings","service":"headscale","setting":"base-url","why":"required"\}
+seen    headscale-parked        leash: \{"event":"down","service":"headscale","why":"settings refused; service-config said why"\}
+unseen  caddy-down              leash: \{"event":"down","service":"caddy"

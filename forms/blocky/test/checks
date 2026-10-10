@@ -1,0 +1,23 @@
+# Blocky answers on :53 as its own user, holding no capability but the
+# low port's; resolves through its upstreams over TLS; and blocks what its
+# list names. These need the check host's network: a machine with none
+# fails them, as it would fail its household.
+ok  blocky-user      p=$(head -n 1 /run/cgroup/svc/blocky/cgroup.procs); u=$(grep '^_oci-blocky:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  blocky-resolves  i=0; until nslookup example.org 127.0.0.1 2>/dev/null | grep -A1 '^Name:' | grep -q 'Address: [1-9]'; do i=$((i + 1)); [ $i -le 60 ] || { echo "example.org unresolved in 60 s"; exit 1; }; sleep 1; done
+ok  blocky-blocks    i=0; until nslookup ad.doubleclick.net 127.0.0.1 2>/dev/null | grep -q 'Address: 0\.0\.0\.0'; do i=$((i + 1)); [ $i -le 90 ] || { echo "ad.doubleclick.net not blocked in 90 s"; exit 1; }; sleep 1; done
+# Upstreams over TLS alone: fence lets blocky's user reach :853 and :443,
+# and nothing in plain DNS.
+ok  blocky-tls-only  u=$(grep '^_oci-blocky:' /etc/passwd | cut -d: -f3); grep -qx "connect $u tcp 853 public" /usr/share/werewolf/net && ! grep -q "^connect $u udp 53" /usr/share/werewolf/net && ! grep -q "^connect $u tcp 53" /usr/share/werewolf/net
+# The configuration Blocky runs is the image's with the settings'
+# upstreams and blocklists in place of its own.
+ok  blocky-settings  c=/run/svc/blocky/config.yml; grep -qF '"default":["tcp-tls:dns.quad9.net"]' $c && grep -qF '"ads":["https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"]' $c && ! grep -q 'one\.one\.one\.one"\]' $c
+# Not an open resolver: that configuration gives a client outside the
+# private networks the group that blocks every name, before any upstream
+# is asked. (A stranger's address cannot be put on the machine to ask
+# from: root on the console holds no CAP_NET_ADMIN.)
+ok  blocky-strangers c=/run/svc/blocky/config.yml; grep -qF '"clientGroupsBlock":{"default":["strangers"]' $c && grep -qF '"strangers":["/.*/\n"]' $c && ! grep -q '0\.0\.0\.0/0\|::/0' $c
+# The attack on UDP's unguarded bind (docs/design/listen-udp.md): with
+# blocky down, root, as a broken-into service with the low-port
+# capability would, takes :53, but cannot answer a client from it: fence
+# lets only blocky's user send from the port.
+ok  blocky-squatter  sv -w 30 down /etc/sv/blocky; i=0; while netstat -lun 2>/dev/null | grep -q ':53 '; do i=$((i + 1)); [ $i -le 30 ] || exit 1; sleep 1; done; { nc -u -l -p 53 >/dev/null 2>&1 & l=$!; }; sleep 1; netstat -lun 2>/dev/null | grep -q ':53 '; held=$?; o=$(echo x | nc -v -u -w 1 -p 53 10.0.2.2 40000 2>&1); kill $l 2>/dev/null; sv up /etc/sv/blocky; echo "held $held: $o"; [ $held = 0 ] && echo "$o" | grep -q 'Permission denied' && i=0 && until nslookup example.org 127.0.0.1 >/dev/null 2>&1; do i=$((i + 1)); [ $i -le 30 ] || exit 1; sleep 1; done

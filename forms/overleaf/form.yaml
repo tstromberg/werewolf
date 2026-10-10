@@ -1,0 +1,150 @@
+# overleaf: Overleaf Community Edition 6.3, collaborative LaTeX, from
+# Overleaf's own image, with MongoDB from its own, Valkey and Caddy beside
+# it. Caddy serves it over HTTPS at the machine's base URL with a
+# certificate from Let's Encrypt. Overleaf's services run as one user;
+# its compiler, which runs what its users write, as another, in a copy of
+# the image of its own, sharing no file or secret with them. The
+# administrator comes from the config before anything serves; nobody
+# signs up. Overleaf publishes its image for x86_64 alone. See
+# forms/overleaf/README.md.
+base: prod
+
+with: [valkey, caddy]
+
+archs: [x86_64]
+
+# Taken back of werewolf's defaults (lib/allow.zig): V8 compiles Overleaf's
+# services to machine code as they run.
+allow: [jit]
+
+# The check signs in with curl, which keeps the cookies, and uploads a
+# project as Overleaf takes one, zipped.
+dev:
+  - curl
+  - zip
+
+# make check's (forms/README.md): ten Node services, MongoDB and TeX.
+check:
+  memory: 8192
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: Overleaf's services are Node.js, whose V8 compiles them to machine code as they run (allow jit)
+
+services:
+  # Overleaf's services (web, real-time, document-updater, docstore,
+  # filestore, history-v1, project-history, notifications, chat), as
+  # _oci-overleaf in Overleaf's image, started by overleaf-start, each on
+  # loopback, behind Caddy. Before any serves, overleaf-start makes the
+  # secrets they share, once, in /data; makes MongoDB a replica set; runs
+  # the migrations; and makes the administrator from the config: with no
+  # password, the service parks. They reach each other, MongoDB, Valkey,
+  # the compiler, and a mail server, if the settings name one, and nothing
+  # else: no URL a user names is fetched (linked files from URLs stay off).
+  overleaf:
+    image: docker.io/sharelatex/sharelatex@sha256:d2c20ae595d64f61dca224864b90a5594fb71df0c20c014c2dcaae595f2de7d8
+    exec: /usr/bin/node /werewolf/overleaf-start.mjs
+    # netlink: Node lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: [tcp/3000 tcp/3003 tcp/3009 tcp/3010 tcp/3016 tcp/3026 tcp/3042 tcp/3054 tcp/3100 tcp/4000 loopback]
+    connect:
+      - tcp/3000 tcp/3003 tcp/3009 tcp/3010 tcp/3013 tcp/3016 tcp/3026 tcp/3042 tcp/3054 tcp/3100 tcp/4000 tcp/8080
+      - tcp/6379 tcp/27017
+      - tcp/587 tcp/465 public
+      - udp/53 tcp/53
+    write: /var/lib/overleaf
+    config:
+      - settings /run/config/overleaf/settings.json
+      - admin-password /run/config/overleaf/admin-password
+    setting:
+      - base-url url required as OVERLEAF_SITE_URL
+      - admin-email string required as OVERLEAF_ADMIN_EMAIL
+      - email-from string as OVERLEAF_EMAIL_FROM_ADDRESS
+      - smtp-host hostname as OVERLEAF_EMAIL_SMTP_HOST
+      - smtp-port port as OVERLEAF_EMAIL_SMTP_PORT
+      - smtp-user string as OVERLEAF_EMAIL_SMTP_USER
+    render: env site
+    secret: OVERLEAF_EMAIL_SMTP_PASS /run/config/overleaf/smtp-password optional
+    memory: 3072
+    nofile: 65536
+    env:
+      - LOG_LEVEL=warn
+      # Nobody signs up, opens a project without signing in, or edits one
+      # by its link alone; the administrator makes accounts.
+      - OVERLEAF_ALLOW_PUBLIC_ACCESS=false
+      - OVERLEAF_ALLOW_ANONYMOUS_READ_AND_WRITE_SHARING=false
+
+  # Overleaf's compiler and the nginx that serves its PDFs, started by
+  # clsi-start as _oci-clsi in a copy of the image of its own: TeX runs
+  # what its users write, so it shares no user, file or secret with
+  # Overleaf's services. TeX reads only its project and TeX's own files,
+  # writes only beneath it, and runs only TeX Live's restricted helpers
+  # (shell_escape p): never what a document names. Of the image it may run
+  # nginx, TeX Live and the programs TeX and latexmk start (perl, sh, qpdf,
+  # pdftocairo). It reaches Overleaf's file stores, for a project's files,
+  # and nothing else.
+  clsi:
+    image: docker.io/sharelatex/sharelatex@sha256:d2c20ae595d64f61dca224864b90a5594fb71df0c20c014c2dcaae595f2de7d8
+    exec: /usr/bin/node /werewolf/clsi-start.mjs
+    pledge: stdio rpath wpath inet unix connect listen proc exec sendfile
+    listen: [tcp/3013 tcp/8080 loopback]
+    connect: [tcp/3009 tcp/3100]
+    write: /var/lib/overleaf
+    run:
+      - /usr/sbin/nginx
+      - /usr/bin/perl /usr/bin/env /usr/bin/dash /usr/bin/qpdf /usr/bin/pdftocairo
+      - /usr/local/texlive/2026/bin/x86_64-linux/
+      - /usr/local/texlive/2026/texmf-dist/scripts/
+    memory: 2048
+    nofile: 16384
+
+  # MongoDB 8.0, from its own image, as _oci-mongo: Overleaf's documents,
+  # a replica set of one on loopback, its files in its /data. Only
+  # Overleaf's services may reach it.
+  mongo:
+    image: docker.io/library/mongo@sha256:d0d926f94df099bff534b7ee5b5986458131a22489dfff8664509af0c1e2ca9c
+    exec: /usr/bin/mongod --dbpath /data --bind_ip 127.0.0.1 --port 27017 --replSet overleaf --wiredTigerCacheSizeGB 0.25 --quiet
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: tcp/27017 loopback
+    # A replica set's member reaches itself.
+    connect: tcp/27017
+    memory: 1024
+    nofile: 64000
+
+  # Valkey, as the valkey form has it, but on loopback TCP: Overleaf's
+  # services, in their image's root, cannot see its socket. Only they may
+  # reach it.
+  valkey:
+    exec: /usr/bin/valkey-server /etc/valkey/valkey.conf --port 6379 --bind 127.0.0.1 --maxmemory 448mb
+    user: valkey
+    pledge: stdio rpath wpath inet unix listen proc
+    read: /etc/valkey
+    listen: tcp/6379 loopback
+    share: shared
+    memory: 512
+    nofile: 10240
+
+  # Caddy, as its own user, for Overleaf: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Overleaf's
+  # web, real-time and clsi's nginx on loopback, read its configuration,
+  # and write only its own directories. Its site is the base URL, from the
+  # machine's settings, as BASE_URL, which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/4000 tcp/3026 tcp/8080]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

@@ -14,6 +14,10 @@ const progress = @import("progress.zig");
 /// "werewolf: up in 0.120s (the kernel 0.051s, userland 0.069s)".
 pub const up_line = "werewolf: up in ";
 
+/// no_slot starts the line Firecracker's supervisor writes when the disk
+/// has nothing to boot.
+pub const no_slot = "werewolf: no slot to boot: ";
+
 /// Outcome is how a boot ended: up, a kernel panic, or late when the wait
 /// ran out first.
 pub const Outcome = enum { up, panic, late };
@@ -42,7 +46,8 @@ pub const Boot = struct {
     /// address_ns runs from up to the DHCP lease.
     address_ns: ?i96 = null,
     /// ended is set when Firecracker's supervisor reports on the console
-    /// that the VM exited before it was up, so waiting longer is pointless.
+    /// that the VM exited, or never started, before it was up, so waiting
+    /// longer is pointless.
     ended: bool = false,
 };
 
@@ -81,6 +86,9 @@ pub fn watch(
                 b.userland = try gpa.dupe(u8, u.userland);
                 up_at = Io.Clock.awake.now(io);
                 if (m == null) return b;
+            } else if (std.mem.find(u8, buf[0..n], no_slot) != null) {
+                b.ended = true;
+                return b;
             } else if (std.mem.find(u8, buf[0..n], "werewolf: firecracker exited ")) |at| {
                 // Exit 0 is a reboot, which the supervisor restarts.
                 const rest = buf[at + "werewolf: firecracker exited ".len .. n];

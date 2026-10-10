@@ -1,0 +1,21 @@
+# Unbound answers localhost, from its own local zone, by UDP and by TCP,
+# on loopback and on the machine's address: both private sources.
+ok  unbound-answers   i=0; until drill localhost @127.0.0.1 2>/dev/null | grep -q 'rcode: NOERROR'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no answer on 127.0.0.1 in 60 s"; exit 1; }; sleep 1; done; for a in 127.0.0.1 10.0.2.15; do for t in '' -t; do drill $t localhost @$a | grep -q '^localhost\.[[:space:]].*IN[[:space:]]A[[:space:]]127\.0\.0\.1$' || { echo "no localhost from $a ${t:-by UDP}"; exit 1; }; done; done
+# unbound-setup wrote the settings' zones, each insecure and its default
+# local zone dropped, to every server, 0600; Unbound started with them
+# (unbound-answers).
+ok  unbound-forwards  c=/run/svc/unbound/unbound-setup.conf; grep -q '^[[:space:]]name: "corp\.example\."$' $c && grep -q '^[[:space:]]domain-insecure: "10\.in-addr\.arpa\."$' $c && grep -q '^[[:space:]]local-zone: "10\.in-addr\.arpa\." nodefault$' $c && [ "$(grep -c '^[[:space:]]forward-addr: 10\.0\.2\.3$' $c)" = 2 ] && [ "$(stat -c '%a %U' $c)" = '600 unbound' ]
+# DNSSEC: Unbound validates from the root's keys, which unbound-setup
+# seeded into /data from the image (KSK-2017 and KSK-2024), and keeps
+# there for itself (RFC 5011). Offline, no answer can show it; the
+# console's "init module 0: validator" does (test/console).
+ok  unbound-anchor    a=/data/svc/unbound/root.key; [ "$(stat -c '%a %U' $a)" = '600 unbound' ] && [ "$(grep -c '^\. .*DNSKEY.*257 3 8 ' $a)" -ge 2 ] && grep -q '^[[:space:]]module-config: "validator iterator"$' /etc/unbound/unbound.conf && grep -q '^[[:space:]]auto-trust-anchor-file: "/data/svc/unbound/root\.key"$' /etc/unbound/unbound.conf
+# Nothing controls it: no control socket anywhere, its client pruned.
+ok  unbound-no-ctl    grep -q '^[[:space:]]control-enable: no$' /etc/unbound/unbound.conf && [ -z "$(find /run/svc/unbound /data/svc/unbound -type s)" ] && [ ! -e /usr/bin/unbound-control ] && [ ! -e /usr/bin/unbound-control-setup ] && [ ! -e /usr/bin/sh ] && [ ! -e /usr/bin/bash ]
+# The attack: a query from a public address, which an open resolver
+# would answer and amplify. Every address this machine can send from is
+# private (loopback and 10.0.2.15), and root here holds no CAP_NET_ADMIN
+# or CAP_NET_RAW to add one or forge one, so the check reads the policy
+# Unbound runs with instead: every address refused, the private ranges
+# alone allowed, nothing else deciding (no include sets access-control).
+ok  unbound-refuses   c=/etc/unbound/unbound.conf; want='0.0.0.0/0 refuse|::/0 refuse|127.0.0.0/8 allow|::1/128 allow|10.0.0.0/8 allow|172.16.0.0/12 allow|192.168.0.0/16 allow|100.64.0.0/10 allow|169.254.0.0/16 allow|fc00::/7 allow|fe80::/10 allow'; got=$(sed -n 's/^[[:space:]]*access-control: //p' $c | tr '\n' '|'); [ "$got" = "$want|" ] || { echo "access-control: $got"; exit 1; }; ! grep -q '^[[:space:]]*\(access-control\|private-address\)' /run/svc/unbound/unbound-setup.conf && [ "$(grep -c '^include:' $c)" = 1 ] && ! grep -q '^[[:space:]]*private-address' $c

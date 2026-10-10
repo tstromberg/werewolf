@@ -422,7 +422,7 @@ _check-form: $(HOWL) $(TEST_SK)
 
 check-adhoc: $(HOWL) | _check-shared
 	@mkdir -p $(CHECK) && rm -rf $(BUILD)/adhoc/check-oci
-	@$(HOWL) form --build --with prod --oci web=cgr.dev/chainguard/nginx --web.listen tcp/8080 --web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
+	@$(HOWL) form --build --with prod --services.web.image cgr.dev/chainguard/nginx --services.web.listen tcp/8080 --services.web.write /var/lib/nginx/tmp -o $(BUILD)/adhoc/check-oci >$(CHECK)/check-oci-form.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/check-oci-form.log; echo "FAIL   check-oci form: see $(CHECK)/check-oci-form.log"; exit 1; }
 	@$(call built,check-oci,$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci image)
 	@$(CHECK_MAKE) FORM=$(BUILD)/adhoc/check-oci _check-form

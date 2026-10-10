@@ -1,0 +1,16 @@
+# OpenSearch answers over HTTPS, with the config's certificate, once its
+# security index is made: admin's health, green or yellow.
+ok  os-up            c="curl -sS --max-time 10 --cacert /run/config/opensearch/tls-ca -u admin:werewolf-check-pass-1"; i=0; until $c https://127.0.0.1:9200/_cluster/health 2>/dev/null | grep -qE '"status":"(green|yellow)"'; do i=$((i + 1)); [ $i -le 180 ] || { echo "no health in 180 s"; $c https://127.0.0.1:9200/_cluster/health; exit 1; }; sleep 1; done
+# admin indexes a log line and finds it again.
+ok  os-search        c="curl -sS --max-time 30 --cacert /run/config/opensearch/tls-ca -u admin:werewolf-check-pass-1 -H Content-Type:application/json"; $c -X PUT 'https://127.0.0.1:9200/logs/_doc/1?refresh=true' -d '{"message":"werewolf check line"}' | grep -q '"result":"created"' && $c 'https://127.0.0.1:9200/logs/_search?q=message:werewolf' | grep -q '"total":{"value":1,'
+# The security index holds admin alone, none of the demo users; the
+# rendered file holds a bcrypt hash, not the password, whose copy is gone.
+ok  os-setup         u=/run/svc/opensearch/opensearch-security/internal_users.yml; curl -sS --max-time 10 --cacert /run/config/opensearch/tls-ca -u admin:werewolf-check-pass-1 https://127.0.0.1:9200/_plugins/_security/api/internalusers | grep -q '^{"admin":{' && ! curl -sS --max-time 10 --cacert /run/config/opensearch/tls-ca -u admin:werewolf-check-pass-1 https://127.0.0.1:9200/_plugins/_security/api/internalusers | grep -qE 'kibanaserver|logstash|readall|snapshotrestore|anomalyadmin' && grep -q 'hash: "\$2b\$12\$' $u && ! grep -rq werewolf-check-pass-1 /run/svc/opensearch && [ ! -e /run/svc/opensearch/admin-password ] && [ "$(stat -c '%a %U' $u)" = '600 opensearch' ] && [ -d /data/svc/opensearch/nodes ]
+# Its transport listens on loopback alone, and in TLS: a plain stranger
+# there gets nothing.
+ok  os-transport     netstat -ltn | awk '$4 ~ /:9300$/ { n++; if ($4 !~ /^(127\.0\.0\.1|::1):/) bad = 1 } END { exit !(n && !bad) }'
+# The attacks: no plain HTTP on :9200; a request without a login, and
+# with the demo's admin:admin, each refused with 401; the image has no
+# demo certificate.
+ok  os-refuses       a="curl -sS --max-time 10 --cacert /run/config/opensearch/tls-ca -o /dev/null -w %{http_code}"; ! wget -q -T 5 -O /dev/null http://127.0.0.1:9200/ 2>/dev/null && [ "$($a https://127.0.0.1:9200/logs/_search)" = 401 ] && [ "$($a -u admin:admin https://127.0.0.1:9200/logs/_search)" = 401 ] && [ -z "$(find /usr/share/opensearch -name '*.pem' -o -name 'esnode*' -o -name 'kirk*')" ]
+ok  os-diag          sv restart opensearch; sleep 20; dmesg | tail -40; exit 1

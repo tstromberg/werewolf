@@ -1,0 +1,32 @@
+# Caddy for the mattermost form: HTTPS at the machine's base URL
+# (BASE_URL; howl --base-url), with a certificate Caddy gets itself, and
+# :80 sent there; without one, plain HTTP on :80. Mattermost is behind it
+# on loopback, its WebSocket too. leash starts Caddy (etc/sv/caddy/service)
+# as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris; no body timeout, which would cut off an
+		# upload on a slow line, and none on idle WebSockets, which
+		# Mattermost pings itself.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which this form does not serve.
+		protocols h1 h2
+	}
+}
+
+{$BASE_URL::80} {
+	encode zstd gzip
+	header -Server
+	reverse_proxy 127.0.0.1:8065
+}

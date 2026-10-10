@@ -1,0 +1,15 @@
+#!/bin/sh
+# forms/zot/test/config DIR: the zot form's config for make check, in DIR:
+# its domain, localhost, for which Caddy's own CA signs, and two users,
+# alice, who pushes, and bob, who only pulls; their passwords are
+# werewolf-check-alice and werewolf-check-bob (htpasswd -nbBC 10 made
+# these lines), which test/checks signs in with.
+set -eu
+mkdir -p "$1/zot" "$1/caddy"
+umask 077
+cat >"$1/zot/htpasswd" <<'EOT'
+alice:$2y$10$WHaTihtCoj3daOppvsT9NeF1qDXAeH9hoTVlakFoH4LaNOX3L0ctG
+bob:$2y$10$6jXCPv0yPt30HkBJAcHQ8uzDWhts1sX/QWDQkJgZWycVloBkKF6nG
+EOT
+echo '{"pushers":["alice"]}' >"$1/zot/settings.json"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

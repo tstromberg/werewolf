@@ -1,0 +1,2 @@
+ok  ph-debug1        sleep 45; netstat -lnu 2>/dev/null | grep -v tcp6; netstat -lnt 2>/dev/null | grep -v tcp6; grep -E 'forced|listening on|ERROR' /data/svc/pi-hole/var/log/pihole/FTL.log | grep -v 'TOML\|Config backup' | tail -12; nslookup pi.hole 127.0.0.1; false
+ok  ph-debug2        tail -30 /data/svc/pi-hole/var/log/pihole/FTL.log; tail -8 /data/svc/pi-hole/var/log/pihole/pihole.log; false

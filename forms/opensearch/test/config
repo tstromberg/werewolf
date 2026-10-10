@@ -1,0 +1,19 @@
+#!/bin/sh
+# forms/opensearch/test/config DIR: the opensearch form's config for make
+# check, in DIR: admin's password, which test/checks signs in with, and a
+# CA made here, in a corporation's CA's place, with the certificate it
+# signs for the machine, by name and by loopback address.
+set -eu
+mkdir -p "$1/opensearch"
+umask 077
+t=$(mktemp -d)
+trap 'rm -rf "$t"' EXIT
+printf '%s' werewolf-check-pass-1 >"$1/opensearch/admin-password"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 30 \
+	-subj /CN=werewolf-check-ca -keyout "$t/ca.key" -out "$1/opensearch/tls-ca" 2>/dev/null
+openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+	-subj /CN=search.example.com -keyout "$t/key" -out "$t/csr" 2>/dev/null
+printf 'subjectAltName=DNS:search.example.com,DNS:localhost,IP:127.0.0.1\n' >"$t/ext"
+openssl x509 -req -in "$t/csr" -CA "$1/opensearch/tls-ca" -CAkey "$t/ca.key" \
+	-CAcreateserial -CAserial "$t/srl" -days 30 -extfile "$t/ext" -out "$1/opensearch/tls-cert" 2>/dev/null
+openssl pkcs8 -topk8 -nocrypt -in "$t/key" -out "$1/opensearch/tls-key"

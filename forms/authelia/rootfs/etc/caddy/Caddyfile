@@ -1,0 +1,62 @@
+# Caddy for the authelia form: Authelia's portal at auth.DOMAIN, and every
+# site under DOMAIN behind it (DOMAIN; howl --domain), with certificates
+# Caddy gets itself. A form on this one adds its sites in
+# /etc/caddy/sites/NAME.caddy, each importing `authelia`. leash starts
+# Caddy (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	# A name under .internal gets Caddy's own CA, which the image's trust
+	# store, being read-only, cannot take.
+	skip_install_trust
+	servers {
+		# Against slowloris.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+}
+
+# Asks Authelia about each request: one without a session meant for this
+# site goes to the portal, and one that passes carries who it is in the
+# Remote-* headers, which a client's own are replaced by.
+(authelia) {
+	forward_auth 127.0.0.1:9091 {
+		uri /api/authz/forward-auth
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+}
+
+(headers) {
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
+
+auth.{$DOMAIN} {
+	import headers
+	reverse_proxy 127.0.0.1:9091
+}
+
+# The domain itself: a page saying who is signed in, behind Authelia.
+# A form's own sites go on names under it.
+{$DOMAIN} {
+	import headers
+	import authelia
+	header Content-Type "text/plain; charset=utf-8"
+	respond "signed in as {http.request.header.Remote-User}
+"
+}
+
+import /etc/caddy/sites/*.caddy

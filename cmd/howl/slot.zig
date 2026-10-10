@@ -211,11 +211,14 @@ fn layerStep(
     try b.done(target, began);
 }
 
-/// layer writes target, a tar of dirs laid over one another in order,
-/// whose bytes depend only on the files' contents and whether each is
-/// executable: sorted, owned by root, modes 644 or 755, dated 1970 as apko
-/// dates its own files, and carrying nothing of the builder's (owners,
-/// extended attributes, .DS_Store). Images are made from tars alone, so no
+/// layer writes target, a tar of dirs laid over one another in order, in
+/// restricted pax: ustar's bytes, but for a pax header where a path or a
+/// link is too long for ustar, which would otherwise drop it with a mere
+/// warning (an image's node_modules has both). Its bytes depend only on
+/// the files' contents and whether each is executable: sorted, owned by
+/// root, modes 644 or 755, dated 1970 as apko dates its own files, and
+/// carrying nothing of the builder's (owners, extended attributes,
+/// .DS_Store). Images are made from tars alone, so no
 /// inode number or time of the build host reaches one.
 fn layer(b: *B, target: []const u8, dirs: []const []const u8) !void {
     const io = b.io;
@@ -252,7 +255,7 @@ fn layer(b: *B, target: []const u8, dirs: []const []const u8) !void {
         defer names_in.close(io);
         try b.run(&.{
             "bsdtar",      "-cf",             try b.absolute(t), "--format",
-            "ustar",       "--uid",           "0",               "--gid",
+            "paxr",        "--uid",           "0",               "--gid",
             "0",           "--numeric-owner", "--no-xattrs",     "--no-acls",
             "--no-fflags", "-n",              "-T",              "-",
         }, .{ .cwd = stage, .stdin = names_in });
@@ -357,6 +360,29 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
         try b.path("@{s}", .{overlay}),
     });
     try b.run(argv.items, .{});
+    // An image service runs in its own tree, which lacks werewolf's
+    // programs: a form's `before` helpers, and service-config for its
+    // settings. Each tree gets the root's /usr/lib/werewolf, in the root's
+    // order and bytes (erofs keeps one copy of the data); Landlock lets a
+    // service run only what its service file names.
+    var roots: std.ArrayList([]const u8) = .empty;
+    for (b.chain) |c| {
+        const svcs = c.spec.get("services") orelse continue;
+        for (svcs.map) |svc|
+            if (svc.value.get("image") != null) try roots.append(b.gpa, svc.key);
+    }
+    if (roots.items.len > 0) {
+        const programs = try b.path("{s}/programs.tar", .{out});
+        const from_root = try b.path("@{s}", .{root_tar});
+        const ours = "usr/lib/werewolf/*";
+        try b.run(&.{ "bsdtar", "-cf", programs, "--include", ours, from_root }, .{});
+        const from_programs = try b.path("@{s}", .{programs});
+        for (roots.items) |name| {
+            const into = try b.path(",^usr/,oci/{s}/usr/,", .{name});
+            try b.run(&.{ "bsdtar", "-rf", root_tar, "-s", into, from_programs }, .{});
+        }
+        try Dir.cwd().deleteFile(b.io, programs);
+    }
     Dir.cwd().deleteFile(b.io, target) catch {};
     try checkErofs(b);
     // -T0 dates every file and the image 1970, and the UUID is fixed

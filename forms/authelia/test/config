@@ -1,0 +1,35 @@
+#!/bin/sh
+# forms/authelia/test/config DIR: the authelia form's config for make
+# check, in DIR: the domain werewolf.internal, for which Caddy's own CA
+# signs; its two secrets; and two users, alice and bob, whose password is
+# werewolf-check-pass-1, as Argon2id PHC strings (authelia crypto hash
+# generate argon2 makes the same), which test/checks signs in with.
+set -eu
+d=$1/authelia
+mkdir -p "$d" "$1/caddy"
+umask 077
+# argon2id PASSWORD prints its PHC string, with Authelia's defaults.
+argon2id() {
+	openssl rand -out "$d/.salt" 16
+	hash=$(openssl kdf -keylen 32 -kdfopt pass:"$1" \
+		-kdfopt hexsalt:"$(od -An -tx1 "$d/.salt" | tr -d ' \n')" -kdfopt iter:3 -kdfopt memcost:65536 \
+		-kdfopt lanes:4 -binary ARGON2ID | openssl base64 -A | tr -d '=')
+	salt=$(openssl base64 -A -in "$d/.salt" | tr -d '=')
+	rm "$d/.salt"
+	printf '$argon2id$v=19$m=65536,t=3,p=4$%s$%s' "$salt" "$hash"
+}
+cat >"$d/users.yml" <<USERS
+users:
+  alice:
+    displayname: 'Alice'
+    email: 'alice@werewolf.internal'
+    password: '$(argon2id werewolf-check-pass-1)'
+  bob:
+    displayname: 'Bob'
+    email: 'bob@werewolf.internal'
+    password: '$(argon2id werewolf-check-pass-1)'
+USERS
+openssl rand -hex 32 >"$d/session-secret"
+openssl rand -hex 32 >"$d/storage-key"
+echo '{"domain":"werewolf.internal"}' >"$d/settings.json"
+echo '{"domain":"werewolf.internal"}' >"$1/caddy/settings.json"

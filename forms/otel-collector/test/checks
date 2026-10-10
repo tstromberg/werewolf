@@ -1,0 +1,16 @@
+# The collector takes a span over HTTPS with the senders' token, once its
+# validate has passed and it has started: 200 and an empty partial success.
+ok  otel-http-span   s='{"resourceSpans":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"werewolf-check"}}]},"scopeSpans":[{"spans":[{"traceId":"5b8efff798038103d269b633813fc60c","spanId":"eee19b7ec3c1b174","name":"check","kind":1,"startTimeUnixNano":"1","endTimeUnixNano":"2"}]}]}]}'; i=0; until curl -s -o /tmp/otel.out -w '%{http_code}' --cacert /run/config/otel-collector/tls-cert -H 'Authorization: Bearer werewolf-check-token' -H 'Content-Type: application/json' -d "$s" https://localhost:4318/v1/traces 2>/dev/null | grep -qx 200; do i=$((i + 1)); [ $i -le 90 ] || { echo "no span taken in 90 s"; exit 1; }; sleep 1; done; grep -q partialSuccess /tmp/otel.out
+# And over gRPC, an export of no spans: grpc-status 0 in the trailers.
+ok  otel-grpc-span   printf '\000\000\000\000\000' >/tmp/otel.grpc; curl -sv --http2 --cacert /run/config/otel-collector/tls-cert -H 'Authorization: Bearer werewolf-check-token' -H 'Content-Type: application/grpc' -H 'TE: trailers' --data-binary @/tmp/otel.grpc https://localhost:4317/opentelemetry.proto.collector.trace.v1.TraceService/Export 2>&1 | grep -qi '^< grpc-status: 0'
+# The configuration is the image's with the endpoint filled in: no debug
+# exporter, zpages, pprof or health check. Nothing on the machine listens
+# but the collector on :4317 and :4318, on loopback either: its own
+# metrics (:8888) are off. The key and the tokens are its user's alone.
+ok  otel-config      c=/run/svc/otel-collector/config.json; grep -q '"endpoint": *"127\.0\.0\.1:443"' $c || { echo "no endpoint in $c"; exit 1; }; ! grep -oE 'debug|zpages|pprof|health_check' $c || exit 1; l=$(netstat -ltn | awk 'NR > 2 { n = split($4, a, ":"); print a[n] }' | sort -u | tr '\n' ' '); [ "$l" = '4317 4318 ' ] || { echo "listening: $l"; exit 1; }; for f in tls-key token export-token; do [ "$(stat -c '%U %a' /run/svc/otel-collector/$f)" = 'otelcol 600' ] || { echo "$f: $(stat -c '%U %a' /run/svc/otel-collector/$f)"; exit 1; }; done
+# The attack: a span without the token, and with a wrong one, is refused,
+# 401 over HTTP and Unauthenticated (16) over gRPC; plain HTTP to :4318
+# gets no further than TLS.
+ok  otel-no-token    c='--cacert /run/config/otel-collector/tls-cert -H Content-Type:application/json -d {} https://localhost:4318/v1/traces'; [ "$(curl -s -o /dev/null -w '%{http_code}' $c)" = 401 ] && [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer werewolf-check-wrong' $c)" = 401 ] && [ "$(curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer werewolf-check-export' $c)" = 401 ]
+ok  otel-grpc-no-token g='--http2 --cacert /run/config/otel-collector/tls-cert -H Content-Type:application/grpc -H TE:trailers --data-binary @/tmp/otel.grpc https://localhost:4317/opentelemetry.proto.collector.trace.v1.TraceService/Export'; curl -sv $g 2>&1 | grep -qi '^< grpc-status: 16' && curl -sv -H 'Authorization: Bearer werewolf-check-wrong' $g 2>&1 | grep -qi '^< grpc-status: 16'
+ok  otel-tls-only    printf 'POST /v1/traces HTTP/1.0\r\nAuthorization: Bearer werewolf-check-token\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}' | nc -w 5 127.0.0.1 4318 | grep -q 'Client sent an HTTP request to an HTTPS server'

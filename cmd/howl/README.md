@@ -20,7 +20,7 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 | `ssh`, `console`, `stop`, `delete` | reach, read or remove a machine; with no NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
-| `form ... -o DIR` | writes an ad-hoc form ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same flags |
+| `form [-f FILE] ... -o DIR` | writes a form from a manifest and the line, whose flags are form.yaml's keys ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same |
 | `_build`, `_bhyve`, `_firecracker`, `_unpack` | internal: the Makefile's image, slot, disk and qcow2 targets (`--build`, `--programs`, `--app-root`, `--disk`, `--disk-mib`, `--disk-args` take make's BUILD, PROGRAMS, APP, DISK, DISK_MIB, DISK_ARGS); two supervisors; the OCI unpacker ([oci.md](../../docs/design/oci.md)) |
 
 ## Goals
@@ -55,7 +55,7 @@ the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed), built as 
 | --- | --- | --- |
 | lima | vz VM booting its own UEFI disk from its slots, so it updates in place; Lima-managed, on Lima's network, if the form has sshd and bash, else on vzNAT and the DHCP lease | limactl |
 | bhyve | under `howl _bhyve` via daemon(8); slirp, loopback forwards | doas/sudo, vmm, bhyve-firmware |
-| firecracker | kernel and stage0 booted directly under `howl _firecracker`, so it does not update in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, sudo/doas |
+| firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
 | proxmox | `qm` over ssh to `PROXMOX_HOST`; disks on `PROXMOX_STORAGE` (local-lvm), network on `PROXMOX_BRIDGE` (vmbr0); x86_64 only | ssh to a node as root |
 | gcp | image via a `gs://PROJECT-werewolf-images` bucket | gcloud |

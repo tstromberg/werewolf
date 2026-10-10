@@ -1,0 +1,28 @@
+# Caddy for the pi-hole form: HTTPS for the machine's domain (DOMAIN; howl
+# --domain), with a certificate Caddy gets itself, and :80 sent there;
+# Pi-hole's web interface behind it, which asks for its password. leash
+# starts Caddy (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which this Caddy does not declare.
+		protocols h1 h2
+	}
+}
+
+{$DOMAIN} {
+	header -Server
+	redir / /admin/
+	reverse_proxy 127.0.0.1:8080
+}

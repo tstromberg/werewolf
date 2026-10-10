@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/umami/test/config DIR: the umami form's config for make check, in
+# DIR: its domain, localhost, for which Caddy's own CA signs; the key
+# Umami signs logins with; and its administrator's password,
+# werewolf-check-pass-1, as htpasswd -nbBC 10 made its hash, which
+# test/checks signs in with.
+set -eu
+mkdir -p "$1/umami" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-app-secret-0123456789abcdef >"$1/umami/app-secret"
+printf '%s\n' '$2y$10$rNz9henR/34H8GV/3KeyS.ImB6KqDJCgXO0SF14H14/49nuXbuBFS' >"$1/umami/admin-hash"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

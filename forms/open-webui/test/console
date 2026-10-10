@@ -1,0 +1,10 @@
+# What the open-webui form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-open-webui; test/boot; forms/demo/test/console has the
+# format). Open WebUI, given no administrator's password, parks before it
+# migrates or serves anything, and says why, so no visitor claims it;
+# Ollama, PostgreSQL and Caddy run. make check-open-webui boots it with
+# its config, and checks it serves.
+
+seen    owui-needs-config  leash: \{"event":"down","service":"open-webui","why":"secret WEBUI_ADMIN_PASSWORD: /run/config/open-webui/admin-password: FileNotFound"\}
+unseen  others-down        leash: \{"event":"down","service":"(caddy|postgres|ollama)"

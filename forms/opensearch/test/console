@@ -1,0 +1,9 @@
+# What the opensearch form, booted as it ships, without a shell and
+# without a config, must say on its console (make
+# check-shellfree-opensearch; test/boot; forms/demo/test/console has the
+# format). Given no password, OpenSearch parks before opensearch-setup
+# writes anything or the JVM starts, and says why. make check-opensearch
+# boots it with its config, and checks it serves.
+
+seen    os-needs-config  leash: \{"event":"down","service":"opensearch","why":"config admin-password: FileNotFound"\}
+unseen  setup-ran        opensearch-setup: configuration written

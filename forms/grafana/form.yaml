@@ -3,10 +3,10 @@
 # at the machine's base URL with a certificate from Let's Encrypt. Grafana
 # runs from its project's OCI image, baked into the verified root, its own
 # binary started in place of the image's shell script. Its administrator
-# and secret key come from the config before it serves; nobody signs up,
-# strangers see nothing, and it phones nothing home. Its database and the
-# plugins its administrator installs are in /data/svc/grafana. See
-# forms/grafana/README.md.
+# comes from the config before it serves, its secret key is its own,
+# nobody signs up, strangers see nothing, and it phones nothing home. Its
+# database and the plugins its administrator installs are in
+# /data/svc/grafana. See forms/grafana/README.md.
 base: prod
 
 with: [caddy]
@@ -22,23 +22,34 @@ services:
   # reaches data sources and grafana.com's plugin catalog on the ports they
   # serve. It starts each data source's backend, a program of the image's
   # (data/plugins-bundled), so its pledge has exec. The administrator's
-  # password, the key that encrypts data-source credentials, and the root
-  # URL its links use come from the config: Grafana's own default key is
-  # public, so a missing one parks the service.
+  # password comes from the config; Grafana's own default secret key is
+  # public, so it never runs with it.
   grafana:
-    image: docker.io/grafana/grafana@sha256:b28bae15e219c998fb0e0424ed724930cc61b1f61fb404d47c862f9a23f9e572
+    image: docker.io/grafana/grafana:13.2
     exec: /usr/share/grafana/bin/grafana server --homepath /usr/share/grafana --config /etc/grafana/grafana.ini
     # netlink: Go's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    # The data sources' backends: a program of the image's for each, whose
+    # name ends in the architecture, beneath one directory of the verified
+    # root.
+    run: /usr/share/grafana/data/plugins-bundled/
     listen: [tcp/3000 loopback]
     connect: [tcp/443 tcp/80 tcp/9090 tcp/3100 udp/53 tcp/53]
-    secret:
-      - GF_SECURITY_ADMIN_PASSWORD /run/config/grafana/admin-password
-      - GF_SECURITY_SECRET_KEY /run/config/grafana/secret-key
-      - GF_SERVER_ROOT_URL /run/config/grafana/root-url optional
+    # grafana-setup (forms/grafana/cmd/grafana-setup) keeps the secret key in
+    # /data: the config's, else one it makes once. Grafana reads it from
+    # there by $__file{}, below.
+    before: /usr/lib/werewolf/grafana-setup
+    secret: GF_SECURITY_ADMIN_PASSWORD /run/config/grafana/admin-password
+    config:
+      - secret-key /run/config/grafana/secret-key optional
+      - settings /run/config/grafana/settings.json
+    # The root URL its links use, Caddy's site too: one setting, base-url.
+    setting: base-url url as GF_SERVER_ROOT_URL
+    render: env site
     memory: 1024
     nofile: 65536
     env:
+      - GF_SECURITY_SECRET_KEY=$__file{/data/secret-key}
       - GF_PATHS_DATA=/data
       - GF_PATHS_LOGS=/data/log
       - GF_PATHS_PLUGINS=/data/plugins

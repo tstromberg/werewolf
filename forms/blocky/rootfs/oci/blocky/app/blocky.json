@@ -1,0 +1,112 @@
+{
+  "upstreams": {
+    "groups": {
+      "default": [
+        "tcp-tls:dns.quad9.net",
+        "tcp-tls:one.one.one.one"
+      ]
+    },
+    "strategy": "parallel_best",
+    "timeout": "2s"
+  },
+  "bootstrapDns": [
+    {
+      "upstream": "tcp-tls:dns.quad9.net",
+      "ips": [
+        "9.9.9.9",
+        "149.112.112.112"
+      ]
+    },
+    {
+      "upstream": "tcp-tls:one.one.one.one",
+      "ips": [
+        "1.1.1.1",
+        "1.0.0.1"
+      ]
+    }
+  ],
+  "connectIPVersion": "v4",
+  "blocking": {
+    "denylists": {
+      "ads": [
+        "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts"
+      ],
+      "strangers": [
+        "/.*/\n"
+      ]
+    },
+    "clientGroupsBlock": {
+      "default": [
+        "strangers"
+      ],
+      "127.0.0.0/8": [
+        "ads"
+      ],
+      "10.0.0.0/8": [
+        "ads"
+      ],
+      "172.16.0.0/12": [
+        "ads"
+      ],
+      "192.168.0.0/16": [
+        "ads"
+      ],
+      "100.64.0.0/10": [
+        "ads"
+      ],
+      "169.254.0.0/16": [
+        "ads"
+      ],
+      "::1/128": [
+        "ads"
+      ],
+      "fc00::/7": [
+        "ads"
+      ],
+      "fe80::/10": [
+        "ads"
+      ]
+    },
+    "blockType": "zeroIp",
+    "blockTTL": "1h",
+    "loading": {
+      "strategy": "fast",
+      "refreshPeriod": "24h",
+      "downloads": {
+        "timeout": "30s",
+        "attempts": 3,
+        "cooldown": "10s"
+      }
+    }
+  },
+  "rateLimit": {
+    "enable": true,
+    "rate": 5,
+    "allowlist": [
+      "127.0.0.0/8",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "100.64.0.0/10",
+      "169.254.0.0/16",
+      "::1/128",
+      "fc00::/7",
+      "fe80::/10"
+    ]
+  },
+  "caching": {
+    "minTime": "5m",
+    "prefetching": true
+  },
+  "queryLog": {
+    "type": "none"
+  },
+  "log": {
+    "level": "info",
+    "format": "json",
+    "privacy": true
+  },
+  "ports": {
+    "dns": 53
+  }
+}

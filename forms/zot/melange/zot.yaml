@@ -1,0 +1,50 @@
+# zot for werewolf's zot form, as Wolfi would package it: built by melange
+# in Wolfi's environment with Wolfi's Go, static (no cgo), from the release
+# tag's commit, as upstream's Makefile builds zot-minimal: the registry
+# alone, with no extensions (search, sync, UI, metrics exporter), so none
+# can be turned on by a config line. Go fetches its modules, which go.sum
+# pins. Offered to wolfi-dev/os as it is; when Wolfi ships it, the form
+# names the package and this file goes.
+package:
+  name: zot
+  version: 2.1.22
+  epoch: 0
+  description: OCI-native container image registry
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - go-1.27
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/project-zot/zot
+      tag: v${{package.version}}
+      expected-commit: 6bbc7e56db2b7a64eee589324efe5813245e3a28
+
+  - runs: |
+      b=zotregistry.dev/zot/v2/pkg/buildinfo
+      CGO_ENABLED=0 GOEXPERIMENT=jsonv2 go build -trimpath -ldflags="-s -w \
+        -X $b.ReleaseTag=v${{package.version}} \
+        -X $b.Commit=$(git rev-parse HEAD) \
+        -X $b.BinaryType=minimal \
+        -X $b.GoVersion=$(go env GOVERSION)" \
+        -o zot ./cmd/zot
+      ./zot --version
+      install -Dm755 zot ${{targets.destdir}}/usr/bin/zot
+
+update:
+  enabled: true
+  github:
+    identifier: project-zot/zot
+    strip-prefix: v

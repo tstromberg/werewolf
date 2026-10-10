@@ -1,0 +1,13 @@
+#!/bin/sh
+# forms/adguard-home/test/config DIR: the adguard-home form's config for
+# make check, in DIR: its domain, localhost, for which Caddy's own CA
+# signs; its one user, admin, whose password is werewolf-check-admin
+# (htpasswd -nbBC 10 made the hash), which test/checks signs in as; and
+# one upstream and one blocklist, which test/checks finds in its
+# configuration.
+set -eu
+mkdir -p "$1/caddy" "$1/adguard-home"
+umask 077
+printf '%s\n' '$2y$10$btfxUBUbv4aO/vk/tPmfEOLRT74oizWzXDFtL8Fs.M2QxmKi0AYiu' >"$1/caddy/admin-hash"
+echo '{"domain":"localhost","admin":"admin"}' >"$1/caddy/settings.json"
+echo '{"upstreams":["tls://dns.quad9.net"],"blocklists":["https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt"]}' >"$1/adguard-home/settings.json"

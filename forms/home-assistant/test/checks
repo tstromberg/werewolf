@@ -1,0 +1,22 @@
+# Home Assistant answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once it has started: a first start takes
+# a while, so wait. It runs as its image's user, without capabilities.
+ok  ha-user          p=$(head -n 1 /run/cgroup/svc/home-assistant/cgroup.procs); u=$(grep '^_oci-home-assistant:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  ha-up            i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/api/onboarding 2>/dev/null | grep -q '"step"'; do i=$((i + 1)); [ $i -le 300 ] || { echo "no /api/onboarding in 300 s"; exit 1; }; sleep 1; done
+# Home Assistant itself listens on loopback alone.
+ok  ha-loopback      ! grep -q ':1FBB 00000000:0000 0A' /proc/net/tcp6 && grep -q '0100007F:1FBB 00000000:0000 0A' /proc/net/tcp && ! grep -q '00000000:1FBB 00000000:0000 0A' /proc/net/tcp
+# Onboarding is done: every step, by home-assistant-setup.
+ok  ha-onboarded     o=$(wget -q -T 5 --no-check-certificate -O - https://localhost/api/onboarding) && ! echo "$o" | grep -q '"done":false' && for s in user core_config analytics integration; do echo "$o" | grep -q "\"step\":\"$s\",\"done\":true" || exit 1; done
+# The API answers no one without a token.
+ok  ha-api-locked    wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/ 2>&1 | grep -q 'HTTP/1.1 401'
+# The owner logs in with the config's password, gets a token, and the API
+# answers it; the location is the settings'; discovery is not loaded.
+ok  ha-login         c=https://localhost/; f=$(wget -q -T 10 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data "{\"client_id\":\"$c\",\"handler\":[\"homeassistant\",null],\"redirect_uri\":\"$c?auth_callback=1\"}" ${c}auth/login_flow | sed -n 's/.*"flow_id":"\([0-9a-zA-Z]*\)".*/\1/p') && [ -n "$f" ] && r=$(wget -q -T 30 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data "{\"client_id\":\"$c\",\"username\":\"owner\",\"password\":\"werewolf-check-owner\"}" ${c}auth/login_flow/$f | sed -n 's/.*"result":"\([0-9a-zA-Z]*\)".*/\1/p') && [ -n "$r" ] && wget -q -T 10 --no-check-certificate -O /tmp/ha.token --post-data "grant_type=authorization_code&code=$r&client_id=$c" ${c}auth/token && t=$(sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p' /tmp/ha.token) && wget -q -T 5 --no-check-certificate -O - --header "Authorization: Bearer $t" ${c}api/ | grep -q 'API running' && wget -q -T 5 --no-check-certificate -O /tmp/ha.config --header "Authorization: Bearer $t" ${c}api/config && grep -q '"time_zone":"Europe/Berlin"' /tmp/ha.config && grep -q '"country":"DE"' /tmp/ha.config && ! grep -Eq '"(zeroconf|ssdp|dhcp|bluetooth|usb)"' /tmp/ha.config
+# A wrong password gets no code.
+ok  ha-wrong-password c=https://localhost/; f=$(wget -q -T 10 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data "{\"client_id\":\"$c\",\"handler\":[\"homeassistant\",null],\"redirect_uri\":\"$c?auth_callback=1\"}" ${c}auth/login_flow | sed -n 's/.*"flow_id":"\([0-9a-zA-Z]*\)".*/\1/p') && [ -n "$f" ] && wget -q -T 30 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data "{\"client_id\":\"$c\",\"username\":\"owner\",\"password\":\"wrong-password-1\"}" ${c}auth/login_flow/$f | grep -q 'invalid_auth'
+# The owner is the one home-assistant-setup made; its files are the
+# service's alone, and leash's copy of the password is gone.
+ok  ha-private       u=$(grep '^_oci-home-assistant:' /etc/passwd | cut -d: -f3); d=/data/svc/home-assistant; grep -q '"is_owner": true' $d/.storage/auth && [ "$(stat -c '%u:%a' $d)" = "$u:700" ] && [ "$(stat -c '%u:%a' $d/.storage/auth_provider.homeassistant)" = "$u:600" ] && [ ! -e /run/svc/home-assistant/owner-password ]
+# The attack: a visitor, as the first one to reach a new Home Assistant,
+# tries to make themselves its owner through onboarding, and is refused.
+ok  ha-onboarding-closed wget -q -T 10 --no-check-certificate -S -O /dev/null --header 'Content-Type: application/json' --post-data '{"client_id":"https://localhost/","name":"Mallory","username":"mallory","password":"mallory-password-1","language":"en"}' https://localhost/api/onboarding/users 2>&1 | grep -q 'HTTP/1.1 403' && ! grep -q mallory /data/svc/home-assistant/.storage/auth_provider.homeassistant

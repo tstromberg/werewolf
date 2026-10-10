@@ -1,8 +1,9 @@
 # OCI images
 
 Proposed, 2026-10-06. Half built, 2026-10-08, by [adhoc.md](adhoc.md):
-images baked into the verified root by `howl --oci` (cmd/howl/oci.zig,
-cmd/init/oci.zig, leash's `root` and `dir`). Not built: pulling at boot.
+images baked into the verified root by `howl` (cmd/howl/oci.zig,
+cmd/init/oci.zig, leash's `root` and `dir`); 2026-10-10, by every build
+of a form whose service names `image:` (below). Not built: pulling at boot.
 
 ## Summary
 
@@ -48,6 +49,16 @@ fence, init binds the service's `/proc`, devices and own `noexec`
 directories (cmd/init/oci.zig), and the mount tool opens each target
 without following links. The tree is in the dm-verity root, so no link
 appears in between, the race runc's CVE-2021-30465 used.
+
+**Baked by the build (built).** A form's `image: REPO:TAG` is resolved at
+every build, so the form follows the image's releases; `exec:` replaces
+a script entrypoint, `write:` binds `/data/svc/NAME` paths. howl bakes it
+into `BUILD/oci/FORM/NAME-KEY`, KEY hashing what the bake depends on,
+renamed into place whole, and lays it after the form's rootfs; an
+unreachable registry keeps the last bake. The build copies the root's
+`/usr/lib/werewolf` into each tree (erofs keeps one copy of the data),
+for a form's `before` helpers and settings; `run DIR/` lets an image run
+what is beneath DIR.
 
 **Pulled at boot (proposed).** An `oci` file in the config tar names
 `image REF@sha256:HEX`, never a tag, and a service's lines. Before fence,

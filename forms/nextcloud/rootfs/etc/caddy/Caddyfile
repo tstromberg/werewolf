@@ -1,0 +1,77 @@
+# Caddy for the nextcloud form: HTTPS at the machine's base URL (BASE_URL;
+# howl --base-url), with a certificate Caddy gets itself, and :80 sent
+# there; without one, plain HTTP on :80. Nextcloud's files are served from
+# the image, apps from the app store from /data, and its PHP by php-fpm on
+# its socket. leash starts Caddy (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris; no body timeout, which would cut off an upload
+		# on a slow line.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+}
+
+{$BASE_URL::80} {
+	root * /usr/share/nextcloud
+	encode zstd gzip
+
+	header {
+		-Server
+		-X-Powered-By
+		Strict-Transport-Security "max-age=15552000"
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		X-Permitted-Cross-Domain-Policies none
+		X-Robots-Tag "noindex, nofollow"
+	}
+
+	# Calendars, contacts and the fediverse find Nextcloud here.
+	redir /.well-known/carddav /remote.php/dav/ 301
+	redir /.well-known/caldav /remote.php/dav/ 301
+	redir /.well-known/webfinger /index.php/.well-known/webfinger 301
+	redir /.well-known/nodeinfo /index.php/.well-known/nodeinfo 301
+
+	# What is not the site: its code's insides, the web updater (Nextcloud
+	# is upgraded by the image) and every dotfile. Its config and data are
+	# on /data, beyond this root, but are refused by name all the same.
+	@hidden {
+		path */.* /3rdparty/* /AUTHORS /COPYING /README /build/* /config/* /console.php /cron.php /data/* /db_structure* /lib/* /occ /templates/* /tests/* /updater/* /composer.* /package.json /package-lock.json /REUSE.toml
+	}
+	respond @hidden 404
+	# PHP runs only by Nextcloud's own entry points, as its nginx advice
+	# has it: never a file of the code by its path.
+	@script {
+		path_regexp \.php(/|$)
+		not path_regexp ^/(index|remote|public|status|ocs/v[12]|core/ajax/update)\.php(/|$)
+		not path /ocs-provider/* /ocm-provider/*
+	}
+	respond @script 404
+
+	# Apps from the app store: their scripts, styles and images, never
+	# their PHP, which runs through index.php, or their dotfiles.
+	handle_path /custom_apps/* {
+		root * /data/svc/nextcloud/apps
+		@code path *.php */.*
+		respond @code 404
+		file_server
+	}
+
+	php_fastcgi unix//run/svc/nextcloud/php.sock {
+		env front_controller_active true
+	}
+	file_server
+}

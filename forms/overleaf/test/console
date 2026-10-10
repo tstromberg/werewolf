@@ -1,0 +1,9 @@
+# What the overleaf form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-overleaf;
+# test/boot; forms/demo/test/console has the format). Overleaf, given no
+# administrator's password, parks before it migrates or serves anything,
+# and says why; the compiler, MongoDB, Valkey and Caddy run. make
+# check-overleaf boots it with its config, and checks it serves.
+
+seen    overleaf-needs-config  leash: \{"event":"down","service":"overleaf","why":"config admin-password: FileNotFound"\}
+unseen  others-down            leash: \{"event":"down","service":"(caddy|clsi|mongo|valkey)"

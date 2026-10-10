@@ -45,8 +45,8 @@ pub const usage =
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl upload DISK --on " ++ Platform.list(.cloud, "|") ++ "\n" ++
     \\       howl build-apk RECIPE [--arch ARCH] [--verbose]   a form's own package, from a melange recipe
-    \\       howl form --with FORM,... --package PKG,... --oci NAME=REF --KEY LINE --KEY.SUB VALUE -o DIR   a form from the line, kept;
-    \\            build, run, create and pack take the same flags: one form alone is run as it is, more is generated (-n shows it)
+    \\       howl form [-f FILE] --with FORM,... --packages PKG,... --KEY LINE --KEY.SUB VALUE --services.NAME.KEY LINE -o DIR   a form from a manifest and the line, kept;
+    \\            build, run, create and pack take the same flags, form.yaml's keys: one form alone is run as it is, more is generated (-n shows it)
     \\
 ;
 

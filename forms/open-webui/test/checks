@@ -1,0 +1,29 @@
+# Open WebUI answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its migrations have run in
+# PostgreSQL and its administrator is made: wait.
+ok  owui-health      i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/health 2>/dev/null | grep -q '"status":true'; do i=$((i + 1)); [ $i -le 180 ] || { echo "no /health in 180 s"; exit 1; }; sleep 1; done
+ok  owui-user        p=$(head -n 1 /run/cgroup/svc/open-webui/cgroup.procs); u=$(grep '^open-webui:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+# Plain HTTP is sent to HTTPS.
+ok  owui-https       wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
+# The administrator is the config's, and its password works; a wrong one
+# does not.
+ok  owui-admin       wget -q -T 10 --no-check-certificate -O /tmp/owui.admin --header 'Content-Type: application/json' --post-data '{"email":"admin@example.test","password":"werewolf-check-pass-1"}' https://localhost/api/v1/auths/signin && grep -q '"role":"admin"' /tmp/owui.admin && grep -q '"token":"' /tmp/owui.admin
+ok  owui-wrong-password ! wget -q -T 10 --no-check-certificate -O /dev/null --header 'Content-Type: application/json' --post-data '{"email":"admin@example.test","password":"wrong"}' https://localhost/api/v1/auths/signin 2>/dev/null
+# Its data is PostgreSQL's, not a SQLite file beside its uploads, and its
+# signing key was made once, its own, 0600.
+ok  owui-data        u=$(grep '^open-webui:' /etc/passwd | cut -d: -f3); [ ! -e /data/svc/open-webui/webui.db ] && [ "$(stat -c '%u:%a' /data/svc/open-webui/.webui_secret_key)" = "$u:600" ] && [ "$(stat -c %s /data/svc/open-webui/.webui_secret_key)" -ge 43 ]
+# It reaches Ollama, on loopback alone: nothing but 127.0.0.1 listens on
+# 11434 (0x2CAA).
+ok  owui-ollama      t=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' /tmp/owui.admin); wget -q -T 10 --no-check-certificate -O - --header "Authorization: Bearer $t" https://localhost/ollama/api/version | grep -q '"version"' && [ "$(awk '$4 == "0A" && $2 ~ /:2CAA$/ { print $2 }' /proc/net/tcp /proc/net/tcp6)" = 0100007F:2CAA ]
+# Fetches for users go to public addresses alone (SSRF): fence's lines
+# for its user.
+ok  owui-public      u=$(grep '^open-webui:' /etc/passwd | cut -d: -f3); grep -qx "connect $u tcp 443 public" /usr/share/werewolf/net && grep -qx "connect $u tcp 80 public" /usr/share/werewolf/net
+# A browser on another site gets no CORS grant; the machine's own does.
+ok  owui-cors        ! wget -q -T 5 --no-check-certificate -S -O /dev/null --header 'Origin: https://evil.example' https://localhost/api/config 2>&1 | grep -qi 'access-control-allow-origin' && wget -q -T 5 --no-check-certificate -S -O /dev/null --header 'Origin: https://localhost' https://localhost/api/config 2>&1 | grep -qi 'access-control-allow-origin: https://localhost'
+# Nobody signs up, and the API answers no one without a login.
+ok  owui-signup-closed ! wget -q -T 10 --no-check-certificate -O /dev/null --header 'Content-Type: application/json' --post-data '{"name":"x","email":"stranger@example.test","password":"stranger-pass-1"}' https://localhost/api/v1/auths/signup 2>/dev/null && ! wget -q -T 10 --no-check-certificate -O /dev/null --header 'Content-Type: application/json' --post-data '{"email":"stranger@example.test","password":"stranger-pass-1"}' https://localhost/api/v1/auths/signin 2>/dev/null
+ok  owui-unauth      wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/v1/users/ 2>&1 | grep -q 'HTTP/1.1 401' && wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/api/v1/functions/ 2>&1 | grep -q 'HTTP/1.1 401'
+# The administrator adds a user, who signs in, but may not add a function
+# or a tool: each is Python the server runs.
+ok  owui-add-user    t=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' /tmp/owui.admin); wget -q -T 10 --no-check-certificate -O /dev/null --header "Authorization: Bearer $t" --header 'Content-Type: application/json' --post-data '{"name":"check","email":"user@example.test","password":"werewolf-check-pass-2","role":"user"}' https://localhost/api/v1/auths/add && wget -q -T 10 --no-check-certificate -O /tmp/owui.user --header 'Content-Type: application/json' --post-data '{"email":"user@example.test","password":"werewolf-check-pass-2"}' https://localhost/api/v1/auths/signin && grep -q '"role":"user"' /tmp/owui.user
+ok  owui-no-user-code t=$(sed -n 's/.*"token":"\([^"]*\)".*/\1/p' /tmp/owui.user); c='{"id":"check_code","name":"check","content":"import os\\nclass Pipe:\\n    def pipe(self, body):\\n        return os.getcwd()\\n","meta":{"description":"x"}}'; wget -q -T 10 --no-check-certificate -S -O /dev/null --header "Authorization: Bearer $t" --header 'Content-Type: application/json' --post-data "$c" https://localhost/api/v1/functions/create 2>&1 | grep -q 'HTTP/1.1 401' && wget -q -T 10 --no-check-certificate -S -O /dev/null --header "Authorization: Bearer $t" --header 'Content-Type: application/json' --post-data "$c" https://localhost/api/v1/tools/create 2>&1 | grep -q 'HTTP/1.1 401'

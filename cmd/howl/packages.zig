@@ -240,7 +240,11 @@ pub fn kernel(b: *B) !void {
     const stamp = try b.path("{s}/kernel/unpacked", .{b.p.build});
     Dir.cwd().access(b.io, target, .{}) catch Dir.cwd().deleteFile(b.io, stamp) catch {};
     const began = try b.begin(stamp, &.{ rootfs, b.self }) orelse return;
-    const x = try b.path("{s}/kernel/x", .{b.p.build});
+    // Unpacked beside BUILD/kernel/x and renamed in, so builds side by side
+    // rarely see a half-made tree (there is a moment with none).
+    const final = try b.path("{s}/kernel/x", .{b.p.build});
+    const nonce = Io.Clock.real.now(b.io).nanoseconds;
+    const x = try b.path("{s}.{d}", .{ final, nonce });
     try Dir.cwd().deleteTree(b.io, x);
     try Dir.cwd().createDirPath(b.io, x);
     var config: ?[]const u8 = null;
@@ -267,18 +271,15 @@ pub fn kernel(b: *B) !void {
     );
     const was = Dir.cwd().readFileAlloc(b.io, target, b.gpa, .limited(image.max_gunzip)) catch "";
     if (!mem.eql(u8, was, kern)) try b.write(target, kern);
+    const old = try b.path("{s}.old.{d}", .{ final, nonce });
+    Dir.rename(Dir.cwd(), final, Dir.cwd(), old, b.io) catch {};
+    // Another build's tree landing first is as good as ours.
+    Dir.rename(Dir.cwd(), x, Dir.cwd(), final, b.io) catch |err|
+        try b.steps.note("{s}: {t}; keeping the one there", .{ final, err });
+    Dir.cwd().deleteTree(b.io, x) catch {};
+    Dir.cwd().access(b.io, final, .{}) catch |err| return b.fail("{s}: {t}", .{ final, err });
+    Dir.cwd().deleteTree(b.io, old) catch {};
     try b.write(stamp, "");
-    try b.done(target, began);
-}
-
-/// vmlinux unpacks x86_64's bzImage into the ELF kernel Firecracker boots.
-pub fn vmlinux(b: *B) !void {
-    const src = try b.path("{s}/vmlinuz", .{b.p.build});
-    const target = try b.path("{s}/vmlinux", .{b.p.build});
-    const began = try b.begin(target, &.{src}) orelse return;
-    const elf = image.vmlinux(b.gpa, try b.read(src, image.max_gunzip)) catch |err|
-        return b.fail("{s}: {t}", .{ src, err });
-    try b.write(target, elf);
     try b.done(target, began);
 }
 

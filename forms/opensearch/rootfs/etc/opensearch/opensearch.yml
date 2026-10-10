@@ -1,0 +1,36 @@
+# OpenSearch's configuration on werewolf: one node, its data on /data,
+# HTTPS on :9200 for everyone, its transport on loopback alone, both in
+# TLS with the config's certificate (forms/opensearch/README.md).
+# opensearch-setup copies it to /run/svc/opensearch, its configuration
+# directory, at each start.
+cluster.name: opensearch
+node.name: opensearch
+discovery.type: single-node
+path.data: /data/svc/opensearch
+path.logs: /run/svc/opensearch
+http.host: 0.0.0.0
+http.port: 9200
+transport.host: 127.0.0.1
+transport.port: 9300
+action.destructive_requires_name: true
+
+# The security plugin: the config's certificate, key and CA, never a
+# demo certificate; the security index made from opensearch-setup's files
+# at the first start; security events on the console.
+plugins.security.ssl.http.enabled: true
+plugins.security.ssl.http.pemcert_filepath: tls-cert
+plugins.security.ssl.http.pemkey_filepath: tls-key
+plugins.security.ssl.http.pemtrustedcas_filepath: tls-ca
+plugins.security.ssl.http.enabled_protocols: ["TLSv1.3", "TLSv1.2"]
+plugins.security.ssl.transport.pemcert_filepath: tls-cert
+plugins.security.ssl.transport.pemkey_filepath: tls-key
+plugins.security.ssl.transport.pemtrustedcas_filepath: tls-ca
+plugins.security.ssl.transport.enforce_hostname_verification: false
+plugins.security.ssl.transport.enabled_protocols: ["TLSv1.3"]
+plugins.security.allow_unsafe_democertificates: false
+plugins.security.allow_default_init_securityindex: true
+plugins.security.restapi.roles_enabled: ["all_access"]
+plugins.security.system_indices.enabled: true
+plugins.security.audit.type: log4j
+plugins.security.audit.config.log4j.logger_name: audit
+plugins.security.audit.config.log4j.level: INFO

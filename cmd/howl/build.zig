@@ -12,6 +12,7 @@ const howl = @import("howl.zig");
 const adhoc = @import("adhoc.zig");
 const app = @import("app.zig");
 const melange = @import("melange.zig");
+const oci = @import("oci.zig");
 const progress = @import("progress.zig");
 const packages = @import("packages.zig");
 const slot = @import("slot.zig");
@@ -33,8 +34,6 @@ pub const Goals = struct {
     disk: bool = false,
     /// qcow2 is OUT/disk.qcow2, the disk a release publishes.
     qcow2: bool = false,
-    /// vmlinux is BUILD/vmlinux, x86_64's kernel for Firecracker.
-    vmlinux: bool = false,
     /// lock is the form's apko config and lock, for make's release-inputs.
     lock: bool = false,
 };
@@ -316,7 +315,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     const syntax = "_build --with FORM [--arch ARCH] [--dev] [--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
-        "[--verbose] image|slot|disk|qcow2|vmlinux...";
+        "[--verbose] image|slot|disk|qcow2...";
     var spec: Spec = .{ .form = "", .arch = undefined, .freeze = frozen() };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
@@ -367,8 +366,6 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     const ref = form orelse return why.refuse("{s}", .{syntax});
     spec.form = ref;
     spec.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
-    if (goals.vmlinux and spec.arch != .x86_64)
-        return why.refuse("vmlinux is x86_64's, for Firecracker", .{});
     if (app_dir != null and app_root != null)
         return why.refuse("--app or --app-root: one application", .{});
     if (!goals.disk and (spec.disk_path != null or spec.disk.args.len > 0))
@@ -611,6 +608,8 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         steps.why,
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
+    // The chain's images, baked before anything renders their services.
+    try oci.lay(&b);
     const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2;
     const suffix = try gpa.print("{s}{s}", .{
         if (s.dev) "-dev" else "",
@@ -618,7 +617,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     });
     const config = try b.path("{s}/form/{s}{s}.yaml", .{ p.build, b.name, suffix });
     const lock = try b.path("build/lock/{s}{s}.lock.json", .{ b.name, suffix });
-    if (goals.lock and !image_goals and !goals.vmlinux) {
+    if (goals.lock and !image_goals) {
         try packages.apkoConfig(&b, config);
         return packages.relock(&b, lock, config);
     }
@@ -640,7 +639,6 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         if (!ran.ok) return steps.fail("make programs failed");
     }
     try packages.kernel(&b);
-    if (goals.vmlinux) try packages.vmlinux(&b);
     if (!image_goals and !goals.lock) return;
     try packages.apkoConfig(&b, config);
     try packages.relock(&b, lock, config);

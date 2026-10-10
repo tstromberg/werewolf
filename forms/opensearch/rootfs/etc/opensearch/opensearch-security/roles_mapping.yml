@@ -1,0 +1,9 @@
+# admin holds all_access; any other user, the roles admin maps it to.
+_meta:
+  type: "rolesmapping"
+  config_version: 2
+all_access:
+  reserved: true
+  users:
+    - "admin"
+  description: "The administrator"

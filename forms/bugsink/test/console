@@ -1,0 +1,10 @@
+# What the bugsink form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-bugsink;
+# test/boot; forms/demo/test/console has the format). Bugsink, given no
+# secret key, parks before it migrates or serves anything, and says why;
+# with no domain, so does Caddy. make check-bugsink boots it with its
+# config, and checks it serves.
+
+seen    bugsink-needs-config  leash: \{"event":"down","service":"bugsink","why":"secret SECRET_KEY: /run/config/bugsink/secret-key: FileNotFound"\}
+seen    caddy-needs-domain    service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
+seen    caddy-parked          leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}

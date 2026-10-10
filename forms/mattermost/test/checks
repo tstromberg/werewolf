@@ -1,0 +1,18 @@
+# Mattermost answers through Caddy over HTTPS, with a certificate from
+# Caddy's own CA for localhost, once its migrations have run and
+# mattermost-setup has made the system admin: wait.
+ok  mm-ping          i=0; until wget -q -T 5 --no-check-certificate -O - https://localhost/api/v4/system/ping 2>/dev/null | grep -q '"status":"OK"'; do i=$((i + 1)); [ $i -le 300 ] || { echo "no ping in 300 s"; exit 1; }; sleep 1; done
+# Mattermost runs as its own user, with no capabilities, and reaches
+# public addresses alone.
+ok  mm-user          p=$(head -n 1 /run/cgroup/svc/mattermost/cgroup.procs); u=$(grep '^mattermost:' /etc/passwd | cut -d: -f3); grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -qx "connect $u tcp 443 public" /usr/share/werewolf/net
+# The system admin is the config's: it logs in, and is system admin.
+ok  mm-admin         wget -q -T 10 --no-check-certificate -O - --header 'Content-Type: application/json' --post-data '{"login_id":"admin","password":"werewolf-check-pass-1"}' https://localhost/api/v4/users/login | grep -q '"roles":"system_admin system_user"'
+# Its tables and configuration are in its own schema.
+ok  mm-schema        su -s /bin/sh postgres -c "psql -h /run/svc/postgres -d postgres -Atc \"SELECT count(*) FROM pg_tables WHERE schemaname = 'mattermost' AND tablename IN ('users', 'configurations')\"" | grep -qx 2
+# The attack: a stranger signs up without an invitation. Mattermost
+# refuses, and the account does not exist.
+ok  mm-no-signup     wget -q -T 10 --no-check-certificate -S -O /dev/null --header 'Content-Type: application/json' --post-data '{"email":"eve@example.com","username":"eve","password":"werewolf-check-eve-1"}' https://localhost/api/v4/users 2>&1 | grep -q 'HTTP/1.1 403' && wget -q -T 10 --no-check-certificate -S -O /dev/null --header 'Content-Type: application/json' --post-data '{"login_id":"eve","password":"werewolf-check-eve-1"}' https://localhost/api/v4/users/login 2>&1 | grep -q 'HTTP/1.1 401'
+# The attack: the admin uploads a plugin, which is code the server would
+# run. Uploads are off, and the environment wins over the console's
+# settings, so it is refused and nothing lands in the plugin directory.
+ok  mm-no-plugin     t=$(wget -q -T 10 --no-check-certificate -S -O /dev/null --header 'Content-Type: application/json' --post-data '{"login_id":"admin","password":"werewolf-check-pass-1"}' https://localhost/api/v4/users/login 2>&1 | sed -n 's/^ *[Tt]oken: *//p' | tr -d '\r'); [ -n "$t" ] && printf -- '--x\r\nContent-Disposition: form-data; name="plugin"; filename="evil.tar.gz"\r\nContent-Type: application/gzip\r\n\r\nnot a plugin\r\n--x--\r\n' >/tmp/mm-plugin && wget -q -T 10 --no-check-certificate -S -O /dev/null --header "Authorization: Bearer $t" --header 'Content-Type: multipart/form-data; boundary=x' --post-file /tmp/mm-plugin https://localhost/api/v4/plugins 2>&1 | grep -q 'HTTP/1.1 501' && [ -z "$(ls -A /data/svc/mattermost/plugins 2>/dev/null)" ]

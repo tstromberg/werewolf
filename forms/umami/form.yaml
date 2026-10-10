@@ -1,0 +1,100 @@
+# umami: Umami, web analytics without cookies, with PostgreSQL and Caddy
+# beside it (with): Caddy serves it over HTTPS for the machine's domain,
+# with a certificate from Let's Encrypt; Umami, on loopback, runs from its
+# project's OCI image, pinned by digest, in a tree of its own
+# (docs/design/oci.md), and keeps its tables in a schema of its own. Its
+# administrator's password comes from the config before it serves, so
+# Umami's default (admin, umami) never works. See forms/umami/README.md.
+base: prod
+
+with: [postgresql, caddy]
+
+# pgcrypto, which Umami's first migration asks for, though it uses only
+# what PostgreSQL has built in.
+packages:
+  - postgresql-17-contrib
+
+# The checks read Umami's tables.
+dev:
+  - postgresql-17-client
+
+# make check's (forms/README.md): Node, PostgreSQL and Caddy together.
+check:
+  memory: 2048
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM, and Node compiles JavaScript (allow jit, from postgresql)
+
+services:
+  # Umami, as _oci-umami, inside its image: it serves on loopback, behind
+  # Caddy, and reaches PostgreSQL on loopback alone. Its image's start
+  # script is a shell's, so werewolf-setup does its work: it waits for
+  # PostgreSQL, has Prisma apply the migrations (Node and Prisma's schema
+  # engine are the programs it may start), and sets the administrator's
+  # password from the config. With nowhere to write the tracker,
+  # COLLECT_API_ENDPOINT is not taken. APP_SECRET signs its logins:
+  # without it Umami would sign with a hash of DATABASE_URL, which is no
+  # secret, so a missing one parks it.
+  umami:
+    image: ghcr.io/umami-software/umami@sha256:85909afc45bdcda1917394594a087421fdbb05610fded0fa9f6fb861abb2f367
+    exec: /usr/local/bin/node /app/server.js
+    before: /usr/local/bin/node /app/scripts/werewolf-setup.mjs
+    run: /app/node_modules/.pnpm/@prisma+engines@7.10.0/node_modules/@prisma/engines/
+    listen: tcp/3000 loopback
+    connect: tcp/5432
+    secret: APP_SECRET /run/config/umami/app-secret
+    config: admin-hash /run/config/umami/admin-hash
+    memory: 768
+    nofile: 16384
+    env:
+      - HOSTNAME=127.0.0.1
+      - PORT=3000
+      - DATABASE_URL=postgresql://umami@127.0.0.1:5432/postgres?schema=umami
+      # Nothing sent home: no telemetry, no update checks, Prisma's too.
+      - DISABLE_TELEMETRY=1
+      - DISABLE_UPDATES=1
+      - CHECKPOINT_DISABLE=1
+      - PRISMA_HIDE_UPDATE_MESSAGE=1
+      # Behind Caddy, which sets X-Forwarded-For afresh: the client's
+      # address is that header's, not one a client may send itself.
+      - CLIENT_IP_HEADER=x-forwarded-for
+      - NODE_OPTIONS=--max-old-space-size=512
+
+  # PostgreSQL, as postgresql's, and on loopback TCP for Umami, which in an
+  # image of its own cannot reach the socket: pg_hba.conf lets the role
+  # umami in there without a password and no one else, and leash lets no
+  # service but Umami connect to 5432.
+  postgres:
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/etc/postgresql/pg_hba.conf
+    before: /usr/lib/werewolf/pg-init
+    user: postgres
+    pledge: stdio rpath wpath proc ipc inet unix listen connect
+    run: /usr/bin/initdb
+    read: /etc/postgresql
+    listen: tcp/5432 loopback
+    share: shared
+
+  # Caddy, as its own user, for Umami: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Umami on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the machine's domain, from the settings.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/3000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

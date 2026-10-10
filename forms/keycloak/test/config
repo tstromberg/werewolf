@@ -1,0 +1,11 @@
+#!/bin/sh
+# forms/keycloak/test/config DIR: the keycloak form's config for make
+# check, in DIR: its base URL, https://localhost, for which Caddy's own CA
+# signs, and its administrator and password, which test/checks signs in
+# with.
+set -eu
+mkdir -p "$1/keycloak" "$1/caddy"
+umask 077
+printf '%s' werewolf-check-pass-1 >"$1/keycloak/admin-password"
+echo '{"base-url":"https://localhost","admin":"admin"}' >"$1/keycloak/settings.json"
+echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"

@@ -1,0 +1,13 @@
+#!/bin/sh
+# forms/bugsink/test/config DIR: the bugsink form's config for make check,
+# in DIR: a secret key; the administrator, admin@example.test, and its
+# password, which test/checks signs in with; Bugsink's URL,
+# https://localhost, and Caddy's domain, localhost, for which Caddy's own
+# CA signs.
+set -eu
+mkdir -p "$1/bugsink" "$1/caddy"
+umask 077
+openssl rand -hex 32 | tr -d '\n' >"$1/bugsink/secret-key"
+printf '%s' admin@example.test:werewolf-check-pass-1 >"$1/bugsink/admin"
+printf '%s' https://localhost >"$1/bugsink/base-url"
+echo '{"domain":"localhost"}' >"$1/caddy/settings.json"

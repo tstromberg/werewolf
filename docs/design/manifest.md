@@ -1,6 +1,6 @@
 # One manifest: a machine from one YAML file
 
-Proposed, 2026-10-09; revised after review. On [adhoc.md](adhoc.md), [custom-updates.md](custom-updates.md) and [howl-build.md](howl-build.md).
+Proposed, 2026-10-09; revised after review; phases 1 to 3 built by 2026-10-10. On [adhoc.md](adhoc.md), [custom-updates.md](custom-updates.md) and [howl-build.md](howl-build.md).
 
 ## Summary
 

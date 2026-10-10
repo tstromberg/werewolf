@@ -1,0 +1,91 @@
+# headscale: prod, with Headscale, a coordination server for Tailscale's
+# clients, behind Caddy, which serves it over HTTPS at the machine's base
+# URL with a certificate from Let's Encrypt. Headscale runs from its
+# project's OCI image, baked into the verified root. Nobody joins
+# unasked: a node needs a pre-auth key or its administrator's approval,
+# or, when the config names one, a sign-in with its OpenID provider that
+# the config's lists allow. Its gRPC and metrics are off, so nothing but
+# the clients' protocol reaches it. Its database and keys are in
+# /data/svc/headscale. See forms/headscale/README.md.
+base: prod
+
+with: [caddy]
+
+# The check tries to join with Tailscale's own client and a bad key.
+dev:
+  - tailscale
+
+services:
+  # Headscale, as _oci-headscale, inside its image: it serves the clients'
+  # protocol on loopback, behind Caddy; its CLI's socket is in its /run;
+  # it fetches Tailscale's DERP map over HTTPS, and reaches an OpenID
+  # provider when the config names one. Its configuration is environment
+  # variables: the server URL is the base URL Caddy serves, from the
+  # machine's settings; an OpenID client comes from the config, by file.
+  headscale:
+    image: ghcr.io/juanfont/headscale:v0.29
+    exec: /ko-app/headscale serve
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/8080 loopback]
+    connect: [tcp/443 public, udp/53 tcp/53]
+    config: settings /run/config/headscale/settings.json
+    setting: base-url url required as HEADSCALE_SERVER_URL
+    render: env site
+    secret:
+      - HEADSCALE_OIDC_ISSUER /run/config/headscale/oidc-issuer optional
+      - HEADSCALE_OIDC_CLIENT_ID /run/config/headscale/oidc-client-id optional
+      - HEADSCALE_OIDC_CLIENT_SECRET /run/config/headscale/oidc-client-secret optional
+      - HEADSCALE_OIDC_ALLOWED_USERS /run/config/headscale/oidc-allowed-users optional
+      - HEADSCALE_OIDC_ALLOWED_DOMAINS /run/config/headscale/oidc-allowed-domains optional
+    memory: 512
+    nofile: 65536
+    env:
+      - HEADSCALE_LISTEN_ADDR=127.0.0.1:8080
+      # Caddy says who the client is.
+      - HEADSCALE_TRUSTED_PROXIES=127.0.0.1/32
+      - HEADSCALE_UNIX_SOCKET=/run/headscale.sock
+      - HEADSCALE_NOISE_PRIVATE_KEY_PATH=/data/noise_private.key
+      - HEADSCALE_DATABASE_TYPE=sqlite
+      - HEADSCALE_DATABASE_SQLITE_PATH=/data/db.sqlite
+      - HEADSCALE_PREFIXES_V4=100.64.0.0/10
+      - HEADSCALE_PREFIXES_V6=fd7a:115c:a1e0::/48
+      # Tailscale's relays, as its own clients use them; Headscale runs
+      # none of its own, which would need UDP.
+      - HEADSCALE_DERP_URLS=https://controlplane.tailscale.com/derpmap/default
+      - HEADSCALE_DERP_AUTO_UPDATE_ENABLED=true
+      # Names for the nodes, without taking over each client's resolver.
+      - HEADSCALE_DNS_MAGIC_DNS=true
+      - HEADSCALE_DNS_BASE_DOMAIN=tailnet.internal
+      - HEADSCALE_DNS_OVERRIDE_LOCAL_DNS=false
+      # Nothing asked of anyone but the DERP map: no update checks, no
+      # logs sent to Tailscale.
+      - HEADSCALE_DISABLE_CHECK_UPDATES=true
+      - HEADSCALE_LOGTAIL_ENABLED=false
+      - GOMEMLIMIT=384MiB
+    # No gRPC_listen_addr: without TLS of its own, Headscale serves gRPC on
+    # its socket alone. No metrics_listen_addr: no metrics or debug pages.
+
+  # Caddy, as its own user, for Headscale: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Headscale on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the base URL, from the machine's settings, as BASE_URL,
+  # which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8080]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

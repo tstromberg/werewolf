@@ -1,0 +1,93 @@
+# bugsink: prod, with Bugsink, error tracking that takes the events of
+# Sentry's SDKs, behind Caddy, which serves it over HTTPS for the
+# machine's domain with a certificate from Let's Encrypt. Bugsink runs
+# from its project's OCI image, its 2.x release pinned by digest at each
+# build, in a tree of its own (docs/design/oci.md). Its secret key, its
+# administrator and its URL come from the config before it serves;
+# nobody signs up, strangers see only the login page, and it phones
+# nothing home. Its SQLite database is in /data/svc/bugsink. See
+# forms/bugsink/README.md.
+base: prod
+
+with: [caddy]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  ?programs-no-interpreters: Bugsink is a Python application, and its image's python3.12 runs it once the config gives it a secret key
+
+# The checks sign in and make a project with curl, which keeps cookies.
+dev:
+  - curl
+
+# make check's (forms/README.md): gunicorn's workers and snappea's beside
+# Caddy want more than the default.
+check:
+  memory: 2048
+
+services:
+  # Bugsink, as _oci-bugsink, inside its image: gunicorn serves on
+  # loopback, behind Caddy, and snappea, its task runner, works through
+  # what gunicorn queues in their shared /tmp. monofy, the image's own
+  # supervisor, starts both and stops both if either dies, so its pledge
+  # has exec and its one program is the image's python. Its checks,
+  # migrations and administrator run first, as the image's command does;
+  # a missing secret key, administrator or URL parks it, naming the file.
+  # It reaches public addresses on 443 alone, for alert webhooks.
+  bugsink:
+    image: docker.io/bugsink/bugsink:2
+    exec: /usr/local/bin/python3.12 /usr/local/bin/monofy /usr/local/bin/python3.12 /usr/local/bin/gunicorn --config /app/gunicorn.docker.conf.py --bind=127.0.0.1:8000 --access-logfile - bugsink.wsgi ||| /usr/local/bin/python3.12 /usr/local/bin/bugsink-runsnappea
+    before:
+      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage check --deploy --fail-level WARNING
+      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage migrate snappea --database=snappea
+      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage migrate
+      - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage prestart
+    run: /usr/local/bin/python3.12
+    # netlink: glibc's resolver lists the host's addresses before a
+    # lookup. watch: snappea waits on inotify for gunicorn's wake-ups.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
+    listen: tcp/8000 loopback
+    connect: [tcp/443 public, udp/53 tcp/53]
+    secret:
+      - SECRET_KEY /run/config/bugsink/secret-key
+      - CREATE_SUPERUSER /run/config/bugsink/admin
+      - BASE_URL /run/config/bugsink/base-url
+    memory: 1024
+    nofile: 16384
+    env:
+      - PYTHONDONTWRITEBYTECODE=1
+      # Behind Caddy's TLS: secure cookies, the scheme from Caddy's
+      # X-Forwarded-Proto, the client's address from the X-Real-IP Caddy
+      # sets, never one a client sent.
+      - BEHIND_HTTPS_PROXY=true
+      - USE_X_REAL_IP=true
+      # Nobody signs up: an administrator adds users, and teams.
+      - USER_REGISTRATION=CB_ADMINS
+      - TEAM_CREATION=CB_ADMINS
+      # Nothing sent home; no version or counts shown to the signed-in.
+      - PHONEHOME=false
+      - MINIMIZE_INFORMATION_EXPOSURE=true
+
+  # Caddy, as its own user, for Bugsink: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Bugsink on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the machine's domain, from the settings, as DOMAIN, which
+  # the Caddyfile reads: base-url is Bugsink's, a file.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8000]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

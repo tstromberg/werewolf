@@ -1,0 +1,108 @@
+# kafka: prod, with Apache Kafka 4.3 as one KRaft node, broker and
+# controller in one JVM. Clients reach it on :9093 over TLS with
+# SASL/SCRAM-SHA-512 alone; the controller listens on loopback, for this
+# node's own broker. The certificate, the users and their passwords come
+# from the config, and kafka-setup (forms/kafka/cmd/kafka-setup) makes the
+# users when it formats /data/svc/kafka/log, once, before the broker
+# serves. What no ACL allows is denied; the admin is the one super user.
+# leash starts it (etc/sv/kafka/service) as the kafka user, by running
+# java directly: none of Kafka's scripts, and no shell. See
+# forms/kafka/README.md.
+base: prod
+
+packages:
+  - kafka-4.3
+
+# Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
+# Kafka to machine code as it runs.
+allow: [jit]
+
+# Kafka's scripts, and the bash they name: leash runs java itself, and
+# kafka-setup the formatter.
+prune:
+  - usr/bin/bash
+  - usr/lib/kafka/bin/connect-distributed.sh
+  - usr/lib/kafka/bin/connect-mirror-maker.sh
+  - usr/lib/kafka/bin/connect-plugin-path.sh
+  - usr/lib/kafka/bin/connect-standalone.sh
+  - usr/lib/kafka/bin/kafka-acls.sh
+  - usr/lib/kafka/bin/kafka-broker-api-versions.sh
+  - usr/lib/kafka/bin/kafka-client-metrics.sh
+  - usr/lib/kafka/bin/kafka-cluster.sh
+  - usr/lib/kafka/bin/kafka-configs.sh
+  - usr/lib/kafka/bin/kafka-console-consumer.sh
+  - usr/lib/kafka/bin/kafka-console-producer.sh
+  - usr/lib/kafka/bin/kafka-console-share-consumer.sh
+  - usr/lib/kafka/bin/kafka-consumer-groups.sh
+  - usr/lib/kafka/bin/kafka-consumer-perf-test.sh
+  - usr/lib/kafka/bin/kafka-delegation-tokens.sh
+  - usr/lib/kafka/bin/kafka-delete-records.sh
+  - usr/lib/kafka/bin/kafka-dump-log.sh
+  - usr/lib/kafka/bin/kafka-e2e-latency.sh
+  - usr/lib/kafka/bin/kafka-features.sh
+  - usr/lib/kafka/bin/kafka-get-offsets.sh
+  - usr/lib/kafka/bin/kafka-groups.sh
+  - usr/lib/kafka/bin/kafka-jmx.sh
+  - usr/lib/kafka/bin/kafka-leader-election.sh
+  - usr/lib/kafka/bin/kafka-log-dirs.sh
+  - usr/lib/kafka/bin/kafka-metadata-quorum.sh
+  - usr/lib/kafka/bin/kafka-metadata-shell.sh
+  - usr/lib/kafka/bin/kafka-producer-perf-test.sh
+  - usr/lib/kafka/bin/kafka-reassign-partitions.sh
+  - usr/lib/kafka/bin/kafka-replica-verification.sh
+  - usr/lib/kafka/bin/kafka-run-class.sh
+  - usr/lib/kafka/bin/kafka-server-start.sh
+  - usr/lib/kafka/bin/kafka-server-stop.sh
+  - usr/lib/kafka/bin/kafka-share-consumer-perf-test.sh
+  - usr/lib/kafka/bin/kafka-share-groups.sh
+  - usr/lib/kafka/bin/kafka-storage.sh
+  - usr/lib/kafka/bin/kafka-streams-application-reset.sh
+  - usr/lib/kafka/bin/kafka-streams-groups.sh
+  - usr/lib/kafka/bin/kafka-topics.sh
+  - usr/lib/kafka/bin/kafka-transactions.sh
+  - usr/lib/kafka/bin/kafka-verifiable-consumer.sh
+  - usr/lib/kafka/bin/kafka-verifiable-producer.sh
+  - usr/lib/kafka/bin/kafka-verifiable-share-consumer.sh
+  - usr/lib/kafka/bin/trogdor.sh
+
+# make check's (forms/README.md): :9093 speaks TLS, not HTTP; test/checks
+# speaks Kafka's protocol, with its own client.
+check:
+  memory: 1536
+  skip: [http-answering]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: java runs Kafka, which is what this form is for
+  kernel-write-xor-execute: the JVM compiles Kafka to machine code as it runs (allow jit)
+
+services:
+  # Kafka, as its own user: it may bind :9093, and :9094 on loopback for
+  # its controller, reach that controller, read its configuration and the
+  # image, write only its own directories, and run nothing. kafka-setup
+  # writes server.properties and formats the log directory first, with
+  # the formatter (java) named by run. The heap is half its memory; the
+  # rest is the JVM's own and the page cache.
+  kafka:
+    exec: /usr/bin/java -Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+ExitOnOutOfMemoryError -XX:-UsePerfData -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/kafka -Dlog4j2.configurationFile=/etc/kafka/log4j2.properties -cp /usr/lib/kafka/libs/* kafka.Kafka /run/svc/kafka/server.properties
+    before: /usr/lib/werewolf/kafka-setup
+    user: kafka
+    run: /usr/bin/java
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/9093, tcp/9094 loopback]
+    connect: [tcp/9094]
+    read: /etc/kafka
+    config:
+      - tls-cert /run/config/kafka/tls.crt
+      - tls-key /run/config/kafka/tls.key
+      - admin-password /run/config/kafka/admin-password
+      - users /run/config/kafka/users optional
+      - settings /run/config/kafka/settings.json
+    setting:
+      - domain hostname required as KAFKA_DOMAIN
+      - admin string required as KAFKA_ADMIN
+      - cluster-id string as KAFKA_CLUSTER_ID
+    render: env site
+    memory: 2048
+    nofile: 65536

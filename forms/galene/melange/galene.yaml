@@ -1,0 +1,83 @@
+# Galène for werewolf's galene form, as Wolfi would package it: built by
+# melange in Wolfi's environment with Wolfi's Go, static (no cgo), from the
+# release tag's commit, and its web client, which needs no build, beside
+# it. Go fetches its modules, which go.sum pins. Offered to wolfi-dev/os as
+# it is; when Wolfi ships it, the form names the package and this file
+# goes.
+package:
+  name: galene
+  version: 1.2.1
+  epoch: 0
+  description: Videoconference server for lectures and seminars
+  copyright:
+    - license: MIT
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+      - git
+      - go-1.27
+      - patch
+
+pipeline:
+  - uses: git-checkout
+    with:
+      repository: https://github.com/jech/galene
+      tag: galene-${{package.version}}
+      expected-commit: 6d9338e909fdecdd906150e4dda34e10d9869654
+
+  # Galène tests its TURN relay at start and every 12 hours, with two
+  # peer connections of pion's defaults: mDNS on 5353 and host candidates
+  # on any port, which fence refuses. The test is skipped without ICE
+  # servers, where it can only fail, and mDNS is off for it, as Galène
+  # has it off for its calls. Inline, not files beside this one, so this
+  # recipe is the build's one input (cmd/howl/melange.zig).
+  - runs: |
+      patch -p1 --fuzz=0 --no-backup-if-mismatch <<'EOF'
+      --- a/ice/ice.go
+      +++ b/ice/ice.go
+      @@ -13,6 +13,7 @@
+       	"sync/atomic"
+       	"time"
+
+      +	pionice "github.com/pion/ice/v4"
+       	"github.com/pion/webrtc/v4"
+
+       	"github.com/jech/galene/turnserver"
+      @@ -140,10 +141,14 @@
+       func RelayTest(timeout time.Duration) (time.Duration, error) {
+
+       	conf := ICEConfiguration()
+      +	if len(conf.ICEServers) == 0 {
+      +		return 0, errors.New("no ICE servers")
+      +	}
+       	conf2 := *conf
+       	conf2.ICETransportPolicy = webrtc.ICETransportPolicyRelay
+
+       	var s webrtc.SettingEngine
+      +	s.SetICEMulticastDNSMode(pionice.MulticastDNSModeDisabled)
+       	s.SetHostAcceptanceMinWait(0)
+       	s.SetSrflxAcceptanceMinWait(0)
+       	s.SetPrflxAcceptanceMinWait(0)
+      EOF
+
+  - runs: |
+      CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o galene .
+      install -Dm755 galene ${{targets.destdir}}/usr/bin/galene
+      mkdir -p ${{targets.destdir}}/usr/share/galene
+      cp -R static ${{targets.destdir}}/usr/share/galene/static
+      # The example client is a developer's page, not the service's.
+      rm -rf ${{targets.destdir}}/usr/share/galene/static/example
+
+update:
+  enabled: true
+  github:
+    identifier: jech/galene
+    strip-prefix: galene-
+    use-tag: true

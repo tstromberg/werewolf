@@ -5,16 +5,18 @@ ok  grafana-health   i=0; until wget -q -T 5 --no-check-certificate -O - https:/
 ok  grafana-user     p=$(head -n 1 /run/cgroup/svc/grafana/cgroup.procs); u=$(grep '^_oci-grafana:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 # Plain HTTP is sent to HTTPS.
 ok  grafana-https    wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
-# The administrator is the config's, signs in with its password, and
-# Grafana uses the config's secret key, not its own public default.
+# The administrator is the config's, and signs in with its password.
 ok  grafana-admin    wget -q -T 5 --no-check-certificate -O - --header "Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)" https://localhost/api/user | grep -q '"isGrafanaAdmin": *true'
-ok  grafana-key      p=$(head -n 1 /run/cgroup/svc/grafana/cgroup.procs); tr '\0' '\n' </proc/$p/environ | grep -qx "GF_SECURITY_SECRET_KEY=$(cat /run/config/grafana/secret-key)"
+# Its secret key is its own, made once by grafana-setup: 256 bits as hex,
+# _oci-grafana's alone. Its links use the base URL Caddy serves.
+ok  grafana-key      k=/data/svc/grafana/secret-key; [ "$(stat -c '%u:%a' $k)" = "$(grep '^_oci-grafana:' /etc/passwd | cut -d: -f3):600" ] && grep -qxE '[0-9a-f]{64}' $k
+ok  grafana-root-url wget -q -T 5 --no-check-certificate -O - --header "Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)" https://localhost/api/admin/settings | grep -q '"root_url": *"https://localhost/\{0,1\}"'
 # Nothing is sent home: the settings in effect say so.
 ok  grafana-quiet    s=$(wget -q -T 5 --no-check-certificate -O - --header "Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)" https://localhost/api/admin/settings) && for k in reporting_enabled check_for_updates check_for_plugin_updates; do echo "$s" | grep -q "\"$k\": *\"false\"" || { echo "$k is not false"; exit 1; }; done && echo "$s" | grep -q '"preinstall_disabled": *"true"'
 # A data source's backend, a program of the image's, starts: a Prometheus
-# with nothing behind it fails its health check with Prometheus's own
-# error, not with a plugin that could not run.
-ok  grafana-plugin   a="Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)"; wget -q -T 10 --no-check-certificate -O /dev/null --header "$a" --header 'Content-Type: application/json' --post-data '{"name":"check","uid":"check","type":"prometheus","access":"proxy","url":"http://127.0.0.1:9090"}' https://localhost/api/datasources; h=$(wget -q -T 30 --no-check-certificate -O - --header "$a" https://localhost/api/datasources/uid/check/health 2>&1); echo "$h"; echo "$h" | grep -qi 'connection refused\|9090' && ! echo "$h" | grep -qi 'plugin unavailable\|not registered\|failed to start'
+# with nothing behind it fails its health check in the plugin (400), not
+# for want of a plugin that could not run (404, plugin.notRegistered).
+ok  grafana-plugin   a="Authorization: Basic $(printf %s admin:werewolf-check-pass-1 | base64)"; wget -q -T 10 --no-check-certificate -O /dev/null --header "$a" --header 'Content-Type: application/json' --post-data '{"name":"check","uid":"check","type":"prometheus","access":"proxy","url":"http://127.0.0.1:9090"}' https://localhost/api/datasources && wget -q -T 30 --no-check-certificate -S -O /dev/null --header "$a" https://localhost/api/datasources/uid/check/health 2>&1 | grep -q 'HTTP/1.1 400'
 # Its database is on /data, and _oci-grafana's.
 ok  grafana-data     [ "$(stat -c %u /data/svc/grafana/grafana.db)" = "$(grep '^_oci-grafana:' /etc/passwd | cut -d: -f3)" ]
 # A stranger gets nothing: no dashboard without signing in, a wrong

@@ -1,0 +1,40 @@
+# Caddy for the overleaf form: HTTPS at the machine's base URL (BASE_URL;
+# howl --base-url), with a certificate Caddy gets itself, and :80 sent
+# there; without one, plain HTTP on :80. It routes as the image's own
+# nginx (overleaf.conf) did: compiled output to clsi's nginx, the editor's
+# socket to real-time, the rest to web, all on loopback; Overleaf's
+# metrics and health checks are not the world's. leash starts Caddy
+# (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris. No body timeout: the editor holds a WebSocket
+		# open, and a project upload may be slow.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which fence does not serve yet.
+		protocols h1 h2
+	}
+}
+
+{$BASE_URL::80} {
+	encode zstd gzip
+	header -Server
+	@hidden path_regexp (?i)^/(metrics|health_check)(/.*)?$
+	@output path_regexp ^/project/[0-9a-f]+/(user/[0-9a-f]+/)?(build/[0-9a-f-]+/output/output\.[a-z.]+|content/[0-9a-f-]+/[0-9a-f]+)$
+	route {
+		respond @hidden 404
+		reverse_proxy @output 127.0.0.1:8080
+		reverse_proxy /socket.io/* 127.0.0.1:3026
+		reverse_proxy 127.0.0.1:4000
+	}
+}

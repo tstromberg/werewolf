@@ -48,7 +48,8 @@ restarts the service; the repositories on `/data` stay.
 - **Uploads are verified.** rest-server checks each blob's hash as it
   arrives.
 - **No metrics**, no outbound network: fence has no line for its user.
-- **restic's own image**, pinned by digest, run in a tree of its own
+- **restic's own image**, `latest`, pinned by digest at each build, so a
+  new image follows each rest-server release; run in a tree of its own
   ([oci.md](../../docs/design/oci.md)): its entrypoint is a shell
   script, so leash runs `/usr/bin/rest-server` itself, and nothing else in
   the image can run.

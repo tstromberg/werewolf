@@ -1,0 +1,8 @@
+# What the kafka form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-kafka; test/boot;
+# forms/demo/test/console has the format). Given no certificate, Kafka
+# parks before kafka-setup writes or formats anything, and says why. make
+# check-kafka boots it with its config, and checks what it refuses.
+
+seen    kafka-needs-config  leash: \{"event":"down","service":"kafka","why":"config tls-cert: FileNotFound"\}
+unseen  setup-ran           kafka-setup:

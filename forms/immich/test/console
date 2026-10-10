@@ -1,0 +1,9 @@
+# What the immich form, booted as it ships, without a shell and without a
+# config, must say on its console (make check-shellfree-immich;
+# test/boot; forms/demo/test/console has the format). Caddy, given no
+# admin's password, parks before immich-setup runs, so Immich is never
+# opened unclaimed; Immich, PostgreSQL and Valkey run behind it.
+# make check-immich boots it with its config, and checks it serves.
+
+seen    caddy-needs-config  leash: \{"event":"down","service":"caddy","why":"config admin-password: FileNotFound"\}
+unseen  others-down         leash: \{"event":"down","service":"(immich|postgres|valkey)"

@@ -32,11 +32,14 @@ path, kept open); shell entrypoints.
 
 ## Detailed design
 
-**Flags write lines; files hold structure**
-([the grammar](../forms.md#forms-from-the-command-line)). An image's
-flag is a line of its service file as written there, so one grammar
-covers every leash directive; anything nested is the file's. howl knows
-no form, and the build says which keys exist.
+**The flags are form.yaml's keys**
+([the grammar](../forms.md#forms-from-the-command-line),
+[manifest.md](manifest.md)): `--services.web.listen tcp/8080` is that
+line of that service, so one grammar covers every key and every leash
+directive, by the key table in `lib/form.zig`; `-f FILE` reads a
+manifest and the flags layer over it; `-n` prints what they make, which
+`-f` reads back. What holds structure (`accounts`, `bastion`) is the
+file's alone. howl knows no form; the build says what each key means.
 
 **Images are baked at build.** Nothing runs from a tmpfs, no policy is
 fixed after boot, and boot costs nothing; a new image is a new build, as
@@ -50,7 +53,7 @@ service user no form declares, whose uid is its name's hash
 
 **The form says `image`.** The generated form.yaml holds each image as a
 service: `services: NAME: {image: REF@sha256:..., listen: ..., write:
-...}`, the operator's lines as keys and `--link A:B` as `link: [B]`. What
+...}`, the operator's lines as keys and `link: [B]` for A reaching B. What
 the registry said is a record beside the tree,
 `rootfs/usr/share/werewolf/images/NAME.json` (lib/form.zig's `ImageRecord`):
 the pinned image, the command checked against the tree, its environment
@@ -68,7 +71,7 @@ and each `write PATH` from `/data/svc/NAME/PATH`, all `noexec`
 **`loopback` on a listen.** fence served every `listen` from outside,
 so a listener was public or impossible. `listen tcp/5432 loopback`
 grants the bind and serves nothing, the twin of `connect ... public`;
-`--link A:B` is A's `connect` to it. Open: a link to a form's UNIX
+A's `link: [B]` is its `connect` to it. Open: a link to a form's UNIX
 socket, binding `/run/svc/SVC` into the image so the listener knows its
 peer and no password exists (the image's user must share its group).
 
@@ -104,5 +107,5 @@ own puller**: `crane` and a pipe replace oci.md's three processes.
   or images on one port, a key the build refuses, an unknown directive.
   A failed build is a line on the host, never a parked service.
 - `make check-adhoc` boots Chainguard's nginx from flags alone. Open:
-  packages, bundles and links in `make check`; `--package` names checked
+  packages, bundles and links in `make check`; `--packages` names checked
   against the APKINDEX; the memory sum checked against the machine's.

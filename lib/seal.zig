@@ -289,8 +289,8 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 const max_calls = 512;
 /// max_filter counts the prelude (6), execveat (5), the socket and
 /// socketpair families (2 * (3 + 2 * 5)), the machine's refusals
-/// (7 + 5 + 7 + 7), the table and the final return.
-pub const max_filter = 6 + 5 + 2 * (3 + 2 * 5) + 26 + 2 * max_calls + 1;
+/// (7 + 5 + 7 + 7 + 8), the table and the final return.
+pub const max_filter = 6 + 5 + 2 * (3 + 2 * 5) + 34 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 
 /// families maps each socket promise to the address families it allows.
@@ -315,6 +315,13 @@ const families = [_]struct { p: Promise, af: u32 }{
 ///   timer_create,     a CPU-time clock, the caller's or another process's:
 ///   clock_nanosleep   POSIX CPU timers (CVE-2025-38352)
 ///
+/// And one surface nothing needs once the seal holds: seccomp's
+/// user-notification listener (SECCOMP_FILTER_FLAG_NEW_LISTENER, and
+/// SECCOMP_GET_NOTIF_SIZES, which only a listener uses). With one, a process
+/// answers its children's calls itself, and could tell leash its narrowing
+/// held when it did not. init installs the seal with the only listener,
+/// before this refusal is in force.
+///
 /// Each fails as a kernel without the feature would fail it, so a program
 /// that probes for one carries on. Only these calls miss the kernel's
 /// seccomp cache, and none is frequent enough to matter.
@@ -333,6 +340,7 @@ pub const by_argument = [_][]const u8{
     "setsockopt (TCP_ULP)",
     "pipe2 (O_NOTIFICATION_PIPE)",
     "timer_create and clock_nanosleep (a CPU-time clock)",
+    "seccomp (a user-notification listener)",
 };
 
 const SOL_TCP = 6;
@@ -341,6 +349,9 @@ const TCP_ULP = 31;
 const O_NOTIFICATION_PIPE = 0o200;
 const CLOCK_PROCESS_CPUTIME_ID = 2;
 const CLOCK_THREAD_CPUTIME_ID = 3;
+const SECCOMP_SET_MODE_FILTER = 1;
+const SECCOMP_GET_NOTIF_SIZES = 3;
+const SECCOMP_FILTER_FLAG_NEW_LISTENER = 1 << 3;
 
 /// refusal returns why the machine seal refuses this call, or null. The
 /// filter decides; this repeats its rules so seal-watch can say why.
@@ -362,6 +373,13 @@ pub fn refusal(nr: u32, args: [6]u64) ?Refusal {
         return .{ .what = "O_NOTIFICATION_PIPE", .arg = low(args[1]), .errno = .NOPKG };
     if ((nr == number(.timer_create) or nr == number(.clock_nanosleep)) and cpuClock(low(args[0])))
         return .{ .what = "CPU-time clock", .arg = low(args[0]), .errno = .INVAL };
+    if (nr == number(.seccomp)) {
+        if (low(args[0]) == SECCOMP_GET_NOTIF_SIZES)
+            return .{ .what = "seccomp listener", .arg = low(args[0]), .errno = .INVAL };
+        if (low(args[0]) == SECCOMP_SET_MODE_FILTER and
+            low(args[1]) & SECCOMP_FILTER_FLAG_NEW_LISTENER != 0)
+            return .{ .what = "seccomp listener", .arg = low(args[1]), .errno = .INVAL };
+    }
     return null;
 }
 
@@ -468,6 +486,16 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
             put(buf, &n, RET_K, 0, 0, other);
             put(buf, &n, LD_W_ABS, 0, 0, 0);
         }
+        // seccomp(SECCOMP_GET_NOTIF_SIZES) and
+        // seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER)
+        put(buf, &n, JEQ_K, 0, 6, number(.seccomp));
+        put(buf, &n, LD_W_ABS, 0, 0, 16); // args[0]: the operation
+        put(buf, &n, JEQ_K, 3, 0, SECCOMP_GET_NOTIF_SIZES);
+        put(buf, &n, JEQ_K, 0, 3, SECCOMP_SET_MODE_FILTER);
+        put(buf, &n, LD_W_ABS, 0, 0, 24); // args[1]: the flags
+        put(buf, &n, JSET_K, 0, 1, SECCOMP_FILTER_FLAG_NEW_LISTENER);
+        put(buf, &n, RET_K, 0, 0, other);
+        put(buf, &n, LD_W_ABS, 0, 0, 0);
     }
     var seen: [max_calls]u32 = undefined;
     var n_seen: usize = 0;
@@ -492,10 +520,8 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
 /// each refused call instead (SECCOMP_FILTER_FLAG_LOG), which seal-watch
 /// never sees.
 pub fn install(filter: []const Filter, listener: bool) !i32 {
-    const SECCOMP_SET_MODE_FILTER = 1;
     const SECCOMP_FILTER_FLAG_TSYNC = 1 << 0;
     const SECCOMP_FILTER_FLAG_LOG = 1 << 1;
-    const SECCOMP_FILTER_FLAG_NEW_LISTENER = 1 << 3;
     const SECCOMP_FILTER_FLAG_TSYNC_ESRCH = 1 << 4;
     const prog = extern struct { len: u16, filter: [*]const Filter }{
         .len = @intCast(filter.len),
@@ -577,7 +603,7 @@ test buildFilter {
     const socket = number(.socket);
     // A filter with every promise fits.
     _ = buildFilter(&buf, .full, true);
-    const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), false);
+    const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet, .seccomp }), false);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         action(machine, native_arch, number(.read), 0),
@@ -617,6 +643,12 @@ test buildFilter {
         .{ .timer_create, 1, 0, 0, false }, // CLOCK_MONOTONIC
         .{ .clock_nanosleep, CLOCK_PROCESS_CPUTIME_ID, 0, 0, true },
         .{ .clock_nanosleep, 0, 0, 0, false }, // CLOCK_REALTIME
+        .{ .seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, 0, true },
+        .{ .seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER | 1, 0, true },
+        .{ .seccomp, SECCOMP_GET_NOTIF_SIZES, 0, 0, true },
+        .{ .seccomp, SECCOMP_SET_MODE_FILTER, 0b10011, 0, false }, // TSYNC, LOG, TSYNC_ESRCH
+        .{ .seccomp, 2, 0, 0, false }, // SECCOMP_GET_ACTION_AVAIL
+        .{ .seccomp, 0, 0, 0, false }, // SECCOMP_SET_MODE_STRICT
     }) |c| {
         const want: u32 = if (c[4]) linux.SECCOMP.RET.USER_NOTIF else linux.SECCOMP.RET.ALLOW;
         const nr = number(c[0]);

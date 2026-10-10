@@ -1,0 +1,10 @@
+# What the pi-hole form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-pi-hole;
+# test/boot; forms/demo/test/console has the format). With no password,
+# pihole-FTL parks before it binds anything, and says why; with no domain,
+# so does Caddy. make check-pi-hole boots it with its config, and checks
+# it blocks.
+
+seen    ph-needs-password  leash: \{"event":"down","service":"pi-hole","why":"secret FTLCONF_webserver_api_password: /run/config/pi-hole/password: FileNotFound"\}
+seen    caddy-needs-domain service-config: \{"event":"settings","service":"caddy","setting":"domain","why":"required"\}
+seen    caddy-parked       leash: \{"event":"down","service":"caddy","why":"settings refused; service-config said why"\}

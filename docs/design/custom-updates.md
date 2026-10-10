@@ -1,6 +1,7 @@
 # One updater: apk
 
-Proposed 2026-10-08. Phases 1, 2, 3 and 5 and the format pin are built.
+Proposed 2026-10-08. Phases 1, 2, 3 and 5 and the format pin are built;
+phase 4 was declined.
 
 ## Summary
 
@@ -50,16 +51,13 @@ as two forms may ship one path; and in-tree melange recipes' packages. Each
 version is its commit's time, so a clean tree packs the same bytes. Every
 package depends on `werewolf-formatN`. CI never deletes one.
 
-**The image's own repository** is `/usr/share/werewolf/repo`, tagged `@local`.
-It holds `local-FORM` for each form outside `forms/`, with its files, OCI
-trees, `--app` and local recipes, signed by a key the build makes and then
-discards. apk takes a package from a tagged repository only when world names
-it `name@local`, so world lists exactly what will not update.
+**What is not published** (forms outside `forms/`, OCI trees, `--app`) stays
+in the image, and each update copies it forward from the running slot.
 
 **What howl builds.** A form named is the published one, fetched and checked
 against the signed index (lib/apk.zig), which the machine updates; one not yet
 published is the checkout's, with a warning. A path is the caller's, never
-updated. `--build` takes the tree's forms and programs; phase 4 makes them `@local`.
+updated. `--build` takes the tree's forms and programs, carried forward too.
 
 **compose** (lib/compose.zig; lib/README.md) lays the staged forms and writes
 what the chain derives. The updater runs it over the accounts apk laid, from
@@ -81,7 +79,9 @@ a machine on N takes N's newest and logs `held` each check, until reinstalled.
    publishes changed programs, and a published machine took eight.
 3. Built: `NAME-form` packages, fetched by name; stage0 is a package; howl
    builds with no checkout, holding the tree's files it uses (files.zig).
-4. The image's repository; `buildSlot` copies nothing forward.
+4. Declined 2026-10-10: an `@local` repository in the image, signed by a
+   throwaway key. It stores local content twice and adds signing machinery,
+   where copying forward is built and tested.
 5. Built: the release path is gone; releases serve installs.
 
 ## Drawbacks

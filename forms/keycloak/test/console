@@ -1,0 +1,9 @@
+# What the keycloak form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-keycloak;
+# test/boot; forms/demo/test/console has the format). Keycloak, given no
+# administrator's password, parks before it makes a table or serves
+# anything, and says why; PostgreSQL and Caddy run. make check-keycloak
+# boots it with its config, and checks it serves.
+
+seen    keycloak-needs-config  leash: \{"event":"down","service":"keycloak","why":"secret KC_BOOTSTRAP_ADMIN_PASSWORD: /run/config/keycloak/admin-password: FileNotFound"\}
+unseen  others-down            leash: \{"event":"down","service":"(caddy|postgres)"

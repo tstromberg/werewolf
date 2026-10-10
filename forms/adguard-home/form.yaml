@@ -1,0 +1,70 @@
+# adguard-home: prod, with AdGuard Home, a DNS resolver that blocks ads
+# and trackers for a home or office network, on :53 over UDP and TCP, and
+# its web UI behind Caddy, which serves it over HTTPS for the machine's
+# domain to the one user the config names. It asks its upstreams over
+# TLS, keeps no query log, refuses clients outside private networks, and
+# never shows its setup wizard. Its upstreams and blocklists are settings;
+# the rest is its web UI's. It runs AdGuard Home's own image, its latest
+# release, pinned by digest when built, in a tree of its own
+# (docs/design/oci.md), and keeps its configuration, lists and counts in
+# /data/svc/adguard-home. See forms/adguard-home/README.md.
+base: prod
+
+with: [caddy]
+
+check:
+  # :53 speaks DNS, not HTTP; test/checks asks it questions.
+  skip: [http-answering]
+
+services:
+  # AdGuard Home, in its image, as _oci-adguard-home: it may bind :53
+  # (leash grants the low port) and its web UI on loopback, and reach its
+  # upstreams over DNS-over-TLS, the bootstrap resolvers that name them,
+  # and its lists over HTTPS, at public addresses alone. Before it starts,
+  # adguard-home-setup copies the form's configuration to /data if none is
+  # there, so it never runs the setup wizard, and puts in the upstreams
+  # and blocklists the machine's settings give.
+  adguard-home:
+    image: docker.io/adguard/adguardhome:latest
+    before: /usr/lib/werewolf/adguard-home-setup
+    exec: /opt/adguardhome/AdGuardHome --no-check-update -c /data/AdGuardHome.yaml -w /data
+    pledge: stdio rpath wpath inet netlink connect listen proc
+    listen: [tcp/53 udp/53, tcp/3000 loopback]
+    connect:
+      - tcp/853 tcp/443 public
+      - udp/53 tcp/53 public
+    config: settings /run/config/adguard-home/settings.json optional
+    setting:
+      - upstreams string...
+      - blocklists url...
+    render: json adguard.json
+    memory: 512
+    nofile: 16384
+    env: GOMEMLIMIT=384MiB
+
+  # Caddy, as its own user, for AdGuard Home: it may bind :80 and :443 and
+  # no other port, reach the ACME CA over HTTPS, a resolver, and AdGuard
+  # Home on loopback, read its configuration, and write only its own
+  # directories. It lets through the one user the config names: the name
+  # from the settings, the bcrypt hash from a file.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/3000]
+    read: /etc/caddy
+    secret: ADMIN_HASH /run/config/caddy/admin-hash
+    config: settings /run/config/caddy/settings.json
+    setting:
+      - domain hostname required as DOMAIN
+      - admin string required as ADMIN_USER
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

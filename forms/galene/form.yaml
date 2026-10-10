@@ -1,0 +1,72 @@
+# galene: Galène, a videoconference server made for lectures and seminars,
+# with Caddy in front (with): Caddy serves its pages and WebSocket over
+# HTTPS at the machine's base URL, with a certificate from Let's Encrypt;
+# Galène, on loopback, carries the media itself over one UDP port. Its
+# groups, their operator and the others' password come from the config,
+# hashed by galene-setup before it serves; no group is listed or open to
+# strangers. Wolfi does not ship Galène: melange builds it from a pinned
+# release (forms/galene/melange/galene.yaml). See forms/galene/README.md.
+base: prod
+
+with: [caddy]
+
+services:
+  # Caddy, as its own user, for Galène: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Galène on
+  # loopback, read its configuration, and write only its own directories.
+  # Its site is the base URL, from the machine's settings, as BASE_URL,
+  # which the Caddyfile reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8443]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: base-url url as BASE_URL
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
+
+  # Galène, as its own user: its pages and WebSocket on loopback, behind
+  # Caddy, and every call's media through udp/10000, which it
+  # demultiplexes itself; fence lets only its user send from that port.
+  # Its built-in TURN server, which would relay to any address a client
+  # names from ports fence cannot declare, is off; an external one, named
+  # by the config's ICE servers, serves the clients and Galène, which
+  # reaches it on TURN's port alone. galene-setup writes its group files
+  # and configuration before each start; recordings, which a group allows
+  # only when the settings say so, and the tokens operators hand out are
+  # kept in /data.
+  galene:
+    # leash starts it in /data/svc/galene, where its ./data and
+    # ./recordings are.
+    exec: /usr/bin/galene -insecure -http 127.0.0.1:8443 -static /usr/share/galene/static -groups /run/svc/galene/groups -udp-range 10000 -turn=
+    before: /usr/lib/werewolf/galene-setup
+    user: galene
+    # netlink: Go lists the host's addresses for ICE.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/8443 loopback, udp/10000]
+    connect: [udp/3478 tcp/3478 udp/53 tcp/53]
+    config:
+      - operator-password /run/config/galene/operator-password
+      - password /run/config/galene/password optional
+      - ice-servers /run/config/galene/ice-servers.json optional
+      - settings /run/config/galene/settings.json
+    setting:
+      - base-url url required
+      - groups string... required
+      - operator string required
+      - recording bool
+    render: json galene.json
+    memory: 1024
+    nofile: 65536
+    env:
+      - GOMEMLIMIT=768MiB

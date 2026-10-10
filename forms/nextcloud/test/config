@@ -1,0 +1,11 @@
+#!/bin/sh
+# forms/nextcloud/test/config DIR: the nextcloud form's config for make
+# check, in DIR: its base URL, https://localhost, for which Caddy's own CA
+# signs, its administrator and the administrator's password, which
+# forms/nextcloud/test/checks signs in with.
+set -eu
+mkdir -p "$1/nextcloud" "$1/caddy"
+umask 077
+printf '%s' 'werewolf-check-Pass-1x' >"$1/nextcloud/admin-password"
+echo '{"base-url":"https://localhost","admin":"admin","admin-email":"admin@example.com","phone-region":"US"}' >"$1/nextcloud/settings.json"
+echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"

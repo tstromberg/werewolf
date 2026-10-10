@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/limesurvey/test/config DIR: the limesurvey form's config for make
+# check, in DIR, as an operator would make one (forms/limesurvey/README.md):
+# the site's address and name, its admin, and the admin's bcrypt password
+# hash, of "werewolf-check", which forms/limesurvey/test/checks signs in
+# with; no mail relay, so mail is off.
+set -eu
+d=$1/limesurvey
+mkdir -p "$d"
+umask 077
+printf '%s' '$2y$10$nWqdaG5ayjvw7wEKz/savO5m4DJl9OSz9aeKEdKl.e05GIwwFAzIq' >"$d/admin-password-hash"
+echo '{"url":"http://localhost","title":"werewolf check surveys","admin-user":"admin","admin-name":"Check Admin","admin-email":"admin@example.test"}' >"$d/settings.json"

@@ -1,0 +1,29 @@
+# AdGuard Home answers on :53 as its own user, holding no capability but
+# the low port's, from the configuration its first start copied to /data,
+# which it then rewrote itself; resolves through its upstreams over TLS;
+# and blocks what its list names. These need the check host's network.
+ok  agh-user         p=$(head -n 1 /run/cgroup/svc/adguard-home/cgroup.procs); u=$(grep '^_oci-adguard-home:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000400$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  agh-resolves     i=0; until nslookup example.org 127.0.0.1 2>/dev/null | grep -A1 '^Name:' | grep -q 'Address: [1-9]'; do i=$((i + 1)); [ $i -le 90 ] || { echo "example.org unresolved in 90 s"; exit 1; }; sleep 1; done
+ok  agh-config       f=/data/svc/adguard-home/AdGuardHome.yaml; u=$(grep '^_oci-adguard-home:' /etc/passwd | cut -d: -f3); [ "$(stat -c %u $f)" = "$u" ] && grep -q '^schema_version: 34' $f && grep -q 'allowed_clients:' $f && grep -q '^theme:' $f && ! grep -q '^#' $f
+# Nothing in the image runs but AdGuard Home and the form's helper:
+# busybox, which the image carries, is not in the service's run list.
+ok  agh-no-busybox   f=/etc/sv/adguard-home/service; grep -qx 'before /usr/lib/werewolf/adguard-home-setup' $f && ! grep -q '/bin/\|^run ' $f
+# The settings' upstream and blocklist are the configuration's, in place
+# of the form's, and the UI's other changes would stay.
+ok  agh-settings     f=/data/svc/adguard-home/AdGuardHome.yaml; sed -n '/^  upstream_dns:/,/^  [a-z]/p' $f | grep -q 'tls://dns.quad9.net' && ! grep -q 'one.one.one.one' $f && sed -n '/^filters:/,/^[a-z]/p' $f | grep -c 'url:' | grep -qx 1
+ok  agh-blocks       i=0; until nslookup ad.doubleclick.net 127.0.0.1 2>/dev/null | grep -q 'Address: 0\.0\.0\.0'; do i=$((i + 1)); [ $i -le 120 ] || { echo "ad.doubleclick.net not blocked in 120 s"; exit 1; }; sleep 1; done
+# The web UI is Caddy's to show, over HTTPS, to the config's one user.
+ok  agh-login        i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/null https://localhost/ 2>&1 | grep -q 'HTTP/1.1 401'; do i=$((i + 1)); [ $i -le 60 ] || { echo "no 401 in 60 s"; exit 1; }; sleep 1; done; wget -q -T 5 --no-check-certificate -O - --header "Authorization: Basic $(printf %s admin:werewolf-check-admin | base64)" https://localhost/control/status | grep -q '"running":true'
+ok  agh-wrong-password wget -q -T 5 --no-check-certificate -S -O /dev/null --header "Authorization: Basic $(printf %s admin:wrong | base64)" https://localhost/control/status 2>&1 | grep -q 'HTTP/1.1 401'
+# The attack, a first visitor claiming it: there is no setup wizard to
+# finish, even for the user Caddy lets through.
+ok  agh-no-wizard    a="Authorization: Basic $(printf %s admin:werewolf-check-admin | base64)"; ! wget -q -T 5 --no-check-certificate -O /dev/null --header "$a" https://localhost/control/install/get_addresses 2>/dev/null && ! wget -q -T 5 --no-check-certificate -O /dev/null --header "$a" --header 'Content-Type: application/json' --post-data '{"web":{"ip":"0.0.0.0","port":3000},"dns":{"ip":"0.0.0.0","port":53},"username":"x","password":"xxxxxxxx"}' https://localhost/control/install/configure 2>/dev/null
+# Not an open resolver: the configuration AdGuard Home runs, as it wrote
+# it back, refuses every client outside the private networks. (A
+# stranger's address cannot be put on the machine to ask from: root on the
+# console holds no CAP_NET_ADMIN.)
+ok  agh-strangers    f=/data/svc/adguard-home/AdGuardHome.yaml; a=$(sed -n '/^  allowed_clients:/,/^  [a-z]/p' $f); echo "$a" | grep -q -- '- 192.168.0.0/16' && echo "$a" | grep -q -- '- 10.0.0.0/8' && ! echo "$a" | grep -q '0\.0\.0\.0/0\|::/0'
+# The attack on UDP's unguarded bind (docs/design/listen-udp.md): with
+# AdGuard Home down, root, as a broken-into service with the low-port
+# capability would, takes :53, but cannot answer a client from it.
+ok  agh-squatter     sv -w 30 down /etc/sv/adguard-home; i=0; while netstat -lun 2>/dev/null | grep -q ':53 '; do i=$((i + 1)); [ $i -le 30 ] || exit 1; sleep 1; done; { nc -u -l -p 53 >/dev/null 2>&1 & l=$!; }; sleep 1; netstat -lun 2>/dev/null | grep -q ':53 '; held=$?; o=$(echo x | nc -v -u -w 1 -p 53 10.0.2.2 40000 2>&1); kill $l 2>/dev/null; sv up /etc/sv/adguard-home; echo "held $held: $o"; [ $held = 0 ] && echo "$o" | grep -q 'Permission denied' && i=0 && until nslookup example.org 127.0.0.1 >/dev/null 2>&1; do i=$((i + 1)); [ $i -le 30 ] || exit 1; sleep 1; done

@@ -1,0 +1,32 @@
+# Squid answers on :3128 once squid-setup has written its lists.
+ok  squid-up         i=0; until nc -z 127.0.0.1 3128 2>/dev/null; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing on :3128 in 60 s"; exit 1; }; sleep 1; done; grep -qx '\.example\.com' /run/svc/squid/domains && grep -qx '127\.0\.0\.2/32' /run/svc/squid/networks
+# A CONNECT to port 443 of a listed name, from this machine and from a
+# listed network, is Squid's to make: 200 where the check machine reaches
+# the Internet, 503 where it does not, but never Squid's 403.
+ok  squid-allows     for s in 127.0.0.1 127.0.0.2; do r=$( (printf 'CONNECT www.example.com:443 HTTP/1.1\r\nHost: www.example.com:443\r\n\r\n'; sleep 3) | nc -s $s -w 10 127.0.0.1 3128 | tr -d '\r'); echo "$r" | head -n 1 | grep -qE '^HTTP/1\.1 (200|503) ' && ! echo "$r" | grep -q ERR_ACCESS_DENIED || { echo "from $s: $(echo "$r" | head -n 1)"; exit 1; }; done
+# Squid's error pages name no version.
+ok  squid-no-version (printf 'CONNECT evil.example.net:443 HTTP/1.1\r\nHost: evil.example.net:443\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 >/tmp/squid.403; grep -q '^HTTP/1\.1 403 ' /tmp/squid.403 && ! grep -qiE 'squid/[0-9]' /tmp/squid.403
+# A listed name that points inward reaches nothing: Squid allows the
+# CONNECT to localhost, and fence refuses its connection, since Squid may
+# reach port 443 at public addresses alone (DNS rebinding, SSRF).
+ok  squid-inward     u=$(grep '^squid:' /etc/passwd | cut -d: -f3); grep -qx "connect $u tcp 443 public" /usr/share/werewolf/net && r=$( (printf 'CONNECT localhost:443 HTTP/1.1\r\nHost: localhost:443\r\n\r\n'; sleep 3) | nc -w 10 127.0.0.1 3128 | tr -d '\r') && echo "$r" | head -n 1 | grep -q '^HTTP/1\.1 503 ' && echo "$r" | grep -q ERR_CONNECT_FAIL
+# Squid's configuration: nothing kept, nothing added to a request, no
+# port but 3128, no socket to control it by.
+ok  squid-config     c=/etc/squid.conf; grep -qx 'cache deny all' $c && grep -qx 'via off' $c && grep -qx 'forwarded_for delete' $c && ! grep -q '^cache_dir' $c && [ -z "$(find /run/svc/squid -type s)" ] && [ "$(netstat -ltnu | grep -cE ':(3128|3130|4827|3401) ')" = 1 ]
+# Nothing listens but what the form declares (test/checks' listeners, for
+# TCP), and the one UDP socket off loopback is Squid's resolver's, on an
+# ephemeral port, which fence lets only replies from port 53 reach.
+ok  squid-listeners  bad=$(netstat -ltn | awk 'NR > 2 && $4 !~ /^(127\.|::1:)/ { n = split($4, a, ":"); print a[n] }' | sort -u | grep -vx -e none $(awk '$1 == "listen" && $2 == "tcp" { print "-e " $3 }' /usr/share/werewolf/net)); [ -z "$bad" ] || { echo "listening, undeclared: $bad"; exit 1; }; u=$(grep '^squid:' /etc/passwd | cut -d: -f3); udp=$(tail -n +2 /proc/net/udp | while read -r _ l _ st _ _ _ id _; do p=$((0x${l#*:})); case ${l%:*} in *7F) continue ;; esac; [ "$st" != 07 ] || { [ "$id" = "$u" ] && [ $p -ge 32768 ]; } || echo "port $p, uid $id"; done); [ -z "$udp" ] || { echo "UDP, not Squid's resolver: $udp"; exit 1; }
+# The attacks, each refused with Squid's 403: a name not listed; a listed
+# exact name's subdomain; a listed name on port 25 (mail, as spam or
+# exfiltration would use it); an address whose reverse DNS gives a listed
+# name; plain HTTP; a client from a network not listed; and the cache
+# manager, from this machine itself (cache_object://, which Squid 7 no
+# longer speaks, is a 400).
+ok  squid-unlisted   (printf 'CONNECT evil.example.net:443 HTTP/1.1\r\nHost: evil.example.net:443\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED'
+ok  squid-exact      (printf 'CONNECT evil.pypi.org:443 HTTP/1.1\r\nHost: evil.pypi.org:443\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED'
+ok  squid-port-25    (printf 'CONNECT www.example.com:25 HTTP/1.1\r\nHost: www.example.com:25\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED'
+ok  squid-by-address (printf 'CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED'
+ok  squid-plain-http (printf 'GET http://www.example.com/ HTTP/1.1\r\nHost: www.example.com\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED'
+ok  squid-source     (printf 'CONNECT www.example.com:443 HTTP/1.1\r\nHost: www.example.com:443\r\n\r\n'; sleep 2) | nc -s 127.0.0.3 -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED'
+ok  squid-cachemgr   (printf 'GET http://127.0.0.1:3128/squid-internal-mgr/menu HTTP/1.1\r\nHost: 127.0.0.1:3128\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_ACCESS_DENIED' && (printf 'GET cache_object://localhost/menu HTTP/1.1\r\nHost: localhost\r\n\r\n'; sleep 2) | nc -w 5 127.0.0.1 3128 | grep -q '^X-Squid-Error: ERR_INVALID_URL'

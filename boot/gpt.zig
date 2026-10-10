@@ -22,13 +22,18 @@ const esp_guid = "57e1f000-77e2-4b0f-8a3c-000000000001";
 const root_guid = "57e1f000-77e2-4b0f-8a3c-000000000002";
 
 /// create writes path, a sparse disk of l.sectors sectors that holds the
-/// partition table and nothing else.
+/// partition table and nothing else. It is mode 0600: a machine's disk
+/// holds its /data, secrets included.
 pub fn create(io: Io, path: []const u8, l: Layout) !void {
     var primary: [(2 + entry_sectors) * sector]u8 = undefined;
     var backup: [(entry_sectors + 1) * sector]u8 = undefined;
     encode(l, &primary, &backup);
 
-    var f = try Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    var f = try Io.Dir.cwd().createFile(
+        io,
+        path,
+        .{ .truncate = true, .permissions = .fromMode(0o600) },
+    );
     defer f.close(io);
     try f.setLength(io, l.sectors * sector);
     try f.writePositionalAll(io, &primary, 0);

@@ -1,0 +1,80 @@
+# authelia: Authelia, single sign-on with a second factor, in front of
+# every site under the machine's domain, with Caddy beside it (with):
+# Caddy serves the portal at auth.DOMAIN and asks Authelia about every
+# other site under DOMAIN, with certificates from Let's Encrypt. Users and
+# secrets come from the config before it serves; nobody signs up, and
+# nothing is reachable without a rule. Wolfi does not ship Authelia:
+# melange builds it from a pinned release
+# (forms/authelia/melange/authelia.yaml). See forms/authelia/README.md.
+base: prod
+
+with: [caddy]
+
+packages:
+  # What forms/authelia/melange/authelia.yaml's build links, from Wolfi.
+  - sqlite-libs
+
+# The check signs in with curl, which keeps cookies.
+dev:
+  - curl
+
+services:
+  # Authelia, as its own user: it serves on loopback, behind Caddy, keeps
+  # its SQLite database (sessions' second factors, bans) in its /data,
+  # and reaches only a mail server and a resolver. Its users, its session
+  # secret and its storage key come from the config: missing, it parks
+  # with a line naming the file. Its domain and mail server are settings,
+  # which its configuration's template reads.
+  authelia:
+    exec: /usr/bin/authelia --config /etc/authelia/configuration.yml
+    before: /usr/bin/authelia config validate --config /etc/authelia/configuration.yml
+    user: authelia
+    # netlink: Go's resolver lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/9091 loopback]
+    connect: [tcp/587 tcp/465 tcp/53 udp/53]
+    read: /etc/authelia
+    config:
+      - sso-users /run/config/authelia/users.yml
+      - session-secret /run/config/authelia/session-secret
+      - storage-key /run/config/authelia/storage-key
+      - smtp-password /run/config/authelia/smtp-password optional
+      - settings /run/config/authelia/settings.json
+    setting:
+      - domain hostname required as DOMAIN
+      - smtp-server hostport as SMTP_SERVER
+      - smtp-sender string as SMTP_SENDER
+      - smtp-username string as SMTP_USERNAME
+    render: env site
+    memory: 256
+    nofile: 4096
+    env:
+      - X_AUTHELIA_CONFIG_FILTERS=template
+      - AUTHELIA_SESSION_SECRET_FILE=/run/svc/authelia/session-secret
+      - AUTHELIA_STORAGE_ENCRYPTION_KEY_FILE=/run/svc/authelia/storage-key
+      - TMPDIR=/run/svc/authelia
+      - GOMEMLIMIT=192MiB
+
+  # Caddy, as its own user, for Authelia: it may bind :80 and :443 and no
+  # other port, reach the ACME CA over HTTPS, a resolver, and Authelia on
+  # loopback, read its configuration, and write only its own directories.
+  # The domain is the machine's setting, as DOMAIN, which the Caddyfile
+  # reads.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/9091]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

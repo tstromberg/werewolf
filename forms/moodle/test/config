@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/moodle/test/config DIR: the moodle form's config for make check,
+# in DIR: its base URL, https://localhost, for which Caddy's own CA signs,
+# the site's name, its administrator and the administrator's password,
+# which forms/moodle/test/checks signs in with; no mail relay, so mail is
+# off.
+set -eu
+mkdir -p "$1/moodle" "$1/caddy"
+umask 077
+printf '%s' 'werewolf-check-Pass-1x' >"$1/moodle/admin-password"
+echo '{"base-url":"https://localhost","site-name":"werewolf check school","admin":"admin","admin-email":"admin@example.com"}' >"$1/moodle/settings.json"
+echo '{"base-url":"https://localhost"}' >"$1/caddy/settings.json"

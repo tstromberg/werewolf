@@ -68,7 +68,10 @@ pub fn compose(
     // ro: each form's rootfs, base first, so later forms' files win; then
     // the services form.yaml renders, each on a leash: its file, and run
     // and finish links to leash where the rootfs laid none.
-    for (forms) |fm| try lay(io, gpa, root, try gpa.print("{s}/rootfs", .{fm.dir}), ro, "");
+    for (forms) |fm| {
+        try lay(io, gpa, root, try gpa.print("{s}/rootfs", .{fm.dir}), ro, "");
+        for (fm.images) |dir| try lay(io, gpa, root, dir, ro, "");
+    }
     for (try form.services(io, gpa, root, forms, f)) |s| {
         if (mem.find(u8, s.path, "form.yaml: services.") == null) continue;
         const dir = try gpa.print("etc/sv/{s}", .{s.name});
@@ -185,8 +188,9 @@ fn put(io: Io, dir: Dir, path: []const u8, data: []const u8) !void {
 }
 
 /// stage writes fm under dir as an image stages it, at forms/NAME:
-/// form.yaml and rootfs. The updater composes from what an image staged; a
-/// form's package (NAME-form) carries the same tree.
+/// form.yaml and rootfs, with its baked images laid in as `howl form`
+/// lays them. The updater composes from what an image staged; a form's
+/// package (NAME-form) carries the same tree.
 pub fn stage(io: Io, gpa: Allocator, root: Dir, fm: Form, dir: Dir) !void {
     const at = try gpa.print("forms/{s}", .{fm.name});
     try dir.createDirPath(io, at);
@@ -195,6 +199,7 @@ pub fn stage(io: Io, gpa: Allocator, root: Dir, fm: Form, dir: Dir) !void {
     try put(io, dir, try gpa.print("{s}/form.yaml", .{at}), text);
     const rootfs = try gpa.print("{s}/rootfs", .{fm.dir});
     try lay(io, gpa, root, rootfs, dir, try gpa.print("{s}/rootfs", .{at}));
+    for (fm.images) |d| try lay(io, gpa, root, d, dir, try gpa.print("{s}/rootfs", .{at}));
 }
 
 /// lay copies the tree at src, under root, into dst at to ("" for dst
@@ -812,6 +817,14 @@ pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failur
     const services = try form.services(io, gpa, root, forms, f);
     const parsed = try gpa.alloc(service.Service, services.len);
     for (services, parsed) |s, *ps| {
+        if (mem.startsWith(u8, s.text, form.unbaked)) {
+            const ref = s.text[form.unbaked.len..mem.findScalar(u8, s.text, '\n').?];
+            return f.fail(
+                gpa,
+                "{s}: {s}: no image baked: the build bakes it (howl build), or howl form --oci",
+                .{ s.path, mem.trim(u8, ref, " ") },
+            );
+        }
         ps.* = try parseService(gpa, s, f);
         for (ps.listen) |p| if (mem.findScalar(u16, declared.items, p) == null)
             return f.fail(

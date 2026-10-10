@@ -1,0 +1,10 @@
+# What the nextcloud form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-nextcloud;
+# test/boot; forms/demo/test/console has the format). Nextcloud, given no
+# administrator's password, parks before it installs or serves anything,
+# and says why; PostgreSQL, Valkey, Caddy and the jobs' cron run. make
+# check-nextcloud boots it with its config, and checks it serves.
+
+seen    nextcloud-needs-config  leash: \{"event":"down","service":"nextcloud","why":"config admin-password: FileNotFound"\}
+unseen  others-down             leash: \{"event":"down","service":"(caddy|postgres|valkey|cron)"
+unseen  installed               nextcloud-setup: installed

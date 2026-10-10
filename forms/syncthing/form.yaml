@@ -1,0 +1,89 @@
+# syncthing: prod, with Syncthing keeping folders in sync with your other
+# devices, peer to peer, over TLS on :22000, and its web GUI behind Caddy,
+# which lets in the one user the config names. Syncthing runs from its
+# project's own image, its latest 2.x release, pinned by digest when built,
+# in a tree of its own (docs/design/oci.md, cmd/howl/oci.zig), as
+# _oci-syncthing. It upgrades nothing itself, sends no crash reports, and
+# keeps its keys, config and folders in /data/svc/syncthing. See
+# forms/syncthing/README.md.
+base: prod
+
+with: [caddy]
+
+# make check's, for this form alone (forms/README.md): :22000 speaks
+# Syncthing's TLS, not HTTP.
+check:
+  skip: [http-answering]
+
+services:
+  # Syncthing, in its image, as _oci-syncthing: it may bind :22000, TCP
+  # and QUIC, and its GUI's :8384 on loopback alone, for Caddy; reach peers
+  # on :22000 anywhere, the global discovery servers and relays at public
+  # addresses, and a resolver; and write only /var/syncthing, which is
+  # /data/svc/syncthing/var/syncthing. The image's entrypoint is a shell
+  # script, so it runs the program itself. Before each start,
+  # syncthing-setup makes its key and config once and holds the options
+  # werewolf decides; relays and global discovery are settings, on unless
+  # they say otherwise.
+  syncthing:
+    image: docker.io/syncthing/syncthing:2
+    exec: /bin/syncthing serve --no-browser
+    before: /usr/lib/werewolf/syncthing-setup
+    # netlink: Go lists the machine's addresses to announce them.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    # Not udp/21027: local discovery broadcasts to the LAN, which fence
+    # neither sends nor delivers; devices there connect by address.
+    listen: [tcp/22000 udp/22000, tcp/8384 loopback]
+    # STUN, on udp/3478, finds the address a router gives QUIC.
+    connect:
+      - tcp/22000 udp/22000
+      - tcp/443 tcp/22067 udp/3478 public
+      - udp/53 tcp/53
+    write: /var/syncthing
+    config: settings /run/config/syncthing/settings.json
+    setting:
+      - relays bool as SYNCTHING_RELAYS
+      - global-discovery bool as SYNCTHING_DISCOVERY
+    render: env site
+    memory: 1024
+    nofile: 65536
+    env:
+      # The GUI on loopback alone, whatever its config says.
+      - STGUIADDRESS=127.0.0.1:8384
+      # The machine's updater updates it, not Syncthing itself.
+      - STNOUPGRADE=1
+      # No monitor process: it restarted Syncthing and uploaded its crash
+      # reports; runsv restarts it, and nothing is uploaded.
+      - STMONITORED=1
+      - GOMEMLIMIT=768MiB
+
+  # Caddy, as its own user, for Syncthing's GUI: it may bind :80 and :443
+  # and no other port, reach the ACME CA over HTTPS, a resolver, and the
+  # GUI on loopback, read its configuration, and write only its own
+  # directories. Before it starts, syncthing-auth writes the one user it
+  # lets through, from the machine's settings and a bcrypt hash of the
+  # config's password.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before:
+      - /usr/lib/werewolf/syncthing-auth
+      - /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8384]
+    read: /etc/caddy
+    config:
+      - gui-password /run/config/caddy/gui-password
+      - settings /run/config/caddy/settings.json
+    setting:
+      - base-url url as BASE_URL
+      - gui-user string required as GUI_USER
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB

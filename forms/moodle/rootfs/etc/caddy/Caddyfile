@@ -1,0 +1,57 @@
+# Caddy for the moodle form: HTTPS at the machine's base URL (BASE_URL;
+# howl --base-url), with a certificate Caddy gets itself, and :80 sent
+# there; without one, plain HTTP on :80. Moodle's public directory is
+# served from the image, and its PHP by php-fpm on its socket. leash
+# starts Caddy (etc/sv/caddy/service) as caddy.
+{
+	# werewolf's configuration is in the image: no admin API, no :2019.
+	admin off
+	log {
+		output stderr
+		format json
+	}
+	# Certificates and the ACME account, kept across boots.
+	storage file_system /data/svc/caddy
+	servers {
+		# Against slowloris; no body timeout, which would cut off an upload
+		# on a slow line.
+		timeouts {
+			read_header 10s
+			idle 2m
+		}
+		# HTTP/3 is UDP, which this form does not serve.
+		protocols h1 h2
+	}
+}
+
+{$BASE_URL::80} {
+	root * /usr/share/moodle/public
+	encode zstd gzip
+
+	header {
+		-Server
+		-X-Powered-By
+		Strict-Transport-Security "max-age=15552000"
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Content-Type-Options nosniff
+	}
+
+	# What is not the site, as Moodle's own advice for nginx has it: its
+	# libraries' insides, tests, readmes and lock files, every dotfile, and
+	# the web installer, since the machine installs Moodle from its config
+	# before it serves. Moodle's data is on /data, beyond this root.
+	@hidden {
+		path_regexp (/vendor/|/node_modules/|composer\.json|/readme|/README|readme\.txt|/upgrade\.txt|/UPGRADING\.md|db/install\.xml|/fixtures/|/behat/|phpunit\.xml|\.lock|environment\.xml|/\.)
+	}
+	respond @hidden 404
+	@installer path /install.php /install/*
+	respond @installer 404
+
+	# A file that is there, else Moodle's router, r.php
+	# ($CFG->routerconfigured); a .php path's rest is PATH_INFO, as
+	# pluginfile.php/... wants.
+	php_fastcgi unix//run/svc/moodle/php.sock {
+		try_files {path} {path}/index.php /r.php
+	}
+	file_server
+}

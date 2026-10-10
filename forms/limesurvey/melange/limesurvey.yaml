@@ -1,0 +1,56 @@
+# LimeSurvey for werewolf's limesurvey form: the project's release, as it
+# ships it (its Composer and npm dependencies inside), pinned by sha256.
+# Wolfi does not ship LimeSurvey. The code goes in /usr/share/limesurvey,
+# read-only on the machine; its two writable trees, tmp/ (published
+# assets, the runtime cache) and upload/ (themes, images, participants'
+# files), are links into the php-fpm service's directory on /data, so
+# every path LimeSurvey derives from them lands there. Its web installer,
+# documentation and Apache files stay out. Offered to wolfi-dev/os as it
+# is; when Wolfi ships it, the form names the package and this file goes.
+package:
+  name: limesurvey
+  version: 7.5.1
+  epoch: 0
+  description: Online survey tool
+  copyright:
+    - license: GPL-2.0-or-later
+
+vars:
+  build: "261007"
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - busybox
+      - ca-certificates-bundle
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://download.limesurvey.org/latest-master/limesurvey${{package.version}}+${{vars.build}}.zip
+      expected-sha256: d0818210cffffab05129e3f6cc99be843d12a4b01764d5ab07bf90f7611b4c4d
+      extract: false
+
+  - runs: |
+      unzip -q limesurvey${{package.version}}+${{vars.build}}.zip
+      cd limesurvey
+      grep -q "versionnumber'\] = '${{package.version}}'" application/config/version.php
+      # Not served or run on the machine: the release notes (they name the
+      # version), Apache's files, the samples, and the trees that become
+      # links to /data.
+      rm -rf docs tmp upload open-api-gen.php publiccode.yml README.md \
+        SECURITY.md .codespellrc .npmrc
+      find . -name .htaccess -delete
+      find . -type d -exec chmod 755 {} +
+      find . -type f -exec chmod 644 {} +
+      ln -s /data/svc/php-fpm/tmp tmp
+      ln -s /data/svc/php-fpm/upload upload
+      mkdir -p ${{targets.destdir}}/usr/share
+      cp -a . ${{targets.destdir}}/usr/share/limesurvey
+
+update:
+  enabled: false

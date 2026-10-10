@@ -1,0 +1,9 @@
+# What the openldap form, booted as it ships, without a shell and without
+# a config, must say on its console (make check-shellfree-openldap;
+# test/boot; forms/demo/test/console has the format). Given no admin
+# password, slapd parks before openldap-setup writes or makes anything or
+# slapd binds a port, and says why. make check-openldap boots it with its
+# config, and checks what it refuses.
+
+seen    openldap-needs-config  leash: \{"event":"down","service":"openldap","why":"config admin-password: FileNotFound"\}
+unseen  setup-ran              openldap-setup: slapd\.conf

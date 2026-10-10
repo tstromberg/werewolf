@@ -1,0 +1,12 @@
+#!/bin/sh
+# forms/squid/test/config DIR: the squid form's config for make check, in
+# DIR. 127.0.0.2 stands in for a client network, so the check can send from
+# a listed address and an unlisted one (127.0.0.3), neither of them Squid's
+# localhost. localhost is listed, so a CONNECT Squid allows can be followed
+# to loopback, where fence refuses it.
+set -eu
+mkdir -p "$1/squid"
+cat >"$1/squid/settings.json" <<'JSON'
+{"networks": ["10.128.0.0/9", "127.0.0.2/32"],
+ "domains": [".example.com", "pypi.org", "localhost"]}
+JSON

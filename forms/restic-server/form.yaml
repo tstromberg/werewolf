@@ -4,8 +4,9 @@
 # client adds snapshots but can delete or rewrite nothing, so a machine
 # broken into cannot take its backups with it. Each user reaches only the
 # repository of its own name; the users are the config's, as bcrypt
-# htpasswd lines, and none is built in. It runs restic's own image,
-# pinned by digest, in a tree of its own (docs/design/oci.md), and keeps
+# htpasswd lines, and none is built in. It runs restic's own image, its
+# latest release, pinned by digest when built, in a tree of its own
+# (docs/design/oci.md, cmd/howl/oci.zig), and keeps
 # the repositories in /data/svc/restic-server. See
 # forms/restic-server/README.md.
 base: prod
@@ -23,7 +24,7 @@ services:
   # with a line naming the file. The image's entrypoint is a shell script,
   # so it runs the program itself.
   restic-server:
-    image: docker.io/restic/rest-server@sha256:d2aff06f47eb38637dff580c3e6bce4af98f386c396a25d32eb6727ec96214a5
+    image: docker.io/restic/rest-server:latest
     exec: /usr/bin/rest-server --path /data --listen 127.0.0.1:8000 --append-only --private-repos --htpasswd-file /tmp/restic-users
     pledge: stdio rpath wpath inet listen proc
     listen: tcp/8000 loopback

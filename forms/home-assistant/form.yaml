@@ -1,0 +1,75 @@
+# home-assistant: Home Assistant, for a home's devices and automations,
+# behind Caddy, which serves it over HTTPS for the machine's domain (or
+# plain HTTP on :80 without one). It runs Home Assistant's own image, its
+# stable release pinned by digest when built, in a tree of its own
+# (docs/design/oci.md). Its owner comes from the config, made before it
+# serves, so no visitor is offered onboarding. Discovery, Bluetooth and
+# USB are off: they wait on multicast and devices. Its configuration and
+# history are in /data/svc/home-assistant. See forms/home-assistant/README.md.
+base: prod
+
+with: [caddy]
+
+check:
+  # The image is 2.3 GB, unpacked in the root; Home Assistant wants 400 MiB.
+  memory: 4096
+
+services:
+  # Home Assistant, in its image, as _oci-home-assistant: it serves on
+  # loopback alone, behind Caddy, and reaches devices on the network by the
+  # ports their integrations use, and the internet's by HTTPS. Before it
+  # starts, home-assistant-setup writes its configuration and, the first
+  # time, its owner. The image's entrypoint is s6-overlay's shell scripts,
+  # so leash runs Python itself, and nothing else in the image can run.
+  home-assistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    exec: /usr/local/bin/python3 -m homeassistant --config /data
+    before: /usr/lib/werewolf/home-assistant-setup
+    dir: /data
+    # sendfile: aiohttp serves the frontend's files with it.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc sendfile
+    listen: tcp/8123 loopback
+    connect:
+      - tcp/443 tcp/80 udp/53 tcp/53
+      # MQTT, MQTT over TLS, ESPHome, Matter, Z-Wave JS.
+      - tcp/1883 tcp/8883 tcp/6053 tcp/5580 tcp/3000
+      # Cast, Sonos, and the web ports of Kodi, UniFi, Jellyfin and Plex.
+      - tcp/8008 tcp/8009 tcp/1400 tcp/8080 tcp/8443 tcp/8096 tcp/32400
+    config:
+      - owner-password /run/config/home-assistant/owner-password
+      - settings /run/config/home-assistant/settings.json
+    setting:
+      - owner string required as OWNER
+      - domain hostname as DOMAIN
+      - time-zone string as TIME_ZONE
+      - latitude string as LATITUDE
+      - longitude string as LONGITUDE
+      - country string as COUNTRY
+      - unit-system string as UNIT_SYSTEM
+    render: env site
+    memory: 1024
+    nofile: 65536
+    env: PYTHONDONTWRITEBYTECODE=1
+
+  # Caddy, as its own user, for Home Assistant: it may bind :80 and :443
+  # and no other port, reach the ACME CA over HTTPS, a resolver, and Home
+  # Assistant on loopback, read its configuration, and write only its own
+  # directories. Its site is the machine's domain, from the settings.
+  caddy:
+    exec: /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    before: /usr/bin/caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    user: caddy
+    pledge: stdio rpath wpath inet unix connect listen proc
+    listen: [tcp/80 tcp/443]
+    connect: [tcp/443 tcp/53 udp/53 tcp/8123]
+    read: /etc/caddy
+    config: settings /run/config/caddy/settings.json
+    setting: domain hostname as DOMAIN
+    render: env site
+    memory: 512
+    nofile: 65536
+    env:
+      - XDG_DATA_HOME=/data/svc/caddy
+      - XDG_CONFIG_HOME=/run/svc/caddy
+      - HOME=/run/svc/caddy
+      - GOMEMLIMIT=384MiB
