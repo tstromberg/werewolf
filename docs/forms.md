@@ -91,7 +91,7 @@ and key, and `make list-forms` shows the chains.
 | `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
 | `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
 | `opensearch` | `prod` | one node of log search, TLS and the security plugin on, no demo users ([opensearch.md](../forms/opensearch/README.md)) |
-| `suricata` | `prod` | Suricata on a packet feed, the rules in the image, no control socket ([suricata.md](../forms/suricata/README.md)) |
+| `suricata` | `prod` | Suricata on a packet feed, Emerging Threats Open cached on the data partition, no control socket ([suricata.md](../forms/suricata/README.md)) |
 | `opencanary` | `prod` | a low-interaction honeypot: six bait ports, nothing else, no real login ([opencanary.md](../forms/opencanary/README.md)) |
 | `zeek` | `prod` | Zeek on the same kind of feed, JSON logs, no packages ([zeek.md](../forms/zeek/README.md)) |
 | `velociraptor` | `prod` | the Velociraptor server, keys generated on the machine, the GUI on loopback ([velociraptor.md](../forms/velociraptor/README.md)) |
@@ -99,7 +99,9 @@ and key, and `make list-forms` shows the chains.
 | `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j's HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
 | `iris` | `prod`, with `postgresql`, `caddy` | DFIR-IRIS, the administrator from the config, the web server on loopback ([iris.md](../forms/iris/README.md)) |
 | `misp` | `prod`, with `mariadb-tcp`, `valkey`, `caddy` | MISP core behind Caddy, the image's published passwords not set, modules not started ([misp.md](../forms/misp/README.md)) |
-| `greenbone` | `prod`, with `postgresql`, `caddy` | Greenbone's manager and web UI, `admin`/`admin` refused, no scanner ([greenbone.md](../forms/greenbone/README.md)) |
+| `greenbone` | `prod`, with `postgresql`, `caddy`, `valkey` | Greenbone's manager, web UI, scanner and feed; the scanner alone holds the packet capabilities; `admin`/`admin` refused ([greenbone.md](../forms/greenbone/README.md)) |
+| `paperless` | `prod`, with `valkey`, `caddy` | Paperless-ngx 3.3, a document archive, sign-up closed, its administrator from the config, OCR from the system's packages, built here ([paperless.md](../forms/paperless/README.md)) |
+| `minecraft` | `jre` | Minecraft Java Edition 26.3, pinned, the whitelist and online mode on, no RCON or query port, the `jre` form's Java 27 ([minecraft.md](../forms/minecraft/README.md)) |
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init

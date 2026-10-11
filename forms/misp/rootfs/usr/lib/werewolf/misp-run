@@ -29,16 +29,25 @@ esac
 	exit 1
 }
 
-mkdir -p /data /run/bin /var/www/MISP/app/Config /var/www/MISP/app/files /var/www/MISP/app/tmp/logs
+mkdir -p /data /data/gnupg /run/bin /var/www/MISP/app/Config /var/www/MISP/app/files /var/www/MISP/app/tmp/logs
 ln -sfn /usr/bin/php8.4 /run/bin/php
 export PATH="/run/bin:/usr/local/bin:/usr/bin"
+export GNUPGHOME=/data/gnupg
 
 if [ ! -s /data/gpg-pass ]; then
-	/usr/bin/openssl rand -base64 24 >/data/gpg-pass
+	/usr/bin/php8.4 -r 'file_put_contents("/data/gpg-pass", rtrim(strtr(base64_encode(random_bytes(18)), "+/", "AB"), "="));'
 fi
 export ADMIN_PASSWORD="$pw"
 
-cat >/var/www/MISP/app/Config/database.php <<'EOF'
+seed=/var/www/MISP/app/Config.dist
+cfg=/var/www/MISP/app/Config
+[ -f "$cfg/core.php" ] || cat "$seed/core.default.php" >"$cfg/core.php"
+[ -f "$cfg/bootstrap.php" ] || cat "$seed/bootstrap.default.php" >"$cfg/bootstrap.php"
+[ -f "$cfg/routes.php" ] || cat "$seed/routes.php" >"$cfg/routes.php"
+[ -f "$cfg/email.php" ] || cat "$seed/email.php" >"$cfg/email.php"
+/usr/bin/php8.4 /usr/lib/werewolf/misp-config.php
+
+cat >"$cfg/database.php" <<'EOF'
 <?php
 class DATABASE_CONFIG {
 	public $default = array(
@@ -53,8 +62,8 @@ class DATABASE_CONFIG {
 	);
 }
 EOF
-if [ ! -s /var/www/MISP/app/Config/config.php ]; then
-	printf '%s\n' '<?php' '$config=array();' >/var/www/MISP/app/Config/config.php
+if [ ! -s "$cfg/config.php" ]; then
+	printf '%s\n' '<?php' '$config=array();' >"$cfg/config.php"
 fi
 if [ -d /var/www/MISP/app/files.dist ] && [ ! -f /data/files-seeded ]; then
 	cp -a /var/www/MISP/app/files.dist/. /var/www/MISP/app/files/
@@ -76,6 +85,15 @@ done
 if ! db -e "DESCRIBE attributes" >/dev/null 2>&1; then
 	db </var/www/MISP/INSTALL/MYSQL.sql
 fi
+i=0
+until /usr/bin/php8.4 -r 'exit(@fsockopen("127.0.0.1", 6379) ? 0 : 1);'; do
+	i=$((i + 1))
+	[ "$i" -le 90 ] || {
+		echo "misp-run: valkey did not answer" >&2
+		exit 1
+	}
+	sleep 1
+done
 
 cake() {
 	/usr/bin/php8.4 -q /var/www/MISP/app/Console/cake.php -working /var/www/MISP/app "$@"
@@ -88,5 +106,20 @@ cake User change_pw "$ADMIN_EMAIL" "$pw"
 cake Admin setSetting -q Security.password_policy_length 12
 cake Admin setSetting -q Security.password_policy_complexity '/.{12}/'
 cake Admin setSetting -q MISP.baseurl "$BASE_URL"
-unset ADMIN_PASSWORD
+cake Admin setSetting -q MISP.redis_host 127.0.0.1
+cake Admin setSetting -q MISP.redis_port 6379
+cake Admin setSetting -q MISP.manage_workers false
+cake Admin setSetting -q SimpleBackgroundJobs.enabled true
+cake Admin setSetting -q SimpleBackgroundJobs.redis_host 127.0.0.1
+cake Admin setSetting -q SimpleBackgroundJobs.redis_port 6379
+if [ ! -f "$GNUPGHOME/trustdb.gpg" ]; then
+	/usr/bin/gpg --batch --pinentry-mode loopback --passphrase-file /data/gpg-pass \
+		--quick-generate-key "MISP <${ADMIN_EMAIL}>" default default never
+fi
+cake Admin setSetting -q GnuPG.binary /usr/bin/gpg
+cake Admin setSetting -q GnuPG.homedir "$GNUPGHOME"
+cake Admin setSetting -q GnuPG.email "$ADMIN_EMAIL"
+gpg_pw=$(/usr/bin/php8.4 -r 'echo rtrim(file_get_contents("/data/gpg-pass"));')
+cake Admin setSetting -q GnuPG.password "$gpg_pw"
+unset gpg_pw ADMIN_PASSWORD
 exec /usr/lib/werewolf/misp-serve

@@ -1,21 +1,24 @@
 # suricata: prod, with Suricata reading a packet feed and writing its
-# alerts to /data. span (cmd/span) opens the interface, then becomes _span
+# alerts to /data. pcap-feed (cmd/pcap-feed) opens the interface, then becomes _pcap
 # and may only copy frames; Suricata never holds CAP_NET_RAW or
-# CAP_NET_ADMIN. No rules are fetched, the unix control socket is off, and
-# nothing listens. See forms/suricata/README.md.
+# CAP_NET_ADMIN. The engine reads /usr/share/suricata/suricata.yaml.
+# rules-fetch, as _rules, caches Emerging Threats Open
+# on the data partition and refreshes it. Suricata's pledge has no
+# network, and it does not own that cache. The unix control socket is
+# off, and nothing listens. See forms/suricata/README.md.
 base: prod
 
 packages:
   - suricata
 
-# Taken back of werewolf's defaults (lib/allow.zig): span opens a packet
+# Taken back of werewolf's defaults (lib/allow.zig): pcap-feed opens a packet
 # socket and sets promiscuous mode, then drops both.
 allow: [packet, netadmin]
 
-programs: [span]
+programs: [pcap-feed]
 
 # python and suricata-update, which the package depends on and nothing
-# runs: rules are the image's.
+# runs. rules-fetch downloads the signature cache.
 prune:
   - usr/bin/python3.13
   - usr/bin/python3
@@ -24,27 +27,51 @@ prune:
 
 accounts:
   groups:
-    - groupname: _span
+    - groupname: _pcap
       gid: 70
+    - groupname: _rules
+      gid: 72
   users:
-    - username: _span
+    - username: _pcap
       uid: 70
       gid: 70
       homedir: /var/empty
       shell: /sbin/nologin
+    - username: _rules
+      uid: 72
+      gid: 72
+      homedir: /var/empty
+      shell: /sbin/nologin
 
 # make check's (forms/README.md): Suricata's own beside the machine's.
+# The signature cache is large enough that the engine wants 2 GiB.
 check:
-  memory: 1024
+  memory: 4096
 
 services:
-  # Suricata, as its own user: it reads the fifo span writes, the rules in
-  # the image, and writes logs under /data/svc/suricata. It binds nothing
-  # and reaches nothing. The unix command socket is off, so nothing on the
-  # machine can tell a running Suricata to reload or stop.
+  # rules-fetch, as _rules. It copies the image's rules and caches
+  # Emerging Threats Open under /data. share: shared lets Suricata open
+  # a file there. The files are mode 0644, owned by _rules, so the
+  # engine cannot replace them. TCP 443 is public; DNS is the resolver.
+  rules-fetch:
+    exec: /usr/lib/werewolf/rules-fetch
+    user: _rules
+    pledge: stdio rpath wpath inet unix netlink connect proc
+    connect: [tcp/443 public, udp/53 tcp/53]
+    read: [/usr/share/suricata, /etc/suricata]
+    share: shared
+    memory: 128
+
+  # Suricata, as its own user: it reads the fifo pcap-feed writes and the
+  # cache rules-fetch wrote, and writes logs under /data/svc/suricata.
+  # It binds nothing. Its pledge has no inet, so it cannot fetch.
+  # The unix command socket is off, so nothing on the machine can tell
+  # a running Suricata to reload or stop. before waits briefly for the
+  # signature cache, then starts on whatever rules are already there.
   suricata:
-    exec: /usr/bin/suricata -c /etc/suricata/suricata.yaml -r /run/svc/suricata/feed -l /data/svc/suricata --pidfile /run/svc/suricata/suricata.pid --set default-log-dir=/data/svc/suricata --set unix-command.enabled=no --set default-rule-path=/usr/share/suricata/rules --set rule-files.0=werewolf.rules --set pcap-file.checksum-checks=no --init-errors-fatal
+    exec: /usr/bin/suricata -c /usr/share/suricata/suricata.yaml -r /run/svc/suricata/feed -l /data/svc/suricata --pidfile /run/svc/suricata/suricata.pid --set default-log-dir=/data/svc/suricata --set unix-command.enabled=no --set default-rule-path=/data/svc/rules-fetch/rules --set classification-file=/data/svc/rules-fetch/rules/classification.config --set reference-config-file=/usr/share/suricata/reference.config --set rule-files.0=werewolf.rules --set rule-files.1=app-layer-events.rules --set rule-files.2=decoder-events.rules --set rule-files.3=dhcp-events.rules --set rule-files.4=dnp3-events.rules --set rule-files.5=dns-events.rules --set rule-files.6=enip-events.rules --set rule-files.7=files.rules --set rule-files.8=ftp-events.rules --set rule-files.9=http-events.rules --set rule-files.10=http2-events.rules --set rule-files.11=ipsec-events.rules --set rule-files.12=kerberos-events.rules --set rule-files.13=ldap-events.rules --set rule-files.14=mdns-events.rules --set rule-files.15=modbus-events.rules --set rule-files.16=mqtt-events.rules --set rule-files.17=nfs-events.rules --set rule-files.18=ntp-events.rules --set rule-files.19=pgsql-events.rules --set rule-files.20=pop3-events.rules --set rule-files.21=quic-events.rules --set rule-files.22=rfb-events.rules --set rule-files.23=smb-events.rules --set rule-files.24=smtp-events.rules --set rule-files.25=ssh-events.rules --set rule-files.26=stream-events.rules --set rule-files.27=tls-events.rules --set rule-files.28=websocket-events.rules --set rule-files.29=emerging.rules --set pcap-file.checksum-checks=no --init-errors-fatal
+    before: /usr/lib/werewolf/rules-fetch wait
     user: suricata
     pledge: stdio rpath wpath unix proc
-    read: [/etc/suricata, /usr/share/suricata]
-    memory: 512
+    read: [/etc/suricata, /usr/share/suricata, /data/svc/rules-fetch]
+    memory: 2048

@@ -5,7 +5,7 @@ Threat intelligence: [MISP](https://www.misp-project.org/) 2.5, its core, behind
 ## Security Posture
 
 - PHP listens on loopback. Caddy is what the network sees. FastCGI is not published, and the supervisor control port is not open.
-- The image's published passwords are not set: not `example`, not `redispassword`, not `passphrase`, not `supervisor`.
+- The image's published passwords are not set: not `example`, not `redispassword`, not `passphrase`, not `supervisor`. Cake's published salt is replaced on the machine.
 - The administrator password is the config's. The email is the setting's, not `admin@admin.test`.
 - MariaDB and Valkey listen on loopback. Only this service may connect. Valkey has no password because nothing else can open the port.
 - The image's bash runs one script, then misp-serve. That program starts PHP and one of each worker. The list is the binary. There is no Python and no supervisor socket. The host has no shell.
@@ -44,7 +44,7 @@ The database starts empty. This form does not import a MISP dump.
 ### Known Quirks
 
 - The database password is `misp`. It is not a secret, and it is not `example`.
-- Twelve characters at least. The GPG passphrase is made once, on `/data`, and is not put in the environment.
+- Twelve characters at least. A GPG key is made once, on `/data`. The passphrase is not put in the environment.
 - MISP modules are not started. rsyslog is not started. A worker exiting restarts the service.
 
 ### Network Exposure

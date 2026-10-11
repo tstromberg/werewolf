@@ -6,7 +6,7 @@
 base: app
 
 packages:
-  - openjdk-21-jre
+  - openjdk-27-jre
 
 # Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
 # the application to machine code as it runs.

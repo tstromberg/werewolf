@@ -220,7 +220,7 @@ Checks form.yaml's `sshd:` and `bastion:` at build time (via lib/form).
 Parses a service file, `/etc/sv/NAME/service`, for leash (which starts the
 service, and narrows a program it runs), howl pack (its config and setting
 flags), `seal` (its pledge) and compose (the machine's promises). Each reads the whole file the same
-way. cmd/leash/README.md documents the lines.
+way. cmd/leash/README.md documents the lines, including caps and a shared data directory.
 
 ## settings
 

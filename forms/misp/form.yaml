@@ -37,7 +37,6 @@ services:
       - /usr/bin/bash
       - /usr/bin/env
       - /usr/bin/dash
-      - /usr/bin/openssl
       - /usr/bin/php8.4
       - /usr/bin/mariadb
       - /usr/bin/mkdir

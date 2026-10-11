@@ -6,7 +6,7 @@ ok  pl-up            i=0; until wget -q -T 5 --no-check-certificate -S -O /dev/n
 ok  pl-https         wget -q -T 5 -S -O /dev/null http://localhost/ 2>&1 | grep -qi 'Location: https://localhost/'
 # A stranger gets no document list. Sign-up has no password field.
 ok  pl-anon          code=$(curl -sk -o /dev/null -w '%{http_code}' https://localhost/api/documents/); [ "$code" = 401 ] || [ "$code" = 403 ]
-ok  pl-signup        curl -sfk https://localhost/accounts/signup/ | grep -q 'name="password1"' && { echo "signup is open"; exit 1; }; true
+ok  pl-signup        body=$(curl -sfk https://localhost/accounts/signup/) || { echo "signup did not answer"; exit 1; }; printf '%s' "$body" | grep -q 'name="password1"' && { echo "signup is open"; exit 1; }; true
 # A wrong password gets no token. The administrator, the config's, does,
 # and the document list answers with it.
 ok  pl-wrong         [ "$(curl -sk -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{"username":"admin","password":"wrong"}' https://localhost/api/token/)" = 400 ]

@@ -10,6 +10,11 @@ base: prod
 
 with: [valkey, caddy]
 
+# SQLite creates its database and journal as mode 0644, which has no
+# group write, so the directory's ACL cannot grant it. The preload adds
+# the bit for files in the library, and the four users share them.
+programs: [paperless-group.so]
+
 packages:
   # The interpreter, and what the wheels link. howl build-apk names the rest.
   - python-3.13
@@ -33,7 +38,7 @@ packages:
 dev:
   - curl
 
-# make check's (forms/README.md): four Python programs, Valkey and Caddy.
+# make check's (forms/README.md): four Paperless services, Valkey and Caddy.
 check:
   memory: 4096
 
@@ -41,40 +46,32 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: python3 runs Paperless, which is what this form is for
+  processes-services-leashed: the four services share one library, so the files they make stay writable by the group
 
 services:
-  # Paperless, as its own user, in the valkey group so it can open the
-  # socket. paperless-run starts the web server on loopback, the consumer,
-  # the worker and the scheduler, and exits if one of them does. Before
-  # any of them, paperless-init makes the directories and waits for
-  # Valkey, then the database is migrated and the administrator is made
-  # from the config. It reaches Valkey's socket and nothing else. Sign-up
-  # is closed. Page cleaning is off: Wolfi does not package unpaper.
+  # The web server, as its own user, in the valkey group so it can open
+  # the socket. It owns the library and shares it with its group: the
+  # consumer, the worker and the scheduler write there too. paperless-init
+  # makes the directories and waits for Valkey, then the database is
+  # migrated and the administrator is made from the config, and the ready
+  # mark lets the other three start. Sign-up is closed. Page cleaning is
+  # off: Wolfi does not package unpaper. It reaches Valkey's socket and
+  # nothing else.
   paperless:
-    exec: /usr/lib/werewolf/paperless-run
+    exec: /usr/lib/paperless/bin/python3 -m granian --interface asginl --ws --loop uvloop --host 127.0.0.1 --port 8000 --workers 1 paperless.asgi:application
     before:
       - /usr/lib/werewolf/paperless-init
       - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py migrate --skip-checks --no-input
-      - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py manage_superuser
+      - /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py manage_superuser --skip-checks
+      - /usr/lib/werewolf/paperless-init ready
     user: paperless
     group: valkey
-    # netlink: glibc lists the host's addresses before a lookup. watch: the
-    # consumer waits on the consume directory.
-    pledge: stdio rpath wpath inet unix netlink connect listen proc exec watch
+    share: group
+    # netlink: glibc lists the host's addresses before a lookup.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
     listen: [tcp/8000 loopback]
     connect: /run/svc/valkey/valkey.sock
-    run:
-      - /usr/lib/paperless/bin/python3
-      - /usr/bin/tesseract
-      - /usr/bin/gs
-      - /usr/bin/convert
-      - /usr/bin/identify
-      - /usr/bin/qpdf
-      - /usr/bin/pdftoppm
-      - /usr/bin/pdfinfo
-      - /usr/bin/pdftotext
-      - /usr/bin/pngquant
-      - /usr/bin/file
+    run: /usr/lib/paperless/bin/python3
     secret:
       - PAPERLESS_SECRET_KEY /run/config/paperless/secret-key
       - PAPERLESS_ADMIN_PASSWORD /run/config/paperless/admin-password
@@ -83,9 +80,10 @@ services:
       - domain hostname required as DOMAIN
       - admin string required as PAPERLESS_ADMIN_USER
     render: env site
-    memory: 2048
+    memory: 768
     nofile: 16384
     env:
+      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
       - PYTHONPATH=/usr/lib/paperless/app
       - PYTHONDONTWRITEBYTECODE=1
       - PYTHONUNBUFFERED=1
@@ -95,8 +93,138 @@ services:
       - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
       - PAPERLESS_SCRATCH_DIR=/run/svc/paperless/tmp
       - PAPERLESS_STATICDIR=/usr/lib/paperless/static
-      - PAPERLESS_BIND_ADDR=127.0.0.1
-      - PAPERLESS_PORT=8000
+      - PAPERLESS_TIME_ZONE=UTC
+      - PAPERLESS_OCR_LANGUAGE=eng
+      - PAPERLESS_OCR_CLEAN=none
+      - PAPERLESS_ACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
+
+  # The consumer, the worker and the scheduler. Each has its own user, in
+  # paperless's group, and writes the library. They wait for the ready
+  # mark, so they do not open the database mid-migration. The consumer
+  # watches the consume folder. It and the worker run the OCR tools.
+  # Django's startup check runs Tesseract, so the scheduler may too.
+  # The worker is one process: a pool would need shared memory.
+  paperless-consumer:
+    exec: /usr/lib/paperless/bin/python3 /usr/lib/paperless/app/manage.py document_consumer
+    before: /usr/lib/werewolf/paperless-init wait
+    user: paperless-consumer
+    group: [valkey, paperless]
+    pledge: stdio rpath wpath inet unix netlink connect proc exec watch
+    connect: /run/svc/valkey/valkey.sock
+    write: /data/svc/paperless
+    run:
+      - /usr/lib/paperless/bin/python3
+      - /usr/bin/tesseract
+      - /usr/sbin/tesseract
+      - /usr/bin/gs
+      - /usr/bin/convert
+      - /usr/bin/identify
+      - /usr/bin/qpdf
+      - /usr/bin/pdftoppm
+      - /usr/bin/pdfinfo
+      - /usr/bin/pdftotext
+      - /usr/bin/pngquant
+      - /usr/bin/file
+    secret: PAPERLESS_SECRET_KEY /run/config/paperless/secret-key
+    config: settings /run/config/paperless-consumer/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 768
+    nofile: 4096
+    env:
+      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
+      - PYTHONPATH=/usr/lib/paperless/app
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DATA_DIR=/data/svc/paperless
+      - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
+      - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless-consumer/tmp
+      - PAPERLESS_STATICDIR=/usr/lib/paperless/static
+      - PAPERLESS_TIME_ZONE=UTC
+      - PAPERLESS_OCR_LANGUAGE=eng
+      - PAPERLESS_OCR_CLEAN=none
+      - PAPERLESS_ACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
+
+  paperless-worker:
+    exec: /usr/lib/paperless/bin/python3 -m celery --app paperless worker --loglevel INFO --pool=solo --without-mingle --without-gossip
+    before: /usr/lib/werewolf/paperless-init wait
+    user: paperless-worker
+    group: [valkey, paperless]
+    pledge: stdio rpath wpath inet unix netlink connect proc exec
+    connect: /run/svc/valkey/valkey.sock
+    write: /data/svc/paperless
+    run:
+      - /usr/lib/paperless/bin/python3
+      - /usr/bin/tesseract
+      - /usr/sbin/tesseract
+      - /usr/bin/gs
+      - /usr/bin/convert
+      - /usr/bin/identify
+      - /usr/bin/qpdf
+      - /usr/bin/pdftoppm
+      - /usr/bin/pdfinfo
+      - /usr/bin/pdftotext
+      - /usr/bin/pngquant
+      - /usr/bin/file
+    secret: PAPERLESS_SECRET_KEY /run/config/paperless/secret-key
+    config: settings /run/config/paperless-worker/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 768
+    nofile: 4096
+    env:
+      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
+      - PYTHONPATH=/usr/lib/paperless/app
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DATA_DIR=/data/svc/paperless
+      - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
+      - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless-worker/tmp
+      - PAPERLESS_STATICDIR=/usr/lib/paperless/static
+      - PAPERLESS_TIME_ZONE=UTC
+      - PAPERLESS_OCR_LANGUAGE=eng
+      - PAPERLESS_OCR_CLEAN=none
+      - PAPERLESS_ACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS=false
+      - PAPERLESS_TRUSTED_PROXIES=127.0.0.1
+
+  paperless-beat:
+    exec: /usr/lib/paperless/bin/python3 -m celery --app paperless beat --loglevel INFO
+    before: /usr/lib/werewolf/paperless-init wait
+    user: paperless-beat
+    group: [valkey, paperless]
+    pledge: stdio rpath wpath inet unix netlink connect proc exec
+    connect: /run/svc/valkey/valkey.sock
+    write: /data/svc/paperless
+    run:
+      - /usr/lib/paperless/bin/python3
+      - /usr/bin/tesseract
+      - /usr/sbin/tesseract
+    secret: PAPERLESS_SECRET_KEY /run/config/paperless/secret-key
+    config: settings /run/config/paperless-beat/settings.json
+    setting: domain hostname required as DOMAIN
+    render: env site
+    memory: 128
+    nofile: 1024
+    env:
+      - LD_PRELOAD=/usr/lib/werewolf/paperless-group.so
+      - PYTHONPATH=/usr/lib/paperless/app
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONUNBUFFERED=1
+      - PAPERLESS_REDIS=unix:///run/svc/valkey/valkey.sock
+      - PAPERLESS_DATA_DIR=/data/svc/paperless
+      - PAPERLESS_MEDIA_ROOT=/data/svc/paperless/media
+      - PAPERLESS_CONSUMPTION_DIR=/data/svc/paperless/consume
+      - PAPERLESS_SCRATCH_DIR=/run/svc/paperless-beat/tmp
+      - PAPERLESS_STATICDIR=/usr/lib/paperless/static
       - PAPERLESS_TIME_ZONE=UTC
       - PAPERLESS_OCR_LANGUAGE=eng
       - PAPERLESS_OCR_CLEAN=none

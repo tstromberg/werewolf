@@ -1,17 +1,22 @@
-# greenbone: prod, with gvmd and gsad from Greenbone's images, behind
-# Caddy, and PostgreSQL on loopback. gvmd's entrypoint is a shell that
-# drops through gosu; this execs the image's bash on one script. gsad is
-# its own program. The two images do not share a directory, so gvm-link
-# carries gvmd's socket to gsad. The administrator is not admin/admin.
-# The scanner and the feed are not on this machine. See
-# forms/greenbone/README.md.
+# greenbone: prod, with gvmd, gsad, the scanner and the feed from
+# Greenbone's images, behind Caddy. PostgreSQL and Valkey are on
+# loopback. gvmd's entrypoint is a shell that drops through gosu; this
+# execs the image's bash on one script. The scanner is the one service
+# that keeps CAP_NET_RAW and CAP_NET_ADMIN. The feed owns the cache
+# under /data/share/gvm; gvmd may read it and the scanner may write
+# only the plugin directory. gsad, Caddy and PostgreSQL have neither
+# the capabilities nor the cache. The administrator is not admin/admin.
+# See forms/greenbone/README.md.
 base: prod
 
-with: [postgresql, caddy]
+with: [postgresql, caddy, valkey]
 
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).
-allow: [jit]
+# packet and netadmin stay in this machine's bounding set so the
+# scanner's leash can keep them. No other service on this machine
+# names them. Another form's machine is unchanged.
+allow: [jit, packet, netadmin]
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
@@ -29,23 +34,54 @@ accounts:
       homedir: /var/empty
       shell: /sbin/nologin
 
-# make check's (forms/README.md): gvmd beside PostgreSQL.
+# make check's (forms/README.md): gvmd, the scanner and the feed
+# beside PostgreSQL.
 check:
-  memory: 4096
+  memory: 8192
 
 services:
+  # The feed, as _oci-feed, inside its image. It writes the cache and
+  # is the only writer of it, apart from the scanner's plugin cache.
+  # It has no packet capability and no path to PostgreSQL. rsync stays
+  # in the image. The community feed is release 25.0, which that server
+  # still publishes. A failed sync keeps the cache and tries the next day.
+  feed:
+    image: registry.community.greenbone.net/community/greenbone-feed-sync:stable
+    exec: /bin/bash /usr/lib/werewolf/feed-run
+    pledge: stdio rpath wpath inet unix netlink connect proc exec
+    connect: [tcp/873 public, udp/53, tcp/53]
+    run: /usr/
+    memory: 1024
+    nofile: 8192
+    data:
+      - /data/share/gvm/vt /var/lib/openvas/plugins write
+      - /data/share/gvm/notus /var/lib/notus write
+      - /data/share/gvm/scap /var/lib/gvm/scap-data write
+      - /data/share/gvm/cert /var/lib/gvm/cert-data write
+      - /data/share/gvm/data-objects /var/lib/gvm/data-objects write
+    env:
+      - GREENBONE_FEED_SYNC_FEED_RELEASE=25.0
+
   # gvmd, as _oci-gvmd, inside its image. greenbone-run migrates, sets
   # the administrator from the config, and execs gvmd on a Unix socket.
   # The socket is mode 0660. Its group is _oci-gvmd, which gvm-link
   # keeps after it drops. GMP still wants the password. share: group
-  # is that directory. It reaches PostgreSQL and nothing else. A
-  # missing password parks it. The image's bash may run gvmd.
+  # is that directory. It reaches PostgreSQL and the scanner, and
+  # reads the feed. It has no packet capability. A missing password
+  # parks it. The image's bash may run gvmd.
   gvmd:
     image: registry.community.greenbone.net/community/gvmd:stable
     exec: /usr/bin/bash /usr/lib/werewolf/greenbone-run
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec
-    connect: [tcp/5432]
+    connect: [tcp/5432, tcp/9391]
     write: [/var/lib/gvm, /var/log/gvm]
+    # The feed owns these. gvmd is in that group and may only read
+    # them: the data line is read, and Landlock follows the line.
+    group: _oci-feed
+    data:
+      - /data/share/gvm/scap /var/lib/gvm/scap-data read
+      - /data/share/gvm/cert /var/lib/gvm/cert-data read
+      - /data/share/gvm/data-objects /var/lib/gvm/data-objects read
     share: group
     run:
       - /usr/bin/bash
@@ -80,9 +116,35 @@ services:
       - GSAD_HTTP_ONLY=1
       - GSAD_FOREGROUND=1
 
+  # The scanner, as _oci-openvas, inside its image. It is the one
+  # service that keeps CAP_NET_RAW and CAP_NET_ADMIN, for alive
+  # detection. It listens on loopback for gvmd. It may write the
+  # plugin cache and only read the rest of the feed. Fence prohibits
+  # its loopback except Valkey, so it cannot open PostgreSQL or gsad.
+  # The image's entrypoint would set the socket mode to 666 and drop
+  # through gosu; this execs python on ospd-openvas.
+  openvas:
+    image: registry.community.greenbone.net/community/ospd-openvas:stable
+    exec: /bin/bash /usr/lib/werewolf/openvas-run
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec packet
+    caps: net_raw net_admin
+    listen: tcp/9391 loopback
+    connect: [tcp/6379, udp/53, any]
+    group: _oci-feed
+    write: [/var/log/gvm, /etc/openvas]
+    run: /usr/
+    memory: 2048
+    nofile: 65536
+    data:
+      - /data/share/gvm/vt /var/lib/openvas/plugins write
+      - /data/share/gvm/notus /var/lib/notus read
+    env:
+      - NMAP_PRIVILEGED=1
+
   # PostgreSQL, as postgresql's form runs it, but also on loopback TCP:
   # pg_hba.conf lets the role gvmd alone in that way, to the postgres
-  # database, and only gvmd's leash reaches it.
+  # database. The scanner's routing prohibits its loopback except
+  # Valkey, and no other leash names this port.
   postgres:
     exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/usr/share/werewolf-greenbone/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
@@ -92,6 +154,20 @@ services:
     run: /usr/bin/initdb
     read: /run/werewolf/import
     share: shared
+
+  # Valkey, on loopback, for the scanner's knowledge base. No password:
+  # the port is loopback, and only the scanner's leash connects. Fence
+  # prohibits that user from every other loopback port.
+  valkey:
+    exec: /usr/bin/valkey-server /etc/valkey/valkey.conf
+    before: /usr/lib/werewolf/valkey-init
+    user: valkey
+    pledge: stdio rpath wpath inet unix listen proc
+    listen: tcp/6379 loopback
+    read: /etc/valkey /run/werewolf/import
+    share: shared
+    memory: 256
+    nofile: 10240
 
   # Caddy, as its own user, for gsad. The domain is the site.
   caddy:

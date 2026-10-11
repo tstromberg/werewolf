@@ -224,7 +224,7 @@ pub fn main(init: std.process.Init) !void {
         "Landlock: {s}; this kernel cannot leash a service",
         .{sandbox.whyNot(gpa, err)},
     );
-    if ((s.listen.len > 0 or s.connect.len > 0) and rules.abi < 4)
+    if ((s.listen.len > 0 or s.connect.len > 0 or s.connect_any) and rules.abi < 4)
         l.fail(.park, "Landlock ABI {d} has no TCP rules", .{rules.abi});
     const floor_rules: []const Floor = if (s.root != null) &rooted_floor else &floor;
     for (floor_rules) |f| allow(rules, f.path, f.access, .optional) catch {};
@@ -240,6 +240,11 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "/run: {s}", .{sandbox.whyNot(gpa, err)});
     for (s.read) |p| allowPath(l, rules, gpa, p, read_tree, nodata);
     for (s.write) |p| allowPath(l, rules, gpa, p, write_tree, nodata);
+    // A shared directory is a different inode from the image path it is
+    // bound over, so the rule names the image path. Write on a parent
+    // does not cover it. A reader stays read-only here even if the
+    // directory's mode is wider.
+    for (s.data) |d| allowPath(l, rules, gpa, d.image, if (d.write) write_tree else read_tree, nodata);
     for (s.run) |p| if (p[p.len - 1] == '/') {
         // Every program beneath an image's directory, as Grafana runs one
         // for each data source: the image is read-only, in the verified root.
@@ -265,6 +270,13 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
     for (s.connect) |port| rules.port(sandbox.connect_tcp, port) catch |err|
         l.fail(.park, "connect tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+    // Every TCP port, for the one service that declared it. Other
+    // services keep the ports on their connect lines and no others.
+    if (s.connect_any) {
+        var p: u32 = 1;
+        while (p <= 65535) : (p += 1) rules.port(sandbox.connect_tcp, @intCast(p)) catch |err|
+            l.fail(.park, "connect tcp/{d}: {s}", .{ p, sandbox.whyNot(gpa, err) });
+    }
     // A socket's directory, not the socket, which its server makes anew
     // each time it starts; nothing there but reaching sockets.
     if (rules.fs & sandbox.resolve_unix != 0) for (s.sockets) |p|
@@ -289,7 +301,16 @@ pub fn main(init: std.process.Init) !void {
     for ([_][]const u16{ s.listen, s.listen_udp }) |ports| {
         for (ports) |p| low_port = low_port or p < 1024;
     }
-    dropTo(user, groups, low_port) catch |err|
+    // A packet capability is kept only when this machine allowed it.
+    // A file that names one the machine did not allow parks, so editing
+    // the file cannot widen the bounding set.
+    var keep: u32 = s.caps;
+    if (low_port) keep |= 1 << linux.CAP.NET_BIND_SERVICE;
+    if (s.caps & service.cap.net_raw != 0 and !allowances.has(.packet))
+        l.fail(.park, "caps net_raw: this machine does not allow packet", .{});
+    if (s.caps & service.cap.net_admin != 0 and !allowances.has(.netadmin))
+        l.fail(.park, "caps net_admin: this machine does not allow netadmin", .{});
+    dropTo(user, groups, keep) catch |err|
         l.fail(.park, "giving root up: {s}", .{@errorName(err)});
 
     // --- leashed --------------------------------------------------------------
@@ -756,31 +777,39 @@ fn interpreter(head: []const u8) !?[]const u8 {
     return null;
 }
 
+comptime {
+    if (service.cap.net_admin != 1 << linux.CAP.NET_ADMIN) @compileError("net_admin");
+    if (service.cap.net_raw != 1 << linux.CAP.NET_RAW) @compileError("net_raw");
+}
+
 /// dropTo switches to user for good. It keeps no supplementary groups and
-/// no capability but CAP_NET_BIND_SERVICE when bind_low, which survives exec.
-/// It fails with StillRoot if root can be regained.
-fn dropTo(user: User, groups: []const linux.gid_t, bind_low: bool) !void {
+/// no capability but the bits in keep (a low port's, and the packet
+/// capabilities the service file named), which survive exec. It fails
+/// with StillRoot if root can be regained.
+fn dropTo(user: User, groups: []const linux.gid_t, keep: u32) !void {
     // EINVAL means the kernel does not know the capability, so it cannot
     // grant it either. Any other failure is an error.
-    var cap: usize = 0;
-    while (cap < 64) : (cap += 1) {
-        if (bind_low and cap == linux.CAP.NET_BIND_SERVICE) continue;
-        const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+    var n: usize = 0;
+    while (n < 64) : (n += 1) {
+        if (n < 32 and keep & (@as(u32, 1) << @intCast(n)) != 0) continue;
+        const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), n, 0, 0, 0);
         if (linux.errno(rc) != .INVAL) try check(rc);
     }
-    if (bind_low) try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
+    if (keep != 0) try check(linux.prctl(@backingInt(linux.PR.SET_KEEPCAPS), 1, 0, 0, 0));
     try check(linux.setgroups(groups.len, groups.ptr));
     try check(linux.setresgid(user.gid, user.gid, user.gid));
     try check(linux.setresuid(user.uid, user.uid, user.uid));
-    const keep: u32 = if (bind_low) 1 << linux.CAP.NET_BIND_SERVICE else 0;
     var hdr: CapHeader = .{};
     const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep, .inheritable = keep }, .{} };
     try check(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)));
-    // Ambient, so it survives exec into a program without file capabilities.
-    if (bind_low) try check(linux.prctl(
+    // Ambient, so each one survives exec into a program without file
+    // capabilities. Other services pass keep 0, or only the low port.
+    // bit stays a usize: a u5 cannot count to 32, and the last increment
+    // would overflow.
+    for (0..32) |bit| if (keep & (@as(u32, 1) << @intCast(bit)) != 0) try check(linux.prctl(
         @backingInt(linux.PR.CAP_AMBIENT),
         linux.PR.CAP_AMBIENT_RAISE,
-        linux.CAP.NET_BIND_SERVICE,
+        bit,
         0,
         0,
     ));

@@ -38,6 +38,7 @@ The database starts empty. This form does not import a case export.
 
 ### Known Quirks
 
+- The schema is migrated before the server listens. A migration that fails does not serve.
 - The administrator password is applied at every start, from the file.
 - Background modules do not run. This machine is the web server.
 - The database password is not a secret: only this service can open the port.

@@ -1,0 +1,149 @@
+#!/bin/sh
+# check-updater-uki boots prod's own disk layout under firmware and updates
+# it through a repository this check serves, whose prod-form depends on
+# uki-prod: the machine must compose slot b with the signed UKI in its
+# root, lay it on the ESP with an entry that names it, and reboot into
+# that UKI, which must commit (docs/design/verified-boot.md, "Updates
+# under Secure Boot"). make passes CHECK_ENV and the pieces it built.
+set -eu
+dir=$CHECK/update-uki
+log=$dir/update.log
+
+say() { printf '%-6s %-14s %s\n' "$1" uki "$2"; }
+fail() { say FAIL "$1; see $log"; exit 1; }
+skip() { say skip "$*"; exit 0; }
+
+[ -n "${FIRMWARE:-}" ] || skip "no UEFI firmware for $ARCH"
+UKI_PACKAGE=$(echo "${REPO_DIR:?}"/uki-prod-*.apk)
+FORM_PACKAGE=$(echo "$REPO_DIR"/prod-form-*.apk)
+for f in "$OUT/slot/root.erofs" "$OUT/slot/stage0.zst" "$OUT/slot/vmlinuz" \
+	"$OUT/slot/cmdline" "$OUT/rootfs.tar" "$OUT/overlay.tar" \
+	"$UKI_PACKAGE" "$FORM_PACKAGE" "${REPO_KEY:?}" "${REPO_PUB:?}"; do
+	[ -f "$f" ] || skip "no $f"
+done
+debugfs=$(command -v debugfs || true)
+for d in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
+	[ -n "$debugfs" ] || [ ! -x "$d/debugfs" ] || debugfs=$d/debugfs
+done
+[ -n "$debugfs" ] || skip "no debugfs (e2fsprogs)"
+mke2fs=$(dirname "$debugfs")/mke2fs
+[ -x "$mke2fs" ] || skip "no mke2fs (e2fsprogs)"
+M="MTOOLS_SKIP_CHECK=1 mtools"
+mc() { MTOOLS_SKIP_CHECK=1 "$@"; }
+
+rm -rf "$dir" && mkdir -p "$dir/claim" "$dir/root/werewolf/a" "$dir/root/werewolf/b" "$dir/repo"
+
+# --- the repository this check serves ------------------------------------------
+# Its key is the machine's own; prod-form comes at a later time, now
+# depending on uki-prod, which holds the boot key's signed UKI.
+repo=$dir/repo
+cp "$UKI_PACKAGE" "$UKI_PACKAGE.stanza" "$FORM_PACKAGE" "$FORM_PACKAGE.stanza" "$repo/"
+build/host/package index "$repo" - >/dev/null
+openssl dgst -sha256 -sign "$REPO_KEY" -out "$repo/APKINDEX.sig" "$repo/APKINDEX.member"
+build/host/package sign "$repo" check-repo.rsa.pub "$repo/APKINDEX.sig" >/dev/null
+python3 -c 'import http.server,os,sys
+os.chdir(sys.argv[1])
+http.server.ThreadingHTTPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler).serve_forever()' \
+	"$repo" &
+server=$!
+trap 'kill $server ${qemu:-} 2>/dev/null' EXIT
+sleep 1
+port=$(lsof -nP -p $server 2>/dev/null | awk '/TCP .*LISTEN/ { print $9 }' | sed 's/.*://' | head -1)
+[ -n "$port" ] || fail "the repository server did not start"
+
+# --- slot a's root, with this check's repository in it -------------------------
+mkdir -p "$dir/claim/etc/apk/keys"
+cp "$REPO_PUB" "$dir/claim/etc/apk/keys/check-repo.rsa.pub"
+bsdtar -xOf "$OUT/rootfs.tar" etc/apk/repositories >"$dir/repositories"
+printf 'http://10.0.2.2:%s/repo\n' "$port" >>"$dir/repositories"
+cp "$dir/repositories" "$dir/claim/etc/apk/repositories"
+printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >"$dir/root.mtree"
+"$TAR" -C "$dir/claim" -cf "$dir/claim.tar" --uid 0 --gid 0 --numeric-owner \
+	etc/apk/repositories etc/apk/keys/check-repo.rsa.pub
+"$TAR" -cf "$dir/root.tar" --uid 0 --gid 0 --numeric-owner \
+	"@$dir/root.mtree" "@$OUT/rootfs.tar" "@$OUT/overlay.tar" "@$dir/claim.tar"
+# shellcheck disable=SC2086 # EROFS_OPTS are words
+mkfs.erofs $EROFS_OPTS -T0 -U 00000000-0000-0000-0000-000000000000 --tar=f \
+	"$dir/root/werewolf/a/root.erofs" "$dir/root.tar" >/dev/null 2>&1
+mkdir -p "$dir/verity"
+build/host/verity "$dir/root/werewolf/a/root.erofs" "$dir/verity/verity" >/dev/null
+(cd "$dir/verity" && "$TAR" -cf - --format newc --uid 0 --gid 0 --numeric-owner verity) |
+	zstd -q -c | cat "$OUT/slot/stage0.zst" - >"$dir/stage0.zst"
+
+# --- the disk: one GPT, the ESP and the root partition as the shipped layout ---
+truncate -s 256M "$dir/esp.img"
+mc mformat -i "$dir/esp.img" ::
+python3 -c 'import sys
+f=open(sys.argv[1],"r+b")
+f.seek(0x43); f.write((0x57E1F000).to_bytes(4,"little"))
+f.seek(446); f.write(bytes(64))
+f.close()' \
+	"$dir/esp.img"
+mc mmd -i "$dir/esp.img" ::/EFI ::/EFI/BOOT ::/loader ::/loader/entries ::/werewolf ::/werewolf/a
+bsdtar -xOf build/aarch64/boot/rootfs.tar usr/lib/systemd/boot/efi/systemd-bootaa64.efi \
+	>"$dir/systemd-bootaa64.efi"
+mc mcopy -i "$dir/esp.img" "$dir/systemd-bootaa64.efi" ::/EFI/BOOT/BOOTAA64.EFI
+cat >"$dir/entry.conf" <<'ENTRY'
+title werewolf a
+sort-key werewolf
+version 19800101T000000Z
+linux /werewolf/a/vmlinuz
+initrd /werewolf/a/stage0.zst
+options console=ttyS0,115200 console=hvc0 init=/init panic=10 softlockup_panic=1 debugfs=off proc_mem.force_override=never slab_nomerge page_alloc.shuffle=1 ipv6.disable=1 kvm-arm.mode=none loglevel=5 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewolf werewolf.esp=57E1-F000 werewolf.slot=a
+ENTRY
+mc mcopy -i "$dir/esp.img" "$dir/entry.conf" ::/loader/entries/werewolf-a+1.conf
+printf '@echo -on\r\nmap\r\nFS0:\\EFI\\BOOT\\BOOTAA64.EFI\r\n' >"$dir/startup.nsh"
+mc mcopy -i "$dir/esp.img" "$dir/startup.nsh" ::/startup.nsh
+mc mcopy -i "$dir/esp.img" "$OUT/slot/vmlinuz" ::/werewolf/a/vmlinuz
+mc mcopy -i "$dir/esp.img" "$dir/stage0.zst" ::/werewolf/a/stage0.zst
+"$mke2fs" -q -F -t ext4 -U 57e1f000-77e2-4b0f-8a3c-0000000000a0 -d "$dir/root" "$dir/root.img" 512M
+
+# --- the run ---------------------------------------------------------------------
+# Firmware, the disk, and the network with the host's repository. Boot one
+# commits slot a and stages the update, which reboots; boot two is slot
+# b's UKI, which must come up and commit. Expect drives QEMU, because the
+# UEFI shell skips startup.nsh when stdin is not a terminal.
+: >"$log"
+expect -f - "$dir" "$log" "$ARCH" "$ACCEL" "$CPU" "$FIRMWARE" <<'EXPECT' || fail "$(tail -c 300 "$log")"
+set dir [lindex $argv 0]
+set log [lindex $argv 1]
+set arch [lindex $argv 2]
+set accel [lindex $argv 3]
+set cpu [lindex $argv 4]
+set firmware [lindex $argv 5]
+set f [open $log a]
+log_user 0
+set timeout 1500
+spawn qemu-system-$arch -M virt -accel $accel -cpu $cpu -m 2048 -nographic \
+	-bios $firmware -boot menu=on,splash-time=0 \
+	-drive file=$dir/esp.img,format=raw,if=virtio \
+	-drive file=$dir/root.img,format=raw,if=virtio \
+	-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=
+set booted 0
+set staged 0
+set verified 0
+expect {
+	-re {.+} {
+		puts -nonewline $f $expect_out(0,string)
+		flush $f
+		if {[string first "handing over to runit" $expect_out(0,string)] >= 0} { set booted 1 }
+		if {[string first {\"event\":\"stage\"} $expect_out(0,string)] >= 0} { set staged 1 }
+		if {[string first "slot b:" $expect_out(0,string)] >= 0 &&
+		    [string first "verified" $expect_out(0,string)] >= 0} { set verified 1 }
+		if {$booted && $staged && $verified} { exit 0 }
+		exp_continue
+	}
+	eof { puts $f "\nwerewolf-check: qemu exited"; exit 1 }
+	timeout { puts $f "\nwerewolf-check: timed out (booted=$booted staged=$staged verified=$verified)"; exit 1 }
+}
+EXPECT
+
+# The ESP must hold the UKI and an entry that names it.
+mc mtype -i "$dir/esp.img" \
+	"::/loader/entries/$(mc mdir -b -i "$dir/esp.img" ::/loader/entries |
+		sed -n 's|.*werewolf-b[^ ]*\.conf.*|&|p' | head -1 | sed 's|.*/||')" 2>/dev/null |
+	grep -q '^efi /werewolf/b/uki.efi$' || fail "no entry names the UKI"
+mc mdir -i "$dir/esp.img" ::/werewolf/b 2>/dev/null | grep -q uki.efi ||
+	fail "the UKI was not laid on the ESP"
+
+say pass "the update laid a signed UKI, and the machine booted it and committed"

@@ -280,7 +280,8 @@ fn interface(gpa: Allocator, svcs: []const forms.Service, why: *Why) !Interface 
     // Every flag means one thing, and every path in the tar has one source.
     // A setting several services declare alike, of one type, is one flag,
     // its value given to each: a site's domain, to its web server and its
-    // application.
+    // application. A file they declare alike, the same path and the same
+    // optional bit, is one flag too: one secret, read by each service.
     const Flag = struct { name: []const u8, service: []const u8, setting: ?settings.Setting };
     var flags: std.ArrayList(Flag) = .empty;
     for (files.items) |f|
@@ -294,6 +295,12 @@ fn interface(gpa: Allocator, svcs: []const forms.Service, why: *Why) !Interface 
                 .{ a.service, a.name },
             );
         for (flags.items[0..i]) |b| if (std.mem.eql(u8, a.name, b.name)) {
+            if (a.setting == null and b.setting == null) {
+                const fa = fileNamed(files.items, a.service, a.name).?;
+                const fb = fileNamed(files.items, b.service, b.name).?;
+                if (std.mem.eql(u8, fa.path, fb.path) and fa.optional == fb.optional) continue;
+                return unalike(why, a, b);
+            }
             const x = a.setting orelse return unalike(why, a, b);
             const y = b.setting orelse return unalike(why, a, b);
             if (x.type != y.type or x.list != y.list) return unalike(why, a, b);
@@ -305,8 +312,10 @@ fn interface(gpa: Allocator, svcs: []const forms.Service, why: *Why) !Interface 
     for (paths.items, 0..) |a, i| {
         for (own_files) |own| if (std.mem.eql(u8, a, own))
             return why.refuse("a service declares {s}, which is werewolf's own", .{a});
-        for (paths.items[0..i]) |b| if (std.mem.eql(u8, a, b))
+        for (paths.items[0..i]) |b| if (std.mem.eql(u8, a, b)) {
+            if (identicalFiles(files.items, a)) continue;
             return why.refuse("two declarations put files at {s}", .{a});
+        };
     }
     return .{ .files = files.items, .settings = sets.items };
 }
@@ -496,6 +505,31 @@ pub fn flagValue(
 
 /// Entry is one file in the tar, and the flag it came from.
 pub const Entry = struct { path: []const u8, data: []const u8, from: []const u8 };
+
+/// fileNamed returns the file flag service declares, if it does.
+fn fileNamed(files: []const File, svc: []const u8, flag: []const u8) ?File {
+    for (files) |f| if (std.mem.eql(u8, f.service, svc) and std.mem.eql(u8, f.flag, flag))
+        return f;
+    return null;
+}
+
+/// identicalFiles reports whether every file at path is one declaration:
+/// the same flag and the same optional bit, declared more than once.
+fn identicalFiles(files: []const File, path: []const u8) bool {
+    var flag: ?[]const u8 = null;
+    var optional: ?bool = null;
+    var n: usize = 0;
+    for (files) |f| if (std.mem.eql(u8, f.path, path)) {
+        n += 1;
+        if (flag) |g| {
+            if (!std.mem.eql(u8, g, f.flag) or optional.? != f.optional) return false;
+        } else {
+            flag = f.flag;
+            optional = f.optional;
+        }
+    };
+    return n >= 2;
+}
 
 /// unalike refuses a flag two services declare differently.
 fn unalike(why: *Why, a: anytype, b: anytype) error{Refused} {
@@ -1649,6 +1683,24 @@ test interface {
         for (texts, svcs[0..texts.len]) |t, *s| s.* = .{ .name = t[0], .path = "", .text = t[1] };
         try testing.expectError(error.Refused, interface(gpa, svcs[0..texts.len], &why));
     }
+
+    // One secret, one path, read by two services: one flag and one file.
+    const shared = try interface(gpa, &.{
+        .{
+            .name = "web",
+            .path = "",
+            .text = head ++ "secret PAPERLESS_SECRET_KEY /run/config/paperless/secret-key",
+        },
+        .{
+            .name = "worker",
+            .path = "",
+            .text = head ++ "secret PAPERLESS_SECRET_KEY /run/config/paperless/secret-key",
+        },
+    }, &why);
+    try testing.expectEqual(@as(usize, 2), shared.files.len);
+    try testing.expectEqualStrings("paperless-secret-key", shared.files[0].flag);
+    try testing.expectEqualStrings("paperless/secret-key", shared.files[0].path);
+    try testing.expectEqualStrings(shared.files[0].path, shared.files[1].path);
 }
 
 test options {

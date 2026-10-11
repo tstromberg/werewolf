@@ -63,8 +63,8 @@ The forms neither the catalog nor service-forms.md carries:
 | `grafana` | admin from the config; sign-up off; the API without a login | built |
 | `open-webui` | admin from the config; sign-up off; a user's function upload | built |
 
-`continuwuity` is the Matrix form, `samba` the file share. Next:
-documents (Paperless-ngx) and games (`minecraft`). Backups are `restic-server`.
+`continuwuity` is the Matrix form, `samba` the file share, `paperless`
+the document archive, `minecraft` the game. Backups are `restic-server`.
 
 **Plugins** (Nextcloud apps, Home Assistant integrations, Grafana
 plugins, Open WebUI functions) install at run time into `/data`, as each

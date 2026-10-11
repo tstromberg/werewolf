@@ -1,0 +1,42 @@
+# minecraft: Minecraft Java Edition 26.3, the release pinned in
+# forms/minecraft/melange/minecraft.yaml. Nothing here notices when
+# Mojang publishes a newer server. It is the jre form, so it runs that
+# form's Java. The whitelist is the config's account names, resolved
+# with Mojang before each start. Online mode is on, and there is no
+# RCON or query port. The world is in /data. See forms/minecraft/README.md.
+base: jre
+
+# make check's (forms/README.md). The game port speaks Minecraft's
+# protocol, not HTTP. The heap and the world sit beside the machine's.
+check:
+  memory: 4096
+  skip: [http-answering]
+
+# The posture checks this form fails, and why: its own, never inherited
+# (forms/README.md). A ? before one: the host decides.
+weaknesses:
+  programs-no-interpreters: java runs the server, which is what this form is for
+  kernel-write-xor-execute: the JVM compiles the server to machine code as it runs (allow jit, from jre)
+
+services:
+  # The server, as its own user. It may bind the game port and no other,
+  # reach Mojang over HTTPS (the whitelist's account lookup, and online
+  # mode's session check) and a resolver, and write its directory.
+  # minecraft-init writes server.properties, eula.txt and the whitelist
+  # first. The bundler unpacks its libraries there, not into the
+  # read-only image. The heap is under the memory limit, with room for
+  # the JVM's own. View distance is short so a small machine can
+  # generate the spawn.
+  minecraft:
+    exec: /usr/bin/java -Xms512m -Xmx1280m -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/minecraft -DbundlerRepoDir=/data/svc/minecraft -jar /usr/lib/minecraft/server.jar nogui
+    before: /usr/lib/werewolf/minecraft-init
+    user: minecraft
+    # netlink: the JVM lists the host's addresses.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: [tcp/25565]
+    connect: [tcp/443 tcp/53 udp/53]
+    config: settings /run/config/minecraft/settings.json
+    setting: players string... required
+    render: json minecraft.json
+    memory: 2560
+    nofile: 8192

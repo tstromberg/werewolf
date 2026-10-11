@@ -639,6 +639,21 @@ pub fn lay(b: *native.B) !void {
                     });
                 try writes.append(gpa, w);
             }
+            // A data line's image path is a mount point, like a write.
+            // It is not a write bind: compose mounts /data/share over it.
+            for (try valuesOf(gpa, svc.value, "data")) |line| {
+                var it = std.mem.tokenizeAny(u8, line, " \t");
+                _ = it.next();
+                const image = it.next() orelse "";
+                const access = it.next() orelse "";
+                if (it.next() != null or image.len < 2 or image[0] != '/' or
+                    (!std.mem.eql(u8, access, "read") and !std.mem.eql(u8, access, "write")))
+                    return b.fail(
+                        "{s}: services: {s}: data {s}: a host path, an image path, and read or write",
+                        .{ fm.dir, svc.key, line },
+                    );
+                try writes.append(gpa, image);
+            }
             var override: ?[]const []const u8 = null;
             if (valueOf(svc.value, "exec")) |e| {
                 if (std.mem.findAny(u8, e, "\"'\\") != null)

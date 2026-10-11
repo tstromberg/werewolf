@@ -31,5 +31,16 @@ if /usr/local/sbin/gvmd --get-users --verbose | grep -q '^admin '; then
 else
 	/usr/local/sbin/gvmd --create-user=admin --password="$pw"
 fi
+# The scanner listens on loopback. Recording it fails open: the UI
+# comes up either way. The type is the second word.
+/usr/local/sbin/gvmd --get-scanners | while read -r uuid type _; do
+	case $type in
+	OpenVAS)
+		/usr/local/sbin/gvmd --modify-scanner="$uuid" \
+			--scanner-host=127.0.0.1 --scanner-port=9391 ||
+			echo "greenbone-run: scanner not recorded" >&2
+		;;
+	esac
+done || echo "greenbone-run: scanners not listed" >&2
 umask 007
 exec /usr/local/sbin/gvmd -f --listen=/run/gvmd.sock --listen-mode=660

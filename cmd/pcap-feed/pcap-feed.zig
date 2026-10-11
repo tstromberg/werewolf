@@ -1,17 +1,17 @@
-//! span copies one interface's packets to a pcap fifo, then gives up the
-//! ability to do anything else. Suricata and Zeek read the fifo. They never
-//! hold CAP_NET_RAW or CAP_NET_ADMIN: span opens the socket, sets
-//! promiscuous mode, writes the pcap header, drops to _span, and from then
-//! on may only read that socket and write that fifo.
+//! pcap-feed copies one interface's packets to a pcap fifo, then gives up
+//! the ability to do anything else. Suricata and Zeek read the fifo. They
+//! never hold CAP_NET_RAW or CAP_NET_ADMIN: pcap-feed opens the socket,
+//! sets promiscuous mode, writes the pcap header, drops to _pcap, and from
+//! then on may only read that socket and write that fifo.
 //!
-//!     span
+//!     pcap-feed
 //!
-//! /etc/werewolf/span names the fifo and the user who may read it:
+//! /etc/werewolf/pcap-feed names the fifo and the user who may read it:
 //!
 //!     feed /run/svc/suricata/feed
 //!     user suricata
 //!
-//! runit starts it as root (forms/suricata/rootfs/etc/sv/span/run). See
+//! runit starts it as root (forms/suricata/rootfs/etc/sv/pcap-feed/run). See
 //! forms/suricata/README.md.
 
 const std = @import("std");
@@ -20,8 +20,8 @@ const Io = std.Io;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
-const config_path = "/etc/werewolf/span";
-const drop_user = "_span";
+const config_path = "/etc/werewolf/pcap-feed";
+const drop_user = "_pcap";
 const snaplen: u32 = 65535;
 const sol_packet: i32 = 263;
 const packet_add_membership: i32 = 1;
@@ -63,6 +63,10 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn run(io: Io, gpa: Allocator) !void {
+    // runsv execs the ./run link, so the kernel names this process run.
+    // An administrator should see the program.
+    if (linux.errno(linux.prctl(@backingInt(linux.PR.SET_NAME), @intFromPtr("pcap-feed"), 0, 0, 0)) != .SUCCESS)
+        return error.SetName;
     const cfg = try parse(try readFile(io, gpa, config_path, 512));
     const reader = try account(io, gpa, cfg.user);
     const self = try account(io, gpa, drop_user);
@@ -213,7 +217,7 @@ fn account(io: Io, gpa: Allocator, name: []const u8) !Account {
     return error.NoSuchUser;
 }
 
-/// parse reads span's two lines. Anything else, including a third word or a
+/// parse reads pcap-feed's two lines. Anything else, including a third word or a
 /// feed that is not absolute, is refused: the file is in the image, and a
 /// surprise there is a bug, not a setting.
 fn parse(text: []const u8) !Config {
@@ -263,7 +267,7 @@ fn htons(v: u16) u16 {
 
 fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
     var buf: [512]u8 = undefined;
-    const line = std.mem.print(&buf, "span: " ++ fmt ++ "\n", args) catch return;
+    const line = std.mem.print(&buf, "pcap-feed: " ++ fmt ++ "\n", args) catch return;
     Io.File.stdout().writeStreamingAll(io, line) catch {};
 }
 

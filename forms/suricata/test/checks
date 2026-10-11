@@ -1,9 +1,10 @@
-# Suricata reads span's fifo as its own user, with no control socket and
+# Suricata reads pcap-feed's fifo as its own user, with no control socket and
 # no way to rewrite the rules. The marker rule is the image's.
-ok  span-dropped     p=$(awk '$2=="(span)"{print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); [ -n "$p" ] && grep -q '^Uid:[[:space:]]*70[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  span-feed        [ "$(stat -c '%a' /run/svc/suricata/feed)" = 400 ] && [ "$(stat -c '%u' /run/svc/suricata/feed)" = "$(grep '^suricata:' /etc/passwd | cut -d: -f3)" ]
+ok  pcap-dropped     p=$(awk '$2=="(pcap-feed)"{print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); [ -n "$p" ] && grep -q '^Uid:[[:space:]]*70[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  pcap-fifo        [ "$(stat -c '%a' /run/svc/suricata/feed)" = 400 ] && [ "$(stat -c '%u' /run/svc/suricata/feed)" = "$(grep '^suricata:' /etc/passwd | cut -d: -f3)" ]
 ok  suricata-user    p=$(head -n 1 /run/cgroup/svc/suricata/cgroup.procs); u=$(grep '^suricata:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  suricata-started i=0; until grep -q 'Engine started' /data/svc/suricata/suricata.log 2>/dev/null; do i=$((i + 1)); [ $i -le 60 ] || { echo "no engine in 60 s"; exit 1; }; sleep 1; done
+ok  suricata-started i=0; until grep -q 'Engine started' /data/svc/suricata/suricata.log 2>/dev/null; do i=$((i + 1)); [ $i -le 180 ] || { echo "no engine in 180 s"; echo '--- suricata.log ---'; tail -n 60 /data/svc/suricata/suricata.log 2>&1; exit 1; }; sleep 1; done
 ok  suricata-rule    grep -q 'werewolf.rules' /data/svc/suricata/suricata.log
+ok  rules-cache      u=$(grep '^_rules:' /etc/passwd | cut -d: -f3); s=$(grep '^suricata:' /etc/passwd | cut -d: -f3); [ "$u" != "$s" ] && [ "$(stat -c '%u' /data/svc/rules-fetch/rules/werewolf.rules)" = "$u" ] && [ "$(stat -c '%a' /data/svc/rules-fetch/rules/werewolf.rules)" = 644 ]
 ok  suricata-socket  ! find /run /data/svc/suricata \( -name 'suricata-command.socket' -o -name 'suricata.socket' \) 2>/dev/null | grep -q .
 ok  suricata-rules   ! touch /usr/share/suricata/rules/werewolf.rules 2>/dev/null

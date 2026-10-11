@@ -36,7 +36,15 @@ until "$py" -c 'import socket; s=socket.create_connection(("127.0.0.1",5432),2);
 	}
 	sleep 1
 done
-"$py" -m flask db upgrade || echo "iris-run: flask db upgrade failed; gunicorn starts anyway" >&2
+i=0
+until "$py" -m flask db upgrade; do
+	i=$((i + 1))
+	[ "$i" -le 30 ] || {
+		echo "iris-run: schema did not migrate" >&2
+		exit 1
+	}
+	sleep 1
+done
 exec "$py" /opt/venv/bin/gunicorn app:app \
 	--worker-class eventlet --workers 1 --bind 127.0.0.1:8000 \
 	--timeout 180 --worker-connections 100 --log-level info

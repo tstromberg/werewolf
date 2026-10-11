@@ -8,4 +8,8 @@ umask 077
 printf '%s' werewolf-check-secret-key >"$1/paperless/secret-key"
 printf '%s' werewolf-check-password >"$1/paperless/admin-password"
 echo '{"domain":"localhost","admin":"admin"}' >"$1/paperless/settings.json"
+for s in paperless-consumer paperless-worker paperless-beat; do
+	mkdir -p "$1/$s"
+	echo '{"domain":"localhost"}' >"$1/$s/settings.json"
+done
 echo '{"domain":"localhost"}' >"$1/caddy/settings.json"
