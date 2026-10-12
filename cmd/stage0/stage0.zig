@@ -6,6 +6,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const dm = @import("dm");
 const verity = @import("verity");
+const ipe = @import("ipe");
 const cmdline = @import("cmdline");
 const MS = linux.MS; // ziglint-ignore: Z032
 
@@ -153,6 +154,12 @@ pub fn main(init: std.process.Init) !void {
             .{ img, params.root[0..8] },
         );
 
+    // Switch away from initramfs trust before any descendant is forked.
+    // The deadman uses only raw calls, so it needs no executable mappings
+    // from the initramfs after this policy becomes active.
+    enforceIpe(io, gpa, params.root) catch |err|
+        fail("IPE: {s}; not handing over", .{@errorName(err)});
+
     if (boot.slot) |slot| {
         // A shorter wait is for make check-deadman, so only a DEV build's
         // root, now verified, may ask for one. A release always waits ten
@@ -195,6 +202,35 @@ pub fn main(init: std.process.Init) !void {
         try gpa.print("kernel={d} modules={d} root={d}", .{ kernel_ms, modules_ms, root_ms }));
     const err = std.process.replace(io, .{ .argv = &.{"/init"}, .environ_map = &env });
     fail("cannot start /init: {s}", .{@errorName(err)});
+}
+
+fn enforceIpe(io: std.Io, gpa: std.mem.Allocator, root: [32]u8) !void {
+    const required = linux.errno(linux.access("/root" ++ ipe.marker, linux.F_OK)) == .SUCCESS;
+    const present = linux.errno(linux.access(ipe.base, linux.F_OK)) == .SUCCESS;
+    if (!required and !present) return;
+    if (!present) return error.IpeMissing;
+    const signed = std.Io.Dir.cwd().readFileAlloc(
+        io,
+        "/ipe.p7b",
+        gpa,
+        .limited(ipe.max_policy),
+    ) catch
+        return error.IpePolicyMissing;
+    if (!writeFile(ipe.base ++ "/new_policy", signed)) return error.IpePolicyRejected;
+    var expected: std.Io.Writer.Allocating = .init(gpa);
+    defer expected.deinit();
+    try ipe.policy(&expected.writer, root);
+    if (!std.mem.eql(u8, readAll(gpa, ipe.policy_path), expected.written()))
+        return error.IpeWrongRoot;
+    if (!writeFile(ipe.active, "1") or !writeFile(ipe.base ++ "/enforce", "1") or
+        !ipe.enforced(
+            readAll(gpa, ipe.policy_path),
+            readAll(gpa, ipe.active),
+            readAll(gpa, ipe.base ++ "/enforce"),
+        ))
+        return error.IpeNotEnforced;
+    try ipe.lockAdmin();
+    say("IPE: only this root image may execute; policy administration removed", .{});
 }
 
 /// deadman forks a child that sleeps for after seconds, then reboots unless

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Boot the production daemon with the same users as the development check.
+set -eu
+exec "$(dirname "$0")/config" "$@"

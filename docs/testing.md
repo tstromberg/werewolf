@@ -1,5 +1,13 @@
 # Testing
 
+Opt-in IPE builds have a separate `make IPE=1 check-ipe` suite. It boots
+the real image, tests global execution and executable mappings without
+Landlock, seccomp or noexec, and refuses missing, tampered, wrong-signer and wrong-root
+policies before handover. Build the custom kernel with `make ipe-kernel`
+on Linux and supply `WEREWOLF_IPE_KEY` and `WEREWOLF_IPE_CRT`; see
+[design/ipe.md](design/ipe.md). CI runs it on both architectures with
+disposable signing keys. Production updates remain held on IPE images.
+
 ```sh
 make test           # every program's and library's unit tests
 make check          # boot every form, and a slot, and check each one
@@ -167,9 +175,15 @@ from 23200 plus that place. So machines never share state or ports, and
 `make -j` runs them together. A few forms boot a second time from the disk
 the first boot left, to show what it kept (`AGAIN_FORMS`, Makefile):
 `minimal` keeps nothing, `sshd` a host key, `prod-ssh` a host key under an
-updater, `gitea` and `vaultwarden` an application's data, and `demo`
-PostgreSQL's. Every form runs the same code, so these few stand for all.
+updater, `gitea` and `vaultwarden` an application's data, `demo`
+PostgreSQL's, and `samba` its files while adding and revoking users.
+Every form runs the same code, so these few stand for all.
 `AGAIN_FORMS=all` boots every form twice.
+
+A form's `test/config-again` may change its config before that second
+boot, and `test/checks-again` adds checks to the common persistence checks.
+A form's `test/config-shellfree` supplies configuration for its production
+boot when its service needs secrets to start.
 
 Nothing waits a fixed time. [test/boot](../test/boot) waits for each thing
 it needs to see, up to a limit, so a fast machine finishes fast and a slow

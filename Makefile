@@ -71,10 +71,14 @@ ifeq ($(KERNEL_ARGS)$(filter :,$(FORM_ASK)),)
 $(error form $(FORM) has no kernel arguments, as build/host/form says above)
 endif
 
-BUILD = build/$(ARCH)
+IPE ?=
+BUILD = build/$(ARCH)$(if $(IPE),/ipe)
+IPE_KERNEL ?= build/ipe-kernel/$(ARCH)/rootfs.tar
+WEREWOLF_IPE_CRT ?=
+WEREWOLF_IPE_KEY ?=
 APP ?=
 DEV ?=
-OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)
+OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
 TAR ?= $(shell command -v bsdtar || echo tar)
 SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 .DELETE_ON_ERROR:
@@ -99,7 +103,7 @@ hooks:
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
 HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
-	$(if $(PUBLISHED),--published)
+	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT))
 image slot: $(HOWL)
 	$(HOWL_BUILD) $@
 disk: $(HOWL)
@@ -149,6 +153,7 @@ PROGRAM_AT_bite-cleanup = usr/bin/bite-cleanup
 PROGRAM_AT_popen-shim = usr/lib/werewolf/popen-shim.so
 PROGRAM_AT_samba-passwd = usr/lib/werewolf/samba-passwd.so
 PROGRAM_AT_paperless-group = usr/lib/werewolf/paperless-group.so
+PROGRAM_AT_crash-log = usr/lib/werewolf/crash-log.so
 form_bin = $(PROGRAMS)/forms/$(notdir $(patsubst %/cmd/$(notdir $(1)),%,$(1)))/usr/lib/werewolf/$(notdir $(1))
 FORM_CMDS := $(sort $(patsubst %/,%,$(wildcard forms/*/cmd/*/) $(foreach d,$(FORM_DIRS),$(wildcard $(d)/cmd/*/))))
 POSTURE_BIN = $(call program_bin,posture)
@@ -160,14 +165,14 @@ endef
 
 # A program may import any library; a library, only what its --dep flags name.
 LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
-	-Mverity=lib/verity.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
+	-Mverity=lib/verity.zig -Mipe=lib/ipe.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
 	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig -Mhostkey=lib/hostkey.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep seal --dep settings --dep update-policy \
+ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
@@ -177,7 +182,7 @@ $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wil
 	$$(zig_check)
 	zig build-exe -O ReleaseSafe -fstrip -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
-$(foreach p,$(filter-out popen-shim samba-passwd paperless-group,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
+$(foreach p,$(filter-out popen-shim samba-passwd paperless-group crash-log,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
 # pg-init preloads popen-shim.so into initdb, so it links glibc as initdb does.
 # samba preloads samba-passwd.so into smbd, for the same reason: glibc.
@@ -189,6 +194,10 @@ $(call program_bin,samba-passwd): cmd/samba-passwd/samba-passwd.zig
 	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 # Paperless preloads paperless-group.so into CPython, so it links glibc too.
 $(call program_bin,paperless-group): cmd/paperless-group/paperless-group.zig
+	$(zig_check)
+	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
+# Suricata preloads crash-log.so, so it links glibc as Suricata does.
+$(call program_bin,crash-log): cmd/crash-log/crash-log.zig
 	$(zig_check)
 	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 
@@ -230,7 +239,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
-	lib/verity.zig lib/image.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
+	lib/verity.zig lib/ipe.zig lib/image.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -252,7 +261,7 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+	boot/gpt.zig lib/ipe.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
@@ -265,7 +274,9 @@ _test/lib/compose.zig: ; zig test $(COMPOSE_MODULES)
 _test/tools/package.zig _test/lib/apk.zig: _test/%: ; zig test --dep package -Mroot=$* -Mpackage=lib/package.zig
 _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/cmd/popen-shim/popen-shim.zig: ; zig test cmd/popen-shim/popen-shim.zig -lc
+_test/cmd/samba-passwd/samba-passwd.zig: ; zig test cmd/samba-passwd/samba-passwd.zig -lc
 _test/cmd/paperless-group/paperless-group.zig: ; zig test cmd/paperless-group/paperless-group.zig -lc
+_test/cmd/crash-log/crash-log.zig: ; zig test cmd/crash-log/crash-log.zig -lc
 _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
 _test/cmd/%.zig: ; zig test $(call ZIG_MODULES,cmd/$*.zig)
 _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
@@ -414,7 +425,7 @@ CHECK_BOOT = console=$(CONSOLE) $(KERNEL_ARGS) panic=1 werewolf.debug=1 werewolf
 CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 werewolf.dns=10.0.2.3
 # The posture failures test/boot expects: test/posture-known's and the form's weaknesses.
 POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
-export POSTURE_KNOWN := $(POSTURE_KNOWN_KIND) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
+export POSTURE_KNOWN := $(if $(IPE),$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN_KIND)),$(POSTURE_KNOWN_KIND)) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
 # A check script's environment (docs/testing.md). Homebrew keeps debugfs off PATH.
 VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e2fsprogs/sbin/debugfs /usr/local/opt/e2fsprogs/sbin/debugfs))
@@ -442,6 +453,27 @@ check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
 # boots below.
 check-integrity: check-slot check-unsigned check-verity check-deadman \
 	$(if $(filter aarch64-hvf aarch64-kvm,$(ARCH)-$(ACCEL)),check-secureboot)
+
+# IPE is opt-in until signed prebuilt updates replace on-machine rebuilds.
+.PHONY: ipe-kernel check-ipe _check-ipe
+ipe-kernel: $(HOWL)
+	@[ -n "$(WEREWOLF_IPE_KEY)" ] && [ -n "$(WEREWOLF_IPE_CRT)" ] || \
+		{ echo "ipe-kernel: WEREWOLF_IPE_KEY and WEREWOLF_IPE_CRT must name signing files" >&2; exit 1; }
+	$(MAKE) --no-print-directory IPE= FORM=minimal ARCH=$(ARCH) slot
+	boot/build-kernel build/$(ARCH)/kernel/rootfs.tar $(WEREWOLF_IPE_CRT) $(WEREWOLF_IPE_KEY) $(dir $(IPE_KERNEL))
+
+IPE_PROBE = $(BUILD)/test/ipe-probe-root/usr/lib/werewolf/ipe-probe
+$(IPE_PROBE): test/ipe-init.zig lib/ipe.zig lib/dm.zig lib/verity.zig
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep dm --dep verity --dep ipe \
+		-Mroot=$< -Mdm=lib/dm.zig -Mverity=lib/verity.zig -Mipe=lib/ipe.zig -femit-bin=$@
+check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE)
+	@[ "$(IPE)" = 1 ] || { echo "check-ipe: set IPE=1 and the kernel, key and certificate paths" >&2; exit 1; }
+	$(MAKE) --no-print-directory FORM=minimal DEV=1 APP=$(BUILD)/test/ipe-probe-root image
+	$(MAKE) --no-print-directory FORM=minimal DEV=1 APP=$(BUILD)/test/ipe-probe-root _check-ipe
+_check-ipe:
+	@$(CHECK_ENV) IPE_PROBE=$(IPE_PROBE) VERITY=$(VERITY_BIN) \
+		IPE_KEY=$(WEREWOLF_IPE_KEY) IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-ipe $(CHECK_QEMU)
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
 check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check: check-forms check-shellfree check-integrity check-cloud check-persist
@@ -475,7 +507,7 @@ CHECK_WEB_PORT := $(call form_check,web)
 CHECK_WEB := $(if $(CHECK_WEB_PORT),$(call check_port,23200,$(FORM)))
 CHECK_FWD = $(if $(CHECK_SSH),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)))
 # The forms booted again on the disks they left (docs/testing.md).
-AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo
+AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo samba
 ifeq ($(AGAIN_FORMS),all)
 override AGAIN_FORMS := $(FORMS)
 endif
@@ -501,7 +533,7 @@ $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
 	@$(call built,$*-shellfree,$(MAKE) --no-print-directory FORM=$* DEV= image)
 	@$(MAKE) --no-print-directory FORM=$* DEV= _check-shellfree
 _check-shellfree:
-	@$(CHECK_ENV) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
+	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
 # These boot what a form's check built, so follow it; they need prod's DHCP, metadata and /data.
 check-lease check-nodata check-metadata: | _check-shared check-prod

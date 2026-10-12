@@ -1,0 +1,2 @@
+seen samba-users samba-init: 2 users
+seen samba-started smbd version [^\r\n]+ started\.

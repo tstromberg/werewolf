@@ -7,6 +7,13 @@ programs and forms are packages: [custom-updates.md](design/custom-updates.md)),
 boots that slot once, and records what changed and which CVEs that fixes.
 Releases are for installs; every machine updates this one way.
 
+Opt-in IPE images hold local rebuilds with `IpeSignedImageRequired`: a new
+root needs its own signed policy, and no machine holds that signing key.
+Installing or arming another slot and rebooting into a pending update are
+also held; committing the current boot remains available.
+Signed prebuilt-image delivery is still required before production IPE
+rollout ([design/ipe.md](design/ipe.md)).
+
 It is one Zig program, `cmd/slot-update/slot-update.zig` with
 `cmd/slot-update/cve.zig` (the CVE children and the checks of what they say)
 and `lib/sandbox.zig`, in `minimal` and so every form.
@@ -167,7 +174,8 @@ become root's, and anything that is not a regular file with a name apk
 gives its cache (`APKINDEX.*.tar.gz`, `*.apk`, `installed`) is removed
 unread. Before its apk reads a byte, root checks the cache itself
 (`cmd/slot-update/apk.zig`): each index's signature against the root's
-keys (`.SIGN.RSA256` is SHA-256, Alpine's `.SIGN.RSA` SHA-1), each
+keys (`.SIGN.RSA256` is required except for the explicit Alpine keyring,
+whose `.SIGN.RSA` is SHA-1), each
 package's control segment against the SHA-1 its index lists (`C:`), and
 the rest against the SHA-256 that control names (`datahash`). A package
 no index lists is removed; one that does not match fails the pass, and is

@@ -36,8 +36,9 @@ is one leashed process, or a few, on one machine.
 ## Detailed design
 
 pcap-feed opens one interface, writes a pcap header to a fifo,
-drops to `_pcap` (uid 70) and keeps `read`, `write`, `clock_gettime`
-and `exit_group`. Suricata and Zeek read the fifo. `packet` and
+drops to `_pcap` (uid 70) and keeps `read`, `write`, `poll`, `ppoll`,
+`clock_gettime` and `exit_group`. A reader that opens after the
+previous one closed gets a new header. Suricata and Zeek read the fifo. `packet` and
 `netadmin` stay in the bounding set so pcap-feed can open the socket; the
 analyzers never have them.
 
@@ -93,8 +94,8 @@ The scanner alone keeps the packet capabilities; gvmd reads the feed and cannot 
 
 ## Reliability Considerations
 
-A sensor that exits is restarted by runit and finds the fifo still
-open. Velociraptor's keys are kept on `/data`; a second boot does not
+A sensor that exits is restarted by runit. pcap-feed writes a new
+pcap header when that next reader opens the fifo. Velociraptor's keys are kept on `/data`; a second boot does not
 regenerate them. BloodHound waits out Neo4j by exiting until Bolt
 answers, and runit starts it again. IRIS and gvmd do the same for
 PostgreSQL.

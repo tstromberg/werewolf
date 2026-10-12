@@ -1,0 +1,51 @@
+# Exercise the opt-in IPE path with disposable keys, on both architectures.
+name: ipe
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  enforce:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install tools
+        run: |
+          sudo test/ci-setup
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc
+      - name: Disposable signing identity
+        run: |
+          mkdir -p build/ipe-check
+          openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 2 \
+            -subj /CN=werewolf-ipe-check -keyout build/ipe-check/policy.key -out build/ipe-check/policy.crt
+          chmod 600 build/ipe-check/policy.key
+      - name: Build kernel and test enforcement
+        env:
+          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
+          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
+        run: |
+          make ipe-kernel
+          make IPE=1 check-ipe
+      - name: Keep console logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: ipe-${{ runner.arch }}
+          path: build/*/ipe/check/ipe/*.log

@@ -7,6 +7,7 @@
 //! See README.md and docs/updater.md.
 
 const std = @import("std");
+const ipe = @import("ipe");
 pub const Io = std.Io;
 pub const Dir = Io.Dir;
 pub const Allocator = std.mem.Allocator;
@@ -420,6 +421,7 @@ pub const Update = struct {
         // Until this slot commits, the other slot is the fallback and must
         // not be written.
         Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
+        try u.requireLocalUpdate();
         const held_lock = try u.lock();
         defer _ = linux.close(held_lock);
         Dir.cwd().deleteTree(io, work_dir) catch {};
@@ -925,6 +927,20 @@ pub const Update = struct {
     pub const buildSlot = slot.buildSlot;
     pub const install = slot.install;
 
+    /// A locally rebuilt root has no CI-signed IPE policy. Refuse before
+    /// modifying a slot; the policy signing key never belongs on a machine.
+    pub fn requireLocalUpdate(u: *Update) !void {
+        if (!try localUpdateAllowed(
+            Dir.cwd().access(u.io, ipe.marker, .{}),
+            Dir.cwd().access(u.io, ipe.base, .{}),
+        )) {
+            u.step = "ipe";
+            u.detail = "IPE requires a prebuilt image and its signed root policy; local package " ++
+                "rebuilds are held";
+            return error.IpeSignedImageRequired;
+        }
+    }
+
     pub const apkAdd = slot.apkAdd;
 
     /// held asks the mount broker for a read-write mount of word, kept while
@@ -1370,6 +1386,33 @@ fn lessString(_: void, a: []const u8, b: []const u8) bool {
 // --- tests ------------------------------------------------------------------
 
 const testing = std.testing;
+
+fn localUpdateAllowed(marker_access: anyerror!void, kernel_access: anyerror!void) !bool {
+    const required = if (marker_access) |_| true else |err| switch (err) {
+        error.FileNotFound => false,
+        else => return err,
+    };
+    const present = if (kernel_access) |_| true else |err| switch (err) {
+        error.FileNotFound => false,
+        else => return err,
+    };
+    return !required and !present;
+}
+
+test "IPE update guard holds even if its root marker is missing" {
+    try testing.expect(try localUpdateAllowed(error.FileNotFound, error.FileNotFound));
+    try testing.expect(!try localUpdateAllowed({}, error.FileNotFound));
+    try testing.expect(!try localUpdateAllowed(error.FileNotFound, {}));
+    try testing.expect(!try localUpdateAllowed({}, {}));
+    try testing.expectError(
+        error.AccessDenied,
+        localUpdateAllowed(error.AccessDenied, error.FileNotFound),
+    );
+    try testing.expectError(
+        error.AccessDenied,
+        localUpdateAllowed(error.FileNotFound, error.AccessDenied),
+    );
+}
 
 test parentDir {
     try testing.expectEqualStrings("/boot", parentDir(parentDir("/boot/grub/grubenv")));

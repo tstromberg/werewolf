@@ -1,0 +1,5 @@
+#!/bin/sh
+# Add Carol, rotate Alice's password, and remove Bob without replacing /data.
+set -eu
+umask 077
+printf '%s\n' 'carol:werewolf-new-password' 'alice:werewolf-rotated-password' >"$1/samba/users"

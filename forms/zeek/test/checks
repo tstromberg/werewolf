@@ -2,4 +2,4 @@
 ok  pcap-dropped  p=$(awk '$2=="(pcap-feed)"{print $1; exit}' /proc/[0-9]*/stat 2>/dev/null); [ -n "$p" ] && grep -q '^Uid:[[:space:]]*70[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
 ok  pcap-fifo     [ "$(stat -c '%a' /run/svc/zeek/feed)" = 400 ]
 ok  zeek-user     p=$(head -n 1 /run/cgroup/svc/zeek/cgroup.procs); u=$(grep '^_oci-zeek:' /etc/passwd | cut -d: -f3); [ "$u" -ge 65536 ] && grep -q "^Uid:[[:space:]]*$u[[:space:]]" /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
-ok  zeek-started  i=0; until [ -s /data/svc/zeek/reporter.log ] || [ -s /data/svc/zeek/conn.log ]; do i=$((i + 1)); [ $i -le 90 ] || { echo "no zeek log in 90 s"; exit 1; }; sleep 1; done
+ok  zeek-started  i=0; until [ -s /data/svc/zeek/reporter.log ] || [ -s /data/svc/zeek/conn.log ]; do i=$((i + 1)); [ $i -le 90 ] || { echo "no zeek log in 90 s"; find /data/svc/zeek /run/svc/zeek -type f 2>/dev/null | head -n 40; exit 1; }; sleep 1; done

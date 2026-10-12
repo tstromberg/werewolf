@@ -66,6 +66,10 @@ pub const Spec = struct {
     /// OUT/disk.img. A machine's disk has its own: the disk is rebuilt by
     /// file times alone, so a path reused with other arguments would not be.
     disk_path: ?[]const u8 = null,
+    /// IPE builds use an external kernel archive and a host-only policy signer.
+    ipe_kernel: ?[]const u8 = null,
+    ipe_key: ?[]const u8 = null,
+    ipe_cert: ?[]const u8 = null,
 };
 
 /// Paths are where a build writes, as the Makefile names them.
@@ -80,15 +84,19 @@ pub const Paths = struct {
 
 pub fn paths(gpa: Allocator, s: Spec) !Paths {
     const name = std.fs.path.basename(mem.trimEnd(u8, s.form, "/"));
-    const dir = s.build orelse try gpa.print("build/{t}", .{s.arch});
+    const dir = s.build orelse try gpa.print(
+        "build/{t}{s}",
+        .{ s.arch, if (s.ipe_kernel != null) "/ipe" else "" },
+    );
     return .{
         .build = dir,
-        .out = try gpa.print("{s}/{s}{s}{s}{s}", .{
+        .out = try gpa.print("{s}/{s}{s}{s}{s}{s}", .{
             dir,
             name,
             if (s.dev) "-dev" else "",
             if (s.app != null) "-app" else "",
             if (s.published) "-published" else "",
+            if (s.ipe_kernel != null) "-ipe" else "",
         }),
         .programs = s.programs orelse try gpa.print("build/{t}/programs", .{s.arch}),
     };
@@ -105,10 +113,13 @@ const BuildOptions = struct {
     dir: []const u8 = "dist",
     arch: howl.Arch,
     format: DiskFormat = .qcow2,
+    ipe_kernel: ?[]const u8 = null,
+    ipe_key: ?[]const u8 = null,
+    ipe_cert: ?[]const u8 = null,
 };
 
 /// buildOptions parses build's command line: FORM, --build, and -o, --arch,
-/// --format and --app, each with a value. host is this machine's arch, or
+/// --format, --app and the three --ipe-* flags, each with a value. host is this machine's arch, or
 /// null if werewolf does not build for it.
 fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !BuildOptions {
     var form: ?[]const u8 = null;
@@ -132,11 +143,18 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             arch = howl.archName(v) orelse return why.refuse(howl.arch_refusal, .{v});
         } else if (std.mem.eql(u8, a, "--app")) {
             o.app = v;
+        } else if (std.mem.eql(u8, a, "--ipe-kernel")) {
+            o.ipe_kernel = v;
+        } else if (std.mem.eql(u8, a, "--ipe-key")) {
+            o.ipe_key = v;
+        } else if (std.mem.eql(u8, a, "--ipe-cert")) {
+            o.ipe_cert = v;
         } else if (std.mem.eql(u8, a, "--format")) {
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
-            "{s}: build takes --build, -o, --arch, --format and --app\n{s}",
+            "{s}: build takes --build, -o, --arch, --format, --app, --ipe-kernel, --ipe-key and " ++
+                "--ipe-cert\n{s}",
             .{ a, howl.usage },
         );
     }
@@ -176,6 +194,9 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .arch = o.arch,
         .app = ab.root,
         .published = !o.local,
+        .ipe_kernel = o.ipe_kernel,
+        .ipe_key = o.ipe_key,
+        .ipe_cert = o.ipe_cert,
     };
     try make(
         io,
@@ -325,7 +346,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     const syntax = "_build --with FORM [--arch ARCH] [--dev] [--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
-        "[--verbose] image|slot|disk|qcow2...";
+        "[--ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] [--verbose] image|slot|disk|qcow2...";
     var spec: Spec = .{ .form = "", .arch = undefined };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
@@ -352,6 +373,12 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
                 spec.build = v;
             } else if (std.mem.eql(u8, flag, "--programs")) {
                 spec.programs = v;
+            } else if (std.mem.eql(u8, flag, "--ipe-kernel")) {
+                spec.ipe_kernel = v;
+            } else if (std.mem.eql(u8, flag, "--ipe-key")) {
+                spec.ipe_key = v;
+            } else if (std.mem.eql(u8, flag, "--ipe-cert")) {
+                spec.ipe_cert = v;
             } else if (std.mem.eql(u8, flag, "--disk")) {
                 spec.disk_path = v;
             } else if (std.mem.eql(u8, flag, "--disk-mib")) {
@@ -543,7 +570,7 @@ pub const B = struct {
     /// copy copies a file with its mode, as cp does.
     pub fn copy(b: *B, from: []const u8, to: []const u8) !void {
         Dir.copyFile(Dir.cwd(), from, Dir.cwd(), to, b.io, .{}) catch |err|
-            return b.fail("{s}: {t}", .{ from, err });
+            return b.fail("copy {s} to {s}: {t}", .{ from, to, err });
     }
 
     /// read returns the file at p, of at most limit bytes.
@@ -601,6 +628,7 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
 }
 
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
+    try validateIpe(s);
     const p = try paths(gpa, s);
     const env = try toolEnv(gpa);
     const fingerprint = try locks.inputs(io, gpa, s);
@@ -616,6 +644,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         steps.why,
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
+    if (s.ipe_kernel != null) try checkIpeForms(gpa, b.chain);
     if (previous) |rec| b.locked_images = rec.images;
     // The chain's images, baked before anything renders their services.
     try oci.lay(&b);
@@ -658,6 +687,63 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     try melange.lay(&b, rootfs);
     try slot.meta(&b, rootfs);
     try slot.make(&b, rootfs, goals);
+}
+
+fn validateIpe(s: Spec) !void {
+    const fields = [_]?[]const u8{ s.ipe_kernel, s.ipe_key, s.ipe_cert };
+    var count: usize = 0;
+    for (fields) |f| if (f) |v| {
+        if (v.len == 0) return error.IpeNeedsKernelKeyAndCertificate;
+        count += 1;
+    };
+    if (count != 0 and count != fields.len) return error.IpeNeedsKernelKeyAndCertificate;
+}
+
+fn checkIpeForms(gpa: Allocator, chain: []const forms.Form) !void {
+    for (chain) |fm| for (try fm.items(gpa, "allow")) |line| {
+        var words = mem.tokenizeAny(u8, line, " \t");
+        while (words.next()) |word| if (mem.eql(
+            u8,
+            word,
+            "jit",
+        )) return error.IpeCannotAuthorizeJit;
+    };
+}
+
+test "a child form cannot hide an inherited JIT allowance from IPE" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var diag: forms.Diagnostic = .{};
+    const base: forms.Form = .{
+        .name = "base",
+        .dir = "forms/base",
+        .spec = try forms.parse(gpa, "allow:\n  - jit\n", &diag),
+    };
+    const child: forms.Form = .{
+        .name = "child",
+        .dir = "forms/child",
+        .spec = try forms.parse(gpa, "allow:\n  - pty\n", &diag),
+    };
+    try checkIpeForms(gpa, &.{child});
+    try t.expectError(error.IpeCannotAuthorizeJit, checkIpeForms(gpa, &.{ base, child }));
+}
+
+test "IPE builds require all signing inputs and have separate output paths" {
+    const t = std.testing;
+    var s: Spec = .{ .form = "minimal", .arch = .aarch64 };
+    try validateIpe(s);
+    s.ipe_kernel = "kernel.tar";
+    try t.expectError(error.IpeNeedsKernelKeyAndCertificate, validateIpe(s));
+    s.ipe_key = "key.pem";
+    try t.expectError(error.IpeNeedsKernelKeyAndCertificate, validateIpe(s));
+    s.ipe_cert = "cert.pem";
+    try validateIpe(s);
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const p = try paths(arena.allocator(), s);
+    try t.expectEqualStrings("build/aarch64/ipe/minimal-ipe", p.out);
 }
 
 /// every_program are the programs in every form but init and bite-cleanup,

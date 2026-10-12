@@ -61,7 +61,8 @@ leash stacks the service's promises alone on the seal: a Python app that
 pledged `stdio rpath inet listen` cannot fork, run a program, make a Unix
 socket or a memory file, or change its ids. The kernel audits those
 refusals; seal-watch never sees them. leash becomes the service by
-`execveat` of a descriptor, the one exec a filter without `exec` allows.
+`execveat` using the program descriptor number it selected, the one exec a
+filter without `exec` allows. Landlock supplies executable-file identity.
 
 ## Drawbacks
 

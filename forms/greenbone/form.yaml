@@ -22,6 +22,7 @@ allow: [jit, packet, netadmin]
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   kernel-write-xor-execute: PostgreSQL compiles costly queries to machine code with LLVM (allow jit, from postgresql)
+  network-fence-unbypassable: OpenVAS keeps CAP_NET_RAW and CAP_NET_ADMIN for privileged scanning, so isolate this machine from services it must not scan
 
 accounts:
   groups:
@@ -119,8 +120,9 @@ services:
   # The scanner, as _oci-openvas, inside its image. It is the one
   # service that keeps CAP_NET_RAW and CAP_NET_ADMIN, for alive
   # detection. It listens on loopback for gvmd. It may write the
-  # plugin cache and only read the rest of the feed. Fence prohibits
-  # its loopback except Valkey, so it cannot open PostgreSQL or gsad.
+  # plugin cache and only read the rest of the feed. Its retained network
+  # capabilities can bypass Fence; deploy the whole machine on a scanner
+  # segment that cannot route to management services.
   # The image's entrypoint would set the socket mode to 666 and drop
   # through gosu; this execs python on ospd-openvas.
   openvas:

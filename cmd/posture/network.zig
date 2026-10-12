@@ -65,6 +65,24 @@ pub fn check(p: *Posture) !void {
             ),
     });
     try fence(p, policy orelse "", v6_on);
+    const init_status = p.read("/proc/1/status");
+    const bypass = fenceBypass(init_status);
+    try p.add(.{
+        .id = "network-fence-unbypassable",
+        .area = "network",
+        .name = "Fence cannot be bypassed with network capabilities",
+        .why = "CAP_NET_ADMIN can replace Fence's routing policy, and CAP_NET_RAW can send " ++
+            "traffic beneath it with raw or packet sockets.",
+        .how = "PID 1's capability bounding set lacks CAP_NET_ADMIN and CAP_NET_RAW, so every " ++
+            "descendant lacks them too",
+        .result = if (bypass) |can| (if (can) .fail else .pass) else .skip,
+        .detail = if (bypass == null)
+            "cannot read PID 1's capability bounding set"
+        else if (bypass.?)
+            "CAP_NET_ADMIN or CAP_NET_RAW remains in the bounding set"
+        else
+            "",
+    });
     try p.absent(
         "network-no-login",
         "network",
@@ -200,6 +218,21 @@ pub fn check(p: *Posture) !void {
             .{ "net/ipv4/tcp_rfc1337", "1" },
         },
     );
+}
+
+/// fenceBypass reports whether PID 1's bounding set retains a capability
+/// that can send traffic outside Fence's policy.
+fn fenceBypass(status: []const u8) ?bool {
+    const admin = posture.capBit(status, "CapBnd", @intCast(linux.CAP.NET_ADMIN)) orelse return null;
+    const raw = posture.capBit(status, "CapBnd", @intCast(linux.CAP.NET_RAW)) orelse return null;
+    return admin or raw;
+}
+
+test fenceBypass {
+    try testing.expectEqual(false, fenceBypass("Name:\tinit\nCapBnd:\t0000000000000000\n").?);
+    try testing.expectEqual(true, fenceBypass("CapBnd:\t0000000000001000\n").?);
+    try testing.expectEqual(true, fenceBypass("CapBnd:\t0000000000002000\n").?);
+    try testing.expectEqual(null, fenceBypass("Name:\tinit\n"));
 }
 
 fn ssh(p: *Posture) !void {

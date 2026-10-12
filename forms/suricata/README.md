@@ -4,7 +4,7 @@ A network sensor: [Suricata](https://suricata.io) 8 reading one interface and wr
 
 ## Security Posture
 
-- pcap-feed opens the packet socket and promiscuous mode, writes the pcap header, then becomes `_pcap` with no capabilities and a filter of `read`, `write`, `clock_gettime` and `exit_group`.
+- pcap-feed opens the packet socket and promiscuous mode, writes a pcap header, then becomes `_pcap` with no capabilities and a filter of `read`, `write`, `poll`, `ppoll`, `clock_gettime` and `exit_group`. Each time the engine opens the fifo, including after a restart, it gets its own header.
 - Suricata runs as its own user. It reads the fifo and the rules cache: Emerging Threats Open, the engine's protocol rules, and one marker. It binds nothing. Its pledge has no network.
 - rules-fetch, as `_rules`, downloads that cache onto the data partition and refreshes it daily. The directory is mode 0711 and the files are mode 0644, so Suricata can read them and cannot replace them.
 - The unix control socket is off. `suricata-update` and Python are not on the machine. A refresh is loaded the next time Suricata starts.

@@ -478,6 +478,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
         ctx.clearNotice();
         return;
     };
+    try u.requireLocalUpdate();
     // Not armed: its try is spent or was never set. A reboot would boot this
     // slot again, so wait for the next check to stage it.
     if (!try u.armed(p)) {
@@ -502,7 +503,10 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
     const left = ctx.reboot_at.? - nowSecs(u.io);
     // The one-second notice is already out. Sleep that second, but not a
     // backwards clock: holding the lock across it would stall the next check.
-    if (left > 0) u.io.sleep(.fromSeconds(@intCast(@min(left, notice.floor_secs))), .awake) catch {};
+    if (left > 0) u.io.sleep(
+        .fromSeconds(@intCast(@min(left, notice.floor_secs))),
+        .awake,
+    ) catch {};
     // If the reread, the log, or reboot fails, try again shortly. due_in
     // would otherwise stay unset and the daemon would wait out the hour.
     ctx.due_in = notice.floor_secs;
@@ -579,7 +583,10 @@ fn keptFeed(u: *Update) ?tiers.Feed {
     const data = u.read(feed_path) catch return null;
     if (data.len == 0) return null;
     const sig = u.read(feed_sig_path) catch return null;
-    const key = apk.parseKey(u.gpa, u.read(meta_dir ++ "/tiers.pub") catch return null) catch return null;
+    const key = apk.parseKey(
+        u.gpa,
+        u.read(meta_dir ++ "/tiers.pub") catch return null,
+    ) catch return null;
     const last: ?[]const u8 = if (u.read(feed_serial_path)) |t|
         std.mem.trim(u8, t, " \n")
     else |_|

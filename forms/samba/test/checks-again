@@ -1,0 +1,6 @@
+# The updated config must change access while retaining the existing data.
+ok  samba-kept       i=0; until smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'alice%werewolf-rotated-password' -c 'get hi.txt /tmp/samba-kept' >/tmp/samba-get 2>&1; do i=$((i + 1)); [ $i -le 60 ] || { cat /tmp/samba-get; exit 1; }; sleep 1; done; [ "$(cat /tmp/samba-kept)" = hello ]
+ok  samba-new-user   echo new-user >/tmp/samba-new; smbclient //10.0.2.15/carol -m SMB3 --client-protection=encrypt -U 'carol%werewolf-new-password' -c 'put /tmp/samba-new hi.txt; get hi.txt /tmp/samba-new-out' && [ "$(cat /tmp/samba-new-out)" = new-user ]
+ok  samba-old-pass   ! smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'alice%werewolf-check-password' -c 'ls' >/tmp/samba-old-pass 2>&1
+ok  samba-removed    ! smbclient //10.0.2.15/bob -m SMB3 --client-protection=encrypt -U 'bob%werewolf-other-password' -c 'ls' >/tmp/samba-removed 2>&1
+ok  samba-new-other  ! smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'carol%werewolf-new-password' -c 'get hi.txt /tmp/samba-other' >/tmp/samba-new-other 2>&1

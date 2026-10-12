@@ -1,8 +1,10 @@
 //! pcap-feed copies one interface's packets to a pcap fifo, then gives up
 //! the ability to do anything else. Suricata and Zeek read the fifo. They
 //! never hold CAP_NET_RAW or CAP_NET_ADMIN: pcap-feed opens the socket,
-//! sets promiscuous mode, writes the pcap header, drops to _pcap, and from
-//! then on may only read that socket and write that fifo.
+//! sets promiscuous mode, writes a pcap header, drops to _pcap, and from
+//! then on may only read that socket, learn that the fifo was opened or
+//! closed, and write it. A reader consumes its header. The next open gets
+//! a new one, or it would block in the header forever.
 //!
 //!     pcap-feed
 //!
@@ -72,7 +74,11 @@ fn run(io: Io, gpa: Allocator) !void {
     const self = try account(io, gpa, drop_user);
     const iface = try chooseInterface(io, gpa);
     const packet = try openPacket(iface);
-    const feed = try openFeed(cfg.feed, reader);
+    const feed = try openFeed(cfg.feed);
+    // The watch is in place before the reader is allowed to open the fifo,
+    // so the first open is seen and a later one still gets a header.
+    const notes = try watchFeed(io, cfg.feed);
+    try giveFeed(feed, reader);
     say(io, "{{\"event\":\"start\",\"iface\":\"{s}\",\"feed\":\"{s}\",\"user\":\"{s}\"}}", .{
         iface.name, cfg.feed, cfg.user,
     });
@@ -80,26 +86,13 @@ fn run(io: Io, gpa: Allocator) !void {
     var filter: sandbox.Filter = .{};
     filter.allow("read");
     filter.allow("write");
+    // aarch64 has no poll, so the libc call is ppoll. Allow both.
+    filter.allow("poll");
+    filter.allow("ppoll");
     filter.allow("clock_gettime");
     filter.allow("exit_group");
     try filter.install();
-    while (true) {
-        const n = linux.read(packet, &frame, frame.len);
-        if (linux.errno(n) == .INTR) continue;
-        if (linux.errno(n) != .SUCCESS) linux.exit_group(1);
-        if (n == 0) continue;
-        var rec: [16]u8 = undefined;
-        var ts: linux.timespec = undefined;
-        if (linux.errno(linux.clock_gettime(.REALTIME, &ts)) != .SUCCESS) linux.exit_group(1);
-        const got: u32 = @intCast(n);
-        const incl = if (got > snaplen) snaplen else got;
-        std.mem.writeInt(u32, rec[0..4], @intCast(ts.sec), .little);
-        std.mem.writeInt(u32, rec[4..8], @intCast(@divTrunc(ts.nsec, 1000)), .little);
-        std.mem.writeInt(u32, rec[8..12], incl, .little);
-        std.mem.writeInt(u32, rec[12..16], got, .little);
-        writeAll(feed, &rec) catch linux.exit_group(1);
-        writeAll(feed, frame[0..incl]) catch linux.exit_group(1);
-    }
+    copy(packet, notes, feed);
 }
 
 const Iface = struct { name: []const u8, index: i32 };
@@ -152,10 +145,11 @@ fn openPacket(iface: Iface) !i32 {
     return fd;
 }
 
-/// openFeed creates the fifo, opens it for read and write so this process
-/// does not wait for the reader, writes nothing yet, then hands the reader
-/// the only permission to open it. The descriptor stays writable.
-fn openFeed(path: []const u8, reader: Account) !i32 {
+/// openFeed creates the fifo and opens it for read and write, so this
+/// process does not wait for the reader. The header is written while the
+/// fifo is still root's, mode 0600, so the reader cannot see a partial
+/// header. giveFeed hands the reader the only permission to open it.
+fn openFeed(path: []const u8) !i32 {
     if (std.fs.path.dirname(path)) |dir| {
         var dz: [129]u8 = undefined;
         const made = linux.mkdir(try z(dir, &dz), 0o755);
@@ -165,15 +159,170 @@ fn openFeed(path: []const u8, reader: Account) !i32 {
     const pz = try z(path, &pzbuf);
     const made = linux.mknod(pz, linux.S.IFIFO | 0o600, 0);
     if (linux.errno(made) != .SUCCESS and linux.errno(made) != .EXIST) return error.FeedCreate;
-    const rc = linux.open(pz, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0);
+    const rc = linux.open(pz, .{ .ACCMODE = .RDWR, .NONBLOCK = true, .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return error.FeedOpen;
     const fd: i32 = @intCast(rc);
-    // The header is written while the fifo is still root's, mode 0600, so
-    // the reader cannot open it and see a partial header.
     try writeAll(fd, &pcapHeader());
+    return fd;
+}
+
+fn giveFeed(fd: i32, reader: Account) !void {
     if (linux.errno(linux.fchown(fd, reader.uid, reader.gid)) != .SUCCESS) return error.FeedOwner;
     if (linux.errno(linux.fchmod(fd, 0o400)) != .SUCCESS) return error.FeedMode;
-    return fd;
+}
+
+/// watchFeed reports each open and close of the fifo. The watch is taken
+/// before the reader can be the first to open it after the mode change.
+fn watchFeed(io: Io, path: []const u8) !i32 {
+    const fd = linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK);
+    if (linux.errno(fd) != .SUCCESS) {
+        say(io, "inotify_init1 errno {s}", .{@tagName(linux.errno(fd))});
+        return error.Watch;
+    }
+    var pzbuf: [129]u8 = undefined;
+    const wd = linux.inotify_add_watch(@intCast(fd), try z(path, &pzbuf), linux.IN.OPEN | linux.IN.CLOSE_NOWRITE);
+    if (linux.errno(wd) != .SUCCESS) {
+        say(io, "inotify_add_watch errno {s}", .{@tagName(linux.errno(wd))});
+        return error.Watch;
+    }
+    return @intCast(fd);
+}
+
+/// Watch is how many readers hold the fifo, and whether the next bytes
+/// they read must be a pcap header.
+const Watch = struct {
+    readers: u32 = 0,
+    /// primed means a header is already in the pipe, or the current reader
+    /// has taken it. The first header is written before the loop.
+    primed: bool = true,
+    header_due: bool = false,
+
+    /// saw applies one inotify mask. It returns true when leftover bytes
+    /// have to be discarded: the last reader closed, and those bytes would
+    /// be the next reader's file header.
+    fn saw(w: *Watch, mask: u32) bool {
+        if (mask & linux.IN.Q_OVERFLOW != 0) {
+            w.readers = 0;
+            w.primed = false;
+            w.header_due = true;
+            return true;
+        }
+        var drain = false;
+        if (mask & linux.IN.OPEN != 0) {
+            w.readers += 1;
+            if (w.readers == 1 and !w.primed) w.header_due = true;
+        }
+        if (mask & linux.IN.CLOSE_NOWRITE != 0 and w.readers > 0) {
+            w.readers -= 1;
+            if (w.readers == 0) {
+                w.primed = false;
+                w.header_due = false;
+                drain = true;
+            }
+        }
+        return drain;
+    }
+};
+
+/// copy writes packets for whichever reader currently holds the fifo, and
+/// a header when a new reader is the one that needs it. Packets that arrive
+/// with nobody reading are dropped, so the socket does not stall the watch.
+fn copy(packet: i32, notes: i32, feed: i32) void {
+    var watch: Watch = .{};
+    const header = pcapHeader();
+    var header_off: usize = 0;
+    var rec: [16 + 65535]u8 = undefined;
+    var rec_len: usize = 0;
+    var rec_off: usize = 0;
+    var scratch: [8192]u8 = undefined;
+    while (true) {
+        const writing = watch.header_due or rec_off < rec_len;
+        var fds = [3]linux.pollfd{
+            .{ .fd = notes, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = packet, .events = linux.POLL.IN, .revents = 0 },
+            .{ .fd = feed, .events = linux.POLL.OUT, .revents = 0 },
+        };
+        const nfd: u32 = if (writing) 3 else 2;
+        const ready = linux.poll(&fds, nfd, -1);
+        if (linux.errno(ready) == .INTR) continue;
+        if (linux.errno(ready) != .SUCCESS) linux.exit_group(1);
+        if (fds[0].revents & linux.POLL.IN != 0) {
+            if (takeNotes(notes, &watch, feed, &scratch)) {
+                header_off = 0;
+                rec_len = 0;
+                rec_off = 0;
+            }
+        }
+        if (watch.header_due) {
+            const w = writeSome(feed, header[header_off..]) catch |err| switch (err) {
+                error.Again => continue,
+                else => linux.exit_group(1),
+            };
+            header_off += w;
+            if (header_off >= header.len) {
+                watch.header_due = false;
+                watch.primed = true;
+                header_off = 0;
+            }
+            continue;
+        }
+        if (fds[1].revents & linux.POLL.IN != 0) {
+            const n = linux.read(packet, &frame, frame.len);
+            if (linux.errno(n) == .INTR or linux.errno(n) == .AGAIN) continue;
+            if (linux.errno(n) != .SUCCESS) linux.exit_group(1);
+            if (n == 0 or watch.readers == 0 or rec_off < rec_len) continue;
+            rec_len = record(&rec, frame[0..n]);
+            rec_off = 0;
+        }
+        if (rec_off < rec_len) {
+            const w = writeSome(feed, rec[rec_off..rec_len]) catch |err| switch (err) {
+                error.Again => continue,
+                else => linux.exit_group(1),
+            };
+            rec_off += w;
+        }
+    }
+}
+
+fn takeNotes(notes: i32, watch: *Watch, feed: i32, scratch: []u8) bool {
+    var buf: [4096]u8 = undefined;
+    const n = linux.read(notes, &buf, buf.len);
+    if (linux.errno(n) == .AGAIN or linux.errno(n) == .INTR) return false;
+    if (linux.errno(n) != .SUCCESS) linux.exit_group(1);
+    var drained = false;
+    var off: usize = 0;
+    while (off + 16 <= n) {
+        const mask = std.mem.readInt(u32, buf[off + 4 ..][0..4], .little);
+        const len = std.mem.readInt(u32, buf[off + 12 ..][0..4], .little);
+        if (len > n - off - 16) break;
+        if (watch.saw(mask)) {
+            discard(feed, scratch);
+            drained = true;
+        }
+        off += 16 + len;
+    }
+    return drained;
+}
+
+fn discard(feed: i32, scratch: []u8) void {
+    while (true) {
+        const n = linux.read(feed, scratch.ptr, scratch.len);
+        if (linux.errno(n) == .INTR) continue;
+        if (linux.errno(n) != .SUCCESS or n == 0) return;
+    }
+}
+
+fn record(buf: *[16 + 65535]u8, pkt: []const u8) usize {
+    var ts: linux.timespec = undefined;
+    if (linux.errno(linux.clock_gettime(.REALTIME, &ts)) != .SUCCESS) linux.exit_group(1);
+    const got: u32 = @intCast(pkt.len);
+    const incl = if (got > snaplen) snaplen else got;
+    std.mem.writeInt(u32, buf[0..4], @intCast(ts.sec), .little);
+    std.mem.writeInt(u32, buf[4..8], @intCast(@divTrunc(ts.nsec, 1000)), .little);
+    std.mem.writeInt(u32, buf[8..12], incl, .little);
+    std.mem.writeInt(u32, buf[12..16], got, .little);
+    @memcpy(buf[16..][0..incl], pkt[0..incl]);
+    return 16 + incl;
 }
 
 fn pcapHeader() [24]u8 {
@@ -189,11 +338,22 @@ fn pcapHeader() [24]u8 {
 fn writeAll(fd: i32, buf: []const u8) !void {
     var off: usize = 0;
     while (off < buf.len) {
-        const rc = linux.write(fd, buf[off..].ptr, buf.len - off);
-        if (linux.errno(rc) != .SUCCESS) return error.Write;
-        if (rc == 0) return error.Write;
-        off += rc;
+        const n = writeSome(fd, buf[off..]) catch |err| switch (err) {
+            // The pipe has room: the header is written before any reader,
+            // and a full pipe is not a reason to fail that first write.
+            error.Again => continue,
+            else => |e| return e,
+        };
+        off += n;
     }
+}
+
+fn writeSome(fd: i32, buf: []const u8) !usize {
+    const rc = linux.write(fd, buf.ptr, buf.len);
+    if (linux.errno(rc) == .AGAIN) return error.Again;
+    if (linux.errno(rc) == .INTR) return 0;
+    if (linux.errno(rc) != .SUCCESS or rc == 0) return error.Write;
+    return @intCast(rc);
 }
 
 const Account = struct { uid: u32, gid: u32 };
@@ -278,6 +438,29 @@ test "parse takes the feed and the reader" {
     try testing.expectEqualStrings("/run/svc/suricata/feed", cfg.feed);
     try testing.expectEqualStrings("suricata", cfg.user);
     try testing.expectEqualStrings("/tmp/feed", (try parse("# c\nfeed /tmp/feed\nuser _oci-zeek\n")).feed);
+}
+
+test "a new reader after a close needs a header" {
+    var w: Watch = .{};
+    try testing.expect(!w.saw(linux.IN.OPEN));
+    try testing.expect(!w.header_due);
+    try testing.expect(w.saw(linux.IN.CLOSE_NOWRITE));
+    try testing.expect(!w.primed);
+    try testing.expect(!w.saw(linux.IN.OPEN));
+    try testing.expect(w.header_due);
+    try testing.expectEqual(@as(u32, 1), w.readers);
+}
+
+test "two opens share one header" {
+    var w: Watch = .{ .primed = false };
+    try testing.expect(!w.saw(linux.IN.OPEN));
+    try testing.expect(w.header_due);
+    w.header_due = false;
+    w.primed = true;
+    try testing.expect(!w.saw(linux.IN.OPEN));
+    try testing.expect(!w.header_due);
+    try testing.expect(!w.saw(linux.IN.CLOSE_NOWRITE));
+    try testing.expectEqual(@as(u32, 1), w.readers);
 }
 
 test "parse refuses a surprise" {

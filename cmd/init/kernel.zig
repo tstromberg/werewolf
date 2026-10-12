@@ -6,6 +6,7 @@ const builtin = @import("builtin");
 const linux = std.os.linux;
 const allow = @import("allow");
 const audit = @import("audit");
+const ipe = @import("ipe");
 const init = @import("init.zig");
 const Machine = init.Machine;
 const mkdir = init.mkdir;
@@ -122,6 +123,14 @@ pub fn kernel(m: *Machine) !void {
         "/sys/kernel/security",
     });
     m.mount(&.{ "-o", "remount,nosuid,nodev,noexec,nosymfollow", "/sys/kernel/security" });
+    if (init.exists(ipe.marker) and !ipe.enforced(
+        m.read(ipe.policy_path),
+        m.read(ipe.active),
+        m.read(ipe.base ++ "/enforce"),
+    )) {
+        say("IPE required but no enforcing release policy; not handing over", .{});
+        return error.IpeNotEnforced;
+    }
     const lockdown = "/sys/kernel/security/lockdown";
     if (std.mem.indexOf(u8, m.read(lockdown), "[confidentiality]") == null)
         _ = writeFile(lockdown, "confidentiality");

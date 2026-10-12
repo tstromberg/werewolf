@@ -1,0 +1,61 @@
+# Suricata's engine for werewolf's suricata form. Wolfi's package is built
+# with gcc -march=native, Suricata's configure default, so a builder with
+# SVE emits CNTB and the binary dies with SIGILL on a machine without it.
+# This rebuilds the same release for the baseline architecture and lays
+# the binary over Wolfi's package, which still provides the libraries,
+# the configuration and the user.
+package:
+  name: suricata
+  version: 8.0.4
+  epoch: 0
+  description: Network IDS, IPS and security monitoring engine
+  copyright:
+    - license: GPL-2.0-only
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cbindgen
+      - jansson-dev
+      - libcap-ng-dev
+      - libpcap-dev
+      - linux-headers
+      - pcre2-dev
+      - pkgconf
+      - rust-1.94
+      - yaml-dev
+      - zlib-dev
+
+pipeline:
+  - uses: fetch
+    with:
+      uri: https://www.openinfosecfoundation.org/download/suricata-${{package.version}}.tar.gz
+      expected-sha256: 81cee7bae69848a9751b2ce0867620eefa52b192e79c20b5eac897600b28b191
+
+  # The release tarball vendors the Rust crates, so the build fetches
+  # nothing. -march=armv8-a and target-cpu=generic keep SVE out even
+  # when the builder has it. nfqueue, eBPF and the Python tools stay
+  # off: this form reads a pcap and does not run them.
+  - runs: |
+      export CFLAGS="-O2 -march=armv8-a"
+      export CXXFLAGS="-O2 -march=armv8-a"
+      export RUSTFLAGS="-C target-cpu=generic"
+      ./configure \
+        --prefix=/usr \
+        --sysconfdir=/etc \
+        --localstatedir=/var \
+        --disable-gccmarch-native \
+        --disable-python \
+        --disable-suricata-update \
+        --disable-libmagic
+      make -j"$(nproc)"
+      install -Dm755 src/suricata "${{targets.destdir}}/usr/bin/suricata"
+
+  - uses: strip

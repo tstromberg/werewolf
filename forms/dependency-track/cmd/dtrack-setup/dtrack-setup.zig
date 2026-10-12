@@ -12,7 +12,6 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const net = Io.net;
-const json = std.json;
 
 const password_path = "/run/svc/caddy/admin-password";
 const done = "/data/svc/caddy/dtrack-setup-done";
@@ -46,50 +45,70 @@ fn run(io: Io, gpa: Allocator) !void {
     for (password) |c| if (c < 0x20 or c == 0x7f) return error.AdminPasswordRefused;
 
     try awaitApi(io, gpa);
-    const fresh = try credentials(gpa, "admin", password);
+    // 4.14's login and forceChangePassword take form fields and return the
+    // token as text. JSON is refused, and admin/admin does not yield a
+    // token while the published password still has to be changed.
+    const fresh = try formFields(gpa, "admin", password, null);
     if ((try login(io, gpa, fresh)).len != 0) {
         try mark(io);
         say(io, "{{\"event\":\"admin already set\"}}", .{});
         return;
     }
-    const published = try credentials(gpa, "admin", "admin");
-    const token = try login(io, gpa, published);
-    if (token.len == 0) return error.PublishedPasswordRefused;
-    const change = try json.Stringify.valueAlloc(gpa, .{
-        .username = "admin",
-        .password = "admin",
-        .newPassword = password,
-        .confirmPassword = password,
-    }, .{});
-    const changed = try request(io, gpa, "POST", "/api/v1/user/forceChangePassword", token, change);
+    const change = try formFields(gpa, "admin", "admin", password);
+    const changed = try request(io, gpa, "POST", "/api/v1/user/forceChangePassword", null, form_type, change);
     if (changed.status != 200) return error.PasswordNotChanged;
     if ((try login(io, gpa, fresh)).len == 0) return error.NewPasswordRefused;
     try mark(io);
     say(io, "{{\"event\":\"admin set\"}}", .{});
 }
 
-fn credentials(gpa: Allocator, user: []const u8, password: []const u8) ![]const u8 {
-    return json.Stringify.valueAlloc(gpa, .{ .username = user, .password = password }, .{});
+const form_type = "application/x-www-form-urlencoded";
+
+fn formFields(gpa: Allocator, user: []const u8, password: []const u8, new_password: ?[]const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(gpa, "username=");
+    try encode(gpa, &out, user);
+    try out.appendSlice(gpa, "&password=");
+    try encode(gpa, &out, password);
+    if (new_password) |n| {
+        try out.appendSlice(gpa, "&newPassword=");
+        try encode(gpa, &out, n);
+        try out.appendSlice(gpa, "&confirmPassword=");
+        try encode(gpa, &out, n);
+    }
+    return out.items;
+}
+
+fn encode(gpa: Allocator, out: *std.ArrayList(u8), s: []const u8) !void {
+    const hex = "0123456789ABCDEF";
+    for (s) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+            try out.append(gpa, c);
+        } else {
+            try out.appendSlice(gpa, &[_]u8{ '%', hex[c >> 4], hex[c & 0xf] });
+        }
+    }
 }
 
 /// login returns the bearer token, or an empty slice when the password is
-/// refused. Any other answer is an error: setup does not guess.
+/// refused. The token is the body itself. Any other answer is an error.
 fn login(io: Io, gpa: Allocator, body: []const u8) ![]const u8 {
-    const got = try request(io, gpa, "POST", "/api/v1/user/login", null, body);
+    const got = try request(io, gpa, "POST", "/api/v1/user/login", null, form_type, body);
     if (got.status == 401 or got.status == 403) return "";
     if (got.status != 200) return error.LoginRefused;
-    const Token = struct { token: []const u8 = "" };
-    const parsed = json.parseFromSliceLeaky(Token, gpa, got.body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.LoginAnswerNotUnderstood;
-    if (parsed.token.len == 0) return error.LoginAnswerNotUnderstood;
-    return parsed.token;
+    const token = std.mem.trim(u8, got.body, " \t\r\n");
+    var parts = std.mem.splitScalar(u8, token, '.');
+    const a = parts.next() orelse return error.LoginAnswerNotUnderstood;
+    const b = parts.next() orelse return error.LoginAnswerNotUnderstood;
+    const c = parts.next() orelse return error.LoginAnswerNotUnderstood;
+    if (parts.next() != null or a.len == 0 or b.len == 0 or c.len == 0) return error.LoginAnswerNotUnderstood;
+    return token;
 }
 
 fn awaitApi(io: Io, gpa: Allocator) !void {
     var i: u32 = 0;
     while (i < wait_seconds) : (i += 1) {
-        const got = request(io, gpa, "GET", "/api/version", null, null) catch {
+        const got = request(io, gpa, "GET", "/api/version", null, null, null) catch {
             try io.sleep(.fromSeconds(1), .awake);
             continue;
         };
@@ -105,6 +124,7 @@ fn request(
     method: []const u8,
     path: []const u8,
     token: ?[]const u8,
+    content_type: ?[]const u8,
     body: ?[]const u8,
 ) !Response {
     const addr = try net.IpAddress.parse("127.0.0.1", port);
@@ -113,11 +133,11 @@ fn request(
     var wbuf: [4096]u8 = undefined;
     var w = s.writer(io, &wbuf);
     const out = &w.interface;
-    try out.print("{s} {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nAccept: application/json\r\n" ++
+    try out.print("{s} {s} HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nAccept: */*\r\n" ++
         "Connection: close\r\n", .{ method, path, port });
     if (token) |t| try out.print("Authorization: Bearer {s}\r\n", .{t});
     const b = body orelse "";
-    if (body != null) try out.writeAll("Content-Type: application/json\r\n");
+    if (content_type) |ct| try out.print("Content-Type: {s}\r\n", .{ct});
     try out.print("Content-Length: {d}\r\n\r\n{s}", .{ b.len, b });
     try out.flush();
     var rbuf: [4096]u8 = undefined;
@@ -172,6 +192,16 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
 }
 
 const testing = std.testing;
+
+test "form fields encode reserved characters" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const body = try formFields(arena.allocator(), "admin", "a b&c", "n=1");
+    try testing.expectEqualStrings(
+        "username=admin&password=a%20b%26c&newPassword=n%3D1&confirmPassword=n%3D1",
+        body,
+    );
+}
 
 test "parse reads the status and joins chunks" {
     const plain = try parse(testing.allocator, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}");

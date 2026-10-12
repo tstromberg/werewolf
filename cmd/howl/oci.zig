@@ -294,6 +294,16 @@ pub fn unpack(io: Io, gpa: Allocator, r: *Io.Reader, root: Dir, why: *Why) !Unpa
                         "{s}: a hard link to {s}, not a clean name",
                         .{ name, e.link },
                     );
+                // hardLink follows its source. Check that source just as
+                // strictly as the destination, including its final part: an
+                // earlier tar entry may have made either one a symlink out of
+                // the extraction tree.
+                try throughNoLink(io, gpa, root, target, why);
+                var link_buf: [max_name]u8 = undefined;
+                if (root.readLink(io, target, &link_buf)) |_| return why.refuse(
+                    "{s}: a hard link to {s}, which is a link",
+                    .{ name, target },
+                ) else |_| {}
                 const st = root.statFile(io, target, .{}) catch
                     return why.refuse(
                         "{s}: a hard link to {s}, which is not in the tree yet",
@@ -1023,4 +1033,29 @@ test "unpack: files, directories, links; refusals" {
         var br: Io.Reader = .fixed(try tarOf(gpa, &.{bad}));
         try testing.expectError(error.Refused, unpack(io, gpa, &br, tmp.dir, &bw));
     }
+}
+
+test "unpack refuses a hardlink through an archive symlink" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const outside = try gpa.print("{s}-outside", .{tmp.sub_path});
+    defer tmp.parent_dir.deleteTree(io, outside) catch {};
+    try tmp.parent_dir.createDirPath(io, outside);
+    const marker = try gpa.print("{s}/marker", .{outside});
+    try tmp.parent_dir.writeFile(io, .{ .sub_path = marker, .data = "host secret" });
+    const outside_path = try tmp.parent_dir.realPathFileAlloc(io, outside, gpa);
+
+    const hostile = try tarOf(gpa, &.{
+        .{ "escape", '2', "", outside_path },
+        .{ "copied", '1', "", "escape/marker" },
+    });
+    var r: Io.Reader = .fixed(hostile);
+    var why: Why = .{};
+    try testing.expectError(error.Refused, unpack(io, gpa, &r, tmp.dir, &why));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "copied", .{}));
 }
