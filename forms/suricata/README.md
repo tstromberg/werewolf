@@ -4,8 +4,7 @@ A network sensor: [Suricata](https://suricata.io) 8 reading one interface and wr
 
 ## Security Posture
 
-- pcap-feed opens the packet socket and promiscuous mode, writes a pcap header, then becomes `_pcap` with no capabilities and a filter of `read`, `write`, `poll`, `ppoll`, `clock_gettime` and `exit_group`. Each time the engine opens the fifo, including after a restart, it gets its own header.
-- Suricata runs as its own user. It reads the fifo and the rules cache: Emerging Threats Open, the engine's protocol rules, and one marker. It binds nothing. Its pledge has no network.
+- Suricata runs as its own user and captures `eth0` with the AF_PACKET ring. It keeps `CAP_NET_RAW` and `CAP_NET_ADMIN` for that socket and promiscuous mode. It reads the rules cache: Emerging Threats Open, the engine's protocol rules, and one marker. It binds no TCP port. Its pledge has no `inet`, so it cannot fetch. A packet socket can still inject frames.
 - rules-fetch, as `_rules`, downloads that cache onto the data partition and refreshes it daily. The directory is mode 0711 and the files are mode 0644, so Suricata can read them and cannot replace them.
 - The unix control socket is off. `suricata-update` and Python are not on the machine. A refresh is loaded the next time Suricata starts.
 
@@ -34,8 +33,7 @@ There is nothing to import. Alerts from this machine are the files under `/data/
 ### Known Quirks
 
 - The signature cache refreshes when rules-fetch starts a pass, at most daily. Suricata keeps the rules it loaded until it starts again.
-- pcap-feed's fifo is `/run/svc/suricata/feed`, mode 0400, Suricata's alone.
-- Promiscuous mode is requested. Without `CAP_NET_ADMIN` the feed would be only what this host sends and receives; the form keeps that capability until pcap-feed drops it.
+- Promiscuous mode is on. A mirror that delivers frames addressed to other machines needs it; `CAP_NET_ADMIN` is what sets it.
 
 ### Network Exposure
 

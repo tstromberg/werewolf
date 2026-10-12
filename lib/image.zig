@@ -35,6 +35,18 @@ pub fn modules(
     params: []const Param,
     bad: *[]const u8,
 ) !Modules {
+    return modulesWithBuiltins(gpa, dep, "", words, native, params, bad);
+}
+
+pub fn modulesWithBuiltins(
+    gpa: Allocator,
+    dep: []const u8,
+    builtins: []const u8,
+    words: []const []const u8,
+    native: []const []const u8,
+    params: []const Param,
+    bad: *[]const u8,
+) !Modules {
     if (words.len == 0) return error.NoModules;
     for (native) |n| if (!contains(words, n)) {
         bad.* = n;
@@ -62,6 +74,16 @@ pub fn modules(
             while (i > 0) {
                 i -= 1;
                 try all.append(gpa, .{ .tag = tag, .path = fields.items[i] });
+            }
+        }
+        if (!found) {
+            const builtin_suffix = try gpa.print("/{s}.ko", .{name});
+            var builtin_lines = mem.splitScalar(u8, builtins, '\n');
+            while (builtin_lines.next()) |line| {
+                if (mem.endsWith(u8, line, builtin_suffix)) {
+                    found = true;
+                    break;
+                }
             }
         }
         if (!found) {
@@ -110,6 +132,31 @@ pub fn modules(
     const sorted = files.keys();
     mem.sortUnstable([]const u8, sorted, {}, lessThan);
     return .{ .list = list.items, .files = sorted };
+}
+
+test "declared built-in modules need no file, while missing modules still fail" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const dep = "kernel/fs/fat/vfat.ko.gz:\n";
+    const words: []const []const u8 = &.{ "@esp:vfat", "@esp:efivarfs" };
+    var bad: []const u8 = "";
+    const result = try modulesWithBuiltins(
+        gpa,
+        dep,
+        "kernel/fs/efivarfs/efivarfs.ko\n",
+        words,
+        words,
+        &.{},
+        &bad,
+    );
+    try std.testing.expectEqual(@as(usize, 1), result.files.len);
+    try std.testing.expectEqualStrings("@esp kernel/fs/fat/vfat.ko\n", result.list);
+    try std.testing.expectError(
+        error.ModuleNotFound,
+        modulesWithBuiltins(gpa, dep, "kernel/fs/other/other.ko\n", words, words, &.{}, &bad),
+    );
+    try std.testing.expectEqualStrings("efivarfs", bad);
 }
 
 /// Mod is one line of a load order: a modules.dep path, and the tag

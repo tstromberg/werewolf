@@ -1,0 +1,76 @@
+#!/bin/sh
+# enroll-boot ARCH CERT OUT: public firmware material, never a private signer.
+set -eu
+umask 077
+arch=${1:?architecture}
+cert=${2:?certificate}
+out=${3:?output directory}
+case $arch in aarch64 | x86_64) ;; *) echo 'enroll-boot: unsupported architecture' >&2; exit 1 ;; esac
+case $arch in aarch64) bootfile=/EFI/BOOT/BOOTAA64.EFI ;; x86_64) bootfile=/EFI/BOOT/BOOTX64.EFI ;; esac
+mkdir -p "$out"
+openssl x509 -in "$cert" -outform DER -out "$out/boot.der"
+guid=a0420f26-3a13-4a1b-9c77-134e29b24bf1
+if [ "${4:-}" = aws ]; then
+	if command -v virt-fw-vars >/dev/null; then
+		virt-fw-vars --output-aws "$out/vars.aws.new" --output-json "$out/vars.json.new" \
+			--append-boot-filepath "$bootfile" \
+			--set-pk "$guid" "$cert" --add-kek "$guid" "$cert" --add-db "$guid" "$cert" --sb
+	else
+		vm=werewolf-ci-24.04
+		remote=$(limactl shell "$vm" -- mktemp -d /tmp/werewolf-sb.XXXXXXXX)
+		case $remote in /tmp/werewolf-sb.*) ;; *) exit 1 ;; esac
+		trap 'limactl shell "$vm" -- rm -rf -- "$remote" >/dev/null 2>&1 || true' EXIT
+		limactl copy "$cert" "$vm:$remote/boot.crt"
+		limactl shell "$vm" -- virt-fw-vars --output-aws "$remote/vars.aws" \
+			--output-json "$remote/vars.json" --append-boot-filepath "$bootfile" --set-pk "$guid" "$remote/boot.crt" \
+			--add-kek "$guid" "$remote/boot.crt" --add-db "$guid" "$remote/boot.crt" --sb
+		for file in vars.aws vars.json; do limactl copy "$vm:$remote/$file" "$out/$file.new"; done
+	fi
+	for file in vars.aws vars.json; do mv -f "$out/$file.new" "$out/$file"; done
+	exit
+fi
+source=${SECUREBOOT_DIR:-}
+if [ -n "$source" ]; then
+	cp "$source/code.fd" "$out/code.fd"
+	cp "$source/vars.fd" "$out/template.fd"
+else
+	case $arch in
+	aarch64)
+		code=/usr/share/AAVMF/AAVMF_CODE.secboot.fd
+		vars=/usr/share/AAVMF/AAVMF_VARS.fd ;;
+	x86_64)
+		code=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
+		vars=/usr/share/OVMF/OVMF_VARS_4M.fd ;;
+	esac
+	if [ -f "$code" ] && [ -f "$vars" ]; then
+		cp "$code" "$out/code.fd"
+		cp "$vars" "$out/template.fd"
+	else
+		limactl copy "werewolf-ci-24.04:$code" "$out/code.fd"
+		limactl copy "werewolf-ci-24.04:$vars" "$out/template.fd"
+	fi
+fi
+if [ "${ENROLL_TEST_SETUP:-}" = 1 ]; then cp "$out/template.fd" "$out/setup.fd"; fi
+if command -v virt-fw-vars >/dev/null; then
+	virt-fw-vars --input "$out/template.fd" --output "$out/vars.fd.new" \
+		--output-aws "$out/vars.aws.new" --output-json "$out/vars.json.new" \
+		--append-boot-filepath "$bootfile" \
+		--delete PK --delete KEK --delete db --delete dbx \
+		--set-pk "$guid" "$cert" --add-kek "$guid" "$cert" --add-db "$guid" "$cert" --sb
+else
+	vm=werewolf-ci-24.04
+	remote=$(limactl shell "$vm" -- mktemp -d /tmp/werewolf-sb.XXXXXXXX)
+	case $remote in /tmp/werewolf-sb.*) ;; *) echo 'enroll-boot: bad VM temporary path' >&2; exit 1 ;; esac
+	trap 'limactl shell "$vm" -- rm -rf -- "$remote" >/dev/null 2>&1 || true' EXIT
+	limactl copy "$cert" "$vm:$remote/boot.crt"
+	limactl copy "$out/template.fd" "$vm:$remote/template.fd"
+	limactl shell "$vm" -- virt-fw-vars --input "$remote/template.fd" --output "$remote/vars.fd" \
+		--output-aws "$remote/vars.aws" --output-json "$remote/vars.json" \
+		--append-boot-filepath "$bootfile" \
+		--delete PK --delete KEK --delete db --delete dbx \
+		--set-pk "$guid" "$remote/boot.crt" --add-kek "$guid" "$remote/boot.crt" \
+		--add-db "$guid" "$remote/boot.crt" --sb
+	for file in vars.fd vars.aws vars.json; do limactl copy "$vm:$remote/$file" "$out/$file.new"; done
+fi
+for file in vars.fd vars.aws vars.json; do mv -f "$out/$file.new" "$out/$file"; done
+rm -f "$out/template.fd"

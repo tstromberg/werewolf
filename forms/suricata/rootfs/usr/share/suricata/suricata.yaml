@@ -637,7 +637,9 @@ logging:
       # type: json
   - file:
       enabled: yes
-      level: info
+      # "Loading rule file" is a config line. info would hide which
+      # files were opened, including werewolf.rules.
+      level: config
       filename: suricata.log
       # format: "[%i - %m] %z %d: %S: %M"
       # type: json

@@ -103,9 +103,13 @@ hooks:
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
 HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
-	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT))
+	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
+	$(if $(IPE_UPDATES),--ipe-updates $(IPE_UPDATES) --image-serial $(IMAGE_SERIAL))
 image slot: $(HOWL)
 	$(HOWL_BUILD) $@
+.PHONY: prebuilt
+prebuilt: $(HOWL)
+	$(HOWL_BUILD) prebuilt
 disk: $(HOWL)
 	$(HOWL_BUILD) $(if $(DISK),--disk $(DISK)) $(if $(DISK_MIB),--disk-mib $(DISK_MIB)) $(if $(DISK_ARGS),--disk-args "$(DISK_ARGS)") disk
 # A released disk never takes DISK_ARGS.
@@ -171,8 +175,9 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
-	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep seal --dep settings --dep update-policy \
+	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
+	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig
+ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
@@ -222,14 +227,22 @@ WEREWOLF_BOOT_CRT ?= release/boot.crt
 UKI_STUB ?= out/tools/stubs/$(ARCH)/linux.efi.stub
 UKI = $(OUT)/slot/uki.efi
 UKI_WORK = $(BUILD)/uki
-$(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUILD)/vmlinuz $(UKI_BIN)
+UKI_NATIVE ?=
+UKI_ARGS ?= $(if $(UKI_NATIVE),werewolf.native=1 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewolf werewolf.esp=57E1-F000)
+.PHONY: _uki-options
+_uki-options:
+$(UKI_WORK)/options: _uki-options
+	@mkdir -p $(UKI_WORK)
+	@printf '%s\n' '$(CONSOLE)' '$(UKI_ARGS)' '$(WEREWOLF_BOOT_KEY)' '$(WEREWOLF_BOOT_CRT)' '$(UKI_STUB)' >$@.new
+	@cmp -s $@.new $@ && rm -f $@.new || mv -f $@.new $@
+$(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUILD)/vmlinuz $(UKI_BIN) $(WEREWOLF_BOOT_KEY) $(WEREWOLF_BOOT_CRT) $(UKI_STUB) $(UKI_WORK)/options
 	@[ -n "$(WEREWOLF_BOOT_KEY)" ] && [ -n "$(WEREWOLF_BOOT_CRT)" ] && [ -f "$(UKI_STUB)" ] || \
 		{ echo "$@: WEREWOLF_BOOT_KEY, WEREWOLF_BOOT_CRT and UKI_STUB (= systemd's linuxaa64.efi.stub) name the boot key and the stub (docs/testing.md)" >&2; exit 1; }
 	@mkdir -p $(UKI_WORK) && cp $(OUT)/slot/root.erofs $(UKI_WORK)/
 	@touch -t 197001010000 $(UKI_WORK)/root.erofs
 	@cd $(UKI_WORK) && $(TAR) -cf - --format newc --uid 0 --gid 0 --numeric-owner root.erofs | zstd -1 -q -c >root.cpio.zst
 	@cat $(OUT)/slot/stage0.zst $(UKI_WORK)/root.cpio.zst >$(UKI_WORK)/initrd
-	@printf '%s console=%s\0' "$$(cat $(OUT)/slot/cmdline)" $(CONSOLE) >$(UKI_WORK)/cmdline
+	@printf '%s console=%s %s\0' "$$(cat $(OUT)/slot/cmdline)" $(CONSOLE) '$(UKI_ARGS)' >$(UKI_WORK)/cmdline
 	@rm -f $(UKI).signed
 	$(UKI_BIN) $(UKI_STUB) $(UKI).unsigned .linux=$(BUILD)/vmlinuz .initrd=$(UKI_WORK)/initrd .cmdline=$(UKI_WORK)/cmdline
 	osslsigncode sign -certs $(WEREWOLF_BOOT_CRT) -key $(WEREWOLF_BOOT_KEY) -in $(UKI).unsigned -out $(UKI).signed >/dev/null
@@ -239,7 +252,7 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
-	lib/verity.zig lib/ipe.zig lib/image.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
+	lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -261,11 +274,19 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
+_test/cloud-console: ; python3 test/cloud-console --test
+_test/azure-security: ; python3 test/azure-security --test
+_test/kernel-version: ; python3 test/kernel-version
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
+_test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
+_test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/apk.zig lib/package.zig
+	@mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe --dep apk --dep tpm -Mroot=$< --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
 _test/lib/form.zig: ; zig test --dep allow --dep sshd -Mroot=lib/form.zig -Mallow=lib/allow.zig --dep settings -Msshd=lib/sshd.zig -Msettings=lib/settings.zig
 _test/lib/sshd.zig: ; zig test --dep settings -Mroot=lib/sshd.zig -Msettings=lib/settings.zig
 _test/lib/service.zig: ; zig test --dep seal --dep settings -Mroot=lib/service.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig
@@ -386,11 +407,6 @@ dist:
 _dist-form: $(HOWL)
 	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
-	# The slot's signed UKI, where a boot key is given, so the manifest
-	# lists it (cmd/howl/build.zig; docs/releases.md).
-	@[ -z "$(WEREWOLF_BOOT_KEY)" ] || $(MAKE) --no-print-directory FORM=$(FORM_REF) ARCH=$(ARCH) \
-		WEREWOLF_BOOT_KEY=$(WEREWOLF_BOOT_KEY) WEREWOLF_BOOT_CRT=$(WEREWOLF_BOOT_CRT) \
-		$(BUILD)/$(notdir $(patsubst %/,%,$(FORM_REF)))/slot/uki.efi
 	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST)
 
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
@@ -454,7 +470,7 @@ check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
 check-integrity: check-slot check-unsigned check-verity check-deadman \
 	$(if $(filter aarch64-hvf aarch64-kvm,$(ARCH)-$(ACCEL)),check-secureboot)
 
-# IPE is opt-in until signed prebuilt updates replace on-machine rebuilds.
+# IPE is opt-in; enrolled images update through signed prebuilt bundles.
 .PHONY: ipe-kernel check-ipe _check-ipe
 ipe-kernel: $(HOWL)
 	@[ -n "$(WEREWOLF_IPE_KEY)" ] && [ -n "$(WEREWOLF_IPE_CRT)" ] || \
@@ -474,6 +490,20 @@ check-ipe: $(HOWL) $(VERITY_BIN) $(IPE_PROBE)
 _check-ipe:
 	@$(CHECK_ENV) IPE_PROBE=$(IPE_PROBE) VERITY=$(VERITY_BIN) \
 		IPE_KEY=$(WEREWOLF_IPE_KEY) IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-ipe $(CHECK_QEMU)
+.PHONY: check-image-updater
+check-image-updater: $(HOWL)
+	@[ "$(IPE)" = 1 ] || { echo "check-image-updater: set IPE=1 and its kernel/key/certificate" >&2; exit 1; }
+	@$(CHECK_ENV) ARCH=$(ARCH) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
+		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-image-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci
+
+# Continuous EFI update: the new UKI and external root must agree under IPE.
+IPE_UPDATE_SECUREBOOT ?= 1
+check-image-updater-uki: $(HOWL)
+	@[ "$(IPE)" = 1 ] || { echo "check-image-updater-uki: set IPE=1 and its kernel/key/certificate" >&2; exit 1; }
+	$(MAKE) --no-print-directory IPE= FORM=minimal slot
+	@$(CHECK_ENV) ARCH=$(ARCH) IPE_UPDATE_BOOT=efi IPE_UPDATE_SECUREBOOT=$(IPE_UPDATE_SECUREBOOT) BOOT_ROOTFS=build/$(ARCH)/boot/rootfs.tar \
+		FIRMWARE=$(UEFI_FIRMWARE) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) \
+		IPE_CERT=$(WEREWOLF_IPE_CRT) test/check-updater-uki $(QEMU) -smp 2 -m 2048 -device virtio-rng-pci
 # check-adhoc pulls an OCI image, too slowly on emulated arm64.
 check-cloud:     check-metadata check-nodata check-lease check-static $(if $(filter aarch64-tcg,$(ARCH)-$(ACCEL)),,check-adhoc)
 check: check-forms check-shellfree check-integrity check-cloud check-persist
@@ -549,17 +579,15 @@ check-deadman: | _check-shared check-minimal check-slot
 	@$(CHECK_MAKE) FORM=minimal _check-deadman
 check-unsigned: | _check-shared check-minimal check-slot
 	@$(CHECK_MAKE) FORM=minimal _check-unsigned
-check-secureboot: $(UKI_BIN) | _check-shared check-minimal check-slot
-	@[ -n "$(SECUREBOOT_DIR)" ] || { echo "skip   secureboot        no SECUREBOOT_DIR (docs/testing.md)"; exit 0; }
+check-secureboot: $(HOWL)
 	@rm -f $(CHECK)/sb.key $(CHECK)/sb.crt
 	@mkdir -p $(CHECK)
 	openssl req -newkey rsa:2048 -nodes -keyout $(CHECK)/sb.key -x509 -new \
 		-subj /CN=werewolf-secureboot-check -days 30 -out $(CHECK)/sb.crt 2>/dev/null
-	@rm -f $(BUILD)/prod/slot/uki.efi
-	@$(MAKE) --no-print-directory FORM=prod ARCH=$(ARCH) WEREWOLF_BOOT_KEY=$(CHECK)/sb.key \
-		WEREWOLF_BOOT_CRT=$(CHECK)/sb.crt UKI_STUB=$(SECUREBOOT_DIR)/stub.efi \
-		$(BUILD)/prod/slot/uki.efi
 	@$(MAKE) --no-print-directory FORM=prod ARCH=$(ARCH) _check-secureboot
+check-lima-secureboot: check-secureboot
+	python3 test/check-lima-secureboot $(CHECK)/secureboot/release/prod-$(ARCH)-disk.qcow2 \
+		$(CHECK)/secureboot/enrolled $(CHECK)/lima-secureboot
 # check-firecracker builds for x86_64 here and boots on FIRECRACKER_HOST
 # (default galadriel) through a cross-compiled howl, so the host needs no
 # toolchain (docs/testing.md). The form is sshd relaxed to take a key file,
@@ -651,7 +679,10 @@ examples:
 examples-gcp:
 	@status=0; for f in $(call shard,$(FORMS)); do test/example gcp $$f || status=1; done; exit $$status
 _check-cloud: $(HOWL)
-	@test/cloud $(CLOUD) $(FORM) $(ARCH)
+	@mkdir -p $(CHECK)
+	@runner=$$(mktemp '$(CHECK)/cloud-$(CLOUD).XXXXXXXX') && \
+		trap 'rm -f "$$runner"' EXIT && cp test/cloud "$$runner" && chmod 700 "$$runner" && \
+		HOWL=$(HOWL) "$$runner" $(CLOUD) $(FORM) $(ARCH)
 check-compose: slot
 	@OUT=$(OUT) FORM=$(FORM) ARCH=$(ARCH) DEV=$(DEV) LOCK=$(FORM_LOCK) VENDOR=$(BUILD)/vendor \
 		FORM_TOOL=$(abspath $(FORM_TOOL)) TAR=$(TAR) test/check-compose
@@ -671,35 +702,9 @@ _check-updater: $(VERITY_BIN)
 ci:
 	test/lima-ci
 
-# check-updater-uki updates a machine through a repository the check serves,
-# whose prod-form depends on uki-prod: slot b must carry the signed UKI and
-# boot through the entry that names it (docs/design/verified-boot.md).
-check-updater-uki: $(UKI_BIN) $(VERITY_BIN) | _check-shared
-	@[ "$(ARCH)-$(ACCEL)" = aarch64-hvf ] || [ "$(ARCH)-$(ACCEL)" = aarch64-kvm ] || \
-		{ echo "skip   uki               emulated arm64 boots firmware too slowly"; exit 0; }
-	@mkdir -p $(CHECK)
-	@rm -f $(CHECK)/uki-repo.key $(CHECK)/uki-repo.crt $(CHECK)/uki.key $(CHECK)/uki.crt
-	openssl genrsa -out $(CHECK)/uki-repo.key 2048 2>/dev/null
-	openssl rsa -in $(CHECK)/uki-repo.key -pubout -out $(CHECK)/uki-repo.pub 2>/dev/null
-	openssl req -newkey rsa:2048 -nodes -keyout $(CHECK)/uki.key -x509 -new \
-		-subj /CN=werewolf-uki-check -days 30 -out $(CHECK)/uki.crt 2>/dev/null
-	@$(MAKE) --no-print-directory FORM=prod slot
-	@rm -f $(BUILD)/prod/slot/uki.efi
-	@$(MAKE) --no-print-directory FORM=prod WEREWOLF_BOOT_KEY=$(CHECK)/uki.key \
-		WEREWOLF_BOOT_CRT=$(CHECK)/uki.crt $(BUILD)/prod/slot/uki.efi
-	@mkdir -p $(CHECK)/uki-repo && rm -rf $(CHECK)/uki-repo/*
-	@mkdir -p $(CHECK)/uki-repo/uki/usr/lib/werewolf/uki
-	cp $(BUILD)/prod/slot/uki.efi $(CHECK)/uki-repo/uki/usr/lib/werewolf/uki/slot.efi
-	build/host/package pack $(CHECK)/uki-repo $(CHECK)/uki-repo/uki uki-prod - $(ARCH) \
-		$$(date -u +%s) "the check's UKI" depend:werewolf-format$(PACKAGE_FORMAT)
-	@t=$(CHECK)/uki-repo/form && build/host/form stage prod $$t >/dev/null && \
-		build/host/package pack $(CHECK)/uki-repo $$t prod-form - $(ARCH) \
-		$$(date -u +%s) "the check's prod" \
-		$$(build/host/form depends prod | sed 's/^/depend:/') depend:uki-prod
-	@$(CHECK_ENV) FORM=prod OUT=$(BUILD)/prod ARCH=$(ARCH) REPO_DIR=$(CHECK)/uki-repo EROFS_OPTS='$(EROFS_OPTS)' \
-		REPO_KEY=$(CHECK)/uki-repo.key REPO_PUB=$(CHECK)/uki-repo.pub \
-		ACCEL=$(ACCEL) CPU=$(CPU) FIRMWARE=$(UEFI_FIRMWARE) \
-		test/check-updater-uki
+# Signed UKIs travel with the exact root they seal, not a locally composed root.
+.PHONY: check-updater-uki check-image-updater-uki
+check-updater-uki: check-image-updater-uki
 # clean keeps the locks, so the next build is the same as the last.
 clean:
 	rm -rf $(filter-out $(LOCK),$(wildcard build/*))

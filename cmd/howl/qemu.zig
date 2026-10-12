@@ -26,9 +26,9 @@ pub const Machine = struct {
     import_disk: ?[]const u8 = null,
 };
 
-/// Firmware is edk2's code and, on x86_64, the template of its variables,
-/// which each machine copies to vars.fd.
-pub const Firmware = struct { code: []const u8, vars: ?[]const u8 = null };
+/// Firmware is edk2's code and optional variables copied to vars.fd.
+/// Secure Arm storage is immutable; x86 isolates its writes with SMM.
+pub const Firmware = struct { code: []const u8, vars: ?[]const u8 = null, secure: bool = false };
 
 /// firmware finds edk2 for arch where QEMU's packages put it, or null.
 pub fn firmware(io: Io, arch: howl.Arch) ?Firmware {
@@ -114,16 +114,23 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
     const code = try std.mem.replaceOwned(u8, gpa, m.firmware.code, ",", ",,");
     const machine = switch (m.arch) {
         .aarch64 => "virt",
-        .x86_64 => "q35",
+        .x86_64 => if (m.firmware.secure) "q35,smm=on" else "q35",
     };
     // splash-time=0 skips edk2's five-second wait.
-    const boot: []const []const u8 = switch (m.arch) {
-        .aarch64 => &.{ "-bios", m.firmware.code },
-        .x86_64 => &.{
-            "-drive", try gpa.print("if=pflash,format=raw,unit=0,readonly=on,file={s}", .{code}),
-            "-drive", try gpa.print("if=pflash,format=raw,unit=1,file={s}/vars.fd", .{d}),
-        },
-    };
+    const boot: []const []const u8 = if (m.firmware.vars != null) &.{
+        "-drive", try gpa.print("if=pflash,format=raw,unit=0,readonly=on,file={s}", .{code}),
+        "-drive",
+        try gpa.print("if=pflash,format=raw,unit=1,{s}file={s}/vars.fd", .{
+            // Arm has no SMM to isolate flash from guest root. Enrollment
+            // is host-owned and immutable; BLS files carry slot selection.
+            if (m.firmware.secure and m.arch == .aarch64) "readonly=on," else "",
+            d,
+        }),
+    } else &.{ "-bios", m.firmware.code };
+    const protected: []const []const u8 = if (m.firmware.secure and m.arch == .x86_64)
+        &.{ "-global", "driver=cfi.pflash01,property=secure,value=on" }
+    else
+        &.{};
     const base = try std.mem.concat(gpa, []const u8, &.{ &.{
         try gpa.print("qemu-system-{t}", .{m.arch}),
         "-M",
@@ -152,7 +159,7 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
         std.fmt.comptimePrint("{d}", .{howl.local_mib}),
         "-boot",
         "menu=on,splash-time=0",
-    }, boot, &.{
+    }, boot, protected, &.{
         "-netdev",
         try gpa.print(
             "user,id=n0,hostfwd=tcp:127.0.0.1:{d}-:22,hostfwd=tcp:127.0.0.1:{d}-:{d}",
@@ -360,9 +367,33 @@ test argv {
     try std.testing.expect(std.mem.find(u8, xl, "unit=0,readonly=on,file=/q/code.fd") != null);
     try std.testing.expect(std.mem.find(u8, xl, "unit=1,file=/m/vars.fd") != null);
     try std.testing.expectEqualStrings("console=ttyS0", bootArgs(.x86_64)[0]);
+    var secure = m;
+    secure.firmware.vars = "/q/vars.fd";
+    secure.firmware.secure = true;
+    const sl = try std.mem.join(arena.allocator(), " ", try argv(arena.allocator(), secure, .hvf));
+    try std.testing.expect(std.mem.find(u8, sl, "-bios") == null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        sl,
+        "unit=0,readonly=on,file=/q/edk2-aarch64-code.fd",
+    ) != null);
+    try std.testing.expect(std.mem.find(u8, sl, "unit=1,readonly=on,file=/w,,x/m/vars.fd") != null);
+    secure.arch = .x86_64;
+    const sx = try std.mem.join(arena.allocator(), " ", try argv(arena.allocator(), secure, .tcg));
+    try std.testing.expect(std.mem.find(u8, sx, "-M q35,smm=on") != null);
+    try std.testing.expect(std.mem.find(
+        u8,
+        sx,
+        "driver=cfi.pflash01,property=secure,value=on",
+    ) != null);
+    try std.testing.expect(std.mem.find(u8, sx, "unit=1,file=/w,,x/m/vars.fd") != null);
     var brought = m;
     brought.import_disk = "/w,x/m/import.img";
-    const with = try std.mem.join(arena.allocator(), " ", try argv(arena.allocator(), brought, .hvf));
+    const with = try std.mem.join(
+        arena.allocator(),
+        " ",
+        try argv(arena.allocator(), brought, .hvf),
+    );
     try std.testing.expect(std.mem.find(
         u8,
         with,

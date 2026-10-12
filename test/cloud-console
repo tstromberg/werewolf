@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Rejoin userspace records interrupted by kernel console messages."""
+import re
+import sys
+
+
+def clean(data):
+    return re.sub(rb"\[\s*[0-9]+\.[0-9]+\][^\n]*\n", b"", data.replace(b"\r", b""))
+
+
+if sys.argv[1:] == ["--test"]:
+    wanted = b'posture: fail= pass=90 {"tool":"posture","host":"new-host"}\n'
+    split = b'posture: fail= pass=90 {"tool":"posture","[ 5.125] audit: syscall denied\r\nhost":"new-host"}\r\n'
+    assert clean(split) == wanted
+    assert clean(wanted) == wanted
+    assert clean(b'ordinary [1, 2] data\n') == b'ordinary [1, 2] data\n'
+    print("pass   cloud-console: kernel interleaving preserves complete userspace records")
+else:
+    sys.stdout.buffer.write(clean(sys.stdin.buffer.read()))

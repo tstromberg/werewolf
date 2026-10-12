@@ -32,7 +32,7 @@ const esp_mib = 256;
 /// partition's UUID, esp_uuid.
 const esp_serial = "57E1F000";
 const esp_uuid = "57E1-F000";
-const root_uuid = "57e1f000-77e2-4b0f-8a3c-0000000000a0";
+pub const root_uuid = "57e1f000-77e2-4b0f-8a3c-0000000000a0";
 /// epoch is FAT's first day, 1980-01-01, where mtools' and mke2fs's clocks
 /// stop.
 const epoch_seconds = 315532800;
@@ -72,7 +72,7 @@ fn bootOf(arch: howl.Arch) Boot {
         .aarch64 => .{
             .efi = "systemd-bootaa64.efi",
             .name = "BOOTAA64.EFI",
-            .console = "console=ttyS0,115200 console=hvc0",
+            .console = "console=ttyAMA0 console=ttyS0,115200 console=hvc0",
         },
         .x86_64 => .{
             .efi = "systemd-bootx64.efi",
@@ -80,6 +80,19 @@ fn bootOf(arch: howl.Arch) Boot {
             .console = "console=tty0 console=hvc0 console=ttyS0,115200",
         },
     };
+}
+
+pub fn consoles(arch: howl.Arch) []const u8 {
+    return bootOf(arch).console;
+}
+
+test "signed boot consoles cover Graviton, PL011 and the virtual console" {
+    const t = std.testing;
+    try t.expectEqualStrings(
+        "console=ttyAMA0 console=ttyS0,115200 console=hvc0",
+        consoles(.aarch64),
+    );
+    try t.expect(std.mem.endsWith(u8, consoles(.x86_64), "console=ttyS0,115200"));
 }
 
 /// write writes out, a sparse disk of the slot in slot_dir (vmlinuz,
@@ -143,6 +156,26 @@ pub fn write(
             "bsdtar", "-xOf", boot_rootfs, try b.path("usr/lib/systemd/boot/efi/{s}", .{boot.efi}),
         }, .{ .stdout = f });
     }
+    if (b.spec.boot_key) |key| {
+        const plain = try b.path("{s}/{s}", .{ esp, efi });
+        const signed = try b.path("{s}.signed", .{plain});
+        try b.run(
+            &.{
+                "osslsigncode",
+                "sign",
+                "-certs",
+                b.spec.boot_cert.?,
+                "-key",
+                key,
+                "-in",
+                plain,
+                "-out",
+                signed,
+            },
+            .{},
+        );
+        try b.rename(signed, plain);
+    }
     // No menu, and no editing the command line from the console.
     try b.put(esp, "loader/loader.conf",
         \\timeout 0
@@ -158,7 +191,13 @@ pub fn write(
             "werewolf.esp={s}{s}{s} werewolf.slot=a",
         .{ boot.console, image_args, root_uuid, esp_uuid, if (extra.len > 0) " " else "", extra },
     );
-    try b.put(esp, "loader/entries/werewolf-a.conf", try b.path(
+    try b.put(esp, "loader/entries/werewolf-a.conf", if (b.spec.boot_key != null) try b.path(
+        \\title werewolf a
+        \\sort-key werewolf
+        \\version 19800101T000000Z
+        \\efi /werewolf/a/uki.efi
+        \\
+    , .{}) else try b.path(
         \\title werewolf a
         \\sort-key werewolf
         \\version 19800101T000000Z
@@ -167,15 +206,24 @@ pub fn write(
         \\options {s}
         \\
     , .{options}));
+    if (b.spec.boot_key != null) try b.copy(
+        try b.path("{s}/uki.efi", .{slot_dir}),
+        try b.path("{s}/werewolf/a/uki.efi", .{esp}),
+    );
     for ([_][]const u8{ "vmlinuz", "stage0.zst" }) |name| try b.copy(
         try b.path("{s}/{s}", .{ slot_dir, name }),
         try b.path("{s}/werewolf/a/{s}", .{ esp, name }),
     );
     // Sorted, as the directories are.
-    const esp_files = [_][]const u8{
+    const regular_files = [_][]const u8{
         efi,                     "loader/entries/werewolf-a.conf", "loader/loader.conf",
         "werewolf/a/stage0.zst", "werewolf/a/vmlinuz",
     };
+    const signed_files: []const []const u8 = if (b.spec.boot_key != null)
+        &.{"werewolf/a/uki.efi"}
+    else
+        &.{};
+    const esp_files = try mem.concat(b.gpa, []const u8, &.{ &regular_files, signed_files });
     const then: Io.Timestamp = .fromNanoseconds(epoch_seconds * std.time.ns_per_s);
     for (esp_files) |f| try Dir.cwd().setTimestamps(io, try b.path("{s}/{s}", .{ esp, f }), .{
         .access_timestamp = .{ .new = then },

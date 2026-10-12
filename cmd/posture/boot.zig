@@ -6,6 +6,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const testing = std.testing;
 const ipe = @import("ipe");
+const tpm = @import("tpm");
 
 const posture = @import("posture.zig");
 const Posture = posture.Posture;
@@ -16,10 +17,10 @@ const trim = posture.trim;
 /// its vendor GUID: the global variable GUID.
 const secure_boot_var =
     "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
+const setup_mode_var =
+    "/sys/firmware/efi/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c";
 
-/// Stage0 writes this once a TPM counter at least the running slot's
-/// serial has held (phase 5). Nothing does yet, so the check fails and
-/// every image excuses it (test/posture-known).
+/// Init records stage0's check; posture independently validates the TPM policy.
 const rollback_marker = "/run/werewolf/rollback-checked";
 
 /// parseSecureBoot reads the SecureBoot variable's bytes: four attribute
@@ -31,6 +32,20 @@ fn parseSecureBoot(data: []const u8) ?bool {
         1 => true,
         else => null,
     };
+}
+
+fn secureBoot(enabled: ?bool, setup: ?bool) ?bool {
+    const on = enabled orelse return null;
+    return on and setup != null and !setup.?;
+}
+
+test "Secure Boot posture requires enforcement outside setup mode" {
+    const t = std.testing;
+    try t.expect(secureBoot(true, false).?);
+    try t.expect(!secureBoot(false, false).?);
+    try t.expect(!secureBoot(true, true).?);
+    try t.expect(!secureBoot(true, null).?);
+    try t.expect(secureBoot(null, false) == null);
 }
 
 /// parseSwitch reads a kernel module parameter that holds Y or N.
@@ -86,7 +101,10 @@ pub fn check(p: *Posture) !void {
         .detail = if (!ipe_on) "no enforcing release IPE policy" else "",
     });
     var buf: [64]u8 = undefined;
-    const sb = parseSecureBoot(readBytes(secure_boot_var, &buf) orelse "");
+    const sb = secureBoot(
+        parseSecureBoot(readBytes(secure_boot_var, &buf) orelse ""),
+        parseSecureBoot(readBytes(setup_mode_var, &buf) orelse ""),
+    );
     const has_tpm = exists(p.io, "/dev/tpmrm0");
     const checked_rollback = exists(p.io, rollback_marker);
     try p.add(.{
@@ -96,7 +114,7 @@ pub fn check(p: *Posture) !void {
         .why = "Whoever reaches the console or the disk can boot another kernel, or another " ++
             "stage0 with its own root hash. Firmware that verifies signatures boots only what " ++
             "was signed.",
-        .how = "the firmware's SecureBoot variable is on",
+        .how = "SecureBoot is on and SetupMode is off",
         .result = if (sb) |on| (if (on) .pass else .fail) else .skip,
         .detail = if (sb == null)
             "no EFI variables to read: no EFI firmware, or a kernel without them"
@@ -120,9 +138,12 @@ pub fn check(p: *Posture) !void {
         .name = "Rollback protected",
         .why = "An older image, still signed, is an easier target than a new one; the boot must " ++
             "refuse to go back to it.",
-        .how = "a TPM counter at least the running slot's serial, checked before handover, " ++
+        .how = "the running serial meets the protected TPM floor, checked before handover, " ++
             "marked in " ++ rollback_marker,
-        .result = if (rollbackProtected(has_tpm, checked_rollback)) .pass else .fail,
+        .result = if (rollbackProtected(has_tpm, checked_rollback) and tpm.protected(p.io, p.gpa))
+            .pass
+        else
+            .fail,
         .detail = if (!has_tpm)
             "no TPM device: no counter to guard the slot serial"
         else
@@ -131,7 +152,7 @@ pub fn check(p: *Posture) !void {
 }
 
 /// rollbackProtected requires both protected storage and stage0's proof that
-/// its counter was at least the running slot's serial.
+/// the running slot's serial met its protected floor.
 fn rollbackProtected(has_tpm: bool, checked: bool) bool {
     return has_tpm and checked;
 }

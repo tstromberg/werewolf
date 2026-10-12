@@ -356,6 +356,7 @@ const Entry = struct {
     version: []const u8 = "",
     linux: []const u8 = "",
     initrd: []const u8 = "",
+    efi: bool = false,
     options: []const u8 = "",
 
     fn parse(name: []const u8, text: []const u8) Entry {
@@ -363,15 +364,22 @@ const Entry = struct {
         var lines = mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |raw| {
             const line = mem.trim(u8, raw, " \t\r");
+            if (mem.eql(u8, line, "efi")) e.efi = true;
             const sp = mem.findAny(u8, line, " \t") orelse continue;
             const key = line[0..sp];
             const value = mem.trim(u8, line[sp..], " \t");
             if (mem.eql(u8, key, "version")) e.version = value;
             if (mem.eql(u8, key, "linux")) e.linux = value;
             if (mem.eql(u8, key, "initrd")) e.initrd = value;
+            if (mem.eql(u8, key, "efi")) e.efi = true;
             if (mem.eql(u8, key, "options")) e.options = value;
         }
         return e;
+    }
+
+    fn direct(e: Entry) error{ FirmwareRequired, IncompleteEntry }!void {
+        if (e.efi) return error.FirmwareRequired;
+        if (e.linux.len == 0 or e.initrd.len == 0) return error.IncompleteEntry;
     }
 
     /// Tries is the count in an entry's name: werewolf-b+1.conf has one try
@@ -471,8 +479,13 @@ fn boot(io: Io, gpa: Allocator, dir: []const u8, why: *howl.Why) ![]const u8 {
         if (chosen == null or e.before(chosen.?)) chosen = e;
     }
     const e = chosen orelse return why.refuse("{s}: no boot entries", .{disk});
-    if (e.linux.len == 0 or e.initrd.len == 0)
-        return why.refuse("{s}: no linux or initrd line", .{e.name});
+    e.direct() catch |err| return switch (err) {
+        error.FirmwareRequired => why.refuse(
+            "Firecracker has no UEFI Secure Boot; refusing EFI entry {s}; use --on qemu",
+            .{e.name},
+        ),
+        error.IncompleteEntry => why.refuse("{s}: no linux or initrd line", .{e.name}),
+    };
     var said = try gpa.print("booting {s}", .{e.name});
     if (try e.spent(gpa)) |name| {
         _ = try esp.run("mren", &.{ try gpa.print("::/loader/entries/{s}", .{e.name}), name });
@@ -707,6 +720,32 @@ test "Entry.parse" {
     try testing.expectEqualStrings("/werewolf/b/vmlinuz", e.linux);
     try testing.expectEqualStrings("/werewolf/b/stage0.zst", e.initrd);
     try testing.expectEqualStrings("console=ttyS0,115200 werewolf.slot=b", e.options);
+    // An EFI entry must not silently fall back to unsigned direct boot,
+    // even when an attacker appends linux and initrd lines.
+    const signed: Entry = .parse("werewolf-a.conf",
+        \\efi /werewolf/a/uki.efi
+        \\linux /untrusted/kernel
+        \\initrd /untrusted/initrd
+        \\
+    );
+    try testing.expect(signed.efi);
+    try testing.expectError(error.FirmwareRequired, signed.direct());
+    const blank: Entry = .parse("werewolf-a.conf",
+        \\efi /werewolf/a/uki.efi
+        \\linux /untrusted/kernel
+        \\initrd /untrusted/initrd
+        \\efi
+        \\
+    );
+    try testing.expectError(error.FirmwareRequired, blank.direct());
+    try testing.expectError(error.FirmwareRequired, Entry.parse("bare.conf",
+        \\efi
+        \\linux /untrusted/kernel
+        \\initrd /untrusted/initrd
+        \\
+    ).direct());
+    try e.direct();
+    try testing.expectError(error.IncompleteEntry, (Entry{ .name = "empty.conf" }).direct());
 }
 
 test "Entry.tries" {

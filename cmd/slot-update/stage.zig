@@ -478,7 +478,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
         ctx.clearNotice();
         return;
     };
-    try u.requireLocalUpdate();
+    try @import("images.zig").requireBoot(u, p.build, false);
     // Not armed: its try is spent or was never set. A reboot would boot this
     // slot again, so wait for the next check to stage it.
     if (!try u.armed(p)) {
@@ -521,6 +521,7 @@ pub fn bootIfDue(u: *Update, ctx: *Ctx) !void {
         return;
     }
     const at = nowSecs(u.io);
+    try @import("images.zig").requireBoot(u, again.build, true);
     u.step = "reboot";
     try u.record(.{
         .event = "reboot",

@@ -962,6 +962,9 @@ fn rfc3339(gpa: Allocator, secs: u64) ![]const u8 {
 }
 
 const testing = std.testing;
+test {
+    _ = boot;
+}
 
 // Run each area's tests along with these.
 test {

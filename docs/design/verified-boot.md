@@ -4,12 +4,11 @@ Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0,
 cmd/init); 2, a read-only root; 3, its dm-verity hash tree (lib/verity.zig)
 and signed releases ([docs/releases.md](../releases.md)); and phase 5's
 first slice, a signed UKI on a local disk (make check-secureboot). Phase 4,
-our own kernel with IPE, is opt-in ([ipe.md](ipe.md)); production updates
-still require its signed-image delivery path. The rest of phase 5, Secure
-Boot in the clouds, remains open. Posture holds the gaps as `boot-` checks
-(docs/posture.md): Secure Boot on, module signatures enforced by the
-kernel's build, rollback refused by a TPM counter, each failing today
-and excused by every image (test/posture-known).
+our own kernel with IPE, is opt-in ([ipe.md](ipe.md)); enrolled images have
+signed slot updates ([prebuilt-images.md](prebuilt-images.md)). Phase 5's
+Secure Boot passed on AWS and GCP; Azure firmware acceptance remains unreliable.
+Posture holds gaps as `boot-` checks (docs/posture.md); IPE builds enforce
+module signatures. Bite firmware and TPM rollback remain deployment gaps.
 
 ## Summary
 
@@ -26,8 +25,8 @@ root included, and lockdown, MDWE and one-way sysctls hold. Two gaps
 remain. Landlock binds only fence's descendants, not the mount broker,
 DHCP's renewal, the deadman or the kernel's helpers. And only the host, on
 direct boot, checks the kernel and stage0, which holds the root hash. On
-werewolf's own disk (systemd-boot is unsigned) or a bitten machine (GRUB is
-the distro's), root can have the mount broker mount them and replace them.
+the original unsigned disk or a bitten machine (GRUB is the distro's),
+root can have the mount broker mount them and replace them.
 
 ## Goals
 
@@ -67,31 +66,31 @@ policy, busybox ran from the named dm-verity image and was refused, with
 an audit record, from an unnamed verified image, from `/tmp` and through
 `ld.so`.
 
-**Phase 5: Secure Boot**, where a provider takes our keys: AWS
-(`register-image --uefi-data`), GCP (an image's signature database) and
-Azure (a Trusted Launch key vault). Each slot is a signed UKI of kernel,
-stage0 and a fixed command line, so the address comes by DHCP; the boot
-key is RSA-2048, as firmware needs. Until the loader is signed for a
-cloud, `howl create` takes what it gives beside it — GCP a vTPM with
-integrity monitoring, AWS a NitroTPM (`test/cloud` checks both).
+**Phase 5: Secure Boot (built).** New QEMU machines enroll a host-held
+key and boot signed systemd-boot and UKIs. Signed release disks carry
+`boot.crt`; cloud uploads verify both PEs against it before enrollment.
+AWS receives UEFI data and a persistent boot entry, GCP receives PK/KEK/db,
+and Azure uses a specialized gallery version with custom UEFI keys and
+Trusted Launch. Stage0 requires SecureBoot on and SetupMode off.
 
-**Phase 5, first slice (built): a signed UKI on a local disk.**
-`tools/uki` assembles one PE from systemd's stub and the slot's kernel,
-stage0, root and command line; `osslsigncode` signs it, and `make
-check-secureboot` (docs/testing.md) boots it under firmware with only
-that key and proves a one-byte change refused.
+**Native slot identity.** The UKI seals root UUID, directory and ESP identity.
+Stage0 resolves only canonical slot UKI paths from StubImageIdentifier, then
+protects the resolved `/proc/cmdline`. Unsigned loader options cannot alter
+root, slot or IPE enforcement. Both stock Alpine and IPE kernels are supported.
+`make check-secureboot` verifies the actual release disk and manifest on both
+architectures; the continuous update test covers eight rejected boot cases.
 
 **Updates under Secure Boot.** A machine that boots a signed UKI cannot
-build its own next slot: nothing on it may hold the boot key. So where
-Secure Boot is on, CI signs each release's UKI, the manifest lists it
-with its hash, and the updater fetches and lays it where the firmware
-boots it, serial in line for a TPM to check.
+build its own next slot: nothing on it may hold the boot key. Enrolled IPE
+images fetch the UKI and exact root as one signed bundle, retaining proof
+before arming ([prebuilt-images.md](prebuilt-images.md)). A UKI packaged
+inside a locally recomposed root cannot preserve its sealed root hash.
+`make IPE=1 check-updater-uki` proves firmware delivery, verified slot b and commit.
 
 **Open.** Key custody in a KMS. Rollback: root on a bitten machine can
 install an older signed release; TPM counters would stop it. The module
 key makes kernel builds differ, and CI requires two to match. A slot
-built on the machine cannot carry a signed policy. Phase 5 may sign
-systemd-boot.
+built on the machine cannot carry a signed policy. TPM device provisioning and old-release boot proofs remain open.
 
 ## Drawbacks
 

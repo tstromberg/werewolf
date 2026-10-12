@@ -7,12 +7,11 @@ programs and forms are packages: [custom-updates.md](design/custom-updates.md)),
 boots that slot once, and records what changed and which CVEs that fixes.
 Releases are for installs; every machine updates this one way.
 
-Opt-in IPE images hold local rebuilds with `IpeSignedImageRequired`: a new
-root needs its own signed policy, and no machine holds that signing key.
-Installing or arming another slot and rebooting into a pending update are
-also held; committing the current boot remains available.
-Signed prebuilt-image delivery is still required before production IPE
-rollout ([design/ipe.md](design/ipe.md)).
+Enrolled IPE images fetch signed prebuilt slots, verify every artifact and
+retain proof for arming and reboot. Unenrolled images hold local rebuilds
+with `IpeSignedImageRequired`; the host keeps the signing key. See
+[design/prebuilt-images.md](design/prebuilt-images.md) for enrollment,
+publication layout and rollback limits.
 
 It is one Zig program, `cmd/slot-update/slot-update.zig` with
 `cmd/slot-update/cve.zig` (the CVE children and the checks of what they say)

@@ -82,6 +82,29 @@ User data that is not base64, such as a `#cloud-config`, is logged as
 cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws","files":["authorized_keys","hostname"]}
 ```
 
+## Signed boot
+
+New `howl create` machines on AWS, GCP and Azure use signed loaders and UKIs.
+The host retains the boot signer; public certificates enroll the provider's
+firmware. Uploading a release requires its `FORM-ARCH-boot.crt` beside the disk.
+Both the actual loader and UKI must verify against it before a cloud image is made.
+Azure uses a specialized gallery image with custom UEFI keys and Trusted Launch.
+Arm defaults use Cobalt `Standard_D2ps_v6`; older Arm sizes lack Trusted Launch
+([supported sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch)).
+West US 2 x86 boot passed once on `Standard_D2s_v5`, but a fresh retry with
+identical enrollment reported `SecureBoot=1, SetupMode=1`. Cobalt Arm reported
+that state with both key sizes. Stage0 refuses it; reliable Azure deployment
+remains blocked despite successful gallery enrollment. For x86 diagnostics,
+pass `--arch x86_64 --size Standard_D2s_v5`.
+
+`WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` select an existing signing identity.
+Otherwise cloud builds retain one under `build/boot/ARCH`, outside guest artifacts.
+Signed machines hold updates until enrolled in a matching signed image channel;
+locally composing an unsigned replacement cannot preserve the verified boot chain.
+IPE channels also need the kernel, policy signer, `IPE_UPDATES` and `IMAGE_SERIAL`
+([prebuilt images](design/prebuilt-images.md)). TPM presence alone does not prevent
+rollback; provisioning protected rollback state remains separate work.
+
 ## Separation
 
 Each fetch uses two processes ([programs.md](programs.md)):

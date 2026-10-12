@@ -9,6 +9,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 const broker = @import("broker");
 const cmdline = @import("cmdline");
+const tpm = @import("tpm");
 
 const committed = "/run/werewolf/committed";
 const updater_ready = "/run/werewolf/updater-ready";
@@ -79,14 +80,14 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
     const good = try gpa.print("{s}/{s}.conf", .{ d, entry });
     if (exists(io, good)) {
         say(io, "{s} is already good", .{entry});
-        return markCommitted(io);
+        return markCommitted(io, gpa);
     }
     if (dataUnavailable(io, gpa)) return;
     const tried = (try triedEntry(io, gpa, d, entry)) orelse
         return say(io, "no entry for {s} in {s}; not committing", .{ entry, d });
     try Dir.rename(Dir.cwd(), tried, Dir.cwd(), good, io);
     linux.sync();
-    markCommitted(io);
+    try markCommitted(io, gpa);
     say(io, "healthy for a minute; {s} is good", .{entry});
 }
 
@@ -111,12 +112,13 @@ fn commitGrub(io: Io, gpa: Allocator, spec: cmdline.Place, entry: []const u8) !v
     );
     if (isSaved(block, entry)) {
         say(io, "{s} is already GRUB's default", .{entry});
-        return markCommitted(io);
+        return markCommitted(io, gpa);
     }
     if (dataUnavailable(io, gpa)) return;
     if (!run(io, &.{ "/usr/lib/werewolf/grub-setenv", f, "saved_entry", entry }))
         return say(io, "not committing", .{});
-    markCommitted(io);
+    linux.sync();
+    try markCommitted(io, gpa);
     say(io, "healthy for a minute; {s} is now GRUB's default", .{entry});
 }
 
@@ -198,7 +200,8 @@ fn isSaved(block: []const u8, entry: []const u8) bool {
 }
 
 /// markCommitted creates the file that tells stage0's deadman not to reboot.
-fn markCommitted(io: Io) void {
+fn markCommitted(io: Io, gpa: Allocator) !void {
+    try tpm.commit(io, gpa);
     Dir.cwd().writeFile(
         io,
         .{ .sub_path = committed, .data = "" },

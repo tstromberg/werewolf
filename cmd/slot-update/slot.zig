@@ -9,6 +9,7 @@ const form = @import("form");
 const stage0Modules = @import("image").modules;
 const ModuleParam = @import("image").Param;
 const m = @import("slot-update.zig");
+const images = @import("images.zig");
 const Io = m.Io;
 const Dir = m.Dir;
 const Allocator = m.Allocator;
@@ -227,7 +228,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
 /// in werewolf/ beside GRUB's directory. /victim is read-only, so the mount
 /// broker lends writable mounts.
 pub fn install(u: *Update, build: []const u8) !void {
-    try u.requireLocalUpdate();
+    try images.requireInstall(u);
     if (u.cmd.grubenv == null) return installEsp(u, build);
     const io = u.io;
     u.step = "install";
@@ -268,16 +269,23 @@ pub fn install(u: *Update, build: []const u8) !void {
     );
     try u.writeReplacing(
         try u.gpa.print("{s}/vmlinuz", .{kdir}),
-        try unwrapZboot(u.gpa, try u.read(work_dir ++ "/slot/vmlinuz")),
+        if (u.image != null)
+            try u.read(work_dir ++ "/slot/vmlinuz")
+        else
+            try unwrapZboot(u.gpa, try u.read(work_dir ++ "/slot/vmlinuz")),
     );
     try Dir.cwd().copyFile(
-        work_dir ++ "/slot/stage0.zst",
+        if (u.image != null)
+            work_dir ++ "/slot/stage0-bitten.zst"
+        else
+            work_dir ++ "/slot/stage0.zst",
         Dir.cwd(),
         try u.gpa.print("{s}/stage0.zst", .{kdir}),
         io,
         .{},
     );
     try rememberDeclaration(u, v, rdir);
+    try images.remember(u, rdir);
     linux.sync();
     // bite's GRUB entries read each slot's kernel arguments from the
     // environment, so an update's new arguments reach older machines.
@@ -288,6 +296,7 @@ pub fn install(u: *Update, build: []const u8) !void {
         try u.gpa.print("werewolf_args_{s}", .{u.other}),
         args,
     });
+    if (u.image != null) _ = try images.verifyOther(u, build, true, false, true);
     // Arm, then write attempt. In the other order, a power cut between
     // them would record a try that never happened as a rollback and mark
     // an unjudged build bad. In this order it costs at most one extra
@@ -307,6 +316,7 @@ fn writeAttempt(u: *Update, build: []const u8) !void {
 /// Record which declaration each slot holds while both are known. These
 /// records select an existing slot; they never authorize package bytes.
 fn rememberDeclaration(u: *Update, victim: []const u8, other: []const u8) !void {
+    if (u.image != null) return;
     const current = u.read(meta_dir ++ "/local/inputs") catch "";
     const next = readIn(u, work_dir ++ "/root", "usr/share/werewolf/local/inputs") catch "";
     if (current.len == 64) try u.writeReplacing(try u.gpa.print("{s}{s}/{s}/declaration", .{
@@ -319,9 +329,14 @@ fn rememberDeclaration(u: *Update, victim: []const u8, other: []const u8) !void 
 /// manifest may select only the slot that holds its exact image inputs.
 pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
     Dir.cwd().access(u.io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
-    try u.requireLocalUpdate();
     const lock = try u.lock();
     defer _ = linux.close(lock);
+    if (try u.needsSignedImage()) {
+        const image = try images.verifyOther(u, null, true, true, false);
+        if (expected) |hash| if (image.declaration == null or
+            !std.mem.eql(u8, hash, image.declaration.?))
+            return error.DeclarationNotInOtherSlot;
+    }
     const victim = try u.held(.victim);
     defer victim.release();
     const root = try u.gpa.print("{s}{s}/{s}", .{ victim.path(), u.cmd.victim.?.path, u.other });
@@ -459,9 +474,16 @@ fn installEsp(u: *Update, build: []const u8) !void {
             io,
             .{},
         );
+    } else if (u.image != null) {
+        Dir.cwd().deleteFile(io, try u.gpa.print("{s}/uki.efi", .{kdir})) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        };
     }
     try rememberDeclaration(u, v, rdir);
+    try images.remember(u, rdir);
     linux.sync();
+    if (u.image != null) _ = try images.verifyOther(u, build, true, false, true);
 
     // systemd-boot boots the newest version, so the new entry must be newer
     // than the running slot's even if the clock is behind.

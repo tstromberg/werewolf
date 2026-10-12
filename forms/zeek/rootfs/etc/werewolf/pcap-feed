@@ -1,4 +1,0 @@
-# pcap-feed's fifo for this machine (cmd/pcap-feed). Inside Zeek's image the fifo
-# is /tmp/feed, because that image's /tmp is /run/svc/zeek here.
-feed /run/svc/zeek/feed
-user _oci-zeek

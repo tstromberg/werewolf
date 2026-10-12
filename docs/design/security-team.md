@@ -25,7 +25,7 @@ is one leashed process, or a few, on one machine.
 
 - Each built form passes `make check-NAME` and `check-shellfree-NAME`.
 - Its check ends in the login, or the socket, the defaults refuse.
-- Capture is not a capability of the analyzer.
+- The packet capabilities stay on the sensor process, and off every other service.
 
 ## Non-Goals
 
@@ -35,12 +35,7 @@ is one leashed process, or a few, on one machine.
 
 ## Detailed design
 
-pcap-feed opens one interface, writes a pcap header to a fifo,
-drops to `_pcap` (uid 70) and keeps `read`, `write`, `poll`, `ppoll`,
-`clock_gettime` and `exit_group`. A reader that opens after the
-previous one closed gets a new header. Suricata and Zeek read the fifo. `packet` and
-`netadmin` stay in the bounding set so pcap-feed can open the socket; the
-analyzers never have them.
+Suricata and Zeek each capture `eth0` with `AF_PACKET`. The service keeps `CAP_NET_RAW` and `CAP_NET_ADMIN`; leash drops both from every other service. `packet` allows that socket family and no other. `listen` is the `bind()` the socket needs, and neither form declares a TCP port, so Landlock refuses a TCP bind. Suricata has no `inet` and no `netlink`. Zeek still has both, for the resolver. A packet socket can inject. `packet` and `netadmin` stay in the bounding set so those two services can open the socket.
 
 Iris, MISP and Greenbone exec `/usr/bin/bash` or `/bin/bash` with one
 script as the argument. sh-shim is the host's mini-shell and runs one
@@ -51,8 +46,8 @@ image, so the host's programs-no-shell check still passes.
 | Form | State | Defaults; its check's attack |
 | --- | --- | --- |
 | `velociraptor` | built | keys generated on the machine; `admin` from the config at each start; GUI on loopback behind Caddy; clients on :8000 with mutual TLS; the server may run only its own binary; `admin`/`admin` and a stranger |
-| `suricata` | built | pcap-feed's fifo; Emerging Threats Open cached on `/data` by rules-fetch; the engine has no network and does not own the cache; no unix socket |
-| `zeek` | built | the same fifo, Zeek's `local` scripts, JSON logs on `/data`; the process not root |
+| `suricata` | built | AF_PACKET on eth0; Emerging Threats Open cached on `/data` by rules-fetch; the engine has no inet and does not own the cache; no unix socket |
+| `zeek` | built | AF_PACKET on eth0, Zeek's `local` scripts, JSON logs on `/data`; the process not root |
 | `dependency-track` | built | bundled jar, PostgreSQL on loopback, Caddy; `admin`/`admin` replaced before Caddy opens |
 | `bloodhound` | built | CE behind Caddy; Neo4j Bolt on loopback, HTTP off; Cypher mutations off; the community-edition password refused |
 | `wazuh` | not built | the manager's programs are mode 0750, root only; the tree is read-only, and the leash has dropped root |
@@ -63,16 +58,14 @@ image, so the host's programs-no-shell check still passes.
 
 ## Drawbacks
 
-pcap-feed is a program we maintain. Two passwords for BloodHound, because
+Two passwords for BloodHound, because
 two services cannot share one config key. Neo4j's password is set
 once; Dependency-Track's administrator is too. Greenbone's first
 feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 
 ## Alternatives Considered
 
-- Leashing Suricata with `CAP_NET_RAW`. pcap-feed is how capture stays
-  outside the analyzer. A service may name `net_raw` and `net_admin`;
-  only Greenbone's scanner does, and only that process keeps them.
+- Copying packets through a fifo so the analyzer never holds `CAP_NET_RAW`. The copy adds a trip through userspace, and a packet socket is what these sensors are for. A service may name `net_raw` and `net_admin`; Suricata, Zeek and Greenbone's scanner do, and only those processes keep them.
 - Elastic as a form. It is a licensed cluster. OpenSearch is the
   search node.
 - Running Wazuh's `/init`, or its bash, as root. The programs are not
@@ -83,8 +76,7 @@ feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 
 ## Security Considerations
 
-The fifo is mode 0400 after the header is written, so the reader
-cannot see a partial header and cannot write the feed. Velociraptor
+Suricata and Zeek hold the packet capabilities; every other service on those machines drops them. A packet socket can inject, and Zeek's netlink socket can change routes. Velociraptor
 can run VQL that would exec; the leash allows only the server binary.
 BloodHound's metrics port is loopback. Neo4j sends no usage report.
 The bash these three forms run is the image's, and it is not on the
@@ -94,8 +86,7 @@ The scanner alone keeps the packet capabilities; gvmd reads the feed and cannot 
 
 ## Reliability Considerations
 
-A sensor that exits is restarted by runit. pcap-feed writes a new
-pcap header when that next reader opens the fifo. Velociraptor's keys are kept on `/data`; a second boot does not
+A sensor that exits is restarted by runit. Velociraptor's keys are kept on `/data`; a second boot does not
 regenerate them. BloodHound waits out Neo4j by exiting until Bolt
 answers, and runit starts it again. IRIS and gvmd do the same for
 PostgreSQL.

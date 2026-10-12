@@ -8,7 +8,9 @@ const dm = @import("dm");
 const verity = @import("verity");
 const ipe = @import("ipe");
 const cmdline = @import("cmdline");
+const tpm = @import("tpm");
 const MS = linux.MS; // ziglint-ignore: Z032
+const nosymfollow = 256; // Linux MS_NOSYMFOLLOW, absent from std.os.linux.MS.
 
 /// deadman_after is how many seconds a slot has to commit before the
 /// deadman reboots it.
@@ -28,7 +30,8 @@ pub fn main(init: std.process.Init) !void {
     // Check the whole line once, for every later program: a line that is
     // ambiguous or malformed ends the boot here.
     var refused: cmdline.Failure = .{};
-    const boot = cmdline.parse(readAll(gpa, "/proc/cmdline"), &refused) orelse
+    const boot_line = readAll(gpa, "/proc/cmdline");
+    var boot = cmdline.parse(boot_line, &refused) orelse
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
 
     // Raise lockdown to confidentiality before any module loads, so the
@@ -83,6 +86,59 @@ pub fn main(init: std.process.Init) !void {
     std.Io.Dir.cwd().deleteTree(io, "/usr/lib/modules") catch |err|
         say("modules not freed: {s}", .{@errorName(err)});
     const modules_ms = bootMs();
+    if (boot.native) {
+        if (boot.slot != null) fail("native UKI supplied an explicit slot; not handing over", .{});
+        const vars = "/sys/firmware/efi/efivars";
+        mountFs(
+            "efivarfs",
+            vars,
+            "efivarfs",
+            MS.NOSUID | MS.NODEV | MS.NOEXEC | MS.RDONLY | nosymfollow,
+        );
+        if (boot.secure) {
+            const on = readAll(gpa, vars ++ "/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+            const setup = readAll(gpa, vars ++ "/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c");
+            if (on.len != 5 or on[4] != 1 or setup.len != 5 or setup[4] != 0)
+                fail("Secure Boot required outside setup mode; not handing over " ++
+                    "(SecureBoot bytes={d} value={d}, SetupMode bytes={d} value={d})", .{
+                    on.len,    if (on.len == 5) on[4] else @as(u8, 255),
+                    setup.len, if (setup.len == 5) setup[4] else @as(u8, 255),
+                });
+            say("Secure Boot enforced outside setup mode", .{});
+        }
+        boot.slot = cmdline.firmwareSlot(readAll(
+            gpa,
+            vars ++ "/StubImageIdentifier-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f",
+        )) orelse fail("native UKI has no canonical firmware slot path; not handing over", .{});
+        const resolved = try gpa.print("{s} werewolf.slot={s}\n", .{
+            std.mem.trimEnd(u8, boot_line, "\n"), @tagName(boot.slot.?),
+        });
+        const record = try std.Io.Dir.cwd().createFile(io, "/boot-cmdline", .{
+            .exclusive = true,
+            .permissions = .fromMode(0o400),
+        });
+        defer record.close(io);
+        try record.writeStreamingAll(io, resolved);
+        if (linux.errno(linux.mount(
+            "/boot-cmdline",
+            "/proc/cmdline",
+            null,
+            MS.BIND,
+            0,
+        )) != .SUCCESS or
+            linux.errno(linux.mount(
+                null,
+                "/proc/cmdline",
+                null,
+                MS.BIND | MS.REMOUNT | MS.RDONLY | MS.NOSUID | MS.NODEV | MS.NOEXEC | nosymfollow,
+                0,
+            )) != .SUCCESS)
+            fail("cannot protect native boot identity", .{});
+        say(
+            "native UKI selected slot {s}; unsigned loader options excluded",
+            .{@tagName(boot.slot.?)},
+        );
+    }
 
     var img: [:0]const u8 = "/root.erofs";
     if (boot.root.len > 0) {
@@ -143,6 +199,9 @@ pub fn main(init: std.process.Init) !void {
         .{ img, @tagName(linux.errno(rc)) },
     );
     const root_ms = bootMs();
+    const protected_rollback = tpm.boot(io, gpa) catch |err|
+        fail("TPM rollback: {s}; not handing over", .{@errorName(err)});
+    if (protected_rollback) say("TPM rollback floor checked; platform hierarchy disabled", .{});
     if (boot.slot) |slot|
         say(
             "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",
@@ -193,6 +252,7 @@ pub fn main(init: std.process.Init) !void {
     // kernel puts every NAME=value it does not take into stage0's
     // environment, and it must not reach every process on the machine.
     var env: std.process.Environ.Map = .init(gpa);
+    if (protected_rollback) try env.put("WEREWOLF_ROLLBACK", "checked");
     try env.put("WEREWOLF_BOOT", if (slot_ms > 0)
         try gpa.print(
             "kernel={d} modules={d} slot={d} root={d}",

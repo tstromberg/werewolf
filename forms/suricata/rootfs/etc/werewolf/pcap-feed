@@ -1,4 +1,0 @@
-# pcap-feed's fifo for this machine (cmd/pcap-feed). The fifo is created at boot;
-# Suricata is the only user that may open it.
-feed /run/svc/suricata/feed
-user suricata

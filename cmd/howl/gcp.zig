@@ -85,6 +85,7 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
+    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
     const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     if (ask(
         io,
@@ -143,6 +144,12 @@ pub fn ensureImage(
         machine(arch).arch,
         "--guest-os-features",
         "UEFI_COMPATIBLE,GVNIC",
+        "--platform-key-file",
+        try gpa.print("{s}/boot.der", .{work}),
+        "--key-exchange-key-file",
+        try gpa.print("{s}/boot.der", .{work}),
+        "--signature-database-file",
+        try gpa.print("{s}/boot.der", .{work}),
         "--labels",
         try gpa.print("{s}={s}", .{ label, std.fs.path.basename(std.mem.trimEnd(u8, form, "/")) }),
         // Store the image in the zone's region, not GCP's default
@@ -174,8 +181,8 @@ pub fn formOf(io: Io, gpa: Allocator, p: Place, name: []const u8, why: *howl.Why
 /// create starts VM name from image, with the base64 config file b64 as its
 /// user-data. It has no service account or scopes, its vTPM measures each
 /// boot and integrity monitoring reports a change off the machine, and
-/// Secure Boot is off because werewolf's loader is not signed for it yet
-/// (docs/design/verified-boot.md). A null size picks machine(arch).size.
+/// The image's enrolled certificate authorizes its loader and UKI.
+/// A null size picks machine(arch).size.
 pub fn create(
     io: Io,
     gpa: Allocator,
@@ -214,7 +221,7 @@ pub fn create(
         try gpa.print("{s}={s}", .{ label, std.fs.path.basename(std.mem.trimEnd(u8, form, "/")) }),
         "--no-service-account",
         "--no-scopes",
-        "--no-shielded-secure-boot",
+        "--shielded-secure-boot",
         "--shielded-vtpm",
         "--shielded-integrity-monitoring",
         "--metadata-from-file",

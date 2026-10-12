@@ -42,6 +42,18 @@ pub fn fetcher(
     out: i32,
     parent: linux.pid_t,
 ) noreturn {
+    fetcherBounded(id, root, url, body, max_fetch, out, parent);
+}
+
+pub fn fetcherBounded(
+    id: u32,
+    root: [*:0]const u8,
+    url: []const u8,
+    body: i32,
+    maximum: usize,
+    out: i32,
+    parent: linux.pid_t,
+) noreturn {
     sandbox.tieTo(parent);
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     const status = fetchInto(
@@ -51,6 +63,7 @@ pub fn fetcher(
         url,
         body,
         out,
+        maximum,
     ) catch |err| sandbox.whyNot(arena.allocator(), err);
     sandbox.say(out, 0, status, "");
 }
@@ -62,6 +75,7 @@ fn fetchInto(
     url: []const u8,
     body: i32,
     out: i32,
+    maximum: usize,
 ) ![]const u8 {
     try sandbox.closeAllBut(&.{ body, out });
     var threaded: Io.Threaded = .init_single_threaded;
@@ -71,7 +85,7 @@ fn fetchInto(
     const now = Io.Clock.real.now(io);
     try client.ca_bundle.rescan(gpa, io, now);
     client.now = now;
-    try sandbox.limit(.FSIZE, max_fetch);
+    try sandbox.limit(.FSIZE, maximum);
     try sandbox.dropTo(id, root);
     const etc: i32 = @intCast(try sandbox.sys(
         linux.openat(

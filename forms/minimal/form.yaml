@@ -93,4 +93,4 @@ modules:
   # commit write the EFI partition. 437 and utf8 are FAT's default codepage
   # and iocharset in Alpine's kernel. Loaded only there (`@esp`; stage0
   # tells modload when the command line names the partition, werewolf.esp).
-  - "@esp vfat nls_cp437 nls_utf8"
+  - "@esp vfat nls_cp437 nls_utf8 efivarfs"

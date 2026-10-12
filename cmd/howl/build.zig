@@ -21,6 +21,7 @@ const disk = @import("disk.zig");
 const published = @import("published.zig");
 const locks = @import("lock.zig");
 const deployment = @import("deployment.zig");
+const prebuilt = @import("prebuilt.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -28,6 +29,7 @@ const mem = std.mem;
 
 /// Goals are the make targets a build stands in for.
 pub const Goals = struct {
+    prebuilt: bool = false,
     /// image is BUILD/vmlinuz and OUT/initramfs.zst, for a direct boot.
     image: bool = false,
     /// slot is OUT/slot: vmlinuz, both stage0s, root.erofs and cmdline.
@@ -66,10 +68,16 @@ pub const Spec = struct {
     /// OUT/disk.img. A machine's disk has its own: the disk is rebuilt by
     /// file times alone, so a path reused with other arguments would not be.
     disk_path: ?[]const u8 = null,
+    qcow2_path: ?[]const u8 = null,
     /// IPE builds use an external kernel archive and a host-only policy signer.
     ipe_kernel: ?[]const u8 = null,
     ipe_key: ?[]const u8 = null,
     ipe_cert: ?[]const u8 = null,
+    ipe_updates: ?[]const u8 = null,
+    image_serial: ?[]const u8 = null,
+    boot_key: ?[]const u8 = null,
+    boot_cert: ?[]const u8 = null,
+    boot_native: bool = false,
 };
 
 /// Paths are where a build writes, as the Makefile names them.
@@ -116,6 +124,11 @@ const BuildOptions = struct {
     ipe_kernel: ?[]const u8 = null,
     ipe_key: ?[]const u8 = null,
     ipe_cert: ?[]const u8 = null,
+    ipe_updates: ?[]const u8 = null,
+    image_serial: ?[]const u8 = null,
+    boot_key: ?[]const u8 = null,
+    boot_cert: ?[]const u8 = null,
+    boot_native: bool = false,
 };
 
 /// buildOptions parses build's command line: FORM, --build, and -o, --arch,
@@ -136,6 +149,10 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.local = true;
             continue;
         }
+        if (std.mem.eql(u8, args[i], "--boot-native")) {
+            o.boot_native = true;
+            continue;
+        }
         const a, const v = try howl.flagValue(args, &i, why);
         if (std.mem.eql(u8, a, "-o")) {
             o.dir = v;
@@ -149,12 +166,21 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.ipe_key = v;
         } else if (std.mem.eql(u8, a, "--ipe-cert")) {
             o.ipe_cert = v;
+        } else if (std.mem.eql(u8, a, "--ipe-updates")) {
+            o.ipe_updates = v;
+        } else if (std.mem.eql(u8, a, "--image-serial")) {
+            o.image_serial = v;
+        } else if (std.mem.eql(u8, a, "--boot-key")) {
+            o.boot_key = v;
+        } else if (std.mem.eql(u8, a, "--boot-cert")) {
+            o.boot_cert = v;
         } else if (std.mem.eql(u8, a, "--format")) {
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
-            "{s}: build takes --build, -o, --arch, --format, --app, --ipe-kernel, --ipe-key and " ++
-                "--ipe-cert\n{s}",
+            "{s}: build takes --build, -o, --arch, --format, --app, --ipe-kernel, --ipe-key, " ++
+                "--ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert and " ++
+                "--boot-native\n{s}",
             .{ a, howl.usage },
         );
     }
@@ -197,13 +223,26 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .ipe_kernel = o.ipe_kernel,
         .ipe_key = o.ipe_key,
         .ipe_cert = o.ipe_cert,
+        .ipe_updates = o.ipe_updates,
+        .image_serial = o.image_serial,
+        .boot_key = o.boot_key orelse howl.environ.get("WEREWOLF_BOOT_KEY"),
+        .boot_cert = o.boot_cert orelse if (o.boot_key != null or
+            howl.environ.get("WEREWOLF_BOOT_KEY") != null)
+            howl.environ.get("WEREWOLF_BOOT_CRT") orelse "release/boot.crt"
+        else
+            null,
+        .boot_native = o.boot_native or (!direct and (o.boot_key != null or
+            howl.environ.get("WEREWOLF_BOOT_KEY") != null)),
     };
     try make(
         io,
         gpa,
         &steps,
         spec,
-        if (direct) .{ .image = true } else .{ .slot = true, .qcow2 = true },
+        if (direct)
+            .{ .image = true, .slot = o.ipe_updates != null, .prebuilt = o.ipe_updates != null }
+        else
+            .{ .slot = true, .qcow2 = true, .prebuilt = o.ipe_updates != null },
     );
     const p = try paths(gpa, spec);
     // A DEV=1 build has a root shell on its console (cmd/debug-shell): never one to publish.
@@ -234,10 +273,11 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
             .{ .name = "disk.qcow2", .path = try gpa.print("{s}/disk.qcow2", .{p.out}) },
         });
         const uki = try gpa.print("{s}/slot/uki.efi", .{p.out});
-        if (Dir.cwd().access(io, uki, .{})) |_|
+        if (spec.boot_key != null)
             try out.append(gpa, .{ .name = "uki", .path = uki })
-        else |_|
+        else
             try steps.note("no signed UKI in the release: WEREWOLF_BOOT_KEY was not set", .{});
+        if (spec.boot_cert) |cert| try out.append(gpa, .{ .name = "boot.crt", .path = cert });
         break :blk out.items;
     };
     const id = manifest.write(io, gpa, &steps, dir, .{
@@ -346,7 +386,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     const syntax = "_build --with FORM [--arch ARCH] [--dev] [--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
-        "[--ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] [--verbose] image|slot|disk|qcow2...";
+        "[--ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] " ++
+        "[--ipe-updates URL --image-serial UTC] [--verbose] image|slot|disk|qcow2|prebuilt...";
     var spec: Spec = .{ .form = "", .arch = undefined };
     var form: ?[]const u8 = null;
     var arch = howl.hostArch();
@@ -357,6 +398,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) {
             spec.dev = true;
+        } else if (std.mem.eql(u8, args[i], "--boot-native")) {
+            spec.boot_native = true;
         } else if (std.mem.eql(u8, args[i], "--published")) {
             spec.published = true;
         } else if (std.mem.startsWith(u8, args[i], "-")) {
@@ -379,6 +422,14 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
                 spec.ipe_key = v;
             } else if (std.mem.eql(u8, flag, "--ipe-cert")) {
                 spec.ipe_cert = v;
+            } else if (std.mem.eql(u8, flag, "--ipe-updates")) {
+                spec.ipe_updates = v;
+            } else if (std.mem.eql(u8, flag, "--image-serial")) {
+                spec.image_serial = v;
+            } else if (std.mem.eql(u8, flag, "--boot-key")) {
+                spec.boot_key = v;
+            } else if (std.mem.eql(u8, flag, "--boot-cert")) {
+                spec.boot_cert = v;
             } else if (std.mem.eql(u8, flag, "--disk")) {
                 spec.disk_path = v;
             } else if (std.mem.eql(u8, flag, "--disk-mib")) {
@@ -403,6 +454,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     const ref = form orelse return why.refuse("{s}", .{syntax});
     spec.form = ref;
     spec.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
+    if (goals.prebuilt) goals.slot = true;
     if (app_dir != null and app_root != null)
         return why.refuse("--app or --app-root: one application", .{});
     if (!goals.disk and (spec.disk_path != null or spec.disk.args.len > 0))
@@ -630,6 +682,13 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
     try validateIpe(s);
     const p = try paths(gpa, s);
+    try Dir.cwd().createDirPath(io, p.programs);
+    const guard = try Dir.cwd().createFile(io, try gpa.print("{s}.build.lock", .{p.programs}), .{
+        .truncate = false,
+    });
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
     const env = try toolEnv(gpa);
     const fingerprint = try locks.inputs(io, gpa, s);
     const previous = try locks.matching(io, gpa, s);
@@ -648,7 +707,7 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     if (previous) |rec| b.locked_images = rec.images;
     // The chain's images, baked before anything renders their services.
     try oci.lay(&b);
-    const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2;
+    const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2 or goals.prebuilt;
     const suffix = try gpa.print("{s}{s}", .{
         if (s.dev) "-dev" else "",
         if (s.published) "-published" else "",
@@ -687,9 +746,12 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     try melange.lay(&b, rootfs);
     try slot.meta(&b, rootfs);
     try slot.make(&b, rootfs, goals);
+    if (goals.prebuilt) try prebuilt.write(&b);
 }
 
 fn validateIpe(s: Spec) !void {
+    if ((s.boot_key == null) != (s.boot_cert == null)) return error.BootKeyAndCertificateRequired;
+    if (s.boot_native and s.boot_key == null) return error.NativeBootNeedsSigner;
     const fields = [_]?[]const u8{ s.ipe_kernel, s.ipe_key, s.ipe_cert };
     var count: usize = 0;
     for (fields) |f| if (f) |v| {
@@ -697,6 +759,14 @@ fn validateIpe(s: Spec) !void {
         count += 1;
     };
     if (count != 0 and count != fields.len) return error.IpeNeedsKernelKeyAndCertificate;
+    if (s.ipe_updates != null or s.image_serial != null) {
+        if (count != fields.len or s.ipe_updates == null or s.image_serial == null)
+            return error.ImageUpdatesNeedIpeChannelAndSerial;
+        try @import("prebuilt").channel(s.ipe_updates.?);
+        _ = @import(
+            "update-policy",
+        ).parseSerial(s.image_serial.?) catch return error.BadImageSerial;
+    }
 }
 
 fn checkIpeForms(gpa: Allocator, chain: []const forms.Form) !void {
@@ -744,6 +814,27 @@ test "IPE builds require all signing inputs and have separate output paths" {
     defer arena.deinit();
     const p = try paths(arena.allocator(), s);
     try t.expectEqualStrings("build/aarch64/ipe/minimal-ipe", p.out);
+}
+
+test "image enrollment requires IPE, a safe channel and a release serial" {
+    const t = std.testing;
+    var s: Spec = .{
+        .form = "minimal",
+        .arch = .aarch64,
+        .ipe_updates = "https://example.test/app",
+    };
+    try t.expectError(error.ImageUpdatesNeedIpeChannelAndSerial, validateIpe(s));
+    s.ipe_kernel = "kernel.tar";
+    s.ipe_key = "key.pem";
+    s.ipe_cert = "cert.pem";
+    try t.expectError(error.ImageUpdatesNeedIpeChannelAndSerial, validateIpe(s));
+    s.image_serial = "20261011T180000Z";
+    try validateIpe(s);
+    s.ipe_updates = "http://example.test/app";
+    try t.expectError(error.BadImageChannel, validateIpe(s));
+    s.ipe_updates = "https://example.test/app";
+    s.image_serial = "invalid";
+    try t.expectError(error.BadImageSerial, validateIpe(s));
 }
 
 /// every_program are the programs in every form but init and bite-cleanup,
@@ -938,6 +1029,12 @@ test buildOptions {
     try testing.expectEqualStrings("out", o.dir);
     try testing.expectEqual(.aarch64, o.arch);
     try testing.expectEqual(DiskFormat.vhd, o.format);
+    const signed = try buildOptions(&.{
+        "prod", "--boot-key", "host.key", "--boot-cert", "public.crt", "--boot-native",
+    }, .aarch64, &why);
+    try testing.expectEqualStrings("host.key", signed.boot_key.?);
+    try testing.expectEqualStrings("public.crt", signed.boot_cert.?);
+    try testing.expect(signed.boot_native);
     try testing.expectEqual(
         .x86_64,
         (try buildOptions(&.{ "--arch", "x86_64", "prod" }, null, &why)).arch,

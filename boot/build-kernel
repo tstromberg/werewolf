@@ -11,10 +11,10 @@ cert=$(realpath "$2")
 key=$(realpath "$3")
 mkdir -p "$4"
 out=$(realpath "$4")
-case $(uname -m) in
+case ${KERNEL_ARCH:-$(uname -m)} in
 aarch64) arch=arm64; image=arch/arm64/boot/Image ;;
 x86_64) arch=x86; image=arch/x86/boot/bzImage ;;
-*) echo "build-kernel: aarch64 or x86_64 required" >&2; exit 1 ;;
+*) echo "build-kernel: aarch64 or x86_64 required (KERNEL_ARCH for cross builds)" >&2; exit 1 ;;
 esac
 archive=$out/linux-$version.tar.xz
 if [ ! -f "$archive" ]; then
@@ -26,12 +26,14 @@ src=$out/linux-$version
 [ -d "$src" ] || tar -xJf "$archive" -C "$out"
 obj=$out/obj
 stage=$out/root.$$
-mkdir -p "$obj" "$out/base"
+alpine_base=$(mktemp -d "$out/base.XXXXXXXX")
+trap 'rm -f "$obj/module-signing.pem"; rm -rf "$stage" "$alpine_base"' EXIT
+mkdir -p "$obj"
 openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER >"$out/cert.pub"
 openssl pkey -in "$key" -pubout -outform DER >"$out/key.pub"
 cmp -s "$out/cert.pub" "$out/key.pub" || { echo "build-kernel: key does not match certificate" >&2; exit 1; }
-tar -xf "$base" -C "$out/base" --wildcards 'boot/config-*' 'etc/apk/repositories'
-set -- "$out/base"/boot/config-*
+tar -xf "$base" -C "$alpine_base" --wildcards 'boot/config-*' 'etc/apk/repositories'
+set -- "$alpine_base"/boot/config-*
 [ $# = 1 ] && [ -f "$1" ] || { echo "build-kernel: exactly one Alpine config required" >&2; exit 1; }
 case ${1##*/} in
 config-$version-*) ;;
@@ -44,7 +46,6 @@ umask 077
 cat "$key" "$cert" >"$obj/module-signing.pem"
 cp "$cert" "$obj/ipe.crt"
 cp "$tree/boot/ipe-boot.policy" "$obj/ipe-boot.policy"
-trap 'rm -f "$obj/module-signing.pem"; rm -rf "$stage"' EXIT
 c=$src/scripts/config
 "$c" --file "$obj/.config" --enable SECURITY_IPE --enable IPE_PROP_DM_VERITY \
 	--set-str LSM 'landlock,lockdown,yama,ipe' \
@@ -57,7 +58,8 @@ c=$src/scripts/config
 	--disable KEXEC --disable KEXEC_FILE --disable KEXEC_CORE --disable LOCALVERSION_AUTO \
 	--set-str LOCALVERSION '-werewolf' --enable MODULE_COMPRESS_GZIP \
 	--disable MODULE_COMPRESS_ZSTD --disable MODULE_COMPRESS_XZ \
-	--disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES --enable EFIVAR_FS
+	--disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES --enable EFIVAR_FS \
+	--enable TCG_TPM --enable TCG_TIS --enable TCG_TIS_CORE --enable TCG_CRB
 make -C "$src" O="$obj" ARCH="$arch" olddefconfig
 # Fail rather than quietly build a kernel without the required enforcement.
 for opt in SECURITY_IPE IPE_PROP_DM_VERITY MODULE_SIG_FORCE LOCK_DOWN_KERNEL_FORCE_INTEGRITY; do
@@ -74,7 +76,7 @@ cp "$obj/$image" "$stage/boot/vmlinuz-virt"
 cp "$obj/.config" "$stage/boot/config-$kver"
 cp "$cert" "$stage/boot/ipe.crt"
 printf 'linux-virt-%s-werewolf\n' "$version" >"$stage/boot/kernel-package"
-cp "$out/base/etc/apk/repositories" "$stage/etc/apk/repositories"
+cp "$alpine_base/etc/apk/repositories" "$stage/etc/apk/repositories"
 depmod -b "$stage" "$kver"
 deps=$stage/lib/modules/$kver/modules.dep
 [ -s "$deps" ] || { echo "build-kernel: depmod produced no dependencies" >&2; exit 1; }

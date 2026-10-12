@@ -59,6 +59,15 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         .disable_cypher_complexity_limit = false,
         .enable_cypher_mutations = false,
         .enable_user_analytics = false,
+        // A gibibyte, which is BloodHound's own default, on two threads:
+        // a small machine has two CPUs, and eight threads only waits.
+        .crypto = .{
+            .argon2 = .{
+                .memory_kibibytes = 1048576,
+                .num_iterations = 1,
+                .num_threads = 2,
+            },
+        },
     }, .{});
     var f = try Dir.cwd().createFile(io, config_path, .{ .permissions = .fromMode(0o600) });
     defer f.close(io);

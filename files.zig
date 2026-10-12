@@ -6,6 +6,8 @@
 /// advisories are werewolf's own fixes (docs/releases.md).
 pub const tiers_pub = @embedFile("release/tiers.pub");
 pub const advisories = @embedFile("release/advisories");
+pub const enroll_boot = @embedFile("tools/enroll-boot");
+pub const verify_boot_disk = @embedFile("tools/verify-boot-disk");
 
 /// posture_known are the posture checks every form of a kind fails.
 pub const posture_known = @embedFile("test/posture-known");

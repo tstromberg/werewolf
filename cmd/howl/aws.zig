@@ -118,6 +118,11 @@ pub fn ensureImage(
     work: []const u8,
     why: *howl.Why,
 ) ![]const u8 {
+    const cert = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    const helper = try gpa.print("{s}/enroll-boot", .{work});
+    try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = @import("files").enroll_boot });
+    defer Dir.cwd().deleteFile(io, helper) catch {};
+    try howl.run(io, why, &.{ "sh", helper, @tagName(arch), cert, work, "aws" });
     const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
     if (ask(io, gpa, p, &.{
         "ec2",
@@ -150,6 +155,8 @@ pub fn ensureImage(
         m.arch,
         "--boot-mode",
         "uefi",
+        "--uefi-data",
+        try gpa.print("file://{s}/vars.aws", .{work}),
         "--ena-support",
         "--tpm-support",
         "v2.0",

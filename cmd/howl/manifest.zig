@@ -135,7 +135,7 @@ fn copy(io: Io, from: []const u8, to: []const u8) !struct { [64]u8, u64 } {
 const Entry = struct { name: []const u8, sha256: [64]u8, size: u64 };
 
 /// Package is one package of the rootfs, from apk's installed database.
-const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
+const Package = @import("prebuilt").Package;
 
 const Manifest = struct {
     form: []const u8,
@@ -165,7 +165,7 @@ fn buildId(entries: []const Entry) [16]u8 {
 /// (P: name, V: version, o: origin), with a blank line between stanzas. A
 /// package with no origin is its own. They are sorted as their "name
 /// version origin" lines sort bytewise, as `LC_ALL=C sort` did.
-fn parsePackages(gpa: Allocator, db: []const u8) ![]const Package {
+pub fn parsePackages(gpa: Allocator, db: []const u8) ![]const Package {
     var lines: std.ArrayList([]const u8) = .empty;
     var p: []const u8 = "";
     var v: []const u8 = "";

@@ -1,0 +1,24 @@
+#!/usr/bin/env python3
+"""QEMU guestfwd: carry guest port 443 to an unprivileged loopback TLS server."""
+import os
+import select
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=30) as peer:
+    peer.settimeout(None)
+    while True:
+        ready, _, _ = select.select([peer, 0], [], [], 60)
+        if not ready:
+            break
+        if peer in ready:
+            data = peer.recv(65536)
+            if not data:
+                break
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+        if 0 in ready:
+            data = os.read(0, 65536)
+            if not data:
+                break
+            peer.sendall(data)

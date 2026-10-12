@@ -36,6 +36,8 @@ SHA-256; the script refuses a different Alpine version. Both architectures
 keep their drivers and compressed modules. IPE, module signature enforcement
 and forced lockdown are enabled; kexec and extra IPE signer keyrings are off.
 The supplied certificate is trusted for policies and its key signs modules.
+`KERNEL_ARCH=aarch64 LLVM=1` permits cross compilation on a faster Linux host.
+CI checks upstream and Alpine revision pins against both architecture locks.
 There is no generated developer module key. Keep this identity stable when
 comparing independent builds; the private key is absent from the output tar.
 
@@ -76,14 +78,12 @@ On macOS, build the kernel in a Linux VM and copy its `rootfs.tar` back.
 on the host. Howl also accepts `--ipe-kernel`, `--ipe-key`, `--ipe-cert`
 for `build` and `_build`; all three are required together.
 
-**Updates are held.** The package updater rebuilds EROFS locally, changing
-the root hash without obtaining its signed policy. On an IPE machine it
-returns `IpeSignedImageRequired` before modifying a slot. Completing
-automatic updates requires a prebuilt signed-image delivery path, including
-custom application images. There is no fallback to unsigned local rebuilds.
-Installing or arming another slot and rebooting into a pending update are
-also held; the current slot can still commit normally.
-Production releases do not enable IPE until that delivery path is built.
+**Updates use signed bundles.** Enroll a channel with `IPE_UPDATES` and
+`IMAGE_SERIAL`, then export with `make prebuilt`. The updater verifies the
+complete slot before installing, arming or rebooting; retained signatures
+also protect operator `try` ([prebuilt-images.md](prebuilt-images.md)).
+Unenrolled IPE machines return `IpeSignedImageRequired`. Production IPE
+rollout still needs signing-key provisioning and channel publication.
 
 ## Drawbacks
 

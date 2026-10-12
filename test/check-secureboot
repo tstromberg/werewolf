@@ -1,125 +1,113 @@
-#!/bin/sh
-# check-secureboot QEMU... proves the release's UKI end to end (make
-# check-secureboot; docs/design/verified-boot.md). make's uki rule signs
-# minimal's kernel, stage0, root and command line into one PE with the
-# boot key (tools/uki, osslsigncode); the release manifest must list it
-# with the hash of what was built; firmware with Secure Boot on and only
-# the test key enrolled must boot it with its posture judged; and the
-# same image with one byte changed must be refused, Access Denied, and
-# never hand over. make passes CHECK_ENV, BOOT_KEY, BOOT_CRT (Makefile).
-set -eu
-dir=${SECUREBOOT_DIR:-}
-crt=${BOOT_CRT:?}
-uki=$OUT/slot/uki.efi
-guid=a0420f26-3a13-4a1b-9c77-134e29b24bf1
-log=$CHECK/secureboot.log
-
-say() { echo "skip   secureboot        $*"; exit 0; }
-fail() { echo "FAIL   secureboot        $1; see $log"; exit 1; }
-[ -n "$dir" ] || say "no SECUREBOOT_DIR (docs/testing.md)"
-for f in "$dir/stub.efi" "$dir/code.fd" "$dir/vars.fd" "$uki"; do
-	[ -f "$f" ] || say "no $f"
-done
-command -v osslsigncode >/dev/null || say "no osslsigncode"
-
-# The release: its manifest lists the UKI with the hash of what was built.
-# --build takes this checkout's forms, for as long as its format is ahead
-# of the repository's.
-rel=$CHECK/sb-release
-rm -rf "$rel"
-build/host/howl build --build --with prod -o "$rel" >/dev/null ||
-	fail "the release would not build"
-python3 - "$rel/prod-$ARCH.json" "$uki" <<'EOF' || fail "the manifest does not carry the UKI"
+#!/usr/bin/env python3
+"""Verify the released signed disk, its enrollment, and firmware rejection."""
 import hashlib
 import json
-import sys
-
-d = json.load(open(sys.argv[1]))
-assert "uki" in d["files"], "no uki in the manifest"
-h = hashlib.sha256(open(sys.argv[2], "rb").read()).hexdigest()
-assert d["files"]["uki"]["sha256"] == h, (d["files"]["uki"]["sha256"], h)
-EOF
-
-# The key this run made, enrolled as PK, KEK and db: with virt-fw-vars,
-# here or in the CI VM, as where it is installed.
-openssl x509 -in "$crt" -outform DER -out "$CHECK/sb.der"
-vars=$CHECK/sb-vars.fd
-if command -v virt-fw-vars >/dev/null; then
-	virt-fw-vars --input "$dir/vars.fd" --output "$vars" \
-		--set-pk "$guid" "$CHECK/sb.der" --add-kek "$guid" "$CHECK/sb.der" \
-		--add-db "$guid" "$CHECK/sb.der" --sb >/dev/null
-elif limactl shell werewolf-ci-24.04 -- true >/dev/null 2>&1; then
-	limactl copy "$CHECK/sb.der" werewolf-ci-24.04:/tmp/sb.der
-	limactl copy "$dir/vars.fd" werewolf-ci-24.04:/tmp/vars.fd
-	limactl shell werewolf-ci-24.04 -- virt-fw-vars --input /tmp/vars.fd \
-		--output /tmp/sb-vars.fd --set-pk "$guid" /tmp/sb.der \
-		--add-kek "$guid" /tmp/sb.der --add-db "$guid" /tmp/sb.der --sb >/dev/null
-	limactl copy werewolf-ci-24.04:/tmp/sb-vars.fd "$vars"
-else
-	say "neither virt-fw-vars nor the werewolf-ci-24.04 VM to enroll the key"
-fi
-
-mkdir -p "$CHECK/sb/EFI/BOOT"
-rm -f "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI"
-cp "$uki" "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI"
-printf 'FS0:\\EFI\\BOOT\\BOOTAA64.EFI\r\n' >"$CHECK/sb/startup.nsh"
-
-boot() { # boot VARS LOG BOOTS-OR-REFUSED, then QEMU's arguments
-	rm -f "$CHECK/sb-run.fd"
-	cp "$1" "$CHECK/sb-run.fd"
-	log=$2
-	wanted=$3
-	shift 3
-	if test/boot secureboot - "$log" "$@" \
-		-drive if=pflash,format=raw,file="$dir/code.fd",readonly=on \
-		-drive if=pflash,format=raw,file="$CHECK/sb-run.fd" \
-		-drive id=sbdisk,if=none,file=fat:rw:"$CHECK/sb",format=raw \
-		-device virtio-blk-pci,drive=sbdisk \
-		-netdev user,id=n0 -device virtio-net-pci,netdev=n0,romfile=; then
-		[ "$wanted" = boots ] || fail "the changed image booted"
-	else
-		[ "$wanted" = refused ] || fail "the signed image did not boot"
-		grep -a -q 'Access Denied' "$log" ||
-			fail "no Access Denied for the changed image"
-	fi
-}
-
-# The signed image must boot with its posture line whole: a line the
-# serial port broke mid-print can still parse, so a boot whose line lacks
-# the failures this image surely has is tried once more.
-whole() { # whole LOG
-	python3 - "$1" <<'EOF'
+import os
+import pathlib
+import pty
 import re
+import select
+import shutil
+import subprocess
 import sys
+import time
 
-t = re.sub(r"\[\s*\d+\.\d+\][^\n]*\n", "", open(sys.argv[1], errors="replace").read().replace("\r", ""))
-m = re.search(r"posture: fail=(\S*) pass=", t)
-sys.exit(0 if m and "boot-rollback-protected" in m.group(1) and "boot-sig-enforced" in m.group(1) else 1)
-EOF
-}
+env = os.environ
+arch = env['ARCH']
+work = pathlib.Path(env['CHECK']) / 'secureboot'
+work.mkdir(parents=True, exist_ok=True)
+key = str(pathlib.Path(env['BOOT_KEY']).resolve())
+cert = str(pathlib.Path(env['BOOT_CRT']).resolve())
+howl = str(pathlib.Path(env['HOWL']).resolve())
 
-signed_boot() { # signed_boot VARS LOG, then QEMU's arguments
-	vars=$1
-	log=$2
-	shift 2
-	for _ in 1 2; do
-		if boot "$vars" "$log" boots "$@"; then
-			whole "$log" && return 0
-			echo "werewolf-check: the posture line arrived broken; booting again"
-		fi
-	done
-	fail "the signed image did not boot, or its posture line never came whole"
-}
 
-signed_boot "$vars" "$log" "$@"
-cp "$uki" "$CHECK/sb-tampered.efi"
-python3 - "$CHECK/sb-tampered.efi" <<'EOF'
-import sys
-d = bytearray(open(sys.argv[1], "rb").read())
-off = len(d) // 3 * 2
-d[off] ^= 0xff
-open(sys.argv[1], "wb").write(d)
-EOF
-cp "$CHECK/sb-tampered.efi" "$CHECK/sb/EFI/BOOT/BOOTAA64.EFI"
-boot "$vars" "$CHECK/secureboot-tamper.log" refused "$@"
-echo "pass   secureboot        the release's signed UKI boots under Secure Boot; a changed one is refused"
+def command(args, label):
+    with (work / (label + '.log')).open('wb') as log:
+        subprocess.run(args, check=True, stdout=log, stderr=subprocess.STDOUT)
+
+
+release = work / 'release'
+command([howl, 'build', '--build', '--with', 'prod', '--arch', arch, '-o', str(release),
+         '--boot-key', key, '--boot-cert', cert, '--boot-native'], 'build')
+manifest = json.loads((release / f'prod-{arch}.json').read_text())
+uki = release / f'prod-{arch}-uki'
+assert manifest['files']['uki']['sha256'] == hashlib.sha256(uki.read_bytes()).hexdigest()
+assert manifest['files']['boot.crt']['sha256'] == hashlib.sha256(pathlib.Path(cert).read_bytes()).hexdigest()
+disk = release / f'prod-{arch}-disk.qcow2'
+command(['sh', 'tools/verify-boot-disk', arch, str(disk), cert, str(work)], 'verify-disk')
+enrolled = work / 'enrolled'
+command(['sh', 'tools/enroll-boot', arch, cert, str(enrolled)], 'enroll')
+raw = work / 'disk.raw'
+command(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'raw', str(disk), str(raw)], 'raw')
+installed = work / 'installed.efi'
+installed.unlink(missing_ok=True)
+command(['mcopy', '-i', str(raw) + '@@1048576', '::/werewolf/a/uki.efi', str(installed)], 'extract')
+assert hashlib.sha256(installed.read_bytes()).hexdigest() == manifest['files']['uki']['sha256']
+
+qemu = sys.argv[1:]
+qemu[qemu.index('-M') + 1] = 'virt' if arch == 'aarch64' else 'q35,smm=on'
+if arch == 'x86_64':
+    qemu += ['-global', 'driver=cfi.pflash01,property=secure,value=on']
+
+
+def boot(label, refused=False):
+    variables = work / 'run.fd'
+    shutil.copyfile(enrolled / 'vars.fd', variables)
+    # AAVMF cannot log rejected boots after its flash writes are refused.
+    # Use a disposable writable clone for that diagnostic; the successful
+    # boot separately proves immutable enrollment and checks its digest.
+    frozen = 'readonly=on,' if arch == 'aarch64' and not refused else ''
+    digest = hashlib.sha256(variables.read_bytes()).digest()
+    args = qemu + ['-drive', f'if=pflash,format=raw,readonly=on,file={enrolled}/code.fd',
+                   '-drive', f'if=pflash,format=raw,{frozen}file={variables}',
+                   '-drive', f'format=raw,if=virtio,file={raw}',
+                   '-netdev', 'user,id=n0', '-device', 'virtio-net-pci,netdev=n0,romfile=']
+    master, slave = pty.openpty()
+    process = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    seen = b''
+    try:
+        with (work / (label + '.log')).open('wb') as log:
+            deadline = time.monotonic() + 300
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.5)[0]:
+                    seen += os.read(master, 65536)
+                    log.seek(0)
+                    log.write(seen)
+                    log.flush()
+                if refused:
+                    if b'up in ' in seen:
+                        raise RuntimeError('tampered UKI handed over')
+                    if b'access denied' in seen.lower():
+                        return
+                else:
+                    line = re.search(rb'posture: fail=([^ ]*) pass=', seen)
+                    if line:
+                        failures = set(line[1].decode().split(',')) - {''}
+                        expected = {x.lstrip('?') for x in env['POSTURE_KNOWN'].split()}
+                        required = {x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')}
+                        assert failures <= expected and required <= failures, failures
+                        assert b'Secure Boot enforced outside setup mode' in seen
+                        assert b'native UKI selected slot a' in seen
+                        assert re.search(rb'slot a:[^\r\n]*verified', seen)
+                        return
+                if process.poll() is not None:
+                    break
+            raise RuntimeError('no expected firmware outcome: ' + label)
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=30)
+        os.close(master)
+        if frozen:
+            assert hashlib.sha256(variables.read_bytes()).digest() == digest
+
+
+boot('boot')
+data = bytearray(installed.read_bytes())
+data[len(data) // 2] ^= 1
+changed = work / 'tampered.efi'
+changed.write_bytes(data)
+command(['mcopy', '-o', '-i', str(raw) + '@@1048576', str(changed), '::/werewolf/a/uki.efi'], 'tamper')
+boot('refused', True)
+print('pass   secureboot: released disk and manifest agree; enrolled native boot passes posture; tampered UKI refused')
