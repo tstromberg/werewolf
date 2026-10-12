@@ -2,9 +2,8 @@
 
 ## Summary
 
-posture measures how a Linux machine protects itself: about a hundred
-checks, each passed, failed or skipped, with why it matters and how it was
-checked. On werewolf it runs once a boot as a service; on any Linux, by hand.
+posture tests a Linux machine's protections and reports passes, failures
+and skips, with reasons. It runs each boot on werewolf, or by hand on Linux.
 
 ## Background
 
@@ -43,9 +42,10 @@ filtering, ignoring IPv6 router advertisements; docs/security.md).
   `unprivileged_bpf_disabled=1`): only if one reads locked is the unlocked
   value written back, which must be refused, so no check lowers anything.
 - **Proofs:** a copy of itself, under a random name, in each writable
-  place and in a memfd, must not start. Opening a sysctl, a sysfs file and
-  the first disk for writing must be refused. Running `/` as a program
-  must leave an audit record, and stopping audit must be refused.
+  place and in a memfd, must not start. Opening sysctls across five subtrees,
+  a sysfs file and the first disk with O_WRONLY or O_RDWR must be refused.
+  Setting the current console loglevel through syslog must be refused.
+  Running `/` must leave an audit record; stopping audit must be refused.
 - **Walks** (setuid files, anything anyone may write) go from each
   directory's descriptor, not following links, on one filesystem.
 - **Attacks**, only with `werewolf.check=1`, `--attack` or `WEREWOLF_CHECK=1`

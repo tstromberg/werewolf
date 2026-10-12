@@ -305,14 +305,25 @@ pub fn check(p: *Posture) !void {
         var writable: std.ArrayList(u8) = .empty;
         const places = [_][:0]const u8{
             "/proc/sys/kernel/printk",
+            "/proc/sys/kernel/kptr_restrict",
+            "/proc/sys/kernel/dmesg_restrict",
+            "/proc/sys/vm/memfd_noexec",
+            "/proc/sys/vm/mmap_min_addr",
+            "/proc/sys/user/max_user_namespaces",
+            "/proc/sys/fs/protected_symlinks",
+            "/proc/sys/net/ipv4/ip_forward",
             "/sys/kernel/mm/transparent_hugepage/enabled",
             disk,
         };
         for (places) |path| {
             if (path.len == 0) continue;
-            switch (openError(path, .WRONLY)) {
-                .ACCES, .NOENT => {},
-                else => try listAdd(p.gpa, &writable, "{s}", .{path}),
+            for ([_]std.posix.ACCMODE{ .WRONLY, .RDWR }) |mode| {
+                const err = openError(path, mode);
+                if (err == .ACCES) continue;
+                // Some kernels lack optional settings; printk must exist,
+                // so a missing /proc/sys cannot make this check pass.
+                if (err == .NOENT and !std.mem.eql(u8, path, places[0])) continue;
+                try listAdd(p.gpa, &writable, "{s} ({t}): {t}", .{ path, mode, err });
             }
         }
         try p.add(.{
@@ -321,13 +332,14 @@ pub fn check(p: *Posture) !void {
             .name = "Kernel settings and disks not writable",
             .why = "Not even root can change a sysctl, a sysfs setting or a disk underneath " ++
                 "its filesystem, until the machine reboots.",
-            .how = "opening a sysctl, a sysfs setting and the first disk for writing, " ++
-                "without writing, is refused with EACCES (Landlock, from fence)",
+            .how = "opening kernel, vm, user, fs and net sysctls, a sysfs setting and " ++
+                "the first disk with O_WRONLY and O_RDWR, without writing, is refused " ++
+                "with EACCES (Landlock, from fence); kernel.printk must exist",
             .result = if (writable.items.len == 0) .pass else .fail,
             .detail = if (writable.items.len == 0)
                 ""
             else
-                try p.gpa.print("opened for writing: {s}", .{writable.items}),
+                try p.gpa.print("expected EACCES: {s}", .{writable.items}),
         });
         // fence closes /dev but for the devices werewolf names, so a disk and
         // the device-mapper and loop controls must open for no one.

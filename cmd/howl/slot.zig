@@ -256,6 +256,8 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
             ),
         );
     }
+    if (goals.prebuilt or (b.spec.ipe_updates != null and (goals.disk or goals.qcow2)))
+        try @import("prebuilt.zig").write(b);
     if (goals.disk) try diskStep(
         b,
         b.spec.disk_path orelse try b.path("{s}/disk.img", .{out}),
@@ -794,12 +796,16 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
         &.{try b.path("{s}/uki.efi", .{slot})}
     else
         &.{};
+    const proof_inputs: []const []const u8 = if (b.spec.ipe_updates != null) &.{
+        try b.path("{s}/prebuilt/{t}/latest.json", .{ out, b.spec.arch }),
+        try b.path("{s}/prebuilt/{t}/latest.json.sig", .{ out, b.spec.arch }),
+    } else &.{};
     const began = try b.begin(target, try mem.concat(b.gpa, []const u8, &.{ &.{
         try b.path("{s}/vmlinuz", .{slot}),    try b.path("{s}/stage0.zst", .{slot}),
         try b.path("{s}/root.erofs", .{slot}), try b.path("{s}/cmdline", .{slot}),
         boot,                                  b.self,
         options,
-    }, signed_inputs })) orelse return;
+    }, signed_inputs, proof_inputs })) orelse return;
     const t = try b.tmp(target);
     if (qcow2) {
         const raw = try b.path("{s}/disk.raw", .{out});

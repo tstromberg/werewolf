@@ -45,6 +45,8 @@ is having a filter at all, not its length.
   machine seal also refuses by argument paths that exploited CVEs used:
   unnamed socket families (AF_ALG), TCP_ULP, O_NOTIFICATION_PIPE and
   CPU-time clocks, failing as a kernel without the feature would.
+- `syslog` permits reading the log, but refuses clearing it or changing
+  console settings, which would bypass fence's protection of `/proc/sys`.
 - Any 32-bit or x32 call kills the process.
 - Without `exec`, a service may only `execveat` a descriptor: that is
   how leash becomes the service.

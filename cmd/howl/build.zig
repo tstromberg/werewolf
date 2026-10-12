@@ -21,7 +21,6 @@ const disk = @import("disk.zig");
 const published = @import("published.zig");
 const locks = @import("lock.zig");
 const deployment = @import("deployment.zig");
-const prebuilt = @import("prebuilt.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -746,7 +745,6 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     try melange.lay(&b, rootfs);
     try slot.meta(&b, rootfs);
     try slot.make(&b, rootfs, goals);
-    if (goals.prebuilt) try prebuilt.write(&b);
 }
 
 fn validateIpe(s: Spec) !void {

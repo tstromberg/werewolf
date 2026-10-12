@@ -40,6 +40,30 @@ howl run --with webshell-example
 
 Prebuilt images for any cloud or hypervisor are on the [releases](https://github.com/werewolf-linux/werewolf/releases) page.
 
+## Secure Boot
+
+Signed loaders and UKIs authenticate the kernel, early boot and root hash.
+Stage0 requires `SecureBoot=1` and `SetupMode=0` before handing over.
+The matrix describes Werewolf's integration; provider flags alone are not proof.
+
+| VM provider / backend | Werewolf Secure Boot | Caveats |
+|---|---|---|
+| QEMU (KVM / HVF) | Verified on x86_64 and arm64 | Host enrolls its signer; x86 requires SMM; Arm key storage is read-only. |
+| AWS EC2 | Verified on arm64 | Custom UEFI enrollment; UEFI-capable instance required. NitroTPM presence does not yet prevent rollback. |
+| Google Compute Engine | Verified on arm64 | Custom keys and Shielded VM enforcement; vTPM presence does not yet prevent rollback. |
+| Azure Trusted Launch | Blocked / inconsistent | West US 2 Arm and x86 reported setup mode despite matching keys; one x86 control passed. Boot refuses unsafe state. |
+| Lima QEMU | Verified on arm64 Mac | Test supplies enrolled firmware through QEMU arguments; normal `howl --on lima` uses VZ. |
+| Lima VZ | Unsupported | No firmware-key enrollment interface; Secure Boot-required images refuse handover. |
+| Firecracker | Unsupported | No UEFI; EFI entries are refused. Ordinary direct boot is a separate trust model. |
+| bhyve | Not enrolled by howl | x86 firmware can support Secure Boot; Bilbo and Smaug validation is pending. Arm backend is not implemented. |
+| Proxmox VE | Not implemented / unverified | Experimental backend does not enroll Werewolf's firmware keys. |
+| Existing VMs taken over with `bite` | Unverified | Authenticating the existing distro bootloader remains unfinished. |
+
+A/B recovery must retain the previous good release **after health commit**.
+Protected TPM retirement is unfinished and must preserve that fallback.
+Signed machines require a matching signed update channel; unsigned local updates are held.
+See [boot tests](docs/testing.md#secure-boot), [cloud caveats](docs/cloud.md#signed-boot), and [the audit](docs/audit/astra-2026-10-11.md).
+
 ## Take over an existing VM
 
 If your provider won't boot a custom image, `bite` installs the latest release beside Debian, Ubuntu, Fedora or Rocky and boots into it ([docs/bite.md](docs/bite.md)):

@@ -1038,6 +1038,30 @@ pub fn logged(p: *Posture) !void {
     var printk = std.mem.tokenizeAny(u8, p.sysctl("kernel/printk"), " \t");
     const level = std.fmt.parseInt(u8, printk.next() orelse "", 10) catch 0;
     const console = capturedConsole(p.read("/proc/consoles"));
+    // Use the current level: on an unsealed kernel this must detect the
+    // writable interface without lowering the console's logging threshold.
+    const log_control: ?linux.E = if (p.root and level >= 1 and level <= 8)
+        linux.errno(linux.syscall3(.syslog, 8, 0, level))
+    else
+        null;
+    try p.add(.{
+        .id = "kernel-log-control",
+        .area = "kernel",
+        .name = "Console settings cannot be changed through syslog",
+        .why = "Root must not bypass /proc/sys restrictions to silence kernel refusals.",
+        .how = "syslog(SYSLOG_ACTION_CONSOLE_LEVEL) with the current valid level " ++
+            "is refused with EPERM, EACCES or ENOSYS, without changing the level",
+        .result = if (log_control) |e| switch (e) {
+            .PERM, .ACCES, .NOSYS => .pass,
+            else => .fail,
+        } else .skip,
+        .detail = if (log_control) |e|
+            try p.gpa.print("syslog: {t}", .{e})
+        else if (!p.root)
+            "requires root"
+        else
+            "no console loglevel in 1..8",
+    });
     try p.add(.{
         .id = "kernel-console-log",
         .area = "kernel",

@@ -289,8 +289,8 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 const max_calls = 512;
 /// max_filter counts the prelude (6), execveat (7), the socket and
 /// socketpair families (2 * (3 + 2 * 5)), the machine's refusals
-/// (7 + 5 + 7 + 7 + 8), the table and the final return.
-pub const max_filter = 6 + 7 + 2 * (3 + 2 * 5) + 34 + 2 * max_calls + 1;
+/// (7 + 5 + 7 + 7 + 8 + 10), the table and the final return.
+pub const max_filter = 6 + 7 + 2 * (3 + 2 * 5) + 44 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 
 /// families maps each socket promise to the address families it allows.
@@ -303,8 +303,8 @@ const families = [_]struct { p: Promise, af: u32 }{
 };
 
 /// Refusal is a call the machine seal refuses by its arguments, whatever a
-/// pledge says. Each closes a path that exploits in CISA's KEV catalog used
-/// and nothing here needs (docs/cve-mitigation-survey.md).
+/// pledge says. These close unused attack paths and alternate ways to
+/// change settings fence protects (docs/cve-mitigation-survey.md).
 ///
 ///   socket,           a family no promise names: AF_ALG (CVE-2025-39964,
 ///   socketpair        CVE-2026-31431), and RDS, TIPC, VSOCK, AF_KEY, XDP
@@ -314,6 +314,8 @@ const families = [_]struct { p: Promise, af: u32 }{
 ///   pipe2             O_NOTIFICATION_PIPE: a watch queue (CVE-2022-0995)
 ///   timer_create,     a CPU-time clock, the caller's or another process's:
 ///   clock_nanosleep   POSIX CPU timers (CVE-2025-38352)
+///   syslog            clearing the log or changing kernel.printk without
+///                     opening /proc/sys; only read operations pass
 ///
 /// And one surface nothing needs once the seal holds: seccomp's
 /// user-notification listener (SECCOMP_FILTER_FLAG_NEW_LISTENER, and
@@ -341,6 +343,7 @@ pub const by_argument = [_][]const u8{
     "pipe2 (O_NOTIFICATION_PIPE)",
     "timer_create and clock_nanosleep (a CPU-time clock)",
     "seccomp (a user-notification listener)",
+    "syslog (clearing the log or changing console settings)",
 };
 
 const SOL_TCP = 6;
@@ -352,6 +355,9 @@ const CLOCK_THREAD_CPUTIME_ID = 3;
 const SECCOMP_SET_MODE_FILTER = 1;
 const SECCOMP_GET_NOTIF_SIZES = 3;
 const SECCOMP_FILTER_FLAG_NEW_LISTENER = 1 << 3;
+// CLOSE, OPEN, READ, READ_ALL, SIZE_UNREAD, SIZE_BUFFER. Every other
+// operation, including future ones, is refused.
+const syslog_read_ops = [_]u32{ 0, 1, 2, 3, 9, 10 };
 
 /// refusal returns why the machine seal refuses this call, or null. The
 /// filter decides; this repeats its rules so seal-watch can say why.
@@ -380,6 +386,9 @@ pub fn refusal(nr: u32, args: [6]u64) ?Refusal {
             low(args[1]) & SECCOMP_FILTER_FLAG_NEW_LISTENER != 0)
             return .{ .what = "seccomp listener", .arg = low(args[1]), .errno = .INVAL };
     }
+    if (nr == number(.syslog) and
+        std.mem.findScalar(u32, &syslog_read_ops, low(args[0])) == null)
+        return .{ .what = "syslog control", .arg = low(args[0]), .errno = .PERM };
     return null;
 }
 
@@ -512,6 +521,13 @@ fn buildFilterWithExec(
         put(buf, &n, JSET_K, 0, 1, SECCOMP_FILTER_FLAG_NEW_LISTENER);
         put(buf, &n, RET_K, 0, 0, other);
         put(buf, &n, LD_W_ABS, 0, 0, 0);
+        // syslog may read the log, but never clear it or change the console.
+        put(buf, &n, JEQ_K, 0, 9, number(.syslog));
+        put(buf, &n, LD_W_ABS, 0, 0, 16); // args[0]: operation (int)
+        for (syslog_read_ops, 0..) |op, i|
+            put(buf, &n, JEQ_K, @intCast(syslog_read_ops.len - i), 0, op);
+        put(buf, &n, RET_K, 0, 0, other);
+        put(buf, &n, LD_W_ABS, 0, 0, 0);
     }
     var seen: [max_calls]u32 = undefined;
     var n_seen: usize = 0;
@@ -619,6 +635,7 @@ test buildFilter {
     const socket = number(.socket);
     // A filter with every promise fits.
     _ = buildFilter(&buf, .full, true);
+    _ = buildFilter(&buf, .full, false);
     const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet, .seccomp }), false);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
@@ -800,6 +817,32 @@ test buildFilter {
     for (never) |sys| try testing.expectEqual(
         RET_ENOSYS,
         action(biggest, native_arch, number(sys), 0),
+    );
+}
+
+test "syslog cannot change console settings or clear the log" {
+    var buf: [max_filter]Filter = undefined;
+    const machine = buildFilter(&buf, .initMany(&.{.syslog}), false);
+    for (0..12) |op| {
+        const read = op <= 3 or op == 9 or op == 10;
+        const want: u32 = if (read) linux.SECCOMP.RET.ALLOW else linux.SECCOMP.RET.USER_NOTIF;
+        try testing.expectEqual(want, action(machine, native_arch, number(.syslog), @intCast(op)));
+        // The kernel takes an int: high bits must not hide a control action.
+        for ([_]u64{ op, op | 0xffffffff00000000 }) |arg| {
+            const refused = refusal(number(.syslog), .{ arg, 0, 6, 0, 0, 0 });
+            try testing.expectEqual(!read, refused != null);
+            if (refused) |r| try testing.expectEqual(linux.E.PERM, r.errno);
+        }
+    }
+    try testing.expectEqual(
+        linux.SECCOMP.RET.USER_NOTIF,
+        action(machine, native_arch, number(.syslog), 0xffffffff),
+    );
+    // An allowed operation still needs the syslog promise.
+    const empty = buildFilter(&buf, .empty, false);
+    try testing.expectEqual(
+        linux.SECCOMP.RET.USER_NOTIF,
+        action(empty, native_arch, number(.syslog), 3),
     );
 }
 

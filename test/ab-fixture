@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Build private, self-contained signed releases for provider A/B tests."""
+import datetime
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+howl, arch, kernel, key, cert, destination, mode = sys.argv[1:]
+howl, kernel, key, cert = [str(Path(p).resolve()) for p in [howl, kernel, key, cert]]
+root = Path(destination).resolve()
+root.mkdir(parents=True, exist_ok=True, mode=0o700)
+os.umask(0o077)
+if mode not in ['secure', 'plain']:
+    sys.exit('ab-fixture: mode must be secure or plain')
+env = dict(os.environ, COPYFILE_DISABLE='1')
+for name in ['WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'UKI_ARGS', 'UKI_NATIVE']:
+    env.pop(name, None)
+
+
+def run(args, label):
+    with (root / (label + '.log')).open('wb') as log:
+        subprocess.run(args, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
+
+
+run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+     '-subj', '/CN=werewolf-ab-tls', '-addext', 'subjectAltName=IP:127.0.0.1',
+     '-keyout', str(root / 'tls.key'), '-out', str(root / 'tls.crt')], 'tls')
+run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(root / 'ssh.key')], 'ssh-key')
+probe = root / 'ab-status'
+run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
+     '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'verity', '-Mroot=test/ab-status.zig',
+     '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
+     '-Mipe=lib/ipe.zig', '-Mverity=lib/verity.zig', '-femit-bin=' + str(probe)], 'probe')
+form = root / 'provider-ab'
+form.mkdir()
+(form / 'form.yaml').write_text('''base: prod-ssh
+packages: [openssl]
+sshd:
+  pubkey-accepted-algorithms: ssh-ed25519
+services:
+  ab-https:
+    exec: /usr/bin/openssl s_server -accept 127.0.0.1:443 -cert /usr/share/ab/tls.crt -key /usr/share/ab/tls.key -WWW -quiet
+    user: ab-https
+    pledge: stdio rpath wpath inet listen
+    listen: [tcp/443 loopback]
+    read: /usr/share/ab
+    memory: 256
+weaknesses:
+  network-ssh-security-keys: disposable provider fixture accepts a test key file
+''')
+overlay = form / 'rootfs'
+for d in ['usr/share/werewolf', 'usr/share/ab', 'usr/bin', 'etc/ssl/certs']:
+    (overlay / d).mkdir(parents=True, exist_ok=True)
+shutil.copyfile(probe, overlay / 'usr/bin/ab-status')
+(overlay / 'usr/bin/ab-status').chmod(0o755)
+for name in ['tls.crt', 'tls.key']:
+    shutil.copyfile(root / name, overlay / 'usr/share/ab' / name)
+(overlay / 'usr/share/ab/tls.key').chmod(0o644)
+shutil.copyfile(root / 'tls.crt', overlay / 'etc/ssl/certs/ca-certificates.crt')
+channel = 'https://127.0.0.1/image'
+now = datetime.datetime.now(datetime.timezone.utc)
+releases = {}
+seed = root / 'seed'
+seed.mkdir()
+for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
+    version = (now - datetime.timedelta(minutes=minutes)).strftime('%Y%m%dT%H%M%SZ')
+    (overlay / 'usr/share/werewolf/ab-release').write_text(label + '\n')
+    health = overlay / 'etc/sv/ab-unhealthy'
+    if health.exists():
+        shutil.rmtree(health)
+    if label == 'bad':
+        health.mkdir(parents=True)
+        (health / 'run').symlink_to('/usr/bin/false')
+    if label == 'A':
+        shutil.copytree(seed, overlay / 'usr/share/ab/seed')
+    for path in overlay.rglob('*'):
+        if not path.is_symlink():
+            path.chmod(0o755 if path.is_dir() or path.name == 'ab-status' else 0o644)
+    release = root / ('release-' + label)
+    args = [howl, 'build', '--build', '--with', str(form), '--arch', arch, '-o', str(release),
+            '--ipe-kernel', kernel, '--ipe-key', key, '--ipe-cert', cert,
+            '--ipe-updates', channel, '--image-serial', version]
+    if mode == 'secure':
+        args += ['--boot-key', key, '--boot-cert', cert, '--boot-native']
+    run(args, 'build-' + label)
+    output = Path('build') / arch / 'ipe' / 'provider-ab-ipe'
+    bundle = output / 'prebuilt' / arch
+    manifest = json.loads((bundle / 'latest.json').read_text())
+    releases[label] = manifest
+    if label != 'A':
+        target = seed / 'image' / arch
+        target.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(bundle / manifest['build'], target / manifest['build'])
+        heads = seed / 'heads' / label
+        heads.mkdir(parents=True)
+        for filename in ['latest.json', 'latest.json.sig']:
+            shutil.copyfile(bundle / filename, heads / filename)
+    else:
+        initial_serial = version
+result = {'arch': arch, 'mode': mode, 'form': str(form), 'channel': channel,
+          'kernel': kernel, 'key': key, 'cert': cert, 'initial_serial': initial_serial,
+          'disk': str(root / 'release-A' / ('provider-ab-' + arch + '-disk.qcow2')),
+          'ssh_key': str(root / 'ssh.key'), 'releases': releases}
+(root / 'fixture.json').write_text(json.dumps(result, indent=2) + '\n')
+print('pass   ab-fixture: signed A, B and unhealthy candidate; host signing keys excluded from guests')

@@ -50,10 +50,10 @@ parked: there is no default. `/run/svc/NAME` and `/data/svc/NAME` are
 The seal, on PID 1, allows werewolf's own promises (`base` in
 lib/seal.zig) and every service's pledge (`/usr/share/werewolf/pledge`).
 It matches call numbers, so the kernel answers allowed calls from its
-seccomp cache however long the filter is. For six calls (`socket`,
-`socketpair`, `setsockopt`, `pipe2`, `timer_create`, `clock_nanosleep`)
-it reads arguments too, refusing to everyone the ways into kernel code
-that exploits in CISA's KEV catalog used (lib/README.md). A refused call
+seccomp cache however long the filter is. For `socket`, `socketpair`,
+`setsockopt`, `pipe2`, `timer_create`, `clock_nanosleep`, `seccomp` and
+`syslog`, it reads arguments too: unused attack paths, new seccomp listeners,
+log clearing and console changes are refused (lib/README.md). A refused call
 fails as on a kernel without it, so a program that probes carries on;
 seal-watch logs it once, with the promise that would allow it.
 

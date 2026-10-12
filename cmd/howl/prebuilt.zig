@@ -20,7 +20,7 @@ pub fn write(b: *B) !void {
     );
     if (b.spec.dev) return b.fail("refused: prebuilt images cannot contain a DEV root shell", .{});
     const boot_key = b.env.get("WEREWOLF_BOOT_KEY") orelse "";
-    if (boot_key.len > 0) try b.run(&.{
+    if (boot_key.len > 0 and b.spec.boot_key == null) try b.run(&.{
         @import("howl.zig").make_cmd,
         "--no-print-directory",
         try b.path("FORM={s}", .{b.spec.form}),
@@ -38,7 +38,10 @@ pub fn write(b: *B) !void {
             @field(
                 files,
                 n,
-            ) = if (boot_key.len > 0) try signed.hashFile(b.io, b.gpa, path) else null;
+            ) = if (boot_key.len > 0 or b.spec.boot_key != null)
+                try signed.hashFile(b.io, b.gpa, path)
+            else
+                null;
         } else @field(files, n) = try signed.hashFile(b.io, b.gpa, path);
     }
     const build = signed.buildId(files);

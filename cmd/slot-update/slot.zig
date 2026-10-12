@@ -360,23 +360,6 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
         const esp = try u.held(.esp);
         defer esp.release();
         const entries = try u.gpa.print("{s}/loader/entries", .{esp.path()});
-        var options: ?[]const u8 = null;
-        var newest: i64 = 0;
-        const names = try u.listDir(entries);
-        for (names) |name| {
-            const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
-            newest = @max(newest, entrySecs(text) orelse 0);
-            if (!isEntryOf(name, u.other)) continue;
-            var lines = std.mem.splitScalar(u8, text, '\n');
-            while (lines.next()) |line| if (std.mem.cutPrefix(
-                u8,
-                line,
-                "options ",
-            )) |o| {
-                options = o;
-            };
-        }
-        const opts = options orelse return error.NoOtherSlotEntry;
         const uki: bool = blk: {
             Dir.cwd().access(
                 u.io,
@@ -385,6 +368,16 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
             ) catch break :blk false;
             break :blk true;
         };
+        var options: ?[]const u8 = null;
+        var newest: i64 = 0;
+        const names = try u.listDir(entries);
+        for (names) |name| {
+            const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
+            newest = @max(newest, entrySecs(text) orelse 0);
+            if (!isEntryOf(name, u.other)) continue;
+            options = try rollbackOptions(u.gpa, text, u.other, uki);
+        }
+        const opts = options orelse return error.NoOtherSlotEntry;
         const serial = try u.gpa.print(
             "{f}",
             .{policy.Serial{ .secs = @max(nowSecs(u.io), newest + 1) }},
@@ -1410,6 +1403,42 @@ fn withSlot(
 /// argName returns a kernel argument's name: the part before =, or all of it.
 fn argName(arg: []const u8) []const u8 {
     return arg[0 .. std.mem.findScalar(u8, arg, '=') orelse arg.len];
+}
+
+/// Native UKIs seal their options; a factory EFI entry has no options line.
+fn rollbackOptions(gpa: Allocator, text: []const u8, slot_name: []const u8, uki: bool) ![]const u8 {
+    var options: ?[]const u8 = null;
+    var efi: ?[]const u8 = null;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.cutPrefix(u8, line, "options ")) |o| options = o;
+        if (std.mem.cutPrefix(u8, line, "efi ")) |p| efi = p;
+    }
+    if (uki) {
+        const expected = try gpa.print("/werewolf/{s}/uki.efi", .{slot_name});
+        if (efi == null or !std.mem.eql(u8, efi.?, expected)) return error.NoOtherSlotEntry;
+        return "";
+    }
+    return options orelse error.NoOtherSlotEntry;
+}
+
+test "rollback retains signed native entries without trusting unsigned options" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const native = "efi /werewolf/a/uki.efi\n";
+    try testing.expectEqualStrings("", try rollbackOptions(a, native, "a", true));
+    try testing.expectEqualStrings(
+        "",
+        try rollbackOptions(a, native ++ "options ipe.enforce=0\n", "a", true),
+    );
+    try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, native, "b", true));
+    try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, "options x\n", "a", true));
+    try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, native, "a", false));
+    try testing.expectEqualStrings(
+        "x werewolf.slot=b",
+        try rollbackOptions(a, "options x werewolf.slot=b\n", "b", false),
+    );
 }
 
 /// loaderEntry returns a Boot Loader Specification type 1 entry for slot.
