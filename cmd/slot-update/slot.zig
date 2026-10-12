@@ -423,6 +423,9 @@ fn installEsp(u: *Update, build: []const u8) !void {
     try Dir.cwd().createDirPath(io, kdir);
     try Dir.cwd().createDirPath(io, entries);
 
+    var retirement = try @import("retire.zig").prepare(u, v);
+    defer if (retirement) |*prepared| prepared.close();
+
     // Remove the other slot's entries and attempt first, so nothing boots
     // it while its files change. vfat has no journal, so sync the deletes
     // before changing any file.
@@ -436,6 +439,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
     }
     linux.sync();
     // copyFile goes through a temporary name, so each file is whole or absent.
+    if (retirement) |*prepared| try prepared.apply();
     try Dir.cwd().copyFile(
         work_dir ++ "/slot/root.erofs",
         Dir.cwd(),

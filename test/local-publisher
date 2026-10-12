@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Exercise host permit issuance, rollback context, restart, limits and HTTPS exposure."""
+import concurrent.futures
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+from urllib.request import urlopen
+from urllib.error import HTTPError
+
+publisher = importlib.machinery.SourceFileLoader('publisher', 'tools/local-publisher').load_module()
+HOWL = str(Path(sys.argv.pop(1) if len(sys.argv) > 1 else 'build/host/howl').resolve())
+PROBE = str(Path('build/host/tpm-policy').resolve())
+A, B, C = [value * 32 for value in ['aa', 'bb', 'cc']]
+PA, PB, PC = [value * 32 for value in ['11', '22', '33']]
+
+
+class Issuance(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='ww-publisher-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.records = self.root / 'records'
+        self.records.mkdir()
+        self.public = self.root / 'public'
+        self.public.mkdir()
+        publisher.run(['openssl', 'genrsa', '-out', self.root / 'permit.key', '2048'])
+        publisher.run(['openssl', 'pkey', '-in', self.root / 'permit.key', '-pubout', '-out', self.root / 'permit.pub'])
+        raw = publisher.TAG + bytes.fromhex('42' * 32 + '00' * 32 + A + A + PA)
+        state = self.root / 'factory.state'
+        state.write_bytes(raw)
+        publisher.run([PROBE, 'permit-pair', self.root / 'permit.pub', state, self.root / 'factory.message'])
+        publisher.run(['openssl', 'dgst', '-sha256', '-sign', self.root / 'permit.key',
+                       '-out', self.root / 'factory.sig', self.root / 'factory.message'])
+        bundle = raw + (self.root / 'factory.sig').read_bytes()
+        (self.root / 'factory.permit').write_bytes(bundle)
+        self.factory = publisher.record(bundle)
+        (self.records / (self.factory['anchor'] + '.permit')).write_bytes(bundle)
+        (self.root / 'releases.json').write_text(json.dumps({A: PA, B: PB, C: PC}))
+        self.approve(B)
+        self.config = {'authority': str(self.root), 'public': str(self.public), 'howl': HOWL, 'arch': 'aarch64'}
+        self.issuer = publisher.Publisher(self.config)
+
+    def issue(self, candidate=B, previous=None, retained=A):
+        return self.issuer.permit(self.factory['machine'], candidate,
+                                 previous or self.factory['anchor'], retained)
+
+    def approve(self, candidate):
+        (self.root / 'approved.json').write_text(json.dumps({'candidate': candidate, 'serial': '20261012T000000Z'}))
+
+    def test_signed_ab_preserves_both_releases(self):
+        bundle = self.issue()
+        state = publisher.record(bundle)
+        self.assertEqual((state['retained'], state['candidate'], state['pcr']), (A, B, PA))
+        path = self.records / (state['anchor'] + '.permit')
+        publisher.run([HOWL, '_boot-record', self.root / 'permit.pub', path])
+
+    def test_operator_rollback_changes_retained_pcr(self):
+        previous = publisher.record(self.issue())['anchor']
+        self.approve(C)
+        from_b = publisher.record(self.issue(C, previous, B))
+        from_a = publisher.record(self.issue(C, previous, A))
+        self.assertEqual((from_b['retained'], from_b['pcr']), (B, PB))
+        self.assertEqual((from_a['retained'], from_a['pcr']), (A, PA))
+        self.assertNotEqual(from_a['anchor'], from_b['anchor'])
+
+    def test_completed_transition_resumes_without_new_extension(self):
+        original = self.issue()
+        self.approve(C)
+        self.assertEqual(original, self.issue(B, publisher.record(original)['anchor'], A))
+        self.assertEqual(2, len(list(self.records.glob('*.permit'))))
+
+    def test_guest_cannot_reauthorize_a_retired_registered_release(self):
+        ab = publisher.record(self.issue())['anchor']
+        self.approve(C)
+        bc = publisher.record(self.issue(C, ab, B))['anchor']
+        with self.assertRaises(ValueError):
+            self.issue(A, bc, C)
+        self.assertEqual(3, len(list(self.records.glob('*.permit'))))
+
+    def test_restart_and_concurrent_requests_are_idempotent(self):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            bundles = list(pool.map(lambda _: self.issue(), range(8)))
+        self.assertTrue(all(bundle == bundles[0] for bundle in bundles))
+        self.issuer = publisher.Publisher(self.config)
+        self.assertEqual(bundles[0], self.issue())
+        self.assertEqual(2, len(list(self.records.glob('*.permit'))))
+
+    def test_unregistered_foreign_and_unsafe_requests_are_refused(self):
+        for candidate, previous, retained in [('dd' * 32, None, A), (B, 'ee' * 32, A),
+                                              (B, None, C), (A, None, A)]:
+            with self.assertRaises((ValueError, FileNotFoundError, subprocess.SubprocessError)):
+                self.issue(candidate, previous, retained)
+        for value in ['../permit.key', 'ab', 'AA' * 32]:
+            with self.assertRaises(ValueError):
+                self.issuer.permit(value, B, self.factory['anchor'], A)
+        with self.assertRaises(ValueError):
+            self.issuer.permit('01' * 32, B, self.factory['anchor'], A)
+        self.assertEqual(1, len(list(self.records.glob('*.permit'))))
+
+    def test_corrupt_registered_record_is_refused_before_signing(self):
+        path = self.records / (self.factory['anchor'] + '.permit')
+        raw = bytearray(path.read_bytes())
+        raw[-1] ^= 1
+        path.write_bytes(raw)
+        with self.assertRaises(subprocess.SubprocessError):
+            self.issue()
+
+    def test_issuance_is_bounded(self):
+        saved = publisher.MAX_RECORDS
+        try:
+            publisher.MAX_RECORDS = 1
+            with self.assertRaises(ValueError):
+                self.issue()
+        finally:
+            publisher.MAX_RECORDS = saved
+
+    def test_only_public_channel_paths_are_exposed(self):
+        arch = self.public / 'aarch64'
+        arch.mkdir()
+        (arch / 'latest.json').write_text('{}')
+        self.assertEqual((arch / 'latest.json').resolve(), self.issuer.artifact('/aarch64/latest.json'))
+        for route in ['/permit.key', '/aarch64/../permit.key', '/aarch64/%2e%2e/permit.key',
+                      '//aarch64/latest.json', '/x86_64/latest.json']:
+            with self.assertRaises(ValueError):
+                self.issuer.artifact(route)
+        link = arch / B
+        link.symlink_to(self.root, target_is_directory=True)
+        (self.root / 'uki.efi').write_bytes(b'private')
+        with self.assertRaises(ValueError):
+            self.issuer.artifact('/aarch64/' + B + '/uki.efi')
+
+    def test_https_context_and_private_file_refusal(self):
+        publisher.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                       '-subj', '/CN=publisher-test', '-addext', 'subjectAltName=IP:127.0.0.1',
+                       '-keyout', self.root / 'tls.key', '-out', self.root / 'tls.crt'])
+        self.config.update(port=0, certificate=str(self.root / 'tls.crt'), key=str(self.root / 'tls.key'), token='secret')
+        server = publisher.Server(self.config)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            origin = 'https://127.0.0.1:' + str(server.server_port)
+            context = ssl.create_default_context(cafile=self.config['certificate'])
+            route = '/aarch64/permits/' + self.factory['machine'] + '/' + B + '.permit?from=' + self.factory['anchor'] + '&retain=' + A
+            with urlopen(origin + route, context=context, timeout=10) as response:
+                self.assertEqual(B, publisher.record(response.read())['candidate'])
+            for route in ['/permit.key', '/tls.key', '/_health', '/aarch64/permits/' +
+                          self.factory['machine'] + '/' + B + '.permit?from=' + self.factory['anchor']]:
+                with self.assertRaises(HTTPError) as failure:
+                    urlopen(origin + route, context=context, timeout=10)
+                self.assertEqual(404, failure.exception.code)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    unittest.main()

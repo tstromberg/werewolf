@@ -113,6 +113,12 @@ pub fn image(b: *B) !void {
         "out/tools/stubs/{t}/linux.efi.stub",
         .{b.spec.arch},
     );
+    if (b.spec.tpm_pub != null and b.env.get("UKI_STUB") == null)
+        return b.fail(
+            "TPM boot requires UKI_STUB with TPM measurement enabled; Alpine's default stub " ++
+                "disables it",
+            .{},
+        );
     const options = try b.path("{s}/uki.options", .{slot});
     const wanted = try b.path("native {any}\n{s}\n", .{
         b.spec.boot_native, try std.mem.join(b.gpa, " ", b.spec.disk.args),
@@ -143,15 +149,45 @@ pub fn image(b: *B) !void {
         "werewolf.native=1 werewolf.secure=1"
     else
         "werewolf.slot=a";
-    const line = try b.path("{s} {s} init=/init panic=10 {s} {s} " ++
-        "werewolf.victim={s}:/werewolf " ++
-        "werewolf.esp=57E1-F000\x00", .{
+    const prefix = try b.path("{s} {s} init=/init panic=10 {s} {s} {s} " ++
+        "werewolf.victim={s}:/werewolf werewolf.esp=57E1-F000\x00", .{
         base,
-        @import("disk.zig").consoles(b.spec.arch),
+        @import(
+            "disk.zig",
+        ).consoles(b.spec.arch),
         extra,
         identity,
+        if (b.spec.tpm_pub != null) "werewolf.tpm=2" else "",
         @import("disk.zig").root_uuid,
     });
+    const line = if (b.spec.tpm_pub != null) blk: {
+        const signed = @import("prebuilt");
+        var hashes: [3][32]u8 = undefined;
+        for ([3][]const u8{ "root.erofs", "vmlinuz", "stage0.zst" }, 0..) |name, i| {
+            const file = try signed.hashFile(b.io, b.gpa, try b.path("{s}/{s}", .{ slot, name }));
+            _ = try std.fmt.hexToBytes(&hashes[i], file.sha256);
+        }
+        const Sha256 = std.crypto.hash.sha2.Sha256;
+        var hash = Sha256.init(.{});
+        hash.update("werewolf.boot-context/2\x00");
+        var stub_hash: [32]u8 = undefined;
+        Sha256.hash(stub, &stub_hash, .{});
+        hash.update(&stub_hash);
+        hash.update(prefix);
+        const context = hash.finalResult();
+        const id = @import("tpm").releaseId(
+            @tagName(b.arch),
+            hashes[0],
+            hashes[1],
+            hashes[2],
+            context,
+        );
+        try b.write(try b.path("{s}/release.id", .{slot}), &id);
+        try b.write(try b.path("{s}/boot.context", .{slot}), &context);
+        break :blk try b.path("{s} werewolf.release={x}\x00", .{
+            std.mem.trimEnd(u8, prefix, "\x00"), &id,
+        });
+    } else prefix;
     const unsigned = try b.path("{s}/uki.efi.unsigned", .{slot});
     try b.write(
         unsigned,
@@ -169,6 +205,10 @@ pub fn image(b: *B) !void {
         .{},
     );
     try b.rename(temp, target);
+    if (b.spec.tpm_pub != null) try b.write(
+        try b.path("{s}/pcr11", .{slot}),
+        &try uki.pcr11(try b.read(target, 512 << 20)),
+    );
     try Dir.cwd().deleteFile(b.io, unsigned);
     try b.done(target, began);
 }

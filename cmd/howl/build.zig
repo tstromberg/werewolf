@@ -77,6 +77,10 @@ pub const Spec = struct {
     boot_key: ?[]const u8 = null,
     boot_cert: ?[]const u8 = null,
     boot_native: bool = false,
+    tpm_pub: ?[]const u8 = null,
+    boot_state: ?[]const u8 = null,
+    update_ca: ?[]const u8 = null,
+    update_port: ?u16 = null,
 };
 
 /// Paths are where a build writes, as the Makefile names them.
@@ -128,6 +132,7 @@ const BuildOptions = struct {
     boot_key: ?[]const u8 = null,
     boot_cert: ?[]const u8 = null,
     boot_native: bool = false,
+    tpm_pub: ?[]const u8 = null,
 };
 
 /// buildOptions parses build's command line: FORM, --build, and -o, --arch,
@@ -173,13 +178,15 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.boot_key = v;
         } else if (std.mem.eql(u8, a, "--boot-cert")) {
             o.boot_cert = v;
+        } else if (std.mem.eql(u8, a, "--tpm-pub")) {
+            o.tpm_pub = v;
         } else if (std.mem.eql(u8, a, "--format")) {
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
             "{s}: build takes --build, -o, --arch, --format, --app, --ipe-kernel, --ipe-key, " ++
                 "--ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert and " ++
-                "--boot-native\n{s}",
+                "--boot-native, --tpm-pub\n{s}",
             .{ a, howl.usage },
         );
     }
@@ -225,6 +232,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .ipe_updates = o.ipe_updates,
         .image_serial = o.image_serial,
         .boot_key = o.boot_key orelse howl.environ.get("WEREWOLF_BOOT_KEY"),
+        .tpm_pub = o.tpm_pub orelse howl.environ.get("WEREWOLF_TPM_PUB"),
         .boot_cert = o.boot_cert orelse if (o.boot_key != null or
             howl.environ.get("WEREWOLF_BOOT_KEY") != null)
             howl.environ.get("WEREWOLF_BOOT_CRT") orelse "release/boot.crt"
@@ -429,6 +437,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
                 spec.boot_key = v;
             } else if (std.mem.eql(u8, flag, "--boot-cert")) {
                 spec.boot_cert = v;
+            } else if (std.mem.eql(u8, flag, "--tpm-pub")) {
+                spec.tpm_pub = v;
             } else if (std.mem.eql(u8, flag, "--disk")) {
                 spec.disk_path = v;
             } else if (std.mem.eql(u8, flag, "--disk-mib")) {
@@ -748,6 +758,8 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
 }
 
 fn validateIpe(s: Spec) !void {
+    if (s.tpm_pub != null and (!s.boot_native or s.boot_key == null or
+        s.ipe_kernel == null or s.ipe_updates == null)) return error.TpmNeedsSignedNativeIpeUpdates;
     if ((s.boot_key == null) != (s.boot_cert == null)) return error.BootKeyAndCertificateRequired;
     if (s.boot_native and s.boot_key == null) return error.NativeBootNeedsSigner;
     const fields = [_]?[]const u8{ s.ipe_kernel, s.ipe_key, s.ipe_cert };
@@ -761,6 +773,8 @@ fn validateIpe(s: Spec) !void {
         if (count != fields.len or s.ipe_updates == null or s.image_serial == null)
             return error.ImageUpdatesNeedIpeChannelAndSerial;
         try @import("prebuilt").channel(s.ipe_updates.?);
+        const uri = try std.Uri.parse(s.ipe_updates.?);
+        if ((uri.port orelse 443) != (s.update_port orelse 443)) return error.BadImageChannel;
         _ = @import(
             "update-policy",
         ).parseSerial(s.image_serial.?) catch return error.BadImageSerial;

@@ -1,0 +1,318 @@
+#!/usr/bin/env python3
+"""Boot a signed, enrolled QEMU guest; retain its disk and TPM across power cuts."""
+import json
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import struct
+import shutil
+import sys
+import time
+
+from ab_providers import Provider
+from tpm_proxy import Proxy
+
+fixture_file, work, probe = [Path(arg).resolve() for arg in sys.argv[1:]]
+fixture = json.loads(fixture_file.read_text())
+info = json.loads((fixture_file.parent / 'tpm/machine.json').read_text())
+work.mkdir(mode=0o700)
+os.umask(0o077)
+state = work / 'nv'
+state.mkdir()
+socket = work / 'tpm.sock'
+fixture['tpm_socket'] = str(socket) + '.ctrl'
+backend = None
+machine = None
+proxy = None
+
+
+def swtpm(startup):
+    for filename in (socket, Path(str(socket) + '.ctrl')):
+        filename.unlink(missing_ok=True)
+    args = ['swtpm', 'socket', '--tpm2', '--tpmstate', 'dir=' + str(state),
+            '--ctrl', 'type=unixio,path=' + str(socket) + '.ctrl',
+            '--flags', 'not-need-init' + (',startup-clear' if startup else '')]
+    if startup:
+        args += ['--server', 'type=unixio,path=' + str(socket)]
+    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    for _ in range(100):
+        if process.poll() is not None:
+            raise RuntimeError(process.stderr.read().decode())
+        if (not startup or socket.exists()) and Path(str(socket) + '.ctrl').exists():
+            return process
+        time.sleep(0.05)
+    process.terminate()
+    process.communicate(timeout=10)
+    raise RuntimeError('TPM sockets missing')
+
+
+def status():
+    try:
+        result = machine.ssh('/usr/bin/ab-status', check=False, timeout=10)
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode:
+        return None
+    return json.loads(result.stdout)
+
+
+def wait_boot(release, previous=None, committed=True, timeout=400):
+    until = time.monotonic() + timeout
+    paused = None
+    while time.monotonic() < until:
+        if machine.process.poll() is not None or proxy.failures:
+            raise RuntimeError('QEMU/TPM startup failed: ' + str(proxy.failures) + '\n' +
+                               machine.log.read_text(errors='replace')[-6000:])
+        value = status()
+        if value and value['release'] == release and value['boot_id'] != previous:
+            if not all(value[flag] for flag in ['rollback_protected', 'secure_boot', 'ipe', 'verified_root']):
+                raise RuntimeError('guest enforcement missing: ' + str(value))
+            if value['root_hash'] != fixture['releases'][release]['root_hash']:
+                raise RuntimeError('wrong authenticated root: ' + str(value))
+            if value['pcr11'] != info['pcrs'][release]:
+                raise RuntimeError('UKI prediction disagrees with actual PCR 11: ' + str(value))
+            if paused != value['boot_id']:
+                result = machine.ssh('while [ ! -e /run/werewolf/updater-ready ]; do sleep 1; done; '
+                                     '/usr/bin/sv down /etc/sv/autoupdate', check=False, timeout=15)
+                if result.returncode:
+                    time.sleep(2)
+                    continue
+                paused = value['boot_id']
+            if value['committed'] is committed:
+                with (work / 'evidence.jsonl').open('a') as output:
+                    output.write(json.dumps(value) + '\n')
+                print('pass   tpm-guest: boot ' + release + ' with signed identity, exact PCR and protected pair', flush=True)
+                return value
+        time.sleep(2)
+    raise RuntimeError('guest did not boot ' + release + ': ' + str(status()) + '\n' + machine.log.read_text(errors='replace')[-6000:])
+
+
+def power_off():
+    global backend, proxy
+    machine.process.kill()
+    machine.process.wait(timeout=10)
+    proxy.cancel()
+    proxy.close()
+    backend.kill()
+    backend.communicate(timeout=10)
+    backend = None
+    proxy = None
+
+
+def power_on(args=None):
+    global backend, proxy
+    backend = swtpm(False)
+    proxy = Proxy(work / 'proxy.sock', str(socket) + '.ctrl')
+    with machine.log.open('ab') as output:
+        machine.process = subprocess.Popen(args or machine.qemu_args, env=machine.env, stdout=output,
+                                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+
+
+def power_cycle():
+    power_off()
+    power_on()
+
+
+def refusal(reason, offset, timeout=100):
+    until = time.monotonic() + timeout
+    while time.monotonic() < until:
+        console = machine.log.read_bytes()[offset:].decode(errors='replace')
+        if 'handing over to runit' in console:
+            raise RuntimeError('unauthorized boot reached userspace')
+        if 'TPM rollback: ' + reason + '; not handing over' in console:
+            print('pass   tpm-guest-refusal: ' + reason + ' before handover', flush=True)
+            return
+        time.sleep(1)
+    raise RuntimeError('missing explicit boot refusal: ' + console[-6000:])
+
+
+def replay_retired(unmeasured=False):
+    # Mutate only the stopped test disk, retaining its protected TPM state.
+    raw = work / 'replay.raw'
+    disk = work / 'disk.qcow2'
+    machine.run(['qemu-img', 'convert', '-f', 'qcow2', '-O', 'raw', str(disk), str(raw)])
+    with raw.open('rb') as image:
+        image.seek(512)
+        header = image.read(92)
+        if header[:8] != b'EFI PART':
+            raise RuntimeError('test image is not GPT')
+        table, count, width = struct.unpack_from('<QII', header, 72)
+        if count < 2 or width < 128:
+            raise RuntimeError('missing test partitions')
+        image.seek(table * 512)
+        entries = image.read(2 * width)
+        esp_offset = struct.unpack_from('<Q', entries, 32)[0] * 512
+        root_offset = struct.unpack_from('<Q', entries, width + 32)[0] * 512
+        root_end = (struct.unpack_from('<Q', entries, width + 40)[0] + 1) * 512
+    partition = work / 'replay.ext4'
+    with raw.open('rb') as image, partition.open('wb') as filesystem:
+        image.seek(root_offset)
+        remaining = root_end - root_offset
+        while remaining:
+            chunk = image.read(min(1 << 20, remaining))
+            if not chunk:
+                raise RuntimeError('truncated test partition')
+            filesystem.write(chunk)
+            remaining -= len(chunk)
+    # Replay the stopped guest's journal before editing filesystem metadata.
+    result = machine.run(['e2fsck', '-fy', str(partition)], check=False)
+    if result.returncode not in [0, 1]:
+        raise RuntimeError('test filesystem recovery failed: ' + result.stderr)
+    source = fixture_file.parent / 'release-A'
+    root = next(source.glob('*-root.erofs'))
+    filesystem = str(partition)
+    machine.run(['debugfs', '-w', '-R', 'rm /werewolf/a/root.erofs', filesystem])
+    machine.run(['debugfs', '-w', '-R', 'write ' + json.dumps(str(root)) + ' /werewolf/a/root.erofs', filesystem])
+    result = machine.run(['e2fsck', '-fy', filesystem], check=False)
+    if result.returncode not in [0, 1]:
+        raise RuntimeError('test filesystem edit failed: ' + result.stderr)
+    readback = work / 'replayed.erofs'
+    machine.run(['debugfs', '-R', 'dump /werewolf/a/root.erofs ' + json.dumps(str(readback)), filesystem])
+    expected = fixture['releases']['A']['files']['root.erofs']['sha256']
+    if hashlib.sha256(readback.read_bytes()).hexdigest() != expected:
+        raise RuntimeError('retired root differs from the signed release')
+    readback.unlink()
+    with partition.open('rb') as filesystem, raw.open('r+b') as image:
+        image.seek(root_offset)
+        shutil.copyfileobj(filesystem, image, 1 << 20)
+    partition.unlink()
+    fat = str(raw) + '@@' + str(esp_offset)
+    uki = fixture_file.parent / 'tpm/unmeasured.efi' if unmeasured else next(source.glob('*-uki'))
+    machine.run(['mcopy', '-o', '-i', fat, str(uki), '::/werewolf/a/uki.efi'])
+    entry = work / 'replay.conf'
+    entry.write_text('title retired A\nsort-key werewolf\nversion 99999999T999999Z\nuki /werewolf/a/uki.efi\n')
+    machine.run(['mdel', '-i', fat, '::/loader/entries/werewolf-a*.conf'])
+    machine.run(['mcopy', '-o', '-i', fat, str(entry), '::/loader/entries/werewolf-a+1.conf'])
+    restored = work / 'replay.qcow2'
+    machine.run(['qemu-img', 'convert', '-f', 'raw', '-O', 'qcow2', str(raw), str(restored)])
+    restored.replace(disk)
+    raw.unlink()
+
+
+def select(release):
+    target = '/data/svc/ab-https/image/' + fixture['arch']
+    source = '/data/svc/ab-https/heads/' + release
+    machine.ssh(f'cp {source}/latest.json {target}/latest.json; cp {source}/latest.json.sig {target}/latest.json.sig')
+
+
+try:
+    backend = swtpm(True)
+    subprocess.run([probe, 'bootstrap-pair', info['public'], fixture_file.parent / 'tpm/aa.permit',
+                    'unix:' + str(socket), work / 'credentials'], check=True)
+    backend.terminate()
+    backend.communicate(timeout=10)
+    backend = swtpm(False)
+    proxy = Proxy(work / 'proxy.sock', str(socket) + '.ctrl')
+    fixture['tpm_socket'] = str(work / 'proxy.sock')
+    machine = Provider('qemu', fixture, work, 'build/host/howl')
+    machine.start()
+    a = wait_boot('A')
+    if a['tpm_anchor'] != info['anchors']['aa']:
+        raise RuntimeError('factory anchor mismatch')
+    machine.ssh('cp -r /usr/share/ab/seed/. /data/svc/ab-https/; '
+                'chown -R ab-https:ab-https /data/svc/ab-https; chmod -R a+rX /data/svc/ab-https')
+    # Preissued public permits are copied to the HTTPS fixture; no signer enters it.
+    machine.run(['scp', '-F', '/dev/null', '-P', str(machine.ssh_port), '-i', fixture['ssh_key'],
+                 '-o', 'StrictHostKeyChecking=no', '-o', 'UserKnownHostsFile=/dev/null', '-r',
+                 str(fixture_file.parent / 'tpm/permits'), 'root@127.0.0.1:/data/svc/ab-https/image/' + fixture['arch'] + '/'])
+    machine.ssh('chmod -R a+rX /data/svc/ab-https/image; chown -R ab-https:ab-https /data/svc/ab-https/image')
+    select('B')
+    machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)
+    machine.reboot('/usr/lib/werewolf/slot-update try')
+    b = wait_boot('B', a['boot_id'])
+    if b['tpm_anchor'] != info['anchors']['ab']:
+        raise RuntimeError('commit changed the authorized A/B pair')
+    machine.reboot('/usr/lib/werewolf/slot-update try')
+    a2 = wait_boot('A', b['boot_id'])
+    if a2['tpm_anchor'] != b['tpm_anchor']:
+        raise RuntimeError('operator rollback changed TPM state')
+    machine.reboot('/usr/lib/werewolf/slot-update try')
+    b2 = wait_boot('B', a2['boot_id'])
+    # The command is blocked at the TPM boundary; no test hooks enter the guest.
+    select('bad')
+    previous = b2
+    for cut, expected in [('before', 'ab'), ('after', 'bc')]:
+        proxy.arm(cut)
+        with (work / ('update-' + cut + '.log')).open('wb') as output:
+            command = subprocess.Popen(machine.ssh_args('/usr/lib/werewolf/slot-update check'),
+                                       stdout=output, stderr=subprocess.STDOUT)
+            try:
+                if not proxy.hit.wait(timeout=180) or proxy.failures:
+                    raise RuntimeError('retirement boundary not reached: ' + str(proxy.failures))
+                power_cycle()
+            finally:
+                try:
+                    command.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    command.kill()
+                    command.wait(timeout=10)
+        recovered = wait_boot('B', previous['boot_id'])
+        if recovered['tpm_anchor'] != info['anchors'][expected]:
+            raise RuntimeError('unsafe protected state after cut ' + cut)
+        previous = recovered
+        print('pass   tpm-guest-cut: ' + cut + ' NV extension; retained B recovered', flush=True)
+    # Resume the completed transition, then force a failed trial back to B.
+    machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)
+    machine.reboot('/usr/lib/werewolf/slot-update try')
+    failed = wait_boot('bad', previous['boot_id'], committed=False)
+    power_cycle()
+    recovered = wait_boot('B', failed['boot_id'])
+    if recovered['tpm_anchor'] != info['anchors']['bc']:
+        raise RuntimeError('failed-trial recovery lost protected pair')
+    power_off()
+    replay_retired()
+    offset = machine.log.stat().st_size
+    power_on()
+    refusal('RollbackRefused', offset)
+    replay_recovery = wait_boot('B', recovered['boot_id'])
+    if replay_recovery['tpm_anchor'] != info['anchors']['bc']:
+        raise RuntimeError('replay rejection changed the protected pair')
+    power_off()
+    replay_retired(unmeasured=True)
+    offset = machine.log.stat().st_size
+    power_on()
+    refusal('UnmeasuredBoot', offset)
+    unmeasured_recovery = wait_boot('B', replay_recovery['boot_id'])
+    if unmeasured_recovery['tpm_anchor'] != info['anchors']['bc']:
+        raise RuntimeError('unmeasured boot changed the protected pair')
+    power_off()
+    args = []
+    for position in range(0, len(machine.qemu_args)):
+        if position > 0 and machine.qemu_args[position - 1] in ['-chardev', '-tpmdev']:
+            continue
+        if machine.qemu_args[position] in ['-chardev', '-tpmdev']:
+            continue
+        if machine.qemu_args[position] == '-device' and machine.qemu_args[position + 1].startswith('tpm-tis'):
+            continue
+        if machine.qemu_args[position].startswith('tpm-tis'):
+            continue
+        args.append(machine.qemu_args[position])
+    offset = machine.log.stat().st_size
+    power_on(args)
+    refusal('FileNotFound', offset)
+    print('pass   tpm-guest: commit, operator rollback, deterministic cuts and failed-trial recovery', flush=True)
+except Exception:
+    if machine:
+        try:
+            # Public download bytes help distinguish a wrong server response from a bad permit.
+            result = machine.ssh('ls -l /data/svc/autoupdate/work/boot.permit; '
+                                 'openssl enc -base64 -A -in /data/svc/autoupdate/work/boot.permit',
+                                 check=False, timeout=10)
+            (work / 'failed-permit.log').write_text(result.stdout + result.stderr)
+            route = '/image/' + fixture['arch'] + '/permits/' + info['machine'] + '/' + info['ids']['B'] + '.permit'
+            command = "printf 'GET " + route + " HTTP/1.0\\r\\n\\r\\n' | " + \
+                      'openssl s_client -quiet -connect 127.0.0.1:443 2>/dev/null | openssl enc -base64 -A'
+            result = machine.ssh(command, check=False, timeout=10)
+            (work / 'failed-permit-response.base64').write_text(result.stdout)
+        except Exception:
+            pass
+    raise
+finally:
+    if machine:
+        machine.stop()
+    if proxy:
+        proxy.close()
+    if backend:
+        backend.terminate()
+        backend.communicate(timeout=10)

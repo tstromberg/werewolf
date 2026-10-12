@@ -35,11 +35,11 @@ pub const usage =
     \\usage: howl build --with FORM,... [--build] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, playground
+    \\       howl run [--with FORM,...] [--on TARGET] [--secure] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, playground
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] " ++
+    "] [--secure] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] " ++
     "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
@@ -88,6 +88,9 @@ pub fn main(init: std.process.Init) void {
             _bhyve,
             _firecracker,
             _unpack,
+            @"_boot-permit",
+            @"_boot-record",
+            @"_local-refresh",
         },
         args[1],
     ) orelse
@@ -109,6 +112,9 @@ pub fn main(init: std.process.Init) void {
         .form => adhoc.form(io, gpa, args[2..], &why),
         // Internal: the Makefile's image targets (build.zig).
         ._build => native.buildTargets(io, gpa, args[2..], &why),
+        .@"_boot-permit" => @import("enrollment.zig").permit(io, gpa, args[2..]),
+        .@"_boot-record" => @import("enrollment.zig").verify(io, gpa, args[2..]),
+        .@"_local-refresh" => @import("local-secure.zig").refresh(io, gpa, args[2..], &why),
         // Internal: create runs howl again as the bhyve or Firecracker supervisor.
         ._bhyve => if (args.len < 5)
             why.refuse("_bhyve NAME CONFIG BHYVE...", .{})
@@ -212,6 +218,7 @@ const reserved = [_][]const u8{
     "size",
     "app",
     "allow-from",
+    "secure",
 };
 
 /// chain returns form's chain, base first, as the build lays it out
@@ -403,6 +410,7 @@ pub const Options = struct {
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository, so the machine does not update them.
     local: bool = false,
+    secure: bool = false,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -1275,9 +1283,11 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
     const verbose, const some = try verboseFlag(gpa, all);
     const dev, const rest = try takeFlag(gpa, some, &.{"--dev"});
     const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
-    const yes, const args = try takeFlag(gpa, more, &.{"--yes"});
+    const yes, const before_secure = try takeFlag(gpa, more, &.{"--yes"});
+    const secure, const args = try takeFlag(gpa, before_secure, &.{"--secure"});
     var o = try options(gpa, args, why);
     o.local = from_tree;
+    o.secure = secure;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
     const iface = try formInterface(io, gpa, o.form, why);
@@ -1295,6 +1305,10 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
 
     const eng = engine(io, gpa, o.on);
     const on = eng.on;
+    if (o.secure and (on != .lima or dev)) return why.refuse(
+        "--secure requires --on lima and refuses --dev",
+        .{},
+    );
     const tell: Tell = .{
         .verbose = verbose,
         .command = try gpa.print("howl {s} {s}", .{
@@ -1567,6 +1581,8 @@ fn beneath(path: []const u8, parent: []const u8) bool {
 const testing = std.testing;
 
 test {
+    _ = @import("enrollment.zig");
+    _ = @import("local-secure.zig");
     _ = @import("apply.zig");
     _ = lima;
     _ = bhyve;

@@ -65,16 +65,16 @@ a host-verified direct launch would require a separate trust design.
 ### Protected rollback
 
 TPM policy must keep the current and retained last-known-good releases bootable.
-A healthy commit must not raise a floor that rejects its predecessor.
-Retire older releases only when safely replacing that retained fallback.
+A healthy commit preserves its predecessor; retire releases when replacing that fallback.
 Signed boot identity must match protected authorization before handover.
-The serial-only TPM prototype is not yet a compatible production policy.
+The [exact-pair retirement protocol](tpm-ab-retirement.md) replaces the serial prototype.
+Its opt-in guest checks, provisioning and actual QEMU x86_64 power cuts are verified.
 
-Guest root must not lower or remove the NV floor, clear the TPM, or provision
+Guest root must not replace the protected anchor, clear the TPM, or provision
 a replacement index with weaker permissions. Hierarchy credentials remain on
 the host. NV writes need authenticated transitions preserving the retained fallback;
 an ordinary owner-writable index or guest-held password is insufficient.
-Unprovisioned devices remain a posture failure until the full policy is tested.
+Unprovisioned devices fail mandatory boot and cannot pass protected-rollback posture.
 
 ### Clouds
 
@@ -111,9 +111,9 @@ actual device commands and hierarchy reset paths, not just serial comparisons.
 
 Initial tests use disposable keys, cloned variables and local TPM state.
 They prove A/B updates, tamper, unsigned image, wrong signer and loader-option
-override rejection. Real TPM commands refuse replay and hierarchy reset; full
-TPM-enrolled boot and retired-release rejection remain open. Power cuts during
-installation, commit and TPM transitions must preserve authorized A/B recovery.
+override rejection. QEMU x86_64 TPM-gated boots refuse retired releases, missing
+TPMs and unmeasured UKIs. Actual power cuts around retirement preserve B;
+commit and operator rollback retain both members. Lima arm64 and cloud TPM boots remain open.
 
 References: [systemd-stub](https://github.com/systemd/systemd/blob/main/man/systemd-stub.xml),
 [QEMU variables](https://www.qemu.org/docs/master/devel/uefi-vars.html),

@@ -57,7 +57,8 @@ runsv starts it as `/etc/sv/slot-keep/run`, with no arguments.
    is renamed to `werewolf-SLOT.conf`, then `sync`. If the loader already
    points at this slot, it skips the write.
 5. **Commit**: it creates `/run/werewolf/committed`, logs one line, and
-   parks (`sv down .`).
+   parks (`sv down .`). Commit never retires the retained A/B release in the TPM;
+   retirement belongs to replacing the inactive slot (docs/design/tpm-ab-retirement.md).
 
 ## Drawbacks
 
@@ -90,5 +91,5 @@ A slot that boots but cannot serve, or cannot update, would be kept for good.
 - **Logs each step**: why it waits, why it did not commit, what it committed.
 - **Tested**: unit tests for `serviceHealthy`, `isTried` and `isSaved`;
   `check-slot` and `check-updater` (GRUB, as after bite), each with a boot
-  that must be committed. `check-persist` and `check-dist` boot werewolf's
-  own disk (systemd-boot); no check runs a whole update there.
+  that must be committed. `check-persist` and `check-dist` boot werewolf's own disk;
+  `check-ab-qemu` covers signed upgrade, commit and both rollback paths.

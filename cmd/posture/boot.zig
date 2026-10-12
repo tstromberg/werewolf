@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const testing = std.testing;
 const ipe = @import("ipe");
 const tpm = @import("tpm");
+const cmdline = @import("cmdline");
 
 const posture = @import("posture.zig");
 const Posture = posture.Posture;
@@ -136,23 +137,31 @@ pub fn check(p: *Posture) !void {
         .id = "boot-rollback-protected",
         .area = "boot",
         .name = "Rollback protected",
-        .why = "An older image, still signed, is an easier target than a new one; the boot must " ++
-            "refuse to go back to it.",
-        .how = "the running serial meets the protected TPM floor, checked before handover, " ++
+        .why = "Retired signed images must be refused while both authorized A/B releases remain " ++
+            "bootable.",
+        .how = "the running release belongs to the protected TPM pair, checked before handover, " ++
             "marked in " ++ rollback_marker,
-        .result = if (rollbackProtected(has_tpm, checked_rollback) and tpm.protected(p.io, p.gpa))
+        .result = if (rollbackProtected(has_tpm, checked_rollback) and pairProtected(p))
             .pass
         else
             .fail,
         .detail = if (!has_tpm)
-            "no TPM device: no counter to guard the slot serial"
+            "no TPM device: no protected release authorization"
         else
-            "a TPM is here, but no counter checked this boot",
+            "protected A/B authorization must match this boot",
     });
 }
 
+fn pairProtected(p: *Posture) bool {
+    var bad: cmdline.Failure = .{};
+    const cmd = cmdline.parse(p.read("/proc/cmdline"), &bad) orelse return false;
+    const victim = cmd.victim orelse return false;
+    const directory = p.gpa.print("/victim{s}/boot-state", .{victim.path}) catch return false;
+    return tpm.protected(p.io, p.gpa, cmd.release, directory);
+}
+
 /// rollbackProtected requires both protected storage and stage0's proof that
-/// the running slot's serial met its protected floor.
+/// the running release belongs to its protected pair.
 fn rollbackProtected(has_tpm: bool, checked: bool) bool {
     return has_tpm and checked;
 }

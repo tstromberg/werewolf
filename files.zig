@@ -7,6 +7,7 @@
 pub const tiers_pub = @embedFile("release/tiers.pub");
 pub const advisories = @embedFile("release/advisories");
 pub const enroll_boot = @embedFile("tools/enroll-boot");
+pub const local_publisher = @embedFile("tools/local-publisher");
 pub const verify_boot_disk = @embedFile("tools/verify-boot-disk");
 
 /// posture_known are the posture checks every form of a kind fails.

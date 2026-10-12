@@ -43,9 +43,27 @@ pub const Cmdline = struct {
     /// native selects the slot from the signed UKI's canonical firmware path.
     native: bool = false,
     secure: bool = false,
+    tpm: bool = false,
+    release: ?[32]u8 = null,
 };
 
 const Key = std.meta.FieldEnum(Cmdline);
+
+test "TPM enforcement requires sealed secure native identity and rejects overrides" {
+    const t = std.testing;
+    var f: Failure = .{};
+    const native = "werewolf.native=1 werewolf.secure=1 " ++
+        "werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewolf werewolf.esp=57E1-F000";
+    const release = " werewolf.release=" ++ @as([64]u8, @splat('a'));
+    try t.expect(parse(native ++ " werewolf.tpm=2" ++ release, &f).?.tpm);
+    for ([_][]const u8{
+        native ++ " werewolf.tpm=2",
+        native ++ release,
+        native ++ " werewolf.tpm=1" ++ release,
+        native ++ " werewolf.tpm=2" ++ release ++ release,
+        "werewolf.tpm=2" ++ release,
+    }) |bad| try t.expect(parse(bad, &f) == null);
+}
 
 /// max_deadman is the longest the deadman may wait, in seconds.
 pub const max_deadman = 600;
@@ -89,6 +107,16 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .check => c.check = if (isOne(v)) true else return refuse(f, "not 1"),
             .native => c.native = if (isOne(v)) true else return refuse(f, "not 1"),
             .secure => c.secure = if (isOne(v)) true else return refuse(f, "not 1"),
+            .tpm => c.tpm = if (std.mem.eql(u8, v, "2"))
+                true
+            else
+                return refuse(f, "not protocol 2"),
+            .release => {
+                var digest: [32]u8 = undefined;
+                if (v.len != 64) return refuse(f, "not a SHA-256 release identity");
+                _ = std.fmt.hexToBytes(&digest, v) catch return refuse(f, "not a SHA-256 identity");
+                c.release = digest;
+            },
         }
     }
     if (c.native and (c.victim == null or c.esp == null or c.grubenv != null or c.root.len > 0)) {
@@ -98,6 +126,10 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
     if (c.secure and !c.native) {
         f.word = "werewolf.secure";
         return refuse(f, "requires signed native boot identity");
+    }
+    if (c.tpm != (c.release != null) or (c.tpm and !c.secure)) {
+        f.word = "werewolf.tpm";
+        return refuse(f, "requires secure native boot and an exact release identity");
     }
     if (!c.native and (c.victim == null) != (c.slot == null)) {
         f.word = "werewolf.victim";

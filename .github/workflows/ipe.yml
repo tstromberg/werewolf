@@ -30,7 +30,7 @@ jobs:
         run: |
           sudo test/ci-setup
           sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc \
-            python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools
+            python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools systemd-boot-efi
       - name: Kernel version agreement
         run: |
           make build/lock/kernel.lock.json
@@ -57,6 +57,14 @@ jobs:
         run: |
           make build/host/tpm-policy
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
+          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-ab
+          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-enrollment
+      - name: Protected TPM guest and power cuts
+        if: runner.arch == 'X64'
+        env:
+          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
+          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
+        run: make IPE=1 check-tpm-guest
       - name: Keep console logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -68,3 +76,7 @@ jobs:
             build/*/check/secureboot/*.log
             build/*/ipe/check/provider-ab-qemu/*.log
             build/*/ipe/check/provider-ab-qemu/phases.json
+            build/*/ipe/check/tpm-guest/fixture.log
+            build/*/ipe/check/tpm-guest/factory.log
+            build/*/ipe/check/tpm-guest/guest/*.log
+            build/*/ipe/check/tpm-guest/guest/evidence.jsonl

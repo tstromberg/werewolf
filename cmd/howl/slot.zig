@@ -33,19 +33,34 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     try Dir.cwd().createDirPath(b.io, out);
     const enrollment = try b.path("{s}/image-enrollment", .{out});
-    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\nnative {}\n", .{
-        b.spec.ipe_updates orelse "", b.spec.image_serial orelse "", b.spec.boot_key != null,
-        b.spec.boot_native,
+    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\nnative {}\ntpm {s}\nca " ++
+        "{s}\nport {d}\n", .{
+        b.spec.ipe_updates orelse "",  b.spec.image_serial orelse "", b.spec.boot_key != null,
+        b.spec.boot_native,            b.spec.tpm_pub orelse "",      b.spec.update_ca orelse "",
+        b.spec.update_port orelse 443,
     }));
     // howl itself holds the release keys, advisories and known posture
     // failures (files.zig), so b.self covers them.
     const fixed = [_][]const u8{ rootfs, kernel_rootfs, b.self, enrollment };
     const signer: []const []const u8 = if (b.spec.ipe_cert) |cert| &.{cert} else &.{};
     const boot_signer: []const []const u8 = if (b.spec.boot_cert) |cert| &.{cert} else &.{};
+    const tpm_signer: []const []const u8 = if (b.spec.tpm_pub) |pubkey| &.{pubkey} else &.{};
+    const update_ca: []const []const u8 = if (b.spec.update_ca) |cert| &.{cert} else &.{};
     const inputs = try mem.concat(
         b.gpa,
         []const u8,
-        &.{ &fixed, signer, boot_signer, b.form_files, b.rootfs, b.bins, b.made, b.app },
+        &.{
+            &fixed,
+            signer,
+            boot_signer,
+            tpm_signer,
+            update_ca,
+            b.form_files,
+            b.rootfs,
+            b.bins,
+            b.made,
+            b.app,
+        },
     );
     const began = try b.begin(stamp, inputs) orelse return;
     // A step that fails part way leaves no stamp to call it made.
@@ -94,6 +109,14 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const d = try b.path("{s}/usr/share/werewolf", .{meta_dir});
     if (b.spec.ipe_kernel != null) try b.put(d, "ipe", "required\n");
     if (b.spec.boot_key != null) try b.put(d, "secure-boot", "required\n");
+    if (b.spec.tpm_pub) |pubkey| {
+        const data = try b.read(pubkey, 8192);
+        _ = try @import("apk").parseKey(b.gpa, data);
+        const target = try b.path("{s}/tpm", .{d});
+        try Dir.cwd().createDirPath(b.io, target);
+        try b.put(target, "protocol", "2\n");
+        try b.put(target, "signer.pub", data);
+    }
     if (b.spec.ipe_updates) |url| {
         const dest = try b.path("{s}/image-update", .{d});
         try Dir.cwd().createDirPath(b.io, dest);
@@ -105,6 +128,24 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         });
         _ = try @import("apk").parseKey(b.gpa, public_key);
         try b.put(dest, "image.pub", public_key);
+        if (b.spec.update_port) |port| {
+            if (port == 0) return error.BadImageChannel;
+            try b.put(dest, "port", try b.path("{d}\n", .{port}));
+            try b.put(dest, "permit-context", "2\n");
+            const net_path = try b.path("{s}/net", .{d});
+            const net = try b.read(net_path, 64 << 10);
+            try b.write(net_path, try b.path("{s}connect 69 tcp {d}\n", .{ net, port }));
+        }
+        if (b.spec.update_ca) |ca| {
+            const existing = try b.capture(stamp, &.{
+                "bsdtar", "-xOf", rootfs, "etc/ssl/certs/ca-certificates.crt",
+            });
+            const pem = try b.read(ca, 32 << 10);
+            try Dir.cwd().createDirPath(b.io, try b.path("{s}/etc/ssl/certs", .{ro_dir}));
+            try b.put(ro_dir, "etc/ssl/certs/ca-certificates.crt", try b.path("{s}\n{s}\n", .{
+                existing, pem,
+            }));
+        }
     }
     const kernel_pkg = if (b.spec.ipe_kernel != null)
         mem.trim(
@@ -226,7 +267,9 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
     );
     try stage0Init(b, rootfs);
     try stage0(b, "stage0", "modules", b.modules.native);
-    if (goals.slot) try stage0(b, "stage0-bitten", "modules-bitten", b.modules.all);
+    if (goals.slot or goals.prebuilt or
+        (b.spec.ipe_updates != null and (goals.disk or goals.qcow2)))
+        try stage0(b, "stage0-bitten", "modules-bitten", b.modules.all);
     if (goals.image or (b.spec.boot_key != null and !b.spec.boot_native)) try initramfs(b, root);
     // The slot's kernel as Alpine ships it, not BUILD/vmlinuz: on aarch64
     // an EFI zboot image, 10 MB to the raw Image's 36, which a UEFI
@@ -789,6 +832,8 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
     const options = try b.path("{s}.options", .{target});
     var want: Io.Writer.Allocating = .init(b.gpa);
     try want.writer.print("size-mib {d}\n", .{b.spec.disk.size_mib});
+    const boot_state = b.spec.boot_state orelse b.env.get("WEREWOLF_BOOT_STATE");
+    try want.writer.print("boot-state {s}\n", .{boot_state orelse ""});
     if (!qcow2) for (b.spec.disk.args) |arg| try want.writer.print("arg {s}\n", .{arg});
     const was = Dir.cwd().readFileAlloc(b.io, options, b.gpa, .limited(64 << 10)) catch "";
     if (!mem.eql(u8, was, want.written())) try b.write(options, want.written());
@@ -800,12 +845,13 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
         try b.path("{s}/prebuilt/{t}/latest.json", .{ out, b.spec.arch }),
         try b.path("{s}/prebuilt/{t}/latest.json.sig", .{ out, b.spec.arch }),
     } else &.{};
+    const state_inputs: []const []const u8 = if (boot_state) |file| &.{file} else &.{};
     const began = try b.begin(target, try mem.concat(b.gpa, []const u8, &.{ &.{
         try b.path("{s}/vmlinuz", .{slot}),    try b.path("{s}/stage0.zst", .{slot}),
         try b.path("{s}/root.erofs", .{slot}), try b.path("{s}/cmdline", .{slot}),
         boot,                                  b.self,
         options,
-    }, signed_inputs, proof_inputs })) orelse return;
+    }, signed_inputs, proof_inputs, state_inputs })) orelse return;
     const t = try b.tmp(target);
     if (qcow2) {
         const raw = try b.path("{s}/disk.raw", .{out});
