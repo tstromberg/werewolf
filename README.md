@@ -8,7 +8,7 @@ vulnerabilities. Our mitigations prevent 48 of 49 Linux exploits in CISA's Known
 
 - Verified execution: Binaries can only be executed from a cryptographically verified, read-only image.
 - Minimal, privilege-separated OS: Minimal surface area - most images don't even ship with a shell.
-- Automatic remediation: Automatic CVE/CISA-KEV driven updates by default, with rollback on failure
+- Automatic remediation: Automatic CVE/KEV driven updates by default, with rollback on failure
 - Declarative runtime confinement: Explicit syscall, filesystem, and network permissions constrain compromised components.
 - Kernel lockdown: Irreversible restrictions block dangerous kernel interfaces, such as io_uring, eBPF, module loading
 

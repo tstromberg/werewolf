@@ -23,5 +23,5 @@
 # module signatures (boot-sig-enforced), and no TPM counter guards the
 # slot serial (boot-rollback-protected). Phase 4 and phase 5 close these.
 
-dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?boot-secure-boot boot-rollback-protected boot-sig-enforced
-* ?boot-secure-boot boot-rollback-protected boot-sig-enforced
+dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced
+* ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced

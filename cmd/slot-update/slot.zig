@@ -40,6 +40,7 @@ const Update = m.Update;
 /// root.erofs with its dm-verity tree, vmlinuz, and stage0.zst. It expects
 /// packagesPlan to have installed work_dir/root and work_dir/kernel.
 pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
+    try u.requireLocalUpdate();
     const io = u.io;
     const root = work_dir ++ "/root";
     try Dir.cwd().createDirPath(io, work_dir ++ "/slot");
@@ -226,6 +227,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
 /// in werewolf/ beside GRUB's directory. /victim is read-only, so the mount
 /// broker lends writable mounts.
 pub fn install(u: *Update, build: []const u8) !void {
+    try u.requireLocalUpdate();
     if (u.cmd.grubenv == null) return installEsp(u, build);
     const io = u.io;
     u.step = "install";
@@ -317,6 +319,7 @@ fn rememberDeclaration(u: *Update, victim: []const u8, other: []const u8) !void 
 /// manifest may select only the slot that holds its exact image inputs.
 pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
     Dir.cwd().access(u.io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
+    try u.requireLocalUpdate();
     const lock = try u.lock();
     defer _ = linux.close(lock);
     const victim = try u.held(.victim);
@@ -630,6 +633,10 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
                 u.detail = path;
                 return err;
             },
+            // Alpine 3.24 still names index signatures .SIGN.RSA and
+            // verifies them with SHA-1. Werewolf and Wolfi indexes must use
+            // .SIGN.RSA256; do not extend this exception to their keys.
+            .allow_legacy_sha1 = std.mem.eql(u8, keys, "/etc/werewolf/alpine-keys"),
         });
     }
     var d = try Dir.cwd().openDir(u.io, cache, .{ .follow_symlinks = false });

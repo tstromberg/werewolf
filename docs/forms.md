@@ -24,7 +24,7 @@ and key, and `make list-forms` shows the chains.
 | `app` | `prod` | where an application is laid; its service's `app` user gets a hashed uid; no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
 | `php` | `nginx` | with php-fpm running the site's `.php` files |
-| `node`, `python`, `ruby`, `jre` | `app` | a runtime, for the service and application a form on it brings |
+| `node`, `python`, `ruby`, `jre`, `jre21` | `app` | a runtime, for the service and application a form on it brings; `jre` is Java 27 and `jre21` is Java 21 |
 | `node-app`, `python-app`, `ruby-app`, `jre-app` | `node`, `python`, `ruby`, `jre` | a service for the application `--app` lays, on :8080; none shipped |
 | `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](../forms/postgresql/README.md)) |
 | `demo` | `postgresql` | nginx and the status page ([demo.md](../forms/demo/README.md)) |
@@ -60,7 +60,7 @@ and key, and `make list-forms` shows the chains.
 | `mariadb-tcp` | `mariadb-local` | the same server on TCP port 3306, for a client that is not on this machine ([mariadb-tcp.md](../forms/mariadb-tcp/README.md)) |
 | `wordpress-mariadb` | `wordpress`, with `mariadb-local` | WordPress with its tables in MariaDB, its role `php` by unix_socket, holding its database alone ([wordpress-mariadb.md](../forms/wordpress-mariadb/README.md)) |
 | `jellyfin` | `prod-ssh` | Jellyfin behind Caddy's HTTPS, media copied in over ssh, its wizard completed before anyone reaches it, ffmpeg narrowed, reaching nothing ([jellyfin.md](../forms/jellyfin/README.md)) |
-| `kafka` | `prod` | Kafka 4.3 in KRaft, one broker and controller, SCRAM over TLS, users from the config, ACLs denying what none allows ([kafka.md](../forms/kafka/README.md)) |
+| `kafka` | `jre21` | Kafka 4.3 in KRaft, one broker and controller, SCRAM over TLS, users from the config, ACLs denying what none allows ([kafka.md](../forms/kafka/README.md)) |
 | `openldap` | `prod` | OpenLDAP 2.6 on LDAPS alone, no anonymous binds, passwords stored as Argon2id and never read back ([openldap.md](../forms/openldap/README.md)) |
 | `otel-collector` | `prod` | the OpenTelemetry Collector taking OTLP over TLS with a bearer token, passing it to the one endpoint its settings name ([otel-collector.md](../forms/otel-collector/README.md)) |
 | `unbound` | `prod` | a recursive, validating resolver answering private ranges alone, its forward zones from the settings ([unbound.md](../forms/unbound/README.md)) |
@@ -90,12 +90,12 @@ and key, and `make list-forms` shows the chains.
 | `umami` | `prod`, with `postgresql`, `caddy` | web analytics without cookies, the default administrator password refused ([umami.md](../forms/umami/README.md)) |
 | `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
 | `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
-| `opensearch` | `prod` | one node of log search, TLS and the security plugin on, no demo users ([opensearch.md](../forms/opensearch/README.md)) |
+| `opensearch` | `jre` | one node of log search, TLS and the security plugin on, no demo users, the `jre` form's Java 27 ([opensearch.md](../forms/opensearch/README.md)) |
 | `suricata` | `prod` | Suricata on a packet feed, Emerging Threats Open cached on the data partition, no control socket ([suricata.md](../forms/suricata/README.md)) |
 | `opencanary` | `prod` | a low-interaction honeypot: six bait ports, nothing else, no real login ([opencanary.md](../forms/opencanary/README.md)) |
 | `zeek` | `prod` | Zeek on the same kind of feed, JSON logs, no packages ([zeek.md](../forms/zeek/README.md)) |
 | `velociraptor` | `prod` | the Velociraptor server, keys generated on the machine, the GUI on loopback ([velociraptor.md](../forms/velociraptor/README.md)) |
-| `dependency-track` | `prod`, with `postgresql`, `caddy` | Dependency-Track, the published administrator password replaced before it is reachable ([dependency-track.md](../forms/dependency-track/README.md)) |
+| `dependency-track` | `jre21`, with `postgresql`, `caddy` | Dependency-Track, the published administrator password replaced before it is reachable ([dependency-track.md](../forms/dependency-track/README.md)) |
 | `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j's HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
 | `iris` | `prod`, with `postgresql`, `caddy` | DFIR-IRIS, the administrator from the config, the web server on loopback ([iris.md](../forms/iris/README.md)) |
 | `misp` | `prod`, with `mariadb-tcp`, `valkey`, `caddy` | MISP core behind Caddy, the image's published passwords not set, modules not started ([misp.md](../forms/misp/README.md)) |

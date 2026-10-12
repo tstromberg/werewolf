@@ -23,8 +23,13 @@ const max_index = 256 << 20;
 const max_head = 32 << 20;
 
 /// Trusted is a key an index is checked against. name is its file name,
-/// which the index's signature file names.
-pub const Trusted = struct { name: []const u8, key: Key };
+/// which the index's signature file names. Legacy SHA-1 index signatures
+/// require an explicit opt-in, used only for Alpine's repository.
+pub const Trusted = struct {
+    name: []const u8,
+    key: Key,
+    allow_legacy_sha1: bool = false,
+};
 
 /// Index maps a package's cache name, NAME-VERSION.HASH (HASH is the first
 /// 4 bytes of C: in hex), to the SHA-1 of its control segment.
@@ -86,16 +91,20 @@ fn verified(gpa: Allocator, keys: []const Trusted, data: []const u8) !Verified {
     if (files.len != 1) return error.BadSignatureSegment;
     const name = files[0].name;
     const signed = data[sig.end..];
-    const key, const sha256 = for (keys) |k| {
-        if (std.mem.startsWith(u8, name, ".SIGN.RSA256.") and
-            std.mem.eql(u8, name[".SIGN.RSA256.".len..], k.name)) break .{ k.key, true };
-        if (std.mem.startsWith(u8, name, ".SIGN.RSA.") and
-            std.mem.eql(u8, name[".SIGN.RSA.".len..], k.name)) break .{ k.key, false };
-    } else return error.UnknownKey;
-    if (sha256)
-        try verifyHash(Sha256, key, signed, files[0].data)
+    const key_name, const sha256 = if (std.mem.cutPrefix(u8, name, ".SIGN.RSA256.")) |n|
+        .{ n, true }
+    else if (std.mem.cutPrefix(u8, name, ".SIGN.RSA.")) |n|
+        .{ n, false }
     else
-        try verifyHash(Sha1, key, signed, files[0].data);
+        return error.BadSignatureSegment;
+    const trusted = for (keys) |k| {
+        if (std.mem.eql(u8, key_name, k.name)) break k;
+    } else return error.UnknownKey;
+    if (!sha256 and !trusted.allow_legacy_sha1) return error.LegacySha1;
+    if (sha256)
+        try verifyHash(Sha256, trusted.key, signed, files[0].data)
+    else
+        try verifyHash(Sha1, trusted.key, signed, files[0].data);
 
     // Refuse anything after the signed segment.
     const body = try segment(gpa, signed, 0, max_index);
@@ -402,7 +411,7 @@ pub fn verifyHash(comptime Hash: type, key: Key, data: []const u8, sig: []const 
 
 const testing = std.testing;
 
-fn testKeys(gpa: Allocator) ![]const Trusted {
+fn testKeys(gpa: Allocator) ![]Trusted {
     const k = try parseKey(gpa, @embedFile("testdata/apk/test.rsa.pub"));
     return gpa.dupe(Trusted, &.{.{ .name = "test.rsa.pub", .key = k }});
 }
@@ -412,10 +421,12 @@ test readIndex {
     defer arena.deinit();
     const a = arena.allocator();
     const keys = try testKeys(a);
-    for ([_][]const u8{
-        @embedFile("testdata/apk/APKINDEX.sha256.tar.gz"),
-        @embedFile("testdata/apk/APKINDEX.sha1.tar.gz"),
-    }) |data| {
+    const sha256 = @embedFile("testdata/apk/APKINDEX.sha256.tar.gz");
+    const sha1 = @embedFile("testdata/apk/APKINDEX.sha1.tar.gz");
+    var refused: Index = .empty;
+    try testing.expectError(error.LegacySha1, readIndex(a, keys, &refused, sha1));
+    keys[0].allow_legacy_sha1 = true;
+    for ([_][]const u8{ sha256, sha1 }) |data| {
         var idx: Index = .empty;
         const kept = try readIndex(a, keys, &idx, data);
         try testing.expectEqual(2, idx.count());

@@ -387,7 +387,7 @@ fn pledgeAndExec(
 ) noreturn {
     if (!learn) {
         var filter_buf: [seal.max_filter]seal.Filter = undefined;
-        const filter = seal.buildFilter(&filter_buf, promises, true);
+        const filter = seal.buildServiceFilter(&filter_buf, promises, @intCast(prog));
         _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
     }
     const rc = linux.syscall5(

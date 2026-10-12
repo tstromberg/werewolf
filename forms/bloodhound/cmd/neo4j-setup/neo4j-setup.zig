@@ -8,6 +8,7 @@
 //! forms/bloodhound/README.md.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -15,6 +16,12 @@ const Allocator = std.mem.Allocator;
 const password_path = "/run/svc/neo4j/neo4j-password";
 const marker = "/data/svc/neo4j/initial-password-set";
 const java = "/usr/bin/java";
+const jna_link = "/run/svc/neo4j/libjnidispatch.so";
+const jna = switch (builtin.cpu.arch) {
+    .aarch64 => "/usr/lib/jna/aarch64/libjnidispatch.so",
+    .x86_64 => "/usr/lib/jna/x86_64/libjnidispatch.so",
+    else => @compileError("no JNA library for this arch"),
+};
 
 const dirs = [_][]const u8{
     "/data/svc/neo4j/data",
@@ -32,6 +39,11 @@ pub fn main(init: std.process.Init) void {
 }
 
 fn run(io: Io, gpa: Allocator) !void {
+    // JNA would unpack this into a temporary directory, which is noexec.
+    // The file on the root is the one for this arch; the link is where
+    // both JVMs are told to load it.
+    Dir.cwd().deleteFile(io, jna_link) catch {};
+    try Dir.cwd().symLink(io, jna, jna_link, .{});
     for (dirs) |d| Dir.cwd().createDirPath(io, d) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -51,11 +63,12 @@ fn run(io: Io, gpa: Allocator) !void {
 
     var child = try std.process.spawn(io, .{
         .argv = &.{
-            java,                                      "-Dapp.name=neo4j-admin",
-            "-Dapp.home=/var/lib/neo4j",               "-Dbasedir=/var/lib/neo4j",
-            "-Djava.io.tmpdir=/run/svc/neo4j",         "-classpath",
-            "/var/lib/neo4j/lib/*",                    "org.neo4j.server.startup.NeoAdminBoot",
-            "dbms",                                    "set-initial-password",
+            java,                                     "-Dapp.name=neo4j-admin",
+            "-Dapp.home=/var/lib/neo4j",              "-Dbasedir=/var/lib/neo4j",
+            "-Djava.io.tmpdir=/run/svc/neo4j",        "-Djna.nosys=true",
+            "-Djna.boot.library.path=/run/svc/neo4j", "-classpath",
+            "/var/lib/neo4j/lib/*",                   "org.neo4j.server.startup.NeoAdminBoot",
+            "dbms",                                   "set-initial-password",
             "--require-password-change=false",        password,
         },
         .stdin = .ignore,

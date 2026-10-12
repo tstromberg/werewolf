@@ -1,4 +1,4 @@
-# kafka: prod, with Apache Kafka 4.3 as one KRaft node, broker and
+# kafka: jre21, with Apache Kafka 4.3 as one KRaft node, broker and
 # controller in one JVM. Clients reach it on :9093 over TLS with
 # SASL/SCRAM-SHA-512 alone; the controller listens on loopback, for this
 # node's own broker. The certificate, the users and their passwords come
@@ -8,14 +8,10 @@
 # leash starts it (etc/sv/kafka/service) as the kafka user, by running
 # java directly: none of Kafka's scripts, and no shell. See
 # forms/kafka/README.md.
-base: prod
+base: jre21
 
 packages:
   - kafka-4.3
-
-# Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
-# Kafka to machine code as it runs.
-allow: [jit]
 
 # Kafka's scripts, and the bash they name: leash runs java itself, and
 # kafka-setup the formatter.
@@ -75,7 +71,7 @@ check:
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: java runs Kafka, which is what this form is for
-  kernel-write-xor-execute: the JVM compiles Kafka to machine code as it runs (allow jit)
+  kernel-write-xor-execute: the JVM compiles Kafka to machine code as it runs (allow jit, from jre21)
 
 services:
   # Kafka, as its own user: it may bind :9093, and :9094 on loopback for

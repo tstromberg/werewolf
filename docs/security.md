@@ -197,8 +197,9 @@ cloud-init's user-data, once werewolf has committed.
   CAP_SYS_ADMIN dropped), so the sysctls marked "yes" above stay set. The
   mount broker, outside that domain, still mounts the few filesystems it
   names for any root process that asks (cmd/mount-broker/README.md). What
-  root may run is bounded by what the verified root holds; IPE (phase 4 of
-  the design) would bound it by signature.
+  root may run is bounded by what the verified root holds. Opt-in IPE
+  builds enforce one signed root globally, including executable mappings;
+  production rollout awaits signed prebuilt updates ([design/ipe.md](design/ipe.md)).
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
   them, or GRUB's config, and keep them across reboots. Secure Boot is off,
   since Alpine's kernel is not signed for it. Posture measures the whole

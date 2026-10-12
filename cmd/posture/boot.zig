@@ -5,6 +5,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const testing = std.testing;
+const ipe = @import("ipe");
 
 const posture = @import("posture.zig");
 const Posture = posture.Posture;
@@ -67,8 +68,27 @@ fn readBytes(path: []const u8, buf: []u8) ?[]const u8 {
 }
 
 pub fn check(p: *Posture) !void {
+    const ipe_on = ipe.enforced(
+        p.read(ipe.policy_path),
+        p.read(ipe.active),
+        p.read(ipe.base ++ "/enforce"),
+    );
+    const bounded = posture.capBit(p.read("/proc/1/status"), "CapBnd", 33);
+    try p.add(.{
+        .id = "boot-ipe-enforced",
+        .area = "boot",
+        .name = "Only this image's native code executes",
+        .why = "A trusted loader must not map untrusted native code, and root must not " ++
+            "disable the integrity policy. IPE judges executable files and mappings globally.",
+        .how = "the single-root default-deny policy is active and enforcing, and PID 1 " ++
+            "cannot regain CAP_MAC_ADMIN",
+        .result = if (ipe_on and bounded != null and !bounded.?) .pass else .fail,
+        .detail = if (!ipe_on) "no enforcing release IPE policy" else "",
+    });
     var buf: [64]u8 = undefined;
     const sb = parseSecureBoot(readBytes(secure_boot_var, &buf) orelse "");
+    const has_tpm = exists(p.io, "/dev/tpmrm0");
+    const checked_rollback = exists(p.io, rollback_marker);
     try p.add(.{
         .id = "boot-secure-boot",
         .area = "boot",
@@ -102,15 +122,18 @@ pub fn check(p: *Posture) !void {
             "refuse to go back to it.",
         .how = "a TPM counter at least the running slot's serial, checked before handover, " ++
             "marked in " ++ rollback_marker,
-        .result = if (exists(p.io, "/dev/tpmrm0") and exists(p.io, rollback_marker))
-            .pass
-        else
-            .fail,
-        .detail = if (!exists(p.io, "/dev/tpmrm0"))
+        .result = if (rollbackProtected(has_tpm, checked_rollback)) .pass else .fail,
+        .detail = if (!has_tpm)
             "no TPM device: no counter to guard the slot serial"
         else
             "a TPM is here, but no counter checked this boot",
     });
+}
+
+/// rollbackProtected requires both protected storage and stage0's proof that
+/// its counter was at least the running slot's serial.
+fn rollbackProtected(has_tpm: bool, checked: bool) bool {
+    return has_tpm and checked;
 }
 
 test parseSecureBoot {
@@ -119,6 +142,13 @@ test parseSecureBoot {
     try testing.expectEqual(null, parseSecureBoot(&.{ 0, 0, 0, 0, 2 }));
     try testing.expectEqual(null, parseSecureBoot(&.{ 0, 0, 0, 0 }));
     try testing.expectEqual(null, parseSecureBoot(""));
+}
+
+test rollbackProtected {
+    try testing.expect(!rollbackProtected(false, false));
+    try testing.expect(!rollbackProtected(true, false));
+    try testing.expect(!rollbackProtected(false, true));
+    try testing.expect(rollbackProtected(true, true));
 }
 
 test parseSwitch {

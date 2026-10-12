@@ -1,0 +1,72 @@
+#!/bin/sh
+# check-ipe QEMU...: release boot, independent kernel enforcement, bad policies.
+set -eu
+dir=$CHECK/ipe
+mkdir -p "$dir"
+cat >"$dir/checks" <<'EOF'
+ok  ipe-active       [ "$(cat /sys/kernel/security/ipe/enforce)" = 1 ] && [ "$(cat /sys/kernel/security/ipe/policies/werewolf/active)" = 1 ]
+ok  ipe-no-initramfs  ! grep -q boot_verified /sys/kernel/security/ipe/policies/werewolf/policy
+ok  ipe-locked       ! (echo 0 >/sys/kernel/security/ipe/enforce) && [ "$(cat /sys/kernel/security/ipe/enforce)" = 1 ]
+ok  ipe-modules      [ "$(cat /sys/module/module/parameters/sig_enforce)" = Y ]
+EOF
+test/boot ipe "$dir/checks" "$dir/boot.log" "$@" -kernel "$KERNEL" \
+	-initrd "$OUT/initramfs.zst" -append "$CMDLINE"
+
+zstd -dq -c "$OUT/slot/stage0.zst" >"$dir/stage0.cpio"
+mkdir -p "$dir/other" "$dir/extra"
+cp "$IPE_PROBE" "$dir/other/probe"
+mkfs.erofs -T0 -b4096 "$dir/other.erofs" "$dir/other" >/dev/null
+"$VERITY" "$dir/other.erofs" "$dir/extra/other-verity"
+cp "$IPE_PROBE" "$dir/extra/init"
+(cd "$dir/extra" && "$TAR" -cf ../extra.tar --uid 0 --gid 0 init other-verity)
+"$TAR" -cf "$dir/probe.cpio" --format newc --uid 0 --gid 0 \
+	--exclude init "@$dir/stage0.cpio"
+"$TAR" -cf "$dir/probe-extra.cpio" --format newc --uid 0 --gid 0 "@$dir/extra.tar"
+cat "$dir/probe.cpio" "$dir/probe-extra.cpio" | zstd -1 -q -c >"$dir/probe.zst"
+test/ipe-boot "$dir/probe.log" "$@" -kernel "$KERNEL" -initrd "$dir/probe.zst" \
+	-append "$CMDLINE audit=1 loglevel=7" \
+	-drive "file=$OUT/slot/root.erofs,format=raw,if=none,id=trusted,readonly=on" -device virtio-blk-pci,drive=trusted \
+	-drive "file=$dir/other.erofs,format=raw,if=none,id=other,readonly=on" -device virtio-blk-pci,drive=other
+# Audit must show an IPE MMAP refusal, so a broken loader cannot pass the test.
+grep -a -q 'ipe_hook=MMAP.*enforcing=1' "$dir/probe.log"
+
+"$TAR" -cf "$dir/root.cpio" --format newc --uid 0 --gid 0 \
+	-C "$OUT/slot" root.erofs
+zstd -1 -q -c "$dir/root.cpio" >"$dir/root.zst"
+openssl req -newkey rsa:2048 -nodes -x509 -sha256 -days 1 \
+	-subj /CN=untrusted-ipe-check -keyout "$dir/stranger.key" -out "$dir/stranger.crt" >/dev/null 2>&1
+chmod 600 "$dir/stranger.key"
+for kind in missing tampered wrong-root wrong-signer; do
+	"$TAR" -cf "$dir/bad.cpio" --format newc --uid 0 --gid 0 \
+		--exclude ipe.p7b "@$dir/stage0.cpio"
+	case $kind in
+	missing) reason=IpePolicyMissing ;;
+	tampered)
+		printf garbage >"$dir/extra/ipe.p7b"
+		reason=IpePolicyRejected ;;
+	wrong-root)
+		sed 's/dmverity_roothash=sha256:[0-9a-f]*/dmverity_roothash=sha256:0000000000000000000000000000000000000000000000000000000000000000/' \
+			"$OUT/ipe.policy" >"$dir/wrong.policy"
+		openssl smime -sign -binary -md sha256 -in "$dir/wrong.policy" -signer "$IPE_CERT" \
+			-inkey "$IPE_KEY" -noattr -nodetach -nosmimecap -outform DER -out "$dir/extra/ipe.p7b"
+		reason=IpeWrongRoot ;;
+	wrong-signer)
+		openssl smime -sign -binary -md sha256 -in "$OUT/ipe.policy" -signer "$dir/stranger.crt" \
+			-inkey "$dir/stranger.key" -noattr -nodetach -nosmimecap -outform DER -out "$dir/extra/ipe.p7b"
+		reason=IpePolicyRejected ;;
+	esac
+	if [ "$kind" != missing ]; then
+		"$TAR" -cf "$dir/bad-extra.cpio" --format newc --uid 0 --gid 0 -C "$dir/extra" ipe.p7b
+		cat "$dir/bad.cpio" "$dir/bad-extra.cpio" >"$dir/bad-all.cpio"
+	else cp "$dir/bad.cpio" "$dir/bad-all.cpio"; fi
+	zstd -1 -q -c "$dir/bad-all.cpio" >"$dir/bad-stage0.zst"
+	cat "$dir/bad-stage0.zst" "$dir/root.zst" >"$dir/bad.zst"
+	if test/boot "ipe-$kind" - "$dir/$kind.log" "$@" -kernel "$KERNEL" -initrd "$dir/bad.zst" -append "$CMDLINE" >"$dir/$kind.result"; then
+		echo "FAIL   ipe-$kind: invalid policy booted" >&2; exit 1
+	fi
+	grep -a -q "stage0: IPE: $reason; not handing over" "$dir/$kind.log"
+	! grep -a -q 'handing over to runit' "$dir/$kind.log"
+	echo "pass   ipe-$kind: boot refused before handover"
+done
+rm -f "$dir/stranger.key"
+echo "pass   ipe: trusted root allowed; executable tmpfs, other verified root and loader bypass refused; administration locked"

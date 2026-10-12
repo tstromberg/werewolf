@@ -23,6 +23,8 @@ pub const Build = struct {
     arch: Arch,
     /// dev marks a DEV=1 build, with busybox-full and the debug shell.
     dev: bool = false,
+    /// ipe removes the stock kernel's IPE and module-signature exceptions.
+    ipe: bool = false,
     /// posture_known is test/posture-known: the posture checks every form
     /// of a kind fails.
     posture_known: []const u8 = "",
@@ -815,7 +817,11 @@ pub fn weaknesses(gpa: Allocator, top: Form, b: Build) Allocator.Error![]const u
         var it = mem.tokenizeAny(u8, line, " \t");
         const first = it.next() orelse continue;
         if (!mem.eql(u8, first, kind) and !mem.eql(u8, first, @tagName(b.arch))) continue;
-        while (it.next()) |id| try out.print(gpa, "{s} {s}\n", .{ id, unbuilt(id, excuse) });
+        while (it.next()) |id| {
+            if (b.ipe and (mem.eql(u8, id, "boot-ipe-enforced") or
+                mem.eql(u8, id, "boot-sig-enforced"))) continue;
+            try out.print(gpa, "{s} {s}\n", .{ id, unbuilt(id, excuse) });
+        }
     }
     return out.items;
 }
@@ -831,6 +837,8 @@ fn unbuilt(id: []const u8, generic: []const u8) []const u8 {
     if (mem.eql(u8, bare, "boot-sig-enforced"))
         return "Alpine builds this kernel without signature enforcement; phase 4 builds " ++
             "werewolf's own";
+    if (mem.eql(u8, bare, "boot-ipe-enforced"))
+        return "the stock Alpine kernel lacks IPE; build with IPE=1 for global image enforcement";
     if (mem.eql(u8, bare, "boot-rollback-protected"))
         return "no TPM counter guards the slot serial yet: phase 5 of the boot design";
     return generic;
@@ -1407,6 +1415,22 @@ test "weaknesses: the form's own, then its kind's and its arch's from posture-kn
             "programs-no-interpreters " ++ dev ++ "\nkernel-y " ++ dev ++ "\n",
         try weaknesses(gpa, top, .{ .arch = .x86_64, .dev = true, .posture_known = known }),
     );
+}
+
+test "IPE builds retain unrelated weaknesses and remove closed kernel gaps" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const top = try testForm(gpa, "minimal", "weaknesses:\n  programs-no-shell: deliberate\n");
+    const got = try weaknesses(gpa, top, .{
+        .arch = .aarch64,
+        .ipe = true,
+        .posture_known = "* boot-ipe-enforced boot-sig-enforced boot-rollback-protected\n",
+    });
+    try testing.expect(mem.find(u8, got, "boot-ipe-enforced") == null);
+    try testing.expect(mem.find(u8, got, "boot-sig-enforced") == null);
+    try testing.expect(mem.find(u8, got, "boot-rollback-protected") != null);
+    try testing.expect(mem.find(u8, got, "programs-no-shell deliberate") != null);
 }
 
 test "pledge: a path inside a strict service's directory fails the build" {

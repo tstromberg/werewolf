@@ -9,6 +9,14 @@ img=$CHECK/$FORM-shellfree.img
 # /data: 4 GiB, sparse, so it costs only what is written. demo's Grype
 # unpacks a 2.4 GB database there, beside its 188 MB download.
 rm -f "$img" && dd if=/dev/zero of="$img" bs=1048576 count=0 seek=4096 2>/dev/null
-exec test/boot "$FORM-shellfree" "${CONSOLE:--}" "$CHECK/$FORM-shellfree.log" "$@" \
-	-kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$CMDLINE werewolf.data=vda" \
+set -- "$@" -kernel "$KERNEL" -initrd "$OUT/initramfs.zst" -append "$CMDLINE werewolf.data=vda" \
 	-drive "file=$img,format=raw,if=virtio"
+if [ -x "$FORM_DIR/test/config-shellfree" ]; then
+	c=$CHECK/$FORM-shellfree-config
+	rm -rf "$c" && mkdir -p "$c"
+	head -c 64 /dev/zero | tr '\0' k >"$c/data.key"
+	"$FORM_DIR/test/config-shellfree" "$c"
+	"$HOWL" pack --build --with "$FORM_REF" -o "$c.tar" --config "$c" >/dev/null
+	set -- "$@" -drive "file=$c.tar,format=raw,if=virtio,readonly=on"
+fi
+exec test/boot "$FORM-shellfree" "${CONSOLE:--}" "$CHECK/$FORM-shellfree.log" "$@"

@@ -38,28 +38,46 @@ rm -rf "$dir" && mkdir -p "$dir/claim" "$dir/root/werewolf/a" "$dir/root/werewol
 # depending on uki-prod, which holds the boot key's signed UKI.
 repo=$dir/repo
 cp "$UKI_PACKAGE" "$UKI_PACKAGE.stanza" "$FORM_PACKAGE" "$FORM_PACKAGE.stanza" "$repo/"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$dir/repo.key" -out "$dir/repo.crt" \
+	-days 2 -subj "/CN=check" -addext "subjectAltName=IP:10.0.2.2" 2>/dev/null
+python3 -c 'import ssl,sys
+c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+c.load_cert_chain(sys.argv[1],sys.argv[2])' "$PWD/$dir/repo.crt" "$PWD/$dir/repo.key" ||
+	fail "the repository's key and certificate do not pair"
 build/host/package index "$repo" - >/dev/null
 openssl dgst -sha256 -sign "$REPO_KEY" -out "$repo/APKINDEX.sig" "$repo/APKINDEX.member"
 build/host/package sign "$repo" check-repo.rsa.pub "$repo/APKINDEX.sig" >/dev/null
-python3 -c 'import http.server,os,sys
+python3 -c 'import http.server,os,ssl,sys
 os.chdir(sys.argv[1])
-http.server.ThreadingHTTPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler).serve_forever()' \
-	"$repo" &
+s=http.server.ThreadingHTTPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
+c=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+c.load_cert_chain(sys.argv[2])
+s.socket=c.wrap_socket(s.socket,server_side=True)
+s.serve_forever()' \
+	"$repo" "$PWD/$dir/repo.crt" "$PWD/$dir/repo.key" &
 server=$!
 trap 'kill $server ${qemu:-} 2>/dev/null' EXIT
-sleep 1
-port=$(lsof -nP -p $server 2>/dev/null | awk '/TCP .*LISTEN/ { print $9 }' | sed 's/.*://' | head -1)
+port=''
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+	sleep 1
+	port=$(lsof -nP -p $server 2>/dev/null | awk '/TCP .*LISTEN/ { print $9 }' | sed 's/.*://' | head -1)
+	[ -n "$port" ] && break
+done
 [ -n "$port" ] || fail "the repository server did not start"
 
 # --- slot a's root, with this check's repository in it -------------------------
 mkdir -p "$dir/claim/etc/apk/keys"
 cp "$REPO_PUB" "$dir/claim/etc/apk/keys/check-repo.rsa.pub"
 bsdtar -xOf "$OUT/rootfs.tar" etc/apk/repositories >"$dir/repositories"
-printf 'http://10.0.2.2:%s/repo\n' "$port" >>"$dir/repositories"
+printf 'https://10.0.2.2:%s\n' "$port" >>"$dir/repositories"
 cp "$dir/repositories" "$dir/claim/etc/apk/repositories"
+mkdir -p "$dir/claim/etc/ssl/certs"
+bsdtar -xOf "$OUT/rootfs.tar" etc/ssl/certs/ca-certificates.crt >"$dir/ca-bundle" 2>/dev/null || : >"$dir/ca-bundle"
+cat "$dir/repo.crt" >>"$dir/ca-bundle"
+cp "$dir/ca-bundle" "$dir/claim/etc/ssl/certs/ca-certificates.crt"
 printf '#mtree\n./ type=dir uid=0 gid=0 uname=root gname=root mode=0755 time=0.0\n' >"$dir/root.mtree"
 "$TAR" -C "$dir/claim" -cf "$dir/claim.tar" --uid 0 --gid 0 --numeric-owner \
-	etc/apk/repositories etc/apk/keys/check-repo.rsa.pub
+	etc/apk/repositories etc/apk/keys/check-repo.rsa.pub etc/ssl/certs/ca-certificates.crt
 "$TAR" -cf "$dir/root.tar" --uid 0 --gid 0 --numeric-owner \
 	"@$dir/root.mtree" "@$OUT/rootfs.tar" "@$OUT/overlay.tar" "@$dir/claim.tar"
 # shellcheck disable=SC2086 # EROFS_OPTS are words
@@ -76,6 +94,7 @@ mc mformat -i "$dir/esp.img" ::
 python3 -c 'import sys
 f=open(sys.argv[1],"r+b")
 f.seek(0x43); f.write((0x57E1F000).to_bytes(4,"little"))
+f.seek(0x52); f.write(b"FAT32   ")
 f.seek(446); f.write(bytes(64))
 f.close()' \
 	"$dir/esp.img"

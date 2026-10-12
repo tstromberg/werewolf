@@ -4,3 +4,6 @@ ok  samba-up     echo hello >/tmp/samba-in; i=0; until smbclient //127.0.0.1/ali
 ok  samba-round  smbclient //127.0.0.1/alice -m SMB3 --client-protection=encrypt -U 'alice%werewolf-check-password' -c 'get hi.txt /tmp/samba-out' && [ "$(cat /tmp/samba-out)" = hello ]
 ok  samba-guest  ! smbclient //127.0.0.1/alice -m SMB3 --client-protection=encrypt -N -c 'ls' >/tmp/samba-guest 2>&1
 ok  samba-other  ! smbclient //127.0.0.1/alice -m SMB3 --client-protection=encrypt -U 'bob%werewolf-other-password' -c 'get hi.txt /tmp/samba-bob' >/tmp/samba-other 2>&1
+ok  samba-network  smbclient //10.0.2.15/bob -m SMB3 --client-protection=encrypt -U 'bob%werewolf-other-password' -c 'ls'
+ok  samba-wrong    ! smbclient //10.0.2.15/alice -m SMB3 --client-protection=encrypt -U 'alice%incorrect-password' -c 'ls' >/tmp/samba-wrong 2>&1
+ok  samba-smb2     ! smbclient //10.0.2.15/alice -m SMB2 -U 'alice%werewolf-check-password' -c 'ls' >/tmp/samba-smb2 2>&1

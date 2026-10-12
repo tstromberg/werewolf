@@ -50,7 +50,14 @@ boot() { # boot NAME CHECKS QEMU...
 boot "$FORM" "$c-checks" "$@"
 [ -n "${AGAIN:-}" ] || exit 0
 
-boot "$FORM-again" test/checks-again "$@"
+# A form may change its config before rebooting on the same data disk.
+if [ -e "$FORM_DIR/test/config-again" ]; then
+	"$FORM_DIR/test/config-again" "$c-config"
+	"$HOWL" pack --build --with "$FORM_REF" -o "$c-config.tar" --config "$c-config" >/dev/null
+fi
+cp test/checks-again "$c-checks-again"
+[ ! -e "$FORM_DIR/test/checks-again" ] || cat "$FORM_DIR/test/checks-again" >>"$c-checks-again"
+boot "$FORM-again" "$c-checks-again" "$@"
 ! grep -a -E 'werewolf: (formatting|making LUKS2) ' "$c-again.log" ||
 	{ echo "FAIL   $FORM-again        formatted the disk its first boot left"; exit 1; }
 a=$(grep -a '"event":"host-key"' "$c.log" | grep -a 'kept in /data' |

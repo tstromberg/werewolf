@@ -1,0 +1,90 @@
+#!/bin/sh
+# build-kernel ALPINE-ROOTFS CERT KEY OUT: native Linux kernel build.
+# CERT authorizes IPE policies; KEY signs modules and never enters the output.
+set -eu
+[ $# = 4 ] || { echo "usage: boot/build-kernel ALPINE-ROOTFS CERT KEY OUT" >&2; exit 2; }
+[ "$(uname -s)" = Linux ] || { echo "build-kernel: run on Linux (Lima on macOS)" >&2; exit 1; }
+tree=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+. "$tree/boot/kernel-source"
+base=$(realpath "$1")
+cert=$(realpath "$2")
+key=$(realpath "$3")
+mkdir -p "$4"
+out=$(realpath "$4")
+case $(uname -m) in
+aarch64) arch=arm64; image=arch/arm64/boot/Image ;;
+x86_64) arch=x86; image=arch/x86/boot/bzImage ;;
+*) echo "build-kernel: aarch64 or x86_64 required" >&2; exit 1 ;;
+esac
+archive=$out/linux-$version.tar.xz
+if [ ! -f "$archive" ]; then
+	curl -fL --retry 3 "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$version.tar.xz" -o "$archive.tmp"
+	mv "$archive.tmp" "$archive"
+fi
+printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+src=$out/linux-$version
+[ -d "$src" ] || tar -xJf "$archive" -C "$out"
+obj=$out/obj
+stage=$out/root.$$
+mkdir -p "$obj" "$out/base"
+openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER >"$out/cert.pub"
+openssl pkey -in "$key" -pubout -outform DER >"$out/key.pub"
+cmp -s "$out/cert.pub" "$out/key.pub" || { echo "build-kernel: key does not match certificate" >&2; exit 1; }
+tar -xf "$base" -C "$out/base" --wildcards 'boot/config-*' 'etc/apk/repositories'
+set -- "$out/base"/boot/config-*
+[ $# = 1 ] && [ -f "$1" ] || { echo "build-kernel: exactly one Alpine config required" >&2; exit 1; }
+case ${1##*/} in
+config-$version-*) ;;
+*) echo "build-kernel: Alpine config must match pinned Linux $version; update boot/kernel-source" >&2; exit 1 ;;
+esac
+cp "$1" "$obj/.config"
+# Fixed build metadata; a supplied stable key makes module signatures reproducible.
+export KBUILD_BUILD_TIMESTAMP='1970-01-01 00:00:00 UTC' KBUILD_BUILD_USER=werewolf KBUILD_BUILD_HOST=werewolf KBUILD_BUILD_VERSION=1
+umask 077
+cat "$key" "$cert" >"$obj/module-signing.pem"
+cp "$cert" "$obj/ipe.crt"
+cp "$tree/boot/ipe-boot.policy" "$obj/ipe-boot.policy"
+trap 'rm -f "$obj/module-signing.pem"; rm -rf "$stage"' EXIT
+c=$src/scripts/config
+"$c" --file "$obj/.config" --enable SECURITY_IPE --enable IPE_PROP_DM_VERITY \
+	--set-str LSM 'landlock,lockdown,yama,ipe' \
+	--set-str IPE_BOOT_POLICY 'ipe-boot.policy' \
+	--set-str SYSTEM_TRUSTED_KEYS 'ipe.crt' --set-str SYSTEM_REVOCATION_KEYS '' \
+	--set-str MODULE_SIG_KEY 'module-signing.pem' --enable MODULE_SIG \
+	--enable MODULE_SIG_ALL --enable MODULE_SIG_FORCE --enable MODULE_SIG_SHA256 \
+	--disable IPE_POLICY_SIG_SECONDARY_KEYRING --disable IPE_POLICY_SIG_PLATFORM_KEYRING \
+	--enable LOCK_DOWN_KERNEL_FORCE_INTEGRITY --disable LOCK_DOWN_KERNEL_FORCE_NONE \
+	--disable KEXEC --disable KEXEC_FILE --disable KEXEC_CORE --disable LOCALVERSION_AUTO \
+	--set-str LOCALVERSION '-werewolf' --enable MODULE_COMPRESS_GZIP \
+	--disable MODULE_COMPRESS_ZSTD --disable MODULE_COMPRESS_XZ \
+	--disable DEBUG_INFO_BTF --disable DEBUG_INFO_BTF_MODULES --enable EFIVAR_FS
+make -C "$src" O="$obj" ARCH="$arch" olddefconfig
+# Fail rather than quietly build a kernel without the required enforcement.
+for opt in SECURITY_IPE IPE_PROP_DM_VERITY MODULE_SIG_FORCE LOCK_DOWN_KERNEL_FORCE_INTEGRITY; do
+	grep -qx "CONFIG_$opt=y" "$obj/.config" || { echo "build-kernel: CONFIG_$opt did not hold" >&2; exit 1; }
+done
+make -C "$src" O="$obj" ARCH="$arch" -j"${JOBS:-$(nproc)}" all
+mkdir -p "$stage/boot" "$stage/etc/apk"
+# Ubuntu's depmod may have no zlib support. Resolve signed, uncompressed
+# modules first, then compress them and update the textual dependency paths.
+make -C "$src" O="$obj" ARCH="$arch" INSTALL_MOD_PATH="$stage" CONFIG_MODULE_COMPRESS_ALL= modules_install
+kver=$(make -s -C "$src" O="$obj" ARCH="$arch" kernelrelease)
+rm -f "$stage/lib/modules/$kver/build" "$stage/lib/modules/$kver/source"
+cp "$obj/$image" "$stage/boot/vmlinuz-virt"
+cp "$obj/.config" "$stage/boot/config-$kver"
+cp "$cert" "$stage/boot/ipe.crt"
+printf 'linux-virt-%s-werewolf\n' "$version" >"$stage/boot/kernel-package"
+cp "$out/base/etc/apk/repositories" "$stage/etc/apk/repositories"
+depmod -b "$stage" "$kver"
+deps=$stage/lib/modules/$kver/modules.dep
+[ -s "$deps" ] || { echo "build-kernel: depmod produced no dependencies" >&2; exit 1; }
+find "$stage/lib/modules/$kver" -type f -name '*.ko' -exec gzip -n -f {} +
+sed 's/\.ko\([ :]\)/.ko.gz\1/g; s/\.ko$/.ko.gz/' "$deps" >"$deps.tmp"
+mv "$deps.tmp" "$deps"
+# The native module resolver uses modules.dep; binary indices from the
+# uncompressed installation would name paths that no longer exist.
+find "$stage/lib/modules/$kver" -type f -name '*.bin' -delete
+tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+	-cf "$out/rootfs.tar.tmp" -C "$stage" boot lib/modules etc/apk/repositories
+mv "$out/rootfs.tar.tmp" "$out/rootfs.tar"
+echo "build-kernel: $out/rootfs.tar"

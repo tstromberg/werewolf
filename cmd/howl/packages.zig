@@ -6,6 +6,7 @@ const std = @import("std");
 const forms = @import("form");
 const compose = @import("compose");
 const image = @import("image");
+const ipe = @import("ipe");
 const package = @import("package");
 const files = @import("files");
 const progress = @import("progress.zig");
@@ -286,7 +287,19 @@ pub fn kernel(b: *B) !void {
     const lock = "build/lock/kernel.lock.json";
     const rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     try relock(b, lock, yaml);
-    try apkoBuild(b, rootfs, yaml, lock, &.{lock});
+    if (b.spec.ipe_kernel) |custom| {
+        // A custom archive has the same layout, but its config and signer
+        // must prove the selected enforcement before it replaces Alpine's.
+        const began = try b.begin(rootfs, &.{custom});
+        if (began != null) {
+            try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(rootfs).?);
+            try b.copy(custom, rootfs);
+            try b.done(rootfs, began.?);
+        }
+        const embedded_cert = try b.capture(rootfs, &.{ "bsdtar", "-xOf", rootfs, "boot/ipe.crt" });
+        if (!mem.eql(u8, embedded_cert, try b.read(b.spec.ipe_cert.?, 64 << 10)))
+            return b.fail("IPE kernel certificate differs from --ipe-cert", .{});
+    } else try apkoBuild(b, rootfs, yaml, lock, &.{lock});
     const target = try b.path("{s}/vmlinuz", .{b.p.build});
     // The step's own stamp says when it last ran; vmlinuz is rewritten only
     // when its bytes change, so a new howl that unpacks the same kernel
@@ -310,6 +323,8 @@ pub fn kernel(b: *B) !void {
     const cfg = config orelse return b.fail("{s}: no boot/config-", .{rootfs});
     try b.run(&.{ "bsdtar", "-xf", rootfs, "-C", x, "boot/vmlinuz-virt", "lib/modules", cfg }, .{});
     const config_text = try b.read(try b.path("{s}/{s}", .{ x, cfg }), 4 << 20);
+    if (b.spec.ipe_kernel != null) ipe.checkConfig(config_text) catch |err|
+        return b.fail("IPE kernel config: {t}", .{err});
     const misses = try image.configMisses(b.gpa, config_text);
     for (misses) |m| try b.steps.note("kernel config: {f}", .{m});
     if (misses.len > 0) return b.fail("{s} reopens what werewolf relies on it to close", .{cfg});

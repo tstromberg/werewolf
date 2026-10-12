@@ -1,25 +1,20 @@
-# dependency-track: prod, with Dependency-Track's bundled server behind
+# dependency-track: jre21, with Dependency-Track's bundled server behind
 # Caddy, and PostgreSQL on loopback. The first start replaces the
 # published admin/admin password with the config's, before Caddy opens.
 # The API listens on loopback. Java runs it. See
 # forms/dependency-track/README.md.
-base: prod
+base: jre21
 
 with: [postgresql, caddy]
 
 packages:
   - dependency-track-bundled
-  - openjdk-21-default-jvm
-
-# Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
-# Dependency-Track to machine code as it runs.
-allow: [jit]
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: java runs Dependency-Track, which is what this form is for
-  kernel-write-xor-execute: the JVM compiles Dependency-Track to machine code as it runs (allow jit)
+  kernel-write-xor-execute: the JVM compiles Dependency-Track to machine code as it runs (allow jit, from jre21)
 
 # make check's (forms/README.md): the JVM's heap beside PostgreSQL.
 check:
@@ -31,7 +26,9 @@ services:
   # admin/admin. A missing password parks Caddy, so this never faces the
   # network with the published password.
   dtrack:
-    exec: /usr/bin/java -Xms256m -Xmx768m -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack -Dalpine.http.host=127.0.0.1 -Dalpine.http.port=8080 -jar /usr/share/java/dependency-track/dependency-track-bundled.jar
+    # -host is the jar's own flag. A -Dalpine.http.host property does not
+    # bind it, and the default is every address.
+    exec: /usr/bin/java -Xms256m -Xmx768m -Djava.io.tmpdir=/run/svc/dtrack -Duser.home=/data/svc/dtrack -jar /usr/share/java/dependency-track/dependency-track-bundled.jar -host 127.0.0.1 -port 8080
     user: dtrack
     # netlink: the JVM lists the host's addresses.
     pledge: stdio rpath wpath inet unix netlink connect listen proc
@@ -45,8 +42,6 @@ services:
       - ALPINE_DATABASE_DRIVER=org.postgresql.Driver
       - ALPINE_DATABASE_USERNAME=dtrack
       - ALPINE_DATABASE_PASSWORD=dtrack
-      - ALPINE_HTTP_HOST=127.0.0.1
-      - ALPINE_HTTP_PORT=8080
 
   # PostgreSQL, as postgresql's form runs it, but also on loopback TCP:
   # pg_hba.conf lets the role dtrack alone in that way, to the postgres

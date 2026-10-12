@@ -7,9 +7,9 @@ Vulnerability management: [Greenbone](https://greenbone.github.io/docs/) gvmd an
 - gsad listens on loopback. Caddy is what the network sees. The scanner listens on loopback for gvmd.
 - The administrator is `admin`. The password is the config's, applied at every start. `admin` / `admin` is refused.
 - gvmd's socket is mode 0660, group `_oci-gvmd`. gvm-link keeps that group after it drops to `_glink`. The socket it gives gsad is mode 0660, group `_oci-gsad`. A command on it still needs the administrator password.
-- The scanner is the one service that keeps `CAP_NET_RAW` and `CAP_NET_ADMIN`. gvmd, gsad, the feed, Valkey, PostgreSQL and Caddy do not.
+- The scanner is the one service that keeps `CAP_NET_RAW` and `CAP_NET_ADMIN`. These capabilities can bypass Fence's routing policy. Isolate the machine from management networks and services it must not scan.
 - The feed cache is `/data/share/gvm`, owned by the feed, mode 02750. gvmd is in that group and may only read it. The scanner may write the plugin directory and only read the rest. Nothing else on the machine is in the group.
-- PostgreSQL takes one role, over loopback. The scanner's routing prohibits its loopback except Valkey, so it cannot open that port.
+- PostgreSQL takes one role over loopback. Fence's ordinary route permits only Valkey, but a compromised scanner can bypass that route with its retained capabilities.
 - The image's bash runs one script, then the program. The host has no shell. rsync and Python stay inside the feed and scanner images.
 
 ## Getting Started
@@ -43,7 +43,7 @@ The database starts empty. The feed fills the cache on `/data` from the communit
 - gvmd listens on a Unix socket, not a TCP port. gvm-link, as `_glink` in the group `_oci-gvmd`, copies it into gsad's directory. Both sockets are mode 0660.
 - The scanner's socket is mode 0770 inside its own directory. gvmd uses loopback TCP, not that socket.
 - The first feed sync is large. An 8 GiB disk is tight once PostgreSQL and the cache share it. A later sync keeps the last good copy when the server is unreachable.
-- The database password is not a secret: the scanner cannot open the port, and no other leash names it.
+- The database password is shared only with its clients; network isolation must account for the scanner's retained capabilities.
 - Twelve characters at least, and not `admin`.
 
 ### Network Exposure

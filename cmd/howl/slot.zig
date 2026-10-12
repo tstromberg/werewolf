@@ -7,6 +7,7 @@ const std = @import("std");
 const forms = @import("form");
 const compose = @import("compose");
 const verity = @import("verity");
+const ipe = @import("ipe");
 const image = @import("image");
 const build = @import("build.zig");
 const packages = @import("packages.zig");
@@ -62,6 +63,7 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
         const kind: compose.Build = .{
             .arch = b.arch,
             .dev = b.spec.dev,
+            .ipe = b.spec.ipe_kernel != null,
             .posture_known = embedded.posture_known,
         };
         var f: forms.Failure = .{};
@@ -82,11 +84,19 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     }
 
     const d = try b.path("{s}/usr/share/werewolf", .{meta_dir});
-    const kernel_pkg = try packages.lockedKernel(
-        b.gpa,
-        try b.read("build/lock/kernel.lock.json", 64 << 20),
-        @tagName(b.spec.arch),
-    );
+    if (b.spec.ipe_kernel != null) try b.put(d, "ipe", "required\n");
+    const kernel_pkg = if (b.spec.ipe_kernel != null)
+        mem.trim(
+            u8,
+            try b.capture(stamp, &.{ "bsdtar", "-xOf", kernel_rootfs, "boot/kernel-package" }),
+            "\n",
+        )
+    else
+        try packages.lockedKernel(
+            b.gpa,
+            try b.read("build/lock/kernel.lock.json", 64 << 20),
+            @tagName(b.spec.arch),
+        );
     try b.put(d, "kernel", try b.path("{s}\n", .{kernel_pkg}));
     try b.put(d, "alpine", try b.capture(stamp, &.{
         "bsdtar", "-xOf", kernel_rootfs, "etc/apk/repositories",
@@ -183,10 +193,14 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
     );
     const root = try b.path("{s}/slot/root.erofs", .{out});
     try rootErofs(b, root, rootfs, overlay);
+    if (b.spec.ipe_kernel != null) try signIpe(b);
     try layerStep(
         b,
         try b.path("{s}/verity.tar", .{out}),
-        &.{root},
+        if (b.spec.ipe_kernel != null)
+            &.{ root, try b.path("{s}/verity/ipe.p7b", .{out}) }
+        else
+            &.{root},
         &.{try b.path("{s}/verity", .{out})},
     );
     try stage0Init(b, rootfs);
@@ -216,6 +230,68 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         false,
     );
     if (goals.qcow2) try diskStep(b, try b.path("{s}/disk.qcow2", .{out}), true);
+}
+
+/// signIpe puts the release's signed root policy beside /verity in stage0.
+fn signIpe(b: *B) !void {
+    const dir = try b.path("{s}/verity", .{b.p.out});
+    const params = try verity.Params.parse(try b.read(try b.path("{s}/verity", .{dir}), 4096));
+    var text: Io.Writer.Allocating = .init(b.gpa);
+    defer text.deinit();
+    try ipe.policy(&text.writer, params.root);
+    const plain = try b.path("{s}/ipe.policy", .{b.p.out});
+    try packages.keep(b, plain, text.written());
+    const target = try b.path("{s}/ipe.p7b", .{dir});
+    const cert = b.spec.ipe_cert.?;
+    const key = b.spec.ipe_key.?;
+    const began = try b.begin(target, &.{ plain, cert, key }) orelse return;
+    const tmp = try b.tmp(target);
+    try b.run(
+        &.{
+            "openssl",
+            "smime",
+            "-sign",
+            "-binary",
+            "-md",
+            "sha256",
+            "-in",
+            plain,
+            "-signer",
+            cert,
+            "-inkey",
+            key,
+            "-noattr",
+            "-nodetach",
+            "-nosmimecap",
+            "-outform",
+            "DER",
+            "-out",
+            tmp,
+        },
+        .{},
+    );
+    // Check the signer before any stage0 or disk is assembled.
+    try b.run(
+        &.{
+            "openssl",
+            "smime",
+            "-verify",
+            "-binary",
+            "-inform",
+            "DER",
+            "-in",
+            tmp,
+            "-CAfile",
+            cert,
+            "-purpose",
+            "any",
+            "-out",
+            "/dev/null",
+        },
+        .{},
+    );
+    try b.rename(tmp, target);
+    try b.done(target, began);
 }
 
 fn layerStep(
@@ -519,7 +595,11 @@ fn stage0(b: *B, name: []const u8, modules_name: []const u8, words: []const []co
 /// is off), and the loader hands the kernel each file as it is.
 fn moduleTar(b: *B, target: []const u8, words: []const []const u8) !void {
     const vmlinuz = try b.path("{s}/vmlinuz", .{b.p.build});
-    const inputs = try mem.concat(b.gpa, []const u8, &.{ &.{ vmlinuz, b.self }, b.form_files });
+    const inputs = try mem.concat(b.gpa, []const u8, &.{ &.{
+        vmlinuz,
+        b.self,
+        try b.path("{s}/kernel/rootfs.tar", .{b.p.build}),
+    }, b.form_files });
     const began = try b.begin(target, inputs) orelse return;
     const dir = target[0 .. target.len - ".tar".len];
     try Dir.cwd().deleteTree(b.io, dir);

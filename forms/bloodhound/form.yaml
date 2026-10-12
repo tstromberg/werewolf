@@ -1,16 +1,18 @@
-# bloodhound: prod, with BloodHound CE behind Caddy, Neo4j on loopback
+# bloodhound: jre21, with BloodHound CE behind Caddy, Neo4j on loopback
 # Bolt, and PostgreSQL on loopback. Neo4j's HTTP is off. Its password and
 # the administrator's come from the config; Neo4j's is set once, before
 # the first start, and the administrator's is applied at every start.
 # Cypher mutations are off and the complexity limit stays on. Java runs
 # Neo4j. See forms/bloodhound/README.md.
-base: prod
+base: jre21
 
 with: [postgresql, caddy]
 
 packages:
+  # pg_trgm, which BloodHound's first migration creates. The postgresql
+  # form ships the server alone.
+  - postgresql-17-contrib
   - neo4j-2026.07
-  - openjdk-21-default-jvm
 
 # bash, which Neo4j's package depends on and nothing runs, and Neo4j's
 # shell scripts: java starts it.
@@ -20,15 +22,11 @@ prune:
   - usr/bin/neo4j
   - var/lib/neo4j/bin
 
-# Taken back of werewolf's defaults (lib/allow.zig): the JVM compiles
-# Neo4j to machine code as it runs.
-allow: [jit]
-
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
   programs-no-interpreters: java runs Neo4j, which is what holds the graph
-  kernel-write-xor-execute: the JVM compiles Neo4j to machine code as it runs (allow jit)
+  kernel-write-xor-execute: the JVM compiles Neo4j to machine code as it runs (allow jit, from jre21)
 
 # make check's (forms/README.md): Neo4j, PostgreSQL and BloodHound together.
 check:
@@ -38,12 +36,14 @@ services:
   # Neo4j, as its own user, Bolt on loopback and no HTTP. neo4j-setup sets
   # the initial password from the config once. A missing password parks it.
   neo4j:
-    exec: /usr/bin/java -Xms256m -Xmx1g -XX:+UseG1GC -Djava.io.tmpdir=/run/svc/neo4j -Dfile.encoding=UTF-8 -Dapp.name=neo4j -Dapp.home=/var/lib/neo4j -Dbasedir=/var/lib/neo4j -classpath /var/lib/neo4j/lib/* org.neo4j.server.startup.NeoBoot console
+    exec: /usr/bin/java -Xms256m -Xmx1g -XX:+UseG1GC -Djava.io.tmpdir=/run/svc/neo4j -Djna.nosys=true -Djna.boot.library.path=/run/svc/neo4j -Dfile.encoding=UTF-8 -Dapp.name=neo4j -Dapp.home=/var/lib/neo4j -Dbasedir=/var/lib/neo4j -classpath /var/lib/neo4j/lib/* org.neo4j.server.startup.NeoBoot console
     before: /usr/lib/werewolf/neo4j-setup
     user: neo4j
     pledge: stdio rpath wpath inet unix netlink listen proc exec
     listen: tcp/7687 loopback
-    run: /usr/bin/java
+    # Neo4j starts its server as a child process. That spawn runs the
+    # JDK's helper, which is not the java binary itself.
+    run: /usr/bin/java /usr/lib/jvm/java-21-openjdk/lib/jspawnhelper /usr/lib/jna/aarch64/libjnidispatch.so /usr/lib/jna/x86_64/libjnidispatch.so
     read: /var/lib/neo4j
     config: neo4j-password /run/config/neo4j/neo4j-password
     memory: 2048

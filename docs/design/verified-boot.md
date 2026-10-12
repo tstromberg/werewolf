@@ -3,9 +3,10 @@
 Proposed, 2026-10-06. Built: phase 1, lockdown and sysctls (cmd/stage0,
 cmd/init); 2, a read-only root; 3, its dm-verity hash tree (lib/verity.zig)
 and signed releases ([docs/releases.md](../releases.md)); and phase 5's
-first slice, a signed UKI on a local disk (make check-secureboot). Not
-built: 4, our own kernel with IPE; the rest of 5, Secure Boot in the
-clouds. Posture holds each unbuilt phase open, as the `boot-` checks
+first slice, a signed UKI on a local disk (make check-secureboot). Phase 4,
+our own kernel with IPE, is opt-in ([ipe.md](ipe.md)); production updates
+still require its signed-image delivery path. The rest of phase 5, Secure
+Boot in the clouds, remains open. Posture holds the gaps as `boot-` checks
 (docs/posture.md): Secure Boot on, module signatures enforced by the
 kernel's build, rollback refused by a TPM counter, each failing today
 and excused by every image (test/posture-known).
@@ -48,18 +49,17 @@ nothing would. `make check-verity` proves a changed image does not boot.
 
 **Phase 4: our kernel.** Alpine's `linux-virt` lacks IPE, so CI builds it
 from Alpine's config, at Alpine's version so CVE reports still match, with
-`SECURITY_IPE` (in `CONFIG_LSM`), `IPE_PROP_DM_VERITY`, `DM_VERITY=y`,
+`SECURITY_IPE` (in `CONFIG_LSM`), `IPE_PROP_DM_VERITY`, `DM_VERITY`,
 `SYSTEM_TRUSTED_KEYS` (the image certificate), `MODULE_SIG_FORCE` and
 `LOCK_DOWN_KERNEL_FORCE_INTEGRITY`, without `KEXEC` or a developer key.
 
 **Phase 4: the policy.** Each release carries one, `DEFAULT action=DENY`
 and `op=EXECUTE dmverity_roothash=sha256:ROOTHASH action=ALLOW`, signed by
 CI with the image key as PKCS#7. It names a root hash, not any signed
-root, so only this release runs. stage0 writes it to `ipe/new_policy`, as
-it cannot live in the root it names. init activates it before the seal
-drops `CAP_MAC_ADMIN`, with no securityfs file left open. If the root
-carries `/usr/share/werewolf/enforce` and no policy is active, init exits
-and the slot falls back. The deadman must then exec and map nothing.
+root, so only this release runs. Stage0 loads and activates it before
+forking the deadman, then removes `CAP_MAC_ADMIN` from all capability
+sets. Init refuses handover if `/usr/share/werewolf/ipe` requires IPE and
+the policy is not enforcing. The deadman must exec and map nothing.
 
 **IPE, tested** on 2026-10-06 with Alpine's 6.18.55 config and these
 options. With no policy, a busybox copy in `/tmp` ran. With a signed

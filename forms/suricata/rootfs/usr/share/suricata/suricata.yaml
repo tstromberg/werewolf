@@ -970,7 +970,7 @@ app-layer:
       #encryption-handling: track-only
 
     pgsql:
-      enabled: no
+      enabled: yes
       # Stream reassembly size for PostgreSQL. By default, track it completely.
       stream-depth: 0
       # Maximum number of live PostgreSQL transactions per flow
@@ -1216,7 +1216,7 @@ app-layer:
       # If the limit is reached, the app-layer-event:modbus.flooded; will match.
       #request-flood: 500
 
-      enabled: no
+      enabled: yes
       detection-ports:
         dp: 502
       # According to MODBUS Messaging on TCP/IP Implementation Guide V1.0b, it
@@ -1230,7 +1230,7 @@ app-layer:
 
     # DNP3
     dnp3:
-      enabled: no
+      enabled: yes
       detection-ports:
         dp: 20000
       #max-tx: 32
@@ -1239,7 +1239,7 @@ app-layer:
 
     # SCADA EtherNet/IP and CIP protocol support
     enip:
-      enabled: no
+      enabled: yes
       detection-ports:
         dp: 44818
         sp: 44818

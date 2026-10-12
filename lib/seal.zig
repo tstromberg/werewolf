@@ -287,10 +287,10 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 };
 
 const max_calls = 512;
-/// max_filter counts the prelude (6), execveat (5), the socket and
+/// max_filter counts the prelude (6), execveat (7), the socket and
 /// socketpair families (2 * (3 + 2 * 5)), the machine's refusals
 /// (7 + 5 + 7 + 7 + 8), the table and the final return.
-pub const max_filter = 6 + 5 + 2 * (3 + 2 * 5) + 34 + 2 * max_calls + 1;
+pub const max_filter = 6 + 7 + 2 * (3 + 2 * 5) + 34 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 
 /// families maps each socket promise to the address families it allows.
@@ -407,10 +407,24 @@ fn cpuClock(clock: u32) bool {
 /// or for the seal any promise's, so even root cannot open an unnamed
 /// family. The seal also adds the refusals by argument (see refusal). Other
 /// calls are matched by number alone, so the kernel can cache the verdict.
-/// A service without exec may only execveat a descriptor (AT_EMPTY_PATH):
-/// that is how leash becomes the service, and Landlock lets it run only
-/// its own program.
+/// buildFilter has no one-time exec descriptor. A caller that becomes a
+/// service uses buildServiceFilter instead.
 pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) []const Filter {
+    return buildFilterWithExec(buf, promises, per_service, null);
+}
+
+/// buildServiceFilter narrows the initial exec to Leash's selected descriptor
+/// number and exact AT_EMPTY_PATH flags. Landlock supplies file identity.
+pub fn buildServiceFilter(buf: *[max_filter]Filter, promises: Set, exec_fd: u32) []const Filter {
+    return buildFilterWithExec(buf, promises, true, exec_fd);
+}
+
+fn buildFilterWithExec(
+    buf: *[max_filter]Filter,
+    promises: Set,
+    per_service: bool,
+    exec_fd: ?u32,
+) []const Filter {
     // A service's filter needs no listener, so leash can install it after
     // dropping CAP_SYS_ADMIN. The seal on PID 1 hands the rest to
     // seal-watch to log and count.
@@ -431,10 +445,12 @@ pub fn buildFilter(buf: *[max_filter]Filter, promises: Set, per_service: bool) [
         put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.KILL_PROCESS);
     }
     const socket = number(.socket);
-    if (per_service and !promises.contains(.exec)) {
-        put(buf, &n, JEQ_K, 0, 4, number(.execveat));
+    if (per_service and !promises.contains(.exec) and exec_fd != null) {
+        put(buf, &n, JEQ_K, 0, 6, number(.execveat));
+        put(buf, &n, LD_W_ABS, 0, 0, 16); // seccomp_data.args[0], low word: fd
+        put(buf, &n, JEQ_K, 0, 3, exec_fd.?);
         put(buf, &n, LD_W_ABS, 0, 0, 48); // seccomp_data.args[4], low word: flags
-        put(buf, &n, JSET_K, 0, 1, AT_EMPTY_PATH);
+        put(buf, &n, JEQ_K, 0, 1, AT_EMPTY_PATH);
         put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
         put(buf, &n, RET_K, 0, 0, other);
     }
@@ -686,7 +702,7 @@ test buildFilter {
         );
 
     // A service's filter refuses with ENOSYS and needs no listener.
-    const service = buildFilter(&buf, .initMany(&.{ .stdio, .inet }), true);
+    const service = buildServiceFilter(&buf, .initMany(&.{ .stdio, .inet }), 7);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         action(service, native_arch, socket, linux.AF.INET),
@@ -734,11 +750,24 @@ test buildFilter {
     }) |sys|
         try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(sys), 0));
 
-    // Without exec, only execveat of a descriptor runs a program; that is
-    // how leash becomes the service.
+    // Only Leash's selected descriptor number and exact flags pass this
+    // filter; Landlock still judges executable identity.
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
-        action(service, native_arch, number(.execveat), AT_EMPTY_PATH),
+        actionArgs(service, native_arch, number(.execveat), .{ 7, 0, 0, 0, AT_EMPTY_PATH, 0 }),
+    );
+    try testing.expectEqual(
+        RET_ENOSYS,
+        actionArgs(service, native_arch, number(.execveat), .{ 8, 0, 0, 0, AT_EMPTY_PATH, 0 }),
+    );
+    try testing.expectEqual(
+        RET_ENOSYS,
+        actionArgs(
+            service,
+            native_arch,
+            number(.execveat),
+            .{ 7, 0, 0, 0, AT_EMPTY_PATH | 0x100, 0 },
+        ),
     );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execveat), 0));
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execve), 0));

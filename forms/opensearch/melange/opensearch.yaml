@@ -1,6 +1,6 @@
 # OpenSearch for werewolf's opensearch form: upstream's minimal release
 # for each arch, pinned by sha256, without its bundled JDK (the form runs
-# Wolfi's openjdk-25-jre) or its bin/ scripts, which are bash, and with
+# the jre form's Java) or its bin/ scripts, which are bash, and with
 # JNA's library unpacked from its jar; the security plugin from Maven
 # Central, without its tools and demo configuration, laid in plugins/ as
 # opensearch-plugin would. Beside them, java.args: what bin/opensearch

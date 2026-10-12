@@ -23,8 +23,10 @@ howl create samba --with samba --users users
 Each line of `users` is `name:password`. The share has that name. A client is in [Samba's documentation](https://www.samba.org/samba/docs/current/man-html/smbclient.1.html).
 
 ```text
-smbclient //ADDRESS/alice -U alice
+smbclient //ADDRESS/alice -m SMB3 --client-protection=encrypt -U alice
 ```
+
+On QEMU, howl reports `127.0.0.1:PORT`: use `//127.0.0.1/alice` and add `-p PORT` to the client command. On Lima or a cloud VM, use the server's IP address.
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -35,6 +37,17 @@ howl create samba --with samba --on gcp --allow-from me --users users
 ```
 
 `--allow-from me` admits your address to port 445.
+
+### Adding or changing users
+
+Append a user to the same `users` file, then run the original `howl create` command again, with the same machine name and deployment options:
+
+```sh
+printf '%s\n' "bob:$(openssl rand -base64 18)" >>users
+howl create samba --with samba --users users
+```
+
+The machine restarts with the complete user list. Bob can then connect to `//ADDRESS/bob`. Edit a user's password to rotate it, or remove their line to revoke access. Existing files on `/data` are kept, including files belonging to removed users. Keep the `users` file private; it contains plaintext passwords.
 
 ### Importing data
 
