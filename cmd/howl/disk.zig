@@ -249,6 +249,16 @@ pub fn write(
     // root reaches a slot.
     const erofs = try b.path("{s}/werewolf/a/root.erofs", .{root});
     try b.copy(try b.path("{s}/root.erofs", .{slot_dir}), erofs);
+    if (b.spec.ipe_updates != null) {
+        const rdir = try b.path("{s}/werewolf/a", .{root});
+        const proof = try b.path("{s}/prebuilt/{t}", .{ b.p.out, arch });
+        try b.copy(try b.path("{s}/latest.json", .{proof}), try b.path("{s}/image.json", .{rdir}));
+        try b.copy(
+            try b.path("{s}/latest.json.sig", .{proof}),
+            try b.path("{s}/image.json.sig", .{rdir}),
+        );
+        try b.copy(try b.path("{s}/cmdline", .{slot_dir}), try b.path("{s}/cmdline", .{rdir}));
+    }
     const st = try Dir.cwd().statFile(io, erofs, .{});
     const file_mode: std.posix.mode_t = if (st.permissions.toMode() & 0o111 != 0) 0o755 else 0o644;
     for ([_]struct { []const u8, std.posix.mode_t }{

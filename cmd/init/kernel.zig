@@ -210,8 +210,8 @@ fn writeXorExecute(contained: bool) !void {
 }
 
 /// sysctls close what root could use against the kernel or another process,
-/// and what a user could use against root. Root could undo most of them; no
-/// one else can. None costs a program anything. See docs/security.md.
+/// and what a user could use against root. Fence later denies writes to
+/// /proc/sys, including root's, so reversible settings stay set too.
 const sysctls = [_][2][]const u8{
     // Randomize addresses as far as 4K pages and 48-bit addresses allow.
     .{ "vm/mmap_rnd_bits", switch (builtin.cpu.arch) {
@@ -236,7 +236,7 @@ const sysctls = [_][2][]const u8{
     .{ "net/ipv4/ip_forward", "0" },
     // No process may ptrace another, root included; this cannot be lowered.
     .{ "kernel/yama/ptrace_scope", "3" },
-    // memfds cannot be executed, though root may lower this.
+    // Fence prevents root from lowering this after boot.
     .{ "vm/memfd_noexec", "2" },
     // In a user namespace, a user could mount a tmpfs without noexec.
     .{ "user/max_user_namespaces", "0" },

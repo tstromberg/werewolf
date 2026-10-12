@@ -47,6 +47,12 @@ reverse-path filtering, and ignoring IPv6 router advertisements
 
 Where it is safe, a check tests rather than reads:
 
+- **Sysctl writes**: as root, `files-system-writes` opens settings under
+  `kernel`, `vm`, `user`, `fs` and `net` with `O_WRONLY` and `O_RDWR`,
+  without writing. Each existing setting must return `EACCES`, and
+  `kernel.printk` must exist. `kernel-log-control` also asks `syslog(2)`
+  to set the current console level; it must be refused, closing the
+  alternate path that `dmesg -n` uses.
 - **One-way settings** (lockdown, the module loader, ptrace, BPF) must read
   locked, and writing the unlocked value must be refused. It is written
   only when the setting already reads locked, when the kernel's refusal is
