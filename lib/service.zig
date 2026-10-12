@@ -15,10 +15,21 @@ pub const Service = struct {
     /// cannot restrict a UDP bind (docs/design/listen-udp.md).
     listen_udp: []const u16 = &.{},
     connect: []const u16 = &.{},
+    /// connect_any is a `connect any` line: every TCP port, for one
+    /// service that scans. Fence still refuses its loopback except the
+    /// ports in connect.
+    connect_any: bool = false,
     /// sockets are the pathname UNIX sockets a `connect` line names.
     sockets: []const []const u8 = &.{},
     read: []const []const u8 = &.{},
     write: []const []const u8 = &.{},
+    /// data is a directory under /data/share, bound into an image at
+    /// image, read or write. The first service that writes a path owns
+    /// it. Another service reaches it only in that user's group.
+    data: []const Data = &.{},
+    /// caps is CAP_NET_RAW and CAP_NET_ADMIN, the only capabilities a
+    /// service file may keep besides a low port's. Empty is none.
+    caps: u32 = 0,
     run: []const []const u8 = &.{},
     requires: []const []const u8 = &.{},
     env: []const [2][]const u8 = &.{},
@@ -73,6 +84,17 @@ const narrowing: seal.Set = .initMany(&.{ .rpath, .exec, .landlock, .seccomp });
 /// network is what no narrowed program may promise.
 const network: seal.Set = .initMany(&.{ .inet, .unix, .netlink, .packet, .connect, .listen });
 
+/// cap is the bit a `caps` line may name: CAP_NET_ADMIN and CAP_NET_RAW.
+/// A service file cannot keep any other capability.
+pub const cap = struct {
+    pub const net_admin: u32 = 1 << 12;
+    pub const net_raw: u32 = 1 << 13;
+};
+
+/// Data is a `data` line: a directory under /data/share/NAME, bound
+/// into an image at image. write is the service's access there.
+pub const Data = struct { host: []const u8, image: []const u8, write: bool };
+
 /// Secret is a `secret` line: a variable read from a file beneath
 /// /run/config, which is never logged; an optional one may be missing.
 pub const Secret = struct { name: []const u8, path: []const u8, optional: bool = false };
@@ -123,7 +145,10 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var listen: std.ArrayList(u16) = .empty;
     var listen_udp: std.ArrayList(u16) = .empty;
     var connect: std.ArrayList(u16) = .empty;
+    var connect_any = false;
     var sockets: std.ArrayList([]const u8) = .empty;
+    var data: std.ArrayList(Data) = .empty;
+    var caps: u32 = 0;
     var read: std.ArrayList([]const u8) = .empty;
     var write: std.ArrayList([]const u8) = .empty;
     var run: std.ArrayList([]const u8) = .empty;
@@ -174,6 +199,9 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                 if (!isCleanPath(a) or std.mem.findScalar(u8, a[1..], '/') == null)
                     return invalid(bad, "a socket's path must be absolute, clean, in a directory");
                 try sockets.append(gpa, a);
+            } else if (std.mem.eql(u8, a, "any")) {
+                if (connect_any) return invalid(bad, "connect any twice");
+                connect_any = true;
             } else try connect.append(gpa, try tcpPort(a, bad));
         } else if (std.mem.eql(u8, key, "read") or std.mem.eql(u8, key, "write") or
             std.mem.eql(u8, key, "run") or std.mem.eql(u8, key, "requires"))
@@ -267,10 +295,37 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             if (args.len != 1 or !isCleanPath(args[0]))
                 return invalid(bad, "dir takes one absolute path, inside the root");
             dir = args[0];
+        } else if (std.mem.eql(u8, key, "caps")) {
+            if (caps != 0) return invalid(bad, "caps twice");
+            if (args.len == 0) return invalid(bad, "caps takes net_raw and net_admin");
+            for (args) |a| {
+                const bit: u32 = if (std.mem.eql(u8, a, "net_raw"))
+                    cap.net_raw
+                else if (std.mem.eql(u8, a, "net_admin"))
+                    cap.net_admin
+                else
+                    return invalid(bad, "caps takes net_raw and net_admin, each once");
+                if (caps & bit != 0) return invalid(bad, "caps takes net_raw and net_admin, each once");
+                caps |= bit;
+            }
+        } else if (std.mem.eql(u8, key, "data")) {
+            if (args.len != 3) return invalid(bad, "data takes a host path, an image path, and read or write");
+            if (!isSharePath(args[0]))
+                return invalid(bad, "data's host path is /data/share/NAME/ and a directory beneath");
+            if (!isCleanPath(args[1]))
+                return invalid(bad, "data's image path must be absolute, without . or .. or //");
+            const writable = if (std.mem.eql(u8, args[2], "write"))
+                true
+            else if (std.mem.eql(u8, args[2], "read"))
+                false
+            else
+                return invalid(bad, "data takes read or write");
+            try data.append(gpa, .{ .host = args[0], .image = args[1], .write = writable });
         } else return invalid(bad, "unknown key");
     }
     bad.line = 0;
     if (dir != null and root == null) return invalid(bad, "dir without root");
+    if (data.items.len > 0 and root == null) return invalid(bad, "data is an image's");
     const promises = pledge orelse return invalid(bad, "no pledge: say what it does");
     if (render) |r| {
         settings.declare(gpa, declared.items, r, &bad.why) catch |err| switch (err) {
@@ -300,9 +355,12 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .listen = listen.items,
         .listen_udp = listen_udp.items,
         .connect = connect.items,
+        .connect_any = connect_any,
         .sockets = sockets.items,
         .read = read.items,
         .write = write.items,
+        .data = data.items,
+        .caps = caps,
         .run = run.items,
         .requires = requires.items,
         .env = env.items,
@@ -564,6 +622,21 @@ pub fn isName(s: []const u8) bool {
     return true;
 }
 
+/// isSharePath reports whether s is /data/share/NAME/ and a directory
+/// beneath it. NAME is a lowercase word. The share root itself, and a
+/// service's own /data/svc directory, are not a shared tree.
+fn isSharePath(s: []const u8) bool {
+    const prefix = "/data/share/";
+    if (!std.mem.startsWith(u8, s, prefix) or !isCleanPath(s)) return false;
+    const rest = s[prefix.len..];
+    const slash = std.mem.findScalar(u8, rest, '/') orelse return false;
+    if (slash == 0 or slash + 1 == rest.len) return false;
+    const name = rest[0..slash];
+    if (name.len > 32 or !std.ascii.isLower(name[0])) return false;
+    for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') return false;
+    return true;
+}
+
 /// isVariable reports whether s is an environment variable name:
 /// [A-Za-z_][A-Za-z0-9_]*.
 fn isVariable(s: []const u8) bool {
@@ -639,6 +712,22 @@ test parse {
     try testing.expectEqualStrings("valkey", group.groups[0]);
     try testing.expectEqual(0, plain.groups.len);
     try testing.expectEqual(null, plain.cpu);
+    const scan = try parse(arena.allocator(),
+        \\exec /usr/bin/scan
+        \\user _oci-scan
+        \\pledge stdio inet connect packet
+        \\root /oci/scan
+        \\connect tcp/6379 any
+        \\caps net_raw net_admin
+        \\data /data/share/gvm/vt /var/lib/openvas/plugins write
+        \\data /data/share/gvm/notus /var/lib/notus read
+    , &bad);
+    try testing.expect(scan.connect_any);
+    try testing.expectEqualSlices(u16, &.{6379}, scan.connect);
+    try testing.expectEqual(cap.net_raw | cap.net_admin, scan.caps);
+    try testing.expect(scan.data[0].write);
+    try testing.expect(!scan.data[1].write);
+    try testing.expectEqualStrings("/var/lib/notus", scan.data[1].image);
 }
 
 test "parse refuses" {
@@ -692,6 +781,15 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a/b", .line = 4 },
         .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\nroot /oci/b", .line = 5 },
         .{ .text = "exec /a\nuser x\npledge stdio\ndir /data", .line = 0 }, // dir without root
+        .{ .text = "exec /a\nuser x\npledge stdio\ncaps sys_admin", .line = 4 },
+        .{ .text = "exec /a\nuser x\npledge stdio\ncaps", .line = 4 },
+        .{ .text = "exec /a\nuser x\npledge stdio\ncaps net_raw\ncaps net_admin", .line = 5 },
+        .{ .text = "exec /a\nuser x\npledge stdio\ncaps net_raw net_raw", .line = 4 },
+        .{ .text = "exec /a\nuser x\npledge stdio\nconnect any\nconnect any", .line = 5 },
+        .{ .text = "exec /a\nuser x\npledge stdio\ndata /data/share/gvm/vt /x write", .line = 0 },
+        .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/svc/a /x write", .line = 5 },
+        .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/share/gvm /x write", .line = 5 },
+        .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/share/gvm/vt /x maybe", .line = 5 },
     };
     for (cases) |c| {
         var bad: Bad = .{};

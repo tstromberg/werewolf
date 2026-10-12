@@ -1,0 +1,7 @@
+#!/bin/sh
+# forms/minecraft/test/config DIR: the minecraft form's config for make
+# check, in DIR. steve is on the whitelist. test/checks logs in as steve
+# and as a name that is not.
+set -eu
+mkdir -p "$1/minecraft"
+echo '{"players":["steve"]}' >"$1/minecraft/settings.json"

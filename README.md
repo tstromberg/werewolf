@@ -1,20 +1,22 @@
-# Werewolf Linux
-So secure that you can just give out the root password.
+# Werewolf Linux - Battle hardened, Secure-by-default VMs
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-Werewolf Linux is an experimental, secure-by-default distro for virtual machines:
+Werewolf Linux is an experimental, secure-by-default distro for virtual machines. Our goal is to find a way to serve
+popular applications in a form that's effectively unhackable, even in the face of undocumented application or Linux 
+vulnerabilities. Our mitigations prevent 48 of 49 Linux exploits in CISA's Known Exploited Vulnerabilities catalog ([survey](docs/cve-mitigation-survey.md)):
 
-* **Locked down**: read-only, verified root (ChromeOS's dm-verity) and every program confined by promises (OpenBSD's unveil/pledge).
-* **Declarative**: a VM is a form plus a few flags, built from Wolfi/Alpine packages, like NixOS but as a one-liner.
-* **Minimal**: production images carry no shell by default (Chainguard OS).
-* **Self-updating**: on by default, into A/B slots that roll back on failure (ChromeOS).
+- Verified execution: Binaries can only be executed from a cryptographically verified, read-only image.
+- Minimal, privilege-separated OS: Minimal surface area - most images don't even ship with a shell.
+- Automatic remediation: Automatic CVE/CISA-KEV driven updates by default, with rollback on failure
+- Declarative runtime confinement: Explicit syscall, filesystem, and network permissions constrain compromised components.
+- Kernel lockdown: Irreversible restrictions block dangerous kernel interfaces, such as io_uring, eBPF, module loading
 
-Prevents 48 of 49 Linux exploits in CISA's Known Exploited Vulnerabilities catalog ([survey](docs/cve-mitigation-survey.md)).
+Werewolf is like if ChromeOS and OpenBSD had a baby: locked down, minimal, privilege seperated, with automatic updates enabled by default. It predominantly uses packages from Wolfi and Alpine, and uses Zig as it's implementation language.
 
 ## Try it
 
-`howl` is werewolf's command: it builds and boots werewolf VMs, locally or in a cloud.
+`howl` is werewolf's friendly end-user interface, it builds and boots werewolf VMs, locally or in a cloud.
 
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf

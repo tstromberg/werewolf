@@ -4,7 +4,7 @@ A document archive with OCR and search: [Paperless-ngx](https://docs.paperless-n
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The web server, the consumer, the worker and the scheduler each run as their own user. They share the library, which the web server's user owns. The root is read-only. `/data` is what survives.
 - Sign-up is closed. The administrator is created from the config before the site answers.
 - The web server listens on loopback. Caddy is the public port.
 - The queue is Valkey's socket. There is no Redis port.
@@ -12,6 +12,7 @@ A document archive with OCR and search: [Paperless-ngx](https://docs.paperless-n
 ### Weaknesses
 
 - Python runs Paperless. Named in `form.yaml`.
+- The four services share one library, so the files they make stay writable by that group. Named in `form.yaml`.
 
 ## Getting Started
 

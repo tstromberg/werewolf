@@ -4,7 +4,7 @@ A network sensor: [Zeek](https://zeek.org) 8.2 reading one interface and writing
 
 ## Security Posture
 
-- span opens the packet socket and promiscuous mode, then becomes `_span` and may only copy frames. Zeek never holds those capabilities.
+- pcap-feed opens the packet socket and promiscuous mode, then becomes `_pcap` and may only copy frames. Zeek never holds those capabilities.
 - Zeek runs as its image's user. It reads the fifo and writes logs. It reaches a resolver and nothing else.
 
 ## Getting Started
@@ -15,7 +15,7 @@ A network sensor: [Zeek](https://zeek.org) 8.2 reading one interface and writing
 howl create zeek --with zeek
 ```
 
-Logs are JSON files in `/data/svc/zeek`. The scripts are Zeek's stock `local`. Logs are in [Zeek's documentation](https://docs.zeek.org/).
+Logs are JSON files in `/data/svc/zeek`. The scripts are Zeek's stock `local`, and one line so `reporter.log` exists as soon as Zeek is up. Logs are in [Zeek's documentation](https://docs.zeek.org/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 

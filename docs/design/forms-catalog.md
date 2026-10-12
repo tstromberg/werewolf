@@ -50,7 +50,7 @@ READMEs, forms/README.md and test/checks hold what tiers 1 and 2 taught.
 
 | Form | Defaults; its check's attack | Waits on |
 | --- | --- | --- |
-| `minecraft` on `jre` | whitelist, `online-mode`, no RCON or query port; a join off the list | a stand-in jar, as Mojang's cannot ship |
+| `minecraft` | whitelist, `online-mode`, no RCON or query port; a join off the list | built 2026-10-11: Mojang's 26.3 on the `jre` form's Java 27, pinned; nothing notices a newer release (forms/minecraft) |
 | `mattermost` | no open sign-up, plugins off (a plugin is code); a plugin upload | its first-run program |
 | `jellyfin` (.NET) | no DLNA, discovery or remote metadata; the wizard after setup | built 2026-10-10: jellyfin-setup completes the wizard on loopback before Caddy starts; media over ssh (forms/jellyfin) |
 | `miniflux` | admin from the config; a feed on loopback (SSRF) | built 2026-10-10 (forms/miniflux) |

@@ -5,7 +5,7 @@ Active Directory graphs: [BloodHound CE](https://bloodhound.specterops.io/), beh
 ## Security Posture
 
 - BloodHound and its metrics listen on loopback. Neo4j's HTTP is off. Bolt requires a password.
-- Cypher mutations are off. The complexity limit stays on.
+- Cypher that writes is refused, and the complexity limit stays on. A collector's zip is ingested by the application.
 - The administrator is `admin`, recreated from the config at each start. Neo4j's password is set once, before Neo4j's first start.
 - PostgreSQL takes one role, over loopback, and only BloodHound may connect.
 

@@ -85,7 +85,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
 	check-lease check-static check-unsigned check-verity check-deadman check-metadata check-persist \
-	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker seal-learn $(OUT)/disk.qcow2
+	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
 
 all: image
 install-deps:
@@ -148,6 +148,7 @@ PROGRAM_AT_init = init
 PROGRAM_AT_bite-cleanup = usr/bin/bite-cleanup
 PROGRAM_AT_popen-shim = usr/lib/werewolf/popen-shim.so
 PROGRAM_AT_samba-passwd = usr/lib/werewolf/samba-passwd.so
+PROGRAM_AT_paperless-group = usr/lib/werewolf/paperless-group.so
 form_bin = $(PROGRAMS)/forms/$(notdir $(patsubst %/cmd/$(notdir $(1)),%,$(1)))/usr/lib/werewolf/$(notdir $(1))
 FORM_CMDS := $(sort $(patsubst %/,%,$(wildcard forms/*/cmd/*/) $(foreach d,$(FORM_DIRS),$(wildcard $(d)/cmd/*/))))
 POSTURE_BIN = $(call program_bin,posture)
@@ -176,7 +177,7 @@ $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wil
 	$$(zig_check)
 	zig build-exe -O ReleaseSafe -fstrip -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
-$(foreach p,$(filter-out popen-shim samba-passwd,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
+$(foreach p,$(filter-out popen-shim samba-passwd paperless-group,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
 # pg-init preloads popen-shim.so into initdb, so it links glibc as initdb does.
 # samba preloads samba-passwd.so into smbd, for the same reason: glibc.
@@ -184,6 +185,10 @@ $(call program_bin,popen-shim): cmd/popen-shim/popen-shim.zig
 	$(zig_check)
 	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 $(call program_bin,samba-passwd): cmd/samba-passwd/samba-passwd.zig
+	$(zig_check)
+	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
+# Paperless preloads paperless-group.so into CPython, so it links glibc too.
+$(call program_bin,paperless-group): cmd/paperless-group/paperless-group.zig
 	$(zig_check)
 	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 
@@ -260,6 +265,7 @@ _test/lib/compose.zig: ; zig test $(COMPOSE_MODULES)
 _test/tools/package.zig _test/lib/apk.zig: _test/%: ; zig test --dep package -Mroot=$* -Mpackage=lib/package.zig
 _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
 _test/cmd/popen-shim/popen-shim.zig: ; zig test cmd/popen-shim/popen-shim.zig -lc
+_test/cmd/paperless-group/paperless-group.zig: ; zig test cmd/paperless-group/paperless-group.zig -lc
 _test/tools/test-sk.zig: ; zig test tools/test-sk.zig -lc
 _test/cmd/%.zig: ; zig test $(call ZIG_MODULES,cmd/$*.zig)
 _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
@@ -632,6 +638,36 @@ _check-updater: $(VERITY_BIN)
 
 ci:
 	test/lima-ci
+
+# check-updater-uki updates a machine through a repository the check serves,
+# whose prod-form depends on uki-prod: slot b must carry the signed UKI and
+# boot through the entry that names it (docs/design/verified-boot.md).
+check-updater-uki: $(UKI_BIN) $(VERITY_BIN) | _check-shared
+	@[ "$(ARCH)-$(ACCEL)" = aarch64-hvf ] || [ "$(ARCH)-$(ACCEL)" = aarch64-kvm ] || \
+		{ echo "skip   uki               emulated arm64 boots firmware too slowly"; exit 0; }
+	@mkdir -p $(CHECK)
+	@rm -f $(CHECK)/uki-repo.key $(CHECK)/uki-repo.crt $(CHECK)/uki.key $(CHECK)/uki.crt
+	openssl genrsa -out $(CHECK)/uki-repo.key 2048 2>/dev/null
+	openssl rsa -in $(CHECK)/uki-repo.key -pubout -out $(CHECK)/uki-repo.pub 2>/dev/null
+	openssl req -newkey rsa:2048 -nodes -keyout $(CHECK)/uki.key -x509 -new \
+		-subj /CN=werewolf-uki-check -days 30 -out $(CHECK)/uki.crt 2>/dev/null
+	@$(MAKE) --no-print-directory FORM=prod slot
+	@rm -f $(BUILD)/prod/slot/uki.efi
+	@$(MAKE) --no-print-directory FORM=prod WEREWOLF_BOOT_KEY=$(CHECK)/uki.key \
+		WEREWOLF_BOOT_CRT=$(CHECK)/uki.crt $(BUILD)/prod/slot/uki.efi
+	@mkdir -p $(CHECK)/uki-repo && rm -rf $(CHECK)/uki-repo/*
+	@mkdir -p $(CHECK)/uki-repo/uki/usr/lib/werewolf/uki
+	cp $(BUILD)/prod/slot/uki.efi $(CHECK)/uki-repo/uki/usr/lib/werewolf/uki/slot.efi
+	build/host/package pack $(CHECK)/uki-repo $(CHECK)/uki-repo/uki uki-prod - $(ARCH) \
+		$$(date -u +%s) "the check's UKI" depend:werewolf-format$(PACKAGE_FORMAT)
+	@t=$(CHECK)/uki-repo/form && build/host/form stage prod $$t >/dev/null && \
+		build/host/package pack $(CHECK)/uki-repo $$t prod-form - $(ARCH) \
+		$$(date -u +%s) "the check's prod" \
+		$$(build/host/form depends prod | sed 's/^/depend:/') depend:uki-prod
+	@$(CHECK_ENV) FORM=prod OUT=$(BUILD)/prod ARCH=$(ARCH) REPO_DIR=$(CHECK)/uki-repo EROFS_OPTS='$(EROFS_OPTS)' \
+		REPO_KEY=$(CHECK)/uki-repo.key REPO_PUB=$(CHECK)/uki-repo.pub \
+		ACCEL=$(ACCEL) CPU=$(CPU) FIRMWARE=$(UEFI_FIRMWARE) \
+		test/check-updater-uki
 # clean keeps the locks, so the next build is the same as the last.
 clean:
 	rm -rf $(filter-out $(LOCK),$(wildcard build/*))

@@ -104,6 +104,19 @@ pub fn build(b: *B, recipe: []const u8) !void {
         // behind when a build dies: here, not in the checkout's root.
         try env.put("QEMU_DISKS_PATH", scratch);
     }
+    // The recipe's directory is the build's source. Another file there, a
+    // stand-in's Java, is an input too, or editing it would not rebuild.
+    if (std.fs.path.dirname(recipe)) |dir| {
+        var listing = try Dir.cwd().openDir(b.io, dir, .{ .iterate = true });
+        defer listing.close(b.io);
+        var it = listing.iterate();
+        while (try it.next(b.io)) |e| {
+            if (e.kind != .file or e.name[0] == '.') continue;
+            const path = try b.gpa.print("{s}/{s}", .{ dir, e.name });
+            if (mem.eql(u8, path, recipe)) continue;
+            try inputs.append(b.gpa, path);
+        }
+    }
     const target = try stamp(b, recipe);
     const began = try b.begin(target, inputs.items) orelse return;
     try Dir.cwd().createDirPath(b.io, vendor ++ "/packages");

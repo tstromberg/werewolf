@@ -1037,7 +1037,8 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
                 } else if (mem.eql(u8, d.key, "connect")) for (values) |v| {
                     var net: std.ArrayList([]const u8) = .empty;
                     var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
-                    while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w))
+                    while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w) or
+                        mem.eql(u8, w, "any"))
                         try net.append(gpa, w);
                     if (net.items.len == 0) continue;
                     if (user.len == 0) return f.fail(

@@ -4,9 +4,10 @@ A network sensor: [Suricata](https://suricata.io) 8 reading one interface and wr
 
 ## Security Posture
 
-- span opens the packet socket and promiscuous mode, writes the pcap header, then becomes `_span` with no capabilities and a filter of `read`, `write`, `clock_gettime` and `exit_group`.
-- Suricata runs as its own user. It reads the fifo and the rules in the image. It binds nothing and reaches nothing.
-- The unix control socket is off. `suricata-update` and Python are not on the machine.
+- pcap-feed opens the packet socket and promiscuous mode, writes the pcap header, then becomes `_pcap` with no capabilities and a filter of `read`, `write`, `clock_gettime` and `exit_group`.
+- Suricata runs as its own user. It reads the fifo and the rules cache: Emerging Threats Open, the engine's protocol rules, and one marker. It binds nothing. Its pledge has no network.
+- rules-fetch, as `_rules`, downloads that cache onto the data partition and refreshes it daily. The directory is mode 0711 and the files are mode 0644, so Suricata can read them and cannot replace them.
+- The unix control socket is off. `suricata-update` and Python are not on the machine. A refresh is loaded the next time Suricata starts.
 
 ## Getting Started
 
@@ -16,7 +17,7 @@ A network sensor: [Suricata](https://suricata.io) 8 reading one interface and wr
 howl create suricata --with suricata
 ```
 
-Alerts are in `/data/svc/suricata`. The one rule looks for the string `werewolf-suricata-marker` in HTTP. A ruleset of your own replaces `werewolf.rules` and is a new image. Rules are in [Suricata's documentation](https://docs.suricata.io/).
+Alerts are in `/data/svc/suricata`. The cache is `/data/svc/rules-fetch`: Emerging Threats Open when the feed answers, and always the engine's protocol rules plus one rule that looks for the string `werewolf-suricata-marker` in HTTP. Rules are in [Suricata's documentation](https://docs.suricata.io/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -32,11 +33,11 @@ There is nothing to import. Alerts from this machine are the files under `/data/
 
 ### Known Quirks
 
-- No rule download. The image holds the rules.
-- span's fifo is `/run/svc/suricata/feed`, mode 0400, Suricata's alone.
-- Promiscuous mode is requested. Without `CAP_NET_ADMIN` the feed would be only what this host sends and receives; the form keeps that capability until span drops it.
+- The signature cache refreshes when rules-fetch starts a pass, at most daily. Suricata keeps the rules it loaded until it starts again.
+- pcap-feed's fifo is `/run/svc/suricata/feed`, mode 0400, Suricata's alone.
+- Promiscuous mode is requested. Without `CAP_NET_ADMIN` the feed would be only what this host sends and receives; the form keeps that capability until pcap-feed drops it.
 
 ### Network Exposure
 
 - listen: none
-- connect: none
+- connect: rules-fetch to TCP 443 on public addresses, and to the resolver on UDP and TCP 53. Suricata itself connects nowhere.

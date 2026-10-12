@@ -60,6 +60,7 @@ pub fn compose(
     f: *Failure,
 ) !void {
     const allowed = try allowances(gpa, forms, f);
+    try privileges(io, gpa, root, forms, allowed, f);
     const accts = try withAccounts(io, gpa, root, forms, image, f);
     const passwd = accts.passwd;
     const group = accts.group;
@@ -924,9 +925,57 @@ fn serviceDirOwner(path: []const u8) ?[]const u8 {
     return null;
 }
 
+/// privileges refuses a capability the chain did not allow, and a shared
+/// directory no one writes or that a service reaches without joining the
+/// owner's group. The first writer in service-name order owns the path.
+/// Other forms name neither, so they are unchanged.
+fn privileges(
+    io: Io,
+    gpa: Allocator,
+    root: Dir,
+    forms: []const Form,
+    allowed: []const []const u8,
+    f: *Failure,
+) !void {
+    const services = try form.services(io, gpa, root, forms, f);
+    var owner_of: std.array_hash_map.String([]const u8) = .empty;
+    var user_of: std.array_hash_map.String([]const u8) = .empty;
+    for (services) |s| {
+        const parsed = try parseService(gpa, s, f);
+        try user_of.put(gpa, s.name, parsed.user);
+        if (parsed.caps & service.cap.net_raw != 0 and !allows(allowed, "packet"))
+            return f.fail(gpa, "{s}: caps net_raw: the chain does not allow packet", .{s.path});
+        if (parsed.caps & service.cap.net_admin != 0 and !allows(allowed, "netadmin"))
+            return f.fail(gpa, "{s}: caps net_admin: the chain does not allow netadmin", .{s.path});
+        for (parsed.data) |d| if (d.write and !owner_of.contains(d.host))
+            try owner_of.put(gpa, d.host, s.name);
+    }
+    for (services) |s| {
+        const parsed = try parseService(gpa, s, f);
+        for (parsed.data) |d| {
+            const owner = owner_of.get(d.host) orelse return f.fail(
+                gpa,
+                "{s}: data {s}: no service writes it",
+                .{ s.path, d.host },
+            );
+            if (mem.eql(u8, owner, s.name)) continue;
+            const owner_user = user_of.get(owner).?;
+            const joined = for (parsed.groups) |g| {
+                if (mem.eql(u8, g, owner_user)) break true;
+            } else false;
+            if (!joined) return f.fail(
+                gpa,
+                "{s}: data {s}: {s} owns it; group {s} joins that user",
+                .{ s.path, d.host, owner, owner_user },
+            );
+        }
+    }
+}
+
 /// oci lists the services that run in a baked-in image: `root NAME DIR USER`,
 /// then `write NAME PATH` for each path init binds beneath the image root
-/// and fence allows (cmd/init/oci.zig, cmd/fence).
+/// and fence allows (cmd/init/oci.zig, cmd/fence). `data NAME HOST IMAGE
+/// read|write` is a directory under /data/share, bound the same way.
 pub fn oci(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failure) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     for (try form.services(io, gpa, root, forms, f)) |s| {
@@ -934,6 +983,9 @@ pub fn oci(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failure) 
         const dir = parsed.root orelse continue;
         try out.print(gpa, "root {s} {s} {s}\n", .{ s.name, dir, parsed.user });
         for (parsed.write) |path| try out.print(gpa, "write {s} {s}\n", .{ s.name, path });
+        for (parsed.data) |d| try out.print(gpa, "data {s} {s} {s} {s}\n", .{
+            s.name, d.host, d.image, if (d.write) "write" else "read",
+        });
     }
     return out.items;
 }
@@ -1107,6 +1159,13 @@ fn netLine(
             if (mem.eql(u8, t, "icmp")) {
                 if (public) return false;
                 try out.append(gpa, try gpa.print("connect {s} icmp", .{who}));
+                continue;
+            }
+            // any is every TCP port, for one user. public would refuse the
+            // private networks a scan is for, and `all` would be every user.
+            if (mem.eql(u8, t, "any")) {
+                if (public or mem.eql(u8, who, "all")) return false;
+                try out.append(gpa, try gpa.print("connect {s} tcp any", .{who}));
                 continue;
             }
             const proto = if (mem.startsWith(u8, t, "udp/")) "udp" else "tcp";

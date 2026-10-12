@@ -32,14 +32,13 @@ is one leashed process, or a few, on one machine.
 - Fleet beside Velociraptor, and any C2 or malware sandbox.
 - Elastic Security, Security Onion, OpenCTI, TheHive, Cortex.
 - Wazuh, until the service user can execute its programs.
-- Greenbone's scanner and feed. The manager and the web UI are the form.
 
 ## Detailed design
 
-span (`cmd/span`) opens one interface, writes a pcap header to a fifo,
-drops to `_span` (uid 70) and keeps `read`, `write`, `clock_gettime`
+pcap-feed opens one interface, writes a pcap header to a fifo,
+drops to `_pcap` (uid 70) and keeps `read`, `write`, `clock_gettime`
 and `exit_group`. Suricata and Zeek read the fifo. `packet` and
-`netadmin` stay in the bounding set so span can open the socket; the
+`netadmin` stay in the bounding set so pcap-feed can open the socket; the
 analyzers never have them.
 
 Iris, MISP and Greenbone exec `/usr/bin/bash` or `/bin/bash` with one
@@ -51,28 +50,28 @@ image, so the host's programs-no-shell check still passes.
 | Form | State | Defaults; its check's attack |
 | --- | --- | --- |
 | `velociraptor` | built | keys generated on the machine; `admin` from the config at each start; GUI on loopback behind Caddy; clients on :8000 with mutual TLS; the server may run only its own binary; `admin`/`admin` and a stranger |
-| `suricata` | built | span's fifo; the image's one rule; no unix socket, no rule download; the engine not root, the rules not writable |
+| `suricata` | built | pcap-feed's fifo; Emerging Threats Open cached on `/data` by rules-fetch; the engine has no network and does not own the cache; no unix socket |
 | `zeek` | built | the same fifo, Zeek's `local` scripts, JSON logs on `/data`; the process not root |
 | `dependency-track` | built | bundled jar, PostgreSQL on loopback, Caddy; `admin`/`admin` replaced before Caddy opens |
 | `bloodhound` | built | CE behind Caddy; Neo4j Bolt on loopback, HTTP off; Cypher mutations off; the community-edition password refused |
 | `wazuh` | not built | the manager's programs are mode 0750, root only; the tree is read-only, and the leash has dropped root |
 | `opencanary` | built | Python on twistd, not the image's shell; FTP, SSH, HTTP, Telnet, RDP and VNC only; SMB and the host's logs off; a banner on :21, nothing on :445 |
 | `misp` | built | PHP on loopback behind Caddy; misp-serve starts a fixed list, with no Python and no supervisor; published passwords are not set; modules are not started |
-| `greenbone` | built | gvmd's socket is mode 0660, group `_oci-gvmd`, carried by gvm-link; both behind Caddy; `admin`/`admin` refused; no scanner |
+| `greenbone` | built | gvmd's socket is mode 0660, group `_oci-gvmd`, carried by gvm-link; both behind Caddy; `admin`/`admin` refused; the scanner alone holds the packet capabilities; the feed owns the cache and gvmd may only read it |
 | `iris` | built | gunicorn on loopback behind Caddy, via the image's bash; the administrator from the config; no worker |
 
 ## Drawbacks
 
-span is a program we maintain. Two passwords for BloodHound, because
+pcap-feed is a program we maintain. Two passwords for BloodHound, because
 two services cannot share one config key. Neo4j's password is set
-once; Dependency-Track's administrator is too. Greenbone on this
-machine does not scan. MISP's PHP listens on loopback.
+once; Dependency-Track's administrator is too. Greenbone's first
+feed sync is large; the UI is up while it runs. MISP's PHP listens on loopback.
 
 ## Alternatives Considered
 
-- Leashing Suricata with `CAP_NET_RAW`. Posture allows a service no
-  capability but `CAP_NET_BIND_SERVICE`. span is how capture stays
-  outside that rule.
+- Leashing Suricata with `CAP_NET_RAW`. pcap-feed is how capture stays
+  outside the analyzer. A service may name `net_raw` and `net_admin`;
+  only Greenbone's scanner does, and only that process keeps them.
 - Elastic as a form. It is a licensed cluster. OpenSearch is the
   search node.
 - Running Wazuh's `/init`, or its bash, as root. The programs are not
@@ -90,6 +89,7 @@ BloodHound's metrics port is loopback. Neo4j sends no usage report.
 The bash these three forms run is the image's, and it is not on the
 host. gvmd's socket is mode 0660 and its group is `_oci-gvmd`;
 gvm-link keeps that group. A command still needs the password.
+The scanner alone keeps the packet capabilities; gvmd reads the feed and cannot open PostgreSQL.
 
 ## Reliability Considerations
 
