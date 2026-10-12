@@ -1,22 +1,21 @@
-# Werewolf Linux - Battle hardened, Secure-by-default VMs
+# Werewolf Linux — Secure-by-default VMs
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-Werewolf Linux is an experimental, secure-by-default distro for virtual machines. Our goal is to find a way to serve
-popular applications in a form that's effectively unhackable, even in the face of undocumented application or Linux 
-vulnerabilities. Our mitigations prevent 48 of 49 Linux exploits in CISA's Known Exploited Vulnerabilities catalog ([survey](docs/cve-mitigation-survey.md)):
+Werewolf Linux is an experimental, secure-by-default distribution for virtual
+machines. Our goal is to keep popular applications contained even when attackers
+exploit previously unknown application or Linux vulnerabilities.
 
-- Verified execution: Binaries can only be executed from a cryptographically verified, read-only image.
-- Minimal, privilege-separated OS: Minimal surface area - most images don't even ship with a shell.
-- Automatic remediation: Automatic CVE/KEV driven updates by default, with rollback on failure
-- Declarative runtime confinement: Explicit syscall, filesystem, and network permissions constrain compromised components.
-- Kernel lockdown: Irreversible restrictions block dangerous kernel interfaces, such as io_uring, eBPF, module loading
-
-Werewolf is like if ChromeOS and OpenBSD had a baby: locked down, minimal, privilege seperated, with automatic updates enabled by default. It predominantly uses packages from Wolfi and Alpine, and uses Zig as it's implementation language.
+Think ChromeOS meets OpenBSD: verified, read-only system images, automatic updates,
+a minimal OS and privilege separation. Services get explicit system-call, filesystem
+and network permissions that gaining root cannot remove. Werewolf uses packages
+from Wolfi and Alpine; its own programs are written in Zig.
 
 ## Try it
 
-`howl` is werewolf's friendly end-user interface, it builds and boots werewolf VMs, locally or in a cloud.
+`howl` builds and starts VMs on Linux and macOS, with experimental FreeBSD and
+NetBSD support (`gmake` instead of `make`). Prepare the [Secure Boot prerequisites](docs/testing.md#secure-boot),
+then start a local playground; `howl` chooses an installed VM manager:
 
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf
@@ -24,86 +23,68 @@ make install
 howl run
 ```
 
-Build your application into an immutable VM, here or in a cloud (`--on gcp`, `aws`, `azure`, `proxmox`):
+To run your own locked-down Python app, put `main.py` in `./myapp`, for example:
 
 ```sh
-howl create web --with python-app --app ./myapp
+howl create web --on gcp --with python-app --app ./myapp
 ```
 
-Tutorials: [PHP](examples/php/README.md), [Python](examples/python/README.md), [Node.js](examples/nodejs/README.md), [Go](examples/go/README.md), [Rust](examples/rust/README.md), [ASP.NET Core](examples/aspnet/README.md).
+Tutorials: [Python](examples/python/README.md), [PHP](examples/php/README.md),
+[Node.js](examples/nodejs/README.md), [Go](examples/go/README.md),
+[Rust](examples/rust/README.md), [ASP.NET Core](examples/aspnet/README.md).
+Prebuilt images are on the [releases page](https://github.com/werewolf-linux/werewolf/releases).
 
-Even an application with a remote code execution bug stays contained. Don't believe us? Try to break out of this web shell:
+## Choose a form and host
 
-```sh
-howl run --with webshell-example
-```
-
-Prebuilt images for any cloud or hypervisor are on the [releases](https://github.com/werewolf-linux/werewolf/releases) page.
+A **form** declares packages, services and permissions. Choose [Caddy](forms/caddy/README.md),
+[PostgreSQL](forms/postgresql/README.md), an [SSH bastion](forms/bastion/README.md),
+or [build your own](docs/forms.md). The [catalog](forms/README.md) includes production
+bases and a deliberately vulnerable `webshell-example` for testing confinement.
 
 ## Secure Boot
 
-Signed loaders and UKIs authenticate the kernel, early boot and root hash.
-Stage0 requires `SecureBoot=1` and `SetupMode=0` before handing over.
-The matrix describes Werewolf's integration; provider flags alone are not proof.
+Secure Boot authenticates the kernel, early boot code and root filesystem hash.
 
-| VM provider / backend | Werewolf Secure Boot | Caveats |
+| Provider | Werewolf Secure Boot | Caveats |
 |---|---|---|
-| QEMU (KVM / HVF) | Verified on x86_64 and arm64 | Host enrolls its signer; x86 requires SMM; Arm key storage is read-only. |
-| AWS EC2 | Verified on arm64 | Custom UEFI enrollment; UEFI-capable instance required. NitroTPM presence does not yet prevent rollback. |
-| Google Compute Engine | Verified on arm64 | Custom keys and Shielded VM enforcement; vTPM presence does not yet prevent rollback. |
-| Azure Trusted Launch | Blocked / inconsistent | West US 2 Arm and x86 reported setup mode despite matching keys; one x86 control passed. Boot refuses unsafe state. |
-| Lima QEMU | Verified on arm64 Mac | Test supplies enrolled firmware through QEMU arguments; normal `howl --on lima` uses VZ. |
-| Lima VZ | Unsupported | No firmware-key enrollment interface; Secure Boot-required images refuse handover. |
-| Firecracker | Unsupported | No UEFI; EFI entries are refused. Ordinary direct boot is a separate trust model. |
-| bhyve | Not enrolled by howl | x86 firmware can support Secure Boot; Bilbo and Smaug validation is pending. Arm backend is not implemented. |
-| Proxmox VE | Not implemented / unverified | Experimental backend does not enroll Werewolf's firmware keys. |
-| Existing VMs taken over with `bite` | Unverified | Authenticating the existing distro bootloader remains unfinished. |
+| QEMU | Verified, x86_64 and arm64 | Enrolled firmware; x86 needs SMM, arm64 uses immutable variables |
+| AWS EC2 | Verified, arm64 | Custom UEFI enrollment; NitroTPM alone does not protect rollback |
+| Google Compute Engine | Verified, arm64 | Custom Shielded VM keys; vTPM alone does not protect rollback |
+| Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
+| Lima QEMU | Verified, arm64 Mac | Explicit debug firmware arguments; normal `howl --on lima` uses VZ |
+| Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
+| bhyve | Manual enrollment verified, x86_64 | Bilbo firmware test; `howl` enrollment and arm64 backend remain unfinished |
+| Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
+| Existing VMs converted with `bite` | Unverified | Existing bootloader authentication is unfinished |
 
-A/B recovery must retain the previous good release **after health commit**.
-Protected TPM retirement is unfinished and must preserve that fallback.
-Signed machines require a matching signed update channel; unsigned local updates are held.
-See [boot tests](docs/testing.md#secure-boot), [cloud caveats](docs/cloud.md#signed-boot), and [the audit](docs/audit/astra-2026-10-11.md).
+A/B updates must retain the previous good slot after commit. Protected rollback
+prevention remains unfinished, even with a TPM. See
+[provider recovery tests](docs/testing.md#provider-ab-upgrades-and-rollbacks),
+[cloud setup](docs/cloud.md#signed-boot) and [boot tests](docs/testing.md#secure-boot).
+[`bite`](docs/bite.md) can replace an existing distro and deletes it after a successful
+migration. Verifying the existing bootloader's authenticity remains unfinished.
 
-## Take over an existing VM
+## Security and updates
 
-If your provider won't boot a custom image, `bite` installs the latest release beside Debian, Ubuntu, Fedora or Rocky and boots into it ([docs/bite.md](docs/bite.md)):
+Before starting services, Werewolf disables kernel module loading and prevents
+services from changing kernel security settings, even as root. Development images
+can relax some restrictions. Posture checks test the running machine's protections;
+the [security guide](docs/security.md) explains the controls and trusted helpers.
+Our [CVE survey](docs/cve-mitigation-survey.md) checks whether known exploits have
+the conditions they need to work; it does not report tests of those exploits.
 
-```sh
-sudo sh -c "$(curl -fsSL https://raw.githubusercontent.com/werewolf-linux/werewolf/main/bite)" bite -i
-```
+The [updater](docs/updater.md) prioritizes known exploited vulnerabilities and keeps
+two system images so a failed update can return to the previous one. Signed images
+need updates signed by a key the machine trusts. Protection against booting older
+signed images remains unfinished. You must update your application code and
+the dependencies bundled with it.
 
-## Forms
+## Get involved
 
-A form is werewolf tuned to do one thing well. A few of them:
+Questions, documentation fixes and reports from different hosts are welcome in
+[GitHub issues](https://github.com/werewolf-linux/werewolf/issues); no Zig knowledge
+is needed. The [contribution guide](CONTRIBUTING.md) covers setup, tests and first
+contributions. Discuss larger changes early. Report vulnerabilities privately
+through the [security policy](SECURITY.md).
 
-| Form | What it is |
-|---|---|
-| `minimal` | the smallest bootable image; no sshd |
-| `prod` | DHCP, a persistent `/data` disk and automatic updates; no shell |
-| `prod-ssh` | `prod` plus sshd, by security key |
-| `app` | `prod` plus an unprivileged application user |
-| [`bastion`](forms/bastion/README.md) | a forwarding-only SSH bastion |
-| [`caddy`](forms/caddy/README.md) | a web server |
-| [`cloudflared`](forms/cloudflared/README.md) | a zero-trust tunnel |
-| [`tailscale`](forms/tailscale/README.md) | an unprivileged, userspace subnet router |
-| [`postgresql`](forms/postgresql/README.md) | a database |
-| `webshell-example` | a deliberately vulnerable web app, to show the sandbox holds |
-
-All of them are in [forms/](forms/README.md).
-
-## Learn more
-
-- [docs/forms.md](docs/forms.md): forms, and building your application into one
-- [docs/security.md](docs/security.md): what werewolf defends against, and how
-- [docs/programs.md](docs/programs.md): the programs in `cmd/` and how each is confined
-- [docs/releases.md](docs/releases.md) and [docs/updater.md](docs/updater.md): releases and updates
-- [docs/data.md](docs/data.md): `/data`, disks and encryption
-- [docs/roadmap.md](docs/roadmap.md): what comes next
-
-## Contributing
-
-Contributions are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) gets you from a clone to a passing test. Report security issues privately, as [SECURITY.md](SECURITY.md) describes.
-
-## License
-
-[Apache 2.0](LICENSE).
+Licensed under [Apache 2.0](LICENSE).

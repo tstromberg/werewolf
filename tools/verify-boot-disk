@@ -14,7 +14,7 @@ qemu-img convert -f qcow2 -O raw "$disk" "$raw"
 mcopy -i "$raw@@1048576" "::/EFI/BOOT/$loader" "$out/verify-loader.efi"
 mcopy -i "$raw@@1048576" '::/werewolf/a/uki.efi' "$out/verify-uki.efi"
 mtype -i "$raw@@1048576" '::/loader/entries/werewolf-a.conf' |
-	awk '/^efi \/werewolf\/a\/uki.efi$/ { found=1 } /^linux |^initrd |^options / { bad=1 } END { exit (!found || bad) }'
+	awk '/^uki \/werewolf\/a\/uki.efi$/ { found=1 } /^efi |^linux |^initrd |^options / { bad=1 } END { exit (!found || bad) }'
 for file in verify-loader.efi verify-uki.efi; do
 	osslsigncode verify -CAfile "$cert" -in "$out/$file" >/dev/null
 done

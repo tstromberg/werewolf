@@ -28,7 +28,8 @@ pub fn main(init: std.process.Init) !void {
         if (!std.mem.eql(u8, fields.next() orelse continue, "/")) continue;
         const fs = fields.next() orelse continue;
         const opts = fields.next() orelse continue;
-        verified_root = std.mem.startsWith(u8, device, "/dev/dm-") and
+        verified_root = (std.mem.eql(u8, device, "/dev/mapper/root") or
+            std.mem.startsWith(u8, device, "/dev/dm-")) and
             std.mem.eql(u8, fs, "erofs") and std.mem.startsWith(u8, opts, "ro,");
     }
     const policy = read(io, gpa, ipe.policy_path) catch "";

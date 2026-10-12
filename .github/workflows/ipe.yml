@@ -21,7 +21,7 @@ jobs:
       matrix:
         runner: [ubuntu-26.04, ubuntu-26.04-arm]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -52,6 +52,7 @@ jobs:
           make IPE=1 check-ipe
           make IPE=1 check-image-updater
           make IPE=1 check-image-updater-uki
+          make IPE=1 check-ab-qemu
       - name: Protected TPM policy
         run: |
           make build/host/tpm-policy
@@ -65,3 +66,5 @@ jobs:
             build/*/ipe/check/ipe/*.log
             build/*/ipe/check/image-updater/*.log
             build/*/check/secureboot/*.log
+            build/*/ipe/check/provider-ab-qemu/*.log
+            build/*/ipe/check/provider-ab-qemu/phases.json

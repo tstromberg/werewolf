@@ -275,10 +275,13 @@ TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settin
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/azure-security: ; python3 test/azure-security --test
+_test/provider-ab:
+	python3 test/ab_checks.py
+	python3 test/ab-provider-tests
 _test/kernel-version: ; python3 test/kernel-version
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
@@ -668,6 +671,24 @@ check-gcp-metadata: $(HOWL) $(TEST_SK)
 
 check-gcp check-aws check-azure: check-%:
 	@$(MAKE) --no-print-directory FORM=prod-ssh CLOUD=$* _check-cloud
+
+# Explicit live lifecycle tests; cloud credentials are never required by PR CI.
+.PHONY: check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox check-bhyve-secureboot _check-provider-ab
+check-ab-qemu check-ab-lima-qemu check-ab-lima-vz check-ab-aws check-ab-gcp check-ab-azure check-ab-bhyve check-ab-firecracker check-ab-proxmox: check-ab-%:
+	@$(MAKE) --no-print-directory AB_PROVIDER=$* _check-provider-ab
+check-bhyve-secureboot: $(HOWL)
+	@test -n "$(AB_FIXTURE)" || { echo 'set AB_FIXTURE to a signed x86_64 fixture.json' >&2; exit 1; }
+	@CHECK=$(CHECK) python3 test/check-bhyve-secureboot $(HOWL) $(AB_FIXTURE)
+_check-provider-ab: $(HOWL)
+	@CHECK=$(CHECK) IPE_KERNEL=$(IPE_KERNEL) IPE_KEY=$(WEREWOLF_IPE_KEY) IPE_CERT=$(WEREWOLF_IPE_CRT) \
+		python3 test/check-provider-ab $(HOWL) $(AB_PROVIDER) $(ARCH)
+
+build/x86_64/tools/howl-linux: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
+	@mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe -target x86_64-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
+build/x86_64/tools/howl-freebsd: cmd/howl/howl.zig $(HOWL) $(wildcard cmd/howl/*.zig) files.zig
+	@mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe -target x86_64-freebsd $(call ZIG_MODULES,$<) -femit-bin=$@
 
 # A form README's fences (docs/design/examples.md). Not part of make check:
 # the console checks stay, and a README with no Getting Started is skipped.

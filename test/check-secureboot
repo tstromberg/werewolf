@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 
+from ab_checks import require_native_initrd
+
 env = os.environ
 arch = env['ARCH']
 work = pathlib.Path(env['CHECK']) / 'secureboot'
@@ -31,6 +33,7 @@ command([howl, 'build', '--build', '--with', 'prod', '--arch', arch, '-o', str(r
          '--boot-key', key, '--boot-cert', cert, '--boot-native'], 'build')
 manifest = json.loads((release / f'prod-{arch}.json').read_text())
 uki = release / f'prod-{arch}-uki'
+require_native_initrd(uki.read_bytes(), (release / f'prod-{arch}-stage0.zst').read_bytes())
 assert manifest['files']['uki']['sha256'] == hashlib.sha256(uki.read_bytes()).hexdigest()
 assert manifest['files']['boot.crt']['sha256'] == hashlib.sha256(pathlib.Path(cert).read_bytes()).hexdigest()
 disk = release / f'prod-{arch}-disk.qcow2'

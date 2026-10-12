@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Real signed updates, post-commit rollback and unhealthy-slot recovery."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+from ab_checks import require_boot
+from ab_providers import Provider
+
+howl, provider, arch = sys.argv[1:]
+howl = str(Path(howl).resolve())
+supported = ['qemu', 'lima-qemu', 'lima-vz', 'aws', 'gcp', 'azure', 'bhyve', 'firecracker', 'proxmox']
+if provider not in supported:
+    sys.exit('unknown provider: ' + provider)
+mode = os.environ.get('AB_MODE', 'plain' if provider in ['lima-vz', 'bhyve', 'firecracker', 'proxmox'] else 'secure')
+if provider in ['lima-vz', 'firecracker'] and mode == 'secure':
+    sys.exit('this backend has no Secure Boot enrollment; run its explicit refusal test')
+if provider in ['bhyve', 'firecracker', 'proxmox'] and arch != 'x86_64':
+    sys.exit('this remote backend currently requires x86_64')
+if provider == 'proxmox' and not os.environ.get('PROXMOX_HOST'):
+    sys.exit('Proxmox is untested: set PROXMOX_HOST when a test node is available')
+logs = Path(os.environ.get('CHECK', 'build/' + arch + '/check')) / ('provider-ab-' + provider)
+logs.mkdir(parents=True, exist_ok=True)
+for filename in ['failure.log', 'cleanup-failure.log', 'phases.json']:
+    (logs / filename).unlink(missing_ok=True)
+fixture_path = os.environ.get('AB_FIXTURE')
+if not fixture_path:
+    destination = Path(tempfile.mkdtemp(prefix='fixture-', dir=logs)).resolve()
+    kernel, key, cert = [os.environ[name] for name in ['IPE_KERNEL', 'IPE_KEY', 'IPE_CERT']]
+    with (logs / 'fixture.log').open('wb') as output:
+        subprocess.run([sys.executable, 'test/ab-fixture', howl, arch, kernel, key, cert,
+                        str(destination), mode], stdout=output, stderr=subprocess.STDOUT, check=True)
+    fixture_path = str(destination / 'fixture.json')
+else:
+    fixture_path = str(Path(fixture_path).resolve())
+    if Path(fixture_path).is_dir():
+        fixture_path = str(Path(fixture_path) / 'fixture.json')
+fixture = json.loads(Path(fixture_path).read_text())
+if fixture['arch'] != arch or fixture['mode'] != mode:
+    sys.exit('fixture architecture or boot mode differs from the requested provider test')
+phases = []
+
+
+def report(label, status):
+    phases.append({'phase': label, 'status': status})
+    (logs / 'phases.json').write_text(json.dumps(phases, indent=2) + '\n')
+    with (machine.work / 'console-evidence.log').open('a') as output:
+        output.write('\n' + label + ' ' + status['boot_id'] + '\n' + machine.console())
+    print('pass   ' + provider + ': ' + label, flush=True)
+
+
+def evidence(machine):
+    try:
+        result = machine.ssh('/usr/bin/ab-status', check=False, timeout=15)
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode:
+        return None
+    try:
+        value = json.loads(result.stdout)
+        with (machine.work / 'evidence.log').open('a') as log:
+            log.write(json.dumps(value) + '\n')
+        return value
+    except ValueError:
+        raise RuntimeError('invalid guest evidence: ' + result.stdout[-1000:])
+
+
+def wait_boot(machine, release, slot, previous=None, committed=True, timeout=400):
+    until = time.monotonic() + timeout
+    last = None
+    paused = None
+    while time.monotonic() < until:
+        last = evidence(machine)
+        if last and last.get('release') == release and last.get('boot_id') != previous:
+            if paused != last['boot_id']:
+                try:
+                    pause = machine.ssh('while [ ! -e /run/werewolf/updater-ready ]; do sleep 1; done; /usr/bin/sv down /etc/sv/autoupdate', check=False, timeout=15)
+                except subprocess.TimeoutExpired:
+                    time.sleep(3)
+                    continue
+                if pause.returncode == 255:
+                    time.sleep(3)
+                    continue
+                if pause.returncode:
+                    raise RuntimeError('cannot pause fixture updater: ' + pause.stderr + pause.stdout)
+                paused = last['boot_id']
+            last = evidence(machine)
+            if last is None:
+                time.sleep(3)
+                continue
+            if last.get('committed') is committed:
+                require_boot(last, release, slot, fixture['releases'][release]['root_hash'],
+                             previous=previous, secure=mode == 'secure', committed=committed)
+                return last
+        time.sleep(3)
+    raise RuntimeError('missing boot/commit ' + release + ': ' + str(last))
+
+
+def select(machine, release):
+    target = '/data/svc/ab-https/image/' + arch
+    source = '/data/svc/ab-https/heads/' + release
+    machine.ssh(f'cp {source}/latest.json {target}/latest.json; cp {source}/latest.json.sig {target}/latest.json.sig')
+
+
+def reboot(machine):
+    machine.reboot()
+
+
+failed = None
+with tempfile.TemporaryDirectory(prefix='ww-ab-', dir='/tmp') as temporary:
+    machine = Provider(provider, fixture, Path(temporary), howl)
+    try:
+        machine.start()
+        initial = wait_boot(machine, 'A', 'a')
+        report('initial A verified and committed', initial)
+        machine.ssh('cp -r /usr/share/ab/seed/. /data/svc/ab-https/; chown -R ab-https:ab-https /data/svc/ab-https; chmod -R a+rX /data/svc/ab-https')
+        select(machine, 'B')
+        machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)
+        reboot(machine)
+        upgraded = wait_boot(machine, 'B', 'b', previous=initial['boot_id'])
+        report('authenticated upgrade B verified and committed', upgraded)
+        machine.reboot('/usr/lib/werewolf/slot-update try')
+        rolled_back = wait_boot(machine, 'A', 'a', previous=upgraded['boot_id'])
+        report('post-commit rollback to retained A', rolled_back)
+        reboot(machine)
+        persisted = wait_boot(machine, 'A', 'a', previous=rolled_back['boot_id'])
+        report('rollback A survives another reboot', persisted)
+        select(machine, 'bad')
+        machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)
+        reboot(machine)
+        unhealthy = wait_boot(machine, 'bad', 'b', previous=persisted['boot_id'], committed=False)
+        report('unhealthy signed candidate remains uncommitted', unhealthy)
+        deadline = time.monotonic() + 750
+        while time.monotonic() < deadline:
+            current = evidence(machine)
+            if current and current.get('boot_id') == unhealthy['boot_id'] and current.get('committed') is True:
+                raise AssertionError('unhealthy candidate committed')
+            if current and current.get('release') == 'A' and current.get('boot_id') != unhealthy['boot_id']:
+                recovered = wait_boot(machine, 'A', 'a', previous=unhealthy['boot_id'])
+                report('deadman automatically restored verified A', recovered)
+                break
+            time.sleep(30)
+        else:
+            raise AssertionError('unhealthy candidate did not automatically return to A')
+        text = machine.console() + (machine.work / 'console-evidence.log').read_text()
+        if 'slot b did not commit in 600s' not in text:
+            raise AssertionError('missing deadman evidence from the provider console')
+        if mode == 'secure' and text.count('Secure Boot enforced outside setup mode') < 2:
+            raise AssertionError('provider console did not independently confirm enforced boots')
+        machine.ssh('/usr/lib/werewolf/slot-update outcome')
+        retry = machine.ssh('/usr/lib/werewolf/slot-update check', check=False, timeout=600)
+        if retry.returncode == 0 or 'ImageRolledBack' not in retry.stderr + retry.stdout:
+            raise AssertionError('updater did not refuse the failed signed candidate')
+        report('failed candidate is refused on retry', recovered)
+    except Exception as error:
+        failed = error
+        (logs / 'failure.log').write_text(traceback.format_exc())
+    finally:
+        try:
+            machine.stop()
+        except Exception as error:
+            failed = failed or error
+            (logs / 'cleanup-failure.log').write_text(traceback.format_exc())
+        for path in machine.work.glob('*.log'):
+            (logs / path.name).write_bytes(path.read_bytes())
+if failed:
+    sys.exit('FAIL   ' + provider + ': ' + str(failed) + '; see ' + str(logs))
+print('pass   ' + provider + ': signed A/B upgrade, post-commit rollback, persistent rollback and automatic unhealthy recovery; resources removed')

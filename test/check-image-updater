@@ -162,7 +162,7 @@ def firmware_update(image, document):
     entry.write_text("title werewolf a\nversion 19800101T000000Z\nlinux /werewolf/a/vmlinuz\n" +
                      "initrd /werewolf/a/stage0.zst\noptions " + options + "\n")
     if secure_boot:
-        entry.write_text("title werewolf a\nversion 19800101T000000Z\nefi /werewolf/a/uki.efi\n" +
+        entry.write_text("title werewolf a\nversion 19800101T000000Z\nuki /werewolf/a/uki.efi\n" +
                          "options init=/untrusted werewolf.slot=b ipe.enforce=0\n")
     startup = directory / "startup.nsh"
     startup.write_bytes(f"@echo -on\r\nFS0:\\EFI\\BOOT\\{efi_name}\r\n".encode())
@@ -226,7 +226,7 @@ def firmware_update(image, document):
         raise RuntimeError("firmware UKI differs from signed bundle")
     entries = subprocess.check_output(["mdir", "-b", "-i", str(esp), "::/loader/entries"]).decode()
     names = [line.rsplit("/", 1)[-1] for line in entries.splitlines() if "werewolf-b" in line]
-    if len(names) != 1 or b"efi /werewolf/b/uki.efi" not in subprocess.check_output(
+    if len(names) != 1 or b"uki /werewolf/b/uki.efi" not in subprocess.check_output(
             ["mtype", "-i", str(esp), "::/loader/entries/" + names[0]]):
         raise RuntimeError("committed entry does not select the UKI")
     replay(image)
@@ -313,7 +313,7 @@ def firmware_refusals(args, esp, image, enrolled, efi_name):
             command(["mmd", "-i", str(cloned), "::/werewolf/other"])
             path = "/werewolf/other/uki.efi"
             command(["mcopy", "-i", str(cloned), str(directory / "slot-a/uki.efi"), "::" + path])
-        entry.write_text("title refusal\nefi " + path + "\n")
+        entry.write_text("title refusal\nuki " + path + "\n")
         command(["mcopy", "-o", "-i", str(cloned), str(entry), "::/loader/entries/werewolf-a+1.conf"])
         boot = args + ["-drive", f"if=pflash,format=raw,readonly=on,file={enrolled}/code.fd",
                        "-drive", f"if=pflash,format=raw,file={vars_file}",
