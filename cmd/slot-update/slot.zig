@@ -1412,7 +1412,11 @@ fn rollbackOptions(gpa: Allocator, text: []const u8, slot_name: []const u8, uki:
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         if (std.mem.cutPrefix(u8, line, "options ")) |o| options = o;
-        if (std.mem.cutPrefix(u8, line, "efi ")) |p| efi = p;
+        const path = std.mem.cutPrefix(u8, line, "uki ") orelse std.mem.cutPrefix(u8, line, "efi ");
+        if (path) |p| {
+            if (efi != null) return error.NoOtherSlotEntry;
+            efi = p;
+        }
     }
     if (uki) {
         const expected = try gpa.print("/werewolf/{s}/uki.efi", .{slot_name});
@@ -1427,6 +1431,12 @@ test "rollback retains signed native entries without trusting unsigned options" 
     defer arena.deinit();
     const a = arena.allocator();
     const native = "efi /werewolf/a/uki.efi\n";
+    const counted = "uki /werewolf/a/uki.efi\n";
+    try testing.expectEqualStrings("", try rollbackOptions(a, counted, "a", true));
+    try testing.expectError(
+        error.NoOtherSlotEntry,
+        rollbackOptions(a, native ++ counted, "a", true),
+    );
     try testing.expectEqualStrings("", try rollbackOptions(a, native, "a", true));
     try testing.expectEqualStrings(
         "",
@@ -1442,7 +1452,8 @@ test "rollback retains signed native entries without trusting unsigned options" 
 }
 
 /// loaderEntry returns a Boot Loader Specification type 1 entry for slot.
-/// version orders the slots, newest first; sort-key groups them.
+/// version orders the slots, newest first; sort-key groups them. A UKI must
+/// use `uki`: systemd-boot does not count attempts for generic `efi` entries.
 fn loaderEntry(
     gpa: Allocator,
     slot: []const u8,
@@ -1454,7 +1465,7 @@ fn loaderEntry(
         \\title werewolf {s}
         \\sort-key werewolf
         \\version {s}
-        \\efi /werewolf/{s}/uki.efi
+        \\uki /werewolf/{s}/uki.efi
         \\options {s}
         \\
     , .{ slot, version, slot, options });
@@ -1679,13 +1690,12 @@ test "systemd-boot entries" {
         \\options x werewolf.slot=b
         \\
     , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b", false));
-    // A slot whose packages carried a UKI boots it: one signed PE, the
-    // entry's options appended to the command line sealed inside it.
+    // UKIs use the counted loader type; signed native options remain sealed.
     try testing.expectEqualStrings(
         \\title werewolf b
         \\sort-key werewolf
         \\version 20261006T120000Z
-        \\efi /werewolf/b/uki.efi
+        \\uki /werewolf/b/uki.efi
         \\options x werewolf.slot=b
         \\
     , try loaderEntry(a, "b", "20261006T120000Z", "x werewolf.slot=b", true));

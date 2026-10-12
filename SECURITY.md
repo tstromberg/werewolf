@@ -4,7 +4,7 @@ werewolf exists to be attacked and hold, so we want to hear about every way it d
 
 ## Reporting a vulnerability
 
-Report it privately through GitHub: on the repository's **Security** tab, choose **Report a vulnerability**. Please don't open a public issue or pull request for it.
+We prefer vulnerabilities to be reported as a public GitHub issue. If that doesn't meet your requirements, report it privately through GitHub.
 
 Include what you can: the form and release (or commit), what you did, and what happened. A proof of concept helps.
 

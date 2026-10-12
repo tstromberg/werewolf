@@ -276,7 +276,7 @@ pub fn ensureImage(
         "--offer",
         "werewolf",
         "--sku",
-        form,
+        name,
         "--os-type",
         "Linux",
         "--os-stat" ++

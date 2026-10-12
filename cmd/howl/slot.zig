@@ -227,7 +227,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
     try stage0Init(b, rootfs);
     try stage0(b, "stage0", "modules", b.modules.native);
     if (goals.slot) try stage0(b, "stage0-bitten", "modules-bitten", b.modules.all);
-    if (goals.image or b.spec.boot_key != null) try initramfs(b, root);
+    if (goals.image or (b.spec.boot_key != null and !b.spec.boot_native)) try initramfs(b, root);
     // The slot's kernel as Alpine ships it, not BUILD/vmlinuz: on aarch64
     // an EFI zboot image, 10 MB to the raw Image's 36, which a UEFI
     // machine's firmware reads on every boot.

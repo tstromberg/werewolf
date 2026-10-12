@@ -77,6 +77,7 @@ Trusted Launch. Stage0 requires SecureBoot on and SetupMode off.
 Stage0 resolves only canonical slot UKI paths from StubImageIdentifier, then
 protects the resolved `/proc/cmdline`. Unsigned loader options cannot alter
 root, slot or IPE enforcement. Both stock Alpine and IPE kernels are supported.
+The native UKI carries only stage0 and uses counted `uki` entries for A/B recovery.
 `make check-secureboot` verifies the actual release disk and manifest on both
 architectures; the continuous update test covers eight rejected boot cases.
 

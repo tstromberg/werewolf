@@ -1,5 +1,25 @@
 """Boot evidence required by every provider A/B lifecycle test."""
 import re
+import struct
+
+
+def require_native_initrd(uki, stage0):
+    """The signed native UKI carries stage0, which verifies its external root."""
+    pe = struct.unpack_from('<I', uki, 0x3c)[0]
+    if uki[:2] != b'MZ' or uki[pe:pe + 4] != b'PE\0\0':
+        raise AssertionError('invalid native UKI')
+    sections = struct.unpack_from('<H', uki, pe + 6)[0]
+    optional = struct.unpack_from('<H', uki, pe + 20)[0]
+    matches = []
+    for index in range(sections):
+        header = pe + 24 + optional + index * 40
+        if uki[header:header + 8].rstrip(b'\0') != b'.initrd':
+            continue
+        size = struct.unpack_from('<I', uki, header + 8)[0]
+        offset = struct.unpack_from('<I', uki, header + 20)[0]
+        matches.append(uki[offset:offset + size])
+    if matches != [stage0]:
+        raise AssertionError('native UKI initrd differs from the exported stage0')
 
 
 def require_boot(value, release, slot, root_hash, previous=None, secure=True, committed=True):

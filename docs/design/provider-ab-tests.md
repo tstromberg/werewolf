@@ -41,6 +41,9 @@ It invokes the normal operator rollback and proves A remains bootable after
 another restart. An unhealthy candidate must consume its try without committing,
 then automatically return to A. BLS entries and authenticated factory-slot
 proofs must survive the normal lifecycle; the runner does not synthesize success.
+UKIs use the pinned systemd-boot's `uki` directive, which spends the entry's
+boot attempt. Generic `efi` entries do not, so a deadman reboot can repeatedly
+select the unhealthy candidate instead of restoring the previous good release.
 
 QEMU, Lima, cloud and remote hypervisor adapters provide lifecycle operations,
 SSH and raw consoles. Azure's known setup-mode conflict is a failing test,

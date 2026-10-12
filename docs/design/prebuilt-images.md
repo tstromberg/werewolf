@@ -107,3 +107,6 @@ stage0 variants, stale UKIs and 64-character reboot countdown identities.
 CI runs both architectures with disposable signing keys.
 `check-image-updater-uki` also tests continuous firmware boot and native
 EFI installation on accelerated arm64, checking the delivered UKI digest.
+Factory slots retain their signed manifests and command line for authenticated
+operator rollback. `check-ab-PROVIDER` proves upgrades, rollback after commit,
+another reboot of the retained release, and automatic unhealthy-slot recovery.

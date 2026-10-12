@@ -467,6 +467,66 @@ are, in a separate VM. There, nested guests lose a CPU's timer early in
 boot and stall, so 24.04 is the default. Its old erofs-utils is replaced by
 [tools/install-deps](../tools/install-deps), which builds 1.9.4.
 
+## Provider A/B upgrades and rollbacks
+
+`make IPE=1 check-ab-PROVIDER` builds three disposable signed releases and
+uses the real updater over confined loopback HTTPS. Each boot must have a fresh
+boot ID, the expected signed root hash, read-only dm-verity and enforcing IPE.
+Supported firmware tests additionally require SecureBoot=1 and SetupMode=0.
+The runner checks upgrade A→B, health commit, operator rollback B→A, another
+reboot of A, and automatic recovery from an unhealthy signed candidate after
+600 seconds. After recovery the updater must refuse that failed build again.
+Host/console logs and `phases.json` remain under `CHECK/provider-ab-PROVIDER`;
+only resources created by the test are removed, including on failure.
+
+Build an IPE kernel with a disposable signing identity first, as described above.
+Set `WEREWOLF_IPE_KEY`, `WEREWOLF_IPE_CRT` and, for an existing kernel archive,
+`IPE_KERNEL`. A saved `AB_FIXTURE=/absolute/path/fixture.json` reuses an existing
+fixture of the same architecture and mode. Private signers stay on the host.
+
+| Target | Mode | Requirements |
+|---|---|---|
+| `check-ab-qemu` | Secure Boot | QEMU and enrollment tools; CI runs both architectures |
+| `check-ab-lima-qemu` | Secure Boot | arm64 Mac; explicit debug firmware arguments |
+| `check-ab-lima-vz` | Signed updates | arm64 Mac; `AB_MODE=plain` |
+| `check-ab-aws`, `check-ab-gcp` | Secure Boot | Authenticated cloud CLI; optional `CLOUD_SIZE`, `GCP_PROJECT`, `GCP_ZONE` |
+| `check-ab-azure` | Secure Boot | Authenticated Azure CLI; owned temporary group in West US 2 by default |
+| `check-ab-bhyve` | Signed updates | x86_64; `BHYVE_HOST=bilbo`, passwordless `doas`, bhyve firmware and mtools |
+| `check-ab-firecracker` | Signed updates | x86_64; `FIRECRACKER_HOST=galadriel`, KVM and passwordless `doas` |
+| `check-ab-proxmox` | Signed updates | Untested; `PROXMOX_HOST`, optional `PROXMOX_STORAGE` and `PROXMOX_BRIDGE` |
+
+Lima VZ, Firecracker, bhyve and Proxmox default to `AB_MODE=plain`; their signed
+updates do not imply firmware enforcement. Bilbo also accepts `AB_MODE=secure`
+with `SECUREBOOT_DIR` holding its public `code.fd` and `vars.fd` templates.
+`make check-bhyve-secureboot AB_FIXTURE=...` checks tampered-UKI rejection with
+those templates. `howl` does not yet configure bhyve enrollment itself.
+Smaug runs arm64 FreeBSD; Werewolf's bhyve backend currently supports x86_64 only.
+Proxmox has no available test node. Azure's setup-mode inconsistency remains a
+failing Secure Boot deployment, not a passing recovery test.
+
+Observed on 2026-10-12 (full lifecycle includes automatic unhealthy recovery):
+
+| Provider / architecture | A/B result | Firmware enforcement |
+|---|---|---|
+| QEMU arm64 | Passed | Secure Boot with immutable variables |
+| Lima QEMU arm64 | Passed | Secure Boot with explicit debug firmware arguments |
+| AWS and GCP arm64 | Passed | Custom enrolled keys; SecureBoot=1, SetupMode=0 |
+| bhyve x86_64 on Bilbo | Passed in both modes | Manual Secure Boot enrollment also passed changed-UKI refusal |
+| Lima VZ arm64 | Passed | Signed updates, without Secure Boot |
+| Firecracker x86_64 on Galadriel | Passed | Signed updates; no UEFI |
+| Azure arm64, West US 2 | Blocked before handover | Firmware again reported SecureBoot=1, SetupMode=1 |
+| Proxmox | Unverified | No node available |
+| bhyve arm64 on Smaug | Unsupported backend | Werewolf integration unfinished |
+
+Stock QEMU firmware boot and tampered-UKI rejection also passed on x86_64;
+full QEMU A/B CI covers both IPE architectures. See the
+[audit](audit/astra-2026-10-11.md#provider-ab-follow-up-2026-10-12) for findings.
+
+These opt-in live tests need no public mirror. Cloud tests create billable
+resources and must use test credentials. Ordinary PR CI requires no cloud or
+remote-host credentials. Protected TPM retirement remains unfinished and must
+preserve the previous good slot after commit ([design](design/provider-ab-tests.md)).
+
 ## Secure Boot
 
 `make check-secureboot` builds a stock-Alpine signed release disk and verifies

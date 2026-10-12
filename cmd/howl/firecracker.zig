@@ -364,14 +364,16 @@ const Entry = struct {
         var lines = mem.tokenizeScalar(u8, text, '\n');
         while (lines.next()) |raw| {
             const line = mem.trim(u8, raw, " \t\r");
-            if (mem.eql(u8, line, "efi")) e.efi = true;
+            if (mem.eql(u8, line, "efi") or mem.eql(u8, line, "uki") or
+                mem.eql(u8, line, "uki-url")) e.efi = true;
             const sp = mem.findAny(u8, line, " \t") orelse continue;
             const key = line[0..sp];
             const value = mem.trim(u8, line[sp..], " \t");
             if (mem.eql(u8, key, "version")) e.version = value;
             if (mem.eql(u8, key, "linux")) e.linux = value;
             if (mem.eql(u8, key, "initrd")) e.initrd = value;
-            if (mem.eql(u8, key, "efi")) e.efi = true;
+            if (mem.eql(u8, key, "efi") or mem.eql(u8, key, "uki") or
+                mem.eql(u8, key, "uki-url")) e.efi = true;
             if (mem.eql(u8, key, "options")) e.options = value;
         }
         return e;
@@ -744,6 +746,17 @@ test "Entry.parse" {
         \\initrd /untrusted/initrd
         \\
     ).direct());
+    inline for (.{ "uki", "uki-url" }) |directive| {
+        try testing.expectError(error.FirmwareRequired, Entry.parse(
+            "untrusted.conf",
+            directive ++
+                " /werewolf/a/uki.efi\nlinux /untrusted/kernel\ninitrd /untrusted/initrd\n",
+        ).direct());
+        try testing.expectError(error.FirmwareRequired, Entry.parse(
+            "bare.conf",
+            directive ++ "\nlinux /untrusted/kernel\ninitrd /untrusted/initrd\n",
+        ).direct());
+    }
     try e.direct();
     try testing.expectError(error.IncompleteEntry, (Entry{ .name = "empty.conf" }).direct());
 }

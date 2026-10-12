@@ -120,9 +120,13 @@ pub fn image(b: *B) !void {
     const previous = std.Io.Dir.cwd().readFileAlloc(b.io, options, b.gpa, .limited(8192)) catch "";
     if (!std.mem.eql(u8, wanted, previous)) try b.write(options, wanted);
     const target = try b.path("{s}/uki.efi", .{slot});
+    const initrd_path = if (b.spec.boot_native)
+        try b.path("{s}/stage0.zst", .{slot})
+    else
+        try b.path("{s}/initramfs.zst", .{b.p.out});
     const began = try b.begin(target, &.{
         try b.path("{s}/vmlinuz", .{b.p.build}),
-        try b.path("{s}/initramfs.zst", .{b.p.out}),
+        initrd_path,
         try b.path("{s}/cmdline", .{slot}),
         stub_path,
         key,
@@ -132,7 +136,7 @@ pub fn image(b: *B) !void {
     }) orelse return;
     const stub = try b.read(stub_path, 1 << 20);
     const kernel = try b.read(try b.path("{s}/vmlinuz", .{b.p.build}), 512 << 20);
-    const initrd = try b.read(try b.path("{s}/initramfs.zst", .{b.p.out}), 512 << 20);
+    const initrd = try b.read(initrd_path, 512 << 20);
     const base = std.mem.trimEnd(u8, try b.read(try b.path("{s}/cmdline", .{slot}), 4096), "\n");
     const extra = try std.mem.join(b.gpa, " ", b.spec.disk.args);
     const identity = if (b.spec.boot_native)

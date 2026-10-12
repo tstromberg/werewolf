@@ -8,10 +8,15 @@ import shutil
 import subprocess
 import sys
 
+from ab_checks import require_native_initrd
+
 howl, arch, kernel, key, cert, destination, mode = sys.argv[1:]
 howl, kernel, key, cert = [str(Path(p).resolve()) for p in [howl, kernel, key, cert]]
 root = Path(destination).resolve()
 root.mkdir(parents=True, exist_ok=True, mode=0o700)
+if any(root.iterdir()):
+    sys.exit('ab-fixture: destination must be empty')
+root.chmod(0o700)
 os.umask(0o077)
 if mode not in ['secure', 'plain']:
     sys.exit('ab-fixture: mode must be secure or plain')
@@ -34,7 +39,8 @@ run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
      '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'verity', '-Mroot=test/ab-status.zig',
      '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
      '-Mipe=lib/ipe.zig', '-Mverity=lib/verity.zig', '-femit-bin=' + str(probe)], 'probe')
-form = root / 'provider-ab'
+name = 'provider-ab-' + mode + '-' + arch.replace('_', '-')
+form = root / name
 form.mkdir()
 (form / 'form.yaml').write_text('''base: prod-ssh
 packages: [openssl]
@@ -42,7 +48,7 @@ sshd:
   pubkey-accepted-algorithms: ssh-ed25519
 services:
   ab-https:
-    exec: /usr/bin/openssl s_server -accept 127.0.0.1:443 -cert /usr/share/ab/tls.crt -key /usr/share/ab/tls.key -WWW -quiet
+    exec: /usr/bin/openssl s_server -4 -accept 127.0.0.1:443 -cert /usr/share/ab/tls.crt -key /usr/share/ab/tls.key -WWW -quiet
     user: ab-https
     pledge: stdio rpath wpath inet listen
     listen: [tcp/443 loopback]
@@ -56,8 +62,8 @@ for d in ['usr/share/werewolf', 'usr/share/ab', 'usr/bin', 'etc/ssl/certs']:
     (overlay / d).mkdir(parents=True, exist_ok=True)
 shutil.copyfile(probe, overlay / 'usr/bin/ab-status')
 (overlay / 'usr/bin/ab-status').chmod(0o755)
-for name in ['tls.crt', 'tls.key']:
-    shutil.copyfile(root / name, overlay / 'usr/share/ab' / name)
+for filename in ['tls.crt', 'tls.key']:
+    shutil.copyfile(root / filename, overlay / 'usr/share/ab' / filename)
 (overlay / 'usr/share/ab/tls.key').chmod(0o644)
 shutil.copyfile(root / 'tls.crt', overlay / 'etc/ssl/certs/ca-certificates.crt')
 channel = 'https://127.0.0.1/image'
@@ -86,7 +92,10 @@ for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
     if mode == 'secure':
         args += ['--boot-key', key, '--boot-cert', cert, '--boot-native']
     run(args, 'build-' + label)
-    output = Path('build') / arch / 'ipe' / 'provider-ab-ipe'
+    if mode == 'secure':
+        require_native_initrd((release / (name + '-' + arch + '-uki')).read_bytes(),
+                              (release / (name + '-' + arch + '-stage0.zst')).read_bytes())
+    output = Path('build') / arch / 'ipe' / (name + '-ipe')
     bundle = output / 'prebuilt' / arch
     manifest = json.loads((bundle / 'latest.json').read_text())
     releases[label] = manifest
@@ -102,7 +111,7 @@ for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
         initial_serial = version
 result = {'arch': arch, 'mode': mode, 'form': str(form), 'channel': channel,
           'kernel': kernel, 'key': key, 'cert': cert, 'initial_serial': initial_serial,
-          'disk': str(root / 'release-A' / ('provider-ab-' + arch + '-disk.qcow2')),
+          'disk': str(root / 'release-A' / (name + '-' + arch + '-disk.qcow2')),
           'ssh_key': str(root / 'ssh.key'), 'releases': releases}
 (root / 'fixture.json').write_text(json.dumps(result, indent=2) + '\n')
 print('pass   ab-fixture: signed A, B and unhealthy candidate; host signing keys excluded from guests')

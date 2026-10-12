@@ -330,8 +330,8 @@ pub fn check(p: *Posture) !void {
             .id = "files-system-writes",
             .area = "files",
             .name = "Kernel settings and disks not writable",
-            .why = "Not even root can change a sysctl, a sysfs setting or a disk underneath " ++
-                "its filesystem, until the machine reboots.",
+            .why = "Processes under fence, including root, cannot open kernel settings " ++
+                "or disks for writing.",
             .how = "opening kernel, vm, user, fs and net sysctls, a sysfs setting and " ++
                 "the first disk with O_WRONLY and O_RDWR, without writing, is refused " ++
                 "with EACCES (Landlock, from fence); kernel.printk must exist",

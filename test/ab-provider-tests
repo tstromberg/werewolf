@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+"""Failure paths must clean owned resources and leave other VMs alone."""
+import subprocess
+import tempfile
+from pathlib import Path
+from ab_providers import Provider
+
+with tempfile.TemporaryDirectory(prefix='ww-ab-unit-') as temporary:
+    root = Path(temporary)
+    public = root / 'ssh.pub'
+    public.write_text('ssh-ed25519 disposable-fixture\n')
+    fixture = {'ssh_key': str(root / 'ssh'), 'kernel': 'kernel', 'key': 'signer',
+               'cert': 'public', 'channel': 'https://127.0.0.1/image',
+               'initial_serial': '20261012T000000Z', 'mode': 'plain', 'arch': 'x86_64'}
+
+    def machine(kind, suffix):
+        work = root / suffix
+        work.mkdir()
+        return Provider(kind, fixture, work, 'howl')
+
+    cloud = machine('gcp', 'cloud')
+    cloud.cloud_created, cloud.image = True, 'owned-image'
+    calls = []
+    cloud.console = lambda: ''
+
+    def failed_delete(args, **kwargs):
+        calls.append(args)
+        raise RuntimeError('injected instance deletion failure')
+
+    cloud.run = failed_delete
+    cloud.delete_image = lambda: calls.append(['delete-owned-image'])
+    try:
+        cloud.stop()
+    except RuntimeError as error:
+        assert 'injected instance deletion failure' in str(error)
+    else:
+        raise AssertionError('cleanup failure was swallowed')
+    assert calls == [['howl', 'delete', cloud.name, '--on', 'gcp'], ['delete-owned-image']]
+
+    remote = machine('firecracker', 'remote')
+    remote.remote_command = lambda *args, **kwargs: subprocess.CompletedProcess([], 0, '/tmp/other-owner\n', '')
+    try:
+        remote.start_remote()
+    except RuntimeError as error:
+        assert 'invalid remote private directory' in str(error)
+    else:
+        raise AssertionError('accepted an unowned cleanup path')
+    assert remote.remote_dir is None
+    remote.stop()
+
+    collision = machine('firecracker', 'tap-collision')
+    collision.remote_dir, collision.tap = '/tmp/ww-ab.unit', 'existing-tap'
+    collision.console = lambda: ''
+    calls = []
+
+    def owned_cleanup(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, '', '')
+
+    collision.remote_command = owned_cleanup
+    collision.stop()
+    assert not any(args[2:5] == ['ip', 'link', 'delete'] for args in calls)
+    assert calls[-1] == ['doas', '-n', 'rm', '-rf', '/tmp/ww-ab.unit']
+
+    proxmox = machine('proxmox', 'proxmox')
+    proxmox.vmid = '100'
+    calls = []
+
+    def other_vm(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, 'name: another-owner\n', '')
+
+    proxmox.remote_command = other_vm
+    try:
+        proxmox.delete_proxmox()
+    except RuntimeError as error:
+        assert 'different owner/name' in str(error)
+    else:
+        raise AssertionError('accepted another owner’s VM for deletion')
+    assert calls == [['qm', 'config', '100']]
+
+print('pass   provider-ab cleanup: deletion failures, unowned paths and mismatched VM ownership')

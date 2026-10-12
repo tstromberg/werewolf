@@ -186,6 +186,7 @@ pub fn write(
     );
     // Slot a is good from the start, so it has no try count. Its version is
     // older than any update's, so the first update's slot sorts ahead of it.
+    // UKIs use `uki`, as generic `efi` entries do not spend boot attempts.
     const options = try b.path(
         "{s} init=/init panic=10 softlockup_panic=1 {s} werewolf.victim={s}:/werewolf " ++
             "werewolf.esp={s}{s}{s} werewolf.slot=a",
@@ -195,7 +196,7 @@ pub fn write(
         \\title werewolf a
         \\sort-key werewolf
         \\version 19800101T000000Z
-        \\efi /werewolf/a/uki.efi
+        \\uki /werewolf/a/uki.efi
         \\
     , .{}) else try b.path(
         \\title werewolf a
