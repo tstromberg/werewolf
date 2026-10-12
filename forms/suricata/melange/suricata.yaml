@@ -41,8 +41,8 @@ pipeline:
 
   # The release tarball vendors the Rust crates, so the build fetches
   # nothing. -march=armv8-a and target-cpu=generic keep SVE out even
-  # when the builder has it. nfqueue, eBPF and the Python tools stay
-  # off: this form reads a pcap and does not run them.
+      # when the builder has it. nfqueue, eBPF and the Python tools stay
+      # off: this form captures with AF_PACKET and does not run them.
   - runs: |
       export CFLAGS="-O2 -march=armv8-a"
       export CXXFLAGS="-O2 -march=armv8-a"

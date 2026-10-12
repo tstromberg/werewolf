@@ -31,13 +31,21 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const out = b.p.out;
     const stamp = try b.path("{s}/meta.stamp", .{out});
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
+    try Dir.cwd().createDirPath(b.io, out);
+    const enrollment = try b.path("{s}/image-enrollment", .{out});
+    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\nnative {}\n", .{
+        b.spec.ipe_updates orelse "", b.spec.image_serial orelse "", b.spec.boot_key != null,
+        b.spec.boot_native,
+    }));
     // howl itself holds the release keys, advisories and known posture
     // failures (files.zig), so b.self covers them.
-    const fixed = [_][]const u8{ rootfs, kernel_rootfs, b.self };
+    const fixed = [_][]const u8{ rootfs, kernel_rootfs, b.self, enrollment };
+    const signer: []const []const u8 = if (b.spec.ipe_cert) |cert| &.{cert} else &.{};
+    const boot_signer: []const []const u8 = if (b.spec.boot_cert) |cert| &.{cert} else &.{};
     const inputs = try mem.concat(
         b.gpa,
         []const u8,
-        &.{ &fixed, b.form_files, b.rootfs, b.bins, b.made, b.app },
+        &.{ &fixed, signer, boot_signer, b.form_files, b.rootfs, b.bins, b.made, b.app },
     );
     const began = try b.begin(stamp, inputs) orelse return;
     // A step that fails part way leaves no stamp to call it made.
@@ -85,6 +93,19 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
 
     const d = try b.path("{s}/usr/share/werewolf", .{meta_dir});
     if (b.spec.ipe_kernel != null) try b.put(d, "ipe", "required\n");
+    if (b.spec.boot_key != null) try b.put(d, "secure-boot", "required\n");
+    if (b.spec.ipe_updates) |url| {
+        const dest = try b.path("{s}/image-update", .{d});
+        try Dir.cwd().createDirPath(b.io, dest);
+        try b.put(dest, "url", url);
+        try b.put(dest, "serial", b.spec.image_serial.?);
+        try b.put(dest, "declaration", (try @import("prebuilt.zig").declaration(b)) orelse "");
+        const public_key = try b.capture(stamp, &.{
+            "openssl", "x509", "-in", b.spec.ipe_cert.?, "-pubkey", "-noout",
+        });
+        _ = try @import("apk").parseKey(b.gpa, public_key);
+        try b.put(dest, "image.pub", public_key);
+    }
     const kernel_pkg = if (b.spec.ipe_kernel != null)
         mem.trim(
             u8,
@@ -206,7 +227,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
     try stage0Init(b, rootfs);
     try stage0(b, "stage0", "modules", b.modules.native);
     if (goals.slot) try stage0(b, "stage0-bitten", "modules-bitten", b.modules.all);
-    if (goals.image) try initramfs(b, root);
+    if (goals.image or b.spec.boot_key != null) try initramfs(b, root);
     // The slot's kernel as Alpine ships it, not BUILD/vmlinuz: on aarch64
     // an EFI zboot image, 10 MB to the raw Image's 36, which a UEFI
     // machine's firmware reads on every boot.
@@ -224,12 +245,27 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         stamp,
         try b.path("{s}/meta/usr/share/werewolf/cmdline", .{out}),
     );
+    if (b.spec.boot_key != null) {
+        try @import("secureboot.zig").image(b);
+        try b.copy(b.spec.boot_cert.?, try b.path("{s}/boot.crt", .{out}));
+        if (b.spec.qcow2_path) |target| try b.copy(
+            b.spec.boot_cert.?,
+            try b.path(
+                "{s}/boot.crt",
+                .{std.fs.path.dirname(target) orelse "."},
+            ),
+        );
+    }
     if (goals.disk) try diskStep(
         b,
         b.spec.disk_path orelse try b.path("{s}/disk.img", .{out}),
         false,
     );
-    if (goals.qcow2) try diskStep(b, try b.path("{s}/disk.qcow2", .{out}), true);
+    if (goals.qcow2) try diskStep(
+        b,
+        b.spec.qcow2_path orelse try b.path("{s}/disk.qcow2", .{out}),
+        true,
+    );
 }
 
 /// signIpe puts the release's signed root policy beside /verity in stage0.
@@ -612,9 +648,10 @@ fn moduleTar(b: *B, target: []const u8, words: []const []const u8) !void {
     if (try it.next(b.io) != null) return b.fail("{s}: more than one kernel", .{mods});
     const src = try b.path("{s}/{s}", .{ mods, kver });
     var bad: []const u8 = "";
-    const m = image.modules(
+    const m = image.modulesWithBuiltins(
         b.gpa,
         try b.read(try b.path("{s}/modules.dep", .{src}), 16 << 20),
+        try b.read(try b.path("{s}/modules.builtin", .{src}), 16 << 20),
         words,
         b.modules.native,
         b.params,
@@ -753,12 +790,16 @@ fn diskStep(b: *B, target: []const u8, qcow2: bool) !void {
     if (!qcow2) for (b.spec.disk.args) |arg| try want.writer.print("arg {s}\n", .{arg});
     const was = Dir.cwd().readFileAlloc(b.io, options, b.gpa, .limited(64 << 10)) catch "";
     if (!mem.eql(u8, was, want.written())) try b.write(options, want.written());
-    const began = try b.begin(target, &.{
+    const signed_inputs: []const []const u8 = if (b.spec.boot_key != null)
+        &.{try b.path("{s}/uki.efi", .{slot})}
+    else
+        &.{};
+    const began = try b.begin(target, try mem.concat(b.gpa, []const u8, &.{ &.{
         try b.path("{s}/vmlinuz", .{slot}),    try b.path("{s}/stage0.zst", .{slot}),
         try b.path("{s}/root.erofs", .{slot}), try b.path("{s}/cmdline", .{slot}),
         boot,                                  b.self,
         options,
-    }) orelse return;
+    }, signed_inputs })) orelse return;
     const t = try b.tmp(target);
     if (qcow2) {
         const raw = try b.path("{s}/disk.raw", .{out});

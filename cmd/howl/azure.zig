@@ -103,24 +103,25 @@ fn lastLine(text: []const u8) []const u8 {
 }
 
 /// Machine holds Azure's name for an arch and a small Gen2 VM size. x86_64
-/// avoids the B-series, which new subscriptions are often refused. Both
-/// sizes have SCSI, which every werewolf kernel drives; the newest are NVMe-only.
+/// avoids the B-series, which new subscriptions are often refused. Arm
+/// uses Cobalt, since older Arm sizes cannot enforce Trusted Launch.
+/// Both sizes offer SCSI, which every werewolf kernel drives.
 pub const Machine = struct { arch: []const u8, size: []const u8 };
 
 pub fn machine(arch: howl.Arch) Machine {
     return switch (arch) {
-        .aarch64 => .{ .arch = "Arm64", .size = "Standard_B2pls_v2" },
+        .aarch64 => .{ .arch = "Arm64", .size = "Standard_D2ps_v6" },
         .x86_64 => .{ .arch = "x64", .size = "Standard_D2as_v4" },
     };
 }
 
-/// ensureImage returns the name of the managed disk made from disk, creating
+/// ensureDisk returns the name of the managed disk made from disk, creating
 /// it once: convert to a fixed VHD, create an upload disk of that size, copy
 /// with azcopy under a write grant, then revoke the grant to make it usable.
 /// azcopy is needed because the upload URL takes only page writes, which az's
 /// blob upload does not do; it also skips empty pages, so only tens of MiB of
 /// an 8 GiB disk move. A disk left mid-upload by a failed create is remade.
-pub fn ensureImage(
+fn ensureDisk(
     io: Io,
     gpa: Allocator,
     p: Place,
@@ -219,6 +220,211 @@ fn uploading(state: []const u8) bool {
     return std.mem.eql(u8, state, "ReadyToUpload") or std.mem.eql(u8, state, "ActiveUpload");
 }
 
+/// Custom firmware keys belong to the gallery version, which the VM must inherit.
+pub fn ensureImage(
+    io: Io,
+    gpa: Allocator,
+    p: Place,
+    form: []const u8,
+    arch: howl.Arch,
+    disk: []const u8,
+    work: []const u8,
+    why: *howl.Why,
+) ![]const u8 {
+    _ = try @import("secureboot.zig").certificate(io, gpa, disk, work, arch, why);
+    const der = try Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/boot.der", .{work}),
+        gpa,
+        .limited(8192),
+    );
+    const name = try images.name(gpa, form, arch, &try images.sha256(io, disk));
+    const gallery = try std.mem.replaceOwned(u8, gpa, name, "-", "_");
+    if (ask(io, gpa, p, &.{
+        "sig",            "image-version",           "show",
+        "--gallery-name", gallery,                   "--gallery-image-definition",
+        "boot",           "--gallery-image-version", "1.0.0",
+        "--query",        "id",                      "-o",
+        "tsv",
+    })) |id| {
+        try verifyGallery(io, gpa, id, der, why);
+        howl.say(io, "image {s}: there already", .{name});
+        return id;
+    }
+    const source = try ensureDisk(io, gpa, p, form, arch, disk, work, why);
+    const source_id = try need(io, gpa, p, &.{
+        "disk", "show", "-n", source, "--query", "id", "-o", "tsv",
+    }, why);
+    const gallery_id = try need(io, gpa, p, &.{
+        "sig",    "create",         "--gallery-name", gallery, "--location", p.location,
+        "--tags", "werewolf=image", "--query",        "id",    "-o",         "tsv",
+    }, why);
+    _ = try need(io, gpa, p, &.{
+        "sig",
+        "image-definitio" ++
+            "n",
+        "create",
+        "--gallery-name",
+        gallery,
+        "--gallery-image-definitio" ++
+            "n",
+        "boot",
+        "--location",
+        p.location,
+        "--publisher",
+        "werewolf",
+        "--offer",
+        "werewolf",
+        "--sku",
+        form,
+        "--os-type",
+        "Linux",
+        "--os-stat" ++
+            "e",
+        "Specialized",
+        "--hyper-v-generation",
+        "V2",
+        "--architecture",
+        machine(
+            arch,
+        ).arch,
+        "--features",
+        "SecurityType=TrustedLaunchSupported",
+        "-o",
+        "none",
+    }, why);
+    const version = try gpa.print("{s}/images/boot/versions/1.0.0", .{gallery_id});
+    const body = try gpa.print("{s}/gallery-version.json", .{work});
+    try Dir.cwd().writeFile(io, .{ .sub_path = body, .data = try galleryVersion(
+        gpa,
+        p.location,
+        source_id,
+        der,
+    ) });
+    defer Dir.cwd().deleteFile(io, body) catch {};
+    try howl.run(io, why, try galleryRequest(gpa, version, body));
+    const start = Io.Clock.awake.now(io);
+    while (start.untilNow(io, .awake).toSeconds() < 600) {
+        const state = ask(io, gpa, p, &.{
+            "sig",               "image-version",
+            "show",              "--gallery-name",
+            gallery,             "--gallery-image-definition",
+            "boot",              "--gallery-image-version",
+            "1.0.0",             "--query",
+            "provisioningState", "-o",
+            "tsv",
+        }) orelse "";
+        if (std.mem.eql(u8, state, "Succeeded")) {
+            try verifyGallery(io, gpa, version, der, why);
+            return version;
+        }
+        if (std.mem.eql(u8, state, "Failed")) return why.refuse(
+            "gallery {s} failed to provision its enrolled image",
+            .{gallery},
+        );
+        try io.sleep(.fromSeconds(2), .awake);
+    }
+    return why.refuse(
+        "gallery {s} did not finish enrolling its image within ten minutes",
+        .{gallery},
+    );
+}
+
+fn galleryRequest(gpa: Allocator, version: []const u8, body: []const u8) ![]const []const u8 {
+    return gpa.dupe([]const u8, &.{
+        "az",
+        "rest",
+        "--method",
+        "put",
+        "--url",
+        try gpa.print("https://management.azure.com{s}?api-version=2024-03-03", .{version}),
+        "--headers",
+        "Content-Type=application/json",
+        "--body",
+        try gpa.print("@{s}", .{body}),
+        "--output",
+        "none",
+    });
+}
+
+fn verifyGallery(
+    io: Io,
+    gpa: Allocator,
+    version: []const u8,
+    der: []const u8,
+    why: *howl.Why,
+) !void {
+    const read = call(io, gpa, try galleryReadRequest(gpa, version));
+    if (!read.ok or !try galleryEnrolled(gpa, read.out, der)) return why.refuse(
+        "Azure did not retain the disk's exact PK/KEK/db enrollment; refusing to launch its VM",
+        .{},
+    );
+}
+
+fn galleryReadRequest(gpa: Allocator, version: []const u8) ![]const []const u8 {
+    return gpa.dupe([]const u8, &.{
+        "az",      "rest",                                    "--method", "get",  "--url",
+        try gpa.print(
+            "https://management.azure.com{s}?api-version=2024-03-03&$expand=UefiSettings",
+            .{version},
+        ),
+        "--query", "properties.securityProfile.uefiSettings", "-o",       "json",
+    });
+}
+
+fn galleryEnrolled(gpa: Allocator, text: []const u8, der: []const u8) !bool {
+    const Key = struct { type: []const u8, value: []const []const u8 };
+    const Record = struct {
+        signatureTemplateNames: []const []const u8,
+        additionalSignatures: struct { pk: Key, kek: []const Key, db: []const Key },
+    };
+    const parsed = std.json.parseFromSlice(Record, gpa, text, .{
+        .ignore_unknown_fields = true,
+    }) catch return false;
+    defer parsed.deinit();
+    const r = parsed.value;
+    if (r.signatureTemplateNames.len != 1 or
+        !std.mem.eql(u8, r.signatureTemplateNames[0], "NoSignatureTemplate") or
+        r.additionalSignatures.kek.len != 1 or r.additionalSignatures.db.len != 1) return false;
+    const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
+    defer gpa.free(encoded);
+    const certificate = std.base64.standard.Encoder.encode(encoded, der);
+    for ([_]Key{
+        r.additionalSignatures.pk, r.additionalSignatures.kek[0], r.additionalSignatures.db[0],
+    }) |key| if (!std.mem.eql(u8, key.type, "x509") or key.value.len != 1 or
+        !std.mem.eql(u8, key.value[0], certificate)) return false;
+    return true;
+}
+
+fn galleryVersion(
+    gpa: Allocator,
+    location: []const u8,
+    source: []const u8,
+    der: []const u8,
+) ![]const u8 {
+    const encoded = try gpa.alloc(u8, std.base64.standard.Encoder.calcSize(der.len));
+    const cert = std.base64.standard.Encoder.encode(encoded, der);
+    const signature = .{ .type = "x509", .value = [_][]const u8{cert} };
+    return std.json.Stringify.valueAlloc(gpa, .{
+        .location = location,
+        .properties = .{
+            .publishingProfile = .{
+                .targetRegions = .{.{ .name = location, .regionalReplicaCount = 1 }},
+                .storageAccountType = "Standard_LRS",
+            },
+            .storageProfile = .{ .osDiskImage = .{ .source = .{ .id = source } } },
+            .securityProfile = .{ .uefiSettings = .{
+                .signatureTemplateNames = .{"NoSignatureTemplate"},
+                .additionalSignatures = .{
+                    .pk = signature,
+                    .kek = .{signature},
+                    .db = .{signature},
+                },
+            } },
+        },
+    }, .{});
+}
+
 /// Vm is a VM found by name. form is its form tag, or "" if it has none.
 pub const Vm = struct { form: []const u8 };
 
@@ -248,9 +454,8 @@ fn copyDisk(gpa: Allocator, name: []const u8) ![]const u8 {
     return gpa.print("werewolf-{s}", .{name});
 }
 
-/// create makes VM name from a copy of image, with the config tar as its
-/// userData. Security type is Standard because no one Azure trusts signs
-/// werewolf's loader. az makes it a network whose security group lets
+/// create makes VM name from the enrolled specialized gallery image, with
+/// the config tar as its userData. az makes it a network whose security group lets
 /// nothing in. The OS disk and NIC are deleted with the VM. A null size
 /// picks machine(arch).size.
 pub fn create(
@@ -267,28 +472,26 @@ pub fn create(
 ) !void {
     const m = machine(arch);
     const disk = try copyDisk(gpa, name);
-    _ = try need(io, gpa, p, &.{
-        "disk",
-        "create",
-        "-n",
-        disk,
-        "--source",
-        image,
-        "--os-type",
-        "Linux",
-        "--hyper-v-generation",
-        "V2",
-        "--architecture",
-        m.arch,
-        "--security-type",
-        "Standard",
-        "--sku",
-        "Standard_LRS",
-        "--tags",
-        try gpa.print("{s}={s}", .{ tag, form }),
-        "-o",
-        "none",
-    }, why);
+    // The CLI validates an SSH key for specialized images; its ARM template omits osProfile.
+    const work = std.fs.path.dirname(tar) orelse ".";
+    const public_pem = try gpa.print("{s}/boot.pub", .{work});
+    const public_ssh = try gpa.print("{s}/azure-validator.pub", .{work});
+    defer Dir.cwd().deleteFile(io, public_pem) catch {};
+    defer Dir.cwd().deleteFile(io, public_ssh) catch {};
+    const extracted = call(io, gpa, &.{
+        "openssl", "x509", "-in", try gpa.print("{s}/boot.crt", .{work}), "-pubkey", "-noout",
+    });
+    if (!extracted.ok) return why.refuse(
+        "cannot read the verified disk's public boot certificate",
+        .{},
+    );
+    try Dir.cwd().writeFile(io, .{ .sub_path = public_pem, .data = extracted.out });
+    const converted = call(io, gpa, &.{ "ssh-keygen", "-i", "-m", "PKCS8", "-f", public_pem });
+    if (!converted.ok) return why.refuse(
+        "cannot convert the public boot key for Azure's CLI validator",
+        .{},
+    );
+    try Dir.cwd().writeFile(io, .{ .sub_path = public_ssh, .data = converted.out });
     // az vm create returns only once the VM runs, and can enable boot
     // diagnostics only with a storage account. Azure logs the console only
     // after diagnostics are on, and only for a VM it knows. So enable them
@@ -303,14 +506,24 @@ pub fn create(
             "create",
             "-n",
             name,
-            "--attach-os-disk",
+            "--image",
+            image,
+            "--specialized",
+            "true",
+            "--ssh-key-value",
+            public_ssh,
+            "--os-disk-name",
             disk,
-            "--os-type",
-            "linux",
             "--size",
             size orelse m.size,
             "--security-type",
-            "Standard",
+            "TrustedLaunch",
+            "--enable-secure-boot",
+            "true",
+            "--enable-vtpm",
+            "true",
+            "--enable-agent",
+            "false",
             "--user-data",
             tar,
             "--nsg-rule",
@@ -552,6 +765,43 @@ pub fn delete(io: Io, gpa: Allocator, p: Place, name: []const u8, vm: ?Vm, why: 
 }
 
 const testing = std.testing;
+test "gallery enrollment replaces default trust with the disk certificate" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const text = try galleryVersion(gpa, "eastus", "/disks/verified", &.{ 1, 2, 3 });
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+    defer parsed.deinit();
+    const properties = parsed.value.object.get("properties").?.object;
+    const storage = properties.get("storageProfile").?.object;
+    const source = storage.get("osDiskImage").?.object.get("source").?.object;
+    try testing.expectEqualStrings("/disks/verified", source.get("id").?.string);
+    const uefi = properties.get("securityProfile").?.object.get("uefiSettings").?.object;
+    const templates = uefi.get("signatureTemplateNames").?.array.items;
+    try testing.expectEqual(@as(usize, 1), templates.len);
+    try testing.expectEqualStrings("NoSignatureTemplate", templates[0].string);
+    const signatures = uefi.get("additionalSignatures").?.object;
+    inline for (.{ "pk", "kek", "db" }) |field| {
+        const v = signatures.get(field).?;
+        const sig = if (std.mem.eql(u8, field, "pk")) v.object else v.array.items[0].object;
+        try testing.expectEqualStrings("x509", sig.get("type").?.string);
+        try testing.expectEqualStrings("AQID", sig.get("value").?.array.items[0].string);
+    }
+    const retained = try std.json.Stringify.valueAlloc(
+        gpa,
+        @as(std.json.Value, .{ .object = uefi }),
+        .{},
+    );
+    try testing.expect(try galleryEnrolled(gpa, retained, &.{ 1, 2, 3 }));
+    try testing.expect(!try galleryEnrolled(gpa, retained, &.{ 1, 2, 4 }));
+    try testing.expect(!try galleryEnrolled(gpa, "null", &.{ 1, 2, 3 }));
+    try testing.expect(!try galleryEnrolled(gpa, "{}", &.{ 1, 2, 3 }));
+    const request = try galleryRequest(gpa, "/gallery/version", "/private/public.json");
+    try testing.expectEqualStrings("--headers", request[6]);
+    try testing.expectEqualStrings("Content-Type=application/json", request[7]);
+    const read = try galleryReadRequest(gpa, "/gallery/version");
+    try testing.expect(std.mem.find(u8, read[5], "&$expand=UefiSettings") != null);
+}
 
 test openArgs {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -571,6 +821,7 @@ test openArgs {
 
 test machine {
     try testing.expectEqualStrings("Arm64", machine(.aarch64).arch);
+    try testing.expectEqualStrings("Standard_D2ps_v6", machine(.aarch64).size);
     try testing.expectEqualStrings("Standard_D2as_v4", machine(.x86_64).size);
 }
 

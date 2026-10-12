@@ -201,6 +201,11 @@ pub fn main(init: std.process.Init) !void {
         record(io, .stdout(), .{ .event = "uncapped", .service = name, .why = "no cgroup2" });
     }
 
+    // The allowance files live on the machine. An image's root does not
+    // contain them, and the chroot below would hide them.
+    const allow_packet = allowances.has(.packet);
+    const allow_netadmin = allowances.has(.netadmin);
+
     // Chroot into the service's image as root, before building any rule, so
     // every later path, links included, resolves inside the image. Only what
     // init bound in (cmd/init/oci.zig) is reachable; the image's /tmp and
@@ -306,9 +311,9 @@ pub fn main(init: std.process.Init) !void {
     // the file cannot widen the bounding set.
     var keep: u32 = s.caps;
     if (low_port) keep |= 1 << linux.CAP.NET_BIND_SERVICE;
-    if (s.caps & service.cap.net_raw != 0 and !allowances.has(.packet))
+    if (s.caps & service.cap.net_raw != 0 and !allow_packet)
         l.fail(.park, "caps net_raw: this machine does not allow packet", .{});
-    if (s.caps & service.cap.net_admin != 0 and !allowances.has(.netadmin))
+    if (s.caps & service.cap.net_admin != 0 and !allow_netadmin)
         l.fail(.park, "caps net_admin: this machine does not allow netadmin", .{});
     dropTo(user, groups, keep) catch |err|
         l.fail(.park, "giving root up: {s}", .{@errorName(err)});
@@ -875,6 +880,7 @@ const narrow_floor = [_]Floor{
     .{ .path = "/etc/localtime", .access = sandbox.read_file },
     .{ .path = "/dev/null", .access = sandbox.read_file | sandbox.write_file },
     .{ .path = "/dev/zero", .access = sandbox.read_file },
+    .{ .path = "/dev/random", .access = sandbox.read_file },
     .{ .path = "/dev/urandom", .access = sandbox.read_file },
 };
 

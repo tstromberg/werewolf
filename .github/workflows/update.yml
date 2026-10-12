@@ -18,6 +18,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  kernel-version:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install apko
+        run: sudo tools/install-deps -y apko
+      - name: Compare the kernel pins with current Alpine packages
+        run: |
+          latest=$(mktemp)
+          trap 'rm -f "$latest"' EXIT
+          apko --workdir boot lock --arch aarch64,x86_64 --output "$latest" kernel.yaml
+          python3 test/check-kernel-version boot/kernel-source "$latest"
   update:
     # x86_64 alone: its runners have KVM; an arm64 runner's TCG would take
     # far longer than an update should.

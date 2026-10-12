@@ -91,12 +91,12 @@ and key, and `make list-forms` shows the chains.
 | `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
 | `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
 | `opensearch` | `jre` | one node of log search, TLS and the security plugin on, no demo users, the `jre` form's Java 27 ([opensearch.md](../forms/opensearch/README.md)) |
-| `suricata` | `prod` | Suricata on a packet feed, Emerging Threats Open cached on the data partition, no control socket ([suricata.md](../forms/suricata/README.md)) |
+| `suricata` | `prod` | Suricata on eth0, Emerging Threats Open cached on the data partition, no control socket ([suricata.md](../forms/suricata/README.md)) |
 | `opencanary` | `prod` | a low-interaction honeypot: six bait ports, nothing else, no real login ([opencanary.md](../forms/opencanary/README.md)) |
-| `zeek` | `prod` | Zeek on the same kind of feed, JSON logs, no packages ([zeek.md](../forms/zeek/README.md)) |
+| `zeek` | `prod` | Zeek on eth0, JSON logs, no packages ([zeek.md](../forms/zeek/README.md)) |
 | `velociraptor` | `prod` | the Velociraptor server, keys generated on the machine, the GUI on loopback ([velociraptor.md](../forms/velociraptor/README.md)) |
 | `dependency-track` | `jre21`, with `postgresql`, `caddy` | Dependency-Track, the published administrator password replaced before it is reachable ([dependency-track.md](../forms/dependency-track/README.md)) |
-| `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j's HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
+| `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j 4.4 from this form's package, its HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
 | `iris` | `prod`, with `postgresql`, `caddy` | DFIR-IRIS, the administrator from the config, the web server on loopback ([iris.md](../forms/iris/README.md)) |
 | `misp` | `prod`, with `mariadb-tcp`, `valkey`, `caddy` | MISP core behind Caddy, the image's published passwords not set, modules not started ([misp.md](../forms/misp/README.md)) |
 | `greenbone` | `prod`, with `postgresql`, `caddy`, `valkey` | Greenbone's manager, web UI, scanner and feed; the scanner alone holds the packet capabilities; `admin`/`admin` refused ([greenbone.md](../forms/greenbone/README.md)) |

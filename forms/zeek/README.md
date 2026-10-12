@@ -4,8 +4,7 @@ A network sensor: [Zeek](https://zeek.org) 8.2 reading one interface and writing
 
 ## Security Posture
 
-- pcap-feed opens the packet socket and promiscuous mode, then becomes `_pcap` and may only copy frames. Zeek never holds those capabilities.
-- Zeek runs as its image's user. It reads the fifo and writes logs. It reaches a resolver and nothing else.
+- Zeek runs as its image's user and captures `eth0` with its AF_PACKET plugin. It keeps `CAP_NET_RAW` and `CAP_NET_ADMIN` for that socket and promiscuous mode. It writes logs. It reaches a resolver and nothing else. No TCP port is declared. A packet socket can still inject frames, and this process's netlink socket can change routes because the resolver pledge includes it.
 
 ## Getting Started
 
@@ -31,8 +30,8 @@ There is nothing to import. Logs from this machine are the files under `/data/sv
 
 ### Known Quirks
 
-- Inside the image the fifo is `/tmp/feed`. On the machine it is `/run/svc/zeek/feed`.
 - No packages and no Management framework. What Zeek runs is the image's `local`.
+- Promiscuous mode is on, so a mirror can deliver frames addressed to other machines.
 
 ### Network Exposure
 

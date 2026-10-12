@@ -1,9 +1,6 @@
 # What the zeek form, booted as it ships, must say on its console (make
 # check-shellfree-zeek; test/boot; forms/demo/test/console has the
-# format). pcap-feed opens the interface and drops; Zeek starts. make
-# check-zeek checks the feed and a log.
+# format). Zeek starts. make check-zeek checks a log.
 
-seen    pcap-start   pcap-feed: \{"event":"start","iface":
-unseen  pcap-down    pcap-feed: \{"event":"down"
 seen    zeek-start   leash: \{"event":"start","service":"zeek"
 unseen  zeek-down    leash: \{"event":"down","service":"zeek"

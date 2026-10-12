@@ -1005,7 +1005,11 @@ fn help(w: *Io.Writer, gpa: Allocator, verb: []const u8, form: []const u8, iface
     try row(w, "--update-policy FILE", "update-policy.json: when updates install");
     if (std.mem.eql(u8, verb, "create")) {
         try row(w, "--allow-from me|CIDR", "opens the form's TCP ports to it (gcp, aws, azure)");
-        try row(w, "--import DIR", "files on a read-only disk, imported once as the data is first made");
+        try row(
+            w,
+            "--import DIR",
+            "files on a read-only disk, imported once as the data is first made",
+        );
     }
     for (iface.files) |f| try row(
         w,
@@ -1436,7 +1440,8 @@ pub fn reconfigurable(
         .{ name, name, on },
     );
     if (o.import_dir != null) return why.refuse(
-        "{s} exists, and an import runs only while its data is first made: howl delete {s} --on {t}, then create",
+        "{s} exists, and an import runs only while its data is first made: howl delete {s} --on " ++
+            "{t}, then create",
         .{ name, name, on },
     );
     if (was.len == 0) return notMade(name, on, why);
@@ -1464,6 +1469,17 @@ test "reconfigure accepts a cloud form label for a local manifest path" {
 /// releaseDisk returns the form's release disk.qcow2, with --app's
 /// application, and builds it if it is stale, as howl build would.
 pub fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: Arch, why: *Why) ![]const u8 {
+    return releaseDiskAt(io, gpa, o, arch, null, why);
+}
+
+pub fn releaseDiskAt(
+    io: Io,
+    gpa: Allocator,
+    o: Options,
+    arch: Arch,
+    target: ?[]const u8,
+    why: *Why,
+) ![]const u8 {
     const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
     const name = std.fs.path.basename(std.mem.trimEnd(u8, o.form, "/"));
     var steps: progress.Steps = try .init(io, gpa, why, .{
@@ -1476,14 +1492,37 @@ pub fn releaseDisk(io: Io, gpa: Allocator, o: Options, arch: Arch, why: *Why) ![
         .log = try gpa.print("build/log/{s}-{t}-build.log", .{ name, arch }),
         .first = start_phase,
     });
+    const configured_key = environ.get("WEREWOLF_BOOT_KEY");
+    const boot_signer: ?@import(
+        "secureboot.zig",
+    ).Keys = if (target == null) null else if (configured_key) |key|
+        .{ .key = key, .cert = environ.get("WEREWOLF_BOOT_CRT") orelse "release/boot.crt" }
+    else
+        try @import("secureboot.zig").signer(
+            io,
+            gpa,
+            &steps,
+            try gpa.print("build/boot/{t}", .{arch}),
+            false,
+        );
+    const kernel = if (target != null) environ.get("WEREWOLF_IPE_KERNEL") else null;
     const p = try buildHere(io, gpa, &steps, .{
         .form = o.form,
         .arch = arch,
         .app = ab.root,
         .published = !o.local,
+        .boot_key = if (boot_signer) |k| k.key else null,
+        .boot_cert = if (boot_signer) |k| k.cert else null,
+        .boot_native = target != null,
+        .qcow2_path = target,
+        .ipe_kernel = kernel,
+        .ipe_key = if (kernel != null) environ.get("WEREWOLF_IPE_KEY") else null,
+        .ipe_cert = if (kernel != null) environ.get("WEREWOLF_IPE_CRT") else null,
+        .ipe_updates = if (kernel != null) environ.get("IPE_UPDATES") else null,
+        .image_serial = if (kernel != null) environ.get("IMAGE_SERIAL") else null,
     }, .{ .qcow2 = true });
     _ = try steps.finish();
-    return gpa.print("{s}/disk.qcow2", .{p.out});
+    return target orelse gpa.print("{s}/disk.qcow2", .{p.out});
 }
 
 pub fn isMachineName(s: []const u8) bool {

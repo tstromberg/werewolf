@@ -6,7 +6,11 @@ Landlock, seccomp or noexec, and refuses missing, tampered, wrong-signer and wro
 policies before handover. Build the custom kernel with `make ipe-kernel`
 on Linux and supply `WEREWOLF_IPE_KEY` and `WEREWOLF_IPE_CRT`; see
 [design/ipe.md](design/ipe.md). CI runs it on both architectures with
-disposable signing keys. Production updates remain held on IPE images.
+disposable signing keys. `make IPE=1 check-image-updater` also exercises
+signed HTTPS slot updates, rejection before writes and reboot/commit with
+IPE enforced ([design/prebuilt-images.md](design/prebuilt-images.md)).
+On accelerated arm64, `make IPE=1 check-updater-uki` keeps one disk
+through firmware boot, signed UKI delivery, verified slot b and commit.
 
 ```sh
 make test           # every program's and library's unit tests
@@ -465,27 +469,41 @@ boot and stall, so 24.04 is the default. Its old erofs-utils is replaced by
 
 ## Secure Boot
 
-`make check-secureboot` proves the boot chain's first verified slice
-([design/verified-boot.md](design/verified-boot.md)): minimal's slot as a
-signed UKI — kernel, stage0, root image and command line as one PE
-(`tools/uki`) — boots on firmware with Secure Boot on and only the test key
-enrolled, and the same image with one byte changed is refused. It runs on
-arm64 hosts with their own accelerator (`hvf`, `kvm`); emulated arm64
-skips it, as it skips the other UEFI boots.
+`make check-secureboot` builds a stock-Alpine signed release disk and verifies
+its UKI and certificate against the release manifest and actual ESP. Enrolled
+firmware must boot the native slot, verify the root and pass expected posture;
+a changed UKI must be refused. It runs on arm64 and x86_64, including emulation.
 
-It needs a directory the host cannot make, given as `SECUREBOOT_DIR=DIR`:
+`make IPE=1 check-updater-uki` additionally proves continuous signed A/B delivery
+under Secure Boot. It rejects unsigned, altered and wrong-key loaders and UKIs,
+an unexpected UKI path, and setup-mode boot before handover. Malicious unsigned
+loader options cannot change slot identity or disable IPE. The valid HTTPS
+update must boot verified slot b and commit it with IPE still enforcing.
+Arm A/B boots keep enrollment flash read-only and verify its digest; disposable
+writable clones capture AAVMF's explicit rejection diagnostics.
 
-- `stub.efi` — systemd's `linuxaa64.efi.stub`, from Alpine's
-  `systemd-efistub` package (`apk fetch` and untar).
-- `code.fd` and `vars.fd` — firmware that enforces Secure Boot and its
-  empty variable store, as Ubuntu's `qemu-efi-aarch64` ships them:
-  `AAVMF_CODE.secboot.fd` and `AAVMF_VARS.fd` from `/usr/share/AAVMF`.
+On an arm64 Mac, `make check-lima-secureboot` proves the signed release under
+Lima's QEMU backend and checks that VZ refuses its Secure Boot requirement.
+The test supplies enrolled firmware through Lima's debug QEMU arguments; the
+normal `howl --on lima` VZ engine does not support firmware-key enrollment.
+Firecracker has no UEFI firmware and refuses EFI entries, including entries
+with appended unsigned `linux` and `initrd` lines. Use QEMU for firmware enforcement.
 
-The boot key is made fresh each run and enrolled as PK, KEK and db by
-`virt-fw-vars` — Ubuntu's `python3-virt-firmware` — wherever it is
-installed: here, or in the `werewolf-ci-24.04` VM, which the check
-reaches through `limactl` on macOS. `osslsigncode` signs the UKI; `brew
-install osslsigncode` brings it.
+Install `python3-virt-firmware`, OVMF and `qemu-efi-aarch64` on Linux. On macOS,
+`tools/enroll-boot` uses the existing `werewolf-ci-24.04` Lima build VM for firmware
+and public-key enrollment. `SECUREBOOT_DIR` optionally supplies `code.fd` and
+`vars.fd`; pinned systemd stubs come from `out/tools/stubs/ARCH/linux.efi.stub`.
+Enrollment never copies a private signer into that helper's VM scratch directory.
+
+`test/check-tpm-policy` runs on Linux with swtpm and tpm2-tools. It tests signed
+monotonic NV writes, replay, altered data, undefine and hierarchy-reset refusal.
+Set `TPM_POLICY_PROBE` to `build/host/tpm-policy` to exercise Werewolf's actual
+TPM command implementation as well. CI runs these and both firmware architectures.
+
+PR CI checks the IPE source version against both Alpine architecture locks.
+Nightly CI resolves fresh signed indexes and compares their full package versions
+with `boot/kernel-source`, including Alpine's revision. `test/kernel-version`
+checks version drift, revision drift and missing architectures without network access.
 
 ## Firecracker
 

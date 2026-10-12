@@ -375,6 +375,12 @@ git log -p cve-tiers.json   # every change, as a diff
 
 ## Limits
 
+Opt-in IPE application channels use complete signed slot bundles rather
+than on-machine package composition. `make prebuilt` exports a pinned
+channel; `WEREWOLF_BOOT_KEY` adds its freshly signed UKI. See
+[design/prebuilt-images.md](design/prebuilt-images.md) for enrollment,
+artifact layout, publication order and rollback limits.
+
 - The published disks boot in CI under QEMU alone: not on a cloud, and
   not with a cloud's devices.
 - Releases are kept; nothing prunes old ones.

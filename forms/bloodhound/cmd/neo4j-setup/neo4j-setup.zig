@@ -16,12 +16,14 @@ const Allocator = std.mem.Allocator;
 const password_path = "/run/svc/neo4j/neo4j-password";
 const marker = "/data/svc/neo4j/initial-password-set";
 const java = "/usr/bin/java";
-const jna_link = "/run/svc/neo4j/libjnidispatch.so";
 const jna = switch (builtin.cpu.arch) {
-    .aarch64 => "/usr/lib/jna/aarch64/libjnidispatch.so",
-    .x86_64 => "/usr/lib/jna/x86_64/libjnidispatch.so",
+    .aarch64 => "/usr/lib/jna/aarch64",
+    .x86_64 => "/usr/lib/jna/x86_64",
     else => @compileError("no JNA library for this arch"),
 };
+// Java's seed file is /dev/urandom. The floor allows /dev/random too.
+const tool_options = "-Djna.nosys=true -Djna.boot.library.path=" ++ jna ++
+    " -Djava.security.egd=file:/dev/urandom";
 
 const dirs = [_][]const u8{
     "/data/svc/neo4j/data",
@@ -32,18 +34,18 @@ const dirs = [_][]const u8{
 
 pub fn main(init: std.process.Init) void {
     const io = init.io;
-    run(io, init.arena.allocator()) catch |err| {
+    run(init) catch |err| {
         say(io, "{{\"event\":\"failed\",\"why\":\"{s}\"}}", .{@errorName(err)});
         std.process.exit(1);
     };
 }
 
-fn run(io: Io, gpa: Allocator) !void {
-    // JNA would unpack this into a temporary directory, which is noexec.
-    // The file on the root is the one for this arch; the link is where
-    // both JVMs are told to load it.
-    Dir.cwd().deleteFile(io, jna_link) catch {};
-    try Dir.cwd().symLink(io, jna, jna_link, .{});
+fn run(init: std.process.Init) !void {
+    const io = init.io;
+    const gpa = init.arena.allocator();
+    // Neo4j starts another JVM for the password command and drops flags
+    // it does not know. The child still reads JAVA_TOOL_OPTIONS.
+    try init.environ_map.put("JAVA_TOOL_OPTIONS", tool_options);
     for (dirs) |d| Dir.cwd().createDirPath(io, d) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -63,14 +65,15 @@ fn run(io: Io, gpa: Allocator) !void {
 
     var child = try std.process.spawn(io, .{
         .argv = &.{
-            java,                                     "-Dapp.name=neo4j-admin",
-            "-Dapp.home=/var/lib/neo4j",              "-Dbasedir=/var/lib/neo4j",
-            "-Djava.io.tmpdir=/run/svc/neo4j",        "-Djna.nosys=true",
-            "-Djna.boot.library.path=/run/svc/neo4j", "-classpath",
-            "/var/lib/neo4j/lib/*",                   "org.neo4j.server.startup.NeoAdminBoot",
-            "dbms",                                   "set-initial-password",
-            "--require-password-change=false",        password,
+            java,                                      "-Dapp.name=neo4j-admin",
+            "-Dapp.home=/var/lib/neo4j",               "-Dbasedir=/var/lib/neo4j",
+            "-Djava.io.tmpdir=/run/svc/neo4j",         "-Djava.security.egd=file:/dev/urandom",
+            "-Djna.nosys=true",                        "-Djna.boot.library.path=" ++ jna,
+            "-classpath",                              "/var/lib/neo4j/lib/*",
+            "org.neo4j.server.startup.Neo4jAdminBoot", "set-initial-password",
+            "--require-password-change=false",         password,
         },
+        .environ_map = init.environ_map,
         .stdin = .ignore,
     });
     const term = try child.wait(io);

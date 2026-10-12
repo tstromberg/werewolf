@@ -2,23 +2,24 @@
 
 ## Summary
 
-slot-update is the autoupdater: it builds or fetches the other slot and boots
-it once due; a slot that does not prove healthy rolls back. See
-[docs/updater.md](../../docs/updater.md) and [update-policy.md](../../docs/design/update-policy.md).
+slot-update builds or fetches the other slot and boots it once due; an unhealthy
+slot rolls back ([updater.md](../../docs/updater.md), [update-policy.md](../../docs/design/update-policy.md)).
 
 Signed `local-NAME` updates are due immediately; `try [HASH]` selects the parked slot; failed solves fail `update-held` ([manifest.md](../../docs/design/manifest.md)).
 ## Background
 
-A werewolf root is an immutable dm-verity erofs image, so a fix lands only as
-a new image in the other of two slots, `a` and `b`; the loader boots it once and
-falls back unless slot-keep commits it. It is built on the machine from what
-werewolf's repository, Wolfi and Alpine hold now, for every form.
+A root is an immutable dm-verity EROFS image. A fix lands in the other slot,
+`a` or `b`; the loader falls back unless slot-keep commits it. It is composed
+locally from werewolf's repository, Wolfi and Alpine.
+Enrolled IPE machines fetch complete signed slots instead; unenrolled IPE
+holds updates ([prebuilt-images.md](../../docs/design/prebuilt-images.md)).
 
 | File | Holds |
 | --- | --- |
 | `slot-update.zig` | daemon, `check`, `outcome`, the plans, the log |
 | `stage.zig` | settings, tiers feed, `attempt`, `pending`, lock, reboot |
 | `slot.zig` | building and installing the other slot; new roots (`Root`) |
+| `images.zig` | authenticated prebuilt delivery and retained slot proof |
 | `../../lib/apk.zig` | checking apk's cache before root's apk reads it; RSA keys |
 | `cve.zig` | CVE fetcher and reader children; root's checks of their lines |
 | `tiers.zig` | the signed CVE tiers feed; tiering an update's fixes |
@@ -28,7 +29,7 @@ werewolf's repository, Wolfi and Alpine hold now, for every form.
 
 - Exploited CVEs fixed within about 75 minutes, high ones within hours.
 - No update can leave a machine unbootable.
-- Nothing from the network decides anything as root.
+- Authenticate network inputs before root uses them.
 - A log an auditor can read alone, every line chained to the one before.
 
 ## Non-Goals
@@ -63,9 +64,8 @@ Invariants to keep:
   `Root`'s accounts; it writes exactly `compose.records`, the rest carries over.
 - **Fail toward sooner.** With no valid feed, every fix, or else the update
   itself, counts High. A refused form policy blocks the operator's file too.
-- **Durability.** State files go through `writeReplacing`; log lines are fsync'd.
-- **One pass at a time.** `check`, `outcome` and the reboot hold `lock`; `check`
-  and `outcome` require `/run/werewolf/committed`.
+- **Durability and exclusion.** State/log writes are synced. Passes hold `lock`
+  and require `/run/werewolf/committed`.
 
 ## Drawbacks
 
@@ -73,8 +73,7 @@ Invariants to keep:
 
 ## Alternatives Considered
 
-- **Reboot as soon as built:** nightly reboots on a busy form.
-- **Tier on each machine:** more untrusted parsing; CI tiers once and signs.
+- Reboot immediately: disrupts busy forms. Tier locally: adds untrusted parsing.
 
 ## Security Considerations
 

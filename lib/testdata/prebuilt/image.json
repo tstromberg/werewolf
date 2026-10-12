@@ -1,0 +1,42 @@
+{
+  "format": "werewolf-image/1",
+  "channel": "https://example.test/shop",
+  "arch": "aarch64",
+  "serial": "20261011T000000Z",
+  "build": "dfd5d3e38c60a94bdc6f34c2bbe8035a53de3583ae6486fc334b2faa560e32ca",
+  "ipe": true,
+  "root_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "kernel": "linux-virt-6.18.55-werewolf",
+  "packages": [
+    {
+      "name": "busybox",
+      "version": "1",
+      "origin": "busybox"
+    }
+  ],
+  "advisories": [],
+  "declaration": null,
+  "files": {
+    "vmlinuz": {
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 1
+    },
+    "root.erofs": {
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 1
+    },
+    "stage0.zst": {
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 1
+    },
+    "stage0-bitten.zst": {
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 1
+    },
+    "cmdline": {
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size": 1
+    },
+    "uki.efi": null
+  }
+}

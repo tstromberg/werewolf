@@ -61,7 +61,8 @@ for kind in missing tampered wrong-root wrong-signer; do
 	else cp "$dir/bad.cpio" "$dir/bad-all.cpio"; fi
 	zstd -1 -q -c "$dir/bad-all.cpio" >"$dir/bad-stage0.zst"
 	cat "$dir/bad-stage0.zst" "$dir/root.zst" >"$dir/bad.zst"
-	if test/boot "ipe-$kind" - "$dir/$kind.log" "$@" -kernel "$KERNEL" -initrd "$dir/bad.zst" -append "$CMDLINE" >"$dir/$kind.result"; then
+	# Let the serial port drain the rejection before -no-reboot exits QEMU.
+	if test/boot "ipe-$kind" - "$dir/$kind.log" "$@" -kernel "$KERNEL" -initrd "$dir/bad.zst" -append "$CMDLINE panic=3" >"$dir/$kind.result"; then
 		echo "FAIL   ipe-$kind: invalid policy booted" >&2; exit 1
 	fi
 	grep -a -q "stage0: IPE: $reason; not handing over" "$dir/$kind.log"

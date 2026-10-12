@@ -33,7 +33,9 @@ die() {
 cloud=${1:-cloud}
 [ $# -eq 3 ] || die "usage: cloud gcp|aws|azure FORM ARCH"
 form=$2 arch=$3
-howl=build/host/howl
+set --
+[ -z "${CLOUD_SIZE:-}" ] || set -- --size "$CLOUD_SIZE"
+howl=${HOWL:-build/host/howl}
 [ -x "$howl" ] || die "no $howl; make howl"
 
 case $cloud in
@@ -78,7 +80,13 @@ image_delete() {
 	case $cloud in
 	gcp) g compute images delete "$1" ;;
 	aws) aws ec2 deregister-image --image-id "$2" && aws ec2 delete-snapshot --snapshot-id "$3" ;;
-	azure) az disk delete -g "$group" -n "$1" --yes -o none ;;
+	azure)
+		gallery=$(printf '%s' "$1" | tr '-' '_')
+		az sig image-version delete -g "$group" --gallery-name "$gallery" --gallery-image-definition boot \
+			--gallery-image-version 1.0.0 -o none &&
+		az sig image-definition delete -g "$group" --gallery-name "$gallery" --gallery-image-definition boot -o none &&
+		az sig delete -g "$group" --gallery-name "$gallery" -o none &&
+		az disk delete -g "$group" -n "$1" --yes -o none ;;
 	esac
 }
 # leftovers lists what is left of the machine after delete, one per line.
@@ -98,7 +106,7 @@ leftovers() {
 	azure) az resource list -g "$group" --query "[?contains(name, '$name')].name" -o tsv ;;
 	esac | sed '/^$/d'
 }
-name=werewolf-check-$(date -u +%Y%m%d%H%M%S)
+name=${CLOUD_NAME:-werewolf-check-$(date -u +%Y%m%d%H%M%S)}
 work=$(mktemp -d)
 
 cleanup() {
@@ -111,7 +119,7 @@ cleanup() {
 		# Delete only the image this run's create made, by the name create
 		# printed. Do not delete every image newer than the run: another run
 		# of the same form, at the same time, makes one too and still uses it.
-		made_image=$(sed -n 's/^werewolf: image \([a-z0-9-]*\): making it .*/\1/p' "$work/create.err" 2>/dev/null)
+		made_image=$(sed -n -E 's/^(howl|werewolf): image ([a-z0-9-]*): making it .*/\2/p' "$work/create.err" 2>/dev/null)
 		[ -z "$made_image" ] || images | while read -r image id snapshot; do
 			[ "$image" = "$made_image" ] || continue
 			image_delete "$image" "$id" "$snapshot" >/dev/null 2>&1 || say "could not delete image $image"
@@ -130,14 +138,18 @@ fail() {
 	failed=1
 }
 log=$work/serial.log
-serial() { "$howl" console "$name" --on "$cloud" 2>/dev/null | tr -d '\r' >"$log" || true; }
+raw=$work/serial.raw.log
+serial() {
+	"$howl" console "$name" --on "$cloud" 2>/dev/null >"$raw" || true
+	python3 test/cloud-console <"$raw" >"$log"
+}
 seen() { grep -a -q -E "$1" "$log"; }
 # await_posture waits until posture reports host $1, which it does after
 # every service has started. A panic ends the wait early.
 await_posture() {
 	i=0
 	while serial; ! seen "posture: .*\"host\":\"$1\""; do
-		seen 'Kernel panic' && break
+		grep -a -q 'Kernel panic' "$raw" && break
 		i=$((i + 1))
 		[ $i -le 150 ] || break
 		sleep 2
@@ -154,9 +166,16 @@ say "creating $name, $form on $arch, in $where"
 # it names the image cleanup deletes. The address comes back on fd 3.
 # create's status goes to a file, because a pipeline's status is tee's.
 # `|| rc=` lets a failed create get past set -e to the line that records it.
-made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --build --config "$work/config" \
+made=$({ { rc=0; "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" "$@" --build --config "$work/config" \
 	--allow-from me 2>&1 >&3 3>&- || rc=$?; echo "$rc" >"$work/create.rc"; } | tee "$work/create.err" >&2; } 3>&1)
-[ "$(cat "$work/create.rc")" = 0 ] || die "howl create failed; its output is above"
+if [ "$(cat "$work/create.rc")" != 0 ]; then
+	serial
+	keep=build/$arch/$form/check/$cloud-serial.log
+	mkdir -p "$(dirname "$keep")"
+	cp "$log" "$keep"
+	cp "$raw" "${keep%.log}.raw.log"
+	die "howl create failed; console saved in $keep"
+fi
 addr=$(echo "$made" | cut -f2)
 
 say "waiting for the posture line on the serial port"
@@ -164,29 +183,41 @@ await_posture "$name"
 keep=build/$arch/$form/check/$cloud-serial.log
 mkdir -p "$(dirname "$keep")"
 cp "$log" "$keep"
+cp "$raw" "${keep%.log}.raw.log"
 
 seen 'stage0: slot a: .*verified' && ok root-verified || fail "root-verified: stage0 did not verify slot a's root"
+seen 'stage0: Secure Boot enforced outside setup mode' && ok secure-boot ||
+	fail "secure-boot: stage0 did not verify firmware enforcement outside setup mode"
 seen "cloud-metadata: \\{.*\"event\":\"config\",\"provider\":\"$cloud\"" && ok metadata-config ||
 	fail "metadata-config: no config taken from the cloud's metadata server"
 seen "posture: .*\"host\":\"$name\"" && ok hostname || fail "hostname: posture does not name the host $name"
 
 # Each cloud's integrity protections, as the cloud reports them: a vTPM
 # beside the machine and, where the cloud offers it, a record of the boot it
-# measured. Secure Boot stays off everywhere until werewolf's loader is
-# signed (docs/design/verified-boot.md).
+# measured. Stage0's check above is independent of the provider's flags.
 case $cloud in
 gcp)
 	v=$(gcloud compute instances describe "$name" --zone "$zone" \
-		--format='value(shieldedInstanceConfig.enableVtpm,shieldedInstanceConfig.enableIntegrityMonitoring)' 2>/dev/null |
+		--format='value(shieldedInstanceConfig.enableSecureBoot,shieldedInstanceConfig.enableVtpm,shieldedInstanceConfig.enableIntegrityMonitoring)' 2>/dev/null |
 		tr '\t' ' ') || true
-	[ "$v" = 'True True' ] && ok shielded || fail "shielded: vTPM and integrity monitoring are not both on: $v"
+	[ "$v" = 'True True True' ] && ok shielded || fail "shielded: Secure Boot, vTPM and integrity monitoring are not all on: $v"
 	;;
 aws)
-	ami=$(aws ec2 describe-images --owners self --filters "Name=tag:werewolf-form,Values=$form" \
-		--query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text 2>/dev/null) || true
+	ami=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=$name" \
+		Name=instance-state-name,Values=running --query 'Reservations[0].Instances[0].ImageId' --output text 2>/dev/null) || true
 	v=$(aws ec2 describe-images --image-ids "$ami" --query 'Images[0].TpmSupport' --output text 2>/dev/null) ||
 		true
 	[ "$v" = 'v2.0' ] && ok nitro-tpm || fail "nitro-tpm: the image does not give the machine one: $v"
+	;;
+azure)
+	v=$(az vm show -g "$group" -n "$name" \
+		--query '{security:securityProfile,os:osProfile}' -o json) || true
+	if printf '%s' "$v" | python3 test/azure-security; then
+		ok trusted-launch
+		ok specialized-image
+	else
+		fail "trusted-launch: enforcement flags or specialized-image profile are incorrect: $v"
+	fi
 	;;
 esac
 
@@ -244,9 +275,10 @@ fi
 # create restarts the machine on it.
 echo "$name-b" >"$work/config/hostname"
 say "replacing its config"
-if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" --build --config "$work/config" >/dev/null; then
+if "$howl" create "$name" --with "$form" --on "$cloud" --arch "$arch" "$@" --build --config "$work/config" >/dev/null; then
 	await_posture "$name-b"
 	cat "$log" >>"$keep"
+	cat "$raw" >>"${keep%.log}.raw.log"
 	seen "posture: .*\"host\":\"$name-b\"" && ok reconfigure ||
 		fail "reconfigure: posture does not name the new host $name-b"
 else

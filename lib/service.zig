@@ -74,7 +74,7 @@ pub const floor = [_][:0]const u8{
     "/etc/passwd",      "/etc/group",         "/etc/hosts",
     "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/ld.so.cache",
     "/etc/localtime",   "/etc/ssl",           "/dev/null",
-    "/dev/zero",        "/dev/urandom",
+    "/dev/zero",        "/dev/random",        "/dev/urandom",
 };
 
 /// narrowing is what a service with narrowed programs must promise: their

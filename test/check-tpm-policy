@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Prove monotonic signed NV writes and guest reset refusal on a real swtpm."""
+import os
+import pathlib
+import socket
+import subprocess
+import tempfile
+
+
+def run(args, reject=False):
+    result = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if reject:
+        if result.returncode == 0:
+            raise RuntimeError("unexpectedly authorized: " + args[0])
+    elif result.returncode:
+        raise RuntimeError(args[0] + ": " + result.stderr.decode(errors="replace"))
+    return result.stdout
+
+
+os.umask(0o077)
+with tempfile.TemporaryDirectory(prefix="werewolf-tpm-") as temp:
+    root = pathlib.Path(temp)
+    os.chdir(root)
+    (root / "state").mkdir()
+    with socket.socket() as data, socket.socket() as ctrl:
+        data.bind(("127.0.0.1", 0))
+        port = data.getsockname()[1]
+        ctrl.bind(("127.0.0.1", port + 1))
+    run(["swtpm", "socket", "--tpm2", "--tpmstate", "dir=" + str(root / "state"),
+         "--server", f"type=tcp,port={port},bindaddr=127.0.0.1",
+         "--ctrl", f"type=tcp,port={port + 1},bindaddr=127.0.0.1",
+         "--flags", "not-need-init,startup-clear", "--daemon", "--pid", "file=" + str(root / "pid")])
+    os.environ["TPM2TOOLS_TCTI"] = f"swtpm:host=127.0.0.1,port={port}"
+    try:
+        for name in ["owner", "lockout"]:
+            (root / (name + ".auth")).write_bytes(os.urandom(32))
+        run(["tpm2_changeauth", "-c", "o", "file:owner.auth"])
+        run(["tpm2_changeauth", "-c", "l", "file:lockout.auth"])
+        run(["tpm2_clearcontrol", "-C", "l", "-P", "file:lockout.auth", "s"])
+        run(["openssl", "genrsa", "-out", "signer.key", "2048"])
+        run(["openssl", "pkey", "-in", "signer.key", "-pubout", "-out", "signer.pub"])
+        run(["tpm2_loadexternal", "-G", "rsa", "-C", "o", "-a", "sign|userwithauth", "-u", "signer.pub", "-c", "signer.ctx", "-n", "signer.name"])
+        run(["tpm2_startauthsession", "-S", "trial.ctx"])
+        pathlib.Path("qualifier").write_bytes(b"werewolf.rollback/1")
+        run(["tpm2_policyauthorize", "-S", "trial.ctx", "-n", "signer.name", "-q", "qualifier", "-L", "authorize.policy"])
+        run(["tpm2_flushcontext", "trial.ctx"])
+        index = "0x1500020"
+        run(["tpm2_nvdefine", index, "-C", "o", "-P", "file:owner.auth", "-s", "8", "-g", "sha256",
+             "-a", "ownerwrite|policywrite|authread|no_da|writeall", "-L", "authorize.policy"])
+        pathlib.Path("zero").write_bytes(bytes(8))
+        run(["tpm2_nvwrite", index, "-C", "o", "-P", "file:owner.auth", "-i", "zero"])
+        permits = {}
+        for value in [10, 20]:
+            data = str(value) + ".data"
+            pathlib.Path(data).write_bytes(value.to_bytes(8, "big"))
+            cp = str(value) + ".cp"
+            policy = str(value) + ".policy"
+            signature = str(value) + ".sig"
+            run(["tpm2_nvwrite", index, "-i", data, "--cphash", cp])
+            run(["tpm2_startauthsession", "-S", "trial.ctx"])
+            run(["tpm2_policynv", index, "ule", "-i", data, "-S", "trial.ctx"])
+            run(["tpm2_policycphash", "-S", "trial.ctx", "--cphash-input", cp, "-L", policy])
+            run(["tpm2_flushcontext", "trial.ctx"])
+            message = str(value) + ".message"
+            pathlib.Path(message).write_bytes(pathlib.Path(policy).read_bytes() + pathlib.Path("qualifier").read_bytes())
+            run(["openssl", "dgst", "-sha256", "-sign", "signer.key", "-out", signature, message])
+            permits[value] = (data, cp, policy, signature)
+
+        def advance(value, altered=None, reject=False):
+            data, cp, policy, signature = permits[value]
+            run(["tpm2_verifysignature", "-c", "signer.ctx", "-g", "sha256", "-m", str(value) + ".message",
+                 "-s", signature, "-t", "ticket", "-f", "rsassa"])
+            run(["tpm2_flushcontext", "-t"])
+            run(["tpm2_startauthsession", "--policy-session", "-S", "session.ctx"])
+            try:
+                run(["tpm2_policynv", index, "ule", "-i", data, "-S", "session.ctx"], reject=reject and altered is None)
+                if reject and altered is None:
+                    return
+                run(["tpm2_policycphash", "-S", "session.ctx", "--cphash-input", cp])
+                run(["tpm2_policyauthorize", "-S", "session.ctx", "-i", policy, "-q", "qualifier", "-n", "signer.name", "-t", "ticket"])
+                run(["tpm2_nvwrite", index, "-P", "session:session.ctx", "-i", altered or data], reject=reject)
+            finally:
+                run(["tpm2_flushcontext", "session.ctx"])
+
+        advance(10)
+        advance(20)
+        advance(10, reject=True)
+        advance(20, altered="zero", reject=True)
+        run(["tpm2_nvwrite", index, "-i", "zero"], reject=True)
+        run(["tpm2_nvundefine", index, "-C", "o"], reject=True)
+        run(["tpm2_clear", "-c", "l"], reject=True)
+        run(["tpm2_clearcontrol", "-C", "l", "c"], reject=True)
+        run(["tpm2_changeauth", "-c", "o", ""], reject=True)
+        run(["tpm2_hierarchycontrol", "-C", "p", "phEnable", "clear"])
+        run(["tpm2_clearcontrol", "-C", "p", "c"], reject=True)
+        run(["tpm2_nvread", index, "-s", "8", "-o", "floor"])
+        if pathlib.Path("floor").read_bytes() != (20).to_bytes(8, "big"):
+            raise RuntimeError("protected floor changed")
+        if os.environ.get("TPM_POLICY_PROBE"):
+            probe = os.environ["TPM_POLICY_PROBE"]
+            run([probe, "check", "signer.pub", "20", str(port)])
+            run([probe, "check", "signer.pub", "10", str(port)], reject=True)
+            run([probe, "advance", "signer.pub", "20", str(port), "20.sig"])
+            run([probe, "advance", "signer.pub", "10", str(port), "10.sig"], reject=True)
+            run([probe, "advance", "signer.pub", "20", str(port), "10.sig"], reject=True)
+            print("pass   tpm-protocol: runtime read, signature verification and policy-session writes exercised")
+        if os.environ.get("TPM_POLICY_EXPORT"):
+            destination = pathlib.Path(os.environ["TPM_POLICY_EXPORT"])
+            destination.mkdir(parents=True, exist_ok=True)
+            for name in ["signer.pub", "signer.name", "authorize.policy", "10.cp", "10.policy", "10.sig", "20.cp", "20.policy", "20.sig"]:
+                (destination / name).write_bytes(pathlib.Path(name).read_bytes())
+        print("pass   tpm-policy: signed increases accepted; replay, changed data, direct write, undefine and hierarchy reset refused")
+    finally:
+        os.kill(int((root / "pid").read_text()), 15)

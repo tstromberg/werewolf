@@ -199,15 +199,17 @@ cloud-init's user-data, once werewolf has committed.
   names for any root process that asks (cmd/mount-broker/README.md). What
   root may run is bounded by what the verified root holds. Opt-in IPE
   builds enforce one signed root globally, including executable mappings;
-  production rollout awaits signed prebuilt updates ([design/ipe.md](design/ipe.md)).
+  enrolled images update through signed prebuilt slots
+  ([design/prebuilt-images.md](design/prebuilt-images.md)).
 - **A bitten machine's kernel and stage0 are unchecked.** root can replace
-  them, or GRUB's config, and keep them across reboots. Secure Boot is off,
-  since Alpine's kernel is not signed for it. Posture measures the whole
+  them, or GRUB's config, and keep them across reboots. Native QEMU and cloud
+  images now boot signed loaders and UKIs; the existing bite path still needs
+  authenticated bootloader enrollment. Posture measures the whole
   chain as it stands: `boot-secure-boot`, `boot-sig-enforced` and
   `boot-rollback-protected` (docs/posture.md).
 - **Nothing stops a rollback.** An older release, still signed, can be
   installed and booted again; a TPM counter at least the running slot's
-  serial would refuse it (phase 5 of
+  release serial against a protected TPM floor would refuse it (phase 5 of
   [design/verified-boot.md](design/verified-boot.md)). Posture's
   `boot-rollback-protected` holds the gap open.
 - **Forms CI does not publish are built on the machine** that runs

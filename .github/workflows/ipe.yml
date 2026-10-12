@@ -29,13 +29,20 @@ jobs:
       - name: Install tools
         run: |
           sudo test/ci-setup
-          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc
+          sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc \
+            python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools
+      - name: Kernel version agreement
+        run: |
+          make build/lock/kernel.lock.json
+          python3 test/check-kernel-version
       - name: Disposable signing identity
         run: |
           mkdir -p build/ipe-check
           openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 2 \
             -subj /CN=werewolf-ipe-check -keyout build/ipe-check/policy.key -out build/ipe-check/policy.crt
           chmod 600 build/ipe-check/policy.key
+      - name: Stock Alpine Secure Boot release
+        run: make check-secureboot
       - name: Build kernel and test enforcement
         env:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
@@ -43,9 +50,18 @@ jobs:
         run: |
           make ipe-kernel
           make IPE=1 check-ipe
+          make IPE=1 check-image-updater
+          make IPE=1 check-image-updater-uki
+      - name: Protected TPM policy
+        run: |
+          make build/host/tpm-policy
+          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
       - name: Keep console logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: ipe-${{ runner.arch }}
-          path: build/*/ipe/check/ipe/*.log
+          path: |
+            build/*/ipe/check/ipe/*.log
+            build/*/ipe/check/image-updater/*.log
+            build/*/check/secureboot/*.log

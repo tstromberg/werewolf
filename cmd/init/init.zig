@@ -43,6 +43,11 @@ pub fn main(init: std.process.Init) !void {
 
     m.filesystems();
     m.seed();
+    if (std.mem.eql(u8, init.environ_map.get("WEREWOLF_ROLLBACK") orelse "", "checked"))
+        try std.Io.Dir.cwd().writeFile(
+            init.io,
+            .{ .sub_path = "/run/werewolf/rollback-checked", .data = "checked\n" },
+        );
     // stage0 checked the line by the same rules, so a refusal here means
     // the line changed under it.
     var refused: cmdline.Failure = .{};

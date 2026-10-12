@@ -1,39 +1,32 @@
-# zeek: prod, with Zeek reading a packet feed and writing JSON logs to
-# /data. pcap-feed (cmd/pcap-feed) opens the interface, then becomes _pcap and may
-# only copy frames; Zeek, from its project's image, never holds
-# CAP_NET_RAW or CAP_NET_ADMIN. It loads the stock local scripts and
+# zeek: prod, with Zeek capturing eth0 and writing JSON logs to /data.
+# The service keeps CAP_NET_RAW and CAP_NET_ADMIN for the AF_PACKET
+# socket and promiscuous mode. It loads the stock local scripts and
 # reaches a resolver only. See forms/zeek/README.md.
 base: prod
 
-# Taken back of werewolf's defaults (lib/allow.zig): pcap-feed opens a packet
-# socket and sets promiscuous mode, then drops both.
+# Taken back of werewolf's defaults (lib/allow.zig): Zeek opens a packet
+# socket and sets promiscuous mode.
 allow: [packet, netadmin]
 
-programs: [pcap-feed]
-
-accounts:
-  groups:
-    - groupname: _pcap
-      gid: 70
-  users:
-    - username: _pcap
-      uid: 70
-      gid: 70
-      homedir: /var/empty
-      shell: /sbin/nologin
+# The posture checks this form fails, and why (forms/README.md).
+weaknesses:
+  network-fence-unbypassable: Zeek captures the interface and sets promiscuous mode; the bounding set keeps CAP_NET_RAW and CAP_NET_ADMIN for that service
 
 # make check's (forms/README.md): Zeek's own beside the machine's.
 check:
   memory: 2048
 
 services:
-  # Zeek, as _oci-zeek, inside its image. /tmp there is /run/svc/zeek here,
-  # where pcap-feed's fifo is; /data is /data/svc/zeek. It writes logs and
-  # reaches a resolver. It runs nothing else.
+  # Zeek, as _oci-zeek, inside its image. /tmp there is /run/svc/zeek
+  # here, and /data is /data/svc/zeek. It captures eth0 with the
+  # AF_PACKET plugin. packet is that socket; listen is bind() for it,
+  # and no TCP port is declared, so Landlock refuses a TCP bind. It
+  # writes logs and reaches a resolver. It runs nothing else.
   zeek:
     image: docker.io/zeek/zeek:8.2
-    exec: /usr/local/zeek/bin/zeek -C -r /tmp/feed local /usr/lib/werewolf/boot.zeek LogAscii::use_json=T Log::default_logdir=/data Log::flush_interval=1sec
-    pledge: stdio rpath wpath inet unix netlink connect proc
+    exec: /usr/local/zeek/bin/zeek -C -i af_packet::eth0 local /usr/lib/werewolf/boot.zeek LogAscii::use_json=T Log::default_logdir=/data Log::flush_interval=1sec
+    pledge: stdio rpath wpath inet unix netlink connect proc packet listen
+    caps: net_raw net_admin
     connect: [udp/53 tcp/53]
     memory: 1024
     env:

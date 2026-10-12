@@ -51,7 +51,7 @@ const Pe = struct {
 
 const Error = error{
     NotPE,
-    NotArm64,
+    UnsupportedMachine,
     NotPE32Plus,
     NoSections,
     NameTooLong,
@@ -76,7 +76,7 @@ fn parse(image: []const u8) Error!Pe {
         .first_raw = std.math.maxInt(usize),
         .last_virt_end = 0,
     };
-    if (p.machine != 0xaa64) return Error.NotArm64;
+    if (p.machine != 0xaa64 and p.machine != 0x8664) return Error.UnsupportedMachine;
     if (std.mem.readInt(u16, image[p.opt..][0..2], .little) != 0x20b) return Error.NotPE32Plus;
     if (p.nsections == 0) return Error.NoSections;
     var i: usize = 0;
@@ -96,7 +96,7 @@ fn parse(image: []const u8) Error!Pe {
 /// and returns the image: sections laid out in order after the last one's
 /// raw data, their headers in the room between the headers and the first
 /// section's raw data, and the header patched to count and cover them.
-fn assemble(
+pub fn assemble(
     gpa: std.mem.Allocator,
     stub: []const u8,
     names: []const []const u8,
@@ -224,11 +224,15 @@ test "assemble refuses a name longer than a section's" {
     try testing.expectError(Error.NameTooLong, assemble(a.allocator(), stub, &names, &datas));
 }
 
-test "parse refuses what is not an arm64 PE32+" {
+test "PE32+ supports arm64 and x86_64, and refuses other machines" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
     try testing.expectError(Error.NotPE, parse("not a PE"));
     const stub = try peForTests(a.allocator(), 4);
     std.mem.writeInt(u16, stub[0x84..][0..2], 0x8664, .little); // x86_64
-    try testing.expectError(Error.NotArm64, parse(stub));
+    try testing.expectEqual(@as(u16, 0x8664), (try parse(stub)).machine);
+    const x = try assemble(a.allocator(), stub, &.{".cmdline"}, &.{"quiet\x00"});
+    try testing.expectEqual(@as(u16, 0x8664), (try parse(x)).machine);
+    std.mem.writeInt(u16, stub[0x84..][0..2], 0x14c, .little);
+    try testing.expectError(Error.UnsupportedMachine, parse(stub));
 }

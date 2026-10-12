@@ -9,6 +9,7 @@ const bhyve = @import("bhyve.zig");
 const firecracker = @import("firecracker.zig");
 const proxmox = @import("proxmox.zig");
 const qemu = @import("qemu.zig");
+const secureboot = @import("secureboot.zig");
 const import_disk = @import("import.zig");
 const booting = @import("boot.zig");
 const progress = @import("progress.zig");
@@ -52,10 +53,6 @@ pub fn createQemu(
     const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
-    const fw = qemu.firmware(io, arch) orelse return why.refuse(
-        "--on qemu: no UEFI firmware for {t} (edk2, which QEMU's packages bring)",
-        .{arch},
-    );
     const replaced = try qemu.stop(io, gpa, dir);
     // The machine is its disk, booted from slots and updated in place, so a
     // machine of this name keeps it and takes the new config; howl run
@@ -70,6 +67,12 @@ pub fn createQemu(
         why,
     );
     var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
+    const keys = try secureboot.prepare(io, gpa, &steps, at, arch, kept);
+    const fw: qemu.Firmware = .{
+        .code = try gpa.print("{s}/code.fd", .{at}),
+        .vars = try gpa.print("{s}/vars.fd", .{at}),
+        .secure = true,
+    };
     var built: ?i64 = null;
     if (!kept) {
         const ab = try appBuild(io, gpa, o.form, arch, o.app, why);
@@ -80,18 +83,30 @@ pub fn createQemu(
             .published = !o.local,
             .app = ab.root,
             .disk_path = disk,
+            .boot_key = keys.key,
+            .boot_cert = keys.cert,
+            .ipe_kernel = howl.environ.get("WEREWOLF_IPE_KERNEL"),
+            .ipe_key = if (howl.environ.get("WEREWOLF_IPE_KERNEL") != null)
+                howl.environ.get("WEREWOLF_IPE_KEY")
+            else
+                null,
+            .ipe_cert = if (howl.environ.get("WEREWOLF_IPE_KERNEL") != null)
+                howl.environ.get("WEREWOLF_IPE_CRT")
+            else
+                null,
+            .ipe_updates = if (howl.environ.get("WEREWOLF_IPE_KERNEL") != null)
+                howl.environ.get("IPE_UPDATES")
+            else
+                null,
+            .image_serial = if (howl.environ.get("WEREWOLF_IPE_KERNEL") != null)
+                howl.environ.get("IMAGE_SERIAL")
+            else
+                null,
+            .boot_native = true,
         };
         spec.disk.args = qemu.bootArgs(arch);
         _ = try howl.buildHere(io, gpa, &steps, spec, .{ .disk = true });
         built = steps.start.untilNow(io, .awake).toSeconds();
-        if (fw.vars) |v| try Dir.copyFile(
-            Dir.cwd(),
-            v,
-            Dir.cwd(),
-            try gpa.print("{s}/vars.fd", .{dir}),
-            io,
-            .{},
-        );
     }
     try writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{dir}), tar, why);
     const ssh_port = try qemu.freePort(io, 2222);
@@ -250,7 +265,8 @@ pub fn createLima(
             .{ name, name },
         );
         if (o.import_dir != null) return why.refuse(
-            "{s} exists, and an import runs only while its data is first made: howl delete {s}, then create",
+            "{s} exists, and an import runs only while its data is first made: howl delete {s}, " ++
+                "then create",
             .{ name, name },
         );
         managed = try reconfigure(io, gpa, name, o.form, dir, tar, why);

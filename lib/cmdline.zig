@@ -40,6 +40,9 @@ pub const Cmdline = struct {
     seal: Seal = .enforce,
     debug: bool = false,
     check: bool = false,
+    /// native selects the slot from the signed UKI's canonical firmware path.
+    native: bool = false,
+    secure: bool = false,
 };
 
 const Key = std.meta.FieldEnum(Cmdline);
@@ -84,9 +87,19 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
                 return refuse(f, "not learn or enforce"),
             .debug => c.debug = if (isOne(v)) true else return refuse(f, "not 1"),
             .check => c.check = if (isOne(v)) true else return refuse(f, "not 1"),
+            .native => c.native = if (isOne(v)) true else return refuse(f, "not 1"),
+            .secure => c.secure = if (isOne(v)) true else return refuse(f, "not 1"),
         }
     }
-    if ((c.victim == null) != (c.slot == null)) {
+    if (c.native and (c.victim == null or c.esp == null or c.grubenv != null or c.root.len > 0)) {
+        f.word = "werewolf.native";
+        return refuse(f, "needs a native victim and ESP, without GRUB or a direct root");
+    }
+    if (c.secure and !c.native) {
+        f.word = "werewolf.secure";
+        return refuse(f, "requires signed native boot identity");
+    }
+    if (!c.native and (c.victim == null) != (c.slot == null)) {
         f.word = "werewolf.victim";
         return refuse(f, "comes with werewolf.slot, and only with it");
     }
@@ -102,6 +115,61 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
     }
     f.* = .{};
     return c;
+}
+
+/// The stub's path is a routing hint. The signed verity root remains the authority.
+pub fn firmwareSlot(variable: []const u8) ?Slot {
+    if (variable.len < 6 or variable.len > 516 or variable.len % 2 != 0) return null;
+    var path: [256]u8 = undefined;
+    var n: usize = 0;
+    var at: usize = 4;
+    while (at + 2 <= variable.len) : (at += 2) {
+        const c = std.mem.readInt(u16, variable[at..][0..2], .little);
+        if (c == 0) {
+            if (at + 2 != variable.len) return null;
+            const text = path[0..n];
+            if (std.mem.eql(u8, text, "/werewolf/a/uki.efi")) return .a;
+            if (std.mem.eql(u8, text, "/werewolf/b/uki.efi")) return .b;
+            return null;
+        }
+        if (c > 127 or c < 32 or n == path.len) return null;
+        path[n] = if (c == '\\') '/' else std.ascii.toLower(@intCast(c));
+        n += 1;
+    }
+    return null;
+}
+
+test "native boot binds the disk while firmware supplies only a canonical slot hint" {
+    const t = std.testing;
+    var f: Failure = .{};
+    const line = "werewolf.native=1 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewo" ++
+        "lf werewolf.esp=57E1-F000";
+    const native = parse(line, &f) orelse return error.TestUnexpectedResult;
+    try t.expect(native.native and native.slot == null and native.victim != null);
+    try t.expect(parse("werewolf.native=1", &f) == null);
+    try t.expect(parse("werewolf.secure=1", &f) == null);
+    try t.expect(parse(line ++ " werewolf.secure=1", &f).?.secure);
+    try t.expect(parse(line ++ " werewolf.root=vda", &f) == null);
+    try t.expect(parse(
+        line ++ " werewolf.grubenv=57e1f000-77e2-4b0f-8a3c-0000000000a0:/boot/grubenv",
+        &f,
+    ) == null);
+    var raw: [516]u8 = @splat(0);
+    for ([_][]const u8{
+        "\\werewolf\\a\\uki.efi",
+        "\\WEREWOLF\\B\\UKI.EFI",
+        "\\werewolf\\a\\..\\b\\uki.efi",
+        "\\EFI\\BOOT\\BOOTAA64.EFI",
+    }, 0..) |path, i| {
+        @memset(&raw, 0);
+        for (path, 0..) |c, j| std.mem.writeInt(u16, raw[4 + j * 2 ..][0..2], c, .little);
+        const value = raw[0 .. 6 + path.len * 2];
+        try t.expectEqual(
+            if (i == 0) Slot.a else if (i == 1) Slot.b else null,
+            firmwareSlot(value),
+        );
+        try t.expect(firmwareSlot(value[0 .. value.len - 2]) == null);
+    }
 }
 
 const not_device = "not a disk's name in /dev, as vdc";

@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""Exercise signed IPE updates over HTTPS, including rejection before slot writes."""
+import functools
+import hashlib
+import http.server
+import json
+import os
+import pathlib
+import pty
+import re
+import select
+import shlex
+import shutil
+import ssl
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+env = os.environ
+directory = pathlib.Path(env["CHECK"]) / "image-updater"
+directory.mkdir(parents=True, exist_ok=True)
+arch = env["ARCH"]
+key = str(pathlib.Path(env["IPE_KEY"]).resolve())
+cert = str(pathlib.Path(env["IPE_CERT"]).resolve())
+kernel = str(pathlib.Path(env["IPE_KERNEL"]).resolve())
+howl = str(pathlib.Path(env["HOWL"]).resolve())
+debugfs = env["DEBUGFS"]
+mke2fs = str(pathlib.Path(debugfs).with_name("mke2fs"))
+e2fsck = str(pathlib.Path(debugfs).with_name("e2fsck"))
+channel = "https://10.0.2.100/image"
+firmware_boot = env.get("IPE_UPDATE_BOOT") == "efi"
+secure_boot = firmware_boot and env.get("IPE_UPDATE_SECUREBOOT") == "1"
+
+
+def command(args, log=None):
+    if log:
+        with pathlib.Path(log).open("wb") as output:
+            subprocess.run(args, check=True, stdout=output, stderr=subprocess.STDOUT)
+    else:
+        subprocess.run(args, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def serial(value):
+    return value.strftime("%Y%m%dT%H%M%SZ")
+
+
+def digest(path):
+    with pathlib.Path(path).open("rb") as data:
+        hasher = hashlib.sha256()
+        for chunk in iter(lambda: data.read(65536), b""):
+            hasher.update(chunk)
+        return hasher.hexdigest()
+
+
+tls_key = directory / "tls.key"
+tls_cert = directory / "tls.crt"
+command(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+         "-subj", "/CN=prebuilt-check", "-addext", "subjectAltName=IP:10.0.2.100",
+         "-keyout", str(tls_key), "-out", str(tls_cert)])
+tls_key.chmod(0o600)
+now = datetime.now(timezone.utc)
+old_serial = serial(now - timedelta(minutes=2))
+new_serial = serial(now - timedelta(minutes=1))
+build = directory / "build"
+out = build / "minimal-app-ipe"
+variants = {}
+for label, version in [("a", old_serial), ("b", new_serial)]:
+    app = directory / f"app-{label}"
+    ca = app / "etc/ssl/certs"
+    ca.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(tls_cert, ca / "ca-certificates.crt")
+    (app / "etc/prebuilt-marker").write_text(label)
+    args = ["make", "--no-print-directory", f"HOWL={howl}", "IPE=1", "FORM=minimal", "DEV=",
+            f"ARCH={arch}", f"BUILD={build}", f"APP={app}", f"IPE_KERNEL={kernel}",
+            f"WEREWOLF_IPE_KEY={key}", f"WEREWOLF_IPE_CRT={cert}",
+            f"IPE_UPDATES={channel}", f"IMAGE_SERIAL={version}", "prebuilt"]
+    if firmware_boot:
+        args += [f"WEREWOLF_BOOT_KEY={key}", f"WEREWOLF_BOOT_CRT={cert}"]
+    if secure_boot:
+        args += ["UKI_NATIVE=1", "UKI_ARGS=" + env["CMDLINE"] +
+                 f" werewolf.native=1 werewolf.secure=1 werewolf.victim={env['VICTIM']}:/var/lib/werewolf werewolf.esp=57E1-F000"]
+    command(args, directory / f"build-{label}.log")
+    destination = directory / f"slot-{label}"
+    shutil.rmtree(destination, ignore_errors=True)
+    shutil.copytree(out / "slot", destination)
+    manifest = json.loads((out / f"prebuilt/{arch}/latest.json").read_text())
+    variants[label] = manifest
+    print(f"built  image-{label}: {manifest['build']}", flush=True)
+
+www = directory / "www"
+shutil.rmtree(www, ignore_errors=True)
+shutil.copytree(out / "prebuilt", www / "image")
+latest = www / f"image/{arch}/latest.json"
+signature = latest.with_suffix(".json.sig")
+payload = latest.parent / variants["b"]["build"]
+original_root = (directory / "slot-b/root.erofs").read_bytes()
+
+victim = directory / "victim"
+shutil.rmtree(victim, ignore_errors=True)
+for name in ["a", "b"]:
+    root = victim / f"var/lib/werewolf/{name}"
+    boot = victim / f"boot/werewolf/{name}"
+    root.mkdir(parents=True)
+    boot.mkdir(parents=True)
+    shutil.copyfile(directory / "slot-a/root.erofs", root / "root.erofs")
+    shutil.copyfile(directory / "slot-a/vmlinuz", boot / "vmlinuz")
+    shutil.copyfile(directory / "slot-a/stage0-bitten.zst", boot / "stage0.zst")
+grub = victim / "boot/grub"
+grub.mkdir()
+text = b"# GRUB Environment Block\nsaved_entry=werewolf-b\nnext_entry=werewolf-a\n"
+(grub / "grubenv").write_bytes(text + b"#" * (1024 - len(text)))
+base = directory / "base.img"
+command([mke2fs, "-q", "-F", "-t", "ext4", "-U", env["VICTIM"], "-d", str(victim), str(base), "512M"])
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+
+server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Handler, directory=str(www.resolve())))
+tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+tls.load_cert_chain(tls_cert, tls_key)
+server.socket = tls.wrap_socket(server.socket, server_side=True)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+relay = shlex.join([sys.executable, str(pathlib.Path("test/prebuilt-relay").resolve()), str(server.server_port)])
+qemu = sys.argv[1:] + ["-netdev", f"user,id=n0,restrict=on,guestfwd=tcp:10.0.2.100:443-cmd:{relay}",
+                      "-device", "virtio-net-pci,netdev=n0,romfile="]
+cmdline = (env["CMDLINE"] + " " + (directory / "slot-a/cmdline").read_text().strip() +
+           f" init=/init werewolf.victim={env['VICTIM']}:/var/lib/werewolf" +
+           f" werewolf.grubenv={env['VICTIM']}:/boot/grub/grubenv")
+
+
+def firmware_update(image, document):
+    esp = directory / "esp.img"
+    with esp.open("wb") as output:
+        output.truncate(256 * 1024 * 1024)
+    command(["mformat", "-F", "-N", "57e1f000", "-i", str(esp), "::"])
+    with esp.open("r+b") as output:
+        output.seek(446)
+        output.write(bytes(64))
+    command(["mmd", "-i", str(esp), "::/EFI", "::/EFI/BOOT", "::/loader", "::/loader/entries",
+             "::/werewolf", "::/werewolf/a"])
+    loader = directory / "systemd-boot.efi"
+    efi_arch = "aa64" if arch == "aarch64" else "x64"
+    efi_name = "BOOT" + efi_arch.upper() + ".EFI"
+    with loader.open("wb") as output:
+        subprocess.run(["bsdtar", "-xOf", env["BOOT_ROOTFS"],
+                        f"usr/lib/systemd/boot/efi/systemd-boot{efi_arch}.efi"], stdout=output, check=True)
+    if secure_boot:
+        signed_loader = directory / "systemd-boot.signed.efi"
+        signed_loader.unlink(missing_ok=True)
+        command(["osslsigncode", "sign", "-certs", cert, "-key", key, "-in", str(loader), "-out", str(signed_loader)])
+        loader = signed_loader
+    command(["mcopy", "-i", str(esp), str(loader), f"::/EFI/BOOT/{efi_name}"])
+    options = (env["CMDLINE"] + " " + (directory / "slot-a/cmdline").read_text().strip() +
+               f" init=/init werewolf.victim={env['VICTIM']}:/var/lib/werewolf" +
+               " werewolf.esp=57E1-F000 werewolf.slot=a")
+    entry = directory / "entry.conf"
+    entry.write_text("title werewolf a\nversion 19800101T000000Z\nlinux /werewolf/a/vmlinuz\n" +
+                     "initrd /werewolf/a/stage0.zst\noptions " + options + "\n")
+    if secure_boot:
+        entry.write_text("title werewolf a\nversion 19800101T000000Z\nefi /werewolf/a/uki.efi\n" +
+                         "options init=/untrusted werewolf.slot=b ipe.enforce=0\n")
+    startup = directory / "startup.nsh"
+    startup.write_bytes(f"@echo -on\r\nFS0:\\EFI\\BOOT\\{efi_name}\r\n".encode())
+    command(["mcopy", "-i", str(esp), str(entry), "::/loader/entries/werewolf-a+1.conf"])
+    command(["mcopy", "-i", str(esp), str(startup), "::/startup.nsh"])
+    for name in (["uki.efi"] if secure_boot else ["vmlinuz", "stage0.zst"]):
+        command(["mcopy", "-i", str(esp), str(directory / f"slot-a/{name}"), f"::/werewolf/a/{name}"])
+    args = [arg for arg in qemu if arg != "-no-reboot"]
+    args[args.index("-M") + 1] = "virt" if arch == "aarch64" else "q35,smm=on"
+    if secure_boot:
+        enrolled = directory / "enrolled"
+        os.environ["ENROLL_TEST_SETUP"] = "1"
+        command(["tools/enroll-boot", arch, cert, str(enrolled)], directory / "enroll.log")
+        del os.environ["ENROLL_TEST_SETUP"]
+        if arch == "x86_64":
+            args += ["-global", "driver=cfi.pflash01,property=secure,value=on"]
+        firmware_refusals(args, esp, image, enrolled, efi_name)
+        frozen = "readonly=on," if arch == "aarch64" else ""
+        enrolled_digest = digest(enrolled / "vars.fd")
+        args += ["-drive", f"if=pflash,format=raw,readonly=on,file={enrolled}/code.fd",
+                 "-drive", f"if=pflash,format=raw,{frozen}file={enrolled}/vars.fd"]
+    else:
+        args += ["-bios", env["FIRMWARE"]]
+    args += ["-boot", "menu=on,splash-time=0", "-drive", f"file={esp},format=raw,if=virtio",
+             "-drive", f"file={image},format=raw,if=virtio"]
+    master, slave = pty.openpty()
+    process = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    seen = b""
+    try:
+        with (directory / "firmware.log").open("wb") as log:
+            deadline = time.monotonic() + 900
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.5)[0]:
+                    chunk = os.read(master, 65536)
+                    seen += chunk
+                    log.write(chunk)
+                    log.flush()
+                if b'"event":"commit","slot":"b"' in seen:
+                    break
+                if process.poll() is not None:
+                    raise RuntimeError("firmware exited; see firmware.log")
+            else:
+                raise RuntimeError("firmware update did not commit; see firmware.log")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=30)
+        os.close(master)
+    if secure_boot and arch == "aarch64" and digest(enrolled / "vars.fd") != enrolled_digest:
+        raise RuntimeError("Arm firmware changed immutable enrollment")
+    if not re.search(rb"slot b:[^\r\n]*verified", seen) or seen.count(b"policy administration removed") < 2:
+        raise RuntimeError("firmware boot did not verify slot b with IPE")
+    if secure_boot and (seen.count(b"native UKI selected slot") < 2 or
+                        seen.count(b"Secure Boot enforced outside setup mode") < 2):
+        raise RuntimeError("Secure Boot did not preserve native slot identity and update; see firmware.log")
+    installed = directory / "installed-uki.efi"
+    installed.unlink(missing_ok=True)
+    command(["mcopy", "-i", str(esp), "::/werewolf/b/uki.efi", str(installed)])
+    if digest(installed) != document["files"]["uki.efi"]["sha256"]:
+        raise RuntimeError("firmware UKI differs from signed bundle")
+    entries = subprocess.check_output(["mdir", "-b", "-i", str(esp), "::/loader/entries"]).decode()
+    names = [line.rsplit("/", 1)[-1] for line in entries.splitlines() if "werewolf-b" in line]
+    if len(names) != 1 or b"efi /werewolf/b/uki.efi" not in subprocess.check_output(
+            ["mtype", "-i", str(esp), "::/loader/entries/" + names[0]]):
+        raise RuntimeError("committed entry does not select the UKI")
+    replay(image)
+    parked_root = directory / "firmware-root.erofs"
+    dump(image, "/var/lib/werewolf/b/root.erofs", parked_root)
+    if digest(parked_root) != document["files"]["root.erofs"]["sha256"]:
+        raise RuntimeError("firmware root differs from signed bundle")
+    mode = "Secure Boot" if secure_boot else "firmware"
+    print(f"pass   signed-uki: continuous {mode} boot, HTTPS update, verified slot b and commit with IPE", flush=True)
+
+
+def refused_boot(args, logfile, expected):
+    master, slave = pty.openpty()
+    process = subprocess.Popen(args, stdin=slave, stdout=slave, stderr=slave)
+    os.close(slave)
+    seen = b""
+    try:
+        with logfile.open("wb") as log:
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if select.select([master], [], [], 0.5)[0]:
+                    chunk = os.read(master, 65536)
+                    seen += chunk
+                    log.write(chunk)
+                    log.flush()
+                if b"up in " in seen or b'"event":"commit"' in seen:
+                    raise RuntimeError(f"rejected boot handed over: {logfile}")
+                if expected.lower() in seen.lower():
+                    return
+                if process.poll() is not None:
+                    break
+            raise RuntimeError(f"missing boot refusal: {logfile}")
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=30)
+        os.close(master)
+
+
+def firmware_refusals(args, esp, image, enrolled, efi_name):
+    # Disposable writable clones let AAVMF record explicit rejection errors.
+    # The continuous A/B boot uses immutable enrollment and checks its digest.
+    wrong_key = directory / "wrong-boot.key"
+    wrong_cert = directory / "wrong-boot.crt"
+    command(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+             "-subj", "/CN=wrong-boot", "-keyout", str(wrong_key), "-out", str(wrong_cert)])
+    wrong_key.chmod(0o600)
+    for target, original, remote in [
+        ("loader", directory / "systemd-boot.signed.efi", f"::/EFI/BOOT/{efi_name}"),
+        ("uki", directory / "slot-a/uki.efi", "::/werewolf/a/uki.efi"),
+    ]:
+        unsigned = directory / f"unsigned-{target}.efi"
+        unsigned.unlink(missing_ok=True)
+        command(["osslsigncode", "remove-signature", "-in", str(original), "-out", str(unsigned)])
+        tampered = directory / f"tampered-{target}.efi"
+        data = bytearray(original.read_bytes())
+        data[len(data) // 2] ^= 1
+        tampered.write_bytes(data)
+        wrong = directory / f"wrong-{target}.efi"
+        wrong.unlink(missing_ok=True)
+        command(["osslsigncode", "sign", "-certs", str(wrong_cert), "-key", str(wrong_key),
+                 "-in", str(unsigned), "-out", str(wrong)])
+        for kind, candidate in [("unsigned", unsigned), ("tampered", tampered), ("wrong-key", wrong)]:
+            cloned = directory / f"{target}-{kind}.img"
+            vars_file = directory / "refusal-vars.fd"
+            shutil.copyfile(esp, cloned)
+            shutil.copyfile(enrolled / "vars.fd", vars_file)
+            command(["mcopy", "-o", "-i", str(cloned), str(candidate), remote])
+            boot = args + ["-drive", f"if=pflash,format=raw,readonly=on,file={enrolled}/code.fd",
+                           "-drive", f"if=pflash,format=raw,file={vars_file}",
+                           "-drive", f"file={cloned},format=raw,if=virtio",
+                           "-drive", f"file={image},format=raw,if=virtio"]
+            refused_boot(boot, directory / f"refuse-{target}-{kind}.log", b"Access Denied")
+            cloned.unlink()
+            print(f"pass   secureboot: {target} {kind} refused by firmware", flush=True)
+    for kind in ["wrong-path", "setup-mode"]:
+        cloned = directory / "native-refusal.img"
+        vars_file = directory / "refusal-vars.fd"
+        entry = directory / "refusal.conf"
+        shutil.copyfile(esp, cloned)
+        shutil.copyfile(enrolled / ("setup.fd" if kind == "setup-mode" else "vars.fd"), vars_file)
+        path = "/werewolf/a/uki.efi"
+        if kind == "wrong-path":
+            command(["mmd", "-i", str(cloned), "::/werewolf/other"])
+            path = "/werewolf/other/uki.efi"
+            command(["mcopy", "-i", str(cloned), str(directory / "slot-a/uki.efi"), "::" + path])
+        entry.write_text("title refusal\nefi " + path + "\n")
+        command(["mcopy", "-o", "-i", str(cloned), str(entry), "::/loader/entries/werewolf-a+1.conf"])
+        boot = args + ["-drive", f"if=pflash,format=raw,readonly=on,file={enrolled}/code.fd",
+                       "-drive", f"if=pflash,format=raw,file={vars_file}",
+                       "-drive", f"file={cloned},format=raw,if=virtio",
+                       "-drive", f"file={image},format=raw,if=virtio"]
+        expected = (b"no canonical firmware slot path" if kind == "wrong-path" else
+                    b"Secure Boot required outside setup mode")
+        refused_boot(boot, directory / f"refuse-{kind}.log", expected)
+        cloned.unlink()
+        print(f"pass   secureboot: {kind} refused before root handover", flush=True)
+
+
+def boot(label, image, slot, files, until, timeout=300):
+    log = directory / f"{label}.log"
+    args = qemu + ["-kernel", str(files / "vmlinuz"), "-initrd", str(files / "stage0.zst"),
+                   "-append", cmdline + f" werewolf.slot={slot}",
+                   "-drive", f"file={image},format=raw,if=virtio"]
+    with log.open("wb") as output:
+        process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                text = log.read_text(errors="replace")
+                if re.search(until, text):
+                    return text
+                if process.poll() is not None:
+                    break
+                time.sleep(0.5)
+            raise RuntimeError(f"{label}: no expected outcome; see {log}\n{text[-4000:]}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+    return ""
+
+
+def replay(image):
+    subprocess.run([e2fsck, "-y", "-E", "journal_only", str(image)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+
+
+def dump(image, source, destination):
+    pathlib.Path(destination).unlink(missing_ok=True)
+    command([debugfs, "-R", f"dump {source} {destination}", str(image)])
+    if not pathlib.Path(destination).is_file():
+        raise RuntimeError(f"no {source} in {image}")
+
+
+initial = directory / "initial"
+initial.mkdir(exist_ok=True)
+shutil.copyfile(directory / "slot-a/vmlinuz", initial / "vmlinuz")
+shutil.copyfile(directory / "slot-a/stage0-bitten.zst", initial / "stage0.zst")
+cases = [("bad-signature", "BadSignature"), ("wrong-channel", "WrongImageChannel"),
+         ("wrong-arch", "WrongImageArch"), ("older", "OlderImage"),
+         ("serial-reused", "ImageSerialReused"), ("tampered-root", "ImageArtifactMismatch"),
+         ("missing-ipe", "MissingField"), ("not-ipe", "NotAnIpeImage")]
+selected = set(env.get("IPE_UPDATE_CASES", "").split(",")) - {""}
+if firmware_boot:
+    selected = {"valid"}
+if selected - {label for label, _ in cases} - {"valid"}:
+    raise RuntimeError("unknown IPE_UPDATE_CASES")
+try:
+    for label, expected in cases + [("valid", None)]:
+        if selected and label not in selected:
+            continue
+        document = json.loads(json.dumps(variants["b"]))
+        (payload / "root.erofs").write_bytes(original_root)
+        if label == "wrong-channel":
+            document["channel"] = "https://10.0.2.100/other"
+        elif label == "wrong-arch":
+            document["arch"] = "x86_64" if arch == "aarch64" else "aarch64"
+        elif label == "older":
+            document["serial"] = serial(now - timedelta(days=1))
+        elif label == "serial-reused":
+            document["serial"] = old_serial
+        elif label == "missing-ipe":
+            del document["ipe"]
+        elif label == "not-ipe":
+            document["ipe"] = False
+        elif label == "tampered-root":
+            damaged = bytearray(original_root)
+            damaged[0] ^= 1
+            (payload / "root.erofs").write_bytes(damaged)
+        latest.write_text(json.dumps(document, indent=2) + "\n")
+        command(["openssl", "dgst", "-sha256", "-sign", key, "-out", str(signature), str(latest)])
+        if label == "bad-signature":
+            signature.write_bytes(b"invalid signature")
+        image = directory / f"{label}.img"
+        shutil.copyfile(base, image)
+        if firmware_boot:
+            firmware_update(image, document)
+            continue
+        text = boot(label, image, "a", initial, r'"event":"error"' if expected else r'"event":"reboot"')
+        replay(image)
+        root_file = directory / f"{label}.erofs"
+        dump(image, "/var/lib/werewolf/b/root.erofs", root_file)
+        if expected:
+            if f'"error":"{expected}"' not in text or '"event":"stage"' in text:
+                raise RuntimeError(f"{label}: unexpected outcome; see {directory / (label + '.log')}")
+            if digest(root_file) != digest(directory / "slot-a/root.erofs"):
+                raise RuntimeError(f"{label}: changed slot before verification")
+            print(f"pass   {label}: held before slot writes", flush=True)
+            continue
+        if digest(root_file) != document["files"]["root.erofs"]["sha256"]:
+            raise RuntimeError("installed root differs from signed artifact")
+        parked = directory / "parked"
+        parked.mkdir(exist_ok=True)
+        for name in ["vmlinuz", "stage0.zst"]:
+            dump(image, f"/boot/werewolf/b/{name}", parked / name)
+        for name in ["image.json", "image.json.sig", "cmdline"]:
+            dump(image, f"/var/lib/werewolf/b/{name}", parked / name)
+        command(["openssl", "dgst", "-sha256", "-verify", str(out / "meta/usr/share/werewolf/image-update/image.pub"),
+                 "-signature", str(parked / "image.json.sig"), str(parked / "image.json")])
+        if digest(parked / "stage0.zst") != document["files"]["stage0-bitten.zst"]["sha256"]:
+            raise RuntimeError("GRUB installed the wrong signed stage0 variant")
+        second = boot("commit", image, "b", parked, r'"event":"commit","slot":"b"')
+        if "IPE: only this root image may execute; policy administration removed" not in second:
+            raise RuntimeError("new slot did not enforce IPE")
+        print("pass   signed-image: fetched, verified, installed, rebooted and committed with IPE", flush=True)
+finally:
+    server.shutdown()
+    server.server_close()

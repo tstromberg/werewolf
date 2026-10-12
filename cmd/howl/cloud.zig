@@ -21,7 +21,6 @@ const Entry = howl.Entry;
 const machineDir = howl.machineDir;
 const listens = howl.listens;
 const reconfigurable = howl.reconfigurable;
-const releaseDisk = howl.releaseDisk;
 const flagValue = howl.flagValue;
 const hostArch = howl.hostArch;
 const not_built_here = howl.not_built_here;
@@ -196,7 +195,14 @@ pub fn createGcp(
         );
         try gcp.reconfigure(io, gpa, p, name, c.b64, why);
     } else {
-        const disk = try releaseDisk(io, gpa, o, c.arch, why);
+        const disk = try howl.releaseDiskAt(
+            io,
+            gpa,
+            o,
+            c.arch,
+            try gpa.print("{s}/disk.qcow2", .{c.dir}),
+            why,
+        );
         const image = try gcp.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.zone });
         try gcp.create(io, gpa, p, name, o.form, c.arch, o.size, image, c.b64, why);
@@ -243,7 +249,14 @@ pub fn createAws(
         try aws.reconfigure(io, gpa, p, i.id, c.b64, why);
         id = i.id;
     } else {
-        const disk = try releaseDisk(io, gpa, o, c.arch, why);
+        const disk = try howl.releaseDiskAt(
+            io,
+            gpa,
+            o,
+            c.arch,
+            try gpa.print("{s}/disk.qcow2", .{c.dir}),
+            why,
+        );
         const ami = try aws.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
         say(io, "{s}: starting it in {s}", .{ name, p.region });
         id = try aws.create(io, gpa, p, name, o.form, c.arch, o.size, ami, c.b64, why);
@@ -295,7 +308,14 @@ pub fn createAzure(
         try azure.reconfigure(io, gpa, p, name, tar, c.dir, why);
         return azureUp(io, gpa, p, name, o.form, before, w, why);
     }
-    const disk = try releaseDisk(io, gpa, o, c.arch, why);
+    const disk = try howl.releaseDiskAt(
+        io,
+        gpa,
+        o,
+        c.arch,
+        try gpa.print("{s}/disk.qcow2", .{c.dir}),
+        why,
+    );
     const image = try azure.ensureImage(io, gpa, p, o.form, c.arch, disk, c.dir, why);
     say(io, "{s}: starting it in {s}, {s}", .{ name, p.group, p.location });
     try azure.create(io, gpa, p, name, o.form, c.arch, o.size, image, tar_path, why);

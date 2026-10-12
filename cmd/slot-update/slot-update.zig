@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const ipe = @import("ipe");
+const prebuilt = @import("prebuilt");
+const images = @import("images.zig");
 pub const Io = std.Io;
 pub const Dir = Io.Dir;
 pub const Allocator = std.mem.Allocator;
@@ -26,7 +28,7 @@ const slot = @import("slot.zig");
 const Pending = stage.Pending;
 
 pub const meta_dir = "/usr/share/werewolf";
-const state_dir = "/data/svc/autoupdate";
+pub const state_dir = "/data/svc/autoupdate";
 pub const work_dir = state_dir ++ "/work";
 pub const cache_dir = state_dir ++ "/cache";
 const log_path = state_dir ++ "/log";
@@ -234,7 +236,7 @@ pub const Ctx = struct {
     first_boot: bool = false,
     due_in: ?i64 = null,
     rebooting: bool = false,
-    notice_build: [16]u8 = @splat(0),
+    notice_build: [64]u8 = @splat(0),
     notice_len: u8 = 0,
     reboot_at: ?i64 = null,
     /// spoken is the lead, in seconds, of the notice already sent.
@@ -330,6 +332,7 @@ pub const Update = struct {
     step: []const u8 = "start",
     /// detail is what the last failed command said, for the error event.
     detail: []const u8 = "",
+    image: ?images.Verified = null,
 
     pub fn setup(u: *Update) !void {
         try Dir.cwd().createDirPath(u.io, state_dir ++ "/reports");
@@ -421,7 +424,6 @@ pub const Update = struct {
         // Until this slot commits, the other slot is the fallback and must
         // not be written.
         Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
-        try u.requireLocalUpdate();
         const held_lock = try u.lock();
         defer _ = linux.close(held_lock);
         Dir.cwd().deleteTree(io, work_dir) catch {};
@@ -429,7 +431,11 @@ pub const Update = struct {
         defer Dir.cwd().deleteTree(io, work_dir) catch {};
         const arch = std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n");
         const release = std.mem.trim(u8, try u.read(meta_dir ++ "/release"), "\n");
-        const plan = (u.packagesPlan(arch, release) catch |err| {
+        const image_update = try u.needsSignedImage();
+        const plan = ((if (image_update)
+            images.plan(u, arch)
+        else
+            u.packagesPlan(arch, release)) catch |err| {
             try u.writeReplacing(state_dir ++ "/held", @errorName(err));
             return err;
         }) orelse {
@@ -470,7 +476,10 @@ pub const Update = struct {
         const repo = for (try u.words(try u.read("/etc/apk/repositories"))) |r| {
             if (!std.mem.eql(u8, r, werewolf_repository)) break r;
         } else return error.NoWolfiRepository;
-        const applied = localChanged(plan.old_pkgs, plan.new_pkgs);
+        const applied = if (u.image != null)
+            try images.applied(u)
+        else
+            localChanged(plan.old_pkgs, plan.new_pkgs);
         const package_cves: []const cve.PackageFix = if (applied)
             &.{}
         else
@@ -494,7 +503,7 @@ pub const Update = struct {
             .advisories = plan.advisories,
             .have = try u.ownAdvisories(),
         });
-        try u.buildSlot(plan.new_kernel);
+        if (!image_update) try u.buildSlot(plan.new_kernel);
         // Write pending only after install arms the new build, so a failed
         // install keeps the first-seen times. install removes attempt first,
         // so bootIfDue boots nothing meanwhile. Seen is stamped here, not
@@ -658,6 +667,7 @@ pub const Update = struct {
     /// of printable ASCII without backslashes, so a loader entry and GRUB's
     /// environment hold it intact.
     pub fn slotCmdline(u: *Update) ![]const u8 {
+        if (u.image != null) return prebuilt.cmdline(try u.read(work_dir ++ "/slot/cmdline"));
         const text = try slot.readIn(u, work_dir ++ "/root", "usr/share/werewolf/cmdline");
         const line = std.mem.trimEnd(u8, text, "\n");
         for (line) |c| if (c < ' ' or c > '~' or c == '\\') return error.BadCmdline;
@@ -742,16 +752,25 @@ pub const Update = struct {
     /// network blip costs a retry, not an hour. Otherwise it returns
     /// error.FetchFailed with the fetcher's reason in detail.
     pub fn download(u: *Update, url: []const u8, path: [:0]const u8) !Download {
+        return u.downloadLimit(url, path, 256 << 20);
+    }
+
+    pub fn downloadLimit(
+        u: *Update,
+        url: []const u8,
+        path: [:0]const u8,
+        maximum: usize,
+    ) !Download {
         var b: Backoff = .{};
         while (true) {
-            if (u.downloadOnce(url, path)) |got| return got else |err| {
+            if (u.downloadOnce(url, path, maximum)) |got| return got else |err| {
                 if (err != error.FetchFailed or !transient(u.detail) or
                     !u.again(&b, url)) return err;
             }
         }
     }
 
-    fn downloadOnce(u: *Update, url: []const u8, path: [:0]const u8) !Download {
+    fn downloadOnce(u: *Update, url: []const u8, path: [:0]const u8, maximum: usize) !Download {
         const flags: linux.O = .{
             .ACCMODE = .RDWR,
             .CREAT = true,
@@ -764,7 +783,12 @@ pub const Update = struct {
             "open a download",
         ));
         errdefer _ = linux.close(fd);
-        const said = try u.ask(cve.fetcher, .{ update_id, net_root, url, fd }, 256, fetch_seconds);
+        const said = try u.ask(
+            cve.fetcherBounded,
+            .{ update_id, net_root, url, fd, maximum },
+            256,
+            fetch_seconds,
+        );
         if (!std.mem.eql(u8, said.status, "ok")) {
             u.detail = said.status;
             return error.FetchFailed;
@@ -777,6 +801,7 @@ pub const Update = struct {
             if (n == 0) break;
             h.update(buf[0..n]);
             size += n;
+            if (size > maximum) return error.TooBig;
         }
         return .{ .fd = fd, .size = size, .sha256 = std.fmt.bytesToHex(h.finalResult(), .lower) };
     }
@@ -809,7 +834,7 @@ pub const Update = struct {
     /// downloadMax downloads url to path and returns its bytes, or
     /// error.TooBig if it exceeds max.
     pub fn downloadMax(u: *Update, url: []const u8, path: [:0]const u8, max: usize) ![]const u8 {
-        const got = try u.download(url, path);
+        const got = try u.downloadLimit(url, path, max);
         _ = linux.close(got.fd);
         if (got.size > max) return error.TooBig;
         return u.read(path);
@@ -930,15 +955,25 @@ pub const Update = struct {
     /// A locally rebuilt root has no CI-signed IPE policy. Refuse before
     /// modifying a slot; the policy signing key never belongs on a machine.
     pub fn requireLocalUpdate(u: *Update) !void {
-        if (!try localUpdateAllowed(
-            Dir.cwd().access(u.io, ipe.marker, .{}),
-            Dir.cwd().access(u.io, ipe.base, .{}),
-        )) {
+        if (try u.needsSignedImage()) {
             u.step = "ipe";
             u.detail = "IPE requires a prebuilt image and its signed root policy; local package " ++
                 "rebuilds are held";
             return error.IpeSignedImageRequired;
         }
+    }
+
+    pub fn needsSignedImage(u: *Update) !bool {
+        if (Dir.cwd().access(u.io, meta_dir ++ "/secure-boot", .{})) |_|
+            return true
+        else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        return !try localUpdateAllowed(
+            Dir.cwd().access(u.io, ipe.marker, .{}),
+            Dir.cwd().access(u.io, ipe.base, .{}),
+        );
     }
 
     pub const apkAdd = slot.apkAdd;
@@ -953,7 +988,7 @@ pub const Update = struct {
         };
     }
 
-    fn isBad(u: *Update, build: []const u8) bool {
+    pub fn isBad(u: *Update, build: []const u8) bool {
         const bad = u.read(state_dir ++ "/bad") catch return false;
         for (u.lines(bad) catch return false) |l| if (std.mem.eql(u8, l, build)) return true;
         return false;
@@ -1226,7 +1261,7 @@ pub fn argvZ(gpa: Allocator, argv: []const []const u8) ![:null]const ?[*:0]const
     return z;
 }
 
-pub const Package = struct { name: []const u8, version: []const u8, origin: []const u8 };
+pub const Package = prebuilt.Package;
 
 /// parseInstalled parses an apk installed database, sorted by name. Records
 /// end at a blank line; P is the name, V the version, o the origin (source
@@ -1386,6 +1421,20 @@ fn lessString(_: void, a: []const u8, b: []const u8) bool {
 // --- tests ------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "reboot countdown retains both package and full image build IDs" {
+    var ctx: Ctx = .{};
+    for ([_][]const u8{
+        "0123456789abcdef",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    }) |build| {
+        ctx.remember(build);
+        try testing.expect(ctx.noticeIs(build));
+        try testing.expect(!ctx.noticeIs("another-build"));
+        ctx.clearNotice();
+        try testing.expect(!ctx.noticeIs(build));
+    }
+}
 
 fn localUpdateAllowed(marker_access: anyerror!void, kernel_access: anyerror!void) !bool {
     const required = if (marker_access) |_| true else |err| switch (err) {

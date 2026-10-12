@@ -1,0 +1,21 @@
+#!/bin/sh
+# Verify the signed loader and UKI on the actual cloud disk before enrollment.
+set -eu
+umask 077
+arch=${1:?architecture} disk=${2:?disk} cert=${3:?certificate} out=${4:?work directory}
+case $arch in
+aarch64) loader=BOOTAA64.EFI ;;
+x86_64) loader=BOOTX64.EFI ;;
+*) exit 1 ;;
+esac
+raw=$out/verify.raw
+trap 'rm -f "$raw" "$out/verify-loader.efi" "$out/verify-uki.efi"' EXIT
+qemu-img convert -f qcow2 -O raw "$disk" "$raw"
+mcopy -i "$raw@@1048576" "::/EFI/BOOT/$loader" "$out/verify-loader.efi"
+mcopy -i "$raw@@1048576" '::/werewolf/a/uki.efi' "$out/verify-uki.efi"
+mtype -i "$raw@@1048576" '::/loader/entries/werewolf-a.conf' |
+	awk '/^efi \/werewolf\/a\/uki.efi$/ { found=1 } /^linux |^initrd |^options / { bad=1 } END { exit (!found || bad) }'
+for file in verify-loader.efi verify-uki.efi; do
+	osslsigncode verify -CAfile "$cert" -in "$out/$file" >/dev/null
+done
+openssl x509 -in "$cert" -outform DER -out "$out/boot.der"

@@ -1,9 +1,7 @@
 # What the suricata form, booted as it ships, must say on its console
 # (make check-shellfree-suricata; test/boot; forms/demo/test/console has
-# the format). pcap-feed opens the interface and drops; Suricata starts. make
-# check-suricata checks the feed and the rule.
+# the format). Suricata starts. make check-suricata checks the engine
+# and the rule.
 
-seen    pcap-start        pcap-feed: \{"event":"start","iface":
-unseen  pcap-down         pcap-feed: \{"event":"down"
 seen    suricata-start    leash: \{"event":"start","service":"suricata"
 unseen  suricata-down     leash: \{"event":"down","service":"suricata"
