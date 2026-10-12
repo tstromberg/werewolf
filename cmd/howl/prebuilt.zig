@@ -72,6 +72,13 @@ pub fn write(b: *B) !void {
         .packages = try manifest.parsePackages(b.gpa, db),
         .advisories = try policy.parseAdvisories(b.gpa, embedded.advisories, &bad),
         .declaration = try declaration(b),
+        .boot_context = if (b.spec.tpm_pub != null)
+            try b.gpa.dupe(u8, &std.fmt.bytesToHex(
+                (try b.read(try b.path("{s}/boot.context", .{slot}), 33))[0..32].*,
+                .lower,
+            ))
+        else
+            null,
         .files = files,
     };
     try signed.check(m, .{ .channel = url, .arch = m.arch });

@@ -22,10 +22,19 @@ with tempfile.TemporaryDirectory(prefix="werewolf-tpm-") as temp:
     root = pathlib.Path(temp)
     os.chdir(root)
     (root / "state").mkdir()
-    with socket.socket() as data, socket.socket() as ctrl:
-        data.bind(("127.0.0.1", 0))
-        port = data.getsockname()[1]
-        ctrl.bind(("127.0.0.1", port + 1))
+    for _ in range(100):
+        with socket.socket() as data, socket.socket() as ctrl:
+            data.bind(("127.0.0.1", 0))
+            port = data.getsockname()[1]
+            if port == 65535:
+                continue
+            try:
+                ctrl.bind(("127.0.0.1", port + 1))
+            except OSError:
+                continue
+            break
+    else:
+        raise RuntimeError("no adjacent TPM ports")
     run(["swtpm", "socket", "--tpm2", "--tpmstate", "dir=" + str(root / "state"),
          "--server", f"type=tcp,port={port},bindaddr=127.0.0.1",
          "--ctrl", f"type=tcp,port={port + 1},bindaddr=127.0.0.1",

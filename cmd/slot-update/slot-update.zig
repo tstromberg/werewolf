@@ -783,12 +783,15 @@ pub const Update = struct {
             "open a download",
         ));
         errdefer _ = linux.close(fd);
-        const said = try u.ask(
+        const said = u.ask(
             cve.fetcherBounded,
             .{ update_id, net_root, url, fd, maximum },
             256,
             fetch_seconds,
-        );
+        ) catch |err| {
+            u.detail = url;
+            return err;
+        };
         if (!std.mem.eql(u8, said.status, "ok")) {
             u.detail = said.status;
             return error.FetchFailed;

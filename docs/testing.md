@@ -558,7 +558,59 @@ Enrollment never copies a private signer into that helper's VM scratch directory
 `test/check-tpm-policy` runs on Linux with swtpm and tpm2-tools. It tests signed
 monotonic NV writes, replay, altered data, undefine and hierarchy-reset refusal.
 Set `TPM_POLICY_PROBE` to `build/host/tpm-policy` to exercise Werewolf's actual
-TPM command implementation as well. CI runs these and both firmware architectures.
+TPM command implementation as well. These serial-floor commands are host test
+probes; their former guest commit hook is removed because it invalidated A/B fallback.
+
+With that same probe, `python3 test/check-tpm-ab` tests the
+[replacement exact-pair protocol](design/tpm-ab-retirement.md) using actual
+TPM commands and independently generated trial policies. It covers both members,
+operator rollback, wrong/zero/changed PCRs, replayed state, altered signatures,
+direct writes, index removal, hierarchy resets and weaker provisioning.
+Eleven durable-boundary models use on-disk records, slot fixtures and simulator
+restarts. A TCP proxy drops a successful NV_Extend reply to exercise uncertain
+completion; recovery reads the anchor and refuses a blind retry.
+These protocol/model checks do not prove physical TPM atomicity.
+CI runs both TPM suites and both firmware architectures. Normal unit tests compare
+the new policy digests with checked-in public TPM fixtures; no private keys are retained.
+
+`make IPE=1 check-tpm-guest` builds disposable TPM-gated releases and boots QEMU
+with persistent swtpm state. Install `swtpm`, `tpm2-tools` and `systemd-boot-efi`.
+The harness selects the host's TPM-enabled stub; `UKI_STUB` can supply another.
+Alpine's [stub build](https://github.com/alpinelinux/aports/blob/master/main/systemd-boot/APKBUILD)
+disables TPM measurement; mandatory boot refuses zero PCR 11.
+The runner checks signed identity, exact root, actual PCR prediction and posture;
+then commit, operator rollback, failed trials and cuts around the NV extension.
+It kills both VM and simulator and retains their existing disk, variables and NV.
+It also restores retired A, installs a signed unmeasured UKI and removes the TPM,
+requiring explicit stage0 refusal. The full guest suite passed on Galadriel x86_64;
+IPE CI runs it on x86_64. Both architectures run the protocol/model suites.
+Retain only logs and `evidence.jsonl`; fixture signers and reset credentials are private.
+
+The opt-in build takes `--tpm-pub` (or `WEREWOLF_TPM_PUB`) and a TPM-enabled
+`UKI_STUB`, alongside signed native IPE image updates. `WEREWOLF_BOOT_STATE` supplies
+the signed factory pair; `tools/tpm-enroll` initializes a fresh host-controlled TPM.
+Reset credentials and the permit signer stay outside guests. Firmware must trust
+only UKIs that enforce this check. The updater fetches machine-specific public
+permits at `CHANNEL/ARCH/permits/MACHINE_NONCE/CANDIDATE_ID.permit`.
+See [TPM retirement](design/tpm-ab-retirement.md) for issuer and custody requirements.
+
+`howl run --on lima --secure` uses an arm64 QEMU guest with host-managed enrollment,
+HTTPS image publication and contextual permits. Supply `WEREWOLF_IPE_KERNEL`,
+`WEREWOLF_IPE_KEY`, `WEREWOLF_IPE_CRT` and a TPM-enabled `UKI_STUB`.
+The [local deployment design](design/secure-local-deployment.md) defines the host trust boundary.
+`tools/build-tpm-stub OUT` builds the pinned measured stub on Linux; copy its public
+`linux.efi.stub` back to the Mac. No signing key is needed to build the stub.
+
+`make check-secure-lima` uses those inputs and exercises creation, multiple signed
+updates, operator rollback, restart with the same NV authorization, updates after
+rollback and an unhealthy counted trial recovering its predecessor. It compares
+actual PCR 11 with registered predictions and rejects writable-code execution,
+verified-root writes and requests to reauthorize retired history.
+The test removes its own instance, signers and reset credentials, retaining public logs.
+`make test` runs the bounded publisher's signature, context, concurrency and restart
+regressions. `python3 test/check-tpm-enrollment` tests native enrollment against
+swtpm on macOS or Linux, including private file modes, repeat refusal and restart.
+Only the VM's TPM device is exposed; no signing keys or host directories are mounted.
 
 PR CI checks the IPE source version against both Alpine architecture locks.
 Nightly CI resolves fresh signed indexes and compares their full package versions

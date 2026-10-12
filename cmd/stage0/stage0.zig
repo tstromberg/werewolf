@@ -199,9 +199,16 @@ pub fn main(init: std.process.Init) !void {
         .{ img, @tagName(linux.errno(rc)) },
     );
     const root_ms = bootMs();
-    const protected_rollback = tpm.boot(io, gpa) catch |err|
+    const journal = if (boot.victim) |v|
+        try gpa.print("/victim{s}/boot-state", .{v.path})
+    else
+        "";
+    const protected_rollback = tpm.boot(io, gpa, boot.release, journal) catch |err|
         fail("TPM rollback: {s}; not handing over", .{@errorName(err)});
-    if (protected_rollback) say("TPM rollback floor checked; platform hierarchy disabled", .{});
+    if (protected_rollback) say(
+        "TPM release authorization checked; reset authority protected",
+        .{},
+    );
     if (boot.slot) |slot|
         say(
             "slot {s}: {s}, read-only, verified (root hash {x}…), is the root",

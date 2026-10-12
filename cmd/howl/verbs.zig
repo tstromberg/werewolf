@@ -95,7 +95,8 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
         const managed = lima.isManaged(yaml);
         const addr = if (managed) null else lima.addressOf(io, gpa, name);
         // Root, by Lima's forwarded port, when its config tar gave root keys.
-        const port = if (managed and try rootKeyed(io, gpa, dir))
+        const secured = std.mem.find(u8, yaml, "# werewolf lima: secure\n") != null;
+        const port = if ((managed or secured) and try rootKeyed(io, gpa, dir))
             lima.sshPort(io, gpa, name)
         else
             null;
@@ -303,6 +304,7 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
     }
     // Remove what create kept: the disks, and the config tar, which holds
     // secrets.
+    if (on == .lima) @import("local-secure.zig").stopPublisher(io, gpa, dir);
     Dir.cwd().deleteTree(io, dir) catch {};
 }
 
@@ -349,8 +351,12 @@ pub fn console(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !voi
     const path = if (on == .bhyve or on == .firecracker)
         try gpa.print("{s}/console.log", .{d})
     else
-        try gpa.print("{s}/serialv.log", .{
+        try gpa.print("{s}/{s}", .{
             try lima.dir(io, gpa, name) orelse return why.refuse("no machine {s}", .{name}),
+            if (Dir.cwd().access(io, try gpa.print("{s}/authority/enrolled", .{d}), .{})) |_|
+                "serial.log"
+            else |_|
+                "serialv.log",
         });
     const text = Dir.cwd().readFileAlloc(io, path, gpa, .limited(64 << 20)) catch |err|
         return why.refuse("{s}: {s}", .{ path, @errorName(err) });

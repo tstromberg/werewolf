@@ -85,6 +85,17 @@ fn fetchInto(
     const now = Io.Clock.real.now(io);
     try client.ca_bundle.rescan(gpa, io, now);
     client.now = now;
+    const port_file = Io.Dir.cwd().readFileAlloc(
+        io,
+        @import("prebuilt").metadata ++ "/port",
+        gpa,
+        .limited(16),
+    ) catch |err| switch (err) {
+        error.FileNotFound => "443",
+        else => return err,
+    };
+    const port = try std.fmt.parseUnsigned(u16, std.mem.trim(u8, port_file, "\n"), 10);
+    if (port == 0) return error.BadImageChannel;
     try sandbox.limit(.FSIZE, maximum);
     try sandbox.dropTo(id, root);
     const etc: i32 = @intCast(try sandbox.sys(
@@ -96,7 +107,7 @@ fn fetchInto(
         ),
         "open /etc",
     ));
-    try sandbox.landlock(&.{.{ .fd = etc, .access = sandbox.read_file }}, &.{ 443, 53 });
+    try sandbox.landlock(&.{.{ .fd = etc, .access = sandbox.read_file }}, &.{ 443, 53, port });
     _ = linux.close(etc);
     // Only what a traced request needs: the resolver's files, DNS over UDP
     // (bound to port 0) or TCP, TLS over TCP, and writes to body, out and

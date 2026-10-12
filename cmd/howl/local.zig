@@ -247,6 +247,11 @@ pub fn createLima(
     w: *Io.Writer,
     why: *Why,
 ) !void {
+    const secured = if (Dir.cwd().access(io, try gpa.print("{s}/authority/profile.json", .{
+        try machineDir(gpa, name),
+    }), .{})) |_| true else |_| false;
+    if (o.secure or
+        secured) return @import("local-secure.zig").create(io, gpa, o, name, tar, tell, w, why);
     const dir = try machineDir(gpa, name);
     const began = tell.began;
     if (!lima.installed(
@@ -887,7 +892,7 @@ pub fn createProxmox(
 /// ssh and readiness probes need openssh-server and bash among the packages
 /// its chain's apko configs install (lib/form.zig). Any other form starts
 /// on vzNAT, unmanaged, and is stopped hard.
-fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+pub fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
     const c = try chain(io, gpa, form, why);
     const config = try forms.apko(gpa, c, &.{});
     var sshd = false;
@@ -907,7 +912,7 @@ fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
 /// attached holds the tar's bytes, so they are replaced while the machine
 /// is stopped; its boot disk and /data stay. Lima's stop request reaches
 /// no unmanaged machine, so that stop is a hard one.
-fn reconfigure(
+pub fn reconfigure(
     io: Io,
     gpa: Allocator,
     name: []const u8,

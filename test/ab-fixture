@@ -36,9 +36,10 @@ run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
 run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(root / 'ssh.key')], 'ssh-key')
 probe = root / 'ab-status'
 run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
-     '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'verity', '-Mroot=test/ab-status.zig',
+     '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'verity', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
      '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
-     '-Mipe=lib/ipe.zig', '-Mverity=lib/verity.zig', '-femit-bin=' + str(probe)], 'probe')
+     '-Mipe=lib/ipe.zig', '-Mverity=lib/verity.zig', '--dep', 'apk', '-Mtpm=lib/tpm.zig',
+     '--dep', 'package', '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe)], 'probe')
 name = 'provider-ab-' + mode + '-' + arch.replace('_', '-')
 form = root / name
 form.mkdir()
@@ -90,7 +91,7 @@ for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
             '--ipe-kernel', kernel, '--ipe-key', key, '--ipe-cert', cert,
             '--ipe-updates', channel, '--image-serial', version]
     if mode == 'secure':
-        args += ['--boot-key', key, '--boot-cert', cert, '--boot-native']
+        args += ['--boot-key', env.get('AB_BOOT_KEY', key), '--boot-cert', env.get('AB_BOOT_CRT', cert), '--boot-native']
     run(args, 'build-' + label)
     if mode == 'secure':
         require_native_initrd((release / (name + '-' + arch + '-uki')).read_bytes(),
@@ -110,6 +111,7 @@ for label, minutes in [('B', 8), ('bad', 6), ('A', 10)]:
     else:
         initial_serial = version
 result = {'arch': arch, 'mode': mode, 'form': str(form), 'channel': channel,
+          'boot_key': env.get('AB_BOOT_KEY', key), 'boot_cert': env.get('AB_BOOT_CRT', cert),
           'kernel': kernel, 'key': key, 'cert': cert, 'initial_serial': initial_serial,
           'disk': str(root / 'release-A' / (name + '-' + arch + '-disk.qcow2')),
           'ssh_key': str(root / 'ssh.key'), 'releases': releases}

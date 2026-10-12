@@ -719,7 +719,10 @@ fn ruleMessage(buf: *[256]u8, seq: u32, kind: u16, r: Rule) []const u8 {
         &.{if (pr == .icmp and r.family == linux.AF.INET6) IPPROTO_ICMPV6 else @backingInt(pr)},
     );
     if (r.sport) |s| b.attr(FRA_SPORT_RANGE, std.mem.sliceAsBytes(&[2]u16{ s, s }));
-    if (r.dport) |d| b.attr(FRA_DPORT_RANGE, std.mem.sliceAsBytes(&[2]u16{ d, r.dport_last orelse d }));
+    if (r.dport) |d| b.attr(
+        FRA_DPORT_RANGE,
+        std.mem.sliceAsBytes(&[2]u16{ d, r.dport_last orelse d }),
+    );
     if (r.uid) |u| b.attr(FRA_UID_RANGE, std.mem.sliceAsBytes(&[2]u32{ u, u }));
     // struct nlmsghdr: length, type, flags, sequence, port.
     std.mem.writeInt(u32, buf[0..4], @intCast(b.len), .little);
@@ -808,6 +811,11 @@ fn restrict(p: Policy) !void {
         try ruleset.port(sandbox.connect_tcp, c.port);
     if (p.nmetadata > 0) try ruleset.port(sandbox.connect_tcp, metadata_port);
     for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access);
+    // Root's posture/updater use the resource manager on TPM-gated boots.
+    // Service domains still narrow their device access independently.
+    if (linux.errno(linux.access("/run/werewolf/rollback-checked", linux.F_OK)) == .SUCCESS and
+        linux.errno(linux.access("/usr/share/werewolf/tpm/protocol", linux.F_OK)) == .SUCCESS)
+        try allowPath(ruleset, linux.AT.FDCWD, "/dev/tpmrm0", device);
     // Allow the writable binds under each image root (cmd/init/oci.zig).
     // Landlock judges a path by where it is mounted, not where a bind came
     // from, so /run's and /data's rules do not cover them.
@@ -1439,7 +1447,8 @@ test "a scan reaches every port and not this machine's services" {
             prohibited = true;
         if (x.uid == 70 and x.priority == pref.out_allow and x.dport == null and x.proto == .tcp)
             wide_out = true;
-        if (x.priority == pref.in_allow and x.dport == ephemeral_lo and x.dport_last == ephemeral_hi)
+        if (x.priority == pref.in_allow and x.dport == ephemeral_lo and
+            x.dport_last == ephemeral_hi)
             replies = true;
         // Another user's loopback is not prohibited, and a service port
         // is not opened by the reply range.

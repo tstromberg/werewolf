@@ -197,6 +197,7 @@ pub fn verifyOther(
         try u.read(try u.gpa.print("{s}/image.json.sig", .{rdir})),
     );
     if (!rollback) try fresh(u, image);
+    try @import("retire.zig").requireOther(u, image);
     if (expected) |e| if (!std.mem.eql(u8, e, image.build)) return error.WrongStagedImage;
     var mount: ?broker.Held = null;
     defer if (mount) |*held| held.release();

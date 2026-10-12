@@ -1,0 +1,438 @@
+#!/usr/bin/env python3
+"""Real TPM policy and durable-boundary model; not a full VM power-cut test."""
+import hashlib
+import os
+import pathlib
+import shutil
+import socket
+import subprocess
+import tempfile
+import threading
+import time
+
+
+def run(args, reject=False, error=None):
+    result = subprocess.run([str(arg) for arg in args], capture_output=True, timeout=30)
+    if reject:
+        if result.returncode == 0:
+            raise RuntimeError("unexpected authorization: " + " ".join(map(str, args[:2])))
+        if error and error.encode() not in result.stderr:
+            raise RuntimeError("wrong refusal: " + result.stderr.decode(errors="replace"))
+    elif result.returncode:
+        raise RuntimeError(str(args[0]) + ": " + result.stderr.decode(errors="replace"))
+    return result.stdout
+
+
+def sha(data):
+    return hashlib.sha256(data).digest()
+
+
+def write(file, data):
+    pathlib.Path(file).write_bytes(data)
+
+
+def record(machine, previous, retained, candidate, pcr):
+    return b"werewolf.boot/2\0" + machine + previous + retained + candidate + pcr
+
+
+def anchor(raw):
+    return sha(raw[48:80] + sha(raw))
+
+
+def startup_refused(port):
+    # tpm2_startup treats TPM_RC_INITIALIZE as success; check the wire response.
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as stream:
+        stream.sendall(bytes.fromhex("80010000000c000001440000"))
+        response = bytearray()
+        while len(response) < 10:
+            part = stream.recv(10 - len(response))
+            if not part:
+                raise RuntimeError("truncated startup reply")
+            response.extend(part)
+    if response != bytes.fromhex("80010000000a00000100"):
+        raise RuntimeError("guest startup reset was not refused: " + response.hex())
+
+
+class TPM:
+    def __init__(self, directory):
+        self.directory = pathlib.Path(directory)
+        self.directory.mkdir(exist_ok=True)
+        self.process = None
+        for _ in range(100):
+            with socket.socket() as data, socket.socket() as ctrl:
+                data.bind(("127.0.0.1", 0))
+                self.port = data.getsockname()[1]
+                if self.port == 65535:
+                    continue
+                try:
+                    ctrl.bind(("127.0.0.1", self.port + 1))
+                except OSError:
+                    continue
+                break
+        else:
+            raise RuntimeError("no adjacent TPM ports")
+
+    def start(self, release=None):
+        self.process = subprocess.Popen([
+            "swtpm", "socket", "--tpm2", "--tpmstate", "dir=" + str(self.directory),
+            "--server", f"type=tcp,port={self.port},bindaddr=127.0.0.1",
+            "--ctrl", f"type=tcp,port={self.port + 1},bindaddr=127.0.0.1",
+            "--flags", "not-need-init,startup-clear"], stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE)
+        os.environ["TPM2TOOLS_TCTI"] = f"swtpm:host=127.0.0.1,port={self.port}"
+        for _ in range(100):
+            if self.process.poll() is not None:
+                raise RuntimeError(self.process.stderr.read().decode(errors="replace"))
+            try:
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.1):
+                    break
+            except OSError:
+                time.sleep(0.01)
+        else:
+            raise RuntimeError("TPM did not listen")
+        if release:
+            run(["tpm2_pcrextend", "11:sha256=" + sha(b"UKI:" + release).hex()])
+
+    def stop(self, crash=False):
+        if self.process:
+            if crash:
+                self.process.kill()
+            else:
+                self.process.terminate()
+            self.process.communicate(timeout=10)
+            self.process = None
+
+    def boot(self, release):
+        self.stop(crash=True)
+        self.start(release)
+
+
+def lose_extension_reply(probe, port):
+    """Execute NV_Extend successfully, then sever the client's reply stream."""
+    failures = []
+    extended = []
+
+    def packet(stream):
+        data = bytearray()
+        expected = 10
+        while len(data) < expected:
+            part = stream.recv(expected - len(data))
+            if not part:
+                raise RuntimeError("truncated proxy packet")
+            data.extend(part)
+            if len(data) == 10:
+                expected = int.from_bytes(data[2:6], "big")
+                if not 10 <= expected <= 4096:
+                    raise RuntimeError("oversized proxy packet")
+        return bytes(data)
+
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(10)
+        proxy_port = listener.getsockname()[1]
+
+        def proxy():
+            try:
+                client, _ = listener.accept()
+                with client, socket.create_connection(("127.0.0.1", port), timeout=10) as server:
+                    client.settimeout(10)
+                    while True:
+                        command = packet(client)
+                        server.sendall(command)
+                        response = packet(server)
+                        if int.from_bytes(command[6:10], "big") == 0x136:
+                            if int.from_bytes(response[6:10], "big") != 0:
+                                raise RuntimeError("extension failed before reply was lost")
+                            extended.append(True)
+                            return
+                        client.sendall(response)
+            except Exception as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=proxy, daemon=True)
+        thread.start()
+        try:
+            run([probe, "retire", "signer.pub", "bc.state", proxy_port, "bc.sig"], True, "EndOfStream")
+        finally:
+            thread.join(timeout=12)
+        if thread.is_alive() or failures or not extended:
+            raise RuntimeError("lost-ack proxy failed: " + str(failures))
+
+
+def main():
+    probe = pathlib.Path(os.environ["TPM_POLICY_PROBE"]).resolve()
+    export = pathlib.Path(os.environ["TPM_AB_EXPORT"]).resolve() if os.environ.get("TPM_AB_EXPORT") else None
+    os.umask(0o077)
+    with tempfile.TemporaryDirectory(prefix="werewolf-tpm-ab-") as temp:
+        root = pathlib.Path(temp)
+        os.chdir(root)
+        tpm = TPM(root / "nv")
+        try:
+            tpm.start(b"A")
+            for name in ("owner", "lockout"):
+                write(name + ".auth", os.urandom(32))
+                run(["tpm2_changeauth", "-c", name[0] if name == "owner" else "l", "file:" + name + ".auth"])
+            run(["tpm2_clearcontrol", "-C", "l", "-P", "file:lockout.auth", "s"])
+            run(["openssl", "genrsa", "-out", "signer.key", "2048"])
+            run(["openssl", "pkey", "-in", "signer.key", "-pubout", "-out", "signer.pub"])
+            write("qualifier", b"werewolf.boot/2")
+
+            def load_signer():
+                run(["tpm2_loadexternal", "-G", "rsa", "-C", "o", "-a", "sign|userwithauth",
+                     "-u", "signer.pub", "-c", "signer.ctx", "-n", "signer.name"])
+
+            load_signer()
+            run(["tpm2_startauthsession", "-S", "trial.ctx"])
+            run(["tpm2_policyauthorize", "-S", "trial.ctx", "-n", "signer.name",
+                 "-q", "qualifier", "-L", "authorize.policy"])
+            run(["tpm2_flushcontext", "trial.ctx"])
+            index = "0x1500021"
+            run(["tpm2_nvdefine", index, "-C", "o", "-P", "file:owner.auth", "-s", "32", "-g", "sha256",
+                 "-a", "nt=extend|ownerwrite|policywrite|authread|no_da", "-L", "authorize.policy"])
+            machine = os.urandom(32)
+            releases = {letter: sha(b"release:" + letter.encode()) for letter in "ABCD"}
+            pcrs = {letter: sha(bytes(32) + sha(b"UKI:" + letter.encode())) for letter in "ABCD"}
+            for letter in releases:
+                write(letter + ".id", releases[letter])
+                write(letter + ".pcr", pcrs[letter])
+            states = {}
+            states["aa"] = record(machine, bytes(32), releases["A"], releases["A"], pcrs["A"])
+            states["ab"] = record(machine, anchor(states["aa"]), releases["A"], releases["B"], pcrs["A"])
+            states["bc"] = record(machine, anchor(states["ab"]), releases["B"], releases["C"], pcrs["B"])
+            states["ac"] = record(machine, anchor(states["ab"]), releases["A"], releases["C"], pcrs["A"])
+            write("factory.digest", sha(states["aa"]))
+            run(["tpm2_nvextend", index, "-C", "o", "-P", "file:owner.auth", "-i", "factory.digest"])
+
+            for label, raw in states.items():
+                write(label + ".state", raw)
+                write(label + ".previous", raw[48:80])
+                write(label + ".digest", sha(raw))
+                write(label + ".pcr", raw[-32:])
+                run(["tpm2_nvextend", index, "-i", label + ".digest", "--cphash", label + ".cp"])
+                run(["tpm2_startauthsession", "-S", "trial.ctx"])
+                run(["tpm2_policynv", index, "eq", "-i", label + ".previous", "-S", "trial.ctx"])
+                run(["tpm2_policypcr", "-S", "trial.ctx", "-l", "sha256:11", "-f", label + ".pcr"])
+                run(["tpm2_policycphash", "-S", "trial.ctx", "--cphash-input", label + ".cp", "-L", label + ".policy"])
+                run(["tpm2_flushcontext", "trial.ctx"])
+                message = pathlib.Path(label + ".policy").read_bytes() + b"werewolf.boot/2"
+                write(label + ".message", message)
+                run([probe, "permit-pair", "signer.pub", label + ".state", "runtime.message"])
+                if pathlib.Path("runtime.message").read_bytes() != message:
+                    raise RuntimeError("runtime policy disagrees with independent TPM trial: " + label)
+                run(["openssl", "dgst", "-sha256", "-sign", "signer.key", "-out", label + ".sig", label + ".message"])
+                write(label + ".anchor", anchor(raw))
+
+            def read_anchor():
+                run([probe, "read-pair", "signer.pub", tpm.port, "actual.anchor"])
+                return pathlib.Path("actual.anchor").read_bytes()
+
+            def verify(label, release, reject=False, error=None, state=None, signature=None):
+                run([probe, "verify-pair", "signer.pub", state or label + ".state",
+                     signature or label + ".sig", "actual.anchor", release + ".id"], reject, error)
+
+            def retire(label, reject=False, error=None, signature=None):
+                run([probe, "retire", "signer.pub", label + ".state", tpm.port,
+                     signature or label + ".sig"], reject, error)
+
+            if read_anchor() != anchor(states["aa"]):
+                raise RuntimeError("wrong factory anchor")
+            verify("aa", "A")
+            verify("aa", "B", True, "RollbackRefused")
+            run([probe, "transition", "aa.state", "ab.state", "A.id", "A.pcr"])
+            run([probe, "transition", "ab.state", "bc.state", "B.id", "B.pcr"])
+            run([probe, "transition", "ab.state", "ac.state", "A.id", "A.pcr"])
+            run([probe, "transition", "ab.state", "bc.state", "A.id", "A.pcr"], True, "UnsafeRetirement")
+            run(["tpm2_pcrreset", "11"], True)
+            startup_refused(tpm.port)
+            run(["tpm2_shutdown"])
+            startup_refused(tpm.port)
+
+            def authorized_session(label):
+                run(["tpm2_flushcontext", "-t"])
+                load_signer()
+                run(["tpm2_verifysignature", "-c", "signer.ctx", "-g", "sha256", "-m", label + ".message",
+                     "-s", label + ".sig", "-t", "ticket", "-f", "rsassa"])
+                run(["tpm2_flushcontext", "-t"])
+                run(["tpm2_startauthsession", "--policy-session", "-S", "session.ctx"])
+                run(["tpm2_policynv", index, "eq", "-i", label + ".previous", "-S", "session.ctx"])
+                run(["tpm2_policypcr", "-S", "session.ctx", "-l", "sha256:11", "-f", label + ".pcr"])
+                run(["tpm2_policycphash", "-S", "session.ctx", "--cphash-input", label + ".cp"])
+                run(["tpm2_policyauthorize", "-S", "session.ctx", "-i", label + ".policy",
+                     "-q", "qualifier", "-n", "signer.name", "-t", "ticket"])
+
+            authorized_session("ab")
+            write("changed.digest", bytes(32))
+            run(["tpm2_nvextend", index, "-P", "session:session.ctx", "-i", "changed.digest"], True)
+            run(["tpm2_flushcontext", "session.ctx"])
+            authorized_session("ab")
+            run(["tpm2_pcrextend", "11:sha256=" + bytes(32).hex()])
+            run(["tpm2_nvextend", index, "-P", "session:session.ctx", "-i", "ab.digest"], True)
+            run(["tpm2_flushcontext", "session.ctx"])
+            tpm.stop()
+            tpm.start()  # No UKI measurement must never satisfy an update permit.
+            retire("ab", True, "TpmRefused")
+            tpm.boot(b"A")
+            retire("ab")
+            read_anchor()
+            verify("ab", "A")
+            verify("ab", "B")
+            retire("ab", True, "StaleBootState")
+            retire("bc", True, "TpmRefused")
+            if read_anchor() != anchor(states["ab"]):
+                raise RuntimeError("refused transitions changed TPM state")
+            for offset in (16, 48, 80, 112, 144):
+                changed = bytearray(states["ab"])
+                changed[offset] ^= 1
+                write("changed.state", changed)
+                verify("ab", "A", True, "BadSignature", state="changed.state")
+            verify("ab", "A", True, "BadSignature", signature="bc.sig")
+            write("legacy.message", pathlib.Path("ab.policy").read_bytes() + b"werewolf.rollback/1")
+            run(["openssl", "dgst", "-sha256", "-sign", "signer.key", "-out", "legacy.sig", "legacy.message"])
+            retire("ac", True, "TpmRefused", "legacy.sig")
+            tpm.boot(b"B")
+            if read_anchor() != anchor(states["ab"]):
+                raise RuntimeError("NV anchor did not survive simulator kill")
+            tpm.boot(b"B")
+            write("platform.auth", os.urandom(32))
+            run(["tpm2_changeauth", "-c", "p", "file:platform.auth"])
+            if read_anchor() != anchor(states["ab"]):
+                raise RuntimeError("firmware-held platform authorization was not accepted")
+            tpm.stop()
+            shutil.copytree(root / "nv", root / "snapshot")
+            shutil.copytree(root / "snapshot", root / "operator-rollback")
+            tpm = TPM(root / "operator-rollback")
+            tpm.start(b"A")
+            retire("ac")
+            read_anchor()
+            verify("ac", "A")
+            verify("ac", "C")
+            verify("ac", "B", True, "RollbackRefused")
+            tpm.stop()
+            tpm = TPM(root / "nv")
+            tpm.start(b"B")
+            retire("bc")
+            read_anchor()
+            verify("bc", "B")
+            verify("bc", "C")
+            verify("bc", "A", True, "RollbackRefused")
+            verify("ab", "B", True, "StaleBootState")
+            retire("ac", True, "StaleBootState")
+            run(["tpm2_nvextend", index, "-i", "changed.digest"], True)
+            run(["tpm2_nvwrite", index, "-i", "changed.digest"], True)
+            run(["tpm2_nvundefine", index, "-C", "o"], True)
+            run(["tpm2_clear", "-c", "l"], True)
+            run(["tpm2_clearcontrol", "-C", "l", "c"], True)
+            run(["tpm2_changeauth", "-c", "o", ""], True)
+            run(["tpm2_clearcontrol", "-C", "p", "c"], True)
+            if read_anchor() != anchor(states["bc"]):
+                raise RuntimeError("guest reset attempts changed TPM state")
+            # A provider misconfiguration must also fail the public-state checks.
+            tpm.stop()
+            for fault in ("clear-enabled", "empty-owner", "writable-index", "owner-policy", "platform-policy"):
+                directory = root / fault
+                shutil.copytree(root / "snapshot", directory)
+                tpm = TPM(directory)
+                tpm.start(b"B")
+                try:
+                    if fault == "clear-enabled":
+                        run(["tpm2_clearcontrol", "-C", "p", "c"])
+                    elif fault == "empty-owner":
+                        run(["tpm2_changeauth", "-c", "o", "-p", "file:owner.auth", ""])
+                    elif fault == "writable-index":
+                        run(["tpm2_nvundefine", index, "-C", "o", "-P", "file:owner.auth"])
+                        run(["tpm2_nvdefine", index, "-C", "o", "-P", "file:owner.auth", "-s", "32", "-g", "sha256",
+                             "-a", "ownerwrite|authread|authwrite|no_da"])
+                        run(["tpm2_nvwrite", index, "-C", "o", "-P", "file:owner.auth", "-i", "changed.digest"])
+                    else:
+                        write("hierarchy.policy", bytes(32))
+                        hierarchy = "o" if fault == "owner-policy" else "p"
+                        args = ["tpm2_setprimarypolicy", "-C", hierarchy, "-g", "sha256", "-L", "hierarchy.policy"]
+                        if hierarchy == "o":
+                            args += ["-P", "file:owner.auth"]
+                        run(args)
+                    error = "WrongRollbackIndex" if fault == "writable-index" else "UnprotectedTpmHierarchy"
+                    run([probe, "read-pair", "signer.pub", tpm.port, "wrong.anchor"], True, error)
+                finally:
+                    tpm.stop()
+            print("pass   tpm-ab: real policies match trial digests; pairs, PCR gates, replay and reset refusal")
+
+            # Each cut uses host-cloned private TPM state. The guest never restores NV.
+            tpm.stop()
+            cuts = ["staged", "journal-torn", "journal-synced", "entry-retired",
+                    "retirement-ack-lost", "candidate-partial", "candidate-synced",
+                    "trial-armed", "trial-failed", "commit-before-sync", "commit-after-sync"]
+            for step, cut in enumerate(cuts):
+                directory = root / ("cut-" + cut)
+                directory.mkdir()
+                shutil.copytree(root / "snapshot", directory / "nv")
+                tpm = TPM(directory / "nv")
+                tpm.start(b"B")
+                try:
+                    journal = directory / "journal"
+                    journal.mkdir()
+                    shutil.copy("ab.state", journal / "old.state")
+                    shutil.copy("ab.sig", journal / "old.sig")
+                    if step == 1:
+                        write(journal / "pending.tmp", states["bc"][:60])
+                    if step >= 2:
+                        shutil.copy("bc.state", journal / "next.state")
+                        shutil.copy("bc.sig", journal / "next.sig")
+                    slots = directory / "slots"
+                    slots.mkdir()
+                    write(slots / "a", b"release:A")
+                    write(slots / "b", b"release:B")
+                    write(directory / "staged", b"release:C")
+                    entries = {"b": ("B", "good")}
+                    if step < 3:
+                        entries["a"] = ("A", "good")
+                    if cut == "retirement-ack-lost":
+                        lose_extension_reply(probe, tpm.port)
+                    elif step >= 4:
+                        retire("bc")
+                    if step == 5:
+                        write(slots / "a", b"release:")
+                    if step >= 6:
+                        shutil.copy(directory / "staged", slots / "a")
+                    if step >= 7:
+                        entries["a"] = ("C", "exhausted" if cut == "trial-failed" else "trial")
+                    if step >= 9:
+                        entries["a"] = ("C", "good" if cut == "commit-after-sync" else "trial")
+                    for slot, (release, status) in entries.items():
+                        write(directory / (slot + ".entry"), (release + " " + status).encode())
+                    # SIGKILL includes the successful extension / lost acknowledgment case.
+                    tpm.boot(b"B")
+                    read_anchor()
+                    authorized = []
+                    for entry in directory.glob("*.entry"):
+                        release, status = entry.read_text().split()
+                        if status == "exhausted":
+                            continue
+                        if sha((slots / entry.stem).read_bytes()) != releases[release]:
+                            continue
+                        for state_file in journal.glob("*.state"):
+                            result = subprocess.run([str(probe), "verify-pair", "signer.pub",
+                                str(state_file), str(state_file.with_suffix(".sig")),
+                                "actual.anchor", release + ".id"], capture_output=True, timeout=30)
+                            if result.returncode == 0:
+                                authorized.append(release)
+                                break
+                    if "B" not in authorized or (step >= 4 and "A" in authorized):
+                        raise RuntimeError("unsafe recovery at " + cut + ": " + str(authorized))
+                    if cut == "commit-after-sync" and "C" not in authorized:
+                        raise RuntimeError("commit lost one authorized release")
+                    if step >= 4:
+                        retire("bc", True, "StaleBootState")
+                finally:
+                    tpm.stop()
+            print(f"pass   tpm-ab-cuts: {len(cuts)} durable-boundary cases preserve B; commit retains B/C")
+            if export:
+                export.mkdir(parents=True, exist_ok=True)
+                for file in ("signer.pub", "signer.name", "authorize.policy", "ab.state", "ab.cp", "ab.policy", "ab.sig"):
+                    shutil.copy(file, export / file)
+        finally:
+            tpm.stop()
+
+
+if __name__ == "__main__":
+    main()

@@ -2,9 +2,12 @@
 
 <img src="docs/media/logo-small.png" alt="werewolf logo" width="160" align="right">
 
-Werewolf Linux is an experimental, secure-by-default distribution for virtual
-machines. Our goal is to keep popular applications contained even when attackers
-exploit previously unknown application or Linux vulnerabilities.
+Werewolf Linux is an ambitious experiment to create unhackable (yet useful) Linux VMs.
+
+Our goal is to keep application compromises contained; even in the face of vulnerabilities:
+even a webshell running as root shouldn't be vulnerable to most zero-day kernel exploits.
+In our review against the CISA KEV catalog of exploited Linux vulnerabilities - Werewolf
+prevents 49 out of 50 of them by virtue of it's protections.
 
 Think ChromeOS meets OpenBSD: verified, read-only system images, automatic updates,
 a minimal OS and privilege separation. Services get explicit system-call, filesystem
@@ -14,8 +17,8 @@ from Wolfi and Alpine; its own programs are written in Zig.
 ## Try it
 
 `howl` builds and starts VMs on Linux and macOS, with experimental FreeBSD and
-NetBSD support (`gmake` instead of `make`). Prepare the [Secure Boot prerequisites](docs/testing.md#secure-boot),
-then start a local playground; `howl` chooses an installed VM manager:
+NetBSD support (`gmake` instead of `make`). This creates a local playground based
+on the best available local VM manager (lima, qemu, firecracker, etc):
 
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf
@@ -23,7 +26,7 @@ make install
 howl run
 ```
 
-To run your own locked-down Python app, put `main.py` in `./myapp`, for example:
+To deploy a locked-down Python app on GCP, try something like this:
 
 ```sh
 howl create web --on gcp --with python-app --app ./myapp

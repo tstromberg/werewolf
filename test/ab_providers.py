@@ -46,7 +46,7 @@ class Provider:
                         WEREWOLF_IPE_CRT=fixture['cert'], IPE_UPDATES=fixture['channel'],
                         IMAGE_SERIAL=fixture['initial_serial'])
         if fixture['mode'] == 'secure':
-            self.env.update(WEREWOLF_BOOT_KEY=fixture['key'], WEREWOLF_BOOT_CRT=fixture['cert'])
+            self.env.update(WEREWOLF_BOOT_KEY=fixture.get('boot_key', fixture['key']), WEREWOLF_BOOT_CRT=fixture.get('boot_cert', fixture['cert']))
         else:
             self.env.pop('WEREWOLF_BOOT_KEY', None)
             self.env.pop('WEREWOLF_BOOT_CRT', None)
@@ -73,7 +73,10 @@ class Provider:
         if 'LIMA_HOME' in os.environ:
             self.env['LIMA_HOME'] = os.environ['LIMA_HOME']
         try:
-            self.run(['sh', 'tools/enroll-boot', self.fixture['arch'], self.fixture['cert'], str(directory)])
+            if self.fixture.get('firmware'):
+                shutil.copytree(self.fixture['firmware'], directory)
+            else:
+                self.run(['sh', 'tools/enroll-boot', self.fixture['arch'], self.fixture.get('boot_cert', self.fixture['cert']), str(directory)])
         finally:
             self.env.pop('LIMA_HOME', None)
             if lima_home is not None:
@@ -119,6 +122,12 @@ class Provider:
                  '-drive', f'if=pflash,format=raw,unit=1,{frozen}file={firmware}/vars.fd']
         if arch == 'x86_64':
             args += ['-global', 'driver=cfi.pflash01,property=secure,value=on']
+        if self.fixture.get('tpm_socket'):
+            ppi = ',ppi=off' if accel == 'hvf' else ''
+            args += ['-chardev', 'socket,id=tpmsock,path=' + self.fixture['tpm_socket'],
+                     '-tpmdev', 'emulator,id=tpm0,chardev=tpmsock',
+                     '-device', ('tpm-tis' if arch == 'x86_64' else 'tpm-tis-device') + ',tpmdev=tpm0' + ppi]
+        self.qemu_args = args
         self.vars_path = firmware / 'vars.fd'
         self.vars_digest = hashlib.sha256(self.vars_path.read_bytes()).digest()
         with self.log.open('wb') as output:
@@ -304,13 +313,16 @@ class Provider:
         self.remote_pid = result.stdout.strip()
 
     def ssh(self, command, check=True, timeout=120):
+        return self.run(self.ssh_args(command), check=check, timeout=timeout)
+
+    def ssh_args(self, command):
         args = ['ssh', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
                 '-o', 'ConnectTimeout=5', '-o', 'StrictHostKeyChecking=accept-new',
                 '-o', 'UserKnownHostsFile=' + str(self.work / 'known_hosts'),
                 '-i', self.fixture['ssh_key'], '-p', str(self.ssh_port)]
         if self.proxy:
             args += ['-o', 'ProxyCommand=' + self.proxy]
-        return self.run([*args, 'root@' + self.address, command], check=check, timeout=timeout)
+        return [*args, 'root@' + self.address, command]
 
     def reboot(self, command='/usr/bin/reboot'):
         # A Lima forwarder may hold the SSH connection after the guest exits.

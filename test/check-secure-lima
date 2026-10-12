@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Exercise howl's host-managed secured Lima deployment and contextual A/B updates."""
+import hashlib
+import json
+import ssl
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import sys
+import time
+from urllib.request import urlopen
+from urllib.error import HTTPError
+
+howl, kernel, key, cert, stub, output = sys.argv[1:]
+howl, kernel, key, cert, stub = [str(Path(p).resolve()) for p in [howl, kernel, key, cert, stub]]
+work = Path(output).resolve()
+work.mkdir(parents=True, mode=0o700, exist_ok=False)
+os.umask(0o077)
+name = 'ww-secure-' + secrets.token_hex(6)
+machine = Path('build/machines') / name
+authority = machine / 'authority'
+form = work / 'form'
+overlay = form / 'rootfs'
+overlay.mkdir(parents=True)
+(form / 'form.yaml').write_text('base: playground\nweaknesses:' +
+    Path('forms/playground/form.yaml').read_text().split('weaknesses:', 1)[1])
+label_file = overlay / 'usr/share/werewolf/ab-release'
+label_file.parent.mkdir(parents=True)
+label_file.write_text('A\n')
+env = dict(os.environ, WEREWOLF_IPE_KERNEL=kernel, WEREWOLF_IPE_KEY=key,
+           WEREWOLF_IPE_CRT=cert, UKI_STUB=stub,
+           WEREWOLF_BOOT_KEY=str(work / 'unrelated-missing.key'),
+           WEREWOLF_BOOT_CRT=str(work / 'unrelated-missing.crt'))
+
+
+def run(args, label, check=True, timeout=600):
+    result = subprocess.run([str(arg) for arg in args], env=env, text=True,
+                            capture_output=True, timeout=timeout, umask=0o022)
+    with (work / (label + '.log')).open('a') as log:
+        log.write(result.stdout + result.stderr)
+    if check and result.returncode:
+        raise RuntimeError(label + ': ' + result.stderr[-2000:])
+    return result
+
+
+def ssh(command, label, **kwargs):
+    return run([howl, 'ssh', name, '--', command], label, **kwargs)
+
+
+def wait_boot(label, previous=None, anchor=None, committed=True):
+    until = time.monotonic() + 240
+    paused = None
+    while time.monotonic() < until:
+        try:
+            reply = ssh('/usr/bin/ab-status', 'status', check=False, timeout=10)
+            status = json.loads(reply.stdout) if reply.returncode == 0 else None
+        except (subprocess.TimeoutExpired, ValueError):
+            status = None
+        if status and status['release'] == label and status['boot_id'] != previous:
+            if not all(status[flag] for flag in ['secure_boot', 'ipe', 'verified_root', 'rollback_protected']):
+                raise RuntimeError('missing guest enforcement: ' + str(status))
+            if paused != status['boot_id']:
+                result = ssh('test -e /run/werewolf/updater-ready && sv down /etc/sv/autoupdate',
+                             'pause', check=False, timeout=10)
+                if result.returncode:
+                    time.sleep(2)
+                    continue
+                paused = status['boot_id']
+            if status['committed'] is committed:
+                if anchor is not None and status['tpm_anchor'] != anchor:
+                    raise RuntimeError('rollback or restart changed protected authorization')
+                mappings = json.loads((authority / 'releases.json').read_text())
+                if status['pcr11'] not in mappings.values():
+                    raise RuntimeError('actual PCR does not match a registered signed image')
+                with (work / 'evidence.jsonl').open('a') as log:
+                    log.write(json.dumps(status) + '\n')
+                print('pass   secure-lima: ' + label + ', enrolled firmware, IPE, exact measured TPM pair', flush=True)
+                return status
+        time.sleep(2)
+    raise RuntimeError('secured Lima did not commit ' + label)
+
+
+def refresh(label):
+    label_file.write_text(label + '\n')
+    run([howl, '_local-refresh', machine.resolve()], 'refresh-' + label)
+    head = authority / 'public/aarch64/latest.json'
+    before = head.read_bytes()
+    run([howl, '_local-refresh', machine.resolve()], 'unchanged-' + label)
+    if head.read_bytes() != before:
+        raise RuntimeError('unchanged pinned inputs generated another release')
+    image = json.loads(before)
+    core = b'werewolf.release/2\0aarch64\0'
+    for filename in ['root.erofs', 'vmlinuz', 'stage0.zst']:
+        core += bytes.fromhex(image['files'][filename]['sha256'])
+    core += bytes.fromhex(image['boot_context'])
+    return hashlib.sha256(core).hexdigest()
+
+
+def update(label, previous, committed=True):
+    candidate = refresh(label)
+    ssh('/usr/lib/werewolf/slot-update check', 'check-' + label)
+    ssh('/usr/lib/werewolf/slot-update try', 'try-' + label, check=False, timeout=30)
+    current = wait_boot(label, previous['boot_id'], committed=committed)
+    if current['tpm_anchor'] == previous['tpm_anchor']:
+        raise RuntimeError('replacement did not retire the inactive release')
+    raw = (authority / 'records' / (current['tpm_anchor'] + '.permit')).read_bytes()
+    if raw[112:144].hex() != candidate:
+        raise RuntimeError('permit named a different candidate')
+    if raw[144:176].hex() != previous['pcr11']:
+        raise RuntimeError('permit did not bind the actual retained boot')
+    return current
+
+
+try:
+    probe = overlay / 'usr/bin/ab-status'
+    probe.parent.mkdir(parents=True)
+    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', 'aarch64-linux-musl',
+         '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
+         '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
+         '-Mipe=lib/ipe.zig', '--dep', 'apk', '-Mtpm=lib/tpm.zig', '--dep', 'package',
+         '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe)], 'probe')
+    for path in overlay.rglob('*'):
+        path.chmod(0o755 if path.is_dir() or path == probe else 0o644)
+    create = [howl, 'create', name, '--with', form, '--build', '--on', 'lima', '--secure', '--yes']
+    run(create, 'create')
+    a = wait_boot('A')
+    for secret in ['boot.key', 'authority/permit.key', 'authority/tls.key',
+                   'authority/credentials/owner.auth', 'authority/credentials/lockout.auth']:
+        if (machine / secret).stat().st_mode & 0o777 != 0o600:
+            raise RuntimeError('private host key permissions weakened')
+    attempt = ssh('cp /usr/bin/true /data/unsigned-probe && /data/unsigned-probe', 'unsigned', check=False)
+    if attempt.returncode == 0:
+        raise RuntimeError('unsigned writable code executed')
+    attempt = ssh('echo tamper >> /usr/bin/true', 'root-write', check=False)
+    if attempt.returncode == 0:
+        raise RuntimeError('verified root accepted a write')
+    b = update('B', a)
+    c = update('C', b)
+    # Registered history is not authority to install a retired release.
+    configuration = json.loads((authority / 'publisher.json').read_text())
+    factory_record = (authority / 'factory.permit').read_bytes()
+    current_head = json.loads((authority / 'approved.json').read_text())
+    route = '/aarch64/permits/' + factory_record[16:48].hex() + '/' + factory_record[112:144].hex() + \
+            '.permit?from=' + c['tpm_anchor'] + '&retain=' + current_head['candidate']
+    context = ssl.create_default_context(cafile=configuration['certificate'])
+    try:
+        urlopen('https://127.0.0.1:' + str(configuration['port']) + route, context=context, timeout=10)
+        raise RuntimeError('host issuer reauthorized a retired image')
+    except HTTPError as failure:
+        if failure.code != 404:
+            raise
+    ssh('/usr/lib/werewolf/slot-update try', 'rollback-B', check=False, timeout=30)
+    b2 = wait_boot('B', c['boot_id'], c['tpm_anchor'])
+    run(create, 'restart')
+    b3 = wait_boot('B', b2['boot_id'], b2['tpm_anchor'])
+    d = update('D', b3)
+    unhealthy = overlay / 'etc/sv/ab-unhealthy'
+    unhealthy.mkdir(parents=True, mode=0o755)
+    for path in [overlay / 'etc', overlay / 'etc/sv']:
+        path.chmod(0o755)
+    (unhealthy / 'run').symlink_to('/usr/bin/false')
+    trial = update('E', d, committed=False)
+    ssh('/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=30)
+    wait_boot('D', trial['boot_id'], trial['tpm_anchor'])
+    print('pass   secure-lima: A/B updates, rollback, restart, failed-trial recovery and tamper refusals', flush=True)
+finally:
+    for source, target in [(machine / 'create.log', 'native-create.log'),
+                           (authority / 'refresh.log', 'native-refresh.log')]:
+        if source.exists():
+            (work / target).write_bytes(source.read_bytes())
+    if machine.exists():
+        run([howl, 'delete', name, '--on', 'lima'], 'cleanup', check=False)

@@ -39,6 +39,7 @@ pub const Manifest = struct {
     packages: []const Package,
     advisories: []const policy.Advisory = &.{},
     declaration: ?[]const u8 = null,
+    boot_context: ?[]const u8 = null,
     files: Files,
 
     pub fn artifact(m: Manifest, name: []const u8) ?Artifact {
@@ -80,6 +81,8 @@ pub fn check(m: Manifest, identity: Identity) !void {
     _ = policy.parseSerial(m.serial) catch return error.BadImageSerial;
     if (!hex(m.root_hash) or !hex(m.build)) return error.BadImageHash;
     if (m.declaration) |d| if (!hex(d)) return error.BadImageHash;
+    if (m.boot_context) |c| if (!hex(c) or m.files.@"uki.efi" == null)
+        return error.BadImageBootContext;
     if (m.kernel.len == 0 or m.kernel.len > 256 or
         !printable(m.kernel)) return error.BadImageKernel;
     inline for (names) |n| if (m.artifact(n)) |a| {
@@ -223,7 +226,7 @@ pub fn channel(url: []const u8) !void {
     if (uri.host == null or uri.user != null or uri.password != null or uri.query != null or
         uri.fragment != null)
         return error.BadImageChannel;
-    if (uri.port != null and uri.port.? != 443) return error.BadImageChannel;
+    if (uri.port == 0) return error.BadImageChannel;
     for (url) |c| if (!std.ascii.isAlphanumeric(c) and mem.indexOfScalar(u8, "-._:/[]", c) == null)
         return error.BadImageChannel;
     var parts = mem.splitScalar(u8, url["https://".len..], '/');

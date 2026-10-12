@@ -2,6 +2,7 @@
 const std = @import("std");
 const cmdline = @import("cmdline");
 const ipe = @import("ipe");
+const tpm = @import("tpm");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -37,6 +38,18 @@ pub fn main(init: std.process.Init) !void {
     const enforce = read(io, gpa, ipe.base ++ "/enforce") catch "";
     const policy_root = ipe.policyRoot(policy);
     const hash = std.fmt.bytesToHex(policy_root orelse return error.BadIpePolicy, .lower);
+    var anchor: [64]u8 = @splat(0);
+    var pcr: [64]u8 = @splat(0);
+    var protected = false;
+    if (boot.tpm) {
+        const key = try tpm.keyAt(io, gpa, "");
+        var device = try tpm.Device.open(io);
+        defer device.close();
+        anchor = std.fmt.bytesToHex(try device.anchor(key), .lower);
+        pcr = std.fmt.bytesToHex(try device.pcr11(), .lower);
+        const journal = try gpa.print("/victim{s}/boot-state", .{boot.victim.?.path});
+        protected = tpm.protected(io, gpa, boot.release, journal);
+    }
     const output = try std.json.Stringify.valueAlloc(gpa, .{
         .boot_id = std.mem.trim(u8, try read(io, gpa, "/proc/sys/kernel/random/boot_id"), "\n"),
         .release = std.mem.trim(u8, try read(io, gpa, "/usr/share/werewolf/ab-release"), "\n"),
@@ -46,6 +59,9 @@ pub fn main(init: std.process.Init) !void {
         .ipe = ipe.enforced(policy, active, enforce),
         .secure_boot = on.len == 5 and on[4] == 1 and setup.len == 5 and setup[4] == 0,
         .committed = exists(io, "/run/werewolf/committed"),
+        .rollback_protected = protected,
+        .tpm_anchor = if (boot.tpm) anchor[0..] else "",
+        .pcr11 = if (boot.tpm) pcr[0..] else "",
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, output);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");

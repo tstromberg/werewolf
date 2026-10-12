@@ -8,7 +8,7 @@ our own kernel with IPE, is opt-in ([ipe.md](ipe.md)); enrolled images have
 signed slot updates ([prebuilt-images.md](prebuilt-images.md)). Phase 5's
 Secure Boot passed on AWS and GCP; Azure firmware acceptance remains unreliable.
 Posture holds gaps as `boot-` checks (docs/posture.md); IPE builds enforce
-module signatures. Bite firmware and TPM rollback remain deployment gaps.
+module signatures. Bite firmware remains a deployment gap; TPM integration is opt-in.
 
 ## Summary
 
@@ -88,10 +88,10 @@ before arming ([prebuilt-images.md](prebuilt-images.md)). A UKI packaged
 inside a locally recomposed root cannot preserve its sealed root hash.
 `make IPE=1 check-updater-uki` proves firmware delivery, verified slot b and commit.
 
-**Open.** Key custody in a KMS. Rollback: root on a bitten machine can
-install an older signed release; TPM counters would stop it. The module
-key makes kernel builds differ, and CI requires two to match. A slot
-built on the machine cannot carry a signed policy. TPM device provisioning and old-release boot proofs remain open.
+**Open.** KMS custody, Lima arm64 integration and provider TPM provisioning.
+Opt-in [protected pair retirement](tpm-ab-retirement.md) rejects retired releases
+and preserves A/B rollback through actual QEMU x86_64 power cuts. The module
+key makes kernel builds differ, and CI requires two to match.
 
 ## Drawbacks
 
