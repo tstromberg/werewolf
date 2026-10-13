@@ -140,13 +140,72 @@ fn fetchInto(
     var buf: [64 << 10]u8 = undefined;
     const file: Io.File = .{ .handle = body, .flags = .{ .nonblocking = false } };
     var w = file.writerStreaming(io, &buf);
-    const res = try client.fetch(.{ .location = .{ .url = url }, .response_writer = &w.interface });
+    // Reject oversized responses before write(2) triggers SIGXFSZ. This also
+    // bounds chunked, EOF-delimited and decompressed bodies without trusting headers.
+    var bounded: Bounded = .{ .sink = &w.interface, .remaining = maximum };
+    const res = client.fetch(.{
+        .location = .{ .url = url },
+        .response_writer = &bounded.writer,
+    }) catch |err| {
+        if (bounded.oversized) return error.TooBig;
+        return err;
+    };
     try w.interface.flush();
     if (res.status != .ok) return std.enums.tagName(
         std.http.Status,
         res.status,
     ) orelse "HttpStatus";
     return "ok";
+}
+
+const Bounded = struct {
+    sink: *Io.Writer,
+    remaining: usize,
+    oversized: bool = false,
+    writer: Io.Writer = .{ .buffer = &.{}, .vtable = &.{ .drain = drain } },
+
+    fn drain(writer: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
+        const self: *Bounded = @fieldParentPtr("writer", writer);
+        var total: usize = 0;
+        for (data, 0..) |slice, i| {
+            const count = @mulWithOverflow(slice.len, if (i == data.len - 1) splat else 1);
+            const sum = @addWithOverflow(total, count[0]);
+            if (count[1] != 0 or sum[1] != 0 or sum[0] > self.remaining) {
+                self.oversized = true;
+                return error.WriteFailed;
+            }
+            total = sum[0];
+        }
+        const written = try self.sink.writeSplat(data, splat);
+        self.remaining -= written;
+        return written;
+    }
+};
+
+test "fetch bounds count body bytes across writes and reject excess before the file write" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var bounded: Bounded = .{ .sink = &output.writer, .remaining = 432 };
+    try bounded.writer.writeAll(&(@as([176]u8, @splat(1))));
+    var pattern = [_][]const u8{&(@as([128]u8, @splat(2)))};
+    try bounded.writer.writeSplatAll(&pattern, 2);
+    try std.testing.expectEqual(@as(usize, 432), output.written().len);
+    try std.testing.expectError(error.WriteFailed, bounded.writer.writeByte(3));
+    try std.testing.expect(bounded.oversized);
+    try std.testing.expectEqual(@as(usize, 432), output.written().len);
+}
+
+test "fetch bound rejects a whole oversized or overflowing vector" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    var bounded: Bounded = .{ .sink = &output.writer, .remaining = 2 };
+    var vector = [_][]const u8{ "a", "bc" };
+    try std.testing.expectError(error.WriteFailed, bounded.writer.writeSplatAll(&vector, 1));
+    try std.testing.expectEqual(@as(usize, 0), output.written().len);
+    try std.testing.expectError(
+        error.WriteFailed,
+        Bounded.drain(&bounded.writer, &vector, std.math.maxInt(usize)),
+    );
 }
 
 /// reader runs as id in the empty /var/empty, with no network or files and

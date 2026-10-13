@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Supervise an enrolled local swtpm without granting its control socket to a guest."""
+import fcntl
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import sys
+import time
+
+
+def request(directory, message):
+    with socket.socket(socket.AF_UNIX) as client:
+        client.settimeout(15)
+        client.connect(str(directory / 'service.sock'))
+        client.sendall(message.encode())
+        return client.recv(64) == b'OK'
+
+
+def serve(authority, directory):
+    os.umask(0o077)
+    with (authority / 'tpm-service.lock').open('a+b') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Enrollment is deliberately separate; this service never creates TPM state.
+        state = authority / 'swtpm'
+        if not (authority / 'enrolled').is_file() or not (state / 'tpm2-00.permall').is_file():
+            raise ValueError('missing enrolled TPM state')
+        directory.mkdir(mode=0o700, exist_ok=True)
+        stat = directory.lstat()
+        if directory.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o777 != 0o700:
+            raise ValueError('unsafe TPM socket directory')
+        for name in ['service.sock', 'tpm.sock']:
+            (directory / name).unlink(missing_ok=True)
+        process = subprocess.Popen(['swtpm', 'socket', '--tpm2', '--tpmstate', 'dir=' + str(state),
+                                    '--ctrl', 'type=unixio,path=' + str(directory / 'tpm.sock'),
+                                    '--flags', 'not-need-init'], stdin=subprocess.DEVNULL)
+        (authority / 'tpm.pid').write_text(str(process.pid) + '\n')
+        try:
+            until = time.monotonic() + 5
+            while not (directory / 'tpm.sock').exists():
+                if process.poll() is not None or time.monotonic() > until:
+                    raise RuntimeError('swtpm failed to start')
+                time.sleep(0.05)
+            with socket.socket(socket.AF_UNIX) as server:
+                server.bind(str(directory / 'service.sock'))
+                server.listen(2)
+                server.settimeout(1)
+                while process.poll() is None:
+                    try:
+                        connection, _ = server.accept()
+                    except socket.timeout:
+                        continue
+                    with connection:
+                        connection.settimeout(2)
+                        command = connection.recv(64)
+                        if command == b'STOP':
+                            process.terminate()
+                            process.wait(timeout=10)
+                            connection.sendall(b'OK')
+                            return
+                        if command == b'STATUS':
+                            connection.sendall(b'OK')
+                raise RuntimeError('swtpm exited unexpectedly')
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            (authority / 'tpm.pid').unlink(missing_ok=True)
+            for name in ['service.sock', 'tpm.sock']:
+                (directory / name).unlink(missing_ok=True)
+
+
+def main():
+    operation, source, sockets = sys.argv[1:]
+    authority, directory = Path(source).resolve(), Path(sockets)
+    if operation == 'serve':
+        serve(authority, directory)
+        return
+    if operation == 'stop':
+        try:
+            if not request(directory, 'STOP'):
+                raise RuntimeError('TPM service refused shutdown')
+        except (FileNotFoundError, ConnectionRefusedError):
+            # A held service lock means shutdown has not completed; do not remove state.
+            with (authority / 'tpm-service.lock').open('a+b') as guard:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return
+    if operation != 'start':
+        raise ValueError('unknown operation')
+    try:
+        if request(directory, 'STATUS'):
+            return
+    except (FileNotFoundError, ConnectionRefusedError):
+        pass
+    with (authority / 'tpm-service.log').open('ab') as log:
+        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), 'serve',
+                                  str(authority), str(directory)], stdin=subprocess.DEVNULL,
+                                 stdout=log, stderr=log, start_new_session=True)
+    until = time.monotonic() + 8
+    while child.poll() is None and time.monotonic() < until:
+        try:
+            if request(directory, 'STATUS'):
+                return
+        except (FileNotFoundError, ConnectionRefusedError):
+            time.sleep(0.05)
+    raise RuntimeError('TPM service startup failed; inspect tpm-service.log')
+
+
+if __name__ == '__main__':
+    main()

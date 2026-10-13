@@ -1305,8 +1305,8 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
 
     const eng = engine(io, gpa, o.on);
     const on = eng.on;
-    if (o.secure and (on != .lima or dev)) return why.refuse(
-        "--secure requires --on lima and refuses --dev",
+    if (o.secure and ((on != .lima and on != .qemu) or dev)) return why.refuse(
+        "--secure requires --on lima or qemu and refuses --dev",
         .{},
     );
     const tell: Tell = .{
