@@ -249,7 +249,14 @@ pub fn main(init: std.process.Init) !void {
     // bound over, so the rule names the image path. Write on a parent
     // does not cover it. A reader stays read-only here even if the
     // directory's mode is wider.
-    for (s.data) |d| allowPath(l, rules, gpa, d.image, if (d.write) write_tree else read_tree, nodata);
+    for (s.data) |d| allowPath(
+        l,
+        rules,
+        gpa,
+        d.image,
+        if (d.write) write_tree else read_tree,
+        nodata,
+    );
     for (s.run) |p| if (p[p.len - 1] == '/') {
         // Every program beneath an image's directory, as Grafana runs one
         // for each data source: the image is read-only, in the verified root.

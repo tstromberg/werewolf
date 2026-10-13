@@ -99,7 +99,11 @@ fn edit(
             in_options = true;
             found = true;
             try out.appendSlice(gpa, line);
-            for (listen) |a| try out.print(gpa, "\n{s}    <listenAddress>{s}</listenAddress>", .{ indent, a });
+            for (listen) |a| try out.print(
+                gpa,
+                "\n{s}    <listenAddress>{s}</listenAddress>",
+                .{ indent, a },
+            );
             continue;
         }
         if (in_options and std.mem.eql(u8, t, "</options>")) {
@@ -161,7 +165,11 @@ fn replace(io: Io, p: []const u8, data: []const u8) !void {
     const tmp = try std.mem.print(&tmp_buf, ".{s}.tmp", .{base});
     dir.deleteFile(io, tmp) catch {};
     {
-        var f = try dir.createFile(io, tmp, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        var f = try dir.createFile(
+            io,
+            tmp,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
         defer f.close(io);
         try f.writeStreamingAll(io, data);
         try f.sync(io);
@@ -227,11 +235,17 @@ test "option matches the element, not a longer name" {
     const opts = [_]Option{.{ .name = "natEnabled", .value = "false" }};
     try testing.expectEqual(@as(?usize, 0), option(&opts, "<natEnabled>true</natEnabled>"));
     try testing.expectEqual(@as(?usize, null), option(&opts, "<natEnabledX>1</natEnabledX>"));
-    try testing.expectEqual(@as(?usize, null), option(&opts, "<natLeaseMinutes>60</natLeaseMinutes>"));
+    try testing.expectEqual(
+        @as(?usize, null),
+        option(&opts, "<natLeaseMinutes>60</natLeaseMinutes>"),
+    );
 }
 
 test "edit refuses a config without options" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expectError(error.NoOptionsInConfig, edit(arena.allocator(), "<configuration/>\n", &.{}, &.{}));
+    try testing.expectError(
+        error.NoOptionsInConfig,
+        edit(arena.allocator(), "<configuration/>\n", &.{}, &.{}),
+    );
 }

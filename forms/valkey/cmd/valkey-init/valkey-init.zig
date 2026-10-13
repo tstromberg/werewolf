@@ -181,7 +181,8 @@ test "limits stay empty off the network and name the cap on it" {
     const off = try limitsText(gpa, true, 0, "werewolf-check-password");
     defer gpa.free(off);
     try std.testing.expectEqualStrings(
-        "bind 0.0.0.0\nport 6379\nmaxmemory 0\nuser default on >werewolf-check-password ~* &* +@all -@admin\n",
+        "bind 0.0.0.0\nport 6379\nmaxmemory 0\nuser default on >werewolf-check-password ~* &* " ++
+            "+@all -@admin\n",
         off,
     );
     const capped = try limitsText(gpa, true, 64, "werewolf-check-password");

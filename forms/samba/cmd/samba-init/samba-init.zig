@@ -49,7 +49,15 @@ fn run(io: Io, gpa: Allocator) !void {
     // The password file and smbd's sockets live under /run: /data is noexec,
     // and the password file is rewritten from the config on every start.
     // The shares themselves stay on /data.
-    for ([_][]const u8{ data_dir, homes, private_dir, run_dir ++ "/lock", run_dir ++ "/state", run_dir ++ "/cache", run_dir ++ "/ncalrpc" }) |dir| {
+    for ([_][]const u8{
+        data_dir,
+        homes,
+        private_dir,
+        run_dir ++ "/lock",
+        run_dir ++ "/state",
+        run_dir ++ "/cache",
+        run_dir ++ "/ncalrpc",
+    }) |dir| {
         Dir.cwd().createDirPath(io, dir) catch |err| {
             say(io, "{s}: {s}", .{ dir, @errorName(err) });
             return err;
@@ -67,8 +75,16 @@ fn run(io: Io, gpa: Allocator) !void {
         const hash = ntHash(user.password);
         // smbd is not root, so it cannot become this uid. The share forces
         // the samba user, who owns the files.
-        try passwd.print(gpa, "{s}:{d}:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:{s}:[U          ]:LCT-00000001\n", .{ user.name, uid, hash });
-        try accounts.print(gpa, "{s}:x:{d}:{d}::/var/empty:/sbin/nologin\n", .{ user.name, uid, gid });
+        try passwd.print(
+            gpa,
+            "{s}:{d}:XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX:{s}:[U          ]:LCT-00000001\n",
+            .{ user.name, uid, hash },
+        );
+        try accounts.print(
+            gpa,
+            "{s}:x:{d}:{d}::/var/empty:/sbin/nologin\n",
+            .{ user.name, uid, gid },
+        );
     }
     try writePrivate(io, passwd.items);
     try writeRun(io, accounts_name, accounts.items);
@@ -83,7 +99,7 @@ fn parseUsers(gpa: Allocator, raw: []const u8) ![]User {
     var lines = std.mem.splitScalar(u8, raw, '\n');
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        const colon = std.mem.indexOfScalar(u8, line, ':') orelse return error.BadUser;
+        const colon = std.mem.findScalar(u8, line, ':') orelse return error.BadUser;
         const name = line[0..colon];
         const password = line[colon + 1 ..];
         if (!nameOk(name) or !passwordOk(password)) return error.BadUser;
@@ -95,7 +111,8 @@ fn parseUsers(gpa: Allocator, raw: []const u8) ![]User {
 
 fn nameOk(name: []const u8) bool {
     if (name.len == 0 or name.len > 32) return false;
-    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and c != '-') return false;
+    for (name) |c| if (!std.ascii.isAlphanumeric(c) and c != '.' and c != '_' and
+        c != '-') return false;
     return true;
 }
 
@@ -171,7 +188,11 @@ fn writePrivate(io: Io, text: []const u8) !void {
     const tmp = ".smbpasswd.tmp";
     dir.deleteFile(io, tmp) catch {};
     {
-        var f = try dir.createFile(io, tmp, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+        var f = try dir.createFile(
+            io,
+            tmp,
+            .{ .exclusive = true, .permissions = .fromMode(0o600) },
+        );
         defer f.close(io);
         try f.writeStreamingAll(io, text);
         try f.sync(io);
@@ -185,7 +206,11 @@ fn writeRun(io: Io, name: []const u8, text: []const u8) !void {
     const tmp = ".smb.conf.tmp";
     dir.deleteFile(io, tmp) catch {};
     {
-        var f = try dir.createFile(io, tmp, .{ .exclusive = true, .permissions = .fromMode(0o644) });
+        var f = try dir.createFile(
+            io,
+            tmp,
+            .{ .exclusive = true, .permissions = .fromMode(0o644) },
+        );
         defer f.close(io);
         try f.writeStreamingAll(io, text);
         try f.sync(io);
@@ -244,7 +269,11 @@ fn md4(msg: []const u8) [16]u8 {
         const r2 = [_]u5{ 3, 5, 9, 13 };
         const o2 = [_]usize{ 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15 };
         inline for (0..16) |i| {
-            const t = std.math.rotl(u32, a +% ((b & c) | (b & d) | (c & d)) +% x[o2[i]] +% 0x5a827999, r2[i % 4]);
+            const t = std.math.rotl(
+                u32,
+                a +% ((b & c) | (b & d) | (c & d)) +% x[o2[i]] +% 0x5a827999,
+                r2[i % 4],
+            );
             a = d;
             d = c;
             c = b;
@@ -276,17 +305,27 @@ test "the NT hash of password is the one Samba publishes" {
     const gpa = std.testing.allocator;
     const hash = ntHash("password");
     try std.testing.expectEqualStrings("8846F7EAEE8FB117AD06BDD830B7586C", &hash);
-    const users = try parseUsers(gpa, "alice:werewolf-check-password\nbob:werewolf-other-password\n");
+    const users = try parseUsers(
+        gpa,
+        "alice:werewolf-check-password\nbob:werewolf-other-password\n",
+    );
     defer gpa.free(users);
     try std.testing.expectEqual(@as(usize, 2), users.len);
     try std.testing.expectError(error.BadUser, parseUsers(gpa, "alice:short\n"));
     try std.testing.expectError(error.BadUser, parseUsers(gpa, "alice:pass:word1\n"));
-    try std.testing.expectError(error.BadUser, parseUsers(gpa, "alice:werewolf-check-password\nalice:werewolf-other-password\n"));
+    try std.testing.expectError(
+        error.BadUser,
+        parseUsers(gpa, "alice:werewolf-check-password\nalice:werewolf-other-password\n"),
+    );
     const conf = try configText(gpa, users);
     defer gpa.free(conf);
     try std.testing.expect(std.mem.indexOf(u8, conf, "server smb encrypt = required\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, conf, "bind interfaces only = no\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, conf, "smb passwd file = /run/svc/samba/private/smbpasswd\n") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        conf,
+        "smb passwd file = /run/svc/samba/private/smbpasswd\n",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, conf, "valid users = alice\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, conf, "guest ok = no\n") != null);
 }

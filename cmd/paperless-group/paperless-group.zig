@@ -21,7 +21,7 @@ const rtld_next: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))))
 
 fn setErrno(err: linux.E) void {
     const slot = if (builtin.os.tag == .linux) __errno_location() else std.c._errno();
-    slot.* = @intFromEnum(err);
+    slot.* = @backingInt(err);
 }
 
 fn library(path: []const u8) bool {
@@ -39,7 +39,9 @@ fn modeFor(path: [*:0]const u8, flags: c_int, mode: c_uint) c_uint {
 var resolving: bool = false;
 
 fn resolve(comptime name: [*:0]const u8, comptime T: type) ?T {
-    const found = &(struct { var next: ?T = null; }).next;
+    const found = &(struct {
+        var next: ?T = null;
+    }).next;
     if (found.*) |f| return f;
     if (resolving) return null;
     resolving = true;
@@ -66,7 +68,7 @@ fn sysOpenAt(dirfd: usize, path: [*:0]const u8, flags: c_int, mode: c_uint) c_in
     );
     const s: isize = @bitCast(rc);
     if (s < 0) {
-        setErrno(@enumFromInt(@as(u16, @intCast(-s))));
+        setErrno(@fromBackingInt(@intCast(@as(u16, @intCast(-s)))));
         return -1;
     }
     return @intCast(s);
@@ -80,7 +82,13 @@ fn openAs(comptime name: [*:0]const u8, path: [*:0]const u8, flags: c_int, mode:
     return -1;
 }
 
-fn openAtAs(comptime name: [*:0]const u8, dirfd: c_int, path: [*:0]const u8, flags: c_int, mode: c_uint) c_int {
+fn openAtAs(
+    comptime name: [*:0]const u8,
+    dirfd: c_int,
+    path: [*:0]const u8,
+    flags: c_int,
+    mode: c_uint,
+) c_int {
     const mode2 = modeFor(path, flags, mode);
     if (resolve(name, OpenAt)) |f| return f(dirfd, path, flags, mode2);
     if (resolving) return sysOpenAt(@as(usize, @bitCast(@as(isize, dirfd))), path, flags, mode2);
@@ -125,8 +133,17 @@ export fn openat64(dirfd: c_int, path: [*:0]const u8, flags: c_int, mode: c_uint
 }
 
 test "the library's new files are group writable" {
-    try std.testing.expectEqual(@as(c_uint, 0o664), modeFor("/data/svc/paperless/db.sqlite3", o_creat, 0o644));
-    try std.testing.expectEqual(@as(c_uint, 0o664), modeFor("/data/svc/paperless/db.sqlite3-wal", o_creat, 0o644));
+    try std.testing.expectEqual(
+        @as(c_uint, 0o664),
+        modeFor("/data/svc/paperless/db.sqlite3", o_creat, 0o644),
+    );
+    try std.testing.expectEqual(
+        @as(c_uint, 0o664),
+        modeFor("/data/svc/paperless/db.sqlite3-wal", o_creat, 0o644),
+    );
     try std.testing.expectEqual(@as(c_uint, 0o644), modeFor("/tmp/db.sqlite3", o_creat, 0o644));
-    try std.testing.expectEqual(@as(c_uint, 0o644), modeFor("/data/svc/paperless/db.sqlite3", 0, 0o644));
+    try std.testing.expectEqual(
+        @as(c_uint, 0o644),
+        modeFor("/data/svc/paperless/db.sqlite3", 0, 0o644),
+    );
 }

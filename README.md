@@ -4,15 +4,17 @@
 
 Werewolf Linux is an ambitious experiment to create unhackable (yet useful) Linux VMs.
 
-Our goal is to keep application compromises contained; even in the face of vulnerabilities:
-even a webshell running as root shouldn't be vulnerable to most zero-day kernel exploits.
-In our review against the CISA KEV catalog of exploited Linux vulnerabilities - Werewolf
-prevents 49 out of 50 of them by virtue of it's protections.
+Our goal is a declarative, immutable Linux distro so secure that undeclared
+malware (backdoors, exploits) fail to execute. In our review against the CISA
+KEV catalog of exploited Linux vulnerabilities - Werewolf prevent 49 out of 50
+of them by virtue of it's protections.
 
 Think ChromeOS meets OpenBSD: verified, read-only system images, automatic updates,
 a minimal OS and privilege separation. Services get explicit system-call, filesystem
-and network permissions that gaining root cannot remove. Werewolf uses packages
-from Wolfi and Alpine; its own programs are written in Zig.
+and network permissions (pledge) that not even root can remove. It's also designed to
+be auditor friendly, tracking which CVEs were resolved, and which weaknesses remain.
+
+Werewolf uses Wolfi and Alpine packages; its own programs are written in Zig.
 
 ## Try it
 

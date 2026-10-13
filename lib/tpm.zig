@@ -280,10 +280,12 @@ pub const Device = struct {
         };
     }
     pub fn close(d: *Device) void {
+        std.crypto.secureZero(u8, &d.response);
         d.file.close(d.io);
     }
 
     fn call(d: *Device, b: *Bytes) !Read {
+        defer std.crypto.secureZero(u8, &b.data);
         std.mem.writeInt(u32, b.data[2..6], @intCast(b.len), .big);
         try d.file.writeStreamingAll(d.io, b.slice());
         var got = try d.file.readStreaming(d.io, &.{&d.response});
@@ -324,12 +326,21 @@ pub const Device = struct {
     }
 
     /// Host-only enrollment of a fresh TPM; credentials never enter a guest image.
-    pub fn provision(d: *Device, key: apk.Key, initial: Record, credentials: [2][32]u8) !void {
+    pub fn provision(
+        d: *Device,
+        key: apk.Key,
+        initial: Record,
+        credentials: *const [2][32]u8,
+    ) !void {
         const zero: [32]u8 = @splat(0);
         if (!std.mem.eql(u8, &initial.previous, &zero) or
-            !std.mem.eql(u8, &initial.retained, &initial.candidate)) return error.WrongFactoryBootState;
-        for (credentials) |secret|
-            if (std.mem.eql(u8, &secret, &zero)) return error.BadProvisioningCredential;
+            !std.mem.eql(
+                u8,
+                &initial.retained,
+                &initial.candidate,
+            )) return error.WrongFactoryBootState;
+        for (credentials) |*secret|
+            if (std.mem.eql(u8, secret, &zero)) return error.BadProvisioningCredential;
         if (try d.property(0x200) & 5 != 0) return error.TpmAlreadyProvisioned;
         try d.noHierarchyPolicies();
         var b = command(0x17a, &.{}, null);
@@ -343,9 +354,9 @@ pub const Device = struct {
         if (count > 1) return error.BadTpmResponse;
         if (count == 1 and try r.int(u32) == pair_index) return error.TpmAlreadyProvisioned;
         if (r.at != r.data.len) return error.BadTpmResponse;
-        for ([2]u32{ owner, 0x4000000a }, credentials) |hierarchy, secret| {
+        for ([2]u32{ owner, 0x4000000a }, credentials) |hierarchy, *secret| {
             b = command(0x129, &.{hierarchy}, password); // HierarchyChangeAuth
-            b.sized(&secret);
+            b.sized(secret);
             _ = try d.call(&b);
         }
         b = passwordCommand(0x127, &.{0x4000000a}, &credentials[1]); // ClearControl

@@ -26,7 +26,7 @@ extern "c" fn __errno_location() *c_int;
 
 fn setErrno(err: linux.E) void {
     const slot = if (builtin.os.tag == .linux) __errno_location() else std.c._errno();
-    slot.* = @intFromEnum(err);
+    slot.* = @backingInt(err);
 }
 
 const rtld_next: ?*anyopaque = @ptrFromInt(@as(usize, @bitCast(@as(isize, -1))));
@@ -49,7 +49,7 @@ fn parseLine(line: []const u8) ?Found {
     var n: usize = 0;
     var rest = line;
     while (n < 7) {
-        const cut = std.mem.indexOfScalar(u8, rest, ':') orelse {
+        const cut = std.mem.findScalar(u8, rest, ':') orelse {
             f[n] = rest;
             n += 1;
             break;
@@ -142,19 +142,25 @@ fn lookupUid(uid: u32, buf: [*]u8, len: usize, pwd: *Passwd) ?bool {
     return true;
 }
 
-export fn getpwnam_r(name: [*:0]const u8, pwd: *Passwd, buf: [*]u8, len: usize, result: *?*Passwd) c_int {
+export fn getpwnam_r(
+    name: [*:0]const u8,
+    pwd: *Passwd,
+    buf: [*]u8,
+    len: usize,
+    result: *?*Passwd,
+) c_int {
     result.* = null;
     if (lookupName(name, buf, len, pwd)) |ok| {
         if (!ok) {
             setErrno(.RANGE);
-            return @intFromEnum(linux.E.RANGE);
+            return @backingInt(linux.E.RANGE);
         }
         result.* = pwd;
         return 0;
     }
     const next = realName() orelse {
         setErrno(.NOENT);
-        return @intFromEnum(linux.E.NOENT);
+        return @backingInt(linux.E.NOENT);
     };
     return next(name, pwd, buf, len, result);
 }
@@ -164,14 +170,14 @@ export fn getpwuid_r(uid: u32, pwd: *Passwd, buf: [*]u8, len: usize, result: *?*
     if (lookupUid(uid, buf, len, pwd)) |ok| {
         if (!ok) {
             setErrno(.RANGE);
-            return @intFromEnum(linux.E.RANGE);
+            return @backingInt(linux.E.RANGE);
         }
         result.* = pwd;
         return 0;
     }
     const next = realUid() orelse {
         setErrno(.NOENT);
-        return @intFromEnum(linux.E.NOENT);
+        return @backingInt(linux.E.NOENT);
     };
     return next(uid, pwd, buf, len, result);
 }

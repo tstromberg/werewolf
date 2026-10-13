@@ -65,7 +65,12 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
     io.random(&secret);
     const image = try read(io, gpa, image_properties);
     try replace(io, keystore, try std.mem.concat(gpa, u8, &.{ key, "\n", cert }), 0o600);
-    try replace(io, properties, try server(gpa, image, domain, admin, &std.fmt.bytesToHex(secret, .lower)), 0o600);
+    try replace(
+        io,
+        properties,
+        try server(gpa, image, domain, admin, &std.fmt.bytesToHex(secret, .lower)),
+        0o600,
+    );
 
     if (try formatted(io, gpa)) |id| {
         if (wanted) |w| if (!std.mem.eql(u8, w, id)) {
@@ -74,7 +79,11 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
             });
             return error.AnotherCluster;
         };
-        say(io, "server.properties written for {s}:9093; keeping cluster {s} in {s}", .{ domain, id, log_dir });
+        say(
+            io,
+            "server.properties written for {s}:9093; keeping cluster {s} in {s}",
+            .{ domain, id, log_dir },
+        );
         return;
     }
 
@@ -90,7 +99,11 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
     const id = wanted orelse newClusterId(io, &id_buf);
     try format(io, gpa, id, list.items);
     var names: std.ArrayList(u8) = .empty;
-    for (list.items, 0..) |u, i| try names.print(gpa, "{s}{s}", .{ if (i == 0) "" else ", ", u.name });
+    for (list.items, 0..) |u, i| try names.print(
+        gpa,
+        "{s}{s}",
+        .{ if (i == 0) "" else ", ", u.name },
+    );
     say(io, "formatted cluster {s} in {s}, with users {s}; {s} is the super user", .{
         id, log_dir, names.items, admin,
     });
@@ -98,7 +111,13 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
 
 /// server returns server.properties: the image's, then the lines only this
 /// machine can give.
-fn server(gpa: Allocator, image: []const u8, domain: []const u8, admin: []const u8, secret: []const u8) ![]const u8 {
+fn server(
+    gpa: Allocator,
+    image: []const u8,
+    domain: []const u8,
+    admin: []const u8,
+    secret: []const u8,
+) ![]const u8 {
     var w: Io.Writer.Allocating = .init(gpa);
     const o = &w.writer;
     try o.writeAll(image);
@@ -118,7 +137,12 @@ fn server(gpa: Allocator, image: []const u8, domain: []const u8, admin: []const 
 /// formatted returns the cluster ID of the log directory, or null if it
 /// has none yet. A directory made for another node is refused.
 fn formatted(io: Io, gpa: Allocator) !?[]const u8 {
-    const text = Dir.cwd().readFileAlloc(io, meta, gpa, .limited(4 << 10)) catch |err| switch (err) {
+    const text = Dir.cwd().readFileAlloc(
+        io,
+        meta,
+        gpa,
+        .limited(4 << 10),
+    ) catch |err| switch (err) {
         error.FileNotFound => return null,
         else => return err,
     };
@@ -356,10 +380,15 @@ test "server: the image's lines, then the machine's" {
 test "scramArgument: Kafka's salted password for a known salt" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    const a = try scramArgument(arena.allocator(), .{ .name = "app", .password = "pencil-pencil" }, "salt");
+    const a = try scramArgument(
+        arena.allocator(),
+        .{ .name = "app", .password = "pencil-pencil" },
+        "salt",
+    );
     // Python's hashlib.pbkdf2_hmac('sha512', b'pencil-pencil', b'salt', 8192, 64).
     try testing.expectEqualStrings("SCRAM-SHA-512=[name=app,salt=c2FsdA==,saltedpassword=" ++
-        "gN/D31iRgK+ya4O3s3gZ4RqmgmUnph3NwkDRN3Ad8/7ccMh7MGs2wNN6+8Pz+3A3BVl2e7Gi1fQrr54vtorrNA==," ++
+        "gN/D31iRgK+ya4O3s3gZ4RqmgmUnph3NwkDRN3Ad8/7ccMh7MGs2wNN6+8Pz+3A3BVl2e7Gi1fQrr54vtorrNA=" ++
+        "=," ++
         "iterations=8192]", a);
     // No comma inside, which the formatter splits at.
     try testing.expectEqual(3, std.mem.count(u8, a, ","));
@@ -390,7 +419,9 @@ test "users: NAME PASSWORD lines, each name once" {
 }
 
 test "metaProperties: the cluster and node" {
-    const m = try metaProperties("#\nversion=1\nnode.id=1\ncluster.id=MkU3OEVBNTcwNTJENDM2Qg\ndirectory.id=x\n");
+    const m = try metaProperties(
+        "#\nversion=1\nnode.id=1\ncluster.id=MkU3OEVBNTcwNTJENDM2Qg\ndirectory.id=x\n",
+    );
     try testing.expectEqualStrings("MkU3OEVBNTcwNTJENDM2Qg", m.cluster);
     try testing.expectEqualStrings("1", m.node);
     try testing.expectError(error.MetaPropertiesWithoutClusterId, metaProperties("node.id=1\n"));
@@ -398,13 +429,26 @@ test "metaProperties: the cluster and node" {
 
 test "clusterId takes Kafka's IDs alone" {
     try testing.expect(clusterId("MkU3OEVBNTcwNTJENDM2Qg"));
-    for ([_][]const u8{ "", "MkU3OEVBNTcwNTJENDM2Q", "-kU3OEVBNTcwNTJENDM2Qg", "MkU3OEVBNTcwNTJENDM2Q=", "MkU3OEVBNTcwNTJENDM2Q+" }) |bad|
+    for ([_][]const u8{
+        "",
+        "MkU3OEVBNTcwNTJENDM2Q",
+        "-kU3OEVBNTcwNTJENDM2Qg",
+        "MkU3OEVBNTcwNTJENDM2Q=",
+        "MkU3OEVBNTcwNTJENDM2Q+",
+    }) |bad|
         try testing.expect(!clusterId(bad));
 }
 
 test "name and hostname" {
     try testing.expect(name("ops") and name("billing-app"));
-    for ([_][]const u8{ "", "Ops", "-a", "_node", "a;b", "a b" }) |bad| try testing.expect(!name(bad));
+    for ([_][]const u8{
+        "",
+        "Ops",
+        "-a",
+        "_node",
+        "a;b",
+        "a b",
+    }) |bad| try testing.expect(!name(bad));
     try testing.expect(hostname("kafka.corp.example") and hostname("10.0.0.5"));
     for ([_][]const u8{ "", "a b", "a:9093", "a\nb" }) |bad| try testing.expect(!hostname(bad));
 }

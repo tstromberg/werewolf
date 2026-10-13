@@ -56,7 +56,7 @@ jobs:
           make IPE=1 check-ab-qemu
       - name: Protected TPM policy
         run: |
-          make build/host/tpm-policy
+          make build/host/tpm-policy build/host/tpm-bootstrap
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-ab
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-enrollment

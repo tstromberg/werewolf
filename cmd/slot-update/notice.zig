@@ -160,7 +160,14 @@ fn writeItems(gpa: Allocator, w: *std.Io.Writer, n: Notice) !void {
         if (!show_k) continue;
         const tier = tiers.tierOf(n.feed, c.id);
         if (n.brief and tier != n.tier) continue;
-        try addLine(gpa, &items, "linux-virt", strip(k.from), strip(k.to), .{ .id = c.id, .tier = tier });
+        try addLine(
+            gpa,
+            &items,
+            "linux-virt",
+            strip(k.from),
+            strip(k.to),
+            .{ .id = c.id, .tier = tier },
+        );
     }
     for (n.body.advisories) |a| {
         if (!plain(a.id)) continue;
@@ -222,7 +229,8 @@ fn writeItems(gpa: Allocator, w: *std.Io.Writer, n: Notice) !void {
     }
     // The cap can land on a package boundary. The next package is unshown
     // too, so count it here rather than only inside a half-printed one.
-    if (shown < total and readable(n.report)) try w.print("and {d} more in {s}\n", .{ total - shown, n.report });
+    if (shown < total and
+        readable(n.report)) try w.print("and {d} more in {s}\n", .{ total - shown, n.report });
 }
 
 fn writeHeader(w: *std.Io.Writer, item: Item, width: usize) !void {
@@ -496,7 +504,7 @@ test "a long notice names the report and drops an unsafe id" {
     defer arena.deinit();
     const gpa = arena.allocator();
     var cves: [13][]const u8 = undefined;
-    for (&cves, 0..) |*c, i| c.* = try std.fmt.allocPrint(gpa, "CVE-2026-{d:0>4}", .{i});
+    for (&cves, 0..) |*c, i| c.* = try gpa.print("CVE-2026-{d:0>4}", .{i});
     var ids: [14][]const u8 = undefined;
     @memcpy(ids[0..13], &cves);
     ids[13] = "CVE-2026-9\n";
@@ -517,14 +525,18 @@ test "a long notice names the report and drops an unsafe id" {
         .body = body,
     });
     try std.testing.expect(std.mem.indexOf(u8, msg, "werewolf@host") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msg, "and 1 more in /data/svc/autoupdate/reports/x.json") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        msg,
+        "and 1 more in /data/svc/autoupdate/reports/x.json",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "CVE-2026-9") == null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "Security posture: High") != null);
 
     // Twelve lines fill the cap on the first package. The next package
     // still has to be counted.
     var first: [12][]const u8 = undefined;
-    for (&first, 0..) |*c, i| c.* = try std.fmt.allocPrint(gpa, "CVE-2026-{d:0>4}", .{i});
+    for (&first, 0..) |*c, i| c.* = try gpa.print("CVE-2026-{d:0>4}", .{i});
     const split = try text(gpa, .{
         .host = "example",
         .now = 0,
@@ -536,7 +548,11 @@ test "a long notice names the report and drops an unsafe id" {
             .{ .origin = "zlib", .from = "1", .to = "2", .cves = &.{"CVE-2026-0099"} },
         } },
     });
-    try std.testing.expect(std.mem.indexOf(u8, split, "and 1 more in /data/svc/autoupdate/reports/x.json") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        split,
+        "and 1 more in /data/svc/autoupdate/reports/x.json",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, split, "CVE-2026-0099") == null);
     try std.testing.expect(std.mem.indexOf(u8, split, "zlib") == null);
 }

@@ -55,7 +55,15 @@ fn run(io: Io, gpa: Allocator) !void {
         return;
     }
     const change = try formFields(gpa, "admin", "admin", password);
-    const changed = try request(io, gpa, "POST", "/api/v1/user/forceChangePassword", null, form_type, change);
+    const changed = try request(
+        io,
+        gpa,
+        "POST",
+        "/api/v1/user/forceChangePassword",
+        null,
+        form_type,
+        change,
+    );
     if (changed.status != 200) return error.PasswordNotChanged;
     if ((try login(io, gpa, fresh)).len == 0) return error.NewPasswordRefused;
     try mark(io);
@@ -64,7 +72,12 @@ fn run(io: Io, gpa: Allocator) !void {
 
 const form_type = "application/x-www-form-urlencoded";
 
-fn formFields(gpa: Allocator, user: []const u8, password: []const u8, new_password: ?[]const u8) ![]const u8 {
+fn formFields(
+    gpa: Allocator,
+    user: []const u8,
+    password: []const u8,
+    new_password: ?[]const u8,
+) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(gpa, "username=");
     try encode(gpa, &out, user);
@@ -101,7 +114,8 @@ fn login(io: Io, gpa: Allocator, body: []const u8) ![]const u8 {
     const a = parts.next() orelse return error.LoginAnswerNotUnderstood;
     const b = parts.next() orelse return error.LoginAnswerNotUnderstood;
     const c = parts.next() orelse return error.LoginAnswerNotUnderstood;
-    if (parts.next() != null or a.len == 0 or b.len == 0 or c.len == 0) return error.LoginAnswerNotUnderstood;
+    if (parts.next() != null or a.len == 0 or b.len == 0 or
+        c.len == 0) return error.LoginAnswerNotUnderstood;
     return token;
 }
 

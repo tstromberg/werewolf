@@ -93,13 +93,20 @@ fn nameOk(name: []const u8) bool {
 
 fn passwordOk(password: []const u8) bool {
     if (password.len < 8 or password.len > 256) return false;
-    for (password) |c| if (c <= 0x20 or c >= 0x7f or c == '"' or c == '\'' or c == '\\' or c == '#') return false;
+    for (password) |c| if (c <= 0x20 or c >= 0x7f or c == '"' or c == '\'' or c == '\\' or
+        c == '#') return false;
     return true;
 }
 
 /// configText is continuwuity.toml. The administrator is created once,
 /// while RocksDB has not been opened. Registration stays closed.
-fn configText(gpa: Allocator, domain: []const u8, admin: []const u8, password: []const u8, create: bool) ![]u8 {
+fn configText(
+    gpa: Allocator,
+    domain: []const u8,
+    admin: []const u8,
+    password: []const u8,
+    create: bool,
+) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     try buf.print(gpa,
         \\[global]
@@ -126,7 +133,11 @@ fn configText(gpa: Allocator, domain: []const u8, admin: []const u8, password: [
         \\
     , .{ domain, data_dir });
     if (create) {
-        try buf.print(gpa, "admin_execute = [\"users create_user {s} {s}\"]\n", .{ admin, password });
+        try buf.print(
+            gpa,
+            "admin_execute = [\"users create_user {s} {s}\"]\n",
+            .{ admin, password },
+        );
     }
     try buf.print(gpa,
         \\
@@ -140,13 +151,37 @@ fn configText(gpa: Allocator, domain: []const u8, admin: []const u8, password: [
 
 test "the first start names the admin and a later one does not" {
     const gpa = std.testing.allocator;
-    const first = try configText(gpa, "matrix.example.com", "alice", "werewolf-check-password", true);
+    const first = try configText(
+        gpa,
+        "matrix.example.com",
+        "alice",
+        "werewolf-check-password",
+        true,
+    );
     defer gpa.free(first);
-    try std.testing.expect(std.mem.indexOf(u8, first, "server_name = \"matrix.example.com\"\n") != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        first,
+        "server_name = \"matrix.example.com\"\n",
+    ) != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "allow_registration = false\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "admin_execute = [\"users create_user alice werewolf-check-password\"]\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, first, "client = \"https://matrix.example.com\"\n") != null);
-    const again = try configText(gpa, "matrix.example.com", "alice", "werewolf-check-password", false);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        first,
+        "admin_execute = [\"users create_user alice werewolf-check-password\"]\n",
+    ) != null);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        first,
+        "client = \"https://matrix.example.com\"\n",
+    ) != null);
+    const again = try configText(
+        gpa,
+        "matrix.example.com",
+        "alice",
+        "werewolf-check-password",
+        false,
+    );
     defer gpa.free(again);
     try std.testing.expect(std.mem.indexOf(u8, again, "admin_execute") == null);
     try std.testing.expect(!passwordOk("short"));

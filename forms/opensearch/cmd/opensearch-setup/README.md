@@ -26,7 +26,7 @@ script.
 ## Non-Goals
 
 - Changing the password of a running node: the security index on `/data`
-  holds it after the first start ([README](../../README.md#drawbacks)).
+  holds it after the first start ([form notes](../../README.md#known-quirks)).
 - Checking certificates: the security plugin refuses a bad or demo one,
   and says why.
 

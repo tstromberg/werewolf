@@ -5,7 +5,8 @@
 #   make howl             build build/host/howl; make install puts it on PATH
 #   make test             run every unit test, in seconds
 #   make lint             check Zig, YAML and docs; make fix repairs what it can
-#   make hooks            run test, lint and check-sshd before each commit
+#   make install-precommit install the test, lint and local howl run hook
+#   make precommit         run that hook now
 #   make -j check         boot every form and a slot in parallel, and attack each
 #   make check-FORM       check one form; check-shellfree-FORM checks it as shipped
 #   make check-one        boot FORM REPEAT times, to chase a flake
@@ -84,7 +85,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 .DELETE_ON_ERROR:
 
 # A target named _NAME is a step of another target.
-.PHONY: all install uninstall install-deps precommit hooks image slot disk bite-me list-forms test \
+.PHONY: all install uninstall install-deps install-precommit precommit hooks image slot disk bite-me list-forms test \
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
@@ -96,9 +97,9 @@ install-deps:
 	@tools/install-deps
 precommit:
 	@tools/git-hooks/pre-commit
-hooks:
+install-precommit hooks:
 	git config core.hooksPath tools/git-hooks
-	@echo "hooks: git runs tools/git-hooks/pre-commit before each commit: test, lint, check-sshd"
+	@echo "pre-commit installed: test, lint, and a local howl run"
 
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
 HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
@@ -274,7 +275,7 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/tpm-bootstrap.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
@@ -292,6 +293,10 @@ _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+_test/lib/tpm-bootstrap.zig: ; zig test --dep apk -Mroot=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+build/host/tpm-bootstrap: tools/tpm-bootstrap.zig lib/tpm-bootstrap.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
+	@mkdir -p $(dir $@)
+	zig build-exe -O ReleaseSafe --dep bootstrap --dep apk --dep tpm -Mroot=$< --dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
 build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe --dep apk --dep tpm -Mroot=$< --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@

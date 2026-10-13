@@ -248,7 +248,10 @@ fn servicesLeashed(p: *Posture) !void {
         else |_|
             0;
         const allowed: u64 = (1 << linux.CAP.NET_BIND_SERVICE) | named;
-        if (whyNotLeashed(status, allowed)) |why| try listAdd(p.gpa, &bad, "{s} {s}", .{ name, why });
+        if (whyNotLeashed(
+            status,
+            allowed,
+        )) |why| try listAdd(p.gpa, &bad, "{s} {s}", .{ name, why });
     }
     try p.add(.{
         .id = "processes-services-leashed",
@@ -440,12 +443,16 @@ test whyNotLeashed {
         "CapEff:\t0000000000000400\nCapBnd:\t0000000000000400\nCapAmb:\t0000000000000400\nNoNewP" ++
         "rivs:\t1\n";
     try testing.expectEqual(null, whyNotLeashed(ok, bind));
-    try testing.expectEqualStrings("runs as root", whyNotLeashed("Uid:\t200\t0\t200\t200\n", bind).?);
+    try testing.expectEqualStrings(
+        "runs as root",
+        whyNotLeashed("Uid:\t200\t0\t200\t200\n", bind).?,
+    );
     const caps = "Uid:\t70\t70\t70\t70\nCapInh:\t0\nCapPrm:\t0\nCapEff:\t0\nCapBnd:\t000001fffff" ++
         "fffff\nCapAmb:\t0\nNoNewPrivs:\t1\n";
     try testing.expectEqualStrings("has capabilities", whyNotLeashed(caps, bind).?);
     const packet: u64 = service.cap.net_raw | service.cap.net_admin;
-    const scan = "Uid:\t70\t70\t70\t70\nCapInh:\t3000\nCapPrm:\t3000\nCapEff:\t3000\nCapBnd:\t3000\n" ++
+    const scan = "Uid:\t70\t70\t70\t70\nCapInh:\t3000\nCapPrm:\t3000\nCapEff:\t3000\nCapBnd:\t30" ++
+        "00\n" ++
         "CapAmb:\t3000\nNoNewPrivs:\t1\n";
     try testing.expectEqual(null, whyNotLeashed(scan, bind | packet));
     try testing.expectEqualStrings("has capabilities", whyNotLeashed(scan, bind).?);

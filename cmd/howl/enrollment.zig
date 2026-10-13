@@ -84,6 +84,7 @@ pub fn provision(
     const credentials = try gpa.print("{s}/credentials", .{dir});
     try Dir.cwd().createDir(io, credentials, .fromMode(0o700));
     var secrets: [2][32]u8 = undefined;
+    defer std.crypto.secureZero(u8, std.mem.asBytes(&secrets));
     for ([2][]const u8{ "owner.auth", "lockout.auth" }, &secrets) |name, *secret| {
         try io.randomSecure(secret);
         try durable(io, try gpa.print("{s}/{s}", .{ credentials, name }), secret);
@@ -134,7 +135,7 @@ pub fn provision(
             .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } },
         };
         defer device.close();
-        try device.provision(key, initial, secrets);
+        try device.provision(key, initial, &secrets);
     }
     const ended = try child.wait(io);
     if (ended != .exited or ended.exited != 0) return error.TpmShutdownFailed;

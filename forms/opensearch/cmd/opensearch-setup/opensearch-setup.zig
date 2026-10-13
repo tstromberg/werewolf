@@ -146,7 +146,11 @@ test "internalUsers holds admin alone, by its hash" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const y = try internalUsers(arena.allocator(), "$2b$12$abc/def");
-    try testing.expect(std.mem.find(u8, y, "admin:\n  hash: \"$2b$12$abc/def\"\n  reserved: true\n") != null);
+    try testing.expect(std.mem.find(
+        u8,
+        y,
+        "admin:\n  hash: \"$2b$12$abc/def\"\n  reserved: true\n",
+    ) != null);
     try testing.expectEqual(1, std.mem.count(u8, y, "hash:"));
 }
 

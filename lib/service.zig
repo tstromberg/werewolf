@@ -305,13 +305,22 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
                     cap.net_admin
                 else
                     return invalid(bad, "caps takes net_raw and net_admin, each once");
-                if (caps & bit != 0) return invalid(bad, "caps takes net_raw and net_admin, each once");
+                if (caps & bit != 0) return invalid(
+                    bad,
+                    "caps takes net_raw and net_admin, each once",
+                );
                 caps |= bit;
             }
         } else if (std.mem.eql(u8, key, "data")) {
-            if (args.len != 3) return invalid(bad, "data takes a host path, an image path, and read or write");
+            if (args.len != 3) return invalid(
+                bad,
+                "data takes a host path, an image path, and read or write",
+            );
             if (!isSharePath(args[0]))
-                return invalid(bad, "data's host path is /data/share/NAME/ and a directory beneath");
+                return invalid(
+                    bad,
+                    "data's host path is /data/share/NAME/ and a directory beneath",
+                );
             if (!isCleanPath(args[1]))
                 return invalid(bad, "data's image path must be absolute, without . or .. or //");
             const writable = if (std.mem.eql(u8, args[2], "write"))
@@ -787,9 +796,18 @@ test "parse refuses" {
         .{ .text = "exec /a\nuser x\npledge stdio\ncaps net_raw net_raw", .line = 4 },
         .{ .text = "exec /a\nuser x\npledge stdio\nconnect any\nconnect any", .line = 5 },
         .{ .text = "exec /a\nuser x\npledge stdio\ndata /data/share/gvm/vt /x write", .line = 0 },
-        .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/svc/a /x write", .line = 5 },
-        .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/share/gvm /x write", .line = 5 },
-        .{ .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/share/gvm/vt /x maybe", .line = 5 },
+        .{
+            .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/svc/a /x write",
+            .line = 5,
+        },
+        .{
+            .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/share/gvm /x write",
+            .line = 5,
+        },
+        .{
+            .text = "exec /a\nuser x\npledge stdio\nroot /oci/a\ndata /data/share/gvm/vt /x maybe",
+            .line = 5,
+        },
     };
     for (cases) |c| {
         var bad: Bad = .{};

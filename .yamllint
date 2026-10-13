@@ -1,7 +1,15 @@
 ---
 extends: default
 
-ignore-from-file: .gitignore
+ignore:
+  - build/
+  - config/
+  - dist/
+  - out/
+  # Rendered as a Go template before Authelia reads it.
+  - forms/authelia/rootfs/etc/authelia/configuration.yml
+  # Upstream's Suricata configuration is kept intact; it has nonstandard indentation.
+  - forms/suricata/rootfs/usr/share/suricata/suricata.yaml
 
 rules:
   braces:

@@ -1386,6 +1386,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
             try chain(io, gpa, o.form, why),
             name,
             yes or on.here(),
+            o.local,
         );
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);

@@ -276,7 +276,10 @@ fn coreConfig(gpa: Allocator, s: Settings) ![]const u8 {
             .unit_system_v2 = s.unit_system,
             .location_name = "Home",
             .time_zone = s.time_zone,
-            .external_url = if (s.domain) |d| try std.mem.concat(gpa, u8, &.{ "https://", d }) else null,
+            .external_url = if (s.domain) |d|
+                try std.mem.concat(gpa, u8, &.{ "https://", d })
+            else
+                null,
             .internal_url = null,
             .currency = "EUR",
             .country = s.country,
