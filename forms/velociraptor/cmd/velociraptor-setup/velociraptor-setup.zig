@@ -47,10 +47,9 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
     } else |_| {
         try writeFile(io, merge_path, try merge(gpa, domain));
         const generated = try capture(io, gpa, &.{
-            bin,                 "--nobanner", "--no-interactive",
-            "--tempdir",         run_dir,
-            "config",            "generate",
-            "--merge_file",      merge_path,
+            bin,         "--nobanner",   "--no-interactive",
+            "--tempdir", run_dir,        "config",
+            "generate",  "--merge_file", merge_path,
         });
         if (!std.mem.startsWith(u8, std.mem.trimStart(u8, generated, " \t\r\n"), "version:"))
             return error.ConfigNotGenerated;

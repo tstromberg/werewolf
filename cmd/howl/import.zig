@@ -74,7 +74,11 @@ fn stageFiles(io: Io, gpa: Allocator, src: []const u8, stage: []const u8, why: *
                 const one = try from.statFile(io, e.name, .{ .follow_symlinks = false });
                 if (one.permissions.toMode() & 0o6000 != 0)
                     return why.refuse("--import {s}: {s} is setuid or setgid", .{ src, e.name });
-                try copyFile(io, try gpa.print("{s}/{s}", .{ src, e.name }), try gpa.print("{s}/{s}", .{ stage, e.name }));
+                try copyFile(
+                    io,
+                    try gpa.print("{s}/{s}", .{ src, e.name }),
+                    try gpa.print("{s}/{s}", .{ stage, e.name }),
+                );
                 n += 1;
             },
             .sym_link => return why.refuse("--import {s}: {s} is a symlink", .{ src, e.name }),

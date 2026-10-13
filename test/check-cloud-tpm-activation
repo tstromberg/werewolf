@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Validate proposed cloud activation policy with independent TPM tools."""
 from contextlib import contextmanager
+import hashlib
 import os
 from pathlib import Path
 import subprocess
 import tempfile
 import time
+
+probe = Path(os.environ.get('TPM_BOOTSTRAP_PROBE', 'build/host/tpm-bootstrap')).resolve()
+policy_probe = Path(os.environ.get('TPM_POLICY_PROBE', 'build/host/tpm-policy')).resolve()
 
 
 @contextmanager
@@ -57,6 +61,10 @@ def exercise(root, env):
     run('tpm2_startauthsession', '-S', 'trial.ctx')
     run('tpm2_policyor', '-Q', '-S', 'trial.ctx', '-l', branches, '-L', 'policy.bin')
     run('tpm2_flushcontext', 'trial.ctx')
+    if not probe.is_file():
+        raise RuntimeError('build the native probe: make build/host/tpm-bootstrap')
+    expected = b''.join((root / f).read_bytes() for f in ['quote.policy', 'activate.policy', 'policy.bin'])
+    assert run(probe, 'policy', 'expected.pcr').stdout == expected
     run('tpm2_createek', '-Q', '-c', '0x81010001', '-G', 'rsa', '-u', 'ek.pub')
 
     def parent():
@@ -83,7 +91,9 @@ def exercise(root, env):
         run('tpm2_policyor', '-Q', '-S', 'akpol.ctx', '-l', branches)
 
     policy('TPM2_CC_Quote')
-    nonce = os.urandom(32).hex()
+    (root / 'context').write_bytes(bytes.fromhex('aa' * 32 + 'bb' * 32) +
+                                 (root / 'expected.pcr').read_bytes() + os.urandom(32))
+    nonce = run(probe, 'challenge', 'context').stdout.hex()
     run('tpm2_quote', '-Q', '-c', '0x81010002', '-p', 'session:akpol.ctx', '-l', 'sha256:11',
         '-q', nonce, '-m', 'quote.msg', '-s', 'quote.sig', '-o', 'quote.pcr', '-g', 'sha256')
     run('tpm2_flushcontext', 'akpol.ctx')
@@ -96,6 +106,23 @@ def exercise(root, env):
     quote('00' * 32, success=False)
     (root / 'wrong.pcr').write_bytes(bytes.fromhex('33' * 32))
     quote(nonce, 'wrong.pcr', success=False)
+    run('tpm2_readpublic', '-Q', '-c', '0x81010001', '-f', 'pem', '-o', 'ek.pem')
+    verify = [probe, 'verify', 'context', 'ek.pem', 'ek.pub', 'ak.pub', 'quote.msg', 'quote.sig']
+    run(*verify)
+    if os.environ.get('TPM_BOOTSTRAP_FIXTURES'):
+        directory = Path(os.environ['TPM_BOOTSTRAP_FIXTURES'])
+        directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+        for name in ['context', 'ek.pem', 'ek.pub', 'ak.pub', 'quote.msg', 'quote.sig']:
+            (directory / name).write_bytes((root / name).read_bytes())
+    original = (root / 'ak.pub').read_bytes()
+    changed = bytearray(original)
+    changed[9] ^= 0x40  # Adding userWithAuth must not permit empty-auth activation.
+    (root / 'weak-ak.pub').write_bytes(changed)
+    run(*verify[:5], 'weak-ak.pub', *verify[6:], success=False)
+    for size in range(len(original)):
+        (root / 'truncated-ak.pub').write_bytes(original[:size])
+        run(*verify[:5], 'truncated-ak.pub', *verify[6:], success=False)
+    print('pass   native cloud attestation: independent policy/quote match; weak and truncated templates refused')
     secret = os.urandom(32)
     (root / 'secret').write_bytes(secret)
     name = (root / 'ak.name').read_bytes().hex()
@@ -142,6 +169,33 @@ def exercise(root, env):
         flush()
     print('pass   cloud TPM activation: wrong AK identity and corrupted capsule refused')
 
+    # Native host wrapping must interoperate with the independent TPM client.
+    (root / 'reset.credentials').write_bytes(os.urandom(64))
+    run('openssl', 'genrsa', '-out', 'capsule-sign.key', '2048')
+    run('openssl', 'pkey', '-in', 'capsule-sign.key', '-pubout', '-out', 'capsule-sign.pub')
+    run(probe, 'wrap', *verify[2:], 'reset.credentials', 'capsule-sign.key', 'capsule-sign.pub', 'native.bundle')
+    bundle = (root / 'native.bundle').read_bytes()
+    header = len(b'werewolf.enroll/1\0')
+    assert len(bundle) == header + 328 + 92 + 2 + 256
+    (root / 'native.credential').write_bytes((root / 'capsule').read_bytes()[:8] +
+                                           bundle[header:header + 328])
+    parent()
+    policy()
+    activate('native.credential', 'native.key')
+    flush()
+    check = [probe, 'check-capsule', 'context', 'ek.pem', 'ak.pub', 'native.key',
+             'native.bundle', 'reset.credentials', 'capsule-sign.pub']
+    run(*check)
+    changed = bytearray(bundle)
+    changed[-1] ^= 1
+    (root / 'corrupted.bundle').write_bytes(changed)
+    run(*check[:6], 'corrupted.bundle', *check[7:], success=False)
+    changed = bytearray((root / 'context').read_bytes())
+    changed[0] ^= 1
+    (root / 'foreign.context').write_bytes(changed)
+    run(check[0], check[1], 'foreign.context', *check[3:], success=False)
+    print('pass   native cloud capsule: independent TPM activation, authenticated reset credentials and tamper refusals')
+
     run('tpm2_pcrextend', '-Q', '11:sha256=' + '22' * 32)
     run('tpm2_startauthsession', '--policy-session', '-S', 'bad.ctx')
     run('tpm2_policypcr', '-Q', '-S', 'bad.ctx', '-l', 'sha256:11',
@@ -157,6 +211,108 @@ def main():
         root = Path(temporary)
         with simulator(root) as env:
             exercise(root, env)
+        nested = root / 'native'
+        nested.mkdir()
+        with simulator(nested) as env:
+            native_guest(nested, env)
+
+
+def native_guest(root, env):
+    def run(*args, success=True):
+        result = subprocess.run(list(map(str, args)), cwd=root, env=env,
+                                capture_output=True, timeout=20)
+        if (result.returncode == 0) != success:
+            raise RuntimeError(str(args) + ': ' + result.stderr.decode(errors='replace'))
+        return result
+
+    run('tpm2_pcrextend', '-Q', '11:sha256=' + '11' * 32)
+    run('tpm2_pcrread', '-Q', 'sha256:11', '-o', 'expected.pcr')
+    run('tpm2_createek', '-Q', '-c', '0x81010001', '-G', 'rsa', '-u', 'ek.pub')
+    run('tpm2_readpublic', '-Q', '-c', '0x81010001', '-f', 'pem', '-o', 'ek.pem')
+    run('openssl', 'genrsa', '-out', 'permit.key', '2048')
+    run('openssl', 'pkey', '-in', 'permit.key', '-pubout', '-out', 'permit.pub')
+    state = b'werewolf.boot/2\0' + bytes.fromhex('42' * 32 + '00' * 32 + 'aa' * 64 + '11' * 32)
+    (root / 'factory.state').write_bytes(state)
+    run(policy_probe, 'permit-pair', 'permit.pub', 'factory.state', 'factory.message')
+    run('openssl', 'dgst', '-sha256', '-sign', 'permit.key', '-out', 'factory.sig', 'factory.message')
+    factory = state + (root / 'factory.sig').read_bytes()
+    (root / 'factory.permit').write_bytes(factory)
+    (root / 'context').write_bytes(bytes.fromhex('42' * 32) + hashlib.sha256(factory).digest() +
+                                 (root / 'expected.pcr').read_bytes() + os.urandom(32))
+    (root / 'reset.credentials').write_bytes(os.urandom(64))
+    endpoint = 'unix:' + str(root / 'tpm.sock')
+    command = [str(probe), 'guest-probe', 'context', endpoint, 'permit.pub', 'factory.permit']
+    run('openssl', 'genrsa', '-out', 'attacker.key', '2048')
+    run('openssl', 'pkey', '-in', 'attacker.key', '-pubout', '-out', 'attacker.pub')
+
+    def exchange(kind):
+        guest = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            def read(count):
+                raw = guest.stdout.read(count)
+                if len(raw) != count:
+                    raise RuntimeError('native guest failed: ' + guest.stderr.read().decode(errors='replace'))
+                return raw
+            assert read(8) == b'WWENROL1'
+            fields = {}
+            for name in ['native.ek', 'native.ak', 'native.quote', 'native.signature']:
+                size = int.from_bytes(read(2), 'big')
+                assert size <= 1024
+                fields[name] = read(size)
+                (root / name).write_bytes(fields[name])
+            nonce = run(probe, 'challenge', 'context').stdout.hex()
+            run('tpm2_checkquote', '-Q', '-u', 'native.ak', '-m', 'native.quote',
+                '-s', 'native.signature', '-f', 'expected.pcr', '-l', 'sha256:11',
+                '-g', 'sha256', '-q', nonce)
+            output = 'bundle-' + kind
+            sender = 'attacker' if kind == 'foreign-signer' else 'permit'
+            run(probe, 'wrap', 'context', 'ek.pem', 'native.ek', 'native.ak',
+                'native.quote', 'native.signature', 'reset.credentials', sender + '.key', sender + '.pub', output)
+            capsule = bytearray((root / output).read_bytes())
+            if kind == 'corrupted':
+                capsule[-1] ^= 1
+            elif kind == 'bad-aead':
+                capsule[437] ^= 1
+                message = b'werewolf.enroll.capsule/1\0' + bytes.fromhex(nonce) + capsule[:438]
+                (root / 'corrupted.message').write_bytes(message)
+                run('openssl', 'dgst', '-sha256', '-sign', 'permit.key', '-out',
+                    'corrupted.signature', 'corrupted.message')
+                capsule = capsule[:438] + b'\x01\x00' + (root / 'corrupted.signature').read_bytes()
+            elif kind == 'unsigned':
+                capsule = capsule[:438]
+            elif kind == 'truncated':
+                capsule = capsule[:-1]
+            elif kind == 'oversized':
+                capsule += b'x'
+            guest.stdin.write(capsule)
+            guest.stdin.close()
+            guest.stdin = None
+            receipt, error = guest.communicate(timeout=20)
+            if kind != 'valid':
+                assert guest.returncode != 0 and not receipt, error
+                expected_error = (b'AuthenticationFailed' if kind == 'bad-aead' else
+                                  b'BadEnrollmentSignature' if kind in ['corrupted', 'foreign-signer'] else
+                                  b'BadEnrollmentCapsule')
+                assert expected_error in error, error
+            else:
+                assert guest.returncode == 0, error.decode(errors='replace')
+                expected = hashlib.sha256(state[48:80] + hashlib.sha256(state).digest()).digest()
+                assert receipt == expected
+                run('tpm2_nvread', '-Q', '-C', '0x01500021', '-s', '32', '-o',
+                    'independent.anchor', '0x01500021')
+                assert (root / 'independent.anchor').read_bytes() == expected
+        finally:
+            if guest.poll() is None:
+                guest.kill()
+            guest.communicate(timeout=10)
+
+    for kind in ['corrupted', 'bad-aead', 'foreign-signer', 'unsigned', 'truncated', 'oversized', 'valid']:
+        exchange(kind)
+    replay = run(*command, success=False)
+    assert not replay.stdout
+    assert b'TpmAlreadyProvisioned' in replay.stderr
+    print('pass   native guest bootstrap: encrypted exchange, malformed-capsule refusal, protected readback and replay refusal')
 
 
 if __name__ == '__main__':

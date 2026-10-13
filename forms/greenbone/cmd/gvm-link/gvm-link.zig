@@ -35,7 +35,11 @@ fn run(io: Io, gpa: Allocator) !void {
     const gvmd = try groupIn(groups, gvmd_group);
     const gsad = try groupIn(groups, gsad_group);
     const listen_fd = try bindListen(cfg.listen, me.uid, gsad);
-    say(io, "{{\"event\":\"start\",\"listen\":\"{s}\",\"dial\":\"{s}\"}}", .{ cfg.listen, cfg.dial });
+    say(
+        io,
+        "{{\"event\":\"start\",\"listen\":\"{s}\",\"dial\":\"{s}\"}}",
+        .{ cfg.listen, cfg.dial },
+    );
     try sandbox.dropWith(me.uid, null, &.{gvmd});
     var filter: sandbox.Filter = .{};
     inline for ([_][]const u8{
@@ -151,7 +155,7 @@ fn parse(text: []const u8) !Config {
     while (lines.next()) |raw| {
         const line = std.mem.trim(u8, raw, " \t\r");
         if (line.len == 0 or line[0] == '#') continue;
-        const sp = std.mem.indexOfScalar(u8, line, ' ') orelse return error.BadConfig;
+        const sp = std.mem.findScalar(u8, line, ' ') orelse return error.BadConfig;
         const key = line[0..sp];
         const value = std.mem.trim(u8, line[sp + 1 ..], " \t");
         if (value.len == 0 or value[0] != '/' or value.len > 108) return error.BadConfig;

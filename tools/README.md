@@ -106,4 +106,6 @@ DIR, but only a howl that answers as werewolf's does.
 
 ## git-hooks
 
-`make hooks` points git here. pre-commit runs the unit tests, lint and check-sshd.
+`make install-precommit` points git here. pre-commit runs the unit tests, lint
+and a small `howl run --build` boot, stopping the machine afterwards. If
+`werewolf-run` already exists, it boots and removes a temporary machine instead.

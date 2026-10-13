@@ -223,7 +223,11 @@ pub fn check(p: *Posture) !void {
 /// fenceBypass reports whether PID 1's bounding set retains a capability
 /// that can send traffic outside Fence's policy.
 fn fenceBypass(status: []const u8) ?bool {
-    const admin = posture.capBit(status, "CapBnd", @intCast(linux.CAP.NET_ADMIN)) orelse return null;
+    const admin = posture.capBit(
+        status,
+        "CapBnd",
+        @intCast(linux.CAP.NET_ADMIN),
+    ) orelse return null;
     const raw = posture.capBit(status, "CapBnd", @intCast(linux.CAP.NET_RAW)) orelse return null;
     return admin or raw;
 }

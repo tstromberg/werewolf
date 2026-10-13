@@ -22,6 +22,7 @@ pub fn offer(
     chain: []const forms.Form,
     name: []const u8,
     yes: bool,
+    local_build: bool,
 ) !?[]const u8 {
     if (!forms.runsSshd(chain)) return null;
     const key_files = forms.takesKeyFiles(gpa, chain) catch false;
@@ -64,7 +65,7 @@ pub fn offer(
             return null;
         }
     }
-    howl.say(io, "root on {s} takes {s}", .{ name, files });
+    if (!local_build) howl.say(io, "root on {s} takes {s}", .{ name, files });
     return try mem.concat(gpa, u8, found.lines);
 }
 

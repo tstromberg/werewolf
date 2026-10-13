@@ -47,7 +47,10 @@ fn note(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) callconv
     // si_addr is the faulting instruction. The context's pc is printed
     // too: a wrong offset must not be the only address on the line.
     const fault: u64 = @intFromPtr(info.fields.sigfault.addr);
-    const pc: u64 = if (ctx) |c| std.mem.readInt(u64, @as([*]const u8, @ptrCast(c))[pc_at..][0..8], .little) else 0;
+    const pc: u64 = if (ctx) |c|
+        std.mem.readInt(u64, @as([*]const u8, @ptrCast(c))[pc_at..][0..8], .little)
+    else
+        0;
     var buf: [512]u8 = undefined;
     writeOut(format(&buf, @backingInt(sig), info.code, fault, pc, null));
     const maps = loadMaps();
@@ -70,7 +73,11 @@ fn writeOut(line: []const u8) void {
         if (path.len + 1 > zbuf.len) return;
         @memcpy(zbuf[0..path.len], path);
         zbuf[path.len] = 0;
-        const fd = linux.open(zbuf[0..path.len :0], .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true }, 0o644);
+        const fd = linux.open(
+            zbuf[0..path.len :0],
+            .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true, .CLOEXEC = true },
+            0o644,
+        );
         if (linux.errno(fd) != .SUCCESS) return;
         _ = linux.write(@intCast(fd), line.ptr, line.len);
         _ = linux.close(@intCast(fd));
@@ -94,9 +101,15 @@ fn crashPath() ?[]const u8 {
 fn format(buf: []u8, sig: u32, code: i32, addr: u64, pc: u64, esr: ?u64) []u8 {
     var w: std.Io.Writer = .fixed(buf);
     if (esr) |e| {
-        w.print("crash-log: signal {d} code {d} addr 0x{x} pc 0x{x} esr 0x{x}\n", .{ sig, code, addr, pc, e }) catch return buf[0..0];
+        w.print(
+            "crash-log: signal {d} code {d} addr 0x{x} pc 0x{x} esr 0x{x}\n",
+            .{ sig, code, addr, pc, e },
+        ) catch return buf[0..0];
     } else {
-        w.print("crash-log: signal {d} code {d} addr 0x{x} pc 0x{x}\n", .{ sig, code, addr, pc }) catch return buf[0..0];
+        w.print(
+            "crash-log: signal {d} code {d} addr 0x{x} pc 0x{x}\n",
+            .{ sig, code, addr, pc },
+        ) catch return buf[0..0];
     }
     return w.buffered();
 }
@@ -134,7 +147,7 @@ fn mapFor(pc: u64, maps: []const u8, buf: []u8) []u8 {
 
 fn insnLine(addr: u64, maps: []const u8, buf: []u8) []u8 {
     const line = covering(maps, addr) orelse return buf[0..0];
-    const sp = std.mem.indexOfScalar(u8, line, ' ') orelse return buf[0..0];
+    const sp = std.mem.findScalar(u8, line, ' ') orelse return buf[0..0];
     if (sp + 1 >= line.len or line[sp + 1] != 'r' or addr % 4 != 0) return buf[0..0];
     const word = @as(*const u32, @ptrFromInt(addr)).*;
     var w: std.Io.Writer = .fixed(buf);
@@ -151,7 +164,7 @@ fn firstExec(ctx: ?*anyopaque, maps: []const u8, buf: []u8) []u8 {
     while (off + 8 <= 1024) : (off += 8) {
         const v = std.mem.readInt(u64, raw[off..][0..8], .little);
         const line = covering(maps, v) orelse continue;
-        const sp = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
+        const sp = std.mem.findScalar(u8, line, ' ') orelse continue;
         if (sp + 3 >= line.len or line[sp + 3] != 'x') continue;
         var w: std.Io.Writer = .fixed(buf);
         const shown = line[0..@min(line.len, 180)];
@@ -164,10 +177,10 @@ fn firstExec(ctx: ?*anyopaque, maps: []const u8, buf: []u8) []u8 {
 fn covering(maps: []const u8, pc: u64) ?[]const u8 {
     var it = std.mem.splitScalar(u8, maps, '\n');
     while (it.next()) |line| {
-        const dash = std.mem.indexOfScalar(u8, line, '-') orelse continue;
+        const dash = std.mem.findScalar(u8, line, '-') orelse continue;
         const start = std.fmt.parseInt(u64, line[0..dash], 16) catch continue;
         const rest = line[dash + 1 ..];
-        const sp = std.mem.indexOfScalar(u8, rest, ' ') orelse continue;
+        const sp = std.mem.findScalar(u8, rest, ' ') orelse continue;
         const end = std.fmt.parseInt(u64, rest[0..sp], 16) catch continue;
         if (pc >= start and pc < end) return line;
     }
@@ -183,7 +196,10 @@ test "format names the signal and the pc" {
 test "format keeps an esr" {
     var buf: [128]u8 = undefined;
     const line = format(&buf, 4, 1, 0x10, 0x20, 0x34000000);
-    try std.testing.expectEqualStrings("crash-log: signal 4 code 1 addr 0x10 pc 0x20 esr 0x34000000\n", line);
+    try std.testing.expectEqualStrings(
+        "crash-log: signal 4 code 1 addr 0x10 pc 0x20 esr 0x34000000\n",
+        line,
+    );
 }
 
 test "covering finds the mapping that holds the pc" {

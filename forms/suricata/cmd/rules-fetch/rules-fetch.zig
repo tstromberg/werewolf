@@ -93,7 +93,12 @@ fn refresh(io: Io, gpa: Allocator) !void {
     try mkdir(io, rules_dir);
     try copyImageRules(io, gpa);
     if (!exists(io, emerging)) try writeFile(io, emerging, stub);
-    const extra = Dir.cwd().readFileAlloc(io, cache_class, gpa, .limited(max_class)) catch |err| switch (err) {
+    const extra = Dir.cwd().readFileAlloc(
+        io,
+        cache_class,
+        gpa,
+        .limited(max_class),
+    ) catch |err| switch (err) {
         error.FileNotFound => "",
         else => return err,
     };
@@ -209,7 +214,7 @@ fn expand(gpa: Allocator, reader: *Io.Reader, rules: *Io.Writer) ![]u8 {
 /// wanted classifies one tar name. null is a file the feed ships and
 /// the engine does not load. BadName is a name that could leave rules/.
 fn wanted(name: []const u8) !?Kind {
-    if (name.len == 0 or name[0] == '/' or std.mem.indexOfScalar(u8, name, '\\') != null)
+    if (name.len == 0 or name[0] == '/' or std.mem.findScalar(u8, name, '\\') != null)
         return error.BadName;
     var it = std.mem.splitScalar(u8, name, '/');
     while (it.next()) |part| {
@@ -232,7 +237,7 @@ fn copyImageRules(io: Io, gpa: Allocator) !void {
         if (e.kind != .file) continue;
         if (!std.mem.endsWith(u8, e.name, ".rules")) continue;
         if (std.mem.eql(u8, e.name, "emerging.rules")) continue;
-        if (std.mem.indexOfScalar(u8, e.name, '/') != null) return error.BadName;
+        if (std.mem.findScalar(u8, e.name, '/') != null) return error.BadName;
         const src = try gpa.print(image_rules ++ "/{s}", .{e.name});
         const data = try Dir.cwd().readFileAlloc(io, src, gpa, .limited(max_one));
         const dest = try gpa.print(rules_dir ++ "/{s}", .{e.name});
@@ -266,7 +271,7 @@ fn shortName(line: []const u8) ?[]const u8 {
     const prefix = "config classification:";
     if (!std.mem.startsWith(u8, line, prefix)) return null;
     const rest = std.mem.trim(u8, line[prefix.len..], " \t");
-    const comma = std.mem.indexOfScalar(u8, rest, ',') orelse return null;
+    const comma = std.mem.findScalar(u8, rest, ',') orelse return null;
     if (comma == 0) return null;
     return rest[0..comma];
 }
@@ -354,7 +359,11 @@ test "expand concatenates rules and refuses a link" {
     var tar: Io.Writer.Allocating = .init(gpa);
     var tw: std.tar.Writer = .{ .underlying_writer = &tar.writer };
     try tw.writeFileBytes("rules/a.rules", "alert a", .{});
-    try tw.writeFileBytes("rules/classification.config", "config classification: et-only,ET,1\n", .{});
+    try tw.writeFileBytes(
+        "rules/classification.config",
+        "config classification: et-only,ET,1\n",
+        .{},
+    );
     try tw.writeFileBytes("rules/LICENSE", "no", .{});
 
     var rules: Io.Writer.Allocating = .init(gpa);

@@ -1,0 +1,41 @@
+#!/bin/sh
+# Boot howl's default form with local sources. Use run's machine unless
+# the user already has one, in which case use and remove a throwaway machine.
+set -eu
+howl=$1
+machine=werewolf-run
+mode=run
+log=$(mktemp "${TMPDIR:-/tmp}/howl-run-smoke.XXXXXX")
+
+cleanup() {
+	case $mode in
+		run) "$howl" stop >/dev/null 2>&1 || : ;;
+		create) "$howl" delete "$machine" >/dev/null 2>&1 || : ;;
+	esac
+	rm -f "$log"
+}
+
+run_howl() {
+	if "$@" >"$log" 2>&1; then
+		cat "$log"
+	else
+		cat "$log" >&2
+		return 1
+	fi
+	if grep -q 'root on .* takes ' "$log"; then
+		echo "howl-run-smoke: local build printed the root-key notice" >&2
+		return 1
+	fi
+}
+
+if [ -e "build/machines/$machine" ]; then
+	machine=precommit-$$
+	mode=create
+	trap cleanup EXIT
+	trap 'exit 1' HUP INT TERM
+	run_howl "$howl" create "$machine" --with playground --build --on qemu --yes
+else
+	trap cleanup EXIT
+	trap 'exit 1' HUP INT TERM
+	run_howl "$howl" run --build --on qemu --yes
+fi

@@ -313,7 +313,10 @@ fn syncSvc(io: Io) !void {
 
 test "network config stays closed until port 3306" {
     try std.testing.expectEqualStrings("[mariadbd]\nskip-networking\n", networkText(false));
-    try std.testing.expectEqualStrings("[mariadbd]\nbind-address=0.0.0.0\nport=3306\n", networkText(true));
+    try std.testing.expectEqualStrings(
+        "[mariadbd]\nbind-address=0.0.0.0\nport=3306\n",
+        networkText(true),
+    );
 }
 
 test "import lists regular sql files and refuses a symlink" {

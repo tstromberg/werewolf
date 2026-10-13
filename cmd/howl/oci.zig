@@ -659,7 +659,8 @@ pub fn lay(b: *native.B) !void {
                 if (it.next() != null or image.len < 2 or image[0] != '/' or
                     (!std.mem.eql(u8, access, "read") and !std.mem.eql(u8, access, "write")))
                     return b.fail(
-                        "{s}: services: {s}: data {s}: a host path, an image path, and read or write",
+                        "{s}: services: {s}: data {s}: a host path, an image path, and read or " ++
+                            "write",
                         .{ fm.dir, svc.key, line },
                     );
                 try writes.append(gpa, image);

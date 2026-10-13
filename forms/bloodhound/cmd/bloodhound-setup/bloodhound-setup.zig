@@ -47,7 +47,10 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         .database = .{
             .connection = "user=bloodhound dbname=postgres host=127.0.0.1 sslmode=disable",
         },
-        .neo4j = .{ .connection = try gpa.print("neo4j://neo4j:{s}@127.0.0.1:7687", .{try encode(gpa, neo)}) },
+        .neo4j = .{ .connection = try gpa.print(
+            "neo4j://neo4j:{s}@127.0.0.1:7687",
+            .{try encode(gpa, neo)},
+        ) },
         .recreate_default_admin = true,
         .default_admin = .{
             .principal_name = "admin",
@@ -121,6 +124,9 @@ const testing = std.testing;
 test "encode keeps a password out of the query syntax" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqualStrings("werewolf-check-pass-1", try encode(arena.allocator(), "werewolf-check-pass-1"));
+    try testing.expectEqualStrings(
+        "werewolf-check-pass-1",
+        try encode(arena.allocator(), "werewolf-check-pass-1"),
+    );
     try testing.expectEqualStrings("a%40b%2Fc", try encode(arena.allocator(), "a@b/c"));
 }

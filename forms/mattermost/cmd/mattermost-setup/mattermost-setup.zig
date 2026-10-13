@@ -72,7 +72,8 @@ fn run(io: Io, gpa: Allocator, environ: std.process.Environ) !void {
         },
     }
 
-    const login = try request(io, gpa, "POST", "/api/v4/users/login", null, try json.Stringify.valueAlloc(
+    const login = try request(io, gpa, "POST", "/api/v4/users/logi" ++
+        "n", null, try json.Stringify.valueAlloc(
         gpa,
         .{ .login_id = username, .password = password },
         .{},
@@ -205,7 +206,10 @@ fn address(s: []const u8) bool {
 fn mark(io: Io) !void {
     var f = try Dir.cwd().createFile(io, done, .{ .permissions = .fromMode(0o600) });
     defer f.close(io);
-    try f.writeStreamingAll(io, "Mattermost's system admin is made (forms/mattermost/README.md).\n");
+    try f.writeStreamingAll(
+        io,
+        "Mattermost's system admin is made (forms/mattermost/README.md).\n",
+    );
     try f.sync(io);
 }
 
@@ -218,14 +222,18 @@ fn say(io: Io, comptime fmt: []const u8, args: anytype) void {
 const testing = std.testing;
 
 test "parse reads the status and token and joins chunks" {
-    const plain = try parse(testing.allocator, "HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}");
+    const plain = try parse(
+        testing.allocator,
+        "HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\n{}",
+    );
     try testing.expectEqual(201, plain.status);
     try testing.expectEqualStrings("{}", plain.body);
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const chunked = try parse(
         arena.allocator(),
-        "HTTP/1.1 200 OK\r\nToken: abc\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3\r\n:1}\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nToken: abc\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"a\"\r\n3\r\n" ++
+            ":1}\r\n0\r\n\r\n",
     );
     try testing.expectEqualStrings("abc", chunked.token);
     try testing.expectEqualStrings("{\"a\":1}", chunked.body);

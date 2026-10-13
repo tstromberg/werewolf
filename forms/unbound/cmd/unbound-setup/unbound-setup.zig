@@ -188,7 +188,11 @@ test "render: IPv4 alone, no forward zones" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const conf = try render(arena.allocator(), .{});
-    try testing.expect(std.mem.find(u8, conf, "server:\n\tinterface: 0.0.0.0\n\tdo-ip6: no\n") != null);
+    try testing.expect(std.mem.find(
+        u8,
+        conf,
+        "server:\n\tinterface: 0.0.0.0\n\tdo-ip6: no\n",
+    ) != null);
     for ([_][]const u8{ "::0", "forward-zone", "domain-insecure" }) |absent|
         try testing.expect(std.mem.find(u8, conf, absent) == null);
 }
@@ -205,7 +209,8 @@ test "render: forward zones, each insecure, to every server" {
         "\tinterface: 0.0.0.0\n\tinterface: ::0\n\tdo-ip6: yes\n",
         "\tdomain-insecure: \"corp.example.\"\n\tlocal-zone: \"corp.example.\" nodefault\n",
         "\tlocal-zone: \"10.in-addr.arpa.\" nodefault\n",
-        "forward-zone:\n\tname: \"corp.example.\"\n\tforward-addr: 10.0.0.2\n\tforward-addr: 10.0.0.3\n",
+        "forward-zone:\n\tname: \"corp.example.\"\n" ++
+            "\tforward-addr: 10.0.0.2\n\tforward-addr: 10.0.0.3\n",
         "forward-zone:\n\tname: \"10.in-addr.arpa.\"\n\tforward-addr: 10.0.0.2\n",
     }) |want| try testing.expect(std.mem.find(u8, conf, want) != null);
 }

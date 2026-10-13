@@ -43,6 +43,7 @@ pub fn main(init: std.process.Init) !void {
         defer directory.close(io);
         try directory.setPermissions(io, .fromMode(0o700));
         var credentials: [2][32]u8 = undefined;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&credentials));
         for ([2][]const u8{ "owner.auth", "lockout.auth" }, &credentials) |filename, *secret| {
             try io.randomSecure(secret);
             const file = try directory.createFile(io, filename, .{
@@ -60,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
         try directory_file.sync(io);
         var device = try connect(io, args[4]);
         defer device.close();
-        try device.provision(key, initial, credentials);
+        try device.provision(key, initial, &credentials);
         return;
     }
     if (std.mem.eql(u8, args[1], "permit-pair") and args.len == 5) {
