@@ -182,14 +182,6 @@ pub fn verifyOther(
 ) !signed.Manifest {
     const root_view: []const u8 = if (held_mounts) broker.Word.victim.place() else "/victim";
     const rdir = try u.gpa.print("{s}{s}/{s}", .{ root_view, u.cmd.victim.?.path, u.other });
-    const word: broker.Word = if (u.cmd.grubenv != null) .grub else .esp;
-    const kdir = if (u.cmd.grubenv) |g|
-        try u.gpa.print(
-            "{s}{s}/werewolf/{s}",
-            .{ word.place(), m.parentDir(m.parentDir(g.path)), u.other },
-        )
-    else
-        try u.gpa.print("{s}/werewolf/{s}", .{ word.place(), u.other });
     const image = try open(
         u,
         std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n"),
@@ -199,13 +191,58 @@ pub fn verifyOther(
     if (!rollback) try fresh(u, image);
     try @import("retire.zig").requireOther(u, image);
     if (expected) |e| if (!std.mem.eql(u8, e, image.build)) return error.WrongStagedImage;
-    var mount: ?broker.Held = null;
-    defer if (mount) |*held| held.release();
     if (contents) {
-        if (!held_mounts) mount = try u.held(word);
-        try signed.checkInstalled(u.io, u.gpa, image, rdir, kdir, u.cmd.grubenv != null);
+        if (u.cmd.grubenv) |g| {
+            const kdir = try u.gpa.print(
+                "{s}{s}/werewolf/{s}",
+                .{ broker.Word.grub.place(), m.parentDir(m.parentDir(g.path)), u.other },
+            );
+            var mount: ?broker.Held = null;
+            defer if (mount) |*held| held.release();
+            if (!held_mounts) mount = try u.held(.grub);
+            try signed.checkInstalled(u.io, u.gpa, image, rdir, kdir, true);
+        } else {
+            try checkEspInstalled(u, image, rdir);
+        }
     }
     return image;
+}
+
+/// checkEspInstalled verifies an installed slot's bytes without an ESP
+/// mount: the root files are read here, and the broker reports the boot
+/// files' digests from its detached mount.
+fn checkEspInstalled(u: *Update, image: signed.Manifest, rdir: []const u8) !void {
+    const files = broker.espInspect() catch |err| {
+        u.detail = broker.refusal;
+        return err;
+    };
+    for ([_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "root.erofs", .path = "root.erofs" },
+        .{ .name = "cmdline", .path = "cmdline" },
+    }) |f| {
+        const path = try u.gpa.print("{s}/{s}", .{ rdir, f.path });
+        if (image.artifact(f.name)) |want| {
+            const got = try signed.hashFile(u.io, u.gpa, path);
+            try signed.matches(want, got.size, got.sha256);
+        } else {
+            Dir.cwd().access(u.io, path, .{}) catch continue;
+            return error.UnselectedImageUki;
+        }
+    }
+    for ([_]struct { name: []const u8, file: ?broker.EspFile }{
+        .{ .name = "vmlinuz", .file = files.vmlinuz },
+        .{ .name = "stage0.zst", .file = files.stage0 },
+        .{ .name = "uki.efi", .file = files.uki },
+    }) |f| {
+        if (image.artifact(f.name)) |want| {
+            const got = f.file orelse return error.MissingArtifact;
+            if (got.size != want.size or !std.mem.eql(u8, &got.sha256, want.sha256))
+                return error.ArtifactMismatch;
+        } else if (f.file != null and std.mem.eql(u8, f.name, "uki.efi")) {
+            return error.UnselectedImageUki;
+        }
+    }
+    _ = try signed.cmdline(try u.read(try u.gpa.print("{s}/cmdline", .{rdir})));
 }
 
 pub fn requireBoot(u: *Update, expected: []const u8, contents: bool) !void {

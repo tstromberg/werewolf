@@ -178,7 +178,7 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
-	--dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
+	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
@@ -247,14 +247,14 @@ $(UKI): $(OUT)/slot/root.erofs $(OUT)/slot/stage0.zst $(OUT)/slot/cmdline $(BUIL
 	@printf '%s console=%s %s\0' "$$(cat $(OUT)/slot/cmdline)" $(CONSOLE) '$(UKI_ARGS)' >$(UKI_WORK)/cmdline
 	@rm -f $(UKI).signed
 	$(UKI_BIN) $(UKI_STUB) $(UKI).unsigned .linux=$(BUILD)/vmlinuz .initrd=$(UKI_WORK)/initrd .cmdline=$(UKI_WORK)/cmdline
-	osslsigncode sign -certs $(WEREWOLF_BOOT_CRT) -key $(WEREWOLF_BOOT_KEY) -in $(UKI).unsigned -out $(UKI).signed >/dev/null
+	osslsigncode sign -time 0 -certs $(WEREWOLF_BOOT_CRT) -key $(WEREWOLF_BOOT_KEY) -in $(UKI).unsigned -out $(UKI).signed >/dev/null
 	@mv -f $(UKI).signed $(UKI) && rm -f $(UKI).unsigned
 
 # Built under a temporary name, so a running check never finds an empty howl, which sh runs as a pass.
 howl: $(HOWL)
 $(HOWL): cmd/howl/howl.zig $(wildcard cmd/howl/*.zig) lib/settings.zig lib/update-policy.zig lib/network.zig \
 	lib/form.zig lib/allow.zig lib/service.zig lib/seal.zig lib/sshd.zig lib/compose.zig lib/package.zig \
-	lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
+	lib/verity.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/image.zig tools/uki.zig boot/gpt.zig files.zig $(shell grep -o '@embedFile("[^"]*")' files.zig | cut -d'"' -f2)
 	$(zig_check)
 	t=$@.$$$$ && zig build-exe -O ReleaseSafe $(call ZIG_MODULES,$<) -femit-bin=$$t && mv -f $$t $@
 
@@ -276,17 +276,18 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image _test/release-signing
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
-_test/bootstrap-image: ; python3 test/bootstrap-image
+_test/bootstrap-image: build/host/tpm-bootstrap ; python3 test/bootstrap-image
+_test/release-signing: ; python3 test/release-signing; python3 test/native-firmware
 _test/azure-security: ; python3 test/azure-security --test
 _test/provider-ab:
 	python3 test/ab_checks.py
 	python3 test/ab-provider-tests
 _test/kernel-version: ; python3 test/kernel-version
-_test/local-prerequisites: ; python3 test/local-prerequisites
+_test/local-prerequisites: ; python3 test/local-prerequisites; python3 test/build-helper
 _test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
 _test/kernel-inputs: ; python3 test/kernel-inputs
 _test/local-publisher: $(HOWL) build/host/tpm-policy
@@ -295,21 +296,35 @@ _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-_test/lib/tpm-bootstrap.zig: ; zig test --dep apk -Mroot=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-_test/lib/enrollment.zig: ; zig test --dep apk --dep tpm --dep bootstrap -Mroot=lib/enrollment.zig --dep apk -Mtpm=lib/tpm.zig --dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-build/host/tpm-bootstrap: tools/tpm-bootstrap.zig lib/enrollment.zig lib/tpm-bootstrap.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
+_test/lib/boot-authority.zig: ; zig test --dep apk -Mroot=lib/boot-authority.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+_test/lib/machine-transport.zig: ; zig test --dep apk -Mroot=lib/machine-transport.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+_test/lib/tpm-bootstrap.zig: ; zig test --dep apk --dep tpm -Mroot=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+_test/lib/enrollment.zig: ; zig test --dep apk --dep tpm --dep bootstrap -Mroot=lib/enrollment.zig --dep apk -Mtpm=lib/tpm.zig --dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+build/host/tpm-bootstrap: tools/tpm-bootstrap.zig lib/enrollment.zig lib/tpm-bootstrap.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/apk.zig lib/package.zig
 	@mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe --dep bootstrap --dep enrollment --dep apk --dep tpm -Mroot=$< --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig --dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
-build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
+	zig build-exe -O ReleaseSafe --dep bootstrap --dep enrollment --dep apk --dep tpm -Mroot=$< --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig --dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
+build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/boot-state.zig lib/apk.zig lib/package.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe --dep apk --dep tpm -Mroot=$< --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
 
-.PHONY: check-tpm-guest check-secure-lima check-secure-qemu
+.PHONY: check-tpm-guest check-tpm-recovery check-tpm-bootstrap-guest check-secure-lima check-secure-qemu check-run-cache
+check-tpm-recovery: build/host/tpm-policy
+	python3 test/check-tpm-recovery
+
+check-tpm-bootstrap-guest: build/host/tpm-bootstrap build/host/tpm-policy build/host/uki $(call program_bin,tpm-enroll)
+	@[ "$(IPE)" = 1 ] || { echo 'check-tpm-bootstrap-guest: set IPE=1 and a measured UKI_STUB' >&2; exit 1; }
+	python3 test/check-tpm-bootstrap-guest --arch $(ARCH) --kernel $(IPE_KERNEL) --stub $(UKI_STUB) \
+		--agent $(call program_bin,tpm-enroll) --work $(BUILD)/check/tpm-bootstrap \
+		--unmeasured-stub out/tools/stubs/$(ARCH)/linux.efi.stub --recovery-cuts
+
 check-tpm-guest: $(HOWL) build/host/tpm-policy build/host/uki
 	python3 test/check-tpm-qemu $(HOWL) $(ARCH) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(BUILD)/check/tpm-guest
 
 check-secure-lima: $(HOWL)
 	python3 test/check-secure-lima $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/secure-lima
+check-run-cache: $(HOWL)
+	python3 test/check-run-cache $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/run-cache
+
 check-secure-qemu: $(HOWL)
 	python3 test/check-secure-lima $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/secure-qemu qemu
 
@@ -409,7 +424,7 @@ list-forms:
 RELEASE_FORMS = $(shell $(FORM_ASK) released)
 DIST_DIRECT_FORMS = minimal
 DIST = dist
-RELEASE_SOURCES = Makefile forms boot cmd lib tools/form.zig release/image.pub release/tiers.pub release/advisories release/packages.pub
+RELEASE_SOURCES = Makefile forms boot cmd lib tools release/image.pub release/tiers.pub release/advisories release/packages.pub release/boot.crt release/with-boot-key
 # Releases take werewolf's programs from its repository, so a newly published program is an input.
 RELEASE_LOCKS = $(addprefix $(LOCK)/,$(addsuffix -published.lock.json,$(RELEASE_FORMS)) kernel.lock.json boot.lock.json)
 # The inputs are a digest of the sources' bytes and exec bits, and every package's URL.
@@ -417,8 +432,8 @@ release-inputs:
 	rm -f $(RELEASE_LOCKS)
 	$(MAKE) --no-print-directory -j $(BOOT_LOCKS)
 	for f in $(RELEASE_FORMS); do $(MAKE) --no-print-directory _lock/$$f || exit 1; done
-	{ echo "tree $$({ find $(RELEASE_SOURCES) -type f ! -name .DS_Store | LC_ALL=C sort | xargs $(SHA256); \
-		find $(RELEASE_SOURCES) -type f -perm -100 | LC_ALL=C sort; } | $(SHA256) | cut -c1-64)"; \
+	{ echo "tree $$({ find $(RELEASE_SOURCES) -type f ! -name .DS_Store ! -path '*/__pycache__/*' | LC_ALL=C sort | xargs $(SHA256); \
+		find $(RELEASE_SOURCES) -type f -perm -100 ! -path '*/__pycache__/*' | LC_ALL=C sort; } | $(SHA256) | cut -c1-64)"; \
 	  sed -n 's|.*"url": "\([^"]*\.apk\)".*|\1|p' $(RELEASE_LOCKS) | LC_ALL=C sort -u; } >$(LOCK)/inputs
 	@echo "inputs: $$($(SHA256) < $(LOCK)/inputs | cut -c1-16), $$(grep -c '^https' $(LOCK)/inputs) packages"
 # A release's forms come from werewolf's repository, so howl writes its config and lock,

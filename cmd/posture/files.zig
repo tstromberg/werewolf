@@ -62,41 +62,14 @@ pub fn check(p: *Posture) !void {
         .name = "Read-only root",
         .why = "Nothing can change the running system's programs.",
         .how = "/ is mounted ro",
+        .expected = "options contain ro",
+        .observed = posture.mountOptions(mounts, "/") orelse "mount not found",
         .result = if (hasOption(mounts, "/", "ro")) .pass else .fail,
     });
     // stage0 maps the image through dm-verity as a read-only device-mapper
     // device named root, so no remount can make it writable, and a block
     // that fails its hash fails to read.
-    const root_dev = statx(p.gpa, "/");
-    const dm_name = if (root_dev) |st| trim(p.read(try p.gpa.print(
-        "/sys/dev/block/{d}:{d}/dm/name",
-        .{ st.dev_major, st.dev_minor },
-    ))) else "";
-    const dm_ro = if (root_dev) |st| trim(p.read(try p.gpa.print(
-        "/sys/dev/block/{d}:{d}/ro",
-        .{ st.dev_major, st.dev_minor },
-    ))) else "";
-    const corrupted = logHas(p.kernelLog(), &.{ "verity", "corrupted" });
-    try p.add(.{
-        .id = "files-root-verity",
-        .area = "files",
-        .name = "Root verified",
-        .why = "Every block of the system read is the one its build hashed: a changed " ++
-            "image fails to read, and not even root can remount the root writable.",
-        .how = "/ is on a device-mapper device named root (stage0's dm-verity mapping) " ++
-            "that is itself read-only (/sys/dev/block/MAJ:MIN/ro), and the kernel log has " ++
-            "no dm-verity corruption",
-        .result = if (std.mem.eql(u8, dm_name, "root") and std.mem.eql(u8, dm_ro, "1") and
-            !corrupted) .pass else .fail,
-        .detail = if (corrupted)
-            "the kernel log reports a corrupted block"
-        else if (!std.mem.eql(u8, dm_name, "root"))
-            "/ is not on a device-mapper device named root"
-        else if (!std.mem.eql(u8, dm_ro, "1"))
-            "the root device is writable"
-        else
-            "",
-    });
+    if (p.werewolf) try rootVerity(p);
     const vfat = try mountedAs(p.gpa, mounts, "vfat");
     try p.add(.{
         .id = "files-boot-unmounted",
@@ -115,6 +88,7 @@ pub fn check(p: *Posture) !void {
         .name = "setuid ignored everywhere",
         .why = "No filesystem, the root included, honours a setuid or setgid bit.",
         .how = "every mount in /proc/self/mounts is nosuid",
+        .observed = try p.gpa.print("mounts missing nosuid: {s}", .{if (nosuid.len > 0) nosuid else "none"}),
         .result = if (nosuid.len == 0) .pass else .fail,
         .detail = nosuid,
     });
@@ -125,6 +99,7 @@ pub fn check(p: *Posture) !void {
         .name = "Only the system's programs run",
         .why = "Every filesystem but the root refuses to run programs from it.",
         .how = "every mount in /proc/self/mounts but / is noexec",
+        .observed = try p.gpa.print("applicable mounts missing noexec: {s}", .{if (noexec.len > 0) noexec else "none"}),
         .result = if (noexec.len == 0) .pass else .fail,
         .detail = noexec,
     });
@@ -138,6 +113,7 @@ pub fn check(p: *Posture) !void {
         .why = "A device file made anywhere else is not honoured.",
         .how = "every mount in /proc/self/mounts but the device filesystems (devtmpfs, devpts) " ++
             "is nodev",
+        .observed = try p.gpa.print("applicable mounts missing nodev: {s}", .{if (nodev.len > 0) nodev else "none"}),
         .result = if (nodev.len == 0) .pass else .fail,
         .detail = nodev,
     });
@@ -276,6 +252,7 @@ pub fn check(p: *Posture) !void {
         else
             "",
     });
+    p.work("files-unowned: walking", "/");
     const unowned = try findOnRoot(p, .{ .unowned = .{
         .uids = try thirdFields(p.gpa, passwd),
         .gids = try thirdFields(p.gpa, group),
@@ -291,18 +268,21 @@ pub fn check(p: *Posture) !void {
         .result = if (unowned.len == 0) .pass else .fail,
         .detail = unowned,
     });
-    if (mountType(mounts, "/victim") != null) try p.add(.{
+    if (p.werewolf and mountType(mounts, "/victim") != null) try p.add(.{
         .id = "files-victim-readonly",
         .area = "files",
         .name = "Old system read-only",
         .why = "The system this machine replaced stays readable, not writable.",
         .how = "/victim is mounted ro",
+        .observed = posture.mountOptions(mounts, "/victim") orelse "mount not found",
         .result = if (hasOption(mounts, "/victim", "ro")) .pass else .fail,
     });
     if (p.root) {
         var disk_buf: [64]u8 = undefined;
         const disk = firstDisk(&disk_buf);
         var writable: std.ArrayList(u8) = .empty;
+        var write_observed: std.ArrayList(u8) = .empty;
+        var write_sources: std.ArrayList(u8) = .empty;
         const places = [_][:0]const u8{
             "/proc/sys/kernel/printk",
             "/proc/sys/kernel/kptr_restrict",
@@ -317,9 +297,11 @@ pub fn check(p: *Posture) !void {
         };
         for (places) |path| {
             if (path.len == 0) continue;
+            try listAdd(p.gpa, &write_sources, "{s}: open(O_WRONLY/O_RDWR|O_NOFOLLOW|O_CLOEXEC)", .{path});
             for ([_]std.posix.ACCMODE{ .WRONLY, .RDWR }) |mode| {
                 const err = openError(path, mode);
-                if (err == .ACCES) continue;
+                try listAdd(p.gpa, &write_observed, "{s} ({t}): errno={d} ({t})", .{ path, mode, @backingInt(err), err });
+                if (err == .ACCES or (!p.werewolf and (err == .PERM or err == .ROFS))) continue;
                 // Some kernels lack optional settings; printk must exist,
                 // so a missing /proc/sys cannot make this check pass.
                 if (err == .NOENT and !std.mem.eql(u8, path, places[0])) continue;
@@ -330,11 +312,15 @@ pub fn check(p: *Posture) !void {
             .id = "files-system-writes",
             .area = "files",
             .name = "Kernel settings and disks not writable",
-            .why = "Processes under fence, including root, cannot open kernel settings " ++
+            .why = "Processes, including root, cannot open kernel settings " ++
                 "or disks for writing.",
             .how = "opening kernel, vm, user, fs and net sysctls, a sysfs setting and " ++
                 "the first disk with O_WRONLY and O_RDWR, without writing, is refused " ++
-                "with EACCES (Landlock, from fence); kernel.printk must exist",
+                "by the kernel; kernel.printk must exist",
+            .source = write_sources.items,
+            .expected = if (p.werewolf) "EACCES for each write-open; ENOENT tolerated only for optional paths, never kernel.printk" else "EACCES, EPERM or EROFS; ENOENT only for optional paths, never kernel.printk",
+            .observed = write_observed.items,
+            .comparison = if (p.werewolf) null else try p.gpa.print("open(kernel settings|disk, WRONLY|RDWR) = {s}{s}", .{ if (writable.items.len > 0) writable.items else "denied", if (writable.items.len > 0) ", want denied" else "" }),
             .result = if (writable.items.len == 0) .pass else .fail,
             .detail = if (writable.items.len == 0)
                 ""
@@ -344,11 +330,17 @@ pub fn check(p: *Posture) !void {
         // fence closes /dev but for the devices werewolf names, so a disk and
         // the device-mapper and loop controls must open for no one.
         var readable: std.ArrayList(u8) = .empty;
+        var read_observed: std.ArrayList(u8) = .empty;
+        var read_sources: std.ArrayList(u8) = .empty;
         const devices = [_][:0]const u8{ disk, "/dev/mapper/control", "/dev/loop-control" };
         for (devices) |path| {
             if (path.len == 0) continue;
-            switch (openError(path, .RDONLY)) {
+            const err = openError(path, .RDONLY);
+            try listAdd(p.gpa, &read_sources, "{s}: open(O_RDONLY|O_NOFOLLOW|O_CLOEXEC)", .{path});
+            try listAdd(p.gpa, &read_observed, "{s}: errno={d} ({t})", .{ path, @backingInt(err), err });
+            switch (err) {
                 .ACCES, .NOENT => {},
+                .PERM => if (p.werewolf) try listAdd(p.gpa, &readable, "{s}", .{path}),
                 else => try listAdd(p.gpa, &readable, "{s}", .{path}),
             }
         }
@@ -356,11 +348,13 @@ pub fn check(p: *Posture) !void {
             .id = "files-device-reads",
             .area = "files",
             .name = "Devices closed",
-            .why = "Not even root can open a disk underneath its filesystem, or any device " ++
-                "the machine does not use, even to read it: /dev is closed but for the " ++
-                "devices werewolf names.",
+            .why = "Raw storage and device-control interfaces cannot be opened for reading.",
             .how = "opening the first disk, /dev/mapper/control and /dev/loop-control for " ++
-                "reading is refused with EACCES (Landlock, from fence)",
+                "reading is refused",
+            .source = read_sources.items,
+            .expected = if (p.werewolf) "EACCES or ENOENT for each read-open" else "EACCES, EPERM or ENOENT for each read-open",
+            .observed = read_observed.items,
+            .comparison = if (p.werewolf) null else try p.gpa.print("open(storage|device controls, RDONLY) = {s}{s}", .{ if (readable.items.len > 0) readable.items else "denied", if (readable.items.len > 0) ", want denied" else "" }),
             .result = if (readable.items.len == 0) .pass else .fail,
             .detail = if (readable.items.len == 0)
                 ""
@@ -368,6 +362,40 @@ pub fn check(p: *Posture) !void {
                 try p.gpa.print("opened for reading: {s}", .{readable.items}),
         });
     }
+}
+
+fn rootVerity(p: *Posture) !void {
+    const root_dev = statx(p.gpa, "/");
+    const dm_name = if (root_dev) |st| trim(p.read(try p.gpa.print(
+        "/sys/dev/block/{d}:{d}/dm/name",
+        .{ st.dev_major, st.dev_minor },
+    ))) else "";
+    const dm_ro = if (root_dev) |st| trim(p.read(try p.gpa.print(
+        "/sys/dev/block/{d}:{d}/ro",
+        .{ st.dev_major, st.dev_minor },
+    ))) else "";
+    const corrupted = logHas(p.kernelLog(), &.{ "verity", "corrupted" });
+    try p.add(.{
+        .id = "files-root-verity",
+        .area = "files",
+        .name = "Root verified",
+        .why = "Every block of the system read is the one its build hashed: a changed " ++
+            "image fails to read, and not even root can remount the root writable.",
+        .how = "/ is on a device-mapper device named root (stage0's dm-verity mapping) " ++
+            "that is itself read-only (/sys/dev/block/MAJ:MIN/ro), and the kernel log has " ++
+            "no dm-verity corruption",
+        .observed = try p.gpa.print("dm/name={s}; ro={s}; corruption record={s}", .{ dm_name, dm_ro, if (corrupted) "present" else "not found" }),
+        .result = if (std.mem.eql(u8, dm_name, "root") and std.mem.eql(u8, dm_ro, "1") and
+            !corrupted) .pass else .fail,
+        .detail = if (corrupted)
+            "the kernel log reports a corrupted block"
+        else if (!std.mem.eql(u8, dm_name, "root"))
+            "/ is not on a device-mapper device named root"
+        else if (!std.mem.eql(u8, dm_ro, "1"))
+            "the root device is writable"
+        else
+            "",
+    });
 }
 
 /// followsLink reports whether a link to / made in /tmp opens. The name is
@@ -458,6 +486,7 @@ fn starts(p: *Posture, path: []const u8) bool {
 /// findSetid lists the setuid and setgid files on the root filesystem,
 /// without crossing into other filesystems such as /proc or /data.
 pub fn findSetid(p: *Posture) ![]const u8 {
+    p.work("processes-no-setid: walking", "/");
     return findOnRoot(p, .setid);
 }
 
@@ -465,6 +494,7 @@ pub fn findSetid(p: *Posture) ![]const u8 {
 fn findOnRoot(p: *Posture, find: Find) ![]const u8 {
     var found: std.ArrayList(u8) = .empty;
     const root = statx(p.gpa, "/") orelse return "cannot stat /";
+    p.startWalk();
     var d = Dir.cwd().openDir(p.io, "/", .{ .iterate = true }) catch return "cannot open /";
     defer d.close(p.io);
     try walk(p, d, "/", root, find, &found, 0);
@@ -543,6 +573,7 @@ fn walk(
             &st,
         )) != .SUCCESS) continue;
         if (st.dev_major != top.dev_major or st.dev_minor != top.dev_minor) continue;
+        p.walkProgress(path);
         const hit = switch (find) {
             .unowned => |ids| std.mem.findScalar(u32, ids.uids, st.uid) == null or
                 std.mem.findScalar(u32, ids.gids, st.gid) == null,
@@ -590,6 +621,8 @@ fn worldWritable(p: *Posture) !struct { found: []const u8, tried: []const u8 } {
         if (isFound(.open_dirs, top.mode)) try listAdd(p.gpa, &found, "{s}", .{dir});
         var d = Dir.cwd().openDir(p.io, dir, .{ .iterate = true }) catch continue;
         defer d.close(p.io);
+        p.work("files-world-writable: walking", dir);
+        p.startWalk();
         try walk(p, d, dir, top, find, &found, 0);
     }
     return .{ .found = found.items, .tried = tried.items };

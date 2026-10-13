@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Build an isolated signed enrollment UKI, containing public factory trust only."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import shutil
+import stat
+import struct
+import subprocess
+
+
+CMDLINE = b'rdinit=/init werewolf.native=1 werewolf.secure=1 werewolf.bootstrap=1'
+
+
+def bounded(filename, limit):
+    with Path(filename).open('rb') as source:
+        raw = source.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError('bootstrap input exceeds its bound')
+    return raw
+
+
+def agent_elf(raw, arch):
+    """Require a static Linux ELF for the requested architecture."""
+    machine = {'aarch64': 183, 'x86_64': 62}[arch]
+    if len(raw) < 64 or raw[:7] != b'\x7fELF\x02\x01\x01' or struct.unpack_from('<H', raw, 18)[0] != machine:
+        raise ValueError('bootstrap agent architecture/ELF mismatch')
+    offset = struct.unpack_from('<Q', raw, 32)[0]
+    size, count = struct.unpack_from('<HH', raw, 54)
+    if size != 56 or not count or count > 128 or offset + count * size > len(raw):
+        raise ValueError('invalid bootstrap agent program headers')
+    for index in range(count):
+        if struct.unpack_from('<I', raw, offset + index * size)[0] == 3:
+            raise ValueError('bootstrap agent must not require a dynamic interpreter')
+
+
+def newc(entries):
+    """Canonical newc archive: fixed names, ownership and timestamps; no host tree walk."""
+    result = bytearray()
+    for inode, (name, mode, raw, major, minor) in enumerate(entries + [('TRAILER!!!', 0, b'', 0, 0)], 1):
+        name = name.encode() + b'\0'
+        fields = (inode, mode, 0, 0, 1, 0, len(raw), 0, 0, major, minor, len(name), 0)
+        result += b'070701' + ''.join(f'{field:08x}' for field in fields).encode() + name
+        result += b'\0' * (-len(result) % 4)
+        result += raw
+        result += b'\0' * (-len(result) % 4)
+    result += b'\0' * (-len(result) % 512)
+    return bytes(result)
+
+
+def initrd(agent, public, factory):
+    return newc([
+        ('dev', stat.S_IFDIR | 0o755, b'', 0, 0),
+        ('dev/console', stat.S_IFCHR | 0o620, b'', 5, 1),
+        ('init', stat.S_IFREG | 0o500, agent, 0, 0),
+        ('enrollment', stat.S_IFDIR | 0o500, b'', 0, 0),
+        ('enrollment/publisher.pub', stat.S_IFREG | 0o400, public, 0, 0),
+        ('enrollment/factory.permit', stat.S_IFREG | 0o400, factory, 0, 0),
+    ])
+
+
+def build(args):
+    agent = bounded(args.agent, 16 << 20)
+    agent_elf(agent, args.arch)
+    public = bounded(args.publisher, 1024)
+    factory = bounded(args.factory, 688)
+    # Independent native verification checks signature and factory-only semantics.
+    identity = subprocess.run([args.codec, 'factory', args.publisher, args.factory],
+                              check=True, capture_output=True, timeout=30).stdout
+    if len(identity) != 96 or identity[32:64] != hashlib.sha256(factory).digest():
+        raise ValueError('factory identity verification mismatch')
+    out = Path(args.output)
+    out.mkdir(mode=0o700, parents=False)  # Refuse overwriting existing enrollment evidence.
+    try:
+        archive = initrd(agent, public, factory)
+        (out / 'bootstrap.initrd').write_bytes(archive)
+        console = 'ttyAMA0' if args.arch == 'aarch64' else 'ttyS0'
+        line = CMDLINE + (b' werewolf.recovery=1' if args.recovery else b'') + (' console=' + console).encode() + b'\0'
+        (out / 'cmdline').write_bytes(line)
+        unsigned, signed = out / 'unsigned.efi', out / 'bootstrap.efi'
+        subprocess.run([args.uki, args.stub, str(unsigned), '.linux=' + args.kernel,
+                        '.initrd=' + str(out / 'bootstrap.initrd'), '.cmdline=' + str(out / 'cmdline')],
+                       check=True, capture_output=True, timeout=60)
+        subprocess.run(['osslsigncode', 'sign', '-certs', args.boot_cert, '-key', args.boot_key,
+                        '-in', str(unsigned), '-out', str(signed)],
+                       check=True, capture_output=True, timeout=60)
+        subprocess.run(['osslsigncode', 'verify', '-CAfile', args.boot_cert, '-in', str(signed)],
+                       check=True, capture_output=True, timeout=60)
+        subprocess.run([args.uki, '--pcr11', str(signed), str(out / 'pcr11')],
+                       check=True, capture_output=True, timeout=30)
+        pcr = (out / 'pcr11').read_bytes()
+        if len(pcr) != 32 or pcr == bytes(32):
+            raise ValueError('bootstrap must have a nonzero measured identity')
+        manifest = dict(kind='tpm-bootstrap', protocol=1, arch=args.arch,
+                        mode='recovery' if args.recovery else 'fresh',
+                        machine=identity[:32].hex(), factory=identity[32:64].hex(),
+                        anchor=identity[64:].hex(), pcr11=pcr.hex(),
+                        publisher_sha256=hashlib.sha256(public).hexdigest(),
+                        initrd_sha256=hashlib.sha256(archive).hexdigest(),
+                        uki_sha256=hashlib.sha256(signed.read_bytes()).hexdigest())
+        (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        unsigned.unlink()
+    except BaseException:
+        shutil.rmtree(out)
+        raise
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--arch', choices=['aarch64', 'x86_64'], required=True)
+    for name in ['agent', 'kernel', 'stub', 'publisher', 'factory', 'boot-key', 'boot-cert', 'output']:
+        parser.add_argument('--' + name, required=True)
+    parser.add_argument('--uki', default='build/host/uki')
+    parser.add_argument('--codec', default='build/host/tpm-bootstrap')
+    parser.add_argument('--recovery', action='store_true')
+    build(parser.parse_args())
+
+
+if __name__ == '__main__':
+    main()

@@ -373,7 +373,8 @@ pub fn apko(
 /// a staged apko.yaml is refused.
 /// 3: local-NAME stages the operator's forms and app for the updater;
 /// inline update policy and metadata people need the matching programs.
-pub const format = 3;
+/// 4: init and mount-broker require the private task-links metadata observer.
+pub const format = 4;
 
 /// format_package is format's package, a name per format, so a world names
 /// it with no version to compare. It holds /usr/lib/werewolf/format: apk
@@ -383,10 +384,10 @@ pub const format_package = std.fmt.comptimePrint("werewolf-format{d}", .{format}
 /// image_programs are the programs from cmd/ that every image runs, stage0's
 /// init among them: a machine builds its next stage0 from its next root.
 pub const image_programs = [_][]const u8{
-    "init",         "stage0",       "modload",      "iface-up",    "fence",        "mount",
-    "mount-broker", "posture",      "seal-watch",   "seal",        "runit-stage",  "reboot",
-    "grub-setenv",  "slot-keep",    "power-button", "debug-shell", "ssh-host-key", "leash",
-    "leash-reap",   "bite-cleanup",
+    "init",         "stage0",      "modload",      "iface-up",     "fence",       "mount",
+    "mount-broker", "task-links",  "posture",      "seal-watch",   "seal",        "runit-stage",
+    "reboot",       "grub-setenv", "slot-keep",    "power-button", "debug-shell", "ssh-host-key",
+    "leash",        "leash-reap",  "bite-cleanup",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.

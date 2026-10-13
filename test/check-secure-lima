@@ -71,8 +71,8 @@ label_file.parent.mkdir(parents=True)
 label_file.write_text('A\n')
 env = dict(os.environ, WEREWOLF_IPE_KERNEL=kernel, WEREWOLF_IPE_KEY=key,
            WEREWOLF_IPE_CRT=cert, UKI_STUB=stub,
-           WEREWOLF_BOOT_KEY=str(work / 'unrelated-missing.key'),
-           WEREWOLF_BOOT_CRT=str(work / 'unrelated-missing.crt'),
+           WEREWOLF_BOOT_KEY=str(work / 'boot.key'),
+           WEREWOLF_BOOT_CRT=str(work / 'boot.crt'),
            PATH=str(wrapper_dir) + os.pathsep + os.environ['PATH'])
 
 
@@ -103,7 +103,7 @@ def wait_boot(label, previous=None, anchor=None, committed=True):
             if not all(status[flag] for flag in ['secure_boot', 'ipe', 'verified_root', 'rollback_protected']):
                 raise RuntimeError('missing guest enforcement: ' + str(status))
             if paused != status['boot_id'] and status['committed'] is committed:
-                result = ssh('test -e /run/werewolf/updater-ready && sv down /etc/sv/autoupdate',
+                result = ssh('test -e /run/werewolf/updater-ready && sv pause /etc/sv/autoupdate',
                              'pause', check=False, timeout=10)
                 if result.returncode:
                     time.sleep(2)
@@ -155,6 +155,9 @@ def update(label, previous, committed=True):
 
 
 try:
+    run(['openssl', 'req', '-newkey', 'rsa:4096', '-nodes', '-x509', '-sha256',
+         '-days', '2', '-subj', '/CN=werewolf-caller-build',
+         '-keyout', env['WEREWOLF_BOOT_KEY'], '-out', env['WEREWOLF_BOOT_CRT']], 'boot-key')
     run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', private_ssh], 'ssh-key')
     probe = overlay / 'usr/bin/ab-status'
     probe.parent.mkdir(parents=True)
@@ -165,7 +168,10 @@ try:
          '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe)], 'probe')
     for path in overlay.rglob('*'):
         path.chmod(0o755 if path.is_dir() or path == probe else 0o644)
-    create = [howl, 'create', name, '--with', form, '--build', '--on', provider, '--secure', '--yes', '--root-keys', str(private_ssh) + '.pub']
+    # Exercise the protected default, without an explicit --secure or Lima selector.
+    create = [howl, 'create', name, '--with', form, '--build', '--yes', '--root-keys', str(private_ssh) + '.pub']
+    if provider == 'qemu':
+        create += ['--on', provider]
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         creation = pool.submit(run, create, 'create')
         deadline = time.monotonic() + 600
@@ -176,11 +182,22 @@ try:
             if time.monotonic() > deadline:
                 raise RuntimeError('QEMU launch did not reach the TPM proxy')
             time.sleep(.1)
+        if (machine / 'boot.crt').read_bytes() != (work / 'boot.crt').read_bytes():
+            raise RuntimeError('--build did not enroll the caller\'s boot certificate')
         backend = json.loads((proxy_dir / 'backend.json').read_text())
         proxy = Proxy(proxy_dir / 'proxy.sock', backend)
         (proxy_dir / 'ready').touch()
         creation.result()
     a = wait_boot('A')
+    profile = json.loads((authority / 'profile.json').read_text())
+    if profile['spec'].get('tpm_firmware'):
+        ssh('test "$(cat /usr/share/werewolf/tpm/protocol)" = 2-firmware && '
+            'test ! -e /usr/share/werewolf/tpm/signer.pub && '
+            'test "$(wc -c < /usr/share/werewolf/tpm/vendor.sha256)" -eq 32',
+            'authority-source')
+    refused = run([*create, '--insecure'], 'downgrade-refused', check=False)
+    if refused.returncode == 0 or 'cannot be downgraded' not in refused.stderr:
+        raise RuntimeError('existing enrollment accepted an insecure reconfiguration')
     for secret in ['boot.key', 'authority/permit.key', 'authority/tls.key',
                    'authority/credentials/owner.auth', 'authority/credentials/lockout.auth']:
         if (machine / secret).stat().st_mode & 0o777 != 0o600:
@@ -295,4 +312,5 @@ finally:
     if proxy:
         proxy.close()
     private_ssh.unlink(missing_ok=True)
+    (work / 'boot.key').unlink(missing_ok=True)
     proxy_work.cleanup()

@@ -35,11 +35,12 @@ pub const usage =
     \\usage: howl build --with FORM,... [--build] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--secure] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   create's machine werewolf-run, replaced each time; with no --with, playground
+    \\       howl run [--with FORM,...] [--on TARGET] [--secure|--insecure] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   secure by default; replaces werewolf-run; default form playground
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--secure] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] [--allow-from me|CIDR] " ++
+    "] [--secure|--insecure] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] " ++
+    "[--allow-from me|CIDR] " ++
     "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
     "       howl console [NAME] [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
@@ -221,6 +222,7 @@ const reserved = [_][]const u8{
     "app",
     "allow-from",
     "secure",
+    "insecure",
 };
 
 /// chain returns form's chain, base first, as the build lays it out
@@ -412,7 +414,7 @@ pub const Options = struct {
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository, so the machine does not update them.
     local: bool = false,
-    secure: bool = false,
+    secure: bool = true,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -1079,21 +1081,16 @@ fn runForm(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
     const asking = for (args) |a| {
         if (std.mem.eql(u8, a, "-h") or std.mem.eql(u8, a, "--help")) break true;
     } else false;
-    // Remove the last one, wherever it ran: it holds the name, and maybe
-    // the ports.
-    if (!asking) if (madeOn(
-        io,
-        gpa,
-        run_name,
-    )) |was| verbs.remove(io, gpa, run_name, was, why) catch |err| say(
-        io,
-        "{s}: the last one, on {t}, was not removed: {s}",
-        .{ run_name, was, if (err == error.Refused) why.text else @errorName(err) },
-    );
+    // Refuse an unsupported protection mode before removing the previous VM.
+    if (!asking) {
+        const launch = try launchFlags(gpa, args, why);
+        const o = try options(gpa, launch.args, why);
+        try requireProtection(engineFor(io, gpa, o.on, launch.secure).on, launch, why);
+    }
     var with: std.ArrayList([]const u8) = .empty;
     try with.appendSlice(gpa, args);
     try with.append(gpa, run_name);
-    return createFrom(io, gpa, with.items, why);
+    return createFrom(io, gpa, with.items, true, why);
 }
 
 /// Tell is how create reports: every line, or one line per step and a
@@ -1241,13 +1238,24 @@ pub fn isRoot() bool {
 
 pub const arch_refusal = "--arch {s}: aarch64 (arm64), or x86_64 (x86-64, amd64)";
 
-/// Engine is where a machine runs when --on does not say: Lima on macOS,
-/// bhyve on FreeBSD, Firecracker on Linux with KVM if its network needs no
-/// password, else QEMU. note says why a likelier engine was passed over.
-/// run and create choose alike.
+/// Secure deployments choose Lima on macOS and QEMU on Linux. Missing
+/// prerequisites never change the protection mode or select another backend.
 const Engine = struct { on: Platform, note: ?[]const u8 = null };
 
 pub fn engine(io: Io, gpa: Allocator, given: ?Platform) Engine {
+    return engineFor(io, gpa, given, true);
+}
+
+fn protectedEngine(host: std.Target.Os.Tag, given: ?Platform) Platform {
+    return given orelse switch (host) {
+        .macos => .lima,
+        .freebsd => .bhyve,
+        else => .qemu,
+    };
+}
+
+fn engineFor(io: Io, gpa: Allocator, given: ?Platform, secure: bool) Engine {
+    if (secure) return .{ .on = protectedEngine(@import("builtin").os.tag, given) };
     if (given) |p| return .{ .on = p };
     if (lima.installed(io, gpa)) return .{ .on = .lima };
     if (bhyve.installed(io)) return .{ .on = .bhyve };
@@ -1260,6 +1268,75 @@ pub fn engine(io: Io, gpa: Allocator, given: ?Platform) Engine {
         };
     }
     return .{ .on = .qemu };
+}
+
+const Launch = struct {
+    secure: bool,
+    dev: bool,
+    local: bool,
+    yes: bool,
+    args: []const []const u8,
+};
+
+fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch {
+    _, const plain = try verboseFlag(gpa, line);
+    const dev, const rest = try takeFlag(gpa, plain, &.{"--dev"});
+    const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
+    const yes, const before_secure = try takeFlag(gpa, more, &.{"--yes"});
+    const secure, const before_insecure = try takeFlag(gpa, before_secure, &.{"--secure"});
+    const insecure, const args = try takeFlag(gpa, before_insecure, &.{"--insecure"});
+    if (secure and insecure) return why.refuse("--secure and --insecure conflict", .{});
+    return .{ .secure = !insecure, .dev = dev, .local = from_tree, .yes = yes, .args = args };
+}
+
+fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
+    if (!launch.secure) return;
+    if (launch.dev) return why.refuse(
+        "secure deployment refuses --dev; development shells require explicit --insecure",
+        .{},
+    );
+    if (on != .lima and on != .qemu) return why.refuse(
+        "{t}: protected deployment is not ready; use Lima on macOS or QEMU on Linux; " ++
+            "--insecure explicitly opts out",
+        .{on},
+    );
+    if (!launch.local) return why.refuse(
+        "published protected boot images are not ready; use --build with local signing " ++
+            "credentials; refusing an implicit build or unprotected download",
+        .{},
+    );
+}
+
+test "deployment defaults protect Lima and Linux QEMU without backend fallback" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var why: Why = .{};
+    const launch = try launchFlags(arena.allocator(), &.{ "playground", "--build" }, &why);
+    try testing.expect(launch.secure and launch.local);
+    try testing.expect((Options{}).secure);
+    try testing.expectEqual(Platform.lima, protectedEngine(.macos, null));
+    try testing.expectEqual(Platform.qemu, protectedEngine(.linux, null));
+    try requireProtection(.lima, launch, &why);
+    try requireProtection(.qemu, launch, &why);
+    const downloaded = try launchFlags(arena.allocator(), &.{"playground"}, &why);
+    try testing.expect(downloaded.secure and !downloaded.local);
+    try testing.expectError(error.Refused, requireProtection(.lima, downloaded, &why));
+    for ([_]Platform{ .firecracker, .bhyve, .proxmox, .aws, .gcp, .azure }) |on|
+        try testing.expectError(error.Refused, requireProtection(on, launch, &why));
+    const dev = try launchFlags(arena.allocator(), &.{ "playground", "--dev" }, &why);
+    try testing.expectError(error.Refused, requireProtection(.lima, dev, &why));
+    const unsafe = try launchFlags(
+        arena.allocator(),
+        &.{ "--insecure", "playground", "--dev" },
+        &why,
+    );
+    try testing.expect(!unsafe.secure and unsafe.dev);
+    try requireProtection(.firecracker, unsafe, &why);
+    try testing.expectError(error.Refused, launchFlags(
+        arena.allocator(),
+        &.{ "playground", "--secure", "--insecure" },
+        &why,
+    ));
 }
 
 /// madeOn returns the platform create recorded for name, or null.
@@ -1275,21 +1352,21 @@ pub const run_name = "werewolf-run";
 
 fn create(io: Io, gpa: Allocator, line: []const []const u8, why: *Why) !void {
     const all = (try adhoc.take(io, gpa, .create, line, why)) orelse return;
-    return createFrom(io, gpa, all, why);
+    return createFrom(io, gpa, all, false, why);
 }
 
 /// createFrom is create after adhoc.take has expanded the line: the form
 /// first, then the name and flags.
-fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void {
+fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, why: *Why) !void {
     const began = Io.Clock.awake.now(io);
     const verbose, const some = try verboseFlag(gpa, all);
-    const dev, const rest = try takeFlag(gpa, some, &.{"--dev"});
-    const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
-    const yes, const before_secure = try takeFlag(gpa, more, &.{"--yes"});
-    const secure, const args = try takeFlag(gpa, before_secure, &.{"--secure"});
+    const launch = try launchFlags(gpa, some, why);
+    const args = launch.args;
+    const dev = launch.dev;
+    const yes = launch.yes;
     var o = try options(gpa, args, why);
-    o.local = from_tree;
-    o.secure = secure;
+    o.local = launch.local;
+    o.secure = launch.secure;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
     const iface = try formInterface(io, gpa, o.form, why);
@@ -1305,12 +1382,10 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
         .{name},
     );
 
-    const eng = engine(io, gpa, o.on);
+    const eng = engineFor(io, gpa, o.on, o.secure);
     const on = eng.on;
-    if (o.secure and ((on != .lima and on != .qemu) or dev)) return why.refuse(
-        "--secure requires --on lima or qemu and refuses --dev",
-        .{},
-    );
+    try requireProtection(on, launch, why);
+    o.on = on;
     const tell: Tell = .{
         .verbose = verbose,
         .command = try gpa.print("howl {s} {s}", .{
@@ -1391,6 +1466,30 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, why: *Why) !void 
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
+    if (replacing) {
+        var keep = false;
+        if (o.secure) {
+            const cached = try @import("local-secure.zig").reuse(io, gpa, o, name, tar);
+            if (cached == .running) {
+                try @import("local-secure.zig").startPublisher(io, gpa, name, why);
+                try w.print(
+                    "{s}\t{s}\tunchanged; running with Secure Boot, IPE, TPM A/B\n",
+                    .{ name, o.form },
+                );
+                return;
+            }
+            keep = cached == .configure;
+        }
+        if (!keep) if (madeOn(
+            io,
+            gpa,
+            name,
+        )) |was| verbs.remove(io, gpa, name, was, why) catch |err| say(
+            io,
+            "{s}: the last one, on {t}, was not removed: {s}",
+            .{ name, was, if (err == error.Refused) why.text else @errorName(err) },
+        );
+    }
     if (o.allow_from) |a| {
         if (!on.is(.cloud)) return why.refuse(
             "--allow-from is for --on {s}: {t}'s machines are reached as it says",
@@ -1587,6 +1686,7 @@ test {
     _ = @import("enrollment.zig");
     _ = @import("cloud-enrollment.zig");
     _ = @import("local-secure.zig");
+    _ = @import("secureboot.zig");
     _ = @import("prerequisites.zig");
     _ = @import("apply.zig");
     _ = lima;

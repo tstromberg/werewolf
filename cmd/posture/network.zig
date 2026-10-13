@@ -19,62 +19,18 @@ pub fn check(p: *Posture) !void {
     // IPv6 is on unless disable_ipv6 reads 1 or the kernel has no IPv6.
     const v6 = p.sysctl("net/ipv6/conf/all/disable_ipv6");
     const v6_on = v6.len > 0 and !std.mem.eql(u8, v6, "1");
-    var ports: std.ArrayList(u16) = .empty;
-    for ([_][]const u8{
-        "/proc/net/tcp",
-        "/proc/net/tcp6",
-    }) |f| try listenPorts(p.gpa, p.read(f), &ports);
-    var list: std.ArrayList(u8) = .empty;
-    for (ports.items) |port| try listAdd(p.gpa, &list, "{d}", .{port});
-    // Read fence's network policy, or else the older list of ports.
-    const policy: ?[]const u8 = Dir.cwd().readFileAlloc(
-        p.io,
-        "/usr/share/werewolf/net",
-        p.gpa,
-        .limited(64 << 10),
-    ) catch null;
-    const declared: ?[]const u8 = if (policy) |net|
-        try policyPorts(p.gpa, net)
-    else
-        Dir.cwd().readFileAlloc(p.io, "/etc/werewolf/listen", p.gpa, .limited(64 << 10)) catch
-            null;
-    var undeclared: std.ArrayList(u8) = .empty;
-    if (declared) |text| for (ports.items) |port| {
-        if (!isDeclared(text, port)) try listAdd(p.gpa, &undeclared, "{d}", .{port});
-    };
-    try p.add(.{
-        .id = "network-ports",
-        .area = "network",
-        .name = "Only declared ports open",
-        .why = "Nothing listens on the network that the machine is not meant to offer.",
-        .how = "listening TCP ports (/proc/net/tcp, tcp6), but those bound to loopback alone, " ++
-            "which the network never reaches, are those the machine's policy " ++
-            "declares (/usr/share/werewolf/net)",
-        .result = if (declared == null)
-            .skip
-        else if (undeclared.items.len == 0)
-            .pass
-        else
-            .fail,
-        .detail = if (undeclared.items.len > 0)
-            try p.gpa.print("undeclared: {s}", .{undeclared.items})
-        else
-            try p.gpa.print(
-                "listening: {s}",
-                .{if (list.items.len > 0) list.items else "none"},
-            ),
-    });
-    try fence(p, policy orelse "", v6_on);
+    if (p.werewolf) try imageNetwork(p, v6_on) else try fence(p, "", v6_on);
     const init_status = p.read("/proc/1/status");
     const bypass = fenceBypass(init_status);
     try p.add(.{
-        .id = "network-fence-unbypassable",
+        .id = if (p.werewolf) "network-fence-unbypassable" else "network-capabilities-restricted",
         .area = "network",
-        .name = "Fence cannot be bypassed with network capabilities",
-        .why = "CAP_NET_ADMIN can replace Fence's routing policy, and CAP_NET_RAW can send " ++
+        .name = "Network capabilities restricted",
+        .why = "CAP_NET_ADMIN can replace routing policy, and CAP_NET_RAW can send " ++
             "traffic beneath it with raw or packet sockets.",
         .how = "PID 1's capability bounding set lacks CAP_NET_ADMIN and CAP_NET_RAW, so every " ++
             "descendant lacks them too",
+        .observed = posture.statusField(init_status, "CapBnd") orelse "CapBnd unavailable",
         .result = if (bypass) |can| (if (can) .fail else .pass) else .skip,
         .detail = if (bypass == null)
             "cannot read PID 1's capability bounding set"
@@ -220,6 +176,57 @@ pub fn check(p: *Posture) !void {
     );
 }
 
+fn imageNetwork(p: *Posture, v6_on: bool) !void {
+    var ports: std.ArrayList(u16) = .empty;
+    for ([_][]const u8{
+        "/proc/net/tcp",
+        "/proc/net/tcp6",
+    }) |f| try listenPorts(p.gpa, p.read(f), &ports);
+    var list: std.ArrayList(u8) = .empty;
+    for (ports.items) |port| try listAdd(p.gpa, &list, "{d}", .{port});
+    // Read fence's network policy, or else the older list of ports.
+    const policy: ?[]const u8 = Dir.cwd().readFileAlloc(
+        p.io,
+        "/usr/share/werewolf/net",
+        p.gpa,
+        .limited(64 << 10),
+    ) catch null;
+    const declared: ?[]const u8 = if (policy) |net|
+        try policyPorts(p.gpa, net)
+    else
+        Dir.cwd().readFileAlloc(p.io, "/etc/werewolf/listen", p.gpa, .limited(64 << 10)) catch
+            null;
+    var undeclared: std.ArrayList(u8) = .empty;
+    if (declared) |text| for (ports.items) |port| {
+        if (!isDeclared(text, port)) try listAdd(p.gpa, &undeclared, "{d}", .{port});
+    };
+    try p.add(.{
+        .id = "network-ports",
+        .area = "network",
+        .name = "Only declared ports open",
+        .why = "Nothing listens on the network that the machine is not meant to offer.",
+        .how = "listening TCP ports (/proc/net/tcp, tcp6), but those bound to loopback alone, " ++
+            "which the network never reaches, are those the machine's policy " ++
+            "declares (/usr/share/werewolf/net)",
+        .expected = if (declared) |ports_text| try p.gpa.print("non-loopback listeners are a subset of declared ports: {s}", .{trim(ports_text)}) else "network policy required to compare listeners",
+        .observed = try p.gpa.print("non-loopback listening ports: {s}", .{if (list.items.len > 0) list.items else "none"}),
+        .result = if (declared == null)
+            .skip
+        else if (undeclared.items.len == 0)
+            .pass
+        else
+            .fail,
+        .detail = if (undeclared.items.len > 0)
+            try p.gpa.print("undeclared: {s}", .{undeclared.items})
+        else
+            try p.gpa.print(
+                "listening: {s}",
+                .{if (list.items.len > 0) list.items else "none"},
+            ),
+    });
+    try fence(p, policy orelse "", v6_on);
+}
+
 /// fenceBypass reports whether PID 1's bounding set retains a capability
 /// that can send traffic outside Fence's policy.
 fn fenceBypass(status: []const u8) ?bool {
@@ -243,6 +250,7 @@ fn ssh(p: *Posture) !void {
     const sshd = for ([_][]const u8{ "/usr/sbin/sshd", "/usr/bin/sshd" }) |path| {
         if (exists(p.io, path)) break path;
     } else return;
+    if (p.root) p.work("SSH settings (10 s timeout):", "sshd -T");
     const settings: ?[]const u8 = if (!p.root) null else if (std.process.run(p.gpa, p.io, .{
         .argv = &.{ sshd, "-T" },
         .stdout_limit = .limited(1 << 20),
@@ -313,6 +321,9 @@ fn ssh(p: *Posture) !void {
             "nothing.",
         .how = "sshd -T lists only security-key algorithms (sk-...) in " ++
             "pubkeyacceptedalgorithms, and touch-required in pubkeyauthoptions",
+        .observed = if (settings) |s| try p.gpa.print("pubkeyacceptedalgorithms={s}; pubkeyauthoptions={s}", .{
+            sshValue(s, "pubkeyacceptedalgorithms") orelse "absent", sshValue(s, "pubkeyauthoptions") orelse "absent",
+        }) else skipped,
         .result = if (settings == null) .skip else if (plain.len == 0) .pass else .fail,
         .detail = if (settings == null) skipped else plain,
     });
@@ -442,14 +453,17 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
     const port = unusedPort(policy);
     const bound = probeBind(port);
     try p.add(.{
-        .id = "network-bind",
+        .id = if (p.werewolf) "network-bind" else "network-bind-restricted",
         .area = "network",
-        .name = "Undeclared ports cannot be opened",
-        .why = "Not even root can start a listener on a port the machine is not meant to " ++
-            "offer.",
+        .name = if (p.werewolf) "Undeclared ports cannot be opened" else "TCP listeners restricted",
+        .why = "Arbitrary processes cannot open TCP listeners.",
+        .source = try p.gpa.print("bind(AF_INET TCP, INADDR_ANY, port={d})", .{port}),
+        .comparison = try p.gpa.print("bind(TCP, *:{d}) = {s}{s}", .{
+            port,                                         if (bound == .SUCCESS) "0" else try p.gpa.print("E{s}({d})", .{ errnoText(bound), @backingInt(bound) }),
+            if (bound == .ACCES) "" else ", want EACCES",
+        }),
         .how = try p.gpa.print(
-            "bind() of a TCP socket to port {d}, which the policy does not declare, is " ++
-                "refused with EACCES (Landlock, inherited from PID 1)",
+            "bind() of a TCP socket to port {d} is refused with EACCES",
             .{port},
         ),
         .result = if (bound == .ACCES) .pass else .fail,
@@ -458,18 +472,22 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
 
     const sent = probeSend();
     try p.add(.{
-        .id = "network-outbound",
+        .id = if (p.werewolf) "network-outbound" else "network-outbound-restricted",
         .area = "network",
-        .name = "Only declared traffic leaves",
+        .name = if (p.werewolf) "Only declared traffic leaves" else "Outbound connections restricted",
         .why = "A program can send nothing its form did not declare: no beacon, no " ++
             "exfiltration, no download.",
         .how = "connect() of a UDP socket to 192.0.2.1 port 9 (an address for " ++
-            "documentation, never routed), which looks the route up without sending, is " ++
-            "refused with EACCES (policy routing)",
+            "documentation), which looks the route up without sending, is refused with EACCES",
+        .comparison = try p.gpa.print("connect(UDP, 192.0.2.1:9) = {s}{s}", .{
+            if (sent == .SUCCESS) "0" else try p.gpa.print("E{s}({d})", .{ errnoText(sent), @backingInt(sent) }),
+            if (sent == .ACCES) "" else ", want EACCES",
+        }),
         .result = if (sent == .ACCES) .pass else .fail,
         .detail = try p.gpa.print("connect: {s}", .{errnoText(sent)}),
     });
 
+    p.work("network-metadata: TCP probe (1 s timeout):", "169.254.169.254:80");
     const md = probeMetadata();
     try p.add(.{
         .id = "network-metadata",
@@ -488,6 +506,8 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
         .detail = @tagName(md),
     });
 
+    if (!p.werewolf) return;
+    p.work("network policy routing: netlink dump (1 s reply timeout)", "");
     const rules: RuleSummary = if (ruleDump(p.gpa, linux.AF.INET)) |dump|
         summarizeRules(dump)
     else |_|

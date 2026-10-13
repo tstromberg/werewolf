@@ -163,6 +163,8 @@ pub fn write(
             &.{
                 "osslsigncode",
                 "sign",
+                "-time",
+                "0",
                 "-certs",
                 b.spec.boot_cert.?,
                 "-key",

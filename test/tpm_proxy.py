@@ -6,7 +6,7 @@ import threading
 
 
 class Proxy:
-    def __init__(self, listen, backend):
+    def __init__(self, listen, backend, select=None):
         self.backend = str(backend)
         self.path = Path(listen)
         self.listener = socket.socket(socket.AF_UNIX)
@@ -17,6 +17,7 @@ class Proxy:
         self.connections = []
         self.failures = []
         self.mode = None
+        self.select = select
         self.hit = threading.Event()
         self.release = threading.Event()
         self.cancelled = False
@@ -109,7 +110,8 @@ class Proxy:
                 command = self.packet(client)
                 retirement = (int.from_bytes(command[6:10], 'big') == 0x136 and
                               int.from_bytes(command[10:14], 'big') == 0x01500021)
-                mode = self.mode if retirement else None
+                selected = self.select(command) if self.select else retirement
+                mode = self.mode if selected else None
                 if mode == 'before' and self.gate():
                     return
                 backend.sendall(command)

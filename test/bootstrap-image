@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Offline regression tests for the isolated bootstrap image format."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import stat
+import struct
+import subprocess
+import tempfile
+import unittest
+
+loader = importlib.machinery.SourceFileLoader('bootstrap_builder', 'tools/build-tpm-bootstrap')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+builder = importlib.util.module_from_spec(spec)
+loader.exec_module(builder)
+
+
+def elf(machine=183, interpreter=False):
+    raw = bytearray(120)
+    raw[:7] = b'\x7fELF\x02\x01\x01'
+    struct.pack_into('<H', raw, 18, machine)
+    struct.pack_into('<Q', raw, 32, 64)
+    struct.pack_into('<HH', raw, 54, 56, 1)
+    struct.pack_into('<I', raw, 64, 3 if interpreter else 1)
+    return raw
+
+
+def entries(raw):
+    result = {}
+    at = 0
+    while True:
+        assert raw[at:at + 6] == b'070701'
+        fields = [int(raw[at + 6 + i * 8:at + 14 + i * 8], 16) for i in range(13)]
+        start = at + 110
+        name = raw[start:start + fields[11] - 1].decode()
+        start = (start + fields[11] + 3) & ~3
+        content = raw[start:start + fields[6]]
+        if name == 'TRAILER!!!':
+            break
+        result[name] = (fields, content)
+        at = (start + fields[6] + 3) & ~3
+    return result
+
+
+class BootstrapImage(unittest.TestCase):
+    def test_archive_contains_only_agent_and_public_factory(self):
+        archive = builder.initrd(b'agent', b'public key', b'signed factory')
+        content = entries(archive)
+        self.assertEqual(set(content), {'dev', 'dev/console', 'init', 'enrollment',
+                                        'enrollment/publisher.pub', 'enrollment/factory.permit'})
+        self.assertEqual(content['init'][1], b'agent')
+        self.assertEqual(content['init'][0][1], stat.S_IFREG | 0o500)
+        self.assertEqual(content['enrollment/factory.permit'][1], b'signed factory')
+        self.assertEqual(content['dev/console'][0][9:11], [5, 1])
+        for fields, _ in content.values():
+            self.assertEqual(fields[2:4], [0, 0])
+            self.assertEqual(fields[5], 0)
+        self.assertEqual(len(archive) % 512, 0)
+        self.assertEqual(archive, builder.initrd(b'agent', b'public key', b'signed factory'))
+
+    def test_signed_command_line_has_no_workload_or_administration_options(self):
+        self.assertEqual(builder.CMDLINE.split(), [b'rdinit=/init', b'werewolf.native=1',
+                                                  b'werewolf.secure=1', b'werewolf.bootstrap=1'])
+
+    def test_static_agent_and_architecture(self):
+        builder.agent_elf(elf(), 'aarch64')
+        builder.agent_elf(elf(62), 'x86_64')
+        with self.assertRaises(ValueError):
+            builder.agent_elf(elf(62), 'aarch64')
+        with self.assertRaises(ValueError):
+            builder.agent_elf(elf(interpreter=True), 'aarch64')
+
+    def test_truncated_and_invalid_agent_headers(self):
+        good = elf()
+        for size in range(len(good)):
+            with self.assertRaises(ValueError):
+                builder.agent_elf(good[:size], 'aarch64')
+        for offset, value in [(32, 1000), (54, 0), (56, 200)]:
+            raw = elf()
+            struct.pack_into('<Q' if offset == 32 else '<H', raw, offset, value)
+            with self.assertRaises(ValueError):
+                builder.agent_elf(raw, 'aarch64')
+
+    def test_input_bound_includes_eof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            filename = Path(temporary) / 'input'
+            filename.write_bytes(b'x' * 688)
+            self.assertEqual(len(builder.bounded(filename, 688)), 688)
+            filename.write_bytes(b'x' * 689)
+            with self.assertRaises(ValueError):
+                builder.bounded(filename, 688)
+
+    def test_signed_transition_is_not_a_factory_permit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path('lib/testdata/tpm-ab')
+            permit = Path(temporary) / 'transition.permit'
+            permit.write_bytes((source / 'ab.state').read_bytes() + (source / 'ab.sig').read_bytes())
+            result = subprocess.run(['build/host/tpm-bootstrap', 'factory', str(source / 'signer.pub'), str(permit)],
+                                    capture_output=True, timeout=20)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b'WrongFactoryBootState', result.stderr)
+            self.assertEqual(result.stdout, b'')
+
+
+if __name__ == '__main__':
+    unittest.main()

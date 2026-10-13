@@ -10,15 +10,39 @@ and skips, with reasons. It runs each boot on werewolf, or by hand on Linux.
 werewolf's protections live in many places: the kernel command line,
 sysctls, fence's Landlock domain and rules, the seal, leash, the mounts, and
 what the image leaves out. posture reports whether each is in force on the
-running machine. It assumes nothing of werewolf, so a report from another
-distribution is a comparison; werewolf-only checks skip where their subject
-is absent. `docs/posture.md` lists the checks.
+running machine. It detects werewolf by the `/usr/share/werewolf`
+directory. Other distributions run generic checks; image
+policy, TPM release authorization, updater, generated service and leash
+checks are omitted. `docs/posture.md` lists the checks.
 
-`posture [--extended] [--attack] [--json | --line]` prints text, or JSON
+`posture [--extended] [--attack] [--verbose] [--json | --line | --summary]` prints text, or JSON
 with why and how, or `posture: fail=ID,ID pass=N skip=N {JSON of failures}`,
 and exits 1 if any check fails. `--extended` adds what werewolf skips by
 choice (wiping freed memory, forced CPU mitigations, strict reverse-path
 filtering, ignoring IPv6 router advertisements; docs/security.md).
+
+`--summary` prints a state and counts on one line, followed by only failures.
+The scan is live, so the summary omits its timestamp.
+NOMINAL means no failed checks; EXPECTED GAPS means
+every failure has an image excuse; DEGRADED means an unexcused failure;
+Skipped checks and limited privileges describe coverage separately.
+A terminal uses green passes and red X marks for all failures; the
+EXPECTED GAPS state is amber. `NO_COLOR` or `TERM=dumb` disables color. Failures still exit 1,
+including expected ones. Playground's interactive terminal logins run a
+fresh summary through `/etc/profile.d/posture.sh`, covering ash and bash.
+
+Text uses two columns: a short label and `source = value, want expectation`
+for failures; passes omit `want`. Each item takes at most two rows, with
+long values shortened. `--json` retains the complete `source`, `expected`,
+`observed` and `comparison`, including syscall arguments and numeric errno.
+Unavailable reads do not claim a particular cause. Expected weaknesses
+do not replace measured evidence.
+
+`--verbose` streams phase starts, each check's result and elapsed
+milliseconds, expensive operation starts, walk progress, phase totals and
+the total scan time to stderr. Per-check times measure work since the
+preceding result in the same phase, including shared setup; they are not
+independent microbenchmarks. The output combines with every report format.
 
 ## Goals
 
@@ -46,6 +70,9 @@ filtering, ignoring IPv6 router advertisements; docs/security.md).
   a sysfs file and the first disk with O_WRONLY or O_RDWR must be refused.
   Setting the current console loglevel through syslog must be refused.
   Running `/` must leave an audit record; stopping audit must be refused.
+  The audit proof follows new `/dev/kmsg` records with `poll`, allowing
+  100 ms for kauditd, and matches the probe child's pid and exec syscall.
+  Missing or rate-limited evidence fails, rather than passing silently.
 - **Walks** (setuid files, anything anyone may write) go from each
   directory's descriptor, not following links, on one filesystem.
 - **Attacks**, only with `werewolf.check=1`, `--attack` or `WEREWOLF_CHECK=1`

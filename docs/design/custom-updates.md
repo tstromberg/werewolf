@@ -36,7 +36,7 @@ programs forward, so a fix to `fence` reached no `howl`-built machine.
 The world file is the spec and apk is the solver: a host and machine resolve the same answer.
 
 **The image is its world.** The machine above has world `local-shop
-werewolf-format3`. `local-shop` depends on `prod-form`, `cloudflared-form`,
+werewolf-format4`. `local-shop` depends on `prod-form`, `cloudflared-form`,
 `bastion-form` and `curl`; each form depends on its base's, its Wolfi packages
 and werewolf programs. apk refuses what cannot combine, at build time.
 

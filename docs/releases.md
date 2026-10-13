@@ -25,6 +25,13 @@ sshd, for an operator to reach by security key (`ed25519-sk` or
 
 The tag is the manifests' serial, the time CI signed them.
 
+CI uses `release/with-boot-key` to materialize its PEM secret as a private key file,
+verify it against the boot certificate, and remove it after the build. Missing keys refuse.
+Boot PE signatures use a fixed signing time so independent release builds can match.
+`check-dist` verifies signed artifacts and enrolls their certificate before booting the actual disk.
+These existing releases do not yet provide the complete IPE/TPM default deployment profile;
+see [published protected images](design/published-secure-boot.md).
+
 ```json
 {
   "format": "werewolf-release/1",

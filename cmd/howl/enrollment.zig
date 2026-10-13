@@ -9,6 +9,72 @@ const Allocator = std.mem.Allocator;
 
 pub const Signer = struct { key: []const u8, public: []const u8 };
 
+/// Certify the existing machine permit key for authenticated firmware PK/KEK enrollment.
+pub fn certificate(
+    io: Io,
+    gpa: Allocator,
+    steps: *Steps,
+    authority: Signer,
+    dir: []const u8,
+) ![]const u8 {
+    const cert = try gpa.print("{s}/permit.crt", .{dir});
+    if (!(try steps.exec(&.{.{ .argv = &.{
+        "openssl", "req",   "-new", "-x509", "-key",                           authority.key,
+        "-sha256", "-days", "3650", "-subj", "/CN=werewolf-machine-authority", "-out",
+        cert,
+    } }}, .{})).ok) return steps.fail("certifying the machine TPM authority failed");
+    const extracted = try std.process.run(gpa, io, .{
+        .argv = &.{ "openssl", "x509", "-in", cert, "-pubkey", "-noout" },
+        .stdout_limit = .limited(8192),
+    });
+    if (extracted.term != .exited or extracted.term.exited != 0 or
+        !std.mem.eql(u8, extracted.stdout, try read(io, gpa, authority.public, 8192)))
+        return error.WrongMachineCertificate;
+    return cert;
+}
+
+pub fn transport(
+    io: Io,
+    gpa: Allocator,
+    steps: *Steps,
+    authority: Signer,
+    dir: []const u8,
+    ca: []const u8,
+    host: [4]u8,
+    port: u16,
+) ![]const u8 {
+    const key = try apk.parseKey(gpa, try read(io, gpa, authority.public, 8192));
+    const state = try tpm.bundle(
+        key,
+        try read(io, gpa, try gpa.print("{s}/factory.permit", .{dir}), tpm.record_size + 512),
+    );
+    const converted = try std.process.run(gpa, io, .{
+        .argv = &.{ "openssl", "x509", "-in", ca, "-outform", "DER" },
+        .stdout_limit = .limited(tpm.transport.max_certificate),
+    });
+    if (converted.term != .exited or
+        converted.term.exited != 0) return error.BadTransportCertificate;
+    const declaration: tpm.transport.Declaration = .{
+        .machine = state.machine,
+        .host = host,
+        .port = port,
+        .ca = converted.stdout,
+    };
+    const message = try gpa.print("{s}/transport.message", .{dir});
+    const signature = try gpa.print("{s}/transport.sig", .{dir});
+    defer Dir.cwd().deleteFile(io, message) catch {};
+    defer Dir.cwd().deleteFile(io, signature) catch {};
+    const bytes = try declaration.message(gpa);
+    try durable(io, message, bytes);
+    if (!(try steps.exec(&.{.{ .argv = &.{
+        "openssl", "dgst", "-sha256", "-sign", authority.key, "-out", signature, message,
+    } }}, .{})).ok) return steps.fail("signing the machine update transport failed");
+    const bundle = try std.mem.concat(gpa, u8, &.{ bytes, try read(io, gpa, signature, 512) });
+    _ = try tpm.transport.open(key, bundle, state.machine, host, port);
+    try durable(io, try gpa.print("{s}/transport.bundle", .{dir}), bundle);
+    return bundle;
+}
+
 pub fn signer(io: Io, gpa: Allocator, steps: *Steps, dir: []const u8, kept: bool) !Signer {
     const key = try gpa.print("{s}/permit.key", .{dir});
     const public = try gpa.print("{s}/permit.pub", .{dir});

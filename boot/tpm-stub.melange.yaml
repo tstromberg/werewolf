@@ -1,0 +1,35 @@
+package:
+  name: werewolf-tpm-stub-build
+  version: 0.1.0
+  epoch: 0
+  description: Pinned TPM-measuring EFI stub for host-side UKI signing
+  copyright:
+    - license: LGPL-2.1-or-later
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - bash
+      - coreutils
+      - gnutar
+      - curl
+      - ca-certificates-bundle
+      - meson
+      - ninja-build
+      - pkgconf
+      - gperf
+      - libcap-dev
+      - util-linux-dev
+      - python-3.13
+      - py3.13-jinja2
+      - py3.13-pyelftools
+pipeline:
+  - runs: |
+      sh tools/build-tpm-stub /var/tmp/ww-tpm-stub-build
+      install -Dm644 /var/tmp/ww-tpm-stub-build/linux.efi.stub \
+        "${{targets.destdir}}/usr/share/werewolf-build/linux.efi.stub"

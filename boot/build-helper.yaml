@@ -1,0 +1,21 @@
+# A private native compiler/firmware helper; never the protected workload VM.
+minimumLimaVersion: "2.2.0"
+vmType: vz
+arch: aarch64
+images:
+  - location: https://cloud-images.ubuntu.com/minimal/releases/resolute/release-20261002/ubuntu-26.04-minimal-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:768d6339844cb8a86c7287e9ac7b9d71ddc391531ad2521b72d22f0833660b01
+param:
+  internal_netplanOptional: "true"
+cpus: 4
+memory: 4GiB
+disk: 24GiB
+mounts: []
+containerd:
+  system: false
+  user: false
+ssh:
+  loadDotSSHPubKeys: false
+  forwardAgent: false
+  forwardX11: false

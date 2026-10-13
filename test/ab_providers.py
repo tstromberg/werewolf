@@ -182,7 +182,9 @@ class Provider:
             self.env['AZURE_DEFAULTS_GROUP'] = self.name
             self.own_group = True
             self.run(['az', 'group', 'create', '-n', self.name, '-l', 'westus2', '-o', 'none'])
-        args = [self.howl, 'create', self.name, '--with', self.fixture['form'],
+        # This adapter exercises the legacy cloud slot path, without local
+        # exact-pair TPM enrollment. Protected-default CLI tests are separate.
+        args = [self.howl, 'create', self.name, '--insecure', '--with', self.fixture['form'],
                 '--on', self.kind, '--arch', self.fixture['arch'], '--build',
                 '--config', str(self.config), '--allow-from', 'me']
         size = self.env.get('CLOUD_SIZE')

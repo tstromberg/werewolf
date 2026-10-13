@@ -47,19 +47,16 @@ pub fn resolve(
     const cache = try gpa.print("{s}/build/secure-cache", .{cwd});
     try Dir.cwd().createDirPath(io, cache);
     try Dir.cwd().setFilePermissions(io, cache, .fromMode(0o700), .{});
-    const source = try gpa.print("{s}/source", .{cache});
-    for (@import("files").secure_sources) |file| {
-        const path = try gpa.print("{s}/{s}", .{ source, file.path });
-        try Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
-        try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = file.data });
-    }
+    const source = try materialize(io, gpa, cache);
     const script = try gpa.print("{s}/local-prerequisites", .{source});
     var nonce: [8]u8 = undefined;
     try io.randomSecure(&nonce);
     const report = try gpa.print("{s}/paths-{x}.json", .{ cache, &nonce });
     defer Dir.cwd().deleteFile(io, report) catch {};
     var base: []const u8 = "unused";
-    if (!external) {
+    var env = try howl.environ.clone(gpa);
+    defer env.deinit();
+    if (!external or @import("builtin").os.tag == .macos) {
         var build = try native.prepare(io, gpa, steps, .{
             .form = "minimal",
             .arch = arch,
@@ -67,6 +64,14 @@ pub fn resolve(
         });
         try @import("packages.zig").kernel(&build);
         base = try gpa.print("{s}/kernel/rootfs.tar", .{build.p.build});
+        if (@import("builtin").os.tag == .macos) {
+            try env.put("QEMU_KERNEL_IMAGE", try gpa.print("{s}/vmlinuz", .{build.p.build}));
+            try env.put("QEMU_BASE_INITRAMFS", try absolute(
+                gpa,
+                cwd,
+                try @import("melange.zig").guest(&build),
+            ));
+        }
     }
     try steps.enter(.{
         .name = "Preparing pinned IPE kernel and measured EFI stub",
@@ -81,7 +86,7 @@ pub fn resolve(
         source,         cache,
         @tagName(arch), base,
         report,
-    }, .env = howl.environ }}, .{})).ok) return steps.fail(
+    }, .env = &env }}, .{})).ok) return steps.fail(
         "preparing security inputs failed; see the builder dependencies in docs/testing.md",
     );
     var inputs = try std.json.parseFromSliceLeaky(Inputs, gpa, try Dir.cwd().readFileAlloc(
@@ -101,6 +106,55 @@ pub fn resolve(
 
 fn absolute(gpa: std.mem.Allocator, cwd: []const u8, path: []const u8) ![]const u8 {
     return if (std.fs.path.isAbsolute(path)) path else gpa.print("{s}/{s}", .{ cwd, path });
+}
+
+fn materialize(io: std.Io, gpa: std.mem.Allocator, cache: []const u8) ![]const u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for (@import("files").secure_sources) |file| {
+        for ([_][]const u8{ file.path, file.data }) |part| {
+            var length: [8]u8 = undefined;
+            std.mem.writeInt(u64, &length, part.len, .big);
+            hash.update(&length);
+            hash.update(part);
+        }
+    }
+    const source = try gpa.print("{s}/source/{x}", .{ cache, &hash.finalResult() });
+    for (@import("files").secure_sources) |file| {
+        const path = try gpa.print("{s}/{s}", .{ source, file.path });
+        const previous = Dir.cwd().readFileAlloc(
+            io,
+            path,
+            gpa,
+            .limited(file.data.len + 1),
+        ) catch null;
+        if (previous) |bytes| if (std.mem.eql(u8, bytes, file.data)) continue;
+        try Dir.cwd().createDirPath(io, std.fs.path.dirname(path).?);
+        try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = file.data });
+    }
+    return source;
+}
+
+test "cached builder sources keep timestamps and repair altered inputs" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const cache = try tmp.dir.realPathFileAlloc(t.io, ".", gpa);
+    const source = try materialize(t.io, gpa, cache);
+    const file = @import("files").secure_sources[0];
+    const path = try gpa.print("{s}/{s}", .{ source, file.path });
+    const before = try Dir.cwd().statFile(t.io, path, .{});
+    try t.expectEqualStrings(source, try materialize(t.io, gpa, cache));
+    const after = try Dir.cwd().statFile(t.io, path, .{});
+    try t.expectEqual(before.mtime.nanoseconds, after.mtime.nanoseconds);
+    try Dir.cwd().writeFile(t.io, .{ .sub_path = path, .data = "altered builder" });
+    _ = try materialize(t.io, gpa, cache);
+    try t.expectEqualStrings(
+        file.data,
+        try Dir.cwd().readFileAlloc(t.io, path, gpa, .limited(file.data.len + 1)),
+    );
 }
 
 test "managed IPE inputs refuse partial overrides" {

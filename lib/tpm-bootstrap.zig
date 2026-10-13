@@ -1,6 +1,7 @@
 //! Bounded cloud attestation and encrypted credential transport; deployment stays gated.
 const std = @import("std");
 const apk = @import("apk");
+const tpm = @import("tpm");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Hmac = std.crypto.auth.hmac.sha2.HmacSha256;
 const Gcm = std.crypto.aead.aes_gcm.Aes256Gcm;
@@ -554,6 +555,7 @@ pub const Boot = struct {
     ek_public: Public,
     ak_public: Public,
     pcr: [32]u8,
+    recovery_key: ?apk.Key = null,
 
     pub fn deinit(b: *Boot) void {
         b.device.flush(b.ak);
@@ -596,7 +598,7 @@ pub const Boot = struct {
 
     fn activate(b: *Boot, credential: Credential) ![32]u8 {
         // A replayed bootstrap must not release its capsule key after enrollment.
-        try b.device.fresh();
+        try b.device.admit(b.recovery_key);
         const ak_session = try b.device.pcrSession(b.pcr, 0x147);
         defer b.device.flush(ak_session);
         const ek_session = try b.device.endorsementSession();
@@ -803,9 +805,26 @@ pub const Device = struct {
         return key.public;
     }
 
+    fn admit(d: *Device, recovery_key: ?apk.Key) !void {
+        if (recovery_key) |key| {
+            var target: tpm.Device = .{ .io = d.io, .file = d.file };
+            defer std.crypto.secureZero(u8, &target.response);
+            _ = try target.incomplete(key);
+        } else try d.fresh();
+    }
+
     pub fn begin(d: *Device, pcr: [32]u8) !Boot {
+        return d.start(pcr, null);
+    }
+
+    /// Explicit recovery still refuses fresh, written, foreign and legacy indices.
+    pub fn beginRecovery(d: *Device, pcr: [32]u8, key: apk.Key) !Boot {
+        return d.start(pcr, key);
+    }
+
+    fn start(d: *Device, pcr: [32]u8, recovery_key: ?apk.Key) !Boot {
         _ = try policy(pcr);
-        try d.fresh();
+        try d.admit(recovery_key);
         if (!std.mem.eql(u8, &try d.pcr11(), &pcr)) return error.WrongBootstrapMeasurement;
         const endorsement = try d.createEndorsement();
         const ek = endorsement.handle;
@@ -850,6 +869,7 @@ pub const Device = struct {
             .ek_public = ek_public,
             .ak_public = ak_public,
             .pcr = pcr,
+            .recovery_key = recovery_key,
         };
     }
 };

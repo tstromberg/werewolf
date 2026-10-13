@@ -241,6 +241,115 @@ pub fn cmdline(text: []const u8) ![]const u8 {
     return line;
 }
 
+/// loaderEntry returns a Boot Loader Specification type 1 entry for slot.
+/// version orders the slots, newest first; sort-key groups them. A UKI must
+/// use `uki`: systemd-boot does not count attempts for generic `efi` entries.
+pub fn loaderEntry(
+    gpa: mem.Allocator,
+    slot: []const u8,
+    version: []const u8,
+    options: []const u8,
+    uki: bool,
+) ![]const u8 {
+    if (uki) return gpa.print(
+        \\title werewolf {s}
+        \\sort-key werewolf
+        \\version {s}
+        \\uki /werewolf/{s}/uki.efi
+        \\options {s}
+        \\
+    , .{ slot, version, slot, options });
+    return gpa.print(
+        \\title werewolf {s}
+        \\sort-key werewolf
+        \\version {s}
+        \\linux /werewolf/{s}/vmlinuz
+        \\initrd /werewolf/{s}/stage0.zst
+        \\options {s}
+        \\
+    , .{ slot, version, slot, slot, options });
+}
+
+/// isEntryOf reports whether name is an entry of slot: werewolf-b.conf,
+/// werewolf-b+1.conf with tries left, or werewolf-b+0-1.conf with none.
+pub fn isEntryOf(name: []const u8, slot: []const u8) bool {
+    const prefix = "werewolf-";
+    if (!mem.startsWith(u8, name, prefix) or !mem.endsWith(u8, name, ".conf")) return false;
+    const rest = name[prefix.len .. name.len - ".conf".len];
+    if (!mem.startsWith(u8, rest, slot)) return false;
+    return rest.len == slot.len or rest[slot.len] == '+';
+}
+
+/// isCountingEntry reports whether name is entry's counting form, such as
+/// werewolf-a+1.conf for entry werewolf-a.
+pub fn isCountingEntry(name: []const u8, entry: []const u8) bool {
+    if (!mem.startsWith(u8, name, entry) or !mem.endsWith(u8, name, ".conf")) return false;
+    return name.len > entry.len and name[entry.len] == '+';
+}
+
+/// entrySecs returns an entry's version, a policy.Serial, in Unix seconds,
+/// or null if it has none or another format.
+pub fn entrySecs(entry: []const u8) ?i64 {
+    var it = mem.tokenizeScalar(u8, entry, '\n');
+    while (it.next()) |line| {
+        if (mem.startsWith(u8, line, "version "))
+            return policy.parseSerial(line["version ".len..]) catch null;
+    }
+    return null;
+}
+
+/// withSlot returns the other slot's command line. Machine arguments from
+/// this boot (console, werewolf.mac) carry over, but the image's arguments
+/// replace any of the same name, so a loosened entry does not outlive an
+/// update and new arguments reach older machines. werewolf.slot is set to
+/// slot; the loader's initrd= and BOOT_IMAGE= are dropped.
+pub fn withSlot(
+    gpa: mem.Allocator,
+    boot: []const u8,
+    image: []const u8,
+    slot: []const u8,
+) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var it = mem.tokenizeAny(u8, boot, " \n");
+    next: while (it.next()) |arg| {
+        if (mem.startsWith(u8, arg, "werewolf.slot=") or
+            mem.startsWith(u8, arg, "initrd=") or
+            mem.startsWith(u8, arg, "BOOT_IMAGE=")) continue;
+        var own = mem.tokenizeAny(u8, image, " \n");
+        while (own.next()) |o| if (mem.eql(u8, argName(arg), argName(o))) continue :next;
+        try out.print(gpa, "{s} ", .{arg});
+    }
+    var own = mem.tokenizeAny(u8, image, " \n");
+    while (own.next()) |o| try out.print(gpa, "{s} ", .{o});
+    try out.print(gpa, "werewolf.slot={s}", .{slot});
+    return out.items;
+}
+
+fn argName(arg: []const u8) []const u8 {
+    return arg[0 .. mem.findScalar(u8, arg, '=') orelse arg.len];
+}
+
+/// Native UKIs seal their options; a factory EFI entry has no options line.
+pub fn rollbackOptions(gpa: mem.Allocator, text: []const u8, slot_name: []const u8, uki: bool) ![]const u8 {
+    var options: ?[]const u8 = null;
+    var efi: ?[]const u8 = null;
+    var lines = mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (mem.cutPrefix(u8, line, "options ")) |o| options = o;
+        const path = mem.cutPrefix(u8, line, "uki ") orelse mem.cutPrefix(u8, line, "efi ");
+        if (path) |p| {
+            if (efi != null) return error.NoOtherSlotEntry;
+            efi = p;
+        }
+    }
+    if (uki) {
+        const expected = try gpa.print("/werewolf/{s}/uki.efi", .{slot_name});
+        if (efi == null or !mem.eql(u8, efi.?, expected)) return error.NoOtherSlotEntry;
+        return "";
+    }
+    return options orelse error.NoOtherSlotEntry;
+}
+
 fn hex(s: []const u8) bool {
     if (s.len != 64) return false;
     for (s) |c| if (!(c >= '0' and c <= '9') and !(c >= 'a' and c <= 'f')) return false;
@@ -352,6 +461,36 @@ test "image URLs and kernel arguments cannot escape their records" {
     try testing.expectEqualStrings("a=b", try cmdline("a=b\n"));
     try testing.expectError(error.BadCmdline, cmdline("a=b\nlinux /evil"));
     try testing.expectError(error.BadCmdline, cmdline("a=\\b"));
+}
+
+test "loader entries are generated and matched canonically" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try testing.expect(isEntryOf("werewolf-b.conf", "b"));
+    try testing.expect(isEntryOf("werewolf-b+1.conf", "b"));
+    try testing.expect(isEntryOf("werewolf-b+0-1.conf", "b"));
+    try testing.expect(!isEntryOf("werewolf-bb.conf", "b"));
+    try testing.expect(isCountingEntry("werewolf-a+1.conf", "werewolf-a"));
+    try testing.expect(!isCountingEntry("werewolf-a.conf", "werewolf-a"));
+    try testing.expectEqualStrings(
+        "console=tty werewolf.slot=b",
+        try withSlot(a, "console=tty werewolf.slot=a", "", "b"),
+    );
+    const entry = try loaderEntry(a, "b", "20261007T140211Z", "console=tty werewolf.slot=b", false);
+    try testing.expect(std.mem.containsAtLeast(u8, entry, 1, "linux /werewolf/b/vmlinuz"));
+    try testing.expectEqual(@as(?i64, 1791381731), entrySecs(entry));
+
+    const native = "efi /werewolf/a/uki.efi\n";
+    const counted = "uki /werewolf/a/uki.efi\n";
+    try testing.expectEqualStrings("", try rollbackOptions(a, counted, "a", true));
+    try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, native ++ counted, "a", true));
+    try testing.expectEqualStrings("", try rollbackOptions(a, native, "a", true));
+    try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, native, "b", true));
+    try testing.expectEqualStrings(
+        "x werewolf.slot=b",
+        try rollbackOptions(a, "options x werewolf.slot=b\n", "b", false),
+    );
 }
 
 test "manifest authentication precedes parsing and pins the enrolled key" {

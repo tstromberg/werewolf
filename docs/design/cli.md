@@ -35,15 +35,18 @@ by hand.
 `build` makes a *file*, by itself and byte for byte as make's `_dist-form`
 did ([howl-build.md](howl-build.md)), never with `DEV`, so every image has a
 release's manifest ([releases.md](../releases.md)).
-`create` makes a *machine*: it builds if stale, packs, uploads only an
+`run`/`create` default to protected Lima on macOS and QEMU on Linux; currently they require `--build`.
+Published protected downloads remain gated ([design](published-secure-boot.md)); `--insecure` is explicit.
+`create` makes a *machine*: source builds if stale, packs, uploads only an
 image the cloud lacks, starts the machine, waits for init's `up in`, and
-prints `NAME ADDRESS FORM`. `run` is `create` of one throwaway machine,
-`werewolf-run`. Each platform is driven by its own tool (`limactl`, `qm`,
+prints `NAME ADDRESS FORM`. `run` uses `werewolf-run`, reusing an unchanged protected VM
+and resuming its existing image when stopped. Changed image inputs replace it.
+Each platform is driven by its own tool (`limactl`, `qm`,
 `gcloud`, `aws`, `az`…) with argument lists: no SDK, no state file.
 
 | Target | Choice, and why |
 | --- | --- |
-| lima | vzNAT unless the form has sshd and bash, which Lima's probes need; bash in every image costs too much |
+| lima | protected QEMU by default; `--insecure` uses the legacy VZ path |
 | firecracker | QEMU's UEFI disk, its supervisor in systemd-boot's place: Firecracker has no firmware, and one disk format updates everywhere |
 | proxmox | `qm` over ssh: the REST API has no serial log, and no address without a guest agent |
 | aws | an EBS snapshot written directly: VM Import took 6–10 minutes and a hand-made bucket and role |

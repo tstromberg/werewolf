@@ -55,9 +55,13 @@ is having a filter at all, not its length.
 
 Client for cmd/mount-broker. fence's Landlock domain stops root's programs
 from mounting, so slot-update, slot-keep, runit-stage and bite-cleanup ask
-the broker for `grub`, `esp`, `victim` or `shutdown`. A mount lasts until
+the broker for `grub`, `victim` or `shutdown`. A mount lasts until
 `release` or the asker's exit. Mount points are fixed and checked, so a
-fake listener at the socket cannot redirect writes.
+fake listener at the socket cannot redirect writes. The EFI partition is
+not a word: `esp-status`, `esp-commit`, `esp-disarm`, `esp-arm`,
+`esp-inspect` and `esp-install` have the broker work on it detached, and
+`slot-root`, `slot-decl` and `slot-meta` do the same for a native
+machine's slot files. Words are lent only in the situations they serve.
 
 ## dm
 
@@ -87,6 +91,10 @@ which writes empty files from a tar. See
 [docs/design/howl-build.md](../docs/design/howl-build.md).
 
 ## cmdline
+
+The signed enrollment UKI uses `werewolf.bootstrap=1` with `native=1` and `secure=1`.
+Its separately measured recovery variant adds `werewolf.recovery=1`; neither mode accepts workload options.
+Ordinary stage0 refuses workload handover in either mode.
 
 Parses the `werewolf.*` words of the kernel command line for stage0,
 init, mount-broker, slot-update, leash, posture and others:

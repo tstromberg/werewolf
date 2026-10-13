@@ -5,35 +5,62 @@ umask 077
 arch=${1:?architecture}
 cert=${2:?certificate}
 out=${3:?output directory}
+owner_cert=${5:-$cert}
 case $arch in aarch64 | x86_64) ;; *) echo 'enroll-boot: unsupported architecture' >&2; exit 1 ;; esac
 case $arch in aarch64) bootfile=/EFI/BOOT/BOOTAA64.EFI ;; x86_64) bootfile=/EFI/BOOT/BOOTX64.EFI ;; esac
 mkdir -p "$out"
 openssl x509 -in "$cert" -outform DER -out "$out/boot.der"
 guid=a0420f26-3a13-4a1b-9c77-134e29b24bf1
+vm=${WEREWOLF_BUILD_VM:-werewolf-build-26.04}
+helper_ready=0
+prepare_helper() {
+    [ "$helper_ready" = 0 ] || return 0
+    helper=${WEREWOLF_HELPER_SETUP:-$(dirname "$0")/build-helper}
+    template=${WEREWOLF_HELPER_TEMPLATE:-$(dirname "$0")/../boot/build-helper.yaml}
+    python3 "$helper" "$vm" "$template"
+    helper_ready=1
+}
 if [ "${4:-}" = aws ]; then
 	if command -v virt-fw-vars >/dev/null; then
 		virt-fw-vars --output-aws "$out/vars.aws.new" --output-json "$out/vars.json.new" \
 			--append-boot-filepath "$bootfile" \
-			--set-pk "$guid" "$cert" --add-kek "$guid" "$cert" --add-db "$guid" "$cert" --sb
+			--set-pk "$guid" "$owner_cert" --add-kek "$guid" "$owner_cert" --add-db "$guid" "$cert" --sb
 	else
-		vm=werewolf-ci-24.04
+		prepare_helper
 		remote=$(limactl shell "$vm" -- mktemp -d /tmp/werewolf-sb.XXXXXXXX)
 		case $remote in /tmp/werewolf-sb.*) ;; *) exit 1 ;; esac
 		trap 'limactl shell "$vm" -- rm -rf -- "$remote" >/dev/null 2>&1 || true' EXIT
 		limactl copy "$cert" "$vm:$remote/boot.crt"
+		limactl copy "$owner_cert" "$vm:$remote/owner.crt"
 		limactl shell "$vm" -- virt-fw-vars --output-aws "$remote/vars.aws" \
-			--output-json "$remote/vars.json" --append-boot-filepath "$bootfile" --set-pk "$guid" "$remote/boot.crt" \
-			--add-kek "$guid" "$remote/boot.crt" --add-db "$guid" "$remote/boot.crt" --sb
+			--output-json "$remote/vars.json" --append-boot-filepath "$bootfile" --set-pk "$guid" "$remote/owner.crt" \
+			--add-kek "$guid" "$remote/owner.crt" --add-db "$guid" "$remote/boot.crt" --sb
 		for file in vars.aws vars.json; do limactl copy "$vm:$remote/$file" "$out/$file.new"; done
 	fi
 	for file in vars.aws vars.json; do mv -f "$out/$file.new" "$out/$file"; done
 	exit
 fi
+native_tool=
+if [ "$(uname -s)" = Darwin ] && [ -z "${WEREWOLF_BUILD_VM:-}" ] &&
+    { [ -z "${SECUREBOOT_DIR:-}" ] || ! command -v virt-fw-vars >/dev/null; }; then
+    native=${WEREWOLF_FIRMWARE_SETUP:-$(dirname "$0")/native-firmware}
+    requirements=${WEREWOLF_FIRMWARE_REQUIREMENTS:-$(dirname "$0")/../boot/firmware-requirements.txt}
+    report=$out/native-firmware.json
+    python3 "$native" "$arch" "$requirements" "$report"
+    native_tool=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tool"])' "$report")
+    if [ -z "${SECUREBOOT_DIR:-}" ]; then
+        code=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["code.fd"])' "$report")
+        vars=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["template.fd"])' "$report")
+        cp "$code" "$out/code.fd"
+        cp "$vars" "$out/template.fd"
+    fi
+    rm -f "$report"
+fi
 source=${SECUREBOOT_DIR:-}
 if [ -n "$source" ]; then
 	cp "$source/code.fd" "$out/code.fd"
 	cp "$source/vars.fd" "$out/template.fd"
-else
+elif [ -z "$native_tool" ]; then
 	case $arch in
 	aarch64)
 		code=/usr/share/AAVMF/AAVMF_CODE.secboot.fd
@@ -54,30 +81,32 @@ else
 		cp "$vars" "$out/template.fd"
 	else
 		[ "$(uname -s)" = Darwin ] || { echo "enroll-boot: install Secure Boot firmware for $arch or set SECUREBOOT_DIR" >&2; exit 1; }
-		limactl copy "werewolf-ci-24.04:$code" "$out/code.fd"
-		limactl copy "werewolf-ci-24.04:$vars" "$out/template.fd"
+        prepare_helper
+        limactl copy "$vm:$code" "$out/code.fd"
+        limactl copy "$vm:$vars" "$out/template.fd"
 	fi
 fi
 if [ "${ENROLL_TEST_SETUP:-}" = 1 ]; then cp "$out/template.fd" "$out/setup.fd"; fi
-if command -v virt-fw-vars >/dev/null; then
-	virt-fw-vars --input "$out/template.fd" --output "$out/vars.fd.new" \
+if [ -n "$native_tool" ] || command -v virt-fw-vars >/dev/null; then
+    "${native_tool:-virt-fw-vars}" --input "$out/template.fd" --output "$out/vars.fd.new" \
 		--output-aws "$out/vars.aws.new" --output-json "$out/vars.json.new" \
 		--append-boot-filepath "$bootfile" \
 		--delete PK --delete KEK --delete db --delete dbx \
-		--set-pk "$guid" "$cert" --add-kek "$guid" "$cert" --add-db "$guid" "$cert" --sb
+		--set-pk "$guid" "$owner_cert" --add-kek "$guid" "$owner_cert" --add-db "$guid" "$cert" --sb
 else
     [ "$(uname -s)" = Darwin ] || { echo "enroll-boot: install virt-firmware (virt-fw-vars)" >&2; exit 1; }
-	vm=werewolf-ci-24.04
+    prepare_helper
 	remote=$(limactl shell "$vm" -- mktemp -d /tmp/werewolf-sb.XXXXXXXX)
 	case $remote in /tmp/werewolf-sb.*) ;; *) echo 'enroll-boot: bad VM temporary path' >&2; exit 1 ;; esac
 	trap 'limactl shell "$vm" -- rm -rf -- "$remote" >/dev/null 2>&1 || true' EXIT
 	limactl copy "$cert" "$vm:$remote/boot.crt"
+	limactl copy "$owner_cert" "$vm:$remote/owner.crt"
 	limactl copy "$out/template.fd" "$vm:$remote/template.fd"
 	limactl shell "$vm" -- virt-fw-vars --input "$remote/template.fd" --output "$remote/vars.fd" \
 		--output-aws "$remote/vars.aws" --output-json "$remote/vars.json" \
 		--append-boot-filepath "$bootfile" \
 		--delete PK --delete KEK --delete db --delete dbx \
-		--set-pk "$guid" "$remote/boot.crt" --add-kek "$guid" "$remote/boot.crt" \
+		--set-pk "$guid" "$remote/owner.crt" --add-kek "$guid" "$remote/owner.crt" \
 		--add-db "$guid" "$remote/boot.crt" --sb
 	for file in vars.fd vars.aws vars.json; do limactl copy "$vm:$remote/$file" "$out/$file.new"; done
 fi

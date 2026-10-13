@@ -3,7 +3,7 @@
 ## Summary
 
 Extend the local exact-pair protocol to provider-controlled TPMs without publishing reset secrets.
-Status: provider identity pins and native encrypted exchange are simulator-tested; cloud boot remains open.
+Status: provider pins/native exchange are tested; signed enrollment and recovery work in a local VM.
 Cloud `--secure` remains refused until enrollment and provider recovery tests pass.
 
 ## Background
@@ -48,6 +48,8 @@ Build a separate measured, signed bootstrap UKI containing only the enrollment a
 Seal the factory machine nonce, signed factory-record digest and bootstrap mode in its identity.
 Regular workload UKIs continue to require the existing mandatory v2 checks.
 No root filesystem handover, application or ordinary administration service runs in bootstrap mode.
+`cmd/tpm-enroll` and `tools/build-tpm-bootstrap` implement that isolated image with a bounded VM channel.
+Provider transport and normal-factory boot selection remain open; this does not enable cloud deployment.
 Refuse bootstrap when protected enrollment already exists; there is no guest reset or force option.
 
 The bootstrap creates a TPM attestation key with fixed TPM/parent attributes.
@@ -77,7 +79,8 @@ Install disable-clear, owner/lockout authentication and the existing v2 NV polic
 Read back the full protected state, then reboot into the normal signed factory image.
 Host readiness requires the normal boot's identity, measurement and protected-pair evidence.
 Partial provisioning refuses ordinary boot and preserves host recovery material.
-Recovery must prove the same authority; it cannot silently clear or replace the TPM.
+The [signed recovery mode](tpm-enrollment-recovery.md) proves the original authority and rejects written NV.
+It cannot clear the TPM, replace credentials or restore factory state over retirement history.
 
 ### Publication and updates
 

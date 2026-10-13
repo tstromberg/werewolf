@@ -87,7 +87,8 @@ make -C "$src" O="$obj" ARCH="$arch" olddefconfig
 for opt in SECURITY_IPE IPE_PROP_DM_VERITY MODULE_SIG_FORCE LOCK_DOWN_KERNEL_FORCE_INTEGRITY; do
 	grep -qx "CONFIG_$opt=y" "$obj/.config" || { echo "build-kernel: CONFIG_$opt did not hold" >&2; exit 1; }
 done
-make -C "$src" O="$obj" ARCH="$arch" -j"${JOBS:-$(nproc)}" all
+# VM firmware supplies its device tree; build only the image and modules we package.
+make -C "$src" O="$obj" ARCH="$arch" -j"${JOBS:-$(nproc)}" "${image##*/}" modules
 mkdir -p "$stage/boot" "$stage/etc/apk"
 # Ubuntu's depmod may have no zlib support. Resolve signed, uncompressed
 # modules first, then compress them and update the textual dependency paths.

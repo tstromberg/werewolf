@@ -3,7 +3,7 @@
 ## Summary
 
 `lib/tpm-bootstrap.zig` implements native attestation, credential wrapping and authenticated capsules.
-The integration probe completes provisioning on swtpm; signed cloud deployment remains gated.
+The signed VM agent completes enrollment and explicit recovery; provider deployment remains gated.
 
 ## Background
 
@@ -55,12 +55,32 @@ Anyone can wrap a chosen key using a public EK; GCM alone cannot authenticate th
 
 `Boot.receive` combines publisher verification, template checks, activation and capsule authentication.
 The activation primitive stays private so callers cannot omit the signature gate accidentally.
-Freshness checks reject owner/lockout auth, either Werewolf NV index and hierarchy policy overrides.
+Ordinary freshness checks reject owner/lockout auth, Werewolf NV indices and hierarchy policy overrides.
 Check freshness both before key creation and immediately before activation.
 Provision the existing signed factory pair, protect reset paths and verify the resulting NV anchor.
 Only the public anchor is returned; plaintext credentials and command/response buffers are wiped.
 The deployment agent must reboot before ordinary workload startup.
-Partial provisioning requires authenticated recovery; replay does not reset or finish it implicitly.
+Partial provisioning requires the [separate recovery mode](tpm-enrollment-recovery.md).
+It authenticates the original reset credentials and rejects written indices; replay cannot reset history.
+
+### Signed image and channel
+
+`tools/build-tpm-bootstrap` signs a separate UKI with `cmd/tpm-enroll` as its only executable.
+Its deterministic initramfs contains only PID 1, the console node and public factory trust.
+The host verifies the factory signature before building; image metadata records its digest and machine.
+The signed command line selects secure, native bootstrap mode and permits no workload options.
+Explicit recovery adds signed `werewolf.recovery=1`, producing its own measured identity.
+Ordinary stage0 refuses this mode before module loading or root handover.
+The agent requires SecureBoot=1, SetupMode=0, confidentiality lockdown and the exact boot IPE policy.
+It closes module loading, removes policy administration and uses built-in drivers only.
+The VM transport is the kernel-named `werewolf.enroll` virtio port, discovered with strict bounds.
+After freshness and nonzero-PCR checks, emit `WWREADY1`; the host then sends `WWCHAL01` plus context.
+Compare the channel's machine/factory with immutable trust and its PCR with the actual measurement.
+Send the existing proof frame; receive `WWCAPS01`, big-endian u16 length and at most 952 bytes.
+After secret wiping and protected readback, send `WWDONE01` plus the public anchor, then reboot.
+There is no shell, filesystem handover, network daemon or guest reset operation.
+`make IPE=1 check-tpm-bootstrap-guest` exercises the signed image and firmware refusal gates.
+Provider transport, normal-factory selection and provider recovery/lifecycle validation remain open.
 
 ### Probe and tests
 
@@ -87,7 +107,7 @@ Requires strict TPM templates, publisher signatures and a separate signed-bootst
 ## Security Considerations
 
 Signing keys and durable reset custody stay with the publisher.
-The actual deployment must bake factory trust/context into a measured signed bootstrap UKI.
+Provider deployment must select the verified normal factory image after bootstrap.
 An offline probe using caller-provided files cannot establish that boot trust.
 Never expose the probe as a workload service or enable deployment from simulator success alone.
 

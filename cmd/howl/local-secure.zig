@@ -27,6 +27,325 @@ const Publisher = struct {
     refresh_seconds: u32 = 3600,
 };
 
+pub const Reuse = enum { miss, running, configure };
+
+/// Health-check the retained publisher, restarting it only when absent.
+pub fn startPublisher(io: Io, gpa: Allocator, name: []const u8, why: *howl.Why) !void {
+    const authority = try gpa.print("{s}/authority", .{try howl.machineDir(gpa, name)});
+    try howl.run(io, why, &.{
+        "python3",
+        try gpa.print("{s}/local-publisher", .{authority}),
+        "start",
+        try gpa.print("{s}/publisher.json", .{authority}),
+    });
+}
+
+/// An explicit stop preserves the protected machine's image and enrollment.
+pub fn stop(
+    io: Io,
+    gpa: Allocator,
+    name: []const u8,
+    provider: howl.Platform,
+    why: *howl.Why,
+) !bool {
+    const dir = try howl.machineDir(gpa, name);
+    const authority = try gpa.print("{s}/authority", .{dir});
+    const saved = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    const guard = try Dir.cwd().openFile(
+        io,
+        try gpa.print("{s}/secure.lock", .{dir}),
+        .{ .mode = .read_write },
+    );
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    if (profile.provider != provider) return why.refuse("the secured provider cannot change", .{});
+    switch (provider) {
+        .lima => {
+            const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
+            const yaml = try Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}/lima.yaml", .{instance}),
+                gpa,
+                .limited(1 << 20),
+            );
+            const form = lima.formOf(yaml) orelse return error.ForeignLimaInstance;
+            if (!std.mem.eql(u8, form, profile.spec.form)) return error.ForeignLimaInstance;
+            try Dir.cwd().access(io, try gpa.print("{s}/swtpm", .{instance}), .{});
+            if (try lima.running(io, gpa, name)) try howl.run(io, why, &.{
+                "limactl", "stop", "-f", name,
+            });
+        },
+        .qemu => {
+            _ = try qemu.stop(io, gpa, dir);
+            try stopTpm(io, gpa, dir);
+        },
+        else => return error.BadSecuredProvider,
+    }
+    stopPublisher(io, gpa, dir);
+    return true;
+}
+
+/// Matching inputs keep the image and authority; matching live guests need no work.
+pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []const u8) !Reuse {
+    if (!o.secure or !o.local or o.app != null or o.import_dir != null) return .miss;
+    const dir = try howl.machineDir(gpa, name);
+    const authority = try gpa.print("{s}/authority", .{dir});
+    const saved = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return .miss,
+        else => return err,
+    };
+    const guard = try Dir.cwd().openFile(
+        io,
+        try gpa.print("{s}/secure.lock", .{dir}),
+        .{ .mode = .read_write },
+    );
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    if (profile.provider != o.on.? or profile.spec.published or
+        !std.mem.eql(u8, profile.spec.form, o.form)) return .miss;
+    for ([_][]const u8{ "enrolled", "credentials/owner.auth", "credentials/lockout.auth" }) |file|
+        try Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ authority, file }), .{});
+    Dir.cwd().access(io, try gpa.print("{s}/ready", .{authority}), .{}) catch return .miss;
+    if (!try callerMatches(io, gpa, profile.spec)) return .miss;
+    const expected = try inputs(
+        io,
+        gpa,
+        profile.spec,
+        try gpa.print("{s}/linux.efi.stub", .{authority}),
+    );
+    const previous = try Dir.cwd().readFileAlloc(io, try gpa.print(
+        "{s}/image-inputs",
+        .{authority},
+    ), gpa, .limited(65));
+    if (!std.mem.eql(u8, &expected, previous)) return .miss;
+    const requested = if (profile.spec.permit_host != null)
+        try withTransport(
+            gpa,
+            tar,
+            try Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}/transport.bundle", .{authority}),
+                gpa,
+                .limited(@import("tpm").transport.max_bundle),
+            ),
+        )
+    else
+        tar;
+    const current = try Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/config.tar", .{dir}),
+        gpa,
+        .limited(64 << 20),
+    );
+    if (!std.mem.eql(u8, requested, current)) return .configure;
+    if (profile.provider == .lima) {
+        const instance = try lima.dir(io, gpa, name) orelse return .configure;
+        try Dir.cwd().access(io, try gpa.print("{s}/swtpm", .{instance}), .{});
+        return if (try lima.running(io, gpa, name)) .running else .configure;
+    } else if (profile.provider == .qemu) {
+        if (qemu.running(io, gpa, dir) == null) return .configure;
+        const monitor = try Io.net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{dir}));
+        const connection = monitor.connect(io) catch return .configure;
+        connection.close(io);
+        return .running;
+    }
+    return .miss;
+}
+
+fn callerMatches(io: Io, gpa: Allocator, spec: native.Spec) !bool {
+    if (howl.environ.get("WEREWOLF_BOOT_CRT") != null and
+        howl.environ.get("WEREWOLF_BOOT_KEY") == null) return false;
+    if (howl.environ.get("WEREWOLF_BOOT_KEY")) |key| {
+        if (!try sameCredential(io, gpa, key, spec.boot_key.?)) return false;
+        if (!try sameCredential(io, gpa, howl.environ.get(
+            "WEREWOLF_BOOT_CRT",
+        ) orelse "release/boot.crt", spec.boot_cert.?)) return false;
+    }
+    const fields = [_][]const u8{ "WEREWOLF_IPE_KERNEL", "WEREWOLF_IPE_KEY", "WEREWOLF_IPE_CRT" };
+    const previous = [_][]const u8{ spec.ipe_kernel.?, spec.ipe_key.?, spec.ipe_cert.? };
+    const supplied = try @import("prerequisites.zig").supplied(
+        howl.environ.get(fields[0]),
+        howl.environ.get(fields[1]),
+        howl.environ.get(fields[2]),
+    );
+    if (supplied) for (fields, previous) |field, file| {
+        if (!try sameArtifact(io, gpa, howl.environ.get(field).?, file)) return false;
+    };
+    if (howl.environ.get("UKI_STUB")) |stub| {
+        const a = try @import("prebuilt").hashFile(io, gpa, stub);
+        const machine = std.fs.path.dirname(spec.boot_key.?).?;
+        const b = try @import("prebuilt").hashFile(
+            io,
+            gpa,
+            try gpa.print("{s}/authority/linux.efi.stub", .{machine}),
+        );
+        if (!std.mem.eql(u8, a.sha256, b.sha256)) return false;
+    }
+    return true;
+}
+
+fn sameArtifact(io: Io, gpa: Allocator, given: []const u8, held: []const u8) !bool {
+    const cwd = try std.process.currentPathAlloc(io, gpa);
+    const a_path = try std.fs.path.resolveAlloc(gpa, &.{ cwd, given });
+    const b_path = try std.fs.path.resolveAlloc(gpa, &.{ cwd, held });
+    // inputs checks held's bytes; do not hash that same file twice.
+    if (std.mem.eql(u8, a_path, b_path)) return true;
+    const a = try @import("prebuilt").hashFile(io, gpa, given);
+    const b = try @import("prebuilt").hashFile(io, gpa, held);
+    return a.size == b.size and std.mem.eql(u8, a.sha256, b.sha256);
+}
+
+fn sameCredential(io: Io, gpa: Allocator, given: []const u8, held: []const u8) !bool {
+    const a = try Dir.cwd().readFileAlloc(io, given, gpa, .limited(32 << 10));
+    defer std.crypto.secureZero(u8, a);
+    const b = try Dir.cwd().readFileAlloc(io, held, gpa, .limited(32 << 10));
+    defer std.crypto.secureZero(u8, b);
+    return std.mem.eql(u8, a, b);
+}
+
+test "unchanged live runs preserve state; changed inputs, config and lost authority refuse reuse" {
+    const t = std.testing;
+    const io = t.io;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var env: std.process.Environ.Map = .init(gpa);
+    howl.environ = &env;
+    defer howl.environ = undefined;
+    var nonce: [6]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const name = try gpa.print("ww-cache-{x}", .{&nonce});
+    const dir = try howl.machineDir(gpa, name);
+    defer Dir.cwd().deleteTree(io, dir) catch {};
+    const authority = try gpa.print("{s}/authority", .{dir});
+    try Dir.cwd().createDirPath(io, authority);
+    const form = try gpa.print("{s}/form", .{dir});
+    try Dir.cwd().createDirPath(io, form);
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = try gpa.print("{s}/form.yaml", .{form}),
+        .data = "base: playground\n",
+    });
+    const source_dir = try gpa.print("{s}/cmd/cache", .{form});
+    try Dir.cwd().createDirPath(io, source_dir);
+    const source_file = try gpa.print("{s}/cache.zig", .{source_dir});
+    try Dir.cwd().writeFile(io, .{ .sub_path = source_file, .data = "original source" });
+    for ([_][]const u8{
+        "kernel",
+        "ipe.key",
+        "ipe.crt",
+        "boot.key",
+        "boot.crt",
+        "authority/linux.efi.stub",
+    }) |file|
+        try Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = try gpa.print("{s}/{s}", .{ dir, file }), .data = file },
+        );
+    const spec: native.Spec = .{
+        .form = form,
+        .arch = .aarch64,
+        .ipe_kernel = try gpa.print("{s}/kernel", .{dir}),
+        .ipe_key = try gpa.print("{s}/ipe.key", .{dir}),
+        .ipe_cert = try gpa.print("{s}/ipe.crt", .{dir}),
+        .boot_key = try gpa.print("{s}/boot.key", .{dir}),
+        .boot_cert = try gpa.print("{s}/boot.crt", .{dir}),
+    };
+    try Dir.cwd().writeFile(io, .{ .sub_path = try gpa.print(
+        "{s}/profile.json",
+        .{authority},
+    ), .data = try std.json.Stringify.valueAlloc(
+        gpa,
+        Profile{ .spec = spec, .managed = false, .provider = .qemu },
+        .{},
+    ) });
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = try gpa.print("{s}/secure.lock", .{dir}), .data = "" },
+    );
+    try Dir.cwd().createDirPath(io, try gpa.print("{s}/credentials", .{authority}));
+    for ([_][]const u8{
+        "ready",
+        "enrolled",
+        "credentials/owner.auth",
+        "credentials/lockout.auth",
+    }) |file|
+        try Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = try gpa.print("{s}/{s}", .{ authority, file }), .data = "original" },
+        );
+    const stub = try gpa.print("{s}/linux.efi.stub", .{authority});
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = try gpa.print("{s}/image-inputs", .{authority}),
+            .data = &try inputs(io, gpa, spec, stub),
+        },
+    );
+    const tar = try howl.writeTar(
+        gpa,
+        &.{.{ .path = "hostname", .data = "cached", .from = "test" }},
+    );
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = try gpa.print("{s}/config.tar", .{dir}), .data = tar },
+    );
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = try gpa.print("{s}/qemu.pid", .{dir}),
+            .data = try gpa.print("{d}\n", .{if (@import("builtin").os.tag == .linux)
+                std.os.linux.getpid()
+            else
+                std.c.getpid()}),
+        },
+    );
+    const monitor = try Io.net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{dir}));
+    var server = try monitor.listen(io, .{});
+    defer server.deinit(io);
+    const o: howl.Options = .{ .form = form, .on = .qemu, .local = true, .secure = true };
+    try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
+    try Dir.cwd().writeFile(io, .{ .sub_path = source_file, .data = "edited guest source" });
+    try t.expectEqual(Reuse.miss, try reuse(io, gpa, o, name, tar));
+    try Dir.cwd().writeFile(io, .{ .sub_path = source_file, .data = "original source" });
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = try gpa.print("{s}/README.md", .{source_dir}),
+        .data = "documentation edit",
+    });
+    try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
+    try t.expectEqual(Reuse.configure, try reuse(
+        io,
+        gpa,
+        o,
+        name,
+        try howl.writeTar(gpa, &.{.{ .path = "hostname", .data = "changed", .from = "test" }}),
+    ));
+    try Dir.cwd().writeFile(io, .{ .sub_path = spec.ipe_key.?, .data = "changed signer" });
+    try t.expectEqual(Reuse.miss, try reuse(io, gpa, o, name, tar));
+    try Dir.cwd().writeFile(io, .{ .sub_path = spec.ipe_key.?, .data = "ipe.key" });
+    try Dir.cwd().deleteFile(io, try gpa.print("{s}/qemu.pid", .{dir}));
+    try t.expectEqual(Reuse.configure, try reuse(io, gpa, o, name, tar));
+    const credential = try gpa.print("{s}/credentials/owner.auth", .{authority});
+    try Dir.cwd().deleteFile(io, credential);
+    try t.expectError(error.FileNotFound, reuse(io, gpa, o, name, tar));
+}
+
 pub fn create(
     io: Io,
     gpa: Allocator,
@@ -62,15 +381,6 @@ pub fn create(
         try gpa.print("{s}/disk.img", .{at}),
         .{},
     )) |_| true else |_| false;
-    if (!kept) {
-        // Never re-enroll a partial creation or an instance deleted outside howl.
-        if (Dir.cwd().access(io, authority, .{})) |_| return why.refuse(
-            "{s}: enrollment already exists; inspect the partial creation before recreating",
-            .{
-                name,
-            },
-        ) else |err| if (err != error.FileNotFound) return err;
-    }
     try Dir.cwd().createDirPath(io, at);
     try Dir.cwd().setFilePermissions(io, at, .fromMode(0o700), .{});
     const guard = try Dir.cwd().createFile(io, try gpa.print("{s}/secure.lock", .{at}), .{
@@ -80,8 +390,22 @@ pub fn create(
     defer guard.close(io);
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
+    if (!kept) {
+        // An empty directory left by failed firmware preparation contains
+        // no enrollment to replace. All nonempty authority remains guarded.
+        if (!try emptyAuthority(io, authority)) return why.refuse(
+            "{s}: enrollment already exists; inspect the partial creation before recreating",
+            .{name},
+        );
+        Dir.cwd().deleteDir(io, authority) catch |err| if (err != error.FileNotFound) return err;
+    }
     var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
+    Dir.cwd().deleteFile(io, try gpa.print("{s}/ready", .{authority})) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
     var profile: Profile = undefined;
+    var configured = tar;
     if (kept) {
         const data = Dir.cwd().readFileAlloc(
             io,
@@ -93,6 +417,16 @@ pub fn create(
             .{name},
         );
         profile = try std.json.parseFromSliceLeaky(Profile, gpa, data, .{});
+        if (profile.spec.permit_host != null) configured = try withTransport(
+            gpa,
+            tar,
+            try Dir.cwd().readFileAlloc(
+                io,
+                try gpa.print("{s}/transport.bundle", .{authority}),
+                gpa,
+                .limited(@import("tpm").transport.max_bundle),
+            ),
+        );
         if (profile.provider != provider) return why.refuse(
             "the secured provider cannot change",
             .{},
@@ -104,20 +438,37 @@ pub fn create(
             "credentials/lockout.auth",
         }) |file|
             try Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ authority, file }), .{});
+        const current = try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/config.tar", .{at}),
+            gpa,
+            .limited(64 << 20),
+        );
+        const changed = !std.mem.eql(u8, current, configured);
         if (on_lima) {
             const existing = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
             try Dir.cwd().access(io, try gpa.print("{s}/swtpm", .{existing}), .{});
-            _ = try @import("local.zig").reconfigure(io, gpa, name, o.form, dir, tar, why);
-        } else {
+            if (changed) _ = try @import("local.zig").reconfigure(
+                io,
+                gpa,
+                name,
+                o.form,
+                dir,
+                configured,
+                why,
+            );
+        } else if (changed) {
             _ = try qemu.stop(io, gpa, dir);
             try tpmService(io, gpa, at, "stop");
-            try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), tar, why);
+            try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), configured, why);
         }
     } else {
         const prerequisites = try @import("prerequisites.zig").resolve(io, gpa, &steps, arch, why);
+        const boot = try ownedBoot(io, gpa, &steps, at, arch, o.local);
         try Dir.cwd().createDir(io, authority, .fromMode(0o700));
-        const boot = try ownedBoot(io, gpa, &steps, at, arch);
         const permit_signer = try enrollment.signer(io, gpa, &steps, authority, false);
+        const owner_cert = try enrollment.certificate(io, gpa, &steps, permit_signer, authority);
+        try secureboot.enroll(io, gpa, &steps, at, arch, boot.cert, owner_cert);
         const port = try qemu.freePort(io, 8443);
         const tls_key = try gpa.print("{s}/tls.key", .{authority});
         const tls_cert = try gpa.print("{s}/tls.crt", .{authority});
@@ -162,6 +513,7 @@ pub fn create(
             .boot_cert = boot.cert,
             .boot_native = true,
             .tpm_pub = permit_signer.public,
+            .tpm_firmware = true,
             .ipe_kernel = prerequisites.kernel.?,
             .ipe_key = prerequisites.key.?,
             .ipe_cert = prerequisites.cert.?,
@@ -172,6 +524,8 @@ pub fn create(
             .image_serial = try serial(io, gpa),
             .update_ca = tls_cert,
             .update_port = port,
+            .permit_host = if (on_lima) "192.168.5.2" else "10.0.2.2",
+            .permit_port = port,
             .disk = .{ .args = if (on_lima) &.{
                 "console=ttyAMA0",              "werewolf.ip=" ++ lima.user_ip,
                 "werewolf.gw=" ++ lima.user_gw, "werewolf.dns=192.168.5.3",
@@ -207,6 +561,16 @@ pub fn create(
             authority,
             try gpa.print("{s}/slot", .{paths.out}),
         );
+        configured = try withTransport(gpa, tar, try enrollment.transport(
+            io,
+            gpa,
+            &steps,
+            permit_signer,
+            authority,
+            tls_cert,
+            if (on_lima) .{ 192, 168, 5, 2 } else .{ 10, 0, 2, 2 },
+            port,
+        ));
         _ = try build(io, gpa, &steps, profile.spec, stub, .{ .disk = true });
         try enrollment.durable(
             io,
@@ -220,7 +584,7 @@ pub fn create(
             &try inputs(io, gpa, profile.spec, stub),
         );
         const tar_path = try gpa.print("{s}/config.tar", .{at});
-        try howl.writePrivate(io, gpa, tar_path, tar, why);
+        try howl.writePrivate(io, gpa, tar_path, configured, why);
         if (on_lima) {
             const config_disk = try gpa.print("{s}-config", .{name});
             if (!(try steps.exec(&.{.{ .argv = &.{
@@ -285,6 +649,7 @@ pub fn create(
         return steps.fail("the host image publisher did not start");
     if (!on_lima) {
         try startQemu(io, gpa, profile.spec, name, at, &steps, why);
+        try enrollment.durable(io, try gpa.print("{s}/ready", .{authority}), "verified\n");
         _ = try steps.finish();
         try w.print("{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n", .{
             name, qemu.record(io, gpa, dir, "ssh") orelse "0", o.form,
@@ -319,6 +684,7 @@ pub fn create(
             .{ name, console },
         );
     }
+    try enrollment.durable(io, try gpa.print("{s}/ready", .{authority}), "verified\n");
     try w.print("{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n", .{
         name, lima.sshPort(io, gpa, name) orelse "0", o.form,
     });
@@ -382,7 +748,12 @@ fn ownedBoot(
     steps: *progress.Steps,
     at: []const u8,
     arch: howl.Arch,
+    local: bool,
 ) !secureboot.Keys {
+    try steps.enter(.{ .name = "Preparing enrolled Secure Boot firmware", .short = "firmware" });
+    // A source build belongs to the caller's signing authority. Published
+    // deployments must not silently substitute an unrelated local signer.
+    if (local) return secureboot.prepare(io, gpa, steps, at, arch, false);
     var env = try howl.environ.clone(gpa);
     _ = env.swapRemove("WEREWOLF_BOOT_KEY");
     _ = env.swapRemove("WEREWOLF_BOOT_CRT");
@@ -392,14 +763,175 @@ fn ownedBoot(
     return secureboot.prepare(io, gpa, steps, at, arch, false);
 }
 
+fn withTransport(gpa: Allocator, tar: []const u8, bundle: []const u8) ![]const u8 {
+    if (tar.len > 64 << 20 or bundle.len > @import("tpm").transport.max_bundle)
+        return error.ConfigTooBig;
+    var entries: std.ArrayList(howl.Entry) = .empty;
+    var reader: Io.Reader = .fixed(tar);
+    var names: [Dir.max_path_bytes]u8 = undefined;
+    var links: [Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&reader, .{
+        .file_name_buffer = &names,
+        .link_name_buffer = &links,
+    });
+    while (try it.next()) |entry| {
+        if (entry.kind != .file or entry.name.len > 100 or
+            reader.seek > tar.len or entry.size > tar.len - reader.seek)
+            return error.BadMachineConfig;
+        if (std.mem.eql(u8, entry.name, "machine-transport")) continue;
+        try entries.append(gpa, .{
+            .path = try gpa.dupe(u8, entry.name),
+            .data = tar[reader.seek..][0..@intCast(entry.size)],
+            .from = "existing config",
+        });
+    }
+    try entries.append(
+        gpa,
+        .{ .path = "machine-transport", .data = bundle, .from = "host authority" },
+    );
+    const result = try howl.writeTar(gpa, entries.items);
+    if (result.len > 64 << 20) return error.ConfigTooBig;
+    return result;
+}
+
+test "machine transport config replaces only its reserved public declaration" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const old = try howl.writeTar(gpa, &.{
+        .{ .path = "authorized_keys", .data = "retained SSH keys", .from = "test" },
+        .{ .path = "machine-transport", .data = "untrusted old declaration", .from = "test" },
+    });
+    const result = try withTransport(gpa, old, "host-signed declaration");
+    var reader: Io.Reader = .fixed(result);
+    var names: [Dir.max_path_bytes]u8 = undefined;
+    var links: [Dir.max_path_bytes]u8 = undefined;
+    var it: std.tar.Iterator = .init(&reader, .{
+        .file_name_buffer = &names,
+        .link_name_buffer = &links,
+    });
+    var count: usize = 0;
+    while (try it.next()) |entry| {
+        const expected = if (count == 0) "retained SSH keys" else "host-signed declaration";
+        try t.expectEqualStrings(expected, result[reader.seek..][0..@intCast(entry.size)]);
+        count += 1;
+    }
+    try t.expectEqual(@as(usize, 2), count);
+    try t.expectError(error.UnexpectedEndOfStream, withTransport(gpa, old[0..20], "signed"));
+}
+
+fn emptyAuthority(io: Io, path: []const u8) !bool {
+    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return true,
+        else => return err,
+    };
+    defer dir.close(io);
+    var iterator = dir.iterate();
+    return try iterator.next(io) == null;
+}
+
+test "early firmware failure can retry but any enrollment material refuses replacement" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(path);
+    try t.expect(try emptyAuthority(t.io, path));
+    try tmp.dir.writeFile(t.io, .{ .sub_path = "owner.auth", .data = "original authority" });
+    try t.expect(!try emptyAuthority(t.io, path));
+    const bytes = try tmp.dir.readFileAlloc(t.io, "owner.auth", t.allocator, .limited(64));
+    defer t.allocator.free(bytes);
+    try t.expectEqualStrings("original authority", bytes);
+}
+
 fn inputs(io: Io, gpa: Allocator, spec: native.Spec, stub: []const u8) ![64]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     hash.update(&try @import("lock.zig").inputs(io, gpa, spec));
-    for ([5][]const u8{
-        spec.ipe_kernel.?,                            spec.ipe_cert.?, spec.boot_cert.?, stub,
+    hash.update(&try programInputs(io, gpa, spec.form));
+    for ([7][]const u8{
+        spec.ipe_kernel.?,                            spec.ipe_cert.?,
+        spec.ipe_key.?,                               spec.boot_cert.?,
+        spec.boot_key.?,                              stub,
         try std.process.executablePathAlloc(io, gpa),
     }) |file| hash.update((try @import("prebuilt").hashFile(io, gpa, file)).sha256);
     return std.fmt.bytesToHex(hash.finalResult(), .lower);
+}
+
+/// Bind checkout sources used by the image, even when howl itself was not rebuilt.
+fn programInputs(io: Io, gpa: Allocator, form: []const u8) ![32]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    for ([_][]const u8{ "Makefile", "files.zig" }) |file| {
+        hash.update(file);
+        const bytes = @import("prebuilt").hashFile(io, gpa, file) catch |err| switch (err) {
+            error.FileNotFound => {
+                hash.update("absent");
+                continue;
+            },
+            else => return err,
+        };
+        hash.update(bytes.sha256);
+    }
+    try sourceTree(io, gpa, &hash, "lib");
+    for ([_][]const u8{ "init", "bite-cleanup" } ++ native.every_program) |name|
+        try sourceTree(io, gpa, &hash, try gpa.print("cmd/{s}", .{name}));
+    var bad: @import("form").Failure = .{};
+    const chain = try @import("form").chain(io, gpa, Dir.cwd(), form, &bad);
+    for (chain) |part| {
+        for (try part.items(gpa, "programs")) |item| {
+            var names = std.mem.tokenizeAny(u8, item, " \t");
+            while (names.next()) |name| {
+                const stem = name[0 .. std.mem.findScalarLast(u8, name, '.') orelse name.len];
+                try sourceTree(io, gpa, &hash, try gpa.print("cmd/{s}", .{stem}));
+            }
+        }
+        try sourceTree(io, gpa, &hash, try gpa.print("{s}/cmd", .{part.dir}));
+        hash.update(&try @import("lock.zig").tree(
+            io,
+            gpa,
+            Dir.cwd(),
+            try gpa.print("{s}/melange", .{part.dir}),
+        ));
+    }
+    if (@import("app.zig").example(chain[chain.len - 1].name)) |example| {
+        const sources: []const []const u8 = switch (example) {
+            .go => &.{"examples/go/main.go"},
+            .rust => &.{"examples/rust/main.rs"},
+            .aspnet => &.{ "examples/aspnet/Program.cs", "examples/aspnet/App.csproj" },
+        };
+        for (sources) |file| hash.update((try @import("prebuilt").hashFile(io, gpa, file)).sha256);
+    }
+    return hash.finalResult();
+}
+
+fn sourceTree(io: Io, gpa: Allocator, hash: *std.crypto.hash.sha2.Sha256, path: []const u8) !void {
+    hash.update(path);
+    hash.update(&.{0});
+    var dir = Dir.cwd().openDir(io, path, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => {
+            hash.update("absent");
+            return;
+        },
+        else => return err,
+    };
+    defer dir.close(io);
+    var names: std.ArrayList([]const u8) = .empty;
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.path, ".zig") and
+            !std.mem.endsWith(u8, entry.path, ".mtree")) continue;
+        try names.append(gpa, try gpa.dupe(u8, entry.path));
+    }
+    std.mem.sort([]const u8, names.items, {}, native.lessThan);
+    for (names.items) |name| {
+        hash.update(name);
+        hash.update(&.{0});
+        hash.update((try @import("prebuilt").hashFile(io, gpa, try gpa.print(
+            "{s}/{s}",
+            .{ path, name },
+        ))).sha256);
+    }
 }
 
 fn build(

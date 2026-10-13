@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Exercise portable authority against actual signed EFI boots; save public logs only."""
+import argparse
+import hashlib
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import shutil
+import stat
+import subprocess
+import tarfile
+import tempfile
+
+
+def run(*args):
+    result = subprocess.run(list(map(str, args)), capture_output=True, timeout=120)
+    if result.returncode:
+        raise RuntimeError(str(args[0]) + ': ' + result.stderr.decode(errors='replace')[-4000:])
+    return result.stdout
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    for name in ('arch', 'kernel', 'stub', 'output'):
+        parser.add_argument('--' + name, required=True)
+    parser.add_argument('--accel', default='tcg')
+    parser.add_argument('--uki', default='build/host/uki')
+    args = parser.parse_args()
+    if args.arch not in ('aarch64', 'x86_64'):
+        raise ValueError('unsupported architecture')
+    work = Path(args.output).resolve()
+    work.mkdir(mode=0o700, parents=True, exist_ok=False)
+    os.umask(0o077)
+    loader = importlib.machinery.SourceFileLoader('bootstrap_image', 'tools/build-tpm-bootstrap')
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    image = importlib.util.module_from_spec(spec)
+    loader.exec_module(image)
+    with tempfile.TemporaryDirectory(prefix='ww-firmware-authority-') as temporary:
+        root = Path(temporary)
+        for name in ('owner', 'vendor', 'foreign'):
+            run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+                '-subj', '/CN=werewolf-test-' + name, '-keyout', root / (name + '.key'),
+                '-out', root / (name + '.crt'))
+            (root / (name + '.pub')).write_bytes(run('openssl', 'pkey', '-in',
+                root / (name + '.key'), '-pubout'))
+        vendor = run('openssl', 'x509', '-in', root / 'vendor.crt', '-outform', 'DER')
+        probe = root / 'init'
+        run('zig', 'build-exe', '-O', 'ReleaseSafe', '-target', args.arch + '-linux-musl',
+            '--dep', 'authority', '--dep', 'apk', '-Mroot=test/boot-authority-init.zig',
+            '--dep', 'apk', '-Mauthority=lib/boot-authority.zig', '--dep', 'package',
+            '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe))
+        initrd = root / 'initrd'
+        initrd.write_bytes(image.newc([
+            ('init', stat.S_IFREG | 0o755, probe.read_bytes(), 0, 0),
+            ('sys', stat.S_IFDIR | 0o755, b'', 0, 0),
+            ('dev', stat.S_IFDIR | 0o755, b'', 0, 0),
+            ('dev/console', stat.S_IFCHR | 0o600, b'', 5, 1),
+            ('vendor.sha256', stat.S_IFREG | 0o400, hashlib.sha256(vendor).digest(), 0, 0),
+            ('owner.pub', stat.S_IFREG | 0o400, (root / 'owner.pub').read_bytes(), 0, 0),
+        ]))
+        kernel = Path(args.kernel).resolve()
+        if tarfile.is_tarfile(kernel):
+            with tarfile.open(kernel) as archive:
+                candidates = [m for m in archive if m.isfile() and
+                              m.name.lstrip('./').startswith('boot/vmlinuz')]
+                if len(candidates) != 1 or candidates[0].size > 64 << 20:
+                    raise ValueError('ambiguous or oversized kernel')
+                data = archive.extractfile(candidates[0]).read()
+            kernel = root / 'vmlinuz'
+            kernel.write_bytes(data)
+        line = root / 'cmdline'
+        line.write_bytes(('init=/init panic=1 console=' +
+                         ('ttyAMA0' if args.arch == 'aarch64' else 'ttyS0')).encode() + b'\0')
+        unsigned = root / 'unsigned.efi'
+        run(args.uki, args.stub, unsigned, '.linux=' + str(kernel),
+            '.initrd=' + str(initrd), '.cmdline=' + str(line))
+        for name in ('vendor', 'foreign'):
+            run('osslsigncode', 'sign', '-time', '0', '-certs', root / (name + '.crt'),
+                '-key', root / (name + '.key'), '-in', unsigned, '-out', root / (name + '.efi'))
+        env = dict(os.environ, ENROLL_TEST_SETUP='1')
+        enrolled = root / 'firmware'
+        subprocess.run(['sh', 'tools/enroll-boot', args.arch, str(root / 'vendor.crt'),
+                        str(enrolled), 'local', str(root / 'owner.crt')], env=env,
+                       check=True, capture_output=True, timeout=300)
+        if os.uname().sysname == 'Darwin':
+            report = root / 'tools.json'
+            run('python3', 'tools/native-firmware', args.arch, 'boot/firmware-requirements.txt', report)
+            import json
+            tool = json.loads(report.read_text())['tool']
+        else:
+            tool = shutil.which('virt-fw-vars')
+        if not tool:
+            raise RuntimeError('missing firmware variable tooling')
+        guid = 'a0420f26-3a13-4a1b-9c77-134e29b24bf1'
+        cases = [
+            ('valid', [], 'vendor', 'boot-authority-check: PASS'),
+            ('foreign-kek', ['--delete', 'KEK', '--add-kek', guid, str(root / 'foreign.crt')],
+             'vendor', 'boot-authority-check: refuse ForeignFirmwareAuthority'),
+            ('foreign-owner', ['--set-pk', guid, str(root / 'foreign.crt'), '--delete', 'KEK',
+             '--add-kek', guid, str(root / 'foreign.crt')],
+             'vendor', 'boot-authority-check: refuse IncorrectMachineAuthority'),
+            ('extra-db', ['--add-db', guid, str(root / 'foreign.crt')],
+             'vendor', 'boot-authority-check: refuse BadFirmwareAuthority'),
+            ('foreign-db', ['--delete', 'db', '--add-db', guid, str(root / 'foreign.crt')],
+             'foreign', 'boot-authority-check: refuse ForeignBootTrust'),
+            ('setup-mode', None, 'vendor', 'boot-authority-check: refuse InsecureFirmware'),
+        ]
+        for label, changes, signer, expected in cases:
+            variables = root / 'vars.fd'
+            if changes is None:
+                shutil.copyfile(enrolled / 'setup.fd', variables)
+            else:
+                run(tool, '--input', enrolled / 'vars.fd', '--output', variables, *changes)
+            disk = root / 'esp.img'
+            with disk.open('wb') as stream:
+                stream.truncate(128 << 20)
+            run('mformat', '-i', disk, '-F', '::')
+            run('mmd', '-i', disk, '::/EFI', '::/EFI/BOOT')
+            run('mcopy', '-i', disk, root / (signer + '.efi'), '::/EFI/BOOT/' +
+                ('BOOTAA64.EFI' if args.arch == 'aarch64' else 'BOOTX64.EFI'))
+            command = ['qemu-system-' + args.arch, '-accel', args.accel, '-M',
+                       'virt' if args.arch == 'aarch64' else 'q35,smm=on', '-cpu',
+                       'host' if args.accel != 'tcg' else 'max', '-smp', '2', '-m', '1024',
+                       '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-no-reboot',
+                       '-drive', 'if=pflash,format=raw,readonly=on,file=' + str(enrolled / 'code.fd'),
+                       '-drive', 'if=pflash,format=raw,' +
+                       ('readonly=on,' if args.arch == 'aarch64' else '') + 'file=' + str(variables),
+                       '-drive', 'if=virtio,format=raw,file=' + str(disk)]
+            if args.arch == 'x86_64':
+                command += ['-global', 'driver=cfi.pflash01,property=secure,value=on']
+            log = work / (label + '.log')
+            with log.open('wb') as stream:
+                process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
+                                           stdout=stream, stderr=subprocess.STDOUT)
+                try:
+                    process.wait(timeout=120)
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=10)
+            data = log.read_text(errors='replace')
+            if expected not in data or (label != 'valid' and 'boot-authority-check: PASS' in data):
+                raise RuntimeError(label + ' did not produce the expected refusal: ' + data[-4000:])
+            print('pass   boot-authority: ' + label, flush=True)
+        (work / 'vendor.crt').write_bytes((root / 'vendor.crt').read_bytes())
+        (work / 'owner.pub').write_bytes((root / 'owner.pub').read_bytes())
+
+
+if __name__ == '__main__':
+    main()

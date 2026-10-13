@@ -550,8 +550,8 @@ Firecracker has no UEFI firmware and refuses EFI entries, including entries
 with appended unsigned `linux` and `initrd` lines. Use QEMU for firmware enforcement.
 
 Install `python3-virt-firmware`, OVMF and `qemu-efi-aarch64` on Linux. On macOS,
-`tools/enroll-boot` uses the existing `werewolf-ci-24.04` Lima build VM for firmware
-and public-key enrollment. `SECUREBOOT_DIR` optionally supplies `code.fd` and
+`tools/enroll-boot` uses hash-pinned public firmware and native Mac Python tools for enrollment.
+`SECUREBOOT_DIR` optionally supplies `code.fd` and
 `vars.fd`; pinned systemd stubs come from `out/tools/stubs/ARCH/linux.efi.stub`.
 Enrollment never copies a private signer into that helper's VM scratch directory.
 
@@ -594,15 +594,30 @@ only UKIs that enforce this check. The updater fetches machine-specific public
 permits at `CHANNEL/ARCH/permits/MACHINE_NONCE/CANDIDATE_ID.permit`.
 See [TPM retirement](design/tpm-ab-retirement.md) for issuer and custody requirements.
 
-`howl run --on lima --secure` uses an arm64 QEMU guest with host-managed enrollment,
-HTTPS image publication and contextual permits. Native Linux uses `--on qemu --secure`.
+`--tpm-firmware` builds use the authenticated firmware PK as machine authority,
+with identical KEK trust and one separately pinned code certificate in db.
+The verified root records `2-firmware` and the code certificate's SHA-256;
+it contains no machine permit key. Existing `2` roots retain their embedded key.
+`test/check-boot-authority` boots a signed probe against actual EFI variables,
+covering valid enrollment, foreign PK/KEK/db, extra db trust and setup mode.
+IPE CI runs it on both architectures; local signed execution was tested on arm64.
+
+`howl run --build` defaults to an arm64 Lima QEMU guest on macOS, with host-managed enrollment,
+HTTPS image publication and contextual permits. Native Linux defaults to protected QEMU.
+Published protected downloads remain gated; see [the publication design](design/published-secure-boot.md).
 Howl creates and caches matching IPE inputs when no overrides are supplied.
 Optional overrides are `WEREWOLF_IPE_KERNEL`, `WEREWOLF_IPE_KEY`, `WEREWOLF_IPE_CRT`
 (all three together), and a TPM-enabled `UKI_STUB`.
 Managed builds need kernel build tools, swtpm, virt-firmware and measured-stub dependencies.
-On Debian/Ubuntu, `make install-deps` installs them. On a Mac, the trusted
-`werewolf-ci-24.04` Linux helper must be running; `WEREWOLF_BUILD_VM` selects another.
-Only public IPE trust reaches the helper; its temporary module signer is destroyed.
+On Debian/Ubuntu, `make install-deps` installs them. Mac builds use Melange's existing QEMU
+runner, with a stock Alpine kernel and matching initramfs modules. Its isolated Linux guest
+supplies native Kbuild and EFI/TPM build tools; Ubuntu is not required.
+Only explicitly staged public sources, base archives and IPE certificates reach that guest.
+Signing keys stay on the Mac; firmware and native enrollment tools are hash-pinned separately.
+`WEREWOLF_BUILD_VM` explicitly selects an isolated native arm64 Linux Lima helper instead.
+That optional helper is created/started before use; host mounts and SSH agent forwarding are refused.
+Its separate temporary module signer is destroyed. Published protected images should need no build VM.
+See [macOS builds](macos-builds.md) for builder setup and firmware compatibility.
 The [local deployment design](design/secure-local-deployment.md) defines the host trust boundary.
 `tools/build-tpm-stub OUT` builds the pinned measured stub on Linux; copy its public
 `linux.efi.stub` back to the Mac. No signing key is needed to build the stub.
@@ -614,18 +629,39 @@ rollback, kills of both VM and simulator before/after NV extension, completed-up
 resume and an unhealthy counted trial recovering its predecessor. It compares
 actual PCR 11 with the exact booted release's prediction and rejects writable-code execution,
 verified-root writes and requests to reauthorize retired history.
-The test removes its own instance, signers and reset credentials, retaining public logs.
+The test omits `--secure` and the Lima selector, checks caller boot enrollment,
+and removes its own instance, signers and reset credentials, retaining public logs.
 `make test` runs the bounded publisher's signature, context, concurrency and restart
 regressions. `python3 test/check-tpm-enrollment` tests native enrollment against
 swtpm on macOS or Linux, including private file modes, repeat refusal, restart,
 supervisor crash recovery, cleanup and refusal to replace missing backing state.
 `test/local-prerequisites` covers cache tampering, incomplete publication and signer custody.
+It also checks independent kernel/stub invalidation, legacy cache adoption and interrupted builds.
+On macOS, `make check-run-cache` in an isolated checkout measures repeat protected Lima runs and resume.
+It rejects repeated builders, changed boot IDs on live reuse and replaced signing/TPM authority.
+Supply the same explicit IPE kernel/key/certificate and measured stub as `check-secure-lima`.
+New profiles use [signed machine transport](design/machine-transport.md) outside the verified root.
+Its tests reject foreign machines, endpoints, signers, malformed CAs and every single-byte mutation.
 `test/cloud-enrollment` checks SDK replies and immutable AWS/GCP TPM identity pins;
-encrypted cloud bootstrap remains proposed in the [enrollment design](design/cloud-tpm-enrollment.md).
+cloud deployment remains gated in the [enrollment design](design/cloud-tpm-enrollment.md).
 Build `build/host/tpm-bootstrap` and `build/host/tpm-policy`, then run
 `python3 test/check-cloud-tpm-activation` with independent TPM tools and fresh simulators.
 It checks native quotes, publisher-signed encrypted capsules, provisioning, tamper and replay;
 it does not deploy a signed cloud bootstrap. See the [wire protocol](design/tpm-bootstrap-protocol.md).
+`make IPE=1 check-tpm-bootstrap-guest` builds and boots the separate signed enrollment UKI.
+It requires the IPE kernel, measured `UKI_STUB`, QEMU, swtpm and firmware enrollment tools.
+The agent runs alone as PID 1 with immutable public factory trust and a bounded virtio channel.
+Tests verify actual PCR/EK binding, encrypted provisioning, protected readback and reboot.
+Wrong machine/PCR, foreign signatures, invalid AEAD, unsigned/oversized capsules and replay refuse.
+Signed unmeasured images, absent TPMs, tampered UKIs and firmware setup mode also refuse.
+CI configures signed enrollment/recovery on both architectures; provider transport/validation remain open.
+The signed test also kills QEMU and swtpm at owner-auth, NV-definition and NV-extension boundaries.
+It boots a distinct measured recovery image, repeats a recovery cut and verifies the exact protected anchor.
+Normal bootstrap refuses partial state; recovery refuses fresh/written TPMs, wrong PCRs and wrong authority.
+`make check-tpm-recovery` tests all twelve provisioning boundaries on macOS or Linux.
+It also rejects wrong owner/lockout credentials, foreign/legacy indices and hierarchy-policy overrides.
+A valid signed retirement remains unchanged when the old factory record is offered to recovery.
+Only public manifests, templates, quotes and console logs survive the disposable test fixture.
 Only the VM's TPM device is exposed; no signing keys or host directories are mounted.
 
 PR CI checks the IPE source version against both Alpine architecture locks.

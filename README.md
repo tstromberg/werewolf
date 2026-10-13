@@ -20,18 +20,20 @@ Werewolf uses Wolfi and Alpine packages; its own programs are written in Zig.
 
 `howl` builds and starts VMs on Linux and macOS, with experimental FreeBSD and
 NetBSD support (`gmake` instead of `make`). This creates a local playground based
-on the best available local VM manager (lima, qemu, firecracker, etc):
+on Lima's protected QEMU backend on an arm64 Mac, or QEMU on Linux:
 
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf
 make install
-howl run
+howl run --build
 ```
 
-To deploy a locked-down Python app on GCP, try something like this:
+Secure mode is the default. Published protected downloads are still being implemented;
+plain `howl run` refuses until they are ready. `--build` uses local signing credentials.
+Cloud deployment currently requires an explicit protection opt-out:
 
 ```sh
-howl create web --on gcp --with python-app --app ./myapp
+howl create web --insecure --on gcp --with python-app --app ./myapp
 ```
 
 Tutorials: [Python](examples/python/README.md), [PHP](examples/php/README.md),
@@ -52,11 +54,11 @@ Secure Boot authenticates the kernel, early boot code and root filesystem hash.
 
 | Provider | Werewolf Secure Boot | Caveats |
 |---|---|---|
-| QEMU | Verified, x86_64 and arm64 | Linux `--secure` adds host custody and persistent TPM; x86 needs SMM |
+| QEMU | Verified, x86_64 and arm64 | Linux default includes host custody and persistent TPM; x86 needs SMM |
 | AWS EC2 | Verified, arm64 | Custom UEFI enrollment; NitroTPM alone does not protect rollback |
 | Google Compute Engine | Verified, arm64 | Custom Shielded VM keys; vTPM alone does not protect rollback |
 | Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
-| Lima QEMU | Verified, arm64 Mac | `howl --on lima --secure` selects QEMU, IPE and persistent TPM; default uses VZ |
+| Lima QEMU | Verified, arm64 Mac | Default uses QEMU, IPE and persistent TPM; source builds currently required |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
 | bhyve | Manual enrollment verified, x86_64 | Bilbo firmware test; `howl` enrollment and arm64 backend remain unfinished |
 | Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
@@ -94,3 +96,5 @@ contributions. Discuss larger changes early. Report vulnerabilities privately
 through the [security policy](SECURITY.md).
 
 Licensed under [Apache 2.0](LICENSE).
+
+Development sponsored by [isotope13](http://isotope13.io/).
