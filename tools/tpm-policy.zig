@@ -26,13 +26,20 @@ pub fn main(init: std.process.Init) !void {
         var device = try connect(io, args[3]);
         defer device.close();
         try device.disablePlatform();
-        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[4], .data = &try device.anchor(key) });
+        try std.Io.Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = args[4], .data = &try device.anchor(key) },
+        );
         return;
     }
     if (std.mem.eql(u8, args[1], "bootstrap-pair") and args.len == 6) {
         const raw = try read(io, gpa, args[3], tpm.record_size + 512);
         const initial = try tpm.bundle(key, raw);
-        const directory = try std.Io.Dir.cwd().createDirPathOpen(io, args[5], .{});
+        const directory = try std.Io.Dir.cwd().createDirPathOpen(
+            io,
+            args[5],
+            .{ .open_options = .{ .iterate = true } },
+        );
         defer directory.close(io);
         try directory.setPermissions(io, .fromMode(0o700));
         var credentials: [2][32]u8 = undefined;

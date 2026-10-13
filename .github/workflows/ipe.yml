@@ -30,7 +30,8 @@ jobs:
         run: |
           sudo test/ci-setup
           sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc \
-            python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools systemd-boot-efi
+            python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools systemd-boot-efi \
+            meson ninja-build gperf libcap-dev libmount-dev python3-jinja2 python3-pyelftools
       - name: Kernel version agreement
         run: |
           make build/lock/kernel.lock.json
@@ -59,12 +60,21 @@ jobs:
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-ab
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-enrollment
+          python3 test/check-cloud-tpm-activation
+      - name: Build pinned measured stub
+        run: |
+          tools/build-tpm-stub build/tpm-stub
+          echo "UKI_STUB=$PWD/build/tpm-stub/linux.efi.stub" >> "$GITHUB_ENV"
       - name: Protected TPM guest and power cuts
-        if: runner.arch == 'X64'
         env:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
           WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
         run: make IPE=1 check-tpm-guest
+      - name: Secured QEMU CLI lifecycle and power cuts
+        env:
+          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
+          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
+        run: make IPE=1 check-secure-qemu
       - name: Keep console logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -80,3 +90,5 @@ jobs:
             build/*/ipe/check/tpm-guest/factory.log
             build/*/ipe/check/tpm-guest/guest/*.log
             build/*/ipe/check/tpm-guest/guest/evidence.jsonl
+            build/*/ipe/check/secure-qemu/*.log
+            build/*/ipe/check/secure-qemu/evidence.jsonl

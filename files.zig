@@ -31,3 +31,13 @@ pub const boot = [_]struct { path: []const u8, data: []const u8 }{
         .data = @embedFile("boot/alpine-keys/alpine-devel@lists.alpinelinux.org-616ae350.rsa.pub"),
     },
 };
+
+/// Pinned security builders are available even when howl runs without its checkout.
+pub const secure_sources = [_]struct { path: []const u8, data: []const u8 }{
+    .{ .path = "local-prerequisites", .data = @embedFile("tools/local-prerequisites") },
+    .{ .path = "boot/kernel-source", .data = @embedFile("boot/kernel-source") },
+    .{ .path = "boot/build-kernel", .data = @embedFile("boot/build-kernel") },
+    .{ .path = "boot/ipe-boot.policy", .data = @embedFile("boot/ipe-boot.policy") },
+    .{ .path = "boot/stub-source", .data = @embedFile("boot/stub-source") },
+    .{ .path = "tools/build-tpm-stub", .data = @embedFile("tools/build-tpm-stub") },
+};

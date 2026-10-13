@@ -8,7 +8,8 @@ tree=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 . "$tree/boot/kernel-source"
 base=$(realpath "$1")
 cert=$(realpath "$2")
-key=$(realpath "$3")
+key=$3
+[ "$key" = - ] || key=$(realpath "$key")
 mkdir -p "$4"
 out=$(realpath "$4")
 case ${KERNEL_ARCH:-$(uname -m)} in
@@ -16,6 +17,16 @@ aarch64) arch=arm64; image=arch/arm64/boot/Image ;;
 x86_64) arch=x86; image=arch/x86/boot/bzImage ;;
 *) echo "build-kernel: aarch64 or x86_64 required (KERNEL_ARCH for cross builds)" >&2; exit 1 ;;
 esac
+# Match Alpine's complete package revision before downloading or compiling.
+# Matching only config filenames misses Alpine revisions carrying backports.
+database=$(tar -tf "$base" | awk '$0 == "usr/lib/apk/db/installed" || $0 == "lib/apk/db/installed" {print}')
+case $database in usr/lib/apk/db/installed | lib/apk/db/installed) ;;
+*) echo 'build-kernel: exactly one Alpine package database required' >&2; exit 1 ;; esac
+package_version=$(tar -xOf "$base" "$database" | awk -F: '$1 == "P" {kernel=($2 == "linux-virt")} kernel && $1 == "V" {print $2; exit}')
+[ "$package_version" = "$alpine_version" ] || {
+    echo "build-kernel: Alpine linux-virt $package_version differs from pinned $alpine_version" >&2
+    exit 1
+}
 archive=$out/linux-$version.tar.xz
 if [ ! -f "$archive" ]; then
 	curl -fL --retry 3 "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$version.tar.xz" -o "$archive.tmp"
@@ -29,9 +40,11 @@ stage=$out/root.$$
 alpine_base=$(mktemp -d "$out/base.XXXXXXXX")
 trap 'rm -f "$obj/module-signing.pem"; rm -rf "$stage" "$alpine_base"' EXIT
 mkdir -p "$obj"
-openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER >"$out/cert.pub"
-openssl pkey -in "$key" -pubout -outform DER >"$out/key.pub"
-cmp -s "$out/cert.pub" "$out/key.pub" || { echo "build-kernel: key does not match certificate" >&2; exit 1; }
+if [ "$key" != - ]; then
+    openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER >"$out/cert.pub"
+    openssl pkey -in "$key" -pubout -outform DER >"$out/key.pub"
+    cmp -s "$out/cert.pub" "$out/key.pub" || { echo "build-kernel: key does not match certificate" >&2; exit 1; }
+fi
 tar -xf "$base" -C "$alpine_base" --wildcards 'boot/config-*' 'etc/apk/repositories'
 set -- "$alpine_base"/boot/config-*
 [ $# = 1 ] && [ -f "$1" ] || { echo "build-kernel: exactly one Alpine config required" >&2; exit 1; }
@@ -43,7 +56,16 @@ cp "$1" "$obj/.config"
 # Fixed build metadata; a supplied stable key makes module signatures reproducible.
 export KBUILD_BUILD_TIMESTAMP='1970-01-01 00:00:00 UTC' KBUILD_BUILD_USER=werewolf KBUILD_BUILD_HOST=werewolf KBUILD_BUILD_VERSION=1
 umask 077
-cat "$key" "$cert" >"$obj/module-signing.pem"
+if [ "$key" = - ]; then
+    # Only the public IPE authority reaches a remote build helper. A temporary
+    # module signer is consumed here and destroyed; it never leaves the builder.
+    openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 3650 \
+        -subj /CN=werewolf-build-modules -keyout "$obj/module-signing.pem" \
+        -out "$alpine_base/module.crt"
+    cat "$alpine_base/module.crt" >>"$obj/module-signing.pem"
+else
+    cat "$key" "$cert" >"$obj/module-signing.pem"
+fi
 cp "$cert" "$obj/ipe.crt"
 cp "$tree/boot/ipe-boot.policy" "$obj/ipe-boot.policy"
 c=$src/scripts/config

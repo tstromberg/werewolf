@@ -12,6 +12,14 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 . "$root/boot/stub-source"
 mkdir -p "$1"
 out=$(realpath "$1")
+# Ubuntu build helpers may lack a sufficiently recent Meson. Keep Python
+# dependencies in this builder's private output, without changing system packages.
+if ! command -v meson >/dev/null; then
+    python3 -m venv "$out/venv"
+    "$out/venv/bin/pip" install 'meson==1.9.2' 'jinja2==3.1.6' 'pyelftools==0.32'
+    PATH="$out/venv/bin:$PATH"
+    export PATH
+fi
 archive=$out/systemd-$version.tar.gz
 if [ ! -f "$archive" ]; then
     curl --fail --location --proto '=https' --tlsv1.2 "$url" -o "$archive.new"

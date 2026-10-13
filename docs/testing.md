@@ -583,7 +583,7 @@ then commit, operator rollback, failed trials and cuts around the NV extension.
 It kills both VM and simulator and retains their existing disk, variables and NV.
 It also restores retired A, installs a signed unmeasured UKI and removes the TPM,
 requiring explicit stage0 refusal. The full guest suite passed on Galadriel x86_64;
-IPE CI runs it on x86_64. Both architectures run the protocol/model suites.
+IPE CI runs it on both architectures with the pinned measured stub; protocol suites also run.
 Retain only logs and `evidence.jsonl`; fixture signers and reset credentials are private.
 
 The opt-in build takes `--tpm-pub` (or `WEREWOLF_TPM_PUB`) and a TPM-enabled
@@ -595,21 +595,35 @@ permits at `CHANNEL/ARCH/permits/MACHINE_NONCE/CANDIDATE_ID.permit`.
 See [TPM retirement](design/tpm-ab-retirement.md) for issuer and custody requirements.
 
 `howl run --on lima --secure` uses an arm64 QEMU guest with host-managed enrollment,
-HTTPS image publication and contextual permits. Supply `WEREWOLF_IPE_KERNEL`,
-`WEREWOLF_IPE_KEY`, `WEREWOLF_IPE_CRT` and a TPM-enabled `UKI_STUB`.
+HTTPS image publication and contextual permits. Native Linux uses `--on qemu --secure`.
+Howl creates and caches matching IPE inputs when no overrides are supplied.
+Optional overrides are `WEREWOLF_IPE_KERNEL`, `WEREWOLF_IPE_KEY`, `WEREWOLF_IPE_CRT`
+(all three together), and a TPM-enabled `UKI_STUB`.
+Managed builds need kernel build tools, swtpm, virt-firmware and measured-stub dependencies.
+On Debian/Ubuntu, `make install-deps` installs them. On a Mac, the trusted
+`werewolf-ci-24.04` Linux helper must be running; `WEREWOLF_BUILD_VM` selects another.
+Only public IPE trust reaches the helper; its temporary module signer is destroyed.
 The [local deployment design](design/secure-local-deployment.md) defines the host trust boundary.
 `tools/build-tpm-stub OUT` builds the pinned measured stub on Linux; copy its public
 `linux.efi.stub` back to the Mac. No signing key is needed to build the stub.
 
-`make check-secure-lima` uses those inputs and exercises creation, multiple signed
+`make check-secure-lima` and Linux `make check-secure-qemu` use explicit test inputs
+and exercise creation, multiple signed
 updates, operator rollback, restart with the same NV authorization, updates after
-rollback and an unhealthy counted trial recovering its predecessor. It compares
-actual PCR 11 with registered predictions and rejects writable-code execution,
+rollback, kills of both VM and simulator before/after NV extension, completed-update
+resume and an unhealthy counted trial recovering its predecessor. It compares
+actual PCR 11 with the exact booted release's prediction and rejects writable-code execution,
 verified-root writes and requests to reauthorize retired history.
 The test removes its own instance, signers and reset credentials, retaining public logs.
 `make test` runs the bounded publisher's signature, context, concurrency and restart
 regressions. `python3 test/check-tpm-enrollment` tests native enrollment against
-swtpm on macOS or Linux, including private file modes, repeat refusal and restart.
+swtpm on macOS or Linux, including private file modes, repeat refusal, restart,
+supervisor crash recovery, cleanup and refusal to replace missing backing state.
+`test/local-prerequisites` covers cache tampering, incomplete publication and signer custody.
+`test/cloud-enrollment` checks SDK replies and immutable AWS/GCP TPM identity pins;
+encrypted cloud bootstrap remains proposed in the [enrollment design](design/cloud-tpm-enrollment.md).
+`python3 test/check-cloud-tpm-activation` checks the proposed PCR/command-bound policy
+with independent TPM tools and a fresh simulator; it does not enroll a cloud guest.
 Only the VM's TPM device is exposed; no signing keys or host directories are mounted.
 
 PR CI checks the IPE source version against both Alpine architecture locks.

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Check cache integrity and persistent local policy custody without compiling kernels."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+
+loader = importlib.machinery.SourceFileLoader('prerequisites', 'tools/local-prerequisites')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+
+
+class Prerequisites(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory(prefix='ww-prerequisite-test-')
+        self.root = Path(self.work.name)
+        self.old_umask = os.umask(0o077)
+
+    def tearDown(self):
+        os.umask(self.old_umask)
+        self.work.cleanup()
+
+    def completed(self):
+        for name in ['rootfs.tar', 'linux.efi.stub']:
+            (self.root / name).write_bytes(name.encode())
+        data = {'inputs': 'pinned', 'outputs': {name: module.digest(self.root / name)
+                for name in ['rootfs.tar', 'linux.efi.stub']}}
+        (self.root / 'complete.json').write_text(json.dumps(data))
+        return data
+
+    def test_tampering_or_missing_output_invalidates_cache(self):
+        self.completed()
+        self.assertTrue(module.valid(self.root, 'pinned'))
+        (self.root / 'rootfs.tar').write_bytes(b'tampered')
+        self.assertFalse(module.valid(self.root, 'pinned'))
+        self.completed()
+        (self.root / 'linux.efi.stub').unlink()
+        self.assertFalse(module.valid(self.root, 'pinned'))
+
+    def test_incomplete_publication_or_different_pin_cannot_reuse(self):
+        self.completed()
+        self.assertFalse(module.valid(self.root, 'other'))
+        (self.root / 'complete.json').rename(self.root / 'complete.json.new')
+        self.assertFalse(module.valid(self.root, 'pinned'))
+
+    def test_wrong_output_set_and_symlinks_cannot_reuse(self):
+        data = self.completed()
+        data['outputs']['../private.key'] = '0' * 64
+        (self.root / 'complete.json').write_text(json.dumps(data))
+        self.assertFalse(module.valid(self.root, 'pinned'))
+        self.completed()
+        (self.root / 'linux.efi.stub').rename(self.root / 'other.stub')
+        (self.root / 'linux.efi.stub').symlink_to(self.root / 'other.stub')
+        self.assertFalse(module.valid(self.root, 'pinned'))
+
+    def test_partial_identity_refuses_without_rotation(self):
+        key = self.root / 'policy.key'
+        key.write_bytes(b'private')
+        with self.assertRaises(ValueError):
+            module.identity(self.root)
+        self.assertEqual(key.read_bytes(), b'private')
+
+    def test_identity_survives_restart_and_requires_private_permissions(self):
+        key, cert = module.identity(self.root)
+        before = module.digest(key), module.digest(cert)
+        module.identity(self.root)
+        self.assertEqual(before, (module.digest(key), module.digest(cert)))
+        key.chmod(0o644)
+        with self.assertRaises(ValueError):
+            module.identity(self.root)
+
+    def test_lost_identity_cannot_silently_rotate(self):
+        key, cert = module.identity(self.root)
+        key.unlink()
+        cert.unlink()
+        with self.assertRaises(ValueError):
+            module.identity(self.root)
+        self.assertFalse(key.exists())
+        self.assertFalse(cert.exists())
+
+    def test_cache_tracks_bytes_and_architecture_not_mtime(self):
+        pin = self.root / 'pin'
+        pin.write_bytes(b'source 1')
+        before = module.fingerprint('aarch64', {'pin': pin})
+        os.utime(pin, (1, 1))
+        self.assertEqual(before, module.fingerprint('aarch64', {'pin': pin}))
+        self.assertNotEqual(before, module.fingerprint('x86_64', {'pin': pin}))
+        pin.write_bytes(b'source 2')
+        self.assertNotEqual(before, module.fingerprint('aarch64', {'pin': pin}))
+
+
+unittest.main()

@@ -91,6 +91,7 @@ pub fn main(init: std.process.Init) void {
             @"_boot-permit",
             @"_boot-record",
             @"_local-refresh",
+            @"_cloud-ek",
         },
         args[1],
     ) orelse
@@ -114,6 +115,7 @@ pub fn main(init: std.process.Init) void {
         ._build => native.buildTargets(io, gpa, args[2..], &why),
         .@"_boot-permit" => @import("enrollment.zig").permit(io, gpa, args[2..]),
         .@"_boot-record" => @import("enrollment.zig").verify(io, gpa, args[2..]),
+        .@"_cloud-ek" => @import("cloud-enrollment.zig").retrieve(io, gpa, args[2..], &why),
         .@"_local-refresh" => @import("local-secure.zig").refresh(io, gpa, args[2..], &why),
         // Internal: create runs howl again as the bhyve or Firecracker supervisor.
         ._bhyve => if (args.len < 5)
@@ -1582,7 +1584,9 @@ const testing = std.testing;
 
 test {
     _ = @import("enrollment.zig");
+    _ = @import("cloud-enrollment.zig");
     _ = @import("local-secure.zig");
+    _ = @import("prerequisites.zig");
     _ = @import("apply.zig");
     _ = lima;
     _ = bhyve;

@@ -216,7 +216,7 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
     switch (on) {
         .qemu => {
             _ = try qemu.stop(io, gpa, dir);
-            @import("local-secure.zig").stopTpm(io, gpa, dir);
+            try @import("local-secure.zig").stopTpm(io, gpa, dir);
         },
         .gcp => {
             // Delete the VM and its disk, not the image, which others may share.

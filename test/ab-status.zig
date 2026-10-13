@@ -53,6 +53,7 @@ pub fn main(init: std.process.Init) !void {
     const output = try std.json.Stringify.valueAlloc(gpa, .{
         .boot_id = std.mem.trim(u8, try read(io, gpa, "/proc/sys/kernel/random/boot_id"), "\n"),
         .release = std.mem.trim(u8, try read(io, gpa, "/usr/share/werewolf/ab-release"), "\n"),
+        .release_id = if (boot.release) |release| &std.fmt.bytesToHex(release, .lower) else "",
         .slot = if (boot.slot) |s| @tagName(s) else "",
         .root_hash = &hash,
         .verified_root = verified_root,

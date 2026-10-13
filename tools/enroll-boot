@@ -42,10 +42,18 @@ else
 		code=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd
 		vars=/usr/share/OVMF/OVMF_VARS_4M.fd ;;
 	esac
+    # Arch packages use edk2's dotted 4m names; keep code/vars from the same pair.
+    if [ "$arch" = x86_64 ] && [ ! -f "$code" ] &&
+        [ -f /usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd ] &&
+        [ -f /usr/share/edk2/x64/OVMF_VARS.4m.fd ]; then
+        code=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd
+        vars=/usr/share/edk2/x64/OVMF_VARS.4m.fd
+    fi
 	if [ -f "$code" ] && [ -f "$vars" ]; then
 		cp "$code" "$out/code.fd"
 		cp "$vars" "$out/template.fd"
 	else
+		[ "$(uname -s)" = Darwin ] || { echo "enroll-boot: install Secure Boot firmware for $arch or set SECUREBOOT_DIR" >&2; exit 1; }
 		limactl copy "werewolf-ci-24.04:$code" "$out/code.fd"
 		limactl copy "werewolf-ci-24.04:$vars" "$out/template.fd"
 	fi
@@ -58,6 +66,7 @@ if command -v virt-fw-vars >/dev/null; then
 		--delete PK --delete KEK --delete db --delete dbx \
 		--set-pk "$guid" "$cert" --add-kek "$guid" "$cert" --add-db "$guid" "$cert" --sb
 else
+    [ "$(uname -s)" = Darwin ] || { echo "enroll-boot: install virt-firmware (virt-fw-vars)" >&2; exit 1; }
 	vm=werewolf-ci-24.04
 	remote=$(limactl shell "$vm" -- mktemp -d /tmp/werewolf-sb.XXXXXXXX)
 	case $remote in /tmp/werewolf-sb.*) ;; *) echo 'enroll-boot: bad VM temporary path' >&2; exit 1 ;; esac

@@ -50,18 +50,19 @@ Secure Boot authenticates the kernel, early boot code and root filesystem hash.
 
 | Provider | Werewolf Secure Boot | Caveats |
 |---|---|---|
-| QEMU | Verified, x86_64 and arm64 | Enrolled firmware; x86 needs SMM, arm64 uses immutable variables |
+| QEMU | Verified, x86_64 and arm64 | Linux `--secure` adds host custody and persistent TPM; x86 needs SMM |
 | AWS EC2 | Verified, arm64 | Custom UEFI enrollment; NitroTPM alone does not protect rollback |
 | Google Compute Engine | Verified, arm64 | Custom Shielded VM keys; vTPM alone does not protect rollback |
 | Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
-| Lima QEMU | Verified, arm64 Mac | Explicit debug firmware arguments; normal `howl --on lima` uses VZ |
+| Lima QEMU | Verified, arm64 Mac | `howl --on lima --secure` selects QEMU, IPE and persistent TPM; default uses VZ |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
 | bhyve | Manual enrollment verified, x86_64 | Bilbo firmware test; `howl` enrollment and arm64 backend remain unfinished |
 | Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
 | Existing VMs converted with `bite` | Unverified | Existing bootloader authentication is unfinished |
 
-A/B updates must retain the previous good slot after commit. Protected rollback
-prevention remains unfinished, even with a TPM. See
+A/B updates retain the previous good slot after commit. The secured local profile
+uses TPM authorization for exactly two releases and refuses retired images.
+Cloud TPM enrollment remains unfinished; enabling a vTPM alone is insufficient. See
 [provider recovery tests](docs/testing.md#provider-ab-upgrades-and-rollbacks),
 [cloud setup](docs/cloud.md#signed-boot) and [boot tests](docs/testing.md#secure-boot).
 [`bite`](docs/bite.md) can replace an existing distro and deletes it after a successful
@@ -78,8 +79,8 @@ the conditions they need to work; it does not report tests of those exploits.
 
 The [updater](docs/updater.md) prioritizes known exploited vulnerabilities and keeps
 two system images so a failed update can return to the previous one. Signed images
-need updates signed by a key the machine trusts. Protection against booting older
-signed images remains unfinished. You must update your application code and
+need updates signed by a key the machine trusts. The secured local profile also refuses retired
+signed images while retaining A/B recovery. You must update your application code and
 the dependencies bundled with it.
 
 ## Get involved

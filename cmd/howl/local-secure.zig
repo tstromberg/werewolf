@@ -70,14 +70,6 @@ pub fn create(
                 name,
             },
         ) else |err| if (err != error.FileNotFound) return err;
-        for ([4][]const u8{
-            "WEREWOLF_IPE_KERNEL", "WEREWOLF_IPE_KEY", "WEREWOLF_IPE_CRT", "UKI_STUB",
-        }) |variable| if (howl.environ.get(variable) == null) return why.refuse(
-            "--secure requires {s}; use the pinned IPE kernel and TPM-enabled EFI stub",
-            .{
-                variable,
-            },
-        );
     }
     try Dir.cwd().createDirPath(io, at);
     try Dir.cwd().setFilePermissions(io, at, .fromMode(0o700), .{});
@@ -122,6 +114,7 @@ pub fn create(
             try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), tar, why);
         }
     } else {
+        const prerequisites = try @import("prerequisites.zig").resolve(io, gpa, &steps, arch, why);
         try Dir.cwd().createDir(io, authority, .fromMode(0o700));
         const boot = try ownedBoot(io, gpa, &steps, at, arch);
         const permit_signer = try enrollment.signer(io, gpa, &steps, authority, false);
@@ -169,9 +162,9 @@ pub fn create(
             .boot_cert = boot.cert,
             .boot_native = true,
             .tpm_pub = permit_signer.public,
-            .ipe_kernel = try absolute(gpa, cwd, howl.environ.get("WEREWOLF_IPE_KERNEL").?),
-            .ipe_key = try absolute(gpa, cwd, howl.environ.get("WEREWOLF_IPE_KEY").?),
-            .ipe_cert = try absolute(gpa, cwd, howl.environ.get("WEREWOLF_IPE_CRT").?),
+            .ipe_kernel = prerequisites.kernel.?,
+            .ipe_key = prerequisites.key.?,
+            .ipe_cert = prerequisites.cert.?,
             .ipe_updates = try gpa.print(
                 "https://{s}:{d}",
                 .{ if (on_lima) "192.168.5.2" else "10.0.2.2", port },
@@ -185,7 +178,7 @@ pub fn create(
             } else secureArgs(arch) },
         } };
         const stub = try gpa.print("{s}/linux.efi.stub", .{authority});
-        try Dir.cwd().copyFile(howl.environ.get("UKI_STUB").?, Dir.cwd(), stub, io, .{});
+        try Dir.cwd().copyFile(prerequisites.stub, Dir.cwd(), stub, io, .{});
         // Every refresh uses the same measured stub, even after the caller's environment changes.
         const pubconfig: Publisher = .{
             .authority = authority,
@@ -409,10 +402,6 @@ fn inputs(io: Io, gpa: Allocator, spec: native.Spec, stub: []const u8) ![64]u8 {
     return std.fmt.bytesToHex(hash.finalResult(), .lower);
 }
 
-fn absolute(gpa: Allocator, cwd: []const u8, file: []const u8) ![]const u8 {
-    return if (std.fs.path.isAbsolute(file)) file else gpa.print("{s}/{s}", .{ cwd, file });
-}
-
 fn build(
     io: Io,
     gpa: Allocator,
@@ -475,10 +464,18 @@ fn tpmService(io: Io, gpa: Allocator, at: []const u8, operation: []const u8) !vo
     if (result.term != .exited or result.term.exited != 0) return error.TpmServiceFailed;
 }
 
-pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) void {
-    const cwd = std.process.currentPathAlloc(io, gpa) catch return;
-    const at = gpa.print("{s}/{s}", .{ cwd, dir }) catch return;
-    tpmService(io, gpa, at, "stop") catch {};
+pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) !void {
+    const cwd = try std.process.currentPathAlloc(io, gpa);
+    const at = try gpa.print("{s}/{s}", .{ cwd, dir });
+    Dir.cwd().access(
+        io,
+        try gpa.print("{s}/authority/local-tpm", .{at}),
+        .{},
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    try tpmService(io, gpa, at, "stop");
 }
 
 fn startQemu(
