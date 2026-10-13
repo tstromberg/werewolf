@@ -196,10 +196,26 @@ pub fn durable(io: Io, file: []const u8, data: []const u8) !void {
 }
 
 fn syncDir(io: Io, path: []const u8) !void {
-    const dir = try Dir.cwd().openDir(io, path, .{});
+    // Zig otherwise opens Linux directories with O_PATH, which cannot be fsynced.
+    const dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     const file: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
     try file.sync(io);
+}
+
+test "enrollment credentials are exclusive and fsync both file and parent directory" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(root);
+    const file = try t.allocator.print("{s}/owner.auth", .{root});
+    defer t.allocator.free(file);
+    try durable(t.io, file, &(@as([32]u8, @splat(0x42))));
+    try t.expectError(error.PathAlreadyExists, durable(t.io, file, "replacement"));
+    const bytes = try tmp.dir.readFileAlloc(t.io, "owner.auth", t.allocator, .limited(33));
+    defer t.allocator.free(bytes);
+    try t.expectEqualSlices(u8, &(@as([32]u8, @splat(0x42))), bytes);
 }
 
 test "publisher hashes must be complete SHA256 digests" {

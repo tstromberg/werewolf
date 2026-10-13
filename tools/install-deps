@@ -161,7 +161,9 @@ Linux)
 		update="$apt update"
 		install="$apt install -y --no-install-recommends"
 		pkgs="ca-certificates curl make xz-utils zstd libarchive-tools erofs-utils e2fsprogs mtools
-			qemu-utils expect netcat-openbsd osslsigncode python3-pip systemd-container bubblewrap $qemu"
+			qemu-utils expect netcat-openbsd osslsigncode python3-pip python3-venv python3-virt-firmware
+            swtpm build-essential flex bison libssl-dev libelf-dev bc ninja-build gperf
+            libcap-dev libmount-dev systemd-container bubblewrap $qemu"
 		apko_pkgs="ca-certificates curl"
 		zig_pkgs="ca-certificates curl xz-utils"
 		erofs_deps="autoconf automake libtool pkg-config gcc liblz4-dev libzstd-dev uuid-dev zlib1g-dev"

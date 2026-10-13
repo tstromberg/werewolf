@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify native host enrollment, private credentials, restart and reset refusal."""
 import hashlib
+import signal
 import os
 from pathlib import Path
 import subprocess
@@ -91,7 +92,38 @@ def main():
         finally:
             process.terminate()
             process.communicate(timeout=10)
-    print('pass   native TPM enrollment: private credentials, protected readback, reset refusal, restart')
+        # The production supervisor must preserve enrolled storage, reuse its
+        # daemon, recover a killed simulator, and refuse missing backing state.
+        (work / 'nv').rename(work / 'swtpm')
+        (work / 'enrolled').write_bytes(expected)
+        service = Path('tools/local-tpm').resolve()
+        sockets = work / 'service'
+        def supervise(operation, success=True):
+            result = subprocess.run([sys.executable, str(service), operation, str(work), str(sockets)],
+                                    capture_output=True, timeout=20)
+            if (result.returncode == 0) != success:
+                raise RuntimeError('unexpected supervisor result: ' + result.stderr.decode()[-1000:])
+        try:
+            supervise('start')
+            first = int((work / 'tpm.pid').read_text())
+            supervise('start')
+            if int((work / 'tpm.pid').read_text()) != first:
+                raise RuntimeError('restart created a second simulator')
+            os.kill(first, signal.SIGKILL)
+            supervise('stop')
+            supervise('start')
+            supervise('stop')
+            if sockets.exists() or (work / 'tpm.pid').exists():
+                raise RuntimeError('TPM service did not remove its private runtime sockets')
+            saved = work / 'saved-nv'
+            (work / 'swtpm').rename(saved)
+            supervise('start', success=False)
+            if (work / 'swtpm').exists():
+                raise RuntimeError('missing state was silently replaced')
+            saved.rename(work / 'swtpm')
+        finally:
+            supervise('stop')
+    print('pass   native TPM enrollment and supervisor: private custody, reset refusal, restart, crash recovery')
 
 
 if __name__ == '__main__':

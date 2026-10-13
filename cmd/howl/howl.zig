@@ -1583,6 +1583,7 @@ const testing = std.testing;
 test {
     _ = @import("enrollment.zig");
     _ = @import("local-secure.zig");
+    _ = @import("prerequisites.zig");
     _ = @import("apply.zig");
     _ = lima;
     _ = bhyve;

@@ -73,6 +73,7 @@ def serve(authority, directory):
             (authority / 'tpm.pid').unlink(missing_ok=True)
             for name in ['service.sock', 'tpm.sock']:
                 (directory / name).unlink(missing_ok=True)
+            directory.rmdir()
 
 
 def main():
@@ -82,14 +83,21 @@ def main():
         serve(authority, directory)
         return
     if operation == 'stop':
-        try:
-            if not request(directory, 'STOP'):
-                raise RuntimeError('TPM service refused shutdown')
-        except (FileNotFoundError, ConnectionRefusedError):
-            # A held service lock means shutdown has not completed; do not remove state.
-            with (authority / 'tpm-service.lock').open('a+b') as guard:
-                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return
+        deadline = time.monotonic() + 12
+        while True:
+            try:
+                if not request(directory, 'STOP'):
+                    raise RuntimeError('TPM service refused shutdown')
+                return
+            except (FileNotFoundError, ConnectionRefusedError, ConnectionResetError):
+                try:
+                    with (authority / 'tpm-service.lock').open('a+b') as guard:
+                        fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return
+                except BlockingIOError:
+                    if time.monotonic() > deadline:
+                        raise RuntimeError('TPM service did not finish shutdown')
+                    time.sleep(.1)
     if operation != 'start':
         raise ValueError('unknown operation')
     try:

@@ -2,14 +2,14 @@
 
 ## Summary
 
-Deploy Lima QEMU guests with enrolled Secure Boot, IPE and exact-pair TPM retirement.
-The Mac and its stored TPM state are trusted; guest root and guest disks are not.
-Status: arm64 Lima integration implemented; lifecycle and issuer checks pass.
+Deploy Lima and Linux QEMU guests with enrolled Secure Boot, IPE and exact-pair TPM retirement.
+The local host and its stored TPM state are trusted; guest root and guest disks are not.
+Status: arm64 Lima verified; Linux QEMU integration and managed prerequisites under validation.
 
 ## Background
 
-The guest protocol and QEMU x86_64 lifecycle pass, but normal Lima uses VZ.
-Host enrollment and permit issuance are currently separate test operations.
+The guest protocol and QEMU x86_64 lifecycle pass; normal Lima uses VZ.
+The secured profile combines host enrollment, signing and permit issuance.
 
 ## Goals
 
@@ -21,7 +21,7 @@ Host enrollment and permit issuance are currently separate test operations.
 
 ## Non-Goals
 
-- Defend against a Mac administrator replacing the entire VM and virtual TPM.
+- Defend against a host administrator replacing the entire VM and virtual TPM.
 - Give guests firmware signing or TPM hierarchy credentials.
 - Silently migrate existing VZ disks or replace their enrolled trust.
 
@@ -32,15 +32,23 @@ Host enrollment and permit issuance are currently separate test operations.
 Use `vmType: qemu`, enrolled firmware and Lima's persistent `tpm: true` support.
 Keep the TPM state in the instance's private `swtpm` directory across restarts.
 Expose only its emulated guest device; neither state nor control sockets are mounts.
-Use a TPM-enabled EFI stub and compare predicted PCR 11 against an actual arm64 boot.
+Linux QEMU uses the same authorities, with a private host supervisor for persistent swtpm.
+QEMU receives its control socket; the guest receives only the emulated TPM device.
+Missing enrolled backing state fails; shutdown must finish before authority removal.
+Use a TPM-enabled EFI stub and compare predicted PCR 11 against actual boots.
 The default Alpine stub disables measurement and cannot serve this profile.
 Build the measured stub from `boot/stub-source` with `tools/build-tpm-stub` on Linux.
 
 ### Invocation and prerequisites
 
 `howl run --on lima --secure` selects this profile on an arm64 Mac.
-Supply `WEREWOLF_IPE_KERNEL`, `WEREWOLF_IPE_KEY`, `WEREWOLF_IPE_CRT` and `UKI_STUB`.
-The kernel archive must match the policy signer; first-use kernel caching is separate.
+`howl run --on qemu --secure` selects it on native Linux.
+Without overrides, howl creates a private host IPE identity and caches matching builds.
+Cache identities bind architecture, Alpine base, public signer, sources and builder bytes.
+Checksummed completion records reject altered or incomplete cached artifacts.
+All three IPE overrides must be supplied together; `UKI_STUB` can override the measured stub.
+The Mac uses a trusted Linux build helper and sends only its public IPE certificate.
+A separate temporary module signer stays in the builder and is deleted after compilation.
 Host authorities and public release objects persist beneath the machine directory.
 `--dev` is refused; ordinary Lima remains available without this opt-in profile.
 
@@ -84,7 +92,7 @@ configuration changes cannot turn an older non-enforcing image into an enforcing
 
 - Requires QEMU, swtpm, a measured stub and an IPE kernel matching the signer.
 - Host permit issuance adds persistent state and an availability dependency.
-- First-use kernel creation or retrieval may take longer than the VM boot itself.
+- First-use kernel compilation requires native build dependencies and takes longer than VM boot.
 
 ## Alternatives Considered
 
@@ -105,5 +113,5 @@ Avoid advertising full protection when only a subset of the profile is enabled.
 Test creation, restart, healthy update, rollback, failed trials and retirement cuts.
 Check explicit rejection of retired releases, missing TPMs and unmeasured UKIs.
 Validate provisioning against independent TPM tools and retain only public evidence.
-The Lima regression covers A/B/C updates, rollback, restart, failed trials and tampering.
+The CLI regression covers updates, rollback, restart, failed trials, tampering and NV cuts.
 VM/simulator process kills do not prove physical TPM power-loss atomicity.
