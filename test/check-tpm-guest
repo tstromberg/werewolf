@@ -218,6 +218,17 @@ try:
                  str(fixture_file.parent / 'tpm/permits'), 'root@127.0.0.1:/data/svc/ab-https/image/' + fixture['arch'] + '/'])
     machine.ssh('chmod -R a+rX /data/svc/ab-https/image; chown -R ab-https:ab-https /data/svc/ab-https/image')
     select('B')
+    # An EOF-delimited response exceeding the permit cap must fail without
+    # changing the protected pair, then allow the correctly signed retry.
+    public = '/data/svc/ab-https/image/' + fixture['arch'] + '/permits/' + info['machine'] + '/' + info['ids']['B'] + '.permit'
+    machine.ssh('cp ' + public + ' ' + public + '.original; head -c 689 /dev/zero > ' + public)
+    refused = machine.ssh('/usr/lib/werewolf/slot-update check', check=False, timeout=600)
+    if 'TooBig' not in refused.stdout + refused.stderr:
+        raise RuntimeError('oversized permit did not report the bounded refusal')
+    if status()['tpm_anchor'] != a['tpm_anchor']:
+        raise RuntimeError('oversized permit changed protected authorization')
+    machine.ssh('mv ' + public + '.original ' + public)
+    print('pass   tpm-guest: oversized EOF-delimited permit refused before retirement', flush=True)
     machine.ssh('/usr/lib/werewolf/slot-update check', timeout=600)
     machine.reboot('/usr/lib/werewolf/slot-update try')
     b = wait_boot('B', a['boot_id'])

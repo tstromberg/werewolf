@@ -24,6 +24,8 @@ pub const Machine = struct {
     guest_web: u16,
     /// import_disk is the read-only ext4 image of --import, or null.
     import_disk: ?[]const u8 = null,
+    /// Host-private swtpm control socket; only its emulated device enters the guest.
+    tpm_socket: ?[]const u8 = null,
 };
 
 /// Firmware is edk2's code and optional variables copied to vars.fd.
@@ -174,9 +176,20 @@ pub fn argv(gpa: Allocator, m: Machine, a: Accel) ![]const []const u8 {
         "-drive",
         try gpa.print("file={s}/config.tar,format=raw,if=virtio,readonly=on", .{d}),
     } });
-    const imp = m.import_disk orelse return base;
+    const attached = if (m.tpm_socket) |socket| try std.mem.concat(gpa, []const u8, &.{ base, &.{
+        "-chardev",
+        try gpa.print(
+            "socket,id=chrtpm,path={s}",
+            .{try std.mem.replaceOwned(u8, gpa, socket, ",", ",,")},
+        ),
+        "-tpmdev",
+        "emulator,id=tpm0,chardev=chrtpm",
+        "-device",
+        if (m.arch == .aarch64) "tpm-tis-device,tpmdev=tpm0" else "tpm-tis,tpmdev=tpm0",
+    } }) else base;
+    const imp = m.import_disk orelse return attached;
     const p = try std.mem.replaceOwned(u8, gpa, imp, ",", ",,");
-    return std.mem.concat(gpa, []const u8, &.{ base, &.{
+    return std.mem.concat(gpa, []const u8, &.{ attached, &.{
         "-drive",
         try gpa.print("file={s},format=raw,if=virtio,readonly=on", .{p}),
     } });

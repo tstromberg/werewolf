@@ -1,4 +1,4 @@
-//! Lima's protected local profile, enrolled once and updated by its host publisher.
+//! Protected local profiles, enrolled once and updated by their host publisher.
 const std = @import("std");
 const howl = @import("howl.zig");
 const lima = @import("lima.zig");
@@ -12,7 +12,7 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-const Profile = struct { spec: native.Spec, managed: bool };
+const Profile = struct { spec: native.Spec, managed: bool, provider: howl.Platform = .lima };
 const Publisher = struct {
     authority: []const u8,
     public: []const u8,
@@ -37,10 +37,15 @@ pub fn create(
     w: *Io.Writer,
     why: *howl.Why,
 ) !void {
-    if (tell.dev) return why.refuse("the secured Lima profile refuses --dev", .{});
-    if (!lima.installed(io, gpa)) return why.refuse("--secure requires Lima on macOS", .{});
+    const provider = howl.engine(io, gpa, o.on).on;
+    const on_lima = provider == .lima;
+    if (tell.dev) return why.refuse("the secured local profile refuses --dev", .{});
+    if (!on_lima and @import("builtin").os.tag != .linux)
+        return why.refuse("secured QEMU currently requires Linux", .{});
+    if (on_lima and
+        !lima.installed(io, gpa)) return why.refuse("--secure requires Lima on macOS", .{});
     const arch = try howl.localArch(why);
-    if (arch != .aarch64) return why.refuse(
+    if (on_lima and arch != .aarch64) return why.refuse(
         "the secured Lima profile currently requires arm64",
         .{},
     );
@@ -52,7 +57,11 @@ pub fn create(
     const profile_file = try gpa.print("{s}/profile.json", .{authority});
     const config = try gpa.print("{s}/publisher.json", .{authority});
     const script = try gpa.print("{s}/local-publisher", .{authority});
-    const kept = try lima.exists(io, gpa, name);
+    const kept = if (on_lima) try lima.exists(io, gpa, name) else if (Dir.cwd().access(
+        io,
+        try gpa.print("{s}/disk.img", .{at}),
+        .{},
+    )) |_| true else |_| false;
     if (!kept) {
         // Never re-enroll a partial creation or an instance deleted outside howl.
         if (Dir.cwd().access(io, authority, .{})) |_| return why.refuse(
@@ -92,16 +101,26 @@ pub fn create(
             .{name},
         );
         profile = try std.json.parseFromSliceLeaky(Profile, gpa, data, .{});
-        try howl.reconfigurable(o, name, profile.spec.form, .lima, why);
+        if (profile.provider != provider) return why.refuse(
+            "the secured provider cannot change",
+            .{},
+        );
+        try howl.reconfigurable(o, name, profile.spec.form, provider, why);
         for ([3][]const u8{
             "enrolled",
             "credentials/owner.auth",
             "credentials/lockout.auth",
         }) |file|
             try Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ authority, file }), .{});
-        const existing = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
-        try Dir.cwd().access(io, try gpa.print("{s}/swtpm", .{existing}), .{});
-        _ = try @import("local.zig").reconfigure(io, gpa, name, o.form, dir, tar, why);
+        if (on_lima) {
+            const existing = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
+            try Dir.cwd().access(io, try gpa.print("{s}/swtpm", .{existing}), .{});
+            _ = try @import("local.zig").reconfigure(io, gpa, name, o.form, dir, tar, why);
+        } else {
+            _ = try qemu.stop(io, gpa, dir);
+            try tpmService(io, gpa, at, "stop");
+            try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), tar, why);
+        }
     } else {
         try Dir.cwd().createDir(io, authority, .fromMode(0o700));
         const boot = try ownedBoot(io, gpa, &steps, at, arch);
@@ -123,19 +142,23 @@ pub fn create(
             "-subj",
             "/CN=werewolf-local-images",
             "-addext",
-            "subjectAltName=IP:192.168.5.2,IP:127.0.0.1",
+            if (on_lima)
+                "subjectAltName=IP:192.168.5.2,IP:127.0.0.1"
+            else
+                "subjectAltName=IP:10.0.2.2,IP:127.0.0.1",
             "-keyout",
             tls_key,
             "-out",
             tls_cert,
         } }}, .{})).ok) return steps.fail("creating the local HTTPS authority failed");
         const app = try howl.appBuild(io, gpa, o.form, arch, o.app, why);
-        profile = .{ .managed = try @import("local.zig").limaManages(
-            io,
-            gpa,
-            o.form,
-            why,
-        ), .spec = .{
+        profile = .{ .provider = provider, .managed = on_lima and
+            try @import("local.zig").limaManages(
+                io,
+                gpa,
+                o.form,
+                why,
+            ), .spec = .{
             .form = o.form,
             .arch = arch,
             .published = !o.local,
@@ -149,14 +172,17 @@ pub fn create(
             .ipe_kernel = try absolute(gpa, cwd, howl.environ.get("WEREWOLF_IPE_KERNEL").?),
             .ipe_key = try absolute(gpa, cwd, howl.environ.get("WEREWOLF_IPE_KEY").?),
             .ipe_cert = try absolute(gpa, cwd, howl.environ.get("WEREWOLF_IPE_CRT").?),
-            .ipe_updates = try gpa.print("https://192.168.5.2:{d}", .{port}),
+            .ipe_updates = try gpa.print(
+                "https://{s}:{d}",
+                .{ if (on_lima) "192.168.5.2" else "10.0.2.2", port },
+            ),
             .image_serial = try serial(io, gpa),
             .update_ca = tls_cert,
             .update_port = port,
-            .disk = .{ .args = &.{
+            .disk = .{ .args = if (on_lima) &.{
                 "console=ttyAMA0",              "werewolf.ip=" ++ lima.user_ip,
                 "werewolf.gw=" ++ lima.user_gw, "werewolf.dns=192.168.5.3",
-            } },
+            } else secureArgs(arch) },
         } };
         const stub = try gpa.print("{s}/linux.efi.stub", .{authority});
         try Dir.cwd().copyFile(howl.environ.get("UKI_STUB").?, Dir.cwd(), stub, io, .{});
@@ -202,29 +228,51 @@ pub fn create(
         );
         const tar_path = try gpa.print("{s}/config.tar", .{at});
         try howl.writePrivate(io, gpa, tar_path, tar, why);
-        const config_disk = try gpa.print("{s}-config", .{name});
-        if (!(try steps.exec(&.{.{ .argv = &.{
-            "limactl", "disk", "import", config_disk, tar_path,
-        } }}, .{})).ok) return steps.fail("importing the config disk failed");
-        const yaml = try gpa.print("{s}/lima.yaml", .{at});
-        try howl.writePrivate(
-            io,
-            gpa,
-            yaml,
-            try template(gpa, o.form, profile.spec.disk_path.?, at, config_disk, profile.managed),
-            why,
-        );
-        if (!(try steps.exec(&.{.{ .argv = &.{
-            "limactl", "create", "--name", name, "--tty=false", yaml,
-        } }}, .{})).ok) return steps.fail("creating the secured Lima instance failed");
-        const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
-        try enrollment.provision(
-            io,
-            gpa,
-            permit_signer,
-            authority,
-            try gpa.print("{s}/swtpm", .{instance}),
-        );
+        if (on_lima) {
+            const config_disk = try gpa.print("{s}-config", .{name});
+            if (!(try steps.exec(&.{.{ .argv = &.{
+                "limactl", "disk", "import", config_disk, tar_path,
+            } }}, .{})).ok) return steps.fail("importing the config disk failed");
+            const yaml = try gpa.print("{s}/lima.yaml", .{at});
+            try howl.writePrivate(
+                io,
+                gpa,
+                yaml,
+                try template(
+                    gpa,
+                    o.form,
+                    profile.spec.disk_path.?,
+                    at,
+                    config_disk,
+                    profile.managed,
+                ),
+                why,
+            );
+            if (!(try steps.exec(&.{.{ .argv = &.{
+                "limactl", "create", "--name", name, "--tty=false", yaml,
+            } }}, .{})).ok) return steps.fail("creating the secured Lima instance failed");
+            const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
+            try enrollment.provision(
+                io,
+                gpa,
+                permit_signer,
+                authority,
+                try gpa.print("{s}/swtpm", .{instance}),
+            );
+        } else {
+            try enrollment.durable(
+                io,
+                try gpa.print("{s}/local-tpm", .{authority}),
+                @import("files").local_tpm,
+            );
+            try enrollment.provision(
+                io,
+                gpa,
+                permit_signer,
+                authority,
+                try gpa.print("{s}/swtpm", .{authority}),
+            );
+        }
     }
     const helper = @import("files").local_publisher;
     const previous_helper = try Dir.cwd().readFileAlloc(io, script, gpa, .limited(128 << 10));
@@ -242,6 +290,14 @@ pub fn create(
     }
     if (!(try steps.exec(&.{.{ .argv = &.{ "python3", script, "start", config } }}, .{})).ok)
         return steps.fail("the host image publisher did not start");
+    if (!on_lima) {
+        try startQemu(io, gpa, profile.spec, name, at, &steps, why);
+        _ = try steps.finish();
+        try w.print("{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n", .{
+            name, qemu.record(io, gpa, dir, "ssh") orelse "0", o.form,
+        });
+        return;
+    }
     _ = try steps.finish();
     if (!try lima.running(io, gpa, name)) {
         const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
@@ -387,6 +443,105 @@ pub fn stopPublisher(io: Io, gpa: Allocator, dir: []const u8) void {
     const script = gpa.print("{s}/authority/local-publisher", .{dir}) catch return;
     const config = gpa.print("{s}/authority/publisher.json", .{dir}) catch return;
     _ = std.process.run(gpa, io, .{ .argv = &.{ "python3", script, "stop", config } }) catch {};
+}
+
+fn secureArgs(arch: howl.Arch) []const []const u8 {
+    const network = [_][]const u8{
+        "werewolf.ip=10.0.2.15/24", "werewolf.gw=10.0.2.2", "werewolf.dns=10.0.2.3",
+    };
+    return switch (arch) {
+        .aarch64 => &([_][]const u8{"console=ttyAMA0"} ++ network),
+        .x86_64 => &([_][]const u8{"console=ttyS0"} ++ network),
+    };
+}
+
+fn sockets(gpa: Allocator, at: []const u8) ![]const u8 {
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(at, &hash, .{});
+    return gpa.print("/tmp/ww-tpm-{x}", .{hash[0..12]});
+}
+
+fn tpmService(io: Io, gpa: Allocator, at: []const u8, operation: []const u8) !void {
+    const result = try std.process.run(gpa, io, .{ .argv = &.{
+        "python3",
+        try gpa.print(
+            "{s}/authority/local-tpm",
+            .{at},
+        ),
+        operation,
+        try gpa.print("{s}/authority", .{at}),
+        try sockets(gpa, at),
+    } });
+    if (result.term != .exited or result.term.exited != 0) return error.TpmServiceFailed;
+}
+
+pub fn stopTpm(io: Io, gpa: Allocator, dir: []const u8) void {
+    const cwd = std.process.currentPathAlloc(io, gpa) catch return;
+    const at = gpa.print("{s}/{s}", .{ cwd, dir }) catch return;
+    tpmService(io, gpa, at, "stop") catch {};
+}
+
+fn startQemu(
+    io: Io,
+    gpa: Allocator,
+    spec: native.Spec,
+    name: []const u8,
+    at: []const u8,
+    steps: *progress.Steps,
+    why: *howl.Why,
+) !void {
+    try tpmService(io, gpa, at, "start");
+    errdefer tpmService(io, gpa, at, "stop") catch {};
+    const ssh = try qemu.freePort(io, 2222);
+    const web = try qemu.freePort(io, 8080);
+    try howl.writePrivate(
+        io,
+        gpa,
+        try gpa.print("{s}/machine", .{at}),
+        try gpa.print("form {s}\nssh {d}\nweb {d}\n", .{ spec.form, ssh, web }),
+        why,
+    );
+    var guest_web: u16 = 80;
+    for (try howl.listens(io, gpa, spec.form, why)) |port| if (port != 22) {
+        guest_web = port;
+    };
+    for ([_][]const u8{ "console.log", "console.sock", "monitor.sock" }) |file|
+        Dir.cwd().deleteFile(io, try gpa.print("{s}/{s}", .{ at, file })) catch {};
+    const args = try qemu.argv(gpa, .{
+        .arch = spec.arch,
+        .dir = at,
+        .firmware = .{
+            .code = try gpa.print(
+                "{s}/code.fd",
+                .{at},
+            ),
+            .vars = try gpa.print("{s}/vars.fd", .{at}),
+            .secure = true,
+        },
+        .ssh_port = ssh,
+        .web_port = web,
+        .guest_web = guest_web,
+        .tpm_socket = try gpa.print("{s}/tpm.sock", .{try sockets(gpa, at)}),
+    }, qemu.accel(io));
+    if (!(try steps.exec(
+        &.{.{ .argv = args }},
+        .{},
+    )).ok) return steps.fail("secured QEMU did not start");
+    errdefer {
+        _ = qemu.stop(io, gpa, at) catch false;
+    }
+    var spin: progress.Spinner = .init(io);
+    const boot = try booting.watch(
+        io,
+        gpa,
+        try gpa.print("{s}/console.log", .{at}),
+        0,
+        null,
+        0,
+        &spin,
+    );
+    spin.clear();
+    if (!boot.up) return why.refuse("{s}: protected QEMU boot did not finish", .{name});
 }
 
 pub fn qemuCommand(gpa: Allocator, vars: []const u8) ![]const u8 {

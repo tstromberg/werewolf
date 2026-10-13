@@ -1,23 +1,56 @@
 #!/usr/bin/env python3
 """Exercise howl's host-managed secured Lima deployment and contextual A/B updates."""
+import concurrent.futures
 import hashlib
 import json
 import ssl
 import os
 from pathlib import Path
 import secrets
+import shutil
+import signal
+import tempfile
 import subprocess
 import sys
 import time
 from urllib.request import urlopen
 from urllib.error import HTTPError
+from tpm_proxy import Proxy
 
-howl, kernel, key, cert, stub, output = sys.argv[1:]
+howl, kernel, key, cert, stub, output = sys.argv[1:7]
+provider = sys.argv[7] if len(sys.argv) == 8 else "lima"
+if provider not in ["lima", "qemu"]:
+    raise ValueError("provider must be lima or qemu")
+arch = "aarch64" if os.uname().machine in ["arm64", "aarch64"] else "x86_64"
 howl, kernel, key, cert, stub = [str(Path(p).resolve()) for p in [howl, kernel, key, cert, stub]]
 work = Path(output).resolve()
 work.mkdir(parents=True, mode=0o700, exist_ok=False)
 os.umask(0o077)
 name = 'ww-secure-' + secrets.token_hex(6)
+proxy = None
+proxy_work = tempfile.TemporaryDirectory(prefix='ww-secure-proxy-')
+proxy_dir = Path(proxy_work.name)
+wrapper_dir = work / 'wrapper'
+wrapper_dir.mkdir()
+qemu_binary = shutil.which('qemu-system-' + arch)
+if not qemu_binary:
+    raise RuntimeError('missing QEMU')
+wrapper = wrapper_dir / ('qemu-system-' + arch)
+wrapper.write_text('''#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+args = sys.argv[1:]
+root = Path(''' + repr(str(proxy_dir)) + ''')
+for i, arg in enumerate(args):
+    if i and args[i - 1] == '-chardev' and 'socket,' in arg and 'tpm' in arg:
+        parts = arg.split(',')
+        backend = next(part[5:] for part in parts if part.startswith('path='))
+        (root / 'backend.json').write_text(json.dumps(backend))
+        while not (root / 'ready').exists(): time.sleep(.05)
+        args[i] = ','.join('path=' + str(root / 'proxy.sock') if part.startswith('path=') else part for part in parts)
+os.execv(''' + repr(qemu_binary) + ''', [''' + repr(qemu_binary) + ''', *args])
+''')
+wrapper.chmod(0o755)
 machine = Path('build/machines') / name
 authority = machine / 'authority'
 form = work / 'form'
@@ -31,7 +64,8 @@ label_file.write_text('A\n')
 env = dict(os.environ, WEREWOLF_IPE_KERNEL=kernel, WEREWOLF_IPE_KEY=key,
            WEREWOLF_IPE_CRT=cert, UKI_STUB=stub,
            WEREWOLF_BOOT_KEY=str(work / 'unrelated-missing.key'),
-           WEREWOLF_BOOT_CRT=str(work / 'unrelated-missing.crt'))
+           WEREWOLF_BOOT_CRT=str(work / 'unrelated-missing.crt'),
+           PATH=str(wrapper_dir) + os.pathsep + os.environ['PATH'])
 
 
 def run(args, label, check=True, timeout=600):
@@ -84,13 +118,13 @@ def wait_boot(label, previous=None, anchor=None, committed=True):
 def refresh(label):
     label_file.write_text(label + '\n')
     run([howl, '_local-refresh', machine.resolve()], 'refresh-' + label)
-    head = authority / 'public/aarch64/latest.json'
+    head = authority / ('public/' + arch + '/latest.json')
     before = head.read_bytes()
     run([howl, '_local-refresh', machine.resolve()], 'unchanged-' + label)
     if head.read_bytes() != before:
         raise RuntimeError('unchanged pinned inputs generated another release')
     image = json.loads(before)
-    core = b'werewolf.release/2\0aarch64\0'
+    core = b'werewolf.release/2\0' + arch.encode() + b'\0'
     for filename in ['root.erofs', 'vmlinuz', 'stage0.zst']:
         core += bytes.fromhex(image['files'][filename]['sha256'])
     core += bytes.fromhex(image['boot_context'])
@@ -115,15 +149,28 @@ def update(label, previous, committed=True):
 try:
     probe = overlay / 'usr/bin/ab-status'
     probe.parent.mkdir(parents=True)
-    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', 'aarch64-linux-musl',
+    run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
          '--dep', 'cmdline', '--dep', 'ipe', '--dep', 'tpm', '-Mroot=test/ab-status.zig',
          '--dep', 'network', '-Mcmdline=lib/cmdline.zig', '-Mnetwork=lib/network.zig',
          '-Mipe=lib/ipe.zig', '--dep', 'apk', '-Mtpm=lib/tpm.zig', '--dep', 'package',
          '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe)], 'probe')
     for path in overlay.rglob('*'):
         path.chmod(0o755 if path.is_dir() or path == probe else 0o644)
-    create = [howl, 'create', name, '--with', form, '--build', '--on', 'lima', '--secure', '--yes']
-    run(create, 'create')
+    create = [howl, 'create', name, '--with', form, '--build', '--on', provider, '--secure', '--yes']
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        creation = pool.submit(run, create, 'create')
+        deadline = time.monotonic() + 600
+        while not (proxy_dir / 'backend.json').exists():
+            if creation.done():
+                creation.result()
+                raise RuntimeError('QEMU did not attach its TPM through the test proxy')
+            if time.monotonic() > deadline:
+                raise RuntimeError('QEMU launch did not reach the TPM proxy')
+            time.sleep(.1)
+        backend = json.loads((proxy_dir / 'backend.json').read_text())
+        proxy = Proxy(proxy_dir / 'proxy.sock', backend)
+        (proxy_dir / 'ready').touch()
+        creation.result()
     a = wait_boot('A')
     for secret in ['boot.key', 'authority/permit.key', 'authority/tls.key',
                    'authority/credentials/owner.auth', 'authority/credentials/lockout.auth']:
@@ -141,7 +188,7 @@ try:
     configuration = json.loads((authority / 'publisher.json').read_text())
     factory_record = (authority / 'factory.permit').read_bytes()
     current_head = json.loads((authority / 'approved.json').read_text())
-    route = '/aarch64/permits/' + factory_record[16:48].hex() + '/' + factory_record[112:144].hex() + \
+    route = '/' + arch + '/permits/' + factory_record[16:48].hex() + '/' + factory_record[112:144].hex() + \
             '.permit?from=' + c['tpm_anchor'] + '&retain=' + current_head['candidate']
     context = ssl.create_default_context(cafile=configuration['certificate'])
     try:
@@ -155,6 +202,57 @@ try:
     run(create, 'restart')
     b3 = wait_boot('B', b2['boot_id'], b2['tpm_anchor'])
     d = update('D', b3)
+    # Gate the actual TPM command on the host; no hooks enter the signed guest.
+    candidate = refresh('F')
+    recovered = d
+    for cut in ['before', 'after']:
+        proxy.arm(cut)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            checking = pool.submit(ssh, '/usr/lib/werewolf/slot-update check', 'cut-' + cut,
+                                   check=False, timeout=240)
+            try:
+                if not proxy.hit.wait(180) or proxy.failures:
+                    raise RuntimeError('TPM retirement boundary not reached: ' + str(proxy.failures))
+                if provider == 'lima':
+                    instance = json.loads(run(['limactl', 'list', name, '--json'], 'instance').stdout)
+                    home = Path(instance['dir'])
+                    vm_pid = int((home / 'qemu.pid').read_text())
+                    processes = run(['ps', '-axo', 'pid=,command='], 'processes').stdout.splitlines()
+                    matches = [int(line.split(None, 1)[0]) for line in processes
+                               if backend in line and '--tpmstate' in line and 'swtpm' in line]
+                    if len(matches) != 1:
+                        raise RuntimeError('cannot identify the owned Lima TPM process')
+                    tpm_pid = matches[0]
+                else:
+                    vm_pid = int((machine / 'qemu.pid').read_text())
+                    home = None
+                    # The private host service owns its swtpm; discover only its child.
+                    tpm_pid = int((authority / 'tpm.pid').read_text())
+                os.kill(vm_pid, signal.SIGKILL)
+                try:
+                    os.kill(tpm_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proxy.cancel()
+            finally:
+                proxy.cancel()
+                checking.result()
+        # Recreate the proxy connections while preserving disk, keys and backing NV.
+        proxy.close()
+        proxy = Proxy(proxy_dir / 'proxy.sock', backend)
+        if provider == 'lima':
+            run(['limactl', 'stop', '--force', name], 'stop-after-' + cut)
+        run(create, 'recover-' + cut)
+        following = wait_boot('D', recovered['boot_id'], recovered['tpm_anchor'] if cut == 'before' else None)
+        if cut == 'after':
+            raw = (authority / 'records' / (following['tpm_anchor'] + '.permit')).read_bytes()
+            if following['tpm_anchor'] == recovered['tpm_anchor'] or raw[112:144].hex() != candidate:
+                raise RuntimeError('completed retirement was lost after power cut')
+        recovered = following
+        print('pass   secure-' + provider + ': ' + cut + ' retirement power cut recovered D', flush=True)
+    ssh('/usr/lib/werewolf/slot-update check', 'resume-F')
+    ssh('/usr/lib/werewolf/slot-update try', 'try-F', check=False, timeout=30)
+    d = wait_boot('F', recovered['boot_id'], recovered['tpm_anchor'])
     unhealthy = overlay / 'etc/sv/ab-unhealthy'
     unhealthy.mkdir(parents=True, mode=0o755)
     for path in [overlay / 'etc', overlay / 'etc/sv']:
@@ -162,7 +260,7 @@ try:
     (unhealthy / 'run').symlink_to('/usr/bin/false')
     trial = update('E', d, committed=False)
     ssh('/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=30)
-    wait_boot('D', trial['boot_id'], trial['tpm_anchor'])
+    wait_boot('F', trial['boot_id'], trial['tpm_anchor'])
     print('pass   secure-lima: A/B updates, rollback, restart, failed-trial recovery and tamper refusals', flush=True)
 finally:
     for source, target in [(machine / 'create.log', 'native-create.log'),
@@ -170,4 +268,7 @@ finally:
         if source.exists():
             (work / target).write_bytes(source.read_bytes())
     if machine.exists():
-        run([howl, 'delete', name, '--on', 'lima'], 'cleanup', check=False)
+        run([howl, 'delete', name, '--on', provider], 'cleanup', check=False)
+    if proxy:
+        proxy.close()
+    proxy_work.cleanup()

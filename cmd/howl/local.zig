@@ -49,6 +49,19 @@ pub fn createQemu(
     tell: Tell,
     why: *Why,
 ) !void {
+    const own_dir = try machineDir(gpa, name);
+    const secured = if (Dir.cwd().access(
+        io,
+        try gpa.print("{s}/authority/profile.json", .{own_dir}),
+        .{},
+    )) |_|
+        true
+    else |_|
+        false;
+    if (o.secure or secured) {
+        var out = Io.File.stdout().writerStreaming(io, &.{});
+        return @import("local-secure.zig").create(io, gpa, o, name, tar, tell, &out.interface, why);
+    }
     const arch = try localArch(why);
     const dir = try machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);

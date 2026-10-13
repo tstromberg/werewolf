@@ -214,7 +214,10 @@ pub fn delete(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void
 pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why) !void {
     const dir = try machineDir(gpa, name);
     switch (on) {
-        .qemu => _ = try qemu.stop(io, gpa, dir),
+        .qemu => {
+            _ = try qemu.stop(io, gpa, dir);
+            @import("local-secure.zig").stopTpm(io, gpa, dir);
+        },
         .gcp => {
             // Delete the VM and its disk, not the image, which others may share.
             const p = try gcp.place(io, gpa, why);
@@ -304,7 +307,7 @@ pub fn remove(io: Io, gpa: Allocator, name: []const u8, on: Platform, why: *Why)
     }
     // Remove what create kept: the disks, and the config tar, which holds
     // secrets.
-    if (on == .lima) @import("local-secure.zig").stopPublisher(io, gpa, dir);
+    if (on == .lima or on == .qemu) @import("local-secure.zig").stopPublisher(io, gpa, dir);
     Dir.cwd().deleteTree(io, dir) catch {};
 }
 
