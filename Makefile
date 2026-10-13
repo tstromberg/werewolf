@@ -275,7 +275,7 @@ TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settin
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
 _test/azure-security: ; python3 test/azure-security --test
@@ -284,6 +284,8 @@ _test/provider-ab:
 	python3 test/ab-provider-tests
 _test/kernel-version: ; python3 test/kernel-version
 _test/local-prerequisites: ; python3 test/local-prerequisites
+_test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
+_test/kernel-inputs: ; python3 test/kernel-inputs
 _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/local-publisher $(HOWL)
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig

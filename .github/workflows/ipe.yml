@@ -60,6 +60,7 @@ jobs:
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-ab
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-enrollment
+          python3 test/check-cloud-tpm-activation
       - name: Build pinned measured stub
         run: |
           tools/build-tpm-stub build/tpm-stub

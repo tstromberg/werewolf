@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Refuse mismatched Alpine revisions before any kernel download or compilation."""
+import io
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import tarfile
+import tempfile
+import unittest
+
+PIN = re.search(r'^alpine_version=(.+)$', Path('boot/kernel-source').read_text(), re.M)[1]
+
+
+@unittest.skipUnless(platform.system() == 'Linux', 'native kernel builder requires Linux')
+class KernelInputs(unittest.TestCase):
+    def run_base(self, package):
+        with tempfile.TemporaryDirectory(prefix='ww-kernel-inputs-') as temporary:
+            work = Path(temporary)
+            base = work / 'base.tar'
+            with tarfile.open(base, 'w') as archive:
+                if package is not None:
+                    raw = ('P:linux-virt\nV:' + package + '\n\n').encode()
+                    info = tarfile.TarInfo('usr/lib/apk/db/installed')
+                    info.size = len(raw)
+                    archive.addfile(info, io.BytesIO(raw))
+            cert = work / 'public.crt'
+            cert.write_text('unused until package validation succeeds')
+            tools = work / 'bin'
+            tools.mkdir()
+            curl = tools / 'curl'
+            marker = work / 'download-started'
+            curl.write_text('#!/bin/sh\ntouch "' + str(marker) + '"\nexit 99\n')
+            curl.chmod(0o755)
+            result = subprocess.run(['sh', 'boot/build-kernel', str(base), str(cert), '-', str(work / 'out')],
+                                    env=dict(os.environ, PATH=str(tools) + ':' + os.environ['PATH']),
+                                    capture_output=True, text=True)
+            return result, marker.exists()
+
+    def test_package_revision_drift_refuses_before_download(self):
+        upstream = PIN.split('-r')[0]
+        result, downloaded = self.run_base(upstream + '-r999')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('differs from pinned', result.stderr)
+        self.assertFalse(downloaded)
+
+    def test_missing_package_database_refuses_before_download(self):
+        result, downloaded = self.run_base(None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('package database required', result.stderr)
+        self.assertFalse(downloaded)
+
+    def test_matching_revision_reaches_the_builder(self):
+        result, downloaded = self.run_base(PIN)
+        self.assertEqual(result.returncode, 99)
+        self.assertTrue(downloaded)
+
+
+unittest.main()

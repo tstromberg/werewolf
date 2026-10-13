@@ -612,7 +612,7 @@ and exercise creation, multiple signed
 updates, operator rollback, restart with the same NV authorization, updates after
 rollback, kills of both VM and simulator before/after NV extension, completed-update
 resume and an unhealthy counted trial recovering its predecessor. It compares
-actual PCR 11 with registered predictions and rejects writable-code execution,
+actual PCR 11 with the exact booted release's prediction and rejects writable-code execution,
 verified-root writes and requests to reauthorize retired history.
 The test removes its own instance, signers and reset credentials, retaining public logs.
 `make test` runs the bounded publisher's signature, context, concurrency and restart
@@ -620,6 +620,10 @@ regressions. `python3 test/check-tpm-enrollment` tests native enrollment against
 swtpm on macOS or Linux, including private file modes, repeat refusal, restart,
 supervisor crash recovery, cleanup and refusal to replace missing backing state.
 `test/local-prerequisites` covers cache tampering, incomplete publication and signer custody.
+`test/cloud-enrollment` checks SDK replies and immutable AWS/GCP TPM identity pins;
+encrypted cloud bootstrap remains proposed in the [enrollment design](design/cloud-tpm-enrollment.md).
+`python3 test/check-cloud-tpm-activation` checks the proposed PCR/command-bound policy
+with independent TPM tools and a fresh simulator; it does not enroll a cloud guest.
 Only the VM's TPM device is exposed; no signing keys or host directories are mounted.
 
 PR CI checks the IPE source version against both Alpine architecture locks.

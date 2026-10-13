@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Exercise provider identity pinning through the CLI without cloud credentials."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HOWL = str(Path(sys.argv.pop(1)).resolve())
+PUBLIC = Path('lib/testdata/tpm-ab/signer.pub').read_text()
+INSTANCE = 'i-0123456789abcdef0'
+
+
+class Enrollment(unittest.TestCase):
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory(prefix='ww-cloud-identity-')
+        self.addCleanup(self.work.cleanup)
+        self.root = Path(self.work.name)
+        self.pin = self.root / 'identity.json'
+        self.response = self.root / 'response.json'
+        self.env = dict(os.environ, PATH=str(self.root) + os.pathsep + os.environ['PATH'],
+                        WW_EK_RESPONSE=str(self.response), WW_EK_REGION='us-west-2',
+                        WW_EK_ID='123456789')
+        script = '''#!/usr/bin/env python3
+import os, pathlib, sys
+args = sys.argv[1:]
+if 'describe-availability-zones' in args:
+    print(os.environ['WW_EK_REGION'])
+elif args[:2] == ['config', 'get-value']:
+    print('test-project' if args[-1] == 'project' else 'us-west1-a')
+elif 'describe' in args:
+    marker = pathlib.Path(os.environ['WW_EK_RESPONSE']).with_suffix('.replaced')
+    print('987654321' if marker.exists() else os.environ['WW_EK_ID'])
+elif 'get-instance-tpm-ek-pub' in args:
+    assert args[args.index('--instance-id') + 1] == 'i-0123456789abcdef0'
+    assert args[args.index('--key-format') + 1] == 'der'
+    assert args[args.index('--key-type') + 1] == 'rsa-2048'
+    print(pathlib.Path(os.environ['WW_EK_RESPONSE']).read_text())
+elif 'get-shielded-identity' in args:
+    assert args[args.index('--project') + 1] == 'test-project'
+    assert args[args.index('--zone') + 1] == 'us-west1-a'
+    print(pathlib.Path(os.environ['WW_EK_RESPONSE']).read_text())
+    if os.environ.get('WW_EK_REPLACE_ON_KEY'):
+        pathlib.Path(os.environ['WW_EK_RESPONSE']).with_suffix('.replaced').touch()
+else:
+    sys.exit('unexpected SDK command: ' + repr(args))
+'''
+        for name in ['aws', 'gcloud']:
+            tool = self.root / name
+            tool.write_text(script)
+            tool.chmod(0o700)
+
+    def aws(self, **changes):
+        value = dict(InstanceId=INSTANCE, KeyFormat='der', KeyType='rsa-2048',
+                     KeyValue=''.join(PUBLIC.splitlines()[1:-1]))
+        value.update(changes)
+        self.response.write_text(json.dumps(value))
+
+    def call(self, provider='aws', resource=INSTANCE):
+        return subprocess.run([HOWL, '_cloud-ek', provider, resource, str(self.pin)],
+                              env=self.env, capture_output=True, text=True, timeout=15)
+
+    def test_aws_repeat_preserves_pin_and_mode(self):
+        self.aws()
+        self.assertEqual(self.call().returncode, 0)
+        saved = self.pin.read_bytes()
+        self.assertEqual(self.pin.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.call().returncode, 0)
+        self.assertEqual(self.pin.read_bytes(), saved)
+        self.assertEqual(json.loads(saved)['resource'], INSTANCE)
+
+    def test_changed_scope_and_key_never_replace_pin(self):
+        self.aws()
+        self.assertEqual(self.call().returncode, 0)
+        saved = self.pin.read_bytes()
+        self.env['WW_EK_REGION'] = 'us-west-1'
+        self.assertIn('CloudTpmIdentityChanged', self.call().stderr)
+        self.assertEqual(self.pin.read_bytes(), saved)
+        self.env['WW_EK_REGION'] = 'us-west-2'
+        replacement = self.root / 'replacement.key'
+        subprocess.run(['openssl', 'genpkey', '-algorithm', 'RSA', '-pkeyopt',
+                        'rsa_keygen_bits:2048', '-out', str(replacement)],
+                       capture_output=True, check=True)
+        pem = subprocess.check_output(['openssl', 'pkey', '-in', str(replacement),
+                                       '-pubout'], text=True)
+        self.aws(KeyValue=''.join(pem.splitlines()[1:-1]))
+        self.assertIn('CloudTpmIdentityChanged', self.call().stderr)
+        self.assertEqual(self.pin.read_bytes(), saved)
+
+    def test_foreign_resource_and_oversized_response_do_not_pin(self):
+        self.aws(InstanceId='i-12345678')
+        self.assertIn('BadCloudTpmIdentity', self.call().stderr)
+        self.assertFalse(self.pin.exists())
+        self.response.write_text('x' * 8193)
+        self.assertNotEqual(self.call().returncode, 0)
+        self.assertFalse(self.pin.exists())
+
+    def test_invalid_algorithm_does_not_pin(self):
+        for changes in [dict(KeyFormat='tpmt'), dict(KeyType='ecc-prime256')]:
+            self.aws(**changes)
+            self.assertIn('BadCloudTpmIdentity', self.call().stderr)
+            self.assertFalse(self.pin.exists())
+
+    def test_gcp_accepts_encryption_key_not_signing_key(self):
+        self.response.write_text(json.dumps(dict(signingKey=dict(ekPub=PUBLIC))))
+        self.assertNotEqual(self.call('gcp', 'werewolf-test').returncode, 0)
+        self.assertFalse(self.pin.exists())
+        self.response.write_text(json.dumps(dict(encryptionKey=dict(ekPub=PUBLIC))))
+        result = self.call('gcp', 'werewolf-test')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.pin.read_text())['scope'], 'test-project/us-west1-a')
+        self.assertIn('CloudTpmIdentityChanged', self.call('gcp', 'another-vm').stderr)
+
+    def test_gcp_recreated_name_cannot_reuse_pin(self):
+        self.response.write_text(json.dumps(dict(encryptionKey=dict(ekPub=PUBLIC))))
+        self.assertEqual(self.call('gcp', 'werewolf-test').returncode, 0)
+        saved = self.pin.read_bytes()
+        self.env['WW_EK_ID'] = '987654321'
+        self.assertIn('CloudTpmIdentityChanged', self.call('gcp', 'werewolf-test').stderr)
+        self.assertEqual(self.pin.read_bytes(), saved)
+
+    def test_gcp_missing_or_invalid_numeric_id_does_not_pin(self):
+        self.response.write_text(json.dumps(dict(encryptionKey=dict(ekPub=PUBLIC))))
+        for value in ['', 'None', '0', '-1', '123\n456', '18446744073709551616']:
+            self.env['WW_EK_ID'] = value
+            self.assertNotEqual(self.call('gcp', 'werewolf-test').returncode, 0)
+            self.assertFalse(self.pin.exists())
+
+    def test_gcp_replacement_during_identity_read_does_not_pin(self):
+        self.response.write_text(json.dumps(dict(encryptionKey=dict(ekPub=PUBLIC))))
+        self.env['WW_EK_REPLACE_ON_KEY'] = '1'
+        self.assertIn('CloudTpmIdentityChanged', self.call('gcp', 'werewolf-test').stderr)
+        self.assertFalse(self.pin.exists())
+
+    def test_cli_options_cannot_be_resources(self):
+        for provider in ['aws', 'gcp']:
+            self.assertIn('BadCloudResource', self.call(provider, '--project=foreign').stderr)
+        self.assertFalse(self.pin.exists())
+
+    def test_truncated_existing_pin_is_not_repaired(self):
+        self.aws()
+        self.pin.write_text('{')
+        self.assertNotEqual(self.call().returncode, 0)
+        self.assertEqual(self.pin.read_text(), '{')
+
+
+unittest.main()

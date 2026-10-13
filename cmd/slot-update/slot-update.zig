@@ -1519,12 +1519,14 @@ test {
 /// (an error name rather than an HTTP status), a 5xx, 408 or 429. A refusal
 /// like 404 will be the same next time.
 fn transient(said: []const u8) bool {
+    if (std.mem.eql(u8, said, "TooBig")) return false;
     const status = std.meta.stringToEnum(std.http.Status, said) orelse return true;
     return @backingInt(status) >= 500 or status == .request_timeout or
         status == .too_many_requests;
 }
 
 test transient {
+    try testing.expect(!transient("TooBig"));
     try std.testing.expect(transient("ConnectionRefused"));
     try std.testing.expect(transient("service_unavailable"));
     try std.testing.expect(transient("too_many_requests"));

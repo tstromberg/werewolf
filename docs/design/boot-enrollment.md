@@ -112,9 +112,9 @@ actual device commands and hierarchy reset paths, not just serial comparisons.
 Initial tests use disposable keys, cloned variables and local TPM state.
 They prove A/B updates, tamper, unsigned image, wrong signer and loader-option
 override rejection. QEMU x86_64 TPM-gated boots refuse retired releases, missing
-TPMs and unmeasured UKIs. Actual power cuts around retirement preserve B;
-commit and operator rollback retain both members. Lima arm64 and cloud TPM boots remain open.
-
+TPMs and unmeasured UKIs. Power cuts preserve B; commit and operator rollback retain
+both members. Lima arm64 and Linux QEMU are verified.
+Cloud enrollment follows the proposed [TPM bootstrap design](cloud-tpm-enrollment.md).
 References: [systemd-stub](https://github.com/systemd/systemd/blob/main/man/systemd-stub.xml),
 [QEMU variables](https://www.qemu.org/docs/master/devel/uefi-vars.html),
 [GCP enrollment](https://docs.cloud.google.com/compute/shielded-vm/docs/creating-shielded-images).

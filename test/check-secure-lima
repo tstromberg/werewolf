@@ -113,14 +113,14 @@ def wait_boot(label, previous=None, anchor=None, committed=True):
                 if anchor is not None and status['tpm_anchor'] != anchor:
                     raise RuntimeError('rollback or restart changed protected authorization')
                 mappings = json.loads((authority / 'releases.json').read_text())
-                if status['pcr11'] not in mappings.values():
-                    raise RuntimeError('actual PCR does not match a registered signed image')
+                if mappings.get(status['release_id']) != status['pcr11']:
+                    raise RuntimeError('actual PCR does not match this signed release identity')
                 with (work / 'evidence.jsonl').open('a') as log:
                     log.write(json.dumps(status) + '\n')
                 print('pass   secure-' + provider + ': ' + label + ', enrolled firmware, IPE, exact measured TPM pair', flush=True)
                 return status
         time.sleep(2)
-    raise RuntimeError('secured Lima did not commit ' + label)
+    raise RuntimeError('secured ' + provider + ' did not commit ' + label)
 
 
 def refresh(label):
@@ -272,6 +272,20 @@ try:
     wait_boot('F', trial['boot_id'], trial['tpm_anchor'])
     print('pass   secure-' + provider + ': A/B updates, rollback, power cuts, restart and tamper refusals', flush=True)
 finally:
+    if authority.exists():
+        for filename in ['releases.json', 'approved.json', 'permit.pub', 'factory.permit']:
+            source = authority / filename
+            if source.exists():
+                (work / filename).write_bytes(source.read_bytes())
+    if provider == 'qemu':
+        console = machine / 'console.log'
+        if console.exists():
+            (work / 'console.log').write_bytes(console.read_bytes())
+    else:
+        instance = Path(env.get('LIMA_HOME', str(Path.home() / '.lima'))) / name
+        console = instance / 'serial.log'
+        if console.exists():
+            (work / 'console.log').write_bytes(console.read_bytes())
     for source, target in [(machine / 'create.log', 'native-create.log'),
                            (authority / 'refresh.log', 'native-refresh.log')]:
         if source.exists():

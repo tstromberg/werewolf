@@ -4,7 +4,7 @@
 
 Deploy Lima and Linux QEMU guests with enrolled Secure Boot, IPE and exact-pair TPM retirement.
 The local host and its stored TPM state are trusted; guest root and guest disks are not.
-Status: arm64 Lima verified; Linux QEMU integration and managed prerequisites under validation.
+Status: arm64 Lima and x86_64 Linux QEMU verified, including managed security inputs.
 
 ## Background
 

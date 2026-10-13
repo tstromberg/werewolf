@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Validate proposed cloud activation policy with independent TPM tools."""
+from contextlib import contextmanager
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+
+
+@contextmanager
+def simulator(root):
+    (root / 'nv').mkdir()
+    endpoint = root / 'tpm.sock'
+    process = subprocess.Popen([
+        'swtpm', 'socket', '--tpm2', '--tpmstate', 'dir=' + str(root / 'nv'),
+        '--server', 'type=unixio,path=' + str(endpoint),
+        '--ctrl', 'type=unixio,path=' + str(endpoint) + '.ctrl',
+        '--flags', 'not-need-init,startup-clear',
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    try:
+        for _ in range(100):
+            if process.poll() is not None:
+                raise RuntimeError(process.stderr.read().decode())
+            if endpoint.exists():
+                break
+            time.sleep(.05)
+        else:
+            raise RuntimeError('simulator did not start')
+        yield dict(os.environ, TPM2TOOLS_TCTI='swtpm:path=' + str(endpoint))
+    finally:
+        process.terminate()
+        try:
+            process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=10)
+
+
+def exercise(root, env):
+    def run(*args, success=True):
+        result = subprocess.run(list(map(str, args)), cwd=root, env=env,
+                                capture_output=True, timeout=20)
+        if (result.returncode == 0) != success:
+            raise RuntimeError(str(args) + ': ' + result.stderr.decode(errors='replace'))
+        return result
+
+    run('tpm2_pcrextend', '-Q', '11:sha256=' + '11' * 32)
+    run('tpm2_pcrread', '-Q', 'sha256:11', '-o', 'expected.pcr')
+    for code, output in [('TPM2_CC_Quote', 'quote.policy'),
+                         ('TPM2_CC_ActivateCredential', 'activate.policy')]:
+        run('tpm2_startauthsession', '-S', 'trial.ctx')
+        run('tpm2_policypcr', '-Q', '-S', 'trial.ctx', '-l', 'sha256:11', '-f', 'expected.pcr')
+        run('tpm2_policycommandcode', '-Q', '-S', 'trial.ctx', code, '-L', output)
+        run('tpm2_flushcontext', 'trial.ctx')
+    branches = 'sha256:quote.policy,activate.policy'
+    run('tpm2_startauthsession', '-S', 'trial.ctx')
+    run('tpm2_policyor', '-Q', '-S', 'trial.ctx', '-l', branches, '-L', 'policy.bin')
+    run('tpm2_flushcontext', 'trial.ctx')
+    run('tpm2_createek', '-Q', '-c', '0x81010001', '-G', 'rsa', '-u', 'ek.pub')
+
+    def parent():
+        run('tpm2_startauthsession', '--policy-session', '-S', 'parent.ctx')
+        run('tpm2_policysecret', '-Q', '-S', 'parent.ctx', '-c', 'e')
+
+    parent()
+    attributes = 'fixedtpm|fixedparent|sensitivedataorigin|adminwithpolicy|restricted|sign'
+    run('tpm2_create', '-Q', '-C', '0x81010001', '-P', 'session:parent.ctx',
+        '-G', 'rsa2048:rsassa-sha256:null', '-g', 'sha256', '-a', attributes,
+        '-L', 'policy.bin', '-u', 'ak.pub', '-r', 'ak.priv')
+    run('tpm2_flushcontext', 'parent.ctx')
+    parent()
+    run('tpm2_load', '-Q', '-C', '0x81010001', '-P', 'session:parent.ctx',
+        '-u', 'ak.pub', '-r', 'ak.priv', '-c', 'ak.ctx', '-n', 'ak.name')
+    run('tpm2_evictcontrol', '-Q', '-C', 'o', '-c', 'ak.ctx', '0x81010002')
+    run('tpm2_flushcontext', 'parent.ctx')
+    run('tpm2_flushcontext', '-t')
+
+    def policy(code='TPM2_CC_ActivateCredential'):
+        run('tpm2_startauthsession', '--policy-session', '-S', 'akpol.ctx')
+        run('tpm2_policypcr', '-Q', '-S', 'akpol.ctx', '-l', 'sha256:11', '-f', 'expected.pcr')
+        run('tpm2_policycommandcode', '-Q', '-S', 'akpol.ctx', code)
+        run('tpm2_policyor', '-Q', '-S', 'akpol.ctx', '-l', branches)
+
+    policy('TPM2_CC_Quote')
+    nonce = os.urandom(32).hex()
+    run('tpm2_quote', '-Q', '-c', '0x81010002', '-p', 'session:akpol.ctx', '-l', 'sha256:11',
+        '-q', nonce, '-m', 'quote.msg', '-s', 'quote.sig', '-o', 'quote.pcr', '-g', 'sha256')
+    run('tpm2_flushcontext', 'akpol.ctx')
+
+    def quote(challenge, pcr='expected.pcr', success=True):
+        run('tpm2_checkquote', '-Q', '-u', 'ak.pub', '-m', 'quote.msg', '-s', 'quote.sig',
+            '-f', pcr, '-l', 'sha256:11', '-g', 'sha256', '-q', challenge, success=success)
+
+    quote(nonce)
+    quote('00' * 32, success=False)
+    (root / 'wrong.pcr').write_bytes(bytes.fromhex('33' * 32))
+    quote(nonce, 'wrong.pcr', success=False)
+    secret = os.urandom(32)
+    (root / 'secret').write_bytes(secret)
+    name = (root / 'ak.name').read_bytes().hex()
+    run('tpm2_makecredential', '-Q', '-T', 'none', '-u', 'ek.pub', '-s', 'secret',
+        '-n', name, '-o', 'capsule')
+
+    def activate(capsule, output, success=True, auth='session:akpol.ctx'):
+        args = ['tpm2_activatecredential', '-Q', '-c', '0x81010002', '-C', '0x81010001',
+                '-P', 'session:parent.ctx', '-i', capsule, '-o', output]
+        if auth is not None:
+            args += ['-p', auth]
+        run(*args, success=success)
+        if not success:
+            assert not (root / output).exists()
+
+    def flush():
+        run('tpm2_flushcontext', 'parent.ctx')
+        run('tpm2_flushcontext', 'akpol.ctx')
+
+    parent()
+    policy('TPM2_CC_Quote')
+    activate('capsule', 'wrong-command', success=False)
+    flush()
+    parent()
+    activate('capsule', 'empty-auth', success=False, auth=None)
+    run('tpm2_flushcontext', 'parent.ctx')
+    parent()
+    policy()
+    activate('capsule', 'recovered')
+    assert (root / 'recovered').read_bytes() == secret
+    flush()
+    print('pass   cloud TPM activation: fresh quote, expected PCR, encrypted key and command/empty-auth refusals')
+
+    # Bind the capsule to this AK name and reject corruption before releasing its key.
+    run('tpm2_makecredential', '-Q', '-T', 'none', '-u', 'ek.pub', '-s', 'secret',
+        '-n', '000b' + '44' * 32, '-o', 'wrong-name')
+    damaged = bytearray((root / 'capsule').read_bytes())
+    damaged[-1] ^= 1
+    (root / 'damaged').write_bytes(damaged)
+    for capsule in ['wrong-name', 'damaged']:
+        parent()
+        policy()
+        activate(capsule, capsule + '.recovered', success=False)
+        flush()
+    print('pass   cloud TPM activation: wrong AK identity and corrupted capsule refused')
+
+    run('tpm2_pcrextend', '-Q', '11:sha256=' + '22' * 32)
+    run('tpm2_startauthsession', '--policy-session', '-S', 'bad.ctx')
+    run('tpm2_policypcr', '-Q', '-S', 'bad.ctx', '-l', 'sha256:11',
+        '-f', 'expected.pcr', success=False)
+    parent()
+    activate('capsule', 'wrong-boot', success=False, auth='session:bad.ctx')
+    print('pass   cloud TPM activation: stale challenge, wrong quote/PCR and post-boot activation refused')
+
+
+def main():
+    os.umask(0o077)
+    with tempfile.TemporaryDirectory(prefix='ww-cloud-ak-', dir='/tmp') as temporary:
+        root = Path(temporary)
+        with simulator(root) as env:
+            exercise(root, env)
+
+
+if __name__ == '__main__':
+    main()
