@@ -142,13 +142,13 @@ fn lookupUid(uid: u32, buf: [*]u8, len: usize, pwd: *Passwd) ?bool {
     return true;
 }
 
-export fn getpwnam_r(
+fn getpwnamR(
     name: [*:0]const u8,
     pwd: *Passwd,
     buf: [*]u8,
     len: usize,
     result: *?*Passwd,
-) c_int {
+) callconv(.c) c_int {
     result.* = null;
     if (lookupName(name, buf, len, pwd)) |ok| {
         if (!ok) {
@@ -165,7 +165,13 @@ export fn getpwnam_r(
     return next(name, pwd, buf, len, result);
 }
 
-export fn getpwuid_r(uid: u32, pwd: *Passwd, buf: [*]u8, len: usize, result: *?*Passwd) c_int {
+fn getpwuidR(
+    uid: u32,
+    pwd: *Passwd,
+    buf: [*]u8,
+    len: usize,
+    result: *?*Passwd,
+) callconv(.c) c_int {
     result.* = null;
     if (lookupUid(uid, buf, len, pwd)) |ok| {
         if (!ok) {
@@ -182,6 +188,11 @@ export fn getpwuid_r(uid: u32, pwd: *Passwd, buf: [*]u8, len: usize, result: *?*
     return next(uid, pwd, buf, len, result);
 }
 
+comptime {
+    @export(&getpwnamR, .{ .name = "getpwnam_r" });
+    @export(&getpwuidR, .{ .name = "getpwuid_r" });
+}
+
 var once_name: Passwd = .{};
 var once_name_buf: [512]u8 = undefined;
 var once_uid: Passwd = .{};
@@ -189,13 +200,13 @@ var once_uid_buf: [512]u8 = undefined;
 
 export fn getpwnam(name: [*:0]const u8) ?*Passwd {
     var result: ?*Passwd = null;
-    if (getpwnam_r(name, &once_name, &once_name_buf, once_name_buf.len, &result) != 0) return null;
+    if (getpwnamR(name, &once_name, &once_name_buf, once_name_buf.len, &result) != 0) return null;
     return result;
 }
 
 export fn getpwuid(uid: u32) ?*Passwd {
     var result: ?*Passwd = null;
-    if (getpwuid_r(uid, &once_uid, &once_uid_buf, once_uid_buf.len, &result) != 0) return null;
+    if (getpwuidR(uid, &once_uid, &once_uid_buf, once_uid_buf.len, &result) != 0) return null;
     return result;
 }
 

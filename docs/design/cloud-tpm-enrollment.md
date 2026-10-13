@@ -3,7 +3,7 @@
 ## Summary
 
 Extend the local exact-pair protocol to provider-controlled TPMs without publishing reset secrets.
-Status: provider public-key retrieval implemented; encrypted bootstrap enrollment is proposed.
+Status: provider pins/native exchange are tested; signed enrollment and recovery work in a local VM.
 Cloud `--secure` remains refused until enrollment and provider recovery tests pass.
 
 ## Background
@@ -48,6 +48,8 @@ Build a separate measured, signed bootstrap UKI containing only the enrollment a
 Seal the factory machine nonce, signed factory-record digest and bootstrap mode in its identity.
 Regular workload UKIs continue to require the existing mandatory v2 checks.
 No root filesystem handover, application or ordinary administration service runs in bootstrap mode.
+`cmd/tpm-enroll` and `tools/build-tpm-bootstrap` implement that isolated image with a bounded VM channel.
+Provider transport and normal-factory boot selection remain open; this does not enable cloud deployment.
 Refuse bootstrap when protected enrollment already exists; there is no guest reset or force option.
 
 The bootstrap creates a TPM attestation key with fixed TPM/parent attributes.
@@ -58,7 +60,7 @@ The activation branch must set PolicyCommandCode; PCR policy alone is insufficie
 The host must verify a fresh nonce, the complete public template and the expected quote/PCR selection.
 Prove association with the provider-pinned endorsement key using credential activation.
 `test/check-cloud-tpm-activation` verifies these policies with independent TPM tools.
-The native wire protocol still needs interoperability tests before release.
+The [native wire protocol](tpm-bootstrap-protocol.md) passes independent-tool interoperability tests.
 An endorsement-key match alone does not attest which software is running.
 
 ### Reset credentials
@@ -67,8 +69,8 @@ Persist random owner and lockout credentials at mode 0600 before any authority c
 After bootstrap attestation succeeds, encrypt credentials for that TPM and policy-bound key.
 Credential activation conveys a random 32-byte key, not the reset credentials themselves.
 Use that key for an authenticated encrypted capsule bound to the full enrollment context.
-Authenticate the encrypted capsule and bind it to machine nonce and factory record.
-Plaintext credentials may exist transiently in verified bootstrap memory while provisioning.
+Require the factory publisher's signature before activation; public EK encryption alone lacks sender trust.
+Credentials may exist transiently in verified bootstrap memory while provisioning.
 They must never be logged, persisted, returned over the network or exposed after workload handover.
 Explicitly wipe credentials and every TPM-command buffer that contained them.
 Replaying bootstrap after enrollment must refuse before capsule activation.
@@ -77,7 +79,8 @@ Install disable-clear, owner/lockout authentication and the existing v2 NV polic
 Read back the full protected state, then reboot into the normal signed factory image.
 Host readiness requires the normal boot's identity, measurement and protected-pair evidence.
 Partial provisioning refuses ordinary boot and preserves host recovery material.
-Recovery must prove the same authority; it cannot silently clear or replace the TPM.
+The [signed recovery mode](tpm-enrollment-recovery.md) proves the original authority and rejects written NV.
+It cannot clear the TPM, replace credentials or restore factory state over retirement history.
 
 ### Publication and updates
 

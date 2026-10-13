@@ -51,8 +51,8 @@ mke2fs, cryptsetup), the command line's `werewolf.*` words
    says why, which also stops a slot on probation from committing.
 6. **Image roots** (`oci.zig`), if the build listed any: binds for each,
    made before fence forbids mounting ([adhoc.md](../../docs/design/adhoc.md)).
-7. **Seal** (`seal.zig`): core dumps off, helpers cut to CAP_SYS_BOOT,
-   seal-watch started, bounding set cut, seccomp filter installed. The mount
+7. **Seal** (`seal.zig`): start the metadata-only task-links observer; core dumps off,
+   helpers cut to CAP_SYS_BOOT, seal-watch started, bounding set cut, seccomp installed. The mount
    broker and DHCP renewal start outside fence; then `exec fence runit`.
 
 ## Drawbacks

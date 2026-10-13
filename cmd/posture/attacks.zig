@@ -222,7 +222,7 @@ pub fn run(p: *Posture) !void {
         else
             "",
     });
-    try leashAttack(p);
+    if (p.werewolf) try leashAttack(p);
 }
 
 /// leashAttack checks that a leashed service can do what its file grants and

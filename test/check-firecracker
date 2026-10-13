@@ -58,7 +58,7 @@ ssh "$host" "[ -x \$HOME/go/bin/apko ] && \$HOME/go/bin/apko --version >/dev/nul
 
 ssh "$host" "cd $work && build/host/howl delete $name --on firecracker" >/dev/null 2>&1 || true
 
-ssh "$host" "cd $work && PATH=\$HOME/go/bin:\$PATH build/host/howl create $name --with sshd --sshd.pubkey-accepted-algorithms=ssh-ed25519 --on firecracker --build --yes" ||
+ssh "$host" "cd $work && PATH=\$HOME/go/bin:\$PATH build/host/howl create $name --with sshd --sshd.pubkey-accepted-algorithms=ssh-ed25519 --on firecracker --insecure --build --yes" ||
 	fail "create failed on $host"
 
 # The posture line lands in the console log once the machine has settled.

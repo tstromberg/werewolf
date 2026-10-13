@@ -64,28 +64,31 @@ pub fn main(init: std.process.Init) !void {
     park(io);
 }
 
-/// commitEsp commits for systemd-boot by renaming this slot's counting entry
-/// to entry.conf, on the EFI partition the mount broker lends for the rename.
+/// commitEsp commits for systemd-boot: the mount broker renames this
+/// slot's counting entry to entry.conf on the EFI partition, which it
+/// never lends as a mount.
 fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
-    const esp = broker.ask(.esp) catch |err|
+    const status = broker.espStatus() catch |err|
         return say(
             io,
             "no EFI partition: {s} {s}; not committing",
             .{ @errorName(err), broker.refusal },
         );
-    defer esp.release();
-
-    const d = try gpa.print("{s}/loader/entries", .{esp.path()});
-    const good = try gpa.print("{s}/{s}.conf", .{ d, entry });
-    if (exists(io, good)) {
-        say(io, "{s} is already good", .{entry});
-        return markCommitted(io);
+    switch (status) {
+        .already => {
+            say(io, "{s} is already good", .{entry});
+            return markCommitted(io);
+        },
+        .none => return say(io, "no entry for {s} on the EFI partition; not committing", .{entry}),
+        .tried => {},
     }
     if (dataUnavailable(io, gpa)) return;
-    const tried = (try triedEntry(io, gpa, d, entry)) orelse
-        return say(io, "no entry for {s} in {s}; not committing", .{ entry, d });
-    try Dir.rename(Dir.cwd(), tried, Dir.cwd(), good, io);
-    linux.sync();
+    broker.espCommit() catch |err|
+        return say(
+            io,
+            "cannot commit {s}: {s} {s}; not committing",
+            .{ entry, @errorName(err), broker.refusal },
+        );
     try markCommitted(io);
     say(io, "healthy for a minute; {s} is good", .{entry});
 }
@@ -171,23 +174,6 @@ fn serviceHealthy(status: [20]u8, now: u64) bool {
     };
 }
 
-/// triedEntry returns the path of this slot's entry that still counts tries,
-/// such as werewolf-a+1.conf, or werewolf-a+0-1.conf after one try.
-fn triedEntry(io: Io, gpa: Allocator, dir: []const u8, entry: []const u8) !?[]const u8 {
-    var d = Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return null;
-    defer d.close(io);
-    var it = d.iterate();
-    while (try it.next(io)) |e| {
-        if (isTried(e.name, entry)) return try gpa.print("{s}/{s}", .{ dir, e.name });
-    }
-    return null;
-}
-
-fn isTried(name: []const u8, entry: []const u8) bool {
-    if (!std.mem.startsWith(u8, name, entry) or !std.mem.endsWith(u8, name, ".conf")) return false;
-    return name.len > entry.len and name[entry.len] == '+';
-}
-
 /// isSaved reports whether GRUB's block already has saved_entry=entry.
 fn isSaved(block: []const u8, entry: []const u8) bool {
     var it = std.mem.splitScalar(u8, block, '\n');
@@ -271,14 +257,6 @@ test serviceHealthy {
     try testing.expect(!serviceHealthy(statusOf(0, 'u', 1), 1000));
     try testing.expect(!serviceHealthy(statusOf(2, 'u', 600), 1000));
     try testing.expect(!serviceHealthy(statusOf(7, 'u', 600), 1000));
-}
-
-test isTried {
-    try testing.expect(isTried("werewolf-b+1.conf", "werewolf-b"));
-    try testing.expect(isTried("werewolf-b+0-1.conf", "werewolf-b"));
-    try testing.expect(!isTried("werewolf-b.conf", "werewolf-b"));
-    try testing.expect(!isTried("werewolf-bb+1.conf", "werewolf-b"));
-    try testing.expect(!isTried("werewolf-b+1.tmp", "werewolf-b"));
 }
 
 test isSaved {

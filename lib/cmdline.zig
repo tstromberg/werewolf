@@ -43,6 +43,10 @@ pub const Cmdline = struct {
     /// native selects the slot from the signed UKI's canonical firmware path.
     native: bool = false,
     secure: bool = false,
+    /// bootstrap is a rootless enrollment boot; stage0 must never hand it over.
+    bootstrap: bool = false,
+    /// recovery is a separate signed bootstrap; never inferred from TPM state.
+    recovery: bool = false,
     tpm: bool = false,
     release: ?[32]u8 = null,
 };
@@ -107,6 +111,8 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .check => c.check = if (isOne(v)) true else return refuse(f, "not 1"),
             .native => c.native = if (isOne(v)) true else return refuse(f, "not 1"),
             .secure => c.secure = if (isOne(v)) true else return refuse(f, "not 1"),
+            .bootstrap => c.bootstrap = if (isOne(v)) true else return refuse(f, "not 1"),
+            .recovery => c.recovery = if (isOne(v)) true else return refuse(f, "not 1"),
             .tpm => c.tpm = if (std.mem.eql(u8, v, "2"))
                 true
             else
@@ -119,7 +125,24 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             },
         }
     }
-    if (c.native and (c.victim == null or c.esp == null or c.grubenv != null or c.root.len > 0)) {
+    if (c.bootstrap) {
+        f.word = "werewolf.bootstrap";
+        if (!c.native or !c.secure) return refuse(f, "requires secure native enrollment boot");
+        var allowed: std.EnumSet(Key) = .empty;
+        inline for (.{ Key.native, Key.secure, Key.bootstrap }) |key| allowed.insert(key);
+        if (c.recovery) allowed.insert(.recovery);
+        if (!seen.subsetOf(allowed)) return refuse(
+            f,
+            "cannot carry workload or administration options",
+        );
+    }
+    if (c.recovery and !c.bootstrap) {
+        f.word = "werewolf.recovery";
+        return refuse(f, "requires a signed bootstrap, never a workload boot");
+    }
+    if (c.native and !c.bootstrap and
+        (c.victim == null or c.esp == null or c.grubenv != null or c.root.len > 0))
+    {
         f.word = "werewolf.native";
         return refuse(f, "needs a native victim and ESP, without GRUB or a direct root");
     }
@@ -147,6 +170,33 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
     }
     f.* = .{};
     return c;
+}
+
+test "enrollment boot cannot acquire workload identity or relaxed controls" {
+    var f: Failure = .{};
+    const line = "werewolf.native=1 werewolf.secure=1 werewolf.bootstrap=1";
+    try testing.expect(parse(line, &f).?.bootstrap);
+    for ([_][]const u8{
+        "werewolf.bootstrap=1",            "werewolf.native=1 werewolf.bootstrap=1",
+        line ++ " werewolf.root=vda",      line ++ " werewolf.data=vdb",
+        line ++ " werewolf.slot=a",        line ++ " werewolf.victim=" ++ id ++ ":/w",
+        line ++ " werewolf.esp=57E1-F000", line ++ " werewolf.seal=learn",
+        line ++ " werewolf.debug=1",       line ++ " werewolf.check=1",
+        line ++ " werewolf.tpm=2",         line ++ " werewolf.release=" ++ @as([64]u8, @splat('a')),
+        line ++ " werewolf.bootstrap=1",   line ++ " werewolf.bootstrap=0",
+    }) |bad| try testing.expect(parse(bad, &f) == null);
+}
+
+test "recovery requires an explicit secure rootless bootstrap identity" {
+    var f: Failure = .{};
+    const line = "werewolf.native=1 werewolf.secure=1 werewolf.bootstrap=1 werewolf.recovery=1";
+    try testing.expect(parse(line, &f).?.recovery);
+    for ([_][]const u8{
+        "werewolf.recovery=1",          "werewolf.native=1 werewolf.secure=1 werewolf.recovery=1",
+        line ++ " werewolf.recovery=1", line ++ " werewolf.root=vda",
+        line ++ " werewolf.slot=a",     line ++ " werewolf.seal=learn",
+        line ++ " werewolf.debug=1",    line ++ " werewolf.recovery=0",
+    }) |bad| try testing.expect(parse(bad, &f) == null);
 }
 
 /// The stub's path is a routing hint. The signed verity root remains the authority.

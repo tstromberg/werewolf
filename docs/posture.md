@@ -7,6 +7,13 @@ it to any Linux machine (it is a static binary) and run it as root to
 compare, or, in a checkout there, run `make posture`, which builds it and
 runs it with sudo.
 
+The `/usr/share/werewolf` directory selects werewolf
+checks. Other Linux systems omit image-specific IPE policy, TPM A/B
+authorization, root-device naming, updater, generated service, leash and
+compiled network-policy checks. Generic kernel, mount, capability, syscall
+and SSH checks still run. A copied posture binary does not identify the
+host as werewolf. Generic reports do not read image allowances or excuses.
+
 ```
 Ubuntu 24.04.4 LTS, Linux 6.8.0-134-generic, on lima-werewolf-ci (root)
 
@@ -19,14 +26,53 @@ Kernel
 ✅ 5 passed   ❌ 33 failed   ⚠️ 2 skipped
 ```
 
-A check that does not pass says what it found; in a terminal, a long list
-is cut to fit (`+3 more`). `--json` prints everything, with what each check
+A check that does not pass says what it found; long values are shortened
+with `…` to keep each item within two rows. `--json` prints everything, with what each check
 protects against (`why`) and how it was checked (`how`):
 
 ```sh
 posture --json | jq '.summary'          # { "pass": 24, "fail": 9, "skip": 0 }
 posture --json | jq -r '.checks[] | select(.result == "fail") | .name'
 ```
+
+`--summary` runs fresh checks and shows the state and counts on one line,
+followed by violations. It omits the timestamp because the scan is live.
+All failures, including expected gaps, use an `X`. A terminal colors passes
+green, failure marks red and the EXPECTED GAPS state amber. Redirected
+output, `NO_COLOR` and `TERM=dumb` suppress color. Long violation rows are
+wrapped or shortened to at most two rows at the terminal width.
+
+| State | Meaning |
+| --- | --- |
+| NOMINAL | No failed checks. |
+| EXPECTED GAPS | Every failure is excused by the image's declared weaknesses. |
+| DEGRADED | At least one failure is not excused. |
+
+These describe the measured checks, not a guarantee of security. Skips
+remain visible in the totals, and non-root scans label their limited
+coverage separately. NOMINAL does not mean every check ran.
+
+Playground displays this summary for interactive terminal logins via
+`/etc/profile.d/posture.sh`, which covers its default ash shell and bash
+login shells. To add it to your own bashrc:
+
+```sh
+case $- in
+    *i*) [ ! -t 1 ] || /usr/lib/werewolf/posture --summary || : ;;
+esac
+```
+
+The login summary writes only to its terminal's stdout. As with any live
+scan, refusal probes produce kernel audit records which may reach the
+serial console. Noninteractive SSH commands and redirected logins do not
+run the login summary. Reports with failures exit 1, including expected
+failures; the login hook absorbs that status so the shell stays usable.
+
+The audit proof waits on new kernel records for up to 100 ms rather than
+sleeping and rereading the whole kernel log for a second. Missing audit
+evidence still fails, including when printk rate limiting suppresses it.
+This improves the usual playground scan; large filesystem trees, a
+metadata connection timeout or `sshd -T` can still take longer than 200 ms.
 
 `--line` prints one line, for a console or a log: the ids that failed,
 sorted, between commas (`fail=` and nothing when none did), the counts,
@@ -37,6 +83,43 @@ its excuse where the image expects it (the passes are only counted;
 ```
 posture: fail=programs-no-shell,programs-services-no-shell pass=37 skip=0 {"tool":"posture",…}
 ```
+
+Text uses two columns: a short description and the checked expectation.
+Failures use Go's test/error shape, `expression = value, want expectation`;
+passes omit the redundant `want`. Each item uses one row, or two when it
+wraps. Long values are shortened; the full evidence stays in `--json`.
+
+```text
+❌ Core dumps disabled     /proc/1/limits core.hard = unlimited, want 0
+❌ Kernel TLS unavailable  setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS
+✅ SYN flood protection    /proc/sys: net.ipv4.tcp_syncookies = 1
+```
+
+JSON records `source`, `expected`, `observed` and the compact `comparison`.
+Sources identify exact file fields or syscall arguments. For example,
+`core.hard` is the `Max core file size` row's `Hard Limit` column in
+`/proc/1/limits`; the vsyscall check records the complete `[vsyscall]`
+mapping row; syscall probes include return values and numeric errno.
+Composite checks retain individual values and fallback sources. Expected
+image exceptions retain the original evidence.
+
+`--verbose` prints progress and timings immediately to stderr, even while
+the final report is still being collected:
+
+```sh
+doas /tmp/posture --verbose
+doas /tmp/posture --verbose --summary
+doas /tmp/posture --verbose --json >posture.json 2>posture-timing.log
+```
+
+It announces each phase, reports every completed check with elapsed
+milliseconds, names potentially slow operations before they
+start (filesystem walks, SSH settings, metadata and audit probes), and
+prints phase and total scan times. Long walks report their entry count
+and current directory roughly once a second. Check timings cover work
+since the previous result within that phase; shared setup is attributed
+to the next result. Verbose output adds its own overhead, so use it to
+locate expensive work, then measure the ordinary command separately.
 
 `--extended` adds the checks werewolf fails by choice, because meeting
 them would slow what the machine runs, or is not yet shown to work with

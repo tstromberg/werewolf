@@ -32,6 +32,25 @@ pub fn main(init: std.process.Init) !void {
         );
         return;
     }
+    if (std.mem.eql(u8, args[1], "recover-pair") and args.len == 7) {
+        const initial = try tpm.bundle(key, try read(io, gpa, args[3], tpm.record_size + 512));
+        var credentials: [2][32]u8 = undefined;
+        defer std.crypto.secureZero(u8, std.mem.asBytes(&credentials));
+        for ([2][]const u8{ "owner.auth", "lockout.auth" }, &credentials) |name, *secret| {
+            const raw = try read(io, gpa, try gpa.print("{s}/{s}", .{ args[5], name }), 32);
+            defer std.crypto.secureZero(u8, raw);
+            if (raw.len != 32) return error.BadProvisioningCredential;
+            @memcpy(secret, raw);
+        }
+        var device = try connect(io, args[4]);
+        defer device.close();
+        try device.recover(key, initial, &credentials);
+        try std.Io.Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = args[6], .data = &try device.anchor(key) },
+        );
+        return;
+    }
     if (std.mem.eql(u8, args[1], "bootstrap-pair") and args.len == 6) {
         const raw = try read(io, gpa, args[3], tpm.record_size + 512);
         const initial = try tpm.bundle(key, raw);
@@ -87,17 +106,7 @@ pub fn main(init: std.process.Init) !void {
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[4], .data = data });
         return;
     }
-    const port = try std.fmt.parseUnsigned(
-        u16,
-        if (std.mem.eql(u8, args[1], "read-pair")) args[3] else args[4],
-        10,
-    );
-    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
-    const stream = try address.connect(io, .{ .mode = .stream });
-    var device: tpm.Device = .{
-        .io = io,
-        .file = .{ .handle = stream.socket.handle, .flags = .{ .nonblocking = false } },
-    };
+    var device = try connect(io, if (std.mem.eql(u8, args[1], "read-pair")) args[3] else args[4]);
     defer device.close();
     try device.disablePlatform();
     if (pair) {
@@ -142,7 +151,7 @@ fn connect(io: std.Io, endpoint: []const u8) !tpm.Device {
     };
 }
 
-fn read(io: std.Io, gpa: std.mem.Allocator, file: []const u8, limit: usize) ![]const u8 {
+fn read(io: std.Io, gpa: std.mem.Allocator, file: []const u8, limit: usize) ![]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(limit + 1));
 }
 

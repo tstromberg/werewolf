@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""CI key handling must authenticate its identity and clean up private material."""
+import importlib.machinery
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+loader = importlib.machinery.SourceFileLoader('release_signer', 'release/with-boot-key')
+spec = importlib.util.spec_from_loader(loader.name, loader)
+signer = importlib.util.module_from_spec(spec)
+loader.exec_module(signer)
+dist_loader = importlib.machinery.SourceFileLoader('released_boot', 'test/check-dist')
+dist_spec = importlib.util.spec_from_loader(dist_loader.name, dist_loader)
+released = importlib.util.module_from_spec(dist_spec)
+dist_loader.exec_module(released)
+
+
+class ReleaseSigning(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix='ww-release-key-test-')
+        cls.root = Path(cls.temporary.name)
+        for name in ['first', 'other']:
+            subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509',
+                            '-sha256', '-days', '2', '-subj', '/CN=werewolf-test',
+                            '-keyout', str(cls.root / (name + '.key')),
+                            '-out', str(cls.root / (name + '.crt'))],
+                           check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def environment(self, supplied):
+        return dict(os.environ, WEREWOLF_BOOT_KEY=supplied,
+                    WEREWOLF_BOOT_CRT=str(self.root / 'first.crt'))
+
+    def command(self, code):
+        return [sys.executable, '-c', code]
+
+    def test_pem_becomes_private_filename_and_is_removed_after_success(self):
+        marker = self.root / 'location'
+        raw = (self.root / 'first.key').read_text()
+        code = ('import os, pathlib, stat; p=pathlib.Path(os.environ["WEREWOLF_BOOT_KEY"]); '
+                'assert stat.S_IMODE(p.stat().st_mode)==0o600; '
+                'assert stat.S_IMODE(p.parent.stat().st_mode)==0o700; '
+                'assert p.read_text().startswith("-----BEGIN "); '
+                'pathlib.Path(' + repr(str(marker)) + ').write_text(str(p))')
+        self.assertEqual(signer.run(self.command(code), self.environment(raw)), 0)
+        self.assertFalse(Path(marker.read_text()).exists())
+
+    def test_file_input_is_copied_and_failure_cleans_up_without_rotating_source(self):
+        original = self.root / 'first.key'
+        before = original.read_bytes()
+        marker = self.root / 'failed-location'
+        code = ('import os, pathlib, sys; '
+                'pathlib.Path(' + repr(str(marker)) +
+                ').write_text(os.environ["WEREWOLF_BOOT_KEY"]); sys.exit(23)')
+        self.assertEqual(signer.run(self.command(code), self.environment(str(original))), 23)
+        self.assertFalse(Path(marker.read_text()).exists())
+        self.assertEqual(original.read_bytes(), before)
+
+    def test_wrong_key_and_missing_inputs_refuse_before_child(self):
+        marker = self.root / 'must-not-run'
+        command = self.command('from pathlib import Path; Path(' + repr(str(marker)) + ').touch()')
+        for supplied in ['', str(self.root / 'other.key'), '-----BEGIN INVALID PRIVATE KEY-----\nsecret']:
+            with self.subTest(supplied=bool(supplied)):
+                with self.assertRaises(ValueError):
+                    signer.run(command, self.environment(supplied))
+                self.assertFalse(marker.exists())
+
+    def test_cli_diagnostics_never_echo_malformed_secret(self):
+        secret = '-----BEGIN PRIVATE KEY-----\nPRIVATE_SENTINEL_DO_NOT_LOG\n-----END PRIVATE KEY-----'
+        result = subprocess.run([sys.executable, 'release/with-boot-key', *self.command('pass')],
+                                env=self.environment(secret), capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('PRIVATE_SENTINEL_DO_NOT_LOG', result.stdout + result.stderr)
+
+    def test_signed_release_replaces_generic_firmware_and_enforces_smm(self):
+        arguments = ['qemu-system-x86_64', '-M', 'q35', '-bios', 'generic.fd',
+                     '-drive', 'if=pflash,unit=1,file=old-vars',
+                     '-drive', 'file=config.tar,if=virtio', '-snapshot']
+        result = released.firmware_arguments(arguments, 'x86_64', Path('/owned'))
+        self.assertNotIn('-bios', result)
+        self.assertNotIn('if=pflash,unit=1,file=old-vars', result)
+        self.assertIn('file=config.tar,if=virtio', result)
+        self.assertEqual(result[result.index('-M') + 1], 'q35,smm=on')
+        self.assertIn('driver=cfi.pflash01,property=secure,value=on', result)
+        self.assertEqual(sum('if=pflash' in arg for arg in result), 2)
+        arm = released.firmware_arguments(['qemu-system-aarch64', '-M', 'virt', '-bios', 'old.fd'],
+                                          'aarch64', Path('/owned'))
+        self.assertIn('if=pflash,format=raw,unit=1,readonly=on,file=/owned/vars.fd', arm)
+
+    def test_release_proof_requires_all_signed_artifacts_and_exact_bytes(self):
+        import hashlib
+        records = {}
+        for name in ['disk.qcow2', 'uki', 'boot.crt']:
+            raw = name.encode()
+            (self.root / ('prod-aarch64-' + name)).write_bytes(raw)
+            records[name] = {'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()}
+        manifest = {'files': records}
+        released.authenticated_artifacts(manifest, self.root, 'prod-aarch64')
+        for name in list(records):
+            missing = {'files': {key: val for key, val in records.items() if key != name}}
+            with self.assertRaises(KeyError):
+                released.authenticated_artifacts(missing, self.root, 'prod-aarch64')
+        (self.root / 'prod-aarch64-uki').write_bytes(b'tampered')
+        with self.assertRaises(ValueError):
+            released.authenticated_artifacts(manifest, self.root, 'prod-aarch64')
+
+
+unittest.main()

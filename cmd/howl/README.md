@@ -15,8 +15,8 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's forms and programs in, not the published ones the machine updates |
 | `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
-| `run` | `create` of `werewolf-run`, replacing the last; default form playground, on every engine |
-| `ssh`, `console`, `stop`, `delete` | reach, read or remove a machine; with no NAME, run's |
+| `run` | secure `create` of `werewolf-run`, reusing an unchanged protected VM; default playground; currently requires `--build` |
+| `ssh`, `console`, `stop`, `delete` | reach or read a machine; stop keeps protected local state, delete removes it; without NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
 | `form [-f FILE] ... -o DIR` | writes a form from a manifest and the line, whose flags are form.yaml's keys ([docs/design/adhoc.md](../../docs/design/adhoc.md)); build, run, create and pack take the same |
@@ -46,13 +46,13 @@ The tar is ustar, sorted, root's, 0600, dated 1970. Names are at most 100 bytes
 of `[A-Za-z0-9._-/]`, files 1 MiB; clouds add cloud-metadata's limits (32 files
 of 32 KiB, 48 KiB in all) and AWS's and Azure's caps on user data.
 
-**Engines.** Without `--on`, create picks Lima (macOS), bhyve (FreeBSD x86_64),
-Firecracker (Linux, KVM, sudo without a password), else QEMU. Local machines run
-the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed), built as `build` does.
+**Engines.** Secure create defaults to Lima (macOS) and QEMU (Linux); missing prerequisites fail.
+Other providers currently require explicit `--insecure`; `--dev` also requires that opt-out.
+Published downloads remain gated ([design](../../docs/design/published-secure-boot.md)); local machines use the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
-| lima | vz VM booting its own UEFI disk from its slots, so it updates in place; Lima-managed, on Lima's network, if the form has sshd and bash, else on vzNAT and the DHCP lease | limactl |
+| lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--insecure` uses VZ | limactl, qemu, swtpm, firmware tools |
 | bhyve | under `howl _bhyve` via daemon(8); slirp, loopback forwards | doas/sudo, vmm, bhyve-firmware |
 | firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |
@@ -67,7 +67,7 @@ a build uploads once and delete keeps the image. A cloud machine lets nothing in
 `--allow-from me|CIDR` opens the form's TCP ports, or create prints the commands.
 
 **Second create.** The machine keeps its disk and takes the new config.
-`howl run` makes a new one. Another form, `--app`, or `--import` is refused.
+`howl run` reuses matching protected inputs and resumes stopped VMs without building; changed inputs replace it. `howl delete` requests a fresh one. Another form, `--app`, or `--import` is refused on a second create.
 `--import DIR` is a read-only disk the form reads once, while its data is
 first made ([data.md](../../docs/data.md)). A cloud cannot attach it.
 

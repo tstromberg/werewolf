@@ -45,13 +45,16 @@ version is 1980, older than any update's. `make disk` needs no Linux: it
 uses `boot/gpt.zig` (no `sfdisk`), mtools and `mke2fs -d`.
 
 The updater knows the disk by `werewolf.esp`. It builds the other slot as
-always, borrows the EFI partition from the mount broker, and:
+always, and asks the mount broker — which never lends the EFI partition
+as a mount — to install it:
 
-1. Removes the other slot's entries, writes its kernel and stage0 to the
-   EFI partition and `root.erofs` to ext4, each whole, and syncs.
-2. Writes `werewolf-<other>+1.conf`, with one try, dated now or a second
-   past the newest entry. Its options are this boot's, with `werewolf.slot`
-   and the new image's arguments swapped in.
+1. The broker removes the other slot's entries. The updater writes
+   `root.erofs` to ext4, and the broker writes the staged kernel, stage0
+   and optional UKI to the EFI partition, each whole, checking each
+   against the size and SHA-256 the updater named, and syncs.
+2. The broker writes `werewolf-<other>+1.conf`, with one try, dated now
+   or a second past the newest entry. Its options are this boot's, with
+   `werewolf.slot` and the new image's arguments swapped in.
 3. Reboots. systemd-boot renames the entry `+0-1` and boots it.
 
 | Then | Happens |
@@ -88,7 +91,7 @@ The old slot stays a good, older entry: the fallback, and the next target.
 | --- | --- |
 | A console user adds `init=/bin/sh` | `timeout 0` and `editor no`: no menu, no editor. |
 | A file on ext4 owned by the builder's uid, so by whoever has it on the machine (Lima makes the host user's), who could swap a slot | `debugfs` makes every file root's; `werewolf/` is 0700. |
-| The EFI partition | Mounted by the mount broker only to write a slot or commit, `nosuid,nodev,noexec,nosymfollow`. root can still rewrite it, as it can a bitten machine's GRUB, until Secure Boot. |
+| The EFI partition | Never lent as a mount. The broker works on it detached, only for the supervised slot-update and slot-keep services, writing only digest-checked slot files and entries it generates. root in a shell is refused; Secure Boot remains the firmware-side answer. |
 | Kernel arguments that start a new entry line | `disk.zig` takes only letters, digits and `_.,= -` from the image, and no control character from `DISK_ARGS`. |
 
 ## Reliability Considerations

@@ -33,11 +33,13 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     try Dir.cwd().createDirPath(b.io, out);
     const enrollment = try b.path("{s}/image-enrollment", .{out});
-    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\nnative {}\ntpm {s}\nca " ++
-        "{s}\nport {d}\n", .{
-        b.spec.ipe_updates orelse "",  b.spec.image_serial orelse "", b.spec.boot_key != null,
-        b.spec.boot_native,            b.spec.tpm_pub orelse "",      b.spec.update_ca orelse "",
-        b.spec.update_port orelse 443,
+    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\nnative {}\ntpm {s}\n" ++
+        "firmware {}\nca " ++
+        "{s}\nport {d}\npermit-host {s}\npermit-port {d}\n", .{
+        b.spec.ipe_updates orelse "", b.spec.image_serial orelse "", b.spec.boot_key != null,
+        b.spec.boot_native,           b.spec.tpm_pub orelse "",      b.spec.tpm_firmware,
+        b.spec.update_ca orelse "",   b.spec.update_port orelse 443, b.spec.permit_host orelse "",
+        b.spec.permit_port orelse 0,
     }));
     // howl itself holds the release keys, advisories and known posture
     // failures (files.zig), so b.self covers them.
@@ -109,7 +111,22 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const d = try b.path("{s}/usr/share/werewolf", .{meta_dir});
     if (b.spec.ipe_kernel != null) try b.put(d, "ipe", "required\n");
     if (b.spec.boot_key != null) try b.put(d, "secure-boot", "required\n");
-    if (b.spec.tpm_pub) |pubkey| {
+    if (b.spec.tpm_firmware) {
+        const der = try b.capture(stamp, &.{
+            "openssl", "x509", "-in", b.spec.boot_cert.?, "-outform", "DER",
+        });
+        _ = try @import("tpm").firmware.certificateKey(der);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(der, &digest, .{});
+        const target = try b.path("{s}/tpm", .{d});
+        try Dir.cwd().createDirPath(b.io, target);
+        try b.put(target, "protocol", "2-firmware\n");
+        try b.put(target, "vendor.sha256", &digest);
+        if (b.spec.permit_host) |host| {
+            try b.put(target, "permit-host", host);
+            try b.put(target, "permit-port", try b.path("{d}\n", .{b.spec.permit_port.?}));
+        }
+    } else if (b.spec.tpm_pub) |pubkey| {
         const data = try b.read(pubkey, 8192);
         _ = try @import("apk").parseKey(b.gpa, data);
         const target = try b.path("{s}/tpm", .{d});
@@ -136,11 +153,17 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
             const net = try b.read(net_path, 64 << 10);
             try b.write(net_path, try b.path("{s}connect 69 tcp {d}\n", .{ net, port }));
         }
-        if (b.spec.update_ca) |ca| {
+        if (b.spec.permit_port) |port| if (port != (b.spec.update_port orelse 443)) {
+            const net_path = try b.path("{s}/net", .{d});
+            const net = try b.read(net_path, 64 << 10);
+            try b.write(net_path, try b.path("{s}connect 69 tcp {d}\n", .{ net, port }));
+        };
+        if (b.spec.update_ca != null and b.spec.permit_host == null) {
+            // Legacy roots bake their CA; firmware transport roots receive signed public CA bytes.
             const existing = try b.capture(stamp, &.{
                 "bsdtar", "-xOf", rootfs, "etc/ssl/certs/ca-certificates.crt",
             });
-            const pem = try b.read(ca, 32 << 10);
+            const pem = try b.read(b.spec.update_ca.?, 32 << 10);
             try Dir.cwd().createDirPath(b.io, try b.path("{s}/etc/ssl/certs", .{ro_dir}));
             try b.put(ro_dir, "etc/ssl/certs/ca-certificates.crt", try b.path("{s}\n{s}\n", .{
                 existing, pem,

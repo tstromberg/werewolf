@@ -25,6 +25,7 @@ const kernelVersion = @import("cve").kernelVersion;
 pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
+const control = @import("control.zig");
 const Pending = stage.Pending;
 
 pub const meta_dir = "/usr/share/werewolf";
@@ -113,29 +114,40 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(2);
     }
 
-    var u: Update = .{ .io = init.io, .gpa = gpa };
-    u.setup() catch |err| {
-        if (err == error.NotBootedFromASlot) std.debug.print(
-            "slot-update: this machine booted its image directly, not from a slot, " ++
-                "so nothing updates it in place; make it again (howl run) for the newest\n",
-            .{},
-        );
-        fatal(&u, err);
-    };
-    if (std.mem.eql(u8, mode, "try")) {
-        slot.tryOther(&u, if (args.len == 3) args[2] else null) catch |err| fatal(&u, err);
-    } else if (std.mem.eql(u8, mode, "check")) {
-        var settings: policy.Settings = .{};
-        u.loadPolicy(&settings) catch |err| fatal(&u, err);
-        u.check(&settings, false) catch |err| fatal(&u, err);
-    } else {
-        u.outcome() catch |err| fatal(&u, err);
-    }
+    try control.submit(init.io, gpa, mode, if (args.len == 3) args[2] else null);
 }
 
-fn fatal(u: *Update, err: anyerror) noreturn {
-    failed(u, err);
-    std.process.exit(1);
+fn operator(io: Io, request: control.Request) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer arena.deinit();
+    var u: Update = .{ .io = io, .gpa = arena.allocator() };
+    u.setup() catch |err| {
+        failed(&u, err);
+        return err;
+    };
+    (switch (request.command) {
+        .@"try" => slot.tryOther(&u, request.declaration),
+        .check => blk: {
+            var settings: policy.Settings = .{};
+            try u.loadPolicy(&settings);
+            break :blk u.check(&settings, false);
+        },
+        .outcome => u.outcome(),
+    }) catch |err| {
+        failed(&u, err);
+        return err;
+    };
+}
+
+fn requested(io: Io, listener: i32) bool {
+    var buf: [control.limit + 1]u8 = undefined;
+    const next = control.accept(listener, &buf) orelse return false;
+    operator(io, next.request) catch |err| {
+        control.reply(next.fd, err);
+        return true;
+    };
+    control.reply(next.fd, null);
+    return true;
 }
 
 /// failed logs err. It leaves the work directory alone: a pass that failed
@@ -177,6 +189,7 @@ fn daemon(io: Io) noreturn {
     // once. Test "never finished", not "never logged": a first check that
     // failed before the network was up still logs.
     var ctx: Ctx = .{ .first_boot = neverChecked(io) };
+    const listener = control.listen() catch park(io, "cannot start operator request listener");
     switch (pass(io, .setup, &ctx)) {
         .ok => Dir.cwd().writeFile(io, .{ .sub_path = ready_path, .data = "" }) catch |err| {
             std.debug.print(
@@ -189,7 +202,8 @@ fn daemon(io: Io) noreturn {
     }
     while (true) {
         Dir.cwd().access(io, "/run/werewolf/committed", .{}) catch {
-            io.sleep(.fromSeconds(10), .awake) catch {};
+            _ = requested(io, listener);
+            io.sleep(.fromSeconds(1), .awake) catch {};
             continue;
         };
         break;
@@ -197,9 +211,12 @@ fn daemon(io: Io) noreturn {
     const every = updateEvery(io);
     _ = pass(io, .policy, &ctx);
     _ = pass(io, .outcome, &ctx);
-    var next_check = nowSecs(io);
+    // Allow the fresh boot to finish becoming reachable before autonomous replacement.
+    // Operator requests remain immediate and are processed before a scheduled pass.
+    var next_check = nowSecs(io) + 10;
     var boot_checked = false;
     while (true) {
+        if (requested(io, listener)) continue;
         if (nowSecs(io) >= next_check) {
             if (pass(io, .check, &ctx) == .ok) {
                 boot_checked = true;
@@ -217,8 +234,8 @@ fn daemon(io: Io) noreturn {
             } else next_check = nowSecs(io) + every;
         }
         if (!ctx.rebooting) _ = pass(io, .boot, &ctx);
-        const wait = @min(next_check - nowSecs(io), ctx.due_in orelse every);
-        io.sleep(.fromSeconds(@max(wait, 1)), .awake) catch {};
+        // Poll operator requests without changing the scheduled check or reboot deadline.
+        io.sleep(.fromSeconds(1), .awake) catch {};
     }
 }
 
@@ -783,9 +800,10 @@ pub const Update = struct {
             "open a download",
         ));
         errdefer _ = linux.close(fd);
+        const ca = try @import("retire.zig").fetchAuthority(u, url);
         const said = u.ask(
-            cve.fetcherBounded,
-            .{ update_id, net_root, url, fd, maximum },
+            cve.fetcherPinned,
+            .{ update_id, net_root, url, fd, maximum, ca },
             256,
             fetch_seconds,
         ) catch |err| {

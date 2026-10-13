@@ -49,6 +49,17 @@ test "Secure Boot posture requires enforcement outside setup mode" {
     try t.expect(secureBoot(null, false) == null);
 }
 
+test "generic Linux boot checks omit image policy and TPM release authorization" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var p: Posture = .{ .io = testing.io, .gpa = arena.allocator(), .root = false };
+    try check(&p);
+    try testing.expectEqual(@as(usize, 2), p.checks.items.len);
+    try testing.expectEqualStrings("boot-secure-boot", p.checks.items[0].id);
+    try testing.expectEqualStrings("boot-sig-enforced", p.checks.items[1].id);
+}
+
 /// parseSwitch reads a kernel module parameter that holds Y or N.
 fn parseSwitch(text: []const u8) ?bool {
     const t = trim(text);
@@ -84,6 +95,45 @@ fn readBytes(path: []const u8, buf: []u8) ?[]const u8 {
 }
 
 pub fn check(p: *Posture) !void {
+    if (p.werewolf) try imagePolicy(p);
+    var buf: [64]u8 = undefined;
+    const sb_value = parseSecureBoot(readBytes(secure_boot_var, &buf) orelse "");
+    const setup_value = parseSecureBoot(readBytes(setup_mode_var, &buf) orelse "");
+    const sb = secureBoot(sb_value, setup_value);
+    try p.add(.{
+        .id = "boot-secure-boot",
+        .area = "boot",
+        .name = "Secure Boot on",
+        .why = "Whoever reaches the console or the disk can boot another kernel, or another " ++
+            "stage0 with its own root hash. Firmware that verifies signatures boots only what " ++
+            "was signed.",
+        .how = "SecureBoot is on and SetupMode is off",
+        .expected = "SecureBoot byte 4 = 1; SetupMode byte 4 = 0",
+        .observed = try p.gpa.print("SecureBoot={s}; SetupMode={s}", .{ if (sb_value) |on| if (on) "1" else "0" else "unavailable/invalid", if (setup_value) |on| if (on) "1" else "0" else "unavailable/invalid" }),
+        .result = if (sb) |on| (if (on) .pass else .fail) else .skip,
+        .detail = if (sb == null)
+            "no EFI variables to read: no EFI firmware, or a kernel without them"
+        else
+            "",
+    });
+    const sig_value = trim(p.read("/sys/module/module/parameters/sig_enforce"));
+    const sig = parseSwitch(sig_value);
+    try p.add(.{
+        .id = "boot-sig-enforced",
+        .area = "boot",
+        .name = "Module signatures enforced",
+        .why = "Until init closes the module loader, the kernel's own build is all that decides " ++
+            "what it runs: one built to refuse unsigned modules cannot be told to take them.",
+        .how = "/sys/module/module/parameters/sig_enforce is Y",
+        .expected = "Y",
+        .observed = if (sig_value.len > 0) sig_value else "unavailable (missing, unreadable or empty)",
+        .result = if (sig) |on| (if (on) .pass else .fail) else .skip,
+        .detail = if (sig == null) "this kernel has no module signature switch" else "",
+    });
+    if (p.werewolf) try rollback(p);
+}
+
+fn imagePolicy(p: *Posture) !void {
     const ipe_on = ipe.enforced(
         p.read(ipe.policy_path),
         p.read(ipe.active),
@@ -101,38 +151,11 @@ pub fn check(p: *Posture) !void {
         .result = if (ipe_on and bounded != null and !bounded.?) .pass else .fail,
         .detail = if (!ipe_on) "no enforcing release IPE policy" else "",
     });
-    var buf: [64]u8 = undefined;
-    const sb = secureBoot(
-        parseSecureBoot(readBytes(secure_boot_var, &buf) orelse ""),
-        parseSecureBoot(readBytes(setup_mode_var, &buf) orelse ""),
-    );
+}
+
+fn rollback(p: *Posture) !void {
     const has_tpm = exists(p.io, "/dev/tpmrm0");
     const checked_rollback = exists(p.io, rollback_marker);
-    try p.add(.{
-        .id = "boot-secure-boot",
-        .area = "boot",
-        .name = "Secure Boot on",
-        .why = "Whoever reaches the console or the disk can boot another kernel, or another " ++
-            "stage0 with its own root hash. Firmware that verifies signatures boots only what " ++
-            "was signed.",
-        .how = "SecureBoot is on and SetupMode is off",
-        .result = if (sb) |on| (if (on) .pass else .fail) else .skip,
-        .detail = if (sb == null)
-            "no EFI variables to read: no EFI firmware, or a kernel without them"
-        else
-            "",
-    });
-    const sig = parseSwitch(p.read("/sys/module/module/parameters/sig_enforce"));
-    try p.add(.{
-        .id = "boot-sig-enforced",
-        .area = "boot",
-        .name = "Module signatures enforced",
-        .why = "Until init closes the module loader, the kernel's own build is all that decides " ++
-            "what it runs: one built to refuse unsigned modules cannot be told to take them.",
-        .how = "/sys/module/module/parameters/sig_enforce is Y",
-        .result = if (sig) |on| (if (on) .pass else .fail) else .skip,
-        .detail = if (sig == null) "this kernel has no module signature switch" else "",
-    });
     try p.add(.{
         .id = "boot-rollback-protected",
         .area = "boot",

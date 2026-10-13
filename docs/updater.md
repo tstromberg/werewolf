@@ -24,9 +24,13 @@ update check      build and stage the other slot if anything is newer
 update outcome    after a reboot, log whether the last update held
 ```
 
+Manual commands delegate bounded requests to the supervised `autoupdate` service through a
+root-only Unix socket, starting that existing service if stopped. `try [HASH]` requests rollback
+through the same authenticated service. Direct invocations cannot bypass broker identity checks.
+
 The `autoupdate` service waits for the running slot to commit, reads its
 settings and logs them (`policy`), runs `outcome` once, then `check` at
-once and every hour (a form's `updates:` names another interval with
+after a 10-second startup grace and every hour (a form's `updates:` names another interval with
 `every: 30m`, 5m to 7d; `updates: off` leaves the service out of the
 image). A check stages what it finds; the service boots a staged slot
 when it is due, by how urgent its fixes are, and in between sleeps until

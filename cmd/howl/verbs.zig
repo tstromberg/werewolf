@@ -149,8 +149,7 @@ fn rootKeyed(io: Io, gpa: Allocator, dir: []const u8) !bool {
     return false;
 }
 
-/// stopHere is howl stop. It removes the machine howl run keeps, wherever
-/// it runs.
+/// Stop keeps protected local disks and authority; legacy machines are removed.
 pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
     if (args.len > 0) return why.refuse(
         "stop takes nothing: it ends howl run's machine; delete NAME ends another",
@@ -161,7 +160,8 @@ pub fn stopHere(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !vo
         gpa,
         run_name,
     ) orelse return why.refuse("no machine from howl run", .{});
-    try remove(io, gpa, run_name, on, why);
+    if (!try @import("local-secure.zig").stop(io, gpa, run_name, on, why))
+        try remove(io, gpa, run_name, on, why);
     const look: progress.Look = .of(io, Io.File.stderr());
     try Io.File.stderr().writeStreamingAll(
         io,

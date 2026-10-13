@@ -4,11 +4,11 @@
 
 Deploy Lima and Linux QEMU guests with enrolled Secure Boot, IPE and exact-pair TPM retirement.
 The local host and its stored TPM state are trusted; guest root and guest disks are not.
-Status: arm64 Lima and x86_64 Linux QEMU verified, including managed security inputs.
+Status: Lima lifecycle passed with Melange-built inputs and native Mac firmware enrollment.
 
 ## Background
 
-The guest protocol and QEMU x86_64 lifecycle pass; normal Lima uses VZ.
+The guest protocol and QEMU x86_64 lifecycle pass; protected Lima uses QEMU by default.
 The secured profile combines host enrollment, signing and permit issuance.
 
 ## Goals
@@ -41,16 +41,19 @@ Build the measured stub from `boot/stub-source` with `tools/build-tpm-stub` on L
 
 ### Invocation and prerequisites
 
-`howl run --on lima --secure` selects this profile on an arm64 Mac.
-`howl run --on qemu --secure` selects it on native Linux.
+`howl run --build` selects this profile on an arm64 Mac or native Linux.
+Published downloads remain gated in [the publication design](published-secure-boot.md).
 Without overrides, howl creates a private host IPE identity and caches matching builds.
 Cache identities bind architecture, Alpine base, public signer, sources and builder bytes.
 Checksummed completion records reject altered or incomplete cached artifacts.
 All three IPE overrides must be supplied together; `UKI_STUB` can override the measured stub.
-The Mac uses a trusted Linux build helper and sends only its public IPE certificate.
+Mac builds use the existing Melange QEMU runner with a stock Alpine kernel and matching modules.
+An isolated Linux guest supplies native Kbuild and EFI/TPM tools; private keys stay on the Mac.
+Public firmware and native enrollment dependencies are hash-pinned; no Ubuntu VM is required.
 A separate temporary module signer stays in the builder and is deleted after compilation.
 Host authorities and public release objects persist beneath the machine directory.
-`--dev` is refused; ordinary Lima remains available without this opt-in profile.
+`--build` honors caller boot credentials; absent credentials are managed locally.
+`--dev` requires explicit `--insecure`, which selects the legacy deployment path.
 
 ### Enrollment
 
@@ -65,10 +68,10 @@ retain recovery credentials and report the partial state rather than reset silen
 ### Images and permits
 
 Use a consistent host-held signer across a machine's authorized release images.
-All update roots must contain the same TPM verification key as their predecessor.
+New roots select the enrolled firmware PK; legacy roots retain their embedded TPM verification key.
 The image manifest, embedded UKI identity and host PCR mapping must agree.
 Boot, IPE and update signing identities must match their enrolled authorities.
-Generate a unique boot signer; ignore shared legacy boot-signing environment overrides.
+Source builds enroll caller boot credentials, or create a unique managed signer when absent.
 The host signs a transition only after authenticating the old record and candidate,
 checking retained membership, validating release/PCR mappings and serializing issuance.
 Deliver only public signed permits; guest code authenticates them against the TPM.
@@ -77,14 +80,14 @@ Guest root can request updates or cause denial of service; it cannot grant autho
 Only the current published candidate can receive a new transition signature.
 Historical registrations cannot reauthorize retired roots; completed transitions may resume.
 Publication refuses older heads. Signature checks and a lock serialize bounded issuance.
-The local TLS certificate and update port are declared in the verified root.
+The root declares the permit host/port; [signed config](machine-transport.md) supplies its public TLS CA.
 Hourly host refreshes rebuild only when pinned inputs or the builder change.
 
 ### Startup and existing machines
 
 Create the Lima instance, provision its own simulator state, then start the guest.
 Report readiness only after the required guest checks succeed.
-Restart preserves disk, firmware variables, hierarchy credentials and TPM state.
+Restart preserves disk, firmware variables, hierarchy credentials and TPM state; unchanged runs reuse live guests.
 An existing machine without this profile requires explicit recreation or migration;
 configuration changes cannot turn an older non-enforcing image into an enforcing one.
 
@@ -103,10 +106,10 @@ configuration changes cannot turn an older non-enforcing image into an enforcing
 
 ## Security Considerations
 
-Firmware must trust only UKIs that require mandatory TPM checks.
+New profiles use PK for TPM authority, matching KEK and pinned db; old roots keep embedded keys.
 Host keys and private state must never appear in roots, config disks or guest mounts.
 Reject unknown anchors, missing TPMs, wrong keys and unsigned or retired images.
-Avoid advertising full protection when only a subset of the profile is enabled.
+Firmware must trust only UKIs that require mandatory TPM checks.
 
 ## Reliability Considerations
 

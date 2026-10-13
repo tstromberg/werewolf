@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Ensure an isolated native Linux helper exists and is running before any use."""
+import json
+import fcntl
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+def run(arguments, **kwargs):
+    return subprocess.run([str(arg) for arg in arguments], check=True, **kwargs)
+
+
+def instance(name):
+    result = run(['limactl', 'list', '--json'], capture_output=True, text=True)
+    matches = [record for line in result.stdout.splitlines()
+               for record in [json.loads(line)] if record.get('name') == name]
+    if len(matches) > 1:
+        raise ValueError('ambiguous build helper')
+    return matches[0] if matches else None
+
+
+def validate(record):
+    if record.get('arch') != 'aarch64':
+        raise ValueError('build helper must use native arm64 Linux')
+    # Inspect the effective configuration, not just the requested template.
+    config = record['config']
+    if config.get('os') != 'Linux':
+        raise ValueError('build helper must run Linux')
+    if config.get('mounts') or config.get('ssh', {}).get('forwardAgent'):
+        raise ValueError('build helper must have no host mounts or forwarded SSH agent')
+
+
+DEPENDENCIES = r'''set -eu
+test "$(uname -m)" = aarch64
+missing=0
+for package in build-essential flex bison libssl-dev libelf-dev bc kmod curl xz-utils bsdextrautils \
+    meson ninja-build gperf libcap-dev libmount-dev python3-jinja2 python3-pyelftools python3-venv \
+    qemu-efi-aarch64 python3-virt-firmware systemd-boot-efi; do
+    if [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]; then
+        missing=1
+    fi
+done
+if [ "$missing" = 1 ]; then
+    sudo -n apt-get update -qq
+    sudo -n apt-get install -y -qq build-essential flex bison libssl-dev libelf-dev bc kmod bsdextrautils \
+        curl xz-utils meson ninja-build gperf libcap-dev libmount-dev python3-jinja2 \
+        python3-pyelftools python3-venv qemu-efi-aarch64 python3-virt-firmware systemd-boot-efi
+fi
+command -v virt-fw-vars >/dev/null
+test -f /usr/share/AAVMF/AAVMF_CODE.secboot.fd
+test -f /usr/share/AAVMF/AAVMF_VARS.fd
+'''
+
+
+def ensure(name, template):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name):
+        raise ValueError('invalid build helper name')
+    record = instance(name)
+    if record is None:
+        print('howl: creating isolated Linux build helper ' + name, file=sys.stderr)
+        run(['limactl', 'create', '--tty=false', '--name', name, template])
+        record = instance(name)
+        if record is None:
+            raise ValueError('build helper creation did not produce an instance')
+    validate(record)
+    if record.get('status') != 'Running':
+        print('howl: starting Linux build helper ' + name, file=sys.stderr)
+        run(['limactl', 'start', '--tty=false', name])
+        record = instance(name)
+        if record is None or record.get('status') != 'Running':
+            raise ValueError('build helper did not start')
+        validate(record)
+    run(['limactl', 'shell', name, '--', 'sh', '-s'], input=DEPENDENCIES, text=True)
+
+
+def prepare(name, template):
+    if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}', name):
+        raise ValueError('invalid build helper name')
+    root = Path(os.environ.get('LIMA_HOME', str(Path.home() / '.lima'))).expanduser()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    previous = os.umask(0o077)
+    try:
+        with (root / ('.werewolf-build-' + name + '.lock')).open('a+b') as guard:
+            # Serialize both first-use creation and apt convergence across machine builds.
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            ensure(name, template)
+    finally:
+        os.umask(previous)
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) != 3 or not Path(sys.argv[2]).is_file():
+            raise ValueError('usage: build-helper NAME TEMPLATE.yaml')
+        prepare(sys.argv[1], sys.argv[2])
+    except (OSError, ValueError, subprocess.SubprocessError):
+        print('howl: Linux build helper preparation failed; no unprotected fallback', file=sys.stderr)
+        sys.exit(1)

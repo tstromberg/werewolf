@@ -15,7 +15,15 @@ const Dir = m.Dir;
 const Allocator = m.Allocator;
 const linux = m.linux;
 const sandbox = m.sandbox;
+const broker = @import("broker");
+const signed = @import("prebuilt");
 const policy = m.policy;
+
+const loaderEntry = signed.loaderEntry;
+const isEntryOf = signed.isEntryOf;
+const entrySecs = signed.entrySecs;
+const withSlot = signed.withSlot;
+const rollbackOptions = signed.rollbackOptions;
 const verity = m.verity;
 
 const apk_seconds = m.apk_seconds;
@@ -337,9 +345,9 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
             !std.mem.eql(u8, hash, image.declaration.?))
             return error.DeclarationNotInOtherSlot;
     }
-    const victim = try u.held(.victim);
-    defer victim.release();
-    const root = try u.gpa.print("{s}{s}/{s}", .{ victim.path(), u.cmd.victim.?.path, u.other });
+    // The other slot is read through stage0's read-only /victim mount;
+    // nothing here needs the victim writable.
+    const root = try u.gpa.print("/victim{s}/{s}", .{ u.cmd.victim.?.path, u.other });
     try Dir.cwd().access(u.io, try u.gpa.print("{s}/root.erofs", .{root}), .{});
     if (expected) |hash| {
         if (hash.len != 64) return error.BadDeclarationHash;
@@ -357,38 +365,10 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
             try u.gpa.print("werewolf-{s}", .{u.other}),
         });
     } else {
-        const esp = try u.held(.esp);
-        defer esp.release();
-        const entries = try u.gpa.print("{s}/loader/entries", .{esp.path()});
-        const uki: bool = blk: {
-            Dir.cwd().access(
-                u.io,
-                try u.gpa.print("{s}/werewolf/{s}/uki.efi", .{ esp.path(), u.other }),
-                .{},
-            ) catch break :blk false;
-            break :blk true;
+        broker.espArm() catch |err| {
+            u.detail = broker.refusal;
+            return err;
         };
-        var options: ?[]const u8 = null;
-        var newest: i64 = 0;
-        const names = try u.listDir(entries);
-        for (names) |name| {
-            const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
-            newest = @max(newest, entrySecs(text) orelse 0);
-            if (!isEntryOf(name, u.other)) continue;
-            options = try rollbackOptions(u.gpa, text, u.other, uki);
-        }
-        const opts = options orelse return error.NoOtherSlotEntry;
-        const serial = try u.gpa.print(
-            "{f}",
-            .{policy.Serial{ .secs = @max(nowSecs(u.io), newest + 1) }},
-        );
-        const entry = try loaderEntry(u.gpa, u.other, serial, opts, uki);
-        for (names) |name| if (isEntryOf(name, u.other))
-            try Dir.cwd().deleteFile(u.io, try u.gpa.print("{s}/{s}", .{ entries, name }));
-        try u.writeReplacing(
-            try u.gpa.print("{s}/werewolf-{s}+1.conf", .{ entries, u.other }),
-            entry,
-        );
     }
     Dir.cwd().deleteFile(u.io, m.pending_path) catch {};
     try writeAttempt(u, expected orelse "operator-try");
@@ -406,22 +386,20 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
 fn installEsp(u: *Update, build: []const u8) !void {
     const io = u.io;
     u.step = "install";
-    const victim = try u.held(.victim);
-    defer victim.release();
-    const esp = try u.held(.esp);
-    defer esp.release();
-    const v = victim.path();
-    const e = esp.path();
+    // The victim is lent only for a TPM retirement, whose boot state the
+    // updater still writes there; verified boot bounds that route. Every
+    // other install moves its slot files through the broker and reads
+    // through stage0's read-only /victim mount.
+    const retire_mode = u.cmd.release != null;
+    var hold: ?broker.Held = if (retire_mode) try u.held(.victim) else null;
+    defer if (hold) |*h| h.release();
+    const v = if (hold) |h| h.path() else "/victim";
 
     const rdir = try u.gpa.print(
         "{s}{s}/{s}",
         .{ v, u.cmd.victim.?.path, u.other },
     );
-    const kdir = try u.gpa.print("{s}/werewolf/{s}", .{ e, u.other });
-    const entries = try u.gpa.print("{s}/loader/entries", .{e});
-    try Dir.cwd().createDirPath(io, rdir);
-    try Dir.cwd().createDirPath(io, kdir);
-    try Dir.cwd().createDirPath(io, entries);
+    if (retire_mode) try Dir.cwd().createDirPath(io, rdir);
 
     var retirement = try @import("retire.zig").prepare(u, v);
     defer if (retirement) |*prepared| prepared.close();
@@ -433,86 +411,90 @@ fn installEsp(u: *Update, build: []const u8) !void {
         error.FileNotFound => {},
         else => return err,
     };
-    for (try u.listDir(entries)) |name| {
-        if (!isEntryOf(name, u.other)) continue;
-        try Dir.cwd().deleteFile(io, try u.gpa.print("{s}/{s}", .{ entries, name }));
-    }
+    // The broker removes the other slot's entries, so nothing boots it
+    // while its files change.
+    broker.espDisarm() catch |err| {
+        u.detail = broker.refusal;
+        return err;
+    };
     linux.sync();
     // copyFile goes through a temporary name, so each file is whole or absent.
     if (retirement) |*prepared| try prepared.apply();
-    try Dir.cwd().copyFile(
-        work_dir ++ "/slot/root.erofs",
-        Dir.cwd(),
-        try u.gpa.print("{s}/root.erofs", .{rdir}),
-        io,
-        .{},
-    );
-    for (&[_][]const u8{ "vmlinuz", "stage0.zst" }) |f| {
+    if (retire_mode) {
         try Dir.cwd().copyFile(
-            try u.gpa.print("{s}/slot/{s}", .{ work_dir, f }),
+            work_dir ++ "/slot/root.erofs",
             Dir.cwd(),
-            try u.gpa.print("{s}/{s}", .{ kdir, f }),
+            try u.gpa.print("{s}/root.erofs", .{rdir}),
             io,
             .{},
         );
-    }
-    // The slot's signed UKI, when its packages carried one: laid beside the
-    // kernel, and the entry below names it, so firmware with the boot key
-    // verifies the whole boot and firmware without it boots it as plainly.
-    const uki: bool = blk: {
-        Dir.cwd().access(io, work_dir ++ "/slot/uki.efi", .{}) catch break :blk false;
-        break :blk true;
-    };
-    if (uki) {
-        try Dir.cwd().copyFile(
-            work_dir ++ "/slot/uki.efi",
-            Dir.cwd(),
-            try u.gpa.print("{s}/uki.efi", .{kdir}),
-            io,
-            .{},
-        );
-    } else if (u.image != null) {
-        Dir.cwd().deleteFile(io, try u.gpa.print("{s}/uki.efi", .{kdir})) catch |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
+        try rememberDeclaration(u, v, rdir);
+        try images.remember(u, rdir);
+    } else if (u.image == null) {
+        const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
+        broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
+            u.detail = broker.refusal;
+            return err;
         };
+        const current = u.read(meta_dir ++ "/local/inputs") catch "";
+        const next = readIn(u, work_dir ++ "/root", "usr/share/werewolf/local/inputs") catch "";
+        if (current.len == 64 or next.len == 64) {
+            broker.slotDecl(
+                if (current.len == 64) current else null,
+                if (next.len == 64) next else null,
+            ) catch |err| {
+                u.detail = broker.refusal;
+                return err;
+            };
+        }
+    } else {
+        const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
+        broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
+            u.detail = broker.refusal;
+            return err;
+        };
+        const meta_a = try signed.hashFile(io, u.gpa, work_dir ++ "/image.json");
+        const meta_b = try signed.hashFile(io, u.gpa, work_dir ++ "/image.json.sig");
+        const meta_c = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
+        broker.slotMeta(
+            .{ .size = meta_a.size, .sha256 = meta_a.sha256 },
+            .{ .size = meta_b.size, .sha256 = meta_b.sha256 },
+            .{ .size = meta_c.size, .sha256 = meta_c.sha256 },
+        ) catch |err| {
+            u.detail = broker.refusal;
+            return err;
+        };
+        if (u.image.?.manifest.declaration) |d| {
+            broker.slotDecl(null, d) catch |err| {
+                u.detail = broker.refusal;
+                return err;
+            };
+        }
     }
-    try rememberDeclaration(u, v, rdir);
-    try images.remember(u, rdir);
     linux.sync();
-    if (u.image != null) _ = try images.verifyOther(u, build, true, false, true);
 
-    // systemd-boot boots the newest version, so the new entry must be newer
-    // than the running slot's even if the clock is behind.
-    var newest: i64 = 0;
-    for (try u.listDir(entries)) |name| {
-        if (!std.mem.startsWith(u8, name, "werewolf-") or
-            !std.mem.endsWith(u8, name, ".conf")) continue;
-        const text = try u.read(try u.gpa.print("{s}/{s}", .{ entries, name }));
-        newest = @max(newest, entrySecs(text) orelse continue);
-    }
-    // A serial sorts by time in systemd-boot's version order.
-    const version = try u.gpa.print(
-        "{f}",
-        .{policy.Serial{ .secs = @max(nowSecs(io), newest + 1) }},
-    );
-    const options = try withSlot(
-        u.gpa,
-        try u.read("/proc/cmdline"),
-        try u.slotCmdline(),
-        u.other,
-    );
-    const entry = try loaderEntry(u.gpa, u.other, version, options, uki);
-    const tmp = try u.gpa.print("{s}/werewolf-{s}.tmp", .{ entries, u.other });
-    try u.write(tmp, entry);
+    // The broker copies the boot files from these fixed staged names and
+    // arms the slot. Stage the command line it should seal into the entry,
+    // and name every artifact by the digest the broker must find.
+    try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
+    const kernel = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/vmlinuz");
+    const stage0 = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/stage0.zst");
+    const cmdline = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
+    const uki: ?signed.Artifact = blk: {
+        Dir.cwd().access(io, work_dir ++ "/slot/uki.efi", .{}) catch break :blk null;
+        break :blk try signed.hashFile(io, u.gpa, work_dir ++ "/slot/uki.efi");
+    };
+    broker.espInstall(
+        .{ .size = kernel.size, .sha256 = kernel.sha256 },
+        .{ .size = stage0.size, .sha256 = stage0.sha256 },
+        if (uki) |a| .{ .size = a.size, .sha256 = a.sha256 } else null,
+        .{ .size = cmdline.size, .sha256 = cmdline.sha256 },
+    ) catch |err| {
+        u.detail = broker.refusal;
+        return err;
+    };
+    if (u.image != null) _ = try images.verifyOther(u, build, true, false, retire_mode);
     // Arm, then write attempt, as install does and for the same reason.
-    try Dir.cwd().rename(
-        tmp,
-        Dir.cwd(),
-        try u.gpa.print("{s}/werewolf-{s}+1.conf", .{ entries, u.other }),
-        io,
-    );
-    linux.sync();
     try writeAttempt(u, build);
 }
 
@@ -1377,59 +1359,6 @@ fn cacheName(name: []const u8) bool {
 
 // --- pure functions, tested below -------------------------------------------
 
-/// withSlot returns the other slot's command line. Machine arguments from
-/// this boot (console, werewolf.mac) carry over, but the image's arguments
-/// replace any of the same name, so a loosened entry does not outlive an
-/// update and new arguments reach older machines. werewolf.slot is set to
-/// slot; the loader's initrd= and BOOT_IMAGE= are dropped.
-fn withSlot(
-    gpa: Allocator,
-    cmdline: []const u8,
-    image: []const u8,
-    slot: []const u8,
-) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, cmdline, " \n");
-    next: while (it.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "werewolf.slot=") or
-            std.mem.startsWith(u8, arg, "initrd=") or
-            std.mem.startsWith(u8, arg, "BOOT_IMAGE=")) continue;
-        var own = std.mem.tokenizeAny(u8, image, " \n");
-        while (own.next()) |o| if (std.mem.eql(u8, argName(arg), argName(o))) continue :next;
-        try out.print(gpa, "{s} ", .{arg});
-    }
-    var own = std.mem.tokenizeAny(u8, image, " \n");
-    while (own.next()) |o| try out.print(gpa, "{s} ", .{o});
-    try out.print(gpa, "werewolf.slot={s}", .{slot});
-    return out.items;
-}
-
-/// argName returns a kernel argument's name: the part before =, or all of it.
-fn argName(arg: []const u8) []const u8 {
-    return arg[0 .. std.mem.findScalar(u8, arg, '=') orelse arg.len];
-}
-
-/// Native UKIs seal their options; a factory EFI entry has no options line.
-fn rollbackOptions(gpa: Allocator, text: []const u8, slot_name: []const u8, uki: bool) ![]const u8 {
-    var options: ?[]const u8 = null;
-    var efi: ?[]const u8 = null;
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.cutPrefix(u8, line, "options ")) |o| options = o;
-        const path = std.mem.cutPrefix(u8, line, "uki ") orelse std.mem.cutPrefix(u8, line, "efi ");
-        if (path) |p| {
-            if (efi != null) return error.NoOtherSlotEntry;
-            efi = p;
-        }
-    }
-    if (uki) {
-        const expected = try gpa.print("/werewolf/{s}/uki.efi", .{slot_name});
-        if (efi == null or !std.mem.eql(u8, efi.?, expected)) return error.NoOtherSlotEntry;
-        return "";
-    }
-    return options orelse error.NoOtherSlotEntry;
-}
-
 test "rollback retains signed native entries without trusting unsigned options" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -1453,56 +1382,6 @@ test "rollback retains signed native entries without trusting unsigned options" 
         "x werewolf.slot=b",
         try rollbackOptions(a, "options x werewolf.slot=b\n", "b", false),
     );
-}
-
-/// loaderEntry returns a Boot Loader Specification type 1 entry for slot.
-/// version orders the slots, newest first; sort-key groups them. A UKI must
-/// use `uki`: systemd-boot does not count attempts for generic `efi` entries.
-fn loaderEntry(
-    gpa: Allocator,
-    slot: []const u8,
-    version: []const u8,
-    options: []const u8,
-    uki: bool,
-) ![]const u8 {
-    if (uki) return gpa.print(
-        \\title werewolf {s}
-        \\sort-key werewolf
-        \\version {s}
-        \\uki /werewolf/{s}/uki.efi
-        \\options {s}
-        \\
-    , .{ slot, version, slot, options });
-    return gpa.print(
-        \\title werewolf {s}
-        \\sort-key werewolf
-        \\version {s}
-        \\linux /werewolf/{s}/vmlinuz
-        \\initrd /werewolf/{s}/stage0.zst
-        \\options {s}
-        \\
-    , .{ slot, version, slot, slot, options });
-}
-
-/// isEntryOf reports whether name is an entry of slot: werewolf-b.conf,
-/// werewolf-b+1.conf with tries left, or werewolf-b+0-1.conf with none.
-fn isEntryOf(name: []const u8, slot: []const u8) bool {
-    const prefix = "werewolf-";
-    if (!std.mem.startsWith(u8, name, prefix) or !std.mem.endsWith(u8, name, ".conf")) return false;
-    const rest = name[prefix.len .. name.len - ".conf".len];
-    if (!std.mem.startsWith(u8, rest, slot)) return false;
-    return rest.len == slot.len or rest[slot.len] == '+';
-}
-
-/// entrySecs returns an entry's version, a policy.Serial, in Unix seconds,
-/// or null if it has none or another format.
-fn entrySecs(entry: []const u8) ?i64 {
-    var it = std.mem.tokenizeScalar(u8, entry, '\n');
-    while (it.next()) |line| {
-        if (std.mem.startsWith(u8, line, "version "))
-            return policy.parseSerial(line["version ".len..]) catch null;
-    }
-    return null;
 }
 
 /// gunzip inflates a gzip stream of up to max_read bytes.

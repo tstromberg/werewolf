@@ -1,0 +1,226 @@
+#!/usr/bin/env python3
+"""Cut actual native enrollment commands; recover only unwritten factory state."""
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import time
+
+from enrollment_cuts import Cut, STEPS, command, snapshot
+
+probe = Path(os.environ.get('TPM_POLICY_PROBE', 'build/host/tpm-policy')).resolve()
+
+
+def run(*args, success=True):
+    result = subprocess.run(list(map(str, args)), capture_output=True, timeout=20)
+    if (result.returncode == 0) != success:
+        raise RuntimeError('unexpected probe result: ' + result.stderr.decode(errors='replace')[-1000:])
+    return result
+
+
+def start(root):
+    endpoint = root / 'tpm.sock'
+    for path in [endpoint, Path(str(endpoint) + '.ctrl')]:
+        path.unlink(missing_ok=True)
+    process = subprocess.Popen(['swtpm', 'socket', '--tpm2', '--tpmstate', 'dir=' + str(root / 'nv'),
+                                '--server', 'type=unixio,path=' + str(endpoint),
+                                '--ctrl', 'type=unixio,path=' + str(endpoint) + '.ctrl',
+                                '--flags', 'not-need-init,startup-clear'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(100):
+        if endpoint.exists() and Path(str(endpoint) + '.ctrl').exists():
+            return process, endpoint
+        if process.poll() is not None:
+            raise RuntimeError('recovery test simulator failed')
+        time.sleep(.05)
+    process.kill()
+    process.wait(timeout=10)
+    raise RuntimeError('recovery test simulator socket missing')
+
+
+def kill(process):
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=10)
+
+
+def interrupted(root, public, factory, step, when, operation='bootstrap-pair', credentials=None):
+    backend, endpoint = start(root)
+    proxy = Cut(root / 'cut.sock', endpoint, step, when)
+    client = None
+    try:
+        args = [probe, operation, public, factory, 'unix:' + str(proxy.filename), credentials or root / 'credentials']
+        if operation == 'recover-pair':
+            args += [root / 'interrupted.anchor']
+        client = subprocess.Popen(list(map(str, args)), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if not proxy.hit.wait(timeout=15) or proxy.failures:
+            raise RuntimeError('missing enrollment cut: ' + step + '/' + when + ': ' + str(proxy.failures))
+        kill(client)
+        kill(backend)
+    finally:
+        if client:
+            kill(client)
+        kill(backend)
+        proxy.close()
+
+
+def rejected_credentials(root, public, factory, credentials, role):
+    branch = root / ('wrong-' + role)
+    branch.mkdir()
+    shutil.copytree(root / 'nv', branch / 'nv')
+    wrong = branch / 'credentials'
+    shutil.copytree(credentials, wrong)
+    filename = wrong / (role + '.auth')
+    raw = bytearray(filename.read_bytes())
+    raw[0] ^= 1
+    filename.write_bytes(raw)
+    backend, endpoint = start(branch)
+    try:
+        before = snapshot(endpoint)
+        result = run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint), wrong, branch / 'anchor', success=False)
+        if b'TpmRefused' not in result.stderr or snapshot(endpoint) != before or (branch / 'anchor').exists():
+            raise RuntimeError('wrong reset authority changed enrollment state')
+    finally:
+        kill(backend)
+
+
+def exercise(root):
+    public, private = root / 'signer.pub', root / 'signer.key'
+    run('openssl', 'genrsa', '-out', private, '2048')
+    run('openssl', 'pkey', '-in', private, '-pubout', '-out', public)
+    state = b'werewolf.boot/2\0' + bytes.fromhex('42' * 32 + '00' * 32 + 'aa' * 64 + '11' * 32)
+    (root / 'factory.state').write_bytes(state)
+    run(probe, 'permit-pair', public, root / 'factory.state', root / 'factory.message')
+    run('openssl', 'dgst', '-sha256', '-sign', private, '-out', root / 'factory.sig', root / 'factory.message')
+    factory = root / 'factory.permit'
+    factory.write_bytes(state + (root / 'factory.sig').read_bytes())
+    expected = hashlib.sha256(bytes(32) + hashlib.sha256(state).digest()).digest()
+    for step in STEPS:
+        for when in ['before', 'after']:
+            case = root / (step + '-' + when)
+            case.mkdir()
+            (case / 'nv').mkdir()
+            interrupted(case, public, factory, step, when)
+            credentials = case / 'credentials'
+            original = [(credentials / name).read_bytes() for name in ['owner.auth', 'lockout.auth']]
+            backend, endpoint = start(case)
+            try:
+                before = snapshot(endpoint)
+            finally:
+                kill(backend)
+            if before[0] & 1 and not (before[1] and int.from_bytes(before[1][6:10], 'big') & (1 << 29)):
+                if step == 'define' and when == 'after':
+                    checkpoint = root / 'unwritten'
+                    checkpoint.mkdir()
+                    shutil.copytree(case / 'nv', checkpoint / 'nv')
+                    shutil.copytree(credentials, checkpoint / 'credentials')
+                rejected_credentials(case, public, factory, credentials, 'owner')
+                if before[0] & 4:
+                    rejected_credentials(case, public, factory, credentials, 'lockout')
+                # Interrupt recovery again after lockout proof/set, preserving its original custody.
+                interrupted(case, public, factory, 'lockout', 'after', 'recover-pair', credentials)
+                backend, endpoint = start(case)
+                try:
+                    run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint), credentials, case / 'anchor')
+                    if (case / 'anchor').read_bytes() != expected:
+                        raise RuntimeError('recovery extended the wrong factory anchor')
+                    # Independent auth-only no-ops prove both original credentials survived.
+                    if command(endpoint, 0x121, (0x40000001,), (0x40000001).to_bytes(4, 'big') + b'\x01', original[0])[0]:
+                        raise RuntimeError('owner authority changed during recovery')
+                    if command(endpoint, 0x129, (0x4000000a,), b'\x00\x20' + original[1], original[1])[0]:
+                        raise RuntimeError('lockout authority changed during recovery')
+                    after = snapshot(endpoint)
+                    run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint), credentials, case / 'replay.anchor', success=False)
+                    if snapshot(endpoint) != after or (case / 'replay.anchor').exists():
+                        raise RuntimeError('completed recovery replay changed protected state')
+                finally:
+                    kill(backend)
+            else:
+                backend, endpoint = start(case)
+                try:
+                    result = run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint), credentials, case / 'anchor', success=False)
+                    reason = b'TpmAlreadyProvisioned' if before[1] else b'NoIncompleteEnrollment'
+                    if reason not in result.stderr or snapshot(endpoint) != before:
+                        raise RuntimeError('fresh/terminal state incorrectly entered recovery')
+                    if before[1]:
+                        run(probe, 'read-pair', public, 'unix:' + str(endpoint), case / 'terminal.anchor')
+                        if (case / 'terminal.anchor').read_bytes() != expected:
+                            raise RuntimeError('uncertain final reply did not leave the protected factory pair')
+                finally:
+                    kill(backend)
+            if original != [(credentials / name).read_bytes() for name in ['owner.auth', 'lockout.auth']]:
+                raise RuntimeError('recovery replaced publisher custody')
+            print('pass   TPM recovery: ' + step + '/' + when + ', authority retained, wrong credentials/replay refused', flush=True)
+    # Even known owner credentials cannot adopt an index belonging to another publisher.
+    run('openssl', 'genrsa', '-out', root / 'foreign.key', '2048')
+    run('openssl', 'pkey', '-in', root / 'foreign.key', '-pubout', '-out', root / 'foreign.pub')
+    run(probe, 'permit-pair', root / 'foreign.pub', root / 'factory.state', root / 'foreign.message')
+    run('openssl', 'dgst', '-sha256', '-sign', root / 'foreign.key', '-out', root / 'foreign.sig', root / 'foreign.message')
+    (root / 'foreign.permit').write_bytes(state + (root / 'foreign.sig').read_bytes())
+    checkpoint = root / 'unwritten'
+    backend, endpoint = start(checkpoint)
+    try:
+        before = snapshot(endpoint)
+        result = run(probe, 'recover-pair', root / 'foreign.pub', root / 'foreign.permit', 'unix:' + str(endpoint),
+                     checkpoint / 'credentials', checkpoint / 'foreign.anchor', success=False)
+        if b'WrongRollbackIndex' not in result.stderr or snapshot(endpoint) != before:
+            raise RuntimeError('foreign policy was adopted during recovery')
+        owner = (checkpoint / 'credentials/owner.auth').read_bytes()
+        legacy = (0x01500020).to_bytes(4, 'big') + b'\x00\x0b' + (0x02040002).to_bytes(4, 'big') + b'\x00\x00\x00\x08'
+        params = b'\x00\x00' + len(legacy).to_bytes(2, 'big') + legacy
+        if command(endpoint, 0x12a, (0x40000001,), params, owner)[0]:
+            raise RuntimeError('legacy refusal fixture definition failed')
+        before = snapshot(endpoint)
+        result = run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint),
+                     checkpoint / 'credentials', checkpoint / 'legacy.anchor', success=False)
+        if b'WrongRollbackIndex' not in result.stderr or snapshot(endpoint) != before:
+            raise RuntimeError('legacy index was adopted during recovery')
+        # A hierarchy policy opens another authorization path; recovery must refuse it.
+        if command(endpoint, 0x12e, (0x40000001,), b'\x00\x20' + b'\x55' * 32 + b'\x00\x0b', owner)[0]:
+            raise RuntimeError('hierarchy policy refusal fixture failed')
+        before = snapshot(endpoint)
+        result = run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint),
+                     checkpoint / 'credentials', checkpoint / 'policy.anchor', success=False)
+        if b'UnprotectedTpmHierarchy' not in result.stderr or snapshot(endpoint) != before:
+            raise RuntimeError('hierarchy policy override entered recovery')
+    finally:
+        kill(backend)
+    print('pass   TPM recovery: foreign and legacy indices and hierarchy overrides refused without authority/NV changes', flush=True)
+    # A legitimate signed retirement must not become a factory reinitialization path.
+    case = root / 'retired'
+    case.mkdir()
+    (case / 'nv').mkdir()
+    backend, endpoint = start(case)
+    try:
+        run(probe, 'bootstrap-pair', public, factory, 'unix:' + str(endpoint), case / 'credentials')
+        if command(endpoint, 0x182, (11,), b'\x00\x00\x00\x01\x00\x0b' + b'\x11' * 32, b'')[0]:
+            raise RuntimeError('independent PCR extension failed')
+        pcr = hashlib.sha256(bytes(32) + b'\x11' * 32).digest()
+        retired = b'werewolf.boot/2\0' + b'\x42' * 32 + expected + b'\xaa' * 32 + b'\xbb' * 32 + pcr
+        (case / 'retired.state').write_bytes(retired)
+        run(probe, 'permit-pair', public, case / 'retired.state', case / 'retired.message')
+        run('openssl', 'dgst', '-sha256', '-sign', private, '-out', case / 'retired.sig', case / 'retired.message')
+        run(probe, 'retire', public, case / 'retired.state', 'unix:' + str(endpoint), case / 'retired.sig')
+        run(probe, 'read-pair', public, 'unix:' + str(endpoint), case / 'before.anchor')
+        before = snapshot(endpoint)
+        result = run(probe, 'recover-pair', public, factory, 'unix:' + str(endpoint), case / 'credentials', case / 'bad.anchor', success=False)
+        run(probe, 'read-pair', public, 'unix:' + str(endpoint), case / 'after.anchor')
+        if b'TpmAlreadyProvisioned' not in result.stderr or snapshot(endpoint) != before or (case / 'bad.anchor').exists():
+            raise RuntimeError('written retirement incorrectly entered recovery')
+        if (case / 'before.anchor').read_bytes() == expected or (case / 'after.anchor').read_bytes() != (case / 'before.anchor').read_bytes():
+            raise RuntimeError('recovery restored factory authorization over retirement')
+    finally:
+        kill(backend)
+    print('pass   TPM recovery: signed retirement retained; old factory recovery cannot restore authorization', flush=True)
+
+
+def main():
+    os.umask(0o077)
+    with tempfile.TemporaryDirectory(prefix='ww-tpm-recover-', dir='/tmp') as temporary:
+        exercise(Path(temporary))
+
+
+if __name__ == '__main__':
+    main()

@@ -105,7 +105,7 @@ jobs:
       - name: Build
         env:
           WEREWOLF_BOOT_KEY: ${{ secrets.WEREWOLF_BOOT_KEY }}
-        run: make dist
+        run: python3 release/with-boot-key make dist
       - name: Boot and check
         if: matrix.copy == 1
         run: make -k check-minimal check-prod check-prod-ssh check-slot check-lease check-dist

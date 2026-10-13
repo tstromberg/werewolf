@@ -4,6 +4,46 @@ const tpm = @import("tpm");
 const apk = @import("apk");
 const m = @import("slot-update.zig");
 
+pub fn transport(u: *m.Update) !?tpm.transport.Declaration {
+    const host_text = u.read(tpm.metadata ++ "/permit-host") catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    const host: [4]u8 = if (std.mem.eql(u8, host_text, "192.168.5.2"))
+        .{ 192, 168, 5, 2 }
+    else if (std.mem.eql(u8, host_text, "10.0.2.2"))
+        .{ 10, 0, 2, 2 }
+    else
+        return error.BadPermitTransport;
+    const port = try std.fmt.parseUnsigned(
+        u16,
+        std.mem.trim(u8, try u.read(tpm.metadata ++ "/permit-port"), "\n"),
+        10,
+    );
+    const key = try tpm.keyAt(u.io, u.gpa, "");
+    var device = try tpm.Device.open(u.io);
+    defer device.close();
+    const running = u.cmd.release orelse return error.MissingSealedBootIdentity;
+    const victim = u.cmd.victim orelse return error.TpmNeedsSignedImage;
+    const directory = try u.gpa.print("/victim{s}/boot-state", .{victim.path});
+    const state = try tpm.current(u.io, u.gpa, key, directory, try device.anchor(key), running);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(
+        u.io,
+        tpm.transport.path,
+        u.gpa,
+        .limited(tpm.transport.max_bundle),
+    );
+    return try tpm.transport.open(key, raw, state.record.machine, host, port);
+}
+
+pub fn fetchAuthority(u: *m.Update, url: []const u8) !?[]const u8 {
+    const declaration = try transport(u) orelse return null;
+    const endpoint = try declaration.endpoint(u.gpa);
+    if (std.mem.startsWith(u8, url, endpoint) and url.len > endpoint.len and
+        url[endpoint.len] == '/') return declaration.ca;
+    return null;
+}
+
 pub fn identity(image: @import("prebuilt").Manifest) ![32]u8 {
     var hashes: [3][32]u8 = undefined;
     for ([3][]const u8{
@@ -54,10 +94,17 @@ pub fn prepare(u: *m.Update, victim: []const u8) !?Prepared {
     errdefer device.close();
     const directory = try u.gpa.print("{s}{s}/boot-state", .{ victim, u.cmd.victim.?.path });
     const old = try tpm.current(u.io, u.gpa, key, directory, try device.anchor(key), running);
+    const declaration = try transport(u);
+    const endpoint = if (declaration) |decl|
+        try decl.endpoint(u.gpa)
+    else
+        image.manifest.channel;
     const base = try u.gpa.print("{s}/{s}/permits/{x}/{x}.permit", .{
-        image.manifest.channel, image.manifest.arch, &old.record.machine, &candidate,
+        endpoint, image.manifest.arch, &old.record.machine, &candidate,
     });
-    const contextual = if (u.read(@import("prebuilt").metadata ++ "/permit-context")) |data|
+    const contextual = if (declaration != null)
+        true
+    else if (u.read(@import("prebuilt").metadata ++ "/permit-context")) |data|
         std.mem.eql(u8, data, "2\n")
     else |_|
         false;

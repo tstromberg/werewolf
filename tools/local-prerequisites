@@ -31,6 +31,51 @@ def fingerprint(arch, files):
     return value.hexdigest()
 
 
+def melange(tree, cache, arch, output, kind, base=None, cert=None):
+    """Stage only public inputs for the existing macOS QEMU/APK builder."""
+    package = 'werewolf-ipe-build' if kind == 'kernel' else 'werewolf-tpm-stub-build'
+    recipe = 'boot/ipe-kernel.melange.yaml' if kind == 'kernel' else 'boot/tpm-stub.melange.yaml'
+    artifact = 'rootfs.tar' if kind == 'kernel' else 'linux.efi.stub'
+    source_names = ['boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy'] if kind == 'kernel' else ['boot/stub-source', 'tools/build-tpm-stub']
+    with tempfile.TemporaryDirectory(prefix='melange-public-', dir=output.parent) as temporary:
+        work = Path(temporary)
+        source = work / 'source'
+        source.mkdir()
+        for name in source_names + [recipe]:
+            target = source / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(tree / name, target)
+        if kind == 'kernel':
+            shutil.copyfile(base, source / 'base.tar')
+            shutil.copyfile(cert, source / 'policy.crt')
+        # No private signing paths, PEM secrets or caller key directories enter the runner.
+        env = {name: os.environ[name] for name in ['PATH', 'HOME', 'LANG', 'SSL_CERT_FILE',
+               'QEMU_KERNEL_IMAGE', 'QEMU_BASE_INITRAMFS'] if name in os.environ}
+        if not all(name in env and Path(env[name]).is_file()
+                   for name in ['QEMU_KERNEL_IMAGE', 'QEMU_BASE_INITRAMFS']):
+            raise ValueError('Melange QEMU requires a stock bootstrap kernel and initramfs')
+        scratch = work / 'scratch'
+        scratch.mkdir()
+        env.update(TMPDIR=str(scratch), QEMU_DISKS_PATH=str(scratch))
+        run(['melange', 'build', source / recipe, '--runner', 'qemu', '--arch', arch,
+             '--source-dir', source, '--out-dir', work / 'packages', '--cache-dir', cache / 'melange-cache',
+             '--cpu', os.environ.get('MELANGE_CPU', str(max(1, (os.cpu_count() or 2) // 2))),
+             '--memory', os.environ.get('MELANGE_MEMORY', '8Gi'), '--disk', '24Gi',
+             '--generate-index=false'], env=env)
+        apk = work / 'packages' / arch / (package + '-0.1.0-r0.apk')
+        destination = output.with_name(output.name + '.new')
+        try:
+            with destination.open('xb') as stream:
+                run(['bsdtar', '-xzOf', apk, 'usr/share/werewolf-build/' + artifact], stdout=stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            if not destination.stat().st_size:
+                raise ValueError('Melange output is missing its required artifact')
+            destination.replace(output)
+        finally:
+            destination.unlink(missing_ok=True)
+
+
 def valid(directory, expected, outputs=None):
     outputs = outputs or {'rootfs.tar', 'linux.efi.stub'}
     try:
@@ -83,49 +128,111 @@ def build(tree, cache, arch, base, key, cert):
     files = {name: tree / name for name in [
         'boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
         'boot/stub-source', 'tools/build-tpm-stub',
+        'boot/ipe-kernel.melange.yaml', 'boot/tpm-stub.melange.yaml',
     ]}
     files.update(base=base, certificate=cert)
     expected = fingerprint(arch, files)
     target = cache / arch / expected
     target.mkdir(mode=0o700, parents=True, exist_ok=True)
+    kernel_files = {name: path for name, path in files.items()
+                    if name in ['boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
+                                'boot/ipe-kernel.melange.yaml', 'base', 'certificate']}
+    stub_files = {name: path for name, path in files.items() if name not in kernel_files}
+    kernel_pin, stub_pin = fingerprint(arch, kernel_files), fingerprint(arch, stub_files)
+    kernel_cache = cache / arch / ('kernel-' + kernel_pin)
+    stub_cache = cache / arch / ('stub-' + stub_pin)
     if valid(target, expected):
+        # Adopt existing successful builds; changing cache layout must not trigger compilation.
+        for part, pin, artifact in [(kernel_cache, kernel_pin, 'rootfs.tar'),
+                                    (stub_cache, stub_pin, 'linux.efi.stub')]:
+            if not (part / 'complete.json').exists():
+                part.mkdir(mode=0o700, parents=True, exist_ok=True)
+                copy_cached(target / artifact, part / artifact)
+                complete(part, pin, [artifact])
+        return target
+    kernel_cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    stub_cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    need_kernel = not valid(kernel_cache, kernel_pin, {'rootfs.tar'})
+    need_stub = not valid(stub_cache, stub_pin, {'linux.efi.stub'})
+    if not need_kernel and not need_stub:
+        copy_cached(kernel_cache / 'rootfs.tar', target / 'rootfs.tar')
+        copy_cached(stub_cache / 'linux.efi.stub', target / 'linux.efi.stub')
+        complete(target, expected, ['rootfs.tar', 'linux.efi.stub'])
         return target
     if platform.system() == 'Linux':
         if platform.machine() != arch:
             raise ValueError('native kernel build architecture differs')
-        run(['sh', tree / 'boot/build-kernel', base, cert, key, target / 'kernel'])
-        run(['sh', tree / 'tools/build-tpm-stub', target / 'stub'])
-        shutil.copyfile(target / 'kernel/rootfs.tar', target / 'rootfs.tar')
-        shutil.copyfile(target / 'stub/linux.efi.stub', target / 'linux.efi.stub')
+        if need_kernel:
+            run(['sh', tree / 'boot/build-kernel', base, cert, key, kernel_cache / 'kernel'])
+            copy_cached(kernel_cache / 'kernel/rootfs.tar', kernel_cache / 'rootfs.tar')
+            complete(kernel_cache, kernel_pin, ['rootfs.tar'])
+        if need_stub:
+            run(['sh', tree / 'tools/build-tpm-stub', stub_cache / 'stub'])
+            copy_cached(stub_cache / 'stub/linux.efi.stub', stub_cache / 'linux.efi.stub')
+            complete(stub_cache, stub_pin, ['linux.efi.stub'])
+    elif platform.system() == 'Darwin' and not os.environ.get('WEREWOLF_BUILD_VM'):
+        if need_kernel:
+            melange(tree, cache, arch, kernel_cache / 'rootfs.tar', 'kernel', base, cert)
+            complete(kernel_cache, kernel_pin, ['rootfs.tar'])
+        if need_stub:
+            melange(tree, cache, arch, stub_cache / 'linux.efi.stub', 'stub')
+            complete(stub_cache, stub_pin, ['linux.efi.stub'])
     elif platform.system() == 'Darwin' and arch == 'aarch64':
-        vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-ci-24.04')
+        vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-build-26.04')
+        run(['python3', tree / 'build-helper', vm, tree / 'boot/build-helper.yaml'])
         # This is a trusted build helper, never the secured workload VM.
         reply = subprocess.check_output(['limactl', 'shell', vm, 'mktemp', '-d',
-                                         '/tmp/ww-prerequisites.XXXXXXXX'], text=True).strip()
-        if not reply.startswith('/tmp/ww-prerequisites.') or '/' in reply[len('/tmp/ww-prerequisites.'):]:
+                                         '/var/tmp/ww-prerequisites.XXXXXXXX'], text=True).strip()
+        if not reply.startswith('/var/tmp/ww-prerequisites.') or '/' in reply[len('/var/tmp/ww-prerequisites.'):]:
             raise ValueError('unexpected helper temporary directory')
         remote = reply
         try:
             run(['limactl', 'shell', vm, 'mkdir', '-p', remote + '/boot', remote + '/tools'])
-            for name in files:
+            public_files = dict(kernel_files if need_kernel else {})
+            if need_stub:
+                public_files.update(stub_files)
+            for name in public_files:
                 destination = remote + '/' + (name if name.startswith(('boot/', 'tools/')) else
                                                'base.tar' if name == 'base' else 'policy.crt')
-                run(['limactl', 'copy', files[name], vm + ':' + destination])
+                run(['limactl', 'copy', public_files[name], vm + ':' + destination])
             # Source archives are shared public data; objects containing private keys are temporary.
-            run(['limactl', 'shell', vm, 'sh', remote + '/boot/build-kernel',
-                 remote + '/base.tar', remote + '/policy.crt', '-', remote + '/kernel'])
-            run(['limactl', 'shell', vm, 'sh', remote + '/tools/build-tpm-stub', remote + '/stub'])
-            run(['limactl', 'copy', vm + ':' + remote + '/kernel/rootfs.tar', target / 'rootfs.tar'])
-            run(['limactl', 'copy', vm + ':' + remote + '/stub/linux.efi.stub', target / 'linux.efi.stub'])
+            if need_kernel:
+                run(['limactl', 'shell', vm, 'sh', remote + '/boot/build-kernel',
+                     remote + '/base.tar', remote + '/policy.crt', '-', remote + '/kernel'])
+                run(['limactl', 'copy', vm + ':' + remote + '/kernel/rootfs.tar', kernel_cache / 'rootfs.tar'])
+                complete(kernel_cache, kernel_pin, ['rootfs.tar'])
+            if need_stub:
+                run(['limactl', 'shell', vm, 'sh', remote + '/tools/build-tpm-stub', remote + '/stub'])
+                run(['limactl', 'copy', vm + ':' + remote + '/stub/linux.efi.stub', stub_cache / 'linux.efi.stub'])
+                complete(stub_cache, stub_pin, ['linux.efi.stub'])
         finally:
             run(['limactl', 'shell', vm, 'rm', '-rf', '--', remote])
     else:
         raise ValueError('managed prerequisites require native Linux or an arm64 Mac build helper')
-    outputs = {name: digest(target / name) for name in ['rootfs.tar', 'linux.efi.stub']}
+    copy_cached(kernel_cache / 'rootfs.tar', target / 'rootfs.tar')
+    copy_cached(stub_cache / 'linux.efi.stub', target / 'linux.efi.stub')
+    complete(target, expected, ['rootfs.tar', 'linux.efi.stub'])
+    return target
+
+
+def copy_cached(source, destination):
+    temporary = destination.with_name(destination.name + '.new')
+    temporary.unlink(missing_ok=True)
+    try:
+        try:
+            os.link(source, temporary)
+        except OSError:
+            shutil.copyfile(source, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def complete(target, expected, names):
+    outputs = {name: digest(target / name) for name in names}
     temporary = target / 'complete.json.new'
     temporary.write_text(json.dumps({'inputs': expected, 'outputs': outputs}) + '\n')
     temporary.replace(target / 'complete.json')
-    return target
 
 
 def main():
@@ -136,17 +243,20 @@ def main():
     with (cache / 'build.lock').open('a+b') as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
         if operation == 'stub':
-            expected = fingerprint(arch, {name: tree / name for name in ['boot/stub-source', 'tools/build-tpm-stub']})
+            expected = fingerprint(arch, {name: tree / name for name in ['boot/stub-source', 'tools/build-tpm-stub', 'boot/tpm-stub.melange.yaml']})
             target = cache / arch / ('stub-' + expected)
             target.mkdir(mode=0o700, parents=True, exist_ok=True)
             if not valid(target, expected, {'linux.efi.stub'}):
                 if platform.system() == 'Linux':
                     run(['sh', tree / 'tools/build-tpm-stub', target / 'stub'])
                     shutil.copyfile(target / 'stub/linux.efi.stub', target / 'linux.efi.stub')
+                elif platform.system() == 'Darwin' and not os.environ.get('WEREWOLF_BUILD_VM'):
+                    melange(tree, cache, arch, target / 'linux.efi.stub', 'stub')
                 else:
-                    vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-ci-24.04')
-                    remote = subprocess.check_output(['limactl', 'shell', vm, 'mktemp', '-d', '/tmp/ww-prerequisites.XXXXXXXX'], text=True).strip()
-                    if not remote.startswith('/tmp/ww-prerequisites.') or '/' in remote[len('/tmp/ww-prerequisites.'):]:
+                    vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-build-26.04')
+                    run(['python3', tree / 'build-helper', vm, tree / 'boot/build-helper.yaml'])
+                    remote = subprocess.check_output(['limactl', 'shell', vm, 'mktemp', '-d', '/var/tmp/ww-prerequisites.XXXXXXXX'], text=True).strip()
+                    if not remote.startswith('/var/tmp/ww-prerequisites.') or '/' in remote[len('/var/tmp/ww-prerequisites.'):]:
                         raise ValueError('unexpected helper temporary directory')
                     try:
                         run(['limactl', 'shell', vm, 'mkdir', '-p', remote + '/boot', remote + '/tools'])

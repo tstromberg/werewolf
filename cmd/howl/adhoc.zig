@@ -1018,6 +1018,7 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
 fn takesNothing(flag: []const u8) bool {
     for ([_][]const u8{
         "--secure",
+        "--insecure",
         "--dev",
         "--build",
         "--yes",

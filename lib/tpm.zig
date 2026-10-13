@@ -14,6 +14,8 @@ pub const index: u32 = 0x01500020;
 pub const attributes: u32 = 0x2204100a; // written, no DA, auth read, write-all, owner/policy write
 pub const qualifier = "werewolf.rollback/1";
 pub const metadata = "/usr/share/werewolf/tpm";
+pub const firmware = @import("boot-authority.zig");
+pub const transport = @import("machine-transport.zig");
 const owner: u32 = 0x40000001;
 const platform: u32 = 0x4000000c;
 const password: u32 = 0x40000009;
@@ -325,7 +327,7 @@ pub const Device = struct {
         return r.int(u32);
     }
 
-    /// Host-only enrollment of a fresh TPM; credentials never enter a guest image.
+    /// Enroll a fresh TPM; credentials stay transient in an attested bootstrap.
     pub fn provision(
         d: *Device,
         key: apk.Key,
@@ -368,10 +370,106 @@ pub const Device = struct {
         b.sized("");
         b.sized(nv.slice());
         _ = try d.call(&b);
+        // The first extension is terminal: every reset guard must already hold.
+        try d.disablePlatform();
+        try d.hierarchyProtected();
         b = passwordCommand(0x136, &.{ owner, pair_index }, &credentials[0]);
         b.sized(&initial.digest());
         _ = try d.call(&b);
+        if (!std.mem.eql(u8, &try d.anchor(key), &initial.anchor())) return error.WrongBootState;
+    }
+
+    pub const Progress = struct { lockout: bool, clear_disabled: bool, defined: bool };
+
+    /// Read-only admission for explicit recovery; any written index is terminal.
+    pub fn incomplete(d: *Device, key: apk.Key) !Progress {
+        try d.noHierarchyPolicies();
+        const permanent = try d.property(0x200);
+        if (permanent & 1 == 0) return error.NoIncompleteEnrollment;
+        if (try d.property(0x201) & 2 == 0) return error.TpmOwnerDisabled;
+        var state: Progress = .{
+            .lockout = permanent & 4 != 0,
+            .clear_disabled = permanent & 0x100 != 0,
+            .defined = false,
+        };
+        var b = command(0x17a, &.{}, null);
+        b.int(u32, 1); // HANDLES
+        b.int(u32, index);
+        b.int(u32, 2);
+        var r = try d.call(&b);
+        if (try r.int(u8) > 1 or try r.int(u32) != 1) return error.BadTpmResponse;
+        const count = try r.int(u32);
+        if (count > 2) return error.BadTpmResponse;
+        for (0..count) |_| {
+            const handle = try r.int(u32);
+            if (handle == index) return error.WrongRollbackIndex;
+            if (handle == pair_index) state.defined = true;
+        }
+        if (r.at != r.data.len) return error.BadTpmResponse;
+        if (state.defined) {
+            if (!state.lockout or !state.clear_disabled) return error.UnprotectedTpmHierarchy;
+            b = command(0x169, &.{pair_index}, null);
+            r = try d.call(&b);
+            const actual = try r.sized();
+            if (actual.len < 10) return error.WrongRollbackIndex;
+            if (std.mem.readInt(u32, actual[6..10], .big) & (1 << 29) != 0)
+                return error.TpmAlreadyProvisioned;
+            var expected = try pairPublic(key);
+            std.mem.writeInt(u32, expected.data[6..10], pair_attributes & ~@as(u32, 1 << 29), .big);
+            if (!std.mem.eql(u8, actual, expected.slice()) or
+                !std.mem.eql(u8, try r.sized(), &name(actual)) or r.at != r.data.len)
+                return error.WrongRollbackIndex;
+        }
+        return state;
+    }
+
+    /// Finish an unwritten factory pair using the original durable credentials only.
+    pub fn recover(d: *Device, key: apk.Key, initial: Record, credentials: *const [2][32]u8) !void {
+        const zero: [32]u8 = @splat(0);
+        if (!std.mem.eql(u8, &initial.previous, &zero) or
+            !std.mem.eql(
+                u8,
+                &initial.retained,
+                &initial.candidate,
+            )) return error.WrongFactoryBootState;
+        for (credentials) |*secret|
+            if (std.mem.eql(u8, secret, &zero)) return error.BadProvisioningCredential;
+        const before = try d.incomplete(key);
+        // Authenticate owner without changing its auth or enabled state.
+        var b = passwordCommand(0x121, &.{owner}, &credentials[0]);
+        b.int(u32, owner);
+        b.int(u8, 1);
+        _ = try d.call(&b);
+        if (before.lockout) {
+            // Prove existing lockout auth by retaining the exact same credential.
+            b = passwordCommand(0x129, &.{0x4000000a}, &credentials[1]);
+            b.sized(&credentials[1]);
+            _ = try d.call(&b);
+        }
+        if (!std.meta.eql(before, try d.incomplete(key))) return error.EnrollmentChanged;
+        if (!before.lockout) {
+            b = command(0x129, &.{0x4000000a}, password);
+            b.sized(&credentials[1]);
+            _ = try d.call(&b);
+        }
+        if (!before.clear_disabled) {
+            b = passwordCommand(0x127, &.{0x4000000a}, &credentials[1]);
+            b.int(u8, 1);
+            _ = try d.call(&b);
+        }
+        if (!before.defined) {
+            var nv = try pairPublic(key);
+            std.mem.writeInt(u32, nv.data[6..10], pair_attributes & ~@as(u32, 1 << 29), .big);
+            b = passwordCommand(0x12a, &.{owner}, &credentials[0]);
+            b.sized("");
+            b.sized(nv.slice());
+            _ = try d.call(&b);
+        }
         try d.disablePlatform();
+        try d.hierarchyProtected();
+        b = passwordCommand(0x136, &.{ owner, pair_index }, &credentials[0]);
+        b.sized(&initial.digest());
+        _ = try d.call(&b);
         if (!std.mem.eql(u8, &try d.anchor(key), &initial.anchor())) return error.WrongBootState;
     }
 
@@ -603,6 +701,19 @@ pub fn keyAt(io: std.Io, gpa: std.mem.Allocator, root: []const u8) !apk.Key {
         try gpa.print("{s}{s}/protocol", .{ root, metadata }),
         16,
     );
+    if (std.mem.eql(u8, protocol, "2-firmware\n")) {
+        const pinned = readFile(
+            io,
+            gpa,
+            try gpa.print("{s}{s}/vendor.sha256", .{ root, metadata }),
+            32,
+        ) catch |err| switch (err) {
+            error.StreamTooLong => return error.BadBootProtocol,
+            else => return err,
+        };
+        if (pinned.len != 32) return error.BadBootProtocol;
+        return firmware.load(io, gpa, pinned[0..32].*);
+    }
     if (!std.mem.eql(u8, protocol, "2\n")) return error.BadBootProtocol;
     return apk.parseKey(
         gpa,
@@ -612,6 +723,39 @@ pub fn keyAt(io: std.Io, gpa: std.mem.Allocator, root: []const u8) !apk.Key {
 
 fn readFile(io: std.Io, gpa: std.mem.Allocator, file: []const u8, limit: usize) ![]const u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, file, gpa, .limited(limit + 1));
+}
+
+test "key source is explicit and a broken firmware pin never falls back to an embedded signer" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(t.io, ".", gpa);
+    const dir = try gpa.print("{s}{s}", .{ root, metadata });
+    try std.Io.Dir.cwd().createDirPath(t.io, dir);
+    const protocol = try gpa.print("{s}/protocol", .{dir});
+    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = protocol, .data = "2\n" });
+    const pem = @embedFile("testdata/tpm-ab/signer.pub");
+    try std.Io.Dir.cwd().writeFile(t.io, .{
+        .sub_path = try gpa.print("{s}/signer.pub", .{dir}),
+        .data = pem,
+    });
+    const expected = try apk.parseKey(gpa, pem);
+    try t.expectEqualSlices(u8, expected.modulus, (try keyAt(t.io, gpa, root)).modulus);
+    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = protocol, .data = "2-firmware\n" });
+    try t.expectError(error.FileNotFound, keyAt(t.io, gpa, root));
+    const pin = try gpa.print("{s}/vendor.sha256", .{dir});
+    for ([_]usize{ 0, 31, 33 }) |n| {
+        try std.Io.Dir.cwd().writeFile(
+            t.io,
+            .{ .sub_path = pin, .data = (@as([33]u8, @splat(0)))[0..n] },
+        );
+        try t.expectError(error.BadBootProtocol, keyAt(t.io, gpa, root));
+    }
+    try std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = protocol, .data = "unknown\n" });
+    try t.expectError(error.BadBootProtocol, keyAt(t.io, gpa, root));
 }
 
 pub const Journal = struct { record: Record, position: u1 };

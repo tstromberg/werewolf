@@ -4,9 +4,11 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 loader = importlib.machinery.SourceFileLoader('prerequisites', 'tools/local-prerequisites')
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -91,6 +93,140 @@ class Prerequisites(unittest.TestCase):
         self.assertNotEqual(before, module.fingerprint('x86_64', {'pin': pin}))
         pin.write_bytes(b'source 2')
         self.assertNotEqual(before, module.fingerprint('aarch64', {'pin': pin}))
+
+    def test_melange_stages_public_inputs_and_scrubs_signing_environment(self):
+        tree = self.root / 'tree'
+        for name in ['boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
+                     'boot/ipe-kernel.melange.yaml']:
+            target = tree / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('public build input')
+        base, cert, key = [self.root / name for name in ['base.tar', 'policy.crt', 'private.key']]
+        base.write_bytes(b'public base')
+        cert.write_bytes(b'public certificate')
+        key.write_bytes(b'PRIVATE_SENTINEL')
+        kernel, initrd = self.root / 'kernel', self.root / 'initrd'
+        kernel.touch()
+        initrd.touch()
+        stages = []
+
+        def fake_run(argv, **kwargs):
+            if argv[0] == 'melange':
+                source = Path(argv[argv.index('--source-dir') + 1])
+                stages.append(source.parent)
+                names = {str(path.relative_to(source)) for path in source.rglob('*') if path.is_file()}
+                self.assertEqual(names, {'boot/kernel-source', 'boot/build-kernel',
+                    'boot/ipe-boot.policy', 'boot/ipe-kernel.melange.yaml', 'base.tar', 'policy.crt'})
+                for path in source.rglob('*'):
+                    if path.is_file(): self.assertNotIn(b'PRIVATE_SENTINEL', path.read_bytes())
+                self.assertNotIn('WEREWOLF_BOOT_KEY', kwargs['env'])
+                self.assertNotIn('WEREWOLF_IPE_KEY', kwargs['env'])
+                self.assertEqual(argv[argv.index('--runner') + 1], 'qemu')
+            else:
+                self.assertEqual(argv[0], 'bsdtar')
+                kwargs['stdout'].write(b'public kernel artifact')
+
+        output = self.root / 'rootfs.tar'
+        with patch.dict(os.environ, {'WEREWOLF_BOOT_KEY': 'PRIVATE_SENTINEL',
+                'WEREWOLF_IPE_KEY': str(key), 'QEMU_KERNEL_IMAGE': str(kernel),
+                'QEMU_BASE_INITRAMFS': str(initrd)}), patch.object(module, 'run', fake_run):
+            module.melange(tree, self.root, 'aarch64', output, 'kernel', base, cert)
+        self.assertEqual(output.read_bytes(), b'public kernel artifact')
+        self.assertEqual(key.read_bytes(), b'PRIVATE_SENTINEL')
+        self.assertTrue(stages and not any(path.exists() for path in stages))
+
+    def test_missing_qemu_bootstrap_refuses_before_starting_runner(self):
+        tree = self.root / 'tree'
+        for name in ['boot/stub-source', 'tools/build-tpm-stub', 'boot/tpm-stub.melange.yaml']:
+            target = tree / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('public')
+        with patch.dict(os.environ, {'QEMU_KERNEL_IMAGE': '/missing/kernel',
+                'QEMU_BASE_INITRAMFS': '/missing/initrd'}), patch.object(module, 'run') as run:
+            with self.assertRaises(ValueError):
+                module.melange(tree, self.root, 'aarch64', self.root / 'stub', 'stub')
+            run.assert_not_called()
+        self.assertFalse(list(self.root.glob('melange-public-*')))
+
+    def cached_builder(self):
+        tree, cache = self.root / 'tree', self.root / 'cache'
+        for name in ['boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
+                     'boot/stub-source', 'tools/build-tpm-stub',
+                     'boot/ipe-kernel.melange.yaml', 'boot/tpm-stub.melange.yaml']:
+            path = tree / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(name)
+        base, key, cert = [self.root / name for name in ['base', 'key', 'cert']]
+        base.write_bytes(b'base')
+        key.write_bytes(b'private host-only fixture')
+        cert.write_bytes(b'public policy certificate')
+        calls = []
+
+        def compiler(tree, cache, arch, output, kind, base=None, cert=None):
+            calls.append(kind)
+            output.write_bytes((kind + str(len(calls))).encode())
+
+        return tree, cache, base, key, cert, calls, compiler
+
+    def test_kernel_and_stub_have_independent_dependencies_and_noop_runs_no_builder(self):
+        tree, cache, base, key, cert, calls, compiler = self.cached_builder()
+        with patch.object(module.platform, 'system', return_value='Darwin'), \
+             patch.dict(os.environ, {'WEREWOLF_BUILD_VM': ''}), patch.object(module, 'melange', compiler):
+            first = module.build(tree, cache, 'aarch64', base, key, cert)
+            self.assertEqual(calls, ['kernel', 'stub'])
+            before = (first / 'rootfs.tar').stat().st_mtime_ns
+            self.assertEqual(first, module.build(tree, cache, 'aarch64', base, key, cert))
+            self.assertEqual(calls, ['kernel', 'stub'])
+            self.assertEqual(before, (first / 'rootfs.tar').stat().st_mtime_ns)
+            (tree / 'boot/stub-source').write_text('changed measured stub pin')
+            second = module.build(tree, cache, 'aarch64', base, key, cert)
+            self.assertEqual(calls, ['kernel', 'stub', 'stub'])
+            self.assertEqual((first / 'rootfs.tar').read_bytes(), (second / 'rootfs.tar').read_bytes())
+            cert.write_bytes(b'changed policy authority')
+            third = module.build(tree, cache, 'aarch64', base, key, cert)
+            self.assertEqual(calls, ['kernel', 'stub', 'stub', 'kernel'])
+            self.assertEqual((second / 'linux.efi.stub').read_bytes(), (third / 'linux.efi.stub').read_bytes())
+
+    def test_existing_combined_cache_is_adopted_without_recompiling(self):
+        tree, cache, base, key, cert, calls, compiler = self.cached_builder()
+        with patch.object(module.platform, 'system', return_value='Darwin'), \
+             patch.dict(os.environ, {'WEREWOLF_BUILD_VM': ''}), patch.object(module, 'melange', compiler):
+            target = module.build(tree, cache, 'aarch64', base, key, cert)
+            for part in list((cache / 'aarch64').glob('kernel-*')) + list((cache / 'aarch64').glob('stub-*')):
+                shutil.rmtree(part)
+            calls.clear()
+            self.assertEqual(target, module.build(tree, cache, 'aarch64', base, key, cert))
+            self.assertEqual(calls, [])
+            (tree / 'boot/stub-source').write_text('new stub')
+            module.build(tree, cache, 'aarch64', base, key, cert)
+            self.assertEqual(calls, ['stub'])
+
+    def test_stub_failure_keeps_the_completed_kernel_for_retry(self):
+        tree, cache, base, key, cert, calls, compiler = self.cached_builder()
+
+        def failing(*args, **kwargs):
+            if args[4] == 'stub':
+                calls.append('stub failure')
+                raise RuntimeError('interrupted stub build')
+            compiler(*args, **kwargs)
+
+        with patch.object(module.platform, 'system', return_value='Darwin'), \
+             patch.dict(os.environ, {'WEREWOLF_BUILD_VM': ''}):
+            with patch.object(module, 'melange', failing), self.assertRaises(RuntimeError):
+                module.build(tree, cache, 'aarch64', base, key, cert)
+            with patch.object(module, 'melange', compiler):
+                module.build(tree, cache, 'aarch64', base, key, cert)
+            self.assertEqual(calls, ['kernel', 'stub failure', 'stub'])
+
+    def test_corrupt_component_rebuilds_only_that_component(self):
+        tree, cache, base, key, cert, calls, compiler = self.cached_builder()
+        with patch.object(module.platform, 'system', return_value='Darwin'), \
+             patch.dict(os.environ, {'WEREWOLF_BUILD_VM': ''}), patch.object(module, 'melange', compiler):
+            target = module.build(tree, cache, 'aarch64', base, key, cert)
+            (target / 'rootfs.tar').write_bytes(b'corrupt kernel')
+            module.build(tree, cache, 'aarch64', base, key, cert)
+            self.assertEqual(calls, ['kernel', 'stub', 'kernel'])
+            self.assertTrue(module.valid(target, json.loads((target / 'complete.json').read_text())['inputs']))
 
 
 unittest.main()

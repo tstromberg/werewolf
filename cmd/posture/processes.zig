@@ -20,35 +20,7 @@ const trim = posture.trim;
 const uidOf = posture.uidOf;
 
 pub fn check(p: *Posture) !void {
-    try p.add(.{
-        .id = "update-held",
-        .area = "processes",
-        .name = "Updates resolve",
-        .why = "An unsolvable package pin must not silently hold the last image forever.",
-        .how = "the last update resolution left no held marker",
-        .result = if (!p.root or !exists(p.io, "/usr/share/werewolf/form"))
-            .skip
-        else if (exists(p.io, "/data/svc/autoupdate/held"))
-            .fail
-        else
-            .pass,
-        .detail = if (p.root) p.read("/data/svc/autoupdate/held") else "",
-    });
-    try p.add(.{
-        .id = "updates-enabled",
-        .area = "processes",
-        .name = "Automatic updates enabled",
-        .why = "Security fixes reach the machine without an operator rebuilding it.",
-        .how = "werewolf's autoupdate service is present and not marked down",
-        .result = if (!exists(p.io, "/usr/share/werewolf/form"))
-            .skip
-        else if ((exists(p.io, "/etc/sv/autoupdate/run") or
-            exists(p.io, "/etc/sv/autoupdate/service")) and
-            !exists(p.io, "/etc/sv/autoupdate/down"))
-            .pass
-        else
-            .fail,
-    });
+    if (p.werewolf) try updates(p);
     const mounts = p.read("/proc/self/mounts");
     try p.add(.{
         .id = "processes-hidden",
@@ -56,6 +28,8 @@ pub fn check(p: *Posture) !void {
         .name = "Processes hidden",
         .why = "A user sees only their own processes, not what else runs.",
         .how = "/proc is mounted hidepid=invisible",
+        .expected = "options contain hidepid=invisible or hidepid=2",
+        .observed = posture.mountOptions(mounts, "/proc") orelse "mount not found",
         .result = if (hasOption(mounts, "/proc", "hidepid=invisible") or
             hasOption(mounts, "/proc", "hidepid=2"))
             .pass
@@ -84,10 +58,52 @@ pub fn check(p: *Posture) !void {
             .result = if (nginx.found == 0) .skip else if (nginx.root == 0) .pass else .fail,
             .detail = if (nginx.found == 0) "no nginx running" else "",
         });
-        try servicesLeashed(p);
-        try serviceDirs(p);
-        try imageRoots(p);
+        if (p.werewolf) {
+            try servicesLeashed(p);
+            try serviceDirs(p);
+            try imageRoots(p);
+        }
     }
+}
+
+fn updates(p: *Posture) !void {
+    const werewolf_image = exists(p.io, "/usr/share/werewolf/form");
+    const held_marker = exists(p.io, "/data/svc/autoupdate/held");
+    try p.add(.{
+        .id = "update-held",
+        .area = "processes",
+        .name = "Updates resolve",
+        .why = "An unsolvable package pin must not silently hold the last image forever.",
+        .how = "the last update resolution left no held marker",
+        .observed = try p.gpa.print("werewolf image={s}; held marker={s}", .{ if (werewolf_image) "present" else "absent", if (held_marker) "present" else "absent" }),
+        .result = if (!p.root or !werewolf_image)
+            .skip
+        else if (held_marker)
+            .fail
+        else
+            .pass,
+        .detail = if (p.root) p.read("/data/svc/autoupdate/held") else "",
+    });
+    const update_run = exists(p.io, "/etc/sv/autoupdate/run");
+    const update_service = exists(p.io, "/etc/sv/autoupdate/service");
+    const update_down = exists(p.io, "/etc/sv/autoupdate/down");
+    try p.add(.{
+        .id = "updates-enabled",
+        .area = "processes",
+        .name = "Automatic updates enabled",
+        .why = "Security fixes reach the machine without an operator rebuilding it.",
+        .how = "werewolf's autoupdate service is present and not marked down",
+        .observed = try p.gpa.print("werewolf image={s}; run={s}; service={s}; down={s}", .{
+            if (werewolf_image) "present" else "absent", if (update_run) "present" else "absent",
+            if (update_service) "present" else "absent", if (update_down) "present" else "absent",
+        }),
+        .result = if (!werewolf_image)
+            .skip
+        else if ((update_run or update_service) and !update_down)
+            .pass
+        else
+            .fail,
+    });
 }
 
 /// serviceDirs checks that each service's directories, /run/svc/NAME and
@@ -353,7 +369,8 @@ pub fn programs(p: *Posture) !void {
         &.{ "gdb", "lldb", "strace", "ltrace" },
     );
 
-    // Each werewolf service must start straight from an ELF program.
+    if (!p.werewolf) return;
+    // Each image service must start straight from an ELF program.
     var d = Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true }) catch return;
     defer d.close(p.io);
     var scripts: std.ArrayList(u8) = .empty;

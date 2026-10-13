@@ -98,7 +98,7 @@ are separate operations; retry partial failures with the same declaration.
 declared people take precedence, and metadata grants neither admin nor root. See Google's
 [key format](https://docs.cloud.google.com/compute/docs/connect/add-ssh-keys) and [project-key control](https://docs.cloud.google.com/compute/docs/connect/restrict-ssh-keys).
 
-**Release and verification.** This is package format 3: publish its programs and forms together
+**Release and verification.** This is package format 4: publish its programs and forms together
 before enrolling; format-2 machines need reinstalling. Tests cover content invalidation, two-arch
 packages, signed indexes, stable revisions, config merging and GCP expiry/precedence. The lock command
 fixture and QEMU SSH boots pass. `make check-gcp-metadata` verifies GCP keys, expiry, precedence, blocking, rotation and invalid user-data retention. Other clouds and the full apply/rollback cycle need live verification.

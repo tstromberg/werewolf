@@ -22,7 +22,7 @@ run_howl() {
 		cat "$log" >&2
 		return 1
 	fi
-	if grep -q 'root on .* takes ' "$log"; then
+	if grep -q 'root on .* takes .*\.pub' "$log"; then
 		echo "howl-run-smoke: local build printed the root-key notice" >&2
 		return 1
 	fi
@@ -33,9 +33,9 @@ if [ -e "build/machines/$machine" ]; then
 	mode=create
 	trap cleanup EXIT
 	trap 'exit 1' HUP INT TERM
-	run_howl "$howl" create "$machine" --with playground --build --on qemu --yes
+	run_howl "$howl" create "$machine" --with playground --build --yes
 else
 	trap cleanup EXIT
 	trap 'exit 1' HUP INT TERM
-	run_howl "$howl" run --build --on qemu --yes
+	run_howl "$howl" run --build --yes
 fi

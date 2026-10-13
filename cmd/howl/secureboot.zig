@@ -31,28 +31,42 @@ pub fn signer(
     if (!kept) {
         const have_key = if (Dir.cwd().access(io, key, .{})) |_| true else |_| false;
         const have_cert = if (Dir.cwd().access(io, cert, .{})) |_| true else |_| false;
+        if (have_key != have_cert) return steps.fail(
+            "partial boot identity; restore the existing signer instead of rotating trust",
+        );
+        if (howl.environ.get("WEREWOLF_BOOT_CRT") != null and
+            howl.environ.get("WEREWOLF_BOOT_KEY") == null)
+            return steps.fail("WEREWOLF_BOOT_CRT requires WEREWOLF_BOOT_KEY");
         if (howl.environ.get("WEREWOLF_BOOT_KEY")) |configured| {
             const certificate_path = howl.environ.get(
                 "WEREWOLF_BOOT_CRT",
             ) orelse "release/boot.crt";
+            try verifySigner(io, gpa, steps, configured, certificate_path);
             const private = try Dir.cwd().readFileAlloc(io, configured, gpa, .limited(32 << 10));
+            defer std.crypto.secureZero(u8, private);
             const public_cert = try Dir.cwd().readFileAlloc(
                 io,
                 certificate_path,
                 gpa,
                 .limited(8192),
             );
-            const f = try Dir.cwd().createFile(io, key, .{ .permissions = .fromMode(0o600) });
-            defer f.close(io);
-            try f.writeStreamingAll(io, private);
-            try Dir.cwd().writeFile(io, .{ .sub_path = cert, .data = public_cert });
-        } else if (!have_key or !have_cert) {
-            const f = try Dir.cwd().createFile(
-                io,
-                key,
-                .{ .permissions = .fromMode(0o600) },
-            );
-            f.close(io);
+            if (have_key) {
+                const previous = try Dir.cwd().readFileAlloc(io, key, gpa, .limited(32 << 10));
+                defer std.crypto.secureZero(u8, previous);
+                const previous_cert = try Dir.cwd().readFileAlloc(io, cert, gpa, .limited(8192));
+                if (!std.mem.eql(u8, previous, private) or
+                    !std.mem.eql(u8, public_cert, previous_cert))
+                    return steps.fail("the existing boot signer cannot be replaced");
+            } else {
+                const f = try Dir.cwd().createFile(io, key, .{
+                    .exclusive = true,
+                    .permissions = .fromMode(0o600),
+                });
+                defer f.close(io);
+                try f.writeStreamingAll(io, private);
+                try Dir.cwd().writeFile(io, .{ .sub_path = cert, .data = public_cert });
+            }
+        } else if (!have_key) {
             const made = try steps.exec(&.{.{ .argv = &.{
                 "openssl",  "req",                     "-newkey",
                 "rsa:4096", "-nodes",                  "-x509",
@@ -69,7 +83,99 @@ pub fn signer(
             );
     }
     try Dir.cwd().setFilePermissions(io, key, .fromMode(0o600), .{});
+    try verifySigner(io, gpa, steps, key, cert);
     return .{ .key = key, .cert = cert };
+}
+
+fn verifySigner(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    steps: *@import("progress.zig").Steps,
+    key: []const u8,
+    cert: []const u8,
+) !void {
+    const private = try std.process.run(gpa, io, .{
+        .argv = &.{ "openssl", "pkey", "-in", key, "-pubout" },
+        .stdout_limit = .limited(8192),
+        .stderr_limit = .limited(8192),
+    });
+    const public_cert = try std.process.run(gpa, io, .{
+        .argv = &.{ "openssl", "x509", "-in", cert, "-pubkey", "-noout" },
+        .stdout_limit = .limited(8192),
+        .stderr_limit = .limited(8192),
+    });
+    if (private.term != .exited or private.term.exited != 0 or
+        public_cert.term != .exited or public_cert.term.exited != 0 or
+        !std.mem.eql(u8, private.stdout, public_cert.stdout))
+        return steps.fail("boot key does not match its certificate");
+}
+
+test "caller boot credentials enroll once and mismatches never replace trust" {
+    const t = std.testing;
+    const io = t.io;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    var env = std.process.Environ.Map.init(gpa);
+    howl.environ = &env;
+    defer howl.environ = undefined;
+    var why: howl.Why = .{};
+    var steps = try @import("progress.zig").Steps.init(io, gpa, &why, .{
+        .verbose = true,
+        .command = "test caller boot credentials",
+        .log = "unused",
+        .first = .{ .name = "Checking boot credentials", .short = "signer" },
+    });
+    for ([_][]const u8{ "first", "other" }) |name| {
+        const key = try gpa.print("{s}/{s}.key", .{ root, name });
+        const cert = try gpa.print("{s}/{s}.crt", .{ root, name });
+        const made = try std.process.run(gpa, io, .{
+            .argv = &.{
+                "openssl",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-x509",
+                "-sha256",
+                "-days",
+                "2",
+                "-subj",
+                "/CN=werewolf-test",
+                "-keyout",
+                key,
+                "-out",
+                cert,
+            },
+            .stdout_limit = .limited(8192),
+            .stderr_limit = .limited(8192),
+        });
+        try t.expect(made.term == .exited and made.term.exited == 0);
+    }
+    try env.put("WEREWOLF_BOOT_KEY", try gpa.print("{s}/first.key", .{root}));
+    try env.put("WEREWOLF_BOOT_CRT", try gpa.print("{s}/first.crt", .{root}));
+    const at = try gpa.print("{s}/enrolled", .{root});
+    const kept = try signer(io, gpa, &steps, at, false);
+    const before = try Dir.cwd().readFileAlloc(io, kept.key, gpa, .limited(8192));
+    defer std.crypto.secureZero(u8, before);
+    _ = try signer(io, gpa, &steps, at, false);
+    try env.put("WEREWOLF_BOOT_CRT", try gpa.print("{s}/other.crt", .{root}));
+    try t.expectError(error.Refused, signer(io, gpa, &steps, at, false));
+    try env.put("WEREWOLF_BOOT_KEY", try gpa.print("{s}/other.key", .{root}));
+    try t.expectError(error.Refused, signer(io, gpa, &steps, at, false));
+    const after = try Dir.cwd().readFileAlloc(io, kept.key, gpa, .limited(8192));
+    defer std.crypto.secureZero(u8, after);
+    try t.expectEqualSlices(u8, before, after);
+    try Dir.cwd().deleteFile(io, kept.cert);
+    try t.expectError(error.Refused, signer(io, gpa, &steps, at, false));
+    _ = env.swapRemove("WEREWOLF_BOOT_KEY");
+    try t.expectError(
+        error.Refused,
+        signer(io, gpa, &steps, try gpa.print("{s}/new", .{root}), false),
+    );
 }
 
 pub fn prepare(
@@ -82,16 +188,7 @@ pub fn prepare(
 ) !Keys {
     const keys = try signer(io, gpa, steps, dir, kept);
     if (!kept) {
-        const helper = try gpa.print("{s}/enroll-boot", .{dir});
-        try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = embedded.enroll_boot });
-        const enrolled = try steps.exec(
-            &.{.{ .argv = &.{ "sh", helper, @tagName(arch), keys.cert, dir } }},
-            .{},
-        );
-        if (!enrolled.ok) return steps.fail(
-            "Secure Boot enrollment failed; plain firmware is not a fallback",
-        );
-        try Dir.cwd().deleteFile(io, helper);
+        try enroll(io, gpa, steps, dir, arch, keys.cert, keys.cert);
     } else {
         for ([_][]const u8{
             try gpa.print("{s}/vars.fd", .{dir}),
@@ -105,6 +202,50 @@ pub fn prepare(
     return keys;
 }
 
+/// Enroll separate firmware administration and executable code certificates.
+pub fn enroll(
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    steps: *@import("progress.zig").Steps,
+    dir: []const u8,
+    arch: howl.Arch,
+    cert: []const u8,
+    owner: []const u8,
+) !void {
+    const helper = try gpa.print("{s}/enroll-boot", .{dir});
+    try Dir.cwd().writeFile(io, .{ .sub_path = helper, .data = embedded.enroll_boot });
+    const setup = try gpa.print("{s}/build-helper", .{dir});
+    const template = try gpa.print("{s}/build-helper.yaml", .{dir});
+    const firmware = try gpa.print("{s}/native-firmware", .{dir});
+    const requirements = try gpa.print("{s}/firmware-requirements.txt", .{dir});
+    try Dir.cwd().writeFile(io, .{ .sub_path = setup, .data = embedded.build_helper });
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = template,
+        .data = embedded.build_helper_template,
+    });
+    try Dir.cwd().writeFile(io, .{ .sub_path = firmware, .data = embedded.native_firmware });
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = requirements,
+        .data = embedded.firmware_requirements,
+    });
+    var env = try howl.environ.clone(gpa);
+    defer env.deinit();
+    try env.put("WEREWOLF_HELPER_SETUP", setup);
+    try env.put("WEREWOLF_HELPER_TEMPLATE", template);
+    try env.put("WEREWOLF_FIRMWARE_SETUP", firmware);
+    try env.put("WEREWOLF_FIRMWARE_REQUIREMENTS", requirements);
+    const enrolled = try steps.exec(
+        &.{.{ .argv = &.{
+            "sh", helper, @tagName(arch), cert, dir, "local", owner,
+        }, .env = &env }},
+        .{},
+    );
+    if (!enrolled.ok) return steps.fail(
+        "Secure Boot enrollment failed; plain firmware is not a fallback",
+    );
+    try Dir.cwd().deleteFile(io, helper);
+}
+
 pub fn image(b: *B) !void {
     const key = b.spec.boot_key.?;
     const cert = b.spec.boot_cert orelse return error.BootCertificateRequired;
@@ -113,7 +254,7 @@ pub fn image(b: *B) !void {
         "out/tools/stubs/{t}/linux.efi.stub",
         .{b.spec.arch},
     );
-    if (b.spec.tpm_pub != null and b.env.get("UKI_STUB") == null)
+    if ((b.spec.tpm_pub != null or b.spec.tpm_firmware) and b.env.get("UKI_STUB") == null)
         return b.fail(
             "TPM boot requires UKI_STUB with TPM measurement enabled; Alpine's default stub " ++
                 "disables it",
@@ -157,10 +298,10 @@ pub fn image(b: *B) !void {
         ).consoles(b.spec.arch),
         extra,
         identity,
-        if (b.spec.tpm_pub != null) "werewolf.tpm=2" else "",
+        if (b.spec.tpm_pub != null or b.spec.tpm_firmware) "werewolf.tpm=2" else "",
         @import("disk.zig").root_uuid,
     });
-    const line = if (b.spec.tpm_pub != null) blk: {
+    const line = if (b.spec.tpm_pub != null or b.spec.tpm_firmware) blk: {
         const signed = @import("prebuilt");
         var hashes: [3][32]u8 = undefined;
         for ([3][]const u8{ "root.erofs", "vmlinuz", "stage0.zst" }, 0..) |name, i| {
@@ -201,11 +342,14 @@ pub fn image(b: *B) !void {
     const temp = try b.tmp(target);
     Dir.cwd().deleteFile(b.io, temp) catch {};
     try b.run(
-        &.{ "osslsigncode", "sign", "-certs", cert, "-key", key, "-in", unsigned, "-out", temp },
+        &.{
+            "osslsigncode", "sign", "-time", "0",      "-certs", cert,
+            "-key",         key,    "-in",   unsigned, "-out",   temp,
+        },
         .{},
     );
     try b.rename(temp, target);
-    if (b.spec.tpm_pub != null) try b.write(
+    if (b.spec.tpm_pub != null or b.spec.tpm_firmware) try b.write(
         try b.path("{s}/pcr11", .{slot}),
         &try uki.pcr11(try b.read(target, 512 << 20)),
     );

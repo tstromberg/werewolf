@@ -156,7 +156,7 @@ fn setting(name: []const u8) ?[]const u8 {
 /// modules appended under usr/lib/modules. melange's QEMU_KERNEL_MODULES
 /// puts them under /lib, which replaces the guest's /lib -> usr/lib link
 /// and so its loader. It returns the initramfs's path.
-fn guest(b: *B) ![]const u8 {
+pub fn guest(b: *B) ![]const u8 {
     const target = try b.path("{s}/melange-guest-{t}.cpio", .{ vendor, b.spec.arch });
     const kernel = try b.path("{s}/vmlinuz", .{b.p.build});
     const began = try b.begin(target, &.{kernel}) orelse return target;

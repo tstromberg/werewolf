@@ -58,6 +58,10 @@ pub fn createQemu(
         true
     else |_|
         false;
+    if (secured and !o.secure) return why.refuse(
+        "{s}: an enrolled machine cannot be downgraded with --insecure",
+        .{name},
+    );
     if (o.secure or secured) {
         var out = Io.File.stdout().writerStreaming(io, &.{});
         return @import("local-secure.zig").create(io, gpa, o, name, tar, tell, &out.interface, why);
@@ -263,6 +267,10 @@ pub fn createLima(
     const secured = if (Dir.cwd().access(io, try gpa.print("{s}/authority/profile.json", .{
         try machineDir(gpa, name),
     }), .{})) |_| true else |_| false;
+    if (secured and !o.secure) return why.refuse(
+        "{s}: an enrolled machine cannot be downgraded with --insecure",
+        .{name},
+    );
     if (o.secure or
         secured) return @import("local-secure.zig").create(io, gpa, o, name, tar, tell, w, why);
     const dir = try machineDir(gpa, name);

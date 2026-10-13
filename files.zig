@@ -7,6 +7,10 @@
 pub const tiers_pub = @embedFile("release/tiers.pub");
 pub const advisories = @embedFile("release/advisories");
 pub const enroll_boot = @embedFile("tools/enroll-boot");
+pub const build_helper = @embedFile("tools/build-helper");
+pub const build_helper_template = @embedFile("boot/build-helper.yaml");
+pub const native_firmware = @embedFile("tools/native-firmware");
+pub const firmware_requirements = @embedFile("boot/firmware-requirements.txt");
 pub const local_tpm = @embedFile("tools/local-tpm");
 pub const local_publisher = @embedFile("tools/local-publisher");
 pub const verify_boot_disk = @embedFile("tools/verify-boot-disk");
@@ -35,6 +39,10 @@ pub const boot = [_]struct { path: []const u8, data: []const u8 }{
 /// Pinned security builders are available even when howl runs without its checkout.
 pub const secure_sources = [_]struct { path: []const u8, data: []const u8 }{
     .{ .path = "local-prerequisites", .data = @embedFile("tools/local-prerequisites") },
+    .{ .path = "build-helper", .data = build_helper },
+    .{ .path = "boot/build-helper.yaml", .data = build_helper_template },
+    .{ .path = "boot/ipe-kernel.melange.yaml", .data = @embedFile("boot/ipe-kernel.melange.yaml") },
+    .{ .path = "boot/tpm-stub.melange.yaml", .data = @embedFile("boot/tpm-stub.melange.yaml") },
     .{ .path = "boot/kernel-source", .data = @embedFile("boot/kernel-source") },
     .{ .path = "boot/build-kernel", .data = @embedFile("boot/build-kernel") },
     .{ .path = "boot/ipe-boot.policy", .data = @embedFile("boot/ipe-boot.policy") },

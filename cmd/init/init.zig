@@ -85,6 +85,10 @@ pub fn main(init: std.process.Init) !void {
         say("core dumps not limited", .{});
     // The seal fails closed: PID 1 exits, the kernel panics, and the machine
     // comes back on the slot that last worked.
+    const links = phase_seal.startLinks() orelse {
+        say("no private service identity reader; not handing over", .{});
+        std.process.exit(1);
+    };
     phase_seal.seal(&m) catch |err| {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
@@ -96,8 +100,9 @@ pub fn main(init: std.process.Init) !void {
     if (std.process.spawn(m.io, .{
         .argv = &.{"/usr/lib/werewolf/mount-broker"},
         .environ_map = &m.env,
-        .stdin = .ignore,
+        .stdin = .{ .file = .{ .handle = links, .flags = .{ .nonblocking = false } } },
     })) |_| {} else |broker_err| say("no mount broker: {s}", .{@errorName(broker_err)});
+    _ = linux.close(links);
     // DHCP renewal starts before fence, which takes CAP_NET_ADMIN and packet
     // sockets from every later process, root included. runit does not
     // restart it; if it exits, the address it applied stays.

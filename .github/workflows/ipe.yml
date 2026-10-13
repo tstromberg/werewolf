@@ -60,6 +60,7 @@ jobs:
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-policy
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-ab
           TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-enrollment
+          TPM_POLICY_PROBE="$PWD/build/host/tpm-policy" python3 test/check-tpm-recovery
           python3 test/check-cloud-tpm-activation
       - name: Build pinned measured stub
         run: |
@@ -70,6 +71,18 @@ jobs:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
           WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
         run: make IPE=1 check-tpm-guest
+      - name: Signed firmware authority and trust substitutions
+        run: |
+          make build/host/uki
+          arch=$(uname -m)
+          python3 test/check-boot-authority --arch "$arch" \
+            --kernel "build/ipe-kernel/$arch/rootfs.tar" --stub "$UKI_STUB" \
+            --output "build/$arch/ipe/check/boot-authority"
+      - name: Signed rootless TPM bootstrap
+        env:
+          WEREWOLF_IPE_KEY: build/ipe-check/policy.key
+          WEREWOLF_IPE_CRT: build/ipe-check/policy.crt
+        run: make IPE=1 check-tpm-bootstrap-guest
       - name: Secured QEMU CLI lifecycle and power cuts
         env:
           WEREWOLF_IPE_KEY: build/ipe-check/policy.key
@@ -90,5 +103,10 @@ jobs:
             build/*/ipe/check/tpm-guest/factory.log
             build/*/ipe/check/tpm-guest/guest/*.log
             build/*/ipe/check/tpm-guest/guest/evidence.jsonl
+            build/*/ipe/check/tpm-bootstrap/*.log
+            build/*/ipe/check/tpm-bootstrap/manifest.json
+            build/*/ipe/check/tpm-bootstrap/quote.msg
+            build/*/ipe/check/tpm-bootstrap/quote.sig
+            build/*/ipe/check/boot-authority/*.log
             build/*/ipe/check/secure-qemu/*.log
             build/*/ipe/check/secure-qemu/evidence.jsonl

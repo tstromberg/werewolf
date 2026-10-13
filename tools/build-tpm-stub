@@ -14,7 +14,9 @@ mkdir -p "$1"
 out=$(realpath "$1")
 # Ubuntu build helpers may lack a sufficiently recent Meson. Keep Python
 # dependencies in this builder's private output, without changing system packages.
-if ! command -v meson >/dev/null; then
+# Ubuntu 24.04 ships an older Meson than this pinned systemd requires.
+if ! command -v meson >/dev/null || ! meson --version | python3 -c \
+    'import sys; sys.exit(tuple(map(int, sys.stdin.read().strip().split("."))) < (1, 9, 2))'; then
     python3 -m venv "$out/venv"
     "$out/venv/bin/pip" install 'meson==1.9.2' 'jinja2==3.1.6' 'pyelftools==0.32'
     PATH="$out/venv/bin:$PATH"
