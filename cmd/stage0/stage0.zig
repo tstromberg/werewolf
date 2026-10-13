@@ -33,6 +33,7 @@ pub fn main(init: std.process.Init) !void {
     const boot_line = readAll(gpa, "/proc/cmdline");
     var boot = cmdline.parse(boot_line, &refused) orelse
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
+    if (boot.bootstrap) fail("enrollment boot cannot hand over a workload", .{});
 
     // Raise lockdown to confidentiality before any module loads, so the
     // kernel refuses unsigned ones, and no one, root included, reads its

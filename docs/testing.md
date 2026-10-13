@@ -622,8 +622,10 @@ supervisor crash recovery, cleanup and refusal to replace missing backing state.
 `test/local-prerequisites` covers cache tampering, incomplete publication and signer custody.
 `test/cloud-enrollment` checks SDK replies and immutable AWS/GCP TPM identity pins;
 encrypted cloud bootstrap remains proposed in the [enrollment design](design/cloud-tpm-enrollment.md).
-`python3 test/check-cloud-tpm-activation` checks the proposed PCR/command-bound policy
-with independent TPM tools and a fresh simulator; it does not enroll a cloud guest.
+Build `build/host/tpm-bootstrap` and `build/host/tpm-policy`, then run
+`python3 test/check-cloud-tpm-activation` with independent TPM tools and fresh simulators.
+It checks native quotes, publisher-signed encrypted capsules, provisioning, tamper and replay;
+it does not deploy a signed cloud bootstrap. See the [wire protocol](design/tpm-bootstrap-protocol.md).
 Only the VM's TPM device is exposed; no signing keys or host directories are mounted.
 
 PR CI checks the IPE source version against both Alpine architecture locks.

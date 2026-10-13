@@ -3,12 +3,33 @@ const std = @import("std");
 const bootstrap = @import("bootstrap");
 const apk = @import("apk");
 const tpm = @import("tpm");
+const enrollment = @import("enrollment");
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
     if (args.len < 3) return error.BadArguments;
+    if (std.mem.eql(u8, args[1], "ek-probe") and args.len == 4) {
+        const file = try connect(io, args[2]);
+        var device: bootstrap.Device = .{ .io = io, .file = file };
+        defer device.close();
+        const key = try device.endorsementPublic();
+        try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = args[3], .data = key.slice() });
+        return;
+    }
+    if (std.mem.eql(u8, args[1], "factory") and args.len == 4) {
+        const key = try apk.parseKey(gpa, try read(io, gpa, args[2], 1024));
+        const raw = try read(io, gpa, args[3], 688);
+        const initial = try enrollment.factory(key, raw);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(raw, &digest, .{});
+        const out = std.Io.File.stdout();
+        try out.writeStreamingAll(io, &initial.machine);
+        try out.writeStreamingAll(io, &digest);
+        try out.writeStreamingAll(io, &initial.anchor());
+        return;
+    }
     if (std.mem.eql(u8, args[1], "policy") and args.len == 3) {
         const raw = try read(io, gpa, args[2], 32);
         if (raw.len != 32) return error.BadDigest;
@@ -121,16 +142,7 @@ fn guest(
         !std.mem.eql(u8, &context.machine, &initial.machine) or
         !std.mem.eql(u8, &initial.previous, &zero) or
         !std.mem.eql(u8, &initial.retained, &initial.candidate)) return error.WrongFactoryBootState;
-    const file = if (std.mem.eql(u8, endpoint, "/dev/tpmrm0"))
-        try std.Io.Dir.cwd().openFile(io, endpoint, .{ .mode = .read_write })
-    else if (std.mem.startsWith(u8, endpoint, "unix:")) blk: {
-        const address = try std.Io.net.UnixAddress.init(endpoint[5..]);
-        const stream = try address.connect(io);
-        break :blk std.Io.File{
-            .handle = stream.socket.handle,
-            .flags = .{ .nonblocking = false },
-        };
-    } else return error.BadTpmEndpoint;
+    const file = try connect(io, endpoint);
     var device: bootstrap.Device = .{ .io = io, .file = file };
     defer device.close();
     var boot = try device.begin(context.pcr);
@@ -171,6 +183,19 @@ fn guest(
     defer std.crypto.secureZero(u8, &target.response);
     try target.provision(key, initial, @ptrCast(&credentials));
     try out.writeStreamingAll(io, &try target.anchor(key));
+}
+
+fn connect(io: std.Io, endpoint: []const u8) !std.Io.File {
+    return if (std.mem.eql(u8, endpoint, "/dev/tpmrm0"))
+        try std.Io.Dir.cwd().openFile(io, endpoint, .{ .mode = .read_write })
+    else if (std.mem.startsWith(u8, endpoint, "unix:")) blk: {
+        const address = try std.Io.net.UnixAddress.init(endpoint[5..]);
+        const stream = try address.connect(io);
+        break :blk std.Io.File{
+            .handle = stream.socket.handle,
+            .flags = .{ .nonblocking = false },
+        };
+    } else return error.BadTpmEndpoint;
 }
 
 fn sign(

@@ -177,8 +177,9 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
 	--dep service --dep package -Mcompose=lib/compose.zig -Mpackage=lib/package.zig -Mimage=lib/image.zig \
 	-Mgpt=boot/gpt.zig --dep package -Mapk=lib/apk.zig -Mfiles=files.zig -Mpeople=lib/people.zig \
-	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig
-ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep seal --dep settings --dep update-policy \
+	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
+	--dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
+ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
 	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
@@ -275,10 +276,11 @@ PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
 	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
-	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/tpm-bootstrap.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
-test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment
+	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/tpm.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
+test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image
 	@echo "test: $(words $(TEST_SOURCES)) suites passed, and howl's lines"
 _test/cloud-console: ; python3 test/cloud-console --test
+_test/bootstrap-image: ; python3 test/bootstrap-image
 _test/azure-security: ; python3 test/azure-security --test
 _test/provider-ab:
 	python3 test/ab_checks.py
@@ -294,9 +296,10 @@ _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
 _test/lib/tpm-bootstrap.zig: ; zig test --dep apk -Mroot=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
-build/host/tpm-bootstrap: tools/tpm-bootstrap.zig lib/tpm-bootstrap.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
+_test/lib/enrollment.zig: ; zig test --dep apk --dep tpm --dep bootstrap -Mroot=lib/enrollment.zig --dep apk -Mtpm=lib/tpm.zig --dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
+build/host/tpm-bootstrap: tools/tpm-bootstrap.zig lib/enrollment.zig lib/tpm-bootstrap.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
 	@mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe --dep bootstrap --dep apk --dep tpm -Mroot=$< --dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
+	zig build-exe -O ReleaseSafe --dep bootstrap --dep enrollment --dep apk --dep tpm -Mroot=$< --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig --dep apk -Mbootstrap=lib/tpm-bootstrap.zig --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
 build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/boot-state.zig lib/apk.zig lib/package.zig
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe --dep apk --dep tpm -Mroot=$< --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@

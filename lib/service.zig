@@ -26,7 +26,7 @@ pub const Service = struct {
     /// data is a directory under /data/share, bound into an image at
     /// image, read or write. The first service that writes a path owns
     /// it. Another service reaches it only in that user's group.
-    data: []const Data = &.{},
+    data: []const Mount = &.{},
     /// caps is CAP_NET_RAW and CAP_NET_ADMIN, the only capabilities a
     /// service file may keep besides a low port's. Empty is none.
     caps: u32 = 0,
@@ -91,9 +91,9 @@ pub const cap = struct {
     pub const net_raw: u32 = 1 << 13;
 };
 
-/// Data is a `data` line: a directory under /data/share/NAME, bound
+/// Mount is a `data` line: a directory under /data/share/NAME, bound
 /// into an image at image. write is the service's access there.
-pub const Data = struct { host: []const u8, image: []const u8, write: bool };
+pub const Mount = struct { host: []const u8, image: []const u8, write: bool };
 
 /// Secret is a `secret` line: a variable read from a file beneath
 /// /run/config, which is never logged; an optional one may be missing.
@@ -147,7 +147,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var connect: std.ArrayList(u16) = .empty;
     var connect_any = false;
     var sockets: std.ArrayList([]const u8) = .empty;
-    var data: std.ArrayList(Data) = .empty;
+    var data: std.ArrayList(Mount) = .empty;
     var caps: u32 = 0;
     var read: std.ArrayList([]const u8) = .empty;
     var write: std.ArrayList([]const u8) = .empty;

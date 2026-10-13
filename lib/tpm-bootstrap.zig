@@ -583,14 +583,14 @@ pub const Boot = struct {
     pub fn receive(b: *Boot, signer: apk.Key, challenge: Challenge, raw: []const u8) ![64]u8 {
         if (!std.mem.eql(u8, &challenge.pcr, &b.pcr)) return error.WrongBootstrapMeasurement;
         const bundle = try verifyCapsule(signer, challenge, raw);
-        var shared = try b.activate(bundle.credential);
-        defer std.crypto.secureZero(u8, &shared);
         const ak = try attestationKey(b.ak_public.slice(), b.pcr);
         const ek: apk.Key = .{
             .modulus = b.ek_public.slice()[b.ek_public.len - 256 ..],
             .exponent = &.{ 1, 0, 1 },
         };
         _ = try endorsementKey(b.ek_public.slice(), ek);
+        var shared = try b.activate(bundle.credential);
+        defer std.crypto.secureZero(u8, &shared);
         return open(challenge, ak.name, ek, &shared, bundle.capsule);
     }
 
@@ -774,13 +774,10 @@ pub const Device = struct {
         return handle;
     }
 
-    pub fn begin(d: *Device, pcr: [32]u8) !Boot {
-        _ = try policy(pcr);
-        try d.fresh();
-        if (!std.mem.eql(u8, &try d.pcr11(), &pcr)) return error.WrongBootstrapMeasurement;
+    fn createEndorsement(d: *Device) !struct { handle: u32, public: Public } {
         var packet = command(0x131, &.{0x4000000b}, &.{0x40000009}); // CreatePrimary
         packet.sized(&.{ 0, 0, 0, 0 });
-        var area = template(true, pcr);
+        const area = template(true, zero);
         packet.sized(area.data[0..area.len]);
         packet.sized("");
         packet.int(u32, 0);
@@ -796,15 +793,33 @@ pub const Device = struct {
             &objectName(ek_public.slice()[2..]),
         )) return error.BadTpmResponse;
         try reply.parameters.end();
+        return .{ .handle = ek, .public = ek_public };
+    }
+
+    /// Test-host pin retrieval from its private simulator connection, independent of a guest.
+    pub fn endorsementPublic(d: *Device) !Public {
+        const key = try d.createEndorsement();
+        defer d.flush(key.handle);
+        return key.public;
+    }
+
+    pub fn begin(d: *Device, pcr: [32]u8) !Boot {
+        _ = try policy(pcr);
+        try d.fresh();
+        if (!std.mem.eql(u8, &try d.pcr11(), &pcr)) return error.WrongBootstrapMeasurement;
+        const endorsement = try d.createEndorsement();
+        const ek = endorsement.handle;
+        errdefer d.flush(ek);
+        const ek_public = endorsement.public;
         const parent = try d.endorsementSession();
         defer d.flush(parent);
-        packet = command(0x153, &.{ek}, &.{parent}); // Create
+        var packet = command(0x153, &.{ek}, &.{parent}); // Create
         packet.sized(&.{ 0, 0, 0, 0 });
-        area = template(false, pcr);
+        const area = template(false, pcr);
         packet.sized(area.data[0..area.len]);
         packet.sized("");
         packet.int(u32, 0);
-        reply = try d.call(&packet, false, 1);
+        var reply = try d.call(&packet, false, 1);
         const private = try reply.parameters.sized();
         if (private.len > 1024) return error.BadTpmResponse;
         var wrapped: [1024]u8 = undefined;
@@ -973,4 +988,56 @@ test "capsule framing rejects every truncated packet, oversized body and invalid
     try t.expectError(error.BadEnrollmentCapsule, Bundle.decode(&(raw ++ [_]u8{0})));
     raw[domain.len + 1] -= 1;
     if (Bundle.decode(&raw)) |_| return error.AcceptedInvalidCapsule else |_| {}
+}
+
+test "publisher signatures authenticate the complete capsule before activation" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const base = "lib/testdata/tpm-bootstrap/";
+    const context = try std.Io.Dir.cwd().readFileAlloc(t.io, base ++ "context", gpa, .limited(129));
+    const challenge: Challenge = .{
+        .machine = context[0..32].*,
+        .factory = context[32..64].*,
+        .pcr = context[64..96].*,
+        .challenge = context[96..128].*,
+    };
+    const pem = try std.Io.Dir.cwd().readFileAlloc(
+        t.io,
+        base ++ "capsule-sign.pub",
+        gpa,
+        .limited(1024),
+    );
+    const signer = try apk.parseKey(gpa, pem);
+    const raw = try std.Io.Dir.cwd().readFileAlloc(
+        t.io,
+        base ++ "native.bundle",
+        gpa,
+        .limited(953),
+    );
+    _ = try verifyCapsule(signer, challenge, raw);
+    for (0..raw.len) |length|
+        try t.expectError(
+            error.BadEnrollmentCapsule,
+            verifyCapsule(signer, challenge, raw[0..length]),
+        );
+    for ([_]usize{ 22, 54, 90, 346, 358, 422, 440 }) |at| {
+        raw[at] ^= 1;
+        try t.expectError(error.BadEnrollmentSignature, verifyCapsule(signer, challenge, raw));
+        raw[at] ^= 1;
+    }
+    inline for (.{ "machine", "factory", "pcr", "challenge" }) |field| {
+        var changed = challenge;
+        @field(changed, field)[0] ^= 1;
+        try t.expectError(error.BadEnrollmentSignature, verifyCapsule(signer, changed, raw));
+    }
+    const wrong_pem = try std.Io.Dir.cwd().readFileAlloc(
+        t.io,
+        "lib/testdata/tpm-ab/signer.pub",
+        gpa,
+        .limited(1024),
+    );
+    const wrong = try apk.parseKey(gpa, wrong_pem);
+    try t.expectError(error.BadEnrollmentSignature, verifyCapsule(wrong, challenge, raw));
 }

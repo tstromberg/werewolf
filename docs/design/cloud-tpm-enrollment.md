@@ -3,7 +3,7 @@
 ## Summary
 
 Extend the local exact-pair protocol to provider-controlled TPMs without publishing reset secrets.
-Status: provider public-key retrieval implemented; encrypted bootstrap enrollment is proposed.
+Status: provider identity pins and native encrypted exchange are simulator-tested; cloud boot remains open.
 Cloud `--secure` remains refused until enrollment and provider recovery tests pass.
 
 ## Background
@@ -58,7 +58,7 @@ The activation branch must set PolicyCommandCode; PCR policy alone is insufficie
 The host must verify a fresh nonce, the complete public template and the expected quote/PCR selection.
 Prove association with the provider-pinned endorsement key using credential activation.
 `test/check-cloud-tpm-activation` verifies these policies with independent TPM tools.
-The native wire protocol still needs interoperability tests before release.
+The [native wire protocol](tpm-bootstrap-protocol.md) passes independent-tool interoperability tests.
 An endorsement-key match alone does not attest which software is running.
 
 ### Reset credentials
@@ -67,8 +67,8 @@ Persist random owner and lockout credentials at mode 0600 before any authority c
 After bootstrap attestation succeeds, encrypt credentials for that TPM and policy-bound key.
 Credential activation conveys a random 32-byte key, not the reset credentials themselves.
 Use that key for an authenticated encrypted capsule bound to the full enrollment context.
-Authenticate the encrypted capsule and bind it to machine nonce and factory record.
-Plaintext credentials may exist transiently in verified bootstrap memory while provisioning.
+Require the factory publisher's signature before activation; public EK encryption alone lacks sender trust.
+Credentials may exist transiently in verified bootstrap memory while provisioning.
 They must never be logged, persisted, returned over the network or exposed after workload handover.
 Explicitly wipe credentials and every TPM-command buffer that contained them.
 Replaying bootstrap after enrollment must refuse before capsule activation.

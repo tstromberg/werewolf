@@ -175,6 +175,10 @@ def exercise(root, env):
     run('openssl', 'pkey', '-in', 'capsule-sign.key', '-pubout', '-out', 'capsule-sign.pub')
     run(probe, 'wrap', *verify[2:], 'reset.credentials', 'capsule-sign.key', 'capsule-sign.pub', 'native.bundle')
     bundle = (root / 'native.bundle').read_bytes()
+    if os.environ.get('TPM_BOOTSTRAP_FIXTURES'):
+        directory = Path(os.environ['TPM_BOOTSTRAP_FIXTURES'])
+        for name in ['native.bundle', 'capsule-sign.pub']:
+            (directory / name).write_bytes((root / name).read_bytes())
     header = len(b'werewolf.enroll/1\0')
     assert len(bundle) == header + 328 + 92 + 2 + 256
     (root / 'native.credential').write_bytes((root / 'capsule').read_bytes()[:8] +
@@ -244,6 +248,14 @@ def native_guest(root, env):
     command = [str(probe), 'guest-probe', 'context', endpoint, 'permit.pub', 'factory.permit']
     run('openssl', 'genrsa', '-out', 'attacker.key', '2048')
     run('openssl', 'pkey', '-in', 'attacker.key', '-pubout', '-out', 'attacker.pub')
+    original = (root / 'context').read_bytes()
+    for offset, error in [(32, b'WrongFactoryBootState'), (64, b'WrongBootstrapMeasurement')]:
+        damaged = bytearray(original)
+        damaged[offset] ^= 1
+        (root / 'context').write_bytes(damaged)
+        refusal = run(*command, success=False)
+        assert not refusal.stdout and error in refusal.stderr, refusal.stderr
+    (root / 'context').write_bytes(original)
 
     def exchange(kind):
         guest = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.PIPE,
@@ -295,6 +307,7 @@ def native_guest(root, env):
                                   b'BadEnrollmentSignature' if kind in ['corrupted', 'foreign-signer'] else
                                   b'BadEnrollmentCapsule')
                 assert expected_error in error, error
+                print('pass   native guest refusal: ' + kind + ' before provisioning')
             else:
                 assert guest.returncode == 0, error.decode(errors='replace')
                 expected = hashlib.sha256(state[48:80] + hashlib.sha256(state).digest()).digest()
@@ -312,7 +325,21 @@ def native_guest(root, env):
     replay = run(*command, success=False)
     assert not replay.stdout
     assert b'TpmAlreadyProvisioned' in replay.stderr
+    partial = root / 'partial'
+    partial.mkdir()
+    for name in ['context', 'permit.pub', 'factory.permit']:
+        (partial / name).write_bytes((root / name).read_bytes())
+    (partial / 'owner.auth').write_bytes(os.urandom(32))
+    with simulator(partial) as partial_env:
+        subprocess.run(['tpm2_changeauth', '-c', 'o', 'file:' + str(partial / 'owner.auth')],
+                       env=partial_env, capture_output=True, check=True)
+        refusal = subprocess.run([str(probe), 'guest-probe', 'context',
+                                  'unix:' + str(partial / 'tpm.sock'), 'permit.pub', 'factory.permit'],
+                                 cwd=partial, env=partial_env, capture_output=True, timeout=20)
+        assert refusal.returncode != 0 and not refusal.stdout
+        assert b'TpmAlreadyProvisioned' in refusal.stderr, refusal.stderr
     print('pass   native guest bootstrap: encrypted exchange, malformed-capsule refusal, protected readback and replay refusal')
+    print('pass   native guest bootstrap: wrong factory/PCR and incomplete prior provisioning refused before proof')
 
 
 if __name__ == '__main__':
