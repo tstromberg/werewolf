@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 
-from ab_checks import require_native_initrd
+from ab_checks import console_posture_failures, require_native_initrd
 
 env = os.environ
 arch = env['ARCH']
@@ -95,9 +95,8 @@ def boot(label, refused=False):
                     if b'access denied' in seen.lower():
                         return
                 else:
-                    line = re.search(rb'posture: fail=([^ ]*) pass=', seen)
-                    if line:
-                        failures = set(line[1].decode().split(',')) - {''}
+                    failures = console_posture_failures(seen)
+                    if failures is not None:
                         expected = {x.lstrip('?') for x in env['POSTURE_KNOWN'].split()}
                         required = {x for x in env['POSTURE_KNOWN'].split() if not x.startswith('?')}
                         assert failures <= expected and required <= failures, failures
