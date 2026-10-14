@@ -21,7 +21,8 @@ build() { sed -n 's/^  "build": "\(.*\)",$/\1/p' "$1" 2>/dev/null || true; }
 packages() { sed -n 's/^    {"name": "\([^"]*\)", "version": "\([^"]*\)".*/\1 \2/p' "$1" 2>/dev/null || true; }
 
 # Fetch the latest release's manifests. Before the first release, there are none.
-prev=$(gh release view --json tagName --jq .tagName 2>/dev/null || echo none)
+prev=$(gh api --paginate --slurp "repos/${GH_REPO:-werewolf-linux/werewolf}/releases?per_page=100" --jq \
+	'[.[][] | select(.draft == false and (.tag_name | test("^[0-9]{8}T[0-9]{6}Z$")))][0].tag_name // "none"')
 [ "$prev" = none ] || gh release download "$prev" --dir "$last" --pattern '*-aarch64.json' --pattern '*-x86_64.json'
 
 changed=''

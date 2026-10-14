@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Admit vendor bundles through Lima or Linux QEMU downloads and exercise A/B recovery."""
+import concurrent.futures
+import hashlib
+import http.server
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from tpm_proxy import Proxy
+
+if len(sys.argv) != 6:
+    sys.exit('usage: check-published-lifecycle HOWL INITIAL UPDATE LATER OUTPUT')
+howl, initial, update_bundle, later, work = [Path(arg).resolve() for arg in sys.argv[1:]]
+work.mkdir(mode=0o700, parents=True, exist_ok=False)
+os.umask(0o077)
+bundles = [initial, update_bundle, later]
+manifests = [json.loads((bundle / 'boot.json').read_text()) for bundle in bundles]
+provider = {'192.168.5.2': 'lima', '10.0.2.2': 'qemu'}.get(manifests[0]['permit_host'])
+arch = manifests[0]['image']['arch']
+if provider is None or arch not in ('aarch64', 'x86_64') or (provider == 'lima' and arch != 'aarch64'):
+    sys.exit('unsupported published lifecycle target')
+if any(m['form'] != 'playground' or m['image']['arch'] != arch or
+       m['permit_host'] != manifests[0]['permit_host'] or m['permit_port'] != 9443 for m in manifests):
+    sys.exit('published lifecycle requires three playground bundles for the same target')
+releases = [(bundle / 'slot/release.id').read_bytes().hex() for bundle in bundles]
+if len(set(releases)) != 3 or sorted(m['image']['serial'] for m in manifests) != [m['image']['serial'] for m in manifests]:
+    sys.exit('lifecycle requires distinct, ordered signed releases')
+consumer = work / 'consumer'
+consumer.mkdir()
+mirror = work / 'mirror'
+base = mirror / 'playground' / provider / arch
+latest = base / 'latest'
+latest.mkdir(parents=True)
+for bundle in bundles:
+    descriptor = hashlib.sha256((bundle / 'boot.json').read_bytes()).hexdigest()
+    objects = base / 'objects' / descriptor
+    objects.mkdir(parents=True)
+    for name in ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi'):
+        os.link(bundle / 'slot' / name, objects / name)
+    os.link(bundle / 'disk.img.zst', objects / 'disk.img.zst')
+    for name in ('latest.json', 'latest.json.sig'):
+        os.link(bundle / 'prebuilt/aarch64' / name, objects / name)
+
+
+def promote(bundle):
+    for name in ('boot.json.sig', 'boot.json'):
+        incoming = latest / (name + '.new')
+        shutil.copyfile(bundle / name, incoming)
+        os.replace(incoming, latest / name)
+
+
+promote(initial)
+identity, ca, key = [work / name for name in ('ssh.key', 'mirror.crt', 'mirror.key')]
+subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', identity], check=True)
+subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256', '-days', '2',
+    '-subj', '/CN=werewolf-lifecycle-mirror', '-addext', 'subjectAltName=IP:127.0.0.1',
+    '-keyout', key, '-out', ca], check=True, capture_output=True)
+requests = []
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(mirror), **kwargs)
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        requests.append(self.path)
+        super().do_GET()
+
+
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(ca, key)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+server_thread.start()
+wrappers = work / 'bin'
+wrappers.mkdir()
+for tool in ('apko', 'melange', 'zig', 'make', 'gmake', 'mkfs.erofs', 'mformat', 'mke2fs'):
+    path = wrappers / tool
+    path.write_text('#!/bin/sh\necho "consumer attempted a build: ' + tool + '" >&2\nexit 99\n')
+    path.chmod(0o755)
+ssh_binary = shutil.which('ssh')
+ssh_wrapper = wrappers / 'ssh'
+ssh_wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\nos.execv(' + repr(ssh_binary) + ', ' +
+    repr([ssh_binary, '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', str(identity)]) + '+sys.argv[1:])\n')
+ssh_wrapper.chmod(0o755)
+proxy_work = tempfile.TemporaryDirectory(prefix='ww-published-proxy-', dir='/tmp')
+proxy_dir = Path(proxy_work.name)
+qemu_tool = 'qemu-system-' + arch
+qemu_binary = shutil.which(qemu_tool)
+if not qemu_binary:
+    sys.exit('published lifecycle requires QEMU')
+qemu_wrapper = wrappers / qemu_tool
+qemu_wrapper.write_text('''#!/usr/bin/env python3
+import json,os,sys,time
+from pathlib import Path
+args=sys.argv[1:]
+root=Path(''' + repr(str(proxy_dir)) + ''')
+for i,arg in enumerate(args):
+    if i and args[i-1]=='-chardev' and 'socket,' in arg and 'tpm' in arg:
+        parts=arg.split(',')
+        backend=next(part[5:] for part in parts if part.startswith('path='))
+        # TPM sockets use hashed short directories on Linux; identify the VM
+        # by its own pidfile rather than the backend socket's spelling.
+        if any('/werewolf-run/' in value for value in args):
+            (root/'backend.json').write_text(json.dumps(backend))
+            while not (root/'ready').exists(): time.sleep(.05)
+            args[i]=','.join('path='+str(root/'proxy.sock') if part.startswith('path=') else part for part in parts)
+os.execv(''' + repr(qemu_binary) + ''',[''' + repr(qemu_binary) + ''',*args])
+''')
+qemu_wrapper.chmod(0o755)
+lima_home = Path(tempfile.mkdtemp(prefix='ww-published-lifecycle-', dir='/tmp'))
+roots = work / 'mirror-roots.pem'
+system_ca = ssl.get_default_verify_paths().cafile
+roots.write_bytes((Path(system_ca).read_bytes() if system_ca else b'') + b'\n' + ca.read_bytes())
+env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(roots),
+           WEREWOLF_BOOT_MIRROR='https://127.0.0.1:%d' % server.server_port,
+           PATH=str(wrappers) + os.pathsep + os.environ['PATH'], PYTHONDONTWRITEBYTECODE='1')
+for name in ('WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'WEREWOLF_IPE_KEY', 'WEREWOLF_IPE_CRT',
+             'WEREWOLF_IPE_KERNEL', 'UKI_STUB', 'WEREWOLF_BUILD_VM',
+             'WEREWOLF_PROTECTED_BOOT_KEY', 'WEREWOLF_PROTECTED_IMAGE_KEY'):
+    env.pop(name, None)
+names = ['werewolf-run', 'ww-published-second']
+machines = [consumer / 'build/machines' / name for name in names]
+proxy = None
+observed = {}
+
+
+def observe(command, response):
+    if int.from_bytes(response[6:10], 'big'):
+        return
+    code = int.from_bytes(command[6:10], 'big')
+    if code == 0x14e and int.from_bytes(command[10:14], 'big') == 0x01500021:
+        if response[:2] == b'\x80\x02' and response[14:16] == b'\x00\x20':
+            observed['anchor'] = response[16:48].hex()
+    elif code == 0x17e and response[-34:-32] == b'\x00\x20':
+        observed['pcr11'] = response[-32:].hex()
+
+
+def run(args, label, check=True, timeout=300):
+    result = subprocess.run([str(arg) for arg in args], cwd=consumer, env=env,
+                            capture_output=True, timeout=timeout)
+    with (work / (label + '.log')).open('ab') as stream:
+        stream.write(result.stdout + result.stderr)
+    if check and result.returncode:
+        raise RuntimeError(label + ': ' + result.stderr.decode(errors='replace')[-3000:])
+    return result
+
+
+def ssh(name, command, label, **kwargs):
+    check = kwargs.pop('check', True)
+    result = run([howl, 'ssh', name, '--', command], label, check=False, **kwargs)
+    if check and result.returncode:
+        run([howl, 'ssh', name, '--', 'sv status /etc/sv/*; tail -30 /data/svc/autoupdate/log'],
+            name + '-failure-services', check=False, timeout=20)
+        raise RuntimeError(label + ': ' + result.stderr.decode(errors='replace')[-3000:])
+    return result
+
+
+def launch(args, label):
+    global proxy
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        creation = pool.submit(run, args, label, timeout=600)
+        deadline = time.monotonic() + 540
+        while proxy is None:
+            if (proxy_dir / 'backend.json').exists():
+                backend = json.loads((proxy_dir / 'backend.json').read_text())
+                proxy = Proxy(proxy_dir / 'proxy.sock', backend, observe=observe)
+                (proxy_dir / 'ready').touch()
+                break
+            if creation.done():
+                creation.result()
+                raise RuntimeError('default deployment did not attach a TPM through the test proxy')
+            if time.monotonic() > deadline:
+                raise RuntimeError('TPM launch timed out')
+            time.sleep(.1)
+        creation.result()
+
+
+def status(name):
+    command = ('/usr/lib/werewolf/posture --json; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
+               'printf "CMDLINE "; cat /proc/cmdline; printf "COMMITTED "; '
+               'if test -e /run/werewolf/committed; then echo yes; else echo no; fi')
+    reply = ssh(name, command, name + '-status', check=False, timeout=15)
+    if reply.returncode:
+        return None
+    text = reply.stdout.decode()
+    end = text.index('\nBOOT-ID ')
+    report = json.loads(text[:end])
+    checks = {entry['id']: entry['result'] for entry in report['checks']}
+    required = ('boot-secure-boot', 'boot-ipe-enforced', 'boot-rollback-protected', 'files-root-verity')
+    if any(checks.get(key) != 'pass' for key in required):
+        raise RuntimeError('guest protection missing: ' + repr(checks))
+    values = dict(line.split(' ', 1) for line in text[end + 1:].splitlines())
+    release = re.search(r'(?:^| )werewolf.release=([0-9a-f]{64})(?: |$)', values['CMDLINE'])
+    if not release:
+        raise RuntimeError('running signed release is missing')
+    value = dict(machine=name, release=release.group(1), boot_id=values['BOOT-ID'],
+                 committed=values['COMMITTED'] == 'yes')
+    if name == names[0]:
+        anchor, pcr = observed['anchor'], observed['pcr11']
+        authority = machines[0] / 'authority'
+        raw = (authority / 'records' / (anchor + '.permit')).read_bytes()
+        run([howl, '_boot-record', authority / 'permit.pub', authority / 'records' / (anchor + '.permit')], 'verify-record')
+        if value['release'] not in (raw[80:112].hex(), raw[112:144].hex()):
+            raise RuntimeError('running release is outside the actual TPM pair')
+        expected = next(m['pcr11'] for m, rid in zip(manifests, releases) if rid == value['release'])
+        if expected != pcr:
+            raise RuntimeError('actual PCR differs from this exact signed bundle')
+        value.update(anchor=anchor, pcr11=pcr)
+    return value
+
+
+def wait(name, release, previous=None, anchor=None, committed=True, fault=False):
+    until = time.monotonic() + 240
+    while time.monotonic() < until:
+        try:
+            value = status(name)
+            if value and value['release'] == release and value['boot_id'] != previous:
+                if fault and not value['committed']:
+                    # Inject a host-controlled keeper failure into the exact production
+                    # image, before its minute-long health check can commit the trial.
+                    ssh(name, 'sv pause /etc/sv/slot-keep', 'fail-trial-keeper')
+                    value = status(name)
+                if value['committed'] is committed:
+                    if anchor is not None and value['anchor'] != anchor:
+                        raise RuntimeError('recovery replaced protected TPM authorization')
+                    if committed:
+                        ready = ssh(name, 'test -e /run/werewolf/updater-ready && sv pause /etc/sv/autoupdate',
+                                    'pause-updater', check=False, timeout=15)
+                        if ready.returncode:
+                            time.sleep(2)
+                            continue
+                    with (work / 'evidence.jsonl').open('a') as stream:
+                        stream.write(json.dumps(value) + '\n')
+                    print('pass: %s release %.12s, committed=%s, four protections' % (name, release, committed), flush=True)
+                    return value
+        except (ValueError, KeyError, subprocess.TimeoutExpired):
+            pass
+        time.sleep(2)
+    raise RuntimeError(name + ' did not reach the expected protected release')
+
+
+def credentials(machine):
+    authority = machine / 'authority'
+    return {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in
+            ('permit.key', 'permit.pub', 'factory.permit', 'credentials/owner.auth', 'credentials/lockout.auth')}
+
+
+def refresh(bundle):
+    promote(bundle)
+    # Expire only the five-minute freshness window; retain all signed floors,
+    # objects and receipts. This avoids sleeping through a cache TTL in tests.
+    for path in (consumer / 'build/boot-cache').rglob('current.json'):
+        current = json.loads(path.read_text())
+        current['checked'] = 0
+        path.write_text(json.dumps(current))
+    run([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'accept-head')
+
+
+try:
+    launch([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'first-run')
+    a = wait(names[0], releases[0])
+    before = credentials(machines[0])
+    downloaded = len(requests)
+    began = time.monotonic()
+    run([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'repeat-run')
+    elapsed = time.monotonic() - began
+    if status(names[0])['boot_id'] != a['boot_id'] or len(requests) != downloaded or credentials(machines[0]) != before:
+        raise RuntimeError('unchanged run rebooted, downloaded or rotated authority')
+    run([howl, 'create', names[1], '--with', 'playground', '--on', provider,
+         '--root-keys', str(identity) + '.pub'], 'second-owner', timeout=600)
+    other = wait(names[1], releases[0])
+    owner2 = credentials(machines[1])
+    if any(owner2[name] == before[name] for name in before):
+        raise RuntimeError('independent enrollments share authority or TPM credentials')
+    for machine in machines:
+        spec = json.loads((machine / 'authority/profile.json').read_text())['spec']
+        if spec['boot_key'] is not None or spec['ipe_key'] is not None:
+            raise RuntimeError('consumer owns a vendor signing key')
+    foreign = run([howl, '_boot-record', machines[1] / 'authority/permit.pub',
+                   machines[0] / 'authority/factory.permit'], 'foreign-owner', check=False)
+    if foreign.returncode == 0:
+        raise RuntimeError('another owner authenticated this machine permit')
+    for command, label in [('cp /usr/bin/true /data/unsigned-probe && /data/unsigned-probe', 'unsigned'),
+                           ('echo tamper >> /usr/bin/true', 'root-write')]:
+        if ssh(names[0], command, label, check=False).returncode == 0:
+            raise RuntimeError(label + ' was accepted')
+    refresh(update_bundle)
+    run([howl, '_local-refresh', machines[1]], 'second-refresh')
+    states = []
+    for name, previous in zip(names, [a, other]):
+        ssh(name, '/usr/lib/werewolf/slot-update check', name + '-check-update')
+        ssh(name, '/usr/lib/werewolf/slot-update try', name + '-try-update', check=False, timeout=30)
+        states.append(wait(name, releases[1], previous['boot_id']))
+    b = states[0]
+    installed = ssh(names[0], 'cat /boot/slot/b/cmdline', 'signed-cmdline-bytes')
+    if installed.stdout != (update_bundle / 'slot/cmdline').read_bytes():
+        raise RuntimeError('installer changed authenticated command line bytes')
+    if b['anchor'] == a['anchor']:
+        raise RuntimeError('upgrade did not extend the actual TPM pair')
+    raw = (machines[0] / 'authority/records' / (b['anchor'] + '.permit')).read_bytes()
+    if raw[80:112].hex() != releases[0] or raw[112:144].hex() != releases[1] or raw[144:176].hex() != a['pcr11']:
+        raise RuntimeError('upgrade permit failed to bind retained and candidate releases and PCR')
+    ssh(names[0], '/usr/lib/werewolf/slot-update try', 'operator-rollback', check=False, timeout=30)
+    recovered = wait(names[0], releases[0], b['boot_id'], b['anchor'])
+    run([howl, 'stop'], 'stop')
+    launch([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'resume')
+    recovered = wait(names[0], releases[0], recovered['boot_id'], recovered['anchor'])
+    if credentials(machines[0]) != before:
+        raise RuntimeError('stop/resume changed machine custody')
+    refresh(later)
+    backend = json.loads((proxy_dir / 'backend.json').read_text())
+    for cut in ('before', 'after'):
+        proxy.arm(cut)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            checking = pool.submit(ssh, names[0], '/usr/lib/werewolf/slot-update check', 'cut-' + cut,
+                                   check=False, timeout=240)
+            try:
+                if not proxy.hit.wait(180) or proxy.failures:
+                    raise RuntimeError('retirement cut not reached: ' + repr(proxy.failures))
+                vm_dir = lima_home / names[0] if provider == 'lima' else machines[0]
+                vm_pid = int((vm_dir / 'qemu.pid').read_text())
+                processes = subprocess.check_output(['ps', '-axo', 'pid=,command='], env=env, text=True).splitlines()
+                matches = [int(line.split(None, 1)[0]) for line in processes
+                           if backend in line and '--tpmstate' in line and 'swtpm' in line]
+                if len(matches) != 1:
+                    raise RuntimeError('cannot identify the owned TPM process')
+                os.kill(vm_pid, signal.SIGKILL)
+                os.kill(matches[0], signal.SIGKILL)
+            finally:
+                proxy.cancel()
+                checking.result()
+        proxy.close()
+        observed.clear()
+        proxy = Proxy(proxy_dir / 'proxy.sock', backend, observe=observe)
+        if provider == 'lima':
+            run(['limactl', 'stop', '--force', names[0]], 'force-stop-' + cut)
+        else:
+            run([howl, 'stop'], 'force-stop-' + cut)
+        launch([howl, 'run', '--on', provider, '--root-keys', str(identity) + '.pub'], 'recover-' + cut)
+        following = wait(names[0], releases[0], recovered['boot_id'],
+                         recovered['anchor'] if cut == 'before' else None)
+        if cut == 'after':
+            raw = (machines[0] / 'authority/records' / (following['anchor'] + '.permit')).read_bytes()
+            if following['anchor'] == recovered['anchor'] or raw[112:144].hex() != releases[2]:
+                raise RuntimeError('completed retirement was lost across the power cut')
+        recovered = following
+        print('pass: ' + cut + ' retirement cut recovered the retained release', flush=True)
+    ssh(names[0], '/usr/lib/werewolf/slot-update check', 'resume-later-install')
+    ssh(names[0], '/usr/lib/werewolf/slot-update try', 'try-unhealthy', check=False, timeout=30)
+    trial = wait(names[0], releases[2], recovered['boot_id'], recovered['anchor'], committed=False, fault=True)
+    time.sleep(5)
+    if status(names[0])['committed']:
+        raise RuntimeError('failed keeper committed a trial')
+    ssh(names[0], '/usr/bin/reboot', 'failed-trial-reboot', check=False, timeout=30)
+    wait(names[0], releases[0], trial['boot_id'], trial['anchor'])
+    if credentials(machines[0]) != before or credentials(machines[1]) != owner2:
+        raise RuntimeError('lifecycle replaced owner or TPM custody')
+    run([howl, 'delete', names[0], '--on', provider], 'delete-first')
+    wait(names[1], releases[1])
+    run([howl, '_local-refresh', machines[1]], 'surviving-owner-refresh')
+    ssh(names[1], '/usr/lib/werewolf/slot-update check', 'shared-issuer-survives')
+    gates = {'secure_boot', 'ipe', 'verified_root', 'rollback_protected', 'ab_upgrade',
+             'operator_rollback', 'unhealthy_fallback', 'retirement_cuts', 'tamper_refused',
+             'no_consumer_builds', 'no_vendor_private_keys', 'shared_issuer', 'fresh_download', 'independent_owners'}
+    report = dict(format='werewolf-boot-gates/1', descriptor=hashlib.sha256((initial / 'boot.json').read_bytes()).hexdigest(),
+                  arch=arch, provider=provider, checks={name: True for name in gates})
+    (work / 'gates.json').write_text(json.dumps(report, indent=2) + '\n')
+    (work / 'result.json').write_text(json.dumps(dict(unchanged_run_seconds=elapsed,
+        unchanged_run_no_network=True, retained_enrollment=True, lifecycle_evidence='evidence.jsonl'), indent=2) + '\n')
+    print('pass: exact production default download, independent owners, A/B, rollback, retirement cuts and failed-trial fallback', flush=True)
+finally:
+    for name, machine in zip(names, machines):
+        console = lima_home / name / 'serial.log' if provider == 'lima' else machine / 'console.log'
+        if console.exists():
+            shutil.copyfile(console, work / (name + '-console.log'))
+        run([howl, 'delete', name, '--on', provider], name + '-cleanup', check=False, timeout=180)
+    if proxy:
+        proxy.close()
+    server.shutdown()
+    server_thread.join(timeout=10)
+    server.server_close()
+    shutil.rmtree(lima_home, ignore_errors=True)
+    shutil.rmtree(consumer / 'build/machines', ignore_errors=True)
+    shutil.rmtree(consumer / 'build/permit-service', ignore_errors=True)
+    identity.unlink(missing_ok=True)
+    key.unlink(missing_ok=True)
+    proxy_work.cleanup()
