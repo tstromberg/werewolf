@@ -270,8 +270,8 @@ fn lay(io: Io, gpa: Allocator, root: Dir, src: []const u8, dst: Dir, to: []const
     }
 }
 
-/// defaultId returns the uid and gid of a service user no form's accounts
-/// declare: an FNV-1a hash of its name, in [2^30, 2^31). Ids start above
+/// defaultId returns an account's default uid and gid: an FNV-1a hash of
+/// its name, in [2^30, 2^31). Ids start above
 /// system and people ids and stop below 2^31, which software that keeps a uid
 /// in a signed int cannot hold. It depends on the name alone, so the id is
 /// the same on every build and machine whatever forms come and go, and the
@@ -280,11 +280,12 @@ pub fn defaultId(name: []const u8) u32 {
     return (1 << 30) | (std.hash.Fnv1a_32.hash(name) & ((1 << 30) - 1));
 }
 
-/// apko returns the chain's merged apko config (form.apko, with extra) plus
-/// an account for each service user no form's accounts declare: a group and
-/// a user, both with id defaultId(name), home /var/empty and shell
-/// /sbin/nologin, after the declared ones. It refuses two services that run
-/// as one user, since strict share could not then keep them apart. It also
+/// apko returns the chain's merged apko config (form.apko, with extra),
+/// filling omitted account ids with defaultId(name), and adding an account
+/// for each undeclared service user. A user with no uid gets its own group,
+/// home /var/empty and shell /sbin/nologin unless overridden; a same-named
+/// declared group supplies its gid. It refuses two services that run as
+/// one user, since strict share could not then keep them apart. It also
 /// refuses a default id that a declared uid or gid, or another default,
 /// already holds; a form's accounts must then give one of them a uid.
 pub fn apko(
@@ -298,21 +299,52 @@ pub fn apko(
     const merged = try form.apko(gpa, forms, extra);
     const top = forms[forms.len - 1].dir;
     var declared: std.array_hash_map.String(void) = .empty;
+    var declared_groups: std.array_hash_map.String(u32) = .empty;
     var ids: std.array_hash_map.Auto(u32, []const u8) = .empty;
+    var groups: std.ArrayList(form.Node) = .empty;
+    var users: std.ArrayList(form.Node) = .empty;
     if (merged.get("accounts")) |acc| {
-        if (acc.get("users")) |users| for (try entries(gpa, top, users, f)) |u| {
+        if (acc.get("users")) |list| for (try entries(gpa, top, list, f)) |u| {
             const name = try scalarAt(gpa, top, u, "username", f);
             try declared.put(gpa, name, {});
-            try ids.put(gpa, try number(gpa, top, u, "uid", f), name);
+            if (u.get("uid") != null) try ids.put(gpa, try number(gpa, top, u, "uid", f), name);
+            if (u.get("gid") != null) try ids.put(gpa, try number(gpa, top, u, "gid", f), name);
         };
-        if (acc.get("groups")) |groups| for (try entries(gpa, top, groups, f)) |g| {
+        if (acc.get("groups")) |list| for (try entries(gpa, top, list, f)) |g| {
             const name = try scalarAt(gpa, top, g, "groupname", f);
-            try ids.put(gpa, try number(gpa, top, g, "gid", f), name);
+            if (g.get("gid") != null) try ids.put(gpa, try number(gpa, top, g, "gid", f), name);
+        };
+        if (acc.get("groups")) |list| for (try entries(gpa, top, list, f)) |g| {
+            const name = try scalarAt(gpa, top, g, "groupname", f);
+            const gid = if (g.get("gid") == null)
+                try defaultAccountId(gpa, top, name, &ids, f)
+            else
+                try number(gpa, top, g, "gid", f);
+            try declared_groups.put(gpa, name, gid);
+            const defaults = try mapOf(gpa, &.{.{ "gid", try gpa.print("{d}", .{gid}) }});
+            try groups.append(gpa, try form.merge(gpa, defaults, g));
+        };
+        if (acc.get("users")) |list| for (try entries(gpa, top, list, f)) |u| {
+            if (u.get("uid") != null) {
+                try users.append(gpa, u);
+                continue;
+            }
+            const name = try scalarAt(gpa, top, u, "username", f);
+            const id = try defaultAccountId(gpa, top, name, &ids, f);
+            const n = try gpa.print("{d}", .{id});
+            const gid = try gpa.print("{d}", .{declared_groups.get(name) orelse id});
+            const defaults = try mapOf(gpa, &.{
+                .{ "uid", n },
+                .{ "gid", gid },
+                .{ "homedir", "/var/empty" },
+                .{ "shell", "/sbin/nologin" },
+            });
+            try users.append(gpa, try form.merge(gpa, defaults, u));
+            if (u.get("gid") == null and !declared_groups.contains(name))
+                try groups.append(gpa, try mapOf(gpa, &.{ .{ "groupname", name }, .{ "gid", n } }));
         };
     }
     var runs_as: std.array_hash_map.String([]const u8) = .empty;
-    var groups: std.ArrayList(form.Node) = .empty;
-    var users: std.ArrayList(form.Node) = .empty;
     const services = try form.services(io, gpa, root, forms, f);
     for (services) |s| {
         const user = (try parseService(gpa, s, f)).user;
@@ -322,19 +354,15 @@ pub fn apko(
             .{ other.value, s.name, user },
         );
         if (declared.contains(user)) continue;
-        const id = defaultId(user);
-        if (ids.get(id)) |holder| return f.fail(
-            gpa,
-            "{s}: user {s}'s default id {d} is {s}'s: give one of them a uid in accounts",
-            .{ s.path, user, id, holder },
-        );
-        try ids.put(gpa, id, user);
+        const id = try defaultAccountId(gpa, s.path, user, &ids, f);
         const n = try gpa.print("{d}", .{id});
-        try groups.append(gpa, try mapOf(gpa, &.{ .{ "groupname", user }, .{ "gid", n } }));
+        const gid = try gpa.print("{d}", .{declared_groups.get(user) orelse id});
+        if (!declared_groups.contains(user))
+            try groups.append(gpa, try mapOf(gpa, &.{ .{ "groupname", user }, .{ "gid", n } }));
         try users.append(gpa, try mapOf(gpa, &.{
             .{ "username", user },
             .{ "uid", n },
-            .{ "gid", n },
+            .{ "gid", gid },
             .{ "homedir", "/var/empty" },
             .{ "shell", "/sbin/nologin" },
         }));
@@ -353,13 +381,46 @@ pub fn apko(
             s.name,
         )) return f.fail(gpa, "{s}: group {s} is its own", .{ s.path, g });
     };
-    if (users.items.len == 0) return merged;
-    const added = try gpa.dupe(form.Entry, &.{
-        .{ .key = "groups", .value = .{ .list = groups.items } },
-        .{ .key = "users", .value = .{ .list = users.items } },
-    });
-    const add = try gpa.dupe(form.Entry, &.{.{ .key = "accounts", .value = .{ .map = added } }});
-    return form.merge(gpa, merged, .{ .map = add });
+    if (users.items.len == 0 and groups.items.len == 0) return merged;
+    var acc = merged.get("accounts") orelse form.Node{ .map = &.{} };
+    acc = try replaceField(gpa, acc, "groups", .{ .list = groups.items });
+    acc = try replaceField(gpa, acc, "users", .{ .list = users.items });
+    return replaceField(gpa, merged, "accounts", acc);
+}
+
+/// defaultAccountId reserves name's default id, refusing another account's.
+fn defaultAccountId(
+    gpa: Allocator,
+    path: []const u8,
+    name: []const u8,
+    ids: *std.array_hash_map.Auto(u32, []const u8),
+    f: *Failure,
+) Error!u32 {
+    const id = defaultId(name);
+    if (ids.get(id)) |holder| {
+        if (!mem.eql(u8, holder, name)) return f.fail(
+            gpa,
+            "{s}: user {s}'s default id {d} is {s}'s: give one of them a uid in accounts",
+            .{ path, name, id, holder },
+        );
+    }
+    try ids.put(gpa, id, name);
+    return id;
+}
+
+/// replaceField copies a map with key replaced, without joining list values.
+fn replaceField(
+    gpa: Allocator,
+    node: form.Node,
+    key: []const u8,
+    value: form.Node,
+) Allocator.Error!form.Node {
+    var fields: std.ArrayList(form.Entry) = .empty;
+    for (node.map) |entry| {
+        if (!mem.eql(u8, entry.key, key)) try fields.append(gpa, entry);
+    }
+    try fields.append(gpa, .{ .key = key, .value = value });
+    return .{ .map = fields.items };
 }
 
 /// format numbers the files compose writes and werewolf's programs read. Each
@@ -1610,6 +1671,109 @@ test "apko: a service user apko.yaml does not name gets an account, its id its n
     const again = try form.chain(io, gpa, tmp.dir, "x", &f);
     try testing.expectError(error.Form, apko(io, gpa, tmp.dir, again, &.{}, &f));
     try testing.expect(mem.find(u8, f.text, "is old's") != null);
+}
+
+test "apko: declared accounts inherit ids and keep shell and group overrides on updates" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/x");
+    try tmp.dir.writeFile(io, .{ .sub_path = "forms/x/form.yaml", .data =
+        \\accounts:
+        \\  groups:
+        \\    - groupname: worker
+        \\      members: [helper]
+        \\    - groupname: pinned
+        \\      gid: 123
+        \\    - groupname: web
+        \\      gid: 456
+        \\  users:
+        \\    - username: worker
+        \\      shell: /usr/lib/werewolf/sh-shim
+        \\    - username: helper
+        \\    - username: shared
+        \\      gid: 123
+        \\    - username: pinned
+        \\      uid: 123
+        \\      homedir: /var/empty
+        \\      shell: /usr/bin/false
+        \\services:
+        \\  worker:
+        \\    exec: /worker
+        \\    user: worker
+        \\    pledge: stdio
+        \\  web:
+        \\    exec: /web
+        \\    user: web
+        \\    pledge: stdio
+        \\
+    });
+    var f: Failure = .{};
+    const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
+    const merged = try apko(io, gpa, tmp.dir, forms, &.{}, &f);
+    const acc = merged.get("accounts").?;
+    const users = acc.get("users").?.list;
+    const groups = acc.get("groups").?.list;
+    try testing.expectEqual(5, users.len);
+    try testing.expectEqual(4, groups.len);
+    try testing.expectEqualStrings("worker", groups[0].get("groupname").?.scalar.text);
+    try testing.expectEqualStrings(
+        try gpa.print("{d}", .{defaultId("worker")}),
+        groups[0].get("gid").?.scalar.text,
+    );
+    try testing.expectEqual(1, groups[0].get("members").?.list.len);
+    try testing.expectEqualStrings("helper", groups[3].get("groupname").?.scalar.text);
+    const empty: Accounts = .{ .passwd = "", .group = "", .shadow = "" };
+    const got = try withAccounts(io, gpa, tmp.dir, forms, empty, &f);
+    for ([_]struct { name: []const u8, gid: ?u32 = null, shell: []const u8 = "/sbin/nologin" }{
+        .{ .name = "worker", .shell = "/usr/lib/werewolf/sh-shim" },
+        .{ .name = "helper" },
+        .{ .name = "shared", .gid = 123 },
+        .{ .name = "web", .gid = 456 },
+    }) |case| {
+        const uid = defaultId(case.name);
+        try testing.expect(mem.find(u8, got.passwd, try gpa.print(
+            "{s}:x:{d}:{d}:Account created by apko:/var/empty:{s}\n",
+            .{ case.name, uid, case.gid orelse uid, case.shell },
+        )) != null);
+    }
+    try testing.expect(mem.find(
+        u8,
+        got.passwd,
+        "pinned:x:123:123:Account created by apko:/var/empty:/usr/bin/false\n",
+    ) != null);
+    const again = try withAccounts(io, gpa, tmp.dir, forms, got, &f);
+    try testing.expectEqualStrings(got.passwd, again.passwd);
+    try testing.expectEqualStrings(got.group, again.group);
+    try testing.expectEqualStrings(got.shadow, again.shadow);
+}
+
+test "apko: omitted account ids cannot collide with an explicit uid or gid" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/x");
+    inline for ([_][]const u8{
+        "accounts:\n  users:\n    - username: worker\n    - username: pinned\n      uid: {d}\n",
+        "accounts:\n  groups:\n    - groupname: worker\n    - groupname: pinned\n      gid: {d}\n",
+        "accounts:\n  users:\n    - username: worker\n    - username: pinned\n" ++
+            "      uid: 123\n      gid: {d}\n",
+    }) |text| {
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "forms/x/form.yaml",
+            .data = try gpa.print(text, .{defaultId("worker")}),
+        });
+        var f: Failure = .{};
+        const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
+        try testing.expectError(error.Form, apko(io, gpa, tmp.dir, forms, &.{}, &f));
+        try testing.expect(mem.find(u8, f.text, "is pinned's") != null);
+    }
 }
 
 test serviceDirOwner {

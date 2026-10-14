@@ -921,12 +921,7 @@ pub fn create(
         );
         Dir.cwd().deleteDir(io, authority) catch |err| if (err != error.FileNotFound) return err;
     }
-    var step_options = try tell.step(gpa, dir);
-    if (kept) step_options.first = .{
-        .name = "Checking retained enrollment and updating VM configuration",
-        .short = "files",
-    };
-    var steps: progress.Steps = try .init(io, gpa, why, step_options);
+    var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
     Dir.cwd().deleteFile(io, try gpa.print("{s}/ready", .{authority})) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,

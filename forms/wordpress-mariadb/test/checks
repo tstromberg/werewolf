@@ -9,3 +9,6 @@ ok  wpm-in-mariadb   [ "$(mariadb -S /run/svc/mariadb/mariadb.sock -N -e 'select
 # The role php logs in by unix_socket, may do anything to its database
 # and nothing beyond it: asked as php, MariaDB reads it no file.
 ok  wpm-php-role     m="mariadb -S /run/svc/mariadb/mariadb.sock -N"; g=$($m -e "show grants for 'php'@'localhost'"); echo "$g" | grep -q 'unix_socket' && echo "$g" | grep -q 'ALL PRIVILEGES ON `wordpress`' && ! echo "$g" | grep 'ON \*\.\*' | grep -qv 'GRANT USAGE' && [ "$(chpst -u php $m -e "select load_file('/etc/passwd') is null")" = 1 ]
+
+# A wrong password returns the login page, with no logged-in cookie.
+ok  wpm-wrong-password h=$(wget -q -T 10 -S -O /dev/null --header 'Cookie: wordpress_test_cookie=WP%20Cookie%20check' --post-data 'log=admin&pwd=wrong-password&testcookie=1' http://localhost/wp-login.php 2>&1); echo "$h" | grep -q 'HTTP/1.1 200' && ! echo "$h" | grep -q 'Set-Cookie: wordpress_logged_in_'

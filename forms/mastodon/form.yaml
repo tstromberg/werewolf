@@ -27,31 +27,6 @@ packages:
   - libxslt
   - zlib
 
-# The web's, the jobs' and cron's users share the web's group, its primary
-# one, since leash keeps no other: the media and secrets in the web's
-# `share group` directory are theirs (README.md). Each id is the one its
-# name's hash would give it (forms/README.md).
-accounts:
-  groups:
-    - groupname: mastodon
-      gid: 986418474
-  users:
-    - username: mastodon
-      uid: 986418474
-      gid: 986418474
-      homedir: /var/empty
-      shell: /sbin/nologin
-    - username: mastodon-jobs
-      uid: 979281085
-      gid: 986418474
-      homedir: /var/empty
-      shell: /sbin/nologin
-    - username: mastodon-cron
-      uid: 1924668105
-      gid: 986418474
-      homedir: /var/empty
-      shell: /sbin/nologin
-
 # Mastodon's parts beside it: its database, its queue and cache, Caddy in
 # front with HTTPS for the domain, its timers, and /bin/sh for the
 # commands Paperclip runs through it (cmd/sh-shim). See
@@ -101,8 +76,8 @@ services:
   cron:
     exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
     user: mastodon-cron
-    # Valkey's group, for its socket.
-    group: valkey
+    # The web's group for its media and secrets; Valkey's for its socket.
+    group: mastodon valkey
     pledge: stdio rpath wpath unix connect proc exec
     connect: [/run/svc/postgres/.s.PGSQL.5432, /run/svc/valkey/valkey.sock]
     run: /usr/bin/ruby
@@ -209,8 +184,8 @@ services:
   mastodon-jobs:
     exec: /usr/bin/ruby -C /usr/lib/mastodon /usr/bin/bundle exec sidekiq -c 5
     user: mastodon-jobs
-    # Valkey's group, for its socket.
-    group: valkey
+    # The web's group for its media and secrets; Valkey's for its socket.
+    group: mastodon valkey
     # netlink: glibc's resolver lists the host's addresses before a lookup.
     pledge: stdio rpath wpath inet unix netlink connect proc exec landlock seccomp
     connect:

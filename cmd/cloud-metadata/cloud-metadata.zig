@@ -251,10 +251,17 @@ fn apply(
             continue;
         }
         _ = linux.mkdirat(home_dir, name, 0o700);
-        if (linux.errno(
-            linux.fchownat(home_dir, name, id, id, linux.AT.SYMLINK_NOFOLLOW),
-        ) != .SUCCESS) continue;
-        _ = linux.fchmodat(home_dir, name, 0o700);
+        const hrc = linux.openat(
+            home_dir,
+            name,
+            .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(hrc) != .SUCCESS) continue;
+        const hfd: linux.fd_t = @intCast(hrc);
+        defer _ = linux.close(hfd);
+        if (linux.errno(linux.fchown(hfd, id, id)) != .SUCCESS) continue;
+        _ = linux.fchmod(hfd, 0o700);
     }
     const base = for (files[0..n]) |*f| {
         if (std.mem.eql(u8, f.name(), "authorized_keys")) break f.data;

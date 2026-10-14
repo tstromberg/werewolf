@@ -78,12 +78,15 @@ pub fn prepare(u: *m.Update) !?Prepared {
     const running = u.cmd.release orelse return null;
     const image = u.image orelse return error.TpmNeedsSignedImage;
     const candidate = try identity(image.manifest);
+    const uki_art = image.manifest.files.@"uki.efi" orelse return error.MissingBootContext;
     const binary = try std.Io.Dir.cwd().readFileAlloc(
         u.io,
         m.work_dir ++ "/slot/uki.efi",
         u.gpa,
         .limited(512 << 20),
     );
+    const uki_got = try signed.hashBytes(u.gpa, binary);
+    try signed.matches(uki_art, uki_got.size, uki_got.sha256);
     const line = try @import("uki").section(binary, ".cmdline") orelse return error.BadCmdline;
     var bad: @import("cmdline").Failure = .{};
     const parsed = @import("cmdline").parse(std.mem.trimEnd(u8, line, "\x00"), &bad) orelse
@@ -118,7 +121,7 @@ pub fn prepare(u: *m.Update) !?Prepared {
     const completed = std.mem.eql(u8, &old.record.anchor(), &next.anchor());
     if (!completed) {
         try old.record.transition(next, running, try device.pcr11());
-        const permit = try signed.hashFile(u.io, u.gpa, m.work_dir ++ "/boot.permit");
+        const permit = try signed.hashBytes(u.gpa, raw);
         broker.slotState(old.position ^ 1, .{
             .size = permit.size,
             .sha256 = permit.sha256,

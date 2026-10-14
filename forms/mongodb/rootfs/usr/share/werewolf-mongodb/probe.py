@@ -33,7 +33,7 @@ def receive(connection, length):
     return result
 
 
-def command(document):
+def command(document, *, javascript_refused=False):
     document['$db'] = 'werewolf_check'
     body = struct.pack('<i', 0) + b'\0' + bson(document)
     with socket.create_connection(('127.0.0.1', 27017), timeout=5) as connection:
@@ -42,12 +42,21 @@ def command(document):
         if response_to != 1 or opcode != 2013 or not 21 < length < 1048576:
             raise RuntimeError('invalid MongoDB response')
         reply = receive(connection, length - 16)
-        if b'\x01ok\0' + struct.pack('<d', 1.0) not in reply:
+        succeeded = b'\x01ok\0' + struct.pack('<d', 1.0) in reply
+        if javascript_refused:
+            if succeeded or b'$where' not in reply:
+                raise RuntimeError('MongoDB did not refuse server-side JavaScript')
+        elif not succeeded:
             raise RuntimeError('MongoDB command failed')
         return reply
 
 
 command({'ping': 1})
+if '--javascript-refused' in sys.argv:
+    command({'find': 'probe', 'filter': {'$where': 'return true'}},
+            javascript_refused=True)
+    print('mongodb-probe: server-side JavaScript refused')
+    sys.exit(0)
 if '--retained' not in sys.argv:
     command({'update': 'probe', 'updates': [{'q': {'_id': 'werewolf'},
              'u': {'$set': {'value': 'werewolf-wire-check'}}, 'upsert': True}]})

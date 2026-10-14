@@ -5,3 +5,7 @@ ok  postgres-redirs     n=/usr/lib/werewolf/sh-shim; [ "$($n -c 'busybox echo ke
 # Query through peer authentication; preserve UTF-8 data and the C locale.
 ok  postgres-sql        q() { chpst -u postgres psql -h /run/svc/postgres -d postgres -Atqc "$1"; }; [ "$(q "SELECT current_setting('server_encoding') || '/' || datcollate || '/' || datctype FROM pg_database WHERE datname = current_database()")" = UTF8/C/C ] && [ "$(q "CREATE TABLE werewolf_shim_check(value text); INSERT INTO werewolf_shim_check VALUES ('h' || chr(233) || 'llo'); SELECT encode(convert_to(value, 'UTF8'), 'hex') FROM werewolf_shim_check")" = 68c3a96c6c6f ]
 ok  postgres-peer       ! chpst -u nobody psql -h /run/svc/postgres -U postgres -d postgres -Atqc 'SELECT 1' 2>/dev/null
+
+# A rolled-back write must not survive inside the same database.
+ok  postgres-rollback [ "$(chpst -u postgres psql -h /run/svc/postgres -d postgres -Atqc "BEGIN; INSERT INTO werewolf_shim_check VALUES ('rolled-back'); ROLLBACK; SELECT count(*) FROM werewolf_shim_check WHERE value='rolled-back';")" = 0 ]
+ok  postgres-local ! netstat -ltn | grep -q ':5432 '

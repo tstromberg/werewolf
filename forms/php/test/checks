@@ -1,0 +1,5 @@
+# With no application supplied, nginx serves its placeholder and refuses
+# nonexistent scripts. The supplied-application boot also exercises PHP.
+ok  php-placeholder wget -q -T 5 -O - http://127.0.0.1/ | grep -q 'nginx is serving this page'
+ok  php-missing-script wget -q -T 5 -S -O /dev/null http://127.0.0.1/missing.php 2>&1 | grep -q 'HTTP/1.1 404'
+ok  php-socket-private [ "$(stat -c %a /run/svc/php-fpm/php.sock)" = 660 ] && ! chpst -u nobody test -r /run/svc/php-fpm/php.sock

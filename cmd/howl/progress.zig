@@ -237,7 +237,10 @@ pub const Steps = struct {
             .said = .{ .gpa = gpa, .phase = o.first, .since = start },
             .history = .init(io, !o.verbose),
         };
-        if (s.reporter()) |m| m.enter(o.first);
+        if (s.reporter()) |m| {
+            m.enter(o.first);
+            s.said.since = m.since;
+        }
         return s;
     }
 

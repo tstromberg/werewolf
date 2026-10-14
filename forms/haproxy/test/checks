@@ -2,6 +2,7 @@
 # this check starts on loopback :443, answering each connection and
 # recording what reaches it. HAProxy's own TCP checks connect there too,
 # and it answers 503 while the backend is down, so try for a while.
+ok  haproxy-unavailable wget -q -T 5 -S -O /dev/null http://127.0.0.1/ 2>&1 | grep -q 'HTTP/1.1 503'
 ok  haproxy-proxies  (while :; do (printf 'HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\nwerewolf-backend'; sleep 1) | nc -l -p 443 -s 127.0.0.1 -w 3 >>/tmp/backend 2>/dev/null; done) >/dev/null 2>&1 & i=0; until wget -q -T 5 -O - --header 'Proxy: http://evil.example/' http://127.0.0.1/werewolf-check 2>/dev/null | grep -qx werewolf-backend; do i=$((i + 1)); [ $i -le 60 ] || { echo "nothing through HAProxy in 60 s"; exit 1; }; sleep 1; done
 # The request arrived with the client's address added and without its
 # Proxy header, which a CGI backend would make HTTP_PROXY (httpoxy).

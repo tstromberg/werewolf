@@ -503,7 +503,10 @@ endif
 endif
 shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 	awk -F/ -v s=$(SHARD) 'BEGIN { split(s, a, "/") } (NR - 1) % a[2] == a[1] - 1'),$(1))
-check-forms:     $(addprefix check-,$(call shard,$(FORMS)))
+APP_CHECK_FORMS := $(shell awk '!/^\#/ && NF { print $$1 }' test/app-fixtures)
+.PHONY: check-apps $(addprefix check-app-,$(APP_CHECK_FORMS))
+check-apps: $(addprefix check-app-,$(call shard,$(APP_CHECK_FORMS)))
+check-forms:     $(addprefix check-,$(call shard,$(FORMS))) check-apps
 check-shellfree: $(addprefix check-shellfree-,$(call shard,$(FORMS)))
 # check-secureboot runs where firmware boots fast enough: an arm64 host
 # with its own accelerator. Emulated arm64 skips it, as it skips the UEFI
@@ -571,19 +574,31 @@ check-one: | _check-shared
 check-%: | _check-shared
 	@$(call built,$*,$(CHECK_MAKE) FORM=$* image)
 	@$(CHECK_MAKE) FORM=$* _check-form
+
+# Test the actual application-carrier form with code in its verified image,
+# as well as its ordinary boot without code. A separate name avoids sharing
+# disks, configuration or logs with check-FORM under make -j.
+$(addprefix check-app-,$(APP_CHECK_FORMS)): check-app-%: | _check-shared
+	@test/app-fixture $* $(CHECK)/apps/$*
+	@$(call built,app-$*,$(CHECK_MAKE) FORM=$* APP=$(CHECK)/apps/$* image)
+	@$(CHECK_MAKE) FORM=$* APP=$(CHECK)/apps/$* CHECK_NAME=app-$* CHECK_SKIP= \
+		FORM_CHECKS=$(shell awk -v form=$* '$$1 == form { print $$3 }' test/app-fixtures) AGAIN_FORMS= _check-form
 # Each form's ports get their own host ports, so forms boot in parallel.
 check_port = $(shell echo $(FORMS) | tr ' ' '\n' | grep -n -x '$(2)' | cut -d: -f1 | awk '{ print $(1) + $$1 }')
-CHECK_SSH := $(if $(filter 22,$(shell $(FORM_ASK) listens $(FORM_REF))),$(call check_port,22200,$(FORM)))
+# A honeypot may offer an SSH banner on 22 without operator logins.
+CHECK_SSH := $(if $(and $(filter sshd bastion gitea sftpgo,$(CHAIN)),$(filter 22,$(shell $(FORM_ASK) listens $(FORM_REF)))),$(call check_port,22200,$(FORM)))
 CHECK_WEB_PORT := $(call form_check,web)
 CHECK_WEB := $(if $(CHECK_WEB_PORT),$(call check_port,23200,$(FORM)))
+CHECK_SKIP ?= $(call form_check,skip)
 CHECK_FWD = $(if $(CHECK_SSH),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_SSH)-:22$(if $(CHECK_WEB),$(,)hostfwd=tcp:127.0.0.1:$(CHECK_WEB)-:$(CHECK_WEB_PORT)))
 # The forms booted again on the disks they left (docs/testing.md).
-AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo samba
+AGAIN_FORMS ?= minimal sshd prod-ssh gitea vaultwarden demo samba mongodb rabbitmq
 ifeq ($(AGAIN_FORMS),all)
 override AGAIN_FORMS := $(FORMS)
 endif
 _check-form: $(HOWL) $(TEST_SK)
-	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) SKIP='$(call form_check,skip)' \
+	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) SKIP='$(CHECK_SKIP)' \
+		CHECK_NAME='$(CHECK_NAME)' FORM_CHECKS='$(FORM_CHECKS)' \
 		AGAIN=$(filter $(AGAIN_FORMS),$(FORM)) SSH_PORT=$(CHECK_SSH) SSH_SK_PROVIDER=$(CURDIR)/$(TEST_SK) \
 		KEPT_KEYS=$(CHECK_KEPT_KEYS) GITEA_PORT=$(CHECK_WEB) test/check-form \
 		$(subst user$(,)id=n0,user$(,)id=n0$(CHECK_FWD),$(CHECK_QEMU))

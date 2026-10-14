@@ -1119,7 +1119,10 @@ pub const Tell = struct {
             .verbose = t.verbose,
             .command = t.command,
             .log = try gpa.print("{s}/create.log", .{dir}),
-            .first = .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" },
+            .first = if (t.milestones) |m|
+                m.phase orelse .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" }
+            else
+                .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" },
             .milestones = t.milestones,
         };
     }

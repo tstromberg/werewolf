@@ -483,4 +483,7 @@ test "manifest authentication precedes parsing and pins the enrolled key" {
         error.WrongImageArch,
         open(gpa, key, data, sig, .{ .channel = identity.channel, .arch = "x86_64" }),
     );
+    const art = try hashBytes(gpa, "abc");
+    try matches(art, 3, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    try testing.expectError(error.ImageArtifactMismatch, matches(art, 4, art.sha256));
 }
