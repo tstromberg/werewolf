@@ -42,6 +42,18 @@ def identity(source, arch, locks):
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def source_identity(tree):
+    entries = []
+    for row in tree.split(b'\0'):
+        if not row:
+            continue
+        path = row.split(b'\t', 1)[1]
+        if (path.endswith(b'.md') and b'/rootfs/' not in path) or b'__pycache__/' in path:
+            continue
+        entries.append(row)
+    return hashlib.sha256(b'\0'.join(entries)).hexdigest()
+
+
 def prepare(howl, arch, output):
     if arch not in ('x86_64', 'aarch64'):
         raise ValueError('unsupported protected architecture')
@@ -81,7 +93,7 @@ def prepare(howl, arch, output):
         raise ValueError('Alpine kernel changed; update boot/kernel-source before publishing')
     tree = subprocess.check_output(['git', 'ls-tree', '-rz', 'HEAD', '--', 'Makefile', 'files.zig',
         'boot', 'cmd', 'forms', 'lib', 'tools', 'release', 'test', '.github'])
-    source = hashlib.sha256(b'\0'.join(row for row in tree.split(b'\0') if b'__pycache__/' not in row)).hexdigest()
+    source = source_identity(tree)
     digest = identity(source, arch, locks)
     (output / 'inputs').write_text(digest + '\n')
     print('protected inputs: ' + digest)
