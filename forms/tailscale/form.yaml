@@ -10,7 +10,8 @@ check:
 
 services:
   tailscale:
-    exec: /usr/bin/tailscaled --tun=userspace-networking --port=41641 --state=/data/svc/tailscale/tailscaled.state --statedir=/data/svc/tailscale --socket=/run/svc/tailscale/tailscaled.sock --config=/run/svc/tailscale/config.json
+    exec: /usr/bin/tailscaled --tun=userspace-networking --port=41641 --state=/data/svc/tailscale/tailscaled.state --statedir=/data/svc/tailscale
+      --socket=/run/svc/tailscale/tailscaled.sock --config=/run/svc/tailscale/config.json
     user: tailscale
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     read: /etc/tailscale

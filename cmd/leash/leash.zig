@@ -229,7 +229,7 @@ pub fn main(init: std.process.Init) !void {
         "Landlock: {s}; this kernel cannot leash a service",
         .{sandbox.whyNot(gpa, err)},
     );
-    if ((s.listen.len > 0 or s.connect.len > 0 or s.connect_any) and rules.abi < 4)
+    if ((s.listen.len > 0 or s.connect.len > 0 or s.connect_any or s.dns) and rules.abi < 4)
         l.fail(.park, "Landlock ABI {d} has no TCP rules", .{rules.abi});
     const floor_rules: []const Floor = if (s.root != null) &rooted_floor else &floor;
     for (floor_rules) |f| allow(rules, f.path, f.access, .optional) catch {};
@@ -283,6 +283,8 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "listen tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
     for (s.connect) |port| rules.port(sandbox.connect_tcp, port) catch |err|
         l.fail(.park, "connect tcp/{d}: {s}", .{ port, sandbox.whyNot(gpa, err) });
+    if (s.dns) rules.port(sandbox.connect_tcp, 53) catch |err|
+        l.fail(.park, "connect dns: {s}", .{sandbox.whyNot(gpa, err)});
     // Every TCP port, for the one service that declared it. Other
     // services keep the ports on their connect lines and no others.
     if (s.connect_any) {

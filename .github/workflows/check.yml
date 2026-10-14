@@ -33,6 +33,8 @@ jobs:
         run: sudo test/ci-setup
       - name: Unit tests
         run: make -j"$(nproc)" test
+      - name: DNS permissions, DHCP renewal and HTTPS by hostname
+        run: make check-dns DNS_TEST_RUNNER=sudo
 
   lint:
     # Once: lint reads the sources, and the sources are the same on arm.

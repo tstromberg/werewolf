@@ -16,6 +16,7 @@ allow: [kvm]
 # QEMU's user-mode network, as root: the guests' names and HTTP and HTTPS,
 # through the host's own sockets.
 net:
+  - dns root
   - connect root udp/53 tcp/53 tcp/80 tcp/443
 
 # KVM: built into the aarch64 kernel; on x86_64 a module for each vendor,
@@ -27,6 +28,9 @@ modules:
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
 weaknesses:
+  network-root-dns-assigned: root forwards its guests' DNS queries to the assigned resolvers
+  network-root-dns-arbitrary: root forwards its guests' DNS queries to other servers
+  network-root-https-arbitrary: root forwards its guests' HTTPS connections
   network-no-login: sshd, by key, is what this form is for; busybox-full brings telnetd too, which nothing starts
   programs-no-downloaders: busybox-full, the tools of those who log in, has wget, nc and telnet
   programs-no-interpreters: busybox-full, the tools of those who log in, has awk

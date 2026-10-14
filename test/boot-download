@@ -33,6 +33,9 @@ class Downloads(unittest.TestCase):
         cls.identity.cleanup()
 
     def setUp(self):
+        modern_tls = patch.object(downloads.ssl, 'HAS_TLSv1_3', True)
+        modern_tls.start()
+        self.addCleanup(modern_tls.stop)
         self.temporary = tempfile.TemporaryDirectory(prefix='ww-download-cache-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -276,6 +279,53 @@ class Downloads(unittest.TestCase):
                     downloads.fetch('https://vendor.test/object', path, 2)
                 self.assertFalse(path.exists())
                 self.assertTrue(failure.fp.closed)
+
+    def test_stock_macos_python_uses_system_https_transport(self):
+        with patch.object(downloads.sys, 'platform', 'darwin'), \
+             patch.object(downloads.ssl, 'HAS_TLSv1_3', False), \
+             patch.object(downloads, 'fetch_curl') as curl:
+            path = self.root / 'macos'
+            downloads.fetch('https://vendor.test/object', path, 2)
+            curl.assert_called_once_with('https://vendor.test/object', path, 2, None)
+
+    def test_curl_transport_stream_bounds_identity_hash_and_redirect_authority(self):
+        class Process:
+            def __init__(self, args, raw, fields):
+                self.stdout = io.BytesIO(raw)
+                header = Path(args[args.index('--dump-header') + 1])
+                header.write_bytes(fields)
+
+            def wait(self, **kwargs):
+                return 0
+
+            def poll(self):
+                return 0
+
+        expected = dict(size=2, sha256=hashlib.sha256(b'ab').hexdigest())
+        cases = [(b'ab', b'HTTP/2 200\r\n\r\n', True),
+                 (b'a', b'HTTP/2 200\r\n\r\n', False),
+                 (b'abc', b'HTTP/2 200\r\n\r\n', False),
+                 (b'ab', b'HTTP/2 200\r\nContent-Encoding: gzip\r\n\r\n', False),
+                 (b'ab', b'HTTP/2 200\r\nContent-Length: 3\r\n\r\n', False),
+                 (b'', b'HTTP/2 302\r\nLocation: http://cdn.test/object\r\n\r\n', False),
+                 (b'', b'HTTP/2 302\r\nLocation: https://secret@cdn.test/object\r\n\r\n', False),
+                 (b'', b'HTTP/2 404\r\n\r\n', False)]
+        for index, (raw, fields, valid) in enumerate(cases):
+            def execute(args, **kwargs):
+                self.assertEqual('/usr/bin/curl', args[0])
+                self.assertEqual('=https', args[args.index('--proto') + 1])
+                self.assertEqual(downloads.USER_AGENT, args[args.index('--user-agent') + 1])
+                self.assertNotIn('--location', args)
+                self.assertNotIn('--insecure', args)
+                return Process(args, raw, fields)
+            with patch.object(downloads.subprocess, 'Popen', side_effect=execute):
+                path = self.root / ('curl-' + str(index))
+                if valid:
+                    downloads.fetch_curl('https://vendor.test/object', path, 2, expected)
+                    self.assertEqual(b'ab', path.read_bytes())
+                else:
+                    with self.assertRaises(ValueError):
+                        downloads.fetch_curl('https://vendor.test/object', path, 2, expected)
 
     def test_streaming_transport_enforces_sizes_without_content_length(self):
         class Response(io.BytesIO):

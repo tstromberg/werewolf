@@ -81,7 +81,9 @@ services:
   # the formatter (java) named by run. The heap is half its memory; the
   # rest is the JVM's own and the page cache.
   kafka:
-    exec: /usr/bin/java -Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent -XX:MaxInlineLevel=15 -XX:+ExitOnOutOfMemoryError -XX:-UsePerfData -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/kafka -Dlog4j2.configurationFile=/etc/kafka/log4j2.properties -cp /usr/lib/kafka/libs/* kafka.Kafka /run/svc/kafka/server.properties
+    exec: /usr/bin/java -Xms1g -Xmx1g -XX:+UseG1GC -XX:MaxGCPauseMillis=20 -XX:InitiatingHeapOccupancyPercent=35 -XX:+ExplicitGCInvokesConcurrent
+      -XX:MaxInlineLevel=15 -XX:+ExitOnOutOfMemoryError -XX:-UsePerfData -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/kafka
+      -Dlog4j2.configurationFile=/etc/kafka/log4j2.properties -cp /usr/lib/kafka/libs/* kafka.Kafka /run/svc/kafka/server.properties
     before: /usr/lib/werewolf/kafka-setup
     user: kafka
     run: /usr/bin/java

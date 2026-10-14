@@ -64,7 +64,8 @@ services:
   # database, and only services whose leash lets them connect to :5432
   # reach it at all.
   postgres:
-    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/usr/share/werewolf-iris/pg_hba.conf
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c
+      hba_file=/usr/share/werewolf-iris/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
     pledge: stdio rpath wpath inet proc ipc unix listen connect

@@ -234,6 +234,18 @@ const sources = std.StaticStringMap([]const u8).initComptime(.{
     .{ "network-bind", "bind(AF_INET TCP, INADDR_ANY, undeclared port)" },
     .{ "network-outbound", "connect(AF_INET UDP, 192.0.2.1:9), no packets sent" },
     .{
+        "network-root-dns-assigned",
+        "/etc/resolv.conf nameserver lines; root UDP/TCP connect(port 53)",
+    },
+    .{
+        "network-root-dns-arbitrary",
+        "root UDP/TCP connect(TEST-NET:53), excluding configured resolvers",
+    },
+    .{
+        "network-root-https-arbitrary",
+        "root nonblocking TCP connect(TEST-NET:443); no server response needed",
+    },
+    .{
         "network-metadata",
         "connect(AF_INET TCP, 169.254.169.254:80), then poll and getsockopt(SO_ERROR), 1 s" ++
             " deadline",
@@ -809,6 +821,30 @@ const briefs = std.StaticStringMap(Brief).initComptime(.{
             .label = "Undeclared egress blocked",
             .expr = "connect(UDP, 192.0.2.1:9)",
             .want = "EACCES",
+        },
+    },
+    .{
+        "network-root-dns-assigned",
+        Brief{
+            .label = "Root assigned DNS blocked",
+            .expr = "root connect(DNS, assigned)",
+            .want = "EACCES|EPERM",
+        },
+    },
+    .{
+        "network-root-dns-arbitrary",
+        Brief{
+            .label = "Root arbitrary DNS blocked",
+            .expr = "root connect(DNS, other)",
+            .want = "EACCES|EPERM",
+        },
+    },
+    .{
+        "network-root-https-arbitrary",
+        Brief{
+            .label = "Root arbitrary HTTPS blocked",
+            .expr = "root connect(TCP, other:443)",
+            .want = "EACCES|EPERM",
         },
     },
     .{

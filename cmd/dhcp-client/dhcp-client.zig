@@ -9,6 +9,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const sandbox = @import("sandbox");
 const network = @import("network");
+const dns_policy = @import("dns");
 const sys = sandbox.sys;
 
 const state_dir = "/run/werewolf/network";
@@ -99,6 +100,25 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         } else |err| if (err != error.FileNotFound) return err;
     }
 
+    const dns_users = try dns_policy.users(try Dir.cwd().readFileAlloc(
+        io,
+        dns_policy.policy_path,
+        gpa,
+        .limited(4096),
+    ));
+    const dns_servers = if (mode == .keep) try dns_policy.resolvers(Dir.cwd().readFileAlloc(
+        io,
+        dns_policy.resolv_path,
+        gpa,
+        .limited(1024),
+    ) catch |err| switch (err) {
+        error.FileNotFound => "",
+        else => return err,
+    }) else dns_policy.Resolvers{};
+    const dns_socket = if (mode == .keep and dns_users.len > 0)
+        try dns_policy.Socket.open()
+    else
+        null;
     const link = try Link.open(nic);
     // Log the carrier wait separately, so a NIC that comes up late (Hyper-V's,
     // after its VMBus handshake) is not blamed on the DHCP exchange.
@@ -122,6 +142,7 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
     const pid = try sys(linux.fork(), "fork");
     if (pid == 0) {
         _ = linux.close(sp[0]);
+        if (dns_socket) |socket| socket.close();
         _ = linux.close(link.inet);
         _ = linux.close(@intCast(dir));
         var e: Engine = .{ .pkt = link.packet, .sp = sp[1], .index = link.index, .mac = link.mac };
@@ -138,6 +159,9 @@ fn start(io: Io, gpa: Allocator, mode: Mode, arg_nic: []const u8) !void {
         .link = link,
         .nic = nic,
         .applied = held,
+        .dns_users = dns_users,
+        .dns_servers = dns_servers,
+        .dns_socket = dns_socket,
     };
     try p.confine();
     p.run();
@@ -460,6 +484,9 @@ const Parent = struct {
     /// applied is the lease on the NIC. keep starts from the one up applied.
     applied: ?Wire = null,
     log: Log = .{},
+    dns_users: dns_policy.Users,
+    dns_servers: dns_policy.Resolvers,
+    dns_socket: ?dns_policy.Socket,
 
     /// confine keeps only CAP_NET_ADMIN, lets Landlock limit writes to
     /// /run/werewolf/network, and installs a seccomp filter that kills the
@@ -470,6 +497,10 @@ const Parent = struct {
 
         var f: sandbox.Filter = .{};
         f.allowArg("read", 0, @intCast(p.sp));
+        if (p.dns_socket) |socket| {
+            f.allowArg("sendto", 0, @intCast(socket.fd));
+            f.allowArg("recvfrom", 0, @intCast(socket.fd));
+        }
         f.allowArg("ioctl", 1, linux.SIOCSIFADDR);
         f.allowArg("ioctl", 1, linux.SIOCSIFNETMASK);
         f.allowArg("ioctl", 1, linux.SIOCSIFMTU);
@@ -531,6 +562,15 @@ const Parent = struct {
                         .reason = "the new lease differs",
                     });
                 };
+                var servers: dns_policy.Resolvers = .{};
+                for (m.lease.dns[0..m.lease.ndns]) |ip| try servers.add(ip);
+                if (p.dns_socket) |*socket| try dns_policy.replace(
+                    socket,
+                    p.dns_users,
+                    p.dns_servers,
+                    servers,
+                );
+                p.dns_servers = servers;
                 try p.link.apply(p.dir, m.lease, &p.log, p.nic);
                 p.applied = m.lease;
                 var fba: [16 << 10]u8 = undefined;
@@ -972,7 +1012,7 @@ const Link = struct {
                 .errno = sandbox.errnoName(sandbox.failed_errno),
             });
         };
-        if (w.ndns > 0) {
+        {
             var text: [max_dns * 28]u8 = undefined;
             var tw: Io.Writer = .fixed(&text);
             for (w.dns[0..w.ndns]) |d| try tw.print(

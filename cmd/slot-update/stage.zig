@@ -560,7 +560,7 @@ fn warn(u: *Update, p: Pending, tier: policy.Tier, lead: i64, brief: bool) !void
         .body = noticeBody(u, p.report),
         .feed = keptFeed(u),
     });
-    const console = writeDev("/dev/console", msg);
+    const console = writeDevAt(linux.AT.FDCWD, "/dev/console", msg);
     const sessions = writePts(u, msg);
     u.record(.{
         .event = "warn",
@@ -595,16 +595,20 @@ fn keptFeed(u: *Update) ?tiers.Feed {
     return tiers.open(u.gpa, key, data, sig, nowSecs(u.io), last) catch null;
 }
 
-fn writeDev(path: [*:0]const u8, text: []const u8) bool {
-    const rc = linux.openat(linux.AT.FDCWD, path, .{
+fn writeDevAt(dirfd: i32, path: [*:0]const u8, text: []const u8) bool {
+    const rc = linux.openat(dirfd, path, .{
         .ACCMODE = .WRONLY,
         .CLOEXEC = true,
         .NOCTTY = true,
+        .NOFOLLOW = true,
         .NONBLOCK = true,
     }, 0);
     if (linux.errno(rc) != .SUCCESS) return false;
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS or
+        (st.mode & linux.S.IFMT) != linux.S.IFCHR) return false;
     var off: usize = 0;
     while (off < text.len) {
         const n = linux.write(fd, text[off..].ptr, text.len - off);
@@ -621,18 +625,18 @@ fn writeDev(path: [*:0]const u8, text: []const u8) bool {
 }
 
 fn writePts(u: *Update, text: []const u8) usize {
-    var d = Dir.cwd().openDir(u.io, "/dev/pts", .{ .iterate = true }) catch return 0;
+    var d = Dir.cwd().openDir(
+        u.io,
+        "/dev/pts",
+        .{ .iterate = true, .follow_symlinks = false },
+    ) catch return 0;
     defer d.close(u.io);
     var n: usize = 0;
     var it = d.iterate();
     while (it.next(u.io) catch return n) |e| {
         if (!digits(e.name)) continue;
-        const path = u.gpa.dupeSentinel(
-            u8,
-            u.gpa.print("/dev/pts/{s}", .{e.name}) catch continue,
-            0,
-        ) catch continue;
-        if (writeDev(path, text)) n += 1;
+        const name = u.gpa.dupeSentinel(u8, e.name, 0) catch continue;
+        if (writeDevAt(d.handle, name, text)) n += 1;
     }
     return n;
 }

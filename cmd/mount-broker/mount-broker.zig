@@ -417,6 +417,7 @@ fn writeFileAt(dirfd: i32, name: []const u8, data: []const u8) !void {
         0o700,
     );
     defer _ = linux.close(fd);
+    errdefer unlinkAt(dirfd, tmp) catch {};
     try writeAll(fd, data);
     if (linux.errno(linux.fsync(fd)) != .SUCCESS) return error.SyncFailed;
     var from_buf: [160]u8 = undefined;
@@ -665,6 +666,16 @@ fn digestAt(dirfd: i32, name: []const u8) !?Digest {
     return try digestFd(fd);
 }
 
+fn validStagedDir(st: linux.Statx) bool {
+    return (st.mode & linux.S.IFMT) == linux.S.IFDIR and
+        st.uid == 0 and st.gid == 0 and (st.mode & 0o022) == 0;
+}
+
+fn validStagedFile(st: linux.Statx) bool {
+    return (st.mode & linux.S.IFMT) == linux.S.IFREG and
+        st.nlink == 1 and st.uid == 0 and st.gid == 0 and (st.mode & 0o022) == 0;
+}
+
 fn openStagedFile(rel: [:0]const u8) !i32 {
     const dir_flags: linux.O = .{
         .ACCMODE = .RDONLY,
@@ -687,6 +698,14 @@ fn openStagedFile(rel: [:0]const u8) !i32 {
         "openat2 work_dir",
     );
     defer _ = linux.close(wfd);
+    var dst_st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(
+        wfd,
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .UID = true, .GID = true },
+        &dst_st,
+    )) != .SUCCESS or !validStagedDir(dst_st)) return error.UnsafeStagedDir;
     const file_flags: linux.O = .{
         .ACCMODE = .RDONLY,
         .NOFOLLOW = true,
@@ -709,8 +728,13 @@ fn openStagedFile(rel: [:0]const u8) !i32 {
     );
     errdefer _ = linux.close(fd);
     var st: linux.Statx = undefined;
-    if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true }, &st)) != .SUCCESS or
-        (st.mode & linux.S.IFMT) != linux.S.IFREG) return error.NotRegularFile;
+    if (linux.errno(linux.statx(
+        fd,
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .MODE = true, .UID = true, .GID = true, .NLINK = true },
+        &st,
+    )) != .SUCCESS or !validStagedFile(st)) return error.NotRegularFile;
     return fd;
 }
 
@@ -750,6 +774,7 @@ fn copyChecked(
         0o700,
     );
     defer _ = linux.close(dst);
+    errdefer unlinkAt(dirfd, tmp) catch {};
     var hash: Sha256 = .init(.{});
     var total: u64 = 0;
     var buf: [64 << 10]u8 = undefined;
@@ -1082,4 +1107,30 @@ test isMounted {
         "/boot",
     ));
     try testing.expect(!isMounted("/dev/vda /boot2 ext4 ro 0 0\n", "/boot"));
+}
+
+test "staged files and directories must be root-owned, not group/world-writable, and unlinked" {
+    var dir = std.mem.zeroes(linux.Statx);
+    dir.mode = linux.S.IFDIR | 0o755;
+    try testing.expect(validStagedDir(dir));
+    dir.mode = linux.S.IFDIR | 0o775;
+    try testing.expect(!validStagedDir(dir));
+    dir.mode = linux.S.IFDIR | 0o755;
+    dir.uid = 69;
+    try testing.expect(!validStagedDir(dir));
+
+    var file = std.mem.zeroes(linux.Statx);
+    file.mode = linux.S.IFREG | 0o600;
+    file.nlink = 1;
+    try testing.expect(validStagedFile(file));
+    file.nlink = 2;
+    try testing.expect(!validStagedFile(file));
+    file.nlink = 1;
+    file.uid = 69;
+    try testing.expect(!validStagedFile(file));
+    file.uid = 0;
+    file.mode = linux.S.IFREG | 0o664;
+    try testing.expect(!validStagedFile(file));
+    file.mode = linux.S.IFIFO | 0o600;
+    try testing.expect(!validStagedFile(file));
 }

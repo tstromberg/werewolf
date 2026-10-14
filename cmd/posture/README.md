@@ -21,11 +21,12 @@ adds what werewolf skips by choice (wiping freed memory, forced CPU mitigations,
 strict reverse-path filtering, ignoring IPv6 router advertisements;
 docs/security.md). `NO_COLOR` or `TERM=dumb` disables terminal colors.
 Playground's interactive logins run `--summary` via `/etc/profile.d/posture.sh`.
+Summary rows align the gap and evidence: amber `gap` for declared weaknesses,
+red `FAIL` for unexpected failures, shortened to terminal width. SSH lists unmet key requirements.
 
 Text uses two columns (`source = value, want expectation` for failures, at most
 two rows per item); `--json` retains complete `source`, `expected`, `observed`,
-and `comparison`. `--verbose` streams phase starts, per-check elapsed ms, walk
-progress, and totals to stderr.
+and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progress and totals to stderr.
 
 ## Goals
 

@@ -1112,12 +1112,15 @@ pub const Tell = struct {
     note: ?[]const u8 = null,
     dev: bool = false,
 
+    milestones: ?*progress.Milestones = null,
+
     pub fn step(t: Tell, gpa: Allocator, dir: []const u8) !progress.Options {
         return .{
             .verbose = t.verbose,
             .command = t.command,
             .log = try gpa.print("{s}/create.log", .{dir}),
-            .first = start_phase,
+            .first = .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" },
+            .milestones = t.milestones,
         };
     }
 };
@@ -1365,6 +1368,8 @@ fn create(io: Io, gpa: Allocator, line: []const []const u8, why: *Why) !void {
 fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, why: *Why) !void {
     const began = Io.Clock.awake.now(io);
     const verbose, const some = try verboseFlag(gpa, all);
+    var milestones: progress.Milestones = .init(io, !verbose);
+    defer milestones.finish();
     const launch = try launchFlags(gpa, some, why);
     const args = launch.args;
     const dev = launch.dev;
@@ -1378,6 +1383,11 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     const on = eng.on;
     if (!o.help) try requireProtection(on, launch, why);
     o.on = on;
+    milestones.enabled = !o.help and !verbose;
+    milestones.enter(.{
+        .name = try gpa.print("Resolving {s} deployment for {t}", .{ o.form, on }),
+        .short = "resolve",
+    });
     if (o.secure and !o.local) {
         o.production_download = true;
         if (o.app != null or o.import_dir != null or !forms.isName(o.form)) return why.refuse(
@@ -1415,6 +1425,9 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .{name},
     );
 
+    if (on == .lima) {
+        try @import("local-secure.zig").reconcileLima(io, gpa, name, why);
+    }
     if (o.boot_image != null) try @import("local-secure.zig").resumeDownload(
         io,
         gpa,
@@ -1435,6 +1448,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .began = began,
         .note = eng.note,
         .dev = dev,
+        .milestones = &milestones,
     };
     if (on == .disk) return why.refuse(
         "--on disk is pack's: howl build and howl pack make a disk and its tar",
@@ -1498,7 +1512,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
                 definition.ssh == .files,
                 name,
                 yes or on.here(),
-                o.local,
+                verbose,
             );
         } else o.own_keys = try keys.offer(
             io,
@@ -1506,7 +1520,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             try chain(io, gpa, o.form, why),
             name,
             yes or on.here(),
-            o.local,
+            verbose,
         );
     }
     const entries = try gather(io, gpa, iface, o, why);
@@ -1518,10 +1532,11 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             const cached = try @import("local-secure.zig").reuse(io, gpa, o, name, tar);
             if (cached == .running) {
                 try @import("local-secure.zig").startPublisher(io, gpa, name, why);
-                try w.print(
-                    "{s}\t{s}\tunchanged; running with Secure Boot, IPE, TPM A/B\n",
-                    .{ name, o.form },
-                );
+                milestones.done(.{
+                    .name = try gpa.print("{s} running, inputs unchanged; total", .{name}),
+                    .short = "ready",
+                });
+                try local.protectedReady(io, gpa, name, o.form, on, true, w, why);
                 return;
             }
             keep = cached == .configure;

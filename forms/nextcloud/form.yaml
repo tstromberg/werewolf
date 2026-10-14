@@ -108,7 +108,8 @@ services:
   # the config names; occ upgrades it when the image brought a new
   # Nextcloud, and adds the indices a new release wants.
   nextcloud:
-    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/nextcloud -d opcache.memory_consumption=256 -d opcache.interned_strings_buffer=32 -d opcache.max_accelerated_files=20000 -d opcache.revalidate_freq=60
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/nextcloud -d
+      opcache.memory_consumption=256 -d opcache.interned_strings_buffer=32 -d opcache.max_accelerated_files=20000 -d opcache.revalidate_freq=60
     before:
       - /usr/bin/php -d apc.enable_cli=1 -d memory_limit=1G /usr/share/werewolf-nextcloud/setup.php
       - /usr/bin/php -d apc.enable_cli=1 -d memory_limit=1G /usr/share/nextcloud/occ upgrade --no-interaction

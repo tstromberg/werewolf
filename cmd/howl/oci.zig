@@ -588,7 +588,7 @@ pub fn bakeTree(io: Io, gpa: Allocator, k: Bake, why: *Why) !void {
 
 /// lay bakes the `image:` services of the build's chain, as `howl form
 /// --oci` bakes one into a form's own rootfs, into BUILD/oci/FORM/NAME-KEY,
-/// KEY a hash of what the bake depends on, and lays each after its form's
+/// KEY a hash of what the bake depends on, and lays each before its form's
 /// rootfs (Form.images). A tag is resolved at every build, so a form that
 /// names one follows its image's releases; a moved tag is a new KEY, baked
 /// into a new directory and renamed into place, so builds side by side
@@ -786,7 +786,10 @@ pub fn prepare(
         root.symLink(io, l[1], at, .{}) catch |err|
             return why.refuse("{s}/{s}: {s}", .{ dir, at, @errorName(err) });
     }
+    try place(io, root, "etc/werewolf-network", .dir, why);
     try place(io, root, "etc/resolv.conf", .file, why);
+    try root.deleteFile(io, "etc/resolv.conf");
+    try root.symLink(io, "/etc/werewolf-network/resolv.conf", "etc/resolv.conf", .{});
     try place(io, root, "etc/hosts", .file, why);
     root.writeFile(io, .{
         .sub_path = "etc/hosts",
@@ -1061,4 +1064,31 @@ test "unpack refuses a hardlink through an archive symlink" {
     var why: Why = .{};
     try testing.expectError(error.Refused, unpack(io, gpa, &r, tmp.dir, &why));
     try testing.expectError(error.FileNotFound, tmp.dir.access(io, "copied", .{}));
+}
+
+test "OCI resolver binding follows atomic DHCP replacement without image links escaping" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "etc");
+    try tmp.dir.symLink(io, "/outside", "etc/werewolf-network", .{});
+    try tmp.dir.symLink(io, "/outside", "etc/resolv.conf", .{});
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    var why: Why = .{};
+    try prepare(io, gpa, dir, "web", &.{}, &why);
+    var buf: [128]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/etc/werewolf-network/resolv.conf",
+        buf[0..try tmp.dir.readLink(io, "etc/resolv.conf", &buf)],
+    );
+    const bound = try tmp.dir.openDir(io, "etc/werewolf-network", .{ .follow_symlinks = false });
+    bound.close(io);
+    try prepare(io, gpa, dir, "web", &.{}, &why);
+    try testing.expectEqualStrings(
+        "/etc/werewolf-network/resolv.conf",
+        buf[0..try tmp.dir.readLink(io, "etc/resolv.conf", &buf)],
+    );
 }

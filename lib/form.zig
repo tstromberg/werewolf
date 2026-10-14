@@ -25,8 +25,8 @@ pub const Node = union(enum) {
 };
 
 pub const Scalar = struct {
-    /// raw is the scalar as written, quotes and all. A merged config repeats
-    /// it, so apko reads each value as the author wrote it.
+    /// raw keeps quotes as written and folds plain continuations to spaces,
+    /// so a merged config gives apko the same value.
     raw: []const u8,
     /// text is the value, unquoted.
     text: []const u8,
@@ -137,7 +137,10 @@ const Parser = struct {
             for (entries.items) |e|
                 if (mem.eql(u8, e.key, key)) return p.fail(l.n, "a key given twice");
             p.i += 1;
-            const value = if (rest.len > 0) try p.flow(rest, l.n) else try p.nested(indent, l.n);
+            const value = if (rest.len > 0)
+                try p.flow(rest, l.n, indent)
+            else
+                try p.nested(indent, l.n);
             try entries.append(p.gpa, .{ .key = key, .value = value });
         }
         return .{ .map = entries.items };
@@ -174,16 +177,37 @@ const Parser = struct {
                 try items.append(p.gpa, try p.map(at));
             } else {
                 p.i += 1;
-                try items.append(p.gpa, try p.flow(rest, l.n));
+                try items.append(p.gpa, try p.flow(rest, l.n, indent));
             }
         }
         return .{ .list = items.items };
     }
 
     /// flow parses a value on its key's or item's line: a scalar, `[a, b]` or `{}`.
-    fn flow(p: *Parser, text: []const u8, n: usize) SyntaxError!Node {
+    fn flow(p: *Parser, text: []const u8, n: usize, indent: usize) SyntaxError!Node {
         if (mem.eql(u8, text, "{}")) return .{ .map = &.{} };
-        if (text[0] != '[') return .{ .scalar = try p.scalar(text, n) };
+        if (text[0] != '[') {
+            const first = try p.scalar(text, n);
+            if (text[0] == '"' or text[0] == '\'' or
+                p.i == p.lines.len or p.lines[p.i].indent <= indent)
+                return .{ .scalar = first };
+            // Plain YAML values may continue on adjacent, indented lines.
+            // Blank lines have different folding rules and are outside this subset.
+            var joined: std.ArrayList(u8) = .empty;
+            try joined.appendSlice(p.gpa, text);
+            var last = n;
+            while (p.i < p.lines.len and p.lines[p.i].indent > indent) : (p.i += 1) {
+                const next = p.lines[p.i];
+                if (next.n != last + 1 or isItem(next.text))
+                    return p.fail(next.n, "a continuation must be an adjacent plain value");
+                try joined.append(p.gpa, ' ');
+                try joined.appendSlice(p.gpa, next.text);
+                // Validate the joined value too, so nested keys cannot become text.
+                _ = try p.scalar(joined.items, next.n);
+                last = next.n;
+            }
+            return .{ .scalar = try p.scalar(joined.items, n) };
+        }
         if (text[text.len - 1] != ']') return p.fail(n, "a list that does not end with ]");
         const inner = mem.trim(u8, text[1 .. text.len - 1], " ");
         var items: std.ArrayList(Node) = .empty;
@@ -1037,9 +1061,16 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
                 } else if (mem.eql(u8, d.key, "connect")) for (values) |v| {
                     var net: std.ArrayList([]const u8) = .empty;
                     var it = mem.tokenizeAny(u8, v.scalar.text, " \t");
-                    while (it.next()) |w| if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w) or
-                        mem.eql(u8, w, "any"))
-                        try net.append(gpa, w);
+                    while (it.next()) |w| {
+                        if (mem.eql(u8, w, "dns")) {
+                            if (user.len == 0) return f.fail(gpa, "{s}/form.yaml: services: " ++
+                                "{s}: connect dns needs the service's " ++
+                                "user", .{ form.dir, s.key });
+                            try out.append(gpa, try gpa.print("dns {s}", .{user}));
+                        } else if (mem.startsWith(u8, w, "tcp/") or fenceOnly(w) or
+                            mem.eql(u8, w, "any"))
+                            try net.append(gpa, w);
+                    }
                     if (net.items.len == 0) continue;
                     if (user.len == 0) return f.fail(
                         gpa,
@@ -1064,7 +1095,7 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
     for (forms) |form| for (try form.items(gpa, "net")) |line| {
         var it = mem.tokenizeAny(u8, line, " \t");
         const key = it.next() orelse "";
-        if (mem.eql(u8, key, "connect") or mem.eql(u8, key, "listen")) {
+        if (mem.eql(u8, key, "connect") or mem.eql(u8, key, "listen") or mem.eql(u8, key, "dns")) {
             const user = it.next() orelse "";
             if (runs_as.get(user)) |svc| return f.fail(
                 gpa,
@@ -1637,6 +1668,46 @@ test "parse: maps, lists, item maps, inline lists, comments, quotes" {
     try testing.expectEqual(0, doc.get("empty").?.list.len);
 }
 
+test "parse: plain continuations preserve commands and round-trip" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const doc = try testParse(gpa,
+        \\services:
+        \\  web:
+        \\    exec: /usr/bin/server --port 80
+        \\      --config /etc/server.conf
+        \\    before:
+        \\      - /usr/bin/python -c
+        \\        "print('ready')"
+        \\      - /usr/bin/check
+        \\    user: web
+        \\accounts:
+        \\  users:
+        \\    - username: web
+        \\      homedir: /data/web
+        \\        directory
+        \\      uid: 1000
+    );
+    const web = doc.get("services").?.get("web").?;
+    const command = "/usr/bin/server --port 80 --config /etc/server.conf";
+    try testing.expectEqualStrings(command, web.get("exec").?.scalar.text);
+    try testing.expectEqualStrings("web", web.get("user").?.scalar.text);
+    const before = web.get("before").?.list;
+    try testing.expectEqual(2, before.len);
+    try testing.expectEqualStrings("/usr/bin/python -c \"print('ready')\"", before[0].scalar.text);
+    const users = doc.get("accounts").?.get("users").?.list;
+    try testing.expectEqualStrings("/data/web directory", users[0].get("homedir").?.scalar.text);
+    try testing.expectEqualStrings("1000", users[0].get("uid").?.scalar.text);
+    const written = try testWrite(gpa, doc);
+    const again = try testParse(gpa, written);
+    try testing.expectEqualStrings(
+        command,
+        again.get("services").?.get("web").?.get("exec").?.scalar.text,
+    );
+    try testing.expectEqualStrings(written, try testWrite(gpa, again));
+}
+
 test "parse: what apko might read otherwise is refused, with its line" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
@@ -1654,6 +1725,11 @@ test "parse: what apko might read otherwise is refused, with its line" {
         .{ "a: [b, , c]\n", 1 },
         .{ "a: \"\\n\"\n", 1 },
         .{ "?: x\n", 1 },
+        .{ "a: value\n  nested: value\n", 2 },
+        .{ "a: value\n\n  continuation\n", 3 },
+        .{ "a: value\n  # comment\n  continuation\n", 3 },
+        .{ "a: \"value\"\n  continuation\n", 2 },
+        .{ "a: [value]\n  continuation\n", 2 },
     };
     for (bad) |b| {
         var d: Diagnostic = .{};
@@ -2275,4 +2351,29 @@ test bastionService {
             "tcp/2222\n",
         try bastionService(io, gpa, tmp.dir, try chain(io, gpa, tmp.dir, "edge", &f), &f),
     );
+}
+
+test "service DNS compiles for its user and direct service grants are refused" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var diag: Diagnostic = .{};
+    var failure: Failure = .{};
+    const spec = try parse(
+        gpa,
+        "services:\n  web:\n    exec: /web\n    user: web\n    connect: dns tcp/443\n",
+        &diag,
+    );
+    const forms = [_]Form{.{ .name = "site", .dir = "site", .spec = spec }};
+    try testing.expectEqualStrings(
+        "dns web\nconnect web tcp/443",
+        try mem.join(gpa, "\n", try netLines(gpa, &forms, &failure)),
+    );
+    const bad = try parse(
+        gpa,
+        "net: [dns web]\nservices:\n  web:\n    exec: /web\n    user: web\n",
+        &diag,
+    );
+    const bad_forms = [_]Form{.{ .name = "bad", .dir = "bad", .spec = bad }};
+    try testing.expectError(error.Form, netLines(gpa, &bad_forms, &failure));
 }

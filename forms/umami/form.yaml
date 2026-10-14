@@ -67,7 +67,8 @@ services:
   # umami in there without a password and no one else, and leash lets no
   # service but Umami connect to 5432.
   postgres:
-    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c hba_file=/etc/postgresql/pg_hba.conf
+    exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/svc/postgres -c
+      hba_file=/etc/postgresql/pg_hba.conf
     before: /usr/lib/werewolf/pg-init
     user: postgres
     pledge: stdio rpath wpath proc ipc inet unix listen connect

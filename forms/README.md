@@ -1,5 +1,8 @@
 # forms
 
+To choose a VM, browse the [available forms and setup guides](../docs/forms-catalog.md).
+This page is the reference for defining a form.
+
 Each directory here is a form ([docs/forms.md](../docs/forms.md)), and
 holds everything about it: a new form is a new directory.
 
@@ -33,10 +36,10 @@ by name from there, so the machine updates it; `--build` takes this tree's.
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `sh-shim` | added to |
 | `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
 | `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
-| `services` | its leashed services, one a name: leash's directives as keys ([cmd/leash](../cmd/leash/leash.zig) lists them), a value one line, a list one line each, which the build writes as `etc/sv/NAME/service` with `run` and `finish` on leash. `listen` and `connect` take a net line's words (`tcp/PORT`, `udp/PORT`, `icmp`, `public`, `loopback`): leash holds the TCP, fence the rest, so a service's network is said once. `image: REF` runs it in that image's tree, baked at `/oci/NAME` as `_oci-NAME` with the image's own command and environment, or `exec`'s; a tag is followed, the build baking its digest of the day ([docs/design/oci.md](../docs/design/oci.md)); `run DIR/` runs what is beneath DIR in it; `link: [NAME...]` reaches those services' ports on loopback | whole, last by name |
+| `services` | its leashed services, one a name: leash's directives as keys ([cmd/leash](../cmd/leash/leash.zig) lists them), a value one line, a list one line each, which the build writes as `etc/sv/NAME/service` with `run` and `finish` on leash. `listen` and `connect` take a net line's words (`tcp/PORT`, `udp/PORT`, `icmp`, `public`, `loopback`, `dns`): leash holds the TCP, fence the rest, so a service's network is said once. `image: REF` runs it in that image's tree, baked at `/oci/NAME` as `_oci-NAME` with the image's own command and environment, or `exec`'s; a tag is followed, the build baking its digest of the day ([docs/design/oci.md](../docs/design/oci.md)); `run DIR/` runs what is beneath DIR in it; `link: [NAME...]` reaches those services' ports on loopback | whole, last by name |
 | `users` | the machine's people, the top manifest's alone (a form others take may name none): each a name with `keys:` (lines of a `.pub`, security keys' unless `sshd:` takes key files) and `admin: true`, whose keys are root's too. Never in the image: `howl` packs them into the boot config, and init makes each an account (uid its name's hash in 1000-60000, home `/data/home/NAME`, ash where busybox gives one) and its keys file; `howl --users.NAME.keys LINE`, `--users.NAME.admin` | the top form's |
 | `updates` | how the machine keeps itself current (docs/updater.md): `every: 1h` (5m to 7d) between checks, or `off`, which leaves the autoupdate service out of the image; `howl --updates off`, `--updates.every 1h` | the last form's |
-| `net` | the network of what is no service, as the updater's fetcher (`connect _update tcp/443 udp/53 tcp/53`) or root's: `listen tcp/PORT... [loopback]`, `listen USER udp/PORT...` (a kernel's socket, as WireGuard's, is root's), `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER`; a line for a service's user is refused ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
+| `net` | the network of what is no service, as the updater's fetcher (`connect _update tcp/443`, `dns _update`) or root's: `listen tcp/PORT... [loopback]`, `listen USER udp/PORT...` (a kernel's socket, as WireGuard's, is root's), `connect USER\|all tcp/PORT udp/PORT icmp [public]`, `metadata USER`, `dns USER...` (UDP/TCP 53 to detected resolvers only); a line for a service's user is refused ([docs/design/fence.md](../docs/design/fence.md)); `build/host/form listens FORM` lists the ports it serves | added to |
 | `prune` | files its packages bring that nothing runs, as each is in the image: `usr/bin/bash` | added to |
 | `dev` | packages for DEV=1 builds alone: a daemon's client, for its checks | added to |
 | `modules` | kernel modules it loads, `MODULE...`; `ARCH MODULE...` for one arch (`aarch64 virtio_mmio`); `@TAG MODULE...` for a machine stage0 tags (`"@esp vfat"`, quoted, as YAML wants a value that starts with @); both, arch first: `aarch64 @hyperv hv_netvsc` | added to |
@@ -70,8 +73,10 @@ weaknesses:
 
 Both files are YAML in the small part of it they are written in: block
 maps and lists indented with spaces, plain or quoted scalars, `[a, b]`,
-and `#` comments. A key this page does not list, or YAML apko might read
-some other way (anchors, tags, multi-line scalars, inline maps), fails
+and `#` comments. Plain values may wrap onto adjacent, more-indented lines;
+each line break becomes a space. Quoted values stay on one line. A key
+this page does not list, or YAML apko might read some other way (anchors,
+tags, block scalars, inline maps, blank lines within values), fails
 the build with its file and line.
 
 ## What apko installs

@@ -2,9 +2,8 @@
 
 ## Summary
 
-fence sets the machine's network and file policy once at boot, from the
-image, then execs runit. Every process descends from it, and none, not even
-root, can loosen the policy before a reboot.
+fence sets the image's network and file policy, then execs runit. Every
+process descends from it; root cannot loosen the policy before a reboot.
 
 ## Background
 
@@ -13,13 +12,12 @@ serves or asked for, with no firewall to configure. init's last step is
 `exec fence runit`. Before that, init installs the seal and starts the
 programs that stay outside fence's domain: the mount broker, DHCP's renewal
 (which keeps its CAP_NET_ADMIN and packet socket) and stage0's deadman.
-fence reads only `/usr/share/werewolf/net`, compiled from form.yaml's `net`
-lines: one entry per line, numbers only, `all` for every user.
-
+fence reads `/usr/share/werewolf/net`, compiled from form.yaml's `net`, and
+the detected resolvers: one entry per line, numbers only, `all` for every user.
     listen tcp 22
     listen tcp 5432 loopback
     connect 0 tcp 443
-    connect all udp 53
+    dns 69
     connect 207 tcp 443 public
     metadata 68
 
@@ -41,16 +39,19 @@ lines: one entry per line, numbers only, `all` for every user.
    traffic passes only if its user declared the protocol and port
    (`connect`), as a reply from a served port (`listen`), as ICMPv6, or to
    the metadata server's TCP 80 for a user named in `metadata`. Anything
-   else fails with EACCES. A `public` connect is also refused to private,
-   loopback, link-local, shared, multicast and reserved addresses, so a
-   service that fetches URLs strangers name cannot reach the local network
-   or the metadata server. Azure's wire server is closed to everyone.
-   Arriving traffic passes to a served port, from a port the machine
-   connects to, or as ICMP. TCP, UDP, the other transports, tunnels and
-   IPsec are dropped unanswered; other protocols get "unreachable". Local
-   and loopback traffic always pass. A `loopback` listen has no rule, so
-   only this machine reaches it. Allowed traffic with no route fails as
-   "network unreachable", not EACCES, so clients try the next address.
+   else fails with EACCES. `dns UID` permits UDP and TCP 53 only to the
+   detected IPv4 resolvers, including GCP's metadata address; replies must
+   come from those addresses to ephemeral ports. DHCP renewals revoke old
+   DNS rules before granting new ones ([dns.md](../../docs/design/dns.md)).
+   A `public` connect refuses private, loopback, link-local, shared,
+   multicast and reserved addresses, blocking the local network and
+   metadata server from URL fetchers. Azure's wire server is closed to all.
+   Arrivals pass to served ports, from connected ports, or as ICMP. Denied
+   TCP, UDP, other transports, tunnels and IPsec get no reply; other
+   protocols get "unreachable". Local and loopback traffic always pass.
+   A `loopback` listen has no rule, so only this machine reaches it.
+   Allowed traffic with no route fails as "network unreachable", not
+   EACCES, so clients try the next address.
 2. **Landlock**, for every process: TCP binds only to the policy's ports
    or 0, and connects only to declared, served, loopback and metadata
    ports. Files are readable anywhere but `/dev`; programs run only from
@@ -64,22 +65,18 @@ lines: one entry per line, numbers only, `all` for every user.
    allows them (`lib/allow.zig`: `netadmin`, `packet`; none does), and
    always CAP_SYS_ADMIN, which only Landlock needed. Root then cannot
    mount or configure a filesystem (fsconfig, CVE-2022-0185).
-4. **exec** PROGRAM, under its base name.
 
 ## Drawbacks
 
-- Stateless: any packet from TCP 443 or UDP 53 passes as a reply, to any socket.
+- Stateless: a broad `connect` admits replies by source port; `dns` also
+  checks the resolver address and destination ephemeral port.
 - Fragmented UDP replies are lost: later fragments carry no ports.
 
 ## Alternatives Considered
 
 ### netfilter or BPF
 More to configure and more kernel to reach. Policy routing, Landlock and
-the bounding set are built in, and nothing sets them again.
-
-### A rule that drops every protocol arriving
-ARP asks whether an address is local with a lookup that has no protocol.
-Dropping that would leave the machine unreachable.
+the bounding set are built in; DHCP changes only resolver grants.
 
 ## Security Considerations
 

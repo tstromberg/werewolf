@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+"""Exercise stale Lima enrollment through create, without booting a VM."""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HOWL = str(Path(sys.argv.pop(1) if len(sys.argv) > 1 else 'build/host/howl').resolve())
+FORMS = Path('forms').resolve()
+
+
+class LimaState(unittest.TestCase):
+    def create(self, listing, status=0):
+        self.temporary = tempfile.TemporaryDirectory(prefix='ww-lima-state-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / 'forms').symlink_to(FORMS, target_is_directory=True)
+        self.directory = self.root / 'build/machines/state-test'
+        authority = self.directory / 'authority'
+        authority.mkdir(parents=True)
+        (self.directory / 'engine').write_text('lima')
+        # Deliberately incomplete: absent instances must not require a usable profile.
+        (authority / 'profile.json').write_bytes(b'old enrollment')
+        (authority / 'policy.key').write_bytes(b'old private key')
+        tools = self.root / 'bin'
+        tools.mkdir()
+        lima = tools / 'limactl'
+        lima.write_text('#!/bin/sh\n'
+                        'if [ "$1" = list ]; then\n'
+                        '  printf "%s\\n" ' + repr(listing) + '\n'
+                        '  exit ' + str(status) + '\n'
+                        'fi\n'
+                        '# Stop before provisioning or building a new VM.\n'
+                        'exit 1\n')
+        lima.chmod(0o755)
+        self.result = subprocess.run(
+            [HOWL, 'create', 'state-test', '--with', 'minimal', '--build', '--yes', '--on', 'lima'],
+            cwd=self.root, env=dict(os.environ, PATH=str(tools) + os.pathsep + os.environ['PATH']),
+            capture_output=True, timeout=30,
+        )
+
+    def test_absent_instance_clears_stale_enrollment_before_provisioning(self):
+        self.create('another-vm')
+        self.assertNotEqual(self.result.returncode, 0)
+        self.assertIn(b'--secure requires Lima on macOS', self.result.stderr)
+        self.assertFalse((self.directory / 'authority/profile.json').exists())
+        self.assertFalse((self.directory / 'authority/policy.key').exists())
+        self.assertFalse((self.root / 'build/machines/.orphaned').exists())
+
+    def test_present_instance_keeps_enrollment(self):
+        self.create('state-test')
+        self.assertNotEqual(self.result.returncode, 0)
+        self.assertEqual((self.directory / 'authority/policy.key').read_bytes(), b'old private key')
+
+    def test_failed_listing_keeps_enrollment(self):
+        self.create('', status=1)
+        self.assertNotEqual(self.result.returncode, 0)
+        self.assertIn(b'cannot query Lima', self.result.stderr)
+        self.assertEqual((self.directory / 'authority/profile.json').read_bytes(), b'old enrollment')
+
+
+unittest.main()

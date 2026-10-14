@@ -12,6 +12,8 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 . "$root/boot/stub-source"
 mkdir -p "$1"
 out=$(realpath "$1")
+phase() { printf 'howl: phase %s: %s\n' "$1" "$2" >&2; }
+phase stub-tools "Preparing EFI stub build tools"
 # Ubuntu build helpers may lack a sufficiently recent Meson. Keep Python
 # dependencies in this builder's private output, without changing system packages.
 # Ubuntu 24.04 ships an older Meson than this pinned systemd requires.
@@ -24,16 +26,21 @@ if ! command -v meson >/dev/null || ! meson --version | python3 -c \
 fi
 archive=$out/systemd-$version.tar.gz
 if [ ! -f "$archive" ]; then
+    phase stub-download "Downloading systemd $version EFI stub sources"
     curl --fail --location --proto '=https' --tlsv1.2 "$url" -o "$archive.new"
     mv "$archive.new" "$archive"
 fi
 printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+phase stub-unpack "Unpacking systemd $version EFI stub sources"
 [ -d "$out/systemd-$version" ] || tar -xf "$archive" -C "$out"
+phase stub-configure "Configuring systemd $version EFI stub (meson setup)"
 meson setup "$out/obj" "$out/systemd-$version" --reconfigure \
     -Dmode=release -Dtpm=true -Dbootloader=enabled -Defi-stub-extra-sections=3000 \
     -Dtests=false -Dman=disabled -Dhtml=disabled -Dtranslations=false \
     -Dsysusers=false -Dtmpfiles=false -Dfirstboot=false -Duserdb=false -Dinstall-tests=false
+phase stub-compile "Compiling systemd $version EFI stub (meson compile systemd-boot)"
 meson compile -C "$out/obj" systemd-boot
+phase stub-collect "Collecting the measured EFI stub"
 cp "$out/obj/src/boot/linux$efi.efi.stub" "$out/linux.efi.stub.new"
 mv "$out/linux.efi.stub.new" "$out/linux.efi.stub"
 echo "build-tpm-stub: $out/linux.efi.stub"

@@ -6,7 +6,7 @@ const boot = @import("boot.zig");
 const cmdline = @import("cmdline");
 const files = @import("files.zig");
 const kernel = @import("kernel.zig");
-const network = @import("network.zig");
+pub const network = @import("network.zig");
 const processes = @import("processes.zig");
 const evidence = @import("evidence.zig");
 
@@ -873,8 +873,12 @@ fn printComparison(w: *Io.Writer, text: []const u8, room: usize, indent: usize) 
 
 fn shortComparison(text: []const u8, budget: usize, buf: []u8) ![]const u8 {
     if (text.len <= budget) return text;
-    const want = std.mem.findLast(u8, text, ", want ");
-    const suffix = if (want != null and std.mem.count(u8, text, ", want ") == 1)
+    const separator = if (std.mem.findLast(u8, text, "; expected ") != null)
+        "; expected "
+    else
+        ", want ";
+    const want = std.mem.findLast(u8, text, separator);
+    const suffix = if (want != null and std.mem.count(u8, text, separator) == 1)
         text[want.?..]
     else
         "";
@@ -905,7 +909,7 @@ fn printKnown(w: *Io.Writer, k: Known) !void {
 }
 
 /// A login-sized report: state and counts on one line, then only failed
-/// checks. All failures use a red X, including expected gaps.
+/// checks. Declared gaps are amber; unexpected failures are red.
 fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: bool) !void {
     const reset = if (color) "\x1b[0m" else "";
     const dim = if (color) "\x1b[2m" else "";
@@ -921,7 +925,7 @@ fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: b
     try w.print("Security posture: {s}{s}{s} · ", .{ state_color, state.label(), reset });
     try w.print("{s}{d} passed{s} · {s}{d} failed{s} · {s}{d} skipped{s}", .{
         green,          r.summary.pass,
-        reset,          if (r.summary.fail > 0) red else dim,
+        reset,          if (r.summary.fail > 0) state_color else dim,
         r.summary.fail, reset,
         dim,            r.summary.skip,
         reset,
@@ -930,41 +934,102 @@ fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: b
     try w.writeByte('\n');
     var width: usize = 0;
     for (r.checks) |c| if (c.result == .fail) {
-        width = @max(width, (evidence.label(c.id) orelse c.name).len);
+        width = @max(width, summaryLabel(c).len);
     };
+    // Leave room for evidence even when a check has a long name.
+    width = @min(width, (cols orelse 120) / 3);
     for (r.checks) |c| {
         if (c.result != .fail) continue;
-        try w.print("  {s}X{s} ", .{ red, reset });
-        if (c.comparison) |comparison| {
-            const label = evidence.label(c.id) orelse c.name;
-            try writeClean(w, label);
-            try w.splatByteAll(' ', width - label.len + 2);
-            try printComparison(w, comparison, (cols orelse 120) -| (width + 6), width + 6);
-            try w.writeByte('\n');
-            continue;
-        }
-        // Clean every field: none may drive a terminal.
-        var row: Io.Writer.Allocating = .init(gpa);
-        defer row.deinit();
-        try writeClean(&row.writer, c.name);
-        if (c.excuse != null) try row.writer.writeAll(" (expected)");
-        const detail = if (c.detail.len > 0) c.detail else c.excuse orelse "";
-        if (detail.len > 0) {
-            try row.writer.writeAll(" · ");
-            try writeClean(&row.writer, detail);
-        }
-        const text = row.written();
-        const room = if (cols) |n| n -| 4 else std.math.maxInt(usize);
-        if (text.len <= room) {
-            try w.writeAll(text);
-        } else {
-            var end = room -| 3;
-            while (end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
-            try w.writeAll(text[0..end]);
-            try w.writeAll("…");
-        }
+        try w.print("  {s}{s}{s}  ", .{
+            if (c.excuse != null) amber else red,
+            if (c.excuse != null) "gap " else "FAIL",
+            reset,
+        });
+        const label_len = try printSummaryCell(gpa, w, summaryLabel(c), width);
+        try w.splatByteAll(' ', width -| label_len);
+        try w.writeAll("  ");
+        _ = try printSummaryCell(
+            gpa,
+            w,
+            try summaryDetail(gpa, c),
+            (cols orelse 120) -| (width + 10),
+        );
         try w.writeByte('\n');
     }
+}
+
+const summary_labels = std.StaticStringMap([]const u8).initComptime(.{
+    .{ "programs-no-shell", "Shells present" },
+    .{ "programs-no-downloaders", "Download / network tools" },
+    .{ "programs-no-interpreters", "Interpreters present" },
+    .{ "programs-no-compilers", "Compilers present" },
+    .{ "programs-no-module-tools", "Module tools present" },
+    .{ "programs-no-network-tools", "Network tools present" },
+    .{ "programs-no-debuggers", "Debuggers present" },
+    .{ "network-no-login", "Login servers present" },
+    .{ "network-ssh-security-keys", "SSH security key policy" },
+});
+
+fn summaryLabel(c: Check) []const u8 {
+    return summary_labels.get(c.id) orelse evidence.label(c.id) orelse c.name;
+}
+
+fn summaryDetail(gpa: Allocator, c: Check) ![]const u8 {
+    if (std.mem.eql(u8, c.id, "network-ssh-security-keys")) {
+        // Use the measured settings, not the list shortened for display. Touch
+        // may already be enforced even though ordinary keys are also accepted.
+        var fields = std.mem.splitSequence(u8, c.observed orelse "", "; ");
+        const algs = fields.next() orelse "";
+        const opts = fields.next() orelse "";
+        if (std.mem.startsWith(u8, algs, "pubkeyacceptedalgorithms=") and
+            std.mem.startsWith(u8, opts, "pubkeyauthoptions="))
+        {
+            const algorithms = algs["pubkeyacceptedalgorithms=".len..];
+            var keys = std.mem.tokenizeScalar(u8, algorithms, ',');
+            var other = false;
+            while (keys.next()) |key| other = other or !std.mem.startsWith(u8, key, "sk-");
+            var options = std.mem.tokenizeAny(u8, opts["pubkeyauthoptions=".len..], ", ");
+            var touch = false;
+            while (options.next()) |option| touch = touch or
+                std.mem.eql(u8, option, "touch-required");
+            const key_gap = if (std.mem.eql(u8, algorithms, "absent"))
+                "key algorithms unavailable"
+            else if (other)
+                "ordinary keys accepted"
+            else
+                "";
+            if (touch) return key_gap;
+            return gpa.print(
+                "{s}{s}touch not enforced",
+                .{ key_gap, if (key_gap.len > 0) "; " else "" },
+            );
+        }
+    } else if (summary_labels.has(c.id)) {
+        return if (c.detail.len > 0) c.detail else c.observed orelse "unavailable";
+    }
+    const detail = c.comparison orelse if (c.detail.len > 0) c.detail else c.excuse orelse "";
+    return std.mem.replaceOwned(u8, gpa, detail, ", want ", "; expected ");
+}
+
+/// One row per failure. Sanitize before measuring so controls cannot change
+/// wrapping. Detailed text and JSON retain the complete evidence.
+fn printSummaryCell(gpa: Allocator, w: *Io.Writer, text: []const u8, room: usize) !usize {
+    var clean: Io.Writer.Allocating = .init(gpa);
+    defer clean.deinit();
+    try writeClean(&clean.writer, text);
+    const value = clean.written();
+    if (value.len <= room) {
+        try w.writeAll(value);
+        return value.len;
+    }
+    if (room < "…".len) {
+        try w.splatByteAll('.', room);
+        return room;
+    }
+    var buf: [1024]u8 = undefined;
+    const compact = try shortComparison(value, @min(room, buf.len), &buf);
+    try w.writeAll(compact);
+    return compact.len;
 }
 
 const Verdict = enum {
@@ -1551,13 +1616,14 @@ test "login summary keeps failures, marks exceptions and cleans terminal text" {
     try printSummary(gpa, &out.writer, r, null, false);
     try testing.expectEqualStrings(
         "Security posture: DEGRADED · 1 passed · 2 failed · 1 skipped\n" ++
-            "  X Lockdown?[2J · none?\n" ++
-            "  X No shell (expected) · playground uses bash\n",
+            "  FAIL  Lockdown?[2J  none?\n" ++
+            "  gap   No shell      playground uses bash\n",
         out.written(),
     );
     out.clearRetainingCapacity();
     try printSummary(gpa, &out.writer, r, 30, true);
-    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.written(), "\x1b[31mX\x1b[0m"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\x1b[31mFAIL\x1b[0m"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\x1b[33mgap \x1b[0m"));
     try testing.expect(std.unicode.utf8ValidateSlice(out.written()));
     try testing.expect(std.mem.indexOf(u8, out.written(), "…\n") != null);
     out.clearRetainingCapacity();
@@ -1570,6 +1636,83 @@ test "login summary keeps failures, marks exceptions and cleans terminal text" {
         "Security posture: DEGRADED · 1 passed · 2 failed · 1 skipped · some checks limited " ++
             "(not root)\n",
     ));
+}
+
+test "playground summary states each measured gap in six rows at 80 columns" {
+    const gpa = testing.allocator;
+    const ids = [_][]const u8{
+        "programs-no-shell", "programs-no-downloaders",   "programs-no-interpreters",
+        "network-no-login",  "network-ssh-security-keys",
+    };
+    const details = [_][]const u8{
+        "/bin/sh, /bin/ash, /bin/bash",
+        "/bin/wget, /bin/nc, /bin/netcat, /bin/telnet",
+        "/bin/awk",
+        "/bin/sshd, /bin/telnetd",
+        "unused long algorithm list",
+    };
+    var checks: [5]Check = undefined;
+    for (&checks, ids, details) |*c, id, detail| c.* = .{
+        .id = id,
+        .area = "",
+        .name = "unused predicate",
+        .why = "",
+        .how = "",
+        .result = .fail,
+        .detail = detail,
+        .excuse = "declared weakness",
+    };
+    checks[4].observed = "pubkeyacceptedalgorithms=ssh-ed25519,sk-ssh-ed25519@openssh.com; " ++
+        "pubkeyauthoptions=touch-required";
+    const r: Report = .{
+        .time = "",
+        .os = "",
+        .host = "",
+        .kernel = "",
+        .root = true,
+        .summary = .{ .pass = 86, .fail = 5, .skip = 5 },
+        .checks = &checks,
+    };
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    // The renderer's temporary allocations also belong to the test arena.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    try printSummary(arena.allocator(), &out.writer, r, 80, false);
+    try testing.expectEqualStrings(
+        "Security posture: EXPECTED GAPS · 86 passed · 5 failed · 5 skipped\n" ++
+            "  gap   Shells present            /bin/sh, /bin/ash, /bin/bash\n" ++
+            "  gap   Download / network tools  /bin/wget, /bin/nc, /bin/netcat, /bin/telnet\n" ++
+            "  gap   Interpreters present      /bin/awk\n" ++
+            "  gap   Login servers present     /bin/sshd, /bin/telnetd\n" ++
+            "  gap   SSH security key policy   ordinary keys accepted\n",
+        out.written(),
+    );
+    out.clearRetainingCapacity();
+    try printSummary(arena.allocator(), &out.writer, r, 45, false);
+    try testing.expectEqual(6, std.mem.count(u8, out.written(), "\n"));
+    var rows = std.mem.tokenizeScalar(u8, out.written(), '\n');
+    _ = rows.next(); // The heading keeps all counts, including at narrow widths.
+    while (rows.next()) |row| try testing.expect(row.len <= 45);
+    checks[4].observed = "pubkeyacceptedalgorithms=sk-ssh-ed25519@openssh.com; " ++
+        "pubkeyauthoptions=none";
+    try testing.expectEqualStrings(
+        "touch not enforced",
+        try summaryDetail(arena.allocator(), checks[4]),
+    );
+    checks[4].observed = "pubkeyacceptedalgorithms=ssh-ed25519; pubkeyauthoptions=none";
+    try testing.expectEqualStrings(
+        "ordinary keys accepted; touch not enforced",
+        try summaryDetail(arena.allocator(), checks[4]),
+    );
+    out.clearRetainingCapacity();
+    _ = try printSummaryCell(
+        arena.allocator(),
+        &out.writer,
+        "some source = a very long observed value; expected denied",
+        40,
+    );
+    try testing.expect(std.mem.endsWith(u8, out.written(), "; expected denied"));
 }
 
 test "summary states distinguish expected gaps from unexcused failures; skips describe coverage" {

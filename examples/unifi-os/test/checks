@@ -1,0 +1,3 @@
+# Deliberately require application readiness: running processes alone do
+# not establish a working UniFi OS integration.
+ok  unifi-network-ready i=0; until curl -sf http://127.0.0.1:8081/status; do i=$((i + 1)); [ $i -le 120 ] || exit 1; sleep 1; done

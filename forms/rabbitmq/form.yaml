@@ -1,0 +1,61 @@
+# RabbitMQ 4.2 for local applications. A native launcher replaces the
+# shell entrypoint; the broker and Erlang distribution remain on loopback.
+base: prod
+
+allow: [jit]
+
+weaknesses:
+  kernel-write-xor-execute: Erlang's BEAM runtime compiles broker bytecode as it runs
+
+dev: [python-3.14]
+
+check:
+  memory: 2048
+
+services:
+  rabbitmq:
+    image: docker.io/library/rabbitmq@sha256:dc475e5f314614cc7fce25366db9bb49704bc76c0820cc6e54901dc220edf4c7
+    exec: /opt/erlang/lib/erlang/erts-15.2.7.13/bin/erlexec -args_file /etc/rabbitmq/erl.args
+    before: /usr/lib/werewolf/rabbitmq-start
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
+    listen: [tcp/5672 tcp/4369 tcp/25672 loopback]
+    connect: [tcp/4369 tcp/25672]
+    # These are the pinned image's native Erlang executables, not erl's
+    # shell wrapper. No CLI, plugin installer or shell is runnable.
+    run:
+      - /opt/erlang/lib/erlang/erts-15.2.7.13/bin/erlexec
+      - /opt/erlang/lib/erlang/erts-15.2.7.13/bin/beam.smp
+      - /opt/erlang/lib/erlang/erts-15.2.7.13/bin/epmd
+      - /opt/erlang/lib/erlang/erts-15.2.7.13/bin/inet_gethost
+      - /opt/erlang/lib/erlang/erts-15.2.7.13/bin/erl_child_setup
+      - /usr/lib/werewolf/rabbitmq-os-probe
+    config:
+      - password /run/config/rabbitmq/password
+      - settings /run/config/rabbitmq/settings.json
+    setting: username string as RABBITMQ_USER
+    render: env site
+    memory: 1024
+    nofile: 65536
+    env:
+      - HOME=/data
+      - PATH=/opt/erlang/lib/erlang/erts-15.2.7.13/bin:/usr/bin:/bin
+      - ROOTDIR=/opt/erlang/lib/erlang
+      - BINDIR=/opt/erlang/lib/erlang/erts-15.2.7.13/bin
+      - EMU=beam
+      - PROGNAME=erl
+      - ERL_LIBS=/opt/rabbitmq/plugins
+      - ERL_EPMD_ADDRESS=127.0.0.1
+      - RABBITMQ_HOME=/opt/rabbitmq
+      - RABBITMQ_NODENAME=rabbit@localhost
+      - RABBITMQ_CONFIG_FILE=/run/rabbitmq.config
+      - RABBITMQ_ADVANCED_CONFIG_FILE=/run/absent.config
+      - RABBITMQ_ENABLED_PLUGINS_FILE=/etc/rabbitmq/enabled_plugins
+      - RABBITMQ_PLUGINS_DIR=/opt/rabbitmq/plugins
+      - RABBITMQ_PLUGINS_EXPAND_DIR=/data/plugins-expanded
+      - RABBITMQ_MNESIA_BASE=/data/mnesia
+      - RABBITMQ_LOG_BASE=/data/log
+      - RABBITMQ_LOGS=-
+      - RABBITMQ_PID_FILE=/run/rabbitmq.pid
+      - ERL_CRASH_DUMP=/data/erl_crash.dump
+      - LANG=C.UTF-8
+      - LC_ALL=C.UTF-8

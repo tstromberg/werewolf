@@ -28,7 +28,8 @@ services:
   # the JVM's own. View distance is short so a small machine can
   # generate the spawn.
   minecraft:
-    exec: /usr/bin/java -Xms512m -Xmx1280m -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/minecraft -DbundlerRepoDir=/data/svc/minecraft -jar /usr/lib/minecraft/server.jar nogui
+    exec: /usr/bin/java -Xms512m -Xmx1280m -XX:-UsePerfData -XX:+ExitOnOutOfMemoryError -Djava.awt.headless=true -Djava.io.tmpdir=/run/svc/minecraft
+      -DbundlerRepoDir=/data/svc/minecraft -jar /usr/lib/minecraft/server.jar nogui
     before: /usr/lib/werewolf/minecraft-init
     user: minecraft
     # netlink: the JVM lists the host's addresses.

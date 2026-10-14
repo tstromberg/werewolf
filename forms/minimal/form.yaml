@@ -53,7 +53,8 @@ programs: [slot-update]
 # git.kernel.org, all over HTTPS, and the names to find them. Root, which
 # builds and installs the slot, has no network at all.
 net:
-  - connect _update tcp/443 udp/53 tcp/53
+  - connect _update tcp/443
+  - dns _update
 
 # make check's, for this form alone (forms/README.md): its checks boot the
 # slot offline, so the updater finds nothing.

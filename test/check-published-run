@@ -14,9 +14,10 @@ import tempfile
 import threading
 import time
 
-if len(sys.argv) != 4:
-    sys.exit('usage: check-published-run HOWL BUNDLE OUTPUT')
-howl, bundle, output = [Path(value).resolve() for value in sys.argv[1:]]
+public = len(sys.argv) == 5 and sys.argv[-1] == '--public'
+if len(sys.argv) != 4 and not public:
+    sys.exit('usage: check-published-run HOWL BUNDLE OUTPUT [--public]')
+howl, bundle, output = [Path(value).resolve() for value in sys.argv[1:4]]
 work = output
 work.mkdir(mode=0o700, parents=True, exist_ok=False)
 os.umask(0o077)
@@ -84,8 +85,15 @@ roots = work / 'mirror-roots.pem'
 system_ca = ssl.get_default_verify_paths().cafile
 roots.write_bytes((Path(system_ca).read_bytes() if system_ca else b'') + b'\n' + ca.read_bytes())
 env['SSL_CERT_FILE'] = str(roots)
+if public:
+    env.pop('WEREWOLF_BOOT_MIRROR', None)
+    if 'SSL_CERT_FILE' in os.environ:
+        env['SSL_CERT_FILE'] = os.environ['SSL_CERT_FILE']
+    else:
+        env.pop('SSL_CERT_FILE', None)
 for name in ('WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'WEREWOLF_IPE_KEY', 'WEREWOLF_IPE_CRT',
-             'WEREWOLF_IPE_KERNEL', 'UKI_STUB', 'WEREWOLF_BUILD_VM'):
+             'WEREWOLF_IPE_KERNEL', 'UKI_STUB', 'WEREWOLF_BUILD_VM',
+             'WEREWOLF_PROTECTED_BOOT_KEY', 'WEREWOLF_PROTECTED_IMAGE_KEY'):
     env.pop(name, None)
 machine = consumer / 'build/machines/werewolf-run'
 
@@ -135,14 +143,20 @@ try:
     authority = machine / 'authority'
     before = {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}
     downloaded = len(requests)
+    checked = {str(path): path.read_bytes() for path in (consumer / 'build/boot-cache').rglob('current.json')}
     began = time.monotonic()
     run([howl, 'run', '--root-keys', str(identity) + '.pub'], 'repeat-run')
     elapsed = time.monotonic() - began
     if status() != boot or len(requests) != downloaded:
         raise RuntimeError('unchanged run rebooted or performed another download')
+    if checked != {str(path): path.read_bytes() for path in (consumer / 'build/boot-cache').rglob('current.json')}:
+        raise RuntimeError('unchanged run repeated mirror freshness checks')
     if before != {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}:
         raise RuntimeError('repeat run replaced machine authority')
     profile = json.loads((authority / 'profile.json').read_text())
+    downloaded_head = Path(profile['bootstrap']['directory']) / 'boot.json'
+    if hashlib.sha256(downloaded_head.read_bytes()).hexdigest() != descriptor:
+        raise RuntimeError('actual download differs from the expected published image')
     if profile['spec']['boot_key'] is not None or profile['spec']['ipe_key'] is not None:
         raise RuntimeError('consumer owns a vendor signing key')
     run([howl, 'stop'], 'stop')
@@ -161,6 +175,7 @@ try:
     if before != {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}:
         raise RuntimeError('resume replaced owner or TPM authorization')
     result = dict(descriptor=descriptor, default_signed_download=True, no_consumer_builds=True,
+                  production_mirror=public,
                   no_vendor_private_keys=True, secure_boot=True, ipe=True, rollback_protected=True,
                   verified_root=True,
                   retained_enrollment_on_resume=True, unchanged_run_seconds=elapsed,

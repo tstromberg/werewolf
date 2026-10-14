@@ -40,11 +40,14 @@ pub const Index = std.StringHashMapUnmanaged([Sha1.digest_length]u8);
 /// root, so apk parses only bytes root has checked.
 pub fn readIndex(gpa: Allocator, keys: []const Trusted, idx: *Index, data: []const u8) ![]const u8 {
     const v = try verified(gpa, keys, data);
-    for (try parseRecords(gpa, v.list)) |r| try idx.put(
-        gpa,
-        try gpa.print("{s}-{s}.{x}", .{ r.name, r.version, r.sha1[0..4] }),
-        r.sha1,
-    );
+    for (try parseRecords(gpa, v.list)) |r| {
+        const key = try gpa.print("{s}-{s}.{x}", .{ r.name, r.version, r.sha1[0..4] });
+        if (idx.get(key)) |prev| {
+            if (!std.mem.eql(u8, &prev, &r.sha1)) return error.BadApkIndex;
+            continue;
+        }
+        try idx.put(gpa, key, r.sha1);
+    }
     return std.mem.concat(gpa, u8, &.{ try signatureSegment(gpa, v.name, v.signature), v.signed });
 }
 
@@ -238,7 +241,7 @@ pub fn checkPackage(
 ) !void {
     if (!std.mem.endsWith(u8, name, ".apk")) return error.NotInIndex;
     const want = idx.get(name[0 .. name.len - ".apk".len]) orelse return error.NotInIndex;
-    const file = try dir.openFile(io, name, .{});
+    const file = try dir.openFile(io, name, .{ .follow_symlinks = false });
     defer file.close(io);
     const size = try file.length(io);
     const head = try gpa.alloc(u8, @intCast(@min(size, max_head)));
@@ -248,7 +251,11 @@ pub fn checkPackage(
     // Hash the rest. For a signed package, also copy it after the control
     // segment into tmp, which replaces the package.
     const tmp = try gpa.print("{s}.tmp", .{name});
-    const out: ?Io.File = if (c.start > 0) try dir.createFile(io, tmp, .{}) else null;
+    if (c.start > 0) dir.deleteFile(io, tmp) catch {};
+    const out: ?Io.File = if (c.start > 0)
+        try dir.createFile(io, tmp, .{ .exclusive = true })
+    else
+        null;
     defer if (out) |f| f.close(io);
     errdefer if (out != null) dir.deleteFile(io, tmp) catch {};
     if (out) |f| try f.writePositionalAll(io, head[c.start..c.end], 0);

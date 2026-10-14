@@ -44,7 +44,9 @@ pub fn main(init: std.process.Init) !void {
     }
     var failed = false;
     for (args[i..]) |path| {
-        const ok = fixFile(gpa, init.io, path, max, check) catch |err| e: {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena.deinit();
+        const ok = fixFile(arena.allocator(), init.io, path, max, check) catch |err| e: {
             std.debug.print("{s}: {s}\n", .{ path, @errorName(err) });
             break :e false;
         };
@@ -58,6 +60,14 @@ pub fn main(init: std.process.Init) !void {
 fn fixFile(gpa: Allocator, io: Io, path: []const u8, max: usize, check: bool) !bool {
     const dir = Io.Dir.cwd();
     const original = try dir.readFileAllocOptions(io, path, gpa, .limited(16 << 20), .of(u8), 0);
+    if (check) {
+        var errors = try astErrors(gpa, original, path);
+        defer errors.deinit(gpa);
+        if (errors.errorMessageCount() > 0) {
+            try errors.renderToStderr(io, .{}, .off);
+            return false;
+        }
+    }
     var source: [:0]const u8 = original;
     var pass: usize = 0;
     while (pass < 20) : (pass += 1) source = try fixOnce(gpa, source, max) orelse break;
@@ -75,6 +85,19 @@ fn fixFile(gpa: Allocator, io: Io, path: []const u8, max: usize, check: bool) !b
     }
     if (!check and changed) try dir.writeFile(io, .{ .sub_path = path, .data = source });
     return ok;
+}
+
+/// Use Zig's own AstGen checks, including uncalled function bodies, without
+/// starting a compiler process for every file.
+fn astErrors(gpa: Allocator, source: [:0]const u8, path: []const u8) !std.zig.ErrorBundle {
+    var tree = try Ast.parse(gpa, source, .{});
+    defer tree.deinit(gpa);
+    var zir = try std.zig.AstGen.generate(gpa, tree);
+    defer zir.deinit(gpa);
+    var errors: std.zig.ErrorBundle.Wip = try .init(gpa);
+    defer errors.deinit();
+    if (zir.hasCompileErrors()) try errors.addZirErrorMessages(zir, tree, source, path);
+    return errors.toOwnedBundle("");
 }
 
 /// commonSense reports whether a long line may stand, as the style guide's
@@ -559,6 +582,22 @@ fn splitPoint(lit: []const u8, room: usize) ?usize {
 }
 
 const testing = std.testing;
+
+test "AST checks reject errors in uncalled functions and malformed syntax" {
+    for ([_][:0]const u8{
+        "fn unused() void { const x = 1; }",
+        "fn unused(x: u32) void {}",
+        "fn unused() void { var x: u32 = 1; _ = &x; _ = x; _ = x; }",
+        "fn broken( {",
+    }) |source| {
+        var errors = try astErrors(testing.allocator, source, "test.zig");
+        defer errors.deinit(testing.allocator);
+        try testing.expect(errors.errorMessageCount() > 0);
+    }
+    var errors = try astErrors(testing.allocator, "fn unused() void {}", "test.zig");
+    defer errors.deinit(testing.allocator);
+    try testing.expectEqual(0, errors.errorMessageCount());
+}
 
 fn fixed(source: [:0]const u8, max: usize) ![]const u8 {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

@@ -69,7 +69,6 @@ pub fn watch(
     var up_at: ?Io.Timestamp = null;
     const buf = try gpa.alloc(u8, 1 << 20);
     const lbuf = try gpa.alloc(u8, if (m != null) 4 << 20 else 1);
-    var said: []const u8 = "";
     for (0..wait_seconds * 20) |_| {
         if (!b.up) if (Dir.cwd().openFile(io, console_log, .{})) |f| {
             defer f.close(io);
@@ -79,7 +78,6 @@ pub fn watch(
             if (len > from and
                 b.power_ns == null) b.power_ns = start.untilNow(io, .awake).toNanoseconds();
             const n = f.readPositionalAll(io, buf, from) catch 0;
-            said = try lastLine(gpa, buf[0..n]);
             if (upLine(buf[0..n])) |u| {
                 b.up = true;
                 b.kernel = try gpa.dupe(u8, u.kernel);
@@ -112,7 +110,7 @@ pub fn watch(
                 "Booting"
             else
                 "Waiting for its address",
-            said,
+            "",
         );
         try io.sleep(.fromMilliseconds(50), .awake);
     }
@@ -131,16 +129,6 @@ fn upLine(text: []const u8) ?struct { kernel: []const u8, userland: []const u8 }
     const ke = std.mem.findScalarPos(u8, line, ki, ',') orelse return null;
     const ue = std.mem.findScalarPos(u8, line, ui, ')') orelse return null;
     return .{ .kernel = line[ki..ke], .userland = line[ui..ue] };
-}
-
-/// lastLine returns the last non-blank line of text, cleaned for the spinner.
-fn lastLine(gpa: Allocator, text: []const u8) ![]const u8 {
-    var it = std.mem.splitBackwardsScalar(u8, text, '\n');
-    while (it.next()) |l| {
-        const c = try progress.clean(gpa, l);
-        if (c.len > 0) return c;
-    }
-    return "";
 }
 
 /// awaitSsh reports whether an sshd at host:port sent its "SSH-" banner

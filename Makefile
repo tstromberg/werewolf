@@ -43,7 +43,8 @@ HOWL = build/host/howl
 FORM_REF := $(FORM)
 override FORM := $(notdir $(patsubst %/,%,$(FORM)))
 # These goals need no form tool, and install-deps runs before there is a Zig.
-FORMLESS = install-deps install uninstall howl $(HOWL) clean help
+FORMLESS = install-deps install uninstall howl $(HOWL) clean help \
+	lint _lint fix yamllint-lint zig-lint zig-fix doc-lint
 ifeq ($(filter-out $(FORMLESS),$(or $(MAKECMDGOALS),all)),)
 FORM_ASK = :
 else
@@ -88,7 +89,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
-	check-lease check-static check-unsigned check-verity check-deadman check-metadata check-persist \
+	check-lease check-dns check-static check-unsigned check-verity check-deadman check-metadata check-persist \
 	check-dist check-gcp check-gcp-metadata check-aws check-azure check-secureboot check-firecracker check-updater-uki seal-learn $(OUT)/disk.qcow2
 
 all: image
@@ -168,7 +169,8 @@ endef
 # A program may import any library; a library, only what its --dep flags name.
 LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=lib/dm.zig \
 	-Mverity=lib/verity.zig -Mipe=lib/ipe.zig -Mseal=lib/seal.zig -Msettings=lib/settings.zig \
-	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig -Mhostkey=lib/hostkey.zig \
+	-Mupdate-policy=lib/update-policy.zig -Mnetwork=lib/network.zig \
+	--dep sandbox -Mnet-rule=lib/net-rule.zig --dep network --dep net-rule --dep sandbox -Mdns=lib/dns.zig -Mhostkey=lib/hostkey.zig \
 	--dep allow --dep sshd -Mform=lib/form.zig --dep seal -Maudit=lib/audit.zig \
 	--dep seal --dep settings -Mservice=lib/service.zig -Mallow=lib/allow.zig -Mcve=lib/cve.zig \
 	--dep network -Mcmdline=lib/cmdline.zig --dep settings -Msshd=lib/sshd.zig --dep form --dep seal \
@@ -177,7 +179,7 @@ LIB_MODULES = --dep seal -Msandbox=lib/sandbox.zig -Mbroker=lib/broker.zig -Mdm=
 	--dep apk --dep update-policy -Mprebuilt=lib/prebuilt.zig -Muki=tools/uki.zig --dep apk -Mtpm=lib/tpm.zig \
 	--dep apk --dep tpm -Mbootstrap=lib/tpm-bootstrap.zig --dep apk --dep tpm --dep bootstrap -Menrollment=lib/enrollment.zig
 ZIG_MODULES = --dep sandbox --dep broker --dep dm --dep verity --dep ipe --dep prebuilt --dep uki --dep tpm --dep enrollment --dep seal --dep settings --dep update-policy \
-	--dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
+	--dep dns --dep net-rule --dep network --dep hostkey --dep form --dep audit --dep service --dep allow --dep cve --dep cmdline \
 	--dep sshd --dep compose --dep package --dep image --dep gpt --dep apk --dep files --dep people -Mroot=$(1) $(LIB_MODULES)
 
 # program NAME, BINARY, DIR is the rule that builds DIR (default cmd/NAME) into BINARY.
@@ -267,7 +269,7 @@ $(TEST_SK): tools/test-sk.zig
 # Each file's tests are a target, so make -j test runs them in parallel.
 PROGRAM_SOURCES = $(foreach d,$(wildcard cmd/* forms/*/cmd/*),$(d)/$(notdir $(d)).zig)
 TEST_SOURCES = lib/sandbox.zig lib/seal.zig lib/dm.zig lib/verity.zig lib/settings.zig lib/update-policy.zig \
-	lib/network.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
+	lib/network.zig lib/net-rule.zig lib/dns.zig lib/cmdline.zig lib/hostkey.zig lib/audit.zig lib/form.zig lib/compose.zig lib/package.zig \
 	lib/allow.zig lib/service.zig lib/cve.zig lib/sshd.zig lib/image.zig lib/apk.zig lib/people.zig tools/form.zig tools/package.zig \
 	boot/gpt.zig lib/ipe.zig lib/prebuilt.zig lib/broker.zig lib/tpm.zig lib/boot-authority.zig lib/machine-transport.zig lib/tpm-bootstrap.zig lib/enrollment.zig lib/boot-state.zig tools/cve-tiers.zig tools/test-sk.zig tools/doc-check.zig tools/uki.zig $(PROGRAM_SOURCES)
 test: $(addprefix _test/,$(TEST_SOURCES)) _test/howl-smoke _test/howl-lock _test/cloud-console _test/azure-security _test/kernel-version _test/provider-ab _test/local-publisher _test/local-prerequisites _test/kernel-inputs _test/cloud-enrollment _test/bootstrap-image _test/release-signing
@@ -280,8 +282,9 @@ _test/provider-ab:
 	python3 test/ab_checks.py
 	python3 test/ab-provider-tests
 _test/kernel-version: ; python3 test/kernel-version
-_test/local-prerequisites:
+_test/local-prerequisites: $(HOWL)
 	python3 test/local-prerequisites
+	python3 test/lima-state $(HOWL)
 	python3 test/sign-kernel
 	python3 test/build-helper
 _test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
@@ -294,6 +297,7 @@ _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/protected-publication
 	python3 test/protected-export
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
+_test/lib/dns.zig _test/lib/net-rule.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
 _test/lib/tpm.zig: ; zig test --dep apk -Mroot=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig
@@ -602,7 +606,18 @@ $(addprefix check-shellfree-,$(FORMS)): check-shellfree-%: | _check-shared
 _check-shellfree:
 	@$(CHECK_ENV) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) CONSOLE=$(wildcard $(FORM_DIR)/test/console) test/check-shellfree $(CHECK_QEMU)
 
-# These boot what a form's check built, so follow it; they need prod's DHCP, metadata and /data.
+# The Linux kernel, private namespaces and a local DNS/TLS/DHCP fixture; no internet.
+$(BUILD)/dns-policy: test/dns-policy.zig $(wildcard lib/*.zig)
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl $(call ZIG_MODULES,$<) -femit-bin=$@
+$(BUILD)/posture-egress: test/posture-egress.zig $(wildcard cmd/posture/*.zig) $(wildcard lib/*.zig)
+	$(zig_check)
+	zig build-exe -O ReleaseSafe -target $(ARCH)-linux-musl --dep posture $(call ZIG_MODULES,$<) \
+		--dep cmdline --dep allow --dep service --dep audit --dep ipe --dep tpm -Mposture=cmd/posture/posture.zig -femit-bin=$@
+check-dns: $(call program_bin,fence) $(call program_bin,dhcp-client) $(BUILD)/dns-policy $(BUILD)/posture-egress
+	$(DNS_TEST_RUNNER) python3 test/check-dns $(call program_bin,fence) $(BUILD)/dns-policy $(call program_bin,dhcp-client) $(BUILD)/posture-egress
+
+# These boot what a form's check built; prod supplies DHCP, metadata and /data.
 check-lease check-nodata check-metadata: | _check-shared check-prod
 	@$(CHECK_MAKE) FORM=prod _$@
 check-static check-verity: | _check-shared check-minimal
@@ -773,7 +788,7 @@ FIXERS := zig-fix
 .PHONY: lint _lint fix $(LINTERS) $(FIXERS)
 lint: _lint
 _lint:
-	@status=0; for t in $(LINTERS); do $(MAKE) $$t || status=1; done; exit $$status
+	@$(MAKE) --no-print-directory -k -j3 $(LINTERS)
 fix:
 	@status=0; for t in $(FIXERS); do $(MAKE) $$t || status=1; done; exit $$status
 LINT_ROOT := $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
@@ -787,15 +802,18 @@ $(YAMLLINT_BIN):
 	curl -sSfL https://github.com/adrienverge/yamllint/archive/refs/tags/v$(YAMLLINT_VERSION).tar.gz | tar -C $(LINT_ROOT)/out/linters -zxf -
 	cd $(YAMLLINT_ROOT) && pip3 install --target dist . || pip install --target dist .
 yamllint-lint: $(YAMLLINT_BIN)
-	PYTHONPATH=$(YAMLLINT_ROOT)/dist $(YAMLLINT_ROOT)/dist/bin/yamllint .
+	PYTHONPATH=$(YAMLLINT_ROOT)/dist $(YAMLLINT_BIN) $(YAML_SOURCES)
 # END: lint-install .
 
-# zig ast-check also checks the functions nothing calls, which a build skips.
-ZIG_SOURCES = $(shell find . -name '*.zig' -not -path './build/*' -not -path './out/*' -not -path './.zig-cache/*' -not -path './.claude/*')
+# zigfix --check uses Zig's AstGen, including functions nothing calls.
+# Prune generated trees before descending: image roots contain millions of files.
+source_find = find . -type d \( -name .git -o -path './build' -o -path './out' -o -path './.zig-cache' -o -path './.claude' $(1) \) -prune -o -type f $(2) -print
+ZIG_SOURCES := $(shell $(call source_find,,-name '*.zig'))
+YAML_SOURCES := $(shell $(call source_find,-o -path './dist' -o -path './config',\( -name '*.yaml' -o -name '*.yml' -o -name '.yamllint' \)))
 ZIGFIX := $(LINT_ROOT)/out/tools/zigfix
 $(ZIGFIX): tools/zigfix.zig
 	mkdir -p $(dir $@)
-	zig build-exe -O ReleaseSafe -femit-bin=$@ tools/zigfix.zig
+	zig build-exe -O Debug -femit-bin=$@ tools/zigfix.zig
 # The sha256s are those of ziglint's checksums.txt when it was pinned.
 ZIGLINT_VERSION ?= 0.5.3
 ZIGLINT_PLATFORM := $(subst arm64,aarch64,$(shell uname -m))-$(if $(filter Darwin,$(HOST_OS)),macos,linux)
@@ -812,13 +830,12 @@ $(ZIGLINT_BIN):
 	tar -C $(ZIGLINT_ROOT) -xzf $(ZIGLINT_ROOT)/ziglint.tar.gz ziglint
 	rm $(ZIGLINT_ROOT)/ziglint.tar.gz
 zig-lint: $(ZIGFIX) $(ZIGLINT_BIN)
-	@status=0; for f in $(ZIG_SOURCES); do zig ast-check $$f >/dev/null || status=1; done; exit $$status
 	$(ZIGFIX) --check $(ZIG_SOURCES)
 	$(ZIGLINT_BIN) $(ZIG_SOURCES)
 zig-fix: $(ZIGFIX)
 	$(ZIGFIX) $(ZIG_SOURCES)
 
-DOC_SOURCES = $(shell find . -name '*.md' -not -path './build/*' -not -path './out/*' -not -path './dist/*' -not -path './.zig-cache/*' -not -path './.claude/*')
+DOC_SOURCES := $(shell $(call source_find,-o -path './dist',-name '*.md'))
 DOC_CHECK := $(LINT_ROOT)/out/tools/doc-check
 $(DOC_CHECK): tools/doc-check.zig
 	mkdir -p $(dir $@)

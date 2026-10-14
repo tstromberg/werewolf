@@ -1,0 +1,5 @@
+ok  rabbitmq-works  i=0; until python3 /usr/share/werewolf-rabbitmq/probe.py; do i=$((i + 1)); [ $i -le 90 ] || exit 1; sleep 1; done
+ok  rabbitmq-guest  python3 /usr/share/werewolf-rabbitmq/probe.py --guest
+ok  rabbitmq-local netstat -ltn | awk '$4 ~ /:(5672|4369|25672)$/ { n++; if ($4 !~ /^127\.0\.0\.1:/) bad = 1 } END { exit !(n == 3 && !bad) }'
+ok  rabbitmq-user  p=$(pidof beam.smp); [ -n "$p" ] && ! grep -q '^Uid:[[:space:]]*0[[:space:]]' /proc/$p/status && grep -q '^CapEff:[[:space:]]*0000000000000000$' /proc/$p/status && grep -q '^NoNewPrivs:[[:space:]]*1' /proc/$p/status
+ok  rabbitmq-secret [ ! -e /run/svc/rabbitmq/password ] && [ "$(stat -c %a /data/svc/rabbitmq/.erlang.cookie)" = 600 ] && ! grep -r werewolf-check-pass-1 /run/svc/rabbitmq && [ "$(stat -c %a /data/svc/rabbitmq)" = 700 ]

@@ -116,9 +116,21 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
         m.fmt("/dev/{s}", .{d}),
         m.fmt("{s}/dev/{s}", .{ dir, d }),
     });
-    // With no resolver there is no file, and the image's empty one stays.
-    const resolv = "/run/werewolf/network/resolv.conf";
-    if (exists(resolv)) m.mount(&.{ "--bind", resolv, m.fmt("{s}/etc/resolv.conf", .{dir}) });
+    // Bind the directory, so atomic DHCP replacements are visible in the
+    // image's resolver symlink. Older retained roots have a plain placeholder.
+    const network = "/run/werewolf/network";
+    const target = m.fmtZ("{s}/etc/werewolf-network", .{dir});
+    if (exists(target)) {
+        m.mount(&.{ "--bind", "-o", "ro", network, target });
+    } else if (exists(m.fmtZ("{s}/resolv.conf", .{network}))) {
+        m.mount(&.{
+            "--bind",
+            "-o",
+            "ro",
+            m.fmt("{s}/resolv.conf", .{network}),
+            m.fmt("{s}/etc/resolv.conf", .{dir}),
+        });
+    }
     // Make the service's directories as leash would, owned by its user, so
     // it can write there from the start. They are 0711 while init binds
     // what is inside them, since the mount tool, root without

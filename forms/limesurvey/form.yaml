@@ -70,7 +70,8 @@ services:
   # directory (not /tmp, which the leash does not grant), and no looking
   # for changed files, since the image cannot change.
   php-fpm:
-    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d opcache.validate_timestamps=0 -d opcache.memory_consumption=192 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000
+    exec: /usr/bin/php-fpm --nodaemonize --force-stderr --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm -d
+      opcache.validate_timestamps=0 -d opcache.memory_consumption=192 -d opcache.interned_strings_buffer=16 -d opcache.max_accelerated_files=20000
     before:
       - /usr/bin/php -d memory_limit=512M /usr/share/werewolf-limesurvey/install.php
       - /usr/bin/php-fpm --test --fpm-config /etc/php/php-fpm.conf -d opcache.lockfile_path=/run/svc/php-fpm
