@@ -40,7 +40,7 @@ def valid(directory):
 
 def provision(arch, requirements, cache):
     if arch != 'aarch64':
-        raise ValueError('managed native firmware currently supports arm64 Macs')
+        raise ValueError('managed native firmware currently supports aarch64')
     requirements = Path(requirements).resolve()
     cache = Path(cache).resolve()
     os.umask(0o077)

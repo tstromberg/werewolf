@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify the released signed disk, its enrollment, and firmware rejection."""
 import hashlib
+import errno
 import json
 import os
 import pathlib
@@ -74,7 +75,17 @@ def boot(label, refused=False):
             deadline = time.monotonic() + 300
             while time.monotonic() < deadline:
                 if select.select([master], [], [], 0.5)[0]:
-                    seen += os.read(master, 65536)
+                    try:
+                        part = os.read(master, 65536)
+                    except OSError as error:
+                        # Linux reports terminal EOF as EIO when QEMU exits.
+                        # Keep the firmware/startup error in boot.log visible.
+                        if error.errno != errno.EIO:
+                            raise
+                        part = b''
+                    if not part:
+                        break
+                    seen += part
                     log.seek(0)
                     log.write(seen)
                     log.flush()
@@ -96,7 +107,8 @@ def boot(label, refused=False):
                         return
                 if process.poll() is not None:
                     break
-            raise RuntimeError('no expected firmware outcome: ' + label)
+            raise RuntimeError('no expected firmware outcome: ' + label +
+                               '; QEMU exit=' + str(process.poll()) + '; see ' + str(work / (label + '.log')))
     finally:
         if process.poll() is None:
             process.terminate()

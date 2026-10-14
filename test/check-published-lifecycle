@@ -48,7 +48,7 @@ for bundle in bundles:
         os.link(bundle / 'slot' / name, objects / name)
     os.link(bundle / 'disk.img.zst', objects / 'disk.img.zst')
     for name in ('latest.json', 'latest.json.sig'):
-        os.link(bundle / 'prebuilt/aarch64' / name, objects / name)
+        os.link(bundle / 'prebuilt' / arch / name, objects / name)
 
 
 def promote(bundle):
