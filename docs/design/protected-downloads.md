@@ -9,8 +9,7 @@ GHA publication first targets x86_64 QEMU playground after exact-bundle lifecycl
 
 ## Background
 
-The [portable bundle](boot-images.md) already separates vendor code from machine owner keys.
-Legacy releases use different trust and cannot satisfy this protected profile.
+The [portable bundle](boot-images.md) separates vendor code from owner keys; legacy release trust cannot satisfy this profile.
 
 ## Goals
 
@@ -34,10 +33,8 @@ Legacy releases use different trust and cannot satisfy this protected profile.
 `release/protected/image.crt` authorizes IPE policies, modules and signed image/boot heads.
 These are separate identities and neither may reuse a legacy release key.
 `release/protected/trust.json` fixes the HTTPS mirror and declared host permit port.
-Compiled public certificates establish trust.
 `release/create-protected-trust PRIVATE PUBLIC` refuses partial state or replacement of committed trust.
-Default custody is `config/release-signing/protected/`: private files 0600, directory 0700, ignored by Git.
-Keep an offline backup before putting these keys into production.
+Keep an offline backup; default custody is Git-ignored `config/release-signing/protected/` (files 0600, directory 0700).
 The release environment needs `WEREWOLF_PROTECTED_BOOT_KEY` and `WEREWOLF_PROTECTED_IMAGE_KEY`.
 Both secrets are configured in werewolf-linux/werewolf's main-only release environment.
 `release/with-protected-keys` checks both committed public certificates before starting a child.
@@ -50,10 +47,9 @@ The mirror is separate from the local update/permit channel; namespaces bind eac
 
 ```text
 boot/v1/FORM/PROVIDER/ARCH/latest/boot.json[.sig]
-boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/disk.img.zst
+boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/disk.{img.zst,qcow2}
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{vmlinuz,root.erofs,stage0.zst,cmdline,uki.efi}
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/latest.json[.sig]
-boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/disk.qcow2
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/downloads.json[.sig]
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{gates.json,boot.crt,image.crt}
 ```
@@ -68,8 +64,7 @@ bounded metadata, checks the boot certificate hash and requires the exact reques
 The downloader uses this native gate before fetching any artifact selected by the descriptor.
 HTTPS redirects cannot downgrade to HTTP or inject credentials.
 Requests identify Werewolf; stock macOS uses system curl for TLS 1.3. Streams enforce signed sizes/hashes.
-Native complete-bundle verification then checks the independent image signature, PE signature,
-embedded kernel/initrd, measured identity and predicted PCR before cache promotion.
+Before cache promotion, native admission verifies image and PE signatures, embedded kernel/initrd, measured identity and predicted PCR.
 
 A private lock serializes downloads for one channel/public-trust identity across mirrors.
 Hash-addressed objects share slot bytes; temporary partial downloads are removed on failure or interruption.
@@ -91,14 +86,13 @@ x86_64 QEMU copies with dedicated environment secrets; both include playground, 
 Admission resolves a shared package snapshot for the images, kernel base, bootloader and both Melange builders.
 Both copies consume those exact versions; the deduplication key binds source, package bytes and public trust.
 Only a fully published GitHub release and verified R2 mirror mark inputs successful; failures retry.
-Manual dispatch accepts `force` to publish again with the same inputs. No compiled kernel cache crosses copies.
+Manual dispatch accepts `force` to publish again with the same inputs.
 Each job shares prerequisites between forms but the two copies do not restore compiled kernels.
 The comparison covers complete signed disks and slots. Public candidates omit `boot.json.sig`.
 The QEMU gate authorizes three playground candidates and tests them on hosted Linux with KVM, OVMF and swtpm.
 The harness also supports Lima; evidence cannot cross providers or architectures. Only tested bundles publish.
 
-`release/prepare-protected` authenticates the candidate with committed trust, requires an exact
-artifact/provider/architecture evidence record and runs complete native admission before copying.
+`release/prepare-protected` requires committed trust, exact artifact/provider/architecture evidence and native admission before copying.
 All fourteen evidence checks must be boolean true, including A/B upgrade, operator rollback,
 unhealthy fallback, retirement cuts, tampering, independent owner isolation and fresh downloads.
 It prepares immutable objects, signed heads and an upload plan in a new directory atomically.
@@ -118,9 +112,9 @@ updates that issue on retries and closes it after recovery. Pull-request runs ca
 Vendor signatures authorize code; machine keys authorize TPM transitions. They remain separate.
 Advancing a cache head must never implicitly delete a VM, reset TPM state or replace owner keys.
 Production trust changes require a deliberate rotation design; missing keys never rotate automatically.
+
 ## Reliability Considerations
 
-Tests exercise real native signature admission before mocked artifact transport.
-Additional stream tests cover exact, truncated, oversized and encoded responses.
+Tests exercise native signature admission before mocked transport, plus exact, truncated, oversized and encoded streams.
 Publication tests reject missing, false, nonboolean and foreign-artifact lifecycle evidence.
 Unit tests alone cannot authorize publication; exact-bundle runtime evidence remains mandatory.

@@ -505,7 +505,8 @@ endif
 endif
 shard = $(if $(SHARD),$(shell echo $(sort $(1)) | tr ' ' '\n' | \
 	awk -F/ -v s=$(SHARD) 'BEGIN { split(s, a, "/") } (NR - 1) % a[2] == a[1] - 1'),$(1))
-APP_CHECK_FORMS := $(shell awk '!/^\#/ && NF { print $$1 }' test/app-fixtures)
+# Octal keeps Make's comment parser and awk's escape handling portable.
+APP_CHECK_FORMS := $(shell awk '!/^\043/ && NF { print $$1 }' test/app-fixtures)
 .PHONY: check-apps $(addprefix check-app-,$(APP_CHECK_FORMS))
 check-apps: $(addprefix check-app-,$(call shard,$(APP_CHECK_FORMS)))
 check-forms:     $(addprefix check-,$(call shard,$(FORMS))) check-apps
