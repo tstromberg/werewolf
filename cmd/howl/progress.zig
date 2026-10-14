@@ -803,7 +803,8 @@ test "builder phases survive melange logging and ignore ordinary output" {
     defer arena.deinit();
     for ([_][]const u8{
         "howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)",
-        "2026/10/14 08:12:13 WARN howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)",
+        "2026/10/14 08:12:13 WARN howl: phase kernel-compile: " ++
+            "Compiling Linux 6.18.56 (make Image modules)",
     }) |raw| {
         const p = phaseFromOutput(try clean(arena.allocator(), raw)).?;
         try testing.expectEqualStrings("kernel-compile", p.short);
@@ -838,7 +839,8 @@ test "only opted-in commands change phase and all output stays in the log" {
     const cmd: Steps.Cmd = .{ .argv = &.{
         "/bin/sh",
         "-c",
-        "printf 'howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)\\nCC security/bpf/hooks.o' >&2",
+        "printf 'howl: phase kernel-compile: Compiling Linux 6.18.56 " ++
+            "(make Image modules)\\nCC security/bpf/hooks.o' >&2",
     } };
     try testing.expect((try steps.exec(&.{cmd}, .{})).ok);
     try testing.expectEqualStrings(first.name, steps.said.phase.name);

@@ -35,10 +35,16 @@ def build(form, provider, arch, serial, output):
     boot_key = Path(os.environ['WEREWOLF_PROTECTED_BOOT_KEY']).resolve()
     boot_cert = Path(os.environ['WEREWOLF_PROTECTED_BOOT_CRT']).resolve()
     version = re.search(r'^alpine_version=(.+)$', Path('boot/kernel-source').read_text(), re.M).group(1)
+    base_packages = ['linux-virt=' + version]
+    if snapshot := os.environ.get('WEREWOLF_PROTECTED_INPUTS'):
+        base_lock = Path(snapshot) / 'kernel.lock.json'
+        base_packages = builder.package_pins(base_lock, arch)
     with (cache / 'build.lock').open('a+b') as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
         inputs = {name: tree / name for name in ('boot/kernel-source', 'boot/kernel.yaml')}
         inputs.update({str(path.relative_to(tree)): path for path in sorted((tree / 'boot/alpine-keys').glob('*.pub'))})
+        if snapshot:
+            inputs['package-lock'] = base_lock
         base_pin = builder.fingerprint(arch, inputs)
         base_dir = cache / arch / ('base-' + base_pin)
         base_dir.mkdir(parents=True, exist_ok=True)
@@ -46,8 +52,9 @@ def build(form, provider, arch, serial, output):
         if not builder.valid(base_dir, base_pin, {'base.tar'}):
             with tempfile.TemporaryDirectory(dir=base_dir) as temporary:
                 incoming = Path(temporary) / 'base.tar'
+                pins = [argument for package in base_packages for argument in ('-p', package)]
                 subprocess.run(['apko', '--workdir', 'boot', 'build-minirootfs', '--build-arch', arch,
-                                '-p', 'linux-virt=' + version, 'kernel.yaml', str(incoming)], check=True)
+                                *pins, 'kernel.yaml', str(incoming)], check=True)
                 digest = builder.digest(incoming)
                 os.replace(incoming, base)
                 (base_dir / 'complete.json').write_text(json.dumps(dict(inputs=base_pin, outputs={'base.tar': digest})) + '\n')

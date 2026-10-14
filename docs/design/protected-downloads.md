@@ -88,6 +88,10 @@ An existing enrollment must retain its owner/TPM state and accept a candidate th
 `.github/workflows/protected-images.yml` runs unit, admission, download, custody and export regression tests
 and lint. Relevant main pushes, an hourly schedule and manual dispatch produce two independent
 x86_64 QEMU copies with dedicated environment secrets; both include playground, prod and prod-ssh.
+Admission resolves a shared package snapshot for the images, kernel base, bootloader and both Melange builders.
+Both copies consume those exact versions; the deduplication key binds source, package bytes and public trust.
+Only a fully published GitHub release and verified R2 mirror mark inputs successful; failures retry.
+Manual dispatch accepts `force` to publish again with the same inputs. No compiled kernel cache crosses copies.
 Each job shares prerequisites between forms but the two copies do not restore compiled kernels.
 The comparison covers complete signed disks and slots. Public candidates omit `boot.json.sig`.
 The QEMU gate authorizes three playground candidates and tests them on hosted Linux with KVM, OVMF and swtpm.
@@ -106,6 +110,8 @@ Signed configuration accompanies the exact code; resumed machines retain their o
 Its signed manifest binds asset hashes, lifecycle evidence, source commit and GHA run; uploads reverify it.
 GitHub assets have form/provider/architecture prefixes; identical R2 objects retain canonical filenames.
 All GitHub assets are attested. A draft becomes public only after fresh R2 downloads match every asset.
+The `publishing-health` workflow tracks main-branch check, package and image failures in one issue per workflow,
+updates that issue on retries and closes it after recovery. Pull-request runs cannot create these issues.
 
 ## Security Considerations
 

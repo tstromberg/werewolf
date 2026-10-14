@@ -56,6 +56,10 @@ on:
         description: Build and publish gated signed images to GitHub and R2
         type: boolean
         default: true
+      force:
+        description: Publish even if these inputs were already published successfully
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,6 +76,8 @@ jobs:
       serial: ${{ steps.serial.outputs.value }}
       serial1: ${{ steps.serial.outputs.update1 }}
       serial2: ${{ steps.serial.outputs.update2 }}
+      key: ${{ steps.inputs.outputs.key }}
+      build: ${{ inputs.force || steps.seen.outputs.cache-hit != 'true' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -83,6 +89,23 @@ jobs:
           make -j"$(nproc)" test
           make lint
           make howl
+      - name: Resolve one package snapshot for both independent copies
+        id: inputs
+        run: |
+          python3 release/protected-inputs build/host/howl x86_64 build/protected-inputs
+          echo "key=protected-v1-$(cat build/protected-inputs/inputs)" >>"$GITHUB_OUTPUT"
+      - name: Already published successfully?
+        id: seen
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: build/protected-inputs/inputs
+          key: ${{ steps.inputs.outputs.key }}
+          lookup-only: true
+      - name: Keep the resolved public package locks
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: protected-inputs
+          path: build/protected-inputs/
       - name: One serial for both independent copies
         id: serial
         run: |
@@ -101,12 +124,19 @@ jobs:
     timeout-minutes: 150
     env:
       PYTHONDONTWRITEBYTECODE: '1'
+      WEREWOLF_PROTECTED_INPUTS: ${{ github.workspace }}/build/protected-inputs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned build and runtime tools
         run: sudo test/ci-setup
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: protected-inputs
+          path: build/protected-inputs
+      - name: Use the shared image package locks
+        run: mkdir -p build/lock && cp build/protected-inputs/*.lock.json build/lock/
       - name: Complete QEMU lifecycle and qcow2 export with disposable test authority
         run: python3 test/check-protected-qemu
       - name: Keep public runtime evidence and build logs
@@ -125,6 +155,7 @@ jobs:
     needs: admission
     if: >-
       github.ref == 'refs/heads/main' &&
+      needs.admission.outputs.build == 'true' &&
       (github.event_name == 'push' || github.event_name == 'schedule' ||
        (github.event_name == 'workflow_dispatch' && inputs.build))
     environment: release
@@ -139,6 +170,7 @@ jobs:
     env:
       SOURCE_DATE_EPOCH: '0'
       PYTHONDONTWRITEBYTECODE: '1'
+      WEREWOLF_PROTECTED_INPUTS: ${{ github.workspace }}/build/protected-inputs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -147,6 +179,12 @@ jobs:
         run: sudo test/ci-setup
       - name: Build the signing host tool
         run: make howl
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: protected-inputs
+          path: build/protected-inputs
+      - name: Use the shared image package locks
+        run: mkdir -p build/lock && cp build/protected-inputs/*.lock.json build/lock/
       # Deliberately no compiled-kernel cache restore: these two candidate copies
       # must have independent source/object trees. Forms within each job share
       # the verified prerequisite cache, with host-only policy/module signing.
@@ -250,7 +288,7 @@ jobs:
             build/protected-lifecycle/result.json
 
   publish-qemu:
-    needs: qemu-lifecycle
+    needs: [admission, qemu-lifecycle]
     runs-on: ubuntu-26.04
     environment: release
     permissions:
@@ -305,3 +343,12 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.github.outputs.tag }}
         run: gh release edit "$RELEASE_TAG" --draft=false --latest
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: protected-inputs
+          path: build/protected-inputs
+      - name: Remember inputs only after both public destinations pass
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: build/protected-inputs/inputs
+          key: ${{ needs.admission.outputs.key }}

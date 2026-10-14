@@ -6,8 +6,7 @@ howl builds images, packs boot config, and creates, updates, reaches and deletes
 
 ## Background
 
-A machine is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a
-config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
+A machine is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 
 | Verb | Does |
 | --- | --- |
@@ -15,7 +14,7 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's forms and programs in, not the published ones the machine updates |
 | `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
-| `run` | secure `create` of `werewolf-run`, reusing an unchanged protected VM; default playground; currently requires `--build` |
+| `run` | secure `create` of `werewolf-run`, reusing an unchanged protected VM; default playground downloads a protected image; `--build` uses local sources |
 | `ssh`, `console`, `stop`, `delete` | reach or read a machine; stop keeps protected local state, delete removes it; without NAME, run's |
 | `upload DISK --on gcp\|aws\|azure` | makes a release disk a cloud image and prints its name |
 | `build-apk RECIPE` | builds a form's package from a melange recipe as `build` would (`melange.zig`), and lists what each package links |
@@ -24,8 +23,7 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 
 ## Goals
 
-- One command from form to running machine; what pack accepts, the machine
-  accepts, because both run the same checks.
+- One command from form to running machine; pack and the machine accept the same config checks.
 - Machine records in `build/machines/NAME`, signing keys and history in `~/.howl`.
 
 ## Non-Goals
@@ -34,21 +32,18 @@ config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud
 
 ## Detailed design
 
-**Forms.** A name is NAME-form, from werewolf's repository by its signed index
-(`published.zig`), which the machine updates; one not published yet is
-`./forms/NAME`, with a warning. A path is the caller's own, never updated.
+**Forms.** A name is NAME-form, from werewolf's repository by its signed index (`published.zig`), which the machine updates;
+one not published yet is `./forms/NAME`, with a warning. A path is the caller's own, never updated.
 
 **Config tar.** Each service's `config`, `setting` and `render` lines declare a
-flag (`lib/service.zig`); howl's own are `--config DIR`, `--hostname`,
-`--ip/--gw/--dns`, `--data-key`, `--root-keys`, `--update-policy`. A FILE flag
-reads a file or `-`, never a value. The guest's code checks every value first.
-The tar is ustar, sorted, root's, 0600, dated 1970. Names are at most 100 bytes
-of `[A-Za-z0-9._-/]`, files 1 MiB; clouds add cloud-metadata's limits (32 files
-of 32 KiB, 48 KiB in all) and AWS's and Azure's caps on user data.
+flag (`lib/service.zig`); howl adds `--config DIR`, `--hostname`, `--ip/--gw/--dns`, `--data-key`, `--root-keys`, `--update-policy`.
+A FILE flag reads a file or `-`, never a value. The guest's code checks every value first.
+The tar is ustar, sorted, root's, 0600, dated 1970. Names are at most 100 bytes of `[A-Za-z0-9._-/]`, files 1 MiB;
+clouds add cloud-metadata's limits (32 files of 32 KiB, 48 KiB in all) and AWS's and Azure's user-data caps.
 
 **Engines.** Secure create defaults to Lima (macOS) and QEMU (Linux); missing prerequisites fail.
 Other providers currently require explicit `--insecure`; `--dev` also requires that opt-out.
-Published downloads remain gated ([design](../../docs/design/published-secure-boot.md)); local machines use the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
+Published downloads require the provider's protected profile ([design](../../docs/design/published-secure-boot.md)); local machines use the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
@@ -61,33 +56,21 @@ Published downloads remain gated ([design](../../docs/design/published-secure-bo
 | aws | AMI written straight into an EBS snapshot | aws CLI |
 | azure | managed disk via azcopy; a specialized VM on a copy | az, azcopy, a default group |
 
-Local engines and Proxmox attach the tar as a read-only disk; clouds take it as
-base64 user data. Cloud images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`), so
-a build uploads once and delete keeps the image. A cloud machine lets nothing in:
-`--allow-from me|CIDR` opens the form's TCP ports, or create prints the commands.
+Local engines and Proxmox attach the tar read-only; clouds take base64 user data. Cloud images are `werewolf-FORM-ARCH-DIGEST` (`image.zig`), so a build uploads once and delete keeps the image.
+A cloud machine lets nothing in: `--allow-from me|CIDR` opens the form's TCP ports, or create prints the commands.
 
 **Second create.** The machine keeps its disk and takes the new config.
-Lima's instance list determines whether the VM exists. If it was deleted
-outside howl, the next create or run clears its stale per-VM files and
-creates a fresh instance. Stopped instances
-keep their enrollment; a failed Lima query never clears it.
+Lima's instance list determines whether the VM exists. An externally deleted VM is recreated after clearing stale per-VM files.
+Stopped instances keep their enrollment; a failed Lima query never clears it.
 `howl run` reuses matching protected inputs and resumes stopped VMs without building; changed inputs replace it. `howl delete` requests a fresh one. Another form, `--app`, or `--import` is refused on a second create.
 `--import DIR` is a read-only disk the form reads once, while its data is
 first made ([data.md](../../docs/data.md)). A cloud cannot attach it.
 
-**Build progress.** The status line shows the current phase and its elapsed
-time, with moons for image construction and a wolf for VM startup. Each
-completed phase stays on its own line with its measured duration; fast phases
-use milliseconds. Deployment resolution groups image authentication,
-configuration validation and retained VM checks. Publisher and runtime checks
-belong to VM startup. The final line gives VM state and total command time,
-followed by SSH, console and stop commands. Terminal output omits the machine
-record; pipelines retain it on stdout. Phases and commands go to stderr. Protected `--build`
-separates kernel preparation, compilation, module
-installation and signing from the measured EFI stub build. Kernel phases name
-the pinned Linux version and the `make` target. A kernel compile can take
-minutes; the timer follows that work until it finishes. Command output stays
-in the build log, with the last lines shown on failure; `--verbose` streams it.
+**Build progress.** Timed phases show moons for image construction and a wolf for VM startup; completed phases retain their durations.
+Deployment resolution covers authentication, config and retained VM checks; startup covers publisher and runtime checks.
+The final line gives VM state and total time, followed by SSH, console and stop commands. Phases go to stderr; pipelines receive the machine record on stdout.
+Protected `--build` separates kernel preparation, compilation, module installation and signing from the EFI stub build, naming the Linux version and make target.
+Output stays in the build log, with its tail shown on failure; `--verbose` streams it.
 
 ## Drawbacks
 
@@ -112,7 +95,6 @@ in the build log, with the last lines shown on failure; `--verbose` streams it.
 
 ## Reliability Considerations
 
-- Images are named by content: a retried upload or create finds them, and
-  `console` works whether or not the machine came up.
+- Images are named by content: a retried upload or create finds them; `console` works whether or not the machine came up.
 - create does not roll back: a partial failure leaves named leftovers.
 - Open: Proxmox has never run on a real node.

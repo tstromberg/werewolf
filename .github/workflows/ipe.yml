@@ -28,10 +28,13 @@ jobs:
           persist-credentials: false
       - name: Install tools
         run: |
-          sudo test/ci-setup
+          sudo apt-get update
           sudo apt-get install -y build-essential flex bison libssl-dev libelf-dev bc \
             python3-virt-firmware ovmf qemu-efi-aarch64 swtpm swtpm-tools tpm2-tools systemd-boot-efi \
             meson ninja-build gperf libcap-dev libmount-dev python3-jinja2 python3-pyelftools
+          # Package installation can recreate /dev/kvm with root-only access.
+          # Apply runner permissions after every runtime package is installed.
+          sudo test/ci-setup
       - name: Kernel version agreement
         run: |
           make build/lock/kernel.lock.json
@@ -42,6 +45,19 @@ jobs:
           openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 2 \
             -subj /CN=werewolf-ipe-check -keyout build/ipe-check/policy.key -out build/ipe-check/policy.crt
           chmod 600 build/ipe-check/policy.key
+      - name: Use the tested ARM firmware and immutable variable-store profile
+        if: matrix.runner == 'ubuntu-26.04-arm'
+        run: |
+          python3 tools/native-firmware aarch64 boot/firmware-requirements.txt build/ipe-check/firmware.json
+          python3 - <<'PY' >>"$GITHUB_ENV"
+          import json, pathlib, shutil
+          firmware = json.loads(pathlib.Path('build/ipe-check/firmware.json').read_text())
+          target = pathlib.Path('build/ipe-check/firmware').resolve()
+          target.mkdir()
+          for source, name in [('code.fd', 'code.fd'), ('template.fd', 'vars.fd')]:
+              shutil.copyfile(firmware[source], target / name)
+          print('SECUREBOOT_DIR=' + str(target))
+          PY
       - name: Stock Alpine Secure Boot release
         run: make check-secureboot
       - name: Build kernel and test enforcement
