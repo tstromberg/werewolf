@@ -292,6 +292,7 @@ _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/boot-download $(HOWL)
 	python3 test/protected-release
 	python3 test/protected-publication
+	python3 test/protected-export
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig

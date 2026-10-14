@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+"""Verify signed qcow2 exports, exact mirror parity and failure before publication."""
+import copy
+import datetime
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+publisher = importlib.machinery.SourceFileLoader('export_transport', 'release/publish-protected').load_module()
+exporter = importlib.machinery.SourceFileLoader('export_under_test', 'release/export-protected').load_module()
+github = importlib.machinery.SourceFileLoader('export_github', 'release/github-protected').load_module()
+
+
+class ProtectedExport(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix='ww-export-fixture-')
+        cls.root = Path(cls.temporary.name)
+        cls.trust, cls.bundle = cls.root / 'trust', cls.root / 'bundle'
+        cls.trust.mkdir()
+        cls.bundle.mkdir()
+        cls.key = cls.root / 'image.key'
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256', '-days', '2',
+                        '-subj', '/CN=release-export-test', '-keyout', cls.key, '-out', cls.trust / 'image.crt'],
+                       check=True, capture_output=True)
+        shutil.copyfile(cls.trust / 'image.crt', cls.trust / 'boot.crt')
+        (cls.trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/1',
+            source='https://vendor.test/boot/v1', permit_port=9443)))
+        cls.manifest = dict(form='playground', image=dict(arch='x86_64', build='a' * 64,
+            serial=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')), raw_size=512 << 20)
+        (cls.bundle / 'boot.json').write_text(json.dumps(cls.manifest))
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', cls.key, '-out', cls.bundle / 'boot.json.sig',
+                        cls.bundle / 'boot.json'], check=True, capture_output=True)
+        (cls.bundle / 'slot').mkdir()
+        for name in exporter.downloads.FILES:
+            (cls.bundle / 'slot' / name).write_bytes(name.encode())
+        head = cls.bundle / 'prebuilt/x86_64'
+        head.mkdir(parents=True)
+        (head / 'latest.json').write_bytes(b'exact original image manifest')
+        (head / 'latest.json.sig').write_bytes(b'exact original image signature')
+        raw = cls.root / 'disk.raw'
+        with raw.open('wb') as output:
+            output.write(b'protected disk header')
+            output.seek((256 << 20) + 73)
+            output.write(b'protected slot bytes')
+            output.seek((512 << 20) - 19)
+            output.write(b'backup disk header!')
+        subprocess.run(['zstd', '-q', raw, '-o', cls.bundle / 'disk.img.zst'], check=True)
+        cls.report = dict(format='werewolf-boot-gates/1', descriptor=exporter.downloads.sha(cls.bundle / 'boot.json'),
+            arch='x86_64', provider='qemu', checks={name: True for name in publisher.preparation.GATES})
+        cls.prefix = 'playground-qemu-x86_64'
+        cls.assets = cls.root / 'assets'
+        cls.environment = dict(WEREWOLF_PROTECTED_IMAGE_KEY=str(cls.key), GITHUB_REPOSITORY='werewolf-linux/werewolf',
+            GITHUB_SHA='a' * 40, GITHUB_RUN_ID='12345', GITHUB_RUN_ATTEMPT='1')
+        # Native boot admission is tested by boot-images/boot-download. Here,
+        # only that gate is isolated; actual RSA signatures and qemu-img run.
+        with patch.object(publisher.preparation.downloads, 'native', return_value=cls.manifest), \
+             patch.dict(os.environ, cls.environment):
+            cls.signed = exporter.export('howl', cls.bundle, cls.report, 'qemu', cls.assets, cls.trust,
+                                         preparation=publisher.preparation)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='ww-export-test-')
+        self.addCleanup(self.temporary.cleanup)
+        self.work = Path(self.temporary.name)
+        self.copy = self.work / 'assets'
+        shutil.copytree(self.assets, self.copy)
+
+    def test_qcow2_round_trips_and_both_mirrors_retain_original_signatures(self):
+        signed = exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
+        self.assertEqual(self.signed, signed)
+        with patch.object(publisher.preparation.downloads, 'native', return_value=self.manifest):
+            plan = publisher.publish('howl', self.bundle, self.report, 'qemu',
+                publisher.Store(str(self.work / 'store')), self.trust, release_assets=self.copy)
+        objects = self.work / 'store/playground/qemu/x86_64/objects' / plan['descriptor']
+        for name in list(signed['files']) + ['downloads.json', 'downloads.json.sig']:
+            self.assertEqual((self.copy / (self.prefix + '-' + name)).read_bytes(), (objects / name).read_bytes())
+
+    def test_modified_qcow2_or_signature_is_rejected(self):
+        for suffix in ('disk.qcow2', 'downloads.json.sig'):
+            path = self.copy / (self.prefix + '-' + suffix)
+            original = path.read_bytes()
+            path.write_bytes(original + b'tamper')
+            with self.assertRaises((ValueError, subprocess.CalledProcessError)):
+                exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
+            path.write_bytes(original)
+
+    def test_replaced_boot_signature_cannot_be_mirrored(self):
+        path = self.copy / (self.prefix + '-boot.json.sig')
+        path.write_bytes(b'foreign signature')
+        with self.assertRaisesRegex(ValueError, 'signed digest'):
+            exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
+
+    def test_false_runtime_gate_never_exports_or_signs(self):
+        bad = copy.deepcopy(self.report)
+        bad['checks']['ab_upgrade'] = False
+        with patch.object(publisher.preparation.downloads, 'native', return_value=self.manifest), \
+             patch.object(exporter, 'unpack') as unpack:
+            with self.assertRaises(ValueError):
+                exporter.export('howl', self.bundle, bad, 'qemu', self.work / 'refused', self.trust,
+                                preparation=publisher.preparation)
+            unpack.assert_not_called()
+        self.assertFalse((self.work / 'refused').exists())
+
+    def test_wrong_provider_evidence_and_unsigned_extra_assets_refuse(self):
+        wrong = dict(self.report, provider='lima')
+        with self.assertRaisesRegex(ValueError, 'different lifecycle evidence'):
+            exporter.verify(self.copy, self.bundle, wrong, 'qemu', self.trust)
+        (self.copy / 'private.key').write_bytes(b'must never upload')
+        with self.assertRaisesRegex(ValueError, 'unexpected files'):
+            exporter.verify(self.copy, self.bundle, self.report, 'qemu', self.trust)
+
+    def test_truncated_raw_disk_and_backing_file_refuse(self):
+        source = self.work / 'short.zst'
+        subprocess.run(['zstd', '-q', self.bundle / 'slot/cmdline', '-o', source], check=True)
+        with self.assertRaisesRegex(ValueError, 'authenticated size'):
+            exporter.unpack(source, self.work / 'short.raw', self.manifest['raw_size'])
+        overlay = self.work / 'overlay.qcow2'
+        subprocess.run(['qemu-img', 'create', '-q', '-f', 'qcow2', '-F', 'raw', '-b',
+                        self.root / 'disk.raw', overlay], check=True)
+        with self.assertRaisesRegex(ValueError, 'standalone'):
+            exporter.compare(self.root / 'disk.raw', overlay, self.manifest['raw_size'])
+
+    def test_github_draft_carries_all_assets_and_exact_workflow_commit(self):
+        with patch.dict(os.environ, dict(self.environment, GITHUB_OUTPUT=str(self.work / 'outputs'))), \
+             patch.object(github, 'command') as run:
+            tag = github.draft(self.copy, self.bundle, self.report, 'qemu', self.trust)
+        argv = run.call_args.args[0]
+        self.assertIn('--draft', argv)
+        self.assertEqual('a' * 40, argv[argv.index('--target') + 1])
+        self.assertEqual({str(path.resolve()) for path in self.copy.iterdir()}, set(argv[-len(list(self.copy.iterdir())):]))
+        self.assertEqual('tag=' + tag + '\n', (self.work / 'outputs').read_text())
+
+    def test_github_never_uploads_extra_or_tampered_files(self):
+        (self.copy / 'private.key').write_bytes(b'must never upload')
+        with patch.object(github, 'command') as run:
+            with self.assertRaisesRegex(ValueError, 'unexpected files'):
+                github.draft(self.copy, self.bundle, self.report, 'qemu', self.trust)
+            run.assert_not_called()
+
+
+if __name__ == '__main__':
+    unittest.main()

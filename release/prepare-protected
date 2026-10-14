@@ -27,7 +27,7 @@ def gates(report, manifest, descriptor, provider):
         raise ValueError('protected boot lifecycle gates are incomplete')
 
 
-def prepare(howl, bundle, report, provider, output, trust='release/protected'):
+def prepare(howl, bundle, report, provider, output, trust='release/protected', release_assets=None):
     bundle, output, trust = Path(bundle).resolve(), Path(output).resolve(), Path(trust).resolve()
     metadata = json.loads(downloads.read(trust / 'trust.json', 4096))
     if set(metadata) != {'format', 'source', 'permit_port'} or metadata['format'] != 'werewolf-boot-trust/1':
@@ -46,6 +46,10 @@ def prepare(howl, bundle, report, provider, output, trust='release/protected'):
     gates(report, manifest, descriptor, provider)
     downloads.freshness(manifest, descriptor, None, time.time())
     downloads.native(howl, 'verify', bundle, request)
+    exported = None
+    if release_assets is not None:
+        exporter = importlib.machinery.SourceFileLoader('publication_export', 'release/export-protected').load_module()
+        exported = exporter.verify(release_assets, bundle, report, provider, trust)
     if output.exists():
         raise ValueError('publication output already exists')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -64,6 +68,15 @@ def prepare(howl, bundle, report, provider, output, trust='release/protected'):
         for name in ('boot.json', 'boot.json.sig'):
             shutil.copyfile(bundle / name, latest / name)
             shutil.copyfile(bundle / name, objects / name)
+        if exported is not None:
+            # Existing boot/image heads stay byte-identical. The additional
+            # downloads signature covers qcow2, runtime evidence and GHA provenance.
+            for name, record in exported['files'].items():
+                if name not in downloads.FILES + ('disk.img.zst', 'latest.json', 'latest.json.sig', 'boot.json', 'boot.json.sig'):
+                    shutil.copyfile(Path(release_assets) / record['asset'], objects / name)
+            prefix = '%s-%s-%s' % (form, provider, arch)
+            for name in ('downloads.json', 'downloads.json.sig'):
+                shutil.copyfile(Path(release_assets) / (prefix + '-' + name), objects / name)
         entries = []
         for path in sorted(staging.rglob('*')):
             if path.is_file():
