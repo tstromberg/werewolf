@@ -62,7 +62,7 @@ permissions:
 
 concurrency:
   group: protected-images-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   admission:
