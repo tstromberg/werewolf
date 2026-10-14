@@ -2,8 +2,10 @@
 """CI key handling must authenticate its identity and clean up private material."""
 import importlib.machinery
 import importlib.util
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,6 +81,42 @@ class ReleaseSigning(unittest.TestCase):
                                 env=self.environment(secret), capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('PRIVATE_SENTINEL_DO_NOT_LOG', result.stdout + result.stderr)
+
+    @unittest.skipUnless(shutil.which('jq'), 'release selection integration requires jq')
+    def test_legacy_comparison_finds_release_beyond_a_page_of_protected_tags(self):
+        with tempfile.TemporaryDirectory(prefix='ww-release-selection-') as temporary:
+            root = Path(temporary)
+            dist, binaries = root / 'dist', root / 'bin'
+            dist.mkdir()
+            binaries.mkdir()
+            manifest = dist / 'prod-x86_64.json'
+            manifest.write_text('{\n  "build": "unchanged",\n  "kernel": "unchanged"\n}\n')
+            pages = root / 'pages.json'
+            pages.write_text(json.dumps([
+                [dict(draft=False, tag_name='protected-20261014T000000Z') for _ in range(100)],
+                [dict(draft=True, tag_name='20261012T000000Z'), dict(draft=False, tag_name='20261010T091704Z')]]))
+            fake = binaries / 'gh'
+            fake.write_text('''#!/usr/bin/env python3
+import os,pathlib,shutil,subprocess,sys
+args=sys.argv[1:]
+if args[0]=='api':
+    assert '--paginate' in args and '--slurp' in args
+    result=subprocess.run(['jq','-r',args[args.index('--jq')+1]],
+        input=pathlib.Path(os.environ['STUB_PAGES']).read_bytes(),capture_output=True,check=True)
+    sys.stdout.buffer.write(result.stdout)
+elif args[:2]==['release','download']:
+    assert args[2]=='20261010T091704Z',args
+    shutil.copyfile(os.environ['STUB_MANIFEST'],pathlib.Path(args[args.index('--dir')+1])/'prod-x86_64.json')
+else: raise SystemExit('unchanged legacy images must not create a release')
+''')
+            fake.chmod(0o755)
+            env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ['PATH'],
+                       STUB_PAGES=str(pages), STUB_MANIFEST=str(manifest))
+            env.pop('GH_REPO', None)
+            result = subprocess.run(['sh', 'release/publish', dist, root / 'unused-locks'],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('nothing to publish', result.stdout)
 
     def test_signed_release_replaces_generic_firmware_and_enforces_smm(self):
         arguments = ['qemu-system-x86_64', '-M', 'q35', '-bios', 'generic.fd',
