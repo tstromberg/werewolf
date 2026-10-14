@@ -33,13 +33,11 @@ Legacy releases use different trust and cannot satisfy this protected profile.
 `release/protected/boot.crt` authorizes only protected loaders and UKIs.
 `release/protected/image.crt` authorizes IPE policies, modules and signed image/boot heads.
 These are separate identities and neither may reuse a legacy release key.
-`release/protected/trust.json` fixes the HTTPS mirror and declared host permit port.
-Compiled public certificates establish trust.
+`release/protected/trust.json` fixes the HTTPS mirror and host permit port; compiled public certificates establish trust.
 `release/create-protected-trust PRIVATE PUBLIC` refuses partial state or replacement of committed trust.
 Default custody is `config/release-signing/protected/`: private files 0600, directory 0700, ignored by Git.
 Keep an offline backup before putting these keys into production.
-The release environment needs `WEREWOLF_PROTECTED_BOOT_KEY` and `WEREWOLF_PROTECTED_IMAGE_KEY`.
-Both secrets are configured in werewolf-linux/werewolf's main-only release environment.
+The main-only release environment has `WEREWOLF_PROTECTED_BOOT_KEY` and `WEREWOLF_PROTECTED_IMAGE_KEY` configured.
 `release/with-protected-keys` checks both committed public certificates before starting a child.
 It materializes private host paths, suppresses malformed-secret diagnostics and removes temporary keys.
 Melange compile staging receives only public inputs; private module/policy signing stays on the host.
@@ -85,15 +83,12 @@ An existing enrollment must retain its owner/TPM state and accept a candidate th
 
 ### CI and publication
 
-`.github/workflows/protected-images.yml` runs unit, admission, download, custody and export regression tests
-and lint. Relevant main pushes, an hourly schedule and manual dispatch produce two independent
-x86_64 QEMU copies with dedicated environment secrets; both include playground, prod and prod-ssh.
-Admission resolves a shared package snapshot for the images, kernel base, bootloader and both Melange builders.
-Both copies consume those exact versions; the deduplication key binds source, package bytes and public trust.
-Only a fully published GitHub release and verified R2 mirror mark inputs successful; failures retry.
-Manual dispatch accepts `force` to publish again with the same inputs. No compiled kernel cache crosses copies.
-Each job shares prerequisites between forms but the two copies do not restore compiled kernels.
-The comparison covers complete signed disks and slots. Public candidates omit `boot.json.sig`.
+`.github/workflows/protected-images.yml` runs unit, admission, download, custody and export regression tests and lint.
+Relevant main pushes, hourly checks and manual dispatch build two independent x86_64 QEMU copies of playground, prod and prod-ssh.
+Admission resolves shared package locks for images, kernel base, bootloader and both Melange builders; both copies consume them.
+The deduplication key binds source, package bytes and public trust. Only verified publication to both destinations marks success; failures retry.
+Manual dispatch accepts `force` to publish the same inputs again. No compiled kernel cache crosses the independent copies.
+Complete signed disks and slots must match. Public candidates omit `boot.json.sig` until lifecycle authorization.
 The QEMU gate authorizes three playground candidates and tests them on hosted Linux with KVM, OVMF and swtpm.
 The harness also supports Lima; evidence cannot cross providers or architectures. Only tested bundles publish.
 
@@ -110,8 +105,7 @@ Signed configuration accompanies the exact code; resumed machines retain their o
 Its signed manifest binds asset hashes, lifecycle evidence, source commit and GHA run; uploads reverify it.
 GitHub assets have form/provider/architecture prefixes; identical R2 objects retain canonical filenames.
 All GitHub assets are attested. A draft becomes public only after fresh R2 downloads match every asset.
-The `publishing-health` workflow tracks main-branch check, package and image failures in one issue per workflow,
-updates that issue on retries and closes it after recovery. Pull-request runs cannot create these issues.
+`publishing-health` tracks main-branch check, package and image failures in one issue per workflow, updates retries and closes on recovery.
 
 ## Security Considerations
 
