@@ -1,6 +1,6 @@
 #!/bin/sh
 # build-kernel ALPINE-ROOTFS CERT KEY OUT: native Linux kernel build.
-# CERT authorizes IPE policies; KEY signs modules and never enters the output.
+# CERT authorizes IPE policies and modules; KEY=- returns unsigned modules for host signing.
 set -eu
 [ $# = 4 ] || { echo "usage: boot/build-kernel ALPINE-ROOTFS CERT KEY OUT" >&2; exit 2; }
 [ "$(uname -s)" = Linux ] || { echo "build-kernel: run on Linux (Lima on macOS)" >&2; exit 1; }
@@ -38,7 +38,7 @@ src=$out/linux-$version
 obj=$out/obj
 stage=$out/root.$$
 alpine_base=$(mktemp -d "$out/base.XXXXXXXX")
-trap 'rm -f "$obj/module-signing.pem"; rm -rf "$stage" "$alpine_base"' EXIT
+trap 'rm -rf "$stage" "$alpine_base"; rm -f "$out/rootfs.tar.tmp"' EXIT
 mkdir -p "$obj"
 if [ "$key" != - ]; then
     openssl x509 -in "$cert" -pubkey -noout | openssl pkey -pubin -outform DER >"$out/cert.pub"
@@ -53,19 +53,11 @@ config-$version-*) ;;
 *) echo "build-kernel: Alpine config must match pinned Linux $version; update boot/kernel-source" >&2; exit 1 ;;
 esac
 cp "$1" "$obj/.config"
-# Fixed build metadata; a supplied stable key makes module signatures reproducible.
-export KBUILD_BUILD_TIMESTAMP='1970-01-01 00:00:00 UTC' KBUILD_BUILD_USER=werewolf KBUILD_BUILD_HOST=werewolf KBUILD_BUILD_VERSION=1
+# Stable metadata, paths and latent-entropy instrumentation; runtime entropy remains dynamic.
+export SOURCE_DATE_EPOCH=0 KBUILD_BUILD_TIMESTAMP='1970-01-01 00:00:00 UTC' KBUILD_BUILD_USER=werewolf KBUILD_BUILD_HOST=werewolf KBUILD_BUILD_VERSION=1
+export KCFLAGS="-fdebug-prefix-map=$src=. -fdebug-prefix-map=$obj=. -frandom-seed=werewolf-$version"
+export KAFLAGS="-fdebug-prefix-map=$src=. -fdebug-prefix-map=$obj=."
 umask 077
-if [ "$key" = - ]; then
-    # Only the public IPE authority reaches a remote build helper. A temporary
-    # module signer is consumed here and destroyed; it never leaves the builder.
-    openssl req -newkey rsa:4096 -nodes -x509 -sha256 -days 3650 \
-        -subj /CN=werewolf-build-modules -keyout "$obj/module-signing.pem" \
-        -out "$alpine_base/module.crt"
-    cat "$alpine_base/module.crt" >>"$obj/module-signing.pem"
-else
-    cat "$key" "$cert" >"$obj/module-signing.pem"
-fi
 cp "$cert" "$obj/ipe.crt"
 cp "$tree/boot/ipe-boot.policy" "$obj/ipe-boot.policy"
 c=$src/scripts/config
@@ -73,8 +65,8 @@ c=$src/scripts/config
 	--set-str LSM 'landlock,lockdown,yama,ipe' \
 	--set-str IPE_BOOT_POLICY 'ipe-boot.policy' \
 	--set-str SYSTEM_TRUSTED_KEYS 'ipe.crt' --set-str SYSTEM_REVOCATION_KEYS '' \
-	--set-str MODULE_SIG_KEY 'module-signing.pem' --enable MODULE_SIG \
-	--enable MODULE_SIG_ALL --enable MODULE_SIG_FORCE --enable MODULE_SIG_SHA256 \
+	--set-str MODULE_SIG_KEY '' --enable MODULE_SIG \
+	--disable MODULE_SIG_ALL --enable MODULE_SIG_FORCE --enable MODULE_SIG_SHA256 \
 	--disable IPE_POLICY_SIG_SECONDARY_KEYRING --disable IPE_POLICY_SIG_PLATFORM_KEYRING \
 	--enable LOCK_DOWN_KERNEL_FORCE_INTEGRITY --disable LOCK_DOWN_KERNEL_FORCE_NONE \
 	--disable KEXEC --disable KEXEC_FILE --disable KEXEC_CORE --disable LOCALVERSION_AUTO \
@@ -87,10 +79,12 @@ make -C "$src" O="$obj" ARCH="$arch" olddefconfig
 for opt in SECURITY_IPE IPE_PROP_DM_VERITY MODULE_SIG_FORCE LOCK_DOWN_KERNEL_FORCE_INTEGRITY; do
 	grep -qx "CONFIG_$opt=y" "$obj/.config" || { echo "build-kernel: CONFIG_$opt did not hold" >&2; exit 1; }
 done
+grep -qx 'CONFIG_MODULE_SIG_KEY=""' "$obj/.config"
+grep -qx '# CONFIG_MODULE_SIG_ALL is not set' "$obj/.config"
 # VM firmware supplies its device tree; build only the image and modules we package.
 make -C "$src" O="$obj" ARCH="$arch" -j"${JOBS:-$(nproc)}" "${image##*/}" modules
 mkdir -p "$stage/boot" "$stage/etc/apk"
-# Ubuntu's depmod may have no zlib support. Resolve signed, uncompressed
+# Ubuntu's depmod may have no zlib support. Resolve uncompressed
 # modules first, then compress them and update the textual dependency paths.
 make -C "$src" O="$obj" ARCH="$arch" INSTALL_MOD_PATH="$stage" CONFIG_MODULE_COMPRESS_ALL= modules_install
 kver=$(make -s -C "$src" O="$obj" ARCH="$arch" kernelrelease)
@@ -111,5 +105,9 @@ mv "$deps.tmp" "$deps"
 find "$stage/lib/modules/$kver" -type f -name '*.bin' -delete
 tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
 	-cf "$out/rootfs.tar.tmp" -C "$stage" boot lib/modules etc/apk/repositories
-mv "$out/rootfs.tar.tmp" "$out/rootfs.tar"
+if [ "$key" = - ]; then
+    mv "$out/rootfs.tar.tmp" "$out/rootfs.tar"
+else
+    python3 "$tree/tools/sign-kernel" "$out/rootfs.tar.tmp" "$key" "$cert" "$out/rootfs.tar"
+fi
 echo "build-kernel: $out/rootfs.tar"

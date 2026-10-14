@@ -1,5 +1,9 @@
 # Root arbitrary-code-execution audit — 2026-10-13
 
+Editorial update, 2026-10-13: findings specific to removed deployment code
+have been omitted. Remaining findings and source locations describe the
+audited revision; original finding numbers are retained.
+
 Scope: the `werewolf-run` playground machine on Lima (`vz`, aarch64, kernel
 6.18.56-0-virt), attacked from its root SSH shell, plus a read of the
 confinement code that shell runs under (`cmd/fence`, `lib/seal.zig`,
@@ -128,8 +132,7 @@ Each was tried from the root shell on the live machine unless noted:
   syscall; per-promise and socket-family argument filters),
   `mount-broker` (fixed one-word protocol, device identity pinned by
   serial/UUID, detached `nosuid,nodev,noexec` mounts, restrictions-only
-  seccomp), `grub-setenv` (one record rewritten byte-for-byte, no new
-  records or variables), `people` account parsing (rejects the name
+  seccomp), `people` account parsing (rejects the name
   `root`, existing names, and uid collisions), and the `fence` ruleset
   construction all match their documented behavior; no flaw was found
   in them during this pass.
@@ -147,7 +150,7 @@ Each was tried from the root shell on the live machine unless noted:
   instance's config file.
 - **Broker words are broad by design.** Any uid-0 process in the one
   mount namespace may ask for `victim` (the data filesystem, writable),
-  `esp`, `grub`, or `shutdown`, at any time, or write under those
+  `esp` or `shutdown`, at any time, or write under those
   mounts while the updater holds them. `cmd/mount-broker/README.md`
   already records this as open; the live run shows the ask path needs
   no werewolf binary at all — any uid-0 client that can open a unix
@@ -171,7 +174,7 @@ Each was tried from the root shell on the live machine unless noted:
   (`iface-up`, `cloud-metadata`'s user-data handling past `people`).
 - OCI and adhoc forms (`cmd/init/oci.zig` binds and the execute grant
   on image roots) — this image has no `/oci`; only the code was read.
-- Other forms and providers (bitten/GRUB machines, QEMU, cloud with
+- Other forms and providers (QEMU, cloud with
   Secure Boot or IPE), the host-side `howl` Lima driver, and kernel
   vulnerabilities reachable through the sealed syscall surface.
 
@@ -205,9 +208,9 @@ Only the supervised `slot-keep` and `slot-update` services may ask,
 proven by binary, argv, cwd and the supervising `runsv` — read through
 a private `task-links` helper that alone keeps `CAP_SYS_PTRACE`, since
 the broker's dropped tracing authority cannot read non-dumpable
-services' `/proc` links. `grub`/`victim` are lent only on bitten
-boots (plus the updater's TPM retirement on native boots), and
-`shutdown` only to runit stage 3; every refusal is logged. Verified by
+services' `/proc` links. `victim` is lent only for the updater's TPM
+retirement on native boots, and `shutdown` only to runit stage 3;
+every refusal is logged. Verified by
 unit tests (`identityMatches` forged-shell cases, request parsers),
 `make check-persist` (`ok demo slot-commits`) and
 `make check-updater` (install, boot and commit of the other slot).
@@ -228,22 +231,17 @@ system exists to contain. During any genuine update (a window of
 seconds to minutes while the broker copies the kernel and initramfs),
 root could replace the staged command line after the updater wrote
 it; `withSlot` then lets the replacement override same-named boot
-arguments and add new ones. Proven at unit level with the real merge
-and parse code: a staged line carrying
-`werewolf.grubenv=UUID:/werewolf werewolf.ip=10.9.9.9/24
-werewolf.seal=learn werewolf.debug=1` produces a parsing entry for
-slot b treated as a bitten boot on the attacker's network identity,
-with relaxed seal/debug words.
+arguments and add new ones. Unit-level reproduction used the actual
+merge and parser code to change the trial boot's context, including
+network identity and relaxed seal/debug words.
 
 Payloads were chased and bounded: dm-verity (hash sealed in the
 digest-checked initramfs) refuses a redirected root, stage0's IPE
 still governs execution, `seal=learn` and `debug=1` are honored only
 on DEV builds, and native UKI boots exclude unsigned loader options
 entirely. So this was not a standalone ACE on release builds — but it
-was a forgery of the trial boot's context (bitten treatment unlocks
-the broker's `grub` mount and slot-keep's GRUB commit path, including
-a `grub-setenv` write into the victim filesystem), and it broke the
-digest chain every sibling artifact obeys. Fixed: `esp-install` now
+was a forgery of the trial boot's context, and it broke the digest
+chain every sibling artifact obeys. Fixed: `esp-install` now
 carries the command line as a fourth digest artifact (`c=`), the
 updater hashes the staged file it wrote, and the broker verifies
 size and SHA-256 before touching the ESP or deriving any options.

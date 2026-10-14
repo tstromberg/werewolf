@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""Materialize dedicated protected-image secrets only on the trusted signing host."""
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+
+
+def checked(arguments):
+    result = subprocess.run(arguments, capture_output=True)
+    if result.returncode:
+        raise ValueError('invalid protected signing identity')
+    return result.stdout
+
+
+def run(argv, environment):
+    os.umask(0o077)
+    with tempfile.TemporaryDirectory(prefix='ww-protected-signing-') as temporary:
+        work, env = Path(temporary), dict(environment)
+        public_keys = []
+        for kind, public_name in [('BOOT', 'boot.crt'), ('IMAGE', 'image.crt')]:
+            supplied = environment.get('WEREWOLF_PROTECTED_' + kind + '_KEY', '')
+            if not supplied:
+                raise ValueError('protected signing keys are required')
+            cert = Path(environment.get('WEREWOLF_PROTECTED_' + kind + '_CRT',
+                                        'release/protected/' + public_name)).resolve()
+            key = work / (kind.lower() + '.key')
+            key.write_bytes(supplied.encode() if supplied.startswith('-----BEGIN ') else Path(supplied).read_bytes())
+            key.chmod(0o600)
+            public = checked(['openssl', 'pkey', '-in', str(key), '-pubout'])
+            pinned = checked(['openssl', 'x509', '-in', str(cert), '-pubkey', '-noout'])
+            checked(['openssl', 'x509', '-in', str(cert), '-checkend', '86400', '-noout'])
+            if public != pinned:
+                raise ValueError('protected key differs from committed certificate')
+            # A dedicated identity cannot be the legacy release signer.
+            legacy = Path('release/boot.crt' if kind == 'BOOT' else 'release/image.pub')
+            old = checked(['openssl', 'x509', '-in', str(legacy), '-pubkey', '-noout']) if kind == 'BOOT' else legacy.read_bytes()
+            if public == old:
+                raise ValueError('protected images cannot reuse legacy signing authority')
+            public_keys.append(public)
+            env['WEREWOLF_PROTECTED_' + kind + '_KEY'] = str(key)
+            env['WEREWOLF_PROTECTED_' + kind + '_CRT'] = str(cert)
+            if kind == 'BOOT':
+                env.update(WEREWOLF_BOOT_KEY=str(key), WEREWOLF_BOOT_CRT=str(cert))
+            else:
+                env.update(WEREWOLF_IPE_KEY=str(key), WEREWOLF_IPE_CRT=str(cert))
+        if public_keys[0] == public_keys[1]:
+            raise ValueError('boot and policy authorities must be separate')
+        child = subprocess.Popen(argv, env=env)
+        try:
+            return child.wait()
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+
+
+def interrupted(signum, frame):
+    raise KeyboardInterrupt
+
+
+if __name__ == '__main__':
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        if len(sys.argv) < 2:
+            raise ValueError('usage: with-protected-keys COMMAND [ARG...]')
+        sys.exit(run(sys.argv[1:], os.environ))
+    except (OSError, ValueError):
+        sys.exit('with-protected-keys: missing/invalid dedicated keys or public identity mismatch')
+    except KeyboardInterrupt:
+        sys.exit(130)

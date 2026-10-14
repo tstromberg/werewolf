@@ -12,8 +12,7 @@ to take over than their containers ([docs/forms.md](../forms.md)).
 ## Background
 
 - **The graph grew by accretion**: fourteen forms, several only to add one
-  capability (`dhcp`, `cloud`, `disk`, `crypt`); `bitten` meant both
-  "boots from slots" (any machine that updates) and "installed by bite".
+  capability (`dhcp`, `cloud`, `disk`, `crypt`).
 - **A chain is linear.** A form has one `base`, so a capability added as a
   link burdens every form above it, and every combination wants a form.
 - **People pick a runtime, not a capability**: "a Python machine".
@@ -21,8 +20,7 @@ to take over than their containers ([docs/forms.md](../forms.md)).
 ## Goals
 
 - A short list of forms chosen by what they run.
-- Any image boots from the initramfs, a native disk or a slot bite
-  installed; no form is "the bitten one".
+- Any image boots from the initramfs or a native disk.
 - A capability is a variant or a form taken `with`, never a chain link.
 
 ## Non-Goals
@@ -40,11 +38,9 @@ minimal ──→ prod ──┬──→ nginx ──→ php
 minimal ──→ sshd ──→ qemu-host;   prod with sshd ──→ prod-ssh, lima
 ```
 
-**`minimal` absorbed `bitten`**: slots, `blkid`, `bite-cleanup` and the
-filesystem modules, so any image can go on a native disk or be installed
-by bite. xfs, btrfs and FAT load only where stage0 tags the machine
-(`@xfs`, `@btrfs`, `@esp` in form.yaml's `modules`), so modload still
-runs once. `bite-cleanup` on a machine that was never bitten stops.
+**`minimal` supplies slots**, `blkid` and the filesystem modules for native disks.
+FAT loads only where stage0 tags the machine (`@esp` in form.yaml's
+`modules`), so modload still runs once.
 
 **`prod` absorbed** `dhcp`, `cloud`, `autoupdate`, `disk` and `crypt`. It
 carries `mke2fs` and `cryptsetup`, so having the tools cannot mean

@@ -12,6 +12,9 @@ base: prod
 
 packages:
   - postgresql-17
+  - posix-libc-utils-bin  # locale -a, without ldd or its bash dependency
+
+dev: [postgresql-17-client]  # peer-authenticated SQL checks
 
 paths:
   # PAM's password helper, setgid shadow, arrives through PostgreSQL's
@@ -26,7 +29,7 @@ allow: [jit]
 
 # werewolf's programs from cmd/ this form's machines run, beside the
 # ones every form has (docs/programs.md)
-programs: [popen-shim.so]
+programs: [sh-shim]
 
 # The posture checks this form fails, and why: its own, never inherited
 # (forms/README.md). A ? before one: the host decides.
@@ -36,8 +39,7 @@ weaknesses:
 services:
   # PostgreSQL, as its own user, for local clients over its UNIX socket
   # alone. pg-init makes the cluster on the first start, and applies the
-  # image's SQL before each; initdb, which it runs, needs popen-shim.so and
-  # starts the server itself.
+  # image's SQL before each; initdb starts setup backends through the shim.
   postgres:
     exec: /usr/bin/postgres -D /data/svc/postgres/data -c listen_addresses= -c unix_socket_directories=/run/svc/postgres
     before: /usr/lib/werewolf/pg-init
@@ -46,7 +48,10 @@ services:
     # tries nscd's socket, which is not there; refused, each login would leave
     # two audit records. It reaches no network: there is no inet promise.
     pledge: stdio rpath wpath proc ipc unix listen connect
-    run: /usr/bin/initdb
+    run:
+      - /usr/bin/initdb
+      - /usr/lib/werewolf/sh-shim
+      - /usr/bin/locale
     # pg-init streams /run/werewolf/import/*.sql once, while it makes the cluster.
     read: /run/werewolf/import
     # Local clients reach its socket, /run/svc/postgres/.s.PGSQL.5432.

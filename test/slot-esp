@@ -1,0 +1,17 @@
+#!/bin/sh
+# slot-esp IMAGE SLOT CMDLINE: make a native EFI partition for direct-kernel tests.
+# The broker uses its FAT serial and counted loader entries just as on a UEFI disk.
+set -eu
+image=$1
+slot=$2
+cmdline=$3
+truncate -s 128M "$image"
+mformat -F -N 57e1f000 -i "$image" ::
+# Leave the protective MBR empty so Linux recognizes this as a FAT filesystem.
+dd if=/dev/zero of="$image" bs=1 count=64 seek=446 conv=notrunc 2>/dev/null
+mmd -i "$image" ::/loader ::/loader/entries ::/werewolf "::/werewolf/$slot"
+entry=$(mktemp)
+trap 'rm -f "$entry"' EXIT
+printf 'title werewolf %s\nversion 19800101T000000Z\nlinux /werewolf/%s/vmlinuz\ninitrd /werewolf/%s/stage0.zst\noptions %s werewolf.slot=%s\n' \
+    "$slot" "$slot" "$slot" "$cmdline" "$slot" >"$entry"
+mcopy -i "$image" "$entry" "::/loader/entries/werewolf-$slot+1.conf"

@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Fetch protected bundles with explicit public pins and an atomic release floor."""
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import signal
+import ssl
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+from urllib.error import HTTPError
+from urllib.parse import urlsplit
+
+HEAD_LIMIT = 1 << 20
+SIGNATURE_LIMIT = 512
+FILES = ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi')
+HEX = re.compile(r'[0-9a-f]{64}\Z')
+CACHE_SECONDS = 300
+USER_AGENT = 'Werewolf-howl/1 (+https://github.com/werewolf-linux/werewolf)'
+
+
+def sha(path):
+    value = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for block in iter(lambda: source.read(1 << 20), b''):
+            value.update(block)
+    return value.hexdigest()
+
+
+def read(path, limit):
+    with Path(path).open('rb') as source:
+        result = source.read(limit + 1)
+    if len(result) > limit:
+        raise ValueError('metadata exceeds its bound')
+    return result
+
+
+def atomic(path, value):
+    raw = json.dumps(value, sort_keys=True, separators=(',', ':')).encode() + b'\n'
+    with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as output:
+        temporary = Path(output.name)
+        try:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+            os.replace(temporary, path)
+            fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def stamp(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError('cache files must be regular files')
+    return [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+
+
+def validate_request(request):
+    fields = {'source', 'cache', 'boot_certificate', 'image_certificate', 'channel', 'form', 'arch', 'provider'}
+    if set(request) != fields or any(not isinstance(v, str) or not v for v in request.values()):
+        raise ValueError('invalid download request')
+    url = urlsplit(request['source'])
+    if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment:
+        raise ValueError('download source must be an HTTPS directory without credentials or query')
+    if request['arch'] not in ('aarch64', 'x86_64') or request['provider'] not in ('lima', 'qemu'):
+        raise ValueError('unsupported protected download target')
+    if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', request['form']):
+        raise ValueError('download requires a named published form; custom images require --build')
+    gateway = '192.168.5.2' if request['provider'] == 'lima' else '10.0.2.2'
+    channel = urlsplit(request['channel'])
+    if channel.scheme != 'https' or channel.hostname != gateway or not channel.port or channel.username or channel.password or channel.query or channel.fragment:
+        raise ValueError('protected channel must use the declared provider gateway')
+
+
+class HTTPSOnly(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        url = urlsplit(newurl)
+        if url.scheme != 'https' or not url.hostname or url.username or url.password:
+            raise ValueError('download redirect changes protected transport')
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+def fetch(url, path, limit, expected=None):
+    request = urllib.request.Request(url, headers={'Accept-Encoding': 'identity', 'User-Agent': USER_AGENT})
+    context = ssl.create_default_context(cafile=os.environ.get('SSL_CERT_FILE'))
+    opener = urllib.request.build_opener(HTTPSOnly(), urllib.request.HTTPSHandler(context=context))
+    try:
+        response = opener.open(request, timeout=30)
+    except HTTPError as failure:
+        failure.close()
+        if failure.code == 404:
+            raise ValueError('protected image is not published at this mirror (HTTP 404)') from None
+        raise ValueError('protected image mirror refused the request (HTTP %d)' % failure.code) from None
+    with response, path.open('xb') as output:
+        if response.status != 200 or response.headers.get('Content-Encoding', 'identity') != 'identity':
+            raise ValueError('unexpected download response')
+        length = response.headers.get('Content-Length')
+        if length is not None and (not length.isdecimal() or int(length) > limit or
+                                   (expected and int(length) != expected['size'])):
+            raise ValueError('download size differs from authenticated size')
+        digest, total, deadline = hashlib.sha256(), 0, time.monotonic() + 900
+        while True:
+            block = response.read(min(1 << 20, limit - total + 1))
+            if not block:
+                break
+            total += len(block)
+            if total > limit or time.monotonic() > deadline:
+                raise ValueError('download exceeds authenticated bound or time limit')
+            digest.update(block)
+            output.write(block)
+        if expected and (total != expected['size'] or digest.hexdigest() != expected['sha256']):
+            raise ValueError('download differs from authenticated artifact')
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def freshness(manifest, descriptor, floor, now):
+    serial, build = manifest['image']['serial'], manifest['image']['build']
+    date = datetime.datetime.strptime(serial, '%Y%m%dT%H%M%SZ').replace(tzinfo=datetime.timezone.utc)
+    if date.strftime('%Y%m%dT%H%M%SZ') != serial or date.timestamp() > now + 86400:
+        raise ValueError('invalid or future boot release')
+    if not HEX.fullmatch(build) or not HEX.fullmatch(descriptor):
+        raise ValueError('invalid boot identity')
+    if floor is not None:
+        if set(floor) != {'serial', 'build', 'descriptor'} or any(not isinstance(v, str) for v in floor.values()):
+            raise ValueError('invalid saved release floor')
+        # Validate persistent state independently; corruption must not reset the floor.
+        saved_date = datetime.datetime.strptime(floor['serial'], '%Y%m%dT%H%M%SZ')
+        if saved_date.strftime('%Y%m%dT%H%M%SZ') != floor['serial'] or not HEX.fullmatch(floor['build']) or not HEX.fullmatch(floor['descriptor']):
+            raise ValueError('invalid saved release floor')
+        if serial < floor['serial']:
+            raise ValueError('older protected boot release')
+        if serial == floor['serial'] and (build != floor['build'] or descriptor != floor['descriptor']):
+            raise ValueError('protected release serial reused')
+    return dict(serial=serial, build=build, descriptor=descriptor)
+
+
+def download(request, admit, verify, validator, transport=fetch, now=None):
+    """Admission and verification are native howl calls; injection supports fault tests."""
+    validate_request(request)
+    now = time.time() if now is None else now
+    trust = dict(request)
+    for name in ('boot_certificate', 'image_certificate'):
+        trust[name] = sha(request[name])
+    trust.pop('cache')
+    trust.pop('source')
+    identity = hashlib.sha256(json.dumps(trust, sort_keys=True).encode()).hexdigest()
+    cache = Path(request['cache']).resolve()
+    state = cache / 'channels' / identity
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    objects = cache / 'objects'
+    objects.mkdir(mode=0o700, exist_ok=True)
+    with (state / 'download.lock').open('a+b') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        floor_path, current_path = state / 'floor.json', state / 'current.json'
+        floor = json.loads(read(floor_path, 4096)) if floor_path.exists() else None
+        if floor is not None:
+            if not isinstance(floor, dict) or set(floor) != {'serial', 'build', 'descriptor'}:
+                raise ValueError('invalid saved release floor')
+            freshness({'image': floor}, floor['descriptor'], floor, now)
+        if current_path.exists() and floor is None:
+            raise ValueError('saved release floor is missing; refusing to reset it')
+        current = json.loads(read(current_path, 4096)) if current_path.exists() else None
+        if current and floor and current['descriptor'] == floor['descriptor'] and 0 <= now - current['checked'] < CACHE_SECONDS:
+            bundle = state / current['descriptor']
+            if complete(bundle, validator):
+                manifest = admit(bundle)
+                freshness(manifest, current['descriptor'], floor, now)
+                return bundle
+        with tempfile.TemporaryDirectory(prefix='incoming-', dir=state) as temporary:
+            staging = Path(temporary)
+            base = request['source'].rstrip('/') + '/' + '/'.join(request[name] for name in ('form', 'provider', 'arch'))
+            # Signatures precede JSON on the server. A torn head refuses without changing state.
+            transport(base + '/latest/boot.json.sig', staging / 'boot.json.sig', SIGNATURE_LIMIT)
+            transport(base + '/latest/boot.json', staging / 'boot.json', HEAD_LIMIT)
+            manifest = admit(staging)
+            descriptor = sha(staging / 'boot.json')
+            next_floor = freshness(manifest, descriptor, floor, now)
+            bundle = state / descriptor
+            if complete(bundle, validator):
+                # Cached bytes remain subject to the newly authenticated descriptor and floor.
+                if sha(bundle / 'boot.json') != descriptor:
+                    raise ValueError('cached descriptor collision')
+            else:
+                if bundle.exists():
+                    shutil.rmtree(bundle)
+                remote = base + '/objects/' + descriptor
+                public = staging / 'prebuilt' / request['arch']
+                public.mkdir(parents=True)
+                for name, limit in [('latest.json', HEAD_LIMIT), ('latest.json.sig', SIGNATURE_LIMIT)]:
+                    transport(remote + '/' + name, public / name, limit)
+                slot = staging / 'slot'
+                slot.mkdir()
+                immutable = public / manifest['image']['build']
+                immutable.mkdir()
+                artifacts = [(name, manifest['image']['files'][name]) for name in FILES]
+                artifacts.append(('disk.img.zst', manifest['disk']))
+                for name, artifact in artifacts:
+                    obj = objects / artifact['sha256']
+                    good = obj.exists() and not obj.is_symlink() and obj.stat().st_size == artifact['size'] and sha(obj) == artifact['sha256']
+                    if not good:
+                        # Downloads stay private until their size and hash match the signed descriptor.
+                        part = staging / (name + '.part')
+                        transport(remote + '/' + name, part, artifact['size'], artifact)
+                        if part.stat().st_size != artifact['size'] or sha(part) != artifact['sha256']:
+                            raise ValueError('transport returned an unauthenticated object')
+                        part.chmod(0o400)
+                        os.replace(part, obj)
+                    target = staging / name if name == 'disk.img.zst' else slot / name
+                    os.link(obj, target)
+                    if name != 'disk.img.zst':
+                        os.link(obj, immutable / name)
+                proof = verify(staging)
+                for name, value in [('release.id', proof['release']), ('pcr11', proof['pcr'])]:
+                    raw = bytes(value)
+                    if len(raw) != 32:
+                        raise ValueError('invalid native verification result')
+                    (slot / name).write_bytes(raw)
+                # Mirror top-level heads for publisher compatibility.
+                for name in ('latest.json', 'latest.json.sig'):
+                    os.link(public / name, staging / name)
+                files = sorted(str(path.relative_to(staging)) for path in staging.rglob('*') if path.is_file())
+                receipt = dict(validator=validator, files={name: stamp(staging / name) for name in files})
+                atomic(staging / 'complete.json', receipt)
+                os.rename(staging, bundle)
+                # TemporaryDirectory tolerates a successfully moved directory.
+            atomic(floor_path, next_floor)
+            atomic(current_path, dict(descriptor=descriptor, checked=now))
+            return bundle
+
+
+def complete(bundle, validator):
+    try:
+        receipt = json.loads(read(bundle / 'complete.json', 64 << 10))
+        image = json.loads(read(bundle / 'boot.json', HEAD_LIMIT))['image']
+        if image['arch'] not in ('aarch64', 'x86_64') or not HEX.fullmatch(image['build']):
+            return False
+        public = 'prebuilt/' + image['arch'] + '/'
+        required = {'boot.json', 'boot.json.sig', 'disk.img.zst', 'latest.json', 'latest.json.sig',
+                    'slot/release.id', 'slot/pcr11', public + 'latest.json', public + 'latest.json.sig'}
+        required.update('slot/' + name for name in FILES)
+        required.update(public + image['build'] + '/' + name for name in FILES)
+        if receipt['validator'] != validator or set(receipt['files']) != required:
+            return False
+        for name, saved in receipt['files'].items():
+            if name.startswith('/') or '..' in Path(name).parts or stamp(bundle / name) != saved:
+                return False
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def native(howl, operation, directory, request):
+    args = [howl, '_boot-image', operation, str(directory), request['boot_certificate'],
+            request['image_certificate'], request['channel'], request['arch']]
+    if operation == 'head':
+        args.extend([request['form'], request['provider']])
+    result = subprocess.run(args, capture_output=True)
+    if result.returncode:
+        # Native diagnostics name the failed check, never include private credentials.
+        raise ValueError('native boot admission refused: ' + result.stderr.decode(errors='replace').strip())
+    return json.loads(result.stdout)
+
+
+def main():
+    if len(sys.argv) != 3:
+        raise ValueError('usage: boot-download HOWL REQUEST_JSON')
+    howl = str(Path(sys.argv[1]).resolve())
+    request = json.loads(read(sys.argv[2], 64 << 10))
+    validator = dict(howl=stamp(Path(howl)), downloader=sha(__file__))
+    bundle = download(request, lambda path: native(howl, 'head', path, request),
+                      lambda path: native(howl, 'verify', path, request), validator)
+    print(json.dumps(dict(directory=str(bundle), boot_certificate=request['boot_certificate'],
+                         image_certificate=request['image_certificate'], channel=request['channel'])))
+
+
+def interrupted(signum, frame):
+    raise InterruptedError('protected download interrupted')
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        sys.exit('boot-download: ' + str(error))

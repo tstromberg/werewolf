@@ -220,7 +220,9 @@ const non_public4 = [_]Prefix{
 const non_public6 = [_]Prefix{
     .{ .addr = &v6(&.{0}, 1), .len = 128 }, // loopback
     .{ .addr = &v6(&.{0}, 0), .len = 96 }, // unspecified, and IPv4-compatible
+    .{ .addr = &v6(&.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff }, 0), .len = 96 }, // IPv4-mapped
     .{ .addr = &v6(&.{ 0, 0x64, 0xff, 0x9b }, 0), .len = 96 }, // NAT64, to IPv4 behind it
+    .{ .addr = &v6(&.{ 0x20, 0x02 }, 0), .len = 16 }, // 6to4
     .{ .addr = &v6(&.{0xfc}, 0), .len = 7 }, // unique local: AWS's metadata
     .{ .addr = &v6(&.{ 0xfe, 0x80 }, 0), .len = 10 }, // link-local
     .{ .addr = &v6(&.{ 0xfe, 0xc0 }, 0), .len = 10 }, // site-local, deprecated
@@ -514,8 +516,6 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .action = FR_ACT_PROHIBIT,
         .from_here = true,
         .dst = md,
-        .proto = .tcp,
-        .dport = metadata_port,
     });
     if (family == linux.AF.INET) for (wire_server_ports) |port_number| rules.add(.{
         .priority = pref.metadata_refuse,
@@ -807,8 +807,13 @@ fn restrict(p: Policy) !void {
         try ruleset.port(sandbox.bind_tcp, l);
         try ruleset.port(sandbox.connect_tcp, l);
     }
-    for (p.connect[0..p.nconnect]) |c| if (c.proto == .tcp)
-        try ruleset.port(sandbox.connect_tcp, c.port);
+    for (p.connect[0..p.nconnect]) |c| if (c.proto == .tcp) {
+        if (c.any) {
+            var port_num: u32 = 1;
+            while (port_num <= 65535) : (port_num += 1)
+                try ruleset.port(sandbox.connect_tcp, @intCast(port_num));
+        } else try ruleset.port(sandbox.connect_tcp, c.port);
+    };
     if (p.nmetadata > 0) try ruleset.port(sandbox.connect_tcp, metadata_port);
     for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access);
     // Root's posture/updater use the resource manager on TPM-gated boots.

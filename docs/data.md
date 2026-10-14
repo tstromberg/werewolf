@@ -10,7 +10,7 @@ leaves the disk as it is and says why.
 | nothing, or a form without `mke2fs` (`minimal`) | tmpfs capped at 25% of RAM: nothing is kept, and a runaway service fills it rather than exhausting memory |
 | `werewolf.data=DEV` | ext4 on the disk labelled `werewolf-data` (`prod` and the forms on it) |
 | `werewolf.data=DEV`, and `data.key` in the config | the same in LUKS2, keyed by `data.key` |
-| `werewolf.victim=` | a directory on the victim's filesystem ([bite](bite.md)) |
+| `werewolf.slots=` | `/boot/data` on the `/boot` ext4 filesystem |
 
 The kernel command line says whether there is a disk, and the config
 whether it is encrypted; the form only has the tools or not. So a disk is

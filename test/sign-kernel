@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Verify deterministic module signatures, pinned trust and atomic kernel publication."""
+import gzip
+import importlib.machinery
+import io
+import os
+from pathlib import Path
+import struct
+import subprocess
+import shutil
+import sys
+import tarfile
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+signer = importlib.machinery.SourceFileLoader('signer', 'tools/sign-kernel').load_module()
+CONFIG = b'\n'.join([b'CONFIG_MODULE_SIG_FORCE=y', b'CONFIG_MODULE_SIG=y',
+    b'CONFIG_MODULE_SIG_KEY=""', b'# CONFIG_MODULE_SIG_ALL is not set',
+    b'CONFIG_SYSTEM_TRUSTED_KEYS="ipe.crt"']) + b'\n'
+MODULE = 'lib/modules/test/kernel/fixture.ko.gz'
+RAW = b'\x7fELF' + b'fixture unsigned module\n' * 128
+
+
+class Signing(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.identity = tempfile.TemporaryDirectory(prefix='ww-module-signing-')
+        cls.key, cls.cert = [Path(cls.identity.name) / name for name in ('key.pem', 'cert.pem')]
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256',
+            '-days', '1', '-subj', '/CN=module-test', '-keyout', str(cls.key), '-out', str(cls.cert)],
+            check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.identity.cleanup()
+
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory(prefix='ww-module-archive-')
+        self.addCleanup(self.work.cleanup)
+        self.root = Path(self.work.name)
+        self.source, self.output = [self.root / name for name in ('unsigned.tar', 'signed.tar')]
+
+    def archive(self, changes=None, extra=None, omit_modules=False):
+        files = {'boot/vmlinuz-virt': b'unchanged kernel', 'boot/config-test': CONFIG,
+                 'boot/ipe.crt': self.cert.read_bytes(), MODULE: signer.compress(RAW)}
+        files.update(changes or {})
+        if omit_modules:
+            del files[MODULE]
+        with tarfile.open(self.source, 'w:') as output:
+            for name, data in files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                member.mtime = 123456789
+                output.addfile(member, io.BytesIO(data))
+            if extra:
+                output.addfile(extra)
+
+    def assert_refused(self):
+        self.output.write_bytes(b'previous complete archive')
+        with self.assertRaises((ValueError, KeyError)):
+            signer.sign(self.source, self.key, self.cert, self.output)
+        self.assertEqual(self.output.read_bytes(), b'previous complete archive')
+        self.assertFalse(self.output.with_name('signed.tar.new').exists())
+
+    def test_repeat_bytes_and_signature_verified_independently(self):
+        self.archive({'lib/modules/test/extra-%d.ko.gz' % i: signer.compress(RAW + bytes([i]))
+                      for i in range(3)})
+        signer.sign(self.source, self.key, self.cert, self.output)
+        original = self.output.read_bytes()
+        signer.sign(self.source, self.key, self.cert, self.output)
+        self.assertEqual(original, self.output.read_bytes())
+        with tarfile.open(self.output) as result:
+            data = gzip.decompress(result.extractfile(MODULE).read())
+            self.assertEqual(b'unchanged kernel', result.extractfile('boot/vmlinuz-virt').read())
+            self.assertTrue(all(item.mtime == item.uid == item.gid == 0 for item in result.getmembers()))
+        self.assertTrue(data.endswith(signer.MARKER))
+        footer = data[-len(signer.MARKER)-12:-len(signer.MARKER)]
+        fields = struct.unpack('>BBBBB3xI', footer)
+        self.assertEqual((0, 0, 2, 0, 0), fields[:5])
+        length = fields[-1]
+        signature = self.root / 'module.p7s'
+        signature.write_bytes(data[-len(signer.MARKER)-12-length:-len(signer.MARKER)-12])
+        module = self.root / 'module.ko'
+        module.write_bytes(data[:-len(signer.MARKER)-12-length])
+        self.assertEqual(RAW, module.read_bytes())
+        args = ['cms', '-verify', '-binary', '-inform', 'DER', '-in', signature,
+                '-content', module, '-certfile', self.cert, '-nointern', '-noverify', '-out', os.devnull]
+        signer.openssl(args)
+        module.write_bytes(RAW[:-1] + b'X')
+        with self.assertRaises(ValueError):
+            signer.openssl(args)
+
+    def test_wrong_signer_refuses_without_replacing_archive(self):
+        self.archive()
+        other = self.root / 'foreign.key'
+        subprocess.run(['openssl', 'genrsa', '-out', str(other), '2048'], check=True, capture_output=True)
+        with self.assertRaises(ValueError):
+            signer.sign(self.source, other, self.cert, self.output)
+        self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(os.environ.get('UPSTREAM_SIGN_FILE'), 'set UPSTREAM_SIGN_FILE to the pinned Linux tool')
+    def test_exact_bytes_match_independent_upstream_sign_file(self):
+        raw = self.root / 'reference.ko'
+        raw.write_bytes(RAW)
+        actual = signer.module_signature(RAW, self.key, self.cert, self.root)
+        subprocess.run([os.environ['UPSTREAM_SIGN_FILE'], 'sha256', str(self.key), str(self.cert), str(raw)],
+                       check=True, capture_output=True)
+        self.assertEqual(actual, raw.read_bytes())
+
+    def test_weak_enforcement_and_foreign_policy_refuse(self):
+        for changes in ({'boot/config-test': CONFIG.replace(b'CONFIG_MODULE_SIG_FORCE=y', b'# disabled')},
+                        {'boot/ipe.crt': b'foreign certificate'}):
+            with self.subTest(changes=changes):
+                self.archive(changes)
+                self.assert_refused()
+
+    def test_already_signed_and_non_elf_modules_refuse(self):
+        for raw in (RAW + signer.MARKER, b'not an ELF module'):
+            with self.subTest(raw=raw[:20]):
+                self.archive({MODULE: signer.compress(raw)})
+                self.assert_refused()
+
+    def test_paths_links_and_duplicate_members_refuse(self):
+        for name, kind in (('../private', tarfile.REGTYPE), ('/etc/private', tarfile.REGTYPE),
+                           ('lib/module-link', tarfile.SYMTYPE), (MODULE, tarfile.REGTYPE),
+                           ('boot/./vmlinuz-virt', tarfile.REGTYPE)):
+            with self.subTest(name=name):
+                extra = tarfile.TarInfo(name)
+                extra.type = kind
+                self.archive(extra=extra)
+                self.assert_refused()
+
+    def test_decompressed_module_limit_and_missing_modules_refuse(self):
+        self.archive()
+        with patch.object(signer, 'MAX_MODULE', 32):
+            self.assert_refused()
+        with patch.object(signer, 'MAX_ARCHIVE', 16):
+            self.assert_refused()
+        self.archive(omit_modules=True)
+        self.assert_refused()
+
+    def test_signing_failure_removes_partial_output(self):
+        self.archive()
+        with patch.object(signer, 'module_signature', side_effect=ValueError('signing interrupted')):
+            self.assert_refused()
+
+    def test_terminated_signer_preserves_complete_output_and_can_retry(self):
+        self.archive()
+        self.output.write_bytes(b'previous complete archive')
+        marker = self.root / 'signing-started'
+        binary = self.root / 'bin'
+        binary.mkdir()
+        actual = shutil.which('openssl')
+        wrapper = binary / 'openssl'
+        wrapper.write_text('#!/usr/bin/env python3\nimport os,sys,time\nfrom pathlib import Path\n' +
+            'if sys.argv[1:3]==["cms","-sign"]:\n    Path(' + repr(str(marker)) +
+            ').touch()\n    time.sleep(0.5)\n' +
+            'os.execv(' + repr(actual) + ',[' + repr(actual) + ',*sys.argv[1:]])\n')
+        wrapper.chmod(0o755)
+        env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'])
+        process = subprocess.Popen([sys.executable, 'tools/sign-kernel', str(self.source),
+            str(self.key), str(self.cert), str(self.output)], env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            until = time.monotonic() + 10
+            while not marker.exists() and process.poll() is None and time.monotonic() < until:
+                time.sleep(0.01)
+            self.assertTrue(marker.exists())
+            process.terminate()
+            process.communicate(timeout=10)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertEqual(self.output.read_bytes(), b'previous complete archive')
+            self.assertFalse(self.output.with_name('signed.tar.new').exists())
+            self.assertEqual([], list(self.root.glob('module-sign-*')))
+            signer.sign(self.source, self.key, self.cert, self.output)
+            self.assertNotEqual(self.output.read_bytes(), b'previous complete archive')
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=10)
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    unittest.main()

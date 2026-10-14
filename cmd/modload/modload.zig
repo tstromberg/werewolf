@@ -113,7 +113,7 @@ fn load() !Result {
             if (std.mem.eql(u8, m.tag, tag)) insert(fd, m, &r);
     }
     for (fds[0..count], mods[0..count]) |*fd, m| if (fd.* >= 0) {
-        if (named) {
+        if (named or tags.overflow) {
             r.skipped += 1;
             close(fd.*);
             fd.* = -1;
@@ -156,13 +156,14 @@ fn insert(fd: *i32, m: Module, r: *Result) void {
 }
 
 /// Tags reads stdin's lines, each a tag, as stage0 writes them: `hyperv`
-/// and `esp` when needed, then the slot's filesystem (`xfs`, `btrfs`, or
-/// `ext4` or `none`, which no line is for).
+/// and `esp` when needed.
+/// A final `none` sentinel leaves unused tags unloaded on direct boots too.
 const Tags = struct {
     buf: [64]u8 = undefined,
     start: usize = 0,
     end: usize = 0,
     done: bool = false,
+    overflow: bool = false,
 
     /// next returns the next line without its newline, or null at the end
     /// of stdin.
@@ -195,6 +196,7 @@ const Tags = struct {
             say("modload: stdin's line is too long for a tag; reading no more\n", .{});
             t.end = 0;
             t.done = true;
+            t.overflow = true;
             return;
         }
         while (true) {

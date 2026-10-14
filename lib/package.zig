@@ -86,6 +86,12 @@ pub const Packed = struct {
 /// pack builds a package of entries, which come in tar order: each directory
 /// before what is in it.
 pub fn pack(gpa: Allocator, info: Info, entries: []const Entry) !Packed {
+    for ([_][]const u8{ info.name, info.version, info.arch }) |s|
+        if (!validField(s, false)) return error.BadPackageInfo;
+    for ([_][]const u8{ info.description, info.url, info.license }) |s|
+        if (!validField(s, true)) return error.BadPackageInfo;
+    for (info.depends) |d| if (!validField(d, false)) return error.BadPackageInfo;
+    for (info.provides) |p| if (!validField(p, false)) return error.BadPackageInfo;
     var data_tar: std.ArrayList(u8) = .empty;
     var size: u64 = 0;
     for (entries) |e| {
@@ -333,19 +339,34 @@ fn gzip(gpa: Allocator, data: []const u8) ![]const u8 {
 /// member it signs.
 pub const Opened = struct { signature: []const u8, member: []const u8 };
 
+fn validField(s: []const u8, allow_space: bool) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c <= 0x1f or c == 0x7f) return false;
+        if (!allow_space and c == ' ') return false;
+    }
+    return true;
+}
+
 /// open splits whole, an APKINDEX.tar.gz, into its signature by the key apk
 /// knows as key_name and the member that signature covers. A key holder must
 /// verify the signature before trusting the member: whoever can write the
 /// bucket can write an index.
 pub fn open(gpa: Allocator, whole: []const u8, key_name: []const u8) !Opened {
     const tar, const end = try inflate(gpa, whole, max_signature);
-    if (tar.len < block) return error.BadIndex;
+    if (tar.len < block or !mem.eql(u8, tar[257..263], "ustar\x00")) return error.BadIndex;
+    const want_sum = std.fmt.parseInt(u32, mem.trim(u8, tar[148..156], "\x00 "), 8) catch
+        return error.BadIndex;
+    var sum: u32 = 0;
+    for (tar[0..block], 0..) |b, i| sum += if (i >= 148 and i < 156) ' ' else b;
+    if (sum != want_sum) return error.BadIndex;
     const want = try gpa.print(".SIGN.RSA256.{s}", .{key_name});
     if (!mem.eql(u8, mem.sliceTo(tar[0..100], 0), want)) return error.UnknownKey;
     const size = std.fmt.parseInt(usize, mem.trim(u8, tar[124..136], "\x00 "), 8) catch
         return error.BadIndex;
     // One file, cut: nothing after its padded data.
-    if (tar.len != block + (size + block - 1) / block * block) return error.BadIndex;
+    if (size > max_signature or tar.len != block + (size + block - 1) / block * block)
+        return error.BadIndex;
     return .{ .signature = tar[block..][0..size], .member = whole[end..] };
 }
 

@@ -896,7 +896,7 @@ test "small parsers" {
         \\/dev/vda1 /data ext4 rw,nosuid 0 0
     ;
     try testing.expectEqualStrings("ext4", mountType(mounts, "/data").?);
-    try testing.expectEqual(null, mountType(mounts, "/victim"));
+    try testing.expectEqual(null, mountType(mounts, "/boot"));
     try testing.expect(isAdvisoryId("GHSA-abcd-1234-efgh"));
     try testing.expect(!isAdvisoryId("CVE-1/../x"));
     try testing.expect(isSubpackage("openssl-4.0-libcrypto", "openssl-4.0"));

@@ -462,6 +462,17 @@ fn buildFilterWithExec(
         put(buf, &n, JEQ_K, 0, 1, AT_EMPTY_PATH);
         put(buf, &n, RET_K, 0, 0, linux.SECCOMP.RET.ALLOW);
         put(buf, &n, RET_K, 0, 0, other);
+        for (if (@import("builtin").cpu.arch == .x86_64)
+            [_]linux.SYS{ .dup2, .dup3 }
+        else
+            [_]linux.SYS{.dup3}) |sys|
+        {
+            put(buf, &n, JEQ_K, 0, 4, number(sys));
+            put(buf, &n, LD_W_ABS, 0, 0, 24); // seccomp_data.args[1], low word: newfd
+            put(buf, &n, JEQ_K, 0, 1, exec_fd.?);
+            put(buf, &n, RET_K, 0, 0, other);
+            put(buf, &n, LD_W_ABS, 0, 0, 0);
+        }
     }
     {
         var afs: [families.len]u32 = undefined;
@@ -785,6 +796,14 @@ test buildFilter {
             number(.execveat),
             .{ 7, 0, 0, 0, AT_EMPTY_PATH | 0x100, 0 },
         ),
+    );
+    try testing.expectEqual(
+        RET_ENOSYS,
+        actionArgs(service, native_arch, number(.dup3), .{ 0, 7, 0, 0, 0, 0 }),
+    );
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        actionArgs(service, native_arch, number(.dup3), .{ 0, 8, 0, 0, 0, 0 }),
     );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execveat), 0));
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execve), 0));

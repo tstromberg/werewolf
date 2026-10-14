@@ -7,13 +7,13 @@
 set -eu
 d=$CHECK/deadman
 log=$CHECK/deadman.log
-rm -rf "$d" "$d.img" && mkdir -p "$d/var/lib/werewolf/a"
-cp "$OUT/slot/root.erofs" "$d/var/lib/werewolf/a/"
-mke2fs -q -F -t ext4 -U "$VICTIM" -d "$d" "$d.img" 128M && rm -r "$d"
+rm -rf "$d" "$d.img" && mkdir -p "$d/slot/a"
+cp "$OUT/slot/root.erofs" "$d/slot/a/"
+mke2fs -q -F -t ext4 -U "$SLOTS" -d "$d" "$d.img" 128M && rm -r "$d"
 fail() { echo "FAIL   deadman            $1; see $log"; exit 1; }
 rc=0
 timeout 180 "$@" -kernel "$OUT/slot/vmlinuz" -initrd "$OUT/slot/stage0.zst" \
-	-append "$CMDLINE init=/init werewolf.slot=a werewolf.victim=$VICTIM:/var/lib/werewolf werewolf.deadman=20" \
+	-append "$CMDLINE init=/init werewolf.slot=a werewolf.slots=$SLOTS werewolf.deadman=20" \
 	-drive "file=$d.img,format=raw,if=virtio" </dev/null >"$log" 2>&1 || rc=$?
 [ $rc -ne 124 ] || fail "no reset in 180 s"
 grep -a -q 'stage0: the deadman waits 20s' "$log" || fail "stage0 did not take werewolf.deadman"

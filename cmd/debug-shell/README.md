@@ -49,8 +49,7 @@ is a different image, so the shell never ships. runit starts it as
 ## Alternatives Considered
 
 ### Gate on the command line alone
-Root can set `werewolf.debug=1` through GRUB's environment, and anyone at a
-bitten machine's console can edit GRUB's menu. A switch an attacker can flip
+A boot configuration can set `werewolf.debug=1`. A switch an attacker can flip
 is no gate (docs/design/lockdown.md); the image must decide.
 
 ### A login prompt with a password

@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init.Minimal) void {
         },
     };
     var bad: Bad = .{};
-    const n = split(command, &words, &argv, &bad) catch {
+    const parsed = parse(command, &words, &argv, &bad) catch {
         const byte = [1]u8{bad.byte};
         switch (bad.why) {
             .syntax => say(
@@ -72,16 +72,21 @@ pub fn main(init: std.process.Init.Minimal) void {
             .sh_word => say("refused: {s} is sh's own, not a program", .{bad.word}),
             .unterminated => say("refused: an unterminated {s} quote", .{&byte}),
             .too_long => say("refused: the command is too long", .{}),
+            .redirection => say(
+                "refused: only trailing /dev/null redirects, once each, then 2>&1",
+                .{},
+            ),
         }
         std.process.exit(126);
     };
-    if (n == 0) std.process.exit(0); // as sh -c '' does
+    if (parsed.argc == 0) std.process.exit(0); // as sh -c '' does
     const env = init.environ.block.slice;
     const path = for (env) |e| {
         const s = std.mem.span(e.?);
         if (std.mem.startsWith(u8, s, "PATH=")) break s["PATH=".len..];
     } else default_path;
-    run(argv[0..n :null], env.ptr, path);
+    parsed.redirects.apply();
+    run(argv[0..parsed.argc :null], env.ptr, path);
 }
 
 /// Call is how sh-shim was called: with a COMMAND to run, or not as sh -c.
@@ -182,7 +187,16 @@ const Search = struct {
 };
 
 /// Why says why split refused a command.
-const Why = enum { syntax, control, expansion, assignment, sh_word, unterminated, too_long };
+const Why = enum {
+    syntax,
+    control,
+    expansion,
+    assignment,
+    sh_word,
+    unterminated,
+    too_long,
+    redirection,
+};
 
 /// Bad is why split refused a command, and the byte or first word at fault.
 const Bad = struct { why: Why = .syntax, byte: u8 = 0, word: []const u8 = "" };
@@ -260,7 +274,158 @@ fn refuse(bad: *Bad, why: Why, byte: u8) error{Refused} {
     return error.Refused;
 }
 
+const Redirects = struct {
+    in: bool = false,
+    out: bool = false,
+    err_to_out: bool = false,
+
+    fn apply(r: Redirects) void {
+        if (r.in) nullFd(0, true);
+        if (r.out) nullFd(1, false);
+        if (r.err_to_out) {
+            const e = linux.errno(linux.dup3(1, 2, 0));
+            if (e != .SUCCESS) fail("stderr", e);
+        }
+    }
+};
+
+fn nullFd(to: i32, reading: bool) void {
+    const fd = linux.open("/dev/null", .{ .ACCMODE = if (reading) .RDONLY else .WRONLY }, 0);
+    const e = linux.errno(fd);
+    if (e != .SUCCESS) fail("/dev/null", e);
+    if (fd == to) return;
+    const moved = linux.errno(linux.dup3(@intCast(fd), to, 0));
+    _ = linux.close(@intCast(fd));
+    if (moved != .SUCCESS) fail("/dev/null", moved);
+}
+
+/// parse leaves shell words to split and accepts only a trailing discard of
+/// standard input/output. No descriptor changes happen until all syntax passes.
+fn parse(command: []const u8, buf: []u8, out: []?[*:0]const u8, bad: *Bad) error{Refused}!struct {
+    argc: usize,
+    redirects: Redirects = .{},
+} {
+    if (command.len > max_command) return refuse(bad, .too_long, 0);
+    var i: usize = 0;
+    while (i < command.len) : (i += 1) {
+        const c = command[i];
+        if (c == '\'' or c == '"') {
+            i = std.mem.findScalarPos(u8, command, i + 1, c) orelse
+                return refuse(bad, .unterminated, c);
+        } else if (c == '<' or c == '>') {
+            if (i == 0 or (command[i - 1] != ' ' and command[i - 1] != '\t'))
+                return refuse(bad, .redirection, c);
+            const n = try split(command[0..i], buf, out, bad);
+            if (n == 0) return refuse(bad, .redirection, c);
+            return .{ .argc = n, .redirects = try redirects(command[i..], bad) };
+        }
+    }
+    return .{ .argc = try split(command, buf, out, bad) };
+}
+
+fn redirects(suffix: []const u8, bad: *Bad) error{Refused}!Redirects {
+    var tail = suffix;
+    var result: Redirects = .{};
+    while (true) {
+        tail = std.mem.trimStart(u8, tail, " \t");
+        if (tail.len == 0) return result;
+        if (std.mem.startsWith(u8, tail, "2>&1")) {
+            if (!result.out or result.err_to_out) return refuse(bad, .redirection, '2');
+            result.err_to_out = true;
+            tail = tail[4..];
+        } else {
+            const flag = switch (tail[0]) {
+                '<' => &result.in,
+                '>' => &result.out,
+                else => return refuse(bad, .redirection, tail[0]),
+            };
+            if (flag.*) return refuse(bad, .redirection, tail[0]);
+            flag.* = true;
+            tail = std.mem.trimStart(u8, tail[1..], " \t");
+            const length = for ([_][]const u8{
+                "/dev/null",
+                "\"/dev/null\"",
+                "'/dev/null'",
+            }) |target| {
+                if (std.mem.startsWith(u8, tail, target)) break target.len;
+            } else return refuse(bad, .redirection, 0);
+            tail = tail[length..];
+        }
+        if (tail.len > 0 and tail[0] != ' ' and tail[0] != '\t')
+            return refuse(bad, .redirection, tail[0]);
+    }
+}
+
 const testing = std.testing;
+
+test "parse PostgreSQL setup commands without changing their words" {
+    const backend = "\"/usr/libexec/postgresql17/postgres\"";
+    const cases = [_]struct { command: []const u8, argc: usize, io: Redirects }{
+        .{ .command = backend ++ " -V", .argc = 2, .io = .{} },
+        .{ .command = backend ++ " --boot -F -c log_checkpoints=false", .argc = 5, .io = .{} },
+        .{
+            .command = backend ++ " --single -F -O -j template1 >/dev/null",
+            .argc = 6,
+            .io = .{ .out = true },
+        },
+        .{
+            .command = backend ++ " --check -F < \"/dev/null\" > \"/dev/null\" 2>&1",
+            .argc = 3,
+            .io = .{ .in = true, .out = true, .err_to_out = true },
+        },
+        .{ .command = "locale -a", .argc = 2, .io = .{} },
+        .{
+            .command = "program '< /tmp/file' '2>&1' >'/dev/null'",
+            .argc = 3,
+            .io = .{ .out = true },
+        },
+    };
+    for (cases) |case| {
+        var buf: [256]u8 = undefined;
+        var out: [130]?[*:0]const u8 = undefined;
+        var bad: Bad = .{};
+        const got = try parse(case.command, &buf, &out, &bad);
+        try testing.expectEqual(case.argc, got.argc);
+        try testing.expectEqualDeep(case.io, got.redirects);
+        try testing.expectEqual(null, out[got.argc]);
+    }
+}
+
+test "parse refuses other files, descriptors, operators and words after redirection" {
+    for ([_][]const u8{
+        "program > /data/overwrite",
+        "program < /etc/passwd",
+        "program >> /dev/null",
+        "program << /dev/null",
+        "program 2>/dev/null",
+        "program 1>/dev/null",
+        "program 3>&1",
+        "program 2>&1",
+        "program > /dev/null 2>&2",
+        "program > /dev/null 2>&1 2>&1",
+        "program > /dev/null > /dev/null",
+        "program < /dev/null < /dev/null",
+        "program > /dev/null extra",
+        "program > /dev/null ; attacker",
+        "program > /dev/null | attacker",
+        "program > /dev/null &",
+        "program > /dev/null\nattacker",
+        "program > /dev/null/child",
+        "program > /dev/null2>&1",
+        "program > /dev/null< /dev/null",
+        "program> /dev/null",
+        "program > \"$TARGET\"",
+        "program > /dev/null # comment",
+        "program > /dev/null 2>&1x",
+        "> /dev/null",
+        "program '\" > /dev/null",
+    }) |command| {
+        var buf: [256]u8 = undefined;
+        var out: [130]?[*:0]const u8 = undefined;
+        var bad: Bad = .{};
+        try testing.expectError(error.Refused, parse(command, &buf, &out, &bad));
+    }
+}
 
 /// expectWords checks that split gives command exactly want.
 fn expectWords(command: []const u8, want: []const []const u8) !void {
@@ -541,7 +706,7 @@ test "random bytes: never a crash, and words within the bytes given" {
             r.intRangeAtMost(u8, 1, 255)
         else
             " '\"a"[r.uintLessThan(usize, 4)];
-        const n = split(cmd[0..len], &buf, &out, &bad) catch continue;
+        const n = (parse(cmd[0..len], &buf, &out, &bad) catch continue).argc;
         accepted += 1;
         var bytes: usize = 0;
         for (out[0..n]) |w| bytes += std.mem.span(w.?).len + 1;

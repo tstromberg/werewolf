@@ -54,14 +54,14 @@ is having a filter at all, not its length.
 ## broker
 
 Client for cmd/mount-broker. fence's Landlock domain stops root's programs
-from mounting, so slot-update, slot-keep, runit-stage and bite-cleanup ask
-the broker for `grub`, `victim` or `shutdown`. A mount lasts until
-`release` or the asker's exit. Mount points are fixed and checked, so a
-fake listener at the socket cannot redirect writes. The EFI partition is
-not a word: `esp-status`, `esp-commit`, `esp-disarm`, `esp-arm`,
-`esp-inspect` and `esp-install` have the broker work on it detached, and
-`slot-root`, `slot-decl` and `slot-meta` do the same for a native
-machine's slot files. Words are lent only in the situations they serve.
+from mounting, so init gives slot-update, slot-keep and runit-stage each an
+inherited `SOCK_SEQPACKET` socketpair (`Role.updater`, `Role.keeper`,
+`Role.stage`). Each caller retains only its own descriptor (`keepOnlyClient`)
+and drops dumpability. Neither the EFI partition nor `/boot` is ever lent as a
+mount: `esp-status`, `esp-commit`, `esp-disarm`, `esp-arm`, `esp-inspect` and
+`esp-install` have the broker work on the ESP detached, `slot-root`,
+`slot-decl`, `slot-meta` and `slot-state` do the same for `/boot/slot/{a,b}`
+and `/boot/state/{0,1}`, and `shutdown` unmounts `/data` and `/boot`.
 
 ## dm
 
@@ -104,8 +104,7 @@ init, mount-broker, slot-update, leash, posture and others:
 | `ip=CIDR gw=ADDR dns=ADDR` | static network, by lib/network's rules |
 | `mac=ADDR` | which NIC, when there are several |
 | `data=DEV` | /data's disk, by name in /dev |
-| `victim=UUID:/DIR`, `slot=a\|b` | the slots' directory, and this boot's slot; both or neither |
-| `grubenv=UUID:/PATH` | GRUB's environment block, after bite |
+| `slots=UUID`, `slot=a\|b` | the `/boot` ext4 partition, and this boot's slot; both or neither |
 | `esp=XXXX-XXXX` | the EFI system partition, by FAT serial |
 | `root=DEV` | direct boot: the disk holding the image; not with `slot` |
 | `deadman=SECONDS` | the deadman's wait, 1 to 600 |
@@ -166,7 +165,7 @@ match the build.
 
 A service user that no form's accounts declare gets a user and group of
 its own, with id `defaultId(name)`: an FNV-1a hash of the name in
-[65536, 2^31), so the id is the same on every build and machine and the
+[2^30, 2^31), so the id is the same on every build and machine and the
 service keeps its files on /data. The build fails if two services share a
 user, if a default id collides with a declared one, or if a service reads
 or writes inside another service's directory whose `share` is strict.

@@ -21,6 +21,7 @@ const SockaddrUn = extern struct {
 };
 
 pub fn main(init: std.process.Init) void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const io = init.io;
     run(io, init.arena.allocator()) catch |err| {
         say(io, "{{\"event\":\"down\",\"why\":\"{s}\"}}", .{@errorName(err)});

@@ -116,7 +116,7 @@ pub fn write(
         return b.fail("{s} has no cmdline, the image's kernel arguments (make slot)", .{slot_dir});
     const image_args = mem.trimEnd(u8, cmdline, "\n");
     // The image's arguments go on the entry's options line. Allow only
-    // plain characters, so no newline starts another line, as bite does.
+    // plain characters, so no newline starts another line.
     for (image_args) |c| if (!std.ascii.isAlphanumeric(c) and
         mem.findScalar(u8, "_.,= -", c) == null)
         return b.fail("{s} holds more than kernel arguments", .{cmdline_path});
@@ -143,7 +143,7 @@ pub fn write(
     };
     const esp = try b.path("{s}/esp", .{w});
     const root = try b.path("{s}/root", .{w});
-    try Dir.cwd().createDirPath(io, try b.path("{s}/werewolf/a", .{root}));
+    try Dir.cwd().createDirPath(io, try b.path("{s}/slot/a", .{root}));
     for (esp_dirs) |d| try Dir.cwd().createDirPath(io, try b.path("{s}/{s}", .{ esp, d }));
     gpt.create(io, out, l) catch |err| return b.fail("{s}: {t}", .{ out, err });
 
@@ -190,7 +190,7 @@ pub fn write(
     // older than any update's, so the first update's slot sorts ahead of it.
     // UKIs use `uki`, as generic `efi` entries do not spend boot attempts.
     const options = try b.path(
-        "{s} init=/init panic=10 softlockup_panic=1 {s} werewolf.victim={s}:/werewolf " ++
+        "{s} init=/init panic=10 softlockup_panic=1 {s} werewolf.slots={s} " ++
             "werewolf.esp={s}{s}{s} werewolf.slot=a",
         .{ boot.console, image_args, root_uuid, esp_uuid, if (extra.len > 0) " " else "", extra },
     );
@@ -247,10 +247,8 @@ pub fn write(
         mcopy, "-m", "-i", image, try b.path("{s}/{s}", .{ esp, f }), try b.path("::/{s}", .{f}),
     }, .{ .env = env });
 
-    // The root partition holds root.erofs under werewolf/. mke2fs -d copies
-    // the staged modes: u=rwX,go=rX, but 0700 on werewolf/, so that only
-    // root reaches a slot.
-    const erofs = try b.path("{s}/werewolf/a/root.erofs", .{root});
+    // The boot partition holds root.erofs under slot/a/.
+    const erofs = try b.path("{s}/slot/a/root.erofs", .{root});
     try b.copy(try b.path("{s}/root.erofs", .{slot_dir}), erofs);
     if (b.spec.boot_state orelse b.env.get("WEREWOLF_BOOT_STATE")) |file| {
         const pubkey = b.spec.tpm_pub orelse return error.TpmSignerRequired;
@@ -262,12 +260,13 @@ pub fn write(
             !std.mem.eql(u8, &record.retained, &record.candidate) or
             !std.mem.eql(u8, &record.previous, &@as([32]u8, @splat(0))))
             return error.WrongFactoryBootState;
-        const journal = try b.path("{s}/werewolf/boot-state", .{root});
+        const journal = try b.path("{s}/state", .{root});
         try Dir.cwd().createDirPath(b.io, journal);
-        try b.put(journal, "state.0", raw);
+        try Dir.cwd().setFilePermissions(io, journal, .fromMode(0o700), .{});
+        try b.put(journal, "0", raw);
     }
     if (b.spec.ipe_updates != null) {
-        const rdir = try b.path("{s}/werewolf/a", .{root});
+        const rdir = try b.path("{s}/slot/a", .{root});
         const proof = try b.path("{s}/prebuilt/{t}", .{ b.p.out, arch });
         try b.copy(try b.path("{s}/latest.json", .{proof}), try b.path("{s}/image.json", .{rdir}));
         try b.copy(
@@ -280,8 +279,8 @@ pub fn write(
     const file_mode: std.posix.mode_t = if (st.permissions.toMode() & 0o111 != 0) 0o755 else 0o644;
     for ([_]struct { []const u8, std.posix.mode_t }{
         .{ root, 0o755 },
-        .{ try b.path("{s}/werewolf", .{root}), 0o700 },
-        .{ try b.path("{s}/werewolf/a", .{root}), 0o755 },
+        .{ try b.path("{s}/slot", .{root}), 0o700 },
+        .{ try b.path("{s}/slot/a", .{root}), 0o755 },
         .{ erofs, file_mode },
     }) |e| try Dir.cwd().setFilePermissions(io, e[0], .fromMode(e[1]), .{});
     const offset = l.root_first * gpt.sector;
@@ -298,11 +297,7 @@ pub fn write(
     // mke2fs -d keeps the builder's owners and times. A file left with the
     // builder's uid would belong to whoever has that uid on the machine.
     var cmds: std.ArrayList(u8) = .empty;
-    for ([_][]const u8{ "/werewolf", "/werewolf/a", "/werewolf/a/root.erofs" }) |p| {
-        for ([_][]const u8{ "uid", "gid" }) |f| try cmds.print(b.gpa, "sif {s} {s} 0\n", .{ p, f });
-        for ([_][]const u8{ "atime", "ctime", "mtime", "crtime" }) |f|
-            try cmds.print(b.gpa, "sif {s} {s} {s}\n", .{ p, f, epoch });
-    }
+    try stageFixups(b, root, "", &cmds);
     const cmds_path = try b.path("{s}/debugfs.cmds", .{w});
     try b.put(w, "debugfs.cmds", cmds.items);
     try b.run(&.{
@@ -312,6 +307,20 @@ pub fn write(
     try b.steps.note("disk {s} ({t}, {d} MiB, EFI {s}, root {s})", .{
         out, arch, o.size_mib, esp_uuid, root_uuid,
     });
+}
+
+fn stageFixups(b: *B, dir_path: []const u8, rel: []const u8, cmds: *std.ArrayList(u8)) !void {
+    var d = try Dir.cwd().openDir(b.io, dir_path, .{ .iterate = true });
+    defer d.close(b.io);
+    var it = d.iterate();
+    while (try it.next(b.io)) |e| {
+        const p = try b.path("{s}/{s}", .{ rel, e.name });
+        for ([_][]const u8{ "uid", "gid" }) |f| try cmds.print(b.gpa, "sif {s} {s} 0\n", .{ p, f });
+        for ([_][]const u8{ "atime", "ctime", "mtime", "crtime" }) |f|
+            try cmds.print(b.gpa, "sif {s} {s} {s}\n", .{ p, f, epoch });
+        if (e.kind == .directory)
+            try stageFixups(b, try b.path("{s}/{s}", .{ dir_path, e.name }), p, cmds);
+    }
 }
 
 /// tool returns where name is: in a keg_dirs directory, or on the PATH.

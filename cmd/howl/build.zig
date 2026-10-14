@@ -246,6 +246,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .ipe_key = o.ipe_key,
         .ipe_cert = o.ipe_cert,
         .ipe_updates = o.ipe_updates,
+        .update_port = if (o.ipe_updates) |url| (try std.Uri.parse(url)).port orelse 443 else null,
         .image_serial = o.image_serial,
         .boot_key = o.boot_key orelse howl.environ.get("WEREWOLF_BOOT_KEY"),
         .tpm_pub = o.tpm_pub orelse howl.environ.get("WEREWOLF_TPM_PUB"),
@@ -290,10 +291,6 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         try out.appendSlice(gpa, &.{
             .{ .name = "vmlinuz", .path = try gpa.print("{s}/slot/vmlinuz", .{p.out}) },
             .{ .name = "stage0.zst", .path = try gpa.print("{s}/slot/stage0.zst", .{p.out}) },
-            .{
-                .name = "stage0-bitten.zst",
-                .path = try gpa.print("{s}/slot/stage0-bitten.zst", .{p.out}),
-            },
             .{ .name = "root.erofs", .path = try gpa.print("{s}/slot/root.erofs", .{p.out}) },
             .{ .name = "cmdline", .path = try gpa.print("{s}/slot/cmdline", .{p.out}) },
             .{ .name = "disk.qcow2", .path = try gpa.print("{s}/disk.qcow2", .{p.out}) },
@@ -489,6 +486,7 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     const ref = form orelse return why.refuse("{s}", .{syntax});
     spec.form = ref;
     spec.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
+    if (spec.ipe_updates) |url| spec.update_port = (try std.Uri.parse(url)).port orelse 443;
     if (goals.prebuilt) goals.slot = true;
     if (app_dir != null and app_root != null)
         return why.refuse("--app or --app-root: one application", .{});
@@ -571,7 +569,7 @@ pub const B = struct {
     recipes: []const []const u8,
     /// app are --app's directories and files.
     app: []const []const u8,
-    modules: compose.Modules,
+    modules: []const []const u8,
     params: []const image.Param,
     /// env is the tools' environment (pipeline).
     env: *const std.process.Environ.Map,
@@ -905,16 +903,16 @@ test "image enrollment requires IPE, a safe channel and a release serial" {
     try t.expectError(error.BadImageSerial, validateIpe(s));
 }
 
-/// every_program are the programs in every form but init and bite-cleanup,
+/// every_program are the programs in every form but init,
 /// each in PROGRAMS/NAME/usr/lib/werewolf/NAME, in overlay order: stage0's
 /// init, the module loader, the network's setup and policy, the mounts,
 /// posture, the seal's two, and those that replace shell scripts
 /// (docs/design/shell-free.md).
 pub const every_program = [_][]const u8{
-    "stage0",       "modload",      "iface-up",    "fence",      "mount",
-    "mount-broker", "task-links",   "posture",     "seal-watch", "seal",
-    "runit-stage",  "reboot",       "grub-setenv", "slot-keep",  "power-button",
-    "debug-shell",  "ssh-host-key", "leash",       "leash-reap",
+    "stage0",       "modload",    "iface-up",     "fence",       "mount",
+    "mount-broker", "posture",    "seal-watch",   "seal",        "runit-stage",
+    "reboot",       "slot-keep",  "power-button", "debug-shell", "ssh-host-key",
+    "leash",        "leash-reap",
 };
 
 /// plan reads the form's chain and works out everything the steps need.
@@ -956,14 +954,12 @@ fn plan(
             );
             try overlay.append(gpa, try gpa.print("{s}/{s}", .{ p.programs, prog }));
         }
-        try bins.append(gpa, try gpa.print("{s}/bite-cleanup/usr/bin/bite-cleanup", .{p.programs}));
-        try overlay.append(gpa, try gpa.print("{s}/bite-cleanup", .{p.programs}));
     }
 
     var form_files: std.ArrayList([]const u8) = .empty;
     var rootfs: std.ArrayList([]const u8) = .empty;
     // The form's programs' directories: form.yaml's programs, each in
-    // PROGRAMS/NAME (popen-shim.so in PROGRAMS/popen-shim, as make's
+    // PROGRAMS/NAME (samba-passwd.so in PROGRAMS/samba-passwd, as make's
     // basename names it), and a form's own, F/cmd/P, in PROGRAMS/forms/F.
     var dirs: std.array_hash_map.String(void) = .empty;
     for (chain) |c| {

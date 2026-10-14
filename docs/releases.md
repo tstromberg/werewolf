@@ -16,7 +16,7 @@ sshd, for an operator to reach by security key (`ed25519-sk` or
 | --- | --- |
 | `prod-ARCH-disk.qcow2`, `prod-ssh-ARCH-disk.qcow2` | a UEFI boot disk of 8 GiB holding the slot: what a VM boots from ([Deploying](#deploying)) |
 | `FORM-ARCH-vmlinuz` | the kernel |
-| `prod-ARCH-stage0.zst`, `prod-ARCH-stage0-bitten.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot, and the kernel arguments it boots with, for bite to install beside a distro ([bite.md](bite.md)): stage0 for werewolf's own disk, and for a distro's after bite, which adds the modules of the distro's filesystem (xfs, btrfs) |
+| `prod-ARCH-stage0.zst`, `prod-ARCH-root.erofs`, `prod-ARCH-cmdline`, and the same for `prod-ssh` | the slot and the kernel arguments for werewolf's native disk |
 | `minimal-ARCH-initramfs.zst`, `minimal-ARCH-cmdline` | the whole image, and the kernel arguments its host passes, for direct boot |
 | `FORM-ARCH-uki` | the whole slot as one signed PE — kernel, stage0, root and command line (tools/uki) — that firmware with Secure Boot on and the boot key enrolled boots whole; listed when the release was signed with one ([design/verified-boot.md](design/verified-boot.md)) |
 | `FORM-ARCH.json`, `FORM-ARCH.json.sig` | the manifest, signed |
@@ -31,6 +31,9 @@ Boot PE signatures use a fixed signing time so independent release builds can ma
 `check-dist` verifies signed artifacts and enrolls their certificate before booting the actual disk.
 These existing releases do not yet provide the complete IPE/TPM default deployment profile;
 see [published protected images](design/published-secure-boot.md).
+The separate [protected candidate workflow](../.github/workflows/protected-images.yml) uses
+dedicated public trust and compares independent signed bundles for Lima and Linux QEMU.
+Its [download/publication gates](design/protected-downloads.md) remain separate from these releases.
 
 ```json
 {
@@ -44,7 +47,6 @@ see [published protected images](design/published-secure-boot.md).
   "files": {
     "vmlinuz": {"sha256": "27e0c04b…", "size": 36306944},
     "stage0.zst": {"sha256": "47bb1201…", "size": 9799501},
-    "stage0-bitten.zst": {"sha256": "…", "size": …},
     "root.erofs": {"sha256": "779f06fb…", "size": 20717568},
     "disk.qcow2": {"sha256": "7d383112…", "size": 26214400}
   },

@@ -16,10 +16,6 @@ pub const Slot = enum {
     }
 };
 
-/// Place is UUID:/PATH: a filesystem, by the UUID in its superblock, and a
-/// plain absolute path on it (see isPlainPath).
-pub const Place = struct { uuid: []const u8, path: []const u8 };
-
 pub const Seal = enum { enforce, learn };
 
 /// Cmdline holds each werewolf.NAME word in the field NAME.
@@ -29,9 +25,8 @@ pub const Cmdline = struct {
     dns: []const u8 = "",
     mac: []const u8 = "",
     data: []const u8 = "",
-    victim: ?Place = null,
+    slots: ?[]const u8 = null,
     slot: ?Slot = null,
-    grubenv: ?Place = null,
     /// esp is the FAT serial, as a number.
     esp: ?u32 = null,
     root: []const u8 = "",
@@ -57,7 +52,7 @@ test "TPM enforcement requires sealed secure native identity and rejects overrid
     const t = std.testing;
     var f: Failure = .{};
     const native = "werewolf.native=1 werewolf.secure=1 " ++
-        "werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewolf werewolf.esp=57E1-F000";
+        "werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000";
     const release = " werewolf.release=" ++ @as([64]u8, @splat('a'));
     try t.expect(parse(native ++ " werewolf.tpm=2" ++ release, &f).?.tpm);
     for ([_][]const u8{
@@ -100,8 +95,7 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .mac => c.mac = if (isMac(v)) v else return refuse(f, "not a MAC address"),
             .data => c.data = if (isDeviceName(v)) v else return refuse(f, not_device),
             .root => c.root = if (isDeviceName(v)) v else return refuse(f, not_device),
-            .victim => c.victim = place(v) orelse return refuse(f, not_place),
-            .grubenv => c.grubenv = place(v) orelse return refuse(f, not_place),
+            .slots => c.slots = if (uuid(v) != null) v else return refuse(f, "not a UUID"),
             .slot => c.slot = std.meta.stringToEnum(Slot, v) orelse return refuse(f, "not a or b"),
             .esp => c.esp = serial(v) orelse return refuse(f, "not a FAT serial, XXXX-XXXX"),
             .deadman => c.deadman = seconds(v) orelse return refuse(f, "not 1 to 600 seconds"),
@@ -141,10 +135,10 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
         return refuse(f, "requires a signed bootstrap, never a workload boot");
     }
     if (c.native and !c.bootstrap and
-        (c.victim == null or c.esp == null or c.grubenv != null or c.root.len > 0))
+        (c.slots == null or c.esp == null or c.root.len > 0))
     {
         f.word = "werewolf.native";
-        return refuse(f, "needs a native victim and ESP, without GRUB or a direct root");
+        return refuse(f, "needs native slots and ESP, without a direct root");
     }
     if (c.secure and !c.native) {
         f.word = "werewolf.secure";
@@ -154,8 +148,8 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
         f.word = "werewolf.tpm";
         return refuse(f, "requires secure native boot and an exact release identity");
     }
-    if (!c.native and (c.victim == null) != (c.slot == null)) {
-        f.word = "werewolf.victim";
+    if (!c.native and (c.slots == null) != (c.slot == null)) {
+        f.word = "werewolf.slots";
         return refuse(f, "comes with werewolf.slot, and only with it");
     }
     if (c.root.len > 0 and c.slot != null) {
@@ -179,7 +173,7 @@ test "enrollment boot cannot acquire workload identity or relaxed controls" {
     for ([_][]const u8{
         "werewolf.bootstrap=1",            "werewolf.native=1 werewolf.bootstrap=1",
         line ++ " werewolf.root=vda",      line ++ " werewolf.data=vdb",
-        line ++ " werewolf.slot=a",        line ++ " werewolf.victim=" ++ id ++ ":/w",
+        line ++ " werewolf.slot=a",        line ++ " werewolf.slots=" ++ id,
         line ++ " werewolf.esp=57E1-F000", line ++ " werewolf.seal=learn",
         line ++ " werewolf.debug=1",       line ++ " werewolf.check=1",
         line ++ " werewolf.tpm=2",         line ++ " werewolf.release=" ++ @as([64]u8, @splat('a')),
@@ -224,10 +218,10 @@ pub fn firmwareSlot(variable: []const u8) ?Slot {
 test "native boot binds the disk while firmware supplies only a canonical slot hint" {
     const t = std.testing;
     var f: Failure = .{};
-    const line = "werewolf.native=1 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewo" ++
-        "lf werewolf.esp=57E1-F000";
+    const line = "werewolf.native=1 werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 " ++
+        "werewolf.esp=57E1-F000";
     const native = parse(line, &f) orelse return error.TestUnexpectedResult;
-    try t.expect(native.native and native.slot == null and native.victim != null);
+    try t.expect(native.native and native.slot == null and native.slots != null);
     try t.expect(parse("werewolf.native=1", &f) == null);
     try t.expect(parse("werewolf.secure=1", &f) == null);
     try t.expect(parse(line ++ " werewolf.secure=1", &f).?.secure);
@@ -255,27 +249,12 @@ test "native boot binds the disk while firmware supplies only a canonical slot h
 }
 
 const not_device = "not a disk's name in /dev, as vdc";
-const not_place = "not UUID:/PATH, a plain absolute path";
 
 /// isDeviceName reports whether name is a block device name in /dev, such
 /// as vdc or nvme0n1: a lower-case letter, then up to 15 letters and digits.
 pub fn isDeviceName(name: []const u8) bool {
     if (name.len == 0 or name.len > 16 or !std.ascii.isLower(name[0])) return false;
     for (name) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c)) return false;
-    return true;
-}
-
-/// isPlainPath reports whether path is absolute and plain: not / itself, no
-/// empty, . or .. parts, and only safe characters. @ is allowed for btrfs
-/// subvolumes such as Ubuntu's /@.
-pub fn isPlainPath(path: []const u8) bool {
-    if (path.len < 2 or path[0] != '/' or path[path.len - 1] == '/') return false;
-    var parts = std.mem.splitScalar(u8, path[1..], '/');
-    while (parts.next()) |p| {
-        if (p.len == 0 or std.mem.eql(u8, p, ".") or std.mem.eql(u8, p, "..")) return false;
-        for (p) |c| if (!std.ascii.isAlphanumeric(c) and
-            std.mem.findScalar(u8, "._-@", c) == null) return false;
-    }
     return true;
 }
 
@@ -312,19 +291,12 @@ pub fn serial(s: []const u8) ?u32 {
     return n;
 }
 
-fn place(s: []const u8) ?Place {
-    const colon = std.mem.findScalar(u8, s, ':') orelse return null;
-    const p: Place = .{ .uuid = s[0..colon], .path = s[colon + 1 ..] };
-    if (uuid(p.uuid) == null or !isPlainPath(p.path)) return null;
-    return p;
-}
-
 fn isOne(s: []const u8) bool {
     return std.mem.eql(u8, s, "1");
 }
 
 /// isMac reports whether s is six pairs of hex digits joined by colons.
-fn isMac(s: []const u8) bool {
+pub fn isMac(s: []const u8) bool {
     if (s.len != 17) return false;
     for (s, 0..) |c, i| if (if (i % 3 == 2) c != ':' else !std.ascii.isHex(c)) return false;
     return true;
@@ -356,14 +328,12 @@ fn refused(text: []const u8) !Failure {
 test parse {
     var f: Failure = .{};
     const slot = parse(
-        "console=hvc0 werewolf.victim=" ++ id ++ ":/var/lib/werewolf werewolf.slot=b " ++
-            "werewolf.grubenv=" ++ id ++ ":/@/boot/grub/grubenv werewolf.esp=57E1-F000 " ++
+        "console=hvc0 werewolf.slots=" ++ id ++ " werewolf.slot=b " ++
+            "werewolf.esp=57E1-F000 " ++
             "werewolf.mac=52:55:55:0a:Bc:01 werewolf.seal=learn werewolf.debug=1\n",
         &f,
     ).?;
-    try testing.expectEqualStrings(id, slot.victim.?.uuid);
-    try testing.expectEqualStrings("/var/lib/werewolf", slot.victim.?.path);
-    try testing.expectEqualStrings("/@/boot/grub/grubenv", slot.grubenv.?.path);
+    try testing.expectEqualStrings(id, slot.slots.?);
     try testing.expectEqual(Slot.b, slot.slot.?);
     try testing.expectEqual(Slot.a, slot.slot.?.other());
     try testing.expectEqual(0x57E1F000, slot.esp.?);
@@ -395,14 +365,12 @@ test parse {
         "werewolf.data=vdA",
         "werewolf.root=../vdc",
         "werewolf.root=abcdefghijklmnopq",
-        "werewolf.slot=c werewolf.victim=" ++ id ++ ":/w",
+        "werewolf.slot=c werewolf.slots=" ++ id,
         "werewolf.slot=a",
-        "werewolf.victim=" ++ id ++ ":/w",
-        "werewolf.victim=ab:/w werewolf.slot=a",
-        "werewolf.victim=" ++ id ++ ":w werewolf.slot=a",
-        "werewolf.victim=" ++ id ++ ":/w/../etc werewolf.slot=a",
-        "werewolf.victim=" ++ id ++ ":/ werewolf.slot=a",
-        "werewolf.victim=" ++ id ++ ":/w werewolf.slot=a werewolf.root=vdc",
+        "werewolf.slots=" ++ id,
+        "werewolf.slots=ab werewolf.slot=a",
+        "werewolf.slots=" ++ id ++ ":/w werewolf.slot=a",
+        "werewolf.slots=" ++ id ++ " werewolf.slot=a werewolf.root=vdc",
         "werewolf.grubenv=" ++ id ++ ":/b//g",
         "werewolf.esp=57E1F000",
         "werewolf.esp=57E1-+000",
@@ -443,11 +411,4 @@ test serial {
     try testing.expectEqual(0x57E1F000, serial("57e1-f000").?);
     for ([_][]const u8{ "57E1F000", "57E1-F00", "57E1-G000", "+7E1-F000", "" }) |s|
         try testing.expectEqual(null, serial(s));
-}
-
-test isPlainPath {
-    for ([_][]const u8{ "/var/lib/werewolf", "/@/boot/grub/grubenv", "/root/var/x" }) |p|
-        try testing.expect(isPlainPath(p));
-    for ([_][]const u8{ "", "/", "w", "/w/", "/a//b", "/a/./b", "/a/../b", "/a b", "/a:b" }) |p|
-        try testing.expect(!isPlainPath(p));
 }

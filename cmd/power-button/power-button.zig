@@ -50,6 +50,7 @@ comptime {
 const get_line_ioctl = linux.IOCTL.IOWR(0xB4, 0x07, LineRequest);
 
 pub fn main(init: std.process.Init) !void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const io = init.io;
     var fds: [max_devices]linux.pollfd = undefined;
     var names: [max_devices][]const u8 = undefined;

@@ -28,9 +28,9 @@ make install
 howl run --build
 ```
 
-Secure mode is the default. Published protected downloads are still being implemented;
-plain `howl run` refuses until they are ready. `--build` uses local signing credentials.
-Cloud deployment currently requires an explicit protection opt-out:
+Secure mode is the default for every deployer. Plain `howl run` authenticates a published
+protected image with embedded production certificates; an unpublished target fails closed.
+`--build` uses local signing credentials. Cloud deployment currently requires an explicit opt-out:
 
 ```sh
 howl create web --insecure --on gcp --with python-app --app ./myapp
@@ -58,19 +58,16 @@ Secure Boot authenticates the kernel, early boot code and root filesystem hash.
 | AWS EC2 | Verified, arm64 | Custom UEFI enrollment; NitroTPM alone does not protect rollback |
 | Google Compute Engine | Verified, arm64 | Custom Shielded VM keys; vTPM alone does not protect rollback |
 | Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
-| Lima QEMU | Verified, arm64 Mac | Default uses QEMU, IPE and persistent TPM; source builds currently required |
+| Lima QEMU | Verified, arm64 Mac | Default requires signed protected downloads; local `--build` retains caller signing |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |
 | bhyve | Manual enrollment verified, x86_64 | Bilbo firmware test; `howl` enrollment and arm64 backend remain unfinished |
 | Proxmox VE | Unverified | `howl` enrollment unfinished; no test node available |
-| Existing VMs converted with `bite` | Unverified | Existing bootloader authentication is unfinished |
 
 A/B updates retain the previous good slot after commit. The secured local profile
 uses TPM authorization for exactly two releases and refuses retired images.
 Cloud TPM enrollment remains unfinished; enabling a vTPM alone is insufficient. See
 [provider recovery tests](docs/testing.md#provider-ab-upgrades-and-rollbacks),
 [cloud setup](docs/cloud.md#signed-boot) and [boot tests](docs/testing.md#secure-boot).
-[`bite`](docs/bite.md) can replace an existing distro and deletes it after a successful
-migration. Verifying the existing bootloader's authenticity remains unfinished.
 
 ## Security and updates
 

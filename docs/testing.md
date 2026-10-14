@@ -1,5 +1,14 @@
 # Testing
 
+`test/check-published-lifecycle HOWL INITIAL UPDATE LATER OUTPUT` exercises the exact
+production-signed playground bundles under isolated Lima enrollments. Consumers have no
+source tree or vendor keys, and build commands fail if invoked. It checks four guest protections,
+actual TPM measurements, independent owners sharing one issuer, cached reuse, A/B upgrades,
+operator rollback, stop/resume, retirement power cuts and failed-keeper trial fallback.
+It emits artifact-bound publication gates only after every check succeeds.
+`test/protected-publication` separately tests ordered uploads, interruption recovery,
+immutable collisions and authenticated server release floors without network access.
+
 Opt-in IPE builds have a separate `make IPE=1 check-ipe` suite. It boots
 the real image, tests global execution and executable mappings without
 Landlock, seccomp or noexec, and refuses missing, tampered, wrong-signer and wrong-root
@@ -39,7 +48,7 @@ these compilers before they check the forms. None of them ships in a VM.
 ## What `make check` does
 
 It builds every form and boots each one under QEMU. Then it boots a slot
-the way bite leaves one. On each machine it runs
+with a native EFI partition. On each machine it runs
 [test/checks](../test/checks) as root on the serial console, then powers
 the machine off. A machine passes when it boots, every check comes out as
 expected, and it shuts down cleanly.
@@ -151,17 +160,12 @@ file, and say so.
 The slot boot covers what direct boot cannot:
 
 - stage0 finds `root.erofs` by filesystem UUID;
-- `/victim` is read-only;
-- the `slot-keep` service makes the slot GRUB's default once it has stayed
-  healthy for a minute;
-- `bite-cleanup` then deletes a stand-in distro around it, traps included,
-  while it keeps werewolf's directory and `/boot`.
+- `/boot` is read-only;
+- the `slot-keep` service commits the native EFI entry once the slot has
+  stayed healthy for a minute.
 
-Among the traps, `debugfs` makes `/etc/resolv.conf` immutable.
-bite-cleanup must delete the rest of `/etc`, name the file, and exit 1. The
-victim is a 128 MiB ext4 that `mke2fs -d` fills with what bite leaves: the
-root image in slot a, its kernel, and GRUB's environment block. The slot
-uses `minimal`, which has no updater to reach the network once it commits.
+The test uses a 128 MiB ext4 holding the root image in slot a and a separate
+FAT EFI partition with one counted loader entry.
 
 ```
 ok     sshd               posture
@@ -214,8 +218,8 @@ builds slot b, installs it and reboots.
 [test/update](../test/update) then reads the disk with `debugfs`. The
 report must list each CVE source with a sha256 and no error, each apk cache
 must have kept its packages, slot b's root must be owned by root with mode
-0755, and GRUB must boot b next. Then test/update boots slot b, which must
-commit, and the updater must record that the update held. No seccomp
+0755, and the EFI entry must allow one try of b. Then test/update boots
+slot b, which must commit, and the updater must record that the update held. No seccomp
 filter may have killed anything in either boot. The consoles are in
 `build/<arch>/check/update-prod/`.
 
@@ -348,7 +352,7 @@ script boots. The script takes the machine, `QEMU...`, as its arguments,
 and the form's values in its environment (the Makefile's `CHECK_ENV`):
 `CHECK`, the log directory; `FORM` and `OUT`, the form and its build;
 `KERNEL`, with its command line without an address (`BOOT`) and with one
-(`CMDLINE`); `VICTIM`, the UUID stage0 finds a slot's disk by; and the
+(`CMDLINE`); `SLOTS_UUID`, the UUID stage0 finds a slot's disk by; and the
 tools `HOWL`, `TAR` and `DEBUGFS`. It says `pass` or `FAIL` in test/boot's
 columns.
 
@@ -395,7 +399,7 @@ werewolf: up in 1.470s (the kernel 0.225s, userland 1.245s), handing over to run
 | `modules` | stage0's modload closes the loader, after the scan for the slot's disk it runs alongside |
 | `slot` | the slot's filesystem is mounted (a slot's boot only) |
 | `root` | `root.erofs` is mounted through dm-verity |
-| `mounts`, `sysctls`, `network`, `victim`, `config`, `data` | init's steps of those names end |
+| `mounts`, `sysctls`, `network`, `config`, `data` | init's steps of those names end |
 | `seal` | init has sealed itself and started the mount broker and the DHCP renewal |
 
 The console also shows the other half of a reboot. Stage 3 ends with
@@ -616,7 +620,8 @@ Only explicitly staged public sources, base archives and IPE certificates reach 
 Signing keys stay on the Mac; firmware and native enrollment tools are hash-pinned separately.
 `WEREWOLF_BUILD_VM` explicitly selects an isolated native arm64 Linux Lima helper instead.
 That optional helper is created/started before use; host mounts and SSH agent forwarding are refused.
-Its separate temporary module signer is destroyed. Published protected images should need no build VM.
+Modules are compiled with public trust and signed on the host; private keys never enter the builder.
+Published protected images should need no build VM.
 See [macOS builds](macos-builds.md) for builder setup and firmware compatibility.
 The [local deployment design](design/secure-local-deployment.md) defines the host trust boundary.
 `tools/build-tpm-stub OUT` builds the pinned measured stub on Linux; copy its public
@@ -637,6 +642,25 @@ swtpm on macOS or Linux, including private file modes, repeat refusal, restart,
 supervisor crash recovery, cleanup and refusal to replace missing backing state.
 `test/local-prerequisites` covers cache tampering, incomplete publication and signer custody.
 It also checks independent kernel/stub invalidation, legacy cache adoption and interrupted builds.
+`test/sign-kernel` checks deterministic host signatures, pinned trust and failed-publication cleanup.
+`test/check-kernel-repro ARCH ALPINE_BASE KEY CERT OUTPUT` compares two cold Melange builds
+and their host-signed archives; the shared dependency download cache contains only public inputs.
+`test/check-kernel-modules` boots the kernel to test actual module signature enforcement.
+It requires trusted module load success and signature errors for unsigned, foreign and altered copies.
+`test/boot-images` checks independently signed admission failures before machine enrollment.
+It covers foreign/altered signatures, authenticated weak profiles, unknown fields and size bounds.
+`test/boot-download` uses native metadata admission to check bounded transport, cache reuse,
+interruption, torn heads, persistent floors and replay/equivocation refusal before artifact promotion.
+`test/protected-release` checks dedicated signing custody and artifact-bound publication gates.
+Both run with `_test/local-publisher`; [protected-image CI](../.github/workflows/protected-images.yml)
+also runs them and can build two independent signed candidates with dedicated production secrets.
+Candidate CI has no publication permission; see [download gates](design/protected-downloads.md).
+The publisher suite verifies independent HTTPS issuers and continued issuance after one registration stops.
+`make check-shared-boot` is an opt-in arm64 Lima test in an isolated public checkout.
+It seals one vendor artifact, makes private vendor keys unavailable, and enrolls two machines.
+It checks identical code/PCRs with distinct owner keys, machine nonces and TPM anchors.
+Its update path covers shared-channel delivery, signed A/B replacement, rollback and head replay refusal.
+See [portable boot bundles](design/boot-images.md) for the internal producer/import APIs.
 On macOS, `make check-run-cache` in an isolated checkout measures repeat protected Lima runs and resume.
 It rejects repeated builders, changed boot IDs on live reuse and replaced signing/TPM authority.
 Supply the same explicit IPE kernel/key/certificate and measured stub as `check-secure-lima`.

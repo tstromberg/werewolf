@@ -7,7 +7,7 @@ A database for the other services on this machine: [PostgreSQL](https://www.post
 The server runs as its own user, and nothing else does. There is no shell. Landlock and seccomp hold it to its socket and to `/data/svc/postgres`. The root is read-only.
 
 - No TCP. `listen_addresses` is empty. A local role is the system user's name, and a TCP login is refused.
-- `initdb` would run a shell. `pg-init` runs those commands itself, and only when they are one program and its arguments.
+- `initdb` uses the static sh-shim: one declared program and its arguments, with only `/dev/null` redirections. Setup needs no preload.
 - The cluster is mode 0700. If it was made and then lost, the next start refuses to create an empty one over it.
 - PostgreSQL compiles costly queries to machine code with LLVM. `jit` stays on, which is its default.
 
@@ -45,6 +45,7 @@ A form can still carry `rootfs/usr/share/werewolf-postgres/NAME.sql`. That SQL r
 - A dump's roles must be system users on this machine. Peer authentication has no passwords.
 - The image's SQL files run on every start. An `INSERT` needs a conflict target, or the rows multiply. `--import` runs once.
 - Stay on 17. A new major version is a new form: the data needs `pg_upgrade`.
+- This form owns `/bin/sh` as sh-shim, including DEV builds. The console debugger uses `/bin/ash`. A form replacing the PostgreSQL service must keep its explicit initdb, sh-shim and locale run paths.
 
 ## Size
 

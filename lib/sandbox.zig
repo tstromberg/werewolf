@@ -215,21 +215,25 @@ pub const Ruleset = struct {
 
     /// Options: sockets also handles resolve_unix where the kernel knows it
     /// (ABI 9), so no pathname UNIX socket made outside the domain is
-    /// reached but beneath a rule that grants it.
-    pub const Options = struct { sockets: bool = false };
+    /// reached but beneath a rule that grants it. only_exec handles only
+    /// execute, to drop setup helpers before the service starts.
+    pub const Options = struct { sockets: bool = false, only_exec: bool = false };
 
     pub fn init(o: Options) !Ruleset {
         // LANDLOCK_CREATE_RULESET_VERSION
         const abi = try sys(linux.syscall3(.landlock_create_ruleset, 0, 0, 1), "landlock version");
-        const fs = fsAll(abi) | if (o.sockets and abi >= 9) resolve_unix else 0;
+        const fs = if (o.only_exec)
+            execute
+        else
+            fsAll(abi) | if (o.sockets and abi >= 9) resolve_unix else 0;
         // struct landlock_ruleset_attr: handled_access_fs, handled_access_net,
         // scoped (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and _SIGNAL).
         const attr: [3]u64 = .{
             fs,
-            if (abi >= 4) bind_tcp | connect_tcp else 0,
-            if (abi >= 6) 0x3 else 0,
+            if (!o.only_exec and abi >= 4) bind_tcp | connect_tcp else 0,
+            if (!o.only_exec and abi >= 6) 0x3 else 0,
         };
-        const size: usize = if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
+        const size: usize = if (o.only_exec) 8 else if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
         const fd = try sys(
             linux.syscall3(.landlock_create_ruleset, @intFromPtr(&attr), size, 0),
             "landlock ruleset",
@@ -314,16 +318,18 @@ pub const Filter = struct {
         f.n += 1;
     }
 
-    /// allowArg allows the call when argument arg equals value. It compares
-    /// only the low 32 bits, so use it only for an argument the kernel reads
-    /// as 32 bits (a descriptor, an ioctl request, a socket family).
+    /// allowArg allows the call when argument arg equals value, with its high
+    /// 32 bits zero so a 64-bit unsigned long (such as mount flags) cannot
+    /// carry high bits past the check.
     pub fn allowArg(f: *Filter, comptime name: []const u8, comptime arg: u3, value: u32) void {
         const n = nr(name) orelse return;
-        f.prog[f.n] = .{ .code = seal.JEQ_K, .jf = 3, .k = n };
-        f.prog[f.n + 1] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, arg) };
-        f.prog[f.n + 2] = .{ .code = seal.JEQ_K, .jt = to_allow, .k = value };
-        f.prog[f.n + 3] = .{ .code = seal.LD_W_ABS, .k = 0 };
-        f.n += 4;
+        f.prog[f.n] = .{ .code = seal.JEQ_K, .jf = 5, .k = n };
+        f.prog[f.n + 1] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, arg) + 4 };
+        f.prog[f.n + 2] = .{ .code = seal.JEQ_K, .jf = 2, .k = 0 };
+        f.prog[f.n + 3] = .{ .code = seal.LD_W_ABS, .k = 16 + 8 * @as(u32, arg) };
+        f.prog[f.n + 4] = .{ .code = seal.JEQ_K, .jt = to_allow, .k = value };
+        f.prog[f.n + 5] = .{ .code = seal.LD_W_ABS, .k = 0 };
+        f.n += 6;
     }
 
     fn finish(f: *Filter) []const seal.Filter {
@@ -456,17 +462,18 @@ test Filter {
     f.allow("this_call_does_not_exist");
     f.refuse("mount");
     const p = f.finish();
-    // 0-2 the arch check and load; 3 read; 4-7 write with its argument and
-    // the reload; 8 mount; 9 kill; 10 allow; 11 EPERM. Each jump lands where
-    // it should.
-    try std.testing.expectEqual(12, p.len);
-    try std.testing.expectEqual(9, 1 + 1 + p[1].jf);
-    try std.testing.expectEqual(10, 3 + 1 + p[3].jt);
-    try std.testing.expectEqual(8, 4 + 1 + p[4].jf);
-    try std.testing.expectEqual(@as(u32, 7), p[6].k);
-    try std.testing.expectEqual(10, 6 + 1 + p[6].jt);
-    try std.testing.expectEqual(11, 8 + 1 + p[8].jt);
-    try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, p[9].k);
-    try std.testing.expectEqual(linux.SECCOMP.RET.ALLOW, p[10].k);
-    try std.testing.expectEqual(linux.SECCOMP.RET.ERRNO | 1, p[11].k);
+    // 0-2 the arch check and load; 3 read; 4-9 write with its high/low words
+    // and the reload; 10 mount; 11 kill; 12 allow; 13 EPERM. Each jump lands
+    // where it should.
+    try std.testing.expectEqual(14, p.len);
+    try std.testing.expectEqual(11, 1 + 1 + p[1].jf);
+    try std.testing.expectEqual(12, 3 + 1 + p[3].jt);
+    try std.testing.expectEqual(10, 4 + 1 + p[4].jf);
+    try std.testing.expectEqual(9, 6 + 1 + p[6].jf);
+    try std.testing.expectEqual(@as(u32, 7), p[8].k);
+    try std.testing.expectEqual(12, 8 + 1 + p[8].jt);
+    try std.testing.expectEqual(13, 10 + 1 + p[10].jt);
+    try std.testing.expectEqual(linux.SECCOMP.RET.KILL_PROCESS, p[11].k);
+    try std.testing.expectEqual(linux.SECCOMP.RET.ALLOW, p[12].k);
+    try std.testing.expectEqual(linux.SECCOMP.RET.ERRNO | 1, p[13].k);
 }

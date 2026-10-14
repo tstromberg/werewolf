@@ -265,7 +265,8 @@ pub fn main(init: std.process.Init) !void {
             l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
     } else allowProgram(l, rules, gpa, p);
     // The image's sh shim, which a service in an image of its own lacks.
-    if (allowances.has(.sh) and s.root == null) allowProgram(l, rules, gpa, sh_shim);
+    if (allowances.has(.sh) and s.root == null and (s.pledge.contains(.exec) or s.before.len > 0))
+        allowProgram(l, rules, gpa, sh_shim);
     allowProgram(l, rules, gpa, s.exec[0]);
     for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
     if (s.render) |r| {
@@ -364,6 +365,15 @@ pub fn main(init: std.process.Init) !void {
             l.fail(.park, "before {s}: {s}", .{ argv[0], @errorName(err) });
         if (term != .exited or term.exited != 0) l.fail(.park, "before {s} failed", .{argv[0]});
     }
+    if (!s.pledge.contains(.exec) and
+        (s.render != null or s.before.len > 0 or s.run.len > 0 or s.narrow.len > 0))
+    {
+        const exec_only = sandbox.Ruleset.init(.{ .only_exec = true }) catch |err|
+            l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
+        allowProgram(l, exec_only, gpa, s.exec[0]);
+        exec_only.restrict() catch |err|
+            l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
+    }
     // Open the program before the pledge. A pledge without exec still allows
     // execveat of this descriptor, and Landlock allows only this program.
     const prog_rc = linux.open(
@@ -397,14 +407,25 @@ fn pledgeAndExec(
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
 ) noreturn {
+    const high_fd: i32 = 1021;
+    const exec_fd: usize = if (prog != high_fd and
+        linux.errno(linux.dup3(
+            @intCast(prog),
+            high_fd,
+            @as(u32, @bitCast(linux.O{ .CLOEXEC = true })),
+        )) == .SUCCESS)
+    blk: {
+        _ = linux.close(@intCast(prog));
+        break :blk @intCast(high_fd);
+    } else prog;
     if (!learn) {
         var filter_buf: [seal.max_filter]seal.Filter = undefined;
-        const filter = seal.buildServiceFilter(&filter_buf, promises, @intCast(prog));
+        const filter = seal.buildServiceFilter(&filter_buf, promises, @intCast(exec_fd));
         _ = seal.install(filter, false) catch |e| l.fail(.park, "pledge: {s}", .{@errorName(e)});
     }
     const rc = linux.syscall5(
         .execveat,
-        prog,
+        exec_fd,
         @intFromPtr(""),
         @intFromPtr(argv),
         @intFromPtr(envp),
@@ -443,13 +464,17 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
     // Close at exec all but stdin, stdout and stderr: a descriptor the
     // service left open, a socket above all, would reach past the narrowing.
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
-    if (linux.getuid() == 0) l.fail(.park, "{s}: run as its service, never as root", .{link.name});
     const file = try gpa.printSentinel("/etc/sv/{s}/service", .{link.service}, 0);
     const text = readRootFile(gpa, file) catch |err|
         l.fail(.park, "{s}: {s}", .{ file, @errorName(err) });
     var bad: service.Bad = .{};
     const s = service.parse(gpa, text, &bad) catch
         l.fail(.park, "{s}, line {d}: {s}", .{ file, bad.line, bad.why });
+    const passwd = Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
+    const user = lookupUser(passwd, s.user) orelse
+        l.fail(.park, "no user {s} in /etc/passwd", .{s.user});
+    if (user.uid == 0 or user.gid == 0 or linux.getuid() != user.uid or linux.getgid() != user.gid)
+        l.fail(.park, "{s}: run as {s}, never as another user", .{ link.name, s.user });
     const n = for (s.narrow) |n| {
         if (std.mem.eql(u8, std.fs.path.basename(n.program), link.name)) break n;
     } else l.fail(.park, "{s} narrows no program named {s}", .{ file, link.name });
@@ -523,8 +548,8 @@ fn readRootFile(gpa: Allocator, path: [:0]const u8) ![]const u8 {
     return buf;
 }
 
-/// unsecret returns environ without the variables the service's secret
-/// lines name, so a narrowed program does not hold them.
+/// unsecret returns environ without loader variables (LD_*) or the variables
+/// the service's secret lines name, so a narrowed program does not hold them.
 fn unsecret(
     gpa: Allocator,
     environ: []const ?[*:0]const u8,
@@ -534,6 +559,7 @@ fn unsecret(
     for (environ) |e| {
         const entry = std.mem.span(e orelse continue);
         const name = entry[0 .. std.mem.findScalar(u8, entry, '=') orelse entry.len];
+        if (std.mem.startsWith(u8, name, "LD_")) continue;
         for (secrets) |sec| {
             if (std.mem.eql(u8, sec.name, name)) break;
         } else try kept.append(gpa, e);

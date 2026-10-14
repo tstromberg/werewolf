@@ -693,7 +693,7 @@ fn valid(w: Wire) bool {
     for (w.dns[0..w.ndns]) |d| if (!usable(d)) return false;
     for (w.routes[0..w.nroutes]) |r| {
         if (r.prefix > 32 or !std.mem.eql(u8, &masked(r.dst, r.prefix), &r.dst)) return false;
-        if (r.prefix > 0 and !usable(r.dst)) return false;
+        if (!usableRoute(r.dst, r.prefix)) return false;
         if (!usableGateway(r.gw, w.addr)) return false;
     }
     if (w.mtu != 0 and (w.mtu < 576 or w.mtu > max_mtu)) return false;
@@ -701,6 +701,15 @@ fn valid(w: Wire) bool {
     // also checks it against the clock (Parent.handle).
     if (w.bound < 0 or w.bound > 1 << 40) return false;
     return w.lease > 0;
+}
+
+/// usableRoute reports whether dst/prefix is the default route (0.0.0.0/0) or
+/// a range that touches none of 0.0.0.0/8, 127.0.0.0/8 or 224.0.0.0/3.
+fn usableRoute(dst: Ip4, prefix: u8) bool {
+    if (prefix == 0) return true;
+    const first = dst[0];
+    const last = first | ~maskOf(prefix)[0];
+    return first != 0 and (last < 127 or first > 127) and last < 224;
 }
 
 /// usableGateway reports whether gw is zero (none), or a usable address
@@ -1761,6 +1770,18 @@ test "leases that must not be applied" {
     w = good;
     w.nroutes = 1;
     w.routes[0] = .{ .dst = .{ 127, 0, 0, 0 }, .prefix = 8, .gw = .{ 10, 0, 2, 2 } };
+    try std.testing.expect(!valid(w));
+    w.routes[0] = .{
+        .dst = .{ 126, 0, 0, 0 },
+        .prefix = 7,
+        .gw = .{ 10, 0, 2, 2 },
+    }; // covers 127/8
+    try std.testing.expect(!valid(w));
+    w.routes[0] = .{
+        .dst = .{ 192, 0, 0, 0 },
+        .prefix = 2,
+        .gw = .{ 10, 0, 2, 2 },
+    }; // covers 224/3
     try std.testing.expect(!valid(w));
     w.routes[0] = .{ .dst = .{ 10, 1, 2, 3 }, .prefix = 24, .gw = .{ 10, 0, 2, 2 } }; // host bits
     try std.testing.expect(!valid(w));

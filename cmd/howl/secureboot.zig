@@ -291,7 +291,7 @@ pub fn image(b: *B) !void {
     else
         "werewolf.slot=a";
     const prefix = try b.path("{s} {s} init=/init panic=10 {s} {s} {s} " ++
-        "werewolf.victim={s}:/werewolf werewolf.esp=57E1-F000\x00", .{
+        "werewolf.slots={s} werewolf.esp=57E1-F000\x00", .{
         base,
         @import(
             "disk.zig",

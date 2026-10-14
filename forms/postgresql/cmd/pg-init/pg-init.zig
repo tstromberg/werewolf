@@ -15,7 +15,6 @@ const import_dir = "/run/werewolf/import";
 const import_failed = import_dir ++ "/import-failed";
 const initdb = "/usr/bin/initdb";
 const postgres = "/usr/bin/postgres";
-const preload = "/usr/lib/werewolf/popen-shim.so";
 /// made marks that a cluster was made. If the cluster is gone but the mark
 /// is not, the data was lost, and pg-init refuses to make an empty one.
 const made = "cluster-made";
@@ -80,7 +79,6 @@ pub fn main(init: std.process.Init) !void {
         say(io, "making the cluster in {s}", .{data_dir});
         var env: std.process.Environ.Map = .init(gpa);
         try env.put("PATH", "/usr/bin");
-        try env.put("LD_PRELOAD", preload);
         var child = try std.process.spawn(io, .{
             .argv = &.{
                 initdb,

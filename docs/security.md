@@ -189,17 +189,13 @@ This recovers the system image; persistent data is not rolled back
 
 Authentication must extend through the boot chain to protect that next
 boot. Firmware must verify bootloader and kernel bundle signatures against
-trusted keys. These bundles are called unified kernel images (UKIs). Bite's
-existing GRUB boot files can still be changed. An unchecked kernel, stage0 or
-command line can defeat these restrictions even if the root image was signed.
+trusted keys. These bundles are called unified kernel images (UKIs).
+An unchecked kernel, stage0 or command line can defeat these restrictions even if the root image was signed.
 
 The updater checks image version numbers, but changing the boot configuration
 can still select an older signed image. Preventing this requires a minimum
 accepted version protected by a Trusted Platform Module (TPM); that protection
-is unfinished ([verified boot](design/verified-boot.md)). Older bite installations
-have another limitation: GRUB entries from before 2026-10-06 keep their original
-command line until `bite` is run again. Posture's `kernel-cmdline` check detects
-missing settings.
+is unfinished ([verified boot](design/verified-boot.md)).
 
 These protections operate inside the guest. The hypervisor can change its
 memory and boot input and must be trusted.
@@ -241,5 +237,5 @@ the seal, capabilities, network restrictions and audit. `--attack` tries service
 `make check` boots images and checks their posture; each form declares its
 expected weaknesses ([posture](posture.md), [testing](testing.md)).
 
-The [sysctl review](audit/sysctl-2026-10-12.md) records the reproduced
+The [sysctl review](audit/muse-sysctl-2026-10-12.md) records the reproduced
 `syslog` bypass, its fix, and the tested limits of this boundary.

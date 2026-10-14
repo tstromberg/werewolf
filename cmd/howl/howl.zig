@@ -93,6 +93,9 @@ pub fn main(init: std.process.Init) void {
             @"_boot-record",
             @"_local-refresh",
             @"_cloud-ek",
+            @"_boot-image",
+            @"_enroll-image",
+            @"_accept-image",
         },
         args[1],
     ) orelse
@@ -118,6 +121,9 @@ pub fn main(init: std.process.Init) void {
         .@"_boot-record" => @import("enrollment.zig").verify(io, gpa, args[2..]),
         .@"_cloud-ek" => @import("cloud-enrollment.zig").retrieve(io, gpa, args[2..], &why),
         .@"_local-refresh" => @import("local-secure.zig").refresh(io, gpa, args[2..], &why),
+        .@"_boot-image" => @import("boot-image.zig").command(io, gpa, args[2..], &why),
+        .@"_enroll-image" => @import("local-secure.zig").enrollImage(io, gpa, args[2..], &why),
+        .@"_accept-image" => @import("local-secure.zig").acceptImage(io, gpa, args[2..], &why),
         // Internal: create runs howl again as the bhyve or Firecracker supervisor.
         ._bhyve => if (args.len < 5)
             why.refuse("_bhyve NAME CONFIG BHYVE...", .{})
@@ -183,7 +189,7 @@ const Settings = struct {
 };
 
 /// Interface is the set of flags a form takes, and where each lands.
-const Interface = struct {
+pub const Interface = struct {
     files: []const File,
     settings: []const Settings,
     /// policy is the form's etc/werewolf/update-policy.json, if any. An
@@ -415,6 +421,8 @@ pub const Options = struct {
     /// from its repository, so the machine does not update them.
     local: bool = false,
     secure: bool = true,
+    boot_image: ?@import("boot-image.zig").Request = null,
+    production_download: bool = false,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
     /// azure: me or an IPv4 CIDR. Without it, create prints the commands.
     allow_from: ?[]const u8 = null,
@@ -973,6 +981,7 @@ fn pack(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
 
 /// formInterface returns the flags form takes, from its chain's files.
 pub fn formInterface(io: Io, gpa: Allocator, form: []const u8, why: *Why) !Interface {
+    if (@import("boot-config.zig").forForm(form)) |definition| return definition.interface;
     const c = try chain(io, gpa, form, why);
     var failure: forms.Failure = .{};
     const svcs = forms.services(io, gpa, Dir.cwd(), c, &failure) catch |err| switch (err) {
@@ -1278,7 +1287,7 @@ const Launch = struct {
     args: []const []const u8,
 };
 
-fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch {
+pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch {
     _, const plain = try verboseFlag(gpa, line);
     const dev, const rest = try takeFlag(gpa, plain, &.{"--dev"});
     const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
@@ -1300,11 +1309,6 @@ fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
             "--insecure explicitly opts out",
         .{on},
     );
-    if (!launch.local) return why.refuse(
-        "published protected boot images are not ready; use --build with local signing " ++
-            "credentials; refusing an implicit build or unprotected download",
-        .{},
-    );
 }
 
 test "deployment defaults protect Lima and Linux QEMU without backend fallback" {
@@ -1320,7 +1324,8 @@ test "deployment defaults protect Lima and Linux QEMU without backend fallback" 
     try requireProtection(.qemu, launch, &why);
     const downloaded = try launchFlags(arena.allocator(), &.{"playground"}, &why);
     try testing.expect(downloaded.secure and !downloaded.local);
-    try testing.expectError(error.Refused, requireProtection(.lima, downloaded, &why));
+    try requireProtection(.lima, downloaded, &why);
+    try requireProtection(.qemu, downloaded, &why);
     for ([_]Platform{ .firecracker, .bhyve, .proxmox, .aws, .gcp, .azure }) |on|
         try testing.expectError(error.Refused, requireProtection(on, launch, &why));
     const dev = try launchFlags(arena.allocator(), &.{ "playground", "--dev" }, &why);
@@ -1369,6 +1374,34 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     o.secure = launch.secure;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
+    const eng = engineFor(io, gpa, o.on, o.secure);
+    const on = eng.on;
+    if (!o.help) try requireProtection(on, launch, why);
+    o.on = on;
+    if (o.secure and !o.local) {
+        o.production_download = true;
+        if (o.app != null or o.import_dir != null or !forms.isName(o.form)) return why.refuse(
+            "custom code requires --build; signed downloads deploy a published form",
+            .{},
+        );
+        o.boot_image = try @import("download.zig").latest(
+            io,
+            gpa,
+            o.form,
+            on,
+            try localArch(why),
+            why,
+        );
+        const descriptor = try @import("boot-image.zig").admitHead(
+            io,
+            gpa,
+            o.boot_image.?,
+            try localArch(why),
+        );
+        @import(
+            "boot-config.zig",
+        ).current = descriptor.configuration orelse return error.MissingDeploymentDefinition;
+    }
     const iface = try formInterface(io, gpa, o.form, why);
     var out = Io.File.stdout().writerStreaming(io, &.{});
     const w = &out.interface;
@@ -1382,10 +1415,13 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .{name},
     );
 
-    const eng = engineFor(io, gpa, o.on, o.secure);
-    const on = eng.on;
-    try requireProtection(on, launch, why);
-    o.on = on;
+    if (o.boot_image != null) try @import("local-secure.zig").resumeDownload(
+        io,
+        gpa,
+        &o,
+        name,
+        why,
+    );
     const tell: Tell = .{
         .verbose = verbose,
         .command = try gpa.print("howl {s} {s}", .{
@@ -1454,8 +1490,17 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             false
     else
         false;
-    if (!given_keys)
-        o.own_keys = try keys.offer(
+    if (!given_keys) {
+        if (@import("boot-config.zig").forForm(o.form)) |definition| {
+            if (definition.ssh != .disabled) o.own_keys = try keys.offerFor(
+                io,
+                gpa,
+                definition.ssh == .files,
+                name,
+                yes or on.here(),
+                o.local,
+            );
+        } else o.own_keys = try keys.offer(
             io,
             gpa,
             try chain(io, gpa, o.form, why),
@@ -1463,6 +1508,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             yes or on.here(),
             o.local,
         );
+    }
     const entries = try gather(io, gpa, iface, o, why);
     const tar = try writeTar(gpa, entries);
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
@@ -1479,7 +1525,10 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
                 return;
             }
             keep = cached == .configure;
+            if (cached == .miss and
+                o.local) try @import("local-secure.zig").refreshSource(io, gpa, o, name, why);
         }
+        if (o.secure and madeOn(io, gpa, name) != null) keep = true;
         if (!keep) if (madeOn(
             io,
             gpa,
@@ -1519,6 +1568,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
 /// listens returns the TCP ports form serves, as its chain's net lines
 /// declare them (lib/form.zig): listen tcp/80 tcp/443, in order, once each.
 pub fn listens(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const u16 {
+    if (@import("boot-config.zig").forForm(form)) |definition| return definition.ports;
     const c = try chain(io, gpa, form, why);
     var f: forms.Failure = .{};
     return forms.listens(gpa, c, &f) catch |err| switch (err) {
@@ -1529,7 +1579,8 @@ pub fn listens(io: Io, gpa: Allocator, form: []const u8, why: *Why) ![]const u16
 
 /// hasDhcp reports whether form's chain runs dhcp-client, as its form.yaml
 /// programs say.
-fn hasDhcp(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+pub fn hasDhcp(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+    if (@import("boot-config.zig").forForm(form)) |definition| return definition.dhcp;
     for (try chain(io, gpa, form, why)) |f|
         for (try f.items(gpa, "programs")) |p| if (std.mem.eql(u8, p, "dhcp-client")) return true;
     return false;
@@ -1668,7 +1719,7 @@ fn declared(iface: Interface, path: []const u8) bool {
 /// isTarName reports whether every config tar reader takes s
 /// (settings.entryName): [A-Za-z0-9._-/], relative, with no empty, . or ..
 /// part, and at most 100 bytes, to fit ustar's name field.
-fn isTarName(s: []const u8) bool {
+pub fn isTarName(s: []const u8) bool {
     const n = settings.entryName(s) orelse return false;
     return n.len > 0 and n.len <= max_name and n.len == s.len;
 }

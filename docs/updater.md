@@ -39,8 +39,7 @@ the next check or that time, whichever comes first
 logged and tried again at the next.
 
 The machine must be booted from a slot: the kernel command line names
-`werewolf.slot`, `werewolf.victim`, and `werewolf.grubenv` (bite's GRUB)
-or `werewolf.esp` (werewolf's own disk). Elsewhere the
+`werewolf.slot`, `werewolf.slots`, and `werewolf.esp` (werewolf's own disk). Elsewhere the
 service stays down.
 
 ## When an update boots
@@ -100,8 +99,8 @@ updates off.
 | `root` | Add busybox's links, copy werewolf's programs, the operator's `--app` and the build's other records forward, clear setuid and setgid bits, run `mkfs.erofs`. |
 | `verity` | Append the root image's dm-verity hash tree, as the build does (lib/verity.zig), keeping the root hash for stage0. |
 | `vmlinuz` | Take Alpine's kernel as it is: on arm64 an EFI zboot image, which systemd-boot runs, and a quarter the size of the `Image` inside it. |
-| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init` and the module loader from the new root (`/usr/lib/werewolf/stage0` and `modload`, so a fix to either arrives with its package), the form's modules in the build's order (`modules`, or `modules-bitten` on a distro's disk; lib/image.zig) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
-| `install` | Clear GRUB's `next_entry`, so nothing boots the slot while it changes; mount the victim's filesystem and GRUB's apart, copy the slot in, the kernel unwrapped to its `Image` for GRUB, which cannot run zboot, `sync`, set GRUB's `next_entry`, then write `attempt`, so an attempt is on record only for a slot that is armed. On werewolf's own disk, the kernel goes to the EFI partition as it is. |
+| `stage0` | Build stage0, which has no packages, from `/dev`'s five nodes, `init` and the module loader from the new root (`/usr/lib/werewolf/stage0` and `modload`, so a fix to either arrives with its package), the form's modules in the build's order (`modules`; lib/image.zig) and `/verity`, the root hash and salt it opens the root with, as a newc cpio compressed with `zstd`. |
+| `install` | Disarm the other slot through the mount broker; install the root and metadata with digest-checked broker operations, and the kernel, stage0 and optional UKI on a detached EFI mount; sync, arm one try, then write `attempt`, so an attempt is on record only for a slot that is armed. TPM retirement still borrows the slot filesystem to publish boot state. |
 | `stage` | Fetch the CVE tiers feed and tier the fixes by it, with any of werewolf's own advisories the new slot lists (`werewolf-advisories`) and this image lacks; keep in `pending` when this machine first saw each tier, and work out when the slot is due. A build already staged stops here: its fixes are tiered again against the latest feed, and it is logged as `check`, `staged`, with when it is due. |
 | `report` | Write the report, with the update's tier and why it boots when it does; log `stage`. |
 
@@ -117,8 +116,8 @@ A check that fails before one has finished this boot, and before the
 machine has been up ten minutes, is tried again in 30 seconds.
 Any reboot before the slot is due boots it too: its one try is set.
 
-The slot keeps itself or not: `slot-keep` makes it GRUB's default once it is
-healthy, and anything else ends on the previous slot ([bite.md](bite.md#slots)).
+The slot keeps itself or not: `slot-keep` commits its systemd-boot entry once it is
+healthy, and anything else ends on the previous slot ([native boot](design/native-boot.md)).
 Healthy includes the updater: once its setup succeeds it writes
 `/run/werewolf/updater-ready`, and `slot-keep` keeps no slot without it, so
 a slot whose updater cannot run, the one failure no later update could
@@ -288,7 +287,7 @@ it was written. Alpine's own patches on top of upstream are not counted.
 
 The updater reads `/proc/cmdline`, `/etc/apk/` and the
 build record in `/usr/share/werewolf/`: `form`, `release`, `kernel`,
-`alpine`, `overlay`, `modules`, `modules-bitten`, `tiers`,
+`alpine`, `overlay`, `modules`, `tiers`,
 `tiers.pub` and `advisories`.
 
 ## Events
@@ -351,8 +350,7 @@ The program is small and does one pass. It favours what cannot go wrong:
 - **Safety checks.** Built ReleaseSafe: an out-of-bounds index or an
   overflow stops the program instead of corrupting it.
 - **Other programs** do what they do best: `apk`, `mkfs.erofs`, `zstd`,
-  `blkid`, `mount`, `umount`, `sync`, `/usr/lib/werewolf/grub-setenv` (which
-  `slot-keep` shares), `/usr/bin/reboot`. Everything else is Zig's standard
+  `blkid`, `mount`, `umount`, `sync`, `/usr/bin/reboot`. Everything else is Zig's standard
   library.
 - **Errors** end the run. The `error` event names the step and what the
   failed command said; the work directory is removed, and mounts are undone.
@@ -376,7 +374,7 @@ lying readers included, the seccomp filter's jumps, module order, cpio
 entries (device nodes included), zboot unwrapping and timestamps.
 
 To exercise a whole update, build a slot whose build record claims an older
-kernel, bite a VM with it, and power-cycle it:
+kernel, boot a native VM disk with it, and power-cycle it:
 
 ```sh
 make FORM=lima slot

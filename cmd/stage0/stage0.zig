@@ -15,7 +15,7 @@ const nosymfollow = 256; // Linux MS_NOSYMFOLLOW, absent from std.os.linux.MS.
 /// deadman_after is how many seconds a slot has to commit before the
 /// deadman reboots it.
 const deadman_after = 600;
-const find_for = 10; // seconds to wait for the victim's disk to appear
+const find_for = 10; // seconds to wait for the slots disk to appear
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -31,6 +31,7 @@ pub fn main(init: std.process.Init) !void {
     // ambiguous or malformed ends the boot here.
     var refused: cmdline.Failure = .{};
     const boot_line = readAll(gpa, "/proc/cmdline");
+    if (boot_line.len == 0) fail("cannot read /proc/cmdline", .{});
     var boot = cmdline.parse(boot_line, &refused) orelse
         fail("the command line's {s}: {s}", .{ refused.word, refused.why });
     if (boot.bootstrap) fail("enrollment boot cannot hand over a workload", .{});
@@ -50,8 +51,7 @@ pub fn main(init: std.process.Init) !void {
     // Hyper-V is known by the VMBus a kernel with it built in has made, or,
     // where VMBus is a module (newer kernels), by its firmware's vendor.
     // "esp" adds FAT for werewolf's own EFI partition. The disk search runs
-    // while drivers load; then modload is told the filesystem kind (xfs and
-    // btrfs need modules; ext4 does not).
+    // while drivers load.
     var loader: ?std.process.Child = std.process.spawn(io, .{
         .argv = &.{"/usr/lib/werewolf/modload"},
         .stdin = .pipe,
@@ -69,11 +69,10 @@ pub fn main(init: std.process.Init) !void {
             l.stdin.?.writeStreamingAll(io, "hyperv\n") catch {};
         if (boot.esp != null) l.stdin.?.writeStreamingAll(io, "esp\n") catch {};
     }
-    const found = if (boot.victim) |v| findFilesystem(gpa, v.uuid) else null;
+    const found = if (boot.slots) |u| findFilesystem(gpa, u) else null;
     if (loader) |*l| {
-        const name = if (found) |f| @tagName(f.kind) else "none";
-        l.stdin.?.writeStreamingAll(io, name) catch {};
-        l.stdin.?.writeStreamingAll(io, "\n") catch {};
+        // A sentinel leaves unused tagged modules unloaded even on direct boots.
+        l.stdin.?.writeStreamingAll(io, "none\n") catch {};
         l.stdin.?.close(io);
         l.stdin = null;
         const ok = if (l.wait(io)) |term| switch (term) {
@@ -153,12 +152,12 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     var slot_ms: u64 = 0;
-    if (boot.victim) |v| {
-        const f = found orelse fail("no filesystem {s}", .{v.uuid});
-        mkdir("/victim");
+    if (boot.slots) |u| {
+        const f = found orelse fail("no filesystem {s}", .{u});
+        mkdir("/boot");
         const rc = linux.mount(
             f.dev,
-            "/victim",
+            "/boot",
             @tagName(f.kind),
             MS.NOSUID | MS.NODEV | MS.NOEXEC,
             0,
@@ -168,8 +167,8 @@ pub fn main(init: std.process.Init) !void {
             .{ f.dev, @tagName(linux.errno(rc)) },
         );
         img = try gpa.printSentinel(
-            "/victim{s}/{s}/root.erofs",
-            .{ v.path, @tagName(boot.slot.?) },
+            "/boot/slot/{s}/root.erofs",
+            .{@tagName(boot.slot.?)},
             0,
         );
         slot_ms = bootMs();
@@ -200,10 +199,7 @@ pub fn main(init: std.process.Init) !void {
         .{ img, @tagName(linux.errno(rc)) },
     );
     const root_ms = bootMs();
-    const journal = if (boot.victim) |v|
-        try gpa.print("/victim{s}/boot-state", .{v.path})
-    else
-        "";
+    const journal = if (boot.slots != null) "/boot/state" else "";
     const protected_rollback = tpm.boot(io, gpa, boot.release, journal) catch |err|
         fail("TPM rollback: {s}; not handing over", .{@errorName(err)});
     if (protected_rollback) say(
@@ -242,8 +238,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // The root is read-only, so the image already has these mount points.
-    for ([_][:0]const u8{ "dev", "proc", "sys", "victim" }) |m| {
-        if (std.mem.eql(u8, m, "victim") and boot.slot == null) continue;
+    for ([_][:0]const u8{ "dev", "proc", "sys", "boot" }) |m| {
+        if (std.mem.eql(u8, m, "boot") and boot.slot == null) continue;
         const from = try gpa.printSentinel("/{s}", .{m}, 0);
         const to = try gpa.printSentinel("/root/{s}", .{m}, 0);
         if (linux.errno(linux.mount(from, to, null, MS.MOVE, 0)) != .SUCCESS)
@@ -431,9 +427,9 @@ fn loopDevice(gpa: std.mem.Allocator, file: [:0]const u8) !struct { path: [:0]co
     return .{ .path = dev, .fd = @intCast(fd) };
 }
 
-// --- the victim's filesystem ---------------------------------------------------
+// --- the slots filesystem ----------------------------------------------------
 
-const Kind = enum { ext4, xfs, btrfs };
+const Kind = enum { ext4 };
 const Found = struct { dev: [:0]const u8, kind: Kind };
 
 /// findFilesystem returns the block device whose filesystem has uuid,
@@ -496,25 +492,18 @@ fn superblock(dev: [:0]const u8, want: [16]u8) ?Kind {
     const fd = linux.open(dev, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     if (linux.errno(fd) != .SUCCESS) return null;
     defer _ = linux.close(@intCast(fd));
-    var buf: [btrfs_at + 0x1000]u8 = undefined;
+    var buf: [4096]u8 = undefined;
     const n = linux.pread(@intCast(fd), &buf, buf.len, 0);
     if (linux.errno(n) != .SUCCESS) return null;
     const id = identify(buf[0..n]) orelse return null;
     return if (std.mem.eql(u8, &id.uuid, &want)) id.kind else null;
 }
 
-const btrfs_at = 0x10000;
-
 /// identify returns the filesystem kind and UUID in a device's first bytes:
-/// ext2/3/4 at 1 KiB (magic 0xEF53), xfs at 0 ("XFSB"), btrfs at 64 KiB
-/// ("_BHRfS_M").
+/// ext2/3/4 at 1 KiB (magic 0xEF53).
 fn identify(b: []const u8) ?struct { kind: Kind, uuid: [16]u8 } {
     if (b.len >= 1024 + 0x78 and std.mem.readInt(u16, b[1024 + 0x38 ..][0..2], .little) == 0xEF53)
         return .{ .kind = .ext4, .uuid = b[1024 + 0x68 ..][0..16].* };
-    if (b.len >= 48 and std.mem.eql(u8, b[0..4], "XFSB"))
-        return .{ .kind = .xfs, .uuid = b[32..48].* };
-    if (b.len >= btrfs_at + 0x48 and std.mem.eql(u8, b[btrfs_at + 0x40 ..][0..8], "_BHRfS_M"))
-        return .{ .kind = .btrfs, .uuid = b[btrfs_at + 0x20 ..][0..16].* };
     return null;
 }
 
@@ -587,28 +576,14 @@ fn fail(comptime fmt: []const u8, args: anytype) noreturn {
 const testing = std.testing;
 
 test identify {
-    var b: [btrfs_at + 0x1000]u8 = @splat(0);
+    var b: [4096]u8 = @splat(0);
     try testing.expectEqual(null, identify(&b));
 
     std.mem.writeInt(u16, b[1024 + 0x38 ..][0..2], 0xEF53, .little);
     b[1024 + 0x68] = 0x57;
-    var id = identify(&b).?;
+    const id = identify(&b).?;
     try testing.expectEqual(Kind.ext4, id.kind);
     try testing.expectEqual(0x57, id.uuid[0]);
-
-    @memset(&b, 0);
-    @memcpy(b[0..4], "XFSB");
-    b[32] = 0xab;
-    id = identify(&b).?;
-    try testing.expectEqual(Kind.xfs, id.kind);
-    try testing.expectEqual(0xab, id.uuid[0]);
-
-    @memset(&b, 0);
-    @memcpy(b[btrfs_at + 0x40 ..][0..8], "_BHRfS_M");
-    b[btrfs_at + 0x20] = 0xcd;
-    id = identify(&b).?;
-    try testing.expectEqual(Kind.btrfs, id.kind);
-    try testing.expectEqual(0xcd, id.uuid[0]);
 }
 
 test LoopConfig {

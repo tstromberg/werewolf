@@ -9,6 +9,7 @@ const native = @import("build.zig");
 const locks = @import("lock.zig");
 const forms = @import("form");
 const sandbox = @import("sandbox");
+const service = @import("service");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -643,7 +644,7 @@ pub fn lay(b: *native.B) !void {
             });
             var writes: std.ArrayList([]const u8) = .empty;
             for (try valuesOf(gpa, svc.value, "write")) |w| {
-                if (w.len == 0 or w[0] != '/' or std.mem.findScalar(u8, w, ' ') != null)
+                if (!service.isCleanPath(w) or std.mem.findScalar(u8, w, ' ') != null)
                     return b.fail("{s}: services: {s}: write {s}: one absolute path", .{
                         fm.dir, svc.key, w,
                     });
@@ -653,10 +654,11 @@ pub fn lay(b: *native.B) !void {
             // It is not a write bind: compose mounts /data/share over it.
             for (try valuesOf(gpa, svc.value, "data")) |line| {
                 var it = std.mem.tokenizeAny(u8, line, " \t");
-                _ = it.next();
+                const host = it.next() orelse "";
                 const image = it.next() orelse "";
                 const access = it.next() orelse "";
-                if (it.next() != null or image.len < 2 or image[0] != '/' or
+                if (it.next() != null or !service.isSharePath(host) or
+                    !service.isCleanPath(image) or
                     (!std.mem.eql(u8, access, "read") and !std.mem.eql(u8, access, "write")))
                     return b.fail(
                         "{s}: services: {s}: data {s}: a host path, an image path, and read or " ++

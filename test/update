@@ -3,7 +3,7 @@
 #
 # update runs a whole update over the network, as a machine does one: the
 # new slot is built from the packages the repositories hold now.
-# DIR/victim.img holds GRUB's environment and slot a,
+# DIR/slots.img holds slot a, and DIR/esp.img its native EFI entry,
 # whose build record claims a kernel one release older than its own.
 # DIR/vmlinuz and DIR/stage0.zst boot it. QEMU... is the machine, with the
 # network and -no-reboot. CMDLINE is the kernel command line, without
@@ -15,7 +15,7 @@
 # updater reboots into it, which ends QEMU (docs/design/update-policy.md).
 # Then update checks the disk: the report lists each CVE source with a
 # sha256 and no error; each apk cache kept its packages; slot b's root is
-# owned by root, mode 0755; GRUB will boot b once; and slot b's stage0 has
+# owned by root, mode 0755; the EFI entry allows one try of b; and slot b's stage0 has
 # the build's device nodes. Second boot, slot b: it must commit, and the
 # updater must record that the update held. In neither boot may a seccomp
 # filter have killed anything. The consoles are DIR/update-1.log and
@@ -52,9 +52,9 @@ for d in /opt/homebrew/opt/e2fsprogs/sbin /usr/local/opt/e2fsprogs/sbin; do
 done
 [ -n "$debugfs" ] || { say FAIL "no debugfs (e2fsprogs)"; exit 1; }
 e2fsck=${debugfs%/*}/e2fsck
-victim_cat() { "$debugfs" -R "cat $1" "$dir/victim.img" 2>/dev/null; }
-victim_dump() { "$debugfs" -R "dump $1 $2" "$dir/victim.img" >/dev/null 2>&1; }
-victim_ls() { "$debugfs" -R "ls -p $1" "$dir/victim.img" 2>/dev/null | awk -F/ '$6 != "" && $6 != "." && $6 != ".." { print $6 }'; }
+slots_cat() { "$debugfs" -R "cat $1" "$dir/slots.img" 2>/dev/null; }
+slots_dump() { "$debugfs" -R "dump $1 $2" "$dir/slots.img" >/dev/null 2>&1; }
+slots_ls() { "$debugfs" -R "ls -p $1" "$dir/slots.img" 2>/dev/null | awk -F/ '$6 != "" && $6 != "." && $6 != ".." { print $6 }'; }
 
 # boot N SLOT KERNEL INITRD UNTIL LIMIT QEMU... boots slot SLOT with its
 # console in update-N.log. It ends QEMU when a line matches UNTIL, an
@@ -66,7 +66,8 @@ boot() {
 	log=$dir/update-$n.log
 	: >"$log"
 	"$@" -kernel "$kernel" -initrd "$initrd" -append "$cmdline werewolf.slot=$slot" \
-		-drive "file=$dir/victim.img,format=raw,if=virtio" >"$log" 2>&1 </dev/null &
+		-drive "file=$dir/slots.img,format=raw,if=virtio" \
+		-drive "file=$dir/esp.img,format=raw,if=virtio" >"$log" 2>&1 </dev/null &
 	pid=$!
 	waited=0
 	while kill -0 $pid 2>/dev/null; do
@@ -91,22 +92,22 @@ boot() {
 absent() { ! grep -a -q "$1" "$2"; }
 event() { grep -a -o "autoupdate: .*\"event\":\"$2\".*" "$dir/update-$1.log" | head -1; }
 
-state=/var/lib/werewolf/data/svc/autoupdate
+state=/data/svc/autoupdate
 if [ -n "$staged" ]; then
 	# Seed a log from an earlier check, with the owner and mode the updater
 	# gives its own.
 	printf '{"time":"2026-01-01T00:00:00Z","host":"werewolf","event":"check","result":"current"}\n' >"$dir/seed.log"
-	for d in /var/lib/werewolf/data /var/lib/werewolf/data/svc $state; do
-		"$debugfs" -w -R "mkdir $d" "$dir/victim.img" >/dev/null 2>&1
+	for d in /data /data/svc $state; do
+		"$debugfs" -w -R "mkdir $d" "$dir/slots.img" >/dev/null 2>&1
 		for field in "uid 0" "gid 0" "mode 040755"; do
-			"$debugfs" -w -R "sif $d $field" "$dir/victim.img" >/dev/null 2>&1
+			"$debugfs" -w -R "sif $d $field" "$dir/slots.img" >/dev/null 2>&1
 		done
 	done
-	"$debugfs" -w -R "write $dir/seed.log $state/log" "$dir/victim.img" >/dev/null 2>&1
+	"$debugfs" -w -R "write $dir/seed.log $state/log" "$dir/slots.img" >/dev/null 2>&1
 	for field in "uid 0" "gid 0" "mode 0100600"; do
-		"$debugfs" -w -R "sif $state/log $field" "$dir/victim.img" >/dev/null 2>&1
+		"$debugfs" -w -R "sif $state/log $field" "$dir/slots.img" >/dev/null 2>&1
 	done
-	[ -n "$(victim_cat $state/log)" ] || { say FAIL "could not seed the victim's log"; exit 1; }
+	[ -n "$(slots_cat $state/log)" ] || { say FAIL "could not seed the updater's log"; exit 1; }
 	until='"event":"(stage|check|error)"'
 else
 	until='"event":"(check|error)"'
@@ -125,15 +126,15 @@ if [ -n "$staged" ]; then
 	check "staged, and not yet due: the updater did not reboot" absent '"event":"reboot"' "$dir/update-1.log"
 	# After the cut, the filesystem's last changes are in its journal. The
 	# next mount replays it, but debugfs does not, so replay it first.
-	"$e2fsck" -y -E journal_only "$dir/victim.img" >/dev/null 2>&1
+	"$e2fsck" -y -E journal_only "$dir/slots.img" >/dev/null 2>&1
 	check "what was staged is on the disk: the log's stage line" sh -c \
-		"'$debugfs' -R 'cat $state/log' '$dir/victim.img' 2>/dev/null | grep -q '\"event\":\"stage\"'"
+		"'$debugfs' -R 'cat $state/log' '$dir/slots.img' 2>/dev/null | grep -q '\"event\":\"stage\"'"
 else
 	check "the first check's update booted at once" grep -a -q '"event":"reboot",.*"cause":"first-boot"' "$dir/update-1.log"
 fi
 check "no seccomp kill in slot a" absent 'type=1326' "$dir/update-1.log"
 
-victim_cat "$state/reports/$(victim_ls $state/reports | tail -1)" >"$dir/report.json"
+slots_cat "$state/reports/$(slots_ls $state/reports | tail -1)" >"$dir/report.json"
 # The report lists one source or two: the kernel's only when the kernel changed.
 listed=$(grep -c '"url": ' "$dir/report.json")
 hashed=$(grep -c '"sha256": "[0-9a-f]\{64\}"' "$dir/report.json")
@@ -141,10 +142,10 @@ clean=$(grep -c '"error": null' "$dir/report.json")
 check "the report's $listed CVE sources fetched, with their sha256" [ "$listed" -gt 0 -a "$hashed" -eq "$listed" -a "$clean" -eq "$listed" ]
 # A slot built from packages leaves apk's caches.
 for cache in root kernel; do
-	n=$(victim_ls $state/cache/$cache | grep -c '\.apk$')
+	n=$(slots_ls $state/cache/$cache | grep -c '\.apk$')
 	check "the $cache cache kept its $n packages" [ "$n" -gt 0 ]
 done
-victim_dump /var/lib/werewolf/b/root.erofs "$dir/b.erofs"
+slots_dump /slot/b/root.erofs "$dir/b.erofs"
 root=$(dump.erofs --path=/ "$dir/b.erofs" 2>/dev/null | grep -o 'Uid: [0-9]* *Gid: [0-9]* *Access: [0-7]*' | tr -s ' ')
 check "slot b's root is root's, mode 0755" [ "$root" = "Uid: 0 Gid: 0 Access: 0755" ]
 if [ -n "${PUBLISHED:-}" ]; then
@@ -155,11 +156,11 @@ if [ -n "${PUBLISHED:-}" ]; then
 	check "slot b's prod is the package's, not slot a's older copy" sh -c \
 		"[ ! -e '$dir/b/etc/werewolf-old-form' ] && [ ! -e '$dir/b/usr/share/werewolf/forms/prod/rootfs/etc/werewolf-old-form' ]"
 fi
-check "GRUB boots slot b next" grep -a -q 'next_entry=werewolf-b' "$dir/victim.img"
+check "EFI entry allows one try of slot b" mtype -i "$dir/esp.img" ::/loader/entries/werewolf-b+1.conf
 
 # Second boot: boot what the update built.
-victim_dump /boot/werewolf/b/vmlinuz "$dir/b-vmlinuz"
-victim_dump /boot/werewolf/b/stage0.zst "$dir/b-stage0.zst"
+mcopy -o -i "$dir/esp.img" ::/werewolf/b/vmlinuz "$dir/b-vmlinuz"
+mcopy -o -i "$dir/esp.img" ::/werewolf/b/stage0.zst "$dir/b-stage0.zst"
 # devices lists a stage0's device nodes by type, mode and name. slot-update
 # must write the build's (cmd/stage0/stage0.mtree), above all /dev/console,
 # which the kernel gives stage0 as its stdin, stdout and stderr.

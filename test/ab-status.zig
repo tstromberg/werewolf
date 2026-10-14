@@ -47,8 +47,7 @@ pub fn main(init: std.process.Init) !void {
         defer device.close();
         anchor = std.fmt.bytesToHex(try device.anchor(key), .lower);
         pcr = std.fmt.bytesToHex(try device.pcr11(), .lower);
-        const journal = try gpa.print("/victim{s}/boot-state", .{boot.victim.?.path});
-        protected = tpm.protected(io, gpa, boot.release, journal);
+        protected = tpm.protected(io, gpa, boot.release, "/boot/state");
     }
     const output = try std.json.Stringify.valueAlloc(gpa, .{
         .boot_id = std.mem.trim(u8, try read(io, gpa, "/proc/sys/kernel/random/boot_id"), "\n"),

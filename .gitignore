@@ -4,3 +4,5 @@ dist/
 
 # added by lint-install
 out/
+.zig-cache/
+*/__pycache__/

@@ -914,6 +914,7 @@ pub fn createProxmox(
 /// its chain's apko configs install (lib/form.zig). Any other form starts
 /// on vzNAT, unmanaged, and is stopped hard.
 pub fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+    if (@import("boot-config.zig").forForm(form)) |definition| return definition.lima_managed;
     const c = try chain(io, gpa, form, why);
     const config = try forms.apko(gpa, c, &.{});
     var sshd = false;

@@ -12,8 +12,7 @@ anything odd.
 init brings up `lo` with it, then the machine's NIC when there is a static
 address: from the kernel command line (`werewolf.ip`, `werewolf.gw`), or
 else the config tar's `network` file. That is how a machine on a network
-without DHCP, or one bite took over and that keeps the distro's static
-address, gets online. Otherwise dhcp-client applies its own leases.
+without DHCP gets online. Otherwise dhcp-client applies its own leases.
 
 ## Goals
 
@@ -77,7 +76,7 @@ hold apart.
 | Odd input from the command line | Parsed strictly and refused before any request: names, quads, prefixes, and unusable addresses or gateways. |
 | A bug that turns a request into something else | seccomp allows only its five ioctls by number; anything else kills it. |
 | Its privileges outliving the work | It keeps CAP_NET_ADMIN alone, cannot regain others, and exits once done. |
-| Whoever sets the command line | Chooses the address, by design: root, through GRUB's environment on a bitten machine. |
+| Whoever sets the command line | Chooses the address, by design: the signed boot image or direct boot configuration. |
 
 ## Reliability Considerations
 

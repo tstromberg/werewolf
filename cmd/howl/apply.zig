@@ -35,6 +35,7 @@ pub fn enroll(
     on: howl.Platform,
     why: *howl.Why,
 ) !void {
+    if (o.boot_image != null) return;
     const chain = try howl.chain(io, gpa, o.form, why);
     const from = forms.updates(chain).from orelse return;
     const home = howl.environ.get("HOME") orelse return error.NoHome;
@@ -377,7 +378,9 @@ fn keepMachineConfig(
         if (mem.eql(u8, entry.name, "data.key")) had_key = true;
         if (!mem.eql(u8, entry.name, "network") and !mem.eql(u8, entry.name, "data.key") and
             !mem.eql(u8, entry.name, "authorized_keys") and
-            !mem.eql(u8, entry.name, "hostname")) continue;
+            !mem.eql(u8, entry.name, "hostname") and
+            !mem.eql(u8, entry.name, "machine-transport") and
+            !mem.eql(u8, entry.name, "update-policy.json")) continue;
         if (entry.size > old.len - reader.seek) return error.TruncatedConfig;
         const prior = old[reader.seek..][0..@intCast(entry.size)];
         const exists = for (fresh) |f| {

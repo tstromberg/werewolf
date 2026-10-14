@@ -31,7 +31,7 @@
 set -euf
 
 apko_version=1.3.1
-melange_version=0.61.4
+melange_version=0.62.0
 # crane comes from go-containerregistry. howl pulls the images a form bakes
 # in with it (cmd/howl/oci.zig). Homebrew packages it; Linux distributions
 # do not.
@@ -133,14 +133,14 @@ Linux)
 	x86_64)
 		zig_sha256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 		apko_sha256=b8c39ff7e63864efa1296d36a95d3c56f750ef2ab41cdc6d7fad0ae6a483b604
-		melange_sha256=3b864f61399ea05f402178c8e127bf9d46a9c5b2ff4965e59a07b40ce2d2d55f
+        melange_sha256=1d41c132fefc3b8cc5f1927c28c2f6c61a53f35f3b267913938731b03de16e80
 		crane_sha256=c1d593d01551f2c9a3df5ca0a0be4385a839bd9b86d4a76e18d7b17d16559127
 		fc_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
 		;;
 	aarch64)
 		zig_sha256=9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8
 		apko_sha256=47ec5e9e66372629919598f5176b37e9e47a3be456b2c8c9541a891065123fbb
-		melange_sha256=ca5f777f9011d0b024c7cc1032200ddb5f614d80f1aaa826f61205392bf985be
+        melange_sha256=5541c281d0a07b253baa7a4879298ddf2c8bf00a1d70043ede7cfbdf9b8ccbc0
 		crane_sha256=fc0515857bc38e4ddd2d37a5ab03fb5959449c7b2d4ad759bcc1174ac0cad91b
 		fc_sha256=e351ebe4f7a16b5873bbd51005d2e6767103cff4d5ebc829df2d3f95a93e2256
 		;;

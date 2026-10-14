@@ -10,7 +10,7 @@ const form = @import("form");
 const compose = @import("compose");
 
 const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
-    "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH native|bitten|all, " ++
+    "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
     "stage FORM DIR, depends FORM";
@@ -135,17 +135,9 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
         const allowed = try compose.allowances(gpa, forms, f);
         for (compose.moduleParams(allowed, try arch(args[2]))) |p|
             try w.print("{s}:{s}\n", .{ p.module, p.value });
-    } else if (is(verb, "modules") and args.len == 4) {
+    } else if (is(verb, "modules") and args.len == 3) {
         const m = try compose.modules(gpa, forms, try arch(args[2]));
-        const list = if (is(args[3], "native"))
-            m.native
-        else if (is(args[3], "bitten"))
-            m.bitten
-        else if (is(args[3], "all"))
-            m.all
-        else
-            return error.Usage;
-        for (list) |name| try w.print("{s}\n", .{name});
+        for (m) |name| try w.print("{s}\n", .{name});
     } else if (is(verb, "compose") and (args.len == 7 or (args.len == 8 and is(args[7], "dev")))) {
         const b: compose.Build = .{
             .arch = try arch(args[2]),

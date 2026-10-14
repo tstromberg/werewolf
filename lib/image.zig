@@ -24,18 +24,15 @@ pub const Modules = struct {
 /// leaf brings its line of modules.dep back to front, a load order. A
 /// module is listed once untagged; a tagged one only if no untagged leaf
 /// needs it, once per tag. A module's params go on its first line.
-/// It refuses an empty words and words that lack one of native, since
-/// every stage0 loads what werewolf's own does; on error, bad names the
-/// module at fault.
+/// It refuses an empty list; on error, bad names the module at fault.
 pub fn modules(
     gpa: Allocator,
     dep: []const u8,
     words: []const []const u8,
-    native: []const []const u8,
     params: []const Param,
     bad: *[]const u8,
 ) !Modules {
-    return modulesWithBuiltins(gpa, dep, "", words, native, params, bad);
+    return modulesWithBuiltins(gpa, dep, "", words, params, bad);
 }
 
 pub fn modulesWithBuiltins(
@@ -43,16 +40,10 @@ pub fn modulesWithBuiltins(
     dep: []const u8,
     builtins: []const u8,
     words: []const []const u8,
-    native: []const []const u8,
     params: []const Param,
     bad: *[]const u8,
 ) !Modules {
     if (words.len == 0) return error.NoModules;
-    for (native) |n| if (!contains(words, n)) {
-        bad.* = n;
-        return error.NativeModuleMissing;
-    };
-
     // Every leaf's line back to front, tagged as its leaf is.
     var all: std.ArrayList(Mod) = .empty;
     for (words) |w| {
@@ -146,7 +137,6 @@ test "declared built-in modules need no file, while missing modules still fail" 
         dep,
         "kernel/fs/efivarfs/efivarfs.ko\n",
         words,
-        words,
         &.{},
         &bad,
     );
@@ -154,7 +144,7 @@ test "declared built-in modules need no file, while missing modules still fail" 
     try std.testing.expectEqualStrings("@esp kernel/fs/fat/vfat.ko\n", result.list);
     try std.testing.expectError(
         error.ModuleNotFound,
-        modulesWithBuiltins(gpa, dep, "kernel/fs/other/other.ko\n", words, words, &.{}, &bad),
+        modulesWithBuiltins(gpa, dep, "kernel/fs/other/other.ko\n", words, &.{}, &bad),
     );
     try std.testing.expectEqualStrings("efivarfs", bad);
 }
@@ -162,11 +152,6 @@ test "declared built-in modules need no file, while missing modules still fail" 
 /// Mod is one line of a load order: a modules.dep path, and the tag
 /// (`@xfs`) of the leaf that brought it, or "".
 const Mod = struct { tag: []const u8, path: []const u8 };
-
-fn contains(set: []const []const u8, s: []const u8) bool {
-    for (set) |x| if (mem.eql(u8, x, s)) return true;
-    return false;
-}
 
 fn lessThan(_: void, a: []const u8, b: []const u8) bool {
     return mem.lessThan(u8, a, b);
@@ -371,7 +356,7 @@ test modules {
     // crc16 is ext4's too, so it stays untagged; raid6_pq, which two tags
     // need, is listed under each; jbd2, named again, is listed once.
     const words = [_][]const u8{ "@xfs:xfs", "ext4", "@btrfs:btrfs", "jbd2", "@zfs:zfs" };
-    const m = try modules(a, dep, &words, &.{ "ext4", "jbd2" }, &.{}, &bad);
+    const m = try modules(a, dep, &words, &.{}, &bad);
     try testing.expectEqualStrings(
         \\@xfs kernel/fs/xfs/libxfs.ko
         \\@xfs kernel/fs/xfs/xfs.ko
@@ -391,7 +376,7 @@ test modules {
     try testing.expectEqualStrings("kernel/lib/xor.ko.gz", m.files[9]);
 
     // Parameters go on the module's first line, in order.
-    const kvm = try modules(a, dep, &.{"kvm-intel"}, &.{}, &.{
+    const kvm = try modules(a, dep, &.{"kvm-intel"}, &.{
         .{ .module = "kvm-intel", .value = "nested=0" },
         .{ .module = "kvm-intel", .value = "ept=1" },
     }, &bad);
@@ -400,16 +385,11 @@ test modules {
         kvm.list,
     );
 
-    try testing.expectError(error.NoModules, modules(a, dep, &.{}, &.{}, &.{}, &bad));
-    try testing.expectError(
-        error.NativeModuleMissing,
-        modules(a, dep, &.{"@xfs:xfs"}, &.{"ext4"}, &.{}, &bad),
-    );
-    try testing.expectEqualStrings("ext4", bad);
-    try testing.expectError(error.ModuleNotFound, modules(a, dep, &.{"f2fs"}, &.{}, &.{}, &bad));
+    try testing.expectError(error.NoModules, modules(a, dep, &.{}, &.{}, &bad));
+    try testing.expectError(error.ModuleNotFound, modules(a, dep, &.{"f2fs"}, &.{}, &bad));
     try testing.expectEqualStrings("f2fs", bad);
-    try testing.expectError(error.ModuleNotFound, modules(a, dep, &.{"crc"}, &.{}, &.{}, &bad));
-    try testing.expectError(error.ParamsForMissingModule, modules(a, dep, &.{"ext4"}, &.{}, &.{
+    try testing.expectError(error.ModuleNotFound, modules(a, dep, &.{"crc"}, &.{}, &bad));
+    try testing.expectError(error.ParamsForMissingModule, modules(a, dep, &.{"ext4"}, &.{
         .{ .module = "kvm-amd", .value = "nested=0" },
     }, &bad));
     try testing.expectEqualStrings("kvm-amd", bad);

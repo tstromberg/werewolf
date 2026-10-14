@@ -1,14 +1,13 @@
 # Privilege separation after argon
 
-Proposed, 2026-10-13 ([argon-2023-10-13.md](../audit/argon-2023-10-13.md)).
+Proposed and built, 2026-10-13 ([argon-2023-10-13.md](../audit/argon-2023-10-13.md)).
 
 ## Summary
 
-Move `fence` from `runit` to `runsvdir` in stage 2, replace
-`/run/werewolf/mount-broker.sock` and `/proc` caller checks with three inherited
-socketpairs, and split `/run` and `/data` by owner in Landlock. Net effect: ~450
-fewer lines of code (`cmd/task-links` deleted) and confined root can no longer
-reach `mount-broker`, `/etc/shadow`, or the updater.
+Replace `/run/werewolf/mount-broker.sock` and `/proc` caller checks with three
+inherited `SOCK_SEQPACKET` socketpairs, never lend `/boot` as a writable mount,
+and tighten Landlock, `disk.zig`, and parser checks. Net effect: `cmd/task-links`
+and `authorizeService` are deleted, and confined root cannot reach `mount-broker`.
 
 ## Background
 
@@ -20,21 +19,18 @@ root shell asking `mount-broker` to mount the ESP, `mount-broker` added
 after `SO_PEERCRED`.
 
 That fixed a symptom with a heuristic. `SO_PEERCRED` records who called
-`connect(2)`, not who calls `write(2)` after `fork` or `execve`;
-`/proc/PID/cmdline` is caller-writable memory; and because `fence` wraps
-`runit`, `sshd` shares one Landlock domain, `/run`, and `/data` with `runsvdir`,
-`slot-update`, and `slot-keep`. A live check via `howl ssh` also found
-`/victim/werewolf/boot-state` owned by the builder's UID (`501`, user `t` in
-the guest) because `cmd/howl/disk.zig` zeroed only three paths.
+`connect(2)`, not who calls `write(2)` after `fork` or `execve`; and
+`/proc/PID/cmdline` is caller-writable memory. A live check via `howl ssh` also
+found `/boot/state` owned by the builder's UID (`501`) because `cmd/howl/disk.zig`
+zeroed only three paths.
 
 ## Goals
 
 - Authority to reach `mount-broker` is an inherited descriptor, never a socket
   path or `/proc` check; `cmd/task-links` and `authorizeService` are deleted.
-- Root inside `fence` (`sshd`, a console shell) cannot signal the updater,
-  write `/run/werewolf` or `/run/runit`, or touch `/data/werewolf/update`.
+- Neither `/boot` nor the ESP is ever lent as a writable mount.
 - A service without `exec` cannot `execveat` another `/usr` binary via `exec_fd`.
-- `posture` verifies `/victim` owners, `/run/werewolf` read-only locks, and
+- `posture` verifies `/boot` owners, `/run/werewolf` read-only locks, and
   loopback bind addresses on every boot.
 
 ## Non-Goals
@@ -44,49 +40,42 @@ the guest) because `cmd/howl/disk.zig` zeroed only three paths.
 
 ## Detailed design
 
-### 1. Move `fence` to stage 2 and pass socketpairs (`init`, `runit-stage`, `mount-broker`)
+### 1. Pass three role socketpairs (`init`, `runit-stage`, `mount-broker`)
 
-Today `init` ends with `exec fence runit`, placing PID 1, `slot-update`,
-`slot-keep`, and `sshd` in one Landlock domain. Instead, `init` sets `fence`'s
-routing rules before `exec runit`, and `/etc/runit/2` (`runit-stage`) runs
-`exec fence runsvdir -P /etc/sv`.
-
-Before `exec runit`, `init` opens three `AF_UNIX` `SOCK_SEQPACKET`
-socketpairs—`updater`, `keep`, and `stage`—and passes the server ends to
-`mount-broker` on descriptors 3, 4, and 5. The descriptor index *is* the role:
+Before `exec fence runit`, `init` opens three `AF_UNIX` `SOCK_SEQPACKET`
+socketpairs—`updater`, `keeper`, and `stage`—passes the server ends to
+`mount-broker` on descriptors 3, 4, and 5, and places the client ends on
+descriptors 60, 61, and 62. The descriptor index *is* the role:
 
 - **Delete `/run/werewolf/mount-broker.sock`, `authorizeService`, and
   `cmd/task-links`.** `mount-broker` never calls `bind`, `listen`, `accept`, or
   `SO_PEERCRED`, and never reads `/proc`.
-- **Start `slot-update` and `slot-keep` in `/etc/runit/1`** inside their own
-  scoped Landlock domains (ABI 6), each inheriting only its socketpair end.
-  Stage 2 closes `stage`'s descriptor before `exec fence runsvdir`; PID 1 keeps
-  it for `/etc/runit/3` (`stop`) at shutdown. Because `fence` scopes signals,
-  root inside `fence` cannot signal `runit`, `mount-broker`, `slot-update`, or `slot-keep`.
-- **Never lend `/victim` on native boots.** Remove `Word.victim` when
-  `ctx.release` is set. `mount-broker` updates `state.0`/`state.1` itself on a
-  detached `fsmount` of `/victim` after checking `image.json.sig`.
-- **Retire `update-control.sock` rollback.** `slot-update` writes status to
-  `/run/werewolf/update-status.json` (`0644`); its control socket accepts only
-  `check` and `try HASH` (verified by `fresh()`, never `rollback = true`).
+- **Isolate client descriptors.** Stage 1 calls `broker.keepOnlyClient(null)`.
+  Stage 2 closes `stage`'s descriptor (`62`) before `exec runsvdir` so only PID
+  1 holds it for `/etc/runit/3` (`stop`) at shutdown. `slot-update` (`60`) and
+  `slot-keep` (`61`) call `broker.keepOnlyClient(role)` (closing the other two
+  and setting `PR_SET_DUMPABLE = 0`), while every other supervised program
+  (`leash`, `sshd-start`, `debug-shell`, `posture`, `power-button`,
+  `cloud-metadata`, `gvm-link`) closes all descriptors `>= 3` on entry.
+- **Never lend `/boot` as a mount.** `mount-broker` updates `/boot/state/{0,1}`
+  (`slot-state`) and `/boot/slot/{a,b}` (`slot-root`, `slot-decl`, `slot-meta`)
+  itself on a detached `fsmount` of `/boot`.
 - **Harden `copyChecked`.** Open staged files with `openat2(RESOLVE_BENEATH |
   RESOLVE_NO_SYMLINKS)` and `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, then check `S_ISREG`.
 
-### 2. Sibling `/run/werewolf/<owner>/` directories (`init`, `fence`)
+### 2. Lock `/run/werewolf` read-only (`init`, `fence`)
 
-In Landlock, `PATH_BENEATH` is recursive: granting write on `/run/werewolf` to
-let a helper write one file there also grants write on every subdirectory
-beneath it. Putting every file in a sibling `/run/werewolf/<owner>/` directory
-means **nothing ever gets a Landlock write rule on `/run/werewolf` itself**:
+In Landlock, `PATH_BENEATH` is recursive. `init` bind-mounts `/run/werewolf` to
+itself and locks it read-only (`mount-ro /run/werewolf`) after creating
+`/run/werewolf/{update,keep,posture,network,cloud}`, and `fence` grants write
+only on those subdirectories (never `/run/werewolf` itself or `/run/runit`):
 
 | Directory | Writer | Files |
 | --- | --- | --- |
-| `/run/werewolf/init/` | `init` only | `passwd`, `group`, `shadow`, `people`, `hosts`, `hostname`, `boot`, `nodata`, `rollback-checked` |
+| `/run/werewolf/` (locked `ro`) | `init` only | `passwd`, `group`, `shadow`, `people`, `hosts`, `hostname`, `boot`, `nodata`, `rollback-checked` |
 | `/run/werewolf/keep/` | `slot-keep` | `committed` (read by `stage0`'s deadman and `slot-update`) |
 | `/run/werewolf/update/` | `slot-update` | `ready`, `status.json`, `control.sock` |
 | `/run/werewolf/posture/` | `posture` | `posture.json` |
-| `/run/werewolf/fence/` | processes inside `fence` | Shared runtime state inside the fence (alongside `/run/{svc,sshd,user,tmp}`) |
-| `/data/werewolf/update/` | `slot-update` | Slot staging tree (`fence` grants only `/data/{svc,home,var}`) |
 
 ### 3. Pin `execveat` in Landlock (`leash`, `lib/seal.zig`)
 
@@ -97,7 +86,7 @@ checks the target inode: for any service without `exec`, `leash` grants
 
 ### 4. Builder, network, and parser checks
 
-- **`cmd/howl/disk.zig` & `cmd/posture/files.zig`:** Walk the staged `/victim` tree to zero `uid`/`gid` and set `epoch` on every inode; `posture` walks `/victim` as well as `/`.
+- **`cmd/howl/disk.zig` & `cmd/posture/files.zig`:** Walk the staged `/boot` tree to zero `uid`/`gid` and set `epoch` on every inode; `posture` checks `/boot/slot/{a,b}` and `/boot/state` owners.
 - **`cmd/fence/fence.zig`:** Omit `c.port == 0` from Landlock `CONNECT_TCP`; add `::ffff:0:0/96` and `2002::/16` to `non_public6`; block all protocols on `169.254.169.254/32` for non-metadata users; verify in `posture` that `loopback` ports bind `127.0.0.0/8` or `::1`.
 - **`cmd/dhcp-client/dhcp-client.zig` & `lib/network.zig`:** Reject `169.254.0.0/16` in `usable()`, and verify in `valid()` that `[r.dst, r.dst | ~mask(r.prefix)]` never overlaps `0.0.0.0/8`, `127.0.0.0/8`, `169.254.0.0/16`, or `224.0.0.0/3`.
 - **`cmd/slot-update/cve.zig` & `lib/apk.zig`:** Return `std.math.minInt(i64)` from `VersionReader.fail()`; share `lib/tar.zig`'s checksum check; widen `signatureSegment`'s length to `usize`; reject duplicate `APKINDEX`/`.PKGINFO` entries and match `.PKGINFO` `pkgname`/`pkgver` to the index.
@@ -105,19 +94,18 @@ checks the target inode: for any service without `exec`, `leash` grants
 
 ## Drawbacks
 
-- `slot-update` runs as a daemon started in stage 1 rather than under `runsvdir`.
-- Forms writing directly to `/data/foo` must use `/data/{svc,var,home}`.
+- Every non-broker supervised binary must close descriptors `>= 3` on startup.
 
 ## Alternatives Considered
 
 - **Harden `authorizeService` with `pidfd_getfd` or `SCM_CREDENTIALS`.** Still trusts `/proc/PID/cmdline` (user memory) and keeps a socket in `/run` that only three callers ever need.
-- **Separate mount namespaces for `slot-update`.** Linux forbids `mount(2)` inside Landlock; a separate Landlock domain on `/data/werewolf/update` keeps one namespace.
+- **Separate mount namespaces for `slot-update`.** Linux forbids `mount(2)` inside Landlock; detached `fsmount` operations in `mount-broker` keep one namespace.
 
 ## Security Considerations
 
-Authority lives in file descriptors and Landlock inode sets created before stage 2 enters `fence`. Compromising `sshd` or a root shell gives no path to `mount-broker`, `/etc/shadow`, or the updater.
+Authority lives in file descriptors and Landlock inode sets created before `fence`. Compromising `sshd` or a root shell gives no path to `mount-broker` or `/etc/shadow`.
 
 ## Reliability Considerations
 
 - **Fails closed:** any failed socketpair, read-only mount lock, or Landlock rule exits `init`; the deadman timer boots the previous slot.
-- **Tested each boot** by `posture`: `/victim` owners, `/run/werewolf` read-only lock, loopback bind addresses, and broker descriptor isolation.
+- **Tested each boot** by `posture`: `/boot` owners, `/run/werewolf` read-only lock, and loopback bind addresses.

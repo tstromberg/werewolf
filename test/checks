@@ -48,7 +48,6 @@ ok  http-answering   command -v bao >/dev/null || command -v mosquitto >/dev/nul
 ok  data-usable      [ ! -e /run/werewolf/nodata ]
 ok  data-encrypted   ! command -v cryptsetup || grep -q '^/dev/mapper/data /data ' /proc/mounts
 ok  slot-commits     ! grep -q werewolf.slot= /proc/cmdline || { i=0; while [ ! -e /run/werewolf/committed ] && [ $i -lt 120 ]; do sleep 1; i=$((i + 1)); done; [ -e /run/werewolf/committed ]; }
-ok  cleanup          ! command -v bite-cleanup || ! grep -q werewolf.slot= /proc/cmdline || { bite-cleanup -n | grep -q 'would delete 7 entries' && [ -e /victim/etc/os-release ] && { out=$(bite-cleanup 2>&1); [ $? -eq 1 ]; } && printf '%s\n' "$out" | grep -q '^bite-cleanup: /etc/resolv.conf stays' && [ "$(ls -A /victim | tr '\n' ' ')" = "boot etc var " ] && [ "$(ls -A /victim/etc)" = resolv.conf ] && [ "$(ls -A /victim/var /victim/var/lib | tr '\n' ' ')" = "/victim/var: lib  /victim/var/lib: werewolf " ] && [ -s /victim/var/lib/werewolf/a/root.erofs ] && [ -s /victim/boot/grub/grubenv ] && [ -s /victim/boot/werewolf/a/vmlinuz ] && [ -d /run/werewolf ]; }
 ok  root-unlinked    ! rm -f /init && [ -e /init ] && awk '$2 == "/" { o = $4 } END { exit o !~ /^ro(,|$)/ }' /proc/mounts
 ok  root-verified    grep -q '^/dev/mapper/root / erofs ro' /proc/mounts && [ "$(cat /sys/block/dm-0/dm/name)" = root ] && ls /sys/block/dm-0/slaves | grep -q '^loop' && [ "$(cat /sys/module/dm_verity/refcnt)" = 1 ]
 # Each leashed service (one with a service file) is in its own cgroup under

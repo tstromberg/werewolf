@@ -19,7 +19,7 @@ few seconds of writes.
 
 - Give services a blocking console, so none loses output.
 - Leave ext4 and LUKS clean on a stop: services down, `/data` unmounted and
-  closed, the victim's filesystem read-only with its journal written.
+  closed, `/boot` read-only with its journal written.
 - Bound the stop in time, and make it fast when services stop at once.
 - If a new slot cannot run its services, fall back to the old slot.
 
@@ -45,7 +45,7 @@ few seconds of writes.
   up get `k` (KILL) and 6 s more, enough for leash-reap's 5 s; then it moves
   on, naming each. Every runsv gets `x`. Then `sync`, and the mount broker's
   `shutdown`: it unmounts `/data` (or remounts it read-only if held), removes
-  its LUKS mapping, and remounts the victim read-only. If the broker fails,
+  its LUKS mapping, and remounts `/boot` read-only. If the broker fails,
   stage 3 logs it and the journal repairs the filesystems on next boot.
 - **Logging**: `werewolf: stopping services`, each service killed, and
   `werewolf: down in 0.011s (services 0.011s, filesystems 0.000s)`.

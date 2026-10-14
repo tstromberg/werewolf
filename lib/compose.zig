@@ -34,8 +34,8 @@ pub const Build = struct {
 /// composes these anew and carries every other record forward, so none of
 /// these is ever a stale copy.
 pub const records = [_][]const u8{
-    "cmdline",        "dev", "etc", "form",   "forms",         "module-params", "modules",
-    "modules-bitten", "net", "oci", "pledge", "posture-known", "prune",         "weaknesses",
+    "cmdline", "dev", "etc",    "form",          "forms", "module-params", "modules",
+    "net",     "oci", "pledge", "posture-known", "prune", "weaknesses",
 };
 
 /// release_forms are the forms CI releases as disks, for both arches
@@ -174,11 +174,8 @@ pub fn compose(
     const top = forms[forms.len - 1];
     try put(io, rec, "form", try gpa.print("{s}\n", .{top.name}));
     const mods = try modules(gpa, forms, b.arch);
-    // Each record lists what its stage0 loads, in the build's order, so the
-    // updater builds the same stage0s: modules for werewolf's own disk,
-    // modules-bitten for a distro's after bite.
-    try put(io, rec, "modules", try lines(gpa, mods.native));
-    try put(io, rec, "modules-bitten", try lines(gpa, mods.all));
+    // The updater builds stage0 with the same modules and order.
+    try put(io, rec, "modules", try lines(gpa, mods));
     try put(io, rec, "prune", try lines(gpa, try prune(gpa, forms, f)));
     const known = try weaknesses(gpa, top, b);
     try put(io, rec, "weaknesses", if (upd.off)
@@ -261,26 +258,26 @@ fn lay(io: Io, gpa: Allocator, root: Dir, src: []const u8, dst: Dir, to: []const
                 };
                 try into.symLink(io, target, e.path, .{});
             },
-            .file => try from.copyFile(e.path, into, e.path, io, .{}),
+            .file => {
+                into.deleteFile(io, e.path) catch |err| switch (err) {
+                    error.FileNotFound => {},
+                    else => |x| return x,
+                };
+                try from.copyFile(e.path, into, e.path, io, .{});
+            },
             else => return error.UnexpectedFileKind,
         }
     }
 }
 
-/// default_id_first and default_id_count bound defaultId to [65536, 2^31).
-/// Ids start above 16 bits, clear of every id a package, a form's own pick
-/// or a convention (nobody, 65534) takes, and stop below 2^31, which
-/// software that keeps a uid in a signed int cannot hold. So many ids make
-/// two names landing on one all but impossible.
-const default_id_first: u32 = 1 << 16;
-const default_id_count: u32 = (1 << 31) - (1 << 16);
-
 /// defaultId returns the uid and gid of a service user no form's accounts
-/// declare: an FNV-1a hash of its name, in [65536, 2^31). It depends on the
-/// name alone, so the id is the same on every build and machine whatever
-/// forms come and go, and the service keeps owning its files on /data.
+/// declare: an FNV-1a hash of its name, in [2^30, 2^31). Ids start above
+/// system and people ids and stop below 2^31, which software that keeps a uid
+/// in a signed int cannot hold. It depends on the name alone, so the id is
+/// the same on every build and machine whatever forms come and go, and the
+/// service keeps owning its files on /data.
 pub fn defaultId(name: []const u8) u32 {
-    return default_id_first + std.hash.Fnv1a_32.hash(name) % default_id_count;
+    return (1 << 30) | (std.hash.Fnv1a_32.hash(name) & ((1 << 30) - 1));
 }
 
 /// apko returns the chain's merged apko config (form.apko, with extra) plus
@@ -373,7 +370,7 @@ pub fn apko(
 /// a staged apko.yaml is refused.
 /// 3: local-NAME stages the operator's forms and app for the updater;
 /// inline update policy and metadata people need the matching programs.
-/// 4: init and mount-broker require the private task-links metadata observer.
+/// 4: init passes inherited socketpairs to mount-broker and the slot services.
 pub const format = 4;
 
 /// format_package is format's package, a name per format, so a world names
@@ -384,10 +381,9 @@ pub const format_package = std.fmt.comptimePrint("werewolf-format{d}", .{format}
 /// image_programs are the programs from cmd/ that every image runs, stage0's
 /// init among them: a machine builds its next stage0 from its next root.
 pub const image_programs = [_][]const u8{
-    "init",         "stage0",      "modload",      "iface-up",     "fence",       "mount",
-    "mount-broker", "task-links",  "posture",      "seal-watch",   "seal",        "runit-stage",
-    "reboot",       "grub-setenv", "slot-keep",    "power-button", "debug-shell", "ssh-host-key",
-    "leash",        "leash-reap",  "bite-cleanup",
+    "init",         "stage0",       "modload",     "iface-up",     "fence",       "mount",
+    "mount-broker", "posture",      "seal-watch",  "seal",         "runit-stage", "reboot",
+    "slot-keep",    "power-button", "debug-shell", "ssh-host-key", "leash",       "leash-reap",
 };
 
 /// formPrograms adds the packages of fm's form.yaml programs to names.
@@ -721,25 +717,11 @@ pub fn moduleParams(allowed: []const []const u8, arch: Arch) []const Param {
     };
 }
 
-/// bitten_tags mark modules only a distro's disk needs after bite: its
-/// filesystem's. Modules.bitten holds those; native holds the rest, for
-/// werewolf's own disk and a direct boot; all holds both in chain order,
-/// the load order of stage0-bitten.zst.
-const bitten_tags = [_][]const u8{ "@xfs:", "@btrfs:" };
-
-pub const Modules = struct {
-    native: []const []const u8,
-    bitten: []const []const u8,
-    all: []const []const u8,
-};
-
 /// modules returns, in order, the leaf modules the chain's form.yaml names
 /// for arch. A line `ARCH MODULE...` applies to that arch only. A line
 /// `@TAG MODULE...` yields `@TAG:MODULE`, loaded only by a stage0 that finds
 /// that tag.
-pub fn modules(gpa: Allocator, forms: []const Form, arch: Arch) Allocator.Error!Modules {
-    var native: std.ArrayList([]const u8) = .empty;
-    var bitten: std.ArrayList([]const u8) = .empty;
+pub fn modules(gpa: Allocator, forms: []const Form, arch: Arch) Allocator.Error![]const []const u8 {
     var all: std.ArrayList([]const u8) = .empty;
     for (forms) |fm| for (try fm.items(gpa, "modules")) |line| {
         var w = try words(gpa, uncommented(line));
@@ -751,14 +733,10 @@ pub fn modules(gpa: Allocator, forms: []const Form, arch: Arch) Allocator.Error!
         const tag = if (w.len > 0 and isTag(w[0])) w[0] else "";
         for (if (tag.len > 0) w[1..] else w) |m| {
             const word = if (tag.len > 0) try gpa.print("{s}:{s}", .{ tag, m }) else m;
-            const is_bitten = for (bitten_tags) |t| {
-                if (mem.startsWith(u8, word, t)) break true;
-            } else false;
-            try (if (is_bitten) &bitten else &native).append(gpa, word);
             try all.append(gpa, word);
         }
     };
-    return .{ .native = native.items, .bitten = bitten.items, .all = all.items };
+    return all.items;
 }
 
 /// isTag reports whether word is @ followed by lowercase letters or digits.
@@ -788,9 +766,7 @@ pub fn prune(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const []c
     for (forms) |fm| for (try fm.items(gpa, "prune")) |item| {
         var it = mem.tokenizeAny(u8, item, " \t");
         while (it.next()) |p| {
-            if (mem.startsWith(u8, p, "/") or mem.startsWith(u8, p, "./") or
-                mem.startsWith(u8, p, "../") or mem.endsWith(u8, p, "/") or
-                mem.endsWith(u8, p, "/..") or mem.endsWith(u8, p, "/."))
+            if (!cleanPath(p))
                 return f.fail(
                     gpa,
                     "form {s} prunes {s}: a path is relative and clean, usr/bin/bash",
@@ -800,6 +776,15 @@ pub fn prune(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const []c
         }
     };
     return out.items;
+}
+
+fn cleanPath(p: []const u8) bool {
+    if (p.len == 0 or mem.startsWith(u8, p, "/") or mem.endsWith(u8, p, "/")) return false;
+    var segs = mem.splitScalar(u8, p, '/');
+    while (segs.next()) |s| {
+        if (s.len == 0 or mem.eql(u8, s, ".") or mem.eql(u8, s, "..")) return false;
+    }
+    return true;
 }
 
 /// weaknesses lists the posture checks the machine is expected to fail,
@@ -1294,7 +1279,7 @@ test "allowances: along the chain, sorted, once each; nested-kvm needs kvm" {
     }, &f));
 }
 
-test "modules: the arch's, tagged, the bitten apart, in order, as given" {
+test "modules: the arch's, tagged, in order, as given" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
     const gpa = a.allocator();
@@ -1307,16 +1292,14 @@ test "modules: the arch's, tagged, the bitten apart, in order, as given" {
     };
     const m = try modules(gpa, &forms, .aarch64);
     const native = [_][]const u8{
-        "virtio_net",        "virtio_blk", "virtio_mmio", "ena",
-        "@hyperv:hv_netvsc", "@Up",        "not_a_tag",   "@hyperv:hv_netvsc",
+        "virtio_net",        "virtio_blk",   "virtio_mmio",   "@xfs:xfs", "ena",
+        "@hyperv:hv_netvsc", "@btrfs:btrfs", "@btrfs:crc32c", "@Up",      "not_a_tag",
+        "@hyperv:hv_netvsc",
     };
-    try testing.expectEqual(native.len, m.native.len);
-    for (native, m.native) |want, g| try testing.expectEqualStrings(want, g);
-    const bitten = [_][]const u8{ "@xfs:xfs", "@btrfs:btrfs", "@btrfs:crc32c" };
-    try testing.expectEqual(bitten.len, m.bitten.len);
-    for (bitten, m.bitten) |want, g| try testing.expectEqualStrings(want, g);
+    try testing.expectEqual(native.len, m.len);
+    for (native, m) |want, g| try testing.expectEqualStrings(want, g);
     const x = try modules(gpa, &forms, .x86_64);
-    try testing.expectEqualStrings("ia32_only", x.native[2]);
+    try testing.expectEqualStrings("ia32_only", x[2]);
 }
 
 test "net: users as uids, ports as numbers, sorted, once each; what cannot compile fails" {
@@ -1502,7 +1485,7 @@ test "apko: a service user apko.yaml does not name gets an account, its id its n
     const forms = try form.chain(io, gpa, tmp.dir, "x", &f);
     const merged = try apko(io, gpa, tmp.dir, forms, &.{}, &f);
     const id = defaultId("db");
-    try testing.expect(id >= 1 << 16 and id < 1 << 31);
+    try testing.expect(id >= 1 << 30 and id < 1 << 31);
     try testing.expectEqual(id, defaultId("db")); // stable
     try testing.expect(defaultId("db") != defaultId("dc"));
     const acc = merged.get("accounts").?;

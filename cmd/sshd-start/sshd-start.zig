@@ -16,6 +16,7 @@ const key = "/run/sshd/ssh_host_ed25519_key";
 const kept = "/data/svc/sshd/host-key";
 
 pub fn main(init: std.process.Init) !void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const io = init.io;
     const gpa = init.arena.allocator();
 

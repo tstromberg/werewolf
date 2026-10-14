@@ -6,25 +6,23 @@ Proposed, 2026-10-06. Built (cmd/howl/disk.zig, boot/gpt.zig, `make disk`;
 ## Summary
 
 A werewolf disk that boots on its own (UEFI firmware, systemd-boot, a slot)
-and updates itself as a bitten machine does, wherever a VM boots a disk.
+and updates itself wherever a VM boots a disk.
 
 ## Background
 
 Booted directly (`howl run --on qemu`), a machine takes its kernel from the
-host and has nothing to update; bite lends it a distro's disk and GRUB
-([bite.md](../bite.md)). Debian updates itself under Lima because its image
-is a disk with its own bootloader, as each werewolf release now is
+host and has nothing to update. Debian updates itself under Lima because
+its image is a disk with its own bootloader, as each werewolf release now is
 ([releases.md](../releases.md)).
 
 ## Goals
 
 - One disk that boots wherever UEFI firmware finds it, built on a Mac or
   on Linux, and the same bytes from the same slot.
-- A new slot gets one try and falls back on its own, as on bitten machines.
+- A new slot gets one try and falls back on its own.
 
 ## Non-Goals
 
-- Replacing bite: bitten machines keep the distro's GRUB and `grubenv`.
 - Secure Boot (verified-boot.md phase 5), and growing the disk.
 
 ## Detailed design
@@ -34,11 +32,10 @@ GPT, two partitions; every GUID, UUID, serial number and time is fixed.
 | Partition | Holds |
 | --- | --- |
 | EFI system, FAT32, 256 MiB | systemd-boot at the removable-media path (`EFI/BOOT/BOOTAA64.EFI` or `BOOTX64.EFI`), `loader/loader.conf`, `loader/entries/werewolf-*.conf`, `werewolf/{a,b}/vmlinuz` and `stage0.zst` |
-| ext4, the rest | `werewolf/{a,b}/root.erofs`; init adds `werewolf/data`, which is `/data` |
+| ext4 (`/boot`), the rest | `slot/{a,b}/root.erofs`, `state/{0,1}`; init adds `data/`, which is bind-mounted at `/data` |
 
 The removable-media path needs no NVRAM entry, so the disk boots wherever
-it is attached. The ext4 partition is laid out as bite lays out a distro's:
-stage0 finds it by `werewolf.victim=UUID:/werewolf`. systemd-boot sorts
+it is attached. stage0 finds the ext4 partition by `werewolf.slots=UUID`. systemd-boot sorts
 entries by `sort-key`, then newest `version`, with any entry out of tries
 last. No default is set, so the newest slot not known bad wins; slot a's
 version is 1980, older than any update's. `make disk` needs no Linux: it
@@ -75,13 +72,12 @@ The old slot stays a good, older entry: the fallback, and the next target.
 
 ## Drawbacks
 
-- The updater and slot-keep each keep two paths, GRUB's and systemd-boot's.
 - The build needs mtools and e2fsprogs.
 
 ## Alternatives Considered
 
-- **GRUB, as bite uses.** `grub-mkimage` needs Linux, its configuration is
-  a script plus `grubenv`, and one try takes `next_entry`, the deadman and
+- **GRUB.** `grub-mkimage` needs Linux, its configuration is
+  a script plus an environment block, and one try takes `next_entry`, the deadman and
   slot-keep. systemd-boot is one EFI file from Wolfi, a text file per
   entry, counts tries itself, and its editor can be turned off.
 
@@ -90,7 +86,7 @@ The old slot stays a good, older entry: the fallback, and the next target.
 | Risk | Mitigation |
 | --- | --- |
 | A console user adds `init=/bin/sh` | `timeout 0` and `editor no`: no menu, no editor. |
-| A file on ext4 owned by the builder's uid, so by whoever has it on the machine (Lima makes the host user's), who could swap a slot | `debugfs` makes every file root's; `werewolf/` is 0700. |
+| A file on ext4 owned by the builder's uid, so by whoever has it on the machine (Lima makes the host user's), who could swap a slot | `disk.zig` zeroes every staged inode's uid/gid; `slot/` and `state/` are root's. |
 | The EFI partition | Never lent as a mount. The broker works on it detached, only for the supervised slot-update and slot-keep services, writing only digest-checked slot files and entries it generates. root in a shell is refused; Secure Boot remains the firmware-side answer. |
 | Kernel arguments that start a new entry line | `disk.zig` takes only letters, digits and `_.,= -` from the image, and no control character from `DISK_ARGS`. |
 

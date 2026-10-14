@@ -3,7 +3,7 @@
   "channel": "https://example.test/shop",
   "arch": "aarch64",
   "serial": "20261011T000000Z",
-  "build": "dfd5d3e38c60a94bdc6f34c2bbe8035a53de3583ae6486fc334b2faa560e32ca",
+  "build": "035a93f4fcbdfb7155dbac512d85d9f649e7a7fab94bf4dc14a1a1709bb99551",
   "ipe": true,
   "root_hash": "0000000000000000000000000000000000000000000000000000000000000000",
   "kernel": "linux-virt-6.18.55-werewolf",
@@ -26,10 +26,6 @@
       "size": 1
     },
     "stage0.zst": {
-      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "size": 1
-    },
-    "stage0-bitten.zst": {
       "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "size": 1
     },

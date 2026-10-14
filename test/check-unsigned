@@ -13,8 +13,10 @@ cat "$OUT/initramfs.zst" "$cpio" >"$initrd"
 test/boot unsigned test/checks-unsigned "$CHECK/unsigned.log" "$@" \
 	-kernel "$KERNEL" -initrd "$initrd" -append "$CMDLINE"
 cat "$OUT/slot/stage0.zst" "$cpio" >"$initrd"
-cp "$CHECK/victim.img" "$CHECK/unsigned-victim.img"
+cp "$CHECK/slots.img" "$CHECK/unsigned-slots.img"
+cp "$CHECK/slot-esp.img" "$CHECK/unsigned-esp.img"
 exec test/boot unsigned-slot test/checks-unsigned "$CHECK/unsigned-slot.log" "$@" \
 	-kernel "$OUT/slot/vmlinuz" -initrd "$initrd" \
-	-append "$CMDLINE init=/init werewolf.slot=a werewolf.victim=$VICTIM:/var/lib/werewolf werewolf.grubenv=$VICTIM:/boot/grub/grubenv" \
-	-drive "file=$CHECK/unsigned-victim.img,format=raw,if=virtio"
+	-append "$CMDLINE init=/init werewolf.slot=a werewolf.slots=$SLOTS werewolf.esp=57E1-F000" \
+	-drive "file=$CHECK/unsigned-slots.img,format=raw,if=virtio" \
+	-drive "file=$CHECK/unsigned-esp.img,format=raw,if=virtio"

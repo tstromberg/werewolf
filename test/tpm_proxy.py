@@ -6,7 +6,7 @@ import threading
 
 
 class Proxy:
-    def __init__(self, listen, backend, select=None):
+    def __init__(self, listen, backend, select=None, observe=None):
         self.backend = str(backend)
         self.path = Path(listen)
         self.listener = socket.socket(socket.AF_UNIX)
@@ -18,6 +18,7 @@ class Proxy:
         self.failures = []
         self.mode = None
         self.select = select
+        self.observe = observe
         self.hit = threading.Event()
         self.release = threading.Event()
         self.cancelled = False
@@ -116,6 +117,8 @@ class Proxy:
                     return
                 backend.sendall(command)
                 response = self.packet(backend)
+                if self.observe:
+                    self.observe(command, response)
                 if mode == 'after':
                     if int.from_bytes(response[6:10], 'big'):
                         raise RuntimeError('retirement refused before cut')

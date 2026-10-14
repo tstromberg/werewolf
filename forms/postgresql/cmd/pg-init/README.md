@@ -43,8 +43,10 @@ service if one fails.
 4. **No cluster, and never one**: pg-init removes any `data.new` that an
    interrupted start left. `initdb` makes the cluster in `data.new` (UTF-8,
    no locale, local logins by peer, TCP logins rejected) with
-   `popen-shim.so` preloaded, since `initdb` starts a server through
-   `popen(3)` and `system(3)`, which need a shell. pg-init then renames
+   the static sh-shim at `/bin/sh`: `popen(3)` and `system(3)` run one
+   declared program, with only `/dev/null` redirections. The setup backend
+   runs the declared locale utility for collation discovery. No preload is
+   used. pg-init then renames
    `data.new` to `data`, syncs the directory, and writes and syncs
    `cluster-made`.
 5. **The SQL**: every `/usr/share/werewolf-postgres/*.sql`, in name order, up
@@ -81,7 +83,7 @@ There is no shell, and the steps are few.
 | --- | --- |
 | SQL or arguments from outside | Only the image's files and fixed arguments are used. |
 | Excess privilege | It runs as `postgres` under the server's Landlock rules: no more than the server has. |
-| A shell for initdb | `popen-shim.so`, preloaded only into initdb, runs only commands of one known shape. |
+| A shell for initdb | Static sh-shim runs one ELF program; redirections can target only `/dev/null`. |
 | Two servers on one data directory | Only a lock from an earlier boot is removed; the server judges one from this boot. |
 | Data silently replaced | `cluster-made` stops a lost cluster from being remade. |
 

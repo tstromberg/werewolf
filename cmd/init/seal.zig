@@ -80,31 +80,6 @@ fn startWatch() ?i32 {
     return sv[0];
 }
 
-/// Start the metadata reader before dropping SYS_PTRACE. Only its private
-/// socket reaches mount-broker; neither endpoint is inherited by services.
-pub fn startLinks() ?i32 {
-    const path = "/usr/lib/werewolf/task-links";
-    if (!executable(path)) return null;
-    var sv: [2]i32 = undefined;
-    const pair = linux.socketpair(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0, &sv);
-    if (linux.errno(pair) != .SUCCESS) return null;
-    const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{path};
-    const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
-    const pid = linux.fork();
-    if (linux.errno(pid) != .SUCCESS) {
-        _ = linux.close(sv[0]);
-        _ = linux.close(sv[1]);
-        return null;
-    }
-    if (pid == 0) {
-        _ = linux.dup2(sv[1], 0);
-        _ = linux.execve(path, argv, envp);
-        linux.exit_group(127);
-    }
-    _ = linux.close(sv[1]);
-    return sv[0];
-}
-
 /// seal installs a default-deny seccomp filter on PID 1, which every process
 /// inherits and none can remove before a reboot (docs/design/lockdown.md).
 /// It allows the calls of werewolf's base promises and of every promise in

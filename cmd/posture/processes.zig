@@ -75,7 +75,13 @@ fn updates(p: *Posture) !void {
         .name = "Updates resolve",
         .why = "An unsolvable package pin must not silently hold the last image forever.",
         .how = "the last update resolution left no held marker",
-        .observed = try p.gpa.print("werewolf image={s}; held marker={s}", .{ if (werewolf_image) "present" else "absent", if (held_marker) "present" else "absent" }),
+        .observed = try p.gpa.print(
+            "werewolf image={s}; held marker={s}",
+            .{
+                if (werewolf_image) "present" else "absent",
+                if (held_marker) "present" else "absent",
+            },
+        ),
         .result = if (!p.root or !werewolf_image)
             .skip
         else if (held_marker)

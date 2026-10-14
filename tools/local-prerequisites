@@ -31,8 +31,13 @@ def fingerprint(arch, files):
     return value.hexdigest()
 
 
+def sign_kernel(tree, source, key, cert, output):
+    run(['python3', tree / 'tools/sign-kernel', source, key, cert, output])
+
+
 def melange(tree, cache, arch, output, kind, base=None, cert=None):
-    """Stage only public inputs for the existing macOS QEMU/APK builder."""
+    """Stage public inputs for Melange QEMU on macOS or bubblewrap on Linux."""
+    runner = 'qemu' if platform.system() == 'Darwin' else 'bubblewrap'
     package = 'werewolf-ipe-build' if kind == 'kernel' else 'werewolf-tpm-stub-build'
     recipe = 'boot/ipe-kernel.melange.yaml' if kind == 'kernel' else 'boot/tpm-stub.melange.yaml'
     artifact = 'rootfs.tar' if kind == 'kernel' else 'linux.efi.stub'
@@ -51,13 +56,13 @@ def melange(tree, cache, arch, output, kind, base=None, cert=None):
         # No private signing paths, PEM secrets or caller key directories enter the runner.
         env = {name: os.environ[name] for name in ['PATH', 'HOME', 'LANG', 'SSL_CERT_FILE',
                'QEMU_KERNEL_IMAGE', 'QEMU_BASE_INITRAMFS'] if name in os.environ}
-        if not all(name in env and Path(env[name]).is_file()
+        if runner == 'qemu' and not all(name in env and Path(env[name]).is_file()
                    for name in ['QEMU_KERNEL_IMAGE', 'QEMU_BASE_INITRAMFS']):
             raise ValueError('Melange QEMU requires a stock bootstrap kernel and initramfs')
         scratch = work / 'scratch'
         scratch.mkdir()
-        env.update(TMPDIR=str(scratch), QEMU_DISKS_PATH=str(scratch))
-        run(['melange', 'build', source / recipe, '--runner', 'qemu', '--arch', arch,
+        env.update(TMPDIR=str(scratch), QEMU_DISKS_PATH=str(scratch), SOURCE_DATE_EPOCH='0')
+        run(['melange', 'build', source / recipe, '--runner', runner, '--arch', arch,
              '--source-dir', source, '--out-dir', work / 'packages', '--cache-dir', cache / 'melange-cache',
              '--cpu', os.environ.get('MELANGE_CPU', str(max(1, (os.cpu_count() or 2) // 2))),
              '--memory', os.environ.get('MELANGE_MEMORY', '8Gi'), '--disk', '24Gi',
@@ -129,6 +134,7 @@ def build(tree, cache, arch, base, key, cert):
         'boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
         'boot/stub-source', 'tools/build-tpm-stub',
         'boot/ipe-kernel.melange.yaml', 'boot/tpm-stub.melange.yaml',
+        'tools/sign-kernel',
     ]}
     files.update(base=base, certificate=cert)
     expected = fingerprint(arch, files)
@@ -137,8 +143,12 @@ def build(tree, cache, arch, base, key, cert):
     kernel_files = {name: path for name, path in files.items()
                     if name in ['boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
                                 'boot/ipe-kernel.melange.yaml', 'base', 'certificate']}
-    stub_files = {name: path for name, path in files.items() if name not in kernel_files}
-    kernel_pin, stub_pin = fingerprint(arch, kernel_files), fingerprint(arch, stub_files)
+    stub_files = {name: path for name, path in files.items()
+                  if name in ['boot/stub-source', 'tools/build-tpm-stub', 'boot/tpm-stub.melange.yaml']}
+    compiled_pin = fingerprint(arch, kernel_files)
+    kernel_pin = fingerprint(arch, dict(kernel_files, **{'tools/sign-kernel': files['tools/sign-kernel']}))
+    stub_pin = fingerprint(arch, stub_files)
+    compiled_cache = cache / arch / ('compiled-' + compiled_pin)
     kernel_cache = cache / arch / ('kernel-' + kernel_pin)
     stub_cache = cache / arch / ('stub-' + stub_pin)
     if valid(target, expected):
@@ -159,21 +169,22 @@ def build(tree, cache, arch, base, key, cert):
         copy_cached(stub_cache / 'linux.efi.stub', target / 'linux.efi.stub')
         complete(target, expected, ['rootfs.tar', 'linux.efi.stub'])
         return target
-    if platform.system() == 'Linux':
-        if platform.machine() != arch:
-            raise ValueError('native kernel build architecture differs')
-        if need_kernel:
-            run(['sh', tree / 'boot/build-kernel', base, cert, key, kernel_cache / 'kernel'])
-            copy_cached(kernel_cache / 'kernel/rootfs.tar', kernel_cache / 'rootfs.tar')
-            complete(kernel_cache, kernel_pin, ['rootfs.tar'])
-        if need_stub:
-            run(['sh', tree / 'tools/build-tpm-stub', stub_cache / 'stub'])
-            copy_cached(stub_cache / 'stub/linux.efi.stub', stub_cache / 'linux.efi.stub')
-            complete(stub_cache, stub_pin, ['linux.efi.stub'])
-    elif platform.system() == 'Darwin' and not os.environ.get('WEREWOLF_BUILD_VM'):
-        if need_kernel:
-            melange(tree, cache, arch, kernel_cache / 'rootfs.tar', 'kernel', base, cert)
-            complete(kernel_cache, kernel_pin, ['rootfs.tar'])
+    compiled_cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    need_compile = need_kernel and not valid(compiled_cache, compiled_pin, {'unsigned.tar'})
+
+    def finish_kernel():
+        complete(compiled_cache, compiled_pin, ['unsigned.tar'])
+        sign_kernel(tree, compiled_cache / 'unsigned.tar', key, cert, kernel_cache / 'rootfs.tar')
+        complete(kernel_cache, kernel_pin, ['rootfs.tar'])
+
+    if need_kernel and not need_compile:
+        finish_kernel()
+    if platform.system() == 'Linux' and platform.machine() != arch:
+        raise ValueError('native kernel build architecture differs')
+    if platform.system() == 'Linux' or (platform.system() == 'Darwin' and not os.environ.get('WEREWOLF_BUILD_VM')):
+        if need_compile:
+            melange(tree, cache, arch, compiled_cache / 'unsigned.tar', 'kernel', base, cert)
+            finish_kernel()
         if need_stub:
             melange(tree, cache, arch, stub_cache / 'linux.efi.stub', 'stub')
             complete(stub_cache, stub_pin, ['linux.efi.stub'])
@@ -188,19 +199,19 @@ def build(tree, cache, arch, base, key, cert):
         remote = reply
         try:
             run(['limactl', 'shell', vm, 'mkdir', '-p', remote + '/boot', remote + '/tools'])
-            public_files = dict(kernel_files if need_kernel else {})
+            public_files = dict(kernel_files if need_compile else {})
             if need_stub:
                 public_files.update(stub_files)
             for name in public_files:
                 destination = remote + '/' + (name if name.startswith(('boot/', 'tools/')) else
                                                'base.tar' if name == 'base' else 'policy.crt')
                 run(['limactl', 'copy', public_files[name], vm + ':' + destination])
-            # Source archives are shared public data; objects containing private keys are temporary.
-            if need_kernel:
+            # Source archives and compiled modules are public; private keys stay on the host.
+            if need_compile:
                 run(['limactl', 'shell', vm, 'sh', remote + '/boot/build-kernel',
                      remote + '/base.tar', remote + '/policy.crt', '-', remote + '/kernel'])
-                run(['limactl', 'copy', vm + ':' + remote + '/kernel/rootfs.tar', kernel_cache / 'rootfs.tar'])
-                complete(kernel_cache, kernel_pin, ['rootfs.tar'])
+                run(['limactl', 'copy', vm + ':' + remote + '/kernel/rootfs.tar', compiled_cache / 'unsigned.tar'])
+                finish_kernel()
             if need_stub:
                 run(['limactl', 'shell', vm, 'sh', remote + '/tools/build-tpm-stub', remote + '/stub'])
                 run(['limactl', 'copy', vm + ':' + remote + '/stub/linux.efi.stub', stub_cache / 'linux.efi.stub'])
@@ -247,10 +258,7 @@ def main():
             target = cache / arch / ('stub-' + expected)
             target.mkdir(mode=0o700, parents=True, exist_ok=True)
             if not valid(target, expected, {'linux.efi.stub'}):
-                if platform.system() == 'Linux':
-                    run(['sh', tree / 'tools/build-tpm-stub', target / 'stub'])
-                    shutil.copyfile(target / 'stub/linux.efi.stub', target / 'linux.efi.stub')
-                elif platform.system() == 'Darwin' and not os.environ.get('WEREWOLF_BUILD_VM'):
+                if platform.system() == 'Linux' or (platform.system() == 'Darwin' and not os.environ.get('WEREWOLF_BUILD_VM')):
                     melange(tree, cache, arch, target / 'linux.efi.stub', 'stub')
                 else:
                     vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-build-26.04')

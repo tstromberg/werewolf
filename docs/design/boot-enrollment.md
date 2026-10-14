@@ -38,7 +38,7 @@ external root; a forged hint cannot authorize another root or command line.
 
 Stage0 supplies the resolved, validated command line to later programs through
 a read-only bind on `/proc/cmdline`. No unsigned loader options are imported.
-Existing direct boots and bitten boots retain their explicit slot handling.
+Existing direct boots and native tests retain their explicit slot handling.
 Native mode refuses ambiguous selectors, unexpected EFI paths and missing state.
 
 ### Host enrollment

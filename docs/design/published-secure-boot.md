@@ -5,13 +5,16 @@
 `howl run` downloads the latest authenticated protected image and deploys it through Lima on macOS.
 `--build` builds from source and uses the caller's signing credentials, managed locally if absent.
 Secure deployment is the default; incomplete providers and missing protection fail closed.
-Status: firmware authority and signed machine transport implemented; publication and consumption unfinished.
+Status: importer, dedicated trust, cached downloader and candidate CI implemented; default wiring remains gated.
 
 ## Background
 
 The current local source-build profile requires `--build`; protected downloads remain gated.
 New roots obtain machine authority from firmware and TLS trust from signed config.
-Local builds still use a per-machine image channel; a shared vendor channel remains to implement.
+Source builds use per-machine channels; imported bundles now share a declared local channel.
+The [download design](protected-downloads.md) covers dedicated trust, cache floors and publication evidence.
+Kernel/module cold-build reproducibility passed on x86_64; both architectures passed module enforcement.
+The [boot bundle design](boot-images.md) adds shared artifact enrollment and a multiplexed host issuer.
 The existing release workflow signs stock Alpine disks; it does not publish this complete profile.
 Downloading such a disk alone would omit IPE and protected release retirement.
 

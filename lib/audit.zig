@@ -42,7 +42,6 @@ const Status = extern struct {
     backlog_wait_time_actual: u32 = 0,
 };
 const status_enabled = 0x0001;
-const status_backlog_wait_time = 0x0040;
 
 /// locked is the enabled value for on and locked until reboot (0 is off, 1 on).
 pub const locked = 2;
@@ -82,15 +81,13 @@ pub const Error = error{
 };
 
 /// enable turns audit on with one rule, which logs every refused exec, and
-/// locks the configuration until reboot. backlog_wait_time is 0, so a full
-/// queue loses and counts records rather than block a process.
+/// locks the configuration until reboot. The kernel keeps its queue defaults.
 pub fn enable() Error!void {
     const sock = try open();
     defer _ = linux.close(sock);
     const on: Status = .{
-        .mask = status_enabled | status_backlog_wait_time,
+        .mask = status_enabled,
         .enabled = 1,
-        .backlog_wait_time = 0,
     };
     try send(sock, msg_set, std.mem.asBytes(&on));
     var refused_exec: Rule = .{ .flags = filter_exit };

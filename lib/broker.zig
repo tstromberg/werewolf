@@ -1,140 +1,62 @@
 //! broker is the client for cmd/mount-broker. fence's Landlock domain stops
-//! root's programs from mounting, so they ask the broker. See lib/README.md.
+//! root's programs from mounting, so they ask the broker over inherited
+//! socketpairs. See lib/README.md.
 
 const std = @import("std");
-
-/// Private metadata-only reader protocol; it never accepts a file path.
-pub const LinkKind = enum(u8) { exe, cwd };
-pub const link_request_size = 12;
-pub const link_limit = 256;
-pub const LinkRequest = struct { pid: u32, kind: LinkKind };
-
-pub fn linkRequest(pid: u32, kind: LinkKind) ![link_request_size]u8 {
-    if (pid == 0 or pid > std.math.maxInt(i32)) return error.BadLinkRequest;
-    var raw: [link_request_size]u8 = @splat(0);
-    @memcpy(raw[0..4], "WLP1");
-    std.mem.writeInt(u32, raw[4..8], pid, .little);
-    raw[8] = @backingInt(kind);
-    return raw;
-}
-
-pub fn parseLinkRequest(raw: []const u8) !LinkRequest {
-    if (raw.len != link_request_size or !std.mem.eql(u8, raw[0..4], "WLP1") or
-        !std.mem.eql(u8, raw[9..12], &@as([3]u8, @splat(0)))) return error.BadLinkRequest;
-    const pid = std.mem.readInt(u32, raw[4..8], .little);
-    if (pid == 0 or pid > std.math.maxInt(i32)) return error.BadLinkRequest;
-    return .{ .pid = pid, .kind = std.enums.fromInt(LinkKind, raw[8]) orelse
-        return error.BadLinkRequest };
-}
-
-test "private process link requests accept only a bounded PID and metadata selector" {
-    const t = std.testing;
-    const valid = try linkRequest(42, .exe);
-    try t.expectEqual(LinkRequest{ .pid = 42, .kind = .exe }, try parseLinkRequest(&valid));
-    try t.expectError(error.BadLinkRequest, linkRequest(0, .cwd));
-    try t.expectError(error.BadLinkRequest, linkRequest(0x80000000, .cwd));
-    for (0..valid.len) |n| try t.expectError(error.BadLinkRequest, parseLinkRequest(valid[0..n]));
-    for ([_]usize{ 0, 8, 9, 10, 11 }) |at| {
-        var changed = valid;
-        changed[at] = 255;
-        try t.expectError(error.BadLinkRequest, parseLinkRequest(&changed));
-    }
-}
 const linux = std.os.linux;
 
-pub const socket_path = "/run/werewolf/mount-broker.sock";
-
-/// mnt_dir is where the broker mounts what it is asked for.
-pub const mnt_dir = "/run/werewolf/mnt";
-
-/// Word is a request: one of two filesystems, or shutdown. The EFI
-/// partition is not a word: no asker gets it as a mount (see the ESP
-/// operations below).
-pub const Word = enum {
-    grub,
-    victim,
-    shutdown,
-
-    /// place returns where w's filesystem is mounted. It is fixed so the
-    /// asker never takes a path from the answer: root inside fence's domain
-    /// could put its own listener at the socket in /run.
-    pub fn place(w: Word) [:0]const u8 {
-        return switch (w) {
-            .grub => mnt_dir ++ "/grub",
-            .victim => mnt_dir ++ "/victim",
-            .shutdown => unreachable,
-        };
-    }
+/// Role names the three inherited socketpair channels between init, the
+/// supervised slot services, stage 3, and mount-broker.
+pub const Role = enum(u2) {
+    updater = 0,
+    keeper = 1,
+    stage = 2,
 };
 
-/// Held is a filesystem the broker has mounted for us. It stays mounted
-/// while fd, the connection, is open.
-pub const Held = struct {
-    fd: i32,
-    word: Word,
+/// serverFd returns mount-broker's inherited socketpair descriptor for role.
+pub fn serverFd(role: Role) i32 {
+    return 3 + @as(i32, @backingInt(role));
+}
 
-    pub fn path(h: *const Held) []const u8 {
-        return h.word.place();
-    }
+/// clientFd returns the inherited client socketpair descriptor for role.
+pub fn clientFd(role: Role) i32 {
+    return 60 + @as(i32, @backingInt(role));
+}
 
-    /// release closes the connection, and the broker unmounts.
-    pub fn release(h: Held) void {
-        _ = linux.close(h.fd);
+/// keepOnlyClient closes every broker client descriptor except keep, marks
+/// keep close-on-exec, and clears dumpable when a descriptor is retained.
+pub fn keepOnlyClient(keep: ?Role) void {
+    inline for (.{ Role.updater, Role.keeper, Role.stage }) |r| {
+        const fd = clientFd(r);
+        if (keep != null and keep.? == r) {
+            _ = linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC);
+        } else {
+            _ = linux.close(fd);
+        }
     }
+    if (keep != null) _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
+}
+
+/// Word requests shutdown. Neither the EFI partition nor the boot partition
+/// is lent as a mount (see the ESP and slot operations below).
+pub const Word = enum {
+    shutdown,
 };
 
 /// refusal holds the broker's answer after error.Refused.
 pub var refusal_buf: [128]u8 = undefined;
 pub var refusal: []const u8 = "";
 
-/// ask sends word to the broker. For a filesystem, the mount lasts until
-/// release or until this process exits.
-pub fn ask(word: Word) !Held {
-    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
-    const fd: i32 = @intCast(rc);
-    errdefer _ = linux.close(fd);
-    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
-    @memcpy(addr.path[0..socket_path.len], socket_path);
-    if (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) != .SUCCESS)
-        return error.NoBroker;
-    var line: [16]u8 = undefined;
-    const request = std.mem.print(&line, "{s}\n", .{@tagName(word)}) catch unreachable;
-    const sent = linux.sendto(fd, request.ptr, request.len, linux.MSG.NOSIGNAL, null, 0);
-    if (linux.errno(sent) != .SUCCESS) return error.NoBroker;
-
-    var buf: [128]u8 = undefined;
-    var got: usize = 0;
-    const answer = while (true) {
-        if (std.mem.findScalar(u8, buf[0..got], '\n')) |end| break buf[0..end];
-        if (got == buf.len) return error.BadAnswer;
-        const n = linux.read(fd, buf[got..].ptr, buf.len - got);
-        if (linux.errno(n) == .INTR) continue;
-        if (linux.errno(n) != .SUCCESS or n == 0) return error.NoBroker;
-        got += n;
-    };
-    const h: Held = .{ .fd = fd, .word = word };
-    // The answer must name the word's fixed place. Otherwise a fake
-    // listener at the socket could send the asker's writes anywhere.
-    if (word == .shutdown) {
-        if (std.mem.eql(u8, answer, "ok")) return h;
-    } else if (std.mem.startsWith(u8, answer, "ok ") and
-        std.mem.eql(u8, answer[3..], word.place()))
-    {
-        return h;
-    }
-    const n = @min(answer.len, refusal_buf.len);
-    @memcpy(refusal_buf[0..n], answer[0..n]);
-    refusal = refusal_buf[0..n];
-    return error.Refused;
+/// ask sends word to the broker over the stage channel.
+pub fn ask(word: Word) !void {
+    try callOk(.stage, @tagName(word));
 }
 
-// --- the EFI partition -------------------------------------------------------
+// --- the EFI and boot partitions ---------------------------------------------
 //
-// The ESP is never lent as a mount. The broker mounts it detached, does
-// one of these fixed operations itself, and closes it. Only the supervised
-// slot-keep and slot-update services may ask (cmd/mount-broker checks the
-// asking process's identity); every other root process is refused.
+// Neither the ESP nor /boot is lent as a mount. The broker mounts each
+// detached, does one of these fixed operations itself, and closes it. Only
+// the process holding the role's inherited socketpair descriptor can ask.
 
 /// EspStatus is the state of this boot's loader entry on the ESP.
 pub const EspStatus = enum { already, tried, none };
@@ -169,51 +91,47 @@ fn noteRefusal(answer: []const u8) void {
     refusal = refusal_buf[0..n];
 }
 
-/// espCall sends one ESP request line and returns the broker's one-line
-/// answer, in out. An answer of `no ...` is error.Refused.
+/// call sends one request packet on role's socketpair and returns the
+/// broker's one-line answer in out. An answer of `no ...` is error.Refused.
+fn call(role: Role, request: []const u8, out: []u8) ![]const u8 {
+    const fd = clientFd(role);
+    const sent = linux.sendto(fd, request.ptr, request.len, linux.MSG.NOSIGNAL, null, 0);
+    if (linux.errno(sent) != .SUCCESS or sent != request.len) return error.NoBroker;
+    const n = while (true) {
+        const rc = linux.recvfrom(fd, out.ptr, out.len, linux.MSG.TRUNC, null, null);
+        if (linux.errno(rc) == .INTR) continue;
+        if (linux.errno(rc) != .SUCCESS or rc == 0) return error.NoBroker;
+        if (rc > out.len) return error.BadAnswer;
+        break rc;
+    };
+    const answer = std.mem.trimEnd(u8, out[0..n], "\n");
+    if (std.mem.startsWith(u8, answer, "no")) {
+        noteRefusal(answer);
+        return error.Refused;
+    }
+    if (!std.mem.startsWith(u8, answer, "ok")) return error.BadAnswer;
+    return answer;
+}
+
+fn callOk(role: Role, request: []const u8) !void {
+    var out: [256]u8 = undefined;
+    const answer = try call(role, request, &out);
+    if (!std.mem.eql(u8, answer, "ok")) return error.BadAnswer;
+}
+
 fn espCall(request: []const u8, out: []u8) ![]const u8 {
-    const rc = linux.socket(linux.AF.UNIX, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
-    if (linux.errno(rc) != .SUCCESS) return error.NoSocket;
-    const fd: i32 = @intCast(rc);
-    defer _ = linux.close(fd);
-    var addr: linux.sockaddr.un = .{ .family = linux.AF.UNIX, .path = @splat(0) };
-    @memcpy(addr.path[0..socket_path.len], socket_path);
-    if (linux.errno(linux.connect(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.un))) != .SUCCESS)
-        return error.NoBroker;
-    for ([_][]const u8{ request, "\n" }) |part| {
-        const sent = linux.sendto(fd, part.ptr, part.len, linux.MSG.NOSIGNAL, null, 0);
-        if (linux.errno(sent) != .SUCCESS) return error.NoBroker;
-    }
-    var got: usize = 0;
-    while (true) {
-        if (std.mem.findScalar(u8, out[0..got], '\n')) |end| {
-            const answer = out[0..end];
-            if (std.mem.startsWith(u8, answer, "no")) {
-                noteRefusal(answer);
-                return error.Refused;
-            }
-            if (!std.mem.startsWith(u8, answer, "ok")) return error.BadAnswer;
-            return answer;
-        }
-        if (got == out.len) return error.BadAnswer;
-        const n = linux.read(fd, out[got..].ptr, out.len - got);
-        if (linux.errno(n) == .INTR) continue;
-        if (linux.errno(n) != .SUCCESS or n == 0) return error.NoBroker;
-        got += n;
-    }
+    return call(.updater, request, out);
 }
 
 fn espOk(request: []const u8) !void {
-    var out: [256]u8 = undefined;
-    const answer = try espCall(request, &out);
-    if (!std.mem.eql(u8, answer, "ok")) return error.BadAnswer;
+    try callOk(.updater, request);
 }
 
 /// espStatus reports whether this boot's entry is already good, still
 /// counting tries, or absent.
 pub fn espStatus() !EspStatus {
     var out: [256]u8 = undefined;
-    const answer = try espCall("esp-status", &out);
+    const answer = try call(.keeper, "esp-status", &out);
     if (std.mem.eql(u8, answer, "ok already")) return .already;
     if (std.mem.eql(u8, answer, "ok tried")) return .tried;
     if (std.mem.eql(u8, answer, "ok none")) return .none;
@@ -222,7 +140,7 @@ pub fn espStatus() !EspStatus {
 
 /// espCommit renames this boot's counting entry to its good name.
 pub fn espCommit() !void {
-    try espOk("esp-commit");
+    try callOk(.keeper, "esp-commit");
 }
 
 /// espDisarm removes the other slot's loader entries, so nothing boots it
@@ -258,8 +176,8 @@ pub fn espInstall(
 }
 
 /// slotRoot has the broker copy the staged root.erofs of the other slot
-/// onto the victim filesystem, checking it against its digest. On native
-/// boots that filesystem is never lent as a mount either.
+/// slotRoot has the broker copy the staged root.erofs of the other slot
+/// onto the boot filesystem, checking it against its digest.
 pub fn slotRoot(root: EspArtifact) !void {
     var buf: [256]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -277,7 +195,7 @@ pub fn slotDecl(current: ?[]const u8, next: ?[]const u8) !void {
 }
 
 /// slotMeta copies the staged signed image's manifest, signature and slot
-/// command line onto the victim filesystem, each digest-checked.
+/// command line onto the boot filesystem, each digest-checked.
 pub fn slotMeta(manifest: EspArtifact, signature: EspArtifact, cmdline_file: EspArtifact) !void {
     var buf: [768]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
@@ -286,6 +204,35 @@ pub fn slotMeta(manifest: EspArtifact, signature: EspArtifact, cmdline_file: Esp
         cmdline_file.size, cmdline_file.sha256,
     });
     try espOk(w.buffered());
+}
+
+/// slotState copies the staged boot.permit into /state/{position} on the
+/// boot filesystem, checking it against its digest.
+pub fn slotState(position: u1, permit: EspArtifact) !void {
+    var buf: [256]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.print("slot-state p={d} k={d}:{s}", .{ position, permit.size, permit.sha256 });
+    try espOk(w.buffered());
+}
+
+/// SlotJournal is a parsed slot-state request.
+pub const SlotJournal = struct { position: u1, permit: EspArtifact };
+
+/// parseSlotState parses a slot-state request line.
+pub fn parseSlotState(line: []const u8) !SlotJournal {
+    var it = std.mem.tokenizeScalar(u8, line, ' ');
+    if (!std.mem.eql(u8, it.next() orelse return error.BadRequest, "slot-state"))
+        return error.BadRequest;
+    const p_tok = it.next() orelse return error.BadRequest;
+    const k_tok = it.next() orelse return error.BadRequest;
+    if (it.next() != null or p_tok.len != 3 or !std.mem.startsWith(u8, p_tok, "p=") or
+        !std.mem.startsWith(u8, k_tok, "k=")) return error.BadRequest;
+    const position: u1 = switch (p_tok[2]) {
+        '0' => 0,
+        '1' => 1,
+        else => return error.BadRequest,
+    };
+    return .{ .position = position, .permit = try parseArtifact(k_tok[2..]) };
 }
 
 /// parseSlotRoot parses a slot-root request line.
@@ -476,9 +423,10 @@ fn isHex64(s: []const u8) bool {
 
 const testing = std.testing;
 
-test "esp is not a mount word" {
+test "neither esp nor boot is a mount word" {
     try testing.expect(std.meta.stringToEnum(Word, "esp") == null);
-    try testing.expect(std.meta.stringToEnum(Word, "victim") != null);
+    try testing.expect(std.meta.stringToEnum(Word, "boot") == null);
+    try testing.expect(std.meta.stringToEnum(Word, "shutdown") != null);
 }
 
 test "esp install requests and inspect answers round-trip" {
@@ -544,4 +492,9 @@ test "slot requests carry only digests and declarations" {
     ));
     try testing.expectEqual(2, meta.signature.size);
     try testing.expectError(error.BadRequest, parseSlotMeta("slot-meta a=1:" ++ hex));
+
+    const st = try parseSlotState(try std.mem.print(&buf, "slot-state p=1 k=42:{s}", .{hex}));
+    try testing.expectEqual(@as(u1, 1), st.position);
+    try testing.expectEqual(42, st.permit.size);
+    try testing.expectError(error.BadRequest, parseSlotState("slot-state p=2 k=42:" ++ hex));
 }

@@ -15,7 +15,6 @@ pub const Dir = Io.Dir;
 pub const Allocator = std.mem.Allocator;
 pub const linux = std.os.linux;
 pub const sandbox = @import("sandbox");
-const broker = @import("broker");
 const cmdline = @import("cmdline");
 pub const verity = @import("verity");
 pub const policy = @import("update-policy");
@@ -26,6 +25,7 @@ pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
 const control = @import("control.zig");
+const broker = @import("broker");
 const Pending = stage.Pending;
 
 pub const meta_dir = "/usr/share/werewolf";
@@ -83,7 +83,7 @@ pub const apk_seconds = 1800;
 const read_seconds = 300;
 const max_lines = 4 << 20;
 /// tool_seconds and max_tool_output bound a tool that root runs (mkfs.erofs,
-/// zstd, apk offline, grub-setenv). A tool that hangs is killed and the pass
+/// zstd, apk offline). A tool that hangs is killed and the pass
 /// fails, to be retried.
 const tool_seconds = 1800;
 const max_tool_output = 1 << 20;
@@ -106,7 +106,11 @@ pub fn main(init: std.process.Init) !void {
         "check"
     else
         "";
-    if (std.mem.eql(u8, mode, "daemon")) daemon(init.io);
+    if (std.mem.eql(u8, mode, "daemon")) {
+        broker.keepOnlyClient(.updater);
+        daemon(init.io);
+    }
+    broker.keepOnlyClient(null);
     if (!std.mem.eql(u8, mode, "check") and !std.mem.eql(u8, mode, "outcome") and
         !std.mem.eql(u8, mode, "try"))
     {
@@ -356,14 +360,13 @@ pub const Update = struct {
         // init always sets the kernel's hostname, configured or not.
         const uts = std.posix.uname();
         u.host = try u.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0));
-        // Parse as stage0 does (lib/cmdline.zig). A slot boot has
-        // werewolf.slot and werewolf.victim, plus werewolf.grubenv (GRUB,
-        // after bite) or werewolf.esp (systemd-boot on werewolf's own disk).
+        // Parse as stage0 does (lib/cmdline.zig). werewolf.slot,
+        // werewolf.slots and werewolf.esp identify a disk slot.
         var refused: cmdline.Failure = .{};
         u.cmd = cmdline.parse(try u.read("/proc/cmdline"), &refused) orelse
             return error.BadCommandLine;
         const s = u.cmd.slot orelse return error.NotBootedFromASlot;
-        if (u.cmd.grubenv == null and u.cmd.esp == null) return error.NotBootedFromASlot;
+        if (u.cmd.esp == null) return error.NotBootedFromASlot;
         u.slot = @tagName(s);
         u.other = @tagName(s.other());
     }
@@ -999,16 +1002,6 @@ pub const Update = struct {
 
     pub const apkAdd = slot.apkAdd;
 
-    /// held asks the mount broker for a read-write mount of word, kept while
-    /// held. fence's Landlock domain forbids this process mount(2).
-    pub fn held(u: *Update, word: broker.Word) !broker.Held {
-        return broker.ask(word) catch |err| {
-            const why = if (err == error.Refused) broker.refusal else @errorName(err);
-            u.detail = try u.gpa.print("mount-broker, {s}: {s}", .{ @tagName(word), why });
-            return err;
-        };
-    }
-
     pub fn isBad(u: *Update, build: []const u8) bool {
         const bad = u.read(state_dir ++ "/bad") catch return false;
         for (u.lines(bad) catch return false) |l| if (std.mem.eql(u8, l, build)) return true;
@@ -1485,8 +1478,8 @@ test "IPE update guard holds even if its root marker is missing" {
 }
 
 test parentDir {
-    try testing.expectEqualStrings("/boot", parentDir(parentDir("/boot/grub/grubenv")));
-    try testing.expectEqualStrings("", parentDir(parentDir("/grub/grubenv")));
+    try testing.expectEqualStrings("/boot", parentDir(parentDir("/boot/loader/entries")));
+    try testing.expectEqualStrings("", parentDir(parentDir("/loader/entries")));
 }
 
 test "installed database, diffs and origins" {

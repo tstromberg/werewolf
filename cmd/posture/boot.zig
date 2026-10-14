@@ -109,7 +109,13 @@ pub fn check(p: *Posture) !void {
             "was signed.",
         .how = "SecureBoot is on and SetupMode is off",
         .expected = "SecureBoot byte 4 = 1; SetupMode byte 4 = 0",
-        .observed = try p.gpa.print("SecureBoot={s}; SetupMode={s}", .{ if (sb_value) |on| if (on) "1" else "0" else "unavailable/invalid", if (setup_value) |on| if (on) "1" else "0" else "unavailable/invalid" }),
+        .observed = try p.gpa.print(
+            "SecureBoot={s}; SetupMode={s}",
+            .{
+                if (sb_value) |on| if (on) "1" else "0" else "unavailable/invalid",
+                if (setup_value) |on| if (on) "1" else "0" else "unavailable/invalid",
+            },
+        ),
         .result = if (sb) |on| (if (on) .pass else .fail) else .skip,
         .detail = if (sb == null)
             "no EFI variables to read: no EFI firmware, or a kernel without them"
@@ -126,7 +132,10 @@ pub fn check(p: *Posture) !void {
             "what it runs: one built to refuse unsigned modules cannot be told to take them.",
         .how = "/sys/module/module/parameters/sig_enforce is Y",
         .expected = "Y",
-        .observed = if (sig_value.len > 0) sig_value else "unavailable (missing, unreadable or empty)",
+        .observed = if (sig_value.len > 0)
+            sig_value
+        else
+            "unavailable (missing, unreadable or empty)",
         .result = if (sig) |on| (if (on) .pass else .fail) else .skip,
         .detail = if (sig == null) "this kernel has no module signature switch" else "",
     });
@@ -178,9 +187,8 @@ fn rollback(p: *Posture) !void {
 fn pairProtected(p: *Posture) bool {
     var bad: cmdline.Failure = .{};
     const cmd = cmdline.parse(p.read("/proc/cmdline"), &bad) orelse return false;
-    const victim = cmd.victim orelse return false;
-    const directory = p.gpa.print("/victim{s}/boot-state", .{victim.path}) catch return false;
-    return tpm.protected(p.io, p.gpa, cmd.release, directory);
+    if (cmd.slots == null) return false;
+    return tpm.protected(p.io, p.gpa, cmd.release, "/boot/state");
 }
 
 /// rollbackProtected requires both protected storage and stage0's proof that
