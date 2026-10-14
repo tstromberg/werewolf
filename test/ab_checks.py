@@ -3,6 +3,14 @@ import re
 import struct
 
 
+def console_posture_failures(console):
+    """Recover a complete posture summary when kernel audits interrupt the UART."""
+    clean = re.sub(rb'\[ *[0-9]+\.[0-9]+\] [^\n]*\n', b'', console)
+    clean = clean.replace(b'\r', b'').replace(b'\n', b'')
+    match = re.search(rb'posture: fail=([a-z0-9,-]*) pass=[0-9]+ skip=[0-9]+ ', clean)
+    return set(match[1].decode().split(',')) - {''} if match else None
+
+
 def require_native_initrd(uki, stage0):
     """The signed native UKI carries stage0, which verifies its external root."""
     pe = struct.unpack_from('<I', uki, 0x3c)[0]
@@ -45,6 +53,13 @@ def require_boot(value, release, slot, root_hash, previous=None, secure=True, co
 
 
 if __name__ == '__main__':
+    expected = {'boot-ipe-enforced', 'boot-rollback-protected'}
+    interrupted = (b'posture: fail=bo[    6.82] audit: refusal\r\n'
+                   b'ot-ipe-enforced,boot-rollback-protected pass=89 skip=4 {}\r\n')
+    assert console_posture_failures(interrupted) == expected
+    assert console_posture_failures(b'posture: fail= pass=92 skip=4 {}') == set()
+    assert console_posture_failures(b'posture: fail=boot-ipe-enforced pass=89') is None
+    assert console_posture_failures(b'[    1.0] audit: posture: fail= pass=99 skip=0 \n') is None
     good = {'boot_id': '12345678-1234-1234-1234-123456789abc', 'release': 'B',
             'slot': 'b', 'root_hash': 'a' * 64, 'verified_root': True,
             'ipe': True, 'secure_boot': True, 'committed': True}
