@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Boot a compiled kernel and test real trusted, unsigned, foreign and altered modules."""
+import gzip
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+
+if len(sys.argv) < 6:
+    sys.exit('usage: check-kernel-modules ARCH UNSIGNED_TAR SIGNED_TAR OUTPUT QEMU...')
+arch, unsigned, signed, output = sys.argv[1:5]
+command = sys.argv[5:]
+os.umask(0o077)
+work = Path(output).resolve()
+work.mkdir(mode=0o700, parents=True, exist_ok=False)
+root = work / 'root'
+root.mkdir()
+signer = importlib.machinery.SourceFileLoader('signer', 'tools/sign-kernel').load_module()
+with tarfile.open(unsigned) as archive:
+    names = [item for item in archive.getnames() if item.endswith('/drivers/net/dummy.ko.gz')]
+    if len(names) != 1:
+        sys.exit('expected one dummy module in the compiled archive')
+    module_name = names[0]
+    raw = gzip.decompress(archive.extractfile(module_name).read())
+    (work / 'vmlinuz').write_bytes(archive.extractfile('boot/vmlinuz-virt').read())
+with tarfile.open(signed) as archive:
+    trusted = gzip.decompress(archive.extractfile(module_name).read())
+(root / 'trusted.ko').write_bytes(trusted)
+(root / 'unsigned.ko').write_bytes(raw)
+changed = bytearray(trusted)
+changed[len(raw) - 1] ^= 1
+(root / 'tampered.ko').write_bytes(changed)
+with tempfile.TemporaryDirectory(prefix='foreign-module-', dir=work) as temporary:
+    scratch = Path(temporary)
+    foreign_key, foreign_cert = scratch / 'key', scratch / 'cert'
+    subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256',
+        '-days', '1', '-subj', '/CN=foreign-module-test', '-keyout', str(foreign_key), '-out', str(foreign_cert)],
+        check=True, capture_output=True)
+    (root / 'foreign.ko').write_bytes(signer.module_signature(raw, foreign_key, foreign_cert, scratch))
+if os.environ.get('MODULE_PROBE'):
+    shutil.copyfile(os.environ['MODULE_PROBE'], root / 'init')
+else:
+    subprocess.run(['zig', 'build-exe', '-O', 'ReleaseSafe', '-target', arch + '-linux-musl',
+        '-Mroot=test/module-init.zig', '-femit-bin=' + str(root / 'init')], check=True)
+(root / 'init').chmod(0o755)
+subprocess.run(['bsdtar', '--format', 'newc', '--uid', '0', '--gid', '0', '--numeric-owner',
+    '-cf', str(work / 'initramfs'), '-C', str(root), '.'], check=True)
+log = work / 'console.log'
+with log.open('wb') as console:
+    try:
+        result = subprocess.run(command + ['-kernel', str(work / 'vmlinuz'), '-initrd', str(work / 'initramfs'),
+            '-append', 'rdinit=/init console=' + ('ttyAMA0' if arch == 'aarch64' else 'ttyS0') + ' panic=2 loglevel=4'],
+            stdout=console, stderr=subprocess.STDOUT, timeout=90)
+    except subprocess.TimeoutExpired:
+        sys.exit('module probe timed out; see ' + str(log))
+text = log.read_bytes()
+if result.returncode or b'module-check: PASS' not in text or b'module-check: FAIL' in text:
+    print(text[-6000:].decode(errors='replace'), file=sys.stderr)
+    sys.exit('module signature probe failed; see ' + str(log))
+(work / 'result.json').write_text(json.dumps({'arch': arch, 'trusted_module_loaded': True,
+    'unsigned_module_refused': True, 'foreign_signer_refused': True, 'altered_module_refused': True}) + '\n')
+print('pass: kernel loads the host-signed module and refuses unsigned, foreign and altered modules')

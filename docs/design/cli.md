@@ -26,7 +26,7 @@ by hand.
 
 ## Non-Goals
 
-- A daemon, a state file, plugins, prompts, `start`/`stop`, a `bite` verb.
+- A daemon, a state file, plugins, prompts, `start`/`stop`.
 - Building the application, or `make` deploying machines. (Building
   without make was a non-goal; [howl-build.md](howl-build.md) makes it one.)
 

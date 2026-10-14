@@ -1,0 +1,322 @@
+#!/usr/bin/env python3
+"""Exercise authenticated download ordering, failure recovery and cache floors."""
+import datetime
+import hashlib
+import importlib.machinery
+import io
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+HOWL = str(Path(sys.argv.pop(1)).resolve())
+loader = importlib.machinery.SourceFileLoader('boot_download', 'tools/boot-download')
+downloads = loader.load_module()
+
+
+class Downloads(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.identity = tempfile.TemporaryDirectory(prefix='ww-download-trust-')
+        cls.trust = Path(cls.identity.name)
+        for name in ('vendor', 'foreign'):
+            subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256',
+                '-days', '2', '-subj', '/CN=werewolf-download-test', '-keyout', cls.trust / (name + '.key'),
+                '-out', cls.trust / (name + '.crt')], capture_output=True, check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.identity.cleanup()
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='ww-download-cache-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.request = dict(source='https://vendor.test/boot/v1', cache=str(self.root / 'cache'),
+            boot_certificate=str(self.trust / 'vendor.crt'), image_certificate=str(self.trust / 'vendor.crt'),
+            channel='https://192.168.5.2:9443/playground', form='playground', arch='aarch64', provider='lima')
+        image = json.loads(Path('lib/testdata/prebuilt/image.json').read_text())
+        image.update(arch='aarch64', channel=self.request['channel'], boot_context='1' * 64)
+        self.payloads = {name: ('fixture:' + name).encode() for name in downloads.FILES}
+        image['files'] = {name: dict(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+                          for name, raw in self.payloads.items()}
+        build = ''.join('%s %s %d\n' % (name, image['files'][name]['sha256'], image['files'][name]['size'])
+                        for name in downloads.FILES).encode()
+        image['build'] = hashlib.sha256(build).hexdigest()
+        image['serial'] = '20261013T000000Z'
+        der = subprocess.check_output(['openssl', 'x509', '-in', str(self.trust / 'vendor.crt'), '-outform', 'DER'])
+        disk = b'compressed-disk-fixture'
+        self.payloads['disk.img.zst'] = disk
+        self.manifest = dict(format='werewolf-boot/1', form='playground', image=image,
+            disk=dict(size=len(disk), sha256=hashlib.sha256(disk).hexdigest()), raw_size=8 << 30,
+            boot_certificate=hashlib.sha256(der).hexdigest(), permit_host='192.168.5.2', permit_port=9443, pcr11='2' * 64)
+        self.manifest['configuration'] = dict(form='playground', interface=dict(files=[], settings=[]),
+            ports=[22], dhcp=True, ssh='files', lima_managed=True)
+        self.calls, self.verifications = [], []
+        self.fault = None
+        self.validator = dict(version='test-validator')
+        self.now = datetime.datetime(2026, 10, 13, 1, tzinfo=datetime.timezone.utc).timestamp()
+        self.publish()
+
+    def publish(self, signer='vendor'):
+        head = self.root / 'head'
+        head.write_text(json.dumps(self.manifest, sort_keys=True))
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', self.trust / (signer + '.key'),
+            '-out', self.root / 'signature', head], check=True, capture_output=True)
+        self.payloads.update({'boot.json': head.read_bytes(), 'boot.json.sig': (self.root / 'signature').read_bytes(),
+                              'latest.json': json.dumps(self.manifest['image']).encode(), 'latest.json.sig': b'fixture'})
+
+    def fetch(self, url, path, limit, expected=None):
+        name = url.rsplit('/', 1)[1]
+        self.calls.append(name)
+        raw = self.payloads[name]
+        if self.fault == name:
+            path.write_bytes(raw[:1])
+            raise OSError('interrupted download')
+        if len(raw) > limit:
+            raise ValueError('oversized response')
+        path.write_bytes(raw)
+
+    def admit(self, directory):
+        return downloads.native(HOWL, 'head', directory, self.request)
+
+    def verify(self, directory):
+        # This test isolates download/cache behavior. Real PE/disk admission is tested
+        # by test/boot-images and the protected VM runner, not replaced in production.
+        self.verifications.append(str(directory))
+        if self.fault == 'verify':
+            raise ValueError('PE admission refused')
+        return dict(release=[1] * 32, pcr=[2] * 32)
+
+    def download(self, now=None):
+        return downloads.download(self.request, self.admit, self.verify, self.validator,
+                                  self.fetch, self.now if now is None else now)
+
+    def floors(self):
+        return list((self.root / 'cache').rglob('floor.json'))
+
+    def test_noop_uses_no_network_or_artifact_verification(self):
+        first = self.download()
+        count = len(self.calls)
+        self.assertEqual(first, self.download())
+        self.assertEqual(count, len(self.calls))
+        self.assertEqual(1, len(self.verifications))
+        self.assertEqual(bytes([1] * 32), (first / 'slot/release.id').read_bytes())
+        self.assertEqual((first / 'slot/vmlinuz').stat().st_ino,
+                         (first / 'prebuilt/aarch64' / self.manifest['image']['build'] / 'vmlinuz').stat().st_ino)
+
+    def test_foreign_or_modified_heads_fetch_no_artifacts_and_create_no_floor(self):
+        for change in ('foreign', 'modified'):
+            self.publish('foreign' if change == 'foreign' else 'vendor')
+            if change == 'modified':
+                self.payloads['boot.json'] += b' '
+            with self.assertRaisesRegex(ValueError, 'BadSignature'):
+                self.download()
+            self.assertEqual([], self.floors())
+        self.assertEqual(['boot.json.sig', 'boot.json'] * 2, self.calls)
+
+    def test_public_candidate_without_deployment_signature_is_not_admitted(self):
+        candidate = self.root / 'unsigned-candidate'
+        candidate.mkdir()
+        (candidate / 'boot.json').write_bytes(self.payloads['boot.json'])
+        # An image signature and signed code cannot stand in for a boot signature.
+        image = candidate / 'prebuilt/aarch64'
+        image.mkdir(parents=True)
+        (image / 'latest.json').write_bytes(self.payloads['latest.json'])
+        (image / 'latest.json.sig').write_bytes(self.payloads['boot.json.sig'])
+        with self.assertRaisesRegex(ValueError, 'FileNotFound'):
+            self.admit(candidate)
+        (candidate / 'boot.json.sig').write_bytes(self.payloads['boot.json.sig'])
+        self.assertEqual('playground', self.admit(candidate)['form'])
+
+    def test_profile_form_and_provider_fail_before_artifacts(self):
+        for name, value, reason in [('form', 'prod', 'WrongBootForm'),
+                                  ('permit_host', '10.0.2.2', 'WrongBootProvider')]:
+            saved = self.manifest[name]
+            self.manifest[name] = value
+            if name == 'form':
+                self.manifest['configuration']['form'] = value
+            self.publish()
+            with self.assertRaisesRegex(ValueError, reason):
+                self.download()
+            self.manifest[name] = saved
+            if name == 'form':
+                self.manifest['configuration']['form'] = saved
+        self.assertEqual(['boot.json.sig', 'boot.json'] * 2, self.calls)
+
+    def test_interruption_and_native_admission_leave_floor_unchanged_then_retry(self):
+        for fault in ('disk.img.zst', 'verify'):
+            self.fault = fault
+            with self.assertRaises((ValueError, OSError)):
+                self.download()
+            self.assertEqual([], self.floors())
+            self.assertEqual([], list((self.root / 'cache').rglob('*.part')))
+        self.fault = None
+        self.assertTrue(self.download().is_dir())
+        self.assertEqual(1, len(self.floors()))
+
+    def test_tampered_artifact_is_refused_before_native_verification(self):
+        self.payloads['root.erofs'] = b'forged artifact'
+        with self.assertRaises(ValueError):
+            self.download()
+        self.assertEqual([], self.verifications)
+        self.assertEqual([], self.floors())
+
+    def test_older_and_equivocating_heads_do_not_lower_floor(self):
+        self.download()
+        original = self.floors()[0].read_bytes()
+        for serial in ('20261012T000000Z', '20261013T000000Z'):
+            self.manifest['image']['serial'] = serial
+            self.manifest['pcr11'] = '3' * 64
+            self.publish()
+            with self.assertRaisesRegex(ValueError, 'older|reused'):
+                self.download(self.now + 301)
+            self.assertEqual(original, self.floors()[0].read_bytes())
+
+    def test_changing_mirrors_cannot_reset_the_accepted_floor(self):
+        self.download()
+        self.request['source'] = 'https://other-mirror.test/boot/v1'
+        self.manifest['image']['serial'] = '20261012T000000Z'
+        self.publish()
+        with self.assertRaisesRegex(ValueError, 'older'):
+            self.download(self.now + 301)
+        self.assertEqual(1, len(self.floors()))
+
+    def test_missing_or_substituted_configuration_cannot_be_deployed(self):
+        saved = self.manifest['configuration']
+        for definition, reason in [(None, 'MissingDeploymentDefinition'),
+                                   (dict(saved, form='prod'), 'BadDeploymentDefinition')]:
+            self.manifest['configuration'] = definition
+            self.publish()
+            with self.assertRaisesRegex(ValueError, reason):
+                self.download()
+            self.assertEqual([], self.floors())
+
+    def test_newer_head_reuses_all_immutable_artifacts(self):
+        self.download()
+        self.calls.clear()
+        self.manifest['image']['serial'] = '20261013T010000Z'
+        self.publish()
+        self.download(self.now + 301)
+        self.assertEqual(['boot.json.sig', 'boot.json', 'latest.json', 'latest.json.sig'], self.calls)
+        self.assertEqual('20261013T010000Z', json.loads(self.floors()[0].read_text())['serial'])
+
+    def test_changed_cache_and_validator_require_readmission(self):
+        first = self.download()
+        (first / 'slot/pcr11').write_bytes(bytes([9] * 32))
+        self.download()
+        self.assertEqual(2, len(self.verifications))
+        self.validator['version'] = 'new-validator'
+        self.download()
+        self.assertEqual(3, len(self.verifications))
+
+    def test_incomplete_cache_receipt_cannot_skip_artifact_admission(self):
+        first = self.download()
+        receipt = json.loads((first / 'complete.json').read_text())
+        del receipt['files']['slot/uki.efi']
+        (first / 'complete.json').write_text(json.dumps(receipt))
+        self.download()
+        self.assertEqual(2, len(self.verifications))
+
+    def test_corrupt_or_missing_floor_refuses_without_fetching(self):
+        self.download()
+        count = len(self.calls)
+        floor = self.floors()[0]
+        floor.write_text('{}')
+        with self.assertRaises(ValueError):
+            self.download()
+        floor.unlink()
+        with self.assertRaisesRegex(ValueError, 'missing'):
+            self.download()
+        self.assertEqual(count, len(self.calls))
+
+    def test_future_release_and_unprotected_urls_are_refused(self):
+        self.manifest['image']['serial'] = '20261015T000000Z'
+        self.publish()
+        with self.assertRaisesRegex(ValueError, 'future'):
+            self.download()
+        for source in ('http://vendor.test/', 'https://user:pass@vendor.test/', 'https://vendor.test/?key=secret'):
+            self.request['source'] = source
+            with self.assertRaises(ValueError):
+                self.download()
+
+    def test_https_redirects_cannot_downgrade_transport(self):
+        handler = downloads.HTTPSOnly()
+        request = downloads.urllib.request.Request('https://vendor.test/image')
+        for location in ('http://cdn.test/image', 'https://secret@cdn.test/image'):
+            with self.assertRaises(ValueError):
+                handler.redirect_request(request, None, 302, 'Found', {}, location)
+
+    def test_transport_identifies_howl_and_retains_identity_on_https_redirect(self):
+        class Response(io.BytesIO):
+            status = 200
+            headers = {}
+        with patch.object(downloads.urllib.request, 'build_opener') as opener:
+            opener.return_value.open.return_value = Response(b'ab')
+            downloads.fetch('https://vendor.test/object', self.root / 'identified', 2)
+            request = opener.return_value.open.call_args.args[0]
+        self.assertEqual(downloads.USER_AGENT, request.get_header('User-agent'))
+        self.assertEqual('identity', request.get_header('Accept-encoding'))
+        redirect = downloads.HTTPSOnly().redirect_request(request, None, 302, 'Found', {},
+                                                        'https://cdn.test/object')
+        self.assertEqual(downloads.USER_AGENT, redirect.get_header('User-agent'))
+        self.assertEqual('identity', redirect.get_header('Accept-encoding'))
+
+    def test_http_errors_distinguish_missing_publication_and_denial_without_creating_files(self):
+        for code, reason in ((404, 'not published'), (403, 'refused')):
+            failure = downloads.HTTPError('https://vendor.test/object', code, 'error', {}, io.BytesIO())
+            with patch.object(downloads.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.side_effect = failure
+                path = self.root / ('http-' + str(code))
+                with self.assertRaisesRegex(ValueError, reason + '.*HTTP ' + str(code)):
+                    downloads.fetch('https://vendor.test/object', path, 2)
+                self.assertFalse(path.exists())
+                self.assertTrue(failure.fp.closed)
+
+    def test_streaming_transport_enforces_sizes_without_content_length(self):
+        class Response(io.BytesIO):
+            status = 200
+            headers = {}
+        for index, raw in enumerate((b'ab', b'a', b'abc')):
+            expected = dict(size=2, sha256=hashlib.sha256(b'ab').hexdigest())
+            path = self.root / ('response-' + str(index))
+            with patch.object(downloads.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.return_value = Response(raw)
+                if raw == b'ab':
+                    downloads.fetch('https://vendor.test/object', path, 2, expected)
+                    self.assertEqual(raw, path.read_bytes())
+                else:
+                    with self.assertRaises(ValueError):
+                        downloads.fetch('https://vendor.test/object', path, 2, expected)
+
+    def test_response_headers_cannot_expand_authenticated_bounds(self):
+        class Response(io.BytesIO):
+            status = 200
+        for index, headers in enumerate(({'Content-Length': '3'}, {'Content-Length': '-1'},
+                                         {'Content-Encoding': 'gzip'})):
+            response = Response(b'ab')
+            response.headers = headers
+            with patch.object(downloads.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.return_value = response
+                with self.assertRaises(ValueError):
+                    downloads.fetch('https://vendor.test/object', self.root / ('headers-' + str(index)), 2)
+
+    def test_torn_latest_head_preserves_last_verified_bundle_and_floor(self):
+        bundle = self.download()
+        original = self.floors()[0].read_bytes()
+        self.manifest['image']['serial'] = '20261013T010000Z'
+        self.publish()
+        self.payloads['boot.json'] += b' '
+        with self.assertRaisesRegex(ValueError, 'BadSignature'):
+            self.download(self.now + 301)
+        self.assertEqual(original, self.floors()[0].read_bytes())
+        self.assertTrue(downloads.complete(bundle, self.validator))
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    unittest.main()

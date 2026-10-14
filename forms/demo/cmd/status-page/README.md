@@ -45,7 +45,7 @@ people's text, so all of it is untrusted input.
   listens on :80 and a PostgreSQL login completes.
 - **scan** (user `grype`, may connect only to ports 443 and 53): at start and
   hourly it runs grype over `/`, excluding `/proc`, `/sys`, `/dev`, `/run`,
-  `/tmp`, `/data` and `/victim`, for at most 30 minutes. Its database lives
+  `/tmp`, `/data` and `/boot`, for at most 30 minutes. Its database lives
   in `/data/svc/scan`, never in RAM: with `/data` on tmpfs it does not scan.
   grype's stderr reaches the console a line at a time, with control
   characters shown as `?`. The summary goes to `scan.json` and, where there
@@ -96,5 +96,4 @@ The scan fetches from the internet; the page must not be able to.
 - **Bounded memory**: each pass has its own arena, freed when the pass ends,
   so a process that runs for months uses what one pass needs.
 - **Tested**: unit tests per file (escaping, protocol rows, grype's summary,
-  PostgreSQL's refusals, the page); `check-demo` and `check-persist` boot it
-  and read the page.
+  PostgreSQL's refusals, the page); `check-demo` and `check-persist` read the page.

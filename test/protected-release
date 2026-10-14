@@ -1,0 +1,182 @@
+#!/usr/bin/env python3
+"""Protected production key custody and publication gates must fail closed."""
+import copy
+import datetime
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+signer = importlib.machinery.SourceFileLoader('protected_signer', 'release/with-protected-keys').load_module()
+creator = importlib.machinery.SourceFileLoader('protected_creator', 'release/create-protected-trust').load_module()
+publisher = importlib.machinery.SourceFileLoader('protected_prepare', 'release/prepare-protected').load_module()
+
+
+class ProtectedRelease(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.directory = tempfile.TemporaryDirectory(prefix='ww-protected-key-test-')
+        cls.root = Path(cls.directory.name)
+        for name in ('boot', 'image', 'foreign'):
+            subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256',
+                '-days', '2', '-subj', '/CN=protected-signing-test', '-keyout', cls.root / (name + '.key'),
+                '-out', cls.root / (name + '.crt')], check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.directory.cleanup()
+
+    def environment(self):
+        env = dict(os.environ)
+        for kind in ('BOOT', 'IMAGE'):
+            env['WEREWOLF_PROTECTED_' + kind + '_KEY'] = (self.root / (kind.lower() + '.key')).read_text()
+            env['WEREWOLF_PROTECTED_' + kind + '_CRT'] = str(self.root / (kind.lower() + '.crt'))
+        return env
+
+    def test_private_pem_becomes_host_path_and_is_cleaned_after_success_or_failure(self):
+        marker = self.root / 'key-locations.json'
+        for outcome in (0, 7):
+            code = ('import os,pathlib,json; keys=[pathlib.Path(os.environ[n]) for n in '
+                    '["WEREWOLF_BOOT_KEY","WEREWOLF_IPE_KEY"]]; '
+                    'assert all(p.stat().st_mode & 0o777 == 0o600 for p in keys); '
+                    'assert all(p.parent.stat().st_mode & 0o777 == 0o700 for p in keys); '
+                    'pathlib.Path(' + repr(str(marker)) + ').write_text(json.dumps([str(p) for p in keys])); '
+                    'raise SystemExit(' + str(outcome) + ')')
+            self.assertEqual(outcome, signer.run([sys.executable, '-c', code], self.environment()))
+            self.assertTrue(all(not Path(path).exists() for path in json.loads(marker.read_text())))
+
+    def test_missing_foreign_or_shared_keys_do_not_execute_child(self):
+        marker = self.root / 'must-not-execute'
+        command = [sys.executable, '-c', 'from pathlib import Path; Path(' + repr(str(marker)) + ').touch()']
+        environments = []
+        for value in ('', (self.root / 'foreign.key').read_text(), '-----BEGIN INVALID PRIVATE KEY-----\nsecret'):
+            env = self.environment()
+            env['WEREWOLF_PROTECTED_BOOT_KEY'] = value
+            environments.append(env)
+        shared = self.environment()
+        shared['WEREWOLF_PROTECTED_IMAGE_KEY'] = shared['WEREWOLF_PROTECTED_BOOT_KEY']
+        shared['WEREWOLF_PROTECTED_IMAGE_CRT'] = shared['WEREWOLF_PROTECTED_BOOT_CRT']
+        environments.append(shared)
+        for env in environments:
+            with self.assertRaises(ValueError):
+                signer.run(command, env)
+            self.assertFalse(marker.exists())
+
+    def test_cli_does_not_log_secret_on_failure(self):
+        env = self.environment()
+        env['WEREWOLF_PROTECTED_BOOT_KEY'] = '-----BEGIN PRIVATE KEY-----\nSECRET_SENTINEL\n-----END PRIVATE KEY-----'
+        result = subprocess.run([sys.executable, 'release/with-protected-keys', sys.executable, '-c', 'pass'],
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(0, result.returncode)
+        self.assertNotIn('SECRET_SENTINEL', result.stdout + result.stderr)
+
+    def test_identity_creation_does_not_rotate_partial_or_committed_trust(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private, public = root / 'private', root / 'public'
+            private.mkdir()
+            public.mkdir()
+            (private / 'boot.key').write_text('partial')
+            with self.assertRaises(ValueError):
+                creator.create(private, public)
+            (private / 'boot.key').unlink()
+            (public / 'boot.crt').write_text('committed')
+            with self.assertRaises(ValueError):
+                creator.create(private, public)
+            self.assertFalse((private / 'boot.key').exists())
+
+    def test_existing_identity_is_reused_and_public_pins_cannot_be_replaced(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            private, public = root / 'private', root / 'public'
+            private.mkdir()
+            public.mkdir()
+            for kind in ('boot', 'image'):
+                for suffix in ('.key', '.crt'):
+                    target = private / (kind + suffix)
+                    target.write_bytes((self.root / (kind + suffix)).read_bytes())
+                    target.chmod(0o600)
+            creator.create(private, public)
+            original = (public / 'boot.crt').read_bytes()
+            creator.create(private, public)
+            self.assertEqual(original, (public / 'boot.crt').read_bytes())
+            (public / 'boot.crt').write_text('other pin')
+            with self.assertRaises(ValueError):
+                creator.create(private, public)
+            self.assertEqual('other pin', (public / 'boot.crt').read_text())
+
+    def test_every_publication_gate_is_mandatory_and_boolean_true(self):
+        manifest = {'image': {'arch': 'aarch64'}}
+        descriptor = '1' * 64
+        valid = dict(format='werewolf-boot-gates/1', descriptor=descriptor, arch='aarch64', provider='lima',
+                     checks={name: True for name in publisher.GATES})
+        publisher.gates(valid, manifest, descriptor, 'lima')
+        for gate in publisher.GATES:
+            for value in (False, 'true', 1, None):
+                changed = copy.deepcopy(valid)
+                changed['checks'][gate] = value
+                with self.assertRaises(ValueError):
+                    publisher.gates(changed, manifest, descriptor, 'lima')
+            changed = copy.deepcopy(valid)
+            del changed['checks'][gate]
+            with self.assertRaises(ValueError):
+                publisher.gates(changed, manifest, descriptor, 'lima')
+
+    def test_evidence_cannot_be_reused_for_another_disk_architecture_or_provider(self):
+        valid = dict(format='werewolf-boot-gates/1', descriptor='1' * 64, arch='aarch64', provider='lima',
+                     checks={name: True for name in publisher.GATES})
+        for field, value in [('descriptor', '2' * 64), ('arch', 'x86_64'), ('provider', 'qemu'), ('format', 'old')]:
+            changed = dict(valid, **{field: value})
+            with self.assertRaises(ValueError):
+                publisher.gates(changed, {'image': {'arch': 'aarch64'}}, '1' * 64, 'lima')
+
+    def test_preparation_admits_before_atomic_layout_and_retains_immutable_objects(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, trust, output = root / 'bundle', root / 'trust', root / 'public'
+            bundle.mkdir()
+            trust.mkdir()
+            manifest = dict(form='playground', image=dict(arch='aarch64', build='2' * 64,
+                serial=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')))
+            (bundle / 'boot.json').write_text(json.dumps(manifest))
+            (bundle / 'boot.json.sig').write_bytes(b'signed-boot-head')
+            (bundle / 'disk.img.zst').write_bytes(b'compressed-disk')
+            (bundle / 'slot').mkdir()
+            for name in publisher.downloads.FILES:
+                (bundle / 'slot' / name).write_bytes(name.encode())
+            head = bundle / 'prebuilt/aarch64'
+            head.mkdir(parents=True)
+            (head / 'latest.json').write_bytes(b'signed-image-head')
+            (head / 'latest.json.sig').write_bytes(b'signed-image-signature')
+            (trust / 'trust.json').write_text(json.dumps(dict(format='werewolf-boot-trust/1',
+                source='https://vendor.test/boot/v1', permit_port=9443)))
+            descriptor = publisher.downloads.sha(bundle / 'boot.json')
+            report = dict(format='werewolf-boot-gates/1', descriptor=descriptor, arch='aarch64', provider='lima',
+                          checks={name: True for name in publisher.GATES})
+            with patch.object(publisher.downloads, 'native', return_value=manifest) as native:
+                invalid = copy.deepcopy(report)
+                invalid['checks']['unhealthy_fallback'] = False
+                with self.assertRaises(ValueError):
+                    publisher.prepare('howl', bundle, invalid, 'lima', output, trust)
+                self.assertEqual(['head'], [call.args[1] for call in native.call_args_list])
+                self.assertFalse(output.exists())
+                native.reset_mock()
+                plan = publisher.prepare('howl', bundle, report, 'lima', output, trust)
+                self.assertEqual(['head', 'verify'], [call.args[1] for call in native.call_args_list])
+            self.assertEqual(descriptor, plan['descriptor'])
+            self.assertEqual(10, sum(entry['immutable'] for entry in plan['files']))
+            self.assertEqual(2, sum(not entry['immutable'] for entry in plan['files']))
+            objects = output / 'playground/lima/aarch64/objects' / descriptor
+            self.assertEqual(b'compressed-disk', (objects / 'disk.img.zst').read_bytes())
+            self.assertEqual((bundle / 'boot.json').read_bytes(),
+                             (output / 'playground/lima/aarch64/latest/boot.json').read_bytes())
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    unittest.main()

@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+"""Compare independent cold Melange kernel builds and host-signed module archives."""
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+if len(sys.argv) != 6:
+    sys.exit('usage: check-kernel-repro ARCH ALPINE_BASE KEY CERT OUTPUT')
+arch, base, key, cert, output = sys.argv[1:]
+base, key, cert, work = [Path(value).resolve() for value in (base, key, cert, output)]
+os.umask(0o077)
+work.mkdir(mode=0o700, parents=True, exist_ok=False)
+builder = importlib.machinery.SourceFileLoader('prerequisites', 'tools/local-prerequisites').load_module()
+run = builder.run
+
+
+def logged(arguments, **kwargs):
+    if str(arguments[0]) == 'melange':
+        with (current / 'build.log').open('wb') as log:
+            return run(arguments, stdout=log, stderr=subprocess.STDOUT, **kwargs)
+    return run(arguments, **kwargs)
+
+
+builder.run = logged
+images = []
+for label in ('A', 'B'):
+    current = work / label
+    current.mkdir()
+    unsigned, signed = current / 'unsigned.tar', current / 'signed.tar'
+    builder.melange(Path.cwd(), work, arch, unsigned, 'kernel', base, cert)
+    builder.sign_kernel(Path.cwd(), unsigned, key, cert, signed)
+    images.append({'unsigned': builder.digest(unsigned), 'signed': builder.digest(signed)})
+    print('pass: independent cold build and host signing ' + label, flush=True)
+if images[0] != images[1]:
+    (work / 'mismatch.json').write_text(json.dumps(images, indent=2) + '\n')
+    sys.exit('kernel reproducibility failed; inspect mismatch.json and each build.log')
+result = dict(arch=arch, unsigned_sha256=images[0]['unsigned'], signed_sha256=images[0]['signed'],
+              base_sha256=builder.digest(base), certificate_sha256=builder.digest(cert),
+              independent_cold_builds=True, private_keys_host_only=True)
+(work / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+print('pass: complete kernel/module archives and host signatures reproduce exactly')

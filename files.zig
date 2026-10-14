@@ -13,6 +13,10 @@ pub const native_firmware = @embedFile("tools/native-firmware");
 pub const firmware_requirements = @embedFile("boot/firmware-requirements.txt");
 pub const local_tpm = @embedFile("tools/local-tpm");
 pub const local_publisher = @embedFile("tools/local-publisher");
+pub const boot_download = @embedFile("tools/boot-download");
+pub const protected_trust = @embedFile("release/protected/trust.json");
+pub const protected_boot_certificate = @embedFile("release/protected/boot.crt");
+pub const protected_image_certificate = @embedFile("release/protected/image.crt");
 pub const verify_boot_disk = @embedFile("tools/verify-boot-disk");
 
 /// posture_known are the posture checks every form of a kind fails.
@@ -39,6 +43,7 @@ pub const boot = [_]struct { path: []const u8, data: []const u8 }{
 /// Pinned security builders are available even when howl runs without its checkout.
 pub const secure_sources = [_]struct { path: []const u8, data: []const u8 }{
     .{ .path = "local-prerequisites", .data = @embedFile("tools/local-prerequisites") },
+    .{ .path = "tools/sign-kernel", .data = @embedFile("tools/sign-kernel") },
     .{ .path = "build-helper", .data = build_helper },
     .{ .path = "boot/build-helper.yaml", .data = build_helper_template },
     .{ .path = "boot/ipe-kernel.melange.yaml", .data = @embedFile("boot/ipe-kernel.melange.yaml") },

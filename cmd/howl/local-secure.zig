@@ -12,7 +12,15 @@ const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 
-const Profile = struct { spec: native.Spec, managed: bool, provider: howl.Platform = .lima };
+const Profile = struct {
+    spec: native.Spec,
+    managed: bool,
+    provider: howl.Platform = .lima,
+    imported: ?[]const u8 = null,
+    bootstrap: ?@import("boot-image.zig").Request = null,
+    configuration: ?@import("boot-config.zig").Definition = null,
+    candidate: ?@import("boot-image.zig").Request = null,
+};
 const Publisher = struct {
     authority: []const u8,
     public: []const u8,
@@ -25,9 +33,428 @@ const Publisher = struct {
     image_certificate: []const u8,
     token: []const u8,
     refresh_seconds: u32 = 3600,
+    service: ?[]const u8 = null,
 };
 
 pub const Reuse = enum { miss, running, configure };
+
+pub fn refreshSource(
+    io: Io,
+    gpa: Allocator,
+    o: howl.Options,
+    name: []const u8,
+    why: *howl.Why,
+) !void {
+    const directory = try howl.machineDir(gpa, name);
+    const saved = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/authority/profile.json", .{directory}),
+        gpa,
+        .limited(64 << 10),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    if (profile.imported != null or profile.provider != o.on.? or
+        !std.mem.eql(u8, profile.spec.form, o.form) or
+        !try callerMatches(
+            io,
+            gpa,
+            profile.spec,
+        )) return why.refuse(
+        "{s}: source authority or declaration changed; use a new machine name",
+        .{name},
+    );
+    try refresh(io, gpa, &.{directory}, why);
+}
+
+/// A latest vendor head can authorize updates, never replace an existing enrollment.
+pub fn resumeDownload(
+    io: Io,
+    gpa: Allocator,
+    o: *howl.Options,
+    name: []const u8,
+    why: *howl.Why,
+) !void {
+    const incoming = o.boot_image orelse return error.MissingBootImage;
+    const authority = try gpa.print("{s}/authority", .{try howl.machineDir(gpa, name)});
+    const saved = Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    ) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    if (profile.imported == null) return why.refuse(
+        "{s} has self-signed enrollment; retain --build or use a new machine name",
+        .{name},
+    );
+    if (profile.provider != o.on.? or !std.mem.eql(u8, profile.spec.form, o.form))
+        return why.refuse(
+            "{s}: provider or form changes require a new machine name; enrollment is retained",
+            .{name},
+        );
+    if (!try sameArtifact(io, gpa, incoming.boot_certificate, profile.spec.boot_cert.?) or
+        !try sameArtifact(io, gpa, incoming.image_certificate, profile.spec.ipe_cert.?) or
+        !std.mem.eql(
+            u8,
+            incoming.channel,
+            profile.spec.ipe_updates.?,
+        )) return error.ExistingImageAuthorityMismatch;
+    const bootstrap = profile.bootstrap orelse return error.ImportedImageNeedsAuthenticatedResume;
+    if (profile.candidate == null or
+        !std.mem.eql(u8, profile.candidate.?.directory, incoming.directory))
+        try acceptImage(io, gpa, &.{ name, incoming.directory }, why);
+    o.boot_image = bootstrap;
+}
+
+/// Explicit pins are supplied by the future download consumer, never by the image itself.
+pub fn enrollImage(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
+    if (args.len != 7 or !howl.isMachineName(args[0])) return error.BadArguments;
+    const provider = std.meta.stringToEnum(howl.Platform, args[6]) orelse return error.BadArguments;
+    if (provider != .lima and provider != .qemu) return error.BadSecuredProvider;
+    const request: @import("boot-image.zig").Request = .{
+        .directory = args[1],
+        .boot_certificate = args[2],
+        .image_certificate = args[3],
+        .channel = args[4],
+    };
+    const verified = try @import("boot-image.zig").verify(
+        io,
+        gpa,
+        request,
+        (howl.hostArch() orelse return error.UnsupportedHostArch),
+    );
+    @import("boot-config.zig").current = verified.manifest.configuration;
+    const directory = try howl.machineDir(gpa, args[0]);
+    const existed = if (Dir.cwd().access(io, directory, .{})) |_| true else |_| false;
+    if (!existed) {
+        try Dir.cwd().createDirPath(io, directory);
+        try howl.writePrivate(
+            io,
+            gpa,
+            try gpa.print("{s}/engine", .{directory}),
+            @tagName(provider),
+            why,
+        );
+    }
+    var out = Io.File.stdout().writerStreaming(io, &.{});
+    try create(
+        io,
+        gpa,
+        .{
+            .form = verified.manifest.form,
+            .on = provider,
+            .local = true,
+            .secure = true,
+            .boot_image = request,
+        },
+        args[0],
+        try Dir.cwd().readFileAlloc(io, args[5], gpa, .limited(16 << 20)),
+        .{
+            .verbose = false,
+            .command = "howl enroll authenticated image",
+            .began = Io.Clock.awake.now(io),
+        },
+        &out.interface,
+        why,
+    );
+}
+
+const SharedTls = struct { directory: []const u8, key: []const u8, certificate: []const u8 };
+
+/// Approve a vendor-authenticated candidate without rebuilding or changing machine authority.
+pub fn acceptImage(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !void {
+    if (args.len != 2 or !howl.isMachineName(args[0])) return error.BadArguments;
+    const machine = try howl.machineDir(gpa, args[0]);
+    const guard = try Dir.cwd().openFile(
+        io,
+        try gpa.print("{s}/secure.lock", .{machine}),
+        .{ .mode = .read_write },
+    );
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    const authority = try gpa.print("{s}/authority", .{machine});
+    var profile = try std.json.parseFromSliceLeaky(
+        Profile,
+        gpa,
+        try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/profile.json", .{authority}),
+            gpa,
+            .limited(64 << 10),
+        ),
+        .{},
+    );
+    if (profile.imported == null) return error.ImageIsNotImported;
+    const verified = try @import("boot-image.zig").verify(io, gpa, .{
+        .directory = args[1],
+        .boot_certificate = profile.spec.boot_cert.?,
+        .image_certificate = profile.spec.ipe_cert.?,
+        .channel = profile.spec.ipe_updates.?,
+    }, profile.spec.arch);
+    if (!std.mem.eql(u8, verified.manifest.form, profile.spec.form) or
+        !std.mem.eql(u8, verified.manifest.permit_host, profile.spec.permit_host.?) or
+        verified.manifest.permit_port != profile.spec.permit_port.?)
+        return error.WrongPermitProvider;
+    for ([_]struct { []const u8, [32]u8 }{
+        .{ "release.id", verified.release }, .{ "pcr11", verified.pcr },
+    }) |v| {
+        const raw = try enrollment.digestFile(
+            io,
+            gpa,
+            try gpa.print("{s}/slot/{s}", .{ args[1], v[0] }),
+        );
+        if (!std.mem.eql(u8, &raw, &v[1])) return error.WrongBootMeasurement;
+    }
+    var steps: progress.Steps = try .init(io, gpa, why, .{
+        .command = "howl accept authenticated image",
+        .log = try gpa.print(
+            "{s}/accept.log",
+            .{authority},
+        ),
+        .first = .{ .name = "Accepting vendor-signed image", .short = "image" },
+    });
+    try publish(
+        &steps,
+        try gpa.print("{s}/local-publisher", .{authority}),
+        try gpa.print("{s}/publisher.json", .{authority}),
+        args[1],
+    );
+    profile.candidate = .{
+        .directory = args[1],
+        .boot_certificate = profile.spec.boot_cert.?,
+        .image_certificate = profile.spec.ipe_cert.?,
+        .channel = profile.spec.ipe_updates.?,
+    };
+    profile.configuration = verified.manifest.configuration;
+    const profile_path = try gpa.print("{s}/profile.json", .{authority});
+    const temporary = try gpa.print("{s}.new", .{profile_path});
+    Dir.cwd().deleteFile(io, temporary) catch |err| if (err != error.FileNotFound) return err;
+    try enrollment.durable(
+        io,
+        temporary,
+        try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+    );
+    try Dir.cwd().rename(temporary, Dir.cwd(), profile_path, io);
+    _ = try steps.finish();
+}
+
+fn sharedTls(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    provider: howl.Platform,
+    port: u16,
+) !SharedTls {
+    const cwd = try std.process.currentPathAlloc(io, gpa);
+    const dir = try gpa.print("{s}/build/permit-service/{t}-{d}", .{ cwd, provider, port });
+    try Dir.cwd().createDirPath(io, dir);
+    try Dir.cwd().setFilePermissions(io, dir, .fromMode(0o700), .{});
+    const guard = try Dir.cwd().createFile(
+        io,
+        try gpa.print("{s}/service.lock", .{dir}),
+        .{ .truncate = false, .permissions = .fromMode(0o600) },
+    );
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    const key = try gpa.print("{s}/tls.key", .{dir});
+    const cert = try gpa.print("{s}/tls.crt", .{dir});
+    const config = try gpa.print("{s}/publisher.json", .{dir});
+    const registry = try gpa.print("{s}/registry", .{dir});
+    if (Dir.cwd().access(io, config, .{})) |_| {
+        for ([_][]const u8{ key, cert, registry }) |file| try Dir.cwd().access(io, file, .{});
+    } else |err| {
+        if (err != error.FileNotFound) return err;
+        for ([_][]const u8{ key, cert }) |file| {
+            if (Dir.cwd().access(io, file, .{})) |_|
+                return error.PartialPermitServiceIdentity
+            else |missing| if (missing != error.FileNotFound) return missing;
+        }
+        try enrollment.durable(io, key, "");
+        if (!(try steps.exec(
+            &.{.{ .argv = &.{
+                "openssl",
+                "req",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-x509",
+                "-sha256",
+                "-days",
+                "3650",
+                "-subj",
+                "/CN=werewolf-permits",
+                "-addext",
+                "subjectAltName=IP:192.168.5.2,IP:10.0.2.2,IP:127.0.0.1",
+                "-keyout",
+                key,
+                "-out",
+                cert,
+            } }},
+            .{},
+        )).ok) return error.PermitServiceIdentityFailed;
+        try Dir.cwd().createDir(io, registry, .fromMode(0o700));
+        var token: [32]u8 = undefined;
+        try io.randomSecure(&token);
+        try enrollment.durable(io, config, try std.json.Stringify.valueAlloc(gpa, .{
+            .authority = dir,
+            .registry = registry,
+            .port = port,
+            .certificate = cert,
+            .key = key,
+            .token = &std.fmt.bytesToHex(token, .lower),
+            .refresh_seconds = 0,
+        }, .{}));
+    }
+    return .{ .directory = dir, .key = key, .certificate = cert };
+}
+
+const ImportedSetup = struct { profile: Profile, tar: []const u8 };
+
+fn importImage(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    o: howl.Options,
+    name: []const u8,
+    at: []const u8,
+    authority: []const u8,
+    request: @import("boot-image.zig").Request,
+    tar: []const u8,
+    why: *howl.Why,
+) !ImportedSetup {
+    const verified = try @import("boot-image.zig").verify(
+        io,
+        gpa,
+        request,
+        (howl.hostArch() orelse return error.UnsupportedHostArch),
+    );
+    const m = verified.manifest;
+    const expected_host = if (o.on.? == .lima) "192.168.5.2" else "10.0.2.2";
+    if (!std.mem.eql(u8, m.permit_host, expected_host)) return error.WrongPermitProvider;
+    try Dir.cwd().createDir(io, authority, .fromMode(0o700));
+    const code = try gpa.print("{s}/boot.crt", .{at});
+    const image_cert = try gpa.print("{s}/image.crt", .{authority});
+    try Dir.cwd().copyFile(request.boot_certificate, Dir.cwd(), code, io, .{});
+    try Dir.cwd().copyFile(request.image_certificate, Dir.cwd(), image_cert, io, .{});
+    const signer = try enrollment.signer(io, gpa, steps, authority, false);
+    const owner = try enrollment.certificate(io, gpa, steps, signer, authority);
+    try secureboot.enroll(
+        io,
+        gpa,
+        steps,
+        at,
+        (howl.hostArch() orelse return error.UnsupportedHostArch),
+        code,
+        owner,
+    );
+    const tls = try sharedTls(io, gpa, steps, o.on.?, m.permit_port);
+    const slot = try gpa.print("{s}/initial-slot", .{authority});
+    try Dir.cwd().createDir(io, slot, .fromMode(0o700));
+    try enrollment.durable(io, try gpa.print("{s}/release.id", .{slot}), &verified.release);
+    try enrollment.durable(io, try gpa.print("{s}/pcr11", .{slot}), &verified.pcr);
+    const factory = try enrollment.factory(io, gpa, steps, signer, authority, slot);
+    const configured = try withTransport(
+        gpa,
+        tar,
+        try enrollment.transport(
+            io,
+            gpa,
+            steps,
+            signer,
+            authority,
+            tls.certificate,
+            if (o.on.? == .lima) .{ 192, 168, 5, 2 } else .{ 10, 0, 2, 2 },
+            m.permit_port,
+        ),
+    );
+    const disk = try gpa.print("{s}/disk.img", .{at});
+    try @import("boot-image.zig").materialize(io, gpa, steps, request, verified, disk, factory);
+    const profile: Profile = .{
+        .provider = o.on.?,
+        .managed = if (m.configuration) |definition| definition.lima_managed else false,
+        .imported = m.image.build,
+        .bootstrap = .{
+            .directory = request.directory,
+            .boot_certificate = code,
+            .image_certificate = image_cert,
+            .channel = request.channel,
+        },
+        .configuration = m.configuration,
+        .candidate = .{
+            .directory = request.directory,
+            .boot_certificate = code,
+            .image_certificate = image_cert,
+            .channel = request.channel,
+        },
+        .spec = .{
+            .form = m.form,
+            .arch = (howl.hostArch() orelse return error.UnsupportedHostArch),
+            .published = true,
+            .disk_path = disk,
+            .boot_cert = code,
+            .boot_native = true,
+            .tpm_firmware = true,
+            .tpm_pub = signer.public,
+            .boot_state = factory,
+            .ipe_cert = image_cert,
+            .ipe_updates = m.image.channel,
+            .image_serial = m.image.serial,
+            .update_ca = tls.certificate,
+            .update_port = (try std.Uri.parse(m.image.channel)).port,
+            .permit_host = m.permit_host,
+            .permit_port = m.permit_port,
+        },
+    };
+    const config = try gpa.print("{s}/publisher.json", .{authority});
+    const script = try gpa.print("{s}/local-publisher", .{authority});
+    var channel_digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(m.image.channel, &channel_digest, .{});
+    const channel_hash = std.fmt.bytesToHex(channel_digest, .lower);
+    const pubconfig: Publisher = .{
+        .authority = authority,
+        .public = try gpa.print("{s}/public/{s}", .{ tls.directory, &channel_hash }),
+        .howl = try std.process.executablePathAlloc(io, gpa),
+        .arch = m.image.arch,
+        .channel = m.image.channel,
+        .port = m.permit_port,
+        .certificate = tls.certificate,
+        .key = tls.key,
+        .image_certificate = image_cert,
+        .token = "unused-registration",
+        .refresh_seconds = if (o.production_download) 300 else 0,
+        .service = tls.directory,
+    };
+    try enrollment.durable(io, script, @import("files").local_publisher);
+    try enrollment.durable(io, config, try std.json.Stringify.valueAlloc(gpa, pubconfig, .{}));
+    // Recheck auxiliary measurements before the existing publisher registers them.
+    for ([_]struct {
+        []const u8,
+        [32]u8,
+    }{ .{ "release.id", verified.release }, .{ "pcr11", verified.pcr } }) |v| {
+        const bytes = try enrollment.digestFile(
+            io,
+            gpa,
+            try gpa.print("{s}/slot/{s}", .{ request.directory, v[0] }),
+        );
+        if (!std.mem.eql(u8, &bytes, &v[1])) return error.WrongBootMeasurement;
+    }
+    try publish(steps, script, config, request.directory);
+    try enrollment.durable(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+    );
+    try provisionInstance(io, gpa, steps, profile, name, at, authority, configured, signer, why);
+    return .{ .profile = profile, .tar = configured };
+}
 
 /// Health-check the retained publisher, restarting it only when absent.
 pub fn startPublisher(io: Io, gpa: Allocator, name: []const u8, why: *howl.Why) !void {
@@ -97,7 +524,7 @@ pub fn stop(
 
 /// Matching inputs keep the image and authority; matching live guests need no work.
 pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []const u8) !Reuse {
-    if (!o.secure or !o.local or o.app != null or o.import_dir != null) return .miss;
+    if (!o.secure or o.app != null or o.import_dir != null) return .miss;
     const dir = try howl.machineDir(gpa, name);
     const authority = try gpa.print("{s}/authority", .{dir});
     const saved = Dir.cwd().readFileAlloc(
@@ -118,23 +545,30 @@ pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []c
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
     const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
-    if (profile.provider != o.on.? or profile.spec.published or
+    if (profile.provider != o.on.? or
         !std.mem.eql(u8, profile.spec.form, o.form)) return .miss;
+    if (profile.imported != null) {
+        if (o.local or o.boot_image == null) return error.ImportedImageCannotSourceBuild;
+    } else {
+        if (!o.local or profile.spec.published) return .miss;
+        if (!try callerMatches(io, gpa, profile.spec)) return .miss;
+        const expected = try inputs(
+            io,
+            gpa,
+            profile.spec,
+            try gpa.print("{s}/linux.efi.stub", .{authority}),
+        );
+        const previous = try Dir.cwd().readFileAlloc(
+            io,
+            try gpa.print("{s}/image-inputs", .{authority}),
+            gpa,
+            .limited(65),
+        );
+        if (!std.mem.eql(u8, &expected, previous)) return .miss;
+    }
     for ([_][]const u8{ "enrolled", "credentials/owner.auth", "credentials/lockout.auth" }) |file|
         try Dir.cwd().access(io, try gpa.print("{s}/{s}", .{ authority, file }), .{});
     Dir.cwd().access(io, try gpa.print("{s}/ready", .{authority}), .{}) catch return .miss;
-    if (!try callerMatches(io, gpa, profile.spec)) return .miss;
-    const expected = try inputs(
-        io,
-        gpa,
-        profile.spec,
-        try gpa.print("{s}/linux.efi.stub", .{authority}),
-    );
-    const previous = try Dir.cwd().readFileAlloc(io, try gpa.print(
-        "{s}/image-inputs",
-        .{authority},
-    ), gpa, .limited(65));
-    if (!std.mem.eql(u8, &expected, previous)) return .miss;
     const requested = if (profile.spec.permit_host != null)
         try withTransport(
             gpa,
@@ -417,6 +851,21 @@ pub fn create(
             .{name},
         );
         profile = try std.json.parseFromSliceLeaky(Profile, gpa, data, .{});
+        if (profile.imported != null) {
+            const requested = o.boot_image orelse
+                return error.ImportedImageNeedsAuthenticatedResume;
+            const verified = try @import("boot-image.zig").verify(io, gpa, requested, arch);
+            if (!std.mem.eql(u8, profile.imported.?, verified.manifest.image.build))
+                return error.ImportedImageCannotReplaceEnrollment;
+        } else {
+            if (o.boot_image != null or !o.local) return error.ExistingSourceEnrollment;
+            if (!try callerMatches(
+                io,
+                gpa,
+                profile.spec,
+            )) return error.ExistingSourceAuthorityMismatch;
+        }
+
         if (profile.spec.permit_host != null) configured = try withTransport(
             gpa,
             tar,
@@ -462,6 +911,10 @@ pub fn create(
             try tpmService(io, gpa, at, "stop");
             try howl.writePrivate(io, gpa, try gpa.print("{s}/config.tar", .{at}), configured, why);
         }
+    } else if (o.boot_image) |request| {
+        const setup = try importImage(io, gpa, &steps, o, name, at, authority, request, tar, why);
+        profile = setup.profile;
+        configured = setup.tar;
     } else {
         const prerequisites = try @import("prerequisites.zig").resolve(io, gpa, &steps, arch, why);
         const boot = try ownedBoot(io, gpa, &steps, at, arch, o.local);
@@ -583,53 +1036,18 @@ pub fn create(
             try gpa.print("{s}/image-inputs", .{authority}),
             &try inputs(io, gpa, profile.spec, stub),
         );
-        const tar_path = try gpa.print("{s}/config.tar", .{at});
-        try howl.writePrivate(io, gpa, tar_path, configured, why);
-        if (on_lima) {
-            const config_disk = try gpa.print("{s}-config", .{name});
-            if (!(try steps.exec(&.{.{ .argv = &.{
-                "limactl", "disk", "import", config_disk, tar_path,
-            } }}, .{})).ok) return steps.fail("importing the config disk failed");
-            const yaml = try gpa.print("{s}/lima.yaml", .{at});
-            try howl.writePrivate(
-                io,
-                gpa,
-                yaml,
-                try template(
-                    gpa,
-                    o.form,
-                    profile.spec.disk_path.?,
-                    at,
-                    config_disk,
-                    profile.managed,
-                ),
-                why,
-            );
-            if (!(try steps.exec(&.{.{ .argv = &.{
-                "limactl", "create", "--name", name, "--tty=false", yaml,
-            } }}, .{})).ok) return steps.fail("creating the secured Lima instance failed");
-            const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
-            try enrollment.provision(
-                io,
-                gpa,
-                permit_signer,
-                authority,
-                try gpa.print("{s}/swtpm", .{instance}),
-            );
-        } else {
-            try enrollment.durable(
-                io,
-                try gpa.print("{s}/local-tpm", .{authority}),
-                @import("files").local_tpm,
-            );
-            try enrollment.provision(
-                io,
-                gpa,
-                permit_signer,
-                authority,
-                try gpa.print("{s}/swtpm", .{authority}),
-            );
-        }
+        try provisionInstance(
+            io,
+            gpa,
+            &steps,
+            profile,
+            name,
+            at,
+            authority,
+            configured,
+            permit_signer,
+            why,
+        );
     }
     const helper = @import("files").local_publisher;
     const previous_helper = try Dir.cwd().readFileAlloc(io, script, gpa, .limited(128 << 10));
@@ -643,7 +1061,15 @@ pub fn create(
         )).ok)
             return steps.fail("the previous host publisher did not stop");
         try Dir.cwd().rename(replacement, Dir.cwd(), script, io);
-        try publish(&steps, script, config, (try native.paths(gpa, profile.spec)).out);
+        try publish(
+            &steps,
+            script,
+            config,
+            if (profile.candidate) |candidate|
+                candidate.directory
+            else
+                (try native.paths(gpa, profile.spec)).out,
+        );
     }
     if (!(try steps.exec(&.{.{ .argv = &.{ "python3", script, "start", config } }}, .{})).ok)
         return steps.fail("the host image publisher did not start");
@@ -702,6 +1128,19 @@ pub fn refresh(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         gpa,
         .limited(64 << 10),
     ), .{});
+    if (profile.imported != null) {
+        var options: howl.Options = .{ .form = profile.spec.form, .on = profile.provider };
+        options.boot_image = try @import("download.zig").latest(
+            io,
+            gpa,
+            profile.spec.form,
+            profile.provider,
+            profile.spec.arch,
+            why,
+        );
+        try resumeDownload(io, gpa, &options, std.fs.path.basename(dir), why);
+        return;
+    }
     const guard = try Dir.cwd().openFile(
         io,
         try gpa.print("{s}/secure.lock", .{dir}),
@@ -794,6 +1233,116 @@ fn withTransport(gpa: Allocator, tar: []const u8, bundle: []const u8) ![]const u
     return result;
 }
 
+test "downloaded live reuse has no vendor keys and retains bootstrap and TPM authority" {
+    const t = std.testing;
+    const io = t.io;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var nonce: [8]u8 = undefined;
+    try io.randomSecure(&nonce);
+    const name = try gpa.print("ww-import-{s}", .{std.fmt.bytesToHex(nonce, .lower)});
+    const dir = try howl.machineDir(gpa, name);
+    defer Dir.cwd().deleteTree(io, dir) catch {};
+    const authority = try gpa.print("{s}/authority", .{dir});
+    try Dir.cwd().createDirPath(io, try gpa.print("{s}/credentials", .{authority}));
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = try gpa.print("{s}/secure.lock", .{dir}), .data = "" },
+    );
+    for ([_][]const u8{
+        "ready",
+        "enrolled",
+        "credentials/owner.auth",
+        "credentials/lockout.auth",
+    }) |file|
+        try Dir.cwd().writeFile(
+            io,
+            .{ .sub_path = try gpa.print("{s}/{s}", .{ authority, file }), .data = "retained" },
+        );
+    const bootstrap: @import("boot-image.zig").Request = .{
+        .directory = "immutable-" ++
+            "A",
+        .boot_certificate = "public-boot.crt",
+        .image_certificate = "public-image.crt",
+        .channel = "https://10.0.2.2:9443/playground",
+    };
+    const profile: Profile = .{
+        .spec = .{
+            .form = "playground",
+            .arch = .x86_64,
+            .published = true,
+        },
+        .managed = false,
+        .provider = .qemu,
+        .imported = "A",
+        .bootstrap = bootstrap,
+        .candidate = bootstrap,
+    };
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = try gpa.print("{s}/profile.json", .{authority}),
+            .data = try std.json.Stringify.valueAlloc(gpa, profile, .{}),
+        },
+    );
+    const tar = try howl.writeTar(gpa, &.{.{ .path = "hostname", .data = name, .from = "test" }});
+    try Dir.cwd().writeFile(
+        io,
+        .{ .sub_path = try gpa.print("{s}/config.tar", .{dir}), .data = tar },
+    );
+    try Dir.cwd().writeFile(
+        io,
+        .{
+            .sub_path = try gpa.print("{s}/qemu.pid", .{dir}),
+            .data = try gpa.print(
+                "{d}\n",
+                .{
+                    if (@import("builtin").os.tag == .linux)
+                        std.os.linux.getpid()
+                    else
+                        std.c.getpid(),
+                },
+            ),
+        },
+    );
+    const address = try Io.net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{dir}));
+    var listener = try address.listen(io, .{});
+    defer listener.deinit(io);
+    var o: howl.Options = .{
+        .form = "playground",
+        .on = .qemu,
+        .secure = true,
+        .boot_image = bootstrap,
+    };
+    try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
+    try t.expectEqual(
+        Reuse.configure,
+        try reuse(
+            io,
+            gpa,
+            o,
+            name,
+            try howl.writeTar(gpa, &.{.{ .path = "hostname", .data = "changed", .from = "test" }}),
+        ),
+    );
+    o.local = true;
+    try t.expectError(error.ImportedImageCannotSourceBuild, reuse(io, gpa, o, name, tar));
+    o.local = false;
+    try Dir.cwd().deleteFile(io, try gpa.print("{s}/credentials/owner.auth", .{authority}));
+    try t.expectError(error.FileNotFound, reuse(io, gpa, o, name, tar));
+    const saved = try Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    );
+    const kept = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    try t.expectEqualStrings("immutable-A", kept.bootstrap.?.directory);
+    try t.expectEqual(null, kept.spec.ipe_key);
+    try t.expectEqual(null, kept.spec.boot_key);
+}
+
 test "machine transport config replaces only its reserved public declaration" {
     const t = std.testing;
     var arena: std.heap.ArenaAllocator = .init(t.allocator);
@@ -873,7 +1422,7 @@ fn programInputs(io: Io, gpa: Allocator, form: []const u8) ![32]u8 {
         hash.update(bytes.sha256);
     }
     try sourceTree(io, gpa, &hash, "lib");
-    for ([_][]const u8{ "init", "bite-cleanup" } ++ native.every_program) |name|
+    for ([_][]const u8{"init"} ++ native.every_program) |name|
         try sourceTree(io, gpa, &hash, try gpa.print("cmd/{s}", .{name}));
     var bad: @import("form").Failure = .{};
     const chain = try @import("form").chain(io, gpa, Dir.cwd(), form, &bad);
@@ -1116,4 +1665,65 @@ test "secured Lima uses measured QEMU and has no host mounts" {
     try std.testing.expect(std.mem.find(u8, yaml, "location: \"/tmp/a b/disk.img\"") != null);
     try std.testing.expectEqualStrings("qemu-system-aarch64 -drive 'if=pflash,format=raw,unit=1," ++
         "readonly=on,file=/tmp/a,,b c.fd'", try qemuCommand(gpa, "/tmp/a,b c.fd"));
+}
+
+fn provisionInstance(
+    io: Io,
+    gpa: Allocator,
+    steps: *progress.Steps,
+    profile: Profile,
+    name: []const u8,
+    at: []const u8,
+    authority: []const u8,
+    configured: []const u8,
+    permit_signer: enrollment.Signer,
+    why: *howl.Why,
+) !void {
+    const tar_path = try gpa.print("{s}/config.tar", .{at});
+    try howl.writePrivate(io, gpa, tar_path, configured, why);
+    if (profile.provider == .lima) {
+        const config_disk = try gpa.print("{s}-config", .{name});
+        if (!(try steps.exec(&.{.{ .argv = &.{
+            "limactl", "disk", "import", config_disk, tar_path,
+        } }}, .{})).ok) return steps.fail("importing the config disk failed");
+        const yaml = try gpa.print("{s}/lima.yaml", .{at});
+        try howl.writePrivate(
+            io,
+            gpa,
+            yaml,
+            try template(
+                gpa,
+                profile.spec.form,
+                profile.spec.disk_path.?,
+                at,
+                config_disk,
+                profile.managed,
+            ),
+            why,
+        );
+        if (!(try steps.exec(&.{.{ .argv = &.{
+            "limactl", "create", "--name", name, "--tty=false", yaml,
+        } }}, .{})).ok) return steps.fail("creating the secured Lima instance failed");
+        const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
+        try enrollment.provision(
+            io,
+            gpa,
+            permit_signer,
+            authority,
+            try gpa.print("{s}/swtpm", .{instance}),
+        );
+    } else {
+        try enrollment.durable(
+            io,
+            try gpa.print("{s}/local-tpm", .{authority}),
+            @import("files").local_tpm,
+        );
+        try enrollment.provision(
+            io,
+            gpa,
+            permit_signer,
+            authority,
+            try gpa.print("{s}/swtpm", .{authority}),
+        );
+    }
 }

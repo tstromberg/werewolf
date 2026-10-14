@@ -21,8 +21,9 @@ from urllib.parse import parse_qs, urlsplit
 
 HEX = r'[0-9a-f]{64}'
 TAG = b'werewolf.boot/2\0'
-FILES = {'root.erofs', 'vmlinuz', 'stage0.zst', 'stage0-bitten.zst', 'cmdline', 'uki.efi'}
+FILES = {'root.erofs', 'vmlinuz', 'stage0.zst', 'cmdline', 'uki.efi'}
 MAX_RECORDS = 4096
+MAX_MACHINES = 64
 
 
 def atomic(path, data):
@@ -135,10 +136,49 @@ class Publisher:
             raise ValueError('invalid artifact')
         return path
 
+    def for_machine(self, machine):
+        if machine != self.machine:
+            raise ValueError('foreign machine')
+        return self
+
+
+class Registry:
+    """A shared listener dispatches to independently keyed machine issuers."""
+    def __init__(self, config):
+        self.directory = Path(config['registry'])
+
+    def for_machine(self, machine):
+        if not re.fullmatch(HEX, machine):
+            raise ValueError('invalid machine')
+        path = self.directory / (machine + '.json')
+        if path.is_symlink() or path.stat().st_size > 65536:
+            raise ValueError('invalid registration')
+        issuer = Publisher(json.loads(path.read_text()))
+        if issuer.machine != machine:
+            raise ValueError('foreign registration')
+        return issuer
+
+    def artifact(self, route):
+        # Each immutable channel has a shared public cache, independent of its issuers.
+        registrations = sorted(self.directory.glob('*.json'))
+        if len(registrations) > MAX_MACHINES:
+            raise ValueError('registration limit')
+        for path in registrations:
+            if path.is_symlink() or path.stat().st_size > 65536:
+                raise ValueError('invalid registration')
+            config = json.loads(path.read_text())
+            prefix = urlsplit(config['channel']).path.rstrip('/')
+            if route.startswith(prefix + '/'):
+                try:
+                    return Publisher(config).artifact(route[len(prefix):])
+                except FileNotFoundError:
+                    continue
+        raise ValueError('undeclared channel')
+
 
 class Server(http.server.HTTPServer):
     def __init__(self, config):
-        self.publisher = Publisher(config)
+        self.publisher = Registry(config) if config.get('registry') else Publisher(config)
         self.config = config
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
         self.capacity = threading.BoundedSemaphore(8)
@@ -188,13 +228,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if route.path == '/_health' and self.authorized():
                 self.send_data(b'ready\n')
                 return
-            pattern = '/' + self.server.config['arch'] + '/permits/(' + HEX + ')/(' + HEX + ')\\.permit'
+            pattern = '/(aarch64|x86_64)/permits/(' + HEX + ')/(' + HEX + ')\\.permit'
             match = re.fullmatch(pattern, route.path)
             if match:
                 query = parse_qs(route.query, strict_parsing=True, max_num_fields=2)
                 if set(query) != {'from', 'retain'} or any(len(values) != 1 for values in query.values()):
                     raise ValueError('invalid context')
-                self.send_data(self.server.publisher.permit(*match.groups(), query['from'][0], query['retain'][0]))
+                arch, machine, candidate = match.groups()
+                issuer = self.server.publisher.for_machine(machine)
+                if issuer.config['arch'] != arch:
+                    raise ValueError('foreign architecture')
+                self.send_data(issuer.permit(machine, candidate, query['from'][0], query['retain'][0]))
                 return
             if route.query:
                 raise ValueError('unexpected query')
@@ -204,7 +248,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.send_header('Content-Length', str(os.fstat(stream.fileno()).st_size))
                 self.end_headers()
                 shutil.copyfileobj(stream, self.wfile, 64 << 10)
-        except (ValueError, KeyError, FileNotFoundError):
+        except (ValueError, KeyError, FileNotFoundError) as error:
+            if self.server.config.get('registry'):
+                print(json.dumps({'event': 'refused', 'path': self.path,
+                                  'error': type(error).__name__, 'detail': str(error)}), flush=True)
             self.send_error(404)
         except (OSError, subprocess.SubprocessError):
             self.send_error(503)
@@ -250,6 +297,28 @@ def main():
     if args.action == 'publish':
         publish(config, args.source)
         return
+    if config.get('service'):
+        service = Path(config['service'])
+        registry = service / 'registry'
+        machine = record((Path(config['authority']) / 'factory.permit').read_bytes())['machine']
+        with (service / 'registration.lock').open('a+b') as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            registration = registry / (machine + '.json')
+            if args.action == 'start':
+                if not registration.exists() and len(list(registry.glob('*.json'))) >= MAX_MACHINES:
+                    raise ValueError('registration limit')
+                if registration.exists() and json.loads(registration.read_text()) != config:
+                    raise ValueError('conflicting machine registration')
+                atomic(registration, json.dumps(config).encode())
+            elif args.action == 'stop':
+                registration.unlink(missing_ok=True)
+                if any(registry.glob('*.json')):
+                    return
+            else:
+                raise ValueError('a machine registration cannot serve directly')
+            result = subprocess.run([sys.executable, str(Path(__file__).resolve()), args.action,
+                                     str(service / 'publisher.json')], check=True)
+            return
     if args.action == 'stop':
         try:
             if not control(config, True):
@@ -269,7 +338,7 @@ def main():
             fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
             with Server(config) as server:
                 stopped = threading.Event()
-                if config.get('refresh_seconds', 0):
+                if config.get('refresh_seconds', 0) or config.get('registry'):
                     refresher = threading.Thread(target=refresh_loop, args=(config, stopped))
                     refresher.start()
                 else:
@@ -315,75 +384,128 @@ def publish(config, source):
     image = json.loads(manifest.read_text())
     if image['channel'] != config['channel'] or image['arch'] != config['arch'] or not image['ipe']:
         raise ValueError('wrong image authority')
-    identity = b'werewolf.release/2\0' + config['arch'].encode() + b'\0'
-    for filename in ['root.erofs', 'vmlinuz', 'stage0.zst']:
-        identity += bytes.fromhex(image['files'][filename]['sha256'])
-    identity += bytes.fromhex(image['boot_context'])
-    release = hashlib.sha256(identity).hexdigest()
-    if (source / 'slot/release.id').read_bytes().hex() != release:
-        raise ValueError('wrong release identity')
-    pcr = (source / 'slot/pcr11').read_bytes().hex()
-    if not re.fullmatch(HEX, pcr) or pcr == '0' * 64:
-        raise ValueError('unmeasured image')
     root = Path(config['public']) / config['arch']
-    target = root / image['build']
-    if not re.fullmatch(HEX, image['build']):
-        raise ValueError('wrong build identity')
-    target.mkdir(parents=True, exist_ok=True)
-    for filename, artifact in image['files'].items():
-        if artifact is None:
-            continue
-        if filename not in FILES:
-            raise ValueError('unknown artifact')
-        original = manifest.parent / image['build'] / filename
-        with original.open('rb') as stream:
-            digest = file_digest(stream)
-        if original.stat().st_size != artifact['size'] or digest != artifact['sha256']:
-            raise ValueError('wrong image bytes')
-        destination = target / filename
-        if destination.exists():
-            with destination.open('rb') as stream:
-                if file_digest(stream) != digest:
-                    raise ValueError('immutable object collision')
-        else:
-            temporary = target / (filename + '.new')
-            with original.open('rb') as incoming, temporary.open('xb') as outgoing:
-                shutil.copyfileobj(incoming, outgoing)
-                outgoing.flush()
-                os.fsync(outgoing.fileno())
-            os.replace(temporary, destination)
-    with (authority / 'issuer.lock').open('a+b') as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
-        mappings = authority / 'releases.json'
-        releases = json.loads(mappings.read_text()) if mappings.exists() else {}
-        if release in releases and releases[release] != pcr:
-            raise ValueError('conflicting measurement')
-        releases[release] = pcr
-        approved_file = authority / 'approved.json'
-        approved = json.loads(approved_file.read_text()) if approved_file.exists() else None
-        if approved and (image['serial'] < approved['serial'] or
-                         (image['serial'] == approved['serial'] and release != approved['candidate'])):
-            raise ValueError('publication would roll back the update head')
-        atomic(mappings, (json.dumps(releases) + '\n').encode())
-        atomic(approved_file, (json.dumps({'candidate': release, 'serial': image['serial']}) + '\n').encode())
-        atomic(root / 'latest.json.sig', signature.read_bytes())
-        atomic(root / 'latest.json', manifest.read_bytes())
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / 'publication.lock').open('a+b') as public_guard:
+        fcntl.flock(public_guard, fcntl.LOCK_EX)
+        receipt = root / 'accepted-head.json'
+        previous = root / 'latest.json'
+        if receipt.exists() or previous.exists():
+            if receipt.exists():
+                saved = json.loads(receipt.read_text())
+                old_data = saved['head'].encode()
+                old_signature = bytes.fromhex(saved['signature'])
+            else:
+                old_data = previous.read_bytes()
+                old_signature = (root / 'latest.json.sig').read_bytes()
+            if len(old_data) > 1048576 or len(old_signature) > 512:
+                raise ValueError('invalid shared head receipt')
+            with tempfile.TemporaryDirectory(dir=authority) as temporary:
+                work = Path(temporary)
+                public_key = work / 'image.pub'
+                public_key.write_bytes(run(['openssl', 'x509', '-in', config['image_certificate'],
+                                            '-pubkey', '-noout']).stdout)
+                (work / 'head').write_bytes(old_data)
+                (work / 'signature').write_bytes(old_signature)
+                run(['openssl', 'dgst', '-sha256', '-verify', public_key,
+                     '-signature', work / 'signature', work / 'head'])
+            old = json.loads(old_data)
+            if old['channel'] != config['channel'] or old['arch'] != config['arch']:
+                raise ValueError('conflicting shared channel identity')
+            if image['serial'] < old['serial'] or (image['serial'] == old['serial'] and image['build'] != old['build']):
+                raise ValueError('publication would roll back the shared update head')
+        identity = b'werewolf.release/2\0' + config['arch'].encode() + b'\0'
+        for filename in ['root.erofs', 'vmlinuz', 'stage0.zst']:
+            identity += bytes.fromhex(image['files'][filename]['sha256'])
+        identity += bytes.fromhex(image['boot_context'])
+        release = hashlib.sha256(identity).hexdigest()
+        if (source / 'slot/release.id').read_bytes().hex() != release:
+            raise ValueError('wrong release identity')
+        pcr = (source / 'slot/pcr11').read_bytes().hex()
+        if not re.fullmatch(HEX, pcr) or pcr == '0' * 64:
+            raise ValueError('unmeasured image')
+        target = root / image['build']
+        if not re.fullmatch(HEX, image['build']):
+            raise ValueError('wrong build identity')
+        target.mkdir(parents=True, exist_ok=True)
+        for filename, artifact in image['files'].items():
+            if artifact is None:
+                continue
+            if filename not in FILES:
+                raise ValueError('unknown artifact')
+            original = manifest.parent / image['build'] / filename
+            with original.open('rb') as stream:
+                digest = file_digest(stream)
+            if original.stat().st_size != artifact['size'] or digest != artifact['sha256']:
+                raise ValueError('wrong image bytes')
+            destination = target / filename
+            if destination.exists():
+                with destination.open('rb') as stream:
+                    if file_digest(stream) != digest:
+                        raise ValueError('immutable object collision')
+            else:
+                temporary = target / (filename + '.new')
+                with original.open('rb') as incoming, temporary.open('xb') as outgoing:
+                    shutil.copyfileobj(incoming, outgoing)
+                    outgoing.flush()
+                    os.fsync(outgoing.fileno())
+                os.replace(temporary, destination)
+        with (authority / 'issuer.lock').open('a+b') as guard:
+            fcntl.flock(guard, fcntl.LOCK_EX)
+            mappings = authority / 'releases.json'
+            releases = json.loads(mappings.read_text()) if mappings.exists() else {}
+            if release in releases and releases[release] != pcr:
+                raise ValueError('conflicting measurement')
+            releases[release] = pcr
+            approved_file = authority / 'approved.json'
+            approved = json.loads(approved_file.read_text()) if approved_file.exists() else None
+            if approved and (image['serial'] < approved['serial'] or
+                             (image['serial'] == approved['serial'] and release != approved['candidate'])):
+                raise ValueError('publication would roll back the update head')
+            atomic(mappings, (json.dumps(releases) + '\n').encode())
+            atomic(approved_file, (json.dumps({'candidate': release, 'serial': image['serial']}) + '\n').encode())
+            atomic(receipt, json.dumps({'head': manifest.read_text(), 'signature': signature.read_bytes().hex()}).encode())
+            atomic(root / 'latest.json.sig', signature.read_bytes())
+            atomic(root / 'latest.json', manifest.read_bytes())
+
+def refresh_targets(config):
+    if not config.get('registry'):
+        return [config] if config.get('refresh_seconds', 0) else []
+    targets = []
+    paths = sorted(Path(config['registry']).glob('*.json'))
+    if len(paths) > MAX_MACHINES:
+        raise ValueError('registration limit')
+    for path in paths:
+        if path.is_symlink() or path.stat().st_size > 65536:
+            raise ValueError('invalid registration')
+        entry = json.loads(path.read_text())
+        if entry.get('refresh_seconds', 0):
+            targets.append(entry)
+    return targets
 
 
 def refresh_loop(config, stopped):
-    while not stopped.wait(config['refresh_seconds']):
-        with (Path(config['authority']) / 'refresh-service.log').open('ab') as output:
-            try:
-                process = subprocess.Popen([config['howl'], '_local-refresh', str(Path(config['authority']).parent)],
-                                           stdin=subprocess.DEVNULL, stdout=output, stderr=output)
-                deadline = time.monotonic() + 3600
-                while process.poll() is None:
-                    if stopped.wait(1) or time.monotonic() >= deadline:
-                        process.kill()
-                        process.wait(timeout=10)
-                        break
-            except (OSError, subprocess.SubprocessError) as error:
-                output.write(('local-publisher: refresh failed: ' + str(type(error).__name__) + '\n').encode())
+    interval = config.get('refresh_seconds') or 300
+    while not stopped.wait(interval):
+        try:
+            targets = refresh_targets(config)
+        except (OSError, ValueError, KeyError):
+            continue
+        for target in targets:
+            if stopped.is_set():
+                return
+            with (Path(target['authority']) / 'refresh-service.log').open('ab') as output:
+                try:
+                    process = subprocess.Popen([target['howl'], '_local-refresh', str(Path(target['authority']).parent)],
+                                               stdin=subprocess.DEVNULL, stdout=output, stderr=output)
+                    deadline = time.monotonic() + 900
+                    while process.poll() is None:
+                        if stopped.wait(1) or time.monotonic() >= deadline:
+                            process.kill()
+                            process.wait(timeout=10)
+                            break
+                except (OSError, subprocess.SubprocessError) as error:
+                    output.write(('local-publisher: refresh failed: ' + str(type(error).__name__) + '\n').encode())
 
 
 if __name__ == '__main__':

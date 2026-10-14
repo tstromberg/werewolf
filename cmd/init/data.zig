@@ -1,5 +1,6 @@
-//! init's /data phase: a directory on the victim, RAM, or the disk named by
-//! werewolf.data, formatted only while blank and encrypted when there is a key.
+//! init's /data phase: /boot/data on a machine with slots, RAM, or the disk
+//! named by werewolf.data, formatted only while blank and encrypted when there
+//! is a key.
 
 const std = @import("std");
 const settings = @import("settings");
@@ -24,19 +25,18 @@ const import_failed = import_dir ++ "/import-failed";
 /// checks keys against it too.
 const min_data_key = settings.min_data_key;
 
-/// data mounts /data: the victim's data/ directory on a machine with slots,
-/// else RAM without werewolf.data or mke2fs, else the disk labelled
-/// werewolf-data, in LUKS2 when the config has a data.key. A disk is
-/// formatted only while blkid finds it blank, since /data may hold the
-/// only copy of something. When it cannot use a disk, /data is an empty
-/// read-only tmpfs and /run/werewolf/nodata says why (see README.md).
+/// data mounts /data: /boot/data on a machine with slots, else RAM without
+/// werewolf.data or mke2fs, else the disk labelled werewolf-data, in LUKS2
+/// when the config has a data.key. A disk is formatted only while blkid finds
+/// it blank, since /data may hold the only copy of something. When it cannot
+/// use a disk, /data is an empty read-only tmpfs and /run/werewolf/nodata says
+/// why (see README.md).
 pub fn data(m: *Machine) void {
     mkdir("/data", 0o755);
-    if (m.victim_dir.len > 0) {
-        // The victim's filesystem is repaired by the kernel as it mounts,
-        // so there is nothing to format, check or label. It wins over any
-        // disk.
-        const dir = m.fmtZ("{s}/data", .{m.victim_dir});
+    if (m.cmd.slots != null and m.mountSource("/boot") != null) {
+        // The boot filesystem is repaired by the kernel as it mounts, so
+        // there is nothing to format, check or label. It wins over any disk.
+        const dir = "/boot/data";
         mkdir(dir, 0o755);
         if (m.run(&.{ mount_bin, "--bind", "-o", "symfollow", dir, "/data" }) and
             m.run(&.{ mount_bin, "-o", "remount,bind,noatime,nosuid,nodev,noexec", "/data" }))
@@ -45,18 +45,18 @@ pub fn data(m: *Machine) void {
         } else {
             nodata(m, m.fmt("cannot bind {s}", .{dir}));
         }
-        // Make /victim read-only. That is a property of the mount, so /data,
-        // bound from it, stays writable; slot-keep and slot-update mount the
-        // victim again to write it.
+        // Make /boot read-only. That is a property of the mount, so /data,
+        // bound from it, stays writable; mount-broker mounts the filesystem
+        // detached when slot-update writes a new slot.
         if (m.run(&.{
             mount_bin,
             "-o",
             "remount,bind,ro,nosuid,nodev,noexec,nosymfollow",
-            "/victim",
+            "/boot",
         }))
-            say("/victim is read-only", .{})
+            say("/boot is read-only", .{})
         else
-            say("/victim stays writable: remounting it read-only failed", .{});
+            say("/boot stays writable: remounting it read-only failed", .{});
     } else if (m.cmd.data.len == 0 or m.which("mke2fs") == null) {
         m.mount(&.{
             "-t",

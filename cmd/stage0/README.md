@@ -15,7 +15,7 @@ The image comes from one of three places, named on the kernel command line:
 
 | Words | Image |
 | --- | --- |
-| `werewolf.victim=UUID:DIR`, `werewolf.slot=a\|b` | `DIR/SLOT/root.erofs` on that filesystem (bite's victim, or werewolf's own disk) |
+| `werewolf.slots=UUID`, `werewolf.slot=a\|b` | `/slot/SLOT/root.erofs` on that filesystem (werewolf's own disk) |
 | `werewolf.root=DEV` | the disk `/dev/DEV` (Firecracker's `vdc`) |
 | neither | `/root.erofs` appended to the initramfs (a direct boot, `howl run --on qemu`) |
 
@@ -33,7 +33,7 @@ before stage0, so it uses the kernel directly: no shell, blkid or mount.
 
 ## Non-Goals
 
-- Choosing slots: the loader (GRUB or systemd-boot) does.
+- Choosing slots: systemd-boot does.
 - Verifying the initramfs or kernel: secure boot's job
   ([verified-boot.md](../../docs/design/verified-boot.md)).
 
@@ -47,8 +47,8 @@ before stage0, so it uses the kernel directly: no shell, blkid or mount.
    reading tags on stdin (`hyperv`, `esp`, then the filesystem kind). Then
    the initramfs's 14 MB of modules are deleted, since nothing frees it.
 4. **The disk**: every block device's superblock is read for the UUID
-   (ext4, xfs, btrfs), every 10 ms for up to 10 s. If two devices have it,
-   stage0 fails: `/data` and the config tar come from that filesystem too.
+   (ext4), every 10 ms for up to 10 s. If two devices have it,
+   stage0 fails: `/data` comes from that filesystem too.
 5. **The root**: dm-verity maps the disk, or a file on a read-only,
    autoclearing loop device read ahead in the background, with `/verity`;
    erofs mounts it read-only.
@@ -56,7 +56,7 @@ before stage0, so it uses the kernel directly: no shell, blkid or mount.
    (sysrq `b`) unless `/run/werewolf/committed` exists in PID 1's root,
    logging why a second before. Only a DEV build's root may shorten the
    wait (`werewolf.deadman`, for `make check-deadman`).
-7. **Hands over**: moves `/dev`, `/proc`, `/sys`, `/victim` into the root,
+7. **Hands over**: moves `/dev`, `/proc`, `/sys`, `/boot` into the root,
    makes it `/` (as switch_root does), and execs `/init` with only
    `WEREWOLF_BOOT` (phase timings), so the kernel's leftover words stop here.
 8. **Fails** by writing the reason to `/dev/kmsg` at KERN_CRIT, which the
@@ -64,10 +64,10 @@ before stage0, so it uses the kernel directly: no shell, blkid or mount.
 
 ## Drawbacks
 
-- A second disk with the victim's UUID stops both slots booting until it is
-  detached: refusal over a guess.
-- A victim on md RAID1 with metadata at the end shows its superblock on
-  each member, so it is refused, as the mount broker refuses it.
+- A second disk with the boot partition's UUID stops both slots booting until
+  it is detached: refusal over a guess.
+- A boot partition on md RAID1 with metadata at the end shows its superblock
+  on each member, so it is refused, as the mount broker refuses it.
 
 ## Alternatives Considered
 
@@ -75,7 +75,7 @@ before stage0, so it uses the kernel directly: no shell, blkid or mount.
 Many tools, each a way in, for six steps the kernel does directly.
 
 ### The first device with the UUID
-A clone attached beside the disk could then supply `/data` and root's keys.
+A clone attached beside the disk could then supply `/data`.
 
 ### Waiting for udev
 There is none; the superblock is read directly every 10 ms.
@@ -86,7 +86,7 @@ There is none; the superblock is read directly every 10 ms.
 | --- | --- |
 | A changed root image | dm-verity against the initramfs's root hash: a changed block fails to read. |
 | Unsigned modules | Lockdown at integrity before modload; then the loader closes. |
-| A disk standing in for the victim | Two matching UUIDs refused. |
+| A disk standing in for `/boot` | Two matching UUIDs refused. |
 | A FIFO or link as the image | Opened `O_NOFOLLOW`; only a regular file is used, so PID 1 cannot block. |
 | A crafted command line | Every `werewolf.*` word checked by `lib/cmdline.zig`; a refusal panics. |
 | A slot that boots but cannot serve | The deadman reboots it after ten minutes. |

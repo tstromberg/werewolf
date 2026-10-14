@@ -5,7 +5,7 @@
 # /usr/lib/werewolf/status-page (forms/demo/cmd/status-page/status-page.zig), run as the status and grype
 # users; the image has no shell. It checks
 # Wolfi and Alpine hourly, not every 20 hours (etc/werewolf/update-every).
-# Boot it from a slot (bite), so that /data, which holds grype's database
+# Boot it from a native disk slot, so that /data, which holds grype's database
 # and the page's history, is on a disk. See forms/demo/README.md.
 base: postgresql
 

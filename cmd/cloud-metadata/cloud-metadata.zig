@@ -67,6 +67,7 @@ const providers = [_]Provider{
 };
 
 pub fn main(init: std.process.Init) !void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     // Disable Speculative Store Bypass for this process and its children.
     // werewolf leaves this to each program so workloads do not pay for it
     // (docs/security.md). On a CPU without the control, the call just fails.
@@ -243,9 +244,16 @@ fn apply(
         const name = nameZ(k.name);
         putFile(keys_dir, name, k.text, 0o600) catch continue;
         const id = people.userId(k.name);
-        _ = linux.fchownat(keys_dir, name, id, id, 0);
+        if (linux.errno(
+            linux.fchownat(keys_dir, name, id, id, linux.AT.SYMLINK_NOFOLLOW),
+        ) != .SUCCESS) {
+            _ = linux.unlinkat(keys_dir, name, 0);
+            continue;
+        }
         _ = linux.mkdirat(home_dir, name, 0o700);
-        _ = linux.fchownat(home_dir, name, id, id, 0);
+        if (linux.errno(
+            linux.fchownat(home_dir, name, id, id, linux.AT.SYMLINK_NOFOLLOW),
+        ) != .SUCCESS) continue;
         _ = linux.fchmodat(home_dir, name, 0o700);
     }
     const base = for (files[0..n]) |*f| {

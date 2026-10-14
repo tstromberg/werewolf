@@ -289,10 +289,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         &.{try b.path("{s}/verity", .{out})},
     );
     try stage0Init(b, rootfs);
-    try stage0(b, "stage0", "modules", b.modules.native);
-    if (goals.slot or goals.prebuilt or
-        (b.spec.ipe_updates != null and (goals.disk or goals.qcow2)))
-        try stage0(b, "stage0-bitten", "modules-bitten", b.modules.all);
+    try stage0(b, "stage0", "modules", b.modules);
     if (goals.image or (b.spec.boot_key != null and !b.spec.boot_native)) try initramfs(b, root);
     // The slot's kernel as Alpine ships it, not BUILD/vmlinuz: on aarch64
     // an EFI zboot image, 10 MB to the raw Image's 36, which a UEFI
@@ -303,7 +300,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
         try b.path("{s}/vmlinuz", .{b.p.build}),
         try b.path("{s}/kernel/x/boot/vmlinuz-virt", .{b.p.build}),
     );
-    // The kernel arguments the image asks for, beside it, for bite and
+    // The kernel arguments the image asks for, beside it, for
     // the disk to boot it with.
     try copyStep(
         b,
@@ -721,17 +718,12 @@ fn moduleTar(b: *B, target: []const u8, words: []const []const u8) !void {
         try b.read(try b.path("{s}/modules.dep", .{src}), 16 << 20),
         try b.read(try b.path("{s}/modules.builtin", .{src}), 16 << 20),
         words,
-        b.modules.native,
         b.params,
         &bad,
     ) catch |err| return switch (err) {
         error.NoModules => b.fail(
             "{s}: no modules to load: the build lost its module list",
             .{target},
-        ),
-        error.NativeModuleMissing => b.fail(
-            "{s}: native module {s} missing from its list",
-            .{ target, bad },
         ),
         error.ModuleNotFound => b.fail("module {s} not in {s}/modules.dep", .{ bad, src }),
         error.ParamsForMissingModule => b.fail(

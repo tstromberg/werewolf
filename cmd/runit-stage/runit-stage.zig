@@ -14,8 +14,12 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
     switch (stageOf(std.fs.path.basename(args[0]))) {
-        1 => return,
+        1 => {
+            broker.keepOnlyClient(null);
+            return;
+        },
         2 => {
+            _ = linux.close(broker.clientFd(.stage));
             // runit opens the console non-blocking so PID 1 never waits on
             // it, and its children share that open file. A service writing
             // faster than the serial port would get EAGAIN and lose output,
@@ -36,8 +40,12 @@ pub fn main(init: std.process.Init) !void {
             say(io, "runsvdir: {s}; runit will run stage 2 again", .{@errorName(err)});
             std.process.exit(111);
         },
-        3 => try stop(io, gpa),
+        3 => {
+            broker.keepOnlyClient(.stage);
+            try stop(io, gpa);
+        },
         else => {
+            broker.keepOnlyClient(null);
             std.debug.print("runit-stage: run as /etc/runit/1, 2 or 3\n", .{});
             std.process.exit(2);
         },
@@ -71,9 +79,8 @@ fn stop(io: Io, gpa: Allocator) !void {
     linux.sync();
     // fence's domain forbids unmounting, so the mount broker (cmd/mount-broker)
     // unmounts /data (or remounts it read-only if held), closes its LUKS
-    // mapping, and remounts the victim read-only so GRUB, which ignores the
-    // journal, reads current blocks.
-    const done = broker.ask(.shutdown) catch |err| {
+    // mapping, and remounts /boot read-only and unmounts it.
+    broker.ask(.shutdown) catch |err| {
         say(
             io,
             "filesystems not put down: {s} {s}; the journal will repair them",
@@ -81,7 +88,6 @@ fn stop(io: Io, gpa: Allocator) !void {
         );
         return;
     };
-    done.release();
 }
 
 /// serviceDirs returns the service directories in /etc/sv, sorted. A missing

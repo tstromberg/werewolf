@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Attach deterministic Linux module signatures on the host, without exposing keys to builders."""
+import gzip
+import io
+import os
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path, PurePosixPath
+import struct
+import subprocess
+import sys
+import signal
+import tarfile
+import tempfile
+
+MARKER = b'~Module signature appended~\n'
+MAX_MODULE = 128 << 20
+MAX_ARCHIVE = 2 << 30
+
+
+def openssl(arguments):
+    result = subprocess.run(['openssl', *map(str, arguments)], capture_output=True, timeout=60)
+    if result.returncode:
+        raise ValueError('kernel module signing or verification failed')
+    return result.stdout
+
+
+def module_signature(data, key, cert, scratch):
+    if not data.startswith(b'\x7fELF') or data.endswith(MARKER):
+        raise ValueError('expected an unsigned ELF module')
+    module, signature = scratch / 'module.ko', scratch / 'module.p7s'
+    module.write_bytes(data)
+    openssl(['cms', '-sign', '-binary', '-noattr', '-nocerts', '-md', 'sha256',
+             '-signer', cert, '-inkey', key, '-in', module, '-outform', 'DER', '-out', signature])
+    signed = signature.read_bytes()
+    if not 0 < len(signed) <= 16384:
+        raise ValueError('module signature exceeds its bound')
+    # Linux scripts/sign-file: PKCS#7 id_type=2, zero unused fields, big-endian length.
+    return data + signed + struct.pack('>BBBBB3xI', 0, 0, 2, 0, 0, len(signed)) + MARKER
+
+
+def compress(data):
+    stream = io.BytesIO()
+    with gzip.GzipFile(filename='', mode='wb', fileobj=stream, compresslevel=6, mtime=0) as output:
+        output.write(data)
+    return stream.getvalue()
+
+
+def signed_module(data, key, cert, scratch):
+    with gzip.GzipFile(fileobj=io.BytesIO(data), mode='rb') as compressed:
+        raw = compressed.read(MAX_MODULE + 1)
+    if len(raw) > MAX_MODULE:
+        raise ValueError('module exceeds its decompressed bound')
+    with tempfile.TemporaryDirectory(prefix='module-', dir=scratch) as work:
+        return compress(module_signature(raw, key, cert, Path(work)))
+
+
+def sign(source, key, cert, destination):
+    source, key, cert, destination = map(Path, (source, key, cert, destination))
+    openssl(['rsa', '-in', key, '-check', '-noout'])
+    if openssl(['pkey', '-in', key, '-pubout']) != openssl(['x509', '-in', cert, '-pubkey', '-noout']):
+        raise ValueError('module signing key does not match its certificate')
+    if source.stat().st_size > MAX_ARCHIVE:
+        raise ValueError('kernel archive exceeds its bound')
+    temporary = destination.with_name(destination.name + '.new')
+    temporary.unlink(missing_ok=True)
+    try:
+        with tempfile.TemporaryDirectory(prefix='module-sign-', dir=destination.parent) as work, \
+             tarfile.open(source, 'r:') as incoming:
+            scratch = Path(work)
+            members = incoming.getmembers()
+            if len(members) > 16384:
+                raise ValueError('kernel archive contains too many members')
+            names, total = set(), 0
+            for member in members:
+                path = PurePosixPath(member.name)
+                if not path.parts or path.is_absolute() or '..' in path.parts or path.parts[0] not in ('boot', 'lib', 'etc'):
+                    raise ValueError('unsafe kernel archive path')
+                canonical = path.as_posix()
+                if '\\' in member.name or member.name.rstrip('/') != canonical:
+                    raise ValueError('noncanonical kernel archive path')
+                if canonical in names or not (member.isfile() or member.isdir()):
+                    raise ValueError('duplicate or unsupported kernel archive member')
+                names.add(canonical)
+                total += member.size
+                if member.size < 0 or total > MAX_ARCHIVE or member.size > (256 << 20):
+                    raise ValueError('kernel archive member exceeds its bound')
+            configs = [member for member in members if member.name.startswith('boot/config-')]
+            if len(configs) != 1 or not configs[0].isfile() or configs[0].size > (1 << 20):
+                raise ValueError('expected one bounded kernel configuration')
+            config = incoming.extractfile(configs[0]).read().splitlines()
+            for required in (b'CONFIG_MODULE_SIG_FORCE=y', b'CONFIG_MODULE_SIG=y',
+                             b'CONFIG_MODULE_SIG_KEY=""', b'# CONFIG_MODULE_SIG_ALL is not set',
+                             b'CONFIG_SYSTEM_TRUSTED_KEYS="ipe.crt"'):
+                if required not in config:
+                    raise ValueError('kernel module enforcement or public trust differs')
+            policy = incoming.getmember('boot/ipe.crt')
+            if not policy.isfile() or policy.size > (1 << 20) or incoming.extractfile(policy).read() != cert.read_bytes():
+                raise ValueError('kernel policy certificate differs')
+            count = 0
+            ordered = sorted(members, key=lambda item: item.name)
+            workers = min(4, os.cpu_count() or 1)
+            with temporary.open('xb') as stream, \
+                 tarfile.open(fileobj=stream, mode='w:', format=tarfile.GNU_FORMAT) as outgoing, \
+                 ThreadPoolExecutor(max_workers=workers) as pool:
+                # Read tar members sequentially and bound both pending work and output buffering.
+                for start in range(0, len(ordered), workers):
+                    pending = []
+                    for member in ordered[start:start + workers]:
+                        data = incoming.extractfile(member).read() if member.isfile() else b''
+                        future = None
+                        if member.name.endswith('.ko.gz'):
+                            if not member.name.startswith('lib/modules/'):
+                                raise ValueError('module is outside its declared directory')
+                            future = pool.submit(signed_module, data, key, cert, scratch)
+                            count += 1
+                        elif member.name.endswith('.ko'):
+                            raise ValueError('expected compressed modules')
+                        pending.append((member, data, future))
+                    for member, data, future in pending:
+                        if future is not None:
+                            data = future.result()
+                        member.uid = member.gid = member.mtime = 0
+                        member.uname = member.gname = ''
+                        member.pax_headers = {}
+                        member.mode = 0o755 if member.isdir() else 0o644
+                        member.size = len(data)
+                        outgoing.addfile(member, io.BytesIO(data) if member.isfile() else None)
+                if not count:
+                    raise ValueError('kernel archive has no modules')
+            with temporary.open('rb') as output:
+                if temporary.stat().st_size > MAX_ARCHIVE:
+                    raise ValueError('signed kernel archive exceeds its bound')
+                os.fsync(output.fileno())
+            temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    def interrupted(signum, frame):
+        raise InterruptedError('module signing interrupted')
+    signal.signal(signal.SIGTERM, interrupted)
+    if len(sys.argv) != 5:
+        sys.exit('usage: sign-kernel UNSIGNED_TAR KEY CERT OUTPUT_TAR')
+    try:
+        sign(*sys.argv[1:])
+    except (OSError, EOFError, ValueError, KeyError, tarfile.TarError) as error:
+        sys.exit('sign-kernel: ' + str(error))

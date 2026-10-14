@@ -13,11 +13,13 @@ const phase_config = @import("config.zig");
 const phase_data = @import("data.zig");
 const phase_oci = @import("oci.zig");
 const phase_seal = @import("seal.zig");
+const broker = @import("broker");
 const cmdline = @import("cmdline");
 
 pub const mount_bin = "/usr/lib/werewolf/mount";
 
 const path_env = "/usr/sbin:/usr/bin:/sbin:/bin";
+const broker_roles = [_]broker.Role{ .updater, .keeper, .stage };
 
 pub fn main(init: std.process.Init) !void {
     var m: Machine = .{
@@ -50,8 +52,13 @@ pub fn main(init: std.process.Init) !void {
         );
     // stage0 checked the line by the same rules, so a refusal here means
     // the line changed under it.
+    const boot_line = m.read("/proc/cmdline");
+    if (boot_line.len == 0) {
+        say("cannot read /proc/cmdline; not handing over", .{});
+        std.process.exit(1);
+    }
     var refused: cmdline.Failure = .{};
-    m.cmd = cmdline.parse(m.read("/proc/cmdline"), &refused) orelse {
+    m.cmd = cmdline.parse(boot_line, &refused) orelse {
         say("the command line's {s}: {s}; not handing over", .{ refused.word, refused.why });
         std.process.exit(1);
     };
@@ -63,8 +70,6 @@ pub fn main(init: std.process.Init) !void {
     phases.add("sysctls", bootMs());
     // The config on disk comes first, since it may set the network; the
     // cloud's metadata needs the network.
-    m.victim();
-    phases.add("victim", bootMs());
     m.config();
     phases.add("config", bootMs());
     // The import disk is not /data. Mount it before services, and always
@@ -85,24 +90,17 @@ pub fn main(init: std.process.Init) !void {
         say("core dumps not limited", .{});
     // The seal fails closed: PID 1 exits, the kernel panics, and the machine
     // comes back on the slot that last worked.
-    const links = phase_seal.startLinks() orelse {
-        say("no private service identity reader; not handing over", .{});
-        std.process.exit(1);
-    };
     phase_seal.seal(&m) catch |err| {
         say("not sealed: {s}; not handing over", .{@errorName(err)});
         std.process.exit(1);
     };
     // The mount broker mounts for the few programs that must, once fence's
     // Landlock domain forbids mounting. Starting it here puts it outside that
-    // domain but under the seal. Without it nothing can keep this slot, so
-    // the machine falls back to the slot that last worked.
-    if (std.process.spawn(m.io, .{
-        .argv = &.{"/usr/lib/werewolf/mount-broker"},
-        .environ_map = &m.env,
-        .stdin = .{ .file = .{ .handle = links, .flags = .{ .nonblocking = false } } },
-    })) |_| {} else |broker_err| say("no mount broker: {s}", .{@errorName(broker_err)});
-    _ = linux.close(links);
+    // domain but under the seal, with one socketpair per role. Without it
+    // nothing can keep this slot, so the machine falls back to the slot that
+    // last worked.
+    const broker_clients = startBroker();
+    if (broker_clients == null) say("no mount broker", .{});
     // DHCP renewal starts before fence, which takes CAP_NET_ADMIN and packet
     // sockets from every later process, root included. runit does not
     // restart it; if it exits, the address it applied stays.
@@ -142,6 +140,13 @@ pub fn main(init: std.process.Init) !void {
         m.fmt("{d}.{d:0>3}", .{ kernel_ms / 1000, kernel_ms % 1000 }),
         m.fmt("{d}.{d:0>3}", .{ (up_ms -| kernel_ms) / 1000, (up_ms -| kernel_ms) % 1000 }),
     });
+    if (broker_clients) |clients| {
+        for (broker_roles, clients) |role, fd| {
+            const dst = broker.clientFd(role);
+            _ = linux.dup2(fd, dst);
+            if (fd != dst) _ = linux.close(fd);
+        }
+    }
     const err = std.process.replace(
         m.io,
         .{ .argv = &.{ "/usr/lib/werewolf/fence", "/usr/bin/runit" }, .environ_map = &m.env },
@@ -150,12 +155,73 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(1);
 }
 
+/// startBroker starts mount-broker with the server ends of three
+/// SOCK_SEQPACKET socketpairs on descriptors 3, 4 and 5, and returns the
+/// client ends (still close-on-exec) for init.
+fn startBroker() ?[3]i32 {
+    const path = "/usr/lib/werewolf/mount-broker";
+    if (!executable(path)) return null;
+    var pairs: [3][2]i32 = undefined;
+    for (&pairs, 0..) |*sv, i| {
+        if (linux.errno(linux.socketpair(
+            linux.AF.UNIX,
+            linux.SOCK.SEQPACKET | linux.SOCK.CLOEXEC,
+            0,
+            sv,
+        )) != .SUCCESS) {
+            for (pairs[0..i]) |prev| {
+                _ = linux.close(prev[0]);
+                _ = linux.close(prev[1]);
+            }
+            return null;
+        }
+    }
+    const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{path};
+    const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{
+        "PATH=" ++ path_env,
+        "HOME=/",
+        "TERM=linux",
+    };
+    const pid = linux.fork();
+    if (linux.errno(pid) != .SUCCESS) {
+        for (pairs) |sv| {
+            _ = linux.close(sv[0]);
+            _ = linux.close(sv[1]);
+        }
+        return null;
+    }
+    if (pid == 0) {
+        var high: [3]i32 = undefined;
+        for (pairs, 0..) |sv, i| {
+            const duped = linux.fcntl(sv[0], linux.F.DUPFD_CLOEXEC, 16 + @as(usize, i));
+            if (linux.errno(duped) != .SUCCESS) linux.exit_group(127);
+            high[i] = @intCast(duped);
+        }
+        for (broker_roles, high) |role, src| {
+            if (linux.errno(linux.dup2(src, broker.serverFd(role))) != .SUCCESS)
+                linux.exit_group(127);
+        }
+        _ = linux.close_range(
+            6,
+            std.math.maxInt(linux.fd_t),
+            .{ .UNSHARE = false, .CLOEXEC = false },
+        );
+        _ = linux.execve(path, argv, envp);
+        linux.exit_group(127);
+    }
+    var clients: [3]i32 = undefined;
+    for (pairs, 0..) |sv, i| {
+        _ = linux.close(sv[0]);
+        clients[i] = sv[1];
+    }
+    return clients;
+}
+
 pub const Machine = struct {
     io: Io,
     gpa: Allocator,
     env: std.process.Environ.Map,
     cmd: cmdline.Cmdline = .{},
-    victim_dir: []const u8 = "",
     nocloud_user: []const u8 = "",
     /// users are the people the config's users file named, whose homes
     /// data makes on /data (cmd/init/config.zig).
@@ -171,7 +237,6 @@ pub const Machine = struct {
     pub const seed = phase_kernel.seed;
     pub const kernel = phase_kernel.kernel;
     pub const network = phase_network.network;
-    pub const victim = phase_config.victim;
     pub const config = phase_config.config;
     pub const metadata = phase_config.metadata;
     pub const data = phase_data.data;
@@ -376,8 +441,8 @@ const AT_EMPTY_PATH = 0x1000;
 
 /// openRegular opens path for reading if it is a regular file and not a
 /// link, or returns null. It is for files from outside the image (a cidata
-/// ISO, a victim): a FIFO or device could block PID 1 forever, and a link
-/// could point anywhere.
+/// ISO): a FIFO or device could block PID 1 forever, and a link could point
+/// anywhere.
 pub fn openRegular(path: [:0]const u8) ?i32 {
     const fd = linux.open(path, .{
         .ACCMODE = .RDONLY,

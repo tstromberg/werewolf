@@ -634,7 +634,7 @@ pub fn isName(s: []const u8) bool {
 /// isSharePath reports whether s is /data/share/NAME/ and a directory
 /// beneath it. NAME is a lowercase word. The share root itself, and a
 /// service's own /data/svc directory, are not a shared tree.
-fn isSharePath(s: []const u8) bool {
+pub fn isSharePath(s: []const u8) bool {
     const prefix = "/data/share/";
     if (!std.mem.startsWith(u8, s, prefix) or !isCleanPath(s)) return false;
     const rest = s[prefix.len..];

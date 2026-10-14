@@ -6,7 +6,6 @@ const std = @import("std");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
-const linux = std.os.linux;
 const broker = @import("broker");
 const cmdline = @import("cmdline");
 
@@ -16,16 +15,16 @@ const nodata = "/run/werewolf/nodata";
 const wait = 15;
 
 pub fn main(init: std.process.Init) !void {
+    broker.keepOnlyClient(.keeper);
     const io = init.io;
     const gpa = init.arena.allocator();
-    // Parse as stage0 does (lib/cmdline.zig). It allows only slot a or b and
-    // a plain GRUB path, since both end up in paths written as root.
+    // Parse as stage0 does (lib/cmdline.zig).
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(readAll(io, gpa, "/proc/cmdline"), &refused) orelse {
         say(io, "the command line's {s}: {s}; not committing", .{ refused.word, refused.why });
         park(io);
     };
-    if (cmd.grubenv == null and (cmd.esp == null or cmd.slot == null)) park(io);
+    if (cmd.esp == null or cmd.slot == null) park(io);
     const entry = try gpa.print("werewolf-{s}", .{@tagName(cmd.slot orelse .a)});
 
     var said = false;
@@ -57,10 +56,7 @@ pub fn main(init: std.process.Init) !void {
         said = true;
     }
 
-    if (cmd.grubenv) |grubenv|
-        try commitGrub(io, gpa, grubenv, entry)
-    else
-        try commitEsp(io, gpa, entry);
+    try commitEsp(io, gpa, entry);
     park(io);
 }
 
@@ -91,37 +87,6 @@ fn commitEsp(io: Io, gpa: Allocator, entry: []const u8) !void {
         );
     try markCommitted(io);
     say(io, "healthy for a minute; {s} is good", .{entry});
-}
-
-/// commitGrub sets GRUB's saved_entry to entry. The block lives on the
-/// victim's root (Debian), /boot partition (Ubuntu, Rocky) or /boot subvolume
-/// (Fedora); /victim is read-only, so the mount broker lends a writable mount.
-fn commitGrub(io: Io, gpa: Allocator, spec: cmdline.Place, entry: []const u8) !void {
-    const boot = broker.ask(.grub) catch |err| return say(
-        io,
-        "no GRUB environment block at {s}:{s}: {s} {s}; not committing",
-        .{ spec.uuid, spec.path, @errorName(err), broker.refusal },
-    );
-    defer boot.release();
-
-    // lib/cmdline.zig rejects "." and "..", so f stays inside the mount.
-    const f = try gpa.print("{s}{s}", .{ boot.path(), spec.path });
-    const block = readAll(io, gpa, f);
-    if (block.len == 0) return say(
-        io,
-        "no GRUB environment block at {s}:{s}; not committing",
-        .{ spec.uuid, spec.path },
-    );
-    if (isSaved(block, entry)) {
-        say(io, "{s} is already GRUB's default", .{entry});
-        return markCommitted(io);
-    }
-    if (dataUnavailable(io, gpa)) return;
-    if (!run(io, &.{ "/usr/lib/werewolf/grub-setenv", f, "saved_entry", entry }))
-        return say(io, "not committing", .{});
-    linux.sync();
-    try markCommitted(io);
-    say(io, "healthy for a minute; {s} is now GRUB's default", .{entry});
 }
 
 /// dataUnavailable reports, and logs, whether /data failed this boot. Such a
@@ -174,16 +139,6 @@ fn serviceHealthy(status: [20]u8, now: u64) bool {
     };
 }
 
-/// isSaved reports whether GRUB's block already has saved_entry=entry.
-fn isSaved(block: []const u8, entry: []const u8) bool {
-    var it = std.mem.splitScalar(u8, block, '\n');
-    while (it.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "saved_entry=")) continue;
-        if (std.mem.eql(u8, line["saved_entry=".len..], entry)) return true;
-    }
-    return false;
-}
-
 /// markCommitted creates the file that tells stage0's deadman not to reboot.
 fn markCommitted(io: Io) !void {
     // Retirement belongs to inactive-slot replacement; commit keeps both releases.
@@ -198,15 +153,6 @@ fn park(io: Io) noreturn {
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
     say(io, "sv down: {s}", .{@errorName(err)});
     std.process.exit(1);
-}
-
-fn run(io: Io, argv: []const []const u8) bool {
-    var child = std.process.spawn(io, .{ .argv = argv, .stdin = .ignore }) catch return false;
-    const term = child.wait(io) catch return false;
-    return switch (term) {
-        .exited => |code| code == 0,
-        else => false,
-    };
 }
 
 /// readAll returns path's contents, or "" on error. It reads to the end
@@ -257,11 +203,4 @@ test serviceHealthy {
     try testing.expect(!serviceHealthy(statusOf(0, 'u', 1), 1000));
     try testing.expect(!serviceHealthy(statusOf(2, 'u', 600), 1000));
     try testing.expect(!serviceHealthy(statusOf(7, 'u', 600), 1000));
-}
-
-test isSaved {
-    const block = "# GRUB Environment Block\nnext_entry=\nsaved_entry=werewolf-a\n####";
-    try testing.expect(isSaved(block, "werewolf-a"));
-    try testing.expect(!isSaved(block, "werewolf-b"));
-    try testing.expect(!isSaved("saved_entry=werewolf-ab\n", "werewolf-a"));
 }

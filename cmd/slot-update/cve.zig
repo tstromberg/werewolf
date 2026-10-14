@@ -429,7 +429,7 @@ const VersionReader = struct {
 
     fn fail(r: *VersionReader) i64 {
         r.t = .invalid;
-        return -1;
+        return std.math.minInt(i64);
     }
 };
 
@@ -696,6 +696,9 @@ test apkOrder {
         .{ "1.2.3_pre1", "1.2.3_p1", .lt },
         .{ "2.39.4", "2.39.4_p0", .lt },
         .{ "1.0_bad", "1.0", .lt },
+        .{ "1.0_bad", "1.0_alpha", .lt },
+        .{ "1.0_bad", "1.0_rc", .lt },
+        .{ "1.0.bad", "1.0.001", .gt },
         .{ "abc", "1.0", .lt },
         .{ "1.0.", "1.0", .gt },
         .{ "1.0", "1.0-r", .lt },

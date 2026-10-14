@@ -11,10 +11,9 @@ then the slot is on probation, and a reset goes back to the last good slot.
 An update writes the other slot and boots it once (docs/updater.md). If the
 slot cannot boot, the loader falls back by itself. If it boots but does not
 work, stage0's deadman reboots after ten minutes unless
-`/run/werewolf/committed` exists, and the loader goes back. Two loaders
-choose slots: a distro's GRUB after bite (`saved_entry` in its environment
-block), and systemd-boot on werewolf's own disk
-(docs/design/native-boot.md), whose entry name counts tries
+`/run/werewolf/committed` exists, and the loader goes back.
+systemd-boot on werewolf's own disk (docs/design/native-boot.md) counts tries
+in the entry name
 (`werewolf-a+1.conf`) until it is renamed `werewolf-a.conf`.
 
 ## Goals
@@ -35,12 +34,11 @@ block), and systemd-boot on werewolf's own disk
 
 runsv starts it as `/etc/sv/slot-keep/run`, with no arguments.
 
-1. **Which loader.** It parses the kernel command line as stage0 does
-   (`lib/cmdline.zig`). `werewolf.grubenv=UUID:PATH` means GRUB;
-   `werewolf.esp` with `werewolf.slot` means systemd-boot; anything else
-   means nothing to commit, and it parks. The parser allows only slot `a` or
-   `b`, and an absolute GRUB path with no `.` or `..`, since both go into
-   paths written as root. A refused command line is logged, and it parks.
+1. **Which slot.** It parses the kernel command line as stage0 does
+   (`lib/cmdline.zig`). `werewolf.esp` with `werewolf.slot` identifies
+   a systemd-boot slot; anything else means nothing to commit, and it parks.
+   The parser allows only slot `a` or `b`. A refused command line is logged,
+   and it parks.
 2. **Wait** every 15 s until healthy. Each `/etc/sv/*/supervise/status`
    (20 bytes: last change, want, state) must show the service running for
    60 s, or down because it wants to be. Down while wanted up (between
@@ -51,10 +49,8 @@ runsv starts it as `/etc/sv/slot-keep/run`, with no arguments.
    which slot-update writes once its setup succeeds, logging this once.
 3. **Not with `/data` gone.** If `/run/werewolf/nodata` exists, it logs its
    reason and commits nothing.
-4. **GRUB**: the broker lends the block's filesystem writable;
-   `grub-setenv` sets `saved_entry=werewolf-SLOT` in place.
-   **systemd-boot**: the broker lends the EFI partition; the counting entry
-   is renamed to `werewolf-SLOT.conf`, then `sync`. If the loader already
+4. **systemd-boot**: the broker renames the counting entry to
+   `werewolf-SLOT.conf` on a detached EFI mount and syncs it. If the loader already
    points at this slot, it skips the write.
 5. **Commit**: it creates `/run/werewolf/committed`, logs one line, and
    parks (`sv down .`). Commit never retires the retained A/B release in the TPM;
@@ -80,8 +76,8 @@ A slot that boots but cannot serve, or cannot update, would be kept for good.
 | Risk | Mitigation |
 | --- | --- |
 | A broken update committed | Only after every service has run a minute, /data works, and the updater is ready. |
-| A path from the command line | Slot a or b; GRUB's path absolute with no `.` or `..`. |
-| Writing the loader | Through the mount broker, mounted separately for one write; GRUB's block rewritten in place by `grub-setenv`. |
+| A path from the command line | Slot a or b; the broker derives entry paths itself. |
+| Writing the loader | Through the mount broker, mounted detached for one write. |
 | Its own privilege | Root, in fence's domain and sealed; only the broker can mount. |
 
 ## Reliability Considerations
@@ -89,7 +85,7 @@ A slot that boots but cannot serve, or cannot update, would be kept for good.
 - **Fails safe**: anything it cannot do leaves the slot uncommitted, and the
   deadman takes the machine back.
 - **Logs each step**: why it waits, why it did not commit, what it committed.
-- **Tested**: unit tests for `serviceHealthy`, `isTried` and `isSaved`;
-  `check-slot` and `check-updater` (GRUB, as after bite), each with a boot
+- **Tested**: unit tests for `serviceHealthy` and the broker's loader operations;
+  `check-slot` and `check-updater` (native EFI), each with a boot
   that must be committed. `check-persist` and `check-dist` boot werewolf's own disk;
   `check-ab-qemu` covers signed upgrade, commit and both rollback paths.

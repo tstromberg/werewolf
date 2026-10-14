@@ -54,7 +54,7 @@ as it activates IPE before `CAP_MAC_ADMIN` leaves. An enforcing root
   general policy language.
 - A re-exec the check boot never made is refused in production. The recording
   comes from that form's check.
-- Alpine's kernel and a bitten machine do not enforce it. There, a command line
+- Alpine's kernel does not enforce it. There, a command line
   stays frozen only where the pledge has no `exec`.
 
 ## Alternatives considered

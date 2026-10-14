@@ -5,6 +5,7 @@ import importlib.machinery
 import json
 import os
 from pathlib import Path
+import socket
 import ssl
 import subprocess
 import sys
@@ -32,7 +33,7 @@ class Issuance(unittest.TestCase):
         self.public.mkdir()
         publisher.run(['openssl', 'genrsa', '-out', self.root / 'permit.key', '2048'])
         publisher.run(['openssl', 'pkey', '-in', self.root / 'permit.key', '-pubout', '-out', self.root / 'permit.pub'])
-        raw = publisher.TAG + bytes.fromhex('42' * 32 + '00' * 32 + A + A + PA)
+        raw = publisher.TAG + bytes.fromhex(getattr(self, 'nonce', '42' * 32) + '00' * 32 + A + A + PA)
         state = self.root / 'factory.state'
         state.write_bytes(raw)
         publisher.run([PROBE, 'permit-pair', self.root / 'permit.pub', state, self.root / 'factory.message'])
@@ -136,6 +137,47 @@ class Issuance(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.issuer.artifact('/aarch64/' + B + '/uki.efi')
 
+    def test_shared_listener_keeps_machine_keys_and_records_independent(self):
+        other = Issuance('test_signed_ab_preserves_both_releases')
+        other.nonce = '43' * 32
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        registry = self.root / 'registry'
+        registry.mkdir()
+        for fixture in (self, other):
+            fixture.config['channel'] = 'https://192.168.5.2:9443/playground'
+            (registry / (fixture.factory['machine'] + '.json')).write_text(json.dumps(fixture.config))
+        shared = publisher.Registry({'registry': str(registry)})
+        for fixture in (self, other):
+            issuer = shared.for_machine(fixture.factory['machine'])
+            bundle = issuer.permit(fixture.factory['machine'], B, fixture.factory['anchor'], A)
+            state = publisher.record(bundle)
+            self.assertEqual(fixture.factory['machine'], state['machine'])
+            path = fixture.records / (state['anchor'] + '.permit')
+            publisher.run([HOWL, '_boot-record', fixture.root / 'permit.pub', path])
+            foreign = other if fixture is self else self
+            with self.assertRaises(subprocess.SubprocessError):
+                publisher.run([HOWL, '_boot-record', foreign.root / 'permit.pub', path])
+            with self.assertRaises(ValueError):
+                issuer.permit(foreign.factory['machine'], B, fixture.factory['anchor'], A)
+        with self.assertRaises(ValueError):
+            shared.for_machine('../permit.key')
+        with self.assertRaises(FileNotFoundError):
+            shared.for_machine('44' * 32)
+        (registry / ('45' * 32 + '.json')).write_text(json.dumps(self.config))
+        with self.assertRaises(ValueError):
+            shared.for_machine('45' * 32)
+        (registry / ('46' * 32 + '.json')).symlink_to(registry / (self.factory['machine'] + '.json'))
+        with self.assertRaises(ValueError):
+            shared.for_machine('46' * 32)
+        head = self.public / 'aarch64/latest.json'
+        head.parent.mkdir()
+        head.write_text('{"vendor":"shared"}')
+        self.assertEqual(head.resolve(), shared.artifact('/playground/aarch64/latest.json'))
+        for route in ('/playground/permit.key', '/aarch64/latest.json', '/playground/aarch64/../tls.key'):
+            with self.assertRaises(ValueError):
+                shared.artifact(route)
+
     def test_https_context_and_private_file_refusal(self):
         publisher.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
                        '-subj', '/CN=publisher-test', '-addext', 'subjectAltName=IP:127.0.0.1',
@@ -159,6 +201,81 @@ class Issuance(unittest.TestCase):
             server.shutdown()
             thread.join()
             server.server_close()
+
+    def test_shared_https_routes_without_a_listener_architecture(self):
+        publisher.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                       '-subj', '/CN=shared-publisher', '-addext', 'subjectAltName=IP:127.0.0.1',
+                       '-keyout', self.root / 'tls.key', '-out', self.root / 'tls.crt'])
+        registry = self.root / 'registry'
+        registry.mkdir()
+        self.config['channel'] = 'https://192.168.5.2:9443/playground'
+        (registry / (self.factory['machine'] + '.json')).write_text(json.dumps(self.config))
+        head = self.public / 'aarch64/latest.json'
+        head.parent.mkdir()
+        head.write_text('{"shared":true}')
+        config = dict(authority=str(self.root), registry=str(registry), port=0,
+                      certificate=str(self.root / 'tls.crt'), key=str(self.root / 'tls.key'), token='shared')
+        server = publisher.Server(config)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        context = ssl.create_default_context(cafile=config['certificate'])
+        origin = 'https://127.0.0.1:' + str(server.server_port)
+        try:
+            with urlopen(origin + '/playground/aarch64/latest.json', context=context, timeout=10) as response:
+                self.assertEqual(head.read_bytes(), response.read())
+            route = '/aarch64/permits/' + self.factory['machine'] + '/' + B + '.permit?from=' + self.factory['anchor'] + '&retain=' + A
+            with urlopen(origin + route, context=context, timeout=10) as response:
+                self.assertEqual(B, publisher.record(response.read())['candidate'])
+            with self.assertRaises(HTTPError) as failure:
+                urlopen(origin + route.replace('/aarch64/', '/x86_64/'), context=context, timeout=10)
+            self.assertEqual(404, failure.exception.code)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def test_shared_registration_stop_preserves_other_issuer(self):
+        other = Issuance('test_signed_ab_preserves_both_releases')
+        other.nonce = '43' * 32
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        service = self.root / 'service'
+        service.mkdir()
+        registry = service / 'registry'
+        registry.mkdir()
+        publisher.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                       '-subj', '/CN=shared-lifecycle', '-addext', 'subjectAltName=IP:127.0.0.1',
+                       '-keyout', service / 'tls.key', '-out', service / 'tls.crt'])
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1', 0))
+            port = reservation.getsockname()[1]
+        config = dict(authority=str(service), registry=str(registry), port=port,
+                      certificate=str(service / 'tls.crt'), key=str(service / 'tls.key'), token='lifecycle')
+        service_config = service / 'publisher.json'
+        service_config.write_text(json.dumps(config))
+        clients = []
+        for fixture in (self, other):
+            fixture.config.update(service=str(service), channel='https://192.168.5.2:%d/playground' % port)
+            client = fixture.root / 'publisher.json'
+            client.write_text(json.dumps(fixture.config))
+            clients.append(client)
+        tool = [sys.executable, str(Path('tools/local-publisher').resolve())]
+        try:
+            for client in clients:
+                publisher.run(tool + ['start', client])
+            publisher.run(tool + ['stop', clients[0]])
+            self.assertFalse((registry / (self.factory['machine'] + '.json')).exists())
+            self.assertTrue(publisher.control(config))
+            route = '/aarch64/permits/' + other.factory['machine'] + '/' + B + '.permit?from=' + other.factory['anchor'] + '&retain=' + A
+            context = ssl.create_default_context(cafile=config['certificate'])
+            with urlopen('https://127.0.0.1:%d' % port + route, context=context, timeout=10) as reply:
+                self.assertEqual(other.factory['machine'], publisher.record(reply.read())['machine'])
+            publisher.run(tool + ['stop', clients[1]])
+            self.assertEqual([], list(registry.glob('*.json')))
+            with self.assertRaises(OSError):
+                publisher.control(config)
+        finally:
+            publisher.run(tool + ['stop', service_config])
 
 
 if __name__ == '__main__':

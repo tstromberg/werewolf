@@ -26,9 +26,8 @@ Zig is pinned to the version in the Makefile's `ZIG_VERSION`. Zig changes betwee
 | `test/` | the scripts `make check` boots and attacks machines with |
 | `release/` | building, signing and publishing releases |
 | `docs/` | user docs; `docs/design/` holds design docs |
-| `bite` | takes over an existing VM |
 
-The image has no shell, so everything that runs on a machine is a small Zig program. Tools that run on the build host or on a distro being taken over (`bite`, `release/*`, `test/*`) are POSIX shell, on purpose: that is where a shell already is.
+The image has no shell, so everything that runs on a machine is a small Zig program. Tools that run on the build host (`release/*`, `test/*`) are POSIX shell, on purpose: that is where a shell already is.
 
 ## Make a change
 
@@ -64,7 +63,7 @@ And in practice:
 
 ## Commits and pull requests
 
-- Commit subjects are `area: what changed`, in the imperative: `bite: download the latest release when given no slot`. The body says why.
+- Commit subjects are `area: what changed`, in the imperative: `howl: verify the downloaded release before booting`. The body says why.
 - One logical change per pull request. CI must pass.
 - Pull requests are merged with merge commits.
 

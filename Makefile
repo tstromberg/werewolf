@@ -15,8 +15,7 @@
 #   make check-gcp-metadata check GCP people, key expiry, precedence and rotation
 #   make example-FORM     run that form's local README fence; examples-gcp runs GCP
 #   make ci               run CI's check job in an Ubuntu VM under Lima
-#   make image|slot|disk  build FORM's initramfs, bite slot or UEFI disk
-#   make bite-me          take over this Debian, Ubuntu, Fedora or Rocky VM
+#   make image|slot|disk  build FORM's initramfs, slot or UEFI disk
 #   make list-forms       list the forms and the forms each includes
 #   make relock           resolve FORM's packages again
 #   make dist             build the released forms, unsigned (docs/releases.md)
@@ -31,7 +30,7 @@ HOST_ARCH := $(shell uname -m | sed 's/arm64/aarch64/;s/amd64/x86_64/')
 ARCH ?= $(HOST_ARCH)
 HOST_OS := $(shell uname -s)
 
-FORM ?= $(if $(filter bite-me,$(MAKECMDGOALS)),prod-ssh,sshd)
+FORM ?= sshd
 FORM_TOOL = build/host/form
 FORM_TOOL_SOURCES = tools/form.zig lib/form.zig lib/compose.zig lib/package.zig lib/allow.zig lib/sshd.zig lib/service.zig lib/seal.zig lib/settings.zig
 # compose_modules NAME is lib/compose.zig as module NAME, with its imports.
@@ -85,7 +84,7 @@ SHA256 ?= $(shell command -v sha256sum || echo shasum -a 256)
 .DELETE_ON_ERROR:
 
 # A target named _NAME is a step of another target.
-.PHONY: all install uninstall install-deps install-precommit precommit hooks image slot disk bite-me list-forms test \
+.PHONY: all install uninstall install-deps install-precommit precommit hooks image slot disk list-forms test \
 	programs packages posture howl cve-tiers relock release-inputs dist clean help ci check check-forms \
 	check-shellfree check-integrity check-cloud check-native check-one check-adhoc check-bastion check-people \
 	check-slot check-compose check-updater check-updater-staged check-updater-published check-nodata \
@@ -154,8 +153,6 @@ CMDS := $(filter-out howl,$(patsubst cmd/%/,%,$(wildcard cmd/*/)))
 # program_bin NAME is where cmd/NAME is built; form_bin DIR, where forms/F/cmd/P is.
 program_bin = $(PROGRAMS)/$(1)/$(or $(PROGRAM_AT_$(1)),usr/lib/werewolf/$(1))
 PROGRAM_AT_init = init
-PROGRAM_AT_bite-cleanup = usr/bin/bite-cleanup
-PROGRAM_AT_popen-shim = usr/lib/werewolf/popen-shim.so
 PROGRAM_AT_samba-passwd = usr/lib/werewolf/samba-passwd.so
 PROGRAM_AT_paperless-group = usr/lib/werewolf/paperless-group.so
 PROGRAM_AT_crash-log = usr/lib/werewolf/crash-log.so
@@ -189,13 +186,9 @@ $(2): $(or $(3),cmd/$(1))/$(1).zig $$(wildcard $(or $(3),cmd/$(1))/*.zig) $$(wil
 	$$(zig_check)
 	zig build-exe -O ReleaseSafe -fstrip -target $$(ARCH)-linux-musl $$(call ZIG_MODULES,$$<) -femit-bin=$$@
 endef
-$(foreach p,$(filter-out popen-shim samba-passwd paperless-group crash-log,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
+$(foreach p,$(filter-out samba-passwd paperless-group crash-log,$(CMDS)),$(eval $(call program,$(p),$(call program_bin,$(p)))))
 $(foreach c,$(FORM_CMDS),$(eval $(call program,$(notdir $(c)),$(call form_bin,$(c)),$(c))))
-# pg-init preloads popen-shim.so into initdb, so it links glibc as initdb does.
 # samba preloads samba-passwd.so into smbd, for the same reason: glibc.
-$(call program_bin,popen-shim): cmd/popen-shim/popen-shim.zig
-	$(zig_check)
-	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
 $(call program_bin,samba-passwd): cmd/samba-passwd/samba-passwd.zig
 	$(zig_check)
 	zig build-lib -dynamic -O ReleaseSafe -fstrip -target $(ARCH)-linux-gnu -lc -femit-bin=$@ $<
@@ -230,7 +223,7 @@ UKI_STUB ?= out/tools/stubs/$(ARCH)/linux.efi.stub
 UKI = $(OUT)/slot/uki.efi
 UKI_WORK = $(BUILD)/uki
 UKI_NATIVE ?=
-UKI_ARGS ?= $(if $(UKI_NATIVE),werewolf.native=1 werewolf.victim=57e1f000-77e2-4b0f-8a3c-0000000000a0:/werewolf werewolf.esp=57E1-F000)
+UKI_ARGS ?= $(if $(UKI_NATIVE),werewolf.native=1 werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000)
 .PHONY: _uki-options
 _uki-options:
 $(UKI_WORK)/options: _uki-options
@@ -287,11 +280,18 @@ _test/provider-ab:
 	python3 test/ab_checks.py
 	python3 test/ab-provider-tests
 _test/kernel-version: ; python3 test/kernel-version
-_test/local-prerequisites: ; python3 test/local-prerequisites; python3 test/build-helper
+_test/local-prerequisites:
+	python3 test/local-prerequisites
+	python3 test/sign-kernel
+	python3 test/build-helper
 _test/cloud-enrollment: $(HOWL) ; python3 test/cloud-enrollment $(HOWL)
 _test/kernel-inputs: ; python3 test/kernel-inputs
 _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/local-publisher $(HOWL)
+	python3 test/boot-images $(HOWL)
+	python3 test/boot-download $(HOWL)
+	python3 test/protected-release
+	python3 test/protected-publication
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/cmdline.zig: ; zig test --dep network -Mroot=lib/cmdline.zig -Mnetwork=lib/network.zig
 _test/lib/prebuilt.zig: ; zig test --dep apk --dep update-policy -Mroot=lib/prebuilt.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -Mupdate-policy=lib/update-policy.zig
@@ -307,7 +307,7 @@ build/host/tpm-policy: tools/tpm-policy.zig lib/tpm.zig lib/boot-authority.zig l
 	@mkdir -p $(dir $@)
 	zig build-exe -O ReleaseSafe --dep apk --dep tpm -Mroot=$< --dep apk -Mtpm=lib/tpm.zig --dep package -Mapk=lib/apk.zig -Mpackage=lib/package.zig -femit-bin=$@
 
-.PHONY: check-tpm-guest check-tpm-recovery check-tpm-bootstrap-guest check-secure-lima check-secure-qemu check-run-cache
+.PHONY: check-tpm-guest check-tpm-recovery check-tpm-bootstrap-guest check-secure-lima check-secure-qemu check-run-cache check-shared-boot
 check-tpm-recovery: build/host/tpm-policy
 	python3 test/check-tpm-recovery
 
@@ -325,6 +325,9 @@ check-secure-lima: $(HOWL)
 check-run-cache: $(HOWL)
 	python3 test/check-run-cache $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/run-cache
 
+check-shared-boot: $(HOWL)
+	python3 test/check-shared-boot $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/shared-boot
+
 check-secure-qemu: $(HOWL)
 	python3 test/check-secure-lima $(HOWL) $(IPE_KERNEL) $(WEREWOLF_IPE_KEY) $(WEREWOLF_IPE_CRT) $(UKI_STUB) $(BUILD)/check/secure-qemu qemu
 
@@ -335,7 +338,6 @@ _test/tools/form.zig: ; zig test $(FORM_TOOL_MODULES)
 _test/lib/compose.zig: ; zig test $(COMPOSE_MODULES)
 _test/tools/package.zig _test/lib/apk.zig: _test/%: ; zig test --dep package -Mroot=$* -Mpackage=lib/package.zig
 _test/tools/cve-tiers.zig: ; zig test $(call ZIG_MODULES,tools/cve-tiers.zig)
-_test/cmd/popen-shim/popen-shim.zig: ; zig test cmd/popen-shim/popen-shim.zig -lc
 _test/cmd/samba-passwd/samba-passwd.zig: ; zig test cmd/samba-passwd/samba-passwd.zig -lc
 _test/cmd/paperless-group/paperless-group.zig: ; zig test cmd/paperless-group/paperless-group.zig -lc
 _test/cmd/crash-log/crash-log.zig: ; zig test cmd/crash-log/crash-log.zig -lc
@@ -410,13 +412,6 @@ cve-tiers: $(CVE_TIERS_BIN) $(LOCK)/kernel.lock.json
 	NVD_API_KEY=$${NVD_API_KEY:-$$(cat $(NVD_API_KEY_FILE))} \
 	$(CVE_TIERS_BIN) "$$kernel" build/tiers/origins build/tiers/nvd build/tiers/in build/tiers/cve-tiers.json
 
-ifneq ($(filter bite-me,$(MAKECMDGOALS)),)
-ifneq ($(HOST_OS)-$(HOST_ARCH),Linux-$(ARCH))
-$(error bite-me runs on the Linux $(ARCH) machine it takes over)
-endif
-endif
-bite-me: slot
-	$(if $(filter 0,$(shell id -u)),,sudo) ./bite -i $(if $(wildcard config/*),--config config) $(OUT)/slot
 list-forms:
 	@$(FORM_TOOL) tree
 
@@ -484,10 +479,10 @@ CHECK_CMDLINE = $(CHECK_BOOT) werewolf.ip=10.0.2.15/24 werewolf.gw=10.0.2.2 were
 POSTURE_KNOWN_KIND := $(shell awk -v b=$(if $(DEV),dev,*) -v a=$(ARCH) '$$1 == b || $$1 == a { $$1 = ""; k = k $$0 } END { print k }' test/posture-known)
 export POSTURE_KNOWN := $(if $(IPE),$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN_KIND)),$(POSTURE_KNOWN_KIND)) $(shell $(FORM_ASK) weaknesses $(FORM_REF))
 # A check script's environment (docs/testing.md). Homebrew keeps debugfs off PATH.
-VICTIM_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
+SLOTS_UUID = 0e7e1f00-c4ec-4b00-8000-00000000c4ec
 DEBUGFS = $(firstword $(shell command -v debugfs) $(wildcard /opt/homebrew/opt/e2fsprogs/sbin/debugfs /usr/local/opt/e2fsprogs/sbin/debugfs))
 CHECK_ENV = CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) KERNEL=$(BUILD)/vmlinuz BOOT='$(CHECK_BOOT)' \
-	CMDLINE='$(CHECK_CMDLINE)' VICTIM=$(VICTIM_UUID) DEBUGFS=$(DEBUGFS) HOWL=$(HOWL) TAR=$(TAR)
+	CMDLINE='$(CHECK_CMDLINE)' SLOTS=$(SLOTS_UUID) DEBUGFS=$(DEBUGFS) HOWL=$(HOWL) TAR=$(TAR)
 # built NAME, COMMAND logs COMMAND to CHECK/NAME-build.log, and shows its tail on failure.
 built = mkdir -p $(CHECK) && $(2) >$(CHECK)/$(1)-build.log 2>&1 || \
 	{ tail -n 20 $(CHECK)/$(1)-build.log; echo "FAIL   $(1) build: see $(CHECK)/$(1)-build.log"; exit 1; }
@@ -753,7 +748,7 @@ check-updater check-updater-staged check-updater-published: | _check-shared
 _check-updater: $(VERITY_BIN)
 	@mkdir -p $(CHECK)/update-$(FORM) && $(MAKE) --no-print-directory slot >$(CHECK)/update-$(FORM)/build.log 2>&1 || \
 		{ tail -n 20 $(CHECK)/update-$(FORM)/build.log; echo "FAIL   update build: see $(CHECK)/update-$(FORM)/build.log"; exit 1; }
-	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) VICTIM=$(VICTIM_UUID) PRUNE='$(call form_list,prune)' \
+	@CHECK=$(CHECK) FORM=$(FORM) OUT=$(OUT) TAR=$(TAR) SLOTS=$(SLOTS_UUID) PRUNE='$(call form_list,prune)' \
 		EROFS_OPTS='$(EROFS_OPTS)' VERITY=$(VERITY_BIN) CONSOLE=$(CONSOLE) SEAL_ARGS='$(SEAL_ARGS)' STAGED='$(STAGED)' PUBLISHED='$(PUBLISHED)' \
 		test/check-updater $(QEMU) -smp 2 -m 2048 -no-reboot -device virtio-rng-pci -netdev user,id=n0 \
 		-device virtio-net-pci,netdev=n0,romfile=
@@ -772,7 +767,7 @@ help:
 	@sed -n '2,/^$$/s/^# \{0,1\}//p' Makefile
 
 # BEGIN: lint-install .
-LINTERS := yamllint-lint zig-lint doc-lint bite-key-lint
+LINTERS := yamllint-lint zig-lint doc-lint
 FIXERS := zig-fix
 .PHONY: lint _lint fix $(LINTERS) $(FIXERS)
 lint: _lint
@@ -829,8 +824,3 @@ $(DOC_CHECK): tools/doc-check.zig
 	zig build-exe -O ReleaseSafe -femit-bin=$@ tools/doc-check.zig
 doc-lint: $(DOC_CHECK)
 	$(DOC_CHECK) $(DOC_SOURCES)
-
-# bite checks a downloaded release against its own copy of the release key.
-bite-key-lint:
-	@sed -n '/BEGIN PUBLIC KEY/,/END PUBLIC KEY/p' bite | cmp -s - release/image.pub || \
-		{ echo "bite: its release key differs from release/image.pub"; exit 1; }

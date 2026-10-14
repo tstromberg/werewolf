@@ -65,7 +65,7 @@ the forms world names as NAME-form as the new root's packages laid them, and
 the image's own copies of the rest, and writes only into scratch.
 
 **One path.** Built: the release path is gone (`release.zig`, the manifest
-compare, `check-updater-release`); `image.pub` stays with bite, for installs,
+compare, `check-updater-release`); release signatures authenticate installs,
 and werewolf's advisories are a package, `werewolf-advisories`.
 
 **The format pin**, `werewolf-formatN`, named by a published world, keeps

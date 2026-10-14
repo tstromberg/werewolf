@@ -16,8 +16,11 @@ Ubuntu is not required for the default build path.
 
 Only explicitly staged public sources, base archives and the public IPE
 certificate enter the builder. Private policy, boot, permit and reset
-credentials stay on the Mac. A separate temporary module signer is generated
-inside the builder and deleted after compilation.
+credentials stay on the Mac. The kernel embeds the stable public IPE certificate
+for module trust and keeps mandatory module signature enforcement enabled.
+Melange produces unsigned modules; [sign-kernel](../tools/sign-kernel) signs them
+on the host with the matching private key before the image consumes the archive.
+No temporary random module certificate enters the kernel or builder output.
 
 The recipes are [ipe-kernel.melange.yaml](../boot/ipe-kernel.melange.yaml) and
 [tpm-stub.melange.yaml](../boot/tpm-stub.melange.yaml).
@@ -27,7 +30,10 @@ Alpine base, public signer, sources and builder bytes; completion hashes
 reject altered or incomplete artifacts.
 
 Kernel and stub caches are independent. Changing the stub recipe reuses the
-kernel; changing the public IPE certificate reuses the stub. Completed older
+kernel; changing the public IPE certificate reuses the stub. Compilation and
+host signing also have separate caches: changing the signing helper or retrying
+failed signing reuses authenticated compiled modules. No-op runs do not sign again.
+Completed older
 combined caches are adopted without recompilation. A failed stub build keeps
 the completed kernel. Builder sources are written only when their bytes change.
 
@@ -42,6 +48,9 @@ Application builds currently use the existing replacement path.
 GCC 15.2 is pinned to match the Alpine kernel configuration. A rolling GCC 16
 build crashed on Alpine's latent-entropy plugin; retain the plugin and use
 the compatible compiler rather than disabling kernel hardening.
+Fixed build metadata, debug-path mappings and an explicit compiler seed preserve
+latent-entropy instrumentation while making its generated constants reproducible.
+Linux managed builds use the same Melange recipes under bubblewrap.
 
 ## Firmware enrollment on the Mac
 
@@ -80,6 +89,29 @@ The opt-in [run-cache test](../test/check-run-cache) requires an isolated checko
 and measures actual Lima repeat runs and resume. It rejects repeated builders,
 guest restarts on unchanged runs and changes to signing or TPM authority.
 It also checks host publisher recovery without rebuilding or restarting the guest.
+[module-signing tests](../test/sign-kernel) cover exact repeat bytes, signature/tamper
+verification, wrong trust, bounded inputs and interrupted publication.
+Set `UPSTREAM_SIGN_FILE` to the pinned Linux tool for independent signature-byte comparison.
+`test/check-kernel-repro ARCH ALPINE_BASE KEY CERT OUTPUT` compares two independent
+cold Melange builds and their complete host-signed archives. On macOS, supply
+the stock `QEMU_KERNEL_IMAGE` and matching `QEMU_BASE_INITRAMFS`; keys stay on the host.
+`test/check-kernel-modules ARCH UNSIGNED_TAR SIGNED_TAR OUTPUT QEMU...` boots
+an isolated probe that loads a trusted module and refuses unsigned, foreign
+and altered copies with kernel signature errors. This is separate from the
+complete Secure Boot/IPE/TPM deployment lifecycle gate.
+
+Two independent x86_64 cold Melange builds produced identical complete kernel/module
+archives; two host-signing passes also produced identical archives. Module probes
+passed on Linux x86_64/KVM and macOS arm64/HVF: trusted load succeeded and unsigned,
+foreign-signed and altered modules returned `KEYREJECTED`.
+Evidence: `build/ipe-check/kernel-repro-20261013/`.
+The [kernel reproducibility workflow](../.github/workflows/kernel-repro.yml) repeats
+cold-build comparison and runtime enforcement on both native Linux architectures.
+It uses disposable test keys and does not publish production artifacts.
+The revised arm64 kernel also passed six protected Lima A/B/A boots with two
+independent enrollments, retained TPM anchors on rollback and continued HTTPS
+service after one machine's deletion. No consumer builders or vendor signing ran.
+Evidence: `build/ipe-check/secure-lima/shared-vendor-repro-kernel-verified/`.
 
 Kernel/stub compilation through Melange QEMU and native firmware enrollment
 have passed on this arm64 Mac; enrollment was exercised with Python 3.9 and

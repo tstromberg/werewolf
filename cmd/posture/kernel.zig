@@ -93,7 +93,10 @@ pub fn check(p: *Posture) !void {
         .name = "Only signed kernel modules",
         .why = "Every module in the kernel was signed by whoever built the kernel.",
         .how = "the kernel's unsigned-module taint (bit 13) is clear",
-        .observed = try p.gpa.print("tainted={d}; unsigned-module bit 13={d}", .{ tainted, (tainted >> 13) & 1 }),
+        .observed = try p.gpa.print(
+            "tainted={d}; unsigned-module bit 13={d}",
+            .{ tainted, (tainted >> 13) & 1 },
+        ),
         .result = if (tainted & (1 << 13) == 0) .pass else .fail,
     });
     const kexec_value = p.sysctl("kernel/kexec_load_disabled");
@@ -105,7 +108,10 @@ pub fn check(p: *Posture) !void {
         .why = "Root cannot replace the running kernel with kexec.",
         .how = "kernel.kexec_load_disabled is 1, or lockdown (integrity) refuses unsigned " ++
             "kexec",
-        .observed = try p.gpa.print("kexec_load_disabled={s}; lockdown={s}", .{ if (kexec_value.len > 0) kexec_value else "unavailable", level }),
+        .observed = try p.gpa.print(
+            "kexec_load_disabled={s}; lockdown={s}",
+            .{ if (kexec_value.len > 0) kexec_value else "unavailable", level },
+        ),
         .result = if (kexec_off or locked) .pass else .fail,
     });
     try p.oneWay(
@@ -139,7 +145,10 @@ pub fn check(p: *Posture) !void {
         .name = "Performance events restricted",
         .why = "Ordinary users cannot watch the kernel through performance counters.",
         .how = "kernel.perf_event_paranoid is 2 or more",
-        .observed = if (paranoid.len > 0) paranoid else "unavailable (missing, unreadable or empty)",
+        .observed = if (paranoid.len > 0)
+            paranoid
+        else
+            "unavailable (missing, unreadable or empty)",
         .result = if (perf >= 2) .pass else .fail,
         .detail = paranoid,
     });
@@ -266,7 +275,10 @@ pub fn check(p: *Posture) !void {
         .how = "PID 1's CapBnd in /proc/1/status lacks each of them; every process descends " ++
             "from PID 1",
         .source = if (p.werewolf) null else "/proc/1/status: CapBnd",
-        .observed = try p.gpa.print("CapBnd={s}; forbidden capabilities held={s}", .{ bnd orelse "unavailable", if (held.items.len > 0) held.items else "none" }),
+        .observed = try p.gpa.print(
+            "CapBnd={s}; forbidden capabilities held={s}",
+            .{ bnd orelse "unavailable", if (held.items.len > 0) held.items else "none" },
+        ),
         .result = if (bnd == null) .skip else if (held.items.len == 0) .pass else .fail,
         .detail = if (bnd == null)
             "cannot read /proc/1/status"
@@ -276,17 +288,26 @@ pub fn check(p: *Posture) !void {
             "",
     });
     if (!p.werewolf) {
-        const mount_cap = capBit(p.read("/proc/self/status"), "CapEff", @backingInt(allow.Cap.sys_admin));
+        const mount_cap = capBit(
+            p.read("/proc/self/status"),
+            "CapEff",
+            @backingInt(allow.Cap.sys_admin),
+        );
         try p.add(.{
             .id = "kernel-mount-capability",
             .area = "kernel",
             .name = "Mount capability absent",
-            .why = "A process without CAP_SYS_ADMIN cannot mount filesystems in its current user namespace.",
+            .why = "A process without CAP_SYS_ADMIN cannot mount filesystems in its current " ++
+                "user namespace.",
             .how = "/proc/self/status CapEff has CAP_SYS_ADMIN (bit 21) clear",
             .source = "/proc/self/status: CapEff bit 21 (CAP_SYS_ADMIN)",
             .expected = "0",
             .observed = if (mount_cap) |held_cap| if (held_cap) "1" else "0" else "unavailable",
-            .comparison = if (mount_cap) |held_cap| if (held_cap) "/proc/self/status CapEff.SYS_ADMIN = 1, want 0" else "/proc/self/status CapEff.SYS_ADMIN = 0" else "/proc/self/status CapEff: unavailable",
+            .comparison = if (mount_cap) |held_cap| if (held_cap)
+                "/proc/self/status CapEff.SYS_ADMIN = 1, want 0"
+            else
+                "/proc/self/status CapEff.SYS_ADMIN = " ++
+                    "0" else "/proc/self/status CapEff: unavailable",
             .result = if (mount_cap) |held_cap| if (held_cap) .fail else .pass else .skip,
         });
     }
@@ -312,7 +333,10 @@ pub fn check(p: *Posture) !void {
             "device event or to load a module.",
         .how = "kernel.usermodehelper.bset lacks each of those capabilities, and " ++
             "kernel.hotplug and kernel.modprobe are empty",
-        .observed = try p.gpa.print("usermodehelper.bset={s}; hotplug=\"{s}\"; modprobe=\"{s}\"", .{ helpers_text, hotplug, modprobe }),
+        .observed = try p.gpa.print(
+            "usermodehelper.bset={s}; hotplug=\"{s}\"; modprobe=\"{s}\"",
+            .{ helpers_text, hotplug, modprobe },
+        ),
         .result = if (!p.root)
             .skip
         else if (helpers == null)
@@ -364,7 +388,10 @@ pub fn check(p: *Posture) !void {
         .why = "No program can map the first 64 KiB of memory, where a kernel bug that " ++
             "follows a null pointer would find it.",
         .how = "vm.mmap_min_addr is 65536 or more",
-        .observed = if (min_addr.len > 0) min_addr else "unavailable (missing, unreadable or empty)",
+        .observed = if (min_addr.len > 0)
+            min_addr
+        else
+            "unavailable (missing, unreadable or empty)",
         .result = if ((std.fmt.parseInt(u64, min_addr, 10) catch 0) >= 65536) .pass else .fail,
         .detail = try p.gpa.print(
             "vm.mmap_min_addr is {s}",
@@ -449,7 +476,10 @@ pub fn check(p: *Posture) !void {
         .how = "/proc/self/maps has no [vsyscall] mapping (vsyscall=none)",
         .expected = "no mapping whose pathname is [vsyscall]",
         .observed = vsyscall orelse "[vsyscall] mapping absent",
-        .comparison = try p.gpa.print("/proc/self/maps [vsyscall] = {s}", .{if (vsyscall != null) "present, want absent" else "absent"}),
+        .comparison = try p.gpa.print(
+            "/proc/self/maps [vsyscall] = {s}",
+            .{if (vsyscall != null) "present, want absent" else "absent"},
+        ),
         .result = if (vsyscall == null) .pass else .fail,
     });
     // Children inherit PID 1's limits, and only root can raise a hard limit.
@@ -463,8 +493,14 @@ pub fn check(p: *Posture) !void {
         .how = "PID 1's hard limit on core file size (/proc/1/limits) is 0, so no process " ++
             "it starts can raise its own",
         .expected = "Max core file size: Hard Limit = 0 bytes",
-        .observed = if (core) |c| try p.gpa.print("Hard Limit = {s} bytes", .{c}) else "Max core file size row unavailable",
-        .comparison = if (core) |c| try p.gpa.print("/proc/1/limits core.hard = {s}{s}", .{ c, if (std.mem.eql(u8, c, "0")) "" else ", want 0" }) else "/proc/1/limits core.hard: unavailable",
+        .observed = if (core) |c|
+            try p.gpa.print("Hard Limit = {s} bytes", .{c})
+        else
+            "Max core file size row unavailable",
+        .comparison = if (core) |c| try p.gpa.print(
+            "/proc/1/limits core.hard = {s}{s}",
+            .{ c, if (std.mem.eql(u8, c, "0")) "" else ", want 0" },
+        ) else "/proc/1/limits core.hard: unavailable",
         .result = if (core) |c| (if (std.mem.eql(u8, c, "0")) .pass else .fail) else .skip,
         .detail = if (core) |c|
             try p.gpa.print("hard limit is {s}", .{c})
@@ -488,7 +524,10 @@ pub fn check(p: *Posture) !void {
         .how = "none of " ++ comptime joined(&rare_features) ++
             " in /proc/modules, /proc/net/protocols or /proc/filesystems",
         .observed = try featureObservations(p.gpa, &rare_features, modules, protocols, filesystems),
-        .comparison = try p.gpa.print("/proc/{{modules,net/protocols,filesystems}} ∩ deny = {s}{s}", .{ if (rare.len > 0) rare else "∅", if (rare.len > 0) ", want ∅" else "" }),
+        .comparison = try p.gpa.print(
+            "/proc/{{modules,net/protocols,filesystems}} ∩ deny = {s}{s}",
+            .{ if (rare.len > 0) rare else "∅", if (rare.len > 0) ", want ∅" else "" },
+        ),
         .result = if (rare.len == 0) .pass else .fail,
         .detail = rare,
     });
@@ -508,8 +547,20 @@ pub fn check(p: *Posture) !void {
             "x_tables, overlayfs) is not in the running kernel.",
         .how = "none of " ++ comptime joined(&exploited_features) ++
             " in /proc/modules, /proc/net/protocols or /proc/filesystems",
-        .observed = try featureObservations(p.gpa, &exploited_features, modules, protocols, filesystems),
-        .comparison = try p.gpa.print("/proc/{{modules,net/protocols,filesystems}} ∩ deny = {s}{s}", .{ if (exploited.len > 0) exploited else "∅", if (exploited.len > 0) ", want ∅" else "" }),
+        .observed = try featureObservations(
+            p.gpa,
+            &exploited_features,
+            modules,
+            protocols,
+            filesystems,
+        ),
+        .comparison = try p.gpa.print(
+            "/proc/{{modules,net/protocols,filesystems}} ∩ deny = {s}{s}",
+            .{
+                if (exploited.len > 0) exploited else "∅",
+                if (exploited.len > 0) ", want ∅" else "",
+            },
+        ),
         .result = if (exploited.len == 0) .pass else .fail,
         .detail = exploited,
     });
@@ -571,7 +622,13 @@ fn exploitEntries(p: *Posture) !void {
         .how = "socket(AF_ALG) fails",
         .expected = "return = -1 (any errno); no socket opened",
         .observed = try posture.syscallObservation(p.gpa, alg),
-        .comparison = try p.gpa.print("socket(AF_ALG, SEQPACKET, 0) = {s}{s}", .{ try posture.syscallResult(p.gpa, alg), if (alg_e == .SUCCESS) ", want error" else "" }),
+        .comparison = try p.gpa.print(
+            "socket(AF_ALG, SEQPACKET, 0) = {s}{s}",
+            .{
+                try posture.syscallResult(p.gpa, alg),
+                if (alg_e == .SUCCESS) ", want error" else "",
+            },
+        ),
         .result = if (alg_e == .SUCCESS) .fail else .pass,
         .detail = if (alg_e == .SUCCESS) "opened" else errnoText(alg_e),
     });
@@ -592,12 +649,22 @@ fn exploitEntries(p: *Posture) !void {
         .why = "No program can hand a socket's TLS records to the kernel, the way into " ++
             "CVE-2025-39682.",
         .how = "setsockopt(TCP_ULP, \"tls\") on a TCP socket fails with ENOENT or ENOSYS",
-        .expected = "setsockopt return = -1, errno = ENOENT (2) or ENOSYS (38); ENOTCONN indicates TLS is available",
-        .observed = try p.gpa.print("{s}: {s}", .{ if (linux.errno(tcp) != .SUCCESS) "socket" else "setsockopt", try posture.syscallObservation(p.gpa, ulp_rc) }),
+        .expected = "setsockopt return = -1, errno = ENOENT (2) or ENOSYS (38); ENOTCONN " ++
+            "indicates TLS is available",
+        .observed = try p.gpa.print(
+            "{s}: {s}",
+            .{
+                if (linux.errno(tcp) != .SUCCESS) "socket" else "setsockopt",
+                try posture.syscallObservation(p.gpa, ulp_rc),
+            },
+        ),
         .comparison = try p.gpa.print("{s} = {s}{s}", .{
             if (linux.errno(tcp) != .SUCCESS) "socket(TCP)" else "setsockopt(TCP_ULP, tls)",
             try posture.syscallResult(p.gpa, ulp_rc),
-            if (ulp_e == .NOENT or ulp_e == .NOSYS or linux.errno(tcp) != .SUCCESS) "" else ", want ENOENT|ENOSYS",
+            if (ulp_e == .NOENT or ulp_e == .NOSYS or linux.errno(tcp) != .SUCCESS)
+                ""
+            else
+                ", want ENOENT|ENOSYS",
         }),
         .result = if (linux.errno(tcp) != .SUCCESS)
             .skip
@@ -625,7 +692,13 @@ fn exploitEntries(p: *Posture) !void {
         .how = "pipe2(O_NOTIFICATION_PIPE) fails",
         .expected = "return = -1 (any errno); no notification pipe created",
         .observed = try posture.syscallObservation(p.gpa, pipe),
-        .comparison = try p.gpa.print("pipe2(O_NOTIFICATION_PIPE) = {s}{s}", .{ try posture.syscallResult(p.gpa, pipe), if (pipe_e == .SUCCESS) ", want error" else "" }),
+        .comparison = try p.gpa.print(
+            "pipe2(O_NOTIFICATION_PIPE) = {s}{s}",
+            .{
+                try posture.syscallResult(p.gpa, pipe),
+                if (pipe_e == .SUCCESS) ", want error" else "",
+            },
+        ),
         .result = if (pipe_e == .SUCCESS) .fail else .pass,
         .detail = if (pipe_e == .SUCCESS) "made" else errnoText(pipe_e),
     });
@@ -641,9 +714,22 @@ fn exploitEntries(p: *Posture) !void {
         .name = "No seccomp listeners",
         .why = "No program can answer another's system calls with a seccomp listener.",
         .how = "seccomp(SECCOMP_GET_NOTIF_SIZES) fails",
-        .expected = "return = -1 (any errno); the size-query interface is refused (no listener is installed by the probe)",
-        .observed = if (notif_e == .SUCCESS) try p.gpa.print("return = 0; seccomp_notif={d}, seccomp_notif_resp={d}, seccomp_data={d} bytes", .{ sizes[0], sizes[1], sizes[2] }) else try posture.syscallObservation(p.gpa, notif_rc),
-        .comparison = try p.gpa.print("seccomp(GET_NOTIF_SIZES) = {s}{s}", .{ try posture.syscallResult(p.gpa, notif_rc), if (notif_e == .SUCCESS) ", want error" else "" }),
+        .expected = "return = -1 (any errno); the size-query interface is refused (no listener " ++
+            "is installed by the probe)",
+        .observed = if (notif_e == .SUCCESS)
+            try p.gpa.print(
+                "return = 0; seccomp_notif={d}, seccomp_notif_resp={d}, seccomp_data={d} bytes",
+                .{ sizes[0], sizes[1], sizes[2] },
+            )
+        else
+            try posture.syscallObservation(p.gpa, notif_rc),
+        .comparison = try p.gpa.print(
+            "seccomp(GET_NOTIF_SIZES) = {s}{s}",
+            .{
+                try posture.syscallResult(p.gpa, notif_rc),
+                if (notif_e == .SUCCESS) ", want error" else "",
+            },
+        ),
         .result = if (notif_e == .SUCCESS) .fail else .pass,
         .detail = if (notif_e == .SUCCESS) "answered" else errnoText(notif_e),
     });
@@ -667,11 +753,26 @@ fn exploitEntries(p: *Posture) !void {
         .why = "No program, root included, can open a pseudo-terminal, the way into " ++
             "CVE-2014-0196 and the TTY layer's other bugs, unless the machine's form " ++
             "allows it for logins.",
-        .how = if (p.werewolf) "open(/dev/ptmx) fails, or the form allows pty" else "open(/dev/ptmx) fails",
+        .how = if (p.werewolf)
+            "open(/dev/ptmx) fails, or the form allows pty"
+        else
+            "open(/dev/ptmx) fails",
         .source = if (p.werewolf) null else "open(/dev/ptmx, O_RDWR|O_NOCTTY|O_CLOEXEC)",
-        .expected = if (p.werewolf) "open return = -1 (any errno), or the form explicitly allows pty" else "open return = -1 (any errno)",
-        .observed = if (p.werewolf) try p.gpa.print("{s}; form allows pty = {s}", .{ try posture.syscallObservation(p.gpa, ptmx), if (pty_allowed) "yes" else "no" }) else try posture.syscallObservation(p.gpa, ptmx),
-        .comparison = try p.gpa.print("open(/dev/ptmx) = {s}{s}", .{ try posture.syscallResult(p.gpa, ptmx), if (pty_allowed) "; allow.pty" else if (ptmx_e == .SUCCESS) ", want error" else "" }),
+        .expected = if (p.werewolf)
+            "open return = -1 (any errno), or the form explicitly allows pty"
+        else
+            "open return = -1 (any errno)",
+        .observed = if (p.werewolf) try p.gpa.print(
+            "{s}; form allows pty = {s}",
+            .{ try posture.syscallObservation(p.gpa, ptmx), if (pty_allowed) "yes" else "no" },
+        ) else try posture.syscallObservation(p.gpa, ptmx),
+        .comparison = try p.gpa.print(
+            "open(/dev/ptmx) = {s}{s}",
+            .{
+                try posture.syscallResult(p.gpa, ptmx),
+                if (pty_allowed) "; allow.pty" else if (ptmx_e == .SUCCESS) ", want error" else "",
+            },
+        ),
         .result = if (ptmx_e != .SUCCESS or pty_allowed) .pass else .fail,
         .detail = if (ptmx_e != .SUCCESS)
             errnoText(ptmx_e)
@@ -790,8 +891,10 @@ fn memory(p: *Posture) !void {
         .how = "no merged caches in /sys/kernel/slab (slab_nomerge), page_alloc's shuffle " ++
             "parameter is Y, and the kernel's boot line says heap alloc:on (or " ++
             "init_on_alloc is on the command line)",
-        .expected = "slab symlink count = 0 (or slab_nomerge enabled); shuffle = Y (or page_alloc.shuffle enabled); heap alloc = on (or init_on_alloc enabled)",
-        .comparison = try p.gpa.print("slab.aliases={s}{s}; page_alloc.shuffle={s}{s}; heap alloc={s}{s}", .{
+        .expected = "slab symlink count = 0 (or slab_nomerge enabled); shuffle = Y (or " ++
+            "page_alloc.shuffle enabled); heap alloc = on (or init_on_alloc enabled)",
+        .comparison = try p.gpa.print("slab.aliases={s}{s}; page_alloc.shuffle={s}{s}; heap " ++
+            "alloc={s}{s}", .{
             if (aliases) |n| try p.gpa.print("{d}", .{n}) else "unreadable",
             if (merged) ", want 0" else "",
             if (shuffle.len > 0) shuffle else if (shuffled) "on (cmdline)" else "unavailable",
@@ -799,11 +902,16 @@ fn memory(p: *Posture) !void {
             if (alloc) |on| if (on) "on" else "off" else "unknown",
             if (alloc == false) ", want on" else "",
         }),
-        .observed = try p.gpa.print("slab symlink count={s}; shuffle={s}; boot mem auto-init={s}; fallback command line={s}", .{
+        .observed = try p.gpa.print("slab symlink count={s}; shuffle={s}; boot mem " ++
+            "auto-init={s}; fallback command line={s}", .{
             if (aliases) |n| try p.gpa.print("{d}", .{n}) else "unavailable",
             if (shuffle.len > 0) shuffle else "unavailable",
             if (auto_init.len > 0) auto_init else "unavailable",
-            try argumentValues(p.gpa, cmdline, &.{ "slab_nomerge", "page_alloc.shuffle", "init_on_alloc" }),
+            try argumentValues(
+                p.gpa,
+                cmdline,
+                &.{ "slab_nomerge", "page_alloc.shuffle", "init_on_alloc" },
+            ),
         }),
         .result = if (missing.items.len > 0) .fail else if (alloc == null) .skip else .pass,
         .detail = if (missing.items.len > 0)
@@ -1010,7 +1118,10 @@ fn argumentValues(gpa: Allocator, cmd: []const u8, names: []const []const u8) ![
         var value: []const u8 = "absent";
         var words = std.mem.tokenizeAny(u8, cmd, " \r\n\t");
         while (words.next()) |word| {
-            if (std.mem.eql(u8, word, name)) value = "present (no value)" else if (word.len > name.len and std.mem.startsWith(u8, word, name) and word[name.len] == '=')
+            if (std.mem.eql(u8, word, name))
+                value = "present (no value)"
+            else if (word.len > name.len and std.mem.startsWith(u8, word, name) and
+                word[name.len] == '=')
                 value = word[name.len + 1 ..];
         }
         try listAdd(gpa, &out, "{s}={s}", .{ name, value });
@@ -1036,14 +1147,32 @@ fn featuresPresent(
     return found.items;
 }
 
-fn featureObservations(gpa: Allocator, names: []const []const u8, modules: []const u8, protocols: []const u8, filesystems: []const u8) ![]const u8 {
+fn featureObservations(
+    gpa: Allocator,
+    names: []const []const u8,
+    modules: []const u8,
+    protocols: []const u8,
+    filesystems: []const u8,
+) ![]const u8 {
     var found: std.ArrayList(u8) = .empty;
     for (names) |name| {
-        if (firstWordIs(modules, name)) try listAdd(gpa, &found, "/proc/modules: {s}=present", .{name});
-        if (firstWordIs(protocols, name)) try listAdd(gpa, &found, "/proc/net/protocols: {s}=present", .{name});
-        if (hasFilesystem(filesystems, name)) try listAdd(gpa, &found, "/proc/filesystems: {s}=present", .{name});
+        if (firstWordIs(
+            modules,
+            name,
+        )) try listAdd(gpa, &found, "/proc/modules: {s}=present", .{name});
+        if (firstWordIs(
+            protocols,
+            name,
+        )) try listAdd(gpa, &found, "/proc/net/protocols: {s}=present", .{name});
+        if (hasFilesystem(
+            filesystems,
+            name,
+        )) try listAdd(gpa, &found, "/proc/filesystems: {s}=present", .{name});
     }
-    return if (found.items.len > 0) found.items else "none of the prohibited names present in the inspected tables";
+    return if (found.items.len > 0)
+        found.items
+    else
+        "none of the prohibited names present in the inspected tables";
 }
 
 /// firstWordIs reports whether a line of text starts with the word name, in
@@ -1104,7 +1233,8 @@ fn askToStop() ?[]const u8 {
 /// in the kernel log (lib/audit.zig).
 pub fn logged(p: *Posture) !void {
     p.work("kernel-exec-log: waiting for probe audit record (100 ms timeout)", "");
-    const on_record = try refusedExecLogged(p);
+    var probe_detail: []const u8 = "";
+    const on_record = try refusedExecLogged(p, &probe_detail);
     // Ask audit to stop only if it reads locked, or is unreadable for lack
     // of the capability that stopping also needs. Unlocked audit, as on
     // other distributions, would really stop.
@@ -1125,14 +1255,17 @@ pub fn logged(p: *Posture) !void {
         .why = "An intruder's first step, running something the machine refuses, leaves a " ++
             "line in the kernel's log that nothing on the machine can prevent or stop.",
         .how = if (p.root) how ++ ", and asking the kernel to stop auditing is refused" else how,
+        .observed = probe_detail,
         .comparison = if (on_record) |seen| if (!seen)
-            "/dev/kmsg: matching AUDIT_SYSCALL entries = 0, want >0"
-        else if (stopped) |reason| try p.gpa.print("/dev/kmsg: matched; AUDIT_SET = {s}, want denied", .{reason}) else "/dev/kmsg: matched child execve, type=1300, success=no; audit locked" else "/dev/kmsg: unreadable (requires root)",
+            probe_detail
+        else if (stopped) |reason| try p.gpa.print(
+            "/dev/kmsg: matched; AUDIT_SET = {s}, want denied",
+            .{reason},
+        ) else "/dev/kmsg: matched child execve, type=1300, success=no; audit " ++
+            "locked" else probe_detail,
         .result = if (on_record) |seen| if (seen and stopped == null) .pass else .fail else .skip,
-        .detail = if (on_record == null)
-            "kernel log needs root"
-        else if (!on_record.?)
-            "no audit record of a refused exec"
+        .detail = if (on_record == null or !on_record.?)
+            probe_detail
         else
             stopped orelse "",
     });
@@ -1188,50 +1321,148 @@ pub fn logged(p: *Posture) !void {
 /// Follow new kernel records rather than repeatedly copying the entire
 /// boot log and sleeping 50 ms. kauditd wakes poll when its record arrives.
 /// Missing (including rate-limited) evidence still fails after 100 ms.
-fn refusedExecLogged(p: *Posture) !?bool {
-    const rc = linux.open("/dev/kmsg", .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
-    if (linux.errno(rc) != .SUCCESS) return if (p.root) false else null;
+fn refusedExecLogged(p: *Posture, detail: *[]const u8) !?bool {
+    const rc = linux.open(
+        "/dev/kmsg",
+        .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(rc) != .SUCCESS) {
+        _ = try execLogFailure(p, detail, "open(/dev/kmsg)", rc, 0);
+        return if (p.root) false else null;
+    }
     const fd: i32 = @intCast(rc);
     defer _ = linux.close(fd);
-    if (linux.errno(linux.lseek(fd, 0, linux.SEEK.END)) != .SUCCESS) return false;
+    const seek = linux.lseek(fd, 0, linux.SEEK.END);
+    if (linux.errno(seek) != .SUCCESS)
+        return execLogFailure(p, detail, "lseek(/dev/kmsg, SEEK_END)", seek, 0);
     const child = linux.fork();
-    if (linux.errno(child) != .SUCCESS) return false;
+    if (linux.errno(child) != .SUCCESS)
+        return execLogFailure(p, detail, "fork", child, 0);
     if (child == 0) {
-        _ = execRoot();
-        linux.exit_group(0);
+        linux.exit_group(@backingInt(execRoot()));
     }
     var status: i32 = 0;
-    if (linux.errno(linux.wait4(@intCast(child), &status, 0, null)) != .SUCCESS) return false;
+    const waited = linux.wait4(@intCast(child), &status, 0, null);
+    if (linux.errno(waited) != .SUCCESS)
+        return execLogFailure(p, detail, "wait4", waited, child);
+    const exit_status: u32 = @bitCast(status);
+    if (!linux.W.IFEXITED(exit_status) or
+        linux.W.EXITSTATUS(exit_status) != @backingInt(linux.E.ACCES))
+    {
+        detail.* = try p.gpa.print(
+            "child={d}: execve(/) did not report EACCES; wait status={d}",
+            .{ child, status },
+        );
+        return false;
+    }
     const needles = [_][]const u8{
-        "type=1300",                                                        "success=no",
-        try p.gpa.print(" syscall={d} ", .{@backingInt(linux.SYS.execve)}), try p.gpa.print(" pid={d} ", .{child}),
+        "type=1300",                            "success=no", " exit=-13 ",
+        try p.gpa.print(
+            " syscall={d} ",
+            .{@backingInt(linux.SYS.execve)},
+        ),
+        try p.gpa.print(" pid={d} ", .{child}),
     };
     const deadline = Io.Timestamp.now(p.io, .awake).nanoseconds + 100 * std.time.ns_per_ms;
     var record: [8192]u8 = undefined;
+    var records: usize = 0;
     while (true) {
         const left = deadline - Io.Timestamp.now(p.io, .awake).nanoseconds;
-        if (left <= 0) return false;
+        if (left <= 0) return execLogTimeout(p, detail, child, records);
         const n = linux.read(fd, &record, record.len);
         switch (linux.errno(n)) {
-            .SUCCESS => if (n == 0) return false else if (posture.logHas(record[0..n], &needles)) return true,
+            .SUCCESS => {
+                if (n == 0) return execLogFailure(p, detail, "read(/dev/kmsg): EOF", n, child);
+                records += 1;
+                if (execAuditRecord(record[0..n], &needles)) {
+                    detail.* = try p.gpa.print(
+                        "child={d}: execve(/)=EACCES(13); matching AUDIT_SYSCALL record",
+                        .{child},
+                    );
+                    return true;
+                }
+            },
             .PIPE, .INTR => continue,
             .AGAIN => {
                 var fds = [1]linux.pollfd{.{ .fd = fd, .events = linux.POLL.IN, .revents = 0 }};
-                const ready = linux.poll(&fds, 1, @intCast(@divFloor(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)));
+                const ready = linux.poll(
+                    &fds,
+                    1,
+                    @intCast(@divFloor(left + std.time.ns_per_ms - 1, std.time.ns_per_ms)),
+                );
                 if (linux.errno(ready) == .INTR) continue;
-                if (ready != 1) return false;
+                if (ready == 0) return execLogTimeout(p, detail, child, records);
+                if (ready != 1) return execLogFailure(p, detail, "poll(/dev/kmsg)", ready, child);
             },
-            else => return false,
+            else => return execLogFailure(p, detail, "read(/dev/kmsg)", n, child),
         }
     }
 }
 
+fn execAuditRecord(record: []const u8, needles: []const []const u8) bool {
+    // /dev/kmsg gives userspace writes a non-kernel facility, even for root.
+    if (!std.mem.startsWith(u8, record, "5,")) return false;
+    const body = record[(std.mem.findScalar(u8, record, ';') orelse return false) + 1 ..];
+    if (!std.mem.startsWith(u8, body, "audit: type=1300 ")) return false;
+    // comm and the fields after it may contain text supplied by a process.
+    const end = std.mem.indexOf(u8, body, " comm=") orelse return false;
+    return posture.logHas(body[0 .. end + 1], needles);
+}
+
+test "exec audit evidence must be a kernel notice for this refusal" {
+    const fields = "audit: type=1300 syscall=221 success=no exit=-13 pid=123 comm=probe";
+    const needles = [_][]const u8{
+        "type=1300",
+        " syscall=221 ",
+        "success=no",
+        " exit=-13 ",
+        " pid=123 ",
+    };
+    try testing.expect(execAuditRecord("5,100,200,-;" ++ fields, &needles));
+    try testing.expect(!execAuditRecord("13,100,200,-;" ++ fields, &needles));
+    try testing.expect(!execAuditRecord("13,100,200,-;5,100,200,-;" ++ fields, &needles));
+    for ([_][]const u8{
+        "audit: type=1300 syscall=221 success=no exit=-13 pid=1234 comm=probe",
+        "audit: type=1300 syscall=221 success=yes exit=0 pid=123 comm=probe",
+        "audit: type=1300 syscall=221 success=no exit=-1 pid=123 comm=probe",
+        "audit: type=1300 syscall=56 success=no exit=-13 pid=123 comm=probe",
+        "audit: type=1300 syscall=221 success=no exit=-13 pid=9 comm=\" pid=123 \"",
+        "audit: type=1423 syscall=221 success=no exit=-13 pid=123 comm=\"type=1300 \"",
+    }) |other| {
+        var buf: [256]u8 = undefined;
+        const record = try std.mem.print(&buf, "5,100,200,-;{s}", .{other});
+        try testing.expect(!execAuditRecord(record, &needles));
+    }
+}
+
+fn execLogTimeout(p: *Posture, detail: *[]const u8, child: usize, records: usize) !?bool {
+    detail.* = try p.gpa.print(
+        "child={d}: execve(/)=EACCES(13); records={d}; no matching audit record within 100 ms",
+        .{ child, records },
+    );
+    return false;
+}
+
+fn execLogFailure(
+    p: *Posture,
+    detail: *[]const u8,
+    step: []const u8,
+    rc: usize,
+    child: usize,
+) !?bool {
+    detail.* = try p.gpa.print(
+        "{s}: {s}; child={d}",
+        .{ step, try posture.syscallObservation(p.gpa, rc), child },
+    );
+    return false;
+}
+
 /// execRoot runs / as a program, which the kernel refuses (EACCES) and audits.
-fn execRoot() bool {
+fn execRoot() linux.E {
     const argv = [_:null]?[*:0]const u8{"/"};
     const envp = [_:null]?[*:0]const u8{};
-    _ = linux.execve("/", &argv, &envp);
-    return false;
+    return linux.errno(linux.execve("/", &argv, &envp));
 }
 
 /// capturedConsole returns the first enabled, writable console in

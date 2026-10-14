@@ -39,7 +39,7 @@ own channel; neither the machine nor a mirror may choose a different one.
 
 The exporter writes `OUT/prebuilt/ARCH/latest.json` and its detached
 `latest.json.sig`. Immutable `ARCH/BUILD/` objects contain `vmlinuz`,
-`root.erofs`, native and bitten stage0 archives, `cmdline`, and optional
+`root.erofs`, `stage0.zst`, `cmdline`, and optional
 `uki.efi`. BUILD hashes the canonical artifact names, sizes and SHA-256s.
 Upload immutable objects first and the signed head last. Exporting does
 not publish remotely. The IPE certificate's RSA key signs the manifest.
@@ -64,8 +64,7 @@ over a day ahead. Equal initial serial requires the running root hash.
 The floor is recorded before installation and never silently lowered.
 
 Each parked root retains its signed manifest, signature and command line.
-GRUB receives the authenticated bitten stage0; native EFI receives the
-native archive and optional UKI. Installation rechecks the parked bytes
+Native EFI receives the authenticated stage0 archive and optional UKI. Installation rechecks the parked bytes
 before arming, and automatic reboot rechecks them again. Native updates
 remove an obsolete UKI; verification refuses an unselected leftover UKI.
 

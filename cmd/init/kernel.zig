@@ -185,7 +185,7 @@ pub fn kernel(m: *Machine) !void {
     if (!all) say("some sysctls were not applied", .{});
     try writeXorExecute(contained);
     // A panic must reboot: the kernel's default is to hang, and an oops now
-    // panics. Keep a timeout the command line set (bite and howl's disk.zig
+    // panics. Keep a timeout the command line set (howl's disk.zig
     // set 10), else set 10 seconds.
     if (std.mem.eql(u8, trim(m.read("/proc/sys/kernel/panic")), "0") and
         !writeFile(

@@ -99,9 +99,7 @@ A/B slots are files, not separate disks or separate root partitions. The
 disk has a FAT32 EFI partition for both slots' kernels and stage0 images,
 and an ext4 partition with `werewolf/a/root.erofs`, `werewolf/b/root.erofs`
 and the shared `werewolf/data/`. The updater writes the inactive slot and
-changes the boot entry. The whole disk is for a cloud or a hypervisor, but
-the update mechanism can use existing filesystems:
-[bite](../docs/bite.md) installs slots without repartitioning.
+changes the boot entry. The whole disk is for a cloud or a hypervisor.
 
 ## Prepare GCP once
 

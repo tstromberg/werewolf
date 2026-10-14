@@ -2,6 +2,8 @@
 const std = @import("std");
 const tpm = @import("tpm");
 const apk = @import("apk");
+const broker = @import("broker");
+const signed = @import("prebuilt");
 const m = @import("slot-update.zig");
 
 pub fn transport(u: *m.Update) !?tpm.transport.Declaration {
@@ -24,9 +26,8 @@ pub fn transport(u: *m.Update) !?tpm.transport.Declaration {
     var device = try tpm.Device.open(u.io);
     defer device.close();
     const running = u.cmd.release orelse return error.MissingSealedBootIdentity;
-    const victim = u.cmd.victim orelse return error.TpmNeedsSignedImage;
-    const directory = try u.gpa.print("/victim{s}/boot-state", .{victim.path});
-    const state = try tpm.current(u.io, u.gpa, key, directory, try device.anchor(key), running);
+    if (u.cmd.slots == null) return error.TpmNeedsSignedImage;
+    const state = try tpm.current(u.io, u.gpa, key, "/boot/state", try device.anchor(key), running);
     const raw = try std.Io.Dir.cwd().readFileAlloc(
         u.io,
         tpm.transport.path,
@@ -44,7 +45,7 @@ pub fn fetchAuthority(u: *m.Update, url: []const u8) !?[]const u8 {
     return null;
 }
 
-pub fn identity(image: @import("prebuilt").Manifest) ![32]u8 {
+pub fn identity(image: signed.Manifest) ![32]u8 {
     var hashes: [3][32]u8 = undefined;
     for ([3][]const u8{
         image.files.@"root.erofs".sha256,
@@ -73,7 +74,7 @@ pub const Prepared = struct {
     }
 };
 
-pub fn prepare(u: *m.Update, victim: []const u8) !?Prepared {
+pub fn prepare(u: *m.Update) !?Prepared {
     const running = u.cmd.release orelse return null;
     const image = u.image orelse return error.TpmNeedsSignedImage;
     const candidate = try identity(image.manifest);
@@ -92,8 +93,7 @@ pub fn prepare(u: *m.Update, victim: []const u8) !?Prepared {
     const key = try tpm.keyAt(u.io, u.gpa, "");
     var device = try tpm.Device.open(u.io);
     errdefer device.close();
-    const directory = try u.gpa.print("{s}{s}/boot-state", .{ victim, u.cmd.victim.?.path });
-    const old = try tpm.current(u.io, u.gpa, key, directory, try device.anchor(key), running);
+    const old = try tpm.current(u.io, u.gpa, key, "/boot/state", try device.anchor(key), running);
     const declaration = try transport(u);
     const endpoint = if (declaration) |decl|
         try decl.endpoint(u.gpa)
@@ -104,7 +104,7 @@ pub fn prepare(u: *m.Update, victim: []const u8) !?Prepared {
     });
     const contextual = if (declaration != null)
         true
-    else if (u.read(@import("prebuilt").metadata ++ "/permit-context")) |data|
+    else if (u.read(signed.metadata ++ "/permit-context")) |data|
         std.mem.eql(u8, data, "2\n")
     else |_|
         false;
@@ -118,8 +118,15 @@ pub fn prepare(u: *m.Update, victim: []const u8) !?Prepared {
     const completed = std.mem.eql(u8, &old.record.anchor(), &next.anchor());
     if (!completed) {
         try old.record.transition(next, running, try device.pcr11());
-        try tpm.publish(u.io, u.gpa, directory, old.position ^ 1, raw);
-        _ = try tpm.current(u.io, u.gpa, key, directory, next.anchor(), running);
+        const permit = try signed.hashFile(u.io, u.gpa, m.work_dir ++ "/boot.permit");
+        broker.slotState(old.position ^ 1, .{
+            .size = permit.size,
+            .sha256 = permit.sha256,
+        }) catch |err| {
+            u.detail = broker.refusal;
+            return err;
+        };
+        _ = try tpm.current(u.io, u.gpa, key, "/boot/state", next.anchor(), running);
     }
     return .{
         .device = device,
@@ -130,12 +137,11 @@ pub fn prepare(u: *m.Update, victim: []const u8) !?Prepared {
     };
 }
 
-pub fn requireOther(u: *m.Update, image: @import("prebuilt").Manifest) !void {
+pub fn requireOther(u: *m.Update, image: signed.Manifest) !void {
     const running = u.cmd.release orelse return;
     const key = try tpm.keyAt(u.io, u.gpa, "");
     var device = try tpm.Device.open(u.io);
     defer device.close();
-    const directory = try u.gpa.print("/victim{s}/boot-state", .{u.cmd.victim.?.path});
-    const state = try tpm.current(u.io, u.gpa, key, directory, try device.anchor(key), running);
+    const state = try tpm.current(u.io, u.gpa, key, "/boot/state", try device.anchor(key), running);
     if (!state.record.allows(try identity(image))) return error.RollbackRefused;
 }

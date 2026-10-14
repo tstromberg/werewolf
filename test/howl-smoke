@@ -18,8 +18,10 @@ out=$("$howl" run --build --secure --insecure 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'conflict' || fail "conflicting security flags were accepted"
 out=$("$howl" run --build --on gcp 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'protected deployment is not ready' || fail "default allowed incomplete cloud protection"
-out=$("$howl" run 2>&1)
-[ $? -ne 0 ] && echo "$out" | grep -q 'refusing an implicit build or unprotected download' || fail "published mode silently rebuilt or downgraded"
+out=$(WEREWOLF_BOOT_MIRROR=http://127.0.0.1 "$howl" run 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q 'protected image download failed' || fail "published mode silently rebuilt or downgraded"
+out=$("$howl" upload missing.qcow2 --on aws 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q 'cannot establish protected deployment' || fail "raw-disk upload bypassed secure defaults"
 "$howl" create --build smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"
 "$howl" create --build web --with python-app --app ./myapp -h >/dev/null 2>&1 ||
 	fail "README: howl create web --with python-app --app ./myapp"

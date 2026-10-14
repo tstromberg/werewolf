@@ -7,11 +7,6 @@
 # and has no shell: forms that log people in add busybox-full, as does any
 # form built with DEV=1. Every other form includes this one.
 #
-# It boots anywhere werewolf does: directly, from its own disk (make disk),
-# or from a slot bite installed beside a distro, whose filesystem it finds
-# by UUID. Then /data is a directory on that filesystem, and bite-cleanup
-# removes the distro once the slot has committed. See docs/bite.md.
-
 repositories:
   - https://packages.wolfi.dev/os
 keyring:
@@ -19,7 +14,7 @@ keyring:
 packages:
   - wolfi-baselayout
   - runit                 # PID 1 after init: runs services, shuts down cleanly
-  - blkid                 # find a filesystem by UUID or label (busybox cannot read xfs or btrfs)
+  - blkid                 # find a filesystem by UUID or label
   - apk-tools             # the updater: fetch and verify packages, against the keys in the image
   - erofs-utils           # mkfs.erofs, for the new slot's root
   - zstd                  # stage0's compression, as the build's
@@ -61,7 +56,7 @@ net:
   - connect _update tcp/443 udp/53 tcp/53
 
 # make check's, for this form alone (forms/README.md): its checks boot the
-# slot as bite leaves it, with no way out, so the updater finds nothing.
+# slot offline, so the updater finds nothing.
 check:
   offline: true
 
@@ -78,17 +73,8 @@ modules:
   # (QEMU's virt, Apple's VZ): the controller, whose line power-button reads,
   # since linux-virt has no gpio-keys driver to make it a key.
   - aarch64 gpio-pl061
-  # The victim's filesystem bite leaves behind: ext4 (Debian, Ubuntu, and
-  # werewolf's own disk, and /data's everywhere), xfs (Rocky), btrfs
-  # (Fedora). xfs and btrfs load only on a slot that is on them (`@FS`;
-  # stage0 tells modload): btrfs's raid6 times itself for 0.17 s at load.
-  # btrfs asks the crypto API for its checksum at mount time, after the
-  # loader is closed, so crc32c (its default, and Fedora's) is loaded with
-  # it; xxhash64 and blake2b checksums would need xxhash_generic and
-  # blake2b_generic.
+  # The slot and data filesystems.
   - ext4
-  - "@xfs xfs"
-  - "@btrfs btrfs crc32c-cryptoapi"
   # FAT, for werewolf's own disk (docs/design/native-boot.md): the updater and
   # commit write the EFI partition. 437 and utf8 are FAT's default codepage
   # and iocharset in Alpine's kernel. Loaded only there (`@esp`; stage0

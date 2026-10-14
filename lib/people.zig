@@ -47,10 +47,10 @@ pub const Change = struct {
 };
 
 /// userId returns a person's uid and gid: an FNV-1a hash of the name, in
-/// 1000 to 60000, the same on every machine, so a home on /data keeps its
-/// owner from one image to the next.
+/// [2^29, 2^30), the same on every machine, clear of system and service ids,
+/// so a home on /data keeps its owner from one image to the next.
 pub fn userId(name: []const u8) u32 {
-    return 1000 + std.hash.Fnv1a_32.hash(name) % 59000;
+    return (1 << 29) | (std.hash.Fnv1a_32.hash(name) & ((1 << 29) - 1));
 }
 
 /// parse reads the users file. A line that is not one goes to refused.
@@ -228,7 +228,7 @@ test "apply: accounts for the people named, admins' keys root's, the gone remove
     const c = try apply(gpa, base, "tom admin " ++ k1 ++ "\ntom " ++ k2 ++ "\nann " ++ k3 ++
         "\nroot " ++ k3 ++ "\nBad x\nnginx " ++ k3 ++ "\n\n", "/bin/ash");
     const tom = userId("tom");
-    try testing.expect(tom >= 1000 and tom < 60000);
+    try testing.expect(tom >= 1 << 29 and tom < 1 << 30);
     try testing.expectEqualStrings(try gpa.print(
         "root:x:0:0::/root:/bin/sh\nnginx:x:384260303:384260303::/var/empty:/sbin/nologin\n" ++
             "tom:x:{d}:{d}::/data/home/tom:/bin/ash\nann:x:{d}:{d}::/data/home/ann:/bin/ash\n",

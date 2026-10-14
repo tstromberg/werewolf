@@ -1,0 +1,6 @@
+# Fresh cluster creation and a running server, with no shell or preload.
+seen    postgres-cluster  pg-init: making the cluster in /data/svc/postgres/data
+seen    postgres-ready    database system is ready to accept connections
+unseen  postgres-down     leash: \{"event":"(down|retry)","service":"postgres"
+unseen  shim-refused      sh-shim: refused
+unseen  initdb-failed     pg-init: /usr/bin/initdb failed

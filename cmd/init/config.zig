@@ -1,6 +1,5 @@
-//! init's config phase: it finds one config tar (on the victim, a disk or
-//! the cloud's metadata) and a NoCloud seed, and extracts the tar in a
-//! confined child.
+//! init's config phase: it finds one config tar (on a disk or the cloud's
+//! metadata) and a NoCloud seed, and extracts the tar in a confined child.
 
 const std = @import("std");
 const seal_lib = @import("seal");
@@ -31,34 +30,13 @@ const max_config_total = 16 << 20;
 
 const max_config_entries = 256;
 
-/// victim sets m.victim_dir on a machine with slots. The filesystem that
-/// holds the slots also holds config.tar and data/; stage0 mounted it on
-/// /victim to read root.erofs.
-pub fn victim(m: *Machine) void {
-    const v = m.cmd.victim orelse return;
-    // Take the device from the mount table. Searching the disks again
-    // could find a different one with the same UUID.
-    const dev = m.mountSource("/victim") orelse
-        return say("victim's filesystem {s} is not on /victim", .{v.uuid});
-    m.victim_dir = m.fmt("/victim{s}", .{v.path});
-    say("victim's filesystem {s} on /victim, werewolf in {s}", .{ dev, m.victim_dir });
-}
-
-/// config extracts one config tar: the victim's config.tar, or else the
-/// first block device holding one. Others are logged and ignored, so an
-/// attached disk cannot quietly replace root's keys. In the same pass it
-/// finds the first NoCloud seed by reading each disk's ISO 9660 volume
-/// descriptor, which mounts nothing and avoids blkid (85 ms on GCP).
-/// It runs before the network, since the tar may set the address.
+/// config extracts the first block device holding a config tar. Others are
+/// logged and ignored, so an attached disk cannot quietly replace root's keys.
+/// In the same pass it finds the first NoCloud seed by reading each disk's ISO
+/// 9660 volume descriptor, which mounts nothing and avoids blkid (85 ms on
+/// GCP). It runs before the network, since the tar may set the address.
 pub fn config(m: *Machine) void {
     var tar: ?[]const u8 = null;
-    if (m.victim_dir.len > 0) {
-        const t = m.fmt("{s}/config.tar", .{m.victim_dir});
-        if (exists(m.z(t))) {
-            say("config tar in {s}", .{m.victim_dir});
-            tar = t;
-        }
-    }
     var seed_dev: ?[:0]const u8 = null;
     for (m.list("/sys/class/block")) |name| {
         const dev = m.fmtZ("/dev/{s}", .{name});
@@ -250,8 +228,8 @@ fn keys(m: *Machine, user: []const u8, text: []const u8) void {
 /// writes nothing if it has over 256 entries or 16 MiB. It writes only
 /// directories and files, at most 1 MiB each, with plain relative names.
 fn extract(m: *Machine, path: []const u8) void {
-    // Only a regular file or a disk, and no link: on a victim's filesystem
-    // a FIFO would block PID 1 forever, and a link could point anywhere.
+    // Only a regular file or a disk, and no link: a FIFO would block PID 1
+    // forever, and a link could point anywhere.
     const src = linux.open(m.z(path), .{
         .ACCMODE = .RDONLY,
         .CLOEXEC = true,
@@ -440,8 +418,8 @@ test "Lima data is bounded and never follows links" {
         readLimaData(arena.allocator(), io, tmp.dir, &files),
     );
     try tmp.dir.deleteFile(io, "provision.data/00000000");
-    try tmp.dir.writeFile(io, .{ .sub_path = "victim", .data = "must not be imported" });
-    try tmp.dir.symLink(io, "../victim", "provision.data/00000000", .{});
+    try tmp.dir.writeFile(io, .{ .sub_path = "secret", .data = "must not be imported" });
+    try tmp.dir.symLink(io, "../secret", "provision.data/00000000", .{});
     if (readLimaData(arena.allocator(), io, tmp.dir, &files)) |_|
         return error.FollowedSymlink
     else |_| {}

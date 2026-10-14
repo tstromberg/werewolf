@@ -5,7 +5,7 @@
 #   names none: werewolf's own client (cmd/dhcp-client), and the dhcp-client
 #   service that renews the lease;
 # - its config from a cloud's metadata server (GCP, AWS, Hetzner Cloud,
-#   Azure) when no config tar is on a disk or beside the victim
+#   Azure) when no config tar is on a disk
 #   (cmd/cloud-metadata; docs/cloud.md);
 # - /data on a disk, when werewolf.data names one, in LUKS2 when the config
 #   brings data.key (docs/data.md).

@@ -19,7 +19,7 @@ and key, and `make list-forms` shows the chains.
 
 | Form | Built on | Is |
 | --- | --- | --- |
-| `minimal` | | boots anywhere, from the initramfs, its own disk or a slot bite installed; a static address; updates itself from a slot; listens on nothing |
+| `minimal` | | boots from the initramfs or its own disk; a static address; updates itself from a slot; listens on nothing |
 | `prod` | `minimal` | the production base: DHCP, the cloud's metadata, `/data` on a disk, in LUKS2 when the config brings `data.key` ([data.md](data.md)); no shell, nothing listening. Build yours on this, or on a runtime form below |
 | `app` | `prod` | where an application is laid; its service's `app` user gets a hashed uid; no runtime, service or listener |
 | `nginx` | `prod` | serving a site from the image on :80 |
@@ -553,7 +553,6 @@ describes publishing, locks, configuration transports and rollback.
 | | |
 | --- | --- |
 | `howl build --with helloworld` | `dist/helloworld-ARCH-disk.qcow2`, a disk that boots it under UEFI, for a provider that takes one (`--format raw\|vhd\|vmdk`); `howl create NAME --with helloworld --on gcp\|aws\|azure` makes a cloud machine of it |
-| `make FORM=helloworld bite-me` | run on a Debian, Ubuntu, Fedora or Rocky VM: installs it beside the distro ([bite.md](bite.md)) |
 | `make FORM=helloworld image` | the kernel and initramfs, for QEMU, Firecracker or any host that boots them directly |
 
 It updates itself, unless `updates: off` explicitly disables the updater

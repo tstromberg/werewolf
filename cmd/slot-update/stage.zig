@@ -273,7 +273,7 @@ pub fn whyOf(
 /// seed returns this machine's seed for build. It derives from the disk's
 /// UUID, which outlives every slot, so it is stable across boots.
 pub fn seed(u: *Update, build: []const u8) u64 {
-    return policy.seed(u.cmd.victim.?.uuid, build);
+    return policy.seed(u.cmd.slots.?, build);
 }
 
 // --- the tiers feed ---------------------------------------------------------

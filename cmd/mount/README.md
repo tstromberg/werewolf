@@ -39,7 +39,7 @@ fence's Landlock domain forbids mounting, and the seal
   iso9660 for a NoCloud seed), each named with `-t`, never probed; the
   options each takes, with their values checked; and the places mounts may
   go: `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, `/var/tmp`, `/data`,
-  `/victim`, `/mnt`, and `/oci` (image roots, `cmd/init/oci.zig`). A bound
+  `/boot`, `/mnt`, and `/oci` (image roots, `cmd/init/oci.zig`). A bound
   device node from `/dev` does not get `nodev`, so it still works.
 - **A new mount** is built detached (`fsopen`, `fsconfig`, `fsmount`) with
   its restrictions, then attached (`move_mount`).
@@ -61,7 +61,7 @@ fence's Landlock domain forbids mounting, and the seal
 
 - The kernel resolves a block mount's source path itself, following links;
   only devtmpfs, which only root writes, holds those paths.
-- It cannot mount the victim's filesystem (ext4, xfs or btrfs) or the ESP:
+- It cannot mount the slot filesystem (ext4) or the ESP:
   stage0 and the mount broker do.
 
 ## Alternatives Considered

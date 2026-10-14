@@ -12,10 +12,9 @@ dm-verity, a cloud's NIC) are modules. Each form names the ones it needs;
 the build resolves their dependencies, decompresses them (Alpine's kernel
 cannot), and lists them in `/usr/lib/modules/RELEASE/werewolf.modules` on
 the verified root. stage0 runs modload; init runs it again, finds the loader
-closed, and says so. Modules only some machines need are tagged: `@xfs` and
-`@btrfs` for a slot on Rocky's or Fedora's filesystem (bite keeps it),
-`@hyperv` for Hyper-V's disks, `@esp` for FAT. Tags save time: btrfs's raid6
-benchmark cost 0.17 s a boot, and hv_storvsc 18 ms finding no VMBus.
+closed, and says so. Modules only some machines need are tagged:
+`@hyperv` for Hyper-V's disks, `@esp` for FAT. Tags save time: hv_storvsc
+spent 18 ms finding no VMBus.
 
 ## Goals
 
@@ -51,8 +50,7 @@ benchmark cost 0.17 s a boot, and hv_storvsc 18 ms finding no VMBus.
    Untagged lines load first. Then stage0 names tags on stdin, one a line,
    and each tag's lines load as it arrives: `hyperv` at once if
    `/sys/bus/vmbus` exists (the slot's disk may sit behind it), `esp` with
-   `werewolf.esp`, then the filesystem stage0 found the slot on (`none`
-   without a slot). Tagged lines not named are skipped; if stdin ends with
+   `werewolf.esp`, then a `none` sentinel to leave unused tags unloaded. Tagged lines not named are skipped; if stdin ends with
    no tag named, every line loads.
 6. **Close** the loader (`kernel.modules_disabled=1`) whatever happened,
    and read it back: the kernel's answer, not the write's, is reported.

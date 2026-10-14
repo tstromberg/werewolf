@@ -26,6 +26,17 @@ pub fn offer(
 ) !?[]const u8 {
     if (!forms.runsSshd(chain)) return null;
     const key_files = forms.takesKeyFiles(gpa, chain) catch false;
+    return offerFor(io, gpa, key_files, name, yes, local_build);
+}
+
+pub fn offerFor(
+    io: Io,
+    gpa: Allocator,
+    key_files: bool,
+    name: []const u8,
+    yes: bool,
+    local_build: bool,
+) !?[]const u8 {
     const home = howl.environ.get("HOME") orelse return null;
     const found = try usable(io, gpa, try std.fs.path.join(gpa, &.{ home, ".ssh" }), key_files);
     if (found.lines.len == 0) {

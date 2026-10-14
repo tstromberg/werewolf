@@ -8,7 +8,7 @@ our own kernel with IPE, is opt-in ([ipe.md](ipe.md)); enrolled images have
 signed slot updates ([prebuilt-images.md](prebuilt-images.md)). Phase 5's
 Secure Boot passed on AWS and GCP; Azure firmware acceptance remains unreliable.
 Posture holds gaps as `boot-` checks (docs/posture.md); IPE builds enforce
-module signatures. Bite firmware remains a deployment gap; TPM integration is opt-in.
+module signatures. TPM integration is opt-in.
 
 ## Summary
 
@@ -25,8 +25,7 @@ root included, and lockdown, MDWE and one-way sysctls hold. Two gaps
 remain. Landlock binds only fence's descendants, not the mount broker,
 DHCP's renewal, the deadman or the kernel's helpers. And only the host, on
 direct boot, checks the kernel and stage0, which holds the root hash. On
-the original unsigned disk or a bitten machine (GRUB is the distro's),
-root can have the mount broker mount them and replace them.
+an unsigned disk, firmware does not authenticate the kernel and stage0.
 
 ## Goals
 
@@ -95,8 +94,7 @@ key makes kernel builds differ, and CI requires two to match.
 
 ## Drawbacks
 
-- Our own kernel is a build to run and keep current with Alpine's, and
-  bitten machines never get a checked kernel or stage0.
+- Our own kernel is a build to run and keep current with Alpine's.
 - A release whose policy is missing or wrong runs nothing and falls back.
 
 ## Alternatives Considered
@@ -112,7 +110,7 @@ key makes kernel builds differ, and CI requires two to match.
   initramfs stays writable and its files count as verified.
 - `CAP_MAC_ADMIN` must leave the bounding set, as init already does, or
   root can switch IPE off. `ipe.enforce=0` on the command line is as safe
-  as the line: fixed on direct boot and in a UKI, open on a bitten machine.
+  as the line: fixed on direct boot and in a signed UKI.
 
 ## Reliability Considerations
 

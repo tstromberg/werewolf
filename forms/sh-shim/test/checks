@@ -15,3 +15,6 @@ ok  sh-shim-path      n=/usr/lib/werewolf/sh-shim; cd /usr/bin && PATH=/usr/bin 
 # A DEV build's busybox-full brings a shell, and its /bin/sh wins over the
 # shim's, as any package's or later form's would. The allowance is laid.
 ok  sh-shim-yields    [ "$(readlink /usr/bin/sh)" = /bin/busybox ] && [ -e /etc/werewolf/allow/sh ]
+# No arbitrary files are opened, and /dev/null redirection survives exec
+# even when it has to occupy the descriptor that was already closed.
+ok  sh-shim-redirs     n=/usr/lib/werewolf/sh-shim; [ -z "$($n -c 'busybox echo discard > /dev/null 2>&1')" ] && [ -z "$($n -c 'busybox cat < /dev/null')" ] && { $n -c 'busybox cat < /dev/null' 0<&-; } && { $n -c 'busybox echo discard > /dev/null' 1>&-; } && { $n -c 'busybox echo discard > /dev/null 2>&1' 1>&- 2>&-; }

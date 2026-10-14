@@ -36,15 +36,14 @@ busybox `sh` in every image. Removing it matters because:
 - **Forms that log people in** (`sshd`, `playground`, `prod-ssh`) carry
   busybox-full; runtime forms (`python`, `node`, `php`, `jre`) carry their
   interpreter. Each names the failure in `weaknesses:` (forms/README.md).
-- **bite**, which runs on the victim's distro; an interpreter inside a
-  program (nginx's njs); other binaries, such as init's `blkid`.
+- An interpreter inside a program (nginx's njs); other binaries, such as init's `blkid`.
 
 ## Detailed design
 
 **Programs for scripts.** Each script became a small Zig program in cmd/:
 runit's three stages (`runit-stage`, under three names), `reboot`,
-`grub-setenv`, `slot-keep`, `power-button`, `debug-shell`, `ssh-host-key`,
-`sshd-start`, `bite-cleanup`, and `mount`, since busybox's cannot set
+`slot-keep`, `power-button`, `debug-shell`, `ssh-host-key`,
+`sshd-start`, and `mount`, since busybox's cannot set
 `noexec`. init ends in `exec fence runit`, so runit stays PID 1.
 
 **`sh -c` without a shell.** A program that insists on one (supercronic, a
@@ -66,7 +65,7 @@ by templating at boot. `forms/nginx` is the worked example.
 **Checks.** posture looks for shells and interpreters by name in the
 program directories and checks each `/etc/sv/*/run` is ELF
 ([docs/posture.md](../posture.md)). A `system(3)` call fails on the check
-boot; `initdb`'s did, so `popen-shim` runs its one command. `DEV=1` adds
+boot; PostgreSQL setup uses sh-shim with explicit executable declarations. `DEV=1` adds
 busybox-full for debugging and test/checks, and `make dist` refuses it.
 
 **Open.** init could stay PID 1 for life and read the power button; runit

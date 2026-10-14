@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""Boot the actual production-signed bundle through default howl run from a source-free directory."""
+import hashlib
+import http.server
+import json
+import os
+from pathlib import Path
+import secrets
+import shutil
+import ssl
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+if len(sys.argv) != 4:
+    sys.exit('usage: check-published-run HOWL BUNDLE OUTPUT')
+howl, bundle, output = [Path(value).resolve() for value in sys.argv[1:]]
+work = output
+work.mkdir(mode=0o700, parents=True, exist_ok=False)
+os.umask(0o077)
+manifest = json.loads((bundle / 'boot.json').read_text())
+descriptor = hashlib.sha256((bundle / 'boot.json').read_bytes()).hexdigest()
+consumer = work / 'consumer'
+consumer.mkdir()
+mirror = work / 'mirror'
+base = mirror / 'playground/lima/aarch64'
+objects = base / 'objects' / descriptor
+latest = base / 'latest'
+objects.mkdir(parents=True)
+latest.mkdir()
+for name in ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi'):
+    os.link(bundle / 'slot' / name, objects / name)
+os.link(bundle / 'disk.img.zst', objects / 'disk.img.zst')
+for name in ('latest.json', 'latest.json.sig'):
+    os.link(bundle / 'prebuilt/aarch64' / name, objects / name)
+for name in ('boot.json', 'boot.json.sig'):
+    os.link(bundle / name, latest / name)
+identity = work / 'ssh.key'
+ca = work / 'mirror.crt'
+key = work / 'mirror.key'
+subprocess.run(['ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', identity], check=True)
+subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256', '-days', '2',
+    '-subj', '/CN=werewolf-local-mirror', '-addext', 'subjectAltName=IP:127.0.0.1',
+    '-keyout', key, '-out', ca], check=True, capture_output=True)
+requests = []
+
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(mirror), **kwargs)
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        requests.append(self.path)
+        super().do_GET()
+
+
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(ca, key)
+server.socket = context.wrap_socket(server.socket, server_side=True)
+thread = threading.Thread(target=server.serve_forever, daemon=True)
+thread.start()
+wrappers = work / 'bin'
+wrappers.mkdir()
+for tool in ('apko', 'melange', 'zig', 'make', 'gmake', 'mkfs.erofs', 'mformat', 'mke2fs'):
+    path = wrappers / tool
+    path.write_text('#!/bin/sh\necho "consumer attempted a build: ' + tool + '" >&2\nexit 99\n')
+    path.chmod(0o755)
+ssh_binary = shutil.which('ssh')
+ssh_wrapper = wrappers / 'ssh'
+ssh_wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\nos.execv(' + repr(ssh_binary) + ', ' +
+    repr([ssh_binary, '-F', '/dev/null', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', str(identity)]) + '+sys.argv[1:])\n')
+ssh_wrapper.chmod(0o755)
+lima_home = Path(tempfile.mkdtemp(prefix='ww-production-run-', dir='/tmp'))
+env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(ca),
+           WEREWOLF_BOOT_MIRROR='https://127.0.0.1:%d' % server.server_port,
+           PATH=str(wrappers) + os.pathsep + os.environ['PATH'], PYTHONDONTWRITEBYTECODE='1')
+roots = work / 'mirror-roots.pem'
+system_ca = ssl.get_default_verify_paths().cafile
+roots.write_bytes((Path(system_ca).read_bytes() if system_ca else b'') + b'\n' + ca.read_bytes())
+env['SSL_CERT_FILE'] = str(roots)
+for name in ('WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'WEREWOLF_IPE_KEY', 'WEREWOLF_IPE_CRT',
+             'WEREWOLF_IPE_KERNEL', 'UKI_STUB', 'WEREWOLF_BUILD_VM'):
+    env.pop(name, None)
+machine = consumer / 'build/machines/werewolf-run'
+
+
+def run(args, label, check=True, timeout=300):
+    result = subprocess.run([str(arg) for arg in args], cwd=consumer, env=env,
+                            capture_output=True, timeout=timeout)
+    (work / (label + '.log')).write_bytes(result.stdout + result.stderr)
+    if check and result.returncode:
+        raise RuntimeError(label + ': ' + result.stderr.decode(errors='replace')[-3000:])
+    return result
+
+
+def status():
+    command = ('/usr/lib/werewolf/posture --json; printf "\\nBOOT-ID "; cat /proc/sys/kernel/random/boot_id; '
+               'printf "COMMITTED "; test -e /run/werewolf/committed && echo yes')
+    reply = run([howl, 'ssh', 'werewolf-run', '--', command], 'status', check=False, timeout=15)
+    if reply.returncode:
+        return None
+    text = reply.stdout.decode()
+    end = text.index('\nBOOT-ID ')
+    report = json.loads(text[:end])
+    checks = {entry['id']: entry['result'] for entry in report['checks']}
+    required = ('boot-secure-boot', 'boot-ipe-enforced', 'boot-rollback-protected', 'files-root-verity')
+    # Preserve raw posture rather than accepting a boot marker by itself.
+    if any(checks.get(name) != 'pass' for name in required):
+        raise RuntimeError('guest protection missing: ' + repr({name: checks.get(name) for name in required}))
+    if 'COMMITTED yes' not in text:
+        return None
+    return text[end + len('\nBOOT-ID '):].splitlines()[0]
+
+
+try:
+    run([howl, 'run', '--root-keys', str(identity) + '.pub'], 'first-run', timeout=600)
+    deadline = time.monotonic() + 180
+    boot = None
+    while time.monotonic() < deadline and boot is None:
+        try:
+            boot = status()
+        except (ValueError, subprocess.TimeoutExpired):
+            pass
+        if boot is None:
+            time.sleep(2)
+    if boot is None:
+        raise RuntimeError('actual production image did not report committed protected boot')
+    files = ('permit.key', 'permit.pub', 'factory.permit', 'credentials/owner.auth', 'credentials/lockout.auth')
+    authority = machine / 'authority'
+    before = {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}
+    downloaded = len(requests)
+    began = time.monotonic()
+    run([howl, 'run', '--root-keys', str(identity) + '.pub'], 'repeat-run')
+    elapsed = time.monotonic() - began
+    if status() != boot or len(requests) != downloaded:
+        raise RuntimeError('unchanged run rebooted or performed another download')
+    if before != {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}:
+        raise RuntimeError('repeat run replaced machine authority')
+    profile = json.loads((authority / 'profile.json').read_text())
+    if profile['spec']['boot_key'] is not None or profile['spec']['ipe_key'] is not None:
+        raise RuntimeError('consumer owns a vendor signing key')
+    run([howl, 'stop'], 'stop')
+    run([howl, 'run', '--root-keys', str(identity) + '.pub'], 'resume', timeout=600)
+    deadline = time.monotonic() + 180
+    resumed = None
+    while time.monotonic() < deadline and resumed is None:
+        try:
+            resumed = status()
+        except (ValueError, subprocess.TimeoutExpired):
+            pass
+        if resumed is None:
+            time.sleep(2)
+    if resumed is None or resumed == boot:
+        raise RuntimeError('stopped production machine did not resume')
+    if before != {name: hashlib.sha256((authority / name).read_bytes()).hexdigest() for name in files}:
+        raise RuntimeError('resume replaced owner or TPM authorization')
+    result = dict(descriptor=descriptor, default_signed_download=True, no_consumer_builds=True,
+                  no_vendor_private_keys=True, secure_boot=True, ipe=True, rollback_protected=True,
+                  verified_root=True,
+                  retained_enrollment_on_resume=True, unchanged_run_seconds=elapsed,
+                  unchanged_run_no_network=True)
+    (work / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+    print('pass: actual production image, default download, protected boot, cached reuse and retained enrollment', flush=True)
+finally:
+    run([howl, 'delete', 'werewolf-run', '--on', 'lima'], 'cleanup', check=False, timeout=180)
+    server.shutdown()
+    thread.join(timeout=10)
+    server.server_close()
+    shutil.rmtree(lima_home, ignore_errors=True)
+    shutil.rmtree(consumer / 'build/machines', ignore_errors=True)
+    shutil.rmtree(consumer / 'build/permit-service', ignore_errors=True)
+    identity.unlink(missing_ok=True)
+    key.unlink(missing_ok=True)

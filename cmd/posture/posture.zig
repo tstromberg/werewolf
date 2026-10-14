@@ -18,6 +18,7 @@ const Allocator = std.mem.Allocator;
 const linux = std.os.linux;
 
 pub fn main(init: std.process.Init) !void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const gpa = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
@@ -69,7 +70,9 @@ pub fn main(init: std.process.Init) !void {
             try out.writer.writeByte('\n');
         },
         .line => try printLine(gpa, &out.writer, report),
-        .summary => try printSummary(gpa, &out.writer, report, columns(), (Io.File.stdout().isTty(io) catch false) and
+        .summary => try printSummary(gpa, &out.writer, report, columns(), (Io.File.stdout().isTty(
+            io,
+        ) catch false) and
             init.environ_map.get("NO_COLOR") == null and
             !std.mem.eql(u8, init.environ_map.get("TERM") orelse "", "dumb")),
     }
@@ -80,7 +83,10 @@ pub fn main(init: std.process.Init) !void {
 const Format = enum { text, json, line, summary };
 
 fn usage() void {
-    std.debug.print("usage: posture [--extended] [--attack] [--verbose] [--json | --line | --summary]\n", .{});
+    std.debug.print(
+        "usage: posture [--extended] [--attack] [--verbose] [--json | --line | --summary]\n",
+        .{},
+    );
 }
 
 const service_json = "/run/werewolf/posture.json";
@@ -267,12 +273,20 @@ pub const Posture = struct {
         var measured = c;
         measured.source = c.source orelse evidence.source(c.id) orelse c.how;
         measured.expected = c.expected orelse c.how;
-        measured.observed = c.observed orelse if (c.detail.len > 0) c.detail else switch (c.result) {
+        measured.observed = c.observed orelse if (c.detail.len > 0)
+            c.detail
+        else switch (c.result) {
             .pass => "no violations found",
             .fail => "required condition not met; raw value not recorded",
             .skip => "not checked: source unavailable or not applicable",
         };
-        measured.comparison = c.comparison orelse try evidence.comparison(p.gpa, c.id, @tagName(c.result), measured.observed.?, c.detail);
+        measured.comparison = c.comparison orelse try evidence.comparison(
+            p.gpa,
+            c.id,
+            @tagName(c.result),
+            measured.observed.?,
+            c.detail,
+        );
         try p.checks.append(p.gpa, measured);
         if (p.verbose) {
             const now = Io.Timestamp.now(p.io, .awake);
@@ -309,7 +323,10 @@ pub const Posture = struct {
         if (p.walk_entries % 256 != 0) return;
         const now = Io.Timestamp.now(p.io, .awake);
         if (elapsedMs(p.walk_since orelse now, now) < 1000) return;
-        const operation = p.gpa.print("walk progress: {d} entries, at", .{p.walk_entries}) catch return;
+        const operation = p.gpa.print(
+            "walk progress: {d} entries, at",
+            .{p.walk_entries},
+        ) catch return;
         p.work(operation, path);
         p.walk_since = now;
     }
@@ -325,7 +342,10 @@ pub const Posture = struct {
     }
 
     fn emitTrace(p: *Posture, text: []const u8) void {
-        if (p.trace_writer) |w| w.writeAll(text) catch {} else Io.File.stderr().writeStreamingAll(p.io, text) catch {};
+        if (p.trace_writer) |w|
+            w.writeAll(text) catch {}
+        else
+            Io.File.stderr().writeStreamingAll(p.io, text) catch {};
     }
 
     fn phase(p: *Posture, name: []const u8, check: *const fn (*Posture) anyerror!void) !void {
@@ -339,7 +359,10 @@ pub const Posture = struct {
             });
             return err;
         };
-        p.trace("{d:.3} ms  phase {s}", .{ elapsedMs(start, Io.Timestamp.now(p.io, .awake)), name });
+        p.trace(
+            "{d:.3} ms  phase {s}",
+            .{ elapsedMs(start, Io.Timestamp.now(p.io, .awake)), name },
+        );
     }
 
     /// allowances returns the names in /etc/werewolf/allow (lib/allow.zig), sorted.
@@ -387,15 +410,19 @@ pub const Posture = struct {
             p.werewolf = werewolfImage(p.io, root);
         } else |_| p.werewolf = false;
         const start = if (p.verbose) Io.Timestamp.now(p.io, .awake) else null;
+        // Prove logging before the refusal probes can fill its backlog.
+        try p.phase("audit", kernel.logged);
         try p.phase("boot", boot.check);
         try p.phase("kernel", kernel.check);
         try p.phase("processes", processes.check);
         try p.phase("programs", processes.programs);
         try p.phase("files", files.check);
         try p.phase("network", network.check);
-        try p.phase("audit", kernel.logged);
         if (p.root and p.attacksAsked()) try p.phase("attacks", attacks.run);
-        if (start) |s| p.trace("{d:.3} ms  total scan", .{elapsedMs(s, Io.Timestamp.now(p.io, .awake))});
+        if (start) |s| p.trace(
+            "{d:.3} ms  total scan",
+            .{elapsedMs(s, Io.Timestamp.now(p.io, .awake))},
+        );
     }
 
     /// kernelLog returns every record the kernel log still holds, or "" if
@@ -476,7 +503,10 @@ pub const Posture = struct {
         }
         try how.appendSlice(
             p.gpa,
-            if (p.werewolf) " in /bin, /sbin, /usr/bin, /usr/sbin or /usr/local, but for a link to " ++ sh_shim else " in /bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin or /usr/local/sbin",
+            if (p.werewolf)
+                " in /bin, /sbin, /usr/bin, /usr/sbin or /usr/local, but for a link to " ++ sh_shim
+            else
+                " in /bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin or /usr/local/sbin",
         );
         try p.add(.{
             .id = id,
@@ -484,8 +514,18 @@ pub const Posture = struct {
             .name = name,
             .why = why,
             .how = how.items,
-            .source = if (p.werewolf) "/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin and /usr/local/sbin: path existence and sh-shim inode identity" else "/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin and /usr/local/sbin: path existence",
-            .observed = if (found.items.len > 0) found.items else if (p.werewolf) "none of the named tools found (sh-shim aliases excluded)" else "none of the named tools found",
+            .source = if (p.werewolf)
+                "/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin and /usr/local/sbin: path " ++
+                    "existence and sh-shim inode identity"
+            else
+                "/bin, /sbin, /usr/bin, /usr/sbin, /usr/local/bin and /usr/local/sbin: path " ++
+                    "existence",
+            .observed = if (found.items.len > 0)
+                found.items
+            else if (p.werewolf)
+                "none of the named tools found (sh-shim aliases excluded)"
+            else
+                "none of the named tools found",
             .comparison = try p.gpa.print("bin dirs ∩ deny = {s}{s}", .{
                 if (found.items.len > 0) found.items else "∅",
                 if (found.items.len > 0) ", want ∅" else "",
@@ -525,12 +565,28 @@ pub const Posture = struct {
                 try p.gpa.print("{s} is {s}", .{ dotted(p.gpa, key), locked }),
             .source = path,
             .comparison = try p.gpa.print("{s} = {s}{s}", .{
-                path,                                                                                                                                                               if (value.len > 0) value else "unavailable",
-                if (!is_locked) try p.gpa.print(", want {s}", .{locked}) else if (lowered) "; unlock write accepted, want denied" else if (p.root) "; unlock write denied" else "",
+                path,
+                if (value.len > 0)
+                    value
+                else
+                    "unavailable",
+                if (!is_locked)
+                    try p.gpa.print(", want {s}", .{locked})
+                else if (lowered)
+                    "; unlock write accepted, want denied"
+                else if (p.root)
+                    "; unlock write denied"
+                else
+                    "",
             }),
             .observed = try p.gpa.print("value={s}; unlock write={s}", .{
                 if (value.len > 0) value else "unavailable (missing, unreadable or empty)",
-                if (!is_locked or !p.root) "not attempted" else if (lowered) "accepted" else "refused",
+                if (!is_locked or !p.root)
+                    "not attempted"
+                else if (lowered)
+                    "accepted"
+                else
+                    "refused",
             }),
             .result = if (is_locked and !lowered) .pass else .fail,
             .detail = if (is_locked) "" else try p.gpa.print(
@@ -560,13 +616,22 @@ pub const Posture = struct {
             try listAdd(p.gpa, &how, "{s} = {s}", .{ dotted(p.gpa, kv[0]), kv[1] });
             try listAdd(p.gpa, &sources, "/proc/sys/{s}", .{kv[0]});
             const keys = try p.expand(kv[0]);
-            if (keys.len == 0) try listAdd(p.gpa, &observed, "/proc/sys/{s}: no entries read", .{kv[0]});
+            if (keys.len == 0) try listAdd(
+                p.gpa,
+                &observed,
+                "/proc/sys/{s}: no entries read",
+                .{kv[0]},
+            );
             for (keys) |key| {
                 const value = p.sysctl(key);
                 try listAdd(p.gpa, &observed, "/proc/sys/{s}={s}", .{
                     key, if (value.len > 0) value else "unavailable (missing, unreadable or empty)",
                 });
-                if (!std.mem.eql(u8, value, kv[1])) try listAdd(p.gpa, &comparison, "/proc/sys/{s} = {s}, want {s}", .{
+                if (!std.mem.eql(
+                    u8,
+                    value,
+                    kv[1],
+                )) try listAdd(p.gpa, &comparison, "/proc/sys/{s} = {s}, want {s}", .{
                     key, if (value.len > 0) value else "unavailable", kv[1],
                 });
                 if (!std.mem.eql(u8, value, kv[1])) try listAdd(
@@ -585,7 +650,10 @@ pub const Posture = struct {
             .how = how.items,
             .source = sources.items,
             .observed = observed.items,
-            .comparison = if (bad.items.len > 0) comparison.items else try p.gpa.print("/proc/sys: {s}", .{how.items}),
+            .comparison = if (bad.items.len > 0)
+                comparison.items
+            else
+                try p.gpa.print("/proc/sys: {s}", .{how.items}),
             .result = if (bad.items.len == 0) .pass else .fail,
             .detail = bad.items,
         });
@@ -648,7 +716,10 @@ fn werewolfImage(io: Io, root: Dir) bool {
 }
 
 fn elapsedMs(start: Io.Timestamp, end: Io.Timestamp) f64 {
-    return @as(f64, @floatFromInt(@max(0, end.nanoseconds - start.nanoseconds))) / std.time.ns_per_ms;
+    return @as(
+        f64,
+        @floatFromInt(@max(0, end.nanoseconds - start.nanoseconds)),
+    ) / std.time.ns_per_ms;
 }
 
 pub fn syscallObservation(gpa: Allocator, rc: usize) ![]const u8 {
@@ -656,12 +727,21 @@ pub fn syscallObservation(gpa: Allocator, rc: usize) ![]const u8 {
     return if (err == .SUCCESS)
         gpa.print("return = {d}; errno = 0 (success)", .{rc})
     else
-        gpa.print("return = -1; errno = {d} (E{s})", .{ @backingInt(err), std.enums.tagName(linux.E, err) orelse "UNKNOWN" });
+        gpa.print(
+            "return = -1; errno = {d} (E{s})",
+            .{ @backingInt(err), std.enums.tagName(linux.E, err) orelse "UNKNOWN" },
+        );
 }
 
 pub fn syscallResult(gpa: Allocator, rc: usize) ![]const u8 {
     const err = linux.errno(rc);
-    return if (err == .SUCCESS) gpa.print("{d}", .{rc}) else gpa.print("E{s}({d})", .{ std.enums.tagName(linux.E, err) orelse "UNKNOWN", @backingInt(err) });
+    return if (err == .SUCCESS)
+        gpa.print("{d}", .{rc})
+    else
+        gpa.print(
+            "E{s}({d})",
+            .{ std.enums.tagName(linux.E, err) orelse "UNKNOWN", @backingInt(err) },
+        );
 }
 
 /// compare matches checks against the image's weaknesses: one line each, a
@@ -743,7 +823,12 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
         if (c.comparison) |comparison| {
             try w.splatByteAll(' ', width - label.len + 2);
             const available = (cols orelse 120) -| (width + 7);
-            try printComparison(w, comparison, available -| (if (c.excuse != null) @as(usize, 11) else 0), width + 7);
+            try printComparison(
+                w,
+                comparison,
+                available -| (if (c.excuse != null) @as(usize, 11) else 0),
+                width + 7,
+            );
             if (c.excuse != null) try w.writeAll(" [expected]");
             try w.writeByte('\n');
             continue;
@@ -775,7 +860,7 @@ fn printComparison(w: *Io.Writer, text: []const u8, room: usize, indent: usize) 
     const compact = try shortComparison(text, budget, &buf);
     if (compact.len <= line_room) return writeClean(w, compact);
     var split = utf8Prefix(compact, line_room);
-    if (std.mem.lastIndexOfScalar(u8, compact[0..split], ' ')) |space| {
+    if (std.mem.findScalarLast(u8, compact[0..split], ' ')) |space| {
         if (space >= line_room / 2) split = space;
     }
     try writeClean(w, compact[0..split]);
@@ -788,11 +873,14 @@ fn printComparison(w: *Io.Writer, text: []const u8, room: usize, indent: usize) 
 
 fn shortComparison(text: []const u8, budget: usize, buf: []u8) ![]const u8 {
     if (text.len <= budget) return text;
-    const want = std.mem.lastIndexOf(u8, text, ", want ");
-    const suffix = if (want != null and std.mem.count(u8, text, ", want ") == 1) text[want.?..] else "";
+    const want = std.mem.findLast(u8, text, ", want ");
+    const suffix = if (want != null and std.mem.count(u8, text, ", want ") == 1)
+        text[want.?..]
+    else
+        "";
     const suffix_len = utf8Prefix(suffix, @min(suffix.len, budget / 2));
     const prefix_len = utf8Prefix(text, budget -| (suffix_len + 3));
-    return std.fmt.bufPrint(buf, "{s}…{s}", .{ text[0..prefix_len], suffix[0..suffix_len] });
+    return std.mem.print(buf, "{s}…{s}", .{ text[0..prefix_len], suffix[0..suffix_len] });
 }
 
 fn utf8Prefix(text: []const u8, max: usize) usize {
@@ -879,12 +967,12 @@ fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: b
     }
 }
 
-const SummaryState = enum {
+const Verdict = enum {
     nominal,
     expected_gaps,
     degraded,
 
-    fn label(s: SummaryState) []const u8 {
+    fn label(s: Verdict) []const u8 {
         return switch (s) {
             .nominal => "NOMINAL",
             .expected_gaps => "EXPECTED GAPS",
@@ -893,7 +981,7 @@ const SummaryState = enum {
     }
 };
 
-fn summaryState(r: Report) SummaryState {
+fn summaryState(r: Report) Verdict {
     if (r.summary.fail > 0) {
         var failures: usize = 0;
         for (r.checks) |c| {
@@ -1279,7 +1367,10 @@ test "werewolf identity uses the metadata directory, not a copied posture binary
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(testing.io, "usr/lib/werewolf");
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "usr/lib/werewolf/posture", .data = "copied binary" });
+    try tmp.dir.writeFile(
+        testing.io,
+        .{ .sub_path = "usr/lib/werewolf/posture", .data = "copied binary" },
+    );
     try testing.expect(!werewolfImage(testing.io, tmp.dir));
     try tmp.dir.createDirPath(testing.io, "usr/share/werewolf");
     try testing.expect(werewolfImage(testing.io, tmp.dir));
@@ -1301,11 +1392,23 @@ test "verbose is opt-in, streams timings, and keeps evidence out of diagnostics"
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var out: Io.Writer.Allocating = .init(arena.allocator());
-    var p: Posture = .{ .io = testing.io, .gpa = arena.allocator(), .root = false, .trace_writer = &out.writer };
+    var p: Posture = .{
+        .io = testing.io,
+        .gpa = arena.allocator(),
+        .root = false,
+        .trace_writer = &out.writer,
+    };
     const fixture = struct {
         fn check(q: *Posture) anyerror!void {
             q.work("walk", "/tmp/\x1b[2J");
-            try q.add(.{ .id = "fixture", .area = "test", .name = "Fixture", .why = "", .how = "test predicate", .result = .pass });
+            try q.add(.{
+                .id = "fixture",
+                .area = "test",
+                .name = "Fixture",
+                .why = "",
+                .how = "test predicate",
+                .result = .pass,
+            });
         }
     };
     try p.phase("fixture", fixture.check);
@@ -1317,19 +1420,36 @@ test "verbose is opt-in, streams timings, and keeps evidence out of diagnostics"
     try testing.expect(std.mem.indexOf(u8, out.written(), "ms  fixture  pass\n") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "ms  phase fixture\n") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "Source:") == null);
-    try testing.expectEqual(@as(f64, 1.25), elapsedMs(.{ .nanoseconds = 0 }, .{ .nanoseconds = 1_250_000 }));
+    try testing.expectEqual(
+        @as(f64, 1.25),
+        elapsedMs(.{ .nanoseconds = 0 }, .{ .nanoseconds = 1_250_000 }),
+    );
 }
 
 test "compact comparisons preserve want, wrap twice, and escape terminal controls" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try printComparison(&out.writer, "setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS", 80, 4);
-    try testing.expectEqualStrings("setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS", out.written());
+    try printComparison(
+        &out.writer,
+        "setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS",
+        80,
+        4,
+    );
+    try testing.expectEqualStrings(
+        "setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS",
+        out.written(),
+    );
     out.clearRetainingCapacity();
-    try printComparison(&out.writer, "files = /tmp/\x1b[2J/éééééééééééééééééééééééééééééééééééééééééééééééééé, want ∅", 35, 8);
+    try printComparison(
+        &out.writer,
+        "files = /tmp/\x1b[2J/ééééééééééééééééééééééééééééééééé" ++
+            "ééééééééééééééééé, want ∅",
+        35,
+        8,
+    );
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.written(), "\n"));
     try testing.expect(std.mem.indexOf(u8, out.written(), "want ∅") != null);
-    try testing.expect(std.mem.indexOfScalar(u8, out.written(), 0x1b) == null);
+    try testing.expect(std.mem.findScalar(u8, out.written(), 0x1b) == null);
     try testing.expect(std.unicode.utf8ValidateSlice(out.written()));
 }
 
@@ -1337,8 +1457,28 @@ test "text uses a label and comparison; JSON retains full evidence" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     var p: Posture = .{ .io = testing.io, .gpa = arena.allocator(), .root = false };
-    try p.add(.{ .id = "kernel-ktls", .area = "kernel", .name = "No kernel TLS", .why = "", .how = "precise syscall rule", .result = .fail, .source = "setsockopt(SOL_TCP, TCP_ULP, tls)", .expected = "ENOENT or ENOSYS", .observed = "ENOTCONN (107)", .comparison = "setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS", .detail = "NOTCONN" });
-    const r: Report = .{ .time = "", .os = "Linux", .host = "host", .kernel = "6", .root = false, .summary = .{ .fail = 1 }, .checks = p.checks.items };
+    try p.add(.{
+        .id = "kernel-ktls",
+        .area = "kernel",
+        .name = "No kernel TLS",
+        .why = "",
+        .how = "precise syscall rule",
+        .result = .fail,
+        .source = "setsockopt(SOL_TCP, TCP_ULP, tls)",
+        .expected = "ENOENT or ENOSYS",
+        .observed = "ENOTCONN (107)",
+        .comparison = "setsockopt(TCP_ULP, tls) = ENOTCONN(107), want ENOENT|ENOSYS",
+        .detail = "NOTCONN",
+    });
+    const r: Report = .{
+        .time = "",
+        .os = "Linux",
+        .host = "host",
+        .kernel = "6",
+        .root = false,
+        .summary = .{ .fail = 1 },
+        .checks = p.checks.items,
+    };
     var out: Io.Writer.Allocating = .init(arena.allocator());
     try printText(&out.writer, r, 120);
     try testing.expect(std.mem.indexOf(u8, out.written(), "Kernel TLS unavailable") != null);
@@ -1347,7 +1487,11 @@ test "text uses a label and comparison; JSON retains full evidence" {
     out.clearRetainingCapacity();
     try std.json.Stringify.value(r, json_options, &out.writer);
     try testing.expect(std.mem.indexOf(u8, out.written(), "precise syscall rule") != null);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "setsockopt(SOL_TCP, TCP_ULP, tls)") != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out.written(),
+        "setsockopt(SOL_TCP, TCP_ULP, tls)",
+    ) != null);
     out.clearRetainingCapacity();
     try printLine(arena.allocator(), &out.writer, r);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\"source\"") == null);
@@ -1359,10 +1503,40 @@ test "login summary keeps failures, marks exceptions and cleans terminal text" {
     defer arena.deinit();
     const gpa = arena.allocator();
     const checks = [_]Check{
-        .{ .id = "pass", .area = "kernel", .name = "Passing check", .why = "", .how = "", .result = .pass },
-        .{ .id = "skip", .area = "kernel", .name = "Skipped check", .why = "", .how = "", .result = .skip },
-        .{ .id = "fail", .area = "kernel", .name = "Lockdown\x1b[2J", .why = "", .how = "", .result = .fail, .detail = "none\n" },
-        .{ .id = "expected", .area = "programs", .name = "No shell", .why = "", .how = "", .result = .fail, .excuse = "playground uses bash" },
+        .{
+            .id = "pass",
+            .area = "kernel",
+            .name = "Passing check",
+            .why = "",
+            .how = "",
+            .result = .pass,
+        },
+        .{
+            .id = "skip",
+            .area = "kernel",
+            .name = "Skipped check",
+            .why = "",
+            .how = "",
+            .result = .skip,
+        },
+        .{
+            .id = "fail",
+            .area = "kernel",
+            .name = "Lockdown\x1b[2J",
+            .why = "",
+            .how = "",
+            .result = .fail,
+            .detail = "none\n",
+        },
+        .{
+            .id = "expected",
+            .area = "programs",
+            .name = "No shell",
+            .why = "",
+            .how = "",
+            .result = .fail,
+            .excuse = "playground uses bash",
+        },
     };
     const r: Report = .{
         .time = "2026-10-13T15:00:00Z",
@@ -1390,26 +1564,47 @@ test "login summary keeps failures, marks exceptions and cleans terminal text" {
     var limited = r;
     limited.root = false;
     try printSummary(gpa, &out.writer, limited, null, false);
-    try testing.expect(std.mem.startsWith(u8, out.written(), "Security posture: DEGRADED · 1 passed · 2 failed · 1 skipped · some checks limited (not root)\n"));
+    try testing.expect(std.mem.startsWith(
+        u8,
+        out.written(),
+        "Security posture: DEGRADED · 1 passed · 2 failed · 1 skipped · some checks limited " ++
+            "(not root)\n",
+    ));
 }
 
 test "summary states distinguish expected gaps from unexcused failures; skips describe coverage" {
-    var r: Report = .{ .time = "", .os = "", .host = "", .kernel = "", .root = true, .summary = .{ .pass = 1 }, .checks = &.{} };
-    try testing.expectEqual(SummaryState.nominal, summaryState(r));
+    var r: Report = .{
+        .time = "",
+        .os = "",
+        .host = "",
+        .kernel = "",
+        .root = true,
+        .summary = .{ .pass = 1 },
+        .checks = &.{},
+    };
+    try testing.expectEqual(Verdict.nominal, summaryState(r));
     r.summary.skip = 1;
-    try testing.expectEqual(SummaryState.nominal, summaryState(r));
+    try testing.expectEqual(Verdict.nominal, summaryState(r));
     r.summary.skip = 0;
     r.root = false;
-    try testing.expectEqual(SummaryState.nominal, summaryState(r));
+    try testing.expectEqual(Verdict.nominal, summaryState(r));
     r.root = true;
     r.summary.pass = 0;
-    try testing.expectEqual(SummaryState.nominal, summaryState(r));
-    var checks = [_]Check{.{ .id = "shell", .area = "programs", .name = "No shell", .why = "", .how = "", .result = .fail, .excuse = "playground uses bash" }};
+    try testing.expectEqual(Verdict.nominal, summaryState(r));
+    var checks = [_]Check{.{
+        .id = "shell",
+        .area = "programs",
+        .name = "No shell",
+        .why = "",
+        .how = "",
+        .result = .fail,
+        .excuse = "playground uses bash",
+    }};
     r.summary.fail = 1;
     r.checks = &checks;
-    try testing.expectEqual(SummaryState.expected_gaps, summaryState(r));
+    try testing.expectEqual(Verdict.expected_gaps, summaryState(r));
     checks[0].excuse = null;
-    try testing.expectEqual(SummaryState.degraded, summaryState(r));
+    try testing.expectEqual(Verdict.degraded, summaryState(r));
 }
 test {
     _ = boot;
@@ -1430,14 +1625,14 @@ const test_mounts =
     \\dev /dev devtmpfs rw,nosuid,noexec,relatime 0 0
     \\tmpfs /tmp tmpfs rw,nosuid,nodev,noexec 0 0
     \\tmpfs /run tmpfs rw,nosuid,nodev 0 0
-    \\/dev/vda1 /victim ext4 ro,nosuid,nodev,noexec 0 0
+    \\/dev/vda1 /boot ext4 ro,nosuid,nodev,noexec 0 0
     \\/dev/vda1 /data ext4 rw,nosuid,nodev,noexec,noatime 0 0
     \\mqueue /dev/mqueue mqueue rw,nosuid,nodev,noexec 0 0
 ;
 
 test hasOption {
     try testing.expect(hasOption(test_mounts, "/proc", "hidepid=invisible"));
-    try testing.expect(hasOption(test_mounts, "/victim", "ro"));
+    try testing.expect(hasOption(test_mounts, "/boot", "ro"));
     try testing.expect(!hasOption(test_mounts, "/", "ro"));
     try testing.expect(!hasOption(test_mounts, "/run", "noexec"));
     try testing.expectEqualStrings("ext4", mountType(test_mounts, "/data").?);

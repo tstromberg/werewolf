@@ -86,7 +86,7 @@ BTI and kCFI need it built with clang, which Alpine and Ubuntu do not use.
 
 ## Alternatives Considered
 
-- **A command-line switch for eBPF**: root on a bitten machine rewrites GRUB.
+- **A command-line switch for eBPF**: an unsigned boot configuration can weaken policy.
 - **`integrity` everywhere**, as before, lets a kprobe rootkit read the kernel.
 - **eBPF built out** needs a second kernel; **the BPF LSM** uses eBPF.
 - **A list of calls**: allowed, it breaks on glibc updates; refused, it ages.

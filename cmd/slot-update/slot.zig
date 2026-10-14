@@ -177,23 +177,16 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     const src = try u.gpa.print("lib/modules/{s}", .{kvers[0]});
     const dst = try u.gpa.print("usr/lib/modules/{s}", .{kvers[0]});
     const dep = try k.read(u, try u.gpa.print("{s}/modules.dep", .{src}));
-    // The build's stage0s, from the same lists in the same order
-    // (lib/image.zig), as compose wrote them into the new root from its
-    // forms: under a distro's GRUB (bite), modules-bitten, which adds the
-    // distro filesystem's modules to werewolf's own.
+    // Use the same module list and order as the build.
     const records = "usr/share/werewolf/";
-    const native = try u.lines(try r.read(u, records ++ "modules"));
-    const words = if (u.cmd.grubenv != null)
-        try u.lines(try r.read(u, records ++ "modules-bitten"))
-    else
-        native;
+    const words = try u.lines(try r.read(u, records ++ "modules"));
     var params: std.ArrayList(ModuleParam) = .empty;
     for (try u.lines(try r.read(u, records ++ "module-params"))) |line| {
         const space = std.mem.findScalar(u8, line, ' ') orelse return error.BadModuleParams;
         try params.append(u.gpa, .{ .module = line[0..space], .value = line[space + 1 ..] });
     }
     var bad: []const u8 = "";
-    const mods = stage0Modules(u.gpa, dep, words, native, params.items, &bad) catch |err| {
+    const mods = stage0Modules(u.gpa, dep, words, params.items, &bad) catch |err| {
         u.detail = bad;
         return err;
     };
@@ -230,88 +223,10 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
 
 // --- install ----------------------------------------------------------------
 
-/// install writes the built slot and arms one try of it, under GRUB (bite)
-/// or, without werewolf.grubenv, systemd-boot (installEsp). root.erofs goes
-/// beside this slot's on the victim's filesystem; the kernel and stage0 go
-/// in werewolf/ beside GRUB's directory. /victim is read-only, so the mount
-/// broker lends writable mounts.
+/// install writes the built slot and arms one try through systemd-boot.
 pub fn install(u: *Update, build: []const u8) !void {
     try images.requireInstall(u);
-    if (u.cmd.grubenv == null) return installEsp(u, build);
-    const io = u.io;
-    u.step = "install";
-    const victim = try u.held(.victim);
-    defer victim.release();
-    const grub = try u.held(.grub);
-    defer grub.release();
-    const v = victim.path();
-    const g = grub.path();
-
-    const gpath = u.cmd.grubenv.?.path;
-    const kdir = try u.gpa.print(
-        "{s}{s}/werewolf/{s}",
-        .{ g, parentDir(parentDir(gpath)), u.other },
-    );
-    const rdir = try u.gpa.print(
-        "{s}{s}/{s}",
-        .{ v, u.cmd.victim.?.path, u.other },
-    );
-    try Dir.cwd().createDirPath(io, kdir);
-    try Dir.cwd().createDirPath(io, rdir);
-    // Disarm first, so nothing boots the slot or names it in attempt until
-    // it is whole.
-    const env = try u.gpa.print("{s}{s}", .{ g, gpath });
-    Dir.cwd().deleteFile(io, attempt_path) catch |err| switch (err) {
-        error.FileNotFound => {},
-        else => return err,
-    };
-    try u.run(&.{ "/usr/lib/werewolf/grub-setenv", env, "next_entry", "" });
-    // Each file goes through a temporary name, so it is whole or absent.
-    // GRUB cannot run arm64's EFI zboot image, so unwrap the Image inside.
-    try Dir.cwd().copyFile(
-        work_dir ++ "/slot/root.erofs",
-        Dir.cwd(),
-        try u.gpa.print("{s}/root.erofs", .{rdir}),
-        io,
-        .{},
-    );
-    try u.writeReplacing(
-        try u.gpa.print("{s}/vmlinuz", .{kdir}),
-        if (u.image != null)
-            try u.read(work_dir ++ "/slot/vmlinuz")
-        else
-            try unwrapZboot(u.gpa, try u.read(work_dir ++ "/slot/vmlinuz")),
-    );
-    try Dir.cwd().copyFile(
-        if (u.image != null)
-            work_dir ++ "/slot/stage0-bitten.zst"
-        else
-            work_dir ++ "/slot/stage0.zst",
-        Dir.cwd(),
-        try u.gpa.print("{s}/stage0.zst", .{kdir}),
-        io,
-        .{},
-    );
-    try rememberDeclaration(u, v, rdir);
-    try images.remember(u, rdir);
-    linux.sync();
-    // bite's GRUB entries read each slot's kernel arguments from the
-    // environment, so an update's new arguments reach older machines.
-    const args = try std.mem.join(u.gpa, " ", try u.words(try u.slotCmdline()));
-    try u.run(&.{
-        "/usr/lib/werewolf/grub-setenv",
-        env,
-        try u.gpa.print("werewolf_args_{s}", .{u.other}),
-        args,
-    });
-    if (u.image != null) _ = try images.verifyOther(u, build, true, false, true);
-    // Arm, then write attempt. In the other order, a power cut between
-    // them would record a try that never happened as a rollback and mark
-    // an unjudged build bad. In this order it costs at most one extra
-    // boot. See README.md, Arming order.
-    const entry = try u.gpa.print("werewolf-{s}", .{u.other});
-    try u.run(&.{ "/usr/lib/werewolf/grub-setenv", env, "next_entry", entry });
-    try writeAttempt(u, build);
+    try installEsp(u, build);
 }
 
 fn writeAttempt(u: *Update, build: []const u8) !void {
@@ -321,18 +236,6 @@ fn writeAttempt(u: *Update, build: []const u8) !void {
     );
 }
 
-/// Record which declaration each slot holds while both are known. These
-/// records select an existing slot; they never authorize package bytes.
-fn rememberDeclaration(u: *Update, victim: []const u8, other: []const u8) !void {
-    if (u.image != null) return;
-    const current = u.read(meta_dir ++ "/local/inputs") catch "";
-    const next = readIn(u, work_dir ++ "/root", "usr/share/werewolf/local/inputs") catch "";
-    if (current.len == 64) try u.writeReplacing(try u.gpa.print("{s}{s}/{s}/declaration", .{
-        victim, u.cmd.victim.?.path, u.slot,
-    }), current);
-    if (next.len == 64) try u.writeReplacing(try u.gpa.print("{s}/declaration", .{other}), next);
-}
-
 /// tryOther arms the other slot as it stands. With expected, an older
 /// manifest may select only the slot that holds its exact image inputs.
 pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
@@ -340,36 +243,24 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
     const lock = try u.lock();
     defer _ = linux.close(lock);
     if (try u.needsSignedImage()) {
-        const image = try images.verifyOther(u, null, true, true, false);
+        const image = try images.verifyOther(u, null, true, true);
         if (expected) |hash| if (image.declaration == null or
             !std.mem.eql(u8, hash, image.declaration.?))
             return error.DeclarationNotInOtherSlot;
     }
-    // The other slot is read through stage0's read-only /victim mount;
-    // nothing here needs the victim writable.
-    const root = try u.gpa.print("/victim{s}/{s}", .{ u.cmd.victim.?.path, u.other });
+    // The other slot is read through stage0's read-only /boot mount;
+    // nothing here needs /boot writable.
+    const root = try u.gpa.print("/boot/slot/{s}", .{u.other});
     try Dir.cwd().access(u.io, try u.gpa.print("{s}/root.erofs", .{root}), .{});
     if (expected) |hash| {
         if (hash.len != 64) return error.BadDeclarationHash;
         const held = try u.read(try u.gpa.print("{s}/declaration", .{root}));
         if (!std.mem.eql(u8, hash, held)) return error.DeclarationNotInOtherSlot;
     }
-    if (u.cmd.grubenv) |grubenv| {
-        const grub = try u.held(.grub);
-        defer grub.release();
-        const env = try u.gpa.print("{s}{s}", .{ grub.path(), grubenv.path });
-        try u.run(&.{
-            "/usr/lib/werewolf/grub-setenv",
-            env,
-            "next_entry",
-            try u.gpa.print("werewolf-{s}", .{u.other}),
-        });
-    } else {
-        broker.espArm() catch |err| {
-            u.detail = broker.refusal;
-            return err;
-        };
-    }
+    broker.espArm() catch |err| {
+        u.detail = broker.refusal;
+        return err;
+    };
     Dir.cwd().deleteFile(u.io, m.pending_path) catch {};
     try writeAttempt(u, expected orelse "operator-try");
     try u.record(.{ .event = "try", .slot = u.other, .declaration = expected });
@@ -386,22 +277,9 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
 fn installEsp(u: *Update, build: []const u8) !void {
     const io = u.io;
     u.step = "install";
-    // The victim is lent only for a TPM retirement, whose boot state the
-    // updater still writes there; verified boot bounds that route. Every
-    // other install moves its slot files through the broker and reads
-    // through stage0's read-only /victim mount.
-    const retire_mode = u.cmd.release != null;
-    var hold: ?broker.Held = if (retire_mode) try u.held(.victim) else null;
-    defer if (hold) |*h| h.release();
-    const v = if (hold) |h| h.path() else "/victim";
-
-    const rdir = try u.gpa.print(
-        "{s}{s}/{s}",
-        .{ v, u.cmd.victim.?.path, u.other },
-    );
-    if (retire_mode) try Dir.cwd().createDirPath(io, rdir);
-
-    var retirement = try @import("retire.zig").prepare(u, v);
+    // Every install moves its slot files and TPM state through the broker's
+    // detached mounts and reads through stage0's read-only /boot mount.
+    var retirement = try @import("retire.zig").prepare(u);
     defer if (retirement) |*prepared| prepared.close();
 
     // Remove the other slot's entries and attempt first, so nothing boots
@@ -418,19 +296,10 @@ fn installEsp(u: *Update, build: []const u8) !void {
         return err;
     };
     linux.sync();
-    // copyFile goes through a temporary name, so each file is whole or absent.
+    try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
+    // copyChecked goes through a temporary name, so each file is whole or absent.
     if (retirement) |*prepared| try prepared.apply();
-    if (retire_mode) {
-        try Dir.cwd().copyFile(
-            work_dir ++ "/slot/root.erofs",
-            Dir.cwd(),
-            try u.gpa.print("{s}/root.erofs", .{rdir}),
-            io,
-            .{},
-        );
-        try rememberDeclaration(u, v, rdir);
-        try images.remember(u, rdir);
-    } else if (u.image == null) {
+    if (u.image == null) {
         const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
         broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
             u.detail = broker.refusal;
@@ -454,7 +323,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
             return err;
         };
         const meta_a = try signed.hashFile(io, u.gpa, work_dir ++ "/image.json");
-        const meta_b = try signed.hashFile(io, u.gpa, work_dir ++ "/image.json.sig");
+        const meta_b = try signed.hashFile(io, u.gpa, work_dir ++ "/image.sig");
         const meta_c = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
         broker.slotMeta(
             .{ .size = meta_a.size, .sha256 = meta_a.sha256 },
@@ -474,9 +343,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
     linux.sync();
 
     // The broker copies the boot files from these fixed staged names and
-    // arms the slot. Stage the command line it should seal into the entry,
-    // and name every artifact by the digest the broker must find.
-    try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
+    // arms the slot. Name every artifact by the digest the broker must find.
     const kernel = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/vmlinuz");
     const stage0 = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/stage0.zst");
     const cmdline = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
@@ -493,7 +360,7 @@ fn installEsp(u: *Update, build: []const u8) !void {
         u.detail = broker.refusal;
         return err;
     };
-    if (u.image != null) _ = try images.verifyOther(u, build, true, false, retire_mode);
+    if (u.image != null) _ = try images.verifyOther(u, build, true, false);
     // Arm, then write attempt, as install does and for the same reason.
     try writeAttempt(u, build);
 }
@@ -1399,17 +1266,6 @@ fn withoutGz(path: []const u8) []const u8 {
     return if (std.mem.endsWith(u8, path, ".gz")) path[0 .. path.len - 3] else path;
 }
 
-/// unwrapZboot returns the Image inside an arm64 EFI zboot image ("MZ",
-/// "zimg", then the gzipped Image's offset and size as little-endian u32).
-/// Any other image is returned unchanged.
-fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
-    if (image.len < 16 or !std.mem.eql(u8, image[4..8], "zimg")) return image;
-    const off = std.mem.readInt(u32, image[8..12], .little);
-    const size = std.mem.readInt(u32, image[12..16], .little);
-    if (@as(u64, off) + size > image.len) return error.BadZboot;
-    return gunzip(gpa, image[off .. off + size]);
-}
-
 const Node = struct {
     name: []const u8,
     mode: u32,
@@ -1542,24 +1398,24 @@ test "systemd-boot entries" {
     defer arena.deinit();
     const a = arena.allocator();
     try testing.expectEqualStrings(
-        "console=hvc0 werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000 werewolf.mac=52:55 " ++
+        "console=hvc0 werewolf.slots=ab werewolf.esp=57E1-F000 werewolf.mac=52:55 " ++
             "werewolf.slot=b",
         try withSlot(
             a,
             "initrd=\\werewolf\\a\\stage0.zst console=hvc0 werewolf.slot=a " ++
-                "werewolf.victim=ab:/werewolf werewolf.esp=57E1-F000  werewolf.mac=52:55\n",
+                "werewolf.slots=ab werewolf.esp=57E1-F000  werewolf.mac=52:55\n",
             "",
             "b",
         ),
     );
     // The image's arguments replace any of the same name, or are added.
     try testing.expectEqualStrings(
-        "console=hvc0 werewolf.victim=ab:/werewolf debugfs=off proc_mem.force_override=never " ++
+        "console=hvc0 werewolf.slots=ab debugfs=off proc_mem.force_override=never " ++
             "werewolf.slot=b",
         try withSlot(
             a,
             "console=hvc0 proc_mem.force_override=always werewolf.slot=a " ++
-                "werewolf.victim=ab:/werewolf\n",
+                "werewolf.slots=ab\n",
             "debugfs=off proc_mem.force_override=never\n",
             "b",
         ),
@@ -1698,16 +1554,4 @@ test cpioEntry {
     try testing.expectEqualStrings("00002190", c[14..22]);
     try testing.expectEqualStrings("00000005", c[78..86]);
     try testing.expectEqualStrings("00000001", c[86..94]);
-}
-
-test unwrapZboot {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const plain = "not a zboot image, at all";
-    try testing.expectEqualStrings(plain, try unwrapZboot(arena.allocator(), plain));
-    var bad: [16]u8 = @splat(0);
-    @memcpy(bad[4..8], "zimg");
-    std.mem.writeInt(u32, bad[8..12], 8, .little);
-    std.mem.writeInt(u32, bad[12..16], 100, .little);
-    try testing.expectError(error.BadZboot, unwrapZboot(arena.allocator(), &bad));
 }

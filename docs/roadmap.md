@@ -16,4 +16,4 @@
    exploited CVE, hours for a high one, and a week or four in the
    maintenance window for the rest
    ([docs/design/update-policy.md](design/update-policy.md)).
-6. bite on x86, and drivers beyond virtio (NVMe, ENA, Hyper-V).
+6. Drivers beyond virtio (NVMe, ENA, Hyper-V).

@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Build a protected vendor bundle using public-only compile inputs and host signing."""
+import fcntl
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import sys
+import tempfile
+
+
+def build(form, provider, arch, serial, output):
+    if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', form) or provider not in ('lima', 'qemu'):
+        raise ValueError('invalid protected form or provider')
+    if arch not in ('aarch64', 'x86_64') or platform.machine() != arch or platform.system() != 'Linux':
+        raise ValueError('CI builds require a native Linux runner for the requested architecture')
+    if provider == 'lima' and arch != 'aarch64':
+        raise ValueError('protected Lima currently requires arm64')
+    output = Path(output).resolve()
+    if output.exists():
+        raise ValueError('protected output already exists')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    os.environ['SOURCE_DATE_EPOCH'] = '0'
+    loader = importlib.machinery.SourceFileLoader('protected_builder', 'tools/local-prerequisites')
+    builder = loader.load_module()
+    tree, cache = Path.cwd(), Path('build/protected-cache').resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    # This command must be called through with-protected-keys. Key files remain
+    # on this host; builder.melange stages only the pinned public certificate.
+    key = Path(os.environ['WEREWOLF_PROTECTED_IMAGE_KEY']).resolve()
+    cert = Path(os.environ['WEREWOLF_PROTECTED_IMAGE_CRT']).resolve()
+    boot_key = Path(os.environ['WEREWOLF_PROTECTED_BOOT_KEY']).resolve()
+    boot_cert = Path(os.environ['WEREWOLF_PROTECTED_BOOT_CRT']).resolve()
+    version = re.search(r'^alpine_version=(.+)$', Path('boot/kernel-source').read_text(), re.M).group(1)
+    with (cache / 'build.lock').open('a+b') as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        inputs = {name: tree / name for name in ('boot/kernel-source', 'boot/kernel.yaml')}
+        inputs.update({str(path.relative_to(tree)): path for path in sorted((tree / 'boot/alpine-keys').glob('*.pub'))})
+        base_pin = builder.fingerprint(arch, inputs)
+        base_dir = cache / arch / ('base-' + base_pin)
+        base_dir.mkdir(parents=True, exist_ok=True)
+        base = base_dir / 'base.tar'
+        if not builder.valid(base_dir, base_pin, {'base.tar'}):
+            with tempfile.TemporaryDirectory(dir=base_dir) as temporary:
+                incoming = Path(temporary) / 'base.tar'
+                subprocess.run(['apko', '--workdir', 'boot', 'build-minirootfs', '--build-arch', arch,
+                                '-p', 'linux-virt=' + version, 'kernel.yaml', str(incoming)], check=True)
+                digest = builder.digest(incoming)
+                os.replace(incoming, base)
+                (base_dir / 'complete.json').write_text(json.dumps(dict(inputs=base_pin, outputs={'base.tar': digest})) + '\n')
+        prerequisites = builder.build(tree, cache, arch, base, key, cert)
+    env = dict(os.environ, UKI_STUB=str(prerequisites / 'linux.efi.stub'))
+    host = '192.168.5.2' if provider == 'lima' else '10.0.2.2'
+    trust = json.loads(Path('release/protected/trust.json').read_text())
+    port = trust['permit_port']
+    channel = 'https://%s:%d/%s' % (host, port, form)
+    work = Path('build/protected-images').resolve() / (arch + '-' + provider) / form
+    work.mkdir(mode=0o700, parents=True, exist_ok=True)
+    disk = work / 'disk.raw'
+    disk_args = 'console=ttyAMA0' if arch == 'aarch64' else 'console=ttyS0'
+    if provider == 'lima':
+        disk_args += ' werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.3'
+    howl = str(Path('build/host/howl').resolve())
+    args = [howl, '_build', '--with', form, '--arch', arch, '--build', str(work),
+        '--ipe-kernel', str(prerequisites / 'rootfs.tar'), '--ipe-key', str(key), '--ipe-cert', str(cert),
+        '--ipe-updates', channel, '--image-serial', serial, '--boot-key', str(boot_key),
+        '--boot-cert', str(boot_cert), '--boot-native', '--tpm-firmware', '--permit-host', host,
+        '--permit-port', str(port), '--disk', str(disk), '--disk-args', disk_args, 'disk']
+    subprocess.run(args, env=env, check=True)
+    slot = work / (form + '-ipe')
+    producer = dict(form=form, arch=arch, disk=str(disk), slot=str(slot / 'slot'),
+        head=str(slot / 'prebuilt' / arch), output=str(output), image_key=str(key),
+        image_certificate=str(cert), boot_certificate=str(boot_cert), channel=channel,
+        permit_host=host, permit_port=port)
+    config = work / 'seal.json'
+    config.write_text(json.dumps(producer))
+    try:
+        subprocess.run([howl, '_boot-image', 'seal', str(config)], env=env, check=True)
+    finally:
+        config.unlink(missing_ok=True)
+    # Candidate artifacts may be publicly readable. Withhold the signature that
+    # admits a boot bundle until the trusted lifecycle/publication job passes.
+    # Signed image heads and PE code alone cannot authorize the boot descriptor.
+    (output / 'boot.json.sig').unlink()
+    disk.unlink()
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        if len(sys.argv) != 6:
+            raise ValueError('usage: build-protected FORM PROVIDER ARCH SERIAL OUTPUT')
+        build(*sys.argv[1:])
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        sys.exit('build-protected: protected build failed; no unsigned output is published')

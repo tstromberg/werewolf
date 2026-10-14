@@ -354,8 +354,15 @@ fn azureUp(
 /// create does, for VMs made some other way (Terraform, the console), and
 /// prints the image name or AMI id. An Azure disk serves one VM, so copy it
 /// for each (az disk create --source).
-pub fn upload(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
-    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|");
+pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
+    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|") ++ " [--insecure]";
+    const launch = try howl.launchFlags(gpa, given, why);
+    if (launch.secure) return why.refuse(
+        "raw-disk upload cannot establish protected deployment; use create with a signed image, " ++
+            "or explicitly --insecure",
+        .{},
+    );
+    const args = launch.args;
     if (args.len < 2) return why.refuse(syntax, .{});
     var i: usize = 1;
     const flag, const value = try flagValue(args, &i, why);

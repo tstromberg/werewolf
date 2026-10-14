@@ -16,7 +16,7 @@ const writeFile = init.writeFile;
 
 /// network brings up lo and one NIC. iface-up applies a static address,
 /// from the command line or else the config tar's network file; it is for
-/// providers without DHCP and for machines bite took over. Otherwise, if
+/// providers without DHCP. Otherwise, if
 /// the form has it, dhcp-client gets a lease; init starts its renewal later.
 pub fn network(m: *Machine) void {
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });

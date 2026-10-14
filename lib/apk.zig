@@ -17,7 +17,7 @@ const package = @import("package");
 
 /// Inflated size limits for a signature segment, a control segment and an
 /// index, and how much of a package is read to find its control segment.
-const max_signature = 64 << 10;
+const max_signature = 63 << 10;
 const max_control = 16 << 20;
 const max_index = 256 << 20;
 const max_head = 32 << 20;
@@ -109,10 +109,18 @@ fn verified(gpa: Allocator, keys: []const Trusted, data: []const u8) !Verified {
     // Refuse anything after the signed segment.
     const body = try segment(gpa, signed, 0, max_index);
     if (body.end != signed.len) return error.TrailingData;
-    const list = for (try tarFiles(gpa, body.bytes)) |f| {
-        if (std.mem.eql(u8, f.name, "APKINDEX")) break f.data;
-    } else return error.NoApkIndex;
-    return .{ .name = name, .signature = files[0].data, .signed = signed, .list = list };
+    var list: ?[]const u8 = null;
+    for (try tarFiles(gpa, body.bytes)) |f| {
+        if (!std.mem.eql(u8, f.name, "APKINDEX")) continue;
+        if (list != null) return error.BadApkIndex;
+        list = f.data;
+    }
+    return .{
+        .name = name,
+        .signature = files[0].data,
+        .signed = signed,
+        .list = list orelse return error.NoApkIndex,
+    };
 }
 
 /// parseRecords parses an APKINDEX. Records are KEY:VALUE lines separated
@@ -125,15 +133,27 @@ fn parseRecords(gpa: Allocator, list: []const u8) ![]const Record {
         var name: ?[]const u8 = null;
         var version: ?[]const u8 = null;
         var csum: ?[]const u8 = null;
+        var has_depends = false;
         var depends: []const []const u8 = &.{};
         var lines = std.mem.tokenizeScalar(u8, record, '\n');
         while (lines.next()) |l| {
             if (l.len < 2 or l[1] != ':') return error.BadApkIndex;
             switch (l[0]) {
-                'P' => name = l[2..],
-                'V' => version = l[2..],
-                'C' => csum = l[2..],
+                'P' => {
+                    if (name != null) return error.BadApkIndex;
+                    name = l[2..];
+                },
+                'V' => {
+                    if (version != null) return error.BadApkIndex;
+                    version = l[2..];
+                },
+                'C' => {
+                    if (csum != null) return error.BadApkIndex;
+                    csum = l[2..];
+                },
                 'D' => {
+                    if (has_depends) return error.BadApkIndex;
+                    has_depends = true;
                     var words: std.ArrayList([]const u8) = .empty;
                     var w = std.mem.tokenizeScalar(u8, l[2..], ' ');
                     while (w.next()) |d| try words.append(gpa, d);
@@ -143,6 +163,9 @@ fn parseRecords(gpa: Allocator, list: []const u8) ![]const Record {
             }
         }
         if (name == null and version == null and csum == null) continue;
+        const pkg_name = name orelse return error.BadApkIndex;
+        const pkg_ver = version orelse return error.BadApkIndex;
+        if (!validToken(pkg_name) or !validToken(pkg_ver)) return error.BadApkIndex;
         const c = csum orelse return error.BadApkIndex;
         if (!std.mem.startsWith(u8, c, "Q1")) return error.BadApkIndex;
         var sha1: [Sha1.digest_length]u8 = undefined;
@@ -151,13 +174,18 @@ fn parseRecords(gpa: Allocator, list: []const u8) ![]const Record {
             return error.BadApkIndex;
         decoder.decode(&sha1, c[2..]) catch return error.BadApkIndex;
         try out.append(gpa, .{
-            .name = name orelse return error.BadApkIndex,
-            .version = version orelse return error.BadApkIndex,
+            .name = pkg_name,
+            .version = pkg_ver,
             .depends = depends,
             .sha1 = sha1,
         });
     }
     return out.items;
+}
+
+fn validToken(s: []const u8) bool {
+    return s.len > 0 and std.mem.findScalar(u8, s, '/') == null and
+        std.mem.find(u8, s, "..") == null;
 }
 
 /// Control locates a package's control segment and holds datahash, the
@@ -176,15 +204,22 @@ fn control(gpa: Allocator, head: []const u8, want: [Sha1.digest_length]u8) !Cont
         c = try segment(gpa, head, start, max_control);
         if (!std.mem.eql(u8, &sha1Of(head[start..c.end]), &want)) return error.NotAsIndexed;
     }
-    const info = for (try tarFiles(gpa, c.bytes)) |f| {
-        if (std.mem.eql(u8, f.name, ".PKGINFO")) break f.data;
-    } else return error.NoPkgInfo;
-    var lines = std.mem.tokenizeScalar(u8, info, '\n');
-    const hex = while (lines.next()) |l| {
-        if (std.mem.startsWith(u8, l, "datahash = ")) break l["datahash = ".len..];
-    } else return error.NoDataHash;
+    var info: ?[]const u8 = null;
+    for (try tarFiles(gpa, c.bytes)) |f| {
+        if (!std.mem.eql(u8, f.name, ".PKGINFO")) continue;
+        if (info != null) return error.NoPkgInfo;
+        info = f.data;
+    }
+    var lines = std.mem.tokenizeScalar(u8, info orelse return error.NoPkgInfo, '\n');
+    var hex: ?[]const u8 = null;
+    while (lines.next()) |l| {
+        if (!std.mem.startsWith(u8, l, "datahash = ")) continue;
+        if (hex != null) return error.NoDataHash;
+        hex = l["datahash = ".len..];
+    }
     var datahash: [Sha256.digest_length]u8 = undefined;
-    const got = std.fmt.hexToBytes(&datahash, hex) catch return error.NoDataHash;
+    const got = std.fmt.hexToBytes(&datahash, hex orelse return error.NoDataHash) catch
+        return error.NoDataHash;
     if (got.len != datahash.len) return error.NoDataHash;
     return .{ .start = start, .end = c.end, .datahash = datahash };
 }
@@ -352,6 +387,7 @@ pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
 
     // SEQUENCE { SEQUENCE { OID rsaEncryption, NULL }, BIT STRING { 0, RSAPublicKey } }
     const spki = try element(bytes, 0, .sequence);
+    if (spki.slice.end != bytes.len) return error.BadKey;
     const algorithm = try element(bytes, spki.slice.start, .sequence);
     const oid = try element(bytes, algorithm.slice.start, .object_identifier);
     if (!std.mem.eql(
@@ -359,6 +395,8 @@ pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
         bytes[oid.slice.start..oid.slice.end],
         &rsa_encryption,
     )) return error.BadKey;
+    const params = try element(bytes, oid.slice.end, .null);
+    if (params.slice.end != algorithm.slice.end) return error.BadKey;
     const bits = try element(bytes, algorithm.slice.end, .bitstring);
     if (bits.slice.end != spki.slice.end or bits.slice.end - bits.slice.start < 2 or
         bytes[bits.slice.start] != 0)
@@ -366,8 +404,10 @@ pub fn parseKey(gpa: Allocator, pem: []const u8) !Key {
     const inner = bytes[bits.slice.start + 1 .. bits.slice.end];
     // parseDer trusts the lengths in inner, so check them here first.
     const seq = try element(inner, 0, .sequence);
+    if (seq.slice.end != inner.len) return error.BadKey;
     const n = try element(inner, seq.slice.start, .integer);
-    _ = try element(inner, n.slice.end, .integer);
+    const e = try element(inner, n.slice.end, .integer);
+    if (e.slice.end != seq.slice.end) return error.BadKey;
     const parts = rsa.PublicKey.parseDer(inner) catch return error.BadKey;
     switch (parts.modulus.len) {
         256, 384, 512 => {},
@@ -591,6 +631,9 @@ test parseRecords {
         "C:Q2AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:x\nV:1-r0\n",
         "C:Q1AAAA\nP:x\nV:1-r0\n",
         "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nV:1-r0\n",
+        "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:x\nP:y\nV:1-r0\n",
+        "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:../x\nV:1-r0\n",
+        "C:Q1AAAAAAAAAAAAAAAAAAAAAAAAAAA=\nP:a/b\nV:1-r0\n",
         "nonsense\n",
     }) |list| try testing.expectError(error.BadApkIndex, parseRecords(a, list));
 }

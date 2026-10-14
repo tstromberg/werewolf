@@ -15,7 +15,6 @@ pub const Files = struct {
     vmlinuz: Artifact,
     @"root.erofs": Artifact,
     @"stage0.zst": Artifact,
-    @"stage0-bitten.zst": Artifact,
     cmdline: Artifact,
     @"uki.efi": ?Artifact = null,
 };
@@ -23,7 +22,6 @@ pub const names = [_][]const u8{
     "vmlinuz",
     "root.erofs",
     "stage0.zst",
-    "stage0-bitten.zst",
     "cmdline",
     "uki.efi",
 };
@@ -177,46 +175,6 @@ pub fn hashFile(io: std.Io, gpa: mem.Allocator, path: []const u8) !Artifact {
     };
 }
 
-/// Recheck the selected boot variant and reject a stale UKI that an
-/// operator rollback could otherwise select outside the signed contract.
-pub fn checkInstalled(
-    io: std.Io,
-    gpa: mem.Allocator,
-    image: Manifest,
-    root: []const u8,
-    boot: []const u8,
-    bitten: bool,
-) !void {
-    for ([_][]const u8{ "root.erofs", "vmlinuz", "stage0.zst", "cmdline", "uki.efi" }) |name| {
-        if (bitten and mem.eql(u8, name, "uki.efi")) continue;
-        const source = if (bitten and mem.eql(u8, name, "stage0.zst"))
-            "stage0-bitten.zst"
-        else
-            name;
-        const dir = if (mem.eql(u8, name, "root.erofs") or mem.eql(u8, name, "cmdline"))
-            root
-        else
-            boot;
-        const path = try gpa.print("{s}/{s}", .{ dir, name });
-        if (image.artifact(source)) |a| {
-            const got = try hashFile(io, gpa, path);
-            try matches(a, got.size, got.sha256);
-        } else {
-            std.Io.Dir.cwd().access(io, path, .{}) catch |err| switch (err) {
-                error.FileNotFound => continue,
-                else => return err,
-            };
-            return error.UnselectedImageUki;
-        }
-    }
-    _ = try cmdline(try std.Io.Dir.cwd().readFileAlloc(
-        io,
-        try gpa.print("{s}/cmdline", .{root}),
-        gpa,
-        .limited(4096),
-    ));
-}
-
 /// Keep URLs free of credentials, queries and traversal. The publisher
 /// uploads ARCH/BUILD/NAME first, then ARCH/latest.json and its signature.
 pub fn channel(url: []const u8) !void {
@@ -330,7 +288,12 @@ fn argName(arg: []const u8) []const u8 {
 }
 
 /// Native UKIs seal their options; a factory EFI entry has no options line.
-pub fn rollbackOptions(gpa: mem.Allocator, text: []const u8, slot_name: []const u8, uki: bool) ![]const u8 {
+pub fn rollbackOptions(
+    gpa: mem.Allocator,
+    text: []const u8,
+    slot_name: []const u8,
+    uki: bool,
+) ![]const u8 {
     var options: ?[]const u8 = null;
     var efi: ?[]const u8 = null;
     var lines = mem.splitScalar(u8, text, '\n');
@@ -386,7 +349,6 @@ fn fixture() Manifest {
             .vmlinuz = a,
             .@"root.erofs" = a,
             .@"stage0.zst" = a,
-            .@"stage0-bitten.zst" = a,
             .cmdline = a,
         },
     };
@@ -484,7 +446,10 @@ test "loader entries are generated and matched canonically" {
     const native = "efi /werewolf/a/uki.efi\n";
     const counted = "uki /werewolf/a/uki.efi\n";
     try testing.expectEqualStrings("", try rollbackOptions(a, counted, "a", true));
-    try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, native ++ counted, "a", true));
+    try testing.expectError(
+        error.NoOtherSlotEntry,
+        rollbackOptions(a, native ++ counted, "a", true),
+    );
     try testing.expectEqualStrings("", try rollbackOptions(a, native, "a", true));
     try testing.expectError(error.NoOtherSlotEntry, rollbackOptions(a, native, "b", true));
     try testing.expectEqualStrings(
@@ -508,56 +473,5 @@ test "manifest authentication precedes parsing and pins the enrolled key" {
     try testing.expectError(
         error.WrongImageArch,
         open(gpa, key, data, sig, .{ .channel = identity.channel, .arch = "x86_64" }),
-    );
-}
-
-test "installed proof rechecks bytes, the stage0 variant and stale UKIs" {
-    const io = testing.io;
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "root");
-    try tmp.dir.createDirPath(io, "boot");
-    const path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
-    const root = try gpa.print("{s}/root", .{path});
-    const boot = try gpa.print("{s}/boot", .{path});
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/root.erofs", .data = "root" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "root/cmdline", .data = "quiet=1\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/vmlinuz", .data = "kernel" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/stage0.zst", .data = "native" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "bitten", .data = "bitten" });
-    var m = fixture();
-    m.files.vmlinuz = try hashFile(io, gpa, try gpa.print("{s}/vmlinuz", .{boot}));
-    m.files.@"root.erofs" = try hashFile(io, gpa, try gpa.print("{s}/root.erofs", .{root}));
-    m.files.cmdline = try hashFile(io, gpa, try gpa.print("{s}/cmdline", .{root}));
-    m.files.@"stage0.zst" = try hashFile(io, gpa, try gpa.print("{s}/stage0.zst", .{boot}));
-    m.files.@"stage0-bitten.zst" = try hashFile(io, gpa, try gpa.print("{s}/bitten", .{path}));
-    try checkInstalled(io, gpa, m, root, boot, false);
-    try testing.expectError(
-        error.ImageArtifactMismatch,
-        checkInstalled(io, gpa, m, root, boot, true),
-    );
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/stage0.zst", .data = "bitten" });
-    try checkInstalled(io, gpa, m, root, boot, true);
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/vmlinuz", .data = "changed" });
-    try testing.expectError(
-        error.ImageArtifactMismatch,
-        checkInstalled(io, gpa, m, root, boot, true),
-    );
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/vmlinuz", .data = "kernel" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/stage0.zst", .data = "native" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/uki.efi", .data = "old unsigned boot" });
-    try testing.expectError(
-        error.UnselectedImageUki,
-        checkInstalled(io, gpa, m, root, boot, false),
-    );
-    m.files.@"uki.efi" = try hashFile(io, gpa, try gpa.print("{s}/uki.efi", .{boot}));
-    try checkInstalled(io, gpa, m, root, boot, false);
-    try tmp.dir.writeFile(io, .{ .sub_path = "boot/uki.efi", .data = "tampered signed boot" });
-    try testing.expectError(
-        error.ImageArtifactMismatch,
-        checkInstalled(io, gpa, m, root, boot, false),
     );
 }

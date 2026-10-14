@@ -16,7 +16,7 @@ In scope:
 
 - werewolf images: every form in `forms/`, its programs (`cmd/`), and the boot chain.
 - Releases and updates: signing, manifests, the updater.
-- `howl`, and `bite`.
+- `howl`.
 
 Out of scope: bugs in upstream packages (Wolfi, Alpine's kernel) that werewolf doesn't make worse; report those upstream. If werewolf's hardening fails to contain one, that part is in scope.
 

@@ -1,0 +1,101 @@
+#!/usr/bin/env python3
+"""Independent signatures exercise boot-profile admission before any machine mutation."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+import tempfile
+import unittest
+
+HOWL = str(Path(sys.argv.pop(1)).resolve())
+
+
+class Admission(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix='ww-boot-image-')
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        for name in ('vendor', 'foreign'):
+            subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+                '-subj', '/CN=boot-image-test', '-keyout', self.root / (name + '.key'),
+                '-out', self.root / (name + '.crt')], check=True, capture_output=True)
+        der = subprocess.check_output(['openssl', 'x509', '-in', str(self.root / 'vendor.crt'), '-outform', 'DER'])
+        image = json.loads(Path('lib/testdata/prebuilt/image.json').read_text())
+        image['arch'] = 'aarch64' if platform.machine() in ('arm64', 'aarch64') else 'x86_64'
+        image['boot_context'] = '0' * 64
+        image['files']['uki.efi'] = dict(size=1, sha256='1' * 64)
+        digest = hashlib.sha256()
+        for name in ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi'):
+            artifact = image['files'][name]
+            digest.update(('%s %s %d\n' % (name, artifact['sha256'], artifact['size'])).encode())
+        image['build'] = digest.hexdigest()
+        self.manifest = dict(format='werewolf-boot/1', form='playground', image=image,
+            disk=dict(size=1, sha256='0' * 64), raw_size=8 << 30,
+            boot_certificate=hashlib.sha256(der).hexdigest(), permit_host='192.168.5.2',
+            permit_port=9443, pcr11='1' * 64)
+
+    def invoke(self, manifest=None, signer='vendor', mutate=False, trust='vendor'):
+        head = self.root / 'boot.json'
+        head.write_text(json.dumps(manifest or self.manifest))
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', self.root / (signer + '.key'),
+            '-out', self.root / 'boot.json.sig', head], check=True, capture_output=True)
+        if mutate:
+            head.write_text(head.read_text() + ' ')
+        return subprocess.run([HOWL, '_boot-image', 'verify', self.root,
+            self.root / 'vendor.crt', self.root / (trust + '.crt'), self.manifest['image']['channel']],
+            capture_output=True)
+
+    def refused(self, manifest, reason):
+        result = self.invoke(manifest)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(reason.encode(), result.stderr)
+
+    def test_valid_profile_reaches_artifact_gate(self):
+        self.refused(self.manifest, 'FileNotFound')
+
+    def test_exact_512_byte_signature_reaches_artifact_gate(self):
+        subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:4096', '-nodes', '-days', '1',
+            '-subj', '/CN=boot-image-4096', '-keyout', self.root / 'big.key',
+            '-out', self.root / 'big.crt'], check=True, capture_output=True)
+        result = self.invoke(signer='big', trust='big')
+        self.assertEqual(512, (self.root / 'boot.json.sig').stat().st_size)
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn(b'FileNotFound', result.stderr)
+
+    def test_foreign_and_altered_signatures_precede_profile_parsing(self):
+        for result in (self.invoke(signer='foreign'), self.invoke(mutate=True)):
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(b'BadSignature', result.stderr)
+
+    def test_signed_weak_profiles_are_rejected(self):
+        for fields, value, reason in [
+            (('image', 'ipe'), False, 'NotAnIpeImage'),
+            (('image', 'boot_context'), None, 'BadBootImageProfile'),
+            (('permit_port',), 0, 'BadBootImageProfile'),
+            (('permit_host',), '127.0.0.1', 'BadBootImageProfile'),
+            (('pcr11',), '0' * 64, 'UnmeasuredBootImage'),
+            (('raw_size',), 32 << 30, 'BadBootImageSize'),
+            (('disk', 'size'), 3 << 30, 'BadBootImageSize'),
+            (('form',), '../foreign', 'BadBootImageProfile'),
+            (('boot_certificate',), '0' * 64, 'WrongBootCertificate'),
+            (('image', 'channel'), 'https://foreign.test/shop', 'WrongImageChannel'),
+        ]:
+            with self.subTest(fields=fields):
+                changed = copy.deepcopy(self.manifest)
+                cursor = changed
+                for name in fields[:-1]:
+                    cursor = cursor[name]
+                cursor[fields[-1]] = value
+                self.refused(changed, reason)
+
+    def test_signed_unknown_fields_cannot_change_security_policy(self):
+        self.refused(dict(self.manifest, allow_insecure=True), 'UnknownField')
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    unittest.main()

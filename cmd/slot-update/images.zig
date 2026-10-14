@@ -154,22 +154,6 @@ pub fn requireInstall(u: *Update) !void {
     );
 }
 
-/// Preserve the signature beside the root. cmdline is also an authenticated
-/// file, rather than recovered by unpacking the EROFS image as root.
-pub fn remember(u: *Update, rdir: []const u8) !void {
-    const v = u.image orelse return;
-    try u.writeReplacing(try u.gpa.print("{s}/image.json", .{rdir}), v.data);
-    try u.writeReplacing(try u.gpa.print("{s}/image.json.sig", .{rdir}), v.signature);
-    try u.writeReplacing(
-        try u.gpa.print("{s}/cmdline", .{rdir}),
-        try u.read(work ++ "/slot/cmdline"),
-    );
-    if (v.manifest.declaration) |d| try u.writeReplacing(
-        try u.gpa.print("{s}/declaration", .{rdir}),
-        d,
-    );
-}
-
 /// Verify retained proof, then optionally all installed bytes. Automatic
 /// reboot obeys the floor; an explicit operator try can select an older,
 /// still-authenticated image without weakening IPE.
@@ -178,10 +162,8 @@ pub fn verifyOther(
     expected: ?[]const u8,
     contents: bool,
     rollback: bool,
-    held_mounts: bool,
 ) !signed.Manifest {
-    const root_view: []const u8 = if (held_mounts) broker.Word.victim.place() else "/victim";
-    const rdir = try u.gpa.print("{s}{s}/{s}", .{ root_view, u.cmd.victim.?.path, u.other });
+    const rdir = try u.gpa.print("/boot/slot/{s}", .{u.other});
     const image = try open(
         u,
         std.mem.trim(u8, try u.read("/etc/apk/arch"), "\n"),
@@ -191,20 +173,7 @@ pub fn verifyOther(
     if (!rollback) try fresh(u, image);
     try @import("retire.zig").requireOther(u, image);
     if (expected) |e| if (!std.mem.eql(u8, e, image.build)) return error.WrongStagedImage;
-    if (contents) {
-        if (u.cmd.grubenv) |g| {
-            const kdir = try u.gpa.print(
-                "{s}{s}/werewolf/{s}",
-                .{ broker.Word.grub.place(), m.parentDir(m.parentDir(g.path)), u.other },
-            );
-            var mount: ?broker.Held = null;
-            defer if (mount) |*held| held.release();
-            if (!held_mounts) mount = try u.held(.grub);
-            try signed.checkInstalled(u.io, u.gpa, image, rdir, kdir, true);
-        } else {
-            try checkEspInstalled(u, image, rdir);
-        }
-    }
+    if (contents) try checkEspInstalled(u, image, rdir);
     return image;
 }
 
@@ -246,5 +215,5 @@ fn checkEspInstalled(u: *Update, image: signed.Manifest, rdir: []const u8) !void
 }
 
 pub fn requireBoot(u: *Update, expected: []const u8, contents: bool) !void {
-    if (try u.needsSignedImage()) _ = try verifyOther(u, expected, contents, false, false);
+    if (try u.needsSignedImage()) _ = try verifyOther(u, expected, contents, false);
 }

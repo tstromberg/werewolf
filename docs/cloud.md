@@ -56,7 +56,7 @@ the address comes from the command line, the config tar or DHCP.
 
 ## What happens at boot
 
-init looks for a config tar on a disk and beside the victim, and for
+init looks for a config tar on a disk, and for
 NoCloud, as always. Only where it finds none does it run
 `/usr/lib/werewolf/cloud-metadata`, after the network is up:
 

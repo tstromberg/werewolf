@@ -208,8 +208,17 @@ fn imageNetwork(p: *Posture, v6_on: bool) !void {
         .how = "listening TCP ports (/proc/net/tcp, tcp6), but those bound to loopback alone, " ++
             "which the network never reaches, are those the machine's policy " ++
             "declares (/usr/share/werewolf/net)",
-        .expected = if (declared) |ports_text| try p.gpa.print("non-loopback listeners are a subset of declared ports: {s}", .{trim(ports_text)}) else "network policy required to compare listeners",
-        .observed = try p.gpa.print("non-loopback listening ports: {s}", .{if (list.items.len > 0) list.items else "none"}),
+        .expected = if (declared) |ports_text|
+            try p.gpa.print(
+                "non-loopback listeners are a subset of declared ports: {s}",
+                .{trim(ports_text)},
+            )
+        else
+            "network policy required to compare listeners",
+        .observed = try p.gpa.print(
+            "non-loopback listening ports: {s}",
+            .{if (list.items.len > 0) list.items else "none"},
+        ),
         .result = if (declared == null)
             .skip
         else if (undeclared.items.len == 0)
@@ -321,9 +330,16 @@ fn ssh(p: *Posture) !void {
             "nothing.",
         .how = "sshd -T lists only security-key algorithms (sk-...) in " ++
             "pubkeyacceptedalgorithms, and touch-required in pubkeyauthoptions",
-        .observed = if (settings) |s| try p.gpa.print("pubkeyacceptedalgorithms={s}; pubkeyauthoptions={s}", .{
-            sshValue(s, "pubkeyacceptedalgorithms") orelse "absent", sshValue(s, "pubkeyauthoptions") orelse "absent",
-        }) else skipped,
+        .observed = if (settings) |s|
+            try p.gpa.print("pubkeyacceptedalgorithms={s}; pubkeyauthoptions={s}", .{
+                sshValue(
+                    s,
+                    "pubkeyacceptedalgorithms",
+                ) orelse "absent",
+                sshValue(s, "pubkeyauthoptions") orelse "absent",
+            })
+        else
+            skipped,
         .result = if (settings == null) .skip else if (plain.len == 0) .pass else .fail,
         .detail = if (settings == null) skipped else plain,
     });
@@ -459,7 +475,11 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
         .why = "Arbitrary processes cannot open TCP listeners.",
         .source = try p.gpa.print("bind(AF_INET TCP, INADDR_ANY, port={d})", .{port}),
         .comparison = try p.gpa.print("bind(TCP, *:{d}) = {s}{s}", .{
-            port,                                         if (bound == .SUCCESS) "0" else try p.gpa.print("E{s}({d})", .{ errnoText(bound), @backingInt(bound) }),
+            port,
+            if (bound == .SUCCESS)
+                "0"
+            else
+                try p.gpa.print("E{s}({d})", .{ errnoText(bound), @backingInt(bound) }),
             if (bound == .ACCES) "" else ", want EACCES",
         }),
         .how = try p.gpa.print(
@@ -474,13 +494,19 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
     try p.add(.{
         .id = if (p.werewolf) "network-outbound" else "network-outbound-restricted",
         .area = "network",
-        .name = if (p.werewolf) "Only declared traffic leaves" else "Outbound connections restricted",
+        .name = if (p.werewolf)
+            "Only declared traffic leaves"
+        else
+            "Outbound connections restricted",
         .why = "A program can send nothing its form did not declare: no beacon, no " ++
             "exfiltration, no download.",
         .how = "connect() of a UDP socket to 192.0.2.1 port 9 (an address for " ++
             "documentation), which looks the route up without sending, is refused with EACCES",
         .comparison = try p.gpa.print("connect(UDP, 192.0.2.1:9) = {s}{s}", .{
-            if (sent == .SUCCESS) "0" else try p.gpa.print("E{s}({d})", .{ errnoText(sent), @backingInt(sent) }),
+            if (sent == .SUCCESS)
+                "0"
+            else
+                try p.gpa.print("E{s}({d})", .{ errnoText(sent), @backingInt(sent) }),
             if (sent == .ACCES) "" else ", want EACCES",
         }),
         .result = if (sent == .ACCES) .pass else .fail,
@@ -679,13 +705,15 @@ fn isLoopback(hex: []const u8) bool {
         std.mem.endsWith(u8, hex, "7F");
 }
 
-/// policyPorts returns the ports of a policy's `listen tcp PORT` lines, one per line.
+/// policyPorts returns the ports of a policy's `listen tcp PORT` lines (not
+/// `loopback`), one per line.
 fn policyPorts(gpa: Allocator, policy: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, policy, '\n');
     while (it.next()) |line| {
-        if (std.mem.startsWith(u8, line, "listen tcp "))
-            try out.print(gpa, "{s}\n", .{std.mem.trim(u8, line["listen tcp ".len..], " ")});
+        if (!std.mem.startsWith(u8, line, "listen tcp ")) continue;
+        const rest = std.mem.trim(u8, line["listen tcp ".len..], " ");
+        if (!std.mem.endsWith(u8, rest, " loopback")) try out.print(gpa, "{s}\n", .{rest});
     }
     return out.items;
 }
@@ -924,10 +952,11 @@ test listenPorts {
     try testing.expect(isDeclared("80\n", 80));
     const policy = try policyPorts(
         arena.allocator(),
-        "listen tcp 22\nlisten tcp 80\nmetadata 68\n",
+        "listen tcp 22\nlisten tcp 80\nlisten tcp 5432 loopback\nmetadata 68\n",
     );
     try testing.expectEqualStrings("22\n80\n", policy);
-    try testing.expect(isDeclared(policy, 80) and !isDeclared(policy, 68));
+    try testing.expect(isDeclared(policy, 80) and !isDeclared(policy, 68) and
+        !isDeclared(policy, 5432));
     try testing.expect(!isDeclared("80\n", 22));
 }
 

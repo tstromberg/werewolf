@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Prepare immutable protected objects only after admission and artifact-bound boot gates."""
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import shutil
+import sys
+import tempfile
+import time
+
+loader = importlib.machinery.SourceFileLoader('protected_download', 'tools/boot-download')
+downloads = loader.load_module()
+GATES = {'secure_boot', 'ipe', 'verified_root', 'rollback_protected', 'ab_upgrade',
+         'operator_rollback', 'unhealthy_fallback', 'retirement_cuts', 'tamper_refused',
+         'no_consumer_builds', 'no_vendor_private_keys', 'shared_issuer', 'fresh_download', 'independent_owners'}
+
+
+def gates(report, manifest, descriptor, provider):
+    expected = {'format', 'descriptor', 'arch', 'provider', 'checks'}
+    if set(report) != expected or report['format'] != 'werewolf-boot-gates/1':
+        raise ValueError('invalid protected publication evidence')
+    if report['descriptor'] != descriptor or report['arch'] != manifest['image']['arch'] or report['provider'] != provider:
+        raise ValueError('boot evidence describes a different artifact or provider')
+    checks = report['checks']
+    if not isinstance(checks, dict) or set(checks) != GATES or any(value is not True for value in checks.values()):
+        raise ValueError('protected boot lifecycle gates are incomplete')
+
+
+def prepare(howl, bundle, report, provider, output, trust='release/protected'):
+    bundle, output, trust = Path(bundle).resolve(), Path(output).resolve(), Path(trust).resolve()
+    metadata = json.loads(downloads.read(trust / 'trust.json', 4096))
+    if set(metadata) != {'format', 'source', 'permit_port'} or metadata['format'] != 'werewolf-boot-trust/1':
+        raise ValueError('invalid committed publication trust')
+    # The form and architecture here only choose expected identities. They do not
+    # authorize bytes; native signature/profile admission runs before copying files.
+    raw = json.loads(downloads.read(bundle / 'boot.json', downloads.HEAD_LIMIT))
+    form, arch = raw['form'], raw['image']['arch']
+    gateway = '192.168.5.2' if provider == 'lima' else '10.0.2.2'
+    request = dict(source=metadata['source'], cache='unused', form=form, arch=arch, provider=provider,
+        channel='https://%s:%d/%s' % (gateway, metadata['permit_port'], form),
+        boot_certificate=str(trust / 'boot.crt'), image_certificate=str(trust / 'image.crt'))
+    downloads.validate_request(request)
+    manifest = downloads.native(howl, 'head', bundle, request)
+    descriptor = downloads.sha(bundle / 'boot.json')
+    gates(report, manifest, descriptor, provider)
+    downloads.freshness(manifest, descriptor, None, time.time())
+    downloads.native(howl, 'verify', bundle, request)
+    if output.exists():
+        raise ValueError('publication output already exists')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='protected-public-', dir=output.parent) as temporary:
+        staging = Path(temporary) / 'tree'
+        relative = Path(form) / provider / arch
+        objects = staging / relative / 'objects' / descriptor
+        latest = staging / relative / 'latest'
+        objects.mkdir(parents=True)
+        latest.mkdir()
+        for name in downloads.FILES:
+            shutil.copyfile(bundle / 'slot' / name, objects / name)
+        shutil.copyfile(bundle / 'disk.img.zst', objects / 'disk.img.zst')
+        for name in ('latest.json', 'latest.json.sig'):
+            shutil.copyfile(bundle / 'prebuilt' / arch / name, objects / name)
+        for name in ('boot.json', 'boot.json.sig'):
+            shutil.copyfile(bundle / name, latest / name)
+            shutil.copyfile(bundle / name, objects / name)
+        entries = []
+        for path in sorted(staging.rglob('*')):
+            if path.is_file():
+                key = str(path.relative_to(staging))
+                entries.append(dict(key=key, size=path.stat().st_size, sha256=downloads.sha(path),
+                                    immutable='/objects/' in key))
+        # Consumers never trust this unsigned upload plan. Each signed descriptor
+        # and its separately signed image head are independently authenticated.
+        plan = dict(format='werewolf-boot-upload/1', form=form, provider=provider, arch=arch,
+                    descriptor=descriptor, serial=manifest['image']['serial'], files=entries)
+        downloads.atomic(staging / 'publication.json', plan)
+        os.rename(staging, output)
+    return plan
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        if len(sys.argv) != 6:
+            raise ValueError('usage: prepare-protected HOWL BUNDLE GATES_JSON PROVIDER OUTPUT')
+        howl, bundle, evidence, provider, output = sys.argv[1:]
+        prepare(str(Path(howl).resolve()), bundle, json.loads(downloads.read(evidence, 64 << 10)), provider, output)
+    except (OSError, ValueError, KeyError, TypeError):
+        sys.exit('prepare-protected: admission, dedicated trust or artifact-bound lifecycle gates failed')

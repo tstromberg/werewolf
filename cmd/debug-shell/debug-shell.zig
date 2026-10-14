@@ -8,6 +8,7 @@ const linux = std.os.linux;
 const cmdline = @import("cmdline");
 
 pub fn main(init: std.process.Init) !void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const io = init.io;
     const gpa = init.arena.allocator();
     const args = try init.minimal.args.toSlice(gpa);
@@ -39,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     const line = if (linux.errno(n) == .SUCCESS) buf[0..n] else "";
     // Parse the line as stage0 did (lib/cmdline.zig); a refused line gives
     // no shell. The command line alone is no gate, since root or anyone at
-    // a bitten machine's GRUB menu can set it, so the image must be DEV=1.
+    // a bootloader can set it, so the image must be DEV=1.
     var refused: cmdline.Failure = .{};
     const cmd = cmdline.parse(line, &refused) orelse park(io, null);
     if (!cmd.debug) park(io, null);

@@ -55,10 +55,8 @@ The broker still requires the supervised updater; commands cannot mount directly
   The updater stages `vmlinuz`, `stage0.zst`, optional `uki.efi` and the command line in `work/slot`.
   The broker checks sizes and SHA-256 before copying and generates the loader entry; verification
   reads those digests back through `esp-inspect`.
-- **Native slot writes stay detached.** `slot-root`, `slot-decl` and `slot-meta` check artifact
-  digests; reads use stage0's read-only `/victim`. TPM retirement still borrows the victim to
-  publish boot state, bounded by verified boot. Bitten machines lend `grub` and `victim` only
-  to their recognized updater, keeper and cleanup programs.
+- **Native slot writes stay detached.** `slot-root`, `slot-decl`, `slot-meta` and `slot-state`
+  check artifact digests on a detached mount; reads use stage0's read-only `/boot`.
 - **Nothing goes backwards.** Packages and the kernel never get older (apk's order); the feed never
   older than `cve-tiers.json.serial`. Signatures are verified before parsing.
 - **apk reads only what a key vouched for.** Index signatures, package control (index SHA-1) and

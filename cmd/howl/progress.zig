@@ -376,14 +376,13 @@ pub fn phaseOf(target: []const u8) ?Phase {
     if (ends(t, "/rootfs.tar")) return P("Installing packages", "packages");
     if (has(t, "/programs/")) return P("Compiling werewolf's programs", "programs");
     if (has(t, "melange")) return P("Building packages with melange", "melange");
-    if (ends(t, "modules.tar") or
-        ends(t, "modules-bitten.tar")) return P("Choosing kernel modules", "modules");
+    if (ends(t, "modules.tar")) return P("Choosing kernel modules", "modules");
     if (ends(t, "/meta.stamp")) return P("Recording what the image holds", "metadata");
     if (ends(t, "/overlay.tar") or
         has(t, "/application")) return P("Adding the form's files", "files");
     if (ends(t, "/root.erofs")) return P("Sealing the root (erofs, dm-verity)", "seal");
-    if (ends(t, "initramfs.zst") or ends(t, "/stage0.zst") or
-        ends(t, "/stage0-bitten.zst")) return P("Packing the boot image", "boot image");
+    if (ends(t, "initramfs.zst") or
+        ends(t, "/stage0.zst")) return P("Packing the boot image", "boot image");
     if (ends(t, "/disk.img") or ends(t, "/disk.qcow2")) return P("Making the boot disk", "disk");
     if (std.mem.eql(u8, t, "_dist-form")) return P("Writing the release", "release");
     return null;
@@ -606,7 +605,7 @@ test phaseOf {
     );
     try testing.expectEqualStrings(
         "Packing the boot image",
-        phaseOf("build/aarch64/caddy/slot/stage0-bitten.zst").?.name,
+        phaseOf("build/aarch64/caddy/slot/stage0.zst").?.name,
     );
     try testing.expectEqualStrings(
         "Making the boot disk",

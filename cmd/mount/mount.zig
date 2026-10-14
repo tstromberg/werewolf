@@ -34,7 +34,7 @@ const places = [_][]const u8{
     "/tmp",
     "/var/tmp",
     "/data",
-    "/victim",
+    "/boot",
     "/mnt",
     // Image roots: init binds what a rooted service needs beneath its
     // image (cmd/init/oci.zig).
@@ -129,7 +129,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
     var p: Plan = .{};
     var bind = false;
     var fstype: ?[]const u8 = null;
-    var opts: []const u8 = "";
+    var opts: ?[]const u8 = null;
     var pos: [2][:0]const u8 = undefined;
     var n: usize = 0;
     var i: usize = 0;
@@ -138,7 +138,13 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
         if (std.mem.eql(u8, a, "-t") or std.mem.eql(u8, a, "-o")) {
             i += 1;
             if (i == args.len) return error.Usage;
-            if (a[1] == 't') fstype = args[i] else opts = args[i];
+            if (a[1] == 't') {
+                if (fstype != null) return error.Usage;
+                fstype = args[i];
+            } else {
+                if (opts != null) return error.Usage;
+                opts = args[i];
+            }
         } else if (std.mem.eql(u8, a, "--bind")) {
             bind = true;
         } else if (a.len == 0 or a[0] == '-' or n == 2) {
@@ -153,7 +159,7 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
     var follow = false;
     var remount = false;
     var options: std.ArrayList(Option) = .empty;
-    var it = std.mem.tokenizeScalar(u8, opts, ',');
+    var it = std.mem.tokenizeScalar(u8, opts orelse "", ',');
     next: while (it.next()) |o| {
         if (std.mem.eql(u8, o, "remount")) {
             remount = true;
@@ -201,8 +207,11 @@ fn parse(gpa: Allocator, args: []const [:0]const u8) !Plan {
             p.target = try place(pos[1]);
             p.attrs |= ATTR.NOSUID | ATTR.NOEXEC;
             // A bound device node (/dev/null into an image root) must stay
-            // usable, so it does not get nodev.
-            if (!std.mem.startsWith(u8, p.source, "/dev/")) p.attrs |= ATTR.NODEV;
+            // usable, so it does not get nodev; /dev/shm and /dev/mqueue are
+            // directories and keep it.
+            if (!std.mem.startsWith(u8, p.source, "/dev/") or
+                std.mem.startsWith(u8, p.source, "/dev/shm") or
+                std.mem.startsWith(u8, p.source, "/dev/mqueue")) p.attrs |= ATTR.NODEV;
             if (!follow) p.attrs |= ATTR.NOSYMFOLLOW;
         },
         .mount => {
@@ -506,7 +515,7 @@ fn describe(err: anyerror) []const u8 {
         error.Filesystem => "refused: not a filesystem werewolf mounts",
         error.Path => "refused: paths are absolute, without empty, . or .. parts",
         error.Place => "refused: not under /proc, /sys, /dev, /run, /tmp, /var/tmp, /data, " ++
-            "/victim, /mnt or /oci",
+            "/boot, /mnt or /oci",
         error.Device => "refused: a block device is a path under /dev",
         error.Source => "refused: the source of this filesystem is a plain name",
         error.SymlinkInPath => "refused: a symlink in the path",
@@ -562,11 +571,11 @@ test "nothing that would lift a restriction is taken" {
         );
         try testing.expectError(error.Loosens, tryParse(&.{ "-o", o, "/tmp" }));
     }
-    try testing.expectError(error.Loosens, tryParse(&.{ "-o", "remount,rw", "/victim" }));
+    try testing.expectError(error.Loosens, tryParse(&.{ "-o", "remount,rw", "/boot" }));
 }
 
 test "a remount narrows, and takes only options that narrow" {
-    const v = try tryParse(&.{ "-o", "remount,bind,ro,nosuid,nodev,noexec", "/victim" });
+    const v = try tryParse(&.{ "-o", "remount,bind,ro,nosuid,nodev,noexec", "/boot" });
     try testing.expectEqual(Action.tighten, v.action);
     try testing.expectEqual(ATTR.RDONLY | ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC, v.attrs);
     _ = try tryParse(&.{ "-o", "remount,nosuid,nodev,noexec,hidepid=invisible", "/proc" });
@@ -578,7 +587,7 @@ test "a remount narrows, and takes only options that narrow" {
 test "only werewolf's filesystems, options and values" {
     try testing.expectError(error.Filesystem, tryParse(&.{ "-t", "ntfs", "/dev/vdb", "/mnt" }));
     // Filesystems no caller of mount uses: the broker mounts the ESP and the
-    // victim's itself.
+    // boot partition itself.
     for ([_][:0]const u8{ "vfat", "xfs", "btrfs" }) |t|
         try testing.expectError(error.Filesystem, tryParse(&.{ "-t", t, "/dev/vda1", "/mnt" }));
     try testing.expectError(error.Filesystem, tryParse(&.{ "-t", "overlay", "overlay", "/mnt" }));
@@ -629,7 +638,7 @@ test "only werewolf's places, as clean absolute paths" {
 }
 
 test "binds, and what is not an invocation" {
-    const b = try tryParse(&.{ "--bind", "/victim/var/lib/werewolf/data", "/data" });
+    const b = try tryParse(&.{ "--bind", "/boot/data", "/data" });
     try testing.expectEqual(Action.bind, b.action);
     try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, b.attrs);
     // Into an image root: a device stays one; a directory stays nodev.
@@ -642,7 +651,7 @@ test "binds, and what is not an invocation" {
     // A mount names its filesystem: nothing is probed.
     try testing.expectError(
         error.Usage,
-        tryParse(&.{ "-o", "nosuid,nodev,noexec", "/dev/vda1", "/victim" }),
+        tryParse(&.{ "-o", "nosuid,nodev,noexec", "/dev/vda1", "/boot" }),
     );
     try testing.expectError(error.Usage, tryParse(&.{"/tmp"}));
     try testing.expectError(error.Usage, tryParse(&.{ "-t", "tmpfs" }));
@@ -651,6 +660,12 @@ test "binds, and what is not an invocation" {
     try testing.expectError(
         error.Usage,
         tryParse(&.{ "-o", "ro,rw", "-t", "tmpfs", "tmpfs", "/tmp" }),
+    );
+    const shm = try tryParse(&.{ "--bind", "/dev/shm", "/oci/web/dev/shm" });
+    try testing.expectEqual(ATTR.NOSUID | ATTR.NODEV | ATTR.NOEXEC | ATTR.NOSYMFOLLOW, shm.attrs);
+    try testing.expectError(
+        error.Usage,
+        tryParse(&.{ "-o", "ro", "-o", "noexec", "-t", "tmpfs", "tmpfs", "/tmp" }),
     );
     try testing.expectError(error.Usage, tryParse(&.{ "-t", "tmpfs", "-o", "remount", "/tmp" }));
 }

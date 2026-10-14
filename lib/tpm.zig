@@ -778,7 +778,7 @@ pub fn current(
     release: [32]u8,
 ) !Journal {
     for (0..2) |i| {
-        const file = try gpa.print("{s}/state.{d}", .{ directory, i });
+        const file = try gpa.print("{s}/{d}", .{ directory, i });
         const raw = readFile(io, gpa, file, record_size + 512) catch |err| switch (err) {
             error.FileNotFound, error.StreamTooLong => continue,
             else => return err,
@@ -803,8 +803,9 @@ pub fn boot(io: std.Io, gpa: std.mem.Allocator, release: ?[32]u8, directory: []c
     var device = try Device.open(io);
     defer device.close();
     try device.disablePlatform();
-    try measured(try device.pcr11());
-    _ = try current(io, gpa, key, directory, try device.anchor(key), release.?);
+    const pcr = try device.pcr11();
+    const state = try current(io, gpa, key, directory, try device.anchor(key), release.?);
+    try checkPcr(state.record, release.?, pcr);
     return true;
 }
 
@@ -814,9 +815,16 @@ pub fn protected(io: std.Io, gpa: std.mem.Allocator, release: ?[32]u8, directory
     var device = Device.open(io) catch return false;
     defer device.close();
     const anchor_value = device.anchor(key) catch return false;
-    measured(device.pcr11() catch return false) catch return false;
-    _ = current(io, gpa, key, directory, anchor_value, id) catch return false;
+    const pcr = device.pcr11() catch return false;
+    const state = current(io, gpa, key, directory, anchor_value, id) catch return false;
+    checkPcr(state.record, id, pcr) catch return false;
     return true;
+}
+
+fn checkPcr(record: Record, release: [32]u8, pcr: [32]u8) !void {
+    try measured(pcr);
+    if (std.mem.eql(u8, &release, &record.retained) and !std.mem.eql(u8, &pcr, &record.pcr))
+        return error.UnmeasuredBoot;
 }
 
 fn measured(pcr: [32]u8) !void {
@@ -826,6 +834,16 @@ fn measured(pcr: [32]u8) !void {
 test "mandatory TPM boot refuses an unmeasured PCR" {
     try std.testing.expectError(error.UnmeasuredBoot, measured(@splat(0)));
     try measured(@splat(1));
+    const r: Record = .{
+        .machine = @splat(1),
+        .previous = @splat(0),
+        .retained = @splat(2),
+        .candidate = @splat(3),
+        .pcr = @splat(4),
+    };
+    try checkPcr(r, @splat(2), @splat(4));
+    try std.testing.expectError(error.UnmeasuredBoot, checkPcr(r, @splat(2), @splat(5)));
+    try checkPcr(r, @splat(3), @splat(5));
 }
 
 /// Persist a complete signed bundle before the caller removes an entry or retires NV.
@@ -837,7 +855,7 @@ pub fn publish(
     raw: []const u8,
 ) !void {
     try std.Io.Dir.cwd().createDirPath(io, directory);
-    const target = try gpa.print("{s}/state.{d}", .{ directory, position });
+    const target = try gpa.print("{s}/{d}", .{ directory, position });
     const temp = try gpa.print("{s}.tmp", .{target});
     const file = try std.Io.Dir.cwd().createFile(io, temp, .{ .permissions = .fromMode(0o600) });
     defer file.close(io);
@@ -878,7 +896,7 @@ test "journal ignores a torn new record but refuses stale authorization and reti
         current(io, gpa, key, dir, record.anchor(), record.retained),
     );
     try publish(io, gpa, dir, 0, raw);
-    try tmp.dir.writeFile(io, .{ .sub_path = "journal/state.1", .data = raw[0..100] });
+    try tmp.dir.writeFile(io, .{ .sub_path = "journal/1", .data = raw[0..100] });
     const selected = try current(io, gpa, key, dir, record.anchor(), record.candidate);
     try t.expectEqual(@as(u1, 0), selected.position);
     try t.expectError(

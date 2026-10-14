@@ -36,17 +36,17 @@ const max_grype_said = 1 << 20;
 /// grype_args exclude the kernel's trees, RAM-backed directories, and
 /// /data, which holds grype's database and is not part of the image.
 const grype_args = [_][]const u8{
-    grype_bin,     "dir:/",
-    "--output",    "json",
-    "--file",      grype_out,
-    "--quiet",     "--exclude",
-    "./proc/**",   "--exclude",
-    "./sys/**",    "--exclude",
-    "./dev/**",    "--exclude",
-    "./run/**",    "--exclude",
-    "./tmp/**",    "--exclude",
-    "./data/**",   "--exclude",
-    "./victim/**",
+    grype_bin,   "dir:/",
+    "--output",  "json",
+    "--file",    grype_out,
+    "--quiet",   "--exclude",
+    "./proc/**", "--exclude",
+    "./sys/**",  "--exclude",
+    "./dev/**",  "--exclude",
+    "./run/**",  "--exclude",
+    "./tmp/**",  "--exclude",
+    "./data/**", "--exclude",
+    "./boot/**",
 };
 
 /// scanLoop is the scan service: it scans at start and then hourly, and
