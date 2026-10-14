@@ -1,0 +1,6 @@
+# Ruby's sample serves one text response, irrespective of the path.
+ok  ruby-greeting wget -q -T 5 -O - http://127.0.0.1:8080/ | grep -q '^werewolf: Ruby .* is answering$'
+ok  ruby-content-type wget -q -T 5 -S -O /dev/null http://127.0.0.1:8080/ 2>&1 | grep -qi 'Content-Type: text/plain; charset=utf-8'
+ok  ruby-framing printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 5 127.0.0.1 8080 >/tmp/ruby-response; n=$(sed -n 's/^Content-Length: \([0-9]*\)\r$/\1/p' /tmp/ruby-response); b=$(sed '1,/^\r$/d' /tmp/ruby-response | wc -c | tr -d ' '); [ -n "$n" ] && [ "$n" = "$b" ]
+ok  ruby-fragmented (printf 'GET / HTTP/1.1\r\nHost: localhost\r\n'; sleep 1; printf '\r\n') | nc -w 5 127.0.0.1 8080 | grep -q '^werewolf: Ruby .* is answering'
+ok  ruby-reconnect for i in 1 2 3; do wget -q -T 5 -O - http://127.0.0.1:8080/arbitrary-path | grep -q '^werewolf: Ruby .* is answering' || exit 1; done

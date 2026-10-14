@@ -35,26 +35,6 @@ packages:
   - php-8.4-xmlreader
   - php-8.4-zip           # backups, imports, plugins' packages
 
-# The web's user and cron's share a group, as their files do: Moodle's
-# cron writes course files, caches and locks in the web's directory.
-# Their ids are those their names' hashes would give them
-# (forms/README.md).
-accounts:
-  groups:
-    - groupname: moodle
-      gid: 1877876169
-  users:
-    - username: moodle
-      uid: 1877876169
-      gid: 1877876169
-      homedir: /var/empty
-      shell: /sbin/nologin
-    - username: moodle-cron
-      uid: 1655450216
-      gid: 1877876169
-      homedir: /var/empty
-      shell: /sbin/nologin
-
 # make check's (forms/README.md): Moodle's install makes some 500 tables.
 check:
   memory: 3072
@@ -148,6 +128,7 @@ services:
   cron:
     exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
     user: moodle-cron
+    group: moodle
     pledge: stdio rpath wpath inet unix netlink connect proc exec
     connect:
       - tcp/443 tcp/80 tcp/465 tcp/587 public

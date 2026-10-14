@@ -44,8 +44,8 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    // Close at exec whatever runsv left open, and leash's own files too.
-    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
+    // Close whatever runsv left open, and mark leash's own files CLOEXEC.
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     // runsv gives fd 0 the console, write-only. A service that kept it could
     // forge log lines there (WEBSHELL_VULNS #1), so make fd 0 /dev/null.
     // Services log on fd 1 and 2, which runsv routes.
@@ -90,12 +90,22 @@ pub fn main(init: std.process.Init) !void {
     const s = service.parse(gpa, text, &bad) catch
         l.fail(.park, "./service, line {d}: {s}", .{ bad.line, bad.why });
 
-    const passwd = Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
+    const passwd = Dir.cwd().readFileAlloc(
+        io,
+        "/usr/share/werewolf/etc/passwd",
+        gpa,
+        .limited(1 << 20),
+    ) catch Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
     const user = lookupUser(passwd, s.user) orelse
         l.fail(.park, "no user {s} in /etc/passwd", .{s.user});
     // The groups it joins, each another service's (lib/compose.zig checks
     // that at build), and never one below the services' ids: a system's.
-    const group_file = Dir.cwd().readFileAlloc(io, "/etc/group", gpa, .limited(1 << 20)) catch "";
+    const group_file = Dir.cwd().readFileAlloc(
+        io,
+        "/usr/share/werewolf/etc/group",
+        gpa,
+        .limited(1 << 20),
+    ) catch Dir.cwd().readFileAlloc(io, "/etc/group", gpa, .limited(1 << 20)) catch "";
     const groups = try gpa.alloc(linux.gid_t, s.groups.len);
     for (s.groups, groups) |group_name, *gid| {
         gid.* = lookupGroup(group_file, group_name) orelse
@@ -103,6 +113,7 @@ pub fn main(init: std.process.Init) !void {
         if (gid.* < 1 << 16) l.fail(.park, "group {s} is a system's", .{group_name});
     }
     if (user.uid == 0 or user.gid == 0) l.fail(.park, "{s} is root's", .{s.user});
+    if (user.uid <= 70 or user.gid <= 70) l.fail(.park, "{s} is a system's", .{s.user});
     // The build could not tell this service's directories from another's.
     // Each narrowed program's link ships in the image, as ./run does.
     for (s.narrow) |n| {
@@ -463,19 +474,25 @@ fn narrowLink(path: []const u8) ?Link {
 /// service's secrets.
 fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !noreturn {
     const l: Leash = .{ .io = io, .ctl = null, .name = link.service, .narrowed = true };
-    // Close at exec all but stdin, stdout and stderr: a descriptor the
+    // Close all but stdin, stdout and stderr: a descriptor the
     // service left open, a socket above all, would reach past the narrowing.
-    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = true });
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const file = try gpa.printSentinel("/etc/sv/{s}/service", .{link.service}, 0);
     const text = readRootFile(gpa, file) catch |err|
         l.fail(.park, "{s}: {s}", .{ file, @errorName(err) });
     var bad: service.Bad = .{};
     const s = service.parse(gpa, text, &bad) catch
         l.fail(.park, "{s}, line {d}: {s}", .{ file, bad.line, bad.why });
-    const passwd = Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
+    const passwd = Dir.cwd().readFileAlloc(
+        io,
+        "/usr/share/werewolf/etc/passwd",
+        gpa,
+        .limited(1 << 20),
+    ) catch Dir.cwd().readFileAlloc(io, "/etc/passwd", gpa, .limited(1 << 20)) catch "";
     const user = lookupUser(passwd, s.user) orelse
         l.fail(.park, "no user {s} in /etc/passwd", .{s.user});
-    if (user.uid == 0 or user.gid == 0 or linux.getuid() != user.uid or linux.getgid() != user.gid)
+    if (user.uid <= 70 or user.gid <= 70 or linux.getuid() != user.uid or
+        linux.getgid() != user.gid)
         l.fail(.park, "{s}: run as {s}, never as another user", .{ link.name, s.user });
     const n = for (s.narrow) |n| {
         if (std.mem.eql(u8, std.fs.path.basename(n.program), link.name)) break n;

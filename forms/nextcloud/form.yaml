@@ -43,26 +43,6 @@ packages:
   - php-8.4-xmlwriter
   - php-8.4-zip
 
-# The web's user and the background jobs' share a group, as their files
-# do: the jobs make previews and expire versions in the web's directory.
-# Their ids are those their names' hashes would give them
-# (forms/README.md).
-accounts:
-  groups:
-    - groupname: nextcloud
-      gid: 1680250537
-  users:
-    - username: nextcloud
-      uid: 1680250537
-      gid: 1680250537
-      homedir: /var/empty
-      shell: /sbin/nologin
-    - username: nextcloud-cron
-      uid: 573252680
-      gid: 1680250537
-      homedir: /var/empty
-      shell: /sbin/nologin
-
 check:
   memory: 3072
 
@@ -161,8 +141,8 @@ services:
   cron:
     exec: /usr/bin/supercronic -json -no-reap /etc/cron/crontab
     user: nextcloud-cron
-    # Valkey's group, for its socket.
-    group: valkey
+    # The web's group for its files; Valkey's for its socket.
+    group: nextcloud valkey
     pledge: stdio rpath wpath inet unix netlink connect proc exec
     connect:
       - tcp/443 tcp/80 public

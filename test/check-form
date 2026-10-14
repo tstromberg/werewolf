@@ -22,7 +22,8 @@ case $(openssl version 2>/dev/null) in
 	done
 	;;
 esac
-c=$CHECK/$FORM
+name=${CHECK_NAME:-$FORM}
+c=$CHECK/$name
 # /data: 4 GiB, sparse, so it costs only what is written. demo's Grype
 # unpacks a 2.4 GB database there, beside its 188 MB download.
 rm -f "$c.img" && dd if=/dev/zero of="$c.img" bs=1048576 count=0 seek=4096 2>/dev/null
@@ -34,8 +35,8 @@ if [ -n "${SSH_PORT:-}" ]; then
 fi
 [ ! -e "$FORM_DIR/test/config" ] || "$FORM_DIR/test/config" "$c-config"
 "$HOWL" pack --build --with "$FORM_REF" -o "$c-config.tar" --config "$c-config" >/dev/null
-own=
-[ ! -e "$FORM_DIR/test/checks" ] || own=$FORM_DIR/test/checks
+own=${FORM_CHECKS:-$FORM_DIR/test/checks}
+[ -e "$own" ] || own=
 awk -v skip="${SKIP:-}" 'BEGIN { n = split(skip, s, " "); for (i = 1; i <= n; i++) drop[s[i]] = 1 }
 	!($2 in drop)' test/checks ${own:+"$own"} >"$c-checks"
 
@@ -47,7 +48,7 @@ boot() { # boot NAME CHECKS QEMU...
 		-drive "file=$c.img,format=raw,if=virtio" \
 		-drive "file=$c-config.tar,format=raw,if=virtio,readonly=on"
 }
-boot "$FORM" "$c-checks" "$@"
+boot "$name" "$c-checks" "$@"
 [ -n "${AGAIN:-}" ] || exit 0
 
 # A form may change its config before rebooting on the same data disk.
@@ -57,7 +58,7 @@ if [ -e "$FORM_DIR/test/config-again" ]; then
 fi
 cp test/checks-again "$c-checks-again"
 [ ! -e "$FORM_DIR/test/checks-again" ] || cat "$FORM_DIR/test/checks-again" >>"$c-checks-again"
-boot "$FORM-again" "$c-checks-again" "$@"
+boot "$name-again" "$c-checks-again" "$@"
 ! grep -a -E 'werewolf: (formatting|making LUKS2) ' "$c-again.log" ||
 	{ echo "FAIL   $FORM-again        formatted the disk its first boot left"; exit 1; }
 a=$(grep -a '"event":"host-key"' "$c.log" | grep -a 'kept in /data' |

@@ -25,15 +25,8 @@ weaknesses:
   network-fence-unbypassable: OpenVAS keeps CAP_NET_RAW and CAP_NET_ADMIN for privileged scanning, so isolate this machine from services it must not scan
 
 accounts:
-  groups:
-    - groupname: _glink
-      gid: 71
   users:
     - username: _glink
-      uid: 71
-      gid: 71
-      homedir: /var/empty
-      shell: /sbin/nologin
 
 # make check's (forms/README.md): gvmd, the scanner and the feed
 # beside PostgreSQL.

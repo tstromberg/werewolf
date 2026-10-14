@@ -169,6 +169,10 @@ its own, with id `defaultId(name)`: an FNV-1a hash of the name in
 service keeps its files on /data. The build fails if two services share a
 user, if a default id collides with a declared one, or if a service reads
 or writes inside another service's directory whose `share` is strict.
+Declared users with no uid get those same defaults, keeping overrides such
+as a shell; groups with no gid get `defaultId(name)`. Numeric ids remain
+available for software that requires them. A service joins another's
+group by naming its user in `group`, without overriding either's ids.
 
 ## package
 

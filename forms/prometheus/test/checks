@@ -10,3 +10,8 @@ ok  prom-no-admin    a="Authorization: Basic $(printf %s ops:werewolf-check-pass
 # prometheus-setup wrote the configuration from the settings: the password
 # as a bcrypt hash alone; the metrics are on /data.
 ok  prom-setup       w=/run/svc/prometheus/web.yml; grep -qF "  ops: '\$2b\$10\$" $w && ! grep -q werewolf-check-pass-1 $w && [ "$(stat -c '%a %U' $w)" = '600 prometheus' ] && grep -q "'127.0.0.1:9100'" /run/svc/prometheus/prometheus.yml && [ -d /data/svc/prometheus/data/wal ]
+
+# A bad password is an authentication failure; an invalid expression is
+# a query failure even with valid credentials.
+ok  prom-wrong-password wget -q -T 5 -S -O /dev/null --header "Authorization: Basic $(printf %s ops:wrong-password | base64)" http://127.0.0.1:9090/-/healthy 2>&1 | grep -q 'HTTP/1.1 401'
+ok  prom-invalid-query wget -q -T 5 -S -O /dev/null --header "Authorization: Basic $(printf %s ops:werewolf-check-pass-1 | base64)" 'http://127.0.0.1:9090/api/v1/query?query=%7B' 2>&1 | grep -q 'HTTP/1.1 400'

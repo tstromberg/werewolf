@@ -420,6 +420,14 @@ test checkDue {
 fn home(m: *Machine, passwd: []const u8, user: []const u8) void {
     const dir = m.fmtZ("/data/home/{s}", .{user});
     m.mkdirAll(dir);
-    if (lookupIds(passwd, user)) |ids| _ = linux.fchownat(linux.AT.FDCWD, dir, ids.uid, ids.gid, 0);
-    _ = linux.fchmodat(linux.AT.FDCWD, dir, 0o700);
+    const rc = linux.open(
+        dir,
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(rc) != .SUCCESS) return;
+    const fd: linux.fd_t = @intCast(rc);
+    defer _ = linux.close(fd);
+    if (lookupIds(passwd, user)) |ids| _ = linux.fchown(fd, ids.uid, ids.gid);
+    _ = linux.fchmod(fd, 0o700);
 }

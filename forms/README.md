@@ -32,7 +32,7 @@ by name from there, so the machine updates it; `--build` takes this tree's.
 | `base` | the form it is built on, a name in forms/ | |
 | `with` | forms it takes beside its base, as a Mastodon takes `[postgresql, valkey, nginx]`: their parts come before its own | added to |
 | `packages` | the Wolfi packages apko installs, by name | added to |
-| `accounts`, `paths` | what apko installs beyond packages, in apko's own shape: `accounts` its `groups` and `users`, each with a numbered id, for an account something depends on by number or shell (a login account, a program's fixed uid); a service's user needs none, its id being its name's hash. `paths` its permissions. `repositories`, `keyring` and `archs` are minimal's alone | added to; `archs` the last form's |
+| `accounts`, `paths` | what apko installs beyond packages: `accounts` its `groups` and `users`, with ids optional, for an account something depends on by number or shell (a login account, a program's fixed uid); a service's user needs none, its id being its name's hash. `paths` its permissions. `repositories`, `keyring` and `archs` are minimal's alone | added to; `archs` the last form's |
 | `programs` | programs from cmd/ its machines run beyond every form's: prod's `dhcp-client`, postgresql's `sh-shim` | added to |
 | `allow` | what it takes back of werewolf's defaults ([lib/allow.zig](../lib/allow.zig)): `kvm`, `nested-kvm`, `netadmin`, `packet`, `ipv6`, `pty` (ssh logins), `jit` (a runtime that compiles code as it runs), `sh` (every leashed service may run the sh shim). The image holds each in `/etc/werewolf/allow`, where the machine reads it | added to |
 | `app` | where `howl --app DIR` lays an application: `/usr/lib/app`, nginx's `/usr/share/nginx/html` | the last form's |
@@ -94,10 +94,28 @@ apk, not apko (lib/compose.zig): a user's `homedir` is `/var/empty` (or
 service writes where its service file's `write` says.
 
 A service's `user` needs no account there: one no form names gets its
-own, uid and gid a hash of its name in 65536-2147483647, home
+own, uid and gid a hash of its name in 1073741824-2147483647, home
 `/var/empty`, shell `/sbin/nologin`, the same on every build. Name the
-account to pick its ids. Each service runs as a user of its own: two
+account to override its shell or ids. An account with no `uid` gets the
+same defaults, including its own group; a declared group's omitted `gid`
+is its name's hash. A same-named declared group supplies the default user's
+primary gid. Explicit ids remain available when software requires them.
+Each service runs as a user of its own: two
 that share one, or a hash that lands on an id taken, fail the build.
+
+For example, this overrides only a user's shell:
+
+```yaml
+accounts:
+  users:
+    - username: supercronic
+      shell: /usr/lib/werewolf/sh-shim
+```
+
+To share another service's files, name its user in the service's `group`
+directive. The user's primary group and both ids keep their defaults.
+Removing a numeric override can change the id. Migrate existing `/data`
+file ownership before updating a machine that used the old id.
 
 ## A new form
 

@@ -304,18 +304,40 @@ fn installEsp(u: *Update, build: []const u8) !void {
         u.detail = broker.refusal;
         return err;
     };
+    errdefer broker.espDisarm() catch {};
     linux.sync();
     // A signed slot's command line is already validated and authenticated.
     // Normalizing its trailing newline would change the signed artifact digest.
     if (u.image == null) try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
     // copyChecked goes through a temporary name, so each file is whole or absent.
     if (retirement) |*prepared| try prepared.apply();
-    const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
+    const root_art = if (u.image) |v|
+        v.manifest.files.@"root.erofs"
+    else
+        try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
     broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
         u.detail = broker.refusal;
         return err;
     };
-    if (u.image == null) {
+    if (u.image) |v| {
+        const meta_a = try signed.hashBytes(u.gpa, v.data);
+        const meta_b = try signed.hashBytes(u.gpa, v.signature);
+        const meta_c = v.manifest.files.cmdline;
+        broker.slotMeta(
+            .{ .size = meta_a.size, .sha256 = meta_a.sha256 },
+            .{ .size = meta_b.size, .sha256 = meta_b.sha256 },
+            .{ .size = meta_c.size, .sha256 = meta_c.sha256 },
+        ) catch |err| {
+            u.detail = broker.refusal;
+            return err;
+        };
+        if (v.manifest.declaration) |d| {
+            broker.slotDecl(null, d) catch |err| {
+                u.detail = broker.refusal;
+                return err;
+            };
+        }
+    } else {
         const current = u.read(meta_dir ++ "/local/inputs") catch "";
         const next = readIn(u, work_dir ++ "/root", "usr/share/werewolf/local/inputs") catch "";
         if (current.len == 64 or next.len == 64) {
@@ -327,33 +349,26 @@ fn installEsp(u: *Update, build: []const u8) !void {
                 return err;
             };
         }
-    } else {
-        const meta_a = try signed.hashFile(io, u.gpa, work_dir ++ "/image.json");
-        const meta_b = try signed.hashFile(io, u.gpa, work_dir ++ "/image.sig");
-        const meta_c = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
-        broker.slotMeta(
-            .{ .size = meta_a.size, .sha256 = meta_a.sha256 },
-            .{ .size = meta_b.size, .sha256 = meta_b.sha256 },
-            .{ .size = meta_c.size, .sha256 = meta_c.sha256 },
-        ) catch |err| {
-            u.detail = broker.refusal;
-            return err;
-        };
-        if (u.image.?.manifest.declaration) |d| {
-            broker.slotDecl(null, d) catch |err| {
-                u.detail = broker.refusal;
-                return err;
-            };
-        }
     }
     linux.sync();
 
     // The broker copies the boot files from these fixed staged names and
     // arms the slot. Name every artifact by the digest the broker must find.
-    const kernel = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/vmlinuz");
-    const stage0 = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/stage0.zst");
-    const cmdline = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
-    const uki: ?signed.Artifact = blk: {
+    const kernel = if (u.image) |v|
+        v.manifest.files.vmlinuz
+    else
+        try signed.hashFile(io, u.gpa, work_dir ++ "/slot/vmlinuz");
+    const stage0 = if (u.image) |v|
+        v.manifest.files.@"stage0.zst"
+    else
+        try signed.hashFile(io, u.gpa, work_dir ++ "/slot/stage0.zst");
+    const cmdline = if (u.image) |v|
+        v.manifest.files.cmdline
+    else
+        try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
+    const uki: ?signed.Artifact = if (u.image) |v|
+        v.manifest.files.@"uki.efi"
+    else blk: {
         Dir.cwd().access(io, work_dir ++ "/slot/uki.efi", .{}) catch break :blk null;
         break :blk try signed.hashFile(io, u.gpa, work_dir ++ "/slot/uki.efi");
     };

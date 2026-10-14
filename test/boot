@@ -397,6 +397,15 @@ if {[info exists env(SSH_PORT)] && $env(SSH_PORT) ne ""} {
 		if {$status == 0 && [lindex [split [string trim $out] \n] end] eq "0"} { set in 1 } else { after 1000 }
 	}
 	if {$in} { say ok ssh-login } else { say FAIL ssh-login "root's key did not log in:\n$out"; incr failed }
+	# Exercise command output and exit status over authenticated sessions.
+	lassign [host [list {*}$ssh {*}$login root@127.0.0.1 {printf '%s\n' werewolf-ssh-command}]] status out
+	if {$status == 0 && [lindex [split [string trim $out] \n] end] eq "werewolf-ssh-command"} {
+		say ok ssh-command-output
+	} else { say FAIL ssh-command-output $out; incr failed }
+	lassign [host [list {*}$ssh {*}$login root@127.0.0.1 {exit 23}]] status out
+	if {$status == 23} {
+		say ok ssh-command-status
+	} else { say FAIL ssh-command-status "expected remote exit 23, got $status:\n$out"; incr failed }
 	lassign [host [list {*}$ssh {*}$login -o ExitOnForwardFailure=yes -R 127.0.0.1:0:127.0.0.1:22 root@127.0.0.1 true]] status out
 	if {$status != 0 && [string match "*forwarding failed*" $out]} {
 		say ok ssh-no-forwarding

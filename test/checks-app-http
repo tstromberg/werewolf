@@ -1,0 +1,6 @@
+# The test jar supplied to jre-app exposes this small application contract.
+ok  app-greeting [ "$(wget -q -T 5 -O - http://127.0.0.1:8080/)" = 'Hello from Java on werewolf!' ]
+ok  app-health [ "$(wget -q -T 5 -O - http://127.0.0.1:8080/health)" = ok ]
+ok  app-not-found wget -q -T 5 -S -O /dev/null http://127.0.0.1:8080/missing 2>&1 | grep -q 'HTTP/1.[01] 404'
+ok  app-method-refused wget -q -T 5 -S -O /dev/null --post-data 'changed' http://127.0.0.1:8080/ 2>&1 | grep -q 'HTTP/1.[01] 405'
+ok  app-query [ "$(wget -q -T 5 -O - 'http://127.0.0.1:8080/health?probe=integration')" = ok ]

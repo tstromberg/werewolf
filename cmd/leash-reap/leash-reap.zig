@@ -8,6 +8,7 @@ const linux = std.os.linux;
 const patience_ms = 5000;
 
 pub fn main() void {
+    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = linux.getcwd(&cwd_buf, cwd_buf.len);
     if (linux.errno(cwd) != .SUCCESS) return;

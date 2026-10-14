@@ -8,3 +8,8 @@ ok  mc-stranger      (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x02\x1a\x00\
 # The files are the locked-down ones, steve's account is the whitelist,
 # and the directory is minecraft's.
 ok  mc-files         grep -q '^white-list=true' /data/svc/minecraft/server.properties && grep -q '^online-mode=true' /data/svc/minecraft/server.properties && grep -q '^enable-rcon=false' /data/svc/minecraft/server.properties && grep -q '^enable-query=false' /data/svc/minecraft/server.properties && grep -q '^eula=true' /data/svc/minecraft/eula.txt && grep -qi '"name":"steve"' /data/svc/minecraft/whitelist.json && u=$(grep '^minecraft:' /etc/passwd | cut -d: -f3) && [ "$(stat -c %u /data/svc/minecraft)" = "$u" ]
+
+# The status protocol echoes a ping payload, not merely a banner.
+ok  mc-ping (printf '\x10\x00\x89\x06\x09localhost\x63\xdd\x01\x01\x00\x09\x01\x00\x00\x00\x00\x00\x00\x00\x2a'; sleep 1) | timeout 5 nc 127.0.0.1 25565 >/tmp/mc-ping; [ "$(tail -c 10 /tmp/mc-ping | od -An -tx1 | tr -d ' \n')" = 0901000000000000002a ]
+# The normal game port answers above, but no RCON management service does.
+ok  mc-no-rcon ! netstat -ltn | grep -q ':25575 ' && ! timeout 5 nc -w 2 127.0.0.1 25575 </dev/null

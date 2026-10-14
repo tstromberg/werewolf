@@ -30,17 +30,6 @@ prune:
   - usr/bin/python
   - usr/bin/suricata-update
 
-accounts:
-  groups:
-    - groupname: _rules
-      gid: 72
-  users:
-    - username: _rules
-      uid: 72
-      gid: 72
-      homedir: /var/empty
-      shell: /sbin/nologin
-
 # make check's (forms/README.md): Suricata's own beside the machine's.
 # The signature cache is large enough that the engine wants 2 GiB.
 check:
