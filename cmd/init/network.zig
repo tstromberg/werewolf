@@ -19,6 +19,10 @@ const writeFile = init.writeFile;
 /// providers without DHCP. Otherwise, if
 /// the form has it, dhcp-client gets a lease; init starts its renewal later.
 pub fn network(m: *Machine) void {
+    // Keep the directory present even when DHCP has not acquired a lease.
+    // Service bindings follow future atomic replacements of the resolver file.
+    mkdir("/run/werewolf/network", 0o755);
+    m.write("/run/werewolf/network/resolv.conf", "", 0o644);
     _ = m.run(&.{ "/usr/lib/werewolf/iface-up", "lo" });
     const nic = pickNic(m);
     routerAdvertisements(m, nic);

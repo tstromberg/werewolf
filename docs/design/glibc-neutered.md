@@ -6,7 +6,7 @@ Build a Wolfi-derived glibc with five fixed protections: deny environment config
 
 ## Background
 
-The [vulnerability audit](../../../glibc-neutered/docs/glibc-vuln-audit.md) records ten years of glibc flaws and analogous libc failures. Looney Tunables attacked startup parsing; PwnKit restored converter settings after startup; sudo exploits used NSS without loader variables. Removing environment variables at launch covers only some of these paths.
+The [vulnerability audit](https://github.com/werewolf-linux/glibc-neutered/blob/main/docs/glibc-vuln-audit.md) records ten years of glibc flaws and analogous libc failures. Looney Tunables attacked startup parsing; PwnKit restored converter settings after startup; sudo exploits used NSS without loader variables. Removing environment variables at launch covers only some of these paths.
 
 Follow [CONTRIBUTING.md](../../CONTRIBUTING.md): small changes, deny by default, fail closed. This is a proposal; patches and application compatibility have not been validated.
 

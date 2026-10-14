@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise host permit issuance, rollback context, restart, limits and HTTPS exposure."""
 import concurrent.futures
+import hashlib
 import importlib.machinery
 import json
 import os
@@ -12,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from urllib.request import urlopen
 from urllib.error import HTTPError
 
@@ -121,6 +123,81 @@ class Issuance(unittest.TestCase):
                 self.issue()
         finally:
             publisher.MAX_RECORDS = saved
+
+    def signed_image(self, name, serial):
+        private = self.root / 'image.key'
+        certificate = self.root / 'image.crt'
+        if not private.exists():
+            publisher.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
+                '-subj', '/CN=publisher-image-test', '-keyout', private, '-out', certificate])
+        build = hashlib.sha256(name.encode()).hexdigest()
+        source = self.root / name
+        public = source / 'prebuilt/aarch64'
+        payload = public / build
+        payload.mkdir(parents=True)
+        slot = source / 'slot'
+        slot.mkdir()
+        files = {}
+        for filename in publisher.FILES:
+            raw = (name + ':' + filename).encode()
+            (payload / filename).write_bytes(raw)
+            files[filename] = dict(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+        image = dict(arch='aarch64', channel='https://192.168.5.2:9443/playground', ipe=True,
+                     serial=serial, build=build, files=files, boot_context='44' * 32)
+        manifest = public / 'latest.json'
+        manifest.write_text(json.dumps(image))
+        publisher.run(['openssl', 'dgst', '-sha256', '-sign', private,
+                       '-out', public / 'latest.json.sig', manifest])
+        identity = b'werewolf.release/2\0aarch64\0'
+        for filename in ('root.erofs', 'vmlinuz', 'stage0.zst'):
+            identity += bytes.fromhex(files[filename]['sha256'])
+        identity += bytes.fromhex(image['boot_context'])
+        (slot / 'release.id').write_bytes(hashlib.sha256(identity).digest())
+        (slot / 'pcr11').write_bytes(bytes.fromhex(PB))
+        self.config.update(image_certificate=str(certificate), channel=image['channel'])
+        return source
+
+    def test_shared_head_floor_applies_to_new_owners(self):
+        a = self.signed_image('public-a', '20261013T000000Z')
+        b = self.signed_image('public-b', '20261013T000001Z')
+        publisher.publish(self.config, a)
+        publisher.publish(self.config, b)
+        other = self.root / 'another-owner'
+        other.mkdir()
+        fresh = dict(self.config, authority=str(other))
+        with self.assertRaisesRegex(ValueError, 'shared update head'):
+            publisher.publish(fresh, a)
+        publisher.publish(fresh, b)
+        self.assertEqual((self.root / 'approved.json').read_bytes(), (other / 'approved.json').read_bytes())
+
+    def test_atomic_shared_floor_survives_a_torn_latest_pair(self):
+        a = self.signed_image('old-public', '20261013T000000Z')
+        b = self.signed_image('new-public', '20261013T000001Z')
+        publisher.publish(self.config, a)
+        real = publisher.atomic
+        def cut(path, data):
+            if path == self.public / 'aarch64/latest.json':
+                raise OSError('cut before latest JSON')
+            return real(path, data)
+        with patch.object(publisher, 'atomic', side_effect=cut):
+            with self.assertRaises(OSError):
+                publisher.publish(self.config, b)
+        with self.assertRaises(ValueError):
+            publisher.publish(self.config, a)
+        publisher.publish(self.config, b)
+        self.assertEqual((b / 'prebuilt/aarch64/latest.json').read_bytes(),
+                         (self.public / 'aarch64/latest.json').read_bytes())
+
+    def test_shared_refresh_selects_registered_download_owners(self):
+        registry = self.root / 'refresh-registry'
+        registry.mkdir()
+        downloaded = dict(self.config, refresh_seconds=300)
+        (registry / ('42' * 32 + '.json')).write_text(json.dumps(downloaded))
+        (registry / ('43' * 32 + '.json')).write_text(json.dumps(self.config))
+        self.assertEqual([downloaded], publisher.refresh_targets(dict(registry=str(registry))))
+        (registry / ('44' * 32 + '.json')).symlink_to(registry / ('42' * 32 + '.json'))
+        with self.assertRaises(ValueError):
+            publisher.refresh_targets(dict(registry=str(registry)))
 
     def test_only_public_channel_paths_are_exposed(self):
         arch = self.public / 'aarch64'

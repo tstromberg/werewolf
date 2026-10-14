@@ -19,10 +19,117 @@ pub const Options = struct {
     log: []const u8,
     /// first is the phase shown until a step names another.
     first: Phase,
+    /// Share lifecycle timing with create/run; other builds keep their own history.
+    milestones: ?*Milestones = null,
 };
 
 /// Phase is a build step: name is shown on the line, short in the summary.
-pub const Phase = struct { name: []const u8, short: []const u8 };
+pub const Phase = struct {
+    name: []const u8,
+    short: []const u8,
+
+    /// Moons mark image construction; wolves mark VM startup.
+    pub fn icon(p: Phase) []const u8 {
+        const eql = std.mem.eql;
+        const has = std.mem.find;
+        if (eql(u8, p.short, "boot") or eql(u8, p.short, "ready") or
+            eql(u8, p.short, "launch")) return "🐺";
+        if (has(u8, p.short, "sign") != null or has(u8, p.short, "identity") != null or
+            eql(u8, p.short, "seal") or eql(u8, p.short, "firmware") or
+            eql(u8, p.short, "verify")) return if (eql(u8, p.short, "verify")) "🌒" else "🌔";
+        if (has(u8, p.short, "compile") != null or eql(u8, p.short, "programs") or
+            eql(u8, p.short, "stage0") or eql(u8, p.short, "melange")) return "🌓";
+        if (eql(u8, p.short, "disk") or eql(u8, p.short, "release") or
+            eql(u8, p.short, "reuse") or has(u8, p.short, "collect") != null) return "🌕";
+        if (has(u8, p.short, "pack") != null or has(u8, p.short, "install") != null or
+            has(u8, p.short, "configure") != null or eql(u8, p.short, "config") or
+            eql(u8, p.short, "files") or eql(u8, p.short, "modules") or
+            eql(u8, p.short, "metadata") or eql(u8, p.short, "boot image")) return "🌔";
+        if (eql(u8, p.short, "start") or eql(u8, p.short, "prepare")) return "🌑";
+        return "🌒";
+    }
+};
+
+/// Completed phases retain their individual durations on stderr.
+pub const Milestones = struct {
+    io: Io,
+    enabled: bool,
+    output: Io.File = .stderr(),
+    start: Io.Timestamp,
+    since: Io.Timestamp,
+    phase: ?Phase = null,
+
+    pub fn init(io: Io, enabled: bool) Milestones {
+        const now = Io.Clock.awake.now(io);
+        return .{ .io = io, .enabled = enabled, .start = now, .since = now };
+    }
+
+    pub fn enter(m: *Milestones, p: Phase) void {
+        m.enterAt(p, Io.Clock.awake.now(m.io));
+    }
+
+    fn enterAt(m: *Milestones, p: Phase, now: Io.Timestamp) void {
+        if (!m.enabled) return;
+        if (m.phase) |held| if (std.mem.eql(u8, held.name, p.name)) return;
+        m.finishAt(now);
+        m.phase = p;
+        m.since = now;
+        // Until completion, a terminal keeps a single active line.
+        const err = m.output;
+        if (err.isTty(m.io) catch false) {
+            var buf: [1024]u8 = undefined;
+            const line = std.mem.print(
+                &buf,
+                "\r\x1b[2K  {s} {s}",
+                .{ p.icon(), p.name },
+            ) catch return;
+            err.writeStreamingAll(m.io, line) catch {};
+        }
+    }
+
+    pub fn finish(m: *Milestones) void {
+        m.finishAt(Io.Clock.awake.now(m.io));
+    }
+
+    fn finishAt(m: *Milestones, now: Io.Timestamp) void {
+        if (!m.enabled) return;
+        const p = m.phase orelse return;
+        phaseLine(m.io, m.output, p, m.since.durationTo(now));
+        m.phase = null;
+    }
+
+    /// The last line reports VM state and total command time, not a synthetic phase.
+    pub fn done(m: *Milestones, p: Phase) void {
+        m.finish();
+        if (m.enabled) phaseLine(m.io, m.output, p, m.start.untilNow(m.io, .awake));
+    }
+};
+
+fn phaseLine(io: Io, err: Io.File, p: Phase, elapsed: Io.Duration) void {
+    if (err.isTty(io) catch false) err.writeStreamingAll(io, "\r\x1b[2K") catch {};
+    var buf: [1024]u8 = undefined;
+    // Two columns match the live spinner, so every phase name starts in the same column.
+    const line = std.mem.print(&buf, "  {s} {s}  {f}\n", .{
+        p.icon(), p.name, PhaseTime{ .ns = elapsed.toNanoseconds() },
+    }) catch return;
+    err.writeStreamingAll(io, line) catch {};
+}
+
+/// Preserve useful timings for quick cache checks as well as long compiles.
+const PhaseTime = struct {
+    ns: i96,
+
+    pub fn format(t: PhaseTime, w: *Io.Writer) Io.Writer.Error!void {
+        const ns = @max(t.ns, 0);
+        if (ns < std.time.ns_per_ms) return w.writeAll("<1ms");
+        if (ns < std.time.ns_per_s) return w.print("{d}ms", .{@divTrunc(ns, std.time.ns_per_ms)});
+        const seconds = @divTrunc(ns, std.time.ns_per_s);
+        if (seconds < 60) return w.print("{d}.{d}s", .{
+            seconds, @divTrunc(@mod(ns, std.time.ns_per_s), 100 * std.time.ns_per_ms),
+        });
+        return w.print("{f}", .{Clock{ .seconds = @intCast(seconds) }});
+    }
+};
 
 /// Spent is the total time of a phase, summed over all its turns.
 pub const Spent = struct { short: []const u8, ns: i96 };
@@ -51,7 +158,7 @@ pub const Done = struct {
 /// tail_lines is how many output lines a failure shows.
 const tail_lines = 10;
 /// frame_ms is the redraw interval.
-const frame_ms = 80;
+const frame_ms = 250;
 const frames = [_][]const u8{
     "⠋",
     "⠙",
@@ -63,6 +170,20 @@ const frames = [_][]const u8{
     "⠧",
     "⠇",
     "⠏",
+};
+
+/// Redraw limits updates even when output wakes the poll before its timeout.
+const Redraw = struct {
+    last: ?Io.Timestamp = null,
+
+    fn due(r: *Redraw, now: Io.Timestamp) bool {
+        if (r.last) |last| {
+            if (last.durationTo(now).toNanoseconds() < frame_ms * std.time.ns_per_ms)
+                return false;
+        }
+        r.last = now;
+        return true;
+    }
 };
 
 /// run runs argv as o says. On failure it prints the report itself and
@@ -78,9 +199,9 @@ pub fn run(io: Io, gpa: Allocator, why: *howl.Why, argv: []const []const u8, o: 
     return steps.finish();
 }
 
-/// Steps shows a run of commands and work of howl's own, such as a build
-/// howl makes itself, as one status line, and keeps all their output in a
-/// log. Each step enters its phase; a failure prints the phase, the last
+/// Steps shows commands and howl's own work as a live status line with
+/// timed phase history, and keeps command output in a log.
+/// Each step enters its phase; a failure prints the phase, the last
 /// lines and the log's path. Verbose, the output streams to standard error
 /// and there is no log.
 pub const Steps = struct {
@@ -94,6 +215,8 @@ pub const Steps = struct {
     start: Io.Timestamp,
     said: Said,
     frame: usize = 0,
+    redraw: Redraw = .{},
+    history: ?Milestones = null,
 
     pub fn init(io: Io, gpa: Allocator, why: *howl.Why, o: Options) !Steps {
         var log: ?Io.File = null;
@@ -103,7 +226,7 @@ pub const Steps = struct {
                 return why.refuse("{s}: {s}", .{ o.log, @errorName(e) });
         }
         const start = Io.Clock.awake.now(io);
-        return .{
+        var s: Steps = .{
             .io = io,
             .gpa = gpa,
             .why = why,
@@ -112,12 +235,23 @@ pub const Steps = struct {
             .log = log,
             .start = start,
             .said = .{ .gpa = gpa, .phase = o.first, .since = start },
+            .history = .init(io, !o.verbose),
         };
+        if (s.reporter()) |m| m.enter(o.first);
+        return s;
+    }
+
+    fn reporter(s: *Steps) ?*Milestones {
+        if (s.o.milestones) |m| return m;
+        if (s.history) |*m| return m;
+        return null;
     }
 
     /// enter starts phase p, adding the time since the last change to the
     /// phase before it.
     pub fn enter(s: *Steps, p: Phase) !void {
+        if (s.reporter()) |m| m.enter(p);
+        if (!std.mem.eql(u8, s.said.phase.name, p.name)) s.redraw.last = null;
         try s.said.enter(s.io, p);
         s.draw();
     }
@@ -126,7 +260,7 @@ pub const Steps = struct {
     pub fn note(s: *Steps, comptime fmt: []const u8, args: anytype) !void {
         const line = try s.gpa.print("howl: " ++ fmt ++ "\n", args);
         s.write(line);
-        try s.said.line(line[0 .. line.len - 1]);
+        _ = try s.said.line(line[0 .. line.len - 1]);
         s.draw();
     }
 
@@ -148,7 +282,12 @@ pub const Steps = struct {
     pub fn exec(
         s: *Steps,
         cmds: []const Cmd,
-        files: struct { stdin: ?Io.File = null, stdout: ?Io.File = null },
+        files: struct {
+            stdin: ?Io.File = null,
+            stdout: ?Io.File = null,
+            /// Follow explicit phase announcements from trusted build scripts.
+            phases: bool = false,
+        },
     ) !Ran {
         const io = s.io;
         const children = try s.gpa.alloc(std.process.Child, cmds.len);
@@ -179,7 +318,7 @@ pub const Steps = struct {
             try outs.append(s.gpa, child.stderr.?);
             if (last and files.stdout == null) try outs.append(s.gpa, child.stdout.?);
         }
-        const output = try s.pump(outs.items);
+        const output = try s.pump(outs.items, files.phases);
         var ok = true;
         for (children) |*c| {
             const term = c.wait(io) catch |e|
@@ -190,9 +329,9 @@ pub const Steps = struct {
     }
 
     /// pump reads files until each ends, copying what it reads to the log
-    /// (or, verbose, to standard error) and its lines to the status line,
+    /// (or, verbose, to standard error) and retains its lines for failures,
     /// and returns it all.
-    fn pump(s: *Steps, files: []const Io.File) ![]const u8 {
+    fn pump(s: *Steps, files: []const Io.File, phases: bool) ![]const u8 {
         const fds = try s.gpa.alloc(posix.pollfd, files.len);
         const partial = try s.gpa.alloc(std.ArrayList(u8), files.len);
         for (fds, partial, files) |*p, *part, f| {
@@ -208,7 +347,7 @@ pub const Steps = struct {
                 if (p.fd < 0 or p.revents == 0) continue;
                 const n = posix.read(p.fd, &buf) catch 0;
                 if (n == 0) {
-                    if (part.items.len > 0) try s.said.line(part.items);
+                    if (part.items.len > 0) try s.outputLine(part.items, phases);
                     part.clearRetainingCapacity();
                     p.fd = -1;
                     open -= 1;
@@ -218,7 +357,7 @@ pub const Steps = struct {
                 try all.appendSlice(s.gpa, buf[0..n]);
                 for (buf[0..n]) |c| {
                     if (c == '\n' or c == '\r') {
-                        try s.said.line(part.items);
+                        try s.outputLine(part.items, phases);
                         part.clearRetainingCapacity();
                     } else try part.append(s.gpa, c);
                 }
@@ -228,6 +367,11 @@ pub const Steps = struct {
         return all.items;
     }
 
+    fn outputLine(s: *Steps, raw: []const u8, phases: bool) !void {
+        const line = try s.said.line(raw);
+        if (phases) if (phaseFromOutput(line)) |p| try s.enter(p);
+    }
+
     fn write(s: *Steps, bytes: []const u8) void {
         const to = s.log orelse Io.File.stderr();
         to.writeStreamingAll(s.io, bytes) catch {};
@@ -235,19 +379,23 @@ pub const Steps = struct {
 
     fn draw(s: *Steps) void {
         if (!s.look.tty or s.o.verbose) return;
+        const now = Io.Clock.awake.now(s.io);
+        if (!s.redraw.due(now)) return;
         s.frame += 1;
         s.look.draw(
             s.io,
             Io.File.stderr(),
             frames[s.frame % frames.len],
+            s.said.phase.icon(),
             s.said.phase.name,
-            s.start.untilNow(s.io, .awake),
-            s.said.detail,
+            s.said.since.durationTo(now),
+            "",
         );
     }
 
     /// finish ends a run that succeeded and returns its time and phases.
     pub fn finish(s: *Steps) !Done {
+        if (s.reporter()) |m| m.finish();
         try s.said.enter(s.io, null);
         if (s.look.tty and
             !s.o.verbose) Io.File.stderr().writeStreamingAll(s.io, "\r\x1b[2K") catch {};
@@ -263,6 +411,7 @@ pub const Steps = struct {
     /// and returns error.Refused with why empty, so the caller adds
     /// nothing. Verbose, the output is above, and why holds reason.
     pub fn fail(s: *Steps, reason: []const u8) error{Refused} {
+        if (s.reporter()) |m| m.finish();
         if (s.o.verbose) {
             s.why.text = if (reason.len > 0) reason else "failed; the output is above";
             return error.Refused;
@@ -300,18 +449,16 @@ const Said = struct {
     /// since is when phase began.
     since: Io.Timestamp,
     spent: std.ArrayList(Spent) = .empty,
-    /// detail is the last line, shown beside the phase.
-    detail: []const u8 = "",
     /// last is a ring of the last tail_lines lines.
     last: [tail_lines][]const u8 = @splat(""),
     count: usize = 0,
 
-    fn line(s: *Said, raw: []const u8) !void {
+    fn line(s: *Said, raw: []const u8) ![]const u8 {
         const text = try clean(s.gpa, raw);
-        if (text.len == 0) return;
-        s.detail = text;
+        if (text.len == 0) return text;
         s.last[s.count % tail_lines] = text;
         s.count += 1;
+        return text;
     }
 
     /// enter adds the current phase's time to its total and starts next.
@@ -348,6 +495,18 @@ const Said = struct {
         return out.items;
     }
 };
+
+/// Build scripts announce real command boundaries, including through melange.
+/// Ordinary compiler output never changes the phase or appears on the line.
+fn phaseFromOutput(line: []const u8) ?Phase {
+    const prefix = "howl: phase ";
+    if (!std.mem.startsWith(u8, line, prefix)) return null;
+    const rest = line[prefix.len..];
+    const split = std.mem.find(u8, rest, ": ") orelse return null;
+    const name = rest[split + 2 ..];
+    if (split == 0 or name.len == 0) return null;
+    return .{ .short = rest[0..split], .name = name };
+}
 
 /// phaseOf names the build phase a step's target implies, or returns null
 /// if the target names none.
@@ -485,6 +644,7 @@ pub const Look = struct {
         io: Io,
         f: Io.File,
         spin: []const u8,
+        icon: []const u8,
         phase: []const u8,
         ran: Io.Duration,
         detail: []const u8,
@@ -497,10 +657,10 @@ pub const Look = struct {
             "{f}",
             .{Clock{ .seconds = ran.toSeconds() }},
         ) catch "";
-        w.print("\r\x1b[2K{s} {s}  {s}", .{ spin, phase, time }) catch return;
-        // The spinner takes one column, and phase and time one per byte;
+        w.print("\r\x1b[2K{s} {s} {s}  {s}", .{ spin, icon, phase, time }) catch return;
+        // The spinner takes one column, the emoji two, and phase and time one per byte;
         // detail may hold multibyte characters, so fitColumns counts those.
-        const used = 2 + phase.len + 2 + time.len;
+        const used = 2 + 3 + phase.len + 2 + time.len;
         const room = l.cols -| (used + 5);
         if (detail.len > 0 and room > 8) {
             const d = fitColumns(detail, room);
@@ -520,21 +680,26 @@ pub const Spinner = struct {
     look: Look,
     start: Io.Timestamp,
     frame: usize = 0,
+    redraw: Redraw = .{},
+    phase: ?[]const u8 = null,
 
     pub fn init(io: Io) Spinner {
         return .{ .io = io, .look = .of(io, Io.File.stderr()), .start = Io.Clock.awake.now(io) };
     }
 
-    pub fn tick(s: *Spinner, phase: []const u8, detail: []const u8) void {
+    pub fn tick(s: *Spinner, phase: []const u8, _: []const u8) void {
         if (!s.look.tty) return;
+        const now = Io.Clock.awake.now(s.io);
+        if (!s.redraw.due(now)) return;
         s.frame += 1;
         s.look.draw(
             s.io,
             Io.File.stderr(),
             frames[s.frame % frames.len],
-            phase,
-            s.start.untilNow(s.io, .awake),
-            detail,
+            "🐺",
+            s.phase orelse phase,
+            s.start.durationTo(now),
+            "",
         );
     }
 
@@ -573,6 +738,125 @@ fn columns(f: Io.File) usize {
 }
 
 const testing = std.testing;
+
+test "phase history measures each transition once and keeps fast phases" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const output = try tmp.dir.createFile(testing.io, "phases", .{});
+    defer output.close(testing.io);
+    var m: Milestones = .init(testing.io, true);
+    m.output = output;
+    const checking: Phase = .{ .name = "Checking image inputs", .short = "verify" };
+    m.enterAt(checking, .fromNanoseconds(0));
+    m.enterAt(checking, .fromNanoseconds(20 * std.time.ns_per_ms));
+    m.enterAt(
+        .{ .name = "Compiling Linux", .short = "kernel-compile" },
+        .fromNanoseconds(120 * std.time.ns_per_ms),
+    );
+    m.finishAt(.fromNanoseconds(1500 * std.time.ns_per_ms));
+    m.finishAt(.fromNanoseconds(2000 * std.time.ns_per_ms));
+    const lines = try tmp.dir.readFileAlloc(
+        testing.io,
+        "phases",
+        testing.allocator,
+        .limited(4096),
+    );
+    defer testing.allocator.free(lines);
+    try testing.expectEqualStrings(
+        "  🌒 Checking image inputs  120ms\n  🌓 Compiling Linux  1.3s\n",
+        lines,
+    );
+}
+
+test "phase durations distinguish milliseconds, seconds and minutes" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("<1ms", try std.mem.print(&buf, "{f}", .{PhaseTime{ .ns = 0 }}));
+    try testing.expectEqualStrings(
+        "9ms",
+        try std.mem.print(&buf, "{f}", .{PhaseTime{ .ns = 9 * std.time.ns_per_ms }}),
+    );
+    try testing.expectEqualStrings(
+        "1.2s",
+        try std.mem.print(&buf, "{f}", .{PhaseTime{ .ns = 1234 * std.time.ns_per_ms }}),
+    );
+    try testing.expectEqualStrings(
+        "2m05s",
+        try std.mem.print(&buf, "{f}", .{PhaseTime{ .ns = 125 * std.time.ns_per_s }}),
+    );
+}
+
+test "redraw coalesces busy output and resumes after idle" {
+    var redraw: Redraw = .{};
+    var updates: usize = 0;
+    for (0..1000) |ms| {
+        if (redraw.due(.fromNanoseconds(@as(i96, @intCast(ms)) * std.time.ns_per_ms)))
+            updates += 1;
+    }
+    try testing.expectEqual(4, updates);
+    try testing.expect(redraw.due(.fromNanoseconds(5000 * std.time.ns_per_ms)));
+    try testing.expect(!redraw.due(.fromNanoseconds(5249 * std.time.ns_per_ms)));
+    try testing.expect(redraw.due(.fromNanoseconds(5250 * std.time.ns_per_ms)));
+}
+
+test "builder phases survive melange logging and ignore ordinary output" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{
+        "howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)",
+        "2026/10/14 08:12:13 WARN howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)",
+    }) |raw| {
+        const p = phaseFromOutput(try clean(arena.allocator(), raw)).?;
+        try testing.expectEqualStrings("kernel-compile", p.short);
+        try testing.expectEqualStrings("Compiling Linux 6.18.56 (make Image modules)", p.name);
+    }
+    for ([_][]const u8{
+        "CC security/bpf/hooks.o",
+        "howl: phase kernel-compile",
+        "howl: phase : missing short name",
+        "howl: phase kernel-compile: ",
+    }) |line| try testing.expectEqual(null, phaseFromOutput(line));
+}
+
+test "only opted-in commands change phase and all output stays in the log" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var why: howl.Why = .{};
+    const first: Phase = .{ .name = "Starting the build", .short = "start" };
+    var steps: Steps = .{
+        .io = testing.io,
+        .gpa = gpa,
+        .why = &why,
+        .o = .{ .command = "test build", .log = "unused", .first = first },
+        .look = .{ .tty = false, .color = false, .cols = 80 },
+        .log = try tmp.dir.createFile(testing.io, "build.log", .{}),
+        .start = .fromNanoseconds(0),
+        .said = .{ .gpa = gpa, .phase = first, .since = .fromNanoseconds(0) },
+    };
+    const cmd: Steps.Cmd = .{ .argv = &.{
+        "/bin/sh",
+        "-c",
+        "printf 'howl: phase kernel-compile: Compiling Linux 6.18.56 (make Image modules)\\nCC security/bpf/hooks.o' >&2",
+    } };
+    try testing.expect((try steps.exec(&.{cmd}, .{})).ok);
+    try testing.expectEqualStrings(first.name, steps.said.phase.name);
+    try testing.expect((try steps.exec(&.{cmd}, .{ .phases = true })).ok);
+    try testing.expectEqualStrings(
+        "Compiling Linux 6.18.56 (make Image modules)",
+        steps.said.phase.name,
+    );
+    try testing.expect(steps.said.since.nanoseconds > steps.start.nanoseconds);
+    try testing.expectEqualStrings(
+        "CC security/bpf/hooks.o",
+        steps.said.tail()[steps.said.tail().len - 1],
+    );
+    _ = try steps.finish();
+    const log = try tmp.dir.readFileAlloc(testing.io, "build.log", gpa, .limited(4096));
+    try testing.expect(std.mem.find(u8, log, "CC security/bpf/hooks.o") != null);
+    try testing.expect(std.mem.find(u8, log, "howl: phase kernel-compile:") != null);
+}
 
 test phaseOf {
     try testing.expectEqualStrings(

@@ -1,0 +1,17 @@
+# MongoDB 8.0 for applications on this machine. No external listener,
+# JavaScript execution, shell entrypoint, or database subprocesses.
+base: prod
+
+dev: [python-3.14]
+
+check:
+  memory: 2048
+
+services:
+  mongodb:
+    image: docker.io/library/mongo@sha256:6657bf2413fefc5be649390318f5b4cd7328e982722f8ce2ac6dfa6f0a42cb03
+    exec: /usr/bin/mongod --dbpath /data --bind_ip 127.0.0.1 --port 27017 --nounixsocket --noscripting --wiredTigerCacheSizeGB 0.25
+    pledge: stdio rpath wpath inet unix netlink connect listen proc
+    listen: tcp/27017 loopback
+    memory: 1024
+    nofile: 64000

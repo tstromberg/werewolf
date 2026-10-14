@@ -24,7 +24,8 @@ services:
   # writes logs and reaches a resolver. It runs nothing else.
   zeek:
     image: docker.io/zeek/zeek:8.2
-    exec: /usr/local/zeek/bin/zeek -C -i af_packet::eth0 local /usr/lib/werewolf/boot.zeek LogAscii::use_json=T Log::default_logdir=/data Log::flush_interval=1sec
+    exec: /usr/local/zeek/bin/zeek -C -i af_packet::eth0 local /usr/lib/werewolf/boot.zeek LogAscii::use_json=T Log::default_logdir=/data
+      Log::flush_interval=1sec
     pledge: stdio rpath wpath inet unix netlink connect proc packet listen
     caps: net_raw net_admin
     connect: [udp/53 tcp/53]

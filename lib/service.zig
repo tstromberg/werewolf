@@ -19,6 +19,8 @@ pub const Service = struct {
     /// service that scans. Fence still refuses its loopback except the
     /// ports in connect.
     connect_any: bool = false,
+    /// dns permits UDP and TCP 53 to the detected resolvers alone.
+    dns: bool = false,
     /// sockets are the pathname UNIX sockets a `connect` line names.
     sockets: []const []const u8 = &.{},
     read: []const []const u8 = &.{},
@@ -73,8 +75,13 @@ pub const floor = [_][:0]const u8{
     "/usr",             "/proc",              "/sys/devices/system/cpu",
     "/etc/passwd",      "/etc/group",         "/etc/hosts",
     "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/ld.so.cache",
-    "/etc/localtime",   "/etc/ssl",           "/dev/null",
-    "/dev/zero",        "/dev/random",        "/dev/urandom",
+    "/run/werewolf/network", // DHCP atomically replaces resolv.conf within this directory.
+    "/etc/localtime",
+    "/etc/ssl",
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
 };
 
 /// narrowing is what a service with narrowed programs must promise: their
@@ -146,6 +153,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var listen_udp: std.ArrayList(u16) = .empty;
     var connect: std.ArrayList(u16) = .empty;
     var connect_any = false;
+    var dns = false;
     var sockets: std.ArrayList([]const u8) = .empty;
     var data: std.ArrayList(Mount) = .empty;
     var caps: u32 = 0;
@@ -202,6 +210,8 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             } else if (std.mem.eql(u8, a, "any")) {
                 if (connect_any) return invalid(bad, "connect any twice");
                 connect_any = true;
+            } else if (std.mem.eql(u8, a, "dns")) {
+                dns = true;
             } else try connect.append(gpa, try tcpPort(a, bad));
         } else if (std.mem.eql(u8, key, "read") or std.mem.eql(u8, key, "write") or
             std.mem.eql(u8, key, "run") or std.mem.eql(u8, key, "requires"))
@@ -365,6 +375,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         .listen_udp = listen_udp.items,
         .connect = connect.items,
         .connect_any = connect_any,
+        .dns = dns,
         .sockets = sockets.items,
         .read = read.items,
         .write = write.items,
@@ -1031,4 +1042,20 @@ test reaches {
     try testing.expect(!reaches(s, "app", "/run/svc/application", false));
     try testing.expect(reaches(s, null, "/run/svc/db/socket", false));
     try testing.expect(!reaches(s, null, "/run/svc", false));
+}
+
+test "DNS is explicit and includes TCP fallback in a service" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var bad: Bad = .{};
+    const s = try parse(
+        arena.allocator(),
+        "exec /a\nuser x\npledge stdio inet connect\nconnect dns tcp/443\n",
+        &bad,
+    );
+    try testing.expect(s.dns);
+    try testing.expectEqualSlices(u16, &.{443}, s.connect);
+    try testing.expect(!s.connect_any);
+    const none = try parse(arena.allocator(), "exec /a\nuser x\npledge stdio\n", &bad);
+    try testing.expect(!none.dns);
 }

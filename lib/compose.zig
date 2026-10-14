@@ -72,8 +72,8 @@ pub fn compose(
     // the services form.yaml renders, each on a leash: its file, and run
     // and finish links to leash where the rootfs laid none.
     for (forms) |fm| {
-        try lay(io, gpa, root, try gpa.print("{s}/rootfs", .{fm.dir}), ro, "");
         for (fm.images) |dir| try lay(io, gpa, root, dir, ro, "");
+        try lay(io, gpa, root, try gpa.print("{s}/rootfs", .{fm.dir}), ro, "");
     }
     for (try form.services(io, gpa, root, forms, f)) |s| {
         if (mem.find(u8, s.path, "form.yaml: services.") == null) continue;
@@ -227,8 +227,8 @@ pub fn stage(io: Io, gpa: Allocator, root: Dir, fm: Form, dir: Dir) !void {
         out.written();
     try put(io, dir, try gpa.print("{s}/form.yaml", .{at}), text);
     const rootfs = try gpa.print("{s}/rootfs", .{fm.dir});
-    try lay(io, gpa, root, rootfs, dir, try gpa.print("{s}/rootfs", .{at}));
     for (fm.images) |d| try lay(io, gpa, root, d, dir, try gpa.print("{s}/rootfs", .{at}));
+    try lay(io, gpa, root, rootfs, dir, try gpa.print("{s}/rootfs", .{at}));
 }
 
 /// lay copies the tree at src, under root, into dst at to ("" for dst
@@ -1139,6 +1139,11 @@ fn netLine(
         ));
         return true;
     }
+    if (mem.eql(u8, w[0], "dns") and w.len > 1) {
+        for (w[1..]) |u|
+            try out.append(gpa, try gpa.print("dns {s}", .{uids.get(u) orelse return false}));
+        return true;
+    }
     if (mem.eql(u8, w[0], "metadata") and w.len > 1) {
         for (w[1..]) |u|
             try out.append(gpa, try gpa.print("metadata {s}", .{uids.get(u) orelse return false}));
@@ -1259,6 +1264,60 @@ test "compose links each narrowed program to leash" {
     try testing.expectError(error.FileNotFound, ro.access(io, "etc/sv/web/narrow", .{}));
 }
 
+test "form overlays replace vendor image files in the root and staged update" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    for ([_][2][]const u8{
+        .{ "forms/x/form.yaml", "" },
+        .{ "vendor/oci/x/etc/config", "vendor" },
+        .{ "forms/x/rootfs/oci/x/etc/config", "confined" },
+    }) |file| {
+        try tmp.dir.createDirPath(io, std.fs.path.dirname(file[0]).?);
+        try tmp.dir.writeFile(io, .{ .sub_path = file[0], .data = file[1] });
+    }
+    try tmp.dir.createDirPath(io, "vendor/oci/x/usr/bin");
+    try tmp.dir.createDirPath(io, "forms/x/rootfs/oci/x/usr/bin");
+    try tmp.dir.symLink(io, "vendor-shell", "vendor/oci/x/usr/bin/sh", .{});
+    try tmp.dir.symLink(io, "/usr/lib/werewolf/probe", "forms/x/rootfs/oci/x/usr/bin/sh", .{});
+    var failure: Failure = .{};
+    const forms = try gpa.dupe(Form, try form.chain(io, gpa, tmp.dir, "x", &failure));
+    forms[0].images = &.{"vendor"};
+    var ro = try tmp.dir.createDirPathOpen(io, "ro", .{});
+    defer ro.close(io);
+    var meta = try tmp.dir.createDirPathOpen(io, "meta", .{});
+    defer meta.close(io);
+    try compose(
+        io,
+        gpa,
+        tmp.dir,
+        forms,
+        .{ .passwd = "", .group = "", .shadow = "" },
+        ro,
+        meta,
+        .{ .arch = .aarch64 },
+        &failure,
+    );
+    var text: [64]u8 = undefined;
+    try testing.expectEqualStrings("confined", try ro.readFile(io, "oci/x/etc/config", &text));
+    try testing.expectEqualStrings(
+        "/usr/lib/werewolf/probe",
+        text[0..try ro.readLink(io, "oci/x/usr/bin/sh", &text)],
+    );
+    try testing.expectEqualStrings(
+        "confined",
+        try meta.readFile(io, "usr/share/werewolf/forms/x/rootfs/oci/x/etc/config", &text),
+    );
+    try testing.expectEqualStrings("/usr/lib/werewolf/probe", text[0..try meta.readLink(
+        io,
+        "usr/share/werewolf/forms/x/rootfs/oci/x/usr/bin/sh",
+        &text,
+    )]);
+}
+
 test "allowances: along the chain, sorted, once each; nested-kvm needs kvm" {
     var a = std.heap.ArenaAllocator.init(testing.allocator);
     defer a.deinit();
@@ -1315,11 +1374,13 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         try testForm(gpa, "web", "net:\n  - listen tcp/08080 # leading zeros\n" ++
             "  - listen tcp/5432 loopback\n  - connect web tcp/443 public\n  - connect all " ++
             "icmp\n" ++
-            "  - metadata web\n  - connect _update tcp/443\n  - listen root udp/51820\n"),
+            "  - metadata web\n  - connect _update tcp/443\n  - listen root udp/51820\n" ++
+            "  - dns root _update\n  - dns _update\n"),
     }, passwd, &f);
     try testing.expectEqualStrings(
         "connect 300 tcp 443 public\nconnect 69 tcp 443\nconnect 69 tcp 53\nconnect 69 udp 53\n" ++
-            "connect all icmp\nlisten 0 udp 51820\nlisten tcp 5432 loopback\nlisten tcp 8080\n" ++
+            "connect all icmp\ndns 0\ndns 69\nlisten 0 udp 51820\nlisten tcp 5432 " ++
+            "loopback\nlisten tcp 8080\n" ++
             "metadata 300\n",
         got,
     );
@@ -1332,6 +1393,8 @@ test "net: users as uids, ports as numbers, sorted, once each; what cannot compi
         "listen tcp/",            "listen tcp/99999999999999999999",
         "listen nobody udp/53",   "listen root udp/0",
         "listen root tcp/53",     "listen root udp/53 loopback",
+        "dns",                    "dns all",
+        "dns nobody",             "dns root udp/53",
     }) |line| {
         const forms = [_]Form{try testForm(gpa, "bad", try gpa.print("net:\n  - {s}\n", .{line}))};
         try testing.expectError(error.Form, net(gpa, &forms, passwd, &f));

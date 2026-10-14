@@ -2,10 +2,9 @@
 
 ## Summary
 
-dhcp-client is werewolf's DHCP client. It gets an IPv4 address, routes, MTU
-and resolvers from the network's DHCP server and keeps them for as long as
-the machine runs. `dhcp up NIC` gets a lease within 30 seconds or exits 1;
-`dhcp keep` renews it, or gets a new one.
+dhcp-client gets and keeps an IPv4 address, routes, MTU and resolvers.
+`dhcp up NIC` gets a lease within 30 seconds or exits 1; `dhcp keep`
+renews it, or gets a new one.
 
 ## Background
 
@@ -31,7 +30,6 @@ both powers from every later process, root's included.
 The program is two processes, like OpenBSD's dhclient. Both are set up as
 root before the fork, and the packet socket is opened, filtered and locked
 before either touches the network.
-
 - **The engine** speaks DHCP and is the only process that parses the wire.
   It runs as `_dhcp` (uid 67), chrooted to the empty `/var/empty`, with no
   capabilities, and dies with its parent. seccomp allows only its packet
@@ -40,7 +38,8 @@ before either touches the network.
   only unfragmented UDP from port 67 to 68. For each lease it sends the
   parent a fixed-size message.
 - **The parent** applies leases. It keeps only CAP_NET_ADMIN and seccomp
-  allows four ioctls (address, netmask, MTU, add route). Landlock limits
+  allows four ioctls (address, netmask, MTU, add route) and send/receive
+  on a preopened DNS routing socket. Landlock limits
   its writes to `/run/werewolf/network` (`lease.json`, and `resolv.conf`,
   which `/etc/resolv.conf` links to). It never sees a packet. It checks
   every field of the engine's message again and treats a bad one as a
@@ -56,12 +55,13 @@ before either touches the network.
   unheard (Lima's vzNAT, Azure), so they repeat every 0.25 s for 5 s, then
   back off to 8 s, with RFC 2131 jitter. Up to 2 s waits for carrier
   before the first DISCOVER, since a NIC drops frames until then.
-- **Changes are applied cleanly.** A lease with a different address, mask
-  or routes first takes the old address off, which makes the kernel flush
-  its routes. Routes on the link go in before routes through a gateway. A
-  NAK takes the address off. A lease that expires with no server answering
-  is kept until a new one comes: a cloud's address does not change, and a
-  server that is briefly down should not take the machine offline.
+- **Changes are applied cleanly.** Address, mask or route changes remove
+  the old address and flush its routes. Link routes precede gateway routes.
+  DNS changes revoke the old resolver rules before installing the new
+  ones and replacing `resolv.conf`. Users come from the immutable image
+  policy, never from DHCP; the engine cannot inherit the routing socket.
+  A NAK removes the address. An expired lease stays until replaced: cloud
+  addresses do not change, and a brief outage should not disconnect them.
 
 ## Drawbacks
 
@@ -79,8 +79,7 @@ It would need CAP_NET_ADMIN after fence, so every root process would keep
 it, and with it the power to delete fence's rules.
 
 ### udhcpc or dhclient
-Their scripts need a shell, and dhclient parses far more of the wire, as
-root.
+Their scripts need a shell; dhclient parses far more of the wire as root.
 
 ## Security Considerations
 
@@ -94,7 +93,7 @@ root.
 ## Reliability Considerations
 
 - **A brief link drop** costs a round, not the program.
-- **A DHCP server down past the lease** does not take the machine off the
-  network: the address is kept.
+- **A DHCP server down past the lease:** the address stays on the NIC.
 - **A refused MTU or route** is logged and skipped, so keep stays up.
-- **Tested:** `make check-lease`, and `howl create` on Lima.
+- **Tested:** `make check-dns` exercises actual renewal under both sandboxes;
+  `make check-lease`, and `howl create` on Lima.

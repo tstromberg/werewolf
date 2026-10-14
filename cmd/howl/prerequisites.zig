@@ -74,7 +74,7 @@ pub fn resolve(
         }
     }
     try steps.enter(.{
-        .name = "Preparing pinned IPE kernel and measured EFI stub",
+        .name = "Checking cached security inputs",
         .short = "security inputs",
     });
     if (!(try steps.exec(&.{.{ .argv = &.{
@@ -86,7 +86,7 @@ pub fn resolve(
         source,         cache,
         @tagName(arch), base,
         report,
-    }, .env = &env }}, .{})).ok) return steps.fail(
+    }, .env = &env }}, .{ .phases = true })).ok) return steps.fail(
         "preparing security inputs failed; see the builder dependencies in docs/testing.md",
     );
     var inputs = try std.json.parseFromSliceLeaky(Inputs, gpa, try Dir.cwd().readFileAlloc(

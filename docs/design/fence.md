@@ -22,7 +22,8 @@ compile, or a service `listen` that no `net` line declares.
 
 ## Non-Goals
 
-- Destinations (hosts), connection tracking, or rules between services.
+- Arbitrary destination lists, connection tracking, or rules between services.
+  DNS grants do name the detected resolver addresses.
 
 ## Detailed design
 
@@ -34,6 +35,7 @@ process inherits it all. A lookup from `lo` marks sent traffic:
 | --- | --- |
 | 5 | sent with a `public` line's user, protocol and port to a non-public address: refuse |
 | 10 | sent to this machine or over loopback: deliver |
+| 99 | a DNS user sends UDP/TCP 53 to a detected IPv4 resolver: route |
 | 100 | sent to the metadata server's TCP 80 (IPv6: AWS's fd00:ec2::254) by a user named: route |
 | 101 | sent there by anyone else, or to Azure's wire server: refuse |
 | 200 | sent as declared (user, protocol, port), from a served port, or ICMPv6: route |
@@ -49,7 +51,7 @@ fails ENETUNREACH and clients try the next address; EACCES, final to
 them, broke the updater on dual-stack names.
 
 Landlock lets a process bind only the policy's ports (and 0), and connect
-only to declared, served, loopback and metadata ports: rule 200 lets a
+only to declared, served, DNS, loopback and metadata ports: rule 200 lets a
 served port answer anyone, so a listener could otherwise reach anywhere.
 
 ### Files
@@ -79,7 +81,8 @@ to (443, say) passes, but reaches only a socket that exists.
   and a served UDP port answers only as its user ([listen-udp.md](listen-udp.md)).
 - **Fragmented UDP.** Later fragments carry no ports and meet the drop;
   DNS, the one UDP declared, fits 512 bytes (no EDNS0) or retries on TCP.
-- **Destinations.** `connect USER tcp/443` reaches any HTTPS server.
+- **Destinations.** `connect USER tcp/443` reaches any HTTPS server;
+  `dns USER` is restricted to detected resolvers ([dns.md](dns.md)).
 
 ## Alternatives Considered
 
@@ -97,5 +100,7 @@ domain is scoped (ABI 6): root cannot signal the broker or DHCP's renewal.
 
 - **Fails closed:** any failed step, Landlock below ABI 4 included, exits;
   PID 1 dies, the kernel panics, and the last slot that worked boots.
+- **DNS:** `make check-dns` checks real UDP/TCP rules, HTTPS by hostname and
+  DHCP renewal with local fixtures, on both CI architectures.
 - **Tested** each boot by posture: `network-ports`, `-bind`, `-outbound`,
   `-metadata`, `-inbound`, `-ipv6`, `files-system-writes`, `-device-reads`.

@@ -53,6 +53,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     const io = u.io;
     const root = work_dir ++ "/root";
     try Dir.cwd().createDirPath(io, work_dir ++ "/slot");
+    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, work_dir ++ "/slot", 0o700), "chmod slot");
     const r: Root = try .open(u, root);
     defer r.close(u);
 
@@ -159,6 +160,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
     const s = work_dir ++ "/stage0";
     Dir.cwd().deleteTree(u.io, s) catch {};
     try Dir.cwd().createDirPath(u.io, s);
+    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, s, 0o700), "chmod stage0");
     const s0: Root = try .open(u, s);
     defer s0.close(u);
     // writeCpio adds the device nodes here. init and the loader come from
@@ -242,27 +244,34 @@ pub fn tryOther(u: *Update, expected: ?[]const u8) !void {
     Dir.cwd().access(u.io, "/run/werewolf/committed", .{}) catch return error.NotCommitted;
     const lock = try u.lock();
     defer _ = linux.close(lock);
+    if (expected) |hash| {
+        if (hash.len != 64) return error.BadDeclarationHash;
+        for (hash) |c| if (!(c >= '0' and c <= '9') and !(c >= 'a' and c <= 'f'))
+            return error.BadDeclarationHash;
+    }
+    var build: []const u8 = expected orelse "operator-try";
     if (try u.needsSignedImage()) {
         const image = try images.verifyOther(u, null, true, true);
         if (expected) |hash| if (image.declaration == null or
             !std.mem.eql(u8, hash, image.declaration.?))
             return error.DeclarationNotInOtherSlot;
+        build = image.build;
+    } else {
+        // The other slot is read through stage0's read-only /boot mount;
+        // nothing here needs /boot writable.
+        try images.checkLocalOther(u);
+        if (expected) |hash| {
+            const held = try u.read(try u.gpa.print("/boot/slot/{s}/declaration", .{u.other}));
+            if (!std.mem.eql(u8, hash, held)) return error.DeclarationNotInOtherSlot;
+        }
     }
-    // The other slot is read through stage0's read-only /boot mount;
-    // nothing here needs /boot writable.
-    const root = try u.gpa.print("/boot/slot/{s}", .{u.other});
-    try Dir.cwd().access(u.io, try u.gpa.print("{s}/root.erofs", .{root}), .{});
-    if (expected) |hash| {
-        if (hash.len != 64) return error.BadDeclarationHash;
-        const held = try u.read(try u.gpa.print("{s}/declaration", .{root}));
-        if (!std.mem.eql(u8, hash, held)) return error.DeclarationNotInOtherSlot;
-    }
+    if (u.isBad(build)) return error.ImageRolledBack;
     broker.espArm() catch |err| {
         u.detail = broker.refusal;
         return err;
     };
     Dir.cwd().deleteFile(u.io, m.pending_path) catch {};
-    try writeAttempt(u, expected orelse "operator-try");
+    try writeAttempt(u, build);
     try u.record(.{ .event = "try", .slot = u.other, .declaration = expected });
     linux.sync();
     try u.run(&.{"/usr/bin/reboot"});
@@ -296,15 +305,17 @@ fn installEsp(u: *Update, build: []const u8) !void {
         return err;
     };
     linux.sync();
-    try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
+    // A signed slot's command line is already validated and authenticated.
+    // Normalizing its trailing newline would change the signed artifact digest.
+    if (u.image == null) try u.write(work_dir ++ "/slot/cmdline", try u.slotCmdline());
     // copyChecked goes through a temporary name, so each file is whole or absent.
     if (retirement) |*prepared| try prepared.apply();
+    const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
+    broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
+        u.detail = broker.refusal;
+        return err;
+    };
     if (u.image == null) {
-        const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
-        broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
-            u.detail = broker.refusal;
-            return err;
-        };
         const current = u.read(meta_dir ++ "/local/inputs") catch "";
         const next = readIn(u, work_dir ++ "/root", "usr/share/werewolf/local/inputs") catch "";
         if (current.len == 64 or next.len == 64) {
@@ -317,11 +328,6 @@ fn installEsp(u: *Update, build: []const u8) !void {
             };
         }
     } else {
-        const root_art = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/root.erofs");
-        broker.slotRoot(.{ .size = root_art.size, .sha256 = root_art.sha256 }) catch |err| {
-            u.detail = broker.refusal;
-            return err;
-        };
         const meta_a = try signed.hashFile(io, u.gpa, work_dir ++ "/image.json");
         const meta_b = try signed.hashFile(io, u.gpa, work_dir ++ "/image.sig");
         const meta_c = try signed.hashFile(io, u.gpa, work_dir ++ "/slot/cmdline");
@@ -360,7 +366,11 @@ fn installEsp(u: *Update, build: []const u8) !void {
         u.detail = broker.refusal;
         return err;
     };
-    if (u.image != null) _ = try images.verifyOther(u, build, true, false);
+    if (u.image != null) {
+        _ = try images.verifyOther(u, build, true, false);
+    } else {
+        try images.checkLocalOther(u);
+    }
     // Arm, then write attempt, as install does and for the same reason.
     try writeAttempt(u, build);
 }
@@ -430,6 +440,11 @@ pub fn apkAdd(
         .why = "the repository has moved to a newer format; reinstall to follow",
     });
 
+    try Dir.cwd().createDirPath(u.io, root);
+    _ = try u.sys(
+        linux.fchmodat(linux.AT.FDCWD, try u.gpa.dupeSentinel(u8, root, 0), 0o700),
+        "chmod root",
+    );
     try u.run(try std.mem.concat(u.gpa, []const u8, &.{
         &.{ "/usr/bin/apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
         source,
@@ -510,14 +525,16 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
     var d = try Dir.cwd().openDir(u.io, cache, .{ .follow_symlinks = false });
     defer d.close(u.io);
     var idx: apk.Index = .empty;
+    var signers: std.StringHashMapUnmanaged(void) = .empty;
     const names = try u.listDir(cache);
     for (names) |name| {
         if (!std.mem.startsWith(u8, name, "APKINDEX.")) continue;
+        const raw = try d.readFileAlloc(u.io, name, u.gpa, .limited(max_read));
         const kept = apk.readIndex(
             u.gpa,
             trusted.items,
             &idx,
-            try d.readFileAlloc(u.io, name, u.gpa, .limited(max_read)),
+            raw,
         ) catch |err| {
             // Delete it, or a bad index left by the fetcher would fail every
             // later pass.
@@ -525,8 +542,18 @@ fn checkCache(u: *Update, cache: []const u8, keys: []const u8) !apk.Index {
             u.detail = try u.gpa.print("{s}/{s}", .{ cache, name });
             return err;
         };
-        try d.writeFile(u.io, .{ .sub_path = name, .data = kept });
+        const by = apk.signer(u.gpa, raw) catch unreachable;
+        if ((try signers.fetchPut(u.gpa, by, {})) != null) {
+            for (names) |n| {
+                if (std.mem.startsWith(u8, n, "APKINDEX.")) d.deleteFile(u.io, n) catch {};
+            }
+            u.detail = try u.gpa.print("{s}/{s}", .{ cache, name });
+            return error.DuplicateApkIndex;
+        }
+        try d.deleteFile(u.io, name);
+        try d.writeFile(u.io, .{ .sub_path = name, .data = kept, .flags = .{ .exclusive = true } });
     }
+    if (signers.count() == 0) return error.NoApkIndex;
     for (names) |name| {
         if (std.mem.startsWith(u8, name, "APKINDEX.")) continue;
         apk.checkPackage(u.gpa, u.io, d, name, &idx) catch |err| {
@@ -597,31 +624,47 @@ fn prune(u: *Update, cache: []const u8, root: []const u8) !void {
 }
 
 /// reclaim gives the cache back to root after the fetcher exits: each
-/// regular file with a name apk uses is chowned to root and set to 0644.
-/// Anything else the fetcher left is removed unread.
+/// single-link regular file with a name apk uses is chowned to root and set
+/// to 0644 on its open descriptor. Anything else the fetcher left is removed
+/// unread.
 fn reclaim(u: *Update, cache: [:0]const u8) !void {
-    _ = try u.sys(
-        linux.fchownat(linux.AT.FDCWD, cache, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
-        "chown cache",
-    );
     var d = try Dir.cwd().openDir(u.io, cache, .{ .iterate = true, .follow_symlinks = false });
     defer d.close(u.io);
+    _ = try u.sys(linux.fchown(d.handle, 0, 0), "chown cache");
+    _ = try u.sys(linux.fchmod(d.handle, 0o755), "chmod cache");
     var strays: std.ArrayList([]const u8) = .empty;
     var it = d.iterate();
     while (try it.next(u.io)) |e| {
-        if (e.kind != .file or !cacheName(e.name)) {
+        if (e.kind != .file or !cacheName(e.name) or !reclaimFile(u, d.handle, e.name)) {
             try strays.append(u.gpa, try u.gpa.dupe(u8, e.name));
-            continue;
         }
-        const file = try u.gpa.dupeSentinel(u8, e.name, 0);
-        _ = try u.sys(
-            linux.fchownat(d.handle, file, 0, 0, linux.AT.SYMLINK_NOFOLLOW),
-            "chown cached file",
-        );
-        // The fetcher chose the old mode, so reset it.
-        _ = try u.sys(linux.fchmodat(d.handle, file, 0o644), "chmod cached file");
     }
     for (strays.items) |stray| try d.deleteTree(u.io, stray);
+}
+
+fn reclaimFile(u: *Update, dirfd: i32, name: []const u8) bool {
+    const file = u.gpa.dupeSentinel(u8, name, 0) catch return false;
+    const rc = linux.openat(dirfd, file, .{
+        .ACCMODE = .RDONLY,
+        .CLOEXEC = true,
+        .NOFOLLOW = true,
+        .NONBLOCK = true,
+    }, 0);
+    if (linux.errno(rc) != .SUCCESS) return false;
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    var st: linux.Statx = undefined;
+    if (linux.errno(linux.statx(
+        fd,
+        "",
+        linux.AT.EMPTY_PATH,
+        .{ .TYPE = true, .NLINK = true },
+        &st,
+    )) != .SUCCESS) return false;
+    if ((st.mode & linux.S.IFMT) != linux.S.IFREG or st.nlink != 1) return false;
+    if (linux.errno(linux.fchown(fd, 0, 0)) != .SUCCESS) return false;
+    if (linux.errno(linux.fchmod(fd, 0o644)) != .SUCCESS) return false;
+    return true;
 }
 
 fn busyboxLinks(u: *Update, r: Root) !void {
@@ -634,11 +677,11 @@ fn busyboxLinks(u: *Update, r: Root) !void {
 }
 
 fn stripSetid(u: *Update, root: []const u8) !void {
-    var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true });
+    var d = try Dir.cwd().openDir(u.io, root, .{ .iterate = true, .follow_symlinks = false });
     defer d.close(u.io);
     var w = try d.walk(u.gpa);
     while (try w.next(u.io)) |e| {
-        if (e.kind != .file) continue;
+        if (e.kind != .file and e.kind != .directory) continue;
         const st = try e.dir.statFile(u.io, e.basename, .{ .follow_symlinks = false });
         const mode = st.permissions.toMode();
         if (mode & 0o6000 != 0) {
@@ -666,6 +709,7 @@ fn composeInto(u: *Update, r: Root) !void {
     // a local one, as this image staged it.
     var staged = try Dir.cwd().createDirPathOpen(io, scratch ++ "/staged", .{});
     defer staged.close(io);
+    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, scratch, 0o700), "chmod compose");
     var into = try staged.createDirPathOpen(io, "forms", .{});
     defer into.close(io);
     const world = try u.words(try u.read("/etc/apk/world"));
@@ -1220,8 +1264,13 @@ fn isCachedOf(file: []const u8, pkgs: []const Package) bool {
 
 /// cacheName reports whether apk would give a cache file this name.
 fn cacheName(name: []const u8) bool {
-    return std.mem.eql(u8, name, "installed") or std.mem.endsWith(u8, name, ".apk") or
-        (std.mem.startsWith(u8, name, "APKINDEX.") and std.mem.endsWith(u8, name, ".tar.gz"));
+    if (std.mem.eql(u8, name, "installed")) return true;
+    if (std.mem.endsWith(u8, name, ".apk")) return name.len > ".apk".len;
+    const rest = std.mem.cutPrefix(u8, name, "APKINDEX.") orelse return false;
+    const hex = std.mem.cutSuffix(u8, rest, ".tar.gz") orelse return false;
+    if (hex.len != 8) return false;
+    for (hex) |c| if (!(c >= '0' and c <= '9') and !(c >= 'a' and c <= 'f')) return false;
+    return true;
 }
 
 // --- pure functions, tested below -------------------------------------------
@@ -1477,6 +1526,10 @@ test cacheName {
     }) |n| try testing.expect(cacheName(n));
     for ([_][]const u8{
         "APKINDEX.f8759e6a.tar",
+        "APKINDEX..tar.gz",
+        "APKINDEX.f8759e6.tar.gz",
+        "APKINDEX.F8759E6A.tar.gz",
+        ".apk",
         ".apk.27182ee91faf",
         "installed.new",
         "lib",

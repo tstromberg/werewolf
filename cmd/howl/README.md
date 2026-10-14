@@ -67,9 +67,27 @@ a build uploads once and delete keeps the image. A cloud machine lets nothing in
 `--allow-from me|CIDR` opens the form's TCP ports, or create prints the commands.
 
 **Second create.** The machine keeps its disk and takes the new config.
+Lima's instance list determines whether the VM exists. If it was deleted
+outside howl, the next create or run clears its stale per-VM files and
+creates a fresh instance. Stopped instances
+keep their enrollment; a failed Lima query never clears it.
 `howl run` reuses matching protected inputs and resumes stopped VMs without building; changed inputs replace it. `howl delete` requests a fresh one. Another form, `--app`, or `--import` is refused on a second create.
 `--import DIR` is a read-only disk the form reads once, while its data is
 first made ([data.md](../../docs/data.md)). A cloud cannot attach it.
+
+**Build progress.** The status line shows the current phase and its elapsed
+time, with moons for image construction and a wolf for VM startup. Each
+completed phase stays on its own line with its measured duration; fast phases
+use milliseconds. Deployment resolution groups image authentication,
+configuration validation and retained VM checks. Publisher and runtime checks
+belong to VM startup. The final line gives VM state and total command time,
+followed by SSH, console and stop commands. Terminal output omits the machine
+record; pipelines retain it on stdout. Phases and commands go to stderr. Protected `--build`
+separates kernel preparation, compilation, module
+installation and signing from the measured EFI stub build. Kernel phases name
+the pinned Linux version and the `make` target. A kernel compile can take
+minutes; the timer follows that work until it finishes. Command output stays
+in the build log, with the last lines shown on failure; `--verbose` streams it.
 
 ## Drawbacks
 

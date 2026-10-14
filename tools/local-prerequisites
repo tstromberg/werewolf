@@ -24,6 +24,10 @@ def run(args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
 
 
+def phase(short, name):
+    print('howl: phase ' + short + ': ' + name, file=sys.stderr, flush=True)
+
+
 def fingerprint(arch, files):
     value = hashlib.sha256(arch.encode())
     for name, path in sorted(files.items()):
@@ -32,11 +36,13 @@ def fingerprint(arch, files):
 
 
 def sign_kernel(tree, source, key, cert, output):
+    phase('kernel-sign', 'Signing IPE kernel modules on the host')
     run(['python3', tree / 'tools/sign-kernel', source, key, cert, output])
 
 
 def melange(tree, cache, arch, output, kind, base=None, cert=None):
     """Stage public inputs for Melange QEMU on macOS or bubblewrap on Linux."""
+    phase(kind + '-builder', 'Preparing the ' + ('Linux kernel' if kind == 'kernel' else 'EFI stub') + ' build environment')
     runner = 'qemu' if platform.system() == 'Darwin' else 'bubblewrap'
     package = 'werewolf-ipe-build' if kind == 'kernel' else 'werewolf-tpm-stub-build'
     recipe = 'boot/ipe-kernel.melange.yaml' if kind == 'kernel' else 'boot/tpm-stub.melange.yaml'
@@ -69,6 +75,7 @@ def melange(tree, cache, arch, output, kind, base=None, cert=None):
              '--generate-index=false'], env=env)
         apk = work / 'packages' / arch / (package + '-0.1.0-r0.apk')
         destination = output.with_name(output.name + '.new')
+        phase(kind + '-collect', 'Collecting the ' + ('Linux kernel' if kind == 'kernel' else 'measured EFI stub') + ' build output')
         try:
             with destination.open('xb') as stream:
                 run(['bsdtar', '-xzOf', apk, 'usr/share/werewolf-build/' + artifact], stdout=stream)
@@ -130,6 +137,7 @@ def identity(directory):
 
 
 def build(tree, cache, arch, base, key, cert):
+    phase('security-cache', 'Checking cached kernel and EFI stub')
     files = {name: tree / name for name in [
         'boot/kernel-source', 'boot/build-kernel', 'boot/ipe-boot.policy',
         'boot/stub-source', 'tools/build-tpm-stub',
@@ -190,6 +198,7 @@ def build(tree, cache, arch, base, key, cert):
             complete(stub_cache, stub_pin, ['linux.efi.stub'])
     elif platform.system() == 'Darwin' and arch == 'aarch64':
         vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-build-26.04')
+        phase('build-helper', 'Preparing the Linux build helper')
         run(['python3', tree / 'build-helper', vm, tree / 'boot/build-helper.yaml'])
         # This is a trusted build helper, never the secured workload VM.
         reply = subprocess.check_output(['limactl', 'shell', vm, 'mktemp', '-d',
@@ -198,6 +207,7 @@ def build(tree, cache, arch, base, key, cert):
             raise ValueError('unexpected helper temporary directory')
         remote = reply
         try:
+            phase('build-inputs', 'Copying public inputs to the Linux build helper')
             run(['limactl', 'shell', vm, 'mkdir', '-p', remote + '/boot', remote + '/tools'])
             public_files = dict(kernel_files if need_compile else {})
             if need_stub:
@@ -210,16 +220,19 @@ def build(tree, cache, arch, base, key, cert):
             if need_compile:
                 run(['limactl', 'shell', vm, 'sh', remote + '/boot/build-kernel',
                      remote + '/base.tar', remote + '/policy.crt', '-', remote + '/kernel'])
+                phase('kernel-collect', 'Collecting the Linux kernel build output')
                 run(['limactl', 'copy', vm + ':' + remote + '/kernel/rootfs.tar', compiled_cache / 'unsigned.tar'])
                 finish_kernel()
             if need_stub:
                 run(['limactl', 'shell', vm, 'sh', remote + '/tools/build-tpm-stub', remote + '/stub'])
+                phase('stub-collect', 'Collecting the measured EFI stub')
                 run(['limactl', 'copy', vm + ':' + remote + '/stub/linux.efi.stub', stub_cache / 'linux.efi.stub'])
                 complete(stub_cache, stub_pin, ['linux.efi.stub'])
         finally:
             run(['limactl', 'shell', vm, 'rm', '-rf', '--', remote])
     else:
         raise ValueError('managed prerequisites require native Linux or an arm64 Mac build helper')
+    phase('security-cache', 'Saving verified kernel and EFI stub')
     copy_cached(kernel_cache / 'rootfs.tar', target / 'rootfs.tar')
     copy_cached(stub_cache / 'linux.efi.stub', target / 'linux.efi.stub')
     complete(target, expected, ['rootfs.tar', 'linux.efi.stub'])
@@ -252,7 +265,9 @@ def main():
     os.umask(0o077)
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (cache / 'build.lock').open('a+b') as guard:
+        phase('security-lock', 'Waiting for the security input build lock')
         fcntl.flock(guard, fcntl.LOCK_EX)
+        phase('security-cache', 'Checking cached security inputs')
         if operation == 'stub':
             expected = fingerprint(arch, {name: tree / name for name in ['boot/stub-source', 'tools/build-tpm-stub', 'boot/tpm-stub.melange.yaml']})
             target = cache / arch / ('stub-' + expected)
@@ -262,15 +277,18 @@ def main():
                     melange(tree, cache, arch, target / 'linux.efi.stub', 'stub')
                 else:
                     vm = os.environ.get('WEREWOLF_BUILD_VM', 'werewolf-build-26.04')
+                    phase('build-helper', 'Preparing the Linux build helper')
                     run(['python3', tree / 'build-helper', vm, tree / 'boot/build-helper.yaml'])
                     remote = subprocess.check_output(['limactl', 'shell', vm, 'mktemp', '-d', '/var/tmp/ww-prerequisites.XXXXXXXX'], text=True).strip()
                     if not remote.startswith('/var/tmp/ww-prerequisites.') or '/' in remote[len('/var/tmp/ww-prerequisites.'):]:
                         raise ValueError('unexpected helper temporary directory')
                     try:
+                        phase('build-inputs', 'Copying public EFI stub inputs to the Linux build helper')
                         run(['limactl', 'shell', vm, 'mkdir', '-p', remote + '/boot', remote + '/tools'])
                         for name in ['boot/stub-source', 'tools/build-tpm-stub']:
                             run(['limactl', 'copy', tree / name, vm + ':' + remote + '/' + name])
                         run(['limactl', 'shell', vm, 'sh', remote + '/tools/build-tpm-stub', remote + '/stub'])
+                        phase('stub-collect', 'Collecting the measured EFI stub')
                         run(['limactl', 'copy', vm + ':' + remote + '/stub/linux.efi.stub', target / 'linux.efi.stub'])
                     finally:
                         run(['limactl', 'shell', vm, 'rm', '-rf', '--', remote])
@@ -279,6 +297,7 @@ def main():
             return
         if operation != 'all':
             raise ValueError('unknown operation')
+        phase('policy-identity', 'Checking the local IPE signing identity')
         key, cert = identity(cache / 'signing')
         target = build(tree, cache, arch, base, key, cert)
         Path(report).write_text(json.dumps({

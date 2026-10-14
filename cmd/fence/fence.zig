@@ -5,6 +5,8 @@
 const std = @import("std");
 const sandbox = @import("sandbox");
 const allow = @import("allow");
+const dns = @import("dns");
+const net_rule = @import("net-rule");
 const linux = std.os.linux;
 const Io = std.Io;
 
@@ -79,6 +81,7 @@ pub fn main(init: std.process.Init) !void {
             .loopback = p.loopback[0..p.nloopback],
             .udp = p.udp[0..p.nudp],
             .connect = p.connectText(&out, &text),
+            .dns = p.dns.ids[0..p.dns.len],
             .metadata = p.metadata[0..p.nmetadata],
             .ipv6 = hasIpv6(),
             .kept = kept,
@@ -154,6 +157,15 @@ fn apply() !Policy {
     step = "policy";
     var buf: [4096]u8 = undefined;
     const p = try parsePolicy(try readPolicy(&buf));
+    step = "dns";
+    var resolv: [1024]u8 = undefined;
+    var socket = try dns.Socket.open();
+    defer socket.close();
+    const servers = try dns.resolvers(try readOptional(
+        "/run/werewolf/network/resolv.conf",
+        &resolv,
+    ));
+    try dns.replace(&socket, p.dns, .{}, servers);
     step = "routes";
     try routeRules(p);
     step = "landlock";
@@ -167,19 +179,7 @@ fn apply() !Policy {
 /// and UDP. The rest are dropped on arrival: they have ports, or they are
 /// tunnels or IPsec that would carry traffic past the rules if a handler
 /// were ever loaded.
-const Proto = enum(u8) {
-    icmp = 1,
-    ipip = 4,
-    tcp = 6,
-    udp = 17,
-    dccp = 33,
-    ipv6 = 41,
-    gre = 47,
-    esp = 50,
-    ah = 51,
-    sctp = 132,
-    udplite = 136,
-};
+const Proto = net_rule.Proto;
 
 /// dropped lists the protocols whose arriving packets are dropped unanswered.
 const dropped = [_]Proto{ .tcp, .udp, .udplite, .sctp, .dccp, .ipip, .ipv6, .gre, .esp, .ah };
@@ -253,6 +253,7 @@ const Policy = struct {
     nconnect: usize = 0,
     metadata: [max_entries]u32 = undefined,
     nmetadata: usize = 0,
+    dns: dns.Users = .{},
 
     /// connectText formats the connect entries for the log: "0 tcp 443".
     fn connectText(p: *const Policy, out: *[max_entries][]const u8, buf: []u8) []const []const u8 {
@@ -339,6 +340,8 @@ fn parsePolicy(text: []const u8) !Policy {
                 _ = words.next();
             }
             p.nconnect += 1;
+        } else if (std.mem.eql(u8, key, "dns")) {
+            try p.dns.add(try user(words.next() orelse ""));
         } else if (std.mem.eql(u8, key, "metadata")) {
             if (p.nmetadata == max_entries) return error.BadPolicy;
             p.metadata[p.nmetadata] = try user(words.next() orelse "");
@@ -369,26 +372,7 @@ const RT_TABLE_MAIN = 254;
 const RT_TABLE_LOCAL = 255;
 
 /// Rule is one policy-routing rule, as `ip rule` shows it.
-const Rule = struct {
-    family: u8 = linux.AF.INET,
-    priority: u32,
-    action: u8,
-    /// table is used by FR_ACT_TO_TBL.
-    table: u8 = 0,
-    /// from_here matches only locally sent traffic, whose lookups come from lo.
-    from_here: bool = false,
-    /// src and dst are 4 or 16 bytes, by the rule's family.
-    src: ?[]const u8 = null,
-    dst: ?[]const u8 = null,
-    /// dst_len is dst's prefix length; null means the whole address.
-    dst_len: ?u8 = null,
-    proto: ?Proto = null,
-    sport: ?u16 = null,
-    dport: ?u16 = null,
-    /// dport_last widens dport into a range. Null is dport alone.
-    dport_last: ?u16 = null,
-    uid: ?u32 = null,
-};
+const Rule = net_rule.Rule;
 
 /// max_rules bounds plan's output. Per entry index, listen, UDP listen,
 /// connect and metadata make at most 3 + 3 + 3 + 2 rules, and a public
@@ -680,104 +664,21 @@ fn hasIpv6() bool {
     return linux.errno(linux.access("/proc/net/if_inet6", linux.F_OK)) == .SUCCESS;
 }
 
-const NLMSG_ERROR = 2;
-const RTM_NEWRULE = 32;
-const RTM_DELRULE = 33;
-const NLM_F_REQUEST = 0x1;
-const NLM_F_ACK = 0x4;
-const NLM_F_EXCL = 0x200;
-const NLM_F_CREATE = 0x400;
-const FRA_DST = 1;
-const FRA_SRC = 2;
-const FRA_IIFNAME = 3;
-const FRA_PRIORITY = 6;
-const FRA_TABLE = 15;
-const FRA_UID_RANGE = 20;
-const FRA_IP_PROTO = 22;
-const FRA_SPORT_RANGE = 23;
-const FRA_DPORT_RANGE = 24;
-
-/// ruleMessage builds an RTM_NEWRULE or RTM_DELRULE message for r in buf.
-fn ruleMessage(buf: *[256]u8, seq: u32, kind: u16, r: Rule) []const u8 {
-    @memset(buf, 0);
-    var b: Builder = .{ .buf = buf, .len = 16 };
-    // struct fib_rule_hdr: family, dst_len, src_len, tos, table, res1,
-    // res2, action, flags.
-    const dst_len: u8 = if (r.dst) |a| r.dst_len orelse @intCast(a.len * 8) else 0;
-    const src_len: u8 = if (r.src) |a| @intCast(a.len * 8) else 0;
-    b.bytes(&.{ r.family, dst_len, src_len, 0, r.table, 0, 0, r.action, 0, 0, 0, 0 });
-    b.attr(FRA_PRIORITY, std.mem.asBytes(&r.priority));
-    if (r.table != 0) {
-        const table: u32 = r.table;
-        b.attr(FRA_TABLE, std.mem.asBytes(&table));
-    }
-    if (r.from_here) b.attr(FRA_IIFNAME, "lo\x00");
-    if (r.src) |a| b.attr(FRA_SRC, a);
-    if (r.dst) |a| b.attr(FRA_DST, a);
-    if (r.proto) |pr| b.attr(
-        FRA_IP_PROTO,
-        &.{if (pr == .icmp and r.family == linux.AF.INET6) IPPROTO_ICMPV6 else @backingInt(pr)},
-    );
-    if (r.sport) |s| b.attr(FRA_SPORT_RANGE, std.mem.sliceAsBytes(&[2]u16{ s, s }));
-    if (r.dport) |d| b.attr(
-        FRA_DPORT_RANGE,
-        std.mem.sliceAsBytes(&[2]u16{ d, r.dport_last orelse d }),
-    );
-    if (r.uid) |u| b.attr(FRA_UID_RANGE, std.mem.sliceAsBytes(&[2]u32{ u, u }));
-    // struct nlmsghdr: length, type, flags, sequence, port.
-    std.mem.writeInt(u32, buf[0..4], @intCast(b.len), .little);
-    std.mem.writeInt(u16, buf[4..6], kind, .little);
-    const flags: u16 = if (kind == RTM_NEWRULE)
-        NLM_F_REQUEST | NLM_F_ACK | NLM_F_EXCL | NLM_F_CREATE
-    else
-        NLM_F_REQUEST | NLM_F_ACK;
-    std.mem.writeInt(u16, buf[6..8], flags, .little);
-    std.mem.writeInt(u32, buf[8..12], seq, .little);
-    return buf[0..b.len];
-}
-
-/// Builder appends netlink attributes, four-byte aligned. buf fits the
-/// largest message fence builds.
-const Builder = struct {
-    buf: *[256]u8,
-    len: usize,
-
-    fn bytes(b: *Builder, v: []const u8) void {
-        @memcpy(b.buf[b.len..][0..v.len], v);
-        b.len += v.len;
-    }
-
-    fn attr(b: *Builder, kind: u16, v: []const u8) void {
-        std.mem.writeInt(u16, b.buf[b.len..][0..2], @intCast(4 + v.len), .little);
-        std.mem.writeInt(u16, b.buf[b.len + 2 ..][0..2], kind, .little);
-        @memcpy(b.buf[b.len + 4 ..][0..v.len], v);
-        b.len += std.mem.alignForward(usize, 4 + v.len, 4);
-    }
-};
-
-/// send sends msg and reads its acknowledgement, returning the kernel's errno
-/// as an error.
-fn send(nl: i32, msg: []const u8, seq: u32, comptime what: []const u8) !void {
-    const kernel: linux.sockaddr.nl = .{ .pid = 0, .groups = 0 };
-    _ = try sys(
-        linux.sendto(nl, msg.ptr, msg.len, 0, @ptrCast(&kernel), @sizeOf(linux.sockaddr.nl)),
-        "netlink send",
-    );
-    var reply: [512]u8 align(4) = undefined;
-    const n = try sys(linux.recvfrom(nl, &reply, reply.len, 0, null, null), "netlink receive");
-    const e = ackError(reply[0..n], seq) orelse return error.BadAck;
-    if (e == 0) return;
-    _ = try sys(@bitCast(@as(isize, e)), what);
-}
-
-/// ackError returns the error in an NLMSG_ERROR acknowledging seq: 0 for
-/// success, a negative errno for failure, or null if reply is not one.
-fn ackError(reply: []const u8, seq: u32) ?i32 {
-    if (reply.len < 20) return null;
-    if (std.mem.readInt(u16, reply[4..6], .little) != NLMSG_ERROR) return null;
-    if (std.mem.readInt(u32, reply[8..12], .little) != seq) return null;
-    return std.mem.readInt(i32, reply[16..20], .little);
-}
+const NLMSG_ERROR = net_rule.NLMSG_ERROR;
+const RTM_NEWRULE = net_rule.RTM_NEWRULE;
+const RTM_DELRULE = net_rule.RTM_DELRULE;
+const FRA_DST = net_rule.FRA_DST;
+const FRA_SRC = net_rule.FRA_SRC;
+const FRA_IIFNAME = net_rule.FRA_IIFNAME;
+const FRA_PRIORITY = net_rule.FRA_PRIORITY;
+const FRA_TABLE = net_rule.FRA_TABLE;
+const FRA_UID_RANGE = net_rule.FRA_UID_RANGE;
+const FRA_IP_PROTO = net_rule.FRA_IP_PROTO;
+const FRA_SPORT_RANGE = net_rule.FRA_SPORT_RANGE;
+const FRA_DPORT_RANGE = net_rule.FRA_DPORT_RANGE;
+const ruleMessage = net_rule.ruleMessage;
+const send = net_rule.send;
+const ackError = net_rule.ackError;
 
 // --- the ports: Landlock -----------------------------------------------------
 
@@ -814,6 +715,7 @@ fn restrict(p: Policy) !void {
                 try ruleset.port(sandbox.connect_tcp, @intCast(port_num));
         } else try ruleset.port(sandbox.connect_tcp, c.port);
     };
+    if (p.dns.len > 0) try ruleset.port(sandbox.connect_tcp, 53);
     if (p.nmetadata > 0) try ruleset.port(sandbox.connect_tcp, metadata_port);
     for (files) |f| try allowPath(ruleset, linux.AT.FDCWD, f.path, f.access);
     // Root's posture/updater use the resource manager on TPM-gated boots.
@@ -1138,6 +1040,8 @@ test "policies" {
     try std.testing.expect(pub_.connect[0].public and !pub_.connect[1].public);
     const pt = pub_.connectText(&out, &text);
     try std.testing.expectEqualStrings("207 tcp 443 public", pt[0]);
+    const names = try parsePolicy("dns 0\ndns 69\ndns 0\n");
+    try std.testing.expectEqualSlices(u32, &.{ 0, 69 }, names.dns.ids[0..names.dns.len]);
     const none = try parsePolicy("");
     try std.testing.expectEqual(0, none.nlisten + none.nconnect + none.nmetadata);
     for ([_][]const u8{
@@ -1153,6 +1057,9 @@ test "policies" {
         "listen tcp loopback\n",
         "listen tcp 22 public\n",
         "metadata _cloud\n",
+        "dns all\n",
+        "dns\n",
+        "dns 0 tcp\n",
         "allow everything\n",
         "listen tcp\n",
         "connect 0 sctp 1\n",

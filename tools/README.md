@@ -71,7 +71,9 @@ rewrites deprecated std calls, breaks lines longer than N bytes (default 100)
 where zig fmt keeps the break, then formats as zig fmt does. It fails on lines
 it cannot break, except multiline string lines and comments that overflow by
 one unbreakable word, such as a URL. `--check` writes nothing and also fails
-on any file it would change.
+on any file it would change. It uses Zig's AstGen to check every function,
+including uncalled bodies, in the same process rather than starting Zig for
+each file. Each file's memory is released before reading the next.
 
 ## cve-tiers
 

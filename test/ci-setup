@@ -17,6 +17,11 @@ for a; do
 	esac
 done
 "$(dirname "$0")/../tools/install-deps" -y "$@"
+# install-deps stages public EFI stubs in the checkout as root. The caller
+# must still be able to install linters and compile tools under out/.
+if [ -n "${SUDO_USER:-}" ] && [ -d out ]; then
+	chown -R "$SUDO_USER" out
+fi
 [ -z "${1:-}" ] || exit 0
 
 # Ubuntu's AppArmor stops unprivileged programs from making user namespaces,

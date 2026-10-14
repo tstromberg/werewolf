@@ -38,6 +38,54 @@ const Publisher = struct {
 
 pub const Reuse = enum { miss, running, configure };
 
+/// Host enrollment files cannot establish whether a Lima instance still exists.
+pub fn reconcileLima(io: Io, gpa: Allocator, name: []const u8, why: *howl.Why) !void {
+    if (howl.madeOn(io, gpa, name) != .lima) return;
+    const dir = try howl.machineDir(gpa, name);
+    const guard = try Dir.cwd().createFile(io, try gpa.print("{s}/secure.lock", .{dir}), .{
+        .truncate = false,
+        .permissions = .fromMode(0o600),
+    });
+    defer guard.close(io);
+    try guard.lock(io, .exclusive);
+    defer guard.unlock(io);
+    const present = lima.exists(io, gpa, name) catch |err| return why.refuse(
+        "cannot query Lima for {s}: {s}; retained enrollment is unchanged",
+        .{ name, @errorName(err) },
+    );
+    try clearAbsentLima(io, gpa, name, present);
+}
+
+fn clearAbsentLima(io: Io, gpa: Allocator, name: []const u8, present: bool) !void {
+    if (present) return;
+    const dir = try howl.machineDir(gpa, name);
+    stopPublisher(io, gpa, dir);
+    try Dir.cwd().deleteTree(io, dir);
+}
+
+test "absent Lima instances clear stale host enrollment; extant instances retain it" {
+    const t = std.testing;
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var nonce: [8]u8 = undefined;
+    try t.io.randomSecure(&nonce);
+    const name = try gpa.print("ww-orphan-{x}", .{&nonce});
+    const dir = try howl.machineDir(gpa, name);
+    defer Dir.cwd().deleteTree(t.io, dir) catch {};
+    const authority = try gpa.print("{s}/authority", .{dir});
+    try Dir.cwd().createDirPath(t.io, authority);
+    const profile = try gpa.print("{s}/profile.json", .{authority});
+    try Dir.cwd().writeFile(t.io, .{ .sub_path = profile, .data = "original enrollment" });
+    try clearAbsentLima(t.io, gpa, name, true);
+    try t.expectEqualStrings(
+        "original enrollment",
+        try Dir.cwd().readFileAlloc(t.io, profile, gpa, .limited(4096)),
+    );
+    try clearAbsentLima(t.io, gpa, name, false);
+    try t.expectError(error.FileNotFound, Dir.cwd().access(t.io, profile, .{}));
+}
+
 pub fn refreshSource(
     io: Io,
     gpa: Allocator,
@@ -90,8 +138,22 @@ pub fn resumeDownload(
     };
     const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
     if (profile.imported == null) return why.refuse(
-        "{s} has self-signed enrollment; retain --build or use a new machine name",
-        .{name},
+        "{s} was created with local signing keys; this command requests production-signed " ++
+            "images.\n" ++
+            "Changing signing keys would invalidate its retained A/B rollback slot. " ++
+            "Its disks and keys are unchanged.\n" ++
+            "Keep this VM: {s}\n" ++
+            "Create a separate production VM: howl create werewolf-production --with {s} --on {t}",
+        .{
+            name,
+            if (std.mem.eql(u8, name, howl.run_name) and
+                std.mem.eql(u8, profile.spec.form, "playground"))
+                "howl run --build"
+            else
+                "repeat your original command with --build",
+            o.form,
+            o.on orelse profile.provider,
+        },
     );
     if (profile.provider != o.on.? or !std.mem.eql(u8, profile.spec.form, o.form))
         return why.refuse(
@@ -755,6 +817,32 @@ test "unchanged live runs preserve state; changed inputs, config and lost author
     defer server.deinit(io);
     const o: howl.Options = .{ .form = form, .on = .qemu, .local = true, .secure = true };
     try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
+    const saved_profile = try Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    );
+    var downloaded = o;
+    downloaded.local = false;
+    downloaded.form = "playground";
+    downloaded.boot_image = .{
+        .directory = "unused-vendor-bundle",
+        .boot_certificate = "unused-boot-certificate",
+        .image_certificate = "unused-image-certificate",
+        .channel = "https://10.0.2.2:9443/playground",
+    };
+    var why: howl.Why = .{};
+    try t.expectError(error.Refused, resumeDownload(io, gpa, &downloaded, name, &why));
+    try t.expect(std.mem.indexOf(u8, why.text, "retained A/B rollback slot") != null);
+    try t.expect(std.mem.indexOf(u8, why.text, "--with playground --on qemu") != null);
+    try t.expectEqualStrings(saved_profile, try Dir.cwd().readFileAlloc(
+        io,
+        try gpa.print("{s}/profile.json", .{authority}),
+        gpa,
+        .limited(64 << 10),
+    ));
+    try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
     try Dir.cwd().writeFile(io, .{ .sub_path = source_file, .data = "edited guest source" });
     try t.expectEqual(Reuse.miss, try reuse(io, gpa, o, name, tar));
     try Dir.cwd().writeFile(io, .{ .sub_path = source_file, .data = "original source" });
@@ -833,7 +921,12 @@ pub fn create(
         );
         Dir.cwd().deleteDir(io, authority) catch |err| if (err != error.FileNotFound) return err;
     }
-    var steps: progress.Steps = try .init(io, gpa, why, try tell.step(gpa, dir));
+    var step_options = try tell.step(gpa, dir);
+    if (kept) step_options.first = .{
+        .name = "Checking retained enrollment and updating VM configuration",
+        .short = "files",
+    };
+    var steps: progress.Steps = try .init(io, gpa, why, step_options);
     Dir.cwd().deleteFile(io, try gpa.print("{s}/ready", .{authority})) catch |err| switch (err) {
         error.FileNotFound => {},
         else => return err,
@@ -1071,18 +1164,27 @@ pub fn create(
                 (try native.paths(gpa, profile.spec)).out,
         );
     }
+    // Publisher convergence and VM-state checks belong to the launch phase.
+    try steps.enter(.{
+        .name = if (on_lima)
+            "Starting Lima VM and waiting for guest init"
+        else
+            "Starting QEMU and waiting for guest init",
+        .short = "launch",
+    });
     if (!(try steps.exec(&.{.{ .argv = &.{ "python3", script, "start", config } }}, .{})).ok)
         return steps.fail("the host image publisher did not start");
     if (!on_lima) {
         try startQemu(io, gpa, profile.spec, name, at, &steps, why);
         try enrollment.durable(io, try gpa.print("{s}/ready", .{authority}), "verified\n");
         _ = try steps.finish();
-        try w.print("{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n", .{
-            name, qemu.record(io, gpa, dir, "ssh") orelse "0", o.form,
+        if (tell.milestones) |m| m.done(.{
+            .name = try gpa.print("{s} running; total", .{name}),
+            .short = "ready",
         });
+        try @import("local.zig").protectedReady(io, gpa, name, o.form, provider, false, w, why);
         return;
     }
-    _ = try steps.finish();
     if (!try lima.running(io, gpa, name)) {
         const instance = try lima.dir(io, gpa, name) orelse return error.MissingLimaInstance;
         const console = try gpa.print("{s}/serial.log", .{instance});
@@ -1103,6 +1205,8 @@ pub fn create(
         });
         defer starter.kill(io);
         var spin: progress.Spinner = .init(io);
+        spin.phase = steps.said.phase.name;
+        spin.start = steps.said.since;
         const boot = try booting.watch(io, gpa, console, seen, null, 0, &spin);
         spin.clear();
         if (!boot.up) return why.refuse(
@@ -1111,9 +1215,12 @@ pub fn create(
         );
     }
     try enrollment.durable(io, try gpa.print("{s}/ready", .{authority}), "verified\n");
-    try w.print("{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n", .{
-        name, lima.sshPort(io, gpa, name) orelse "0", o.form,
+    _ = try steps.finish();
+    if (tell.milestones) |m| m.done(.{
+        .name = try gpa.print("{s} running; total", .{name}),
+        .short = "ready",
     });
+    try @import("local.zig").protectedReady(io, gpa, name, o.form, provider, false, w, why);
 }
 
 /// Rebuild with the existing authorities; publishing never changes protected TPM state.
@@ -1609,6 +1716,8 @@ fn startQemu(
         _ = qemu.stop(io, gpa, at) catch false;
     }
     var spin: progress.Spinner = .init(io);
+    spin.phase = steps.said.phase.name;
+    spin.start = steps.said.since;
     const boot = try booting.watch(
         io,
         gpa,
@@ -1683,6 +1792,8 @@ fn provisionInstance(
     try howl.writePrivate(io, gpa, tar_path, configured, why);
     if (profile.provider == .lima) {
         const config_disk = try gpa.print("{s}-config", .{name});
+        // Match the unprotected path: limactl delete leaves detached config disks.
+        _ = try steps.exec(&.{.{ .argv = &.{ "limactl", "disk", "delete", config_disk } }}, .{});
         if (!(try steps.exec(&.{.{ .argv = &.{
             "limactl", "disk", "import", config_disk, tar_path,
         } }}, .{})).ok) return steps.fail("importing the config disk failed");

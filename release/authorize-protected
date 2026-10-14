@@ -1,0 +1,46 @@
+#!/usr/bin/env python3
+"""Privately authorize candidates for a trusted lifecycle job, retaining only admitted signatures."""
+import importlib.machinery
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+downloads = importlib.machinery.SourceFileLoader('protected_admission', 'tools/boot-download').load_module()
+
+
+def authorize(howl, provider, bundle):
+    bundle = Path(bundle).resolve()
+    if provider not in ('lima', 'qemu') or (bundle / 'boot.json.sig').exists():
+        raise ValueError('invalid candidate authorization request')
+    raw = json.loads(downloads.read(bundle / 'boot.json', downloads.HEAD_LIMIT))
+    trust = Path('release/protected').resolve()
+    metadata = json.loads((trust / 'trust.json').read_text())
+    request = dict(source=metadata['source'], cache='unused', form=raw['form'], arch=raw['image']['arch'],
+        provider=provider, boot_certificate=str(trust / 'boot.crt'), image_certificate=str(trust / 'image.crt'),
+        channel='https://%s:%d/%s' % ('192.168.5.2' if provider == 'lima' else '10.0.2.2', metadata['permit_port'], raw['form']))
+    downloads.validate_request(request)
+    signature = bundle / 'boot.json.sig'
+    try:
+        subprocess.run(['openssl', 'dgst', '-sha256', '-sign', os.environ['WEREWOLF_PROTECTED_IMAGE_KEY'],
+                        '-out', signature, bundle / 'boot.json'], check=True, capture_output=True)
+        manifest = downloads.native(howl, 'head', bundle, request)
+        downloads.freshness(manifest, downloads.sha(bundle / 'boot.json'), None, time.time())
+        downloads.native(howl, 'verify', bundle, request)
+    except BaseException:
+        signature.unlink(missing_ok=True)
+        raise
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        if len(sys.argv) < 4:
+            raise ValueError('usage: authorize-protected HOWL PROVIDER BUNDLE...')
+        howl = str(Path(sys.argv[1]).resolve())
+        for bundle in sys.argv[3:]:
+            authorize(howl, sys.argv[2], bundle)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        sys.exit('authorize-protected: candidate admission failed')

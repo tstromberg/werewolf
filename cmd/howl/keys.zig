@@ -22,11 +22,11 @@ pub fn offer(
     chain: []const forms.Form,
     name: []const u8,
     yes: bool,
-    local_build: bool,
+    announce: bool,
 ) !?[]const u8 {
     if (!forms.runsSshd(chain)) return null;
     const key_files = forms.takesKeyFiles(gpa, chain) catch false;
-    return offerFor(io, gpa, key_files, name, yes, local_build);
+    return offerFor(io, gpa, key_files, name, yes, announce);
 }
 
 pub fn offerFor(
@@ -35,7 +35,7 @@ pub fn offerFor(
     key_files: bool,
     name: []const u8,
     yes: bool,
-    local_build: bool,
+    announce: bool,
 ) !?[]const u8 {
     const home = howl.environ.get("HOME") orelse return null;
     const found = try usable(io, gpa, try std.fs.path.join(gpa, &.{ home, ".ssh" }), key_files);
@@ -76,7 +76,7 @@ pub fn offerFor(
             return null;
         }
     }
-    if (!local_build) howl.say(io, "root on {s} takes {s}", .{ name, files });
+    if (announce) howl.say(io, "root on {s} takes {s}", .{ name, files });
     return try mem.concat(gpa, u8, found.lines);
 }
 

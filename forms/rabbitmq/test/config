@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+umask 077
+mkdir -p "$1/rabbitmq"
+printf '%s' werewolf-check-pass-1 >"$1/rabbitmq/password"

@@ -69,7 +69,18 @@ services:
   # briefly for the signature cache, then starts on whatever rules are
   # already there.
   suricata:
-    exec: /usr/bin/suricata -c /usr/share/suricata/suricata.yaml --af-packet -l /data/svc/suricata --set default-log-dir=/data/svc/suricata --set unix-command.enabled=no --set default-rule-path=/data/svc/rules-fetch/rules --set classification-file=/data/svc/rules-fetch/rules/classification.config --set reference-config-file=/usr/share/suricata/reference.config --set rule-files.0=werewolf.rules --set rule-files.1=app-layer-events.rules --set rule-files.2=decoder-events.rules --set rule-files.3=dhcp-events.rules --set rule-files.4=dnp3-events.rules --set rule-files.5=dns-events.rules --set rule-files.6=enip-events.rules --set rule-files.7=files.rules --set rule-files.8=ftp-events.rules --set rule-files.9=http-events.rules --set rule-files.10=http2-events.rules --set rule-files.11=ipsec-events.rules --set rule-files.12=kerberos-events.rules --set rule-files.13=ldap-events.rules --set rule-files.14=mdns-events.rules --set rule-files.15=modbus-events.rules --set rule-files.16=mqtt-events.rules --set rule-files.17=nfs-events.rules --set rule-files.18=ntp-events.rules --set rule-files.19=pgsql-events.rules --set rule-files.20=pop3-events.rules --set rule-files.21=quic-events.rules --set rule-files.22=rfb-events.rules --set rule-files.23=smb-events.rules --set rule-files.24=smtp-events.rules --set rule-files.25=ssh-events.rules --set rule-files.26=stream-events.rules --set rule-files.27=tls-events.rules --set rule-files.28=websocket-events.rules --set rule-files.29=emerging.rules --init-errors-fatal
+    exec: /usr/bin/suricata -c /usr/share/suricata/suricata.yaml --af-packet -l /data/svc/suricata --set default-log-dir=/data/svc/suricata --set
+      unix-command.enabled=no --set default-rule-path=/data/svc/rules-fetch/rules --set
+      classification-file=/data/svc/rules-fetch/rules/classification.config --set reference-config-file=/usr/share/suricata/reference.config --set
+      rule-files.0=werewolf.rules --set rule-files.1=app-layer-events.rules --set rule-files.2=decoder-events.rules --set
+      rule-files.3=dhcp-events.rules --set rule-files.4=dnp3-events.rules --set rule-files.5=dns-events.rules --set rule-files.6=enip-events.rules
+      --set rule-files.7=files.rules --set rule-files.8=ftp-events.rules --set rule-files.9=http-events.rules --set rule-files.10=http2-events.rules
+      --set rule-files.11=ipsec-events.rules --set rule-files.12=kerberos-events.rules --set rule-files.13=ldap-events.rules --set
+      rule-files.14=mdns-events.rules --set rule-files.15=modbus-events.rules --set rule-files.16=mqtt-events.rules --set
+      rule-files.17=nfs-events.rules --set rule-files.18=ntp-events.rules --set rule-files.19=pgsql-events.rules --set rule-files.20=pop3-events.rules
+      --set rule-files.21=quic-events.rules --set rule-files.22=rfb-events.rules --set rule-files.23=smb-events.rules --set
+      rule-files.24=smtp-events.rules --set rule-files.25=ssh-events.rules --set rule-files.26=stream-events.rules --set
+      rule-files.27=tls-events.rules --set rule-files.28=websocket-events.rules --set rule-files.29=emerging.rules --init-errors-fatal
     before: /usr/lib/werewolf/rules-fetch wait
     user: suricata
     caps: net_raw net_admin

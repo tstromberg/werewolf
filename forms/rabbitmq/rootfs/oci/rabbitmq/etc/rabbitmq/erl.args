@@ -1,0 +1,10 @@
+-noinput
+-boot start_sasl
+-s rabbit boot
+-sname rabbit@localhost
+-start_epmd false
++S 2:2
++sbwt none
++sbwtdcpu none
++sbwtdio none
+-kernel inet_dist_listen_min 25672 inet_dist_listen_max 25672 inet_dist_use_interface {127,0,0,1}

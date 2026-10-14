@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""Exercise fence's real DNS rules, renewal and HTTPS by hostname on Linux.
+
+Usage: python3 test/check-dns FENCE DNS-POLICY [DHCP-CLIENT [POSTURE-EGRESS]]
+The binaries must be Linux builds. Everything runs in private mount/network
+namespaces; no host interface, routing policy, resolver or /run state changes.
+No internet, third-party DNS server, VM or production credentials are needed.
+"""
+import http.server
+import json
+import os
+from pathlib import Path
+import select
+import shutil
+import socket
+import ssl
+import struct
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+
+QUERY = bytes.fromhex('123401000001000000000000') + b'\x06update\x08werewolf\x04test\x00\x00\x01\x00\x01'
+FIRST = '10.77.0.2'
+SECOND = '10.77.0.3'
+GCP = '169.254.169.254'
+AZURE = '168.63.129.16'
+
+
+def run(args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def response(data):
+    end = 12
+    while data[end]:
+        end += data[end] + 1
+    end += 5
+    question = data[12:end]
+    is_a = data[end - 4:end - 2] == b'\x00\x01'
+    answer = b'\xc0\x0c\x00\x01\x00\x01\x00\x00\x00\x3c\x00\x04' + socket.inet_aton('203.0.113.7') if is_a else b''
+    return data[:2] + struct.pack('!HHHHH', 0x8180, 1, int(is_a), 0, 0) + question + answer
+
+
+def server(work):
+    tcp = socket.socket()
+    tcp.bind(('', 53))
+    tcp.listen()
+
+    def datagrams(address):
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.bind((address, 53))
+        while True:
+            data, addr = udp.recvfrom(2048)
+            udp.sendto(response(data), addr)
+
+    def receive(client, size):
+        data = b''
+        while len(data) < size:
+            chunk = client.recv(size - len(data))
+            if not chunk:
+                return None
+            data += chunk
+        return data
+
+    def streams():
+        while True:
+            client, _ = tcp.accept()
+            with client:
+                # Posture deliberately closes permitted TCP probes without
+                # sending DNS. Keep serving the next connection afterward.
+                try:
+                    header = receive(client, 2)
+                    if header is None:
+                        continue
+                    data = receive(client, struct.unpack('!H', header)[0])
+                    if data is None:
+                        continue
+                    answer = response(data)
+                    client.sendall(struct.pack('!H', len(answer)) + answer)
+                except OSError:
+                    continue
+
+    for address in [FIRST, SECOND, GCP, AZURE]:
+        threading.Thread(target=datagrams, args=(address,), daemon=True).start()
+    threading.Thread(target=streams, daemon=True).start()
+
+    def leases():
+        dhcp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        dhcp.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        dhcp.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, b'peer\0')
+        dhcp.bind(('', 67))
+        while True:
+            data, _ = dhcp.recvfrom(2048)
+            if len(data) < 240:
+                continue
+            options = {}
+            at = 240
+            while at + 1 < len(data) and data[at] != 255:
+                if data[at] == 0:
+                    at += 1
+                    continue
+                size = data[at + 1]
+                options[data[at]] = data[at + 2:at + 2 + size]
+                at += 2 + size
+            kind = options.get(53)
+            if kind not in (b'\x01', b'\x03'):
+                continue
+            reply = bytearray(240)
+            reply[:3] = b'\x02\x01\x06'
+            reply[4:8] = data[4:8]
+            reply[16:20] = socket.inet_aton('10.77.0.1')
+            reply[28:34] = data[28:34]
+            reply[236:240] = data[236:240]
+            fields = {53: b'\x02' if kind == b'\x01' else b'\x05',
+                      54: socket.inet_aton(FIRST), 1: socket.inet_aton('255.255.255.0'),
+                      3: socket.inet_aton(FIRST), 51: struct.pack('!I', 60),
+                      58: struct.pack('!I', 30), 59: struct.pack('!I', 45)}
+            servers = (work / 'lease-dns').read_text().split()
+            if servers:
+                fields[6] = b''.join(socket.inet_aton(address) for address in servers)
+            for code, value in fields.items():
+                reply += bytes([code, len(value)]) + value
+            reply += b'\xff'
+            dhcp.sendto(reply, ('255.255.255.255', 68))
+
+    threading.Thread(target=leases, daemon=True).start()
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'signed-update-fixture\n')
+
+        def log_message(self, *args):
+            pass
+
+    https = http.server.HTTPServer(('', 443), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(work / 'tls.crt'), str(work / 'tls.key'))
+    https.socket = context.wrap_socket(https.socket, server_side=True)
+    print('ready', flush=True)
+    https.serve_forever()
+
+
+PROBE = r'''
+import errno,json,os,socket,ssl,struct,subprocess,sys,urllib.request
+query=bytes.fromhex('123401000001000000000000')+b'\x06update\x08werewolf\x04test\x00\x00\x01\x00\x01'
+for line in sys.stdin:
+    request=json.loads(line)
+    pid=os.fork()
+    if pid:
+        _, status=os.waitpid(pid,0)
+        print(json.dumps({'result':os.waitstatus_to_exitcode(status)}),flush=True)
+        continue
+    try:
+        os.setgroups([])
+    except PermissionError:
+        pass  # An unprivileged user namespace may deny setgroups.
+    os.setgid(request['uid'])
+    os.setuid(request['uid'])
+    try:
+        if request['mode']=='posture':
+            report=json.loads(subprocess.check_output(['/usr/local/bin/werewolf-posture-egress'],timeout=3))
+            results={item['id']:item['result'] for item in report}
+            assert results==request['expected'], (results,report)
+        elif request['mode']=='https':
+            context=ssl.create_default_context(cafile=sys.argv[1])
+            opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),urllib.request.HTTPSHandler(context=context))
+            with opener.open('https://update.werewolf.test/latest.json',timeout=3) as reply:
+                assert reply.read()==b'signed-update-fixture\n'
+        else:
+            tcp=request['mode'] in ('tcp','metadata','http')
+            sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM if tcp else socket.SOCK_DGRAM)
+            sock.settimeout(2)
+            port=80 if request['mode'] in ('metadata','http') else 53
+            sock.connect((request['server'],port))
+            if tcp:
+                sock.sendall(struct.pack('!H',len(query))+query)
+                header=sock.recv(2)
+                size=struct.unpack('!H',header)[0]
+                answer=b''
+                while len(answer)<size:
+                    answer+=sock.recv(size-len(answer))
+            else:
+                sock.send(query)
+                answer=sock.recv(2048)
+            assert answer[:2]==query[:2] and answer[-4:]==socket.inet_aton('203.0.113.7')
+        assert request['allowed'], 'undeclared traffic succeeded'
+    except OSError as error:
+        assert not request['allowed'], repr(error)
+        assert error.errno in (errno.EACCES,errno.EPERM), repr(error)
+    os._exit(0)
+'''
+
+
+def inside(fence, driver, parent_net, dhcp=None, posture_bin=None):
+    # Entered through unshare, before making any filesystem/network changes.
+    assert os.readlink('/proc/self/ns/net') != parent_net
+    assert os.readlink('/proc/self/ns/mnt') != os.environ['WEREWOLF_DNS_PARENT_MOUNT']
+    run(['mount', '--make-rprivate', '/'])
+    with tempfile.TemporaryDirectory(prefix='werewolf-dns-') as name:
+        work = Path(name)
+        work.chmod(0o755)
+        run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+             '-subj', '/CN=update.werewolf.test', '-addext', 'subjectAltName=DNS:update.werewolf.test',
+             '-keyout', str(work / 'tls.key'), '-out', str(work / 'tls.crt')],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        (work / 'tls.crt').chmod(0o644)
+        probe = work / 'probe.py'
+        probe.write_text(PROBE)
+        probe.chmod(0o644)
+        if posture_bin:
+            binaries = work / 'bin'
+            binaries.mkdir(mode=0o755)
+            shutil.copyfile(posture_bin, binaries / 'werewolf-posture-egress')
+            (binaries / 'werewolf-posture-egress').chmod(0o755)
+            run(['mount', '--bind', str(binaries), '/usr/local/bin'])
+        (work / 'lease-dns').write_text(FIRST + '\n')
+        for directory in ['/run', '/etc', '/usr/share', '/var']:
+            run(['mount', '-t', 'tmpfs', 'tmpfs', directory])
+        Path('/var/empty').mkdir(mode=0o755)
+        Path('/var/run').symlink_to('/run')
+        policy = Path('/usr/share/werewolf/net')
+        policy.parent.mkdir()
+        policy.write_text('dns 69\nconnect 69 tcp 443\n')
+        resolv = Path('/run/werewolf/network/resolv.conf')
+        resolv.parent.mkdir(parents=True)
+        # The OCI resolver view binds the directory, never the old file inode.
+        Path('/etc/werewolf-network').mkdir()
+        run(['mount', '--bind', str(resolv.parent), '/etc/werewolf-network'])
+        run(['mount', '-o', 'remount,bind,ro', '/etc/werewolf-network'])
+        Path('/etc/resolv.conf').symlink_to('/etc/werewolf-network/resolv.conf')
+        old = 'nameserver ' + FIRST + '\n'
+        resolv.write_text(old)
+        run(['ip', 'link', 'set', 'lo', 'up'])
+        run(['ip', 'netns', 'add', 'dns-peer'])
+        run(['ip', 'link', 'add', 'client', 'type', 'veth', 'peer', 'name', 'peer'])
+        run(['ip', 'link', 'set', 'peer', 'netns', 'dns-peer'])
+        run(['ip', 'addr', 'add', '10.77.0.1/24', 'dev', 'client'])
+        run(['ip', 'link', 'set', 'client', 'up'])
+        for scope in ['all', 'default', 'client']:
+            Path('/proc/sys/net/ipv4/conf/' + scope + '/rp_filter').write_text('0\n')
+        run(['ip', 'route', 'add', 'default', 'via', FIRST])
+        ipv6 = Path('/proc/net/if_inet6').exists()
+        if ipv6:
+            run(['ip', '-6', 'addr', 'add', '2001:db8:77::1/64', 'dev', 'client'])
+            run(['ip', '-6', 'route', 'add', 'default', 'via', '2001:db8:77::2'])
+        for address in [FIRST + '/24', SECOND + '/32', GCP + '/32', AZURE + '/32', '203.0.113.7/32']:
+            run(['ip', '-n', 'dns-peer', 'addr', 'add', address, 'dev', 'peer'])
+        run(['ip', '-n', 'dns-peer', 'link', 'set', 'peer', 'up'])
+        run(['ip', '-n', 'dns-peer', 'link', 'set', 'lo', 'up'])
+        run(['ip', '-n', 'dns-peer', 'route', 'add', 'default', 'dev', 'peer'])
+        if ipv6:
+            run(['ip', '-n', 'dns-peer', '-6', 'addr', 'add', '2001:db8:77::2/64', 'dev', 'peer'])
+            run(['ip', '-n', 'dns-peer', '-6', 'route', 'add', 'default', 'dev', 'peer'])
+        peer = subprocess.Popen(['ip', 'netns', 'exec', 'dns-peer', sys.executable,
+                                 str(Path(__file__).resolve()), '--server', str(work)],
+                                stdout=subprocess.PIPE, text=True)
+        client = None
+        keeper = None
+        keeper_log = None
+        watcher = None
+        try:
+            assert select.select([peer.stdout], [], [], 10)[0] and peer.stdout.readline().strip() == 'ready'
+            if posture_bin:
+                watcher = subprocess.Popen(['/usr/local/bin/werewolf-posture-egress', '--watch-resolvers'],
+                                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+            def watched(expected):
+                if not watcher:
+                    return
+                watcher.stdin.write('\n')
+                watcher.stdin.flush()
+                assert select.select([watcher.stdout], [], [], 5)[0], 'resolver floor timed out'
+                assert json.loads(watcher.stdout.readline()) == expected
+
+            watched(old)
+            if dhcp:
+                run([dhcp, 'up', 'client'], timeout=35)
+                keeper_log = (work / 'dhcp.log').open('w')
+                keeper = subprocess.Popen([dhcp, 'keep'], stdout=keeper_log, stderr=subprocess.STDOUT)
+            client = subprocess.Popen([fence, '/usr/bin/python3', '-u', str(probe), str(work / 'tls.crt')],
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            assert select.select([client.stdout], [], [], 10)[0], 'fence timeout'
+            announcement = client.stdout.readline()
+            assert announcement.startswith('fence: ') and '"event":"fence"' in announcement, announcement
+            count = 0
+
+            def probe(request):
+                nonlocal count
+                client.stdin.write(json.dumps(request) + '\n')
+                client.stdin.flush()
+                assert select.select([client.stdout], [], [], 10)[0], 'probe timeout'
+                line = client.stdout.readline()
+                assert line, ('probe exited', client.poll(), request)
+                result = json.loads(line)
+                assert result == dict(result=0), (request, result)
+                count += 1
+
+            def posture_check(assigned, arbitrary='pass', https='pass'):
+                if posture_bin:
+                    expected = dict(zip(['network-root-dns-assigned', 'network-root-dns-arbitrary',
+                                         'network-root-https-arbitrary'], [assigned, arbitrary, https]))
+                    probe(dict(uid=0, mode='posture', allowed=True, expected=expected))
+
+            def check(uid, mode, server, allowed):
+                probe(dict(uid=uid, mode=mode, server=server, allowed=allowed))
+
+            def renew(addresses):
+                nonlocal old
+                new = ''.join('nameserver ' + address + '\n' for address in addresses)
+                if keeper and keeper.poll() is None and addresses == [SECOND]:
+                    (work / 'lease-dns').write_text(SECOND + '\n')
+                    deadline = time.monotonic() + 45
+                    while resolv.read_text() != new and time.monotonic() < deadline:
+                        assert keeper.poll() is None, (work / 'dhcp.log').read_text()
+                        time.sleep(.1)
+                    assert resolv.read_text() == new, (work / 'dhcp.log').read_text()
+                    assert '"event":"renewed"' in (work / 'dhcp.log').read_text()
+                    keeper.terminate()
+                    keeper.wait(timeout=5)
+                    print('pass: real DHCP renewal changed resolver rules under the parent sandbox', flush=True)
+                else:
+                    run([driver, old, new])
+                    resolv.write_text(new)
+                old = new
+                watched(new)
+
+            # Production: the real fetcher user resolves and fetches HTTPS by name.
+            posture_check('pass')
+            for mode in ['udp', 'tcp']:
+                check(69, mode, FIRST, True)
+                check(0, mode, FIRST, False)
+                check(69, mode, SECOND, False)
+            check(69, 'https', '', True)
+            check(69, 'http', FIRST, False)
+            # Renewal closes the old DNS server, keeps the UID grant, and still resolves HTTPS.
+            renew([SECOND])
+            for mode in ['udp', 'tcp']:
+                check(69, mode, FIRST, False)
+                check(69, mode, SECOND, True)
+            check(69, 'https', '', True)
+            # GCP's resolver is also metadata; DNS works but metadata HTTP stays closed.
+            renew([GCP, AZURE])
+            for address in [GCP, AZURE]:
+                check(69, 'udp', address, True)
+                check(69, 'tcp', address, True)
+                check(69, 'metadata', address, False)
+            renew([])
+            posture_check('skip')
+            check(69, 'udp', GCP, False)
+            check(69, 'tcp', AZURE, False)
+            # Playground's root declaration gets the same narrow DNS access.
+            policy.write_text('dns 0\ndns 69\nconnect 69 tcp 443\n')
+            renew([FIRST])
+            check(0, 'udp', FIRST, True)
+            check(0, 'tcp', FIRST, True)
+            check(0, 'udp', SECOND, False)
+            check(0, 'http', FIRST, False)
+            posture_check('fail')
+            if posture_bin:
+                if ipv6:
+                    run([driver, '--root-https-v6'])
+                    posture_check('fail', 'pass', 'fail')
+                    run([driver, '--root-dns-v6'])
+                    posture_check('fail', 'fail', 'fail')
+                run([driver, '--broad-root'])
+                posture_check('fail', 'fail', 'fail')
+            print('pass: %d real-kernel DNS/HTTPS allow-deny checks, including renewal and cloud resolvers' % count)
+        finally:
+            if watcher:
+                watcher.stdin.close()
+                watcher.wait(timeout=5)
+            if client and client.poll() is None:
+                client.stdin.close()
+                try:
+                    client.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    client.kill()
+                    client.wait()
+            if keeper and keeper.poll() is None:
+                keeper.terminate()
+                keeper.wait(timeout=5)
+            if keeper_log:
+                keeper_log.close()
+            peer.terminate()
+            peer.wait(timeout=5)
+            run(['ip', 'netns', 'delete', 'dns-peer'])
+
+
+if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == '--server':
+        server(Path(sys.argv[2]))
+    elif len(sys.argv) in (5, 6, 7) and sys.argv[1] == '--inside':
+        inside(sys.argv[2], sys.argv[3], sys.argv[4],
+               sys.argv[5] if len(sys.argv) >= 6 else None, sys.argv[6] if len(sys.argv) == 7 else None)
+    elif len(sys.argv) in (3, 4, 5):
+        if sys.platform != 'linux':
+            sys.exit('check-dns requires Linux to create private namespaces')
+        user_namespace = ['--user', '--map-auto', '--map-root-user'] if os.geteuid() else []
+        run(['unshare', *user_namespace, '--net', '--mount', '--fork', sys.executable, str(Path(__file__).resolve()),
+             '--inside', str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()),
+             os.readlink('/proc/self/ns/net'), *[str(Path(arg).resolve()) for arg in sys.argv[3:]]],
+            env=dict(os.environ, WEREWOLF_DNS_PARENT_MOUNT=os.readlink('/proc/self/ns/mnt')))
+    else:
+        sys.exit(__doc__)

@@ -97,6 +97,7 @@ pub fn plan(u: *Update, arch: []const u8) !?m.Plan {
     u.step = "image-files";
     try Dir.cwd().deleteTree(u.io, work ++ "/slot");
     try Dir.cwd().createDirPath(u.io, work ++ "/slot");
+    _ = try u.sys(m.linux.fchmodat(m.linux.AT.FDCWD, work ++ "/slot", 0o700), "chmod slot");
     inline for (signed.names) |name| if (image.artifact(name)) |a| {
         const path = try u.gpa.printSentinel("{s}/slot/{s}", .{ work, name }, 0);
         const url = try u.gpa.print("{s}/{s}/{s}", .{ base, image.build, name });
@@ -170,11 +171,25 @@ pub fn verifyOther(
         try u.read(try u.gpa.print("{s}/image.json", .{rdir})),
         try u.read(try u.gpa.print("{s}/image.json.sig", .{rdir})),
     );
+    if (u.isBad(image.build)) return error.ImageRolledBack;
     if (!rollback) try fresh(u, image);
     try @import("retire.zig").requireOther(u, image);
     if (expected) |e| if (!std.mem.eql(u8, e, image.build)) return error.WrongStagedImage;
     if (contents) try checkEspInstalled(u, image, rdir);
     return image;
+}
+
+/// checkLocalOther verifies that the other slot's root image and ESP boot
+/// files exist and are non-empty on machines that build slots locally.
+pub fn checkLocalOther(u: *Update) !void {
+    const root = try u.gpa.print("/boot/slot/{s}/root.erofs", .{u.other});
+    const got = try signed.hashFile(u.io, u.gpa, root);
+    if (got.size == 0) return error.MissingArtifact;
+    const files = broker.espInspect() catch |err| {
+        u.detail = broker.refusal;
+        return err;
+    };
+    if (files.vmlinuz == null or files.stage0 == null) return error.MissingArtifact;
 }
 
 /// checkEspInstalled verifies an installed slot's bytes without an ESP
@@ -215,5 +230,10 @@ fn checkEspInstalled(u: *Update, image: signed.Manifest, rdir: []const u8) !void
 }
 
 pub fn requireBoot(u: *Update, expected: []const u8, contents: bool) !void {
-    if (try u.needsSignedImage()) _ = try verifyOther(u, expected, contents, false);
+    if (u.isBad(expected)) return error.ImageRolledBack;
+    if (try u.needsSignedImage()) {
+        _ = try verifyOther(u, expected, contents, false);
+        return;
+    }
+    if (contents) try checkLocalOther(u);
 }

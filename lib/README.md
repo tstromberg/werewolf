@@ -132,9 +132,9 @@ route to it.
 Reads a form (`forms/NAME/form.yaml`), resolves its chain
 of `base` and `with` forms, and merges what they give apko by the rules of
 apko's deprecated `include:`. Used by tools/form.zig, howl and slot-update.
-It parses a strict YAML subset (block maps and lists, scalars, `[a, b]`,
-comments) and refuses anchors, tags, multi-line scalars and inline maps by
-line, rather than read them differently from apko. See
+It parses a strict YAML subset (block maps and lists, scalars with adjacent
+plain continuations, `[a, b]`, comments) and refuses anchors, tags, block
+scalars and inline maps by line. See
 [forms/README.md](../forms/README.md).
 
 ## compose
@@ -274,3 +274,6 @@ Makes an ssh host key once with ssh-keygen, for sshd-start, ssh-host-key
 and gitea-init. Both halves are written as KEY.new, synced, and renamed
 public half first, so an interrupted boot leaves a whole key or none. A
 missing public half is rebuilt from the key.
+
+`dns.zig` binds declared users to detected IPv4 resolvers and replaces grants on
+DHCP renewal; `net-rule.zig` encodes the shared bounded routing messages.

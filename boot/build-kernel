@@ -17,6 +17,8 @@ aarch64) arch=arm64; image=arch/arm64/boot/Image ;;
 x86_64) arch=x86; image=arch/x86/boot/bzImage ;;
 *) echo "build-kernel: aarch64 or x86_64 required (KERNEL_ARCH for cross builds)" >&2; exit 1 ;;
 esac
+phase() { printf 'howl: phase %s: %s\n' "$1" "$2" >&2; }
+phase kernel-inputs "Checking Linux $version build inputs"
 # Match Alpine's complete package revision before downloading or compiling.
 # Matching only config filenames misses Alpine revisions carrying backports.
 database=$(tar -tf "$base" | awk '$0 == "usr/lib/apk/db/installed" || $0 == "lib/apk/db/installed" {print}')
@@ -29,10 +31,12 @@ package_version=$(tar -xOf "$base" "$database" | awk -F: '$1 == "P" {kernel=($2 
 }
 archive=$out/linux-$version.tar.xz
 if [ ! -f "$archive" ]; then
+	phase kernel-download "Downloading Linux $version sources"
 	curl -fL --retry 3 "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$version.tar.xz" -o "$archive.tmp"
 	mv "$archive.tmp" "$archive"
 fi
 printf '%s  %s\n' "$sha256" "$archive" | sha256sum -c -
+phase kernel-unpack "Unpacking Linux $version sources"
 src=$out/linux-$version
 [ -d "$src" ] || tar -xJf "$archive" -C "$out"
 obj=$out/obj
@@ -61,6 +65,7 @@ umask 077
 cp "$cert" "$obj/ipe.crt"
 cp "$tree/boot/ipe-boot.policy" "$obj/ipe-boot.policy"
 c=$src/scripts/config
+phase kernel-configure "Configuring Linux $version (make olddefconfig)"
 "$c" --file "$obj/.config" --enable SECURITY_IPE --enable IPE_PROP_DM_VERITY \
 	--set-str LSM 'landlock,lockdown,yama,ipe' \
 	--set-str IPE_BOOT_POLICY 'ipe-boot.policy' \
@@ -82,10 +87,12 @@ done
 grep -qx 'CONFIG_MODULE_SIG_KEY=""' "$obj/.config"
 grep -qx '# CONFIG_MODULE_SIG_ALL is not set' "$obj/.config"
 # VM firmware supplies its device tree; build only the image and modules we package.
+phase kernel-compile "Compiling Linux $version (make ${image##*/} modules)"
 make -C "$src" O="$obj" ARCH="$arch" -j"${JOBS:-$(nproc)}" "${image##*/}" modules
 mkdir -p "$stage/boot" "$stage/etc/apk"
 # Ubuntu's depmod may have no zlib support. Resolve uncompressed
 # modules first, then compress them and update the textual dependency paths.
+phase kernel-install "Installing Linux $version modules (make modules_install)"
 make -C "$src" O="$obj" ARCH="$arch" INSTALL_MOD_PATH="$stage" CONFIG_MODULE_COMPRESS_ALL= modules_install
 kver=$(make -s -C "$src" O="$obj" ARCH="$arch" kernelrelease)
 rm -f "$stage/lib/modules/$kver/build" "$stage/lib/modules/$kver/source"
@@ -95,6 +102,7 @@ cp "$cert" "$stage/boot/ipe.crt"
 printf 'linux-virt-%s-werewolf\n' "$version" >"$stage/boot/kernel-package"
 cp "$alpine_base/etc/apk/repositories" "$stage/etc/apk/repositories"
 depmod -b "$stage" "$kver"
+phase kernel-pack "Packing Linux $version modules"
 deps=$stage/lib/modules/$kver/modules.dep
 [ -s "$deps" ] || { echo "build-kernel: depmod produced no dependencies" >&2; exit 1; }
 find "$stage/lib/modules/$kver" -type f -name '*.ko' -exec gzip -n -f {} +
@@ -108,6 +116,7 @@ tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
 if [ "$key" = - ]; then
     mv "$out/rootfs.tar.tmp" "$out/rootfs.tar"
 else
+    phase kernel-sign "Signing Linux $version modules"
     python3 "$tree/tools/sign-kernel" "$out/rootfs.tar.tmp" "$key" "$cert" "$out/rootfs.tar"
 fi
 echo "build-kernel: $out/rootfs.tar"

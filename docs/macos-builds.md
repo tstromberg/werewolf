@@ -3,8 +3,11 @@
 `howl run --build` builds a protected image and deploys it through Lima QEMU
 on an arm64 Mac. Signing and TPM authority remain on the Mac. Builds honor
 caller boot credentials; howl manages local credentials when none are supplied.
-Published protected downloads remain gated while the
-[publication design](design/published-secure-boot.md) is implemented.
+Plain `howl run` downloads a protected image with embedded production trust.
+Targets remain unavailable until their signed artifacts pass the
+[publication gates](design/protected-downloads.md); there is no implicit source build.
+The downloader identifies Werewolf to the mirror. Stock macOS Python uses system curl
+for modern TLS, with certificate verification and bounded, authenticated downloads.
 
 ## Why a Linux guest is needed
 

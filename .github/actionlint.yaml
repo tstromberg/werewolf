@@ -1,0 +1,6 @@
+self-hosted-runner:
+  labels:
+    - werewolf-lima
+    # Hosted labels introduced after the locally installed actionlint release.
+    - ubuntu-26.04
+    - ubuntu-26.04-arm

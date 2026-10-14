@@ -54,7 +54,7 @@ appears in between, the race runc's CVE-2021-30465 used.
 every build, so the form follows the image's releases; `exec:` replaces
 a script entrypoint, `write:` binds `/data/svc/NAME` paths. howl bakes it
 into `BUILD/oci/FORM/NAME-KEY`, KEY hashing what the bake depends on,
-renamed into place whole, and lays it after the form's rootfs; an
+renamed into place whole, and lays it before the form's rootfs; an
 unreachable registry keeps the last bake. The build copies the root's
 `/usr/lib/werewolf` into each tree (erofs keeps one copy of the data),
 for a form's `before` helpers and settings; `run DIR/` lets an image run

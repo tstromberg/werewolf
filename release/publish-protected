@@ -50,11 +50,11 @@ class Store:
             os.replace(incoming, destination)
 
 
-def publish(howl, bundle, report, provider, store, trust='release/protected'):
+def publish(howl, bundle, report, provider, store, trust='release/protected', release_assets=None):
     downloads = preparation.downloads
     with tempfile.TemporaryDirectory(prefix='ww-protected-publication-') as temporary:
         work = Path(temporary)
-        plan = preparation.prepare(howl, bundle, report, provider, work / 'public', trust)
+        plan = preparation.prepare(howl, bundle, report, provider, work / 'public', trust, release_assets)
         namespace = '/'.join([plan['form'], plan['provider'], plan['arch']])
         pins = Path(trust).resolve()
         metadata = json.loads((pins / 'trust.json').read_text())
@@ -127,11 +127,11 @@ def publish(howl, bundle, report, provider, store, trust='release/protected'):
 if __name__ == '__main__':
     os.umask(0o077)
     try:
-        if len(sys.argv) != 5:
-            raise ValueError('usage: publish-protected HOWL BUNDLE GATES_JSON PROVIDER')
-        howl, bundle, evidence, provider = sys.argv[1:]
+        if len(sys.argv) != 6:
+            raise ValueError('usage: publish-protected HOWL BUNDLE GATES_JSON PROVIDER RELEASE_ASSETS')
+        howl, bundle, evidence, provider, assets = sys.argv[1:]
         publish(str(Path(howl).resolve()), Path(bundle).resolve(),
             json.loads(preparation.downloads.read(evidence, 64 << 10)), provider,
-            Store(os.environ.get('PROTECTED_BUCKET', 's3://werewolf/boot/v1')))
+            Store(os.environ.get('PROTECTED_BUCKET', 's3://werewolf/boot/v1')), release_assets=Path(assets).resolve())
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         sys.exit('publish-protected: admission, lifecycle gates, release floor or ordered upload failed')

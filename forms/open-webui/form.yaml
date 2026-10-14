@@ -93,7 +93,9 @@ services:
     # script), -P keeping the data directory it starts in off the import
     # path. Upstream's would make the key with random, not secrets.
     exec: /usr/lib/open-webui/bin/python3 -P -c "from open_webui import app; app()" serve --host 127.0.0.1 --port 8080
-    before: /usr/lib/open-webui/bin/python3 -I -c "import os,secrets; k='.webui_secret_key'; os.path.exists(k) or os.write(os.open(k, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600), secrets.token_urlsafe(32).encode())"
+    before: /usr/lib/open-webui/bin/python3 -I -c
+      "import os,secrets; k='.webui_secret_key'; os.path.exists(k) or os.write(os.open(k, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600),
+        secrets.token_urlsafe(32).encode())"
     user: open-webui
     # netlink: glibc lists the host's addresses for aiohttp's lookups
     # (AI_ADDRCONFIG).

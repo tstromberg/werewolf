@@ -39,7 +39,8 @@ pipeline:
   - runs: |
       cargo auditable build --release --locked --no-default-features \
         -p conduwuit \
-        --features brotli_compression,gzip_compression,zstd_compression,element_hacks,jemalloc,jemalloc_conf,console,ring,bindgen-runtime,release_max_log_level,url_preview
+        --features 'brotli_compression,gzip_compression,zstd_compression,element_hacks,jemalloc,jemalloc_conf,console,ring,
+        bindgen-runtime,release_max_log_level,url_preview'
       install -Dm755 target/release/conduwuit ${{targets.destdir}}/usr/bin/conduwuit
 
   - uses: strip

@@ -13,95 +13,14 @@ A form says what a werewolf machine is for. Each form is a directory,
 A form gets the parts of the form it is built on, and of that form's base,
 and adds its own. [forms/README.md](../forms/README.md) lists every file
 and key, and `make list-forms` shows the chains.
-[design/forms.md](design/forms.md) explains why there are so few forms.
+[design/forms.md](design/forms.md) explains how forms compose.
 
 ## The forms
 
-| Form | Built on | Is |
-| --- | --- | --- |
-| `minimal` | | boots from the initramfs or its own disk; a static address; updates itself from a slot; listens on nothing |
-| `prod` | `minimal` | the production base: DHCP, the cloud's metadata, `/data` on a disk, in LUKS2 when the config brings `data.key` ([data.md](data.md)); no shell, nothing listening. Build yours on this, or on a runtime form below |
-| `app` | `prod` | where an application is laid; its service's `app` user gets a hashed uid; no runtime, service or listener |
-| `nginx` | `prod` | serving a site from the image on :80 |
-| `php` | `nginx` | with php-fpm running the site's `.php` files |
-| `node`, `python`, `ruby`, `jre`, `jre21` | `app` | a runtime, for the service and application a form on it brings; `jre` is Java 27 and `jre21` is Java 21 |
-| `node-app`, `python-app`, `ruby-app`, `jre-app` | `node`, `python`, `ruby`, `jre` | a service for the application `--app` lays, on :8080; none shipped |
-| `postgresql` | `prod` | PostgreSQL 17 on a UNIX socket ([postgresql.md](../forms/postgresql/README.md)) |
-| `demo` | `postgresql` | nginx and the status page ([demo.md](../forms/demo/README.md)) |
-| `prod-ssh` | `prod`, with `sshd` | sshd, for people who log in with a security key |
-| `bastion` | `prod` | forwarding-only SSH, with explicit destinations ([bastion.md](../forms/bastion/README.md)) |
-| `tailscale` | `prod` | userspace subnet routing ([tailscale.md](../forms/tailscale/README.md)) |
-| `caddy` | `prod` | a web server that gets its own certificates ([caddy.md](../forms/caddy/README.md)) |
-| `valkey` | `prod` | Valkey 9.1 on a UNIX socket, for the application beside it ([valkey.md](../forms/valkey/README.md)) |
-| `valkey-tcp` | `valkey` | the same server on TCP port 6379, capped by `--maxmemory` ([valkey-tcp.md](../forms/valkey-tcp/README.md)) |
-| `openbao` | `prod` | OpenBao, unsealed by a key from the config and set up by itself ([openbao.md](../forms/openbao/README.md)) |
-| `step-ca` | `prod` | an internal certificate authority, ACME for the names the config allows ([step-ca.md](../forms/step-ca/README.md)) |
-| `wordpress` | `php` | WordPress on SQLite, installed from the config before it serves ([wordpress.md](../forms/wordpress/README.md)) |
-| `gatus` | `prod` | a status page watching a service ([gatus.md](../forms/gatus/README.md)) |
-| `sftpgo` | `prod` | SFTP for the users the config names, nothing else ([sftpgo.md](../forms/sftpgo/README.md)) |
-| `samba` | `prod` | SMB3 file shares, one directory per user, encryption required, no guest ([samba.md](../forms/samba/README.md)) |
-| `cloudflared` | `prod` | a Cloudflare Tunnel: hostnames served with no open port ([cloudflared.md](../forms/cloudflared/README.md)) |
-| `oauth2-proxy` | `prod` | a login in front of anything, by an OIDC provider ([oauth2-proxy.md](../forms/oauth2-proxy/README.md)) |
-| `mosquitto` | `prod` | an MQTT broker over TLS, users and ACLs from the config ([mosquitto.md](../forms/mosquitto/README.md)) |
-| `nats` | `prod` | a NATS server over TLS, with JetStream on `/data` ([nats.md](../forms/nats/README.md)) |
-| `minio` | `prod` | S3 object storage from `/data` ([minio.md](../forms/minio/README.md)) |
-| `ollama` | `prod` | models served on the CPU, behind a login of your choosing ([ollama.md](../forms/ollama/README.md)) |
-| `gitea` | `prod` | git hosting over its own SSH and the web, nothing run from a repository ([gitea.md](../forms/gitea/README.md)) |
-| `vaultwarden` | `prod` | a Bitwarden-compatible password manager server, built here from a pinned release ([vaultwarden.md](../forms/vaultwarden/README.md)) |
-| `sshd`, `qemu-host` | `minimal` | sshd with a shell, by security key, and its service, for any form to take `with`; and a host for virtual machines |
-| `mastodon` | `ruby`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | Mastodon 4.7, each part on a leash and a user of its own, media parsed narrowed, fetches to public addresses only ([mastodon.md](../forms/mastodon/README.md)) |
-| `mox` | `prod` | a domain's mail: SMTP, IMAP, submission, webmail and its own certificates, as its own user, never root, built here with one patch ([mox.md](../forms/mox/README.md)) |
-| `haproxy` | `prod` | HAProxy 3.4 balancing HTTP over the backends its settings name, HTTPS with a certificate from the config, nothing to control it by but its configuration ([haproxy.md](../forms/haproxy/README.md)) |
-| `miniflux` | `prod`, with `postgresql`, `caddy` | a feed reader fetching from public addresses alone, its administrator from the config, built here ([miniflux.md](../forms/miniflux/README.md)) |
-| `continuwuity` | `prod`, with `caddy` | a Matrix homeserver, registration closed, its administrator from the config, federation on 443, built here ([continuwuity.md](../forms/continuwuity/README.md)) |
-| `prometheus` | `prod` | scraping the targets its settings name, and itself, one user on its web and API, its admin, lifecycle and remote-write APIs off ([prometheus.md](../forms/prometheus/README.md)) |
-| `loki` | `prod` | keeping pushed logs 31 days, behind Caddy's HTTPS and one user, Loki on loopback reaching nothing ([loki.md](../forms/loki/README.md)) |
-| `mariadb-local` | `prod` | MariaDB 12.3, the long-term release, on a UNIX socket alone for the machine's own services, made without a shell by mariadb-init ([mariadb-local.md](../forms/mariadb-local/README.md)) |
-| `mariadb-tcp` | `mariadb-local` | the same server on TCP port 3306, for a client that is not on this machine ([mariadb-tcp.md](../forms/mariadb-tcp/README.md)) |
-| `wordpress-mariadb` | `wordpress`, with `mariadb-local` | WordPress with its tables in MariaDB, its role `php` by unix_socket, holding its database alone ([wordpress-mariadb.md](../forms/wordpress-mariadb/README.md)) |
-| `jellyfin` | `prod-ssh` | Jellyfin behind Caddy's HTTPS, media copied in over ssh, its wizard completed before anyone reaches it, ffmpeg narrowed, reaching nothing ([jellyfin.md](../forms/jellyfin/README.md)) |
-| `kafka` | `jre21` | Kafka 4.3 in KRaft, one broker and controller, SCRAM over TLS, users from the config, ACLs denying what none allows ([kafka.md](../forms/kafka/README.md)) |
-| `openldap` | `prod` | OpenLDAP 2.6 on LDAPS alone, no anonymous binds, passwords stored as Argon2id and never read back ([openldap.md](../forms/openldap/README.md)) |
-| `otel-collector` | `prod` | the OpenTelemetry Collector taking OTLP over TLS with a bearer token, passing it to the one endpoint its settings name ([otel-collector.md](../forms/otel-collector/README.md)) |
-| `unbound` | `prod` | a recursive, validating resolver answering private ranges alone, its forward zones from the settings ([unbound.md](../forms/unbound/README.md)) |
-| `squid` | `prod` | an egress proxy: CONNECT to port 443 of the domains its settings list, from the networks they list, no cache ([squid.md](../forms/squid/README.md)) |
-| `cron` | `prod` | supercronic, running a form's jobs on a schedule through sh-shim, leashed, for any form to take `with` ([cron.md](../forms/cron/README.md)) |
-| `sh-shim` | `minimal` | `/bin/sh` as one program and its words, for any form to take `with` whose programs run `sh -c` ([sh-shim](../cmd/sh-shim/README.md)) |
-| `playground` | `prod`, with `sshd` | `howl run`'s form on every engine: Lima manages it, and it takes key files, Lima's and `~/.ssh`'s, beside security keys |
-| `restic-server` | `prod`, with `caddy` | restic's REST server as an append-only backup target, a private repository a user, from restic's own image ([restic-server.md](../forms/restic-server/README.md)) |
-| `open-webui` | `prod`, with `postgresql`, `caddy` | a chat interface for models Ollama runs on loopback, its administrator from the config, nobody signing up, built here in upstream's slim form ([open-webui.md](../forms/open-webui/README.md)) |
-| `syncthing` | `prod`, with `caddy` | folders kept in sync with your devices over TCP and QUIC, from Syncthing's own image, no local discovery, UPnP or reports, its GUI behind Caddy for one user ([syncthing.md](../forms/syncthing/README.md)) |
-| `grafana` | `prod`, with `caddy` | dashboards and alerts from Grafana's own image, its administrator from the config, no sign-up, nothing sent home ([grafana.md](../forms/grafana/README.md)) |
-| `headscale` | `prod`, with `caddy` | a coordination server for Tailscale's clients from Headscale's own image, joined only by key, approval or an OpenID sign-in ([headscale.md](../forms/headscale/README.md)) |
-| `blocky` | `prod` | DNS for a network, blocking ads and trackers, upstreams over TLS alone, every name blocked for strangers, from Blocky's own image ([blocky.md](../forms/blocky/README.md)) |
-| `adguard-home` | `prod`, with `caddy` | AdGuard Home blocking ads and trackers for a network, no setup wizard, its UI behind Caddy's login, strangers refused, from its own image ([adguard-home.md](../forms/adguard-home/README.md)) |
-| `pi-hole` | `prod`, with `caddy` | Pi-hole answering a network's DNS, local clients alone, its web interface behind Caddy, lists refreshed by the image's own gravity ([pi-hole.md](../forms/pi-hole/README.md)) |
-| `home-assistant` | `prod`, with `caddy` | Home Assistant for a home's devices, its owner from the config, onboarding already done, from its own image ([home-assistant.md](../forms/home-assistant/README.md)) |
-| `immich` | `prod`, with `postgresql`, `valkey`, `caddy` | a photo library from Immich's own image, its administrator from the config, no telemetry ([immich.md](../forms/immich/README.md)) |
-| `nextcloud` | `prod`, with `postgresql`, `valkey`, `caddy`, `cron`, `sh-shim` | files, calendars and contacts, installed from the config, its code read-only ([nextcloud.md](../forms/nextcloud/README.md)) |
-| `moodle` | `prod`, with `postgresql`, `caddy`, `cron`, `sh-shim` | Moodle for a school's courses, no sign-up and no plugin from the web ([moodle.md](../forms/moodle/README.md)) |
-| `mediawiki` | `php` | a department's wiki on SQLite, strangers unable to read or edit until a setting says so ([mediawiki.md](../forms/mediawiki/README.md)) |
-| `limesurvey` | `php`, with `mariadb-local` | surveys, installed from the config, plugins from the image alone ([limesurvey.md](../forms/limesurvey/README.md)) |
-| `keycloak` | `jre`, with `postgresql`, `caddy` | single sign-on by OpenID Connect and SAML, its administrator from the config ([keycloak.md](../forms/keycloak/README.md)) |
-| `galene` | `prod`, with `caddy` | lectures and seminars by video, rooms and passwords from the config ([galene.md](../forms/galene/README.md)) |
-| `overleaf` | `prod`, with `valkey`, `caddy` | collaborative LaTeX, x86_64 only, the compiler apart from the services ([overleaf.md](../forms/overleaf/README.md)) |
-| `authelia` | `prod`, with `caddy` | a password and a second factor in front of every site under a domain ([authelia.md](../forms/authelia/README.md)) |
-| `bugsink` | `prod`, with `caddy` | error tracking for Sentry's SDKs, sign-up off, events taken by DSN alone ([bugsink.md](../forms/bugsink/README.md)) |
-| `umami` | `prod`, with `postgresql`, `caddy` | web analytics without cookies, the default administrator password refused ([umami.md](../forms/umami/README.md)) |
-| `mattermost` | `prod`, with `postgresql`, `caddy` | team chat, open sign-up and plugin uploads off ([mattermost.md](../forms/mattermost/README.md)) |
-| `zot` | `prod`, with `caddy` | an OCI registry, no anonymous pull or push ([zot.md](../forms/zot/README.md)) |
-| `opensearch` | `jre` | one node of log search, TLS and the security plugin on, no demo users, the `jre` form's Java 27 ([opensearch.md](../forms/opensearch/README.md)) |
-| `suricata` | `prod` | Suricata on eth0, Emerging Threats Open cached on the data partition, no control socket ([suricata.md](../forms/suricata/README.md)) |
-| `opencanary` | `prod` | a low-interaction honeypot: six bait ports, nothing else, no real login ([opencanary.md](../forms/opencanary/README.md)) |
-| `zeek` | `prod` | Zeek on eth0, JSON logs, no packages ([zeek.md](../forms/zeek/README.md)) |
-| `velociraptor` | `prod` | the Velociraptor server, keys generated on the machine, the GUI on loopback ([velociraptor.md](../forms/velociraptor/README.md)) |
-| `dependency-track` | `jre21`, with `postgresql`, `caddy` | Dependency-Track, the published administrator password replaced before it is reachable ([dependency-track.md](../forms/dependency-track/README.md)) |
-| `bloodhound` | `prod`, with `postgresql`, `caddy` | BloodHound CE, Neo4j 4.4 from this form's package, its HTTP off, the community-edition password refused ([bloodhound.md](../forms/bloodhound/README.md)) |
-| `iris` | `prod`, with `postgresql`, `caddy` | DFIR-IRIS, the administrator from the config, the web server on loopback ([iris.md](../forms/iris/README.md)) |
-| `misp` | `prod`, with `mariadb-tcp`, `valkey`, `caddy` | MISP core behind Caddy, the image's published passwords not set, modules not started ([misp.md](../forms/misp/README.md)) |
-| `greenbone` | `prod`, with `postgresql`, `caddy`, `valkey` | Greenbone's manager, web UI, scanner and feed; the scanner alone holds the packet capabilities; `admin`/`admin` refused ([greenbone.md](../forms/greenbone/README.md)) |
-| `paperless` | `prod`, with `valkey`, `caddy` | Paperless-ngx 3.3, a document archive, sign-up closed, its administrator from the config, OCR from the system's packages, built here ([paperless.md](../forms/paperless/README.md)) |
-| `minecraft` | `jre` | Minecraft Java Edition 26.3, pinned, the whitelist and online mode on, no RCON or query port, the `jre` form's Java 27 ([minecraft.md](../forms/minecraft/README.md)) |
+The [available forms](forms-catalog.md) page lists every form alphabetically,
+with a description and links to setup guides. It covers applications,
+infrastructure services, runtimes, examples and the building blocks for a form
+of your own.
 
 Every form boots the same way. stage0 opens the form's `root.erofs`
 read-only, through dm-verity, and hands over to init

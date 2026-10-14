@@ -36,7 +36,8 @@ services:
   # It reaches public addresses on 443 alone, for alert webhooks.
   bugsink:
     image: docker.io/bugsink/bugsink:2
-    exec: /usr/local/bin/python3.12 /usr/local/bin/monofy /usr/local/bin/python3.12 /usr/local/bin/gunicorn --config /app/gunicorn.docker.conf.py --bind=127.0.0.1:8000 --access-logfile - bugsink.wsgi ||| /usr/local/bin/python3.12 /usr/local/bin/bugsink-runsnappea
+    exec: /usr/local/bin/python3.12 /usr/local/bin/monofy /usr/local/bin/python3.12 /usr/local/bin/gunicorn --config /app/gunicorn.docker.conf.py
+      --bind=127.0.0.1:8000 --access-logfile - bugsink.wsgi ||| /usr/local/bin/python3.12 /usr/local/bin/bugsink-runsnappea
     before:
       - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage check --deploy --fail-level WARNING
       - /usr/local/bin/python3.12 /usr/local/bin/bugsink-manage migrate snappea --database=snappea

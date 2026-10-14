@@ -1,0 +1,3 @@
+seen    mongodb-leashed  leash: \{"event":"start","service":"mongodb"
+seen    mongodb-ready    Waiting for connections
+unseen  mongodb-down     leash: \{"event":"(down|retry)","service":"mongodb"

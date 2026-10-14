@@ -382,6 +382,46 @@ openssl dgst -sha256 -verify ../release/tiers.pub -signature cve-tiers.json.sig 
 git log -p cve-tiers.json   # every change, as a diff
 ```
 
+## Protected production downloads
+
+`howl run` uses production-signed downloads by default; arm64 Lima playground is published.
+`--build` retains local signing and cached builds. Existing locally signed machines retain
+their original trust; use a new machine name when adopting production downloads.
+The protected trust and layout are described in [protected-downloads](design/protected-downloads.md).
+
+The [protected workflow](../.github/workflows/protected-images.yml) runs after relevant pushes
+to main, hourly for upstream updates, and on manual dispatch. It compares two independent
+x86_64 builds, privately authorizes test candidates, and runs the exact-artifact playground
+lifecycle under QEMU/KVM, OVMF and swtpm on a hosted Linux runner. All fourteen gates must
+pass before publication. `prod` and `prod-ssh` remain candidates; arm64 QEMU and Lima need
+their own runtime evidence before this workflow can publish them. Existing arm64 Lima
+downloads are separate from this GHA publication path.
+
+`release/export-protected HOWL BUNDLE GATES_JSON PROVIDER OUTPUT` admits the gated bundle
+and produces one set of GitHub assets. Original boot/image manifests and signatures are
+copied exactly. A standalone compressed qcow2 is derived from the authenticated raw disk;
+`qemu-img check` and `qemu-img compare` verify its structure and disk contents. A separately
+signed `werewolf-downloads/1` manifest binds every asset's size and SHA-256, the original boot
+descriptor, lifecycle evidence, source commit and GHA run. Conversion does not enroll a VM;
+the protected profile still needs its matching Secure Boot certificate, TPM and permit service.
+
+GitHub releases use tags `protected-SERIAL` and asset names `FORM-PROVIDER-ARCH-FILE`.
+They carry the qcow2, compressed raw disk, slot files, both original signature pairs,
+public certificates, lifecycle gates and signed download manifest. Every asset also receives
+a GitHub build provenance attestation. The legacy release workflow compares only legacy tags.
+
+`release/publish-protected HOWL BUNDLE GATES_JSON PROVIDER RELEASE_ASSETS` rechecks committed trust and
+artifact-bound gates, uploads immutable objects before signed heads, and retains an authenticated
+floor across interrupted uploads. The same qcow2 and signed download assets accompany the
+original bundle under its immutable R2 descriptor. CI uses the existing R2 release credentials.
+`release/check-protected-download HOWL BUNDLE PROVIDER RELEASE_ASSETS` downloads from the public
+endpoint, performs full native admission and compares every R2 object with its GitHub asset.
+The workflow creates a GitHub draft first and makes it public only after attestation, R2 upload
+and this parity check succeed. A failure leaves the draft unpublished; it never bypasses a gate.
+PRs and manual dispatch with `build: false` run the full QEMU lifecycle and export using
+temporary test keys on a disposable hosted runner. They receive no production secrets and upload no images.
+Private boot/image keys remain on signing hosts; consumers and compile guests receive public inputs.
+
 ## Limits
 
 Opt-in IPE application channels use complete signed slot bundles rather

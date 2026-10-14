@@ -37,10 +37,25 @@ posture --json | jq -r '.checks[] | select(.result == "fail") | .name'
 
 `--summary` runs fresh checks and shows the state and counts on one line,
 followed by violations. It omits the timestamp because the scan is live.
-All failures, including expected gaps, use an `X`. A terminal colors passes
-green, failure marks red and the EXPECTED GAPS state amber. Redirected
-output, `NO_COLOR` and `TERM=dumb` suppress color. Long violation rows are
-wrapped or shortened to at most two rows at the terminal width.
+Each row states the gap and its evidence in aligned columns. Declared gaps
+use an amber `gap`; unexpected failures use a red `FAIL`. The labels also
+work without color. A terminal colors passes green and the EXPECTED GAPS
+state amber. Redirected output, `NO_COLOR` and `TERM=dumb` suppress color.
+Each gap uses one row, shortened with `…` at the terminal width; the full
+evidence remains in the detailed report and `--json`.
+
+```text
+Security posture: EXPECTED GAPS · 86 passed · 5 failed · 5 skipped
+  gap   Shells present            /bin/sh, /bin/ash, /bin/bash
+  gap   Download / network tools  /bin/wget, /bin/nc, /bin/netcat, /bin/telnet
+  gap   Interpreters present      /bin/awk
+  gap   Login servers present     /bin/sshd, /bin/telnetd
+  gap   SSH security key policy   ordinary keys accepted
+```
+
+Program rows show installed tools, not proof that a server is running.
+The SSH row names only unmet requirements: ordinary keys accepted, touch
+not enforced, or both. All gaps still count as failed checks and exit 1.
 
 | State | Meaning |
 | --- | --- |

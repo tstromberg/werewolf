@@ -9,6 +9,14 @@ It emits artifact-bound publication gates only after every check succeeds.
 `test/protected-publication` separately tests ordered uploads, interruption recovery,
 immutable collisions and authenticated server release floors without network access.
 
+`make check-dns` checks resolver and UID restrictions, TCP fallback, HTTPS by hostname,
+real DHCP renewal under its sandbox, persistent Landlock resolver reads,
+missing resolvers, and GCP/Azure resolver addresses. It also tests the three
+root DNS/HTTPS posture checks against restricted and deliberately broad grants.
+It uses private Linux mount/network namespaces and local fixtures; no internet is required.
+Root works directly; an unprivileged user needs subordinate UID/GID ranges and
+`newuidmap`/`newgidmap`. CI runs it as root on both architectures.
+
 Opt-in IPE builds have a separate `make IPE=1 check-ipe` suite. It boots
 the real image, tests global execution and executable mappings without
 Landlock, seccomp or noexec, and refuses missing, tampered, wrong-signer and wrong-root
@@ -26,6 +34,7 @@ make test           # every program's and library's unit tests
 make check          # boot every form, and a slot, and check each one
 make -j check       # the same, side by side
 make ci             # the CI job, in an Ubuntu VM under Lima
+make check-dns      # Linux: local DNS/TLS/DHCP fixtures in private namespaces
 make check-updater  # a whole update, over the network
 make check-updater-published  # the same, on forms from werewolf's repository
 make check-gcp      # prod-ssh's disk on a Google Compute Engine VM

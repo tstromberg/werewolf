@@ -139,7 +139,7 @@ pub fn createQemu(
     for (ports) |port| if (port != 22) {
         guest_web = port;
     };
-    try steps.enter(.{ .name = "Starting the VM under QEMU", .short = "start" });
+    try steps.enter(.{ .name = "Starting the VM under QEMU", .short = "launch" });
     // A console log and sockets left by the last machine of this name
     // would be taken for this one's.
     for ([_][]const u8{ "console.log", "console.sock", "monitor.sock" }) |f|
@@ -224,7 +224,46 @@ fn stopCommand(gpa: Allocator, name: []const u8) ![]const u8 {
     return if (std.mem.eql(u8, name, run_name))
         "howl stop"
     else
-        gpa.print("howl delete {s}", .{name});
+        gpa.print("howl stop {s}", .{name});
+}
+
+/// Terminal users get usable commands; pipelines retain the machine record.
+pub fn protectedReady(
+    io: Io,
+    gpa: Allocator,
+    name: []const u8,
+    form: []const u8,
+    provider: Platform,
+    unchanged: bool,
+    w: *Io.Writer,
+    why: *Why,
+) !void {
+    const port = if (provider == .lima)
+        lima.sshPort(io, gpa, name)
+    else
+        qemu.record(io, gpa, try machineDir(gpa, name), "ssh");
+    if (!(Io.File.stdout().isTty(io) catch false)) {
+        if (unchanged) {
+            try w.print(
+                "{s}\t{s}\tunchanged; running with Secure Boot, IPE, TPM A/B\n",
+                .{ name, form },
+            );
+        } else try w.print(
+            "{s}\t127.0.0.1:{s}\t{s}\tSecure Boot, IPE, TPM A/B\n",
+            .{ name, port orelse "0", form },
+        );
+    }
+    var out: Io.Writer.Allocating = .init(gpa);
+    const next = &out.writer;
+    if (std.mem.findScalar(u16, try listens(io, gpa, form, why), 22) != null) {
+        try next.print("     SSH      {s}", .{try sshCommand(gpa, name)});
+        if (port) |p| try next.print("  (127.0.0.1:{s})", .{p});
+        try next.writeByte('\n');
+    }
+    try next.print("     Console  {s}\n     Stop     {s}\n", .{
+        try consoleCommand(gpa, name), try stopCommand(gpa, name),
+    });
+    try Io.File.stderr().writeStreamingAll(io, out.written());
 }
 
 /// reach says how this host reaches a machine under QEMU: web_port
@@ -391,7 +430,7 @@ pub fn createLima(
         // limactl start returns once Lima's ssh and boot scripts are done.
         // The machine is reached through Lima's ssh forward.
         var start_step = step;
-        start_step.first = .{ .name = "Starting the VM, and Lima's ssh", .short = "start" };
+        start_step.first = .{ .name = "Starting the VM, and Lima's ssh", .short = "launch" };
         const started = try progress.run(
             io,
             gpa,

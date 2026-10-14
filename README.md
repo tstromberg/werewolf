@@ -25,15 +25,18 @@ on Lima's protected QEMU backend on an arm64 Mac, or QEMU on Linux:
 ```sh
 git clone https://github.com/werewolf-linux/werewolf && cd werewolf
 make install
-howl run --build
+howl run
 ```
 
 Secure mode is the default for every deployer. Plain `howl run` authenticates a published
 protected image with embedded production certificates; an unpublished target fails closed.
-`--build` uses local signing credentials. Cloud deployment currently requires an explicit opt-out:
+Production downloads currently cover playground on arm64 Lima. `howl run --build`
+uses local signing credentials and cached source builds. Existing locally signed VMs retain
+their trust and use `--build`; use a new machine name for production trust.
+Cloud deployment currently requires an explicit opt-out:
 
 ```sh
-howl create web --insecure --on gcp --with python-app --app ./myapp
+howl create web --on gcp --with python-app --app ./myapp
 ```
 
 Tutorials: [Python](examples/python/README.md), [PHP](examples/php/README.md),
@@ -43,10 +46,11 @@ Prebuilt images are on the [releases page](https://github.com/werewolf-linux/wer
 
 ## Choose a form and host
 
-A **form** declares packages, services and permissions. Choose [Caddy](forms/caddy/README.md),
-[PostgreSQL](forms/postgresql/README.md), an [SSH bastion](forms/bastion/README.md),
-or [build your own](docs/forms.md). The [catalog](forms/README.md) includes production
-bases and a deliberately vulnerable `webshell-example` for testing confinement.
+A **form** declares the software and permissions of a VM. Browse the
+[available forms](docs/forms-catalog.md) for an alphabetical list and setup guides:
+web servers, databases, self-hosted applications, language runtimes and examples.
+Start with [Caddy](forms/caddy/README.md), [PostgreSQL](forms/postgresql/README.md),
+an [SSH bastion](forms/bastion/README.md), or [build your own](docs/forms.md).
 
 ## Secure Boot
 
@@ -55,8 +59,8 @@ Secure Boot authenticates the kernel, early boot code and root filesystem hash.
 | Provider | Werewolf Secure Boot | Caveats |
 |---|---|---|
 | QEMU | Verified, x86_64 and arm64 | Linux default includes host custody and persistent TPM; x86 needs SMM |
-| AWS EC2 | Verified, arm64 | Custom UEFI enrollment; NitroTPM alone does not protect rollback |
-| Google Compute Engine | Verified, arm64 | Custom Shielded VM keys; vTPM alone does not protect rollback |
+| AWS EC2 | Firmware verified, arm64 | Protected default blocked pending TPM custody; NitroTPM alone is insufficient |
+| Google Compute Engine | Firmware verified, arm64 | Protected default blocked pending TPM custody; vTPM alone is insufficient |
 | Azure Trusted Launch | Deployment blocked | Custom enrollment inconsistently leaves firmware in setup mode; boot refuses |
 | Lima QEMU | Verified, arm64 Mac | Default requires signed protected downloads; local `--build` retains caller signing |
 | Lima VZ / Firecracker | Unsupported | No usable enrollment; Secure Boot-required images refuse to boot |

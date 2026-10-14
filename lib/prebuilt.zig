@@ -156,6 +156,15 @@ pub fn matches(a: Artifact, size: u64, digest: []const u8) !void {
     if (a.size != size or !mem.eql(u8, a.sha256, digest)) return error.ImageArtifactMismatch;
 }
 
+pub fn hashBytes(gpa: mem.Allocator, bytes: []const u8) !Artifact {
+    var h = Sha256.init(.{});
+    h.update(bytes);
+    return .{
+        .sha256 = try gpa.dupe(u8, &std.fmt.bytesToHex(h.finalResult(), .lower)),
+        .size = bytes.len,
+    };
+}
+
 pub fn hashFile(io: std.Io, gpa: mem.Allocator, path: []const u8) !Artifact {
     const f = try std.Io.Dir.cwd().openFile(io, path, .{});
     defer f.close(io);

@@ -236,6 +236,225 @@ fn imageNetwork(p: *Posture, v6_on: bool) !void {
     try fence(p, policy orelse "", v6_on);
 }
 
+/// rootEgress measures root's DNS and HTTPS permissions without waiting for a
+/// server. UDP connect sends nothing; TCP is nonblocking and closes at once.
+/// Unknown routing failures are skipped, never treated as proof of restriction.
+pub fn rootEgress(p: *Posture, resolv: []const u8, v6_on: bool) !void {
+    const assigned = configuredResolvers(resolv);
+    var dns_assigned: EgressEvidence = .{ .unknown = assigned.incomplete };
+    var dns_other: EgressEvidence = .{};
+    var https: EgressEvidence = .{};
+    if (p.root) {
+        for (assigned.targets[0..assigned.len]) |target| {
+            try dns_assigned.probe(p.gpa, target.address, .udp);
+            try dns_assigned.probe(p.gpa, target.address, .tcp);
+        }
+        // TEST-NET addresses need no responding public service. Exclude any
+        // configured resolver, so an assigned-only grant cannot fail this check.
+        for ([_][]const u8{ "192.0.2.1", "198.51.100.1", "203.0.113.1" }) |ip| {
+            const address = std.Io.net.IpAddress.parse(ip, 53) catch unreachable;
+            if (assigned.contains(address)) continue;
+            try dns_other.probe(p.gpa, address, .udp);
+            try dns_other.probe(p.gpa, address, .tcp);
+        }
+        for ([_][]const u8{ "192.0.2.1", "198.51.100.1", "203.0.113.1" }) |ip|
+            try https.probe(p.gpa, std.Io.net.IpAddress.parse(ip, 443) catch unreachable, .tcp);
+        if (v6_on) {
+            const dns6 = std.Io.net.IpAddress.parse("2001:db8::1", 53) catch unreachable;
+            if (!assigned.contains(dns6)) {
+                try dns_other.probe(p.gpa, dns6, .udp);
+                try dns_other.probe(p.gpa, dns6, .tcp);
+            }
+            try https.probe(
+                p.gpa,
+                std.Io.net.IpAddress.parse("2001:db8::1", 443) catch unreachable,
+                .tcp,
+            );
+        }
+    }
+    for ([_]struct { id: []const u8, name: []const u8, why: []const u8, evidence: EgressEvidence }{
+        .{
+            .id = "network-root-dns-assigned",
+            .name = "Root DNS to assigned resolvers blocked",
+            .why = "Root cannot issue arbitrary DNS queries through the assigned resolvers; " ++
+                "network fetchers have their own user permissions.",
+            .evidence = dns_assigned,
+        },
+        .{
+            .id = "network-root-dns-arbitrary",
+            .name = "Root DNS to arbitrary servers blocked",
+            .why = "Root cannot send DNS queries to servers outside the configured resolver set.",
+            .evidence = dns_other,
+        },
+        .{
+            .id = "network-root-https-arbitrary",
+            .name = "Root HTTPS to arbitrary servers blocked",
+            .why = "Root cannot fetch tools or send data over arbitrary HTTPS connections.",
+            .evidence = https,
+        },
+    }) |c| try p.add(.{
+        .id = c.id,
+        .area = "network",
+        .name = c.name,
+        .why = c.why,
+        .how = "root's UDP/TCP connect() probes are denied with EACCES or EPERM; " ++
+            "TCP is nonblocking, without waiting for DNS, TLS or a server response",
+        .expected = "every probe denied with EACCES or EPERM",
+        .observed = if (!p.root) "requires root" else if (c.evidence.text.items.len > 0)
+            c.evidence.text.items
+        else
+            "no configured resolver",
+        .result = if (p.root) c.evidence.result() else .skip,
+        .detail = if (!p.root) "requires root" else if (c.evidence.allowed)
+            "root has network permission"
+        else if (c.evidence.unknown)
+            "permission is inconclusive: configuration, address family or route unavailable"
+        else if (c.evidence.count == 0)
+            "no configured resolver"
+        else
+            "",
+    });
+}
+
+const ResolverTarget = struct { address: std.Io.net.IpAddress };
+const ConfiguredResolvers = struct {
+    targets: [3]ResolverTarget = undefined,
+    len: usize = 0,
+    incomplete: bool = false,
+
+    fn contains(r: *const ConfiguredResolvers, address: std.Io.net.IpAddress) bool {
+        for (r.targets[0..r.len]) |target| if (target.address.eql(&address)) return true;
+        return false;
+    }
+};
+
+fn configuredResolvers(text: []const u8) ConfiguredResolvers {
+    var result: ConfiguredResolvers = .{};
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        var words = std.mem.tokenizeAny(u8, line, " \t\r");
+        if (!std.mem.eql(u8, words.next() orelse "", "nameserver")) continue;
+        const address = std.Io.net.IpAddress.parse(words.next() orelse "", 53) catch {
+            result.incomplete = true;
+            continue;
+        };
+        if (result.contains(address)) continue;
+        if (result.len == result.targets.len) {
+            result.incomplete = true;
+            continue;
+        }
+        result.targets[result.len] = .{ .address = address };
+        result.len += 1;
+    }
+    return result;
+}
+
+const Egress = enum { denied, allowed, unknown };
+const Transport = enum { udp, tcp };
+
+fn egressResult(e: linux.E) Egress {
+    return switch (e) {
+        .ACCES, .PERM => .denied,
+        .SUCCESS, .INPROGRESS, .CONNREFUSED => .allowed,
+        else => .unknown,
+    };
+}
+
+const EgressEvidence = struct {
+    text: std.ArrayList(u8) = .empty,
+    count: usize = 0,
+    allowed: bool = false,
+    unknown: bool = false,
+
+    fn probe(
+        e: *EgressEvidence,
+        gpa: Allocator,
+        address: std.Io.net.IpAddress,
+        proto: Transport,
+    ) !void {
+        const errno = probeEgress(address, proto);
+        const observed = egressResult(errno);
+        e.count += 1;
+        e.allowed = e.allowed or observed == .allowed;
+        e.unknown = e.unknown or observed == .unknown;
+        const outcome = if (errno == .SUCCESS)
+            "allowed"
+        else
+            try gpa.print("E{s}", .{errnoText(errno)});
+        try listAdd(gpa, &e.text, "{s} {f}: {s}", .{ @tagName(proto), address, outcome });
+    }
+
+    fn result(e: EgressEvidence) posture.Result {
+        if (e.allowed) return .fail;
+        if (e.unknown or e.count == 0) return .skip;
+        return .pass;
+    }
+};
+
+fn probeEgress(address: std.Io.net.IpAddress, proto: Transport) linux.E {
+    const family: u32 = if (address == .ip4) linux.AF.INET else linux.AF.INET6;
+    const kind: u32 = if (proto == .udp) linux.SOCK.DGRAM else linux.SOCK.STREAM;
+    const rc = linux.socket(family, kind | linux.SOCK.CLOEXEC | linux.SOCK.NONBLOCK, 0);
+    if (linux.errno(rc) != .SUCCESS) return linux.errno(rc);
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    return switch (address) {
+        .ip4 => |ip| blk: {
+            const a = inet(ip.bytes, ip.port);
+            break :blk linux.errno(linux.connect(fd, @ptrCast(&a), @sizeOf(linux.sockaddr.in)));
+        },
+        .ip6 => |ip| blk: {
+            const a: linux.sockaddr.in6 = .{
+                .addr = ip.bytes,
+                .port = std.mem.nativeToBig(u16, ip.port),
+                .flowinfo = 0,
+                .scope_id = 0,
+            };
+            break :blk linux.errno(linux.connect(fd, @ptrCast(&a), @sizeOf(linux.sockaddr.in6)));
+        },
+    };
+}
+
+test "root egress distinguishes permission denial from offline destinations" {
+    try testing.expectEqual(.denied, egressResult(.ACCES));
+    try testing.expectEqual(.denied, egressResult(.PERM));
+    for ([_]linux.E{ .SUCCESS, .INPROGRESS, .CONNREFUSED }) |e|
+        try testing.expectEqual(.allowed, egressResult(e));
+    for ([_]linux.E{ .NETUNREACH, .HOSTUNREACH, .AFNOSUPPORT, .TIMEDOUT, .MFILE }) |e|
+        try testing.expectEqual(.unknown, egressResult(e));
+    try testing.expectEqual(.skip, (EgressEvidence{}).result());
+    try testing.expectEqual(.skip, (EgressEvidence{ .count = 1, .unknown = true }).result());
+    try testing.expectEqual(
+        .fail,
+        (EgressEvidence{ .count = 2, .unknown = true, .allowed = true }).result(),
+    );
+    try testing.expectEqual(.pass, (EgressEvidence{ .count = 2 }).result());
+}
+
+test "assigned resolver parsing accepts IPv4 and IPv6 but reports incomplete evidence" {
+    const r = configuredResolvers("search local\nnameserver 192.0.2.1 # detected\n" ++
+        "nameserver 192.0.2.1\nnameserver 2001:db8::53\noptions timeout:1\n");
+    try testing.expectEqual(2, r.len);
+    try testing.expect(!r.incomplete);
+    try testing.expect(r.contains(try std.Io.net.IpAddress.parse("192.0.2.1", 53)));
+    try testing.expect(!r.contains(try std.Io.net.IpAddress.parse("198.51.100.1", 53)));
+    try testing.expect(configuredResolvers("nameserver bad\n").incomplete);
+    try testing.expect(configuredResolvers("nameserver 1.1.1.1\nnameserver 2.2.2.2\n" ++
+        "nameserver 3.3.3.3\nnameserver 4.4.4.4\n").incomplete);
+}
+
+test "root egress checks skip instead of measuring a non-root user" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var p: Posture = .{ .io = testing.io, .gpa = arena.allocator(), .root = false };
+    try rootEgress(&p, "nameserver 192.168.5.3\n", false);
+    try testing.expectEqual(3, p.checks.items.len);
+    for (p.checks.items) |c| {
+        try testing.expectEqual(.skip, c.result);
+        try testing.expectEqualStrings("requires root", c.observed.?);
+    }
+}
+
 /// fenceBypass reports whether PID 1's bounding set retains a capability
 /// that can send traffic outside Fence's policy.
 fn fenceBypass(status: []const u8) ?bool {
@@ -515,6 +734,7 @@ fn fence(p: *Posture, policy: []const u8, v6_on: bool) !void {
 
     p.work("network-metadata: TCP probe (1 s timeout):", "169.254.169.254:80");
     const md = probeMetadata();
+    try rootEgress(p, p.read("/etc/resolv.conf"), v6_on);
     try p.add(.{
         .id = "network-metadata",
         .area = "network",

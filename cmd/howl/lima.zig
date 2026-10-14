@@ -1,5 +1,6 @@
 //! lima runs a machine as a Lima VM under macOS's Virtualization framework
-//! (vz). Lima keeps all the state; howl records nothing. See README.md.
+//! (vz). Lima owns VM existence and runtime state; howl retains build and
+//! enrollment inputs separately. See README.md.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -47,9 +48,22 @@ pub fn exists(io: Io, gpa: Allocator, name: []const u8) !bool {
         io,
         .{ .argv = &.{ "limactl", "list", "--format", "{{.Name}}" } },
     );
-    var lines = std.mem.tokenizeScalar(u8, r.stdout, '\n');
-    while (lines.next()) |l| if (std.mem.eql(u8, l, name)) return true;
+    return listed(r.term == .exited and r.term.exited == 0, r.stdout, name);
+}
+
+fn listed(ok: bool, text: []const u8, name: []const u8) !bool {
+    // A failed listing is not evidence that an enrolled VM was deleted.
+    if (!ok) return error.LimaListFailed;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |l| if (std.mem.eql(u8, std.mem.trim(u8, l, " \r"), name)) return true;
     return false;
+}
+
+test "instance absence requires a successful Lima listing" {
+    try std.testing.expect(try listed(true, "stopped-vm\nrunning-vm\n", "stopped-vm"));
+    try std.testing.expect(!try listed(true, "another-vm\n", "deleted-vm"));
+    try std.testing.expect(!try listed(true, "", "deleted-vm"));
+    try std.testing.expectError(error.LimaListFailed, listed(false, "", "deleted-vm"));
 }
 
 /// running reports whether Lima says the instance is running.

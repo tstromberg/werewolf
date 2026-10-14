@@ -1,0 +1,3 @@
+seen    rabbitmq-leashed  leash: \{"event":"start","service":"rabbitmq"
+seen    rabbitmq-ready    Server startup complete
+unseen  rabbitmq-down     leash: \{"event":"(down|retry)","service":"rabbitmq"

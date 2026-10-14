@@ -26,7 +26,7 @@ by hand.
 
 ## Non-Goals
 
-- A daemon, a state file, plugins, prompts, `start`/`stop`.
+- A daemon or an independent inventory of provider VMs.
 - Building the application, or `make` deploying machines. (Building
   without make was a non-goal; [howl-build.md](howl-build.md) makes it one.)
 
@@ -42,7 +42,8 @@ image the cloud lacks, starts the machine, waits for init's `up in`, and
 prints `NAME ADDRESS FORM`. `run` uses `werewolf-run`, reusing an unchanged protected VM
 and resuming its existing image when stopped. Changed image inputs replace it.
 Each platform is driven by its own tool (`limactl`, `qm`,
-`gcloud`, `aws`, `az`…) with argument lists: no SDK, no state file.
+`gcloud`, `aws`, `az`…) with argument lists. The provider supplies VM existence
+and runtime state; local files retain build inputs and enrollment credentials.
 
 | Target | Choice, and why |
 | --- | --- |
@@ -96,7 +97,9 @@ one on the machine, so its private half never leaves.
 
 ## Reliability Considerations
 
-- **No state to lose**: a machine left by a laptop that died mid-`create`
-  is in the provider's list, for `delete`. Failures leave named leftovers.
+- **Provider inventory**: a machine left by a laptop that died mid-`create`
+  is in the provider's list, for `delete`. Lima files left after an external
+  deletion are cleared before the name is reused. Enrollment credentials
+  are retained for extant instances, including stopped ones.
 - **Open: tested by hand.** `make check` uses `howl pack`; the cloud
   checks run `create` and `delete`, but nothing runs them on a schedule.
