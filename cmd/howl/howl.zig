@@ -1120,7 +1120,10 @@ pub const Tell = struct {
             .command = t.command,
             .log = try gpa.print("{s}/create.log", .{dir}),
             .first = if (t.milestones) |m|
-                m.phase orelse .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" }
+                m.phase orelse .{
+                    .name = "Preparing VM boot image and enrollment",
+                    .short = "prepare",
+                }
             else
                 .{ .name = "Preparing VM boot image and enrollment", .short = "prepare" },
             .milestones = t.milestones,
