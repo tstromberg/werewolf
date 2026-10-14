@@ -26,6 +26,9 @@ on:
       - 'test/check-published-*'
       - 'test/check-protected-*'
       - '.github/workflows/protected-images.yml'
+      - '!**/*.md'
+      - 'forms/**/rootfs/**/*.md'
+      - '!**/__pycache__/**'
   push:
     branches: [main]
     paths:
@@ -50,6 +53,9 @@ on:
       - 'test/check-published-*'
       - 'test/check-protected-*'
       - '.github/workflows/protected-images.yml'
+      - '!**/*.md'
+      - 'forms/**/rootfs/**/*.md'
+      - '!**/__pycache__/**'
   workflow_dispatch:
     inputs:
       build:
@@ -87,7 +93,6 @@ jobs:
       - name: Native admission, downloads, production trust and publication gates
         run: |
           make -j"$(nproc)" test
-          make lint
           make howl
       - name: Resolve one package snapshot for both independent copies
         id: inputs

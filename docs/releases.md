@@ -66,6 +66,10 @@ image lacks as soon as that advisory's tier says
 
 ## When CI releases
 
+Formatting and documentation checks run in the independent `lint` workflow;
+they do not gate package or image publication. Builds, signatures, reproducibility
+and runtime checks remain publication requirements.
+
 [.github/workflows/release.yml](../.github/workflows/release.yml) runs
 every 15 minutes, for what Wolfi and Alpine change, and whenever the
 `packages` workflow has run after `check` passes on `main`, for what werewolf

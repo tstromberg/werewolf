@@ -85,8 +85,8 @@ An existing enrollment must retain its owner/TPM state and accept a candidate th
 
 ### CI and publication
 
-`.github/workflows/protected-images.yml` runs unit, admission, download, custody and export regression tests
-and lint. Relevant main pushes, an hourly schedule and manual dispatch produce two independent
+`.github/workflows/protected-images.yml` runs unit, admission, download, custody and export regression tests.
+Relevant main pushes, an hourly schedule and manual dispatch produce two independent
 x86_64 QEMU copies with dedicated environment secrets; both include playground, prod and prod-ssh.
 Admission resolves a shared package snapshot for the images, kernel base, bootloader and both Melange builders.
 Both copies consume those exact versions; the deduplication key binds source, package bytes and public trust.
