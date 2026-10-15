@@ -25,6 +25,35 @@ FILES = ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi')
 HEX = re.compile(r'[0-9a-f]{64}\Z')
 CACHE_SECONDS = 300
 USER_AGENT = 'Werewolf-howl/1 (+https://github.com/werewolf-linux/werewolf)'
+REPOSITORY = 'https://github.com/werewolf-linux/werewolf'
+SERIAL = re.compile(r'[0-9]{8}T[0-9]{6}Z\Z')
+VERSION = re.compile(r'(?:base-images|protected)-[0-9]{8}T[0-9]{6}Z\Z')
+
+
+def versions(form, provider, arch, transport=None):
+    """GitHub is a discovery index; native admission still authenticates installs."""
+    transport = fetch if transport is None else transport
+    prefix = '-'.join((form, provider, arch)) + '-'
+    required = {prefix + name for name in FILES +
+                ('boot.json', 'boot.json.sig', 'latest.json', 'latest.json.sig', 'disk.img.zst')}
+    found = []
+    with tempfile.TemporaryDirectory(prefix='ww-image-versions-') as temporary:
+        for page in range(1, 101):
+            output = Path(temporary) / str(page)
+            transport('https://api.github.com/repos/werewolf-linux/werewolf/releases?per_page=100&page=%d' % page,
+                      output, 16 << 20)
+            releases = json.loads(read(output, 16 << 20))
+            if not isinstance(releases, list):
+                raise ValueError('invalid GitHub releases response')
+            for release in releases:
+                tag = release.get('tag_name', '')
+                if (VERSION.fullmatch(tag) and not release.get('draft', True) and
+                        not release.get('prerelease', True) and
+                        required <= {asset['name'] for asset in release.get('assets', [])}):
+                    found.append(tag)
+            if len(releases) < 100:
+                return sorted(set(found), key=lambda tag: (tag.rsplit('-', 1)[-1], tag), reverse=True)
+    raise ValueError('too many GitHub release pages')
 
 
 def sha(path):
@@ -70,8 +99,10 @@ def stamp(path):
 
 def validate_request(request):
     fields = {'source', 'cache', 'boot_certificate', 'image_certificate', 'channel', 'form', 'arch', 'provider'}
-    if set(request) != fields or any(not isinstance(v, str) or not v for v in request.values()):
+    if set(request) not in (fields, fields | {'version'}) or any(not isinstance(v, str) or not v for v in request.values()):
         raise ValueError('invalid download request')
+    if 'version' in request and not (VERSION.fullmatch(request['version']) or SERIAL.fullmatch(request['version'])):
+        raise ValueError('image version must be a timestamp or base-images-SERIAL GitHub release tag')
     url = urlsplit(request['source'])
     if url.scheme != 'https' or not url.hostname or url.username or url.password or url.query or url.fragment:
         raise ValueError('download source must be an HTTPS directory without credentials or query')
@@ -233,6 +264,8 @@ def download(request, admit, verify, validator, transport=fetch, now=None):
         trust[name] = sha(request[name])
     trust.pop('cache')
     trust.pop('source')
+    # An explicit historical install has its own floor. It must neither lower
+    # the latest channel's floor nor stop a new machine starting on an old image.
     identity = hashlib.sha256(json.dumps(trust, sort_keys=True).encode()).hexdigest()
     cache = Path(request['cache']).resolve()
     state = cache / 'channels' / identity
@@ -259,9 +292,26 @@ def download(request, admit, verify, validator, transport=fetch, now=None):
         with tempfile.TemporaryDirectory(prefix='incoming-', dir=state) as temporary:
             staging = Path(temporary)
             base = request['source'].rstrip('/') + '/' + '/'.join(request[name] for name in ('form', 'provider', 'arch'))
+            version = request.get('version')
+            if version:
+                tag = 'base-images-' + version if SERIAL.fullmatch(version) else version
+                def release_base(tag):
+                    return REPOSITORY + '/releases/download/' + tag + '/' + '-'.join(
+                        request[name] for name in ('form', 'provider', 'arch')) + '-'
+                base = release_base(tag)
+            def head_url(name):
+                return base + name if version else base + '/latest/' + name
             # Signatures precede JSON on the server. A torn head refuses without changing state.
-            transport(base + '/latest/boot.json.sig', staging / 'boot.json.sig', SIGNATURE_LIMIT)
-            transport(base + '/latest/boot.json', staging / 'boot.json', HEAD_LIMIT)
+            try:
+                transport(head_url('boot.json.sig'), staging / 'boot.json.sig', SIGNATURE_LIMIT)
+            except ValueError as error:
+                if not version or not SERIAL.fullmatch(version) or 'HTTP 404' not in str(error):
+                    raise
+                # Releases published before the rename remain installable by timestamp.
+                (staging / 'boot.json.sig').unlink(missing_ok=True)
+                base = release_base('protected-' + version)
+                transport(head_url('boot.json.sig'), staging / 'boot.json.sig', SIGNATURE_LIMIT)
+            transport(head_url('boot.json'), staging / 'boot.json', HEAD_LIMIT)
             manifest = admit(staging)
             descriptor = sha(staging / 'boot.json')
             next_floor = freshness(manifest, descriptor, floor, now)
@@ -274,10 +324,12 @@ def download(request, admit, verify, validator, transport=fetch, now=None):
                 if bundle.exists():
                     shutil.rmtree(bundle)
                 remote = base + '/objects/' + descriptor
+                def object_url(name):
+                    return base + name if version else remote + '/' + name
                 public = staging / 'prebuilt' / request['arch']
                 public.mkdir(parents=True)
                 for name, limit in [('latest.json', HEAD_LIMIT), ('latest.json.sig', SIGNATURE_LIMIT)]:
-                    transport(remote + '/' + name, public / name, limit)
+                    transport(object_url(name), public / name, limit)
                 slot = staging / 'slot'
                 slot.mkdir()
                 immutable = public / manifest['image']['build']
@@ -290,7 +342,7 @@ def download(request, admit, verify, validator, transport=fetch, now=None):
                     if not good:
                         # Downloads stay private until their size and hash match the signed descriptor.
                         part = staging / (name + '.part')
-                        transport(remote + '/' + name, part, artifact['size'], artifact)
+                        transport(object_url(name), part, artifact['size'], artifact)
                         if part.stat().st_size != artifact['size'] or sha(part) != artifact['sha256']:
                             raise ValueError('transport returned an unauthenticated object')
                         part.chmod(0o400)
@@ -352,6 +404,16 @@ def native(howl, operation, directory, request):
 
 
 def main():
+    if len(sys.argv) == 6 and sys.argv[1] == 'versions':
+        form, provider, arch, output = sys.argv[2:]
+        tags = versions(form, provider, arch)
+        if output == 'json':
+            print(json.dumps(dict(form=form, provider=provider, arch=arch, versions=tags)))
+        elif tags:
+            print('\n'.join(tags))
+        else:
+            print('No published base image versions for %s/%s/%s.' % (form, provider, arch))
+        return
     if len(sys.argv) != 3:
         raise ValueError('usage: boot-download HOWL REQUEST_JSON')
     howl = str(Path(sys.argv[1]).resolve())

@@ -2,9 +2,7 @@
 
 ## Summary
 
-Protected downloads authenticate vendor code before enrolling a machine, with dedicated
-boot and image certificates embedded in howl, so a mirror cannot select trust. `howl
-run` downloads the signed profile by default; `--build` keeps caller-owned signing.
+`howl run` verifies downloads with embedded certificates; `--build` uses owner keys.
 
 ## Background
 
@@ -21,8 +19,7 @@ run` downloads the signed profile by default; `--build` keeps caller-owned signi
 ## Non-Goals
 
 - Protect against the Mac administrator rewriting the host cache and VM/TPM state.
-- Treat artifact admission as proof that a provider passed runtime boot tests, or
-  expose a public head before all publication gates have evidence.
+- Publish a head without evidence of all provider runtime boot gates.
 
 ## Detailed design
 
@@ -51,8 +48,7 @@ boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{latest,downloads}.json[.sig]
 boot/v1/FORM/PROVIDER/ARCH/objects/DESCRIPTOR/{gates.json,boot.crt,image.crt}
 ```
 
-`DESCRIPTOR` is the SHA-256 of the signed boot JSON. Objects precede heads; a torn pair
-refuses without changing the floor or cached bundle.
+`DESCRIPTOR` hashes the signed boot JSON. Objects precede heads; torn pairs fail closed.
 
 ### Admission and caching
 
@@ -74,6 +70,13 @@ full admission; equal serials must name the same descriptor, disk and PCR includ
 older or future heads, a corrupt floor or a missing retained floor fail closed. The
 floor retires no TPM release and replaces no bootstrap bundle: an enrollment keeps its
 owner and TPM state and accepts a candidate through its issuer.
+
+`howl versions` lists complete target bundles in published `base-images-SERIAL`
+GitHub releases (also the earlier `protected-SERIAL` tags). `run` and `create` take
+`--version SERIAL|TAG` to install their initial bundle from those assets, using the
+same embedded trust, bounded transport and native admission. Each requested version
+has a separate cache floor; it neither lowers the latest channel's floor nor pins
+the enrolled machine's update channel. Existing enrollment and TPM checks still apply.
 
 ### CI and publication
 
@@ -99,13 +102,11 @@ checks the store's authenticated floor and uploads objects before heads, a signe
 receipt keeping the newest accepted release across an interrupted write. Signed
 configuration accompanies the exact code; a resumed machine keeps its bootstrap.
 
-`release/export-protected` keeps the original signatures, verifies that the standalone
-qcow2 and raw disk match, and signs a manifest binding asset hashes, lifecycle evidence,
-source commit and GHA run, which uploads reverify. GitHub assets carry form, provider
-and architecture prefixes and are attested; R2 keeps canonical names; a draft goes
-public only after fresh R2 downloads match every asset. The `publishing-health` workflow
-tracks main-branch check, package and image failures in one issue per workflow, updated
-on retries and closed on recovery; never from a PR.
+`release/export-protected` retains signatures, compares qcow2 with raw disk, and signs
+asset hashes, lifecycle evidence, source commit and GHA run; uploads reverify them.
+Attested GitHub assets have target prefixes; R2 names are canonical. Drafts go public
+after fresh R2 downloads match. `publishing-health` tracks main-branch check, package
+and image failures in one issue per workflow, closing on recovery; never from a PR.
 
 ## Security Considerations
 
@@ -115,6 +116,5 @@ changing production trust takes a deliberate rotation design, never a missing ke
 
 ## Reliability Considerations
 
-Tests exercise native admission before mocked transport, with exact, truncated,
-oversized and encoded streams; publication tests reject missing, false, nonboolean
-and foreign evidence. Unit tests never authorize publication alone.
+Tests exercise native admission and bounded streams; publication tests reject missing,
+false, nonboolean and foreign evidence. Unit tests alone never authorize publication.

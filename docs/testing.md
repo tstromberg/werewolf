@@ -181,19 +181,16 @@ shows only warnings and worse (`loglevel=5`); `dmesg` keeps every line.
 ## CI
 
 [check.yml](../.github/workflows/check.yml) runs `make test` on x86_64 and
-arm64 runners and `make lint` on one, and splits `make check` into jobs that
-name their area (`forms`, `shellfree`, `integrity`, `cloud`, `persist` and,
-on arm64, `native`), the first three sharded again (`SHARD=K/N`): 19 jobs,
-each booting four machines at a time, with Zig's and apko's caches kept a
-week. [test/ci-setup](../test/ci-setup) installs the tools, pinned.
+arm64 runners and `make lint` on one, and splits x86_64's `make check` into
+jobs that name their area (`forms`, `shellfree`, `integrity`, `cloud`,
+`persist`), the first two sharded again (`SHARD=K/N`): 10 jobs, each booting
+four machines at a time, with Zig's and apko's caches kept a week.
+[test/ci-setup](../test/ci-setup) installs the tools, pinned.
 
-The x86_64 runner has KVM; the arm64 runner has none, so in place of `forms`
-and `shellfree` it runs `native`: [test/cage](../test/cage) boots each form's
-root, built as it ships, under `systemd-nspawn` on the runner's own kernel
-and judges its posture, attacking the seal, Landlock, fence and the leash,
-which hold in a container; what a container cannot own (sysctls, the boot
-line, dm-verity) `POSTURE_KNOWN_NATIVE` allows to fail. arm64 still emulates
-`minimal` and `prod` for the attacks a container cannot carry.
+Hosted arm64 runners have no KVM, so `vm-arm64` runs every group under KVM on a
+self-hosted Ampere runner, for pushes and maintainers' pull requests.
+`make check-native` still checks each form's root under `systemd-nspawn`
+([test/cage](../test/cage)), attacking what holds in a container.
 
 `make ci` runs the same job here, in the `werewolf-ci-24.04` Lima VM with
 nested KVM, copying the tree in fresh without `config/` or `.git`; the VM

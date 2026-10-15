@@ -33,6 +33,23 @@ class Protocol(unittest.TestCase):
     def test_complete(self):
         self.assertEqual(self.validate(self.records), 12)
 
+    def test_one_driver_iteration(self):
+        name = 'test-postgres'
+        records = [r for r in self.records if r.get('suite') == name or r.get('event') == 'complete']
+        text = 'other service: ready\n' + '\n'.join('werewolf-test: ' + json.dumps(r) for r in records)
+        self.assertEqual(native.validate(text, self.plan, self.context, only_driver=name), 6)
+        with self.assertRaises(ValueError):
+            native.validate(text, self.plan, self.context, only_driver='missing')
+
+    def test_iteration_rejects_other_driver_records(self):
+        name = 'test-postgres'
+        records = [r for r in self.records if r.get('suite') == name or r.get('event') == 'complete']
+        foreign = next(r for r in self.records if r.get('event') == 'driver' and r.get('suite') != name)
+        records.insert(-1, foreign)
+        text = '\n'.join('werewolf-test: ' + json.dumps(r) for r in records)
+        with self.assertRaises(ValueError):
+            native.validate(text, self.plan, self.context, only_driver=name)
+
     def test_missing_or_duplicate(self):
         for i in range(len(self.records)):
             with self.subTest(i=i):

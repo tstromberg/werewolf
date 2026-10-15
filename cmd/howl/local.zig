@@ -133,10 +133,10 @@ pub fn createQemu(
     const ssh_port = try qemu.freePort(io, 2222);
     const web_port = try qemu.freePort(io, 8080);
     try writePrivate(io, gpa, try gpa.print("{s}/machine", .{dir}), try gpa.print(
-        "form {s}\nssh {d}\nweb {d}\n",
-        .{ o.form, ssh_port, web_port },
+        "form {s}\nssh {d}\nweb {d}\ndev {d}\n",
+        .{ o.form, ssh_port, web_port, @intFromBool(tell.dev) },
     ), why);
-    const ports = try listens(io, gpa, o.form, why);
+    const ports = try howl.listensDev(io, gpa, o.form, tell.dev, why);
     // The machine's port this host's web port reaches: its last but ssh's,
     // or 80.
     var guest_web: u16 = 80;
@@ -324,7 +324,7 @@ pub fn createLima(
     )) return why.refuse("--on lima: no limactl here, or not macOS (brew install lima)", .{});
     const arch = try localArch(why);
     const m = lima.mac(name);
-    var managed = try limaManages(io, gpa, o.form, why);
+    var managed = try limaManages(io, gpa, o.form, tell.dev, why);
     // Each step prints one line naming it and logs its output.
     const step = try tell.step(gpa, dir);
     var built: ?i64 = null;
@@ -509,7 +509,7 @@ pub fn createLima(
             .{ name, name },
         );
     if (!tty) try w.print("{s}\t{s}\t{s}\n", .{ name, addr, o.form });
-    const ports = try listens(io, gpa, o.form, why);
+    const ports = try howl.listensDev(io, gpa, o.form, tell.dev, why);
     const late = sshReady(io, ports, addr, 22);
     try sayUp(io, gpa, began, try gpa.print(
         "{s} is up on Lima, at {s}{s}",
@@ -717,7 +717,7 @@ pub fn createBhyve(
         try writePrivate(io, gpa, form_file, o.form, why);
     }
     try writePrivate(io, gpa, config, tar, why);
-    const fwds = try bhyve.forwards(gpa, name, try listens(io, gpa, o.form, why));
+    const fwds = try bhyve.forwards(gpa, name, try howl.listensDev(io, gpa, o.form, tell.dev, why));
     // Create the log as this user, so daemon appends to it as root and
     // delete can still remove it.
     const f = Dir.cwd().createFile(
@@ -876,7 +876,7 @@ pub fn createFirecracker(
         var out = Io.File.stdout().writerStreaming(io, &.{});
         try out.interface.print("{s}\t{s}\t{s}\n", .{ name, n.guest, o.form });
     }
-    const ports = try listens(io, gpa, o.form, why);
+    const ports = try howl.listensDev(io, gpa, o.form, tell.dev, why);
     const late = sshReady(io, ports, n.guest, 22);
     return sayUp(io, gpa, tell.began, try gpa.print(
         "{s} is up here, under Firecracker, at {s}{s}",
@@ -959,9 +959,9 @@ pub fn createProxmox(
 /// ssh and readiness probes need openssh-server and bash among the packages
 /// its chain's apko configs install (lib/form.zig). Any other form starts
 /// on vzNAT, unmanaged, and is stopped hard.
-pub fn limaManages(io: Io, gpa: Allocator, form: []const u8, why: *Why) !bool {
+pub fn limaManages(io: Io, gpa: Allocator, form: []const u8, dev: bool, why: *Why) !bool {
     if (@import("boot-config.zig").forForm(form)) |definition| return definition.lima_managed;
-    const c = try chain(io, gpa, form, why);
+    const c = if (dev) try howl.devChain(io, gpa, form, why) else try chain(io, gpa, form, why);
     const config = try forms.apko(gpa, c, &.{});
     var sshd = false;
     var bash = false;

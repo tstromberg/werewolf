@@ -13,7 +13,7 @@
 # which howl adds. Wolfi stays first: the updater reads its CVE feed there.
 repositories:
   - https://packages.wolfi.dev/os
-  - https://dist.werewolf-linux.org/apk/glibc-neutered
+  - https://dist.werewolf-linux.org/apk/glibc
   - https://dist.werewolf-linux.org/apk
 keyring:
   - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub

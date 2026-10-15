@@ -35,12 +35,19 @@ driver for the guest architecture, uploads it with `scp`, and runs it. Repeating
 command reuses the running VM, so edits rebuild only the selected client. `--reset`
 recreates the VM's data disk and reboots; `--stop` ends the VM.
 
-The iteration image adds OpenSSH, `sh-shim`, and one root account with a generated
-per-session key. These exist only in this test image. SSH and SFTP use one loopback
-forward. `sh-shim` dispatches only the fixed `test-control` executable; it rejects shell
-syntax, PTYs, and forwarding are disabled. `scp` uploads to `/tmp/test-upload`. This is a
-trusted, local developer VM: SFTP is not a security boundary and can modify the guest.
-Discard the VM after iteration; never publish it or treat its results as release proof.
+The iteration image adds OpenSSH, `sh-shim`, and one root account. These exist only in
+this test image. SSH and SFTP use one loopback forward. Use one Howl-managed developer
+key at `$XDG_DATA_HOME/howl/keys/dev/ssh-ed25519`; install its public half as root's
+authorized key. Never accept unauthenticated or arbitrary keys. `sh-shim` dispatches
+only the fixed `test-control` executable; it rejects shell syntax, PTYs, and forwarding
+are disabled. `scp` uploads to `/tmp/test-upload`. This is a trusted, local developer
+VM: root SFTP can modify the guest. Discard it after iteration; never publish it or
+treat its results as release proof.
+
+`--dev` automatically adds SSH for local development VMs, using the same managed key
+and `howl ssh` path. It permits root command execution by design. The native test image
+remains separate: it has no BusyBox, and its proposed SSH command path only dispatches
+`test-control` before running drivers through `leash`.
 
 `test-control run DRIVER` accepts only a name in `test/native.json`. It atomically
 promotes that driver's uploaded binary, then invokes its existing fixed service entry
@@ -76,10 +83,11 @@ the guest preserves Unix peer credentials.
 
 ## Security Considerations
 
-Only the disposable local test image has SSH. Its forwarded port binds to loopback and
-uses a generated key. This design trusts the local operator and makes no claim that SFTP
-is confined. The command path is limited by `sh-shim`; driver execution still uses the
-plan's `leash` policy. Native tests remain the release gate.
+Only the disposable local test image gains SSH from this design. Its forwarded port
+binds to loopback and requires Howl's managed developer key. This design trusts the
+local operator and makes no claim that root SFTP is confined. The command path is
+limited by `sh-shim`; driver execution still uses the plan's `leash` policy. Native
+tests remain the release gate.
 
 ## Reliability Considerations
 

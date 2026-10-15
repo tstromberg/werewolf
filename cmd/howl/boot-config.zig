@@ -430,7 +430,7 @@ pub fn derive(
             .files
         else
             .security_keys,
-        .lima_managed = try @import("local.zig").limaManages(io, gpa, ref, why),
+        .lima_managed = try @import("local.zig").limaManages(io, gpa, ref, false, why),
     };
 }
 

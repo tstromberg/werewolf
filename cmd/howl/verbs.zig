@@ -56,12 +56,19 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
     // The guest keeps its host key in /data, so trust it on first use and
     // pin it by name in the machine's directory, not by an address another
     // machine may get later. delete removes it with the machine.
-    const pinned = [_][]const u8{
+    var pinned: std.ArrayList([]const u8) = .empty;
+    try pinned.appendSlice(gpa, &.{
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", try gpa.print("UserKnownHostsFile={s}/known_hosts", .{dir}),
         "-o", try gpa.print("HostKeyAlias={s}", .{name}),
         "-o", "LogLevel=ERROR",
-    };
+    });
+    if (Dir.cwd().access(io, try gpa.print("{s}/dev", .{dir}), .{})) |_| {
+        try pinned.appendSlice(gpa, &.{
+            "-i", try @import("keys.zig").devPrivatePath(io, gpa),
+            "-o", "IdentitiesOnly=yes",
+        });
+    } else |_| {}
     var argv: std.ArrayList([]const u8) = .empty;
     if (on == .qemu) {
         if (qemu.running(
@@ -76,11 +83,11 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             "ssh",
         ) orelse return why.refuse("{s}: no ssh port on record", .{name});
         try argv.appendSlice(gpa, &.{ "ssh", "-p", port });
-        try argv.appendSlice(gpa, &pinned);
+        try argv.appendSlice(gpa, pinned.items);
         try argv.append(gpa, "root@127.0.0.1");
     } else if (on == .firecracker) {
         try argv.append(gpa, "ssh");
-        try argv.appendSlice(gpa, &pinned);
+        try argv.appendSlice(gpa, pinned.items);
         try argv.append(gpa, try gpa.print("root@{s}", .{(try firecracker.net(gpa, name)).guest}));
     } else if (on == .lima) {
         if (!try lima.exists(io, gpa, name)) return why.refuse("no machine {s} on Lima", .{name});
@@ -102,11 +109,11 @@ pub fn sshTo(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void 
             null;
         if (addr) |a| {
             try argv.append(gpa, "ssh");
-            try argv.appendSlice(gpa, &pinned);
+            try argv.appendSlice(gpa, pinned.items);
             try argv.append(gpa, try gpa.print("root@{s}", .{a}));
         } else if (port) |p| {
             try argv.appendSlice(gpa, &.{ "ssh", "-p", p });
-            try argv.appendSlice(gpa, &pinned);
+            try argv.appendSlice(gpa, pinned.items);
             try argv.append(gpa, "root@127.0.0.1");
         } else {
             try argv.appendSlice(gpa, &.{ "limactl", "shell", name });

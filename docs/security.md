@@ -147,9 +147,12 @@ machine takes only updates signed with them, so back that directory up.
 One profile provides all three, so for now they go together. Without
 them a running machine keeps its seal, fence and verified root: root
 still cannot run a program the image lacks, but can choose what boots
-next. `--dev` makes a development image: busybox-full, seal learning
-mode (refused calls logged, not blocked) and, with `werewolf.debug=1`,
-a root shell on the console without a password. It needs
+next. `--dev` makes a local development image: busybox-full, root SSH
+through a Howl-managed Ed25519 key, seal learning mode (refused calls
+logged, not blocked) and, with `werewolf.debug=1`, a root shell on the
+console without a password. The key lives under `$XDG_DATA_HOME/howl/keys/dev/`
+and is passed by `howl ssh`; it is separate from the keys used by playground.
+It needs
 `--disable=secureboot,tpm,ipe`; howl never publishes it, and posture's
 `processes-no-root-console` fails while the shell is offered.
 

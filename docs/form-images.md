@@ -114,14 +114,14 @@ every R2 object with its GitHub asset. A run's one draft release goes
 public only after attestation, the upload and that comparison succeed
 for every target it carries.
 
-GitHub releases are tagged `protected-SERIAL`, with assets named
+GitHub releases are tagged `base-images-SERIAL`, with assets named
 `FORM-PROVIDER-ARCH-FILE`: the qcow2, the compressed raw disk, the slot
 files, both signature pairs, the public certificates, the gates and the
 download manifest, each with a build provenance attestation.
 
 ### Downloading a protected qcow2
 
-Choose a `protected-SERIAL` release with assets for your form, provider
+Choose a `base-images-SERIAL` release with assets for your form, provider
 and architecture; the x86_64 QEMU playground disk is
 `playground-qemu-x86_64-disk.qcow2`. On a matching Linux host,
 `howl run --on qemu` downloads and authenticates the bundle, enrolls
@@ -150,5 +150,24 @@ deployment. Its host service polls for authenticated vendor bundles every
 five minutes, and the guest applies them under its
 [update policy](updater.md#when-an-update-boots). A/B recovery and
 retirement protection depend on keeping that machine's enrollment and
-host service. A GitHub release disk uses the package updater and gains
+host service. A legacy GitHub release disk uses the package updater and gains
 no protected profile by being imported.
+
+### Installing a particular version
+
+List versions with a complete bundle for your target, then start a new machine:
+
+```sh
+howl versions --with playground --on qemu --arch x86_64
+howl create upgrade-test --with playground --on qemu --version 20261014T232908Z
+```
+
+`howl run` also takes `--version`. A timestamp, full `base-images-SERIAL` tag,
+or older `protected-SERIAL` tag selects the initial image from GitHub releases.
+Discovery supports `--json`; its defaults are playground and the host's provider and
+architecture. Every install still verifies the embedded vendor keys and signed
+artifacts. An explicit version has a separate cache floor, so it can install an old
+image without lowering the latest channel's floor. It requires the download path;
+`--build` and `--disable` cannot be combined with it. Use a new machine name to test
+upgrades: existing enrollments retain their rollback protection. The version selects
+the initial image; the host service still polls the latest channel for image updates.

@@ -11,6 +11,39 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
+/// devPrivatePath is the private key Howl uses for local developer VMs.
+pub fn devPrivatePath(io: Io, gpa: Allocator) ![]const u8 {
+    const dir = try howl.keysDir(io, gpa, "dev", "build/keys/dev");
+    return gpa.print("{s}/ssh-ed25519", .{dir});
+}
+
+/// devPublic makes Howl's local developer key once and returns its public
+/// half for the VM's root authorized_keys.
+pub fn devPublic(io: Io, gpa: Allocator) ![]const u8 {
+    const path = try devPrivatePath(io, gpa);
+    const pub_path = try gpa.print("{s}.pub", .{path});
+    if (!exists(io, path)) {
+        const made = try std.process.run(gpa, io, .{ .argv = &.{
+            "/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "howl dev", "-f", path,
+        } });
+        if (made.term != .exited or made.term.exited != 0) return error.DevKeygenFailed;
+    }
+    if (!exists(io, pub_path)) {
+        const derived = try std.process.run(gpa, io, .{ .argv = &.{
+            "/usr/bin/ssh-keygen", "-y", "-f", path,
+        } });
+        if (derived.term != .exited or derived.term.exited != 0) return error.DevKeyUnreadable;
+        try Dir.cwd().writeFile(io, .{ .sub_path = pub_path, .data = derived.stdout });
+    }
+    const public_key = try Dir.cwd().readFileAlloc(io, pub_path, gpa, .limited(16 << 10));
+    return try gpa.dupe(u8, public_key);
+}
+
+fn exists(io: Io, path: []const u8) bool {
+    Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
 /// offer returns root's authorized_keys for machine name: the keys in
 /// ~/.ssh the chain's sshd takes, security keys unless it takes key files
 /// too, once the person agrees, or at once when yes (--yes, or a machine

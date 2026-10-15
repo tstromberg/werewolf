@@ -39,10 +39,9 @@ Kroah-Hartman and Linus Torvalds, and locks the tarball's SHA-256 with our own f
 
 **Configuration.** `config/{common,x86_64,aarch64}.cfg` name every option that is on,
 one per line with its reason. `make config` runs `allnoconfig` with them as
-`KCONFIG_ALLCONFIG`, so nothing unnamed is on, then checks that each line held (an unmet
-dependency fails visibly) and that `config/deny.cfg` holds. The result is committed as
-`config/ARCH.config`; the build re-applies it and stops if any option but a toolchain
-probe differs. A new series adds its options off; Alpine's config is never an input.
+`KCONFIG_ALLCONFIG`, so nothing unnamed is on, then checks each line held and that
+`config/deny.cfg` holds; `config/ARCH.config`, the result, is for review. The build
+derives its own likewise for each release, so a new series comes with its options off.
 
 | On, by need | Options |
 | --- | --- |
@@ -88,9 +87,10 @@ on its slot until reinstalled.
 
 ## Drawbacks
 
-A kernel to keep patched forever, though kernel.org patches and CI builds. A series
-every nine to ten weeks, each a provider test pass. Our Clang build shares no binary
-with anyone's. A dropped driver or protocol, IPv6 included, waits for a revision.
+A kernel to keep patched forever, though kernel.org patches and CI builds. A new series
+ships before review (its notes list each changed option); one renaming a listed option
+stops releases until the list follows. Our Clang build shares no binary with anyone's.
+A dropped driver or protocol, IPv6 included, waits for a revision.
 
 ## Alternatives Considered
 
@@ -115,6 +115,6 @@ different build, refused by Secure Boot and the updater. Mitigations stay `auto`
 
 Every provider boot is a gate: QEMU on both arches in the kernel repository's CI before
 publication, werewolf's provider A/B tests before a release picks the kernel up. Drift
-fails closed: a fragment line that stops holding, a re-applied config that differs, a
-series kernel.org has ended. A published APK is never replaced; A/B slots keep the
-previous kernel. `PANIC_ON_OOPS` and `PANIC_TIMEOUT=10` reboot a wedged kernel.
+fails closed: a list line a new release no longer honours, the deny list, the probe. A
+published APK is never replaced; A/B slots keep the previous kernel. `PANIC_ON_OOPS` and
+`PANIC_TIMEOUT=10` reboot a wedged kernel.
