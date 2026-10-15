@@ -65,7 +65,7 @@ pub fn oci(m: *Machine) bool {
             if (nodata) continue;
             const from = m.fmtZ("/data/svc/{s}{s}", .{ name, path });
             m.mkdirAll(from);
-            _ = linux.fchmodat(linux.AT.FDCWD, from, 0o755);
+            _ = linux.fchmodat2(linux.AT.FDCWD, from, 0o755, linux.AT.SYMLINK_NOFOLLOW);
             own(from, ids.?);
             m.mount(&.{ "--bind", from, m.fmt("{s}{s}", .{ dir, path }) });
         } else if (std.mem.eql(u8, key, "data")) {
@@ -94,8 +94,18 @@ pub fn oci(m: *Machine) bool {
         var words = std.mem.tokenizeScalar(u8, line, ' ');
         if (!std.mem.eql(u8, words.next() orelse "", "root")) continue;
         const svc = words.next() orelse continue;
-        _ = linux.fchmodat(linux.AT.FDCWD, m.fmtZ("/run/svc/{s}", .{svc}), 0o700);
-        if (!nodata) _ = linux.fchmodat(linux.AT.FDCWD, m.fmtZ("/data/svc/{s}", .{svc}), 0o700);
+        _ = linux.fchmodat2(
+            linux.AT.FDCWD,
+            m.fmtZ("/run/svc/{s}", .{svc}),
+            0o700,
+            linux.AT.SYMLINK_NOFOLLOW,
+        );
+        if (!nodata) _ = linux.fchmodat2(
+            linux.AT.FDCWD,
+            m.fmtZ("/data/svc/{s}", .{svc}),
+            0o700,
+            linux.AT.SYMLINK_NOFOLLOW,
+        );
     }
     return true;
 }
@@ -139,7 +149,7 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
     mkdir("/run/svc", 0o755);
     const run_dir = m.fmtZ("/run/svc/{s}", .{name});
     mkdir(run_dir, 0o711);
-    _ = linux.fchmodat(linux.AT.FDCWD, run_dir, 0o711);
+    _ = linux.fchmodat2(linux.AT.FDCWD, run_dir, 0o711, linux.AT.SYMLINK_NOFOLLOW);
     own(run_dir, ids);
     m.mount(&.{ "--bind", run_dir, m.fmt("{s}/tmp", .{dir}) });
     // A /run for a pid file or a socket, as every runtime provides.
@@ -151,7 +161,7 @@ fn root(m: *Machine, name: []const u8, dir: []const u8, ids: phase_config.Ids, n
     mkdir("/data/svc", 0o755);
     const data_dir = m.fmtZ("/data/svc/{s}", .{name});
     mkdir(data_dir, 0o711);
-    _ = linux.fchmodat(linux.AT.FDCWD, data_dir, 0o711);
+    _ = linux.fchmodat2(linux.AT.FDCWD, data_dir, 0o711, linux.AT.SYMLINK_NOFOLLOW);
     own(data_dir, ids);
     m.mount(&.{ "--bind", data_dir, m.fmt("{s}/data", .{dir}) });
 }
@@ -170,7 +180,7 @@ const Share = struct { name: []const u8, host: []const u8, image: []const u8, wr
 fn shareMounts(m: *Machine, shares: []const Share, roots: []const Root) void {
     if (shares.len == 0) return;
     mkdir("/data/share", 0o711);
-    _ = linux.fchmodat(linux.AT.FDCWD, "/data/share", 0o711);
+    _ = linux.fchmodat2(linux.AT.FDCWD, "/data/share", 0o711, linux.AT.SYMLINK_NOFOLLOW);
     for (shares) |s| {
         const owner = ownerOf(shares, s.host) orelse {
             say("oci: {s}: no service writes it", .{s.host});
@@ -227,13 +237,13 @@ fn shareMode(m: *Machine, host: []const u8, ids: phase_config.Ids, mode: u32) vo
     while (std.mem.findScalarPos(u8, host, at + 1, '/')) |slash| {
         if (slash > prefix.len) {
             const z = m.z(host[0..slash]);
-            _ = linux.fchmodat(linux.AT.FDCWD, z, mode);
+            _ = linux.fchmodat2(linux.AT.FDCWD, z, mode, linux.AT.SYMLINK_NOFOLLOW);
             own(z, ids);
         }
         at = slash;
     }
     const z = m.z(host);
-    _ = linux.fchmodat(linux.AT.FDCWD, z, mode);
+    _ = linux.fchmodat2(linux.AT.FDCWD, z, mode, linux.AT.SYMLINK_NOFOLLOW);
     own(z, ids);
 }
 

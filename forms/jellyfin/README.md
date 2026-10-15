@@ -2,6 +2,8 @@
 
 Your media, in a browser or an app: [Jellyfin](https://jellyfin.org) 12.2, behind Caddy. Media is copied in over ssh. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/jellyfin/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

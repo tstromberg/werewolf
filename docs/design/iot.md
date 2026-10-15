@@ -67,7 +67,7 @@ check that sees it. Urgent still reboots within 15 minutes.
 The log is `/data/svc/autoupdate/log`.
 
 **Their server.** `updates.from` is the only repository, kernel and
-tiers URL. It holds `local-NAME` (signed with `~/.howl/packages.rsa`)
+tiers URL. It holds `local-NAME` (signed with howl's `packages.rsa`)
 and the Wolfi, werewolf and Alpine indexes CI copied after a boot,
 each checked with that origin's key. Today the image lists those
 upstreams, and tiers come from GitHub. A canary is another `from`;
@@ -97,4 +97,4 @@ server is the outage domain, and a lost `packages.rsa` means new devices.
 ## Reliability Considerations
 
 A failed commit boots the previous slot and is not installed again.
-Back up `packages.rsa`, `~/.howl/repositories/` and the lab declaration.
+Back up howl's data directory, `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), and the lab declaration.

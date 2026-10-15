@@ -13,7 +13,7 @@ def gh(*args):
 
 def report(run):
     workflow = run['name']
-    if workflow not in ('check', 'packages', 'release', 'protected-images'):
+    if workflow not in ('check', 'packages', 'release', 'protected-images', 'form-images'):
         raise ValueError('unexpected publishing workflow')
     title = 'Publishing blocked: ' + workflow
     issues = json.loads(gh('issue', 'list', '--state', 'open', '--search', '"' + title + '" in:title',

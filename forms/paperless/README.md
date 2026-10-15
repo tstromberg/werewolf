@@ -2,6 +2,8 @@
 
 A document archive with OCR and search: [Paperless-ngx](https://docs.paperless-ngx.com/) 3.3, with Caddy in front and Valkey as its queue. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/paperless/index.html).
+
 ## Security Posture
 
 - The web server, consumer, worker and scheduler share the unprivileged paperless user and private upload files. Each retains separate service rules and process limits. The root is read-only. `/data` is what survives.

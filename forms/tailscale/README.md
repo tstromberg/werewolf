@@ -2,6 +2,8 @@
 
 A [Tailscale](https://tailscale.com) subnet router. The image supplies the service. Boot configuration supplies the routes and the auth key. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/tailscale/index.html).
+
 ## Security Posture
 
 - tailscaled runs as its own user. The root is read-only. State is on `/data`.

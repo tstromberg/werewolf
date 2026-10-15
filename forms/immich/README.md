@@ -2,6 +2,8 @@
 
 A photo and video library, with the phone apps: [Immich](https://immich.app) 3, from the image the project publishes, with PostgreSQL, Valkey and Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/immich/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

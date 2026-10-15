@@ -2,6 +2,8 @@
 
 Error tracking that takes the events Sentry's SDKs send: [Bugsink](https://www.bugsink.com) 2, from its own image, with Caddy in front. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/bugsink/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

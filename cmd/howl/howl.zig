@@ -7,6 +7,7 @@ const settings = @import("settings");
 const service = @import("service");
 const update_policy = @import("update-policy");
 const network = @import("network");
+const cmdline = @import("cmdline");
 const lima = @import("lima.zig");
 const bhyve = @import("bhyve.zig");
 const firecracker = @import("firecracker.zig");
@@ -32,14 +33,16 @@ const Allocator = std.mem.Allocator;
 const json = std.json;
 
 pub const usage =
-    \\usage: howl build --with FORM,... [--build] [--insecure] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+    \\usage: howl forms [FORM|SEARCH] [--arch ARCH] [--build|--published] [--json]   browse forms; an exact name shows setup and commands
+    \\       howl build --with FORM,... [--build] [--disable=secureboot,tpm,ipe] [-o DIR] [--arch ARCH] [--format qcow2|raw|vhd|vmdk] [--app DIR]
+    \\       howl test --with FORM [--arch ARCH]   run integration and production-variant boot checks from this checkout
     \\       howl pack --with FORM [--build] [-o FILE] [-n] [--on TARGET] [CONFIG...]
     \\       howl pack --with FORM -h   the flags FORM takes
-    \\       howl run [--with FORM,...] [--on TARGET] [--secure|--insecure] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   secure by default; replaces werewolf-run; default form playground
+    \\       howl run [--with FORM,...] [--on TARGET] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--verbose] [CONFIG...]   protected by default; replaces werewolf-run; default form playground
     \\       howl ssh [NAME] [-- COMMAND...]   ssh into it, or into NAME; howl stop ends it
     \\
 ++ "       howl create NAME --with FORM,... [--on " ++ Platform.list(.made, "|") ++
-    "] [--secure|--insecure] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] " ++
+    "] [--disable=secureboot,tpm,ipe] [--dev] [--build] [--yes] [--arch ARCH] [--size TYPE] " ++
     "[--allow-from me|CIDR] " ++
     "[--import DIR] [CONFIG...]\n" ++
     "       howl delete NAME [--on " ++ Platform.list(.made, "|") ++ "]\n" ++
@@ -74,6 +77,7 @@ pub fn main(init: std.process.Init) void {
     const verb = std.meta.stringToEnum(
         enum {
             build,
+            @"test",
             pack,
             run,
             create,
@@ -85,6 +89,7 @@ pub fn main(init: std.process.Init) void {
             upload,
             @"build-apk",
             form,
+            forms,
             _build,
             _bhyve,
             _firecracker,
@@ -104,6 +109,7 @@ pub fn main(init: std.process.Init) void {
     var why: Why = .{};
     const done = switch (verb) {
         .build => native.build(io, gpa, args[2..], &why),
+        .@"test" => @import("test.zig").command(io, gpa, args[2..], &why),
         .pack => pack(io, gpa, args[2..], &why),
         .run => runForm(io, gpa, args[2..], &why),
         .create => create(io, gpa, args[2..], &why),
@@ -115,6 +121,7 @@ pub fn main(init: std.process.Init) void {
         .upload => cloud.upload(io, gpa, args[2..], &why),
         .@"build-apk" => apk.build(io, gpa, args[2..], &why),
         .form => adhoc.form(io, gpa, args[2..], &why),
+        .forms => @import("discovery.zig").command(io, gpa, args[2..], &why),
         // Internal: the Makefile's image targets (build.zig).
         ._build => native.buildTargets(io, gpa, args[2..], &why),
         .@"_boot-permit" => @import("enrollment.zig").permit(io, gpa, args[2..]),
@@ -135,7 +142,7 @@ pub fn main(init: std.process.Init) void {
             firecracker.keep(io, gpa, args[2]),
         // Internal: form unpacks an OCI image's tar in a child with no
         // environment (oci.zig).
-        ._unpack => oci.unpackMain(io, gpa, args[2..], &why),
+        ._unpack => oci.unpackMain(io, args[2..], &why),
     };
     done catch |err| switch (err) {
         // An empty why means progress has already printed the failure.
@@ -165,10 +172,55 @@ pub const Why = struct {
     text: []const u8 = "",
 
     pub fn refuse(w: *Why, comptime fmt: []const u8, args: anytype) error{Refused} {
-        w.text = std.mem.print(&w.buf, fmt, args) catch "(too long to say)";
+        // A refusal may quote a registry, a server or a guest.
+        const said = std.mem.print(&w.buf, fmt, args) catch {
+            w.text = "(too long to say)";
+            return error.Refused;
+        };
+        w.text = inert(said);
         return error.Refused;
     }
 };
+
+/// inert drops from text, in place, what could drive a terminal: C0
+/// controls but newline and tab, DEL, C1 controls, and bytes that are not
+/// valid UTF-8 (a lone 0x9b is CSI to a terminal that reads 8-bit
+/// controls). A guest, a registry or a server may have written text.
+pub fn inert(text: []u8) []u8 {
+    var i: usize = 0;
+    var j: usize = 0;
+    while (i < text.len) {
+        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch {
+            i += 1;
+            continue;
+        };
+        if (n > text.len - i) break;
+        const seq = text[i..][0..n];
+        if (!std.unicode.utf8ValidateSlice(seq)) {
+            i += 1;
+            continue;
+        }
+        // C1 controls, U+0080 to U+009F, are 0xc2 0x80 to 0xc2 0x9f.
+        const control = switch (n) {
+            1 => (seq[0] < 0x20 and seq[0] != '\n' and seq[0] != '\t') or seq[0] == 0x7f,
+            2 => seq[0] == 0xc2 and seq[1] <= 0x9f,
+            else => false,
+        };
+        if (!control) {
+            @memmove(text[j..][0..n], seq);
+            j += n;
+        }
+        i += n;
+    }
+    return text[0..j];
+}
+
+test "a refusal quoting a registry cannot drive the terminal" {
+    var why: Why = .{};
+    const err = why.refuse("crane: {s}", .{"no\x1b]52;c;cGF5bG9hZA==\x07 such\x9b2J image\n"});
+    try std.testing.expectEqual(error.Refused, err);
+    try std.testing.expectEqualStrings("crane: no]52;c;cGF5bG9hZA== such2J image\n", why.text);
+}
 
 // --- the form's interface ----------------------------------------------------------
 
@@ -227,8 +279,7 @@ const reserved = [_][]const u8{
     "size",
     "app",
     "allow-from",
-    "secure",
-    "insecure",
+    "disable",
 };
 
 /// chain returns form's chain, base first, as the build lays it out
@@ -420,7 +471,9 @@ pub const Options = struct {
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository, so the machine does not update them.
     local: bool = false,
-    secure: bool = true,
+    /// disabled is what --disable gave up of werewolf's protections; with
+    /// nothing given up, the machine is protected.
+    disabled: cmdline.Protections = .empty,
     boot_image: ?@import("boot-image.zig").Request = null,
     production_download: bool = false,
     /// allow_from is who may reach the form's TCP ports on gcp, aws or
@@ -428,6 +481,10 @@ pub const Options = struct {
     allow_from: ?[]const u8 = null,
     /// flags are the --FLAG VALUE pairs the form declares, in order.
     flags: []const [2][]const u8 = &.{},
+
+    pub fn protected(o: Options) bool {
+        return o.disabled.count() == 0;
+    }
 };
 
 /// options parses a command line without its verb. The first word that is
@@ -1094,7 +1151,7 @@ fn runForm(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
     if (!asking) {
         const launch = try launchFlags(gpa, args, why);
         const o = try options(gpa, launch.args, why);
-        try requireProtection(engineFor(io, gpa, o.on, launch.secure).on, launch, why);
+        try requireProtection(engineFor(io, gpa, o.on, launch.protected()).on, launch, why);
     }
     var with: std.ArrayList([]const u8) = .empty;
     try with.appendSlice(gpa, args);
@@ -1193,6 +1250,93 @@ pub fn machineDir(gpa: Allocator, name: []const u8) ![]const u8 {
     return gpa.print("build/machines/{s}", .{name});
 }
 
+/// dataDir returns where howl keeps what no clean build may take: signing
+/// keys, without which no machine made with them takes another update, and
+/// local package repositories. It is $XDG_DATA_HOME/howl, or
+/// ~/.local/share/howl, the user's alone. ~/.howl, an older home, moves there.
+pub fn dataDir(io: Io, gpa: Allocator) ![]const u8 {
+    const home = environ.get("HOME") orelse return error.NoHome;
+    const xdg = environ.get("XDG_DATA_HOME") orelse "";
+    // The XDG spec ignores a relative path.
+    const dir = if (std.fs.path.isAbsolute(xdg))
+        try gpa.print("{s}/howl", .{xdg})
+    else
+        try gpa.print("{s}/.local/share/howl", .{home});
+    try Dir.cwd().createDirPath(io, std.fs.path.dirname(dir).?);
+    try moveOnce(io, try gpa.print("{s}/.howl", .{home}), dir);
+    const made = if (Dir.cwd().access(io, dir, .{})) |_| false else |_| true;
+    try Dir.cwd().createDirPath(io, dir);
+    try Dir.cwd().setFilePermissions(io, dir, .fromMode(0o700), .{});
+    if (made) say(io, "keeping signing keys in {s}: back it up, since machines made with " ++
+        "them take updates only signed by them", .{dir});
+    return dir;
+}
+
+/// keysDir returns dataDir's keys/sub, the user's alone, first moving there
+/// what an older howl kept at legacy in build/, which make clean removes.
+pub fn keysDir(io: Io, gpa: Allocator, sub: []const u8, legacy: []const u8) ![]const u8 {
+    const all = try gpa.print("{s}/keys", .{try dataDir(io, gpa)});
+    try Dir.cwd().createDirPath(io, all);
+    try Dir.cwd().setFilePermissions(io, all, .fromMode(0o700), .{});
+    const dir = try gpa.print("{s}/{s}", .{ all, sub });
+    try Dir.cwd().createDirPath(io, std.fs.path.dirname(dir).?);
+    try moveOnce(io, legacy, dir);
+    try Dir.cwd().createDirPath(io, dir);
+    try Dir.cwd().setFilePermissions(io, dir, .fromMode(0o700), .{});
+    return dir;
+}
+
+/// moveOnce renames from to to when from exists and to does not.
+fn moveOnce(io: Io, from: []const u8, to: []const u8) !void {
+    if (Dir.cwd().access(io, to, .{})) |_| return else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    }
+    if (Dir.cwd().access(io, from, .{})) |_| {} else |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    }
+    Dir.rename(Dir.cwd(), from, Dir.cwd(), to, io) catch |err| {
+        say(io, "cannot move {s} to {s} ({t}): move it there yourself", .{ from, to, err });
+        return err;
+    };
+    say(io, "moved {s} to {s}", .{ from, to });
+}
+
+test keysDir {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    const saved = environ;
+    defer environ = saved;
+    var env: std.process.Environ.Map = .init(gpa);
+    try env.put("HOME", try gpa.print("{s}/home", .{root}));
+    try env.put("XDG_DATA_HOME", try gpa.print("{s}/data", .{root}));
+    environ = &env;
+    // An older howl's key in build/ moves; a second call finds it moved.
+    try tmp.dir.createDirPath(io, "build/boot/aarch64");
+    try tmp.dir.writeFile(io, .{ .sub_path = "build/boot/aarch64/boot.key", .data = "k" });
+    const legacy = try gpa.print("{s}/build/boot/aarch64", .{root});
+    const dir = try keysDir(io, gpa, "boot/aarch64", legacy);
+    try testing.expectEqualStrings(try gpa.print("{s}/data/howl/keys/boot/aarch64", .{root}), dir);
+    try testing.expectEqualStrings("k", try tmp.dir.readFileAlloc(
+        io,
+        "data/howl/keys/boot/aarch64/boot.key",
+        gpa,
+        .limited(8),
+    ));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "build/boot/aarch64", .{}));
+    try testing.expectEqualStrings(dir, try keysDir(io, gpa, "boot/aarch64", legacy));
+    for ([_][]const u8{ "data/howl", "data/howl/keys", "data/howl/keys/boot/aarch64" }) |d| {
+        const st = try tmp.dir.statFile(io, d, .{});
+        try testing.expectEqual(0o700, st.permissions.toMode() & 0o777);
+    }
+}
+
 /// make_cmd is the GNU make the Makefile needs: gmake on the BSDs, whose
 /// make is a different program.
 pub const make_cmd = switch (@import("builtin").os.tag) {
@@ -1289,34 +1433,80 @@ fn engineFor(io: Io, gpa: Allocator, given: ?Platform, secure: bool) Engine {
 }
 
 const Launch = struct {
-    secure: bool,
+    disabled: cmdline.Protections,
     dev: bool,
     local: bool,
     yes: bool,
     args: []const []const u8,
+
+    pub fn protected(l: Launch) bool {
+        return l.disabled.count() == 0;
+    }
 };
 
 pub fn launchFlags(gpa: Allocator, line: []const []const u8, why: *Why) !Launch {
     _, const plain = try verboseFlag(gpa, line);
     const dev, const rest = try takeFlag(gpa, plain, &.{"--dev"});
     const from_tree, const more = try takeFlag(gpa, rest, &.{"--build"});
-    const yes, const before_secure = try takeFlag(gpa, more, &.{"--yes"});
-    const secure, const before_insecure = try takeFlag(gpa, before_secure, &.{"--secure"});
-    const insecure, const args = try takeFlag(gpa, before_insecure, &.{"--insecure"});
-    if (secure and insecure) return why.refuse("--secure and --insecure conflict", .{});
-    return .{ .secure = !insecure, .dev = dev, .local = from_tree, .yes = yes, .args = args };
+    const yes, const before_disable = try takeFlag(gpa, more, &.{"--yes"});
+    var args: std.ArrayList([]const u8) = .empty;
+    var given: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < before_disable.len) : (i += 1) {
+        const a = before_disable[i];
+        if (!std.mem.eql(u8, a, "--disable") and !std.mem.startsWith(u8, a, "--disable=")) {
+            try args.append(gpa, a);
+            continue;
+        }
+        if (given != null) return why.refuse("--disable twice: give one list", .{});
+        _, given = try flagValue(before_disable, &i, why);
+    }
+    const disabled: cmdline.Protections = if (given) |v| try disableValue(v, why) else .empty;
+    // One protected profile provides all three, so a machine has them all
+    // or, named, none.
+    if (!disabled.eql(.empty) and !disabled.eql(.full)) return why.refuse(
+        "--disable={s}: a machine is made with Secure Boot, the TPM and IPE, or, for now, " ++
+            "without all three: --disable=" ++ every_protection,
+        .{given.?},
+    );
+    return .{
+        .disabled = disabled,
+        .dev = dev,
+        .local = from_tree,
+        .yes = yes,
+        .args = args.items,
+    };
+}
+
+/// every_protection is the one --disable run and create take for now: one
+/// protected profile provides Secure Boot, the TPM and IPE.
+pub const every_protection = "secureboot,tpm,ipe";
+
+/// disableValue parses --disable's list (cmdline.Protection). Secure Boot
+/// goes only with the TPM, whose record unsigned boot code could ignore.
+pub fn disableValue(v: []const u8, why: *Why) !cmdline.Protections {
+    const set = cmdline.protections(v) orelse return why.refuse(
+        "--disable={s}: it names secureboot, tpm or ipe, comma-separated, each once",
+        .{v},
+    );
+    if (set.contains(.secureboot) and !set.contains(.tpm)) return why.refuse(
+        "--disable={s}: unsigned boot code could ignore the TPM, so secureboot goes with tpm",
+        .{v},
+    );
+    return set;
 }
 
 fn requireProtection(on: Platform, launch: Launch, why: *Why) !void {
-    if (!launch.secure) return;
+    if (!launch.protected()) return;
     if (launch.dev) return why.refuse(
-        "secure deployment refuses --dev; development shells require explicit --insecure",
+        "--dev gives root a console without a password, which a protected machine never " ++
+            "has: --dev --disable=" ++ every_protection,
         .{},
     );
     if (on != .lima and on != .qemu) return why.refuse(
-        "{t}: protected deployment is not ready; use Lima on macOS or QEMU on Linux; " ++
-            "--insecure explicitly opts out",
-        .{on},
+        "{t}: protected deployment is not ready; use Lima on macOS or QEMU on Linux, or give " ++
+            "up what {t} cannot provide yet: --disable=" ++ every_protection,
+        .{ on, on },
     );
 }
 
@@ -1325,32 +1515,40 @@ test "deployment defaults protect Lima and Linux QEMU without backend fallback" 
     defer arena.deinit();
     var why: Why = .{};
     const launch = try launchFlags(arena.allocator(), &.{ "playground", "--build" }, &why);
-    try testing.expect(launch.secure and launch.local);
-    try testing.expect((Options{}).secure);
+    try testing.expect(launch.protected() and launch.local);
+    try testing.expect((Options{}).protected());
     try testing.expectEqual(Platform.lima, protectedEngine(.macos, null));
     try testing.expectEqual(Platform.qemu, protectedEngine(.linux, null));
     try requireProtection(.lima, launch, &why);
     try requireProtection(.qemu, launch, &why);
     const downloaded = try launchFlags(arena.allocator(), &.{"playground"}, &why);
-    try testing.expect(downloaded.secure and !downloaded.local);
+    try testing.expect(downloaded.protected() and !downloaded.local);
     try requireProtection(.lima, downloaded, &why);
     try requireProtection(.qemu, downloaded, &why);
     for ([_]Platform{ .firecracker, .bhyve, .proxmox, .aws, .gcp, .azure }) |on|
         try testing.expectError(error.Refused, requireProtection(on, launch, &why));
     const dev = try launchFlags(arena.allocator(), &.{ "playground", "--dev" }, &why);
     try testing.expectError(error.Refused, requireProtection(.lima, dev, &why));
-    const unsafe = try launchFlags(
+    const unprotected = try launchFlags(
         arena.allocator(),
-        &.{ "--insecure", "playground", "--dev" },
+        &.{ "--disable=secureboot,tpm,ipe", "playground", "--dev" },
         &why,
     );
-    try testing.expect(!unsafe.secure and unsafe.dev);
-    try requireProtection(.firecracker, unsafe, &why);
-    try testing.expectError(error.Refused, launchFlags(
+    try testing.expect(unprotected.disabled.eql(.full) and unprotected.dev);
+    try testing.expectEqualSlices([]const u8, &.{"playground"}, unprotected.args);
+    try requireProtection(.firecracker, unprotected, &why);
+    const spaced = try launchFlags(
         arena.allocator(),
-        &.{ "playground", "--secure", "--insecure" },
+        &.{ "--disable", "ipe,tpm,secureboot" },
         &why,
-    ));
+    );
+    try testing.expect(spaced.disabled.eql(.full) and spaced.args.len == 0);
+    for ([_][]const []const u8{
+        &.{ "playground", "--disable=tpm" },
+        &.{ "playground", "--disable=landlock" },
+        &.{ "playground", "--disable" },
+        &.{ "--disable=secureboot,tpm,ipe", "--disable=secureboot,tpm,ipe" },
+    }) |line| try testing.expectError(error.Refused, launchFlags(arena.allocator(), line, &why));
 }
 
 /// madeOn returns the platform create recorded for name, or null.
@@ -1382,10 +1580,10 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     const yes = launch.yes;
     var o = try options(gpa, args, why);
     o.local = launch.local;
-    o.secure = launch.secure;
+    o.disabled = launch.disabled;
     if (o.out != null or o.check)
         return why.refuse("create takes no -o or -n: howl pack writes a tar", .{});
-    const eng = engineFor(io, gpa, o.on, o.secure);
+    const eng = engineFor(io, gpa, o.on, o.protected());
     const on = eng.on;
     if (!o.help) try requireProtection(on, launch, why);
     o.on = on;
@@ -1394,7 +1592,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
         .name = try gpa.print("Resolving {s} deployment for {t}", .{ o.form, on }),
         .short = "resolve",
     });
-    if (o.secure and !o.local) {
+    if (o.protected() and !o.local) {
         o.production_download = true;
         if (o.app != null or o.import_dir != null or !forms.isName(o.form)) return why.refuse(
             "custom code requires --build; signed downloads deploy a published form",
@@ -1534,7 +1732,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
     if (misfit(entries, tar.len, on)) |r| return why.refuse("not for {t}: {s}", .{ on, r });
     if (replacing) {
         var keep = false;
-        if (o.secure) {
+        if (o.protected()) {
             const cached = try @import("local-secure.zig").reuse(io, gpa, o, name, tar);
             if (cached == .running) {
                 try @import("local-secure.zig").startPublisher(io, gpa, name, why);
@@ -1549,7 +1747,7 @@ fn createFrom(io: Io, gpa: Allocator, all: []const []const u8, replacing: bool, 
             if (cached == .miss and
                 o.local) try @import("local-secure.zig").refreshSource(io, gpa, o, name, why);
         }
-        if (o.secure and madeOn(io, gpa, name) != null) keep = true;
+        if (o.protected() and madeOn(io, gpa, name) != null) keep = true;
         if (!keep) if (madeOn(
             io,
             gpa,
@@ -1690,10 +1888,17 @@ pub fn releaseDiskAt(
             io,
             gpa,
             &steps,
-            try gpa.print("build/boot/{t}", .{arch}),
+            try keysDir(
+                io,
+                gpa,
+                try gpa.print("boot/{t}", .{arch}),
+                try gpa.print("build/boot/{t}", .{arch}),
+            ),
             false,
         );
-    const ipe_inputs: ?@import("prerequisites.zig").Inputs = if (o.secure and target != null and
+    const ipe_inputs: ?@import(
+        "prerequisites.zig",
+    ).Inputs = if (o.protected() and target != null and
         environ.get("WEREWOLF_IPE_KERNEL") == null)
         try @import("prerequisites.zig").resolve(io, gpa, &steps, arch, why)
     else
@@ -1702,10 +1907,13 @@ pub fn releaseDiskAt(
         environ.get("WEREWOLF_IPE_KERNEL") orelse if (ipe_inputs) |inp| inp.kernel else null
     else
         null;
+    // A kernel with IPE, given here, keeps IPE whatever --disable gave up.
+    var disabled = o.disabled;
+    if (kernel != null) disabled.remove(.ipe);
     const p = try buildHere(io, gpa, &steps, .{
         .form = o.form,
         .arch = arch,
-        .insecure = !o.secure and kernel == null,
+        .disabled = disabled,
         .app = ab.root,
         .published = !o.local,
         .boot_key = if (boot_signer) |k| k.key else null,
@@ -1732,6 +1940,27 @@ pub fn isMachineName(s: []const u8) bool {
     if (s.len == 0 or s.len > 32 or !std.ascii.isLower(s[0])) return false;
     for (s) |c| if (!std.ascii.isLower(c) and !std.ascii.isDigit(c) and c != '-') return false;
     return true;
+}
+
+/// isIp4 reports whether s is a dotted-quad IPv4 address: what a guest's
+/// lease or console says is accepted as an address only in this form.
+pub fn isIp4(s: []const u8) bool {
+    var octets = std.mem.splitScalar(u8, s, '.');
+    var n: usize = 0;
+    while (octets.next()) |o| : (n += 1) {
+        if (o.len == 0 or o.len > 3) return false;
+        for (o) |c| if (!std.ascii.isDigit(c)) return false;
+        if ((std.fmt.parseInt(u16, o, 10) catch return false) > 255) return false;
+    }
+    return n == 4;
+}
+
+test isIp4 {
+    try std.testing.expect(isIp4("192.168.1.40"));
+    try std.testing.expect(!isIp4("192.168.1"));
+    try std.testing.expect(!isIp4("192.168.1.256"));
+    try std.testing.expect(!isIp4("1.2.3.4.5"));
+    try std.testing.expect(!isIp4("1.2.3.\x1b[2J"));
 }
 
 /// row writes one line of -h: the flag, then, in a column, where it goes.
@@ -1770,6 +1999,7 @@ fn beneath(path: []const u8, parent: []const u8) bool {
 const testing = std.testing;
 
 test {
+    _ = @import("discovery.zig");
     _ = @import("enrollment.zig");
     _ = @import("cloud-enrollment.zig");
     _ = @import("local-secure.zig");

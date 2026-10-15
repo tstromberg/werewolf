@@ -2,6 +2,8 @@
 
 A low-interaction honeypot: [OpenCanary](https://opencanary.org/) from its project's image. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/opencanary/index.html).
+
 ## Security Posture
 
 - The service runs as its image's user. It may bind the bait ports and reach nothing.

@@ -4,7 +4,7 @@
 
 Extend the local exact-pair protocol to provider-controlled TPMs without publishing reset secrets.
 Status: provider pins/native exchange are tested; signed enrollment and recovery work in a local VM.
-Cloud `--secure` remains refused until enrollment and provider recovery tests pass.
+Protected cloud deployment remains refused until enrollment and provider recovery tests pass.
 
 ## Background
 

@@ -325,3 +325,25 @@ if (per_service and !promises.contains(.exec) and exec_fd != null) {
    - Bind mounts whose source starts with `/dev/` (such as `/dev/shm` or `/dev/pts`) omit `ATTR.NODEV` (`line 205`).
 6. **`dhcp-client` `withdraw()` / `apply()` state cleanup (`cmd/dhcp-client/dhcp-client.zig:940-982`):**
    - `withdraw()` resets the IP address to `0.0.0.0`, but leaves an attacker-supplied MTU and stale `/run/werewolf/network/resolv.conf` / `lease.json` in place.
+
+---
+
+### 3.5 Live VM Runtime Confinement Findings (`howl run --build`)
+- **Severity:** Medium
+- **Location:**
+  - `cmd/stage0/stage0.zig:305-378`
+  - `cmd/slot-update/slot-update.zig:181-206, 335-344, 1194-1239`
+  - `lib/broker.zig:26-41`
+  - `cmd/posture/posture.zig:141-147`, `cmd/power-button/power-button.zig:249-256`, `cmd/debug-shell/debug-shell.zig:91-99`, `cmd/cloud-metadata/cloud-metadata.zig:283-290`
+
+**Weaknesses Discovered & Resolved in Live Runtime:**
+1. **`stage0` deadman child ran for 600s with full initramfs capabilities (`CapEff: 000001fdffffffff`), no seccomp filter (`Seccomp: 0`), and open `/dev/console` descriptors (`stage0.zig:324-340`):**
+   - Closed all inherited descriptors except the private `procfs` and `/dev/kmsg` descriptors (`sandbox.closeAllBut`), dropped capabilities to `CAP_SYS_BOOT | CAP_SYS_PTRACE` (`0x00480000`), and installed a strict seccomp allowlist (`nanosleep`, `clock_nanosleep`, `restart_syscall`, `faccessat`, `faccessat2`, `openat`, `write`, `close`, `reboot`, `exit`, `exit_group`).
+2. **`slot-update` (`autoupdate` daemon) ran with `NoNewPrivs: 0` and all 22 `fence` capabilities (`CapEff: 00000024b5c4cdff`) (`slot-update.zig:181-206, 1194-1239`):**
+   - Bounded `slot-update` at daemon startup to `0x000401df` (`CHOWN`, `DAC_OVERRIDE`, `DAC_READ_SEARCH`, `FOWNER`, `FSETID`, `SETGID`, `SETUID`, `SETPCAP`, `SYS_CHROOT`) with `NoNewPrivs: 1`.
+   - Dropped capabilities in `execTool` so `mkfs.erofs`, `zstd`, and `reboot` run with zero capabilities (`sandbox.keepOnly(0)`) and offline `apk` runs with only filesystem capabilities (`0x1f`).
+3. **`broker.keepOnlyClient` only closed fds `60..62`, leaving stray `runsv` descriptors open in `slot-update` and `slot-keep` (`lib/broker.zig:26-41`):**
+   - Replaced the 3-fd loop with `linux.close_range` across `3..maxInt(fd_t)` (excluding the retained broker socketpair descriptor).
+4. **Services parking via `sv down .` (`posture`, `power-button`, `debug-shell`, `cloud-metadata`, `slot-update`) retained capabilities across `execve`:**
+   - Added `sandbox.keepOnly(0)` before executing `/usr/bin/sv down .`.
+

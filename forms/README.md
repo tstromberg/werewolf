@@ -1,6 +1,7 @@
 # forms
 
 To choose a VM, browse the [available forms and setup guides](../docs/forms-catalog.md).
+For prebuilt disks, see [image availability and download instructions](../docs/forms-catalog.md#images-and-downloads).
 This page is the reference for defining a form.
 
 Each directory here is a form ([docs/forms.md](../docs/forms.md)), and
@@ -24,6 +25,7 @@ last, so its files win; `make list-forms` shows each chain. CI publishes
 each form but those with melange recipes as NAME-form
 ([docs/releases.md](../docs/releases.md#packages)), and howl takes a form
 by name from there, so the machine updates it; `--build` takes this tree's.
+These are APK packages, not bootable qcow2 images; disk publication has separate gates.
 
 ## form.yaml
 

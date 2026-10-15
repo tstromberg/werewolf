@@ -2,6 +2,8 @@
 
 Vulnerability management: [Greenbone](https://greenbone.github.io/docs/) gvmd and gsad, the scanner, and the community feed, behind Caddy, with PostgreSQL and Valkey. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/greenbone/index.html).
+
 ## Security Posture
 
 - gsad listens on loopback. Caddy is what the network sees. The scanner listens on loopback for gvmd.

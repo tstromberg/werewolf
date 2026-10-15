@@ -2,6 +2,8 @@
 
 A wiki for a lab or a department: [MediaWiki](https://www.mediawiki.org) 1.43, the long-term release, on SQLite. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mediawiki/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

@@ -44,7 +44,7 @@ class LimaState(unittest.TestCase):
     def test_absent_instance_clears_stale_enrollment_before_provisioning(self):
         self.create('another-vm')
         self.assertNotEqual(self.result.returncode, 0)
-        self.assertIn(b'--secure requires Lima on macOS', self.result.stderr)
+        self.assertIn(b'protected deployment requires Lima on macOS', self.result.stderr)
         self.assertFalse((self.directory / 'authority/profile.json').exists())
         self.assertFalse((self.directory / 'authority/policy.key').exists())
         self.assertFalse((self.root / 'build/machines/.orphaned').exists())

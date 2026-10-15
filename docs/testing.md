@@ -1,5 +1,24 @@
 # Testing
 
+To test one form from the checkout root:
+
+```sh
+howl test --with caddy
+howl test --with caddy --arch x86_64
+```
+
+This runs `make -k check-caddy check-shellfree-caddy`: integration checks in a
+development VM, then posture and console checks of the production variant.
+Both suites are attempted even if one fails. The command returns Make's exit
+status and keeps logs in `build/<arch>/check/`. It uses the checkout's sources
+and the existing test fixtures; no `--dev` or SSH setup is needed.
+
+Use `howl forms` to browse and `howl forms FORM` for a form's guide and commands.
+The [form-image pipeline](releases.md#form-image-catalog) additionally requires
+two matching builds and a Secure Boot test of the actual release qcow2 before
+publishing that form and architecture. These tests supplement the full protected
+TPM lifecycle suite, whose publication gate remains separate.
+
 `test/check-published-lifecycle HOWL INITIAL UPDATE LATER OUTPUT` exercises the exact
 production-signed playground bundles under isolated Lima enrollments. Consumers have no
 source tree or vendor keys, and build commands fail if invoked. It checks four guest protections,
@@ -686,7 +705,7 @@ rollback, kills of both VM and simulator before/after NV extension, completed-up
 resume and an unhealthy counted trial recovering its predecessor. It compares
 actual PCR 11 with the exact booted release's prediction and rejects writable-code execution,
 verified-root writes and requests to reauthorize retired history.
-The test omits `--secure` and the Lima selector, checks caller boot enrollment,
+The test omits the Lima selector, checks caller boot enrollment,
 and removes its own instance, signers and reset credentials, retaining public logs.
 `make test` runs the bounded publisher's signature, context, concurrency and restart
 regressions. `python3 test/check-tpm-enrollment` tests native enrollment against

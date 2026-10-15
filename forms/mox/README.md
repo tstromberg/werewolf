@@ -2,6 +2,8 @@
 
 [mox](https://github.com/mjl-/mox) is the mail server: SMTP, submission, and IMAP, plus a web admin. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mox/index.html).
+
 ## Security Posture
 
 - mox runs as its own user. The root is read-only. Mail lives on `/data`.

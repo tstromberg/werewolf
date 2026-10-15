@@ -2,6 +2,8 @@
 
 Active Directory graphs: [BloodHound CE](https://bloodhound.specterops.io/), behind Caddy, with Neo4j on loopback Bolt and PostgreSQL. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/bloodhound/index.html).
+
 ## Security Posture
 
 - BloodHound and its metrics listen on loopback. Neo4j's HTTP is off. Bolt requires a password.

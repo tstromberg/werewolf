@@ -4,13 +4,13 @@
 
 howl builds images, packs boot config, and creates, updates, reaches and deletes machines here or in a cloud. The design is [docs/design/cli.md](../../docs/design/cli.md).
 
-## Background
-
 A machine is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a config tar init reads from a disk or user data ([docs/cloud.md](../../docs/cloud.md)).
 
 | Verb | Does |
 | --- | --- |
+| `forms [FORM\|SEARCH]` | lists forms or shows setup and run/test commands; uses the checkout when present, `--published` checks signed image availability, `--arch ARCH` filters and `--json` emits records |
 | `build --with FORM` | builds the image itself, byte for byte as the Makefile's recipes did ([howl-build.md](../../docs/design/howl-build.md)): boot disk (`disk.zig`, with mtools and e2fsprogs) and manifest `FORM-ARCH.json` (`manifest.zig`) in `dist`; `--format raw\|vhd\|vmdk` converts with qemu-img |
+| `test --with FORM [--arch ARCH]` | runs this checkout's integration and production-variant boot checks under QEMU; keeps logs in `build/ARCH/check/` and returns failure if either suite fails |
 | `pack --with FORM` | writes the config tar (`-o FILE`) or only checks it (`-n`); `-h` lists FORM's flags |
 | `create NAME --with FORM` | builds and boots a machine, or gives an existing one a new config; `--build` puts this checkout's forms and programs in, not the published ones the machine updates |
 | `apply FILE [--name NAME] [-n]` | prepares and publishes an enrolled declaration as signed `local-NAME`; `updates.from` is its HTTPS repository, `--to ssh://HOST/PATH` selects SSH upload ([manifest.md](../../docs/design/manifest.md)) |
@@ -24,7 +24,7 @@ A machine is a *form* ([docs/forms.md](../../docs/forms.md)), its image, and a c
 ## Goals
 
 - One command from form to running machine; pack and the machine accept the same config checks.
-- Machine records in `build/machines/NAME`, signing keys and history in `~/.howl`.
+- Machine records in `build/machines/NAME`; signing keys and repositories in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`.
 
 ## Non-Goals
 
@@ -41,13 +41,13 @@ A FILE flag reads a file or `-`, never a value. The guest's code checks every va
 The tar is ustar, sorted, root's, 0600, dated 1970. Names are at most 100 bytes of `[A-Za-z0-9._-/]`, files 1 MiB;
 clouds add cloud-metadata's limits (32 files of 32 KiB, 48 KiB in all) and AWS's and Azure's user-data caps.
 
-**Engines.** Secure create defaults to Lima (macOS) and QEMU (Linux); missing prerequisites fail.
-Other providers currently require explicit `--insecure`; `--dev` also requires that opt-out.
+**Engines.** Protected create defaults to Lima (macOS) and QEMU (Linux); missing prerequisites fail.
+Other providers, and `--dev`, need `--disable=secureboot,tpm,ipe`: one profile gives all three for now ([security](../../docs/security.md#protections-a-machine-can-be-made-without)).
 Published downloads require the provider's protected profile ([design](../../docs/design/published-secure-boot.md)); local machines use the host's arch with 2 GiB and 2 CPUs (4 under QEMU and Lima-managed).
 
 | `--on` | How | Needs |
 | --- | --- | --- |
-| lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--insecure` uses VZ | limactl, qemu, swtpm, firmware tools |
+| lima | default QEMU with enrolled firmware, IPE and persistent TPM; `--disable=…` uses VZ | limactl, qemu, swtpm, firmware tools |
 | bhyve | under `howl _bhyve` via daemon(8); slirp, loopback forwards | doas/sudo, vmm, bhyve-firmware |
 | firecracker | its own UEFI disk, under `howl _firecracker`, which plays systemd-boot (picks the entry, spends a try, boots that slot's kernel and stage0), so it updates in place; per machine a tap, a /30 of 172.16.0.0/16 and iptables NAT (and ip_forward, if off), undone by delete | /dev/kvm, firecracker, mtools, sudo/doas |
 | qemu | `qemu-system` in the background, its own disk booted by edk2 from its slots, so it updates in place (`qemu.zig`): hvf, kvm or nvmm, else tcg; user networking, ssh and web on free loopback ports | qemu, edk2 |

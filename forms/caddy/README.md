@@ -2,6 +2,8 @@
 
 A web server that gets its own certificates: [Caddy](https://caddyserver.com) 2.11. The form's manifest is [form.yaml](form.yaml). A form of your own includes this one and lays its site and Caddyfile over the image's.
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/caddy/index.html).
+
 ## Security Posture
 
 Caddy runs as its own user. There is no shell. Landlock and seccomp hold it to ports 80 and 443 and to `/data/svc/caddy`. The root is read-only.

@@ -2,6 +2,8 @@
 
 Case management: [DFIR-IRIS](https://docs.dfir-iris.org/) 2.4, behind Caddy, with PostgreSQL. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/iris/index.html).
+
 ## Security Posture
 
 - The web server listens on loopback. Caddy is what the network sees.

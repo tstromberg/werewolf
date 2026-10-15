@@ -58,6 +58,22 @@ pub fn check(p: *Posture) !void {
             .result = if (nginx.found == 0) .skip else if (nginx.root == 0) .pass else .fail,
             .detail = if (nginx.found == 0) "no nginx running" else "",
         });
+        const console = try consoleShell(p) orelse
+            if (askedShell(p.read("/proc/cmdline"), p.dev)) |w|
+                try p.gpa.print("{s} asks for one", .{w})
+            else
+                null;
+        try p.add(.{
+            .id = "processes-no-root-console",
+            .area = "processes",
+            .name = "No root shell without a password",
+            .why = "Whoever reaches the console, a host's serial log or a cloud's console " ++
+                "viewer, would be root.",
+            .how = "no root shell runs on a console or serial line but by a password login, " ++
+                "and the kernel command line asks for none",
+            .result = if (console == null) .pass else .fail,
+            .detail = console orelse "",
+        });
         if (p.werewolf) {
             try servicesLeashed(p);
             try serviceDirs(p);
@@ -432,6 +448,127 @@ fn workerUids(p: *Posture, prefix: []const u8) !struct { found: usize, root: usi
         if (uidOf(status) == 0) root += 1;
     }
     return .{ .found = found, .root = root };
+}
+
+/// shells are the commands a root console runs: werewolf's debug shell
+/// (getty -n -l /bin/ash), systemd's (bash on tty9), an inittab's sh.
+const shells = [_][]const u8{ "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "yash", "fish" };
+
+fn isShell(name: []const u8) bool {
+    for (shells) |s| if (std.mem.eql(u8, name, s)) return true;
+    return false;
+}
+
+/// consoleShell returns "SHELL on TTY" for a root shell whose terminal is a
+/// console or serial line, not a pseudo-terminal as ssh's are, unless a
+/// password login started it; or null. It reads only /proc and /sys, so it
+/// holds on any Linux.
+fn consoleShell(p: *Posture) !?[]const u8 {
+    var d = Dir.cwd().openDir(p.io, "/proc", .{ .iterate = true }) catch return null;
+    defer d.close(p.io);
+    var it = d.iterate();
+    while (it.next(p.io) catch null) |e| {
+        _ = std.fmt.parseInt(u32, e.name, 10) catch continue;
+        const s = procStat(p.read(try p.gpa.print("/proc/{s}/stat", .{e.name}))) orelse continue;
+        const major = (s.tty >> 8) & 0xfff;
+        // 136 to 143 are pseudo-terminals' (Documentation/admin-guide/devices.txt).
+        if (!isShell(s.comm) or s.tty == 0 or (major >= 136 and major <= 143)) continue;
+        if (uidOf(p.read(try p.gpa.print("/proc/{s}/status", .{e.name}))) != 0) continue;
+        if (passwordLogin(p.read(try p.gpa.print("/proc/{d}/cmdline", .{s.ppid})))) continue;
+        const minor = (s.tty & 0xff) | ((s.tty >> 12) & 0xfff00);
+        const uevent = p.read(try p.gpa.print("/sys/dev/char/{d}:{d}/uevent", .{ major, minor }));
+        var lines = std.mem.splitScalar(u8, uevent, '\n');
+        const tty = while (lines.next()) |l| {
+            if (std.mem.cutPrefix(u8, l, "DEVNAME=")) |n| break n;
+        } else try p.gpa.print("tty {d}:{d}", .{ major, minor });
+        return try p.gpa.print("{s} on {s}", .{ s.comm, tty });
+    }
+    return null;
+}
+
+const Stat = struct { comm: []const u8, ppid: u32, tty: u32 };
+
+/// procStat reads a /proc/PID/stat line: the command, which lies between the
+/// first ( and the last ), the parent, and the controlling terminal.
+fn procStat(text: []const u8) ?Stat {
+    const open = std.mem.findScalar(u8, text, '(') orelse return null;
+    const close = std.mem.findScalarLast(u8, text, ')') orelse return null;
+    if (close < open) return null;
+    var f = std.mem.tokenizeScalar(u8, text[close + 1 ..], ' ');
+    _ = f.next() orelse return null; // state
+    const ppid = std.fmt.parseInt(u32, f.next() orelse return null, 10) catch return null;
+    _ = f.next() orelse return null; // process group
+    _ = f.next() orelse return null; // session
+    const tty = std.fmt.parseInt(i32, f.next() orelse return null, 10) catch return null;
+    return .{ .comm = text[open + 1 .. close], .ppid = ppid, .tty = @bitCast(tty) };
+}
+
+/// passwordLogin reports whether cmdline, a /proc/PID/cmdline, is a login
+/// that asked a password: login, but not login -f, which autologin runs.
+fn passwordLogin(cmdline: []const u8) bool {
+    var args = std.mem.splitScalar(u8, std.mem.trimEnd(u8, cmdline, "\x00"), 0);
+    if (!std.mem.eql(u8, std.fs.path.basename(args.first()), "login")) return false;
+    while (args.next()) |a| {
+        if (a.len > 1 and a[0] == '-' and a[1] != '-' and std.mem.findScalar(u8, a, 'f') != null)
+            return false;
+    }
+    return true;
+}
+
+/// askedShell returns the word of the kernel command line that gives root a
+/// console shell without a password, or null.
+/// werewolf.debug=1 does so only on a DEV=1 build (cmd/debug-shell).
+fn askedShell(cmdline: []const u8, dev: bool) ?[]const u8 {
+    var words = std.mem.tokenizeAny(u8, cmdline, " \t\n");
+    while (words.next()) |w| {
+        const name = w[0 .. std.mem.findScalar(u8, w, '=') orelse w.len];
+        const value = if (name.len < w.len) w[name.len + 1 ..] else "";
+        const off = std.mem.eql(u8, value, "0") or std.mem.eql(u8, value, "no") or
+            std.mem.eql(u8, value, "false");
+        const asks = ((std.mem.eql(u8, name, "systemd.debug_shell") or
+            std.mem.eql(u8, name, "rd.shell")) and !off) or
+            std.mem.eql(u8, name, "rd.break") or
+            (std.mem.eql(u8, name, "init") and isShell(std.fs.path.basename(value))) or
+            (dev and std.mem.eql(u8, w, "werewolf.debug=1"));
+        if (asks) return w;
+    }
+    return null;
+}
+
+test procStat {
+    const s = procStat("412 (a) b) S 1 412 412 1088 412 4194560 0").?;
+    try testing.expectEqualStrings("a) b", s.comm);
+    try testing.expectEqual(1, s.ppid);
+    try testing.expectEqual(1088, s.tty); // 4:64, ttyS0
+    try testing.expectEqual(null, procStat("412 sh S 1"));
+    try testing.expectEqual(null, procStat("412 (sh) S"));
+}
+
+test passwordLogin {
+    try testing.expect(passwordLogin("/bin/login\x00--\x00root\x00"));
+    try testing.expect(passwordLogin("login\x00-p\x00-h\x00host\x00"));
+    try testing.expect(!passwordLogin("/bin/login\x00-f\x00root\x00"));
+    try testing.expect(!passwordLogin("login\x00-pf\x00root\x00"));
+    try testing.expect(!passwordLogin("/usr/bin/getty\x00-n\x00-l\x00/bin/ash\x00"));
+    try testing.expect(!passwordLogin(""));
+}
+
+test askedShell {
+    try testing.expectEqualStrings(
+        "werewolf.debug=1",
+        askedShell("console=ttyAMA0 werewolf.debug=1 quiet", true).?,
+    );
+    try testing.expectEqual(null, askedShell("werewolf.debug=1", false));
+    try testing.expectEqualStrings(
+        "systemd.debug_shell",
+        askedShell("systemd.debug_shell", false).?,
+    );
+    try testing.expectEqualStrings("init=/bin/sh", askedShell("ro init=/bin/sh", false).?);
+    for ([_][]const u8{
+        "systemd.debug_shell=0 rd.shell=no",
+        "init=/sbin/init single",
+        "quiet splash",
+    }) |line| try testing.expectEqual(null, askedShell(line, false));
 }
 
 /// whyNotLeashed says why a /proc/PID/status does not look leashed, or null.

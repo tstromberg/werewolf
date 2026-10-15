@@ -98,7 +98,7 @@ remains blocked despite successful gallery enrollment. For x86 diagnostics,
 pass `--arch x86_64 --size Standard_D2s_v5`.
 
 `WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` select an existing signing identity.
-Otherwise cloud builds retain one under `build/boot/ARCH`, outside guest artifacts.
+Otherwise cloud builds keep one in howl's data directory, `$XDG_DATA_HOME/howl` (`~/.local/share/howl`)'s `keys/boot/ARCH`.
 Signed machines hold updates until enrolled in a matching signed image channel;
 locally composing an unsigned replacement cannot preserve the verified boot chain.
 IPE channels also need the kernel, policy signer, `IPE_UPDATES` and `IMAGE_SERIAL`

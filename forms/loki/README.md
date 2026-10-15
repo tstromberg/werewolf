@@ -2,6 +2,8 @@
 
 [Grafana Loki](https://grafana.com/oss/loki/) takes logs over HTTPS. Caddy checks the user and the password, then proxies to Loki on loopback. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/loki/index.html).
+
 ## Security Posture
 
 - Loki and Caddy run as their own users. The root is read-only.

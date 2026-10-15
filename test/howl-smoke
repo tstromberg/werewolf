@@ -9,19 +9,19 @@ fail() { echo "howl-smoke: $1"; exit 1; }
 "$howl" run --build -n 2>&1 | grep -q 'as it is' || fail "howl run -n should name its environment's form"
 "$howl" run --build --on qemu -n 2>&1 | grep -q 'playground as it is' || fail "howl run --on qemu -n should be playground"
 "$howl" run --build --on qemu -h >/dev/null 2>&1 || fail "howl run --on qemu -h"
-"$howl" run --build --insecure --dev -h >/dev/null 2>&1 || fail "explicit insecure development help"
+"$howl" run --build --disable=secureboot,tpm,ipe --dev -h >/dev/null 2>&1 || fail "explicit unprotected development help"
 out=$("$howl" create --build smoke --with playground --on firecracker 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'protected deployment is not ready' || fail "default allowed unprotected Firecracker"
 out=$("$howl" create --build smoke --with playground --dev 2>&1)
-[ $? -ne 0 ] && echo "$out" | grep -q 'explicit --insecure' || fail "--dev silently disabled protection"
-out=$("$howl" run --build --secure --insecure 2>&1)
-[ $? -ne 0 ] && echo "$out" | grep -q 'conflict' || fail "conflicting security flags were accepted"
+[ $? -ne 0 ] && echo "$out" | grep -q -- '--dev --disable=secureboot,tpm,ipe' || fail "--dev silently disabled protection"
+out=$("$howl" run --build --disable=tpm 2>&1)
+[ $? -ne 0 ] && echo "$out" | grep -q 'without all three' || fail "a partial --disable was accepted"
 out=$("$howl" run --build --on gcp 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'protected deployment is not ready' || fail "default allowed incomplete cloud protection"
 out=$(WEREWOLF_BOOT_MIRROR=http://127.0.0.1 "$howl" run 2>&1)
 [ $? -ne 0 ] && echo "$out" | grep -q 'protected image download failed' || fail "published mode silently rebuilt or downgraded"
 out=$("$howl" upload missing.qcow2 --on aws 2>&1)
-[ $? -ne 0 ] && echo "$out" | grep -q 'cannot establish protected deployment' || fail "raw-disk upload bypassed secure defaults"
+[ $? -ne 0 ] && echo "$out" | grep -q 'cannot bring Secure Boot, the TPM or IPE' || fail "raw-disk upload bypassed the protected default"
 "$howl" create --build smoke --with prod -h >/dev/null 2>&1 || fail "howl create smoke --with prod -h"
 "$howl" create --build web --with python-app --app ./myapp -h >/dev/null 2>&1 ||
 	fail "README: howl create web --with python-app --app ./myapp"

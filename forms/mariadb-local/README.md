@@ -2,6 +2,8 @@
 
 A database for the other services on this machine: [MariaDB](https://mariadb.org) 12.3, the long-term release, on a UNIX socket. The form's manifest is [form.yaml](form.yaml). The same server on a reachable port is [mariadb-tcp](../mariadb-tcp/README.md).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mariadb-local/index.html).
+
 ## Security Posture
 
 The server runs as its own user, and nothing else does. There is no shell and no perl. Landlock and seccomp hold it to its socket and to `/data/svc/mariadb`. The root is read-only.

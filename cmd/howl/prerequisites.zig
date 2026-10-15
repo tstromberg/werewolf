@@ -45,6 +45,12 @@ pub fn resolve(
         .stub = try absolute(gpa, cwd, howl.environ.get("UKI_STUB").?),
     };
     const cache = try gpa.print("{s}/build/secure-cache", .{cwd});
+    // The IPE signing identity is no cache: every machine made with it trusts
+    // only roots its key signs, so it lives in howl's data directory.
+    const identity = if (external)
+        ""
+    else
+        try howl.keysDir(io, gpa, "ipe", try gpa.print("{s}/signing", .{cache}));
     try Dir.cwd().createDirPath(io, cache);
     try Dir.cwd().setFilePermissions(io, cache, .fromMode(0o700), .{});
     const source = try materialize(io, gpa, cache);
@@ -85,7 +91,7 @@ pub fn resolve(
             "all",
         source,         cache,
         @tagName(arch), base,
-        report,
+        report,         identity,
     }, .env = &env }}, .{ .phases = true })).ok) return steps.fail(
         "preparing security inputs failed; see the builder dependencies in docs/testing.md",
     );

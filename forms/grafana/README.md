@@ -2,6 +2,8 @@
 
 Dashboards and alerts: [Grafana](https://grafana.com) 13, from Grafana's own image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/grafana/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

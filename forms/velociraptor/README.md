@@ -2,6 +2,8 @@
 
 Endpoint visibility: the [Velociraptor](https://docs.velociraptor.app/) server, 0.77, behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/velociraptor/index.html).
+
 ## Security Posture
 
 - The server runs as its own user. The keys are generated on the machine, into `/data`, the first time it starts, and are not in the image.

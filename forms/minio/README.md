@@ -2,6 +2,8 @@
 
 S3 on this machine: [MinIO](https://min.io), for restic, rclone, or an application. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/minio/index.html).
+
 ## Security Posture
 
 MinIO runs as its own user. There is no shell. Landlock and seccomp hold it to port 9000 and to `/data/svc/minio`. The root is read-only.

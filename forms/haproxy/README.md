@@ -2,6 +2,8 @@
 
 [HAProxy](https://www.haproxy.org) 3.4 balances HTTP across backends you name, on one leash. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/haproxy/index.html).
+
 ## Security Posture
 
 - HAProxy runs as its own user. The root is read-only. There is no control socket.

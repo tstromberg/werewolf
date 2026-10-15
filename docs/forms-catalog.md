@@ -12,6 +12,16 @@ interpreter and leave the service definition to you.
 
 ## Get started
 
+Browse and inspect forms from the command line:
+
+```sh
+howl forms                       # this checkout, or the signed catalog outside it
+howl forms database              # search names and descriptions
+howl forms caddy                 # setup guide, architectures and commands
+howl forms --published --arch arm64  # published image inventory for one architecture
+howl test --with caddy            # integration and production-variant boot checks
+```
+
 Follow the [installation steps](../README.md#try-it), then try the Node.js
 sample locally from the checkout:
 
@@ -27,6 +37,31 @@ configuration flags. Replace `FORM` with its name.
 prebuilt download requires a published protected image for the selected form,
 host and architecture. See the [host support table](../README.md#secure-boot)
 and [howl guide](../cmd/howl/README.md) for deployment options.
+
+## Images and downloads
+
+Browse the [image catalog](https://dist.werewolf-linux.org/images/v1/index.html)
+or use `howl forms --published`. Each form has a page with arm64 and x86_64
+downloads, package release notes, signatures, test evidence and the latest attempt's status. A failed
+test or build keeps the previous passing image. Unsupported architectures are
+listed explicitly: Overleaf's upstream image currently supports x86_64 only.
+
+The [form-image workflow](../.github/workflows/form-images.yml) discovers every
+form, resolves package and OCI versions, builds each changed target independently
+twice, and requires matching bytes and passing tests on that architecture.
+See [verification and deployment instructions](releases.md#form-image-catalog).
+Publishing a `NAME-form` APK package is separate from publishing a boot disk.
+
+Catalog disks use signed UEFI boot, IPE and signed complete-slot updates. They
+require firmware enrollment and boot configuration. Custom application forms
+still need your code and a corresponding signed update channel.
+
+`howl run` and `howl create` also require TPM enrollment in their protected mode.
+Their prebuilt downloads currently cover `playground` on x86_64 QEMU and arm64
+Lima; the [protected download guide](releases.md#downloading-a-protected-qcow2)
+describes that separate path. A catalog qcow2 does not satisfy its lifecycle
+gates or create owner keys and a host permit service. For other forms, use
+`howl run --build --with FORM` from the checkout and follow its setup guide.
 
 ## Alphabetical list
 
@@ -99,7 +134,7 @@ and [howl guide](../cmd/howl/README.md) for deployment options.
 | [php](../forms/php/form.yaml) | Serve your PHP website through nginx and PHP-FPM. Supply the site with `--app`. |
 | [php-example](../examples/php/README.md) | A sample PHP website, with a tutorial. |
 | [pi-hole](../forms/pi-hole/README.md) | DNS filtering for a home network, with the web interface behind Caddy. |
-| [playground](../forms/playground/form.yaml) | The default `howl run` environment, with an interactive SSH shell and support for ordinary key files. |
+| [playground](../forms/playground/README.md) | The default `howl run` environment, with an interactive SSH shell and support for ordinary key files. |
 | [postgresql](../forms/postgresql/README.md) | PostgreSQL for services in the same VM, accessed through a UNIX socket. |
 | [prod](../forms/prod/form.yaml) | A production starting point with DHCP, cloud metadata, persistent data and automatic updates; no application or listener. |
 | [prod-ssh](../forms/prod-ssh/form.yaml) | The production starting point with interactive SSH access using security keys. |

@@ -2,6 +2,8 @@
 
 Threat intelligence: [MISP](https://www.misp-project.org/) 2.5, its core, behind Caddy, with MariaDB and Valkey. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/misp/index.html).
+
 ## Security Posture
 
 - PHP listens on loopback. Caddy is what the network sees. FastCGI is not published, and the supervisor control port is not open.

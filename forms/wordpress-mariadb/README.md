@@ -2,6 +2,8 @@
 
 [WordPress](https://wordpress.org) with MariaDB on a UNIX socket, behind nginx. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/wordpress-mariadb/index.html).
+
 ## Security Posture
 
 - nginx, php-fpm, and MariaDB run as their own users. The root is read-only.

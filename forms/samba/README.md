@@ -2,6 +2,8 @@
 
 File shares over SMB: [Samba](https://www.samba.org), one directory per user. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/samba/index.html).
+
 ## Security Posture
 
 - Share logins must name real, non-root UNIX accounts. smbd runs as its own user; share files belong to that service user. The root is read-only. Files live on `/data`.

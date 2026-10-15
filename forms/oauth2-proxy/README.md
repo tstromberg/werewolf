@@ -2,6 +2,8 @@
 
 A login in front of another service: [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) 7. It sends visitors to an OIDC provider and lets those the settings allow through. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/oauth2-proxy/index.html).
+
 ## Security Posture
 
 oauth2-proxy runs as its own user. There is no shell. Landlock and seccomp hold it to port 4180, to the provider, and to the upstream. The root is read-only.

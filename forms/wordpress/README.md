@@ -2,6 +2,8 @@
 
 [WordPress](https://wordpress.org) on SQLite, behind nginx. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/wordpress/index.html).
+
 ## Security Posture
 
 - nginx and php-fpm run as their own users. The root is read-only.

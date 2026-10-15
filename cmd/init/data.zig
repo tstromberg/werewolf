@@ -72,7 +72,7 @@ pub fn data(m: *Machine) void {
     } else {
         var why: []const u8 = "";
         if (dataHome(m, &why)) |what| {
-            _ = linux.fchmodat(linux.AT.FDCWD, "/data", 0o755);
+            _ = linux.fchmodat2(linux.AT.FDCWD, "/data", 0o755, linux.AT.SYMLINK_NOFOLLOW);
             say("/data is {s}", .{what});
         } else nodata(m, why);
     }

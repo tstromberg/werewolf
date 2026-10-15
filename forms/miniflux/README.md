@@ -2,6 +2,8 @@
 
 [Miniflux](https://miniflux.app) reads feeds, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/miniflux/index.html).
+
 ## Security Posture
 
 - Miniflux, Caddy, and PostgreSQL run as their own users. The root is read-only.

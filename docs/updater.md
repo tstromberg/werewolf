@@ -5,13 +5,21 @@ asks werewolf's repository, Wolfi and Alpine for anything newer than the
 running image, builds the other slot from it on the machine (werewolf's
 programs and forms are packages: [custom-updates.md](design/custom-updates.md)),
 boots that slot once, and records what changed and which CVEs that fixes.
-Releases are for installs; every machine updates this one way.
+Legacy release disks use this package update path.
 
 Enrolled IPE images fetch signed prebuilt slots, verify every artifact and
 retain proof for arming and reboot. Unenrolled images hold local rebuilds
 with `IpeSignedImageRequired`; the host keeps the signing key. See
 [design/prebuilt-images.md](design/prebuilt-images.md) for enrollment,
 publication layout and rollback limits.
+
+Protected published images use the same signed-slot and A/B update machinery as
+protected source builds. Howl's host service checks the vendor channel every five
+minutes, authenticates new bundles and serves them to the enrolled guest; machine
+owner keys authorize TPM transitions separately from vendor code signatures.
+The guest's update policy still determines when a staged update boots. Keep the
+host service, owner keys and persistent TPM state. A standalone qcow2 import does
+not set these up; see [protected downloads](releases.md#downloading-a-protected-qcow2).
 
 It is one Zig program, `cmd/slot-update/slot-update.zig` with
 `cmd/slot-update/cve.zig` (the CVE children and the checks of what they say)

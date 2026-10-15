@@ -2,6 +2,8 @@
 
 A cache or queue for the other services on this machine: [Valkey](https://valkey.io) 9.1, on a UNIX socket. The form's manifest is [form.yaml](form.yaml). The same server on a reachable port is [valkey-tcp](../valkey-tcp/README.md).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/valkey/index.html).
+
 ## Security Posture
 
 The server runs as its own user. There is no shell. Landlock and seccomp hold it to its socket and to `/data/svc/valkey`. The root is read-only.

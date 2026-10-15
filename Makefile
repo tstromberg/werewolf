@@ -77,6 +77,11 @@ BUILD = build/$(ARCH)$(if $(IPE),/ipe)
 IPE_KERNEL ?= build/ipe-kernel/$(ARCH)/rootfs.tar
 WEREWOLF_IPE_CRT ?=
 WEREWOLF_IPE_KEY ?=
+# What a make-built image is made without, named as howl's --disable takes it
+# (docs/security.md): Secure Boot and the TPM, and IPE unless IPE=1. howl
+# refuses an image that lacks a protection this does not name.
+comma := ,
+DISABLE = secureboot$(comma)tpm$(if $(IPE),,$(comma)ipe)
 APP ?=
 DEV ?=
 OUT = $(BUILD)/$(FORM)$(if $(DEV),-dev)$(if $(APP),-app)$(if $(PUBLISHED),-published)$(if $(IPE),-ipe)
@@ -102,7 +107,7 @@ install-precommit hooks:
 	@echo "pre-commit installed: test, lint, and a local howl run"
 
 # howl always pins locked packages; PUBLISHED=1 takes programs from werewolf's repository.
-HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) \
+HOWL_BUILD = $(HOWL) _build --verbose --with $(FORM_REF) --arch $(ARCH) --disable=$(DISABLE) \
 	--build $(BUILD) --programs $(PROGRAMS) $(if $(DEV),--dev) $(if $(APP),--app-root $(APP)) \
 	$(if $(PUBLISHED),--published) $(if $(IPE),--ipe-kernel $(IPE_KERNEL) --ipe-key $(WEREWOLF_IPE_KEY) --ipe-cert $(WEREWOLF_IPE_CRT)) \
 	$(if $(IPE_UPDATES),--ipe-updates $(IPE_UPDATES) --image-serial $(IMAGE_SERIAL))
@@ -283,6 +288,7 @@ _test/local-publisher: $(HOWL) build/host/tpm-policy
 	python3 test/protected-publication
 	python3 test/protected-export
 	python3 test/protected-inputs
+	python3 test/form-images
 	python3 test/publishing-health
 _test/lib/sandbox.zig _test/lib/audit.zig: _test/%: ; zig test --dep seal -Mroot=$* -Mseal=lib/seal.zig
 _test/lib/dns.zig _test/lib/net-rule.zig: _test/%: ; zig test $(call ZIG_MODULES,$*)
@@ -337,6 +343,8 @@ _test/forms/%.zig: ; zig test $(call ZIG_MODULES,forms/$*.zig)
 _test/%.zig: ; zig test $*.zig
 _test/howl-smoke: $(HOWL)
 	@test/howl-smoke $(HOWL) $(BUILD)
+	@python3 test/howl-test $(HOWL)
+	@python3 test/howl-forms $(HOWL)
 _test/howl-lock: $(HOWL)
 	@python3 test/howl-lock $(HOWL)
 
@@ -433,7 +441,8 @@ dist:
 _dist-form: $(HOWL)
 	@[ "$(BUILD)" = build/$(ARCH) ] && [ -z "$(DEV)$(APP)" ] || \
 		{ echo "_dist-form: a release builds in build/$(ARCH), without DEV or APP (howl build --app)" >&2; exit 1; }
-	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST)
+	$(HOWL) build --verbose --with $(FORM_REF) --arch $(ARCH) -o $(DIST) \
+		--disable=$(if $(WEREWOLF_BOOT_KEY),tpm,secureboot$(comma)tpm)
 
 # check-NAME builds what it boots, then runs test/check-NAME; machines share nothing, so -j works.
 MACHINE = $(if $(filter aarch64,$(ARCH)),virt,q35)
@@ -698,9 +707,11 @@ else
 		$(MAKE) --no-print-directory FORM=$$f _check-dist || failed=1; done; exit $$failed
 endif
 _check-dist:
-	@$(UEFI_ENV) DIST=$(DIST) POSTURE_KNOWN="$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN))" \
+	@$(UEFI_ENV) DIST=$(DIST) HOWL=$(HOWL) FORM_REF=$(FORM_REF) FORM_DIR=$(FORM_DIR) \
+		CONSOLE=$(wildcard $(FORM_DIR)/test/console) \
+		POSTURE_KNOWN="$(filter-out boot-ipe-enforced boot-sig-enforced,$(POSTURE_KNOWN))" \
 		test/check-dist qemu-system-$(ARCH) -M $(MACHINE) -accel $(ACCEL) -cpu $(CPU) \
-		-nographic -smp 2 -m 2048 -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
+		-nographic -smp 2 -m $(or $(call form_check,memory),2048) -snapshot -no-reboot $(UEFI_FLAGS) -device virtio-rng-pci \
 		-netdev user,id=n0,restrict=on -device virtio-net-pci,netdev=n0,romfile=
 
 # check-persist boots without EL2 (edk2 under HVF never boots) and offline; CI sets PERSIST_AFTER=.

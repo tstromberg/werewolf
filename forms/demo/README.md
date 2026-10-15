@@ -2,6 +2,8 @@
 
 A machine that serves one page about itself and keeps itself patched, with no shell in the image. The page shows uptime, the last patches, and what a vulnerability scan finds. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/demo/index.html).
+
 ## Security Posture
 
 - The page is static HTML, rewritten every minute, with no script.

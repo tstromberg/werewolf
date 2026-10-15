@@ -9,6 +9,7 @@ const forms = @import("form");
 const compose = @import("compose");
 const image = @import("image");
 const howl = @import("howl.zig");
+const cmdline = @import("cmdline");
 const adhoc = @import("adhoc.zig");
 const app = @import("app.zig");
 const melange = @import("melange.zig");
@@ -49,9 +50,9 @@ pub const Spec = struct {
     arch: howl.Arch,
     /// dev adds a shell, as DEV=1 does.
     dev: bool = false,
-    /// insecure disables default IPE enforcement and adds werewolf.insecure=1
-    /// to the slot command line.
-    insecure: bool = false,
+    /// disabled is what --disable gave up of werewolf's protections. An
+    /// image may lack only these (unnamed), and its command line says which.
+    disabled: cmdline.Protections = .empty,
     /// app is the staged application's root (howl.appBuild), or null.
     app: ?[]const u8 = null,
     /// build and programs replace BUILD and PROGRAMS, as make's BUILD= and
@@ -88,6 +89,18 @@ pub const Spec = struct {
     update_port: ?u16 = null,
     permit_host: ?[]const u8 = null,
     permit_port: ?u16 = null,
+
+    /// lacks returns the protections s's image is made without: Secure Boot
+    /// with no boot key, the TPM with no signer or firmware word, IPE with no
+    /// kernel. A provider may give one --disable named, as QEMU signs for
+    /// Secure Boot regardless.
+    pub fn lacks(s: Spec) cmdline.Protections {
+        var d: cmdline.Protections = .empty;
+        if (s.boot_key == null) d.insert(.secureboot);
+        if (s.tpm_pub == null and !s.tpm_firmware) d.insert(.tpm);
+        if (s.ipe_kernel == null) d.insert(.ipe);
+        return d;
+    }
 };
 
 /// Paths are where a build writes, as the Makefile names them.
@@ -128,7 +141,7 @@ const BuildOptions = struct {
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository.
     local: bool = false,
-    insecure: bool = false,
+    disabled: cmdline.Protections = .empty,
     dir: []const u8 = "dist",
     arch: howl.Arch,
     format: DiskFormat = .qcow2,
@@ -164,10 +177,6 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.local = true;
             continue;
         }
-        if (std.mem.eql(u8, args[i], "--insecure")) {
-            o.insecure = true;
-            continue;
-        }
         if (std.mem.eql(u8, args[i], "--boot-native")) {
             o.boot_native = true;
             continue;
@@ -179,6 +188,8 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
         const a, const v = try howl.flagValue(args, &i, why);
         if (std.mem.eql(u8, a, "-o")) {
             o.dir = v;
+        } else if (std.mem.eql(u8, a, "--disable")) {
+            o.disabled = try howl.disableValue(v, why);
         } else if (std.mem.eql(u8, a, "--arch")) {
             arch = howl.archName(v) orelse return why.refuse(howl.arch_refusal, .{v});
         } else if (std.mem.eql(u8, a, "--app")) {
@@ -208,20 +219,19 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
-            "{s}: build takes --build, --insecure, -o, --arch, --format, --app, --ipe-kernel, " ++
+            "{s}: build takes --build, --disable, -o, --arch, --format, --app, --ipe-kernel, " ++
                 "--ipe-key, --ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert " ++
                 "and --boot-native, --tpm-pub, --tpm-firmware, --permit-host and " ++
                 "--permit-port\n{s}",
             .{ a, howl.usage },
         );
     }
-    if (o.insecure and (o.ipe_kernel != null or o.ipe_key != null or o.ipe_cert != null or
-        o.ipe_updates != null or o.image_serial != null or o.boot_key != null or
-        o.boot_cert != null or o.boot_native or o.tpm_pub != null or o.tpm_firmware))
-        return why.refuse(
-            "--insecure cannot be combined with IPE, Secure Boot or TPM options",
-            .{},
-        );
+    if ((o.disabled.contains(.ipe) and (o.ipe_kernel != null or o.ipe_key != null or
+        o.ipe_cert != null or o.ipe_updates != null or o.image_serial != null)) or
+        (o.disabled.contains(.secureboot) and
+            (o.boot_key != null or o.boot_cert != null or o.boot_native)) or
+        (o.disabled.contains(.tpm) and (o.tpm_pub != null or o.tpm_firmware)))
+        return why.refuse("--disable names a protection the other flags give", .{});
     o.form = form orelse return why.refuse("no form\n{s}", .{howl.usage});
     o.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
     return o;
@@ -249,7 +259,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .log = try gpa.print("build/log/{s}-{s}-build.log", .{ f, a }),
         .first = howl.start_phase,
     });
-    const ipe_inputs: ?@import("prerequisites.zig").Inputs = if (!o.insecure and
+    const ipe_inputs: ?@import("prerequisites.zig").Inputs = if (!o.disabled.contains(.ipe) and
         o.ipe_kernel == null)
         try @import("prerequisites.zig").resolve(io, gpa, &steps, o.arch, why)
     else
@@ -261,7 +271,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     const spec: Spec = .{
         .form = ref,
         .arch = o.arch,
-        .insecure = o.insecure,
+        .disabled = o.disabled,
         .app = ab.root,
         .published = !o.local,
         .ipe_kernel = o.ipe_kernel orelse if (ipe_inputs) |inp| inp.kernel else null,
@@ -428,7 +438,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
 /// DISK_MIB and DISK_ARGS; the qcow2 goal takes --disk-mib too.
 pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const verbose, const args = try howl.verboseFlag(gpa, given);
-    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--insecure] [--published] " ++
+    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--disable=LIST] [--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
         "[--ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] " ++
@@ -443,8 +453,6 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) {
             spec.dev = true;
-        } else if (std.mem.eql(u8, args[i], "--insecure")) {
-            spec.insecure = true;
         } else if (std.mem.eql(u8, args[i], "--boot-native")) {
             spec.boot_native = true;
         } else if (std.mem.eql(u8, args[i], "--tpm-firmware")) {
@@ -455,6 +463,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
             const flag, const v = try howl.flagValue(args, &i, why);
             if (std.mem.eql(u8, flag, "--with")) {
                 form = v;
+            } else if (std.mem.eql(u8, flag, "--disable")) {
+                spec.disabled = try howl.disableValue(v, why);
             } else if (std.mem.eql(u8, flag, "--arch")) {
                 arch = howl.archName(v) orelse return why.refuse(howl.arch_refusal, .{v});
             } else if (std.mem.eql(u8, flag, "--app")) {
@@ -737,6 +747,8 @@ fn toolEnv(gpa: Allocator) !*std.process.Environ.Map {
 }
 
 fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goals) !void {
+    if (goals.image or goals.slot or goals.disk or goals.qcow2 or goals.prebuilt)
+        if (try unnamed(gpa, s)) |why| return steps.fail(why);
     try validateIpe(s);
     const p = try paths(gpa, s);
     try Dir.cwd().createDirPath(io, p.programs);
@@ -761,9 +773,9 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
     if (previous) |rec| b.locked_images = rec.images;
-    // The chain's images, baked before anything renders their services.
-    try oci.lay(&b);
     const image_goals = goals.image or goals.slot or goals.disk or goals.qcow2 or goals.prebuilt;
+    // A lock needs image digests, but no downloaded or unpacked layers.
+    try oci.lay(&b, goals.lock and !image_goals);
     const suffix = try gpa.print("{s}{s}", .{
         if (s.dev) "-dev" else "",
         if (s.published) "-published" else "",
@@ -804,10 +816,75 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
     try slot.make(&b, rootfs, goals);
 }
 
+/// unnamed returns why s's image may not be made, if it would lack a
+/// protection --disable does not name, and how to give it; or null.
+/// Nothing is given up by default.
+fn unnamed(gpa: Allocator, s: Spec) !?[]const u8 {
+    const lacks = s.lacks();
+    var missing: cmdline.Protections = .empty;
+    var named = s.disabled;
+    for (std.enums.values(cmdline.Protection)) |p| if (lacks.contains(p) and !named.contains(p)) {
+        missing.insert(p);
+        named.insert(p);
+    };
+    if (missing.count() == 0) return null;
+    var w: Io.Writer.Allocating = .init(gpa);
+    try w.writer.writeAll("the image would be made without ");
+    try cmdline.writeProtections(&w.writer, missing, ", ");
+    try w.writer.writeAll(", which --disable does not name. Give");
+    var first = true;
+    for (std.enums.values(cmdline.Protection)) |p| if (missing.contains(p)) {
+        try w.writer.writeAll(if (first) " " else "; ");
+        try w.writer.writeAll(switch (p) {
+            .secureboot => "a boot key (--boot-key, or WEREWOLF_BOOT_KEY)",
+            .tpm => "the TPM (--tpm-firmware or --tpm-pub, with a boot key and IPE updates)",
+            .ipe => "IPE (--ipe-kernel, --ipe-key and --ipe-cert)",
+        });
+        first = false;
+    };
+    try w.writer.writeAll(", or give them up: --disable=");
+    try cmdline.writeProtections(&w.writer, named, ",");
+    return w.written();
+}
+
+test unnamed {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var s: Spec = .{ .form = "prod", .arch = .aarch64 };
+    try testing.expect(s.lacks().eql(.full));
+    try testing.expectEqualStrings(
+        "the image would be made without secureboot, tpm, ipe, which --disable does not " ++
+            "name. Give a boot key (--boot-key, or WEREWOLF_BOOT_KEY); the TPM (--tpm-firmware " ++
+            "or --tpm-pub, with a boot key and IPE updates); IPE (--ipe-kernel, --ipe-key and " ++
+            "--ipe-cert), or give them up: --disable=secureboot,tpm,ipe",
+        (try unnamed(gpa, s)).?,
+    );
+    // QEMU signs a machine --disable gave all three up for: it lacks two.
+    s.disabled = .full;
+    s.boot_key = "boot.key";
+    try testing.expectEqual(null, try unnamed(gpa, s));
+    try testing.expect(s.lacks().eql(.initMany(&.{ .tpm, .ipe })));
+    // A key and IPE given, the TPM neither given nor named.
+    s.disabled = .empty;
+    s.ipe_kernel = "k.tar";
+    try testing.expectEqualStrings(
+        "the image would be made without tpm, which --disable does not name. Give the TPM " ++
+            "(--tpm-firmware or --tpm-pub, with a boot key and IPE updates), or give them up: " ++
+            "--disable=tpm",
+        (try unnamed(gpa, s)).?,
+    );
+    s.tpm_firmware = true;
+    try testing.expectEqual(null, try unnamed(gpa, s));
+    try testing.expect(s.lacks().eql(.empty));
+}
+
 fn validateIpe(s: Spec) !void {
-    if (s.insecure and (s.ipe_kernel != null or s.ipe_key != null or s.ipe_cert != null or
-        s.ipe_updates != null or s.image_serial != null or s.tpm_pub != null or s.tpm_firmware))
-        return error.InsecureWithProtectedOptions;
+    if (s.disabled.contains(.ipe) and (s.ipe_kernel != null or s.ipe_key != null or
+        s.ipe_cert != null or s.ipe_updates != null or s.image_serial != null))
+        return error.DisabledIpeGiven;
+    if (s.disabled.contains(.tpm) and (s.tpm_pub != null or s.tpm_firmware))
+        return error.DisabledTpmGiven;
     if ((s.permit_host == null) != (s.permit_port == null)) return error.BadPermitTransport;
     if (s.permit_host) |host| {
         if (!s.tpm_firmware or s.permit_port.? == 0 or
@@ -1098,7 +1175,17 @@ test buildOptions {
         .x86_64,
         (try buildOptions(&.{ "--arch", "x86_64", "prod" }, null, &why)).arch,
     );
-    try testing.expect((try buildOptions(&.{ "prod", "--insecure" }, .aarch64, &why)).insecure);
+    try testing.expect((try buildOptions(
+        &.{ "prod", "--disable=secureboot,tpm,ipe" },
+        .aarch64,
+        &why,
+    )).disabled.eql(.full));
+    // A build gives each protection itself, so it takes any list.
+    try testing.expect((try buildOptions(
+        &.{ "prod", "--disable=secureboot,tpm" },
+        .aarch64,
+        &why,
+    )).disabled.eql(.initMany(&.{ .secureboot, .tpm })));
     for ([_][]const []const u8{
         &.{},
         &.{ "a", "b" },
@@ -1106,8 +1193,11 @@ test buildOptions {
         &.{ "a", "--format", "zip" },
         &.{ "a", "--on", "gcp" },
         &.{ "a", "-o" },
-        &.{ "a", "--insecure", "--ipe-kernel", "k.tar" },
-        &.{ "a", "--insecure", "--boot-key", "k.pem" },
+        &.{ "a", "--disable=secureboot,tpm,ipe", "--ipe-kernel", "k.tar" },
+        &.{ "a", "--disable=secureboot,tpm,ipe", "--boot-key", "k.pem" },
+        &.{ "a", "--disable=secureboot" },
+        &.{ "a", "--disable=ipe", "--ipe-cert", "c.pem" },
+        &.{ "a", "--disable=tpm", "--tpm-firmware" },
     }) |args| try testing.expectError(error.Refused, buildOptions(args, .aarch64, &why));
     try testing.expectError(error.Refused, buildOptions(&.{"a"}, null, &why));
     try testing.expectEqual(

@@ -2,6 +2,8 @@
 
 A network sensor: [Suricata](https://suricata.io) 8 reading one interface and writing alerts to `/data`. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/suricata/index.html).
+
 ## Security Posture
 
 - Suricata runs as its own user and captures `eth0` with the AF_PACKET ring. It keeps `CAP_NET_RAW` and `CAP_NET_ADMIN` for that socket and promiscuous mode. It reads the rules cache: Emerging Threats Open, the engine's protocol rules, and one marker. It binds no TCP port. Its pledge has no `inet`, so it cannot fetch. A packet socket can still inject frames.

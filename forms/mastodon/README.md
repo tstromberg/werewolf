@@ -2,6 +2,8 @@
 
 [Mastodon](https://joinmastodon.org) for one server, with PostgreSQL, Valkey, and Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mastodon/index.html).
+
 ## Security Posture
 
 - Each program runs as its own user. The root is read-only. `/data` is what survives.

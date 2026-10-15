@@ -30,7 +30,7 @@ howl run
 
 Secure mode is the default for every deployer. Plain `howl run` authenticates a published
 protected image with embedded production certificates; an unpublished target fails closed.
-Production downloads currently cover playground on arm64 Lima. `howl run --build`
+Production downloads currently cover playground on x86_64 QEMU and arm64 Lima. `howl run --build`
 uses local signing credentials and cached source builds. Existing locally signed VMs retain
 their trust and use `--build`; use a new machine name for production trust.
 Cloud deployment currently requires an explicit opt-out:
@@ -42,7 +42,8 @@ howl create web --on gcp --with python-app --app ./myapp
 Tutorials: [Python](examples/python/README.md), [PHP](examples/php/README.md),
 [Node.js](examples/nodejs/README.md), [Go](examples/go/README.md),
 [Rust](examples/rust/README.md), [ASP.NET Core](examples/aspnet/README.md).
-Prebuilt images are on the [releases page](https://github.com/werewolf-linux/werewolf/releases).
+See [image availability and downloads](docs/forms-catalog.md#images-and-downloads)
+for published forms, verification and deployment instructions.
 
 ## Choose a form and host
 
@@ -51,6 +52,20 @@ A **form** declares the software and permissions of a VM. Browse the
 web servers, databases, self-hosted applications, language runtimes and examples.
 Start with [Caddy](forms/caddy/README.md), [PostgreSQL](forms/postgresql/README.md),
 an [SSH bastion](forms/bastion/README.md), or [build your own](docs/forms.md).
+
+Browse, inspect and test from the checkout:
+
+```sh
+howl forms
+howl forms database
+howl forms caddy
+howl run --build --with caddy
+howl test --with caddy
+```
+
+`howl forms --published` checks the signed image catalog for current qcow2
+downloads. `howl forms NAME` links to the setup guide and configuration flags;
+many services need credentials before they can start.
 
 ## Secure Boot
 

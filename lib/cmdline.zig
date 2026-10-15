@@ -18,6 +18,49 @@ pub const Slot = enum {
 
 pub const Seal = enum { enforce, learn };
 
+/// Protection is one of werewolf's protections a machine can be made
+/// without: howl's --disable gives them up, and werewolf.disable names those
+/// a machine lacks.
+pub const Protection = enum { secureboot, tpm, ipe };
+
+pub const Protections = std.EnumSet(Protection);
+
+/// protections parses NAME[,NAME...], each a Protection, none twice, or
+/// returns null.
+pub fn protections(text: []const u8) ?Protections {
+    var set: Protections = .empty;
+    var it = std.mem.splitScalar(u8, text, ',');
+    while (it.next()) |name| {
+        const p = std.meta.stringToEnum(Protection, name) orelse return null;
+        if (set.contains(p)) return null;
+        set.insert(p);
+    }
+    return set;
+}
+
+/// writeProtections writes the names in set, in a fixed order, sep between.
+pub fn writeProtections(w: *std.Io.Writer, set: Protections, sep: []const u8) !void {
+    var first = true;
+    for (std.enums.values(Protection)) |p| if (set.contains(p)) {
+        if (!first) try w.writeAll(sep);
+        try w.writeAll(@tagName(p));
+        first = false;
+    };
+}
+
+test protections {
+    const t = std.testing;
+    const all = protections("secureboot,tpm,ipe").?;
+    try t.expect(all.eql(.full));
+    try t.expect(protections("ipe,tpm").?.eql(.initMany(&.{ .tpm, .ipe })));
+    for ([_][]const u8{ "", "ipe,", "ipe,ipe", "IPE", "landlock", "secureboot tpm" }) |bad|
+        try t.expectEqual(null, protections(bad));
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeProtections(&w, protections("ipe,secureboot,tpm").?, ", ");
+    try t.expectEqualStrings("secureboot, tpm, ipe", w.buffered());
+}
+
 /// Cmdline holds each werewolf.NAME word in the field NAME.
 pub const Cmdline = struct {
     ip: []const u8 = "",
@@ -38,8 +81,9 @@ pub const Cmdline = struct {
     /// native selects the slot from the signed UKI's canonical firmware path.
     native: bool = false,
     secure: bool = false,
-    /// insecure marks a machine built or started with --insecure (no IPE/TPM).
-    insecure: bool = false,
+    /// disable names the protections the machine was made without (howl's
+    /// --disable), less any its provider supplies regardless.
+    disable: Protections = .empty,
     /// bootstrap is a rootless enrollment boot; stage0 must never hand it over.
     bootstrap: bool = false,
     /// recovery is a separate signed bootstrap; never inferred from TPM state.
@@ -57,14 +101,20 @@ test "TPM enforcement requires sealed secure native identity and rejects overrid
         "werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000";
     const release = " werewolf.release=" ++ @as([64]u8, @splat('a'));
     try t.expect(parse(native ++ " werewolf.tpm=2" ++ release, &f).?.tpm);
-    try t.expect(parse("werewolf.insecure=1", &f).?.insecure);
+    try t.expect(parse("werewolf.disable=secureboot,tpm,ipe", &f).?.disable.eql(.full));
+    // Signed native boot without the TPM or IPE, as QEMU makes one.
+    try t.expect(parse(native ++ " werewolf.disable=tpm,ipe", &f).?.secure);
     for ([_][]const u8{
         native ++ " werewolf.tpm=2",
         native ++ release,
         native ++ " werewolf.tpm=1" ++ release,
         native ++ " werewolf.tpm=2" ++ release ++ release,
-        native ++ " werewolf.tpm=2" ++ release ++ " werewolf.insecure=1",
-        "werewolf.insecure=0",
+        native ++ " werewolf.tpm=2" ++ release ++ " werewolf.disable=tpm,ipe",
+        native ++ " werewolf.disable=secureboot,tpm",
+        "werewolf.disable=secureboot",
+        "werewolf.disable=ipe,ipe",
+        "werewolf.disable=landlock",
+        "werewolf.disable=1",
         "werewolf.tpm=2" ++ release,
     }) |bad| try t.expect(parse(bad, &f) == null);
 }
@@ -110,7 +160,8 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .check => c.check = if (isOne(v)) true else return refuse(f, "not 1"),
             .native => c.native = if (isOne(v)) true else return refuse(f, "not 1"),
             .secure => c.secure = if (isOne(v)) true else return refuse(f, "not 1"),
-            .insecure => c.insecure = if (isOne(v)) true else return refuse(f, "not 1"),
+            .disable => c.disable = protections(v) orelse
+                return refuse(f, "not secureboot, tpm or ipe, comma-separated, each once"),
             .bootstrap => c.bootstrap = if (isOne(v)) true else return refuse(f, "not 1"),
             .recovery => c.recovery = if (isOne(v)) true else return refuse(f, "not 1"),
             .tpm => c.tpm = if (std.mem.eql(u8, v, "2"))
@@ -154,9 +205,15 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
         f.word = "werewolf.tpm";
         return refuse(f, "requires secure native boot and an exact release identity");
     }
-    if (c.insecure and (c.bootstrap or c.recovery or c.tpm)) {
-        f.word = "werewolf.insecure";
-        return refuse(f, "conflicts with protected boot");
+    // What a machine lacks cannot also be what it booted with; and the TPM's
+    // record means something only while signed boot code enforces it.
+    if ((c.disable.contains(.secureboot) and c.secure) or (c.disable.contains(.tpm) and c.tpm)) {
+        f.word = "werewolf.disable";
+        return refuse(f, "names a protection this boot has");
+    }
+    if (c.disable.contains(.secureboot) and !c.disable.contains(.tpm)) {
+        f.word = "werewolf.disable";
+        return refuse(f, "secureboot without tpm: unsigned boot code would ignore the TPM");
     }
     if (!c.native and (c.slots == null) != (c.slot == null)) {
         f.word = "werewolf.slots";

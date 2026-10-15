@@ -620,6 +620,29 @@ pub fn isName(s: []const u8) bool {
     return true;
 }
 
+/// isImageRef reports whether s names an image, REPO[:TAG][@sha256:HEX]:
+/// letters, digits and ._:/@- after a letter or digit, so it is one
+/// argument to crane and never one of its flags.
+pub fn isImageRef(s: []const u8) bool {
+    if (s.len == 0 or s.len > 512 or !std.ascii.isAlphanumeric(s[0])) return false;
+    for (s) |c| if (!std.ascii.isAlphanumeric(c) and mem.findScalar(u8, "._:/@-", c) == null)
+        return false;
+    return true;
+}
+
+test isImageRef {
+    for ([_][]const u8{ "nginx", "ghcr.io/x/y:1.2", "r/a@sha256:ab", "localhost:5000/a" }) |ok|
+        try testing.expect(isImageRef(ok));
+    for ([_][]const u8{
+        "",
+        "-x",
+        "a b",
+        "/etc",
+        "a;b",
+        "a\tb",
+    }) |bad| try testing.expect(!isImageRef(bad));
+}
+
 /// load reads the form ref names: forms/REF, or, when ref holds a slash,
 /// the form in that directory, named after it. It checks every form.yaml key.
 pub fn load(io: Io, gpa: Allocator, root: Dir, ref: []const u8, f: *Failure) Error!Form {
@@ -795,8 +818,7 @@ pub fn loadIn(
                     "{s}: services: {s}: {s} is a value or a list of values",
                     .{ path, s.key, d.key },
                 );
-                if (s.value.get("image")) |img| if (img != .scalar or img.scalar.text.len == 0 or
-                    mem.findAny(u8, img.scalar.text, " \t") != null)
+                if (s.value.get("image")) |img| if (img != .scalar or !isImageRef(img.scalar.text))
                     return f.fail(
                         gpa,
                         "{s}: services: {s}: image is one reference, REPO[:TAG][@sha256:...]",
@@ -1450,6 +1472,15 @@ fn render(
             else
                 try out.print(gpa, " {s}", .{a});
         }
+        // The image's working directory is the image's word too: one
+        // absolute path of plain bytes, or it would add lines of its own.
+        for (rec.workdir) |c| if (c <= ' ' or c >= 0x7f or c == '"') return f.fail(
+            gpa,
+            "{s}: the working directory holds a space, a quote or a control character",
+            .{path},
+        );
+        if (rec.workdir.len > 0 and rec.workdir[0] != '/')
+            return f.fail(gpa, "{s}: the working directory is not absolute", .{path});
         try out.print(gpa, "\ndir {s}\nuser {s}\npledge {s}\nmemory {s}\n", .{
             scalarOf(spec, "dir") orelse (if (rec.workdir.len > 0) rec.workdir else "/data"),
             try imageUser(gpa, name),
@@ -2031,6 +2062,46 @@ test "services in form.yaml: rendered as leash reads them, their network fence's
         services(io, gpa, tmp.dir, try chain(io, gpa, tmp.dir, "site", &f), &f),
     );
     try testing.expect(mem.indexOf(u8, f.text, "say it once") != null);
+}
+
+test "an image's working directory is one plain absolute path, never more lines" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    const io = testing.io;
+    try tmp.dir.createDirPath(io, "forms/site/rootfs/usr/share/werewolf/images");
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "forms/site/form.yaml",
+        .data = "services:\n  web:\n    image: ghcr.io/x/web:1\n    listen: [tcp/8080]\n",
+    });
+    const digest = "@sha256:abababababababababababababababababababababababababababababababab";
+    for ([_]struct { []const u8, ?[]const u8 }{
+        .{ "/app", null },
+        .{ "", null },
+        .{ "/app\\nconnect any", "control character" },
+        .{ "/app two", "space" },
+        .{ "app", "not absolute" },
+    }) |case| {
+        try tmp.dir.writeFile(io, .{
+            .sub_path = "forms/site/rootfs/usr/share/werewolf/images/web.json",
+            .data = try gpa.print(
+                "{{\"image\":\"ghcr.io/x/web{s}\",\"argv\":[\"/app/web\"],\"workdir\":\"{s}\"}}",
+                .{ digest, case[0] },
+            ),
+        });
+        var f: Failure = .{};
+        const forms = try chain(io, gpa, tmp.dir, "site", &f);
+        if (case[1]) |said| {
+            try testing.expectError(error.Form, services(io, gpa, tmp.dir, forms, &f));
+            try testing.expect(mem.indexOf(u8, f.text, said) != null);
+        } else {
+            const got = try services(io, gpa, tmp.dir, forms, &f);
+            const want = try gpa.print("\ndir {s}\n", .{if (case[0].len > 0) case[0] else "/data"});
+            try testing.expect(mem.indexOf(u8, got[0].text, want) != null);
+        }
+    }
 }
 
 test "users: the top manifest's people, keys checked, a config file a key a line" {

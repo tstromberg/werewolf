@@ -2,6 +2,8 @@
 
 A [Minecraft](https://www.minecraft.net/en-us/download/server) Java server: 26.3, with the people you name on the whitelist. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/minecraft/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and the one port its manifest names. The root is read-only. The world is on `/data`.

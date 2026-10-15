@@ -2,6 +2,8 @@
 
 [supercronic](https://github.com/aptible/supercronic) runs one service's jobs. A form takes it with `with: [cron]` or `base: cron` and lays a crontab over `etc/cron/crontab`. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/cron/index.html).
+
 ## Security Posture
 
 - supercronic runs as its own user, on a 64 MiB leash, with no listener.

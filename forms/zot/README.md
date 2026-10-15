@@ -2,6 +2,8 @@
 
 A registry for your own container images: [zot](https://zotregistry.dev) 2.1, behind Caddy. Everyone who is named can pull. Only the users you list can push or delete. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/zot/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

@@ -1,0 +1,444 @@
+#!/usr/bin/env python3
+"""Exercise per-form publication gates, immutable storage and recovery without network."""
+import copy
+import datetime
+import hashlib
+import importlib.machinery
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path('release').resolve()))
+import image_catalog as catalog
+import image_notes as notes
+
+images = importlib.machinery.SourceFileLoader('form_images_under_test', 'release/form-images').load_module()
+
+
+class Images(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temporary = tempfile.TemporaryDirectory(prefix='ww-form-trust-')
+        cls.trust = Path(cls.temporary.name)
+        cls.key, cls.cert = cls.trust / 'key', cls.trust / 'cert'
+        subprocess.run(['openssl', 'req', '-newkey', 'rsa:2048', '-nodes', '-x509', '-sha256', '-days', '2',
+                        '-subj', '/CN=form-image-tests', '-keyout', cls.key, '-out', cls.cert],
+                       check=True, capture_output=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='ww-form-images-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.assets = self.root / 'candidate'
+        self.assets.mkdir()
+        self.store = catalog.Store(self.root / 'store')
+        self.run = 'https://github.com/werewolf-linux/werewolf/actions/runs/123'
+        self.candidate = self.make_candidate()
+        self.report = dict(format='werewolf-form-tests/1', form='caddy', arch='x86_64', inputs='a' * 64,
+                           candidate=catalog.sha(self.assets / 'candidate.json'),
+                           checks={name: True for name in catalog.CHECKS})
+
+    def make_candidate(self):
+        for name in catalog.ASSETS - {'boot.crt', 'latest.json', 'latest.json.sig'}:
+            (self.assets / name).write_bytes(('fixture ' + name).encode())
+        shutil.copyfile(self.cert, self.assets / 'boot.crt')
+        self.inventory = dict(format=notes.FORMAT, form='caddy', arch='x86_64', packages=[
+            dict(scope='runtime', name='caddy', version='2.10.0-r0', checksum='a' * 64),
+            dict(scope='runtime', name='removed', version='1-r0', checksum='b' * 64),
+            dict(scope='runtime', name='rebuilt', version='1-r0', checksum='c' * 64),
+            dict(scope='local', name='local-package', version='1-r0', checksum='d' * 64),
+            dict(scope='build:kernel', name='gcc', version='15-r0', checksum='e' * 64),
+        ], images=[dict(form='caddy', service='web', ref='example.test/web:latest',
+                        digest='example.test/web@sha256:' + 'f' * 64)])
+        (self.assets / 'packages.json').write_bytes(catalog.encode(self.inventory))
+        serial = '20261015T120000Z'
+        slot = dict(format='werewolf-image/1', ipe=True, channel=catalog.PUBLIC + '/caddy',
+                    arch='x86_64', serial=serial, boot_context=None,
+                    files={n: catalog.record(self.assets / n) for n in
+                           ('vmlinuz', 'root.erofs', 'stage0.zst', 'cmdline', 'uki.efi')})
+        build = hashlib.sha256()
+        for name, entry in slot['files'].items():
+            build.update(('%s %s %d\n' % (name, entry['sha256'], entry['size'])).encode())
+        slot['build'] = build.hexdigest()
+        raw = catalog.encode(slot)
+        (self.assets / 'latest.json').write_bytes(raw)
+        (self.assets / 'latest.json.sig').write_bytes(catalog.sign(raw, self.key))
+        candidate = dict(format='werewolf-form-image/1', profile='uefi-ipe/1', form='caddy', arch='x86_64',
+                         serial=serial, inputs='a' * 64, commit='b' * 40,
+                         files={n: catalog.record(self.assets / n) for n in catalog.ASSETS})
+        (self.assets / 'candidate.json').write_bytes(catalog.encode(candidate))
+        return candidate
+
+    def publish(self, report=None, store=None):
+        return catalog.publish(self.assets, report or self.report, store or self.store,
+                               self.key, self.cert, self.run)
+
+    def advance(self, inventory):
+        self.inventory = inventory
+        (self.assets / 'packages.json').write_bytes(catalog.encode(inventory))
+        slot = json.loads((self.assets / 'latest.json').read_text())
+        slot['serial'] = (catalog.serial(slot['serial']) + datetime.timedelta(seconds=1)).strftime('%Y%m%dT%H%M%SZ')
+        raw = catalog.encode(slot)
+        (self.assets / 'latest.json').write_bytes(raw)
+        (self.assets / 'latest.json.sig').write_bytes(catalog.sign(raw, self.key))
+        self.candidate = dict(self.candidate, serial=slot['serial'],
+                              files={n: catalog.record(self.assets / n) for n in catalog.ASSETS})
+        (self.assets / 'candidate.json').write_bytes(catalog.encode(self.candidate))
+        self.report['candidate'] = catalog.sha(self.assets / 'candidate.json')
+
+    def test_publication_authenticates_heads_and_keeps_complete_immutable_assets(self):
+        manifest = self.publish()
+        current = self.root / 'store/caddy/x86_64/current.json'
+        self.assertEqual(manifest, catalog.open_head(current.read_bytes(), self.cert, 'caddy', 'x86_64'))
+        objects = self.root / 'store' / manifest['object']
+        self.assertEqual(catalog.ASSETS | catalog.RELEASE_ASSETS | {'downloads.json', 'downloads.json.sig'},
+                         {p.name for p in objects.iterdir()})
+        for name, expected in manifest['files'].items():
+            self.assertEqual(expected, catalog.record(objects / name))
+        catalog.verify_signature((objects / 'downloads.json').read_bytes(),
+                                 (objects / 'downloads.json.sig').read_bytes(), self.cert)
+        release = json.loads((objects / 'release-notes.json').read_text())
+        self.assertIsNone(release['previous'])
+        self.assertTrue(all(p['kind'] == 'added' and p['before'] is None for p in release['packages']))
+        self.assertIn('Initial published image', (objects / 'release-notes.html').read_text())
+
+    def test_release_notes_compare_packages_with_the_last_passing_release(self):
+        previous = self.publish()
+        inventory = copy.deepcopy(self.inventory)
+        inventory['packages'][0].update(version='2.11.0-r0', checksum='1' * 64)
+        inventory['packages'].pop(1)
+        inventory['packages'][1]['checksum'] = '2' * 64
+        inventory['packages'][2].update(version='2-r0', checksum='3' * 64)
+        inventory['packages'][3].update(version='16-r0', checksum='4' * 64)
+        inventory['packages'].append(dict(scope='runtime', name='added', version='1-r0', checksum='5' * 64))
+        inventory['images'][0]['digest'] = 'example.test/web@sha256:' + '6' * 64
+        self.advance(inventory)
+        failed = copy.deepcopy(self.report)
+        failed['checks']['integration'] = False
+        with self.assertRaises(ValueError):
+            self.publish(failed)
+        self.assertEqual(previous, catalog.open_head((self.root / 'store/caddy/x86_64/current.json').read_bytes(),
+                                                   self.cert, 'caddy', 'x86_64'))
+        manifest = self.publish()
+        objects = self.root / 'store' / manifest['object']
+        release = json.loads((objects / 'release-notes.json').read_text())
+        changes = {p['name']: p for p in release['packages']}
+        self.assertEqual({k: previous[k] for k in ('serial', 'commit', 'object')}, release['previous'])
+        self.assertEqual('updated', changes['caddy']['kind'])
+        self.assertEqual('2.10.0-r0', changes['caddy']['before']['version'])
+        self.assertEqual('2.11.0-r0', changes['caddy']['after']['version'])
+        self.assertEqual('rebuilt', changes['rebuilt']['kind'])
+        self.assertEqual('removed', changes['removed']['kind'])
+        self.assertEqual('added', changes['added']['kind'])
+        self.assertEqual('local', changes['local-package']['scope'])
+        self.assertEqual('build:kernel', changes['gcc']['scope'])
+        self.assertEqual('updated', release['images'][0]['kind'])
+        page = (objects / 'release-notes.html').read_text()
+        self.assertIn('href="../' + previous['object'].split('/')[-1] + '/release-notes.html"', page)
+        self.assertIn('release-notes.html', catalog.page([dict(form='caddy', arch='x86_64', status='published', latest=manifest)]))
+
+    def test_previous_inventory_must_match_its_signed_digest(self):
+        previous = self.publish()
+        inventory = copy.deepcopy(self.inventory)
+        self.advance(inventory)
+        before = (self.root / 'store/caddy/x86_64/current.json').read_bytes()
+        package_file = self.root / 'store' / previous['object'] / 'packages.json'
+        package_file.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'previous release package inventory'):
+            self.publish()
+        package_file.unlink()
+        with self.assertRaisesRegex(ValueError, 'previous release package inventory'):
+            self.publish()
+        self.assertEqual(before, (self.root / 'store/caddy/x86_64/current.json').read_bytes())
+
+    def test_source_only_rebuild_has_no_invented_package_changes(self):
+        previous = self.publish()
+        self.advance(copy.deepcopy(self.inventory))
+        self.candidate['commit'] = 'c' * 40
+        (self.assets / 'candidate.json').write_bytes(catalog.encode(self.candidate))
+        self.report['candidate'] = catalog.sha(self.assets / 'candidate.json')
+        manifest = self.publish()
+        objects = self.root / 'store' / manifest['object']
+        release = json.loads((objects / 'release-notes.json').read_text())
+        self.assertEqual([], release['packages'])
+        self.assertEqual([], release['images'])
+        self.assertEqual(notes.page(release), notes.page(copy.deepcopy(release)))
+        self.assertIn('No resolved package or OCI image changes', notes.page(release))
+        self.assertIn('/compare/' + previous['commit'] + '...' + self.candidate['commit'], notes.page(release))
+
+    def test_release_notes_inventory_identity_and_duplicates_are_refused(self):
+        for inventory in [dict(self.inventory, form='nginx'), dict(self.inventory, arch='aarch64'),
+                          dict(self.inventory, packages=self.inventory['packages'] * 2)]:
+            with self.assertRaises(ValueError):
+                notes.release(self.candidate, inventory)
+        previous = self.publish()
+        with self.assertRaises(ValueError):
+            notes.release(self.candidate, self.inventory, previous)
+
+    def test_candidate_inventory_identity_is_checked_even_when_hashes_match(self):
+        for inventory in [dict(self.inventory, form='nginx'), dict(self.inventory, arch='aarch64'),
+                          dict(self.inventory, packages=self.inventory['packages'] * 2)]:
+            (self.assets / 'packages.json').write_bytes(catalog.encode(inventory))
+            self.candidate['files']['packages.json'] = catalog.record(self.assets / 'packages.json')
+            (self.assets / 'candidate.json').write_bytes(catalog.encode(self.candidate))
+            self.report['candidate'] = catalog.sha(self.assets / 'candidate.json')
+            with self.assertRaises(ValueError):
+                self.publish()
+        self.assertFalse((self.root / 'store').exists())
+
+    def test_release_notes_escape_package_and_image_text(self):
+        inventory = copy.deepcopy(self.inventory)
+        inventory['packages'][0].update(name='<script>', version='<img>')
+        inventory['images'][0]['digest'] = '<script>@sha256:' + 'f' * 64
+        page = notes.page(notes.release(self.candidate, inventory))
+        self.assertNotIn('<script>', page)
+        self.assertNotIn('<img>', page)
+        self.assertIn('&lt;script&gt;', page)
+
+    def test_inventory_uses_only_target_packages_and_stable_content_identities(self):
+        snapshot = self.root / 'snapshot/caddy'
+        snapshot.mkdir(parents=True)
+
+        def package(name, arch='x86_64', version='1-r0'):
+            return dict(name=name, architecture=arch, version=version, checksum='Q1test',
+                        data=dict(range='bytes=1-100', checksum='sha256-test'), url='https://example.test/' + name)
+
+        runtime = [package('caddy'), package('other-architecture', arch='aarch64')]
+        images.write(snapshot / 'caddy.lock.json', dict(contents=dict(packages=runtime), werewolf=dict(images=[])))
+        images.write(snapshot / 'caddy-dev.lock.json', dict(contents=dict(packages=[*runtime, package('busybox')])))
+        images.write(snapshot.parent / 'kernel.lock.json', dict(contents=dict(packages=[package('linux-virt')])))
+        images.write(snapshot.parent / 'kernel-builder.lock.json', dict(contents=dict(packages=[package('gcc')])))
+        images.write(snapshot / 'melange-local.lock.json', dict(contents=dict(packages=[package('cargo')])))
+        images.write(snapshot / 'melange.json', {'forms/caddy/melange/local.yaml': 'melange-local.lock.json'})
+        local = [dict(name='local', version='2-r0', checksum='c' * 64)]
+        first = notes.inventory(snapshot, 'caddy', 'x86_64', local)
+        self.assertEqual({'runtime': ['caddy'], 'test': ['busybox'], 'kernel': ['linux-virt'],
+                          'build:kernel': ['gcc'], 'build:forms/caddy/melange/local.yaml': ['cargo'], 'local': ['local']},
+                         {scope: [p['name'] for p in first['packages'] if p['scope'] == scope]
+                          for scope in {p['scope'] for p in first['packages']}})
+        for path in snapshot.parent.rglob('*.lock.json'):
+            lock = json.loads(path.read_text())
+            lock['contents']['packages'].reverse()
+            for p in lock['contents']['packages']:
+                p.update(url='https://mirror.test/' + p['name'])
+                p['data']['range'] = 'bytes=10-200'
+            images.write(path, lock)
+        self.assertEqual(first, notes.inventory(snapshot, 'caddy', 'x86_64', local))
+
+    def test_local_inventory_reads_main_and_subpackage_payload_identities(self):
+        snapshot = self.root / 'snapshot'
+        snapshot.mkdir()
+        images.write(snapshot / 'melange.json', {'forms/example/melange/package.yaml': 'example.lock.json'})
+        package_dir = self.root / 'packages'
+        (package_dir / 'x86_64').mkdir(parents=True)
+
+        def apk(name, digest, arch='x86_64'):
+            metadata = ('pkgname = %s\npkgver = 2-r1\narch = %s\ndatahash = %s\n' %
+                        (name, arch, digest)).encode()
+            with tarfile.open(package_dir / 'x86_64' / (name + '-2-r1.apk'), 'w:gz') as archive:
+                member = tarfile.TarInfo('.PKGINFO')
+                member.size = len(metadata)
+                archive.addfile(member, io.BytesIO(metadata))
+
+        apk('example', 'a' * 64)
+        apk('example-web', 'b' * 64)
+        check_output = subprocess.check_output
+
+        def query(args, **kwargs):
+            if args[0] == 'melange':
+                return 'example-2-r1 example-web-2-r1\n'
+            return check_output(args, **kwargs)
+
+        with patch.object(images.subprocess, 'check_output', side_effect=query):
+            self.assertEqual([dict(name='example', version='2-r1', checksum='a' * 64),
+                              dict(name='example-web', version='2-r1', checksum='b' * 64)],
+                             images.local_packages(snapshot, 'x86_64', package_dir))
+            apk('example-web', 'c' * 64, arch='aarch64')
+            with self.assertRaisesRegex(ValueError, 'wrong architecture'):
+                images.local_packages(snapshot, 'x86_64', package_dir)
+
+    def test_failed_missing_nonboolean_and_foreign_form_tests_never_publish(self):
+        for check in catalog.CHECKS:
+            for value in (False, 1, 'true', None):
+                report = copy.deepcopy(self.report)
+                report['checks'][check] = value
+                with self.assertRaises(ValueError):
+                    self.publish(report)
+        for field, value in [('form', 'nginx'), ('arch', 'aarch64'), ('inputs', 'c' * 64), ('candidate', 'd' * 64)]:
+            with self.assertRaises(ValueError):
+                self.publish(dict(self.report, **{field: value}))
+        report = copy.deepcopy(self.report)
+        report['checks'].pop('integration')
+        with self.assertRaises(ValueError):
+            self.publish(report)
+        self.assertFalse((self.root / 'store').exists())
+
+    def test_modified_assets_signatures_and_extra_files_are_refused(self):
+        for name in ('disk.qcow2', 'latest.json.sig', 'root.erofs', 'packages.json'):
+            path = self.assets / name
+            raw = path.read_bytes()
+            path.write_bytes(raw + b'tamper')
+            with self.assertRaises(ValueError):
+                self.publish()
+            path.write_bytes(raw)
+        (self.assets / 'private.key').write_text('never upload arbitrary files')
+        with self.assertRaises(ValueError):
+            self.publish()
+        self.assertFalse((self.root / 'store').exists())
+
+    def test_head_signature_and_identity_are_checked_before_use(self):
+        manifest = self.publish()
+        raw = catalog.envelope(manifest, self.key)
+        for form, arch in [('nginx', 'x86_64'), ('caddy', 'aarch64')]:
+            with self.assertRaises(ValueError):
+                catalog.open_head(raw, self.cert, form, arch)
+        changed = json.loads(raw)
+        changed['manifest'] = changed['manifest'].replace('caddy', 'nginx')
+        with self.assertRaises(subprocess.CalledProcessError):
+            catalog.open_head(catalog.encode(changed), self.cert, 'nginx', 'x86_64')
+
+    def test_immutable_collision_leaves_existing_head_unchanged(self):
+        manifest = self.publish()
+        head = self.root / 'store/caddy/x86_64/current.json'
+        before = head.read_bytes()
+        # Exercise immutable collision independently; an equal serial is an
+        # idempotent retry and never rewrites the immutable object tree.
+        target = self.root / 'store' / manifest['object'] / 'disk.qcow2'
+        target.write_bytes(b'foreign bytes')
+        with self.assertRaisesRegex(ValueError, 'collision'):
+            self.store.immutable(manifest['object'] + '/disk.qcow2', self.assets / 'disk.qcow2', self.root / 'existing')
+        self.assertEqual(before, head.read_bytes())
+
+    def test_interrupted_update_head_is_repaired_at_the_accepted_floor(self):
+        original = self.store.upload
+
+        def fail_signature(key, path, immutable=False):
+            if key == 'caddy/x86_64/latest.json.sig':
+                raise OSError('power cut')
+            original(key, path, immutable)
+
+        with patch.object(self.store, 'upload', side_effect=fail_signature):
+            with self.assertRaises(OSError):
+                self.publish()
+        head = self.root / 'store/caddy/x86_64/current.json'
+        accepted = head.read_bytes()
+        manifest = self.publish()
+        objects = self.root / 'store' / manifest['object']
+        before_notes = (objects / 'release-notes.json').read_bytes()
+        self.publish()
+        self.assertEqual(before_notes, (objects / 'release-notes.json').read_bytes())
+        self.assertEqual(accepted, head.read_bytes())
+        for name in ('latest.json', 'latest.json.sig'):
+            self.assertEqual((self.assets / name).read_bytes(),
+                             (self.root / 'store/caddy/x86_64' / name).read_bytes())
+        self.assertEqual(self.candidate['serial'], manifest['serial'])
+
+    def test_missing_update_head_cannot_be_an_unchanged_snapshot(self):
+        manifest = self.publish()
+        head = catalog.envelope(manifest, self.key)
+        with patch.object(catalog.urllib.request, 'urlopen', side_effect=[io.BytesIO(head), io.BytesIO(b'wrong head')]):
+            self.assertIsNone(catalog.read_public('caddy', 'x86_64', self.cert))
+        with patch.object(catalog.urllib.request, 'urlopen', side_effect=[io.BytesIO(head),
+                io.BytesIO((self.assets / 'latest.json').read_bytes()),
+                io.BytesIO((self.assets / 'latest.json.sig').read_bytes())]):
+            self.assertEqual(manifest, catalog.read_public('caddy', 'x86_64', self.cert))
+
+    def test_public_https_verification_rejects_wrong_or_oversized_streams(self):
+        expected = catalog.record(self.assets / 'disk.qcow2')
+        with patch.object(catalog.urllib.request, 'urlopen', return_value=io.BytesIO(b'wrong')):
+            with self.assertRaises(ValueError):
+                catalog.verify_public('image', expected)
+        with patch.object(catalog.urllib.request, 'urlopen', return_value=io.BytesIO(b'x' * (expected['size'] + 1))):
+            with self.assertRaises(ValueError):
+                catalog.verify_public('image', expected)
+
+    def test_browse_page_preserves_previous_passing_image_and_escapes_text(self):
+        manifest = self.publish()
+        page = catalog.page([dict(form='caddy', arch='x86_64', status='tests failed <script>',
+                                  summary='A <server>', latest=manifest)])
+        self.assertIn(manifest['object'] + '/disk.qcow2', page)
+        self.assertIn('tests failed &lt;script&gt;', page)
+        self.assertIn('A &lt;server&gt;', page)
+        self.assertNotIn('<script>', page)
+        self.assertIn('caddy/index.html', page)
+
+    def test_descriptions_use_existing_guides(self):
+        descriptions = catalog.descriptions()
+        self.assertIn('web server', descriptions['caddy']['summary'])
+        self.assertTrue(descriptions['caddy']['guide'].endswith('/forms/caddy/README.md'))
+
+    def test_nonmatching_builds_fail_before_booting_or_writing_evidence(self):
+        second = self.root / 'second'
+        shutil.copytree(self.assets, second)
+        (second / 'root.erofs').write_bytes(b'different output')
+        with patch.object(images, 'run') as run:
+            with self.assertRaises(ValueError):
+                images.check_one(self.candidate, self.root / 'snapshot', self.assets, second, self.root / 'verified')
+            run.assert_not_called()
+        self.assertFalse((self.root / 'verified').exists())
+
+    def test_older_or_reused_serial_cannot_replace_a_release(self):
+        manifest = self.publish()
+        path = self.assets / 'candidate.json'
+        candidate = json.loads(path.read_text())
+        candidate['inputs'] = 'c' * 64
+        path.write_bytes(catalog.encode(candidate))
+        report = dict(self.report, inputs='c' * 64, candidate=catalog.sha(path))
+        with self.assertRaisesRegex(ValueError, 'serial reused'):
+            self.publish(report)
+        self.assertEqual(manifest, catalog.open_head(
+            (self.root / 'store/caddy/x86_64/current.json').read_bytes(), self.cert, 'caddy', 'x86_64'))
+
+    def test_a_successful_form_can_publish_while_another_form_fails(self):
+        snapshots, verified = self.root / 'snapshots', self.root / 'verified'
+        plan = dict(arch='x86_64', shard=1, targets=[dict(self.candidate, status='build'),
+                    dict(form='nginx', arch='x86_64', status='resolution failed')])
+        images.write(snapshots / 'inputs-x86_64-1/plan.json', plan)
+        destination = verified / 'verified-x86_64-1'
+        shutil.copytree(self.assets, destination / 'caddy')
+        images.write(destination / 'caddy-tests.json', self.report)
+        images.write(destination / 'results.json', [dict(self.candidate, status='passed')])
+        actual = catalog.publish
+
+        def publish(directory, report, store, key, certificate, run):
+            return actual(directory, report, store, key, self.cert, run)
+
+        open_head = catalog.open_head
+        with patch.dict(os.environ, WEREWOLF_BOOT_KEY=str(self.key), GITHUB_RUN_ID='123', GITHUB_SHA='b' * 40,
+                        GITHUB_REPOSITORY='werewolf-linux/werewolf', GITHUB_STEP_SUMMARY=str(self.root / 'summary')), \
+                patch.object(images, 'forms', return_value=['caddy', 'nginx']), \
+                patch.object(images, 'query', return_value=['aarch64', 'x86_64']), \
+                patch.object(catalog, 'publish', side_effect=publish), \
+                patch.object(catalog, 'open_head', side_effect=lambda raw, _, form, arch: open_head(raw, self.cert, form, arch)):
+            self.assertTrue(images.publish(snapshots, verified, self.store))
+        raw = json.loads((self.root / 'store/index.json').read_text())
+        catalog.verify_signature(raw['manifest'].encode(), bytes.fromhex(raw['signature']), self.cert)
+        rows = json.loads(raw['manifest'])['forms']
+        published = next(row for row in rows if row['form'] == 'caddy' and row['arch'] == 'x86_64')
+        self.assertEqual('published', published['status'])
+        self.assertIn('latest', published)
+        self.assertEqual(4, len(rows))
+        self.assertTrue((self.root / 'store/caddy/index.html').exists())
+        self.assertTrue((self.root / 'store/nginx/index.html').exists())
+        self.assertFalse((self.root / 'store/nginx/x86_64/current.json').exists())
+        summary = (self.root / 'summary').read_text()
+        self.assertIn('/release-notes.html)', summary)
+        self.assertIn('| caddy | x86_64 | published |', summary)
+        self.assertIn('| nginx | x86_64 | resolution failed | Not published |', summary)
+
+
+if __name__ == '__main__':
+    unittest.main()

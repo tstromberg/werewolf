@@ -2,6 +2,8 @@
 
 Collaborative LaTeX: [Overleaf Community Edition](https://github.com/overleaf/overleaf) 6.3, from Overleaf's own image, with MongoDB, Valkey and Caddy. The image is published for x86_64 only. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/overleaf/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

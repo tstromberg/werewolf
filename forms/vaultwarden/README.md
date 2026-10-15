@@ -2,6 +2,8 @@
 
 [Vaultwarden](https://github.com/dani-garcia/vaultwarden) is the Bitwarden-compatible server. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/vaultwarden/index.html).
+
 ## Security Posture
 
 - Vaultwarden runs as its own user. The root is read-only. The vault is on `/data`.

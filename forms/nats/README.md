@@ -2,6 +2,8 @@
 
 A message bus, with JetStream for what must be kept: [NATS](https://nats.io) 2.15. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/nats/index.html).
+
 ## Security Posture
 
 NATS runs as its own user. There is no shell. Landlock and seccomp hold it to port 4222 and to `/data/svc/nats`. The root is read-only.

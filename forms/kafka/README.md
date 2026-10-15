@@ -2,6 +2,8 @@
 
 An event stream for applications inside a company: [Apache Kafka](https://kafka.apache.org) 4.3 as one KRaft node. Clients use TLS and SCRAM-SHA-512. What no ACL allows is denied. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/kafka/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

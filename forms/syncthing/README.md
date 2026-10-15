@@ -2,6 +2,8 @@
 
 Folders kept in sync with your other devices: [Syncthing](https://syncthing.net) 2.1, from its own image, the web interface behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/syncthing/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

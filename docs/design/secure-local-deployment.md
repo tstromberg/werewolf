@@ -53,7 +53,7 @@ Public firmware and native enrollment dependencies are hash-pinned; no Ubuntu VM
 A separate temporary module signer stays in the builder and is deleted after compilation.
 Host authorities and public release objects persist beneath the machine directory.
 `--build` honors caller boot credentials; absent credentials are managed locally.
-`--dev` requires explicit `--insecure`, which selects the legacy deployment path.
+`--dev` requires `--disable=secureboot,tpm,ipe`, which selects the legacy deployment path.
 
 ### Enrollment
 

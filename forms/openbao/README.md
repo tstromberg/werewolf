@@ -2,6 +2,8 @@
 
 [OpenBao](https://openbao.org) stores secrets. You bring the TLS certificate, the unseal key, and an admin password. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/openbao/index.html).
+
 ## Security Posture
 
 - OpenBao runs as its own user. The root is read-only. Secrets live on `/data`.

@@ -2,6 +2,8 @@
 
 DNS for a home or an office that blocks ads and trackers: [Blocky](https://0xerr0r.github.io/blocky/) 0.35, from its own image. There is no web interface. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/blocky/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

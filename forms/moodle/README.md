@@ -2,6 +2,8 @@
 
 Courses for a school or a university: [Moodle](https://moodle.org) 5.3, the long-term release, with PostgreSQL and Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/moodle/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

@@ -189,6 +189,7 @@ fn daemon(io: Io) noreturn {
         0,
         0,
     );
+    keepDaemonCaps(daemon_caps) catch park(io, "cannot drop capabilities");
     // A machine that has never finished a check boots its first update at
     // once. Test "never finished", not "never logged": a first check that
     // failed before the network was up still logs.
@@ -334,6 +335,7 @@ fn updateEvery(io: Io) i64 {
 
 /// park logs why and marks the service down so runsv does not restart it.
 fn park(io: Io, why: []const u8) noreturn {
+    sandbox.keepOnly(0) catch {};
     Io.File.stdout().writeStreamingAll(io, "autoupdate: ") catch {};
     Io.File.stdout().writeStreamingAll(io, why) catch {};
     Io.File.stdout().writeStreamingAll(io, "\n") catch {};
@@ -1189,9 +1191,45 @@ fn tool(argv: [:null]const ?[*:0]const u8, out: i32, parent: linux.pid_t) noretu
     ) catch |err| sandbox.say(out, 127, sandbox.whyNot(arena.allocator(), err), "");
 }
 
+const apk_caps: u32 = (1 << linux.CAP.CHOWN) |
+    (1 << linux.CAP.DAC_OVERRIDE) |
+    (1 << linux.CAP.DAC_READ_SEARCH) |
+    (1 << linux.CAP.FOWNER) |
+    (1 << linux.CAP.FSETID);
+
+const daemon_caps: u32 = apk_caps |
+    (1 << linux.CAP.SETGID) |
+    (1 << linux.CAP.SETUID) |
+    (1 << linux.CAP.SETPCAP) |
+    (1 << linux.CAP.SYS_CHROOT);
+
+fn keepDaemonCaps(keep: u32) !void {
+    for (0..64) |cap| {
+        if (cap < 32 and keep & (@as(u32, 1) << @intCast(cap)) != 0) continue;
+        const rc = linux.prctl(@backingInt(linux.PR.CAPBSET_DROP), cap, 0, 0, 0);
+        if (linux.errno(rc) != .INVAL) _ = try sandbox.sys(rc, "capbset drop");
+    }
+    const CapHeader = extern struct { version: u32 = 0x20080522, pid: i32 = 0 };
+    const CapSets = extern struct { effective: u32 = 0, permitted: u32 = 0, inheritable: u32 = 0 };
+    var hdr: CapHeader = .{};
+    const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
+    _ = try sandbox.sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
+    _ = try sandbox.sys(
+        linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0),
+        "no_new_privs",
+    );
+}
+
 fn execTool(argv: [:null]const ?[*:0]const u8, out: i32) !noreturn {
     try sandbox.closeAllBut(&.{out});
     for ([_]i32{ 1, 2 }) |fd| _ = try sandbox.sys(linux.dup3(out, fd, 0), "dup3");
+    if (linux.geteuid() == 0) {
+        if (std.mem.eql(u8, std.mem.span(argv[0].?), "/usr/bin/apk")) {
+            try keepDaemonCaps(apk_caps);
+        } else {
+            try sandbox.keepOnly(0);
+        }
+    }
     const envp = [_:null]?[*:0]const u8{};
     _ = try sandbox.sys(linux.execve(argv[0].?, argv.ptr, &envp), "execve");
     unreachable;

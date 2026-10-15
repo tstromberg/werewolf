@@ -13,7 +13,7 @@ const usage = "usage: form names|dirs|listens|weaknesses|excuses FORM, " ++
     "list|check FORM KEY, cmdline|module-params FORM ARCH, modules FORM ARCH, " ++
     "compose FORM ARCH KNOWN ACCOUNTS RO META [dev], having KEY [VALUE], every KEY, " ++
     "apko FORM [PKG...], tree, released, format, packaged, " ++
-    "stage FORM DIR, depends FORM";
+    "stage FORM DIR, depends FORM, archs FORM";
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
@@ -108,7 +108,13 @@ fn run(io: Io, gpa: Allocator, w: *Io.Writer, args: []const []const u8, f: *form
     }
     if (args.len < 2) return error.Usage;
     const forms = try form.chain(io, gpa, root, args[1], f);
-    if (is(verb, "names") and args.len == 2) {
+    if (is(verb, "archs") and args.len == 2) {
+        var supported: []const []const u8 = &.{};
+        for (forms) |c| if (c.spec.get("archs") != null) {
+            supported = try c.items(gpa, "archs");
+        };
+        for (supported) |a| try w.print("{s}\n", .{a});
+    } else if (is(verb, "names") and args.len == 2) {
         for (forms) |c| try w.print("{s}\n", .{c.name});
     } else if (is(verb, "dirs") and args.len == 2) {
         for (forms) |c| try w.print("{s}\n", .{c.dir});

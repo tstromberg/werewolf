@@ -2,6 +2,8 @@
 
 A [Matrix](https://matrix.org) homeserver: [Continuwuity](https://continuwuity.org), behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/continuwuity/index.html).
+
 ## Security Posture
 
 - Continuwuity and Caddy run as their own users. The root is read-only.

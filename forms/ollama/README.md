@@ -2,6 +2,8 @@
 
 Models on this machine: [Ollama](https://ollama.com). The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/ollama/index.html).
+
 ## Security Posture
 
 Ollama runs as its own user. There is no shell. Landlock and seccomp hold it to port 11434, to the registry, and to `/data/svc/ollama`. The root is read-only.

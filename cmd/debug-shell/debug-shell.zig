@@ -6,6 +6,7 @@ const std = @import("std");
 const Io = std.Io;
 const linux = std.os.linux;
 const cmdline = @import("cmdline");
+const sandbox = @import("sandbox");
 
 pub fn main(init: std.process.Init) !void {
     _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
@@ -91,6 +92,7 @@ fn executable(path: [:0]const u8) bool {
 /// park logs why, if given, and runs `sv down .` so runsv does not restart
 /// the service.
 fn park(io: Io, why: ?[]const u8) noreturn {
+    sandbox.keepOnly(0) catch {};
     if (why) |w| say(io, "{s}", .{w});
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
     say(io, "sv down: {s}", .{@errorName(err)});

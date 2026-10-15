@@ -370,29 +370,9 @@ pub fn address(text: []const u8) ?[]const u8 {
         const addr = rest[0..end];
         const ip = addr[0 .. std.mem.findScalar(u8, addr, '/') orelse addr.len];
         // The guest wrote this text, so accept only a real address.
-        if (isIp4(ip)) found = ip;
+        if (howl.isIp4(ip)) found = ip;
     }
     return found;
-}
-
-/// isIp4 reports whether s is a dotted-quad IPv4 address.
-fn isIp4(s: []const u8) bool {
-    var octets = std.mem.splitScalar(u8, s, '.');
-    var n: usize = 0;
-    while (octets.next()) |o| : (n += 1) {
-        if (o.len == 0 or o.len > 3) return false;
-        for (o) |c| if (!std.ascii.isDigit(c)) return false;
-        if ((std.fmt.parseInt(u16, o, 10) catch return false) > 255) return false;
-    }
-    return n == 4;
-}
-
-test isIp4 {
-    try testing.expect(isIp4("192.168.1.40"));
-    try testing.expect(!isIp4("192.168.1"));
-    try testing.expect(!isIp4("192.168.1.256"));
-    try testing.expect(!isIp4("1.2.3.4.5"));
-    try testing.expect(!isIp4("1.2.3.\x1b[2J"));
 }
 
 const testing = std.testing;

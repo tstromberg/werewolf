@@ -2,6 +2,8 @@
 
 A database for the other services on this machine: [PostgreSQL](https://www.postgresql.org) 17, on a UNIX socket. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/postgresql/index.html).
+
 ## Security Posture
 
 The server runs as its own user, and nothing else does. There is no shell. Landlock and seccomp hold it to its socket and to `/data/svc/postgres`. The root is read-only.

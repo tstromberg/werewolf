@@ -2,6 +2,8 @@
 
 A forwarding-only SSH server. Users open TCP forwards with a security key, to destinations named in the form, and nothing else: no shell, no command, no file copy. The destination authenticates them again. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/bastion/index.html).
+
 ## Security Posture
 
 - sshd runs as its own user. There is no shell. The root is read-only.

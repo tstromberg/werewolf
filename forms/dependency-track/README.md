@@ -2,6 +2,8 @@
 
 A bill-of-materials server: [Dependency-Track](https://dependencytrack.org) 4.14, the bundled UI and API, behind Caddy, with PostgreSQL. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/dependency-track/index.html).
+
 ## Security Posture
 
 - The API listens on loopback. Caddy is what the network sees.

@@ -3,6 +3,8 @@
 [MongoDB](https://www.mongodb.com/docs/manual/) 8.0 for applications on
 the same machine. The manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mongodb/index.html).
+
 ## Security Posture
 
 - MongoDB runs as its own user, with no capabilities.

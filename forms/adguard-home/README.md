@@ -2,6 +2,8 @@
 
 DNS for a home network, with a web interface: [AdGuard Home](https://adguard.com/adguard-home.html) 0.107, from its own image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/adguard-home/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

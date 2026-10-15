@@ -168,7 +168,7 @@ try:
          '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe)], 'probe')
     for path in overlay.rglob('*'):
         path.chmod(0o755 if path.is_dir() or path == probe else 0o644)
-    # Exercise the protected default, without an explicit --secure or Lima selector.
+    # Exercise the protected default, without a Lima selector.
     create = [howl, 'create', name, '--with', form, '--build', '--yes', '--root-keys', str(private_ssh) + '.pub']
     if provider == 'qemu':
         create += ['--on', provider]
@@ -195,9 +195,9 @@ try:
             'test ! -e /usr/share/werewolf/tpm/signer.pub && '
             'test "$(wc -c < /usr/share/werewolf/tpm/vendor.sha256)" -eq 32',
             'authority-source')
-    refused = run([*create, '--insecure'], 'downgrade-refused', check=False)
-    if refused.returncode == 0 or 'cannot be downgraded' not in refused.stderr:
-        raise RuntimeError('existing enrollment accepted an insecure reconfiguration')
+    refused = run([*create, '--disable=secureboot,tpm,ipe'], 'downgrade-refused', check=False)
+    if refused.returncode == 0 or 'keeps its protections' not in refused.stderr:
+        raise RuntimeError('existing enrollment accepted --disable')
     for secret in ['boot.key', 'authority/permit.key', 'authority/tls.key',
                    'authority/credentials/owner.auth', 'authority/credentials/lockout.auth']:
         if (machine / secret).stat().st_mode & 0o777 != 0o600:

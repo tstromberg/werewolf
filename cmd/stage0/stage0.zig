@@ -8,6 +8,7 @@ const dm = @import("dm");
 const verity = @import("verity");
 const ipe = @import("ipe");
 const cmdline = @import("cmdline");
+const sandbox = @import("sandbox");
 const tpm = @import("tpm");
 const MS = linux.MS; // ziglint-ignore: Z032
 const nosymfollow = 256; // Linux MS_NOSYMFOLLOW, absent from std.os.linux.MS.
@@ -323,7 +324,21 @@ fn deadman(slot: []const u8, after: u32) void {
         return;
     }
     _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
-    _ = linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+    const keep_kmsg = linux.errno(kmsg) == .SUCCESS;
+    const kmsg_fd: i32 = if (keep_kmsg) @intCast(kmsg) else -1;
+    const kept_fds: []const i32 = if (keep_kmsg) &.{ proc_fd, kmsg_fd } else &.{proc_fd};
+    sandbox.closeAllBut(kept_fds) catch fail("cannot close deadman descriptors", .{});
+    sandbox.keepOnly(
+        (1 << linux.CAP.SYS_BOOT) | (1 << linux.CAP.SYS_PTRACE),
+    ) catch fail("cannot drop deadman capabilities", .{});
+    var f: sandbox.Filter = .{};
+    inline for (.{
+        "nanosleep", "clock_nanosleep", "restart_syscall",
+        "faccessat", "faccessat2",      "openat",
+        "write",     "close",           "reboot",
+        "exit",      "exit_group",
+    }) |name| f.allow(name);
+    f.install() catch fail("cannot confine the deadman", .{});
 
     var ts: linux.timespec = .{ .sec = after, .nsec = 0 };
     while (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) {}
@@ -342,14 +357,13 @@ fn deadman(slot: []const u8, after: u32) void {
         // The kernel prints its log to the console from another thread,
         // and sysrq's reset, unlike a panic, waits for nothing. Give the
         // console a second to say why.
-        if (linux.errno(kmsg) == .SUCCESS) {
-            _ = linux.write(@intCast(kmsg), msg.ptr, msg.len);
+        if (keep_kmsg) {
+            _ = linux.write(kmsg_fd, msg.ptr, msg.len);
             var pause: linux.timespec = .{ .sec = 1, .nsec = 0 };
             _ = linux.nanosleep(&pause, null);
         }
-        // If sysrq-trigger fails, call reboot: this process forked before
-        // the seal and keeps every capability. Exiting quietly would leave
-        // the bad slot running.
+        // If sysrq-trigger fails, call reboot: this process keeps
+        // CAP_SYS_BOOT. Exiting quietly would leave the bad slot running.
         const trig = linux.openat(
             proc_fd,
             "sysrq-trigger",

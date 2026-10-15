@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Check form-test dispatch and failure propagation without booting a VM."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+howl = str(Path(sys.argv[1]).resolve())
+with tempfile.TemporaryDirectory(prefix='howl-test-') as temporary:
+    root = Path(temporary)
+    (root / 'bin').mkdir()
+    record = root / 'invocation.json'
+    for tool in ('make', 'gmake'):
+        executable = root / 'bin' / tool
+        executable.write_text('''#!/usr/bin/env python3
+import json, os, pathlib, sys
+pathlib.Path(os.environ['HOWL_TEST_RECORD']).write_text(json.dumps(dict(
+    args=sys.argv[1:], inherited=[k for k in ('MAKEFLAGS', 'MFLAGS', 'MAKELEVEL') if k in os.environ])))
+print('form checks ran', flush=True)
+sys.exit(int(os.environ.get('HOWL_TEST_EXIT', '0')))
+''')
+        executable.chmod(0o755)
+    env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'],
+               HOWL_TEST_RECORD=str(record), MAKEFLAGS='n', MFLAGS='-n', MAKELEVEL='1')
+
+    def run(*args, status=0, **changes):
+        result = subprocess.run([howl, 'test', *args], cwd=root, env=dict(env, **changes),
+                                capture_output=True, text=True)
+        assert result.returncode == status, (args, result.returncode, result.stderr)
+        return result
+
+    assert 'usage: howl test' in run('--help').stderr
+    assert not record.exists()
+    assert 'checkout root' in run('--with', 'caddy', status=1).stderr
+    for path in ('Makefile', 'test/check-form', 'test/check-shellfree', 'forms/caddy/form.yaml'):
+        destination = root / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.touch()
+    result = run('--with', 'caddy', '--arch', 'amd64')
+    invocation = json.loads(record.read_text())
+    assert invocation['args'] == ['--no-print-directory', '-k', 'ARCH=x86_64',
+                                  'check-caddy', 'check-shellfree-caddy'], invocation
+    assert invocation['inherited'] == [], invocation
+    assert result.stdout == 'form checks ran\n'
+    assert 'build/x86_64/check/' in result.stderr
+    run('--with=caddy', '--arch=arm64', status=17, HOWL_TEST_EXIT='17')
+    assert 'ARCH=aarch64' in json.loads(record.read_text())['args']
+    run('--with', 'caddy')
+    record.unlink()
+    for args in [[], ['--with'], ['caddy'], ['--with', 'missing'],
+                 ['--with', 'caddy,sshd'], ['--with', '../caddy'],
+                 ['--with', 'caddy', '--with', 'caddy'],
+                 ['--with', 'caddy', '--arch', 'riscv64'],
+                 ['--with', 'caddy', '--arch', 'arm64', '--arch', 'amd64'],
+                 ['--with', 'caddy', '--on', 'qemu']]:
+        run(*args, status=1)
+        assert not record.exists(), args
+print('howl-test: both form suites, architecture, checkout validation and failure status')

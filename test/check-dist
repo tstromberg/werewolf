@@ -68,7 +68,18 @@ def main(argv):
             raise ValueError('missing UEFI firmware')
         if arch == 'x86_64':
             shutil.copyfile(os.environ['UEFI_VARS'], os.environ['UEFI_VARS_COPY'])
-    os.execv('test/boot', ['test/boot', 'dist-' + form, '-', str(work / 'dist.log'),
+    fixture = Path(os.environ.get('FORM_DIR', 'forms/' + form)) / 'test/config-shellfree'
+    if fixture.is_file():
+        config = work / ('dist-' + form + '-config')
+        shutil.rmtree(config, ignore_errors=True)
+        config.mkdir()
+        (config / 'data.key').write_bytes(b'k' * 64)
+        subprocess.run([str(fixture), str(config)], check=True)
+        tar = str(config) + '.tar'
+        subprocess.run([os.environ.get('HOWL', 'build/host/howl'), 'pack', '--build', '--with',
+                        os.environ.get('FORM_REF', form), '--config', str(config), '-o', tar], check=True)
+        argv += ['-drive', 'file=' + tar + ',format=raw,if=virtio,readonly=on']
+    os.execv('test/boot', ['test/boot', 'dist-' + form, os.environ.get('CONSOLE') or '-', str(work / 'dist.log'),
                          *argv, '-drive', 'file=' + str(disk) + ',format=qcow2,if=virtio'])
 
 

@@ -2,6 +2,8 @@
 
 A machine that serves hostnames on the Internet with no port open to it: [cloudflared](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/cloudflared/index.html).
+
 ## Security Posture
 
 - cloudflared runs as its own user. There is no shell. The root is read-only.

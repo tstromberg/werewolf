@@ -2,6 +2,8 @@
 
 Git hosting: [Gitea](https://gitea.com) 1.26, with git as the one program it may run. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/gitea/index.html).
+
 ## Security Posture
 
 Gitea runs as its own user. There is no shell. Landlock and seccomp hold it to its ports and to `/data/svc/gitea`. The root is read-only.

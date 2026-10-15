@@ -67,7 +67,7 @@ failed resolution preserves the old lock. Kernel and boot-loader locks remain se
 `make clean` keeps locks; `make relock FORM=...` refreshes them. Reproduction needs the same tools and artifacts; `FREEZE=1` is obsolete.
 
 **Publishing.** Set `updates.from` before creation to enroll. Howl packages caller-owned forms
-and the staged app as `local-NAME`, signs the index with `~/.howl/packages.rsa`, and gives the
+and the staged app as `local-NAME`, signs the index with `packages.rsa` in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), and gives the
 machine its public key. Published forms stay separate dependencies. People and boot secrets stay out.
 Apply defaults NAME to the file stem; `--name` overrides it and `--app DIR` replaces the remembered
 app source. `-n` prepares locally without uploading. Run apply once after creation to seed the repository.
@@ -75,7 +75,7 @@ Uploads use HTTPS PUT, or SSH with `--to`; machines always fetch HTTPS without p
 Use a dedicated repository URL and one publisher per declaration. Packages upload before the signed
 index. A remote index containing versions absent locally is refused rather than overwritten.
 Identical inputs reuse a revision; changed inputs advance monotonically. History lives under
-`~/.howl/repositories/`, protected by a file lock and retained across clean builds. Back it up with
+`repositories/` in that directory, protected by a file lock and retained across clean builds. Back it up with
 the signing key and `build/machines/NAME/declaration.json`, which identifies the enrolled machine.
 
 **Updating and rollback.** A changed operator package is due immediately at the next successful

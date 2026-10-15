@@ -10,6 +10,7 @@ const compose = @import("compose");
 const forms = @import("form");
 const package = @import("package");
 const howl = @import("howl.zig");
+const oci = @import("oci.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -156,7 +157,9 @@ fn fetchForm(
     try Dir.cwd().deleteTree(io, tmp);
     try Dir.cwd().createDirPath(io, tmp);
     const prefix = try gpa.print("usr/share/werewolf/forms/{s}/", .{name});
-    try unpack(io, tar, prefix, tmp, url, why);
+    var out = try Dir.cwd().openDir(io, tmp, .{});
+    defer out.close(io);
+    try unpack(io, tar, prefix, out, url, why);
     try Dir.cwd().deleteTree(io, into);
     try Dir.cwd().rename(tmp, Dir.cwd(), into, io);
     try Dir.cwd().writeFile(io, .{ .sub_path = mark, .data = want.version });
@@ -227,19 +230,18 @@ fn pick(records: []const apk.Record, pkg: []const u8, pins: []const []const u8) 
     return best;
 }
 
-/// unpack writes the entries of tar under prefix into dir: directories,
-/// files with their modes, links as links. A name that would leave dir is
-/// refused.
+/// unpack writes the entries of tar under prefix into out: directories,
+/// files with their modes, links as links. A name that would leave out is
+/// refused, and so is one that passes through a link an earlier entry made;
+/// a file replaces, never follows, whatever its name already is.
 fn unpack(
     io: Io,
     tar: []const u8,
     prefix: []const u8,
-    dir: []const u8,
+    out: Dir,
     url: []const u8,
     why: *Why,
 ) !void {
-    var out = try Dir.cwd().openDir(io, dir, .{});
-    defer out.close(io);
     var r: Io.Reader = .fixed(tar);
     var name_buf: [Dir.max_path_bytes]u8 = undefined;
     var link_buf: [Dir.max_path_bytes]u8 = undefined;
@@ -254,15 +256,20 @@ fn unpack(
             "{s}: {s}: not a name within the form",
             .{ url, e.name },
         );
+        try oci.throughNoLink(io, out, rel, why);
         if (std.fs.path.dirname(rel)) |parent| try out.createDirPath(io, parent);
         switch (e.kind) {
             .directory => try out.createDirPath(io, rel),
             .file => {
                 if (e.size > tar.len - r.seek) return error.UnexpectedEndOfStream;
+                out.deleteTree(io, rel) catch {};
                 try out.writeFile(io, .{
                     .sub_path = rel,
                     .data = tar[r.seek..][0..@intCast(e.size)],
-                    .flags = .{ .permissions = .fromMode(@intCast(e.mode & 0o777)) },
+                    .flags = .{
+                        .exclusive = true,
+                        .permissions = .fromMode(@intCast(e.mode & 0o777)),
+                    },
                 });
             },
             .sym_link => try out.symLink(io, e.link_name, rel, .{}),
@@ -284,16 +291,20 @@ fn clean(rel: []const u8) bool {
 fn get(io: Io, gpa: Allocator, url: []const u8, limit: usize, why: *Why) ![]const u8 {
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
-    var body: Io.Writer.Allocating = .init(gpa);
+    // Read at most a byte past limit, so a server cannot make howl hold more.
+    const buf = try gpa.alloc(u8, limit + 1);
+    var body: Io.Writer = .fixed(buf);
     const res = client.fetch(.{
         .location = .{ .url = url },
-        .response_writer = &body.writer,
-    }) catch |err|
+        .response_writer = &body,
+    }) catch |err| {
+        if (body.end == buf.len) return why.refuse("{s}: more than {d} bytes", .{ url, limit });
         return why.refuse("{s}: {t}; --build takes this checkout's forms instead", .{ url, err });
+    };
     if (res.status != .ok)
         return why.refuse("{s}: HTTP {d}", .{ url, @backingInt(res.status) });
-    if (body.written().len > limit) return why.refuse("{s}: more than {d} bytes", .{ url, limit });
-    return body.written();
+    if (body.end > limit) return why.refuse("{s}: more than {d} bytes", .{ url, limit });
+    return buf[0..body.end];
 }
 
 const testing = std.testing;
@@ -328,4 +339,39 @@ test clean {
     try testing.expect(clean("rootfs/etc/sv/x/run"));
     try testing.expect(clean("rootfs/"));
     for ([_][]const u8{ "../x", "a/../b", "a//b", "./a", "/a" }) |p| try testing.expect(!clean(p));
+}
+
+test "unpack keeps a form's links but never writes through one" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const prefix = "usr/share/werewolf/forms/web/";
+    var why: Why = .{};
+    // A service's run is a link, kept as one; a file named like an earlier
+    // link replaces the link rather than writing where it points.
+    try unpack(io, try oci.tarOf(gpa, &.{
+        .{ prefix ++ "rootfs/etc/sv/web/", '5', "", "" },
+        .{ prefix ++ "rootfs/etc/sv/web/run", '2', "", "/usr/lib/werewolf/leash" },
+        .{ prefix ++ "form.yaml", '2', "", "elsewhere" },
+        .{ prefix ++ "form.yaml", '0', "base: prod\n", "" },
+    }), prefix, tmp.dir, "u", &why);
+    var lbuf: [64]u8 = undefined;
+    try testing.expectEqualStrings(
+        "/usr/lib/werewolf/leash",
+        lbuf[0..try tmp.dir.readLink(io, "rootfs/etc/sv/web/run", &lbuf)],
+    );
+    try testing.expectEqualStrings(
+        "base: prod\n",
+        try tmp.dir.readFileAlloc(io, "form.yaml", gpa, .limited(16)),
+    );
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "elsewhere", .{}));
+    // A name beneath a link is refused before anything is written.
+    try testing.expectError(error.Refused, unpack(io, try oci.tarOf(gpa, &.{
+        .{ prefix ++ "conf", '2', "", "elsewhere" },
+        .{ prefix ++ "conf/x", '0', "x", "" },
+    }), prefix, tmp.dir, "u", &why));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(io, "elsewhere", .{}));
 }

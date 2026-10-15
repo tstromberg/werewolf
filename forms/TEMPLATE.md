@@ -12,6 +12,8 @@ If any posture weaknesses show up, add a weaknesses section describing why we ha
 
 ## Getting Started
 
+<<<Include a link to image availability and download instructions: `../../docs/forms-catalog.md#images-and-downloads`.>>>
+
 ### Local test deployment (lima, qemu, firecracker)
 
 One fenced `sh` block. It is the whole setup, and `make example-NAME` runs it ([docs/design/examples.md](../docs/design/examples.md)). Leave `--on` out: howl picks Lima, bhyve, Firecracker, or QEMU. The machine's name is the form's name. A secret is a command (`openssl rand`). A file the command reads is written in the fence, or lives in `forms/NAME/example/`. A variant is a `text` block.

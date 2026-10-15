@@ -2,6 +2,8 @@
 
 DNS for a home network that answers ad and tracker names with `0.0.0.0`: [Pi-hole](https://pi-hole.net), from its own image, the web interface behind Caddy. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/pi-hole/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

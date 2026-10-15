@@ -2,6 +2,8 @@
 
 One node of log search: [OpenSearch](https://opensearch.org) 3.9, TLS on, the security plugin on, no demo users. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/opensearch/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

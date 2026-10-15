@@ -1,6 +1,11 @@
 # Releases
 
-CI publishes three forms, `minimal`, `prod` and `prod-ssh`, for aarch64 and x86_64,
+For all forms, browse the [R2 image catalog](https://dist.werewolf-linux.org/images/v1/index.html)
+or run `howl forms --published`. See [catalog verification and deployment](#form-image-catalog).
+For current form coverage, see [image availability](forms-catalog.md#images-and-downloads).
+Protected qcow2 downloads and their verification instructions are [below](#downloading-a-protected-qcow2).
+
+The legacy CI workflow publishes three forms, `minimal`, `prod` and `prod-ssh`, for aarch64 and x86_64,
 as GitHub releases. It makes a release only when an image would change,
 usually within the hour of a fix reaching Wolfi or Alpine, and anyone
 can rebuild a release byte for byte from what it carries.
@@ -386,9 +391,109 @@ openssl dgst -sha256 -verify ../release/tiers.pub -signature cve-tiers.json.sig 
 git log -p cve-tiers.json   # every change, as a diff
 ```
 
+## Form image catalog
+
+[form-images.yml](../.github/workflows/form-images.yml) discovers every directory
+under `forms/` and considers aarch64 and x86_64 independently. A form's declared
+architecture limits are honored and shown in the catalog. Relevant main pushes,
+an hourly schedule and manual dispatch resolve fresh inputs. Each form's digest
+binds its source chain, shared code and tests, trust, exact package versions and
+checksums, OCI digests, Melange build environments and host tool versions.
+Documentation and unrelated forms do not trigger image rebuilds.
+
+An authenticated `current.json` with the same digest skips a completed target.
+Changed targets build on two independent native Linux runners without restored
+compiled output. Forms within a job share pinned kernel and EFI prerequisites.
+The complete qcow2, slot files, signatures and rebuild locks must match byte for
+byte. Each matching target must meet its form integration coverage minimum,
+then runs `howl test --with FORM --arch ARCH` and boots
+the actual release disk under enrolled Secure Boot firmware. Failed tests,
+missing evidence or different build bytes prevent that target's publication.
+Passing targets can publish while another form fails; the workflow reports failure
+and the catalog keeps the last passing release alongside the failed attempt.
+
+The catalog uses the existing R2 bucket and dedicated `images/v1/` prefix:
+
+```text
+images/v1/index.html                         browse every form
+images/v1/index.json                         signed catalog envelope
+images/v1/FORM/index.html                    architectures, downloads and test status
+images/v1/FORM/ARCH/current.json             atomic signed download head
+images/v1/FORM/ARCH/objects/HASH/disk.qcow2   immutable disk
+images/v1/FORM/ARCH/objects/HASH/downloads.json[.sig]
+images/v1/FORM/ARCH/objects/HASH/tests.json   artifact-bound test evidence
+images/v1/FORM/ARCH/objects/HASH/inputs.tar.gz
+images/v1/FORM/ARCH/objects/HASH/packages.json
+images/v1/FORM/ARCH/objects/HASH/release-notes.{html,json}
+images/v1/FORM/ARCH/BUILD/{vmlinuz,root.erofs,stage0.zst,cmdline,uki.efi}
+images/v1/FORM/ARCH/latest.json[.sig]         signed slot update head
+```
+
+Objects are uploaded and checked through public HTTPS before any head advances.
+An atomic signed receipt retains the publication floor across interrupted update
+head writes. A retry repairs that pair; an incomplete pair never counts as an
+unchanged successful publication. Immutable objects are never overwritten with
+different bytes. The publishing health workflow reports failures and recovery.
+
+### Package release notes
+
+Each passing release includes HTML release notes and JSON changes, linked from
+the image pages, `howl forms FORM --published` and the publishing job summary.
+The comparison uses the previous passing image of the same form and architecture;
+failed attempts never become a baseline. The first release lists its initial
+inventory. Later notes show additions, removals, version updates and packages
+rebuilt with different content at the same version. They also show changes to
+the digests of baked OCI images, with a source comparison when the commit changes.
+A source-only or forced rebuild explicitly reports when no packages changed.
+
+`packages.json` records architecture-specific resolved packages, plus locally
+built form packages read from their APK metadata. Image packages, local recipes,
+kernel configuration inputs, and build/test dependencies are grouped separately.
+Identical runtime dependencies are omitted from the additional test-package list.
+Build/test groups describe inputs, not software installed in the VM. OCI internals
+are not enumerated; their exact image digests are recorded instead.
+
+The inventory is part of both independent builds. The publisher checks the
+previous inventory against its signed manifest before generating notes. The
+signed download manifest binds the inventory and both release-note files, which
+are uploaded and verified before the image head advances. Notes link to the
+previous release, preserving the history even when a later attempt fails.
+
+### Download and verify a catalog disk
+
+Choose a form and architecture on its image page. Download `disk.qcow2`,
+`downloads.json` and `downloads.json.sig` from the same immutable release.
+From a trusted checkout, extract the committed legacy boot certificate's public
+key and verify the manifest before checking the disk:
+
+```sh
+openssl x509 -in release/boot.crt -pubkey -noout > image.pub
+openssl dgst -sha256 -verify image.pub -signature downloads.json.sig downloads.json
+jq -r '.files["disk.qcow2"] | "\(.sha256)  disk.qcow2"' downloads.json | shasum -a 256 -c -
+```
+
+Stop on verification failure. `downloads.json` also binds the source commit,
+GitHub Actions run, rebuild inputs and passing form tests. `current.json` and
+the catalog embed their exact signed JSON bytes as `manifest` and a hex-encoded
+RSA/SHA-256 `signature`; the standalone download uses a detached binary signature.
+
+Catalog images use the legacy boot identity in `release/boot.crt` for UEFI and
+IPE signing, separate from protected-download trust. Enroll that certificate
+using [the signed boot instructions](cloud.md#signed-boot), attach configuration
+packed with `howl pack --build --with FORM`, and follow the form's setup guide.
+The updater fetches complete signed slots from that form's catalog channel;
+forms declaring `updates: off` retain that choice. Configuration and
+application credentials are supplied per machine, never baked into public disks.
+
+These catalog disks do not include TPM release-retirement enrollment. Secure
+`howl run`/`create` downloads retain their separate exact-bundle lifecycle gates;
+use `--build` for a protected source deployment when that form has no protected
+download. The catalog does not cause howl to downgrade to another profile.
+
 ## Protected production downloads
 
-`howl run` uses production-signed downloads by default; arm64 Lima playground is published.
+`howl run` uses production-signed downloads by default; playground is published for
+x86_64 QEMU and arm64 Lima.
 `--build` retains local signing and cached builds. Existing locally signed machines retain
 their original trust; use a new machine name when adopting production downloads.
 The protected trust and layout are described in [protected-downloads](design/protected-downloads.md).
@@ -425,6 +530,44 @@ and this parity check succeed. A failure leaves the draft unpublished; it never 
 PRs and manual dispatch with `build: false` run the full QEMU lifecycle and export using
 temporary test keys on a disposable hosted runner. They receive no production secrets and upload no images.
 Private boot/image keys remain on signing hosts; consumers and compile guests receive public inputs.
+
+### Downloading a protected qcow2
+
+Open [GitHub Releases](https://github.com/werewolf-linux/werewolf/releases) and choose
+a `protected-SERIAL` release with assets for your form, provider and architecture.
+The x86_64 QEMU playground disk is `playground-qemu-x86_64-disk.qcow2`.
+For deployment on a matching Linux host, `howl run --on qemu` downloads and
+authenticates the bundle, enrolls firmware and TPM, and starts the host permit service.
+
+To inspect or archive the standalone disk, set `TAG` to the chosen protected release
+tag and run these commands from a trusted checkout. Use the committed image
+certificate as the trust anchor:
+
+```sh
+TAG=protected-20261014T232908Z
+mkdir -p downloads
+gh release download "$TAG" --repo werewolf-linux/werewolf --dir downloads \
+  --pattern 'playground-qemu-x86_64-*'
+openssl x509 -in release/protected/image.crt -pubkey -noout > downloads/image.pub
+openssl dgst -sha256 -verify downloads/image.pub \
+  -signature downloads/playground-qemu-x86_64-downloads.json.sig \
+  downloads/playground-qemu-x86_64-downloads.json
+(cd downloads && jq -r '.files["disk.qcow2"] | "\(.sha256)  \(.asset)"' \
+  playground-qemu-x86_64-downloads.json | shasum -a 256 -c -)
+gh attestation verify downloads/playground-qemu-x86_64-disk.qcow2 \
+  --repo werewolf-linux/werewolf
+```
+
+Stop if signature or digest verification fails. The signed download manifest covers
+the qcow2, and the signed boot/image manifests cover the original bundle.
+The qcow2 contains the same protected system, but importing it into a hypervisor
+does not create the machine's owner keys, firmware enrollment, TPM state or host
+update/permit service. Use howl for the supported protected deployment path.
+Its host service polls for authenticated vendor bundles every five minutes;
+the guest applies them under its [update policy](updater.md#when-an-update-boots).
+A/B recovery and retirement protection depend on retaining that machine's
+enrollment and host service. Legacy release disks use the package updater and
+do not acquire the protected profile by being converted or imported.
 
 ## Limits
 

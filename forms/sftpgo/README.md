@@ -2,6 +2,8 @@
 
 SFTP and nothing else: [SFTPGo](https://github.com/drakkan/sftpgo) 2.7. No shell, no commands, no FTP, WebDAV or web admin. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/sftpgo/index.html).
+
 ## Security Posture
 
 SFTPGo runs as its own user. There is no shell. Landlock and seccomp hold it to port 22 and to `/data/svc/sftpgo`. The root is read-only.

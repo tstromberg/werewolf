@@ -12,6 +12,7 @@ const evidence = @import("evidence.zig");
 
 const std = @import("std");
 const allow = @import("allow");
+const sandbox = @import("sandbox");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -91,6 +92,11 @@ fn usage() void {
 
 const service_json = "/run/werewolf/posture.json";
 
+/// service_motd is what sshd shows at login (/etc/motd links to it): the
+/// form's greeting, motd_greeting, then what motd says.
+const service_motd = "/run/werewolf/motd";
+const motd_greeting = "/etc/werewolf/motd";
+
 const json_options: std.json.Stringify.Options = .{
     .whitespace = .indent_2,
     .emit_null_optional_fields = false,
@@ -121,18 +127,8 @@ fn serve(io: Io, gpa: Allocator) !void {
     var json: Io.Writer.Allocating = .init(gpa);
     try std.json.Stringify.value(report, json_options, &json.writer);
     try json.writer.writeByte('\n');
-    const tmp = service_json ++ ".tmp";
-    Dir.cwd().writeFile(
-        io,
-        .{ .sub_path = tmp, .data = json.written() },
-    ) catch |err| std.debug.print("posture: {s}: {s}\n", .{ tmp, @errorName(err) });
-    Dir.rename(
-        Dir.cwd(),
-        tmp,
-        Dir.cwd(),
-        service_json,
-        io,
-    ) catch |err| std.debug.print("posture: {s}: {s}\n", .{ service_json, @errorName(err) });
+    put(io, service_json, json.written());
+    put(io, service_motd, try motd(gpa, report, p.read(motd_greeting)));
 
     var line: Io.Writer.Allocating = .init(gpa);
     try printLine(gpa, &line.writer, report);
@@ -140,9 +136,89 @@ fn serve(io: Io, gpa: Allocator) !void {
     try Io.File.stdout().writeStreamingAll(io, line.written());
 
     // Park the service, so runsv does not run it again until the next boot.
+    sandbox.keepOnly(0) catch {};
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
     std.debug.print("posture: sv down: {s}\n", .{@errorName(err)});
     std.process.exit(1);
+}
+
+/// put writes data to path whole, through a temporary name, and logs a failure.
+fn put(io: Io, path: []const u8, data: []const u8) void {
+    var buf: [Dir.max_path_bytes]u8 = undefined;
+    const tmp = std.mem.print(&buf, "{s}.tmp", .{path}) catch return;
+    Dir.cwd().writeFile(io, .{ .sub_path = tmp, .data = data }) catch |err|
+        return std.debug.print("posture: {s}: {s}\n", .{ tmp, @errorName(err) });
+    Dir.rename(Dir.cwd(), tmp, Dir.cwd(), path, io) catch |err|
+        std.debug.print("posture: {s}: {s}\n", .{ path, @errorName(err) });
+}
+
+/// motd returns the message of the day: the form's greeting, then what a
+/// person logging in should know first, if anything: a DEV=1 build, a root
+/// shell without a password, protections the machine was made without.
+fn motd(gpa: Allocator, r: Report, greeting: []const u8) ![]const u8 {
+    var out: Io.Writer.Allocating = .init(gpa);
+    const w = &out.writer;
+    try w.writeAll(greeting);
+    const console = for (r.checks) |c| {
+        if (std.mem.eql(u8, c.id, "processes-no-root-console") and c.result == .fail)
+            break c.detail;
+    } else null;
+    if (!r.dev and console == null and r.disabled.len == 0) return out.written();
+    if (greeting.len > 0) try w.writeAll(if (greeting[greeting.len - 1] == '\n') "\n" else "\n\n");
+    if (r.dev or console != null) {
+        if (r.dev) try w.writeAll("Dev mode");
+        if (r.dev and console != null) try w.writeAll(" · ");
+        if (console) |c| try w.print("a root shell without a password: {s}", .{c});
+        try w.writeByte('\n');
+    }
+    if (r.disabled.len > 0) {
+        try w.writeAll("Protections disabled: ");
+        try writeList(w, r.disabled, ", ");
+        try w.writeByte('\n');
+    }
+    return out.written();
+}
+
+test motd {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var checks = [_]Check{.{
+        .id = "processes-no-root-console",
+        .area = "processes",
+        .name = "n",
+        .why = "w",
+        .how = "h",
+        .result = .fail,
+        .detail = "ash on ttyAMA0",
+    }};
+    const plain: Report = .{
+        .time = "t",
+        .os = "o",
+        .host = "h",
+        .kernel = "k",
+        .root = true,
+        .summary = .{},
+        .checks = &.{},
+    };
+    // A protected machine says nothing more than its greeting.
+    try testing.expectEqualStrings("Hello\n", try motd(gpa, plain, "Hello\n"));
+    try testing.expectEqualStrings("", try motd(gpa, plain, ""));
+    var dev = plain;
+    dev.dev = true;
+    dev.disabled = &.{ "secureboot", "tpm", "ipe" };
+    dev.checks = &checks;
+    try testing.expectEqualStrings(
+        "Hello\n\nDev mode · a root shell without a password: ash on ttyAMA0\n" ++
+            "Protections disabled: secureboot, tpm, ipe\n",
+        try motd(gpa, dev, "Hello\n"),
+    );
+    checks[0].result = .pass;
+    dev.disabled = &.{ "tpm", "ipe" };
+    try testing.expectEqualStrings(
+        "Dev mode\nProtections disabled: tpm, ipe\n",
+        try motd(gpa, dev, ""),
+    );
 }
 
 /// unsettled returns the first other service that runsv says has not
@@ -191,8 +267,11 @@ pub const Report = struct {
     host: []const u8,
     kernel: []const u8,
     root: bool,
-    /// insecure is true when booted with werewolf.insecure=1 (--insecure).
-    insecure: bool = false,
+    /// disabled names the protections the machine was made without
+    /// (werewolf.disable, from howl's --disable).
+    disabled: []const []const u8 = &.{},
+    /// dev is a DEV=1 build: busybox-full, and a root console on request.
+    dev: bool = false,
     /// allow lists, sorted, the werewolf defaults the form gave up at build
     /// time (/etc/werewolf/allow). The checks still measure them.
     allow: []const []const u8 = &.{},
@@ -256,8 +335,10 @@ pub const Posture = struct {
     root: bool,
     /// Image metadata directory, not the underlying distro name.
     werewolf: bool = false,
-    /// insecure is true when /proc/cmdline carries werewolf.insecure=1.
-    insecure: bool = false,
+    /// disabled is werewolf.disable: the protections the machine lacks.
+    disabled: cmdline.Protections = .empty,
+    /// dev is a DEV=1 build (/usr/share/werewolf/dev).
+    dev: bool = false,
     /// extended adds the checks werewolf fails by choice (--extended).
     extended: bool = false,
     /// attack runs attacks.zig even without werewolf.check=1 (--attack), for
@@ -388,13 +469,17 @@ pub const Posture = struct {
     pub fn report(p: *Posture) !Report {
         const uts = std.posix.uname();
         const os_release = p.read("/etc/os-release");
+        var disabled: std.ArrayList([]const u8) = .empty;
+        for (std.enums.values(cmdline.Protection)) |x|
+            if (p.disabled.contains(x)) try disabled.append(p.gpa, @tagName(x));
         var r: Report = .{
             .time = try rfc3339(p.gpa, nowSecs(p.io)),
             .os = prettyName(if (os_release.len > 0) os_release else p.read("/usr/lib/os-release")),
             .host = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0)),
             .kernel = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.release, 0)),
             .root = p.root,
-            .insecure = p.insecure,
+            .disabled = disabled.items,
+            .dev = p.dev,
             .allow = try p.allowances(),
             .summary = .{},
             .checks = p.checks.items,
@@ -414,11 +499,11 @@ pub const Posture = struct {
             defer root.close(p.io);
             p.werewolf = werewolfImage(p.io, root);
         } else |_| p.werewolf = false;
-        var bad: cmdline.Failure = .{};
-        p.insecure = if (p.werewolf)
-            if (cmdline.parse(p.read("/proc/cmdline"), &bad)) |cmd| cmd.insecure else false
-        else
-            false;
+        if (p.werewolf) {
+            var bad: cmdline.Failure = .{};
+            if (cmdline.parse(p.read("/proc/cmdline"), &bad)) |cmd| p.disabled = cmd.disable;
+            p.dev = exists(p.io, "/usr/share/werewolf/dev");
+        }
         const start = if (p.verbose) Io.Timestamp.now(p.io, .awake) else null;
         // Prove logging before the refusal probes can fill its backlog.
         try p.phase("audit", kernel.logged);
@@ -809,7 +894,12 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     try w.writeAll(", on ");
     try writeClean(w, r.host);
     try w.print(" ({s})\n", .{if (r.root) "root" else "not root: some checks are limited"});
-    if (r.insecure) try w.writeAll("Mode: INSECURE (booted with werewolf.insecure=1)\n");
+    if (r.dev) try w.writeAll("Dev mode: a DEV=1 build\n");
+    if (r.disabled.len > 0) {
+        try w.writeAll("Protections disabled: ");
+        try writeList(w, r.disabled, ", ");
+        try w.writeAll(" (werewolf.disable)\n");
+    }
     if (r.allow.len > 0) {
         try w.writeAll("Its form allows:");
         for (r.allow) |a| {
@@ -909,12 +999,12 @@ fn utf8Prefix(text: []const u8, max: usize) usize {
 fn printKnown(w: *Io.Writer, k: Known) !void {
     if (k.unexpected.len > 0) {
         try w.writeAll("posture: WARNING: unexpected: ");
-        try writeList(w, k.unexpected);
+        try writeList(w, k.unexpected, ",");
         try w.writeAll(": failures this image does not excuse (" ++ weaknesses_path ++ ")\n");
     }
     if (k.now_passing.len > 0) {
         try w.writeAll("posture: excused, but passing now: ");
-        try writeList(w, k.now_passing);
+        try writeList(w, k.now_passing, ",");
         try w.writeAll(": its form can drop them\n");
     }
 }
@@ -941,7 +1031,12 @@ fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: b
         dim,            r.summary.skip,
         reset,
     });
-    if (r.insecure) try w.print("{s} · INSECURE MODE{s}", .{ red, reset });
+    if (r.dev) try w.print("{s} · dev mode{s}", .{ red, reset });
+    if (r.disabled.len > 0) {
+        try w.print("{s} · protections disabled: ", .{red});
+        try writeList(w, r.disabled, ", ");
+        try w.writeAll(reset);
+    }
     if (!r.root) try w.print("{s} · some checks limited (not root){s}", .{ dim, reset });
     try w.writeByte('\n');
     var width: usize = 0;
@@ -1071,10 +1166,11 @@ fn summaryState(r: Report) Verdict {
     return .nominal;
 }
 
-fn writeList(w: *Io.Writer, ids: []const []const u8) !void {
-    for (ids, 0..) |id, i| {
-        if (i > 0) try w.writeByte(',');
-        try writeClean(w, id);
+/// writeList writes items with sep between them.
+fn writeList(w: *Io.Writer, items: []const []const u8, sep: []const u8) !void {
+    for (items, 0..) |item, i| {
+        if (i > 0) try w.writeAll(sep);
+        try writeClean(w, item);
     }
 }
 
@@ -1127,7 +1223,11 @@ fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
         try w.writeAll(c.id);
     }
     try w.print(" pass={d} skip={d} ", .{ r.summary.pass, r.summary.skip });
-    if (r.insecure) try w.writeAll("mode=insecure ");
+    if (r.disabled.len > 0) {
+        try w.writeAll("disabled=");
+        try writeList(w, r.disabled, ",");
+        try w.writeByte(' ');
+    }
     var brief = r;
     brief.checks = failed.items;
     try std.json.Stringify.value(brief, .{ .emit_null_optional_fields = false }, w);
@@ -2019,26 +2119,35 @@ test printLine {
     try printLine(arena.allocator(), &out.writer, clean);
     try testing.expect(std.mem.startsWith(u8, out.written(), "posture: fail= pass=1 skip=0 {"));
 
-    var insecure = clean;
-    insecure.insecure = true;
+    var unprotected = clean;
+    unprotected.disabled = &.{ "secureboot", "tpm", "ipe" };
+    unprotected.dev = true;
     out.clearRetainingCapacity();
-    try printLine(arena.allocator(), &out.writer, insecure);
+    try printLine(arena.allocator(), &out.writer, unprotected);
     try testing.expect(std.mem.startsWith(
         u8,
         out.written(),
-        "posture: fail= pass=1 skip=0 mode=insecure {",
+        "posture: fail= pass=1 skip=0 disabled=secureboot,tpm,ipe {",
     ));
-    try testing.expect(std.mem.indexOf(u8, out.written(), "\"insecure\":true") != null);
-    out.clearRetainingCapacity();
-    try printText(&out.writer, insecure, 80);
     try testing.expect(std.mem.indexOf(
         u8,
         out.written(),
-        "Mode: INSECURE (booted with werewolf.insecure=1)\n",
+        "\"disabled\":[\"secureboot\",\"tpm\",\"ipe\"],\"dev\":true",
     ) != null);
     out.clearRetainingCapacity();
-    try printSummary(arena.allocator(), &out.writer, insecure, 80, false);
-    try testing.expect(std.mem.indexOf(u8, out.written(), " · INSECURE MODE\n") != null);
+    try printText(&out.writer, unprotected, 80);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out.written(),
+        "Dev mode: a DEV=1 build\nProtections disabled: secureboot, tpm, ipe (werewolf.disable)\n",
+    ) != null);
+    out.clearRetainingCapacity();
+    try printSummary(arena.allocator(), &out.writer, unprotected, 80, false);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out.written(),
+        " · dev mode · protections disabled: secureboot, tpm, ipe\n",
+    ) != null);
 }
 
 test serviceSettled {

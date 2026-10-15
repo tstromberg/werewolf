@@ -222,7 +222,9 @@ pub fn lease(text: []const u8, m: []const u8) ?Lease {
         var expiry: u64 = 0;
         var lines = std.mem.tokenizeAny(u8, b, "\n\t {");
         while (lines.next()) |l| {
-            if (std.mem.startsWith(u8, l, "ip_address=")) ip = l["ip_address=".len..];
+            // The guest asked for this address; take it only as an address.
+            if (std.mem.startsWith(u8, l, "ip_address=") and howl.isIp4(l["ip_address=".len..]))
+                ip = l["ip_address=".len..];
             if (std.mem.startsWith(
                 u8,
                 l,
@@ -270,11 +272,15 @@ test lease {
         "\n}\n" ++
         "{\n\tname=werewolf\n\tip_address=192.168.105.9\n" ++
         "\thw_address=1,52:55:55:57:e1:f0\n\tlease=0x6700b000\n}\n" ++
-        "{\n\tip_address=192.168.105.2\n\thw_address=1,52:55:55:aa:bb:cc\n\tlease=0x6800b000\n}\n";
+        "{\n\tip_address=192.168.105.2\n\thw_address=1,52:55:55:aa:bb:cc\n\tlease=0x6800b000\n}" ++
+        "\n" ++
+        "{\n\tip_address=-oProxyCommand=x\n\thw_address=1,52:55:55:57:e1:f1\n\tlease=0x6900b000" ++
+        "\n}\n";
     const l = lease(text, "52:55:55:57:e1:f0").?;
     try testing.expectEqualStrings("192.168.105.9", l.ip);
     try testing.expectEqual(@as(u64, 0x6700b000), l.expiry);
     try testing.expectEqual(null, lease(text, "52:55:55:57:e1:f1"));
+    try testing.expectEqual(null, lease(text, "52:55:55:57:e1:f2"));
 }
 
 test template {

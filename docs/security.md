@@ -6,9 +6,10 @@ does not remove those limits: the kernel enforces them, and the process
 cannot turn them off. Some boot helpers hold broader authority and remain
 part of the trusted code.
 
-This page describes machines with security restrictions enabled. Development
-images can log some otherwise-denied system calls instead of blocking them
-(learning mode), and can provide a console shell.
+This page describes machines with every protection. A machine can be made
+without some ([below](#protections-a-machine-can-be-made-without)), and a
+development image can log some denied system calls instead of blocking them
+(learning mode) and give root a console shell.
 
 ## From boot to a running service
 
@@ -101,8 +102,9 @@ acceptance of a trial boot, and shutdown. It accepts fixed requests, not
 arbitrary paths or mount options. Its seccomp filter limits
 the calls it can make, but it remains privileged code outside Landlock.
 Code execution inside the broker would cross the boundary that confines
-services. Any root process can ask for its supported mounts, including
-filesystems holding boot files
+services. Only the updater, slot-keep and runit's shutdown stage can ask it,
+each through a descriptor init gave it, and it lends no mount: it copies
+digest-checked files onto the boot partitions itself
 ([mount broker](../cmd/mount-broker/README.md)).
 
 The DHCP renewal process keeps `CAP_NET_ADMIN`, but its Landlock rules limit
@@ -199,6 +201,33 @@ is unfinished ([verified boot](design/verified-boot.md)).
 
 These protections operate inside the guest. The hypervisor can change its
 memory and boot input and must be trusted.
+
+## Protections a machine can be made without
+
+A machine is made with three protections that reach across reboots: Secure
+Boot checks its boot files, a TPM records which releases may boot, and IPE
+runs only native code from its verified root. `howl --disable=secureboot,tpm,ipe`
+makes one without them, which every provider but Lima and QEMU needs for now
+([cli](design/cli.md)). Nothing disables them by default. The machine's
+command line names what it lacks (`werewolf.disable`), less what its provider
+gives anyway (QEMU signs for Secure Boot), and posture and the login message
+say so.
+
+| Disabled | What that allows |
+| --- | --- |
+| `secureboot` | Boot files that are not signed run. Unsigned boot code could ignore the TPM, so `tpm` goes with it. |
+| `tpm` | Booting an older signed release. |
+| `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
+
+One profile provides all three, so for now they are disabled together. Without
+them, a running machine keeps its seal, fence and verified root: root still
+cannot run a program the image lacks, but it can choose what boots next.
+
+`--dev` makes a development image: busybox-full, seal learning mode, and, when
+the boot asks with `werewolf.debug=1`, a root shell on the console without a
+password. It needs `--disable=secureboot,tpm,ipe`; howl never publishes such
+an image, and posture's `processes-no-root-console` fails while the shell is
+offered, on werewolf or any other Linux.
 
 ## Not done, by choice
 

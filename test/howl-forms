@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Discover local forms without builds, network access or source-tree mutation."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+howl = str(Path(sys.argv[1]).resolve())
+with tempfile.TemporaryDirectory(prefix='howl-forms-') as temporary:
+    root = Path(temporary)
+    for name, text in [('minimal', 'archs: [aarch64, x86_64]\n'),
+                       ('web', 'base: minimal\n'), ('intel-only', 'base: minimal\narchs: [x86_64]\n')]:
+        directory = root / 'forms' / name
+        directory.mkdir(parents=True)
+        (directory / 'form.yaml').write_text(text)
+    (root / 'docs').mkdir()
+    (root / 'docs/forms-catalog.md').write_text(
+        '| [web](../forms/web/README.md) | A searchable web server. |\n')
+    (root / 'bin').mkdir()
+    curl = root / 'bin/curl'
+    curl.write_text('#!/bin/sh\necho "catalog is unavailable" >&2\nexit 22\n')
+    curl.chmod(0o755)
+    env = dict(os.environ, PATH=str(root / 'bin') + os.pathsep + os.environ['PATH'])
+
+    def run(*args, status=0, cwd=root):
+        result = subprocess.run([howl, 'forms', *args], cwd=cwd, env=env, capture_output=True, text=True)
+        assert result.returncode == status, (args, result.returncode, result.stderr)
+        return result
+
+    listed = json.loads(run('--json').stdout)
+    assert listed['source'] == 'checkout'
+    assert {r['form'] for r in listed['forms']} == {'minimal', 'web', 'intel-only'}
+    assert {r['arch'] for r in listed['forms'] if r['form'] == 'intel-only'} == {'x86_64'}
+    filtered = json.loads(run('--build', '--arch=arm64', '--json').stdout)
+    assert {r['form'] for r in filtered['forms']} == {'minimal', 'web'}
+    assert {r['arch'] for r in filtered['forms']} == {'aarch64'}
+    details = run('web').stdout
+    assert 'howl run --build --with web' in details
+    assert 'howl test --with web' in details
+    assert 'howl pack --build --with web -h' in details
+    assert 'forms/web/README.md' in details
+    searched = json.loads(run('searchable', '--json').stdout)
+    assert {r['form'] for r in searched['forms']} == {'web'}
+    assert 'cannot fetch' in run('--published', status=1).stderr
+    assert 'conflict' in run('--published', '--build', status=1).stderr
+    assert 'has no aarch64 form' in run('intel-only', '--arch', 'arm64', status=1).stderr
+    curl.write_text('#!/bin/sh\nprintf \'%s\' \'{"manifest":"{}","signature":"00"}\'\n')
+    assert 'BadCatalogSignature' in run('--published', status=1).stderr
+    forged = json.dumps(dict(manifest='{}', signature='00' * 256))
+    curl.write_text('#!/bin/sh\nprintf \'%s\' \'' + forged + '\'\n')
+    assert 'BadSignature' in run('--published', status=1).stderr
+    run('missing', status=1)
+    run('--arch', 'riscv64', status=1)
+    run('--unknown', status=1)
+    run('one', 'two', status=1)
+    outside = root / 'outside'
+    outside.mkdir()
+    assert 'usage: howl forms' in run('--help', cwd=outside).stderr
+    assert 'no ./forms' in run('--build', cwd=outside, status=1).stderr
+    assert not (root / 'build').exists()
+print('howl-forms: discovery, search, guides, architectures, JSON and explicit source selection')

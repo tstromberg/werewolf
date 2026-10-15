@@ -3,6 +3,8 @@
 [RabbitMQ](https://www.rabbitmq.com/docs/4.2/) 4.2 for applications on
 the same machine. The manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/rabbitmq/index.html).
+
 ## Security Posture
 
 - RabbitMQ runs as its own user, with no capabilities.

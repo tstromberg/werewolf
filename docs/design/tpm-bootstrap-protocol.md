@@ -20,7 +20,7 @@ It does not establish Secure Boot, expose a cloud endpoint or implement recovery
 
 ## Non-Goals
 
-- Enable cloud `--secure` before signed-bootstrap and provider lifecycle tests.
+- Enable protected cloud deployment before signed-bootstrap and provider lifecycle tests.
 - Send private signing keys, persist guest reset secrets or silently clear a partial enrollment.
 
 ## Detailed design

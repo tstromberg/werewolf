@@ -21,6 +21,31 @@ const Profile = struct {
     configuration: ?@import("boot-config.zig").Definition = null,
     candidate: ?@import("boot-image.zig").Request = null,
 };
+
+/// parseProfile reads a machine's profile.json. A profile is howl's own
+/// record, and an older howl wrote fields since dropped (spec.insecure,
+/// always false in a protected machine's), so unknown fields are ignored.
+fn parseProfile(gpa: Allocator, text: []const u8) !Profile {
+    return std.json.parseFromSliceLeaky(Profile, gpa, text, .{ .ignore_unknown_fields = true });
+}
+
+test parseProfile {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    const old = try parseProfile(
+        gpa,
+        "{\"spec\":{\"form\":\"playground\",\"arch\":\"aarch64\",\"insecure\":false}," ++
+            "\"managed\":true}",
+    );
+    try std.testing.expectEqualStrings("playground", old.spec.form);
+    try std.testing.expect(old.spec.disabled.eql(.empty));
+    var made = old;
+    made.spec.disabled = .full;
+    const text = try std.json.Stringify.valueAlloc(gpa, made, .{});
+    try std.testing.expect((try parseProfile(gpa, text)).spec.disabled.eql(.full));
+}
+
 const Publisher = struct {
     authority: []const u8,
     public: []const u8,
@@ -103,7 +128,7 @@ pub fn refreshSource(
         error.FileNotFound => return,
         else => return err,
     };
-    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    const profile = try parseProfile(gpa, saved);
     if (profile.imported != null or profile.provider != o.on.? or
         !std.mem.eql(u8, profile.spec.form, o.form) or
         !try callerMatches(
@@ -136,7 +161,7 @@ pub fn resumeDownload(
         error.FileNotFound => return,
         else => return err,
     };
-    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    const profile = try parseProfile(gpa, saved);
     if (profile.imported == null) return why.refuse(
         "{s} was created with local signing keys; this command requests production-signed " ++
             "images.\n" ++
@@ -212,7 +237,6 @@ pub fn enrollImage(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.
             .form = verified.manifest.form,
             .on = provider,
             .local = true,
-            .secure = true,
             .boot_image = request,
         },
         args[0],
@@ -556,7 +580,7 @@ pub fn stop(
     defer guard.close(io);
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
-    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    const profile = try parseProfile(gpa, saved);
     if (profile.provider != provider) return why.refuse("the secured provider cannot change", .{});
     switch (provider) {
         .lima => {
@@ -586,7 +610,7 @@ pub fn stop(
 
 /// Matching inputs keep the image and authority; matching live guests need no work.
 pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []const u8) !Reuse {
-    if (!o.secure or o.app != null or o.import_dir != null) return .miss;
+    if (!o.protected() or o.app != null or o.import_dir != null) return .miss;
     const dir = try howl.machineDir(gpa, name);
     const authority = try gpa.print("{s}/authority", .{dir});
     const saved = Dir.cwd().readFileAlloc(
@@ -606,7 +630,7 @@ pub fn reuse(io: Io, gpa: Allocator, o: howl.Options, name: []const u8, tar: []c
     defer guard.close(io);
     try guard.lock(io, .exclusive);
     defer guard.unlock(io);
-    const profile = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    const profile = try parseProfile(gpa, saved);
     if (profile.provider != o.on.? or
         !std.mem.eql(u8, profile.spec.form, o.form)) return .miss;
     if (profile.imported != null) {
@@ -815,7 +839,7 @@ test "unchanged live runs preserve state; changed inputs, config and lost author
     const monitor = try Io.net.UnixAddress.init(try gpa.print("{s}/monitor.sock", .{dir}));
     var server = try monitor.listen(io, .{});
     defer server.deinit(io);
-    const o: howl.Options = .{ .form = form, .on = .qemu, .local = true, .secure = true };
+    const o: howl.Options = .{ .form = form, .on = .qemu, .local = true };
     try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
     const saved_profile = try Dir.cwd().readFileAlloc(
         io,
@@ -884,13 +908,19 @@ pub fn create(
     if (!on_lima and @import("builtin").os.tag != .linux)
         return why.refuse("secured QEMU currently requires Linux", .{});
     if (on_lima and
-        !lima.installed(io, gpa)) return why.refuse("--secure requires Lima on macOS", .{});
+        !lima.installed(
+            io,
+            gpa,
+        )) return why.refuse("protected deployment requires Lima on macOS", .{});
     const arch = try howl.localArch(why);
     if (on_lima and arch != .aarch64) return why.refuse(
         "the secured Lima profile currently requires arm64",
         .{},
     );
-    if (o.import_dir != null) return why.refuse("--secure does not yet support --import", .{});
+    if (o.import_dir != null) return why.refuse(
+        "protected deployment does not yet support --import",
+        .{},
+    );
     const dir = try howl.machineDir(gpa, name);
     const cwd = try std.process.currentPathAlloc(io, gpa);
     const at = try gpa.print("{s}/{s}", .{ cwd, dir });
@@ -935,10 +965,10 @@ pub fn create(
             gpa,
             .limited(64 << 10),
         ) catch return why.refuse(
-            "{s} has no secured enrollment; recreate it explicitly before using --secure",
-            .{name},
+            "{s} has no secured enrollment: howl delete {s}, then create it again",
+            .{ name, name },
         );
-        profile = try std.json.parseFromSliceLeaky(Profile, gpa, data, .{});
+        profile = try parseProfile(gpa, data);
         if (profile.imported != null) {
             const requested = o.boot_image orelse
                 return error.ImportedImageNeedsAuthenticatedResume;
@@ -1224,12 +1254,12 @@ pub fn refresh(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
     const dir = args[0];
     const authority = try gpa.print("{s}/authority", .{dir});
     const profile_file = try gpa.print("{s}/profile.json", .{authority});
-    var profile = try std.json.parseFromSliceLeaky(Profile, gpa, try Dir.cwd().readFileAlloc(
+    var profile = try parseProfile(gpa, try Dir.cwd().readFileAlloc(
         io,
         profile_file,
         gpa,
         .limited(64 << 10),
-    ), .{});
+    ));
     if (profile.imported != null) {
         var options: howl.Options = .{ .form = profile.spec.form, .on = profile.provider };
         options.boot_image = try @import("download.zig").latest(
@@ -1414,7 +1444,6 @@ test "downloaded live reuse has no vendor keys and retains bootstrap and TPM aut
     var o: howl.Options = .{
         .form = "playground",
         .on = .qemu,
-        .secure = true,
         .boot_image = bootstrap,
     };
     try t.expectEqual(Reuse.running, try reuse(io, gpa, o, name, tar));
@@ -1439,7 +1468,7 @@ test "downloaded live reuse has no vendor keys and retains bootstrap and TPM aut
         gpa,
         .limited(64 << 10),
     );
-    const kept = try std.json.parseFromSliceLeaky(Profile, gpa, saved, .{});
+    const kept = try parseProfile(gpa, saved);
     try t.expectEqualStrings("immutable-A", kept.bootstrap.?.directory);
     try t.expectEqual(null, kept.spec.ipe_key);
     try t.expectEqual(null, kept.spec.boot_key);

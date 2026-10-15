@@ -2,6 +2,8 @@
 
 A network sensor: [Zeek](https://zeek.org) 8.2 reading one interface and writing JSON logs to `/data`. The form's manifest is [form.yaml](form.yaml). Zeek runs from its project's image.
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/zeek/index.html).
+
 ## Security Posture
 
 - Zeek runs as its image's user and captures `eth0` with its AF_PACKET plugin. It keeps `CAP_NET_RAW` and `CAP_NET_ADMIN` for that socket and promiscuous mode. It writes logs. It reaches a resolver and nothing else. No TCP port is declared. A packet socket can still inject frames, and this process's netlink socket can change routes because the resolver pledge includes it.

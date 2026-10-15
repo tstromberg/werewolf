@@ -2,6 +2,8 @@
 
 A status page for one service: [Gatus](https://gatus.io) 5. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/gatus/index.html).
+
 ## Security Posture
 
 Gatus runs as its own user. There is no shell. Landlock and seccomp hold it to port 8080 and to `/data/svc/gatus`. The root is read-only.

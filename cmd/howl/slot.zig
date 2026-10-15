@@ -8,6 +8,7 @@ const forms = @import("form");
 const compose = @import("compose");
 const verity = @import("verity");
 const ipe = @import("ipe");
+const cmdline = @import("cmdline");
 const image = @import("image");
 const build = @import("build.zig");
 const packages = @import("packages.zig");
@@ -33,10 +34,12 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     try Dir.cwd().createDirPath(b.io, out);
     const enrollment = try b.path("{s}/image-enrollment", .{out});
-    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\ninsecure {}\nnative {}\n" ++
+    var disabled: Io.Writer.Allocating = .init(b.gpa);
+    try cmdline.writeProtections(&disabled.writer, b.spec.disabled, ",");
+    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\ndisable {s}\nnative {}\n" ++
         "tpm {s}\nfirmware {}\nca {s}\nport {d}\npermit-host {s}\npermit-port {d}\n", .{
         b.spec.ipe_updates orelse "", b.spec.image_serial orelse "", b.spec.boot_key != null,
-        b.spec.insecure,              b.spec.boot_native,            b.spec.tpm_pub orelse "",
+        disabled.written(),           b.spec.boot_native,            b.spec.tpm_pub orelse "",
         b.spec.tpm_firmware,          b.spec.update_ca orelse "",    b.spec.update_port orelse 443,
         b.spec.permit_host orelse "", b.spec.permit_port orelse 0,
     }));
@@ -825,15 +828,21 @@ fn copyStep(b: *B, target: []const u8, input: []const u8, from: []const u8) !voi
     try b.done(target, began);
 }
 
-/// cmdlineStep writes target from the image's cmdline, appending
-/// werewolf.insecure=1 when built in insecure mode.
+/// cmdlineStep writes target from the image's cmdline, naming in
+/// werewolf.disable what the image lacks of werewolf's protections.
 fn cmdlineStep(b: *B, target: []const u8, input: []const u8, from: []const u8) !void {
     const began = try b.begin(target, &.{input}) orelse return;
     try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
     const t = try b.tmp(target);
-    if (b.spec.insecure) {
-        const raw = mem.trimEnd(u8, try b.read(from, 4096), "\n");
-        try b.write(t, try b.path("{s} werewolf.insecure=1\n", .{raw}));
+    const lacks = b.spec.lacks();
+    if (lacks.count() > 0) {
+        var line: Io.Writer.Allocating = .init(b.gpa);
+        try line.writer.print("{s} werewolf.disable=", .{
+            mem.trimEnd(u8, try b.read(from, 4096), "\n"),
+        });
+        try cmdline.writeProtections(&line.writer, lacks, ",");
+        try line.writer.writeByte('\n');
+        try b.write(t, line.written());
     } else {
         try b.copy(from, t);
     }

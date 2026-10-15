@@ -2,6 +2,8 @@
 
 [step-ca](https://smallstep.com/docs/step-ca/) is a private certificate authority. You bring the root and the intermediate. The root key stays off the machine. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/step-ca/index.html).
+
 ## Security Posture
 
 - step-ca runs as its own user. The root is read-only.

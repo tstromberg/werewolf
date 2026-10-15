@@ -2,6 +2,8 @@
 
 A directory for the accounts a company already shares: [OpenLDAP](https://www.openldap.org) 2.6 on LDAPS alone. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/openldap/index.html).
+
 ## Security Posture
 
 - The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.

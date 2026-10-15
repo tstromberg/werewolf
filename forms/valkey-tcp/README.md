@@ -2,6 +2,8 @@
 
 [Valkey](https://valkey.io) 9.1 on TCP port 6379: [valkey](../valkey/README.md) with a reachable listener. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/valkey-tcp/index.html).
+
 ## Security Posture
 
 The server runs as its own user. There is no shell. Landlock and seccomp hold it to its socket, to port 6379, and to `/data/svc/valkey`. The root is read-only.

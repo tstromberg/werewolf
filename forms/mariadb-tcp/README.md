@@ -2,6 +2,8 @@
 
 [MariaDB](https://mariadb.org) 12.3 on TCP port 3306: [mariadb-local](../mariadb-local/README.md) with a reachable listener. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mariadb-tcp/index.html).
+
 ## Security Posture
 
 The server runs as its own user. There is no shell and no perl. Landlock and seccomp hold it to its socket, to port 3306, and to `/data/svc/mariadb`. The root is read-only.

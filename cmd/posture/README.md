@@ -42,7 +42,7 @@ and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progres
 
 - **Areas**, one file each: `kernel.zig` (lockdown, modules, sysctls, CPU,
   memory, features exploits reach for), `processes.zig` (hidden processes,
-  leashed services, intruder tools), `files.zig` (mounts, where programs
+  root consoles, leashed services, intruder tools), `files.zig` (mounts, where programs
   run, shared directories, accounts), `network.zig` (ports, fence's rules,
   IPv6, sshd), `attacks.zig`. `posture.zig` holds the report and service.
 - **One-way settings** (lockdown, `modules_disabled`, `ptrace_scope=3`,
@@ -59,9 +59,9 @@ and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progres
   (containers): `/proc/1/mem` and `/dev/mem` must be refused and logged; as
   `nobody`, `/proc/1` must be hidden, `/run` closed, and link tricks in `/tmp`
   refused; a leashed `--probe` tests its grants. A lock isolates concurrent attacks on werewolf.
-- **Service** (`/etc/sv/posture/run`): it waits up to 60 s for each other
-  service to run 5 s or be down on request, writes `/run/werewolf/posture/posture.json`,
-  prints the line, and parks itself with `sv down`.
+- **Service** (`/etc/sv/posture/run`): it waits up to 60 s for each other service to
+  run 5 s, writes `/run/werewolf/posture.json` and the login message `/run/werewolf/motd`
+  (`/etc/werewolf/motd`, then dev mode, a root console, `werewolf.disable`), and parks.
 - **Expected failures:** a werewolf image lists expected failures and excuses
   in `/usr/share/werewolf/weaknesses`. Any other failure prints
   `posture: WARNING: unexpected: ID,...` and names excuses no longer needed.

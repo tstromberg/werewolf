@@ -2,6 +2,8 @@
 
 An MQTT broker for the devices on a network: [Mosquitto](https://mosquitto.org) 2.1. The form's manifest is [form.yaml](form.yaml).
 
+[Images, test status and download instructions](https://dist.werewolf-linux.org/images/v1/mosquitto/index.html).
+
 ## Security Posture
 
 Mosquitto runs as its own user. There is no shell. Landlock and seccomp hold it to port 8883 and to `/data/svc/mosquitto`. The root is read-only.

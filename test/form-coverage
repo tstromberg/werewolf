@@ -95,12 +95,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--list", action="store_true", help="show per-form counts and exception reasons")
+    parser.add_argument("--form", help="check only this form's coverage")
     args = parser.parse_args()
     try:
         rows = audit(args.root)
     except (OSError, ValueError) as error:
         print(f"form-coverage: {error}", file=sys.stderr)
         return 1
+    if args.form:
+        rows = [row for row in rows if row[0] == args.form]
+        if not rows:
+            print(f"form-coverage: no form {args.form}", file=sys.stderr)
+            return 1
     failed = []
     for name, count, minimum, own, fixture, host, reason in rows:
         if args.list:
