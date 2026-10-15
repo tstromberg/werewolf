@@ -1,0 +1,9 @@
+# Drive the vulnerable application through HTTP. In DEV builds the shell
+# itself is denied; the as-shipped console checks also exercise allowed
+# commands and narrowed reads through sh-shim.
+ok  webshell-page wget -q -T 5 -O - http://127.0.0.1:8080/ | grep -q 'a contained vulnerability'
+ok  webshell-history wget -q -T 5 -O /tmp/webshell-attempts http://127.0.0.1:8080/attempts.json && python3 -c 'import json; a=json.load(open("/tmp/webshell-attempts")); assert isinstance(a,list) and len(a)<=100'
+ok  webshell-secret-refused wget -q -T 5 -O /dev/null --post-data 'cmd=cat%20%2Fetc%2Fshadow' http://127.0.0.1:8080/ && wget -q -T 5 -O /tmp/webshell-attempts http://127.0.0.1:8080/attempts.json && python3 -c 'import json; a=json.load(open("/tmp/webshell-attempts")); r=[r for r in a if r["cmd"]=="cat /etc/shadow" and r["source"]!="self-test"][-1]; assert r["exit"]!=0 and "root:" not in r["stdout"]'
+ok  webshell-escaped wget -q -T 5 -O /tmp/webshell-html --post-data 'cmd=%3Cscript%3Ewerewolf-xss%3C%2Fscript%3E' http://127.0.0.1:8080/ && grep -q '&lt;script&gt;werewolf-xss&lt;/script&gt;' /tmp/webshell-html && ! grep -q '<script>werewolf-xss</script>' /tmp/webshell-html
+ok  webshell-not-found wget -q -T 5 -S -O /dev/null http://127.0.0.1:8080/missing 2>&1 | grep -q 'HTTP/1.[01] 404'
+ok  webshell-method-refused printf 'PUT / HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n' | nc -w 5 127.0.0.1 8080 | grep -q '^HTTP/1.[01] 405'

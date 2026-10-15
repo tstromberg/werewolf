@@ -1,17 +1,13 @@
 # samba: a file server. smbd speaks SMB3 on port 445, encryption and
 # signing required, with no NetBIOS and no printers. Users are lines in
 # the config, name:password. Each has a directory under
-# /data/svc/samba/homes, and no UNIX account: the share's files are the
-# samba user's. Nobody connects without a password. See
+# /data/svc/samba/homes, and must have a real UNIX account. The share's
+# files belong to the unprivileged samba service. Nobody connects without a password. See
 # forms/samba/README.md.
 base: prod
 
 packages:
   - samba-server
-
-# smbd asks getpwnam for each share user. The root cannot grow /etc/passwd,
-# so this library answers from the file samba-init writes.
-programs: [samba-passwd.so]
 
 # The check speaks SMB with Samba's own client.
 dev:
@@ -42,7 +38,6 @@ services:
     exec: /usr/bin/smbd --foreground --debug-stdout --configfile /run/svc/samba/smb.conf
     before: /usr/lib/werewolf/samba-init
     user: samba
-    env: [LD_PRELOAD=/usr/lib/werewolf/samba-passwd.so]
     pledge: stdio rpath wpath inet unix listen proc exec
     listen: [tcp/445]
     read: /run/svc/samba

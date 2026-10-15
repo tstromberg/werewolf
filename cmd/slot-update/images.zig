@@ -230,6 +230,7 @@ fn checkEspInstalled(u: *Update, image: signed.Manifest, rdir: []const u8) !void
 }
 
 pub fn requireBoot(u: *Update, expected: []const u8, contents: bool) !void {
+    errdefer if (u.cmd.esp != null) broker.espDisarm() catch {};
     if (u.isBad(expected)) return error.ImageRolledBack;
     if (try u.needsSignedImage()) {
         _ = try verifyOther(u, expected, contents, false);

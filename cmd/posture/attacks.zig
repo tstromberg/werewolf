@@ -116,6 +116,18 @@ fn opensForWrite(path: [:0]const u8, append: bool) bool {
 }
 
 pub fn run(p: *Posture) !void {
+    // These probes deliberately share paths between root and nobody. A
+    // second scan must not remove the first scan's files or leash directories.
+    // Keep the lock file in place: unlinking it would let another scan lock
+    // a different inode. Closing the descriptor also releases it after a crash.
+    const guard: ?Io.File = if (p.werewolf) try Dir.cwd().createFile(
+        p.io,
+        "/run/werewolf/posture-attack.lock",
+        .{ .truncate = false, .permissions = .fromMode(0o600) },
+    ) else null;
+    defer if (guard) |f| f.close(p.io);
+    if (guard) |f| try f.lock(p.io, .exclusive);
+
     const pid = linux.getpid();
     const comm = trim(p.read("/proc/self/comm"));
 

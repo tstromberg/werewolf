@@ -55,7 +55,7 @@ descriptors 60, 61, and 62. The descriptor index *is* the role:
   1 holds it for `/etc/runit/3` (`stop`) at shutdown. `slot-update` (`60`) and
   `slot-keep` (`61`) call `broker.keepOnlyClient(role)` (closing the other two
   and setting `PR_SET_DUMPABLE = 0`), while every other supervised program
-  (`leash`, `sshd-start`, `debug-shell`, `posture`, `power-button`,
+  (`leash`, `debug-shell`, `posture`, `power-button`,
   `cloud-metadata`, `gvm-link`) closes all descriptors `>= 3` on entry.
 - **Never lend `/boot` as a mount.** `mount-broker` updates `/boot/state/{0,1}`
   (`slot-state`) and `/boot/slot/{a,b}` (`slot-root`, `slot-decl`, `slot-meta`)

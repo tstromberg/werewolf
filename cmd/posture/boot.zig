@@ -158,7 +158,13 @@ fn imagePolicy(p: *Posture) !void {
         .how = "the single-root default-deny policy is active and enforcing, and PID 1 " ++
             "cannot regain CAP_MAC_ADMIN",
         .result = if (ipe_on and bounded != null and !bounded.?) .pass else .fail,
-        .detail = if (!ipe_on) "no enforcing release IPE policy" else "",
+        .detail = if (!ipe_on)
+            if (p.insecure)
+                "no enforcing release IPE policy (insecure mode: werewolf.insecure=1)"
+            else
+                "no enforcing release IPE policy"
+        else
+            "",
     });
 }
 

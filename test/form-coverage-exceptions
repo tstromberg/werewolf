@@ -1,0 +1,9 @@
+# Form     Minimum  Why fewer form-specific cases are useful
+minimal    0        Boot foundation; verified root, slots and refusals are tested by the shared and dedicated boot suites.
+prod       0        Machine foundation; DHCP, metadata, encrypted data and updates have dedicated integration suites.
+app        0        Declares only the application directory; runnable applications are tested in the language examples.
+node       0        Runtime only; Node.js service behavior is tested by node-example and the supplied-code node-app boot.
+python     0        Runtime only; Python service behavior is tested by python-example and the supplied-code python-app boot.
+ruby       0        Runtime only; Ruby service behavior is tested by ruby-example and the supplied-code ruby-app boot.
+jre        0        Runtime only; Java service behavior is tested by jre-example and the supplied-code jre-app boot.
+jre21      0        Runtime only; Java 21 service behavior is tested by kafka and dependency-track.

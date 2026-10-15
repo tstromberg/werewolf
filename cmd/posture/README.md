@@ -58,7 +58,7 @@ and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progres
 - **Attacks**, only with `werewolf.check=1`, `--attack` or `WEREWOLF_CHECK=1`
   (containers): `/proc/1/mem` and `/dev/mem` must be refused and logged; as
   `nobody`, `/proc/1` must be hidden, `/run` closed, and link tricks in `/tmp`
-  refused; and posture leashed as `nobody` (`--probe`) tries what it was not granted.
+  refused; a leashed `--probe` tests its grants. A lock isolates concurrent attacks on werewolf.
 - **Service** (`/etc/sv/posture/run`): it waits up to 60 s for each other
   service to run 5 s or be down on request, writes `/run/werewolf/posture/posture.json`,
   prints the line, and parks itself with `sv down`.

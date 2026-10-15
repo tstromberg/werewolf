@@ -182,7 +182,7 @@ flag named for its variable: `secret SMTP_PASSWORD PATH` is
 ## People
 
 A form that runs sshd takes root's keys from the boot config (`--root-keys`).
-A manifest can also name people, each with security keys, and make some
+A manifest can also name UNIX accounts, optionally with security keys, and make some
 of them admins, whose keys log in as root too:
 
 ```yaml
@@ -192,10 +192,18 @@ users:
     admin: true
 ```
 
+For an account without SSH access, declare `users: {alice: {}}`. In the boot config's `users` file, a line containing only `alice` makes that account without keys. An admin must have keys. Cloud metadata reapplies these declarations as they change, with stable account IDs; no image rebuild or reinstall is needed.
+
 They are never in the image: howl packs them into the boot config, and at
 boot init makes each an account of its own (uid its name's hash, home on
 `/data`, a shell where busybox gives one) and writes its keys where sshd
 looks. A form others take may name none; the people are the machine's.
+
+Services normally have distinct UNIX users. Components of one application can
+share an identity by declaring `shared-user: true` in every participating
+service, alongside the same `user`. This shares UNIX file and process access
+and UID-based network policy; Landlock rules, seccomp filters and process
+limits remain per service. Root cannot be shared.
 
 ## Settings
 

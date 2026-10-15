@@ -30,6 +30,7 @@ There is nothing to import. Logs from this machine are the files under `/data/sv
 
 ### Known Quirks
 
+- The image carries its own loader and libc; Werewolf's base glibc does not replace them. `LD_LIBRARY_PATH` selects the image's `/usr/local/zeek/lib`.
 - No packages and no Management framework. What Zeek runs is the image's `local`.
 - Promiscuous mode is on, so a mirror can deliver frames addressed to other machines.
 

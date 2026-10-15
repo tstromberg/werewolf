@@ -274,8 +274,8 @@ and never blocks a process on a full queue.
 
 ## hostkey
 
-Makes an ssh host key once with ssh-keygen, for sshd-start, ssh-host-key
-and gitea-init. Both halves are written as KEY.new, synced, and renamed
+Makes an ssh host key once with ssh-keygen, for ssh-host-key and
+gitea-init. Both halves are written as KEY.new, synced, and renamed
 public half first, so an interrupted boot leaves a whole key or none. A
 missing public half is rebuilt from the key.
 

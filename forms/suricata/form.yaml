@@ -20,8 +20,6 @@ allow: [packet, netadmin]
 weaknesses:
   network-fence-unbypassable: Suricata captures the interface and sets promiscuous mode; the bounding set keeps CAP_NET_RAW and CAP_NET_ADMIN for that service
 
-programs: [crash-log.so]
-
 # python and suricata-update, which the package depends on and nothing
 # runs. rules-fetch downloads the signature cache.
 prune:
@@ -74,7 +72,5 @@ services:
     user: suricata
     caps: net_raw net_admin
     pledge: stdio rpath wpath unix proc packet listen
-    # A fatal signal writes its pc here. Suricata dies in silence otherwise.
-    env: [LD_PRELOAD=/usr/lib/werewolf/crash-log.so, CRASH_LOG=/data/svc/suricata/crash.log]
     read: [/etc/suricata, /usr/share/suricata, /data/svc/rules-fetch]
     memory: 2048

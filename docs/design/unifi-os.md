@@ -44,9 +44,45 @@ startup and storage inside UniFi's form.
 UniFi Core's pre-start hook creates a PostgreSQL role and database,
 prepares configuration and timezone files, and restarts nginx. Network's
 unit starts Java directly and uses helpers for paths and initialization.
-UniFi Core also imports a D-Bus client: service control may need a small
-compatibility service with a fixed vocabulary. Never expose arbitrary
-commands, package installation or a general systemd control interface.
+Network also needs `-Dunifi-os.server=true` from the vendor's environment
+file; otherwise its hardware-console identification path rejects this VM.
+Keep inform port 8080 distinct from its local API port 8081. Its mandatory
+support connector uses 28082; Werewolf restricts this and the other management
+ports to local access even when vendor code binds all interfaces.
+Network's bundled validator requires a version-5 UUID. Core's pre-start
+hook hashes a random name in the DNS namespace, syncs a private temporary
+file, then links it into place without replacing an existing identity.
+Malformed or incompatible identities fail closed; upgrades never rotate them.
+The native [unifi-systemd](../../examples/unifi-os/cmd/unifi-systemd/README.md)
+adapter implements Subscribe, LoadUnit and property queries. It reports
+real runit state and emits PropertiesChanged. StatusText remains empty
+until actual application readiness notifications are integrated. Bundled
+but unstarted identity and agent units are explicitly inactive; unknown
+units and unsupported actions return errors.
+
+Core mounts a dedicated shared socket directory into its OCI root. The
+adapter checks both SO_PEERCRED and the EXTERNAL handshake against Core's
+UID. It can read two supervisor directories and write its socket directory;
+it cannot execute programs or write supervisor control pipes. Core's own
+application data stays private. No general system bus is exposed.
+
+Core's generated configuration uses a second declared mount at
+`/werewolf/config`. Its HTTP and authentication sockets live there; the
+generic private data mount does not allow socket creation. The supported
+configPath override preserves generated files across reboot without making
+the application image writable. Console logging exposes startup failures.
+
+The native [nginx supervisor](../../examples/unifi-os/cmd/unifi-nginx/README.md)
+specializes the inherited nginx form's service and configuration. Its private
+Unix endpoint accepts only Core's fixed reload packet after SO_PEERCRED
+authentication. It tests
+the fixed configuration before signalling its unreaped nginx child; callers
+cannot select a command, path or PID. nginx reads shared configuration and
+TLS files, and has no access to Core's private data. Vendor authentication,
+CSRF, traversal and header filtering rules remain in place. Template overlays
+adapt paths, logs and IPv4 listeners. The two HTML entry pages bake in the
+same model metadata Core would otherwise inject at runtime; its patcher
+recognizes that marker and leaves the verified application image read-only.
 
 Deliver application updates by rebuilding and signing Werewolf images.
 Determine how the OS console reports unsupported update and host actions;

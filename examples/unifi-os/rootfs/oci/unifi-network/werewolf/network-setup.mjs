@@ -9,7 +9,8 @@ try {
     'db.mongo.uri=mongodb://127.0.0.1:27017/ace',
     'statdb.mongo.uri=mongodb://127.0.0.1:27017/ace_stat',
     'unifi.db.name=ace',
-    'unifi.http.port=8081',
+    'unifi.http.port=8080',
+    'unifi.local.http.port=8081',
     '',
   ].join('\n'), { flag: 'wx', mode: 0o600 })
 } catch (error) {

@@ -38,6 +38,8 @@ pub const Cmdline = struct {
     /// native selects the slot from the signed UKI's canonical firmware path.
     native: bool = false,
     secure: bool = false,
+    /// insecure marks a machine built or started with --insecure (no IPE/TPM).
+    insecure: bool = false,
     /// bootstrap is a rootless enrollment boot; stage0 must never hand it over.
     bootstrap: bool = false,
     /// recovery is a separate signed bootstrap; never inferred from TPM state.
@@ -55,11 +57,14 @@ test "TPM enforcement requires sealed secure native identity and rejects overrid
         "werewolf.slots=57e1f000-77e2-4b0f-8a3c-0000000000a0 werewolf.esp=57E1-F000";
     const release = " werewolf.release=" ++ @as([64]u8, @splat('a'));
     try t.expect(parse(native ++ " werewolf.tpm=2" ++ release, &f).?.tpm);
+    try t.expect(parse("werewolf.insecure=1", &f).?.insecure);
     for ([_][]const u8{
         native ++ " werewolf.tpm=2",
         native ++ release,
         native ++ " werewolf.tpm=1" ++ release,
         native ++ " werewolf.tpm=2" ++ release ++ release,
+        native ++ " werewolf.tpm=2" ++ release ++ " werewolf.insecure=1",
+        "werewolf.insecure=0",
         "werewolf.tpm=2" ++ release,
     }) |bad| try t.expect(parse(bad, &f) == null);
 }
@@ -105,6 +110,7 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
             .check => c.check = if (isOne(v)) true else return refuse(f, "not 1"),
             .native => c.native = if (isOne(v)) true else return refuse(f, "not 1"),
             .secure => c.secure = if (isOne(v)) true else return refuse(f, "not 1"),
+            .insecure => c.insecure = if (isOne(v)) true else return refuse(f, "not 1"),
             .bootstrap => c.bootstrap = if (isOne(v)) true else return refuse(f, "not 1"),
             .recovery => c.recovery = if (isOne(v)) true else return refuse(f, "not 1"),
             .tpm => c.tpm = if (std.mem.eql(u8, v, "2"))
@@ -147,6 +153,10 @@ pub fn parse(text: []const u8, f: *Failure) ?Cmdline {
     if (c.tpm != (c.release != null) or (c.tpm and !c.secure)) {
         f.word = "werewolf.tpm";
         return refuse(f, "requires secure native boot and an exact release identity");
+    }
+    if (c.insecure and (c.bootstrap or c.recovery or c.tpm)) {
+        f.word = "werewolf.insecure";
+        return refuse(f, "conflicts with protected boot");
     }
     if (!c.native and (c.slots == null) != (c.slot == null)) {
         f.word = "werewolf.slots";

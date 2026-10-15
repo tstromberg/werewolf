@@ -8,6 +8,7 @@ const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
 const broker = @import("broker");
 const cmdline = @import("cmdline");
+const sandbox = @import("sandbox");
 
 const committed = "/run/werewolf/committed";
 const updater_ready = "/run/werewolf/updater-ready";
@@ -16,6 +17,7 @@ const wait = 15;
 
 pub fn main(init: std.process.Init) !void {
     broker.keepOnlyClient(.keeper);
+    try sandbox.keepOnly(0);
     const io = init.io;
     const gpa = init.arena.allocator();
     // Parse as stage0 does (lib/cmdline.zig).

@@ -200,10 +200,30 @@ fn mount(source: [:0]const u8, target: [:0]const u8, kind: [:0]const u8, flags: 
 }
 
 fn anonymousMapping() !void {
+    const PR_SET_MDWE = 65;
+    const PR_MDWE_REFUSE_EXEC_GAIN = 1;
+    // Before PR_SET_MDWE is set (as on an allow: [jit] form), anonymous
+    // memory can be made executable under IPE; file-backed memory cannot.
+    const jit = linux.mmap(
+        null,
+        4096,
+        .{ .READ = true, .WRITE = true },
+        .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+        -1,
+        0,
+    );
+    if (linux.errno(jit) != .SUCCESS) return error.AnonymousReadMapping;
+    const jit_addr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(jit);
+    defer _ = linux.munmap(jit_addr, 4096);
+    if (linux.errno(linux.mprotect(jit_addr, 4096, .{ .READ = true, .EXEC = true })) != .SUCCESS)
+        return error.JitProtect;
+    // Once PID 1 sets PR_SET_MDWE (every non-JIT form), anonymous W^X is refused.
+    if (linux.errno(linux.prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN, 0, 0, 0)) != .SUCCESS)
+        return error.Mdwe;
     const executable = linux.mmap(
         null,
         4096,
-        .{ .READ = true, .EXEC = true },
+        .{ .READ = true, .WRITE = true, .EXEC = true },
         .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,

@@ -29,11 +29,15 @@ laptop, so the private half never leaves it.
 ## Detailed design
 
 - **Run by leash** as a `before`, as the service's user, inside its
-  Landlock rules: `ssh-host-key /data/svc/sshd/host-key`. KEY must be an
-  absolute path.
+  Landlock rules: `ssh-host-key /data/svc/sshd/host-key` (or `ssh-host-key
+  /data/svc/sshd/host-key /run/svc/sshd/host-key` when `sshd` reads from
+  `/run/svc/sshd` and may also boot on RAM). KEY and COPY must be absolute
+  paths.
 - **Kept**: if the key exists, it is used. If its public half is missing,
   `ssh-keygen -y` makes it again from the key; it is written beside its
-  place, synced, and renamed in.
+  place, synced, and renamed in. When COPY is given, both halves are copied
+  there as mode 0600 files (or made at COPY for this boot alone when `/data`
+  is unavailable or on RAM).
 - **Made**: only if the key's directory exists and is not on RAM (tmpfs).
   Leftovers of an interrupted run (`KEY.new`, `KEY.new.pub`) are removed,
   since ssh-keygen would prompt before overwriting them. `ssh-keygen -t
@@ -45,17 +49,16 @@ laptop, so the private half never leaves it.
   `new, kept in /data` on the boot that made the key. The fingerprint is
   the SHA-256 of the key's decoded blob in unpadded base64, as
   `ssh-keygen -l` prints it.
-- **Shared** with sshd-start through `lib/hostkey.zig`: the atomic make,
-  the public-half repair, the fingerprint and the RAM check. Only
-  ssh-keygen generates key material.
-- **Fails** with the reason, which keeps sshd down: no `/data`, `/data` on
-  RAM, an unreadable key, `ssh-keygen` failing.
+- **Shared** through `lib/hostkey.zig`: the atomic make, the public-half
+  repair, the fingerprint and the RAM check. Only ssh-keygen generates key
+  material.
+- **Fails** with the reason, which keeps sshd down: no `/data` or `/data` on
+  RAM (when COPY is omitted), an unreadable key, `ssh-keygen` failing.
 
 ## Drawbacks
 
 - sshd's user owns the key, so a compromised sshd process can read it.
-  That is the price of not running sshd as root.
-- A machine without `/data` has no ssh.
+- Without COPY, a machine without `/data` has no ssh.
 
 ## Alternatives Considered
 

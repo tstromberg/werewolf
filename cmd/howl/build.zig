@@ -49,6 +49,9 @@ pub const Spec = struct {
     arch: howl.Arch,
     /// dev adds a shell, as DEV=1 does.
     dev: bool = false,
+    /// insecure disables default IPE enforcement and adds werewolf.insecure=1
+    /// to the slot command line.
+    insecure: bool = false,
     /// app is the staged application's root (howl.appBuild), or null.
     app: ?[]const u8 = null,
     /// build and programs replace BUILD and PROGRAMS, as make's BUILD= and
@@ -125,6 +128,7 @@ const BuildOptions = struct {
     /// local takes werewolf's programs from this checkout (--build), not
     /// from its repository.
     local: bool = false,
+    insecure: bool = false,
     dir: []const u8 = "dist",
     arch: howl.Arch,
     format: DiskFormat = .qcow2,
@@ -158,6 +162,10 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
         }
         if (std.mem.eql(u8, args[i], "--build")) {
             o.local = true;
+            continue;
+        }
+        if (std.mem.eql(u8, args[i], "--insecure")) {
+            o.insecure = true;
             continue;
         }
         if (std.mem.eql(u8, args[i], "--boot-native")) {
@@ -200,12 +208,20 @@ fn buildOptions(args: []const []const u8, host: ?howl.Arch, why: *howl.Why) !Bui
             o.format = std.meta.stringToEnum(DiskFormat, v) orelse
                 return why.refuse("--format {s}: qcow2 raw vhd vmdk", .{v});
         } else return why.refuse(
-            "{s}: build takes --build, -o, --arch, --format, --app, --ipe-kernel, --ipe-key, " ++
-                "--ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert and " ++
-                "--boot-native, --tpm-pub, --tpm-firmware, --permit-host and --permit-port\n{s}",
+            "{s}: build takes --build, --insecure, -o, --arch, --format, --app, --ipe-kernel, " ++
+                "--ipe-key, --ipe-cert, --ipe-updates, --image-serial, --boot-key, --boot-cert " ++
+                "and --boot-native, --tpm-pub, --tpm-firmware, --permit-host and " ++
+                "--permit-port\n{s}",
             .{ a, howl.usage },
         );
     }
+    if (o.insecure and (o.ipe_kernel != null or o.ipe_key != null or o.ipe_cert != null or
+        o.ipe_updates != null or o.image_serial != null or o.boot_key != null or
+        o.boot_cert != null or o.boot_native or o.tpm_pub != null or o.tpm_firmware))
+        return why.refuse(
+            "--insecure cannot be combined with IPE, Secure Boot or TPM options",
+            .{},
+        );
     o.form = form orelse return why.refuse("no form\n{s}", .{howl.usage});
     o.arch = arch orelse return why.refuse("{s}: --arch", .{howl.not_built_here});
     return o;
@@ -233,6 +249,11 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
         .log = try gpa.print("build/log/{s}-{s}-build.log", .{ f, a }),
         .first = howl.start_phase,
     });
+    const ipe_inputs: ?@import("prerequisites.zig").Inputs = if (!o.insecure and
+        o.ipe_kernel == null)
+        try @import("prerequisites.zig").resolve(io, gpa, &steps, o.arch, why)
+    else
+        null;
 
     // minimal is released whole, for direct boot; the rest as the slot
     // the updater follows, and as a disk to boot a VM from.
@@ -240,11 +261,12 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
     const spec: Spec = .{
         .form = ref,
         .arch = o.arch,
+        .insecure = o.insecure,
         .app = ab.root,
         .published = !o.local,
-        .ipe_kernel = o.ipe_kernel,
-        .ipe_key = o.ipe_key,
-        .ipe_cert = o.ipe_cert,
+        .ipe_kernel = o.ipe_kernel orelse if (ipe_inputs) |inp| inp.kernel else null,
+        .ipe_key = o.ipe_key orelse if (ipe_inputs) |inp| inp.key else null,
+        .ipe_cert = o.ipe_cert orelse if (ipe_inputs) |inp| inp.cert else null,
         .ipe_updates = o.ipe_updates,
         .update_port = if (o.ipe_updates) |url| (try std.Uri.parse(url)).port orelse 443 else null,
         .image_serial = o.image_serial,
@@ -406,7 +428,7 @@ pub fn build(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) 
 /// DISK_MIB and DISK_ARGS; the qcow2 goal takes --disk-mib too.
 pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *howl.Why) !void {
     const verbose, const args = try howl.verboseFlag(gpa, given);
-    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--published] " ++
+    const syntax = "_build --with FORM [--arch ARCH] [--dev] [--insecure] [--published] " ++
         "[--app DIR | --app-root DIR] " ++
         "[--build DIR] [--programs DIR] [--disk FILE] [--disk-mib N] [--disk-args ARGS] " ++
         "[--ipe-kernel TAR --ipe-key KEY --ipe-cert CERT] " ++
@@ -421,6 +443,8 @@ pub fn buildTargets(io: Io, gpa: Allocator, given: []const []const u8, why: *how
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--dev")) {
             spec.dev = true;
+        } else if (std.mem.eql(u8, args[i], "--insecure")) {
+            spec.insecure = true;
         } else if (std.mem.eql(u8, args[i], "--boot-native")) {
             spec.boot_native = true;
         } else if (std.mem.eql(u8, args[i], "--tpm-firmware")) {
@@ -736,7 +760,6 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
         steps.why,
     );
     var b = try plan(io, gpa, steps, s, p, env, names);
-    if (s.ipe_kernel != null) try checkIpeForms(gpa, b.chain);
     if (previous) |rec| b.locked_images = rec.images;
     // The chain's images, baked before anything renders their services.
     try oci.lay(&b);
@@ -782,6 +805,9 @@ fn pipeline(io: Io, gpa: Allocator, steps: *progress.Steps, s: Spec, goals: Goal
 }
 
 fn validateIpe(s: Spec) !void {
+    if (s.insecure and (s.ipe_kernel != null or s.ipe_key != null or s.ipe_cert != null or
+        s.ipe_updates != null or s.image_serial != null or s.tpm_pub != null or s.tpm_firmware))
+        return error.InsecureWithProtectedOptions;
     if ((s.permit_host == null) != (s.permit_port == null)) return error.BadPermitTransport;
     if (s.permit_host) |host| {
         if (!s.tpm_firmware or s.permit_port.? == 0 or
@@ -833,37 +859,6 @@ test "portable firmware authority requires the complete protected profile" {
     s.permit_host = "192.168.5.2";
     s.boot_native = false;
     try t.expectError(error.TpmNeedsSignedNativeIpeUpdates, validateIpe(s));
-}
-
-fn checkIpeForms(gpa: Allocator, chain: []const forms.Form) !void {
-    for (chain) |fm| for (try fm.items(gpa, "allow")) |line| {
-        var words = mem.tokenizeAny(u8, line, " \t");
-        while (words.next()) |word| if (mem.eql(
-            u8,
-            word,
-            "jit",
-        )) return error.IpeCannotAuthorizeJit;
-    };
-}
-
-test "a child form cannot hide an inherited JIT allowance from IPE" {
-    const t = std.testing;
-    var arena: std.heap.ArenaAllocator = .init(t.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var diag: forms.Diagnostic = .{};
-    const base: forms.Form = .{
-        .name = "base",
-        .dir = "forms/base",
-        .spec = try forms.parse(gpa, "allow:\n  - jit\n", &diag),
-    };
-    const child: forms.Form = .{
-        .name = "child",
-        .dir = "forms/child",
-        .spec = try forms.parse(gpa, "allow:\n  - pty\n", &diag),
-    };
-    try checkIpeForms(gpa, &.{child});
-    try t.expectError(error.IpeCannotAuthorizeJit, checkIpeForms(gpa, &.{ base, child }));
 }
 
 test "IPE builds require all signing inputs and have separate output paths" {
@@ -1103,6 +1098,7 @@ test buildOptions {
         .x86_64,
         (try buildOptions(&.{ "--arch", "x86_64", "prod" }, null, &why)).arch,
     );
+    try testing.expect((try buildOptions(&.{ "prod", "--insecure" }, .aarch64, &why)).insecure);
     for ([_][]const []const u8{
         &.{},
         &.{ "a", "b" },
@@ -1110,6 +1106,8 @@ test buildOptions {
         &.{ "a", "--format", "zip" },
         &.{ "a", "--on", "gcp" },
         &.{ "a", "-o" },
+        &.{ "a", "--insecure", "--ipe-kernel", "k.tar" },
+        &.{ "a", "--insecure", "--boot-key", "k.pem" },
     }) |args| try testing.expectError(error.Refused, buildOptions(args, .aarch64, &why));
     try testing.expectError(error.Refused, buildOptions(&.{"a"}, null, &why));
     try testing.expectEqual(

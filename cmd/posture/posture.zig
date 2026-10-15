@@ -191,6 +191,8 @@ pub const Report = struct {
     host: []const u8,
     kernel: []const u8,
     root: bool,
+    /// insecure is true when booted with werewolf.insecure=1 (--insecure).
+    insecure: bool = false,
     /// allow lists, sorted, the werewolf defaults the form gave up at build
     /// time (/etc/werewolf/allow). The checks still measure them.
     allow: []const []const u8 = &.{},
@@ -254,6 +256,8 @@ pub const Posture = struct {
     root: bool,
     /// Image metadata directory, not the underlying distro name.
     werewolf: bool = false,
+    /// insecure is true when /proc/cmdline carries werewolf.insecure=1.
+    insecure: bool = false,
     /// extended adds the checks werewolf fails by choice (--extended).
     extended: bool = false,
     /// attack runs attacks.zig even without werewolf.check=1 (--attack), for
@@ -390,6 +394,7 @@ pub const Posture = struct {
             .host = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.nodename, 0)),
             .kernel = try p.gpa.dupe(u8, std.mem.sliceTo(&uts.release, 0)),
             .root = p.root,
+            .insecure = p.insecure,
             .allow = try p.allowances(),
             .summary = .{},
             .checks = p.checks.items,
@@ -409,6 +414,11 @@ pub const Posture = struct {
             defer root.close(p.io);
             p.werewolf = werewolfImage(p.io, root);
         } else |_| p.werewolf = false;
+        var bad: cmdline.Failure = .{};
+        p.insecure = if (p.werewolf)
+            if (cmdline.parse(p.read("/proc/cmdline"), &bad)) |cmd| cmd.insecure else false
+        else
+            false;
         const start = if (p.verbose) Io.Timestamp.now(p.io, .awake) else null;
         // Prove logging before the refusal probes can fill its backlog.
         try p.phase("audit", kernel.logged);
@@ -799,6 +809,7 @@ fn printText(w: *Io.Writer, r: Report, cols: ?usize) !void {
     try w.writeAll(", on ");
     try writeClean(w, r.host);
     try w.print(" ({s})\n", .{if (r.root) "root" else "not root: some checks are limited"});
+    if (r.insecure) try w.writeAll("Mode: INSECURE (booted with werewolf.insecure=1)\n");
     if (r.allow.len > 0) {
         try w.writeAll("Its form allows:");
         for (r.allow) |a| {
@@ -930,6 +941,7 @@ fn printSummary(gpa: Allocator, w: *Io.Writer, r: Report, cols: ?usize, color: b
         dim,            r.summary.skip,
         reset,
     });
+    if (r.insecure) try w.print("{s} · INSECURE MODE{s}", .{ red, reset });
     if (!r.root) try w.print("{s} · some checks limited (not root){s}", .{ dim, reset });
     try w.writeByte('\n');
     var width: usize = 0;
@@ -1115,6 +1127,7 @@ fn printLine(gpa: Allocator, w: *Io.Writer, r: Report) !void {
         try w.writeAll(c.id);
     }
     try w.print(" pass={d} skip={d} ", .{ r.summary.pass, r.summary.skip });
+    if (r.insecure) try w.writeAll("mode=insecure ");
     var brief = r;
     brief.checks = failed.items;
     try std.json.Stringify.value(brief, .{ .emit_null_optional_fields = false }, w);
@@ -2005,6 +2018,27 @@ test printLine {
     out.clearRetainingCapacity();
     try printLine(arena.allocator(), &out.writer, clean);
     try testing.expect(std.mem.startsWith(u8, out.written(), "posture: fail= pass=1 skip=0 {"));
+
+    var insecure = clean;
+    insecure.insecure = true;
+    out.clearRetainingCapacity();
+    try printLine(arena.allocator(), &out.writer, insecure);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        out.written(),
+        "posture: fail= pass=1 skip=0 mode=insecure {",
+    ));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\"insecure\":true") != null);
+    out.clearRetainingCapacity();
+    try printText(&out.writer, insecure, 80);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        out.written(),
+        "Mode: INSECURE (booted with werewolf.insecure=1)\n",
+    ) != null);
+    out.clearRetainingCapacity();
+    try printSummary(arena.allocator(), &out.writer, insecure, 80, false);
+    try testing.expect(std.mem.indexOf(u8, out.written(), " · INSECURE MODE\n") != null);
 }
 
 test serviceSettled {

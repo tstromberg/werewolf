@@ -32,7 +32,7 @@ Inline files, timers, conditionals, doas, sudo, su, OS Login, changing a disk or
 | `base`, `with` | Form chain; every form's `with` counts; ad-hoc creation defaults to `prod` |
 | `packages` | Additional Wolfi packages; form dependencies retain their own constraints |
 | `services` | Named leash directives, replaced whole by name; `image` pins OCI, `link` reaches another service; listeners and connections derive fence policy |
-| `users` | Named people with security keys, optional `admin` or bastion destinations; boot config only, never the image; needs sshd or bastion |
+| `users` | Named UNIX accounts with optional security keys; `admin` requires keys; boot config only, never the image |
 | `updates` | `every`, `from`, `policy`, or `off`; last declaration wins. `policy` is quoted JSON using [update-policy.md](update-policy.md) |
 | `machine` | Top manifest only: hostname, ip, gw, dns, data-key, on, arch, size, allow-from, metadata-users; forwarded at creation, immutable on apply |
 | `app` | Destination in the image; `--app DIR` supplies its source tree |

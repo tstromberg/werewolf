@@ -10,6 +10,8 @@ pub const Service = struct {
     exec: []const []const u8 = &.{},
     before: []const []const []const u8 = &.{},
     user: []const u8 = "",
+    /// Every component sharing this UNIX identity must opt in.
+    shared_user: bool = false,
     listen: []const u16 = &.{},
     /// listen_udp are its UDP ports, which fence alone holds: Landlock
     /// cannot restrict a UDP bind (docs/design/listen-udp.md).
@@ -29,8 +31,8 @@ pub const Service = struct {
     /// image, read or write. The first service that writes a path owns
     /// it. Another service reaches it only in that user's group.
     data: []const Mount = &.{},
-    /// caps is CAP_NET_RAW and CAP_NET_ADMIN, the only capabilities a
-    /// service file may keep besides a low port's. Empty is none.
+    /// caps is CAP_NET_RAW and CAP_NET_ADMIN, or login for sshd: the only
+    /// capabilities a service file may keep besides a low port's. Empty is none.
     caps: u32 = 0,
     run: []const []const u8 = &.{},
     requires: []const []const u8 = &.{},
@@ -91,11 +93,27 @@ const narrowing: seal.Set = .initMany(&.{ .rpath, .exec, .landlock, .seccomp });
 /// network is what no narrowed program may promise.
 const network: seal.Set = .initMany(&.{ .inet, .unix, .netlink, .packet, .connect, .listen });
 
-/// cap is the bit a `caps` line may name: CAP_NET_ADMIN and CAP_NET_RAW.
-/// A service file cannot keep any other capability.
+/// cap is the bit a `caps` line may name: CAP_NET_ADMIN, CAP_NET_RAW, or
+/// login for sshd when a machine logs people in.
 pub const cap = struct {
     pub const net_admin: u32 = 1 << 12;
     pub const net_raw: u32 = 1 << 13;
+    pub const login: u32 = 1 << 31;
+    pub const login_set: u64 = (1 << 0) | // CHOWN
+        (1 << 1) | // DAC_OVERRIDE
+        (1 << 2) | // DAC_READ_SEARCH
+        (1 << 3) | // FOWNER
+        (1 << 4) | // FSETID
+        (1 << 5) | // KILL
+        (1 << 6) | // SETGID
+        (1 << 7) | // SETUID
+        (1 << 10) | // NET_BIND_SERVICE
+        (1 << 18) | // SYS_CHROOT
+        (1 << 22) | // SYS_BOOT
+        (1 << 24) | // SYS_RESOURCE
+        (1 << 26) | // SYS_TTY_CONFIG
+        (1 << 29) | // AUDIT_WRITE
+        (@as(u64, 1) << 34); // SYSLOG
 };
 
 /// Mount is a `data` line: a directory under /data/share/NAME, bound
@@ -141,6 +159,7 @@ pub const Bad = struct { line: usize = 0, why: []const u8 = "" };
 pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var exec: ?[]const []const u8 = null;
     var user: ?[]const u8 = null;
+    var shared_user: ?bool = null;
     var nofile: ?u32 = null;
     var memory: ?u32 = null;
     var cpu: ?u16 = null;
@@ -157,6 +176,8 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var sockets: std.ArrayList([]const u8) = .empty;
     var data: std.ArrayList(Mount) = .empty;
     var caps: u32 = 0;
+    var user_line: usize = 0;
+    var caps_line: usize = 0;
     var read: std.ArrayList([]const u8) = .empty;
     var write: std.ArrayList([]const u8) = .empty;
     var run: std.ArrayList([]const u8) = .empty;
@@ -186,9 +207,14 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         } else if (std.mem.eql(u8, key, "user")) {
             if (user != null) return invalid(bad, "user twice");
             if (args.len != 1 or !isName(args[0])) return invalid(bad, "user takes one plain name");
-            if (std.mem.eql(u8, args[0], "root"))
-                return invalid(bad, "user root: a service runs as a user of its own");
             user = args[0];
+            user_line = n;
+        } else if (std.mem.eql(u8, key, "shared-user")) {
+            if (shared_user != null) return invalid(bad, "shared-user twice");
+            if (args.len != 1 or (!std.mem.eql(u8, args[0], "true") and
+                !std.mem.eql(u8, args[0], "false")))
+                return invalid(bad, "shared-user takes true or false");
+            shared_user = std.mem.eql(u8, args[0], "true");
         } else if (std.mem.eql(u8, key, "group")) {
             if (args.len == 0) return invalid(bad, "group takes names");
             for (args) |a| {
@@ -308,11 +334,14 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
         } else if (std.mem.eql(u8, key, "caps")) {
             if (caps != 0) return invalid(bad, "caps twice");
             if (args.len == 0) return invalid(bad, "caps takes net_raw and net_admin");
+            caps_line = n;
             for (args) |a| {
                 const bit: u32 = if (std.mem.eql(u8, a, "net_raw"))
                     cap.net_raw
                 else if (std.mem.eql(u8, a, "net_admin"))
                     cap.net_admin
+                else if (std.mem.eql(u8, a, "login"))
+                    cap.login
                 else
                     return invalid(bad, "caps takes net_raw and net_admin, each once");
                 if (caps & bit != 0) return invalid(
@@ -342,6 +371,16 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
             try data.append(gpa, .{ .host = args[0], .image = args[1], .write = writable });
         } else return invalid(bad, "unknown key");
     }
+    if (caps & cap.login != 0 and caps != cap.login) {
+        bad.line = caps_line;
+        return invalid(bad, "caps login stands alone");
+    }
+    if (std.mem.eql(u8, user orelse "", "root") != (caps & cap.login != 0)) {
+        bad.line = if (user_line != 0) user_line else caps_line;
+        return invalid(bad, "user root: a service runs as a user of its own");
+    }
+    if ((shared_user orelse false) and std.mem.eql(u8, user orelse "", "root"))
+        return invalid(bad, "root cannot be a shared service user");
     bad.line = 0;
     if (dir != null and root == null) return invalid(bad, "dir without root");
     if (data.items.len > 0 and root == null) return invalid(bad, "data is an image's");
@@ -369,6 +408,7 @@ pub fn parse(gpa: Allocator, text: []const u8, bad: *Bad) !Service {
     var s: Service = .{
         .exec = exec orelse return invalid(bad, "no exec"),
         .user = user orelse return invalid(bad, "no user"),
+        .shared_user = shared_user orelse false,
         .pledge = promises,
         .before = before.items,
         .listen = listen.items,
@@ -667,6 +707,28 @@ fn isVariable(s: []const u8) bool {
 
 const testing = std.testing;
 
+test "sharing a service identity is explicit, once, and never root" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var bad: Bad = .{};
+    const base = "exec /a\nuser app\npledge stdio\n";
+    try testing.expect(!(try parse(gpa, base, &bad)).shared_user);
+    try testing.expect((try parse(gpa, base ++ "shared-user true\n", &bad)).shared_user);
+    try testing.expect(!(try parse(gpa, base ++ "shared-user false\n", &bad)).shared_user);
+    inline for ([_][]const u8{
+        "shared-user\n",
+        "shared-user yes\n",
+        "shared-user true false\n",
+        "shared-user true\nshared-user true\n",
+    }) |suffix|
+        try testing.expectError(error.Invalid, parse(gpa, base ++ suffix, &bad));
+    try testing.expectError(
+        error.Invalid,
+        parse(gpa, "exec /a\nuser root\npledge stdio\ncaps login\nshared-user true\n", &bad),
+    );
+}
+
 test parse {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -748,6 +810,13 @@ test parse {
     try testing.expect(scan.data[0].write);
     try testing.expect(!scan.data[1].write);
     try testing.expectEqualStrings("/var/lib/notus", scan.data[1].image);
+    const login = try parse(
+        arena.allocator(),
+        "exec /usr/bin/sshd\nuser root\ncaps login\npledge stdio\n",
+        &bad,
+    );
+    try testing.expectEqual(cap.login, login.caps);
+    try testing.expectEqualStrings("root", login.user);
 }
 
 test "parse refuses" {
@@ -759,6 +828,8 @@ test "parse refuses" {
         .{ .text = "exec a\nuser x", .line = 1 },
         .{ .text = "exec /a/../b\nuser x", .line = 1 },
         .{ .text = "exec /a\nuser root", .line = 2 },
+        .{ .text = "exec /a\nuser x\ncaps login", .line = 2 },
+        .{ .text = "exec /a\nuser root\ncaps login net_raw", .line = 3 },
         .{ .text = "exec /a\nuser x\nsecret P /run/config/p maybe", .line = 3 },
         .{ .text = "exec /a\nuser x\ngroup", .line = 3 },
         .{ .text = "exec /a\nuser x\ngroup Valkey", .line = 3 },

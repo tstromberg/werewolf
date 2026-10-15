@@ -37,6 +37,7 @@ const config =
     \\    "mysql.enabled": false,
     \\    "ssh.enabled": true,
     \\    "ssh.port": 22,
+    \\    "ssh.key_path": "/data",
     \\    "ssh.version": "SSH-2.0-OpenSSH_5.1p1 Debian-4",
     \\    "redis.enabled": false,
     \\    "rdp.enabled": true,

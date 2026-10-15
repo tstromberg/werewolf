@@ -4,15 +4,14 @@ A document archive with OCR and search: [Paperless-ngx](https://docs.paperless-n
 
 ## Security Posture
 
-- The web server, the consumer, the worker and the scheduler each run as their own user. They share the library, which the web server's user owns. The root is read-only. `/data` is what survives.
+- The web server, consumer, worker and scheduler share the unprivileged paperless user and private upload files. Each retains separate service rules and process limits. The root is read-only. `/data` is what survives.
 - Sign-up is closed. The administrator is created from the config before the site answers.
 - The web server listens on loopback. Caddy is the public port.
-- The queue is Valkey's socket. There is no Redis port.
+- The queue and PostgreSQL database use local UNIX sockets. Paperless authenticates to PostgreSQL as its UNIX user; neither has a TCP listener.
 
 ### Weaknesses
 
 - Python runs Paperless. Named in `form.yaml`.
-- The four services share one library, so the files they make stay writable by that group. Named in `form.yaml`.
 
 ## Getting Started
 
@@ -44,7 +43,9 @@ Sign in at `https://paper.example.com`. The library is in `/data/svc/paperless`.
 
 ### Importing data
 
-The database is SQLite in `/data`, and the documents are files beside it. The host cannot write that directory. Add documents in the web interface after the site answers.
+PostgreSQL stores the database in `/data/svc/postgres`; documents remain in `/data/svc/paperless`. Add documents in the web interface after the site answers.
+
+An existing SQLite library stops startup. Export it with the previous image using Paperless's `document_exporter`, keep a backup, and follow the upstream [export/import procedure](https://docs.paperless-ngx.com/administration/#exporter-importer) into PostgreSQL. Move the old `db.sqlite3` and its journal files out of the live library only after the export succeeds; retain them with the backup. The form never converts or deletes an existing database automatically.
 
 ### Known Quirks
 
@@ -52,6 +53,7 @@ The database is SQLite in `/data`, and the documents are files beside it. The ho
 - Page cleaning is off. Wolfi does not package unpaper.
 - Office documents and email are not converted.
 - The assistant is not installed.
+- PostgreSQL JIT is disabled for this form; the inherited PostgreSQL form still declares the kernel JIT allowance.
 - Keep `secret-key`. Creating again with a new one signs everyone out.
 
 ### Network Exposure

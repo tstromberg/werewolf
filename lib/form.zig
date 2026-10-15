@@ -554,7 +554,10 @@ pub fn people(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const Us
         const admin = if (u.value.get("admin")) |a| mem.eql(u8, a.scalar.text, "true") else false;
         const keys_ = try scalars(gpa, u.value.get("keys"));
         try out.append(gpa, .{ .name = u.key, .keys = keys_, .admin = admin });
-        try checked.append(gpa, .{ .name = u.key, .keys = keys_, .destinations = &.{} });
+        if (keys_.len > 0) try checked.append(
+            gpa,
+            .{ .name = u.key, .keys = keys_, .destinations = &.{} },
+        );
     }
     var why: []const u8 = "";
     sshd.peopleKeys(
@@ -574,8 +577,11 @@ pub fn people(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const Us
 /// and keys files (cmd/init). Empty when the manifest names no one.
 pub fn peopleFile(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
-    for (try people(gpa, forms, f)) |u| for (u.keys) |k|
-        try out.print(gpa, "{s} {s}{s}\n", .{ u.name, if (u.admin) "admin " else "", k });
+    for (try people(gpa, forms, f)) |u| {
+        if (u.keys.len == 0) try out.print(gpa, "{s}\n", .{u.name});
+        for (u.keys) |k|
+            try out.print(gpa, "{s} {s}{s}\n", .{ u.name, if (u.admin) "admin " else "", k });
+    }
     return out.items;
 }
 
@@ -686,7 +692,9 @@ pub fn loadIn(
                             mem.eql(u8, k.value.scalar.text, "false")))
                     {} else return f.fail(gpa, "{s}: users: {s}: {s}", .{ path, u.key, shape });
                 }
-                if (keys_ == null) return f.fail(gpa, "{s}: users: {s}: no keys", .{ path, u.key });
+                const admin = u.value.get("admin");
+                if (keys_ == null and admin != null and mem.eql(u8, admin.?.scalar.text, "true"))
+                    return f.fail(gpa, "{s}: users: {s}: an admin needs keys", .{ path, u.key });
             }
         } else if (mem.eql(u8, e.key, "machine")) {
             if (e.value != .map) return f.fail(gpa, "{s}: machine is a map", .{path});
@@ -1028,7 +1036,7 @@ pub fn netLines(gpa: Allocator, forms: []const Form, f: *Failure) Error![]const 
                 try imageUser(gpa, s.key)
             else
                 scalarOf(s.value, "user") orelse "";
-            if (user.len > 0) try runs_as.put(gpa, user, s.key);
+            if (user.len > 0 and !mem.eql(u8, user, "root")) try runs_as.put(gpa, user, s.key);
             for (s.value.map) |d| {
                 const values: []const Node = if (d.value == .scalar) &.{d.value} else d.value.list;
                 if (mem.eql(u8, d.key, "listen")) {
@@ -2071,6 +2079,30 @@ test "users: the top manifest's people, keys checked, a config file a key a line
         try testing.expectError(error.Form, load(io, gpa, tmp.dir, name, &f));
         try testing.expect(mem.indexOf(u8, f.text, "users") != null);
     }
+}
+
+test "users: keyless UNIX accounts are declared without granting SSH or admin" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    try tmp.dir.createDirPath(io, "forms/share");
+    try tmp.dir.writeFile(
+        io,
+        .{
+            .sub_path = "forms/share/form.yaml",
+            .data = "users:\n  alice: {}\n  bob:\n    admin: false\n",
+        },
+    );
+    var f: Failure = .{};
+    const forms = try chain(io, gpa, tmp.dir, "share", &f);
+    const users = try people(gpa, forms, &f);
+    try testing.expectEqual(2, users.len);
+    try testing.expectEqual(0, users[0].keys.len);
+    try testing.expect(!users[0].admin and !users[1].admin);
+    try testing.expectEqualStrings("alice\nbob\n", try peopleFile(gpa, forms, &f));
 }
 
 test "updates: off, or every so often; the last form that says wins" {

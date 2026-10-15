@@ -152,7 +152,7 @@ const table = [_]struct { p: Promise, names: []const []const u8 }{
         .p = .landlock,
         .names = &.{ "landlock_create_ruleset", "landlock_add_rule", "landlock_restrict_self" },
     },
-    .{ .p = .memfd, .names = &.{ "memfd_create", "memfd_secret" } },
+    .{ .p = .memfd, .names = &.{"memfd_create"} },
     .{ .p = .ipc, .names = &.{
         "shmget", "shmat",  "shmdt",      "shmctl",
         "semget", "semop",  "semtimedop", "semctl",
@@ -235,6 +235,7 @@ pub const base: Set = .initMany(&.{
 ///   kexec_load, kexec_file_load    another kernel; lockdown refuses it too
 ///   io_uring_*                     makes kernel.io_uring_disabled permanent
 ///   userfaultfd                    the usual way to win a kernel race
+///   memfd_secret                   secretmem lacks MNT_NOEXEC and memfd_noexec
 ///   open_by_handle_at, name_..     walks past mounts by inode handle
 ///   add_key, keyctl, request_key   the kernel keyring; cryptsetup is done
 ///                                  with it before init hands over
@@ -242,14 +243,14 @@ pub const base: Set = .initMany(&.{
 ///   modify_ldt, iopl, ioperm       16-bit code and I/O ports
 ///   acct .. vhangup                unused here; old, rarely audited code
 const never_names = [_][]const u8{
-    "bpf",               "perf_event_open",   "init_module",     "finit_module",
-    "delete_module",     "kexec_load",        "kexec_file_load", "io_uring_setup",
-    "io_uring_enter",    "io_uring_register", "userfaultfd",     "open_by_handle_at",
-    "name_to_handle_at", "add_key",           "keyctl",          "request_key",
-    "process_vm_readv",  "process_vm_writev", "modify_ldt",      "iopl",
-    "ioperm",            "acct",              "swapon",          "swapoff",
-    "quotactl",          "quotactl_fd",       "lookup_dcookie",  "uselib",
-    "vhangup",
+    "bpf",               "perf_event_open",   "init_module",       "finit_module",
+    "delete_module",     "kexec_load",        "kexec_file_load",   "io_uring_setup",
+    "io_uring_enter",    "io_uring_register", "userfaultfd",       "memfd_secret",
+    "open_by_handle_at", "name_to_handle_at", "add_key",           "keyctl",
+    "request_key",       "process_vm_readv",  "process_vm_writev", "modify_ldt",
+    "iopl",              "ioperm",            "acct",              "swapon",
+    "swapoff",           "quotactl",          "quotactl_fd",       "lookup_dcookie",
+    "uselib",            "vhangup",
 };
 
 /// never holds the calls of never_names that this architecture has.
@@ -289,8 +290,8 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 const max_calls = 512;
 /// max_filter counts the prelude (6), execveat (7), the socket and
 /// socketpair families (2 * (3 + 2 * 5)), the machine's refusals
-/// (7 + 5 + 7 + 7 + 8 + 10), the table and the final return.
-pub const max_filter = 6 + 7 + 2 * (3 + 2 * 5) + 44 + 2 * max_calls + 1;
+/// (7 + 5 + 5 + 7 + 7 + 8 + 10), the table and the final return.
+pub const max_filter = 6 + 7 + 2 * (3 + 2 * 5) + 49 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
 
 /// families maps each socket promise to the address families it allows.
@@ -312,6 +313,8 @@ const families = [_]struct { p: Promise, af: u32 }{
 ///   setsockopt        TCP_ULP, at the TCP level: kernel TLS (CVE-2025-39682)
 ///                     and every other upper-layer protocol
 ///   pipe2             O_NOTIFICATION_PIPE: a watch queue (CVE-2022-0995)
+///   shmat             SHM_EXEC: maps SysV shared memory executable, bypassing
+///                     PR_MDWE_REFUSE_EXEC_GAIN via a second read-only attach
 ///   timer_create,     a CPU-time clock, the caller's or another process's:
 ///   clock_nanosleep   POSIX CPU timers (CVE-2025-38352)
 ///   syslog            clearing the log or changing kernel.printk without
@@ -341,6 +344,7 @@ pub const by_argument = [_][]const u8{
     "socket and socketpair (a family no promise names)",
     "setsockopt (TCP_ULP)",
     "pipe2 (O_NOTIFICATION_PIPE)",
+    "shmat (SHM_EXEC)",
     "timer_create and clock_nanosleep (a CPU-time clock)",
     "seccomp (a user-notification listener)",
     "syslog (clearing the log or changing console settings)",
@@ -350,6 +354,7 @@ const SOL_TCP = 6;
 const TCP_ULP = 31;
 /// O_NOTIFICATION_PIPE has the value of O_EXCL on both architectures.
 const O_NOTIFICATION_PIPE = 0o200;
+const SHM_EXEC = 0o100000;
 const CLOCK_PROCESS_CPUTIME_ID = 2;
 const CLOCK_THREAD_CPUTIME_ID = 3;
 const SECCOMP_SET_MODE_FILTER = 1;
@@ -377,6 +382,8 @@ pub fn refusal(nr: u32, args: [6]u64) ?Refusal {
         return .{ .what = "TCP_ULP", .arg = low(args[2]), .errno = .NOENT };
     if (nr == number(.pipe2) and low(args[1]) & O_NOTIFICATION_PIPE != 0)
         return .{ .what = "O_NOTIFICATION_PIPE", .arg = low(args[1]), .errno = .NOPKG };
+    if (nr == number(.shmat) and low(args[2]) & SHM_EXEC != 0)
+        return .{ .what = "SHM_EXEC", .arg = low(args[2]), .errno = .ACCES };
     if ((nr == number(.timer_create) or nr == number(.clock_nanosleep)) and cpuClock(low(args[0])))
         return .{ .what = "CPU-time clock", .arg = low(args[0]), .errno = .INVAL };
     if (nr == number(.seccomp)) {
@@ -510,6 +517,12 @@ fn buildFilterWithExec(
         put(buf, &n, JEQ_K, 0, 4, number(.pipe2));
         put(buf, &n, LD_W_ABS, 0, 0, 24); // args[1]: flags
         put(buf, &n, JSET_K, 0, 1, O_NOTIFICATION_PIPE);
+        put(buf, &n, RET_K, 0, 0, other);
+        put(buf, &n, LD_W_ABS, 0, 0, 0);
+        // shmat(_, _, SHM_EXEC)
+        put(buf, &n, JEQ_K, 0, 4, number(.shmat));
+        put(buf, &n, LD_W_ABS, 0, 0, 32); // args[2]: shmflg
+        put(buf, &n, JSET_K, 0, 1, SHM_EXEC);
         put(buf, &n, RET_K, 0, 0, other);
         put(buf, &n, LD_W_ABS, 0, 0, 0);
         // timer_create and clock_nanosleep on a CPU-time clock
@@ -647,7 +660,7 @@ test buildFilter {
     // A filter with every promise fits.
     _ = buildFilter(&buf, .full, true);
     _ = buildFilter(&buf, .full, false);
-    const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet, .seccomp }), false);
+    const machine = buildFilter(&buf, .initMany(&.{ .stdio, .inet, .seccomp, .ipc }), false);
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         action(machine, native_arch, number(.read), 0),
@@ -681,6 +694,9 @@ test buildFilter {
         .{ .setsockopt, 3, 1, TCP_ULP, false }, // SOL_SOCKET's option 31
         .{ .pipe2, 0, O_NOTIFICATION_PIPE | cloexec, 0, true },
         .{ .pipe2, 0, cloexec, 0, false },
+        .{ .shmat, 0, 0, SHM_EXEC, true },
+        .{ .shmat, 0, 0, SHM_EXEC | 0o10000, true }, // SHM_RDONLY
+        .{ .shmat, 0, 0, 0, false },
         .{ .timer_create, CLOCK_THREAD_CPUTIME_ID, 0, 0, true },
         .{ .timer_create, CLOCK_PROCESS_CPUTIME_ID, 0, 0, true },
         .{ .timer_create, pid1_cpu, 0, 0, true },

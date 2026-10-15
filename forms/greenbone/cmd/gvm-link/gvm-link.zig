@@ -1,17 +1,14 @@
 //! gvm-link carries gvmd's socket to gsad. The two images do not share a
-//! directory. It binds as root, leaves the socket mode 0660, and drops
-//! to _glink keeping only the group _oci-gvmd. See its README.
+//! directory. Leash runs it as _glink in the groups _oci-gvmd and _oci-gsad;
+//! gsad's /run is setgid _oci-gsad (share: group), so the socket inherits
+//! _oci-gsad and mode 0660 lets gsad alone connect. See its README.
 
 const std = @import("std");
-const sandbox = @import("sandbox");
 const Io = std.Io;
 const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
 const config_path = "/etc/werewolf/gvm-link";
-const drop_user = "_glink";
-const gvmd_group = "_oci-gvmd";
-const gsad_group = "_oci-gsad";
 
 const Config = struct { listen: []const u8, dial: []const u8 };
 
@@ -31,26 +28,12 @@ pub fn main(init: std.process.Init) void {
 
 fn run(io: Io, gpa: Allocator) !void {
     const cfg = try parse(try readFile(io, gpa, config_path, 512));
-    const me = try account(io, gpa, drop_user);
-    const groups = try readFile(io, gpa, "/etc/group", 1 << 20);
-    const gvmd = try groupIn(groups, gvmd_group);
-    const gsad = try groupIn(groups, gsad_group);
-    const listen_fd = try bindListen(cfg.listen, me.uid, gsad);
+    const listen_fd = try bindListen(cfg.listen);
     say(
         io,
         "{{\"event\":\"start\",\"listen\":\"{s}\",\"dial\":\"{s}\"}}",
         .{ cfg.listen, cfg.dial },
     );
-    try sandbox.dropWith(me.uid, null, &.{gvmd});
-    var filter: sandbox.Filter = .{};
-    inline for ([_][]const u8{
-        "accept",       "accept4",      "socket",        "connect", "read",            "write",
-        "close",        "poll",         "ppoll",         "exit",    "exit_group",      "futex",
-        "mmap",         "mprotect",     "munmap",        "brk",     "clone",           "clone3",
-        "rt_sigaction", "rt_sigreturn", "clock_gettime", "gettid",  "set_robust_list", "rseq",
-        "madvise",      "getrandom",
-    }) |name| filter.allow(name);
-    try filter.install();
     while (true) {
         const got = linux.accept4(listen_fd, null, null, linux.SOCK.CLOEXEC);
         if (linux.errno(got) == .INTR) continue;
@@ -106,12 +89,12 @@ fn copySome(from: i32, to: i32, buf: []u8) bool {
     return true;
 }
 
-fn bindListen(path: []const u8, owner: u32, group: u32) !i32 {
+fn bindListen(path: []const u8) !i32 {
     if (std.fs.path.dirname(path)) |dir| {
         var i: u8 = 0;
         while (i < 60) : (i += 1) {
             var dz: [129]u8 = undefined;
-            const rc = linux.access(try z(dir, &dz), linux.X_OK);
+            const rc = linux.access(try z(dir, &dz), linux.W_OK | linux.X_OK);
             if (linux.errno(rc) == .SUCCESS) break;
             _ = linux.nanosleep(&.{ .sec = 1, .nsec = 0 }, null);
         }
@@ -127,9 +110,9 @@ fn bindListen(path: []const u8, owner: u32, group: u32) !i32 {
     @memcpy(addr.path[0..path.len], path);
     const len: linux.socklen_t = @intCast(2 + path.len + 1);
     if (linux.errno(linux.bind(fd, @ptrCast(&addr), len)) != .SUCCESS) return error.Bind;
-    // gsad's group can connect. Everyone else cannot.
-    if (linux.errno(linux.fchown(fd, owner, group)) != .SUCCESS) return error.Owner;
+    // gsad's /run is setgid _oci-gsad (share: group); mode 0660 lets gsad connect.
     if (linux.errno(linux.fchmod(fd, 0o660)) != .SUCCESS) return error.Mode;
+    if (linux.errno(linux.chmod(pathz, 0o660)) != .SUCCESS) return error.Mode;
     if (linux.errno(linux.listen(fd, 16)) != .SUCCESS) return error.Listen;
     return fd;
 }
@@ -174,41 +157,6 @@ fn parse(text: []const u8) !Config {
     };
 }
 
-const Account = struct { uid: u32, gid: u32 };
-
-fn groupIn(text: []const u8, name: []const u8) !u32 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        var f = std.mem.splitScalar(u8, line, ':');
-        const group = f.next() orelse continue;
-        if (!std.mem.eql(u8, group, name)) continue;
-        _ = f.next();
-        const gid = f.next() orelse return error.NoGroup;
-        const id = std.fmt.parseInt(u32, gid, 10) catch return error.NoGroup;
-        if (id < 65536) return error.LowGroup;
-        return id;
-    }
-    return error.NoGroup;
-}
-
-fn account(io: Io, gpa: Allocator, name: []const u8) !Account {
-    const text = try readFile(io, gpa, "/etc/passwd", 1 << 20);
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        var f = std.mem.splitScalar(u8, line, ':');
-        const user = f.next() orelse continue;
-        if (!std.mem.eql(u8, user, name)) continue;
-        _ = f.next();
-        const uid = f.next() orelse return error.NoUser;
-        const gid = f.next() orelse return error.NoUser;
-        return .{
-            .uid = std.fmt.parseInt(u32, uid, 10) catch return error.NoUser,
-            .gid = std.fmt.parseInt(u32, gid, 10) catch return error.NoUser,
-        };
-    }
-    return error.NoUser;
-}
-
 fn readFile(io: Io, gpa: Allocator, path: []const u8, limit: usize) ![]const u8 {
     return Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(limit));
 }
@@ -239,11 +187,4 @@ test "parse reads the two sockets" {
 test "parse refuses a relative path and a second listen" {
     try std.testing.expectError(error.BadConfig, parse("listen relative\n"));
     try std.testing.expectError(error.BadConfig, parse("listen /a\nlisten /b\ndial /c\n"));
-}
-
-test "group id is the third field, and a system group is refused" {
-    const text = "_oci-gvmd:x:70000:_glink\n_glink:x:71:\n";
-    try std.testing.expectEqual(@as(u32, 70000), try groupIn(text, "_oci-gvmd"));
-    try std.testing.expectError(error.LowGroup, groupIn(text, "_glink"));
-    try std.testing.expectError(error.NoGroup, groupIn(text, "_oci-gsad"));
 }

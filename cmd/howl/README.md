@@ -74,8 +74,7 @@ Output stays in the build log, with its tail shown on failure; `--verbose` strea
 
 ## Drawbacks
 
-- A published build needs only howl (`files.zig`); `--build` and a path form's
-  own programs need a checkout, make and Zig; melange, compilers, cloud CLIs.
+- Published builds need only howl (`files.zig`); `--build` and path forms' programs need a checkout, make, Zig; melange, compilers, cloud CLIs.
 
 ## Alternatives Considered
 

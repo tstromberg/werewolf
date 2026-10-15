@@ -110,6 +110,7 @@ pub fn dropWith(id: u32, root: ?[*:0]const u8, groups: []const linux.gid_t) !voi
     var hdr: CapHeader = .{};
     const none = [2]CapSets{ .{}, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&none)), "capset");
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
     if (linux.errno(linux.setresuid(0, 0, 0)) == .SUCCESS) return error.StillRoot;
     tie.keep();
 }
@@ -124,6 +125,7 @@ pub fn keepOnly(keep: u32) !void {
     var hdr: CapHeader = .{};
     const caps = [2]CapSets{ .{ .effective = keep, .permitted = keep }, .{} };
     _ = try sys(linux.syscall2(.capset, @intFromPtr(&hdr), @intFromPtr(&caps)), "capset");
+    _ = try sys(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0), "no_new_privs");
     tie.keep();
 }
 
@@ -216,22 +218,35 @@ pub const Ruleset = struct {
     /// Options: sockets also handles resolve_unix where the kernel knows it
     /// (ABI 9), so no pathname UNIX socket made outside the domain is
     /// reached but beneath a rule that grants it. only_exec handles only
-    /// execute, to drop setup helpers before the service starts.
-    pub const Options = struct { sockets: bool = false, only_exec: bool = false };
+    /// execute, to drop setup helpers before the service starts. only_bind
+    /// handles only TCP bind and abstract UNIX sockets, leaving files,
+    /// connects and signals to fence's machine domain.
+    pub const Options = struct {
+        sockets: bool = false,
+        only_exec: bool = false,
+        only_bind: bool = false,
+    };
 
     pub fn init(o: Options) !Ruleset {
         // LANDLOCK_CREATE_RULESET_VERSION
         const abi = try sys(linux.syscall3(.landlock_create_ruleset, 0, 0, 1), "landlock version");
         const fs = if (o.only_exec)
             execute
+        else if (o.only_bind)
+            if (abi >= 4) 0 else execute
         else
             fsAll(abi) | if (o.sockets and abi >= 9) resolve_unix else 0;
         // struct landlock_ruleset_attr: handled_access_fs, handled_access_net,
         // scoped (LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET and _SIGNAL).
         const attr: [3]u64 = .{
             fs,
-            if (!o.only_exec and abi >= 4) bind_tcp | connect_tcp else 0,
-            if (!o.only_exec and abi >= 6) 0x3 else 0,
+            if (o.only_exec or abi < 4)
+                0
+            else if (o.only_bind)
+                bind_tcp
+            else
+                bind_tcp | connect_tcp,
+            if (o.only_exec or abi < 6) 0 else if (o.only_bind) 0x1 else 0x3,
         };
         const size: usize = if (o.only_exec) 8 else if (abi >= 6) 24 else if (abi >= 4) 16 else 8;
         const fd = try sys(

@@ -344,16 +344,23 @@ pub fn apko(
                 try groups.append(gpa, try mapOf(gpa, &.{ .{ "groupname", name }, .{ "gid", n } }));
         };
     }
-    var runs_as: std.array_hash_map.String([]const u8) = .empty;
+    const Identity = struct { name: []const u8, shared: bool };
+    var runs_as: std.array_hash_map.String(Identity) = .empty;
     const services = try form.services(io, gpa, root, forms, f);
     for (services) |s| {
-        const user = (try parseService(gpa, s, f)).user;
-        if (try runs_as.fetchPut(gpa, user, s.name)) |other| return f.fail(
-            gpa,
-            "services {s} and {s} both run as {s}: each needs a user of its own",
-            .{ other.value, s.name, user },
-        );
-        if (declared.contains(user)) continue;
+        const parsed = try parseService(gpa, s, f);
+        const user = parsed.user;
+        if (runs_as.get(user)) |other| {
+            if (!other.shared or !parsed.shared_user) return f.fail(
+                gpa,
+                "services {s} and {s} both run as {s}: each needs its own user, or every " ++
+                    "component must declare shared-user: true",
+                .{ other.name, s.name, user },
+            );
+            continue;
+        }
+        try runs_as.put(gpa, user, .{ .name = s.name, .shared = parsed.shared_user });
+        if (declared.contains(user) or mem.eql(u8, user, "root")) continue;
         const id = try defaultAccountId(gpa, s.path, user, &ids, f);
         const n = try gpa.print("{d}", .{id});
         const gid = try gpa.print("{d}", .{declared_groups.get(user) orelse id});
@@ -375,11 +382,9 @@ pub fn apko(
             "{s}: group {s}: no service runs as {s}, whose group it would join",
             .{ s.path, g, g },
         );
-        if (mem.eql(
-            u8,
-            owner,
-            s.name,
-        )) return f.fail(gpa, "{s}: group {s} is its own", .{ s.path, g });
+        _ = owner;
+        if (mem.eql(u8, (try parseService(gpa, s, f)).user, g))
+            return f.fail(gpa, "{s}: group {s} is its own", .{ s.path, g });
     };
     if (users.items.len == 0 and groups.items.len == 0) return merged;
     var acc = merged.get("accounts") orelse form.Node{ .map = &.{} };
@@ -432,7 +437,9 @@ fn replaceField(
 /// 3: local-NAME stages the operator's forms and app for the updater;
 /// inline update policy and metadata people need the matching programs.
 /// 4: init passes inherited socketpairs to mount-broker and the slot services.
-pub const format = 4;
+/// 5: shared-user service declarations and keyless UNIX people require
+/// matching builders, launchers and metadata account reconciliation.
+pub const format = 5;
 
 /// format_package is format's package, a name per format, so a world names
 /// it with no version to compare. It holds /usr/lib/werewolf/format: apk
@@ -951,6 +958,7 @@ pub fn pledge(io: Io, gpa: Allocator, root: Dir, forms: []const Form, f: *Failur
             if (mem.eql(u8, owner, s.name)) continue;
             for (services, parsed) |o, po| {
                 if (!mem.eql(u8, o.name, owner) or po.share != .strict) continue;
+                if (ps.shared_user and po.shared_user and mem.eql(u8, ps.user, po.user)) continue;
                 return f.fail(
                     gpa,
                     "{s}: {s} is inside {s}'s directory, which only {s} may enter: " ++
@@ -1002,6 +1010,13 @@ fn privileges(
             return f.fail(gpa, "{s}: caps net_raw: the chain does not allow packet", .{s.path});
         if (parsed.caps & service.cap.net_admin != 0 and !allows(allowed, "netadmin"))
             return f.fail(gpa, "{s}: caps net_admin: the chain does not allow netadmin", .{s.path});
+        if (parsed.caps & service.cap.login != 0 and
+            (!mem.eql(u8, s.name, "sshd") or !allows(allowed, "pty")))
+            return f.fail(
+                gpa,
+                "{s}: caps login is for sshd when the chain allows pty",
+                .{s.path},
+            );
         for (parsed.data) |d| if (d.write and !owner_of.contains(d.host))
             try owner_of.put(gpa, d.host, s.name);
     }
@@ -1749,6 +1764,60 @@ test "apko: declared accounts inherit ids and keep shell and group overrides on 
     try testing.expectEqualStrings(got.passwd, again.passwd);
     try testing.expectEqualStrings(got.group, again.group);
     try testing.expectEqualStrings(got.shadow, again.shadow);
+}
+
+test "apko: every component must opt in to a shared non-root identity" {
+    const io = testing.io;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const gpa = a.allocator();
+    try tmp.dir.createDirPath(io, "forms/app");
+    for ([_][2]bool{
+        .{ false, false },
+        .{ true, false },
+        .{ false, true },
+        .{ true, true },
+    }) |sharing| {
+        const text = try gpa.print(
+            "services:\n  first:\n    exec: /a\n    user: app\n    shared-user: {s}\n    " ++
+                "pledge: stdio\n  second:\n    exec: /b\n    user: app\n    shared-user: {s}\n  " ++
+                "  pledge: stdio\n",
+            .{ if (sharing[0]) "true" else "false", if (sharing[1]) "true" else "false" },
+        );
+        try tmp.dir.writeFile(
+            io,
+            .{
+                .sub_path = "forms/app/form.yaml",
+                .data = try mem.concat(gpa, u8, &.{ text, "    read: /run/svc/first\n" }),
+            },
+        );
+        var f: Failure = .{};
+        const forms = try form.chain(io, gpa, tmp.dir, "app", &f);
+        if (!sharing[0] or !sharing[1]) {
+            try testing.expectError(error.Form, apko(io, gpa, tmp.dir, forms, &.{}, &f));
+        } else {
+            const cfg = try apko(io, gpa, tmp.dir, forms, &.{}, &f);
+            try testing.expectEqual(1, cfg.get("accounts").?.get("users").?.list.len);
+            try testing.expectEqual(1, cfg.get("accounts").?.get("groups").?.list.len);
+            _ = try pledge(io, gpa, tmp.dir, forms, &f);
+        }
+    }
+    // Opting in does not grant access to a different UNIX identity's paths.
+    try tmp.dir.writeFile(
+        io,
+        .{
+            .sub_path = "forms/app/form.yaml",
+            .data = "services:\n  first:\n    exec: /a\n    user: app\n    shared-user: true\n  " ++
+                "  pledge: stdio\n  second:\n    exec: /b\n    user: other\n    shared-user: " ++
+                "true\n    pledge: stdio\n    read: /run/svc/first\n",
+        },
+    );
+    var refused: Failure = .{};
+    const separate = try form.chain(io, gpa, tmp.dir, "app", &refused);
+    _ = try apko(io, gpa, tmp.dir, separate, &.{}, &refused);
+    try testing.expectError(error.Form, pledge(io, gpa, tmp.dir, separate, &refused));
 }
 
 test "apko: omitted account ids cannot collide with an explicit uid or gid" {

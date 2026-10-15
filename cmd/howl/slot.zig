@@ -33,13 +33,12 @@ pub fn meta(b: *B, rootfs: []const u8) !void {
     const kernel_rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     try Dir.cwd().createDirPath(b.io, out);
     const enrollment = try b.path("{s}/image-enrollment", .{out});
-    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\nnative {}\ntpm {s}\n" ++
-        "firmware {}\nca " ++
-        "{s}\nport {d}\npermit-host {s}\npermit-port {d}\n", .{
+    try packages.keep(b, enrollment, try b.path("{s}\n{s}\nsecure {}\ninsecure {}\nnative {}\n" ++
+        "tpm {s}\nfirmware {}\nca {s}\nport {d}\npermit-host {s}\npermit-port {d}\n", .{
         b.spec.ipe_updates orelse "", b.spec.image_serial orelse "", b.spec.boot_key != null,
-        b.spec.boot_native,           b.spec.tpm_pub orelse "",      b.spec.tpm_firmware,
-        b.spec.update_ca orelse "",   b.spec.update_port orelse 443, b.spec.permit_host orelse "",
-        b.spec.permit_port orelse 0,
+        b.spec.insecure,              b.spec.boot_native,            b.spec.tpm_pub orelse "",
+        b.spec.tpm_firmware,          b.spec.update_ca orelse "",    b.spec.update_port orelse 443,
+        b.spec.permit_host orelse "", b.spec.permit_port orelse 0,
     }));
     // howl itself holds the release keys, advisories and known posture
     // failures (files.zig), so b.self covers them.
@@ -302,7 +301,7 @@ pub fn make(b: *B, rootfs: []const u8, goals: build.Goals) !void {
     );
     // The kernel arguments the image asks for, beside it, for
     // the disk to boot it with.
-    try copyStep(
+    try cmdlineStep(
         b,
         try b.path("{s}/slot/cmdline", .{out}),
         stamp,
@@ -822,6 +821,22 @@ fn copyStep(b: *B, target: []const u8, input: []const u8, from: []const u8) !voi
     try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
     const t = try b.tmp(target);
     try b.copy(from, t);
+    try b.rename(t, target);
+    try b.done(target, began);
+}
+
+/// cmdlineStep writes target from the image's cmdline, appending
+/// werewolf.insecure=1 when built in insecure mode.
+fn cmdlineStep(b: *B, target: []const u8, input: []const u8, from: []const u8) !void {
+    const began = try b.begin(target, &.{input}) orelse return;
+    try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(target).?);
+    const t = try b.tmp(target);
+    if (b.spec.insecure) {
+        const raw = mem.trimEnd(u8, try b.read(from, 4096), "\n");
+        try b.write(t, try b.path("{s} werewolf.insecure=1\n", .{raw}));
+    } else {
+        try b.copy(from, t);
+    }
     try b.rename(t, target);
     try b.done(target, began);
 }
