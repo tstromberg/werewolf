@@ -68,7 +68,9 @@ pub fn parse(
         var rest = words.rest();
         const admin = mem.eql(u8, rest, "admin") or mem.startsWith(u8, rest, "admin ");
         if (admin) rest = mem.trimStart(u8, rest["admin".len..], " \t");
-        if ((admin and rest.len == 0) or !isName(name) or mem.findAny(u8, line, "\r\x00") != null) {
+        if ((admin and rest.len == 0) or !isName(name) or
+            (rest.len > 0 and !validKey(rest)) or mem.findAny(u8, line, "\r\x00") != null)
+        {
             try refused.append(gpa, try gpa.print(
                 "'{s}': not NAME [admin] TYPE KEY [COMMENT]",
                 .{shown(line)},
@@ -186,6 +188,30 @@ pub fn isName(s: []const u8) bool {
     return true;
 }
 
+const key_types = [_][]const u8{
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+    "ssh-ed25519",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "ssh-rsa",
+};
+
+fn validKey(s: []const u8) bool {
+    var words = mem.tokenizeAny(u8, s, " \t");
+    const kind = words.next() orelse return false;
+    const body = words.next() orelse return false;
+    const known = for (key_types) |t| {
+        if (mem.eql(u8, t, kind)) break true;
+    } else false;
+    if (!known or body.len == 0 or body.len > 16 << 10) return false;
+    for (body) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '+' and c != '/' and c != '=') return false;
+    }
+    return true;
+}
+
 fn hasEntry(file: []const u8, name: []const u8) bool {
     var lines = mem.splitScalar(u8, file, '\n');
     while (lines.next()) |line| if (line.len > name.len and line[name.len] == ':' and
@@ -268,7 +294,8 @@ test "apply: accounts for the people named, admins' keys root's, the gone remove
     const k2 = "sk-ssh-ed25519@openssh.com AAAA2 tom@spare";
     const k3 = "sk-ssh-ed25519@openssh.com AAAA3 ann";
     const c = try apply(gpa, base, "tom admin " ++ k1 ++ "\ntom " ++ k2 ++ "\nann " ++ k3 ++
-        "\nroot " ++ k3 ++ "\nBad x\nnginx " ++ k3 ++ "\n\n", "/bin/ash");
+        "\nroot " ++ k3 ++ "\nBad x\nnginx " ++ k3 ++
+        "\ntom command=\"/bin/sh\" ssh-ed25519 AAAA1\ntom ssh-ed25519 not-base64!\n\n", "/bin/ash");
     const tom = userId("tom");
     try testing.expect(tom >= 1 << 29 and tom < 1 << 30);
     try testing.expectEqualStrings(try gpa.print(
@@ -281,7 +308,7 @@ test "apply: accounts for the people named, admins' keys root's, the gone remove
     try testing.expectEqualStrings(k1 ++ "\n" ++ k2 ++ "\n", c.keys[0].text);
     try testing.expectEqualStrings(k1 ++ "\n" ++ k2 ++ "\n", c.root_keys);
     try testing.expect(mem.find(u8, c.shadow, "tom:*:") != null);
-    try testing.expectEqual(3, c.refused.len);
+    try testing.expectEqual(5, c.refused.len);
     try testing.expectEqual(0, c.removed.len);
 
     // Applied again with ann gone and a new person: ann's lines go, and

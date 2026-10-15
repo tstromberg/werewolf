@@ -12,8 +12,14 @@ pub const max_capsule = bootstrap.Bundle.size + 2 + 512;
 pub const Mode = enum { fresh, recovery };
 
 pub fn firmware(on: []const u8, setup: []const u8) !void {
-    if (on.len != 5 or setup.len != 5 or on[4] != 1 or setup[4] != 0)
+    if (on.len != 5 or setup.len != 5 or on[4] != 1 or setup[4] != 0 or
+        !validEfiAttrs(on[0..4]) or !validEfiAttrs(setup[0..4]))
         return error.UnenforcedSecureBoot;
+}
+
+fn validEfiAttrs(raw: *const [4]u8) bool {
+    const attrs = std.mem.readInt(u32, raw, .little);
+    return attrs == 6 or attrs == 7;
 }
 
 pub fn factory(key: apk.Key, raw: []const u8) !tpm.Record {

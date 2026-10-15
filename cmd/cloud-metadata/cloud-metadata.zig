@@ -1202,12 +1202,14 @@ const Log = struct {
         var time: [20]u8 = undefined;
         w.print(
             "cloud-metadata: {{\"time\":\"{s}\",\"event\":\"{s}\",",
-            .{ rfc3339(&time, @intCast(ts.sec)), name },
+            .{ rfc3339(&time, @intCast(@max(0, ts.sec))), name },
         ) catch return;
         const mark = w.end;
         std.json.Stringify.value(fields, .{}, &w) catch return;
-        @memmove(l.buf[mark .. w.end - 1], l.buf[mark + 1 .. w.end]);
-        w.end -= 1;
+        if (w.end > mark) {
+            @memmove(l.buf[mark .. w.end - 1], l.buf[mark + 1 .. w.end]);
+            w.end -= 1;
+        }
         w.writeByte('\n') catch return;
         _ = linux.write(1, w.buffered().ptr, w.buffered().len);
     }

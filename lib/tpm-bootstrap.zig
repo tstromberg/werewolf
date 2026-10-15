@@ -485,7 +485,7 @@ const Packet = struct {
     session_count: usize = 0,
 
     fn bytes(b: *Packet, raw: []const u8) void {
-        std.debug.assert(raw.len <= b.data.len - b.len);
+        if (raw.len > b.data.len - b.len) unreachable;
         @memcpy(b.data[b.len..][0..raw.len], raw);
         b.len += raw.len;
     }
@@ -504,7 +504,7 @@ const Packet = struct {
 
 fn command(code: u32, handles: []const u32, sessions: []const u32) Packet {
     var b: Packet = .{};
-    std.debug.assert(sessions.len <= b.sessions.len);
+    if (sessions.len > b.sessions.len) unreachable;
     @memcpy(b.sessions[0..sessions.len], sessions);
     b.session_count = sessions.len;
     b.int(u16, if (sessions.len > 0) 0x8002 else 0x8001);

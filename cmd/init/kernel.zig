@@ -131,20 +131,25 @@ pub fn kernel(m: *Machine) !void {
         say("IPE required but no enforcing release policy; not handing over", .{});
         return error.IpeNotEnforced;
     }
-    const lockdown = "/sys/kernel/security/lockdown";
-    if (std.mem.indexOf(u8, m.read(lockdown), "[confidentiality]") == null)
-        _ = writeFile(lockdown, "confidentiality");
-    say("lockdown: {s}", .{lockdownLevel(m.read(lockdown))});
-
-    if (!m.run(&.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
-
-    var all = true;
     // A refused sysctl ends the boot, and the machine returns on the slot
     // that last worked. In a container the settings are the host's: /proc/sys
     // is read-only (EROFS) and a network namespace lacks some (ENOENT), so
     // refusals are logged and passed. A kernel without a BPF JIT has no
     // bpf_jit_harden, and needs none.
     const contained = linux.errno(linux.access("/proc/sys/kernel/panic", linux.W_OK)) == .ROFS;
+    const lockdown = "/sys/kernel/security/lockdown";
+    if (std.mem.indexOf(u8, m.read(lockdown), "[confidentiality]") == null)
+        _ = writeFile(lockdown, "confidentiality");
+    const level = lockdownLevel(m.read(lockdown));
+    say("lockdown: {s}", .{level});
+    if (!contained and init.exists(lockdown) and !std.mem.eql(u8, level, "confidentiality"))
+        return error.Lockdown;
+
+    if (!m.run(&.{"/usr/lib/werewolf/modload"})) say("not every module loaded; see above", .{});
+    if (!contained and !std.mem.eql(u8, trim(m.read("/proc/sys/kernel/modules_disabled")), "1"))
+        return error.ModulesNotDisabled;
+
+    var all = true;
     for (sysctls) |kv| switch (writeErrno(m.fmtZ("/proc/sys/{s}", .{kv[0]}), kv[1])) {
         .SUCCESS => {},
         .NOENT => if (contained or std.mem.eql(u8, kv[0], "net/core/bpf_jit_harden")) {

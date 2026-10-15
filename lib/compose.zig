@@ -248,8 +248,16 @@ fn lay(io: Io, gpa: Allocator, root: Dir, src: []const u8, dst: Dir, to: []const
     var buf: [Dir.max_path_bytes]u8 = undefined;
     while (try w.next(io)) |e| {
         if (mem.eql(u8, e.basename, ".DS_Store")) continue;
+        if (!cleanPath(e.path)) return error.UnexpectedFileKind;
+        const there = into.statFile(io, e.path, .{ .follow_symlinks = false }) catch null;
+        const was: ?Io.File.Kind = if (there) |st| st.kind else null;
+        if (e.kind == .directory) {
+            if (was != null and was != .directory) return error.UnexpectedFileKind;
+            try into.createDirPath(io, e.path);
+            continue;
+        }
+        if (was == .directory) return error.UnexpectedFileKind;
         switch (e.kind) {
-            .directory => try into.createDirPath(io, e.path),
             .sym_link => {
                 const target = buf[0..try from.readLink(io, e.path, &buf)];
                 into.deleteFile(io, e.path) catch |err| switch (err) {

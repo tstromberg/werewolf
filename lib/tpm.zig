@@ -24,10 +24,12 @@ const Bytes = struct {
     data: [4096]u8 = undefined,
     len: usize = 0,
     fn bytes(b: *Bytes, input: []const u8) void {
+        if (input.len > b.data.len - b.len) unreachable;
         @memcpy(b.data[b.len..][0..input.len], input);
         b.len += input.len;
     }
     fn int(b: *Bytes, comptime T: type, input: T) void {
+        if (@sizeOf(T) > b.data.len - b.len) unreachable;
         std.mem.writeInt(T, b.data[b.len..][0..@sizeOf(T)], input, .big);
         b.len += @sizeOf(T);
     }

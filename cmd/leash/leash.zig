@@ -203,6 +203,7 @@ pub fn main(init: std.process.Init) !void {
     if (exists("/run/cgroup/svc")) {
         const dir = try gpa.printSentinel("/run/cgroup/svc/{s}", .{name}, 0);
         _ = linux.mkdir(dir, 0o755);
+        _ = writeIn(gpa, dir, "cgroup.kill", "1");
         if (s.memory) |mib| {
             var buf: [24]u8 = undefined;
             const max = std.mem.print(&buf, "{d}\n", .{@as(u64, mib) << 20}) catch unreachable;

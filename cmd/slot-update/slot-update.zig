@@ -871,23 +871,6 @@ pub const Update = struct {
         return buf;
     }
 
-    /// sha256Of returns the hex sha256 of the file at path.
-    fn sha256Of(u: *Update, path: []const u8) ![64]u8 {
-        // Stream it: this hashes a root image every hour.
-        var f = try Dir.cwd().openFile(u.io, path, .{});
-        defer f.close(u.io);
-        var h: std.crypto.hash.sha2.Sha256 = .init(.{});
-        var buf: [64 << 10]u8 = undefined;
-        var at: u64 = 0;
-        while (true) {
-            const n = try f.readPositionalAll(u.io, &buf, at);
-            if (n == 0) break;
-            h.update(buf[0..n]);
-            at += n;
-        }
-        return std.fmt.bytesToHex(h.finalResult(), .lower);
-    }
-
     /// examine has a reader parse body for job and returns the lines after its
     /// "ok". On failure it records why on the last source and returns null.
     fn examine(

@@ -330,7 +330,7 @@ pub fn running(io: Io, gpa: Allocator, dir: []const u8) ?std.posix.pid_t {
         10,
     ) catch return null;
     if (builtin.os.tag != .linux) return null;
-    std.posix.kill(pid, .CONT) catch return null;
+    std.posix.kill(pid, @fromBackingInt(@intCast(0))) catch return null;
     return pid;
 }
 

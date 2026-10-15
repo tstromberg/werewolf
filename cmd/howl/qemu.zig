@@ -283,7 +283,7 @@ pub fn attach(io: Io, gpa: Allocator, d: []const u8) !void {
     const log = try gpa.print("{s}/console.log", .{d});
     const text = Dir.cwd().readFileAlloc(io, log, gpa, .limited(64 << 20)) catch "";
     // The last 64 KiB holds the boot and what followed.
-    try out.writeStreamingAll(io, text[text.len -| (64 << 10)..]);
+    try @import("verbs.zig").show(io, gpa, text[text.len -| (64 << 10)..]);
     const in = Io.File.stdin();
     if (!(in.isTty(io) catch false)) return;
 
