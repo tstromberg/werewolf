@@ -124,20 +124,30 @@ pub fn check(p: *Posture) !void {
     });
     const sig_value = trim(p.read("/sys/module/module/parameters/sig_enforce"));
     const sig = parseSwitch(sig_value);
+    // werewolf's kernel has no module loader at all, which no signature
+    // switch can match; a kernel with one must enforce signatures.
+    const no_loader = sig == null and !exists(p.io, "/proc/modules");
     try p.add(.{
         .id = "boot-sig-enforced",
         .area = "boot",
-        .name = "Module signatures enforced",
-        .why = "Until init closes the module loader, the kernel's own build is all that decides " ++
-            "what it runs: one built to refuse unsigned modules cannot be told to take them.",
-        .how = "/sys/module/module/parameters/sig_enforce is Y",
-        .expected = "Y",
-        .observed = if (sig_value.len > 0)
+        .name = "No unsigned kernel modules",
+        .why = "The kernel's own build is all that decides what it runs: one with no module " ++
+            "loader, or built to refuse unsigned modules, cannot be told to take them.",
+        .how = "the kernel has no module loader, or /sys/module/module/parameters/sig_enforce is Y",
+        .expected = "no loader, or Y",
+        .observed = if (no_loader)
+            "no module loader"
+        else if (sig_value.len > 0)
             sig_value
         else
             "unavailable (missing, unreadable or empty)",
-        .result = if (sig) |on| (if (on) .pass else .fail) else .skip,
-        .detail = if (sig == null) "this kernel has no module signature switch" else "",
+        .result = if (no_loader) .pass else if (sig) |on| (if (on) .pass else .fail) else .skip,
+        .detail = if (no_loader)
+            "built without modules"
+        else if (sig == null)
+            "this kernel has no module signature switch"
+        else
+            "",
     });
     if (p.werewolf) try rollback(p);
 }

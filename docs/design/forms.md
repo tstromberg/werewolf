@@ -38,9 +38,8 @@ minimal ──→ prod ──┬──→ nginx ──→ php
 minimal ──→ sshd ──→ qemu-host;   prod with sshd ──→ prod-ssh, lima
 ```
 
-**`minimal` supplies slots**, `blkid` and the filesystem modules for native disks.
-FAT loads only where stage0 tags the machine (`@esp` in form.yaml's
-`modules`), so modload still runs once.
+**`minimal` supplies slots** and `blkid` for native disks; the kernel has
+every filesystem they need built in.
 
 **`prod` absorbed** `dhcp`, `cloud`, `autoupdate`, `disk` and `crypt`. It
 carries `mke2fs` and `cryptsetup`, so having the tools cannot mean

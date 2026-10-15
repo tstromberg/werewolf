@@ -6,7 +6,7 @@ Build-host programs, never in an image. Most build into build/host/.
 
 `form VERB FORM ...` answers make's questions about a form (howl reads forms
 itself): its chain of bases, form.yaml keys, ports, weaknesses, kernel
-arguments, modules, merged apko config, and the files the chain derives
+arguments, merged apko config, and the files the chain derives
 (lib/form.zig, lib/compose.zig, forms/README.md). `form tree` prints every
 form and its chain, and `form released` the forms CI publishes
 (lib/compose.zig's `release_forms`). For `make packages`, `form packaged`
@@ -24,6 +24,8 @@ their repository (lib/package.zig). `make packages` runs the first two for ARCH.
   packs the files under TREE as NAME into `DIR/NAME-VERSION.apk`, with its
   index stanza beside it. TIME is when the source was committed, in seconds
   since the epoch; a VERSION of `-` derives the version from it.
+- `package baselayout DIR ARCH TIME` packs the minimal Werewolf filesystem
+  from `lib/baselayout.zig`, using the same entries as source builds.
 - `package index DIR OLD` writes `DIR/APKINDEX` from OLD, an APKINDEX
   already published (or `-`), and DIR's stanzas, and `DIR/APKINDEX.member`,
   the bytes to sign: `openssl dgst -sha256 -sign KEY`.

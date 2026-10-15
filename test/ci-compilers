@@ -1,0 +1,61 @@
+#!/bin/sh
+# ci-compilers installs the Go, Rust and .NET that the tutorial forms
+# (go-example, rust-example, aspnet-example) compile with on the host,
+# pinned, so every job of a run has the same compilers whichever runner
+# image it lands on. release/form-images records their versions in each
+# form's inputs and refuses a build whose compilers changed. It installs
+# under ~/.cache/werewolf-compilers, as the job's user, and puts them on a
+# GitHub Actions job's PATH. Like ci-setup, a second run does nothing.
+set -eu
+go_version=1.27.2
+rust_version=1.99.1
+dotnet_version=10.0.402
+case $(uname -sm) in
+"Linux x86_64")
+	go_arch=amd64 dotnet_arch=x64
+	go_sha256=ecbadb99091a3f46e31f5f934b068b1864eafa7995211b39eaddf76996045fe5
+	dotnet_sha512=1904a98dda2db34ba78ba3c4fb1b224455329af91c341d83547843c1839e112b04ae699ee92fa2449a8f62249196a938723078c0c60b9f65c88539d5687729c2
+	;;
+"Linux aarch64")
+	go_arch=arm64 dotnet_arch=arm64
+	go_sha256=94f3e30b8e374bc285e7dadc11e0865726b9bc6e85b841ccceaabc0214c6b7c8
+	dotnet_sha512=db85ae85527251fbb1290720ac3bf324bb1d9eea74516ef291ed4bb1f8ff6ec63a17593367f49b456115e8b24ead6d0c2ece2801e501f36a6cd4444ed01a498f
+	;;
+*)
+	echo "ci-compilers: Linux x86_64 or aarch64 only" >&2
+	exit 2
+	;;
+esac
+dir=$HOME/.cache/werewolf-compilers
+mkdir -p "$dir"
+
+# fetch URL SUM sha256|sha512 unpacks a checked archive into $dir/NAME.
+fetch() {
+	rm -rf "${dir:?}/$4" "$dir/$4.tar.gz"
+	curl -fsSL --proto =https -o "$dir/$4.tar.gz" "$1"
+	echo "$2  $dir/$4.tar.gz" | "$3sum" -c --quiet - || {
+		echo "ci-compilers: $1 does not match its pinned digest" >&2
+		exit 1
+	}
+	mkdir "$dir/$4"
+	tar -C "$dir/$4" -xzf "$dir/$4.tar.gz"
+	rm "$dir/$4.tar.gz"
+}
+
+if [ "$(head -n 1 "$dir/go/go/VERSION" 2>/dev/null)" != "go$go_version" ]; then
+	fetch "https://go.dev/dl/go$go_version.linux-$go_arch.tar.gz" "$go_sha256" sha256 go
+fi
+if [ ! -d "$dir/dotnet/sdk/$dotnet_version" ]; then
+	fetch "https://builds.dotnet.microsoft.com/dotnet/Sdk/$dotnet_version/dotnet-sdk-$dotnet_version-linux-$dotnet_arch.tar.gz" \
+		"$dotnet_sha512" sha512 dotnet
+fi
+# rustup checks what it downloads against the release's signed manifest.
+command -v rustup >/dev/null || sudo apt-get install -y rustup
+rustup toolchain install "$rust_version" --profile minimal --target "$(uname -m)-unknown-linux-musl"
+rustup default "$rust_version"
+
+if [ -n "${GITHUB_PATH:-}" ]; then
+	printf '%s\n' "$dir/go/go/bin" "$dir/dotnet" >>"$GITHUB_PATH"
+	printf '%s\n' "DOTNET_ROOT=$dir/dotnet" "RUSTC=rustup run $rust_version rustc" >>"$GITHUB_ENV"
+fi
+echo "ci-compilers: go $go_version, rust $rust_version, dotnet $dotnet_version"

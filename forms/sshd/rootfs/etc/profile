@@ -1,0 +1,7 @@
+export PATH=/usr/bin
+umask 022
+PS1='\h:\w\$ '
+for script in /etc/profile.d/*.sh; do
+    [ ! -r "$script" ] || . "$script"
+done
+unset script

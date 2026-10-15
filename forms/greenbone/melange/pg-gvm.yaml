@@ -1,0 +1,56 @@
+# PostgreSQL's Greenbone extension, built for the same Wolfi PostgreSQL 17
+# as the form. Only gvm-libs' base library is needed; scanner libraries,
+# build tools and headers stay out of the runtime image.
+package:
+  name: pg-gvm
+  version: 22.6.18
+  epoch: 0
+  description: Greenbone PostgreSQL 17 extension and its base library
+  copyright:
+    - license: GPL-3.0-or-later
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - cmake
+      - glib-dev
+      # pg-gvm uses libical 3's recurrence API; libical 4 changed its ABI.
+      - libical-dev~3.0
+      - pkgconf
+      - postgresql-17-dev
+
+pipeline:
+  - runs: mkdir -p gvm-libs pg-gvm
+  - uses: fetch
+    with:
+      uri: https://github.com/greenbone/gvm-libs/archive/refs/tags/v23.13.0.tar.gz
+      expected-sha256: dda4ff261c6083dc6b9a7eab3cf1f531456698b24b9d446b316b3572ad8caeb8
+      directory: gvm-libs
+  - uses: fetch
+    with:
+      uri: https://github.com/greenbone/pg-gvm/archive/refs/tags/v${{package.version}}.tar.gz
+      expected-sha256: ea6b943c804ff7c2ba3da87691a59de96a1a0d9d7597b26b6169efd84ebc2f2b
+      directory: pg-gvm
+  - runs: |
+      printf '\nadd_subdirectory(base)\n' >>gvm-libs/CMakeLists.txt
+      cmake -S gvm-libs -B build-base \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+        -DLIBDIR=/usr/lib -DSKIP_SRC=ON
+      cmake --build build-base -j"$(nproc)"
+      cmake --install build-base
+      cmake -S pg-gvm -B build-pg \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr
+      cmake --build build-pg -j"$(nproc)"
+      DESTDIR="${{targets.destdir}}" cmake --install build-base
+      DESTDIR="${{targets.destdir}}" cmake --install build-pg
+      rm -rf "${{targets.destdir}}/usr/include" \
+        "${{targets.destdir}}/usr/lib/pkgconfig" \
+        "${{targets.destdir}}/run"
+  - uses: strip

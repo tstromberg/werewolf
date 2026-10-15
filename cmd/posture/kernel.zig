@@ -77,14 +77,21 @@ pub fn check(p: *Posture) !void {
         .result = if (locked and !lowered) .pass else .fail,
         .detail = level,
     });
-    try p.oneWay(
+    const modules_why = "No new kernel code can be loaded after boot, by anyone.";
+    if (!try p.builtWithout(
         "kernel-modules-closed",
         "Kernel module loading closed",
-        "No new kernel code can be loaded after boot, by anyone.",
+        modules_why,
         "kernel/modules_disabled",
-        "1",
-        "0",
-    );
+    ))
+        try p.oneWay(
+            "kernel-modules-closed",
+            "Kernel module loading closed",
+            modules_why,
+            "kernel/modules_disabled",
+            "1",
+            "0",
+        );
     const tainted = std.fmt.parseInt(u64, p.sysctl("kernel/tainted"), 10) catch
         std.math.maxInt(u64);
     try p.add(.{
@@ -122,14 +129,21 @@ pub fn check(p: *Posture) !void {
         "3",
         "0",
     );
-    try p.oneWay(
+    const bpf_why = "Ordinary users cannot load BPF programs into the kernel.";
+    if (!try p.builtWithout(
         "kernel-bpf",
         "BPF only for root",
-        "Ordinary users cannot load BPF programs into the kernel.",
+        bpf_why,
         "kernel/unprivileged_bpf_disabled",
-        "1",
-        "0",
-    );
+    ))
+        try p.oneWay(
+            "kernel-bpf",
+            "BPF only for root",
+            bpf_why,
+            "kernel/unprivileged_bpf_disabled",
+            "1",
+            "0",
+        );
     try p.sysctls(
         "kernel-hidden",
         "kernel",
@@ -139,11 +153,17 @@ pub fn check(p: *Posture) !void {
     );
     const paranoid = p.sysctl("kernel/perf_event_paranoid");
     const perf = std.fmt.parseInt(i32, paranoid, 10) catch -9;
-    try p.add(.{
+    const perf_why = "Ordinary users cannot watch the kernel through performance counters.";
+    if (!try p.builtWithout(
+        "kernel-perf",
+        "Performance events restricted",
+        perf_why,
+        "kernel/perf_event_paranoid",
+    )) try p.add(.{
         .id = "kernel-perf",
         .area = "kernel",
         .name = "Performance events restricted",
-        .why = "Ordinary users cannot watch the kernel through performance counters.",
+        .why = perf_why,
         .how = "kernel.perf_event_paranoid is 2 or more",
         .observed = if (paranoid.len > 0)
             paranoid
@@ -159,13 +179,20 @@ pub fn check(p: *Posture) !void {
         "Removes kernel code that privilege-escalation exploits often start from.",
         &.{.{ "user/max_user_namespaces", "0" }},
     );
-    try p.sysctls(
+    const io_uring_why = "Removes a large interface that has carried many kernel exploits.";
+    if (!try p.builtWithout(
         "kernel-io-uring",
-        "kernel",
         "No io_uring",
-        "Removes a large interface that has carried many kernel exploits.",
-        &.{.{ "kernel/io_uring_disabled", "2" }},
-    );
+        io_uring_why,
+        "kernel/io_uring_disabled",
+    ))
+        try p.sysctls(
+            "kernel-io-uring",
+            "kernel",
+            "No io_uring",
+            io_uring_why,
+            &.{.{ "kernel/io_uring_disabled", "2" }},
+        );
     try p.sysctls(
         "kernel-tiocsti",
         "kernel",
@@ -173,13 +200,15 @@ pub fn check(p: *Posture) !void {
         "A process cannot type commands into a terminal it shares with another.",
         &.{.{ "dev/tty/legacy_tiocsti", "0" }},
     );
-    try p.sysctls(
-        "kernel-sysrq",
-        "kernel",
-        "No SysRq",
-        "The console's magic keys cannot dump memory or reboot.",
-        &.{.{ "kernel/sysrq", "0" }},
-    );
+    const sysrq_why = "The console's magic keys cannot dump memory or reboot.";
+    if (!try p.builtWithout("kernel-sysrq", "No SysRq", sysrq_why, "kernel/sysrq"))
+        try p.sysctls(
+            "kernel-sysrq",
+            "kernel",
+            "No SysRq",
+            sysrq_why,
+            &.{.{ "kernel/sysrq", "0" }},
+        );
     try p.sysctls(
         "kernel-core-dumps",
         "kernel",

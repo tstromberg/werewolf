@@ -19,6 +19,14 @@ def call(*args, **kw):
     return subprocess.run([str(a) for a in args], check=True, **kw)
 
 
+def digest(path):
+    result = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1 << 20), b''):
+            result.update(block)
+    return result.hexdigest()
+
+
 def read_plan(form):
     path = Path('forms') / form / 'test/native.json'
     plan = json.loads(path.read_text())
@@ -31,7 +39,7 @@ def read_plan(form):
     names = set()
     for d in plan['drivers']:
         required = {'name', 'source', 'mode', 'user', 'pledge', 'read', 'connect', 'run', 'cases'}
-        if not required <= set(d) or set(d) - required - {'config'}:
+        if not required <= set(d) or set(d) - required - {'config', 'groups'}:
             raise ValueError('invalid driver fields')
         for field in ('name', 'mode'):
             if not IDENT.fullmatch(d[field]):
@@ -41,6 +49,11 @@ def read_plan(form):
         if d['user'] == 'root' or not d['name'].startswith('test-') or d['name'] in names:
             raise ValueError('driver needs a unique test name and non-root identity')
         names.add(d['name'])
+        groups = d.get('groups', [])
+        if not isinstance(groups, list) or len(groups) > 16 or any(
+                not isinstance(group, str) or not ACCOUNT.fullmatch(group) or group == 'root'
+                for group in groups) or len(set(groups)) != len(groups):
+            raise ValueError('invalid test groups')
         source = Path(d['source'])
         if source.name != d['source'] or source.suffix != '.zig' or not (path.parent / source).is_file():
             raise ValueError('driver source must be adjacent Zig source')
@@ -54,6 +67,10 @@ def read_plan(form):
             raise ValueError('unsupported test pledge')
         for field in ('read', 'connect', 'run'):
             for entry in d[field]:
+                if field == 'connect' and isinstance(entry, str) and re.fullmatch(r'tcp/[1-9][0-9]{0,4}', entry):
+                    if int(entry[4:]) > 65535:
+                        raise ValueError('invalid test TCP port')
+                    continue
                 if not isinstance(entry, str) or not entry.startswith('/') or '..' in Path(entry).parts or any(c.isspace() for c in entry):
                     raise ValueError('test grants must be explicit absolute paths')
         for name, source in d.get('config', {}).items():
@@ -110,7 +127,7 @@ def prepare(form, arch):
     compile_dir = work / 'compile'
     write(compile_dir / 'stage.zig', Path('test/native/stage.zig').read_text())
     write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], wait=sorted({
-        p for p in d['read'] + d['connect'] if p.startswith('/run/svc/')})) for d in plan['drivers']]})
+        p for p in d['read'] + d['connect'] if p.startswith(('/run/svc/', '/data/share/'))})) for d in plan['drivers']]})
 
     def compile(source, binary):
         binary.parent.mkdir(parents=True, exist_ok=True)
@@ -130,14 +147,18 @@ def prepare(form, arch):
         for field in ('read', 'connect', 'run'):
             service.extend(field + ' ' + item for item in d[field])
         service.extend('config ' + name + ' ' + source for name, source in d.get('config', {}).items())
+        service.extend('group ' + name for name in d.get('groups', []))
         write(root / 'usr/share/werewolf/tests' / d['name'] / 'service', '\n'.join(service) + '\n')
     print('native-tests: prepared ' + str(generated), flush=True)
 
 
-def validate(text, plan, context):
+def validate(text, plan, context, only_driver=None):
     cases, drivers, completed = set(), set(), False
-    expected = {(d['name'], name) for d in plan['drivers'] for name in d['cases'][context['phase']]}
-    expected_drivers = {d['name'] for d in plan['drivers']}
+    selected = [d for d in plan['drivers'] if only_driver is None or d['name'] == only_driver]
+    if not selected:
+        raise ValueError('unknown test driver: ' + str(only_driver))
+    expected = {(d['name'], name) for d in selected for name in d['cases'][context['phase']]}
+    expected_drivers = {d['name'] for d in selected}
     for line in text.splitlines():
         if 'werewolf-test: ' not in line:
             continue
@@ -219,11 +240,28 @@ def compare(form, arch):
     for name, record in a.items():
         if name not in changed_metadata and b.get(name) != record:
             raise ValueError('native instrumentation changed runtime overlay: ' + name)
+    # New configuration can change a service just as replacing a file can.
+    # Permit only the declared clients, their launcher and inert form metadata.
+    plan = read_plan(form)
+    additions = {'usr/lib/werewolf/test-stage', 'usr/share/werewolf/test-image'}
+    for driver in plan['drivers']:
+        additions.add('usr/lib/werewolf/' + driver['name'])
+        additions.add('usr/share/werewolf/tests/' + driver['name'] + '/service')
+    parents = {str(parent) for name in additions for parent in Path(name).parents}
+    metadata = 'usr/share/werewolf/forms/native-test-' + form
+    for name in b.keys() - a.keys():
+        if name not in additions and name not in parents and name != metadata and not name.startswith(metadata + '/'):
+            raise ValueError('native instrumentation added runtime overlay: ' + name)
     print('native-tests: production service policies, accounts and runtime payload match', flush=True)
 
 
 def run(form, arch, qemu):
     plan = read_plan(form)
+    output = Path(os.environ['OUT'])
+    inputs = dict(image=output / 'initramfs.zst',
+                  production_image=output.parent / form / 'initramfs.zst',
+                  plan=Path('forms') / form / 'test/native.json')
+    identity = {name: digest(path) for name, path in inputs.items()}
     check = Path(os.environ['CHECK'])
     work = check / (form + '-native')
     if work.exists():
@@ -256,15 +294,13 @@ def run(form, arch, qemu):
              '-append', os.environ['CMDLINE'] + ' werewolf.data=vda',
              '-drive', f'file={disk},format=raw,if=virtio',
              '-drive', f'file={packed},format=raw,if=virtio,readonly=on')
+        if any(digest(path) != identity[name] for name, path in inputs.items()):
+            raise ValueError('native test inputs changed during the run; rebuild and retry')
         count = validate(log.read_text(errors='replace'), plan, context)
         results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
         print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
-    output = Path(os.environ['OUT'])
     write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,
-        profile='local-qemu',
-        image=hashlib.sha256((output / 'initramfs.zst').read_bytes()).hexdigest(),
-        production_image=hashlib.sha256((output.parent / form / 'initramfs.zst').read_bytes()).hexdigest(),
-        plan=hashlib.sha256((Path('forms') / form / 'test/native.json').read_bytes()).hexdigest(), phases=results))
+        profile='local-qemu', **identity, phases=results))
 
 
 if __name__ == '__main__':

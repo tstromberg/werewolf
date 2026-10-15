@@ -39,6 +39,8 @@ pub const repository_pem =
     \\-----END PUBLIC KEY-----
 ;
 
+pub const baselayout = @import("baselayout.zig");
+
 /// Info is what a package says of itself, in .PKGINFO and its index entry.
 pub const Info = struct {
     name: []const u8,
@@ -86,6 +88,18 @@ pub const Packed = struct {
     /// stanza is its APKINDEX entry, ending in a blank line.
     stanza: []const u8,
 };
+
+/// base packs the same layout for local builds and the published repository.
+pub fn base(gpa: Allocator, arch: []const u8, time: u64, version_text: []const u8) !Packed {
+    return pack(gpa, .{
+        .name = baselayout.name,
+        .version = version_text,
+        .arch = arch,
+        .time = time,
+        .description = "Werewolf Linux minimal base filesystem",
+        .provides = baselayout.provides,
+    }, baselayout.entries(Entry));
+}
 
 /// pack builds a package of entries, which come in tar order: each directory
 /// before what is in it.

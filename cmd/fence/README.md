@@ -35,7 +35,7 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
 ## Detailed design
 
 1. **Policy-routing rules** for IPv4, and for IPv6 if the kernel has it
-   (werewolf boots with `ipv6.disable=1` unless the form allows IPv6). Sent
+   (werewolf's kernel is built without it). Sent
    traffic passes only if its user declared the protocol and port
    (`connect`), as a reply from a served port (`listen`), as ICMPv6, or to
    the metadata server's TCP 80 for a user named in `metadata`. Anything
@@ -62,7 +62,7 @@ the detected resolvers: one entry per line, numbers only, `all` for every user.
    directories on both sides of their binds. Read-only shares get no write
    grant. `/dev` is closed, even to
    reads, but for null, zero, full, random, urandom, kmsg, terminals, input
-   devices, ptys if allowed, and a PL061 GPIO chip. No process may mount.
+   devices and ptys if allowed. No process may mount.
    Every refusal is audited, after exec too.
 3. **The bounding set** loses CAP_NET_ADMIN and CAP_NET_RAW, unless a form
    allows them (`lib/allow.zig`: `netadmin`, `packet`; none does), and
@@ -89,7 +89,7 @@ the bounding set are built in; DHCP changes only resolver grants.
 | Raw or packet sockets below the rules | That needs CAP_NET_RAW, gone after fence. DHCP's engine holds the one packet socket, locked to DHCP replies. |
 | A reply forged by its source port | Explicit private TCP ports drop arrivals before reply allowances. Other sockets remain **open, by design**, including kernel-picked ports; leash refuses `listen` unless promised. |
 | Root signals the mount broker or DHCP | Landlock ABI 6 scoping blocks signals and abstract sockets out of the domain. |
-| Root drives GPIO lines | Only a PL061 (`arm,pl061`) gets ioctls: the chip a VM wires its power button to. |
+| Root drives GPIO lines | No GPIO chip is open to anyone; the kernel's gpio-keys turns a power line into an input device. |
 
 ## Reliability Considerations
 

@@ -1,7 +1,8 @@
 # IPE
 
-Implemented as an opt-in build, 2026-10-11. Production release builds still
-use Alpine's kernel. This is phase 4 of [verified boot](verified-boot.md).
+Implemented as an opt-in build, 2026-10-11. Every image now boots werewolf's
+own kernel, which has IPE built in ([custom-kernel.md](custom-kernel.md)).
+This is phase 4 of [verified boot](verified-boot.md).
 
 ## Summary
 
@@ -30,22 +31,22 @@ and reaches the mount broker, DHCP renewal and kernel helpers.
 
 ## Detailed design
 
-`boot/build-kernel` builds on native Linux, starting from the matching
-Alpine configuration. `boot/kernel-source` pins the upstream version and
-SHA-256; the script refuses a different Alpine version. Both architectures
-keep their drivers and compressed modules. IPE, module signature enforcement
-and forced lockdown are enabled; kexec and extra IPE signer keyrings are off.
-The supplied certificate is trusted for policies and its key signs modules.
-`KERNEL_ARCH=aarch64 LLVM=1` permits cross compilation on a faster Linux host.
-CI checks upstream and Alpine revision pins against both architecture locks.
-There is no generated developer module key. Keep this identity stable when
-comparing independent builds; the private key is absent from the output tar.
+Every `linux-werewolf` kernel has IPE and lockdown forced to confidentiality,
+and no module loader, kexec or extra IPE signer keyrings. It has no IPE policy
+of its own, so IPE enforces nothing until one is loaded. Its IPE trusts
+kernel-build's `release/ipe.crt`, a copy of `release/protected/image.crt`.
+howl refuses a kernel config without IPE, forced confidentiality, `MODULES`
+off and an empty `IPE_BOOT_POLICY` (`lib/ipe.zig`, `checkConfig`). Tests sign
+with a disposable key: `tools/test-kernel ARCH CERT OUT` builds kernel-build at
+the commit `boot/kernel-build` pins, its IPE trusting `CERT`.
 
-The bootstrap policy permits execution and modules from initramfs only.
-Stage0 loads modules, opens the verified root, then loads `ipe.p7b` from
-initramfs. The kernel verifies its PKCS#7 signature. Stage0 checks the
-deployed policy against the mounted root hash, activates it, and forces
-enforcing mode. The final policy has no initramfs exception:
+The TPM enrollment image's `tpm-enroll` loads, activates and enforces
+`enrollment/ipe-boot.p7b` (from `tools/build-tpm-bootstrap`; the text is
+`lib/ipe.zig`'s `boot_policy`), which permits execution from initramfs only.
+Stage0 opens the verified root and, when the image requires IPE (its marker),
+loads `ipe.p7b` from initramfs. The kernel verifies its PKCS#7 signature.
+Stage0 checks the deployed policy against the mounted root hash, activates it,
+and forces enforcing mode. The final policy has no initramfs exception:
 
 ```text
 policy_name=werewolf policy_version=1.0.0
@@ -60,10 +61,10 @@ active, enforcing policy before continuing. Posture checks enforcement
 and PID 1's capability boundary; IPE images remove the stock exceptions.
 
 Builds use separate paths, `build/ARCH/ipe/FORM-ipe`, and the root carries
-`/usr/share/werewolf/ipe`. The builder checks the custom kernel config and
+`/usr/share/werewolf/ipe`. The builder checks the kernel config and
 certificate. The private signing key is read only by host OpenSSL.
 
-On Linux, supply a stable certificate and private key, then run:
+Supply a stable test certificate and private key, then run:
 
 ```sh
 export WEREWOLF_IPE_KEY=/path/to/policy.key
@@ -73,10 +74,11 @@ make IPE=1 FORM=minimal image
 make IPE=1 check-ipe
 ```
 
-On macOS, build the kernel in a Linux VM and copy its `rootfs.tar` back.
-`IPE_KERNEL` selects that archive. The remaining build and QEMU checks run
-on the host. Howl also accepts `--ipe-kernel`, `--ipe-key`, `--ipe-cert`
-for `build` and `_build`; all three are required together.
+On macOS, `make ipe-kernel` also needs `QEMU_KERNEL_IMAGE` and
+`QEMU_BASE_INITRAMFS`, howl's Melange guest ([macos-builds.md](../macos-builds.md)).
+`IPE_KERNEL` selects the archive. The build and QEMU checks run on the host.
+Howl also accepts `--ipe-kernel`, `--ipe-key`, `--ipe-cert` for `build` and
+`_build`; all three are required together.
 
 **Updates use signed bundles.** Enroll a channel with `IPE_UPDATES` and
 `IMAGE_SERIAL`, then export with `make prebuilt`. The updater verifies the

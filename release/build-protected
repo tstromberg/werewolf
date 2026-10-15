@@ -12,6 +12,17 @@ import sys
 import tempfile
 
 
+def published_kernel(arch, pins, output):
+    """linux-werewolf from werewolf's kernel repository, as apko installs it."""
+    resolver = importlib.machinery.SourceFileLoader('protected_inputs', 'release/protected-inputs').load_module()
+    with tempfile.TemporaryDirectory(dir=output.parent) as temporary:
+        configs = resolver.boot_configs(Path(temporary))
+        incoming = Path(temporary) / 'rootfs.tar'
+        subprocess.run(['apko', '--workdir', configs, 'build-minirootfs', '--build-arch', arch,
+                        *pins, 'kernel.yaml', incoming], check=True)
+        os.replace(incoming, output)
+
+
 def build(form, provider, arch, serial, output):
     if not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', form) or provider not in ('lima', 'qemu'):
         raise ValueError('invalid protected form or provider')
@@ -29,37 +40,32 @@ def build(form, provider, arch, serial, output):
     tree, cache = Path.cwd(), Path('build/protected-cache').resolve()
     cache.mkdir(parents=True, exist_ok=True)
     # This command must be called through with-protected-keys. Key files remain
-    # on this host; builder.melange stages only the pinned public certificate.
+    # on this host; the stub's builder sees only public inputs.
     key = Path(os.environ['WEREWOLF_PROTECTED_IMAGE_KEY']).resolve()
     cert = Path(os.environ['WEREWOLF_PROTECTED_IMAGE_CRT']).resolve()
     boot_key = Path(os.environ['WEREWOLF_PROTECTED_BOOT_KEY']).resolve()
     boot_cert = Path(os.environ['WEREWOLF_PROTECTED_BOOT_CRT']).resolve()
-    version = re.search(r'^alpine_version=(.+)$', Path('boot/kernel-source').read_text(), re.M).group(1)
-    base_packages = ['linux-virt=' + version]
+    inputs = {name: tree / name for name in ('boot/kernel.yaml', 'release/packages.pub')}
+    pins = []
     if snapshot := os.environ.get('WEREWOLF_PROTECTED_INPUTS'):
-        base_lock = Path(snapshot) / 'kernel.lock.json'
-        base_packages = builder.package_pins(base_lock, arch)
+        inputs['package-lock'] = Path(snapshot) / 'kernel.lock.json'
+        pins = [argument for package in builder.package_pins(inputs['package-lock'], arch)
+                for argument in ('-p', package)]
     with (cache / 'build.lock').open('a+b') as guard:
         fcntl.flock(guard, fcntl.LOCK_EX)
-        inputs = {name: tree / name for name in ('boot/kernel-source', 'boot/kernel.yaml')}
-        inputs.update({str(path.relative_to(tree)): path for path in sorted((tree / 'boot/alpine-keys').glob('*.pub'))})
-        if snapshot:
-            inputs['package-lock'] = base_lock
-        base_pin = builder.fingerprint(arch, inputs)
-        base_dir = cache / arch / ('base-' + base_pin)
-        base_dir.mkdir(parents=True, exist_ok=True)
-        base = base_dir / 'base.tar'
-        if not builder.valid(base_dir, base_pin, {'base.tar'}):
-            with tempfile.TemporaryDirectory(dir=base_dir) as temporary:
-                incoming = Path(temporary) / 'base.tar'
-                pins = [argument for package in base_packages for argument in ('-p', package)]
-                subprocess.run(['apko', '--workdir', 'boot', 'build-minirootfs', '--build-arch', arch,
-                                *pins, 'kernel.yaml', str(incoming)], check=True)
-                digest = builder.digest(incoming)
-                os.replace(incoming, base)
-                (base_dir / 'complete.json').write_text(json.dumps(dict(inputs=base_pin, outputs={'base.tar': digest})) + '\n')
-        prerequisites = builder.build(tree, cache, arch, base, key, cert)
-    env = dict(os.environ, UKI_STUB=str(prerequisites / 'linux.efi.stub'))
+        # The published kernel's IPE trusts the protected image certificate.
+        # check-protected-qemu's disposable certificate needs a test kernel
+        # (tools/test-kernel); howl refuses any whose IPE trusts another.
+        if test := os.environ.get('WEREWOLF_PROTECTED_TEST_KERNEL'):
+            kernel = Path(test).resolve()
+        else:
+            pin = builder.fingerprint(arch, inputs)
+            kernel = builder.cached(cache / arch / ('kernel-' + pin), pin, 'rootfs.tar',
+                                    lambda path: published_kernel(arch, pins, path))
+        pin = builder.fingerprint(arch, builder.stub_files(tree))
+        stub = builder.cached(cache / arch / ('stub-' + pin), pin, 'linux.efi.stub',
+                              lambda path: builder.stub(tree, cache, arch, path))
+    env = dict(os.environ, UKI_STUB=str(stub))
     host = '192.168.5.2' if provider == 'lima' else '10.0.2.2'
     trust = json.loads(Path('release/protected/trust.json').read_text())
     port = trust['permit_port']
@@ -72,7 +78,7 @@ def build(form, provider, arch, serial, output):
         disk_args += ' werewolf.ip=192.168.5.15/24 werewolf.gw=192.168.5.2 werewolf.dns=192.168.5.3'
     howl = str(Path('build/host/howl').resolve())
     args = [howl, '_build', '--with', form, '--arch', arch, '--build', str(work),
-        '--ipe-kernel', str(prerequisites / 'rootfs.tar'), '--ipe-key', str(key), '--ipe-cert', str(cert),
+        '--ipe-kernel', str(kernel), '--ipe-key', str(key), '--ipe-cert', str(cert),
         '--ipe-updates', channel, '--image-serial', serial, '--boot-key', str(boot_key),
         '--boot-cert', str(boot_cert), '--boot-native', '--tpm-firmware', '--permit-host', host,
         '--permit-port', str(port), '--disk', str(disk), '--disk-args', disk_args, 'disk']

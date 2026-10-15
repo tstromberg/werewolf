@@ -80,8 +80,8 @@ class Plans(unittest.TestCase):
     def test_greenbone_keeps_legacy_and_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
         self.assertTrue(plan['legacy'])
-        self.assertEqual(plan['packages'], [])
-        self.assertEqual(plan['drivers'][0]['user'], '_oci-gvmd')
+        self.assertEqual(plan['packages'], ['postgresql-17-client'])
+        self.assertEqual(next(d for d in plan['drivers'] if d['mode'] == 'manager')['user'], '_oci-gvmd')
 
     def test_config_cannot_replace_context_or_read_arbitrary_host_files(self):
         original = native.read_plan('greenbone')
@@ -101,6 +101,22 @@ class Plans(unittest.TestCase):
                 plan['drivers'][0]['user'] = 'root'
             else:
                 plan['legacy'] = 'false'
+            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+                with self.assertRaises(ValueError):
+                    native.read_plan('greenbone')
+
+    def test_test_groups_are_explicit_named_non_root_groups(self):
+        for groups in ('_oci-openvas', ['root'], ['_oci-openvas', '_oci-openvas'], [['nested']], ['bad\ngroup']):
+            plan = native.read_plan('greenbone')
+            plan['drivers'][0]['groups'] = groups
+            with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
+                with self.assertRaises(ValueError):
+                    native.read_plan('greenbone')
+
+    def test_tcp_grants_are_single_valid_ports(self):
+        for port in ('tcp/0', 'tcp/65536', 'tcp/any', 'tcp/443 public', 'udp/53'):
+            plan = native.read_plan('greenbone')
+            plan['drivers'][0]['connect'] = [port]
             with patch.object(Path, 'read_text', return_value=json.dumps(plan)):
                 with self.assertRaises(ValueError):
                     native.read_plan('greenbone')
@@ -130,7 +146,9 @@ class Payload(unittest.TestCase):
                 archive.addfile(info, io.BytesIO(data))
 
     def compare(self):
-        with patch.dict(os.environ, BUILD=str(self.root)), contextlib.redirect_stdout(io.StringIO()):
+        plan = native.read_plan('postgresql')
+        with patch.dict(os.environ, BUILD=str(self.root)), contextlib.redirect_stdout(io.StringIO()), \
+                patch.object(native, 'read_plan', return_value=plan):
             native.compare('base', 'aarch64')
 
     def test_client_addition(self):
@@ -165,6 +183,14 @@ class Payload(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.compare()
 
+    def test_added_runtime_configuration_refused(self):
+        self.archive(self.test / 'overlay.tar', {
+            'usr/lib/werewolf/init': b'production init',
+            'etc/postgresql/conf.d/test.conf': b'changed behavior without replacing a file',
+        })
+        with self.assertRaisesRegex(ValueError, 'added runtime overlay'):
+            self.compare()
+
     def test_owner_and_directory_permissions_preserved(self):
         def archive(path, uid, mode):
             with tarfile.open(path, 'w') as output:
@@ -182,6 +208,38 @@ class Payload(unittest.TestCase):
                 archive(self.test / 'rootfs.tar', uid, mode)
                 with self.assertRaises(ValueError):
                     self.compare()
+
+
+class RunIdentity(unittest.TestCase):
+    def test_concurrent_image_or_plan_change_cannot_write_success_report(self):
+        plan = native.read_plan('postgresql')
+        for changed in ('image', 'production_image', 'plan'):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                images = root / 'build'
+                paths = dict(image=images / 'native-test-postgresql/initramfs.zst',
+                             production_image=images / 'postgresql/initramfs.zst',
+                             plan=root / 'forms/postgresql/test/native.json')
+                for path in paths.values():
+                    native.write(path, 'original')
+
+                def boot(*args, **kwargs):
+                    if str(args[0]) == 'test/boot':
+                        paths[changed].write_text('replaced during boot')
+
+                cwd = Path.cwd()
+                try:
+                    os.chdir(root)
+                    with patch.object(native, 'read_plan', return_value=plan), \
+                            patch.object(native, 'call', side_effect=boot), \
+                            patch.dict(os.environ, OUT=str(paths['image'].parent),
+                                       CHECK=str(root / 'check'), HOWL='howl',
+                                       KERNEL='kernel', CMDLINE='test'):
+                        with self.assertRaisesRegex(ValueError, 'inputs changed'):
+                            native.run('postgresql', 'aarch64', [])
+                    self.assertFalse((root / 'check/postgresql-native/results.json').exists())
+                finally:
+                    os.chdir(cwd)
 
 
 if __name__ == '__main__':

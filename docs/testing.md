@@ -14,13 +14,15 @@ runs its native suite instead: compiled Zig drivers under leash use the
 service as its clients would, with no shell or ssh added, on a generated
 test form compared with the plain build before boot
 ([design](design/image-release-testing.md)). Publishing a form's image asks
-more of it ([form-images.md](form-images.md)).
+more of it ([form-images.md](form-images.md)). While developing a suite, use
+the [local iteration loop](design/local-test-iteration.md) to keep the VM
+running between client changes.
 
 PostgreSQL tests SQL, shim redirects, no TCP and encrypted-disk persistence.
-Greenbone tests GMP login, password rejection and target persistence through gvmd
-and gsad's bridge; `legacy: true` retains its older checks. UI login and scans
-remain unqualified. Logs: `build/ARCH/check/FORM-native/`. These local QEMU runs
-are separate from protected lifecycle evidence.
+[Greenbone](../forms/greenbone/README.md#testing-status) tests GMP/OSP, database roles,
+Valkey ACLs, shared mounts and persistence; `legacy: true` retains its DEV checks.
+Logs: `build/ARCH/check/FORM-native/`. These local QEMU runs are separate from
+protected lifecycle evidence.
 
 ```sh
 make test           # every program's and library's unit tests, in seconds
@@ -69,7 +71,6 @@ Other boots cover what one boot cannot:
 | --- | --- | --- |
 | again (the Makefile's `AGAIN_FORMS`; `all` for every form) | come back on the disk the first boot left: `/data` opened, not formatted, its mark kept | [test/checks-again](../test/checks-again); a form's `test/checks-again` and `test/config-again` |
 | `prod` with no key | refuse its LUKS2 disk, mount an empty read-only tmpfs, say why in `/run/werewolf/nodata` | [test/checks-nodata](../test/checks-nodata) |
-| an unsigned module offered to `minimal` and to a slot | refuse it, stay untainted, load every signed module | [test/checks-unsigned](../test/checks-unsigned), [test/unsign](../test/unsign) |
 | `minimal` with one root byte changed (`check-verity`) | dm-verity names the block; stage0 stops before the root is mounted | `root-verified` in test/checks, for every other boot |
 | a slot that never commits (`check-deadman`) | the deadman says why and resets the machine | `werewolf.deadman`, honoured by DEV builds only |
 | `prod` behind a stand-in metadata server, as each cloud | take a good config on GCP, AWS (by session token only), Hetzner and Azure; refuse a tar with a link or `../`; ask nothing on no cloud or on Hyper-V | [test/metadata](../test/metadata), [test/cloud-boot](../test/cloud-boot) |
@@ -98,6 +99,30 @@ foundations and runtime-only forms use the shared suites. The count guards
 against missing coverage; review still judges the cases. `make check-apps`
 builds the `-app` forms and `php` with the applications in
 [test/app-fixtures](../test/app-fixtures) and tests their HTTP behaviour.
+
+## Porting a form to native tests
+
+Start with one existing behaviour and keep the DEV check until its native
+equivalent passes. Declare each driver's user, groups, client programs, paths,
+network endpoints and seed/verify cases in `test/native.json`; the harness
+rejects root drivers, broad grants, missing results and changes to production
+files. Put the Zig client beside the plan and use the shared result context,
+deadline and protocol helpers from `test/native/driver.zig`.
+
+Use the service's real client where practical: Greenbone uses `psql` for SQL,
+then small GMP/OSP clients for its private sockets. Run under the service's
+actual account and only add a group when the socket or data share requires it.
+Wait for paths to appear before applying test confinement, then let the client
+check that the service is ready. Procfs reports a zero file size, so use
+`readKernel` for `/proc` tables; an empty or unreadable table must fail a check.
+
+For persistence, write a run-specific value in seed and read it on the same
+encrypted disk in verify, before setup can recreate it. Keep expected case
+names fixed in the plan and test refusal with a valid request that cannot
+change state. Compare the generated test image with the plain image before
+boot; add only declared test packages, clients and metadata. Retire each old
+shell assertion only after its protocol-level replacement passes on both
+phases and the retained checks still pass.
 
 ## Writing a check
 
@@ -149,7 +174,7 @@ BOOT_TIMEOUT=20 make check-minimal                   # see a hang sooner
 
 `check-one` keeps each failing boot's console as `FORM-one-N.log`. Every
 boot prints where its time went, `werewolf: up in 1.470s (the kernel
-0.225s, userland 1.245s)`, phase by phase (kernel, modules, slot, root,
+0.225s, userland 1.245s)`, phase by phase (kernel, disk, slot, root,
 init's steps, seal), and keeps it in `/run/werewolf/boot`. The console
 shows only warnings and worse (`loglevel=5`); `dmesg` keeps every line.
 

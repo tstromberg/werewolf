@@ -8,6 +8,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const policy = @import("update-policy");
 const tiers = @import("tiers.zig");
+const kernelPackage = @import("cve").kernelPackage;
 
 /// floor_secs is how long a reboot that is already due still waits, so the
 /// reason is on the console before the machine goes down.
@@ -153,6 +154,7 @@ fn writeItems(gpa: Allocator, w: *std.Io.Writer, n: Notice) !void {
         }
     }
     const k = n.body.kernel_cves;
+    const kernel = kernelName(k.to);
     const show_k = plain(strip(k.from)) and plain(strip(k.to));
     for (k.cves) |c| {
         if (!plain(c.id)) continue;
@@ -163,7 +165,7 @@ fn writeItems(gpa: Allocator, w: *std.Io.Writer, n: Notice) !void {
         try addLine(
             gpa,
             &items,
-            "linux-virt",
+            kernel,
             strip(k.from),
             strip(k.to),
             .{ .id = c.id, .tier = tier },
@@ -188,8 +190,8 @@ fn writeItems(gpa: Allocator, w: *std.Io.Writer, n: Notice) !void {
             try addLine(gpa, &items, p.name, from, to, .{ .id = "", .tier = n.tier, .bare = true });
         }
         if (k.cves.len == 0 and !std.mem.eql(u8, k.from, k.to) and
-            plain(strip(k.from)) and plain(strip(k.to)) and find(items.items, "linux-virt") == null)
-            try addLine(gpa, &items, "linux-virt", strip(k.from), strip(k.to), .{
+            plain(strip(k.from)) and plain(strip(k.to)) and find(items.items, kernel) == null)
+            try addLine(gpa, &items, kernel, strip(k.from), strip(k.to), .{
                 .id = "",
                 .tier = n.tier,
                 .bare = true,
@@ -272,9 +274,14 @@ fn lineCount(items: []const Item) usize {
     return n;
 }
 
+/// strip is a kernel package's version: 7.2.11-r1 of linux-werewolf-7.2.11-r1.
 fn strip(version: []const u8) []const u8 {
-    const prefix = "linux-virt-";
-    return if (std.mem.startsWith(u8, version, prefix)) version[prefix.len..] else version;
+    return if (kernelPackage(version)) |k| k.version else version;
+}
+
+/// kernelName names the kernel a notice installs, werewolf's unless it says otherwise.
+fn kernelName(package: []const u8) []const u8 {
+    return if (kernelPackage(package)) |k| k.name else "linux-werewolf";
 }
 
 /// plain is a token safe to write to a terminal: no controls, no escapes.

@@ -10,6 +10,7 @@ const page = @import("page.zig");
 const scan = @import("scan.zig");
 const pg = @import("pg.zig");
 const cmdline = @import("cmdline");
+const kernelPackage = @import("cve").kernelPackage;
 const describeEvent = page.describeEvent;
 const isAdvisoryId = page.isAdvisoryId;
 const plural = page.plural;
@@ -568,7 +569,7 @@ fn patchHistory(
             for (r.kernel_cves.cves) |c| try ids.append(gpa, c.id);
             try out.append(gpa, .{
                 .time = r.time,
-                .name = "linux-virt",
+                .name = if (kernelPackage(r.to.kernel)) |k| k.name else "linux-werewolf",
                 .from = kernelVersion(r.from.kernel),
                 .to = kernelVersion(r.to.kernel),
                 .cves = ids.items,
@@ -620,8 +621,7 @@ fn isSubpackage(name: []const u8, origin: []const u8) bool {
 }
 
 fn kernelVersion(pkg: []const u8) []const u8 {
-    const prefix = "linux-virt-";
-    return if (std.mem.startsWith(u8, pkg, prefix)) pkg[prefix.len..] else pkg;
+    return if (kernelPackage(pkg)) |k| k.version else pkg;
 }
 
 /// outcomeOf says what became of the update that built build, from the

@@ -1,4 +1,0 @@
-# Linux source used with the matching Alpine linux-virt config.
-version=6.18.56
-alpine_version=6.18.56-r0
-sha256=4633bbda2ab95eaf2a7af4041236451d6759c72e6946265531af4b3aacefbf89

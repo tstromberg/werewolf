@@ -8,6 +8,7 @@ const forms = @import("form");
 const howl = @import("howl.zig");
 const native = @import("build.zig");
 const packages = @import("packages.zig");
+const image = @import("image");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -25,8 +26,7 @@ const query = "{{.Package.Name}}-{{.Package.Version}}-r{{.Package.Epoch}}" ++
     "{{$v := print \"-\" .Package.Version \"-r\" .Package.Epoch}}" ++
     "{{range .Subpackages}} {{.Name}}{{$v}}{{end}}";
 
-/// Runner is where melange builds: in bubblewrap, or in a QEMU VM booted
-/// from werewolf's own kernel.
+/// Runner is where melange builds: in bubblewrap, or in a QEMU VM (guest).
 const Runner = enum { qemu, bubblewrap };
 
 /// runner returns bubblewrap where bwrap is on the PATH, but never on
@@ -112,12 +112,10 @@ pub fn build(b: *B, recipe: []const u8) !void {
             try pins.appendSlice(b.gpa, &.{ "--package-append", pin });
     }
     if (r == .qemu) {
-        try packages.kernel(b);
-        const kernel = try b.path("{s}/vmlinuz", .{b.p.build});
-        const initramfs = try guest(b);
-        try inputs.appendSlice(b.gpa, &.{ initramfs, kernel });
-        try env.put("QEMU_KERNEL_IMAGE", try b.absolute(kernel));
-        try env.put("QEMU_BASE_INITRAMFS", try b.absolute(initramfs));
+        const g = try guest(b);
+        try inputs.appendSlice(b.gpa, &.{ g.initramfs, g.kernel });
+        try env.put("QEMU_KERNEL_IMAGE", try b.absolute(g.kernel));
+        try env.put("QEMU_BASE_INITRAMFS", try b.absolute(g.initramfs));
         // The guest's disk is a sparse 50 GiB file, which melange leaves
         // behind when a build dies: here, not in the checkout's root.
         try env.put("QEMU_DISKS_PATH", scratch);
@@ -171,22 +169,54 @@ fn setting(name: []const u8) ?[]const u8 {
     return if (v.len > 0) v else null;
 }
 
-/// guest makes the QEMU runner's initramfs: melange's, with the kernel's
-/// modules appended under usr/lib/modules. melange's QEMU_KERNEL_MODULES
-/// puts them under /lib, which replaces the guest's /lib -> usr/lib link
-/// and so its loader. It returns the initramfs's path.
-pub fn guest(b: *B) ![]const u8 {
-    const target = try b.path("{s}/melange-guest-{t}.cpio", .{ vendor, b.spec.arch });
-    const kernel = try b.path("{s}/vmlinuz", .{b.p.build});
-    const began = try b.begin(target, &.{kernel}) orelse return target;
-    const d = try b.path("{s}.d", .{target});
-    const base = try b.path("{s}.base", .{target});
-    const modules = try b.path("{s}/usr/lib/modules", .{d});
+/// Guest is the kernel and initramfs melange's QEMU runner boots.
+pub const Guest = struct { kernel: []const u8, initramfs: []const u8 };
+
+/// guest makes the QEMU runner's kernel and initramfs from Alpine's
+/// linux-virt (boot/melange-guest.yaml). melange's initramfs loads its
+/// drivers as modules, which werewolf's kernel does not have; the guest
+/// only builds packages, and no image boots it. The modules go under
+/// usr/lib/modules: melange's QEMU_KERNEL_MODULES puts them under /lib,
+/// which replaces the guest's /lib -> usr/lib link and so its loader.
+pub fn guest(b: *B) !Guest {
+    const yaml = try packages.bootConfig(b, "melange-guest.yaml");
+    const lock = "build/lock/melange-guest.lock.json";
+    try packages.relock(b, lock, yaml);
+    const rootfs = try b.path("{s}/melange-guest-{t}.tar", .{ vendor, b.spec.arch });
+    try packages.apkoBuild(b, rootfs, yaml, lock, &.{lock});
+    const out: Guest = .{
+        .kernel = try b.path("{s}/melange-guest-{t}.vmlinuz", .{ vendor, b.spec.arch }),
+        .initramfs = try b.path("{s}/melange-guest-{t}.cpio", .{ vendor, b.spec.arch }),
+    };
+    const began = try b.begin(out.initramfs, &.{rootfs}) orelse return out;
+    const d = try b.path("{s}.d", .{out.initramfs});
+    const base = try b.path("{s}.base", .{out.initramfs});
+    const usr = try b.path("{s}/usr", .{d});
     try Dir.cwd().deleteTree(b.io, d);
-    try Dir.cwd().createDirPath(b.io, modules);
+    try Dir.cwd().createDirPath(b.io, usr);
     try b.run(&.{ "melange", "initramfs", "--arch", @tagName(b.spec.arch), "--output", base }, .{});
-    try copyTree(b, try b.path("{s}/kernel/x/lib/modules", .{b.p.build}), modules);
-    const t = try b.tmp(target);
+    // The modules' vmlinuz links to /boot, which would dangle in the guest.
+    try b.run(
+        &.{
+            "bsdtar",
+            "-xf",
+            rootfs,
+            "-C",
+            usr,
+            "--exclude",
+            "lib/modules/*/vmlinuz",
+            "lib/modules",
+        },
+        .{},
+    );
+    try b.run(&.{ "bsdtar", "-xf", rootfs, "-C", d, "boot/vmlinuz-virt" }, .{});
+    // QEMU boots an arm64 EFI zboot image, but as melange has always booted
+    // the raw Image, the guest gets that. unwrapZboot returns others as they are.
+    const shipped = try b.read(try b.path("{s}/boot/vmlinuz-virt", .{d}), image.max_gunzip);
+    const kern = image.unwrapZboot(b.gpa, shipped) catch |err|
+        return b.fail("{s}: {t}", .{ rootfs, err });
+    try b.write(out.kernel, kern);
+    const t = try b.tmp(out.initramfs);
     {
         const f = try Dir.cwd().createFile(b.io, t, .{});
         defer f.close(b.io);
@@ -207,29 +237,13 @@ pub fn guest(b: *B) ![]const u8 {
             .{ .argv = tar, .cwd = d, .env = b.env },
             .{ .argv = &.{ "cat", base, "-" }, .env = b.env },
         }, .{ .stdout = f });
-        if (!ran.ok) return b.fail("{s}: bsdtar or cat failed", .{target});
+        if (!ran.ok) return b.fail("{s}: bsdtar or cat failed", .{out.initramfs});
     }
-    try b.rename(t, target);
+    try b.rename(t, out.initramfs);
     try Dir.cwd().deleteTree(b.io, d);
     try Dir.cwd().deleteFile(b.io, base);
-    try b.done(target, began);
-    return target;
-}
-
-/// copyTree copies the directories and files under from into to. It leaves
-/// out links, such as the modules' vmlinuz, which would dangle in the guest.
-fn copyTree(b: *B, from: []const u8, to: []const u8) !void {
-    var src = try Dir.cwd().openDir(b.io, from, .{ .iterate = true });
-    defer src.close(b.io);
-    var dst = try Dir.cwd().openDir(b.io, to, .{});
-    defer dst.close(b.io);
-    var w = try src.walk(b.gpa);
-    defer w.deinit();
-    while (try w.next(b.io)) |e| switch (e.kind) {
-        .directory => try dst.createDirPath(b.io, e.path),
-        .file => try Dir.copyFile(src, e.path, dst, e.path, b.io, .{}),
-        else => {},
-    };
+    try b.done(out.initramfs, began);
+    return out;
 }
 
 /// Package is a package file a recipe makes, and the libraries it links.

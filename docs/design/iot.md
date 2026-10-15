@@ -15,7 +15,7 @@ A plant flashes one image, phones home to its own server, and installs
 in a window, a site at a time. The form, repository and window exist
 ([manifest.md](manifest.md), [update-policy.md](update-policy.md)).
 Today a publish reboots on the next check, and the device also reaches
-Wolfi, werewolf, Alpine and a tiers feed on GitHub.
+Wolfi, werewolf and a tiers feed on GitHub.
 
 ## Goals
 
@@ -68,7 +68,7 @@ The log is `/data/svc/autoupdate/log`.
 
 **Their server.** `updates.from` is the only repository, kernel and
 tiers URL. It holds `local-NAME` (signed with howl's `packages.rsa`)
-and the Wolfi, werewolf and Alpine indexes CI copied after a boot,
+and the Wolfi and werewolf indexes CI copied after a boot,
 each checked with that origin's key. Today the image lists those
 upstreams, and tiers come from GitHub. A canary is another `from`;
 promote by publishing the same package to the production URL.

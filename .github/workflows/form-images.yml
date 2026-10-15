@@ -72,7 +72,7 @@ jobs:
     needs: plan
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 16
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -83,11 +83,8 @@ jobs:
       - name: Install pinned tools and example compilers
         run: |
           sudo test/ci-setup
-          command -v go || sudo apt-get install -y golang-go
           command -v javac || sudo apt-get install -y default-jdk-headless
-          command -v rustup || sudo apt-get install -y rustup
-          rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
-          dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
+          test/ci-compilers
       - run: make howl build/host/form
       - name: Resolve package, OCI, recipe environment and source inputs
         env:
@@ -108,7 +105,7 @@ jobs:
     environment: release
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 16
       matrix:
         copy: [1, 2]
         target: ${{ fromJSON(needs.plan.outputs.matrix).include }}
@@ -125,11 +122,8 @@ jobs:
       - name: Install pinned tools and example compilers
         run: |
           sudo test/ci-setup
-          command -v go || sudo apt-get install -y golang-go
           command -v javac || sudo apt-get install -y default-jdk-headless
-          command -v rustup || sudo apt-get install -y rustup
-          rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
-          dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
+          test/ci-compilers
       - run: make howl
       # No compiled-kernel or form output cache is restored: the copies must
       # independently produce identical bytes, including PE and slot signatures.
@@ -140,6 +134,7 @@ jobs:
         run: python3 release/with-protected-keys python3 release/form-images build snapshot candidates
       # Candidates are public. The signature that admits a bundle is made
       # only by the gate job, and published only after its gates pass.
+      # Forms without gates leave only descriptors and digests to compare.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         if: always()
         with:
@@ -160,7 +155,7 @@ jobs:
     if: always() && !cancelled() && needs.plan.result == 'success'
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 16
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 360
@@ -179,11 +174,8 @@ jobs:
       - name: Install pinned tools and example compilers
         run: |
           sudo test/ci-setup
-          command -v go || sudo apt-get install -y golang-go
           command -v javac || sudo apt-get install -y default-jdk-headless
-          command -v rustup || sudo apt-get install -y rustup
-          rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
-          dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
+          test/ci-compilers
       - run: make howl
       - name: Require byte-identical builds and passing tests for this form and architecture
         env:

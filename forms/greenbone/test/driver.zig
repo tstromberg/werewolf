@@ -7,6 +7,7 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 const manager = "/run/svc/gvmd/run/gvmd.sock";
 const bridge = "/run/svc/gsad/run/manager.sock";
+const scanner = "/data/share/gvm/ospd/ospd.sock";
 
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
@@ -15,12 +16,133 @@ pub fn main(init: std.process.Init) !void {
     if (args.len != 4) return error.Usage;
     const suite = args[1];
     const ctx = try driver.Run.load(io, gpa, args[3]);
-    if (std.mem.eql(u8, args[2], "denied")) {
-        const rc = connectSocket(manager);
+    const scanner_denied = std.mem.eql(u8, args[2], "scanner-denied");
+    if (std.mem.eql(u8, args[2], "denied") or scanner_denied) {
+        const rc = connectSocket(if (scanner_denied) scanner else manager);
         if (rc) |fd| {
             _ = linux.close(fd);
             try ctx.result(io, suite, "socket-refused", false);
         } else |err| try ctx.result(io, suite, "socket-refused", err == error.AccessDenied);
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "scanner")) {
+        var client = Client{ .fd = try connectSocket(scanner), .gpa = gpa };
+        defer client.close();
+        const response = try client.command("<get_version/>", "get_version_response");
+        try ctx.result(io, suite, "osp-version", try status(
+            response,
+            "get_version_response",
+        ) == 200 and
+            std.mem.indexOf(u8, response, "<name>OSP</name>") != null and
+            hasVersion(response));
+        const mounts = try driver.readKernel(io, gpa, "/proc/self/mountinfo");
+        const checks = [_]struct { path: []const u8, readonly: bool }{
+            .{ .path = "/oci/gvmd/run/ospd", .readonly = true },
+            .{ .path = "/oci/gvmd/var/lib/gvm/scap-data", .readonly = true },
+            .{ .path = "/oci/gvmd/var/lib/gvm/cert-data", .readonly = true },
+            .{ .path = "/oci/gvmd/var/lib/gvm/data-objects", .readonly = true },
+            .{ .path = "/oci/openvas/var/lib/notus", .readonly = true },
+            .{ .path = "/oci/feed/var/lib/openvas/plugins", .readonly = false },
+            .{ .path = "/oci/openvas/var/lib/openvas/plugins", .readonly = false },
+            .{ .path = "/oci/openvas/run/ospd", .readonly = false },
+        };
+        var correct = true;
+        for (checks) |check| {
+            const readonly = mountedReadOnly(mounts, check.path) catch |err| {
+                try Io.File.stderr().writeStreamingAll(io, try gpa.print("mount {s}: {s}\n", .{
+                    check.path, @errorName(err),
+                }));
+                correct = false;
+                continue;
+            };
+            if (readonly != check.readonly) {
+                try Io.File.stderr().writeStreamingAll(io, try gpa.print("mount {s}: expected " ++
+                    "{s}\n", .{
+                    check.path, if (check.readonly) "read-only" else "writable",
+                }));
+                correct = false;
+            }
+        }
+        try ctx.result(io, suite, "shared-mount-modes", correct);
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "database")) {
+        const checks = [_]struct { name: []const u8, sql: []const u8 }{
+            .{ .name = "ordinary-database-role" ++
+                "s", .sql = "SELECT count(*)=2 AND bool_and(NOT rolsuper AND NOT rolcreaterole " ++
+                "AND NOT rolreplication AND NOT rolbypassrls) FROM pg_roles " ++
+                "WHERE rolname IN ('gvmd','dba')" },
+            .{ .name = "database-owner-rol" ++
+                "e", .sql = "SELECT COALESCE((SELECT 'role=dba'=ANY(setconfig) FROM " ++
+                "pg_db_role_setting " ++
+                "WHERE setrole=(SELECT oid FROM pg_roles WHERE rolname='gvmd') AND " ++
+                "setdatabase=0),false) " ++
+                "AND pg_has_role('gvmd','dba','SET') AND NOT pg_has_role('gvmd','postgres','SET'" ++
+                ") " ++
+                "AND (SELECT pg_get_userbyid(datdba)='dba' FROM pg_database WHERE " ++
+                "datname='postgres')" },
+            .{
+                .name = "database-extensions",
+                .sql = "SELECT count(*)=3 FROM pg_extension WHERE extname IN " ++
+                    "('pg-gvm','uuid-ossp','pgcrypto')",
+            },
+        };
+        for (checks) |check| {
+            const result = try std.process.run(gpa, io, .{
+                .argv = &.{
+                    "/usr/bin/psql",
+                    "-X",
+                    "-q",
+                    "-w",
+                    "-A",
+                    "-t",
+                    "-v",
+                    "ON_ERROR_STOP=1",
+                    "-P",
+                    "pager=off",
+                    "-h",
+                    "/run/svc/postgres",
+                    "-U",
+                    "postgres",
+                    "-d",
+                    "postgres",
+                    "-c",
+                    check.sql,
+                },
+                .stdout_limit = .limited(4096),
+                .stderr_limit = .limited(4096),
+                .timeout = driver.deadline(io, 15),
+            });
+            const ok = result.term == .exited and result.term.exited == 0 and
+                std.mem.eql(u8, std.mem.trim(u8, result.stdout, " \r\n\t"), "t");
+            if (!ok) try Io.File.stderr().writeStreamingAll(io, result.stderr);
+            try ctx.result(io, suite, check.name, ok);
+        }
+        return;
+    }
+    if (std.mem.eql(u8, args[2], "valkey")) {
+        const get = try valkey(io, gpa, &.{ "CONFIG", "GET", "databases" });
+        var lines = std.mem.tokenizeAny(u8, get.stdout, "\r\n");
+        const key = lines.next() orelse "";
+        const value = std.fmt.parseInt(u32, lines.next() orelse "", 10) catch 0;
+        try ctx.result(io, suite, "config-get-databases", get.term == .exited and
+            get.term.exited == 0 and
+            std.mem.eql(u8, key, "databases") and value >= 4 and lines.next() == null);
+        // A valid command shape, with an unknown setting: even a broken ACL
+        // cannot mutate configuration. Only an ACL refusal satisfies the case.
+        const set = try valkey(io, gpa, &.{ "CONFIG", "SET", "werewolf-no-such-setting", "1" });
+        const refused = std.mem.startsWith(
+            u8,
+            std.mem.trimStart(u8, set.stdout, "\r\n"),
+            "NOPERM ",
+        ) or
+            std.mem.startsWith(u8, std.mem.trimStart(u8, set.stderr, "\r\n"), "NOPERM ");
+        try ctx.result(
+            io,
+            suite,
+            "config-set-refused",
+            set.term == .exited and set.term.exited != 0 and refused,
+        );
         return;
     }
     const via_bridge = std.mem.eql(u8, args[2], "bridge");
@@ -69,6 +191,30 @@ pub fn main(init: std.process.Init) !void {
         std.mem.count(u8, found, "<target id=") == 1 and
         std.mem.indexOf(u8, found, try gpa.print("<name>{s}</name>", .{name})) != null and
         std.mem.indexOf(u8, found, "<hosts>192.0.2.1</hosts>") != null);
+    if (!via_bridge) {
+        const scanners = try client.command(
+            "<get_scanners details=\"1\"/>",
+            "get_scanners_response",
+        );
+        const id = socketScanner(scanners) catch null;
+        try ctx.result(
+            io,
+            suite,
+            "scanner-configured",
+            try status(scanners, "get_scanners_response") == 200 and id != null,
+        );
+        const verify = try gpa.print("<verify_scanner scanner_id=\"{s}\"/>", .{id.?});
+        const verified = try client.command(verify, "verify_scanner_response");
+        // OSP's scanner version is empty until scanner initialization finishes.
+        // GMP success proves gvmd connected; the direct OSP case checks its
+        // protocol version independently of a live feed download.
+        try ctx.result(
+            io,
+            suite,
+            "scanner-verified",
+            try status(verified, "verify_scanner_response") == 200,
+        );
+    }
     for ([_][]const u8{ "admin", "werewolf-incorrect-password" }, 0..) |wrong, i| {
         var denied = Client{ .fd = try connectSocket(path), .gpa = gpa };
         defer denied.close();
@@ -95,6 +241,68 @@ pub fn main(init: std.process.Init) !void {
             );
         }
     }
+}
+
+fn hasVersion(response: []const u8) bool {
+    const start = (std.mem.indexOf(
+        u8,
+        response,
+        "<version>",
+    ) orelse return false) + "<version>".len;
+    const end = std.mem.indexOf(u8, response[start..], "</version>") orelse return false;
+    return std.mem.trim(u8, response[start..][0..end], " \t\r\n").len > 0;
+}
+
+test "OSP requires a nonempty protocol version" {
+    try std.testing.expect(hasVersion("<version>22.7</version>"));
+    try std.testing.expect(!hasVersion("<version></version>"));
+    try std.testing.expect(!hasVersion("<version/>"));
+}
+
+fn mountedReadOnly(table: []const u8, path: []const u8) !bool {
+    var lines = std.mem.tokenizeScalar(u8, table, '\n');
+    while (lines.next()) |line| {
+        var fields = std.mem.tokenizeScalar(u8, line, ' ');
+        for (0..4) |_| _ = fields.next() orelse return error.MountRecord;
+        const target = fields.next() orelse return error.MountRecord;
+        const flags = fields.next() orelse return error.MountRecord;
+        if (!std.mem.eql(u8, target, path)) continue;
+        var options = std.mem.tokenizeScalar(u8, flags, ',');
+        while (options.next()) |option| if (std.mem.eql(u8, option, "ro")) return true;
+        return false;
+    }
+    return error.MountMissing;
+}
+
+fn valkey(io: Io, gpa: Allocator, command: []const []const u8) !std.process.RunResult {
+    const argv = try std.mem.concat(gpa, []const u8, &.{
+        &.{ "/usr/bin/valkey-cli", "--raw", "-e", "-h", "127.0.0.1", "-p", "6379" }, command,
+    });
+    return std.process.run(gpa, io, .{
+        .argv = argv,
+        .stdout_limit = .limited(4096),
+        .stderr_limit = .limited(4096),
+        .timeout = driver.deadline(io, 15),
+    });
+}
+
+fn socketScanner(response: []const u8) ![]const u8 {
+    var entries = std.mem.splitSequence(u8, response, "<scanner id=\"");
+    _ = entries.next();
+    while (entries.next()) |entry| {
+        const end = std.mem.indexOf(u8, entry, "</scanner>") orelse return error.ScannerResponse;
+        const item = entry[0..end];
+        if (std.mem.indexOf(u8, item, "<host>/run/ospd/ospd.sock</host>") == null or
+            std.mem.indexOf(u8, item, "<port>0</port>") == null) continue;
+        if (item.len < 37 or item[36] != '"') return error.ScannerId;
+        for (item[0..36], 0..) |ch, i| {
+            if (i == 8 or i == 13 or i == 18 or i == 23) {
+                if (ch != '-') return error.ScannerId;
+            } else if (!std.ascii.isHex(ch)) return error.ScannerId;
+        }
+        return item[0..36];
+    }
+    return error.NoSocketScanner;
 }
 
 const Client = struct {
@@ -210,6 +418,31 @@ test "password XML escapes syntax without changing the credential" {
     const value = try escape(std.testing.allocator, "a&b<c>\"d'");
     defer std.testing.allocator.free(value);
     try std.testing.expectEqualStrings("a&amp;b&lt;c&gt;&quot;d&apos;", value);
+}
+
+test "scanner selection requires the configured Unix endpoint and a UUID" {
+    const id = "01234567-89ab-cdef-0123-456789abcdef";
+    const response = "<get_scanners_response><scanner id=\"" ++ id ++
+        "\"><host>/run/ospd/ospd.sock</host><port>0</port></scanner></get_scanners_response>";
+    try std.testing.expectEqualStrings(id, try socketScanner(response));
+    try std.testing.expectError(error.NoSocketScanner, socketScanner(
+        "<scanner id=\"" ++ id ++ "\"><host>127.0.0.1</host><port>9391</port></scanner>",
+    ));
+    try std.testing.expectError(error.ScannerId, socketScanner(
+        "<scanner id=\"untrusted-id\"><host>/run/ospd/ospd.sock</host><port>0</port></scanner>",
+    ));
+}
+
+test "shared mount checks use VFS flags and require the exact mount point" {
+    const table = "1 0 1:1 / /oci/gvmd/run/ospd ro,nosuid - ext4 /data rw,errors=remount-ro\n" ++
+        "2 0 1:1 / /oci/openvas/run/ospd rw,nosuid - ext4 /data rw,errors=remount-ro\n";
+    try std.testing.expect(try mountedReadOnly(table, "/oci/gvmd/run/ospd"));
+    try std.testing.expect(!try mountedReadOnly(table, "/oci/openvas/run/ospd"));
+    try std.testing.expectError(error.MountMissing, mountedReadOnly(table, "/oci/gvmd/run"));
+    try std.testing.expectError(
+        error.MountRecord,
+        mountedReadOnly("incomplete", "/oci/gvmd/run/ospd"),
+    );
 }
 
 test "GMP envelope refuses partial, foreign, duplicate and trailing responses" {

@@ -21,6 +21,7 @@ pub const policy = @import("update-policy");
 const werewolf_repository = @import("package").repository;
 pub const cve = @import("cve.zig");
 const kernelVersion = @import("cve").kernelVersion;
+const kernelPackage = @import("cve").kernelPackage;
 pub const tiers = @import("tiers.zig");
 const stage = @import("stage.zig");
 const slot = @import("slot.zig");
@@ -601,7 +602,7 @@ pub const Update = struct {
         });
     }
 
-    /// packagesPlan installs what Wolfi and Alpine have now into
+    /// packagesPlan installs what Wolfi and werewolf have now into
     /// work_dir/root and work_dir/kernel and returns the plan. It returns
     /// null, after logging, if nothing changed or a version would go back.
     fn packagesPlan(u: *Update, arch: []const u8, release: []const u8) !?Plan {
@@ -614,13 +615,15 @@ pub const Update = struct {
             try u.words(try u.read("/etc/apk/world")),
         );
         u.step = "kernel";
-        const alpine = std.mem.trim(u8, try u.read(meta_dir ++ "/alpine"), "\n");
+        // linux-werewolf, from the repository the image's kernel came from,
+        // trusting werewolf's key alone: Wolfi's never vouches for a kernel.
+        const repository = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel-repository"), "\n");
         try u.apkAdd(
             work_dir ++ "/kernel",
             arch,
-            "/etc/werewolf/alpine-keys",
-            &.{ "--repository", alpine },
-            &.{"linux-virt"},
+            "/etc/werewolf/kernel-keys",
+            &.{ "--repository", repository },
+            &.{"linux-werewolf"},
         );
 
         u.step = "compare";
@@ -635,8 +638,8 @@ pub const Update = struct {
         );
         const old_kernel = std.mem.trim(u8, try u.read(meta_dir ++ "/kernel"), "\n");
         const new_kernel = try u.gpa.print(
-            "linux-virt-{s}",
-            .{versionOf(kernel_pkgs, "linux-virt") orelse return error.NoKernel},
+            "linux-werewolf-{s}",
+            .{versionOf(kernel_pkgs, "linux-werewolf") orelse return error.NoKernel},
         );
         // An index carries no date, so apk would install an older signed
         // index as happily as a newer one. Refuse any downgrade.
@@ -986,9 +989,10 @@ pub const Update = struct {
             error.FileNotFound => {},
             else => return err,
         }
+        // Every werewolf kernel has IPE; a loaded release policy is what enforces.
         return !try localUpdateAllowed(
             Dir.cwd().access(u.io, ipe.marker, .{}),
-            Dir.cwd().access(u.io, ipe.base, .{}),
+            Dir.cwd().access(u.io, ipe.active, .{}),
         );
     }
 
@@ -1369,8 +1373,9 @@ fn diffPackages(gpa: Allocator, old: []const Package, new: []const Package) ![]c
     return out.items;
 }
 
-/// backwards returns the first package, or linux-virt, that would move to
-/// an older version in apk's order, or null.
+/// backwards returns the first package, or the kernel's, that would move to
+/// an older version in apk's order, or null. Moving from Alpine's linux-virt
+/// to linux-werewolf compares versions alone.
 fn backwards(
     changes: []const Change,
     old_kernel: []const u8,
@@ -1381,13 +1386,9 @@ fn backwards(
         const to = c.to orelse continue;
         if (cve.apkOrder(to, from) == .lt) return c.name;
     }
-    const prefix = "linux-virt-";
-    if (std.mem.startsWith(u8, old_kernel, prefix) and
-        std.mem.startsWith(u8, new_kernel, prefix) and
-        cve.apkOrder(
-            new_kernel[prefix.len..],
-            old_kernel[prefix.len..],
-        ) == .lt) return "linux-virt";
+    const old = kernelPackage(old_kernel) orelse return null;
+    const new = kernelPackage(new_kernel) orelse return null;
+    if (cve.apkOrder(new.version, old.version) == .lt) return new.name;
     return null;
 }
 
@@ -1423,6 +1424,15 @@ test backwards {
     try std.testing.expectEqualStrings(
         "linux-virt",
         backwards(&up, "linux-virt-6.18.55-r0", "linux-virt-6.18.9-r0").?,
+    );
+    // Leaving Alpine's kernel for werewolf's is forward; returning is not.
+    try std.testing.expectEqual(
+        @as(?[]const u8, null),
+        backwards(&up, "linux-virt-6.18.56-r0", "linux-werewolf-7.2.11-r1"),
+    );
+    try std.testing.expectEqualStrings(
+        "linux-werewolf",
+        backwards(&up, "linux-werewolf-7.2.11-r1", "linux-werewolf-7.2.10-r1").?,
     );
 }
 
@@ -1495,19 +1505,19 @@ test "reboot countdown retains both package and full image build IDs" {
     }
 }
 
-fn localUpdateAllowed(marker_access: anyerror!void, kernel_access: anyerror!void) !bool {
+fn localUpdateAllowed(marker_access: anyerror!void, policy_access: anyerror!void) !bool {
     const required = if (marker_access) |_| true else |err| switch (err) {
         error.FileNotFound => false,
         else => return err,
     };
-    const present = if (kernel_access) |_| true else |err| switch (err) {
+    const present = if (policy_access) |_| true else |err| switch (err) {
         error.FileNotFound => false,
         else => return err,
     };
     return !required and !present;
 }
 
-test "IPE update guard holds even if its root marker is missing" {
+test "IPE update guard holds while a release policy is loaded, even without its marker" {
     try testing.expect(try localUpdateAllowed(error.FileNotFound, error.FileNotFound));
     try testing.expect(!try localUpdateAllowed({}, error.FileNotFound));
     try testing.expect(!try localUpdateAllowed(error.FileNotFound, {}));

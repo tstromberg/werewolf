@@ -36,9 +36,8 @@ depended on make's target names and `--debug=b` output, and:
 ## Detailed design
 
 **lib/image.zig** holds what howl and the updater share, as functions of
-bytes, never paths: module order and `werewolf.modules`; gunzip; the zboot
-unwrap and x86 `vmlinux`; the kernel config's rules; mkfs.erofs's options
-and version check. Module order is the Makefile's; the updater's is not yet.
+bytes, never paths: gunzip and unzstd; the zboot unwrap and x86 `vmlinux`;
+the kernel config's rules; mkfs.erofs's options and version check.
 
 **cmd/howl/build.zig** (with `packages.zig`, `app.zig`, `melange.zig` and
 `slot.zig`) runs the pipeline as steps, each skipped when its output is
@@ -92,8 +91,6 @@ A bug in `lib/image.zig` reaches the build and every machine's updates.
 
 ## Reliability Considerations
 
-The module step refuses an empty list. apko retries network errors (howl; make, for
-locks). zstd dates `stage0.zst` to its cpio's second, so the step dates it now. A disk's
-size and arguments sit beside it in `disk.img.options`, rewritten only when they change,
-so new ones rebuild it. Open: a tagged leaf named before an untagged one sharing a
-dependency loads first (no form has such a pair; fix it with the updater's).
+apko retries network errors (howl; make, for locks). zstd dates `stage0.zst` to its
+cpio's second, so the step dates it now. A disk's size and arguments sit beside it in
+`disk.img.options`, rewritten only when they change, so new ones rebuild it.

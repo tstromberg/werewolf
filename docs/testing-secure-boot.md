@@ -3,9 +3,11 @@
 These suites prove the protections that reach across reboots: Secure Boot
 on the boot files, a TPM that records which releases may boot, and IPE,
 which runs only native code from the verified root
-([security.md](security.md)). Most take `IPE=1`, which needs an IPE kernel:
-`make ipe-kernel` builds one on Linux, howl makes and caches one where none
-is given, and `WEREWOLF_IPE_KEY` and `WEREWOLF_IPE_CRT` name its signer
+([security.md](security.md)). Most take `IPE=1`, which needs a test kernel
+whose IPE trusts a disposable certificate: `make ipe-kernel` builds one with
+`tools/test-kernel`, from kernel-build at the commit `boot/kernel-build` pins,
+howl makes and caches one where none is given, and `WEREWOLF_IPE_KEY` and
+`WEREWOLF_IPE_CRT` name its signer
 ([design/ipe.md](design/ipe.md), [macos-builds.md](macos-builds.md)). CI
 runs them with disposable keys on both architectures. Private signers stay
 on the host and never enter a guest or a build VM.
@@ -22,13 +24,11 @@ arm64, `make IPE=1 check-updater-uki` keeps one disk through firmware boot,
 signed UKI delivery, a verified slot b and its commit, with IPE still
 enforcing; it rejects unsigned, altered and wrong-key loaders and UKIs, an
 unexpected UKI path and a setup-mode boot, and unsigned loader options
-cannot change the slot or disable IPE. CI checks `boot/kernel-source`
-against Alpine's locks and, nightly, fresh indexes; `test/kernel-version`
-checks that drift offline.
+cannot change the slot or disable IPE.
 
 ## Secure Boot
 
-`make check-secureboot` builds a stock-Alpine signed release disk, checks
+`make check-secureboot` builds a signed release disk, checks
 its UKI and certificate against the manifest and the ESP, and boots it under
 enrolled firmware: the native slot must boot, the root verify and posture
 pass, and a changed UKI must be refused. It runs on both architectures,
@@ -154,11 +154,9 @@ The host-side pieces have suites of their own, run by `make test`,
 `_test/local-publisher` and
 [protected-images.yml](../.github/workflows/protected-images.yml):
 `test/local-prerequisites` (cache tampering, incomplete publication, signer custody,
-kernel and stub invalidation, interrupted builds), `test/sign-kernel` (deterministic
-host signatures), `test/check-kernel-repro` (two cold Melange builds must match),
-`test/check-kernel-modules` (the kernel refuses unsigned, foreign and altered modules),
-`test/boot-images` and `test/boot-download` (admission: foreign and altered signatures,
-weak profiles, unknown fields, size bounds, torn heads, replay, equivocation),
+kernel and stub invalidation, interrupted builds), `test/boot-images` and
+`test/boot-download` (admission: foreign and altered signatures, weak profiles,
+unknown fields, size bounds, torn heads, replay, equivocation),
 `test/protected-release` and `test/protected-publication` (signing custody, ordered
 uploads, interruption recovery, immutable collisions, release floors), and the
 [machine-transport](design/machine-transport.md) tests, which reject foreign machines,

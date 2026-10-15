@@ -43,17 +43,17 @@ build the measured one from `boot/stub-source` with `tools/build-tpm-stub` on Li
 
 `howl run --build` selects this profile on an arm64 Mac or native Linux. Published
 downloads remain gated in [the publication design](published-secure-boot.md). Without
-overrides, howl creates a private host IPE identity and caches matching builds; a cache
-identity binds architecture, Alpine base, public signer, sources and builder bytes, and
-a checksummed completion record rejects altered or incomplete artifacts. All three IPE
+overrides, howl creates a private host IPE identity and caches matching builds: a
+kernel whose IPE trusts its certificate (`tools/test-kernel`) and the measured stub. A
+cache identity binds architecture, public signer, sources and builder bytes, and a
+checksummed completion record rejects altered or incomplete artifacts. All three IPE
 overrides must be supplied together; `UKI_STUB` can override the measured stub. Mac
-builds use the Melange QEMU runner with a stock Alpine kernel and matching modules: an
-isolated Linux guest supplies native Kbuild and EFI/TPM tools, private keys stay on the
-Mac, firmware and enrollment dependencies are hash-pinned, and a temporary module
-signer is deleted after compilation. `--build` seals a bundle as CI seals werewolf's,
-signed with keys in `$XDG_DATA_HOME/howl`; the machine enrolls it as it would a
-download, so the image holds nothing of one machine. `--dev` requires
-`--disable=secureboot,tpm,ipe`, the legacy deployment path.
+builds use the Melange QEMU runner, which boots Alpine's `linux-virt` only as a build
+guest: an isolated Linux guest supplies native Kbuild and EFI/TPM tools, private keys
+stay on the Mac, and firmware and enrollment dependencies are hash-pinned. `--build`
+seals a bundle as CI seals werewolf's, signed with keys in `$XDG_DATA_HOME/howl`; the
+machine enrolls it as it would a download, so the image holds nothing of one machine.
+`--dev` requires `--disable=secureboot,tpm,ipe`, the legacy deployment path.
 
 ### Enrollment
 

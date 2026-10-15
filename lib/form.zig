@@ -452,7 +452,6 @@ pub const keys = [_]Key{
     .{ .name = "net", .shape = .list },
     .{ .name = "prune", .shape = .list },
     .{ .name = "dev", .shape = .list },
-    .{ .name = "modules", .shape = .list },
     .{ .name = "weaknesses", .shape = .map },
     .{ .name = "check", .shape = .map },
     .{ .name = "sshd", .shape = .map },
@@ -897,14 +896,6 @@ pub fn loadIn(
             }
         } else if (!isScalars(e.value)) {
             return f.fail(gpa, "{s}: {s} is a list of lines", .{ path, e.key });
-        } else if (mem.eql(u8, e.key, "modules")) {
-            for (e.value.list) |item| if (mem.findScalar(u8, item.scalar.text, ':') != null)
-                return f.fail(
-                    gpa,
-                    "{s}: modules: {s}: ARCH and @TAG are words, without a colon: " ++
-                        "aarch64 @hyperv hv_netvsc",
-                    .{ path, item.scalar.text },
-                );
         }
     }
     return .{ .name = name, .dir = dir, .spec = spec };
@@ -2301,7 +2292,7 @@ test checkMisfit {
     }) |c| try testing.expect(checkMisfit(c[0], c[1]) != null);
 }
 
-test "load: modules without colons, check values of their kind" {
+test "load: check values of their kind" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var a = std.heap.ArenaAllocator.init(testing.allocator);
@@ -2311,8 +2302,7 @@ test "load: modules without colons, check values of their kind" {
     try tmp.dir.createDirPath(io, "forms/x");
     var f: Failure = .{};
     for ([_]struct { []const u8, bool }{
-        .{ "modules:\n  - aarch64 @hyperv hv_netvsc\n  - \"@xfs xfs\"\n", true },
-        .{ "modules:\n  - \"aarch64: virtio_mmio\"\n", false },
+        .{ "modules:\n  - virtio_net\n", false },
         .{ "check:\n  memory: 2048\n  offline: true\n  skip: [listeners]\n", true },
         .{ "check:\n  offline: yes\n", false },
         .{ "check:\n  web: http\n", false },

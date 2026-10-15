@@ -16,9 +16,10 @@ timeout, possibly mid-write.
 ## Goals
 
 - A press always ends in an orderly poweroff.
-- Handle both ways the press arrives: an input event (ACPI, on x86 and on
-  arm64 with ACPI), and a GPIO line (arm64 with a device tree: QEMU's `virt`,
-  Apple's VZ).
+- Handle both ways the press arrives, each an input event: ACPI's power
+  button (x86, and arm64 with ACPI), and a GPIO line (arm64 with a device
+  tree: QEMU's `virt`, Apple's VZ), which werewolf's kernel turns into a
+  key with its built-in `gpio-keys` driver.
 - Hold no privilege while waiting.
 
 ## Non-Goals
@@ -32,24 +33,17 @@ runsv starts it as `/etc/sv/power-button/run`, with no arguments.
 
 1. **Input devices**: it opens every `/dev/input/event*`, up to 32, once, so
    the kernel queues events between reads.
-2. **GPIO line**: on a device tree, the power button is wired to a GPIO line
-   through a `gpio-keys` node, whose driver Alpine's `linux-virt` does not
-   build. So power-button reads the line itself. The `gpio-keys` entry with
-   `linux,code` KEY_POWER (116) names the controller by phandle, the line,
-   and its polarity. The controller is the `gpiochip` whose `of_node` has
-   that phandle (a PL061, `gpio-pl061` in `minimal.modules`). It requests
-   the line as input, for rising edges, inverted if active low.
-3. **Nothing to watch**: it logs why and runs `sv down .`, so runsv does not
+2. **Nothing to watch**: it logs why and runs `sv down .`, so runsv does not
    restart it.
-4. **Drop**: it logs what it watches, then calls `sandbox.keepOnly(0)`: no
+3. **Drop**: it logs what it watches, then calls `sandbox.keepOnly(0)`: no
    capabilities, an empty bounding set, securebits locked. Powering off
    needs only root's uid.
-5. **Wait**: it `poll`s every descriptor. An input event is 24 bytes; a
-   press is EV_KEY, KEY_POWER, value 1. A GPIO event is a rising edge.
-6. **Press**: it logs where the press came from and execs
+4. **Wait**: it `poll`s every descriptor. An input event is 24 bytes; a
+   press is EV_KEY, KEY_POWER, value 1.
+5. **Press**: it logs where the press came from and execs
    `/usr/bin/poweroff`, which tells runit to run stage 3 and power off.
-7. **Vanished device** (hang-up or error): it logs it, closes it, and leaves
-   it out of `poll`. If none is left, it parks as in step 3.
+6. **Vanished device** (hang-up or error): it logs it, closes it, and leaves
+   it out of `poll`. If none is left, it parks as in step 2.
 
 ## Drawbacks
 
@@ -60,12 +54,12 @@ runsv starts it as `/etc/sv/power-button/run`, with no arguments.
 ## Alternatives Considered
 
 ### acpid or systemd-logind
-Each brings scripts, a shell or a bus, for one key. Neither reads a GPIO
-power key without the gpio-keys driver.
+Each brings scripts, a shell or a bus, for one key.
 
-### Building gpio-keys into the kernel
-werewolf runs Alpine's signed kernel unchanged. Reading the line here takes
-about fifty lines.
+### Reading the GPIO line here
+Before werewolf built its own kernel, Alpine's had no gpio-keys, and
+power-button requested the line itself. That took a hundred lines and a
+GPIO chip open to ioctls in fence's rules; the kernel's driver takes neither.
 
 ### Only devices that report a power key
 That needs an ioctl on input devices, which fence's Landlock rules refuse,
@@ -76,8 +70,7 @@ and keyboards report one anyway.
 | Risk | Mitigation |
 | --- | --- |
 | A long-lived root daemon | No capabilities after setup, empty bounding set, securebits locked; sealed and in fence's domain. |
-| Parsed input | Fixed-size kernel events; device-tree properties are length-checked. |
-| GPIO lines | One input-only line; fence allows the request only on a PL061. |
+| Parsed input | Fixed-size kernel events. |
 | A forged press | Creating an input device (uinput) needs root and device ioctls, which fence refuses; root could power off anyway. |
 
 ## Reliability Considerations
@@ -85,6 +78,6 @@ and keyboards report one anyway.
 - **No spin**: a vanished device is closed, not polled forever.
 - **Logs its decisions**: what it watches, which device was pressed, and why
   it parked.
-- **Tested**: unit tests for `parseGpios` and `isPowerPress`; every
+- **Tested**: a unit test for `isPowerPress`; every
   `make check` boot ends with `system_powerdown`, and the machine must power
   off cleanly within 60 s.

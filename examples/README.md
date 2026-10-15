@@ -159,7 +159,7 @@ a new machine does not inherit it. Back it up or migrate it before replacing
 a service that keeps state. A second `create` of the same name and form only
 gives it a new config, and a restart.
 
-For these forms, automatic updates refresh Wolfi packages and the Alpine
+For these forms, automatic updates refresh Wolfi packages and werewolf's
 kernel, build the inactive slot and reboot. They keep the baked application
 and werewolf's own binaries; they do not fetch your Git tree, run package
 managers such as pip, npm or Composer, rebuild application code, or adopt

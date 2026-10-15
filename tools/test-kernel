@@ -1,0 +1,44 @@
+#!/bin/sh
+# test-kernel ARCH CERT OUT: build linux-werewolf for IPE tests. IPE trusts
+# CERT, a disposable certificate, in place of werewolf's release certificate.
+# It builds werewolf-linux/kernel-build at the commit boot/kernel-build pins
+# and writes OUT, a tar of the package's boot/ files, which is what howl's
+# --ipe-kernel takes. Melange runs in bubblewrap on Linux; elsewhere it boots
+# QEMU_KERNEL_IMAGE and QEMU_BASE_INITRAMFS, howl's melange guest. No signing
+# key reaches the build: kernel-build signs with a key it makes and discards.
+set -eu
+[ "$#" = 3 ] || { echo 'usage: tools/test-kernel ARCH CERT OUT' >&2; exit 2; }
+arch=$1
+cert=$(realpath "$2")
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
+. "$root/boot/kernel-build"
+case $commit in
+*[!0-9a-f]*) commit= ;;
+esac
+[ "${#commit}" = 40 ] || { echo 'test-kernel: boot/kernel-build: commit is not a full hash' >&2; exit 1; }
+mkdir -p "$(dirname "$3")"
+out=$(realpath "$(dirname "$3")")/$(basename "$3")
+work=$(mktemp -d "$out.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+phase() { printf 'howl: phase %s: %s\n' "$1" "$2" >&2; }
+phase kernel-fetch "Fetching kernel-build $commit"
+git init -q "$work/git"
+# Fetching the hash itself: what builds is what boot/kernel-build names.
+git -C "$work/git" fetch -q --depth=1 "$url" "$commit"
+git -C "$work/git" archive -o "$work/source.tar" "$commit"
+mkdir "$work/source"
+tar -xf "$work/source.tar" -C "$work/source"
+phase kernel-build "Building linux-werewolf for $arch, IPE trusting $cert"
+python3 "$work/source/scripts/install-melange.py" --dest "$work/source/build/tools/melange"
+# Only what the build needs passes; howl's and werewolf's keys stay here.
+set -- PATH="$PATH" HOME="$HOME" IPE_CRT="$cert"
+for name in LANG SSL_CERT_FILE QEMU_KERNEL_IMAGE QEMU_BASE_INITRAMFS MELANGE_CPU MELANGE_MEMORY; do
+    eval "value=\${$name-}"
+    [ -z "$value" ] || set -- "$@" "$name=$value"
+done
+env -i "$@" make -C "$work/source" ARCH="$arch" build
+set -- "$work/source/build/packages/$arch"/linux-werewolf-[0-9]*.apk
+[ "$#" = 1 ] && [ -f "$1" ] || { echo 'test-kernel: expected one linux-werewolf package' >&2; exit 1; }
+bsdtar -cf "$work/rootfs.tar" --include 'boot/*' "@$1"
+mv "$work/rootfs.tar" "$out"
+echo "test-kernel: wrote $out from $(basename "$1")" >&2

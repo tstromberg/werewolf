@@ -21,9 +21,9 @@
 #
 # The boot chain is not verified end to end yet (docs/design/
 # verified-boot.md): Secure Boot is off (?boot-secure-boot: it is on
-# wherever the firmware takes the key), Alpine's kernel does not enforce
-# module signatures (boot-sig-enforced), and no TPM counter guards the
-# slot serial (boot-rollback-protected). Phase 4 and phase 5 close these.
+# wherever the firmware takes the key), only protected images load an IPE
+# release policy (boot-ipe-enforced), and no TPM counter guards the slot
+# serial (boot-rollback-protected). Phase 4 and phase 5 close these.
 
-dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?processes-no-root-console ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced
-* ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced
+dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?processes-no-root-console ?boot-secure-boot boot-rollback-protected boot-ipe-enforced
+* ?boot-secure-boot boot-rollback-protected boot-ipe-enforced

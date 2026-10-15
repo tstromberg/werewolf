@@ -1,7 +1,7 @@
 # The updater
 
 `/usr/lib/werewolf/slot-update` keeps a machine booted from a slot current.
-It asks werewolf's repository, Wolfi and Alpine for anything newer than the
+It asks werewolf's repositories and Wolfi for anything newer than the
 running image, builds the other slot from it on the machine (werewolf's
 programs and forms are packages: [custom-updates.md](design/custom-updates.md)),
 boots that slot once, and records what changed and which CVEs that fixes.
@@ -58,12 +58,12 @@ off (lib/update-policy.zig, [update-policy.md](design/update-policy.md)).
 
 | Step | |
 | --- | --- |
-| `userland`, `kernel` | Fetch, as `_update`, the indexes and packages for the image's `/etc/apk/world`, and `linux-virt` from Alpine; then, as root and offline, `apk add --initdb` them into a new root, verified with its own keys. |
+| `userland`, `kernel` | Fetch, as `_update`, the indexes and packages for the image's `/etc/apk/world`, and `linux-werewolf` from the repository the image's kernel came from (`kernel-repository`); then, as root and offline, `apk add --initdb` them into new roots: packages verified with the image's keys, the kernel with werewolf's alone (`/etc/werewolf/kernel-keys`). |
 | `compare` | Diff the new packages and kernel against the running image's. Nothing newer, anything older (an old signed index installs as readily as a new one), or a build that rolled back before: log `check` or `skip` and stop. |
 | `cves` | Fetch the CVE sources and find what the update fixes, in children of their own. |
-| `compose` | Compose what the forms derive, as the build does (`lib/compose.zig`): files, accounts, network policy, promises, modules, kernel arguments. |
+| `compose` | Compose what the forms derive, as the build does (`lib/compose.zig`): files, accounts, network policy, promises, kernel arguments. |
 | `root`, `verity` | Add busybox's links, copy werewolf's programs, `--app` and the build's records forward, clear setuid bits, run `mkfs.erofs`; append the dm-verity hash tree (lib/verity.zig). |
-| `vmlinuz`, `stage0` | Take Alpine's kernel as it is; build stage0 from the new root's `init`, `modload`, the form's modules and `/verity`. |
+| `vmlinuz`, `stage0` | Take the kernel image as it is (`boot/vmlinuz-werewolf`); build stage0 from the new root's `init` and `/verity`. |
 | `install` | Disarm the other slot through the mount broker; install root, kernel, stage0 and UKI with digest-checked broker operations; arm one try; write `attempt`. |
 | `stage`, `report` | Fetch the tiers feed, tier the fixes, note in `pending` when each tier was first seen, work out when the slot is due, write the report; log `stage`. |
 
@@ -81,10 +81,11 @@ slot's package list and kernel.
 ## Trust and separation
 
 apk fetches every package; root checks every signature and hash before apk
-reads one, and apk checks them again, against the Wolfi key in
-`/etc/apk/keys` and the two Alpine keys in `/etc/werewolf/alpine-keys`. The
-CVE sources are unsigned, fetched over TLS, and inform the report alone; one
-that fails is recorded with its error, and the update goes ahead.
+reads one, and apk checks them again, against the keys in `/etc/apk/keys`
+and, for the kernel, werewolf's packages key alone in
+`/etc/werewolf/kernel-keys`. The CVE sources are unsigned, fetched over
+TLS, and inform the report alone; one that fails is recorded with its
+error, and the update goes ahead.
 
 Root, which builds and installs the slot, has no network: the form's policy
 lets only `_update` (uid 69) send, and only HTTPS and DNS. Children running
@@ -115,7 +116,7 @@ each CVE; one counts when that version is newer than the old and no newer
 than the new, in apk's order (ported to Zig in `cve.zig`). The Linux CNA's
 records, fetched from git.kernel.org when the kernel changes, count when
 `unaffected` names a version on the running branch in the update's range;
-they often appear weeks after a fix ships. Alpine's patches are not counted.
+they often appear weeks after a fix ships.
 
 ## Files
 
@@ -151,10 +152,10 @@ edited line breaks the chain ([audit log](design/update-policy.md#the-audit-log)
 
 ```json
 { "time": "2026-10-06T13:42:36Z", "host": "example", "build": "0123456789abcdef",
-  "from": { "slot": "a", "release": "...", "kernel": "linux-virt-6.18.54-r0" }, "to": { "slot": "b", "kernel": "linux-virt-6.18.55-r0" },
+  "from": { "slot": "a", "release": "...", "kernel": "linux-werewolf-7.2.10-r1" }, "to": { "slot": "b", "kernel": "linux-werewolf-7.2.11-r1" },
   "packages": [ { "name": "busybox-full", "from": "1.37.0-r30", "to": "1.38.0-r2" } ],
   "package_cves": [ { "origin": "busybox", "from": "1.37.0-r30", "to": "1.38.0-r2", "cves": ["CVE-2024-58251"] } ],
-  "kernel_cves": { "branch": "6.18", "cves": [ { "id": "CVE-2026-52988", "fixed_in": "6.18.55", "title": "netfilter: ..." } ] },
+  "kernel_cves": { "branch": "7.2", "cves": [ { "id": "CVE-2026-52988", "fixed_in": "7.2.11", "title": "netfilter: ..." } ] },
   "sources": [ { "url": "https://packages.wolfi.dev/os/security.json", "sha256": "...", "error": null } ] }
 ```
 
@@ -165,10 +166,10 @@ report, fetch the sources, compare their sha256, and apply the rules above.
 
 `make test` runs the unit tests; `make check-updater` runs a whole update
 over the network ([testing-live.md](testing-live.md)). By hand, write an
-older kernel (`linux-virt-6.18.54-r0`) into a built slot's
+older kernel (`linux-werewolf-7.2.10-r1`) into a built slot's
 `meta/usr/share/werewolf/kernel`, remove its `overlay.tar` and
 `slot/root.erofs`, `make FORM=lima slot` again and boot it: the machine
-finds Alpine's newer, builds and boots slot `b`, and commits it.
+finds the newer kernel, builds and boots slot `b`, and commits it.
 werewolf's programs and forms change only with a new image; an update
-needs Wolfi, Alpine and git.kernel.org; and the kernel CVE list is what the
-CNA had published at update time.
+needs Wolfi, werewolf's repositories and git.kernel.org; and the kernel CVE
+list is what the CNA had published at update time.

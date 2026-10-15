@@ -242,21 +242,6 @@ fn digits(s: []const u8) bool {
     return true;
 }
 
-/// lockedKernel returns the kernel packages a lock names for arch,
-/// linux-virt-VER-rN, separated by spaces.
-pub fn lockedKernel(gpa: Allocator, lock: []const u8, arch: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = .empty;
-    var lines = mem.splitScalar(u8, lock, '\n');
-    while (lines.next()) |line| {
-        const apk = apkOf(line, arch) orelse continue;
-        if (!mem.startsWith(u8, apk, "linux-virt-") or
-            mem.findScalar(u8, apk, '/') != null) continue;
-        if (out.items.len > 0) try out.append(gpa, ' ');
-        try out.appendSlice(gpa, apk);
-    }
-    return out.items;
-}
-
 /// apkOf returns what follows /ARCH/ in a lock line's "url", without
 /// .apk, or null if the line names no package of arch.
 fn apkOf(line: []const u8, arch: []const u8) ?[]const u8 {
@@ -273,17 +258,24 @@ fn apkOf(line: []const u8, arch: []const u8) ?[]const u8 {
 
 // --- kernel -----------------------------------------------------------------------------
 
-/// kernel installs Alpine's linux-virt, unpacks its kernel, modules and
-/// config into BUILD/kernel/x, checks the config for what werewolf relies
-/// on it to leave out (image.configMisses), and writes BUILD/vmlinuz.
+/// kernel installs linux-werewolf (docs/design/custom-kernel.md), unpacks
+/// its kernel and config into BUILD/kernel/x, checks the config for what
+/// werewolf relies on it to hold (ipe.checkConfig, image.configMisses), and
+/// writes BUILD/vmlinuz.
 pub fn kernel(b: *B) !void {
     const yaml = try bootConfig(b, "kernel.yaml");
+    // kernel.yaml finds werewolf's key beside the forms', in BUILD/keys.
+    try keep(
+        b,
+        try b.path("{s}/keys/{s}", .{ b.p.build, package.repository_key }),
+        package.repository_pem ++ "\n",
+    );
     const lock = "build/lock/kernel.lock.json";
     const rootfs = try b.path("{s}/kernel/rootfs.tar", .{b.p.build});
     try relock(b, lock, yaml);
     if (b.spec.ipe_kernel) |custom| {
-        // A custom archive has the same layout, but its config and signer
-        // must prove the selected enforcement before it replaces Alpine's.
+        // A test kernel, built by werewolf-linux/kernel-build for a disposable
+        // IPE certificate (IPE_CRT): the same layout, trusting --ipe-cert.
         const began = try b.begin(rootfs, &.{custom});
         if (began != null) {
             try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(rootfs).?);
@@ -315,16 +307,15 @@ pub fn kernel(b: *B) !void {
         config = n;
     };
     const cfg = config orelse return b.fail("{s}: no boot/config-", .{rootfs});
-    try b.run(&.{ "bsdtar", "-xf", rootfs, "-C", x, "boot/vmlinuz-virt", "lib/modules", cfg }, .{});
+    try b.run(&.{ "bsdtar", "-xf", rootfs, "-C", x, "boot/vmlinuz-werewolf", cfg }, .{});
     const config_text = try b.read(try b.path("{s}/{s}", .{ x, cfg }), 4 << 20);
-    if (b.spec.ipe_kernel != null) ipe.checkConfig(config_text) catch |err|
-        return b.fail("IPE kernel config: {t}", .{err});
+    ipe.checkConfig(config_text) catch |err| return b.fail("{s}: {t}", .{ cfg, err });
     const misses = try image.configMisses(b.gpa, config_text);
     for (misses) |m| try b.steps.note("kernel config: {f}", .{m});
     if (misses.len > 0) return b.fail("{s} reopens what werewolf relies on it to close", .{cfg});
-    // On aarch64 Alpine ships an EFI zboot image, which QEMU boots and
-    // Apple's Virtualization framework does not: unwrap it.
-    const shipped = try b.read(try b.path("{s}/boot/vmlinuz-virt", .{x}), image.max_gunzip);
+    // An arm64 EFI zboot image, which QEMU boots and Apple's Virtualization
+    // framework does not, would be unwrapped; werewolf's kernel ships the raw Image.
+    const shipped = try b.read(try b.path("{s}/boot/vmlinuz-werewolf", .{x}), image.max_gunzip);
     const kern = image.unwrapZboot(b.gpa, shipped) catch |err|
         return b.fail("{s}: {t}", .{ target, err });
     // unwrapZboot returns any other image as it is.
@@ -357,7 +348,7 @@ test pins {
         \\        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/zlib-1.3.1-r0.apk",
         \\        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/ca-certificates-bundle-20260909-r0.apk",
         \\        "url": "https://packages.wolfi.dev/os/aarch64/py3.13-pip-25.2-r1.apk",
-        \\        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/linux-virt-6.18.55-r0.apk",
+        \\        "url": "https://dist.werewolf-linux.org/apk/kernel/aarch64/linux-werewolf-7.2.11-r1.apk",
         \\        "url": "https://packages.wolfi.dev/os/aarch64/odd-1.0.apk",
         \\
     ;
@@ -365,10 +356,8 @@ test pins {
     try testing.expectEqual(3, p.len);
     try testing.expectEqualStrings("ca-certificates-bundle=20260909-r0", p[0]);
     try testing.expectEqualStrings("py3.13-pip=25.2-r1", p[1]);
-    try testing.expectEqualStrings("linux-virt=6.18.55-r0", p[2]);
+    try testing.expectEqualStrings("linux-werewolf=7.2.11-r1", p[2]);
     try testing.expectEqualStrings("zlib=1.3.1-r0", (try pins(a, lock, "x86_64"))[0]);
-    try testing.expectEqualStrings("linux-virt-6.18.55-r0", try lockedKernel(a, lock, "aarch64"));
-    try testing.expectEqualStrings("", try lockedKernel(a, lock, "x86_64"));
 }
 
 test unreachableServer {
@@ -378,22 +367,4 @@ test unreachableServer {
     try testing.expect(unreachableServer("read tcp: connection reset by peer"));
     try testing.expect(!unreachableServer("unexpected status code 404 Not Found"));
     try testing.expect(!unreachableServer("solving \"foo\": nothing provides foo"));
-}
-
-test "boot/alpine-keys are the minimal form's Alpine keys" {
-    const gpa = std.testing.allocator;
-    var n: usize = 0;
-    for (files.boot) |f| {
-        const name = mem.cutPrefix(u8, f.path, "alpine-keys/") orelse continue;
-        const path = try gpa.print(
-            "forms/minimal/rootfs/etc/werewolf/alpine-keys/{s}",
-            .{name},
-        );
-        defer gpa.free(path);
-        const prod = try Dir.cwd().readFileAlloc(std.testing.io, path, gpa, .limited(64 << 10));
-        defer gpa.free(prod);
-        try std.testing.expectEqualStrings(prod, f.data);
-        n += 1;
-    }
-    try std.testing.expect(n > 0);
 }

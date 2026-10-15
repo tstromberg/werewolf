@@ -11,6 +11,9 @@ base: prod
 
 with: [postgresql, caddy, valkey]
 
+# The extension is built by melange/pg-gvm.yaml against this PostgreSQL.
+packages: [postgresql-17-contrib, glib, libical~3.0]
+
 # Taken back of werewolf's defaults (lib/allow.zig): PostgreSQL compiles
 # costly queries to machine code with LLVM (jit = on, its default).
 # packet and netadmin stay in this machine's bounding set so the
@@ -41,6 +44,9 @@ services:
     pledge: stdio rpath wpath inet unix netlink connect proc exec
     connect: [tcp/873 public, udp/53, tcp/53]
     run: /usr/
+    # The feed places lock files beside its data directories. These parents
+    # are private writable storage; the declared cache shares stay separate.
+    write: [/var/lib/gvm, /var/lib/openvas]
     memory: 1024
     nofile: 8192
     data:
@@ -56,26 +62,34 @@ services:
   # the administrator from the config, and execs gvmd on a Unix socket.
   # The socket is mode 0660. Its group is _oci-gvmd, which gvm-link
   # keeps after it drops. GMP still wants the password. share: group
-  # is that directory. It reaches PostgreSQL and the scanner, and
+  # is that directory. It reaches PostgreSQL and the scanner's shared socket, and
   # reads the feed. It has no packet capability. A missing password
   # parks it. The image's bash may run gvmd.
   gvmd:
     image: registry.community.greenbone.net/community/gvmd:stable
     exec: /usr/bin/bash /usr/lib/werewolf/greenbone-run
-    pledge: stdio rpath wpath inet unix netlink connect listen proc exec
-    connect: [tcp/5432, tcp/9391]
+    # gvmd coordinates its database work with SysV semaphores.
+    pledge: stdio rpath wpath inet unix netlink connect listen proc exec ipc
+    connect: [tcp/5432, /run/ospd/ospd.sock]
     write: [/var/lib/gvm, /var/log/gvm]
     # The feed owns these. gvmd is in that group and may only read
     # them: the data line is read, and Landlock follows the line.
-    group: _oci-feed
+    group: [_oci-feed, _oci-openvas]
     data:
       - /data/share/gvm/scap /var/lib/gvm/scap-data read
       - /data/share/gvm/cert /var/lib/gvm/cert-data read
       - /data/share/gvm/data-objects /var/lib/gvm/data-objects read
+      - /data/share/gvm/ospd /run/ospd read
     share: group
     run:
       - /usr/bin/bash
       - /usr/bin/grep
+      - /usr/bin/gpg
+      - /usr/bin/gpgconf
+      - /usr/bin/gpg-agent
+      - /usr/bin/mkdir
+      - /usr/bin/rm
+      - /usr/bin/sleep
       - /usr/local/sbin/gvmd
     config: admin-password /run/config/gvmd/admin-password
     memory: 1024
@@ -90,7 +104,8 @@ services:
   # through the socket gvm-link placed in its /run. Caddy is what the
   # network sees.
   gsad:
-    image: registry.community.greenbone.net/community/gsad:stable
+    # gsa includes gsad and the web assets; gsad alone is API-only.
+    image: registry.community.greenbone.net/community/gsa:stable
     exec: /usr/local/sbin/gsad -f --http-only --listen=127.0.0.1 --port=9392
     pledge: stdio rpath wpath inet unix netlink connect listen proc
     listen: tcp/9392 loopback
@@ -120,7 +135,7 @@ services:
 
   # The scanner, as _oci-openvas, inside its image. It is the one
   # service that keeps CAP_NET_RAW and CAP_NET_ADMIN, for alive
-  # detection. It listens on loopback for gvmd. It may write the
+  # detection. It serves gvmd on a group-restricted shared Unix socket. It may write the
   # plugin cache and only read the rest of the feed. Its retained network
   # capabilities can bypass Fence; deploy the whole machine on a scanner
   # segment that cannot route to management services.
@@ -131,7 +146,6 @@ services:
     exec: /bin/bash /usr/lib/werewolf/openvas-run
     pledge: stdio rpath wpath inet unix netlink connect listen proc exec packet
     caps: net_raw net_admin
-    listen: tcp/9391 loopback
     connect: [tcp/6379, udp/53, any]
     group: _oci-feed
     write: [/var/log/gvm, /etc/openvas]
@@ -141,6 +155,7 @@ services:
     data:
       - /data/share/gvm/vt /var/lib/openvas/plugins write
       - /data/share/gvm/notus /var/lib/notus read
+      - /data/share/gvm/ospd /run/ospd write
     env:
       - NMAP_PRIVILEGED=1
 

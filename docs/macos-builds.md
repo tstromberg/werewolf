@@ -11,33 +11,30 @@ for modern TLS, with certificate verification and bounded, authenticated downloa
 
 ## Why a Linux guest is needed
 
-The IPE kernel and measured EFI stub use native Linux build tools and headers.
-Melange runs those tools in a temporary Linux guest under QEMU on the Mac,
-using a stock Alpine kernel and matching initramfs modules. This build guest
-is separate from the protected Werewolf guest that Lima deploys.
-Ubuntu is not required for the default build path.
+The measured EFI stub, and the test kernels IPE tests boot, use native Linux build
+tools and headers. Melange runs those tools in a temporary Linux guest under QEMU on
+the Mac. Its kernel is Alpine's `linux-virt`, as melange's initramfs loads 9p and
+overlayfs as modules, which werewolf's kernel lacks: howl makes it from
+[melange-guest.yaml](../boot/melange-guest.yaml) as
+`build/vendor/melange-guest-ARCH.{vmlinuz,cpio}` (`guest()` in cmd/howl/melange.zig).
+It only builds; no Werewolf image boots it, and it is separate from the protected
+Werewolf guest that Lima deploys. Ubuntu is not required for the default build path.
 
-Only explicitly staged public sources, base archives and the public IPE
-certificate enter the builder. Private policy, boot, permit and reset
-credentials stay on the Mac. The kernel embeds the stable public IPE certificate
-for module trust and keeps mandatory module signature enforcement enabled.
-Melange produces unsigned modules; [sign-kernel](../tools/sign-kernel) signs them
-on the host with the matching private key before the image consumes the archive.
-No temporary random module certificate enters the kernel or builder output.
+Only explicitly staged public sources and the public IPE certificate enter the
+builder. Private policy, boot, permit and reset credentials stay on the Mac.
+Protected builds use the published `linux-werewolf`, whose IPE trusts the protected
+image certificate, installed by apko from [kernel.yaml](../boot/kernel.yaml); they
+build only the stub. The kernel has no modules, so nothing is signed for it.
 
-The recipes are [ipe-kernel.melange.yaml](../boot/ipe-kernel.melange.yaml) and
-[tpm-stub.melange.yaml](../boot/tpm-stub.melange.yaml).
-[local-prerequisites](../tools/local-prerequisites) stages their inputs and
-caches the resulting artifacts. Cache identities bind the architecture,
-Alpine base, public signer, sources and builder bytes; completion hashes
-reject altered or incomplete artifacts.
+The stub's recipe is [tpm-stub.melange.yaml](../boot/tpm-stub.melange.yaml).
+[local-prerequisites](../tools/local-prerequisites) stages its inputs, builds a test
+kernel with [test-kernel](../tools/test-kernel) for a disposable certificate, and
+caches both. Cache identities bind the architecture, the certificate, sources and
+builder bytes; completion hashes reject altered or incomplete artifacts.
 
 Kernel and stub caches are independent. Changing the stub recipe reuses the
-kernel; changing the public IPE certificate reuses the stub. Compilation and
-host signing also have separate caches: changing the signing helper or retrying
-failed signing reuses authenticated compiled modules. No-op runs do not sign again.
-Completed older
-combined caches are adopted without recompilation. A failed stub build keeps
+kernel; changing the certificate or the kernel-build commit
+[kernel-build](../boot/kernel-build) pins reuses the stub. A failed stub build keeps
 the completed kernel. Builder sources are written only when their bytes change.
 
 An unchanged `howl run --build` reuses the running protected machine without building,
@@ -47,12 +44,10 @@ resumes its existing image; changed configuration updates only its config disk. 
 stop` keeps protected disks and authority; `howl delete` explicitly removes a machine
 for a fresh run. Application builds currently use the existing replacement path.
 
-GCC 15.2 is pinned to match the Alpine kernel configuration. A rolling GCC 16
-build crashed on Alpine's latent-entropy plugin; retain the plugin and use
-the compatible compiler rather than disabling kernel hardening.
-Fixed build metadata, debug-path mappings and an explicit compiler seed preserve
-latent-entropy instrumentation while making its generated constants reproducible.
-Linux managed builds use the same Melange recipes under bubblewrap.
+kernel-build compiles the kernel with Wolfi's pinned Clang 22. On macOS,
+`make ipe-kernel` (with `WEREWOLF_IPE_CRT`) needs `QEMU_KERNEL_IMAGE` and
+`QEMU_BASE_INITRAMFS` naming the guest above. Linux managed builds use the same
+Melange recipes under bubblewrap.
 
 ## Firmware enrollment on the Mac
 
@@ -90,31 +85,10 @@ symlinks and unsupported architectures. The opt-in [run-cache
 test](../test/check-run-cache) requires an isolated checkout and measures actual Lima
 repeat runs and resume. It rejects repeated builders, guest restarts on unchanged runs
 and changes to signing or TPM authority. It also checks host publisher recovery without
-rebuilding or restarting the guest. [module-signing tests](../test/sign-kernel) cover
-exact repeat bytes, signature/tamper verification, wrong trust, bounded inputs and
-interrupted publication. Set `UPSTREAM_SIGN_FILE` to the pinned Linux tool for
-independent signature-byte comparison. `test/check-kernel-repro ARCH ALPINE_BASE KEY
-CERT OUTPUT` compares two independent cold Melange builds and their complete host-signed
-archives. On macOS, supply the stock `QEMU_KERNEL_IMAGE` and matching
-`QEMU_BASE_INITRAMFS`; keys stay on the host. `test/check-kernel-modules ARCH
-UNSIGNED_TAR SIGNED_TAR OUTPUT QEMU...` boots an isolated probe that loads a trusted
-module and refuses unsigned, foreign and altered copies with kernel signature errors.
-This is separate from the complete Secure Boot/IPE/TPM deployment lifecycle gate.
+rebuilding or restarting the guest. kernel-build's CI boots each kernel with its
+probe before publishing it.
 
-Two independent x86_64 cold Melange builds produced identical complete kernel/module
-archives; two host-signing passes also produced identical archives. Module probes
-passed on Linux x86_64/KVM and macOS arm64/HVF: trusted load succeeded and unsigned,
-foreign-signed and altered modules returned `KEYREJECTED`.
-Evidence: `build/ipe-check/kernel-repro-20261013/`.
-The [kernel reproducibility workflow](../.github/workflows/kernel-repro.yml) repeats
-cold-build comparison and runtime enforcement on both native Linux architectures.
-It uses disposable test keys and does not publish production artifacts.
-The revised arm64 kernel also passed six protected Lima A/B/A boots with two
-independent enrollments, retained TPM anchors on rollback and continued HTTPS
-service after one machine's deletion. No consumer builders or vendor signing ran.
-Evidence: `build/ipe-check/secure-lima/shared-vendor-repro-kernel-verified/`.
-
-Kernel/stub compilation through Melange QEMU and native firmware enrollment have passed
+Stub compilation through Melange QEMU and native firmware enrollment have passed
 on this arm64 Mac; enrollment was exercised with Python 3.9 and 3.14. Complete
 deployment and A/B validation are separate gates: see [testing](testing.md) and the
 [local deployment design](design/secure-local-deployment.md). Compiler success alone

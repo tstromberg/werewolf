@@ -807,16 +807,6 @@ fn restrict(p: Policy) !void {
             const name: [*:0]const u8 = @ptrCast(&ent.name);
             const s_name = std.mem.sliceTo(name, 0);
             if (ent.type != linux.DT.CHR) continue;
-            if (std.mem.startsWith(u8, s_name, "gpiochip")) {
-                // power-button reads the power key and requests its line.
-                if (isPl061(s_name)) try allowPath(
-                    ruleset,
-                    dev,
-                    name,
-                    sandbox.read_file | sandbox.ioctl_dev,
-                );
-                continue;
-            }
             if (!std.mem.startsWith(u8, s_name, "tty") and
                 !std.mem.startsWith(u8, s_name, "hvc")) continue;
             try allowPath(ruleset, dev, name, terminal);
@@ -827,35 +817,6 @@ fn restrict(p: Policy) !void {
     // too, so a service reaching for a disk, a sysctl or an undeclared port
     // leaves a trace.
     try ruleset.restrict();
-}
-
-/// isPl061 reports whether /dev/gpiochip is a PL061 (device-tree compatible
-/// arm,pl061), which QEMU virt and Apple VZ wire the power button to. On real
-/// hardware a GPIO chip may drive resets and regulators, so no other gets
-/// ioctls.
-fn isPl061(gpiochip: []const u8) bool {
-    var path_buf: [96]u8 = undefined;
-    const path = std.mem.print(
-        &path_buf,
-        "/sys/bus/gpio/devices/{s}/of_node/compatible\x00",
-        .{gpiochip},
-    ) catch
-        return false;
-    const fd = linux.openat(linux.AT.FDCWD, @ptrCast(path.ptr), .{ .CLOEXEC = true }, 0);
-    if (linux.errno(fd) != .SUCCESS) return false;
-    defer _ = linux.close(@intCast(fd));
-    var buf: [256]u8 = undefined;
-    const n = linux.read(@intCast(fd), &buf, buf.len);
-    if (linux.errno(n) != .SUCCESS) return false;
-    return compatibleWith(buf[0..n], "arm,pl061");
-}
-
-/// compatibleWith reports whether a device-tree compatible property, a list
-/// of NUL-separated strings, names want.
-fn compatibleWith(list: []const u8, want: []const u8) bool {
-    var it = std.mem.splitScalar(u8, list, 0);
-    while (it.next()) |c| if (std.mem.eql(u8, c, want)) return true;
-    return false;
 }
 
 /// allowPath adds access to path, relative to dir, in ruleset. A missing
@@ -1072,13 +1033,6 @@ fn rfc3339(buf: *[20]u8, secs: u64) []const u8 {
 
 const example = "connect 0 tcp 443\nconnect 0 udp 53\nconnect all udp 53\nconnect 0 " ++
     "icmp\nlisten tcp 22\nlisten tcp 5432 loopback\nlisten 207 udp 53\nmetadata 68\n";
-
-test compatibleWith {
-    try std.testing.expect(compatibleWith("arm,pl061\x00arm,primecell\x00", "arm,pl061"));
-    try std.testing.expect(compatibleWith("arm,primecell\x00arm,pl061\x00", "arm,pl061"));
-    try std.testing.expect(!compatibleWith("arm,pl0610\x00", "arm,pl061"));
-    try std.testing.expect(!compatibleWith("rockchip,gpio-bank\x00", "arm,pl061"));
-}
 
 test "a program runs under its own name" {
     try std.testing.expectEqualStrings("runit", std.mem.span(baseName("/usr/bin/runit")));

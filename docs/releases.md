@@ -2,8 +2,9 @@
 
 CI publishes three forms, `minimal`, `prod` and `prod-ssh`, for aarch64
 and x86_64, as GitHub releases. It makes a release only when an image
-would change, usually within the hour of a fix reaching Wolfi or Alpine,
-and anyone can rebuild a release byte for byte from what it carries.
+would change, usually within the hour of a fix reaching Wolfi or
+werewolf's kernel, and anyone can rebuild a release byte for byte from
+what it carries.
 
 `prod` is the production base: a machine that takes its address by DHCP, keeps itself
 current, and listens on nothing. `prod-ssh` is `prod` with sshd, for an operator to
@@ -39,9 +40,9 @@ carries one its own image lacks as soon as that advisory's tier says
 
 [release.yml](../.github/workflows/release.yml) runs every 15 minutes (at
 7, 22, 37 and 52, since GitHub runs schedules on the hour late), for what
-Wolfi and Alpine change, and after the `packages` workflow has run on
-`main`, for what werewolf changes, so the packages a change brings are
-published first.
+Wolfi and werewolf's kernel repository change, and after the `packages`
+workflow has run on `main`, for what werewolf changes, so the packages a
+change brings are published first.
 
 1. **Inputs.** `make release-inputs` resolves fresh locks for the forms,
    stage0, the kernel and systemd-boot, and writes `inputs`: a digest of

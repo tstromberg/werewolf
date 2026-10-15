@@ -121,7 +121,8 @@ pub fn check(p: *Posture) !void {
     );
     // werewolf fails these by choice (docs/security.md, "Not done, by
     // choice"), so only --extended checks them: strict reverse-path filtering
-    // is not yet shown to work with fence, and IPv6 needs router advertisements.
+    // is not yet shown to work with fence. Router advertisements pass where
+    // the kernel has no IPv6, as werewolf's does not.
     if (p.extended) {
         // The kernel uses the stricter of all and the interface for both.
         try p.sysctls(

@@ -626,10 +626,9 @@ pub const B = struct {
     rootfs: []const []const u8,
     /// bins are the programs the overlay lays in.
     bins: []const []const u8,
-    /// stage0_bin and loader_bin are stage0's init and module loader in
-    /// PROGRAMS, which stage0 takes when the overlay lays them.
+    /// stage0_bin is stage0's init in PROGRAMS, which stage0 takes when the
+    /// overlay lays it.
     stage0_bin: []const u8,
-    loader_bin: []const u8,
     /// overlay are the directories laid over the packages, OUT/ro first.
     overlay: []const []const u8,
     /// made are the targets of the overlay's compiled parts: a tutorial's
@@ -639,8 +638,6 @@ pub const B = struct {
     recipes: []const []const u8,
     /// app are --app's directories and files.
     app: []const []const u8,
-    modules: []const []const u8,
-    params: []const image.Param,
     /// env is the tools' environment (pipeline).
     env: *const std.process.Environ.Map,
 
@@ -1020,14 +1017,14 @@ test "image enrollment requires IPE, a safe channel and a release serial" {
 
 /// every_program are the programs in every form but init,
 /// each in PROGRAMS/NAME/usr/lib/werewolf/NAME, in overlay order: stage0's
-/// init, the module loader, the network's setup and policy, the mounts,
+/// init, the network's setup and policy, the mounts,
 /// posture, the seal's two, and those that replace shell scripts
 /// (docs/design/shell-free.md).
 pub const every_program = [_][]const u8{
-    "stage0",       "modload",    "iface-up",     "fence",       "mount",
-    "mount-broker", "posture",    "seal-watch",   "seal",        "runit-stage",
-    "reboot",       "slot-keep",  "power-button", "debug-shell", "ssh-host-key",
-    "leash",        "leash-reap",
+    "stage0",     "iface-up",     "fence",       "mount",        "mount-broker",
+    "posture",    "seal-watch",   "seal",        "runit-stage",  "reboot",
+    "slot-keep",  "power-button", "debug-shell", "ssh-host-key", "leash",
+    "leash-reap",
 };
 
 /// plan reads the form's chain and works out everything the steps need.
@@ -1131,13 +1128,11 @@ fn plan(
         .aarch64 => .aarch64,
         .x86_64 => .x86_64,
     };
-    const allowed = compose.allowances(gpa, chain, &f) catch |err| switch (err) {
+    // Refuse a chain whose allowances do not hold together before any step runs.
+    _ = compose.allowances(gpa, chain, &f) catch |err| switch (err) {
         error.Form => return steps.fail(f.text),
         else => |e| return e,
     };
-    var params: std.ArrayList(image.Param) = .empty;
-    for (compose.moduleParams(allowed, arch)) |mp|
-        try params.append(gpa, .{ .module = mp.module, .value = mp.value });
 
     return .{
         .io = io,
@@ -1154,13 +1149,10 @@ fn plan(
         .rootfs = rootfs.items,
         .bins = bins.items,
         .stage0_bin = try gpa.print("{s}/stage0/usr/lib/werewolf/stage0", .{p.programs}),
-        .loader_bin = try gpa.print("{s}/modload/usr/lib/werewolf/modload", .{p.programs}),
         .overlay = overlay.items,
         .made = made.items,
         .recipes = recipes,
         .app = staged.items,
-        .modules = try compose.modules(gpa, chain, arch),
-        .params = params.items,
         .env = env,
     };
 }

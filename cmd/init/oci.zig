@@ -209,7 +209,11 @@ fn shareMounts(m: *Machine, shares: []const Share, roots: []const Root) void {
             say("oci: {s}{s}: mount point: {s}", .{ at.dir, s.image, @errorName(err) });
             continue;
         };
-        m.mount(&.{ "--bind", m.z(s.host), m.fmt("{s}{s}", .{ at.dir, s.image }) });
+        if (s.write) {
+            m.mount(&.{ "--bind", m.z(s.host), m.fmt("{s}{s}", .{ at.dir, s.image }) });
+        } else {
+            m.mount(&.{ "--bind", "-o", "ro", m.z(s.host), m.fmt("{s}{s}", .{ at.dir, s.image }) });
+        }
     }
     // No service has started yet. Close traversal before handover, then
     // set writer ACLs: chmod after an ACL would narrow its writer mask.
@@ -280,7 +284,7 @@ test "shared mount points survive writable parents without following data symlin
     try tmp.dir.createDirPath(io, "outside");
     const root_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
     defer gpa.free(root_path);
-    const root_z = try gpa.dupeZ(root_path);
+    const root_z = try gpa.dupeSentinel(u8, root_path, 0);
     defer gpa.free(root_z);
     const ids: phase_config.Ids = .{ .uid = linux.getuid(), .gid = linux.getgid() };
     try mountTarget(root_z, "/var/lib/gvm/scap-data", ids);

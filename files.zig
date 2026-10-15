@@ -26,11 +26,13 @@ pub const posture_known = @embedFile("test/posture-known");
 /// stage0_mtree is stage0's device nodes.
 pub const stage0_mtree = @embedFile("cmd/stage0/stage0.mtree");
 
-/// boot are the apko configs of the kernel and the boot loader, with the
-/// Alpine keys kernel.yaml names, each by its path under boot/.
+/// boot are the apko configs of the kernel, the boot loader and melange's
+/// QEMU guest, with the Alpine keys melange-guest.yaml names, each by its
+/// path under boot/.
 pub const boot = [_]struct { path: []const u8, data: []const u8 }{
     .{ .path = "kernel.yaml", .data = @embedFile("boot/kernel.yaml") },
     .{ .path = "boot.yaml", .data = @embedFile("boot/boot.yaml") },
+    .{ .path = "melange-guest.yaml", .data = @embedFile("boot/melange-guest.yaml") },
     .{
         .path = "alpine-keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub",
         .data = @embedFile("boot/alpine-keys/alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub"),
@@ -44,14 +46,11 @@ pub const boot = [_]struct { path: []const u8, data: []const u8 }{
 /// Pinned security builders are available even when howl runs without its checkout.
 pub const secure_sources = [_]struct { path: []const u8, data: []const u8 }{
     .{ .path = "local-prerequisites", .data = @embedFile("tools/local-prerequisites") },
-    .{ .path = "tools/sign-kernel", .data = @embedFile("tools/sign-kernel") },
     .{ .path = "build-helper", .data = build_helper },
     .{ .path = "boot/build-helper.yaml", .data = build_helper_template },
-    .{ .path = "boot/ipe-kernel.melange.yaml", .data = @embedFile("boot/ipe-kernel.melange.yaml") },
+    .{ .path = "boot/kernel-build", .data = @embedFile("boot/kernel-build") },
+    .{ .path = "tools/test-kernel", .data = @embedFile("tools/test-kernel") },
     .{ .path = "boot/tpm-stub.melange.yaml", .data = @embedFile("boot/tpm-stub.melange.yaml") },
-    .{ .path = "boot/kernel-source", .data = @embedFile("boot/kernel-source") },
-    .{ .path = "boot/build-kernel", .data = @embedFile("boot/build-kernel") },
-    .{ .path = "boot/ipe-boot.policy", .data = @embedFile("boot/ipe-boot.policy") },
     .{ .path = "boot/stub-source", .data = @embedFile("boot/stub-source") },
     .{ .path = "tools/build-tpm-stub", .data = @embedFile("tools/build-tpm-stub") },
 };

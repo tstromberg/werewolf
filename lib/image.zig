@@ -1,167 +1,16 @@
 //! image holds the steps of making a slot that the build host and the
-//! updater share: the modules stage0 loads, gunzip, the kernel unwraps,
-//! the kernel config check and mkfs.erofs's options. See lib/README.md.
+//! updater share: gunzip, the kernel unwraps, the kernel config check and
+//! mkfs.erofs's options. See lib/README.md.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
-/// Param is a parameter the image loads a module with: kvm-intel, nested=0.
-pub const Param = struct { module: []const u8, value: []const u8 };
-
-/// Modules is what a stage0 loads: werewolf.modules and the files it names.
-pub const Modules = struct {
-    /// list is werewolf.modules, a line per module in load order:
-    /// `[@TAG ]PATH[ KEY=VALUE...]`, PATH as modules.dep has it without .gz.
-    list: []const u8,
-    /// files are the distinct modules.dep paths the list names, sorted:
-    /// what to decompress beside it.
-    files: []const []const u8,
-};
-
-/// modules resolves words, the leaf modules a stage0 loads (`NAME`, or
-/// `@TAG:NAME` for a machine stage0 tags TAG), against modules.dep. Each
-/// leaf brings its line of modules.dep back to front, a load order. A
-/// module is listed once untagged; a tagged one only if no untagged leaf
-/// needs it, once per tag. A module's params go on its first line.
-/// It refuses an empty list; on error, bad names the module at fault.
-pub fn modules(
-    gpa: Allocator,
-    dep: []const u8,
-    words: []const []const u8,
-    params: []const Param,
-    bad: *[]const u8,
-) !Modules {
-    return modulesWithBuiltins(gpa, dep, "", words, params, bad);
-}
-
-pub fn modulesWithBuiltins(
-    gpa: Allocator,
-    dep: []const u8,
-    builtins: []const u8,
-    words: []const []const u8,
-    params: []const Param,
-    bad: *[]const u8,
-) !Modules {
-    if (words.len == 0) return error.NoModules;
-    // Every leaf's line back to front, tagged as its leaf is.
-    var all: std.ArrayList(Mod) = .empty;
-    for (words) |w| {
-        const tagged = w.len > 0 and w[0] == '@';
-        const colon = mem.findScalar(u8, w, ':');
-        const tag = if (tagged) w[0 .. colon orelse w.len] else "";
-        const name = if (tagged and colon != null) w[colon.? + 1 ..] else w;
-        const suffix = try gpa.print("/{s}.ko.gz:", .{name});
-        var found = false;
-        var lines = mem.splitScalar(u8, dep, '\n');
-        while (lines.next()) |line| {
-            var fields: std.ArrayList([]const u8) = .empty;
-            var it = mem.tokenizeAny(u8, line, " \t");
-            while (it.next()) |f| try fields.append(gpa, f);
-            if (fields.items.len == 0 or !mem.endsWith(u8, fields.items[0], suffix)) continue;
-            found = true;
-            fields.items[0] = fields.items[0][0 .. fields.items[0].len - 1];
-            var i = fields.items.len;
-            while (i > 0) {
-                i -= 1;
-                try all.append(gpa, .{ .tag = tag, .path = fields.items[i] });
-            }
-        }
-        if (!found) {
-            const builtin_suffix = try gpa.print("/{s}.ko", .{name});
-            var builtin_lines = mem.splitScalar(u8, builtins, '\n');
-            while (builtin_lines.next()) |line| {
-                if (mem.endsWith(u8, line, builtin_suffix)) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if (!found) {
-            bad.* = name;
-            return error.ModuleNotFound;
-        }
-    }
-
-    // Untagged modules once; a tagged one only where nothing untagged
-    // loads it, once per tag.
-    var base: std.array_hash_map.String(void) = .empty;
-    for (all.items) |m| if (m.tag.len == 0) try base.put(gpa, m.path, {});
-    var seen: std.array_hash_map.String(void) = .empty;
-    var kept: std.ArrayList(Mod) = .empty;
-    for (all.items) |m| {
-        if (m.tag.len > 0 and base.contains(m.path)) continue;
-        const key = try gpa.print("{s} {s}", .{ m.tag, m.path });
-        if ((try seen.getOrPut(gpa, key)).found_existing) continue;
-        try kept.append(gpa, m);
-    }
-
-    var want: std.array_hash_map.String([]const u8) = .empty;
-    for (params) |p| {
-        const r = try want.getOrPut(gpa, p.module);
-        r.value_ptr.* = try gpa.print(
-            "{s} {s}",
-            .{ if (r.found_existing) r.value_ptr.* else "", p.value },
-        );
-    }
-    var list: std.ArrayList(u8) = .empty;
-    var files: std.array_hash_map.String(void) = .empty;
-    for (kept.items) |m| {
-        const path = if (mem.endsWith(u8, m.path, ".gz")) m.path[0 .. m.path.len - 3] else m.path;
-        if (m.tag.len > 0) try list.print(gpa, "{s} ", .{m.tag});
-        try list.appendSlice(gpa, path);
-        const stem = std.fs.path.basename(path);
-        const name = if (mem.endsWith(u8, stem, ".ko")) stem[0 .. stem.len - 3] else stem;
-        if (want.fetchSwapRemove(name)) |p| try list.appendSlice(gpa, p.value);
-        try list.append(gpa, '\n');
-        try files.put(gpa, m.path, {});
-    }
-    if (want.count() > 0) {
-        bad.* = want.keys()[0];
-        return error.ParamsForMissingModule;
-    }
-    const sorted = files.keys();
-    mem.sortUnstable([]const u8, sorted, {}, lessThan);
-    return .{ .list = list.items, .files = sorted };
-}
-
-test "declared built-in modules need no file, while missing modules still fail" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    const dep = "kernel/fs/fat/vfat.ko.gz:\n";
-    const words: []const []const u8 = &.{ "@esp:vfat", "@esp:efivarfs" };
-    var bad: []const u8 = "";
-    const result = try modulesWithBuiltins(
-        gpa,
-        dep,
-        "kernel/fs/efivarfs/efivarfs.ko\n",
-        words,
-        &.{},
-        &bad,
-    );
-    try std.testing.expectEqual(@as(usize, 1), result.files.len);
-    try std.testing.expectEqualStrings("@esp kernel/fs/fat/vfat.ko\n", result.list);
-    try std.testing.expectError(
-        error.ModuleNotFound,
-        modulesWithBuiltins(gpa, dep, "kernel/fs/other/other.ko\n", words, &.{}, &bad),
-    );
-    try std.testing.expectEqualStrings("efivarfs", bad);
-}
-
-/// Mod is one line of a load order: a modules.dep path, and the tag
-/// (`@xfs`) of the leaf that brought it, or "".
-const Mod = struct { tag: []const u8, path: []const u8 };
-
-fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-    return mem.lessThan(u8, a, b);
-}
-
 /// max_gunzip bounds what gunzip inflates: the kernel's Image is 40 MB.
 pub const max_gunzip = 256 << 20;
 
-/// gunzip inflates the first gzip member of data, as the kernel's modules
-/// and payloads are one member each. It refuses more than max_gunzip bytes.
+/// gunzip inflates the first gzip member of data, as a kernel payload is one
+/// member. It refuses more than max_gunzip bytes.
 pub fn gunzip(gpa: Allocator, data: []const u8) ![]u8 {
     var in: std.Io.Reader = .fixed(data);
     var gz: std.compress.flate.Decompress = .init(&in, .gzip, &.{});
@@ -169,6 +18,26 @@ pub fn gunzip(gpa: Allocator, data: []const u8) ![]u8 {
         error.ReadFailed => return gz.err orelse error.ReadFailed,
         else => return err,
     };
+}
+
+/// max_zstd_window is the largest window zstd -22 --ultra, the kernel's
+/// setting, uses. The kernel pipes its payload in, so zstd takes it whole.
+const max_zstd_window = 1 << 27;
+
+/// unzstd inflates a payload compressed as the kernel's build does: one zstd
+/// frame, then the inflated size as a little-endian u32.
+pub fn unzstd(gpa: Allocator, data: []const u8) ![]u8 {
+    if (data.len < 4) return error.BadZstd;
+    var in: std.Io.Reader = .fixed(data[0 .. data.len - 4]);
+    const window = try gpa.alloc(u8, max_zstd_window + std.compress.zstd.block_size_max);
+    defer gpa.free(window);
+    var z: std.compress.zstd.Decompress = .init(&in, window, .{ .window_len = max_zstd_window });
+    const out = z.reader.allocRemaining(gpa, .limited(max_gunzip)) catch |err| switch (err) {
+        error.ReadFailed => return z.err orelse error.ReadFailed,
+        else => return err,
+    };
+    if (out.len != mem.readInt(u32, data[data.len - 4 ..][0..4], .little)) return error.BadZstd;
+    return out;
 }
 
 /// unwrapZboot returns the Image inside an arm64 EFI zboot image: a PE
@@ -185,15 +54,20 @@ pub fn unwrapZboot(gpa: Allocator, image: []const u8) ![]const u8 {
 
 /// vmlinux returns the ELF kernel inside an x86 bzImage, which Firecracker
 /// boots without waiting for the bzImage's stub to inflate it. The setup
-/// header gives the setup sectors at 0x1f1 (0 means 4), then the gzipped
-/// payload's offset past the setup and its length, u32s at 0x248 and 0x24c.
+/// header gives the setup sectors at 0x1f1 (0 means 4), then the payload's
+/// offset past the setup and its length, u32s at 0x248 and 0x24c. werewolf's
+/// kernel compresses it with zstd; gzip is read too.
 pub fn vmlinux(gpa: Allocator, bzimage: []const u8) ![]const u8 {
     if (bzimage.len < 0x250) return error.BadBzImage;
     const sects: u64 = if (bzimage[0x1f1] == 0) 4 else bzimage[0x1f1];
     const start = (sects + 1) * 512 + mem.readInt(u32, bzimage[0x248..0x24c], .little);
     const len = mem.readInt(u32, bzimage[0x24c..0x250], .little);
     if (start + len > bzimage.len) return error.BadBzImage;
-    const elf = try gunzip(gpa, bzimage[start..][0..len]);
+    const payload = bzimage[start..][0..len];
+    const elf = if (mem.startsWith(u8, payload, "\x28\xb5\x2f\xfd"))
+        try unzstd(gpa, payload)
+    else
+        try gunzip(gpa, payload);
     if (!mem.startsWith(u8, elf, "\x7fELF")) return error.NotElf;
     return elf;
 }
@@ -243,16 +117,12 @@ pub fn checkErofs(
 const Want = enum {
     /// yes means built in, because werewolf relies on it.
     yes,
-    /// not_built_in allows a module or off. The machine never loads the
-    /// module, and cannot once modload closes the loader.
-    not_built_in,
-    /// off means left out entirely.
+    /// off means left out entirely; with no module loader, nothing else is out.
     off,
 
     fn holds(want: Want, v: []const u8) bool {
         return switch (want) {
             .yes => mem.eql(u8, v, "y"),
-            .not_built_in => !mem.eql(u8, v, "y"),
             .off => v.len == 0,
         };
     }
@@ -260,28 +130,27 @@ const Want = enum {
     fn text(want: Want) []const u8 {
         return switch (want) {
             .yes => "built in",
-            .not_built_in => "a module or off",
             .off => "off",
         };
     }
 };
 
-/// config_rules are what werewolf relies on Alpine's kernel config to
-/// leave out, or keep in: built in, code the module loader keeps out today
-/// would be in every machine. Each names what it closes.
+/// config_rules are what werewolf relies on its kernel's config to leave out,
+/// or keep in, whatever config/*.cfg in werewolf-linux/kernel-build says
+/// later. Each names what it closes.
 const config_rules = [_]struct { []const u8, Want, []const u8 }{
-    .{ "CONFIG_CRYPTO_USER_API", .not_built_in, "AF_ALG: CVE-2025-39964, CVE-2026-31431" },
-    .{ "CONFIG_CRYPTO_USER_API_AEAD", .not_built_in, "AF_ALG: CVE-2026-31431" },
-    .{ "CONFIG_CRYPTO_USER_API_SKCIPHER", .not_built_in, "AF_ALG" },
-    .{ "CONFIG_CRYPTO_USER_API_HASH", .not_built_in, "AF_ALG" },
-    .{ "CONFIG_CRYPTO_USER_API_RNG", .not_built_in, "AF_ALG" },
-    .{ "CONFIG_TLS", .not_built_in, "kernel TLS: CVE-2025-39682" },
-    .{ "CONFIG_BRIDGE_NF_EBTABLES", .not_built_in, "ebtables: CVE-2026-53266" },
-    .{ "CONFIG_NF_TABLES", .not_built_in, "nf_tables: CVE-2022-2586, CVE-2024-1086" },
-    .{ "CONFIG_NETFILTER_XTABLES", .not_built_in, "x_tables: CVE-2021-22555" },
-    .{ "CONFIG_OVERLAY_FS", .not_built_in, "overlayfs: CVE-2023-0386" },
-    .{ "CONFIG_HID", .not_built_in, "HID: CVE-2024-50302" },
-    .{ "CONFIG_USB", .not_built_in, "USB: CVE-2024-53150, CVE-2024-53197, CVE-2024-53104" },
+    .{ "CONFIG_CRYPTO_USER_API", .off, "AF_ALG: CVE-2025-39964, CVE-2026-31431" },
+    .{ "CONFIG_CRYPTO_USER_API_AEAD", .off, "AF_ALG: CVE-2026-31431" },
+    .{ "CONFIG_CRYPTO_USER_API_SKCIPHER", .off, "AF_ALG" },
+    .{ "CONFIG_CRYPTO_USER_API_HASH", .off, "AF_ALG" },
+    .{ "CONFIG_CRYPTO_USER_API_RNG", .off, "AF_ALG" },
+    .{ "CONFIG_TLS", .off, "kernel TLS: CVE-2025-39682" },
+    .{ "CONFIG_BRIDGE_NF_EBTABLES", .off, "ebtables: CVE-2026-53266" },
+    .{ "CONFIG_NF_TABLES", .off, "nf_tables: CVE-2022-2586, CVE-2024-1086" },
+    .{ "CONFIG_NETFILTER_XTABLES", .off, "x_tables: CVE-2021-22555" },
+    .{ "CONFIG_OVERLAY_FS", .off, "overlayfs: CVE-2023-0386" },
+    .{ "CONFIG_HID", .off, "HID: CVE-2024-50302" },
+    .{ "CONFIG_USB", .off, "USB: CVE-2024-53150, CVE-2024-53197, CVE-2024-53104" },
     .{ "CONFIG_WATCH_QUEUE", .off, "watch queues: CVE-2022-0995" },
     .{ "CONFIG_SND_USB_AUDIO", .off, "USB audio: CVE-2024-53150, CVE-2024-53197" },
     .{ "CONFIG_USB_VIDEO_CLASS", .off, "USB video: CVE-2024-53104" },
@@ -335,66 +204,6 @@ fn configValue(text: []const u8, name: []const u8) []const u8 {
 
 const testing = std.testing;
 
-test modules {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const dep =
-        \\kernel/fs/ext4/ext4.ko.gz: kernel/lib/crc/crc16.ko.gz kernel/fs/mbcache.ko.gz kernel/fs/jbd2/jbd2.ko.gz
-        \\kernel/fs/xfs/xfs.ko.gz: kernel/lib/crc/crc16.ko.gz kernel/fs/xfs/libxfs.ko.gz
-        \\kernel/fs/jbd2/jbd2.ko.gz:
-        \\kernel/fs/btrfs/btrfs.ko.gz: kernel/lib/raid6/raid6_pq.ko.gz kernel/lib/xor.ko.gz
-        \\kernel/lib/raid6/raid6_pq.ko.gz:
-        \\kernel/lib/xor.ko.gz:
-        \\kernel/fs/zfs/zfs.ko.gz: kernel/lib/raid6/raid6_pq.ko.gz
-        \\kernel/arch/x86/kvm/kvm-intel.ko.gz: kernel/arch/x86/kvm/kvm.ko.gz
-        \\kernel/arch/x86/kvm/kvm.ko.gz:
-        \\
-    ;
-    var bad: []const u8 = "";
-    // Tagged and untagged leaves mixed: the chain's order stays. xfs's
-    // crc16 is ext4's too, so it stays untagged; raid6_pq, which two tags
-    // need, is listed under each; jbd2, named again, is listed once.
-    const words = [_][]const u8{ "@xfs:xfs", "ext4", "@btrfs:btrfs", "jbd2", "@zfs:zfs" };
-    const m = try modules(a, dep, &words, &.{}, &bad);
-    try testing.expectEqualStrings(
-        \\@xfs kernel/fs/xfs/libxfs.ko
-        \\@xfs kernel/fs/xfs/xfs.ko
-        \\kernel/fs/jbd2/jbd2.ko
-        \\kernel/fs/mbcache.ko
-        \\kernel/lib/crc/crc16.ko
-        \\kernel/fs/ext4/ext4.ko
-        \\@btrfs kernel/lib/xor.ko
-        \\@btrfs kernel/lib/raid6/raid6_pq.ko
-        \\@btrfs kernel/fs/btrfs/btrfs.ko
-        \\@zfs kernel/lib/raid6/raid6_pq.ko
-        \\@zfs kernel/fs/zfs/zfs.ko
-        \\
-    , m.list);
-    try testing.expectEqual(10, m.files.len);
-    try testing.expectEqualStrings("kernel/fs/btrfs/btrfs.ko.gz", m.files[0]);
-    try testing.expectEqualStrings("kernel/lib/xor.ko.gz", m.files[9]);
-
-    // Parameters go on the module's first line, in order.
-    const kvm = try modules(a, dep, &.{"kvm-intel"}, &.{
-        .{ .module = "kvm-intel", .value = "nested=0" },
-        .{ .module = "kvm-intel", .value = "ept=1" },
-    }, &bad);
-    try testing.expectEqualStrings(
-        "kernel/arch/x86/kvm/kvm.ko\nkernel/arch/x86/kvm/kvm-intel.ko nested=0 ept=1\n",
-        kvm.list,
-    );
-
-    try testing.expectError(error.NoModules, modules(a, dep, &.{}, &.{}, &bad));
-    try testing.expectError(error.ModuleNotFound, modules(a, dep, &.{"f2fs"}, &.{}, &bad));
-    try testing.expectEqualStrings("f2fs", bad);
-    try testing.expectError(error.ModuleNotFound, modules(a, dep, &.{"crc"}, &.{}, &bad));
-    try testing.expectError(error.ParamsForMissingModule, modules(a, dep, &.{"ext4"}, &.{
-        .{ .module = "kvm-amd", .value = "nested=0" },
-    }, &bad));
-    try testing.expectEqualStrings("kvm-amd", bad);
-}
-
 /// hello_gz is `printf 'hello\n' | gzip -n`.
 const hello_gz = [_]u8{
     0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xcb, 0x48,
@@ -444,6 +253,20 @@ test vmlinux {
     mem.writeInt(u32, bz[0x24c..0x250], elf_gz.len + 1, .little);
     try testing.expectError(error.BadBzImage, vmlinux(a, &bz));
     try testing.expectError(error.BadBzImage, vmlinux(a, bz[0..0x100]));
+
+    // `printf '\177ELF' | zstd -22 --ultra`, then the size, as the kernel's build appends it.
+    const elf_zst = [_]u8{
+        0x28, 0xb5, 0x2f, 0xfd, 0x04, 0x88, 0x21, 0x00, 0x00, 0x7f, 0x45, 0x4c, 0x46, 0xad, 0x7f,
+        0x12, 0x44, 0x04, 0x00, 0x00, 0x00,
+    };
+    var zbz: [5 * 512 + 8 + elf_zst.len]u8 = @splat(0);
+    mem.writeInt(u32, zbz[0x248..0x24c], 8, .little);
+    mem.writeInt(u32, zbz[0x24c..0x250], elf_zst.len, .little);
+    @memcpy(zbz[5 * 512 + 8 ..], &elf_zst);
+    try testing.expectEqualStrings("\x7fELF", try vmlinux(a, &zbz));
+    // A wrong size trailer means a truncated or altered payload.
+    zbz[zbz.len - 4] = 5;
+    try testing.expectError(error.BadZstd, vmlinux(a, &zbz));
 }
 
 test checkErofs {
@@ -468,7 +291,7 @@ test checkErofs {
 
 test configMisses {
     const config =
-        \\CONFIG_TLS=m
+        \\# CONFIG_TLS is not set
         \\# CONFIG_WATCH_QUEUE is not set
         \\CONFIG_TLS_DEVICE=y
         \\CONFIG_POSIX_CPU_TIMERS_TASK_WORK=y
@@ -477,7 +300,7 @@ test configMisses {
         \\CONFIG_AUDITSYSCALL=y
         \\CONFIG_HID=y
     ;
-    try testing.expectEqualStrings("m", configValue(config, "CONFIG_TLS"));
+    try testing.expectEqualStrings("", configValue(config, "CONFIG_TLS"));
     try testing.expectEqualStrings("", configValue(config, "CONFIG_WATCH_QUEUE"));
     try testing.expectEqualStrings("\"landlock,lockdown\"", configValue(config, "CONFIG_LSM"));
     const misses = try configMisses(testing.allocator, config);
@@ -485,10 +308,10 @@ test configMisses {
     try testing.expectEqual(1, misses.len);
     var buf: [128]u8 = undefined;
     try testing.expectEqualStrings(
-        "CONFIG_HID is y, werewolf needs it a module or off (HID: CVE-2024-50302)",
+        "CONFIG_HID is y, werewolf needs it off (HID: CVE-2024-50302)",
         try std.mem.print(&buf, "{f}", .{misses[0]}),
     );
-    try testing.expect(Want.not_built_in.holds(""));
+    try testing.expect(Want.off.holds(""));
     try testing.expect(!Want.off.holds("m"));
     try testing.expect(!Want.yes.holds("m"));
 }

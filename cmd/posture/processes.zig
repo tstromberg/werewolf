@@ -129,7 +129,7 @@ fn updates(p: *Posture) !void {
 }
 
 /// serviceDirs checks that each service's directories, /run/svc/NAME and
-/// /data/svc/NAME, have the mode its share line asks for: 0700 by default.
+/// /data/svc/NAME, remain private or have the mode its share line asks for.
 fn serviceDirs(p: *Posture) !void {
     var names: std.ArrayList([]const u8) = .empty;
     if (Dir.cwd().openDir(p.io, "/etc/sv", .{ .iterate = true })) |d| {
@@ -150,7 +150,7 @@ fn serviceDirs(p: *Posture) !void {
             const st = posture.statx(p.gpa, path) orelse continue; // not started yet
             checked += 1;
             const mode = st.mode & 0o7777;
-            if (want == null or mode != want.?)
+            if (!serviceModeSafe(want, mode))
                 try listAdd(p.gpa, &bad, "{s} is {o}", .{ path, mode });
         }
     }
@@ -171,6 +171,22 @@ fn serviceDirs(p: *Posture) !void {
         else
             try p.gpa.print("{d} directories", .{checked}),
     });
+}
+
+// Init keeps directories private until leash applies a service's sharing mode.
+// A service parked for missing configuration has not reached that step.
+fn serviceModeSafe(want: ?u32, mode: u32) bool {
+    const declared = want orelse return false;
+    return mode == 0o700 or mode == declared;
+}
+
+test "service directories may stay private but cannot broaden sharing" {
+    try testing.expect(serviceModeSafe(0o2771, 0o700));
+    try testing.expect(serviceModeSafe(0o2771, 0o2771));
+    try testing.expect(!serviceModeSafe(0o700, 0o777));
+    try testing.expect(!serviceModeSafe(0o711, 0o755));
+    try testing.expect(!serviceModeSafe(0o2771, 0o2775));
+    try testing.expect(!serviceModeSafe(null, 0o700));
 }
 
 /// shareMode returns the mode a service file's first share line asks for:

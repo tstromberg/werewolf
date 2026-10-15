@@ -26,24 +26,25 @@ programs are privilege-separated ([programs.md](programs.md)).
 
 ## Keeping kernel protections set
 
-Some protections are one-way for the boot: the module loader closed,
-lockdown in confidentiality mode, `kernel.yama.ptrace_scope=3` and
-`kernel.unprivileged_bpf_disabled=1` cannot be lowered, by root either.
-The rest would stay writable by root, so fence closes the route: under
-its Landlock rules no process can open a file in `/proc/sys` for writing,
-write `/sys`, or open a disk or device the policy does not name; no
-promise overrides that. `syslog(2)` can set `kernel.printk` without a
-file, so the seal lets it read the log and refuses the rest. A
-descriptor opened before confinement keeps its access, so init closes
-each sysctl file after writing it.
+Some protections are not settings at all: werewolf's kernel has no
+module loader, `bpf` system call, io_uring, user namespaces, kexec or
+SysRq ([custom-kernel.md](design/custom-kernel.md)), and forces lockdown
+to confidentiality. `kernel.yama.ptrace_scope=3` is one-way for the boot:
+it cannot be lowered, by root either. The rest would stay writable by
+root, so fence closes the route: under its Landlock rules no process can
+open a file in `/proc/sys` for writing, write `/sys`, or open a disk or
+device the policy does not name; no promise overrides that. `syslog(2)`
+can set `kernel.printk` without a file, so the seal lets it read the log
+and refuses the rest. A descriptor opened before confinement keeps its
+access, so init closes each sysctl file after writing it.
 
 The seal refuses eBPF, perf, module and kexec calls, io_uring,
 userfaultfd, kernel keyrings and the `process_vm_*` calls, and checks
 arguments to close AF_ALG, kernel TLS, notification pipes and new seccomp
 listeners; a call in another architecture, or x86's x32 convention,
-kills the caller. User namespaces are off; the command line disables
-debugfs, forced writes through `/proc/self/mem` and, on x86_64, 32-bit
-emulation; IPv6 and KVM are off unless the form allows them. An oops, or
+kills the caller. User namespaces, debugfs, IPv6 and, on x86_64, 32-bit
+emulation are not built; the command line disables forced writes through
+`/proc/self/mem`, and KVM unless the form allows it. An oops, or
 a warning once the limit is set, panics and reboots: a damaged kernel
 does not run on, at the price of a denial of service.
 [cmd/init/kernel.zig](../cmd/init/kernel.zig) holds every setting,
@@ -158,10 +159,8 @@ Freed memory is not wiped, for its cost: memory is cleared on
 allocation, slab caches stay separate and page allocation is shuffled.
 CPU mitigations are not forced on every process; werewolf's long-lived
 programs ask for them. Reverse-path filtering conflicts with fence's
-per-user routing, and a form that allows IPv6 takes constrained router
-advertisements, which many networks need for a route. `posture
---extended` reports these. The seal costs about 25 ns a call (`getpid`
-on an M4 Max: 150 ns against 125).
+per-user routing. `posture --extended` reports these. The seal costs
+about 25 ns a call (`getpid` on an M4 Max: 150 ns against 125).
 
 ## Checking a machine
 

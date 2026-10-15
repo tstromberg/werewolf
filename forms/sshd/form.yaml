@@ -7,6 +7,19 @@ packages:
   - openssh-sftp-server   # scp and `limactl copy`
   - busybox-full          # a shell for those who log in, and its tools
 
+# OpenSSH requires its privilege-separation account even though the service
+# itself starts as root. Other forms do not need it.
+accounts:
+  groups:
+    - groupname: sshd
+      gid: 22
+  users:
+    - username: sshd
+      uid: 22
+      gid: 22
+      homedir: /var/empty
+      shell: /sbin/nologin
+
 paths:
   # PAM's password helper, setgid shadow, arrives through openssh-server.
   # Nothing here authenticates with a password.

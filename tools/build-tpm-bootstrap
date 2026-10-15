@@ -35,6 +35,25 @@ def agent_elf(raw, arch):
             raise ValueError('bootstrap agent must not require a dynamic interpreter')
 
 
+# lib/ipe.zig's boot_policy: the kernel has no IPE policy of its own, so
+# tpm-enroll activates this one, signed with the image key, before anything else.
+BOOT_POLICY = (b'policy_name=werewolf_boot policy_version=0.0.0\n'
+               b'DEFAULT action=DENY\nop=EXECUTE boot_verified=TRUE action=ALLOW\n')
+
+
+def signed_policy(key, cert, directory):
+    """BOOT_POLICY as PKCS#7, signed as howl signs release policies; the key stays here."""
+    plain, signed = directory / 'ipe-boot.policy', directory / 'ipe-boot.p7b'
+    plain.write_bytes(BOOT_POLICY)
+    subprocess.run(['openssl', 'smime', '-sign', '-binary', '-md', 'sha256', '-in', str(plain),
+                    '-signer', cert, '-inkey', key, '-noattr', '-nodetach', '-nosmimecap',
+                    '-outform', 'DER', '-out', str(signed)], check=True, capture_output=True, timeout=30)
+    data = signed.read_bytes()
+    plain.unlink()
+    signed.unlink()
+    return data
+
+
 def newc(entries):
     """Canonical newc archive: fixed names, ownership and timestamps; no host tree walk."""
     result = bytearray()
@@ -49,7 +68,7 @@ def newc(entries):
     return bytes(result)
 
 
-def initrd(agent, public, factory):
+def initrd(agent, public, factory, policy):
     return newc([
         ('dev', stat.S_IFDIR | 0o755, b'', 0, 0),
         ('dev/console', stat.S_IFCHR | 0o620, b'', 5, 1),
@@ -57,6 +76,7 @@ def initrd(agent, public, factory):
         ('enrollment', stat.S_IFDIR | 0o500, b'', 0, 0),
         ('enrollment/publisher.pub', stat.S_IFREG | 0o400, public, 0, 0),
         ('enrollment/factory.permit', stat.S_IFREG | 0o400, factory, 0, 0),
+        ('enrollment/ipe-boot.p7b', stat.S_IFREG | 0o400, policy, 0, 0),
     ])
 
 
@@ -73,7 +93,8 @@ def build(args):
     out = Path(args.output)
     out.mkdir(mode=0o700, parents=False)  # Refuse overwriting existing enrollment evidence.
     try:
-        archive = initrd(agent, public, factory)
+        policy = signed_policy(args.ipe_key, args.ipe_cert, out)
+        archive = initrd(agent, public, factory, policy)
         (out / 'bootstrap.initrd').write_bytes(archive)
         console = 'ttyAMA0' if args.arch == 'aarch64' else 'ttyS0'
         line = CMDLINE + (b' werewolf.recovery=1' if args.recovery else b'') + (' console=' + console).encode() + b'\0'
@@ -97,6 +118,7 @@ def build(args):
                         machine=identity[:32].hex(), factory=identity[32:64].hex(),
                         anchor=identity[64:].hex(), pcr11=pcr.hex(),
                         publisher_sha256=hashlib.sha256(public).hexdigest(),
+                        ipe_policy_sha256=hashlib.sha256(policy).hexdigest(),
                         initrd_sha256=hashlib.sha256(archive).hexdigest(),
                         uki_sha256=hashlib.sha256(signed.read_bytes()).hexdigest())
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
@@ -109,7 +131,8 @@ def build(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--arch', choices=['aarch64', 'x86_64'], required=True)
-    for name in ['agent', 'kernel', 'stub', 'publisher', 'factory', 'boot-key', 'boot-cert', 'output']:
+    for name in ['agent', 'kernel', 'stub', 'publisher', 'factory', 'boot-key', 'boot-cert',
+                 'ipe-key', 'ipe-cert', 'output']:
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--uki', default='build/host/uki')
     parser.add_argument('--codec', default='build/host/tpm-bootstrap')

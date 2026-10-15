@@ -31,16 +31,6 @@ fn run(io: std.Io, gpa: std.mem.Allocator) !void {
     // This short-lived probe has no audit daemon. Keep all refusal records
     // on the console instead of exhausting printk's ten-message burst.
     try write("/proc/sys/kernel/printk_ratelimit", "0");
-    // Only bootstrap execution is allowed before the signed policy loads.
-    var loader = try std.process.spawn(
-        io,
-        .{ .argv = &.{"/usr/lib/werewolf/modload"}, .stdin = .pipe },
-    );
-    try loader.stdin.?.writeStreamingAll(io, "none\n");
-    loader.stdin.?.close(io);
-    loader.stdin = null;
-    const term = try loader.wait(io);
-    if (term != .exited or term.exited != 0) return error.Modules;
     try verifiedMount(io, gpa, "/dev/vda", "/verity", "root", "/trusted");
     try verifiedMount(io, gpa, "/dev/vdb", "/other-verity", "other", "/other");
     // Executable tmpfs, deliberately. noexec must not explain a refusal.

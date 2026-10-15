@@ -44,10 +44,12 @@ def entries(raw):
 
 class BootstrapImage(unittest.TestCase):
     def test_archive_contains_only_agent_and_public_factory(self):
-        archive = builder.initrd(b'agent', b'public key', b'signed factory')
+        archive = builder.initrd(b'agent', b'public key', b'signed factory', b'signed policy')
         content = entries(archive)
         self.assertEqual(set(content), {'dev', 'dev/console', 'init', 'enrollment',
-                                        'enrollment/publisher.pub', 'enrollment/factory.permit'})
+                                        'enrollment/publisher.pub', 'enrollment/factory.permit',
+                                        'enrollment/ipe-boot.p7b'})
+        self.assertEqual(content['enrollment/ipe-boot.p7b'][1], b'signed policy')
         self.assertEqual(content['init'][1], b'agent')
         self.assertEqual(content['init'][0][1], stat.S_IFREG | 0o500)
         self.assertEqual(content['enrollment/factory.permit'][1], b'signed factory')
@@ -56,7 +58,15 @@ class BootstrapImage(unittest.TestCase):
             self.assertEqual(fields[2:4], [0, 0])
             self.assertEqual(fields[5], 0)
         self.assertEqual(len(archive) % 512, 0)
-        self.assertEqual(archive, builder.initrd(b'agent', b'public key', b'signed factory'))
+        self.assertEqual(archive, builder.initrd(b'agent', b'public key', b'signed factory', b'signed policy'))
+
+    def test_boot_policy_is_lib_ipe_zig_s(self):
+        source = Path('lib/ipe.zig').read_text()
+        start = source.index('pub const boot_policy = ')
+        literal = source[start:source.index(';', start)]
+        text = ''.join(part.encode().decode('unicode_escape') for part in
+                       __import__('re').findall(r'"((?:[^"\\]|\\.)*)"', literal))
+        self.assertEqual(builder.BOOT_POLICY.decode(), text)
 
     def test_signed_command_line_has_no_workload_or_administration_options(self):
         self.assertEqual(builder.CMDLINE.split(), [b'rdinit=/init', b'werewolf.native=1',

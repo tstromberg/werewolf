@@ -64,7 +64,7 @@ The same Landlock ruleset holds every process's files, root's included:
 | Write | `/run`, `/tmp`, `/var/tmp`, `/dev/shm`, `/data`; `null`, `zero`, `full`, `random`, `urandom`, `kmsg`; terminals; an image root's `/tmp`, `/run`, `/data` and `write` paths, each its own rule ([adhoc.md](adhoc.md)) | `/proc`, `/sys`, disks, the image |
 | Execute | beneath `/usr` and `/oci` | anything written since boot |
 | Make sockets, FIFOs; device nodes | `/run`, an image root's `/run` and `/tmp`; `/data` (`nodev`), for apk building a slot | elsewhere |
-| Device ioctls | console, `tty*`, `hvc*`, ptys if the form allows `pty`, a PL061 GPIO chip | every other device |
+| Device ioctls | console, `tty*`, `hvc*`, ptys if the form allows `pty` | every other device |
 
 So not even root can change a sysctl or write a disk beneath its
 filesystem, or mount. Other reads stay open: the image holds no secrets,

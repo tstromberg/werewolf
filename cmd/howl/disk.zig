@@ -65,8 +65,8 @@ const Boot = struct { efi: []const u8, name: []const u8, console: []const u8 };
 /// serial port is ttyS0 everywhere. On aarch64 the kernel finds ttyAMA0
 /// itself (ACPI SPCR) but not Graviton's 16550, so it names ttyS0, which
 /// exists only there, then hvc0 for Lima's vz, which has no serial port.
-/// aarch64 names no tty0: it would take /dev/console where the ports are
-/// missing. An arg of console=hvc0 makes hvc0 /dev/console on x86_64 too.
+/// Neither names tty0: werewolf's kernel has no virtual terminals. An arg
+/// of console=hvc0 makes hvc0 /dev/console on x86_64 too.
 fn bootOf(arch: howl.Arch) Boot {
     return switch (arch) {
         .aarch64 => .{
@@ -77,7 +77,7 @@ fn bootOf(arch: howl.Arch) Boot {
         .x86_64 => .{
             .efi = "systemd-bootx64.efi",
             .name = "BOOTX64.EFI",
-            .console = "console=tty0 console=hvc0 console=ttyS0,115200",
+            .console = "console=hvc0 console=ttyS0,115200",
         },
     };
 }

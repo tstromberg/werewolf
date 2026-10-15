@@ -39,7 +39,7 @@ config.
 | `updates` | `every`, `from`, `policy`, or `off`, which removes the updater and records the `updates-enabled` posture weakness; last declaration wins. `policy` is quoted JSON using [update-policy.md](update-policy.md) |
 | `machine` | Top manifest only: hostname, ip, gw, dns, data-key, on, arch, size, allow-from, metadata-users; forwarded at creation, immutable on apply |
 | `app` | Destination in the image; `--app DIR` supplies its source tree |
-| `sshd`, `allow`, `modules`, `prune`, `paths`, `programs`, `dev`, `bastion`, `weaknesses`, `check` | Existing form policy; service setting and file flags supply boot config |
+| `sshd`, `allow`, `prune`, `paths`, `programs`, `dev`, `bastion`, `weaknesses`, `check` | Existing form policy; service setting and file flags supply boot config |
 
 ```yaml
 # shop.yaml: howl create shop -f shop.yaml; howl apply shop.yaml --to ssh://deploy@host/srv/apk/shop

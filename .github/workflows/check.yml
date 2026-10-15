@@ -107,11 +107,8 @@ jobs:
         # image with no toolchain.
         if: matrix.group == 'forms' || matrix.group == 'shellfree' || matrix.group == 'native'
         run: |
-          command -v go || sudo apt-get install -y golang-go
           command -v javac || sudo apt-get install -y default-jdk-headless
-          command -v rustup || sudo apt-get install -y rustup
-          rustup toolchain install stable --profile minimal --target "$(uname -m)-unknown-linux-musl"
-          dotnet --list-sdks 2>/dev/null | grep -q '^10\.' || sudo apt-get install -y dotnet-sdk-10.0
+          test/ci-compilers
       # The packages melange builds from forms' recipes (cmd/howl/melange.zig),
       # kept between runs by the recipes' contents and melange's version:
       # vaultwarden's is a Rust build of twenty minutes. Saved even when a
@@ -187,3 +184,65 @@ jobs:
           path: |
             build/*/check/**/*.log
             build/*/check/*-native/results.json
+
+  # arm64 forms as VMs, as x86_64 boots them. Hosted arm runners have no KVM,
+  # so the check job runs arm64 forms in containers on the runner's own
+  # kernel; this job boots werewolf's kernel and every form under KVM on the
+  # self-hosted runner vars.WEREWOLF_ARM64_CHECK_RUNNER names (a JSON list of
+  # labels). It is never form-images' runner, which holds the protected image
+  # key: a pull request can rewrite this file, so the condition below is not
+  # what keeps others' code off the machine; GitHub's approval of outside
+  # contributors' runs is. The runner's account has no sudo and reaches
+  # /dev/kvm through its group; an administrator installs the tools once
+  # (sudo test/ci-setup, a JDK and rustup), and the job checks they are there.
+  vm-arm64:
+    if: >-
+      vars.WEREWOLF_ARM64_CHECK_RUNNER != '' && (github.event_name == 'push' ||
+      contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association))
+    # The fallback is never used (the if needs the variable); it keeps an unset
+    # variable from failing the workflow should runs-on be evaluated anyway.
+    runs-on: ${{ fromJSON(vars.WEREWOLF_ARM64_CHECK_RUNNER || '["ubuntu-26.04-arm"]') }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check tools and install example compilers
+        # install-deps with no answer installs nothing: it fails, listing what
+        # is missing or at the wrong version, unless all is in place.
+        run: |
+          tools/install-deps </dev/null
+          for tool in javac rustup; do
+            command -v "$tool" >/dev/null || { echo "vm-arm64: no $tool on the runner" >&2; exit 1; }
+          done
+          test -r /dev/kvm && test -w /dev/kvm || { echo "vm-arm64: /dev/kvm is not usable" >&2; exit 1; }
+          test/ci-compilers
+      - name: Tool versions
+        id: versions
+        run: echo "melange=$(sed -n 's/^melange_version=//p' tools/install-deps)" >>"$GITHUB_OUTPUT"
+      # Zig's and apko's caches stay in the runner's home between runs; the
+      # melange packages live in the checkout, which checkout cleans.
+      - name: Restore melange packages
+        id: melange
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            build/vendor/packages
+            build/vendor/stamps
+          key: melange-${{ runner.arch }}-${{ steps.versions.outputs.melange }}-${{ hashFiles('forms/*/melange/*.yaml') }}
+      - name: Mark restored melange packages current
+        if: steps.melange.outputs.cache-hit == 'true'
+        run: find build/vendor/stamps -type f -exec touch {} +
+      - name: Boot and check every form, and every form as it ships
+        # A boot a CPU, as the hosted jobs run them, but no more than memory
+        # holds: a guest takes 1 GiB, or its form's check memory, up to 4.
+        run: |
+          jobs=$(awk -v cpus="$(nproc)" '/^MemAvailable:/ { n = int($2 / 4194304); if (n < 1) n = 1; print (n < cpus ? n : cpus) }' /proc/meminfo)
+          echo "vm-arm64: $jobs boots at once"
+          make -k -j"$jobs" check-forms check-shellfree
+      - name: Keep the build and console logs
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: check-vm-arm64
+          path: build/*/check/**/*.log

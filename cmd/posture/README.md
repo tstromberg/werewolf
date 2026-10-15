@@ -17,8 +17,8 @@ checks (`docs/posture.md`).
 JSON with why and how, `posture: fail=ID,ID pass=N skip=N {JSON}`, or one line of state
 (`NOMINAL`, `EXPECTED GAPS`, `DEGRADED`) and counts followed by the failures alone, and
 exits 1 if any check fails. `--extended` adds what werewolf skips by choice (wiping
-freed memory, forced CPU mitigations, strict reverse-path filtering, ignoring IPv6
-router advertisements; docs/security.md). Playground's interactive logins run
+freed memory, forced CPU mitigations, strict reverse-path filtering;
+docs/security.md). Playground's interactive logins run
 `--summary` via `/etc/profile.d/posture.sh`: amber `gap` for a declared weakness, red
 `FAIL` for an unexpected failure, each row shortened to the terminal's width; `NO_COLOR`
 or `TERM=dumb` drops the colour. Text shows `source = value, want expectation` for a
@@ -45,7 +45,8 @@ milliseconds, walk progress and totals to stderr.
   IPv6, sshd), `attacks.zig`. `posture.zig` holds the report and service.
 - **One-way settings** (lockdown, `modules_disabled`, `ptrace_scope=3`,
   `unprivileged_bpf_disabled=1`): only if one reads locked is the unlocked
-  value written back, which must be refused, so no check lowers anything.
+  value written back, which must be refused, so no check lowers anything. A
+  switch the kernel lacks (modules, BPF, io_uring, SysRq, perf) passes, built without.
 - **Proofs:** a copy of itself, under a random name, in each writable
   place and in a memfd, must not start. Opening sysctls across five subtrees,
   a sysfs file and the first disk with O_WRONLY or O_RDWR must be refused.

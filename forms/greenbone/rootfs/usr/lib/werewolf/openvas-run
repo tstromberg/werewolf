@@ -1,13 +1,14 @@
 #!/bin/bash
 # openvas-run: bash, inside the scanner image, as _oci-openvas
 # (forms/greenbone/form.yaml). It points OpenVAS at Valkey on loopback
-# and replaces itself with ospd-openvas. The socket stays in this
-# image's /run. The TCP listener is loopback, and the mode is not 666.
+# and replaces itself with ospd-openvas. Only gvmd joins the socket's
+# group; its mount of that directory is read-only. There is no TCP listener.
 set -eu
 umask 077
 cat >/etc/openvas/openvas.conf <<'EOF'
-db_address = 127.0.0.1
+db_address = tcp://127.0.0.1:6379
 EOF
 exec /usr/bin/python3 /usr/local/bin/ospd-openvas \
 	--config /usr/lib/werewolf/ospd-openvas.conf \
-	--bind-address 127.0.0.1 --port 9391 -f
+	--log-config /usr/lib/werewolf/ospd-logging.conf \
+	--unix-socket /run/ospd/ospd.sock -f

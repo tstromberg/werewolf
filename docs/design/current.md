@@ -72,10 +72,10 @@ Broadcast message from werewolf@host (autoupdate) (Sat Oct 10 12:34:00 2026):
 
 Rebooting in 1 minute to install updates. Security posture: Urgent.
 
-  openssl     3.4.0-r0 -> 3.4.1-r1
+  openssl         3.4.0-r0 -> 3.4.1-r1
     CVE-2026-1111  Urgent
     CVE-2026-2222  High
-  linux-virt  6.18.54-r0 -> 6.18.55-r0
+  linux-werewolf  7.2.10-r1 -> 7.2.11-r1
     CVE-2026-52988  High
 
 The new slot is already installed. This reboot switches to it.
