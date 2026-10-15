@@ -112,7 +112,7 @@ Darwin)
 	system="macOS $(sw_vers -productVersion)"
 	pm=brew
 	install="brew install"
-	pkgs="apko melange crane lima qemu zstd zig mtools e2fsprogs osslsigncode"
+	pkgs="apko melange crane lima qemu swtpm zstd zig mtools e2fsprogs osslsigncode"
 	apko_pkgs=apko
 	zig_pkgs=zig
 	# Homebrew's erofs-utils has no zstd, so build it into Homebrew's
@@ -176,7 +176,7 @@ Linux)
 		pm=dnf
 		install="dnf install -y"
 		pkgs="curl make xz zstd bsdtar erofs-utils e2fsprogs mtools qemu-img expect netcat osslsigncode
-			python3-pip systemd-container bubblewrap $qemu"
+			python3-pip swtpm systemd-container bubblewrap $qemu"
 		apko_pkgs=curl
 		zig_pkgs="curl xz"
 		erofs_deps="autoconf automake libtool pkgconf-pkg-config gcc lz4-devel libzstd-devel

@@ -550,7 +550,9 @@ fn rootErofs(b: *B, target: []const u8, rootfs: []const u8, overlay: []const u8)
         error.Form => return b.steps.fail(f.text),
         else => |e| return e,
     };
-    for (pruned) |p| try argv.appendSlice(b.gpa, &.{ "--exclude", p });
+    // libarchive otherwise matches at any path component: pruning the host's
+    // usr/bin/bash must not remove an OCI service's own interpreter as well.
+    for (pruned) |p| try argv.appendSlice(b.gpa, &.{ "--exclude", try b.path("^{s}", .{p}) });
     try argv.appendSlice(b.gpa, &.{
         try b.path("@{s}", .{mtree}),
         try b.path("@{s}", .{rootfs}),

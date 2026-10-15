@@ -44,9 +44,9 @@ name every option that is on, one per line with its reason. `make config` runs
 `make KCONFIG_ALLCONFIG=<fragments> allnoconfig`, so nothing unnamed is on, then checks
 that each line held (an unmet dependency fails its line and is added, visibly) and that
 `config/deny.cfg`, what no `select` may bring back, holds. The result is committed as
-`config/ARCH.config`, the build's input byte for byte; `olddefconfig` must not change
-it. A new series adds its options off. Alpine's `virt` config seeded the first list and
-stays a report, `make compare`, never an input.
+`config/ARCH.config`; the build re-applies it with `allnoconfig` and stops if any option
+but a toolchain probe differs. A new series adds its options off. Alpine's `virt` config
+seeded the first list and is never an input.
 
 | On, by need | Options |
 | --- | --- |
@@ -115,6 +115,6 @@ different build, refused by Secure Boot and the updater. Mitigations stay `auto`
 
 Every provider boot is a gate: QEMU on both arches in the kernel repository's CI before
 publication, werewolf's provider A/B tests before a release picks the kernel up. Drift
-fails closed: a fragment line that stops holding, a config `olddefconfig` would change,
-a series kernel.org has ended. A published APK is never replaced; A/B slots keep the
+fails closed: a fragment line that stops holding, a re-applied config that differs, a
+series kernel.org has ended. A published APK is never replaced; A/B slots keep the
 previous kernel. `PANIC_ON_OOPS` and `PANIC_TIMEOUT=10` reboot a wedged kernel.

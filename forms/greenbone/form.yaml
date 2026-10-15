@@ -101,7 +101,6 @@ services:
     nofile: 8192
     env:
       - GSAD_MANAGER_UNIX_SOCKET=/run/manager.sock
-      - GSAD_DROP_PRIVILEGES=0
       - GSAD_DO_CHROOT=0
       - GSAD_HTTP_ONLY=1
       - GSAD_FOREGROUND=1

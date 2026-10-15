@@ -32,7 +32,7 @@
       "source": "driver.zig",
       "mode": "policy",
       "user": "postgres",
-      "pledge": "stdio rpath wpath proc exec",
+      "pledge": "stdio rpath wpath inet proc exec",
       "read": ["/etc/sv/postgres/service", "/run/svc/postgres"],
       "connect": [],
       "run": ["/usr/lib/werewolf/sh-shim", "/usr/lib/werewolf/test-postgres-policy"],

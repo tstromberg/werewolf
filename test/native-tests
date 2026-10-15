@@ -73,14 +73,7 @@ def write(path, data):
         path.write_text(data)
 
 
-def prepare(form, arch):
-    plan = read_plan(form)
-    work = Path('build/native-tests') / arch / form
-    generated = work / ('native-test-' + form)
-    root = generated / 'rootfs'
-    # This directory is exclusively generated test output; clear stale drivers.
-    if generated.exists():
-        shutil.rmtree(generated)
+def form_config(form, plan):
     excuses = call('build/host/form', 'excuses', form, capture_output=True, text=True).stdout
     yaml = 'base: ' + form + '\npackages: ' + json.dumps(plan['packages']) + '\n'
     # check metadata is not inherited by generated forms. Preserve the real
@@ -94,13 +87,25 @@ def prepare(form, arch):
             elif value == 'true':
                 check_settings['offline'] = True
     if check_settings:
-        yaml += 'check: ' + json.dumps(check_settings) + '\n'
+        yaml += 'check:\n' + ''.join('  ' + key + ': ' + json.dumps(value) + '\n'
+                                    for key, value in check_settings.items())
     if excuses.strip():
         yaml += 'weaknesses:\n'
         for line in excuses.splitlines():
             key, reason = line.split(' ', 1)
             yaml += '  ' + key + ': ' + json.dumps(reason) + '\n'
-    write(generated / 'form.yaml', yaml)
+    return yaml
+
+
+def prepare(form, arch):
+    plan = read_plan(form)
+    work = Path('build/native-tests') / arch / form
+    generated = work / ('native-test-' + form)
+    root = generated / 'rootfs'
+    # This directory is exclusively generated test output; clear stale drivers.
+    if generated.exists():
+        shutil.rmtree(generated)
+    write(generated / 'form.yaml', form_config(form, plan))
     write(root / 'usr/share/werewolf/test-image', 'werewolf-native-tests/1\n')
     compile_dir = work / 'compile'
     write(compile_dir / 'stage.zig', Path('test/native/stage.zig').read_text())
@@ -243,7 +248,8 @@ def run(form, arch, qemu):
             call(os.environ['HOWL'], 'pack', '--build', '--with', form, '--config', config, '-o', packed,
                  stdout=output, stderr=subprocess.STDOUT)
         console = work / 'console'
-        write(console, 'seen native-completed werewolf-test: .*"event":"complete"\n')
+        write(console, 'seen native-completed werewolf-test: .*"event":"complete"\n'
+                       'unseen native-failures werewolf-test: .*"status":"fail"\n')
         log = work / (phase + '.log')
         call('test/boot', form + '-native-' + phase, console, log, *qemu,
              '-kernel', os.environ['KERNEL'], '-initrd', os.environ['OUT'] + '/initramfs.zst',
@@ -253,8 +259,12 @@ def run(form, arch, qemu):
         count = validate(log.read_text(errors='replace'), plan, context)
         results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
         print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
+    output = Path(os.environ['OUT'])
     write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,
-        image=hashlib.sha256(Path(os.environ['OUT'], 'initramfs.zst').read_bytes()).hexdigest(), phases=results))
+        profile='local-qemu',
+        image=hashlib.sha256((output / 'initramfs.zst').read_bytes()).hexdigest(),
+        production_image=hashlib.sha256((output.parent / form / 'initramfs.zst').read_bytes()).hexdigest(),
+        plan=hashlib.sha256((Path('forms') / form / 'test/native.json').read_bytes()).hexdigest(), phases=results))
 
 
 if __name__ == '__main__':
