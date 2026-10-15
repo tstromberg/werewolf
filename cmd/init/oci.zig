@@ -202,6 +202,13 @@ fn shareMounts(m: *Machine, shares: []const Share, roots: []const Root) void {
             say("oci: {s}: {s} is not a root", .{ s.host, s.name });
             continue;
         };
+        // A writable parent (gvmd's /var/lib/gvm, for example) hides the
+        // image's empty mount points. Recreate only directories, walking by
+        // descriptor so persistent data cannot redirect init through a link.
+        mountTarget(m.z(at.dir), s.image, at.ids) catch |err| {
+            say("oci: {s}{s}: mount point: {s}", .{ at.dir, s.image, @errorName(err) });
+            continue;
+        };
         m.mount(&.{ "--bind", m.z(s.host), m.fmt("{s}{s}", .{ at.dir, s.image }) });
     }
     // No service has started yet. Close traversal before handover, then
@@ -215,6 +222,79 @@ fn shareMounts(m: *Machine, shares: []const Share, roots: []const Root) void {
         const n = extraWriters(shares, roots, s.host, owner, &extra);
         if (n > 0) shareAcl(m.z(s.host), extra[0..n]);
     }
+}
+
+fn mountTarget(root_dir: [:0]const u8, path: []const u8, ids: phase_config.Ids) !void {
+    const opened = linux.open(
+        root_dir,
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(opened) != .SUCCESS) return error.OpenRoot;
+    var parent: i32 = @intCast(opened);
+    defer _ = linux.close(parent);
+    var parts = std.mem.tokenizeScalar(u8, path, '/');
+    while (parts.next()) |part| {
+        if (part.len > 255 or std.mem.eql(u8, part, ".") or
+            std.mem.eql(u8, part, "..")) return error.InvalidPath;
+        var name: [256]u8 = undefined;
+        @memcpy(name[0..part.len], part);
+        name[part.len] = 0;
+        const z = name[0..part.len :0];
+        var next = linux.openat(
+            parent,
+            z,
+            .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(next) == .NOENT) {
+            if (linux.errno(linux.mkdirat(
+                parent,
+                z,
+                0o755,
+            )) != .SUCCESS) return error.CreateMountPoint;
+            next = linux.openat(
+                parent,
+                z,
+                .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true },
+                0,
+            );
+            if (linux.errno(next) != .SUCCESS) return error.OpenMountPoint;
+            if (linux.errno(linux.fchown(@intCast(next), ids.uid, ids.gid)) != .SUCCESS) {
+                _ = linux.close(@intCast(next));
+                return error.OwnMountPoint;
+            }
+        } else if (linux.errno(next) != .SUCCESS) return error.UnsafeMountPoint;
+        _ = linux.close(parent);
+        parent = @intCast(next);
+    }
+}
+
+test "shared mount points survive writable parents without following data symlinks" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "var/lib/gvm");
+    try tmp.dir.createDirPath(io, "outside");
+    const root_path = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(root_path);
+    const root_z = try gpa.dupeZ(root_path);
+    defer gpa.free(root_z);
+    const ids: phase_config.Ids = .{ .uid = linux.getuid(), .gid = linux.getgid() };
+    try mountTarget(root_z, "/var/lib/gvm/scap-data", ids);
+    try tmp.dir.access(io, "var/lib/gvm/scap-data", .{});
+    try tmp.dir.symLink(io, "../../../outside", "var/lib/gvm/link", .{});
+    try std.testing.expectError(
+        error.UnsafeMountPoint,
+        mountTarget(root_z, "/var/lib/gvm/link/created", ids),
+    );
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "outside/created", .{}));
+    try std.testing.expectError(
+        error.InvalidPath,
+        mountTarget(root_z, "/var/lib/gvm/../escaped", ids),
+    );
 }
 
 /// ownerOf returns the first service that writes host, or null.

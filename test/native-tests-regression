@@ -68,6 +68,15 @@ class Protocol(unittest.TestCase):
 
 
 class Plans(unittest.TestCase):
+    def test_generated_form_preserves_real_check_budget_and_weaknesses(self):
+        with tempfile.TemporaryDirectory() as temp:
+            generated = Path(temp) / 'native-test-greenbone'
+            native.write(generated / 'form.yaml', native.form_config('greenbone', native.read_plan('greenbone')))
+            for verb, rest in [('check', ['memory']), ('weaknesses', [])]:
+                expected = native.call('build/host/form', verb, 'greenbone', *rest, capture_output=True).stdout
+                actual = native.call('build/host/form', verb, generated, *rest, capture_output=True).stdout
+                self.assertEqual(actual, expected)
+
     def test_greenbone_keeps_legacy_and_uses_existing_oci_accounts(self):
         plan = native.read_plan('greenbone')
         self.assertTrue(plan['legacy'])

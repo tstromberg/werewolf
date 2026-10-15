@@ -51,7 +51,18 @@ pub fn deadline(io: Io, seconds: i64) Io.Timeout {
 /// Read both tables: an unreadable table must fail, never prove no listener.
 pub fn tcpPrivate(io: Io, gpa: std.mem.Allocator, port: u16, allow_loopback: bool) !bool {
     for ([_][]const u8{ "/proc/net/tcp", "/proc/net/tcp6" }) |path| {
-        const table = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
+        const table = Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20)) catch |err| {
+            if (err != error.FileNotFound or !std.mem.endsWith(u8, path, "tcp6")) return err;
+            // ipv6.disable=1 can leave TCPv6 in the protocol registry despite
+            // rejecting IPv6 sockets. Require that specific kernel refusal;
+            // a permission failure must not masquerade as an absent stack.
+            const linux = std.os.linux;
+            const fd = linux.socket(linux.AF.INET6, linux.SOCK.STREAM | linux.SOCK.CLOEXEC, 0);
+            const why = linux.errno(fd);
+            if (why == .SUCCESS) _ = linux.close(@intCast(fd));
+            if (why != .AFNOSUPPORT) return error.UnobservableTcp6;
+            continue;
+        };
         defer gpa.free(table);
         if (!privateTable(table, port, allow_loopback)) return false;
     }

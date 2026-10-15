@@ -35,7 +35,7 @@ fi
 # then the claim.
 roottar() {
 	set -f --
-	for p in $PRUNE; do set -- "$@" --exclude "$p"; done
+	for p in $PRUNE; do set -- "$@" --exclude "^$p"; done
 	set +f
 	"$TAR" -cf "$dir/root.tar" --uid 0 --gid 0 --numeric-owner "$@" \
 		"@$dir/root.mtree" "@$OUT/rootfs.tar" "@$OUT/overlay.tar" "@$dir/claim.tar"

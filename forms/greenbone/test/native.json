@@ -8,7 +8,7 @@
       "source": "driver.zig",
       "mode": "manager",
       "user": "_oci-gvmd",
-      "pledge": "stdio rpath unix connect",
+      "pledge": "stdio rpath inet unix connect",
       "read": ["/run/svc/gvmd/run"],
       "connect": ["/run/svc/gvmd/run/gvmd.sock"],
       "run": [],
