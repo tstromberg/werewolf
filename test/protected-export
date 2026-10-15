@@ -134,19 +134,40 @@ class ProtectedExport(unittest.TestCase):
     def test_github_draft_carries_all_assets_and_exact_workflow_commit(self):
         with patch.dict(os.environ, dict(self.environment, GITHUB_OUTPUT=str(self.work / 'outputs'))), \
              patch.object(github, 'command') as run:
-            tag = github.draft(self.copy, self.bundle, self.report, 'qemu', self.trust)
+            tag = github.draft([(self.copy, self.bundle, self.report, 'qemu')], self.trust)
         argv = run.call_args.args[0]
         self.assertIn('--draft', argv)
         self.assertEqual('a' * 40, argv[argv.index('--target') + 1])
         self.assertEqual({str(path.resolve()) for path in self.copy.iterdir()}, set(argv[-len(list(self.copy.iterdir())):]))
+        self.assertEqual('protected-' + self.manifest['image']['serial'], tag)
         self.assertEqual('tag=' + tag + '\n', (self.work / 'outputs').read_text())
 
     def test_github_never_uploads_extra_or_tampered_files(self):
         (self.copy / 'private.key').write_bytes(b'must never upload')
         with patch.object(github, 'command') as run:
             with self.assertRaisesRegex(ValueError, 'unexpected files'):
-                github.draft(self.copy, self.bundle, self.report, 'qemu', self.trust)
+                github.draft([(self.copy, self.bundle, self.report, 'qemu')], self.trust)
+            with self.assertRaisesRegex(ValueError, 'one workflow run'):
+                github.draft([], self.trust)
             run.assert_not_called()
+
+    def test_signed_extras_are_mirrored_and_unknown_extras_refuse(self):
+        notes = self.work / 'notes.html'
+        notes.write_text('<p>release notes</p>')
+        with patch.object(publisher.preparation.downloads, 'native', return_value=self.manifest), \
+             patch.dict(os.environ, self.environment):
+            signed = exporter.export('howl', self.bundle, self.report, 'qemu', self.work / 'extras', self.trust,
+                                     publisher.preparation, {'release-notes.html': notes})
+            self.assertEqual(notes.read_bytes(), (self.work / 'extras' / (self.prefix + '-release-notes.html')).read_bytes())
+            self.assertIn('release-notes.html', signed['files'])
+            plan = publisher.publish('howl', self.bundle, self.report, 'qemu',
+                publisher.Store(str(self.work / 'store')), self.trust, release_assets=self.work / 'extras')
+            objects = self.work / 'store/playground/qemu/x86_64/objects' / plan['descriptor']
+            self.assertEqual(notes.read_bytes(), (objects / 'release-notes.html').read_bytes())
+            with self.assertRaisesRegex(ValueError, 'unexpected release extras'):
+                exporter.export('howl', self.bundle, self.report, 'qemu', self.work / 'refused', self.trust,
+                                publisher.preparation, {'private.key': notes})
+        self.assertFalse((self.work / 'refused').exists())
 
 
 if __name__ == '__main__':

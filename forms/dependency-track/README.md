@@ -1,16 +1,23 @@
 # Dependency-Track - Hardened VM
 
-A bill-of-materials server: [Dependency-Track](https://dependencytrack.org) 4.14, the bundled UI and API, behind Caddy, with PostgreSQL. The form's manifest is [form.yaml](form.yaml).
+A bill-of-materials server: [Dependency-Track](https://dependencytrack.org) 4.14, the
+bundled UI and API, behind Caddy, with PostgreSQL. The form's manifest is
+[form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/dependency-track/index.html).
 
 ## Security Posture
 
 - The API listens on loopback. Caddy is what the network sees.
-- The published `admin` / `admin` password is replaced from the config before Caddy opens.
+- The published `admin` / `admin` password is replaced from the config before Caddy
+  opens.
 - PostgreSQL takes one role, over loopback, and only this service may connect.
 
 ### Weaknesses
 
-- Java runs Dependency-Track, and the JVM compiles it as it runs. Both are named in `form.yaml`.
+- Java runs Dependency-Track, and the JVM compiles it as it runs. Both are named in
+  `form.yaml`.
 
 ## Getting Started
 
@@ -22,7 +29,9 @@ howl create dependency-track --with dependency-track \
 	--domain bom.home.arpa --admin-password admin-password
 ```
 
-Open `https://bom.home.arpa` and sign in as `admin`. The password is in `admin-password`. Give the machine 3 GB. Projects and uploads are in [Dependency-Track's documentation](https://docs.dependencytrack.org/).
+Open `https://bom.home.arpa` and sign in as `admin`. The password is in
+`admin-password`. Give the machine 3 GB. Projects and uploads are in [Dependency-Track's
+documentation](https://docs.dependencytrack.org/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -36,7 +45,8 @@ Sign in at `https://bom.example.com`. There is no anonymous upload.
 
 ### Importing data
 
-The database starts empty. Upload a bill of materials through the API. This form does not import a database dump.
+The database starts empty. Upload a bill of materials through the API. This form does
+not import a database dump.
 
 ### Known Quirks
 

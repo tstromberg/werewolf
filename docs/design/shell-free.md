@@ -40,10 +40,10 @@ busybox `sh` in every image. Removing it matters because:
 
 ## Detailed design
 
-**Programs for scripts.** Each script became a small Zig program in cmd/:
-runit's three stages (`runit-stage`, under three names), `reboot`,
-`slot-keep`, `power-button`, `debug-shell`, `ssh-host-key`, and
-`mount`, since busybox's cannot set `noexec`. init ends in `exec fence runit`, so runit stays PID 1.
+**Programs for scripts.** Each script became a small Zig program in cmd/: runit's three
+stages (`runit-stage`, under three names), `reboot`, `slot-keep`, `power-button`,
+`debug-shell`, `ssh-host-key`, and `mount`, since busybox's cannot set `noexec`. init
+ends in `exec fence runit`, so runit stays PID 1.
 
 **`sh -c` without a shell.** A program that insists on one (supercronic, a
 library's `system`) gets sh-shim from the `sh-shim` form: it runs one

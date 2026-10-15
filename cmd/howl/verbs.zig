@@ -375,36 +375,11 @@ pub fn show(io: Io, gpa: Allocator, text: []const u8) !void {
     try out.writeStreamingAll(io, if (out.isTty(io) catch false) try inert(gpa, text) else text);
 }
 
-/// inert returns text that is safe to print to a terminal: valid UTF-8 with
-/// no control characters but newline and tab (no C0, DEL or C1), so a
-/// machine's output cannot send the terminal an escape sequence. Bytes that
-/// are not valid UTF-8 are dropped too: a lone 0x9b is CSI to a terminal
-/// that reads 8-bit controls.
+/// inert returns a copy of text that is safe to print to a terminal
+/// (howl.inert), so a machine's output cannot send it an escape sequence.
 fn inert(gpa: Allocator, text: []const u8) ![]const u8 {
-    var out: std.ArrayList(u8) = try .initCapacity(gpa, text.len);
-    var i: usize = 0;
-    while (i < text.len) {
-        const n = std.unicode.utf8ByteSequenceLength(text[i]) catch {
-            i += 1;
-            continue;
-        };
-        if (n > text.len - i) break;
-        const seq = text[i..][0..n];
-        if (!std.unicode.utf8ValidateSlice(seq)) {
-            i += 1;
-            continue;
-        }
-        i += n;
-        const c = seq[0];
-        // C1 controls, U+0080 to U+009F, are 0xc2 0x80 to 0xc2 0x9f.
-        const control = switch (n) {
-            1 => (c < 0x20 and c != '\n' and c != '\t') or c == 0x7f,
-            2 => c == 0xc2 and seq[1] <= 0x9f,
-            else => false,
-        };
-        if (!control) out.appendSliceAssumeCapacity(seq);
-    }
-    return out.toOwnedSlice(gpa);
+    const out = try gpa.dupe(u8, text);
+    return gpa.realloc(out, howl.inert(out).len);
 }
 
 test inert {

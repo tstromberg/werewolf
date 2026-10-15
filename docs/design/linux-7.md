@@ -14,12 +14,12 @@ for Landlock rules 6.18 lacks: which UNIX sockets a service may reach
 ## Background
 
 leash holds each service to its files, TCP ports and system calls
-([cmd/leash](../../cmd/leash/README.md)). A socket file is the gap:
-Landlock does not check `connect()` to one, so only the directory's mode
-(`share`) stands between services. Linux 7.1 added
+([cmd/leash](../../cmd/leash/README.md)). A socket file is the gap: Landlock does not
+check `connect()` to one, so only the directory's mode (`share`) stands between
+services. Linux 7.1 added
 [`LANDLOCK_ACCESS_FS_RESOLVE_UNIX`](https://docs.kernel.org/userspace-api/landlock.html):
-a socket outside the domain is reached only beneath a rule granting it,
-and a refusal is `EACCES`. Alpine ships 7.x only as `community/linux-stable`.
+a socket outside the domain is reached only beneath a rule granting it, and a refusal is
+`EACCES`. Alpine ships 7.x only as `community/linux-stable`.
 
 ## Goals
 
@@ -62,8 +62,9 @@ undeclared socket, and nginx served php through its declared one.
   10-06, missing 7.1.6–7.1.13 past 7.1's end of life, and 7.2.0–7.2.8),
   and 48 days before that. `linux-lts` takes each 6.18 point release within
   a day. Neither tracks secfixes, so the CVE tiers learn nothing from Alpine.
-- **Churn.** 7.2 reaches end of life about two weeks after 7.3 ships (mid
-  November 2026): a new series every 9–10 weeks, where 6.18's support is projected to run to 2028.
+- **Churn.** 7.2 reaches end of life about two weeks after 7.3 ships (mid November
+  2026), where 6.18's support is projected to run to 2028: a new series every 9–10
+  weeks.
 - **Weight.** No virt flavor: 2,705 options built in against 1,590 (arm64),
   a 42 MB kernel against 36 MB, and Hyper-V's modules on every boot until
   stage0 learned DMI.

@@ -2,119 +2,118 @@
 
 ## Summary
 
-`howl run` downloads the latest authenticated protected image and deploys it through Lima on macOS.
-`--build` builds from source and uses the caller's signing credentials, managed locally if absent.
-Secure deployment is the default; incomplete providers and missing protection fail closed.
-Status: importer, dedicated trust, cached downloader and candidate CI implemented; default wiring remains gated.
+`howl run` downloads the latest authenticated protected image and deploys it through
+Lima on macOS; `--build` builds from source with the caller's signing credentials,
+managed locally if absent. Secure deployment is the default; incomplete providers and
+missing protection fail closed. Status: importer, dedicated trust, cached downloader
+and candidate CI implemented; default wiring remains gated.
 
 ## Background
 
-The current local source-build profile requires `--build`; protected downloads remain gated.
-New roots obtain machine authority from firmware and TLS trust from signed config.
-Source builds use per-machine channels; imported bundles now share a declared local channel.
-The [download design](protected-downloads.md) covers dedicated trust, cache floors and publication evidence.
-Kernel/module cold-build reproducibility passed on x86_64; both architectures passed module enforcement.
-The [boot bundle design](boot-images.md) adds shared artifact enrollment and a multiplexed host issuer.
-The existing release workflow signs stock Alpine disks; it does not publish this complete profile.
-Downloading such a disk alone would omit IPE and protected release retirement.
+New roots take machine authority from firmware and TLS trust from signed config; source
+builds use per-machine channels, imported bundles a declared local one. The [download
+design](protected-downloads.md) covers dedicated trust, cache floors and publication
+evidence, the [boot bundle design](boot-images.md) shared artifact enrollment and a
+multiplexed host issuer. The legacy release workflow signs stock Alpine disks, which
+omit IPE and protected release retirement, so it does not publish this profile.
 
 ## Goals
 
-- Boot downloaded images without a kernel compile, local image composition or publisher private key.
-- Keep Lima ahead of raw QEMU on macOS; use its QEMU backend for enrolled firmware and persistent TPM.
-- Preserve exact-pair A/B updates, operator rollback, failed-trial fallback and interrupted retirement.
-- Authenticate published code separately from the user's machine enrollment and recovery authority.
-- Refuse mismatched keys, incompatible profiles and missing TPM state without changing trust.
-- Publish only artifacts tested through the same first-run and update paths users invoke.
+Boot downloaded images without a kernel compile, local image composition or publisher
+private key, through Lima on macOS (its QEMU backend gives enrolled firmware and a
+persistent TPM). Preserve exact-pair A/B updates, operator rollback, failed-trial
+fallback and interrupted retirement. Authenticate published code apart from the user's
+machine enrollment and recovery authority; refuse mismatched keys, profiles and missing
+TPM state without changing trust. Publish only artifacts tested as users run them.
 
 ## Non-Goals
 
-- Protect against a Mac administrator restoring the complete VM and virtual TPM together.
-- Fall back to VZ, an unprotected image or source compilation when a download fails.
-- Build custom applications without an explicit `--build` or a separately published application channel.
-- Export private host signing or TPM hierarchy credentials to the workload or build helper.
+Protecting against a Mac administrator who restores VM and virtual TPM together;
+falling back to VZ, an unprotected image or a source build when a download fails;
+building custom applications without `--build` or a published application channel;
+exporting private host signing or TPM credentials to the workload or builder.
 
 ## Detailed design
 
 ### Two invocation modes
 
-Without `--build`, resolve a published form, authenticate its latest manifest with a pinned public key,
-and download the exact signed disk and boot certificate. Verify every size and hash before enrollment.
-An application, local form or changed image declaration requires `--build`; never silently compose it.
-Persist the authenticated serial/build floor and reject replay, serial reuse and incompatible architecture.
-With `--build`, honor `WEREWOLF_BOOT_KEY`/`WEREWOLF_BOOT_CRT` and the complete IPE override tuple.
-When credentials are absent, create a private local identity once and retain it for subsequent updates.
-Credential loss, mismatch or partial state requires inspection; no implicit rotation or TPM re-enrollment.
+Without `--build`, resolve a published form, authenticate its latest manifest with a
+pinned public key, download the exact signed disk and boot certificate, and verify every
+size and hash before enrollment; persist the authenticated serial and build floor, and
+reject replay, serial reuse and another architecture. An application, local form or
+changed image declaration requires `--build`, never silent composition. `--build` honors
+`WEREWOLF_BOOT_KEY`/`WEREWOLF_BOOT_CRT` and the complete IPE override tuple, or makes a
+private local identity once and keeps it; credential loss, mismatch or partial state
+requires inspection, not implicit rotation or re-enrollment.
 
 ### Published code trust
 
-Create a dedicated protected-image boot certificate, separate from the legacy release certificate.
-Legacy valid signatures must not authorize a kernel that omits mandatory IPE or TPM checks.
-Use that dedicated certificate for the published loader and UKIs; pin its identity in howl.
-Build the IPE kernel with a stable public policy authority and a pinned measured EFI stub.
-Every protected root must require Secure Boot, IPE, verified root and protocol-v2 TPM authorization.
-Vendor signatures authenticate code and the update manifest; artifact hashes bind the complete slot.
-The signed UKI supplies the measured release identity. All deployments of that artifact use that identity.
-No publisher private key is downloaded or generated by a consumer.
+A dedicated protected-image boot certificate, separate from the legacy release
+certificate, signs the published loader and UKIs, and howl pins its identity; a legacy
+signature must not authorize a kernel that omits mandatory IPE or TPM checks. The IPE
+kernel has a stable public policy authority and a pinned measured EFI stub, and every
+protected root requires Secure Boot, IPE, a verified root and protocol-v2 TPM
+authorization. Vendor signatures authenticate code and the update manifest, artifact
+hashes bind the whole slot, and the signed UKI supplies the shared release identity.
 
 ### Machine authority outside the published root
 
-The explicit `2-firmware` enrollment mode leaves existing embedded-key roots unchanged.
-It reads the single authenticated firmware Platform Key as its TPM permit authority.
-Howl installs a unique machine owner certificate as PK/KEK, and the code certificate in db.
-PK/KEK authorize firmware administration; db authorizes execution. They serve different purposes.
-Firmware must start outside setup mode with exactly the intended trust, with no default third-party keys.
-Stage0 reads bounded EFI signature-list/X.509 data before workloads and refuses ambiguous or missing keys.
-Host-side provisioning defines the exact NV policy for that public machine key and signs its factory record.
-The random nonce, factory journal and reset credentials remain machine-specific; NV never becomes generic.
-Boot still requires an actual nonzero PCR, authenticated journal, protected hierarchy and exact authorized pair.
-New source builds use this mode and signed transport; the downloaded-image consumer remains gated.
+The explicit `2-firmware` enrollment mode leaves embedded-key roots unchanged and reads
+the single authenticated firmware Platform Key as its TPM permit authority: howl
+installs a unique machine owner certificate as PK/KEK, which administer firmware, and
+the code certificate in db, which authorizes execution. Firmware must start outside
+setup mode with exactly that trust; stage0 reads bounded EFI signature-list data before
+workloads and refuses ambiguous or missing keys. Host-side provisioning defines the NV
+policy for that public machine key and signs its factory record; the nonce, journal and
+reset credentials stay machine-specific, and boot still requires a nonzero PCR, an
+authenticated journal, a protected hierarchy and the exact pair.
 
 ### Update transport and retirement
 
-The published root pins its vendor image channel and manifest key independently of the machine permit key.
-Separate image fetching from the host permit endpoint; configuration cannot authorize code or reset NV.
-Permit requests retain the machine nonce, candidate identity, protected predecessor and actual retained PCR.
-The local authority must authenticate vendor manifests and release/PCR mappings before signing a transition.
-The [signed transport declaration](machine-transport.md) binds TLS trust to the authenticated machine nonce.
-Multiple Lima guests need a shared host listener or declared isolated listeners; avoid implicit port widening.
-Immutable host/port declarations bound the endpoint; signed config cannot widen them or change code trust.
-Commit retains both releases. Replacement retires only the inactive one; a completed extension is not repeated.
-Operator rollback and unhealthy-trial fallback use the same retained authorization without lowering the floor.
+The published root pins its vendor image channel and manifest key independently of the
+machine permit key; image fetching is separate from the host permit endpoint, and
+configuration cannot authorize code or reset NV. Permit requests carry the machine
+nonce, candidate identity, protected predecessor and retained PCR; the local authority
+authenticates vendor manifests and release/PCR mappings before signing a transition,
+and the [signed transport declaration](machine-transport.md) binds TLS trust to the
+nonce. Several Lima guests share a host listener or declare isolated ones; immutable
+host/port declarations bound the endpoint, which signed config cannot widen. Commit
+retains both releases, replacement retires only the inactive one, once, and rollback
+and unhealthy-trial fallback reuse that authorization without lowering the floor.
 
 ### Publication gates
 
-Include playground alongside production forms so the default command has a published boot disk.
-Compile pinned IPE kernels and measured stubs in CI; cache by source, architecture and public signer bytes.
-Run both independent builds with the same stable keys and metadata; compare the signed artifacts exactly.
-Materialize CI PEM secrets into private temporary files and verify their public certificate before building.
-Fix PE signing time deterministically; never stamp signatures with runner wall-clock time.
-Test firmware authentication, missing TPM, wrong enrollment, tampering and complete A/B lifecycle on artifacts.
-Upload immutable objects before signed heads. Refuse missing keys and never publish an unsigned substitute.
-Only after those gates pass should the consumer accept the protected profile as its default download.
+Playground is published too, so the default command has a disk. CI compiles pinned IPE
+kernels and measured stubs, cached by source, architecture and public signer bytes;
+builds twice with the same stable keys and metadata and compares the signed artifacts
+exactly; keeps PEM secrets in private temporary files, verified against their
+certificate first; fixes PE signing time; tests firmware authentication, a missing TPM,
+wrong enrollment, tampering and the complete A/B lifecycle on the artifacts; and uploads
+immutable objects before signed heads. Missing keys refuse; nothing unsigned is
+published. Only after these gates pass does the consumer take the profile as default.
 
 ## Drawbacks
 
-- Portable machine enrollment adds a firmware trust parser and a second signing authority to audit.
-- Production needs a dedicated protected-image signing identity and protected CI secrets.
-- Host permit publication remains an availability dependency even when code comes from a vendor channel.
+Portable machine enrollment adds a firmware trust parser and a second signing authority
+to audit; production needs a dedicated signing identity and protected CI secrets; host
+permit publication stays an availability dependency.
 
 ## Alternatives Considered
 
-- Sharing a publisher private key with clients or guests defeats code authentication.
-- Baking a unique machine key into each root requires a source build for every consumer.
-- Reusing legacy boot trust authorizes older signed kernels without mandatory enforcement.
-- Removing TPM retirement makes retired code bootable and loses the current protected update property.
+Sharing a publisher private key with clients or guests defeats code authentication.
+Baking a unique machine key into each root requires a source build for every consumer.
+Reusing legacy boot trust authorizes older signed kernels without mandatory
+enforcement, and dropping TPM retirement makes retired code bootable again.
 
 ## Security Considerations
 
-Firmware enrollment, measured code identity and NV authorization must agree before workload handover.
-Changes to key sourcing require tests for setup mode, foreign/duplicate PKs, legacy db entries and key substitution.
-Mutable config, a mirror or a compromised guest must not choose a new signer or authorize retired history.
-Keep all source-build and downloaded-image failures explicit; an available image is not proof of protection.
+Firmware enrollment, measured code identity and NV authorization must agree before
+workload handover; key sourcing changes need tests for setup mode, foreign and duplicate
+PKs, legacy db entries and key substitution. Mutable config, a mirror or a compromised
+guest must not choose a new signer or authorize retired history.
 
 ## Reliability Considerations
 
-Test a fresh Mac/cache with no Ubuntu helper, retained-authority restart and missing-state refusal.
-Test multiple Lima guests, publisher restart, interrupted downloads and publication ordering.
-Repeat the existing real VM/TPM cut tests and A/B rollback matrix for both invocation modes.
+Test a fresh Mac and cache with no Ubuntu helper, retained-authority restart,
+missing-state refusal, several Lima guests, publisher restart, interrupted downloads,
+publication ordering, and the real VM/TPM cut tests and A/B matrix in both modes.

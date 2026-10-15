@@ -127,7 +127,9 @@ lima_home = Path(tempfile.mkdtemp(prefix='ww-published-lifecycle-', dir='/tmp'))
 roots = work / 'mirror-roots.pem'
 system_ca = ssl.get_default_verify_paths().cafile
 roots.write_bytes((Path(system_ca).read_bytes() if system_ca else b'') + b'\n' + ca.read_bytes())
-env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(roots),
+# The consumer's howl data stays here too: a self-hosted runner's own is
+# never read or written.
+env = dict(os.environ, LIMA_HOME=str(lima_home), SSL_CERT_FILE=str(roots), XDG_DATA_HOME=str(consumer / 'data'),
            WEREWOLF_BOOT_MIRROR='https://127.0.0.1:%d' % server.server_port,
            PATH=str(wrappers) + os.pathsep + os.environ['PATH'], PYTHONDONTWRITEBYTECODE='1')
 for name in ('WEREWOLF_BOOT_KEY', 'WEREWOLF_BOOT_CRT', 'WEREWOLF_IPE_KEY', 'WEREWOLF_IPE_CRT',

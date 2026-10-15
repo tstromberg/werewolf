@@ -1,16 +1,15 @@
 # Service VMs in Lima, GCP and AWS
 
-Use this with the [Tailscale](../forms/tailscale/README.md) tutorial; the [bastion](../forms/bastion/README.md) needs no boot configuration.
-Those tutorials set `FORM`, `VM` and `CONFIG_DIR`, and explain
-which files to create. Run commands from the repository root.
-
+Use this with the [Tailscale](../forms/tailscale/README.md) tutorial; the
+[bastion](../forms/bastion/README.md) needs no boot configuration. Those
+tutorials set `FORM`, `VM` and `CONFIG_DIR`, and say which files to create;
+run the commands from the repository root.
 The form declares packages, accounts, service restrictions and network
-policy. Boot configuration carries destinations/routes and instance credentials. Keeping those inputs
-separate lets several VMs use the same image with different keys.
-
-Install the [build tools](../examples/README.md#build-host). For the local
-case, install [Lima](https://lima-vm.io/docs/installation/) on macOS. The
-commands below use its VZ driver and your Mac's native architecture:
+policy; the boot configuration carries what differs per machine, routes
+and credentials ([cloud.md](cloud.md)), so one image serves several VMs.
+Install the [build tools](../examples/README.md#build-host) and, for the
+local case, [Lima](https://lima-vm.io/docs/installation/) on macOS. The
+commands use Lima's VZ driver and your Mac's native architecture:
 
 ```sh
 export ARCH=$(uname -m | sed 's/arm64/aarch64/')
@@ -22,14 +21,11 @@ make howl
 build/host/howl pack --with "$FORM" -o "$SERVICE_BUILD/config.tar" --config "$CONFIG_DIR"
 ```
 
-`howl pack` checks the directory against what the form declares
-before it writes anything: a missing key, or a destination or route the
-VM would refuse, fails here and names the file. It lists the targets the
-tar fits; cloud metadata limits the config to 32 files of at most 32 KiB,
-and AWS's user data to 16 KiB. `howl pack --with "$FORM" -h` lists the
-form's files and settings, which can also be given as flags. The tar
-contains secrets. Keep it private and out of Git. Base64 is an encoding,
-not encryption.
+`howl pack` checks the directory against what the form declares before it
+writes anything: a missing key, or a route the VM would refuse, fails here
+and names the file, and it lists the targets the tar fits. `howl pack
+--with "$FORM" -h` lists the form's files and settings, which can also be
+given as flags. The tar holds secrets: keep it out of git.
 
 ## Local Lima VM
 
@@ -38,40 +34,22 @@ export VM_IP=$(build/host/howl create "$VM" --with "$FORM" --config "$CONFIG_DIR
 printf '%s\n' "$VM_IP"
 ```
 
-`howl create` packs and checks the config as `howl pack` does,
-builds a boot disk for this VM, with A/B update slots and persistent
+`howl create` packs and checks the config as `pack` does, with the same
+flags, builds a boot disk for this VM, with A/B update slots and persistent
 `/data`, and starts it under Lima's VZ driver. It prints the VM's name,
-address and form; the line above keeps the address. It takes the same
-flags as `pack`, so a setting can also be given on the line.
+address and form. The config tar goes in as a second Lima disk,
+`$VM-config`, attached unformatted, where werewolf finds it at boot; keep
+`~/.lima` private. The VM gets a second network,
+[vzNAT](https://lima-vm.io/docs/config/network/vmnet/), which your Mac
+reaches directly; `create` waits for the address macOS's DHCP server gives
+it, since these machines run no ssh for Lima to wait on. If it reports no
+address, or the service is not up, `build/host/howl console "$VM"` reads
+the serial console. Then return to the tutorial.
 
-The config tar goes in as a second Lima disk, `$VM-config`, attached
-unformatted, where werewolf finds it at boot. Lima's instance file holds
-no copy of a secret, but the disk does: keep `~/.lima` private. The VM
-gets a second network, [vzNAT](https://lima-vm.io/docs/config/network/vmnet/),
-which your Mac reaches directly. Its MAC is derived from the VM's name,
-and `create` waits for the address macOS's DHCP server gives it, since
-these machines run no ssh for Lima to wait on.
-
-If `create` reports no address, or the service is not up, read the VM's
-serial console:
-
-```sh
-build/host/howl console "$VM"
-```
-
-Return to the service tutorial to verify forwarding or tailnet access.
-Use a subnet the VM can reach; avoid advertising a subnet already local
-to your test client, which may send traffic directly instead of through
-Tailscale.
-
-Another `create` of the same name and form replaces its config and
-restarts it; see [changing it](#change-boot-configuration). A changed form
-is a new disk, so delete the VM and create it again. To remove the VM,
-with its `/data` and its config disk:
-
-```sh
-build/host/howl delete "$VM"
-```
+Another `create` of the same name and form replaces its config and restarts
+it ([below](#change-boot-configuration)); a changed form is a new disk, so
+`build/host/howl delete "$VM"`, which removes the VM, its `/data` and its
+config disk, and create it again.
 
 ## GCP VM
 
@@ -84,45 +62,25 @@ build/host/howl delete "$VM" --on gcp     # the VM; its image stays, for others 
 ```
 
 It uses gcloud's project and zone (`CLOUDSDK_COMPUTE_ZONE` picks another),
-uploads the image only once per build, and prints the VM's address.
+uploads the image once per build, and prints the VM's address. On every
+cloud a new machine lets nothing in: `create` ends by printing the lines
+that open the form's TCP ports to your address alone (a GCP firewall rule,
+an AWS security-group rule, an Azure NSG rule), and `delete` removes what
+they make. `--allow-from me` runs them; `0.0.0.0/0` or a CIDR opens wider.
 
-On every cloud, a new machine lets nothing in, and `create` ends by
-printing the lines that open the TCP ports its form listens on, to your
-address alone, to paste as they are; `delete` removes what they make. For
-a form that listens on 22 and 8080, on GCP:
-
-```
-werewolf: web: nothing reaches it yet; to let this host in on ports 22 8080:
-ME=$(curl -fsS https://checkip.amazonaws.com)
-gcloud compute firewall-rules create web-allow --project PROJECT --target-tags web --source-ranges "$ME/32" --allow tcp:22,tcp:8080
-```
-
-On AWS they are `aws ec2 authorize-security-group-ingress` lines for the
-machine's own security group, and on Azure an `az network nsg rule create`
-for its network security group. Or let `create` run them itself:
-`--allow-from me` opens the ports to your address, `--allow-from
-0.0.0.0/0` to everyone, for a public service, and any IPv4 CIDR to a
-network.
-
-The steps below do it by hand, for a VPC and subnet of your own.
-
-Complete the [GCP project setup](../examples/README.md#prepare-gcp-once), and
-make a bucket for the upload (`gcloud storage buckets create gs://NAME
---uniform-bucket-level-access`). Set `GCP_PROJECT`, `GCP_BUCKET` (the bucket's
-name, without `gs://`) and `GCP_ZONE`. Choose a subnet that can reach
-your destinations, and set these values to its VPC and regional subnet names:
+The steps below do it by hand, for a VPC and subnet of your own. Complete
+the [GCP project setup](../examples/README.md#prepare-gcp-once), make a
+bucket for the upload (`gcloud storage buckets create gs://NAME
+--uniform-bucket-level-access`), and set `GCP_PROJECT`, `GCP_BUCKET`
+(without `gs://`) and `GCP_ZONE` (for `aarch64`, one with `t2a-standard-1`). With a new
+image and VM name for each deployment, build a pristine disk, without Lima's network
+arguments, and package it for [manual
+import](https://docs.cloud.google.com/compute/docs/import/import-existing-image):
 
 ```sh
 export GCP_NETWORK=your-vpc
 export GCP_SUBNET=your-subnet
 export GCP_IMAGE="$VM-$ARCH-v1"
-```
-
-Use a new image and VM name for each deployment. For `aarch64`, choose a
-zone supporting `t2a-standard-1`. Build a pristine disk without Lima's
-network arguments, then package it for [manual import](https://docs.cloud.google.com/compute/docs/import/import-existing-image):
-
-```sh
 make FORM="$FORM" ARCH="$ARCH" DEV= "build/$ARCH/$FORM/disk.qcow2"
 mkdir -p "$SERVICE_BUILD/gcp"
 qemu-img convert -f qcow2 -O raw "$SERVICE_BUILD/disk.qcow2" \
@@ -134,10 +92,9 @@ gcloud --project="$GCP_PROJECT" storage cp --if-generation-match=0 \
   "$SERVICE_BUILD/gcp/image.tar.gz" "gs://$GCP_BUCKET/$GCP_IMAGE.tar.gz"
 ```
 
-The imported image contains no credentials. Pass the config separately in
-instance metadata. These [instance flags](https://docs.cloud.google.com/sdk/gcloud/reference/compute/instances/create)
-give the VM no service account and disable Secure Boot, which Werewolf's
-bootloader does not yet support:
+The image holds no credentials; the config goes in as instance metadata,
+which operators with instance permissions can read. The VM gets no service
+account and no Secure Boot, which werewolf's bootloader does not support yet:
 
 ```sh
 case "$ARCH" in
@@ -155,29 +112,16 @@ gcloud --project="$GCP_PROJECT" compute instances create "$VM" \
   --metadata-from-file="user-data=$SERVICE_BUILD/gcp/config.b64"
 ```
 
-Metadata is readable by operators with the corresponding instance
-permissions. Restrict those permissions and protect `config.b64` like the
-original secrets. Werewolf's metadata fetcher validates the tar and init
-extracts it into root-only `/run/config`; leash gives each service only its
-named copies. See [cloud configuration](cloud.md).
-
-The commands assign an external IP for outbound HTTPS. Your VPC must allow
-DNS and HTTPS. The service tutorial supplies any required inbound rule;
-review existing VPC rules too, since an additional narrow rule does not
-cancel a broader one. Inspect boot messages with:
-
-```sh
-gcloud --project="$GCP_PROJECT" compute instances get-serial-port-output \
-  "$VM" --zone="$GCP_ZONE"
-export VM_IP=$(gcloud --project="$GCP_PROJECT" compute instances describe \
-  "$VM" --zone="$GCP_ZONE" \
-  --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
-```
+The VM gets an external IP for outbound HTTPS; the VPC must allow DNS and
+HTTPS out, and the tutorial supplies any inbound rule. `gcloud compute
+instances get-serial-port-output "$VM" --zone="$GCP_ZONE"` shows the boot,
+and `describe "$VM" --format='get(networkInterfaces[0].accessConfigs[0].natIP)'`
+the address for `VM_IP`.
 
 ## AWS VM
 
-`howl create` makes the machine in the aws CLI's region (`aws
-configure`, or `AWS_REGION` and `AWS_PROFILE`), in the default VPC:
+`howl create` makes the machine in the aws CLI's region (`aws configure`,
+or `AWS_REGION` and `AWS_PROFILE`), in the default VPC:
 
 ```sh
 build/host/howl create "$VM" --with "$FORM" --on aws --config "$CONFIG_DIR"
@@ -185,37 +129,26 @@ build/host/howl console "$VM" --on aws
 build/host/howl delete "$VM" --on aws     # the instance, its volume and security group; the AMI stays
 ```
 
-The first `create` of a build writes its disk straight into an EBS
-snapshot through EBS's direct API, only the blocks that hold data, and
-registers it as an AMI named `werewolf-FORM-ARCH-DIGEST` (UEFI, ENA,
-IMDSv2 alone); later ones find the AMI. There is nothing to set up first:
-no bucket and no VM Import role. The instance is a `t4g.medium` (Graviton)
-or a `t3.medium`, 4 GB (`--size` picks another), with no instance profile, the
-config tar in base64 as its user data, and the metadata service reachable
-only from the machine itself (IMDSv2, one hop). Its security group,
+The first `create` of a build writes its disk straight into an EBS snapshot
+through EBS's direct API, only the blocks that hold data, and registers it
+as an AMI named `werewolf-FORM-ARCH-DIGEST` (UEFI, ENA, IMDSv2 alone);
+later ones find the AMI, and nothing is set up first. The instance is a
+`t4g.medium` (Graviton) or a `t3.medium`, 4 GB (`--size` picks another),
+with no instance profile and the config tar in base64 as its user data
+(16 KiB; `howl pack --on aws` says whether it fits). Its security group,
 `werewolf-NAME`, lets nothing in until you run the lines `create` prints
-([above](#gcp-vm)).
-
-AWS user data holds 16 KiB, so the tar's base64 must fit; `werewolf
-pack --on aws` says whether it does. A second `create` of the same name
-and form stops the instance, replaces its user data and starts it again,
-with its volume and `/data` kept; its public address changes unless it
-is an Elastic IP.
-
-Whoever runs `create` needs EC2 (images, snapshots, instances, security
-groups, subnets) and EBS's direct API for snapshots (`ebs:StartSnapshot`,
-`ebs:PutSnapshotBlock`, `ebs:CompleteSnapshot`).
+([above](#gcp-vm)). `create` needs EC2 and EBS's direct snapshot API
+(`ebs:StartSnapshot`, `ebs:PutSnapshotBlock`, `ebs:CompleteSnapshot`).
 
 ## Change boot configuration
 
-In Lima, run the same `howl create` with the changed files or flags.
-It checks the new config, stops the VM, replaces its config disk and
-starts it again; the boot disk and `/data` stay, and with them a Tailscale
-node's identity. The stop is a hard one, a power cut: Lima sends its
-request to shut down only to a guest that answers ssh on Lima's network,
-and a werewolf machine does not. On AWS, run the same `howl create`
-too. For GCP, update the source files, regenerate the tar/base64 using the packing
-commands above, then replace the metadata and reboot:
+In Lima and on AWS, run the same `howl create` with the changed files or
+flags: it checks the new config, stops the machine (in Lima a power cut,
+since it asks only a guest that answers ssh to shut down), replaces the
+config disk or user data, and starts it again; the boot disk and `/data`
+stay, and with them a Tailscale node's identity. On AWS the public address
+changes unless it is an Elastic IP. On GCP, regenerate `config.b64` as
+above, then replace the metadata and reboot:
 
 ```sh
 gcloud --project="$GCP_PROJECT" compute instances add-metadata "$VM" \
@@ -223,21 +156,17 @@ gcloud --project="$GCP_PROJECT" compute instances add-metadata "$VM" \
 gcloud --project="$GCP_PROJECT" compute instances reset "$VM" --zone="$GCP_ZONE"
 ```
 
-Reboot interrupts connections. Both update slots reread the same boot
-configuration, so image rollback does not roll back routes, destinations
-or credentials. Change permitted ports or service privileges by building
-and deploying a new form. Preserve the Tailscale node's data across reboots.
+Both slots read the same boot configuration, so an image rollback does not
+roll back routes or credentials. Ports and service privileges are the
+form's: change them by building and deploying a new one.
 
 ## Clean up GCP
 
-To remove the test deployment, delete the instance, image and upload.
-Deleting the instance also deletes its auto-delete boot disk and data:
+Deleting the instance deletes its boot disk and data with it; the bucket
+and local credentials remain. Remove a retired node from your tailnet.
 
 ```sh
 gcloud --project="$GCP_PROJECT" compute instances delete "$VM" --zone="$GCP_ZONE"
 gcloud --project="$GCP_PROJECT" compute images delete "$GCP_IMAGE"
 gcloud --project="$GCP_PROJECT" storage rm "gs://$GCP_BUCKET/$GCP_IMAGE.tar.gz"
 ```
-
-The bucket and local credential files remain; remove a retired Tailscale
-node from your tailnet.

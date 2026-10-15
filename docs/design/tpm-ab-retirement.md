@@ -40,13 +40,14 @@ clear is disabled; platform authority is disabled or locked by trusted firmware.
 Empty platform auth and any hierarchy-policy override fail closed.
 
 The writer policy combines `PolicyNV(old-anchor == NV)`, `PolicyPCR(PCR 11)`,
-`PolicyCpHash(exact NV_Extend)` and `PolicyAuthorize` with `werewolf.boot/2`.
-The external signer checks that the retained release belongs to the old pair.
-PCR binding prevents root from replaying a preissued later transition while
-still running the release that transition would retire.
-The [NV-extend command](https://github.com/tpm2-software/tpm2-tools/blob/master/man/tpm2_nvextend.1.md)
+`PolicyCpHash(exact NV_Extend)` and `PolicyAuthorize` with `werewolf.boot/2`. The
+external signer checks that the retained release belongs to the old pair. PCR binding
+prevents root from replaying a preissued later transition while still running the
+release that transition would retire. The [NV-extend
+command](https://github.com/tpm2-software/tpm2-tools/blob/master/man/tpm2_nvextend.1.md)
 hashes the old value with the input. Select a TPM-enabled `UKI_STUB`; Alpine disables
-measurement. Boot refuses zero PCR 11; predictions follow the [stub rules](https://github.com/systemd/systemd/blob/main/docs/TPM2_PCR_MEASUREMENTS.md).
+measurement. Boot refuses zero PCR 11; predictions follow the [stub
+rules](https://github.com/systemd/systemd/blob/main/docs/TPM2_PCR_MEASUREMENTS.md).
 
 Boot verifies the record's signature, matches its resulting anchor to the TPM,
 and requires the sealed release ID to equal either authorized member.
@@ -65,11 +66,13 @@ cannot restore an earlier anchor; deliberate reauthorization requires the signer
 6. A healthy boot commits only the counted entry. Both releases remain authorized.
 
 Keep both journal records outside slots until readback confirms the new anchor.
-Serialize host permit issuance and hold the updater lock through journal writes,
-TPM readback and entry arming; [PolicyNV](https://github.com/microsoft/ms-tpm-20-ref/blob/main/TPMCmd/tpm/src/command/EA/PolicyNV.c) is not an atomic compare-and-swap operation.
-After an uncertain command response, read the TPM and select the matching record;
-never retry an extension blindly or trust a disk-side completion flag.
-The retained slot works even with an incomplete candidate; unknown anchors stop boot.
+Serialize host permit issuance and hold the updater lock through journal writes, TPM
+readback and entry arming;
+[PolicyNV](https://github.com/microsoft/ms-tpm-20-ref/blob/main/TPMCmd/tpm/src/command/EA/PolicyNV.c)
+is not an atomic compare-and-swap operation. After an uncertain command response, read
+the TPM and select the matching record; never retry an extension blindly or trust a
+disk-side completion flag. The retained slot works even with an incomplete candidate;
+unknown anchors stop boot.
 
 ## Drawbacks
 

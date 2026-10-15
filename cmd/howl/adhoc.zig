@@ -604,7 +604,7 @@ fn apply(gpa: Allocator, p: *Plan, text: []const u8, why: *Why) !void {
     }
     p.images = images.items;
     for (p.images) |i| {
-        if (!oci.isRef(i.ref)) return why.refuse(
+        if (!forms.isImageRef(i.ref)) return why.refuse(
             "services.{s}.image {s}: not an image reference",
             .{ i.name, i.ref },
         );
@@ -1017,8 +1017,6 @@ fn check(io: Io, gpa: Allocator, dir: []const u8, why: *Why) !Checked {
 /// the next word.
 fn takesNothing(flag: []const u8) bool {
     for ([_][]const u8{
-        "--secure",
-        "--insecure",
         "--dev",
         "--build",
         "--yes",

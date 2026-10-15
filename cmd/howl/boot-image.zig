@@ -28,7 +28,7 @@ pub const Manifest = struct {
     configuration: ?@import("boot-config.zig").Definition = null,
 };
 pub const Verified = struct { manifest: Manifest, release: [32]u8, pcr: [32]u8 };
-const Producer = struct {
+pub const Producer = struct {
     form: []const u8,
     arch: []const u8,
     disk: []const u8,
@@ -398,140 +398,12 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
         try Io.File.stdout().writeStreamingAll(io, try std.json.Stringify.valueAlloc(gpa, m, .{}));
         return;
     }
-    if (args.len == 2 and std.mem.eql(u8, args[0], "seal")) {
-        const p = try std.json.parseFromSliceLeaky(
-            Producer,
-            gpa,
-            try read(io, gpa, args[1], 64 << 10),
-            .{},
-        );
-        const arch = howl.archName(p.arch) orelse return error.WrongImageArch;
-        const published = @import("published.zig");
-        const previous_arch = published.arch;
-        published.arch = null;
-        defer published.arch = previous_arch;
-        const data = try read(
-            io,
-            gpa,
-            try gpa.print("{s}/latest.json", .{p.head}),
-            image.max_manifest,
-        );
-        const signed = try image.open(
-            gpa,
-            try key(io, gpa, p.image_certificate),
-            data,
-            try read(io, gpa, try gpa.print("{s}/latest.json.sig", .{p.head}), 512),
-            .{ .channel = p.channel, .arch = p.arch },
-        );
-        try Dir.cwd().createDir(io, p.output, .fromMode(0o700));
-        try Dir.cwd().createDir(io, try gpa.print("{s}/slot", .{p.output}), .fromMode(0o700));
-        inline for (image.names) |name| try Dir.cwd().copyFile(
-            try gpa.print("{s}/{s}", .{ p.slot, name }),
-            Dir.cwd(),
-            try gpa.print("{s}/slot/{s}", .{ p.output, name }),
-            io,
-            .{},
-        );
-        try Dir.cwd().copyFile(
-            try gpa.print("{s}/latest.json", .{p.head}),
-            Dir.cwd(),
-            try gpa.print("{s}/latest.json", .{p.output}),
-            io,
-            .{},
-        );
-        try Dir.cwd().copyFile(
-            try gpa.print("{s}/latest.json.sig", .{p.head}),
-            Dir.cwd(),
-            try gpa.print("{s}/latest.json.sig", .{p.output}),
-            io,
-            .{},
-        );
-        const disk = try gpa.print("{s}/disk.img.zst", .{p.output});
-        try howl.run(io, why, &.{ "zstd", "-q", "-T0", p.disk, "-o", disk });
-        const m: Manifest = .{
-            .form = p.form,
-            .configuration = try @import("boot-config.zig").derive(
-                io,
-                gpa,
-                p.configuration_form orelse p.form,
-                p.form,
-                why,
-            ),
-            .image = signed,
-            .disk = try image.hashFile(io, gpa, disk),
-            .raw_size = (try Dir.cwd().statFile(io, p.disk, .{})).size,
-            .boot_certificate = try gpa.dupe(
-                u8,
-                &std.fmt.bytesToHex(try certificate(io, gpa, p.boot_certificate), .lower),
-            ),
-            .permit_host = p.permit_host,
-            .permit_port = p.permit_port,
-            .pcr11 = try gpa.dupe(
-                u8,
-                &std.fmt.bytesToHex(
-                    try uki.pcr11(try read(
-                        io,
-                        gpa,
-                        try gpa.print("{s}/uki.efi", .{p.slot}),
-                        512 << 20,
-                    )),
-                    .lower,
-                ),
-            ),
-        };
-        try check(m, .{ .channel = p.channel, .arch = p.arch });
-        const head = try gpa.print("{s}/boot.json", .{p.output});
-        try enrollment.durable(io, head, try std.json.Stringify.valueAlloc(gpa, m, .{}));
-        try howl.run(
-            io,
-            why,
-            &.{
-                "openssl",
-                "dgst",
-                "-sha256",
-                "-sign",
-                p.image_key,
-                "-out",
-                try gpa.print("{s}/boot.json.sig", .{p.output}),
-                head,
-            },
-        );
-        const public = try gpa.print("{s}/prebuilt/{s}", .{ p.output, p.arch });
-        try Dir.cwd().createDirPath(io, try gpa.print("{s}/{s}", .{ public, signed.build }));
-        for ([_][]const u8{ "latest.json", "latest.json.sig" }) |name|
-            try Dir.cwd().copyFile(
-                try gpa.print("{s}/{s}", .{ p.head, name }),
-                Dir.cwd(),
-                try gpa.print("{s}/{s}", .{ public, name }),
-                io,
-                .{},
-            );
-        inline for (image.names) |name| try Dir.cwd().copyFile(
-            try gpa.print("{s}/{s}", .{ p.slot, name }),
-            Dir.cwd(),
-            try gpa.print("{s}/{s}/{s}", .{ public, signed.build, name }),
-            io,
-            .{},
-        );
-        const verified = try verify(
-            io,
-            gpa,
-            .{
-                .directory = p.output,
-                .boot_certificate = p.boot_certificate,
-                .image_certificate = p.image_certificate,
-                .channel = p.channel,
-            },
-            arch,
-        );
-        try enrollment.durable(
-            io,
-            try gpa.print("{s}/slot/release.id", .{p.output}),
-            &verified.release,
-        );
-        try enrollment.durable(io, try gpa.print("{s}/slot/pcr11", .{p.output}), &verified.pcr);
-        return;
-    }
+    if (args.len == 2 and std.mem.eql(u8, args[0], "seal")) return seal(
+        io,
+        gpa,
+        try std.json.parseFromSliceLeaky(Producer, gpa, try read(io, gpa, args[1], 64 << 10), .{}),
+        why,
+    );
     if ((args.len != 5 and args.len != 6) or !std.mem.eql(u8, args[0], "verify"))
         return error.BadArguments;
     const v = try verify(
@@ -549,6 +421,139 @@ pub fn command(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why)
             howl.hostArch() orelse return error.UnsupportedHostArch,
     );
     try Io.File.stdout().writeStreamingAll(io, try std.json.Stringify.valueAlloc(gpa, v, .{}));
+}
+
+/// seal makes p's built image a boot bundle: the slot, its signed head and
+/// the compressed disk beside a boot.json the image key signs, which binds
+/// the form, the disk, the boot certificate, the permit endpoint and the
+/// predicted PCR 11. release/build-protected seals werewolf's images with
+/// it, and howl the images it builds with the user's own keys.
+pub fn seal(io: Io, gpa: Allocator, p: Producer, why: *howl.Why) !void {
+    const arch = howl.archName(p.arch) orelse return error.WrongImageArch;
+    const published = @import("published.zig");
+    const previous_arch = published.arch;
+    published.arch = null;
+    defer published.arch = previous_arch;
+    const data = try read(
+        io,
+        gpa,
+        try gpa.print("{s}/latest.json", .{p.head}),
+        image.max_manifest,
+    );
+    const signed = try image.open(
+        gpa,
+        try key(io, gpa, p.image_certificate),
+        data,
+        try read(io, gpa, try gpa.print("{s}/latest.json.sig", .{p.head}), 512),
+        .{ .channel = p.channel, .arch = p.arch },
+    );
+    try Dir.cwd().createDir(io, p.output, .fromMode(0o700));
+    try Dir.cwd().createDir(io, try gpa.print("{s}/slot", .{p.output}), .fromMode(0o700));
+    inline for (image.names) |name| try Dir.cwd().copyFile(
+        try gpa.print("{s}/{s}", .{ p.slot, name }),
+        Dir.cwd(),
+        try gpa.print("{s}/slot/{s}", .{ p.output, name }),
+        io,
+        .{},
+    );
+    try Dir.cwd().copyFile(
+        try gpa.print("{s}/latest.json", .{p.head}),
+        Dir.cwd(),
+        try gpa.print("{s}/latest.json", .{p.output}),
+        io,
+        .{},
+    );
+    try Dir.cwd().copyFile(
+        try gpa.print("{s}/latest.json.sig", .{p.head}),
+        Dir.cwd(),
+        try gpa.print("{s}/latest.json.sig", .{p.output}),
+        io,
+        .{},
+    );
+    const disk = try gpa.print("{s}/disk.img.zst", .{p.output});
+    try howl.run(io, why, &.{ "zstd", "-q", "-T0", p.disk, "-o", disk });
+    const m: Manifest = .{
+        .form = p.form,
+        .configuration = try @import("boot-config.zig").derive(
+            io,
+            gpa,
+            p.configuration_form orelse p.form,
+            p.form,
+            why,
+        ),
+        .image = signed,
+        .disk = try image.hashFile(io, gpa, disk),
+        .raw_size = (try Dir.cwd().statFile(io, p.disk, .{})).size,
+        .boot_certificate = try gpa.dupe(
+            u8,
+            &std.fmt.bytesToHex(try certificate(io, gpa, p.boot_certificate), .lower),
+        ),
+        .permit_host = p.permit_host,
+        .permit_port = p.permit_port,
+        .pcr11 = try gpa.dupe(
+            u8,
+            &std.fmt.bytesToHex(
+                try uki.pcr11(try read(
+                    io,
+                    gpa,
+                    try gpa.print("{s}/uki.efi", .{p.slot}),
+                    512 << 20,
+                )),
+                .lower,
+            ),
+        ),
+    };
+    try check(m, .{ .channel = p.channel, .arch = p.arch });
+    const head = try gpa.print("{s}/boot.json", .{p.output});
+    try enrollment.durable(io, head, try std.json.Stringify.valueAlloc(gpa, m, .{}));
+    try howl.run(
+        io,
+        why,
+        &.{
+            "openssl",
+            "dgst",
+            "-sha256",
+            "-sign",
+            p.image_key,
+            "-out",
+            try gpa.print("{s}/boot.json.sig", .{p.output}),
+            head,
+        },
+    );
+    const public = try gpa.print("{s}/prebuilt/{s}", .{ p.output, p.arch });
+    try Dir.cwd().createDirPath(io, try gpa.print("{s}/{s}", .{ public, signed.build }));
+    for ([_][]const u8{ "latest.json", "latest.json.sig" }) |name|
+        try Dir.cwd().copyFile(
+            try gpa.print("{s}/{s}", .{ p.head, name }),
+            Dir.cwd(),
+            try gpa.print("{s}/{s}", .{ public, name }),
+            io,
+            .{},
+        );
+    inline for (image.names) |name| try Dir.cwd().copyFile(
+        try gpa.print("{s}/{s}", .{ p.slot, name }),
+        Dir.cwd(),
+        try gpa.print("{s}/{s}/{s}", .{ public, signed.build, name }),
+        io,
+        .{},
+    );
+    const verified = try verify(
+        io,
+        gpa,
+        .{
+            .directory = p.output,
+            .boot_certificate = p.boot_certificate,
+            .image_certificate = p.image_certificate,
+            .channel = p.channel,
+        },
+        arch,
+    );
+    try enrollment.durable(
+        io,
+        try gpa.print("{s}/slot/release.id", .{p.output}),
+        &verified.release,
+    );
+    try enrollment.durable(io, try gpa.print("{s}/slot/pcr11", .{p.output}), &verified.pcr);
 }
 
 test "disk journal paths are quoted without command injection" {

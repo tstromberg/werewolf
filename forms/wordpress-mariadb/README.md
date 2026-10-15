@@ -1,6 +1,10 @@
 # WordPress and MariaDB - Hardened VM
 
-[WordPress](https://wordpress.org) with MariaDB on a UNIX socket, behind nginx. The form's manifest is [form.yaml](form.yaml).
+[WordPress](https://wordpress.org) with MariaDB on a UNIX socket, behind nginx. The
+form's manifest is [form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/wordpress-mariadb/index.html).
 
 ## Security Posture
 
@@ -25,7 +29,8 @@ howl create wordpress-mariadb --with wordpress-mariadb \
 	--admin-password-hash admin-password-hash
 ```
 
-Open `https://blog.home.arpa` and sign in as `admin`. Posts and users are in [WordPress's documentation](https://wordpress.org/documentation/).
+Open `https://blog.home.arpa` and sign in as `admin`. Posts and users are in
+[WordPress's documentation](https://wordpress.org/documentation/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -41,7 +46,8 @@ howl create wordpress-mariadb --with wordpress-mariadb --on gcp --allow-from me 
 
 ### Importing data
 
-`--import` streams `*.sql` into MariaDB once, while data is first made. Uploads and the WordPress tree are not on that disk. A cloud cannot attach it.
+`--import` streams `*.sql` into MariaDB once, while data is first made. Uploads and the
+WordPress tree are not on that disk. A cloud cannot attach it.
 
 ```sh
 umask 077

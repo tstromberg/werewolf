@@ -136,6 +136,7 @@ const Entry = struct { name: []const u8, sha256: [64]u8, size: u64 };
 
 /// Package is one package of the rootfs, from apk's installed database.
 const Package = @import("prebuilt").Package;
+const rebuiltFrom = @import("prebuilt").rebuiltFrom;
 
 const Manifest = struct {
     form: []const u8,
@@ -163,13 +164,15 @@ fn buildId(entries: []const Entry) [16]u8 {
 
 /// parsePackages reads apk's installed database: one stanza per package
 /// (P: name, V: version, o: origin), with a blank line between stanzas. A
-/// package with no origin is its own. They are sorted as their "name
-/// version origin" lines sort bytewise, as `LC_ALL=C sort` did.
+/// package with no origin is its own; one that rebuilds a Wolfi source
+/// (p: provides, prebuilt.rebuiltFrom) has that. They are sorted as their
+/// "name version origin" lines sort bytewise, as `LC_ALL=C sort` did.
 pub fn parsePackages(gpa: Allocator, db: []const u8) ![]const Package {
     var lines: std.ArrayList([]const u8) = .empty;
     var p: []const u8 = "";
     var v: []const u8 = "";
     var o: []const u8 = "";
+    var rebuilt: ?[]const u8 = null;
     var it = mem.splitScalar(u8, db, '\n');
     while (true) {
         const line = it.next();
@@ -177,13 +180,15 @@ pub fn parsePackages(gpa: Allocator, db: []const u8) ![]const Package {
             if (mem.startsWith(u8, l, "P:")) p = l[2..];
             if (mem.startsWith(u8, l, "V:")) v = l[2..];
             if (mem.startsWith(u8, l, "o:")) o = l[2..];
+            if (mem.startsWith(u8, l, "p:")) rebuilt = rebuiltFrom(l[2..]);
             if (l.len > 0) continue;
         }
-        if (p.len > 0)
-            try lines.append(gpa, try gpa.print("{s} {s} {s}", .{ p, v, if (o.len > 0) o else p }));
+        const origin = rebuilt orelse if (o.len > 0) o else p;
+        if (p.len > 0) try lines.append(gpa, try gpa.print("{s} {s} {s}", .{ p, v, origin }));
         p = "";
         v = "";
         o = "";
+        rebuilt = null;
         if (line == null) break;
     }
     mem.sortUnstable([]const u8, lines.items, {}, struct {
@@ -289,14 +294,21 @@ test parsePackages {
         \\
         \\P:solo
         \\V:1-r0
+        \\
+        \\P:glibc-neutered-2.44
+        \\V:2.44-r18
+        \\p:glibc=2.44-r18 wolfi-origin:glibc-2.44:2.44-r8
+        \\o:glibc-neutered-2.44
     ;
     const got = try parsePackages(arena.allocator(), db);
-    try testing.expectEqual(3, got.len);
-    try testing.expectEqualStrings("libblkid", got[0].name);
-    try testing.expectEqualStrings("util-linux", got[0].origin);
-    try testing.expectEqualStrings("runit", got[1].name);
+    try testing.expectEqual(4, got.len);
+    // A rebuild of Wolfi's glibc stands for it, at Wolfi's version.
+    try testing.expectEqualStrings("glibc-2.44:2.44-r8", got[0].origin);
+    try testing.expectEqualStrings("libblkid", got[1].name);
+    try testing.expectEqualStrings("util-linux", got[1].origin);
+    try testing.expectEqualStrings("runit", got[2].name);
     // No origin: the package is its own.
-    try testing.expectEqualStrings("solo", got[2].origin);
+    try testing.expectEqualStrings("solo", got[3].origin);
     try testing.expectEqual(0, (try parsePackages(arena.allocator(), "\n\nV:1\n")).len);
 }
 

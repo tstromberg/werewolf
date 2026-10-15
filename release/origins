@@ -21,12 +21,15 @@ trap 'rm -rf "$work"' EXIT
 # List every package each config installs, as apko resolves it now. make's
 # form tool (FORM_TOOL, by default build/host/form) merges each form's chain
 # into one config, as make does; the boot disk has its own config.
+# Each config names werewolf's key in ../keys, as in a build (lib/package.zig).
 form_tool=${FORM_TOOL:-build/host/form}
+mkdir -p "$work/form" "$work/keys"
+cp release/packages.pub "$work/keys/werewolf-packages.rsa.pub"
 for dir in forms/*/; do
 	name=$(basename "$dir")
-	"$form_tool" apko "$name" >"$work/$name.yaml" || { echo "origins: cannot read form $name" >&2; exit 1; }
+	"$form_tool" apko "$name" >"$work/form/$name.yaml" || { echo "origins: cannot read form $name" >&2; exit 1; }
 done
-for config in "$work"/*.yaml boot/boot.yaml; do
+for config in "$work"/form/*.yaml boot/boot.yaml; do
 	name=$(basename "$config" .yaml)
 	(cd "$(dirname "$config")" && apko lock --arch aarch64,x86_64 \
 		--output "$work/$name.lock.json" "$(basename "$config")" >/dev/null 2>"$work/$name.err") ||

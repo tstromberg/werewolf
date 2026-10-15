@@ -1,14 +1,20 @@
 # Jellyfin - Hardened VM
 
-Your media, in a browser or an app: [Jellyfin](https://jellyfin.org) 12.2, behind Caddy. Media is copied in over ssh. The form's manifest is [form.yaml](form.yaml).
+Your media, in a browser or an app: [Jellyfin](https://jellyfin.org) 12.2, behind Caddy.
+Media is copied in over ssh. The form's manifest is [form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/jellyfin/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
-- ssh brings a small set of tools, including a shell, for the people who log in. .NET runs Jellyfin and compiles it as it runs. All of that is named in `form.yaml`.
+- ssh brings a small set of tools, including a shell, for the people who log in. .NET
+  runs Jellyfin and compiles it as it runs. All of that is named in `form.yaml`.
 
 ## Getting Started
 
@@ -21,7 +27,9 @@ howl create jellyfin --with jellyfin \
 	--jellyfin-password jellyfin-password
 ```
 
-Open `https://media.home.arpa` and sign in as `alice`. The password is in `jellyfin-password`. Copying media needs a security key, which a script cannot mint. Make one with `ssh-keygen -t ed25519-sk` and pass it:
+Open `https://media.home.arpa` and sign in as `alice`. The password is in
+`jellyfin-password`. Copying media needs a security key, which a script cannot mint.
+Make one with `ssh-keygen -t ed25519-sk` and pass it:
 
 ```text
 howl create jellyfin --with jellyfin \
@@ -30,7 +38,10 @@ howl create jellyfin --with jellyfin \
 	--users.alice.keys "$(cat ~/.ssh/id_ed25519_sk.pub)" --users.alice.admin
 ```
 
-A key file is refused until `--sshd.pubkey-accepted-algorithms=ssh-ed25519,sk-ssh-ed25519@openssh.com`, and that is a posture weakness. Libraries are in [Jellyfin's documentation](https://jellyfin.org/docs/).
+A key file is refused until
+`--sshd.pubkey-accepted-algorithms=ssh-ed25519,sk-ssh-ed25519@openssh.com`, and that is
+a posture weakness. Libraries are in [Jellyfin's
+documentation](https://jellyfin.org/docs/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -41,17 +52,20 @@ howl create jellyfin --with jellyfin --on gcp --allow-from me \
 	--jellyfin-password jellyfin-password
 ```
 
-Sign in at `https://media.example.com`. Add `--users.NAME.keys` with a security key, and `--users.NAME.admin`, before you copy files. An admin key is also root's:
+Sign in at `https://media.example.com`. Add `--users.NAME.keys` with a security key, and
+`--users.NAME.admin`, before you copy files. An admin key is also root's:
 
 ```text
 scp -i ~/.ssh/id_ed25519_sk -r Movies root@media.example.com:/data/svc/jellyfin/media/
 ```
 
-The library `Media` is that directory. Jellyfin scans it on its schedule, or at once from the dashboard.
+The library `Media` is that directory. Jellyfin scans it on its schedule, or at once
+from the dashboard.
 
 ### Importing data
 
-Media comes in over the ssh this form publishes, as the cloud section shows. There is no database dump, and `--import` does not carry media.
+Media comes in over the ssh this form publishes, as the cloud section shows. There is no
+database dump, and `--import` does not carry media.
 
 ### Known Quirks
 

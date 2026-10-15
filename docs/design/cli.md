@@ -32,22 +32,25 @@ by hand.
 
 ## Detailed design
 
-`build` makes a *file*, by itself and byte for byte as make's `_dist-form`
-did ([howl-build.md](howl-build.md)), never with `DEV`, so every image has a
-release's manifest ([releases.md](../releases.md)).
-`run`/`create` default to protected Lima on macOS and QEMU on Linux; currently they require `--build`.
-Published protected downloads remain gated ([design](published-secure-boot.md)); `--insecure` is explicit.
-`create` makes a *machine*: source builds if stale, packs, uploads only an
-image the cloud lacks, starts the machine, waits for init's `up in`, and
-prints `NAME ADDRESS FORM`. `run` uses `werewolf-run`, reusing an unchanged protected VM
-and resuming its existing image when stopped. Changed image inputs replace it.
-Each platform is driven by its own tool (`limactl`, `qm`,
-`gcloud`, `aws`, `az`…) with argument lists. The provider supplies VM existence
-and runtime state; local files retain build inputs and enrollment credentials.
+`build` makes a *file*, by itself and byte for byte as make's `_dist-form` did
+([howl-build.md](howl-build.md)), never with `DEV`, so every image has a release's
+manifest ([releases.md](../releases.md)). `run`/`create` default to protected Lima on
+macOS and QEMU on Linux; currently they require `--build`. Published protected downloads
+remain gated ([design](published-secure-boot.md)). `--disable=LIST` gives up protections
+by name (`secureboot`, `tpm`, `ipe`), never by default: one profile gives all three for
+now, so only the whole list is taken, and a machine's command line names what it lacks
+(`werewolf.disable`) for posture and the login message
+([security](../security.md#protections-a-machine-can-be-made-without)). `create` makes a
+*machine*: source builds if stale, packs, uploads only an image the cloud lacks, starts
+the machine, waits for init's `up in`, and prints `NAME ADDRESS FORM`. `run` uses
+`werewolf-run`, reusing an unchanged protected VM and resuming its existing image when
+stopped. Changed image inputs replace it. Each platform is driven by its own tool
+(`limactl`, `qm`, `gcloud`, `aws`, `az`…) with argument lists. The provider supplies VM
+existence and runtime state; local files retain build inputs and enrollment credentials.
 
 | Target | Choice, and why |
 | --- | --- |
-| lima | protected QEMU by default; `--insecure` uses the legacy VZ path |
+| lima | protected QEMU by default; `--disable=secureboot,tpm,ipe` uses the legacy VZ path |
 | firecracker | QEMU's UEFI disk, its supervisor in systemd-boot's place: Firecracker has no firmware, and one disk format updates everywhere |
 | proxmox | `qm` over ssh: the REST API has no serial log, and no address without a guest agent |
 | aws | an EBS snapshot written directly: VM Import took 6–10 minutes and a hand-made bucket and role |
@@ -68,7 +71,8 @@ one on the machine, so its private half never leaves.
 
 ## Drawbacks
 
-- **Two interfaces**, though make's image targets now ask howl ([howl-build.md](howl-build.md)).
+- **Two interfaces**, though make's image targets now ask howl
+  ([howl-build.md](howl-build.md)).
 - **Flags from service files are indirect**: a typo there is a missing flag.
 - **Five provider CLIs** change output and flags on their own schedules.
 - **Azure copies a disk per machine**: a reusable image needs a root agent.

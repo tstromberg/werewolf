@@ -51,7 +51,7 @@ exploited one the day CISA lists it, and each check re-tiers what is staged.
 within limits only a form may lower ([keys](../updater.md#when-an-update-boots)).
 
 **The feed.** CI tiers the CVEs of werewolf's packages and kernel hourly,
-under a key of its own ([releases.md](../releases.md#the-tiers-feed)).
+under a key of its own ([cve-feed.md](../cve-feed.md)).
 Urgent and High entries name the fixed version, so signed data alone finds
 them. With no valid feed, every fix counts as High.
 

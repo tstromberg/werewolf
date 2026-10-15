@@ -23,18 +23,19 @@ pub fn clientFd(role: Role) i32 {
     return 60 + @as(i32, @backingInt(role));
 }
 
-/// keepOnlyClient closes every broker client descriptor except keep, marks
+/// keepOnlyClient closes every descriptor above stderr except keep, marks
 /// keep close-on-exec, and clears dumpable when a descriptor is retained.
 pub fn keepOnlyClient(keep: ?Role) void {
-    inline for (.{ Role.updater, Role.keeper, Role.stage }) |r| {
+    const flags: linux.CLOSE_RANGE = .{ .UNSHARE = false, .CLOEXEC = false };
+    if (keep) |r| {
         const fd = clientFd(r);
-        if (keep != null and keep.? == r) {
-            _ = linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC);
-        } else {
-            _ = linux.close(fd);
-        }
+        _ = linux.close_range(3, fd - 1, flags);
+        _ = linux.close_range(fd + 1, std.math.maxInt(linux.fd_t), flags);
+        _ = linux.fcntl(fd, linux.F.SETFD, linux.FD_CLOEXEC);
+        _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
+    } else {
+        _ = linux.close_range(3, std.math.maxInt(linux.fd_t), flags);
     }
-    if (keep != null) _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
 }
 
 /// Word requests shutdown. Neither the EFI partition nor the boot partition

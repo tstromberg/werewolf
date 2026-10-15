@@ -39,7 +39,7 @@ A service file's `pledge` names its promises; its `read`, `write`,
 `listen` and `connect` lines give it paths and ports. Each word is as
 narrow as a call number allows, and the risky ones stand alone (`exec`,
 `setuid`, `mount`, `memfd`, `watch`, `ipc`, `splice`). The words are in
-[docs/forms.md](../forms.md#what-the-leash-holds); none brings `ptrace`
+[docs/applications.md](../applications.md#what-the-leash-holds); none brings `ptrace`
 or the `never` calls (lib/README.md). A file without a `pledge` is
 parked: there is no default. `/run/svc/NAME` and `/data/svc/NAME` are
 `0700`, the service user's alone, unless its `share` line opens them

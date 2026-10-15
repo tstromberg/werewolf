@@ -1,12 +1,18 @@
 # Home Assistant - Hardened VM
 
-A home's devices and automations: [Home Assistant](https://www.home-assistant.io), the stable image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
+A home's devices and automations: [Home Assistant](https://www.home-assistant.io), the
+stable image, behind Caddy. The form's manifest is [form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/home-assistant/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
-- The image contains Python. Only `python3 -m homeassistant` is started. Integrations you add later run as that same user.
+- The image contains Python. Only `python3 -m homeassistant` is started. Integrations
+  you add later run as that same user.
 
 ## Getting Started
 
@@ -19,7 +25,10 @@ howl create home-assistant --with home-assistant \
 	--time-zone America/New_York --country US
 ```
 
-Open `https://home.home.arpa` and sign in as `me`. The password is in `owner-password`, 12 to 72 bytes. Names under `.home.arpa` get a certificate from Caddy's own CA. Integrations are in [Home Assistant's documentation](https://www.home-assistant.io/docs/).
+Open `https://home.home.arpa` and sign in as `me`. The password is in `owner-password`,
+12 to 72 bytes. Names under `.home.arpa` get a certificate from Caddy's own CA.
+Integrations are in [Home Assistant's
+documentation](https://www.home-assistant.io/docs/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -30,7 +39,9 @@ howl create home-assistant --with home-assistant --on gcp --allow-from me \
 	--time-zone Europe/Berlin --country DE
 ```
 
-Sign in at `https://home.example.com`. A public name gets a certificate from Let's Encrypt. A house more often runs on Proxmox. Omit `--domain` there and Caddy serves plain HTTP on port 80, which is reasonable only on a LAN:
+Sign in at `https://home.example.com`. A public name gets a certificate from Let's
+Encrypt. A house more often runs on Proxmox. Omit `--domain` there and Caddy serves
+plain HTTP on port 80, which is reasonable only on a LAN:
 
 ```text
 howl create home-assistant --with home-assistant --on proxmox \
@@ -42,13 +53,16 @@ The owner's password is set back to the file at each start.
 
 ### Importing data
 
-Home Assistant keeps its state in `/data`, and the host cannot write that directory. Restore a backup from the web UI after this machine is up.
+Home Assistant keeps its state in `/data`, and the host cannot write that directory.
+Restore a backup from the web UI after this machine is up.
 
 ### Known Quirks
 
 - Onboarding is already finished. The first visitor is not offered the setup.
-- Discovery, Bluetooth and USB are off. A Zigbee coordinator is reached over the network, through MQTT, not a dongle.
-- Location starts as the settings you passed. Change it later under Settings, System, General.
+- Discovery, Bluetooth and USB are off. A Zigbee coordinator is reached over the
+  network, through MQTT, not a dongle.
+- Location starts as the settings you passed. Change it later under Settings, System,
+  General.
 - The image is large. Give the machine 4 GB.
 
 ### Network Exposure

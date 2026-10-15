@@ -2,74 +2,119 @@
 
 ## Summary
 
-Build a Wolfi-derived glibc with five fixed protections: deny environment configuration, disable loader injection/search overrides, allow only built-in NSS and converters, and disable nscd. Preserve optimized implementations and public application environment access; adapt applications before weakening these protections. Production native-code integrity also requires Werewolf's existing kernel enforcement.
+Build a Wolfi-derived glibc with five fixed protections: deny environment
+configuration, disable loader injection and search overrides, allow only built-in
+NSS and converters, and disable nscd. Keep the optimized implementations and the
+public environment API; adapt applications before weakening a protection. Native-code
+integrity in production also needs Werewolf's kernel enforcement ([IPE](ipe.md)).
 
 ## Background
 
-The [vulnerability audit](https://github.com/werewolf-linux/glibc-neutered/blob/main/docs/glibc-vuln-audit.md) records ten years of glibc flaws and analogous libc failures. Looney Tunables attacked startup parsing; PwnKit restored converter settings after startup; sudo exploits used NSS without loader variables. Removing environment variables at launch covers only some of these paths.
-
-Follow [CONTRIBUTING.md](../../CONTRIBUTING.md): small changes, deny by default, fail closed. This is a proposal; patches and application compatibility have not been validated.
+The [vulnerability audit](https://github.com/werewolf-linux/glibc-neutered/blob/main/docs/glibc-vuln-audit.md)
+records ten years of glibc flaws reached through startup parsing (Looney Tunables),
+converter settings restored after startup (PwnKit) and NSS without loader variables
+(sudo); sanitizing the environment at launch covers only some of these paths. This is
+a proposal ([CONTRIBUTING.md](../../CONTRIBUTING.md): small, deny by default, fail
+closed); patches and application compatibility are not validated yet.
 
 ## Goals
 
-- Implement exactly five protection mechanisms with the smallest reviewable diff against Wolfi's pinned source.
-- Disabled inputs cause no tuning, injection, module loading, or configured file writes, including after startup.
-- Untrusted libraries cannot execute through retained dependencies or explicit loading on the production Werewolf image.
-- Preserve public `getenv`, `secure_getenv`, environment mutation, symbol versions, and optimized CPU/allocator defaults on x86_64 and aarch64.
-- Pass upstream tests with narrowly explained policy changes, Werewolf form checks, and comparative performance gates before rollout.
+Exactly five mechanisms, as the smallest reviewable diff against Wolfi's source. A
+disabled input causes no tuning, injection, module load or file write, ever; untrusted
+libraries cannot run through retained dependencies or explicit loading. Public
+`getenv`, `secure_getenv`, environment mutation, symbol versions and the optimized CPU
+and allocator defaults stay. Upstream tests pass with each policy change explained;
+form checks and comparative performance gates precede rollout.
 
 ## Non-Goals
 
-- Rewrite memory allocation, DNS, formatting, sorting, vector routines, or general `dlopen`.
-- Add runtime switches, permissive builds, or application-specific exceptions to disabled features.
-- Claim these reductions repair application memory corruption or every libc vulnerability.
+Rewriting allocation, DNS, formatting, sorting, vector routines or `dlopen`; runtime
+switches, permissive builds or exceptions; claiming to repair memory corruption.
 
 ## Detailed design
 
-1. **Deny implicit environment configuration.** In glibc's private build headers, redirect internal environment getters to a typed helper returning `NULL`, if build validation confirms this is smaller and reliable. Exempt the public getter implementations and required secure-execution sanitation. Cover `__libc_secure_getenv` and aliases; a public interposition wrapper is insufficient. Review each caller: denying lookups also changes HOME expansion and other environment-dependent APIs. Bare-name `execvp`/`posix_spawnp` must fail closed; explicit executable paths remain available. Use explicit paths or application workarounds first; retain a real internal lookup only for a demonstrated API requirement, never as a generic variable allowlist.
-   Freeze security-sensitive fallbacks: fail implicit executable lookup instead of searching a broader PATH; retain strict option/pattern defaults; fail environment-selected temporary-name lookup without an explicit valid directory; require eager binding and reject executable-stack requests. These are part of environment/tuning policy, not additional protection mechanisms.
-   Separately skip direct environment interpretation in `elf/rtld.c`, `elf/dl-tunables.c`, and static `elf/dl-support.c`. Preserve kernel `AT_SECURE` sanitation and startup bookkeeping. Retain compiled tunable defaults and hardware detection. Ignore `LANG`, `LANGUAGE`, `LC_ALL`, every `LC_*`, locale paths, timezone, resolver, temp-directory, profiling, and tracing overrides. `setlocale(category, "")` selects `C`; an empty locale argument does not mean an unset current locale. Explicit application locale requests are separate APIs and require compatibility review.
-2. **Disable loader injection and search overrides.** Explicitly ignore `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `LD_PROFILE`, and all other loader environment controls. Cover `/etc/ld.so.preload`, loader `--preload`/`--audit`/`--library-path`, and ELF `DT_AUDIT`/`DT_DEPAUDIT`. Reject other CLI search overrides (`--inhibit-rpath`, `--inhibit-cache`, and hwcaps directory overrides) rather than leave alternative knobs. Ignore disabled environment/file sources without parsing their values; reject explicit CLI/ELF requests clearly before activation. Preserve normal dependencies and `dlopen`. Gate existing activation points rather than removing the loader's dependency machinery.
-3. **Built-in NSS only.** In `nss/nss_module.c`, retain the existing `files` and `dns` branches and fail external requests before constructing names or loading DSOs. Record failure using existing state/locking conventions so retries and concurrent lookups remain correct. Unsupported configuration must return the established unavailable status, not silently change identity data. Applications needing another identity source must adapt separately.
-4. **Built-in converters only.** Skip external gconv cache/configuration discovery in `iconv/gconv_conf.c`; retain its existing built-in module and alias registration. Deny DSO loading in `iconv/gconv_dl.c` as a backstop, and omit external converter files/registries from runtime packages. Built-ins include UTF-8, ASCII, and internal UCS conversions; UTF-16 is not a built-in in the inspected source. Keep existing lookup/error semantics. Applications needing additional conversion use an explicit, tested application library.
-5. **Disable nscd.** Use existing `--disable-build-nscd` and `--disable-nscd` options to omit the daemon and libc clients. Keep direct files/DNS resolution; measure lookup costs before deciding whether application or resolver caching is needed.
+1. **Deny implicit environment configuration.** In the private build headers, redirect
+   the internal environment getters to a typed helper returning `NULL` (if that proves
+   smaller and reliable than editing each caller), exempting the public getters and
+   `AT_SECURE` sanitation and covering `__libc_secure_getenv` and its aliases; an
+   interposition wrapper is not enough. Review each caller: HOME expansion and other
+   environment-dependent APIs change, and every fallback fails closed (bare-name
+   `execvp` fails rather than search a broader PATH, temporary names need an explicit
+   directory, binding is eager, executable stacks are refused). Skip environment
+   interpretation in `elf/rtld.c`, `elf/dl-tunables.c` and static `elf/dl-support.c`,
+   keeping compiled tunable defaults and hardware detection; locale, timezone,
+   resolver, temp-directory, profiling and tracing overrides are ignored, and
+   `setlocale(cat, "")` selects `C`.
+2. **Disable loader injection and search overrides.** Ignore every `LD_*` loader
+   variable and `/etc/ld.so.preload` without parsing them; reject the loader's
+   `--preload`, `--audit`, `--library-path`, `--inhibit-rpath`, `--inhibit-cache` and
+   hwcaps overrides and ELF `DT_AUDIT`/`DT_DEPAUDIT` before activation. Gate the
+   activation points; keep normal dependencies and `dlopen`.
+3. **Built-in NSS only.** In `nss/nss_module.c`, keep the `files` and `dns` branches
+   and fail an external request before a name is built or a DSO loaded, through the
+   existing state and locking, with the established unavailable status rather than
+   different identity data. Another source is the application's to adapt.
+4. **Built-in converters only.** Skip external gconv discovery in `iconv/gconv_conf.c`,
+   deny DSO loading in `iconv/gconv_dl.c` as a backstop, ship no converter files.
+   Built-ins are UTF-8, ASCII and the internal UCS forms, not UTF-16.
+5. **Disable nscd.** `--disable-build-nscd` and `--disable-nscd`; measure files/DNS
+   lookup cost before deciding on caching elsewhere.
 
-Host patches and releases in [werewolf-linux/glibc-neutered](https://github.com/werewolf-linux/glibc-neutered). Track the complete Wolfi recipe and supporting files rather than maintaining a hand-copied recipe or assuming Melange supports inheritance. Pin recipe/source hashes; retain Wolfi's hardening and security backports. A scheduled GitHub Action proposes updates, applies patches without fuzz, and builds matching loader/libc packages for both architectures. Publish only validated, signed/indexed artifacts with source and patch provenance. Patch drift blocks the update; the last validated package remains available. Runtime package dependencies must keep the custom loader and libc together through updates.
+[werewolf-linux/glibc-neutered](https://github.com/werewolf-linux/glibc-neutered)
+holds the patches and releases: Wolfi's complete recipe and files, pinned by hash,
+with Wolfi's hardening and backports kept; a scheduled Action proposes updates, applies
+the patches without fuzz, builds matching loader and libc packages for both
+architectures, and publishes only validated, signed and indexed artifacts; patch drift
+blocks the update and keeps the last validated package. PostgreSQL setup, its bootstrap
+children and locale enumeration now use static sh-shim in place of the popen preload
+([postgresql-sh-shim.md](postgresql-sh-shim.md)), with no glibc loading exception.
 
-PostgreSQL setup now uses static sh-shim with explicit executable declarations and `/dev/null` redirections, replacing its popen preload ([migration](postgresql-sh-shim.md)). Its bootstrap children and locale enumeration use the same adapter. Stock and hardened-libc initialization passes; service confinement, persistence and application checks still govern rollout. No glibc loading exception is added.
-
-Retained loading is bounded by Werewolf's [IPE policy](ipe.md): native executable mappings must come from the selected verified root, including dependencies, explicit `dlopen`/`dlmopen`, and static-linked loading. This is an existing Werewolf integration requirement, not a sixth libc patch. Audit ELF RPATH/RUNPATH, `$ORIGIN`, dependencies, cache entries, and symlinks in the built image; do not authorize writable directories or an untrusted alternate loader. Non-IPE images do not meet the native-code integrity claim. The current strict policy rejects anonymous executable memory, so JIT-dependent forms cannot meet this profile without separate design work; do not silently add an exception.
+Retained loading is bounded by [IPE](ipe.md): every native mapping, dependencies,
+`dlopen`/`dlmopen` and static loading included, comes from the verified root. That is
+an existing requirement, not a sixth patch: audit RPATH/RUNPATH, `$ORIGIN`, cache
+entries and symlinks in the image, and authorize no writable directory or alternate
+loader. Non-IPE images miss the claim; JIT forms need design work, not an exception.
 
 ## Drawbacks
 
-Environment-dependent libc APIs change behavior even though public `getenv` works. C locale affects collation and multibyte conversion; it is not C.UTF-8. External NSS, legacy encodings, profiling injection, and nscd consumers need application work. Private-header macros can affect tools/tests or function definitions; use build guards and explicit exemptions, or choose explicit consumer edits if those are easier to maintain. No patch-size or performance claim is measured yet.
+Environment-dependent APIs change behaviour though public `getenv` works; the C locale
+is not C.UTF-8; external NSS, legacy encodings, profiling injection and nscd consumers
+need application work; private-header macros can reach tools and tests (build guards,
+or consumer edits where easier). No patch-size or performance claim is measured yet.
 
 ## Alternatives Considered
 
-- Launcher sanitation: useful defense, but later `setenv` or memory corruption can restore settings; CLI, ELF, NSS, and converter inputs bypass it.
-- Override public `getenv`, or force secure mode: breaks application configuration and changes unrelated privilege semantics; direct startup scans still remain.
-- Maintain many variable allowlists or remove entire subsystems: adds policy/parser code and patch churn. One private denial helper plus a few activation gates is the first approach to validate.
-- Restore features for PostgreSQL or offer opt-outs: expands every process's surface. Fix setup and conversion requirements in the application.
-- Replace glibc: other libc implementations have analogous parser and memory-safety failures; changing ABI adds migration work without preserving our current performance assumptions.
+Launcher sanitation: a later `setenv` or memory corruption restores settings, and CLI,
+ELF, NSS and converter inputs bypass it. Overriding public `getenv`, or forcing secure
+mode: breaks application configuration and privilege semantics. Variable allowlists or
+removing subsystems: policy code and patch churn; one denial helper plus a few gates
+is validated first. Opt-outs: widen every process; the application is fixed instead.
+Replacing glibc: other libcs fail the same ways, and a new ABI adds migration work.
 
 ## Security Considerations
 
-Direct loader invocation can bypass an environment-only policy:
-
-```sh
-/lib/ld-linux-aarch64.so.1 --library-path /writable/lib /usr/bin/trusted-app
-```
-
-If an attacker can place a compatible dependency in that directory and control loader invocation and arguments, the loader can select the substituted library and run its constructors before application startup. A command allowlist that trusts the loader but accepts arbitrary arguments can expose this route. This is an intentional loader feature, not itself a vulnerability or an automatic privilege escalation; invoking a setuid target through the loader does not grant the target's setuid privileges. Without control of loader invocation, denying this option adds little protection. Reject it to close the CLI equivalent of `LD_LIBRARY_PATH`; adapt the test harness without a runtime exception.
-
-Production IPE must independently reject executable mappings of the substituted library. With comprehensive IPE enforcement, CLI denial is defense in depth. Normal dependency loading, RPATH/RUNPATH, and explicit `dlopen` remain subject to that boundary; CLI denial alone cannot prevent arbitrary native-code execution.
-
-Reject before parsing, allocating, or loading. Denial must survive OOM, duplicate environment entries, environment mutation, configuration reload, alternate filesystem roots, and static-linked loading. Keep upstream fixes for retained APIs: syslog sizing, resolver bounds, `$ORIGIN`, qsort failures, signals, and allocation arithmetic remain separate risks. IPE constrains native-code provenance; it does not prevent reuse of trusted code, malicious interpreted input, or arbitrary application memory corruption. This proposal removes identified injection mechanisms rather than claiming to prevent every possible RCE.
+`ld-linux --library-path /writable/lib /usr/bin/app` is the CLI equivalent of
+`LD_LIBRARY_PATH`: with a compatible dependency there and control of the loader's
+arguments, the substituted library's constructors run first. A loader feature, not an
+escalation (a setuid target gains nothing), it matters only where the attacker controls
+the invocation; reject it, and adapt the test harness without an exception. IPE
+rejects the mapping independently, so CLI denial is defense in depth. Reject before
+parsing, allocating or loading; denial must survive OOM, duplicate or mutated
+environment entries, reloads, alternate roots and static loading. Upstream fixes for
+retained APIs remain separate risks; IPE constrains provenance, not memory corruption.
 
 ## Reliability Considerations
 
-Test public getters and mutation, ordinary and secure execution, static/shared linking, direct loader execution, malformed inputs, and post-startup changes. Assert C locale despite all LANG/LC variants. Exercise every injection route, NSS reload/unavailable results, converter aliases and short output buffers, and absence of nscd socket access. Explain policy-related upstream failures individually; never suppress a whole suite.
-
-Release injection probes must attempt constructors from attacker DSOs via every disabled source, direct loader CLI, alternate roots, and reloads. Also try dependencies, `dlopen`/`dlmopen`, static loading, relative/empty RPATH elements, and symlinks into writable storage under production IPE; untrusted native code must fail before any constructor executes. Run IPE's exec/mmap/mprotect and tampered-policy checks on both architectures.
-
-Before release, run supported form checks on both architectures and compare the same Wolfi revision with/without patches: startup, allocator throughput/RSS, vector operations, DNS/identity latency, and service/database traffic. Initial gate: no correctness failures or repeatable regression over 5% in required workloads; investigate variance and caching effects rather than weakening the policy. Retain the prior validated packages for rollback and run Werewolf's required integration checks before changing production forms.
+Test public getters and mutation, ordinary and secure execution, static and shared
+linking, direct loader execution, malformed inputs and post-startup changes; assert the
+C locale under every LANG/LC variant; exercise every injection route, NSS reload and
+unavailable results, converter aliases and short buffers, and the absent nscd socket.
+Explain each policy-related upstream failure; never suppress a suite. Release probes
+attempt constructors from attacker DSOs through every disabled source, the loader CLI,
+alternate roots, reloads, dependencies, `dlopen`/`dlmopen`, static loading, bad RPATH
+elements and symlinks into writable storage under IPE, failing before any constructor
+runs, with IPE's exec, mmap, mprotect and tampered-policy checks on both architectures.
+Before release, compare the same Wolfi revision with and without the patches (startup,
+allocator, vector operations, DNS and identity latency, service and database traffic):
+no correctness failure, no repeatable regression over 5%, variance and caching
+investigated before the policy is weakened; keep the prior packages for rollback.

@@ -34,15 +34,6 @@ pub fn platform(arch: []const u8) []const u8 {
     return if (std.mem.eql(u8, arch, "aarch64")) "linux/arm64" else "linux/amd64";
 }
 
-/// isRef reports whether s can be an image reference: up to 512 letters,
-/// digits and ._:/@-, starting with a letter or digit, so it is never a flag.
-pub fn isRef(s: []const u8) bool {
-    if (s.len == 0 or s.len > 512 or !std.ascii.isAlphanumeric(s[0])) return false;
-    for (s) |c| if (!std.ascii.isAlphanumeric(c) and std.mem.findScalar(u8, "._:/@-", c) == null)
-        return false;
-    return true;
-}
-
 /// resolve returns ref pinned as REPO@sha256:HEX. A tag, or no tag, is resolved
 /// once with crane, so the form records bytes rather than a name that may move.
 pub fn resolve(io: Io, gpa: Allocator, ref: []const u8, why: *Why) ![]const u8 {
@@ -224,7 +215,7 @@ pub fn pull(
 
 /// unpackMain is `howl _unpack DIR`: it unpacks a tar from standard input into
 /// DIR and prints one line, "FILES BYTES LEFT_OUT". Refusals go to standard error.
-pub fn unpackMain(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !void {
+pub fn unpackMain(io: Io, args: []const []const u8, why: *Why) !void {
     if (args.len != 1) return why.refuse("_unpack DIR", .{});
     const dir = args[0];
     Dir.cwd().createDirPath(io, dir) catch |err|
@@ -240,7 +231,7 @@ pub fn unpackMain(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !
     }}, &.{}) catch |err| return why.refuse("sealing: {s}", .{@errorName(err)});
     var buf: [64 << 10]u8 = undefined;
     var in = Io.File.stdin().readerStreaming(io, &buf);
-    const u = try unpack(io, gpa, &in.interface, root, why);
+    const u = try unpack(io, &in.interface, root, why);
     var out = Io.File.stdout().writerStreaming(io, &.{});
     try out.interface.print("{d} {d} {d}\n", .{ u.files, u.bytes, u.left_out });
     try out.interface.flush();
@@ -250,7 +241,7 @@ pub fn unpackMain(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !
 /// first unclean name, path through a link, or hard link to anything but a file
 /// already unpacked. Device nodes, FIFOs and sockets are counted and skipped.
 /// Only the execute bit of a mode survives, so setuid bits are dropped.
-pub fn unpack(io: Io, gpa: Allocator, r: *Io.Reader, root: Dir, why: *Why) !Unpacked {
+pub fn unpack(io: Io, r: *Io.Reader, root: Dir, why: *Why) !Unpacked {
     var tar: Tar = .{ .r = r };
     var u: Unpacked = .{};
     while (try tar.next(why)) |e| {
@@ -259,7 +250,7 @@ pub fn unpack(io: Io, gpa: Allocator, r: *Io.Reader, root: Dir, why: *Why) !Unpa
         if (name.len == 0) continue;
         u.files += 1;
         if (u.files > max_entries) return why.refuse("more than {d} entries", .{max_entries});
-        try throughNoLink(io, gpa, root, name, why);
+        try throughNoLink(io, root, name, why);
         switch (e.kind) {
             .dir => root.createDirPath(io, name) catch |err|
                 return why.refuse("{s}: {s}", .{ name, @errorName(err) }),
@@ -299,7 +290,7 @@ pub fn unpack(io: Io, gpa: Allocator, r: *Io.Reader, root: Dir, why: *Why) !Unpa
                 // strictly as the destination, including its final part: an
                 // earlier tar entry may have made either one a symlink out of
                 // the extraction tree.
-                try throughNoLink(io, gpa, root, target, why);
+                try throughNoLink(io, root, target, why);
                 var link_buf: [max_name]u8 = undefined;
                 if (root.readLink(io, target, &link_buf)) |_| return why.refuse(
                     "{s}: a hard link to {s}, which is a link",
@@ -346,7 +337,7 @@ fn clean(name: []const u8) ?[]const u8 {
 
 /// throughNoLink refuses name if any directory above it is a symbolic link,
 /// which could redirect the write outside the tree.
-fn throughNoLink(io: Io, gpa: Allocator, root: Dir, name: []const u8, why: *Why) !void {
+pub fn throughNoLink(io: Io, root: Dir, name: []const u8, why: *Why) !void {
     var buf: [max_name]u8 = undefined;
     var at: usize = 0;
     while (std.mem.findScalarPos(u8, name, at, '/')) |slash| : (at = slash + 1) {
@@ -356,7 +347,6 @@ fn throughNoLink(io: Io, gpa: Allocator, root: Dir, name: []const u8, why: *Why)
             .{ name, prefix },
         ) else |_| {}
     }
-    _ = gpa;
 }
 
 fn parentOf(io: Io, root: Dir, name: []const u8, why: *Why) !void {
@@ -595,7 +585,7 @@ pub fn bakeTree(io: Io, gpa: Allocator, k: Bake, why: *Why) !void {
 /// never see half a tree. When the registry cannot be reached, the last
 /// tree baked is kept, and the build says so. A form that carries its own
 /// baked image (howl form) keeps it.
-pub fn lay(b: *native.B) !void {
+pub fn lay(b: *native.B, resolve_only: bool) !void {
     const io = b.io;
     const gpa = b.gpa;
     var why: Why = .{};
@@ -642,6 +632,7 @@ pub fn lay(b: *native.B) !void {
                 .ref = ref,
                 .digest = pinned,
             });
+            if (resolve_only) continue;
             var writes: std.ArrayList([]const u8) = .empty;
             for (try valuesOf(gpa, svc.value, "write")) |w| {
                 if (!service.isCleanPath(w) or std.mem.findScalar(u8, w, ' ') != null)
@@ -960,14 +951,8 @@ test "numbers and checksums" {
     try testing.expectEqual(@as(u64, 7), number(&big).?);
 }
 
-test isRef {
-    for ([_][]const u8{ "nginx", "ghcr.io/acme/web:1.4", "localhost:5000/x@sha256:ab" }) |ok|
-        try testing.expect(isRef(ok));
-    for ([_][]const u8{ "", "-x", "a b", "/etc", "a;b" }) |bad| try testing.expect(!isRef(bad));
-}
-
 /// tarOf builds a tar in memory from (name, type, body, link) entries.
-fn tarOf(
+pub fn tarOf(
     gpa: Allocator,
     entries: []const struct { []const u8, u8, []const u8, []const u8 },
 ) ![]const u8 {
@@ -1015,7 +1000,7 @@ test "unpack: files, directories, links; refusals" {
         .{ "run/fifo", '6', "", "" },
     });
     var r: Io.Reader = .fixed(good);
-    const u = try unpack(io, gpa, &r, tmp.dir, &why);
+    const u = try unpack(io, &r, tmp.dir, &why);
     try testing.expectEqual(7, u.files);
     try testing.expectEqual(12, u.bytes);
     try testing.expectEqual(2, u.left_out);
@@ -1037,7 +1022,7 @@ test "unpack: files, directories, links; refusals" {
     }) |bad| {
         var bw: Why = .{};
         var br: Io.Reader = .fixed(try tarOf(gpa, &.{bad}));
-        try testing.expectError(error.Refused, unpack(io, gpa, &br, tmp.dir, &bw));
+        try testing.expectError(error.Refused, unpack(io, &br, tmp.dir, &bw));
     }
 }
 
@@ -1062,7 +1047,7 @@ test "unpack refuses a hardlink through an archive symlink" {
     });
     var r: Io.Reader = .fixed(hostile);
     var why: Why = .{};
-    try testing.expectError(error.Refused, unpack(io, gpa, &r, tmp.dir, &why));
+    try testing.expectError(error.Refused, unpack(io, &r, tmp.dir, &why));
     try testing.expectError(error.FileNotFound, tmp.dir.access(io, "copied", .{}));
 }
 

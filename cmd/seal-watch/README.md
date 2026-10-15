@@ -49,13 +49,13 @@ calls from werewolf's own programs, or a root shell, reach seal-watch.
   `/run/werewolf/seal/refused` (call, count, last pid, first time,
   promise) after each refusal. After 512 distinct calls, the rest are
   counted together as `other`, logged once.
-- **Learning** (DEV=1 build booted with `werewolf.seal=learn`): it allows
-  each call outside `never` and the argument refusals, and logs each new
-  call, program and service once, for `make seal-learn`:
+- **Learning** (DEV=1 build booted with `werewolf.seal=learn`): it allows each call
+  outside `never` and the argument refusals, and logs each new call, program and service
+  once, for `make seal-learn`:
   `{"event":"learned","call":"memfd_create","promise":"memfd","service":"app","exe":"/usr/bin/node"}`.
-  A learning machine installs no per-service filters, so every call
-  arrives here. After 4096 entries it logs `learning-full` and allows the
-  rest silently. It stays root, to read `/proc/PID/exe`.
+  A learning machine installs no per-service filters, so every call arrives here. After
+  4096 entries it logs `learning-full` and allows the rest silently. It stays root, to
+  read `/proc/PID/exe`.
 - **Shutdown:** it ignores TERM, HUP, INT and PIPE, because refused calls
   keep coming until the machine is down. Stage 3's KILL ends it.
 

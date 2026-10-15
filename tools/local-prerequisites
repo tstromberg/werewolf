@@ -276,7 +276,7 @@ def complete(target, expected, names):
 
 
 def main():
-    operation, source, destination, arch, base, report = sys.argv[1:]
+    operation, source, destination, arch, base, report, signing = sys.argv[1:]
     tree, cache, base = Path(source).resolve(), Path(destination).resolve(), Path(base).resolve()
     os.umask(0o077)
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -314,7 +314,7 @@ def main():
         if operation != 'all':
             raise ValueError('unknown operation')
         phase('policy-identity', 'Checking the local IPE signing identity')
-        key, cert = identity(cache / 'signing')
+        key, cert = identity(Path(signing))
         target = build(tree, cache, arch, base, key, cert)
         Path(report).write_text(json.dumps({
             'kernel': str(target / 'rootfs.tar'), 'stub': str(target / 'linux.efi.stub'),

@@ -53,7 +53,7 @@ link-local and metadata addresses ([cmd/fence](../../cmd/fence/README.md)).
 Built for it:
 
 1. **A narrower leash for a child**: `narrow` lines give ffmpeg and
-   ffprobe their own pledge, paths and memory, and no network, run by
+   ffprobe their own pledge and paths, and no network, run by
    their links ([narrow.md](narrow.md)).
 2. **First run**: a `before` step, as `gitea-init` is, runs `db:prepare`
    and makes the owner from the config with `tootctl` before Puma serves

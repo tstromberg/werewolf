@@ -295,27 +295,11 @@ pub fn main(init: std.process.Init) !void {
             if (d.write) write_tree else read_tree,
             nodata,
         );
-        for (s.run) |p| if (p[p.len - 1] == '/') {
-            // Every program beneath an image's directory, as Grafana runs one
-            // for each data source: the image is read-only, in the verified root.
-            const z = try gpa.dupeSentinel(u8, p[0 .. p.len - 1], 0);
-            allow(rules, z, run_file, .follow) catch |err|
-                l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
-        } else allowProgram(l, rules, gpa, p);
-        // The image's sh shim, which a service in an image of its own lacks.
-        if (allowances.has(
-            .sh,
-        ) and s.root == null and (s.pledge.contains(.exec) or s.before.len > 0))
-            allowProgram(l, rules, gpa, sh_shim);
-        allowProgram(l, rules, gpa, s.exec[0]);
-        for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
-        if (s.render) |r| {
-            allowProgram(l, rules, gpa, service_config);
-            if (r.from) |from| allowPath(l, rules, gpa, from, sandbox.read_file, nodata);
-        }
+        allowExecSet(l, rules, gpa, s, true);
+        if (s.render) |r| if (r.from) |from|
+            allowPath(l, rules, gpa, from, sandbox.read_file, nodata);
         // A narrowed program's leash is leash, reading this file.
         if (s.narrow.len > 0) {
-            allowProgram(l, rules, gpa, leash_bin);
             const file = try gpa.printSentinel("/etc/sv/{s}/service", .{name}, 0);
             allowPath(l, rules, gpa, file, sandbox.read_file, nodata);
         }
@@ -368,6 +352,7 @@ pub fn main(init: std.process.Init) !void {
         l.fail(.park, "caps net_admin: this machine does not allow netadmin", .{});
     dropTo(user, groups, keep, login) catch |err|
         l.fail(.park, "giving root up: {s}", .{@errorName(err)});
+    if (!login and !usesJit(s)) sandbox.refuseExecGain();
 
     // --- leashed --------------------------------------------------------------
 
@@ -408,12 +393,12 @@ pub fn main(init: std.process.Init) !void {
             l.fail(.park, "before {s}: {s}", .{ argv[0], @errorName(err) });
         if (term != .exited or term.exited != 0) l.fail(.park, "before {s} failed", .{argv[0]});
     }
-    if (!s.pledge.contains(.exec) and
-        (s.render != null or s.before.len > 0 or s.run.len > 0 or s.narrow.len > 0))
+    if (!login and (s.render != null or s.before.len > 0 or
+        (!s.pledge.contains(.exec) and (s.run.len > 0 or s.narrow.len > 0))))
     {
         const exec_only = sandbox.Ruleset.init(.{ .only_exec = true }) catch |err|
             l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
-        allowProgram(l, exec_only, gpa, s.exec[0]);
+        allowExecSet(l, exec_only, gpa, s, false);
         exec_only.restrict() catch |err|
             l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     }
@@ -500,13 +485,9 @@ fn narrowLink(path: []const u8) ?Link {
 /// its leash. It reads the program's narrow lines from the service's file,
 /// root's on the verified root; stacks on the service's Landlock domain and
 /// pledge its own, which no_new_privs lets it install; and becomes the
-/// program, with the arguments it was given and the environment less the
-/// service's secrets.
+/// program.
 fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !noreturn {
     const l: Leash = .{ .io = io, .ctl = null, .name = link.service, .narrowed = true };
-    // Close all but stdin, stdout and stderr: a descriptor the
-    // service left open, a socket above all, would reach past the narrowing.
-    _ = linux.close_range(3, std.math.maxInt(linux.fd_t), .{ .UNSHARE = false, .CLOEXEC = false });
     const file = try gpa.printSentinel("/etc/sv/{s}/service", .{link.service}, 0);
     const text = readRootFile(gpa, file) catch |err|
         l.fail(.park, "{s}: {s}", .{ file, @errorName(err) });
@@ -530,6 +511,7 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
 
     check(linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0)) catch
         l.fail(.park, "no_new_privs: refused", .{});
+    sandbox.refuseExecGain();
     const rules = sandbox.Ruleset.init(.{ .sockets = true }) catch |err|
         l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     for (narrow_floor) |f| allow(rules, f.path, f.access, .optional) catch {};
@@ -538,11 +520,6 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
     for (n.read) |p| allowPath(l, rules, gpa, p, read_tree, false);
     for (n.write) |p| allowPath(l, rules, gpa, p, write_tree, false);
     allowProgram(l, rules, gpa, n.program);
-    if (n.memory) |mib| {
-        const max = @as(u64, mib) << 20;
-        if (linux.errno(linux.setrlimit(.DATA, &.{ .cur = max, .max = max })) != .SUCCESS)
-            l.fail(.park, "memory {d}: refused", .{mib});
-    }
     const learn = learning();
     rules.restrict() catch |err| l.fail(.park, "Landlock: {s}", .{sandbox.whyNot(gpa, err)});
     record(io, .stderr(), .{
@@ -551,7 +528,6 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
         .program = n.program,
         .landlock = rules.abi,
         .pledge = try words(gpa, n.pledge),
-        .memory = n.memory,
         .pledged = !learn,
     });
 
@@ -564,7 +540,8 @@ fn narrow(io: Io, gpa: Allocator, link: Link, m: std.process.Init.Minimal) !nore
         l.fail(.park, "exec {s}: {s}", .{ n.program, @tagName(linux.errno(prog_rc)) });
     const argv = try gpa.allocSentinel(?[*:0]const u8, m.args.vector.len, null);
     for (m.args.vector, argv) |a, *p| p.* = a;
-    const envp = try unsecret(gpa, m.environ.block.slice, s.secrets);
+    const envp = try gpa.allocSentinel(?[*:0]const u8, m.environ.block.slice.len, null);
+    for (m.environ.block.slice, envp) |e, *p| p.* = e;
     pledgeAndExec(l, prog_rc, n.program, n.pledge, learn, argv.ptr, envp.ptr);
 }
 
@@ -595,25 +572,6 @@ fn readRootFile(gpa: Allocator, path: [:0]const u8) ![]const u8 {
         off += got;
     }
     return buf;
-}
-
-/// unsecret returns environ without loader variables (LD_*) or the variables
-/// the service's secret lines name, so a narrowed program does not hold them.
-fn unsecret(
-    gpa: Allocator,
-    environ: []const ?[*:0]const u8,
-    secrets: []const service.Secret,
-) ![:null]?[*:0]const u8 {
-    var kept: std.ArrayList(?[*:0]const u8) = .empty;
-    for (environ) |e| {
-        const entry = std.mem.span(e orelse continue);
-        const name = entry[0 .. std.mem.findScalar(u8, entry, '=') orelse entry.len];
-        if (std.mem.startsWith(u8, name, "LD_")) continue;
-        for (secrets) |sec| {
-            if (std.mem.eql(u8, sec.name, name)) break;
-        } else try kept.append(gpa, e);
-    }
-    return kept.toOwnedSliceSentinel(gpa, null);
 }
 
 /// learning reports whether the machine is learning pledges: werewolf.seal=learn
@@ -817,6 +775,64 @@ fn allowPath(
         ),
         else => l.fail(.park, "{s}: {s}", .{ path, sandbox.whyNot(gpa, err) }),
     };
+}
+
+/// allowExecSet grants execute on the programs s may run: s.exec[0] always;
+/// s.run, sh_shim and leash (for narrow links) when s pledges exec; and
+/// s.before and service-config while setup runs.
+fn allowExecSet(
+    l: Leash,
+    rules: sandbox.Ruleset,
+    gpa: Allocator,
+    s: service.Service,
+    with_setup: bool,
+) void {
+    allowProgram(l, rules, gpa, s.exec[0]);
+    if (s.pledge.contains(.exec) or with_setup) {
+        for (s.run) |p| if (p[p.len - 1] == '/') {
+            // Every program beneath an image's directory, as Grafana runs one
+            // for each data source: the image is read-only, in the verified root.
+            const z = gpa.dupeSentinel(u8, p[0 .. p.len - 1], 0) catch
+                l.fail(.park, "out of memory", .{});
+            allow(rules, z, run_file, .follow) catch |err|
+                l.fail(.park, "{s}: {s}", .{ p, sandbox.whyNot(gpa, err) });
+        } else allowProgram(l, rules, gpa, p);
+        // The image's sh shim, which a service in an image of its own lacks.
+        if (allowances.has(.sh) and s.root == null and
+            (s.pledge.contains(.exec) or s.before.len > 0))
+            allowProgram(l, rules, gpa, sh_shim);
+        if (s.narrow.len > 0) allowProgram(l, rules, gpa, leash_bin);
+    }
+    if (with_setup) {
+        for (s.before) |b| allowProgram(l, rules, gpa, b[0]);
+        if (s.render != null) allowProgram(l, rules, gpa, service_config);
+    }
+}
+
+/// usesJit reports whether s runs a JIT compiler (PostgreSQL's LLVM, PHP's
+/// PCRE2/OPcache, the JVM, .NET, BEAM, or Node without --jitless), or an
+/// OCI image on a machine that allowed jit. Every other service sets
+/// Memory-Deny-Write-Execute on itself even when the machine allowed jit.
+fn usesJit(s: service.Service) bool {
+    if (s.root != null) return true;
+    if (isJitProgram(s.exec[0])) {
+        for (s.exec[1..]) |arg| {
+            if (std.mem.eql(u8, arg, "--jitless") or std.mem.eql(u8, arg, "jit=off")) return false;
+        }
+        return true;
+    }
+    for (s.run) |p| if (isJitProgram(p)) return true;
+    return false;
+}
+
+fn isJitProgram(path: []const u8) bool {
+    const base = std.fs.path.basename(path);
+    for ([_][]const u8{
+        "postgres", "php", "php-fpm", "java", "dotnet", "beam.smp", "erl", "node", "nodejs",
+    }) |jit| {
+        if (std.mem.eql(u8, base, jit)) return true;
+    }
+    return false;
 }
 
 /// allowProgram lets the service run path and its ELF interpreter, which the
@@ -1257,18 +1273,18 @@ test "a narrowed program's floor is within its service's" {
     }
 }
 
-test unsecret {
-    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
-    defer arena.deinit();
-    const environ = [_:null]?[*:0]const u8{ "PATH=/usr/bin", "TOKEN=hunter2", "TOKENS=x", "LANG" };
-    const kept = try unsecret(
-        arena.allocator(),
-        &environ,
-        &.{.{ .name = "TOKEN", .path = "/run/config/x" }},
-    );
-    try testing.expectEqual(3, kept.len);
-    try testing.expectEqualStrings("PATH=/usr/bin", std.mem.span(kept[0].?));
-    try testing.expectEqualStrings("TOKENS=x", std.mem.span(kept[1].?));
-    try testing.expectEqualStrings("LANG", std.mem.span(kept[2].?));
-    try testing.expectEqual(null, kept[kept.len]);
+test usesJit {
+    var s: service.Service = .{ .exec = &.{"/usr/bin/caddy"}, .user = "caddy" };
+    try testing.expect(!usesJit(s));
+    s.exec = &.{ "/usr/bin/postgres", "-D", "/data/svc/postgres/data" };
+    try testing.expect(usesJit(s));
+    s.exec = &.{ "/usr/bin/postgres", "-D", "/data/svc/postgres/data", "-c", "jit=off" };
+    try testing.expect(!usesJit(s));
+    s.exec = &.{ "/usr/bin/node", "/app/server.js" };
+    try testing.expect(usesJit(s));
+    s.exec = &.{ "/usr/bin/node", "--jitless", "/usr/lib/mastodon/streaming/index.js" };
+    try testing.expect(!usesJit(s));
+    s.exec = &.{ "/usr/bin/supercronic", "/etc/cron/crontab" };
+    s.run = &.{"/usr/bin/php"};
+    try testing.expect(usesJit(s));
 }

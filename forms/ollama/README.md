@@ -1,12 +1,18 @@
 # Ollama - Hardened VM
 
-Models on this machine: [Ollama](https://ollama.com). The form's manifest is [form.yaml](form.yaml).
+Models on this machine: [Ollama](https://ollama.com). The form's manifest is
+[form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/ollama/index.html).
 
 ## Security Posture
 
-Ollama runs as its own user. There is no shell. Landlock and seccomp hold it to port 11434, to the registry, and to `/data/svc/ollama`. The root is read-only.
+Ollama runs as its own user. There is no shell. Landlock and seccomp hold it to port
+11434, to the registry, and to `/data/svc/ollama`. The root is read-only.
 
-- The API has no login. Put oauth2-proxy, Caddy or a tailnet in front before you serve it past this machine.
+- The API has no login. Put oauth2-proxy, Caddy or a tailnet in front before you serve
+  it past this machine.
 - A browser on another origin is refused.
 - It may run only itself, which is how a model is loaded.
 
@@ -24,7 +30,8 @@ Pull a model against the address howl prints:
 curl http://ADDRESS:11434/api/pull -d '{"model":"gemma3:4b"}'
 ```
 
-Models and the API are in [Ollama's documentation](https://github.com/ollama/ollama/blob/main/docs/api.md).
+Models and the API are in [Ollama's
+documentation](https://github.com/ollama/ollama/blob/main/docs/api.md).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -36,7 +43,9 @@ howl create ollama --with ollama --on gcp --allow-from me
 
 ### Importing data
 
-This machine starts empty. Pull a model with the client against the address howl prints. Models already on disk are in `/data/svc/ollama`, and the host cannot write that directory.
+This machine starts empty. Pull a model with the client against the address howl prints.
+Models already on disk are in `/data/svc/ollama`, and the host cannot write that
+directory.
 
 ### Known Quirks
 

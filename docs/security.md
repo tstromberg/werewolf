@@ -1,241 +1,173 @@
 # Security
 
 Werewolf assumes a service will be compromised. It limits what that
-service can read, change, execute and reach over the network. Gaining root
-does not remove those limits: the kernel enforces them, and the process
-cannot turn them off. Some boot helpers hold broader authority and remain
-part of the trusted code.
-
-This page describes machines with security restrictions enabled. Development
-images can log some otherwise-denied system calls instead of blocking them
-(learning mode), and can provide a console shell.
+service can read, change, execute and reach over the network, and root
+does not lift those limits: the kernel enforces them. A few boot helpers
+hold more authority and remain trusted code. This page describes a
+machine with every protection ([a machine without
+some](#protections-a-machine-can-be-made-without)).
 
 ## From boot to a running service
 
-Before starting services, init (process 1) sets the kernel protections and
-installs the seal, a seccomp filter that limits system calls. It then starts
-fence, which sets network and file-access rules, gives up kernel privileges
-called capabilities, and becomes runit, the service supervisor. Services and
-login sessions inherit these restrictions. A process can narrow them further,
-but cannot remove them.
+init (process 1) sets the kernel protections and installs the seal, a
+seccomp filter that refuses every system call no promise names
+([lib/seal.zig](../lib/seal.zig)). It then starts fence, which sets the
+network and file-access rules, drops capabilities, and becomes runit, the
+service supervisor. Services and logins inherit these restrictions and
+can narrow them, never lift them. If the seal or fence cannot be
+applied, init exits and the kernel panics.
 
-The seal denies system calls by default. It allows calls needed by Werewolf's
-own programs and by services. Services declare named groups of allowed calls,
-called promises, in their form: the configuration describing a VM's packages,
-services and permissions. New system calls stay blocked until the policy names
-them. The leash program applies each service's promises, user account, file
-permissions and port rules. Extra capabilities must also be declared in the form.
-
-System-call and file-access rules serve different purposes. Seccomp decides whether a process
-may make a call; Landlock decides which files and TCP ports it may reach.
-For example, a service may need `openat` to read configuration, but that
-does not give it access to every file. Werewolf's own programs also separate
-untrusted input from privileged work and give up privileges they no longer
-need ([programs](programs.md)).
-
-If the seal or fence cannot be applied, init does not start services.
-Init exits, causing the kernel to panic and stop the machine.
+A service declares in its form the promises (named groups of system
+calls) it needs, its user, its files and its ports, and leash applies
+them ([pledge.md](design/pledge.md)); a new system call stays refused
+until a promise names it. Seccomp decides whether a process may make a
+call, Landlock which files and TCP ports it may reach. Werewolf's own
+programs are privilege-separated ([programs.md](programs.md)).
 
 ## Keeping kernel protections set
 
-Some kernel protections are one-way. Once module loading is disabled,
-root cannot load another module. Kernel lockdown, which restricts access to
-kernel memory and hardware, cannot be lowered from confidentiality mode.
-Setting `kernel.yama.ptrace_scope=3` prevents tracing another
-process, and `kernel.unprivileged_bpf_disabled=1` cannot be reset during
-that boot.
+Some protections are one-way for the boot: the module loader closed,
+lockdown in confidentiality mode, `kernel.yama.ptrace_scope=3` and
+`kernel.unprivileged_bpf_disabled=1` cannot be lowered, by root either.
+The rest would stay writable by root, so fence closes the route: under
+its Landlock rules no process can open a file in `/proc/sys` for writing,
+write `/sys`, or open a disk or device the policy does not name; no
+promise overrides that. `syslog(2)` can set `kernel.printk` without a
+file, so the seal lets it read the log and refuses the rest. A
+descriptor opened before confinement keeps its access, so init closes
+each sysctl file after writing it.
 
-Other settings would normally remain writable by root. Fence closes that
-route: processes subject to its Landlock rules cannot open `/proc/sys` files for
-writing, even as root. Settings such as `vm.memfd_noexec`,
-`kernel.kptr_restrict` and `kernel.io_uring_disabled` therefore stay set.
-The same rules deny writes to `/sys` and access to disks and devices
-the policy does not name.
+The seal refuses eBPF, perf, module and kexec calls, io_uring,
+userfaultfd, kernel keyrings and the `process_vm_*` calls, and checks
+arguments to close AF_ALG, kernel TLS, notification pipes and new seccomp
+listeners; a call in another architecture, or x86's x32 convention,
+kills the caller. User namespaces are off; the command line disables
+debugfs, forced writes through `/proc/self/mem` and, on x86_64, 32-bit
+emulation; IPv6 and KVM are off unless the form allows them. An oops, or
+a warning once the limit is set, panics and reboots: a damaged kernel
+does not run on, at the price of a denial of service.
+[cmd/init/kernel.zig](../cmd/init/kernel.zig) holds every setting,
+[lockdown.md](design/lockdown.md) the reasoning, and the
+[survey](cve-mitigation-survey.md) what each stops.
 
-Sysctls are kernel settings normally changed by writing files in `/proc/sys`.
-There is no `sysctl` promise. The file-access promises `rpath` and `wpath` cannot
-override fence. The old `_sysctl(2)` call was removed in Linux 5.5; no promise allows
-it. An alternate interface still needs its own restriction: `syslog(2)`
-can change `kernel.printk` without opening a file. The seal permits reading
-the log through that call, but refuses console changes and log clearing.
-
-Denying new opens does not revoke access through an already-open file descriptor.
-Init closes each sysctl descriptor after writing it. New boot code must do the
-same: passing an open descriptor to a confined process would preserve its
-earlier access.
-
-The protections reduce both the kernel code an attacker can reach and
-the information available to an exploit. The seal refuses eBPF, perf,
-module and kexec calls, io_uring, userfaultfd, kernel keyrings and the
-`process_vm_*` calls for another process's memory. It also checks arguments
-to close interfaces such as AF_ALG, kernel TLS, notification pipes and new
-seccomp listeners. Calls using an unexpected architecture or x86's x32 calling
-convention kill the caller.
-
-Kernel addresses are hidden, kernel logs require privilege, and user
-namespaces are disabled. Address randomization and a minimum mapping
-address make memory exploits harder. The command line disables debugfs,
-forced writes through `/proc/self/mem`, and, on x86_64, 32-bit syscall
-emulation. IPv6 and KVM are disabled unless the form allows them. The
-[settings in init](../cmd/init/kernel.zig) and
-[lockdown design](design/lockdown.md) give the exact controls.
-
-A kernel fault (an oops) or the first warning after the warning limit is set
-causes a panic and reboot. This stops a kernel left damaged by a failed exploit
-from continuing to run. It also means an attacker who can provoke such a
-warning can cause a denial of service.
-
-The kernel logs blocked program execution, file access and service system calls.
-The audit configuration is locked, and init removes the capability that controls
-it. Notices reach the serial console so the host can retain them outside
-the guest. The seal-watch program separately reports calls refused by the seal.
+The kernel logs refused execs, file access and service system calls; the
+audit configuration is locked, and init drops the capability that
+controls it. Notices reach the serial console, so the host keeps them
+outside the guest. seal-watch reports what the seal refuses.
 
 ## The helpers outside fence
 
-A few programs must start before fence and do not inherit its restrictions.
-They need separate limits, and their security matters to the whole
-machine.
-
-The mount broker keeps `CAP_SYS_ADMIN` to mount filesystems during updates,
-acceptance of a trial boot, and shutdown. It accepts fixed requests, not
-arbitrary paths or mount options. Its seccomp filter limits
-the calls it can make, but it remains privileged code outside Landlock.
-Code execution inside the broker would cross the boundary that confines
-services. Any root process can ask for its supported mounts, including
-filesystems holding boot files
-([mount broker](../cmd/mount-broker/README.md)).
-
-The DHCP renewal process keeps `CAP_NET_ADMIN`, but its Landlock rules limit
-writes to its state directory. Seal-watch gives up root and installs a filter
-that prevents further file opens. Stage0, the early boot program, leaves a
-watchdog called deadman that can reboot a trial image not yet accepted as healthy.
-
-Programs started by the kernel itself also sit outside init's seal.
-Init empties `kernel.modprobe` and `kernel.hotplug`, and limits kernel
-helpers to `CAP_SYS_BOOT`. Fence prevents its descendants from rewriting
-those sysctls to arrange for another program to run.
+The mount broker keeps `CAP_SYS_ADMIN` to mount during updates, slot
+commits and shutdown. It takes fixed requests, not paths or options,
+lends no mount, and answers only the updater, slot-keep and runit's
+shutdown stage, each through a descriptor init gave it. It is privileged
+code outside Landlock: code execution in it crosses the boundary that
+confines services ([cmd/mount-broker/README.md](../cmd/mount-broker/README.md)).
+The DHCP renewal keeps `CAP_NET_ADMIN`, with Landlock on its writes;
+seal-watch drops root and refuses itself further opens; stage0 leaves
+deadman, a watchdog that reboots a trial slot not yet committed. Helpers
+the kernel starts itself sit outside init's seal, so init empties
+`kernel.modprobe` and `kernel.hotplug` and limits them to `CAP_SYS_BOOT`.
 
 ## What an attacker can keep or execute
 
-The root filesystem uses EROFS, a read-only format. The kernel's dm-verity
-checks each block against its expected hash when reading it; changed blocks
-fail to read. There is no writable layer over the image.
-The expected hash comes from stage0, so the check depends on the integrity
-of the boot chain.
+The root is EROFS, read-only, with no writable layer, and dm-verity
+checks each block as it is read; the expected hash comes from stage0, so
+this rests on the boot chain ([verified-boot.md](design/verified-boot.md)).
+Writable mounts refuse execution, setuid bits and, outside device
+filesystems, device files. Fence permits execution beneath `/usr` and
+`/oci`; leash narrows each service further. The image has no setuid or
+setgid file, and init drops the capabilities for loading kernel code,
+reaching hardware, tracing and making device nodes.
+Memory-Deny-Write-Execute refuses a mapping both writable and executable
+in every process, unless the form allows `jit`. None of this makes an
+interpreter's input trustworthy: a runtime can run a script from
+writable storage. Images built with [IPE](design/ipe.md) hold native
+executables and mappings to one verified filesystem named by a signed
+policy; IPE does not authenticate scripts either.
 
-Writable mounts refuse execution and ignore setuid bits. They also ignore
-device files, except on device filesystems. Fence permits execution beneath
-`/usr` and `/oci`; leash restricts each service further. The image contains
-no setuid or setgid files, and init removes capabilities for loading kernel
-code, accessing hardware, tracing processes and creating device nodes.
-
-Memory-Deny-Write-Execute prevents memory mappings that are both writable and
-executable, and adding execute permission to mappings that lacked it. Processes
-inherit it unless the form allows `jit` (just-in-time compilation, which
-generates machine code at runtime). Such forms give up that protection.
-
-These controls do not make an interpreter's input trustworthy. A shell or
-runtime can read and execute a script from writable storage. Mount flags
-and Landlock also do not authenticate every executable mapping. Images built with
-the optional [Integrity Policy Enforcement (IPE)](design/ipe.md) feature restrict
-native executables and mappings to one verified filesystem named by a signed
-policy, including for boot helpers. IPE does not authenticate scripts.
-
-Persistent state lives on `/data`, encrypted with LUKS2 when a key is
-supplied. Init formats only blank storage. If it cannot open or repair an
-existing volume, it leaves it untouched, mounts an empty read-only tmpfs
-at `/data`, and prevents the trial image from being accepted as healthy.
-
-Shared temporary directories use link and file protections. Writable
-mounts refuse symlink traversal with `nosymfollow`, except `/data` and
-kernel-managed filesystems. Building update images needs links on `/data`, so
-code walking that tree must reject links that would give access outside
-its permitted files.
-
-`/proc` hides other users' processes. Root owns `/run`; `/tmp` and `/dev/shm`
-are shared. Boot secrets are unpacked into `/run/config`, accessible only to
-root (mode 0700). The data key is removed after the encrypted volume is opened.
+Persistent state lives on `/data`, LUKS2 when a key is supplied. init
+formats only blank storage; a volume it cannot open is left untouched,
+`/data` becomes an empty read-only tmpfs, and the trial slot cannot
+commit. Writable mounts refuse symlink traversal (`nosymfollow`) except
+`/data`, which update builds need links on, so code walking it must
+refuse links that lead outside its permitted files. `/proc` hides other
+users' processes. Boot secrets are unpacked into `/run/config`, root's
+alone; the data key is removed once the volume is open.
 
 ## Reaching other machines
 
-Each form declares which ports services listen on and what traffic they send.
-Fence denies undeclared traffic in both directions; Landlock also restricts
-TCP ports. The network policy does not track connections and usually names ports
-rather than destination hosts. Permission to connect to HTTPS therefore does not
-confine a process to one server ([fence](design/fence.md)).
-
-Fence drops `CAP_SYS_ADMIN`, `CAP_NET_ADMIN` and `CAP_NET_RAW`. Forms may
-explicitly retain the network capabilities for packet capture or network
-administration. Those allowances weaken the network boundary: a process
-with them can reconfigure networking or send traffic below fence's rules.
-
-`minimal` and `prod` have no listening services. Where SSH is present, it defaults
-to hardware security keys requiring a touch, with no passwords or forwarding.
-`playground` accepts ordinary keys too. Each form's configuration and posture
-results show these differences.
+Each form declares the ports its services listen on and the traffic they
+send; fence drops the rest both ways, and Landlock restricts TCP ports
+too. The policy does not track connections and names ports rather than
+hosts: leave to connect to HTTPS does not confine a process to one server
+([fence.md](design/fence.md)). Fence drops `CAP_SYS_ADMIN`,
+`CAP_NET_ADMIN` and `CAP_NET_RAW`; a form that keeps the network
+capabilities can send below fence's rules. `minimal` and `prod` listen
+on nothing. Where sshd runs, it takes security keys with a touch, no
+passwords, no forwarding; `playground` accepts ordinary keys too.
 
 ## Updates and the next boot
 
-Package updates verify repository signatures before composing an image.
-Published releases have signed manifests. IPE machines configured to trust a
-signed update channel install complete [signed system images](design/prebuilt-images.md),
-with signing keys kept off the guest. Images assembled locally have no release signature.
+The updater verifies repository signatures before composing an image;
+releases carry signed manifests; IPE machines trusting a signed channel
+install complete [signed images](design/prebuilt-images.md), the keys
+kept off the guest. Two slots each hold an image. A new one gets one
+boot; committing marks it healthy, and a panic, a failed boot or
+deadman's timeout returns to the previous slot. That recovers the image,
+not `/data` ([updater.md](updater.md), [releases.md](releases.md)).
+To protect the next boot, firmware must verify the signed unified kernel
+image (loader, kernel, stage0, command line): an unchecked one defeats
+the rest even with a signed root. A changed boot configuration can still
+select an older signed image; the TPM-held minimum version that prevents
+it is unfinished ([verified-boot.md](design/verified-boot.md)). All of
+this runs inside the guest, so the hypervisor must be trusted.
 
-Updates use two slots, each holding a system image. A new image gets one boot
-attempt; committing marks it healthy and selects it for future boots. A panic,
-failed boot or the deadman watchdog's timeout returns to the previous slot.
-This recovers the system image; persistent data is not rolled back
-([updates](updater.md), [releases](releases.md)).
+## Protections a machine can be made without
 
-Authentication must extend through the boot chain to protect that next
-boot. Firmware must verify bootloader and kernel bundle signatures against
-trusted keys. These bundles are called unified kernel images (UKIs).
-An unchecked kernel, stage0 or command line can defeat these restrictions even if the root image was signed.
+Three protections reach across reboots: Secure Boot checks the boot
+files, a TPM records which releases may boot, and IPE runs only native
+code from the verified root. `howl --disable=secureboot,tpm,ipe` makes a
+machine without them, which every provider but Lima and QEMU needs for
+now ([cli](design/cli.md)). Nothing disables them by default: a build
+refuses an image that would lack a protection `--disable` does not name,
+and says how to give it; make's test builds name theirs (`DISABLE`). The
+command line names what the machine lacks (`werewolf.disable`), and
+posture and the login message say so. The keys a build signs with live
+in `$XDG_DATA_HOME/howl` (`~/.local/share/howl`), never in `build/`: a
+machine takes only updates signed with them, so back that directory up.
 
-The updater checks image version numbers, but changing the boot configuration
-can still select an older signed image. Preventing this requires a minimum
-accepted version protected by a Trusted Platform Module (TPM); that protection
-is unfinished ([verified boot](design/verified-boot.md)).
+| Disabled | What that allows |
+| --- | --- |
+| `secureboot` | Boot files that are not signed run. Unsigned boot code could ignore the TPM, so `tpm` goes with it. |
+| `tpm` | Booting an older signed release. |
+| `ipe` | The machine builds its next slot from packages in `/data`, where root can change it before it boots. Native code is held to the verified root by mount flags and Landlock only. |
 
-These protections operate inside the guest. The hypervisor can change its
-memory and boot input and must be trusted.
+One profile provides all three, so for now they go together. Without
+them a running machine keeps its seal, fence and verified root: root
+still cannot run a program the image lacks, but can choose what boots
+next. `--dev` makes a development image: busybox-full, seal learning
+mode (refused calls logged, not blocked) and, with `werewolf.debug=1`,
+a root shell on the console without a password. It needs
+`--disable=secureboot,tpm,ipe`; howl never publishes it, and posture's
+`processes-no-root-console` fails while the shell is offered.
 
 ## Not done, by choice
 
-Some additional controls have costs or conflict with the network policy.
-Freed memory is not wiped because of the performance cost; memory is
-cleared on allocation, slab caches stay separate and page allocation is
-shuffled. CPU vulnerability mitigations are not forced for every process.
-Werewolf's long-lived programs request them where the host supports them.
-
-Reverse-path filtering conflicts with fence's per-user routing. Forms
-allowing IPv6 accept constrained router advertisements because many
-networks need them to obtain a route. `posture --extended` reports these
-choices.
-
-The seal also has a cost. On an M4 Max with Alpine's 6.18 kernel,
-`getpid` took about 150 ns with a filter versus 125 ns without. That
-measurement does not predict an application's total overhead.
+Freed memory is not wiped, for its cost: memory is cleared on
+allocation, slab caches stay separate and page allocation is shuffled.
+CPU mitigations are not forced on every process; werewolf's long-lived
+programs ask for them. Reverse-path filtering conflicts with fence's
+per-user routing, and a form that allows IPv6 takes constrained router
+advertisements, which many networks need for a route. `posture
+--extended` reports these. The seal costs about 25 ns a call (`getpid`
+on an M4 Max: 150 ns against 125).
 
 ## Checking a machine
 
-Run `/usr/lib/werewolf/posture --json` as root to test the machine's protections.
-The posture program also runs each boot and saves `/run/werewolf/posture.json`.
-A setting's current value alone does not prove that an attacker cannot
-change it.
-
-The `files-system-writes` check tries both write-only and read/write opens
-on sysctls under `kernel`, `vm`, `user`, `fs` and `net`, plus `/sys` and a
-disk. It writes nothing. Existing targets must return `EACCES` (permission denied), and
-`kernel.printk` must exist. The `kernel-log-control` check also tries
-`syslog(SYSLOG_ACTION_CONSOLE_LEVEL)` with the current valid level. The call
-must be refused; using the current level keeps the probe safe on an
-unprotected machine.
-
-Other checks test executable mounts, anonymous memory-backed files (`memfd`),
-the seal, capabilities, network restrictions and audit. `--attack` tries service escapes.
-`make check` boots images and checks their posture; each form declares its
-expected weaknesses ([posture](posture.md), [testing](testing.md)).
-
-The [sysctl review](audit/muse-sysctl-2026-10-12.md) records the reproduced
-`syslog` bypass, its fix, and the tested limits of this boundary.
+`/usr/lib/werewolf/posture --json`, as root, tries each protection
+rather than reading its setting, and runs at every boot
+([posture.md](posture.md)); `make check` holds every form's posture to
+the weaknesses it declares ([testing.md](testing.md)). The [sysctl
+review](audit/muse-sysctl-2026-10-12.md) records the reproduced
+`syslog` bypass, its fix and the tested limits.

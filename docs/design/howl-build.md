@@ -92,9 +92,8 @@ A bug in `lib/image.zig` reaches the build and every machine's updates.
 
 ## Reliability Considerations
 
-The module step refuses an empty list. apko retries network errors (howl; make, for locks). zstd dates
-`stage0.zst` to its cpio's second, so the step dates it now. A disk's size
-and arguments sit beside it in `disk.img.options`, rewritten only when they
-change, so new ones rebuild it. Open: a tagged leaf named before an
-untagged one sharing a dependency loads first (no form has such a pair;
-fix it with the updater's).
+The module step refuses an empty list. apko retries network errors (howl; make, for
+locks). zstd dates `stage0.zst` to its cpio's second, so the step dates it now. A disk's
+size and arguments sit beside it in `disk.img.options`, rewritten only when they change,
+so new ones rebuild it. Open: a tagged leaf named before an untagged one sharing a
+dependency loads first (no form has such a pair; fix it with the updater's).

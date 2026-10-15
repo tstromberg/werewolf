@@ -137,7 +137,6 @@ services:
       - /usr/bin/ffmpeg pledge stdio rpath wpath proc
       - /usr/bin/ffmpeg read /data/svc/mastodon
       - /usr/bin/ffmpeg write /data/svc/mastodon
-      - /usr/bin/ffmpeg memory 512
     # The site's domain (Caddy's too), its owner and the owner's password,
     # from the machine's config. The domain is Mastodon's identity: secrets.rb
     # records it on the first start and refuses another. single-user makes it
@@ -205,11 +204,9 @@ services:
       - /usr/bin/ffmpeg pledge stdio rpath wpath proc
       - /usr/bin/ffmpeg read /data/svc/mastodon-jobs /data/svc/mastodon/system
       - /usr/bin/ffmpeg write /data/svc/mastodon-jobs
-      - /usr/bin/ffmpeg memory 512
     # Mail, which the jobs send for the web: by an e-mail provider's SMTP
     # relay, from the machine's settings, over TLS it verifies. Without them
-    # no mail leaves. The password is a secret, never logged, and narrowed
-    # programs never see it.
+    # no mail leaves. The password is a secret, never logged.
     config: settings /run/config/mastodon-jobs/settings.json
     setting:
       - smtp-server hostname as SMTP_SERVER

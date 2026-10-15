@@ -576,7 +576,9 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     });
     // Let replies in from each protocol and port some user connects to, once:
     // TCP to the kernel's ephemeral range, UDP to unprivileged ports (so
-    // Unbound and dnsmasq may randomize across 1024..65535).
+    // Unbound and dnsmasq may randomize across 1024..65534). The kernel
+    // refuses a range that ends at 65535 (fib_rule_port_range_valid), so a
+    // reply to that one port is dropped.
     for (p.connect[0..p.nconnect], 0..) |c, i| {
         if (c.proto == .icmp or c.any) continue;
         const seen = for (p.connect[0..i]) |d| {
@@ -589,7 +591,7 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .proto = c.proto,
             .sport = c.port,
             .dport = if (c.proto == .tcp) ephemeral_lo else 1024,
-            .dport_last = if (c.proto == .tcp) ephemeral_hi else 65535,
+            .dport_last = if (c.proto == .tcp) ephemeral_hi else 65534,
         });
     }
     // Replies to a connection opened to an arbitrary port. Matching every
@@ -1246,6 +1248,22 @@ test "shared writable binds allow IPC at both paths and read-only binds grant no
     try std.testing.expectEqualStrings("/data/share/unifi/bus", std.mem.span(item.path));
     try std.testing.expect(item.sockets);
     try std.testing.expectEqual(null, b.next());
+}
+
+// The kernel refuses a port range that ends at 65535 with EINVAL, and
+// fence, PID 1 then, dies on it.
+test "every port range is one the kernel accepts" {
+    var rules: [max_rules]Rule = undefined;
+    const p = try parsePolicy(example ++ "connect 70 udp 7844\nconnect 71 tcp any\n");
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |family| {
+        for (plan(p, family, &rules)) |r| {
+            if (r.sport) |source| try std.testing.expect(source != 0 and source < 0xffff);
+            if (r.dport) |first| {
+                const last = r.dport_last orelse first;
+                try std.testing.expect(first != 0 and first <= last and last < 0xffff);
+            }
+        }
+    }
 }
 
 test "private ports drop arrivals before forged replies can admit them" {

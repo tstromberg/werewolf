@@ -15,7 +15,9 @@
 # No form carries a shell but those that log people in (sshd, lima,
 # prod-ssh) and DEV=1 builds, which add busybox-full: its shell, awk,
 # wget, nc and telnetd. make check-dist boots prod-ssh's release disk as it
-# ships: busybox for the logins sshd serves, and sshd listening.
+# ships: busybox for the logins sshd serves, and sshd listening. A DEV=1
+# build booted with werewolf.debug=1 has a root shell on its console
+# (?processes-no-root-console: whether the boot asks is the host's).
 #
 # The boot chain is not verified end to end yet (docs/design/
 # verified-boot.md): Secure Boot is off (?boot-secure-boot: it is on
@@ -23,5 +25,5 @@
 # module signatures (boot-sig-enforced), and no TPM counter guards the
 # slot serial (boot-rollback-protected). Phase 4 and phase 5 close these.
 
-dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced
+dev network-no-login programs-no-downloaders programs-no-interpreters programs-no-shell ?processes-no-root-console ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced
 * ?boot-secure-boot boot-rollback-protected boot-sig-enforced boot-ipe-enforced

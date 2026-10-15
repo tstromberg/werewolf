@@ -184,7 +184,8 @@ class Provider:
             self.run(['az', 'group', 'create', '-n', self.name, '-l', 'westus2', '-o', 'none'])
         # This adapter exercises the legacy cloud slot path, without local
         # exact-pair TPM enrollment. Protected-default CLI tests are separate.
-        args = [self.howl, 'create', self.name, '--insecure', '--with', self.fixture['form'],
+        args = [self.howl, 'create', self.name, '--disable=secureboot,tpm,ipe',
+                '--with', self.fixture['form'],
                 '--on', self.kind, '--arch', self.fixture['arch'], '--build',
                 '--config', str(self.config), '--allow-from', 'me']
         size = self.env.get('CLOUD_SIZE')

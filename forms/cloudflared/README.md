@@ -1,6 +1,11 @@
 # cloudflared - Hardened VM
 
-A machine that serves hostnames on the Internet with no port open to it: [cloudflared](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/). The form's manifest is [form.yaml](form.yaml).
+A machine that serves hostnames on the Internet with no port open to it:
+[cloudflared](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
+The form's manifest is [form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/cloudflared/index.html).
 
 ## Security Posture
 
@@ -17,7 +22,9 @@ printf '%s' 'eyJhIjoi...' >token
 howl create cloudflared --with cloudflared --tunnel-token token
 ```
 
-The token is a remotely managed tunnel, from the Cloudflare dashboard. It names the hostnames and the origins. Replace the placeholder before you create the machine. The token is an environment variable, not a file the service can read.
+The token is a remotely managed tunnel, from the Cloudflare dashboard. It names the
+hostnames and the origins. Replace the placeholder before you create the machine. The
+token is an environment variable, not a file the service can read.
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -30,7 +37,8 @@ howl create cloudflared --with cloudflared --on gcp --allow-from me --tunnel-tok
 
 ### Importing data
 
-This machine starts empty. The tunnel's hostnames live in the Cloudflare dashboard, with the token. There is no database to import.
+This machine starts empty. The tunnel's hostnames live in the Cloudflare dashboard, with
+the token. There is no database to import.
 
 ### Known Quirks
 

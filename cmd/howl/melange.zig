@@ -93,6 +93,24 @@ pub fn build(b: *B, recipe: []const u8) !void {
     try env.put("TMPDIR", scratch);
     var inputs: std.ArrayList([]const u8) = .empty;
     try inputs.append(b.gpa, recipe);
+    var pins: std.ArrayList([]const u8) = .empty;
+    if (setting("WEREWOLF_FORM_INPUTS")) |snapshot| {
+        const index = try b.path("{s}/melange.json", .{snapshot});
+        const locks = try std.json.parseFromSliceLeaky(
+            std.json.Value,
+            b.gpa,
+            try b.read(index, 1 << 20),
+            .{},
+        );
+        if (locks != .object) return b.fail("invalid form-image Melange snapshot", .{});
+        const locked = locks.object.get(recipe) orelse
+            return b.fail("missing form-image Melange snapshot for {s}", .{recipe});
+        if (locked != .string) return b.fail("invalid Melange lock filename", .{});
+        const file = try b.path("{s}/{s}", .{ snapshot, locked.string });
+        try inputs.append(b.gpa, file);
+        for (try packages.pins(b.gpa, try b.read(file, 64 << 20), @tagName(b.spec.arch))) |pin|
+            try pins.appendSlice(b.gpa, &.{ "--package-append", pin });
+    }
     if (r == .qemu) {
         try packages.kernel(b);
         const kernel = try b.path("{s}/vmlinuz", .{b.p.build});
@@ -125,7 +143,7 @@ pub fn build(b: *B, recipe: []const u8) !void {
     // Half the host's CPUs, as a Rust build is most of the wait, and 8 GiB.
     const n = std.Thread.getCpuCount() catch 1;
     const cpus = setting("MELANGE_CPU") orelse try b.path("{d}", .{if (n > 2) n / 2 else 1});
-    try b.run(&.{
+    const args = try std.mem.concat(b.gpa, []const u8, &.{ &.{
         "melange",
         "build",
         "--runner",
@@ -141,7 +159,8 @@ pub fn build(b: *B, recipe: []const u8) !void {
         try b.path("{s}/packages", .{at}),
         "--cache-dir",
         try b.path("{s}/melange-cache", .{at}),
-    }, .{ .env = &env });
+    }, pins.items });
+    try b.run(args, .{ .env = &env });
     try Dir.cwd().writeFile(b.io, .{ .sub_path = target, .data = "" });
     try b.done(target, began);
 }

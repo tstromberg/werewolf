@@ -1,7 +1,9 @@
 # forms
 
 To choose a VM, browse the [available forms and setup guides](../docs/forms-catalog.md).
-This page is the reference for defining a form.
+For prebuilt disks, see [image availability and download
+instructions](../docs/forms-catalog.md#images-and-downloads). This page is the reference
+for defining a form.
 
 Each directory here is a form ([docs/forms.md](../docs/forms.md)), and
 holds everything about it: a new form is a new directory.
@@ -24,6 +26,7 @@ last, so its files win; `make list-forms` shows each chain. CI publishes
 each form but those with melange recipes as NAME-form
 ([docs/releases.md](../docs/releases.md#packages)), and howl takes a form
 by name from there, so the machine updates it; `--build` takes this tree's.
+These are APK packages, not bootable qcow2 images; disk publication has separate gates.
 
 ## form.yaml
 
@@ -123,8 +126,9 @@ file ownership before updating a machine that used the old id.
    `packages`; and its `net`.
 2. its `services`: how leash starts each, as whom, on which ports
    ([cmd/leash](../cmd/leash/leash.zig) lists the directives).
-3. `forms/NAME/test/checks`: at least five distinct integration cases proving
-   what works and what is refused ([coverage policy](../docs/testing.md#form-integration-coverage)).
+3. `forms/NAME/test/checks`: at least five distinct integration cases proving what works
+   and what is refused ([coverage
+   policy](../docs/testing.md#form-integration-coverage)).
 4. `make check-NAME`, then name each posture failure in `weaknesses`
    with its excuse, or fix it.
 

@@ -249,6 +249,7 @@ fn isPowerPress(ev: [event_size]u8) bool {
 /// park logs why and marks the service down, so runsv does not restart a
 /// service with nothing to watch.
 fn park(io: Io, why: []const u8) noreturn {
+    sandbox.keepOnly(0) catch {};
     say(io, "{s}", .{why});
     const err = std.process.replace(io, .{ .argv = &.{ "/usr/bin/sv", "down", "." } });
     say(io, "sv down: {s}", .{@errorName(err)});

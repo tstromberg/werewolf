@@ -7,6 +7,7 @@ This guards coverage quantity; review still judges whether cases are useful.
 """
 
 import argparse
+import json
 from pathlib import Path
 import re
 import sys
@@ -71,6 +72,16 @@ def audit(root):
     rows = []
     for name, directory in sorted(forms.items()):
         own = cases(directory / "test/checks")
+        native = set()
+        plan = directory / 'test/native.json'
+        if plan.exists():
+            data = json.loads(plan.read_text())
+            if data.get('format') != 'werewolf-native-tests/1':
+                raise ValueError(f'{plan}: invalid native test format')
+            for suite in data['drivers']:
+                # A case repeated after reboot is still one behavioral case.
+                for phase in ('seed', 'verify'):
+                    native.update((suite['name'], case) for case in suite['cases'][phase])
         fixture = fixtures.get(name, set())
         host = set()
         if name in {"sshd", "prod-ssh", "playground"}:
@@ -85,9 +96,11 @@ def audit(root):
                 raise ValueError(f"test/boot: missing host check {check}")
         # Counts refer to deployments: an unshipped-code boot and a supplied-
         # code boot exercise different contracts even when a name is shared.
-        count = len(own) + len(fixture) + len(host)
+        # Migrating a shell assertion to a native client must not count it
+        # twice. Conservatively use the larger suite until legacy is retired.
+        count = max(len(own), len(native)) + len(fixture) + len(host)
         minimum, reason = exceptions.get(name, (5, ""))
-        rows.append((name, count, minimum, len(own), len(fixture), len(host), reason))
+        rows.append((name, count, minimum, len(own), len(fixture), len(host), len(native), reason))
     return rows
 
 
@@ -95,16 +108,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("."))
     parser.add_argument("--list", action="store_true", help="show per-form counts and exception reasons")
+    parser.add_argument("--form", help="check only this form's coverage")
     args = parser.parse_args()
     try:
         rows = audit(args.root)
     except (OSError, ValueError) as error:
         print(f"form-coverage: {error}", file=sys.stderr)
         return 1
+    if args.form:
+        rows = [row for row in rows if row[0] == args.form]
+        if not rows:
+            print(f"form-coverage: no form {args.form}", file=sys.stderr)
+            return 1
     failed = []
-    for name, count, minimum, own, fixture, host, reason in rows:
+    for name, count, minimum, own, fixture, host, native, reason in rows:
         if args.list:
-            print(f"{name:20} {count:2} cases ({own} guest, {fixture} supplied-code, {host} host)"
+            print(f"{name:20} {count:2} cases ({own} guest, {fixture} supplied-code, {host} host, {native} native)"
                   + (f"; exception: {reason}" if reason else ""))
         if count < minimum:
             failed.append(f"{name}: {count} cases, needs {minimum}")

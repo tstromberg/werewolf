@@ -1,10 +1,17 @@
 # Kafka - Hardened VM
 
-An event stream for applications inside a company: [Apache Kafka](https://kafka.apache.org) 4.3 as one KRaft node. Clients use TLS and SCRAM-SHA-512. What no ACL allows is denied. The form's manifest is [form.yaml](form.yaml).
+An event stream for applications inside a company: [Apache
+Kafka](https://kafka.apache.org) 4.3 as one KRaft node. Clients use TLS and
+SCRAM-SHA-512. What no ACL allows is denied. The form's manifest is
+[form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/kafka/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
@@ -26,7 +33,9 @@ howl create kafka --with kafka --config config \
 	--admin ops --admin-password admin-password
 ```
 
-Clients use `ADDRESS:9093`, `security.protocol=SASL_SSL`, `sasl.mechanism=SCRAM-SHA-512`. `ops` is the super user. Topics and ACLs are in [Kafka's documentation](https://kafka.apache.org/documentation/#security_sasl).
+Clients use `ADDRESS:9093`, `security.protocol=SASL_SSL`,
+`sasl.mechanism=SCRAM-SHA-512`. `ops` is the super user. Topics and ACLs are in [Kafka's
+documentation](https://kafka.apache.org/documentation/#security_sasl).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -43,11 +52,13 @@ howl create kafka --with kafka --on gcp --allow-from me --config config \
 	--admin ops --admin-password admin-password
 ```
 
-From a machine that has Kafka's tools, `ops` creates a topic and grants `orders` that topic alone. Passwords are 12 to 1024 bytes.
+From a machine that has Kafka's tools, `ops` creates a topic and grants `orders` that
+topic alone. Passwords are 12 to 1024 bytes.
 
 ### Importing data
 
-Topics start empty. Producers write to the address howl prints. This form does not import a log.
+Topics start empty. Producers write to the address howl prints. This form does not
+import a log.
 
 ### Known Quirks
 
@@ -55,7 +66,8 @@ Topics start empty. Producers write to the address howl prints. This form does n
 - Users are created when the log is first formatted, not on a later start.
 - One broker and one controller. A cluster would repeat this node.
 - Bash that the package depends on is removed. Java is started directly.
-- The accounts file is `config/kafka/users`. howl's `--users` is for ssh, which this form does not run.
+- The accounts file is `config/kafka/users`. howl's `--users` is for ssh, which this
+  form does not run.
 
 ### Network Exposure
 

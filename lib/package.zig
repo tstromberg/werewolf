@@ -16,6 +16,10 @@ pub const repository = "https://dist.werewolf-linux.org/apk";
 /// /etc/apk/keys: the index's signature names it, so it must match.
 pub const repository_key = "werewolf-packages.rsa.pub";
 
+/// keyring is where an image's apko config, in BUILD/form, finds
+/// repository_key: BUILD/keys.
+pub const keyring = "../keys/" ++ repository_key;
+
 /// repository_pem is release/packages.pub, which signs the repository's
 /// index, for howl to check what it fetches with no checkout beside it.
 pub const repository_pem =

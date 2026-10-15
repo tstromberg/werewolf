@@ -1,5 +1,5 @@
 //! deployment packs the caller's image declaration as local-NAME. Its
-//! repository is signed with ~/.howl/packages.rsa; only its public key
+//! repository is signed with packages.rsa in howl's data directory; only its public key
 //! reaches the image. See docs/design/manifest.md.
 const std = @import("std");
 const forms = @import("form");
@@ -71,13 +71,8 @@ pub fn prepare(b: *native.B, config: forms.Node) !?Prepared {
     const hash = try locks.tree(b.io, b.gpa, Dir.cwd(), tree);
     try staged.writeFile(b.io, .{ .sub_path = "inputs", .data = &hash });
 
-    const home = howl.environ.get("HOME") orelse return b.fail(
-        "no HOME for ~/.howl's signing key",
-        .{},
-    );
-    const state = try b.path("{s}/.howl", .{home});
-    try Dir.cwd().createDirPath(b.io, state);
-    try Dir.cwd().setFilePermissions(b.io, state, .fromMode(0o700), .{});
+    const state = howl.dataDir(b.io, b.gpa) catch |err|
+        return b.fail("howl's data directory, for its signing key: {t}", .{err});
     const guard = try Dir.cwd().createFile(
         b.io,
         try b.path("{s}/packages.lock", .{state}),

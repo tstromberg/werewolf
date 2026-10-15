@@ -282,6 +282,7 @@ fn apply(
 
 /// park says why and marks the service down, so runsv does not start it again.
 fn park(log: *Log, why: []const u8) noreturn {
+    sandbox.keepOnly(0) catch {};
     log.event("down", .{ .reason = why });
     const argv = [_:null]?[*:0]const u8{ "/usr/bin/sv", "down", "." };
     const envp = [_:null]?[*:0]const u8{};

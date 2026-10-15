@@ -71,12 +71,12 @@ mount-broker removes /data's LUKS mapping at shutdown.
 
 ## verity
 
-Builds the dm-verity hash tree for a root image (format version 1, no
-superblock, 4 KiB blocks, SHA-256, levels top first after the data) and
-the table stage0 loads. Used by howl's build, slot-update and stage0, and
-by `tools/verity.zig` for `make check-updater`. The salt is SHA-256 of the image rather than
-random, so the build and the updater make the same tree and builds stay
-reproducible. See [docs/design/verified-boot.md](../docs/design/verified-boot.md).
+Builds the dm-verity hash tree for a root image (format version 1, no superblock, 4 KiB
+blocks, SHA-256, levels top first after the data) and the table stage0 loads. Used by
+howl's build, slot-update and stage0, and by `tools/verity.zig` for `make
+check-updater`. The salt is SHA-256 of the image rather than random, so the build and
+the updater make the same tree and builds stay reproducible. See
+[docs/design/verified-boot.md](../docs/design/verified-boot.md).
 
 ## image
 
@@ -93,8 +93,8 @@ which writes empty files from a tar. See
 ## cmdline
 
 The signed enrollment UKI uses `werewolf.bootstrap=1` with `native=1` and `secure=1`.
-Its separately measured recovery variant adds `werewolf.recovery=1`; neither mode accepts workload options.
-Ordinary stage0 refuses workload handover in either mode.
+Its separately measured recovery variant adds `werewolf.recovery=1`; neither mode
+accepts workload options. Ordinary stage0 refuses workload handover in either mode.
 
 Parses the `werewolf.*` words of the kernel command line for stage0,
 init, mount-broker, slot-update, leash, posture and others:
@@ -230,10 +230,10 @@ Checks form.yaml's `sshd:` and `bastion:` at build time (via lib/form).
 
 ## service
 
-Parses a service file, `/etc/sv/NAME/service`, for leash (which starts the
-service, and narrows a program it runs), howl pack (its config and setting
-flags), `seal` (its pledge) and compose (the machine's promises). Each reads the whole file the same
-way. cmd/leash/README.md documents the lines, including caps and a shared data directory.
+Parses a service file, `/etc/sv/NAME/service`, for leash (which starts the service, and
+narrows a program it runs), howl pack (its config and setting flags), `seal` (its
+pledge) and compose (the machine's promises). Each reads the whole file the same way.
+cmd/leash/README.md documents the lines, including caps and a shared data directory.
 
 ## settings
 

@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Build and run declared shell-free integration clients; never alter production services."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import tarfile
+
+IDENT = re.compile(r'[a-z][a-z0-9-]*\Z')
+ACCOUNT = re.compile(r'[a-z_][a-z0-9_-]*\Z')
+
+
+def call(*args, **kw):
+    return subprocess.run([str(a) for a in args], check=True, **kw)
+
+
+def read_plan(form):
+    path = Path('forms') / form / 'test/native.json'
+    plan = json.loads(path.read_text())
+    if set(plan) - {'format', 'packages', 'drivers', 'legacy'} or plan.get('format') != 'werewolf-native-tests/1':
+        raise ValueError('invalid native test plan')
+    if not isinstance(plan.get('legacy', False), bool):
+        raise ValueError('legacy must be a boolean')
+    if not plan['drivers'] or len(plan['drivers']) > 32:
+        raise ValueError('expected 1..32 drivers')
+    names = set()
+    for d in plan['drivers']:
+        required = {'name', 'source', 'mode', 'user', 'pledge', 'read', 'connect', 'run', 'cases'}
+        if not required <= set(d) or set(d) - required - {'config'}:
+            raise ValueError('invalid driver fields')
+        for field in ('name', 'mode'):
+            if not IDENT.fullmatch(d[field]):
+                raise ValueError('invalid driver identity')
+        if not ACCOUNT.fullmatch(d['user']):
+            raise ValueError('invalid driver account')
+        if d['user'] == 'root' or not d['name'].startswith('test-') or d['name'] in names:
+            raise ValueError('driver needs a unique test name and non-root identity')
+        names.add(d['name'])
+        source = Path(d['source'])
+        if source.name != d['source'] or source.suffix != '.zig' or not (path.parent / source).is_file():
+            raise ValueError('driver source must be adjacent Zig source')
+        if set(d['cases']) != {'seed', 'verify'}:
+            raise ValueError('declare seed and verify cases')
+        for cases in d['cases'].values():
+            if not cases or len(set(cases)) != len(cases) or any(not IDENT.fullmatch(c) for c in cases):
+                raise ValueError('invalid case set')
+        if any(p not in {'stdio', 'rpath', 'wpath', 'proc', 'unix', 'connect', 'exec', 'inet'}
+               for p in d['pledge'].split()):
+            raise ValueError('unsupported test pledge')
+        for field in ('read', 'connect', 'run'):
+            for entry in d[field]:
+                if not isinstance(entry, str) or not entry.startswith('/') or '..' in Path(entry).parts or any(c.isspace() for c in entry):
+                    raise ValueError('test grants must be explicit absolute paths')
+        for name, source in d.get('config', {}).items():
+            if not IDENT.fullmatch(name) or name == 'context' or not re.fullmatch(r'/run/config/[a-z0-9/-]+', source) or '..' in source:
+                raise ValueError('invalid test config mapping')
+    for package in plan['packages']:
+        if not re.fullmatch(r'[a-z0-9][a-z0-9+_.-]*', package) or package in {'busybox', 'busybox-full', 'bash', 'dash'}:
+            raise ValueError('invalid test package')
+    return plan
+
+
+def write(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(data, (dict, list)):
+        data = json.dumps(data, sort_keys=True, indent=2) + '\n'
+    if not path.exists() or path.read_text() != data:
+        path.write_text(data)
+
+
+def prepare(form, arch):
+    plan = read_plan(form)
+    work = Path('build/native-tests') / arch / form
+    generated = work / ('native-test-' + form)
+    root = generated / 'rootfs'
+    # This directory is exclusively generated test output; clear stale drivers.
+    if generated.exists():
+        shutil.rmtree(generated)
+    excuses = call('build/host/form', 'excuses', form, capture_output=True, text=True).stdout
+    yaml = 'base: ' + form + '\npackages: ' + json.dumps(plan['packages']) + '\n'
+    # check metadata is not inherited by generated forms. Preserve the real
+    # form's memory budget (notably Greenbone) and offline network requirement.
+    check_settings = {}
+    for field in ('memory', 'offline'):
+        value = call('build/host/form', 'check', form, field, capture_output=True, text=True).stdout.strip()
+        if value:
+            if field == 'memory':
+                check_settings['memory'] = int(value)
+            elif value == 'true':
+                check_settings['offline'] = True
+    if check_settings:
+        yaml += 'check: ' + json.dumps(check_settings) + '\n'
+    if excuses.strip():
+        yaml += 'weaknesses:\n'
+        for line in excuses.splitlines():
+            key, reason = line.split(' ', 1)
+            yaml += '  ' + key + ': ' + json.dumps(reason) + '\n'
+    write(generated / 'form.yaml', yaml)
+    write(root / 'usr/share/werewolf/test-image', 'werewolf-native-tests/1\n')
+    compile_dir = work / 'compile'
+    write(compile_dir / 'stage.zig', Path('test/native/stage.zig').read_text())
+    write(compile_dir / 'plan.json', {'drivers': [dict(name=d['name'], wait=sorted({
+        p for p in d['read'] + d['connect'] if p.startswith('/run/svc/')})) for d in plan['drivers']]})
+
+    def compile(source, binary):
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        call('zig', 'build-exe', '-O', 'ReleaseSafe', '-fstrip', '-target', arch + '-linux-musl',
+             '--dep', 'test-driver', '-Mroot=' + str(source), '-Mtest-driver=test/native/driver.zig',
+             '-femit-bin=' + str(binary))
+
+    compile(compile_dir / 'stage.zig', root / 'usr/lib/werewolf/test-stage')
+    (root / 'etc/runit').mkdir(parents=True)
+    (root / 'etc/runit/2').symlink_to('/usr/lib/werewolf/test-stage')
+    for d in plan['drivers']:
+        binary = '/usr/lib/werewolf/' + d['name']
+        compile(Path('forms') / form / 'test' / d['source'], root / binary.lstrip('/'))
+        service = [f'exec {binary} {d["name"]} {d["mode"]} /run/svc/{d["name"]}/context',
+                   'user ' + d['user'], 'pledge ' + d['pledge'],
+                   'config context /run/config/tests/context', 'memory 128', 'nofile 128']
+        for field in ('read', 'connect', 'run'):
+            service.extend(field + ' ' + item for item in d[field])
+        service.extend('config ' + name + ' ' + source for name, source in d.get('config', {}).items())
+        write(root / 'usr/share/werewolf/tests' / d['name'] / 'service', '\n'.join(service) + '\n')
+    print('native-tests: prepared ' + str(generated), flush=True)
+
+
+def validate(text, plan, context):
+    cases, drivers, completed = set(), set(), False
+    expected = {(d['name'], name) for d in plan['drivers'] for name in d['cases'][context['phase']]}
+    expected_drivers = {d['name'] for d in plan['drivers']}
+    for line in text.splitlines():
+        if 'werewolf-test: ' not in line:
+            continue
+        raw = line.split('werewolf-test: ', 1)[1]
+        if len(raw) > 4096:
+            raise ValueError('oversize test record')
+        record = json.loads(raw)
+        if not isinstance(record, dict):
+            raise ValueError('test record must be an object')
+        if record.get('run') != context['run'] or record.get('phase') != context['phase']:
+            raise ValueError('stale or foreign test result')
+        if completed or record.get('status') != 'pass':
+            raise ValueError('failed test or output after completion: ' + raw)
+        event = record.get('event')
+        if event == 'case':
+            key = (record.get('suite'), record.get('case'))
+            if key not in expected or key in cases or key[0] in drivers:
+                raise ValueError('unexpected or duplicate case')
+            cases.add(key)
+        elif event == 'driver':
+            name = record.get('suite')
+            if name not in expected_drivers or name in drivers:
+                raise ValueError('unexpected or duplicate driver')
+            if any(key not in cases for key in expected if key[0] == name):
+                raise ValueError('driver omitted cases')
+            drivers.add(name)
+        elif event == 'complete':
+            if cases != expected or drivers != expected_drivers:
+                raise ValueError('incomplete test run')
+            completed = True
+        else:
+            raise ValueError('unknown test event')
+    if not completed:
+        raise ValueError('no completion record')
+    return len(cases)
+
+
+def compare(form, arch):
+    """Test dependencies may add files, but must not replace the runtime payload."""
+    base = Path(os.environ.get('BUILD', 'build/' + arch))
+    before, after = base / form, base / ('native-test-' + form)
+    # Generated records legitimately identify a different form/root. Service
+    # policies, binaries, account identities and machine-wide policy do not.
+    for directory in ('etc/sv', 'etc/werewolf/allow'):
+        one, two = before / 'ro' / directory, after / 'ro' / directory
+        def tree(path):
+            return {str(p.relative_to(path)): ('link', os.readlink(p)) if p.is_symlink()
+                    else ('file', hashlib.sha256(p.read_bytes()).hexdigest())
+                    for p in path.rglob('*') if p.is_file() or p.is_symlink()}
+        if tree(one) != tree(two):
+            raise ValueError('native tests changed production ' + directory)
+    for name in ('pledge', 'net', 'weaknesses'):
+        a, b = before / 'meta/usr/share/werewolf' / name, after / 'meta/usr/share/werewolf' / name
+        if a.read_bytes() != b.read_bytes():
+            raise ValueError('native tests changed production ' + name)
+    for name in ('passwd', 'group'):
+        if (before / 'ro/usr/share/werewolf/etc' / name).read_bytes() != (after / 'ro/usr/share/werewolf/etc' / name).read_bytes():
+            raise ValueError('native tests changed account identities')
+    def files(path):
+        with tarfile.open(path) as archive:
+            return {m.name.removeprefix('./'): (m.type, m.mode, m.uid, m.gid, m.linkname,
+                    hashlib.sha256(archive.extractfile(m).read()).hexdigest() if m.isfile() else '')
+                    for m in archive}
+    a, b = files(before / 'rootfs.tar'), files(after / 'rootfs.tar')
+    for name, record in a.items():
+        if name in {'etc/apko.json', 'etc/apk/world', 'etc/ld.so.cache'} or name.removeprefix('usr/') in {
+                'lib/apk/db/installed', 'lib/apk/db/scripts.tar', 'lib/apk/db/triggers'}:
+            continue
+        if b.get(name) != record:
+            raise ValueError('native dependency changed runtime file: ' + name)
+    for directory in ('bin', 'usr/bin'):
+        for name in ('sh', 'ash', 'bash', 'dash', 'busybox', 'zsh', 'ksh', 'fish'):
+            shell = directory + '/' + name
+            if shell in b and shell not in a:
+                raise ValueError('native dependency introduced a shell: ' + shell)
+    a, b = files(before / 'overlay.tar'), files(after / 'overlay.tar')
+    changed_metadata = {'etc/runit/2', 'etc/apk/world', 'usr/share/werewolf/form',
+                        'usr/share/werewolf/overlay', 'usr/share/werewolf/release'}
+    for name, record in a.items():
+        if name not in changed_metadata and b.get(name) != record:
+            raise ValueError('native instrumentation changed runtime overlay: ' + name)
+    print('native-tests: production service policies, accounts and runtime payload match', flush=True)
+
+
+def run(form, arch, qemu):
+    plan = read_plan(form)
+    check = Path(os.environ['CHECK'])
+    work = check / (form + '-native')
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True, mode=0o700)
+    disk = work / 'data.img'
+    with disk.open('wb') as f:
+        f.truncate(4 << 30)
+    config = work / 'config'
+    config.mkdir(mode=0o700)
+    (config / 'data.key').write_bytes(secrets.token_bytes(32))
+    fixture = Path('forms') / form / 'test/config'
+    if fixture.exists():
+        call(fixture, config)
+    run_id = secrets.token_hex(16)
+    results = []
+    for phase in ('seed', 'verify'):
+        context = dict(run=run_id, phase=phase)
+        write(config / 'tests/context', context)
+        packed = work / (phase + '.tar')
+        with (work / (phase + '-pack.log')).open('wb') as output:
+            call(os.environ['HOWL'], 'pack', '--build', '--with', form, '--config', config, '-o', packed,
+                 stdout=output, stderr=subprocess.STDOUT)
+        console = work / 'console'
+        write(console, 'seen native-completed werewolf-test: .*"event":"complete"\n')
+        log = work / (phase + '.log')
+        call('test/boot', form + '-native-' + phase, console, log, *qemu,
+             '-kernel', os.environ['KERNEL'], '-initrd', os.environ['OUT'] + '/initramfs.zst',
+             '-append', os.environ['CMDLINE'] + ' werewolf.data=vda',
+             '-drive', f'file={disk},format=raw,if=virtio',
+             '-drive', f'file={packed},format=raw,if=virtio,readonly=on')
+        count = validate(log.read_text(errors='replace'), plan, context)
+        results.append(dict(phase=phase, cases=count, log=str(log), sha256=hashlib.sha256(log.read_bytes()).hexdigest()))
+        print(f'native-tests: {form} {phase}: {count} assertions passed', flush=True)
+    write(work / 'results.json', dict(format='werewolf-native-results/1', form=form, arch=arch, run=run_id,
+        image=hashlib.sha256(Path(os.environ['OUT'], 'initramfs.zst').read_bytes()).hexdigest(), phases=results))
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        action, form, arch, *args = sys.argv[1:]
+        if not IDENT.fullmatch(form) or arch not in ('aarch64', 'x86_64'):
+            raise ValueError('invalid form or architecture')
+        if action == 'prepare' and not args:
+            prepare(form, arch)
+        elif action == 'compare' and not args:
+            compare(form, arch)
+        elif action == 'run' and args:
+            run(form, arch, args)
+        else:
+            raise ValueError('usage: native-tests prepare|compare FORM ARCH; run FORM ARCH QEMU...')
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
+        sys.exit('native-tests: ' + str(error))

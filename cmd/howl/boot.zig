@@ -128,6 +128,12 @@ fn upLine(text: []const u8) ?struct { kernel: []const u8, userland: []const u8 }
     const ui = (std.mem.find(u8, line, u) orelse return null) + u.len;
     const ke = std.mem.findScalarPos(u8, line, ki, ',') orelse return null;
     const ue = std.mem.findScalarPos(u8, line, ui, ')') orelse return null;
+    // The guest wrote these, and howl prints them: take only times as init
+    // writes them.
+    for ([_][]const u8{ line[ki..ke], line[ui..ue] }) |t| {
+        if (t.len == 0 or t.len > 16) return null;
+        for (t) |c| if (!std.ascii.isAlphanumeric(c) and c != '.') return null;
+    }
     return .{ .kernel = line[ki..ke], .userland = line[ui..ue] };
 }
 
@@ -166,6 +172,10 @@ test upLine {
     try testing.expectEqualStrings("0.051s", u.kernel);
     try testing.expectEqualStrings("0.069s", u.userland);
     try testing.expectEqual(null, upLine("werewolf: booting\n"));
+    // A guest's line that is not times is not printed as times.
+    try testing.expectEqual(null, upLine(
+        "werewolf: up in 1s (the kernel \x1b]0;x\x07, userland 1s)\n",
+    ));
 }
 
 test outcome {

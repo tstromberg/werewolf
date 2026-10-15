@@ -80,6 +80,10 @@ pub fn main(init: std.process.Init.Minimal) void {
         std.process.exit(126);
     };
     if (parsed.argc == 0) std.process.exit(0); // as sh -c '' does
+    if (refusedProgram(argv[0..parsed.argc])) |why| {
+        say("{s}", .{why});
+        std.process.exit(126);
+    }
     const env = init.environ.block.slice;
     const path = for (env) |e| {
         const s = std.mem.span(e.?);
@@ -118,6 +122,75 @@ fn called(args: []const [*:0]const u8) Call {
     if (!dashes and command.len > 0 and (command[0] == '-' or command[0] == '+'))
         return .{ .option = command };
     return .{ .command = command };
+}
+
+/// shells are command names that would start another shell or sh-shim.
+const shells = [_][]const u8{
+    "sh", "ash", "bash", "dash", "zsh", "ksh", "mksh", "fish", "hush", "sh-shim",
+};
+
+fn isInterpreter(base: []const u8) bool {
+    for ([_][]const u8{
+        "python", "ruby", "node", "nodejs", "php", "perl", "lua",
+    }) |p| if (std.mem.startsWith(u8, base, p)) return true;
+    return false;
+}
+
+fn isSafePhpIni(kv: []const u8) bool {
+    return std.mem.startsWith(u8, kv, "memory_limit=") or
+        std.mem.startsWith(u8, kv, "apc.enable_cli=") or
+        std.mem.startsWith(u8, kv, "max_input_vars=");
+}
+
+fn isCleanUsrPath(path: []const u8) bool {
+    if (!std.mem.startsWith(u8, path, "/usr/") or path.len <= "/usr/".len) return false;
+    if (path[path.len - 1] == '/') return false;
+    var it = std.mem.splitScalar(u8, path[1..], '/');
+    while (it.next()) |seg| {
+        if (seg.len == 0 or std.mem.eql(u8, seg, ".") or std.mem.eql(u8, seg, "..")) return false;
+    }
+    return true;
+}
+
+/// refusedProgram returns why a may not be run by sh-shim, or null. A shell
+/// is never started through sh-shim, and an interpreter must name a script
+/// under /usr/, with no option before it that evaluates code.
+fn refusedProgram(a: []const ?[*:0]const u8) ?[]const u8 {
+    if (a.len == 0) return null;
+    const base = std.fs.path.basename(std.mem.span(a[0].?));
+    for (shells) |s| if (std.mem.eql(u8, base, s))
+        return "refused: sh-shim does not start a shell";
+    if (std.mem.eql(u8, base, "busybox") and a.len > 1) {
+        const sub = std.fs.path.basename(std.mem.span(a[1].?));
+        for (shells) |s| if (std.mem.eql(u8, sub, s))
+            return "refused: sh-shim does not start a shell";
+    }
+    if (!isInterpreter(base)) return null;
+    var saw_f = false;
+    var i: usize = 1;
+    while (i < a.len) : (i += 1) {
+        const arg = std.mem.span(a[i].?);
+        if (std.mem.eql(u8, arg, "-f") and !saw_f) {
+            saw_f = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "-d")) {
+            if (i + 1 >= a.len or !isSafePhpIni(std.mem.span(a[i + 1].?)))
+                return "refused: an interpreter through sh-shim takes no inline code or runtime " ++
+                    "flags";
+            i += 1;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "-d") and isSafePhpIni(arg[2..])) continue;
+        if (arg.len == 0 or arg[0] == '-')
+            return "refused: an interpreter through sh-shim takes no inline code or runtime flags";
+        if (!isCleanUsrPath(arg))
+            return "refused: an interpreter through sh-shim runs only scripts under /usr/";
+        if (saw_f and i + 1 != a.len)
+            return "refused: an interpreter through sh-shim takes no inline code or runtime flags";
+        return null;
+    }
+    return "refused: an interpreter through sh-shim must name a script under /usr/";
 }
 
 /// run execs argv[0] with the environment unchanged, as sh would: a name
@@ -713,4 +786,39 @@ test "random bytes: never a crash, and words within the bytes given" {
         try testing.expect(bytes <= len + 1 and n <= (len + 1) / 2);
     }
     try testing.expect(accepted > 1000);
+}
+
+test refusedProgram {
+    try testing.expectEqual(null, refusedProgram(&.{
+        "/usr/bin/ruby", "/usr/lib/mastodon/bin/tootctl", "media", "remove", "--days=7",
+    }));
+    try testing.expectEqual(null, refusedProgram(&.{
+        "/usr/bin/php", "-d", "memory_limit=256M", "/usr/share/moodle/admin/cli/cron.php",
+    }));
+    try testing.expectEqual(null, refusedProgram(&.{
+        "/usr/bin/php",
+        "-d",
+        "apc.enable_cli=1",
+        "-d",
+        "memory_limit=1G",
+        "-f",
+        "/usr/share/werewolf-nextcloud/cron.php",
+    }));
+    try testing.expectEqual(null, refusedProgram(&.{ "busybox", "echo", "hello" }));
+    for ([_][]const ?[*:0]const u8{
+        &.{ "sh", "-c", "id" },
+        &.{ "/bin/sh", "-c", "id" },
+        &.{ "busybox", "sh", "-c", "id" },
+        &.{ "busybox", "ash" },
+        &.{"/usr/lib/werewolf/sh-shim"},
+        &.{ "/usr/bin/python3", "-c", "print(1)" },
+        &.{ "ruby", "-e", "1" },
+        &.{ "node", "--eval", "1" },
+        &.{ "/usr/bin/php", "-r", "echo 1;" },
+        &.{ "/usr/bin/php", "-d", "auto_prepend_file=/data/x.php", "/usr/share/moodle/cron.php" },
+        &.{ "/usr/bin/php", "-f", "/usr/share/nextcloud/cron.php", "-r", "echo 1;" },
+        &.{ "/usr/bin/python3", "/data/svc/app/evil.py" },
+        &.{ "/usr/bin/python3", "/usr/../data/svc/app/evil.py" },
+        &.{"/usr/bin/python3"},
+    }) |args| try testing.expect(refusedProgram(args) != null);
 }

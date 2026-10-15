@@ -355,11 +355,12 @@ fn azureUp(
 /// prints the image name or AMI id. An Azure disk serves one VM, so copy it
 /// for each (az disk create --source).
 pub fn upload(io: Io, gpa: Allocator, given: []const []const u8, why: *Why) !void {
-    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|") ++ " [--insecure]";
+    const syntax = "upload DISK --on " ++ comptime Platform.list(.cloud, "|") ++
+        " --disable=" ++ howl.every_protection;
     const launch = try howl.launchFlags(gpa, given, why);
-    if (launch.secure) return why.refuse(
-        "raw-disk upload cannot establish protected deployment; use create with a signed image, " ++
-            "or explicitly --insecure",
+    if (launch.protected()) return why.refuse(
+        "a raw disk cannot bring Secure Boot, the TPM or IPE with it: create with a signed " ++
+            "image, or give them up: --disable=" ++ howl.every_protection,
         .{},
     );
     const args = launch.args;

@@ -87,6 +87,7 @@ pub fn buildSlot(u: *Update, new_kernel: []const u8) !void {
         const app = work_dir ++ "/local-overlay";
         var scratch = try Dir.cwd().createDirPathOpen(io, app, .{});
         defer scratch.close(io);
+        _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, app, 0o700), "chmod local-overlay");
         try copyOut(u, r, "usr/share/werewolf/local/overlay", scratch, ".");
         try copyTree(u, r, app, "", &.{});
     }
@@ -455,17 +456,18 @@ pub fn apkAdd(
         .why = "the repository has moved to a newer format; reinstall to follow",
     });
 
+    const root_z = try u.gpa.dupeSentinel(u8, root, 0);
     try Dir.cwd().createDirPath(u.io, root);
-    _ = try u.sys(
-        linux.fchmodat(linux.AT.FDCWD, try u.gpa.dupeSentinel(u8, root, 0), 0o700),
-        "chmod root",
-    );
+    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o700), "chmod root");
     try u.run(try std.mem.concat(u.gpa, []const u8, &.{
         &.{ "/usr/bin/apk", "--root", root, "--arch", arch, "--cache-dir", cache, "--no-network" },
         source,
         &.{ "--no-scripts", "--quiet", "--no-progress", "add", "--initdb" },
         packages,
     }));
+    // wolfi-baselayout sets / to 0755; keep the staging directory 0700 until
+    // mkfs.erofs reads it.
+    _ = try u.sys(linux.fchmodat(linux.AT.FDCWD, root_z, 0o700), "chmod root");
     try prune(u, cache, root);
 }
 

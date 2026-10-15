@@ -1,10 +1,17 @@
 # restic-server - Hardened VM
 
-A place restic sends backups: [rest-server](https://github.com/restic/rest-server), append-only, from restic's own image, behind Caddy. Each user can see only the repository of their own name, and cannot delete a snapshot. The form's manifest is [form.yaml](form.yaml).
+A place restic sends backups: [rest-server](https://github.com/restic/rest-server),
+append-only, from restic's own image, behind Caddy. Each user can see only the
+repository of their own name, and cannot delete a snapshot. The form's manifest is
+[form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/restic-server/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ## Getting Started
 
@@ -17,14 +24,16 @@ howl create restic-server --with restic-server \
 	--domain backup.home.arpa --restic-users restic-users
 ```
 
-There is no web page. On the machine you are backing up, with the password from `laptop-password`:
+There is no web page. On the machine you are backing up, with the password from
+`laptop-password`:
 
 ```text
 export RESTIC_REPOSITORY=rest:https://laptop:PASSWORD@backup.home.arpa/laptop/
 restic init && restic backup ~
 ```
 
-Snapshots, forget and prune are in [restic's documentation](https://restic.readthedocs.io/).
+Snapshots, forget and prune are in [restic's
+documentation](https://restic.readthedocs.io/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -37,11 +46,14 @@ howl create restic-server --with restic-server --on gcp --allow-from me \
 	--domain backup.example.com --restic-users restic-users
 ```
 
-Point the name at the machine. Add a line and run create again to add a user. Repositories already on `/data` stay. Forget and prune are done by a restic that is allowed to, which this server is not.
+Point the name at the machine. Add a line and run create again to add a user.
+Repositories already on `/data` stay. Forget and prune are done by a restic that is
+allowed to, which this server is not.
 
 ### Importing data
 
-This machine starts empty. Point restic at the address howl prints. There is no repository to copy in.
+This machine starts empty. Point restic at the address howl prints. There is no
+repository to copy in.
 
 ### Known Quirks
 

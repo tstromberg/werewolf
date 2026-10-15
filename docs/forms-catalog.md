@@ -1,32 +1,54 @@
 # Available forms
 
-A **form** defines the software and permissions of a Werewolf VM. Choose one
-below and follow its setup guide for configuration, credentials and how to
-connect. Names link to a guide where one exists, or to the manifest for a
-building block or example.
-
-For your own application, start with the [language tutorials](../examples/README.md).
-The `-app` forms need your code supplied through `--app`; the `-example` forms
-include a sample application. Runtime forms such as `python` supply the
-interpreter and leave the service definition to you.
+A form says what a werewolf machine is for: its packages, services and
+permissions. Pick one below and follow its guide; a name links to the guide
+where one exists, else to the form's manifest. For your own application,
+start with the [language tutorials](../examples/README.md): the `-app` forms
+take your code through `--app`, the `-example` forms carry a sample, and a
+runtime form such as `python` supplies the interpreter and leaves the
+service to you ([applications.md](applications.md)).
 
 ## Get started
 
-Follow the [installation steps](../README.md#try-it), then try the Node.js
-sample locally from the checkout:
+```sh
+howl forms                            # this checkout, or the signed catalog outside it
+howl forms database                   # search names and descriptions
+howl forms caddy                      # setup guide, architectures and commands
+howl forms --published --arch arm64   # published images for one architecture
+howl test --with caddy                # integration and production-variant boot checks
+```
+
+After the [installation steps](../README.md#try-it), try the Node.js sample
+from the checkout:
 
 ```sh
 howl run --build --with node-example
 ```
 
-For a service, open its guide below first: many need credentials or certificates
-before they start. `howl pack --build --with FORM -h` lists that form’s
-configuration flags. Replace `FORM` with its name.
+Open a service's guide first: many need credentials or certificates before
+they start, and `howl pack --build --with FORM -h` lists the form's
+configuration flags. `--build` uses this checkout. Secure deployment is the
+default, and a prebuilt download needs a published protected image for the
+form, host and architecture: see the [host support table](../README.md#secure-boot)
+and the [howl guide](../cmd/howl/README.md).
 
-`--build` uses this checkout. Secure deployment is the default; using a
-prebuilt download requires a published protected image for the selected form,
-host and architecture. See the [host support table](../README.md#secure-boot)
-and [howl guide](../cmd/howl/README.md) for deployment options.
+## Images and downloads
+
+Browse the [image catalog](https://dist.werewolf-linux.org/boot/v1/index.html)
+or run `howl forms --published`. Each form's page lists its targets (QEMU on
+arm64 and x86_64, Lima on arm64) with downloads, package release notes,
+signatures, test evidence and the latest attempt's status; a failed build,
+test or gate keeps the previous published image. Unsupported architectures
+are listed: Overleaf's upstream image is x86_64 only.
+[form-images.md](form-images.md) explains how the
+[workflow](../.github/workflows/form-images.yml) builds every form with every
+protection, and why only gated targets are published.
+
+`howl run` and `howl create` download a published target, today `playground`
+([form-images.md](form-images.md#downloading-a-protected-qcow2)), and enroll
+its firmware and TPM. For any other form, run `howl run --build --with FORM`
+from the checkout and follow its guide: the same protections, signed with
+your own keys.
 
 ## Alphabetical list
 
@@ -99,7 +121,7 @@ and [howl guide](../cmd/howl/README.md) for deployment options.
 | [php](../forms/php/form.yaml) | Serve your PHP website through nginx and PHP-FPM. Supply the site with `--app`. |
 | [php-example](../examples/php/README.md) | A sample PHP website, with a tutorial. |
 | [pi-hole](../forms/pi-hole/README.md) | DNS filtering for a home network, with the web interface behind Caddy. |
-| [playground](../forms/playground/form.yaml) | The default `howl run` environment, with an interactive SSH shell and support for ordinary key files. |
+| [playground](../forms/playground/README.md) | The default `howl run` environment, with an interactive SSH shell and support for ordinary key files. |
 | [postgresql](../forms/postgresql/README.md) | PostgreSQL for services in the same VM, accessed through a UNIX socket. |
 | [prod](../forms/prod/form.yaml) | A production starting point with DHCP, cloud metadata, persistent data and automatic updates; no application or listener. |
 | [prod-ssh](../forms/prod-ssh/form.yaml) | The production starting point with interactive SSH access using security keys. |
@@ -129,7 +151,7 @@ and [howl guide](../cmd/howl/README.md) for deployment options.
 | [valkey-tcp](../forms/valkey-tcp/README.md) | Valkey for network clients on TCP port 6379, with a configured memory limit. |
 | [vaultwarden](../forms/vaultwarden/README.md) | A Bitwarden-compatible password manager server. |
 | [velociraptor](../forms/velociraptor/README.md) | A Velociraptor server for endpoint visibility and investigation. |
-| [webshell-example](../forms/webshell-example/form.yaml) | A deliberately vulnerable Python application for testing confinement. |
+| [webshell-example](../forms/webshell-example/README.md) | A deliberately vulnerable Python application for testing confinement. |
 | [wordpress](../forms/wordpress/README.md) | WordPress backed by SQLite, served through nginx. |
 | [wordpress-mariadb](../forms/wordpress-mariadb/README.md) | WordPress backed by MariaDB on a local UNIX socket. |
 | [zeek](../forms/zeek/README.md) | Network traffic analysis on a configured interface, writing JSON logs to persistent data. |
@@ -137,6 +159,6 @@ and [howl guide](../cmd/howl/README.md) for deployment options.
 
 ## Create your own form
 
-The [form authoring guide](forms.md) explains how to define an application,
-services and permissions. The [manifest reference](../forms/README.md) documents
-`form.yaml` and the files a form can supply.
+[forms.md](forms.md) explains how to define an application, its services
+and permissions; [forms/README.md](../forms/README.md) documents `form.yaml`
+and the files a form can supply.

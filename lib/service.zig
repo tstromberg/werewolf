@@ -62,13 +62,12 @@ pub const Service = struct {
 /// Narrow is a program its service runs on a narrower leash, by the link
 /// /etc/sv/NAME/narrow/PROGRAM (docs/design/narrow.md): promises within the
 /// service's, no network, and the paths beyond its floor that it may read
-/// and write, within the service's. memory caps what it may allocate, in MiB.
+/// and write, within the service's.
 pub const Narrow = struct {
     program: []const u8,
     pledge: seal.Set = .empty,
     read: []const []const u8 = &.{},
     write: []const []const u8 = &.{},
-    memory: ?u32 = null,
 };
 
 /// floor is what leash lets every service without a root read beyond its
@@ -447,7 +446,6 @@ const Narrowing = struct {
     pledge: ?seal.Set = null,
     read: std.ArrayList([]const u8) = .empty,
     write: std.ArrayList([]const u8) = .empty,
-    memory: ?u32 = null,
 };
 
 /// narrowLine adds a `narrow PROGRAM KEY WORD...` line, numbered line, to
@@ -460,7 +458,7 @@ fn narrowLine(
     bad: *Bad,
 ) !void {
     if (args.len < 2)
-        return invalid(bad, "narrow takes PROGRAM, then pledge, read, write or memory");
+        return invalid(bad, "narrow takes PROGRAM, then pledge, read or write");
     const prog = (try program(args[0..1], bad))[0];
     const words = args[2..];
     const nw = for (list.items) |*x| {
@@ -485,10 +483,7 @@ fn narrowLine(
             const paths = if (std.mem.eql(u8, args[1], "read")) &nw.read else &nw.write;
             try paths.append(gpa, a);
         }
-    } else if (std.mem.eql(u8, args[1], "memory")) {
-        if (nw.memory != null) return invalid(bad, "narrow memory twice for one program");
-        nw.memory = try mib(words, bad);
-    } else return invalid(bad, "narrow PROGRAM takes pledge, read, write or memory");
+    } else return invalid(bad, "narrow PROGRAM takes pledge, read or write");
 }
 
 /// narrowWithin checks each narrowed program against its service s and
@@ -537,7 +532,6 @@ fn narrowWithin(gpa: Allocator, s: Service, list: []Narrowing, bad: *Bad) ![]con
             .pledge = set,
             .read = nw.read.items,
             .write = nw.write.items,
-            .memory = nw.memory,
         };
     }
     bad.line = 0;
@@ -1020,7 +1014,6 @@ test "narrowed programs" {
         \\narrow /usr/bin/ffmpeg pledge stdio rpath wpath proc
         \\narrow /usr/bin/ffmpeg read /srv/media/in /etc/localtime /run/svc/app/in
         \\narrow /usr/bin/ffmpeg write /var/cache/app/out /run/svc/app/tmp /dev/null
-        \\narrow /usr/bin/ffmpeg memory 512
         \\narrow /usr/bin/ffprobe pledge stdio rpath
     , &bad);
     try testing.expectEqual(2, s.narrow.len);
@@ -1029,8 +1022,6 @@ test "narrowed programs" {
     try testing.expect(ffmpeg.pledge.contains(.proc) and !ffmpeg.pledge.contains(.exec));
     try testing.expectEqual(3, ffmpeg.read.len);
     try testing.expectEqualStrings("/run/svc/app/tmp", ffmpeg.write[1]);
-    try testing.expectEqual(512, ffmpeg.memory.?);
-    try testing.expectEqual(null, s.narrow[1].memory);
     try testing.expectEqual(0, s.narrow[1].read.len);
 
     const cases = [_]struct { text: []const u8, line: usize, why: []const u8 = "" }{
@@ -1047,15 +1038,11 @@ test "narrowed programs" {
         // Sub-keys: known, with their words, and once where once is all.
         .{ .text = head ++ "narrow /usr/bin/ffmpeg\n", .line = 7 },
         .{ .text = head ++ "narrow /usr/bin/ffmpeg frob x\n", .line = 7 },
+        .{ .text = head ++ "narrow /usr/bin/ffmpeg memory 512\n", .line = 7 },
         .{ .text = head ++ "narrow /usr/bin/ffmpeg pledge\n", .line = 7 },
         .{ .text = head ++ "narrow /usr/bin/ffmpeg read\n", .line = 7 },
         .{ .text = head ++ "narrow /usr/bin/ffmpeg read /srv//media\n", .line = 7 },
-        .{ .text = head ++ "narrow /usr/bin/ffmpeg memory 0\n", .line = 7 },
         .{ .text = ff ++ "narrow /usr/bin/ffmpeg pledge rpath\n", .line = 8 },
-        .{
-            .text = ff ++ "narrow /usr/bin/ffmpeg memory 1\nnarrow /usr/bin/ffmpeg memory 2\n",
-            .line = 9,
-        },
         // Promises: some, within the service's, and no network.
         .{ .text = head ++ "narrow /usr/bin/ffmpeg read /srv/media\n", .line = 7, .why = "pledge" },
         .{ .text = head ++ "narrow /usr/bin/ffmpeg pledge mlock\n", .line = 7, .why = "mlock" },

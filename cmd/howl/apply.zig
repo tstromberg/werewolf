@@ -38,10 +38,9 @@ pub fn enroll(
     if (o.boot_image != null) return;
     const chain = try howl.chain(io, gpa, o.form, why);
     const from = forms.updates(chain).from orelse return;
-    const home = howl.environ.get("HOME") orelse return error.NoHome;
     const public = try Dir.cwd().readFileAlloc(
         io,
-        try gpa.print("{s}/.howl/{s}", .{ home, deployment.key_name }),
+        try gpa.print("{s}/{s}", .{ try howl.dataDir(io, gpa), deployment.key_name }),
         gpa,
         .limited(64 << 10),
     );
@@ -144,10 +143,9 @@ pub fn apply(io: Io, gpa: Allocator, args: []const []const u8, why: *howl.Why) !
     )) return why.refuse("updates.from changed; create a new machine for a new repository", .{});
     if (!mem.eql(u8, std.fs.path.basename(enrolled.form), std.fs.path.basename(ref)))
         return why.refuse("{s}: the machine's form name cannot change", .{o.name});
-    const home = howl.environ.get("HOME") orelse return error.NoHome;
     const public = try Dir.cwd().readFileAlloc(
         io,
-        try gpa.print("{s}/.howl/{s}", .{ home, deployment.key_name }),
+        try gpa.print("{s}/{s}", .{ try howl.dataDir(io, gpa), deployment.key_name }),
         gpa,
         .limited(64 << 10),
     );

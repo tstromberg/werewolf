@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise secured local CLI deployment and contextual A/B updates under Lima or QEMU."""
+"""Exercise secured local CLI deployment and contextual A/B updates under Lima or QEMU.
+
+--build makes a protected bundle signed with the caller's keys, which the machine
+enrolls as it would werewolf's download; a rerun with changed inputs offers it
+the next bundle. Keys go to a private XDG_DATA_HOME, never the caller's own."""
 import concurrent.futures
 import hashlib
 import json
@@ -73,6 +77,7 @@ env = dict(os.environ, WEREWOLF_IPE_KERNEL=kernel, WEREWOLF_IPE_KEY=key,
            WEREWOLF_IPE_CRT=cert, UKI_STUB=stub,
            WEREWOLF_BOOT_KEY=str(work / 'boot.key'),
            WEREWOLF_BOOT_CRT=str(work / 'boot.crt'),
+           XDG_DATA_HOME=str(work / 'data'),
            PATH=str(wrapper_dir) + os.pathsep + os.environ['PATH'])
 
 
@@ -123,15 +128,19 @@ def wait_boot(label, previous=None, anchor=None, committed=True):
     raise RuntimeError('secured ' + provider + ' did not commit ' + label)
 
 
+def candidate_bundle():
+    return json.loads((authority / 'profile.json').read_text())['candidate']['directory']
+
+
 def refresh(label):
+    # A rerun with changed inputs builds the next bundle and offers it.
     label_file.write_text(label + '\n')
-    run([howl, '_local-refresh', machine.resolve()], 'refresh-' + label)
-    head = authority / ('public/' + arch + '/latest.json')
-    before = head.read_bytes()
-    run([howl, '_local-refresh', machine.resolve()], 'unchanged-' + label)
-    if head.read_bytes() != before:
+    run(create, 'refresh-' + label)
+    bundle = candidate_bundle()
+    run(create, 'unchanged-' + label)
+    if candidate_bundle() != bundle:
         raise RuntimeError('unchanged pinned inputs generated another release')
-    image = json.loads(before)
+    image = json.loads((Path(bundle) / 'latest.json').read_bytes())
     core = b'werewolf.release/2\0' + arch.encode() + b'\0'
     for filename in ['root.erofs', 'vmlinuz', 'stage0.zst']:
         core += bytes.fromhex(image['files'][filename]['sha256'])
@@ -168,7 +177,7 @@ try:
          '-Mapk=lib/apk.zig', '-Mpackage=lib/package.zig', '-femit-bin=' + str(probe)], 'probe')
     for path in overlay.rglob('*'):
         path.chmod(0o755 if path.is_dir() or path == probe else 0o644)
-    # Exercise the protected default, without an explicit --secure or Lima selector.
+    # Exercise the protected default, without a Lima selector.
     create = [howl, 'create', name, '--with', form, '--build', '--yes', '--root-keys', str(private_ssh) + '.pub']
     if provider == 'qemu':
         create += ['--on', provider]
@@ -195,13 +204,17 @@ try:
             'test ! -e /usr/share/werewolf/tpm/signer.pub && '
             'test "$(wc -c < /usr/share/werewolf/tpm/vendor.sha256)" -eq 32',
             'authority-source')
-    refused = run([*create, '--insecure'], 'downgrade-refused', check=False)
-    if refused.returncode == 0 or 'cannot be downgraded' not in refused.stderr:
-        raise RuntimeError('existing enrollment accepted an insecure reconfiguration')
-    for secret in ['boot.key', 'authority/permit.key', 'authority/tls.key',
-                   'authority/credentials/owner.auth', 'authority/credentials/lockout.auth']:
-        if (machine / secret).stat().st_mode & 0o777 != 0o600:
-            raise RuntimeError('private host key permissions weakened')
+    refused = run([*create, '--disable=secureboot,tpm,ipe'], 'downgrade-refused', check=False)
+    if refused.returncode == 0 or 'keeps its protections' not in refused.stderr:
+        raise RuntimeError('existing enrollment accepted --disable')
+    if (machine / 'boot.key').exists():
+        raise RuntimeError('the machine holds a private boot key; the caller\'s keys stay in its data directory')
+    configuration = json.loads((authority / 'publisher.json').read_text())
+    for secret in [work / 'data/howl/keys/boot' / arch / 'boot.key', Path(configuration['key']),
+                   authority / 'permit.key', authority / 'credentials/owner.auth',
+                   authority / 'credentials/lockout.auth']:
+        if secret.stat().st_mode & 0o777 != 0o600:
+            raise RuntimeError('private host key permissions weakened: ' + str(secret))
     attempt = ssh('cp /usr/bin/true /data/unsigned-probe && /data/unsigned-probe', 'unsigned', check=False)
     if attempt.returncode == 0:
         raise RuntimeError('unsigned writable code executed')
@@ -225,6 +238,9 @@ try:
             raise
     ssh('/usr/lib/werewolf/slot-update try', 'rollback-B', check=False, timeout=30)
     b2 = wait_boot('B', c['boot_id'], c['tpm_anchor'])
+    # A rerun of create restarts QEMU but leaves a running Lima VM alone.
+    if provider == 'lima':
+        run(['limactl', 'stop', '--force', name], 'stop')
     run(create, 'restart')
     b3 = wait_boot('B', b2['boot_id'], b2['tpm_anchor'])
     d = update('D', b3)
@@ -304,7 +320,7 @@ finally:
         if console.exists():
             (work / 'console.log').write_bytes(console.read_bytes())
     for source, target in [(machine / 'create.log', 'native-create.log'),
-                           (authority / 'refresh.log', 'native-refresh.log')]:
+                           (machine / 'build.log', 'native-build.log')]:
         if source.exists():
             (work / target).write_bytes(source.read_bytes())
     if machine.exists():
@@ -313,4 +329,5 @@ finally:
         proxy.close()
     private_ssh.unlink(missing_ok=True)
     (work / 'boot.key').unlink(missing_ok=True)
+    shutil.rmtree(work / 'data', ignore_errors=True)
     proxy_work.cleanup()

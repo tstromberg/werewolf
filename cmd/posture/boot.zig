@@ -159,8 +159,8 @@ fn imagePolicy(p: *Posture) !void {
             "cannot regain CAP_MAC_ADMIN",
         .result = if (ipe_on and bounded != null and !bounded.?) .pass else .fail,
         .detail = if (!ipe_on)
-            if (p.insecure)
-                "no enforcing release IPE policy (insecure mode: werewolf.insecure=1)"
+            if (p.disabled.contains(.ipe))
+                "no enforcing release IPE policy: --disable gave it up (werewolf.disable)"
             else
                 "no enforcing release IPE policy"
         else

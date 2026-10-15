@@ -13,20 +13,18 @@ leaves out. posture reports whether each is in force on the running machine.
 It detects werewolf by `/usr/share/werewolf`; other distributions run generic
 checks (`docs/posture.md`).
 
-`posture [--extended] [--attack] [--verbose] [--json | --line | --summary]`
-prints text, JSON with why and how, `posture: fail=ID,ID pass=N skip=N {JSON}`,
-or a one-line state (`NOMINAL`, `EXPECTED GAPS`, `DEGRADED`) and counts followed
-by only failures (`--summary`), and exits 1 if any check fails. `--extended`
-adds what werewolf skips by choice (wiping freed memory, forced CPU mitigations,
-strict reverse-path filtering, ignoring IPv6 router advertisements;
-docs/security.md). `NO_COLOR` or `TERM=dumb` disables terminal colors.
-Playground's interactive logins run `--summary` via `/etc/profile.d/posture.sh`.
-Summary rows align the gap and evidence: amber `gap` for declared weaknesses,
-red `FAIL` for unexpected failures, shortened to terminal width. SSH lists unmet key requirements.
-
-Text uses two columns (`source = value, want expectation` for failures, at most
-two rows per item); `--json` retains complete `source`, `expected`, `observed`,
-and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progress and totals to stderr.
+`posture [--extended] [--attack] [--verbose] [--json | --line | --summary]` prints text,
+JSON with why and how, `posture: fail=ID,ID pass=N skip=N {JSON}`, or one line of state
+(`NOMINAL`, `EXPECTED GAPS`, `DEGRADED`) and counts followed by the failures alone, and
+exits 1 if any check fails. `--extended` adds what werewolf skips by choice (wiping
+freed memory, forced CPU mitigations, strict reverse-path filtering, ignoring IPv6
+router advertisements; docs/security.md). Playground's interactive logins run
+`--summary` via `/etc/profile.d/posture.sh`: amber `gap` for a declared weakness, red
+`FAIL` for an unexpected failure, each row shortened to the terminal's width; `NO_COLOR`
+or `TERM=dumb` drops the colour. Text shows `source = value, want expectation` for a
+failure, at most two rows an item; `--json` keeps the whole `source`, `expected`,
+`observed` and `comparison`. `--verbose` streams phases, each check's elapsed
+milliseconds, walk progress and totals to stderr.
 
 ## Goals
 
@@ -42,7 +40,7 @@ and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progres
 
 - **Areas**, one file each: `kernel.zig` (lockdown, modules, sysctls, CPU,
   memory, features exploits reach for), `processes.zig` (hidden processes,
-  leashed services, intruder tools), `files.zig` (mounts, where programs
+  root consoles, leashed services, intruder tools), `files.zig` (mounts, where programs
   run, shared directories, accounts), `network.zig` (ports, fence's rules,
   IPv6, sshd), `attacks.zig`. `posture.zig` holds the report and service.
 - **One-way settings** (lockdown, `modules_disabled`, `ptrace_scope=3`,
@@ -56,12 +54,12 @@ and `comparison`. `--verbose` streams phases, per-check elapsed ms, walk progres
 - **Walks** (setuid files, anything anyone may write) go from each
   directory's descriptor, not following links, on one filesystem.
 - **Attacks**, only with `werewolf.check=1`, `--attack` or `WEREWOLF_CHECK=1`
-  (containers): `/proc/1/mem` and `/dev/mem` must be refused and logged; as
-  `nobody`, `/proc/1` must be hidden, `/run` closed, and link tricks in `/tmp`
-  refused; a leashed `--probe` tests its grants. A lock isolates concurrent attacks on werewolf.
-- **Service** (`/etc/sv/posture/run`): it waits up to 60 s for each other
-  service to run 5 s or be down on request, writes `/run/werewolf/posture/posture.json`,
-  prints the line, and parks itself with `sv down`.
+  (containers): `/proc/1/mem` and `/dev/mem` must be refused and logged; as `nobody`,
+  `/proc/1` must be hidden, `/run` closed, and link tricks in `/tmp` refused; a leashed
+  `--probe` tests its grants. A lock isolates concurrent attacks on werewolf.
+- **Service** (`/etc/sv/posture/run`): it waits up to 60 s for each other service to run
+  5 s, writes `/run/werewolf/posture.json` and the login message `/run/werewolf/motd`
+  (`/etc/werewolf/motd`, then dev mode, a root console, `werewolf.disable`), and parks.
 - **Expected failures:** a werewolf image lists expected failures and excuses
   in `/usr/share/werewolf/weaknesses`. Any other failure prints
   `posture: WARNING: unexpected: ID,...` and names excuses no longer needed.
@@ -97,4 +95,5 @@ The machine itself would not know its posture; the service reports it on every b
 
 - **Bounded:** walks stop at depth 40; the service waits 60 s at most.
 - **Degrades:** a check it cannot make is skipped with the reason.
-- **Tested:** unit tests in each area; every `make check` boot judges the line against `test/posture-known`.
+- **Tested:** unit tests in each area; every `make check` boot judges the line against
+  `test/posture-known`.

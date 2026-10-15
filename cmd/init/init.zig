@@ -334,7 +334,7 @@ pub const Machine = struct {
             .{ .sub_path = path, .data = text, .flags = .{ .permissions = .fromMode(mode) } },
         ) catch |err|
             return say("{s}: {s}", .{ path, @errorName(err) });
-        _ = linux.fchmodat(linux.AT.FDCWD, m.z(path), mode);
+        _ = linux.fchmodat2(linux.AT.FDCWD, m.z(path), mode, linux.AT.SYMLINK_NOFOLLOW);
     }
 
     pub fn append(m: *Machine, path: []const u8, text: []const u8) void {
@@ -368,7 +368,7 @@ pub const Machine = struct {
 
     pub fn mkdirAll(m: *Machine, path: [:0]const u8) void {
         Dir.cwd().createDirPath(m.io, path) catch {};
-        _ = linux.fchmodat(linux.AT.FDCWD, path, 0o700);
+        _ = linux.fchmodat2(linux.AT.FDCWD, path, 0o700, linux.AT.SYMLINK_NOFOLLOW);
     }
 
     pub fn fmt(m: *Machine, comptime f: []const u8, args: anytype) []const u8 {

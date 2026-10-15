@@ -1,12 +1,18 @@
 # OpenCanary - Hardened VM
 
-A low-interaction honeypot: [OpenCanary](https://opencanary.org/) from its project's image. The form's manifest is [form.yaml](form.yaml).
+A low-interaction honeypot: [OpenCanary](https://opencanary.org/) from its project's
+image. The form's manifest is [form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/opencanary/index.html).
 
 ## Security Posture
 
 - The service runs as its image's user. It may bind the bait ports and reach nothing.
-- The config is written at each start. SMB, scanners, HTTPS and anything that would read this host's logs are off.
-- A login the bait accepts is a log line. It is not an account, and it does not open a shell.
+- The config is written at each start. SMB, scanners, HTTPS and anything that would read
+  this host's logs are off.
+- A login the bait accepts is a log line. It is not an account, and it does not open a
+  shell.
 
 ## Getting Started
 
@@ -16,7 +22,9 @@ A low-interaction honeypot: [OpenCanary](https://opencanary.org/) from its proje
 howl create opencanary --with opencanary
 ```
 
-Events are on the console and in `/data/svc/opencanary/opencanary.log`. The listeners are FTP :21, SSH :22, Telnet :23, HTTP :80, RDP :3389 and VNC :5900. What a service pretends to be is in [OpenCanary's documentation](https://opencanary.readthedocs.io/).
+Events are on the console and in `/data/svc/opencanary/opencanary.log`. The listeners
+are FTP :21, SSH :22, Telnet :23, HTTP :80, RDP :3389 and VNC :5900. What a service
+pretends to be is in [OpenCanary's documentation](https://opencanary.readthedocs.io/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -24,7 +32,8 @@ Events are on the console and in `/data/svc/opencanary/opencanary.log`. The list
 howl create opencanary --with opencanary --on gcp --allow-from me
 ```
 
-Point a name at it that an attacker might try. Do not put anything else on this machine. The events are the point.
+Point a name at it that an attacker might try. Do not put anything else on this machine.
+The events are the point.
 
 ### Importing data
 

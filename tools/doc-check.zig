@@ -1,23 +1,32 @@
 //! doc-check fails when werewolf's markdown breaks its own rules: a relative
 //! link or #anchor that leads nowhere, a program README over 100 lines, a
-//! design doc over 120, or a line that starts with TODO. See README.md.
+//! design doc over 120, a doc in docs/ over 175, a line over 88 columns, or
+//! a line that starts with TODO. `doc-check --fix` rewraps the paragraphs
+//! that overflow. See README.md.
 
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const mem = std.mem;
 
+/// width is the longest line a doc may have, in code points. Code blocks
+/// and table rows are exempt, as is a URL or path a line ends in.
+const width = 88;
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.arena.allocator();
     const io = init.io;
     const args = try init.minimal.args.toSlice(gpa);
-    if (args.len < 2) {
-        std.debug.print("usage: doc-check FILE.md...\n", .{});
+    const fix = args.len > 1 and mem.eql(u8, args[1], "--fix");
+    const paths = args[@as(usize, if (fix) 2 else 1)..];
+    if (paths.len == 0) {
+        std.debug.print("usage: doc-check [--fix] FILE.md...\n", .{});
         std.process.exit(2);
     }
     var docs: Docs = .{ .io = io, .gpa = gpa };
     var failed = false;
-    for (args[1..]) |path| {
+    for (paths) |path| {
+        if (fix) try rewrap(gpa, io, path);
         if (!try docs.check(path)) failed = true;
     }
     if (failed) std.process.exit(1);
@@ -43,6 +52,13 @@ const Docs = struct {
         while (it.next()) |l| {
             if (mem.startsWith(u8, mem.trimStart(u8, l.text, " \t"), "TODO")) {
                 std.debug.print("doc-check: {s}:{d}: a TODO\n", .{ path, l.number });
+                ok = false;
+            }
+            if (wide(l.text)) {
+                std.debug.print(
+                    "doc-check: {s}:{d}: {d} columns, more than {d}\n",
+                    .{ path, l.number, columns(l.text), width },
+                );
                 ok = false;
             }
             var links: Links = .{ .line = l.text };
@@ -87,18 +103,191 @@ const Docs = struct {
     }
 };
 
-/// limit returns how many lines path may have, or null for no limit: 120
-/// for a design doc, 100 for a program's README (CONTRIBUTING.md, Style).
+/// limit returns how many lines path may have, or null for no limit: 175
+/// for a doc in docs/, 120 for a design doc, 100 for a program's README
+/// (CONTRIBUTING.md, Style).
 fn limit(path: []const u8) ?usize {
+    const p = if (mem.startsWith(u8, path, "./")) path[2..] else path;
+    if (mem.startsWith(u8, p, "docs/") and
+        mem.findScalar(u8, p["docs/".len..], '/') == null) return 175;
     if (mem.find(u8, path, "docs/design/") != null) return 120;
     if (mem.endsWith(u8, path, "/README.md") and
         (mem.startsWith(u8, path, "cmd/") or mem.find(u8, path, "/cmd/") != null)) return 100;
     return null;
 }
 
+/// columns counts a line's code points, near enough to what a reader sees.
+fn columns(line: []const u8) usize {
+    return std.unicode.utf8CountCodepoints(line) catch line.len;
+}
+
+/// wide reports a line over `width` that wrapping could shorten: not a
+/// table row, and not a line whose overflow is one URL or path at its end.
+fn wide(line: []const u8) bool {
+    if (columns(line) <= width) return false;
+    if (mem.startsWith(u8, mem.trimStart(u8, line, " "), "|")) return false;
+    const space = mem.findScalarLast(u8, line, ' ') orelse
+        return mem.findScalar(u8, line, '/') == null;
+    return columns(line[0..space]) > width or mem.findScalar(u8, line[space + 1 ..], '/') == null;
+}
+
 fn read(gpa: Allocator, io: Io, path: []const u8) ![]const u8 {
     return Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(4 << 20));
 }
+
+/// rewrap rewrites path with each paragraph that has a line over `width`
+/// filled to it, and says so.
+fn rewrap(gpa: Allocator, io: Io, path: []const u8) !void {
+    const text = try read(gpa, io, path);
+    const out = try rewrapped(gpa, text);
+    if (mem.eql(u8, out, text)) return;
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = out });
+    std.debug.print("doc-check: {s}: rewrapped\n", .{path});
+}
+
+/// rewrapped returns text with each paragraph that has a line over `width`
+/// filled to it. Only runs of prose and list items are touched, and only
+/// those that overflow; code blocks, tables, headings and the rest of
+/// markdown's structure stay as they are.
+fn rewrapped(gpa: Allocator, text: []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var para: Paragraph = .{};
+    var fenced = false;
+    var after_blank = true;
+    var pos: usize = 0;
+    while (pos < text.len) {
+        const end = mem.findScalarPos(u8, text, pos, '\n') orelse text.len;
+        const line = text[pos..end];
+        pos = end + 1;
+        const fence = mem.startsWith(u8, mem.trimStart(u8, line, " "), "```");
+        if (fence) fenced = !fenced;
+        if (!fence and !fenced and para.continues(line)) {
+            try para.lines.append(gpa, line);
+            after_blank = false;
+            continue;
+        }
+        try para.flush(gpa, &out);
+        if (!fence and !fenced) if (Paragraph.first(line, after_blank)) |hang| {
+            para.hang = hang;
+            try para.lines.append(gpa, line);
+            after_blank = false;
+            continue;
+        };
+        try out.appendSlice(gpa, line);
+        try out.append(gpa, '\n');
+        after_blank = line.len == 0;
+    }
+    try para.flush(gpa, &out);
+    return out.items;
+}
+
+/// A Paragraph is a run of prose lines, or one list item, that wraps as a
+/// unit; `hang` is the indent its lines after the first take.
+const Paragraph = struct {
+    lines: std.ArrayList([]const u8) = .empty,
+    hang: usize = 0,
+
+    /// first returns the hanging indent of a line that may begin a
+    /// paragraph, or null for one wrapping leaves alone: blank, a heading,
+    /// a table row, a quote, HTML, a rule, a link definition, or a code
+    /// block, which is what four spaces of indent mean after a blank line.
+    fn first(line: []const u8, after_blank: bool) ?usize {
+        const indent = line.len - mem.trimStart(u8, line, " ").len;
+        if (indent >= 4 and after_blank) return null;
+        return indent + (marker(line[indent..]) orelse return null);
+    }
+
+    /// marker returns the width of the list marker that starts t, 0 for
+    /// plain prose, or null for a line that is not prose at all.
+    fn marker(t: []const u8) ?usize {
+        if (t.len == 0) return null;
+        switch (t[0]) {
+            '#', '|', '>', '<' => return null,
+            '-', '+', '*' => {
+                if (t.len > 1 and t[1] == ' ') return 2;
+                return if (t[0] == '*' and !mem.startsWith(u8, t, "***")) 0 else null;
+            },
+            '[' => return if (mem.find(u8, t, "]: ") != null) null else 0,
+            '0'...'9' => {
+                var n: usize = 0;
+                while (n < t.len and std.ascii.isDigit(t[n])) n += 1;
+                if (n + 1 < t.len and (t[n] == '.' or t[n] == ')') and
+                    t[n + 1] == ' ') return n + 2;
+                return 0;
+            },
+            else => return 0,
+        }
+    }
+
+    /// continues reports whether line carries on the open paragraph: prose,
+    /// indented as its hang, and not a new list item.
+    fn continues(p: *const Paragraph, line: []const u8) bool {
+        if (p.lines.items.len == 0) return false;
+        const indent = line.len - mem.trimStart(u8, line, " ").len;
+        return indent == p.hang and marker(line[indent..]) == 0;
+    }
+
+    /// flush writes the paragraph out, filled to `width` if a line of it is
+    /// over, and empties it. A hard break (two trailing spaces) or a line
+    /// ending in a backslash keeps a paragraph as it is.
+    fn flush(p: *Paragraph, gpa: Allocator, out: *std.ArrayList(u8)) !void {
+        defer p.lines.clearRetainingCapacity();
+        var over = false;
+        var fixed = false;
+        for (p.lines.items) |l| {
+            if (columns(l) > width) over = true;
+            if (mem.endsWith(u8, l, "  ") or mem.endsWith(u8, l, "\\")) fixed = true;
+        }
+        if (over and !fixed) return p.fill(gpa, out);
+        for (p.lines.items) |l| {
+            try out.appendSlice(gpa, l);
+            try out.append(gpa, '\n');
+        }
+    }
+
+    /// fill lays the paragraph's words out again, as many to a line as fit,
+    /// the first line keeping its marker and the rest indented to hang. A
+    /// word that would start a line as markup, and a word too long for any
+    /// line, stay on the line before.
+    fn fill(p: *Paragraph, gpa: Allocator, out: *std.ArrayList(u8)) !void {
+        var line: std.ArrayList(u8) = .empty;
+        try line.appendSlice(gpa, p.lines.items[0][0..p.hang]);
+        var bare = true;
+        for (p.lines.items, 0..) |l, i| {
+            var words = mem.tokenizeScalar(u8, if (i == 0) l[p.hang..] else l, ' ');
+            while (words.next()) |w| {
+                if (bare) {
+                    try line.appendSlice(gpa, w);
+                    bare = false;
+                } else if (columns(line.items) + 1 + columns(w) <= width or markup(w)) {
+                    try line.append(gpa, ' ');
+                    try line.appendSlice(gpa, w);
+                } else {
+                    try out.appendSlice(gpa, line.items);
+                    try out.append(gpa, '\n');
+                    line.clearRetainingCapacity();
+                    try line.appendNTimes(gpa, ' ', p.hang);
+                    try line.appendSlice(gpa, w);
+                }
+            }
+        }
+        try out.appendSlice(gpa, line.items);
+        try out.append(gpa, '\n');
+    }
+
+    /// markup reports a word that would be read as a heading, quote, table,
+    /// rule or list marker at the start of a line.
+    fn markup(w: []const u8) bool {
+        if (w.len == 0) return false;
+        if (w[0] == '#' or w[0] == '>' or w[0] == '|') return true;
+        if (w.len == 1 and (w[0] == '-' or w[0] == '+' or w[0] == '*')) return true;
+        if (!std.ascii.isDigit(w[0])) return false;
+        const last = w[w.len - 1];
+        if (last != '.' and last != ')') return false;
+        for (w[0 .. w.len - 1]) |c| if (!std.ascii.isDigit(c)) return false;
+        return true;
+    }
+};
 
 /// Lines yields a file's lines outside fenced code blocks, numbered from 1.
 const Lines = struct {
@@ -206,6 +395,16 @@ fn normalize(gpa: Allocator, path: []const u8) ![]const u8 {
 
 const testing = std.testing;
 
+/// times repeats s n times, at compile time, for the tests' long lines.
+fn times(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    comptime {
+        var out: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(out[i * s.len ..][0..s.len], s);
+        const r = out;
+        return &r;
+    }
+}
+
 test slug {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
@@ -256,9 +455,66 @@ test normalize {
 }
 
 test limit {
+    try testing.expectEqual(175, limit("docs/forms.md").?);
+    try testing.expectEqual(175, limit("./docs/forms.md").?);
+    try testing.expectEqual(120, limit("./docs/design/cli.md").?);
+    try testing.expectEqual(null, limit("forms/demo/docs/notes.md"));
     try testing.expectEqual(120, limit("docs/design/cli.md").?);
     try testing.expectEqual(100, limit("cmd/howl/README.md").?);
     try testing.expectEqual(100, limit("forms/demo/cmd/status-page/README.md").?);
     try testing.expectEqual(null, limit("forms/bastion/README.md"));
     try testing.expectEqual(null, limit("README.md"));
+}
+
+test wide {
+    try testing.expect(!wide(comptime times("x", 88)));
+    try testing.expect(wide(comptime times("x", 89)));
+    try testing.expect(!wide(comptime "| " ++ times("x", 90)));
+    try testing.expect(!wide(comptime "see https://example.com/" ++ times("a", 80)));
+    try testing.expect(!wide(comptime "[a link](../../" ++ times("a", 80) ++ ".md)"));
+    try testing.expect(wide(comptime times("a word ", 15) ++ "https://x/y"));
+    try testing.expect(wide(comptime times("a word ", 12) ++ times("x", 20)));
+    try testing.expect(!wide(comptime times("é", 88)));
+}
+
+test rewrapped {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A heading, a short paragraph, a table row, a code block and a
+    // paragraph with a hard break stay as they are, however long.
+    const kept = comptime "# A heading " ++ times("on and ", 12) ++ "\n\nShort paragraph,\n" ++
+        "left as it is.\n\n| a table | row " ++ times("on and ", 12) ++ "|\n\n```\ncode " ++
+        times("on and ", 12) ++ "\n```\n\nA line with a hard break  \nthat stays " ++
+        times("on and ", 12) ++ "\n";
+    try testing.expectEqualStrings(kept, try rewrapped(a, kept));
+    // An indented fence stays a line of its own; a nested item indented
+    // four spaces after another list line is prose, and after a blank line
+    // it is code.
+    try testing.expectEqualStrings(
+        comptime "- item\n   ```\n   code\n   ```\n   after " ++ times("on and ", 11) ++ "on\n" ++
+            "   and\n  - nested\n    - deep " ++ times("on and ", 10) ++
+            "on and\n      on and\n\n" ++
+            "    code " ++ times("on and ", 12) ++ "\n",
+        try rewrapped(
+            a,
+            comptime "- item\n   ```\n   code\n   ```\n   after " ++ times("on and ", 12) ++ "\n" ++
+                "  - nested\n    - deep " ++ times("on and ", 12) ++ "\n\n" ++
+                "    code " ++ times("on and ", 12) ++ "\n",
+        ),
+    );
+    // A list item fills to the limit with a hanging indent; a word that
+    // would start a line as a list marker (3.) stays on the line before; a
+    // plain paragraph fills from column 0.
+    try testing.expectEqualStrings(
+        comptime "- " ++ times("word ", 16) ++ "word\n  word word word\n" ++
+            "2. " ++ times("ab ", 27) ++ "ab 3.\n   ab ab\n\n" ++
+            "plain " ++ times("w ", 40) ++ "w\nw w w w\n",
+        try rewrapped(
+            a,
+            comptime "- " ++ times("word ", 19) ++ "word\n" ++
+                "2. " ++ times("ab ", 28) ++ "3. ab ab\n\n" ++
+                "plain " ++ times("w ", 44) ++ "w\n",
+        ),
+    );
 }

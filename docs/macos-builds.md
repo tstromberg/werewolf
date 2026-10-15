@@ -40,13 +40,12 @@ Completed older
 combined caches are adopted without recompilation. A failed stub build keeps
 the completed kernel. Builder sources are written only when their bytes change.
 
-An unchanged `howl run --build` reuses the running protected machine without
-building, signing or rebooting. It checks image inputs, caller credentials,
-configuration, guest source bytes and provider, and preserves signing keys and TPM state.
-A stopped machine resumes its existing image; changed configuration updates
-only its config disk. `howl stop` keeps protected disks and authority;
-`howl delete` explicitly removes a machine for a fresh run.
-Application builds currently use the existing replacement path.
+An unchanged `howl run --build` reuses the running protected machine without building,
+signing or rebooting. It checks image inputs, caller credentials, configuration, guest
+source bytes and provider, and preserves signing keys and TPM state. A stopped machine
+resumes its existing image; changed configuration updates only its config disk. `howl
+stop` keeps protected disks and authority; `howl delete` explicitly removes a machine
+for a fresh run. Application builds currently use the existing replacement path.
 
 GCC 15.2 is pinned to match the Alpine kernel configuration. A rolling GCC 16
 build crashed on Alpine's latent-entropy plugin; retain the plugin and use
@@ -57,11 +56,11 @@ Linux managed builds use the same Melange recipes under bubblewrap.
 
 ## Firmware enrollment on the Mac
 
-[native-firmware](../tools/native-firmware) verifies the firmware package and
-extracted code/template hashes, then installs native enrollment tools in a
-private Python environment. [firmware-requirements.txt](../boot/firmware-requirements.txt)
-pins dependency versions and hashes; installation requires binary wheels.
-The unused Linux cloud-password dependency is excluded.
+[native-firmware](../tools/native-firmware) verifies the firmware package and extracted
+code/template hashes, then installs native enrollment tools in a private Python
+environment. [firmware-requirements.txt](../boot/firmware-requirements.txt) pins
+dependency versions and hashes; installation requires binary wheels. The unused Linux
+cloud-password dependency is excluded.
 
 Enrollment uses a machine owner certificate in PK/KEK and the caller's code
 certificate in db. Bundled default certificates
@@ -84,24 +83,23 @@ VM is required. Its Ubuntu version does not select the enrolled firmware.
 ## Validation
 
 [local-prerequisites tests](../test/local-prerequisites) cover public staging,
-private-input exclusion and cache integrity. [builder tests](../test/build-helper)
-cover creation, restart and unsafe configuration rejection.
-[firmware tests](../test/native-firmware) cover package authentication,
-component corruption, symlinks and unsupported architectures.
-The opt-in [run-cache test](../test/check-run-cache) requires an isolated checkout
-and measures actual Lima repeat runs and resume. It rejects repeated builders,
-guest restarts on unchanged runs and changes to signing or TPM authority.
-It also checks host publisher recovery without rebuilding or restarting the guest.
-[module-signing tests](../test/sign-kernel) cover exact repeat bytes, signature/tamper
-verification, wrong trust, bounded inputs and interrupted publication.
-Set `UPSTREAM_SIGN_FILE` to the pinned Linux tool for independent signature-byte comparison.
-`test/check-kernel-repro ARCH ALPINE_BASE KEY CERT OUTPUT` compares two independent
-cold Melange builds and their complete host-signed archives. On macOS, supply
-the stock `QEMU_KERNEL_IMAGE` and matching `QEMU_BASE_INITRAMFS`; keys stay on the host.
-`test/check-kernel-modules ARCH UNSIGNED_TAR SIGNED_TAR OUTPUT QEMU...` boots
-an isolated probe that loads a trusted module and refuses unsigned, foreign
-and altered copies with kernel signature errors. This is separate from the
-complete Secure Boot/IPE/TPM deployment lifecycle gate.
+private-input exclusion and cache integrity. [builder tests](../test/build-helper) cover
+creation, restart and unsafe configuration rejection. [firmware
+tests](../test/native-firmware) cover package authentication, component corruption,
+symlinks and unsupported architectures. The opt-in [run-cache
+test](../test/check-run-cache) requires an isolated checkout and measures actual Lima
+repeat runs and resume. It rejects repeated builders, guest restarts on unchanged runs
+and changes to signing or TPM authority. It also checks host publisher recovery without
+rebuilding or restarting the guest. [module-signing tests](../test/sign-kernel) cover
+exact repeat bytes, signature/tamper verification, wrong trust, bounded inputs and
+interrupted publication. Set `UPSTREAM_SIGN_FILE` to the pinned Linux tool for
+independent signature-byte comparison. `test/check-kernel-repro ARCH ALPINE_BASE KEY
+CERT OUTPUT` compares two independent cold Melange builds and their complete host-signed
+archives. On macOS, supply the stock `QEMU_KERNEL_IMAGE` and matching
+`QEMU_BASE_INITRAMFS`; keys stay on the host. `test/check-kernel-modules ARCH
+UNSIGNED_TAR SIGNED_TAR OUTPUT QEMU...` boots an isolated probe that loads a trusted
+module and refuses unsigned, foreign and altered copies with kernel signature errors.
+This is separate from the complete Secure Boot/IPE/TPM deployment lifecycle gate.
 
 Two independent x86_64 cold Melange builds produced identical complete kernel/module
 archives; two host-signing passes also produced identical archives. Module probes
@@ -116,11 +114,11 @@ independent enrollments, retained TPM anchors on rollback and continued HTTPS
 service after one machine's deletion. No consumer builders or vendor signing ran.
 Evidence: `build/ipe-check/secure-lima/shared-vendor-repro-kernel-verified/`.
 
-Kernel/stub compilation through Melange QEMU and native firmware enrollment
-have passed on this arm64 Mac; enrollment was exercised with Python 3.9 and
-3.14. Complete deployment and A/B validation are separate gates: see
-[testing](testing.md) and the [local deployment design](design/secure-local-deployment.md).
-Compiler success alone does not establish a protected guest lifecycle.
+Kernel/stub compilation through Melange QEMU and native firmware enrollment have passed
+on this arm64 Mac; enrollment was exercised with Python 3.9 and 3.14. Complete
+deployment and A/B validation are separate gates: see [testing](testing.md) and the
+[local deployment design](design/secure-local-deployment.md). Compiler success alone
+does not establish a protected guest lifecycle.
 
 The arm64 Lima run-cache test passed live reuse, host publisher recovery and
 retained-authority resume. Warm repeats measured 0.93–1.30 seconds; the first

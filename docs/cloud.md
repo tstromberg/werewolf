@@ -31,8 +31,8 @@ For an end-to-end image build and GCP deployment, start with the
 [language tutorials](../examples/README.md). Each includes a form, the howl
 commands to run it here and on GCP, verification commands and cleanup.
 
-Make the config tar as for a config disk (`howl pack`; [cmd/howl/README.md](../cmd/howl/README.md)),
-then hand it to the cloud in base64:
+Make the config tar as for a config disk (`howl pack`;
+[cmd/howl/README.md](../cmd/howl/README.md)), then hand it to the cloud in base64:
 
 ```sh
 tar -cf config.tar -C config .
@@ -48,11 +48,11 @@ hcloud server create --name web-1 --user-data-from-file config.b64 ...
 az vm create --name web-1 --user-data config.tar ...
 ```
 
-There is no address to give: the machine asks DHCP. A `network` file in
-the user data is not read, the network being up to fetch it; one on a
-config disk is, before the network comes up ([design/cli.md](design/cli.md#config-the-config-tar-from-flags)).
-A NoCloud seed's `network-config` (cloud-init's v1 and v2) is never read:
-the address comes from the command line, the config tar or DHCP.
+There is no address to give: the machine asks DHCP. A `network` file in the user data is
+not read, the network being up to fetch it; one on a config disk is, before the network
+comes up ([design/cli.md](design/cli.md#config-the-config-tar-from-flags)). A NoCloud
+seed's `network-config` (cloud-init's v1 and v2) is never read: the address comes from
+the command line, the config tar or DHCP.
 
 ## What happens at boot
 
@@ -60,11 +60,11 @@ init looks for a config tar on a disk, and for
 NoCloud, as always. Only where it finds none does it run
 `/usr/lib/werewolf/cloud-metadata`, after the network is up:
 
-1. It reads the firmware's DMI strings. `Google Compute Engine`, `Amazon
-   EC2` or `Hetzner` is a cloud it knows, as is Hyper-V's `Virtual
-   Machine` with the chassis asset tag only Azure sets; anything else, a
-   desktop's Hyper-V included, and it asks no one. A neighbour on a flat network could answer for 169.254.169.254; a
-   cloud's own hypervisor answers it there.
+1. It reads the firmware's DMI strings. `Google Compute Engine`, `Amazon EC2` or
+   `Hetzner` is a cloud it knows, as is Hyper-V's `Virtual Machine` with the chassis
+   asset tag only Azure sets; anything else, a desktop's Hyper-V included, and it asks
+   no one. A neighbour on a flat network could answer for 169.254.169.254; a cloud's own
+   hypervisor answers it there.
 2. It asks the metadata server for the user data: GCP with
    `Metadata-Flavor: Google`, AWS through IMDSv2's session token, Hetzner
    plainly, Azure with `Metadata: true`. Four tries over at most half a minute.
@@ -84,26 +84,27 @@ cloud-metadata: {"time":"2026-10-06T16:43:32Z","event":"config","provider":"aws"
 
 ## Signed boot
 
-New `howl create` machines on AWS, GCP and Azure use signed loaders and UKIs.
-The host retains the boot signer; public certificates enroll the provider's
-firmware. Uploading a release requires its `FORM-ARCH-boot.crt` beside the disk.
-Both the actual loader and UKI must verify against it before a cloud image is made.
-Azure uses a specialized gallery image with custom UEFI keys and Trusted Launch.
-Arm defaults use Cobalt `Standard_D2ps_v6`; older Arm sizes lack Trusted Launch
-([supported sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch)).
-West US 2 x86 boot passed once on `Standard_D2s_v5`, but a fresh retry with
-identical enrollment reported `SecureBoot=1, SetupMode=1`. Cobalt Arm reported
-that state with both key sizes. Stage0 refuses it; reliable Azure deployment
-remains blocked despite successful gallery enrollment. For x86 diagnostics,
-pass `--arch x86_64 --size Standard_D2s_v5`.
+New `howl create` machines on AWS, GCP and Azure use signed loaders and UKIs. The host
+retains the boot signer; public certificates enroll the provider's firmware. Uploading a
+release requires its `FORM-ARCH-boot.crt` beside the disk. Both the actual loader and
+UKI must verify against it before a cloud image is made. Azure uses a specialized
+gallery image with custom UEFI keys and Trusted Launch. Arm defaults use Cobalt
+`Standard_D2ps_v6`; older Arm sizes lack Trusted Launch ([supported
+sizes](https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch)). West
+US 2 x86 boot passed once on `Standard_D2s_v5`, but a fresh retry with identical
+enrollment reported `SecureBoot=1, SetupMode=1`. Cobalt Arm reported that state with
+both key sizes. Stage0 refuses it; reliable Azure deployment remains blocked despite
+successful gallery enrollment. For x86 diagnostics, pass `--arch x86_64 --size
+Standard_D2s_v5`.
 
 `WEREWOLF_BOOT_KEY` and `WEREWOLF_BOOT_CRT` select an existing signing identity.
-Otherwise cloud builds retain one under `build/boot/ARCH`, outside guest artifacts.
-Signed machines hold updates until enrolled in a matching signed image channel;
-locally composing an unsigned replacement cannot preserve the verified boot chain.
-IPE channels also need the kernel, policy signer, `IPE_UPDATES` and `IMAGE_SERIAL`
-([prebuilt images](design/prebuilt-images.md)). TPM presence alone does not prevent
-rollback; provisioning protected rollback state remains separate work.
+Otherwise cloud builds keep one in howl's data directory, `$XDG_DATA_HOME/howl`
+(`~/.local/share/howl`)'s `keys/boot/ARCH`. Signed machines hold updates until enrolled
+in a matching signed image channel; locally composing an unsigned replacement cannot
+preserve the verified boot chain. IPE channels also need the kernel, policy signer,
+`IPE_UPDATES` and `IMAGE_SERIAL` ([prebuilt images](design/prebuilt-images.md)). TPM
+presence alone does not prevent rollback; provisioning protected rollback state remains
+separate work.
 
 ## Separation
 
@@ -143,8 +144,8 @@ reaches init.
   ssh keys. That is the cloud account's owner, as with cloud-init.
 - **Not cloud-init.** Users, packages and scripts in a `#cloud-config` are
   not applied.
-- **Four clouds.** Another is a row in the table in `cmd/cloud-metadata/cloud-metadata.zig`:
-  its DMI strings, its path, and its header.
+- **Four clouds.** Another is a row in the table in
+  `cmd/cloud-metadata/cloud-metadata.zig`: its DMI strings, its path, and its header.
 - **Azure only as a specialized VM.** Azure reboots a VM made from a
   generalized image unless an agent reports it ready, and werewolf has
   none; a VM whose OS disk is attached as it is needs no agent

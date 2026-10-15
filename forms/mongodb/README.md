@@ -3,6 +3,9 @@
 [MongoDB](https://www.mongodb.com/docs/manual/) 8.0 for applications on
 the same machine. The manifest is [form.yaml](form.yaml).
 
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/mongodb/index.html).
+
 ## Security Posture
 
 - MongoDB runs as its own user, with no capabilities.
@@ -40,7 +43,8 @@ connect to MongoDB. There is no raw data-directory import helper.
 
 ### Known Quirks
 
-- A single server, without replication or sharding. A consuming form can override its service.
+- A single server, without replication or sharding. A consuming form can override its
+  service.
 - Memory is limited to 1 GiB, with a 256 MiB WiredTiger cache.
 - The pinned image must be rebuilt to receive upstream fixes.
 

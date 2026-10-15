@@ -44,20 +44,14 @@ pub fn apkoConfig(b: *B, target: []const u8) !void {
         error.Form => return b.steps.fail(f.text),
         else => |e| return e,
     };
-    // Published, werewolf's repository, its key under the name the index's
-    // signature gives, and as packages the forms from it, which bring
-    // theirs, and the rest's (compose.published).
-    if (b.spec.published) {
-        const key = try b.path("{s}/keys/{s}", .{ b.p.build, package.repository_key });
-        const pub_key = package.repository_pem ++ "\n";
-        const had = Dir.cwd().readFileAlloc(b.io, key, b.gpa, .limited(64 << 10)) catch "";
-        if (!mem.eql(u8, had, pub_key)) {
-            try Dir.cwd().createDirPath(b.io, std.fs.path.dirname(key).?);
-            try b.write(key, pub_key);
-        }
-        const keyring = try b.path("../keys/{s}", .{package.repository_key});
-        node = try compose.published(b.gpa, node, b.chain, b.from_repo, extra.items, keyring);
-    }
+    // werewolf's key, under the name the index's signature gives, where the
+    // config names it (package.keyring).
+    const key = try b.path("{s}/keys/{s}", .{ b.p.build, package.repository_key });
+    try keep(b, key, package.repository_pem ++ "\n");
+    // Published, werewolf's repository, and as packages the forms from it,
+    // which bring theirs, and the rest's (compose.published).
+    if (b.spec.published)
+        node = try compose.published(b.gpa, node, b.chain, b.from_repo, extra.items);
     b.deployment = try deployment.prepare(b, node);
     if (b.deployment) |p| node = try deployment.configure(b.gpa, node, p);
     // Resolve the same form serials that were checked and composed, even

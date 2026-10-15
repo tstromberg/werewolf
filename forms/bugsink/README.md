@@ -1,14 +1,21 @@
 # Bugsink - Hardened VM
 
-Error tracking that takes the events Sentry's SDKs send: [Bugsink](https://www.bugsink.com) 2, from its own image, with Caddy in front. The form's manifest is [form.yaml](form.yaml).
+Error tracking that takes the events Sentry's SDKs send:
+[Bugsink](https://www.bugsink.com) 2, from its own image, with Caddy in front. The
+form's manifest is [form.yaml](form.yaml).
+
+[Images, test status and download
+instructions](https://dist.werewolf-linux.org/boot/v1/bugsink/index.html).
 
 ## Security Posture
 
-- The service runs as its own user, held to the files and ports its manifest names. The root is read-only. `/data` is what survives.
+- The service runs as its own user, held to the files and ports its manifest names. The
+  root is read-only. `/data` is what survives.
 
 ### Weaknesses
 
-- Python runs Bugsink once the config is present. The machine without a config never starts it. Named in `form.yaml`.
+- Python runs Bugsink once the config is present. The machine without a config never
+  starts it. Named in `form.yaml`.
 
 ## Getting Started
 
@@ -23,7 +30,11 @@ howl create bugsink --with bugsink --config config \
 	--domain errors.home.arpa
 ```
 
-Open `https://errors.home.arpa` and sign in as `you@example.com`. The password is the text after the colon in `config/bugsink/admin`. The domain is given twice, as Caddy's site and as Bugsink's `base-url`, because an image service takes files rather than settings. Projects and DSNs are in [Bugsink's documentation](https://www.bugsink.com/docs/).
+Open `https://errors.home.arpa` and sign in as `you@example.com`. The password is the
+text after the colon in `config/bugsink/admin`. The domain is given twice, as Caddy's
+site and as Bugsink's `base-url`, because an image service takes files rather than
+settings. Projects and DSNs are in [Bugsink's
+documentation](https://www.bugsink.com/docs/).
 
 ### Cloud production deployment (aws, gcp, azure, proxmox)
 
@@ -36,11 +47,13 @@ howl create bugsink --with bugsink --on gcp --allow-from me \
 	--config config --domain errors.example.com
 ```
 
-Sign in at `https://errors.example.com`, make a team and a project, and give its DSN to your application's Sentry SDK. There is no sign-up page.
+Sign in at `https://errors.example.com`, make a team and a project, and give its DSN to
+your application's Sentry SDK. There is no sign-up page.
 
 ### Importing data
 
-The database is SQLite in `/data`, and the host cannot write that directory. Point the SDK at this machine. Events from here on are the data.
+The database is SQLite in `/data`, and the host cannot write that directory. Point the
+SDK at this machine. Events from here on are the data.
 
 ### Known Quirks
 
