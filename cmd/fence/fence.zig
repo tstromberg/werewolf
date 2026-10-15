@@ -223,6 +223,9 @@ const non_public6 = [_]Prefix{
     .{ .addr = &v6(&.{0}, 0), .len = 96 }, // unspecified, and IPv4-compatible
     .{ .addr = &v6(&.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff }, 0), .len = 96 }, // IPv4-mapped
     .{ .addr = &v6(&.{ 0, 0x64, 0xff, 0x9b }, 0), .len = 96 }, // NAT64, to IPv4 behind it
+    .{ .addr = &v6(&.{ 0x01, 0x00 }, 0), .len = 64 }, // discard-only (RFC 6666)
+    .{ .addr = &v6(&.{ 0x20, 0x01 }, 0), .len = 23 }, // IETF protocol assignments and Teredo
+    .{ .addr = &v6(&.{ 0x20, 0x01, 0x0d, 0xb8 }, 0), .len = 32 }, // documentation (RFC 3849)
     .{ .addr = &v6(&.{ 0x20, 0x02 }, 0), .len = 16 }, // 6to4
     .{ .addr = &v6(&.{0xfc}, 0), .len = 7 }, // unique local: AWS's metadata
     .{ .addr = &v6(&.{ 0xfe, 0x80 }, 0), .len = 10 }, // link-local
@@ -378,12 +381,13 @@ const Rule = net_rule.Rule;
 /// max_rules bounds plan's output. Per entry index, listen, UDP listen,
 /// connect, metadata and private ports make at most 3 + 3 + 3 + 2 + 1
 /// rules, and a public connect one more per non-public prefix; the rest are fixed.
-const max_rules = 16 + wire_server_ports.len + dropped.len + (15 + non_public4.len) * max_entries;
+const max_rules = 16 + wire_server_ports.len + dropped.len +
+    (15 + @as(usize, @max(non_public4.len, non_public6.len))) * max_entries;
 
 /// plan returns the rules for family, in the order the kernel tries them:
 ///
 ///   5     a `public` connect to a non-public address: refused
-///   8     one user's named port on 127.0.0.1, when that user connects
+///   8     one user's named port on loopback, when that user connects
 ///         to every TCP port: local table
 ///   9     the rest of loopback, for that user alone: refused
 ///   10    sent to this machine or over loopback: local table
@@ -443,8 +447,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
     });
     // A user who may open every TCP port must not reach this machine's
     // own services. An explicit port of that user's (Redis) is allowed
-    // on 127.0.0.1; the rest of loopback is prohibited. Other users are
-    // not in these rules, so their loopback is unchanged.
+    // on 127.0.0.1 and ::1; the rest of loopback is prohibited. Other
+    // users are not in these rules, so their loopback is unchanged.
     var isolated: [max_entries]u32 = undefined;
     var niso: usize = 0;
     for (p.connect[0..p.nconnect]) |c| {
@@ -459,19 +463,19 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         }
     }
     for (isolated[0..niso]) |id| {
-        if (family == linux.AF.INET) for (p.connect[0..p.nconnect]) |c| {
+        for (p.connect[0..p.nconnect]) |c| {
             if (c.any or c.proto != .tcp or c.uid == null or c.uid.? != id) continue;
             rules.add(.{
                 .priority = pref.loopback_allow,
                 .action = FR_ACT_TO_TBL,
                 .table = RT_TABLE_LOCAL,
                 .from_here = true,
-                .dst = &loopback_ip,
+                .dst = if (family == linux.AF.INET6) &loopback6 else &loopback_ip,
                 .proto = .tcp,
                 .dport = c.port,
                 .uid = id,
             });
-        };
+        }
         rules.add(.{
             .priority = pref.loopback_refuse,
             .action = FR_ACT_PROHIBIT,
@@ -570,7 +574,9 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .proto = .udp,
         .dport = u.port,
     });
-    // Let replies in from each protocol and port some user connects to, once.
+    // Let replies in from each protocol and port some user connects to, once:
+    // TCP to the kernel's ephemeral range, UDP to unprivileged ports (so
+    // Unbound and dnsmasq may randomize across 1024..65535).
     for (p.connect[0..p.nconnect], 0..) |c, i| {
         if (c.proto == .icmp or c.any) continue;
         const seen = for (p.connect[0..i]) |d| {
@@ -582,6 +588,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
             .table = RT_TABLE_LOCAL,
             .proto = c.proto,
             .sport = c.port,
+            .dport = if (c.proto == .tcp) ephemeral_lo else 1024,
+            .dport_last = if (c.proto == .tcp) ephemeral_hi else 65535,
         });
     }
     // Replies to a connection opened to an arbitrary port. Matching every
@@ -608,6 +616,8 @@ fn plan(p: Policy, family: u8, out: *[max_rules]Rule) []const Rule {
         .src = md,
         .proto = .tcp,
         .sport = metadata_port,
+        .dport = ephemeral_lo,
+        .dport_last = ephemeral_hi,
     });
     // Let ICMP in for the errors connections need (path MTU, unreachable).
     // An echo request gets no reply unless the policy lets root send ICMP.
@@ -1033,10 +1043,11 @@ const Log = struct {
         var time: [20]u8 = undefined;
         w.print(
             "fence: {{\"time\":\"{s}\",\"event\":\"{s}\",",
-            .{ rfc3339(&time, @intCast(ts.sec)), name },
+            .{ rfc3339(&time, @intCast(@max(0, ts.sec))), name },
         ) catch return;
         const mark = w.end;
         std.json.Stringify.value(fields, .{}, &w) catch return;
+        if (w.end <= mark) return;
         @memmove(l.buf[mark .. w.end - 1], l.buf[mark + 1 .. w.end]);
         w.end -= 1;
         w.writeByte('\n') catch return;
@@ -1442,38 +1453,42 @@ test "a scan reaches every port and not this machine's services" {
     try std.testing.expectError(error.BadPolicy, parsePolicy("connect all tcp any\n"));
     try std.testing.expectError(error.BadPolicy, parsePolicy("connect 70 tcp any public\n"));
     try std.testing.expectError(error.BadPolicy, parsePolicy("connect 70 udp any\n"));
-    var rules: [max_rules]Rule = undefined;
-    const got = plan(p, linux.AF.INET, &rules);
-    var redis = false;
-    var prohibited = false;
-    var wide_out = false;
-    var replies = false;
-    var sport_zero = false;
-    var other_user = false;
-    var opened_service = false;
-    var scanner_pg = false;
-    for (got) |x| {
-        if (x.sport == 0) sport_zero = true;
-        if (x.uid == 70 and x.priority == pref.loopback_allow and x.dport == 6379 and
-            x.action == FR_ACT_TO_TBL)
-            redis = true;
-        if (x.uid == 70 and x.priority == pref.loopback_refuse and x.action == FR_ACT_PROHIBIT and
-            x.dst_len == 8)
-            prohibited = true;
-        if (x.uid == 70 and x.priority == pref.out_allow and x.dport == null and x.proto == .tcp)
-            wide_out = true;
-        if (x.priority == pref.in_allow and x.dport == ephemeral_lo and
-            x.dport_last == ephemeral_hi)
-            replies = true;
-        // Another user's loopback is not prohibited, and a service port
-        // is not opened by the reply range.
-        if (x.uid == 71 and x.priority == pref.loopback_refuse) other_user = true;
-        if (x.dport == 80 and x.priority == pref.in_allow and x.dport_last != null)
-            opened_service = true;
-        if (x.uid == 70 and x.dport == 5432) scanner_pg = true;
+    for ([_]u8{ linux.AF.INET, linux.AF.INET6 }) |fam| {
+        var rules: [max_rules]Rule = undefined;
+        const got = plan(p, fam, &rules);
+        var redis = false;
+        var prohibited = false;
+        var wide_out = false;
+        var replies = false;
+        var sport_zero = false;
+        var other_user = false;
+        var opened_service = false;
+        var scanner_pg = false;
+        const want_len: u8 = if (fam == linux.AF.INET6) 128 else 8;
+        for (got) |x| {
+            if (x.sport == 0) sport_zero = true;
+            if (x.uid == 70 and x.priority == pref.loopback_allow and x.dport == 6379 and
+                x.action == FR_ACT_TO_TBL)
+                redis = true;
+            if (x.uid == 70 and x.priority == pref.loopback_refuse and
+                x.action == FR_ACT_PROHIBIT and x.dst_len == want_len)
+                prohibited = true;
+            if (x.uid == 70 and x.priority == pref.out_allow and x.dport == null and
+                x.proto == .tcp)
+                wide_out = true;
+            if (x.priority == pref.in_allow and x.dport == ephemeral_lo and
+                x.dport_last == ephemeral_hi)
+                replies = true;
+            // Another user's loopback is not prohibited, and a service port
+            // is not opened by the reply range.
+            if (x.uid == 71 and x.priority == pref.loopback_refuse) other_user = true;
+            if (x.dport == 80 and x.priority == pref.in_allow and x.dport_last != null)
+                opened_service = true;
+            if (x.uid == 70 and x.dport == 5432) scanner_pg = true;
+        }
+        try std.testing.expect(redis and prohibited and wide_out and replies);
+        try std.testing.expect(!sport_zero and !other_user and !opened_service and !scanner_pg);
     }
-    try std.testing.expect(redis and prohibited and wide_out and replies);
-    try std.testing.expect(!sport_zero and !other_user and !opened_service and !scanner_pg);
 }
 
 test "rule messages" {

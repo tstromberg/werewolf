@@ -241,7 +241,7 @@ pub const base: Set = .initMany(&.{
 ///                                  with it before init hands over
 ///   process_vm_readv, _writev      another process's memory; Yama refuses it
 ///   modify_ldt, iopl, ioperm       16-bit code and I/O ports
-///   acct .. vhangup                unused here; old, rarely audited code
+///   acct .. vmsplice               unused here; old, rarely audited code
 const never_names = [_][]const u8{
     "bpf",               "perf_event_open",   "init_module",       "finit_module",
     "delete_module",     "kexec_load",        "kexec_file_load",   "io_uring_setup",
@@ -250,7 +250,7 @@ const never_names = [_][]const u8{
     "request_key",       "process_vm_readv",  "process_vm_writev", "modify_ldt",
     "iopl",              "ioperm",            "acct",              "swapon",
     "swapoff",           "quotactl",          "quotactl_fd",       "lookup_dcookie",
-    "uselib",            "vhangup",
+    "uselib",            "vhangup",           "vmsplice",
 };
 
 /// never holds the calls of never_names that this architecture has.
@@ -288,11 +288,13 @@ pub const native_arch: u32 = switch (@import("builtin").cpu.arch) {
 };
 
 const max_calls = 512;
-/// max_filter counts the prelude (6), execveat (7), the socket and
-/// socketpair families (2 * (3 + 2 * 5)), the machine's refusals
+/// max_filter counts the prelude (6), execveat and its descriptor guards (25),
+/// the socket and socketpair families (2 * (3 + 2 * 5)), the machine's refusals
 /// (7 + 5 + 5 + 7 + 7 + 8 + 10), the table and the final return.
-pub const max_filter = 6 + 7 + 2 * (3 + 2 * 5) + 49 + 2 * max_calls + 1;
+pub const max_filter = 6 + 25 + 2 * (3 + 2 * 5) + 49 + 2 * max_calls + 1;
 const AT_EMPTY_PATH = 0x1000;
+const F_DUPFD = 0;
+const F_DUPFD_CLOEXEC = 1030;
 
 /// families maps each socket promise to the address families it allows.
 const families = [_]struct { p: Promise, af: u32 }{
@@ -480,6 +482,14 @@ fn buildFilterWithExec(
             put(buf, &n, RET_K, 0, 0, other);
             put(buf, &n, LD_W_ABS, 0, 0, 0);
         }
+        put(buf, &n, JEQ_K, 0, 7, number(.fcntl));
+        put(buf, &n, LD_W_ABS, 0, 0, 24); // seccomp_data.args[1], low word: cmd
+        put(buf, &n, JEQ_K, 1, 0, F_DUPFD);
+        put(buf, &n, JEQ_K, 0, 3, F_DUPFD_CLOEXEC);
+        put(buf, &n, LD_W_ABS, 0, 0, 32); // seccomp_data.args[2], low word: minfd
+        put(buf, &n, JGE_K, 0, 1, exec_fd.?);
+        put(buf, &n, RET_K, 0, 0, other);
+        put(buf, &n, LD_W_ABS, 0, 0, 0);
     }
     {
         var afs: [families.len]u32 = undefined;
@@ -820,6 +830,18 @@ test buildFilter {
     try testing.expectEqual(
         linux.SECCOMP.RET.ALLOW,
         actionArgs(service, native_arch, number(.dup3), .{ 0, 8, 0, 0, 0, 0 }),
+    );
+    try testing.expectEqual(
+        RET_ENOSYS,
+        actionArgs(service, native_arch, number(.fcntl), .{ 0, F_DUPFD, 7, 0, 0, 0 }),
+    );
+    try testing.expectEqual(
+        RET_ENOSYS,
+        actionArgs(service, native_arch, number(.fcntl), .{ 0, F_DUPFD_CLOEXEC, 8, 0, 0, 0 }),
+    );
+    try testing.expectEqual(
+        linux.SECCOMP.RET.ALLOW,
+        actionArgs(service, native_arch, number(.fcntl), .{ 0, F_DUPFD_CLOEXEC, 6, 0, 0, 0 }),
     );
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execveat), 0));
     try testing.expectEqual(RET_ENOSYS, action(service, native_arch, number(.execve), 0));

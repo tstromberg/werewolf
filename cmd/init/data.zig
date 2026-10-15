@@ -53,10 +53,12 @@ pub fn data(m: *Machine) void {
             "-o",
             "remount,bind,ro,nosuid,nodev,noexec,nosymfollow",
             "/boot",
-        }))
-            say("/boot is read-only", .{})
-        else
-            say("/boot stays writable: remounting it read-only failed", .{});
+        })) {
+            say("/boot is read-only", .{});
+        } else {
+            say("/boot stays writable: remounting it read-only failed; not handing over", .{});
+            std.process.exit(1);
+        }
     } else if (m.cmd.data.len == 0 or m.which("mke2fs") == null) {
         m.mount(&.{
             "-t",

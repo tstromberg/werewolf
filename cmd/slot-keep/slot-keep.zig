@@ -147,7 +147,10 @@ fn markCommitted(io: Io) !void {
     Dir.cwd().writeFile(
         io,
         .{ .sub_path = committed, .data = "" },
-    ) catch |err| say(io, "{s}: {s}", .{ committed, @errorName(err) });
+    ) catch |err| {
+        say(io, "{s}: {s}", .{ committed, @errorName(err) });
+        return err;
+    };
 }
 
 /// park marks the service down so runsv does not restart it.

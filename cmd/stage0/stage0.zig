@@ -300,24 +300,38 @@ fn enforceIpe(io: std.Io, gpa: std.mem.Allocator, root: [32]u8) !void {
 /// deadman forks a child that sleeps for after seconds, then reboots unless
 /// slot-keep has left its mark in PID 1's root. The loader has spent this
 /// slot's one boot, so the machine returns on the slot that last committed.
-/// The child reaches PID 1 through its own /proc and the kernel log through
-/// a descriptor opened now, since /dev moves into the new root.
+/// The child reaches PID 1 through a detached /proc descriptor and the kernel
+/// log through a descriptor opened now, since /dev moves into the new root.
 fn deadman(slot: []const u8, after: u32) void {
     mkdir("/deadman");
     mountFs("proc", "/deadman", "proc", MS.NOSUID | MS.NODEV | MS.NOEXEC);
+    const proc_rc = linux.open(
+        "/deadman",
+        .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true },
+        0,
+    );
+    if (linux.errno(proc_rc) != .SUCCESS) fail("cannot open /deadman", .{});
+    const proc_fd: i32 = @intCast(proc_rc);
+    _ = linux.umount2("/deadman", linux.MNT.DETACH);
+    _ = linux.rmdir("/deadman");
     const kmsg = linux.open("/dev/kmsg", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
     const pid = linux.fork();
     if (linux.errno(pid) != .SUCCESS) fail("cannot start the deadman", .{});
     if (pid != 0) {
+        _ = linux.close(proc_fd);
         if (linux.errno(kmsg) == .SUCCESS) _ = linux.close(@intCast(kmsg));
         return;
     }
+    _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
+    _ = linux.prctl(@backingInt(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
 
     var ts: linux.timespec = .{ .sec = after, .nsec = 0 };
     while (linux.errno(linux.nanosleep(&ts, &ts)) == .INTR) {}
-    if (linux.errno(linux.access(
-        "/deadman/1/root/run/werewolf/committed",
+    if (linux.errno(linux.faccessat(
+        proc_fd,
+        "1/root/run/werewolf/committed",
         linux.F_OK,
+        0,
     )) != .SUCCESS) {
         var buf: [128]u8 = undefined;
         const msg = std.mem.print(
@@ -336,8 +350,17 @@ fn deadman(slot: []const u8, after: u32) void {
         // If sysrq-trigger fails, call reboot: this process forked before
         // the seal and keeps every capability. Exiting quietly would leave
         // the bad slot running.
-        if (!writeFile("/deadman/sysrq-trigger", "b"))
-            _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
+        const trig = linux.openat(
+            proc_fd,
+            "sysrq-trigger",
+            .{ .ACCMODE = .WRONLY, .CLOEXEC = true },
+            0,
+        );
+        if (linux.errno(trig) == .SUCCESS) {
+            _ = linux.write(@intCast(trig), "b", 1);
+            _ = linux.close(@intCast(trig));
+        }
+        _ = linux.reboot(.MAGIC1, .MAGIC2, .RESTART, null);
     }
     linux.exit(0);
 }

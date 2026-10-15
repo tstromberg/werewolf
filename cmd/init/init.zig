@@ -141,6 +141,7 @@ pub fn main(init: std.process.Init) !void {
         m.fmt("{d}.{d:0>3}", .{ (up_ms -| kernel_ms) / 1000, (up_ms -| kernel_ms) % 1000 }),
     });
     if (broker_clients) |clients| {
+        _ = linux.prctl(@backingInt(linux.PR.SET_DUMPABLE), 0, 0, 0, 0);
         for (broker_roles, clients) |role, fd| {
             const dst = broker.clientFd(role);
             _ = linux.dup2(fd, dst);

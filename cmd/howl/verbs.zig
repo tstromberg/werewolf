@@ -370,7 +370,7 @@ pub fn console(io: Io, gpa: Allocator, args: []const []const u8, why: *Why) !voi
 /// show writes a guest's console text to stdout. To a terminal it drops
 /// control characters (inert), since the guest wrote them and could
 /// otherwise drive the terminal; to a pipe or file it writes text as is.
-fn show(io: Io, gpa: Allocator, text: []const u8) !void {
+pub fn show(io: Io, gpa: Allocator, text: []const u8) !void {
     const out = Io.File.stdout();
     try out.writeStreamingAll(io, if (out.isTty(io) catch false) try inert(gpa, text) else text);
 }

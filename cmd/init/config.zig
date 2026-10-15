@@ -515,14 +515,18 @@ fn parseNoCloud(gpa: Allocator, text: []const u8) !NoCloud {
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |line| {
         const t = std.mem.trimStart(u8, line, " ");
-        if (!user_found and std.mem.startsWith(u8, t, "-")) {
+        if (std.mem.startsWith(u8, t, "-")) {
             const rest = std.mem.trimStart(u8, t[1..], " ");
             if (std.mem.startsWith(u8, rest, "name:")) {
-                nc.user = try std.mem.replaceOwned(u8, gpa, lastField(rest), "\"", "");
-                user_found = true;
+                if (!user_found) {
+                    nc.user = try std.mem.replaceOwned(u8, gpa, lastField(rest), "\"", "");
+                    user_found = true;
+                } else {
+                    uid_found = true;
+                }
             }
         }
-        if (!uid_found and std.mem.startsWith(u8, t, "uid:")) {
+        if (user_found and !uid_found and std.mem.startsWith(u8, t, "uid:")) {
             nc.uid = try std.mem.replaceOwned(u8, gpa, lastField(t), "\"", "");
             uid_found = true;
         }

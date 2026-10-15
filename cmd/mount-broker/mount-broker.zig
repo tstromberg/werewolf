@@ -752,10 +752,9 @@ fn readStaged(rel: [:0]const u8, buf: []u8) ![]const u8 {
     }
 }
 
-/// copyChecked copies the file at src (relative to work_dir) into dirfd as
-/// dest, through a temporary name, only if its bytes match want's size and
-/// SHA-256.
-fn copyChecked(
+/// stageChecked copies the file at src (relative to work_dir) into dirfd as
+/// dest.tmp, fsyncing it only if its bytes match want's size and SHA-256.
+fn stageChecked(
     dirfd: i32,
     src: [:0]const u8,
     dest: []const u8,
@@ -797,6 +796,13 @@ fn copyChecked(
         want.sha256,
     )) return error.DigestMismatch;
     if (linux.errno(linux.fsync(dst)) != .SUCCESS) return error.SyncFailed;
+}
+
+/// commitStaged renames dest.tmp over dest in dirfd and fsyncs the directory.
+fn commitStaged(dirfd: i32, dest: []const u8) !void {
+    var tmp_buf: [160]u8 = undefined;
+    const tmp = try std.mem.print(&tmp_buf, "{s}.tmp", .{dest});
+    errdefer unlinkAt(dirfd, tmp) catch {};
     var from_buf: [160]u8 = undefined;
     var to_buf: [160]u8 = undefined;
     const rc = linux.renameat(dirfd, try zBuf(&from_buf, tmp), dirfd, try zBuf(&to_buf, dest));
@@ -804,13 +810,26 @@ fn copyChecked(
     if (linux.errno(linux.fsync(dirfd)) != .SUCCESS) return error.SyncFailed;
 }
 
+/// copyChecked stages src as dest.tmp, verifies its SHA-256, and renames it over dest.
+fn copyChecked(
+    dirfd: i32,
+    src: [:0]const u8,
+    dest: []const u8,
+    want: broker.EspArtifact,
+    limit: u64,
+) !void {
+    try stageChecked(dirfd, src, dest, want, limit);
+    try commitStaged(dirfd, dest);
+}
+
 fn espInstallNow(req: broker.EspInstall) !void {
     const m = try espMount();
     defer _ = linux.close(m);
     const slots = try bootSlots();
-    // The staged command line is verified before anything on the ESP
-    // changes: confined root can write the staging directory, so its
-    // bytes are trusted only as the updater's named digest describes.
+    // The staged command line and artifacts are verified before any live file
+    // or entry on the ESP changes: confined root can write the staging
+    // directory, so its bytes are trusted only as the updater's named digests
+    // describe.
     var line_buf: [8192]u8 = undefined;
     const staged_cmdline = try readStaged("slot/cmdline", &line_buf);
     const slot_cmdline = try signed.cmdline(staged_cmdline);
@@ -821,16 +840,24 @@ fn espInstallNow(req: broker.EspInstall) !void {
         return error.DigestMismatch;
     const entries = try espEntriesDir(m, true);
     defer _ = linux.close(entries);
+    const slot_dir = try espSlotDir(m, slots.other, true);
+    defer _ = linux.close(slot_dir);
+    try stageChecked(slot_dir, "slot/vmlinuz", "vmlinuz", req.vmlinuz, max_staged);
+    errdefer unlinkAt(slot_dir, "vmlinuz.tmp") catch {};
+    try stageChecked(slot_dir, "slot/stage0.zst", "stage0.zst", req.stage0, max_staged);
+    errdefer unlinkAt(slot_dir, "stage0.zst.tmp") catch {};
+    if (req.uki) |uki| {
+        try stageChecked(slot_dir, "slot/uki.efi", "uki.efi", uki, max_staged);
+    }
+    errdefer if (req.uki != null) unlinkAt(slot_dir, "uki.efi.tmp") catch {};
     const names = try listNames(entries);
     for (0..names.count) |i| {
         if (signed.isEntryOf(names.get(i), slots.other)) try unlinkAt(entries, names.get(i));
     }
-    const slot_dir = try espSlotDir(m, slots.other, true);
-    defer _ = linux.close(slot_dir);
-    try copyChecked(slot_dir, "slot/vmlinuz", "vmlinuz", req.vmlinuz, max_staged);
-    try copyChecked(slot_dir, "slot/stage0.zst", "stage0.zst", req.stage0, max_staged);
-    if (req.uki) |uki| {
-        try copyChecked(slot_dir, "slot/uki.efi", "uki.efi", uki, max_staged);
+    try commitStaged(slot_dir, "vmlinuz");
+    try commitStaged(slot_dir, "stage0.zst");
+    if (req.uki != null) {
+        try commitStaged(slot_dir, "uki.efi");
     } else {
         try unlinkAt(slot_dir, "uki.efi");
     }
@@ -1038,6 +1065,7 @@ fn readFile(path: [*:0]const u8, buf: []u8) []const u8 {
     var got: usize = 0;
     while (got < buf.len) {
         const n = linux.read(@intCast(fd), buf[got..].ptr, buf.len - got);
+        if (linux.errno(n) == .INTR) continue;
         if (linux.errno(n) != .SUCCESS or n == 0) break;
         got += n;
     }
@@ -1055,7 +1083,7 @@ const Log = struct {
         var w: std.Io.Writer = .fixed(&l.buf);
         var ts: linux.timespec = undefined;
         _ = linux.clock_gettime(.REALTIME, &ts);
-        const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(ts.sec) };
+        const es: std.time.epoch.EpochSeconds = .{ .secs = @intCast(@max(0, ts.sec)) };
         const yd = es.getEpochDay().calculateYearDay();
         const md = yd.calculateMonthDay();
         const ds = es.getDaySeconds();
@@ -1067,6 +1095,7 @@ const Log = struct {
         }) catch return;
         const mark = w.end;
         std.json.Stringify.value(fields, .{}, &w) catch return;
+        if (w.end <= mark) return;
         @memmove(l.buf[mark .. w.end - 1], l.buf[mark + 1 .. w.end]);
         w.end -= 1;
         w.writeByte('\n') catch return;
